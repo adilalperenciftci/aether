@@ -3546,15 +3546,47 @@ main() {
 }
 ```
 
-The check reports only where the shadowing is certain. A bare
-identifier arm binds the value rather than naming a case, so it matches
-anything and is never compared against other arms:
+The check reports only where the shadowing is certain, so the arms it
+compares with each other are literals; an arm that is a bare identifier
+is never compared. Over a value that is not an enum, a sum type or an
+optional, such an arm names a variable already in scope (a local, a
+parameter, or a module `const` or `var`) and matches when the value
+equals that variable's value at the time, as `if x == limit` would. It
+binds nothing. That value is not known when the program is compiled, so
+an arm after it with the same value is not reported:
 
-```aether,fragment
-match x {
-    1 -> { println("one") }
-    n -> { println("got ${n}") }   // a binding, not a duplicate: no warning
+```aether,run
+main() {
+    limit = 2
+    x = 2
+    match x {
+        1 -> { println("one") }
+        limit -> { println("at the limit") }   // compares x with limit
+        2 -> { println("two") }                // never runs, not reported
+        _ -> { println("other") }
+    }
 }
+```
+```output
+at the limit
+```
+
+Over an enum a bare identifier names a member (`Red` for `Color.Red`)
+and over a sum type a variant; a variable is not accepted there. The arms
+that bind a name are `some(v)` over an optional and the list patterns
+(`[h|t]`, `[x, y]`). An identifier that names no variable binds nothing
+either, so `n` below is undeclared where the arm uses it. To act on every
+other value, write `_` and use the value matched on:
+
+```aether,fails
+main() {
+    x = 5
+    match x {
+        1 -> { println("one") }
+        n -> { println("got ${n}") }
+    }
+}
+// error[E0300]: Undefined variable 'n'
 ```
 
 A third shape is the mirror of the exhaustiveness check: a `_` arm on a

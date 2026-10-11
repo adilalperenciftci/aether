@@ -7385,9 +7385,10 @@ static void mark_optional_narrowed(ASTNode* n, const char* name, Type* inner) {
  * code the compiler accepted silently: a mis-ordered `_`, or two arms that were
  * meant to differ and collapsed to the same case through a typo.
  *
- * Reported only where the shadowing is certain. A bare identifier arm can be a
- * binding that matches anything rather than a named case, so those are never
- * compared; a warning on correct code would be worse than none. */
+ * Reported only where the shadowing is certain. A bare identifier arm binds
+ * nothing: over a scalar the value is compared with the variable of that
+ * name, whose value is not known here, so identifier arms are never compared
+ * (#2700); a warning on correct code would be worse than none. */
 static int match_arm_is_wildcard(ASTNode* p) {
     if (!p) return 0;
     if (p->node_type && p->node_type->kind == TYPE_WILDCARD) return 1;
