@@ -13445,9 +13445,34 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
              * declared a new `int i` there that shadowed it, and a loop that
              * steps its variable in the body never ended. */
             int saved_var_count = gen->declared_var_count;
+            /* #2737: a loop variable a closure in the body writes is a
+             * promoted capture, read and written through its cell (`*i`) by
+             * the condition, the increment, the body and the closure. It is
+             * declared as any other promoted local is, ahead of the C `for`,
+             * in a block of its own that ends with the loop: one cell for
+             * every iteration, as `i = 0` before a while gives, released
+             * after the loop (a closure that outlives it holds a reference of
+             * its own). The defer scope it opens sits outside the loop's, so
+             * a `break` or `continue` leaves the cell alone, and a `return`,
+             * or a labeled exit of an outer loop, releases it. Declared in
+             * the header as `int i`, the uses dereferenced an int. */
+            ASTNode* for_init = stmt->child_count > 0 ? stmt->children[0] : NULL;
+            int cell_init = for_init && for_init->type == AST_VARIABLE_DECLARATION &&
+                            for_init->value && is_promoted_capture(gen, for_init->value);
+            if (cell_init) {
+                print_line(gen, "{");
+                indent(gen);
+                enter_scope(gen);
+                print_indent(gen);
+                emit_promoted_cell_declaration(gen, for_init->value,
+                    get_c_type(for_init->node_type), for_init->node_type,
+                    for_init->child_count > 0 ? for_init->children[0] : NULL, "0",
+                    for_init->line, for_init->column);
+                print_indent(gen);
+            }
             fprintf(gen->output, "for (");
-            if (stmt->child_count > 0 && stmt->children[0]) {
-                ASTNode* init = stmt->children[0];
+            if (!cell_init && for_init) {
+                ASTNode* init = for_init;
                 if (init->type == AST_VARIABLE_DECLARATION) {
                     generate_type(gen, init->node_type);
                     fprintf(gen->output, " %s", init->value);
@@ -13518,6 +13543,11 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
              * one a C `break` cannot express (#2696). */
             if (for_lbl_idx >= 0 && gen->loop_label_break_used[for_lbl_idx]) {
                 print_line(gen, "__ae_brk_%d: ;", gen->loop_label_id[for_lbl_idx]);
+            }
+            if (cell_init) {
+                exit_scope(gen);   /* #2737: the loop's reference to its cell */
+                unindent(gen);
+                print_line(gen, "}");
             }
             truncate_declared_vars(gen, saved_var_count);
             break;

@@ -340,6 +340,15 @@ the body's own, so its cell is made at the declaration and released at the
 end of each pass, and a closure kept past the pass, in a list or a struct,
 holds the cell through its env.
 
+The variable a C-style `for` loop's init binds is the loop's, so a closure
+that writes it gets one cell for the whole loop (#2737): made before the loop,
+read and written through by the condition, the increment and the body, and
+released after the loop, as for `i = 0` before a `while`. A closure made in
+any pass shares it, one kept past the loop holds it through its env, and a
+`break`, `continue` or `defer` in the body behaves as in the `while`. Before,
+the `for` header declared the variable as a plain value while every use read
+it through the cell, and the program did not compile.
+
 A builder block (`window(...) { ... }`, `vstack(4) { ... }`) is a scope
 like any other here. Its body is emitted inside C braces and now opens a
 matching defer scope, so a cell, or a heap string, declared in the block

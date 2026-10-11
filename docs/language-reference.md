@@ -989,6 +989,28 @@ main() {
 18
 ```
 
+A closure in the body that assigns the variable assigns the loop's own. The
+loop keeps one variable for all its passes, as `i = 0` before a `while` does,
+so the condition, the increment, the body and every closure made in any pass
+read and write the same `i`, and a closure kept past the loop still holds it.
+A closure that only reads the variable takes the value it has when the closure
+is made.
+
+```aether,run
+main() {
+    for (i = 0; i < 6;) {
+        bump = || { i = i + 2 }   // the loop's i
+        bump()
+        println(i)
+        i = i + 1
+    }
+}
+```
+```output
+2
+5
+```
+
 ### Range-Based For Loops
 
 Iterate over a range with `for VAR in START..END`:
