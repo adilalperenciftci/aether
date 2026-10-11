@@ -497,6 +497,9 @@ int has_return_value(ASTNode* node);
 int state_field_owns_string(ASTNode* state_decl);
 /* #2528: a `string[N]` (1) / `fn[N]` (2) state field, length in `*len`. */
 int state_array_owned(ASTNode* state_decl, int* len);
+/* #2688: a `T[N]` state field whose struct T owns strings or closures: T's
+ * name (each element is the actor's own), or NULL. */
+const char* state_struct_array_owned(CodeGenerator* gen, ASTNode* state_decl, int* len);
 /* #2528 (codegen_stmt.c): `v` as the value an owned string element takes. */
 void emit_owned_string_element(CodeGenerator* gen, ASTNode* v);
 
@@ -528,6 +531,13 @@ void emit_owned_array_literal(CodeGenerator* gen, ASTNode* lit, int kind);
  * element, each taken as the field keeps it. */
 int struct_literal_field_takes_array(CodeGenerator* gen, const char* sname, ASTNode* field_init);
 void emit_struct_literal_array_field(CodeGenerator* gen, const char* sname, ASTNode* field_init);
+/* #2690: a struct value a `try` body writes is declared volatile; may the
+ * lvalue `lv` (a local, or a field or element held by one) be such a value?
+ * Its release and replace are then the generated `<Name>_destroy_volatile`
+ * and `<Name>_replace_volatile`, which these name. */
+int lvalue_may_be_volatile(CodeGenerator* gen, ASTNode* lv);
+const char* struct_destroy_fn(const char* sname, int is_volatile);
+const char* struct_replace_fn(const char* sname, int is_volatile);
 /* #2497: does a value of this struct own heap strings, in a `string` field
  * of its own or in a field that is itself such a struct held by value? It
  * then has `<Name>_destroy` / `_replace` / `_heap_free` / `_cell_release`,

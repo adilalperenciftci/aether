@@ -1,0 +1,193 @@
+// Regression (#2690 follow-up): a parameter, a message pattern binding or a
+// local a `try` body writes keeps, after a panic, the value stored before it.
+//
+// The C setjmp a `try` lowers to leaves a non-volatile local that the body
+// changed indeterminate after the longjmp of a panic, and at -O2 it holds
+// whatever its register held before the `try`. #2690 made the hoisted
+// locals and their `_heap_` flags volatile, but not a parameter: its flag
+// was volatile, the parameter itself plain, so after the panic `s` was the
+// caller's string again while its flag said the function owned it, and the
+// exit freed the caller's string, which the caller then freed again (heap
+// corruption with `ae build`). A message pattern binding (`const char* w =
+// _pattern->w`) and a closure's parameter were the same, and so was a local
+// declared inside one `try` and written in a nested one: a declaration
+// emitted inside any `try` was never volatile. Each is volatile now, with
+// its flag: a parameter in the function's own signature
+// (`const char* volatile s`), a struct one too (its release and replace go
+// through the `_volatile` helpers that take the volatile pointer).
+//
+// Run at -O0 (`ae run`) and -O2 (`ae build`). Each check reads its value
+// after churn, allocations of the same sizes that reuse what was freed. The
+// leak check runs where the heap count is exact (mem.heap_in_use_exact):
+// after a warm-up, some window of the same work grows by exactly 0
+// (mem.steady_growth). Strings are built from parameters, because
+// string.concat of two literals folds to a literal.
+
+import std.mem
+import std.string
+
+extern exit(code: int)
+
+struct P {
+    name: string
+}
+
+message Grow { w: string, x: string }
+message Get {}
+message Total { v: int }
+
+// The arm keeps the binding in its state, which frees the one it replaces.
+actor Keeper {
+    state string label
+    state int n
+
+    receive {
+        Grow(w: w, x: x) -> {
+            try {
+                w = string.concat(w, x)
+                panic("arm")
+            } catch e {
+                n = n + 1
+            }
+            label = w
+        }
+        Get() -> { reply Total { v: string.length(label) } }
+    }
+}
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL #2690: ${msg}")
+        exit(1)
+    }
+}
+
+// Allocations of the sizes the checks read, to take over freed blocks.
+churn(w: string) -> int {
+    n = 0
+    i = 0
+    while i < 8 {
+        a = string.concat(w, "!!!!")
+        b = string.concat(w, "zzzz")
+        n = n + string.length(a) + string.length(b)
+        i = i + 1
+    }
+    return n
+}
+
+// The finding's shape: the parameter is reassigned, then the panic.
+grow(s: string, w: string) -> int {
+    try {
+        s = string.concat(s, w)
+        panic("boom")
+    } catch e {
+        churn(w)
+    }
+    return string.length(s)
+}
+
+// A struct parameter, replaced in the `try`.
+rename(p: P, w: string) -> int {
+    try {
+        p = P { name: string.concat(w, "renamed") }
+        panic("boom")
+    } catch e {
+        churn(w)
+    }
+    return string.length(p.name)
+}
+
+// A number parameter.
+count(k: int) -> int {
+    try {
+        k = k + 5
+        panic("boom")
+    } catch e {
+        k = k + 0
+    }
+    return k
+}
+
+// A local declared in one `try` and written in a nested one.
+nested(w: string) -> int {
+    total = 0
+    try {
+        t = string.concat(w, "a")
+        try {
+            t = string.concat(t, "bb")
+            panic("inner")
+        } catch e2 {
+            churn(w)
+        }
+        total = string.length(t)
+        panic("outer")
+    } catch e {
+        total = total + 10
+    }
+    return total
+}
+
+// A closure's parameter.
+closure_param(w: string) -> int {
+    f = | s: string | {
+        try {
+            s = string.concat(s, "cc")
+            panic("boom")
+        } catch e {
+            churn(s)
+        }
+        return string.length(s)
+    }
+    int r = call(f, w)
+    return r
+}
+
+functions(w: string) -> int {
+    base = string.concat(w, "base")
+    a = grow(base, w)
+    check(a == 6, "a reassigned string parameter kept its value (${a})")
+    check(base == "wbase", "the caller's string is its own (${base})")
+    q = P { name: string.concat(w, "old") }
+    b = rename(q, w)
+    check(b == 8, "a reassigned struct parameter kept its value (${b})")
+    check(q.name == "wold", "the caller's struct is its own (${q.name})")
+    check(count(2) == 7, "a reassigned number parameter kept its value")
+    c = nested(w)
+    check(c == 14, "a local written in a nested try kept its value (${c})")
+    d = closure_param(w)
+    check(d == 3, "a reassigned closure parameter kept its value (${d})")
+    return a + b + c + d
+}
+
+state_round(k: ptr, w: string) -> int {
+    base = string.concat(w, "base")
+    k ! Grow { w: base, x: "yy" }
+    int t = k ? Get {}
+    check(base == "wbase", "the sender's string is its own")
+    return t
+}
+
+main() {
+    println("=== test_try_written_param ===")
+    check(functions("w") == 31, "a round adds up")
+    k = spawn(Keeper())
+    check(state_round(k, "w") == 7, "a reassigned pattern binding kept its value")
+    i = 0
+    while i < 20 {
+        functions("w")
+        state_round(k, "w")
+        i = i + 1
+    }
+    if mem.heap_in_use_exact() {
+        grown = mem.steady_growth(|| {
+                j = 0
+                while j < 100 {
+                    functions("w")
+                    j = j + 1
+                }
+                state_round(k, "w")
+            }, 5)
+        check(grown == 0, "a window of 100 rounds grew the heap by ${grown} bytes in every run")
+    }
+    println("=== test_try_written_param passed ===")
+}

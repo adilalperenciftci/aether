@@ -624,6 +624,7 @@ CodeGenerator* create_code_generator(FILE* output) {
     memset(gen->loop_c_depth, 0, sizeof(gen->loop_c_depth));
     // Issue #501 follow-up: try-clobbered locals tracking
     gen->try_clobbered_vars = NULL;
+    gen->try_clobbered_depths = NULL;
     gen->try_clobbered_var_count = 0;
     // Extern function parameter registry
     gen->extern_registry = NULL;
@@ -1770,10 +1771,11 @@ static int try_emit_struct_destroy(CodeGenerator* gen, ASTNode* deferred) {
     if (is_return_escaped_struct_var(gen, var_buf)) {
         return 1;
     }
+    /* A local a `try` body writes is volatile (#2690). */
     print_indent(gen);
     fprintf(gen->output,
-            "/* deferred */ %s_destroy(&%s);\n",
-            struct_name, var_buf);
+            "/* deferred */ %s(&%s);\n",
+            struct_destroy_fn(struct_name, is_try_clobbered_var(gen, var_buf)), var_buf);
     return 1;
 }
 
@@ -1800,8 +1802,8 @@ static int try_emit_struct_array_destroy(CodeGenerator* gen, ASTNode* deferred) 
     if (is_return_escaped_struct_var(gen, var_buf)) return 1;
     print_indent(gen);
     fprintf(gen->output,
-            "/* deferred */ for (int _ae_k = 0; _ae_k < %d; _ae_k++) %s_destroy(&%s[_ae_k]);\n",
-            n, struct_buf, var_buf);
+            "/* deferred */ for (int _ae_k = 0; _ae_k < %d; _ae_k++) %s(&%s[_ae_k]);\n",
+            n, struct_destroy_fn(struct_buf, is_try_clobbered_var(gen, var_buf)), var_buf);
     return 1;
 }
 
@@ -2061,23 +2063,38 @@ void emit_try_pops_for_break_continue(CodeGenerator* gen) {
 // prefix the emitted C type with `volatile`.
 // ----------------------------------------------------------------------
 
-int is_try_clobbered_var(CodeGenerator* gen, const char* name) {
+/* The deepest nesting of `try` bodies that writes `name`, counted from the
+ * scope the set was marked for; 0 when no `try` body writes it. */
+static int try_write_depth(CodeGenerator* gen, const char* name) {
     if (!gen || !name) return 0;
     for (int i = 0; i < gen->try_clobbered_var_count; i++) {
         if (gen->try_clobbered_vars[i] &&
-            strcmp(gen->try_clobbered_vars[i], name) == 0) return 1;
+            strcmp(gen->try_clobbered_vars[i], name) == 0) return gen->try_clobbered_depths[i];
     }
     return 0;
 }
 
-void mark_try_clobbered_var(CodeGenerator* gen, const char* name) {
-    if (!gen || !name) return;
-    if (is_try_clobbered_var(gen, name)) return;
-    char** grown = realloc(gen->try_clobbered_vars,
-                           sizeof(char*) * (gen->try_clobbered_var_count + 1));
+int is_try_clobbered_var(CodeGenerator* gen, const char* name) {
+    return try_write_depth(gen, name) > 0;
+}
+
+static void mark_try_clobbered_var(CodeGenerator* gen, const char* name, int depth) {
+    if (!gen || !name || depth <= 0) return;
+    for (int i = 0; i < gen->try_clobbered_var_count; i++) {
+        if (gen->try_clobbered_vars[i] && strcmp(gen->try_clobbered_vars[i], name) == 0) {
+            if (depth > gen->try_clobbered_depths[i]) gen->try_clobbered_depths[i] = depth;
+            return;
+        }
+    }
+    size_t n = (size_t)gen->try_clobbered_var_count + 1;
+    char** grown = realloc(gen->try_clobbered_vars, sizeof(char*) * n);
     if (!grown) return;
     gen->try_clobbered_vars = grown;
+    int* depths = realloc(gen->try_clobbered_depths, sizeof(int) * n);
+    if (!depths) return;
+    gen->try_clobbered_depths = depths;
     gen->try_clobbered_vars[gen->try_clobbered_var_count] = strdup(name);
+    gen->try_clobbered_depths[gen->try_clobbered_var_count] = depth;
     gen->try_clobbered_var_count++;
 }
 
@@ -2089,17 +2106,39 @@ void clear_try_clobbered_vars(CodeGenerator* gen) {
         }
         free(gen->try_clobbered_vars);
     }
+    free(gen->try_clobbered_depths);
     gen->try_clobbered_vars = NULL;
+    gen->try_clobbered_depths = NULL;
     gen->try_clobbered_var_count = 0;
 }
 
-// Walk `body` looking for AST_TRY_STATEMENT nodes; for each, walk
-// the try body recursively and mark every variable name on the LHS
-// of any assignment-shaped node.  Conservative: a var declared
-// *inside* the try body also gets marked, but the volatile prefix
-// is only applied at AST_VARIABLE_DECLARATION sites where
-// gen->try_frame_depth == 0 (i.e. only when we're emitting a decl
-// in an outer scope of the try, never inside one).
+/* A closure body is emitted as a C function of its own while the set of
+ * the scope that holds it may still be wanted, so it takes the set over
+ * and gives it back. */
+void save_try_clobbered_vars(CodeGenerator* gen, TryClobberedSet* saved) {
+    saved->names = gen->try_clobbered_vars;
+    saved->depths = gen->try_clobbered_depths;
+    saved->count = gen->try_clobbered_var_count;
+    gen->try_clobbered_vars = NULL;
+    gen->try_clobbered_depths = NULL;
+    gen->try_clobbered_var_count = 0;
+}
+
+void restore_try_clobbered_vars(CodeGenerator* gen, TryClobberedSet* saved) {
+    clear_try_clobbered_vars(gen);
+    gen->try_clobbered_vars = saved->names;
+    gen->try_clobbered_depths = saved->depths;
+    gen->try_clobbered_var_count = saved->count;
+}
+
+// Walk `body` looking for AST_TRY_STATEMENT nodes, and mark every
+// variable name on the LHS of an assignment-shaped node inside a try
+// body with how many try bodies enclose that write. A declaration
+// emitted at a shallower depth (gen->try_frame_depth) is outside one
+// of them and gets the volatile prefix (try_volatile_qual_for); one
+// inside all of them lives and dies inside the innermost try body.
+// Conservative: names, not bindings, so a same-named local elsewhere
+// in the scope is volatile too.
 // Helper: when `lhs` is an assignment LHS, find the bare variable
 // name at its root and mark it as try-clobbered.  For:
 //   x = ...           → mark "x"
@@ -2110,10 +2149,10 @@ void clear_try_clobbered_vars(CodeGenerator* gen) {
 // Conservative: marks the storage owner even when the LHS writes
 // to a heap-allocated sub-object (where volatile wouldn't matter)
 // — harmless, just slightly more `volatile` than strictly needed.
-static void mark_lhs_root_var(CodeGenerator* gen, ASTNode* lhs) {
+static void mark_lhs_root_var(CodeGenerator* gen, ASTNode* lhs, int depth) {
     while (lhs) {
         if (lhs->type == AST_IDENTIFIER && lhs->value) {
-            mark_try_clobbered_var(gen, lhs->value);
+            mark_try_clobbered_var(gen, lhs->value, depth);
             return;
         }
         if (lhs->type == AST_MEMBER_ACCESS && lhs->child_count > 0) {
@@ -2129,17 +2168,15 @@ static void mark_lhs_root_var(CodeGenerator* gen, ASTNode* lhs) {
     }
 }
 
-static void scan_try_body_for_writes(CodeGenerator* gen, ASTNode* node) {
-    if (!node) return;
+/* `node`, a node `depth` try bodies deep, may write a variable: mark it. */
+static void mark_try_write(CodeGenerator* gen, ASTNode* node, int depth) {
     // AST_VARIABLE_DECLARATION carries `value` = var name.  This is
     // the shape the Aether parser emits for `x = expr` when `x` is
-    // a bare identifier at statement scope.  Mark unconditionally —
-    // the volatile prefix is only applied at AST_VARIABLE_DECLARATION
-    // emission sites when gen->try_frame_depth == 0 (only outer-scope
-    // decls need volatile; inside-try decls live and die inside the
-    // try body's C scope).
+    // a bare identifier at statement scope.  Marked whether or not it
+    // is the variable's first binding: a binding inside the try body
+    // is declared at that depth, which the mark does not exceed.
     if (node->type == AST_VARIABLE_DECLARATION && node->value) {
-        mark_try_clobbered_var(gen, node->value);
+        mark_try_clobbered_var(gen, node->value, depth);
     }
     // AST_ASSIGNMENT: an explicit re-assignment shape used by some
     // parser paths (struct-literal field-init for one; the general
@@ -2147,7 +2184,7 @@ static void scan_try_body_for_writes(CodeGenerator* gen, ASTNode* node) {
     // see below).
     if (node->type == AST_ASSIGNMENT && node->child_count > 0 &&
         node->children[0]) {
-        mark_lhs_root_var(gen, node->children[0]);
+        mark_lhs_root_var(gen, node->children[0], depth);
     }
     // AST_BINARY_EXPRESSION with op `=` / `+=` / `-=` / etc. — this
     // is the shape Aether's parser produces for a member-access or
@@ -2165,7 +2202,7 @@ static void scan_try_body_for_writes(CodeGenerator* gen, ASTNode* node) {
               op[0] == '/' || op[0] == '%' || op[0] == '&' ||
               op[0] == '|' || op[0] == '^'));
         if (is_assign) {
-            mark_lhs_root_var(gen, node->children[0]);
+            mark_lhs_root_var(gen, node->children[0], depth);
         }
     }
     // AST_COMPOUND_ASSIGNMENT: the statement form `x op= y`. The target's
@@ -2173,39 +2210,42 @@ static void scan_try_body_for_writes(CodeGenerator* gen, ASTNode* node) {
     // used to mark instead, so a variable changed by `+=` in a try body was
     // never made volatile and could read stale after an error unwound.
     if (node->type == AST_COMPOUND_ASSIGNMENT && node->value) {
-        mark_try_clobbered_var(gen, node->value);
-    }
-    for (int i = 0; i < node->child_count; i++) {
-        scan_try_body_for_writes(gen, node->children[i]);
+        mark_try_clobbered_var(gen, node->value, depth);
     }
 }
 
-static void walk_for_try_clobbered(CodeGenerator* gen, ASTNode* node) {
+/* `node` is `depth` try bodies deep. A try statement's body is one deeper;
+ * its catch clause runs once the frame is popped, at the try's own depth,
+ * so a catch binding written in a `try` of its handler (#2739), or a local
+ * declared in one try body and written in a nested one, is written deeper
+ * than it is declared. */
+static void walk_for_try_clobbered(CodeGenerator* gen, ASTNode* node, int depth) {
     if (!node) return;
     if (node->type == AST_TRY_STATEMENT && node->child_count >= 1) {
-        // children[0] is the try body; children[1] is the catch clause.
-        // Vars modified inside the body are the at-risk set.
-        scan_try_body_for_writes(gen, node->children[0]);
+        walk_for_try_clobbered(gen, node->children[0], depth + 1);
+        for (int i = 1; i < node->child_count; i++)
+            walk_for_try_clobbered(gen, node->children[i], depth);
+        return;
     }
+    if (depth > 0) mark_try_write(gen, node, depth);
     for (int i = 0; i < node->child_count; i++) {
-        walk_for_try_clobbered(gen, node->children[i]);
+        walk_for_try_clobbered(gen, node->children[i], depth);
     }
 }
 
 void mark_try_clobbered_vars(CodeGenerator* gen, ASTNode* body) {
     if (!gen || !body) return;
-    walk_for_try_clobbered(gen, body);
+    walk_for_try_clobbered(gen, body, 0);
 }
 
-// Returns "volatile " when `name` is a try-clobbered local and the
-// current codegen position is OUTSIDE any try body in this
-// function.  An inside-try declaration is scoped to the try body
-// and lives/dies inside it; only outer-scope decls cross the
-// setjmp boundary and need volatile.  Returns "" otherwise.
+// Returns "volatile " when `name` is written inside a try body nested
+// deeper than the declaration being emitted: the try body that writes it
+// is then not one the declaration is inside, and its setjmp sees the
+// local after a panic. A declaration inside every try body that writes
+// it lives and dies there. Returns "" otherwise.
 const char* try_volatile_qual_for(CodeGenerator* gen, const char* name) {
     if (!gen || !name) return "";
-    if (gen->try_frame_depth > 0) return "";
-    if (!is_try_clobbered_var(gen, name)) return "";
+    if (try_write_depth(gen, name) <= gen->try_frame_depth) return "";
     return "volatile ";
 }
 

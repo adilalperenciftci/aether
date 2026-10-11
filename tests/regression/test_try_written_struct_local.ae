@@ -1,0 +1,210 @@
+// Regression (#2690 follow-up): a struct value a `try` body writes is
+// volatile, and is released and replaced through a volatile pointer.
+//
+// A local a `try` body writes is declared volatile so that after a panic it
+// holds what was stored before it (#2690), a struct one too: an array of
+// structs, an if-branch-hoisted struct, a struct parameter. The release
+// and replace of a struct that owns strings (`<Name>_destroy(&v)`,
+// `<Name>_replace(&v, x)`) take a plain pointer, which a volatile value
+// does not convert to: every such call warned (-Wdiscarded-qualifiers),
+// and so did the pointer a store into a string field of an element takes
+// (`items[i].name = v`). The generated `<Name>_destroy_volatile` and
+// `<Name>_replace_volatile` take the volatile pointer and work on a copy.
+// The names a `try` writes were also kept from one receive arm to the next
+// (and from a function to the closures emitted after it), so a local of
+// another arm with no `try` was declared volatile; each arm, closure and
+// function now marks its own.
+//
+// The warnings are checked by the try_written_volatile_c integration
+// script, which compiles this program's C with -Werror; this program
+// checks the values a panic leaves and that nothing leaks. Run at -O0 (`ae
+// run`) and -O2 (`ae build`). Each check reads its value after churn,
+// allocations of the same sizes that reuse what was freed. The leak check
+// runs where the heap count is exact (mem.heap_in_use_exact): after a
+// warm-up, some window of the same work grows by exactly 0
+// (mem.steady_growth). Strings are built from parameters, because
+// string.concat of two literals folds to a literal.
+
+import std.mem
+import std.string
+
+extern exit(code: int)
+
+struct Item {
+    name: string
+}
+
+struct Pair {
+    left: Item
+    tag: string
+}
+
+message Keep { w: string }
+message Plain { w: string }
+message Get {}
+message Total { v: int }
+
+// Arm `Keep` writes `it` in a `try`; arm `Plain` has an `it` of its own,
+// written nowhere else, which must stay a plain local.
+actor Keeper {
+    state int n
+
+    receive {
+        Keep(w: w) -> {
+            it = Item { name: string.concat(w, "a") }
+            try {
+                it = Item { name: string.concat(w, "bbbb") }
+                panic("keep")
+            } catch e {
+                n = n + 0
+            }
+            n = string.length(it.name)
+        }
+        Plain(w: w) -> {
+            it = Item { name: string.concat(w, "cc") }
+            n = n + string.length(it.name)
+        }
+        Get() -> { reply Total { v: n } }
+    }
+}
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL #2690: ${msg}")
+        exit(1)
+    }
+}
+
+// Allocations of the sizes the checks read, to take over freed blocks.
+churn(w: string) -> int {
+    n = 0
+    i = 0
+    while i < 8 {
+        a = string.concat(w, "!!!!")
+        b = string.concat(w, "zzzz")
+        n = n + string.length(a) + string.length(b)
+        i = i + 1
+    }
+    return n
+}
+
+// A store into a string field of an element of a try-written array.
+element_field(w: string) -> int {
+    items = [Item { name: string.concat(w, "a") }, Item { name: "lit" }]
+    try {
+        items[0].name = string.concat(w, "bbbb")
+        items[1] = Item { name: string.concat(w, "cc") }
+        panic("boom")
+    } catch e {
+        churn(w)
+    }
+    check(items[0].name == "wbbbb" && items[1].name == "wcc", "an element's field stored before a panic")
+    return string.length(items[0].name) + string.length(items[1].name)
+}
+
+// A whole array of structs stored in a `try`.
+whole_array(w: string) -> int {
+    items = [Item { name: string.concat(w, "a") }, Item { name: "lit" }]
+    other = [Item { name: string.concat(w, "dd") }, Item { name: string.concat(w, "eee") }]
+    try {
+        items = other
+        panic("boom")
+    } catch e {
+        churn(w)
+    }
+    check(items[0].name == "wdd" && items[1].name == "weee", "an array stored before a panic")
+    return string.length(items[0].name) + string.length(items[1].name)
+}
+
+// A struct local first bound in the arms of an `if`, hoisted ahead of it.
+hoisted(w: string, c: bool) -> int {
+    if c {
+        p = Item { name: string.concat(w, "c") }
+    } else {
+        p = Item { name: "lit" }
+    }
+    try {
+        p = Item { name: string.concat(w, "dddd") }
+        panic("boom")
+    } catch e {
+        churn(w)
+    }
+    check(p.name == "wdddd", "a hoisted struct stored before a panic")
+    return string.length(p.name)
+}
+
+// A struct held by value in a try-written local.
+nested_field(w: string) -> int {
+    pr = Pair { left: Item { name: string.concat(w, "l") }, tag: "t" }
+    try {
+        pr.left = Item { name: string.concat(w, "llll") }
+        pr.tag = string.concat(w, "tt")
+        panic("boom")
+    } catch e {
+        churn(w)
+    }
+    check(pr.left.name == "wllll" && pr.tag == "wtt", "a nested struct stored before a panic")
+    return string.length(pr.left.name) + string.length(pr.tag)
+}
+
+// Two closures: one writes a struct in a `try`, the other has a struct of
+// the same name it never writes there.
+closures(w: string) -> int {
+    f = | s: string | {
+        x = Item { name: string.concat(s, "f") }
+        try {
+            x = Item { name: string.concat(s, "ffff") }
+            panic("boom")
+        } catch e {
+            churn(s)
+        }
+        return string.length(x.name)
+    }
+    g = | s: string | {
+        x = Item { name: string.concat(s, "gg") }
+        return string.length(x.name)
+    }
+    int a = call(f, w)
+    int b = call(g, w)
+    check(a == 5 && b == 3, "closures' structs (${a}, ${b})")
+    return a + b
+}
+
+functions(w: string) -> int {
+    return element_field(w) + whole_array(w) + hoisted(w, true) + hoisted(w, false) +
+    nested_field(w) + closures(w)
+}
+
+state_round(k: ptr, w: string) -> int {
+    k ! Keep { w: w }
+    int a = k ? Get {}
+    k ! Plain { w: w }
+    int b = k ? Get {}
+    check(a == 5 && b == 8, "arms' structs (${a}, ${b})")
+    return a + b
+}
+
+main() {
+    println("=== test_try_written_struct_local ===")
+    check(functions("w") == 8 + 7 + 5 + 5 + 8 + 8, "a round adds up")
+    k = spawn(Keeper())
+    check(state_round(k, "w") == 13, "a state round adds up")
+    i = 0
+    while i < 20 {
+        functions("w")
+        state_round(k, "w")
+        i = i + 1
+    }
+    if mem.heap_in_use_exact() {
+        grown = mem.steady_growth(|| {
+                j = 0
+                while j < 100 {
+                    functions("w")
+                    j = j + 1
+                }
+                state_round(k, "w")
+            }, 5)
+        check(grown == 0, "a window of 100 rounds grew the heap by ${grown} bytes in every run")
+    }
+    println("=== test_try_written_struct_local passed ===")
+}

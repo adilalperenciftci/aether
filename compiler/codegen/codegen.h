@@ -263,10 +263,13 @@ typedef struct {
     // have volatile-qualified type and have been changed between
     // the setjmp invocation and longjmp call are indeterminate."
     // Set populated by mark_try_clobbered_vars() pre-pass; consulted
-    // at AST_VARIABLE_DECLARATION emission sites when
-    // try_frame_depth == 0 (only outer-scope decls need volatile;
-    // inside-try decls live and die inside the try body).
+    // at declaration sites (try_volatile_qual_for). Each name carries
+    // the deepest nesting of `try` bodies, counted from the scope the
+    // walk started at (a function, a closure, a receive arm), that
+    // writes it: a local declared at a shallower depth crosses that
+    // setjmp and needs volatile.
     char** try_clobbered_vars;
+    int* try_clobbered_depths;
     int try_clobbered_var_count;
 
     // Extern function parameter type registry — used at call sites for proper casts
@@ -768,22 +771,33 @@ void emit_try_pops_for_break_continue(CodeGenerator* gen);
 // an enclosing scope of the try — must be lowered as `volatile T`
 // so the C optimizer can't keep them in a register that gets
 // clobbered by the panic's siglongjmp.
-void mark_try_clobbered_var(CodeGenerator* gen, const char* name);
 int  is_try_clobbered_var(CodeGenerator* gen, const char* name);
 void clear_try_clobbered_vars(CodeGenerator* gen);
 
+// The set belongs to one C function's body. A body emitted while another
+// is open (a closure's) saves the open one's set and restores it after.
+typedef struct {
+    char** names;
+    int* depths;
+    int count;
+} TryClobberedSet;
+void save_try_clobbered_vars(CodeGenerator* gen, TryClobberedSet* saved);
+void restore_try_clobbered_vars(CodeGenerator* gen, TryClobberedSet* saved);
+
 // Pre-pass: walk `body` and mark every variable assigned inside
-// any AST_TRY_STATEMENT's body.  Called from
-// generate_function_definition alongside hoist_heap_string_trackers
-// (which it must run before, so the volatile prefix appears on
-// the C decl).
+// any AST_TRY_STATEMENT's body, with how deeply such bodies nest
+// there.  Run for each C function's body (a function, main, a
+// closure, a receive arm) after the set is cleared and before its
+// signature, its parameter or pattern bindings and its hoists are
+// emitted, so every declaration of a try-written name sees it.
 void mark_try_clobbered_vars(CodeGenerator* gen, ASTNode* body);
 
-// Return "volatile " when `name` is a try-clobbered local in this
-// function AND we're emitting at an outer scope of any try body
-// (i.e. gen->try_frame_depth == 0).  Empty string otherwise.
-// Safe to concatenate verbatim before a C type that is not a pointer.
-// Issue #501 follow-up.
+// Return "volatile " when `name` is written inside a `try` body nested
+// deeper than the declaration being emitted (gen->try_frame_depth):
+// the local then holds a value the setjmp of that `try` must see after
+// a panic. Empty string otherwise. Issue #501 follow-up; a local
+// declared inside one `try` and written in a nested one, or a catch
+// binding written in a `try` of its handler, is volatile too (#2739).
 const char* try_volatile_qual_for(CodeGenerator* gen, const char* name);
 
 // The C type `c_type` qualified by `vq` (try_volatile_qual_for's answer)

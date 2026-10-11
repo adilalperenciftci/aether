@@ -1,0 +1,104 @@
+// Regression (#2739): a catch binding a `try` of its handler writes keeps,
+// after that try's panic, the value stored before it.
+//
+// The handler declared the binding (`const char* e`) and its ownership
+// flag plain, so after the inner panic's longjmp at -O2 the two could hold
+// their values from before the inner `try`: the string stored was lost or
+// freed twice. The same held for any local declared inside one `try` body
+// and written in a nested one, since a declaration emitted inside a `try`
+// was never volatile. A local is now volatile wherever it is written in a
+// `try` nested deeper than its declaration, the catch binding included.
+//
+// Run at -O0 (`ae run`) and -O2 (`ae build`). Each check reads its value
+// after churn, allocations of the same sizes that reuse what was freed. The
+// leak check runs where the heap count is exact (mem.heap_in_use_exact):
+// after a warm-up, some window of the same work grows by exactly 0
+// (mem.steady_growth). Strings are built from parameters, because
+// string.concat of two literals folds to a literal.
+
+import std.mem
+import std.string
+
+extern exit(code: int)
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL #2739: ${msg}")
+        exit(1)
+    }
+}
+
+// Allocations of the sizes the checks read, to take over freed blocks.
+churn(w: string) -> int {
+    n = 0
+    i = 0
+    while i < 8 {
+        a = string.concat(w, "!!!!!")
+        b = string.concat(w, "zzzzz")
+        n = n + string.length(a) + string.length(b)
+        i = i + 1
+    }
+    return n
+}
+
+// The issue's shape: a literal reason, rebound in the inner `try`.
+literal_reason(w: string) -> int {
+    n = 0
+    try {
+        panic("outer")
+    } catch e {
+        try {
+            e = string.concat(e, w)
+            panic("inner")
+        } catch e2 {
+            churn(w)
+        }
+        check(e == "outerw", "the binding kept what the inner try stored (${e})")
+        n = string.length(e)
+    }
+    return n
+}
+
+// A reason built at run time, which the binding owns, replaced twice.
+owned_reason(w: string) -> int {
+    n = 0
+    try {
+        panic(string.concat(w, "boom"))
+    } catch e {
+        try {
+            e = string.concat(e, "1")
+            e = string.concat(e, "22")
+            panic("inner")
+        } catch e2 {
+            churn(w)
+        }
+        check(e == "wboom122", "an owned binding kept its last value (${e})")
+        n = string.length(e)
+    }
+    return n
+}
+
+round(w: string) -> int {
+    return literal_reason(w) + owned_reason(w)
+}
+
+main() {
+    println("=== test_catch_binding_nested_try ===")
+    check(round("w") == 6 + 8, "a round adds up")
+    i = 0
+    while i < 20 {
+        round("w")
+        i = i + 1
+    }
+    if mem.heap_in_use_exact() {
+        grown = mem.steady_growth(|| {
+                j = 0
+                while j < 100 {
+                    round("w")
+                    j = j + 1
+                }
+            }, 5)
+        check(grown == 0, "a window of 100 rounds grew the heap by ${grown} bytes in every run")
+    }
+    println("=== test_catch_binding_nested_try passed ===")
+}

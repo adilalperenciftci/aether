@@ -2396,6 +2396,52 @@ static void reject_sized_array_argument(ASTNode* call, ASTNode* arg, Type* arg_t
     type_error(emsg, arg->line, arg->column);
 }
 
+/* #2688: a fixed-size array field bound from a whole array (`Shelf { names:
+ * arr }`, `s.names = arr`) copies the source's elements into the field's,
+ * as many as the field holds, so the source must hold exactly that many: a
+ * shorter one was read past its end. An array literal may be shorter (the
+ * rest is zeroed, as for a local) but not longer. A slice or a pointer has
+ * no length known here, and is refused rather than checked when it runs:
+ * copy its elements one by one. Reports and returns 1 on a mismatch.
+ * `slot` names the field. */
+static int reject_array_field_source(ASTNode* value, Type* value_type, Type* field_type,
+                                     const char* slot, int line, int column) {
+    if (!value || !field_type || field_type->kind != TYPE_ARRAY ||
+        field_type->array_size <= 0 || field_type->index_enum_name) return 0;
+    char want[96], got[96], msg[640];
+    int n = field_type->array_size;
+    if (value->type == AST_ARRAY_LITERAL) {
+        if (value->child_count <= n) return 0;
+        snprintf(msg, sizeof(msg),
+                 "%s is %s and cannot take an array literal of %d elements: a fixed-size "
+                 "array field holds exactly its declared number of elements",
+                 slot, array_type_spell(field_type, want, sizeof(want)), value->child_count);
+        type_error(msg, line, column);
+        return 1;
+    }
+    if (!value_type || value_type->kind == TYPE_UNKNOWN) return 0;
+    if (value_type->kind == TYPE_ARRAY && value_type->array_size > 0) {
+        if (value_type->array_size == n) return 0;
+        snprintf(msg, sizeof(msg),
+                 "%s is %s and cannot take %s: binding an array to a fixed-size array field "
+                 "copies its elements, so the two lengths must be the same",
+                 slot, array_type_spell(field_type, want, sizeof(want)),
+                 array_type_spell(value_type, got, sizeof(got)));
+        type_error(msg, line, column);
+        return 1;
+    }
+    if (value_type->kind != TYPE_ARRAY && value_type->kind != TYPE_PTR) return 0;
+    snprintf(msg, sizeof(msg),
+             "%s is %s and cannot take %s: its length is not known until the program "
+             "runs, and a fixed-size array field takes an array of exactly its length",
+             slot, array_type_spell(field_type, want, sizeof(want)),
+             value_type->kind == TYPE_PTR ? "a pointer"
+                                          : array_type_spell(value_type, got, sizeof(got)));
+    type_error_hint(msg, "copy the elements one by one (`s.f[i] = xs[i]`), or bind an array of "
+                    "that length", line, column);
+    return 1;
+}
+
 /* #2468: `call(x, ...)` invokes a closure, and codegen lowers it through
  * `x.fn` / `x.env`. Any callee whose type is known and is not a closure was
  * let through, and the only report was the C compiler's `'_tuple_ptr_string'
@@ -7919,6 +7965,18 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                     free_type(init_type);
                     return 0;
                 }
+                /* #2688: an actor's array state field is a field: it takes
+                 * an array of its own length, or a literal no longer. */
+                if (bound && bound->is_state && bound->type && bound->type->kind == TYPE_ARRAY &&
+                    bound->type->array_size > 0) {
+                    char slot[256];
+                    snprintf(slot, sizeof(slot), "state field '%s'", stmt->value);
+                    if (reject_array_field_source(init, init_type, bound->type, slot,
+                                                  stmt->line, stmt->column)) {
+                        free_type(init_type);
+                        return 0;
+                    }
+                }
                 /* #2516: binding a fixed-size array to an array that already
                  * exists copies its elements, and an array keeps the length
                  * of its first binding, so the two lengths must agree. (An
@@ -10205,6 +10263,19 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                                                   sdef_is_extern);
                                 /* #2628: a closure in a typed fn-pointer field. */
                                 ASTNode* fv = field_init->children[0];
+                                /* #2688: an array field takes an array of its
+                                 * own length. */
+                                if (fv && fd->node_type && fd->node_type->kind == TYPE_ARRAY &&
+                                    fd->node_type->array_size > 0) {
+                                    Type* fvt = infer_type(fv, table);
+                                    char slot[256];
+                                    snprintf(slot, sizeof(slot), "field '%s.%s'",
+                                             sdef->value ? sdef->value : "?", fd->value);
+                                    if (reject_array_field_source(fv, fvt, fd->node_type, slot,
+                                                                  fv->line, fv->column))
+                                        fields_ok = 0;
+                                    free_type(fvt);
+                                }
                                 if (fv && fd->node_type && fd->node_type->kind == TYPE_FUNCTION &&
                                     fd->node_type->is_fnptr) {
                                     Type* fvt = infer_type(fv, table);
@@ -10817,6 +10888,25 @@ int typecheck_binary_expression(ASTNode* expr, SymbolTable* table) {
                 free_type(left_type);
                 free_type(right_type);
                 type_error("Type mismatch in assignment", expr->line, expr->column);
+                return 0;
+            }
+        }
+        /* #2688: a whole array stored into a fixed-size array field takes
+         * one of the field's own length. */
+        if (left->type == AST_MEMBER_ACCESS && left->value && left_type &&
+            left_type->kind == TYPE_ARRAY && left_type->array_size > 0) {
+            char slot[256];
+            Type* ot = left->child_count > 0 ? infer_type(left->children[0], table) : NULL;
+            Type* st = ot && ot->kind == TYPE_PTR ? ot->element_type : ot;
+            if (st && st->kind == TYPE_STRUCT && st->struct_name)
+                snprintf(slot, sizeof(slot), "field '%s.%s'", st->struct_name, left->value);
+            else
+                snprintf(slot, sizeof(slot), "field '%s'", left->value);
+            free_type(ot);
+            if (reject_array_field_source(right, right_type, left_type, slot,
+                                          expr->line, expr->column)) {
+                free_type(left_type);
+                free_type(right_type);
                 return 0;
             }
         }

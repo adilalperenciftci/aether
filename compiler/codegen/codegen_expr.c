@@ -3645,7 +3645,11 @@ static int closure_param_is_promoted(CodeGenerator* gen, ASTNode* closure,
 // body read `index` (#2087): libc's index() on Linux, undeclared on
 // Windows. A C parameter may shadow a libc function; only keywords need
 // the rename.
-static void emit_closure_signature(CodeGenerator* gen, int ci, const char* ret_type) {
+/* `definition`: the parameters are the body's, and one its `try` writes is
+ * volatile (#2690), as a function's is; the prototype leaves them plain,
+ * which C counts as the same type. */
+static void emit_closure_signature(CodeGenerator* gen, int ci, const char* ret_type,
+                                   int definition) {
     int id = gen->closures[ci].id;
     ASTNode* closure = gen->closures[ci].closure_node;
     fprintf(gen->output, "static %s _closure_fn_%d(_closure_env_%d* _env", ret_type, id, id);
@@ -3663,7 +3667,9 @@ static void emit_closure_signature(CodeGenerator* gen, int ci, const char* ret_t
             } else if (closure_param_is_promoted(gen, closure, p->value)) {
                 fprintf(gen->output, ", %s _param_%s", ptype, p->value);
             } else {
-                fprintf(gen->output, ", %s %s", ptype, safe_value_name(p->value));
+                const char* vq = definition ? try_volatile_qual_for(gen, p->value) : "";
+                fprintf(gen->output, ", %s %s", volatile_decl_type(vq, ptype),
+                        safe_value_name(p->value));
             }
         }
     }
@@ -3826,7 +3832,7 @@ void emit_closure_declarations(CodeGenerator* gen) {
             free_type(tuple);
         }
         const char* ret_type = resolve_closure_return_type(gen, ci);
-        emit_closure_signature(gen, ci, ret_type);
+        emit_closure_signature(gen, ci, ret_type, 0);
         fprintf(gen->output, ";\n");
         /* #2528: the non-GCC constructor is defined with the bodies, after
          * the functions that build the closure; without this prototype a
@@ -3876,15 +3882,6 @@ void emit_closure_definitions(CodeGenerator* gen) {
         char own_scope[64];
         closure_scope_name(closure, own_scope, sizeof(own_scope));
 
-        const char* ret_type = resolve_closure_return_type(gen, ci);
-        restore_fnptr_scope_for_closure(gen, parent_func);
-        emit_closure_signature(gen, ci, ret_type);
-        fprintf(gen->output, " {\n");
-        gen->in_string_closure = strcmp(ret_type, "const char*") == 0;
-        /* #2501: a multi-value return builds the closure's tuple. */
-        Type* closure_ret_tuple = closure_tuple_return_type(closure);
-        gen->current_func_return_type = closure_ret_tuple;
-
         // Find body first so we can detect which captures are mutated.
         ASTNode* body = NULL;
         for (int i = closure->child_count - 1; i >= 0; i--) {
@@ -3893,6 +3890,23 @@ void emit_closure_definitions(CodeGenerator* gen) {
                 break;
             }
         }
+
+        /* #2690: the closure is a C function of its own, and so is the set
+         * of names its `try` bodies write: marked before its parameters are
+         * declared, and nobody else's (the last function's, or a sibling
+         * closure's, made unrelated locals volatile). */
+        TryClobberedSet outer_try_set;
+        save_try_clobbered_vars(gen, &outer_try_set);
+        mark_try_clobbered_vars(gen, body);
+
+        const char* ret_type = resolve_closure_return_type(gen, ci);
+        restore_fnptr_scope_for_closure(gen, parent_func);
+        emit_closure_signature(gen, ci, ret_type, 1);
+        fprintf(gen->output, " {\n");
+        gen->in_string_closure = strcmp(ret_type, "const char*") == 0;
+        /* #2501: a multi-value return builds the closure's tuple. */
+        Type* closure_ret_tuple = closure_tuple_return_type(closure);
+        gen->current_func_return_type = closure_ret_tuple;
 
         // Partition captures into mutated (env-backed), promoted (heap cell
         // alias), and read-only (value alias).
@@ -4196,8 +4210,8 @@ void emit_closure_definitions(CodeGenerator* gen) {
                 if (strcmp(safe_value_name(p->value), p->value) == 0 &&
                     !is_heap_string_var(gen, p->value)) {
                     print_indent(gen);
-                    fprintf(gen->output, "int _heap_%s = 1; (void)_heap_%s;\n",
-                            p->value, p->value);
+                    fprintf(gen->output, "%s _heap_%s = 1; (void)_heap_%s;\n",
+                            try_tracker_type(gen, p->value), p->value, p->value);
                     mark_heap_string_var(gen, p->value);
                     mark_captured_string_param(gen, p->value);
                 }
@@ -4232,9 +4246,6 @@ void emit_closure_definitions(CodeGenerator* gen) {
                 else emit_struct_disown(gen, owning, cname, 1);
                 push_struct_destroy_defer(gen, cname, p->node_type, p->line, p->column);
             }
-            /* #2690: a local the body's `try` writes is declared volatile,
-             * as in a function, whichever was emitted first. */
-            mark_try_clobbered_vars(gen, body);
             hoist_heap_string_trackers(gen, body);
             mark_escaped_heap_string_vars(gen, body);
             push_heap_string_exit_free_defers(gen, body);
@@ -4281,6 +4292,7 @@ void emit_closure_definitions(CodeGenerator* gen) {
         gen->in_string_closure = 0;
         gen->current_func_return_type = NULL;
         if (closure_ret_tuple) free_type(closure_ret_tuple);
+        restore_try_clobbered_vars(gen, &outer_try_set);
 
         free(env_captures);
 
