@@ -1,0 +1,9 @@
+// A handle-returning fluent surface, the shape a UI toolkit's modifiers have:
+// each call takes the handle first and returns it, so calls chain.
+exports(mk, plus, on_each)
+mk() -> int { return 5 }
+plus(h: int, k: int) -> int { return h + k }
+on_each(h: int, cb: fn) -> int {
+    cb(h)
+    return h
+}

@@ -1,0 +1,14 @@
+import fluent
+import fluent(mk, plus, on_each)
+main() {
+    // UFCS on a stored value, the method selectively imported (#934 + the
+    // selective form): `g.plus(2)` is `fluent_plus(g, 2)`, not a bare `plus`.
+    g = mk()
+    println("${g.plus(2)}") // 7
+
+    // With a trailing callback, the shape a builder DSL chains.
+    g.on_each() callback | v: int | { println("cb ${v}") } // cb 5
+
+    // A chain on a call result after it.
+    println("${g.plus(1).plus(1)}") // 7
+}
