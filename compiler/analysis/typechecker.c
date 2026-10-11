@@ -306,6 +306,7 @@ void add_symbol(SymbolTable* table, const char* name, Type* type, int is_actor, 
 }
 
 static Symbol* lookup_symbol_in(SymbolTable* table, const char* name, const char* merged_from);
+static const char* find_import_alias(const char* name);
 
 /* The program's own top-level `var`s (no origin_module), named once per
  * typecheck_program before anything is looked up. A module's code never
@@ -369,6 +370,15 @@ static Symbol* lookup_symbol_in(SymbolTable* table, const char* name, const char
      * (aether-ui asks/aether-program-global-leaks-into-module-scope.md). */
     if (symbol && merged_from && !table->parent && symbol->walk_id == 0 &&
         !symbol->is_function && !symbol->is_actor && is_program_global_name(name))
+        return NULL;
+    /* Nor does it see the program's imports. The program's selective and
+     * glob imports bind bare names (`import std.http (server_create)`)
+     * here at file scope; a module's own imports were renamed to the
+     * prefixed name (`http_server_create`) when it was merged. So a bare
+     * name a merged body finds through the program's import is one the
+     * module never imported, and whether it built depended on which
+     * program imported the module (aeo's runner and agent disagreed). */
+    if (symbol && merged_from && !table->parent && find_import_alias(name))
         return NULL;
     if (symbol) return symbol;
 

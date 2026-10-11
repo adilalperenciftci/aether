@@ -1,0 +1,47 @@
+// A call in statement position that returns a struct owning strings, and
+// takes a fresh-string argument, is both "discarded" (its argument wrap
+// frees the temporary and used to yield `(void)_ad_r`) and kept in a
+// statement struct temporary to destroy (`_ae_stmpN = call`). The two
+// disagreed, and the C compiler rejected assigning void to the struct
+// (0.793 through 0.804). The captured call now yields its value.
+//
+// The std.spec chain `expect_str(f()).to_equal_str(g())` with a fresh `g()`
+// is the shape aeo hit.
+
+import std.string
+import std.spec
+
+struct Box {
+    v: string
+}
+
+fresh(s: string) -> string {
+    return string.concat(s, "")
+}
+
+box(s: string) -> Box {
+    return Box { v: string.concat(s, "") }
+}
+
+chk(b: Box, s: string) -> Box {
+    if string.equals(b.v, s) == 1 {
+        println("eq")
+    }
+    return b
+}
+
+main() {
+    // The ask's repro: both arguments fresh, the result thrown away.
+    chk(box(fresh("a")), fresh("a"))
+    // The result of a bound struct, then the call alone.
+    b = box(fresh("b"))
+    chk(b, fresh("b"))
+
+    fw = spec.init()
+    spec.describe(fw, "a fluent chain with fresh strings") {
+        spec.it("compares two fresh strings") callback {
+            spec.expect_str(fresh("x")).to_equal_str(fresh("x"))
+        }
+    }
+    return spec.run_summary(fw)
+}
