@@ -44,10 +44,12 @@ export AETHER_CACHE_DIR="$TMP/cache"
 unset AETHER_HOME
 printf 'main() {\n    println("probe")\n}\n' > "$TMP/p.ae"
 
-# The key a build looks up (`[cache] hit|miss: <key>` under -v).
+# The key a build looks up (`[cache] hit: <key>` or `[cache] miss: <key>`
+# under -v). awk, not a sed alternation: `\|` in a basic regex is a GNU sed
+# extension, and macOS sed matched nothing.
 key() {
     "$AE" build -v "$TMP/p.ae" -o "$TMP/p" 2>&1 |
-        sed -n 's/^\[cache\] \(hit\|miss\): \([0-9a-f][0-9a-f]*\).*/\2/p' | head -1
+        awk '$1 == "[cache]" && ($2 == "hit:" || $2 == "miss:") { print $3; exit }'
 }
 
 # A first build writes the depfile later keys are made from.
