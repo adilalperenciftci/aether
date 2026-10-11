@@ -4232,7 +4232,7 @@ static void check_unreachable_code(ASTNode* body) {
                          stmt->type == AST_RETURN_STATEMENT ? "return" :
                          (stmt->type == AST_FUNCTION_CALL ? "exit()" : "terminating block"));
                 AetherError warn = {
-                    .filename = NULL,
+                    .filename = g_tc_file,
                     .source_code = NULL,
                     .line = unreachable->line,
                     .column = unreachable->column,
@@ -5603,9 +5603,12 @@ int typecheck_program(ASTNode* program) {
     int global_var_count = 0;
     const char** global_var_names = collect_global_var_names(program, &global_var_count);
 
-    // Third pass: unused variable + unreachable code analysis
+    // Third pass: unused variable + unreachable code analysis. Its
+    // diagnostics name the file each definition came from, as the second
+    // pass's do (#2064).
     for (int i = 0; i < program->child_count; i++) {
         ASTNode* child = program->children[i];
+        g_tc_file = child->source_file;
         if ((child->type == AST_FUNCTION_DEFINITION || child->type == AST_BUILDER_FUNCTION) && child->child_count > 0) {
             ASTNode* body = child->children[child->child_count - 1];
             check_unused_variables(body, global_var_names, global_var_count);
@@ -5621,6 +5624,7 @@ int typecheck_program(ASTNode* program) {
             iso_check_function(child, main_body);  // #479 Isolated[T] move check
         }
     }
+    g_tc_file = NULL;
 
     free(global_var_names);
 
@@ -6422,7 +6426,9 @@ static void check_effect_tags(ASTNode* program) {
                 "function '%s' is declared `@no_%s` (or `@pure`) but reaches a "
                 "`%s` operation through `%s`. Remove that call path, or drop the "
                 "effect tag.", fn->value ? fn->value : "?", cap, cap, offending);
+            g_tc_file = fn->source_file;   /* #2064: the definition's own file */
             type_error(msg, fn->line, fn->column);
+            g_tc_file = NULL;
         }
     }
 }
@@ -7426,7 +7432,7 @@ static char* match_arm_key(ASTNode* p) {
 static void warn_unreachable_arm(ASTNode* pattern, const char* msg,
                                  const char* suggestion) {
     AetherError w = {
-        .filename = NULL, .source_code = NULL,
+        .filename = g_tc_file, .source_code = NULL,
         .line = pattern->line, .column = pattern->column,
         .message = msg, .suggestion = suggestion,
         .context = NULL, .code = AETHER_WARN_UNREACHABLE_ARM
@@ -9109,7 +9115,7 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                              "'%s' is already handled, so the `_` arm cannot run",
                              match_expr_type->struct_name ? match_expr_type->struct_name : "?");
                     AetherError w = {
-                        .filename = NULL, .source_code = NULL,
+                        .filename = g_tc_file, .source_code = NULL,
                         .line = sum_wildcard_line, .column = 0,
                         .message = msg,
                         .suggestion = "remove the `_` arm; adding a variant later will then be a compile error rather than silently falling through",
@@ -9134,7 +9140,7 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                              "is already handled, so the `_` arm cannot run",
                              enum_name ? enum_name : "?");
                     AetherError w = {
-                        .filename = NULL, .source_code = NULL,
+                        .filename = g_tc_file, .source_code = NULL,
                         .line = enum_wildcard_line, .column = 0,
                         .message = msg,
                         .suggestion = "remove the `_` arm; adding a member later will then be a compile error rather than silently falling through",
