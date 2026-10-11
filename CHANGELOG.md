@@ -14,6 +14,28 @@ cut while your branch is open cannot fold your entry into the released section.
 
 ## [current]
 
+## [0.805.0]
+
+### Fixed
+
+- **A module's imports are its own.** In a module, a selective import of an
+  extern-backed name (`import std.http (server_create)` for `extern
+  http_server_create`) failed with E0301, although the glob form and a
+  program file's selective import both worked; it now binds the name as they
+  do. And a program's selective or glob import no longer reaches into the
+  modules it imports: a module calling a bare `server_create` without
+  importing `std.http` built or failed depending on which program imported it
+  (aeo's runner and agent disagreed). It now fails with E0301 in every
+  program, as a qualified name already did (#2614).
+
+- **A statement call returning a struct that owns strings, with a fresh-string
+  argument, compiles again.** Since 0.793 the call was both "discarded" (its
+  argument wrap yielded `(void)_ad_r`) and kept in a statement struct
+  temporary to destroy, so the C compiler rejected assigning void to the
+  struct: `chk(box(fresh("a")), fresh("a"))`, and the std.spec chain
+  `expect_str(f()).to_equal_str(g())` with a fresh `g()`. A call the statement
+  keeps in a temporary now yields its value.
+
 ## [0.804.0]
 
 ### Fixed
