@@ -227,6 +227,33 @@ typedef struct {
     int td_arm;
     int next_td_id;
 
+    /* #2696: an unlabeled `break` leaves the innermost loop or `switch`.
+     * The switches around the statement being generated, innermost last;
+     * one is the target when it began inside the innermost loop
+     * (switch_loop_depth == loop_nest_depth). For each: the scope_depth
+     * containing it and the try_frame_depth at its entry, so a break runs
+     * the defers and pops the try frames of only what it leaves, and a C
+     * label id (__ae_brk_N, numbered with the loops' labels) for a break
+     * that cannot be a C `break`. */
+    #define AETHER_MAX_SWITCH_NEST 64
+    int switch_nest_depth;
+    int switch_loop_depth[AETHER_MAX_SWITCH_NEST];
+    int switch_scope[AETHER_MAX_SWITCH_NEST];
+    int switch_try_base[AETHER_MAX_SWITCH_NEST];
+    int switch_c_depth[AETHER_MAX_SWITCH_NEST];
+    int switch_brk_id[AETHER_MAX_SWITCH_NEST];
+    int switch_brk_used[AETHER_MAX_SWITCH_NEST];
+    /* #2696: the C statements a C `break` leaves (a loop or a `switch`)
+     * open around the code being generated. A break is a C `break` only
+     * when its target's own C statement is the innermost of them
+     * (loop_c_depth / switch_c_depth equal to this); otherwise a C statement
+     * the target did not emit stands between (a sum `match` lowers to a C
+     * `switch`) or the target emitted none (a ranged `switch` lowers to an
+     * if-chain, switch_c_depth -1), and the break jumps to the target's
+     * __ae_brk_N label instead. */
+    int c_break_depth;
+    int loop_c_depth[AETHER_MAX_LOOP_NEST];
+
     // try-clobbered locals: variable names modified inside any try
     // body of the current function.  Such locals — when declared
     // in an enclosing scope of the try — must be lowered as

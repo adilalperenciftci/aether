@@ -1015,7 +1015,7 @@ outer: while have_more() {
 - The label sits before the loop keyword (`outer: while`, `scan: for`). It must be on the same line as the `break` / `continue` that references it.
 - A `break label` / `continue label` whose label names no enclosing loop is a compile-time error.
 - Defers in the loop scopes a labeled break/continue unwinds still run (in LIFO order) before the jump, the same cleanup guarantee as an ordinary scope exit.
-- Unlabeled `break` / `continue` are unchanged and act on the innermost loop.
+- An unlabeled `break` leaves the innermost loop or [`switch`](#switch-statements), whichever is nearer (a `match` is neither, so a `break` in an arm leaves what is around the `match`); an unlabeled `continue` acts on the innermost loop.
 
 ---
 
@@ -1153,6 +1153,34 @@ default:            kind = "other";
 A comma-list case lowers to several C `case` labels sharing one body; a `switch`
 containing any ranged case is lowered to an equivalent if-else chain (safe
 because there is no fall-through to preserve).
+
+A `break` in a case leaves the `switch`, and nothing more, whichever of the two
+forms it lowers to: inside a loop, the loop goes on with the statement after the
+`switch`. On its way out it runs the defers of the scopes it leaves inside the
+case, not those of the loop body around the `switch`. A `break` in a `match`
+arm leaves the `switch` or loop around the `match`. `continue` goes on to the
+loop's next iteration, and `break label` leaves the loop it names. Each case is
+a scope of its own, as an `if` branch is: a `defer` in it runs when the case
+ends, and only when the case ran.
+
+```aether,run
+main() {
+    hits = 0
+    i = 0
+    while i < 5 {
+        i = i + 1
+        switch i {
+        case 2..=3: break        // leaves the switch; the loop goes on
+        default:    hits = hits + 1
+        }
+        hits = hits + 10
+    }
+    println(hits)
+}
+```
+```output
+53
+```
 
 Alternatives are the comma-list, in `switch` and `match` alike. A `|` between
 values is the bitwise OR — `1 | 2 | 3` is the number 3 — so the compiler

@@ -1,0 +1,300 @@
+// Regression (#2696): an unlabeled `break` in a `switch` case leaves the
+// switch, in whichever form the switch lowers to. A switch with a ranged case
+// (`case 1..=5:`) lowers to an if-chain, where the C `break` left the loop
+// around it instead; a switch of plain cases lowers to a C switch, where the
+// break left the switch but first ran the defers of the loop body it does not
+// leave. A `break` in an arm of a `match` on a sum type, which lowers to a C
+// switch of its own, left that switch and not the loop. Each function below
+// counts what ran; before the fix the ranged loop ran once instead of three
+// times, the body defer ran twice on one iteration, the sum match loop ran to
+// its limit, a `defer` written in a case ran at the end of the loop body on
+// iterations that never entered the case, a break that left a switch inside
+// a `try` popped that try's frame, which the try body popped again (the
+// program aborted: "aether_try_pop on empty stack"), `ranged_break_stays`
+// (which the missing-return check accepts because the break leaves only the
+// switch) fell off its end, and a break in a ranged switch outside any loop
+// did not compile.
+import std.string
+
+extern exit(code: int)
+
+struct Circle {
+    r: int
+}
+
+struct Square {
+    s: int
+}
+
+type Shape = Circle | Square
+
+var bad = 0
+var defers = 0
+var case_defers = 0
+
+check(label: string, got: int, want: int) {
+    if got != want {
+        println("FAIL ${label}: got ${got}, want ${want}")
+        bad = bad + 1
+    }
+}
+
+// The same loop with a plain and a ranged case: both break out of the
+// switch only, so both see every iteration.
+plain_break() -> int {
+    seen = 0
+    i = 0
+    while i < 3 {
+        i = i + 1
+        switch i {
+            case 2: break
+            default: seen = seen + 1
+        }
+        seen = seen + 10
+    }
+    return seen
+}
+
+ranged_break() -> int {
+    seen = 0
+    i = 0
+    while i < 3 {
+        i = i + 1
+        switch i {
+            case 2..=2: break
+            default: seen = seen + 1
+        }
+        seen = seen + 10
+    }
+    return seen
+}
+
+// The loop body's defer runs once per iteration, when the body ends, not
+// also at a break that leaves only the switch.
+body_defer_plain() -> int {
+    defers = 0
+    i = 0
+    while i < 2 {
+        i = i + 1
+        defer defers = defers + 1
+        switch i {
+            case 1: {
+                break
+            }
+            default: i = i + 0
+        }
+    }
+    return defers
+}
+
+body_defer_ranged() -> int {
+    defers = 0
+    i = 0
+    while i < 2 {
+        i = i + 1
+        defer defers = defers + 1
+        switch i {
+            case 1..=1: {
+                break
+            }
+            default: i = i + 0
+        }
+    }
+    return defers
+}
+
+// A case is a scope of its own: its defer runs when it ends, and only on the
+// iterations that entered it.
+case_defer() -> int {
+    case_defers = 0
+    i = 0
+    while i < 3 {
+        i = i + 1
+        switch i {
+            case 1: defer case_defers = case_defers + 100
+            default: case_defers = case_defers + 1
+        }
+    }
+    return case_defers
+}
+
+// A match on a sum lowers to a C switch: a break in an arm still leaves the
+// loop (or switch) around the match.
+sum_break_in_loop(s: Shape) -> int {
+    n = 0
+    while n < 5 {
+        n = n + 1
+        match s {
+            Circle -> { break }
+            Square -> { n = n + 0 }
+        }
+    }
+    return n
+}
+
+sum_break_in_switch(s: Shape, x: int) -> int {
+    got = 0
+    switch x {
+        case 1: {
+            match s {
+                Circle -> { break }
+                Square -> { got = 5 }
+            }
+            got = got + 100
+        }
+        default: got = 7
+    }
+    return got
+}
+
+// A break that leaves a switch inside a try leaves the try frame alone: the
+// try body still ends and pops it. A break inside a try inside the switch
+// pops that try's frame. Either way the frames balance, and a later panic is
+// caught.
+switch_in_try() -> int {
+    n = 0
+    i = 0
+    while i < 40 {
+        i = i + 1
+        try {
+            switch i % 2 {
+                case 0: break
+                default: n = n + 1
+            }
+            n = n + 10
+        } catch e {
+            n = n + 1000
+        }
+    }
+    try {
+        panic("after")
+    } catch e {
+        n = n + 100000
+    }
+    return n
+}
+
+try_in_switch() -> int {
+    n = 0
+    i = 0
+    while i < 40 {
+        i = i + 1
+        switch i % 2 {
+            case 0: {
+                try {
+                    n = n + 1
+                    break
+                } catch e {
+                    n = n + 1000
+                }
+            }
+            default: n = n + 0
+        }
+    }
+    try {
+        panic("after")
+    } catch e {
+        n = n + 100000
+    }
+    return n
+}
+
+// With no loop around it, a break in a ranged case still leaves the switch.
+no_loop(x: int) -> int {
+    r = 0
+    switch x {
+        case 0..<10: {
+            r = 1
+            if x > 4 {
+                break
+            }
+            r = 2
+        }
+        default: r = 3
+    }
+    return r
+}
+
+// A labeled break leaves the loop it names; continue continues the loop.
+labeled(limit: int) -> int {
+    count = 0
+    outer: while count < limit {
+        count = count + 1
+        switch count {
+            case 3..=5: break outer
+            default: count = count + 0
+        }
+    }
+    return count
+}
+
+cont() -> int {
+    hits = 0
+    i = 0
+    while i < 4 {
+        i = i + 1
+        switch i {
+            case 2..=3: continue
+            default: hits = hits + 1
+        }
+        hits = hits + 10
+    }
+    return hits
+}
+
+// A loop inside a case is what its break leaves.
+loop_in_case(x: int) -> int {
+    r = 0
+    switch x {
+        case 1..=9: {
+            while true {
+                r = r + 1
+                if r == 3 {
+                    break
+                }
+            }
+            r = r + 10
+        }
+        default: r = 99
+    }
+    return r
+}
+
+// The missing-return check takes the break as leaving the switch, so the
+// `while true` cannot end and the function needs no return after it. Code
+// that left the loop instead fell off the end of the function.
+ranged_break_stays(n: int) -> int {
+    i = 0
+    while true {
+        i = i + 1
+        switch i {
+            case 1..=2: break
+            default: return i * 10 + n
+        }
+    }
+}
+
+main() {
+    check("plain break", plain_break(), 32)
+    check("ranged break", ranged_break(), 32)
+    check("body defer, plain", body_defer_plain(), 2)
+    check("body defer, ranged", body_defer_ranged(), 2)
+    check("case defer", case_defer(), 102)
+    check("sum match break in loop", sum_break_in_loop(Circle { r: 1 }), 1)
+    check("sum match break in switch", sum_break_in_switch(Circle { r: 1 }, 1), 0)
+    check("sum match no break", sum_break_in_switch(Square { s: 1 }, 1), 105)
+    check("switch in try", switch_in_try(), 100420)
+    check("try in switch", try_in_switch(), 100020)
+    check("no loop, early", no_loop(7), 1)
+    check("no loop, through", no_loop(2), 2)
+    check("no loop, default", no_loop(20), 3)
+    check("labeled break", labeled(10), 3)
+    check("continue", cont(), 22)
+    check("loop in case", loop_in_case(5), 13)
+    check("break stays in loop", ranged_break_stays(4), 34)
+    if bad != 0 {
+        println("${bad} check(s) failed")
+        exit(1)
+    }
+    println("break leaves the switch: ok")
+}

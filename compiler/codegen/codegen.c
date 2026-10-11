@@ -619,6 +619,10 @@ CodeGenerator* create_code_generator(FILE* output) {
     gen->td_id = 0;
     gen->td_arm = -1;
     gen->next_td_id = 0;
+    /* #2696: break targets */
+    gen->switch_nest_depth = 0;
+    gen->c_break_depth = 0;
+    memset(gen->loop_c_depth, 0, sizeof(gen->loop_c_depth));
     // Issue #501 follow-up: try-clobbered locals tracking
     gen->try_clobbered_vars = NULL;
     gen->try_clobbered_var_count = 0;

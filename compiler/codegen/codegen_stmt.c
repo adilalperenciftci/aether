@@ -10455,6 +10455,51 @@ static int find_labeled_loop_level(CodeGenerator* gen, const char* name) {
     return -1;
 }
 
+/* #2696: enters a `switch` as the target of the unlabeled breaks in its
+ * cases. Its C statement, if it lowers to one, sets switch_c_depth once
+ * opened; an if-chain leaves it -1. Returns its level, or -1 past
+ * AETHER_MAX_SWITCH_NEST. */
+static int switch_target_push(CodeGenerator* gen) {
+    if (gen->switch_nest_depth >= AETHER_MAX_SWITCH_NEST) return -1;
+    int lvl = gen->switch_nest_depth++;
+    gen->switch_loop_depth[lvl] = gen->loop_nest_depth;
+    gen->switch_scope[lvl] = gen->scope_depth;
+    gen->switch_try_base[lvl] = gen->try_frame_depth;
+    gen->switch_c_depth[lvl] = -1;
+    gen->switch_brk_id[lvl] = gen->next_loop_label_id++;
+    gen->switch_brk_used[lvl] = 0;
+    return lvl;
+}
+
+/* Leaves the switch at `lvl`, after its last line: where a break that
+ * could not be a C `break` jumps. */
+static void switch_target_pop(CodeGenerator* gen, int lvl) {
+    if (lvl < 0) return;
+    if (gen->switch_brk_used[lvl]) print_line(gen, "__ae_brk_%d: ;", gen->switch_brk_id[lvl]);
+    gen->switch_nest_depth = lvl;
+}
+
+/* The switch an unlabeled `break` leaves, as its level, or -1 when it
+ * leaves the innermost loop: the innermost switch is nearer when it began
+ * inside that loop. */
+static int break_switch_target(CodeGenerator* gen) {
+    int top = gen->switch_nest_depth - 1;
+    if (top >= 0 && gen->switch_loop_depth[top] == gen->loop_nest_depth) return top;
+    return -1;
+}
+
+/* The statements of switch case `c` from `first` (a `case` holds its
+ * selector first): a scope of their own, as an `if` branch is, so a `defer`
+ * in them runs when the case ends, only when it ran, and a name they bind
+ * first is theirs (#2696). The caller emits the C braces. */
+static void emit_case_body(CodeGenerator* gen, ASTNode* c, int first) {
+    int saved_var_count = gen->declared_var_count;
+    enter_scope(gen);
+    for (int i = first; i < c->child_count; i++) generate_statement(gen, c->children[i]);
+    exit_scope(gen);
+    truncate_declared_vars(gen, saved_var_count);
+}
+
 // #340: emit `value` coerced to the optional type `target`. A bare value of
 // the inner type is implicitly wrapped (`{.has=1, .val=value}`); `none`
 // becomes `{0}`; an expression already of optional type passes through. Used
@@ -13244,12 +13289,15 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                 gen->loop_label_id[for_lbl_idx] = gen->next_loop_label_id++;
                 gen->loop_label_break_used[for_lbl_idx] = 0;
                 gen->loop_label_continue_used[for_lbl_idx] = 0;
+                gen->loop_c_depth[for_lbl_idx] = gen->c_break_depth + 1;
                 gen->loop_nest_depth++;
             }
+            gen->c_break_depth++;
             if (stmt->child_count > 3 && stmt->children[3]) {
                 // Body is always a statement (could be a block or single statement)
                 generate_statement(gen, stmt->children[3]); // body
             }
+            gen->c_break_depth--;
             if (gen->loop_nest_depth > 0) gen->loop_nest_depth--;
             /* #893: labeled-continue target — end of the body, so falling
              * through runs the C `for`'s increment then re-tests the condition. */
@@ -13260,9 +13308,9 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
             unindent(gen);
 
             print_line(gen, "}");
-            /* #893: labeled-break target — after the loop. */
-            if (for_lbl_idx >= 0 && gen->loop_label[for_lbl_idx] &&
-                gen->loop_label_break_used[for_lbl_idx]) {
+            /* #893: the break target, after the loop, for a labeled break or
+             * one a C `break` cannot express (#2696). */
+            if (for_lbl_idx >= 0 && gen->loop_label_break_used[for_lbl_idx]) {
                 print_line(gen, "__ae_brk_%d: ;", gen->loop_label_id[for_lbl_idx]);
             }
             truncate_declared_vars(gen, saved_var_count);
@@ -13333,8 +13381,10 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                 gen->loop_label_continue_used[while_lbl_idx] = 0;
                 gen->loop_td_id[while_lbl_idx] = td_id;
                 gen->loop_td_node[while_lbl_idx] = td_id ? stmt : NULL;
+                gen->loop_c_depth[while_lbl_idx] = gen->c_break_depth + 1;
                 gen->loop_nest_depth++;
             }
+            gen->c_break_depth++;
             ASTNode* saved_td_switch = gen->td_switch;
             int saved_td_id = gen->td_id;
             int saved_in_head = g_td_in_head;
@@ -13355,6 +13405,7 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                 gen->loop_td_id[while_lbl_idx] = 0;
                 gen->loop_td_node[while_lbl_idx] = NULL;
             }
+            gen->c_break_depth--;
             if (gen->loop_nest_depth > 0) gen->loop_nest_depth--;
             /* #893: labeled-continue target — end of the loop body, after the
              * body's scope-exit defers, so the loop re-tests the condition. */
@@ -13366,9 +13417,9 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
 
             print_line(gen, "}");
 
-            /* #893: labeled-break target — after the loop. */
-            if (while_lbl_idx >= 0 && gen->loop_label[while_lbl_idx] &&
-                gen->loop_label_break_used[while_lbl_idx]) {
+            /* #893: the break target, after the loop, for a labeled break or
+             * one a C `break` cannot express (#2696). */
+            if (while_lbl_idx >= 0 && gen->loop_label_break_used[while_lbl_idx]) {
                 print_line(gen, "__ae_brk_%d: ;", gen->loop_label_id[while_lbl_idx]);
             }
             /* #2378: where a threaded continue lands when the --emit=lib
@@ -13468,6 +13519,9 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                     print_indent(gen);
                     fprintf(gen->output, "switch (_sm%d.tag) {\n", id);
                     indent(gen);
+                    /* #2696: a `break` in an arm leaves the loop or switch
+                     * around the match, not this C switch. */
+                    gen->c_break_depth++;
                     for (int i = 1; i < stmt->child_count; i++) {
                         ASTNode* arm = stmt->children[i];
                         if (!arm || arm->type != AST_MATCH_ARM || arm->child_count < 2) continue;
@@ -13503,6 +13557,7 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                         unindent(gen);
                         print_line(gen, "}");
                     }
+                    gen->c_break_depth--;
                     unindent(gen);
                     print_line(gen, "}");
                     unindent(gen);
@@ -13685,6 +13740,10 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                     selector_has_range(c->children[0])) { needs_chain = 1; break; }
             }
 
+            /* #2696: an unlabeled `break` in a case leaves the switch, in
+             * whichever form it lowers to. */
+            int sw_lvl = switch_target_push(gen);
+
             if (!needs_chain && stmt == gen->td_switch && gen->td_id && stmt->child_count > 0) {
                 /* #2378: the dispatch switch of a threaded loop. The selector
                  * goes through _ae_td_sel_N so a continue whose value has no
@@ -13710,13 +13769,17 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                 fprintf(gen->output, ") {\n");
                 print_line(gen, "#endif");
                 indent(gen);
+                gen->c_break_depth++;
+                if (sw_lvl >= 0) gen->switch_c_depth[sw_lvl] = gen->c_break_depth;
                 for (int i = 1; i < stmt->child_count; i++) {
                     gen->td_arm = i;
                     generate_statement(gen, stmt->children[i]);
                 }
+                gen->c_break_depth--;
                 gen->td_arm = -1;
                 unindent(gen);
                 print_line(gen, "}");
+                switch_target_pop(gen, sw_lvl);
                 break;
             }
 
@@ -13727,15 +13790,20 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                 if (stmt->child_count > 0) generate_expression(gen, stmt->children[0]);
                 fprintf(gen->output, ") {\n");
                 indent(gen);
+                gen->c_break_depth++;
+                if (sw_lvl >= 0) gen->switch_c_depth[sw_lvl] = gen->c_break_depth;
                 for (int i = 1; i < stmt->child_count; i++)
                     generate_statement(gen, stmt->children[i]);
+                gen->c_break_depth--;
                 unindent(gen);
                 print_line(gen, "}");
                 gen->td_arm = saved_td_arm;
+                switch_target_pop(gen, sw_lvl);
                 break;
             }
 
-            // Ranged switch -> if-else chain.
+            // Ranged switch -> if-else chain. No C statement a `break` leaves:
+            // one that leaves the switch jumps past the chain (#2696).
             ASTNode* sexpr = stmt->child_count > 0 ? stmt->children[0] : NULL;
             int is_str = sexpr && sexpr->node_type && sexpr->node_type->kind == TYPE_STRING;
             print_line(gen, "{");
@@ -13758,7 +13826,7 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                 emit_selector_condition(gen, c->children[0], "_switch_val", is_str);
                 fprintf(gen->output, ") {\n");
                 indent(gen);
-                for (int j = 1; j < c->child_count; j++) generate_statement(gen, c->children[j]);
+                emit_case_body(gen, c, 1);
                 unindent(gen);
                 print_line(gen, "}");
                 emitted = 1;
@@ -13767,13 +13835,13 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                 print_indent(gen);
                 fprintf(gen->output, emitted ? "else {\n" : "{\n");
                 indent(gen);
-                for (int j = 0; j < default_case->child_count; j++)
-                    generate_statement(gen, default_case->children[j]);
+                emit_case_body(gen, default_case, 0);
                 unindent(gen);
                 print_line(gen, "}");
             }
             unindent(gen);
             print_line(gen, "}");
+            switch_target_pop(gen, sw_lvl);
             break;
         }
             
@@ -13814,9 +13882,11 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
             indent(gen);
             // Generate all statements in the case block (skip first child which is the case value)
             int start_idx = is_default ? 0 : 1;
-            for (int i = start_idx; i < stmt->child_count; i++) {
-                generate_statement(gen, stmt->children[i]);
-            }
+            print_line(gen, "{");
+            indent(gen);
+            emit_case_body(gen, stmt, start_idx);
+            unindent(gen);
+            print_line(gen, "}");
             // Auto-insert `break` unless the case ends with its own
             // control-flow exit. Aether's `switch` has no
             // fallthrough — that's the surprising-default-everyone-
@@ -14312,6 +14382,24 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                 }
                 gen->loop_label_break_used[lvl] = 1;
                 print_line(gen, "goto __ae_brk_%d;", gen->loop_label_id[lvl]);
+            } else if ((lvl = break_switch_target(gen)) >= 0) {
+                /* #2696: the break leaves the innermost switch, and only it:
+                 * the scopes inside the switch run their defers and the try
+                 * frames pushed inside it are popped, not those of the loop
+                 * body around it. A C `break` reaches the end of the switch
+                 * only when the switch is the innermost C statement it
+                 * leaves; from an if-chain, or through a sum match's C
+                 * switch, it jumps there. */
+                if (gen->scope_depth > gen->switch_scope[lvl])
+                    emit_defers_through_scope(gen, gen->switch_scope[lvl]);
+                for (int i = gen->switch_try_base[lvl]; i < gen->try_frame_depth; i++)
+                    print_line(gen, "aether_try_pop();");
+                if (gen->switch_c_depth[lvl] == gen->c_break_depth) {
+                    print_line(gen, "break;");
+                } else {
+                    gen->switch_brk_used[lvl] = 1;
+                    print_line(gen, "goto __ae_brk_%d;", gen->switch_brk_id[lvl]);
+                }
             } else {
                 /* Unwind every scope nested inside the innermost loop,
                  * not just the current one: a `break` inside an `if` (or
@@ -14319,15 +14407,23 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                  * scopes too, and their defers -- a trailing block's
                  * builder-context pop among them -- must run. Same rule
                  * as the labeled form above. */
-                if (gen->loop_nest_depth > 0)
-                    emit_defers_through_scope(gen, gen->loop_label_scope[gen->loop_nest_depth - 1]);
+                int top = gen->loop_nest_depth - 1;
+                if (top >= 0)
+                    emit_defers_through_scope(gen, gen->loop_label_scope[top]);
                 else
                     emit_defers_for_scope(gen);
                 /* Issue #501: drain try frames pushed inside the current
                  * loop body so `break` from inside a try { } in a loop
                  * doesn't leak the panic frame. */
                 emit_try_pops_for_break_continue(gen);
-                print_line(gen, "break;");
+                /* #2696: through a sum match's C switch, a C `break` would
+                 * leave that switch, not the loop. */
+                if (top >= 0 && gen->loop_c_depth[top] != gen->c_break_depth) {
+                    gen->loop_label_break_used[top] = 1;
+                    print_line(gen, "goto __ae_brk_%d;", gen->loop_label_id[top]);
+                } else {
+                    print_line(gen, "break;");
+                }
             }
             break;
         }

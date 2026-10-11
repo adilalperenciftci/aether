@@ -221,6 +221,14 @@ closure_arrow_if() -> int {
     return call(h, 1)
 }
 
+// A break in a ranged case leaves the switch, as in a plain one (#2696).
+ranged_switch_break(n: int) -> int {
+    switch n {
+        case 1..=5: break
+        default: return 0
+    }
+}
+
 main() {
     println("checked, not run")
 }

@@ -64,8 +64,9 @@ expect "'arrow_if'" 187
 expect "a closure" 194
 expect "a closure" 207
 expect "a closure" 220
+expect "'ranged_switch_break'" 230
 
-want=26
+want=27
 got=$(grep -c "E0700" "$log")
 if [ "$got" -ne "$want" ]; then
     echo "  [FAIL] missing_return: $got E0700 errors, want $want"
@@ -85,6 +86,7 @@ for why in "\`msg\` on line 17 is not returned" \
            "the \`break\` on line 76 leaves the loop on line 74" \
            "the \`break\` on line 86 leaves the loop on line 83" \
            "the \`switch\` on line 102 has no \`default\`" \
+           "the \`break\` on line 227 leaves the \`switch\` on line 226" \
            "the body is empty"; do
     if ! grep -qF "$why" "$log"; then
         echo "  [FAIL] missing_return: no help saying: $why"
@@ -96,5 +98,5 @@ if [ "$fail" -ne 0 ]; then
     sed 's/^/        /' "$log" | head -60
     exit 1
 fi
-echo "  [PASS] missing_return: 26 shapes that fall off their end rejected at their closing brace"
+echo "  [PASS] missing_return: 27 shapes that fall off their end rejected at their closing brace"
 exit 0
