@@ -892,9 +892,18 @@ clamp(x, lo, hi) -> {
 
 This allows complex logic in arrow-style functions without switching to block syntax.
 
-The last statement is the result only when it has a value: an expression, a `match`, or a declaration (`-> { x = a + b }` returns `a + b`). An `if`, a loop, a `switch`, a `try`, a `defer` or a `panic` there is a statement like any other, so a body ending in one has to `return` on every path its own way: `-> { if x > 0 { return 1 } }` is a [missing return](#returning-on-every-path-e0700) when `x` is not positive. A call of a function that returns nothing (`println(...)`, or one of the program's with no result) has no value either: with such a `note`, `-> { note(x) }` and `-> note(x)` end with the call and return nothing.
+The last statement is the result only when it has a value: an expression, other than a call of a function that returns nothing, or a `match` one of whose arms gives a value. Any other statement there is a statement like any other, and the body ends with it:
 
-A closure's arrow body follows the same rule: `|x| -> { y = x * 2; y + 1 }` returns `y + 1`, as `|x| -> x * 2` returns `x * 2`. A closure with a plain block body, `|x| { ... }`, returns only what it `return`s.
+- An `if`, a loop, a `switch`, a `try`, a `defer` or a `panic`. A body ending in one has to `return` on every path its own way: `-> { if x > 0 { return 1 } }` is a [missing return](#returning-on-every-path-e0700) when `x` is not positive.
+- A binding or a store: `x = v`, whether it declares `x` or assigns an existing one, `x += v`, `p.n = v`, `xs[i] = v`, `a, b = f()`. With a global `var hits = 0`, `bump() -> { hits = hits + 1 }` stores and returns nothing, and so does `-> { label = "n=${n}" }`, which binds a local nobody reads. The single expression form is the same: `store(p: *P, v: int) -> p.n = v` stores.
+- A send, `a ! M { ... }`, which has no value.
+- A call of a function that returns nothing (`println(...)`, or one of the program's with no result): with such a `note`, `-> { note(x) }` and `-> note(x)` end with the call and return nothing. So does a `match` all of whose arms end in such a call or in a statement, `-> { match x { 1 -> note(1)  _ -> note(0) } }`.
+
+Whether a function returns nothing is settled for the whole program before any body is checked, so it does not depend on the order the functions are defined in: `f(x) -> { g(x) }` returns nothing when `g(x) -> { note(x) }` does, wherever `g` is.
+
+A `return` written out follows the same rule. `return note(x)`, where `note` returns nothing, is the call, then a `return` of nothing, as `-> note(x)` is: it fits a function or a closure that returns nothing. In one that returns a value on another path it has nothing to give back, and is an error naming the call.
+
+A closure's arrow body follows the same rule: `|x| -> { y = x * 2; y + 1 }` returns `y + 1`, as `|x| -> x * 2` returns `x * 2`, and `|| -> { count = count + 1 }` stores into the captured `count` and returns nothing. A closure with a plain block body, `|x| { ... }`, returns only what it `return`s.
 
 ### Multi-parameter Guards
 
@@ -1546,7 +1555,7 @@ main() {
 1 20
 ```
 
-A parenthesised arrow body is still an expression: `sum(a: int, b: int) -> (a + b)` returns `a + b`. The group is a return type when it parses as one and the `{` body (or a `requires` / `ensures` clause) follows it.
+A parenthesised arrow body is still an expression: `sum(a: int, b: int) -> (a + b)` returns `a + b`. The group is a return type when it parses as one and the `{` body (or a `requires` / `ensures` clause) follows it. A dotted name after `->` is read the same way: it is a return type, as in `-> geo.Point { ... }`, when the `{` body, a `requires` / `ensures` clause or a type suffix (`?`, `!`, `[`) follows it, and otherwise an expression body, so `get(p: *P) -> p.n` returns the field and `store(p: *P, v: int) -> p.n = v` stores it.
 
 Error propagation across function boundaries works correctly:
 

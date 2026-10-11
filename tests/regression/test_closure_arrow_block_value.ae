@@ -8,6 +8,14 @@
 // nothing is not one either, so `-> { note(x) }` and `-> note(x)`, for a
 // function or a closure, end with the call and return nothing (they emitted
 // a C return of a void value).
+//
+// A binding or a store last is a statement too (#2735): `|| -> { count =
+// count + 1 }` returned the sum and never stored it, `|| -> { a += 3 }`
+// emitted `return +=3;`, a new string local last did not compile into the
+// int result, and `|n| -> total = total + n` lost its store. A `match` last
+// is a value only when an arm gives one: one whose arms all call functions
+// that return nothing is a statement (it emitted a C return of a void
+// value).
 import std.string
 
 extern exit(code: int)
@@ -51,10 +59,6 @@ main() {
         y
     }
     check("local then name", sq(5), 25)
-
-    // A declaration last returns what it binds.
-    dbl = | x: int | -> { _y = x * 2 }
-    check("declaration", dbl(4), 8)
 
     sign = | x: int | -> {
         match x {
@@ -111,6 +115,55 @@ main() {
     note_block(5)
     note_expr(6)
     check("function arrow calls", noted, 18)
+
+    // An assignment last is a statement: the closure stores (#2735).
+    count = 0
+    bump = || -> { count = count + 1 }
+    bump()
+    bump()
+    check("assignment last", count, 2)
+
+    total = 0
+    add = | n: int | -> { total = total + n }
+    add(3)
+    add(4)
+    check("assignment of a parameter last", total, 7)
+
+    a = 0
+    inc_a = || -> { a += 3 }
+    inc_a()
+    inc_a()
+    check("compound assignment last", a, 6)
+
+    sum = 0
+    add_expr = | n: int | -> sum = sum + n
+    add_expr(5)
+    add_expr(6)
+    check("assignment as the expression", sum, 11)
+
+    // A new local last is a statement: the closure binds it and returns
+    // nothing.
+    seen = 0
+    tag = | n: int | -> {
+        seen = seen + n
+        _label = "b=${n}"
+    }
+    tag(2)
+    tag(5)
+    check("declaration last", seen, 7)
+
+    // A match whose arms call functions that return nothing is a
+    // statement: the closure runs the arm.
+    noted = 0
+    pick = | x: int | -> {
+        match x {
+            1 -> note(11)
+            _ -> note(10)
+        }
+    }
+    pick(1)
+    pick(5)
+    check("match of calls that return nothing", noted, 21)
 
     if bad != 0 {
         println("${bad} check(s) failed")

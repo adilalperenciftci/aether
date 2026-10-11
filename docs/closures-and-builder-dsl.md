@@ -90,6 +90,13 @@ scaled = |x: int| -> {
     y + 1
 }
 
+// An arrow body that ends in a statement returns nothing: an assignment
+// (`count = count + 1`, `count += 1`, a new local), a call of a function
+// that returns nothing, or a `match` whose arms all end in one. This one
+// stores into the captured `count`.
+count = 0
+bump = || -> { count = count + 1 }
+
 // Block closure (multiple statements; returns only what it `return`s)
 greeter = |name: string| {
     println("Hello ${name}")

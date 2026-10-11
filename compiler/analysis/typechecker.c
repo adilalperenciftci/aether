@@ -1903,6 +1903,10 @@ static int is_const_struct_literal(ASTNode* e, SymbolTable* table) {
  * variable-declaration arm, which appears earlier in this file. */
 static int call_yields_no_value(ASTNode* call, SymbolTable* table);
 static int fn_yields_no_value(ASTNode* fn);
+/* #2697, #2733, #2736: which `return`s have a value; defined beside
+ * fn_yields_no_value. */
+static void tc_yields_settle(ASTNode* program, SymbolTable* global);
+static int tc_return_settle(ASTNode* ret, SymbolTable* table);
 
 // Type compatibility functions
 /* A `fn` with no signature: nothing known about parameters or result. */
@@ -4331,6 +4335,10 @@ static Type* g_tc_return_type = NULL;
 /* #2186: the body of the function (or main) being checked -- codegen's
  * hoist_scope_body, over which a hoisted local's type is joined. */
 static ASTNode* g_tc_fn_body = NULL;
+
+/* #2733: what the `return`s being checked return from: the function, main
+ * or closure whose body holds them. */
+static ASTNode* g_tc_return_owner = NULL;
 static void declare_if_branch_hoists(ASTNode* body, SymbolTable* table);
 
 
@@ -5529,6 +5537,11 @@ int typecheck_program(ASTNode* program) {
         free((void*)glob_names);
     }
 
+    /* #2736: which of the program's functions return a value, settled
+     * before any body is checked or inferred, so it does not depend on the
+     * order they are defined in. */
+    tc_yields_settle(program, global_table);
+
     // NEW: Run type inference before type checking
     if (!infer_all_types(program, global_table)) {
         free_symbol_table(global_table);
@@ -5719,12 +5732,15 @@ int typecheck_node(ASTNode* node, SymbolTable* table) {
             /* main's own scope, under the program table, like a function's,
              * so the locals codegen hoists to main's top have one (#2186). */
             ASTNode* saved_fn_body = g_tc_fn_body;
+            ASTNode* saved_owner = g_tc_return_owner;
             g_tc_fn_body = node->child_count > 0 ? node->children[0] : NULL;
+            g_tc_return_owner = node;
             SymbolTable* main_table = create_symbol_table(table);
             if (g_tc_fn_body) declare_if_branch_hoists(g_tc_fn_body, main_table);
             int ok = typecheck_statement(node, main_table);
             free_symbol_table(main_table);
             g_tc_fn_body = saved_fn_body;
+            g_tc_return_owner = saved_owner;
             return ok;
         }
         case AST_CLOSURE:
@@ -7104,10 +7120,13 @@ int typecheck_function_definition(ASTNode* func, SymbolTable* table) {
     Type* saved_ret = g_tc_return_type;
     g_tc_return_type = func->node_type;
     ASTNode* saved_fn_body = g_tc_fn_body;
+    ASTNode* saved_owner = g_tc_return_owner;
     g_tc_fn_body = body;
+    g_tc_return_owner = func;
     declare_if_branch_hoists(body, func_table);   /* #2186 */
     typecheck_statement(body, func_table);
     g_tc_fn_body = saved_fn_body;
+    g_tc_return_owner = saved_owner;
     g_tc_return_type = saved_ret;
 
     /* #1140: `defer try` / `defer catch` only mean something in a function that
@@ -9253,21 +9272,14 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                 else
                     typecheck_expression(stmt->children[i], table);
             }
-            /* #2697: an arrow body returns its last expression only when it
-             * has a value (#2694), and a call of a function that returns
-             * nothing has none, a builtin's (`println`) or the program's:
-             * `-> { note(x) }` ends with the call, as `{ note(x) }` does.
-             * The parser marked the return it wrote. */
-            if (stmt->annotation && strcmp(stmt->annotation, "arrow_value") == 0 &&
-                stmt->child_count == 1 && stmt->children[0] &&
-                stmt->children[0]->type == AST_FUNCTION_CALL &&
-                ((stmt->children[0]->node_type &&
-                  stmt->children[0]->node_type->kind == TYPE_VOID) ||
-                 call_yields_no_value(stmt->children[0], table))) {
-                stmt->type = AST_EXPRESSION_STATEMENT;
-                free(stmt->annotation);
-                stmt->annotation = NULL;
-                return 1;
+            /* #2697, #2733: a return of something with no value, a call of
+             * a function that returns nothing or a `match` whose arms give
+             * none, is that statement. */
+            if (stmt->child_count == 1 && stmt->children[0] &&
+                (stmt->children[0]->type == AST_FUNCTION_CALL ||
+                 stmt->children[0]->type == AST_MATCH_STATEMENT)) {
+                int settled = tc_return_settle(stmt, table);
+                if (settled >= 0) return settled;
             }
             /* #1286: `return arr` from a `-> T[]` function returns a slice. */
             if (stmt->child_count == 1 && g_tc_return_type)
@@ -10038,7 +10050,12 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
              * type, and stamp an erased `call` in return position (#2054)
              * with a type that belongs to the outer function. */
             Type* enclosing_ret = g_tc_return_type;
+            ASTNode* enclosing_owner = g_tc_return_owner;
             g_tc_return_type = NULL;
+            /* A call's trailing block runs inline: a `return` in it returns
+             * from the function it is written in. */
+            if (!(expr->value && strcmp(expr->value, "trailing") == 0))
+                g_tc_return_owner = expr;
             for (int i = 0; i < expr->child_count; i++) {
                 ASTNode* child = expr->children[i];
                 if (child && child->type == AST_BLOCK) {
@@ -10048,6 +10065,7 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                 }
             }
             g_tc_return_type = enclosing_ret;
+            g_tc_return_owner = enclosing_owner;
 
             free_symbol_table(closure_scope);
 
@@ -11174,10 +11192,294 @@ static const TcClauses* tc_clauses_of(ASTNode* fn) {
     return NULL;
 }
 
+/* ---- Which `return`s have a value (#2697, #2733, #2735, #2736) ----------
+ *
+ * A `return` gives its caller a value only when what it returns has one. A
+ * call of a function that returns nothing has none, and neither has a
+ * `match` whose arms all end in such a call or in a statement. A return of
+ * one is that statement, then a return of nothing: `-> note(x)`, `-> {
+ * note(x) }` and `{ return note(x) }` all end with the call (#2697, #2733).
+ *
+ * Whether a function returns a value so depends on the functions its
+ * returns call, and the checker meets a call before the body of a callee
+ * defined further down, whose returns it has not settled yet: with `f(x)
+ * -> { g(x) }` defined before `g(x) -> { note(x) }`, f returned g's void
+ * (#2736). The answer is settled for every function of the program before
+ * any body is checked, as the least fixed point over the calls its returns
+ * make: a function returns a value when its written result type is one, or
+ * when some `return` of it has one, given what the functions it calls
+ * there return. None does until shown to. */
+
+#define TC_YIELDS_NONE  ((void*)1)
+#define TC_YIELDS_VALUE ((void*)2)
+static StrMap g_tc_yields;   /* function name -> TC_YIELDS_NONE / TC_YIELDS_VALUE */
+
+static int tc_value_yields(ASTNode* v, SymbolTable* table, StrMap* locals, int depth);
+
+/* The expression a match arm's body gives, as match_arm_value reads it but
+ * without types: the body, or a block's last expression (not an assignment)
+ * or last `match`. NULL when the arm ends in a statement. */
+static ASTNode* tc_arm_value(ASTNode* body) {
+    if (!body) return NULL;
+    switch (body->type) {
+        case AST_PRINT_STATEMENT: case AST_RETURN_STATEMENT:
+        case AST_VARIABLE_DECLARATION: case AST_ASSIGNMENT:
+        case AST_COMPOUND_ASSIGNMENT: case AST_EXPRESSION_STATEMENT:
+            return NULL;
+        case AST_BLOCK: {
+            ASTNode* last = body->child_count > 0 ? body->children[body->child_count - 1] : NULL;
+            if (!last) return NULL;
+            if (last->type == AST_MATCH_STATEMENT) return last;
+            if (last->type != AST_EXPRESSION_STATEMENT || last->child_count < 1) return NULL;
+            ASTNode* e = last->children[0];
+            if (!e || (e->type == AST_BINARY_EXPRESSION && e->value &&
+                       strcmp(e->value, "=") == 0)) return NULL;
+            return e;
+        }
+        default:
+            return body;
+    }
+}
+
+/* Does a `return` anywhere in `node` give a value? A nested closure's
+ * returns are its own. */
+static int tc_body_yields(ASTNode* node, SymbolTable* table, StrMap* locals, int depth) {
+    if (!node || node->type == AST_CLOSURE) return 0;
+    if (node->type == AST_RETURN_STATEMENT && node->child_count > 0 && node->children[0]) {
+        if (node->child_count > 1) return 1;   /* `return a, b` */
+        return tc_value_yields(node->children[0], table, locals, depth);
+    }
+    for (int i = 0; i < node->child_count; i++)
+        if (tc_body_yields(node->children[i], table, locals, depth)) return 1;
+    return 0;
+}
+
+static ASTNode* tc_closure_body(ASTNode* closure) {
+    for (int i = closure ? closure->child_count - 1 : -1; i >= 0; i--)
+        if (closure->children[i] && closure->children[i]->type == AST_BLOCK)
+            return closure->children[i];
+    return NULL;
+}
+
+/* Does calling `call` give a value? `locals`, while the program's answers
+ * are being settled, holds the names the definition binds itself (each to
+ * the closure literal bound to it, if that is its only binding): such a
+ * name is not the program's function of that name. In the checker, the
+ * scope `table` resolves the name, and the call's type speaks for what is
+ * not one of the program's functions. */
+static int tc_call_yields(ASTNode* call, SymbolTable* table, StrMap* locals, int depth) {
+    if (!call->value || depth > 16) return 1;
+    if (locals && strmap_has(locals, call->value)) {
+        ASTNode* closure = strmap_get(locals, call->value);
+        if (!closure) return 1;
+        return tc_body_yields(tc_closure_body(closure), table, locals, depth + 1);
+    }
+    if (call->annotation && strcmp(call->annotation, "ufcs") == 0) return 1;
+    /* `call(k, x)`, which a checked `k(x)` of a closure binding becomes: the
+     * closure literal it is known to call gives what its body returns, as
+     * #2460 reads the literal's result type and codegen its C one. */
+    if (strcmp(call->value, "call") == 0 && call->child_count > 0 && call->children[0]) {
+        ASTNode* f = call->children[0];
+        ASTNode* lit = NULL;
+        if (f->type == AST_CLOSURE)
+            lit = f;
+        else if (locals)
+            lit = (f->type == AST_IDENTIFIER && f->value) ? strmap_get(locals, f->value) : NULL;
+        else if (table)
+            lit = call_callee_literal(call, table);
+        if (lit && lit->type == AST_CLOSURE)
+            return tc_body_yields(tc_closure_body(lit), table, locals, depth + 1);
+    }
+    Symbol* sym = table ? lookup_qualified_symbol(table, call->value) : NULL;
+    if (sym && sym->node && sym->node->value &&
+        (sym->node->type == AST_FUNCTION_DEFINITION ||
+         sym->node->type == AST_BUILDER_FUNCTION)) {
+        void* known = strmap_get(&g_tc_yields, sym->node->value);
+        if (known) return known == TC_YIELDS_VALUE;
+        return !fn_yields_no_value(sym->node);
+    }
+    if (call->node_type && call->node_type->kind == TYPE_VOID) return 0;
+    if (sym && sym->is_function && sym->type && sym->type->kind == TYPE_VOID) return 0;
+    return 1;
+}
+
+static int tc_value_yields(ASTNode* v, SymbolTable* table, StrMap* locals, int depth) {
+    if (!v) return 1;
+    switch (v->type) {
+        case AST_PRINT_STATEMENT:
+            return 0;
+        case AST_FUNCTION_CALL:
+            return tc_call_yields(v, table, locals, depth);
+        case AST_MATCH_STATEMENT:
+            if (depth > 64) return 1;
+            for (int i = 1; i < v->child_count; i++) {
+                ASTNode* arm = v->children[i];
+                if (!arm || arm->type != AST_MATCH_ARM || arm->child_count < 2) continue;
+                ASTNode* given = tc_arm_value(arm->children[1]);
+                if (given && tc_value_yields(given, table, locals, depth + 1)) return 1;
+            }
+            return 0;
+        default:
+            return 1;
+    }
+}
+
+/* The names a definition binds (parameters, locals, closure parameters,
+ * pattern variables), each to the closure literal bound to it when that is
+ * its only binding, else NULL. */
+static void tc_collect_locals(ASTNode* n, StrMap* locals) {
+    if (!n) return;
+    if (n->value) {
+        if (n->type == AST_VARIABLE_DECLARATION) {
+            ASTNode* init = n->child_count > 0 ? n->children[0] : NULL;
+            int first = !strmap_has(locals, n->value);
+            strmap_put(locals, n->value,
+                       first && init && init->type == AST_CLOSURE ? init : NULL);
+        } else if (n->type == AST_PATTERN_VARIABLE || n->type == AST_CLOSURE_PARAM ||
+                   n->type == AST_CONST_DECLARATION) {
+            strmap_put(locals, n->value, NULL);
+        }
+    }
+    for (int i = 0; i < n->child_count; i++) tc_collect_locals(n->children[i], locals);
+}
+
+static int tc_written_value_type(ASTNode* def) {
+    Type* t = def->node_type;
+    return !def->type_inferred && t && t->kind != TYPE_VOID && t->kind != TYPE_UNKNOWN;
+}
+
+static void tc_yields_settle(ASTNode* program, SymbolTable* global) {
+    strmap_free(&g_tc_yields);
+    strmap_init(&g_tc_yields);
+    if (!program) return;
+
+    int n = 0;
+    for (int i = 0; i < program->child_count; i++) {
+        ASTNode* c = program->children[i];
+        if (c && c->type == AST_EXPORT_STATEMENT && c->child_count > 0) c = c->children[0];
+        if (c && c->value && (c->type == AST_FUNCTION_DEFINITION ||
+                              c->type == AST_BUILDER_FUNCTION)) n++;
+    }
+    if (n == 0) return;
+    ASTNode** defs = calloc((size_t)n, sizeof(ASTNode*));
+    StrMap* locals = calloc((size_t)n, sizeof(StrMap));
+    SymbolTable** scopes = calloc((size_t)n, sizeof(SymbolTable*));
+    if (!defs || !locals || !scopes) {
+        free(defs); free(locals); free(scopes);
+        return;
+    }
+    n = 0;
+    for (int i = 0; i < program->child_count; i++) {
+        ASTNode* c = program->children[i];
+        if (c && c->type == AST_EXPORT_STATEMENT && c->child_count > 0) c = c->children[0];
+        if (!c || !c->value || (c->type != AST_FUNCTION_DEFINITION &&
+                                c->type != AST_BUILDER_FUNCTION)) continue;
+        defs[n] = c;
+        strmap_init(&locals[n]);
+        tc_collect_locals(c, &locals[n]);
+        /* A merged module's function resolves `ns.name` against that
+         * module's imports, as it is checked (#2614). */
+        scopes[n] = create_symbol_table(global);
+        if (c->origin_module) scopes[n]->merged_from = c->origin_module;
+        void* was = strmap_get(&g_tc_yields, c->value);
+        strmap_put(&g_tc_yields, c->value,
+                   (was == TC_YIELDS_VALUE || tc_written_value_type(c))
+                       ? TC_YIELDS_VALUE : TC_YIELDS_NONE);
+        n++;
+    }
+
+    for (int changed = 1; changed; ) {
+        changed = 0;
+        for (int i = 0; i < n; i++) {
+            if (strmap_get(&g_tc_yields, defs[i]->value) == TC_YIELDS_VALUE) continue;
+            ASTNode* body = defs[i]->child_count > 0
+                ? defs[i]->children[defs[i]->child_count - 1] : NULL;
+            if (tc_body_yields(body, scopes[i], &locals[i], 0)) {
+                strmap_put(&g_tc_yields, defs[i]->value, TC_YIELDS_VALUE);
+                changed = 1;
+            }
+        }
+    }
+
+    for (int i = 0; i < n; i++) {
+        strmap_free(&locals[i]);
+        free_symbol_table(scopes[i]);
+    }
+    free(defs);
+    free(locals);
+    free(scopes);
+}
+
+/* Does the function, main or closure whose `return` is being checked give
+ * a value? A function answers as its callers see it; main or a closure by
+ * its returns. */
+static int tc_owner_yields(SymbolTable* table) {
+    ASTNode* owner = g_tc_return_owner;
+    if (!owner) return 0;
+    if ((owner->type == AST_FUNCTION_DEFINITION || owner->type == AST_BUILDER_FUNCTION) &&
+        owner->value) {
+        void* known = strmap_get(&g_tc_yields, owner->value);
+        if (known) return known == TC_YIELDS_VALUE;
+        return !fn_yields_no_value(owner);
+    }
+    ASTNode* body = owner->type == AST_CLOSURE ? tc_closure_body(owner)
+                  : owner->child_count > 0 ? owner->children[0] : NULL;
+    return tc_body_yields(body, table, NULL, 0);
+}
+
+/* A checked `return` of a call or a `match`, `ret`: when what it returns
+ * has no value, it becomes the statement it returns. An arrow body's value
+ * (marked `arrow_value` by the parser) is its last statement, so the body
+ * ends with the call or the match; `return note(x)` written out is the
+ * call, then a `return` of nothing. In a function, main or closure that
+ * returns a value, such a `return` has nothing to give: refused. Returns
+ * -1 when the value has one (the return stays), 1 when the return became
+ * the statement, 0 when it was refused. */
+static int tc_return_settle(ASTNode* ret, SymbolTable* table) {
+    ASTNode* v = ret->children[0];
+    if (tc_value_yields(v, table, NULL, 0)) return -1;
+    int arrow = ret->annotation && strcmp(ret->annotation, "arrow_value") == 0;
+    if (!arrow && tc_owner_yields(table)) {
+        char msg[320];
+        if (v->type == AST_FUNCTION_CALL)
+            snprintf(msg, sizeof(msg),
+                     "'%s' returns no value, so this `return` has nothing to give back",
+                     v->value ? v->value : "function");
+        else
+            snprintf(msg, sizeof(msg),
+                     "this `match` gives no value (each arm ends in a statement or in a "
+                     "call that returns nothing), so this `return` has nothing to give back");
+        type_error_hint(msg,
+                        "a value is returned on another path, so every `return` needs one: "
+                        "run this on a line of its own, then return a value",
+                        ret->line, ret->column);
+        return 0;
+    }
+    free(ret->annotation);
+    ret->annotation = NULL;
+    if (arrow) {
+        /* A `match` runs as a statement in a block of its own. */
+        ret->type = v->type == AST_MATCH_STATEMENT ? AST_BLOCK : AST_EXPRESSION_STATEMENT;
+        return 1;
+    }
+    if (v->type != AST_MATCH_STATEMENT) {
+        ASTNode* stmt = create_ast_node(AST_EXPRESSION_STATEMENT, NULL, v->line, v->column);
+        add_child(stmt, v);
+        ret->children[0] = stmt;
+    }
+    ret->type = AST_BLOCK;
+    add_child(ret, create_ast_node(AST_RETURN_STATEMENT, NULL, ret->line, ret->column));
+    return 1;
+}
+
 static int fn_yields_no_value(ASTNode* fn) {
     if (!fn) return 0;
     if (fn->type != AST_FUNCTION_DEFINITION && fn->type != AST_BUILDER_FUNCTION)
         return 0;
+    /* A function of the program: settled before any body was checked, so
+     * the answer does not depend on which was checked first (#2736). */
+    void* known = fn->value ? strmap_get(&g_tc_yields, fn->value) : NULL;
+    if (known) return known == TC_YIELDS_NONE;
     /* A clause set yields what codegen's fn_result_type decides over every
      * clause (#2645): a value when any clause declares a type or returns
      * one. */
