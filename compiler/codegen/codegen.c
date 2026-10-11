@@ -5758,9 +5758,12 @@ static void mangle_value_idents_in(ASTNode* node, ASTNode* program) {
         case AST_IDENTIFIER:
         case AST_VARIABLE_DECLARATION:
         case AST_PATTERN_VARIABLE:
-        /* #2738: a compound assignment names its target in ->value, and a
-         * closure parameter binds one; left out, `short += 2` wrote a bare
-         * `short` while the declaration became `ae_short`. */
+        /* #2738: a compound assignment names its target in ->value; left
+         * out, `short += 2` wrote a bare `short` while the declaration
+         * became `ae_short`. A closure parameter binds one: left out, its
+         * body's reads were renamed and it was not, so beside an outer
+         * local `short` the closure took them for a capture of that local
+         * and declared `ae_short` twice. */
         case AST_COMPOUND_ASSIGNMENT:
         case AST_CLOSURE_PARAM:
         case AST_STRUCT_FIELD:

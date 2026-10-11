@@ -1,8 +1,10 @@
 // Regression (#2738): a local named after a C keyword is renamed for C
 // (#976), and so is every node that names it. A compound assignment carries
-// its target in the node itself, and a closure parameter binds one; both were
-// left out, so `short += 2` wrote a bare `short` beside the declared
-// `ae_short` and gcc failed.
+// its target in the node itself and was left out, so `short += 2` wrote a
+// bare `short` beside the declared `ae_short` and gcc failed. A closure
+// parameter of such a name, beside a local of the same name: its body's
+// reads were renamed and the parameter was not, so the closure took them for
+// a capture of the local and declared `ae_short` twice.
 
 extern exit(code: int)
 
