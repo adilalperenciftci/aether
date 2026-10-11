@@ -608,6 +608,7 @@ CodeGenerator* create_code_generator(FILE* output) {
     memset(gen->loop_label_id, 0, sizeof(gen->loop_label_id));
     memset(gen->loop_label_break_used, 0, sizeof(gen->loop_label_break_used));
     memset(gen->loop_label_continue_used, 0, sizeof(gen->loop_label_continue_used));
+    memset(gen->loop_step_in_body, 0, sizeof(gen->loop_step_in_body));
     gen->next_loop_label_id = 0;
     for (int i = 0; i < AETHER_MAX_LOOP_NEST; i++) {
         gen->loop_td_id[i] = 0;

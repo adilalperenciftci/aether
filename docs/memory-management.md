@@ -478,6 +478,8 @@ foo(b64: string) -> int {
 
 Cost: zero on functions that don't allocate heap strings; one inline conditional per non-escaped heap-string var per return path.
 
+A C-style `for` loop's variable is owned as the same binding in the loop's `while` rewrite is (#2742). The loop declares it in a block of its own with the statement that binds it, and a step that binds a variable (`s = string.concat(s, "b")`, `i += 2`) is that binding at the end of each pass, so a string the step or the body replaces is freed as it is replaced, and the one the loop ends with (or a struct's owned strings) is freed when the block ends, by a `return` from inside the loop or a labeled exit of an outer loop too. A string variable is the loop's own, beside a local of its name that the loop shadows, and only the loop's own uses decide whether it escapes. Before, the init declared the variable in the C `for` header with no ownership flag and the step was a raw C assignment, so each replaced string and the last one leaked.
+
 ### `@retain` per-parameter annotation on extern declarations
 
 For functions that *store* (or take a strong reference on) a string pointer beyond the call, such as refcount operations and owning map keys, the default "string parameter is read-only" treatment from the escape walker is wrong: it would let the function-exit defer-free reclaim the bytes while the recipient still holds the pointer, a use-after-free. The `@retain` annotation fixes this:

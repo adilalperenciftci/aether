@@ -3559,7 +3559,21 @@ ASTNode* parse_for_loop(Parser* parser) {
     
     ASTNode* increment = NULL;
     if (!match_token(parser, TOKEN_RIGHT_PAREN)) {
-        increment = parse_expression(parser);
+        /* #2742: an increment that binds a variable (`s = f(s)`, `i += 2`)
+         * is the statement it would be at the end of the body, the
+         * binding a while-loop rewrite makes there, so it gets the same
+         * node and, in codegen, the same ownership: a string the binding
+         * replaces is freed, a cell is stored through. Parsed as an
+         * expression, it was a raw C assignment in the header. Any other
+         * increment (`i++`, a call) stays an expression. */
+        Token* step = peek_token(parser);
+        Token* op = peek_ahead(parser, 1);
+        if (step && step->type == TOKEN_IDENTIFIER && op &&
+            (op->type == TOKEN_ASSIGN || token_is_compound_assign(op))) {
+            increment = parse_statement(parser);
+        } else {
+            increment = parse_expression(parser);
+        }
         expect_token(parser, TOKEN_RIGHT_PAREN);
     }
     

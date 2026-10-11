@@ -8558,9 +8558,16 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                 free_type(cond_type);
             }
             
-            // Type check increment (child 2)
+            // Type check increment (child 2). #2742: a binding increment
+            // (`s = f(s)`, `i += 2`) is the statement a body would have.
             if (stmt->child_count > 2 && stmt->children[2]) {
-                typecheck_expression(stmt->children[2], loop_table);
+                ASTNode* step = stmt->children[2];
+                if (step->type == AST_VARIABLE_DECLARATION ||
+                    step->type == AST_COMPOUND_ASSIGNMENT) {
+                    typecheck_statement(step, loop_table);
+                } else {
+                    typecheck_expression(step, loop_table);
+                }
             }
             
             // Type check body (child 3) — #893: with this loop's label in

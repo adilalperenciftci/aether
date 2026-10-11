@@ -203,6 +203,11 @@ typedef struct {
     int loop_label_id[AETHER_MAX_LOOP_NEST];
     int loop_label_break_used[AETHER_MAX_LOOP_NEST];
     int loop_label_continue_used[AETHER_MAX_LOOP_NEST];
+    /* #2742: the loop steps in a statement at the end of its body (a
+     * C-style for whose increment is a binding), after its __ae_cont_N
+     * label, so a `continue` to it jumps there instead of C `continue`,
+     * which would skip the step. */
+    int loop_step_in_body[AETHER_MAX_LOOP_NEST];
     int next_loop_label_id;
     /* #2378 threaded dispatch: a `while true { head; switch sel { ... } }`
      * loop lowers to computed goto where the C compiler has labels-as-values.

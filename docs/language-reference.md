@@ -1020,6 +1020,28 @@ main() {
 5
 ```
 
+A step that binds a variable (`i = i + 3`, `i += 3`, `s = string.concat(s, "b")`)
+is that binding, made at the end of each pass, and a `continue` runs it before
+the condition is tested again. The loop's variable owns its value as any local
+does: a string the step or the body replaces is freed, and so is the one the
+loop ends with.
+
+```aether,run
+main() {
+    total = 0
+    for (i = 0; i < 10; i += 3) {
+        if i == 6 {
+            continue     // the step still runs: 9 is next
+        }
+        total = total + i
+    }
+    println(total)
+}
+```
+```output
+12
+```
+
 ### Range-Based For Loops
 
 Iterate over a range with `for VAR in START..END`:

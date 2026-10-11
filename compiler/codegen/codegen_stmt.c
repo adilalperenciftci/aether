@@ -147,6 +147,95 @@ static void remove_from_name_set(char** names, int* count, const char* name) {
     }
 }
 
+/* A heap-tracked string local that lives for one C block and shadows any
+ * local of its name there: an owning `catch` name (#2333) or a C-style for
+ * loop's string variable (#2742). The caller declares its `_heap_<name>`
+ * flag in the block. While the block is generated the name is a heap string
+ * local declared at this try depth (#2690), and it escapes by what the block
+ * does with it (the escape walk over the block alone), and for a `catch`
+ * name by the function's marks as well; a loop's variable is used nowhere
+ * outside its loop, so only the loop's own uses decide, and a local it
+ * shadows that the function returns does not keep it from being freed.
+ * scoped_string_local_end rolls the name's own marks back, so an enclosing
+ * variable of the same name keeps its own verdicts. (The walk re-marks other
+ * names only as the function-level walk already did.) */
+typedef struct {
+    const char* name;
+    int was_heap;
+    int was_escaped;
+    int was_ret_escaped;
+    int shadowed_depth;
+} ScopedStringLocal;
+
+static void scoped_string_local_begin(CodeGenerator* gen, ScopedStringLocal* sl,
+                                      const char* name, ASTNode* block,
+                                      int block_marks_only) {
+    sl->name = name;
+    sl->was_heap = is_heap_string_var(gen, name);
+    sl->was_escaped = is_escaped_string_var(gen, name);
+    sl->was_ret_escaped = is_return_escaped_string_var(gen, name);
+    mark_heap_string_var(gen, name);
+    /* #2690: declared here, whatever a local it shadows was. */
+    sl->shadowed_depth = set_heap_string_var_try_depth(gen, name, gen->try_frame_depth);
+    if (block_marks_only) {
+        remove_from_name_set(gen->escaped_string_vars, &gen->escaped_string_var_count, name);
+        remove_from_name_set(gen->return_escaped_string_vars,
+                             &gen->return_escaped_string_var_count, name);
+    }
+    mark_escaped_heap_string_vars(gen, block);
+}
+
+/* The free of the value the scoped local holds when its block ends, queued
+ * on the scope the caller has entered for the block, so it runs on
+ * fall-through, on a `break` or `continue` out of the block and on a
+ * `return` alike. None when the value escapes: its holder frees it. */
+static void push_scoped_string_local_free(CodeGenerator* gen, const ScopedStringLocal* sl,
+                                          int line, int column) {
+    if (is_escaped_string_var(gen, sl->name) || is_return_escaped_string_var(gen, sl->name))
+        return;
+    ASTNode* carrier = create_ast_node(AST_EXPRESSION_STATEMENT, NULL, line, column);
+    if (!carrier) return;
+    if (carrier->annotation) free(carrier->annotation);
+    carrier->annotation = heap_strf("heap_string_exit_free:%s", sl->name);
+    codegen_own_node(gen, carrier);
+    push_defer(gen, carrier);
+}
+
+static void scoped_string_local_end(CodeGenerator* gen, const ScopedStringLocal* sl) {
+    if (!sl->was_escaped)
+        remove_from_name_set(gen->escaped_string_vars, &gen->escaped_string_var_count, sl->name);
+    else if (!is_escaped_string_var(gen, sl->name))
+        mark_escaped_string_var(gen, sl->name);
+    if (!sl->was_ret_escaped)
+        remove_from_name_set(gen->return_escaped_string_vars,
+                             &gen->return_escaped_string_var_count, sl->name);
+    else if (!is_return_escaped_string_var(gen, sl->name))
+        mark_return_escaped_string_var(gen, sl->name);
+    if (!sl->was_heap) unmark_heap_string_var(gen, sl->name);
+    else set_heap_string_var_try_depth(gen, sl->name, sl->shadowed_depth);
+}
+
+/* `int _heap_<name> = 0;`, the flag that says the string local `name` owns
+ * the value it holds (#2690: as volatile as the local where a `try` body
+ * writes it). */
+static void emit_heap_string_flag_decl(CodeGenerator* gen, const char* name) {
+    print_indent(gen);
+    fprintf(gen->output, "%s _heap_%s = 0; (void)_heap_%s;\n",
+            try_tracker_type(gen, name), name, name);
+}
+
+/* `const char* <name> = NULL;`, a string local that holds no value yet
+ * (#2690: volatile where a `try` body writes it), recorded as a string so a
+ * binding of another kind is checked against it (#2124). */
+static void emit_string_local_decl(CodeGenerator* gen, const char* name) {
+    print_indent(gen);
+    fprintf(gen->output, "%s %s = NULL;\n",
+            volatile_decl_type(try_volatile_qual_for(gen, name), "const char*"), name);
+    Type* st = create_type(TYPE_STRING);
+    mark_var_declared_typed(gen, name, st);
+    free_type(st);
+}
+
 /* The catch branch of a try whose binding owns a heap-built reason.
  * Emits, inside the `else` of the setjmp test:
  *
@@ -165,22 +254,14 @@ static void remove_from_name_set(char** names, int* count, const char* name) {
 static void emit_owned_catch_handler(CodeGenerator* gen, ASTNode* catch_clause, int uid) {
     const char* name = catch_clause->value;
     ASTNode* handler = catch_clause->children[0];
-
-    int was_heap = is_heap_string_var(gen, name);
-    int was_escaped = is_escaped_string_var(gen, name);
-    int was_ret_escaped = is_return_escaped_string_var(gen, name);
     int saved_var_count = gen->declared_var_count;
 
     print_line(gen, "int _heap_%s = _aether_try_%d->reason_release != NULL; (void)_heap_%s;",
                name, uid, name);
     print_line(gen, "aether_try_pop();");
 
-    mark_heap_string_var(gen, name);
-    /* #2690: declared here, whatever a local it shadows was. */
-    int shadowed_depth = set_heap_string_var_try_depth(gen, name, gen->try_frame_depth);
-    mark_escaped_heap_string_vars(gen, handler);
-    int escapes = is_escaped_string_var(gen, name) ||
-                  is_return_escaped_string_var(gen, name);
+    ScopedStringLocal sl;
+    scoped_string_local_begin(gen, &sl, name, handler, 0);
 
     print_indent(gen);
     fprintf(gen->output, "/* catch %s owns a heap-built reason */", name);
@@ -190,29 +271,13 @@ static void emit_owned_catch_handler(CodeGenerator* gen, ASTNode* catch_clause, 
     print_line(gen, "{");
     indent(gen);
     enter_scope(gen);
-    if (!escapes) {
-        ASTNode* carrier = create_ast_node(AST_EXPRESSION_STATEMENT, NULL,
-                                           handler->line, handler->column);
-        if (carrier) {
-            if (carrier->annotation) free(carrier->annotation);
-            carrier->annotation = heap_strf("heap_string_exit_free:%s", name);
-            codegen_own_node(gen, carrier);
-            push_defer(gen, carrier);
-        }
-    }
+    push_scoped_string_local_free(gen, &sl, handler->line, handler->column);
     generate_statement(gen, handler);
     exit_scope(gen);
     unindent(gen);
     print_line(gen, "}");
     truncate_declared_vars(gen, saved_var_count);
-
-    if (!was_escaped)
-        remove_from_name_set(gen->escaped_string_vars, &gen->escaped_string_var_count, name);
-    if (!was_ret_escaped)
-        remove_from_name_set(gen->return_escaped_string_vars,
-                             &gen->return_escaped_string_var_count, name);
-    if (!was_heap) unmark_heap_string_var(gen, name);
-    else set_heap_string_var_try_depth(gen, name, shadowed_depth);
+    scoped_string_local_end(gen, &sl);
 }
 
 /* `panic(expr)`. A reason the program built at run time is handed to the
@@ -5143,12 +5208,7 @@ void hoist_heap_string_trackers(CodeGenerator* gen, ASTNode* body) {
              * local of that name cannot exist (an assignment to the name
              * is a state store). */
             if (actor_state_string_tracked(gen, name)) continue;
-            /* #2690: the tracker of a local a `try` body writes is as
-             * volatile as the local (try_tracker_type). */
-            print_indent(gen);
-            fprintf(gen->output,
-                    "%s _heap_%s = 0; (void)_heap_%s;\n",
-                    try_tracker_type(gen, name), name, name);
+            emit_heap_string_flag_decl(gen, name);
             mark_heap_string_var(gen, name);
         }
 
@@ -5179,14 +5239,7 @@ void hoist_heap_string_trackers(CodeGenerator* gen, ASTNode* body) {
         /* #2690: and so is the local itself. Hoisted here, it was declared
          * plain however a `try` body wrote it, so after a panic it could
          * hold its value from before the `try`. */
-        print_indent(gen);
-        fprintf(gen->output, "%s %s = NULL;\n",
-                volatile_decl_type(try_volatile_qual_for(gen, name), "const char*"), name);
-        /* #2124: hoisted as a string; a binding of another kind anywhere
-         * in the function is checked against that. */
-        Type* st = create_type(TYPE_STRING);
-        mark_var_declared_typed(gen, name, st);
-        free_type(st);
+        emit_string_local_decl(gen, name);
     }
 }
 
@@ -13457,21 +13510,68 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
              * or a labeled exit of an outer loop, releases it. Declared in
              * the header as `int i`, the uses dereferenced an int. */
             ASTNode* for_init = stmt->child_count > 0 ? stmt->children[0] : NULL;
-            int cell_init = for_init && for_init->type == AST_VARIABLE_DECLARATION &&
-                            for_init->value && is_promoted_capture(gen, for_init->value);
-            if (cell_init) {
+            const char* loop_var = for_init && for_init->type == AST_VARIABLE_DECLARATION
+                                   ? for_init->value : NULL;
+            int cell_init = loop_var && is_promoted_capture(gen, loop_var);
+            /* #2742: the loop's variable is owned as the binding a while-loop
+             * rewrite makes, in the same block of its own:
+             *  - a string: the loop declares its own `s` and `_heap_s`,
+             *    shadowing any local of the name as the C `for` declaration
+             *    did, binds the init through the statement path, which takes
+             *    the value as any owning binding does, and frees the value
+             *    the loop ends with when the block ends;
+             *  - any other variable no enclosing binding declares yet: the
+             *    init is the statement that declares it, with whatever its
+             *    kind needs (a struct that owns strings is destroyed when the
+             *    block ends).
+             * Those defers sit outside the loop's scope, so a `break` or
+             * `continue` keeps the value, and a `return`, or a labeled exit
+             * of an outer loop, frees it. Declared in the header, the
+             * variable owned nothing: the value it ended with was never
+             * freed. Any other loop variable keeps the header declaration:
+             * one that shadows an enclosing local or a module `var` (the
+             * statement would assign those), and an actor's state field,
+             * which a handler reads and writes as `self->name`. */
+            int state_var = loop_var && is_actor_state_var(gen, loop_var);
+            int str_init = !cell_init && loop_var && !state_var && for_init->node_type &&
+                           for_init->node_type->kind == TYPE_STRING;
+            int stmt_init = !cell_init && !str_init && loop_var && !state_var &&
+                            !is_var_declared(gen, loop_var) &&
+                            !is_module_global_var(gen, loop_var);
+            ScopedStringLocal str_local = {0};
+            int own_block = cell_init || str_init || stmt_init;
+            if (own_block) {
                 print_line(gen, "{");
                 indent(gen);
                 enter_scope(gen);
+            }
+            if (cell_init) {
                 print_indent(gen);
-                emit_promoted_cell_declaration(gen, for_init->value,
+                emit_promoted_cell_declaration(gen, loop_var,
                     get_c_type(for_init->node_type), for_init->node_type,
                     for_init->child_count > 0 ? for_init->children[0] : NULL, "0",
                     for_init->line, for_init->column);
-                print_indent(gen);
+            } else if (str_init) {
+                emit_heap_string_flag_decl(gen, loop_var);
+                emit_string_local_decl(gen, loop_var);
+                scoped_string_local_begin(gen, &str_local, loop_var, stmt, 1);
+                push_scoped_string_local_free(gen, &str_local, for_init->line, for_init->column);
+                generate_statement(gen, for_init);
+            } else if (stmt_init) {
+                generate_statement(gen, for_init);
             }
+            /* #2742: an increment that binds a variable (`s = f(s)`, `i += 2`)
+             * is the statement the parser made of it, emitted as the end of
+             * each pass, where a while-loop rewrite binds it, so it takes the
+             * ownership any binding does (a string it replaces is freed, a
+             * cell is stored through). A `continue` jumps to it (see
+             * loop_step_in_body). In the header it was a raw C assignment. */
+            ASTNode* step = stmt->child_count > 2 ? stmt->children[2] : NULL;
+            int step_stmt = step && (step->type == AST_VARIABLE_DECLARATION ||
+                                     step->type == AST_COMPOUND_ASSIGNMENT);
+            if (own_block) print_indent(gen);
             fprintf(gen->output, "for (");
-            if (!cell_init && for_init) {
+            if (!own_block && for_init) {
                 ASTNode* init = for_init;
                 if (init->type == AST_VARIABLE_DECLARATION) {
                     generate_type(gen, init->node_type);
@@ -13491,8 +13591,8 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
             }
             // Note: If no condition, C for loop becomes infinite (for (;;))
             fprintf(gen->output, "; ");
-            if (stmt->child_count > 2 && stmt->children[2]) {
-                generate_expression(gen, stmt->children[2]); // increment
+            if (step && !step_stmt) {
+                generate_expression(gen, step); // increment
             }
             fprintf(gen->output, ") {\n");
             
@@ -13520,6 +13620,7 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                 gen->loop_label_id[for_lbl_idx] = gen->next_loop_label_id++;
                 gen->loop_label_break_used[for_lbl_idx] = 0;
                 gen->loop_label_continue_used[for_lbl_idx] = 0;
+                gen->loop_step_in_body[for_lbl_idx] = step_stmt;
                 gen->loop_c_depth[for_lbl_idx] = gen->c_break_depth + 1;
                 gen->loop_nest_depth++;
             }
@@ -13530,12 +13631,13 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
             }
             gen->c_break_depth--;
             if (gen->loop_nest_depth > 0) gen->loop_nest_depth--;
-            /* #893: labeled-continue target — end of the body, so falling
-             * through runs the C `for`'s increment then re-tests the condition. */
-            if (for_lbl_idx >= 0 && gen->loop_label[for_lbl_idx] &&
-                gen->loop_label_continue_used[for_lbl_idx]) {
+            /* #893: the continue target, end of the body, so falling through
+             * runs the step (the C `for`'s increment, or the step statement
+             * below, #2742) then re-tests the condition. */
+            if (for_lbl_idx >= 0 && gen->loop_label_continue_used[for_lbl_idx]) {
                 print_line(gen, "__ae_cont_%d: ;", gen->loop_label_id[for_lbl_idx]);
             }
+            if (step_stmt) generate_statement(gen, step);
             unindent(gen);
 
             print_line(gen, "}");
@@ -13544,11 +13646,14 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
             if (for_lbl_idx >= 0 && gen->loop_label_break_used[for_lbl_idx]) {
                 print_line(gen, "__ae_brk_%d: ;", gen->loop_label_id[for_lbl_idx]);
             }
-            if (cell_init) {
-                exit_scope(gen);   /* #2737: the loop's reference to its cell */
+            if (own_block) {
+                /* #2737: the loop's reference to its cell; #2742: what the
+                 * value the loop ends with owns. */
+                exit_scope(gen);
                 unindent(gen);
                 print_line(gen, "}");
             }
+            if (str_init) scoped_string_local_end(gen, &str_local);
             truncate_declared_vars(gen, saved_var_count);
             break;
         }
@@ -13615,6 +13720,7 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                 gen->loop_label_id[while_lbl_idx] = gen->next_loop_label_id++;
                 gen->loop_label_break_used[while_lbl_idx] = 0;
                 gen->loop_label_continue_used[while_lbl_idx] = 0;
+                gen->loop_step_in_body[while_lbl_idx] = 0;
                 gen->loop_td_id[while_lbl_idx] = td_id;
                 gen->loop_td_node[while_lbl_idx] = td_id ? stmt : NULL;
                 gen->loop_c_depth[while_lbl_idx] = gen->c_break_depth + 1;
@@ -14699,7 +14805,12 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                 /* Issue #501: drain inside-loop try frames. */
                 emit_try_pops_for_break_continue(gen);
                 int td_lvl = td_continue_target(gen, stmt);
-                if (td_lvl >= 0) {
+                int top = gen->loop_nest_depth - 1;
+                if (top >= 0 && gen->loop_step_in_body[top]) {
+                    /* #2742: the step is the statement after the label. */
+                    gen->loop_label_continue_used[top] = 1;
+                    print_line(gen, "goto __ae_cont_%d;", gen->loop_label_id[top]);
+                } else if (td_lvl >= 0) {
                     /* #2378: run the head and jump to the next arm. */
                     td_emit_dispatch(gen, td_lvl, "continue;");
                 } else {
