@@ -14,11 +14,18 @@ the ways a verdict reaches the exit code:
   * `exit(` — the C exit, bypasses main's scope-end cleanup;
   * `return <non-zero>` inside `main()` — the exit code with cleanup;
   * `panic(`;
-  * `std.testing` / `std.spec` — the frameworks fail the process themselves;
+  * `std.testing` / `std.spec` — the frameworks carry the verdict;
 
 and has no `test_*.sh` driver in its directory (a driver greps the output
-or checks the exit code itself). Run from the repository root; exit 1
-listing every offender.
+or checks the exit code itself).
+
+std.spec carries the verdict only through `run_summary`'s value, which
+main has to return (or pass to `exit`): `run_summary` returns it and does
+not exit. A suite that calls it as a bare statement drops the verdict and
+exits 0 with failing cases (#2678). So every `.ae` test, the sweep's and
+contrib's, is also checked for a bare `run_summary(...)` statement.
+
+Run from the repository root; exit 1 listing every offender.
 """
 import os
 import re
@@ -29,6 +36,9 @@ MARKER = re.compile(r'println\(\s*"[^"]*\b(FAIL|FAILURE|MISMATCH|WRONG)\b')
 VERDICT = re.compile(
     r'\bexit\(|\bpanic\(|\bimport\s+std\.testing\b|\bimport\s+std\.spec\b')
 MAIN_RETURN = re.compile(r'\breturn\s+[1-9]')
+# `spec.run_summary(fw)` (or a bare `run_summary(fw)` from a selective
+# import) as a whole statement: its verdict goes nowhere.
+DROPPED_SUMMARY = re.compile(r'^\s*(?:spec\.)?run_summary\([^()]*\)\s*$', re.M)
 
 
 def prune_patterns():
@@ -62,6 +72,17 @@ def swept_files():
             continue
         kept.append(p)
     return kept
+
+
+def contrib_tests():
+    """contrib's test_*.ae: not in the bulk sweep, run by contrib-check,
+    whose oracle is the exit code too."""
+    out = []
+    for dirpath, _, names in os.walk(os.path.join(ROOT, 'contrib')):
+        for n in names:
+            if n.startswith('test_') and n.endswith('.ae'):
+                out.append(os.path.join(dirpath, n))
+    return out
 
 
 def strip_comments(src):
@@ -106,24 +127,38 @@ def has_driver(path):
 
 def main():
     offenders = []
-    for p in swept_files():
+    dropped = []
+    swept = swept_files()
+    for p in swept + contrib_tests():
         with open(p, encoding='utf-8', errors='replace') as f:
             src = strip_comments(f.read())
-        if not MARKER.search(src):
+        rel = os.path.relpath(p, ROOT).replace(os.sep, '/')
+        if DROPPED_SUMMARY.search(src):
+            dropped.append(rel)
+        if p not in swept or not MARKER.search(src):
             continue
         if VERDICT.search(src) or MAIN_RETURN.search(main_body(src)):
             continue
         if has_driver(p):
             continue
-        offenders.append(os.path.relpath(p, ROOT).replace(os.sep, '/'))
+        offenders.append(rel)
+    status = 0
     if offenders:
         print("test verdicts: %d sweep-run test(s) print a failure marker but cannot exit non-zero:" % len(offenders))
         for o in sorted(offenders):
             print("  " + o)
         print("  make the failure branch reach the exit code: `return 1` from main(), or exit(1).")
-        return 1
-    print("test verdicts: every sweep-run test that prints a failure marker can exit non-zero")
-    return 0
+        status = 1
+    if dropped:
+        print("test verdicts: %d test(s) call run_summary and drop its verdict, so a failing suite exits 0:" % len(dropped))
+        for o in sorted(dropped):
+            print("  " + o)
+        print("  return it from main(): `return spec.run_summary(fw)`.")
+        status = 1
+    if status == 0:
+        print("test verdicts: every sweep-run test that prints a failure marker can exit non-zero,"
+              " and every std.spec suite returns its verdict")
+    return status
 
 
 if __name__ == '__main__':

@@ -3188,6 +3188,7 @@ check-tests:
 	    if $$cand -c "import sys" >/dev/null 2>&1; then py="$$cand"; break; fi; \
 	done; \
 	if [ -n "$$py" ]; then \
+	    $$py tests/scripts/test_check_test_verdicts.py && \
 	    $$py tests/scripts/check_test_verdicts.py && \
 	    $$py tests/scripts/check_sweep_prune.py && \
 	    $$py tests/scripts/test_check_module_specs.py && \

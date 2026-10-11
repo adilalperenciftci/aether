@@ -256,7 +256,7 @@ main() {
             spec.expect_int(abs(-7)).to_equal(7)
         }
     }
-    spec.run_summary(fw)
+    return spec.run_summary(fw)
 }
 ```
 
