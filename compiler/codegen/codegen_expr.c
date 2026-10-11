@@ -6729,7 +6729,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                                  ? get_c_type(field_sig->return_type) : NULL;
                     fad.ret_type = NULL;
                     fad.have_value = fad.ret_ct && strcmp(fad.ret_ct, "void") != 0;
-                    fad.discarded = gen->discard_call_node == expr;
+                    fad.discarded = gen->discard_call_node == expr && !stmt_struct_temp_of(expr);
                     g_fnptr_drain = 1;
                     arg_drain_select(gen, expr, 0, NULL, NULL,
                                      !fad.have_value || fad.discarded, &fad);
@@ -6760,6 +6760,10 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                  * so heap inline args still free. See discard_call_node in
                  * codegen.h. */
                 int ad_call_discarded = gen->discard_call_node == expr;
+                /* ...unless the statement keeps it in a struct temporary to
+                 * destroy (codegen_stmt.c, `_ae_stmpN = call`): that needs
+                 * the value, so the wrap must yield `_ad_r`, not void. */
+                if (ad_call_discarded && stmt_struct_temp_of(expr)) ad_call_discarded = 0;
 
                 /* Typed fn-pointer local call: `fp(a, b)` where `fp` was
                  * declared as `fn(T1, T2, ...) -> R` (or initialised from

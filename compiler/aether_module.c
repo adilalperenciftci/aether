@@ -3189,6 +3189,21 @@ static AetherModule* module_owning_ast(ASTNode* mod_ast) {
     return NULL;
 }
 
+/* 1 when `name` is the bare form of one of `sub_ast`'s externs, the
+ * `<sub_ns>_<name>` a qualified `sub_ns.name` or a glob import binds
+ * (std.http's `extern http_server_create` is `server_create`). */
+static int module_extern_short_name(ASTNode* sub_ast, const char* sub_ns, const char* name) {
+    if (!sub_ast || !sub_ns || !name || !*name || name[0] == '_') return 0;
+    size_t sub_ns_len = strlen(sub_ns);
+    for (int j = 0; j < sub_ast->child_count; j++) {
+        ASTNode* ext = unwrap_export(sub_ast->children[j]);
+        if (!ext || ext->type != AST_EXTERN_FUNCTION || !ext->value) continue;
+        if (strncmp(ext->value, sub_ns, sub_ns_len) == 0 && ext->value[sub_ns_len] == '_' &&
+            strcmp(ext->value + sub_ns_len + 1, name) == 0) return 1;
+    }
+    return 0;
+}
+
 static void apply_inherited_selective_imports(ASTNode* clone, ASTNode* mod_ast) {
     if (!clone || !mod_ast) return;
 
@@ -3307,6 +3322,13 @@ static void apply_inherited_selective_imports(ASTNode* clone, ASTNode* mod_ast) 
                 }
                 if (name_in_list(sel->value, sub_func_names, sub_func_count) &&
                     sel_func_count < AETHER_MODULE_MAX_DECLS) {
+                    sel_func_names[sel_func_count++] = sel->value;
+                } else if (module_extern_short_name(sub_mod->ast, sub_ns, sel->value) &&
+                           !module_defines_own_name(mod_ast, sel->value) &&
+                           sel_func_count < AETHER_MODULE_MAX_DECLS) {
+                    /* An extern-backed name (`import std.http (server_create)`
+                     * for `extern http_server_create`): renamed to the extern,
+                     * as the glob form does since #2637. */
                     sel_func_names[sel_func_count++] = sel->value;
                 } else if (name_in_list(sel->value, sub_const_names, sub_const_count) &&
                            sel_const_count < AETHER_MODULE_MAX_DECLS) {

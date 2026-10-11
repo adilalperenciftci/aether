@@ -2629,6 +2629,14 @@ itself: `m.a()` and `m.K` inside module `m` name its own definitions, its
 private ones staying private (E0303), in a build and in `ae check` of the
 module's file alike (#2631).
 
+Bare names follow the same rule. A module's selective or glob import binds
+names for that module, including a module's extern-backed names
+(`import std.http (server_create)` for its `extern http_server_create`), and
+a program's selective or glob imports bind names for the program only. A
+module that calls `server_create(...)` without importing `std.http` itself
+fails with E0301, whichever program imports it; it used to build when the
+program happened to import the name, and fail when it did not.
+
 ### Module Public API, `exports (…)`
 
 Each module declares its public surface once at the top of the file via
