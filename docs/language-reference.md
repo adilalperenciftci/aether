@@ -936,6 +936,24 @@ for (i = 0; i < 10; i = i + 1) {
 }
 ```
 
+The variable the init binds is the loop's, from the condition through the body
+to the end of the loop: a binding of its name in the body assigns it, so a loop
+can step its variable there, and after the loop the name is free to bind again.
+
+```aether,run
+main() {
+    total = 0
+    for (i = 0; i < 10;) {
+        total = total + i
+        i = i + 3        // the loop's i: 0, 3, 6, 9
+    }
+    println(total)
+}
+```
+```output
+18
+```
+
 ### Range-Based For Loops
 
 Iterate over a range with `for VAR in START..END`:

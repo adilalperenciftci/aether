@@ -13187,7 +13187,13 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
             print_line(gen, "}");
             break;
             
-        case AST_FOR_LOOP:
+        case AST_FOR_LOOP: {
+            /* #2698: the variable the init declares is the loop's, declared
+             * for its condition, increment and body, so a binding of its name
+             * in the body assigns it. Not recorded, `i = i + 1` in the body
+             * declared a new `int i` there that shadowed it, and a loop that
+             * steps its variable in the body never ended. */
+            int saved_var_count = gen->declared_var_count;
             fprintf(gen->output, "for (");
             if (stmt->child_count > 0 && stmt->children[0]) {
                 ASTNode* init = stmt->children[0];
@@ -13198,6 +13204,7 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                         fprintf(gen->output, " = ");
                         generate_expression(gen, init->children[0]);
                     }
+                    if (init->value) mark_var_declared(gen, init->value);
                 } else {
                     generate_expression(gen, init);
                 }
@@ -13258,7 +13265,9 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                 gen->loop_label_break_used[for_lbl_idx]) {
                 print_line(gen, "__ae_brk_%d: ;", gen->loop_label_id[for_lbl_idx]);
             }
+            truncate_declared_vars(gen, saved_var_count);
             break;
+        }
 
         case AST_WHILE_LOOP: {
             // OPTIMIZATION: Try to collapse arithmetic series loops into O(1) expressions.
