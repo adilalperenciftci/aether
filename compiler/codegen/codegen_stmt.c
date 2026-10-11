@@ -6593,6 +6593,21 @@ static int subtree_mentions_param(ASTNode* node, const char* pname) {
     return 0;
 }
 
+/* #2754: does this subtree bind `pname` (an assignment or a compound
+ * assignment to it, or a binder of that name)? A nested closure that does
+ * keeps a promoted cell, not the retained capture. Erring toward "binds"
+ * only withholds a release (a leak), never frees a live closure. */
+static int subtree_rebinds_param(ASTNode* node, const char* pname) {
+    if (!node) return 0;
+    if ((node->type == AST_VARIABLE_DECLARATION || node->type == AST_COMPOUND_ASSIGNMENT ||
+         node->type == AST_PATTERN_VARIABLE || node->type == AST_CLOSURE_PARAM) &&
+        node->value && strcmp(node->value, pname) == 0) return 1;
+    for (int i = 0; i < node->child_count; i++) {
+        if (subtree_rebinds_param(node->children[i], pname)) return 1;
+    }
+    return 0;
+}
+
 /* Does evaluating `node` yield a value that IS, or directly aggregates,
  * the parameter's pointer? This is the "pointer-carrying" test for store
  * sinks: a bare reference (`pname`) or an array/struct literal element
@@ -6913,7 +6928,16 @@ static int param_escapes_in_subtree(CodeGenerator* gen, ASTNode* node,
          * trailing block is inlined, not captured: it is walked like the
          * rest of the body. */
         int trailing = node->value && strcmp(node->value, "trailing") == 0;
-        if (!g_capture_holds_own_ref) return 1;  /* closure capture may outlive the call */
+        /* #2754: a closure-typed parameter captured by a nested closure is
+         * retained by that closure's env (_aether_closure_env_retain), as a
+         * field, a global or actor state retains one (#2528), so the
+         * capture keeps nothing of the caller's either; counted as a keep,
+         * the caller never released the closure it passed. Unless the
+         * nested closure rebinds the name: a promoted cell is not that
+         * retain. */
+        int own_ref = g_capture_holds_own_ref ||
+                      (g_escape_param_is_closure && !subtree_rebinds_param(node, pname));
+        if (!own_ref) return 1;  /* closure capture may outlive the call */
         if (!trailing) return 0;
     }
     /* #2586: an argument to a call through a typed fn pointer is borrowed
