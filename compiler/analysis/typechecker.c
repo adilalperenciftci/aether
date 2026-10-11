@@ -10958,7 +10958,15 @@ static int try_ufcs_rewrite(ASTNode* call, SymbolTable* table) {
     Symbol* fsym = lookup_symbol(table, method);
     if (fsym && fsym->is_function && fsym->node &&
         ufcs_first_param_matches(fsym->node, rtype)) {
-        resolved = strdup(method);            /* same-file bare call */
+        /* A bare name can also be a SELECTIVELY imported function
+         * (`import m (f)` then `x.f()`): the visible symbol is the import's
+         * alias, which an ordinary `f(x)` call has renamed to its qualified
+         * `m.f` by the time it reaches codegen. Shape (b) is rewritten after
+         * that renaming, so without the same lookup here the call kept the
+         * bare `f` and codegen emitted `f(x)`, an undeclared C function, not
+         * `m_f(x)`. */
+        const char* aliased = find_import_alias(method);
+        resolved = strdup(aliased ? aliased : method);
     } else if (global_module_registry) {
         for (int mi = 0; mi < global_module_registry->module_count && !resolved; mi++) {
             AetherModule* m = global_module_registry->modules[mi];
