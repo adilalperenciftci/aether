@@ -4,25 +4,44 @@
 # key unchanged, so `ae run` served the binary built against the old header
 # and a test reported the old code's result.
 #
-# A probe header is added under runtime/utils for the duration of the test
-# (removed on exit) and changed once; each change has to move the key, and
-# removing it has to bring the original key back.
+# The test runs `ae` from a source tree of its own: the built ae, aetherc and
+# libaether.a under build/, and the runtime, std and include headers, copied
+# into a temporary directory (ae counts as running from a source tree when
+# aetherc sits beside it and runtime/ beside build/). A probe header is added
+# there, changed once and removed; each change has to move the key, and the
+# removal has to bring the original key back. Never the shared tree: the
+# sweep runs other cache tests at the same time, and a header appearing in
+# the repository would move their keys too.
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
-AE="$ROOT/build/ae"
 
 fail() { echo "  [FAIL] cache_key_runtime_headers: $1"; exit 1; }
 
-if [ ! -f "$ROOT/runtime/actors/aether_panic.h" ]; then
-    echo "  [SKIP] cache_key_runtime_headers: not a source tree"
+EXE=""
+[ -f "$ROOT/build/ae.exe" ] && EXE=".exe"
+if [ ! -f "$ROOT/build/ae$EXE" ] || [ ! -f "$ROOT/build/aetherc$EXE" ] ||
+   [ ! -f "$ROOT/build/libaether.a" ] || [ ! -d "$ROOT/runtime" ]; then
+    echo "  [SKIP] cache_key_runtime_headers: not a built source tree"
     exit 0
 fi
 
 TMP="$(mktemp -d)"
-probe="$ROOT/runtime/utils/zz_cache_key_probe_$$.h"
-trap 'rm -f "$probe"; rm -rf "$TMP"' EXIT INT TERM
+trap 'rm -rf "$TMP"' EXIT INT TERM
+TREE="$TMP/tree"
+mkdir -p "$TREE/build" || fail "could not make the tree"
+for f in "ae$EXE" "aetherc$EXE" libaether.a aether_manifest.o; do
+    [ -f "$ROOT/build/$f" ] && { cp "$ROOT/build/$f" "$TREE/build/" || fail "could not copy build/$f"; }
+done
+# The headers, in one process (each process costs tens of milliseconds on
+# Windows).
+(cd "$ROOT" && find runtime std include -name '*.h' 2>/dev/null | tar cf - -T -) |
+    (cd "$TREE" && tar xf -) || fail "could not copy the headers"
+
+AE="$TREE/build/ae$EXE"
+probe="$TREE/runtime/utils/zz_cache_key_probe.h"
 export AETHER_CACHE_DIR="$TMP/cache"
+unset AETHER_HOME
 printf 'main() {\n    println("probe")\n}\n' > "$TMP/p.ae"
 
 # The key a build looks up (`[cache] hit|miss: <key>` under -v).
@@ -32,7 +51,8 @@ key() {
 }
 
 # A first build writes the depfile later keys are made from.
-key > /dev/null
+"$AE" build "$TMP/p.ae" -o "$TMP/p" > "$TMP/first.log" 2>&1 ||
+    { tail -5 "$TMP/first.log"; fail "the copied tree could not build a program"; }
 k1="$(key)"
 [ -n "$k1" ] || fail "no cache key reported"
 [ "$(key)" = "$k1" ] || fail "the key is not stable between two builds"
