@@ -8148,14 +8148,15 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                                 if (matches && (fdef->type == AST_FUNCTION_DEFINITION
                                              || fdef->type == AST_EXTERN_FUNCTION
                                              || fdef->type == AST_BUILDER_FUNCTION)) {
-                                    declared_params = 0;
-                                    for (int pi = 0; pi < fdef->child_count; pi++) {
-                                        ASTNode* p = fdef->children[pi];
-                                        if (!p) continue;
-                                        if (p->type == AST_GUARD_CLAUSE) continue;
-                                        if (p->type == AST_BLOCK) continue;
-                                        declared_params++;
-                                    }
+                                    /* Parameters only: a `where` contract on
+                                     * one is an AST_REQUIRES_CLAUSE among
+                                     * them (as are `requires`/`ensures`), and
+                                     * counting it made `set_n(_ctx, n: int
+                                     * where n >= 0)` look like three
+                                     * parameters, so the bare `set_n(3)` in a
+                                     * trailing block got no _ctx and gcc
+                                     * reported too few arguments (#2706). */
+                                    declared_params = fn_param_count(fdef);
                                     break;
                                 }
                             }

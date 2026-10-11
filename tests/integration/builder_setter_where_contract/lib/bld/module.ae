@@ -1,0 +1,16 @@
+// A builder whose setter's parameter carries a `where` contract (#2706).
+import std.list
+
+exports(new, set_n, count)
+
+new() -> ptr {
+    return list.new()
+}
+
+set_n(_ctx: ptr, n: int where n >= 0) {
+    list.add(_ctx, "x")
+}
+
+count(b: ptr) -> int {
+    return list.size(b)
+}

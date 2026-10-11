@@ -1,0 +1,21 @@
+// Regression (#2706): a builder setter whose parameter carries a `where`
+// contract, called bare in a trailing block, gets the block's implicit
+// `_ctx`. The contract is kept among the function's children as a requires
+// clause, and the count that decides the injection took it for a parameter,
+// so `set_n(3)` went out without `_ctx` and gcc reported too few arguments.
+
+import bld
+
+extern exit(code: int)
+
+main() {
+    b = bld.new() {
+        set_n(3)
+        set_n(4)
+    }
+    if bld.count(b) != 2 {
+        println("FAIL: the builder has ${bld.count(b)} entries, want 2")
+        exit(1)
+    }
+    println("PASS: a where-contracted setter got the block's _ctx")
+}
