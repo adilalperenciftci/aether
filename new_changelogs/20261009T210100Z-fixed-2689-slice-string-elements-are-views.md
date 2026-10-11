@@ -10,4 +10,8 @@
   borrows it, so moving elements through a local
   (`t = s[0]; s[0] = s[1]; s[1] = t`) moves the pointers and keeps none,
   and the local is valid only while the element is; returned or added to
-  a container, the local is copied in turn (#2689).
+  a container, the local is copied in turn. A store into a slice element
+  frees nothing and hands the storage what it stores, so moving an element
+  through a copy (a function returning `s[i]`, stored back over another
+  element) leaks the element it replaces; move elements through a local
+  (#2689).
