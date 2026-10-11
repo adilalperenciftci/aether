@@ -8249,6 +8249,19 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                         }
                         int expected_is_fnptr_form = (expected == TYPE_FUNCTION &&
                             expected_type && expected_type->is_fnptr);
+                        /* #2677: an extern's typed fn-pointer parameter
+                         * (`fn(int)`) is a plain C function pointer: C has
+                         * no closures, so a bare function passed to it goes
+                         * in as its address, the C `as fn(int)` produces.
+                         * Read from the extern's own parameter type, since
+                         * `expected_type` is kept to user-function params
+                         * (see the va_list note below). As a closure it
+                         * named an adapter nothing emitted, and handed C an
+                         * _AeClosure where it reads a function pointer. */
+                        if (!expected_is_fnptr_form && expected == TYPE_FUNCTION && !expected_type) {
+                            Type* ext_fn = lookup_extern_param_type(gen, c_func_name, arg_printed);
+                            if (ext_fn && ext_fn->is_fnptr) expected_is_fnptr_form = 1;
+                        }
                         /* #1033: tuple literal → by-value `_tuple_*` struct
                          * for a tuple-typed extern parameter. The element
                          * list comes from the registry's full param type,
