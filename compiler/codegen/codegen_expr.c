@@ -8174,8 +8174,15 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                                      * where n >= 0)` look like three
                                      * parameters, so the bare `set_n(3)` in a
                                      * trailing block got no _ctx and gcc
-                                     * reported too few arguments (#2706). */
-                                    declared_params = fn_param_count(fdef);
+                                     * reported too few arguments (#2706).
+                                     * An extern's children are all
+                                     * parameters, as its registry entry
+                                     * counts them; fn_param_count knows
+                                     * only a definition's parameter nodes
+                                     * and would count none. */
+                                    declared_params = fdef->type == AST_EXTERN_FUNCTION
+                                        ? fdef->child_count
+                                        : fn_param_count(fdef);
                                     break;
                                 }
                             }
