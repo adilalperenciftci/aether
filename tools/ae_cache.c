@@ -757,6 +757,7 @@ typedef struct {
     size_t full_len, full_cap;
     char* rel;
     size_t rel_len, rel_cap;
+    int headers_only;   /* hash `.h` files only (hash_header_tree, #2707) */
 } TreeWalk;
 
 /* `sep` then `name` appended to a path buffer grown as needed. 0 when out
@@ -780,10 +781,15 @@ static int walk_path_push(char** buf, size_t* len, size_t* cap,
     return 1;
 }
 
+static int walk_is_header(const char* name) {
+    size_t n = strlen(name);
+    return n > 2 && strcmp(name + n - 2, ".h") == 0;
+}
+
 static int walk_is_source(const char* name) {
     size_t n = strlen(name);
     return (n > 3 && strcmp(name + n - 3, ".ae") == 0) ||
-           (n > 2 && (strcmp(name + n - 2, ".c") == 0 || strcmp(name + n - 2, ".h") == 0));
+           (n > 2 && strcmp(name + n - 2, ".c") == 0) || walk_is_header(name);
 }
 
 static void walk_dir(TreeWalk* w, int depth);
@@ -796,7 +802,7 @@ static void walk_entry(TreeWalk* w, const char* name, int is_dir, int depth) {
         else walk_dir(w, depth + 1);
         return;
     }
-    if (!walk_is_source(name)) return;
+    if (w->headers_only ? !walk_is_header(name) : !walk_is_source(name)) return;
     if (w->count >= TREE_WALK_MAX_FILES) {
         w->incomplete = "has more than 4096 source files";
         return;
@@ -888,11 +894,13 @@ static void walk_dir(TreeWalk* w, int depth) {
 /* Fold the source files under `root` into `*acc`, adding their number to
  * `*count`. NULL when the walk saw every one; otherwise why it did not, and
  * the key must not be used. */
-static const char* hash_tree(const char* root, unsigned long long* acc, int* count) {
+static const char* hash_tree_kind(const char* root, unsigned long long* acc, int* count,
+                                  int headers_only) {
     TreeWalk w;
     memset(&w, 0, sizeof(w));
     w.acc = *acc;
     w.count = *count;
+    w.headers_only = headers_only;
     if (!walk_path_push(&w.full, &w.full_len, &w.full_cap, "", root) ||
         !walk_path_push(&w.rel, &w.rel_len, &w.rel_cap, "", "")) {
         w.incomplete = "could not be walked (out of memory)";
@@ -904,6 +912,10 @@ static const char* hash_tree(const char* root, unsigned long long* acc, int* cou
     *acc = w.acc;
     *count = w.count;
     return w.incomplete;
+}
+
+static const char* hash_tree(const char* root, unsigned long long* acc, int* count) {
+    return hash_tree_kind(root, acc, count, 0);
 }
 
 int extras_append(char* list, size_t cap, const char* path) {
@@ -1203,6 +1215,34 @@ unsigned long long compute_cache_key(const char* ae_file,
         unsigned long long contrib_hash = hash_contrib_archives(tc.lib);
         if (contrib_hash)
             key_append(&key, ":contrib=%016llx", contrib_hash);
+    }
+
+    /* #2707: in a source tree, the runtime and std headers the generated C
+     * includes (aether_panic.h, aether_slice.h, the actor and module
+     * headers). They reach the binary without being in libaether.a or in
+     * aetherc, so editing one and running `make` left the key unchanged and
+     * `ae run` served the binary built against the old header: a test
+     * reported the old code's result. An installed toolchain's headers
+     * change only with an upgrade, which changes aetherc as well. Content,
+     * not mtime, for the reason the binaries above are hashed by content:
+     * about 120 files and 5 MB, measured at under 20 ms a build on Windows
+     * (a cache hit went from 127 to 145 ms), against the stale result a
+     * missed edit gives. */
+    if (tc.dev_mode && tc.src_root[0]) {
+        static const char* hdr_dirs[] = { "runtime", "std" };
+        unsigned long long hdr_acc = 1469598103934665603ULL;
+        int hdr_count = 0;
+        for (size_t d = 0; complete && d < sizeof(hdr_dirs) / sizeof(hdr_dirs[0]); d++) {
+            char* dir = str_join4(tc.src_root, strlen(tc.src_root), "/", hdr_dirs[d], "");
+            if (!dir) { key.oom = 1; break; }
+            const char* why = hash_tree_kind(dir, &hdr_acc, &hdr_count, 1);
+            if (why) {
+                if (tc.verbose) fprintf(stderr, "[cache] no key: %s %s\n", dir, why);
+                complete = 0;
+            }
+            free(dir);
+        }
+        if (complete) key_append(&key, ":hdr=%d:%016llx", hdr_count, hdr_acc);
     }
 
     if (extra_files && extra_files[0]) {
