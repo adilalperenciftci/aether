@@ -43,6 +43,11 @@ typedef struct Symbol {
     // which knows the joined type; this only makes the name readable after
     // the block.
     int branch_hoisted;
+    // #2683: a hoisted local named after a function, not yet bound in source
+    // order. A local's scope starts after its initializer, so until the
+    // checker reaches its first binding the name is still the function's:
+    // lookups pass over it. Cleared at that binding.
+    int hoist_pending;
     // #2516: a `const` (not a module `var`): its elements cannot be written.
     int is_const;
     struct Symbol* next;

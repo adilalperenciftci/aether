@@ -478,6 +478,39 @@ Variables are inferred from their initialization or usage context.
 
 **A local has one type: the one its first binding gave it.** A later bare assignment is an assignment, not a new variable, so `x = 5` then `x = "s"` (or `x = true`, `x = null`) is a compile error, *cannot re-bind 'x' as string: it was bound as int by its first assignment*, rather than a C error about `const char*`. Use a new name for the other value. A name first bound inside a branch or loop body and **used after it** is one variable for the whole function: it takes the numeric join of every binding (`if a { n = 1 } else { n = 4000000000 }` makes `n` a `long`; `f = 1.5` in one branch and `f = 2` in the other keeps `f` a `float`), and a binding of another kind anywhere in the function, or of another struct or pointer type, is the same compile error: *cannot bind 'v' as int: it is bound as string in another branch or loop body of this function*. A local of a `while` body is declared before the loop, and a name both arms of an `if`/`else` bind is declared before the `if`, so each is one variable whether or not it is used after them: `view = p as *Apple` in one `while` and `view = p as *Pear` in the next is that error, where a bare `ptr` or `null` binding would fit either. A name bound in the bodies of separate `if`s or `for` loops and used only inside them is a separate variable per body, except a `string` local, which is always one variable for the whole function, as its heap tracker is. The conversions the [table below](#casting-between-types) permits still apply at a re-bind, and the local keeps its first type: after `f = 1.5`, `f = 2` stores `2.0` and `f` stays a `float`; after `int x = 0`, `x = 2.5` stores `2`. A `string` accepts `null` (it is a nullable `const char*`), and a value that would not fit an *inferred* `int` (a 64-bit integer, a `uint32`, a float) is the narrowing error described there.
 
+**A local's scope starts after its initializer.** In `count = count() + 1` the call is the function `count`, and from that binding on, to the end of the function, `count` is the local. So is a local declared ahead of its binding because both arms of an `if` bind it: until the checker reaches the first binding in source order, the name is still the function's. A reference that comes before the binding, such as the function passed as a value, is the function too:
+
+```aether,run
+count() -> int { return 41 }
+
+apply(f: fn() -> int) -> int { return f() }
+
+main() {
+    first = apply(count)
+    count = count() + 1
+    println("${first} ${count}")
+}
+```
+```output
+41 42
+```
+
+After the binding the function cannot be called by that name in the function, since the name is the local's; the call is an error that says so:
+
+```aether,fails
+count() -> int { return 41 }
+
+main() {
+    count = count() + 1
+    again = count()
+    println("${count} ${again}")
+}
+// error[E0301]: 'count' is a local here, which hides the function 'count'
+// help: a local's scope starts after its initializer and lasts to the end of
+// the function, so the function cannot be called as 'count' here; give the
+// local another name
+```
+
 **A statement ends at its line.** `foo` on a line of its own is an expression statement; `bar = 2` on the next line is a separate binding, not the declaration `foo bar = 2`. The binding name of a typed declaration (`Pair p`, `size_t n = ...`, `uint32[4] xs`) is written on the type's line.
 
 ### Casting between types
@@ -3449,10 +3482,9 @@ An error stops the build and prints its code, `error[E0301]: ...`, with the sour
 | `E0100` | Syntax: the source does not parse, or a reserved word stands where a name must |
 | `E0200` | Type mismatch, and the other type rules (a cast the types cannot justify, `string + string`) |
 | `E0300` | Undefined variable |
-| `E0301` | Undefined function, or a function of a module the calling module does not import |
+| `E0301` | Undefined function, a function of a module the calling module does not import, or a function a local of its name hides ([a local's scope](#variables)) |
 | `E0303` | A name the module does not export |
 | `E0304` | A name hidden in this scope by `hide` or `seal except` ([hide and seal](hide-and-seal.md)) |
-| `E0400` | A name defined where it conflicts: a local named after the function its own initializer calls (`helper = helper() + 1`), since from that declaration on the name means the local |
 | `E0600` | An actor rule, such as a closure in a handler writing the actor's state |
 | `E0700` | Missing return: control can reach the end of a function whose result is not void ([Returning on every path](#returning-on-every-path-e0700)) |
 

@@ -1,10 +1,73 @@
+import std.list
+import std.math(sqrt)
+
 helper() -> int { return 41 }
+
+label() -> string { return "L" }
+
+twice(x: int) -> int { return x * 2 }
+
+@extern("abs") magnitude(x: int) -> int
+
+apply(f: fn() -> int) -> int { return f() }
 
 user() -> int {
     helper = helper() + 1
     return helper
 }
 
+// Written to after its binding, in place.
+user_compound() -> int {
+    helper = helper() + 1
+    helper += 1
+    return helper
+}
+
+user_value() -> int {
+    first = apply(helper)
+    helper = first + 1
+    return helper
+}
+
+// A string local, bound in both arms of an if.
+pick(c: int) -> string {
+    if c > 0 {
+        label = "${label()}!"
+    } else {
+        label = "none"
+    }
+    return label
+}
+
+// A closure local whose own body calls the function: the closure is part
+// of the initializer, so the call is the function's.
+use_twice() -> int {
+    twice = | x: int | -> twice(x) + 1
+    return twice(3)
+}
+
+// A loop's local read before its binding (the previous pass's value) names
+// no function, so it keeps its name.
+carry() -> int {
+    i = 0
+    total = 0
+    while i < 3 {
+        if i > 0 {
+            total = total + prev
+        }
+        prev = i * 10
+        i = i + 1
+    }
+    return total
+}
+
 main() {
-    println("${user()}")
+    xs = list.new()
+    list.add(xs, "a")
+    // The C name of `list.size` is `list_size`.
+    list_size = list.size(xs)
+    sqrt = sqrt(16.0)
+    magnitude = magnitude(-5)
+    println("${user()} ${user_compound()} ${user_value()} ${pick(1)} ${pick(0)} ${use_twice()}")
+    println("${list_size} ${sqrt} ${magnitude} ${carry()}")
 }

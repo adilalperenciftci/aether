@@ -1,5 +1,5 @@
 import shadowlib
 
 main() {
-    println("${shadowlib.user()}")
+    println("${shadowlib.user()} ${shadowlib.user_value()} ${shadowlib.user_branch(1)} ${shadowlib.user_closure()}")
 }

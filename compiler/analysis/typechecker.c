@@ -301,6 +301,7 @@ void add_symbol(SymbolTable* table, const char* name, Type* type, int is_actor, 
     symbol->inferred_in = NULL;
     symbol->walk_id = 0;
     symbol->branch_hoisted = 0;
+    symbol->hoist_pending = 0;
     symbol->is_const = 0;
     symtab_link(table, symbol);
 }
@@ -362,6 +363,10 @@ static Symbol* lookup_symbol_in(SymbolTable* table, const char* name, const char
     // Local bindings always win — `hide` and `seal except` only block
     // resolution that would walk OUT of this scope into a parent.
     Symbol* symbol = lookup_symbol_local(table, name);
+    /* #2683: a hoisted local not yet bound in source order does not hide
+     * the function of its name (see Symbol.hoist_pending); the walk goes on
+     * outward to it. */
+    if (symbol && symbol->hoist_pending) symbol = NULL;
     /* The program's own top-level `var`s are the program's: a module's code
      * (a merged body, table->merged_from) never resolves to one. A module's
      * own globals are merged under `<ns>_name`, so a bare name there that
@@ -475,6 +480,7 @@ void add_module_alias(SymbolTable* table, const char* alias, const char* module_
     symbol->inferred_in = NULL;
     symbol->walk_id = 0;
     symbol->branch_hoisted = 0;
+    symbol->hoist_pending = 0;
     symbol->is_const = 0;
     symtab_link(table, symbol);
 }
@@ -7196,7 +7202,26 @@ static void declare_hoisted_local(SymbolTable* table, const char* name, Type* t)
     Type* joined = hoist_join_type(g_tc_fn_body, name, t);
     add_symbol(table, name, joined ? joined : clone_type(t), 0, 0, 0);
     Symbol* s = lookup_symbol_local(table, name);
-    if (s) s->branch_hoisted = 1;
+    if (s) {
+        s->branch_hoisted = 1;
+        /* #2683: declared ahead of its first binding, it must not hide a
+         * function of its name before that binding (its own initializer
+         * included): `if c { label = label() } else { ... }`. */
+        s->hoist_pending = g && g->is_function;
+    }
+}
+
+/* #2683: the checker has reached the first binding of `name` (its
+ * initializer checked): a hoisted local of that name is a local from here
+ * on. */
+static void activate_hoisted_local(SymbolTable* table, const char* name) {
+    for (SymbolTable* t = table; t && name; t = t->parent) {
+        Symbol* s = lookup_symbol_local(t, name);
+        if (s) {
+            if (s->hoist_pending) s->hoist_pending = 0;
+            return;
+        }
+    }
 }
 
 /* #2611: is a binding of type `here`, in a sibling branch or loop body of a
@@ -7519,21 +7544,6 @@ static int rhs_returns_void_via_bare_fn(ASTNode* rhs, SymbolTable* table) {
     return 0;
 }
 
-/* #2683: a call by `name` in an initializer, outside any closure in it
- * (a closure runs later, when a local of that name may be the one it means),
- * or NULL. */
-static ASTNode* initializer_calls_name(ASTNode* node, const char* name) {
-    if (!node || !name) return NULL;
-    if (node->type == AST_CLOSURE) return NULL;
-    if (node->type == AST_FUNCTION_CALL && node->value && strcmp(node->value, name) == 0)
-        return node;
-    for (int i = 0; i < node->child_count; i++) {
-        ASTNode* hit = initializer_calls_name(node->children[i], name);
-        if (hit) return hit;
-    }
-    return NULL;
-}
-
 int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
     if (!stmt) return 0;
 
@@ -7638,36 +7648,6 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                 // Has initializer
                 ASTNode* init = stmt->children[0];
 
-                /* #2683: `helper = helper() + 1`, a new local named after the
-                 * function its own initializer calls. In C a declaration is
-                 * in scope in its own initializer, so the call reached the
-                 * int (gcc: "called object 'helper' is not a function"); in
-                 * an imported module the call was left unrenamed and the
-                 * merged program had no `helper` (E0301); checked on its own
-                 * the module passed. One answer for all three: rejected,
-                 * naming the conflict. Only when this declares the local: a
-                 * name already bound to a variable is an assignment. */
-                if (stmt->value) {
-                    Symbol* prior = lookup_symbol(table, stmt->value);
-                    ASTNode* self_call = (!prior || prior->is_function)
-                        ? initializer_calls_name(init, stmt->value) : NULL;
-                    if (self_call) {
-                        char msg[320], hint[320];
-                        snprintf(msg, sizeof(msg),
-                                 "the local '%s' is named after the function '%s' "
-                                 "its own initializer calls",
-                                 stmt->value, stmt->value);
-                        snprintf(hint, sizeof(hint),
-                                 "from this declaration on, '%s' names the local, so "
-                                 "the call cannot reach the function; give the local "
-                                 "another name",
-                                 stmt->value);
-                        type_error_code_hint(msg, hint, self_call->line, self_call->column,
-                                             AETHER_ERR_REDEFINITION);
-                        return 0;
-                    }
-                }
-
                 /* Reading the value of a call that yields none. The callee
                  * lowers to C `void`, so this reads the return register:
                  * stack residue, different every run, and silent today. See
@@ -7704,6 +7684,9 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                 } else {
                     typecheck_expression(init, table);
                 }
+                /* #2683: the initializer read the name before the local
+                 * existed; from here on it is the local. */
+                activate_hoisted_local(table, stmt->value);
                 /* #2623: a named function bound to a typed C function
                  * pointer is its address, as it is passed to a parameter of
                  * that type or stored in a field of one (#1240). Read as a
@@ -11598,6 +11581,28 @@ int typecheck_function_call(ASTNode* call, SymbolTable* table) {
 
     if (!symbol || !symbol->is_function) {
         char error_msg[256];
+        /* #2683: a local bound earlier in the body hides the function of
+         * its name from that binding on. "Undefined function", with its
+         * spelling hint, pointed away from the function defined above. */
+        if (symbol && call->value && !strchr(call->value, '.')) {
+            SymbolTable* root = table;
+            while (root->parent) root = root->parent;
+            Symbol* fn = lookup_symbol_local(root, call->value);
+            if (fn && fn->is_function) {
+                char hint[384];
+                snprintf(error_msg, sizeof(error_msg),
+                         "'%s' is a local here, which hides the function '%s'",
+                         call->value, call->value);
+                snprintf(hint, sizeof(hint),
+                         "a local's scope starts after its initializer and lasts to the end "
+                         "of the function, so the function cannot be called as '%s' here; "
+                         "give the local another name",
+                         call->value);
+                type_error_code_hint(error_msg, hint, call->line, call->column,
+                                     AETHER_ERR_UNDEFINED_FUNC);
+                return 0;
+            }
+        }
         // Check if this is a visibility rejection (not-exported) rather than truly undefined
         if (call->value && strchr(call->value, '.') && global_module_registry) {
             char* tmp = strdup(call->value);

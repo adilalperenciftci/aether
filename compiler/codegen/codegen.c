@@ -5663,7 +5663,9 @@ void generate_main_function(CodeGenerator* gen, ASTNode* main) {
 // member of the group keeps that namespace internally consistent:
 //   values — AST_IDENTIFIER (reads, assignment/destructure lvalues),
 //            AST_VARIABLE_DECLARATION (locals, for-loop vars, params),
-//            AST_PATTERN_VARIABLE (match bindings, pattern params)
+//            AST_PATTERN_VARIABLE (match bindings, pattern params),
+//            AST_COMPOUND_ASSIGNMENT (`x += 1`, target in ->value),
+//            AST_CLOSURE_PARAM (closure parameters)
 //   fields — AST_STRUCT_FIELD / AST_MESSAGE_FIELD (declarations),
 //            AST_ASSIGNMENT (struct/message constructor field — the parser
 //              builds every AST_ASSIGNMENT as a constructor field-init; a
@@ -5715,6 +5717,11 @@ static void mangle_value_idents_in(ASTNode* node, ASTNode* program) {
         case AST_IDENTIFIER:
         case AST_VARIABLE_DECLARATION:
         case AST_PATTERN_VARIABLE:
+        /* #2738: a compound assignment names its target in ->value, and a
+         * closure parameter binds one; left out, `short += 2` wrote a bare
+         * `short` while the declaration became `ae_short`. */
+        case AST_COMPOUND_ASSIGNMENT:
+        case AST_CLOSURE_PARAM:
         case AST_STRUCT_FIELD:
         case AST_MESSAGE_FIELD:
         case AST_ASSIGNMENT:
@@ -5771,6 +5778,224 @@ void erase_string_retype_casts(ASTNode* node) {
 
 static void mangle_keyword_value_idents(ASTNode* program) {
     mangle_value_idents_in(program, program);
+}
+
+/* #2683: a local's scope starts after its initializer. In
+ *
+ *     helper = helper() + 1
+ *
+ * the call is the function `helper`, and from this binding on `helper` is the
+ * local, as `ae check` resolves it; so is any earlier reference in the body,
+ * a function value passed before the binding, say. C puts a declaration in
+ * scope inside its own initializer, so `int helper = helper() + 1;` called
+ * the int ("called object 'helper' is not a function"), and a local hoisted
+ * ahead of its binding hid the function from every earlier reference too.
+ * Such a local is given a C name of its own, `ae_local_<name>`, from its
+ * first binding to the end of the body: every value node of that name after
+ * it (reads, writes, a compound assignment, a closure parameter or pattern
+ * variable that rebinds it, a call through it when it holds a closure).
+ *
+ * Only when a reference the function could own comes first, in source order,
+ * so every other local keeps its spelling, and a loop's local read before
+ * the binding the previous pass made (no function of its name) never counts.
+ * "Could own" errs wide among the program's functions and externs: the
+ * reference's own name, the `<module>_<name>` C name of a dotted call
+ * (`list.size` is `list_size`), the part after the dot, and the C symbol of
+ * an `@extern` of any of those. A rename that was not needed changes nothing
+ * a program can see. A write to a module variable or an actor's state is
+ * not a local, and keeps its name. Both walks visit a node's children before
+ * the node, so a binding's initializer comes before the binding. */
+typedef struct {
+    const char** names;  /* interned (cg_intern), never freed one by one */
+    int count, cap;
+} NameSet;
+
+static int nameset_has(const NameSet* s, const char* name) {
+    for (int i = 0; name && i < s->count; i++)
+        if (strcmp(s->names[i], name) == 0) return 1;
+    return 0;
+}
+
+static void nameset_add(NameSet* s, const char* name) {
+    if (!name || !name[0] || nameset_has(s, name)) return;
+    if (s->count == s->cap) {
+        s->cap = s->cap ? s->cap * 2 : 16;
+        s->names = (const char**)aether_xrealloc((void*)s->names, (size_t)s->cap * sizeof(*s->names));
+    }
+    s->names[s->count++] = cg_intern(name);
+}
+
+static void nameset_free(NameSet* s) {
+    free((void*)s->names);
+    s->names = NULL;
+    s->count = s->cap = 0;
+}
+
+static int is_value_name_node(const ASTNode* n) {
+    return n->type == AST_IDENTIFIER || n->type == AST_VARIABLE_DECLARATION ||
+           n->type == AST_PATTERN_VARIABLE || n->type == AST_COMPOUND_ASSIGNMENT ||
+           n->type == AST_CLOSURE_PARAM;
+}
+
+static int is_binding_node(const ASTNode* n) {
+    return n->type == AST_VARIABLE_DECLARATION || n->type == AST_PATTERN_VARIABLE ||
+           n->type == AST_CLOSURE_PARAM;
+}
+
+/* The functions a reference could name: the program's functions, and the
+ * externs the generated C declares (the program's own and its imports',
+ * as the extern declarations below emit them). */
+typedef struct {
+    NameSet names;      /* every function and extern, by its Aether name */
+    ASTNode** externs;
+    int extern_count, extern_cap;
+} ShadowFns;
+
+static void shadow_fns_add_extern(ShadowFns* f, ASTNode* ext) {
+    if (!ext || !ext->value) return;
+    nameset_add(&f->names, ext->value);
+    if (f->extern_count == f->extern_cap) {
+        f->extern_cap = f->extern_cap ? f->extern_cap * 2 : 32;
+        f->externs = (ASTNode**)aether_xrealloc((void*)f->externs,
+                                                (size_t)f->extern_cap * sizeof(*f->externs));
+    }
+    f->externs[f->extern_count++] = ext;
+}
+
+static void shadow_fns_free(ShadowFns* f) {
+    nameset_free(&f->names);
+    free((void*)f->externs);
+    f->externs = NULL;
+    f->extern_count = f->extern_cap = 0;
+}
+
+/* The extern named `name`, or NULL. */
+static ASTNode* shadow_fns_extern(const ShadowFns* f, const char* name) {
+    for (int i = 0; name && i < f->extern_count; i++)
+        if (strcmp(f->externs[i]->value, name) == 0) return f->externs[i];
+    return NULL;
+}
+
+/* Every C spelling a reference to `v` could have that names one of `fns`,
+ * into `out`. A name that is no function, a local of a loop read before the
+ * binding the previous pass made, is not one a function could own. */
+static void add_c_spellings(const ShadowFns* fns, NameSet* out, const char* v) {
+    const char* forms[3];
+    int nf = 0;
+    forms[nf++] = v;
+    forms[nf++] = codegen_normalise_callee(v);
+    const char* dot = strrchr(v, '.');
+    if (dot && dot[1]) forms[nf++] = dot + 1;
+    for (int i = 0; i < nf; i++) {
+        if (!nameset_has(&fns->names, forms[i])) continue;
+        nameset_add(out, forms[i]);
+        ASTNode* ext = shadow_fns_extern(fns, forms[i]);
+        const char* sym = ext ? extern_c_symbol(ext) : NULL;
+        if (sym) nameset_add(out, sym);
+    }
+}
+
+typedef struct {
+    const ShadowFns* fns;
+    const NameSet* fixed;   /* module vars, an actor's state: never locals */
+    NameSet seen;           /* names bound so far */
+    NameSet early;          /* C spellings of references made before their name was bound */
+    NameSet renamed;        /* locals to rename */
+} LocalShadowScan;
+
+static void scan_local_shadows(ASTNode* node, LocalShadowScan* s) {
+    if (!node) return;
+    for (int i = 0; i < node->child_count; i++) scan_local_shadows(node->children[i], s);
+    if (!node->value) return;
+    if ((node->type == AST_FUNCTION_CALL || node->type == AST_IDENTIFIER) &&
+        !nameset_has(&s->seen, node->value)) {
+        add_c_spellings(s->fns, &s->early, node->value);
+    }
+    if (is_binding_node(node)) {
+        if (node->type == AST_VARIABLE_DECLARATION && !nameset_has(&s->seen, node->value) &&
+            nameset_has(&s->early, node->value) && !nameset_has(s->fixed, node->value)) {
+            nameset_add(&s->renamed, node->value);
+        }
+        nameset_add(&s->seen, node->value);
+    }
+}
+
+/* Rename `from` to `to` in every value node after the first binding of
+ * `from`, and in calls through it. `*active` turns on at that binding,
+ * after its initializer. */
+static void rename_local_after_binding(ASTNode* node, const char* from, const char* to,
+                                       int* active) {
+    if (!node) return;
+    for (int i = 0; i < node->child_count; i++)
+        rename_local_after_binding(node->children[i], from, to, active);
+    if (!node->value || strcmp(node->value, from) != 0) return;
+    if (!*active) {
+        if (node->type != AST_VARIABLE_DECLARATION) return;
+        *active = 1;
+    } else if (!is_value_name_node(node) && node->type != AST_FUNCTION_CALL) {
+        return;
+    }
+    free(node->value);
+    node->value = prefixed_name("", to);
+}
+
+static void rename_locals_shadowing_functions_in(ASTNode* scope, const ShadowFns* fns,
+                                                 const NameSet* fixed) {
+    LocalShadowScan s = {fns, fixed, {0}, {0}, {0}};
+    scan_local_shadows(scope, &s);
+    for (int i = 0; i < s.renamed.count; i++) {
+        const char* from = s.renamed.names[i];
+        char* to = prefixed_name("ae_local_", from);
+        int active = 0;
+        rename_local_after_binding(scope, from, to, &active);
+        free(to);
+    }
+    nameset_free(&s.seen);
+    nameset_free(&s.early);
+    nameset_free(&s.renamed);
+}
+
+static void rename_locals_shadowing_functions(ASTNode* program) {
+    if (!program) return;
+    NameSet globals = {0};
+    ShadowFns fns = {{0}, NULL, 0, 0};
+    for (int i = 0; i < program->child_count; i++) {
+        ASTNode* c = program->children[i];
+        if (!c || !c->value) continue;
+        if (c->type == AST_VARIABLE_DECLARATION || c->type == AST_CONST_DECLARATION)
+            nameset_add(&globals, c->value);
+        else if (c->type == AST_FUNCTION_DEFINITION || c->type == AST_BUILDER_FUNCTION)
+            nameset_add(&fns.names, c->value);
+        else if (c->type == AST_EXTERN_FUNCTION)
+            shadow_fns_add_extern(&fns, c);
+        else if (c->type == AST_IMPORT_STATEMENT) {
+            AetherModule* mod = module_find(c->value);
+            for (int j = 0; mod && mod->ast && j < mod->ast->child_count; j++) {
+                ASTNode* d = mod->ast->children[j];
+                if (d && d->type == AST_EXTERN_FUNCTION) shadow_fns_add_extern(&fns, d);
+            }
+        }
+    }
+    for (int i = 0; fns.names.count > 0 && i < program->child_count; i++) {
+        ASTNode* c = program->children[i];
+        if (!c) continue;
+        if (c->type == AST_FUNCTION_DEFINITION || c->type == AST_MAIN_FUNCTION ||
+            c->type == AST_BUILDER_FUNCTION) {
+            rename_locals_shadowing_functions_in(c, &fns, &globals);
+        } else if (c->type == AST_ACTOR_DEFINITION) {
+            NameSet fixed = {0};
+            for (int g = 0; g < globals.count; g++) nameset_add(&fixed, globals.names[g]);
+            for (int k = 0; k < c->child_count; k++) {
+                ASTNode* st = c->children[k];
+                if (st && st->type == AST_STATE_DECLARATION && st->value)
+                    nameset_add(&fixed, st->value);
+            }
+            rename_locals_shadowing_functions_in(c, &fns, &fixed);
+            nameset_free(&fixed);
+        }
+    }
+    nameset_free(&globals);
+    shadow_fns_free(&fns);
 }
 
 /* #2292: the prefix the entry program's constants are emitted under. Unlike
@@ -6765,6 +6990,9 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     mangle_keyword_value_idents(program);
     rename_leading_underscore_functions(program);
     rename_extern_colliding_functions(program);
+    /* #2683: after the function renames, so a call's name is the one its
+     * C spelling is made from. */
+    rename_locals_shadowing_functions(program);
     /* The rename changed definition names, which are the index's keys,
        without changing the child count it is keyed on. */
     program_index_reset();

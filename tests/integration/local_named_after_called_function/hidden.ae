@@ -1,0 +1,13 @@
+helper() -> int { return 41 }
+
+// After the local is bound, `helper` is the local, so this call is an error
+// that says so.
+user() -> int {
+    helper = helper() + 1
+    again = helper()
+    return helper + again
+}
+
+main() {
+    println("${user()}")
+}

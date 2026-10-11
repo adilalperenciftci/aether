@@ -1,0 +1,22 @@
+// Regression (#2738): a local named after a C keyword is renamed for C
+// (#976), and so is every node that names it. A compound assignment carries
+// its target in the node itself, and a closure parameter binds one; both were
+// left out, so `short += 2` wrote a bare `short` beside the declared
+// `ae_short` and gcc failed.
+
+extern exit(code: int)
+
+main() {
+    short = 1
+    short += 2
+    if short != 3 {
+        println("FAIL: short is ${short}, want 3")
+        exit(1)
+    }
+    f = | short: int | -> short + 1
+    if f(4) != 5 {
+        println("FAIL: a closure parameter named short gave ${f(4)}, want 5")
+        exit(1)
+    }
+    println("PASS: keyword-named locals under a compound assignment and as a closure parameter")
+}

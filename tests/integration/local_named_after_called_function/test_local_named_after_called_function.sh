@@ -2,10 +2,18 @@
 # #2683: `helper = helper() + 1`, a local named after the function its own
 # initializer calls, got three different answers: `ae check` of the module on
 # its own passed, the same code in a main file passed the checker and failed
-# in gcc ("called object 'helper' is not a function"), and an importing
-# program failed with E0301 "Undefined function 'helper'", which points away
-# from the problem. All three now report the same E0400 at the call; a local
-# named apart from the function builds and runs.
+# in gcc ("called object 'helper' is not a function", since a C declaration
+# is in scope in its own initializer), and an importing program failed with
+# E0301 "Undefined function 'helper'" (the merge left the call unrenamed).
+#
+# A local's scope starts after its initializer: the call is the function's,
+# every later `helper` the local's. Each path now builds and runs that way,
+# with the shapes around it: a function value passed before the binding, a
+# local bound in both arms of an if (declared ahead of them), a closure local
+# whose body calls the function, a compound assignment to the local, and C
+# names that differ from the Aether one (`list.size` is `list_size`, an
+# `@extern`, a selective import). A call through the local after its binding
+# is an error that says the local hides the function.
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
@@ -18,20 +26,18 @@ trap 'rm -rf "$TMP"' EXIT
 export AETHER_CACHE_DIR="$TMP/cache"
 cd "$SCRIPT_DIR" || exit 1
 
-expect_e0400() {   # <label> <ae args...>
-    label="$1"; shift
-    out="$("$AE" "$@" 2>&1)" && { echo "$out"; fail "$label: accepted"; }
-    echo "$out" | grep -q "error\[E0400\]: the local 'helper' is named after the function 'helper'" ||
-        { echo "$out"; fail "$label: not the E0400 naming the conflict"; }
-    echo "$out" | grep -q "E0301\|is not a function" && { echo "$out"; fail "$label: a misleading error too"; }
-}
+out="$("$AE" check lib/shadowlib/module.ae 2>&1)" || { echo "$out"; fail "the module checked on its own was rejected"; }
 
-expect_e0400 "the module checked on its own" check lib/shadowlib/module.ae
-expect_e0400 "a main file, checked" check mainfile.ae
-expect_e0400 "a main file, built" build mainfile.ae -o "$TMP/mainfile"
-expect_e0400 "an importing program, checked" check imported.ae
+out="$("$AE" run mainfile.ae 2>&1)" || { echo "$out"; fail "the main file did not build"; }
+want="42 43 42 L! none 7
+1 4 5 10"
+[ "$out" = "$want" ] || { echo "$out"; fail "the main file printed the wrong values"; }
 
-out="$("$AE" run renamed.ae 2>&1)" || { echo "$out"; fail "the renamed local does not build"; }
-[ "$out" = "42" ] || { echo "$out"; fail "the renamed local printed the wrong value"; }
+out="$("$AE" run imported.ae 2>&1)" || { echo "$out"; fail "the importing program did not build"; }
+[ "$out" = "42 42 42 42" ] || { echo "$out"; fail "the importing program printed the wrong values"; }
 
-echo "  [PASS] local_named_after_called_function: one E0400 wherever the function sits"
+out="$("$AE" check hidden.ae 2>&1)" && { echo "$out"; fail "a call through the local after its binding was accepted"; }
+echo "$out" | grep -q "error\[E0301\]: 'helper' is a local here, which hides the function 'helper'" ||
+    { echo "$out"; fail "the call through the local is not reported as hiding the function"; }
+
+echo "  [PASS] local_named_after_called_function: the call is the function's, wherever it sits"
