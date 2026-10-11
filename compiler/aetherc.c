@@ -1441,6 +1441,10 @@ int compile_source(const char* input_path, const char* output_path) {
         return 1;
     }
 
+    // Step 2.4: a legacy `export` changes nothing in the file it is
+    // written in; from here on its declarations are plain ones (#2699).
+    module_unwrap_entry_exports(program);
+
     // Step 2.5: Module Orchestration
     if (verbose_mode) printf("[Phase 2.5/5] Module resolution...\n");
     module_set_source_dir(input_path);

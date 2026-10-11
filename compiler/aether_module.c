@@ -2186,6 +2186,29 @@ static ASTNode* unwrap_export(ASTNode* node) {
     return node;
 }
 
+/* #2699: the wrapper used to stay in the file being compiled, and each pass
+ * walking its top-level definitions had to look through it. Most did not:
+ * an exported function missed the type checker's third pass (W1001, W1002,
+ * `@scoped`, Isolated[T]), return-type inference, the effect walk, the
+ * rename off a libaether C name, its C prototype and its place in a clause
+ * set; an exported constant was undeclared in the C and an exported actor
+ * could not be spawned. The merge unwraps what it takes from a module the
+ * same way. */
+void module_unwrap_entry_exports(ASTNode* program) {
+    if (!program) return;
+    for (int i = 0; i < program->child_count; i++) {
+        ASTNode* wrapper = program->children[i];
+        if (!wrapper || wrapper->type != AST_EXPORT_STATEMENT || wrapper->child_count == 0)
+            continue;
+        ASTNode* decl = wrapper->children[0];
+        /* `export name` names a definition rather than wrapping one. */
+        if (!decl || decl->type == AST_IDENTIFIER) continue;
+        program->children[i] = decl;
+        wrapper->child_count = 0;
+        free_ast_node(wrapper);
+    }
+}
+
 // Collect all function names defined in a module AST
 static int collect_module_func_names(ASTNode* mod_ast, const char** names, int max) {
     int count = 0;
