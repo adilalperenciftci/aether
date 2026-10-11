@@ -210,6 +210,17 @@ actor Counter {
     }
 }
 
+// A closure's arrow body ending in a statement returns only what that
+// statement does, as a function's does (#2697).
+closure_arrow_if() -> int {
+    h = | x: int | -> {
+        if x > 0 {
+            return x
+        }
+    }
+    return call(h, 1)
+}
+
 main() {
     println("checked, not run")
 }

@@ -63,8 +63,9 @@ expect "'trailing_block_falls'" 180
 expect "'arrow_if'" 187
 expect "a closure" 194
 expect "a closure" 207
+expect "a closure" 220
 
-want=25
+want=26
 got=$(grep -c "E0700" "$log")
 if [ "$got" -ne "$want" ]; then
     echo "  [FAIL] missing_return: $got E0700 errors, want $want"
@@ -95,5 +96,5 @@ if [ "$fail" -ne 0 ]; then
     sed 's/^/        /' "$log" | head -60
     exit 1
 fi
-echo "  [PASS] missing_return: 25 shapes that fall off their end rejected at their closing brace"
+echo "  [PASS] missing_return: 26 shapes that fall off their end rejected at their closing brace"
 exit 0

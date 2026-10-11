@@ -1029,6 +1029,59 @@ static ASTNode* parse_interp_string_expr(const char* raw, int line, int column) 
     return interp;
 }
 
+/* Whether the last statement of an arrow body `-> { ... }` is the value the
+ * body returns: an expression, a `match`, or a declaration (which returns
+ * what it binds). A control statement has no value to give: wrapped in a
+ * `return`, `if c { return 1 }` or a loop or a `switch` emitted C that did
+ * not compile. Left as it is, such a body is checked like a block body, and
+ * one that returns a value on some path must on every path (#2684). */
+static int arrow_tail_is_value(ASTNode* last) {
+    switch (last->type) {
+        case AST_RETURN_STATEMENT: case AST_IF_STATEMENT: case AST_WHILE_LOOP:
+        case AST_FOR_LOOP: case AST_SWITCH_STATEMENT: case AST_TRY_STATEMENT:
+        case AST_DEFER_STATEMENT: case AST_PANIC_STATEMENT: case AST_BREAK_STATEMENT:
+        case AST_CONTINUE_STATEMENT: case AST_WHEN_STATEMENT: case AST_BLOCK:
+            return 0;
+        default:
+            return 1;
+    }
+}
+
+/* The return an arrow body's value `-> expr` / `-> { ...; expr }` makes,
+ * marked `arrow_value`: whether a call has a value is not known here, and a
+ * call of a function that returns nothing has none, so the checker turns a
+ * marked return of one back into the call (#2697). */
+static ASTNode* arrow_value_return(ASTNode* value, int line, int column) {
+    ASTNode* ret = create_ast_node(AST_RETURN_STATEMENT, NULL, line, column);
+    ret->annotation = strdup("arrow_value");
+    add_child(ret, value);
+    return ret;
+}
+
+/* An arrow body `-> { ... }`, of a function or a closure alike (#2697),
+ * returns its last statement when that has a value to return. */
+static void arrow_block_return_tail(ASTNode* body) {
+    if (!body || body->child_count == 0) return;
+    ASTNode* last = body->children[body->child_count - 1];
+    if (!last || !arrow_tail_is_value(last)) return;
+    // Wrap the trailing expression as the implicit return (a trailing
+    // statement is not one, #2694). It goes in bare, out of its expression
+    // statement: that is the node an explicit `return expr` holds, and the
+    // passes that read a return's value (whether it hands over an owned
+    // string, which local escapes through it) do not look inside a
+    // statement. Wrapped, `msg = "n=${n}"` then `msg` freed msg at scope
+    // exit and returned the freed pointer, which -O0 and -O2 printed as
+    // different garbage (#2685).
+    ASTNode* value = last;
+    if (last->type == AST_EXPRESSION_STATEMENT &&
+        last->child_count == 1 && last->children[0]) {
+        value = last->children[0];
+        last->children[0] = NULL;  // detach, so freeing last keeps it
+        free_ast_node(last);
+    }
+    body->children[body->child_count - 1] = arrow_value_return(value, value->line, value->column);
+}
+
 // Parse closure expression: |params| -> expr  OR  |params| { block }
 // Also handles: || { block } (no params, double-pipe)
 ASTNode* parse_closure_expression(Parser* parser) {
@@ -1089,8 +1142,11 @@ ASTNode* parse_closure_expression(Parser* parser) {
         // Arrow body: |x| -> x * 2
         advance_token(parser); // consume '->'
         if (peek_token(parser) && peek_token(parser)->type == TOKEN_LEFT_BRACE) {
-            // |x| -> { multi-statement block }
+            // |x| -> { multi-statement block }: returns its last value, as a
+            // function's arrow body does. `|x| { ... }` returns nothing it
+            // does not `return`.
             ASTNode* body = parse_block(parser);
+            arrow_block_return_tail(body);
             add_child(closure, body);
         } else {
             // |x| -> single_expression
@@ -1100,8 +1156,7 @@ ASTNode* parse_closure_expression(Parser* parser) {
                 return NULL;
             }
             // Wrap in a block with implicit return
-            ASTNode* ret = create_ast_node(AST_RETURN_STATEMENT, NULL, expr->line, expr->column);
-            add_child(ret, expr);
+            ASTNode* ret = arrow_value_return(expr, expr->line, expr->column);
             ASTNode* body = create_ast_node(AST_BLOCK, NULL, expr->line, expr->column);
             add_child(body, ret);
             add_child(closure, body);
@@ -5441,24 +5496,6 @@ static int starts_return_type_then_body(Parser* parser) {
     return typed;
 }
 
-/* Whether the last statement of an arrow body `-> { ... }` is the value the
- * body returns: an expression, a `match`, or a declaration (which returns
- * what it binds). A control statement has no value to give: wrapped in a
- * `return`, `if c { return 1 }` or a loop or a `switch` emitted C that did
- * not compile. Left as it is, such a body is checked like a block body, and
- * one that returns a value on some path must on every path (#2684). */
-static int arrow_tail_is_value(ASTNode* last) {
-    switch (last->type) {
-        case AST_RETURN_STATEMENT: case AST_IF_STATEMENT: case AST_WHILE_LOOP:
-        case AST_FOR_LOOP: case AST_SWITCH_STATEMENT: case AST_TRY_STATEMENT:
-        case AST_DEFER_STATEMENT: case AST_PANIC_STATEMENT: case AST_BREAK_STATEMENT:
-        case AST_CONTINUE_STATEMENT: case AST_WHEN_STATEMENT: case AST_BLOCK:
-            return 0;
-        default:
-            return 1;
-    }
-}
-
 ASTNode* parse_function_definition(Parser* parser) {
     // Erlang-style pattern matching functions!
     // Syntax: 
@@ -5788,41 +5825,14 @@ ASTNode* parse_function_definition(Parser* parser) {
             // Multi-statement arrow body: -> { stmt1; stmt2; expr }
             // Parse as a block, but treat the last expression as implicit return
             ASTNode* body = parse_block(parser);
-            if (body && body->child_count > 0) {
-                // Return the last statement when it has a value to return
-                ASTNode* last = body->children[body->child_count - 1];
-                if (arrow_tail_is_value(last)) {
-                    // Wrap the trailing expression as the implicit return
-                    // (a trailing statement is not one, #2694). It goes in
-                    // bare, out of its expression statement: that is the
-                    // node an explicit `return expr` holds, and the passes
-                    // that read a return's value (whether it hands over an
-                    // owned string, which local escapes through it) do not
-                    // look inside a statement. Wrapped, `msg = "n=${n}"`
-                    // then `msg` freed msg at scope exit and returned the
-                    // freed pointer, which -O0 and -O2 printed as different
-                    // garbage (#2685).
-                    ASTNode* value = last;
-                    if (last->type == AST_EXPRESSION_STATEMENT &&
-                        last->child_count == 1 && last->children[0]) {
-                        value = last->children[0];
-                        last->children[0] = NULL;  // detach, so freeing last keeps it
-                        free_ast_node(last);
-                    }
-                    ASTNode* return_stmt = create_ast_node(AST_RETURN_STATEMENT, NULL,
-                                                           value->line, value->column);
-                    add_child(return_stmt, value);
-                    body->children[body->child_count - 1] = return_stmt;
-                }
-            }
+            arrow_block_return_tail(body);
             add_child(func, body);
         } else {
             // Single expression arrow body: -> expr
             ASTNode* body_expr = parse_expression(parser);
             if (body_expr) {
                 // Wrap in a return statement
-                ASTNode* return_stmt = create_ast_node(AST_RETURN_STATEMENT, NULL, 0, 0);
-                add_child(return_stmt, body_expr);
+                ASTNode* return_stmt = arrow_value_return(body_expr, 0, 0);
 
                 ASTNode* body_block = create_ast_node(AST_BLOCK, NULL, 0, 0);
                 add_child(body_block, return_stmt);

@@ -83,7 +83,14 @@ Aether closures use pipe-delimited parameters with arrow or block bodies:
 // Arrow closure (single expression, returns value)
 doubler = |x: int| -> x * 2
 
-// Block closure (multiple statements)
+// Arrow closure with a block: returns its last value, as a function's
+// `-> { ... }` body does
+scaled = |x: int| -> {
+    y = x * 3
+    y + 1
+}
+
+// Block closure (multiple statements; returns only what it `return`s)
 greeter = |name: string| {
     println("Hello ${name}")
 }

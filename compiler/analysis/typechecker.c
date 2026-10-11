@@ -9218,6 +9218,22 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                 else
                     typecheck_expression(stmt->children[i], table);
             }
+            /* #2697: an arrow body returns its last expression only when it
+             * has a value (#2694), and a call of a function that returns
+             * nothing has none, a builtin's (`println`) or the program's:
+             * `-> { note(x) }` ends with the call, as `{ note(x) }` does.
+             * The parser marked the return it wrote. */
+            if (stmt->annotation && strcmp(stmt->annotation, "arrow_value") == 0 &&
+                stmt->child_count == 1 && stmt->children[0] &&
+                stmt->children[0]->type == AST_FUNCTION_CALL &&
+                ((stmt->children[0]->node_type &&
+                  stmt->children[0]->node_type->kind == TYPE_VOID) ||
+                 call_yields_no_value(stmt->children[0], table))) {
+                stmt->type = AST_EXPRESSION_STATEMENT;
+                free(stmt->annotation);
+                stmt->annotation = NULL;
+                return 1;
+            }
             /* #1286: `return arr` from a `-> T[]` function returns a slice. */
             if (stmt->child_count == 1 && g_tc_return_type)
                 slice_coerce_slot(&stmt->children[0], g_tc_return_type, 0);

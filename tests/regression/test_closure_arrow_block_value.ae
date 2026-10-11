@@ -1,0 +1,120 @@
+// Regression (#2697): a closure's arrow body `|x| -> { ... }` returns its
+// last expression, as a function's `-> { ... }` does. It was parsed as a
+// plain block, so `|x| -> { x + 1 }` returned nothing and using its value
+// failed in the C compiler ("invalid use of void expression"). The rule is
+// the function's: the implicit return holds the bare expression (#2685), so
+// a string local returned last is handed over, not freed; a trailing
+// statement is not a value (#2694); and a call of a function that returns
+// nothing is not one either, so `-> { note(x) }` and `-> note(x)`, for a
+// function or a closure, end with the call and return nothing (they emitted
+// a C return of a void value).
+import std.string
+
+extern exit(code: int)
+
+var bad = 0
+var noted = 0
+
+check(label: string, got: int, want: int) {
+    if got != want {
+        println("FAIL ${label}: got ${got}, want ${want}")
+        bad = bad + 1
+    }
+}
+
+check_str(label: string, got: string, want: string) {
+    if !string.equals(got, want) {
+        println("FAIL ${label}: got '${got}', want '${want}'")
+        bad = bad + 1
+    }
+}
+
+note(x: int) {
+    noted = noted + x
+}
+
+apply(f: fn, x: int) -> int {
+    return call(f, x)
+}
+
+// A function's arrow bodies ending in a call that returns nothing.
+note_block(x: int) -> { note(x) }
+
+note_expr(x: int) -> note(x)
+
+main() {
+    inc = | x: int | -> { x + 1 }
+    check("expression", inc(4), 5)
+
+    sq = | x: int | -> {
+        y = x * x
+        y
+    }
+    check("local then name", sq(5), 25)
+
+    // A declaration last returns what it binds.
+    dbl = | x: int | -> { _y = x * 2 }
+    check("declaration", dbl(4), 8)
+
+    sign = | x: int | -> {
+        match x {
+            0 -> 0
+            _ -> 1
+        }
+    }
+    check("match", sign(0) + sign(9) * 10, 10)
+
+    clamp = | x: int | -> {
+        if x > 10 {
+            return 10
+        }
+        x
+    }
+    check("early return", clamp(3) + clamp(30) * 100, 1003)
+
+    five = || -> { 5 }
+    check("no parameters", five(), 5)
+
+    base = 40
+    add_base = | x: int | -> { x + base }
+    check("capture", add_base(2), 42)
+    check("passed as fn", apply(| x: int | -> { x + 100 }, 1), 101)
+
+    // The string a local holds, returned last, is the caller's.
+    label = | n: int | -> {
+        msg = "n=${n}"
+        msg
+    }
+    first = label(3)
+    second = label(44)
+    check_str("string", first, "n=3")
+    check_str("string again", second, "n=44")
+
+    // A trailing statement returns nothing: the closure runs it.
+    noted = 0
+    side = | x: int | -> {
+        if x > 0 {
+            note(x)
+        }
+    }
+    side(2)
+    check("trailing if", noted, 2)
+
+    // A call that returns nothing, last, returns nothing.
+    noted = 0
+    tail_call = | x: int | -> { note(x) }
+    tail_call(3)
+    check("tail call", noted, 3)
+    expr_call = | x: int | -> note(x)
+    expr_call(4)
+    check("expression call", noted, 7)
+    note_block(5)
+    note_expr(6)
+    check("function arrow calls", noted, 18)
+
+    if bad != 0 {
+        println("${bad} check(s) failed")
+        exit(1)
+    }
+    println("closure arrow bodies return their value: ok")
+}

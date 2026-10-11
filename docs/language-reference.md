@@ -859,7 +859,9 @@ clamp(x, lo, hi) -> {
 
 This allows complex logic in arrow-style functions without switching to block syntax.
 
-The last statement is the result only when it has a value: an expression, a `match`, or a declaration (`-> { x = a + b }` returns `a + b`). An `if`, a loop, a `switch`, a `try`, a `defer` or a `panic` there is a statement like any other, so a body ending in one has to `return` on every path its own way: `-> { if x > 0 { return 1 } }` is a [missing return](#returning-on-every-path-e0700) when `x` is not positive.
+The last statement is the result only when it has a value: an expression, a `match`, or a declaration (`-> { x = a + b }` returns `a + b`). An `if`, a loop, a `switch`, a `try`, a `defer` or a `panic` there is a statement like any other, so a body ending in one has to `return` on every path its own way: `-> { if x > 0 { return 1 } }` is a [missing return](#returning-on-every-path-e0700) when `x` is not positive. A call of a function that returns nothing (`println(...)`, or one of the program's with no result) has no value either: with such a `note`, `-> { note(x) }` and `-> note(x)` end with the call and return nothing.
+
+A closure's arrow body follows the same rule: `|x| -> { y = x * 2; y + 1 }` returns `y + 1`, as `|x| -> x * 2` returns `x * 2`. A closure with a plain block body, `|x| { ... }`, returns only what it `return`s.
 
 ### Multi-parameter Guards
 
