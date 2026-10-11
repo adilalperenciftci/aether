@@ -1,0 +1,10 @@
+exports(
+    helper, user
+)
+
+helper() -> int { return 41 }
+
+user() -> int {
+    helper = helper() + 1
+    return helper
+}

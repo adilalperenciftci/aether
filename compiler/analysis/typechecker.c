@@ -7519,6 +7519,21 @@ static int rhs_returns_void_via_bare_fn(ASTNode* rhs, SymbolTable* table) {
     return 0;
 }
 
+/* #2683: a call by `name` in an initializer, outside any closure in it
+ * (a closure runs later, when a local of that name may be the one it means),
+ * or NULL. */
+static ASTNode* initializer_calls_name(ASTNode* node, const char* name) {
+    if (!node || !name) return NULL;
+    if (node->type == AST_CLOSURE) return NULL;
+    if (node->type == AST_FUNCTION_CALL && node->value && strcmp(node->value, name) == 0)
+        return node;
+    for (int i = 0; i < node->child_count; i++) {
+        ASTNode* hit = initializer_calls_name(node->children[i], name);
+        if (hit) return hit;
+    }
+    return NULL;
+}
+
 int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
     if (!stmt) return 0;
 
@@ -7622,6 +7637,36 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
             if (stmt->child_count > 0) {
                 // Has initializer
                 ASTNode* init = stmt->children[0];
+
+                /* #2683: `helper = helper() + 1`, a new local named after the
+                 * function its own initializer calls. In C a declaration is
+                 * in scope in its own initializer, so the call reached the
+                 * int (gcc: "called object 'helper' is not a function"); in
+                 * an imported module the call was left unrenamed and the
+                 * merged program had no `helper` (E0301); checked on its own
+                 * the module passed. One answer for all three: rejected,
+                 * naming the conflict. Only when this declares the local: a
+                 * name already bound to a variable is an assignment. */
+                if (stmt->value) {
+                    Symbol* prior = lookup_symbol(table, stmt->value);
+                    ASTNode* self_call = (!prior || prior->is_function)
+                        ? initializer_calls_name(init, stmt->value) : NULL;
+                    if (self_call) {
+                        char msg[320], hint[320];
+                        snprintf(msg, sizeof(msg),
+                                 "the local '%s' is named after the function '%s' "
+                                 "its own initializer calls",
+                                 stmt->value, stmt->value);
+                        snprintf(hint, sizeof(hint),
+                                 "from this declaration on, '%s' names the local, so "
+                                 "the call cannot reach the function; give the local "
+                                 "another name",
+                                 stmt->value);
+                        type_error_code_hint(msg, hint, self_call->line, self_call->column,
+                                             AETHER_ERR_REDEFINITION);
+                        return 0;
+                    }
+                }
 
                 /* Reading the value of a call that yields none. The callee
                  * lowers to C `void`, so this reads the return register:

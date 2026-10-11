@@ -253,3 +253,5 @@ tests/integration/extern_hidden_state_eval_order/
 tests/integration/emit_header_layout/
 # #2677: own.ae links apply.c; its driver builds them together.
 tests/integration/extern_fnptr_bare_function/
+# #2683: mainfile.ae and imported.ae must not compile; the driver checks the diagnostic.
+tests/integration/local_named_after_called_function/

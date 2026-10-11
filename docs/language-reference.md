@@ -3452,6 +3452,7 @@ An error stops the build and prints its code, `error[E0301]: ...`, with the sour
 | `E0301` | Undefined function, or a function of a module the calling module does not import |
 | `E0303` | A name the module does not export |
 | `E0304` | A name hidden in this scope by `hide` or `seal except` ([hide and seal](hide-and-seal.md)) |
+| `E0400` | A name defined where it conflicts: a local named after the function its own initializer calls (`helper = helper() + 1`), since from that declaration on the name means the local |
 | `E0600` | An actor rule, such as a closure in a handler writing the actor's state |
 | `E0700` | Missing return: control can reach the end of a function whose result is not void ([Returning on every path](#returning-on-every-path-e0700)) |
 

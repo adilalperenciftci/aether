@@ -1,0 +1,5 @@
+import shadowlib
+
+main() {
+    println("${shadowlib.user()}")
+}
