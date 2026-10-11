@@ -6325,6 +6325,38 @@ static const char* c_include_dir_of(const char* file, size_t* len) {
     return file;
 }
 
+/* #2676: the system header of every libc function a program (or a module in
+ * its closure) declares with `extern` and codegen does not declare itself
+ * (libc_extern_header), once each. Guarded with __has_include, so a header a
+ * platform lacks (<sys/wait.h> on Windows) is simply absent and its
+ * functions undeclared there, as they would be in C. */
+static void emit_libc_extern_headers(CodeGenerator* gen, ASTNode* program) {
+    CgStrSet seen = { 0 };
+    int mods = global_module_registry ? global_module_registry->module_count : 0;
+    for (int m = -1; m < mods; m++) {
+        ASTNode* ast = m < 0 ? program
+                             : (global_module_registry->modules[m]
+                                    ? global_module_registry->modules[m]->ast : NULL);
+        if (!ast) continue;
+        for (int i = 0; i < ast->child_count; i++) {
+            ASTNode* c = ast->children[i];
+            if (!c || c->type != AST_EXTERN_FUNCTION || !c->value) continue;
+            const char* sym = extern_c_symbol(c);
+            const char* h = libc_extern_header(sym ? sym : c->value);
+            if (!h || !cg_strset_add(&seen, h, strlen(h))) continue;
+            fprintf(gen->output,
+                    "#if defined(__has_include)\n"
+                    "#  if __has_include(<%s>)\n"
+                    "#    include <%s>\n"
+                    "#  endif\n"
+                    "#else\n"
+                    "#  include <%s>\n"
+                    "#endif\n", h, h, h);
+        }
+    }
+    cg_strset_free(&seen);
+}
+
 static void emit_c_include_directives(CodeGenerator* gen, ASTNode* program) {
     /* Deduplicated by header name AND the directory it came from: two
      * modules may each ship an `api.h`, and a single `#include "api.h"`
@@ -6774,6 +6806,7 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     print_line(gen, "#include <stdint.h>");
     print_line(gen, "#include <time.h>");
     print_line(gen, "#include <setjmp.h>");
+    emit_libc_extern_headers(gen, program);
     print_line(gen, "#include \"aether_panic.h\"");
     print_line(gen, "#include \"aether_slice.h\"");   /* #1286 `T[]` fat pointer */
     /* Cons-cell sequence type — std.collections.string_seq.

@@ -148,6 +148,9 @@ enum {
 int is_owned_string_field_read(ASTNode* e);
 /* The C symbol `@extern("sym")` binds an extern to, or NULL. */
 const char* extern_c_symbol(const ASTNode* ext);
+/* The system header that declares a libc function whose `extern`
+ * declaration codegen skips, or NULL when the prelude includes it (#2676). */
+const char* libc_extern_header(const char* name);
 /* The runtime free a call to `fn` is ("string_free", "string_release",
  * "release"), under its own name or an `@extern` alias, or NULL. */
 const char* consuming_free_symbol(CodeGenerator* gen, const char* fn);

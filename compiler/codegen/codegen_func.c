@@ -849,56 +849,86 @@ int has_return_value(ASTNode* node) {
 // vs typed printf). The user's `extern foo(...)` is still useful — it
 // registers the function for type-aware call-site emission — but we
 // skip writing the C forward declaration. Issue #233.
-static int extern_name_is_libc_conflict(const char* name) {
-    if (!name) return 0;
-    static const char* libc_names[] = {
-        /* Process / signal */
-        "sleep", "usleep", "exit", "_exit", "abort", "atexit",
-        "fork", "wait", "waitpid", "execv", "execvp", "execve",
-        "getpid", "getppid", "getuid", "geteuid", "getgid", "getegid",
-        "signal", "kill", "raise",
-        /* Standard I/O */
-        "printf", "fprintf", "sprintf", "snprintf",
-        "vprintf", "vfprintf", "vsprintf", "vsnprintf",
-        "puts", "fputs", "gets", "fgets",
-        "getc", "putc", "getchar", "putchar", "ungetc",
-        "fopen", "fclose", "fflush", "freopen",
-        "fread", "fwrite", "fseek", "ftell", "rewind",
-        "feof", "ferror", "fileno", "perror", "clearerr",
-        /* Memory */
-        "malloc", "calloc", "realloc", "free",
-        /* String — note: strdup/strndup added; size_t-arg variants
-           like strstr/strchr also clash on prototype shape. */
-        "strlen", "strcmp", "strncmp", "strcpy", "strncpy",
-        "strcat", "strncat", "strdup", "strndup",
-        "strstr", "strchr", "strrchr", "strpbrk",
-        "strspn", "strcspn", "strtok", "strtok_r",
-        "strcasecmp", "strncasecmp",
-        "memcpy", "memset", "memmove", "memcmp", "memchr",
-        /* Number conversion */
-        "atoi", "atol", "atoll", "atof",
-        "strtol", "strtoul", "strtoll", "strtoull",
-        "strtod", "strtof",
-        "abs", "labs", "llabs",
-        /* Sort / search — fn-pointer params clash with Aether's
-           `ptr` lowering to `void*`. */
-        "qsort", "qsort_r", "bsearch",
-        /* Environment */
-        "getenv", "setenv", "putenv", "unsetenv",
-        /* POSIX file ops */
-        "open", "close", "read", "write", "lseek",
-        "dup", "dup2", "pipe",
-        "access", "isatty", "unlink", "rename", "mkdir", "rmdir",
-        "stat", "fstat", "lstat",
-        /* Time */
-        "time", "clock", "clock_gettime", "gettimeofday",
-        "localtime", "gmtime", "mktime", "strftime",
-        NULL
-    };
-    for (int i = 0; libc_names[i]; i++) {
-        if (strcmp(name, libc_names[i]) == 0) return 1;
+/* The C library functions whose declaration an `extern` of the same name
+ * does not emit: the system header's prototype is the canonical one, and
+ * Aether's spelling of it (`void sleep(int)` for libc's `unsigned int
+ * sleep(unsigned int)`) would conflict. Skipping is sound only when that
+ * header is in the translation unit, so each name maps to the header that
+ * declares it, and emit_libc_extern_headers (codegen.c) includes it for
+ * every skipped name a program declares; NULL is a header the prelude
+ * always includes (stdio.h, stdlib.h, string.h, time.h). `extern
+ * signal(...)` was skipped with no <signal.h> anywhere, and gcc 14 rejects
+ * the implicit declaration (#2676). */
+typedef struct { const char* name; const char* header; } LibcExtern;
+
+static const LibcExtern libc_externs[] = {
+    /* Process / signal */
+    { "sleep", "unistd.h" }, { "usleep", "unistd.h" },
+    { "exit", NULL }, { "_exit", "unistd.h" }, { "abort", NULL }, { "atexit", NULL },
+    { "fork", "unistd.h" }, { "wait", "sys/wait.h" }, { "waitpid", "sys/wait.h" },
+    { "execv", "unistd.h" }, { "execvp", "unistd.h" }, { "execve", "unistd.h" },
+    { "getpid", "unistd.h" }, { "getppid", "unistd.h" }, { "getuid", "unistd.h" },
+    { "geteuid", "unistd.h" }, { "getgid", "unistd.h" }, { "getegid", "unistd.h" },
+    { "signal", "signal.h" }, { "kill", "signal.h" }, { "raise", "signal.h" },
+    /* Standard I/O */
+    { "printf", NULL }, { "fprintf", NULL }, { "sprintf", NULL }, { "snprintf", NULL },
+    { "vprintf", NULL }, { "vfprintf", NULL }, { "vsprintf", NULL }, { "vsnprintf", NULL },
+    { "puts", NULL }, { "fputs", NULL }, { "gets", NULL }, { "fgets", NULL },
+    { "getc", NULL }, { "putc", NULL }, { "getchar", NULL }, { "putchar", NULL },
+    { "ungetc", NULL }, { "fopen", NULL }, { "fclose", NULL }, { "fflush", NULL },
+    { "freopen", NULL }, { "fread", NULL }, { "fwrite", NULL }, { "fseek", NULL },
+    { "ftell", NULL }, { "rewind", NULL }, { "feof", NULL }, { "ferror", NULL },
+    { "fileno", NULL }, { "perror", NULL }, { "clearerr", NULL }, { "rename", NULL },
+    /* Memory */
+    { "malloc", NULL }, { "calloc", NULL }, { "realloc", NULL }, { "free", NULL },
+    /* String: strdup/strndup and the size_t-argument functions like
+     * strstr/strchr clash on prototype shape too. */
+    { "strlen", NULL }, { "strcmp", NULL }, { "strncmp", NULL }, { "strcpy", NULL },
+    { "strncpy", NULL }, { "strcat", NULL }, { "strncat", NULL }, { "strdup", NULL },
+    { "strndup", NULL }, { "strstr", NULL }, { "strchr", NULL }, { "strrchr", NULL },
+    { "strpbrk", NULL }, { "strspn", NULL }, { "strcspn", NULL }, { "strtok", NULL },
+    { "strtok_r", NULL }, { "strcasecmp", "strings.h" }, { "strncasecmp", "strings.h" },
+    { "memcpy", NULL }, { "memset", NULL }, { "memmove", NULL }, { "memcmp", NULL },
+    { "memchr", NULL },
+    /* Number conversion */
+    { "atoi", NULL }, { "atol", NULL }, { "atoll", NULL }, { "atof", NULL },
+    { "strtol", NULL }, { "strtoul", NULL }, { "strtoll", NULL }, { "strtoull", NULL },
+    { "strtod", NULL }, { "strtof", NULL }, { "abs", NULL }, { "labs", NULL },
+    { "llabs", NULL },
+    /* Sort / search: fn-pointer parameters clash with Aether's `ptr`
+     * lowering to `void*`. */
+    { "qsort", NULL }, { "qsort_r", NULL }, { "bsearch", NULL },
+    /* Environment */
+    { "getenv", NULL }, { "setenv", NULL }, { "putenv", NULL }, { "unsetenv", NULL },
+    /* POSIX file operations */
+    { "open", "fcntl.h" }, { "close", "unistd.h" }, { "read", "unistd.h" },
+    { "write", "unistd.h" }, { "lseek", "unistd.h" }, { "dup", "unistd.h" },
+    { "dup2", "unistd.h" }, { "pipe", "unistd.h" }, { "access", "unistd.h" },
+    { "isatty", "unistd.h" }, { "unlink", "unistd.h" }, { "rmdir", "unistd.h" },
+    { "mkdir", "sys/stat.h" }, { "stat", "sys/stat.h" }, { "fstat", "sys/stat.h" },
+    { "lstat", "sys/stat.h" },
+    /* Time */
+    { "time", NULL }, { "clock", NULL }, { "clock_gettime", NULL },
+    { "gettimeofday", "sys/time.h" }, { "localtime", NULL }, { "gmtime", NULL },
+    { "mktime", NULL }, { "strftime", NULL },
+    { NULL, NULL }
+};
+
+static const LibcExtern* libc_extern_find(const char* name) {
+    if (!name) return NULL;
+    for (int i = 0; libc_externs[i].name; i++) {
+        if (strcmp(name, libc_externs[i].name) == 0) return &libc_externs[i];
     }
-    return 0;
+    return NULL;
+}
+
+static int extern_name_is_libc_conflict(const char* name) {
+    return libc_extern_find(name) != NULL;
+}
+
+const char* libc_extern_header(const char* name) {
+    const LibcExtern* e = libc_extern_find(name);
+    return e ? e->header : NULL;
 }
 
 // Generate extern C function declaration
