@@ -3435,6 +3435,15 @@ static Type* capture_sized_array_type(CodeGenerator* gen, const char* name,
     return (t && type_is_sized_array(t) && t->array_size > 0) ? t : NULL;
 }
 
+/* #2464: a closure's copy of the array `name` it captures, element by
+ * element. An array a `try` body writes is volatile (#2618), which memcpy's
+ * plain source pointer would not accept (#2691); each element is read as
+ * the array's type says it must be. */
+static void emit_capture_array_copy(CodeGenerator* gen, const char* name, Type* t) {
+    fprintf(gen->output, "for (int _ae_k = 0; _ae_k < %d; _ae_k++) _e->%s[_ae_k] = %s[_ae_k];",
+            t->array_size, name, name);
+}
+
 /* #2618: a closure that copies a string array whose elements are owned
  * (one that owns them, or a parameter viewing its caller's) takes a
  * reference to each element it copied, given back by the env's destructor,
@@ -3781,7 +3790,10 @@ static void emit_closure_env_typedef(CodeGenerator* gen, int ci) {
  * its prototype (emit_closure_declarations) and its definition
  * (emit_closure_definitions), which must agree. A promoted capture arrives
  * as the cell pointer, `ctype*`, which is also what the env field is. A
- * fixed-size array arrives as a pointer to its elements (#2464). */
+ * fixed-size array arrives as a pointer to its elements (#2464), read only
+ * and volatile: an array a `try` body writes has volatile elements, which a
+ * plain pointer would not accept (#2691), and a plain array converts to it
+ * as well. */
 static void emit_make_closure_params(CodeGenerator* gen, int ci) {
     char** captures = gen->closures[ci].captures;
     int cap_count = gen->closures[ci].capture_count;
@@ -3791,7 +3803,8 @@ static void emit_make_closure_params(CodeGenerator* gen, int ci) {
         const char* ctype = lookup_var_c_type(gen, captures[i], parent_func);
         Type* arr = capture_sized_array_type(gen, captures[i], parent_func);
         if (arr && !capture_is_promoted(gen, captures[i], parent_func)) {
-            fprintf(gen->output, "%s* %s", get_c_type(arr->element_type), captures[i]);
+            fprintf(gen->output, "%s const volatile* %s", get_c_type(arr->element_type),
+                    captures[i]);
             continue;
         }
         if (capture_is_promoted(gen, captures[i], parent_func)) {
@@ -3985,8 +3998,10 @@ void emit_closure_definitions(CodeGenerator* gen) {
             // new_string_len_something.md §2.
             char** prev_heap = gen->heap_string_vars;
             int prev_heap_count = gen->heap_string_var_count;
+            int* prev_heap_depths = gen->heap_string_var_try_depths;
             gen->heap_string_vars = NULL;
             gen->heap_string_var_count = 0;
+            gen->heap_string_var_try_depths = NULL;
             /* The escape sets belong to the body too, as a function clears
              * them at its start (codegen_func.c). Closures are emitted after
              * every function, so they inherited the last one's: main's
@@ -4217,6 +4232,9 @@ void emit_closure_definitions(CodeGenerator* gen) {
                 else emit_struct_disown(gen, owning, cname, 1);
                 push_struct_destroy_defer(gen, cname, p->node_type, p->line, p->column);
             }
+            /* #2690: a local the body's `try` writes is declared volatile,
+             * as in a function, whichever was emitted first. */
+            mark_try_clobbered_vars(gen, body);
             hoist_heap_string_trackers(gen, body);
             mark_escaped_heap_string_vars(gen, body);
             push_heap_string_exit_free_defers(gen, body);
@@ -4244,6 +4262,7 @@ void emit_closure_definitions(CodeGenerator* gen) {
     clear_seq_vars(gen);
             gen->heap_string_vars = prev_heap;
             gen->heap_string_var_count = prev_heap_count;
+            gen->heap_string_var_try_depths = prev_heap_depths;
             clear_escaped_string_vars(gen);
             gen->escaped_string_vars = prev_escaped;
             gen->escaped_string_var_count = prev_escaped_count;
@@ -4297,11 +4316,11 @@ void emit_closure_definitions(CodeGenerator* gen) {
                     fprintf(gen->output, "    _e->%s = (%s)aether_str_capture(%s);\n",
                             captures[i], ctype, captures[i]);
                 } else if (capture_sized_array_type(gen, captures[i], parent_func)) {
-                    /* #2464: an array does not assign; copy its bytes. */
-                    fprintf(gen->output, "    memcpy(_e->%s, %s, sizeof(_e->%s));",
-                            captures[i], captures[i], captures[i]);
-                    capture_string_array_take(gen, gen->closures[ci].closure_node, captures[i],
-                                              capture_sized_array_type(gen, captures[i], parent_func));
+                    /* #2464: an array does not assign; copy its elements. */
+                    fprintf(gen->output, "    ");
+                    Type* sat = capture_sized_array_type(gen, captures[i], parent_func);
+                    emit_capture_array_copy(gen, captures[i], sat);
+                    capture_string_array_take(gen, gen->closures[ci].closure_node, captures[i], sat);
                     fprintf(gen->output, "\n");
                 } else {
                     fprintf(gen->output, "    _e->%s = %s;\n", captures[i], captures[i]);
@@ -8842,15 +8861,24 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                     any_take = 1;
                 }
             }
+            /* #2688: a fixed-size array field given another array is filled
+             * once the literal is built (emit_struct_literal_array_field). */
+            int any_array_field = 0;
+            for (int i = 0; i < expr->child_count; i++) {
+                ASTNode* fi = expr->children[i];
+                if (fi && fi->type == AST_ASSIGNMENT &&
+                    struct_literal_field_takes_array(gen, expr->value, fi)) any_array_field = 1;
+            }
             /* When a variable is moved into a field, build the struct into a
              * temp inside a statement-expression, clear the moved-from vars'
              * heap flags, then yield the temp. Otherwise emit the literal
              * directly. */
-            if (any_moved || any_take) {
+            if (any_moved || any_take || any_array_field) {
                 fprintf(gen->output, "({ ");
                 for (int i = 0; any_take && i < expr->child_count; i++) {
                     if (take_own[i][0]) fprintf(gen->output, "int %s = 0; ", take_own[i]);
                 }
+                if (c_imported) fprintf(gen->output, "%s ", aether_c_tag(expr->value));
                 fprintf(gen->output, "%s _ae_slit = ", expr->value);
             }
             if (c_imported) fprintf(gen->output, "(%s %s){", aether_c_tag(expr->value), expr->value);
@@ -8898,6 +8926,8 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                                       fv->value && is_heap_string_var(gen, fv->value) &&
                                       alias_source_must_copy(gen, fv->value);
                         if (take_own && take_own[i][0]) emit_string_take(gen, fv, take_own[i], NULL);
+                        else if (struct_literal_field_takes_array(gen, expr->value, field_init))
+                            fprintf(gen->output, "{0}");   /* #2688: filled below */
                         else if (fv_copy) {
                             fprintf(gen->output, "aether_uniform_heap_str((const char*)(");
                             generate_expression(gen, fv);
@@ -8939,11 +8969,17 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                 }
             }
             fprintf(gen->output, "}");
-            if (any_moved || any_take) {
+            if (any_moved || any_take || any_array_field) {
                 /* #911: disown each moved-from variable so its function-exit
                  * `if (_heap_<v>)` free is a no-op (ownership now in the
                  * struct). Then yield the built struct. */
                 fprintf(gen->output, ";");
+                for (int i = 0; any_array_field && i < expr->child_count; i++) {
+                    ASTNode* fi = expr->children[i];
+                    if (fi && fi->type == AST_ASSIGNMENT &&
+                        struct_literal_field_takes_array(gen, expr->value, fi))
+                        emit_struct_literal_array_field(gen, expr->value, fi);
+                }
                 for (int i = 0; any_take && i < expr->child_count; i++) {
                     if (take_own[i][0])
                         fprintf(gen->output, " _ae_slit._heap_%s = %s;",
@@ -9328,11 +9364,10 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                         fprintf(gen->output, "_e->%s = (%s)aether_str_capture(%s); ",
                                 captures[i], ctype, captures[i]);
                     } else if (capture_sized_array_type(gen, captures[i], cl_parent_func)) {
-                        /* #2464: an array does not assign; copy its bytes. */
-                        fprintf(gen->output, "memcpy(_e->%s, %s, sizeof(_e->%s));",
-                                captures[i], captures[i], captures[i]);
-                        capture_string_array_take(gen, expr, captures[i],
-                                                  capture_sized_array_type(gen, captures[i], cl_parent_func));
+                        /* #2464: an array does not assign; copy its elements. */
+                        Type* sat = capture_sized_array_type(gen, captures[i], cl_parent_func);
+                        emit_capture_array_copy(gen, captures[i], sat);
+                        capture_string_array_take(gen, expr, captures[i], sat);
                         fprintf(gen->output, " ");
                     } else {
                         fprintf(gen->output, "_e->%s = %s; ", captures[i], captures[i]);

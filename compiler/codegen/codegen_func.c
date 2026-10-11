@@ -1984,14 +1984,16 @@ static void emit_function(CodeGenerator* gen, ASTNode* func, const char* clause_
         // fail to compile. See #278.
         if (body->type == AST_BLOCK) {
             gen->hoist_scope_body = body;
-            hoist_if_branch_vars(gen, body);
             /* Issue #501 follow-up: mark vars modified inside any
              * try body in this function so AST_VARIABLE_DECLARATION
              * codegen knows which outer-scope locals need a
              * `volatile` C type qualifier.  Must run before the
              * body is generated, so the per-function set is
-             * populated by the time each decl-site lookup happens. */
+             * populated by the time each decl-site lookup happens,
+             * and before the hoists, which declare locals too
+             * (#2690). */
             mark_try_clobbered_vars(gen, body);
+            hoist_if_branch_vars(gen, body);
             // Pre-hoist `_heap_<name>` companions for every string
             // variable in the body so the tracker is visible across
             // every nesting depth — closes the architectural blocker

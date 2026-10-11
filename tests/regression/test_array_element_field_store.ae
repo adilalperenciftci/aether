@@ -1,0 +1,103 @@
+// Regression: a store into a string field of an element of an array of
+// structs (`items[0].name = v`, `r.items[0].name = v`).
+//
+// The store was a plain one: it left the element's `_heap_name` tracker as
+// it was, so a literal stored over an owned string was freed with the
+// array (a crash), and a fresh string stored there leaked. It now goes
+// through the field store a struct value takes (#1879, #2497): the string
+// replaced is freed, and the tracker says whether the new one is owned,
+// for an element of a local array that owns its elements (#2528), of a
+// struct's array field, and of one reached through a pointer. Found while
+// fixing #2688.
+//
+// Each check reads its value after churn, allocations of the same sizes
+// that reuse what was freed. The leak check runs where the heap count is
+// exact (mem.heap_in_use_exact): after a warm-up, some window of the same
+// work grows by exactly 0 (mem.steady_growth). Strings are built from
+// parameters, because string.concat of two literals folds to a literal.
+
+import std.mem
+import std.string
+
+extern exit(code: int)
+
+struct Item {
+    name: string
+}
+
+struct Row {
+    items: Item[2]
+}
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+churn(w: string) -> int {
+    n = 0
+    i = 0
+    while i < 8 {
+        a = string.concat(w, "!!")
+        b = string.concat(w, "z")
+        n = n + string.length(a) + string.length(b)
+        i = i + 1
+    }
+    return n
+}
+
+// An element of a local array: a literal over an owned string, a fresh
+// string over a literal, and a local's string moved in.
+local_array(w: string) -> int {
+    items = [Item { name: string.concat(w, "a") }, Item { name: "lit" }]
+    items[0].name = "lit"
+    items[1].name = string.concat(w, "b")
+    s = string.concat(w, "c")
+    items[0].name = s
+    churn(w)
+    check(items[0].name == "wc" && items[1].name == "wb", "elements of a local array")
+    return string.length(items[0].name) + string.length(items[1].name)
+}
+
+// An element of a struct's array field, held by value and through a box.
+field_array(w: string) -> int {
+    r = Row { items: [Item { name: string.concat(w, "d") }, Item { name: "lit" }] }
+    r.items[0].name = "lit"
+    r.items[1].name = string.concat(w, "e")
+    p = heap.new(Row)
+    p.items[0].name = string.concat(w, "f")
+    p.items[0].name = string.concat(w, "g")
+    churn(w)
+    check(r.items[0].name == "lit" && r.items[1].name == "we", "elements of a field array")
+    check(p.items[0].name == "wg", "an element through a box")
+    n = string.length(r.items[1].name) + string.length(p.items[0].name)
+    heap.free(p)
+    return n
+}
+
+round(w: string) -> int {
+    return local_array(w) + field_array(w)
+}
+
+main() {
+    println("=== test_array_element_field_store ===")
+    check(round("w") == 4 + 4, "a round adds up")
+    i = 0
+    while i < 20 {
+        round("w")
+        i = i + 1
+    }
+    if mem.heap_in_use_exact() {
+        grown = mem.steady_growth(|| {
+                k = 0
+                while k < 100 {
+                    round("w")
+                    k = k + 1
+                }
+            }, 5)
+        check(grown == 0, "a window of 100 rounds grew the heap by ${grown} bytes in every run")
+    }
+    println("=== test_array_element_field_store passed ===")
+}

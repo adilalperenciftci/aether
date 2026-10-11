@@ -715,6 +715,9 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
                              * its own branch-local joins, as a function
                              * body is. */
                             gen->hoist_scope_body = arm_body;
+                            /* #2690: and a local its `try` writes is
+                             * declared volatile, as in a function. */
+                            mark_try_clobbered_vars(gen, arm_body);
                             hoist_heap_string_trackers(gen, arm_body);
                         }
 

@@ -1,0 +1,200 @@
+// Regression (#2689): an element of a `string[]` slice is copied where it
+// escapes.
+//
+// Since #2618 an element of a `string[N]` array that owns its elements (or
+// of a `string[N]` parameter, field or state field) is a view a keeping
+// slot copies. An element read through a slice was not: a function
+// returning `xs[0]` of a slice handed the array's string back borrowed,
+// and the caller held it after the array let go of it. A slice owns none of
+// its elements, and what does is not known where it is read (an array that
+// owns them, a struct's field, a `make` buffer, C memory), so a slot its
+// element escapes to now takes a copy of its own: a return (directly, in
+// an `if` arm, as a tuple position), a struct field, a container, and a
+// call that hands its argument back. A local bound to a slice element is a
+// view that borrows it, as a local bound to any borrowed string is: it is
+// not copied, so code that moves elements through a local
+// (`t = s[0]; s[0] = s[1]; s[1] = t`, std.sort) moves the pointers and
+// keeps none; read after the element it views is replaced, it is a
+// dangling pointer. Where the local escapes in turn (returned, added to a
+// container) it is copied, since it does not own what it holds.
+//
+// Each check reads its value after churn, allocations of the same sizes
+// that reuse what was freed. The leak check runs where the heap count is
+// exact (mem.heap_in_use_exact): after a warm-up, some window of the same
+// work grows by exactly 0 (mem.steady_growth). Strings are built from
+// parameters, because string.concat of two literals folds to a literal.
+
+import std.list
+import std.mem
+import std.sort
+import std.string
+
+extern exit(code: int)
+
+struct Item {
+    name: string
+}
+
+struct Shelf {
+    names: string[2]
+}
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL #2689: ${msg}")
+        exit(1)
+    }
+}
+
+first(s: string, n: int) -> string {
+    if n > 0 {
+        return s
+    }
+    return "none"
+}
+
+churn(w: string) -> int {
+    n = 0
+    i = 0
+    while i < 8 {
+        a = string.concat(w, "!!")
+        b = string.concat(w, "z")
+        n = n + string.length(a) + string.length(b)
+        i = i + 1
+    }
+    return n
+}
+
+// The issue's shape, and an element returned through an `if` arm, a local
+// view and a tuple position.
+pick(xs: string[]) -> string {
+    return xs[0]
+}
+
+pick_if(xs: string[], c: bool) -> string {
+    return if c { xs[1] } else { xs[0] }
+}
+
+pick_local(xs: string[]) -> string {
+    x = xs[1]
+    return x
+}
+
+pick_tuple(xs: string[]) -> (string, int) {
+    return xs[0], xs.len
+}
+
+returns(w: string) -> int {
+    arr = [string.concat(w, "a"), string.concat(w, "b")]
+    p = pick(arr)
+    q = pick_if(arr[..], true)
+    r = pick_local(arr[0..2])
+    t, n = pick_tuple(arr)
+    arr[0] = "gone"
+    arr[1] = "gone"
+    churn(w)
+    check(p == "wa" && q == "wb" && r == "wb" && t == "wa", "an element returned")
+    check(n == 2, "a tuple returned with an element")
+    return string.length(p) + string.length(q) + string.length(r) + string.length(t)
+}
+
+// A struct, a container and a call handing the element back, through a
+// local slice of an owning array and of a struct's field; a container
+// given a local view.
+escapes(w: string) -> int {
+    arr = [string.concat(w, "c"), string.concat(w, "d")]
+    s = arr[..]
+    it = Item { name: s[0] }
+    y = first(s[0], 1)
+    l = list.new()
+    list.add(l, s[0])
+    v = s[1]
+    list.add(l, v)
+    arr[0] = "gone"
+    arr[1] = "gone"
+    sh = Shelf { names: [string.concat(w, "e"), "lit"] }
+    fs = sh.names[..]
+    z = first(fs[0], 1)
+    sh.names[0] = "lit"
+    churn(w)
+    a, _ = list.get(l, 0)
+    b, _ = list.get(l, 1)
+    check(it.name == "wc" && y == "wc", "a struct and a call kept an element")
+    check(string.length(a) == 2 && string.length(b) == 2, "a container kept an element and a view")
+    check(z == "we", "an element of a struct's field through a slice")
+    n = string.length(it.name) + string.length(y) + string.length(a) + string.length(b)
+    list.free(l)
+    return n + string.length(z)
+}
+
+// A local view moves the elements as they are, and reads them while they
+// are live.
+swap(s: string[]) {
+    t = s[0]
+    s[0] = s[1]
+    s[1] = t
+}
+
+views(w: string) -> int {
+    arr = [string.concat(w, "f"), string.concat(w, "gh")]
+    x = arr[..][0]
+    n = string.length(x)
+    swap(arr)
+    churn(w)
+    check(arr[0] == "wgh" && arr[1] == "wf", "elements swapped through a slice")
+    return n + string.length(arr[0])
+}
+
+// A `make` buffer, whose element is freed by hand after a call kept it.
+buffer(w: string) -> int {
+    buf = make([]string, 2)
+    buf[0] = string.concat(w, "i")
+    x = pick(buf)
+    string.free(buf[0])
+    free(buf)
+    churn(w)
+    check(x == "wi", "an element of a buffer freed by hand")
+    return string.length(x)
+}
+
+by_length(a: string, b: string) -> int {
+    return string.length(a) - string.length(b)
+}
+
+// std.sort moves the elements of the slice it is given and keeps none.
+sorted(w: string) -> int {
+    arr = [string.concat(w, "c"), string.concat(w, "a"), string.concat(w, "bb"), "lit"]
+    sort.strings(arr)
+    check(arr[0] == "lit" && arr[1] == "wa" && arr[3] == "wc", "sorted in place")
+    sort.strings_by(arr[..], by_length)
+    check(arr[0] == "wa" || arr[0] == "wc", "sorted by a comparison")
+    table = ["d", "b", "a", "c"]
+    sort.strings(table)
+    check(table[0] == "a" && table[3] == "d", "a table of literals sorted")
+    return string.length(arr[3])
+}
+
+round(w: string) -> int {
+    return returns(w) + escapes(w) + views(w) + buffer(w) + sorted(w)
+}
+
+main() {
+    println("=== test_slice_string_elements_are_views ===")
+    check(round("w") == 8 + 10 + 5 + 2 + 3, "a round adds up")
+    i = 0
+    while i < 20 {
+        round("w")
+        i = i + 1
+    }
+    if mem.heap_in_use_exact() {
+        grown = mem.steady_growth(|| {
+                k = 0
+                while k < 100 {
+                    round("w")
+                    k = k + 1
+                }
+            }, 5)
+        check(grown == 0, "a window of 100 rounds grew the heap by ${grown} bytes in every run")
+    }
+    println("=== test_slice_string_elements_are_views passed ===")
+}

@@ -239,6 +239,10 @@ frees one-for-one:
   the handoff, so the drain never frees something another owner holds.
 - Nested `try` drains only the inner frame's entries; the outer frame's
   allocations survive to their normal frees.
+- A value stored inside a `try` into a local declared outside it is
+  journaled for the frame the local is declared in (#2690): its free runs
+  where the local's scope ends, which a panic the `try` catches does not
+  skip, so the drain leaves it to the local.
 
 For actor handlers this means a panicking actor's step-scoped
 allocations are reclaimed before the actor is marked dead. The journal

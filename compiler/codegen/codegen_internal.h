@@ -53,9 +53,6 @@ Type* declared_var_type(CodeGenerator* gen, const char* var_name);
 void truncate_declared_vars(CodeGenerator* gen, int saved_count);
 void clear_declared_vars(CodeGenerator* gen);
 void clear_fnptr_locals(CodeGenerator* gen);
-int is_heap_box_var(CodeGenerator* gen, const char* var_name);
-void mark_heap_box_var(CodeGenerator* gen, const char* var_name);
-void unmark_heap_box_var(CodeGenerator* gen, const char* var_name);
 int is_module_global_var(CodeGenerator* gen, const char* name);
 int is_actor_state_var(CodeGenerator* gen, const char* name);   /* #2505 */
 void register_module_global_var(CodeGenerator* gen, const char* name, int is_program);
@@ -63,6 +60,8 @@ int is_heap_string_var(CodeGenerator* gen, const char* var_name);
 void mark_heap_string_var(CodeGenerator* gen, const char* var_name);
 void unmark_heap_string_var(CodeGenerator* gen, const char* var_name);
 void clear_heap_string_vars(CodeGenerator* gen);
+int heap_string_var_try_depth(CodeGenerator* gen, const char* var_name);         /* #2690 */
+int set_heap_string_var_try_depth(CodeGenerator* gen, const char* var_name, int depth);
 int is_escaped_string_var(CodeGenerator* gen, const char* var_name);
 void mark_escaped_string_var(CodeGenerator* gen, const char* var_name);
 void clear_escaped_string_vars(CodeGenerator* gen);
@@ -523,6 +522,12 @@ void emit_closure_take(CodeGenerator* gen, ASTNode* e);
 /* #2528: an array literal whose elements the holder owns: `kind` 1 copies
  * each string (a fresh one is adopted), 2 takes each closure. */
 void emit_owned_array_literal(CodeGenerator* gen, ASTNode* lit, int kind);
+/* #2688: a struct literal's fixed-size array field given another array
+ * (`Shelf { names: arr }`): it is `{0}` in the literal, and
+ * emit_struct_literal_array_field then fills `_ae_slit.<field>` element by
+ * element, each taken as the field keeps it. */
+int struct_literal_field_takes_array(CodeGenerator* gen, const char* sname, ASTNode* field_init);
+void emit_struct_literal_array_field(CodeGenerator* gen, const char* sname, ASTNode* field_init);
 /* #2497: does a value of this struct own heap strings, in a `string` field
  * of its own or in a field that is itself such a struct held by value? It
  * then has `<Name>_destroy` / `_replace` / `_heap_free` / `_cell_release`,

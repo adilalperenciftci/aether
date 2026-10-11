@@ -70,15 +70,6 @@ typedef struct {
     // numeric join of all of them (`int` in one branch, `long` in the
     // other: `int64_t`), the type the typechecker sees for it too.
     ASTNode* hoist_scope_body;
-    // #790: names of locals currently bound to a `heap.new(T)` box (a
-    // calloc'd, zero-initialised `*T`). Only these boxes have their
-    // `_heap_<field>` ownership trackers guaranteed zero, so only on these is
-    // it safe to route a `box.field = ...` store through the heap-string
-    // assignment wrapper (free old if owned + set tracker). A raw
-    // `malloc(...) as *T` has garbage trackers, so its field stores stay bare.
-    // Reset per function; a var is removed when reassigned to a non-heap.new.
-    char** heap_box_vars;
-    int heap_box_var_count;
     // #701: names of module-level `var` globals (file-scope statics).
     // Populated once before any function body is emitted. A bare
     // `name = expr` inside a function whose name is in this set is a
@@ -512,6 +503,11 @@ typedef struct {
     // Used to emit free() on reassignment and avoid freeing string literals.
     char** heap_string_vars;
     int heap_string_var_count;
+    // #2690: parallel to heap_string_vars, how many `try` bodies of the
+    // function enclose each one's C declaration (gen->try_frame_depth when
+    // it was marked). A store nested in more of them journals the string
+    // for the frame the declaration is in (emit_unwind_track_local).
+    int* heap_string_var_try_depths;
 
     // Subset of `heap_string_vars`: names whose value is passed as a
     // function-call argument (or captured by a closure) somewhere in
@@ -789,5 +785,10 @@ const char* try_volatile_qual_for(CodeGenerator* gen, const char* name);
 // as a declaration of the variable spells it: after the `*` of a pointer
 // (`const char* volatile`), before anything else. #2618.
 const char* volatile_decl_type(const char* vq, const char* c_type);
+
+// The C type of the ownership flag beside the local `name`: `volatile int`
+// where the local is volatile (try_volatile_qual_for), `int` elsewhere.
+// #2690.
+const char* try_tracker_type(CodeGenerator* gen, const char* name);
 
 #endif

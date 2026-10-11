@@ -566,8 +566,6 @@ CodeGenerator* create_code_generator(FILE* output) {
     gen->declared_var_types = NULL;
     gen->hoist_scope_body = NULL;
     gen->declared_var_count = 0;
-    gen->heap_box_vars = NULL;
-    gen->heap_box_var_count = 0;
     gen->module_global_vars = NULL;
     gen->module_global_var_is_program = NULL;
     gen->module_global_var_count = 0;
@@ -697,6 +695,7 @@ CodeGenerator* create_code_generator(FILE* output) {
     // Heap string ownership tracking
     gen->heap_string_vars = NULL;
     gen->heap_string_var_count = 0;
+    gen->heap_string_var_try_depths = NULL;
     gen->escaped_string_vars = NULL;
     gen->escaped_string_var_count = 0;
     gen->return_escaped_string_vars = NULL;
@@ -877,12 +876,6 @@ void code_generator_release(CodeGenerator* gen) {
         for (int i = 0; i < gen->synthesised_count; i++) {
             free_ast_node(gen->synthesised_nodes[i]);
         }
-        /* #790: the heap.new box registry is reset per function, so the
-         * last function's entries (main's, typically) are still held here. */
-        for (int i = 0; i < gen->heap_box_var_count; i++) free(gen->heap_box_vars[i]);
-        free(gen->heap_box_vars);
-        gen->heap_box_vars = NULL;
-        gen->heap_box_var_count = 0;
         /* The builder registry generate_program's pre-pass fills: one
          * strdup'd name and optional factory per `builder` function. */
         for (int i = 0; i < gen->builder_func_reg_count; i++) {
@@ -1125,46 +1118,6 @@ void clear_declared_vars(CodeGenerator* gen) {
     gen->declared_var_types = NULL;
     gen->hoist_scope_body = NULL;
     gen->declared_var_count = 0;
-    /* #790: heap.new box provenance is per-function. */
-    if (gen->heap_box_vars) {
-        for (int i = 0; i < gen->heap_box_var_count; i++) free(gen->heap_box_vars[i]);
-        free(gen->heap_box_vars);
-    }
-    gen->heap_box_vars = NULL;
-    gen->heap_box_var_count = 0;
-}
-
-// #790: is `var_name` currently bound to a heap.new(T) box?
-int is_heap_box_var(CodeGenerator* gen, const char* var_name) {
-    if (!var_name) return 0;
-    for (int i = 0; i < gen->heap_box_var_count; i++) {
-        if (strcmp(gen->heap_box_vars[i], var_name) == 0) return 1;
-    }
-    return 0;
-}
-
-// #790: record that `var_name` now holds a heap.new(T) box.
-void mark_heap_box_var(CodeGenerator* gen, const char* var_name) {
-    if (!var_name || is_heap_box_var(gen, var_name)) return;
-    char** nv = realloc(gen->heap_box_vars, sizeof(char*) * (gen->heap_box_var_count + 1));
-    if (!nv) return;
-    gen->heap_box_vars = nv;
-    gen->heap_box_vars[gen->heap_box_var_count] = strdup(var_name);
-    gen->heap_box_var_count++;
-}
-
-// #790: `var_name` was reassigned to something other than a heap.new box —
-// drop it so a later `var.field = ...` store falls back to a bare assignment.
-void unmark_heap_box_var(CodeGenerator* gen, const char* var_name) {
-    if (!var_name) return;
-    for (int i = 0; i < gen->heap_box_var_count; i++) {
-        if (strcmp(gen->heap_box_vars[i], var_name) == 0) {
-            free(gen->heap_box_vars[i]);
-            gen->heap_box_vars[i] = gen->heap_box_vars[gen->heap_box_var_count - 1];
-            gen->heap_box_var_count--;
-            return;
-        }
-    }
 }
 
 // Helper: check if variable currently holds a heap-allocated string
@@ -1180,11 +1133,39 @@ int is_heap_string_var(CodeGenerator* gen, const char* var_name) {
 // Helper: mark variable as holding a heap-allocated string
 void mark_heap_string_var(CodeGenerator* gen, const char* var_name) {
     if (is_heap_string_var(gen, var_name)) return;
-    char** new_vars = realloc(gen->heap_string_vars, sizeof(char*) * (gen->heap_string_var_count + 1));
+    size_t n = (size_t)gen->heap_string_var_count + 1;
+    char** new_vars = realloc(gen->heap_string_vars, sizeof(char*) * n);
     if (!new_vars) return;
     gen->heap_string_vars = new_vars;
+    int* new_depths = realloc(gen->heap_string_var_try_depths, sizeof(int) * n);
+    if (!new_depths) return;
+    gen->heap_string_var_try_depths = new_depths;
     gen->heap_string_vars[gen->heap_string_var_count] = strdup(var_name);
+    gen->heap_string_var_try_depths[gen->heap_string_var_count] = gen->try_frame_depth;
     gen->heap_string_var_count++;
+}
+
+// #2690: how many `try` bodies of the function enclosed the declaration of
+// the heap-string local `var_name` (0 when it is not one).
+int heap_string_var_try_depth(CodeGenerator* gen, const char* var_name) {
+    for (int i = 0; var_name && i < gen->heap_string_var_count; i++) {
+        if (strcmp(gen->heap_string_vars[i], var_name) == 0)
+            return gen->heap_string_var_try_depths[i];
+    }
+    return 0;
+}
+
+// Set it, for a binding that shadows the one marked (an owning `catch`
+// name); returns the depth it had.
+int set_heap_string_var_try_depth(CodeGenerator* gen, const char* var_name, int depth) {
+    for (int i = 0; var_name && i < gen->heap_string_var_count; i++) {
+        if (strcmp(gen->heap_string_vars[i], var_name) == 0) {
+            int old = gen->heap_string_var_try_depths[i];
+            gen->heap_string_var_try_depths[i] = depth;
+            return old;
+        }
+    }
+    return 0;
 }
 
 // Helper: forget that a variable holds a heap-allocated string (a
@@ -1193,8 +1174,10 @@ void unmark_heap_string_var(CodeGenerator* gen, const char* var_name) {
     if (!gen || !var_name) return;
     for (int i = 0; i < gen->heap_string_var_count; i++) {
         if (strcmp(gen->heap_string_vars[i], var_name) == 0) {
+            int last = gen->heap_string_var_count - 1;
             free(gen->heap_string_vars[i]);
-            gen->heap_string_vars[i] = gen->heap_string_vars[gen->heap_string_var_count - 1];
+            gen->heap_string_vars[i] = gen->heap_string_vars[last];
+            gen->heap_string_var_try_depths[i] = gen->heap_string_var_try_depths[last];
             gen->heap_string_var_count--;
             return;
         }
@@ -1209,7 +1192,9 @@ void clear_heap_string_vars(CodeGenerator* gen) {
         }
         free(gen->heap_string_vars);
     }
+    free(gen->heap_string_var_try_depths);
     gen->heap_string_vars = NULL;
+    gen->heap_string_var_try_depths = NULL;
     gen->heap_string_var_count = 0;
 }
 
@@ -2233,6 +2218,15 @@ const char* volatile_decl_type(const char* vq, const char* c_type) {
     size_t n = strlen(c_type);
     if (n > 0 && c_type[n - 1] == '*') return cg_internf("%s volatile", c_type);
     return cg_internf("volatile %s", c_type);
+}
+
+// The C type of the ownership flag beside the local `name` (`_heap_<name>`,
+// `_seqheap_<name>`, `_heapopt_<name>`): `volatile int` wherever the local
+// itself is, since every store into the local sets the flag too, and a flag
+// left in a register by the longjmp says the local owns what it no longer
+// holds, or does not own what it does (#2690).
+const char* try_tracker_type(CodeGenerator* gen, const char* name) {
+    return volatile_decl_type(try_volatile_qual_for(gen, name), "int");
 }
 
 // ============================================================================
@@ -5403,11 +5397,12 @@ static void emit_main_body(CodeGenerator* gen, ASTNode* main) {
              * first assigned inside an if-arm and read after the if needs
              * a declaration at this scope, in main() as anywhere else. */
             gen->hoist_scope_body = main->children[0];
-            hoist_if_branch_vars(gen, main->children[0]);
             /* Issue #501 follow-up: mark try-clobbered vars in main()
              * so the `volatile` prefix is applied at decl sites for
-             * locals modified inside a try body. */
+             * locals modified inside a try body, the hoisted ones
+             * included (#2690). */
             mark_try_clobbered_vars(gen, main->children[0]);
+            hoist_if_branch_vars(gen, main->children[0]);
             hoist_heap_string_trackers(gen, main->children[0]);
             hoist_seq_trackers(gen, main->children[0]);
             hoist_opt_str_trackers(gen, main->children[0]);
@@ -7566,6 +7561,7 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     print_line(gen, "typedef void (*AetherUnwindFree)(const void*);");
     print_line(gen, "extern void aether_unwind_track(const void*, AetherUnwindFree);");
     print_line(gen, "extern void aether_unwind_track_if(const void*, int, AetherUnwindFree);");
+    print_line(gen, "extern void aether_unwind_track_up(const void*, int, AetherUnwindFree);");
     print_line(gen, "extern void aether_unwind_forget(const void*);");
     /* Is `s` a counted AetherString, the one shape string_release frees?
      * The same byte-by-byte probe as aether_heap_str_free below. */
@@ -7593,6 +7589,11 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     print_line(gen, "}");
     print_line(gen, "static inline void aether_unwind_track_str_if(const char* s, int owned) {");
     print_line(gen, "    if (owned) aether_unwind_track(s, aether_unwind_free_str);");
+    print_line(gen, "}");
+    /* #2690: a store into a local from inside `up` nested `try` bodies it
+     * is declared outside of is journaled for the local's own frame. */
+    print_line(gen, "static inline void aether_unwind_track_str_up_if(const char* s, int owned, int up) {");
+    print_line(gen, "    if (owned) aether_unwind_track_up(s, up, aether_unwind_free_str);");
     print_line(gen, "}");
     /* Closure-env string capture: a closure env must OWN its captured
      * strings — the enclosing scope releases its own reference on
