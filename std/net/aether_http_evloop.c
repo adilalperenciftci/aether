@@ -797,14 +797,17 @@ static int ev_respond_from(EvDriver* d, EvConn* c) {
  * exchange. */
 static int ev_begin_retry(EvDriver* d, EvConn* c) {
     const char* url = http_request_url_of(c->px.outbound);
-    char host[256], path[1024];
+    /* The path is sized from the URL; a fixed path[1024] cut a long client
+     * path, and the proxy forwarded the cut one (#2674). */
+    char host[256];
+    char* path = NULL;
     int port = 0, use_tls = 0;
-    if (!url || !parse_url(url, host, sizeof(host), &port, path, sizeof(path), &use_tls))
+    if (!url || !parse_url_alloc(url, host, sizeof(host), &port, &path, &use_tls))
         return -1;
-    if (use_tls) return -1;
+    if (use_tls) { free(path); return -1; }
 
     int fd = http_upstream_acquire(host, port, &c->up);
-    if (fd < 0) return -1;
+    if (fd < 0) { free(path); return -1; }
 
     int body_len = 0;
     const char* body = http_request_body_of(c->px.outbound, &body_len);
@@ -820,6 +823,7 @@ static int ev_begin_retry(EvDriver* d, EvConn* c) {
     };
     c->head = http_build_request_head_into(&head_params, &c->head, &c->head_cap,
                                            &c->head_len);
+    free(path);   /* the head holds the request line now */
     if (!c->head) return -1;
 
     memset(&c->x, 0, sizeof(c->x));
@@ -960,14 +964,18 @@ static int ev_begin_upstream(EvDriver* d, EvConn* c) {
     }
 
     const char* url = http_request_url_of(c->px.outbound);
-    char host[256], path[1024];
+    /* The path is sized from the URL; a fixed path[1024] cut a long client
+     * path, and the proxy forwarded the cut one (#2674). */
+    char host[256];
+    char* path = NULL;
     int port = 0, use_tls = 0;
-    if (!url || !parse_url(url, host, sizeof(host), &port, path, sizeof(path), &use_tls))
+    if (!url || !parse_url_alloc(url, host, sizeof(host), &port, &path, &use_tls))
         return -1;
-    if (use_tls) return -1;      /* this driver is only mounted on plain HTTP */
+    /* this driver is only mounted on plain HTTP */
+    if (use_tls) { free(path); return -1; }
 
     int fd = http_upstream_acquire(host, port, &c->up);
-    if (fd < 0) return -1;
+    if (fd < 0) { free(path); return -1; }
 
     int body_len = 0;
     const char* body = http_request_body_of(c->px.outbound, &body_len);
@@ -978,6 +986,7 @@ static int ev_begin_upstream(EvDriver* d, EvConn* c) {
     };
     c->head = http_build_request_head_into(&head_params, &c->head, &c->head_cap,
                                            &c->head_len);
+    free(path);   /* the head holds the request line now */
     if (!c->head) return -1;
 
     http_exchange_init(&c->x, &c->up.t, c->head, c->head_len, body, body_len,
