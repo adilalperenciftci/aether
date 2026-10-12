@@ -70,6 +70,9 @@ jobs:
   ci:
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
+    # Twice the slowest healthy leg (about 13 min), so a hang outside every
+    # bound costs one cap, not GitHub's 6 hour default (#2772).
+    timeout-minutes: 30
 
     strategy:
       fail-fast: false
@@ -107,16 +110,18 @@ jobs:
             harden: "0"
             install: ""
 
-          # Two shards (#2757): the Intel runner took about 23 min, most of it
-          # the test sweep. Shard 1 runs `make ci` with half the sweep; shard
-          # 2 builds the same toolchain and runs the other half
-          # (tests/scripts/sweep_shard.sh).
+          # Two jobs (#2757): the Intel runner took 13 to 32 min, most of it
+          # the test sweep. [1/2] runs `make ci` with a third of the sweep,
+          # [2/2] builds the same toolchain and runs the other two thirds:
+          # `make ci`'s stages around the sweep cost [1/2] about 5 min more,
+          # so an even split left it that far behind (#2772,
+          # tests/scripts/sweep_shard.sh).
           - name: macOS / Clang (x86_64) [1/2]
             os: macos-15-intel
             cc: clang
             harden: "0"
             install: ""
-            shard: "1/2"
+            shard: "1/3"
             target: ci
 
           - name: macOS / Clang (x86_64) [2/2]
@@ -124,7 +129,7 @@ jobs:
             cc: clang
             harden: "0"
             install: ""
-            shard: "2/2"
+            shard: "2,3/3"
             target: ci-sweep
 
     steps:
@@ -198,12 +203,12 @@ jobs:
         ./build/ae build /tmp/harden_probe.ae --extra /tmp/harden_copy.c -o /tmp/harden_probe
         ./build/ae checksec --require pie,nx,relro-full,canary,fortify /tmp/harden_probe
 
-    # Not from a second shard (#2757): it builds the same object as the
-    # first, and a second save of one key fails.
+    # Not from the sweep-only job (#2757): it builds the same object as the
+    # `make ci` one, and a second save of one key fails.
     - name: Save miniaudio object cache (merge to main, on miss only)
       if: >-
         github.event_name == 'push' && github.ref == 'refs/heads/main'
-        && steps.audio_cache.outputs.cache-hit != 'true' && matrix.shard != '2/2'
+        && steps.audio_cache.outputs.cache-hit != 'true' && matrix.target != 'ci-sweep'
       uses: actions/cache/save@v4
       with:
         path: .ci-cache
@@ -882,18 +887,25 @@ jobs:
   # .ae integration tests (includes REPL tests), examples.
   # ============================================================
   ci-windows:
-    name: Windows / GCC (MSYS2) [${{ matrix.shard }}]
+    name: Windows / GCC (MSYS2) [${{ matrix.part }}]
     runs-on: windows-latest
-    # Two shards (#2757): the leg took about 23 min, most of it the test
-    # sweep on 4 cores. Shard 1 runs `make ci` with half the sweep; shard 2
-    # builds the same toolchain and runs the other half.
+    # Twice the slowest healthy job, so a hang outside every bound costs one
+    # cap, not GitHub's 6 hour default (#2772).
+    timeout-minutes: 35
+    # Two jobs (#2757): the leg took about 23 min, most of it the test sweep
+    # on 4 cores. [1/2] runs `make ci` with a third of the sweep, [2/2] builds
+    # the same toolchain and runs the other two thirds: `make ci`'s stages
+    # around the sweep cost [1/2] about 5 min more, so an even split left it
+    # that far behind (#2772, tests/scripts/sweep_shard.sh).
     strategy:
       fail-fast: false
       matrix:
         include:
-          - shard: "1/2"
+          - part: "1/2"
+            shard: "1/3"
             target: ci
-          - shard: "2/2"
+          - part: "2/2"
+            shard: "2,3/3"
             target: ci-sweep
 
     defaults:
@@ -974,7 +986,7 @@ jobs:
       # 4-vCPU runner's RAM (one link ballooned to 11 min). Meaningfully
       # cutting the 42 min needs a faster linker / fewer per-test relinks,
       # tracked separately.
-      timeout-minutes: 70
+      timeout-minutes: 30
       # The hardcoded `C:\msys64\...` probe in aether_http.c::load_windows_ca_bundle
       # doesn't match the GitHub runner's MSYS2 path (it's installed under a
       # temp dir, not C:\msys64). Export SSL_CERT_FILE explicitly using

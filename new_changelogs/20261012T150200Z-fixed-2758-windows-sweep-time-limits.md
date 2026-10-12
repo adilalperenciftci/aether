@@ -9,4 +9,4 @@
   now a job object around the test, which a small native watchdog
   (`tests/lib/sweep_watchdog.c`) ends with TerminateJobObject: the test and
   everything it started go, nothing else is touched, and the result is the
-  same 124 (#2758). Linux and macOS keep `timeout(1)`.
+  same 124 (#2758). Linux keeps `timeout(1)`.

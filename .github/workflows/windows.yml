@@ -213,8 +213,11 @@ jobs:
         JOBS="$(nproc)" bash tests/scripts/windows_wine_sweep.sh
 
   build-mingw:
-    name: Build + Test (Windows / ${{ matrix.msystem }}) [${{ matrix.shard }}]
+    name: Build + Test (Windows / ${{ matrix.msystem }}) [${{ matrix.part }}]
     runs-on: windows-latest
+    # Twice the slowest healthy job, so a hang outside every bound costs one
+    # cap, not GitHub's 6 hour default (#2772).
+    timeout-minutes: 35
     # Gate on the fast lane (#1593): a cross-build or Wine failure skips
     # ~20 minutes of doomed MSYS2 compute. `needs:`-skipped jobs report as
     # SKIPPED, not failed — with these as required checks the PR still
@@ -227,9 +230,11 @@ jobs:
     # so a MINGW64 leg here ran the half-hour suite a second time for no
     # coverage (#2673).
     #
-    # Two shards (#2757): the leg took about 25 min, most of it the test
-    # sweep on 4 cores. Shard 1 runs `make ci` with half the sweep; shard 2
-    # builds the same toolchain and runs the other half.
+    # Two jobs (#2757): the leg took about 25 min, most of it the test sweep
+    # on 4 cores. [1/2] runs `make ci` with a third of the sweep, [2/2] builds
+    # the same toolchain and runs the other two thirds: `make ci`'s stages
+    # around the sweep cost [1/2] about 5 min more, so an even split left it
+    # that far behind (#2772, tests/scripts/sweep_shard.sh).
     strategy:
       fail-fast: false
       matrix:
@@ -237,12 +242,14 @@ jobs:
           - msystem: UCRT64
             prefix: mingw-w64-ucrt-x86_64
             root: ucrt64
-            shard: "1/2"
+            part: "1/2"
+            shard: "1/3"
             target: ci
           - msystem: UCRT64
             prefix: mingw-w64-ucrt-x86_64
             root: ucrt64
-            shard: "2/2"
+            part: "2/2"
+            shard: "2,3/3"
             target: ci-sweep
 
     defaults:
@@ -303,19 +310,20 @@ jobs:
         ls -la "$(cygpath -u "$SSL_CERT_FILE")"
         AE_SWEEP_SHARD="${{ matrix.shard }}" make ${{ matrix.target }}
 
-    # Shard 1 only (#2757): both shards build the same object and binaries,
-    # and a second save of one cache key or upload of one artifact name fails.
+    # The `make ci` job only (#2757): both jobs build the same object and
+    # binaries, and a second save of one cache key or upload of one artifact
+    # name fails.
     - name: Save miniaudio object cache (merge to main, on miss only)
       if: >-
         github.event_name == 'push' && github.ref == 'refs/heads/main'
-        && steps.audio_cache.outputs.cache-hit != 'true' && matrix.shard == '1/2'
+        && steps.audio_cache.outputs.cache-hit != 'true' && matrix.target == 'ci'
       uses: actions/cache/save@v4
       with:
         path: .ci-cache
         key: audio-obj-windows-${{ matrix.root }}-${{ hashFiles('std/audio/miniaudio.h', 'std/audio/stb_vorbis.c', 'std/audio/aether_audio.c', 'std/audio/aether_audio.h') }}
 
     - name: Upload Windows binaries
-      if: matrix.shard == '1/2'
+      if: matrix.target == 'ci'
       uses: actions/upload-artifact@v4
       with:
         name: aether-windows-${{ matrix.root }}

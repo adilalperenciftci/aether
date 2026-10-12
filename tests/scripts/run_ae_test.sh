@@ -34,8 +34,8 @@ tmpdir="$2"
 root="$3"
 
 # Per-test time limit: GNU coreutils `timeout`, or `gtimeout` on macOS
-# (coreutils via brew), or none when neither exists (macOS without coreutils)
-# so the test still runs, just unbounded. On Windows it is a job object that
+# (coreutils via brew), or the same bound in perl where neither exists, which
+# is macOS as GitHub's runners have it (#2772). On Windows it is a job object that
 # ends the test's whole process tree without a signal, since a signal there
 # can reach unrelated processes (#2758, tests/lib/sweep_timeout.sh).
 # The build gets a bound of its own (#2608): it ran unbounded, so a build that

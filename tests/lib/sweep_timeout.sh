@@ -7,8 +7,14 @@
 #
 # sweep_timeout_bound sets VAR to the words to put in front of a command:
 # `timeout SECONDS` (`-k KILL_AFTER` too, when given), `gtimeout` where only
-# that exists (macOS with coreutils), or nothing when neither does, so the
-# command runs unbounded as before.
+# that exists (macOS with coreutils), or sweep_timeout_posix where neither
+# does. That is macOS as GitHub's runners have it: they ship no coreutils, and
+# every test and stage there ran with no limit at all, so one hang held the
+# CI job until GitHub's 6 hour ceiling (#2772). sweep_timeout_posix is the
+# same bound written in perl, which every macOS has. Only with no perl either
+# does the command run unbounded. _SWEEP_TIMEOUT_TOOLS lists the tools tried
+# before perl ("timeout gtimeout" unless the caller set it): set it empty to
+# take the perl branch, which is how that branch is tested on Linux.
 #
 # On Windows it is never timeout(1). timeout(1) ends a command by signalling
 # its process group, and a signal sent to the MSYS2 process that stands in for
@@ -72,7 +78,7 @@ sweep_timeout_bound() {
         eval "$_stb_var="
         return 0
     fi
-    for _stb_tool in timeout gtimeout; do
+    for _stb_tool in ${_SWEEP_TIMEOUT_TOOLS-timeout gtimeout}; do
         if command -v "$_stb_tool" >/dev/null 2>&1; then
             if [ -n "$_stb_k" ]; then
                 eval "$_stb_var=\"\$_stb_tool -k \$_stb_k \$_stb_secs\""
@@ -82,7 +88,58 @@ sweep_timeout_bound() {
             return 0
         fi
     done
+    if command -v perl >/dev/null 2>&1; then
+        eval "$_stb_var=\"sweep_timeout_posix \$_stb_secs \${_stb_k:-0}\""
+        return 0
+    fi
     eval "$_stb_var="
+}
+
+# sweep_timeout_posix SECONDS KILL_AFTER command args...
+#
+# timeout(1) where neither it nor gtimeout exists (#2772). perl forks the
+# command into a process group of its own, as timeout(1) runs it, and at the
+# limit sends that group SIGTERM, then SIGKILL KILL_AFTER seconds later when
+# KILL_AFTER is not 0 and the command is still there. The status is
+# timeout(1)'s: 124 when the command ended at the limit, 137 when it had to be
+# killed, otherwise the command's own (128+N when signal N ended it). A
+# SIGINT, SIGTERM or SIGHUP sent to the bound itself (a cancelled CI step) is
+# passed on to the group, as timeout(1) passes it on.
+sweep_timeout_posix() {
+    _stp_secs="$1"
+    _stp_k="$2"
+    shift 2
+    perl -e '
+        use POSIX ();
+        my $secs = shift @ARGV;
+        my $kill_after = shift @ARGV;
+        my $pid = fork();
+        exit 125 unless defined $pid;
+        if ($pid == 0) {
+            POSIX::setpgid(0, 0);
+            exec { $ARGV[0] } @ARGV;
+            exit($!{ENOENT} ? 127 : 126);
+        }
+        POSIX::setpgid($pid, $pid);
+        my $timed_out = 0;
+        # kill-ok: POSIX only, the Windows branch never gets here (#2758)
+        $SIG{$_} = sub { kill $_[0], -$pid } for qw(INT TERM HUP);
+        $SIG{ALRM} = sub {
+            # kill-ok: POSIX only, the Windows branch never gets here (#2758)
+            if ($timed_out) { kill "KILL", -$pid; return; }
+            $timed_out = 1;
+            # kill-ok: POSIX only, the Windows branch never gets here (#2758)
+            kill "TERM", -$pid;
+            alarm $kill_after if $kill_after > 0;
+        };
+        alarm $secs;
+        waitpid($pid, 0);
+        my $status = $?;
+        alarm 0;
+        my $sig = $status & 127;
+        exit($sig == 9 ? 137 : 124) if $timed_out;
+        exit($sig ? 128 + $sig : $status >> 8);
+    ' "$_stp_secs" "$_stp_k" "$@"
 }
 
 # sweep_timeout_windows SECONDS command args...

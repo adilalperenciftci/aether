@@ -19,6 +19,12 @@
 # Elsewhere the limit is timeout(1), whose SIGTERM is exactly what the trap
 # sees. The program gives up by itself after 60 s, so a limit that failed
 # cannot leave it behind for long.
+#
+# #2772: where neither timeout(1) nor gtimeout exists (GitHub's macOS
+# runners) the limit is sweep_timeout_posix, the same bound in perl; before
+# it the sweep there had no limit at all. Every POSIX run checks that branch
+# too (_SWEEP_TIMEOUT_TOOLS empty), and checks both bounds pass a command's
+# own status through and kill one that ignores SIGTERM once KILL_AFTER is up.
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
@@ -32,8 +38,8 @@ case "$(uname -s 2>/dev/null)" in
     *) windows= ;;
 esac
 if [ -z "$windows" ] && ! command -v timeout >/dev/null 2>&1 &&
-   ! command -v gtimeout >/dev/null 2>&1; then
-    echo "  [SKIP] sweep_timeout: no timeout(1) here, so the sweep runs unbounded"
+   ! command -v gtimeout >/dev/null 2>&1 && ! command -v perl >/dev/null 2>&1; then
+    echo "  [SKIP] sweep_timeout: no timeout(1), gtimeout or perl here, so the sweep runs unbounded"
     exit 0
 fi
 
@@ -78,38 +84,99 @@ echo "rc=$?"
 echo "sweep shell still running"
 EOF
 
-start=$(date +%s)
-out=$(bash "$TMP/sweep.sh" "$ROOT" "$TMP/hung_test.sh" "$hang" "$TMP/pid" 2>&1)
-sweep_rc=$?
-elapsed=$(( $(date +%s) - start ))
-
-[ "$sweep_rc" -eq 0 ] || fail "the sweep shell exited $sweep_rc: $out"
-printf '%s\n' "$out" | grep -q "sweep shell still running" \
-    || fail "the sweep shell did not get past the hung test: $out"
-printf '%s\n' "$out" | grep -q "^rc=124$" \
-    || fail "the hung test did not end as a timeout (124): $out"
-[ "$elapsed" -lt 30 ] \
-    || fail "the 3 s limit took ${elapsed}s: the program ran until it gave up by itself"
-
-cat "$TMP/pid.background" "$TMP/pid.foreground" 2>/dev/null | tr -d '\r' > "$TMP/pids.txt"
-npids=$(grep -c . "$TMP/pids.txt")
-[ "$npids" = 2 ] || fail "expected both copies of the program to start, $npids did"
-for p in $(cat "$TMP/pids.txt"); do
-    if [ -n "$windows" ]; then
-        img=$(basename "$hang")
-        "$(cygpath -S)/tasklist.exe" //NH //FI "PID eq $p" //FI "IMAGENAME eq $img" 2>/dev/null \
-            | grep -qi "$img" && fail "the hung program (pid $p) outlived the limit"
+# check_hung LABEL TOOLS: the hung test under the bound sweep_timeout_bound
+# picks with _SWEEP_TIMEOUT_TOOLS set to TOOLS ("default" leaves it unset).
+check_hung() {
+    label="$1"
+    rm -f "$TMP/pid.background" "$TMP/pid.foreground"
+    start=$(date +%s)
+    if [ "$2" = default ]; then
+        out=$(bash "$TMP/sweep.sh" "$ROOT" "$TMP/hung_test.sh" "$hang" "$TMP/pid" 2>&1)
     else
-        kill -0 "$p" 2>/dev/null && fail "the hung program (pid $p) outlived the limit"
+        out=$(_SWEEP_TIMEOUT_TOOLS="$2" bash "$TMP/sweep.sh" "$ROOT" "$TMP/hung_test.sh" "$hang" "$TMP/pid" 2>&1)
     fi
-done
+    sweep_rc=$?
+    elapsed=$(( $(date +%s) - start ))
+
+    [ "$sweep_rc" -eq 0 ] || fail "$label: the sweep shell exited $sweep_rc: $out"
+    printf '%s\n' "$out" | grep -q "sweep shell still running" \
+        || fail "$label: the sweep shell did not get past the hung test: $out"
+    printf '%s\n' "$out" | grep -q "^rc=124$" \
+        || fail "$label: the hung test did not end as a timeout (124): $out"
+    [ "$elapsed" -lt 30 ] \
+        || fail "$label: the 3 s limit took ${elapsed}s: the program ran until it gave up by itself"
+
+    cat "$TMP/pid.background" "$TMP/pid.foreground" 2>/dev/null | tr -d '\r' > "$TMP/pids.txt"
+    npids=$(grep -c . "$TMP/pids.txt")
+    [ "$npids" = 2 ] || fail "$label: expected both copies of the program to start, $npids did"
+    for p in $(cat "$TMP/pids.txt"); do
+        if [ -n "$windows" ]; then
+            img=$(basename "$hang")
+            "$(cygpath -S)/tasklist.exe" //NH //FI "PID eq $p" //FI "IMAGENAME eq $img" 2>/dev/null \
+                | grep -qi "$img" && fail "$label: the hung program (pid $p) outlived the limit"
+        else
+            kill -0 "$p" 2>/dev/null && fail "$label: the hung program (pid $p) outlived the limit"
+        fi
+    done
+
+    if [ -n "$windows" ]; then
+        printf '%s\n' "$out" | grep -q "SIGTERM reached the test" \
+            && fail "$label: the limit signalled the test on Windows, where a signal can reach unrelated processes (#2758)"
+    else
+        printf '%s\n' "$out" | grep -q "SIGTERM reached the test" \
+            || fail "$label: the limit's SIGTERM never reached the test: $out"
+    fi
+}
+
+# check_status LABEL TOOLS: a command's own status comes through the bound,
+# and one that ignores SIGTERM is killed (137) once KILL_AFTER is up.
+check_status() {
+    label="$1"
+    start=$(date +%s)
+    if [ "$2" = default ]; then
+        out=$(bash "$TMP/status.sh" "$ROOT" 2>&1)
+    else
+        out=$(_SWEEP_TIMEOUT_TOOLS="$2" bash "$TMP/status.sh" "$ROOT" 2>&1)
+    fi
+    elapsed=$(( $(date +%s) - start ))
+    printf '%s\n' "$out" | grep -q "^exit=3$" \
+        || fail "$label: a command's exit status did not come through the bound: $out"
+    printf '%s\n' "$out" | grep -q "^signalled=137$" \
+        || fail "$label: a command SIGKILL ended did not read as 137: $out"
+    printf '%s\n' "$out" | grep -q "^stubborn=137$" \
+        || fail "$label: a command that ignores SIGTERM was not killed after KILL_AFTER (137): $out"
+    [ "$elapsed" -lt 20 ] \
+        || fail "$label: the 2 s limit with a 1 s grace took ${elapsed}s"
+}
+
+cat > "$TMP/status.sh" <<'EOF'
+. "$1/tests/lib/sweep_timeout.sh"
+sweep_timeout_bound TO "$1" 30
+$TO sh -c 'exit 3'
+echo "exit=$?"
+$TO sh -c 'kill -KILL $$'
+echo "signalled=$?"
+sweep_timeout_bound TO "$1" 2 1
+$TO sh -c 'trap "" TERM; sleep 30'
+echo "stubborn=$?"
+EOF
 
 if [ -n "$windows" ]; then
-    printf '%s\n' "$out" | grep -q "SIGTERM reached the test" \
-        && fail "the limit signalled the test on Windows, where a signal can reach unrelated processes (#2758)"
+    check_hung "job object" default
     echo "  [PASS] sweep_timeout: a hung test ends as 124 through a job object, with no signal, and the sweep shell survives"
-else
-    printf '%s\n' "$out" | grep -q "SIGTERM reached the test" \
-        || fail "timeout(1)'s SIGTERM never reached the test: $out"
-    echo "  [PASS] sweep_timeout: a hung test ends as 124 through timeout(1), and the sweep shell survives"
+    exit 0
 fi
+
+if command -v timeout >/dev/null 2>&1 || command -v gtimeout >/dev/null 2>&1; then
+    check_hung "timeout(1)" default
+    check_status "timeout(1)" default
+    via="timeout(1) and"
+else
+    via=""
+fi
+if command -v perl >/dev/null 2>&1; then
+    check_hung "perl bound" ""
+    check_status "perl bound" ""
+    via="$via the perl bound (#2772)"
+fi
+echo "  [PASS] sweep_timeout: a hung test ends as 124 through ${via# }, its process group goes with it, statuses come through, and the sweep shell survives"
