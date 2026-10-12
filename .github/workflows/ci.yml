@@ -235,8 +235,15 @@ jobs:
   # its own and runs beside the suite.
   # ============================================================
   ci-macos-leaks:
-    name: macOS leaks gate (ARM64)
+    name: macOS leaks gate (ARM64) [${{ matrix.shard }}]
     runs-on: macos-latest
+    # Two jobs, half the suite each (#2772, tests/scripts/sweep_shard.sh):
+    # macos-latest hands out 3-core and 5-core runners alike, and on a
+    # 3-core one the whole suite took 19.5 min against 6 on a 5-core one.
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ["1/2", "2/2"]
 
     steps:
     - uses: actions/checkout@v4
@@ -260,7 +267,7 @@ jobs:
       # it, as `make ci` does, and compiles from source on any mismatch.
       run: |
         CC=clang make audio-cache-restore
-        CC=clang make test-macos-leaks
+        CC=clang AE_SWEEP_SHARD="${{ matrix.shard }}" make test-macos-leaks
 
   # ============================================================
   # FreeBSD cross-compile gate (#402)

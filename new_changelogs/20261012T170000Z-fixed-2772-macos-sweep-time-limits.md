@@ -12,4 +12,6 @@
   legs split in two give the job that runs all of `make ci` a third of the
   sweep instead of half, so both halves finish together, and the macOS
   x86_64 leg runs two half sweeps (with the C unit tests on one), leaving
-  the rest of `make ci` to the ARM64 leg, which runs it on macOS (#2772).
+  the rest of `make ci` to the ARM64 leg, which runs it on macOS. The macOS
+  leaks gate runs as two jobs, half the regression suite each: on a 3-core
+  runner the whole suite took 19.5 minutes (#2772).
