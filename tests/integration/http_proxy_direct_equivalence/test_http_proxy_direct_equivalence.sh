@@ -20,12 +20,13 @@ SRC="$ROOT/tests/integration/http_reverse_proxy/server.ae"
 command -v curl >/dev/null 2>&1 || { echo "  [SKIP] curl not on PATH"; exit 0; }
 
 . "$ROOT/tests/lib/wait_port.sh"
+. "$ROOT/tests/lib/server_jobs.sh"
 
 TMPDIR="$(mktemp -d)"
 UP_PID=""; PX_PID=""
 cleanup() {
-    [ -n "$UP_PID" ] && { kill "$UP_PID" 2>/dev/null || true; wait "$UP_PID" 2>/dev/null || true; }
-    [ -n "$PX_PID" ] && { kill "$PX_PID" 2>/dev/null || true; wait "$PX_PID" 2>/dev/null || true; }
+    stop_server "$UP_PID"
+    stop_server "$PX_PID"
     rm -rf "$TMPDIR"
 }
 trap cleanup EXIT
@@ -78,7 +79,7 @@ capture() {
     # is what exercises the accounting for a partially written body.
     curl -s -D "$TMPDIR/$label.big.h"  --max-time 10 "http://127.0.0.1:$PX_PORT/bigbody"  -o "$TMPDIR/$label.big.b"
 
-    kill "$PX_PID" 2>/dev/null || true; wait "$PX_PID" 2>/dev/null || true; PX_PID=""
+    stop_server "$PX_PID"; PX_PID=""
 
     # The two captures are two proxy processes on two kernel-assigned ports,
     # and the upstream echoes X-Forwarded-Host, which names the port the

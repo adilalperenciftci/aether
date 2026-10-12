@@ -101,7 +101,7 @@ for sh_test in $scripts; do
     elif [ $sh_rc -gt 128 ] && [ $sh_rc -lt 160 ]; then
         sig=$((sh_rc - 128))
         case $sig in
-            9)  what="SIGKILL - killed outright; on a CI runner this is normally the OOM/resource killer" ;;
+            9)  what="SIGKILL - killed outright: the OOM/resource killer, or on Windows a signal sent to a native program's MSYS2 stand-in (#2479, tests/lib/server_jobs.sh)" ;;
             11) what="SIGSEGV - segfault" ;;
             6)  what="SIGABRT - abort()/assert" ;;
             15) what="SIGTERM - asked to stop" ;;

@@ -1,0 +1,87 @@
+// Regression (#2735): a function's arrow body that ends in a statement ends
+// with that statement and returns nothing. Only an expression is a value
+// (#2694); a binding or a store is not:
+//   - `bump() -> { hits = hits + 1 }` emitted `return hits + 1;`, so it
+//     returned the new count and never stored it (0, 0 for 1, 2);
+//   - `-> { hits += n }` and a new local last (`-> { label = "b=${n}" }`)
+//     did not compile;
+//   - `-> p.n = v`, the single expression form, and `-> p.n`, a field read,
+//     were parse errors: a dotted name after `->` was read as a return
+//     type.
+// A `match` last is a value only when an arm gives one: with every arm a
+// call of a function that returns nothing, it is a statement (it emitted a
+// C return of a void value).
+extern exit(code: int)
+
+struct Cell {
+    n: int
+}
+
+var bad = 0
+var hits = 0
+var noted = 0
+
+check(label: string, got: int, want: int) {
+    if got != want {
+        println("FAIL ${label}: got ${got}, want ${want}")
+        bad = bad + 1
+    }
+}
+
+note(x: int) {
+    noted = noted + x
+}
+
+bump() -> { hits = hits + 1 }
+
+add_hits(n: int) -> { hits += n }
+
+tagged(n: int) -> {
+    noted = noted + n
+    _label = "b=${n}"
+}
+
+store(c: *Cell, v: int) -> c.n = v
+
+grow(c: *Cell) -> c.n += 1
+
+read(c: *Cell) -> c.n
+
+pick(x: int) -> {
+    match x {
+        1 -> note(21)
+        _ -> note(20)
+    }
+}
+
+main() {
+    bump()
+    check("assignment last, first call", hits, 1)
+    bump()
+    check("assignment last, second call", hits, 2)
+
+    add_hits(5)
+    check("compound assignment last", hits, 7)
+
+    noted = 0
+    tagged(3)
+    tagged(4)
+    check("declaration last", noted, 7)
+
+    c = heap.new(Cell)
+    store(c, 41)
+    grow(c)
+    check("field store and read", read(c), 42)
+    heap.free(c)
+
+    noted = 0
+    pick(1)
+    pick(9)
+    check("match of calls that return nothing", noted, 41)
+
+    if bad != 0 {
+        println("${bad} check(s) failed")
+        exit(1)
+    }
+    println("arrow bodies ending in a statement run it: ok")
+}

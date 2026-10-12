@@ -1,0 +1,127 @@
+// Regression (#2688 follow-up): an actor's state field that is an array of
+// structs owning strings owns a value per element.
+//
+// `items = r.items` and `items = arr` into `state Item[2] items` copied the
+// elements as plain values: the state shared the strings of its source,
+// which `Row_destroy(&r)` (or the local array's exit) then freed, and the
+// elements it replaced were never released. Such a field now owns its
+// elements as a struct's array field and a local array of such structs
+// do: a whole-array store takes a `_dup` of each new element before it
+// stores any and gives back each element it replaces, an element store
+// (`items[i] = v`) and a store into an element's field (`items[i].name =
+// v`) replace what they overwrite, and the actor's destroy_state releases
+// every element. A local array stored into the state keeps its own
+// elements, released at its exit.
+//
+// Each check reads its value after churn, allocations of the same sizes
+// that reuse what was freed. The leak check runs where the heap count is
+// exact (mem.heap_in_use_exact): after a warm-up, some window of the same
+// work grows by exactly 0 (mem.steady_growth). Strings are built from
+// parameters, because string.concat of two literals folds to a literal.
+
+import std.mem
+import std.string
+
+extern exit(code: int)
+
+struct Item {
+    name: string
+}
+
+struct Row {
+    items: Item[2]
+}
+
+message FromRow { w: string }
+message FromArr { w: string }
+message SetOne { w: string }
+message SetName { w: string }
+message Swap {}
+message Churn { w: string }
+message Get {}
+message Joined { s: string }
+
+actor Keeper {
+    state Item[2] items
+
+    receive {
+        FromRow(w: w) -> {
+            r = Row { items: [Item { name: string.concat(w, "s") }, Item { name: string.concat(w, "tt") }] }
+            items = r.items
+        }
+        FromArr(w: w) -> {
+            arr = [Item { name: string.concat(w, "a") }, Item { name: string.concat(w, "bb") }]
+            items = arr
+        }
+        SetOne(w: w) -> {
+            items[1] = Item { name: string.concat(w, "one") }
+        }
+        SetName(w: w) -> {
+            items[0].name = string.concat(w, "nm")
+        }
+        Swap() -> {
+            items = [items[1], items[0]]
+        }
+        Churn(w: w) -> {
+            i = 0
+            while i < 8 {
+                c = Item { name: string.concat(w, "!") }
+                d = Item { name: string.concat(w, "!!") }
+                i = i + string.length(c.name) + string.length(d.name)
+            }
+        }
+        Get() -> { reply Joined { s: "${items[0].name},${items[1].name}" } }
+    }
+}
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL #2688: ${msg}")
+        exit(1)
+    }
+}
+
+names(k: ptr) -> string {
+    string s = k ? Get {}
+    return s
+}
+
+round(k: ptr, w: string) -> int {
+    k ! FromRow { w: w }
+    k ! Churn { w: w }
+    got = names(k)
+    check(got == "ws,wtt", "an array field of a struct stored into state (${got})")
+    k ! FromArr { w: w }
+    k ! Churn { w: w }
+    got = names(k)
+    check(got == "wa,wbb", "a local array stored into state (${got})")
+    k ! SetOne { w: w }
+    k ! SetName { w: w }
+    k ! Swap {}
+    k ! Churn { w: w }
+    got = names(k)
+    check(got == "wone,wnm", "an element, an element's field, a swap (${got})")
+    return string.length(got)
+}
+
+main() {
+    println("=== test_actor_state_struct_array ===")
+    k = spawn(Keeper())
+    check(round(k, "w") == 8, "a round adds up")
+    i = 0
+    while i < 20 {
+        round(k, "w")
+        i = i + 1
+    }
+    if mem.heap_in_use_exact() {
+        grown = mem.steady_growth(|| {
+                j = 0
+                while j < 10 {
+                    round(k, "w")
+                    j = j + 1
+                }
+            }, 5)
+        check(grown == 0, "a window of 10 rounds grew the heap by ${grown} bytes in every run")
+    }
+    println("=== test_actor_state_struct_array passed ===")
+}

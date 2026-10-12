@@ -1,0 +1,18 @@
+// #2677: a bare function passed to an extern's `fn(int)` parameter is the
+// plain C function pointer the C side calls, as `on_int as fn(int)` is.
+extern apply(handler: fn(int), v: int)
+extern apply_twice(handler: fn(int) -> int, v: int) -> int
+
+on_int(sig: int) {
+    println("got ${sig}")
+}
+
+double(n: int) -> int {
+    return n * 2
+}
+
+main() {
+    apply(on_int, 2)
+    apply(on_int as fn(int), 3)
+    println("twice ${apply_twice(double, 5)}")
+}

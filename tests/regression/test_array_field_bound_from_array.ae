@@ -1,0 +1,194 @@
+// Regression (#2688): a fixed-size array field bound from a whole array.
+//
+// A struct literal given an array (`Shelf { names: arr }`), a store of one
+// into the field (`s.names = arr`, `s.names = [...]`) and the same store
+// into an actor's array state field emitted C that does not compile: C
+// neither initialises nor assigns an array from an array. The elements are
+// now copied one by one, each taken as the field keeps it: a `string[N]`
+// field takes a reference to each element of an array (a counted string
+// shared, anything else copied), and a copy of each element of a literal,
+// as a string array that owns its elements does (#2618); a store takes
+// every new element before it stores any, so one that reads the field sees
+// it from before the store, then gives back each element it replaces. An
+// `int[N]` field copies its elements, an array of structs that own strings
+// a value of its own per element.
+//
+// Each check reads its value after churn, allocations of the same sizes
+// that reuse what was freed. The leak check runs where the heap count is
+// exact (mem.heap_in_use_exact): after a warm-up, some window of the same
+// work grows by exactly 0 (mem.steady_growth). Strings are built from
+// parameters, because string.concat of two literals folds to a literal.
+
+import std.mem
+import std.string
+
+extern exit(code: int)
+
+struct Shelf {
+    names: string[2]
+}
+
+struct Box {
+    shelf: Shelf
+}
+
+struct Vec3 {
+    xs: int[3]
+}
+
+struct Item {
+    name: string
+}
+
+struct Row {
+    items: Item[2]
+}
+
+message Fill { w: string }
+message Swap {}
+message Get {}
+message Total { v: int }
+
+actor Keeper {
+    state string[2] names
+
+    receive {
+        Fill(w: w) -> {
+            arr = [string.concat(w, "s"), "lit"]
+            names = arr
+            arr[0] = "gone"
+        }
+        Swap() -> {
+            names = [names[1], names[0]]
+        }
+        Get() -> { reply Total { v: string.length(names[0]) + string.length(names[1]) } }
+    }
+}
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL #2688: ${msg}")
+        exit(1)
+    }
+}
+
+// Allocations of the sizes the checks read, to take over freed blocks.
+churn(w: string) -> int {
+    n = 0
+    i = 0
+    while i < 8 {
+        a = string.concat(w, "!!")
+        b = string.concat(w, "z")
+        n = n + string.length(a) + string.length(b)
+        i = i + 1
+    }
+    return n
+}
+
+// The issue's shapes: a literal given an owning array, a store of one.
+literal_and_store(w: string) -> int {
+    arr = [string.concat(w, "a"), "lit"]
+    s = Shelf { names: arr }
+    t = Shelf { names: ["x", "y"] }
+    t.names = arr
+    arr[0] = string.concat(w, "b")
+    churn(w)
+    check(s.names[0] == "wa" && s.names[1] == "lit", "a literal given an array")
+    check(t.names[0] == "wa" && t.names[1] == "lit", "an array stored into the field")
+    check(arr[0] == "wb", "the array keeps its own elements")
+    return string.length(s.names[0]) + string.length(t.names[0])
+}
+
+// A parameter array, another struct's field, a table of literals, and a
+// literal with a fresh string, through a box and a nested field.
+sources(xs: string[2], w: string) -> int {
+    a = Shelf { names: xs }
+    b = Shelf { names: a.names }
+    table = ["p", "q"]
+    c = Shelf { names: table }
+    box = Box { shelf: Shelf { names: ["m", "n"] } }
+    box.shelf.names = a.names
+    p = heap.new(Shelf)
+    p.names = [string.concat(w, "c"), "lit"]
+    p.names = b.names
+    a.names[0] = "lit"
+    churn(w)
+    check(b.names[0] == "wk" && c.names[1] == "q", "a field and a table given to a literal")
+    check(box.shelf.names[0] == "wk" && p.names[0] == "wk", "a field stored through a box")
+    n = string.length(b.names[0]) + string.length(box.shelf.names[0]) + string.length(p.names[0])
+    heap.free(p)
+    return n
+}
+
+params(w: string) -> int {
+    arr = [string.concat(w, "k"), "lit"]
+    return sources(arr, w)
+}
+
+// Stored into itself, and swapped by a literal that reads the field.
+self_stores(w: string) -> int {
+    s = Shelf { names: [string.concat(w, "d"), string.concat(w, "e")] }
+    s.names = s.names
+    s.names = [s.names[1], s.names[0]]
+    churn(w)
+    check(s.names[0] == "we" && s.names[1] == "wd", "the field swapped")
+    return string.length(s.names[0]) + string.length(s.names[1])
+}
+
+// An `int[N]` field and an array of structs that own strings.
+other_elements(w: string) -> int {
+    ints = [1, 2, 3]
+    v = Vec3 { xs: ints }
+    ints[0] = 9
+    v.xs = ints
+    items = [Item { name: string.concat(w, "f") }, Item { name: "lit" }]
+    r = Row { items: items }
+    items[0].name = "lit"
+    r.items = items
+    r.items[1].name = string.concat(w, "g")
+    churn(w)
+    check(v.xs[0] == 9 && v.xs[2] == 3, "an int array field")
+    check(r.items[0].name == "lit" && r.items[1].name == "wg", "an array of structs")
+    return v.xs[0] + string.length(r.items[1].name)
+}
+
+// An actor's array state field, overwritten per message.
+state_round(k: ptr, w: string) -> int {
+    i = 0
+    while i < 10 {
+        k ! Fill { w: w }
+        k ! Swap {}
+        i = i + 1
+    }
+    int t = k ? Get {}
+    return t
+}
+
+round(w: string) -> int {
+    return literal_and_store(w) + params(w) + self_stores(w) + other_elements(w)
+}
+
+main() {
+    println("=== test_array_field_bound_from_array ===")
+    check(round("w") == 4 + 6 + 4 + 11, "a round adds up")
+    k = spawn(Keeper())
+    check(state_round(k, "w") == 5, "an array stored into state")
+    i = 0
+    while i < 20 {
+        round("w")
+        state_round(k, "w")
+        i = i + 1
+    }
+    if mem.heap_in_use_exact() {
+        grown = mem.steady_growth(|| {
+                j = 0
+                while j < 100 {
+                    round("w")
+                    j = j + 1
+                }
+                state_round(k, "w")
+            }, 5)
+        check(grown == 0, "a window of 100 rounds grew the heap by ${grown} bytes in every run")
+    }
+    println("=== test_array_field_bound_from_array passed ===")
+}

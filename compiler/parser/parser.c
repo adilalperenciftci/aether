@@ -1029,6 +1029,89 @@ static ASTNode* parse_interp_string_expr(const char* raw, int line, int column) 
     return interp;
 }
 
+static int body_is_assignment(Parser* parser);
+
+/* Whether the last statement of an arrow body `-> { ... }`, a function's or
+ * a closure's (#2697), is the value the body returns. Only an expression is
+ * (#2694), and a `match`, which has a value when its arms have one (the
+ * checker settles that). Any other statement stays one, and the body ends
+ * with it:
+ *  - control: an `if`, a loop, a `switch`, a `try`, a `defer`, a `panic`,
+ *    a `return`, a `break`, a `continue` or a block. Wrapped in a `return`,
+ *    `if c { return 1 }` emitted C that did not compile; a body that
+ *    returns a value on some path must on every path (#2684).
+ *  - a binding or a store: `x = v` (a new local or an existing one),
+ *    `x += v`, `p.n = v`, `xs[i] = v`, `a, b = f()`, `const k = v`.
+ *    Returned, `count = count + 1` handed back the sum and never stored
+ *    it, `a += 3` emitted `return +=3;`, and a new string local did not fit
+ *    the int result inferred for it (#2735).
+ *  - a send, `a ! M { ... }`, which has no value. */
+static int arrow_tail_is_value(ASTNode* last) {
+    if (last->type == AST_MATCH_STATEMENT) return 1;
+    if (last->type != AST_EXPRESSION_STATEMENT || last->child_count != 1) return 0;
+    ASTNode* e = last->children[0];
+    if (!e || e->type == AST_SEND_FIRE_FORGET) return 0;
+    return !(e->type == AST_BINARY_EXPRESSION && e->value && strcmp(e->value, "=") == 0);
+}
+
+/* The return an arrow body's value `-> expr` / `-> { ...; expr }` makes,
+ * marked `arrow_value`: whether a call or a `match` has a value is not
+ * known here, and a call of a function that returns nothing has none, so
+ * the checker turns a marked return of one back into the statement it
+ * returns (#2697). */
+static ASTNode* arrow_value_return(ASTNode* value, int line, int column) {
+    ASTNode* ret = create_ast_node(AST_RETURN_STATEMENT, NULL, line, column);
+    ret->annotation = strdup("arrow_value");
+    add_child(ret, value);
+    return ret;
+}
+
+/* The body of a single-expression arrow, `-> expr`, of a function or a
+ * closure: the block that returns it. An assignment there, `-> n = n + 1`
+ * or `-> p.n += 1`, is the statement `{ n = n + 1 }`, parsed as one (as a
+ * match arm's is, #2575), so it stores and returns nothing, as `-> { n =
+ * n + 1 }` does (#2735). Returned, a closure's store into a captured local
+ * was lost. NULL on a parse error. */
+static ASTNode* parse_arrow_expression_body(Parser* parser) {
+    Token* at = peek_token(parser);
+    if (!at) return NULL;
+    ASTNode* body = create_ast_node(AST_BLOCK, NULL, at->line, at->column);
+    if (body_is_assignment(parser)) {
+        ASTNode* stmt = parse_statement(parser);
+        if (!stmt) { free_ast_node(body); return NULL; }
+        add_child(body, stmt);
+        return body;
+    }
+    ASTNode* expr = parse_expression(parser);
+    if (!expr) { free_ast_node(body); return NULL; }
+    add_child(body, arrow_value_return(expr, expr->line, expr->column));
+    return body;
+}
+
+/* An arrow body `-> { ... }`, of a function or a closure alike (#2697),
+ * returns its last statement when that has a value to return. */
+static void arrow_block_return_tail(ASTNode* body) {
+    if (!body || body->child_count == 0) return;
+    ASTNode* last = body->children[body->child_count - 1];
+    if (!last || !arrow_tail_is_value(last)) return;
+    // Wrap the trailing expression as the implicit return (a trailing
+    // statement is not one, #2694). It goes in bare, out of its expression
+    // statement: that is the node an explicit `return expr` holds, and the
+    // passes that read a return's value (whether it hands over an owned
+    // string, which local escapes through it) do not look inside a
+    // statement. Wrapped, `msg = "n=${n}"` then `msg` freed msg at scope
+    // exit and returned the freed pointer, which -O0 and -O2 printed as
+    // different garbage (#2685).
+    ASTNode* value = last;
+    if (last->type == AST_EXPRESSION_STATEMENT &&
+        last->child_count == 1 && last->children[0]) {
+        value = last->children[0];
+        last->children[0] = NULL;  // detach, so freeing last keeps it
+        free_ast_node(last);
+    }
+    body->children[body->child_count - 1] = arrow_value_return(value, value->line, value->column);
+}
+
 // Parse closure expression: |params| -> expr  OR  |params| { block }
 // Also handles: || { block } (no params, double-pipe)
 ASTNode* parse_closure_expression(Parser* parser) {
@@ -1089,21 +1172,19 @@ ASTNode* parse_closure_expression(Parser* parser) {
         // Arrow body: |x| -> x * 2
         advance_token(parser); // consume '->'
         if (peek_token(parser) && peek_token(parser)->type == TOKEN_LEFT_BRACE) {
-            // |x| -> { multi-statement block }
+            // |x| -> { multi-statement block }: returns its last value, as a
+            // function's arrow body does. `|x| { ... }` returns nothing it
+            // does not `return`.
             ASTNode* body = parse_block(parser);
+            arrow_block_return_tail(body);
             add_child(closure, body);
         } else {
             // |x| -> single_expression
-            ASTNode* expr = parse_expression(parser);
-            if (!expr) {
+            ASTNode* body = parse_arrow_expression_body(parser);
+            if (!body) {
                 free_ast_node(closure);
                 return NULL;
             }
-            // Wrap in a block with implicit return
-            ASTNode* ret = create_ast_node(AST_RETURN_STATEMENT, NULL, expr->line, expr->column);
-            add_child(ret, expr);
-            ASTNode* body = create_ast_node(AST_BLOCK, NULL, expr->line, expr->column);
-            add_child(body, ret);
             add_child(closure, body);
         }
     } else if (next->type == TOKEN_LEFT_BRACE) {
@@ -2563,9 +2644,9 @@ int get_operator_precedence(AeTokenType type) {
     }
 }
 
-/* Does the arm body at the cursor assign: a name, followed by fields and
- * indexes, then `=` or a compound assignment? */
-static int arm_body_is_assignment(Parser* parser) {
+/* Does the match arm or arrow body at the cursor assign: a name, followed
+ * by fields and indexes, then `=` or a compound assignment? */
+static int body_is_assignment(Parser* parser) {
     Token* t = peek_ahead(parser, 0);
     if (!t || t->type != TOKEN_IDENTIFIER) return 0;
     int i = 1;
@@ -3478,7 +3559,21 @@ ASTNode* parse_for_loop(Parser* parser) {
     
     ASTNode* increment = NULL;
     if (!match_token(parser, TOKEN_RIGHT_PAREN)) {
-        increment = parse_expression(parser);
+        /* #2742: an increment that binds a variable (`s = f(s)`, `i += 2`)
+         * is the statement it would be at the end of the body, the
+         * binding a while-loop rewrite makes there, so it gets the same
+         * node and, in codegen, the same ownership: a string the binding
+         * replaces is freed, a cell is stored through. Parsed as an
+         * expression, it was a raw C assignment in the header. Any other
+         * increment (`i++`, a call) stays an expression. */
+        Token* step = peek_token(parser);
+        Token* op = peek_ahead(parser, 1);
+        if (step && step->type == TOKEN_IDENTIFIER && op &&
+            (op->type == TOKEN_ASSIGN || token_is_compound_assign(op))) {
+            increment = parse_statement(parser);
+        } else {
+            increment = parse_expression(parser);
+        }
         expect_token(parser, TOKEN_RIGHT_PAREN);
     }
     
@@ -3772,7 +3867,7 @@ ASTNode* parse_match_case(Parser* parser) {
     if (next && next->type == TOKEN_LEFT_BRACE) {
         // Block result
         result = parse_block(parser);
-    } else if (arm_body_is_assignment(parser)) {
+    } else if (body_is_assignment(parser)) {
         /* #2575: `1 -> o.f = v` / `1 -> x = v` is the statement `{ o.f = v }`
          * and parsed as one, so every pass sees the tree a braced arm has.
          * Parsed as an expression it was emitted as a bare C assignment:
@@ -5441,24 +5536,6 @@ static int starts_return_type_then_body(Parser* parser) {
     return typed;
 }
 
-/* Whether the last statement of an arrow body `-> { ... }` is the value the
- * body returns: an expression, a `match`, or a declaration (which returns
- * what it binds). A control statement has no value to give: wrapped in a
- * `return`, `if c { return 1 }` or a loop or a `switch` emitted C that did
- * not compile. Left as it is, such a body is checked like a block body, and
- * one that returns a value on some path must on every path (#2684). */
-static int arrow_tail_is_value(ASTNode* last) {
-    switch (last->type) {
-        case AST_RETURN_STATEMENT: case AST_IF_STATEMENT: case AST_WHILE_LOOP:
-        case AST_FOR_LOOP: case AST_SWITCH_STATEMENT: case AST_TRY_STATEMENT:
-        case AST_DEFER_STATEMENT: case AST_PANIC_STATEMENT: case AST_BREAK_STATEMENT:
-        case AST_CONTINUE_STATEMENT: case AST_WHEN_STATEMENT: case AST_BLOCK:
-            return 0;
-        default:
-            return 1;
-    }
-}
-
 ASTNode* parse_function_definition(Parser* parser) {
     // Erlang-style pattern matching functions!
     // Syntax: 
@@ -5694,8 +5771,12 @@ ASTNode* parse_function_definition(Parser* parser) {
                         }
                         /* `off` now points just past the dotted name. A typed
                          * return is one immediately followed by `{` (block
-                         * body) or end-of-signature; a struct-literal head
-                         * `{ field:` is still excluded. */
+                         * body), a contract clause or a type suffix; a
+                         * struct-literal head `{ field:` is still excluded.
+                         * Anything else, an operator, `=`, or the next
+                         * definition, follows an expression body: `-> p.n`,
+                         * `-> p.n = v`. Read as a type, both were a parse
+                         * error ("Expected LEFT_BRACE"). */
                         Token* after_qual = peek_ahead(parser, off);
                         if (after_qual && after_qual->type == TOKEN_LEFT_BRACE) {
                             Token* after_brace = peek_ahead(parser, off + 1);
@@ -5705,8 +5786,11 @@ ASTNode* parse_function_definition(Parser* parser) {
                                 after_brace->type == TOKEN_IDENTIFIER &&
                                 after_field && after_field->type == TOKEN_COLON;
                             if (!looks_like_struct_literal) is_typed_return = 1;
-                        } else {
-                            is_typed_return = 1;
+                        } else if (after_qual) {
+                            AeTokenType at = after_qual->type;
+                            is_typed_return = at == TOKEN_REQUIRES || at == TOKEN_ENSURES ||
+                                              at == TOKEN_QUESTION || at == TOKEN_QUESTION_QUESTION ||
+                                              at == TOKEN_EXCLAIM || at == TOKEN_LEFT_BRACKET;
                         }
                         break;
                     }
@@ -5788,44 +5872,12 @@ ASTNode* parse_function_definition(Parser* parser) {
             // Multi-statement arrow body: -> { stmt1; stmt2; expr }
             // Parse as a block, but treat the last expression as implicit return
             ASTNode* body = parse_block(parser);
-            if (body && body->child_count > 0) {
-                // Return the last statement when it has a value to return
-                ASTNode* last = body->children[body->child_count - 1];
-                if (arrow_tail_is_value(last)) {
-                    // Wrap the trailing expression as the implicit return
-                    // (a trailing statement is not one, #2694). It goes in
-                    // bare, out of its expression statement: that is the
-                    // node an explicit `return expr` holds, and the passes
-                    // that read a return's value (whether it hands over an
-                    // owned string, which local escapes through it) do not
-                    // look inside a statement. Wrapped, `msg = "n=${n}"`
-                    // then `msg` freed msg at scope exit and returned the
-                    // freed pointer, which -O0 and -O2 printed as different
-                    // garbage (#2685).
-                    ASTNode* value = last;
-                    if (last->type == AST_EXPRESSION_STATEMENT &&
-                        last->child_count == 1 && last->children[0]) {
-                        value = last->children[0];
-                        last->children[0] = NULL;  // detach, so freeing last keeps it
-                        free_ast_node(last);
-                    }
-                    ASTNode* return_stmt = create_ast_node(AST_RETURN_STATEMENT, NULL,
-                                                           value->line, value->column);
-                    add_child(return_stmt, value);
-                    body->children[body->child_count - 1] = return_stmt;
-                }
-            }
+            arrow_block_return_tail(body);
             add_child(func, body);
         } else {
             // Single expression arrow body: -> expr
-            ASTNode* body_expr = parse_expression(parser);
-            if (body_expr) {
-                // Wrap in a return statement
-                ASTNode* return_stmt = create_ast_node(AST_RETURN_STATEMENT, NULL, 0, 0);
-                add_child(return_stmt, body_expr);
-
-                ASTNode* body_block = create_ast_node(AST_BLOCK, NULL, 0, 0);
-                add_child(body_block, return_stmt);
+            ASTNode* body_block = parse_arrow_expression_body(parser);
+            if (body_block) {
                 add_child(func, body_block);
             }
         }

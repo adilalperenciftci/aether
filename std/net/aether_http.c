@@ -321,21 +321,31 @@ static void http_init(void) {
 //   https://foo.example/bar  →  host="foo.example" port=443 path="/bar" use_tls=1
 //   http://foo:8080/         →  host="foo"         port=8080 path="/"   use_tls=0
 // Returns 1 on success, 0 on malformed input.
-/* A bounded string copy. snprintf(dst, n, "%s", src) does the same thing and
- * brings the whole formatting machinery with it, which parse_url paid for
- * three times on a path that runs once per proxied request. */
-static void url_copy(char* dst, size_t cap, const char* src) {
-    if (!cap) return;
+/* A string copy that refuses rather than cuts: 1 when src fits in cap bytes
+ * with its NUL, 0 (and nothing copied) when it does not. snprintf would bring
+ * the whole formatting machinery with it, which parse_url paid for on a path
+ * that runs once per proxied request; and it would cut. A path cut to the
+ * buffer was sent anyway and answered for the wrong thing (#2674). */
+static int url_copy(char* dst, size_t cap, const char* src) {
     size_t n = strlen(src);
-    if (n >= cap) n = cap - 1;
+    if (n >= cap) return 0;
     memcpy(dst, src, n);
     dst[n] = '\0';
+    return 1;
+}
+
+/* A host of `len` bytes from `start`, whole or not at all. */
+static int url_copy_host(char* host, size_t host_size, const char* start, size_t len) {
+    if (len >= host_size) return 0;
+    memcpy(host, start, len);
+    host[len] = '\0';
+    return 1;
 }
 
 int parse_url(const char* url, char* host, size_t host_size,
                      int* port, char* path, size_t path_size, int* use_tls) {
-    if (!url || !host || !port || !path || !use_tls ||
-        host_size == 0 || path_size == 0) return 0;
+    if (!url || !host || !port || !use_tls || host_size == 0 ||
+        (path && path_size == 0)) return 0;
 
     const char* start;
     *use_tls = 0;
@@ -356,27 +366,32 @@ int parse_url(const char* url, char* host, size_t host_size,
     const char* colon = strchr(start, ':');
 
     if (colon && (!slash || colon < slash)) {
-        size_t host_len = colon - start;
-        if (host_len >= host_size) host_len = host_size - 1;
-        memcpy(host, start, host_len);
-        host[host_len] = '\0';
+        if (!url_copy_host(host, host_size, start, (size_t)(colon - start))) return 0;
         *port = atoi(colon + 1);
-        if (slash) {
-            url_copy(path, path_size, slash);
-        } else {
-            url_copy(path, path_size, "/");
-        }
     } else if (slash) {
-        size_t host_len = slash - start;
-        if (host_len >= host_size) host_len = host_size - 1;
-        memcpy(host, start, host_len);
-        host[host_len] = '\0';
-        url_copy(path, path_size, slash);
+        if (!url_copy_host(host, host_size, start, (size_t)(slash - start))) return 0;
     } else {
-        url_copy(host, host_size, start);
-        url_copy(path, path_size, "/");
+        if (!url_copy(host, host_size, start)) return 0;
     }
+    if (path && !url_copy(path, path_size, slash ? slash : "/")) return 0;
 
+    return 1;
+}
+
+int parse_url_alloc(const char* url, char* host, size_t host_size,
+                    int* port, char** path_out, int* use_tls) {
+    if (!path_out) return 0;
+    *path_out = NULL;
+    if (!url) return 0;
+    /* The path is a tail of the URL, or "/" when it has none. */
+    size_t cap = strlen(url) + 2;
+    char* path = (char*)malloc(cap);
+    if (!path) return 0;
+    if (!parse_url(url, host, host_size, port, path, cap, use_tls)) {
+        free(path);
+        return 0;
+    }
+    *path_out = path;
     return 1;
 }
 
@@ -2920,11 +2935,14 @@ static HttpResponse* http_request_internal(HttpClientRequest* req) {
     response->stream = NULL;
 
     char host[256];
-    char path[1024];
+    /* Sized from the URL, as long as it needs: a fixed path[1024] cut a
+     * longer path and sent the request anyway (#2674). Freed once the request
+     * head is built, its only reader, and on each return before that. */
+    char* path = NULL;
     int port;
     int use_tls;
 
-    if (!parse_url(url, host, sizeof(host), &port, path, sizeof(path), &use_tls)) {
+    if (!parse_url_alloc(url, host, sizeof(host), &port, &path, &use_tls)) {
         response->error = string_new("malformed URL");
         return response;
     }
@@ -2938,6 +2956,7 @@ static HttpResponse* http_request_internal(HttpClientRequest* req) {
     if (use_tls) {
         const char* missing = http_tls_backend_missing();
         if (missing) {
+            free(path);
             response->error = string_new(missing);
             return response;
         }
@@ -2957,6 +2976,7 @@ static HttpResponse* http_request_internal(HttpClientRequest* req) {
         int pr = resolve_proxy_for(req, host, use_tls,
                                    phost, sizeof(phost), &pport, &perr);
         if (pr < 0) {
+            free(path);
             response->error = string_new(perr ? perr : "proxy error");
             return response;
         }
@@ -3072,6 +3092,8 @@ static HttpResponse* http_request_internal(HttpClientRequest* req) {
         body, body_len, content_type, pool_this
     };
     char* hdr = http_build_request_head(&head_params, &hdr_len, &hdr_cap);
+    free(path);   /* the head holds the request line now */
+    path = NULL;
     if (!hdr) {
         transport_close(&t);
         response->error = string_new("out of memory building request");
@@ -3591,52 +3613,54 @@ static char* http_resolve_location(const char* base_url, const char* location) {
      * inverted, which produced a bogus "malformed Location header"
      * for every well-formed base URL. Caught by the cases-8-10
      * end-to-end test in test_http_client_v2.ae. */
-    char base_host[256], base_path[1024];
+    /* Both paths are sized to fit: fixed 1024-byte buffers failed a redirect
+     * from, or to, a long path (#2674). */
+    char base_host[256];
+    char* base_path = NULL;
     int base_port = 0, base_use_tls = 0;
-    if (parse_url(base_url, base_host, sizeof(base_host),
-                  &base_port, base_path, sizeof(base_path), &base_use_tls) == 0) {
+    if (parse_url_alloc(base_url, base_host, sizeof(base_host),
+                        &base_port, &base_path, &base_use_tls) == 0) {
         return NULL;
     }
     const char* scheme = base_use_tls ? "https" : "http";
+    char* out = NULL;
     /* Scheme-relative: //host/x → keep base scheme. */
     if (location[0] == '/' && location[1] == '/') {
         size_t need = strlen(scheme) + 1 + strlen(location) + 1;
-        char* out = (char*)malloc(need);
-        if (!out) return NULL;
-        snprintf(out, need, "%s:%s", scheme, location);
+        out = (char*)malloc(need);
+        if (out) snprintf(out, need, "%s:%s", scheme, location);
+        free(base_path);
         return out;
     }
-    /* Root-relative: /x → keep base scheme + host[:port]. */
-    if (location[0] == '/') {
-        size_t need = strlen(scheme) + 3 + strlen(base_host) + 16 + strlen(location) + 1;
-        char* out = (char*)malloc(need);
-        if (!out) return NULL;
-        if ((base_use_tls && base_port == 443) || (!base_use_tls && base_port == 80)) {
-            snprintf(out, need, "%s://%s%s", scheme, base_host, location);
+    /* Root-relative: /x → keep base scheme + host[:port]; a relative path
+     * replaces the last segment of base_path. */
+    char* joined_path = NULL;
+    const char* tail = location;
+    if (location[0] != '/') {
+        char* last_slash = strrchr(base_path, '/');
+        size_t prefix_len = last_slash ? (size_t)(last_slash - base_path) + 1 : 0;
+        joined_path = (char*)malloc(prefix_len + strlen(location) + 2);
+        if (!joined_path) { free(base_path); return NULL; }
+        if (last_slash) {
+            memcpy(joined_path, base_path, prefix_len);
+            strcpy(joined_path + prefix_len, location);
         } else {
-            snprintf(out, need, "%s://%s:%d%s", scheme, base_host, base_port, location);
+            joined_path[0] = '/';
+            strcpy(joined_path + 1, location);
         }
-        return out;
+        tail = joined_path;
     }
-    /* Relative path: replace last segment of base_path. */
-    char joined_path[1024];
-    char* last_slash = strrchr(base_path, '/');
-    if (last_slash) {
-        size_t prefix_len = (size_t)(last_slash - base_path) + 1;
-        if (prefix_len + strlen(location) + 1 > sizeof(joined_path)) return NULL;
-        memcpy(joined_path, base_path, prefix_len);
-        strcpy(joined_path + prefix_len, location);
-    } else {
-        snprintf(joined_path, sizeof(joined_path), "/%s", location);
+    size_t need = strlen(scheme) + 3 + strlen(base_host) + 16 + strlen(tail) + 1;
+    out = (char*)malloc(need);
+    if (out) {
+        if ((base_use_tls && base_port == 443) || (!base_use_tls && base_port == 80)) {
+            snprintf(out, need, "%s://%s%s", scheme, base_host, tail);
+        } else {
+            snprintf(out, need, "%s://%s:%d%s", scheme, base_host, base_port, tail);
+        }
     }
-    size_t need = strlen(scheme) + 3 + strlen(base_host) + 16 + strlen(joined_path) + 1;
-    char* out = (char*)malloc(need);
-    if (!out) return NULL;
-    if ((base_use_tls && base_port == 443) || (!base_use_tls && base_port == 80)) {
-        snprintf(out, need, "%s://%s%s", scheme, base_host, joined_path);
-    } else {
-        snprintf(out, need, "%s://%s:%d%s", scheme, base_host, base_port, joined_path);
-    }
+    free(joined_path);
+    free(base_path);
     return out;
 }
 
@@ -3766,18 +3790,20 @@ HttpResponse* http_send_raw(HttpClientRequest* req) {
          * http_resolve_location had above; without that fix the strip path
          * never fired in practice (because parse_url always succeeds for
          * well-formed URLs). */
-        char curr_host[256], next_host[256], dummy_path[1024];
+        /* Only the origins are compared, so no path is parsed; and the
+         * headers stay only when both origins parse and match. With a
+         * 1024-byte path buffer a long path failed the parse, which skipped
+         * the strip and sent the credentials to the new host (#2674). */
+        char curr_host[256], next_host[256];
         int curr_port = 0, next_port = 0, curr_tls = 0, next_tls = 0;
-        if (parse_url(current_url, curr_host, sizeof(curr_host), &curr_port,
-                      dummy_path, sizeof(dummy_path), &curr_tls) != 0 &&
+        int same_origin =
+            parse_url(current_url, curr_host, sizeof(curr_host), &curr_port,
+                      NULL, 0, &curr_tls) != 0 &&
             parse_url(next_url, next_host, sizeof(next_host), &next_port,
-                      dummy_path, sizeof(dummy_path), &next_tls) != 0) {
-            if (strcmp(curr_host, next_host) != 0 ||
-                curr_port != next_port ||
-                curr_tls != next_tls) {
-                http_strip_cross_host_headers(req);
-            }
-        }
+                      NULL, 0, &next_tls) != 0 &&
+            strcmp(curr_host, next_host) == 0 &&
+            curr_port == next_port && curr_tls == next_tls;
+        if (!same_origin) http_strip_cross_host_headers(req);
 
         /* Move on. Record the new URL, swap the request URL, send,
          * release the prior response. */

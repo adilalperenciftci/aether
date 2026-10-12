@@ -1,0 +1,70 @@
+// Regression (#2750 follow-up): a `string?` local passed to a callee that
+// only reads it through `x ?? d` is still freed by its owner. #2750 counted
+// a binding of `x ?? d` in the callee (`s = x ?? ""`) as keeping the
+// argument, so the caller's local lost its exit free and its last string
+// leaked (macOS leaks: test_optional_heap_leak, "v-39"). The binding keeps
+// the argument only when the local escapes the callee: kept through a local
+// into a global, the argument stays alive.
+
+import std.mem
+import std.string
+
+extern exit(code: int)
+
+var kept = ""
+
+mk(i: int) -> string? {
+    return string.concat("v-", string.from_int(i))
+}
+
+// Reads the optional through a local bound to `x ?? ""`.
+peek(x: string?) -> int {
+    s = x ?? ""
+    return string.length(s)
+}
+
+// Binds the optional's string to a local and keeps that local.
+stash(x: string?) {
+    s = x ?? ""
+    kept = s
+}
+
+round(i: int) -> int {
+    let a: string? = mk(i)
+    return peek(a)
+}
+
+main() {
+    bad = 0
+    if round(7) != 3 {
+        println("FAIL: peek read the wrong length")
+        bad = bad + 1
+    }
+    n = 0
+    while n < 3 {
+        let b: string? = mk(n)
+        stash(b)
+        n = n + 1
+    }
+    if !string.equals(kept, "v-2") {
+        println("FAIL: the stashed string is '${kept}', want v-2")
+        bad = bad + 1
+    }
+    if mem.heap_in_use_exact() {
+        grown = mem.steady_growth(|| {
+                k = 0
+                while k < 100 {
+                    round(k)
+                    k = k + 1
+                }
+            }, 5)
+        if grown != 0 {
+            println("FAIL: 100 calls passing a string? local to a read-only callee grew the heap by ${grown} bytes")
+            bad = bad + 1
+        }
+    }
+    if bad != 0 {
+        exit(1)
+    }
+    println("PASS: a string? local read by its callee through ?? is freed by its owner")
+}

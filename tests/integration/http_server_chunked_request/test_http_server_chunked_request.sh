@@ -14,6 +14,7 @@
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+. "$ROOT/tests/lib/server_jobs.sh"
 AE="$ROOT/build/ae"
 PORT=18407
 
@@ -21,7 +22,7 @@ PORT=18407
 
 TMPDIR="$(mktemp -d)"
 SRV_PID=""
-cleanup() { [ -n "$SRV_PID" ] && kill "$SRV_PID" 2>/dev/null; rm -rf "$TMPDIR"; }
+cleanup() { stop_server "$SRV_PID"; rm -rf "$TMPDIR"; }
 trap cleanup EXIT
 fail() { echo "  [FAIL] $1"; exit 1; }
 

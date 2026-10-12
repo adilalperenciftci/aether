@@ -70,4 +70,71 @@ case "$out" in
        echo "$out" | sed 's/^/        /'; exit 1 ;;
 esac
 
-echo "  [PASS] warning_names_declaring_file: a module's warning names the module"
+# The rest of the third pass, the match-arm check and the effect check named
+# the importing file too: they reported with no file after the second pass
+# had stopped naming one. Each now names the module and the line in it.
+cat > "$TMP/lib/checks.ae" <<'AE'
+import std.string
+import std.os
+
+exports (after_return, twice_one, leak, moved, shell)
+
+extern keep(p: string)
+
+after_return(n: int) -> int {
+    return n
+    println("never")
+}
+
+twice_one(n: int) -> int {
+    match n {
+        1 -> { return 10 }
+        1 -> { return 11 }
+        _ -> { return 0 }
+    }
+}
+
+leak() {
+    @scoped s = string.concat("a", "b")
+    t = s
+    keep(t)
+}
+
+moved() {
+    let iso = isolate(7)
+    let a = consume(iso)
+    let b = consume(iso)
+    println("${a} ${b}")
+}
+
+@pure
+shell() -> int {
+    return os.system("echo hi")
+}
+AE
+
+cat > "$TMP/main2.ae" <<'AE'
+import checks
+
+main() {
+    println("${checks.after_return(1)}")
+}
+AE
+
+out=$(cd "$TMP" && AETHER_LIB_DIR="$TMP/lib" "$AE" check main2.ae 2>&1)
+
+for at in "checks.ae:10:" "checks.ae:16:" "checks.ae:23:" "checks.ae:30:" "checks.ae:35:"; do
+    case "$out" in
+        *"$at"*) ;;
+        *) echo "  [FAIL] no diagnostic names $at (W1002, W1004, @scoped, Isolated[T], @pure in turn):"
+           echo "$out" | sed 's/^/        /'; exit 1 ;;
+    esac
+done
+
+case "$out" in
+    *"--> main2.ae"*)
+       echo "  [FAIL] a diagnostic in the module names the importing file:"
+       echo "$out" | sed 's/^/        /'; exit 1 ;;
+esac
+
+echo "  [PASS] warning_names_declaring_file: a module's warnings and errors name the module"

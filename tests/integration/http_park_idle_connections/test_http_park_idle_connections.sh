@@ -24,6 +24,7 @@ set -u
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 . "$ROOT/tests/lib/wait_port.sh"
+. "$ROOT/tests/lib/server_jobs.sh"
 AE="$ROOT/build/ae"
 CONNECTIONS="${PARK_TEST_CONNECTIONS:-200}"
 
@@ -48,12 +49,9 @@ fi
 TMP="$(mktemp -d)"
 SRV_PID=""
 cleanup() {
-    if [ -n "$SRV_PID" ]; then
-        kill "$SRV_PID" 2>/dev/null || true
-        # Reaped here so the shell does not print its own "Terminated" line
-        # into a passing test's output.
-        wait "$SRV_PID" 2>/dev/null || true
-    fi
+    # Reaped too, so the shell does not print its own "Terminated" line into
+    # a passing test's output.
+    stop_server "$SRV_PID"
     rm -rf "$TMP"
 }
 trap cleanup EXIT

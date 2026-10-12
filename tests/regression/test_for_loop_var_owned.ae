@@ -1,0 +1,230 @@
+// Regression (#2742): a C-style `for` loop's variable is owned as the same
+// binding in the while-loop rewrite is.
+//
+// The header's init and increment got none of the ownership a binding in a
+// body gets. `for (s = "a"; ...; s = string.concat(s, "b"))` wrote the step
+// as a raw C assignment, so every string it replaced leaked; with a closure
+// that writes `s` (a cell, #2737) the step stored into the cell raw; and
+// the init declared `s` in the header with no ownership flag, so the value
+// the loop ended with leaked even when the body did the stepping. A struct
+// that owns a string leaked the same way. Now the loop declares its
+// variable in a block of its own through the statement path, a binding step
+// (`s = f(s)`, `i += 3`) is the statement it would be at the end of the
+// body, and `continue` runs it. Each shape is checked by value against its
+// while rewrite, and, where the allocator's count is exact, the heap must
+// hold steady across rounds of it. The macOS leaks gate runs this file.
+import std.string
+import std.mem
+
+extern exit(code: int)
+
+var bad = 0
+
+struct Pt {
+    x: int
+    y: int
+}
+
+struct Tag {
+    n: int
+    name: string
+}
+
+check(label: string, got: int, want: int) {
+    println("  ${label}: ${got}")
+    if got != want {
+        println("FAIL ${label}: got ${got}, want ${want}")
+        bad = bad + 1
+    }
+}
+
+check_str(label: string, got: string, want: string) {
+    println("  ${label}: ${got}")
+    if string.equals(got, want) == 0 {
+        println("FAIL ${label}: got ${got}, want ${want}")
+        bad = bad + 1
+    }
+}
+
+// Exits once a loop runs far past its end, so a `continue` that skipped
+// the step fails instead of hanging.
+step(steps: int, label: string) -> int {
+    if steps > 50 {
+        println("FAIL ${label}: the loop did not end")
+        exit(1)
+    }
+    return steps + 1
+}
+
+// The string grows by a step built at run time from `piece`, so nothing
+// folds it to a literal.
+step_in_header(piece: string) -> int {
+    n = 0
+    for (s = string.concat("a", ""); string.length(s) < 6; s = string.concat(s, piece)) {
+        n = n * 10 + string.length(s)
+    }
+    return n
+}
+
+step_in_header_cell(piece: string) -> int {
+    n = 0
+    for (s = string.concat("a", ""); string.length(s) < 8; s = string.concat(s, piece)) {
+        add = || { s = string.concat(s, piece) }
+        add()
+        n = n * 10 + string.length(s)
+    }
+    return n
+}
+
+step_in_body(piece: string) -> int {
+    n = 0
+    for (s = string.concat("a", ""); string.length(s) < 6;) {
+        n = n * 10 + string.length(s)
+        s = string.concat(s, piece)
+    }
+    return n
+}
+
+while_rewrite(piece: string) -> int {
+    n = 0
+    s = string.concat("a", "")
+    while string.length(s) < 6 {
+        n = n * 10 + string.length(s)
+        s = string.concat(s, piece)
+    }
+    return n
+}
+
+// `continue` runs the step; `break` leaves the value for the block's exit.
+skip_and_stop(piece: string) -> int {
+    n = 0
+    steps = 0
+    for (s = string.concat("a", ""); string.length(s) < 9; s = string.concat(s, piece)) {
+        steps = step(steps, "continue in a string loop")
+        if string.length(s) == 3 {
+            continue
+        }
+        if string.length(s) == 6 {
+            break
+        }
+        n = n * 10 + string.length(s)
+    }
+    return n
+}
+
+// A labeled `continue` of the outer loop leaves the inner loop's string.
+labeled(piece: string) -> int {
+    n = 0
+    steps = 0
+    outer: for (i = 0; i < 3; i += 1) {
+        for (s = string.concat("a", ""); string.length(s) < 5; s = string.concat(s, piece)) {
+            steps = step(steps, "labeled continue")
+            if string.length(s) == 3 {
+                continue outer
+            }
+            n = n * 10 + string.length(s)
+        }
+    }
+    return n
+}
+
+// The string a loop returns is its caller's.
+first_of_length(piece: string, len: int) -> string {
+    for (s = string.concat("a", ""); string.length(s) < 9; s = string.concat(s, piece)) {
+        if string.length(s) == len {
+            return s
+        }
+    }
+    return ""
+}
+
+// The loop's variable shadows a local of its name, as it always did.
+shadowed(piece: string) -> string {
+    s = string.concat("out", piece)
+    for (s = string.concat("a", ""); string.length(s) < 4; s = string.concat(s, piece)) {
+    }
+    return s
+}
+
+int_loops() -> int {
+    n = 0
+    for (i = 0; i < 6; i = i + 1) {
+        n = n + i
+    }
+    for (j = 0; j < 10; j += 3) {
+        n = n + j
+    }
+    for (k = 0; k < 4; k++) {
+        n = n + k
+    }
+    return n
+}
+
+struct_loop() -> int {
+    n = 0
+    for (p = Pt { x: 0, y: 1 }; p.x < 6; p = Pt { x: p.x + 1, y: p.y * 2 }) {
+        n = n + p.x + p.y
+    }
+    return n
+}
+
+tag_loop(piece: string) -> int {
+    n = 0
+    for (t = Tag { n: 0, name: string.concat("t", piece) }; t.n < 4; t = Tag { n: t.n + 1, name: string.concat(t.name, piece) }) {
+        n = n * 10 + string.length(t.name)
+    }
+    return n
+}
+
+// Fails when every window of `rounds` calls grows the heap.
+steady(label: string, f: fn) {
+    if mem.heap_in_use_exact() {
+        call(f)
+        grown = mem.steady_growth(|| {
+                k = 0
+                while k < 100 {
+                    call(f)
+                    k = k + 1
+                }
+            }, 5)
+        println("  ${label}: heap growth ${grown}")
+        if grown != 0 {
+            println("FAIL ${label}: 100 calls grew the heap by ${grown} bytes in every run")
+            bad = bad + 1
+        }
+    }
+}
+
+main() {
+    println("=== test_for_loop_var_owned ===")
+    piece = string.concat("b", "")
+    check("step in the increment", step_in_header(piece), 12345)
+    check("step in the increment, a cell", step_in_header_cell(piece), 2468)
+    check("step in the body", step_in_body(piece), 12345)
+    check("while rewrite", while_rewrite(piece), 12345)
+    check("continue and break", skip_and_stop(piece), 1245)
+    check("labeled continue", labeled(piece), 121212)
+    check_str("returned from the loop", first_of_length(piece, 4), "abbb")
+    check_str("shadowed", shadowed(piece), "outb")
+    check("int loops", int_loops(), 39)
+    check("struct loop", struct_loop(), 78)
+    check("struct that owns a string", tag_loop(piece), 2345)
+
+    steady("step in the increment", || { step_in_header(piece) })
+    steady("step in the increment, a cell", || { step_in_header_cell(piece) })
+    steady("step in the body", || { step_in_body(piece) })
+    steady("while rewrite", || { while_rewrite(piece) })
+    steady("continue and break", || { skip_and_stop(piece) })
+    steady("labeled continue", || { labeled(piece) })
+    steady("returned from the loop", || { first_of_length(piece, 4) })
+    steady("shadowed", || { shadowed(piece) })
+    steady("int loops", || { int_loops() })
+    steady("struct loop", || { struct_loop() })
+    steady("struct that owns a string", || { tag_loop(piece) })
+
+    if bad != 0 {
+        println("${bad} check(s) failed")
+        exit(1)
+    }
+    println("=== test_for_loop_var_owned passed ===")
+}

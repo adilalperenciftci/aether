@@ -26,13 +26,12 @@
 #    a single round-trip; on slow machines it stretches until the
 #    state actually changes.
 #
-# 4. SIGKILL teardown — SIGTERM left `wait $pid` blocked
-#    indefinitely on MSYS2 because the http_server's signal handler
-#    didn't fully reap. kill -9 maps to TerminateProcess on MSYS2
-#    (synchronous, uninterceptable). The servers are signalled as jobs
-#    of this shell (tests/lib/server_jobs.sh), never by a remembered pid:
-#    a pid that died earlier can belong to another process by teardown,
-#    and SIGKILLing it took down the whole Windows sweep (#2479).
+# 4. Immediate teardown through kill_server (tests/lib/server_jobs.sh):
+#    SIGKILL as a job on POSIX, TerminateProcess on the server itself on
+#    Windows. SIGTERM there used to leave `wait $pid` blocked, and any
+#    signal to the MSYS2 stand-in of a server makes the runtime signal
+#    unrelated processes too; that is what took down the whole Windows
+#    sweep, the CI step's own shell included (#2479).
 #
 # 5. NO `set -e`. A transient curl flake would otherwise kill the
 #    script with no diagnostic, surfacing in CI as the dreaded
@@ -129,7 +128,7 @@ wait_for_port_soft() {
 
 # Bounce just the proxy. The 3 upstreams stay warm.
 #
-# The proxy is killed with `kill -9` and immediately restarted on the same
+# The proxy is ended with kill_server and immediately restarted on the same
 # port (19100) between subtests. Even though the server sets SO_REUSEADDR,
 # the kernel can briefly hold the previous listener in TIME_WAIT, so a fresh
 # bind occasionally loses the race and the process exits at once. That is a

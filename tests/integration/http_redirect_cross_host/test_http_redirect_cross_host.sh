@@ -29,6 +29,7 @@ set -u
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 . "$ROOT/tests/lib/wait_port.sh"
+. "$ROOT/tests/lib/server_jobs.sh"
 AE="$ROOT/build/ae"
 
 if [ ! -x "$AE" ]; then
@@ -41,8 +42,7 @@ ORIGIN_PID=""
 TARGET_PID=""   # unused; kept so cleanup stays uniform
 cleanup() {
     for p in $ORIGIN_PID $TARGET_PID; do
-        kill "$p" 2>/dev/null || true
-        wait "$p" 2>/dev/null || true
+        stop_server "$p"
     done
     rm -rf "$TMP"
 }

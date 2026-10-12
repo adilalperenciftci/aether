@@ -609,7 +609,7 @@ note:  previous declaration … 'unsigned int(unsigned int)'
 To avoid this collision class entirely:
 
 - **Built-ins are routed through `aether_`-prefixed runtime helpers** in the generated C, they never emit a bare libc symbol.
-- **User `extern` declarations of well-known libc names** (e.g. `sleep`, `exit`, `printf`, `puts`, `malloc`, `read`, `write`, `time`, …) are recognized and the compiler **suppresses the C forward declaration**. The libc header (already included by the prelude) supplies the canonical prototype, and call-site code generation still uses the registered Aether parameter types for type-aware casting.
+- **User `extern` declarations of well-known libc names** (e.g. `sleep`, `exit`, `printf`, `puts`, `malloc`, `read`, `write`, `signal`, `time`, …) are recognized and the compiler **suppresses the C forward declaration**. The system header supplies the canonical prototype: `stdio.h`, `stdlib.h`, `string.h` and `time.h` are always in the generated C, and the header of any other such name the program declares (`signal.h`, `unistd.h`, `sys/wait.h`, `sys/stat.h`, `fcntl.h`, `sys/time.h`, `strings.h`) is included for it, where the platform has it. Call-site code generation still uses the registered Aether parameter types for type-aware casting.
 
 When you write a C shim or third-party binding, you can follow the same convention: prefix exported symbols with `aether_<module>_` (e.g. `aether_vcr_record`, `aether_http_get`) so they don't collide with vendor libraries the user might link via `[build] extra_sources = […]`.
 

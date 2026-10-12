@@ -566,8 +566,6 @@ CodeGenerator* create_code_generator(FILE* output) {
     gen->declared_var_types = NULL;
     gen->hoist_scope_body = NULL;
     gen->declared_var_count = 0;
-    gen->heap_box_vars = NULL;
-    gen->heap_box_var_count = 0;
     gen->module_global_vars = NULL;
     gen->module_global_var_is_program = NULL;
     gen->module_global_var_count = 0;
@@ -610,6 +608,7 @@ CodeGenerator* create_code_generator(FILE* output) {
     memset(gen->loop_label_id, 0, sizeof(gen->loop_label_id));
     memset(gen->loop_label_break_used, 0, sizeof(gen->loop_label_break_used));
     memset(gen->loop_label_continue_used, 0, sizeof(gen->loop_label_continue_used));
+    memset(gen->loop_step_in_body, 0, sizeof(gen->loop_step_in_body));
     gen->next_loop_label_id = 0;
     for (int i = 0; i < AETHER_MAX_LOOP_NEST; i++) {
         gen->loop_td_id[i] = 0;
@@ -619,8 +618,13 @@ CodeGenerator* create_code_generator(FILE* output) {
     gen->td_id = 0;
     gen->td_arm = -1;
     gen->next_td_id = 0;
+    /* #2696: break targets */
+    gen->switch_nest_depth = 0;
+    gen->c_break_depth = 0;
+    memset(gen->loop_c_depth, 0, sizeof(gen->loop_c_depth));
     // Issue #501 follow-up: try-clobbered locals tracking
     gen->try_clobbered_vars = NULL;
+    gen->try_clobbered_depths = NULL;
     gen->try_clobbered_var_count = 0;
     // Extern function parameter registry
     gen->extern_registry = NULL;
@@ -693,6 +697,7 @@ CodeGenerator* create_code_generator(FILE* output) {
     // Heap string ownership tracking
     gen->heap_string_vars = NULL;
     gen->heap_string_var_count = 0;
+    gen->heap_string_var_try_depths = NULL;
     gen->escaped_string_vars = NULL;
     gen->escaped_string_var_count = 0;
     gen->return_escaped_string_vars = NULL;
@@ -705,6 +710,9 @@ CodeGenerator* create_code_generator(FILE* output) {
     gen->zb_params = NULL;
     gen->zb_params_state = 0;
     gen->str_arrays = NULL;
+    gen->cell_owns = NULL;
+    gen->cell_owns_count = 0;
+    gen->cell_owns_cap = 0;
     gen->return_escaped_struct_vars = NULL;
     gen->return_escaped_struct_var_count = 0;
     // *StringSeq ownership tracking — MUST be zero-initialised here:
@@ -847,6 +855,7 @@ void code_generator_release(CodeGenerator* gen) {
         gen->callee_memo = NULL;
         zb_params_free(gen);
         str_arrays_free(gen);   /* #2618 */
+        cell_owns_free(gen);    /* #2755 */
         /* The emitted-typedef registries: one strdup'd name per distinct
          * tuple / optional / sum shape in the program (#1667). */
         for (int i = 0; i < gen->tuple_type_count; i++) {
@@ -873,12 +882,6 @@ void code_generator_release(CodeGenerator* gen) {
         for (int i = 0; i < gen->synthesised_count; i++) {
             free_ast_node(gen->synthesised_nodes[i]);
         }
-        /* #790: the heap.new box registry is reset per function, so the
-         * last function's entries (main's, typically) are still held here. */
-        for (int i = 0; i < gen->heap_box_var_count; i++) free(gen->heap_box_vars[i]);
-        free(gen->heap_box_vars);
-        gen->heap_box_vars = NULL;
-        gen->heap_box_var_count = 0;
         /* The builder registry generate_program's pre-pass fills: one
          * strdup'd name and optional factory per `builder` function. */
         for (int i = 0; i < gen->builder_func_reg_count; i++) {
@@ -1121,46 +1124,6 @@ void clear_declared_vars(CodeGenerator* gen) {
     gen->declared_var_types = NULL;
     gen->hoist_scope_body = NULL;
     gen->declared_var_count = 0;
-    /* #790: heap.new box provenance is per-function. */
-    if (gen->heap_box_vars) {
-        for (int i = 0; i < gen->heap_box_var_count; i++) free(gen->heap_box_vars[i]);
-        free(gen->heap_box_vars);
-    }
-    gen->heap_box_vars = NULL;
-    gen->heap_box_var_count = 0;
-}
-
-// #790: is `var_name` currently bound to a heap.new(T) box?
-int is_heap_box_var(CodeGenerator* gen, const char* var_name) {
-    if (!var_name) return 0;
-    for (int i = 0; i < gen->heap_box_var_count; i++) {
-        if (strcmp(gen->heap_box_vars[i], var_name) == 0) return 1;
-    }
-    return 0;
-}
-
-// #790: record that `var_name` now holds a heap.new(T) box.
-void mark_heap_box_var(CodeGenerator* gen, const char* var_name) {
-    if (!var_name || is_heap_box_var(gen, var_name)) return;
-    char** nv = realloc(gen->heap_box_vars, sizeof(char*) * (gen->heap_box_var_count + 1));
-    if (!nv) return;
-    gen->heap_box_vars = nv;
-    gen->heap_box_vars[gen->heap_box_var_count] = strdup(var_name);
-    gen->heap_box_var_count++;
-}
-
-// #790: `var_name` was reassigned to something other than a heap.new box —
-// drop it so a later `var.field = ...` store falls back to a bare assignment.
-void unmark_heap_box_var(CodeGenerator* gen, const char* var_name) {
-    if (!var_name) return;
-    for (int i = 0; i < gen->heap_box_var_count; i++) {
-        if (strcmp(gen->heap_box_vars[i], var_name) == 0) {
-            free(gen->heap_box_vars[i]);
-            gen->heap_box_vars[i] = gen->heap_box_vars[gen->heap_box_var_count - 1];
-            gen->heap_box_var_count--;
-            return;
-        }
-    }
 }
 
 // Helper: check if variable currently holds a heap-allocated string
@@ -1176,11 +1139,39 @@ int is_heap_string_var(CodeGenerator* gen, const char* var_name) {
 // Helper: mark variable as holding a heap-allocated string
 void mark_heap_string_var(CodeGenerator* gen, const char* var_name) {
     if (is_heap_string_var(gen, var_name)) return;
-    char** new_vars = realloc(gen->heap_string_vars, sizeof(char*) * (gen->heap_string_var_count + 1));
+    size_t n = (size_t)gen->heap_string_var_count + 1;
+    char** new_vars = realloc(gen->heap_string_vars, sizeof(char*) * n);
     if (!new_vars) return;
     gen->heap_string_vars = new_vars;
+    int* new_depths = realloc(gen->heap_string_var_try_depths, sizeof(int) * n);
+    if (!new_depths) return;
+    gen->heap_string_var_try_depths = new_depths;
     gen->heap_string_vars[gen->heap_string_var_count] = strdup(var_name);
+    gen->heap_string_var_try_depths[gen->heap_string_var_count] = gen->try_frame_depth;
     gen->heap_string_var_count++;
+}
+
+// #2690: how many `try` bodies of the function enclosed the declaration of
+// the heap-string local `var_name` (0 when it is not one).
+int heap_string_var_try_depth(CodeGenerator* gen, const char* var_name) {
+    for (int i = 0; var_name && i < gen->heap_string_var_count; i++) {
+        if (strcmp(gen->heap_string_vars[i], var_name) == 0)
+            return gen->heap_string_var_try_depths[i];
+    }
+    return 0;
+}
+
+// Set it, for a binding that shadows the one marked (an owning `catch`
+// name); returns the depth it had.
+int set_heap_string_var_try_depth(CodeGenerator* gen, const char* var_name, int depth) {
+    for (int i = 0; var_name && i < gen->heap_string_var_count; i++) {
+        if (strcmp(gen->heap_string_vars[i], var_name) == 0) {
+            int old = gen->heap_string_var_try_depths[i];
+            gen->heap_string_var_try_depths[i] = depth;
+            return old;
+        }
+    }
+    return 0;
 }
 
 // Helper: forget that a variable holds a heap-allocated string (a
@@ -1189,8 +1180,10 @@ void unmark_heap_string_var(CodeGenerator* gen, const char* var_name) {
     if (!gen || !var_name) return;
     for (int i = 0; i < gen->heap_string_var_count; i++) {
         if (strcmp(gen->heap_string_vars[i], var_name) == 0) {
+            int last = gen->heap_string_var_count - 1;
             free(gen->heap_string_vars[i]);
-            gen->heap_string_vars[i] = gen->heap_string_vars[gen->heap_string_var_count - 1];
+            gen->heap_string_vars[i] = gen->heap_string_vars[last];
+            gen->heap_string_var_try_depths[i] = gen->heap_string_var_try_depths[last];
             gen->heap_string_var_count--;
             return;
         }
@@ -1205,7 +1198,9 @@ void clear_heap_string_vars(CodeGenerator* gen) {
         }
         free(gen->heap_string_vars);
     }
+    free(gen->heap_string_var_try_depths);
     gen->heap_string_vars = NULL;
+    gen->heap_string_var_try_depths = NULL;
     gen->heap_string_var_count = 0;
 }
 
@@ -1780,10 +1775,11 @@ static int try_emit_struct_destroy(CodeGenerator* gen, ASTNode* deferred) {
     if (is_return_escaped_struct_var(gen, var_buf)) {
         return 1;
     }
+    /* A local a `try` body writes is volatile (#2690). */
     print_indent(gen);
     fprintf(gen->output,
-            "/* deferred */ %s_destroy(&%s);\n",
-            struct_name, var_buf);
+            "/* deferred */ %s(&%s);\n",
+            struct_destroy_fn(struct_name, is_try_clobbered_var(gen, var_buf)), var_buf);
     return 1;
 }
 
@@ -1810,8 +1806,8 @@ static int try_emit_struct_array_destroy(CodeGenerator* gen, ASTNode* deferred) 
     if (is_return_escaped_struct_var(gen, var_buf)) return 1;
     print_indent(gen);
     fprintf(gen->output,
-            "/* deferred */ for (int _ae_k = 0; _ae_k < %d; _ae_k++) %s_destroy(&%s[_ae_k]);\n",
-            n, struct_buf, var_buf);
+            "/* deferred */ for (int _ae_k = 0; _ae_k < %d; _ae_k++) %s(&%s[_ae_k]);\n",
+            n, struct_destroy_fn(struct_buf, is_try_clobbered_var(gen, var_buf)), var_buf);
     return 1;
 }
 
@@ -2071,23 +2067,38 @@ void emit_try_pops_for_break_continue(CodeGenerator* gen) {
 // prefix the emitted C type with `volatile`.
 // ----------------------------------------------------------------------
 
-int is_try_clobbered_var(CodeGenerator* gen, const char* name) {
+/* The deepest nesting of `try` bodies that writes `name`, counted from the
+ * scope the set was marked for; 0 when no `try` body writes it. */
+static int try_write_depth(CodeGenerator* gen, const char* name) {
     if (!gen || !name) return 0;
     for (int i = 0; i < gen->try_clobbered_var_count; i++) {
         if (gen->try_clobbered_vars[i] &&
-            strcmp(gen->try_clobbered_vars[i], name) == 0) return 1;
+            strcmp(gen->try_clobbered_vars[i], name) == 0) return gen->try_clobbered_depths[i];
     }
     return 0;
 }
 
-void mark_try_clobbered_var(CodeGenerator* gen, const char* name) {
-    if (!gen || !name) return;
-    if (is_try_clobbered_var(gen, name)) return;
-    char** grown = realloc(gen->try_clobbered_vars,
-                           sizeof(char*) * (gen->try_clobbered_var_count + 1));
+int is_try_clobbered_var(CodeGenerator* gen, const char* name) {
+    return try_write_depth(gen, name) > 0;
+}
+
+static void mark_try_clobbered_var(CodeGenerator* gen, const char* name, int depth) {
+    if (!gen || !name || depth <= 0) return;
+    for (int i = 0; i < gen->try_clobbered_var_count; i++) {
+        if (gen->try_clobbered_vars[i] && strcmp(gen->try_clobbered_vars[i], name) == 0) {
+            if (depth > gen->try_clobbered_depths[i]) gen->try_clobbered_depths[i] = depth;
+            return;
+        }
+    }
+    size_t n = (size_t)gen->try_clobbered_var_count + 1;
+    char** grown = realloc(gen->try_clobbered_vars, sizeof(char*) * n);
     if (!grown) return;
     gen->try_clobbered_vars = grown;
+    int* depths = realloc(gen->try_clobbered_depths, sizeof(int) * n);
+    if (!depths) return;
+    gen->try_clobbered_depths = depths;
     gen->try_clobbered_vars[gen->try_clobbered_var_count] = strdup(name);
+    gen->try_clobbered_depths[gen->try_clobbered_var_count] = depth;
     gen->try_clobbered_var_count++;
 }
 
@@ -2099,17 +2110,39 @@ void clear_try_clobbered_vars(CodeGenerator* gen) {
         }
         free(gen->try_clobbered_vars);
     }
+    free(gen->try_clobbered_depths);
     gen->try_clobbered_vars = NULL;
+    gen->try_clobbered_depths = NULL;
     gen->try_clobbered_var_count = 0;
 }
 
-// Walk `body` looking for AST_TRY_STATEMENT nodes; for each, walk
-// the try body recursively and mark every variable name on the LHS
-// of any assignment-shaped node.  Conservative: a var declared
-// *inside* the try body also gets marked, but the volatile prefix
-// is only applied at AST_VARIABLE_DECLARATION sites where
-// gen->try_frame_depth == 0 (i.e. only when we're emitting a decl
-// in an outer scope of the try, never inside one).
+/* A closure body is emitted as a C function of its own while the set of
+ * the scope that holds it may still be wanted, so it takes the set over
+ * and gives it back. */
+void save_try_clobbered_vars(CodeGenerator* gen, TryClobberedSet* saved) {
+    saved->names = gen->try_clobbered_vars;
+    saved->depths = gen->try_clobbered_depths;
+    saved->count = gen->try_clobbered_var_count;
+    gen->try_clobbered_vars = NULL;
+    gen->try_clobbered_depths = NULL;
+    gen->try_clobbered_var_count = 0;
+}
+
+void restore_try_clobbered_vars(CodeGenerator* gen, TryClobberedSet* saved) {
+    clear_try_clobbered_vars(gen);
+    gen->try_clobbered_vars = saved->names;
+    gen->try_clobbered_depths = saved->depths;
+    gen->try_clobbered_var_count = saved->count;
+}
+
+// Walk `body` looking for AST_TRY_STATEMENT nodes, and mark every
+// variable name on the LHS of an assignment-shaped node inside a try
+// body with how many try bodies enclose that write. A declaration
+// emitted at a shallower depth (gen->try_frame_depth) is outside one
+// of them and gets the volatile prefix (try_volatile_qual_for); one
+// inside all of them lives and dies inside the innermost try body.
+// Conservative: names, not bindings, so a same-named local elsewhere
+// in the scope is volatile too.
 // Helper: when `lhs` is an assignment LHS, find the bare variable
 // name at its root and mark it as try-clobbered.  For:
 //   x = ...           → mark "x"
@@ -2120,10 +2153,10 @@ void clear_try_clobbered_vars(CodeGenerator* gen) {
 // Conservative: marks the storage owner even when the LHS writes
 // to a heap-allocated sub-object (where volatile wouldn't matter)
 // — harmless, just slightly more `volatile` than strictly needed.
-static void mark_lhs_root_var(CodeGenerator* gen, ASTNode* lhs) {
+static void mark_lhs_root_var(CodeGenerator* gen, ASTNode* lhs, int depth) {
     while (lhs) {
         if (lhs->type == AST_IDENTIFIER && lhs->value) {
-            mark_try_clobbered_var(gen, lhs->value);
+            mark_try_clobbered_var(gen, lhs->value, depth);
             return;
         }
         if (lhs->type == AST_MEMBER_ACCESS && lhs->child_count > 0) {
@@ -2139,17 +2172,15 @@ static void mark_lhs_root_var(CodeGenerator* gen, ASTNode* lhs) {
     }
 }
 
-static void scan_try_body_for_writes(CodeGenerator* gen, ASTNode* node) {
-    if (!node) return;
+/* `node`, a node `depth` try bodies deep, may write a variable: mark it. */
+static void mark_try_write(CodeGenerator* gen, ASTNode* node, int depth) {
     // AST_VARIABLE_DECLARATION carries `value` = var name.  This is
     // the shape the Aether parser emits for `x = expr` when `x` is
-    // a bare identifier at statement scope.  Mark unconditionally —
-    // the volatile prefix is only applied at AST_VARIABLE_DECLARATION
-    // emission sites when gen->try_frame_depth == 0 (only outer-scope
-    // decls need volatile; inside-try decls live and die inside the
-    // try body's C scope).
+    // a bare identifier at statement scope.  Marked whether or not it
+    // is the variable's first binding: a binding inside the try body
+    // is declared at that depth, which the mark does not exceed.
     if (node->type == AST_VARIABLE_DECLARATION && node->value) {
-        mark_try_clobbered_var(gen, node->value);
+        mark_try_clobbered_var(gen, node->value, depth);
     }
     // AST_ASSIGNMENT: an explicit re-assignment shape used by some
     // parser paths (struct-literal field-init for one; the general
@@ -2157,7 +2188,7 @@ static void scan_try_body_for_writes(CodeGenerator* gen, ASTNode* node) {
     // see below).
     if (node->type == AST_ASSIGNMENT && node->child_count > 0 &&
         node->children[0]) {
-        mark_lhs_root_var(gen, node->children[0]);
+        mark_lhs_root_var(gen, node->children[0], depth);
     }
     // AST_BINARY_EXPRESSION with op `=` / `+=` / `-=` / etc. — this
     // is the shape Aether's parser produces for a member-access or
@@ -2175,7 +2206,7 @@ static void scan_try_body_for_writes(CodeGenerator* gen, ASTNode* node) {
               op[0] == '/' || op[0] == '%' || op[0] == '&' ||
               op[0] == '|' || op[0] == '^'));
         if (is_assign) {
-            mark_lhs_root_var(gen, node->children[0]);
+            mark_lhs_root_var(gen, node->children[0], depth);
         }
     }
     // AST_COMPOUND_ASSIGNMENT: the statement form `x op= y`. The target's
@@ -2183,39 +2214,42 @@ static void scan_try_body_for_writes(CodeGenerator* gen, ASTNode* node) {
     // used to mark instead, so a variable changed by `+=` in a try body was
     // never made volatile and could read stale after an error unwound.
     if (node->type == AST_COMPOUND_ASSIGNMENT && node->value) {
-        mark_try_clobbered_var(gen, node->value);
-    }
-    for (int i = 0; i < node->child_count; i++) {
-        scan_try_body_for_writes(gen, node->children[i]);
+        mark_try_clobbered_var(gen, node->value, depth);
     }
 }
 
-static void walk_for_try_clobbered(CodeGenerator* gen, ASTNode* node) {
+/* `node` is `depth` try bodies deep. A try statement's body is one deeper;
+ * its catch clause runs once the frame is popped, at the try's own depth,
+ * so a catch binding written in a `try` of its handler (#2739), or a local
+ * declared in one try body and written in a nested one, is written deeper
+ * than it is declared. */
+static void walk_for_try_clobbered(CodeGenerator* gen, ASTNode* node, int depth) {
     if (!node) return;
     if (node->type == AST_TRY_STATEMENT && node->child_count >= 1) {
-        // children[0] is the try body; children[1] is the catch clause.
-        // Vars modified inside the body are the at-risk set.
-        scan_try_body_for_writes(gen, node->children[0]);
+        walk_for_try_clobbered(gen, node->children[0], depth + 1);
+        for (int i = 1; i < node->child_count; i++)
+            walk_for_try_clobbered(gen, node->children[i], depth);
+        return;
     }
+    if (depth > 0) mark_try_write(gen, node, depth);
     for (int i = 0; i < node->child_count; i++) {
-        walk_for_try_clobbered(gen, node->children[i]);
+        walk_for_try_clobbered(gen, node->children[i], depth);
     }
 }
 
 void mark_try_clobbered_vars(CodeGenerator* gen, ASTNode* body) {
     if (!gen || !body) return;
-    walk_for_try_clobbered(gen, body);
+    walk_for_try_clobbered(gen, body, 0);
 }
 
-// Returns "volatile " when `name` is a try-clobbered local and the
-// current codegen position is OUTSIDE any try body in this
-// function.  An inside-try declaration is scoped to the try body
-// and lives/dies inside it; only outer-scope decls cross the
-// setjmp boundary and need volatile.  Returns "" otherwise.
+// Returns "volatile " when `name` is written inside a try body nested
+// deeper than the declaration being emitted: the try body that writes it
+// is then not one the declaration is inside, and its setjmp sees the
+// local after a panic. A declaration inside every try body that writes
+// it lives and dies there. Returns "" otherwise.
 const char* try_volatile_qual_for(CodeGenerator* gen, const char* name) {
     if (!gen || !name) return "";
-    if (gen->try_frame_depth > 0) return "";
-    if (!is_try_clobbered_var(gen, name)) return "";
+    if (try_write_depth(gen, name) <= gen->try_frame_depth) return "";
     return "volatile ";
 }
 
@@ -2229,6 +2263,15 @@ const char* volatile_decl_type(const char* vq, const char* c_type) {
     size_t n = strlen(c_type);
     if (n > 0 && c_type[n - 1] == '*') return cg_internf("%s volatile", c_type);
     return cg_internf("volatile %s", c_type);
+}
+
+// The C type of the ownership flag beside the local `name` (`_heap_<name>`,
+// `_seqheap_<name>`, `_heapopt_<name>`): `volatile int` wherever the local
+// itself is, since every store into the local sets the flag too, and a flag
+// left in a register by the longjmp says the local owns what it no longer
+// holds, or does not own what it does (#2690).
+const char* try_tracker_type(CodeGenerator* gen, const char* name) {
+    return volatile_decl_type(try_volatile_qual_for(gen, name), "int");
 }
 
 // ============================================================================
@@ -5399,11 +5442,12 @@ static void emit_main_body(CodeGenerator* gen, ASTNode* main) {
              * first assigned inside an if-arm and read after the if needs
              * a declaration at this scope, in main() as anywhere else. */
             gen->hoist_scope_body = main->children[0];
-            hoist_if_branch_vars(gen, main->children[0]);
             /* Issue #501 follow-up: mark try-clobbered vars in main()
              * so the `volatile` prefix is applied at decl sites for
-             * locals modified inside a try body. */
+             * locals modified inside a try body, the hoisted ones
+             * included (#2690). */
             mark_try_clobbered_vars(gen, main->children[0]);
+            hoist_if_branch_vars(gen, main->children[0]);
             hoist_heap_string_trackers(gen, main->children[0]);
             hoist_seq_trackers(gen, main->children[0]);
             hoist_opt_str_trackers(gen, main->children[0]);
@@ -5664,7 +5708,9 @@ void generate_main_function(CodeGenerator* gen, ASTNode* main) {
 // member of the group keeps that namespace internally consistent:
 //   values — AST_IDENTIFIER (reads, assignment/destructure lvalues),
 //            AST_VARIABLE_DECLARATION (locals, for-loop vars, params),
-//            AST_PATTERN_VARIABLE (match bindings, pattern params)
+//            AST_PATTERN_VARIABLE (match bindings, pattern params),
+//            AST_COMPOUND_ASSIGNMENT (`x += 1`, target in ->value),
+//            AST_CLOSURE_PARAM (closure parameters)
 //   fields — AST_STRUCT_FIELD / AST_MESSAGE_FIELD (declarations),
 //            AST_ASSIGNMENT (struct/message constructor field — the parser
 //              builds every AST_ASSIGNMENT as a constructor field-init; a
@@ -5716,6 +5762,14 @@ static void mangle_value_idents_in(ASTNode* node, ASTNode* program) {
         case AST_IDENTIFIER:
         case AST_VARIABLE_DECLARATION:
         case AST_PATTERN_VARIABLE:
+        /* #2738: a compound assignment names its target in ->value; left
+         * out, `short += 2` wrote a bare `short` while the declaration
+         * became `ae_short`. A closure parameter binds one: left out, its
+         * body's reads were renamed and it was not, so beside an outer
+         * local `short` the closure took them for a capture of that local
+         * and declared `ae_short` twice. */
+        case AST_COMPOUND_ASSIGNMENT:
+        case AST_CLOSURE_PARAM:
         case AST_STRUCT_FIELD:
         case AST_MESSAGE_FIELD:
         case AST_ASSIGNMENT:
@@ -5772,6 +5826,224 @@ void erase_string_retype_casts(ASTNode* node) {
 
 static void mangle_keyword_value_idents(ASTNode* program) {
     mangle_value_idents_in(program, program);
+}
+
+/* #2683: a local's scope starts after its initializer. In
+ *
+ *     helper = helper() + 1
+ *
+ * the call is the function `helper`, and from this binding on `helper` is the
+ * local, as `ae check` resolves it; so is any earlier reference in the body,
+ * a function value passed before the binding, say. C puts a declaration in
+ * scope inside its own initializer, so `int helper = helper() + 1;` called
+ * the int ("called object 'helper' is not a function"), and a local hoisted
+ * ahead of its binding hid the function from every earlier reference too.
+ * Such a local is given a C name of its own, `ae_local_<name>`, from its
+ * first binding to the end of the body: every value node of that name after
+ * it (reads, writes, a compound assignment, a closure parameter or pattern
+ * variable that rebinds it, a call through it when it holds a closure).
+ *
+ * Only when a reference the function could own comes first, in source order,
+ * so every other local keeps its spelling, and a loop's local read before
+ * the binding the previous pass made (no function of its name) never counts.
+ * "Could own" errs wide among the program's functions and externs: the
+ * reference's own name, the `<module>_<name>` C name of a dotted call
+ * (`list.size` is `list_size`), the part after the dot, and the C symbol of
+ * an `@extern` of any of those. A rename that was not needed changes nothing
+ * a program can see. A write to a module variable or an actor's state is
+ * not a local, and keeps its name. Both walks visit a node's children before
+ * the node, so a binding's initializer comes before the binding. */
+typedef struct {
+    const char** names;  /* interned (cg_intern), never freed one by one */
+    int count, cap;
+} NameSet;
+
+static int nameset_has(const NameSet* s, const char* name) {
+    for (int i = 0; name && i < s->count; i++)
+        if (strcmp(s->names[i], name) == 0) return 1;
+    return 0;
+}
+
+static void nameset_add(NameSet* s, const char* name) {
+    if (!name || !name[0] || nameset_has(s, name)) return;
+    if (s->count == s->cap) {
+        s->cap = s->cap ? s->cap * 2 : 16;
+        s->names = (const char**)aether_xrealloc((void*)s->names, (size_t)s->cap * sizeof(*s->names));
+    }
+    s->names[s->count++] = cg_intern(name);
+}
+
+static void nameset_free(NameSet* s) {
+    free((void*)s->names);
+    s->names = NULL;
+    s->count = s->cap = 0;
+}
+
+static int is_value_name_node(const ASTNode* n) {
+    return n->type == AST_IDENTIFIER || n->type == AST_VARIABLE_DECLARATION ||
+           n->type == AST_PATTERN_VARIABLE || n->type == AST_COMPOUND_ASSIGNMENT ||
+           n->type == AST_CLOSURE_PARAM;
+}
+
+static int is_binding_node(const ASTNode* n) {
+    return n->type == AST_VARIABLE_DECLARATION || n->type == AST_PATTERN_VARIABLE ||
+           n->type == AST_CLOSURE_PARAM;
+}
+
+/* The functions a reference could name: the program's functions, and the
+ * externs the generated C declares (the program's own and its imports',
+ * as the extern declarations below emit them). */
+typedef struct {
+    NameSet names;      /* every function and extern, by its Aether name */
+    ASTNode** externs;
+    int extern_count, extern_cap;
+} ShadowFns;
+
+static void shadow_fns_add_extern(ShadowFns* f, ASTNode* ext) {
+    if (!ext || !ext->value) return;
+    nameset_add(&f->names, ext->value);
+    if (f->extern_count == f->extern_cap) {
+        f->extern_cap = f->extern_cap ? f->extern_cap * 2 : 32;
+        f->externs = (ASTNode**)aether_xrealloc((void*)f->externs,
+                                                (size_t)f->extern_cap * sizeof(*f->externs));
+    }
+    f->externs[f->extern_count++] = ext;
+}
+
+static void shadow_fns_free(ShadowFns* f) {
+    nameset_free(&f->names);
+    free((void*)f->externs);
+    f->externs = NULL;
+    f->extern_count = f->extern_cap = 0;
+}
+
+/* The extern named `name`, or NULL. */
+static ASTNode* shadow_fns_extern(const ShadowFns* f, const char* name) {
+    for (int i = 0; name && i < f->extern_count; i++)
+        if (strcmp(f->externs[i]->value, name) == 0) return f->externs[i];
+    return NULL;
+}
+
+/* Every C spelling a reference to `v` could have that names one of `fns`,
+ * into `out`. A name that is no function, a local of a loop read before the
+ * binding the previous pass made, is not one a function could own. */
+static void add_c_spellings(const ShadowFns* fns, NameSet* out, const char* v) {
+    const char* forms[3];
+    int nf = 0;
+    forms[nf++] = v;
+    forms[nf++] = codegen_normalise_callee(v);
+    const char* dot = strrchr(v, '.');
+    if (dot && dot[1]) forms[nf++] = dot + 1;
+    for (int i = 0; i < nf; i++) {
+        if (!nameset_has(&fns->names, forms[i])) continue;
+        nameset_add(out, forms[i]);
+        ASTNode* ext = shadow_fns_extern(fns, forms[i]);
+        const char* sym = ext ? extern_c_symbol(ext) : NULL;
+        if (sym) nameset_add(out, sym);
+    }
+}
+
+typedef struct {
+    const ShadowFns* fns;
+    const NameSet* fixed;   /* module vars, an actor's state: never locals */
+    NameSet seen;           /* names bound so far */
+    NameSet early;          /* C spellings of references made before their name was bound */
+    NameSet renamed;        /* locals to rename */
+} LocalShadowScan;
+
+static void scan_local_shadows(ASTNode* node, LocalShadowScan* s) {
+    if (!node) return;
+    for (int i = 0; i < node->child_count; i++) scan_local_shadows(node->children[i], s);
+    if (!node->value) return;
+    if ((node->type == AST_FUNCTION_CALL || node->type == AST_IDENTIFIER) &&
+        !nameset_has(&s->seen, node->value)) {
+        add_c_spellings(s->fns, &s->early, node->value);
+    }
+    if (is_binding_node(node)) {
+        if (node->type == AST_VARIABLE_DECLARATION && !nameset_has(&s->seen, node->value) &&
+            nameset_has(&s->early, node->value) && !nameset_has(s->fixed, node->value)) {
+            nameset_add(&s->renamed, node->value);
+        }
+        nameset_add(&s->seen, node->value);
+    }
+}
+
+/* Rename `from` to `to` in every value node after the first binding of
+ * `from`, and in calls through it. `*active` turns on at that binding,
+ * after its initializer. */
+static void rename_local_after_binding(ASTNode* node, const char* from, const char* to,
+                                       int* active) {
+    if (!node) return;
+    for (int i = 0; i < node->child_count; i++)
+        rename_local_after_binding(node->children[i], from, to, active);
+    if (!node->value || strcmp(node->value, from) != 0) return;
+    if (!*active) {
+        if (node->type != AST_VARIABLE_DECLARATION) return;
+        *active = 1;
+    } else if (!is_value_name_node(node) && node->type != AST_FUNCTION_CALL) {
+        return;
+    }
+    free(node->value);
+    node->value = prefixed_name("", to);
+}
+
+static void rename_locals_shadowing_functions_in(ASTNode* scope, const ShadowFns* fns,
+                                                 const NameSet* fixed) {
+    LocalShadowScan s = {fns, fixed, {0}, {0}, {0}};
+    scan_local_shadows(scope, &s);
+    for (int i = 0; i < s.renamed.count; i++) {
+        const char* from = s.renamed.names[i];
+        char* to = prefixed_name("ae_local_", from);
+        int active = 0;
+        rename_local_after_binding(scope, from, to, &active);
+        free(to);
+    }
+    nameset_free(&s.seen);
+    nameset_free(&s.early);
+    nameset_free(&s.renamed);
+}
+
+static void rename_locals_shadowing_functions(ASTNode* program) {
+    if (!program) return;
+    NameSet globals = {0};
+    ShadowFns fns = {{0}, NULL, 0, 0};
+    for (int i = 0; i < program->child_count; i++) {
+        ASTNode* c = program->children[i];
+        if (!c || !c->value) continue;
+        if (c->type == AST_VARIABLE_DECLARATION || c->type == AST_CONST_DECLARATION)
+            nameset_add(&globals, c->value);
+        else if (c->type == AST_FUNCTION_DEFINITION || c->type == AST_BUILDER_FUNCTION)
+            nameset_add(&fns.names, c->value);
+        else if (c->type == AST_EXTERN_FUNCTION)
+            shadow_fns_add_extern(&fns, c);
+        else if (c->type == AST_IMPORT_STATEMENT) {
+            AetherModule* mod = module_find(c->value);
+            for (int j = 0; mod && mod->ast && j < mod->ast->child_count; j++) {
+                ASTNode* d = mod->ast->children[j];
+                if (d && d->type == AST_EXTERN_FUNCTION) shadow_fns_add_extern(&fns, d);
+            }
+        }
+    }
+    for (int i = 0; fns.names.count > 0 && i < program->child_count; i++) {
+        ASTNode* c = program->children[i];
+        if (!c) continue;
+        if (c->type == AST_FUNCTION_DEFINITION || c->type == AST_MAIN_FUNCTION ||
+            c->type == AST_BUILDER_FUNCTION) {
+            rename_locals_shadowing_functions_in(c, &fns, &globals);
+        } else if (c->type == AST_ACTOR_DEFINITION) {
+            NameSet fixed = {0};
+            for (int g = 0; g < globals.count; g++) nameset_add(&fixed, globals.names[g]);
+            for (int k = 0; k < c->child_count; k++) {
+                ASTNode* st = c->children[k];
+                if (st && st->type == AST_STATE_DECLARATION && st->value)
+                    nameset_add(&fixed, st->value);
+            }
+            rename_locals_shadowing_functions_in(c, &fns, &fixed);
+            nameset_free(&fixed);
+        }
+    }
+    nameset_free(&globals);
+    shadow_fns_free(&fns);
 }
 
 /* #2292: the prefix the entry program's constants are emitted under. Unlike
@@ -6325,6 +6597,38 @@ static const char* c_include_dir_of(const char* file, size_t* len) {
     return file;
 }
 
+/* #2676: the system header of every libc function a program (or a module in
+ * its closure) declares with `extern` and codegen does not declare itself
+ * (libc_extern_header), once each. Guarded with __has_include, so a header a
+ * platform lacks (<sys/wait.h> on Windows) is simply absent and its
+ * functions undeclared there, as they would be in C. */
+static void emit_libc_extern_headers(CodeGenerator* gen, ASTNode* program) {
+    CgStrSet seen = { 0 };
+    int mods = global_module_registry ? global_module_registry->module_count : 0;
+    for (int m = -1; m < mods; m++) {
+        ASTNode* ast = m < 0 ? program
+                             : (global_module_registry->modules[m]
+                                    ? global_module_registry->modules[m]->ast : NULL);
+        if (!ast) continue;
+        for (int i = 0; i < ast->child_count; i++) {
+            ASTNode* c = ast->children[i];
+            if (!c || c->type != AST_EXTERN_FUNCTION || !c->value) continue;
+            const char* sym = extern_c_symbol(c);
+            const char* h = libc_extern_header(sym ? sym : c->value);
+            if (!h || !cg_strset_add(&seen, h, strlen(h))) continue;
+            fprintf(gen->output,
+                    "#if defined(__has_include)\n"
+                    "#  if __has_include(<%s>)\n"
+                    "#    include <%s>\n"
+                    "#  endif\n"
+                    "#else\n"
+                    "#  include <%s>\n"
+                    "#endif\n", h, h, h);
+        }
+    }
+    cg_strset_free(&seen);
+}
+
 static void emit_c_include_directives(CodeGenerator* gen, ASTNode* program) {
     /* Deduplicated by header name AND the directory it came from: two
      * modules may each ship an `api.h`, and a single `#include "api.h"`
@@ -6734,6 +7038,9 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     mangle_keyword_value_idents(program);
     rename_leading_underscore_functions(program);
     rename_extern_colliding_functions(program);
+    /* #2683: after the function renames, so a call's name is the one its
+     * C spelling is made from. */
+    rename_locals_shadowing_functions(program);
     /* The rename changed definition names, which are the index's keys,
        without changing the child count it is keyed on. */
     program_index_reset();
@@ -6774,6 +7081,7 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     print_line(gen, "#include <stdint.h>");
     print_line(gen, "#include <time.h>");
     print_line(gen, "#include <setjmp.h>");
+    emit_libc_extern_headers(gen, program);
     print_line(gen, "#include \"aether_panic.h\"");
     print_line(gen, "#include \"aether_slice.h\"");   /* #1286 `T[]` fat pointer */
     /* Cons-cell sequence type — std.collections.string_seq.
@@ -7529,6 +7837,7 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     print_line(gen, "typedef void (*AetherUnwindFree)(const void*);");
     print_line(gen, "extern void aether_unwind_track(const void*, AetherUnwindFree);");
     print_line(gen, "extern void aether_unwind_track_if(const void*, int, AetherUnwindFree);");
+    print_line(gen, "extern void aether_unwind_track_up(const void*, int, AetherUnwindFree);");
     print_line(gen, "extern void aether_unwind_forget(const void*);");
     /* Is `s` a counted AetherString, the one shape string_release frees?
      * The same byte-by-byte probe as aether_heap_str_free below. */
@@ -7556,6 +7865,11 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     print_line(gen, "}");
     print_line(gen, "static inline void aether_unwind_track_str_if(const char* s, int owned) {");
     print_line(gen, "    if (owned) aether_unwind_track(s, aether_unwind_free_str);");
+    print_line(gen, "}");
+    /* #2690: a store into a local from inside `up` nested `try` bodies it
+     * is declared outside of is journaled for the local's own frame. */
+    print_line(gen, "static inline void aether_unwind_track_str_up_if(const char* s, int owned, int up) {");
+    print_line(gen, "    if (owned) aether_unwind_track_up(s, up, aether_unwind_free_str);");
     print_line(gen, "}");
     /* Closure-env string capture: a closure env must OWN its captured
      * strings — the enclosing scope releases its own reference on
@@ -7903,6 +8217,16 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
      * struct or message field, a global, an actor's state): retained and
      * passed through, so a store can take a view in one expression. */
     print_line(gen, "static inline _AeClosure _aether_closure_retain(_AeClosure c) { _aether_closure_env_retain(c.env); return c; }");
+    /* #2755: a closure cell (a `fn` variable a closure writes) holds a
+     * reference of its own to the closure in it, as a string cell owns its
+     * string: a store gives back the one it replaces, and the last holder
+     * of the cell gives back the one it holds before freeing the cell. No
+     * env can hold the cell then, so the release cannot reach it again. */
+    print_line(gen, "static inline void _aether_cell_release_closure(void* cell) {");
+    print_line(gen, "    if (!cell) return;");
+    print_line(gen, "    _AeCellHeader* h = (_AeCellHeader*)cell - 1;");
+    print_line(gen, "    if (_aether_cell_last(h)) { _aether_closure_env_release(((_AeClosure*)cell)->env); free(h); }");
+    print_line(gen, "}");
     /* #2220: the post-store hook for `struct T @observable`. Declared
      * unconditionally (it is one prototype); only a store on an observable
      * struct field emits a call to it. Defined in runtime/aether_observe.c. */

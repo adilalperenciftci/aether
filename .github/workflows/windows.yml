@@ -281,7 +281,9 @@ jobs:
       # runner's MSYS2 install location.
       # AE_SWEEP_RESOURCE_TRACE logs each shell test as it starts, so a
       # sweep killed outright (exit code 2304, #2479) leaves the tests that
-      # were in flight named in the log.
+      # were in flight named in the log. Read them 5 s before "Process
+      # completed": the runner keeps reading the step's output for 5 s after
+      # the shell is gone, while the sweep's other processes still write.
       env:
         AE_SWEEP_RESOURCE_TRACE: "1"
       run: |

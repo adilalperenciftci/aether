@@ -493,6 +493,22 @@ void collect_expression_constraints(ASTNode* node, InferenceContext* ctx) {
             }
             break;
 
+        case AST_STRING_INTERP:
+            /* #2741: an interpolation is a string, whatever it holds. Left
+             * untyped here, a local it binds was untyped until the checker
+             * reached the binding, and the hoists that declare a loop's or a
+             * branch's local ahead of its block (hoist_decl_type) declared
+             * it so: a read of it before the binding, the value the previous
+             * pass bound, was interpolated as an int. */
+            for (int i = 0; i < node->child_count; i++) {
+                collect_constraints(node->children[i], ctx);
+            }
+            if (!node->node_type || node->node_type->kind == TYPE_UNKNOWN) {
+                if (node->node_type) free_type(node->node_type);
+                node->node_type = create_type(TYPE_STRING);
+            }
+            break;
+
         case AST_COMPOUND_ASSIGNMENT:
             // children[0] = operator, children[1] = RHS expression
             if (node->child_count >= 2) {

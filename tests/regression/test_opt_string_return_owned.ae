@@ -1,0 +1,140 @@
+// Regression (#2740): a `string?` a function returns is the caller's own.
+//
+// The caller of a function returning `string?` takes the string in the
+// result as its own and frees it when it holds one, whatever the function
+// returned: a borrowed parameter, a literal, an element of an array or a
+// slice was handed over as it was, and the caller freed it (heap
+// corruption). Each return now hands over a string of its own, as a
+// `-> string` return does: a fresh string, or a local's own, as it is, and
+// anything borrowed copied. An optional passed on is kept when it comes
+// from a call or from a `string?` local that owns its string, and copied
+// otherwise. An argument passed to such a function is no longer kept by
+// the return (the copy is the function's), so the caller still frees it.
+//
+// Each check reads its value after churn, allocations of the same sizes
+// that reuse what was freed. The leak check runs where the heap count is
+// exact (mem.heap_in_use_exact): after a warm-up, some window of the same
+// work grows by exactly 0 (mem.steady_growth). Strings are built from
+// parameters, because string.concat of two literals folds to a literal.
+
+import std.mem
+import std.string
+
+extern exit(code: int)
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL #2740: ${msg}")
+        exit(1)
+    }
+}
+
+// Allocations of the sizes the checks read, to take over freed blocks.
+churn(w: string) -> int {
+    n = 0
+    i = 0
+    while i < 8 {
+        a = string.concat(w, "!")
+        b = string.concat(w, "!!")
+        n = n + string.length(a) + string.length(b)
+        i = i + 1
+    }
+    return n
+}
+
+// The issue's shapes: a parameter, a literal, an element.
+pick(p: string) -> string? { return p }
+lit() -> string? { return "lit" }
+elem(xs: string[], i: int) -> string? { return xs[i] }
+fixed(xs: string[2], i: int) -> string? { return xs[i] }
+
+// Owned values handed over as they are.
+fresh(w: string) -> string? { return string.concat(w, "f") }
+local_owned(w: string) -> string? {
+    x = string.concat(w, "g")
+    return x
+}
+
+// A `string?` local that owns its string, or does not.
+opt_local(w: string, own: bool) -> string? {
+    let o: string? = none
+    if own {
+        o = string.concat(w, "h")
+    } else {
+        o = w
+    }
+    return o
+}
+
+// Optionals passed on: a call's, a parameter's.
+pass(w: string) -> string? { return fresh(w) }
+param_opt(o: string?) -> string? { return o }
+
+// An `if`, each arm as a return of its own.
+either(w: string, c: bool) -> string? {
+    return if c { string.concat(w, "i") } else { w }
+}
+
+none_or(w: string, c: bool) -> string? {
+    if c {
+        return none
+    }
+    return w
+}
+
+len(o: string?) -> int {
+    if o != none {
+        return string.length(o!)
+    }
+    return -1
+}
+
+round(w: string) -> int {
+    arr = [string.concat(w, "x"), "y"]
+    a = pick(w)
+    b = lit()
+    c = elem(arr, 0)
+    c2 = fixed(arr, 0)
+    d = fresh(w)
+    e = local_owned(w)
+    f = opt_local(w, true)
+    g = opt_local(w, false)
+    h = pass(w)
+    d2 = fresh(w)
+    i = param_opt(d2)
+    j = none_or(w, true)
+    k = none_or(w, false)
+    t = elem(arr, 1)
+    u = either(w, true)
+    v = either(w, false)
+    arr[0] = "gone"
+    arr[1] = "gone"
+    churn(w)
+    check(c! == "wx" && c2! == "wx" && t! == "y", "an element returned is the caller's own")
+    check(a! == "w" && b! == "lit" && g! == "w" && k! == "w", "a borrowed string returned is the caller's own")
+    check(d! == "wf" && e! == "wg" && f! == "wh" && h! == "wf" && i! == "wf", "an owned string returned")
+    check(u! == "wi" && v! == "w", "the arms of an if returned")
+    n = len(a) + len(b) + len(c) + len(c2) + len(d) + len(e) + len(f) + len(g) + len(h)
+    return n + len(i) + len(j) + len(k) + len(t) + len(u) + len(v)
+}
+
+main() {
+    println("=== test_opt_string_return_owned ===")
+    check(round("w") == 23, "a round adds up")
+    n = 0
+    while n < 20 {
+        round("w")
+        n = n + 1
+    }
+    if mem.heap_in_use_exact() {
+        grown = mem.steady_growth(|| {
+                m = 0
+                while m < 100 {
+                    round("w")
+                    m = m + 1
+                }
+            }, 5)
+        check(grown == 0, "a window of 100 rounds grew the heap by ${grown} bytes in every run")
+    }
+    println("=== test_opt_string_return_owned passed ===")
+}

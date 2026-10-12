@@ -31,7 +31,7 @@ main() {
         }
     }
 
-    spec.run_summary(fw)
+    return spec.run_summary(fw)
 }
 ```
 
@@ -59,8 +59,12 @@ it (`ae test path/to/fixtures`).
 Each test file is a standalone program with its own `main()`. `ae test`
 compiles and runs each one and reads its **process exit code**: `0` means
 all assertions passed, non-zero means at least one failed.
-`spec.run_summary(fw)` prints the totals and calls `exit(1)` when any
-failure was recorded, so the exit-code contract is automatic.
+`spec.run_summary(fw)` prints the totals and **returns** the verdict, `0`
+when every case passed and `1` when any failed; it does not exit, so cleanup
+after it still runs. Return it from `main()`, as the example does: `main()`'s
+return value is the process exit code. A suite that calls it as a bare
+statement drops the verdict and exits 0 with failing cases, which `make
+check-tests` rejects for the repository's own suites.
 
 ## Suites, context, and hooks
 

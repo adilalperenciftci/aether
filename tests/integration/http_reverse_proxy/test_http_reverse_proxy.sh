@@ -35,6 +35,7 @@ if ! command -v curl >/dev/null 2>&1; then
 fi
 
 . "$ROOT/tests/lib/wait_port.sh"
+. "$ROOT/tests/lib/server_jobs.sh"
 
 TMPDIR="$(mktemp -d)"
 UP_PID=""
@@ -43,14 +44,8 @@ cleanup() {
     # `wait` on a SIGTERM'd child returns 143; with `set -e`, that
     # would propagate as the script's exit code. `|| true` keeps the
     # cleanup quiet whether the child dies by signal or natural exit.
-    if [ -n "$UP_PID" ]; then
-        kill "$UP_PID" 2>/dev/null || true
-        wait "$UP_PID" 2>/dev/null || true
-    fi
-    if [ -n "$PX_PID" ]; then
-        kill "$PX_PID" 2>/dev/null || true
-        wait "$PX_PID" 2>/dev/null || true
-    fi
+    stop_server "$UP_PID"
+    stop_server "$PX_PID"
     rm -rf "$TMPDIR"
 }
 trap cleanup EXIT
@@ -92,14 +87,8 @@ start_mode() {
 }
 
 stop_servers() {
-    if [ -n "$UP_PID" ]; then
-        kill "$UP_PID" 2>/dev/null || true
-        wait "$UP_PID" 2>/dev/null || true
-    fi
-    if [ -n "$PX_PID" ]; then
-        kill "$PX_PID" 2>/dev/null || true
-        wait "$PX_PID" 2>/dev/null || true
-    fi
+    stop_server "$UP_PID"
+    stop_server "$PX_PID"
     UP_PID=""; PX_PID=""
 }
 

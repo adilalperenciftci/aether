@@ -1,5 +1,5 @@
 #!/bin/bash
-# `ae run <prog>.ae &` + `kill $!` must not orphan the program.
+# `ae run <prog>.ae &` + SIGTERM to that job must not orphan the program.
 #
 # ae run BUILDS then SPAWNS the binary and waits — it does not exec it,
 # because it still has cleanup to do afterwards (evict a crashed binary
@@ -14,6 +14,7 @@ set -u
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 AE="$ROOT/build/ae"
+. "$ROOT/tests/lib/server_jobs.sh"
 
 if [ ! -x "$AE" ]; then
     echo "  [SKIP] ae_run_signal_forwarding: $AE not built"
@@ -55,15 +56,18 @@ done
 if [ -z "$CHILD" ]; then
     # Nothing to assert against — the program never got far enough. Do not
     # fail: on a loaded or restricted box this is environmental.
-    kill "$WRAPPER" 2>/dev/null
+    stop_server "$WRAPPER"
     echo "  [SKIP] ae_run_signal_forwarding: child never observed"
     exit 0
 fi
 
-kill "$WRAPPER" 2>/dev/null
+signal_server TERM "$WRAPPER"
 sleep 2
 
 if kill -0 "$CHILD" 2>/dev/null; then
+    # The orphan is ae's child, not a job of this shell: reaped by pid so it
+    # does not hold its socket after a failure.
+    # kill-ok: POSIX-only test, and the pid was alive a moment ago
     kill -9 "$CHILD" 2>/dev/null
     echo "  [FAIL] ae_run_signal_forwarding: child $CHILD survived the wrapper (orphaned)"
     exit 1

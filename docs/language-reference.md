@@ -286,7 +286,7 @@ if id_count > 8 {
 
 This is the stack-buffer-with-heap-fallback idiom (`T buf[N]; T* p = buf; if (n > N) p = malloc(...)`). Only a *named array* decays; an array *literal* initializer (`x = [1, 2, 3]`) still binds a real array. To keep the array type, annotate the binding explicitly (`x: byte[128] = ...`).
 
-**A fixed-size array is a value.** A parameter typed `int[3]` is the callee's own copy of the caller's elements, so a write to it, by the callee or by a closure in it, stays in the callee, and `xs.len` is the declared length; the argument must be an array of exactly that length (a slice parameter, `int[]`, takes any length). Binding an array to a variable that already holds one of the same length copies its elements (`a = b`), and so does declaring one from another (`int[3] b = a`); an array keeps the length of its first binding, so binding one of another length is a type error. An element of a `const` array cannot be written: copy the table into an array of your own first.
+**A fixed-size array is a value.** A parameter typed `int[3]` is the callee's own copy of the caller's elements, so a write to it, by the callee or by a closure in it, stays in the callee, and `xs.len` is the declared length; the argument must be an array of exactly that length (a slice parameter, `int[]`, takes any length). Binding an array to a variable that already holds one of the same length copies its elements (`a = b`), and so does declaring one from another (`int[3] b = a`) or binding one to an array field (`Shelf { names: arr }`, `s.names = arr`, and an actor's array state field); an array keeps the length of its first binding, and a field its declared length, so binding one of another length is a type error. An array literal may be shorter (the rest is zeroed) but not longer. A slice has no length known before the program runs, so binding one to a fixed-size array field is a type error too: copy its elements one by one. An element of a `const` array cannot be written: copy the table into an array of your own first.
 
 ```aether,run
 sum3(xs: int[3]) -> int {
@@ -382,7 +382,7 @@ main() {
 - **A `T[N]` array converts to `T[]` implicitly** wherever a slice is expected: a parameter, a `T[]`-typed binding or field, a `return` from a `-> T[]` function. The length travels with it. `null` converts to the empty slice (`.len` is `0`, and it compares equal to `null`).
 - **A slice decays to its pointer** wherever a `ptr` is expected, exactly as a `T[N]` array does: a `ptr` parameter, a C extern's parameter (including one declared `T[]`), `free(s)`, a comparison against `null`, and pointer arithmetic (`s + n` is a `ptr` to element `n`). `s as ptr` spells the same conversion explicitly, for a `ptr` return or binding. The length is dropped at that boundary; nothing else about the extern ABI changes.
 - **`make([]T, n)`** allocates `n` zeroed elements and returns them as a bounded slice; `free(s)` releases them.
-- A slice does not own its elements. It is valid for exactly as long as the storage it views: an array in an enclosing scope, a `make` buffer until its `free`, a C buffer until C reclaims it.
+- A slice does not own its elements. It is valid for exactly as long as the storage it views: an array in an enclosing scope, a `make` buffer until its `free`, a C buffer until C reclaims it. So a string read out of a `string[]` slice into something that outlives the read (a return value, a struct field, a container) is a copy of its own, while a local bound to one (`t = s[i]`) borrows it and is valid only as long as the element is; a store into a slice element frees nothing: the string it replaces is left to the storage's owner, and the string it stores becomes the storage's ([memory-management.md](memory-management.md)).
 
 **Views over a raw pointer are unbounded.** `p as T[]` (the typed-array cast) and a `T[]` handed back by a C extern have no length the compiler can know. Such a view indexes without a check, as it always did, and its `.len` is `-1`. Bound it with an explicit end to get checking back:
 
@@ -476,7 +476,40 @@ Variables are inferred from their initialization or usage context.
 
 **Keywords are not names.** A statement keyword used as a variable (`when = 0.0`, `message = "hi"`) is refused at the keyword: `'when' is a reserved keyword and cannot be used as an identifier; rename it`.
 
-**A local has one type: the one its first binding gave it.** A later bare assignment is an assignment, not a new variable, so `x = 5` then `x = "s"` (or `x = true`, `x = null`) is a compile error, *cannot re-bind 'x' as string: it was bound as int by its first assignment*, rather than a C error about `const char*`. Use a new name for the other value. A name first bound inside a branch or loop body and **used after it** is one variable for the whole function: it takes the numeric join of every binding (`if a { n = 1 } else { n = 4000000000 }` makes `n` a `long`; `f = 1.5` in one branch and `f = 2` in the other keeps `f` a `float`), and a binding of another kind anywhere in the function, or of another struct or pointer type, is the same compile error: *cannot bind 'v' as int: it is bound as string in another branch or loop body of this function*. A local of a `while` body is declared before the loop, and a name both arms of an `if`/`else` bind is declared before the `if`, so each is one variable whether or not it is used after them: `view = p as *Apple` in one `while` and `view = p as *Pear` in the next is that error, where a bare `ptr` or `null` binding would fit either. A name bound in the bodies of separate `if`s or `for` loops and used only inside them is a separate variable per body, except a `string` local, which is always one variable for the whole function, as its heap tracker is. The conversions the [table below](#casting-between-types) permits still apply at a re-bind, and the local keeps its first type: after `f = 1.5`, `f = 2` stores `2.0` and `f` stays a `float`; after `int x = 0`, `x = 2.5` stores `2`. A `string` accepts `null` (it is a nullable `const char*`), and a value that would not fit an *inferred* `int` (a 64-bit integer, a `uint32`, a float) is the narrowing error described there.
+**A local has one type: the one its first binding gave it.** A later bare assignment is an assignment, not a new variable, so `x = 5` then `x = "s"` (or `x = true`, `x = null`) is a compile error, *cannot re-bind 'x' as string: it was bound as int by its first assignment*, rather than a C error about `const char*`. Use a new name for the other value. A name first bound inside a branch or loop body and **used after it** is one variable for the whole function: it takes the numeric join of every binding (`if a { n = 1 } else { n = 4000000000 }` makes `n` a `long`; `f = 1.5` in one branch and `f = 2` in the other keeps `f` a `float`), and a binding of another kind anywhere in the function, or of another struct or pointer type, is the same compile error: *cannot bind 'v' as int: it is bound as string in another branch or loop body of this function*. A local of a `while` body is declared before the loop, and a name both arms of an `if`/`else` bind is declared before the `if`, so each is one variable whether or not it is used after them: `view = p as *Apple` in one `while` and `view = p as *Pear` in the next is that error, where a bare `ptr` or `null` binding would fit either. A read of such a local in the body before its binding, which sees the value the previous pass bound, has the binding's type (`out = "${out}${prev}"` ahead of `prev = "p${i}"` reads a string). A name bound in the bodies of separate `if`s or `for` loops and used only inside them is a separate variable per body, except a `string` local, which is always one variable for the whole function, as its heap tracker is. The conversions the [table below](#casting-between-types) permits still apply at a re-bind, and the local keeps its first type: after `f = 1.5`, `f = 2` stores `2.0` and `f` stays a `float`; after `int x = 0`, `x = 2.5` stores `2`. A `string` accepts `null` (it is a nullable `const char*`), and a value that would not fit an *inferred* `int` (a 64-bit integer, a `uint32`, a float) is the narrowing error described there.
+
+**A local's scope starts after its initializer.** In `count = count() + 1` the call is the function `count`, and from that binding on, to the end of the function, `count` is the local. So is a local declared ahead of its binding because both arms of an `if` bind it: until the checker reaches the first binding in source order, the name is still the function's. A reference that comes before the binding, such as the function passed as a value, is the function too:
+
+```aether,run
+count() -> int { return 41 }
+
+apply(f: fn() -> int) -> int { return f() }
+
+main() {
+    first = apply(count)
+    count = count() + 1
+    println("${first} ${count}")
+}
+```
+```output
+41 42
+```
+
+After the binding the function cannot be called by that name in the function, since the name is the local's; the call is an error that says so:
+
+```aether,fails
+count() -> int { return 41 }
+
+main() {
+    count = count() + 1
+    again = count()
+    println("${count} ${again}")
+}
+// error[E0301]: 'count' is a local here, which hides the function 'count'
+// help: a local's scope starts after its initializer and lasts to the end of
+// the function, so the function cannot be called as 'count' here; give the
+// local another name
+```
 
 **A statement ends at its line.** `foo` on a line of its own is an expression statement; `bar = 2` on the next line is a separate binding, not the declaration `foo bar = 2`. The binding name of a typed declaration (`Pair p`, `size_t n = ...`, `uint32[4] xs`) is written on the type's line.
 
@@ -859,7 +892,18 @@ clamp(x, lo, hi) -> {
 
 This allows complex logic in arrow-style functions without switching to block syntax.
 
-The last statement is the result only when it has a value: an expression, a `match`, or a declaration (`-> { x = a + b }` returns `a + b`). An `if`, a loop, a `switch`, a `try`, a `defer` or a `panic` there is a statement like any other, so a body ending in one has to `return` on every path its own way: `-> { if x > 0 { return 1 } }` is a [missing return](#returning-on-every-path-e0700) when `x` is not positive.
+The last statement is the result only when it has a value: an expression, other than a call of a function that returns nothing, or a `match` one of whose arms gives a value. Any other statement there is a statement like any other, and the body ends with it:
+
+- An `if`, a loop, a `switch`, a `try`, a `defer` or a `panic`. A body ending in one has to `return` on every path its own way: `-> { if x > 0 { return 1 } }` is a [missing return](#returning-on-every-path-e0700) when `x` is not positive.
+- A binding or a store: `x = v`, whether it declares `x` or assigns an existing one, `x += v`, `p.n = v`, `xs[i] = v`, `a, b = f()`. With a global `var hits = 0`, `bump() -> { hits = hits + 1 }` stores and returns nothing, and so does `-> { label = "n=${n}" }`, which binds a local nobody reads. The single expression form is the same: `store(p: *P, v: int) -> p.n = v` stores.
+- A send, `a ! M { ... }`, which has no value.
+- A call of a function that returns nothing (`println(...)`, or one of the program's with no result): with such a `note`, `-> { note(x) }` and `-> note(x)` end with the call and return nothing. So does a `match` all of whose arms end in such a call or in a statement, `-> { match x { 1 -> note(1)  _ -> note(0) } }`.
+
+Whether a function returns nothing is settled for the whole program before any body is checked, so it does not depend on the order the functions are defined in: `f(x) -> { g(x) }` returns nothing when `g(x) -> { note(x) }` does, wherever `g` is.
+
+A `return` written out follows the same rule. `return note(x)`, where `note` returns nothing, is the call, then a `return` of nothing, as `-> note(x)` is: it fits a function or a closure that returns nothing. In one that returns a value on another path it has nothing to give back, and is an error naming the call.
+
+A closure's arrow body follows the same rule: `|x| -> { y = x * 2; y + 1 }` returns `y + 1`, as `|x| -> x * 2` returns `x * 2`, and `|| -> { count = count + 1 }` stores into the captured `count` and returns nothing. A closure with a plain block body, `|x| { ... }`, returns only what it `return`s.
 
 ### Multi-parameter Guards
 
@@ -936,6 +980,68 @@ for (i = 0; i < 10; i = i + 1) {
 }
 ```
 
+The variable the init binds is the loop's, from the condition through the body
+to the end of the loop: a binding of its name in the body assigns it, so a loop
+can step its variable there, and after the loop the name is free to bind again.
+
+```aether,run
+main() {
+    total = 0
+    for (i = 0; i < 10;) {
+        total = total + i
+        i = i + 3        // the loop's i: 0, 3, 6, 9
+    }
+    println(total)
+}
+```
+```output
+18
+```
+
+A closure in the body that assigns the variable assigns the loop's own. The
+loop keeps one variable for all its passes, as `i = 0` before a `while` does,
+so the condition, the increment, the body and every closure made in any pass
+read and write the same `i`, and a closure kept past the loop still holds it.
+A closure that only reads the variable takes the value it has when the closure
+is made.
+
+```aether,run
+main() {
+    for (i = 0; i < 6;) {
+        bump = || { i = i + 2 }   // the loop's i
+        bump()
+        println(i)
+        i = i + 1
+    }
+}
+```
+```output
+2
+5
+```
+
+A step that binds a variable (`i = i + 3`, `i += 3`, `s = string.concat(s, "b")`)
+is that binding, made at the end of each pass, and a `continue` runs it before
+the condition is tested again. The loop's variable owns its value as any local
+does: a string the step or the body replaces is freed, and so is the one the
+loop ends with.
+
+```aether,run
+main() {
+    total = 0
+    for (i = 0; i < 10; i += 3) {
+        if i == 6 {
+            continue     // the step still runs: 9 is next
+        }
+        total = total + i
+    }
+    println(total)
+}
+```
+```output
+12
+```
+
 ### Range-Based For Loops
 
 Iterate over a range with `for VAR in START..END`:
@@ -995,7 +1101,7 @@ outer: while have_more() {
 - The label sits before the loop keyword (`outer: while`, `scan: for`). It must be on the same line as the `break` / `continue` that references it.
 - A `break label` / `continue label` whose label names no enclosing loop is a compile-time error.
 - Defers in the loop scopes a labeled break/continue unwinds still run (in LIFO order) before the jump, the same cleanup guarantee as an ordinary scope exit.
-- Unlabeled `break` / `continue` are unchanged and act on the innermost loop.
+- An unlabeled `break` leaves the innermost loop or [`switch`](#switch-statements), whichever is nearer (a `match` is neither, so a `break` in an arm leaves what is around the `match`); an unlabeled `continue` acts on the innermost loop.
 
 ---
 
@@ -1133,6 +1239,34 @@ default:            kind = "other";
 A comma-list case lowers to several C `case` labels sharing one body; a `switch`
 containing any ranged case is lowered to an equivalent if-else chain (safe
 because there is no fall-through to preserve).
+
+A `break` in a case leaves the `switch`, and nothing more, whichever of the two
+forms it lowers to: inside a loop, the loop goes on with the statement after the
+`switch`. On its way out it runs the defers of the scopes it leaves inside the
+case, not those of the loop body around the `switch`. A `break` in a `match`
+arm leaves the `switch` or loop around the `match`. `continue` goes on to the
+loop's next iteration, and `break label` leaves the loop it names. Each case is
+a scope of its own, as an `if` branch is: a `defer` in it runs when the case
+ends, and only when the case ran.
+
+```aether,run
+main() {
+    hits = 0
+    i = 0
+    while i < 5 {
+        i = i + 1
+        switch i {
+        case 2..=3: break        // leaves the switch; the loop goes on
+        default:    hits = hits + 1
+        }
+        hits = hits + 10
+    }
+    println(hits)
+}
+```
+```output
+53
+```
 
 Alternatives are the comma-list, in `switch` and `match` alike. A `|` between
 values is the bitwise OR — `1 | 2 | 3` is the number 3 — so the compiler
@@ -1443,7 +1577,7 @@ main() {
 1 20
 ```
 
-A parenthesised arrow body is still an expression: `sum(a: int, b: int) -> (a + b)` returns `a + b`. The group is a return type when it parses as one and the `{` body (or a `requires` / `ensures` clause) follows it.
+A parenthesised arrow body is still an expression: `sum(a: int, b: int) -> (a + b)` returns `a + b`. The group is a return type when it parses as one and the `{` body (or a `requires` / `ensures` clause) follows it. A dotted name after `->` is read the same way: it is a return type, as in `-> geo.Point { ... }`, when the `{` body, a `requires` / `ensures` clause or a type suffix (`?`, `!`, `[`) follows it, and otherwise an expression body, so `get(p: *P) -> p.n` returns the field and `store(p: *P, v: int) -> p.n = v` stores it.
 
 Error propagation across function boundaries works correctly:
 
@@ -3401,7 +3535,7 @@ An error stops the build and prints its code, `error[E0301]: ...`, with the sour
 | `E0100` | Syntax: the source does not parse, or a reserved word stands where a name must |
 | `E0200` | Type mismatch, and the other type rules (a cast the types cannot justify, `string + string`) |
 | `E0300` | Undefined variable |
-| `E0301` | Undefined function, or a function of a module the calling module does not import |
+| `E0301` | Undefined function, a function of a module the calling module does not import, or a function a local of its name hides ([a local's scope](#variables)) |
 | `E0303` | A name the module does not export |
 | `E0304` | A name hidden in this scope by `hide` or `seal except` ([hide and seal](hide-and-seal.md)) |
 | `E0600` | An actor rule, such as a closure in a handler writing the actor's state |
@@ -3498,15 +3632,47 @@ main() {
 }
 ```
 
-The check reports only where the shadowing is certain. A bare
-identifier arm binds the value rather than naming a case, so it matches
-anything and is never compared against other arms:
+The check reports only where the shadowing is certain, so the arms it
+compares with each other are literals; an arm that is a bare identifier
+is never compared. Over a value that is not an enum, a sum type or an
+optional, such an arm names a variable already in scope (a local, a
+parameter, or a module `const` or `var`) and matches when the value
+equals that variable's value at the time, as `if x == limit` would. It
+binds nothing. That value is not known when the program is compiled, so
+an arm after it with the same value is not reported:
 
-```aether,fragment
-match x {
-    1 -> { println("one") }
-    n -> { println("got ${n}") }   // a binding, not a duplicate: no warning
+```aether,run
+main() {
+    limit = 2
+    x = 2
+    match x {
+        1 -> { println("one") }
+        limit -> { println("at the limit") }   // compares x with limit
+        2 -> { println("two") }                // never runs, not reported
+        _ -> { println("other") }
+    }
 }
+```
+```output
+at the limit
+```
+
+Over an enum a bare identifier names a member (`Red` for `Color.Red`)
+and over a sum type a variant; a variable is not accepted there. The arms
+that bind a name are `some(v)` over an optional and the list patterns
+(`[h|t]`, `[x, y]`). An identifier that names no variable binds nothing
+either, so `n` below is undeclared where the arm uses it. To act on every
+other value, write `_` and use the value matched on:
+
+```aether,fails
+main() {
+    x = 5
+    match x {
+        1 -> { println("one") }
+        n -> { println("got ${n}") }
+    }
+}
+// error[E0300]: Undefined variable 'n'
 ```
 
 A third shape is the mirror of the exhaustiveness check: a `_` arm on a

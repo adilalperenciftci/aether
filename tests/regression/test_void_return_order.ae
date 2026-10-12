@@ -1,0 +1,96 @@
+// Regression (#2736, #2733): a `return` of a call of a function that
+// returns nothing is that call, then a return of nothing, whatever order
+// the functions are defined in.
+//
+// #2736: whether an arrow body that calls such a function returns nothing
+// depended on definition order. With `first(x) -> { second(x) }` defined
+// before `second(x) -> { note(x) }`, first was checked while second still
+// held its own `return note(x)`, so first returned second's void and the C
+// compiler stopped ("void value not ignored"); defined the other way round
+// it worked. The same held for a closure, `|x: int| -> later(x)` with
+// `later` defined after main.
+//
+// #2733: `return note(x)` written out, in a function or a closure, was
+// typed int and failed in C the same way. It now means what the arrow form
+// `-> note(x)` means: the call, then a return.
+extern exit(code: int)
+
+var bad = 0
+var noted = 0
+
+check(label: string, got: int, want: int) {
+    if got != want {
+        println("FAIL ${label}: got ${got}, want ${want}")
+        bad = bad + 1
+    }
+}
+
+first(x: int) -> { second(x) }
+
+second(x: int) -> { note(x) }
+
+// The callee's tail calls a closure that returns nothing.
+outer(x: int) -> { inner(x) }
+
+inner(x: int) -> {
+    k = | y: int | -> note(y)
+    k(x)
+}
+
+calls(x: int) {
+    if x > 100 {
+        return note(100)
+    }
+    return note(x)
+}
+
+choose(x: int) {
+    return match x {
+        1 -> note(1)
+        _ -> note(2)
+    }
+}
+
+note(x: int) {
+    noted = noted + x
+}
+
+main() {
+    first(1)
+    second(2)
+    check("arrow calls defined before their callee", noted, 3)
+
+    noted = 0
+    outer(4)
+    check("a callee that calls a closure", noted, 4)
+
+    noted = 0
+    cb = | x: int | -> later(x)
+    cb(5)
+    check("closure calling a function defined after main", noted, 5)
+
+    noted = 0
+    c = | x: int | {
+        return note(x)
+    }
+    c(6)
+    check("closure's explicit return of a call", noted, 6)
+
+    noted = 0
+    calls(7)
+    calls(200)
+    check("explicit return of a call", noted, 107)
+
+    noted = 0
+    choose(1)
+    choose(3)
+    check("explicit return of a match of calls", noted, 3)
+
+    if bad != 0 {
+        println("${bad} check(s) failed")
+        exit(1)
+    }
+    println("returns of calls that return nothing: ok")
+}
+
+later(x: int) -> { note(x) }

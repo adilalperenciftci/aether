@@ -70,15 +70,6 @@ typedef struct {
     // numeric join of all of them (`int` in one branch, `long` in the
     // other: `int64_t`), the type the typechecker sees for it too.
     ASTNode* hoist_scope_body;
-    // #790: names of locals currently bound to a `heap.new(T)` box (a
-    // calloc'd, zero-initialised `*T`). Only these boxes have their
-    // `_heap_<field>` ownership trackers guaranteed zero, so only on these is
-    // it safe to route a `box.field = ...` store through the heap-string
-    // assignment wrapper (free old if owned + set tracker). A raw
-    // `malloc(...) as *T` has garbage trackers, so its field stores stay bare.
-    // Reset per function; a var is removed when reassigned to a non-heap.new.
-    char** heap_box_vars;
-    int heap_box_var_count;
     // #701: names of module-level `var` globals (file-scope statics).
     // Populated once before any function body is emitted. A bare
     // `name = expr` inside a function whose name is in this set is a
@@ -212,6 +203,11 @@ typedef struct {
     int loop_label_id[AETHER_MAX_LOOP_NEST];
     int loop_label_break_used[AETHER_MAX_LOOP_NEST];
     int loop_label_continue_used[AETHER_MAX_LOOP_NEST];
+    /* #2742: the loop steps in a statement at the end of its body (a
+     * C-style for whose increment is a binding), after its __ae_cont_N
+     * label, so a `continue` to it jumps there instead of C `continue`,
+     * which would skip the step. */
+    int loop_step_in_body[AETHER_MAX_LOOP_NEST];
     int next_loop_label_id;
     /* #2378 threaded dispatch: a `while true { head; switch sel { ... } }`
      * loop lowers to computed goto where the C compiler has labels-as-values.
@@ -227,6 +223,33 @@ typedef struct {
     int td_arm;
     int next_td_id;
 
+    /* #2696: an unlabeled `break` leaves the innermost loop or `switch`.
+     * The switches around the statement being generated, innermost last;
+     * one is the target when it began inside the innermost loop
+     * (switch_loop_depth == loop_nest_depth). For each: the scope_depth
+     * containing it and the try_frame_depth at its entry, so a break runs
+     * the defers and pops the try frames of only what it leaves, and a C
+     * label id (__ae_brk_N, numbered with the loops' labels) for a break
+     * that cannot be a C `break`. */
+    #define AETHER_MAX_SWITCH_NEST 64
+    int switch_nest_depth;
+    int switch_loop_depth[AETHER_MAX_SWITCH_NEST];
+    int switch_scope[AETHER_MAX_SWITCH_NEST];
+    int switch_try_base[AETHER_MAX_SWITCH_NEST];
+    int switch_c_depth[AETHER_MAX_SWITCH_NEST];
+    int switch_brk_id[AETHER_MAX_SWITCH_NEST];
+    int switch_brk_used[AETHER_MAX_SWITCH_NEST];
+    /* #2696: the C statements a C `break` leaves (a loop or a `switch`)
+     * open around the code being generated. A break is a C `break` only
+     * when its target's own C statement is the innermost of them
+     * (loop_c_depth / switch_c_depth equal to this); otherwise a C statement
+     * the target did not emit stands between (a sum `match` lowers to a C
+     * `switch`) or the target emitted none (a ranged `switch` lowers to an
+     * if-chain, switch_c_depth -1), and the break jumps to the target's
+     * __ae_brk_N label instead. */
+    int c_break_depth;
+    int loop_c_depth[AETHER_MAX_LOOP_NEST];
+
     // try-clobbered locals: variable names modified inside any try
     // body of the current function.  Such locals — when declared
     // in an enclosing scope of the try — must be lowered as
@@ -240,10 +263,13 @@ typedef struct {
     // have volatile-qualified type and have been changed between
     // the setjmp invocation and longjmp call are indeterminate."
     // Set populated by mark_try_clobbered_vars() pre-pass; consulted
-    // at AST_VARIABLE_DECLARATION emission sites when
-    // try_frame_depth == 0 (only outer-scope decls need volatile;
-    // inside-try decls live and die inside the try body).
+    // at declaration sites (try_volatile_qual_for). Each name carries
+    // the deepest nesting of `try` bodies, counted from the scope the
+    // walk started at (a function, a closure, a receive arm), that
+    // writes it: a local declared at a shallower depth crosses that
+    // setjmp and needs volatile.
     char** try_clobbered_vars;
+    int* try_clobbered_depths;
     int try_clobbered_var_count;
 
     // Extern function parameter type registry — used at call sites for proper casts
@@ -485,6 +511,11 @@ typedef struct {
     // Used to emit free() on reassignment and avoid freeing string literals.
     char** heap_string_vars;
     int heap_string_var_count;
+    // #2690: parallel to heap_string_vars, how many `try` bodies of the
+    // function enclose each one's C declaration (gen->try_frame_depth when
+    // it was marked). A store nested in more of them journals the string
+    // for the frame the declaration is in (emit_unwind_track_local).
+    int* heap_string_var_try_depths;
 
     // Subset of `heap_string_vars`: names whose value is passed as a
     // function-call argument (or captured by a closure) somewhere in
@@ -555,6 +586,14 @@ typedef struct {
     // own their elements, and which element reads are views (StrArrs,
     // private to codegen_stmt.c). Built once, the first time it is asked.
     void* str_arrays;
+
+    // #2755: whether each closure cell gives back the closures it holds
+    // (promoted_closure_cell_owns, private to codegen_stmt.c), by the scope
+    // that declares it and its name, decided once so the scope and every
+    // closure that writes the cell agree.
+    void* cell_owns;
+    int cell_owns_count;
+    int cell_owns_cap;
 
     // #752: struct locals that escape via a return (directly or as a
     // tuple element). Such a struct's heap-string fields belong to the
@@ -740,27 +779,43 @@ void emit_try_pops_for_break_continue(CodeGenerator* gen);
 // an enclosing scope of the try — must be lowered as `volatile T`
 // so the C optimizer can't keep them in a register that gets
 // clobbered by the panic's siglongjmp.
-void mark_try_clobbered_var(CodeGenerator* gen, const char* name);
 int  is_try_clobbered_var(CodeGenerator* gen, const char* name);
 void clear_try_clobbered_vars(CodeGenerator* gen);
 
+// The set belongs to one C function's body. A body emitted while another
+// is open (a closure's) saves the open one's set and restores it after.
+typedef struct {
+    char** names;
+    int* depths;
+    int count;
+} TryClobberedSet;
+void save_try_clobbered_vars(CodeGenerator* gen, TryClobberedSet* saved);
+void restore_try_clobbered_vars(CodeGenerator* gen, TryClobberedSet* saved);
+
 // Pre-pass: walk `body` and mark every variable assigned inside
-// any AST_TRY_STATEMENT's body.  Called from
-// generate_function_definition alongside hoist_heap_string_trackers
-// (which it must run before, so the volatile prefix appears on
-// the C decl).
+// any AST_TRY_STATEMENT's body, with how deeply such bodies nest
+// there.  Run for each C function's body (a function, main, a
+// closure, a receive arm) after the set is cleared and before its
+// signature, its parameter or pattern bindings and its hoists are
+// emitted, so every declaration of a try-written name sees it.
 void mark_try_clobbered_vars(CodeGenerator* gen, ASTNode* body);
 
-// Return "volatile " when `name` is a try-clobbered local in this
-// function AND we're emitting at an outer scope of any try body
-// (i.e. gen->try_frame_depth == 0).  Empty string otherwise.
-// Safe to concatenate verbatim before a C type that is not a pointer.
-// Issue #501 follow-up.
+// Return "volatile " when `name` is written inside a `try` body nested
+// deeper than the declaration being emitted (gen->try_frame_depth):
+// the local then holds a value the setjmp of that `try` must see after
+// a panic. Empty string otherwise. Issue #501 follow-up; a local
+// declared inside one `try` and written in a nested one, or a catch
+// binding written in a `try` of its handler, is volatile too (#2739).
 const char* try_volatile_qual_for(CodeGenerator* gen, const char* name);
 
 // The C type `c_type` qualified by `vq` (try_volatile_qual_for's answer)
 // as a declaration of the variable spells it: after the `*` of a pointer
 // (`const char* volatile`), before anything else. #2618.
 const char* volatile_decl_type(const char* vq, const char* c_type);
+
+// The C type of the ownership flag beside the local `name`: `volatile int`
+// where the local is volatile (try_volatile_qual_for), `int` elsewhere.
+// #2690.
+const char* try_tracker_type(CodeGenerator* gen, const char* name);
 
 #endif

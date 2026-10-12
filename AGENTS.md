@@ -609,10 +609,14 @@ workaround, they cover cases a porter often hand-rolls.
   growth, which drops the earlier false positives under full-suite memory
   pressure; `leaks --atExit` remains the authoritative macOS leak gate if
   one ever looks suspect.
-- **Stale `~/.aether/cache`.** `ae build`/`ae run` cache compiled binaries by
-  source hash; if behaviour seems impossibly stale after an edit (or after
-  switching branches), `rm -rf ~/.aether/cache`. `make clean && make -j$(nproc)`
-  is the full reset to known-good. Maybe this should be investigated.
+- **The `~/.aether/cache` key.** `ae build`/`ae run` cache compiled binaries
+  under a key that covers the program's sources and imported modules, the
+  compiler, the `ae` driver, the C compiler, `libaether.a` and, in a source
+  tree, the content of every header under `runtime/` and `std/` that
+  generated C can include (#2707: a header edit used to leave the key alone
+  and serve the old binary). If behaviour still seems impossibly stale after
+  an edit, `rm -rf ~/.aether/cache` and file what the key missed;
+  `make clean && make -j$(nproc)` is the full reset to known-good.
 
 ## Branch / PR conventions
 

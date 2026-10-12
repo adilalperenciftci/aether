@@ -14,6 +14,7 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 . "$ROOT/tests/lib/wait_port.sh"
+. "$ROOT/tests/lib/server_jobs.sh"
 AE="$ROOT/build/ae"
 
 TMPDIR="$(mktemp -d)"
@@ -21,10 +22,7 @@ AETHER_CACHE_DIR="$TMPDIR/cache"
 export AETHER_CACHE_DIR
 SRV_PID=""
 cleanup() {
-    if [ -n "$SRV_PID" ]; then
-        kill "$SRV_PID" 2>/dev/null || true
-        wait "$SRV_PID" 2>/dev/null || true
-    fi
+    stop_server "$SRV_PID"
     rm -rf "$TMPDIR"
 }
 trap cleanup EXIT

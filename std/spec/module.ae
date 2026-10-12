@@ -31,7 +31,7 @@
 //                 spec.assert_eq(count(), 1, "after one inc")
 //             }
 //         }
-//         spec.run_summary(fw)
+//         return spec.run_summary(fw)
 //     }
 //
 // Run with `ae test` (discovers `test_*.ae` / `*_test.ae`, one process

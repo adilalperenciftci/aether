@@ -12,6 +12,7 @@
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+. "$ROOT/tests/lib/server_jobs.sh"
 AE="$ROOT/build/ae"
 
 # The upstream is raw sockets through tests/lib/raw_socket.h, which needs
@@ -28,7 +29,7 @@ fi
 
 TMPDIR="$(mktemp -d)"
 UP_PID=""
-cleanup() { [ -n "$UP_PID" ] && kill "$UP_PID" 2>/dev/null; rm -rf "$TMPDIR"; }
+cleanup() { stop_server "$UP_PID"; rm -rf "$TMPDIR"; }
 trap cleanup EXIT
 fail() { echo "  [FAIL] $1"; exit 1; }
 
@@ -51,7 +52,7 @@ run_case() {                      # run_case <mode>
 
     OUT="$(UPSTREAM_PORT="$PORT" MODE="$mode" AETHER_HOME="$ROOT" \
            "$AE" run "$SCRIPT_DIR/response_framing.ae" 2>&1)"
-    kill "$UP_PID" 2>/dev/null
+    stop_server "$UP_PID"
     UP_PID=""
     : > "$TMPDIR/port.txt"
     if ! echo "$OUT" | grep -q "^PASS"; then

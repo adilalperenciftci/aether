@@ -162,6 +162,14 @@ void module_add_lib_dir(const char* dir);
 // `--lib` handler call this. Issue #413.
 void module_add_lib_dirs(const char* spec);
 
+// #2699: replace each legacy `export <declaration>` at the top of the file
+// being compiled with the declaration it wraps. The wrapper only tells an
+// importer what it may name, which the module system reads from each
+// module's own parse, so to the file itself an exported definition is one
+// like any other, and every pass from here on sees it that way. `export
+// name` is kept. Call after parse_program() and before module_orchestrate().
+void module_unwrap_entry_exports(ASTNode* program);
+
 // Orchestrate all module loading: scan imports, resolve, parse, cache, detect cycles.
 // Returns 1 on success, 0 on circular dependency error.
 int module_orchestrate(ASTNode* program);

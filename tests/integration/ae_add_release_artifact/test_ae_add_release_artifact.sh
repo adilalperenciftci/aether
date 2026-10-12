@@ -23,6 +23,7 @@
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+. "$ROOT/tests/lib/server_jobs.sh"
 AE="$ROOT/build/ae"
 [ -n "${EXE_EXT:-}" ] && AE="$AE$EXE_EXT"
 
@@ -45,7 +46,7 @@ TMP="$(mktemp -d)"
 PORT=""
 SRV_PID=""
 cleanup() {
-    [ -n "$SRV_PID" ] && kill "$SRV_PID" 2>/dev/null
+    stop_server "$SRV_PID"
     rm -rf "$TMP"
     return 0
 }

@@ -1,0 +1,151 @@
+// Regression (#2690): a string local a `try` body writes keeps what was
+// stored in it before a panic, and frees it once.
+//
+// Such a local must be volatile for its value to survive the longjmp of a
+// panic (C99 7.13.2.1), and so must the `_heap_<name>` tracker that says
+// whether it owns that value. Neither was: a string local is declared at
+// the function's entry, where the qualifier was never applied (#2618 gave
+// it only to a local first declared at its binding), so after a panic both
+// could hold their values from before the try, and the string stored was
+// lost or freed as if never owned. An optional string local (`string?`)
+// and its tracker had the same gap. A string stored there was also
+// journaled for the try's own frame, so the panic freed it while the
+// local, outside the try, still held it: the catch read freed memory and
+// the scope exit could free it again. It is journaled for the frame the
+// local is declared in.
+//
+// The leak check runs where the heap count is exact
+// (mem.heap_in_use_exact): after a warm-up, some window of the same work
+// grows by exactly 0 (mem.steady_growth). Strings are built from
+// parameters, because string.concat of two literals folds to a literal.
+
+import std.mem
+import std.string
+
+extern exit(code: int)
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL #2690: ${msg}")
+        exit(1)
+    }
+}
+
+// The issue's shape: bound before the try, written inside it.
+written(w: string) -> int {
+    s = "lit"
+    try {
+        s = string.concat(w, "b")
+        panic("stop")
+    } catch e {
+        check(e == "stop", "the panic caught")
+    }
+    check(s == "wb", "a string stored before a panic")
+    return string.length(s)
+}
+
+// Written in a loop inside the try, so the last store is not the first.
+looped(w: string) -> int {
+    s = "lit"
+    try {
+        i = 0
+        while i < 3 {
+            s = string.concat(w, "${i}")
+            i = i + 1
+        }
+        panic("stop")
+    } catch e {
+        check(e == "stop", "the panic caught")
+    }
+    check(s == "w2", "the last of several stores before a panic")
+    return string.length(s)
+}
+
+// Owned before the try, given up and owned again inside it.
+regained(w: string) -> int {
+    s = string.concat(w, "c")
+    try {
+        s = "lit"
+        s = string.concat(w, "d")
+        panic("stop")
+    } catch e {
+        check(e == "stop", "the panic caught")
+    }
+    check(s == "wd", "a string stored again before a panic")
+    return string.length(s)
+}
+
+// Two tries deep: the store is journaled for the frame outside both.
+nested(w: string) -> int {
+    s = "lit"
+    try {
+        try {
+            s = string.concat(w, "e")
+            panic("inner")
+        } catch e {
+            check(e == "inner", "the inner panic caught")
+        }
+        panic("outer")
+    } catch e2 {
+        check(e2 == "outer", "the outer panic caught")
+    }
+    check(s == "we", "a string stored two tries deep")
+    return string.length(s)
+}
+
+// First bound in the arms of an `if` and read after it, so declared ahead
+// of the `if`.
+branched(w: string, c: bool) -> int {
+    if c {
+        s = "lit"
+    } else {
+        s = "other"
+    }
+    try {
+        s = string.concat(w, "f")
+        panic("stop")
+    } catch e {
+        check(e == "stop", "the panic caught")
+    }
+    check(s == "wf", "a string stored before a panic, declared ahead of an if")
+    return string.length(s)
+}
+
+// An optional string local.
+optional(w: string) -> int {
+    let o: string? = none
+    try {
+        o = string.concat(w, "o")
+        panic("stop")
+    } catch e {
+        check(e == "stop", "the panic caught")
+    }
+    s = o ?? "none"
+    check(s == "wo", "an optional string stored before a panic")
+    return string.length(s)
+}
+
+round(w: string) -> int {
+    return written(w) + looped(w) + regained(w) + nested(w) + branched(w, true) + optional(w)
+}
+
+main() {
+    println("=== test_try_written_string_local ===")
+    check(round("w") == 12, "a round adds up")
+    i = 0
+    while i < 20 {
+        round("w")
+        i = i + 1
+    }
+    if mem.heap_in_use_exact() {
+        grown = mem.steady_growth(|| {
+                k = 0
+                while k < 100 {
+                    round("w")
+                    k = k + 1
+                }
+            }, 5)
+        check(grown == 0, "a window of 100 rounds grew the heap by ${grown} bytes in every run")
+    }
+    println("=== test_try_written_string_local passed ===")
+}

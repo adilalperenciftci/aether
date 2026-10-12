@@ -448,5 +448,5 @@ main() {
 
     json.json_free(doc)
     doc = null
-    spec.run_summary(fw)
+    return spec.run_summary(fw)
 }

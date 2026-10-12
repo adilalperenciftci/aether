@@ -1,0 +1,112 @@
+// Regression (#2754): a closure literal passed to a function that captures
+// its closure parameter in another closure was never released by the
+// caller. The caller releases a closure argument after the call unless the
+// callee keeps it, and a capture by a nested closure counted as a keep; but
+// that capture retains the closure (as a field, a global or actor state does,
+// #2528), so the caller's reference was the one left over: 2400 bytes per
+// 100 calls of `transient` below.
+//
+// The capture that outlives the call (`wrap` returns it) must still work
+// after the caller has released its own reference. A nested closure that
+// rebinds the parameter makes it a cell, which takes a reference of its own
+// and gives back every closure it holds (#2755), so nothing of the call is
+// left over there either, at exit included.
+
+import std.mem
+import std.string
+
+extern exit(code: int)
+
+take(f: fn) -> int {
+    call(f)
+    return 1
+}
+
+// Captures f in a closure that lives only for the call to take.
+steady(f: fn) {
+    take(|| { call(f) })
+}
+
+// Captures f in a closure it returns.
+wrap(f: fn) -> fn {
+    return || { call(f) }
+}
+
+// A nested closure that rebinds f.
+rebind(f: fn) -> int {
+    n = 0
+    g = || {
+        f = || { n = n + 10 }
+        call(f)
+    }
+    call(g)
+    return n
+}
+
+transient(piece: string) {
+    steady(|| { string.length(piece) })
+}
+
+var hits = 0
+
+outlives(piece: string) -> int {
+    g = wrap(|| { hits = hits + string.length(piece) })
+    call(g)
+    call(g)
+    return hits
+}
+
+main() {
+    piece = string.concat("abc", "")
+    bad = 0
+    transient(piece)
+    got = outlives(piece)
+    if got != 6 {
+        println("FAIL: the closure a returned closure captured gave ${got}, want 6")
+        bad = bad + 1
+    }
+    r = rebind(|| { hits = hits + 1 })
+    if r != 10 {
+        println("FAIL: a nested closure that rebinds the parameter gave ${r}, want 10")
+        bad = bad + 1
+    }
+    if mem.heap_in_use_exact() {
+        grown = mem.steady_growth(|| {
+                k = 0
+                while k < 100 {
+                    transient(piece)
+                    k = k + 1
+                }
+            }, 5)
+        if grown != 0 {
+            println("FAIL: 100 calls passing a closure the callee captures grew the heap by ${grown} bytes")
+            bad = bad + 1
+        }
+        kept = mem.steady_growth(|| {
+                k = 0
+                while k < 100 {
+                    outlives(piece)
+                    k = k + 1
+                }
+            }, 5)
+        if kept != 0 {
+            println("FAIL: 100 calls of a returned capture grew the heap by ${kept} bytes")
+            bad = bad + 1
+        }
+        cell = mem.steady_growth(|| {
+                k = 0
+                while k < 100 {
+                    rebind(|| { hits = hits + string.length(piece) })
+                    k = k + 1
+                }
+            }, 5)
+        if cell != 0 {
+            println("FAIL: 100 calls of a nested closure that rebinds the parameter grew the heap by ${cell} bytes")
+            bad = bad + 1
+        }
+    }
+    if bad != 0 {
+        exit(1)
+    }
+    println("PASS: a closure argument the callee captures is released by the caller")
+}

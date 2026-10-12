@@ -1,0 +1,37 @@
+// Regression (#2676): an `extern` of a libc function whose declaration the
+// code generator skips (the system header's prototype is the canonical one)
+// compiles, because the header that declares it is now included. `signal`
+// was skipped with no <signal.h> in the generated C, and gcc 14 rejects the
+// implicit declaration. getpid and isatty need <unistd.h>, which the
+// generated C for Windows stopped including with windows.h (#2673).
+
+extern signal(sig: int, handler: fn(int)) -> ptr
+extern raise(sig: int) -> int
+extern getpid() -> int
+extern isatty(fd: int) -> int
+extern exit(code: int)
+
+on_int(sig: int) {
+    println("handler got ${sig}")
+}
+
+main() {
+    signal(2, on_int as fn(int))
+    println("installed")
+    // SIGINT, delivered synchronously by raise on Linux, macOS and Windows.
+    if raise(2) != 0 {
+        println("FAIL: raise")
+        exit(1)
+    }
+    if getpid() <= 0 {
+        println("FAIL: getpid")
+        exit(1)
+    }
+    // Nonzero for a terminal (Windows returns 64, not 1), 0 otherwise.
+    tty = isatty(0)
+    if tty < 0 {
+        println("FAIL: isatty returned ${tty}")
+        exit(1)
+    }
+    println("PASS: libc externs declared by their headers")
+}

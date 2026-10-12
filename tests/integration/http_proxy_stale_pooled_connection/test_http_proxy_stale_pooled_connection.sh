@@ -20,16 +20,14 @@ if [ -z "$PY" ]; then
 fi
 
 . "$ROOT/tests/lib/wait_port.sh"
+. "$ROOT/tests/lib/server_jobs.sh"
 
 TMPDIR="$(mktemp -d)"
 PX_PID=""
 UP_PID=""
 cleanup() {
     for pid in "$PX_PID" "$UP_PID"; do
-        if [ -n "$pid" ]; then
-            kill "$pid" 2>/dev/null || true
-            wait "$pid" 2>/dev/null || true
-        fi
+        stop_server "$pid"
     done
     rm -rf "$TMPDIR"
 }

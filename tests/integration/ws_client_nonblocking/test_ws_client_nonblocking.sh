@@ -24,6 +24,7 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+. "$ROOT/tests/lib/server_jobs.sh"
 AE="$ROOT/build/ae"
 
 [ -x "$AE" ] || { echo "  [SKIP] ws_client_nonblocking: ae not built"; exit 0; }
@@ -34,7 +35,7 @@ cleanup() {
     # `|| :` on every line: under `set -e` a failing command inside a trap
     # aborts the rest of the handler, which would leak $TMP and leave a
     # non-zero status behind an already-printed [PASS].
-    if [ -n "$SRV_PID" ]; then kill "$SRV_PID" 2>/dev/null || :; fi
+    stop_server "$SRV_PID"
     rm -rf "$TMP" || :
     return 0
 }

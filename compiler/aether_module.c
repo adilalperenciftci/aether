@@ -2186,6 +2186,29 @@ static ASTNode* unwrap_export(ASTNode* node) {
     return node;
 }
 
+/* #2699: the wrapper used to stay in the file being compiled, and each pass
+ * walking its top-level definitions had to look through it. Most did not:
+ * an exported function missed the type checker's third pass (W1001, W1002,
+ * `@scoped`, Isolated[T]), return-type inference, the effect walk, the
+ * rename off a libaether C name, its C prototype and its place in a clause
+ * set; an exported constant was undeclared in the C and an exported actor
+ * could not be spawned. The merge unwraps what it takes from a module the
+ * same way. */
+void module_unwrap_entry_exports(ASTNode* program) {
+    if (!program) return;
+    for (int i = 0; i < program->child_count; i++) {
+        ASTNode* wrapper = program->children[i];
+        if (!wrapper || wrapper->type != AST_EXPORT_STATEMENT || wrapper->child_count == 0)
+            continue;
+        ASTNode* decl = wrapper->children[0];
+        /* `export name` names a definition rather than wrapping one. */
+        if (!decl || decl->type == AST_IDENTIFIER) continue;
+        program->children[i] = decl;
+        wrapper->child_count = 0;
+        free_ast_node(wrapper);
+    }
+}
+
 // Collect all function names defined in a module AST
 static int collect_module_func_names(ASTNode* mod_ast, const char** names, int max) {
     int count = 0;
@@ -2418,6 +2441,71 @@ static void collect_local_names(ASTNode* node, const char** names, int* count, i
     }
 }
 
+/* #2683: a local's scope starts after its initializer, so in `helper =
+ * helper() + 1` the call is the module's function and every later `helper`
+ * is the local. The walk below leaves a name the body binds anywhere
+ * unrenamed throughout the body (#2637), the initializer included, so the
+ * merged program called a `helper` it did not have (E0301 in a program that
+ * imports the module, while `ae check` of the module passed). A reference
+ * to a module function that comes, in source order, before every binding of
+ * its name in the body cannot be the local: it gets the module rename here,
+ * ahead of that walk.
+ * Children are visited before their node, so an initializer comes before its
+ * binding; a binding lasts to the end of the body (a closure's or a match
+ * arm's included), which errs toward leaving a reference as it was. */
+typedef struct {
+    const char** names;  /* borrowed from binding nodes, which this pass never renames */
+    int count, cap;
+} BoundNames;
+
+static void rename_refs_before_binding(ASTNode* node, const char* prefix,
+                                       const char** func_names, int func_count,
+                                       const char** local_names, int local_count,
+                                       BoundNames* bound) {
+    if (!node || node->type == AST_OFFSETOF) return;
+    for (int i = 0; i < node->child_count; i++) {
+        rename_refs_before_binding(node->children[i], prefix, func_names, func_count,
+                                   local_names, local_count, bound);
+    }
+    if (!node->value) return;
+    if (node->type == AST_VARIABLE_DECLARATION || node->type == AST_PATTERN_VARIABLE ||
+        node->type == AST_CONST_DECLARATION || node->type == AST_CLOSURE_PARAM) {
+        if (!name_in_list(node->value, bound->names, bound->count)) {
+            if (bound->count == bound->cap) {
+                bound->cap = bound->cap ? bound->cap * 2 : 16;
+                bound->names = (const char**)realloc((void*)bound->names,
+                                                     (size_t)bound->cap * sizeof(*bound->names));
+                if (!bound->names) { fprintf(stderr, "out of memory\n"); exit(1); }
+            }
+            bound->names[bound->count++] = node->value;
+        }
+        return;
+    }
+    if (node->type != AST_FUNCTION_CALL && node->type != AST_IDENTIFIER) return;
+    if (!name_in_list(node->value, local_names, local_count) ||
+        name_in_list(node->value, bound->names, bound->count)) return;
+    /* Functions only. A local named after a module const, read before its
+     * binding (a loop's, from the previous pass), is the local to the
+     * checker, which passes over such a local only for a function. */
+    if (!name_in_list(node->value, func_names, func_count)) return;
+    size_t n = strlen(prefix) + 1 + strlen(node->value) + 1;
+    char* prefixed = (char*)malloc(n);
+    if (!prefixed) { fprintf(stderr, "out of memory\n"); exit(1); }
+    snprintf(prefixed, n, "%s_%s", prefix, node->value);
+    free(node->value);
+    node->value = prefixed;
+}
+
+static void rename_refs_before_binding_in(ASTNode* scope, const char* prefix,
+                                          const char** func_names, int func_count,
+                                          const char** local_names, int local_count) {
+    if (local_count == 0 || func_count == 0) return;
+    BoundNames bound = {NULL, 0, 0};
+    rename_refs_before_binding(scope, prefix, func_names, func_count, local_names, local_count,
+                               &bound);
+    free((void*)bound.names);
+}
+
 // Recursively rename intra-module function calls and constant references in a cloned AST.
 // local_names/local_count: names bound in the enclosing function (params + locals) that shadow constants.
 static void rename_intra_module_refs(ASTNode* node, const char* prefix,
@@ -2562,6 +2650,19 @@ static void rename_intra_module_refs(ASTNode* node, const char* prefix,
            Enclosing names are appended after, and merely losing one of those
            costs a missed rename-suppression, not a wrong symbol. */
         collect_local_names(node, clo_locals, &clo_local_count, 128);
+        /* #2683 inside the closure: its own names, where the enclosing body
+         * binds none of them (that body's walk has placed those). */
+        {
+            const char* own[128];
+            int own_count = 0;
+            for (int i = 0; i < clo_local_count; i++) {
+                if (!name_in_list(clo_locals[i], local_names, local_count) &&
+                    !name_is_module_global_var(prefix, clo_locals[i])) {
+                    own[own_count++] = clo_locals[i];
+                }
+            }
+            rename_refs_before_binding_in(node, prefix, func_names, func_count, own, own_count);
+        }
         for (int i = 0; i < local_count && clo_local_count < 128; i++) {
             if (!name_in_list(local_names[i], clo_locals, clo_local_count)) {
                 clo_locals[clo_local_count++] = local_names[i];
@@ -2609,6 +2710,8 @@ static void rename_intra_module_refs(ASTNode* node, const char* prefix,
             }
         }
         nested_local_count = kept;
+        rename_refs_before_binding_in(node, prefix, func_names, func_count, nested_locals,
+                                      nested_local_count);
         for (int i = 0; i < node->child_count; i++) {
             rename_intra_module_refs(node->children[i], prefix, func_names, func_count,
                                      const_names, const_count, nested_locals, nested_local_count);

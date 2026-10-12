@@ -53,9 +53,6 @@ Type* declared_var_type(CodeGenerator* gen, const char* var_name);
 void truncate_declared_vars(CodeGenerator* gen, int saved_count);
 void clear_declared_vars(CodeGenerator* gen);
 void clear_fnptr_locals(CodeGenerator* gen);
-int is_heap_box_var(CodeGenerator* gen, const char* var_name);
-void mark_heap_box_var(CodeGenerator* gen, const char* var_name);
-void unmark_heap_box_var(CodeGenerator* gen, const char* var_name);
 int is_module_global_var(CodeGenerator* gen, const char* name);
 int is_actor_state_var(CodeGenerator* gen, const char* name);   /* #2505 */
 void register_module_global_var(CodeGenerator* gen, const char* name, int is_program);
@@ -63,6 +60,8 @@ int is_heap_string_var(CodeGenerator* gen, const char* var_name);
 void mark_heap_string_var(CodeGenerator* gen, const char* var_name);
 void unmark_heap_string_var(CodeGenerator* gen, const char* var_name);
 void clear_heap_string_vars(CodeGenerator* gen);
+int heap_string_var_try_depth(CodeGenerator* gen, const char* var_name);         /* #2690 */
+int set_heap_string_var_try_depth(CodeGenerator* gen, const char* var_name, int depth);
 int is_escaped_string_var(CodeGenerator* gen, const char* var_name);
 void mark_escaped_string_var(CodeGenerator* gen, const char* var_name);
 void clear_escaped_string_vars(CodeGenerator* gen);
@@ -93,6 +92,14 @@ int is_seq_owning_expr(CodeGenerator* gen, ASTNode* expr);
  * temp lifetime wrap (ArgDrainSub) to detect heap-returning
  * function calls in argument position. */
 int is_heap_string_expr(CodeGenerator* gen, ASTNode* expr);
+/* #2750: a call of an Aether function returning `string?` (handed over
+ * owned, #2740), and `!` / `??` over one; a heap string nobody else holds
+ * (a call, an interpolation, an `or`, such an unwrap) that the expression
+ * reading it frees; and whether a `string?` argument is free after a call. */
+int is_owned_opt_string_call(CodeGenerator* gen, ASTNode* e);
+int is_owned_opt_string_unwrap(CodeGenerator* gen, ASTNode* e);
+int is_fresh_heap_string_temp(CodeGenerator* gen, ASTNode* e);
+int opt_string_arg_freed_after_call(CodeGenerator* gen, const char* func_name, int ai);
 
 /* Does evaluating the expression have a side effect (a call, a send, a
  * va_* op)? Defined in codegen_expr.c. Gates the series-collapse
@@ -148,6 +155,9 @@ enum {
 int is_owned_string_field_read(ASTNode* e);
 /* The C symbol `@extern("sym")` binds an extern to, or NULL. */
 const char* extern_c_symbol(const ASTNode* ext);
+/* The system header that declares a libc function whose `extern`
+ * declaration codegen skips, or NULL when the prelude includes it (#2676). */
+const char* libc_extern_header(const char* name);
 /* The runtime free a call to `fn` is ("string_free", "string_release",
  * "release"), under its own name or an `@extern` alias, or NULL. */
 const char* consuming_free_symbol(CodeGenerator* gen, const char* fn);
@@ -375,6 +385,16 @@ const char* promoted_cell_pointer(const char* c_type, const char* name);
 void emit_promoted_param_cell(CodeGenerator* gen, const char* name,
                               const char* c_type, const char* param_cname,
                               int line, int column);
+/* #2755: closure cells (codegen_stmt.c). The scope declaring the promoted
+ * `name` seen from scope `scope`, and its body (codegen_expr.c); whether
+ * the cell of `name` in the scope being emitted gives back the closures it
+ * holds, or pins them because one may be kept bare; whether `e` reads a
+ * closure cell; and the release of the remembered answers. */
+ASTNode* promoted_cell_declaring_scope(CodeGenerator* gen, const char* scope, const char* name,
+                                       ASTNode** body);
+int promoted_closure_cell_owns(CodeGenerator* gen, const char* name);
+int is_closure_cell_read(CodeGenerator* gen, ASTNode* e);
+void cell_owns_free(CodeGenerator* gen);
 /* The program's own definition of `name`, or NULL. Shared rather than
    duplicated: the builtin fast-paths need it to know when a program has
    defined a function of its own with a builtin's name. */
@@ -495,6 +515,9 @@ int has_return_value(ASTNode* node);
 int state_field_owns_string(ASTNode* state_decl);
 /* #2528: a `string[N]` (1) / `fn[N]` (2) state field, length in `*len`. */
 int state_array_owned(ASTNode* state_decl, int* len);
+/* #2688: a `T[N]` state field whose struct T owns strings or closures: T's
+ * name (each element is the actor's own), or NULL. */
+const char* state_struct_array_owned(CodeGenerator* gen, ASTNode* state_decl, int* len);
 /* #2528 (codegen_stmt.c): `v` as the value an owned string element takes. */
 void emit_owned_string_element(CodeGenerator* gen, ASTNode* v);
 
@@ -520,6 +543,19 @@ void emit_closure_take(CodeGenerator* gen, ASTNode* e);
 /* #2528: an array literal whose elements the holder owns: `kind` 1 copies
  * each string (a fresh one is adopted), 2 takes each closure. */
 void emit_owned_array_literal(CodeGenerator* gen, ASTNode* lit, int kind);
+/* #2688: a struct literal's fixed-size array field given another array
+ * (`Shelf { names: arr }`): it is `{0}` in the literal, and
+ * emit_struct_literal_array_field then fills `_ae_slit.<field>` element by
+ * element, each taken as the field keeps it. */
+int struct_literal_field_takes_array(CodeGenerator* gen, const char* sname, ASTNode* field_init);
+void emit_struct_literal_array_field(CodeGenerator* gen, const char* sname, ASTNode* field_init);
+/* #2690: a struct value a `try` body writes is declared volatile; may the
+ * lvalue `lv` (a local, or a field or element held by one) be such a value?
+ * Its release and replace are then the generated `<Name>_destroy_volatile`
+ * and `<Name>_replace_volatile`, which these name. */
+int lvalue_may_be_volatile(CodeGenerator* gen, ASTNode* lv);
+const char* struct_destroy_fn(const char* sname, int is_volatile);
+const char* struct_replace_fn(const char* sname, int is_volatile);
 /* #2497: does a value of this struct own heap strings, in a `string` field
  * of its own or in a field that is itself such a struct held by value? It
  * then has `<Name>_destroy` / `_replace` / `_heap_free` / `_cell_release`,

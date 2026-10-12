@@ -17,6 +17,7 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 . "$ROOT/tests/lib/wait_port.sh"
+. "$ROOT/tests/lib/server_jobs.sh"
 AE="$ROOT/build/ae"
 
 [ -x "$AE" ] || { echo "  [SKIP] ws_client_conformance: ae not built"; exit 0; }
@@ -53,7 +54,7 @@ cleanup() {
     # aborts the function, so a kill of an already-dead server would both skip
     # the rm below (leaking the temp dir) and leave a non-zero status for the
     # script to exit with -- reporting a failure after having printed [PASS].
-    if [ -n "$SRV_PID" ]; then kill "$SRV_PID" 2>/dev/null || :; fi
+    stop_server "$SRV_PID"
     rm -rf "$TMP" || :
     return 0
 }

@@ -14,36 +14,23 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 AE="$ROOT/build/ae"
+. "$ROOT/tests/lib/server_jobs.sh"
 
 TMPDIR="$(mktemp -d)"
 AETHER_CACHE_DIR="$TMPDIR/cache"
 export AETHER_CACHE_DIR
 SRV_PID=""
 cleanup() {
-    if [ -n "$SRV_PID" ]; then
-        # `ae run` compiles then forks the built binary into a child that
-        # holds the listen socket, so killing the wrapper alone orphans it
-        # (and leaks the fixed port for the next run). Kill the whole
-        # process group where setsid gave us one (Linux); on macOS/BSD
-        # setsid is usually absent, so also pkill any process whose argv
-        # names this test's server.ae as a portable belt-and-braces reap.
-        kill -- "-$SRV_PID" 2>/dev/null || kill "$SRV_PID" 2>/dev/null || true
-        wait "$SRV_PID" 2>/dev/null || true
-        if command -v pkill >/dev/null 2>&1; then
-            pkill -f "$SCRIPT_DIR/server.ae" 2>/dev/null || true
-        fi
-    fi
+    # `ae run` compiles, then runs the built binary as its child, which holds
+    # the listen socket. stop_server's SIGTERM is relayed to that child on
+    # POSIX, and on Windows ae keeps the child in a job object that goes
+    # with ae, so the child does not outlive the test (and leak the port).
+    stop_server "$SRV_PID"
     rm -rf "$TMPDIR"
 }
 trap cleanup EXIT
 
-# Start the server as its own process-group leader so cleanup can reap the
-# forked child too. setsid puts it in a fresh session/pgid == its pid.
-if command -v setsid >/dev/null 2>&1; then
-    setsid sh -c 'AETHER_HOME="$1" exec "$2" run "$3"' _ "$ROOT" "$AE" "$SCRIPT_DIR/server.ae" >"$TMPDIR/srv.log" 2>&1 &
-else
-    AETHER_HOME="$ROOT" "$AE" run "$SCRIPT_DIR/server.ae" >"$TMPDIR/srv.log" 2>&1 &
-fi
+AETHER_HOME="$ROOT" "$AE" run "$SCRIPT_DIR/server.ae" >"$TMPDIR/srv.log" 2>&1 &
 SRV_PID=$!
 
 # No READY-grep or port probe: the server's stdout is block-buffered to

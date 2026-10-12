@@ -26,6 +26,7 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 . "$ROOT/tests/lib/wait_port.sh"
+. "$ROOT/tests/lib/server_jobs.sh"
 AE="$ROOT/build/ae"
 
 [ -x "$AE" ] || { echo "  [SKIP] https_pure_tls_vertical: ae not built"; exit 0; }
@@ -34,7 +35,7 @@ command -v openssl >/dev/null 2>&1 || { echo "  [SKIP] https_pure_tls_vertical: 
 TMP="$(mktemp -d)"
 SRV_PID=""
 cleanup() {
-    if [ -n "$SRV_PID" ]; then kill "$SRV_PID" 2>/dev/null || :; fi
+    stop_server "$SRV_PID"
     rm -rf "$TMP" || :
     return 0
 }
@@ -99,8 +100,7 @@ case "$CURL_OUT" in
 esac
 
 # Stop OpenSSL server
-kill "$SRV_PID" 2>/dev/null || :
-wait "$SRV_PID" 2>/dev/null || :
+stop_server "$SRV_PID"
 
 # --- Start Pure-Aether TLS Server (AETHER_PURE_TLS=1) ---
 AETHER_PURE_TLS=1 CERT_PATH="$TMP/cert.pem" KEY_PATH="$TMP/key.pem" "$TMP/srv" >"$TMP/srv_pure.log" 2>&1 &

@@ -21,6 +21,7 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 . "$ROOT/tests/lib/wait_port.sh"
+. "$ROOT/tests/lib/server_jobs.sh"
 AE="$ROOT/build/ae"
 NAME=https_client_pure_tls
 
@@ -34,7 +35,7 @@ unset SSL_CERT_FILE SSL_CERT_DIR AETHER_PURE_TLS || :
 TMP="$(mktemp -d)"
 PIDS=""
 cleanup() {
-    for p in $PIDS; do kill "$p" 2>/dev/null || :; wait "$p" 2>/dev/null || :; done
+    for p in $PIDS; do stop_server "$p"; done
     rm -rf "$TMP" || :
     return 0
 }
@@ -106,7 +107,7 @@ run() {
     while kill -0 "$cpid" 2>/dev/null; do
         n=$((n + 1))
         if [ "$n" -gt 300 ]; then
-            kill "$cpid" 2>/dev/null || :
+            kill_server "$cpid"
             OUT="HUNG (no result after 30 s)"
             return 0
         fi
@@ -204,7 +205,7 @@ if openssl s_server -help 2>&1 | grep -q -- '-tls1_2'; then
             S12=$P
             break
         fi
-        kill "$spid" 2>/dev/null || :
+        kill_server "$spid"
     done
     [ -n "$S12" ] || fail "could not start openssl s_server -tls1_2"
     run env $PURE URL="https://localhost:$S12/" CAFILE="$TMP/ca.pem" "$TMP/cli"

@@ -1,0 +1,9 @@
+// A native program that sleeps for up to a minute: what the shell tests
+// start in the background and must end.
+main() {
+    i = 0
+    while i < 60 {
+        sleep(1000)
+        i = i + 1
+    }
+}

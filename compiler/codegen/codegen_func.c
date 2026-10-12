@@ -849,56 +849,86 @@ int has_return_value(ASTNode* node) {
 // vs typed printf). The user's `extern foo(...)` is still useful — it
 // registers the function for type-aware call-site emission — but we
 // skip writing the C forward declaration. Issue #233.
-static int extern_name_is_libc_conflict(const char* name) {
-    if (!name) return 0;
-    static const char* libc_names[] = {
-        /* Process / signal */
-        "sleep", "usleep", "exit", "_exit", "abort", "atexit",
-        "fork", "wait", "waitpid", "execv", "execvp", "execve",
-        "getpid", "getppid", "getuid", "geteuid", "getgid", "getegid",
-        "signal", "kill", "raise",
-        /* Standard I/O */
-        "printf", "fprintf", "sprintf", "snprintf",
-        "vprintf", "vfprintf", "vsprintf", "vsnprintf",
-        "puts", "fputs", "gets", "fgets",
-        "getc", "putc", "getchar", "putchar", "ungetc",
-        "fopen", "fclose", "fflush", "freopen",
-        "fread", "fwrite", "fseek", "ftell", "rewind",
-        "feof", "ferror", "fileno", "perror", "clearerr",
-        /* Memory */
-        "malloc", "calloc", "realloc", "free",
-        /* String — note: strdup/strndup added; size_t-arg variants
-           like strstr/strchr also clash on prototype shape. */
-        "strlen", "strcmp", "strncmp", "strcpy", "strncpy",
-        "strcat", "strncat", "strdup", "strndup",
-        "strstr", "strchr", "strrchr", "strpbrk",
-        "strspn", "strcspn", "strtok", "strtok_r",
-        "strcasecmp", "strncasecmp",
-        "memcpy", "memset", "memmove", "memcmp", "memchr",
-        /* Number conversion */
-        "atoi", "atol", "atoll", "atof",
-        "strtol", "strtoul", "strtoll", "strtoull",
-        "strtod", "strtof",
-        "abs", "labs", "llabs",
-        /* Sort / search — fn-pointer params clash with Aether's
-           `ptr` lowering to `void*`. */
-        "qsort", "qsort_r", "bsearch",
-        /* Environment */
-        "getenv", "setenv", "putenv", "unsetenv",
-        /* POSIX file ops */
-        "open", "close", "read", "write", "lseek",
-        "dup", "dup2", "pipe",
-        "access", "isatty", "unlink", "rename", "mkdir", "rmdir",
-        "stat", "fstat", "lstat",
-        /* Time */
-        "time", "clock", "clock_gettime", "gettimeofday",
-        "localtime", "gmtime", "mktime", "strftime",
-        NULL
-    };
-    for (int i = 0; libc_names[i]; i++) {
-        if (strcmp(name, libc_names[i]) == 0) return 1;
+/* The C library functions whose declaration an `extern` of the same name
+ * does not emit: the system header's prototype is the canonical one, and
+ * Aether's spelling of it (`void sleep(int)` for libc's `unsigned int
+ * sleep(unsigned int)`) would conflict. Skipping is sound only when that
+ * header is in the translation unit, so each name maps to the header that
+ * declares it, and emit_libc_extern_headers (codegen.c) includes it for
+ * every skipped name a program declares; NULL is a header the prelude
+ * always includes (stdio.h, stdlib.h, string.h, time.h). `extern
+ * signal(...)` was skipped with no <signal.h> anywhere, and gcc 14 rejects
+ * the implicit declaration (#2676). */
+typedef struct { const char* name; const char* header; } LibcExtern;
+
+static const LibcExtern libc_externs[] = {
+    /* Process / signal */
+    { "sleep", "unistd.h" }, { "usleep", "unistd.h" },
+    { "exit", NULL }, { "_exit", "unistd.h" }, { "abort", NULL }, { "atexit", NULL },
+    { "fork", "unistd.h" }, { "wait", "sys/wait.h" }, { "waitpid", "sys/wait.h" },
+    { "execv", "unistd.h" }, { "execvp", "unistd.h" }, { "execve", "unistd.h" },
+    { "getpid", "unistd.h" }, { "getppid", "unistd.h" }, { "getuid", "unistd.h" },
+    { "geteuid", "unistd.h" }, { "getgid", "unistd.h" }, { "getegid", "unistd.h" },
+    { "signal", "signal.h" }, { "kill", "signal.h" }, { "raise", "signal.h" },
+    /* Standard I/O */
+    { "printf", NULL }, { "fprintf", NULL }, { "sprintf", NULL }, { "snprintf", NULL },
+    { "vprintf", NULL }, { "vfprintf", NULL }, { "vsprintf", NULL }, { "vsnprintf", NULL },
+    { "puts", NULL }, { "fputs", NULL }, { "gets", NULL }, { "fgets", NULL },
+    { "getc", NULL }, { "putc", NULL }, { "getchar", NULL }, { "putchar", NULL },
+    { "ungetc", NULL }, { "fopen", NULL }, { "fclose", NULL }, { "fflush", NULL },
+    { "freopen", NULL }, { "fread", NULL }, { "fwrite", NULL }, { "fseek", NULL },
+    { "ftell", NULL }, { "rewind", NULL }, { "feof", NULL }, { "ferror", NULL },
+    { "fileno", NULL }, { "perror", NULL }, { "clearerr", NULL }, { "rename", NULL },
+    /* Memory */
+    { "malloc", NULL }, { "calloc", NULL }, { "realloc", NULL }, { "free", NULL },
+    /* String: strdup/strndup and the size_t-argument functions like
+     * strstr/strchr clash on prototype shape too. */
+    { "strlen", NULL }, { "strcmp", NULL }, { "strncmp", NULL }, { "strcpy", NULL },
+    { "strncpy", NULL }, { "strcat", NULL }, { "strncat", NULL }, { "strdup", NULL },
+    { "strndup", NULL }, { "strstr", NULL }, { "strchr", NULL }, { "strrchr", NULL },
+    { "strpbrk", NULL }, { "strspn", NULL }, { "strcspn", NULL }, { "strtok", NULL },
+    { "strtok_r", NULL }, { "strcasecmp", "strings.h" }, { "strncasecmp", "strings.h" },
+    { "memcpy", NULL }, { "memset", NULL }, { "memmove", NULL }, { "memcmp", NULL },
+    { "memchr", NULL },
+    /* Number conversion */
+    { "atoi", NULL }, { "atol", NULL }, { "atoll", NULL }, { "atof", NULL },
+    { "strtol", NULL }, { "strtoul", NULL }, { "strtoll", NULL }, { "strtoull", NULL },
+    { "strtod", NULL }, { "strtof", NULL }, { "abs", NULL }, { "labs", NULL },
+    { "llabs", NULL },
+    /* Sort / search: fn-pointer parameters clash with Aether's `ptr`
+     * lowering to `void*`. */
+    { "qsort", NULL }, { "qsort_r", NULL }, { "bsearch", NULL },
+    /* Environment */
+    { "getenv", NULL }, { "setenv", NULL }, { "putenv", NULL }, { "unsetenv", NULL },
+    /* POSIX file operations */
+    { "open", "fcntl.h" }, { "close", "unistd.h" }, { "read", "unistd.h" },
+    { "write", "unistd.h" }, { "lseek", "unistd.h" }, { "dup", "unistd.h" },
+    { "dup2", "unistd.h" }, { "pipe", "unistd.h" }, { "access", "unistd.h" },
+    { "isatty", "unistd.h" }, { "unlink", "unistd.h" }, { "rmdir", "unistd.h" },
+    { "mkdir", "sys/stat.h" }, { "stat", "sys/stat.h" }, { "fstat", "sys/stat.h" },
+    { "lstat", "sys/stat.h" },
+    /* Time */
+    { "time", NULL }, { "clock", NULL }, { "clock_gettime", NULL },
+    { "gettimeofday", "sys/time.h" }, { "localtime", NULL }, { "gmtime", NULL },
+    { "mktime", NULL }, { "strftime", NULL },
+    { NULL, NULL }
+};
+
+static const LibcExtern* libc_extern_find(const char* name) {
+    if (!name) return NULL;
+    for (int i = 0; libc_externs[i].name; i++) {
+        if (strcmp(name, libc_externs[i].name) == 0) return &libc_externs[i];
     }
-    return 0;
+    return NULL;
+}
+
+static int extern_name_is_libc_conflict(const char* name) {
+    return libc_extern_find(name) != NULL;
+}
+
+const char* libc_extern_header(const char* name) {
+    const LibcExtern* e = libc_extern_find(name);
+    return e ? e->header : NULL;
 }
 
 // Generate extern C function declaration
@@ -1564,6 +1594,19 @@ static void emit_function(CodeGenerator* gen, ASTNode* func, const char* clause_
         fprintf(gen->output, "AETHER_WEAK_DEF ");
     }
 
+    /* Issue #501 follow-up: mark the names this function's `try` bodies
+     * write before anything is declared, the parameters in the signature
+     * included: a parameter is a local of the function, and one a `try`
+     * body writes is volatile as any other is (#2690), so that after a
+     * panic it and its ownership flag agree. */
+    clear_try_clobbered_vars(gen);
+    for (int i = func->child_count - 1; i >= 0; i--) {
+        if (func->children[i] && func->children[i]->type == AST_BLOCK) {
+            mark_try_clobbered_vars(gen, func->children[i]);
+            break;
+        }
+    }
+
     if (result) generate_type(gen, result);
     else fprintf(gen->output, "void");
     // For @c_callback, emit the chosen C symbol verbatim (no namespace
@@ -1607,7 +1650,11 @@ static void emit_function(CodeGenerator* gen, ASTNode* func, const char* clause_
              * sits inside the `(*...)`, so the plain type+name path below
              * can't express it. */
             if (is_fnptr_type(child->node_type)) {
-                emit_fnptr_decl(gen, child->node_type, child->value);
+                /* The qualifier of the pointer sits inside the `(*...)`. */
+                const char* vq = try_volatile_qual_for(gen, child->value);
+                emit_fnptr_decl(gen, child->node_type,
+                                vq[0] && child->value ? cg_internf("volatile %s", child->value)
+                                                      : child->value);
                 last_param_cname = child->value ? child->value : "";
                 param_count++;
                 continue;
@@ -1641,7 +1688,13 @@ static void emit_function(CodeGenerator* gen, ASTNode* func, const char* clause_
                 fprintf(gen->output, " _param_%s", child->value);
                 last_param_cname = cg_internf("_param_%s", child->value);
             } else {
-                fprintf(gen->output, " %s", child->value);
+                /* A parameter a `try` body writes is volatile, as a local
+                 * is (#2690): `const char* volatile s`, `P volatile p`. A
+                 * prototype's parameters stay unqualified, which C counts
+                 * as the same type. */
+                fprintf(gen->output, "%s %s",
+                        try_volatile_qual_for(gen, child->value)[0] ? " volatile" : "",
+                        child->value);
                 last_param_cname = child->value ? child->value : "";
             }
             param_count++;
@@ -1733,7 +1786,6 @@ static void emit_function(CodeGenerator* gen, ASTNode* func, const char* clause_
     clear_seq_vars(gen);
     clear_opt_str_vars(gen);
     clear_escaped_string_vars(gen);
-    clear_try_clobbered_vars(gen);  /* Issue #501 follow-up — per-fn set */
 
     // Mark function parameters as declared so they aren't re-declared
     // (e.g., by hoist_loop_vars when a parameter is reassigned in a loop).
@@ -1804,8 +1856,9 @@ static void emit_function(CodeGenerator* gen, ASTNode* func, const char* clause_
                  * A clause decides for itself (#2644); its callers ask every
                  * clause (callee_keeps_string_arg). */
                 print_indent(gen);
-                fprintf(gen->output, "%s = aether_str_capture(%s); int _heap_%s = 1; (void)_heap_%s;\n",
-                        child->value, child->value, child->value, child->value);
+                fprintf(gen->output, "%s = aether_str_capture(%s); %s _heap_%s = 1; (void)_heap_%s;\n",
+                        child->value, child->value, try_tracker_type(gen, child->value),
+                        child->value, child->value);
                 mark_heap_string_var(gen, child->value);
                 mark_captured_string_param(gen, child->value);
             }
@@ -1881,7 +1934,8 @@ static void emit_function(CodeGenerator* gen, ASTNode* func, const char* clause_
                     if (elem->node_type && elem->node_type->kind != TYPE_UNKNOWN)
                         etype = get_c_type(elem->node_type);
                     fprintf(gen->output, "%s %s = _list_%d[%d];\n",
-                            etype, elem->value, pos, j);
+                            volatile_decl_type(try_volatile_qual_for(gen, elem->value), etype),
+                            elem->value, pos, j);
                 }
             }
         } else if (child->type == AST_PATTERN_CONS) {
@@ -1900,15 +1954,19 @@ static void emit_function(CodeGenerator* gen, ASTNode* func, const char* clause_
                 if (child->children[0]->node_type && child->children[0]->node_type->kind != TYPE_UNKNOWN)
                     htype = get_c_type(child->children[0]->node_type);
                 fprintf(gen->output, "%s %s = _list_%d[0];\n",
-                        htype, child->children[0]->value, pos);
+                        volatile_decl_type(try_volatile_qual_for(gen, child->children[0]->value),
+                                           htype),
+                        child->children[0]->value, pos);
             }
             if (child->child_count >= 2 && child->children[1]->type == AST_PATTERN_VARIABLE) {
                 print_indent(gen);
                 const char* ttype = "int";
                 if (child->children[1]->node_type && child->children[1]->node_type->kind != TYPE_UNKNOWN)
                     ttype = get_c_type(child->children[1]->node_type);
-                fprintf(gen->output, "%s* %s = &_list_%d[1];\n",
-                        ttype, child->children[1]->value, pos);
+                fprintf(gen->output, "%s %s = &_list_%d[1];\n",
+                        volatile_decl_type(try_volatile_qual_for(gen, child->children[1]->value),
+                                           cg_internf("%s*", ttype)),
+                        child->children[1]->value, pos);
                 print_indent(gen);
                 fprintf(gen->output, "int %s_len = _len_%d - 1;\n",
                         child->children[1]->value, pos);
@@ -1954,14 +2012,10 @@ static void emit_function(CodeGenerator* gen, ASTNode* func, const char* clause_
         // fail to compile. See #278.
         if (body->type == AST_BLOCK) {
             gen->hoist_scope_body = body;
+            /* The names the body's `try` bodies write were marked before
+             * the signature, so the hoists below declare them volatile
+             * too (#2690). */
             hoist_if_branch_vars(gen, body);
-            /* Issue #501 follow-up: mark vars modified inside any
-             * try body in this function so AST_VARIABLE_DECLARATION
-             * codegen knows which outer-scope locals need a
-             * `volatile` C type qualifier.  Must run before the
-             * body is generated, so the per-function set is
-             * populated by the time each decl-site lookup happens. */
-            mark_try_clobbered_vars(gen, body);
             // Pre-hoist `_heap_<name>` companions for every string
             // variable in the body so the tracker is visible across
             // every nesting depth — closes the architectural blocker
@@ -2660,6 +2714,23 @@ void generate_struct_definition(CodeGenerator* gen, ASTNode* struct_def) {
         }
         print_line(gen, "*dst = src;");
         unindent(gen);
+        print_line(gen, "}");
+
+        /* #2690: the two for a value a `try` body writes, which is declared
+         * volatile (a local, a parameter, an element of such an array), so
+         * that it holds after a panic what was stored before it. C has no
+         * plain pointer to it; these take the volatile one, work on a copy
+         * and store the result back, every access to the value itself a
+         * volatile one. */
+        print_line(gen, "static inline void %s_destroy_volatile(%s volatile* s) {",
+                   struct_def->value, struct_def->value);
+        print_line(gen, "    %s _ae_v = *s; %s_destroy(&_ae_v); *s = _ae_v;",
+                   struct_def->value, struct_def->value);
+        print_line(gen, "}");
+        print_line(gen, "static inline void %s_replace_volatile(%s volatile* dst, %s src) {",
+                   struct_def->value, struct_def->value, struct_def->value);
+        print_line(gen, "    %s _ae_v = *dst; %s_replace(&_ae_v, src); *dst = _ae_v;",
+                   struct_def->value, struct_def->value);
         print_line(gen, "}");
 
         /* #2497: `<Name>_dup(src)`: a value of its own, for a slot that takes

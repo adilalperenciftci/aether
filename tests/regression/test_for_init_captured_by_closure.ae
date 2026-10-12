@@ -1,0 +1,401 @@
+// Regression (#2737): a C-style `for` loop variable that a closure in the
+// body writes. The closure promotes it to a heap cell it shares, and the
+// condition, the increment, the body and the closure read and write it
+// through the cell (`*i`), but the `for` header declared a plain `int i`, so
+// the generated C dereferenced an int and did not compile:
+//
+//     for (int i = 0; ((*i) < 6); )
+//     error: invalid type argument of unary '*' (have 'int')
+//
+// The loop now declares the cell as any other promoted local is declared:
+// one cell for the whole loop, as `i = 0` before a while gives, released
+// after the loop. So each loop here gives what its while-loop rewrite gives,
+// and both are checked against the expected value. A closure that only
+// reads the variable copies it when it is made, in both forms. The macOS
+// leaks gate runs this file; where the allocator's count is exact, the heap
+// must hold steady across rounds of every shape.
+import std.list
+import std.mem
+
+extern exit(code: int)
+
+var bad = 0
+var deferred = 0
+
+check(label: string, got: int, want: int) {
+    println("  ${label}: ${got}")
+    if got != want {
+        println("FAIL ${label}: got ${got}, want ${want}")
+        bad = bad + 1
+    }
+}
+
+note() {
+    deferred = deferred + 1
+}
+
+// The issue's shape: no increment clause; the closure and the body step i.
+issue_for() -> int {
+    seen = 0
+    for (i = 0; i < 6;) {
+        bump = || { i = i + 2 }
+        bump()
+        seen = seen * 10 + i
+        i = i + 1
+    }
+    return seen
+}
+
+issue_while() -> int {
+    seen = 0
+    i = 0
+    while i < 6 {
+        bump = || { i = i + 2 }
+        bump()
+        seen = seen * 10 + i
+        i = i + 1
+    }
+    return seen
+}
+
+// An increment clause steps the cell the closure wrote.
+increment_for() -> int {
+    seen = 0
+    for (i = 0; i < 10; i = i + 1) {
+        bump = || { i = i + 2 }
+        bump()
+        seen = seen * 100 + i
+    }
+    return seen
+}
+
+increment_while() -> int {
+    seen = 0
+    i = 0
+    while i < 10 {
+        bump = || { i = i + 2 }
+        bump()
+        seen = seen * 100 + i
+        i = i + 1
+    }
+    return seen
+}
+
+// A typed init with `++`, and a range for, which lowers to the same loop.
+typed_for() -> int {
+    seen = 0
+    for (int m = 0; m < 8; m++) {
+        bump = || { m = m + 2 }
+        bump()
+        seen = seen * 10 + m
+    }
+    return seen
+}
+
+range_for() -> int {
+    seen = 0
+    for k in 0..10 {
+        skip = || { k = k + 3 }
+        skip()
+        seen = seen * 100 + k
+    }
+    return seen
+}
+
+// A closure that only reads i copies it when it is made; next to one that
+// writes it, i lives in the cell and the reader reads the cell.
+reads_for() -> int {
+    seen = 0
+    for (i = 0; i < 4; i = i + 1) {
+        tens = || { return i * 10 }
+        int v = call(tens)
+        seen = seen + v
+    }
+    return seen
+}
+
+reader_and_writer_for() -> int {
+    seen = 0
+    for (i = 0; i < 6; i = i + 1) {
+        bump = || { i = i + 1 }
+        peek = || { return i }
+        bump()
+        int v = call(peek)
+        seen = seen * 10 + v
+    }
+    return seen
+}
+
+// Nested loops: both variables written by one closure, then each alone.
+nested_both_for() -> int {
+    seen = 0
+    for (i = 0; i < 3; i = i + 1) {
+        for (j = 0; j < 3; j = j + 1) {
+            both = || {
+                i = i + 1
+                j = j + 1
+            }
+            both()
+            seen = seen * 100 + i * 10 + j
+        }
+    }
+    return seen
+}
+
+nested_both_while() -> int {
+    seen = 0
+    i = 0
+    while i < 3 {
+        j = 0
+        while j < 3 {
+            both = || {
+                i = i + 1
+                j = j + 1
+            }
+            both()
+            seen = seen * 100 + i * 10 + j
+            j = j + 1
+        }
+        i = i + 1
+    }
+    return seen
+}
+
+nested_outer_for() -> int {
+    total = 0
+    for (i = 0; i < 4; i = i + 1) {
+        for (j = 0; j < 2; j = j + 1) {
+            total = total + i * 10 + j
+        }
+        skip = || { i = i + 1 }
+        skip()
+    }
+    return total
+}
+
+nested_inner_for() -> int {
+    seen = 0
+    for (i = 0; i < 3; i = i + 1) {
+        for (j = 0; j < 3; j = j + 1) {
+            bump = || { j = j + 1 }
+            bump()
+            seen = seen * 10 + j
+        }
+    }
+    return seen
+}
+
+// Closures that outlive the loop, kept in a list and called after it. The
+// writers share the one cell, which the loop left at 3; the readers each
+// copied the value i had when it was made.
+call_all(l: ptr) -> int {
+    seen = 0
+    k = 0
+    while k < list.size(l) {
+        fn f = unbox_closure(list.get_raw(l, k))
+        int v = call(f)
+        seen = seen * 100 + v
+        k = k + 1
+    }
+    list.free(l)
+    return seen
+}
+
+outlive_for() -> int {
+    l = list.new()
+    for (i = 0; i < 3; i = i + 1) {
+        add = || {
+            i = i + 10
+            return i
+        }
+        list.add(l, add)
+    }
+    return call_all(l)
+}
+
+outlive_while() -> int {
+    l = list.new()
+    i = 0
+    while i < 3 {
+        add = || {
+            i = i + 10
+            return i
+        }
+        list.add(l, add)
+        i = i + 1
+    }
+    return call_all(l)
+}
+
+outlive_reads_for() -> int {
+    l = list.new()
+    for (i = 0; i < 3; i = i + 1) {
+        list.add(l, || { return i + 1 })
+    }
+    return call_all(l)
+}
+
+outlive_reads_while() -> int {
+    l = list.new()
+    i = 0
+    while i < 3 {
+        list.add(l, || { return i + 1 })
+        i = i + 1
+    }
+    return call_all(l)
+}
+
+// A defer in the body runs on every iteration, including the ones a
+// `continue` or a `break` leaves; the cell outlives both.
+exits_for() -> int {
+    seen = 0
+    for (i = 0; i < 100; i = i + 1) {
+        defer note()
+        bump = || { i = i + 1 }
+        if i == 2 {
+            continue
+        }
+        bump()
+        if i > 7 {
+            break
+        }
+        seen = seen * 10 + i
+    }
+    return seen
+}
+
+exits_while() -> int {
+    seen = 0
+    i = 0
+    while i < 100 {
+        defer note()
+        bump = || { i = i + 1 }
+        if i == 2 {
+            i = i + 1
+            continue
+        }
+        bump()
+        if i > 7 {
+            break
+        }
+        seen = seen * 10 + i
+        i = i + 1
+    }
+    return seen
+}
+
+// Labeled exits leave the inner loop's cell from inside it, and the outer
+// loop's own cell by its break.
+labeled_for() -> int {
+    seen = 0
+    outer: for (a = 0; a < 5; a = a + 1) {
+        for (b = 0; b < 5; b = b + 1) {
+            bump = || { b = b + 1 }
+            bump()
+            if b == 3 && a == 1 {
+                continue outer
+            }
+            if a == 3 {
+                break outer
+            }
+            seen = seen * 10 + b
+        }
+        nudge = || { a = a + 0 }
+        nudge()
+    }
+    return seen
+}
+
+// A return from inside the loop.
+find_for(limit: int) -> int {
+    for (i = 0; i < 100; i = i + 1) {
+        bump = || { i = i + 2 }
+        bump()
+        if i > limit {
+            return i
+        }
+    }
+    return -1
+}
+
+// The loop inside a closure, which owns the cell.
+in_closure_for() -> int {
+    total = 0
+    work = || {
+        for (i = 0; i < 4; i = i + 1) {
+            bump = || { i = i + 1 }
+            bump()
+            total = total + i
+        }
+    }
+    work()
+    return total
+}
+
+rounds(n: int) {
+    r = 0
+    while r < n {
+        issue_for()
+        increment_for()
+        typed_for()
+        range_for()
+        reads_for()
+        reader_and_writer_for()
+        nested_both_for()
+        nested_outer_for()
+        nested_inner_for()
+        outlive_for()
+        outlive_reads_for()
+        exits_for()
+        labeled_for()
+        find_for(7)
+        in_closure_for()
+        r = r + 1
+    }
+}
+
+main() {
+    println("=== test_for_init_captured_by_closure ===")
+    check("issue (for)", issue_for(), 25)
+    check("issue (while)", issue_while(), 25)
+    check("increment (for)", increment_for(), 2050811)
+    check("increment (while)", increment_while(), 2050811)
+    check("typed init with ++", typed_for(), 258)
+    check("range for", range_for(), 30711)
+    check("reads", reads_for(), 60)
+    check("reader and writer", reader_and_writer_for(), 135)
+    check("nested, both (for)", nested_both_for(), 1123)
+    check("nested, both (while)", nested_both_while(), 1123)
+    check("nested, outer", nested_outer_for(), 42)
+    check("nested, inner", nested_inner_for(), 131313)
+    check("outlive, writers (for)", outlive_for(), 132333)
+    check("outlive, writers (while)", outlive_while(), 132333)
+    check("outlive, readers (for)", outlive_reads_for(), 10203)
+    check("outlive, readers (while)", outlive_reads_while(), 10203)
+    deferred = 0
+    check("continue and break (for)", exits_for(), 146)
+    check("defers (for)", deferred, 5)
+    deferred = 0
+    check("continue and break (while)", exits_while(), 146)
+    check("defers (while)", deferred, 5)
+    check("labeled continue and break", labeled_for(), 1351135)
+    check("return from the loop", find_for(7), 8)
+    check("loop in a closure", in_closure_for(), 4)
+
+    if mem.heap_in_use_exact() {
+        rounds(5)
+        grown = mem.steady_growth(|| {
+                rounds(50)
+            }, 5)
+        if grown != 0 {
+            println("FAIL a window of 50 rounds grew the heap by ${grown} bytes in every run")
+            bad = bad + 1
+        }
+    }
+
+    if bad != 0 {
+        println("${bad} check(s) failed")
+        exit(1)
+    }
+    println("=== test_for_init_captured_by_closure passed ===")
+}

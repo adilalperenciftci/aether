@@ -30,15 +30,37 @@ void aether_unwind_enter_frame(void) {
     tls_depth++;
 }
 
+static void journal_at(const void* p, AetherUnwindFree free_fn, int depth);
+
 void aether_unwind_track(const void* p, AetherUnwindFree free_fn) {
     if (tls_depth == 0 || !p || !free_fn) return;
+    journal_at(p, free_fn, tls_depth);
+}
+
+// An allocation held by a local declared `up` frames out from the innermost
+// one (a local outside the `try` whose body stores into it): a panic caught
+// by those inner frames leaves the local holding it, so only a drain of the
+// local's own frame may free it. Outside every frame nothing does, and an
+// entry an inner frame holds for it (a value moved in from a local of that
+// frame) goes.
+void aether_unwind_track_up(const void* p, int up, AetherUnwindFree free_fn) {
+    if (!p || !free_fn) return;
+    int depth = tls_depth - (up > 0 ? up : 0);
+    if (depth <= 0) {
+        aether_unwind_forget(p);
+        return;
+    }
+    journal_at(p, free_fn, depth);
+}
+
+static void journal_at(const void* p, AetherUnwindFree free_fn, int depth) {
     // Re-tracking an already-journaled pointer updates in place: the
     // ownership handoff shapes (callee returns, caller re-arms its own
     // defer) must never accumulate two entries for one allocation.
     for (int i = tls_journal.count - 1; i >= 0; i--) {
         if (tls_journal.items[i].ptr == p) {
             tls_journal.items[i].free_fn = free_fn;
-            tls_journal.items[i].depth = tls_depth;
+            tls_journal.items[i].depth = depth;
             return;
         }
     }
@@ -53,7 +75,7 @@ void aether_unwind_track(const void* p, AetherUnwindFree free_fn) {
     }
     tls_journal.items[tls_journal.count].ptr = p;
     tls_journal.items[tls_journal.count].free_fn = free_fn;
-    tls_journal.items[tls_journal.count].depth = tls_depth;
+    tls_journal.items[tls_journal.count].depth = depth;
     tls_journal.count++;
 }
 

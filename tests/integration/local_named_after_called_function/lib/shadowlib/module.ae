@@ -1,0 +1,39 @@
+exports(
+    helper, user, user_value, user_branch, user_closure
+)
+
+helper() -> int { return 41 }
+
+apply(f: fn() -> int) -> int { return f() }
+
+// The local is bound from the call to the function it is named after.
+user() -> int {
+    helper = helper() + 1
+    return helper
+}
+
+// The function as a value before the local of its name is bound.
+user_value() -> int {
+    first = apply(helper)
+    helper = first + 1
+    return helper
+}
+
+// Bound in both arms of an if, so declared ahead of the arms.
+user_branch(c: int) -> int {
+    if c > 0 {
+        helper = helper() + 1
+    } else {
+        helper = 0
+    }
+    return helper
+}
+
+// Inside a closure, whose own local is named after the function.
+user_closure() -> int {
+    f = || {
+        helper = helper() + 1
+        return helper
+    }
+    return f()
+}

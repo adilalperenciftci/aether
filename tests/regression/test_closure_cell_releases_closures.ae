@@ -1,0 +1,253 @@
+// Regression (#2755): a `fn` variable a closure writes lives in a shared
+// cell, and the cell took its first value without a reference of its own
+// and never gave back any closure it held. A function whose nested closure
+// rebinds its `fn` parameter leaked 4400 bytes per 100 calls on 0.805.0
+// (the closure stored into the cell and the cell it captured), and a local
+// rebound the same way leaked every closure it was ever bound to.
+//
+// The cell now holds a reference to the closure in it: its first value and
+// every store are taken (a parameter's retained, so the caller still
+// releases its own), a store gives back the closure it replaces, and the
+// cell's last holder gives back the last. A call through the cell holds the
+// closure for the call, so one that rebinds its own cell while it runs keeps
+// running on a live environment.
+//
+// Each shape is checked for its result, and where the heap count is exact
+// (mem.heap_in_use_exact) for steady growth over 100 calls: a closure that
+// holds the cell and outlives the function (returned, kept in a global), a
+// string parameter rebound the same way, a closure that replaces itself,
+// directly and through a function it is passed to. A cell whose closure is
+// handed back keeps every closure it takes for good, so a holder of the old
+// one can still call it after the cell is rebound. Strings are built from
+// parameters, because string.concat of two literals folds to a literal that
+// owns nothing.
+
+import std.mem
+import std.string
+
+extern exit(code: int)
+
+var hits = 0
+var kept: fn = null
+var held: fn = null
+
+// The issue's shape: a nested closure rebinds the parameter.
+rebind(f: fn) -> int {
+    n = 0
+    g = || {
+        f = || { n = n + 10 }
+        call(f)
+    }
+    call(g)
+    return n
+}
+
+// The caller passes a closure with an environment of its own.
+rebind_caller(piece: string) -> int {
+    return rebind(|| { hits = hits + string.length(piece) })
+}
+
+// A local rebound by a nested closure, then by its own scope.
+local_rebind() -> int {
+    n = 0
+    f = || { n = n + 1 }
+    g = || {
+        f = || { n = n + 10 }
+        call(f)
+    }
+    call(g)
+    call(f)
+    f = || { n = n + 100 }
+    call(f)
+    return n
+}
+
+// A string parameter rebound by a nested closure.
+string_rebind(s: string) -> int {
+    g = || { s = string.concat(s, "x") }
+    call(g)
+    call(g)
+    return string.length(s)
+}
+
+string_caller(piece: string) -> int {
+    return string_rebind(string.concat(piece, "c"))
+}
+
+// The closure that holds the cell is returned and called afterwards.
+escape(f: fn, piece: string) -> fn {
+    g = || {
+        f = || { hits = hits + string.length(piece) }
+        call(f)
+    }
+    return g
+}
+
+escape_caller(piece: string) -> int {
+    h = escape(|| { hits = hits + 1 }, piece)
+    call(h)
+    call(h)
+    return hits
+}
+
+// The closure that holds the cell is kept in a global.
+store(f: fn, piece: string) {
+    g = || {
+        f = || { hits = hits + string.length(piece) }
+        call(f)
+    }
+    kept = g
+}
+
+store_caller(piece: string) -> int {
+    store(|| { hits = hits + 1 }, piece)
+    call(kept)
+    return hits
+}
+
+run(cb: fn) {
+    call(cb)
+}
+
+// A closure that rebinds its own cell while it runs, then reads its
+// capture: called directly and through a function it is passed to.
+machine(piece: string) -> int {
+    count = 0
+    state = || {
+        state = || { count = count + 100 }
+        count = count + string.length(piece)
+    }
+    call(state)
+    call(state)
+    state = || {
+        state = || { count = count + 1000 }
+        count = count + string.length(piece)
+    }
+    run(state)
+    run(state)
+    return count
+}
+
+handback(cb: fn) -> fn {
+    return cb
+}
+
+// The cell's closure handed back, so the cell keeps every closure it takes
+// for good (a holder may have it bare), then the cell rebound: the holder
+// still calls the old one. A global holds it, so the closure kept for good
+// is still reachable at exit.
+bare(piece: string) -> int {
+    f = || { hits = hits + string.length(piece) }
+    held = handback(f)
+    g = || { f = || { hits = hits + 100 } }
+    call(g)
+    call(held)
+    call(f)
+    return hits
+}
+
+fn grows(label: string, grown: int) -> int {
+    if grown != 0 {
+        println("FAIL: 100 calls of ${label} grew the heap by ${grown} bytes")
+        return 1
+    }
+    return 0
+}
+
+main() {
+    piece = string.concat("ab", "c")
+    bad = 0
+    got = rebind_caller(piece)
+    if got != 10 {
+        println("FAIL: a nested closure that rebinds the parameter gave ${got}, want 10")
+        bad = bad + 1
+    }
+    got = local_rebind()
+    if got != 120 {
+        println("FAIL: a local rebound by a nested closure gave ${got}, want 120")
+        bad = bad + 1
+    }
+    got = string_caller(piece)
+    if got != 6 {
+        println("FAIL: a string parameter rebound by a nested closure gave ${got}, want 6")
+        bad = bad + 1
+    }
+    hits = 0
+    got = escape_caller(piece)
+    if got != 6 {
+        println("FAIL: a returned closure holding the cell gave ${got}, want 6")
+        bad = bad + 1
+    }
+    hits = 0
+    store_caller(piece)
+    call(kept)
+    if hits != 6 {
+        println("FAIL: a stored closure holding the cell gave ${hits}, want 6")
+        bad = bad + 1
+    }
+    got = machine(piece)
+    if got != 1106 {
+        println("FAIL: a closure that rebinds its own cell gave ${got}, want 1106")
+        bad = bad + 1
+    }
+    hits = 0
+    got = bare(piece)
+    if got != 103 {
+        println("FAIL: a closure handed back from a cell gave ${got}, want 103")
+        bad = bad + 1
+    }
+    if mem.heap_in_use_exact() {
+        param = mem.steady_growth(|| {
+                k = 0
+                while k < 100 {
+                    rebind_caller(piece)
+                    k = k + 1
+                }
+            }, 5)
+        bad = bad + grows("a nested closure that rebinds the parameter", param)
+        local = mem.steady_growth(|| {
+                k = 0
+                while k < 100 {
+                    local_rebind()
+                    k = k + 1
+                }
+            }, 5)
+        bad = bad + grows("a local rebound by a nested closure", local)
+        text = mem.steady_growth(|| {
+                k = 0
+                while k < 100 {
+                    string_caller(piece)
+                    k = k + 1
+                }
+            }, 5)
+        bad = bad + grows("a string parameter rebound by a nested closure", text)
+        returned = mem.steady_growth(|| {
+                k = 0
+                while k < 100 {
+                    escape_caller(piece)
+                    k = k + 1
+                }
+            }, 5)
+        bad = bad + grows("a returned closure holding the cell", returned)
+        stored = mem.steady_growth(|| {
+                k = 0
+                while k < 100 {
+                    store_caller(piece)
+                    k = k + 1
+                }
+            }, 5)
+        bad = bad + grows("a stored closure holding the cell", stored)
+        replaced = mem.steady_growth(|| {
+                k = 0
+                while k < 100 {
+                    machine(piece)
+                    k = k + 1
+                }
+            }, 5)
+        bad = bad + grows("a closure that rebinds its own cell", replaced)
+    }
+    if bad != 0 {
+        exit(1)
+    }
+    println("PASS: a closure cell releases the closures it holds")
+}
