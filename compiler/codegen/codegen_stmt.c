@@ -14296,6 +14296,18 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                     fprintf(gen->output, ");\n");
                     break;
                 }
+                /* A scalar into a four-lane (or two-lane) value splats once it
+                 * is the element type, as for the binary operator
+                 * (codegen_expr.c): `v *= s` with a float variable `s` beside
+                 * an f32x4 is a truncating conversion C refuses. */
+                Type* rt4 = stmt->children[1]->node_type;
+                const char* elem4 = lane_element_c_type(tk8);
+                if (elem4 && rt4 && is_scalar_splat_kind(rt4->kind)) {
+                    fprintf(gen->output, "%s %s ((%s)(", target, op, elem4);
+                    generate_expression(gen, stmt->children[1]);
+                    fprintf(gen->output, "));\n");
+                    break;
+                }
                 fprintf(gen->output, "%s %s ", target, op);
                 generate_expression(gen, stmt->children[1]);
                 fprintf(gen->output, ";\n");

@@ -48,6 +48,27 @@ static int g_arg_drain_counter = 0;
 /* #1417: unique ids for the *StringSeq literal fold temps. */
 static int g_seq_lit_counter = 0;
 
+/* A scalar kind that splats across a lane value's lanes. */
+int is_scalar_splat_kind(TypeKind kind) {
+    return kind == TYPE_INT || kind == TYPE_INT64 || kind == TYPE_UINT64 ||
+           kind == TYPE_UINT32 || kind == TYPE_UINT16 || kind == TYPE_UINT8 ||
+           kind == TYPE_BYTE || kind == TYPE_FLOAT || kind == TYPE_FLOAT32;
+}
+
+/* The C element type of a 16-byte lane vector, which C's own operators apply
+ * to (f32x4, f64x2, i32x4, i64x2, i16x8), NULL for anything else. f32x8 /
+ * i32x8 go through their _ae_*_ helpers, which take a splat of their own. */
+const char* lane_element_c_type(TypeKind kind) {
+    switch (kind) {
+        case TYPE_F32X4: return "float";
+        case TYPE_F64X2: return "double";
+        case TYPE_I32X4: return "int32_t";
+        case TYPE_I64X2: return "int64_t";
+        case TYPE_I16X8: return "int16_t";
+        default: return NULL;
+    }
+}
+
 static const char* arg_drain_lookup(ASTNode* node) {
     if (!node) return NULL;
     for (int i = g_arg_drain_count - 1; i >= 0; i--) {
@@ -6466,6 +6487,42 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                             fprintf(gen->output, "_ae_%s_splat((%s)(", pfx, scalar_cast);
                             generate_expression(gen, expr->children[k]);
                             fprintf(gen->output, "))");
+                        }
+                    }
+                    fprintf(gen->output, ")");
+                    break;
+                }
+                /* A scalar beside a four-lane (or two-lane) value splats, as
+                 * the language reference says. C's vector extensions splat a
+                 * scalar operand only when it converts to the element type
+                 * without loss: a literal passes that test as a constant,
+                 * but a `float` (C double) VARIABLE beside an f32x4 is
+                 * rejected by clang and GCC alike ("implicit conversion would
+                 * cause truncation"). Convert the scalar to the element type
+                 * first; the typechecker has already decided the pairing is
+                 * legal (it rejects a scalar of another kind). */
+                TypeKind vk4 = TYPE_UNKNOWN;
+                int scalar_side = -1;
+                for (int k = 0; k < 2; k++) {
+                    Type* vt = expr->children[k]->node_type;
+                    Type* st = expr->children[1 - k]->node_type;
+                    if (vt && st && lane_element_c_type(vt->kind) &&
+                        is_scalar_splat_kind(st->kind)) {
+                        vk4 = vt->kind;
+                        scalar_side = 1 - k;
+                        break;
+                    }
+                }
+                if (lane8_fn && vk4 != TYPE_UNKNOWN) {
+                    fprintf(gen->output, "(");
+                    for (int k = 0; k < 2; k++) {
+                        if (k) fprintf(gen->output, " %s ", expr->value);
+                        if (k == scalar_side) {
+                            fprintf(gen->output, "((%s)(", lane_element_c_type(vk4));
+                            generate_expression(gen, expr->children[k]);
+                            fprintf(gen->output, "))");
+                        } else {
+                            generate_expression(gen, expr->children[k]);
                         }
                     }
                     fprintf(gen->output, ")");

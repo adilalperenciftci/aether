@@ -1,0 +1,84 @@
+// Regression: a scalar VARIABLE beside a lane value splats, as a literal
+// does. `v * s` with `s: float` reached the C compiler as `v * s`, a double
+// beside a vector of float, which clang and GCC reject ("implicit conversion
+// would cause truncation"); only a literal, being a constant, passed. The
+// scalar is now converted to the lane element type before C splats it, for
+// every lane type, every operator, on either side, and through a distinct
+// type over a lane type.
+
+import std.lanes
+extern exit(code: int)
+
+type vec4 = distinct f32x4
+
+scale(v: f32x4, s: float) -> f32x4 { return v * s }
+scale_vec4(v: vec4, s: float) -> vec4 { return v * s }
+
+check(label: string, got: float, want: float) {
+    if got != want {
+        println("FAIL ${label}: got ${got}, want ${want}")
+        exit(1)
+    }
+}
+
+main() {
+    s = 0.5
+    n = 2
+    let h: f32 = 3.0
+
+    // f32x4 with a float variable, an int variable and an f32 variable,
+    // on both sides, for each arithmetic operator.
+    a = lanes.f32x4(1.0, 2.0, 3.0, 4.0)
+    check("scale", scale(a, 0.5).y, 1.0)
+    check("f32x4 * s", (a * s).w, 2.0)
+    check("s * f32x4", (s * a).z, 1.5)
+    check("f32x4 + s", (a + s).x, 1.5)
+    check("s - f32x4", (s - a).y, -1.5)
+    check("f32x4 / s", (a / s).y, 4.0)
+    check("f32x4 * n", (a * n).w, 8.0)
+    check("n + f32x4", (n + a).x, 3.0)
+    check("f32x4 * f32", (a * h).y, 6.0)
+    m = a > s * 5.0
+    check("f32x4 > s", lanes.sum4(lanes.select4(m, a, lanes.splat4(0.0))), 7.0)
+    m2 = s * 6.0 <= a
+    check("s <= f32x4", lanes.sum4(lanes.select4(m2, a, lanes.splat4(0.0))), 7.0)
+
+    // f64x2 with float and int variables.
+    d = lanes.f64x2(1.5, 2.5)
+    check("f64x2 * s", (d * s).y, 1.25)
+    check("n * f64x2", (n * d).x, 3.0)
+    check("f64x2 - n", (d - n).y, 0.5)
+
+    // i32x4 with int variables, including `%`.
+    i = lanes.i32x4(10, 20, 30, 40)
+    k = 3
+    check("i32x4 * k", lanes.i32lane(i * k, 3) as float, 120.0)
+    check("k - i32x4", lanes.i32lane(k - i, 0) as float, -7.0)
+    check("i32x4 % k", lanes.i32lane(i % k, 1) as float, 2.0)
+    check("i32x4 / k", lanes.i32lane(i / k, 2) as float, 10.0)
+
+    // i16x8: an int variable narrows to the 16-bit element.
+    w = lanes.i16x8(1, 2, 3, 4, 5, 6, 7, 8)
+    check("i16x8 * k", lanes.i16lane(w * k, 7) as float, 24.0)
+    check("k + i16x8", lanes.i16lane(k + w, 0) as float, 4.0)
+
+    // f32x8 (the helper path) with float and int variables.
+    e = lanes.f32x8(1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0)
+    check("f32x8 * s", lanes.lane8(e * s, 7), 4.0)
+    check("n * f32x8", lanes.lane8(n * e, 5), 12.0)
+
+    // A distinct type over f32x4: scaling keeps the distinct type.
+    v = lanes.f32x4(2.0, 4.0, 6.0, 8.0) as vec4
+    check("scale_vec4", (scale_vec4(v, s) as f32x4).z, 3.0)
+    sv = v * s
+    sv2 = s * sv
+    check("vec4 * s * s", (sv2 as f32x4).w, 2.0)
+
+    // A compound assignment with a scalar variable.
+    acc = lanes.f32x4(1.0, 1.0, 1.0, 1.0)
+    acc *= s
+    acc += s
+    check("compound", acc.x, 1.0)
+
+    println("PASS: a scalar variable splats across every lane type")
+}

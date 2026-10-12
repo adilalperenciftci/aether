@@ -31,6 +31,11 @@ void print_line(CodeGenerator* gen, const char* format, ...);
 void codegen_maybe_emit_line(CodeGenerator* gen, const ASTNode* node);
 const char* get_c_type(Type* type);
 const char* const_array_elem_c_type(Type* t);
+/* The C element type of a lane vector C's own operators apply to (f32x4,
+ * f64x2, i32x4, i64x2, i16x8), NULL otherwise; and whether a scalar of `kind`
+ * splats across one (converted to that element type first). */
+const char* lane_element_c_type(TypeKind kind);
+int is_scalar_splat_kind(TypeKind kind);
 int is_c_reserved_word(const char* name);
 const char* safe_c_name(const char* name);
 // #976: mangle a VALUE/variable identifier that is a C reserved keyword

@@ -212,8 +212,13 @@ and what `any4` / `all4` / `any2` / `all2` reduce to a `bool` when a branch
 is wanted. A scalar `if` over lanes is a mistake the type catches.
 
 **A scalar operand splats.** `v * 2.0`, `v + n` (an integer) and `v > 2.0`
-apply to every lane, as in C — arithmetic and comparison alike. Mixing two
-different lane widths does not. `%` and `~` apply to integer lanes only: a
+apply to every lane, as in C — arithmetic and comparison alike, with the
+scalar on either side, and a variable as well as a literal: `v * s` for a
+`float` `s` beside an `f32x4` converts `s` to the lane's element type and
+then broadcasts it. The same holds for every lane type and for a distinct
+type over one (`type vec4 = distinct f32x4`; `vec4 * s` is a `vec4`, see
+[distinct types](distinct-types.md)). Mixing two different lane widths does
+not. `%` and `~` apply to integer lanes only: a
 float lane has no remainder or bit pattern in that sense, and either one on
 an `f32x4` is a type error at the source line.
 
