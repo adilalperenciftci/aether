@@ -6724,6 +6724,17 @@ static int value_directly_carries_param(ASTNode* node, const char* pname) {
     return 0;
 }
 
+/* #2750: is `node` `o ?? d` or `o!` over an optional whose value carries
+ * the parameter (the string it yields is the parameter's)? */
+static int opt_unwrap_carries_param(ASTNode* node, const char* pname) {
+    if (!node || (node->type != AST_TUPLE_UNWRAP && node->type != AST_NULL_COALESCE) ||
+        node->child_count == 0 || !node->children[0] || !node->children[0]->node_type ||
+        node->children[0]->node_type->kind != TYPE_OPTIONAL) return 0;
+    for (int i = 0; i < node->child_count; i++)
+        if (value_directly_carries_param(node->children[i], pname)) return 1;
+    return 0;
+}
+
 /* #2528: is `node` a store that retains a closure parameter for its holder
  * (so the parameter does not escape through it): `o.f = p` on a struct
  * field, a message field init, a write to a global or an actor's state? */
@@ -6957,6 +6968,22 @@ static int param_escapes_in_subtree(CodeGenerator* gen, ASTNode* node,
         if (!decl_is_self) {
             int followed = -1;
             for (int i = 0; i < node->child_count; i++) {
+                /* #2750: a local bound to `o ?? d` or `o!` holds the
+                 * parameter's string only as long as the local does, so the
+                 * binding keeps it only if the local escapes the body,
+                 * followed as the copy-on-keep query follows an alias
+                 * (#2499). Counted as a keep outright, a read-only callee
+                 * (`peek(x: string?) { s = x ?? "" ... }`) looked like it kept
+                 * its argument, and the caller stopped freeing it. A write to
+                 * a module variable is no local, and stays a keep. */
+                if (opt_unwrap_carries_param(node->children[i], pname)) {
+                    if (node->value && g_keep_body && depth < 8 &&
+                        keep_alias_is_local(gen, node->value) &&
+                        !param_escapes_in_subtree(gen, g_keep_body, node->value, depth + 1,
+                                                  return_is_escape))
+                        continue;
+                    return 1;
+                }
                 /* A call that only hands the parameter back
                  * (`t = temp_prefix(p)`) aliases it as the bare name does. */
                 int handback = 0;
