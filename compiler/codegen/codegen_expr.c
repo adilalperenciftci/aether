@@ -246,7 +246,9 @@ typedef struct ArgDrainWrap {
     int count;          /* hoisted arguments */
     int idx[16];        /* their child indices in the call node */
     int identity[16];   /* 1 = identity-guarded release (return-escape-only param) */
-    int closure[16];    /* 1 = an owned closure (#2507), released through its env */
+    int closure[16];    /* 1 = an owned closure (#2507), released through its env;
+                         * 2 = a closure cell's value, held for the call (#2755):
+                         * retained into the temp, released the same way */
     int optstr[16];     /* 1 = an owned `string?` (#2750), its string freed if it has one */
     int have_value;     /* the call yields a value: of C type ret_ct, or
                          * when that is NULL, of type ret_type */
@@ -466,6 +468,18 @@ static void arg_drain_select(CodeGenerator* gen, ASTNode* expr, int first_arg,
          * `outer(string_returning_call("seed-${i}"))` shape), and
          * AST_OR_ELSE (`f(g() or { ... })` yields a uniformly-heap string,
          * since the `or` lowering boxes both paths, with no consumer). */
+        /* #2755: a closure cell's value lent to the call is held for it:
+         * the call may rebind the cell (the closure it runs replacing
+         * itself), and the store gives back the cell's reference. */
+        if (is_closure_cell_read(gen, arg)) {
+            if ((!func_name || callee_has_visible_body(gen, func_name)) &&
+                !arg_drain_lookup(arg)) {
+                w->identity[w->count] = 0;
+                w->closure[w->count] = 2;
+                w->idx[w->count++] = ai;
+            }
+            continue;
+        }
         /* #2518: a capturing closure literal, as #2507 does a handed-over
          * closure: its only reference is the argument (a list that stores
          * it takes its own). */
@@ -538,8 +552,9 @@ static void arg_drain_open(CodeGenerator* gen, ASTNode* expr, ArgDrainWrap* w) {
          * frees, so there is nothing const about it. */
         if (w->closure[h]) {
             fprintf(gen->output, "_AeClosure %s = ", names[h]);
+            if (w->closure[h] == 2) fprintf(gen->output, "_aether_closure_retain(");
             generate_expression(gen, arg);
-            fprintf(gen->output, "; ");
+            fprintf(gen->output, w->closure[h] == 2 ? "); " : "; ");
             continue;
         }
         if (w->optstr[h]) {
@@ -2167,6 +2182,43 @@ static void restore_fnptr_scope_for_closure(CodeGenerator* gen, const char* pare
 static const char* find_enclosing_scope_name_in(ASTNode* program, ASTNode* node,
                                                 const char* scope, ASTNode* scope_fn,
                                                 ASTNode* target);
+
+/* #2755: the scope that declares the promoted variable `name` seen from
+ * `scope` (a scope name, as parent_func spells one): a closure that
+ * captures the name reaches its parent's cell, so the walk climbs through
+ * each such closure to the closure, function, `main` or receive arm whose
+ * own variable it is, and *body is set to that scope's body. NULL when the
+ * scope is not found. */
+ASTNode* promoted_cell_declaring_scope(CodeGenerator* gen, const char* scope, const char* name,
+                                       ASTNode** body) {
+    *body = NULL;
+    if (!gen || !gen->program || !name) return NULL;
+    for (int depth = 0; scope && depth < 64; depth++) {
+        if (strncmp(scope, "__closure_", 10) != 0) {
+            ASTNode* node = find_scope_node_by_name(gen->program, scope);
+            *body = is_receive_arm_scope(node) ? receive_arm_body(node) : last_block_child(node);
+            return node;
+        }
+        int ci = 0;
+        char nm[64];
+        for (; ci < gen->closure_count; ci++) {
+            closure_scope_name(gen->closures[ci].closure_node, nm, sizeof(nm));
+            if (strcmp(nm, scope) == 0) break;
+        }
+        if (ci == gen->closure_count) return NULL;
+        int captured = 0;
+        for (int k = 0; k < gen->closures[ci].capture_count; k++) {
+            if (gen->closures[ci].captures[k] &&
+                strcmp(gen->closures[ci].captures[k], name) == 0) { captured = 1; break; }
+        }
+        if (!captured) {
+            *body = last_block_child(gen->closures[ci].closure_node);
+            return gen->closures[ci].closure_node;
+        }
+        scope = gen->closures[ci].parent_func;
+    }
+    return NULL;
+}
 
 /* `program` is the root the walk starts from. */
 static const char* find_enclosing_scope_name(ASTNode* program, const char* scope,
@@ -5343,12 +5395,14 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
      * emit the temp name instead of re-evaluating the call. Keeps
      * the parent's call site syntactically intact while the temp's
      * lifetime is managed by the wrap. */
+    /* A closure cell's value held for a call (#2755) is an identifier. */
     if (expr->type == AST_FUNCTION_CALL ||
         expr->type == AST_STRING_INTERP ||
         expr->type == AST_CLOSURE ||
         expr->type == AST_OR_ELSE ||
         expr->type == AST_TUPLE_UNWRAP ||
-        expr->type == AST_NULL_COALESCE) {
+        expr->type == AST_NULL_COALESCE ||
+        (expr->type == AST_IDENTIFIER && g_arg_drain_count > 0)) {
         const char* sub = arg_drain_lookup(expr);
         if (sub) {
             fprintf(gen->output, "%s", sub);
@@ -7818,6 +7872,14 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                              call_returns_owned_closure(gen, closure_arg))) {
                             ad.identity[ad.count] = 0;
                             ad.closure[ad.count] = 1;
+                            ad.idx[ad.count++] = 0;
+                        } else if (closure_arg && !arg_drain_lookup(closure_arg) && ad.count < 16 &&
+                                   is_closure_cell_read(gen, closure_arg)) {
+                            /* #2755: a closure a cell holds is held for its
+                             * own call, which may rebind the cell and give
+                             * back the cell's reference to it. */
+                            ad.identity[ad.count] = 0;
+                            ad.closure[ad.count] = 2;
                             ad.idx[ad.count++] = 0;
                         }
                         arg_drain_open(gen, expr, &ad);

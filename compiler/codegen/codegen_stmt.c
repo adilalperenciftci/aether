@@ -2285,6 +2285,24 @@ static int closure_local_is_plain(CodeGenerator* gen, ASTNode* owner, const char
     return !is_module_global_var(gen, name);
 }
 
+/* #2755: is `name` a cell (a variable a closure writes) in the scope of
+ * `owner`, answered as closure_local_is_plain answers: from the scope being
+ * emitted, or from the names promoted in a top-level function. No answer
+ * is no. */
+static int closure_local_is_cell(CodeGenerator* gen, ASTNode* owner, const char* name) {
+    if (!name || is_module_global_var(gen, name)) return 0;
+    if (owner == gen->current_function) return is_promoted_capture(gen, name);
+    if (!owner || owner->type != AST_FUNCTION_DEFINITION || !owner->value || !gen->program ||
+        find_function_definition_by_name(gen->program, owner->value) != owner) return 0;
+    char** promoted = NULL;
+    int count = 0;
+    get_promoted_names_for_func(gen, owner->value, &promoted, &count);
+    for (int i = 0; i < count; i++) {
+        if (promoted[i] && strcmp(promoted[i], name) == 0) return 1;
+    }
+    return 0;
+}
+
 /* #2668: does `decl` (`a = b`, both closures), a statement of `owner`'s
  * body, give the local `a` a reference of its own to the env of `b`, a
  * closure local or parameter? The binding retains (emit_closure_alias_take),
@@ -6651,21 +6669,6 @@ static int subtree_mentions_param(ASTNode* node, const char* pname) {
     return 0;
 }
 
-/* #2754: does this subtree bind `pname` (an assignment or a compound
- * assignment to it, or a binder of that name)? A nested closure that does
- * keeps a promoted cell, not the retained capture. Erring toward "binds"
- * only withholds a release (a leak), never frees a live closure. */
-static int subtree_rebinds_param(ASTNode* node, const char* pname) {
-    if (!node) return 0;
-    if ((node->type == AST_VARIABLE_DECLARATION || node->type == AST_COMPOUND_ASSIGNMENT ||
-         node->type == AST_PATTERN_VARIABLE || node->type == AST_CLOSURE_PARAM) &&
-        node->value && strcmp(node->value, pname) == 0) return 1;
-    for (int i = 0; i < node->child_count; i++) {
-        if (subtree_rebinds_param(node->children[i], pname)) return 1;
-    }
-    return 0;
-}
-
 /* Does evaluating `node` yield a value that IS, or directly aggregates,
  * the parameter's pointer? This is the "pointer-carrying" test for store
  * sinks: a bare reference (`pname`) or an array/struct literal element
@@ -7000,11 +7003,10 @@ static int param_escapes_in_subtree(CodeGenerator* gen, ASTNode* node,
          * retained by that closure's env (_aether_closure_env_retain), as a
          * field, a global or actor state retains one (#2528), so the
          * capture keeps nothing of the caller's either; counted as a keep,
-         * the caller never released the closure it passed. Unless the
-         * nested closure rebinds the name: a promoted cell is not that
-         * retain. */
-        int own_ref = g_capture_holds_own_ref ||
-                      (g_escape_param_is_closure && !subtree_rebinds_param(node, pname));
+         * the caller never released the closure it passed. So does a
+         * nested closure that rebinds it: the parameter's cell takes a
+         * reference of its own on entry (#2755, emit_promoted_param_cell). */
+        int own_ref = g_capture_holds_own_ref || g_escape_param_is_closure;
         if (!own_ref) return 1;  /* closure capture may outlive the call */
         if (!trailing) return 0;
     }
@@ -7766,6 +7768,10 @@ typedef struct {
     ASTNode* owner;        /* the function / closure whose body root is */
     ASTNode* decl;         /* the binding being declared; the walk must meet it */
     int param_mode;
+    /* #2755: the name is a closure cell (promoted_closure_cell_owns): every
+     * binding, in the scope or in a closure that writes it, is a store the
+     * cell takes, so none is a hand-off. */
+    int cell_mode;
     int allow_return;      /* `return name` hands the reference to the caller */
     int depth;
     int escapes;
@@ -7855,7 +7861,9 @@ static int env_scan_callee_is_variable(CodeGenerator* gen, EnvScan* s, const cha
         }
     }
     if (s->param_mode || s->allow_return) return 0;
-    if (is_var_declared(gen, callee)) return 1;
+    /* A cell's scan reads the tree alone, not what is declared at the
+     * point of emission that asks first (#2755). */
+    if (!s->cell_mode && is_var_declared(gen, callee)) return 1;
     /* A closure body also sees its captures. */
     for (int ci = 0; ci < gen->closure_count; ci++) {
         if (gen->closures[ci].closure_node != s->owner) continue;
@@ -8268,8 +8276,10 @@ static void env_scan_escape(EnvScan* s, int nested, ASTNode* mention) {
  * retains for its holder: a struct field store `o.f = name`, a struct
  * literal's or a message's field init, or a write to a global or an actor's
  * state? The holder then has a reference of its own, and the local keeps
- * releasing its own. */
-static int env_scan_store_retains(CodeGenerator* gen, ASTNode* parent, ASTNode* node) {
+ * releasing its own. So does a closure cell of the scanned scope (#2755,
+ * emit_closure_cell_value), whichever closure writes it. */
+static int env_scan_store_retains(CodeGenerator* gen, EnvScan* s, ASTNode* parent,
+                                  ASTNode* node) {
     switch (parent->type) {
         case AST_ASSIGNMENT:
             if (parent->child_count == 1 && parent->children[0] == node && parent->value) {
@@ -8286,7 +8296,8 @@ static int env_scan_store_retains(CodeGenerator* gen, ASTNode* parent, ASTNode* 
         case AST_VARIABLE_DECLARATION:
             return parent->child_count > 0 && parent->children[0] == node && parent->value &&
                    (is_module_global_var(gen, parent->value) ||
-                    is_actor_state_var(gen, parent->value));
+                    is_actor_state_var(gen, parent->value) ||
+                    closure_local_is_cell(gen, s->owner, parent->value));
         default:
             return 0;
     }
@@ -8313,9 +8324,11 @@ static void env_scan_walk(CodeGenerator* gen, EnvScan* s, ASTNode* node,
         case AST_VARIABLE_DECLARATION:
             if (named) {
                 ASTNode* rhs = node->child_count > 0 ? node->children[0] : NULL;
-                if (s->param_mode) {
+                if (s->param_mode || s->cell_mode) {
                     /* Rebinding the parameter overwrites the caller's copy;
-                     * later uses are walked as if they were still it. */
+                     * later uses are walked as if they were still it. A
+                     * cell's store takes the value and gives back the one
+                     * it replaces (emit_cell_store). */
                     env_scan_walk(gen, s, rhs, node, nested);
                     return;
                 }
@@ -8351,7 +8364,7 @@ static void env_scan_walk(CodeGenerator* gen, EnvScan* s, ASTNode* node,
                 if (parent && closure_container_store_value(gen, parent) == node) return;
                 /* #2525: so does a struct field, a message field, a global
                  * or an actor's state (emit_closure_take retains a view). */
-                if (parent && env_scan_store_retains(gen, parent, node)) return;
+                if (parent && env_scan_store_retains(gen, s, parent, node)) return;
                 /* #2668: so does another closure local bound to it, judged
                  * in the scanned function's own scope; #2670: a parameter a
                  * callee only aliases is no keep of the caller's closure. A
@@ -8417,6 +8430,84 @@ static void env_scan_walk(CodeGenerator* gen, EnvScan* s, ASTNode* node,
     for (int i = 0; i < node->child_count; i++) {
         env_scan_walk(gen, s, node->children[i], node, nested);
     }
+}
+
+/* #2755: a `fn` variable a closure writes lives in a cell
+ * (emit_promoted_cell_declaration) that holds a reference of its own to
+ * the closure in it: its seed and every store take the value (a fresh one
+ * adopted, any other retained), a store gives back the one it replaces, and
+ * the cell's last holder gives back the last (_aether_cell_release_closure).
+ * A call lends the cell's closure to its callee with a reference held for
+ * the call (arg_drain_select), since the call may rebind the cell. Before,
+ * the cell took the caller's closure, or a closure literal, without a
+ * reference and never gave one back: every closure a cell ever held leaked,
+ * 4400 bytes per 100 calls of a function whose nested closure rebinds its
+ * `fn` parameter.
+ *
+ * Giving one back is sound only while nobody keeps the value without a
+ * reference of its own. The cell's scope (where it is declared, nested
+ * closures included) is walked as a closure local's is (env_scan_walk):
+ * an invocation, an argument whose parameter keeps nothing, a holder that
+ * retains (a field, a global, a container, another local) and a binding
+ * leave none. Anything else (a `return`, a keeping callee, an operand) may
+ * keep the value bare, and then the cell pins each value it takes with one
+ * more reference (emit_closure_cell_value): those values live for good, as
+ * every one did before, but the cell is still freed. Decided once per cell
+ * from the tree, remembered, so the scope and every closure that writes the
+ * cell agree. */
+typedef struct { ASTNode* scope; char* name; int state; } CellOwns;
+
+int promoted_closure_cell_owns(CodeGenerator* gen, const char* name) {
+    if (!gen || !name) return 0;
+    ASTNode* body = NULL;
+    ASTNode* scope = promoted_cell_declaring_scope(gen, gen->closure_var_scope, name, &body);
+    if (!scope) return 0;
+    CellOwns* memo = (CellOwns*)gen->cell_owns;
+    for (int i = 0; i < gen->cell_owns_count; i++) {
+        if (memo[i].scope == scope && strcmp(memo[i].name, name) == 0) return memo[i].state == 3;
+    }
+    if (gen->cell_owns_count >= gen->cell_owns_cap) {
+        gen->cell_owns_cap = gen->cell_owns_cap ? gen->cell_owns_cap * 2 : 8;
+        gen->cell_owns = aether_xrealloc(gen->cell_owns,
+                                         (size_t)gen->cell_owns_cap * sizeof(CellOwns));
+        memo = (CellOwns*)gen->cell_owns;
+    }
+    int slot = gen->cell_owns_count++;
+    memo[slot].scope = scope;
+    memo[slot].name = strdup(name);
+    memo[slot].state = 1;   /* asked again while walking: pinned */
+    int owns = 0;
+    if (body) {
+        EnvScan s;
+        memset(&s, 0, sizeof(s));
+        s.name = name;
+        s.root = body;
+        s.owner = scope;
+        s.cell_mode = 1;
+        s.cid = -2;
+        env_scan_walk(gen, &s, body, NULL, 0);
+        owns = !s.escapes;
+    }
+    memo = (CellOwns*)gen->cell_owns;
+    memo[slot].state = owns ? 3 : 2;
+    return owns;
+}
+
+void cell_owns_free(CodeGenerator* gen) {
+    if (!gen) return;
+    CellOwns* memo = (CellOwns*)gen->cell_owns;
+    for (int i = 0; i < gen->cell_owns_count; i++) free(memo[i].name);
+    free(memo);
+    gen->cell_owns = NULL;
+    gen->cell_owns_count = 0;
+    gen->cell_owns_cap = 0;
+}
+
+/* Is `e` a read of a closure cell of the scope being emitted? */
+int is_closure_cell_read(CodeGenerator* gen, ASTNode* e) {
+    return e && e->type == AST_IDENTIFIER && e->value && e->node_type &&
+           e->node_type->kind == TYPE_FUNCTION && !e->node_type->is_fnptr &&
+           is_promoted_capture(gen, e->value);
 }
 
 /* #2506: is `call` a call whose result is a closure only the caller holds
@@ -8646,16 +8737,50 @@ static void emit_cell_element_value(CodeGenerator* gen, int str_elem, ASTNode* v
     }
 }
 
+/* #2755: the value closure cell `name` takes, from the expression `value`
+ * or else the C text `text` (a parameter, a tuple slot): a reference of
+ * its own (emit_closure_take adopts a fresh closure and retains any other),
+ * pinned with one more when the cell's value may be kept bare
+ * (promoted_closure_cell_owns). */
+static void emit_closure_cell_value(CodeGenerator* gen, const char* name, ASTNode* value,
+                                    const char* text) {
+    int pin = !promoted_closure_cell_owns(gen, name);
+    if (pin) fprintf(gen->output, "_aether_closure_retain(");
+    if (value) {
+        emit_closure_take(gen, value);
+    } else {
+        fprintf(gen->output, "_aether_closure_retain(%s)", text);
+    }
+    if (pin) fprintf(gen->output, ")");
+}
+
+static int type_is_closure_value(Type* t) {
+    return t && t->kind == TYPE_FUNCTION && !t->is_fnptr;
+}
+
+/* #2755: store into closure cell `name`: the new value is taken before the
+ * one it replaces is given back, so a value made from the old one (`f =
+ * wrap(f)`) has taken its reference by then. */
+static void emit_closure_cell_store(CodeGenerator* gen, const char* name, ASTNode* value,
+                                    const char* text) {
+    fprintf(gen->output, "{ _AeClosure _ae_cv = ");
+    emit_closure_cell_value(gen, name, value, text);
+    fprintf(gen->output, "; void* _ae_old = (*%s).env; *%s = _ae_cv; _aether_closure_env_release(_ae_old); }\n",
+            name, name);
+}
+
 /* `name = value` into the cell of the promoted capture `name`, of type `t`:
  * the one shape every store into a cell takes (a reassignment, a match
  * arm). A string cell owns its string and a struct cell its struct's
  * strings (#2458), so each takes a value of its own and gives up the one
- * it held (#2514). A whole fixed-size array is stored by
- * emit_cell_array_store. */
+ * it held (#2514), and a closure cell its closure (#2755). A whole
+ * fixed-size array is stored by emit_cell_array_store. */
 static void emit_cell_store(CodeGenerator* gen, const char* name, Type* t, ASTNode* value) {
     const char* ct = t ? get_c_type(t) : NULL;
     const char* sname = struct_owning_strings(gen, t);
-    if (ct && strcmp(ct, "const char*") == 0) {
+    if (type_is_closure_value(t) || (value && type_is_closure_value(value->node_type))) {
+        emit_closure_cell_store(gen, name, value, NULL);
+    } else if (ct && strcmp(ct, "const char*") == 0) {
         fprintf(gen->output, "_aether_str_cell_set(%s, ", name);
         emit_cell_element_value(gen, 1, value);
         fprintf(gen->output, ");\n");
@@ -8840,6 +8965,8 @@ void emit_sized_array_param_copy(CodeGenerator* gen, Type* t, const char* name, 
  * destructor both release through here, so they agree. */
 const char* promoted_cell_release_fn(CodeGenerator* gen, const char* c_type) {
     if (c_type && strcmp(c_type, "const char*") == 0) return "_aether_cell_release_str";
+    /* #2755: a closure cell holds a reference to its closure. */
+    if (c_type && strcmp(c_type, "_AeClosure") == 0) return "_aether_cell_release_closure";
     /* #2474: a string array cell owns every string element, as a string
      * cell owns its one (the macro reads the length off the cell's type). */
     const char* elem;
@@ -8905,7 +9032,11 @@ void emit_promoted_cell_declaration(CodeGenerator* gen, const char* name,
         }
     } else if (init_expr || init_text) {
         fprintf(gen->output, " *%s = ", name);
-        if (init_expr && strcmp(c_type, "const char*") == 0) {
+        if (strcmp(c_type, "_AeClosure") == 0) {
+            /* #2755: a closure cell takes a reference of its own, the
+             * caller's argument retained rather than borrowed. */
+            emit_closure_cell_value(gen, name, init_expr, init_text);
+        } else if (init_expr && strcmp(c_type, "const char*") == 0) {
             /* #2461, #2514: a string cell frees what it holds. */
             emit_cell_element_value(gen, 1, init_expr);
         } else if (init_expr) {
@@ -8944,7 +9075,9 @@ void emit_promoted_cell_declaration(CodeGenerator* gen, const char* name,
  * _aether_cell_release_str). A parameter's string is borrowed from the
  * caller, so seeding the cell with it as it stands made the first write in
  * a closure, or the scope exit, free the caller's string (#2463). The cell
- * takes a reference of its own. */
+ * takes a reference of its own. So does a closure cell (#2755,
+ * emit_closure_cell_value): the caller's closure stays the caller's to
+ * release. */
 void emit_promoted_param_cell(CodeGenerator* gen, const char* name,
                               const char* c_type, const char* param_cname,
                               int line, int column) {
@@ -11651,6 +11784,8 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                                                        stmt->line, stmt->column);
                     } else if (pos_is_string) {
                         fprintf(gen->output, "_aether_str_cell_set(%s, %s);\n", var->value, slot);
+                    } else if (var_type && strcmp(var_type, "_AeClosure") == 0) {
+                        emit_closure_cell_store(gen, var->value, NULL, slot);   /* #2755 */
                     } else {
                         fprintf(gen->output, "*%s = %s;\n", var->value, slot);
                     }

@@ -710,6 +710,9 @@ CodeGenerator* create_code_generator(FILE* output) {
     gen->zb_params = NULL;
     gen->zb_params_state = 0;
     gen->str_arrays = NULL;
+    gen->cell_owns = NULL;
+    gen->cell_owns_count = 0;
+    gen->cell_owns_cap = 0;
     gen->return_escaped_struct_vars = NULL;
     gen->return_escaped_struct_var_count = 0;
     // *StringSeq ownership tracking — MUST be zero-initialised here:
@@ -852,6 +855,7 @@ void code_generator_release(CodeGenerator* gen) {
         gen->callee_memo = NULL;
         zb_params_free(gen);
         str_arrays_free(gen);   /* #2618 */
+        cell_owns_free(gen);    /* #2755 */
         /* The emitted-typedef registries: one strdup'd name per distinct
          * tuple / optional / sum shape in the program (#1667). */
         for (int i = 0; i < gen->tuple_type_count; i++) {
@@ -8213,6 +8217,16 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
      * struct or message field, a global, an actor's state): retained and
      * passed through, so a store can take a view in one expression. */
     print_line(gen, "static inline _AeClosure _aether_closure_retain(_AeClosure c) { _aether_closure_env_retain(c.env); return c; }");
+    /* #2755: a closure cell (a `fn` variable a closure writes) holds a
+     * reference of its own to the closure in it, as a string cell owns its
+     * string: a store gives back the one it replaces, and the last holder
+     * of the cell gives back the one it holds before freeing the cell. No
+     * env can hold the cell then, so the release cannot reach it again. */
+    print_line(gen, "static inline void _aether_cell_release_closure(void* cell) {");
+    print_line(gen, "    if (!cell) return;");
+    print_line(gen, "    _AeCellHeader* h = (_AeCellHeader*)cell - 1;");
+    print_line(gen, "    if (_aether_cell_last(h)) { _aether_closure_env_release(((_AeClosure*)cell)->env); free(h); }");
+    print_line(gen, "}");
     /* #2220: the post-store hook for `struct T @observable`. Declared
      * unconditionally (it is one prototype); only a store on an observable
      * struct field emits a call to it. Defined in runtime/aether_observe.c. */

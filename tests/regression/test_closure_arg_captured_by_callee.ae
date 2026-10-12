@@ -7,8 +7,10 @@
 // 100 calls of `transient` below.
 //
 // The capture that outlives the call (`wrap` returns it) must still work
-// after the caller has released its own reference, and a nested closure
-// that rebinds the parameter keeps it as before.
+// after the caller has released its own reference. A nested closure that
+// rebinds the parameter makes it a cell, which takes a reference of its own
+// and gives back every closure it holds (#2755), so nothing of the call is
+// left over there either, at exit included.
 
 import std.mem
 import std.string
@@ -89,6 +91,17 @@ main() {
             }, 5)
         if kept != 0 {
             println("FAIL: 100 calls of a returned capture grew the heap by ${kept} bytes")
+            bad = bad + 1
+        }
+        cell = mem.steady_growth(|| {
+                k = 0
+                while k < 100 {
+                    rebind(|| { hits = hits + string.length(piece) })
+                    k = k + 1
+                }
+            }, 5)
+        if cell != 0 {
+            println("FAIL: 100 calls of a nested closure that rebinds the parameter grew the heap by ${cell} bytes")
             bad = bad + 1
         }
     }

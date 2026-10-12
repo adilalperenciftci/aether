@@ -385,6 +385,16 @@ const char* promoted_cell_pointer(const char* c_type, const char* name);
 void emit_promoted_param_cell(CodeGenerator* gen, const char* name,
                               const char* c_type, const char* param_cname,
                               int line, int column);
+/* #2755: closure cells (codegen_stmt.c). The scope declaring the promoted
+ * `name` seen from scope `scope`, and its body (codegen_expr.c); whether
+ * the cell of `name` in the scope being emitted gives back the closures it
+ * holds, or pins them because one may be kept bare; whether `e` reads a
+ * closure cell; and the release of the remembered answers. */
+ASTNode* promoted_cell_declaring_scope(CodeGenerator* gen, const char* scope, const char* name,
+                                       ASTNode** body);
+int promoted_closure_cell_owns(CodeGenerator* gen, const char* name);
+int is_closure_cell_read(CodeGenerator* gen, ASTNode* e);
+void cell_owns_free(CodeGenerator* gen);
 /* The program's own definition of `name`, or NULL. Shared rather than
    duplicated: the builtin fast-paths need it to know when a program has
    defined a function of its own with a builtin's name. */

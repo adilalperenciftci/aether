@@ -304,6 +304,27 @@ extern's strdup) becomes a refcounted copy on the way in, so the cell's
 last release frees every value it was ever given; a literal is stored as
 it is and never freed.
 
+A `fn` variable a closure writes is a closure cell, and it holds a
+reference of its own to the closure in it (#2755), as a field, a global or
+actor state does (#2525). Its first value and every store are taken: a
+fresh closure is adopted, any other (a parameter, another variable, a
+field) retained, so a `fn` parameter's cell never holds its caller's
+reference and the caller releases the closure it passed as after any call.
+A store gives back the closure it replaces, after the new one is taken,
+and the cell's last holder gives back the one it still holds. A call
+through the cell, or one that passes the cell's closure to an Aether
+function or closure, holds a reference for the call, so a closure that rebinds its own cell
+while it runs (`state = || { state = next }`) is not freed under itself.
+The scope that declares the cell is walked once, nested closures included,
+as a closure local's is (L5 below): a `return` of the variable or a callee
+that keeps it may hold its value without a reference of its own, and then
+the cell pins every value it takes with one more, which lives for good, as
+every value of such a cell did before. Before, the cell took its first
+value bare and never gave back any: a function whose nested closure
+rebinds its `fn` parameter leaked 4400 bytes per 100 calls. A closure in
+the cell that captures the cell itself is a reference cycle, and is not
+reclaimed.
+
 A fixed-size array the closure writes (`arr[i] = v`, `arr[i]++`, a whole
 `arr = [...]`) is a cell too (#2474): a pointer to the whole array,
 `int (*arr)[3]`, so `(*arr)`, which every use of a promoted name reads,

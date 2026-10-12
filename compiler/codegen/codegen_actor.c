@@ -705,9 +705,14 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
                                      * only the payload width. */
                                     const char* from = cg_internf("_pattern->%s", field->value);
                                     print_indent(gen);
+                                    /* #2755: the cell is the arm's, which
+                                     * a closure cell's seed asks about. */
+                                    const char* seed_scope = gen->closure_var_scope;
+                                    gen->closure_var_scope = arm_name;
                                     emit_promoted_param_cell(gen, var_name,
                                         strcmp(c_type, "intptr_t") == 0 ? "int" : c_type,
                                         from, field->line, field->column);
+                                    gen->closure_var_scope = seed_scope;
                                     continue;
                                 }
                                 /* A binding a `try` body writes is volatile,

@@ -587,6 +587,14 @@ typedef struct {
     // private to codegen_stmt.c). Built once, the first time it is asked.
     void* str_arrays;
 
+    // #2755: whether each closure cell gives back the closures it holds
+    // (promoted_closure_cell_owns, private to codegen_stmt.c), by the scope
+    // that declares it and its name, decided once so the scope and every
+    // closure that writes the cell agree.
+    void* cell_owns;
+    int cell_owns_count;
+    int cell_owns_cap;
+
     // #752: struct locals that escape via a return (directly or as a
     // tuple element). Such a struct's heap-string fields belong to the
     // caller once returned, so the function-exit <Struct>_destroy defer
