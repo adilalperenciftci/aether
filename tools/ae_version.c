@@ -2268,6 +2268,18 @@ int cmd_version_doctor(int do_fix) {
     return 1;
 }
 
+void ae_version_subcommands(FILE* out) {
+    fprintf(out, "Subcommands:\n");
+    fprintf(out, "  ae version list              List all available releases\n");
+    fprintf(out, "  ae version install <v>       Download and install a release\n");
+    fprintf(out, "  ae version use <v>           Switch to an installed release\n");
+    fprintf(out, "  ae version installed         List versions installed locally\n");
+    fprintf(out, "  ae version remove <v>...     Remove installed version(s)\n");
+    fprintf(out, "  ae version gc [--keep N]     Remove all but the newest N (default 2)\n");
+    fprintf(out, "  ae version dedupe            Share identical files across versions\n");
+    fprintf(out, "  ae version doctor [--fix]    Check the install, and compile a test program\n");
+}
+
 int cmd_version(int argc, char** argv) {
     if (argc == 0) {
         /* The BINARY's own version, compiled in. Printing the pin here (what
@@ -2309,15 +2321,8 @@ int cmd_version(int argc, char** argv) {
 
         ae_report_newer_release(stdout);
 
-        printf("\nSubcommands:\n");
-        printf("  ae version list              List all available releases\n");
-        printf("  ae version install <v>       Download and install a release\n");
-        printf("  ae version use <v>           Switch to an installed release\n");
-        printf("  ae version installed         List versions installed locally\n");
-        printf("  ae version remove <v>...     Remove installed version(s)\n");
-        printf("  ae version gc [--keep N]     Remove all but the newest N (default 2)\n");
-        printf("  ae version dedupe            Share identical files across versions\n");
-        printf("  ae version doctor [--fix]    Check the install, and compile a test program\n");
+        printf("\n");
+        ae_version_subcommands(stdout);
         return 0;
     }
     const char* sub = argv[0];

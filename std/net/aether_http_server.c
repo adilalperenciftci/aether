@@ -1755,6 +1755,18 @@ static HttpRequest* http_parse_request_n_impl(HttpRequest* req,
     
     // Extract HTTP version
     char* version_start = path_end + 1;
+    /* #2760: only an HTTP/1.x request reaches this parser (an h2 preface is
+     * taken before it), and its version is `HTTP/1.0` or `HTTP/1.1`.
+     * Anything else is not an HTTP request line: `THIS IS NOT HTTP` was
+     * answered 404 for the path `IS`, on a connection kept open for the next
+     * request of a client that never sends one. It fails the parse, and the
+     * caller answers 400 and closes. */
+    if (strcmp(version_start, "HTTP/1.1") != 0 && strcmp(version_start, "HTTP/1.0") != 0) {
+        req_release(req, req->query_string); req->query_string = NULL;
+        req_release(req, req->path); req->path = NULL;
+        req_release(req, req->method); req->method = NULL;
+        return NULL;
+    }
     size_t version_len = strlen(version_start);
     req->http_version = req_alloc(req, version_len + 1);
     if (req->http_version) memcpy(req->http_version, version_start, version_len + 1);
@@ -4273,6 +4285,19 @@ static void conn_send_bad_framing(HttpConn* conn) {
     conn->linger_on_close = 1;
 }
 
+/* #2760: a request whose request line or headers do not parse. */
+static void conn_send_bad_request_line(HttpConn* conn) {
+    static const char msg[] =
+        "HTTP/1.1 400 Bad Request\r\n"
+        "Content-Type: text/plain\r\n"
+        "Content-Length: 22\r\n"
+        "Connection: close\r\n"
+        "\r\n"
+        "malformed HTTP request";
+    conn_send(conn, msg, (int)(sizeof(msg) - 1));
+    conn->linger_on_close = 1;
+}
+
 static int handle_one_request(HttpServer* server, HttpConn* conn,
                               int requests_served, int max_requests) {
     long t_start = http_now_us();
@@ -4539,7 +4564,14 @@ static int handle_one_request(HttpServer* server, HttpConn* conn,
      * headers; `read_pos` then points at the first body byte, which the
      * accessor reads from and the drain skips past. */
     conn->read_pos += request_total;
-    if (!req) return 0;
+    if (!req) {
+        /* #2760: a request that does not parse is answered, then the
+         * connection ends: where a next request would start is in doubt,
+         * and a client that sent garbage was left holding the connection
+         * open with no reply until its own timeout. */
+        conn_send_bad_request_line(conn);
+        return 0;
+    }
 
     /* Wire up the streaming-body state so http_request_body_read can
      * pull the rest off the socket. body_length carries the declared

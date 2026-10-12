@@ -34,7 +34,7 @@ check(label: string, ok: int) {
 main() {
     println("=== fs symlinks ===")
     windows = os_getenv("OS") == "Windows_NT"
-    base = "${os.temp_dir()}/aether_fs_symlink_test"
+    base = "${os.temp_dir()}/aether_fs_symlink_test_${os.getpid()}"
     fs.remove_tree(base)
     fs.create_dir(base)
     sub = "${base}/sub"

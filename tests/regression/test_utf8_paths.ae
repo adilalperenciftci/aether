@@ -35,7 +35,7 @@ main() {
         return
     }
     println("=== UTF-8 paths and arguments ===")
-    base = "${os.temp_dir()}/aether_utf8_paths_ünï_日本"
+    base = "${os.temp_dir()}/aether_utf8_paths_ünï_日本_${os.getpid()}"
     fs.remove_tree(base)
     check("create a directory with a non-ASCII name", fs.create_dir(base) == "")
     file = "${base}/café.txt"
@@ -44,7 +44,12 @@ main() {
 
     resolved, kind, msg = fs.realpath(file)
     check("the wide path finds the same file (${msg})", kind == fs.KIND_OK)
-    check("the resolved name is the UTF-8 name (${resolved})", string.ends_with(resolved, "café.txt") == 1)
+    // The line names the file and not the path: the directory carries the
+    // process id (#2771), and the output is the same on every run (the
+    // -O0/-O2 comparison diffs it). A failure prints the path.
+    named = string.ends_with(resolved, "café.txt")
+    if named == 0 { println("  resolved: ${resolved}") }
+    check("the resolved name is the UTF-8 name (café.txt)", named)
 
     copied, _, cmsg = fs.copy(file, "${base}/copié.txt")
     check("copy through the wide path (${cmsg})", copied > 0)

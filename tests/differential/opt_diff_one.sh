@@ -54,16 +54,11 @@ f="$1"
 tmpdir="$2"
 root="$3"
 
-if command -v timeout >/dev/null 2>&1; then
-    TO="timeout ${AE_TEST_TIMEOUT:-120}"
-    BTO="timeout ${AE_TEST_BUILD_TIMEOUT:-600}"
-elif command -v gtimeout >/dev/null 2>&1; then
-    TO="gtimeout ${AE_TEST_TIMEOUT:-120}"
-    BTO="gtimeout ${AE_TEST_BUILD_TIMEOUT:-600}"
-else
-    TO=""
-    BTO=""
-fi
+# The limits run_ae_test.sh puts on the same programs, by the same means
+# (on Windows a job object, never a signal: tests/lib/sweep_timeout.sh).
+. "$root/tests/lib/sweep_timeout.sh"
+sweep_timeout_bound TO "$root" "${AE_TEST_TIMEOUT:-120}"
+sweep_timeout_bound BTO "$root" "${AE_TEST_BUILD_TIMEOUT:-600}"
 
 name=$(echo "$f" | sed "s|tests/||;s|/|_|g;s|\.ae$||")
 dir=$(dirname "$f")

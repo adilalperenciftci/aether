@@ -41,6 +41,9 @@ fi
 command -v openssl >/dev/null 2>&1 || { echo "  [SKIP] wss_client_nonblocking: no openssl"; exit 0; }
 
 TMP="$(mktemp -d)"
+# Certificates carry the extensions asked for, under any openssl (#2776).
+. "$ROOT/tests/lib/test_openssl_conf.sh"
+test_openssl_conf "$TMP"
 PEER_PID=""
 cleanup() {
     # `|| :` per line: under `set -e` a failure inside a trap abandons the

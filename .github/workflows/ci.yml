@@ -70,6 +70,9 @@ jobs:
   ci:
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
+    # Twice the slowest healthy leg (about 13 min), so a hang outside every
+    # bound costs one cap, not GitHub's 6 hour default (#2772).
+    timeout-minutes: 30
 
     strategy:
       fail-fast: false
@@ -107,11 +110,30 @@ jobs:
             harden: "0"
             install: ""
 
-          - name: macOS / Clang (x86_64)
+          # Two jobs (#2757, #2772): the Intel runner took 13 to 32 min, most
+          # of it the test sweep. Both run `make ci-sweep`, half the sweep
+          # each (tests/scripts/sweep_shard.sh), and [1/2] the C unit tests
+          # too (CI_SWEEP_UNIT). The rest of `make ci` (the doc and suite
+          # checks, examples, the install and archive smoke tests) does not
+          # depend on the architecture, and the ARM64 leg runs it on macOS.
+          # A third Intel job would not help: GitHub runs five macOS jobs at
+          # a time, and a push already starts seven.
+          - name: macOS / Clang (x86_64) [1/2]
             os: macos-15-intel
             cc: clang
             harden: "0"
             install: ""
+            shard: "1/2"
+            target: ci-sweep
+            unit: "1"
+
+          - name: macOS / Clang (x86_64) [2/2]
+            os: macos-15-intel
+            cc: clang
+            harden: "0"
+            install: ""
+            shard: "2/2"
+            target: ci-sweep
 
     steps:
     - uses: actions/checkout@v4
@@ -143,7 +165,7 @@ jobs:
         key: audio-obj-${{ matrix.os }}-${{ matrix.cc }}-h${{ matrix.harden }}-${{ hashFiles('std/audio/miniaudio.h', 'std/audio/stb_vorbis.c', 'std/audio/aether_audio.c', 'std/audio/aether_audio.h') }}
 
     - name: Run full CI suite
-      run: HARDEN=${{ matrix.harden }} CC=${{ matrix.cc }} make ci
+      run: HARDEN=${{ matrix.harden }} CC=${{ matrix.cc }} AE_SWEEP_SHARD=${{ matrix.shard }} CI_SWEEP_UNIT=${{ matrix.unit }} make ${{ matrix.target || 'ci' }}
 
     # The .ae corpus at -O0 (what `ae run` compiles at) against -O2 (what the
     # sweep in `make ci` compiles at), diffing stdout and exit code (#2488).
@@ -155,6 +177,15 @@ jobs:
       if: matrix.name == 'Linux / GCC'
       timeout-minutes: 40
       run: HARDEN=${{ matrix.harden }} CC=${{ matrix.cc }} make test-ae-opt-diff
+
+    # The C a program gets on the non-GCC path (AETHER_GCC_COMPAT 0, what MSVC
+    # compiles) as strict C11 (#2725). windows.yml's MSVC job compiles the
+    # same programs with cl.exe. The script runs on the aetherc `make ci`
+    # built, so nothing is rebuilt.
+    - name: Generated C without GCC extensions (strict C11)
+      if: matrix.name == 'Linux / GCC'
+      timeout-minutes: 5
+      run: MSVC_COMPAT_CC=gcc bash tests/compiler/test_msvc_compat.sh
 
     # The hardened leg must produce a hardened toolchain, and a program built
     # by it must carry the mitigations too. Before this, `make HARDEN=1` after
@@ -175,30 +206,68 @@ jobs:
         ./build/ae build /tmp/harden_probe.ae --extra /tmp/harden_copy.c -o /tmp/harden_probe
         ./build/ae checksec --require pie,nx,relro-full,canary,fortify /tmp/harden_probe
 
+    # One job per leg saves (#2757): the jobs of a split leg build the same
+    # object, and a second save of one key fails. That is the `make ci` job,
+    # or on a leg of two sweeps the one that runs the unit tests.
     - name: Save miniaudio object cache (merge to main, on miss only)
       if: >-
         github.event_name == 'push' && github.ref == 'refs/heads/main'
         && steps.audio_cache.outputs.cache-hit != 'true'
+        && (matrix.target != 'ci-sweep' || matrix.unit == '1')
       uses: actions/cache/save@v4
       with:
         path: .ci-cache
         key: audio-obj-${{ matrix.os }}-${{ matrix.cc }}-h${{ matrix.harden }}-${{ hashFiles('std/audio/miniaudio.h', 'std/audio/stb_vorbis.c', 'std/audio/aether_audio.c', 'std/audio/aether_audio.h') }}
 
-    # macOS leaks(1) gate (#468). Runs only on the ARM64 macOS job —
-    # one macOS arch is enough leak coverage, and MallocStackLogging
-    # is ~10x slower so we don't want it on both. Linux gets leak
-    # coverage from test-valgrind + ASan-LSan; this is the only
-    # detector that works on Apple Silicon (Apple clang ships ASan
-    # without LSan; upstream LSan hangs here).
+  # ============================================================
+  # macOS leaks(1) gate (#468), a job of its own (#2757)
+  #
+  # ARM64 only: one macOS arch is enough leak coverage, and
+  # MallocStackLogging is ~10x slower, so it is not run on both. Linux gets
+  # leak coverage from test-valgrind + ASan-LSan; this is the only detector
+  # that works on Apple Silicon (Apple clang ships ASan without LSan;
+  # upstream LSan hangs here).
+  #
+  # It used to be the last step of the macOS / Clang (ARM64) leg, after the
+  # whole `make ci` suite: 10.3 min of suite, then 11.7 min of gate, 22 min
+  # on the PR's critical path. It needs only the toolchain
+  # (test-macos-leaks: compiler ae stdlib), so it builds that on a runner of
+  # its own and runs beside the suite.
+  # ============================================================
+  ci-macos-leaks:
+    name: macOS leaks gate (ARM64) [${{ matrix.shard }}]
+    runs-on: macos-latest
+    # Two jobs, half the suite each (#2772, tests/scripts/sweep_shard.sh):
+    # macos-latest hands out 3-core and 5-core runners alike, and on a
+    # 3-core one the whole suite took 19.5 min against 6 on a 5-core one.
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ["1/2", "2/2"]
+
+    steps:
+    - uses: actions/checkout@v4
+
+    # The ARM64 leg's miniaudio object (same OS, compiler and build
+    # variant, so the same key); restore only, the leg saves it.
+    - name: Restore miniaudio object cache
+      uses: actions/cache/restore@v4
+      with:
+        path: .ci-cache
+        key: audio-obj-macos-latest-clang-h0-${{ hashFiles('std/audio/miniaudio.h', 'std/audio/stb_vorbis.c', 'std/audio/aether_audio.c', 'std/audio/aether_audio.h') }}
+
     - name: macOS leaks gate
-      if: matrix.name == 'macOS / Clang (ARM64)'
       # Hard step cap as a backstop to the per-test timeouts inside
       # run_macos_leaks.sh: the gate can never hold a runner indefinitely.
-      # The gate covers the whole tests/regression suite (about 350
+      # The gate covers the whole tests/regression suite (about 490
       # programs, each ~10x slower under leaks + MallocStackLogging), so it
       # checks them one per core; one at a time it had grown past this cap.
-      timeout-minutes: 20
-      run: make test-macos-leaks
+      timeout-minutes: 25
+      # audio-cache-restore checks the object's content stamp before using
+      # it, as `make ci` does, and compiles from source on any mismatch.
+      run: |
+        CC=clang make audio-cache-restore
+        CC=clang AE_SWEEP_SHARD="${{ matrix.shard }}" make test-macos-leaks
 
   # ============================================================
   # FreeBSD cross-compile gate (#402)
@@ -830,8 +899,26 @@ jobs:
   # .ae integration tests (includes REPL tests), examples.
   # ============================================================
   ci-windows:
-    name: Windows / GCC (MSYS2)
+    name: Windows / GCC (MSYS2) [${{ matrix.part }}]
     runs-on: windows-latest
+    # Twice the slowest healthy job, so a hang outside every bound costs one
+    # cap, not GitHub's 6 hour default (#2772).
+    timeout-minutes: 35
+    # Two jobs (#2757): the leg took about 23 min, most of it the test sweep
+    # on 4 cores. [1/2] runs `make ci` with a third of the sweep, [2/2] builds
+    # the same toolchain and runs the other two thirds: `make ci`'s stages
+    # around the sweep cost [1/2] about 5 min more, so an even split left it
+    # that far behind (#2772, tests/scripts/sweep_shard.sh).
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - part: "1/2"
+            shard: "1/3"
+            target: ci
+          - part: "2/2"
+            shard: "2,3/3"
+            target: ci-sweep
 
     defaults:
       run:
@@ -911,7 +998,7 @@ jobs:
       # 4-vCPU runner's RAM (one link ballooned to 11 min). Meaningfully
       # cutting the 42 min needs a faster linker / fewer per-test relinks,
       # tracked separately.
-      timeout-minutes: 70
+      timeout-minutes: 30
       # The hardcoded `C:\msys64\...` probe in aether_http.c::load_windows_ca_bundle
       # doesn't match the GitHub runner's MSYS2 path (it's installed under a
       # temp dir, not C:\msys64). Export SSL_CERT_FILE explicitly using
@@ -922,7 +1009,7 @@ jobs:
         export SSL_CERT_FILE="$(cygpath -w /mingw64/etc/ssl/certs/ca-bundle.crt)"
         echo "SSL_CERT_FILE=$SSL_CERT_FILE"
         ls -la "$(cygpath -u "$SSL_CERT_FILE")"
-        make ci
+        AE_SWEEP_SHARD="${{ matrix.shard }}" make ${{ matrix.target }}
 
   # ============================================================
   # Windows contrib series — beside `Windows / GCC (MSYS2)` rather than after

@@ -31,7 +31,10 @@ main() {
     println("=== fs.realpath regression ===")
 
     windows = os_getenv("OS") == "Windows_NT"
-    tmpdir = "${os.temp_dir()}/aether_fs_realpath_test"
+    // A name of this process's own, so a second sweep running beside this
+    // one does not delete the directory mid-test (#2771).
+    name = "aether_fs_realpath_test_${os.getpid()}"
+    tmpdir = "${os.temp_dir()}/${name}"
     fs.delete_dir(tmpdir)
     fs.create_dir(tmpdir)
     fs.write("${tmpdir}/probe", "x")
@@ -43,15 +46,15 @@ main() {
     }
     // realpath may resolve /tmp to /private/tmp on macOS, and Windows
     // answers with backslashes; accept any resolved form that ends with
-    // /aether_fs_realpath_test/probe once the separators are folded.
-    suffix = "/aether_fs_realpath_test/probe"
+    // /<name>/probe once the separators are folded.
+    suffix = "/${name}/probe"
     if string.ends_with(slashes(resolved1), suffix) != 1 {
         println("FAIL 1: resolved=${resolved1} does not end with ${suffix}"); exit(1)
     }
     println("  PASS 1: canonical path resolves")
 
     // --- Case 2: ./ and ../ folded out ---
-    twisted = "${tmpdir}/./../aether_fs_realpath_test/probe"
+    twisted = "${tmpdir}/./../${name}/probe"
     resolved2, kind2, msg2 = fs.realpath(twisted)
     if kind2 != fs.KIND_OK {
         println("FAIL 2: kind=${kind2} msg=${msg2}, expected KIND_OK"); exit(1)

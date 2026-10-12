@@ -1,0 +1,234 @@
+// Regression (#2748): the heap-string, `string?` and `*StringSeq` locals of
+// a receive arm are freed when the arm ends.
+//
+// A receive arm's handler hoisted the trackers of its string locals but
+// never ran the escape walk or pushed the exit frees a function body gets,
+// so a string the arm built into a local leaked on every message (35 bytes
+// per message of `msg = string.concat(w, "!")`), as did a pattern binding
+// rebound to a heap string, and a `string?` or `*StringSeq` local was not
+// tracked at all. The handler now runs the same passes. A store into a
+// string state field (`label = msg`) takes a string of its own, the
+// local's buffer on its last use (the local's flag cleared) or a copy, so
+// the local's exit free never frees what the state holds. A send or a
+// reply copies the strings it carries, so the local frees its own. An
+// `after` arm's locals get the same passes.
+//
+// Each value is read back in a later message, after churn, allocations of
+// the same sizes that reuse what was freed. The leak checks run where the
+// heap count is exact (mem.heap_in_use_exact): after a warm-up, some
+// window of the same messages grows by exactly 0 (mem.steady_growth), one
+// window per shape. Strings are built from message fields, because
+// string.concat of two literals folds to a literal.
+
+import std.mem
+import std.string
+
+extern exit(code: int)
+
+message Local { w: string }
+message Rebind { w: string }
+message Keep { w: string }
+message KeepAndRead { w: string }
+message KeepTwice { w: string }
+message Optional { w: string }
+message Seq { w: string }
+message Forward { w: string, to: ptr }
+message Ask { w: string }
+message Answer { s: string }
+message Captured { w: string }
+message Guarded { w: string }
+message Churn { w: string }
+message GetCount {}
+message Count { n: int }
+message GetLabels {}
+message Labels { s: string }
+
+maybe(w: string) -> string? {
+    return string.concat(w, "?")
+}
+
+actor Keeper {
+    state int n
+    state label = ""
+    state other = ""
+
+    receive {
+        Local(w: w) -> {
+            msg = string.concat(w, "!")
+            n = n + string.length(msg)
+        }
+        Rebind(w: w) -> {
+            w = string.concat(w, "!!")
+            n = n + string.length(w)
+        }
+        Keep(w: w) -> {
+            msg = string.concat(w, "-k")
+            label = msg
+        }
+        KeepAndRead(w: w) -> {
+            msg = string.concat(w, "-r")
+            label = msg
+            n = n + string.length(msg)
+        }
+        KeepTwice(w: w) -> {
+            msg = string.concat(w, "-t")
+            label = msg
+            other = msg
+        }
+        Optional(w: w) -> {
+            o = maybe(w)
+            n = n + string.length(o ?? "")
+        }
+        Seq(w: w) -> {
+            s = string.split_to_seq(string.concat(w, ",x"), ",")
+            n = n + string.seq_length(s)
+        }
+        Forward(w: w, to: to) -> {
+            msg = string.concat(w, "-f")
+            to ! Keep { w: msg }
+            n = n + string.length(msg)
+        }
+        Ask(w: w) -> {
+            msg = string.concat(w, "-a")
+            reply Answer { s: msg }
+        }
+        Captured(w: w) -> {
+            msg = string.concat(w, "-c")
+            f = || { return string.length(msg) }
+            n = n + call(f)
+        }
+        Guarded(w: w) -> {
+            msg = string.concat(w, "-g")
+            try {
+                msg = string.concat(msg, "+")
+                panic("stop")
+            } catch e {
+                n = n + string.length(msg)
+            }
+        }
+        Churn(w: w) -> {
+            i = 0
+            while i < 8 {
+                a = string.concat(w, "-k")
+                b = string.concat(w, "!!")
+                n = n + string.length(a) + string.length(b) - string.length(a) - string.length(b)
+                i = i + 1
+            }
+        }
+        GetCount() -> {
+            reply Count { n: n }
+        }
+        GetLabels() -> {
+            reply Labels { s: "${label}|${other}" }
+        }
+    }
+}
+
+// An `after` arm's locals are freed as an arm's are. Whether the timeout
+// fires before the program ends depends on the scheduler, so its count is
+// only checked to be one it can reach; when it fires, the macOS leaks gate
+// checks what it built.
+actor Waiter {
+    state int n
+    state label = "ab"
+
+    receive {
+        GetCount() -> {
+            reply Count { n: n }
+        }
+    } after 5 -> {
+        msg = string.concat(label, "!")
+        n = n + string.length(msg)
+    }
+}
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL #2748: ${msg}")
+        exit(1)
+    }
+}
+
+total(k: ptr) -> int {
+    int t = k ? GetCount {}
+    return t
+}
+
+labels(k: ptr) -> string {
+    k ! Churn { w: "w" }
+    string t = k ? GetLabels {}
+    return t
+}
+
+deliver(k: ptr, which: int, peer: ptr) {
+    if which == 0 { k ! Local { w: "w" } }
+    if which == 1 { k ! Rebind { w: "w" } }
+    if which == 2 { k ! Keep { w: "w" } }
+    if which == 3 { k ! KeepAndRead { w: "w" } }
+    if which == 4 { k ! KeepTwice { w: "w" } }
+    if which == 5 { k ! Optional { w: "w" } }
+    if which == 6 { k ! Seq { w: "w" } }
+    if which == 7 { k ! Forward { w: "w", to: peer } }
+    if which == 8 {
+        string a = k ? Ask { w: "w" }
+        check(a == "w-a", "a reply carrying a local (${a})")
+    }
+    if which == 9 { k ! Captured { w: "w" } }
+    if which == 10 { k ! Guarded { w: "w" } }
+}
+
+measure(k: ptr, which: int, peer: ptr) -> long {
+    return mem.steady_growth(|| {
+            j = 0
+            while j < 10 {
+                deliver(k, which, peer)
+                total(k)
+                total(peer)
+                j = j + 1
+            }
+        }, 5)
+}
+
+main() {
+    println("=== test_receive_arm_heap_locals ===")
+    k = spawn(Keeper())
+    peer = spawn(Keeper())
+    waiter = spawn(Waiter())
+    check(total(k) == 0, "a fresh keeper")
+    k ! Local { w: "w" }
+    check(total(k) == 2, "a heap local in an arm (${total(k)})")
+    k ! Rebind { w: "w" }
+    check(total(k) == 5, "a rebound pattern binding (${total(k)})")
+    k ! Keep { w: "w" }
+    check(labels(k) == "w-k|", "a local stored into state (${labels(k)})")
+    k ! KeepAndRead { w: "w" }
+    check(total(k) == 8 && labels(k) == "w-r|", "a local stored into state and read again")
+    k ! KeepTwice { w: "w" }
+    check(labels(k) == "w-t|w-t", "a local stored into two state fields (${labels(k)})")
+    k ! Optional { w: "w" }
+    check(total(k) == 10, "a string? local in an arm (${total(k)})")
+    k ! Seq { w: "w" }
+    check(total(k) == 12, "a *StringSeq local in an arm (${total(k)})")
+    k ! Forward { w: "w", to: peer }
+    check(total(k) == 15 && labels(peer) == "w-f-k|", "a local sent on (${labels(peer)})")
+    deliver(k, 8, peer)
+    k ! Captured { w: "w" }
+    check(total(k) == 18, "a local a closure captures (${total(k)})")
+    k ! Guarded { w: "w" }
+    check(total(k) == 22, "a local a try body rebinds (${total(k)})")
+    if mem.heap_in_use_exact() {
+        names = ["a heap local", "a rebound pattern binding", "a state store", "a state store read again",
+            "two state stores", "a string? local", "a *StringSeq local", "a send",
+            "a reply", "a captured local", "a try body"]
+        i = 0
+        while i < 11 {
+            grown = measure(k, i, peer)
+            check(grown == 0, "10 messages with ${names[i]} grew the heap by ${grown} bytes in every run")
+            i = i + 1
+        }
+    }
+    wait_for_idle()
+    fired = total(waiter)
+    check(fired == 0 || fired == 3, "an after arm's local (${fired})")
+    println("=== test_receive_arm_heap_locals passed ===")
+}

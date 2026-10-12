@@ -136,6 +136,14 @@ int  http_client_pool_idle_count_raw(void);
  * the https request's error names the real cause (untrusted chain, wrong host,
  * a server that does not speak TLS 1.3) rather than a guess. Thread-local. */
 void aether_pure_tls_client_set_error(const char* msg);
+
+/* The Windows trust anchors both HTTPS clients use (#2675), for
+ * std.cryptography.tls13_client: every certificate of the ROOT system store as
+ * PEM text, and the first bundle file of the list std.http.client's OpenSSL
+ * path looks for. Each a fresh malloc the caller frees, "" when there is
+ * nothing (always, off Windows), NULL only when out of memory. */
+char* aether_tls_windows_store_pem(void);
+char* aether_tls_windows_bundle(void);
 long long http_client_rx_buffer_allocs_raw(void);
 
 int http_response_status(HttpResponse* response);

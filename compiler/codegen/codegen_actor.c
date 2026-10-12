@@ -633,8 +633,13 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
                         clear_fnptr_locals(gen);
                         clear_heap_string_vars(gen);
                         clear_captured_string_params(gen);
-    clear_seq_vars(gen);
-    clear_opt_str_vars(gen);
+                        clear_seq_vars(gen);
+                        clear_opt_str_vars(gen);
+                        /* #2748: and the escape marks the last function or
+                         * handler left, as a function clears them, so they
+                         * neither keep this handler's locals nor reach the
+                         * next function. */
+                        clear_escaped_string_vars(gen);
                         /* #2690: the names this arm's `try` bodies write,
                          * and no other arm's (a local of the same name in
                          * an arm with no `try` was declared volatile), are
@@ -763,6 +768,10 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
                              * body is. */
                             gen->hoist_scope_body = arm_body;
                             hoist_heap_string_trackers(gen, arm_body);
+                            /* #2748: its `*StringSeq` and `string?` locals
+                             * too, as a function's are. */
+                            hoist_seq_trackers(gen, arm_body);
+                            hoist_opt_str_trackers(gen, arm_body);
                         }
 
                         // Generate handler body
@@ -776,6 +785,21 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
                         gen->return_escaped_struct_var_count = 0;
                         if (arm_body && arm_body->type == AST_BLOCK) {
                             mark_state_stored_struct_vars(gen, arm_body);
+                            /* #2748: the escape walks and the exit frees a
+                             * function body gets (codegen_func.c), so a
+                             * string, `*StringSeq` or `string?` local the
+                             * handler binds is freed when the handler ends
+                             * unless it was handed on. It never was, and
+                             * each message leaked it. A store into a string
+                             * state field takes a string of its own (the
+                             * local's moved on its last use, else copied),
+                             * so the local keeps its own exit free. */
+                            mark_escaped_heap_string_vars(gen, arm_body);
+                            mark_escaped_seq_vars(gen, arm_body);
+                            mark_escaped_opt_str_vars(gen, arm_body);
+                            push_heap_string_exit_free_defers(gen, arm_body);
+                            push_seq_exit_free_defers(gen, arm_body);
+                            push_opt_str_exit_free_defers(gen, arm_body);
                             for (int k = 0; k < arm_body->child_count; k++) {
                                 generate_statement(gen, arm_body->children[k]);
                             }
@@ -891,8 +915,26 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
             /* The names its own `try` bodies write, not the last arm's. */
             clear_try_clobbered_vars(gen);
             mark_try_clobbered_vars(gen, tbody);
+            /* #2748: its locals are its own, tracked and freed as an arm's
+             * are; the last arm's declarations and marks do not reach it. */
+            clear_declared_vars(gen);
+            clear_fnptr_locals(gen);
+            clear_heap_string_vars(gen);
+            clear_captured_string_params(gen);
+            clear_seq_vars(gen);
+            clear_opt_str_vars(gen);
+            clear_escaped_string_vars(gen);
             if (tbody->type == AST_BLOCK) {
                 gen->hoist_scope_body = tbody;
+                hoist_heap_string_trackers(gen, tbody);
+                hoist_seq_trackers(gen, tbody);
+                hoist_opt_str_trackers(gen, tbody);
+                mark_escaped_heap_string_vars(gen, tbody);
+                mark_escaped_seq_vars(gen, tbody);
+                mark_escaped_opt_str_vars(gen, tbody);
+                push_heap_string_exit_free_defers(gen, tbody);
+                push_seq_exit_free_defers(gen, tbody);
+                push_opt_str_exit_free_defers(gen, tbody);
                 for (int j = 0; j < tbody->child_count; j++) {
                     generate_statement(gen, tbody->children[j]);
                 }

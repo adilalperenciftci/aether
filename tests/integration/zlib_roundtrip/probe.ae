@@ -101,7 +101,7 @@ main() {
     // ---- Test 5: binary payload with embedded NULs round-trips ----
     print("\nTest 5: binary round-trip with embedded NULs\n")
     tmp = os.temp_dir()
-    path = "${tmp}/aether_zlib_binary.bin"
+    path = "${tmp}/aether_zlib_binary_${os.getpid()}.bin"
 
     ok = zlib_probe_write_binary(path)
     if ok != 1 {

@@ -26,17 +26,16 @@ import std.net
 extern exit(code: int)
 
 const CHILD_SRC = "tests/integration/std_ipc_roundtrip/child.ae"
-const CHILD_BIN = "/tmp/std_ipc_roundtrip_child"
 const EXPECTED_PAYLOAD = "passed=44\nfailed=3\nname=demo\n"
 
 // Compile the child to disk via `ae build`. Returns "" on success,
 // error string on failure.
-build_child() -> string {
+build_child(bin: string) -> string {
     argv = list.new()
     list.add(argv, "build")
     list.add(argv, CHILD_SRC)
     list.add(argv, "-o")
-    list.add(argv, CHILD_BIN)
+    list.add(argv, bin)
     out, exit_code, err = os.run_capture("build/ae", argv, null)
     if err != "" { return "spawn error: ${err}" }
     if exit_code != 0 {
@@ -49,12 +48,15 @@ main() {
     println("std.ipc round-trip test")
     println("")
 
-    berr = build_child()
+    // A name of this process's own: two sweeps at once shared one fixed
+    // /tmp name, and one run's delete landed under the other (#2771).
+    child_bin = "${os.temp_dir()}/std_ipc_roundtrip_child_${os.getpid()}"
+    berr = build_child(child_bin)
     if berr != "" {
         println("FAIL: cannot build child: ${berr}")
         exit(1)
     }
-    println("  ✓ child compiled to ${CHILD_BIN}")
+    println("  ✓ child compiled to ${child_bin}")
 
     passed = 0
     failed = 0
@@ -62,7 +64,7 @@ main() {
     // Case 1 — convenience function (drain-and-wait).
     {
         argv = list.new()
-        payload, exit_code, err = os.run_pipe_drain_and_wait(CHILD_BIN, argv, null)
+        payload, exit_code, err = os.run_pipe_drain_and_wait(child_bin, argv, null)
         if err != "" {
             println("  [1] FAIL run_pipe_drain_and_wait: err=${err}")
             failed = failed + 1
@@ -102,7 +104,7 @@ main() {
     // std.net.fd_read_all.
     {
         argv2 = list.new()
-        read_fd, child_pid, err2 = os.run_pipe(CHILD_BIN, argv2, null)
+        read_fd, child_pid, err2 = os.run_pipe(child_bin, argv2, null)
         if err2 != "" {
             println("  [2] FAIL run_pipe: err=${err2}")
             failed = failed + 1
@@ -141,7 +143,7 @@ main() {
     // returns 1 with diagnostic.
     {
         argv3 = list.new()
-        out3, exit3, err3 = os.run_capture(CHILD_BIN, argv3, null)
+        out3, exit3, err3 = os.run_capture(child_bin, argv3, null)
         if err3 != "" {
             println("  [3] FAIL run_capture (no-channel): err=${err3}")
             failed = failed + 1
@@ -162,7 +164,7 @@ main() {
         }
     }
 
-    fs.delete(CHILD_BIN)
+    fs.delete(child_bin)
 
     println("")
     println("std_ipc_roundtrip: ${passed} passing, ${failed} failing (of 3)")

@@ -67,7 +67,15 @@ else
 fi
 export USERPROFILE
 mkdir -p "$HOME"
-export AE_RELEASE_BASE_URL="file://$TMP/origin"
+# The clone URL goes to whichever git comes first on the Windows PATH. Git for
+# Windows maps /tmp to a directory of its own, not MSYS2's, so an MSYS2 path
+# in the URL names no repository there (#2775). The Windows form of the path,
+# file://C:/..., is one both MSYS2's git and Git for Windows parse alike.
+if command -v cygpath >/dev/null 2>&1; then
+    export AE_RELEASE_BASE_URL="file://$(cygpath -m "$TMP/origin")"
+else
+    export AE_RELEASE_BASE_URL="file://$TMP/origin"
+fi
 CACHE="$HOME/.aether/packages/$PKG"
 
 # --- 1. @vX.Y.Z pins EXACTLY that tag ----------------------------------

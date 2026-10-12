@@ -35,7 +35,7 @@ main() {
     println("=== fs.read_binary tuple heap reclaim ===")
 
     tmp = os.temp_dir()
-    path = "${tmp}/aether_fs_read_binary_heap_reclaim.bin"
+    path = "${tmp}/aether_fs_read_binary_heap_reclaim_${os.getpid()}.bin"
 
     // Build a ~10 KB payload so retention shows up clearly against
     // any constant overhead in the cap counter.

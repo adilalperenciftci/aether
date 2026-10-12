@@ -78,26 +78,29 @@ main() {
     }
 
     tmp = os.temp_dir()
+    // Names of this process's own, so a second sweep running beside this
+    // one does not overwrite or delete them (#2771).
+    pid = os.getpid()
 
     // fs.write_binary
-    wb = "${tmp}/aether_2301_wb.bin"
+    wb = "${tmp}/aether_2301_wb_${pid}.bin"
     werr = fs.write_binary(wb, payload)
     fails = fails + check(werr == "", "write_binary accepts a header-magic payload")
     fails = fails + check(file_matches(wb, payload), "write_binary wrote the 48 bytes verbatim")
 
     // fs.write_atomic
-    wa = "${tmp}/aether_2301_wa.bin"
+    wa = "${tmp}/aether_2301_wa_${pid}.bin"
     aerr = fs.write_atomic(wa, payload)
     fails = fails + check(aerr == "", "write_atomic accepts a header-magic payload")
     fails = fails + check(file_matches(wa, payload), "write_atomic wrote the 48 bytes verbatim")
 
     // A sub-slice writes exactly its own bytes.
-    ws = "${tmp}/aether_2301_sub.bin"
+    ws = "${tmp}/aether_2301_sub_${pid}.bin"
     serr = fs.write_binary(ws, payload[0..8])
     fails = fails + check(serr == "" && file_matches(ws, payload[0..8]), "a sub-slice writes only its 8 bytes")
 
     // io.fd_write
-    wf = "${tmp}/aether_2301_fd.bin"
+    wf = "${tmp}/aether_2301_fd_${pid}.bin"
     fd, oerr = io.fd_open_write(wf)
     if oerr != "" {
         println("  FAIL: fd_open_write: ${oerr}")
@@ -109,7 +112,7 @@ main() {
     fails = fails + check(file_matches(wf, payload), "fd_write wrote the 48 bytes verbatim")
 
     // fs.pwrite, at an offset into a fresh file.
-    wp = "${tmp}/aether_2301_pw.bin"
+    wp = "${tmp}/aether_2301_pw_${pid}.bin"
     fs.delete(wp)
     f, perr = fs.open(wp, "w+")
     if perr != "" {
@@ -124,7 +127,7 @@ main() {
     fails = fails + check(file_matches(wp, payload), "pwrite wrote the 48 bytes verbatim")
 
     // Empty slices: string.bytes("") is the null slice.
-    we = "${tmp}/aether_2301_empty.bin"
+    we = "${tmp}/aether_2301_empty_${pid}.bin"
     eerr = fs.write_binary(we, string.bytes(""))
     sz, _ = fs.size(we)
     fails = fails + check(eerr == "" && sz == 0, "write_binary of an empty slice creates an empty file")
@@ -136,7 +139,7 @@ main() {
     // An unbounded slice has no length to write: refused, never written.
     raw = make([]byte, 4)
     unbounded = (raw as ptr) as byte[]
-    never = "${tmp}/aether_2301_never.bin"
+    never = "${tmp}/aether_2301_never_${pid}.bin"
     refused = false
     try {
         _ = fs.write_binary(never, unbounded)

@@ -324,6 +324,22 @@ that:
   skipping does not belong in a gate (#2132 §3); `AE_SWEEP_OPTIONAL=1 make
   test-ae` puts them back in for a run that has the toolchain.
 
+### Files a test writes
+
+Two sweeps on one machine (two checkouts, or parallel agents) run the same
+tests at once, so a test that writes `"${os.temp_dir()}/my_test"` or
+`/tmp/my_test` has the other run delete or overwrite it mid-test (#2770,
+#2771). A test program names what it writes under the temp directory with
+its process id, `"${os.temp_dir()}/my_test_${os.getpid()}"`, or writes
+inside a directory from `fs.make_temp_dir`, and removes it when done. A
+shell test makes a directory of its own, `TMP="$(mktemp -d)"` removed by
+`trap 'rm -rf "$TMP"' EXIT`, and writes there. `make check-tests` runs
+`tests/scripts/check_ae_tmp.py`, which rejects a fixed name under
+`os.temp_dir()` or `/tmp` that a test `.ae` writes, and
+`tests/scripts/check_shell_tmp.py`, which rejects a fixed `/tmp/<name>` in a
+shell test's code. A write that must fail (and so cannot collide), or a path
+in a container of the test's own, is marked `tmp-ok: <why>`.
+
 ### Ending what a shell test starts
 
 A driver that starts a server or client with `prog &` ends it through
@@ -337,6 +353,26 @@ helpers end the program itself there, and send a signal to a job elsewhere.
 `kill -0 "$pid"` (a liveness probe) is fine; a POSIX-only test whose subject
 is a signal to a process that is no job of the script marks that line
 `kill-ok: <why>`.
+
+### Test time limits
+
+Every test the sweep runs has a time limit: 120 s for a `.ae` test
+(`AE_TEST_TIMEOUT`) and 600 s for its build (`AE_TEST_BUILD_TIMEOUT`), 420 s
+for a shell driver (`AE_SH_TEST_TIMEOUT`), and each `make ci` stage its own
+(tests/scripts/run_stage.sh). A test past its limit is ended with everything
+it started and fails as `[TIMEOUT]`. The runners take the limit from
+`tests/lib/sweep_timeout.sh`: `timeout(1)` (or `gtimeout`) on Linux and macOS,
+and on Windows a job object around the test, which a native watchdog
+(`tests/lib/sweep_watchdog.c`, compiled into `build/` on first use) ends with
+TerminateJobObject. Windows never gets `timeout(1)`: its signal to a hung
+test's native programs would make the MSYS2 runtime signal unrelated
+processes, as above (#2758). A runner script of your own does the same:
+
+```sh
+. "$root/tests/lib/sweep_timeout.sh"
+sweep_timeout_bound TO "$root" 60
+$TO ./build/my_check   # exits 124 when the limit ends it
+```
 
 ## Pull Request Requirements
 

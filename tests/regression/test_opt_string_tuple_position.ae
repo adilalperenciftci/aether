@@ -1,0 +1,179 @@
+// Regression (#2751): a `string?` position of a tuple a function returns is
+// owned by the caller that destructures it.
+//
+// A single `string?` result hands its caller a string of its own (#2740),
+// which the local it is bound to frees. A `string?` tuple position was
+// returned as it stood and destructured with its ownership flag left 0, so
+// a fresh string leaked on every call (3500 bytes per 100 calls of
+// `a, n = two(w)` over `return string.concat(w, "x"), 1`). Each position
+// now hands over a string of its own, as a single result does: a fresh one
+// or an owning local's as it is, a parameter, a literal or a field copied,
+// `none` as nothing. A destructure takes it owned, frees the string it
+// replaces, and a `_` slot frees it at once. A whole tuple passed on from
+// a call (`return two(w)`) keeps what the call handed over.
+//
+// Each check reads its value after churn, allocations of the same sizes
+// that reuse what was freed. The leak checks run where the heap count is
+// exact (mem.heap_in_use_exact): after a warm-up, some window of the same
+// work grows by exactly 0 (mem.steady_growth), one window per shape.
+// Strings are built from parameters, because string.concat of two literals
+// folds to a literal.
+
+import std.mem
+import std.string
+
+extern exit(code: int)
+
+struct Named {
+    name: string
+}
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL #2751: ${msg}")
+        exit(1)
+    }
+}
+
+// Allocations of the sizes the checks read, to take over freed blocks.
+churn(w: string) -> int {
+    n = 0
+    i = 0
+    while i < 8 {
+        a = string.concat(w, "x")
+        b = string.concat(w, "yz")
+        n = n + string.length(a) + string.length(b)
+        i = i + 1
+    }
+    return n
+}
+
+one(w: string) -> string? {
+    return string.concat(w, "x")
+}
+
+fresh(w: string) -> (string?, int) {
+    return string.concat(w, "x"), 1
+}
+
+borrowed(w: string) -> (string?, int) {
+    return w, 2
+}
+
+literal(has: bool) -> (string?, int) {
+    if has {
+        return "lit", 3
+    }
+    return none, 0
+}
+
+from_local(w: string) -> (int, string?) {
+    o = one(w)
+    return 4, o
+}
+
+from_param(o: string?) -> (string?, int) {
+    return o, 5
+}
+
+from_field(n: Named) -> (string?, int) {
+    return n.name, 6
+}
+
+either(w: string, c: bool) -> (string?, int) {
+    return if c { string.concat(w, "yz") } else { "else" }, 7
+}
+
+passed_on(w: string) -> (string?, int) {
+    return fresh(w)
+}
+
+len(o: string?) -> int {
+    if o != none {
+        return string.length(o!)
+    }
+    return -1
+}
+
+as_fresh(w: string) -> int {
+    a, n = fresh(w)
+    b, m = passed_on(w)
+    churn(w)
+    check(a! == "wx" && n == 1 && b! == "wx" && m == 1, "a fresh string in a string? position")
+    return len(a) + len(b)
+}
+
+as_borrowed(w: string) -> int {
+    a, n = borrowed(w)
+    b, m = literal(true)
+    c, k = literal(false)
+    churn(w)
+    check(a! == "w" && b! == "lit" && c == none && n + m + k == 5, "a borrowed string in a string? position")
+    return len(a) + len(b) + len(c)
+}
+
+as_local(w: string) -> int {
+    n, a = from_local(w)
+    o = one(w)
+    b, m = from_param(o)
+    c, k = from_field(Named { name: string.concat(w, "yz") })
+    churn(w)
+    check(a! == "wx" && b! == "wx" && o! == "wx" && c! == "wyz", "a string? position from a local, a parameter, a field")
+    return len(a) + len(b) + len(c) + n + m + k
+}
+
+as_rebound(w: string) -> int {
+    a, n = fresh(w)
+    a, n = either(w, true)
+    s = len(a)
+    a, n = either(w, false)
+    _, m = fresh(w)
+    churn(w)
+    check(a! == "else" && s == 3 && n + m == 8, "a string? position destructured again")
+    return s + len(a)
+}
+
+as_closure(w: string) -> int {
+    f = | v: string | {
+        o = one(v)
+        return o, 9
+    }
+    a, n = f(w)
+    churn(w)
+    check(a! == "wx" && n == 9, "a string? position of a closure's tuple")
+    return len(a)
+}
+
+measure(which: int, w: string) -> long {
+    return mem.steady_growth(|| {
+            k = 0
+            while k < 100 {
+                if which == 0 { as_fresh(w) }
+                if which == 1 { as_borrowed(w) }
+                if which == 2 { as_local(w) }
+                if which == 3 { as_rebound(w) }
+                if which == 4 { as_closure(w) }
+                k = k + 1
+            }
+        }, 5)
+}
+
+main() {
+    println("=== test_opt_string_tuple_position ===")
+    w = "w"
+    check(as_fresh(w) == 4 && as_borrowed(w) == 3 && as_local(w) == 22, "a round adds up")
+    check(as_rebound(w) == 7 && as_closure(w) == 2, "a round adds up")
+    a, n = fresh(w)
+    churn(w)
+    check(a! == "wx" && n == 1, "a string? position destructured in main")
+    if mem.heap_in_use_exact() {
+        names = ["a fresh string", "a borrowed string", "a local, parameter or field", "a rebinding", "a closure"]
+        i = 0
+        while i < 5 {
+            grown = measure(i, w)
+            check(grown == 0, "100 string? positions from ${names[i]} grew the heap by ${grown} bytes in every run")
+            i = i + 1
+        }
+    }
+    println("=== test_opt_string_tuple_position passed ===")
+}

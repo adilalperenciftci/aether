@@ -6,16 +6,18 @@
  * declarations) and the typechecker (which must then let a read after the
  * block resolve) use, so the two cannot disagree (#2186).
  *
- * Three rules, all over the AST, before any C is emitted:
+ * Three rules, all over the AST, before any C is emitted. An arm is an if's
+ * then or else block, or a case of a switch (#2732):
  *
  *   - hoist_if_branch_candidates: a name first bound in an arm of one of a
- *     function body's top-level ifs is declared at function scope, when a
- *     top-level statement or an if condition reads it and no top-level
- *     statement declares it.
- *   - the names both arms of an if/else declare (hoist_direct_decl_names on
- *     each arm) are declared before that if, at any depth.
- *   - a while body's locals, and those of the ifs and loops nested in it
- *     (hoist_loop_decls), are declared before the while.
+ *     function body's top-level ifs or switches is declared at function
+ *     scope, when a top-level statement, an if condition or a switch subject
+ *     reads it and no top-level statement declares it.
+ *   - the names every arm of an if/else, or of a switch with a default,
+ *     declares (hoist_common_decl_names) are declared before that statement,
+ *     at any depth.
+ *   - a while body's locals, and those of the ifs, switches and loops nested
+ *     in it (hoist_loop_decls), are declared before the while.
  *
  * Whether a name is already declared, or is a module-level `var`, depends on
  * the caller's own state and is checked by the caller. */
@@ -48,13 +50,23 @@ Type* hoist_join_type(ASTNode* scope_body, const char* name, Type* seed);
  * Returns the count written to `out` (at most `cap`). */
 int hoist_if_branch_candidates(ASTNode* body, const char** out, int cap);
 
-/* The declaration of `name` in the first top-level if arm of `body` that
- * declares it (the one whose type the hoisted variable takes). */
+/* The declaration of `name` in the first arm of a top-level if or switch of
+ * `body` that declares it (the one whose type the hoisted variable takes). */
 ASTNode* hoist_if_branch_first_decl(ASTNode* body, const char* name);
+
+/* The names every arm of `stmt` declares directly, when `stmt` is an if with
+ * an else or a switch with a default (so every path binds them); 0 for any
+ * other statement. Returns the count written to `out` (at most `cap`). */
+int hoist_common_decl_names(ASTNode* stmt, const char** out, int cap);
+
+/* The declaration of `name` in an arm of `stmt` whose type the hoisted
+ * variable takes: the first whose hoist_decl_type is known, else the first. */
+ASTNode* hoist_common_first_decl(ASTNode* stmt, const char* name);
 
 /* Visit, in codegen's order, the declarations hoist_loop_vars declares
  * before a while whose body is `body`: the body's direct declarations and,
- * recursively, those in every child of the ifs and loops nested in it. */
+ * recursively, those in every child of the ifs, switches and loops nested
+ * in it. */
 typedef void (*HoistDeclVisitor)(ASTNode* decl, void* user);
 void hoist_loop_decls(ASTNode* body, HoistDeclVisitor visit, void* user);
 

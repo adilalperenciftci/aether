@@ -19,7 +19,10 @@ main() {
     // "/tmp" resolves to C:\tmp via fopen on Windows and isn't created,
     // so fs.open(w+) fails there (matches the other std.fs tests' idiom).
     tmp = os.temp_dir()
-    path = "${tmp}/aether_test_size64.bin"
+    // A name of this process's own: two sweeps at once (two worktrees, two
+    // CI jobs on one machine) shared the one name, and one run's delete
+    // landed between the other's checks ("file_stat: cannot stat path").
+    path = "${tmp}/aether_test_size64_${os.getpid()}.bin"
     fs.delete(path)
 
     // 2 GiB + 5 bytes: 2147483653 — wraps to -2147483643 through a

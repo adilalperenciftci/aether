@@ -2162,7 +2162,12 @@ fn split_ec_point(spki_key: byte[]) -> (ptr, ptr, int, string) {
 //      store and the OS defaults are not consulted. SSL_CERT_DIR may list
 //      several directories, separated by ':' (';' on Windows), as OpenSSL
 //      reads it.
-//   3. The OS defaults: the first bundle file that exists, else the first
+//   3. On Windows, every certificate of the ROOT system store together with
+//      the first bundle file of the list std.http.client's OpenSSL path looks
+//      for too. std/net/aether_http.c owns both, for both stacks, so the two
+//      cannot look in different places again (#2675). Elsewhere these come
+//      back empty and the next step decides.
+//   4. The OS defaults: the first bundle file that exists, else the first
 //      certificate directory that loads anything. Android has no bundle at
 //      all, only one-certificate-per-file directories, which is why the
 //      directory probe exists.
@@ -2207,20 +2212,14 @@ fn load_trust_anchors(cafile: string) -> (ptr, string) {
         return anchors, ""
     }
 
+    win = load_windows_anchors()
+    if win != null { return win, "" }
+
     // Bundle files.
-    b = first_existing_file5(
+    b = first_existing_file3(
         "/etc/ssl/certs/ca-certificates.crt", // Debian/Ubuntu/Alpine
         "/etc/pki/tls/certs/ca-bundle.crt", // Fedora/RHEL/CentOS
-        "/etc/ssl/cert.pem", // *BSD / macOS (LibreSSL)
-        // Windows ships no system PEM bundle, and every path above is
-        // POSIX-only, so without these a source build there had NO trust
-        // store at all. These are where the toolchains the README tells
-        // Windows users to install put the bundle. They must be native
-        // Windows paths: a compiled Aether program is a plain Win32 binary and
-        // does not inherit MSYS2's virtual mounts, so /mingw64/... does not
-        // resolve here.
-        "C:/Program Files/Git/mingw64/etc/ssl/certs/ca-bundle.crt", // Git for Windows
-        "C:/msys64/mingw64/etc/ssl/certs/ca-bundle.crt") // MSYS2 ca-certificates
+        "/etc/ssl/cert.pem") // *BSD / macOS (LibreSSL)
     if string.length(b) > 0 {
         return tls13_cert.trust_store_load(b)
     }
@@ -2234,17 +2233,41 @@ fn load_trust_anchors(cafile: string) -> (ptr, string) {
     if a2 != null { return a2, "" }
     a3, _e3 = load_cert_dir_if_present("/etc/ssl/certs")
     if a3 != null { return a3, "" }
-    return null, "no CA trust store found (looked for the system bundle and certificate directories; set SSL_CERT_FILE or SSL_CERT_DIR)"
+    return null, "no CA trust store found (looked for the system store, bundle and certificate directories; set SSL_CERT_FILE or SSL_CERT_DIR)"
 }
 
-// The first of five paths that exists as a file, or "".
-fn first_existing_file5(p1: string, p2: string, p3: string, p4: string, p5: string) -> string {
+// The first of three paths that exists as a file, or "".
+fn first_existing_file3(p1: string, p2: string, p3: string) -> string {
     if fs.file_exists(p1) == 1 { return p1 }
     if fs.file_exists(p2) == 1 { return p2 }
     if fs.file_exists(p3) == 1 { return p3 }
-    if fs.file_exists(p4) == 1 { return p4 }
-    if fs.file_exists(p5) == 1 { return p5 }
     return ""
+}
+
+// The Windows trust anchors (#2675), from std/net/aether_http.c, which
+// std.http.client's OpenSSL path reads too: the ROOT system store as PEM text,
+// and the first bundle file of the shared list (the bundle beside the
+// program, MSYS2's, Git for Windows'). Both, rather than the store alone,
+// because Windows adds a root to its store only the first time CryptoAPI
+// needs it. Elsewhere both are "", and so is the result: null.
+extern aether_tls_windows_store_pem() -> string @heap
+extern aether_tls_windows_bundle() -> string @heap
+
+fn load_windows_anchors() -> ptr {
+    anchors = list_new()
+    pem = aether_tls_windows_store_pem()
+    if pem != null {
+        if string.length(pem) > 0 { _ns = tls13_cert.trust_store_add_pem(anchors, pem) }
+    }
+    bundle = aether_tls_windows_bundle()
+    if bundle != null {
+        if string.length(bundle) > 0 { _nb, _eb = tls13_cert.trust_store_add(anchors, bundle) }
+    }
+    if list_size(anchors) == 0 {
+        tls13_cert.free_anchors(anchors)
+        return null
+    }
+    return anchors
 }
 
 // trust_store_load on `dir` when it is a directory; (null, "") when it is not.

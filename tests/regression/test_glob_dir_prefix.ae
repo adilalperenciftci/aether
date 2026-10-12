@@ -24,7 +24,7 @@ main() {
     }
 
     total_ok = 1
-    dir = "/tmp/aeth_glob_1367"
+    dir = "${os.temp_dir()}/aeth_glob_1367_${os.getpid()}"
     _ = system("rm -rf ${dir}; mkdir -p ${dir}/sub")
     _ = system("touch ${dir}/sub/a.x ${dir}/sub/b.x")
 

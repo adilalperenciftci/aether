@@ -5,6 +5,10 @@
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+# A directory of its own, not fixed /tmp paths: two sweeps at once (two
+# checkouts, or parallel agents) overwrote each other's files (#2770).
+AE_TMP="$(mktemp -d)"
+trap 'rm -rf "$AE_TMP"' EXIT
 
 pass=0
 fail=0
@@ -12,7 +16,7 @@ fail=0
 run_reject() {
     case_name="$1"
     src_file="$2"
-    if AETHER_HOME="" "$ROOT/build/ae" build "$src_file" -o /tmp/ae_hide_out 2>/dev/null; then
+    if AETHER_HOME="" "$ROOT/build/ae" build "$src_file" -o $AE_TMP/ae_hide_out 2>/dev/null; then
         echo "  [FAIL] $case_name should have been rejected"
         fail=$((fail + 1))
     else
@@ -24,7 +28,7 @@ run_reject() {
 run_accept() {
     case_name="$1"
     src_file="$2"
-    if AETHER_HOME="" "$ROOT/build/ae" build "$src_file" -o /tmp/ae_hide_out 2>/dev/null; then
+    if AETHER_HOME="" "$ROOT/build/ae" build "$src_file" -o $AE_TMP/ae_hide_out 2>/dev/null; then
         echo "  [PASS] $case_name correctly accepted"
         pass=$((pass + 1))
     else
@@ -34,7 +38,7 @@ run_accept() {
 }
 
 # Case 1: direct read of a hidden variable from a nested block
-cat > /tmp/ae_hide_read.ae << 'EOF'
+cat > $AE_TMP/ae_hide_read.ae << 'EOF'
 extern println(s: string)
 main() {
     secret = "abc"
@@ -44,10 +48,10 @@ main() {
     }
 }
 EOF
-run_reject "read of hidden variable" /tmp/ae_hide_read.ae
+run_reject "read of hidden variable" $AE_TMP/ae_hide_read.ae
 
 # Case 2: direct write to a hidden variable from a nested block
-cat > /tmp/ae_hide_write.ae << 'EOF'
+cat > $AE_TMP/ae_hide_write.ae << 'EOF'
 extern println(s: string)
 main() {
     secret = "abc"
@@ -57,10 +61,10 @@ main() {
     }
 }
 EOF
-run_reject "write to hidden variable" /tmp/ae_hide_write.ae
+run_reject "write to hidden variable" $AE_TMP/ae_hide_write.ae
 
 # Case 3: seal except whitelist excludes a name that the body uses
-cat > /tmp/ae_seal_excluded.ae << 'EOF'
+cat > $AE_TMP/ae_seal_excluded.ae << 'EOF'
 extern println(s: string)
 main() {
     allowed = "ok"
@@ -71,10 +75,10 @@ main() {
     }
 }
 EOF
-run_reject "seal except excludes used name" /tmp/ae_seal_excluded.ae
+run_reject "seal except excludes used name" $AE_TMP/ae_seal_excluded.ae
 
 # Case 4: hide propagates to nested blocks
-cat > /tmp/ae_hide_nested.ae << 'EOF'
+cat > $AE_TMP/ae_hide_nested.ae << 'EOF'
 extern println(s: string)
 main() {
     secret = "abc"
@@ -86,10 +90,10 @@ main() {
     }
 }
 EOF
-run_reject "hide propagates to nested block" /tmp/ae_hide_nested.ae
+run_reject "hide propagates to nested block" $AE_TMP/ae_hide_nested.ae
 
 # Case 5: positive control — visible name in seal whitelist works
-cat > /tmp/ae_hide_ok.ae << 'EOF'
+cat > $AE_TMP/ae_hide_ok.ae << 'EOF'
 extern println(s: string)
 main() {
     allowed = "ok"
@@ -99,10 +103,10 @@ main() {
     }
 }
 EOF
-run_accept "seal except whitelisted name" /tmp/ae_hide_ok.ae
+run_accept "seal except whitelisted name" $AE_TMP/ae_hide_ok.ae
 
 # Case 6: positive control — calling a visible function that USES the hidden var
-cat > /tmp/ae_hide_via_helper.ae << 'EOF'
+cat > $AE_TMP/ae_hide_via_helper.ae << 'EOF'
 extern println(s: string)
 helper(s: string) { println(s) }
 main() {
@@ -115,10 +119,10 @@ main() {
     }
 }
 EOF
-run_accept "calling visible helper while hiding the var" /tmp/ae_hide_via_helper.ae
+run_accept "calling visible helper while hiding the var" $AE_TMP/ae_hide_via_helper.ae
 
 # Case 7: hide inside actor receive arm blocks outer state
-cat > /tmp/ae_hide_actor_receive.ae << 'EOF'
+cat > $AE_TMP/ae_hide_actor_receive.ae << 'EOF'
 extern println(s: string)
 message Ping {}
 actor Server {
@@ -137,10 +141,10 @@ main() {
     wait_for_idle()
 }
 EOF
-run_reject "hide inside actor receive arm" /tmp/ae_hide_actor_receive.ae
+run_reject "hide inside actor receive arm" $AE_TMP/ae_hide_actor_receive.ae
 
 # Case 8: seal except inside actor receive arm blocks unlisted state
-cat > /tmp/ae_seal_actor_receive.ae << 'EOF'
+cat > $AE_TMP/ae_seal_actor_receive.ae << 'EOF'
 extern println(s: string)
 message Greet { name: string }
 actor Greeter {
@@ -159,12 +163,12 @@ main() {
     wait_for_idle()
 }
 EOF
-run_reject "seal except inside actor receive arm" /tmp/ae_seal_actor_receive.ae
+run_reject "seal except inside actor receive arm" $AE_TMP/ae_seal_actor_receive.ae
 
 # Case 9: hide on qualified name blocks prefix.member access. (This used
 # `hide string`, which failed for the wrong reason: `string` is a reserved
 # keyword, so the build stopped at E0100 before any hide check ran.)
-cat > /tmp/ae_hide_qualified.ae << 'EOF'
+cat > $AE_TMP/ae_hide_qualified.ae << 'EOF'
 import std.fs
 extern println(s: string)
 main() {
@@ -174,13 +178,13 @@ main() {
     }
 }
 EOF
-run_reject "hide blocks qualified name access" /tmp/ae_hide_qualified.ae
+run_reject "hide blocks qualified name access" $AE_TMP/ae_hide_qualified.ae
 
 # Cases 10-13: a hidden or sealed-out module prefix stays blocked in every
 # block nested inside the hiding one, as a bare name does (case 4). The
 # qualified check used to look only at the innermost scope, so one level
 # of nesting walked straight past `hide fs`.
-cat > /tmp/ae_hide_qualified_nested.ae << 'EOF'
+cat > $AE_TMP/ae_hide_qualified_nested.ae << 'EOF'
 import std.fs
 extern println(s: string)
 main() {
@@ -192,9 +196,9 @@ main() {
     }
 }
 EOF
-run_reject "hide blocks qualified access in a nested block" /tmp/ae_hide_qualified_nested.ae
+run_reject "hide blocks qualified access in a nested block" $AE_TMP/ae_hide_qualified_nested.ae
 
-cat > /tmp/ae_hide_qualified_if.ae << 'EOF'
+cat > $AE_TMP/ae_hide_qualified_if.ae << 'EOF'
 import std.fs
 check() -> int {
     hide fs
@@ -205,9 +209,9 @@ check() -> int {
 }
 main() { check() }
 EOF
-run_reject "hide blocks qualified access in an if body" /tmp/ae_hide_qualified_if.ae
+run_reject "hide blocks qualified access in an if body" $AE_TMP/ae_hide_qualified_if.ae
 
-cat > /tmp/ae_hide_qualified_closure.ae << 'EOF'
+cat > $AE_TMP/ae_hide_qualified_closure.ae << 'EOF'
 import std.fs
 extern println(s: string)
 main() {
@@ -218,9 +222,9 @@ main() {
     }
 }
 EOF
-run_reject "hide blocks qualified access in a closure" /tmp/ae_hide_qualified_closure.ae
+run_reject "hide blocks qualified access in a closure" $AE_TMP/ae_hide_qualified_closure.ae
 
-cat > /tmp/ae_seal_qualified_nested.ae << 'EOF'
+cat > $AE_TMP/ae_seal_qualified_nested.ae << 'EOF'
 import std.fs
 extern println(s: string)
 main() {
@@ -232,11 +236,11 @@ main() {
     }
 }
 EOF
-run_reject "seal except blocks qualified access in a nested block" /tmp/ae_seal_qualified_nested.ae
+run_reject "seal except blocks qualified access in a nested block" $AE_TMP/ae_seal_qualified_nested.ae
 
 # Cases 14-15: a hide covers its own block and what is nested in it,
 # nothing else; a seal lets its whitelist through at any depth.
-cat > /tmp/ae_hide_qualified_sibling.ae << 'EOF'
+cat > $AE_TMP/ae_hide_qualified_sibling.ae << 'EOF'
 import std.fs
 extern println(s: string)
 main() {
@@ -250,9 +254,9 @@ main() {
     println(fs.exists("/tmp"))
 }
 EOF
-run_accept "hide on a qualified prefix does not leak to sibling or outer blocks" /tmp/ae_hide_qualified_sibling.ae
+run_accept "hide on a qualified prefix does not leak to sibling or outer blocks" $AE_TMP/ae_hide_qualified_sibling.ae
 
-cat > /tmp/ae_seal_qualified_whitelisted.ae << 'EOF'
+cat > $AE_TMP/ae_seal_qualified_whitelisted.ae << 'EOF'
 import std.fs
 extern println(s: string)
 main() {
@@ -264,10 +268,10 @@ main() {
     }
 }
 EOF
-run_accept "seal except lets a whitelisted prefix through nested blocks" /tmp/ae_seal_qualified_whitelisted.ae
+run_accept "seal except lets a whitelisted prefix through nested blocks" $AE_TMP/ae_seal_qualified_whitelisted.ae
 
 # Cleanup
-rm -f /tmp/ae_hide_*.ae /tmp/ae_seal_*.ae /tmp/ae_hide_out
+rm -f $AE_TMP/ae_hide_*.ae $AE_TMP/ae_seal_*.ae $AE_TMP/ae_hide_out
 
 echo ""
 echo "Hide/seal rejection tests: $pass passed, $fail failed"

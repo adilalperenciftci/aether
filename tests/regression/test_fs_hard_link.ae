@@ -24,7 +24,7 @@ check(label: string, ok: int) {
 
 main() {
     println("=== fs hard links ===")
-    base = "${os.temp_dir()}/aether_fs_hard_link_test"
+    base = "${os.temp_dir()}/aether_fs_hard_link_test_${os.getpid()}"
     fs.remove_tree(base)
     fs.create_dir(base)
     a = "${base}/a.txt"

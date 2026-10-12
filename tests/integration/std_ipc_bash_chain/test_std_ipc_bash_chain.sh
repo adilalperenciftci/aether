@@ -29,8 +29,11 @@ fi
 
 cd "$ROOT" || exit 1
 
+# The probe builds its child in the temp directory under a name of its own
+# process (#2771); TMPDIR names this run's directory, which the trap removes.
 TMPDIR="$(mktemp -d)"
-trap 'rm -rf "$TMPDIR" || true; rm -f /tmp/std_ipc_bash_chain_child || true' EXIT
+export TMPDIR
+trap 'rm -rf "$TMPDIR" || true' EXIT
 
 if ! AETHER_HOME="$ROOT" "$AE" run "$SCRIPT_DIR/probe.ae" >"$TMPDIR/out.log" 2>&1; then
     echo "  [FAIL] std_ipc_bash_chain"

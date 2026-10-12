@@ -526,6 +526,15 @@ static int bg_expand(const char* cc, const char* header,
     return 1;
 }
 
+void ae_bindgen_usage(FILE* out) {
+    fprintf(out,
+           "Usage: ae bindgen consts <header.h> [-I dir]... [--match PREFIX] [-o out.ae]\n"
+           "  Imports object-like C macros that expand to integer constant\n"
+           "  expressions, string literals, or float literals as Aether consts.\n"
+           "  Skipped macros are listed in a comment at the end of the output.\n"
+           "  With no -o, writes to stdout.\n");
+}
+
 int ae_bindgen_consts(const char* cc, int argc, char** argv) {
     const char* header = NULL;
     const char* out_path = NULL;
@@ -548,11 +557,7 @@ int ae_bindgen_consts(const char* cc, int argc, char** argv) {
         } else if (strcmp(argv[i], "-o") == 0 && i + 1 < argc) {
             out_path = argv[++i];
         } else if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
-            printf("Usage: ae bindgen consts <header.h> [-I dir]... [--match PREFIX] [-o out.ae]\n"
-                   "  Imports object-like C macros that expand to integer constant\n"
-                   "  expressions, string literals, or float literals as Aether consts.\n"
-                   "  Skipped macros are listed in a comment at the end of the output.\n"
-                   "  With no -o, writes to stdout.\n");
+            ae_bindgen_usage(stdout);
             return 0;
         } else if (argv[i][0] == '-') {
             fprintf(stderr, "ae bindgen: unknown flag '%s' (see ae bindgen consts --help)\n", argv[i]);

@@ -4192,6 +4192,233 @@ static const char* vendored_sqlite_link(const char* cc, const char* ae_link,
     return rewritten;
 }
 
+/* #2757: a source build (`ae build --trace`, or a toolchain with no
+ * libaether.a) handed every runtime source to the one compiler command that
+ * links the program, and the compiler took them one after another: about 90
+ * sources, 150 s of `ae build --trace` on a Windows CI runner. They are
+ * compiled to objects here first, as many at a time as there are
+ * processors, and the link takes the objects.
+ *
+ * Anything this cannot do the old way still does: a failed compile, a
+ * compiler that is a Windows batch file (whose command line cmd.exe caps),
+ * one processor or one source leave the sources on the link command, which
+ * then compiles them as before and reports an error as before. */
+
+static void ae_remove_tree(const char* path);
+
+static int ae_cpu_count(void) {
+#ifdef _WIN32
+    SYSTEM_INFO si;
+    GetSystemInfo(&si);
+    long n = (long)si.dwNumberOfProcessors;
+#else
+    long n = sysconf(_SC_NPROCESSORS_ONLN);
+#endif
+    if (n < 1) n = 1;
+    if (n > 32) n = 32;
+    return (int)n;
+}
+
+/* Runs the commands `cmds[0..n)` at most `jobs` at a time, each one's
+ * stdout and stderr in the file `logs[i]`. Starts nothing more after a
+ * failure, waits for what is running, and returns the index of the first
+ * command that failed or could not start, or -1 when all succeeded. */
+static int ae_run_parallel(char* const* cmds, char* const* logs, int n, int jobs) {
+    int failed = -1, next = 0, running = 0;
+#ifdef _WIN32
+    HANDLE hs[MAXIMUM_WAIT_OBJECTS];
+    int hidx[MAXIMUM_WAIT_OBJECTS];
+    if (jobs > MAXIMUM_WAIT_OBJECTS) jobs = MAXIMUM_WAIT_OBJECTS;
+    while (next < n || running > 0) {
+        while (failed < 0 && next < n && running < jobs) {
+            char** argv = ae_split_command(cmds[next], NULL);
+            int argc = 0;
+            size_t room = 0;
+            for (; argv && argv[argc]; argc++) room += 2 * strlen(argv[argc]) + 3;
+            char** list = argc ? malloc(((size_t)argc + 1) * sizeof(char*) + room) : NULL;
+            if (!list) { free(argv); failed = next; break; }
+            char* w = (char*)list + ((size_t)argc + 1) * sizeof(char*);
+            for (int i = 0; i < argc; i++) {
+                list[i] = w;
+                w = win_quote_arg(argv[i], w);
+                *w++ = '\0';
+            }
+            list[argc] = NULL;
+            /* The child takes the C runtime's descriptors 1 and 2 as they
+             * are when it starts: pointed at its log for that moment. */
+            int fd = _open(logs[next], _O_WRONLY | _O_CREAT | _O_TRUNC, _S_IREAD | _S_IWRITE);
+            if (fd < 0) { free(list); free(argv); failed = next; break; }
+            fflush(stdout);
+            fflush(stderr);
+            int saved1 = _dup(1), saved2 = _dup(2);
+            _dup2(fd, 1);
+            _dup2(fd, 2);
+            _close(fd);
+            intptr_t h = _spawnvp(_P_NOWAIT, argv[0], (const char* const*)list);
+            if (saved1 >= 0) { _dup2(saved1, 1); _close(saved1); }
+            if (saved2 >= 0) { _dup2(saved2, 2); _close(saved2); }
+            free(list);
+            free(argv);
+            if (h == -1) { failed = next; break; }
+            hs[running] = (HANDLE)h;
+            hidx[running] = next;
+            running++;
+            next++;
+        }
+        if (running == 0) break;
+        DWORD r = WaitForMultipleObjects((DWORD)running, hs, FALSE, INFINITE);
+        if (r < WAIT_OBJECT_0 || r >= WAIT_OBJECT_0 + (DWORD)running) {
+            /* Nothing to wait on any more: end the rest rather than leave
+             * them compiling into a directory about to be removed. */
+            for (int k = 0; k < running; k++) {
+                TerminateProcess(hs[k], 1);
+                CloseHandle(hs[k]);
+            }
+            return failed >= 0 ? failed : hidx[0];
+        }
+        int k = (int)(r - WAIT_OBJECT_0);
+        DWORD code = 1;
+        GetExitCodeProcess(hs[k], &code);
+        CloseHandle(hs[k]);
+        if (code != 0 && failed < 0) failed = hidx[k];
+        hs[k] = hs[running - 1];
+        hidx[k] = hidx[running - 1];
+        running--;
+    }
+#else
+    pid_t* pids = calloc((size_t)n, sizeof(pid_t));
+    if (!pids) return 0;
+    while (next < n || running > 0) {
+        while (failed < 0 && next < n && running < jobs) {
+            char** argv = ae_split_command(cmds[next], NULL);
+            if (!argv || !argv[0]) { free(argv); failed = next; break; }
+            posix_spawn_file_actions_t fa;
+            posix_spawn_file_actions_init(&fa);
+            posix_spawn_file_actions_addopen(&fa, STDOUT_FILENO, logs[next],
+                                             O_WRONLY | O_CREAT | O_TRUNC, 0600);
+            posix_spawn_file_actions_adddup2(&fa, STDOUT_FILENO, STDERR_FILENO);
+            pid_t pid;
+            int ret = posix_spawnp(&pid, argv[0], &fa, NULL, argv, environ);
+            posix_spawn_file_actions_destroy(&fa);
+            free(argv);
+            if (ret != 0) { failed = next; break; }
+            pids[next] = pid;
+            running++;
+            next++;
+        }
+        if (running == 0) break;
+        int status = 0;
+        pid_t p = waitpid(-1, &status, 0);
+        if (p < 0) {
+            if (errno == EINTR) continue;
+            break;   /* ECHILD: none of ours is left */
+        }
+        for (int i = 0; i < next; i++) {
+            if (pids[i] != p) continue;
+            pids[i] = 0;
+            running--;
+            int ok = WIFEXITED(status) && WEXITSTATUS(status) == 0;
+            if (!ok && failed < 0) failed = i;
+            break;
+        }
+    }
+    free(pids);
+#endif
+    return failed;
+}
+
+/* The object directory of this process's source build, removed at exit. */
+static char g_rt_obj_dir[1024];
+
+static void ae_remove_rt_obj_dir(void) {
+    if (g_rt_obj_dir[0]) ae_remove_tree(g_rt_obj_dir);
+    g_rt_obj_dir[0] = '\0';
+}
+
+static int ae_make_rt_obj_dir(void) {
+    if (g_rt_obj_dir[0]) return 1;
+#ifdef _WIN32
+    static int seq = 0;
+    for (int tries = 0; tries < 100; tries++) {
+        snprintf(g_rt_obj_dir, sizeof(g_rt_obj_dir), "%s/ae-rtobj-%d-%d",
+                 get_temp_dir(), (int)getpid(), seq++);
+        for (char* q = g_rt_obj_dir; *q; q++) if (*q == '\\') *q = '/';
+        if (_mkdir(g_rt_obj_dir) == 0) break;
+        g_rt_obj_dir[0] = '\0';
+    }
+#else
+    snprintf(g_rt_obj_dir, sizeof(g_rt_obj_dir), "%s/ae-rtobj-XXXXXX", get_temp_dir());
+    if (!mkdtemp(g_rt_obj_dir)) g_rt_obj_dir[0] = '\0';
+#endif
+    if (!g_rt_obj_dir[0]) return 0;
+    atexit(ae_remove_rt_obj_dir);
+    return 1;
+}
+
+/* Compiles the runtime sources of `srcs` (the quoted list a source build
+ * links) with `cc` and the compile flags `cflags`, in parallel, and returns
+ * the quoted list of their objects for the link (heap, the caller frees),
+ * or NULL to leave the sources on the link command as before. */
+static char* ae_precompile_runtime_srcs(const char* cc, const char* cflags, const char* srcs) {
+    if (!srcs || !srcs[0]) return NULL;
+    int jobs = ae_cpu_count();
+    if (jobs < 2) return NULL;
+#ifdef _WIN32
+    char** ccv = ae_split_command(cc, NULL);
+    int batch = !ccv || !ccv[0] || win_prog_is_batch(ccv[0]);
+    free(ccv);
+    if (batch) return NULL;
+#endif
+    int n = 0;
+    char** src = ae_split_command(srcs, &n);
+    if (!src || n < 2 || !ae_make_rt_obj_dir()) { free(src); return NULL; }
+    char** cmds = calloc((size_t)n, sizeof(char*));
+    char** logs = calloc((size_t)n, sizeof(char*));
+    char** objs = calloc((size_t)n, sizeof(char*));
+    char* list = NULL;
+    size_t list_len = 0;
+    int ok = cmds && logs && objs;
+    for (int i = 0; ok && i < n; i++) {
+        const char* base = strrchr(src[i], '/');
+        const char* b2 = strrchr(src[i], '\\');
+        if (b2 && (!base || b2 > base)) base = b2;
+        base = base ? base + 1 : src[i];
+        /* The index keeps two sources of one name apart. */
+        objs[i] = ae_path_printf("%s/%d_%s.o", g_rt_obj_dir, i, base);
+        logs[i] = ae_path_printf("%s/%d_%s.log", g_rt_obj_dir, i, base);
+        cmds[i] = ae_strdup_printf("%s %s -c \"%s\" -o \"%s\"", cc, cflags, src[i], objs[i]);
+        if (!objs[i] || !logs[i] || !cmds[i]) { ok = 0; break; }
+        list_len += strlen(objs[i]) + 4;
+    }
+    if (ok) {
+        if (tc.verbose)
+            fprintf(stderr, "[cmd] compiling %d runtime sources, %d at a time, into %s\n",
+                    n, jobs, g_rt_obj_dir);
+        int failed = ae_run_parallel(cmds, logs, n, jobs);
+        if (failed >= 0) {
+            if (tc.verbose)
+                fprintf(stderr, "[cmd] %s failed; the link command compiles the sources\n",
+                        cmds[failed]);
+            ok = 0;
+        }
+    }
+    if (ok && (list = malloc(list_len + 1)) != NULL) {
+        size_t o = 0;
+        for (int i = 0; i < n; i++)
+            o += (size_t)snprintf(list + o, list_len + 1 - o, "\"%s\" ", objs[i]);
+    }
+    for (int i = 0; i < n; i++) {
+        if (cmds) free(cmds[i]);
+        if (logs) free(logs[i]);
+        if (objs) free(objs[i]);
+    }
+    free(cmds);
+    free(logs);
+    free(objs);
+    free(src);
+    return ok ? list : NULL;
+}
+
 void build_gcc_cmd(char* cmd, size_t size,
                           const char* c_file, const char* out_file,
                           bool optimize, const char* extra_files) {
@@ -4427,12 +4654,22 @@ void build_gcc_cmd(char* cmd, size_t size,
             cmd_too_long(cmd, size, w);
         }
     } else {
+        /* #2757: the runtime sources compiled to objects in parallel, when
+         * that can be done; else the sources, compiled by this command. */
+        char* rt_objs = NULL;
+        if (!g_emit_obj && !g_emit_csrc) {
+            char* rt_cflags = ae_strdup_printf("%s %s %s %s", opt, tc.include_flags,
+                                               ae_includes, pcre2_src_defs);
+            if (rt_cflags) rt_objs = ae_precompile_runtime_srcs(s_gcc_cmd, rt_cflags, tc.runtime_srcs);
+            free(rt_cflags);
+        }
         /* Order matters, same as the POSIX branch: the host-bridge .a
          * references runtime symbols defined in tc.runtime_srcs, so it must
          * come BEFORE that source list on the command line. */
         int w = snprintf(cmd, size,
             "%s %s %s %s \"%s\"%s %s %s %s%s -o \"%s\" %s %s %s %s %s %s %s %s %s %s %s",
-            s_gcc_cmd, opt, tc.include_flags, ae_includes, c_file, config_c, extra, g_host_bridge_link, pcre2_src_defs, tc.runtime_srcs, out_file, openssl_libs, zlib_libs, nghttp2_libs, pcre2_libs, brotli_libs, zstd_libs, audio_libs, yaml_libs, win_link_libs, ae_link, link_flags);
+            s_gcc_cmd, opt, tc.include_flags, ae_includes, c_file, config_c, extra, g_host_bridge_link, pcre2_src_defs, rt_objs ? rt_objs : tc.runtime_srcs, out_file, openssl_libs, zlib_libs, nghttp2_libs, pcre2_libs, brotli_libs, zstd_libs, audio_libs, yaml_libs, win_link_libs, ae_link, link_flags);
+        free(rt_objs);
         if (w >= (int)size) {
             cmd_too_long(cmd, size, w);
         }
@@ -4690,13 +4927,24 @@ void build_gcc_cmd(char* cmd, size_t size,
             cmd_too_long(cmd, size, w);
         }
     } else {
+        /* #2757: the runtime sources compiled to objects in parallel, when
+         * that can be done; else the sources, compiled by this command. */
+        char* rt_objs = NULL;
+        if (!g_emit_obj && !g_emit_csrc) {
+            char* rt_cflags = ae_strdup_printf("%s %s %s %s %s", opt, tc.include_flags,
+                                               ae_includes, pcre2_src_defs,
+                                               macos_homebrew_flags(0));
+            if (rt_cflags) rt_objs = ae_precompile_runtime_srcs(cc, rt_cflags, tc.runtime_srcs);
+            free(rt_cflags);
+        }
         // Order matters: host-bridge .a files reference runtime
         // symbols defined in tc.runtime_srcs (aether_shared_map_*,
         // etc.), so they appear BEFORE the runtime source list.
         int w = snprintf(cmd, size,
             "%s %s %s %s \"%s\"%s %s %s %s%s -rdynamic -o \"%s\" -pthread -lm %s %s %s %s %s %s %s %s %s %s %s %s%s",
-            cc, opt, tc.include_flags, ae_includes, c_file, config_c, extra, g_host_bridge_link, pcre2_src_defs, tc.runtime_srcs, out_file, openssl_libs, zlib_libs, nghttp2_libs, pcre2_libs, brotli_libs, zstd_libs, casper_libs, audio_libs, yaml_libs, ae_link, link_flags, binimport_link(),
+            cc, opt, tc.include_flags, ae_includes, c_file, config_c, extra, g_host_bridge_link, pcre2_src_defs, rt_objs ? rt_objs : tc.runtime_srcs, out_file, openssl_libs, zlib_libs, nghttp2_libs, pcre2_libs, brotli_libs, zstd_libs, casper_libs, audio_libs, yaml_libs, ae_link, link_flags, binimport_link(),
             macos_homebrew_flags(!g_emit_obj && !g_emit_csrc));
+        free(rt_objs);
         if (w >= (int)size) {
             cmd_too_long(cmd, size, w);
         }
@@ -6118,6 +6366,192 @@ static char* run_mode_salt(void) {
     char* salt = libs ? ae_strdup_printf("run%s", libs) : NULL;
     free(libs);
     return salt;
+}
+
+// =============================================================================
+// Per-command help (#2753)
+//
+// `ae <command> --help` (or -h) prints that command's usage on stdout and
+// exits 0 without doing anything else. main() looks for the flag among the
+// command's own arguments, up to a `--` (what follows belongs to the program
+// `ae run` starts), before it dispatches, so no command gets to act on its
+// arguments first. Inside a project `ae build --help` used to build it: the
+// build skipped the flag as "consumed by the global pre-dispatch parse",
+// which had never acted on it, and most other commands ran, installed,
+// took "--help" for a name or reported it as an error instead. Every command
+// `ae help` lists has an entry here; tests/integration/subcommand_help asks
+// each one.
+// =============================================================================
+
+static void print_usage(void);
+static void cflags_usage(void);
+static void lib_path_usage(void);
+static void fmt_usage(void);
+
+static void build_usage(FILE* out) {
+    fprintf(out, "Usage: ae build [file.ae | dir | bin-name] [options]\n");
+    fprintf(out, "  Compile a program to an executable (or a library, with --emit). With no\n");
+    fprintf(out, "  file, builds the project's src/main.ae; a bin-name is a [[bin]] of\n");
+    fprintf(out, "  aether.toml.\n");
+    fprintf(out, "\nOptions:\n");
+    fprintf(out, "  -o <path>          Output path\n");
+    fprintf(out, "  --quick            Compile with -O0 -g for faster iteration (default: -O2)\n");
+    fprintf(out, "  --profile          Compile with -O2 -g -fno-omit-frame-pointer (for perf/gdb)\n");
+    fprintf(out, "  --size             Compile with -Oz -g0 and strip at link, for a shipped\n");
+    fprintf(out, "                     artifact (biggest win on --target, where zig emits DWARF\n");
+    fprintf(out, "                     by default: a wasm --emit=lib drops ~38x)\n");
+    fprintf(out, "  --coverage         Instrument for gcov (compiles with -O0 -g)\n");
+    fprintf(out, "  --trace            Compile message tracing in (run with AETHER_TRACE=<file>)\n");
+    fprintf(out, "  --emit=<kind>      exe (default), lib, staticlib, both, obj or csrc\n");
+    fprintf(out, "  --with=<caps>      Capabilities an --emit=lib library may use\n");
+    fprintf(out, "  --export=<name>    Export one symbol from a library (repeatable);\n");
+    fprintf(out, "                     --exports=a,b names several\n");
+    fprintf(out, "  --package <name>   Build every module of a package into one library\n");
+    fprintf(out, "  --namespace <dir>  Build a namespace and its per-language SDKs\n");
+    fprintf(out, "  --shared-runtime   Link against the shared runtime\n");
+    fprintf(out, "  --extra <file.c>   Compile and link a C file too (repeatable)\n");
+    fprintf(out, "  --lib <dir>        Module search path (repeatable, or %c-separated)\n",
+            AETHER_LIB_PATH_SEP_CHAR);
+    fprintf(out, "  --override <dep>=<path>  Use a local checkout for a dependency\n");
+    fprintf(out, "  -D NAME            Declare a build symbol for `when defined(NAME)`\n");
+    fprintf(out, "  --target <triple>  Cross-compile via zig cc: wasm, aarch64-macos, x86_64-macos,\n");
+    fprintf(out, "             aarch64-linux, x86_64-linux (glibc; carries a GLIBC floor),\n");
+    fprintf(out, "             aarch64-linux-musl, x86_64-linux-musl, riscv64-linux-musl,\n");
+    fprintf(out, "             loongarch64-linux-musl (static; no libc floor),\n");
+    fprintf(out, "             aarch64-freebsd, x86_64-freebsd,\n");
+    fprintf(out, "             aarch64-linux-android (bionic, API 29+; AETHER_ANDROID_API to change),\n");
+    fprintf(out, "             x86_64-windows, aarch64-windows (-> foo.exe; self-contained)\n");
+    fprintf(out, "             (freebsd needs AETHER_SYSROOT=<base sysroot>; see aether-crossbuild)\n");
+    fprintf(out, "             aarch64-ios, aarch64-ios-simulator, x86_64-ios-simulator,\n");
+    fprintf(out, "             aarch64-ios-macabi, x86_64-ios-macabi (Mac Catalyst)\n");
+    fprintf(out, "             (iOS uses Xcode/xcrun, not zig; macOS host only;\n");
+    fprintf(out, "              --emit=lib gives a dylib, --emit=staticlib a .a -- an App\n");
+    fprintf(out, "              Store build needs the .a, as iOS forbids 3rd-party dylibs;\n");
+    fprintf(out, "              AETHER_IOS_MIN sets the deployment target, default 15.0\n");
+    fprintf(out, "              for iOS; Catalyst 13.1 x86_64 / 14.0 arm64)\n");
+}
+
+static void add_usage(FILE* out) {
+    fprintf(out, "Usage: ae add <host>/<user>/<repo>[@version] [--source] [--target <triple>]\n");
+    fprintf(out, "Examples:\n");
+    fprintf(out, "  ae add github.com/user/repo\n");
+    fprintf(out, "  ae add github.com/user/repo@v1.2.0\n");
+    fprintf(out, "  ae add gitlab.com/user/repo\n");
+    fprintf(out, "  ae add github.com/user/repo@v1.2.0 --target macos-arm64\n");
+    fprintf(out, "\nWith @version, a matching release artifact is preferred when the\n");
+    fprintf(out, "package publishes one: a binary package (a released aether.toml with\n");
+    fprintf(out, "a `binary` key naming a bare per-triple shared lib), else a source\n");
+    fprintf(out, "archive. A binary package REQUIRES a published .sha256 (an\n");
+    fprintf(out, "unverifiable shared library is refused). --source forces the git\n");
+    fprintf(out, "clone. --target <triple> fetches a FOREIGN platform's binary package\n");
+    fprintf(out, "(e.g. linux-x86_64, macos-arm64, freebsd-x86_64) instead of the\n");
+    fprintf(out, "host's, for cross-platform bundling.\n");
+}
+
+static void lib_info_usage(FILE* out) {
+    fprintf(out,
+        "Usage: ae lib-info <path-to-library>\n"
+        "\n"
+        "Prints the symbol catalog embedded in an `--emit=lib` artifact:\n"
+        "  ae build --emit=lib script.ae -o build/script.so\n"
+        "  ae lib-info build/script.so\n");
+}
+
+/* Prints `cmd`'s usage on stdout. 0 when `cmd` is not a command. */
+static int print_command_help(const char* cmd) {
+    if (strcmp(cmd, "help") == 0) {
+        print_usage();
+    } else if (strcmp(cmd, "build") == 0) {
+        build_usage(stdout);
+    } else if (strcmp(cmd, "add") == 0) {
+        add_usage(stdout);
+    } else if (strcmp(cmd, "lib-info") == 0) {
+        lib_info_usage(stdout);
+    } else if (strcmp(cmd, "cflags") == 0) {
+        cflags_usage();
+    } else if (strcmp(cmd, "lib-path") == 0) {
+        lib_path_usage();
+    } else if (strcmp(cmd, "fmt") == 0) {
+        fmt_usage();
+    } else if (strcmp(cmd, "checksec") == 0) {
+        ae_checksec_usage();
+    } else if (strcmp(cmd, "bindgen") == 0) {
+        ae_bindgen_usage(stdout);
+    } else if (strcmp(cmd, "version") == 0) {
+        printf("Usage: ae version [<subcommand>]\n");
+        printf("  With no subcommand, print this binary's version, the aetherc it runs\n");
+        printf("  and any newer release.\n\n");
+        ae_version_subcommands(stdout);
+    } else if (strcmp(cmd, "init") == 0) {
+        printf("Usage: ae init <name>\n");
+        printf("  Create a project in the new directory <name>: aether.toml, src/main.ae,\n");
+        printf("  tests/, README.md and .gitignore. Fails if <name> already exists.\n");
+    } else if (strcmp(cmd, "run") == 0) {
+        printf("Usage: ae run [file.ae | dir] [options] [-- program args...]\n");
+        printf("  Compile and run a program. With no file, runs the project's src/main.ae.\n");
+        printf("  Everything after `--` is passed to the program.\n");
+        printf("\nOptions:\n");
+        printf("  --extra <file.c>         Compile and link a C file too (repeatable)\n");
+        printf("  --lib <dir>              Module search path (repeatable, or %c-separated)\n",
+               AETHER_LIB_PATH_SEP_CHAR);
+        printf("  --override <dep>=<path>  Use a local checkout for a dependency\n");
+        printf("  --shared-runtime         Link against the shared runtime\n");
+        printf("  -D NAME                  Declare a build symbol for `when defined(NAME)`\n");
+    } else if (strcmp(cmd, "check") == 0) {
+        printf("Usage: ae check [file.ae] [-D NAME]\n");
+        printf("  Type-check a program without compiling it. With no file, checks the\n");
+        printf("  project's src/main.ae.\n");
+    } else if (strcmp(cmd, "inspect") == 0) {
+        printf("Usage: ae inspect [file.ae]\n");
+        printf("  Show what a script declares: imports, capabilities, exports and\n");
+        printf("  declarations. With no file, inspects the project's src/main.ae.\n");
+    } else if (strcmp(cmd, "test") == 0) {
+        printf("Usage: ae test [file.ae | dir]... [--list] [--format=tap|aeocha-v1] [-D NAME]\n");
+        printf("  Build and run tests. Every file and directory named runs, in order; a\n");
+        printf("  directory runs its tests/ subdirectory when it has one, else itself. With\n");
+        printf("  no target, runs tests/. In a directory a test is a file named test_*.ae\n");
+        printf("  or *_test.ae (fixtures/ left out). A test passes by exiting 0, and the run\n");
+        printf("  fails if any test fails.\n");
+        printf("\nOptions:\n");
+        printf("  --list               Print the test files that would run, run nothing\n");
+        printf("  --format=tap         One aggregated TAP version 13 stream on stdout\n");
+        printf("  --format=aeocha-v1   One aeocha v1 block per test file on stdout\n");
+        printf("  -D NAME              Declare a build symbol for `when defined(NAME)`\n");
+    } else if (strcmp(cmd, "cache") == 0) {
+        printf("Usage: ae cache [info|gc|clear]\n");
+        printf("  info   Show the build cache's size, location and limit (the default)\n");
+        printf("  gc     Evict least-recently-used builds down to the limit now\n");
+        printf("  clear  Remove every cached build\n");
+    } else if (strcmp(cmd, "examples") == 0) {
+        printf("Usage: ae examples [dir]\n");
+        printf("  Build every .ae file under dir (default: examples) into build/examples/.\n");
+    } else if (strcmp(cmd, "repl") == 0) {
+        printf("Usage: ae repl\n");
+        printf("  Start the interactive REPL.\n");
+    } else if (strcmp(cmd, "install") == 0) {
+        printf("Usage: ae install [<version>]\n");
+        printf("  Download and install a release (the latest when no version is given)\n");
+        printf("  beside the others in ~/.aether/versions. `ae use <version>` switches to it.\n");
+    } else if (strcmp(cmd, "upgrade") == 0 || strcmp(cmd, "update") == 0) {
+        printf("Usage: ae %s\n", cmd);
+        printf("  Install the latest release and switch to it.\n");
+    } else if (strcmp(cmd, "use") == 0) {
+        printf("Usage: ae use <version>   (e.g. ae use v0.231.0)\n");
+        printf("  Switch to an installed release. `ae version installed` lists them.\n");
+    } else {
+        return 0;
+    }
+    return 1;
+}
+
+/* True when the command's own arguments ask for help: -h or --help before
+ * any `--`. */
+static int args_ask_for_help(int argc, char** argv) {
+    for (int i = 0; i < argc; i++) {
+        if (strcmp(argv[i], "--") == 0) return 0;
+        if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) return 1;
+    }
+    return 0;
 }
 
 static int cmd_run(int argc, char** argv) {
@@ -7870,7 +8304,7 @@ static void emit_namespace_bindings(const char* manifest_path,
 
 #include <dirent.h>
 
-int cmd_build_namespace(int argc, char** argv) {
+static int build_namespace_in(const char* tmpdir, int argc, char** argv) {
     const char* dir = NULL;
     const char* output_name = NULL;
 
@@ -7905,12 +8339,6 @@ int cmd_build_namespace(int argc, char** argv) {
 #else
     const char* lib_ext = ".so";
 #endif
-
-    /* Set up a temp workspace for the synthesized .ae, the .c outputs,
-     * and the describe stub. Nothing here outlives the build. */
-    char tmpdir[1024];
-    snprintf(tmpdir, sizeof(tmpdir), "%s/aether_ns_%d", get_temp_dir(), (int)getpid());
-    mkdirs(tmpdir);
 
     /* Step 1: produce the describe.c stub from manifest.ae. */
     char describe_c[1056];  // tmpdir[1024] + "/aether_describe.c" + NUL
@@ -8192,6 +8620,21 @@ int cmd_build_namespace(int argc, char** argv) {
     return rc;
 }
 
+/* `ae build --namespace`. The synthesized .ae, the .c outputs and the
+ * describe stub go to a temp workspace of this process's own, removed on
+ * every way out of the build, failed or not: it used to be left behind every
+ * time, one aether_ns_<pid> directory per build (#2773). One left by an
+ * earlier process that had the same pid is cleared first. */
+int cmd_build_namespace(int argc, char** argv) {
+    char tmpdir[1024];
+    snprintf(tmpdir, sizeof(tmpdir), "%s/aether_ns_%d", get_temp_dir(), (int)getpid());
+    ae_remove_tree(tmpdir);
+    mkdirs(tmpdir);
+    int rc = build_namespace_in(tmpdir, argc, argv);
+    ae_remove_tree(tmpdir);
+    return rc;
+}
+
 
 static int cmd_build(int argc, char** argv) {
     const char* file = NULL;
@@ -8440,15 +8883,16 @@ static int cmd_build(int argc, char** argv) {
             return cmd_build_namespace(argc, argv);
         } else if (argv[i][0] != '-') {
             file = argv[i];
-        } else if (strcmp(argv[i], "-v") == 0 || strcmp(argv[i], "--verbose") == 0 ||
-                   strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
-            /* Consumed by the global pre-dispatch parse, seen again here. */
+        } else if (strcmp(argv[i], "-v") == 0 || strcmp(argv[i], "--verbose") == 0) {
+            /* Consumed by the global pre-dispatch parse, seen again here.
+             * -h and --help never get this far: main() answers them before
+             * any command runs (#2753). */
         } else {
             /* An unrecognised flag used to be dropped silently, so a typo
                (`--targt=x86_64-linux`, `--emit-c`) built something other than
                what was asked for and reported success. */
             fprintf(stderr, "Error: Unknown option '%s' for `ae build`.\n", argv[i]);
-            fprintf(stderr, "Run `ae build` with no arguments to list the options.\n");
+            fprintf(stderr, "Run `ae build --help` to list the options.\n");
             return 1;
         }
     }
@@ -8588,27 +9032,7 @@ static int cmd_build(int argc, char** argv) {
 
     if (!file) {
         fprintf(stderr, "Error: No input file specified.\n");
-        fprintf(stderr, "Usage: ae build <file.ae> [-o output] [--extra file.c] [--quick] [--profile] [--size] [--target=<triple>] [-D SYMBOL]\n");
-        fprintf(stderr, "  --quick    Compile with -O0 -g for faster iteration (default: -O2)\n");
-        fprintf(stderr, "  --profile  Compile with -O2 -g -fno-omit-frame-pointer (for perf/gdb)\n");
-        fprintf(stderr, "  --size     Compile with -Oz -g0 and strip at link, for a shipped\n");
-        fprintf(stderr, "             artifact (biggest win on --target, where zig emits DWARF\n");
-        fprintf(stderr, "             by default: a wasm --emit=lib drops ~38x)\n");
-        fprintf(stderr, "  --target   Cross-compile via zig cc: wasm, aarch64-macos, x86_64-macos,\n");
-        fprintf(stderr, "             aarch64-linux, x86_64-linux (glibc; carries a GLIBC floor),\n");
-        fprintf(stderr, "             aarch64-linux-musl, x86_64-linux-musl, riscv64-linux-musl,\n");
-        fprintf(stderr, "             loongarch64-linux-musl (static; no libc floor),\n");
-        fprintf(stderr, "             aarch64-freebsd, x86_64-freebsd,\n");
-        fprintf(stderr, "             aarch64-linux-android (bionic, API 29+; AETHER_ANDROID_API to change),\n");
-        fprintf(stderr, "             x86_64-windows, aarch64-windows (-> foo.exe; self-contained)\n");
-        fprintf(stderr, "             (freebsd needs AETHER_SYSROOT=<base sysroot>; see aether-crossbuild)\n");
-        fprintf(stderr, "             aarch64-ios, aarch64-ios-simulator, x86_64-ios-simulator,\n");
-        fprintf(stderr, "             aarch64-ios-macabi, x86_64-ios-macabi (Mac Catalyst)\n");
-        fprintf(stderr, "             (iOS uses Xcode/xcrun, not zig; macOS host only;\n");
-        fprintf(stderr, "              --emit=lib gives a dylib, --emit=staticlib a .a -- an App\n");
-        fprintf(stderr, "              Store build needs the .a, as iOS forbids 3rd-party dylibs;\n");
-        fprintf(stderr, "              AETHER_IOS_MIN sets the deployment target, default 15.0\n");
-        fprintf(stderr, "              for iOS; Catalyst 13.1 x86_64 / 14.0 arm64)\n");
+        build_usage(stderr);
         return 1;
     }
 
@@ -9547,8 +9971,60 @@ static int path_has_fixtures_dir(const char* path) {
     return 0;
 }
 
+/* Appends the tests under `test_dir` to the list: files named test_*.ae or
+ * *_test.ae (like pytest's test_*.py or Go's *_test.go), with any fixtures/
+ * directory below `test_dir` left out. Returns 0 when out of memory, else 1,
+ * also when the directory holds no test at all. */
+static int test_collect_dir(const char* test_dir, char*** files, int* count, int* cap) {
+    char find_cmd[4096 + 128];
+#ifdef _WIN32
+    snprintf(find_cmd, sizeof(find_cmd),
+        "dir /b /s \"%s\\*.ae\" 2>nul", test_dir);
+#else
+    snprintf(find_cmd, sizeof(find_cmd),
+        "find \"%s\" \\( -name 'test_*.ae' -o -name '*_test.ae' \\) -type f 2>/dev/null | sort",
+        test_dir);
+#endif
+    FILE* pipe = popen(find_cmd, "r");
+    if (!pipe) return 1;
+    char line[4096];
+    int oom = 0;
+    while (fgets(line, sizeof(line), pipe)) {
+        line[strcspn(line, "\r\n")] = '\0';
+        if (strlen(line) == 0) continue;
+        const char* base = strrchr(line, '/');
+        if (!base) base = strrchr(line, '\\');
+        base = base ? base + 1 : line;
+        if (strncmp(base, "test_", 5) != 0) {
+            // Check *_test.ae pattern
+            const char* ext = strstr(base, "_test.ae");
+            if (!ext || strcmp(ext, "_test.ae") != 0) continue;
+        }
+        /* The rule applies below the directory being searched, so the path
+         * is taken relative to it. When the two spellings do not line up
+         * the rule is not applied at all: running a fixture is a visible,
+         * fixable annoyance, and silently skipping a real test is the
+         * failure this whole change is about. */
+        char line_norm[4096], root_norm[4096];
+        path_normalize(line, line_norm, sizeof(line_norm));
+        path_normalize(test_dir, root_norm, sizeof(root_norm));
+        size_t root_len = strlen(root_norm);
+        while (root_len > 0 && root_norm[root_len - 1] == '/') root_len--;
+        if (strncmp(line_norm, root_norm, root_len) == 0) {
+            const char* rel = line_norm + root_len;
+            while (*rel == '/') rel++;
+            if (path_has_fixtures_dir(rel)) continue;
+        }
+        if (!test_files_push(files, count, cap, line)) {
+            oom = 1;
+            break;
+        }
+    }
+    pclose(pipe);
+    return !oom;
+}
+
 static int cmd_test(int argc, char** argv) {
-    const char* target = NULL;
     // Structured-report format (opt-in via --format=<fmt>). NULL = default
     // human output. "tap" = one aggregated TAP v13 stream; "aeocha" = one
     // aeocha-v1 block per test file. In a report mode the per-file progress
@@ -9579,18 +10055,28 @@ static int cmd_test(int argc, char** argv) {
             }
         }
     }
+    /* Every argument that is not a flag names a test file or a directory to
+     * search, and every one of them runs, in the order given (#2752). The
+     * loop used to keep only one, so `ae test a.ae b.ae` dropped b.ae
+     * without a word and a failing test in it passed the run. */
+    const char** targets = (const char**)malloc(sizeof(char*) * (size_t)(argc > 0 ? argc : 1));
+    if (!targets) {
+        fprintf(stderr, "Error: out of memory collecting test targets\n");
+        return 1;
+    }
+    int ntargets = 0;
     for (int i = 0; i < argc; i++) {
         if (strncmp(argv[i], "-D", 2) == 0) {
-            if (argv[i][2] == '\0') i++;   /* `-D NAME`: the name is not the target */
+            if (argv[i][2] == '\0') i++;   /* `-D NAME`: the name is not a target */
             continue;
         }
         if (argv[i][0] != '-') {
             if (!is_safe_path(argv[i])) {
                 fprintf(stderr, "Error: Invalid characters in path\n");
+                free(targets);
                 return 1;
             }
-            target = argv[i];
-            break;
+            targets[ntargets++] = argv[i];
         }
     }
     load_defines_from_toml();
@@ -9602,82 +10088,43 @@ static int cmd_test(int argc, char** argv) {
     char** test_files = NULL;
     int test_count = 0;
     int test_cap = 0;
+    int collected = 1;
 
-    if (target && path_exists(target) && !dir_exists(target)) {
-        // Single file
-        if (!test_files_push(&test_files, &test_count, &test_cap, target)) {
-            fprintf(stderr, "Error: out of memory collecting test files\n");
-            return 1;
-        }
-    } else {
-        // Discover from directory
-        const char* test_dir = "tests";
-        if (target && dir_exists(target)) {
-            static char resolved_test_dir[512];
-            snprintf(resolved_test_dir, sizeof(resolved_test_dir), "%s/tests", target);
-            test_dir = dir_exists(resolved_test_dir) ? resolved_test_dir : target;
-        }
-
-        if (!dir_exists(test_dir)) {
+    if (ntargets == 0) {
+        if (!dir_exists("tests")) {
             printf("No tests/ directory found.\n");
             printf("Create tests in tests/ or run: ae test <file.ae>\n");
+            free(targets);
             return 0;
         }
-
-        char find_cmd[1024];
-#ifdef _WIN32
-        snprintf(find_cmd, sizeof(find_cmd),
-            "dir /b /s \"%s\\*.ae\" 2>nul", test_dir);
-#else
-        snprintf(find_cmd, sizeof(find_cmd),
-            "find \"%s\" \\( -name 'test_*.ae' -o -name '*_test.ae' \\) -type f 2>/dev/null | sort",
-            test_dir);
-#endif
-        FILE* pipe = popen(find_cmd, "r");
-        if (pipe) {
-            char line[4096];
-            int oom = 0;
-            while (fgets(line, sizeof(line), pipe)) {
-                line[strcspn(line, "\r\n")] = '\0';
-                if (strlen(line) == 0) continue;
-                // Convention: only files named test_*.ae or *_test.ae are tests
-                // (like pytest's test_*.py or Go's *_test.go)
-                const char* base = strrchr(line, '/');
-                if (!base) base = strrchr(line, '\\');
-                base = base ? base + 1 : line;
-                if (strncmp(base, "test_", 5) != 0) {
-                    // Check *_test.ae pattern
-                    const char* ext = strstr(base, "_test.ae");
-                    if (!ext || strcmp(ext, "_test.ae") != 0) continue;
-                }
-                /* The rule applies below the directory being searched, so
-                 * the path is taken relative to it. When the two spellings do
-                 * not line up the rule is not applied at all: running a
-                 * fixture is a visible, fixable annoyance, and silently
-                 * skipping a real test is the failure this whole change is
-                 * about. */
-                char line_norm[4096], root_norm[4096];
-                path_normalize(line, line_norm, sizeof(line_norm));
-                path_normalize(test_dir, root_norm, sizeof(root_norm));
-                size_t root_len = strlen(root_norm);
-                while (root_len > 0 && root_norm[root_len - 1] == '/') root_len--;
-                if (strncmp(line_norm, root_norm, root_len) == 0) {
-                    const char* rel = line_norm + root_len;
-                    while (*rel == '/') rel++;
-                    if (path_has_fixtures_dir(rel)) continue;
-                }
-                if (!test_files_push(&test_files, &test_count, &test_cap, line)) {
-                    oom = 1;
-                    break;
-                }
-            }
-            pclose(pipe);
-            if (oom) {
-                fprintf(stderr, "Error: out of memory collecting test files\n");
-                test_files_free(test_files, test_count);
-                return 1;
-            }
+        collected = test_collect_dir("tests", &test_files, &test_count, &test_cap);
+    }
+    for (int t = 0; t < ntargets && collected; t++) {
+        const char* target = targets[t];
+        if (dir_exists(target)) {
+            /* A directory runs its tests/ subdirectory when it has one (a
+             * project root), else what is directly in it and below. */
+            char resolved[4096];
+            snprintf(resolved, sizeof(resolved), "%s/tests", target);
+            collected = test_collect_dir(dir_exists(resolved) ? resolved : target,
+                                         &test_files, &test_count, &test_cap);
+        } else if (path_exists(target)) {
+            collected = test_files_push(&test_files, &test_count, &test_cap, target);
+        } else {
+            /* A target that does not exist is an error. It used to fall
+             * back to ./tests, so a mistyped name ran something else and
+             * could pass. */
+            fprintf(stderr, "Error: no such test file or directory: %s\n", target);
+            test_files_free(test_files, test_count);
+            free(targets);
+            return 1;
         }
+    }
+    free(targets);
+    if (!collected) {
+        fprintf(stderr, "Error: out of memory collecting test files\n");
+        test_files_free(test_files, test_count);
+        return 1;
     }
 
     if (list_only) {
@@ -10231,20 +10678,7 @@ static void ae_add_rmrf(const char* dir) {
 
 static int cmd_add(int argc, char** argv) {
     if (argc < 1 || argv[0][0] == '-') {
-        fprintf(stderr, "Usage: ae add <host>/<user>/<repo>[@version] [--source] [--target <triple>]\n");
-        fprintf(stderr, "Examples:\n");
-        fprintf(stderr, "  ae add github.com/user/repo\n");
-        fprintf(stderr, "  ae add github.com/user/repo@v1.2.0\n");
-        fprintf(stderr, "  ae add gitlab.com/user/repo\n");
-        fprintf(stderr, "  ae add github.com/user/repo@v1.2.0 --target macos-arm64\n");
-        fprintf(stderr, "\nWith @version, a matching release artifact is preferred when the\n");
-        fprintf(stderr, "package publishes one: a binary package (a released aether.toml with\n");
-        fprintf(stderr, "a `binary` key naming a bare per-triple shared lib), else a source\n");
-        fprintf(stderr, "archive. A binary package REQUIRES a published .sha256 (an\n");
-        fprintf(stderr, "unverifiable shared library is refused). --source forces the git\n");
-        fprintf(stderr, "clone. --target <triple> fetches a FOREIGN platform's binary package\n");
-        fprintf(stderr, "(e.g. linux-x86_64, macos-arm64, freebsd-x86_64) instead of the\n");
-        fprintf(stderr, "host's, for cross-platform bundling.\n");
+        add_usage(stderr);
         return 1;
     }
 
@@ -10729,6 +11163,13 @@ static int cmd_cache(int argc, char** argv) {
 // the install always knows better than any caller does).
 // --------------------------------------------------------------------------
 
+static void cflags_usage(void) {
+    printf("Usage: ae cflags [--cflags|--libs]\n");
+    printf("  Print the include and link flags so external builds can:\n");
+    printf("      gcc your.c $(ae cflags) -o your\n");
+    printf("  Without arguments, prints both. Pass --cflags or --libs to subset.\n");
+}
+
 static int cmd_cflags(int argc, char** argv) {
     bool want_cflags = true;
     bool want_libs   = true;
@@ -10742,10 +11183,7 @@ static int cmd_cflags(int argc, char** argv) {
         } else if (strcmp(argv[i], "--libs") == 0) {
             want_cflags = false;
         } else if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
-            printf("Usage: ae cflags [--cflags|--libs]\n");
-            printf("  Print the include and link flags so external builds can:\n");
-            printf("      gcc your.c $(ae cflags) -o your\n");
-            printf("  Without arguments, prints both. Pass --cflags or --libs to subset.\n");
+            cflags_usage();
             return 0;
         } else {
             fprintf(stderr, "ae cflags: unknown option '%s'\n", argv[i]);
@@ -10874,13 +11312,14 @@ static void print_usage(void) {
     printf("  fmt [--check] [path] Format source (stdin->stdout, or files/dirs in place)\n");
     printf("  bindgen consts <h>   Import C macro constants from a header as Aether consts\n");
     printf("  inspect [file.ae]    Show what a script declares (imports, capabilities, exports, decls)\n");
-    printf("  test [file|dir]      Discover and run tests (--list, --format=tap|aeocha-v1)\n");
+    printf("  test [file|dir]...   Discover and run tests (--list, --format=tap|aeocha-v1)\n");
     printf("  add <package>        Add a dependency\n");
     printf("  cache [gc|clear]     Show, trim to its limit, or clear the build cache\n");
     printf("  cflags               Print -I/-L/-laether for embedding in external builds\n");
     printf("  checksec <binary>    Report the hardening a built artifact carries\n");
     printf("  lib-path             Print the resolved module-search chain\n");
-    printf("  examples             List and run example programs\n");
+    printf("  lib-info <library>   Print the symbol catalog of an --emit=lib library\n");
+    printf("  examples [dir]       Build the example programs into build/examples/\n");
     printf("  repl                 Start interactive REPL\n");
     printf("  install [<v>]        Install a release (latest if omitted)\n");
     printf("  upgrade              Install the latest release and switch to it\n");
@@ -10888,6 +11327,7 @@ static void print_usage(void) {
     printf("  version              Show version / list installed versions\n");
     printf("  version list         List all available releases\n");
     printf("  help                 Show this help\n");
+    printf("\n  ae <command> --help (or -h) shows a command's own options.\n");
     printf("\nExamples:\n");
     printf("  ae init myproject          Create a new project\n");
     printf("  ae run hello.ae            Run a single file\n");
@@ -10938,6 +11378,17 @@ static void print_usage(void) {
  *     AETHER_LIB_DIR=a:b ae lib-path   # show what the env var resolves to
  *
  * Issue #413. */
+static void lib_path_usage(void) {
+    printf("Usage: ae lib-path [--lib <dir>%c<dir>...]...\n",
+           AETHER_LIB_PATH_SEP_CHAR);
+    printf("  Print the resolved module-search chain in order.\n");
+    printf("  Useful for debugging \"why isn't my import resolving?\"\n");
+    printf("  Inputs (in priority order, highest first):\n");
+    printf("    1. --lib flags on this command line\n");
+    printf("    2. AETHER_LIB_DIR env var\n");
+    printf("    3. default: `lib`\n");
+}
+
 static int cmd_lib_path(int argc, char** argv) {
     for (int i = 0; i < argc; i++) {
         if (strcmp(argv[i], "--lib") == 0 && i + 1 < argc) {
@@ -10947,14 +11398,7 @@ static int cmd_lib_path(int argc, char** argv) {
              * same chain the equivalent `ae run` would use. */
             ae_dep_override_append(argv[++i]);
         } else if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
-            printf("Usage: ae lib-path [--lib <dir>%c<dir>...]...\n",
-                   AETHER_LIB_PATH_SEP_CHAR);
-            printf("  Print the resolved module-search chain in order.\n");
-            printf("  Useful for debugging \"why isn't my import resolving?\"\n");
-            printf("  Inputs (in priority order, highest first):\n");
-            printf("    1. --lib flags on this command line\n");
-            printf("    2. AETHER_LIB_DIR env var\n");
-            printf("    3. default: `lib`\n");
+            lib_path_usage();
             return 0;
         } else {
             fprintf(stderr, "ae lib-path: unknown option '%s'\n", argv[i]);
@@ -11007,12 +11451,7 @@ static int cmd_lib_path(int argc, char** argv) {
 
 static int cmd_lib_info(int argc, char** argv) {
     if (argc < 1) {
-        fprintf(stderr,
-            "Usage: ae lib-info <path-to-library>\n"
-            "\n"
-            "Prints the symbol catalog embedded in an `--emit=lib` artifact:\n"
-            "  ae build --emit=lib script.ae -o build/script.so\n"
-            "  ae lib-info build/script.so\n");
+        lib_info_usage(stderr);
         return 1;
     }
     const char* path = argv[0];
@@ -11301,6 +11740,13 @@ static char* fmt_read_stdin(void) {
 //   No path: read stdin, write formatted source to stdout.
 //   Paths:   format each .ae file (recursing directories) in place.
 //   --check: do not write; list files that would change, exit 1 if any do.
+static void fmt_usage(void) {
+    printf("Usage: ae fmt [--check] [path...]\n"
+           "  Format Aether source. With no path, reads stdin and writes stdout.\n"
+           "  With paths, formats each .ae file (recursing into directories) in place.\n"
+           "  --check  Do not write; list files that would change, exit 1 if any do.\n");
+}
+
 static int cmd_fmt(int argc, char** argv) {
     int check_mode = 0;
     const char** paths = (const char**)malloc(sizeof(char*) * (size_t)(argc > 0 ? argc : 1));
@@ -11310,10 +11756,7 @@ static int cmd_fmt(int argc, char** argv) {
         if (strcmp(argv[i], "--check") == 0 || strcmp(argv[i], "-c") == 0) {
             check_mode = 1;
         } else if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
-            printf("Usage: ae fmt [--check] [path...]\n"
-                   "  Format Aether source. With no path, reads stdin and writes stdout.\n"
-                   "  With paths, formats each .ae file (recursing into directories) in place.\n"
-                   "  --check  Do not write; list files that would change, exit 1 if any do.\n");
+            fmt_usage();
             free(paths);
             return 0;
         } else {
@@ -11394,6 +11837,13 @@ int main(int argc, char** argv) {
         }
     }
 
+    /* #2753: `ae <command> -h` / `--help` prints the command's usage and
+     * does nothing else, answered here so that no command acts on its
+     * arguments first (see print_command_help). */
+    if (args_ask_for_help(sub_argc, sub_argv) && print_command_help(cmd)) {
+        return 0;
+    }
+
     // Commands that don't need toolchain
     if (strcmp(cmd, "help") == 0 || strcmp(cmd, "--help") == 0 || strcmp(cmd, "-h") == 0) {
         /* `ae help <script.ae>` — heuristic diagnostics for closure-DSL
@@ -11468,7 +11918,7 @@ int main(int argc, char** argv) {
 
     if (strcmp(cmd, "bindgen") == 0) {
         if (sub_argc < 1 || strcmp(sub_argv[0], "consts") != 0) {
-            fprintf(stderr, "Usage: ae bindgen consts <header.h> [-I dir]... [--match PREFIX] [-o out.ae]\n");
+            ae_bindgen_usage(stderr);
             return 1;
         }
         /* The same C compiler the build uses; on Windows this is the

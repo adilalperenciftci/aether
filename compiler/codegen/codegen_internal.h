@@ -464,6 +464,9 @@ void generate_expression_as_elem_ptr(CodeGenerator* gen, ASTNode* expr);
 /* #1286: emit `expr` as an AetherSlice: a `T[N]` array is wrapped with its
  * static length, a slice is emitted as-is. */
 void generate_expression_as_slice(CodeGenerator* gen, ASTNode* expr);
+/* #2723: emit `arg` for a parameter of type `param_type`: an array a `try`
+ * body may have written, for a `T[N]` parameter, as a copy of its own. */
+void generate_sized_array_argument(CodeGenerator* gen, ASTNode* arg, Type* param_type);
 int is_aether_extern_param(CodeGenerator* gen, const char* func_name, int param_idx);
 /* Returns 1 if extern `func_name`'s parameter at `param_idx` was
    declared `@retain`. Tells the escape walker to mark a heap-string

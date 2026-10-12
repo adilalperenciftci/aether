@@ -22,7 +22,7 @@ main() {
     println("=== fs.chmod regression ===")
 
     tmp = os.temp_dir()
-    tmpdir = "${tmp}/aether_fs_chmod_test"
+    tmpdir = "${tmp}/aether_fs_chmod_test_${os.getpid()}"
     fs.delete_dir(tmpdir)
     fs.create_dir(tmpdir)
 

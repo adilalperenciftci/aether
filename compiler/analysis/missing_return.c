@@ -225,11 +225,12 @@ static int switch_has_default(ASTNode* sw) {
     return 0;
 }
 
-/* The arm codegen lowers to an unconditional `else`. */
+/* The arm codegen lowers to an unconditional `else`. The string literal "_"
+ * is a string it compares with, not the wildcard. */
 static int is_wildcard_pattern(ASTNode* p) {
     if (!p) return 0;
     if (p->node_type && p->node_type->kind == TYPE_WILDCARD) return 1;
-    return p->type == AST_LITERAL && p->value && strcmp(p->value, "_") == 0;
+    return p->type == AST_IDENTIFIER && p->value && strcmp(p->value, "_") == 0;
 }
 
 /* A list-pattern element that matches any value: a binding or `_`. */
@@ -579,19 +580,6 @@ static void report(Flow* f, ASTNode* owner, ASTNode* body, const char* message) 
     aether_error_report(&e);
 }
 
-/* `fn`'s name as a caller writes it: a function merged in from a module is
- * named `<ns>_<name>` and is called `<ns>.<name>`. */
-static const char* display_name(ASTNode* fn, char* buf, size_t cap) {
-    const char* name = fn->value ? fn->value : "?";
-    if (!fn->origin_module) return name;
-    const char* ns = strrchr(fn->origin_module, '.');
-    ns = ns ? ns + 1 : fn->origin_module;
-    size_t n = strlen(ns);
-    if (strncmp(name, ns, n) != 0 || name[n] != '_' || !name[n + 1]) return name;
-    snprintf(buf, cap, "%s.%s", ns, name + n + 1);
-    return buf;
-}
-
 static int check_definition(Flow* f, ASTNode* fn) {
     if (fn->child_count == 0) return 0;
     ASTNode* body = fn->children[fn->child_count - 1];
@@ -602,7 +590,8 @@ static int check_definition(Flow* f, ASTNode* fn) {
 
     char message[400];
     char shown[160];
-    const char* name = display_name(fn, shown, sizeof shown);
+    /* `fn`'s name as a caller writes it, not its merged C name. */
+    const char* name = ast_source_name(fn, shown, sizeof shown);
     const char* what = is_clause(f->program, fn) ? "this clause of " : "";
     if (has_value_type(fn->node_type)) {
         snprintf(message, sizeof message,

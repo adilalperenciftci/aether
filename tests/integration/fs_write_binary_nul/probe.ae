@@ -22,8 +22,9 @@ main() {
     print("=== fs.write_binary with embedded NULs ===\n\n")
 
     tmp = os.temp_dir()
-    seed_path = "${tmp}/aether_wb_seed.bin"
-    out_path = "${tmp}/aether_wb_out.bin"
+    pid = os.getpid()
+    seed_path = "${tmp}/aether_wb_seed_${pid}.bin"
+    out_path = "${tmp}/aether_wb_out_${pid}.bin"
 
     // ---- Test 1: shim seeds a 10-byte file with NUL at offset 3 ----
     print("Test 1: seed 10-byte file via C shim\n")
@@ -90,7 +91,7 @@ main() {
 
     // ---- Test 6: write_binary with length 0 is legal (empty file) ----
     print("\nTest 6: write_binary with length 0\n")
-    empty_path = "${tmp}/aether_wb_empty.bin"
+    empty_path = "${tmp}/aether_wb_empty_${pid}.bin"
     err6 = fs.write_binary(empty_path, string.bytes(""))
     if err6 != "" {
         println("  FAIL: empty write errored: ${err6}")
@@ -137,7 +138,7 @@ main() {
     // Existing callers passed string literals (plain char*) which
     // masked the bug. Fixed alongside write_binary.
     print("\nTest 9: fs.write_atomic round-trip preserves NULs\n")
-    atomic_path = "${tmp}/aether_wb_atomic.bin"
+    atomic_path = "${tmp}/aether_wb_atomic_${pid}.bin"
     err9 = fs.write_atomic(atomic_path, string.bytes(data)[0..10])
     if err9 != "" {
         println("  FAIL: write_atomic errored: ${err9}")

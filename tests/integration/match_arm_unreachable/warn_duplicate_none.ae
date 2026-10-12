@@ -1,0 +1,12 @@
+// #2728: a second `none` arm over an optional. The later one used to take
+// the first one's place.
+import std.io
+
+main() {
+    let m: int? = none
+    match m {
+        none -> { println("none") }
+        some(v) -> { println("some ${v}") }
+        none -> { println("unreachable") }
+    }
+}

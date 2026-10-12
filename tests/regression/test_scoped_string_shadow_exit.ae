@@ -1,0 +1,154 @@
+// Regression (#2746): a `return` from inside a block whose string binding
+// shadows a function-level string frees both values.
+//
+// A C-style for loop's string variable (#2742), an owning `catch` binding
+// (#2333) and the `some(v)` binding of a match over a `string?` call
+// (#2750) each live for one C block and shadow a local of their name. The
+// block's exit free and the shadowed local's were both keyed by the name,
+// so a `return` inside the block, which runs every exit free, freed the
+// block's value and then tested the block's flag again for the outer
+// local: the outer value leaked (3800 bytes per 100 calls of the for-loop
+// shape). Such a binding now has a name of its own inside its construct,
+// so each exit free reaches its own variable.
+//
+// Each check reads its value after churn, allocations of the same sizes
+// that reuse what was freed. The leak checks run where the heap count is
+// exact (mem.heap_in_use_exact): after a warm-up, some window of the same
+// work grows by exactly 0 (mem.steady_growth), one window per shape.
+// Strings are built from parameters, because string.concat of two literals
+// folds to a literal.
+
+import std.mem
+import std.string
+
+extern exit(code: int)
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL #2746: ${msg}")
+        exit(1)
+    }
+}
+
+// Allocations of the sizes the checks read, to take over freed blocks.
+churn(w: string) -> int {
+    n = 0
+    i = 0
+    while i < 8 {
+        a = string.concat(w, "er")
+        b = string.concat(w, "boom")
+        n = n + string.length(a) + string.length(b)
+        i = i + 1
+    }
+    return n
+}
+
+fresh(w: string) -> string? {
+    return string.concat(w, "f")
+}
+
+// The loop returns from inside; with `stop` 9 it runs out and the outer
+// value is read after it.
+by_loop(w: string, stop: int) -> int {
+    s = string.concat(w, "er")
+    for (s = "a"; string.length(s) < 4; s = string.concat(s, "b")) {
+        if string.length(s) == stop {
+            return 1
+        }
+    }
+    churn(w)
+    check(s == "wer", "the local a for loop shadows (${s})")
+    return string.length(s)
+}
+
+// A parameter made the function's own before the loop shadows it.
+by_param(s: string) -> int {
+    s = string.concat(s, "er")
+    for (s = "a"; string.length(s) < 4; s = string.concat(s, "b")) {
+        if string.length(s) == 3 {
+            return 1
+        }
+    }
+    return string.length(s)
+}
+
+by_nested(w: string, stop: int) -> int {
+    s = string.concat(w, "er")
+    for (s = "a"; string.length(s) < 4; s = string.concat(s, "b")) {
+        for (s = "c"; string.length(s) < 3; s = string.concat(s, "d")) {
+            if string.length(s) == stop {
+                return 7
+            }
+        }
+    }
+    churn(w)
+    check(s == "wer", "the local nested for loops shadow (${s})")
+    return string.length(s)
+}
+
+by_catch(w: string, early: bool) -> int {
+    e = string.concat(w, "er")
+    try {
+        panic(string.concat(w, "boom"))
+    } catch e {
+        if early {
+            return string.length(e)
+        }
+    }
+    churn(w)
+    check(e == "wer", "the local a catch binding shadows (${e})")
+    return string.length(e)
+}
+
+by_some(w: string, early: bool) -> int {
+    v = string.concat(w, "er")
+    match fresh(w) {
+        none -> {
+            return 0
+        }
+        some(v) -> {
+            if early {
+                return string.length(v)
+            }
+        }
+    }
+    churn(w)
+    check(v == "wer", "the local a some binding shadows (${v})")
+    return string.length(v)
+}
+
+measure(which: int, w: string) -> long {
+    return mem.steady_growth(|| {
+            k = 0
+            while k < 100 {
+                if which == 0 { by_loop(w, 3) }
+                if which == 1 { by_param(w) }
+                if which == 2 { by_nested(w, 2) }
+                if which == 3 { by_catch(w, true) }
+                if which == 4 { by_some(w, true) }
+                if which == 5 { by_loop(w, 9) + by_nested(w, 9) + by_catch(w, false) + by_some(w, false) }
+                k = k + 1
+            }
+        }, 5)
+}
+
+main() {
+    println("=== test_scoped_string_shadow_exit ===")
+    w = "w"
+    check(by_loop(w, 3) == 1 && by_loop(w, 9) == 3, "a for loop's string variable")
+    check(by_param(w) == 1, "a for loop shadowing a parameter")
+    check(by_nested(w, 2) == 7 && by_nested(w, 9) == 3, "nested for loops")
+    check(by_catch(w, true) == 5 && by_catch(w, false) == 3, "a catch binding")
+    check(by_some(w, true) == 2 && by_some(w, false) == 3, "a some binding")
+    if mem.heap_in_use_exact() {
+        names = ["a for loop", "a for loop over a parameter", "nested for loops",
+            "a catch binding", "a some binding", "blocks run to their end"]
+        i = 0
+        while i < 6 {
+            grown = measure(i, w)
+            check(grown == 0, "100 returns from inside ${names[i]} grew the heap by ${grown} bytes in every run")
+            i = i + 1
+        }
+    }
+    println("=== test_scoped_string_shadow_exit passed ===")
+}

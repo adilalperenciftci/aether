@@ -32,6 +32,9 @@ command -v curl >/dev/null 2>&1 || { echo "  [SKIP] tinyweb_tls: curl not on PAT
 command -v openssl >/dev/null 2>&1 || { echo "  [SKIP] tinyweb_tls: openssl not on PATH"; exit 0; }
 
 TMPDIR="$(mktemp -d)"
+# Certificates carry the extensions asked for, under any openssl (#2776).
+. "$ROOT/tests/lib/test_openssl_conf.sh"
+test_openssl_conf "$TMPDIR"
 cleanup() {
     stop_server "${SRV_PID:-}"
     rm -rf "$TMPDIR"

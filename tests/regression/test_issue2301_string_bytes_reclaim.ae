@@ -39,8 +39,9 @@ fn copy_through_view(src: string, dst: string) -> int {
 main() {
     println("=== string.bytes view keeps its owner reclaimable (#2301) ===")
     tmp = os.temp_dir()
-    src = "${tmp}/aether_2301_reclaim_src.bin"
-    dst = "${tmp}/aether_2301_reclaim_dst.bin"
+    pid = os.getpid()
+    src = "${tmp}/aether_2301_reclaim_src_${pid}.bin"
+    dst = "${tmp}/aether_2301_reclaim_dst_${pid}.bin"
 
     chunk = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
     payload = ""

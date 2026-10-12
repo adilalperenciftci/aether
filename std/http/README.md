@@ -115,9 +115,12 @@ cross-builds.
 **Trust store.** The pure client verifies against, in order: the `set_cafile`
 pin alone, when there is one; else the union of `SSL_CERT_FILE` (a PEM bundle)
 and `SSL_CERT_DIR` (a directory of PEM files, or a `:`-separated list — `;` on
-Windows) when either is set; else the first system bundle that exists
-(`/etc/ssl/certs/ca-certificates.crt`, `/etc/pki/tls/certs/ca-bundle.crt`,
-`/etc/ssl/cert.pem`, and the Git-for-Windows / MSYS2 bundles); else the first
+Windows) when either is set; else, on Windows, every certificate of the system
+ROOT store together with the first bundle file of the list the OpenSSL path
+uses too (the bundle the release ships beside the program, MSYS2's, Git for
+Windows'; see the README's Windows section); else the first system bundle that
+exists (`/etc/ssl/certs/ca-certificates.crt`, `/etc/pki/tls/certs/ca-bundle.crt`,
+`/etc/ssl/cert.pem`); else the first
 certificate directory that loads — Android's `/apex/com.android.conscrypt/cacerts`
 (Android 14+) and `/system/etc/security/cacerts`, which are one certificate per
 file with no bundle at all, then `/etc/ssl/certs`. If nothing loads, the

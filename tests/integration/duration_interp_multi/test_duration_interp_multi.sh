@@ -11,8 +11,12 @@
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+# A directory of its own, not fixed /tmp paths: two sweeps at once (two
+# checkouts, or parallel agents) overwrote each other's files (#2770).
+AE_TMP="$(mktemp -d)"
+trap 'rm -rf "$AE_TMP"' EXIT
 
-cat > /tmp/ae_dur_interp_multi.ae << 'EOF'
+cat > $AE_TMP/ae_dur_interp_multi.ae << 'EOF'
 main() {
     a = 5s
     b = 250ms
@@ -24,9 +28,9 @@ main() {
 }
 EOF
 
-output=$(AETHER_HOME="" "$ROOT/build/ae" run /tmp/ae_dur_interp_multi.ae 2>&1)
+output=$(AETHER_HOME="" "$ROOT/build/ae" run $AE_TMP/ae_dur_interp_multi.ae 2>&1)
 rc=$?
-rm -f /tmp/ae_dur_interp_multi.ae
+rm -f $AE_TMP/ae_dur_interp_multi.ae
 
 if [ "$rc" -ne 0 ]; then
     echo "duration_interp_multi: FAIL (program errored, rc=$rc)"

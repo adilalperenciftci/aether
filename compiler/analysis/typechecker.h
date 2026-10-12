@@ -50,6 +50,12 @@ typedef struct Symbol {
     int hoist_pending;
     // #2516: a `const` (not a module `var`): its elements cannot be written.
     int is_const;
+    // #2745: for a local the early inference pass binds to a closure
+    // literal, that literal, so a call through the local has the literal's
+    // result (none while its bindings disagree, as the checker's #2460
+    // rule). Kept off `type`, which is cloned into the AST: a function
+    // returning the local must not inherit it.
+    struct ASTNode* inferred_closure;
     struct Symbol* next;
     // #2007: chain within the scope's hash bucket. A symbol is at the head
     // of its bucket chain exactly when it is the newest of its name in the

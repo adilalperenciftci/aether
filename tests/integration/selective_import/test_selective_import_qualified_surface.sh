@@ -10,6 +10,10 @@
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+# A directory of its own, not fixed /tmp paths: two sweeps at once (two
+# checkouts, or parallel agents) overwrote each other's files (#2770).
+AE_TMP="$(mktemp -d)"
+trap 'rm -rf "$AE_TMP"' EXIT
 
 pass=0
 fail=0
@@ -24,46 +28,46 @@ check_ok() { # desc, file
 
 # 1. Qualified call to a NON-selected function under a selective import — now
 #    resolves (#878). Previously this was rejected.
-cat > /tmp/ae_sel_qual_pow.ae << 'EOF'
+cat > $AE_TMP/ae_sel_qual_pow.ae << 'EOF'
 import std.math (sqrt)
 main() {
     y = math.pow(2.0, 3.0)
     println(y)
 }
 EOF
-check_ok "qualified math.pow resolves under 'import std.math (sqrt)'" /tmp/ae_sel_qual_pow.ae
+check_ok "qualified math.pow resolves under 'import std.math (sqrt)'" $AE_TMP/ae_sel_qual_pow.ae
 
 # 2. Bare-name binding the selective import adds still works.
-cat > /tmp/ae_sel_bare.ae << 'EOF'
+cat > $AE_TMP/ae_sel_bare.ae << 'EOF'
 import std.math (sqrt)
 main() {
     x = sqrt(9.0)
     println(x)
 }
 EOF
-check_ok "bare-name sqrt() works under selective import" /tmp/ae_sel_bare.ae
+check_ok "bare-name sqrt() works under selective import" $AE_TMP/ae_sel_bare.ae
 
 # 3. Qualified call to the SELECTED function also works.
-cat > /tmp/ae_sel_qual_sqrt.ae << 'EOF'
+cat > $AE_TMP/ae_sel_qual_sqrt.ae << 'EOF'
 import std.math (sqrt)
 main() {
     x = math.sqrt(9.0)
     println(x)
 }
 EOF
-check_ok "qualified math.sqrt works under selective import" /tmp/ae_sel_qual_sqrt.ae
+check_ok "qualified math.sqrt works under selective import" $AE_TMP/ae_sel_qual_sqrt.ae
 
 # 4. Full (bare) import still exposes the whole qualified surface.
-cat > /tmp/ae_sel_full.ae << 'EOF'
+cat > $AE_TMP/ae_sel_full.ae << 'EOF'
 import std.math
 main() {
     println(math.sqrt(9.0))
     println(math.pow(2.0, 3.0))
 }
 EOF
-check_ok "bare import exposes the full qualified surface" /tmp/ae_sel_full.ae
+check_ok "bare import exposes the full qualified surface" $AE_TMP/ae_sel_full.ae
 
-rm -f /tmp/ae_sel_qual_pow.ae /tmp/ae_sel_bare.ae /tmp/ae_sel_qual_sqrt.ae /tmp/ae_sel_full.ae
+rm -f $AE_TMP/ae_sel_qual_pow.ae $AE_TMP/ae_sel_bare.ae $AE_TMP/ae_sel_qual_sqrt.ae $AE_TMP/ae_sel_full.ae
 
 echo ""
 echo "Selective-import qualified-surface tests: $pass passed, $fail failed"

@@ -54,7 +54,13 @@ if [ ! -x "$AE" ]; then
 fi
 
 # Full regression suite, discovered from disk (sorted for stable order).
-TESTS="$(for f in "$REG"/test_*.ae; do basename "$f" .ae; done | sort)"
+# AE_SWEEP_SHARD=k/n keeps shard k of n (tests/scripts/sweep_shard.sh): CI
+# runs the gate as two jobs, since on a 3-core runner the whole suite took
+# 19 minutes (#2772). A malformed spec stops the gate here, before the
+# filter inside the command substitution could hand it an empty list.
+sh "$ROOT/tests/scripts/sweep_shard.sh" < /dev/null || exit 2
+TESTS="$(for f in "$REG"/test_*.ae; do basename "$f" .ae; done | sort \
+    | sh "$ROOT/tests/scripts/sweep_shard.sh")"
 
 KNOWN_FILE="$ROOT/tests/leaks_known.txt"
 EXCLUDE_FILE="$ROOT/tests/leaks_exclude.txt"

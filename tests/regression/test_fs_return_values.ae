@@ -13,6 +13,9 @@ main() {
     println("=== FS Return Value Tests ===")
 
     tmp = os.temp_dir()
+    // The names this test creates carry its process id: a second sweep
+    // running beside it made and removed the same ones (#2771).
+    pid = os.getpid()
 
     // Test 1: file.delete on non-existent file returns a non-empty error.
     println("\nTest 1: file.delete non-existent returns error")
@@ -26,7 +29,7 @@ main() {
 
     // Test 2: file.write on a fresh path returns "" on success.
     println("\nTest 2: file.write returns empty err on success")
-    e2 = file.write("${tmp}/aether_fs_write_test.txt", "test data")
+    e2 = file.write("${tmp}/aether_fs_write_test_${pid}.txt", "test data")
     if e2 == "" {
         println("  PASS")
     } else {
@@ -36,7 +39,7 @@ main() {
 
     // Test 3: file.delete on existing file returns "" (success).
     println("\nTest 3: file.delete existing file returns empty err")
-    e3 = file.delete("${tmp}/aether_fs_write_test.txt")
+    e3 = file.delete("${tmp}/aether_fs_write_test_${pid}.txt")
     if e3 == "" {
         println("  PASS")
     } else {
@@ -46,7 +49,7 @@ main() {
 
     // Test 4: file.delete same file again returns error.
     println("\nTest 4: file.delete already-deleted returns error")
-    e4 = file.delete("${tmp}/aether_fs_write_test.txt")
+    e4 = file.delete("${tmp}/aether_fs_write_test_${pid}.txt")
     if e4 != "" {
         println("  PASS: ${e4}")
     } else {
@@ -65,7 +68,7 @@ main() {
 
     // Test 6: dir.create on fresh path returns "" on success.
     println("\nTest 6: dir.create returns empty err on success")
-    de6 = dir.create("${tmp}/aether_fs_test_dir")
+    de6 = dir.create("${tmp}/aether_fs_test_dir_${pid}")
     if de6 == "" {
         println("  PASS")
     } else {
@@ -75,7 +78,7 @@ main() {
 
     // Test 7: dir.exists on existing directory returns 1.
     println("\nTest 7: dir.exists on existing directory returns 1")
-    if dir.exists("${tmp}/aether_fs_test_dir") == 1 {
+    if dir.exists("${tmp}/aether_fs_test_dir_${pid}") == 1 {
         println("  PASS")
     } else {
         println("  FAIL")
@@ -84,7 +87,7 @@ main() {
 
     // Test 8: dir.create on already-existing returns error.
     println("\nTest 8: dir.create duplicate returns error")
-    de8 = dir.create("${tmp}/aether_fs_test_dir")
+    de8 = dir.create("${tmp}/aether_fs_test_dir_${pid}")
     if de8 != "" {
         println("  PASS: ${de8}")
     } else {
@@ -94,7 +97,7 @@ main() {
 
     // Test 9: dir.delete on existing returns "".
     println("\nTest 9: dir.delete existing returns empty err")
-    de9 = dir.delete("${tmp}/aether_fs_test_dir")
+    de9 = dir.delete("${tmp}/aether_fs_test_dir_${pid}")
     if de9 == "" {
         println("  PASS")
     } else {
@@ -104,7 +107,7 @@ main() {
 
     // Test 10: dir.exists after delete returns 0.
     println("\nTest 10: dir.exists after delete returns 0")
-    if dir.exists("${tmp}/aether_fs_test_dir") == 0 {
+    if dir.exists("${tmp}/aether_fs_test_dir_${pid}") == 0 {
         println("  PASS")
     } else {
         println("  FAIL")
@@ -113,14 +116,14 @@ main() {
 
     // Test 11: file.exists on a directory returns 0 (distinct from dir.exists).
     println("\nTest 11: file.exists on directory returns 0")
-    _ = dir.create("${tmp}/aether_fs_test_dir2")
-    if file.exists("${tmp}/aether_fs_test_dir2") == 0 {
+    _ = dir.create("${tmp}/aether_fs_test_dir2_${pid}")
+    if file.exists("${tmp}/aether_fs_test_dir2_${pid}") == 0 {
         println("  PASS: file.exists correctly rejects directory")
     } else {
         println("  FAIL: file.exists should return 0 for directories")
         exit(1)
     }
-    _ = dir.delete("${tmp}/aether_fs_test_dir2")
+    _ = dir.delete("${tmp}/aether_fs_test_dir2_${pid}")
 
     println("\n=== All FS Return Value Tests Passed ===")
 }

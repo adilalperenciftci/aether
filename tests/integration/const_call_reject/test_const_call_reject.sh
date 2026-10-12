@@ -16,6 +16,10 @@
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+# A directory of its own, not fixed /tmp paths: two sweeps at once (two
+# checkouts, or parallel agents) overwrote each other's files (#2770).
+AE_TMP="$(mktemp -d)"
+trap 'rm -rf "$AE_TMP"' EXIT
 
 pass=0
 fail=0
@@ -23,7 +27,7 @@ fail=0
 expect_reject() {
     label="$1"
     file="$2"
-    out=$(AETHER_HOME="" "$ROOT/build/ae" build "$file" -o /tmp/ae_const_reject_out 2>&1)
+    out=$(AETHER_HOME="" "$ROOT/build/ae" build "$file" -o $AE_TMP/ae_const_reject_out 2>&1)
     if echo "$out" | grep -q "const initializer must be a compile-time constant expression"; then
         echo "  [PASS] $label"
         pass=$((pass + 1))
@@ -37,7 +41,7 @@ expect_reject() {
 expect_accept() {
     label="$1"
     file="$2"
-    if AETHER_HOME="" "$ROOT/build/ae" build "$file" -o /tmp/ae_const_ok_out 2>/dev/null; then
+    if AETHER_HOME="" "$ROOT/build/ae" build "$file" -o $AE_TMP/ae_const_ok_out 2>/dev/null; then
         echo "  [PASS] $label"
         pass=$((pass + 1))
     else
@@ -47,65 +51,65 @@ expect_accept() {
 }
 
 # Case 1: top-level const = function call (the headline trap).
-cat > /tmp/ae_const_bad1.ae << 'EOF'
+cat > $AE_TMP/ae_const_bad1.ae << 'EOF'
 extern malloc(size: int) -> ptr
 const G_BUF = malloc(64)
 main() { println("ok") }
 EOF
-expect_reject "top-level const = function call" /tmp/ae_const_bad1.ae
+expect_reject "top-level const = function call" $AE_TMP/ae_const_bad1.ae
 
 # Case 2: top-level const = NON-whitelisted std-namespaced call.
 # string.length is a real pure stdlib function but it is NOT on the
 # compile-time-fold whitelist, so it must still be rejected.
-cat > /tmp/ae_const_bad2.ae << 'EOF'
+cat > $AE_TMP/ae_const_bad2.ae << 'EOF'
 import std.string
 const N = string.length("hi")
 main() { println("ok") }
 EOF
-expect_reject "top-level const = non-whitelisted std call" /tmp/ae_const_bad2.ae
+expect_reject "top-level const = non-whitelisted std call" $AE_TMP/ae_const_bad2.ae
 
 # Case 2b (issue #482): the whitelisted pure conversions ARE accepted
 # and fold to a literal — string.from_int / from_long / from_float /
 # concat. These do not re-evaluate at use sites because the optimizer
 # replaces the call with the literal it produces.
-cat > /tmp/ae_const_ok_fold.ae << 'EOF'
+cat > $AE_TMP/ae_const_ok_fold.ae << 'EOF'
 import std.string
 const ID = string.from_int(42)
 const VER = string.concat("v", "1")
 main() { println("ok") }
 EOF
-expect_accept "whitelisted from_int/concat const folds (issue #482)" /tmp/ae_const_ok_fold.ae
+expect_accept "whitelisted from_int/concat const folds (issue #482)" $AE_TMP/ae_const_ok_fold.ae
 
 # Case 3: function-local const = call.
-cat > /tmp/ae_const_bad3.ae << 'EOF'
+cat > $AE_TMP/ae_const_bad3.ae << 'EOF'
 extern malloc(size: int) -> ptr
 main() {
     const LOCAL = malloc(64)
     println("ok")
 }
 EOF
-expect_reject "function-local const = call" /tmp/ae_const_bad3.ae
+expect_reject "function-local const = call" $AE_TMP/ae_const_bad3.ae
 
 # Case 4: legit literal const compiles.
-cat > /tmp/ae_const_ok1.ae << 'EOF'
+cat > $AE_TMP/ae_const_ok1.ae << 'EOF'
 const PI = 3.14
 const MAX = 100
 const NAME = "alice"
 main() { println("ok") }
 EOF
-expect_accept "literal const RHS still compiles" /tmp/ae_const_ok1.ae
+expect_accept "literal const RHS still compiles" $AE_TMP/ae_const_ok1.ae
 
 # Case 5: arithmetic on literals compiles.
-cat > /tmp/ae_const_ok2.ae << 'EOF'
+cat > $AE_TMP/ae_const_ok2.ae << 'EOF'
 const MAX = 100
 const HALF = MAX / 2
 const DOUBLE = MAX * 2
 main() { println("ok") }
 EOF
-expect_accept "arithmetic on const RHS still compiles" /tmp/ae_const_ok2.ae
+expect_accept "arithmetic on const RHS still compiles" $AE_TMP/ae_const_ok2.ae
 
-rm -f /tmp/ae_const_bad*.ae /tmp/ae_const_ok*.ae \
-      /tmp/ae_const_reject_out /tmp/ae_const_ok_out /tmp/ae_const_ok_fold.ae
+rm -f $AE_TMP/ae_const_bad*.ae $AE_TMP/ae_const_ok*.ae \
+      $AE_TMP/ae_const_reject_out $AE_TMP/ae_const_ok_out $AE_TMP/ae_const_ok_fold.ae
 
 echo ""
 echo "const_call_reject: $pass passed, $fail failed"

@@ -1,0 +1,28 @@
+// An https GET through std.http.client, for test_https_windows_trust.sh. The
+// runner picks the stack (AETHER_PURE_TLS=1 for the pure-Aether client,
+// OpenSSL otherwise) and the trust store (SSL_CERT_FILE, or nothing, and a
+// bundle beside this program); the program only asks.
+//
+//   URL   the https URL to GET
+//
+// Prints "STATUS <code> BODY <body>" on success, "ERR: <error>" on failure.
+
+import std.http.client
+import std.cryptography.tls13_client
+import std.os
+
+main() {
+    url = os.getenv("URL")
+    req = client.request("GET", url)
+    client.set_timeout(req, 10s)
+    resp, err = client.send_request(req)
+    client.request_free(req)
+    if err != "" {
+        println("ERR: ${err}")
+        return
+    }
+    status = client.response_status(resp)
+    body = client.response_body(resp)
+    println("STATUS ${status} BODY ${body}")
+    client.response_free(resp)
+}

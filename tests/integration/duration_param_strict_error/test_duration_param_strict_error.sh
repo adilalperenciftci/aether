@@ -5,8 +5,12 @@
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+# A directory of its own, not fixed /tmp paths: two sweeps at once (two
+# checkouts, or parallel agents) overwrote each other's files (#2770).
+AE_TMP="$(mktemp -d)"
+trap 'rm -rf "$AE_TMP"' EXIT
 
-cat > /tmp/ae_dur_param_bad.ae << 'EOF'
+cat > $AE_TMP/ae_dur_param_bad.ae << 'EOF'
 set_timeout(t: Duration) -> int {
     return 0
 }
@@ -16,9 +20,9 @@ main() {
 }
 EOF
 
-output=$(AETHER_HOME="" "$ROOT/build/ae" build /tmp/ae_dur_param_bad.ae \
-            -o /tmp/ae_dur_param_bad_out 2>&1)
-rm -f /tmp/ae_dur_param_bad.ae /tmp/ae_dur_param_bad_out
+output=$(AETHER_HOME="" "$ROOT/build/ae" build $AE_TMP/ae_dur_param_bad.ae \
+            -o $AE_TMP/ae_dur_param_bad_out 2>&1)
+rm -f $AE_TMP/ae_dur_param_bad.ae $AE_TMP/ae_dur_param_bad_out
 
 # Must reject with the Duration-strictness diagnostic and mention
 # at least one unit-suffix form in the suggestion.

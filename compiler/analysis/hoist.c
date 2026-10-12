@@ -1,5 +1,5 @@
 /* Shared hoisting rules -- see hoist.h (#2186). The logic here is what
- * codegen's hoist_if_branch_vars, hoist_if_else_common_vars and
+ * codegen's hoist_if_branch_vars, hoist_common_vars and
  * hoist_loop_vars used to compute inline; they now call it, and so does the
  * typechecker. */
 
@@ -84,6 +84,29 @@ Type* hoist_join_type(ASTNode* scope_body, const char* name, Type* seed) {
     return acc;
 }
 
+/* The arms of a branching statement: an if's then and else blocks, or a
+ * switch's case statements, whose children (after a case's selector) are
+ * its body. A case's selector is never a declaration, so the case node
+ * itself is the body hoist_direct_decl_names and hoist_find_decl read
+ * (#2732). Returns the count written to `arms` (at most `cap`), 0 for any
+ * other statement. */
+static int branch_arms(ASTNode* stmt, ASTNode** arms, int cap) {
+    int n = 0;
+    if (!stmt) return 0;
+    if (stmt->type == AST_IF_STATEMENT) {
+        for (int j = 1; j < stmt->child_count && j < 3 && n < cap; j++)
+            arms[n++] = stmt->children[j];
+    } else if (stmt->type == AST_SWITCH_STATEMENT) {
+        for (int j = 1; j < stmt->child_count && n < cap; j++) {
+            ASTNode* c = stmt->children[j];
+            if (c && c->type == AST_CASE_STATEMENT) arms[n++] = c;
+        }
+    }
+    return n;
+}
+
+#define HOIST_MAX_ARMS 256
+
 int hoist_if_branch_candidates(ASTNode* body, const char** out, int cap) {
     if (!body || !out) return 0;
     /* Names a top-level statement declares get their own function-scope
@@ -102,10 +125,10 @@ int hoist_if_branch_candidates(ASTNode* body, const char** out, int cap) {
     const char* names[HOIST_MAX_NAMES];
     int count = 0;
     for (int i = 0; i < body->child_count; i++) {
-        ASTNode* child = body->children[i];
-        if (!child || child->type != AST_IF_STATEMENT) continue;
-        for (int j = 1; j < child->child_count && j < 3; j++) {
-            count = hoist_direct_decl_names(child->children[j], names, count, HOIST_MAX_NAMES);
+        ASTNode* arms[HOIST_MAX_ARMS];
+        int na = branch_arms(body->children[i], arms, HOIST_MAX_ARMS);
+        for (int j = 0; j < na; j++) {
+            count = hoist_direct_decl_names(arms[j], names, count, HOIST_MAX_NAMES);
         }
     }
 
@@ -117,13 +140,14 @@ int hoist_if_branch_candidates(ASTNode* body, const char** out, int cap) {
             if (strcmp(name, top_level_decls[k]) == 0) { dup = 1; break; }
         }
         if (dup) continue;
-        /* Only a name read outside the ifs' arms -- by a top-level statement
-         * that is not an if, or by an if's condition -- is hoisted. */
+        /* Only a name read outside the arms -- by a top-level statement that
+         * does not branch, or by an if's condition or a switch's subject --
+         * is hoisted. */
         int referenced_outside = 0;
         for (int i = 0; i < body->child_count && !referenced_outside; i++) {
             ASTNode* child = body->children[i];
             if (!child) continue;
-            if (child->type == AST_IF_STATEMENT) {
+            if (child->type == AST_IF_STATEMENT || child->type == AST_SWITCH_STATEMENT) {
                 if (child->child_count > 0 &&
                     hoist_has_identifier_ref(child->children[0], name)) {
                     referenced_outside = 1;
@@ -142,14 +166,56 @@ int hoist_if_branch_candidates(ASTNode* body, const char** out, int cap) {
 ASTNode* hoist_if_branch_first_decl(ASTNode* body, const char* name) {
     if (!body) return NULL;
     for (int i = 0; i < body->child_count; i++) {
-        ASTNode* child = body->children[i];
-        if (!child || child->type != AST_IF_STATEMENT) continue;
-        for (int j = 1; j < child->child_count && j < 3; j++) {
-            ASTNode* d = hoist_find_decl(child->children[j], name);
+        ASTNode* arms[HOIST_MAX_ARMS];
+        int na = branch_arms(body->children[i], arms, HOIST_MAX_ARMS);
+        for (int j = 0; j < na; j++) {
+            ASTNode* d = hoist_find_decl(arms[j], name);
             if (d) return d;
         }
     }
     return NULL;
+}
+
+int hoist_common_decl_names(ASTNode* stmt, const char** out, int cap) {
+    if (!stmt || !out) return 0;
+    ASTNode* arms[HOIST_MAX_ARMS];
+    int na = branch_arms(stmt, arms, HOIST_MAX_ARMS);
+    /* Every path must pass through an arm: an if needs its else, a switch
+     * its default. */
+    if (stmt->type == AST_IF_STATEMENT && na < 2) return 0;
+    if (stmt->type == AST_SWITCH_STATEMENT) {
+        int has_default = 0;
+        for (int j = 0; j < na; j++) {
+            if (arms[j]->value && strcmp(arms[j]->value, "default") == 0) has_default = 1;
+        }
+        if (!has_default || na < 2) return 0;
+    }
+    if (na == 0) return 0;
+    const char* first[HOIST_MAX_NAMES];
+    int nfirst = hoist_direct_decl_names(arms[0], first, 0, HOIST_MAX_NAMES);
+    int kept = 0;
+    for (int i = 0; i < nfirst && kept < cap; i++) {
+        int everywhere = 1;
+        for (int j = 1; j < na && everywhere; j++) {
+            if (!hoist_find_decl(arms[j], first[i])) everywhere = 0;
+        }
+        if (everywhere) out[kept++] = first[i];
+    }
+    return kept;
+}
+
+ASTNode* hoist_common_first_decl(ASTNode* stmt, const char* name) {
+    ASTNode* arms[HOIST_MAX_ARMS];
+    int na = branch_arms(stmt, arms, HOIST_MAX_ARMS);
+    ASTNode* any = NULL;
+    for (int j = 0; j < na; j++) {
+        ASTNode* d = hoist_find_decl(arms[j], name);
+        if (!d) continue;
+        if (!any) any = d;
+        Type* t = hoist_decl_type(d);
+        if (t && t->kind != TYPE_VOID && t->kind != TYPE_UNKNOWN) return d;
+    }
+    return any;
 }
 
 void hoist_loop_decls(ASTNode* body, HoistDeclVisitor visit, void* user) {
@@ -158,8 +224,10 @@ void hoist_loop_decls(ASTNode* body, HoistDeclVisitor visit, void* user) {
         ASTNode* child = body->children[i];
         if (!child) continue;
         if (child->type == AST_VARIABLE_DECLARATION && child->value) visit(child, user);
+        /* A switch's children are its cases, whose own children are their
+         * bodies: they are visited as an if's arms are (#2732). */
         if (child->type == AST_IF_STATEMENT || child->type == AST_WHILE_LOOP ||
-            child->type == AST_FOR_LOOP) {
+            child->type == AST_FOR_LOOP || child->type == AST_SWITCH_STATEMENT) {
             for (int j = 0; j < child->child_count; j++) {
                 hoist_loop_decls(child->children[j], visit, user);
             }

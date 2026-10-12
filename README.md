@@ -147,7 +147,7 @@ ae build [file.ae]       # Compile to executable
 ae build --trace f.ae    # ...with message tracing compiled in (docs/message-tracing.md)
 ae check [file.ae]       # Type-check without compiling (skips codegen + link)
 ae fmt [--check] [path]  # Format source (stdin, or .ae files/dirs in place)
-ae test [file|dir]       # Discover and run tests
+ae test [file|dir]...    # Discover and run tests (every file and directory named)
 ae examples [dir]        # Build all example programs
 ae add <host/user/repo>  # Add a dependency (any git host)
 ae repl                  # Start interactive REPL
@@ -168,6 +168,7 @@ ae version installed     # List only the releases installed locally
 ae version gc --keep 3   # Prune the store to the newest 3
 ae version dedupe        # Share identical files across versions
 ae help                  # Show all commands
+ae <command> --help      # A command's own options (or -h); runs nothing
 ```
 
 In a project directory (with `aether.toml`), `ae run` and `ae build` compile `src/main.ae` as the program entry point. You can also pass `.` as the directory: `ae run .` or `ae build .`.
@@ -207,24 +208,27 @@ The Aether build is GNU-make based. Use one of the two paths below, `nmake` from
    make ci   # full suite: compiler, ae, stdlib, REPL, C tests, .ae tests, examples
    ```
 
-For HTTPS to verify certs, the `mingw-w64-x86_64-ca-certificates` package above provides the bundle at `/mingw64/etc/ssl/certs/ca-bundle.crt`. Windows has no system PEM store, so that file (or another bundle) is what the runtime has to find. It auto-detects the default MSYS2 location and the one Git for Windows ships:
+For HTTPS to verify certificates on Windows, both TLS stacks (OpenSSL and the pure-Aether client) trust every certificate in the system ROOT store, the one Windows itself uses, together with the first of these bundle files that exists:
 
-| Toolchain | Bundle |
+| Where | Bundle |
 |---|---|
-| MSYS2 + `mingw-w64-x86_64-ca-certificates` | `C:\msys64\mingw64\etc\ssl\certs\ca-bundle.crt` |
-| Git for Windows (already installed if you cloned with it) | `C:\Program Files\Git\mingw64\etc\ssl\certs\ca-bundle.crt` |
+| The release archive, beside the program | `<root>\share\ssl\ca-bundle.crt` for `<root>\bin\prog.exe` (`share\ssl\` in the program's own directory when it is not in a `bin\`) |
+| MSYS2 + `mingw-w64-x86_64-ca-certificates` | `C:\msys64\mingw64\etc\ssl\certs\ca-bundle.crt`, the UCRT64 one, then `etc\ssl\cert.pem` in each |
+| Git for Windows | `C:\Program Files\Git\mingw64\etc\ssl\certs\ca-bundle.crt` |
 
-Anywhere else — a non-default MSYS2 root, a custom bundle, a corporate CA — export `SSL_CERT_FILE` to the bundle's **native Windows** path:
+So a program copied to a machine with neither MSYS2 nor Git for Windows still makes HTTPS requests. The bundle joins the store rather than replacing it because Windows adds a root certificate to its store only the first time it needs one, so the store of a machine that has never met a server can lack the root that server chains to.
+
+`SSL_CERT_FILE` (a PEM bundle) or `SSL_CERT_DIR` (a directory of PEM files, `;`-separated) replaces all of that when set, for a corporate CA, a custom bundle or a test CA. It takes the bundle's **native Windows** path:
 
 ```bash
 export SSL_CERT_FILE="C:/Program Files/Git/mingw64/etc/ssl/certs/ca-bundle.crt"
 ```
 
-An MSYS-style path (`/mingw64/...`) will not work: a compiled Aether program is a plain Win32 binary and does not inherit MSYS2's virtual mounts. A build that finds no bundle fails every HTTPS request at the handshake.
+An MSYS-style path (`/mingw64/...`) will not work: a compiled Aether program is a plain Win32 binary and does not inherit MSYS2's virtual mounts. An `SSL_CERT_FILE` that cannot be read fails every HTTPS request at the handshake, on both stacks, rather than falling back to the store.
 
 Note also that a source build without OpenSSL has no TLS backend linked at all; such a program must `import std.cryptography.tls13_client` to get HTTPS. The error message says so if you forget.
 
-**Native MSVC (cl.exe / nmake):** not currently supported as a full build path, tracker [#99](https://github.com/aether-lang-dev/aether/issues/99). The MSVC matrix job in CI verifies our public headers parse under `cl.exe` so a future native MSVC port stays feasible, but `make` (the build system itself) requires GNU make. The MSYS2 MinGW build above is the supported source-build path for Windows today.
+**Native MSVC (cl.exe / nmake):** not currently supported as a full build path, tracker [#99](https://github.com/aether-lang-dev/aether/issues/99). The MSVC matrix job in CI verifies our public headers parse under `cl.exe`, and that the C the compiler writes for a few programs compiles under it (`make test-msvc-compat` runs the same check locally), so a future native MSVC port stays feasible, but `make` (the build system itself) requires GNU make. The MSYS2 MinGW build above is the supported source-build path for Windows today.
 
 ## Project Structure
 

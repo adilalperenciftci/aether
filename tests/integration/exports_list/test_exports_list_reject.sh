@@ -6,20 +6,24 @@
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+# A directory of its own, not fixed /tmp paths: two sweeps at once (two
+# checkouts, or parallel agents) overwrote each other's files (#2770).
+AE_TMP="$(mktemp -d)"
+trap 'rm -rf "$AE_TMP"' EXIT
 
 pass=0
 fail=0
 
 # Test 1: calling a non-listed function should fail to resolve.
-cat > /tmp/ae_exports_list_bad1.ae << 'EOF'
+cat > $AE_TMP/ae_exports_list_bad1.ae << 'EOF'
 import mathlist
 main() {
     println(mathlist._internal_helper(5))
 }
 EOF
 cd "$SCRIPT_DIR"
-if AETHER_HOME="" "$ROOT/build/ae" build /tmp/ae_exports_list_bad1.ae \
-        -o /tmp/ae_exports_list_bad1 2>/dev/null; then
+if AETHER_HOME="" "$ROOT/build/ae" build $AE_TMP/ae_exports_list_bad1.ae \
+        -o $AE_TMP/ae_exports_list_bad1 2>/dev/null; then
     echo "  [FAIL] non-listed function should be rejected"
     fail=$((fail + 1))
 else
@@ -28,14 +32,14 @@ else
 fi
 
 # Test 2: accessing a non-listed constant should fail.
-cat > /tmp/ae_exports_list_bad2.ae << 'EOF'
+cat > $AE_TMP/ae_exports_list_bad2.ae << 'EOF'
 import mathlist
 main() {
     println(mathlist.SECRET)
 }
 EOF
-if AETHER_HOME="" "$ROOT/build/ae" build /tmp/ae_exports_list_bad2.ae \
-        -o /tmp/ae_exports_list_bad2 2>/dev/null; then
+if AETHER_HOME="" "$ROOT/build/ae" build $AE_TMP/ae_exports_list_bad2.ae \
+        -o $AE_TMP/ae_exports_list_bad2 2>/dev/null; then
     echo "  [FAIL] non-listed const should be rejected"
     fail=$((fail + 1))
 else
@@ -43,7 +47,7 @@ else
     pass=$((pass + 1))
 fi
 
-rm -f /tmp/ae_exports_list_bad*.ae /tmp/ae_exports_list_bad*
+rm -f $AE_TMP/ae_exports_list_bad*.ae $AE_TMP/ae_exports_list_bad*
 
 if [ $fail -gt 0 ]; then
     echo "FAIL: $fail rejection(s) didn't fire"

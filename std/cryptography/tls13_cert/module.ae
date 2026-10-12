@@ -62,7 +62,7 @@ exports(
     SCHEME_ECDSA_P256_SHA256, SCHEME_ECDSA_P384_SHA384, SCHEME_ED25519, SCHEME_RSA_PSS_RSAE_SHA256,
     check_validity, time_to_key, check_hostname,
     chain_verify, chain_verify_path, verify_cert_signature, find_issuer_cert,
-    trust_store_load, trust_store_add, free_anchors,
+    trust_store_load, trust_store_add, trust_store_add_pem, free_anchors,
     parse_ocsp_status, verify_ocsp_signature, verify_ocsp_signature_at, OCSP_GOOD, OCSP_REVOKED, OCSP_UNKNOWN, OCSP_ERROR
 )
 
@@ -1841,6 +1841,15 @@ trust_store_add(anchors: ptr, path: string) -> (int, string) {
     text = fs.file_read_all_raw(fh)
     fs.file_close(fh)
     return add_pem_text(anchors, text), ""
+}
+
+// Append the certificates in PEM `text` (any number of CERTIFICATE blocks,
+// anything around them ignored) to `anchors`, as trust_store_add does for a
+// file. Returns how many were added. What tls13_client loads the Windows
+// system store through (#2675), which arrives as text rather than as a file.
+trust_store_add_pem(anchors: ptr, text: string) -> int {
+    if anchors == null { return 0 }
+    return add_pem_text(anchors, text)
 }
 
 // Every file directly inside `dir`, through add_pem_text.

@@ -1,0 +1,85 @@
+// Regression (#2769): a closure in a `catch` handler or a `some(v)` arm
+// captures the binding.
+//
+// Closure capture discovery counted a name as a local of the enclosing
+// function only through a declaration or a parameter, so a catch binding
+// and the `some(v)` binding of a match over an optional were never
+// captured, and the closure's C body read an undeclared name (gcc stopped
+// at `'e' undeclared`). It worked only by accident, when the function also
+// had a local of the same name, which #2746 now renames apart. Both
+// bindings are locals now, typed as a string (the panic's reason) and as
+// the optional's value, captured as any string local is: the closure's
+// environment takes a reference of its own, given back with it.
+//
+// The leak checks run where the heap count is exact (mem.heap_in_use_exact):
+// after a warm-up, some window of the same work grows by exactly 0
+// (mem.steady_growth), one window per shape.
+
+import std.mem
+import std.string
+
+extern exit(code: int)
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL #2769: ${msg}")
+        exit(1)
+    }
+}
+
+fresh(w: string) -> string? {
+    return string.concat(w, "f")
+}
+
+by_catch(w: string) -> int {
+    try {
+        panic(string.concat(w, "-boom"))
+    } catch e {
+        g = || { return string.length(e) }
+        return call(g)
+    }
+    return 0
+}
+
+// The binding shadows a local of its name, and the closure outlives the arm.
+by_some(w: string) -> int {
+    x = string.concat(w, "-outer")
+    h = || { return 0 }
+    match fresh(w) {
+        none -> {
+            return -1
+        }
+        some(x) -> {
+            h = || { return string.length(x) }
+        }
+    }
+    return call(h) + string.length(x)
+}
+
+measure(which: int, w: string) -> long {
+    return mem.steady_growth(|| {
+            k = 0
+            while k < 100 {
+                if which == 0 { by_catch(w) }
+                if which == 1 { by_some(w) }
+                k = k + 1
+            }
+        }, 5)
+}
+
+main() {
+    println("=== test_closure_captures_scoped_binding ===")
+    w = "w"
+    check(by_catch(w) == 6, "a closure capturing a catch binding (${by_catch(w)})")
+    check(by_some(w) == 9, "a closure capturing a some binding (${by_some(w)})")
+    if mem.heap_in_use_exact() {
+        names = ["a catch binding", "a some binding"]
+        i = 0
+        while i < 2 {
+            grown = measure(i, w)
+            check(grown == 0, "100 closures capturing ${names[i]} grew the heap by ${grown} bytes in every run")
+            i = i + 1
+        }
+    }
+    println("=== test_closure_captures_scoped_binding passed ===")
+}

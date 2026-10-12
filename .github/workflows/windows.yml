@@ -213,8 +213,11 @@ jobs:
         JOBS="$(nproc)" bash tests/scripts/windows_wine_sweep.sh
 
   build-mingw:
-    name: Build + Test (Windows / ${{ matrix.msystem }})
+    name: Build + Test (Windows / ${{ matrix.msystem }}) [${{ matrix.part }}]
     runs-on: windows-latest
+    # Twice the slowest healthy job, so a hang outside every bound costs one
+    # cap, not GitHub's 6 hour default (#2772).
+    timeout-minutes: 35
     # Gate on the fast lane (#1593): a cross-build or Wine failure skips
     # ~20 minutes of doomed MSYS2 compute. `needs:`-skipped jobs report as
     # SKIPPED, not failed — with these as required checks the PR still
@@ -226,6 +229,12 @@ jobs:
     # on MINGW64 for every PR and push, with Mesa, Vulkan and SQLite besides,
     # so a MINGW64 leg here ran the half-hour suite a second time for no
     # coverage (#2673).
+    #
+    # Two jobs (#2757): the leg took about 25 min, most of it the test sweep
+    # on 4 cores. [1/2] runs `make ci` with a third of the sweep, [2/2] builds
+    # the same toolchain and runs the other two thirds: `make ci`'s stages
+    # around the sweep cost [1/2] about 5 min more, so an even split left it
+    # that far behind (#2772, tests/scripts/sweep_shard.sh).
     strategy:
       fail-fast: false
       matrix:
@@ -233,6 +242,15 @@ jobs:
           - msystem: UCRT64
             prefix: mingw-w64-ucrt-x86_64
             root: ucrt64
+            part: "1/2"
+            shard: "1/3"
+            target: ci
+          - msystem: UCRT64
+            prefix: mingw-w64-ucrt-x86_64
+            root: ucrt64
+            part: "2/2"
+            shard: "2,3/3"
+            target: ci-sweep
 
     defaults:
       run:
@@ -290,18 +308,22 @@ jobs:
         export SSL_CERT_FILE="$(cygpath -w /${{ matrix.root }}/etc/ssl/certs/ca-bundle.crt)"
         echo "SSL_CERT_FILE=$SSL_CERT_FILE"
         ls -la "$(cygpath -u "$SSL_CERT_FILE")"
-        make ci
+        AE_SWEEP_SHARD="${{ matrix.shard }}" make ${{ matrix.target }}
 
+    # The `make ci` job only (#2757): both jobs build the same object and
+    # binaries, and a second save of one cache key or upload of one artifact
+    # name fails.
     - name: Save miniaudio object cache (merge to main, on miss only)
       if: >-
         github.event_name == 'push' && github.ref == 'refs/heads/main'
-        && steps.audio_cache.outputs.cache-hit != 'true'
+        && steps.audio_cache.outputs.cache-hit != 'true' && matrix.target == 'ci'
       uses: actions/cache/save@v4
       with:
         path: .ci-cache
         key: audio-obj-windows-${{ matrix.root }}-${{ hashFiles('std/audio/miniaudio.h', 'std/audio/stb_vorbis.c', 'std/audio/aether_audio.c', 'std/audio/aether_audio.h') }}
 
     - name: Upload Windows binaries
+      if: matrix.target == 'ci'
       uses: actions/upload-artifact@v4
       with:
         name: aether-windows-${{ matrix.root }}
@@ -313,7 +335,8 @@ jobs:
   # ============================================================
   # MSVC compatibility check — ensure headers compile under cl.exe
   # No full build yet (runtime needs Win32 threading wiring), but
-  # we verify that all public headers pass the MSVC parser.
+  # we verify that all public headers pass the MSVC parser, and that
+  # the C aetherc writes for a few programs compiles under cl.exe.
   # ============================================================
   headers-msvc:
     name: Header compatibility (MSVC)
@@ -357,3 +380,18 @@ jobs:
            && echo "aether_thread.h (types only) OK" || exit 1
 
         del _probe.c _probe.obj 2>nul
+
+    # The C a program gets on the non-GCC path (AETHER_GCC_COMPAT 0), which
+    # is the path cl.exe takes, compiled by cl.exe itself (#2725). Nothing ran
+    # tests/compiler/test_msvc_compat.sh before. The aetherc that writes the C
+    # is the one the windows-cross job built; the script runs under Git Bash,
+    # with cl.exe on PATH from msvc-dev-cmd.
+    - name: Download the cross-built aetherc
+      uses: actions/download-artifact@v4
+      with:
+        name: aether-windows-cross-x86_64
+        path: build/cross
+
+    - name: Check generated C compiles under cl.exe
+      shell: bash
+      run: AETHERC=build/cross/aetherc.exe MSVC_COMPAT_CC=cl bash tests/compiler/test_msvc_compat.sh

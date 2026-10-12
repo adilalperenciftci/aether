@@ -303,6 +303,7 @@ void add_symbol(SymbolTable* table, const char* name, Type* type, int is_actor, 
     symbol->branch_hoisted = 0;
     symbol->hoist_pending = 0;
     symbol->is_const = 0;
+    symbol->inferred_closure = NULL;
     symtab_link(table, symbol);
 }
 
@@ -482,6 +483,7 @@ void add_module_alias(SymbolTable* table, const char* alias, const char* module_
     symbol->branch_hoisted = 0;
     symbol->hoist_pending = 0;
     symbol->is_const = 0;
+    symbol->inferred_closure = NULL;
     symtab_link(table, symbol);
 }
 
@@ -1907,6 +1909,8 @@ static int fn_yields_no_value(ASTNode* fn);
  * fn_yields_no_value. */
 static void tc_yields_settle(ASTNode* program, SymbolTable* global);
 static int tc_return_settle(ASTNode* ret, SymbolTable* table);
+/* #2743: every arm of a `match` whose value is used gives one. */
+static int check_match_value_arms(ASTNode* m, SymbolTable* table);
 
 // Type compatibility functions
 /* A `fn` with no signature: nothing known about parameters or result. */
@@ -4454,13 +4458,14 @@ static void contract_check_clauses_at_definition(ASTNode* func) {
         contract_sprint_expr(&ps, cl->children[0]);
         contract_str_terminate(&ps);
         char emsg[768];
+        char shown[160];
         snprintf(emsg, sizeof(emsg),
                  is_req
                      ? "`requires` predicate is always false, no call to '%s' "
                        "can ever satisfy it: %s"
                      : "`ensures` predicate is always false, '%s' can never "
                        "return legally: %s",
-                 func->value ? func->value : "<fn>", ptxt);
+                 ast_source_name(func, shown, sizeof(shown)), ptxt);
         type_error(emsg, cl->line, cl->column);
     }
 }
@@ -5583,11 +5588,6 @@ int typecheck_program(ASTNode* program) {
         free((void*)glob_names);
     }
 
-    /* #2736: which of the program's functions return a value, settled
-     * before any body is checked or inferred, so it does not depend on the
-     * order they are defined in. */
-    tc_yields_settle(program, global_table);
-
     // NEW: Run type inference before type checking
     if (!infer_all_types(program, global_table)) {
         free_symbol_table(global_table);
@@ -5642,6 +5642,14 @@ int typecheck_program(ASTNode* program) {
             short_sym->node = full_sym->node;
         }
     }
+
+    /* #2736: which of the program's functions return a value, settled
+     * before any body is checked, so it does not depend on the order they
+     * are defined in. After inference (#2744): a call whose callee depends
+     * on a receiver's type (a UFCS call, a field call) is resolved with the
+     * types inference gave the definition's locals, as the checker will
+     * resolve it. Inference reads none of these answers. */
+    tc_yields_settle(program, global_table);
 
     // Second pass: type check all nodes
     for (int i = 0; i < program->child_count; i++) {
@@ -6489,11 +6497,15 @@ static void check_effect_tags(ASTNode* program) {
         const char* cap = effect_scan(program, body, forbid, visited, &nv,
                                       offending, sizeof(offending), 0);
         if (cap) {
-            char msg[360];
+            /* #2729: named as the source spells it (`checks.shell`), not by
+             * the merged C name (`checks_shell`). */
+            char shown[160];
+            const char* name = ast_source_name(fn, shown, sizeof(shown));
+            char msg[400];
             snprintf(msg, sizeof(msg),
                 "function '%s' is declared `@no_%s` (or `@pure`) but reaches a "
                 "`%s` operation through `%s`. Remove that call path, or drop the "
-                "effect tag.", fn->value ? fn->value : "?", cap, cap, offending);
+                "effect tag.", name, cap, cap, offending);
             g_tc_file = fn->source_file;   /* #2064: the definition's own file */
             type_error(msg, fn->line, fn->column);
             g_tc_file = NULL;
@@ -7322,25 +7334,15 @@ static void declare_if_branch_hoists(ASTNode* body, SymbolTable* table) {
     }
 }
 
-/* Before an if/else: hoist_if_else_common_vars's names (both arms declare
- * them), typed from the then arm, else from the else arm. */
-static void declare_if_else_hoists(ASTNode* ifs, SymbolTable* table) {
-    if (!ifs || ifs->child_count < 3) return;
-    ASTNode* then_body = ifs->children[1];
-    ASTNode* else_body = ifs->children[2];
-    const char* then_names[HOIST_MAX_NAMES];
-    int tc = hoist_direct_decl_names(then_body, then_names, 0, HOIST_MAX_NAMES);
-    const char* else_names[HOIST_MAX_NAMES];
-    int ec = hoist_direct_decl_names(else_body, else_names, 0, HOIST_MAX_NAMES);
-    for (int i = 0; i < tc; i++) {
-        int in_else = 0;
-        for (int j = 0; j < ec; j++) {
-            if (strcmp(then_names[i], else_names[j]) == 0) { in_else = 1; break; }
-        }
-        if (!in_else) continue;
-        Type* t = hoist_decl_type(hoist_find_decl(then_body, then_names[i]));
-        if (!t) t = hoist_decl_type(hoist_find_decl(else_body, then_names[i]));
-        declare_hoisted_local(table, then_names[i], t);
+/* Before an if/else, or a switch with a default (#2732): hoist_common_vars's
+ * names (every arm declares them), typed from the first arm that types
+ * them. */
+static void declare_common_hoists(ASTNode* stmt, SymbolTable* table) {
+    const char* names[HOIST_MAX_NAMES];
+    int n = hoist_common_decl_names(stmt, names, HOIST_MAX_NAMES);
+    for (int i = 0; i < n; i++) {
+        declare_hoisted_local(table, names[i],
+                              hoist_decl_type(hoist_common_first_decl(stmt, names[i])));
     }
 }
 
@@ -7477,20 +7479,37 @@ static void mark_optional_narrowed(ASTNode* n, const char* name, Type* inner) {
  *
  * Reported only where the shadowing is certain. A bare identifier arm binds
  * nothing: over a scalar the value is compared with the variable of that
- * name, whose value is not known here, so identifier arms are never compared
- * (#2700); a warning on correct code would be worse than none. */
+ * name, whose value is not known here, so such arms are never compared
+ * (#2700); a warning on correct code would be worse than none. Over an enum,
+ * a sum or an optional the set of cases is closed and every arm names one
+ * of them, so those arms are compared too (#2728). */
 static int match_arm_is_wildcard(ASTNode* p) {
     if (!p) return 0;
     if (p->node_type && p->node_type->kind == TYPE_WILDCARD) return 1;
-    return p->value && strcmp(p->value, "_") == 0;
+    /* `_` is the wildcard; a string literal "_" is the one-character string
+     * it spells. */
+    return p->type == AST_IDENTIFIER && p->value && strcmp(p->value, "_") == 0;
 }
 
-/* A comparable key, malloc'd, for the pattern shapes whose identity is
+/* A comparable key, malloc'd, for one compared value whose identity is
  * unambiguous; NULL for everything else, which is then left alone. The key
- * covers the whole pattern: a fixed 160-byte key made two long literals
- * sharing a prefix duplicates (#2521). */
-static char* match_arm_key(ASTNode* p) {
+ * covers the whole value: a fixed 160-byte key made two long literals
+ * sharing a prefix duplicates (#2521). `closed` is set over an enum, a sum
+ * or an optional, where an identifier names a member or a variant (a member
+ * already lowered to its constant `Enum_Member`) and never a variable. */
+static char* match_arm_key(ASTNode* p, int closed) {
     if (!p || match_arm_is_wildcard(p)) return NULL;
+    if (closed && p->type == AST_NONE_LITERAL) return strdup("none");
+    if (closed && p->type == AST_PATTERN_VARIABLE && p->annotation &&
+        strcmp(p->annotation, "some_pattern") == 0) return strdup("some");
+    if (closed && (p->type == AST_IDENTIFIER || p->type == AST_PATTERN_VARIABLE) &&
+        p->value) {
+        size_t n = 3 + strlen(p->value) + 1;
+        char* key = malloc(n);
+        if (!key) return NULL;
+        snprintf(key, n, "id:%s", p->value);
+        return key;
+    }
     if (p->type == AST_LITERAL && p->value) {
         /* By length: a string literal may hold a NUL (#2520). A NUL is
          * written as `\0` and a backslash as `\\`, so no two literals share
@@ -7532,9 +7551,27 @@ static void warn_unreachable_arm(ASTNode* pattern, const char* msg,
     warning_count++;
 }
 
-static void check_match_arm_reachability(ASTNode* stmt) {
+/* #2727: the values a selector compares with: the selector itself, or each
+ * value of a comma-list. A range is one value here. Returns the count written
+ * to `out` (at most `cap`). */
+static int selector_elements(ASTNode* sel, ASTNode** out, int cap) {
+    if (!sel || cap <= 0) return 0;
+    if (sel->type != AST_MATCH_ALT) { out[0] = sel; return 1; }
+    int n = 0;
+    for (int i = 0; i < sel->child_count && n < cap; i++)
+        if (sel->children[i]) out[n++] = sel->children[i];
+    return n;
+}
+
+#define SELECTOR_ELEMENTS_MAX 256
+
+/* Run after the arms are checked, so a bare enum member is its constant by
+ * then. An arm is unreachable below a `_`, or when every value it names is
+ * already named by the arms above it (#2728: a comma-list counts value by
+ * value, and over an enum, a sum or an optional an identifier is a case). */
+static void check_match_arm_reachability(ASTNode* stmt, int closed) {
     if (!stmt) return;
-    enum { MATCH_KEYS_MAX = 64 };
+    enum { MATCH_KEYS_MAX = 256 };
     char* keys[MATCH_KEYS_MAX];
     int  key_line[MATCH_KEYS_MAX];
     int  nkeys = 0;
@@ -7560,29 +7597,216 @@ static void check_match_arm_reachability(ASTNode* stmt) {
             continue;
         }
 
-        char* key = match_arm_key(pattern);
-        if (!key) continue;
-        int dup_line = -1;
-        for (int k = 0; k < nkeys; k++) {
-            if (strcmp(keys[k], key) == 0) { dup_line = key_line[k]; break; }
+        ASTNode* els[SELECTOR_ELEMENTS_MAX];
+        int nel = selector_elements(pattern, els, SELECTOR_ELEMENTS_MAX);
+        char* arm_keys[SELECTOR_ELEMENTS_MAX];
+        int nak = 0, all_keyed = nel > 0, dup_line = -1, all_seen = 1;
+        for (int e = 0; e < nel; e++) {
+            char* key = match_arm_key(els[e], closed);
+            if (!key) { all_keyed = 0; continue; }
+            int seen = -1;
+            for (int k = 0; k < nkeys && seen < 0; k++)
+                if (strcmp(keys[k], key) == 0) seen = key_line[k];
+            for (int k = 0; k < nak && seen < 0; k++)
+                if (strcmp(arm_keys[k], key) == 0) seen = pattern->line;
+            if (seen < 0) all_seen = 0;
+            else if (dup_line < 0) dup_line = seen;
+            arm_keys[nak++] = key;
         }
-        if (dup_line >= 0) {
+        if (all_keyed && all_seen && dup_line >= 0) {
             char msg[240];
             snprintf(msg, sizeof(msg),
                      "unreachable match arm: this case is already handled on "
                      "line %d", dup_line);
             warn_unreachable_arm(pattern, msg,
                                  "remove the duplicate, or change it to the case you meant");
-            free(key);
-        } else if (nkeys < MATCH_KEYS_MAX) {
-            keys[nkeys] = key;
-            key_line[nkeys] = pattern->line;
-            nkeys++;
-        } else {
-            free(key);
+        }
+        for (int k = 0; k < nak; k++) {
+            if (nkeys < MATCH_KEYS_MAX) {
+                keys[nkeys] = arm_keys[k];
+                key_line[nkeys] = pattern->line;
+                nkeys++;
+            } else {
+                free(arm_keys[k]);
+            }
         }
     }
     for (int k = 0; k < nkeys; k++) free(keys[k]);
+}
+
+/* ---- #2727: a case selector against the value it is compared with -------
+ *
+ * A `match` arm or a `switch` case compares the value matched with what it
+ * names: a value, a range or a comma-list of them. Nothing checked that
+ * against the value, so codegen's `_match_val == <pattern>` met it first: an
+ * arm naming no variable reached the C compiler as an undeclared identifier,
+ * a string arm over an int was a pointer compared with an integer that never
+ * matched, and a literal arm over an optional or a sum was dropped without a
+ * word. Each value is now checked as the comparison it lowers to. */
+
+/* `name` with its indefinite article, for a message: "an int", "a string". */
+static const char* with_article(const char* name) {
+    if (!name || !*name) return "a value";
+    char c = name[0];
+    int vowel = c == 'a' || c == 'e' || c == 'i' || c == 'o' ||
+                strncmp(name, "un", 2) == 0;
+    return aether_internf("%s %s", vowel ? "an" : "a", name);
+}
+
+static int selector_in_switch(const char* what) {
+    return what && strcmp(what, "case") == 0;
+}
+
+static void selector_mismatch(ASTNode* at, const char* what, const char* shown,
+                              Type* got, Type* subject) {
+    char msg[400];
+    char help[300];
+    snprintf(msg, sizeof(msg),
+             "this %s compares the value matched (%s) with %s, %s, which it can "
+             "never equal", what, type_name(subject), shown, with_article(type_name(got)));
+    if (subject && subject->distinct_name)
+        snprintf(help, sizeof(help),
+                 "'%s' is a distinct type: write the value as one, `<value> as %s`",
+                 subject->distinct_name, subject->distinct_name);
+    else
+        snprintf(help, sizeof(help),
+                 "write a value of type %s here, or convert the value matched with `as`",
+                 type_name(subject));
+    type_error_code_hint(msg, help, at->line, at->column, AETHER_ERR_TYPE_MISMATCH);
+}
+
+/* How a value is shown in a message: a name or a literal as written. */
+static const char* selector_shown(ASTNode* v) {
+    if (v->type == AST_NULL_LITERAL) return "null";
+    if (v->type == AST_IDENTIFIER && v->value)
+        return aether_internf("'%s'", v->value);
+    if (v->type == AST_LITERAL && v->value && v->node_type &&
+        v->node_type->kind == TYPE_STRING)
+        return aether_internf("\"%s\"", v->value);
+    if (v->type == AST_LITERAL && v->value)
+        return aether_internf("%s", v->value);
+    return "this pattern";
+}
+
+static int selector_is_numeric(Type* t) {
+    if (!t) return 1;
+    TypeKind k = t->kind;
+    return k == TYPE_UNKNOWN || is_numeric_scalar(k) || k == TYPE_BYTE || k == TYPE_ENUM;
+}
+
+/* Check one compared value of a selector, `v`, against the value matched,
+ * of type `subject` (NULL when unknown). Returns 0 after reporting. */
+static int check_selector_value(ASTNode* v, Type* subject, SymbolTable* table,
+                                const char* what) {
+    if (!v) return 1;
+    if (v->type == AST_MATCH_RANGE) {
+        if (subject && !selector_is_numeric(subject)) {   /* unknown is numeric */
+            char msg[300];
+            snprintf(msg, sizeof(msg),
+                     "a range %s compares by order, and the value matched is %s, "
+                     "which has none", what, with_article(type_name(subject)));
+            type_error_code_hint(msg, "name the values one by one, separated by commas",
+                                 v->line, v->column, AETHER_ERR_TYPE_MISMATCH);
+            return 0;
+        }
+        int ok = 1;
+        for (int i = 0; i < v->child_count && i < 2; i++)
+            if (!check_selector_value(v->children[i], subject, table, what)) ok = 0;
+        return ok;
+    }
+    int known = subject && subject->kind != TYPE_UNKNOWN;
+    if (v->type == AST_NONE_LITERAL ||
+        (v->type == AST_PATTERN_VARIABLE && v->annotation &&
+         strcmp(v->annotation, "some_pattern") == 0)) {
+        if (!known) return 1;
+        char msg[300];
+        snprintf(msg, sizeof(msg),
+                 "`%s` matches an optional, and the value matched is %s",
+                 v->type == AST_NONE_LITERAL ? "none" : "some(...)",
+                 with_article(type_name(subject)));
+        type_error_code_hint(msg,
+                             selector_in_switch(what)
+                                 ? "`none` and `some(name)` are `match` arms over a `T?` value"
+                                 : "`none` and `some(name)` arms match a `T?` value",
+                             v->line, v->column, AETHER_ERR_TYPE_MISMATCH);
+        return 0;
+    }
+    if (v->type == AST_PATTERN_LIST || v->type == AST_PATTERN_CONS) {
+        if (!known) return 1;
+        char msg[300];
+        snprintf(msg, sizeof(msg),
+                 "a list pattern matches an array, a slice or a `*StringSeq`, and "
+                 "the value matched is %s", with_article(type_name(subject)));
+        type_error_code_hint(msg, "match the list itself, or use a value pattern here",
+                             v->line, v->column, AETHER_ERR_TYPE_MISMATCH);
+        return 0;
+    }
+    /* A bare member of the enum matched is that member's constant. */
+    coerce_bare_enum_member(v, subject, table);
+    if (match_arm_is_wildcard(v)) {
+        char msg[200];
+        snprintf(msg, sizeof(msg),
+                 "`_` takes every value, so it cannot be one of the values a %s names", what);
+        type_error_code_hint(msg,
+                             selector_in_switch(what)
+                                 ? "write `default:` for every other value"
+                                 : "give `_` an arm of its own, after the others",
+                             v->line, v->column, AETHER_ERR_SYNTAX);
+        return 0;
+    }
+    if (v->type == AST_IDENTIFIER && v->value &&
+        !(v->node_type && v->node_type->kind == TYPE_ENUM) &&
+        !lookup_symbol(table, v->value)) {
+        char msg[300];
+        snprintf(msg, sizeof(msg),
+                 "'%s' names no variable: a %s compares the value matched with what "
+                 "it names, and binds no new name", v->value, what);
+        type_error_code_hint(msg,
+                             selector_in_switch(what)
+                                 ? "write `default:` to take every other value, and use the "
+                                   "value matched itself in its body"
+                                 : "write `_` to take every other value, and use the value "
+                                   "matched itself in the arm",
+                             v->line, v->column, AETHER_ERR_UNDEFINED_VAR);
+        return 0;
+    }
+    typecheck_expression(v, table);
+    Type* got = infer_type(v, table);
+    int ok = 1;
+    if (got && subject && got->kind != TYPE_UNKNOWN && subject->kind != TYPE_UNKNOWN &&
+        !is_type_compatible(got, subject)) {
+        selector_mismatch(v, what, selector_shown(v), got, subject);
+        ok = 0;
+    }
+    if (got) free_type(got);
+    return ok;
+}
+
+/* Can a `switch` compare a value of `t` with its cases? It lowers to a C
+ * switch over an integer, or to an if-chain of `==` (string_equals for a
+ * string) for any other scalar. */
+static int switch_subject_comparable(Type* t) {
+    if (!t) return 1;
+    switch (t->kind) {
+        case TYPE_UNKNOWN: case TYPE_INT: case TYPE_INT64: case TYPE_UINT64:
+        case TYPE_UINT32: case TYPE_UINT16: case TYPE_UINT8: case TYPE_BYTE:
+        case TYPE_DURATION: case TYPE_FLOAT: case TYPE_FLOAT32: case TYPE_LONGDOUBLE:
+        case TYPE_BOOL: case TYPE_STRING: case TYPE_PTR: case TYPE_ENUM:
+            return 1;
+        default:
+            return 0;
+    }
+}
+
+/* Check every value of selector `sel` against the value matched. */
+static int check_selector(ASTNode* sel, Type* subject, SymbolTable* table,
+                          const char* what) {
+    ASTNode* els[SELECTOR_ELEMENTS_MAX];
+    int n = selector_elements(sel, els, SELECTOR_ELEMENTS_MAX);
+    int ok = 1;
+    for (int i = 0; i < n; i++)
+        if (!check_selector_value(els[i], subject, table, what)) ok = 0;
+    return ok;
 }
 
 /* #1778 diagnostic helper: is `rhs` a call to a function that has a BARE `fn`
@@ -7746,6 +7970,7 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                 // Match-as-expression: typecheck as statement, then use its type
                 if (init->type == AST_MATCH_STATEMENT) {
                     typecheck_statement(init, table);
+                    check_match_value_arms(init, table);   /* #2743 */
                 } else {
                     typecheck_expression(init, table);
                 }
@@ -8552,8 +8777,8 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
 
         case AST_IF_STATEMENT: {
             /* #2186: names both arms declare are declared before the if,
-             * where codegen declares them (hoist_if_else_common_vars). */
-            declare_if_else_hoists(stmt, table);
+             * where codegen declares them (hoist_common_vars). */
+            declare_common_hoists(stmt, table);
             ASTNode* narrow_var = NULL;
             int narrow_then = 1;
             if (stmt->child_count >= 1) {
@@ -9014,7 +9239,7 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
             int enum_wildcard = 0;
             int enum_wildcard_line = -1;
 
-            check_match_arm_reachability(stmt);   /* #1377 */
+            int opt_match = (match_expr_type && match_expr_type->kind == TYPE_OPTIONAL);
 
             // Type check each match arm
             for (int i = 1; i < stmt->child_count; i++) {
@@ -9064,13 +9289,57 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                     }
                 }
 
+                /* #2727: what an arm names must be something the value
+                 * matched can be. A `some(name)` arm binds; every other arm
+                 * compares the value with what it names. */
+                int arm_wild = match_arm_is_wildcard(pattern);
+                int some_arm = pattern->type == AST_PATTERN_VARIABLE && pattern->annotation &&
+                               strcmp(pattern->annotation, "some_pattern") == 0;
+                if (arm_wild) {
+                    /* takes every value */
+                } else if (opt_match) {
+                    if (pattern->type != AST_NONE_LITERAL && !some_arm) {
+                        const char* msg =
+                            "a match over an optional takes `none`, `some(name)` and `_` "
+                            "arms, and this arm is none of them";
+                        type_error_code_hint(msg,
+                                             "bind the value with `some(v)` and compare `v` "
+                                             "inside that arm",
+                                             pattern->line, pattern->column,
+                                             AETHER_ERR_TYPE_MISMATCH);
+                    }
+                } else if (sum_match) {
+                    if (some_arm || !pattern->value ||
+                        (pattern->type != AST_IDENTIFIER &&
+                         pattern->type != AST_PATTERN_VARIABLE)) {
+                        char msg[300];
+                        snprintf(msg, sizeof(msg),
+                                 "a match over the sum type '%s' takes one variant per arm, "
+                                 "or `_`",
+                                 match_expr_type->struct_name ? match_expr_type->struct_name : "?");
+                        type_error_code_hint(msg,
+                                             "name a variant (`Circle ->`) and read its fields "
+                                             "through the value matched inside the arm",
+                                             pattern->line, pattern->column,
+                                             AETHER_ERR_TYPE_MISMATCH);
+                    }
+                } else if (pattern->type == AST_PATTERN_LIST || pattern->type == AST_PATTERN_CONS) {
+                    if (match_expr_type && match_expr_type->kind != TYPE_UNKNOWN &&
+                        match_expr_type->kind != TYPE_ARRAY && !is_seq_match)
+                        check_selector_value(pattern, match_expr_type, table, "match arm");
+                } else if (!(enum_match && enum_def)) {
+                    check_selector(pattern, match_expr_type, table, "match arm");
+                    /* Its name is not bound here: say so once, at the arm. */
+                    if (some_arm && pattern->value)
+                        add_symbol(arm_table, pattern->value, create_type(TYPE_UNKNOWN), 0, 0, 0);
+                }
+
                 // #340: optional `match` — bind `some(v)` to the unwrapped
                 // value (typed as the optional's inner T), and pin a `none`
                 // arm's type to the matched optional so codegen compares the
                 // right shape.
                 if (match_expr_type && match_expr_type->kind == TYPE_OPTIONAL) {
-                    if (pattern->type == AST_PATTERN_VARIABLE && pattern->annotation &&
-                        strcmp(pattern->annotation, "some_pattern") == 0 && pattern->value) {
+                    if (some_arm && pattern->value) {
                         Type* inner = match_expr_type->element_type
                                     ? clone_type(match_expr_type->element_type)
                                     : create_type(TYPE_UNKNOWN);
@@ -9088,13 +9357,10 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                     // A bare variant pattern (`Circle ->`) is parsed by
                     // parse_match_case via parse_expression, so it arrives as
                     // an AST_IDENTIFIER; `_` arrives as a TYPE_WILDCARD literal.
-                    int is_wild = (pattern->node_type &&
-                                   pattern->node_type->kind == TYPE_WILDCARD) ||
-                                  (pattern->value && strcmp(pattern->value, "_") == 0);
-                    if (is_wild) {
+                    if (arm_wild) {
                         sum_wildcard = 1;
                         if (sum_wildcard_line < 0) sum_wildcard_line = pattern->line;
-                    } else if ((pattern->type == AST_IDENTIFIER ||
+                    } else if (!some_arm && (pattern->type == AST_IDENTIFIER ||
                                 pattern->type == AST_PATTERN_VARIABLE) && pattern->value) {
                         int vidx = -1;
                         for (int vi = 0; vi < sum_nvar; vi++) {
@@ -9130,32 +9396,43 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                 // error, and record coverage for the exhaustiveness check. `_`
                 // is the catch-all.
                 if (enum_match && enum_def && pattern) {
-                    int is_wild = (pattern->node_type &&
-                                   pattern->node_type->kind == TYPE_WILDCARD) ||
-                                  (pattern->value && strcmp(pattern->value, "_") == 0);
-                    if (is_wild) {
+                    if (arm_wild) {
                         enum_wildcard = 1;
                         if (enum_wildcard_line < 0) enum_wildcard_line = pattern->line;
-                    } else if ((pattern->type == AST_IDENTIFIER ||
-                                pattern->type == AST_PATTERN_VARIABLE) && pattern->value) {
-                        size_t elen = strlen(enum_name);
-                        const char* mem = NULL;
-                        int bare = 0;
-                        if (enum_has_member(enum_name, pattern->value)) {
-                            mem = pattern->value;                 // bare `Member`
-                            bare = 1;
-                        } else if (strncmp(pattern->value, enum_name, elen) == 0 &&
-                                   pattern->value[elen] == '_' &&
-                                   enum_has_member(enum_name, pattern->value + elen + 1)) {
-                            mem = pattern->value + elen + 1;      // lowered `Enum_Member`
-                        }
-                        if (!mem) {
-                            char msg[256];
-                            snprintf(msg, sizeof(msg),
-                                "'%s' is not a member of enum '%s'",
-                                pattern->value, enum_name ? enum_name : "?");
-                            type_error(msg, pattern->line, pattern->column);
-                        } else {
+                    } else {
+                        /* #2727: each value of a comma-list (`Red, Green ->`)
+                         * is a member as a lone one is; anything else is
+                         * checked as the comparison it lowers to. */
+                        ASTNode* els[SELECTOR_ELEMENTS_MAX];
+                        int nel = selector_elements(pattern, els, SELECTOR_ELEMENTS_MAX);
+                        for (int e = 0; e < nel; e++) {
+                            ASTNode* el = els[e];
+                            int el_some = el->type == AST_PATTERN_VARIABLE && el->annotation &&
+                                          strcmp(el->annotation, "some_pattern") == 0;
+                            if (el_some || match_arm_is_wildcard(el) || !el->value ||
+                                (el->type != AST_IDENTIFIER && el->type != AST_PATTERN_VARIABLE)) {
+                                check_selector_value(el, match_expr_type, table, "match arm");
+                                continue;
+                            }
+                            size_t elen = strlen(enum_name);
+                            const char* mem = NULL;
+                            int bare = 0;
+                            if (enum_has_member(enum_name, el->value)) {
+                                mem = el->value;                      // bare `Member`
+                                bare = 1;
+                            } else if (strncmp(el->value, enum_name, elen) == 0 &&
+                                       el->value[elen] == '_' &&
+                                       enum_has_member(enum_name, el->value + elen + 1)) {
+                                mem = el->value + elen + 1;           // lowered `Enum_Member`
+                            }
+                            if (!mem) {
+                                char msg[256];
+                                snprintf(msg, sizeof(msg),
+                                    "'%s' is not a member of enum '%s'",
+                                    el->value, enum_name ? enum_name : "?");
+                                type_error(msg, el->line, el->column);
+                                continue;
+                            }
                             for (int mi = 0; mi < enum_def->child_count && mi < 64; mi++) {
                                 ASTNode* mn = enum_def->children[mi];
                                 if (mn && mn->type == AST_ENUM_MEMBER && mn->value &&
@@ -9167,10 +9444,10 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                                 char qualified[512];
                                 snprintf(qualified, sizeof(qualified), "%s_%s",
                                          enum_name, mem);
-                                free(pattern->value);
-                                pattern->value = strdup(qualified);
-                                if (pattern->node_type) free_type(pattern->node_type);
-                                pattern->node_type = clone_type(match_expr_type);
+                                free(el->value);
+                                el->value = strdup(qualified);
+                                if (el->node_type) free_type(el->node_type);
+                                el->node_type = clone_type(match_expr_type);
                             }
                         }
                     }
@@ -9211,6 +9488,10 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
 
                 free_symbol_table(arm_table);
             }
+
+            /* #1377, #2728: arms an earlier arm already covers. Checked once
+             * the arms are, so a bare enum member is its constant. */
+            check_match_arm_reachability(stmt, enum_match || sum_match || opt_match);
 
             /* #1377: the opposite of the exhaustiveness check below. When
              * every variant or member is already handled, the `_` arm cannot
@@ -9319,6 +9600,54 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
             return 1;
         }
 
+        case AST_SWITCH_STATEMENT: {
+            /* #2732: each case is a scope of its own, as an `if` branch is
+             * and as codegen emits it; until now the cases were checked in
+             * the enclosing scope, so a name first bound in one was taken
+             * for a local after the switch and failed in C. The names every
+             * case of a switch with a default binds are declared before it,
+             * as both arms of an if/else are, and the function-level and
+             * loop hoists take a switch's cases as they take an if's arms
+             * (hoist.h). */
+            declare_common_hoists(stmt, table);
+            Type* subject = NULL;
+            if (stmt->child_count > 0 && stmt->children[0]) {
+                typecheck_expression(stmt->children[0], table);
+                subject = infer_type(stmt->children[0], table);
+                if (subject && !switch_subject_comparable(subject)) {
+                    char msg[300];
+                    snprintf(msg, sizeof(msg),
+                             "a switch compares its value with each case, and %s "
+                             "cannot be compared that way", with_article(type_name(subject)));
+                    type_error_code_hint(msg,
+                                         "use `match`, which takes `none` and `some(name)` "
+                                         "arms, variants and list patterns",
+                                         stmt->children[0]->line, stmt->children[0]->column,
+                                         AETHER_ERR_TYPE_MISMATCH);
+                    free_type(subject);
+                    subject = create_type(TYPE_UNKNOWN);
+                }
+            }
+            for (int i = 1; i < stmt->child_count; i++) {
+                ASTNode* c = stmt->children[i];
+                if (!c || c->type != AST_CASE_STATEMENT) {
+                    typecheck_node(c, table);
+                    continue;
+                }
+                int is_default = c->value && strcmp(c->value, "default") == 0;
+                int first = is_default ? 0 : 1;
+                /* #2727: a case selector against the value it compares. */
+                if (!is_default && c->child_count > 0)
+                    check_selector(c->children[0], subject, table, "case");
+                SymbolTable* case_table = create_symbol_table(table);
+                for (int j = first; j < c->child_count; j++)
+                    typecheck_node(c->children[j], case_table);
+                free_symbol_table(case_table);
+            }
+            if (subject) free_type(subject);
+            return 1;
+        }
+
         case AST_RETURN_STATEMENT:
             // #1044 implicit enum selector: `return Blue` in a function whose
             // return type is an enum resolves the bare member against it.
@@ -9345,6 +9674,11 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                  stmt->children[0]->type == AST_MATCH_STATEMENT)) {
                 int settled = tc_return_settle(stmt, table);
                 if (settled >= 0) return settled;
+                /* #2743: a `match` returned for its value takes it from
+                 * every arm. */
+                if (stmt->children[0]->type == AST_MATCH_STATEMENT &&
+                    check_match_value_arms(stmt->children[0], table) > 0)
+                    return 0;
             }
             /* #1286: `return arr` from a `-> T[]` function returns a slice. */
             if (stmt->child_count == 1 && g_tc_return_type)
@@ -11056,6 +11390,52 @@ static int ufcs_first_param_matches(ASTNode* func, Type* rtype) {
            p0->node_type->kind == TYPE_UNKNOWN;
 }
 
+/* #928/#934 UFCS: the function `recv.method(...)` calls, for a receiver of
+ * type `rtype`, as a heap string to put on the call node (the bare name, an
+ * import's alias, or `mod.method`), or NULL when none applies. Shared by the
+ * rewrite below and by the settle of which functions return a value, which
+ * must resolve the call as the rewrite will (#2744). Two tiers, in order:
+ *   (1) a same-file (bare) free function, and
+ *   (2) #934: a function exported by an imported module, the case that
+ *       makes library-provided fluent surfaces work. We honour the same
+ *       visibility as a normal qualified `mod.method(recv)` call: walk the
+ *       visible namespaces and accept the first whose `mod.method` resolves
+ *       to a function with a matching first parameter. On an imported match
+ *       the call is rewritten to the QUALIFIED form `mod.method` so normal
+ *       resolution + codegen emit `mod_method`. */
+static char* ufcs_resolve(const char* method, Type* rtype, SymbolTable* table) {
+    if (!method) return NULL;
+    Symbol* fsym = lookup_symbol(table, method);
+    if (fsym && fsym->is_function && fsym->node &&
+        ufcs_first_param_matches(fsym->node, rtype)) {
+        /* A bare name can also be a SELECTIVELY imported function
+         * (`import m (f)` then `x.f()`): the visible symbol is the import's
+         * alias, which an ordinary `f(x)` call has renamed to its qualified
+         * `m.f` by the time it reaches codegen. Shape (b) is rewritten after
+         * that renaming, so without the same lookup here the call kept the
+         * bare `f` and codegen emitted `f(x)`, an undeclared C function, not
+         * `m_f(x)`. */
+        const char* aliased = find_import_alias(method);
+        return strdup(aliased ? aliased : method);
+    }
+    if (!global_module_registry) return NULL;
+    for (int mi = 0; mi < global_module_registry->module_count; mi++) {
+        AetherModule* m = global_module_registry->modules[mi];
+        if (!m || !m->name) continue;
+        const char* ns = m->name;
+        if (!is_visible_namespace(ns, table)) continue;
+        if (!module_is_exported(m, method)) continue;
+        char qualified[512];
+        snprintf(qualified, sizeof(qualified), "%s.%s", ns, method);
+        Symbol* qs = lookup_qualified_symbol(table, qualified);
+        if (qs && qs->is_function && qs->node &&
+            ufcs_first_param_matches(qs->node, rtype)) {
+            return strdup(qualified);  /* imported qualified call */
+        }
+    }
+    return NULL;
+}
+
 /* #928 method-call-on-value (UFCS): rewrite `recv.method(args)` into the
  * free-function call `method(recv, args)` when `method` is a free function
  * whose FIRST parameter type unifies with typeof(recv). Strictly a
@@ -11119,46 +11499,7 @@ static int try_ufcs_rewrite(ASTNode* call, SymbolTable* table) {
     typecheck_expression(recv, table);
     Type* rtype = infer_type(recv, table);
 
-    /* Resolve `method` to a free function whose first param matches the
-     * receiver. Two tiers, in order:
-     *   (1) a same-file (bare) free function, and
-     *   (2) #934: a function exported by an imported module — the case that
-     *       makes library-provided fluent surfaces work. We honour the same
-     *       visibility as a normal qualified `mod.method(recv)` call: walk
-     *       the visible namespaces and accept the first whose `mod.method`
-     *       resolves to a function with a matching first parameter. On an
-     *       imported match the call is rewritten to the QUALIFIED form
-     *       `mod.method` so normal resolution + codegen emit `mod_method`. */
-    char* resolved = NULL;  /* heap; the name to put on the call node */
-
-    Symbol* fsym = lookup_symbol(table, method);
-    if (fsym && fsym->is_function && fsym->node &&
-        ufcs_first_param_matches(fsym->node, rtype)) {
-        /* A bare name can also be a SELECTIVELY imported function
-         * (`import m (f)` then `x.f()`): the visible symbol is the import's
-         * alias, which an ordinary `f(x)` call has renamed to its qualified
-         * `m.f` by the time it reaches codegen. Shape (b) is rewritten after
-         * that renaming, so without the same lookup here the call kept the
-         * bare `f` and codegen emitted `f(x)`, an undeclared C function, not
-         * `m_f(x)`. */
-        const char* aliased = find_import_alias(method);
-        resolved = strdup(aliased ? aliased : method);
-    } else if (global_module_registry) {
-        for (int mi = 0; mi < global_module_registry->module_count && !resolved; mi++) {
-            AetherModule* m = global_module_registry->modules[mi];
-            if (!m || !m->name) continue;
-            const char* ns = m->name;
-            if (!is_visible_namespace(ns, table)) continue;
-            if (!module_is_exported(m, method)) continue;
-            char qualified[512];
-            snprintf(qualified, sizeof(qualified), "%s.%s", ns, method);
-            Symbol* qs = lookup_qualified_symbol(table, qualified);
-            if (qs && qs->is_function && qs->node &&
-                ufcs_first_param_matches(qs->node, rtype)) {
-                resolved = strdup(qualified);  /* imported qualified call */
-            }
-        }
-    }
+    char* resolved = ufcs_resolve(method, rtype, table);  /* the name to put on the call */
 
     if (rtype) free_type(rtype);
     free(method);
@@ -11358,34 +11699,129 @@ static ASTNode* tc_closure_body(ASTNode* closure) {
     return NULL;
 }
 
+/* Does a call through a value of function type `t` give a value? A typed C
+ * function pointer by its result slot (none is void); a closure type by its
+ * result when it carries one, and an erased `fn` is called for an int
+ * (#2054). As typecheck_function_call types the call. */
+static int tc_fn_type_yields(Type* t) {
+    if (!t || t->kind != TYPE_FUNCTION) return 1;
+    if (t->is_fnptr) return t->return_type && t->return_type->kind != TYPE_VOID;
+    if (t->return_type) return t->return_type->kind != TYPE_VOID;
+    return 1;
+}
+
+/* A name the definition binds, called: `bound` is what tc_collect_locals
+ * recorded for it (a closure literal, a declaration typed `fn(...)`, or
+ * NULL when neither is known). */
+static int tc_bound_callee_yields(ASTNode* bound, SymbolTable* table, StrMap* locals,
+                                  int depth) {
+    if (!bound) return 1;
+    if (bound->type == AST_CLOSURE)
+        return tc_body_yields(tc_closure_body(bound), table, locals, depth + 1);
+    return tc_fn_type_yields(bound->node_type);
+}
+
+static int tc_call_yields(ASTNode* call, SymbolTable* table, StrMap* locals, int depth);
+
+/* #2744: `recv.name(...)` on a value `recv` of type `rtype` (NULL when not
+ * known), resolved as typecheck_function_call resolves it once the
+ * qualified lookup declined: a function-pointer field or a closure field of
+ * `recv`'s struct (when `recv` is a local named `recv_name`), else the free
+ * function UFCS rewrites it to. Returns -1 when none applies. */
+static int tc_method_call_yields(const char* recv_name, const char* name, Type* rtype,
+                                 SymbolTable* table, int depth) {
+    if (recv_name) {
+        int is_ptr = 0;
+        Type* fsig = resolve_fnptr_struct_field(table, recv_name, name, &is_ptr);
+        if (fsig) return tc_fn_type_yields(fsig);
+        Type* ft = local_struct_field_type(table, recv_name, name, NULL);
+        if (ft && ft->kind == TYPE_FUNCTION) return tc_fn_type_yields(ft);
+    }
+    Type* unknown = rtype ? NULL : create_type(TYPE_UNKNOWN);
+    char* target = ufcs_resolve(name, rtype ? rtype : unknown, table);
+    if (unknown) free_type(unknown);
+    if (!target) return -1;
+    ASTNode as_call;
+    memset(&as_call, 0, sizeof(as_call));
+    as_call.type = AST_FUNCTION_CALL;
+    as_call.value = target;
+    int yields = tc_call_yields(&as_call, table, NULL, depth + 1);
+    free(target);
+    return yields;
+}
+
 /* Does calling `call` give a value? `locals`, while the program's answers
  * are being settled, holds the names the definition binds itself (each to
- * the closure literal bound to it, if that is its only binding): such a
- * name is not the program's function of that name. In the checker, the
- * scope `table` resolves the name, and the call's type speaks for what is
- * not one of the program's functions. */
+ * the closure literal bound to it, if that is its only binding, or to its
+ * declaration when that is typed `fn(...)`): such a name is not the
+ * program's function of that name. The settle's scope also holds those
+ * names with the types inference gave them, so a receiver's type is known.
+ * In the checker, the scope `table` resolves the name, and the call's type
+ * speaks for what is not one of the program's functions. */
 static int tc_call_yields(ASTNode* call, SymbolTable* table, StrMap* locals, int depth) {
     if (!call->value || depth > 16) return 1;
-    if (locals && strmap_has(locals, call->value)) {
-        ASTNode* closure = strmap_get(locals, call->value);
-        if (!closure) return 1;
-        return tc_body_yields(tc_closure_body(closure), table, locals, depth + 1);
+    if (locals && strmap_has(locals, call->value))
+        return tc_bound_callee_yields(strmap_get(locals, call->value), table, locals, depth);
+    /* #2744: a call the parser tagged UFCS (`mk(n).show()`), before the
+     * checker rewrote it: the function the rewrite will pick, for the type
+     * inference gave the receiver (read, not computed: nothing is checked,
+     * and nothing reported, before the checker runs). */
+    if (call->annotation && strcmp(call->annotation, "ufcs") == 0) {
+        if (!table || call->child_count < 1 || !call->children[0]) return 1;
+        int y = tc_method_call_yields(NULL, call->value, call->children[0]->node_type,
+                                      table, depth);
+        return y < 0 ? 1 : y;
     }
-    if (call->annotation && strcmp(call->annotation, "ufcs") == 0) return 1;
     /* `call(k, x)`, which a checked `k(x)` of a closure binding becomes: the
      * closure literal it is known to call gives what its body returns, as
-     * #2460 reads the literal's result type and codegen its C one. */
+     * #2460 reads the literal's result type and codegen its C one. Through a
+     * name bound to a typed `fn(...)`, its signature answers (#2744). */
     if (strcmp(call->value, "call") == 0 && call->child_count > 0 && call->children[0]) {
         ASTNode* f = call->children[0];
-        ASTNode* lit = NULL;
         if (f->type == AST_CLOSURE)
-            lit = f;
-        else if (locals)
-            lit = (f->type == AST_IDENTIFIER && f->value) ? strmap_get(locals, f->value) : NULL;
-        else if (table)
-            lit = call_callee_literal(call, table);
-        if (lit && lit->type == AST_CLOSURE)
-            return tc_body_yields(tc_closure_body(lit), table, locals, depth + 1);
+            return tc_body_yields(tc_closure_body(f), table, locals, depth + 1);
+        if (locals) {
+            if (f->type == AST_IDENTIFIER && f->value && strmap_has(locals, f->value))
+                return tc_bound_callee_yields(strmap_get(locals, f->value), table, locals,
+                                              depth);
+        } else if (table) {
+            ASTNode* lit = call_callee_literal(call, table);
+            if (lit && lit->type == AST_CLOSURE)
+                return tc_body_yields(tc_closure_body(lit), table, locals, depth + 1);
+        }
+    }
+    /* #2744: `recv.name(...)` on a local the settle has not seen resolved:
+     * a field of its struct, or the function UFCS gives it. A namespace of
+     * that name is a module call, resolved below. In the checker the call
+     * was rewritten already, or carries the field's type. */
+    const char* dot = strchr(call->value, '.');
+    if (locals && dot && dot != call->value && !strchr(dot + 1, '.')) {
+        char recv[200];
+        size_t rlen = (size_t)(dot - call->value);
+        if (rlen < sizeof(recv)) {
+            memcpy(recv, call->value, rlen);
+            recv[rlen] = '\0';
+            if (strmap_has(locals, recv) && !is_visible_namespace(recv, table)) {
+                Symbol* rs = table ? lookup_symbol(table, recv) : NULL;
+                int y = tc_method_call_yields(recv, dot + 1, rs ? rs->type : NULL, table,
+                                              depth);
+                if (y >= 0) return y;
+            }
+        }
+    }
+    /* A call through a function-pointer field, checked: the field's
+     * signature (its call is typed unknown when the field returns nothing). */
+    if (!locals && table && call->annotation &&
+        (strcmp(call->annotation, "fnfield_ptr") == 0 ||
+         strcmp(call->annotation, "fnfield_val") == 0) && dot) {
+        char recv[200];
+        size_t rlen = (size_t)(dot - call->value);
+        if (rlen < sizeof(recv)) {
+            memcpy(recv, call->value, rlen);
+            recv[rlen] = '\0';
+            Type* fsig = resolve_fnptr_struct_field(table, recv, dot + 1, NULL);
+            if (fsig) return tc_fn_type_yields(fsig);
+        }
     }
     Symbol* sym = table ? lookup_qualified_symbol(table, call->value) : NULL;
     if (sym && sym->node && sym->node->value &&
@@ -11423,21 +11859,53 @@ static int tc_value_yields(ASTNode* v, SymbolTable* table, StrMap* locals, int d
 
 /* The names a definition binds (parameters, locals, closure parameters,
  * pattern variables), each to the closure literal bound to it when that is
- * its only binding, else NULL. */
+ * its only binding, or to its declaration when that is a parameter or a
+ * local written with a `fn(...)` type, whose signature says what a call
+ * through it gives (#2744); else NULL. */
 static void tc_collect_locals(ASTNode* n, StrMap* locals) {
     if (!n) return;
     if (n->value) {
         if (n->type == AST_VARIABLE_DECLARATION) {
             ASTNode* init = n->child_count > 0 ? n->children[0] : NULL;
             int first = !strmap_has(locals, n->value);
+            ASTNode* known = NULL;
+            if (first && init && init->type == AST_CLOSURE)
+                known = init;
+            else if (first && !n->type_inferred && n->node_type &&
+                     n->node_type->kind == TYPE_FUNCTION)
+                known = n;
+            strmap_put(locals, n->value, known);
+        } else if (n->type == AST_PATTERN_VARIABLE || n->type == AST_CLOSURE_PARAM) {
+            /* A parameter is a pattern variable carrying its written type. */
+            int first = !strmap_has(locals, n->value);
             strmap_put(locals, n->value,
-                       first && init && init->type == AST_CLOSURE ? init : NULL);
-        } else if (n->type == AST_PATTERN_VARIABLE || n->type == AST_CLOSURE_PARAM ||
-                   n->type == AST_CONST_DECLARATION) {
+                       first && n->node_type && n->node_type->kind == TYPE_FUNCTION
+                           ? n : NULL);
+        } else if (n->type == AST_CONST_DECLARATION) {
             strmap_put(locals, n->value, NULL);
         }
     }
     for (int i = 0; i < n->child_count; i++) tc_collect_locals(n->children[i], locals);
+}
+
+/* #2744: declare in the settle's scope for a definition the names it binds,
+ * each with the type its first typed declaration has after inference (a
+ * parameter's written type, a local's inferred one), so a call on one of
+ * them resolves as the checker will resolve it: a field of the receiver's
+ * struct, or the function UFCS picks for the receiver's type. */
+static void tc_declare_locals(ASTNode* n, SymbolTable* scope) {
+    if (!n) return;
+    if (n->value && (n->type == AST_VARIABLE_DECLARATION ||
+                     n->type == AST_PATTERN_VARIABLE || n->type == AST_CLOSURE_PARAM) &&
+        !lookup_symbol_local(scope, n->value)) {
+        Type* t = n->node_type;
+        if ((!t || t->kind == TYPE_UNKNOWN) && n->type == AST_VARIABLE_DECLARATION &&
+            n->child_count > 0 && n->children[0])
+            t = n->children[0]->node_type;
+        if (t && t->kind != TYPE_UNKNOWN && t->kind != TYPE_VOID)
+            add_symbol(scope, n->value, clone_type(t), 0, 0, 0);
+    }
+    for (int i = 0; i < n->child_count; i++) tc_declare_locals(n->children[i], scope);
 }
 
 static int tc_written_value_type(ASTNode* def) {
@@ -11478,6 +11946,7 @@ static void tc_yields_settle(ASTNode* program, SymbolTable* global) {
          * module's imports, as it is checked (#2614). */
         scopes[n] = create_symbol_table(global);
         if (c->origin_module) scopes[n]->merged_from = c->origin_module;
+        tc_declare_locals(c, scopes[n]);   /* #2744 */
         void* was = strmap_get(&g_tc_yields, c->value);
         strmap_put(&g_tc_yields, c->value,
                    (was == TC_YIELDS_VALUE || tc_written_value_type(c))
@@ -11522,6 +11991,54 @@ static int tc_owner_yields(SymbolTable* table) {
     ASTNode* body = owner->type == AST_CLOSURE ? tc_closure_body(owner)
                   : owner->child_count > 0 ? owner->children[0] : NULL;
     return tc_body_yields(body, table, NULL, 0);
+}
+
+/* #2743: a `match` whose value is used (bound, assigned, or returned when
+ * some arm gives a value) takes its value from the arm that runs, so every
+ * arm that ends in a value must have one. An arm ending in a call of a
+ * function that returns nothing, or in a `match` none of whose arms gives a
+ * value, has none: codegen stored that void in the match's result and the C
+ * compiler stopped ("void value not ignored"). An arm that ends in a
+ * statement (`return`, `break`, a print, an assignment) gives no value and
+ * leaves the result as it is, as before. Returns the number of arms
+ * refused. */
+static int check_match_value_arms(ASTNode* m, SymbolTable* table) {
+    int refused = 0;
+    if (!m || m->type != AST_MATCH_STATEMENT) return 0;
+    for (int i = 1; i < m->child_count; i++) {
+        ASTNode* arm = m->children[i];
+        if (!arm || arm->type != AST_MATCH_ARM || arm->child_count < 2) continue;
+        ASTNode* given = tc_arm_value(arm->children[1]);
+        if (!given) continue;
+        if (given->type == AST_MATCH_STATEMENT) {
+            if (tc_value_yields(given, table, NULL, 0)) {
+                refused += check_match_value_arms(given, table);
+                continue;
+            }
+            type_error_hint("this arm's `match` gives no value (each of its arms ends in a "
+                            "statement or in a call that returns nothing), and the value of "
+                            "the `match` it is an arm of is used",
+                            "give the arm a value: put the inner `match` in a block and end "
+                            "the block with one",
+                            given->line, given->column);
+            refused++;
+            continue;
+        }
+        if (given->type != AST_FUNCTION_CALL || tc_value_yields(given, table, NULL, 0))
+            continue;
+        const char* callee = given->value ? given->value : "function";
+        char msg[320];
+        char help[320];
+        snprintf(msg, sizeof(msg),
+                 "'%s' returns no value, so this arm gives the `match` none, and the "
+                 "value of the `match` is used", callee);
+        snprintf(help, sizeof(help),
+                 "give the arm a value: a block arm can make the call and end with one, "
+                 "`{ %s(...)  0 }`", callee);
+        type_error_hint(msg, help, given->line, given->column);
+        refused++;
+    }
+    return refused;
 }
 
 /* A checked `return` of a call or a `match`, `ret`: when what it returns
@@ -11748,6 +12265,25 @@ int typecheck_function_call(ASTNode* call, SymbolTable* table) {
         }
         set_node_type(call, create_type(TYPE_VOID));
         return 1;
+    }
+
+    /* `call(f, x)` through a typed C function pointer (a `fn(int)` parameter
+     * or a cast local) is the call `f(x)`. call() invokes a closure, whose C
+     * shape (an environment beside the function) a function pointer does not
+     * have: codegen emitted `f.fn(f.env, x)` and the C compiler stopped. */
+    if (call->value && strcmp(call->value, "call") == 0 && call->child_count > 0 &&
+        call->children[0] && call->children[0]->type == AST_IDENTIFIER &&
+        call->children[0]->value) {
+        Symbol* fs = lookup_symbol(table, call->children[0]->value);
+        if (fs && !fs->is_function && fs->type && fs->type->kind == TYPE_FUNCTION &&
+            fs->type->is_fnptr) {
+            ASTNode* callee = call->children[0];
+            free(call->value);
+            call->value = strdup(callee->value);
+            for (int i = 1; i < call->child_count; i++) call->children[i - 1] = call->children[i];
+            call->child_count--;
+            free_ast_node(callee);
+        }
     }
 
     // Use qualified lookup to handle namespaced calls like string.new -> string_new

@@ -1,0 +1,134 @@
+// Regression (#2727, #2728): what a `match` arm or a `switch` case names is
+// checked against the value it compares, and an arm an earlier one covers
+// never runs.
+//
+// #2727: arm patterns were never checked against the value matched, so
+// codegen's `_match_val == <pattern>` met them first. A comma-list of bare
+// enum members (`Red, Green ->`) reached the C compiler as undeclared names,
+// a bare member in a `switch` case did too, a `switch` over a string was a C
+// switch on a pointer, a uint64 or uint32 value was compared as an int (so
+// 5000000000 took the arm for 705032704), and the string literal "_" was
+// taken for the wildcard (C: "else without a previous if"). Each now
+// compiles and runs the arm its value names. The diagnostics for patterns
+// that can never match are pinned by tests/integration/match_arm_pattern_check.
+//
+// #2728: a repeated variant arm over a sum emitted a second C `case` for
+// the same value ("duplicate case value"); over an optional, a repeated
+// `none` arm, or one after `_`, took the place of the first. The first arm
+// for a case is the one that runs; the warnings are pinned by
+// tests/integration/match_arm_unreachable.
+extern exit(code: int)
+
+var bad = 0
+
+check(label: string, got: string, want: string) {
+    if got != want {
+        println("FAIL ${label}: got ${got}, want ${want}")
+        bad = bad + 1
+    }
+}
+
+enum Color { Red, Green, Blue }
+
+struct Circle { r: int }
+struct Square { s: int }
+type Shape = Circle | Square
+
+warmth(c: Color) -> string {
+    return match c {
+        Red, Green -> "warm"
+        _ -> "cool"
+    }
+}
+
+colour_case(c: Color) -> string {
+    out = "none"
+    switch c {
+        case Red: out = "red"
+        case Color.Green, Blue: out = "green or blue"
+    }
+    return out
+}
+
+big(x: uint64) -> string {
+    return match x {
+        705032704 -> "truncated"
+        5000000000 -> "five billion"
+        _ -> "other"
+    }
+}
+
+big32(x: uint32) -> string {
+    return match x {
+        4000000000 -> "four billion"
+        _ -> "other"
+    }
+}
+
+underscore(s: string) -> string {
+    return match s {
+        "_" -> "underscore"
+        _ -> "anything"
+    }
+}
+
+word_switch(s: string) -> string {
+    out = ""
+    switch s {
+        case "a", "b": out = "first two"
+        case "c": out = "third"
+        default: out = "other"
+    }
+    return out
+}
+
+ratio_switch(f: float) -> string {
+    out = ""
+    switch f {
+        case 0.5: out = "half"
+        default: out = "other"
+    }
+    return out
+}
+
+shape_name(s: Shape) -> string {
+    return match s {
+        Circle -> "circle"
+        Circle -> "second circle"
+        Square -> "square"
+    }
+}
+
+opt_name(m: int?) -> string {
+    return match m {
+        none -> "none"
+        none -> "second none"
+        some(v) -> "some ${v}"
+    }
+}
+
+main() {
+    check("comma-list of bare members", warmth(Color.Green), "warm")
+    check("comma-list of bare members, other", warmth(Color.Blue), "cool")
+    check("bare member case", colour_case(Color.Red), "red")
+    check("qualified and bare in one case", colour_case(Color.Blue), "green or blue")
+    check("uint64 compared as itself", big(5000000000), "five billion")
+    check("uint32 compared as itself", big32(4000000000), "four billion")
+    check("the string \"_\"", underscore("_"), "underscore")
+    check("not the string \"_\"", underscore("x"), "anything")
+    check("switch over a string", word_switch("b"), "first two")
+    check("switch over a string, default", word_switch("z"), "other")
+    check("switch over a float", ratio_switch(0.5), "half")
+    let s: Shape = Circle { r: 2 }
+    check("first arm of a repeated variant", shape_name(s), "circle")
+    let none_m: int? = none
+    check("first arm of a repeated none", opt_name(none_m), "none")
+    let some_m: int? = 4
+    check("some after repeated none", opt_name(some_m), "some 4")
+
+    if bad != 0 {
+        println("${bad} check(s) failed")
+        exit(1)
+    }
+    println("match arm patterns: ok")
+}

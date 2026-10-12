@@ -21,6 +21,7 @@
 
 import std.string
 import std.fs
+import std.os
 
 extern exit(code: int)
 
@@ -64,7 +65,7 @@ main() {
 
     // Case 5: fs.read_binary result vs literal. Write a known file and
     // round-trip; the wrapped bytes must compare equal to the literal.
-    tmp = "/tmp/aether_267_regression"
+    tmp = "${os.temp_dir()}/aether_267_regression_${os.getpid()}"
     fs.write(tmp, "hello")
     bytes, _, err = fs.read_binary(tmp)
     if err != "" {

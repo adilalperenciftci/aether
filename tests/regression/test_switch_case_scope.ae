@@ -1,0 +1,115 @@
+// Regression (#2732): a name first bound in a `switch` case and read after
+// the switch is one variable, as one first bound in an `if` branch is.
+//
+// The type checker took the cases for part of the enclosing scope, so
+// `switch x { case 1: v = 10 ... }` then `return v` passed it, while codegen
+// gives each case a C block of its own: the C compiler stopped with "'v'
+// undeclared". The cases are now scopes of their own in the checker too, and
+// the hoists that let an if branch's binding outlive the if apply to a
+// switch's cases: a name a case of a top-level switch binds and the function
+// reads after it is declared at function scope, a while body's switch binds
+// its names before the loop, and a name every case of a switch with a
+// default binds is declared before the switch, at any depth. A read the C
+// cannot make is a checker error (tests/integration/switch_case_scope).
+extern exit(code: int)
+
+var bad = 0
+
+check(label: string, got: int, want: int) {
+    if got != want {
+        println("FAIL ${label}: got ${got}, want ${want}")
+        bad = bad + 1
+    }
+}
+
+check_s(label: string, got: string, want: string) {
+    if got != want {
+        println("FAIL ${label}: got ${got}, want ${want}")
+        bad = bad + 1
+    }
+}
+
+// The issue's shape: bound in the cases of a top-level switch, read after.
+pick(x: int) -> int {
+    switch x {
+        case 1: v = 10
+        default: v = 20
+    }
+    return v
+}
+
+// Bound by one case only: the other paths read the zero value.
+only_one(x: int) -> int {
+    switch x {
+        case 1: w = 5
+        case 2: println("two")
+    }
+    return w
+}
+
+// A switch nested in an if, every case and the default binding the name.
+nested(x: int) -> int {
+    if x > 0 {
+        switch x {
+            case 1: n = 100
+            case 2, 3: n = 200
+            default: n = 300
+        }
+        return n
+    }
+    return 0
+}
+
+// A switch in a while body: its names are declared before the loop.
+looped(x: int) -> int {
+    i = 0
+    total = 0
+    while i < 3 {
+        switch x {
+            case 1: step = 1
+            default: step = 2
+        }
+        total = total + step
+        i = i + 1
+    }
+    return total
+}
+
+// A string bound in the cases and read after the switch.
+label(x: int) -> string {
+    switch x {
+        case 1: s = "one"
+        default: s = "many"
+    }
+    return s
+}
+
+// A ranged switch lowers to an if-chain, with the same scopes.
+ranged(x: int) -> int {
+    switch x {
+        case 0..=9: r = 1
+        default: r = 2
+    }
+    return r
+}
+
+main() {
+    check("case 1", pick(1), 10)
+    check("default", pick(7), 20)
+    check("one case binds", only_one(1), 5)
+    check("nested, case 1", nested(1), 100)
+    check("nested, comma-list", nested(3), 200)
+    check("nested, default", nested(9), 300)
+    check("in a loop, case 1", looped(1), 3)
+    check("in a loop, default", looped(4), 6)
+    check_s("string, case 1", label(1), "one")
+    check_s("string, default", label(5), "many")
+    check("ranged", ranged(4), 1)
+    check("ranged, default", ranged(40), 2)
+
+    if bad != 0 {
+        println("${bad} check(s) failed")
+        exit(1)
+    }
+    println("switch case scope: ok")
+}

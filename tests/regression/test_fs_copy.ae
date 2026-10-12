@@ -41,7 +41,7 @@ main() {
     println("=== fs.copy regression ===")
 
     tmp = os.temp_dir()
-    tmpdir = "${tmp}/aether_fs_copy_test"
+    tmpdir = "${tmp}/aether_fs_copy_test_${os.getpid()}"
     // Best-effort cleanup of any leftover state from a previous run.
     fs.delete("${tmpdir}/src.txt")
     fs.delete("${tmpdir}/dst.txt")

@@ -13,12 +13,16 @@
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+# A directory of its own, not fixed /tmp paths: two sweeps at once (two
+# checkouts, or parallel agents) overwrote each other's files (#2770).
+AE_TMP="$(mktemp -d)"
+trap 'rm -rf "$AE_TMP"' EXIT
 
 pass=0
 fail=0
 
 cd "$SCRIPT_DIR"
-err=$("$ROOT/build/ae" build test_trailing_comma_lists.ae -o /tmp/ae_tcl_guard 2>&1)
+err=$("$ROOT/build/ae" build test_trailing_comma_lists.ae -o $AE_TMP/ae_tcl_guard 2>&1)
 rc=$?
 
 if [ "$rc" -ne 0 ]; then
@@ -39,7 +43,7 @@ else
     pass=$((pass + 1))
 fi
 
-rm -f /tmp/ae_tcl_guard
+rm -f $AE_TMP/ae_tcl_guard
 
 echo ""
 echo "Trailing-comma E0100 guard: $pass passed, $fail failed"

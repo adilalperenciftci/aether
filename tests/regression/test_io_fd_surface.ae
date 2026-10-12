@@ -29,7 +29,7 @@ main() {
     println("=== std.io fd surface regression ===")
 
     tmpbase = os.temp_dir()
-    tmp = "${tmpbase}/aether_fd_test.txt"
+    tmp = "${tmpbase}/aether_fd_test_${os.getpid()}.txt"
 
     // Case 1: open_write + write_n + close.
     fd, err = io.fd_open_write(tmp)
@@ -124,6 +124,7 @@ main() {
         println("FAIL 6: read-side fd_close returned err='${cerr2}'")
         exit(1)
     }
+    _ = io.delete_file(tmp)
 
     // Case 7: error path — nonexistent file.
     bad_fd, bad_err = io.fd_open_read("/nonexistent/path/aether_fd_test_xyz")

@@ -1,4 +1,4 @@
-.PHONY: all clean test compiler examples examples-run ci
+.PHONY: all clean test compiler examples examples-run ci ci-sweep
 
 # Pin the default goal to `all` regardless of rule order. Without this, the
 # first FILE-target rule defined becomes the default goal — and the generated
@@ -1397,8 +1397,11 @@ else
 test-ae: compiler ae stdlib
 	@echo "==================================="
 	@echo "  Running Aether Source Tests (.ae)"
-	@echo "  Parallel: $(NPROC) jobs"
+	@echo "  Parallel: $(NPROC) jobs$${AE_SWEEP_SHARD:+, shard $$AE_SWEEP_SHARD}"
 	@echo "==================================="
+	@# A bad AE_SWEEP_SHARD (#2757) must fail here: inside the pipelines below
+	@# it would leave the sweep with nothing to run, and nothing reads as a pass.
+	@sh tests/scripts/sweep_shard.sh < /dev/null
 	@tmpdir=$$(mktemp -d); \
 	root=$$(pwd); \
 	script="$$root/tests/scripts/run_ae_test.sh"; \
@@ -1406,7 +1409,7 @@ test-ae: compiler ae stdlib
 	if [ -n "$(AE_SWEEP_EXTRA_PRUNE)" ]; then \
 	  echo "  Extra prune list: $(AE_SWEEP_EXTRA_PRUNE) ($$(sed '/^#/d;/^$$/d' "$(AE_SWEEP_EXTRA_PRUNE)" | wc -l | tr -d ' ') patterns)"; \
 	fi; \
-	sh tests/scripts/ae_sweep_list.sh "$(AE_SWEEP_EXTRA_PRUNE)" | \
+	sh tests/scripts/ae_sweep_list.sh "$(AE_SWEEP_EXTRA_PRUNE)" | sh tests/scripts/sweep_shard.sh | \
 	xargs -P $(NPROC) -I{} sh "$$script" "{}" "$$tmpdir" "$$root"; \
 	sh_script="$$root/tests/scripts/run_ae_sh_dir.sh"; \
 	sh_nproc=$${SH_NPROC:-$(NPROC)}; \
@@ -1425,7 +1428,7 @@ test-ae: compiler ae stdlib
 	  done; \
 	  for d in $$(cat "$$tmpdir/shdirs.txt"); do \
 	    [ -f "$$d/DRIVERS_INDEPENDENT" ] || echo "$$d"; \
-	  done; } \
+	  done; } | sh tests/scripts/sweep_shard.sh \
 	    | xargs -P $$sh_nproc -I{} sh "$$sh_script" "{}" "$$tmpdir" "$$root"; \
 	passed=$$(ls "$$tmpdir"/PASS_* 2>/dev/null | wc -l | tr -d ' '); \
 	failed=$$(ls "$$tmpdir"/FAIL_* 2>/dev/null | wc -l | tr -d ' '); \
@@ -1838,11 +1841,12 @@ examples-run: examples
 	@echo "==================================="
 	@echo "  Running Aether Examples"
 	@echo "==================================="
-	@for bin in $$(find $(BUILD_DIR)/examples -type f ! -name '*.c' ! -name '*.o' | sort); do \
+	@. tests/lib/sweep_timeout.sh; sweep_timeout_bound TO "$$(pwd)" 5; \
+	for bin in $$(find $(BUILD_DIR)/examples -type f ! -name '*.c' ! -name '*.o' | sort); do \
 		test -x "$$bin" || continue; \
 		name=$$(echo $$bin | sed "s|$(BUILD_DIR)/examples/||"); \
 		echo "--- $$name ---"; \
-		timeout 5 $$bin 2>&1 || true; \
+		$$TO $$bin 2>&1 || true; \
 		echo ""; \
 	done
 
@@ -2775,7 +2779,7 @@ help:
 	@echo "  make test-all       - Run both C and .ae tests"
 	@echo "  make check-standalone - Compile every standalone C main (benches, demos)"
 	@echo "  make check-docs       - Compile the documentation's complete examples"
-	@echo "  make check-tests      - The test suite can fail: verdicts reach the exit code, prune list is consistent, every std module has tests, listeners bind loopback, shell tests end background programs through server_jobs.sh"
+	@echo "  make check-tests      - The test suite can fail: verdicts reach the exit code, prune list is consistent, every std module has tests, listeners bind loopback, shell tests end background programs through server_jobs.sh, test programs write temp files under names of their own"
 	@echo "  make check-contrib-modules - Type-check every non-host contrib module"
 	@echo "  make check-changelog  - Validate changelog fragments, catch a release-fold"
 	@echo "  make add-changelog    - Write a new_changelogs/ fragment (SECTION=, SLUG=)"
@@ -2925,10 +2929,26 @@ docker-ci-windows: docker-build-ci
 # instead of running until the job is lost (#2608). See run_stage.sh.
 CI_STAGE = sh tests/scripts/run_stage.sh
 
+# The test sweep of `make ci` alone, for a CI leg split in two (#2757): the
+# toolchain built as `make ci` builds it, then test-ae with AE_SWEEP_SHARD
+# (which tests/scripts/sweep_shard.sh reads). On Windows the other job runs
+# `make ci`, which runs everything else once. CI_SWEEP_UNIT=1 runs the C unit
+# tests too, for the macOS x86_64 leg, whose two jobs are both sweeps: the
+# rest of `make ci` does not depend on the architecture, and the ARM64 leg
+# runs it on macOS (#2772).
+ci-sweep: clean
+	@$(MAKE) audio-cache-restore
+	@$(MAKE) -j$(NPROC) compiler EXTRA_CFLAGS=-Werror
+	@$(MAKE) audio-cache-save
+	@$(MAKE) -j$(NPROC) ae
+	@$(MAKE) -j$(NPROC) stdlib
+	@if [ "$(CI_SWEEP_UNIT)" = 1 ]; then $(CI_STAGE) 1200 "C unit tests" $(MAKE) -j$(NPROC) test; fi
+	@$(MAKE) test-ae
+
 ci: clean
 	@echo "==================================="
 	@echo "  Aether CI — Full Test Suite"
-	@echo "  Parallel: $(NPROC) jobs (build) / $(NPROC) (.ae tests) / $${SH_NPROC:-1} (shell tests)"
+	@echo "  Parallel: $(NPROC) jobs (build) / $(NPROC) (.ae tests) / $${SH_NPROC:-$(NPROC)} (shell tests)"
 	@echo "==================================="
 	@echo ""
 	@echo "[0/11] Restoring miniaudio object cache (if valid)..."
@@ -2988,6 +3008,15 @@ ci: clean
 .PHONY: test-differential
 test-differential: ae
 	@sh tests/differential/run_differential.sh
+
+# The C a program gets when the C compiler is not GCC-compatible
+# (AETHER_GCC_COMPAT 0, which is what MSVC compiles): strict C11 under gcc,
+# and under cl.exe too when it is on PATH (#2725). CI runs the gcc half on the
+# Linux / GCC leg and the cl half in windows.yml's MSVC job. MSVC_COMPAT_CC
+# (gcc, cl or all) picks; see the script.
+.PHONY: test-msvc-compat
+test-msvc-compat: compiler
+	@bash tests/compiler/test_msvc_compat.sh
 
 # The .ae corpus at -O0 against -O2 (#2488). Builds every program `test-ae`
 # builds (the list is tests/scripts/ae_sweep_list.sh, shared with it) at -O2
@@ -3181,7 +3210,7 @@ test-optional: compiler ae stdlib
 
 check-tests:
 	@echo "==================================="
-	@echo "  test suite (verdicts, prune list, loopback listeners, shell kills)"
+	@echo "  test suite (verdicts, prune list, loopback listeners, shell kills, temp names)"
 	@echo "==================================="
 	@py=""; \
 	for cand in python3 python "py -3"; do \
@@ -3196,7 +3225,11 @@ check-tests:
 	    $$py tests/scripts/test_check_loopback_listeners.py && \
 	    $$py tests/scripts/check_loopback_listeners.py && \
 	    $$py tests/scripts/test_check_shell_kills.py && \
-	    $$py tests/scripts/check_shell_kills.py; \
+	    $$py tests/scripts/check_shell_kills.py && \
+	    $$py tests/scripts/test_check_shell_tmp.py && \
+	    $$py tests/scripts/check_shell_tmp.py && \
+	    $$py tests/scripts/test_check_ae_tmp.py && \
+	    $$py tests/scripts/check_ae_tmp.py; \
 	else \
 	    echo "  [SKIP] test suite checks — no working Python found"; \
 	    echo "         (checked on the Linux/macOS legs, which run the same target)"; \

@@ -688,6 +688,14 @@ const char* ast_node_type_to_string(ASTNodeType type);
 // `#line N "path"` directives so gcc/gdb/gcov see .ae line numbers.
 void ast_stamp_source_file(ASTNode* node, const char* path);
 
+/* #2729: the name a caller writes for the definition `def`. A function merged
+ * in from a module is named `<ns>_<name>` in the program and called
+ * `<ns>.<name>`; that spelling is written to `buf` (`cap` bytes) and
+ * returned. Any other definition's own name is returned as it is.
+ * Diagnostics speak the source language, so they name a definition through
+ * this, never through its merged C name. */
+const char* ast_source_name(const ASTNode* def, char* buf, size_t cap);
+
 /* #2146: the lane index `.x` / `.y` / `.z` / `.w` names on a vector type,
  * or -1 when the name is not a lane accessor or the type has too few lanes
  * (`.z` on an f64x2). One table, so the typechecker and codegen cannot
