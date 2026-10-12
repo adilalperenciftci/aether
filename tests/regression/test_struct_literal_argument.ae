@@ -1,0 +1,172 @@
+// Regression (#2749): a struct literal holding owned strings, handed to a
+// call as an argument, is destroyed once the statement is done.
+//
+// A function or closure the compiler emits borrows a struct parameter: it
+// disowns the copy's strings on entry, or takes references of its own when
+// it keeps the value (#2582). Bound to a local first, the literal is
+// destroyed at the local's scope exit; passed as it stood, nothing
+// destroyed it, and every call leaked its strings (3700 bytes per 100
+// calls of `reader(Item { name: string.concat(w, "old") })`). The literal is
+// now a temporary of its statement, as a struct a call returns is: in a
+// return, a binding, an operand, an interpolation, a discarded call, a
+// call through a closure, nested in another literal, with a callee that
+// keeps it or hands back a view of it.
+//
+// Each check reads its value after churn, allocations of the same sizes
+// that reuse what was freed. The leak checks run where the heap count is
+// exact (mem.heap_in_use_exact): after a warm-up, some window of the same
+// work grows by exactly 0 (mem.steady_growth), one window per shape.
+// Strings are built from parameters, because string.concat of two literals
+// folds to a literal.
+
+import std.mem
+import std.string
+
+extern exit(code: int)
+
+struct Item {
+    name: string
+    n: int
+}
+
+struct Outer {
+    inner: Item
+    tag: string
+}
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL #2749: ${msg}")
+        exit(1)
+    }
+}
+
+// Allocations of the sizes the checks read, to take over freed blocks.
+churn(w: string) -> int {
+    n = 0
+    i = 0
+    while i < 8 {
+        a = string.concat(w, "old")
+        b = string.concat(w, "tag!")
+        n = n + string.length(a) + string.length(b)
+        i = i + 1
+    }
+    return n
+}
+
+reader(p: Item) -> int {
+    return string.length(p.name) + p.n
+}
+
+outer_reader(o: Outer) -> int {
+    return string.length(o.inner.name) + string.length(o.tag)
+}
+
+two(a: Item, b: Item) -> int {
+    return string.length(a.name) + string.length(b.name)
+}
+
+// Keeps its parameter as a whole value: takes references of its own.
+keep(p: Item) -> Item {
+    return p
+}
+
+// Hands back a view of its parameter's string.
+name_of(p: Item) -> string {
+    return p.name
+}
+
+as_return(w: string) -> int {
+    return reader(Item { name: string.concat(w, "old"), n: 1 })
+}
+
+as_binding(w: string) -> int {
+    n = reader(Item { name: string.concat(w, "old"), n: 2 })
+    m = two(Item { name: string.concat(w, "old"), n: 0 }, Item { name: string.concat(w, "tag!"), n: 0 })
+    churn(w)
+    check(n == 6 && m == 9, "a struct literal argument bound (${n}, ${m})")
+    return n + m
+}
+
+as_operand(w: string) -> int {
+    k = reader(Item { name: string.concat(w, "old"), n: 0 }) * 2 + reader(Item { name: string.concat(w, "tag!"), n: 1 })
+    check(k == 14, "struct literal arguments in operands (${k})")
+    return k
+}
+
+as_interpolation(w: string) -> int {
+    s = "${reader(Item { name: string.concat(w, "old"), n: 0 })}"
+    check(s == "4", "a struct literal argument in an interpolation (${s})")
+    return string.length(s)
+}
+
+as_discard(w: string) -> int {
+    reader(Item { name: string.concat(w, "old"), n: 0 })
+    keep(Item { name: string.concat(w, "tag!"), n: 3 })
+    return 0
+}
+
+as_closure(w: string) -> int {
+    f = | p: Item | { return string.length(p.name) }
+    n = f(Item { name: string.concat(w, "old"), n: 0 })
+    check(n == 4, "a struct literal argument of a closure (${n})")
+    return n
+}
+
+as_nested(w: string) -> int {
+    n = outer_reader(Outer { inner: Item { name: string.concat(w, "old"), n: 0 }, tag: string.concat(w, "tag!") })
+    check(n == 9, "a nested struct literal argument (${n})")
+    return n
+}
+
+as_kept(w: string) -> int {
+    it = keep(Item { name: string.concat(w, "old"), n: 5 })
+    s = name_of(Item { name: string.concat(w, "tag!"), n: 0 })
+    churn(w)
+    check(it.name == "wold" && it.n == 5, "a struct literal a callee keeps (${it.name})")
+    check(s == "wtag!", "a view of a struct literal argument (${s})")
+    return string.length(it.name) + string.length(s)
+}
+
+measure(which: int, w: string) -> long {
+    return mem.steady_growth(|| {
+            k = 0
+            while k < 100 {
+                if which == 0 { as_return(w) }
+                if which == 1 { as_binding(w) }
+                if which == 2 { as_operand(w) }
+                if which == 3 { as_discard(w) }
+                if which == 4 { as_closure(w) }
+                if which == 5 { as_nested(w) }
+                if which == 6 { as_kept(w) }
+                k = k + 1
+            }
+        }, 5)
+}
+
+main() {
+    println("=== test_struct_literal_argument ===")
+    w = "w"
+    check(as_return(w) == 5 && as_binding(w) == 15 && as_operand(w) == 14, "a round adds up")
+    check(as_interpolation(w) == 1 && as_discard(w) == 0 && as_closure(w) == 4, "a round adds up")
+    check(as_nested(w) == 9 && as_kept(w) == 9, "a round adds up")
+    if mem.heap_in_use_exact() {
+        names = ["a return", "a binding", "an operand", "a discarded call", "a closure call",
+            "a nested literal", "a kept or viewed literal"]
+        i = 0
+        while i < 7 {
+            grown = measure(i, w)
+            check(grown == 0, "100 struct literal arguments in ${names[i]} grew the heap by ${grown} bytes in every run")
+            i = i + 1
+        }
+        grown = mem.steady_growth(|| {
+                k = 0
+                while k < 20 {
+                    as_interpolation(w)
+                    k = k + 1
+                }
+            }, 5)
+        check(grown == 0, "20 interpolations grew the heap by ${grown} bytes in every run")
+    }
+    println("=== test_struct_literal_argument passed ===")
+}

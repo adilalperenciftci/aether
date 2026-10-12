@@ -1,0 +1,153 @@
+// Regression (#2756): a closure a function returns in a tuple, destructured
+// into a local, is released at the local's scope exit.
+//
+// A closure returned alone and bound to a local is the local's to release
+// (#2494, #2506). Returned in a tuple position, nothing released it: the
+// destructure took the slot as a plain value, and the tuple position was
+// never asked whether the callee hands its closure over, so every call
+// leaked the closure's env (2400 bytes per 100 calls of
+// `f2, k = pair(piece)` over `return || { string.length(piece) }, 1`). A
+// position now hands over its closure when every return puts there a
+// closure literal, a call that hands one over, a local nobody else keeps,
+// or the same position of a tuple call passed on; the local the
+// destructure binds releases it, a rebinding releases the one it
+// replaces, a cell gives the slot's reference back once it has taken its
+// own, and a `_` slot gives it back at once. A closure the callee only
+// lends (a field it read) is left to its owner.
+//
+// The leak checks run where the heap count is exact (mem.heap_in_use_exact):
+// after a warm-up, some window of the same work grows by exactly 0
+// (mem.steady_growth), one window per shape.
+
+import std.mem
+import std.string
+
+extern exit(code: int)
+
+struct Holder {
+    cb: fn
+}
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL #2756: ${msg}")
+        exit(1)
+    }
+}
+
+counter(piece: string) -> fn {
+    return || { return string.length(piece) }
+}
+
+pair(piece: string) -> (fn, int) {
+    return || { return string.length(piece) }, 1
+}
+
+from_local(piece: string) -> (int, fn) {
+    f = || { return string.length(piece) + 1 }
+    return 2, f
+}
+
+from_call(piece: string) -> (fn, int) {
+    return counter(piece), 3
+}
+
+passed_on(piece: string) -> (fn, int) {
+    return pair(piece)
+}
+
+// Lends what another owner keeps: the caller must leave it alone.
+from_field(h: Holder) -> (fn, int) {
+    return h.cb, 4
+}
+
+as_literal(piece: string) -> int {
+    f2, k = pair(piece)
+    return call(f2) + k
+}
+
+as_local(piece: string) -> int {
+    k, f = from_local(piece)
+    g, m = from_call(piece)
+    h, n = passed_on(piece)
+    return call(f) + call(g) + call(h) + k + m + n
+}
+
+as_discard(piece: string) -> int {
+    _, k = pair(piece)
+    m, _ = from_local(piece)
+    return k + m
+}
+
+as_rebound(piece: string) -> int {
+    f2, k = pair(piece)
+    a = call(f2)
+    f2, k = from_call(piece)
+    b = call(f2)
+    i = 0
+    while i < 3 {
+        f2, k = pair(piece)
+        b = b + call(f2)
+        i = i + 1
+    }
+    return a + b + k
+}
+
+// `f2` and `k` are written by a closure, so they live in cells.
+as_cell(piece: string) -> int {
+    f2 = counter(piece)
+    k = 0
+    bump = || {
+        f2, k = from_call(piece)
+    }
+    bump()
+    a = call(f2) + k
+    f2, k = pair(piece)
+    return a + call(f2) + k
+}
+
+as_lent(piece: string) -> int {
+    h = Holder { cb: counter(piece) }
+    f, k = from_field(h)
+    a = call(f)
+    g, m = from_field(h)
+    // The owner still holds a callable closure.
+    return a + call(g) + call(h.cb) + k + m
+}
+
+measure(which: int, piece: string) -> long {
+    return mem.steady_growth(|| {
+            i = 0
+            while i < 100 {
+                if which == 0 { as_literal(piece) }
+                if which == 1 { as_local(piece) }
+                if which == 2 { as_discard(piece) }
+                if which == 3 { as_rebound(piece) }
+                if which == 4 { as_cell(piece) }
+                if which == 5 { as_lent(piece) }
+                i = i + 1
+            }
+        }, 5)
+}
+
+main() {
+    println("=== test_tuple_closure_destructure ===")
+    piece = string.concat("bc", "")
+    check(as_literal(piece) == 3, "a closure literal in a tuple (${as_literal(piece)})")
+    check(as_local(piece) == 13, "a closure from a local, a call, a tuple passed on (${as_local(piece)})")
+    check(as_discard(piece) == 3, "a discarded closure slot (${as_discard(piece)})")
+    check(as_rebound(piece) == 11, "a closure slot destructured again (${as_rebound(piece)})")
+    check(as_cell(piece) == 8, "a closure slot a nested closure writes (${as_cell(piece)})")
+    check(as_lent(piece) == 14, "a closure the callee lends (${as_lent(piece)})")
+    if mem.heap_in_use_exact() {
+        names = ["a closure literal", "a local, call or tuple passed on", "a discarded slot",
+            "a rebinding", "a cell", "a lent closure"]
+        i = 0
+        while i < 6 {
+            grown = measure(i, piece)
+            check(grown == 0, "100 tuple closures from ${names[i]} grew the heap by ${grown} bytes in every run")
+            i = i + 1
+        }
+    }
+    println("=== test_tuple_closure_destructure passed ===")
+}

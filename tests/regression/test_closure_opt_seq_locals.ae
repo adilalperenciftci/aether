@@ -1,0 +1,125 @@
+// Regression (#2761): a closure body's `string?` and `*StringSeq` locals are
+// freed when the closure returns.
+//
+// A closure body ran the heap-string passes a function body runs (the
+// tracker hoist, the escape walk, the exit frees) but not their `string?`
+// and `*StringSeq` counterparts, so such a local was declared plain, with
+// no ownership flag and no exit free, and every call leaked what it held
+// (3500 bytes per 100 calls of a `string?` local, 11600 of a `*StringSeq`
+// one). The closure body now runs all of them, as a function body does.
+//
+// Each check reads its value after churn, allocations of the same sizes
+// that reuse what was freed. The leak checks run where the heap count is
+// exact (mem.heap_in_use_exact): after a warm-up, some window of the same
+// work grows by exactly 0 (mem.steady_growth), one window per shape.
+// Strings are built from parameters, because string.concat of two literals
+// folds to a literal.
+
+import std.mem
+import std.string
+
+extern exit(code: int)
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL #2761: ${msg}")
+        exit(1)
+    }
+}
+
+// Allocations of the sizes the checks read, to take over freed blocks.
+churn(w: string) -> int {
+    n = 0
+    i = 0
+    while i < 8 {
+        a = string.concat(w, "x")
+        b = string.concat(w, ",b,c")
+        n = n + string.length(a) + string.length(b)
+        i = i + 1
+    }
+    return n
+}
+
+maybe(w: string, has: bool) -> string? {
+    if has {
+        return string.concat(w, "x")
+    }
+    return none
+}
+
+opt_local(w: string) -> int {
+    g = | v: string | {
+        o = maybe(v, true)
+        churn(v)
+        check(o! == "wx", "a string? local of a closure (${o!})")
+        return string.length(o!)
+    }
+    return g(w)
+}
+
+opt_rebound(w: string) -> int {
+    g = | v: string | {
+        o = maybe(v, true)
+        n = 0
+        i = 0
+        while i < 3 {
+            o = maybe(v, i != 1)
+            n = n + string.length(o ?? "")
+            i = i + 1
+        }
+        return n
+    }
+    return g(w)
+}
+
+seq_local(w: string) -> int {
+    g = | v: string | {
+        s = string.split_to_seq(string.concat(v, ",b,c"), ",")
+        churn(v)
+        check(string.seq_length(s) == 3, "a *StringSeq local of a closure")
+        return string.seq_length(s)
+    }
+    return g(w)
+}
+
+nested(w: string) -> int {
+    outer = | v: string | {
+        inner = | u: string | {
+            o = maybe(u, true)
+            s = string.split_to_seq(string.concat(u, ",b,c"), ",")
+            return string.length(o!) + string.seq_length(s)
+        }
+        return inner(v)
+    }
+    return outer(w)
+}
+
+measure(which: int, w: string) -> long {
+    return mem.steady_growth(|| {
+            k = 0
+            while k < 100 {
+                if which == 0 { opt_local(w) }
+                if which == 1 { opt_rebound(w) }
+                if which == 2 { seq_local(w) }
+                if which == 3 { nested(w) }
+                k = k + 1
+            }
+        }, 5)
+}
+
+main() {
+    println("=== test_closure_opt_seq_locals ===")
+    w = "w"
+    check(opt_local(w) == 2 && opt_rebound(w) == 4, "a closure's string? local")
+    check(seq_local(w) == 3 && nested(w) == 5, "a closure's *StringSeq local")
+    if mem.heap_in_use_exact() {
+        names = ["a string? local", "a string? local rebound", "a *StringSeq local", "nested closures"]
+        i = 0
+        while i < 4 {
+            grown = measure(i, w)
+            check(grown == 0, "100 calls of ${names[i]} grew the heap by ${grown} bytes in every run")
+            i = i + 1
+        }
+    }
+    println("=== test_closure_opt_seq_locals passed ===")
+}

@@ -6046,6 +6046,122 @@ static void rename_locals_shadowing_functions(ASTNode* program) {
     shadow_fns_free(&fns);
 }
 
+/* #2746: a heap-string binding that lives for one C block shadows a local
+ * of its name: a C-style for loop's string variable (#2742), an owning
+ * `catch` binding (#2333), the `some(v)` binding of a match over a
+ * `string?` (#2750). Its free and the shadowed local's are both keyed by
+ * the name (`if (_heap_s) aether_heap_str_free(s)`), so a `return` from
+ * inside the block, which runs every exit free, freed the block's value
+ * and then tested the block's flag again for the outer one: the outer
+ * value leaked. Each such binding the function names anywhere else (a
+ * parameter, a local, a use) is renamed, with every use inside its
+ * construct, to a name of its own, before any pass reads the names, so
+ * each exit free reaches its own variable and flag. A uniform rename
+ * inside the construct keeps its meaning: every use there is the
+ * binding's (a nested binding of the name included, renamed alike), and
+ * field, argument and function names are not value names. */
+static int scoped_binding_seq = 0;
+
+static int names_value_outside(const ASTNode* node, const ASTNode* skip, const char* name) {
+    if (!node || node == skip) return 0;
+    if (node->value && is_value_name_node(node) && strcmp(node->value, name) == 0) return 1;
+    for (int i = 0; i < node->child_count; i++)
+        if (names_value_outside(node->children[i], skip, name)) return 1;
+    return 0;
+}
+
+static void rename_value_names_in(ASTNode* node, const char* from, const char* to) {
+    if (!node) return;
+    for (int i = 0; i < node->child_count; i++) rename_value_names_in(node->children[i], from, to);
+    if (node->value && is_value_name_node(node) && strcmp(node->value, from) == 0) {
+        free(node->value);
+        node->value = strdup(to);
+    }
+}
+
+/* Renames `name`, bound by `construct`, inside it, when `scope` names it
+ * outside it too. A catch clause's own value is its binding. */
+static void rename_scoped_binding(ASTNode* scope, ASTNode* construct, const char* name,
+                                  const NameSet* fixed) {
+    if (!name || strcmp(name, "_") == 0 || nameset_has(fixed, name) ||
+        !names_value_outside(scope, construct, name)) return;
+    char prefix[32];
+    snprintf(prefix, sizeof(prefix), "ae_scoped%d_", scoped_binding_seq++);
+    char* to = prefixed_name(prefix, name);
+    char* from = strdup(name);
+    rename_value_names_in(construct, from, to);
+    if (construct->type == AST_CATCH_CLAUSE && construct->value &&
+        strcmp(construct->value, from) == 0) {
+        free(construct->value);
+        construct->value = strdup(to);
+    }
+    free(from);
+    free(to);
+}
+
+static void rename_scoped_string_bindings_in(ASTNode* scope, ASTNode* node, const NameSet* fixed) {
+    if (!node) return;
+    /* Inner constructs first, so each ends with a name apart from the one
+     * around it (the outer rename no longer meets the inner name). */
+    for (int i = 0; i < node->child_count; i++)
+        rename_scoped_string_bindings_in(scope, node->children[i], fixed);
+    if (node->type == AST_FOR_LOOP && node->child_count > 0 && node->children[0] &&
+        node->children[0]->type == AST_VARIABLE_DECLARATION && node->children[0]->node_type &&
+        node->children[0]->node_type->kind == TYPE_STRING) {
+        rename_scoped_binding(scope, node, node->children[0]->value, fixed);
+    } else if (node->type == AST_CATCH_CLAUSE && node->value) {
+        rename_scoped_binding(scope, node, node->value, fixed);
+    } else if (node->type == AST_MATCH_STATEMENT && node->child_count > 0 && node->children[0] &&
+               node->children[0]->node_type &&
+               node->children[0]->node_type->kind == TYPE_OPTIONAL &&
+               node->children[0]->node_type->element_type &&
+               node->children[0]->node_type->element_type->kind == TYPE_STRING) {
+        for (int i = 1; i < node->child_count; i++) {
+            ASTNode* arm = node->children[i];
+            ASTNode* pat = arm && arm->type == AST_MATCH_ARM && arm->child_count > 0
+                           ? arm->children[0] : NULL;
+            if (pat && pat->type == AST_PATTERN_VARIABLE && pat->annotation &&
+                strcmp(pat->annotation, "some_pattern") == 0)
+                rename_scoped_binding(scope, arm, pat->value, fixed);
+        }
+    }
+}
+
+static void rename_scoped_string_bindings(ASTNode* program) {
+    if (!program) return;
+    NameSet globals = {0};
+    for (int i = 0; i < program->child_count; i++) {
+        ASTNode* c = program->children[i];
+        if (c && c->value &&
+            (c->type == AST_VARIABLE_DECLARATION || c->type == AST_CONST_DECLARATION))
+            nameset_add(&globals, c->value);
+    }
+    for (int i = 0; i < program->child_count; i++) {
+        ASTNode* c = program->children[i];
+        if (!c) continue;
+        if (c->type == AST_FUNCTION_DEFINITION || c->type == AST_MAIN_FUNCTION ||
+            c->type == AST_BUILDER_FUNCTION) {
+            rename_scoped_string_bindings_in(c, c, &globals);
+        } else if (c->type == AST_ACTOR_DEFINITION) {
+            /* An actor's state is `self->name`, no local. */
+            NameSet fixed = {0};
+            for (int g = 0; g < globals.count; g++) nameset_add(&fixed, globals.names[g]);
+            for (int k = 0; k < c->child_count; k++) {
+                ASTNode* st = c->children[k];
+                if (st && st->type == AST_STATE_DECLARATION && st->value)
+                    nameset_add(&fixed, st->value);
+            }
+            for (int k = 0; k < c->child_count; k++) {
+                ASTNode* st = c->children[k];
+                if (st && st->type != AST_STATE_DECLARATION)
+                    rename_scoped_string_bindings_in(st, st, &fixed);
+            }
+            nameset_free(&fixed);
+        }
+    }
+    nameset_free(&globals);
+}
+
 /* #2292: the prefix the entry program's constants are emitted under. Unlike
  * the `ae_` of a keyword mangle, it marks a constant, so a local the keyword
  * pass renames can never take a constant's C name. */
@@ -7041,6 +7157,8 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     /* #2683: after the function renames, so a call's name is the one its
      * C spelling is made from. */
     rename_locals_shadowing_functions(program);
+    /* #2746: before any pass keys an exit free off a local's name. */
+    rename_scoped_string_bindings(program);
     /* The rename changed definition names, which are the index's keys,
        without changing the child count it is keyed on. */
     program_index_reset();
@@ -7981,6 +8099,16 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     print_line(gen, "    if (!s) return s;");
     print_line(gen, "    if (aether_str_is_counted(s)) { string_retain(s); return s; }");
     print_line(gen, "    return aether_uniform_heap_str(s, 0);");
+    print_line(gen, "}");
+    /* #2723: a fixed-size array argument is a value its callee copies, and
+     * one a `try` body writes has volatile elements, which the callee's
+     * plain `E _param_a[N]` would not take. The call passes a copy instead,
+     * read through a volatile pointer into an array of the call's own. */
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED void* _aether_array_arg_copy(void* dst, const volatile void* src, size_t n) {");
+    print_line(gen, "    unsigned char* _d = (unsigned char*)dst;");
+    print_line(gen, "    const volatile unsigned char* _s = (const volatile unsigned char*)src;");
+    print_line(gen, "    for (size_t _i = 0; _i < n; _i++) _d[_i] = _s[_i];");
+    print_line(gen, "    return dst;");
     print_line(gen, "}");
     /* The value a string cell takes (emit_string_take_owned): what the take
      * left borrowed is copied, as for a return, and an owned PLAIN buffer

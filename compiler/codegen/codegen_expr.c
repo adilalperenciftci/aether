@@ -1919,6 +1919,16 @@ static int subtree_reads(ASTNode* node, const char* name) {
 #define FL_NONE 0
 #define FL_FRESH 1
 #define FL_CAPTURE 2
+/* #2769: a `catch` clause's binding and a match arm's `some(v)` binding
+ * declare their name as a local does, for the clause or the arm. */
+static int binds_scoped_name(ASTNode* node, const char* name) {
+    if (!node || !name) return 0;
+    if (node->type == AST_CATCH_CLAUSE)
+        return node->value && strcmp(node->value, name) == 0;
+    return node->type == AST_PATTERN_VARIABLE && node->value && node->annotation &&
+           strcmp(node->annotation, "some_pattern") == 0 && strcmp(node->value, name) == 0;
+}
+
 static int first_occurrence_kind(ASTNode* node, const char* name) {
     if (!node) return FL_NONE;
     // A nested real closure is opaque — its own uses of `name` don't count.
@@ -1940,6 +1950,8 @@ static int first_occurrence_kind(ASTNode* node, const char* name) {
     if (node->type == AST_IDENTIFIER && node->value && strcmp(node->value, name) == 0) {
         return FL_CAPTURE;
     }
+    // A binding of its own: the closure's local.
+    if (binds_scoped_name(node, name)) return FL_FRESH;
     // Otherwise recurse in source order; the first child that resolves wins.
     for (int i = 0; i < node->child_count; i++) {
         int r = first_occurrence_kind(node->children[i], name);
@@ -2415,6 +2427,10 @@ static int subtree_declares(ASTNode* node, const char* var_name) {
         node->value && strcmp(node->value, var_name) == 0) {
         return 1;
     }
+    /* A closure in a `catch` handler or a `some(v)` arm captures the
+     * binding as it captures any local (#2769): it was missed, so the
+     * closure's C body read an undeclared name. */
+    if (binds_scoped_name(node, var_name)) return 1;
     for (int i = 0; i < node->child_count; i++) {
         if (subtree_declares(node->children[i], var_name)) return 1;
     }
@@ -3388,6 +3404,22 @@ static Type* decl_type_in_scope(ASTNode* node, const char* var_name) {
         // Declaration found but untyped — keep looking; a later re-declaration
         // or assignment of the same name may carry the resolved type.
     }
+    /* #2769: a `catch` binding is the panic's reason, a string; a `some(v)`
+     * binding is the matched optional's value. */
+    if (node->type == AST_CATCH_CLAUSE && binds_scoped_name(node, var_name)) {
+        static Type catch_reason_type = { .kind = TYPE_STRING };
+        return &catch_reason_type;
+    }
+    if (node->type == AST_MATCH_STATEMENT && node->child_count > 0 && node->children[0] &&
+        node->children[0]->node_type && node->children[0]->node_type->kind == TYPE_OPTIONAL &&
+        node->children[0]->node_type->element_type) {
+        for (int i = 1; i < node->child_count; i++) {
+            ASTNode* arm = node->children[i];
+            if (arm && arm->type == AST_MATCH_ARM && arm->child_count > 0 &&
+                binds_scoped_name(arm->children[0], var_name))
+                return node->children[0]->node_type->element_type;
+        }
+    }
     for (int i = 0; i < node->child_count; i++) {
         Type* t = decl_type_in_scope(node->children[i], var_name);
         if (t) return t;
@@ -4116,6 +4148,24 @@ void emit_closure_definitions(CodeGenerator* gen) {
             gen->captured_string_param_count = 0;
             gen->return_escaped_struct_vars = NULL;
             gen->return_escaped_struct_var_count = 0;
+            /* #2761: and so do its `*StringSeq` and `string?` locals, which
+             * the passes below track as a function's are. */
+            char** prev_seq = gen->seq_vars;
+            int prev_seq_count = gen->seq_var_count;
+            char** prev_escaped_seq = gen->escaped_seq_vars;
+            int prev_escaped_seq_count = gen->escaped_seq_var_count;
+            char** prev_opt = gen->opt_str_vars;
+            int prev_opt_count = gen->opt_str_var_count;
+            char** prev_escaped_opt = gen->escaped_opt_str_vars;
+            int prev_escaped_opt_count = gen->escaped_opt_str_var_count;
+            gen->seq_vars = NULL;
+            gen->seq_var_count = 0;
+            gen->escaped_seq_vars = NULL;
+            gen->escaped_seq_var_count = 0;
+            gen->opt_str_vars = NULL;
+            gen->opt_str_var_count = 0;
+            gen->escaped_opt_str_vars = NULL;
+            gen->escaped_opt_str_var_count = 0;
             /* Track the closure as the current function so
              * body-structural queries (current_fn_body_block /
              * body_assigns_var_from_heap) resolve a value identifier
@@ -4324,9 +4374,19 @@ void emit_closure_definitions(CodeGenerator* gen) {
                 else emit_struct_disown(gen, owning, cname, 1);
                 push_struct_destroy_defer(gen, cname, p->node_type, p->line, p->column);
             }
+            /* #2761: the `*StringSeq` and `string?` passes too, in the
+             * order a function body runs them (codegen_func.c): a local of
+             * either kind was declared plain, and its value leaked on
+             * every call. */
             hoist_heap_string_trackers(gen, body);
+            hoist_seq_trackers(gen, body);
+            hoist_opt_str_trackers(gen, body);
             mark_escaped_heap_string_vars(gen, body);
+            mark_escaped_seq_vars(gen, body);
+            mark_escaped_opt_str_vars(gen, body);
             push_heap_string_exit_free_defers(gen, body);
+            push_seq_exit_free_defers(gen, body);
+            push_opt_str_exit_free_defers(gen, body);
             for (int i = 0; i < body->child_count; i++) {
                 generate_statement(gen, body->children[i]);
             }
@@ -4348,7 +4408,16 @@ void emit_closure_definitions(CodeGenerator* gen) {
             // Free this closure body's heap-string set and restore the
             // enclosing scope's (see the matching reset above).
             clear_heap_string_vars(gen);
-    clear_seq_vars(gen);
+            clear_seq_vars(gen);
+            clear_opt_str_vars(gen);
+            gen->seq_vars = prev_seq;
+            gen->seq_var_count = prev_seq_count;
+            gen->escaped_seq_vars = prev_escaped_seq;
+            gen->escaped_seq_var_count = prev_escaped_seq_count;
+            gen->opt_str_vars = prev_opt;
+            gen->opt_str_var_count = prev_opt_count;
+            gen->escaped_opt_str_vars = prev_escaped_opt;
+            gen->escaped_opt_str_var_count = prev_escaped_opt_count;
             gen->heap_string_vars = prev_heap;
             gen->heap_string_var_count = prev_heap_count;
             gen->heap_string_var_try_depths = prev_heap_depths;
@@ -5100,6 +5169,43 @@ void generate_expression_as_elem_ptr(CodeGenerator* gen, ASTNode* expr) {
         return;
     }
     generate_expression(gen, expr);
+}
+
+/* #2723: an argument for a fixed-size array parameter (`a: int[4]`). Such a
+ * parameter is a value: the callee copies its caller's elements into an
+ * array of its own (#2516), through a plain `E _param_a[N]`. An array a
+ * `try` body writes has volatile elements (#2690), and passed as it stands
+ * it discarded the qualifier (an error under -Werror). The storage may be
+ * volatile when the array's root variable (`xs`, or `b` of `b.v`) is
+ * written in a `try` body of this function, whatever the depth: such an
+ * argument is copied into an array of the call's own, a compound literal
+ * that lives as long as the call's block, read byte by byte through a
+ * volatile pointer (_aether_array_arg_copy). Any other argument passes
+ * as before, since copying it again would only cost. */
+static int sized_array_arg_may_be_volatile(CodeGenerator* gen, ASTNode* arg) {
+    if (!arg || !type_is_sized_array(arg->node_type) || arg->node_type->array_size <= 0)
+        return 0;
+    for (ASTNode* e = arg; e; ) {
+        if (e->type == AST_IDENTIFIER) return e->value && is_try_clobbered_var(gen, e->value);
+        if ((e->type == AST_MEMBER_ACCESS || e->type == AST_ARRAY_ACCESS) && e->child_count > 0) {
+            e = e->children[0];
+            continue;
+        }
+        return 0;
+    }
+    return 0;
+}
+
+void generate_sized_array_argument(CodeGenerator* gen, ASTNode* arg, Type* param_type) {
+    if (!is_sized_array_param(param_type) || !sized_array_arg_may_be_volatile(gen, arg)) {
+        generate_expression(gen, arg);
+        return;
+    }
+    const char* et = get_c_type(param_type->element_type);
+    fprintf(gen->output, "((%s*)_aether_array_arg_copy((%s[%d]){0}, ", et, et,
+            param_type->array_size);
+    generate_expression(gen, arg);
+    fprintf(gen->output, ", sizeof(%s[%d])))", et, param_type->array_size);
 }
 
 void generate_expression_as_slice(CodeGenerator* gen, ASTNode* expr) {
@@ -7774,6 +7880,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                                 found_id, found_id);
                         generate_expression(gen, closure_arg);
                         fprintf(gen->output, ".env");
+                        int lit_pi = 0;   /* the literal's parameter the argument binds */
                         for (int i = 1; i < expr->child_count; i++) {
                             ASTNode* arg = expr->children[i];
                             // Skip trailing-DSL-block closures (handled via
@@ -7783,7 +7890,14 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                             if (arg && arg->type == AST_CLOSURE &&
                                 arg->value && strcmp(arg->value, "trailing") == 0) continue;
                             fprintf(gen->output, ", ");
-                            generate_expression(gen, arg);
+                            Type* lit_pt = NULL;
+                            for (int pj = 0, seen = 0; literal && pj < literal->child_count; pj++) {
+                                ASTNode* p = literal->children[pj];
+                                if (!p || p->type != AST_CLOSURE_PARAM) continue;
+                                if (seen++ == lit_pi) { lit_pt = p->node_type; break; }
+                            }
+                            lit_pi++;
+                            generate_sized_array_argument(gen, arg, lit_pt);   /* #2723 */
                         }
                         fprintf(gen->output, ")");
                         arg_drain_close(gen, expr, &ad);
@@ -7908,12 +8022,22 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                         fprintf(gen->output, ".fn)(");
                         generate_expression(gen, closure_arg);
                         fprintf(gen->output, ".env");
+                        int arg_pi = 0;
                         for (int i = 1; i < expr->child_count; i++) {
                             ASTNode* arg = expr->children[i];
                             if (arg && arg->type == AST_CLOSURE &&
                                 arg->value && strcmp(arg->value, "trailing") == 0) continue;
                             fprintf(gen->output, ", ");
-                            generate_expression(gen, arg);
+                            /* #2723: the parameter the cast above declares:
+                             * the signature's, else the argument's own. */
+                            Type* pt = (closure_sig && arg_pi < closure_sig->param_count &&
+                                        closure_sig->param_types &&
+                                        closure_sig->param_types[arg_pi] &&
+                                        closure_sig->param_types[arg_pi]->kind != TYPE_UNKNOWN)
+                                       ? closure_sig->param_types[arg_pi]
+                                       : (arg ? arg->node_type : NULL);
+                            arg_pi++;
+                            generate_sized_array_argument(gen, arg, pt);
                         }
                         fprintf(gen->output, ")");
                         arg_drain_close(gen, expr, &ad);
@@ -8649,7 +8773,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                              * gives its reference up (callee_consumes_string_arg). */
                             emit_string_field_handoff(gen, arg);
                         } else {
-                            generate_expression(gen, arg);
+                            generate_sized_array_argument(gen, arg, expected_type);   /* #2723 */
                         }
                         arg_printed++;
                     }

@@ -1,0 +1,138 @@
+// Regression (#2723): a fixed-size array a `try` body writes, passed to a
+// `T[N]` parameter, keeps what was stored before the panic and compiles
+// without a qualifier warning.
+//
+// An array a `try` body writes has volatile elements (#2690), so a store
+// before a panic survives the longjmp. A `T[N]` parameter is a value its
+// callee copies (#2516) through a plain `E _param_a[N]`, and the volatile
+// array passed as it stood discarded the qualifier: a warning, an error
+// under -Werror (tests/integration/try_written_volatile_c compiles this
+// program's C and fails on it). Such an argument is now copied into an
+// array of the call's own, read byte by byte through a volatile
+// pointer: a local array, an array field of a local struct, a string
+// array, a parameter array written in its function's own `try`, and an
+// argument of a closure's array parameter.
+//
+// The leak checks run where the heap count is exact (mem.heap_in_use_exact):
+// after a warm-up, some window of the same work grows by exactly 0
+// (mem.steady_growth), one window per shape.
+
+import std.mem
+import std.string
+
+extern exit(code: int)
+
+struct Box {
+    v: int[4]
+}
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL #2723: ${msg}")
+        exit(1)
+    }
+}
+
+sum4(a: int[4]) -> int {
+    return a[0] + a[1] + a[2] + a[3]
+}
+
+len2(a: string[2]) -> int {
+    return string.length(a[0]) + string.length(a[1])
+}
+
+// Its own parameter, written in its own `try`, passed on.
+again(a: int[4]) -> int {
+    try {
+        a[1] = 20
+        panic("again")
+    } catch e {
+    }
+    return sum4(a)
+}
+
+as_local() -> int {
+    xs = [1, 2, 3, 4]
+    try {
+        xs[0] = 10
+        panic("boom")
+    } catch e {
+    }
+    return sum4(xs)
+}
+
+as_field() -> int {
+    b = Box { v: [1, 2, 3, 4] }
+    try {
+        b.v[3] = 40
+        panic("boom")
+    } catch e {
+    }
+    return sum4(b.v)
+}
+
+as_strings(w: string) -> int {
+    names = ["a", "bb"]
+    try {
+        names[0] = string.concat(w, "cc")
+        panic("boom")
+    } catch e {
+    }
+    return len2(names)
+}
+
+as_param() -> int {
+    xs = [1, 2, 3, 4]
+    try {
+        xs[2] = 30
+        panic("boom")
+    } catch e {
+    }
+    return again(xs)
+}
+
+as_closure() -> int {
+    f = | q: int[4] | { return q[0] * 100 + q[3] }
+    xs = [1, 2, 3, 4]
+    try {
+        xs[3] = 9
+        panic("boom")
+    } catch e {
+    }
+    return call(f, xs)
+}
+
+measure(which: int, w: string) -> long {
+    return mem.steady_growth(|| {
+            k = 0
+            while k < 100 {
+                if which == 0 { as_local() }
+                if which == 1 { as_field() }
+                if which == 2 { as_strings(w) }
+                if which == 3 { as_param() }
+                if which == 4 { as_closure() }
+                k = k + 1
+            }
+        }, 5)
+}
+
+main() {
+    println("=== test_try_written_array_argument ===")
+    w = "w"
+    check(as_local() == 19, "a local array (${as_local()})")
+    check(as_field() == 46, "an array field (${as_field()})")
+    check(as_strings(w) == 5, "a string array (${as_strings(w)})")
+    check(as_param() == 55, "a parameter array passed on (${as_param()})")
+    check(as_closure() == 109, "a closure's array parameter (${as_closure()})")
+    if mem.heap_in_use_exact() {
+        names = ["a local array", "an array field", "a string array", "a parameter array",
+            "a closure's array parameter"]
+        i = 0
+        while i < 5 {
+            grown = measure(i, w)
+            check(grown == 0, "100 calls with ${names[i]} grew the heap by ${grown} bytes in every run")
+            i = i + 1
+        }
+    }
+    println("=== test_try_written_array_argument passed ===")
+}

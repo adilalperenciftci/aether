@@ -10,7 +10,8 @@
 # takes (`items[i].name = v`): each warned with -Wdiscarded-qualifiers. The
 # names a `try` writes were also carried from one receive arm, closure or
 # function to the next, so an unrelated local was made volatile and warned
-# the same way.
+# the same way. A fixed-size array a `try` body writes, passed to a `T[N]`
+# parameter, discarded the qualifier of its elements too (#2723).
 #
 # The regression programs for these cases are compiled to C here, each
 # both ways (the GCC path as the C compiler picks it, and the non-GCC one
@@ -44,7 +45,8 @@ fail() {
 
 INC="-I$ROOT -I$ROOT/runtime -I$ROOT/runtime/utils -I$ROOT/runtime/actors -I$ROOT/runtime/config -I$ROOT/runtime/scheduler -I$ROOT/runtime/memory -I$ROOT/std -I$ROOT/std/collections -I$ROOT/std/string"
 
-for name in test_try_written_param test_try_written_struct_local test_catch_binding_nested_try; do
+for name in test_try_written_param test_try_written_struct_local test_catch_binding_nested_try \
+            test_try_written_array_argument; do
     src="$ROOT/tests/regression/$name.ae"
     [ -f "$src" ] || fail "$src is missing"
     if ! "$AETHERC" "$src" "$tmp/$name.c" >"$tmp/aetherc.log" 2>&1; then
