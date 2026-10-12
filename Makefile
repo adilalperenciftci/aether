@@ -1,4 +1,4 @@
-.PHONY: all clean test compiler examples examples-run ci
+.PHONY: all clean test compiler examples examples-run ci ci-sweep
 
 # Pin the default goal to `all` regardless of rule order. Without this, the
 # first FILE-target rule defined becomes the default goal — and the generated
@@ -1397,8 +1397,11 @@ else
 test-ae: compiler ae stdlib
 	@echo "==================================="
 	@echo "  Running Aether Source Tests (.ae)"
-	@echo "  Parallel: $(NPROC) jobs"
+	@echo "  Parallel: $(NPROC) jobs$${AE_SWEEP_SHARD:+, shard $$AE_SWEEP_SHARD}"
 	@echo "==================================="
+	@# A bad AE_SWEEP_SHARD (#2757) must fail here: inside the pipelines below
+	@# it would leave the sweep with nothing to run, and nothing reads as a pass.
+	@sh tests/scripts/sweep_shard.sh < /dev/null
 	@tmpdir=$$(mktemp -d); \
 	root=$$(pwd); \
 	script="$$root/tests/scripts/run_ae_test.sh"; \
@@ -1406,7 +1409,7 @@ test-ae: compiler ae stdlib
 	if [ -n "$(AE_SWEEP_EXTRA_PRUNE)" ]; then \
 	  echo "  Extra prune list: $(AE_SWEEP_EXTRA_PRUNE) ($$(sed '/^#/d;/^$$/d' "$(AE_SWEEP_EXTRA_PRUNE)" | wc -l | tr -d ' ') patterns)"; \
 	fi; \
-	sh tests/scripts/ae_sweep_list.sh "$(AE_SWEEP_EXTRA_PRUNE)" | \
+	sh tests/scripts/ae_sweep_list.sh "$(AE_SWEEP_EXTRA_PRUNE)" | sh tests/scripts/sweep_shard.sh | \
 	xargs -P $(NPROC) -I{} sh "$$script" "{}" "$$tmpdir" "$$root"; \
 	sh_script="$$root/tests/scripts/run_ae_sh_dir.sh"; \
 	sh_nproc=$${SH_NPROC:-$(NPROC)}; \
@@ -1425,7 +1428,7 @@ test-ae: compiler ae stdlib
 	  done; \
 	  for d in $$(cat "$$tmpdir/shdirs.txt"); do \
 	    [ -f "$$d/DRIVERS_INDEPENDENT" ] || echo "$$d"; \
-	  done; } \
+	  done; } | sh tests/scripts/sweep_shard.sh \
 	    | xargs -P $$sh_nproc -I{} sh "$$sh_script" "{}" "$$tmpdir" "$$root"; \
 	passed=$$(ls "$$tmpdir"/PASS_* 2>/dev/null | wc -l | tr -d ' '); \
 	failed=$$(ls "$$tmpdir"/FAIL_* 2>/dev/null | wc -l | tr -d ' '); \
@@ -2925,10 +2928,21 @@ docker-ci-windows: docker-build-ci
 # instead of running until the job is lost (#2608). See run_stage.sh.
 CI_STAGE = sh tests/scripts/run_stage.sh
 
+# The test sweep of `make ci` alone, for the second shard of a CI leg split
+# in two (#2757): the toolchain built as `make ci` builds it, then test-ae
+# with AE_SWEEP_SHARD (which tests/scripts/sweep_shard.sh reads). The first
+# shard runs `make ci`, which runs everything else once.
+ci-sweep: clean
+	@$(MAKE) audio-cache-restore
+	@$(MAKE) -j$(NPROC) compiler EXTRA_CFLAGS=-Werror
+	@$(MAKE) -j$(NPROC) ae
+	@$(MAKE) -j$(NPROC) stdlib
+	@$(MAKE) test-ae
+
 ci: clean
 	@echo "==================================="
 	@echo "  Aether CI — Full Test Suite"
-	@echo "  Parallel: $(NPROC) jobs (build) / $(NPROC) (.ae tests) / $${SH_NPROC:-1} (shell tests)"
+	@echo "  Parallel: $(NPROC) jobs (build) / $(NPROC) (.ae tests) / $${SH_NPROC:-$(NPROC)} (shell tests)"
 	@echo "==================================="
 	@echo ""
 	@echo "[0/11] Restoring miniaudio object cache (if valid)..."

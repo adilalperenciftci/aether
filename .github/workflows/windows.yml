@@ -213,7 +213,7 @@ jobs:
         JOBS="$(nproc)" bash tests/scripts/windows_wine_sweep.sh
 
   build-mingw:
-    name: Build + Test (Windows / ${{ matrix.msystem }})
+    name: Build + Test (Windows / ${{ matrix.msystem }}) [${{ matrix.shard }}]
     runs-on: windows-latest
     # Gate on the fast lane (#1593): a cross-build or Wine failure skips
     # ~20 minutes of doomed MSYS2 compute. `needs:`-skipped jobs report as
@@ -226,6 +226,10 @@ jobs:
     # on MINGW64 for every PR and push, with Mesa, Vulkan and SQLite besides,
     # so a MINGW64 leg here ran the half-hour suite a second time for no
     # coverage (#2673).
+    #
+    # Two shards (#2757): the leg took about 25 min, most of it the test
+    # sweep on 4 cores. Shard 1 runs `make ci` with half the sweep; shard 2
+    # builds the same toolchain and runs the other half.
     strategy:
       fail-fast: false
       matrix:
@@ -233,6 +237,13 @@ jobs:
           - msystem: UCRT64
             prefix: mingw-w64-ucrt-x86_64
             root: ucrt64
+            shard: "1/2"
+            target: ci
+          - msystem: UCRT64
+            prefix: mingw-w64-ucrt-x86_64
+            root: ucrt64
+            shard: "2/2"
+            target: ci-sweep
 
     defaults:
       run:
@@ -290,18 +301,21 @@ jobs:
         export SSL_CERT_FILE="$(cygpath -w /${{ matrix.root }}/etc/ssl/certs/ca-bundle.crt)"
         echo "SSL_CERT_FILE=$SSL_CERT_FILE"
         ls -la "$(cygpath -u "$SSL_CERT_FILE")"
-        make ci
+        AE_SWEEP_SHARD="${{ matrix.shard }}" make ${{ matrix.target }}
 
+    # Shard 1 only (#2757): both shards build the same object and binaries,
+    # and a second save of one cache key or upload of one artifact name fails.
     - name: Save miniaudio object cache (merge to main, on miss only)
       if: >-
         github.event_name == 'push' && github.ref == 'refs/heads/main'
-        && steps.audio_cache.outputs.cache-hit != 'true'
+        && steps.audio_cache.outputs.cache-hit != 'true' && matrix.shard == '1/2'
       uses: actions/cache/save@v4
       with:
         path: .ci-cache
         key: audio-obj-windows-${{ matrix.root }}-${{ hashFiles('std/audio/miniaudio.h', 'std/audio/stb_vorbis.c', 'std/audio/aether_audio.c', 'std/audio/aether_audio.h') }}
 
     - name: Upload Windows binaries
+      if: matrix.shard == '1/2'
       uses: actions/upload-artifact@v4
       with:
         name: aether-windows-${{ matrix.root }}

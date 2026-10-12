@@ -107,11 +107,25 @@ jobs:
             harden: "0"
             install: ""
 
-          - name: macOS / Clang (x86_64)
+          # Two shards (#2757): the Intel runner took about 23 min, most of it
+          # the test sweep. Shard 1 runs `make ci` with half the sweep; shard
+          # 2 builds the same toolchain and runs the other half
+          # (tests/scripts/sweep_shard.sh).
+          - name: macOS / Clang (x86_64) [1/2]
             os: macos-15-intel
             cc: clang
             harden: "0"
             install: ""
+            shard: "1/2"
+            target: ci
+
+          - name: macOS / Clang (x86_64) [2/2]
+            os: macos-15-intel
+            cc: clang
+            harden: "0"
+            install: ""
+            shard: "2/2"
+            target: ci-sweep
 
     steps:
     - uses: actions/checkout@v4
@@ -143,7 +157,7 @@ jobs:
         key: audio-obj-${{ matrix.os }}-${{ matrix.cc }}-h${{ matrix.harden }}-${{ hashFiles('std/audio/miniaudio.h', 'std/audio/stb_vorbis.c', 'std/audio/aether_audio.c', 'std/audio/aether_audio.h') }}
 
     - name: Run full CI suite
-      run: HARDEN=${{ matrix.harden }} CC=${{ matrix.cc }} make ci
+      run: HARDEN=${{ matrix.harden }} CC=${{ matrix.cc }} AE_SWEEP_SHARD=${{ matrix.shard }} make ${{ matrix.target || 'ci' }}
 
     # The .ae corpus at -O0 (what `ae run` compiles at) against -O2 (what the
     # sweep in `make ci` compiles at), diffing stdout and exit code (#2488).
@@ -175,10 +189,12 @@ jobs:
         ./build/ae build /tmp/harden_probe.ae --extra /tmp/harden_copy.c -o /tmp/harden_probe
         ./build/ae checksec --require pie,nx,relro-full,canary,fortify /tmp/harden_probe
 
+    # Not from a second shard (#2757): it builds the same object as the
+    # first, and a second save of one key fails.
     - name: Save miniaudio object cache (merge to main, on miss only)
       if: >-
         github.event_name == 'push' && github.ref == 'refs/heads/main'
-        && steps.audio_cache.outputs.cache-hit != 'true'
+        && steps.audio_cache.outputs.cache-hit != 'true' && matrix.shard != '2/2'
       uses: actions/cache/save@v4
       with:
         path: .ci-cache
@@ -857,8 +873,19 @@ jobs:
   # .ae integration tests (includes REPL tests), examples.
   # ============================================================
   ci-windows:
-    name: Windows / GCC (MSYS2)
+    name: Windows / GCC (MSYS2) [${{ matrix.shard }}]
     runs-on: windows-latest
+    # Two shards (#2757): the leg took about 23 min, most of it the test
+    # sweep on 4 cores. Shard 1 runs `make ci` with half the sweep; shard 2
+    # builds the same toolchain and runs the other half.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - shard: "1/2"
+            target: ci
+          - shard: "2/2"
+            target: ci-sweep
 
     defaults:
       run:
@@ -949,7 +976,7 @@ jobs:
         export SSL_CERT_FILE="$(cygpath -w /mingw64/etc/ssl/certs/ca-bundle.crt)"
         echo "SSL_CERT_FILE=$SSL_CERT_FILE"
         ls -la "$(cygpath -u "$SSL_CERT_FILE")"
-        make ci
+        AE_SWEEP_SHARD="${{ matrix.shard }}" make ${{ matrix.target }}
 
   # ============================================================
   # Windows contrib series — beside `Windows / GCC (MSYS2)` rather than after
