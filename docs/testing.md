@@ -47,8 +47,14 @@ or let the runner discover it:
 ae test              # every test_*.ae / *_test.ae under tests/
 ae test calc_test.ae # a single file
 ae test path/to/dir  # a directory (its tests/ subdir if present, else itself)
+ae test a_test.ae b_test.ae path/to/dir  # several, in that order
 ae test --list       # print what would run, run nothing
 ```
+
+Every file and directory named runs, and the run fails if any test in any of
+them fails. A name that is neither a file nor a directory is an error that
+names it; it is never replaced by `tests/`. `ae test --help` lists the
+options.
 
 Discovery has no ceiling: every matching file runs, and the summary's total
 is that number. A `fixtures/` directory is not searched, because a fixture is

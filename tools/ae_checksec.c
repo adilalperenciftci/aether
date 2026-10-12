@@ -304,22 +304,26 @@ static void print_row(const char* label, const char* key, PropState s) {
     else        printf("  %-12s %s\n", label, prop_word(s));
 }
 
+void ae_checksec_usage(void) {
+    printf("Usage: ae checksec <binary> [--require pie,nx,relro-full,canary,fortify]\n"
+           "\n"
+           "Reports the hardening a linked artifact actually carries, read from its\n"
+           "own headers: ELF, Mach-O and PE. With --require, exits non-zero when a\n"
+           "listed property is missing, which is what keeps a mitigation from being\n"
+           "lost silently.\n"
+           "\n"
+           "Properties: pie, nx, relro (relro-full requires BIND_NOW), canary,\n"
+           "fortify, stripped. A property the artifact's format cannot express\n"
+           "reports n/a and satisfies --require, so one gate works everywhere.\n");
+}
+
 int cmd_checksec(int argc, char** argv) {
     const char* path = NULL;
     const char* require = NULL;
 
     for (int i = 0; i < argc; i++) {
         if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
-            printf("Usage: ae checksec <binary> [--require pie,nx,relro-full,canary,fortify]\n"
-                   "\n"
-                   "Reports the hardening a linked artifact actually carries, read from its\n"
-                   "own headers: ELF, Mach-O and PE. With --require, exits non-zero when a\n"
-                   "listed property is missing, which is what keeps a mitigation from being\n"
-                   "lost silently.\n"
-                   "\n"
-                   "Properties: pie, nx, relro (relro-full requires BIND_NOW), canary,\n"
-                   "fortify, stripped. A property the artifact's format cannot express\n"
-                   "reports n/a and satisfies --require, so one gate works everywhere.\n");
+            ae_checksec_usage();
             return 0;
         }
         if (strcmp(argv[i], "--require") == 0 && i + 1 < argc) {

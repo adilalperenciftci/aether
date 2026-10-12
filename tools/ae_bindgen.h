@@ -1,6 +1,8 @@
 #ifndef AE_BINDGEN_H
 #define AE_BINDGEN_H
 
+#include <stdio.h>
+
 // `ae bindgen consts` — import object-like C macros that expand to scalar
 // constants (integers, strings, floats) as Aether consts (#1245). `cc` is
 // the C compiler the driver already resolved, as a command line names it
@@ -8,5 +10,9 @@
 // pipeline stages are preprocessor-only, nothing is executed. Returns 0 on
 // success.
 int ae_bindgen_consts(const char* cc, int argc, char** argv);
+
+// The usage of `ae bindgen consts`, for --help (stdout) and for a call that
+// names no subcommand (stderr).
+void ae_bindgen_usage(FILE* out);
 
 #endif // AE_BINDGEN_H

@@ -19,13 +19,13 @@ secs="$1"
 name="$2"
 shift 2
 
-if command -v timeout >/dev/null 2>&1; then
-    TO="timeout -k 30 $secs"
-elif command -v gtimeout >/dev/null 2>&1; then
-    TO="gtimeout -k 30 $secs"
-else
-    TO=""
-fi
+# timeout(1) asks the stage to stop and kills it 30 s later. On Windows the
+# stage's process tree is ended at the bound through a job object instead,
+# with no signal, which there can reach unrelated processes (#2758, see
+# tests/lib/sweep_timeout.sh).
+root="$(cd "$(dirname "$0")/../.." && pwd)"
+. "$root/tests/lib/sweep_timeout.sh"
+sweep_timeout_bound TO "$root" "$secs" 30
 
 $TO "$@"
 rc=$?

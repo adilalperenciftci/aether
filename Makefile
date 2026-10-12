@@ -1841,11 +1841,12 @@ examples-run: examples
 	@echo "==================================="
 	@echo "  Running Aether Examples"
 	@echo "==================================="
-	@for bin in $$(find $(BUILD_DIR)/examples -type f ! -name '*.c' ! -name '*.o' | sort); do \
+	@. tests/lib/sweep_timeout.sh; sweep_timeout_bound TO "$$(pwd)" 5; \
+	for bin in $$(find $(BUILD_DIR)/examples -type f ! -name '*.c' ! -name '*.o' | sort); do \
 		test -x "$$bin" || continue; \
 		name=$$(echo $$bin | sed "s|$(BUILD_DIR)/examples/||"); \
 		echo "--- $$name ---"; \
-		timeout 5 $$bin 2>&1 || true; \
+		$$TO $$bin 2>&1 || true; \
 		echo ""; \
 	done
 
@@ -3002,6 +3003,15 @@ ci: clean
 .PHONY: test-differential
 test-differential: ae
 	@sh tests/differential/run_differential.sh
+
+# The C a program gets when the C compiler is not GCC-compatible
+# (AETHER_GCC_COMPAT 0, which is what MSVC compiles): strict C11 under gcc,
+# and under cl.exe too when it is on PATH (#2725). CI runs the gcc half on the
+# Linux / GCC leg and the cl half in windows.yml's MSVC job. MSVC_COMPAT_CC
+# (gcc, cl or all) picks; see the script.
+.PHONY: test-msvc-compat
+test-msvc-compat: compiler
+	@bash tests/compiler/test_msvc_compat.sh
 
 # The .ae corpus at -O0 against -O2 (#2488). Builds every program `test-ae`
 # builds (the list is tests/scripts/ae_sweep_list.sh, shared with it) at -O2

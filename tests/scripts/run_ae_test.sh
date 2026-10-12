@@ -33,21 +33,16 @@ f="$1"
 tmpdir="$2"
 root="$3"
 
-# Portable per-test timeout: GNU coreutils `timeout` on Linux/MSYS2,
-# `gtimeout` on macOS (coreutils via brew); empty when neither exists
-# (macOS without coreutils) so the test still runs, just unbounded.
+# Per-test time limit: GNU coreutils `timeout`, or `gtimeout` on macOS
+# (coreutils via brew), or none when neither exists (macOS without coreutils)
+# so the test still runs, just unbounded. On Windows it is a job object that
+# ends the test's whole process tree without a signal, since a signal there
+# can reach unrelated processes (#2758, tests/lib/sweep_timeout.sh).
 # The build gets a bound of its own (#2608): it ran unbounded, so a build that
 # hung held its sweep slot, and the sweep, for as long as the job lasted.
-if command -v timeout >/dev/null 2>&1; then
-    TO="timeout ${AE_TEST_TIMEOUT:-120}"
-    BTO="timeout ${AE_TEST_BUILD_TIMEOUT:-600}"
-elif command -v gtimeout >/dev/null 2>&1; then
-    TO="gtimeout ${AE_TEST_TIMEOUT:-120}"
-    BTO="gtimeout ${AE_TEST_BUILD_TIMEOUT:-600}"
-else
-    TO=""
-    BTO=""
-fi
+. "$root/tests/lib/sweep_timeout.sh"
+sweep_timeout_bound TO "$root" "${AE_TEST_TIMEOUT:-120}"
+sweep_timeout_bound BTO "$root" "${AE_TEST_BUILD_TIMEOUT:-600}"
 
 name=$(echo "$f" | sed "s|tests/||;s|/|_|g;s|\.ae$||")
 dir=$(dirname "$f")

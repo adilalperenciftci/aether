@@ -147,6 +147,13 @@ path may contain spaces (`--extra "my dir/shim.c"`).
 | **Good for** | C helpers your program always needs | Renderer backends, platform variants |
 | **Works with** | `ae build` and `ae run` | `ae build` and `ae run` |
 
+### `ae build --help`
+
+`ae build --help` (or `-h`) prints every option below and builds nothing,
+inside a project too; every other command answers `--help` the same way. An
+option `ae build` does not know is an error rather than ignored, so a typo
+never builds something other than what was asked for.
+
 ### `--quick` for fast iteration
 
 By default, `ae build` runs the C compiler with `-O2` to match release-quality codegen. For tight edit/build/test loops where binary speed isn't critical, pass `--quick` to drop to `-O0 -g`:

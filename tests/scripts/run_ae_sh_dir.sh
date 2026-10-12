@@ -34,15 +34,12 @@ else
     scripts="$(find "$dir" -maxdepth 1 -name "test_*.sh" 2>/dev/null | sort)"
 fi
 
-# Portable per-test timeout, same shape as run_ae_test.sh. Shell tests get a
-# longer default than .ae tests: they drive whole toolchain round-trips.
-if command -v timeout >/dev/null 2>&1; then
-    TO="timeout ${AE_SH_TEST_TIMEOUT:-420}"
-elif command -v gtimeout >/dev/null 2>&1; then
-    TO="gtimeout ${AE_SH_TEST_TIMEOUT:-420}"
-else
-    TO=""
-fi
+# Per-test time limit, the same as run_ae_test.sh's (on Windows a job object
+# around the test, never a signal: #2758, tests/lib/sweep_timeout.sh). Shell
+# tests get a longer default than .ae tests: they drive whole toolchain
+# round-trips.
+. "$root/tests/lib/sweep_timeout.sh"
+sweep_timeout_bound TO "$root" "${AE_SH_TEST_TIMEOUT:-420}"
 
 # Each test's wall time, for the report at the end of the sweep (#2673).
 . "$root/tests/scripts/sweep_clock.sh"

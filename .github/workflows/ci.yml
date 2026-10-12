@@ -170,6 +170,15 @@ jobs:
       timeout-minutes: 40
       run: HARDEN=${{ matrix.harden }} CC=${{ matrix.cc }} make test-ae-opt-diff
 
+    # The C a program gets on the non-GCC path (AETHER_GCC_COMPAT 0, what MSVC
+    # compiles) as strict C11 (#2725). windows.yml's MSVC job compiles the
+    # same programs with cl.exe. The script runs on the aetherc `make ci`
+    # built, so nothing is rebuilt.
+    - name: Generated C without GCC extensions (strict C11)
+      if: matrix.name == 'Linux / GCC'
+      timeout-minutes: 5
+      run: MSVC_COMPAT_CC=gcc bash tests/compiler/test_msvc_compat.sh
+
     # The hardened leg must produce a hardened toolchain, and a program built
     # by it must carry the mitigations too. Before this, `make HARDEN=1` after
     # an ordinary build recompiled nothing and relinked the same unhardened

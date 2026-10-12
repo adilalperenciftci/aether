@@ -1,0 +1,32 @@
+// What the Windows ROOT system store gives both HTTPS clients (#2675), for
+// test_https_windows_trust.sh: the PEM text std/net/aether_http.c makes of it,
+// how many CERTIFICATE blocks that holds, and how many of them the pure
+// client's certificate parser accepts as trust anchors.
+//
+// Prints "STORE <blocks> <parsed>". Off Windows the text is empty: "STORE 0 0".
+
+import std.string
+import std.list
+import std.cryptography.tls13_cert
+
+extern aether_tls_windows_store_pem() -> string @heap
+
+main() {
+    pem = aether_tls_windows_store_pem()
+    blocks = 0
+    if pem != null {
+        n = string.length(pem)
+        marker = "-----BEGIN CERTIFICATE-----"
+        pos = string.index_of_from(pem, marker, 0)
+        while pos >= 0 {
+            blocks = blocks + 1
+            pos = string.index_of_from(pem, marker, pos + 1)
+            if pos >= n { pos = -1 }
+        }
+    }
+    anchors = list_new()
+    parsed = 0
+    if pem != null { parsed = tls13_cert.trust_store_add_pem(anchors, pem) }
+    tls13_cert.free_anchors(anchors)
+    println("STORE ${blocks} ${parsed}")
+}

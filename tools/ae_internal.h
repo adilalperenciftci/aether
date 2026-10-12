@@ -120,6 +120,8 @@ bool ae_build_size_mode(void);
 /* `ae checksec` (#1646): report the hardening a linked artifact carries.
  * Implemented in tools/ae_checksec.c. */
 int cmd_checksec(int argc, char** argv);
+/* Its usage, for `ae checksec --help` (#2753). */
+void ae_checksec_usage(void);
 const char* get_home_dir(void);
 bool get_exe_path(char* buf, size_t size);
 bool dir_exists(const char* path);
@@ -140,6 +142,8 @@ void build_gcc_cmd(char* cmd, size_t size,
 
 /* ae_version.c — version manager (list/install/switch releases). */
 int cmd_version(int argc, char** argv);
+/* The list of `ae version` subcommands, for `ae version` and its --help. */
+void ae_version_subcommands(FILE* out);
 /* Download a URL to a path / unpack an archive into a directory. Both
  * shell out to whatever the platform has (curl or wget; tar or
  * Expand-Archive) and return 0 on success. Shared with `ae add`'s

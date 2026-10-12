@@ -338,6 +338,26 @@ helpers end the program itself there, and send a signal to a job elsewhere.
 is a signal to a process that is no job of the script marks that line
 `kill-ok: <why>`.
 
+### Test time limits
+
+Every test the sweep runs has a time limit: 120 s for a `.ae` test
+(`AE_TEST_TIMEOUT`) and 600 s for its build (`AE_TEST_BUILD_TIMEOUT`), 420 s
+for a shell driver (`AE_SH_TEST_TIMEOUT`), and each `make ci` stage its own
+(tests/scripts/run_stage.sh). A test past its limit is ended with everything
+it started and fails as `[TIMEOUT]`. The runners take the limit from
+`tests/lib/sweep_timeout.sh`: `timeout(1)` (or `gtimeout`) on Linux and macOS,
+and on Windows a job object around the test, which a native watchdog
+(`tests/lib/sweep_watchdog.c`, compiled into `build/` on first use) ends with
+TerminateJobObject. Windows never gets `timeout(1)`: its signal to a hung
+test's native programs would make the MSYS2 runtime signal unrelated
+processes, as above (#2758). A runner script of your own does the same:
+
+```sh
+. "$root/tests/lib/sweep_timeout.sh"
+sweep_timeout_bound TO "$root" 60
+$TO ./build/my_check   # exits 124 when the limit ends it
+```
+
 ## Pull Request Requirements
 
 ### Docs-only PRs: skip CI with `[skip actions]`

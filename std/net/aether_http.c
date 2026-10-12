@@ -150,6 +150,10 @@ void http_client_pool_size_for_proxy(void) {}
 #ifdef _WIN32
     #include <winsock2.h>
     #include <ws2tcpip.h>
+    /* The ROOT certificate store (#2675). Before the OpenSSL headers, which
+     * undefine the names wincrypt.h shares with them (X509_NAME and others);
+     * aether_thread.h's WIN32_LEAN_AND_MEAN keeps windows.h from bringing it. */
+    #include <wincrypt.h>
     #ifdef _MSC_VER
         #pragma comment(lib, "ws2_32.lib")
     #endif
@@ -396,6 +400,165 @@ int parse_url_alloc(const char* url, char* host, size_t host_size,
 }
 
 // -----------------------------------------------------------------
+// Windows trust anchors, the same for both HTTPS clients (#2675)
+// -----------------------------------------------------------------
+//
+// Neither client read the Windows certificate store, so a program copied to a
+// machine without MSYS2 or Git for Windows could make no HTTPS request at all,
+// and the two looked for different bundle files (OpenSSL's list here, the
+// pure-Aether client's in std.cryptography.tls13_client), so one could work on
+// a machine where the other failed. Both now trust, unless SSL_CERT_FILE or
+// SSL_CERT_DIR names the store, every certificate in the system ROOT store
+// (what Python's ssl module loads on Windows) together with the first bundle
+// file of the one list below. The bundle joins the store rather than standing
+// in for it: Windows adds a root to the store on demand, the first time
+// CryptoAPI needs it, so a root a server chains to can be missing from the
+// store of a machine that has never met that server.
+//
+// The tls13_client module reaches these through extern declarations, which is
+// why they live here, beside the OpenSSL code that uses them too, and why
+// they exist (returning nothing) on every platform.
+
+#ifdef _WIN32
+/* wincrypt.h is included with winsock2.h at the top, before the OpenSSL
+ * headers, which undefine the names it shares with them (X509_NAME...). */
+
+/* The first file of the bundle list that exists, in `out`; "" when none
+ * does. In order: the bundle the release archive ships beside the program
+ * (<root>\bin\prog.exe -> <root>\share\ssl\ca-bundle.crt, or the program's own
+ * directory when it is not in a bin\), MSYS2's ca-certificates for MINGW64
+ * and UCRT64 under both names it has used, and Git for Windows'. */
+static const char* windows_ca_bundle(char* out, size_t cap) {
+    static const char* fixed[] = {
+        "C:\\msys64\\mingw64\\etc\\ssl\\certs\\ca-bundle.crt",
+        "C:\\msys64\\ucrt64\\etc\\ssl\\certs\\ca-bundle.crt",
+        "C:\\msys64\\mingw64\\etc\\ssl\\cert.pem",
+        "C:\\msys64\\ucrt64\\etc\\ssl\\cert.pem",
+        "C:\\Program Files\\Git\\mingw64\\etc\\ssl\\certs\\ca-bundle.crt",
+        NULL
+    };
+    char exe_path[MAX_PATH];
+    DWORD n = GetModuleFileNameA(NULL, exe_path, sizeof(exe_path));
+    if (n > 0 && n < sizeof(exe_path)) {
+        char* p = strrchr(exe_path, '\\');           // ...\bin\prog.exe -> ...\bin
+        if (p) {
+            *p = '\0';
+            char* q = strrchr(exe_path, '\\');        // ...\bin -> ...
+            if (q && _stricmp(q, "\\bin") == 0) *q = '\0';
+        }
+        snprintf(out, cap, "%s\\share\\ssl\\ca-bundle.crt", exe_path);
+        DWORD a = GetFileAttributesA(out);
+        if (a != INVALID_FILE_ATTRIBUTES && !(a & FILE_ATTRIBUTE_DIRECTORY)) return out;
+    }
+    for (int i = 0; fixed[i]; i++) {
+        DWORD a = GetFileAttributesA(fixed[i]);
+        if (a != INVALID_FILE_ATTRIBUTES && !(a & FILE_ATTRIBUTE_DIRECTORY)) {
+            snprintf(out, cap, "%s", fixed[i]);
+            return out;
+        }
+    }
+    if (cap) out[0] = '\0';
+    return out;
+}
+
+/* Calls `each` with the DER of every certificate in the ROOT system store of
+ * the current user, which includes the machine's. Returns how many. */
+static int windows_root_store_each(void (*each)(const unsigned char* der, size_t len, void* arg),
+                                   void* arg) {
+    HCERTSTORE store = CertOpenSystemStoreW(0, L"ROOT");
+    if (!store) return 0;
+    int n = 0;
+    PCCERT_CONTEXT c = NULL;
+    while ((c = CertEnumCertificatesInStore(store, c)) != NULL) {
+        if ((c->dwCertEncodingType & X509_ASN_ENCODING) && c->cbCertEncoded > 0) {
+            each(c->pbCertEncoded, (size_t)c->cbCertEncoded, arg);
+            n++;
+        }
+    }
+    CertCloseStore(store, 0);
+    return n;
+}
+
+typedef struct { char* buf; size_t len, cap; int oom; } PemOut;
+
+static void pem_out_append(PemOut* o, const char* s, size_t n) {
+    if (o->oom) return;
+    if (o->len + n + 1 > o->cap) {
+        size_t want = o->cap ? o->cap * 2 : 65536;
+        while (want < o->len + n + 1) want *= 2;
+        char* grown = (char*)realloc(o->buf, want);
+        if (!grown) { o->oom = 1; return; }
+        o->buf = grown;
+        o->cap = want;
+    }
+    memcpy(o->buf + o->len, s, n);
+    o->len += n;
+    o->buf[o->len] = '\0';
+}
+
+/* One certificate as a PEM block, base64 in lines of 64. */
+static void pem_out_cert(const unsigned char* der, size_t len, void* arg) {
+    static const char b64[] =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    PemOut* o = (PemOut*)arg;
+    pem_out_append(o, "-----BEGIN CERTIFICATE-----\n", 28);
+    char line[65];
+    size_t col = 0;
+    for (size_t i = 0; i < len; i += 3) {
+        unsigned v = (unsigned)der[i] << 16;
+        if (i + 1 < len) v |= (unsigned)der[i + 1] << 8;
+        if (i + 2 < len) v |= der[i + 2];
+        line[col++] = b64[(v >> 18) & 63];
+        line[col++] = b64[(v >> 12) & 63];
+        line[col++] = i + 1 < len ? b64[(v >> 6) & 63] : '=';
+        line[col++] = i + 2 < len ? b64[v & 63] : '=';
+        if (col == 64) {
+            line[col++] = '\n';
+            pem_out_append(o, line, col);
+            col = 0;
+        }
+    }
+    if (col) {
+        line[col++] = '\n';
+        pem_out_append(o, line, col);
+    }
+    pem_out_append(o, "-----END CERTIFICATE-----\n", 26);
+}
+#endif  // _WIN32
+
+/* Every certificate of the Windows ROOT system store as PEM text, a fresh
+ * malloc the caller frees; "" when there is none, and on any other platform.
+ * NULL only when out of memory. */
+char* aether_tls_windows_store_pem(void) {
+#ifdef _WIN32
+    PemOut o = { NULL, 0, 0, 0 };
+    windows_root_store_each(pem_out_cert, &o);
+    if (o.oom) { free(o.buf); return NULL; }
+    if (o.buf) return o.buf;
+#endif
+    char* empty = (char*)malloc(1);
+    if (empty) empty[0] = '\0';
+    return empty;
+}
+
+/* The first bundle file of the list above that exists, a fresh malloc the
+ * caller frees; "" when none does, and on any other platform. NULL only when
+ * out of memory. */
+char* aether_tls_windows_bundle(void) {
+#ifdef _WIN32
+    char path[MAX_PATH + 64];
+    windows_ca_bundle(path, sizeof(path));
+    size_t n = strlen(path);
+#else
+    const char* path = "";
+    size_t n = 0;
+#endif
+    char* copy = (char*)malloc(n + 1);
+    if (copy) memcpy(copy, path, n + 1);
+    return copy;
+}
+
+// -----------------------------------------------------------------
 // OpenSSL context: lazy init, shared across all HTTPS calls
 // -----------------------------------------------------------------
 
@@ -404,58 +567,43 @@ int parse_url_alloc(const char* url, char* host, size_t host_size,
 static _Atomic(SSL_CTX*) g_ssl_ctx;
 
 #ifdef _WIN32
-// Probe well-known CA-bundle locations on Windows in priority order and
-// load the first one that exists. Linux + macOS have a system trust
-// store that OpenSSL's compiled-in default paths point at; Windows
-// MSYS2 builds keep theirs at MINGW_PREFIX/etc/ssl/certs/ca-bundle.crt
-// (from the `mingw-w64-x86_64-ca-certificates` package), and the Aether
-// release archive includes a bundle next to ae.exe at
-// <root>/share/ssl/ca-bundle.crt. Without a trust anchor every HTTPS
-// request fails with "certificate verify failed".
+/* One certificate of the ROOT store into the context's X509_STORE. One that
+ * OpenSSL cannot parse, or that is there already, is passed over. */
+static void x509_store_add_der(const unsigned char* der, size_t len, void* arg) {
+    const unsigned char* p = der;
+    X509* x = d2i_X509(NULL, &p, (long)len);
+    if (!x) return;
+    X509_STORE_add_cert((X509_STORE*)arg, x);
+    X509_free(x);
+}
+
+// The trust anchors on Windows, which OpenSSL has no useful default for there,
+// chosen as the pure-Aether client chooses them (see "Windows trust anchors"
+// above): when SSL_CERT_FILE or SSL_CERT_DIR is set, what they name and
+// nothing else; otherwise every certificate of the ROOT system store and the
+// first bundle file of the shared list. Returns 1 when anything was loaded.
 //
-// Returns 1 if a bundle was successfully loaded, 0 if no probe matched.
-static int load_windows_ca_bundle(SSL_CTX* ctx) {
-    // 1. SSL_CERT_FILE env var — also honored by SSL_CTX_set_default_
-    //    verify_paths, but try it first so the load succeeds even when
-    //    the default paths weren't compiled in.
-    const char* env = getenv("SSL_CERT_FILE");
-    if (env && env[0] && SSL_CTX_load_verify_locations(ctx, env, NULL) == 1) {
-        return 1;
-    }
-
-    // 2. Bundle shipped alongside ae.exe in the release archive
-    //    (<root>/bin/ae.exe → <root>/share/ssl/ca-bundle.crt).
-    char exe_path[MAX_PATH];
-    DWORD n = GetModuleFileNameA(NULL, exe_path, sizeof(exe_path));
-    if (n > 0 && n < sizeof(exe_path)) {
-        char* p = strrchr(exe_path, '\\');           // …\bin\ae.exe → …\bin
-        if (p) {
-            *p = '\0';
-            char* q = strrchr(exe_path, '\\');        // …\bin → …
-            if (q && _stricmp(q, "\\bin") == 0) *q = '\0';
-        }
+// An SSL_CERT_FILE that did not load used to fall through to the bundle
+// files, while the pure client failed closed on it; now both fail closed.
+static int load_windows_trust(SSL_CTX* ctx) {
+    const char* file = getenv("SSL_CERT_FILE");
+    const char* dir = getenv("SSL_CERT_DIR");
+    if (file && !file[0]) file = NULL;
+    if (dir && !dir[0]) dir = NULL;
+    int loaded = 0;
+    if (file || dir) {
+        if (file && SSL_CTX_load_verify_locations(ctx, file, NULL) == 1) loaded = 1;
+        if (dir && SSL_CTX_load_verify_locations(ctx, NULL, dir) == 1) loaded = 1;
+    } else {
+        loaded = windows_root_store_each(x509_store_add_der, SSL_CTX_get_cert_store(ctx)) > 0;
         char bundle[MAX_PATH + 64];
-        snprintf(bundle, sizeof(bundle),
-                 "%s\\share\\ssl\\ca-bundle.crt", exe_path);
-        if (SSL_CTX_load_verify_locations(ctx, bundle, NULL) == 1) {
-            return 1;
-        }
+        if (windows_ca_bundle(bundle, sizeof(bundle))[0] &&
+            SSL_CTX_load_verify_locations(ctx, bundle, NULL) == 1) loaded = 1;
     }
-
-    // 3. MSYS2 well-known paths (mingw-w64-x86_64-ca-certificates package).
-    static const char* candidates[] = {
-        "C:\\msys64\\mingw64\\etc\\ssl\\certs\\ca-bundle.crt",
-        "C:\\msys64\\ucrt64\\etc\\ssl\\certs\\ca-bundle.crt",
-        "C:\\msys64\\mingw64\\etc\\ssl\\cert.pem",
-        "C:\\msys64\\ucrt64\\etc\\ssl\\cert.pem",
-        NULL
-    };
-    for (int i = 0; candidates[i]; i++) {
-        if (SSL_CTX_load_verify_locations(ctx, candidates[i], NULL) == 1) {
-            return 1;
-        }
-    }
-    return 0;
+    /* What failed to load (a duplicate, a missing file) is no error of any
+     * request, and must not be reported as the cause of one later. */
+    ERR_clear_error();
+    return loaded;
 }
 #endif  // _WIN32
 
@@ -465,9 +613,9 @@ static int load_windows_ca_bundle(SSL_CTX* ctx) {
 //
 // Not static: the WebSocket client in aether_http_server.c dials wss:// with
 // the same trust setup. Sharing this rather than building a second client CTX
-// there keeps one place where the trust store is decided -- the Windows CA
-// probing below was hard enough to get right once (#1107, #1110) that a
-// second copy would be a liability. The caller must NOT free it; the CTX is
+// there keeps one place where the trust store is decided -- the Windows trust
+// anchors above were hard enough to get right once (#1107, #1110, #2675) that
+// a second copy would be a liability. The caller must NOT free it; the CTX is
 // process-wide and outlives any one connection.
 static SSL_CTX* get_ssl_ctx(void);
 SSL_CTX* aether_http_client_ssl_ctx(void) { return get_ssl_ctx(); }
@@ -482,11 +630,11 @@ static SSL_CTX* get_ssl_ctx(void) {
     SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER, NULL);
 
 #ifdef _WIN32
-    // Windows OpenSSL builds typically have no compiled-in CA path — probe
-    // SSL_CERT_FILE / the shipped bundle / MSYS2 paths first; only fall
-    // through to the default-paths call (which is effectively a no-op on
-    // Win32) if every probe missed.
-    if (!load_windows_ca_bundle(ctx)) {
+    // Windows OpenSSL builds typically have no compiled-in CA path: the
+    // anchors are the ones load_windows_trust finds. Only when it finds none
+    // (an empty store and no bundle file) does the default-paths call get a
+    // turn, for a build whose compiled-in OPENSSLDIR does hold certificates.
+    if (!load_windows_trust(ctx)) {
         SSL_CTX_set_default_verify_paths(ctx);
     }
 #else

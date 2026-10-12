@@ -327,7 +327,8 @@ jobs:
   # ============================================================
   # MSVC compatibility check — ensure headers compile under cl.exe
   # No full build yet (runtime needs Win32 threading wiring), but
-  # we verify that all public headers pass the MSVC parser.
+  # we verify that all public headers pass the MSVC parser, and that
+  # the C aetherc writes for a few programs compiles under cl.exe.
   # ============================================================
   headers-msvc:
     name: Header compatibility (MSVC)
@@ -371,3 +372,18 @@ jobs:
            && echo "aether_thread.h (types only) OK" || exit 1
 
         del _probe.c _probe.obj 2>nul
+
+    # The C a program gets on the non-GCC path (AETHER_GCC_COMPAT 0), which
+    # is the path cl.exe takes, compiled by cl.exe itself (#2725). Nothing ran
+    # tests/compiler/test_msvc_compat.sh before. The aetherc that writes the C
+    # is the one the windows-cross job built; the script runs under Git Bash,
+    # with cl.exe on PATH from msvc-dev-cmd.
+    - name: Download the cross-built aetherc
+      uses: actions/download-artifact@v4
+      with:
+        name: aether-windows-cross-x86_64
+        path: build/cross
+
+    - name: Check generated C compiles under cl.exe
+      shell: bash
+      run: AETHERC=build/cross/aetherc.exe MSVC_COMPAT_CC=cl bash tests/compiler/test_msvc_compat.sh
