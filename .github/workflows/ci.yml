@@ -110,26 +110,29 @@ jobs:
             harden: "0"
             install: ""
 
-          # Two jobs (#2757): the Intel runner took 13 to 32 min, most of it
-          # the test sweep. [1/2] runs `make ci` with a third of the sweep,
-          # [2/2] builds the same toolchain and runs the other two thirds:
-          # `make ci`'s stages around the sweep cost [1/2] about 5 min more,
-          # so an even split left it that far behind (#2772,
-          # tests/scripts/sweep_shard.sh).
+          # Two jobs (#2757, #2772): the Intel runner took 13 to 32 min, most
+          # of it the test sweep. Both run `make ci-sweep`, half the sweep
+          # each (tests/scripts/sweep_shard.sh), and [1/2] the C unit tests
+          # too (CI_SWEEP_UNIT). The rest of `make ci` (the doc and suite
+          # checks, examples, the install and archive smoke tests) does not
+          # depend on the architecture, and the ARM64 leg runs it on macOS.
+          # A third Intel job would not help: GitHub runs five macOS jobs at
+          # a time, and a push already starts seven.
           - name: macOS / Clang (x86_64) [1/2]
             os: macos-15-intel
             cc: clang
             harden: "0"
             install: ""
-            shard: "1/3"
-            target: ci
+            shard: "1/2"
+            target: ci-sweep
+            unit: "1"
 
           - name: macOS / Clang (x86_64) [2/2]
             os: macos-15-intel
             cc: clang
             harden: "0"
             install: ""
-            shard: "2,3/3"
+            shard: "2/2"
             target: ci-sweep
 
     steps:
@@ -162,7 +165,7 @@ jobs:
         key: audio-obj-${{ matrix.os }}-${{ matrix.cc }}-h${{ matrix.harden }}-${{ hashFiles('std/audio/miniaudio.h', 'std/audio/stb_vorbis.c', 'std/audio/aether_audio.c', 'std/audio/aether_audio.h') }}
 
     - name: Run full CI suite
-      run: HARDEN=${{ matrix.harden }} CC=${{ matrix.cc }} AE_SWEEP_SHARD=${{ matrix.shard }} make ${{ matrix.target || 'ci' }}
+      run: HARDEN=${{ matrix.harden }} CC=${{ matrix.cc }} AE_SWEEP_SHARD=${{ matrix.shard }} CI_SWEEP_UNIT=${{ matrix.unit }} make ${{ matrix.target || 'ci' }}
 
     # The .ae corpus at -O0 (what `ae run` compiles at) against -O2 (what the
     # sweep in `make ci` compiles at), diffing stdout and exit code (#2488).
@@ -203,12 +206,14 @@ jobs:
         ./build/ae build /tmp/harden_probe.ae --extra /tmp/harden_copy.c -o /tmp/harden_probe
         ./build/ae checksec --require pie,nx,relro-full,canary,fortify /tmp/harden_probe
 
-    # Not from the sweep-only job (#2757): it builds the same object as the
-    # `make ci` one, and a second save of one key fails.
+    # One job per leg saves (#2757): the jobs of a split leg build the same
+    # object, and a second save of one key fails. That is the `make ci` job,
+    # or on a leg of two sweeps the one that runs the unit tests.
     - name: Save miniaudio object cache (merge to main, on miss only)
       if: >-
         github.event_name == 'push' && github.ref == 'refs/heads/main'
-        && steps.audio_cache.outputs.cache-hit != 'true' && matrix.target != 'ci-sweep'
+        && steps.audio_cache.outputs.cache-hit != 'true'
+        && (matrix.target != 'ci-sweep' || matrix.unit == '1')
       uses: actions/cache/save@v4
       with:
         path: .ci-cache

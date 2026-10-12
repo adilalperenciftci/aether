@@ -38,6 +38,9 @@ esac
 unset SSL_CERT_FILE SSL_CERT_DIR AETHER_PURE_TLS || :
 
 TMP="$(mktemp -d)"
+# Certificates carry the extensions asked for, under any openssl (#2776).
+. "$ROOT/tests/lib/test_openssl_conf.sh"
+test_openssl_conf "$TMP"
 PIDS=""
 cleanup() {
     for p in $PIDS; do stop_server "$p"; done
@@ -116,7 +119,12 @@ both() {
         case "$want:$OUT" in
             "ok:STATUS 200 BODY trust-ok"*) echo "    ok: $case_name ($stack)" ;;
             fail:ERR:*) echo "    ok: $case_name ($stack refused)" ;;
-            *) echo "    got: $OUT"; fail "$case_name on the $stack stack: expected $want" ;;
+            *) echo "    got: $OUT"
+               # What the client was given, so a failure says what the CA held.
+               echo "    openssl: $(openssl version 2>&1)"
+               openssl x509 -in "$TMP/ca.pem" -noout -text 2>/dev/null \
+                   | grep -E "X509v3 |CA:" | sed "s/^ */    ca: /"
+               fail "$case_name on the $stack stack: expected $want" ;;
         esac
     done
 }

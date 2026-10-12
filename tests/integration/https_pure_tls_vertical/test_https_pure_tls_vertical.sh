@@ -33,6 +33,9 @@ AE="$ROOT/build/ae"
 command -v openssl >/dev/null 2>&1 || { echo "  [SKIP] https_pure_tls_vertical: no openssl to make a cert"; exit 0; }
 
 TMP="$(mktemp -d)"
+# Certificates carry the extensions asked for, under any openssl (#2776).
+. "$ROOT/tests/lib/test_openssl_conf.sh"
+test_openssl_conf "$TMP"
 SRV_PID=""
 cleanup() {
     stop_server "$SRV_PID"

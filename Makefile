@@ -2929,15 +2929,20 @@ docker-ci-windows: docker-build-ci
 # instead of running until the job is lost (#2608). See run_stage.sh.
 CI_STAGE = sh tests/scripts/run_stage.sh
 
-# The test sweep of `make ci` alone, for the second shard of a CI leg split
-# in two (#2757): the toolchain built as `make ci` builds it, then test-ae
-# with AE_SWEEP_SHARD (which tests/scripts/sweep_shard.sh reads). The first
-# shard runs `make ci`, which runs everything else once.
+# The test sweep of `make ci` alone, for a CI leg split in two (#2757): the
+# toolchain built as `make ci` builds it, then test-ae with AE_SWEEP_SHARD
+# (which tests/scripts/sweep_shard.sh reads). On Windows the other job runs
+# `make ci`, which runs everything else once. CI_SWEEP_UNIT=1 runs the C unit
+# tests too, for the macOS x86_64 leg, whose two jobs are both sweeps: the
+# rest of `make ci` does not depend on the architecture, and the ARM64 leg
+# runs it on macOS (#2772).
 ci-sweep: clean
 	@$(MAKE) audio-cache-restore
 	@$(MAKE) -j$(NPROC) compiler EXTRA_CFLAGS=-Werror
+	@$(MAKE) audio-cache-save
 	@$(MAKE) -j$(NPROC) ae
 	@$(MAKE) -j$(NPROC) stdlib
+	@if [ "$(CI_SWEEP_UNIT)" = 1 ]; then $(CI_STAGE) 1200 "C unit tests" $(MAKE) -j$(NPROC) test; fi
 	@$(MAKE) test-ae
 
 ci: clean

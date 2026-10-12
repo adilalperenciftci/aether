@@ -33,6 +33,9 @@ command -v openssl >/dev/null 2>&1 || { echo "  [SKIP] $NAME: no openssl to make
 unset SSL_CERT_FILE SSL_CERT_DIR AETHER_PURE_TLS || :
 
 TMP="$(mktemp -d)"
+# Certificates carry the extensions asked for, under any openssl (#2776).
+. "$ROOT/tests/lib/test_openssl_conf.sh"
+test_openssl_conf "$TMP"
 PIDS=""
 cleanup() {
     for p in $PIDS; do stop_server "$p"; done
