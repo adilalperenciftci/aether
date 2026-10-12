@@ -55,6 +55,14 @@ generate() {
 }
 
 INC="-I. -Iruntime -Iruntime/utils -Iruntime/actors -Iruntime/config -Iruntime/scheduler -Iruntime/memory -Istd -Istd/collections -Istd/string"
+# On glibc and musl, -std=c11 hides POSIX as well as the GNU extensions this
+# checks for, so the POSIX branch of the generated C (clock_gettime and
+# CLOCK_MONOTONIC behind clock_ns()) was undeclared on Linux. Strict C11 code
+# that uses POSIX asks for it, as here; cl compiles the _WIN32 branches.
+STRICT_POSIX=""
+case "$(uname -s 2>/dev/null)" in
+    Linux*) STRICT_POSIX="-D_POSIX_C_SOURCE=200809L" ;;
+esac
 
 # cl <name>: compile <name>.c (no forcing needed: cl is not GCC-compatible).
 # /experimental:c11atomics is what makes MSVC's <stdatomic.h> usable in C.
@@ -92,7 +100,7 @@ generate interp
 if [ -n "$use_gcc" ]; then
     # shellcheck disable=SC2086
     gcc -c -o /dev/null "$TMP/interp_nogcc.c" $INC \
-        -std=c11 -pedantic -Wno-unused-label -Werror 2>&1
+        $STRICT_POSIX -std=c11 -pedantic -Wno-unused-label -Werror 2>&1
     echo "  [PASS] Non-actor string interpolation compiles under C11 -pedantic"
 fi
 [ -z "$use_cl" ] || cl_compile interp "Non-actor string interpolation"
@@ -131,7 +139,7 @@ echo "  [PASS] Actor dispatch has switch-case fallback"
 if [ -n "$use_gcc" ]; then
     # Syntax-check only: it cannot link without the full runtime.
     # shellcheck disable=SC2086
-    gcc -fsyntax-only "$TMP/actor_nogcc.c" $INC -std=c11 -Wno-unused-label 2>&1
+    gcc -fsyntax-only "$TMP/actor_nogcc.c" $INC $STRICT_POSIX -std=c11 -Wno-unused-label 2>&1
     echo "  [PASS] Actor program syntax-checks under C11"
 fi
 [ -z "$use_cl" ] || cl_compile actor "Actor program"
@@ -169,7 +177,7 @@ AEOF
 generate closure
 if [ -n "$use_gcc" ]; then
     # shellcheck disable=SC2086
-    gcc -fsyntax-only "$TMP/closure_nogcc.c" $INC -std=c11 -Wno-unused-label \
+    gcc -fsyntax-only "$TMP/closure_nogcc.c" $INC $STRICT_POSIX -std=c11 -Wno-unused-label \
         -Werror=discarded-qualifiers -Werror=incompatible-pointer-types \
         -Werror=implicit-function-declaration 2>&1
     echo "  [PASS] A closure over try-written arrays syntax-checks under C11"

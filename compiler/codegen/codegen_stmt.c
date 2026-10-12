@@ -11570,9 +11570,18 @@ static void emit_match_result_value_now(CodeGenerator* gen, ASTNode* result) {
     }
     if (gen->match_result_var) {
         fprintf(gen->output, "%s = ", gen->match_result_var);
+        generate_expression(gen, result);
+        fprintf(gen->output, ";\n");
+        return;
     }
+    /* A match whose value nothing reads drops the arm's value, and the C
+     * says so: an arm `1 -> 10` was the statement `10;`, which clang warns
+     * computes nothing (-Wunused-value, on by default), and that warning
+     * reached the user from a correct program. A void call is fine under
+     * the cast too. */
+    fprintf(gen->output, "(void)(");
     generate_expression(gen, result);
-    fprintf(gen->output, ";\n");
+    fprintf(gen->output, ");\n");
 }
 
 // #340: emit a match arm's result body — mirrors the generic match dispatch

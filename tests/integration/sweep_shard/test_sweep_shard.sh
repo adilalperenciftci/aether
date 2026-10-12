@@ -8,6 +8,10 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 SHARD="$ROOT/tests/scripts/sweep_shard.sh"
 
+# The sweep that runs this test may itself be a shard (CI exports
+# AE_SWEEP_SHARD), and each case below sets the spec it means.
+unset AE_SWEEP_SHARD
+
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 fail() { echo "  [FAIL] sweep_shard: $1"; exit 1; }

@@ -33,7 +33,7 @@ main() {
     // Video-only clip: 2s of testsrc at 10fps, 64x48. Being video-only
     // makes it double as the no-audio case further down. Both clips are
     // named per process, so two sweeps at once never share one (#2774).
-    clip ="${os.temp_dir()}/_avc_test_clip_${os.getpid()}.mp4"
+    clip = "${os.temp_dir()}/_avc_test_clip_${os.getpid()}.mp4"
     av = list.new()
     _ = list.add(av, "-y")
     _ = list.add(av, "-f")

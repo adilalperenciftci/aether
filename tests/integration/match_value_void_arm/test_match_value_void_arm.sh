@@ -149,5 +149,24 @@ if [ "$out" != "note 2
     fails=$((fails + 1))
 fi
 
+# The arm `1 -> 10` of the match nothing reads drops its value, and its C
+# says so: it was the statement `10;`, which clang warns about by default, so
+# `ae run` printed a C warning for a correct program on macOS. gcc reports
+# the same with -Wunused-value, so the check runs on every C compiler.
+AETHERC="$ROOT/build/aetherc"
+[ -f "$AETHERC.exe" ] && AETHERC="$AETHERC.exe"
+CC_BIN="${CC:-cc}"
+command -v "$CC_BIN" >/dev/null 2>&1 || CC_BIN=gcc
+INC="-I$ROOT -I$ROOT/runtime -I$ROOT/runtime/utils -I$ROOT/runtime/actors -I$ROOT/runtime/config -I$ROOT/runtime/scheduler -I$ROOT/runtime/memory -I$ROOT/std -I$ROOT/std/collections -I$ROOT/std/string"
+if ! "$AETHERC" "$TMP/accepted.ae" "$TMP/accepted.c" >"$TMP/aetherc.log" 2>&1; then
+    echo "  [FAIL] accepted: aetherc failed"
+    sed 's/^/        /' "$TMP/aetherc.log" | head -10
+    fails=$((fails + 1))
+elif ! "$CC_BIN" -fsyntax-only -Werror=unused-value $INC "$TMP/accepted.c" >"$TMP/cc.log" 2>&1; then
+    echo "  [FAIL] accepted: its C computes a value nothing uses"
+    sed 's/^/        /' "$TMP/cc.log" | head -10
+    fails=$((fails + 1))
+fi
+
 [ "$fails" -eq 0 ] || exit 1
 echo "  [PASS] match_value_void_arm: a void-call arm of a match whose value is used is refused"
