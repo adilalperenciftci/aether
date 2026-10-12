@@ -14,6 +14,35 @@ cut while your branch is open cannot fold your entry into the released section.
 
 ## [current]
 
+## [0.808.0]
+
+### Fixed
+
+- **A scalar variable beside a lane value splats, as a literal does.** The
+  language reference says a scalar operand splats, and the type checker
+  accepted `v * s` for an `f32x4` `v` and a `float` `s`, but the generated
+  `v * s` put a C `double` beside a vector of `float`, which clang and GCC
+  reject ("implicit conversion would cause truncation"); only a literal,
+  being a constant, compiled. The scalar is now converted to the lane's
+  element type before C broadcasts it, for `f32x4`, `f64x2`, `i32x4`,
+  `i64x2` and `i16x8` (`f32x8` / `i32x8` already splatted through their
+  helpers), for every arithmetic and comparison operator, with the scalar on
+  either side, in a compound assignment (`v *= s`), and through a distinct
+  type over a lane type (`type vec4 = distinct f32x4`).
+
+- **An operator does not mix two different distinct types.** Distinct types
+  have nominal identity, enforced at assignments and call arguments, but
+  `USD + EUR` (both `distinct float`) compiled and added the two, as did
+  `vec3 + vec4` over the same lane type. A binary operator, comparison or
+  compound assignment whose operands are two different distinct types is now
+  a type error (E0200) naming both: `'+' mixes distinct types USD and EUR`.
+  The same distinct type on both sides now keeps it (`USD + USD` is a `USD`,
+  so `usd += usd` and passing the sum where a `USD` is wanted work without a
+  cast; before, the result was the base `float`), and a distinct lane type
+  scaled by a scalar keeps it (`vec4 * s` is a `vec4`). A distinct type
+  beside a plain value of its base (`USD + 1.0`) is unchanged: computed over
+  the base, the result is the base. See docs/distinct-types.md.
+
 ## [0.807.0]
 
 ### Changed
