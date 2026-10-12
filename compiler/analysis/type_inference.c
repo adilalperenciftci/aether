@@ -422,11 +422,97 @@ static unsigned new_walk_id(void) {
     return g_next_walk_id;
 }
 
+/* The first `return` with a value under `n`, not looking into nested
+ * closures; sets *any_string when any such return is a string. */
+static ASTNode* first_value_return(ASTNode* n, int* any_string) {
+    if (!n || n->type == AST_CLOSURE) return NULL;
+    if (n->type == AST_RETURN_STATEMENT && n->child_count > 0 && n->children[0] &&
+        n->children[0]->type != AST_PRINT_STATEMENT) {
+        Type* t = n->children[0]->node_type;
+        if (t && t->kind == TYPE_STRING) *any_string = 1;
+        return n;
+    }
+    ASTNode* first = NULL;
+    for (int i = 0; i < n->child_count; i++) {
+        ASTNode* r = first_value_return(n->children[i], any_string);
+        if (r && !first) first = r;
+    }
+    return first;
+}
+
+/* #2745: what calling the closure literal `lit` yields, as far as this pass
+ * can tell: the type of its first value `return`, or a string if any return
+ * is one: the rule the checker's closure_literal_result_type and codegen's
+ * C signature use. NULL when nothing is known yet (no value return, an
+ * untyped one, or several values, which the checker types). */
+static Type* closure_literal_result(ASTNode* lit) {
+    if (!lit || lit->type != AST_CLOSURE) return NULL;
+    ASTNode* body = NULL;
+    for (int i = lit->child_count - 1; i >= 0; i--) {
+        if (lit->children[i] && lit->children[i]->type == AST_BLOCK) {
+            body = lit->children[i];
+            break;
+        }
+    }
+    int any_string = 0;
+    ASTNode* ret = first_value_return(body, &any_string);
+    if (!ret || ret->child_count != 1) return NULL;
+    if (any_string) return create_type(TYPE_STRING);
+    Type* t = ret->children[0]->node_type;
+    if (!t || t->kind == TYPE_UNKNOWN || t->kind == TYPE_VOID) return NULL;
+    return clone_type(t);
+}
+
+/* #2745: a local's inferred_closure once its bindings disagree: it stays
+ * unknown for the rest of the walk. */
+static ASTNode g_closure_disagrees;
+
+/* #2745: the closure literal a call invokes, when this pass knows it: the
+ * literal itself, or one a local is bound to (`k = |x| ...`, then `k(x)` or
+ * `call(k, x)`). */
+static ASTNode* called_closure_literal(ASTNode* call, InferenceContext* ctx) {
+    if (!call || !call->value || !ctx->symbols) return NULL;
+    ASTNode* callee = NULL;
+    if (strcmp(call->value, "call") == 0 && call->child_count > 0) {
+        callee = call->children[0];
+        if (callee && callee->type == AST_CLOSURE) return callee;
+        if (!callee || callee->type != AST_IDENTIFIER || !callee->value) return NULL;
+    }
+    const char* name = callee ? callee->value : call->value;
+    Symbol* sym = lookup_symbol(ctx->symbols, name);
+    if (!sym || sym->is_function || sym->inferred_closure == &g_closure_disagrees) return NULL;
+    return sym->inferred_closure;
+}
+
 // Collect constraints from expressions
 void collect_expression_constraints(ASTNode* node, InferenceContext* ctx) {
     if (!node) return;
     
     switch (node->type) {
+        case AST_IF_EXPRESSION:
+            /* #2745: an if-expression has the type of its branches, as the
+             * checker gives it: the then branch's, or the else branch's while
+             * the then branch's is not known. Left untyped here, a local it
+             * binds was untyped until the checker reached the binding, and
+             * the hoists that declare a loop's or a branch's local ahead of
+             * its block (hoist_decl_type) declared it so: a read of it before
+             * the binding, the value the previous pass bound, was
+             * interpolated as an int (#2741 for interpolations). */
+            for (int i = 0; i < node->child_count; i++) {
+                collect_constraints(node->children[i], ctx);
+            }
+            if (node->child_count >= 3 &&
+                (!node->node_type || node->node_type->kind == TYPE_UNKNOWN)) {
+                Type* t = node->children[1] ? node->children[1]->node_type : NULL;
+                if (!t || t->kind == TYPE_UNKNOWN || t->kind == TYPE_VOID)
+                    t = node->children[2] ? node->children[2]->node_type : NULL;
+                if (t && t->kind != TYPE_UNKNOWN && t->kind != TYPE_VOID) {
+                    if (node->node_type) free_type(node->node_type);
+                    node->node_type = clone_type(t);
+                }
+            }
+            break;
+
         case AST_BINARY_EXPRESSION:
             if (node->child_count >= 2) {
                 collect_constraints(node->children[0], ctx);
@@ -583,6 +669,30 @@ void collect_expression_constraints(ASTNode* node, InferenceContext* ctx) {
                     Symbol* fresh = lookup_symbol_local(ctx->symbols, node->value);
                     if (fresh) fresh->inferred_in = ctx->scope_owner;
                 }
+                /* #2745: a local of a function, main or closure remembers
+                 * the closure literal it is bound to, as the checker's does
+                 * (#2460): a call through it yields what the literal
+                 * returns. Every binding must be such a literal, agreeing
+                 * on that result, or it is known no more. Not an actor's
+                 * state or a module `var`, which handlers and functions
+                 * bind in no order this walk can follow. On this pass's
+                 * symbol only. */
+                Symbol* bound = lookup_symbol_local(ctx->symbols, node->value);
+                if (bound && !bound->is_function && node->type == AST_VARIABLE_DECLARATION &&
+                    ctx->walk_id != 0 && bound->walk_id == ctx->walk_id &&
+                    bound->inferred_closure != &g_closure_disagrees) {
+                    ASTNode* init = node->child_count > 0 ? node->children[0] : NULL;
+                    ASTNode* lit = (init && init->type == AST_CLOSURE) ? init : NULL;
+                    ASTNode* had = bound->inferred_closure;
+                    if (lit && had && had != lit) {
+                        Type* a = closure_literal_result(had);
+                        Type* b = closure_literal_result(lit);
+                        if (!a || !b || !types_equal(a, b)) lit = NULL;
+                        if (a) free_type(a);
+                        if (b) free_type(b);
+                    }
+                    bound->inferred_closure = lit ? lit : &g_closure_disagrees;
+                }
             }
             break;
 
@@ -690,6 +800,18 @@ void collect_expression_constraints(ASTNode* node, InferenceContext* ctx) {
                             node->node_type = clone_type(func_sym->type);
                         }
                     }
+                }
+            }
+            /* #2745: a call of a closure literal, directly (`call(|| -> 1)`)
+             * or through a local bound to one (`k()`, `call(k)`), yields what
+             * the literal returns. Left untyped, a local bound by such a call
+             * in a loop was declared ahead of the loop without a type, and a
+             * read of it before the binding was interpolated as an int. */
+            if (!node->node_type || node->node_type->kind == TYPE_UNKNOWN) {
+                Type* r = closure_literal_result(called_closure_literal(node, ctx));
+                if (r) {
+                    if (node->node_type) free_type(node->node_type);
+                    node->node_type = r;
                 }
             }
             break;

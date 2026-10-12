@@ -1,0 +1,11 @@
+// The string literal "_" is the one-character string, not the wildcard, so
+// the `_` arm after it can still run.
+import std.io
+
+main() {
+    s = "x"
+    match s {
+        "_" -> { println("underscore") }
+        _ -> { println("other") }
+    }
+}

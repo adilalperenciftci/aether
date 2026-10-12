@@ -758,6 +758,17 @@ void ast_stamp_source_file(ASTNode* node, const char* path) {
     }
 }
 
+const char* ast_source_name(const ASTNode* def, char* buf, size_t cap) {
+    const char* name = (def && def->value) ? def->value : "?";
+    if (!def || !def->origin_module || !buf || cap == 0) return name;
+    const char* ns = strrchr(def->origin_module, '.');
+    ns = ns ? ns + 1 : def->origin_module;
+    size_t n = strlen(ns);
+    if (strncmp(name, ns, n) != 0 || name[n] != '_' || !name[n + 1]) return name;
+    snprintf(buf, cap, "%s.%s", ns, name + n + 1);
+    return buf;
+}
+
 int annotation_has_marker(const char* annotation, const char* marker) {
     if (!annotation || !marker || !*marker) return 0;
     size_t n = strlen(marker);

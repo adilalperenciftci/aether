@@ -1,0 +1,13 @@
+// #2728: the same member written bare, then qualified.
+import std.io
+
+enum Color { Red, Green, Blue }
+
+main() {
+    c = Color.Blue
+    match c {
+        Blue -> { println("blue") }
+        Color.Blue -> { println("unreachable") }
+        _ -> { println("other") }
+    }
+}

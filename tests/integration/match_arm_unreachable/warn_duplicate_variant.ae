@@ -1,0 +1,16 @@
+// #2728: a second arm for the same variant of a sum type. It also made a
+// second C `case` for the same value, which the C compiler refused.
+import std.io
+
+struct Circle { r: int }
+struct Square { s: int }
+type Shape = Circle | Square
+
+main() {
+    let s: Shape = Square { s: 3 }
+    match s {
+        Circle -> { println("circle") }
+        Square -> { println("square") }
+        Circle -> { println("unreachable") }
+    }
+}

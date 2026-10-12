@@ -476,7 +476,7 @@ Variables are inferred from their initialization or usage context.
 
 **Keywords are not names.** A statement keyword used as a variable (`when = 0.0`, `message = "hi"`) is refused at the keyword: `'when' is a reserved keyword and cannot be used as an identifier; rename it`.
 
-**A local has one type: the one its first binding gave it.** A later bare assignment is an assignment, not a new variable, so `x = 5` then `x = "s"` (or `x = true`, `x = null`) is a compile error, *cannot re-bind 'x' as string: it was bound as int by its first assignment*, rather than a C error about `const char*`. Use a new name for the other value. A name first bound inside a branch or loop body and **used after it** is one variable for the whole function: it takes the numeric join of every binding (`if a { n = 1 } else { n = 4000000000 }` makes `n` a `long`; `f = 1.5` in one branch and `f = 2` in the other keeps `f` a `float`), and a binding of another kind anywhere in the function, or of another struct or pointer type, is the same compile error: *cannot bind 'v' as int: it is bound as string in another branch or loop body of this function*. A local of a `while` body is declared before the loop, and a name both arms of an `if`/`else` bind is declared before the `if`, so each is one variable whether or not it is used after them: `view = p as *Apple` in one `while` and `view = p as *Pear` in the next is that error, where a bare `ptr` or `null` binding would fit either. A read of such a local in the body before its binding, which sees the value the previous pass bound, has the binding's type (`out = "${out}${prev}"` ahead of `prev = "p${i}"` reads a string). A name bound in the bodies of separate `if`s or `for` loops and used only inside them is a separate variable per body, except a `string` local, which is always one variable for the whole function, as its heap tracker is. The conversions the [table below](#casting-between-types) permits still apply at a re-bind, and the local keeps its first type: after `f = 1.5`, `f = 2` stores `2.0` and `f` stays a `float`; after `int x = 0`, `x = 2.5` stores `2`. A `string` accepts `null` (it is a nullable `const char*`), and a value that would not fit an *inferred* `int` (a 64-bit integer, a `uint32`, a float) is the narrowing error described there.
+**A local has one type: the one its first binding gave it.** A later bare assignment is an assignment, not a new variable, so `x = 5` then `x = "s"` (or `x = true`, `x = null`) is a compile error, *cannot re-bind 'x' as string: it was bound as int by its first assignment*, rather than a C error about `const char*`. Use a new name for the other value. A name first bound inside a branch or loop body and **used after it** is one variable for the whole function: it takes the numeric join of every binding (`if a { n = 1 } else { n = 4000000000 }` makes `n` a `long`; `f = 1.5` in one branch and `f = 2` in the other keeps `f` a `float`), and a binding of another kind anywhere in the function, or of another struct or pointer type, is the same compile error: *cannot bind 'v' as int: it is bound as string in another branch or loop body of this function*. A `switch` case is a branch here as an `if` arm is. A local of a `while` body is declared before the loop, and a name both arms of an `if`/`else` (or every case of a `switch` with a `default`) bind is declared before the `if` (or `switch`), so each is one variable whether or not it is used after them: `view = p as *Apple` in one `while` and `view = p as *Pear` in the next is that error, where a bare `ptr` or `null` binding would fit either. A read of such a local in the body before its binding, which sees the value the previous pass bound, has the binding's type (`out = "${out}${prev}"` ahead of `prev = "p${i}"` reads a string). A name bound in the bodies of separate `if`s or `for` loops and used only inside them is a separate variable per body, except a `string` local, which is always one variable for the whole function, as its heap tracker is. The conversions the [table below](#casting-between-types) permits still apply at a re-bind, and the local keeps its first type: after `f = 1.5`, `f = 2` stores `2.0` and `f` stays a `float`; after `int x = 0`, `x = 2.5` stores `2`. A `string` accepts `null` (it is a nullable `const char*`), and a value that would not fit an *inferred* `int` (a 64-bit integer, a `uint32`, a float) is the narrowing error described there.
 
 **A local's scope starts after its initializer.** In `count = count() + 1` the call is the function `count`, and from that binding on, to the end of the function, `count` is the local. So is a local declared ahead of its binding because both arms of an `if` bind it: until the checker reaches the first binding in source order, the name is still the function's. A reference that comes before the binding, such as the function passed as a value, is the function too:
 
@@ -1240,6 +1240,14 @@ A comma-list case lowers to several C `case` labels sharing one body; a `switch`
 containing any ranged case is lowered to an equivalent if-else chain (safe
 because there is no fall-through to preserve).
 
+A `switch` over a string, a pointer or a float compares by an if-chain as well,
+a string by content. Its cases are checked against the value as a `match`
+arm's are ([Match Expressions](#match-expressions)): a case naming a value the
+`switch`'s value can never equal, or a name that is no variable, constant or
+enum member, is an error at the case, and a value that cannot be compared (an
+optional, a sum, a struct) is one at the `switch`. A bare enum member (`case
+Red:`) is that member, as in a `match`.
+
 A `break` in a case leaves the `switch`, and nothing more, whichever of the two
 forms it lowers to: inside a loop, the loop goes on with the statement after the
 `switch`. On its way out it runs the defers of the scopes it leaves inside the
@@ -1247,7 +1255,28 @@ case, not those of the loop body around the `switch`. A `break` in a `match`
 arm leaves the `switch` or loop around the `match`. `continue` goes on to the
 loop's next iteration, and `break label` leaves the loop it names. Each case is
 a scope of its own, as an `if` branch is: a `defer` in it runs when the case
-ends, and only when the case ran.
+ends, and only when the case ran. A name a case binds is one variable with the
+rest of the function exactly where a name an `if` branch binds would be
+([Variables](#variables)): read after a `switch` at the top of the function
+body, bound in a `while` body, or bound by every case of a `switch` with a
+`default`. Elsewhere a read after the `switch` is `Undefined variable`:
+
+```aether,run
+pick(x: int) -> int {
+    switch x {
+        case 1: v = 10
+        default: v = 20
+    }
+    return v
+}
+
+main() {
+    println("${pick(1)} ${pick(2)}")
+}
+```
+```output
+10 20
+```
 
 ```aether,run
 main() {
@@ -3533,8 +3562,8 @@ An error stops the build and prints its code, `error[E0301]: ...`, with the sour
 | Code | Kind |
 |------|------|
 | `E0100` | Syntax: the source does not parse, or a reserved word stands where a name must |
-| `E0200` | Type mismatch, and the other type rules (a cast the types cannot justify, `string + string`) |
-| `E0300` | Undefined variable |
+| `E0200` | Type mismatch, and the other type rules (a cast the types cannot justify, `string + string`, a `match` arm or `switch` case that can never equal the value it compares, an arm that gives no value to a `match` whose value is used: [Match Expressions](#match-expressions)) |
+| `E0300` | Undefined variable, and a name in a `match` arm or `switch` case that is no variable, constant or member |
 | `E0301` | Undefined function, a function of a module the calling module does not import, or a function a local of its name hides ([a local's scope](#variables)) |
 | `E0303` | A name the module does not export |
 | `E0304` | A name hidden in this scope by `hide` or `seal except` ([hide and seal](hide-and-seal.md)) |
@@ -3632,10 +3661,13 @@ main() {
 }
 ```
 
-The check reports only where the shadowing is certain, so the arms it
-compares with each other are literals; an arm that is a bare identifier
-is never compared. Over a value that is not an enum, a sum type or an
-optional, such an arm names a variable already in scope (a local, a
+The check reports only where the shadowing is certain. The arms it
+compares with each other are literals, and over an enum, a sum type or an
+optional, where the cases are known, members (bare or qualified, `Red`
+and `Color.Red` being one case), variants and `none` / `some(v)` too. An
+arm that is a comma-list is reported when an earlier arm already names
+every one of its values. Over any other value a bare identifier arm is
+never compared: it names a variable already in scope (a local, a
 parameter, or a module `const` or `var`) and matches when the value
 equals that variable's value at the time, as `if x == limit` would. It
 binds nothing. That value is not known when the program is compiled, so
@@ -3661,8 +3693,8 @@ Over an enum a bare identifier names a member (`Red` for `Color.Red`)
 and over a sum type a variant; a variable is not accepted there. The arms
 that bind a name are `some(v)` over an optional and the list patterns
 (`[h|t]`, `[x, y]`). An identifier that names no variable binds nothing
-either, so `n` below is undeclared where the arm uses it. To act on every
-other value, write `_` and use the value matched on:
+either, and is an error at the arm. To act on every other value, write
+`_` and use the value matched on:
 
 ```aether,fails
 main() {
@@ -3672,7 +3704,10 @@ main() {
         n -> { println("got ${n}") }
     }
 }
-// error[E0300]: Undefined variable 'n'
+// error[E0300]: 'n' names no variable: a match arm compares the value
+// matched with what it names, and binds no new name
+// help: write `_` to take every other value, and use the value matched
+// itself in the arm
 ```
 
 A third shape is the mirror of the exhaustiveness check: a `_` arm on a
@@ -3721,7 +3756,174 @@ msg = match status {
 println(msg)
 ```
 
-Supported patterns: integer literals, string literals, `_` (wildcard), list patterns.
+Arms are tried in source order and the first that matches runs. An arm is one
+of these patterns:
+
+| Pattern | Matches | Over |
+|---------|---------|------|
+| `0`, `-1`, `2.5`, `true`, `"stop"` | a value equal to the literal; a string compares by content | a value of the literal's type |
+| `limit`, `LIMIT` | a value equal to that variable or constant at the time; the arm binds nothing | a value of the variable's type |
+| `1..=9`, `0..<10` | a value in the range, `..=` inclusive and `..<` half-open | an integer, a float or an enum |
+| `10, 20, 30` | a value equal to any of them; each may be a value or a range | as its values |
+| `_` | every value; an arm of its own, last | anything |
+| `Red`, `Color.Red` | that member, bare or qualified; every member needs an arm, or `_` | an enum |
+| `Circle` | that variant, and inside the arm the value matched is that struct; every variant needs an arm, or `_` | a sum type |
+| `none`, `some(v)` | no value, or a value bound to `v` for the arm | an optional |
+| `[]`, `[x]`, `[a, b]`, `[h\|t]` | a list of that length (`[h\|t]`: at least one), binding its elements | an array, a slice or a `*StringSeq` |
+
+```aether,run
+const LIMIT = 100
+
+classify(n: int, lucky: int) -> string {
+    return match n {
+        0 -> "zero"
+        lucky -> "lucky"
+        LIMIT -> "the limit"
+        1..=9 -> "a digit"
+        10, 20, 30 -> "a round ten"
+        _ -> "something else"
+    }
+}
+
+main() {
+    println(classify(0, 7))
+    println(classify(7, 7))
+    println(classify(100, 7))
+    println(classify(4, 7))
+    println(classify(20, 7))
+    println(classify(55, 7))
+    command = "stop"
+    answer = match command {
+        "start" -> "starting"
+        "stop" -> "stopping"
+        _ -> "unknown"
+    }
+    println(answer)
+}
+```
+```output
+zero
+lucky
+the limit
+a digit
+a round ten
+something else
+stopping
+```
+
+Over an enum, a sum type or an optional the cases are known, so a bare name is
+a member or a variant, and a missing one is a compile error unless `_` takes the
+rest:
+
+```aether,run
+enum Color { Red, Green, Blue }
+
+struct Circle { r: int }
+struct Square { side: int }
+type Shape = Circle | Square
+
+warmth(c: Color) -> string {
+    return match c {
+        Red, Green -> "warm"
+        Color.Blue -> "cool"
+    }
+}
+
+area(s: Shape) -> int {
+    return match s {
+        Circle -> 3 * s.r * s.r
+        Square -> s.side * s.side
+    }
+}
+
+describe(m: int?) -> string {
+    return match m {
+        none -> "nothing"
+        some(v) -> "got ${v}"
+    }
+}
+
+main() {
+    println(warmth(Color.Green))
+    println(warmth(Color.Blue))
+    println(area(Circle { r: 2 }))
+    println(area(Square { side: 3 }))
+    let empty: int? = none
+    println(describe(empty))
+    println(describe(5))
+}
+```
+```output
+warm
+cool
+12
+9
+nothing
+got 5
+```
+
+List patterns take an array with its `_len` variable ([List Pattern
+Matching](#list-pattern-matching)), a slice, which carries its length, or a
+`*StringSeq`:
+
+```aether,run
+describe(xs: int[]) -> string {
+    return match xs {
+        [] -> "empty"
+        [x] -> "one: ${x}"
+        [a, b] -> "two: ${a} ${b}"
+        [h|_] -> "starts with ${h}"
+    }
+}
+
+main() {
+    all = [4, 5, 6]
+    println(describe(all[0..0]))
+    println(describe(all[0..1]))
+    println(describe(all[0..2]))
+    println(describe(all))
+}
+```
+```output
+empty
+one: 4
+two: 4 5
+starts with 4
+```
+
+Each value an arm names must be one the value matched can equal, and the
+compiler says so at the arm (E0200): a string arm over an `int`, `none` or
+`some(v)` over a value that is not an optional, a range over a string, a list
+pattern over a scalar, or `_` inside a comma-list. A `match` over an optional
+takes only `none`, `some(name)` and `_` arms, and one over a sum type one
+variant per arm or `_`. A name that is no variable, constant or member is
+E0300 at the arm: an arm compares, it never binds a new name (`_` takes every
+other value).
+
+When the value of a `match` is used (bound, returned, or the value of an arm
+of such a `match`), every arm that ends in a value gives the `match` its value.
+An arm that ends in a call of a function that returns nothing has none, and is
+an error at the call. An arm that ends in a statement, such as a `return`,
+gives no value and is accepted:
+
+```aether,fails
+note(x: int) { println("note ${x}") }
+
+pick(n: int) -> int {
+    return match n {
+        1 -> note(1)
+        _ -> 5
+    }
+}
+
+main() {
+    println("${pick(2)}")
+}
+// error[E0200]: 'note' returns no value, so this arm gives the `match` none,
+// and the value of the `match` is used
+// help: give the arm a value: a block arm can make the call and end with one,
+// `{ note(...)  0 }`
+```
 
 ---
 

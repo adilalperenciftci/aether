@@ -1,0 +1,11 @@
+// A comma-list that names one value no earlier arm does can still run.
+import std.io
+
+main() {
+    x = 3
+    match x {
+        1, 2 -> { println("one or two") }
+        2, 3 -> { println("three") }
+        _ -> { println("other") }
+    }
+}

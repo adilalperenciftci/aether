@@ -1,0 +1,16 @@
+// A bare identifier arm over a value that is not an enum, a sum or an
+// optional names a variable, and the arm runs when the value equals it
+// (#2700). That value is not known when the program is compiled, so the arm
+// is never compared with the others: a later arm with the same value is not
+// reported, as a warning on correct code would be worse than none.
+import std.io
+
+main() {
+    limit = 2
+    x = 2
+    match x {
+        limit -> { println("at the limit") }
+        2 -> { println("two") }
+        _ -> { println("other") }
+    }
+}

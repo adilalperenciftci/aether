@@ -1,0 +1,113 @@
+// Regression (#2744): whether a function returns a value is settled the same
+// way whatever order the functions are defined in, for an arrow tail whose
+// callee is known only once the call is resolved.
+//
+// #2736 settles, before any body is checked, which functions return a value,
+// over the calls their returns make. It resolved those calls by name, so a
+// tail whose callee depends on what it is called on was taken to give a
+// value: a UFCS call (`b.show()`, `mk(n).show()`, rewritten to `show(b)`), a
+// call through a function-pointer field (`o.run(n)`) and a call through a
+// parameter typed `fn(int)` (`f(x)`, `call(f, x)`). The function was then
+// emitted as returning nothing while its caller returned its "value", and the
+// C compiler stopped ("void value not ignored"), in either definition order.
+// The settle now resolves those calls as the checker does, with the types
+// inference gave the receiver. Each shape below is checked with its caller
+// defined before the callee and after it.
+//
+// Also: `call(f, x)` through a typed function pointer is the call `f(x)`;
+// it was emitted as a closure call (`f.fn(f.env, x)`), which C refused.
+extern exit(code: int)
+
+var bad = 0
+var noted = 0
+
+check(label: string, got: int, want: int) {
+    if got != want {
+        println("FAIL ${label}: got ${got}, want ${want}")
+        bad = bad + 1
+    }
+}
+
+struct Box { n: int }
+struct Ops { run: fn(int) }
+
+// ---- callers first --------------------------------------------------------
+
+outer_param(b: Box) -> { ufcs_param(b) }
+ufcs_param(b: Box) -> { b.show() }
+
+outer_local(n: int) -> { ufcs_local(n) }
+ufcs_local(n: int) -> {
+    b = Box { n: n }
+    b.show()
+}
+
+outer_chain(n: int) -> { ufcs_chain(n) }
+ufcs_chain(n: int) -> { mk(n).show() }
+
+outer_field(o: Ops, n: int) -> { through_field(o, n) }
+through_field(o: Ops, n: int) -> { o.run(n) }
+
+outer_fnparam(n: int) -> { apply(note, n) }
+apply(f: fn(int), x: int) -> { f(x) }
+
+outer_call(n: int) -> { apply_call(note, n) }
+apply_call(f: fn(int), x: int) -> { call(f, x) }
+
+// A UFCS tail whose target returns a value still gives one.
+outer_value(n: int) -> { twice_of(n) }
+twice_of(n: int) -> { mk(n).twice() }
+
+// ---- the functions they reach ---------------------------------------------
+
+mk(n: int) -> Box { return Box { n: n } }
+show(b: Box) -> { note(b.n) }
+twice(b: Box) -> { b.n * 2 }
+
+note(x: int) {
+    noted = noted + x
+}
+
+// ---- callees first --------------------------------------------------------
+
+late_param(b: Box) -> { b.show() }
+late_outer_param(b: Box) -> { late_param(b) }
+
+late_apply(f: fn(int), x: int) -> { f(x) }
+late_outer_fnparam(n: int) -> { late_apply(note, n) }
+
+main() {
+    b = Box { n: 1 }
+    o = Ops { run: note }
+
+    outer_param(b)
+    check("UFCS on a parameter", noted, 1)
+    noted = 0
+    outer_local(2)
+    check("UFCS on a local", noted, 2)
+    noted = 0
+    outer_chain(3)
+    check("UFCS on a call's result", noted, 3)
+    noted = 0
+    outer_field(o, 4)
+    check("function-pointer field", noted, 4)
+    noted = 0
+    outer_fnparam(5)
+    check("fn(int) parameter", noted, 5)
+    noted = 0
+    outer_call(6)
+    check("call() through a fn(int) parameter", noted, 6)
+    check("UFCS tail with a value", outer_value(7), 14)
+    noted = 0
+    late_outer_param(b)
+    check("UFCS, callee first", noted, 1)
+    noted = 0
+    late_outer_fnparam(8)
+    check("fn(int) parameter, callee first", noted, 8)
+
+    if bad != 0 {
+        println("${bad} check(s) failed")
+        exit(1)
+    }
+    println("void tails through receivers and parameters: ok")
+}

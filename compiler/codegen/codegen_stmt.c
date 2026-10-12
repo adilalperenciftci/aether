@@ -1488,9 +1488,25 @@ static const char* scrutinee_c_type(ASTNode* expr) {
     if (t->kind == TYPE_FLOAT)      return "double";
     if (t->kind == TYPE_FLOAT32)    return "float";
     if (t->kind == TYPE_LONGDOUBLE) return "long double";
-    if (t->kind == TYPE_INT64)      return "int64_t";
+    if (t->kind == TYPE_INT64 || t->kind == TYPE_DURATION) return "int64_t";
+    /* An unsigned value is compared as itself: as an int, 5000000000 was
+     * 705032704 and matched that arm instead of its own. */
+    if (t->kind == TYPE_UINT64)     return "uint64_t";
+    if (t->kind == TYPE_UINT32)     return "uint32_t";
+    if (t->kind == TYPE_UINT16)     return "uint16_t";
+    if (t->kind == TYPE_UINT8)      return "uint8_t";
+    if (t->kind == TYPE_BYTE)       return "unsigned char";
     if (t->kind == TYPE_BOOL)       return "bool";
     return "int";
+}
+
+/* #2727: is the value a switch compares something a C `switch` takes? A
+ * string, a pointer or a float is compared by an if-chain instead. */
+static int switch_subject_is_integer(ASTNode* expr) {
+    Type* t = expr ? expr->node_type : NULL;
+    if (!t) return 1;
+    return !(t->kind == TYPE_STRING || t->kind == TYPE_PTR || t->kind == TYPE_FLOAT ||
+             t->kind == TYPE_FLOAT32 || t->kind == TYPE_LONGDOUBLE);
 }
 
 static void generate_list_pattern_condition(CodeGenerator* gen, ASTNode* pattern,
@@ -9774,23 +9790,15 @@ static void emit_hoisted_local_decl(CodeGenerator* gen, Type* var_type,
     push_struct_destroy_defer(gen, name, var_type, 0, 0);
 }
 
-static void hoist_if_else_common_vars(CodeGenerator* gen,
-                                       ASTNode* then_body,
-                                       ASTNode* else_body) {
-    if (!then_body || !else_body) return;
-    const char* then_names[HOIST_MAX_NAMES];
-    int then_count = hoist_direct_decl_names(then_body, then_names, 0, HOIST_MAX_NAMES);
-    const char* else_names[HOIST_MAX_NAMES];
-    int else_count = hoist_direct_decl_names(else_body, else_names, 0, HOIST_MAX_NAMES);
+/* Declare, before an if/else or a switch with a default, the names every arm
+ * binds (hoist_common_decl_names, shared with the typechecker), so the
+ * binding survives the arm (#2732 added the switch). */
+static void hoist_common_vars(CodeGenerator* gen, ASTNode* stmt) {
+    const char* names[HOIST_MAX_NAMES];
+    int count = hoist_common_decl_names(stmt, names, HOIST_MAX_NAMES);
 
-    for (int i = 0; i < then_count; i++) {
-        const char* n = then_names[i];
-        // Must appear in else_names too.
-        int in_else = 0;
-        for (int j = 0; j < else_count; j++) {
-            if (strcmp(n, else_names[j]) == 0) { in_else = 1; break; }
-        }
-        if (!in_else) continue;
+    for (int i = 0; i < count; i++) {
+        const char* n = names[i];
 
         // Skip if already declared at outer scope.
         if (is_var_declared(gen, n)) continue;
@@ -9801,23 +9809,9 @@ static void hoist_if_else_common_vars(CodeGenerator* gen,
         /* #2505: nor an actor's state field, which `n` writes in a handler. */
         if (is_actor_state_var(gen, n)) continue;
 
-        // Recover a usable type from either branch's initializer.
-        ASTNode* decl = hoist_find_decl(then_body, n);
-        Type* var_type = decl ? decl->node_type : NULL;
-        if ((!var_type || var_type->kind == TYPE_VOID
-             || var_type->kind == TYPE_UNKNOWN)
-            && decl && decl->child_count > 0
-            && decl->children[0] && decl->children[0]->node_type) {
-            var_type = decl->children[0]->node_type;
-        }
-        if (!var_type || var_type->kind == TYPE_VOID
-            || var_type->kind == TYPE_UNKNOWN) {
-            decl = hoist_find_decl(else_body, n);
-            if (decl && decl->child_count > 0
-                && decl->children[0] && decl->children[0]->node_type) {
-                var_type = decl->children[0]->node_type;
-            }
-        }
+        // Recover a usable type from the first arm that has one.
+        ASTNode* decl = hoist_common_first_decl(stmt, n);
+        Type* var_type = hoist_decl_type(decl);
         Type* joined = sibling_join_type(gen, n, var_type);
         if (joined) var_type = joined;
         print_indent(gen);
@@ -9825,8 +9819,8 @@ static void hoist_if_else_common_vars(CodeGenerator* gen,
          * value -- see hoist_loop_vars. */
         if (is_promoted_capture(gen, n)) {
             emit_promoted_cell_declaration(gen, n, get_c_type(var_type), var_type, NULL, NULL,
-                                           decl ? decl->line : then_body->line,
-                                           decl ? decl->column : then_body->column);
+                                           decl ? decl->line : stmt->line,
+                                           decl ? decl->column : stmt->column);
             if (joined) free_type(joined);
             continue;
         }
@@ -10219,7 +10213,7 @@ static int td_continue_target(CodeGenerator* gen, ASTNode* stmt) {
 // Pre-hoist variables first-declared inside if-statement branches at
 // the enclosing function-body scope, when:
 //   (a) the variable is referenced *outside* (after) the if-block, and
-//   (b) the existing hoist_if_else_common_vars hasn't already handled
+//   (b) the existing hoist_common_vars hasn't already handled
 //       it (which only fires when both branches declare the variable
 //       and they have a common else).
 //
@@ -14307,9 +14301,7 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
             // closing `}`, even though Aether semantics expect them to
             // survive the merge. See docs/notes/compiler_notes_from_vcr_port.md
             // item #2.
-            if (stmt->child_count > 2) {
-                hoist_if_else_common_vars(gen, stmt->children[1], stmt->children[2]);
-            }
+            hoist_common_vars(gen, stmt);
 
             fprintf(gen->output, "if (");
             if (stmt->child_count > 0) emit_condition(gen, stmt->children[0]);   /* #2582 */
@@ -14659,15 +14651,19 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                     int id = om_counter++;
                     ASTNode *none_body = NULL, *some_body = NULL, *wild_body = NULL;
                     const char* some_bind = NULL;
-                    for (int i = 1; i < stmt->child_count; i++) {
+                    /* Arms are tried in source order: the first arm for each
+                     * case is the one that runs, and none runs after a `_`
+                     * (#2728; a repeated or late arm took over). */
+                    for (int i = 1; i < stmt->child_count && !wild_body; i++) {
                         ASTNode* arm = stmt->children[i];
                         if (!arm || arm->type != AST_MATCH_ARM || arm->child_count < 2) continue;
                         ASTNode* pat = arm->children[0];
                         ASTNode* body = arm->children[1];
-                        if (pat->type == AST_NONE_LITERAL) none_body = body;
-                        else if (pat->type == AST_PATTERN_VARIABLE && pat->annotation &&
+                        if (pat->type == AST_NONE_LITERAL) {
+                            if (!none_body) none_body = body;
+                        } else if (pat->type == AST_PATTERN_VARIABLE && pat->annotation &&
                                  strcmp(pat->annotation, "some_pattern") == 0) {
-                            some_body = body; some_bind = pat->value;
+                            if (!some_body) { some_body = body; some_bind = pat->value; }
                         } else if (pat->node_type && pat->node_type->kind == TYPE_WILDCARD) {
                             wild_body = body;
                         } else if (pat->type == AST_IDENTIFIER && pat->value &&
@@ -14758,14 +14754,23 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                     /* #2696: a `break` in an arm leaves the loop or switch
                      * around the match, not this C switch. */
                     gen->c_break_depth++;
-                    for (int i = 1; i < stmt->child_count; i++) {
+                    /* Arms are tried in source order, and a C switch tries
+                     * them by value: a variant's first arm is its case, and
+                     * an arm after `_` never runs (#2728). Emitting them made
+                     * a duplicate `case`, which C rejects, or let a variant
+                     * below `_` take its value back. */
+                    const char* seen_variants[256];
+                    int nseen = 0;
+                    int after_wild = 0;
+                    for (int i = 1; i < stmt->child_count && !after_wild; i++) {
                         ASTNode* arm = stmt->children[i];
                         if (!arm || arm->type != AST_MATCH_ARM || arm->child_count < 2) continue;
                         ASTNode* pat = arm->children[0];
                         ASTNode* body = arm->children[1];
                         int is_wild =
                             (pat->node_type && pat->node_type->kind == TYPE_WILDCARD) ||
-                            (pat->value && strcmp(pat->value, "_") == 0);
+                            (pat->type == AST_IDENTIFIER && pat->value &&
+                             strcmp(pat->value, "_") == 0);
                         // A bare variant pattern (`Circle ->`) arrives as an
                         // AST_IDENTIFIER (parse_expression); accept that and
                         // the AST_PATTERN_VARIABLE form.
@@ -14774,6 +14779,14 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                             (pat->type == AST_IDENTIFIER ||
                              pat->type == AST_PATTERN_VARIABLE))
                             variant = pat->value;
+                        if (variant) {
+                            int dup = 0;
+                            for (int s = 0; s < nseen; s++)
+                                if (strcmp(seen_variants[s], variant) == 0) { dup = 1; break; }
+                            if (dup) continue;
+                            if (nseen < 256) seen_variants[nseen++] = variant;
+                        }
+                        if (is_wild) after_wild = 1;
                         print_indent(gen);
                         if (is_wild) {
                             fprintf(gen->output, "default: {\n");
@@ -14841,23 +14854,9 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                     generate_expression(gen, match_expr);
                     fprintf(gen->output, "_len;\n");
                 } else {
-                    // Emit temp variable for the match expression value
-                    Type* mexpr_type = match_expr->node_type;
-                    const char* match_c_type = "int";
-                    if (mexpr_type) {
-                        if (mexpr_type->kind == TYPE_STRING || mexpr_type->kind == TYPE_PTR)
-                            match_c_type = "const char*";
-                        else if (mexpr_type->kind == TYPE_FLOAT)
-                            match_c_type = "double";
-                        else if (mexpr_type->kind == TYPE_FLOAT32)
-                            match_c_type = "float";
-                        else if (mexpr_type->kind == TYPE_LONGDOUBLE)
-                            match_c_type = "long double";
-                        else if (mexpr_type->kind == TYPE_INT64)
-                            match_c_type = "int64_t";
-                        else if (mexpr_type->kind == TYPE_BOOL)
-                            match_c_type = "bool";
-                    }
+                    // Emit temp variable for the match expression value, of
+                    // the type a switch's lowered temp has.
+                    const char* match_c_type = scrutinee_c_type(match_expr);
                     /* #2582: a struct a call in the subject returns lives
                      * until the match is done, since the subject (a string
                      * field of it, say) is read by every arm. */
@@ -14877,8 +14876,9 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                     ASTNode* pattern = match_arm->children[0];
                     ASTNode* result = match_arm->children[1];
 
-                    // Check if wildcard pattern
-                    int is_wildcard = (pattern->type == AST_LITERAL &&
+                    // Check if wildcard pattern. The string literal "_" is
+                    // a string to compare with, not the wildcard.
+                    int is_wildcard = (pattern->type == AST_IDENTIFIER &&
                                       pattern->value &&
                                       strcmp(pattern->value, "_") == 0) ||
                                      (pattern->node_type &&
@@ -14968,13 +14968,19 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
             // ranged, lower the whole switch to an if-chain (comparing a temp
             // scrutinee via emit_selector_condition); plain / comma-list-only
             // switches keep the C `switch` for readable output.
-            int needs_chain = 0;
+            /* A C switch takes an integer; a string, a pointer or a float is
+             * compared by the if-chain, as a match is (#2727). */
+            int needs_chain = stmt->child_count > 0 && !switch_subject_is_integer(stmt->children[0]);
             for (int i = 1; i < stmt->child_count; i++) {
                 ASTNode* c = stmt->children[i];
                 if (c && c->type == AST_CASE_STATEMENT && c->child_count > 0 &&
                     !(c->value && strcmp(c->value, "default") == 0) &&
                     selector_has_range(c->children[0])) { needs_chain = 1; break; }
             }
+
+            /* #2732: names every case of a switch with a default binds are
+             * declared before it, as both arms of an if/else are. */
+            hoist_common_vars(gen, stmt);
 
             /* #2696: an unlabeled `break` in a case leaves the switch, in
              * whichever form it lowers to. */

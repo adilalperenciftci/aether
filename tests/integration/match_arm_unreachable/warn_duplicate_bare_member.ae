@@ -1,0 +1,14 @@
+// #2728: a second arm for the same enum member, written bare.
+import std.io
+
+enum Color { Red, Green, Blue }
+
+main() {
+    c = Color.Green
+    match c {
+        Green -> { println("green") }
+        Red -> { println("red") }
+        Green -> { println("unreachable") }
+        _ -> { println("other") }
+    }
+}

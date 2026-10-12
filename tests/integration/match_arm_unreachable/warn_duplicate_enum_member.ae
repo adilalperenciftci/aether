@@ -1,0 +1,15 @@
+// #2728: a second arm for the same enum member, written qualified. The
+// member is lowered to its constant before the arms are compared, so the
+// arms used to be keyed by nothing and the duplicate compiled clean.
+import std.io
+
+enum Color { Red, Green, Blue }
+
+main() {
+    c = Color.Red
+    match c {
+        Color.Red -> { println("red") }
+        Color.Red -> { println("unreachable") }
+        _ -> { println("other") }
+    }
+}
