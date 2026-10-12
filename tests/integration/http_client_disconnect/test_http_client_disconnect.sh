@@ -17,12 +17,13 @@ PY="$(sh "$ROOT/tests/scripts/find_python.sh" 2>/dev/null)" || PY=""
 [ -n "$PY" ] || { echo "  [SKIP] no working Python (a Windows Store alias is not one)"; exit 0; }
 
 . "$ROOT/tests/lib/wait_port.sh"
+. "$ROOT/tests/lib/server_jobs.sh"
 
 TMPDIR="$(mktemp -d)"
 UP_PID=""; PX_PID=""
 cleanup() {
-    [ -n "$UP_PID" ] && { kill "$UP_PID" 2>/dev/null || true; wait "$UP_PID" 2>/dev/null || true; }
-    [ -n "$PX_PID" ] && { kill "$PX_PID" 2>/dev/null || true; wait "$PX_PID" 2>/dev/null || true; }
+    stop_server "$UP_PID"
+    stop_server "$PX_PID"
     rm -rf "$TMPDIR"
 }
 trap cleanup EXIT

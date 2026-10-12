@@ -26,11 +26,12 @@
 # DESIGN — same defensive shape the proxy_pool tests landed in:
 #   - No `set -e` (transient curl flakes shouldn't kill the script
 #     silently; explicit `fail` calls do the right thing).
-#   - SIGKILL teardown via `kill -9` (TerminateProcess on MSYS2).
+#   - The host is ended through tests/lib/server_jobs.sh (#2479).
 #   - Polling-based wait_for_port (not sleep N).
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+. "$ROOT/tests/lib/server_jobs.sh"
 AE="$ROOT/build/ae"
 AETHERC="$ROOT/build/aetherc"
 
@@ -48,9 +49,7 @@ TMPDIR="$(mktemp -d)"
 HOST_PID=""
 
 cleanup() {
-    if [ -n "$HOST_PID" ]; then
-        kill -9 "$HOST_PID" 2>/dev/null || true
-    fi
+    kill_server "$HOST_PID"
     rm -rf "$TMPDIR"
 }
 trap cleanup EXIT
@@ -187,8 +186,7 @@ grep -q '^static fallback$' "$TMPDIR/body2" || \
     fail "static: body mismatch"
 
 # Tear down the happy-path host before the negative cases.
-kill -9 "$HOST_PID" 2>/dev/null || true
-wait "$HOST_PID" 2>/dev/null || true
+kill_server "$HOST_PID"
 HOST_PID=""
 
 # --- Test 3: missing .so path — host exits non-zero with KIND_NOT_FOUND ---

@@ -1,0 +1,13 @@
+// Writes its own pid where AE_RUN_PID_FILE says, then sleeps for up to two
+// minutes: the program `ae run` starts, which must end when ae does.
+import std.os
+import std.fs
+
+main() {
+    _e = fs.write(os.getenv("AE_RUN_PID_FILE"), "${os.getpid()}\n")
+    i = 0
+    while i < 120 {
+        sleep(1000)
+        i = i + 1
+    }
+}

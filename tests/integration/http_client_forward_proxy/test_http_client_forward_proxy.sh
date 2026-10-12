@@ -21,6 +21,7 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 . "$ROOT/tests/lib/wait_port.sh"
+. "$ROOT/tests/lib/server_jobs.sh"
 AE="$ROOT/build/ae"
 
 if ! command -v python3 >/dev/null 2>&1; then
@@ -30,8 +31,8 @@ fi
 
 TMPDIR="$(mktemp -d)"
 cleanup() {
-    [ -n "${ORIGIN_PID:-}" ] && kill "$ORIGIN_PID" 2>/dev/null || true
-    [ -n "${PROXY_PID:-}" ]  && kill "$PROXY_PID"  2>/dev/null || true
+    stop_server "${ORIGIN_PID:-}"
+    stop_server "${PROXY_PID:-}"
     wait 2>/dev/null || true
     rm -rf "$TMPDIR"
 }

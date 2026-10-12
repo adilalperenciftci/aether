@@ -16,6 +16,7 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+. "$ROOT/tests/lib/server_jobs.sh"
 AE="$ROOT/build/ae"
 PORT_OK=18192
 PORT_BAD=18193
@@ -43,8 +44,8 @@ cleanup() {
     # Every step tolerates its own failure: under `set -e` a failing command
     # in a trap abandons the rest of the handler, which would leak $TMP and
     # leave a non-zero status behind a test that had already passed.
-    if [ -n "$OK_PID" ];  then kill "$OK_PID"  2>/dev/null || :; fi
-    if [ -n "$BAD_PID" ]; then kill "$BAD_PID" 2>/dev/null || :; fi
+    stop_server "$OK_PID"
+    stop_server "$BAD_PID"
     rm -rf "$TMP" || :
     return 0
 }

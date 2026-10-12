@@ -2775,7 +2775,7 @@ help:
 	@echo "  make test-all       - Run both C and .ae tests"
 	@echo "  make check-standalone - Compile every standalone C main (benches, demos)"
 	@echo "  make check-docs       - Compile the documentation's complete examples"
-	@echo "  make check-tests      - The test suite can fail: verdicts reach the exit code, prune list is consistent, every std module has tests, listeners bind loopback"
+	@echo "  make check-tests      - The test suite can fail: verdicts reach the exit code, prune list is consistent, every std module has tests, listeners bind loopback, shell tests end background programs through server_jobs.sh"
 	@echo "  make check-contrib-modules - Type-check every non-host contrib module"
 	@echo "  make check-changelog  - Validate changelog fragments, catch a release-fold"
 	@echo "  make add-changelog    - Write a new_changelogs/ fragment (SECTION=, SLUG=)"
@@ -3181,7 +3181,7 @@ test-optional: compiler ae stdlib
 
 check-tests:
 	@echo "==================================="
-	@echo "  test suite (verdicts, prune list, loopback listeners)"
+	@echo "  test suite (verdicts, prune list, loopback listeners, shell kills)"
 	@echo "==================================="
 	@py=""; \
 	for cand in python3 python "py -3"; do \
@@ -3194,7 +3194,9 @@ check-tests:
 	    $$py tests/scripts/test_check_module_specs.py && \
 	    $$py tests/scripts/check_module_specs.py && \
 	    $$py tests/scripts/test_check_loopback_listeners.py && \
-	    $$py tests/scripts/check_loopback_listeners.py; \
+	    $$py tests/scripts/check_loopback_listeners.py && \
+	    $$py tests/scripts/test_check_shell_kills.py && \
+	    $$py tests/scripts/check_shell_kills.py; \
 	else \
 	    echo "  [SKIP] test suite checks — no working Python found"; \
 	    echo "         (checked on the Linux/macOS legs, which run the same target)"; \

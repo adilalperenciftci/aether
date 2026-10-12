@@ -34,6 +34,7 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 . "$ROOT/tests/lib/wait_port.sh"
+. "$ROOT/tests/lib/server_jobs.sh"
 AE="$ROOT/build/ae"
 
 if ! command -v curl >/dev/null 2>&1; then
@@ -44,10 +45,7 @@ fi
 TMPDIR="$(mktemp -d)"
 MARKER="$TMPDIR/marker"
 cleanup() {
-    if [ -n "${SRV_PID:-}" ]; then
-        kill "$SRV_PID" 2>/dev/null || true
-        wait "$SRV_PID" 2>/dev/null || true
-    fi
+    stop_server "${SRV_PID:-}"
     rm -rf "$TMPDIR"
 }
 trap cleanup EXIT
@@ -112,7 +110,7 @@ if [ "$(cat "$TMPDIR/work.body")" != "work-done" ]; then
 fi
 
 # --- shutdown: kill the process; on_stop fires from accept-loop teardown ---
-kill -TERM "$SRV_PID" 2>/dev/null || true
+signal_server TERM "$SRV_PID" || true
 
 # Give the on_stop hook up to 3s to fire (the accept poll has a 1s
 # timeout so the loop notices is_running flipped within ~1s).

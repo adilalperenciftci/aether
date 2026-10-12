@@ -153,6 +153,7 @@ check_one() {
         # run_bounded group-kill above won't reach an orphaned target —
         # reap it by path so a stuck program can't accumulate across the
         # run. (Harmless if already gone.)
+        # kill-ok: macOS only, and the target is no job of this shell
         pkill -9 -f "$bin" 2>/dev/null || true
         echo "  [FAIL] $t: leaks(1) TIMED OUT (>${LEAKS_TIMEOUT}s) — program did not exit"
         : >"$tmpdir/fail_$t"

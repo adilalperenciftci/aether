@@ -28,6 +28,7 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 . "$ROOT/tests/lib/wait_port.sh"
+. "$ROOT/tests/lib/server_jobs.sh"
 AE="$ROOT/build/ae"
 
 if ! command -v openssl >/dev/null 2>&1; then
@@ -41,11 +42,8 @@ fi
 
 TMPDIR="$(mktemp -d)"
 cleanup() {
-    if [ -n "${SRV_PID:-}" ]; then
-        kill "$SRV_PID" 2>/dev/null || true
-        # Suppress the "Terminated: 15" wait notice from the shell.
-        wait "$SRV_PID" 2>/dev/null || true
-    fi
+    # Reaped too, which keeps the shell's "Terminated" notice out of the log.
+    stop_server "${SRV_PID:-}"
     rm -rf "$TMPDIR"
 }
 trap cleanup EXIT

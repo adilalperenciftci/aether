@@ -17,6 +17,7 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+. "$ROOT/tests/lib/server_jobs.sh"
 AE="$ROOT/build/ae"
 PORT=18252
 
@@ -45,7 +46,7 @@ cleanup() {
     # `|| :` per line: under `set -e` a failure inside a trap abandons the
     # rest of the handler, leaking $TMP and leaving a non-zero exit behind an
     # already-printed [PASS].
-    if [ -n "$PEER_PID" ]; then kill "$PEER_PID" 2>/dev/null || :; fi
+    stop_server "$PEER_PID"
     rm -rf "$TMP" || :
     return 0
 }

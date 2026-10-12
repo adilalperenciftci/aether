@@ -15,6 +15,7 @@
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+. "$ROOT/tests/lib/server_jobs.sh"
 AE="$ROOT/build/ae"
 
 if [ ! -x "$AE" ]; then
@@ -87,7 +88,7 @@ AE
 
 "$tmp/drip" "$tmp/port.txt" > "$tmp/srv.log" 2>&1 &
 srv_pid=$!
-cleanup() { kill "$srv_pid" 2>/dev/null || true; rm -rf "$tmp" || true; }
+cleanup() { stop_server "$srv_pid"; rm -rf "$tmp" || true; }
 trap cleanup EXIT
 
 port=""

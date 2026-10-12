@@ -324,6 +324,20 @@ that:
   skipping does not belong in a gate (#2132 §3); `AE_SWEEP_OPTIONAL=1 make
   test-ae` puts them back in for a run that has the toolchain.
 
+### Ending what a shell test starts
+
+A driver that starts a server or client with `prog &` ends it through
+`tests/lib/server_jobs.sh` (`kill_server`, `stop_server`, `signal_server`),
+never with `kill "$pid"`. On Windows a signal sent to the MSYS2 stand-in of a
+native program makes the MSYS2 runtime signal unrelated processes found
+through recycled parent pids, the CI step's own shell among them (#2479); the
+helpers end the program itself there, and send a signal to a job elsewhere.
+`make check-tests` runs `tests/scripts/check_shell_kills.py`, which rejects a
+`kill` of a pid held in a variable, `pkill` and `killall` in `tests/**/*.sh`.
+`kill -0 "$pid"` (a liveness probe) is fine; a POSIX-only test whose subject
+is a signal to a process that is no job of the script marks that line
+`kill-ok: <why>`.
+
 ## Pull Request Requirements
 
 ### Docs-only PRs: skip CI with `[skip actions]`

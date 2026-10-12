@@ -14,6 +14,11 @@
 # a resource ceiling rather than a flaky machine, but nothing recorded what
 # was exhausted, so the kill was unattributable.
 #
+# It was not a resource: a test signalling one of its servers made the
+# MSYS2 runtime SIGKILL the step's own shell through a recycled Windows
+# parent pid (#2479, see tests/lib/server_jobs.sh). The trace stays, as
+# what it records is still the first thing to read when a sweep dies.
+#
 # MemAvailable is Linux-only. MSYS2 — the platform this exists to diagnose —
 # ships an 8-field /proc/meminfo with MemTotal/MemFree and NO MemAvailable,
 # so keying on MemAvailable alone printed "(mem unknown)" on Windows and

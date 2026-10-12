@@ -21,12 +21,13 @@ command -v openssl >/dev/null 2>&1 || { echo "  [SKIP] openssl not on PATH"; exi
 command -v curl    >/dev/null 2>&1 || { echo "  [SKIP] curl not on PATH"; exit 0; }
 
 . "$ROOT/tests/lib/wait_port.sh"
+. "$ROOT/tests/lib/server_jobs.sh"
 
 TMPDIR="$(mktemp -d)"
 UP_PID=""; PX_PID=""
 cleanup() {
-    [ -n "$UP_PID" ] && { kill "$UP_PID" 2>/dev/null || true; wait "$UP_PID" 2>/dev/null || true; }
-    [ -n "$PX_PID" ] && { kill "$PX_PID" 2>/dev/null || true; wait "$PX_PID" 2>/dev/null || true; }
+    stop_server "$UP_PID"
+    stop_server "$PX_PID"
     rm -rf "$TMPDIR"
 }
 trap cleanup EXIT

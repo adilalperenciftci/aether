@@ -25,6 +25,7 @@ fi
 AE="$ROOT/build/ae$EXE"
 [ -x "$AE" ] || { echo "  [SKIP] $NAME: build/ae not built"; exit 0; }
 LIMIT="${STOP_CYCLES_LIMIT:-40}"
+. "$ROOT/tests/lib/server_jobs.sh"
 
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP" || true' EXIT
@@ -40,8 +41,7 @@ pid=$!
 waited=0
 while kill -0 "$pid" 2>/dev/null; do
     if [ "$waited" -ge "$LIMIT" ]; then
-        kill -9 "$pid" 2>/dev/null
-        wait "$pid" 2>/dev/null
+        kill_server "$pid"
         echo "  [FAIL] $NAME: 50 start/stop cycles did not finish in ${LIMIT}s (a stop was lost, or each stop waited out the poll)"
         tail -5 "$TMP/out.log" | sed 's/^/        /'
         exit 1

@@ -1012,18 +1012,66 @@ static char* win_quote_arg(const char* arg, char* w) {
  * batch file's own expansion of %* and its path. */
 #define WIN_CMD_LINE_MAX 8000
 
+/* Spawns the program `ae run` launches (`forward` in ae_spawn) and waits for
+ * it, as _spawnvp(_P_WAIT) would, with the program in a job object that kills
+ * it when the job's last handle closes. ae holds that handle, so whatever
+ * ends ae (Ctrl-C, TerminateProcess from a supervisor or a test harness) ends
+ * the program with it: the Windows side of the POSIX signal forwarder, and
+ * for the same reason. A program left behind keeps its listening socket, and
+ * the next run of the same test cannot bind. When the program exits by
+ * itself the kill is disarmed first, so anything it started and meant to
+ * leave running stays. Where a job cannot be had (a parent job that refuses
+ * nesting), the program runs as before. Returns what _spawnvp(_P_WAIT) would:
+ * the exit status, or -1 with errno set when it never started. */
+static int win_spawn_run_child(const char* prog, char* const* list) {
+    HANDLE job = CreateJobObjectA(NULL, NULL);
+    if (job) {
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION li;
+        memset(&li, 0, sizeof li);
+        li.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        if (!SetInformationJobObject(job, JobObjectExtendedLimitInformation, &li, sizeof li)) {
+            CloseHandle(job);
+            job = NULL;
+        }
+    }
+    intptr_t h = _spawnvp(_P_NOWAIT, prog, (const char* const*)list);
+    if (h == -1) {
+        int e = errno;
+        if (job) CloseHandle(job);
+        errno = e;
+        return -1;
+    }
+    HANDLE child = (HANDLE)h;
+    if (job && !AssignProcessToJobObject(job, child)) {
+        CloseHandle(job);
+        job = NULL;
+    }
+    DWORD code = (DWORD)-1;
+    WaitForSingleObject(child, INFINITE);
+    GetExitCodeProcess(child, &code);
+    CloseHandle(child);
+    if (job) {
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION li;
+        memset(&li, 0, sizeof li);
+        SetInformationJobObject(job, JobObjectExtendedLimitInformation, &li, sizeof li);
+        CloseHandle(job);
+    }
+    errno = 0;
+    return (int)code;
+}
+
 /* Spawns argv[0] with `argv` through _spawnvp and waits for it. `quiet`
- * and `capture` as for run_command; `forward` has nothing to do here, as
- * Windows has no terminating signal to relay. Returns the exit status (for
- * a crash, the NTSTATUS the OS ended it with, negative as an int), or
- * AE_SPAWN_FAILED, with the reason printed, when it never started.
+ * and `capture` as for run_command; `forward` marks the program `ae run`
+ * launches, which goes through win_spawn_run_child, as Windows has no
+ * terminating signal to relay. Returns the exit status (for a crash, the
+ * NTSTATUS the OS ended it with, negative as an int), or AE_SPAWN_FAILED,
+ * with the reason printed, when it never started.
  *
  * _spawnvp joins its arguments with single spaces and quotes none of them,
  * so each goes in already quoted for the child's C runtime, the program's
  * own path included: a batch file runs through cmd.exe, which splits an
  * unquoted path at its spaces. The bare path is what _spawnvp looks up. */
 static int ae_spawn(char* const* argv, int quiet, const char* capture, int forward) {
-    (void)forward;
     int n = 0;
     size_t room = 0;
     for (; argv[n]; n++) room += 2 * strlen(argv[n]) + 3;
@@ -1092,7 +1140,9 @@ static int ae_spawn(char* const* argv, int quiet, const char* capture, int forwa
      * the child never started. A child CAN exit 0xFFFFFFFF, so -1 alone does
      * not separate the two; errno, cleared first, does. */
     errno = 0;
-    int ret = (int)_spawnvp(_P_WAIT, argv[0], (const char* const*)spawn_list);
+    int ret = forward
+        ? win_spawn_run_child(argv[0], spawn_list)
+        : (int)_spawnvp(_P_WAIT, argv[0], (const char* const*)spawn_list);
     int spawn_errno = (ret == -1) ? errno : 0;
     if (rsp_path[0]) remove(rsp_path);
     free(list);

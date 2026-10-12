@@ -11,7 +11,7 @@
 #
 # DESIGN — see part 1's header. Warm 3 upstreams + fresh proxy per
 # subtest, counters from proxy's own /proxy-metrics, no `set -e`,
-# polling on real observables, SIGKILL teardown.
+# polling on real observables, immediate kill_server teardown.
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
@@ -96,7 +96,7 @@ wait_for_port_soft() {
     return 1
 }
 
-# Retry the proxy bind: kill -9 + immediate rebind on 19100 can briefly lose
+# Retry the proxy bind: kill_server + immediate rebind on 19100 can briefly lose
 # to a TIME_WAIT listener even with SO_REUSEADDR — transient, so retry.
 start_proxy() {
     proxy_role="$1"
