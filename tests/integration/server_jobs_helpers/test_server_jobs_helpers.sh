@@ -90,5 +90,21 @@ else
     P=""
 fi
 
+# 5. A job that already ended with a failing status, not yet reaped: the
+# helpers answer 0 and a caller under `set -e` carries on. Tests run their
+# EXIT trap's stop_server after their [PASS] line, often under `set -e`, and
+# the job's own status (143 after signal_server TERM) became the test's.
+( set -e
+  sh -c 'exit 3' &
+  q=$!
+  sleep 0.5
+  stop_server "$q"
+  sh -c 'exit 5' &
+  q=$!
+  sleep 0.5
+  kill_server "$q"
+  echo carried-on ) > "$tmp/sete.out" 2>&1
+grep -q carried-on "$tmp/sete.out" || fail "a helper ended a set -e caller with a finished job's status"
+
 echo "  [PASS] $NAME: kill_server, stop_server and signal_server end and reap their jobs"
 exit 0

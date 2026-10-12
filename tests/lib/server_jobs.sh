@@ -87,7 +87,10 @@ _server_reap() {
         _si=$((_si + 1))
     done
     server_alive "$1" && return 1
-    wait "%$2" 2>/dev/null
+    # A reaped job's status is the program's: 143 or 137 when a signal ended
+    # it. It is not the helper's answer, and a caller under `set -e` (most
+    # tests) would exit with it, from its EXIT trap after its [PASS] line.
+    wait "%$2" 2>/dev/null || :
     return 0
 }
 
@@ -95,7 +98,7 @@ kill_server() {
     [ -n "$1" ] || return 0
     _sj=$(_server_job_number "$1")
     if [ -z "$_sj" ]; then
-        wait "$1" 2>/dev/null
+        wait "$1" 2>/dev/null || :   # status not ours: see _server_reap
         return 0
     fi
     if [ -n "$_SERVER_JOBS_WINDOWS" ]; then
@@ -116,7 +119,7 @@ stop_server() {
     fi
     _sj=$(_server_job_number "$1")
     if [ -z "$_sj" ]; then
-        wait "$1" 2>/dev/null
+        wait "$1" 2>/dev/null || :   # status not ours: see _server_reap
         return 0
     fi
     kill -TERM "%$_sj" 2>/dev/null
