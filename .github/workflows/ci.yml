@@ -184,21 +184,48 @@ jobs:
         path: .ci-cache
         key: audio-obj-${{ matrix.os }}-${{ matrix.cc }}-h${{ matrix.harden }}-${{ hashFiles('std/audio/miniaudio.h', 'std/audio/stb_vorbis.c', 'std/audio/aether_audio.c', 'std/audio/aether_audio.h') }}
 
-    # macOS leaks(1) gate (#468). Runs only on the ARM64 macOS job —
-    # one macOS arch is enough leak coverage, and MallocStackLogging
-    # is ~10x slower so we don't want it on both. Linux gets leak
-    # coverage from test-valgrind + ASan-LSan; this is the only
-    # detector that works on Apple Silicon (Apple clang ships ASan
-    # without LSan; upstream LSan hangs here).
+  # ============================================================
+  # macOS leaks(1) gate (#468), a job of its own (#2757)
+  #
+  # ARM64 only: one macOS arch is enough leak coverage, and
+  # MallocStackLogging is ~10x slower, so it is not run on both. Linux gets
+  # leak coverage from test-valgrind + ASan-LSan; this is the only detector
+  # that works on Apple Silicon (Apple clang ships ASan without LSan;
+  # upstream LSan hangs here).
+  #
+  # It used to be the last step of the macOS / Clang (ARM64) leg, after the
+  # whole `make ci` suite: 10.3 min of suite, then 11.7 min of gate, 22 min
+  # on the PR's critical path. It needs only the toolchain
+  # (test-macos-leaks: compiler ae stdlib), so it builds that on a runner of
+  # its own and runs beside the suite.
+  # ============================================================
+  ci-macos-leaks:
+    name: macOS leaks gate (ARM64)
+    runs-on: macos-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    # The ARM64 leg's miniaudio object (same OS, compiler and build
+    # variant, so the same key); restore only, the leg saves it.
+    - name: Restore miniaudio object cache
+      uses: actions/cache/restore@v4
+      with:
+        path: .ci-cache
+        key: audio-obj-macos-latest-clang-h0-${{ hashFiles('std/audio/miniaudio.h', 'std/audio/stb_vorbis.c', 'std/audio/aether_audio.c', 'std/audio/aether_audio.h') }}
+
     - name: macOS leaks gate
-      if: matrix.name == 'macOS / Clang (ARM64)'
       # Hard step cap as a backstop to the per-test timeouts inside
       # run_macos_leaks.sh: the gate can never hold a runner indefinitely.
-      # The gate covers the whole tests/regression suite (about 350
+      # The gate covers the whole tests/regression suite (about 490
       # programs, each ~10x slower under leaks + MallocStackLogging), so it
       # checks them one per core; one at a time it had grown past this cap.
-      timeout-minutes: 20
-      run: make test-macos-leaks
+      timeout-minutes: 25
+      # audio-cache-restore checks the object's content stamp before using
+      # it, as `make ci` does, and compiles from source on any mismatch.
+      run: |
+        CC=clang make audio-cache-restore
+        CC=clang make test-macos-leaks
 
   # ============================================================
   # FreeBSD cross-compile gate (#402)

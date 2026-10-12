@@ -42,10 +42,13 @@ cc "$SCRIPT_DIR/emcc_stub.c" -o "$TMP/bin/emcc" 2>"$TMP/stub.log" \
     || { cat "$TMP/stub.log"; fail "could not compile emcc_stub.c"; }
 
 # Install to a throwaway prefix. This is the only way to exercise the
-# installed-tree path resolution.
-if ! (cd "$ROOT" && make install PREFIX="$TMP/prefix" >"$TMP/install.log" 2>&1); then
+# installed-tree path resolution. The binaries `make` has just built, as the
+# other install-layout tests do (#2142): `make install` rebuilt the whole
+# toolchain as an -O3 LTO release first, 76 s of a test that checks where the
+# runtime sources land (#2757).
+if ! (cd "$ROOT" && AETHER_INSTALL_NO_BUILD=1 AETHER_INSTALL_NO_RC=1 ./install.sh "$TMP/prefix"         < /dev/null >"$TMP/install.log" 2>&1); then
     tail -15 "$TMP/install.log"
-    fail "make install PREFIX=... did not succeed"
+    fail "install.sh <prefix> did not succeed"
 fi
 
 [ -f "$TMP/prefix/share/aether/runtime/scheduler/aether_scheduler_coop.c" ] \

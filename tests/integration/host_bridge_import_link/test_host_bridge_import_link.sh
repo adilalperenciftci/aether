@@ -29,7 +29,9 @@ PY_A="$ROOT/build/contrib/libaether_host_python.a"
 INST_PY_A="$ROOT/lib/aether/libaether_host_python.a"
 if [ ! -f "$PY_A" ] && [ ! -f "$INST_PY_A" ]; then
     # Try to build it once.
-    (cd "$ROOT" && bash tests/scripts/contrib_build.sh) >/dev/null 2>&1 || true
+    # Only the bridge this test links (#2757): every contrib module took
+    # 70 to 80 s of the Windows sweep, for one archive.
+    (cd "$ROOT" && MODULES=python bash tests/scripts/contrib_build.sh) >/dev/null 2>&1 || true
 fi
 if [ ! -f "$PY_A" ] && [ ! -f "$INST_PY_A" ]; then
     echo "  [SKIP] host_bridge_import_link: libaether_host_python.a not built (python3-dev not installed?)"
