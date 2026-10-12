@@ -23,7 +23,7 @@ main() {
 
     // Test 2: write + read round-trip
     print("\nTest 2: write + read round-trip\n")
-    test_path = "${tmp}/aether_io_test.txt"
+    test_path = "${tmp}/aether_io_test_${os.getpid()}.txt"
     we = io.write_file(test_path, "hello io")
     if we != "" { println("  FAIL: write: ${we}"); exit(1) }
     content2, re2 = io.read_file(test_path)
@@ -79,7 +79,7 @@ main() {
 
     // Test 7: write empty content
     print("\nTest 7: write empty content\n")
-    test_path2 = "${tmp}/aether_io_empty_test.txt"
+    test_path2 = "${tmp}/aether_io_empty_test_${os.getpid()}.txt"
     we7 = io.write_file(test_path2, "")
     if we7 != "" { println("  FAIL: write: ${we7}"); exit(1) }
     content4, _ = io.read_file(test_path2)

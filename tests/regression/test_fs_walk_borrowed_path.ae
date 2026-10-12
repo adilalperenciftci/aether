@@ -22,7 +22,7 @@ main() {
 
     tmp = os.temp_dir()
 
-    root = "${tmp}/aether_walk_borrow_test"
+    root = "${tmp}/aether_walk_borrow_test_${os.getpid()}"
     sub = "${root}/nested"
     e = fs.mkdir_p(sub)
     if e != "" {

@@ -31,7 +31,7 @@ main() {
     println("=== fs.move regression ===")
 
     tmp = os.temp_dir()
-    tmpdir = "${tmp}/aether_fs_move_test"
+    tmpdir = "${tmp}/aether_fs_move_test_${os.getpid()}"
     fs.delete("${tmpdir}/src.txt")
     fs.delete("${tmpdir}/dst.txt")
     fs.delete("${tmpdir}/preexist.txt")

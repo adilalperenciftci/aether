@@ -26,15 +26,14 @@ import std.list
 extern exit(code: int)
 
 const CHILD_SRC = "tests/integration/std_ipc_bash_chain/child.ae"
-const CHILD_BIN = "/tmp/std_ipc_bash_chain_child"
 const EXPECTED_PAYLOAD = "via-bash=ok\n"
 
-build_child() -> string {
+build_child(bin: string) -> string {
     argv = list.new()
     list.add(argv, "build")
     list.add(argv, CHILD_SRC)
     list.add(argv, "-o")
-    list.add(argv, CHILD_BIN)
+    list.add(argv, bin)
     out, exit_code, err = os.run_capture("build/ae", argv, null)
     if err != "" { return "spawn error: ${err}" }
     if exit_code != 0 { return "ae build exit ${exit_code}: ${out}" }
@@ -45,12 +44,15 @@ main() {
     println("std.ipc bash-c-chain regression test")
     println("")
 
-    berr = build_child()
+    // A name of this process's own: two sweeps at once shared one fixed
+    // /tmp name, and one run's delete landed under the other (#2771).
+    child_bin = "${os.temp_dir()}/std_ipc_bash_chain_child_${os.getpid()}"
+    berr = build_child(child_bin)
     if berr != "" {
         println("FAIL: cannot build child: ${berr}")
         exit(1)
     }
-    println("  ✓ child compiled to ${CHILD_BIN}")
+    println("  ✓ child compiled to ${child_bin}")
 
     passed = 0
     failed = 0
@@ -62,7 +64,7 @@ main() {
     {
         argv = list.new()
         list.add(argv, "-c")
-        list.add(argv, "echo PRE; ${CHILD_BIN}; rc=$?; echo POST; exit $rc")
+        list.add(argv, "echo PRE; '${child_bin}'; rc=$?; echo POST; exit $rc")
         payload, exit_code, err = os.run_pipe_drain_and_wait("/bin/bash", argv, null)
         if err != "" {
             println("  [1] FAIL: err=${err}")
@@ -85,7 +87,7 @@ main() {
         }
     }
 
-    fs.delete(CHILD_BIN)
+    fs.delete(child_bin)
 
     println("")
     println("std_ipc_bash_chain: ${passed} passing, ${failed} failing (of 1)")

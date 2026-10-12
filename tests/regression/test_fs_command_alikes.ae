@@ -13,7 +13,7 @@ extern exit(code: int)
 main() {
     // Use the platform's temp dir, not a hardcoded /tmp (which does not exist
     // on Windows) — os.temp_dir() resolves per-OS (GetTempPath / TMPDIR / /tmp).
-    base = "${os.temp_dir()}/ae_fs_cmdalikes_test"
+    base = "${os.temp_dir()}/ae_fs_cmdalikes_test_${os.getpid()}"
     _r0 = fs.remove_tree(base) // fresh start (idempotent on a missing path)
 
     // --- build a small tree under base/src -----------------------------------

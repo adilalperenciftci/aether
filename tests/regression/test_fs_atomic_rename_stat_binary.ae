@@ -13,10 +13,13 @@ main() {
 
     // Pick a scratch dir — /tmp on POSIX, TEMP/TMPDIR on other platforms.
     tmp = os.temp_dir()
+    // Names of this process's own: two sweeps at once shared the fixed
+    // names and deleted or overwrote each other's files (#2771).
+    pid = os.getpid()
 
     // ---- Test 1: write_atomic round-trip ---------------------------
     println("\nTest 1: write_atomic writes what we gave it")
-    path_a = "${tmp}/aether_fs_atomic_test.txt"
+    path_a = "${tmp}/aether_fs_atomic_test_${pid}.txt"
     err = fs.write_atomic(path_a, string.bytes("hello atomic"))
     if err != "" {
         println("  FAIL: write_atomic returned err: ${err}")
@@ -59,8 +62,8 @@ main() {
 
     // ---- Test 4: rename round-trip --------------------------------
     println("\nTest 4: rename moves a file")
-    src = "${tmp}/aether_fs_rename_src.txt"
-    dst = "${tmp}/aether_fs_rename_dst.txt"
+    src = "${tmp}/aether_fs_rename_src_${pid}.txt"
+    dst = "${tmp}/aether_fs_rename_dst_${pid}.txt"
     fs.delete(dst) // ensure no leftover
     fs.write(src, "payload")
     err3 = fs.rename(src, dst)
@@ -82,6 +85,7 @@ main() {
 
     // ---- Test 5: rename of non-existent src errors ---------------
     println("\nTest 5: rename of non-existent source errors")
+    // tmp-ok: the source never exists, so the rename creates nothing.
     err4 = fs.rename("${tmp}/aether_fs_no_such_file", "${tmp}/aether_fs_target")
     if err4 == "" {
         println("  FAIL: expected error, got success")
@@ -91,7 +95,7 @@ main() {
 
     // ---- Test 6: file_stat on a regular file --------------------
     println("\nTest 6: file_stat on a regular file")
-    path_s = "${tmp}/aether_fs_stat_file.txt"
+    path_s = "${tmp}/aether_fs_stat_file_${pid}.txt"
     fs.write(path_s, "twelve bytes") // 12 bytes
     kind, size, mtime, err5 = fs.file_stat(path_s)
     if err5 != "" {
@@ -115,7 +119,7 @@ main() {
 
     // ---- Test 7: file_stat on a directory ------------------------
     println("\nTest 7: file_stat on a directory")
-    dir_s = "${tmp}/aether_fs_stat_dir"
+    dir_s = "${tmp}/aether_fs_stat_dir_${pid}"
     fs.create_dir(dir_s)
     kind_d, _, _, err6 = fs.file_stat(dir_s)
     if err6 != "" {
@@ -153,7 +157,7 @@ main() {
 
     // ---- Test 9: read_binary round-trip on a text file -----------
     println("\nTest 9: read_binary round-trip (text content)")
-    path_t = "${tmp}/aether_fs_rb_text.txt"
+    path_t = "${tmp}/aether_fs_rb_text_${pid}.txt"
     fs.write(path_t, "0123456789")
     data, n, err8 = fs.read_binary(path_t)
     if err8 != "" {
@@ -178,7 +182,7 @@ main() {
 
     // ---- Test 10: read_binary on an empty file -------------------
     println("\nTest 10: read_binary on an empty file")
-    path_e = "${tmp}/aether_fs_rb_empty.txt"
+    path_e = "${tmp}/aether_fs_rb_empty_${pid}.txt"
     fs.write(path_e, "")
     data_e, n_e, err9 = fs.read_binary(path_e)
     if err9 != "" {
@@ -216,8 +220,8 @@ main() {
     // ---- Test 12: write_atomic + rename composes for durable move ----
     println("\nTest 12: write_atomic + rename compose for durable move")
     // Pattern: write_atomic to a staging path, then rename into place.
-    stage = "${tmp}/aether_fs_stage.txt"
-    final_ = "${tmp}/aether_fs_final.txt"
+    stage = "${tmp}/aether_fs_stage_${pid}.txt"
+    final_ = "${tmp}/aether_fs_final_${pid}.txt"
     fs.delete(final_)
     err11 = fs.write_atomic(stage, string.bytes("staged payload"))
     if err11 != "" {

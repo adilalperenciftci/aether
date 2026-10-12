@@ -29,7 +29,7 @@ main() {
     // Set up: a known-existing directory and a known-existing file
     // inside it.
     tmp = os.temp_dir()
-    tmpdir = "${tmp}/aether_fs_exists_test"
+    tmpdir = "${tmp}/aether_fs_exists_test_${os.getpid()}"
     fs.create_dir(tmpdir)
     tmpfile = "${tmpdir}/probe"
     fs.write(tmpfile, "probe")

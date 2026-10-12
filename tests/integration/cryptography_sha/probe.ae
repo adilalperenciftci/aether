@@ -73,7 +73,7 @@ main() {
     // through fs.read_binary (length-aware AetherString); hash it.
     print("\nTest 4: sha256 of a 10-byte AetherString with NUL at offset 3\n")
     tmp = os.temp_dir()
-    path = "${tmp}/aether_crypto_nul_test.bin"
+    path = "${tmp}/aether_crypto_nul_test_${os.getpid()}.bin"
 
     ok = cryptography_probe_write_binary(path)
     if ok != 1 {

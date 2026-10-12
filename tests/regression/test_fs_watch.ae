@@ -13,21 +13,24 @@
 // Self-asserting: FAIL + exit 1 on mismatch, PASS at the end. Cleans up.
 
 import std.fs
+import std.os
 
 extern exit(code: int)
 
 main() {
-    base = "/tmp/ae_fs_watch_test"
+    base = "${os.temp_dir()}/ae_fs_watch_test_${os.getpid()}"
     _c = fs.create_dir(base)
     werr = fs.write("${base}/seed.txt", "seed")
     if werr != "" {
         println("SKIP fs.watch: cannot write probe (${werr})")
+        _rt1 = fs.remove_tree(base)
         return
     }
 
     w, err = fs.watch_open(base)
     if err != "" {
         println("SKIP fs.watch: ${err}")
+        _rt2 = fs.remove_tree(base)
         return
     }
 

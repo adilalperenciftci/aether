@@ -252,7 +252,7 @@ main() {
 
     // === FILE WRITE / READ ROUND-TRIP ===
     print("\nTest 21: file write + read round-trip\n")
-    test_path = "${tmp}/aether_edge_test.txt"
+    test_path = "${tmp}/aether_edge_test_${os.getpid()}.txt"
     we21 = file.write(test_path, "edge case test")
     if we21 != "" { println("  FAIL: write: ${we21}"); exit(1) }
     content, re21 = file.read(test_path)

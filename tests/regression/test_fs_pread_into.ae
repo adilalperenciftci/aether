@@ -19,7 +19,7 @@ main() {
 
     // Scratch dir idiom shared with the other std.fs tests.
     tmp = os.temp_dir()
-    path = "${tmp}/aether_test_pread_into.bin"
+    path = "${tmp}/aether_test_pread_into_${os.getpid()}.bin"
     fs.delete(path)
 
     // Five little-endian u64s (40 bytes). Two carry embedded NUL bytes so the

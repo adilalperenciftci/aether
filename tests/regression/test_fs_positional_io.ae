@@ -15,7 +15,7 @@ main() {
     // "/tmp" resolves to C:\tmp via fopen on Windows and isn't created,
     // so fs.open(w+) fails there (matches the other std.fs tests' idiom).
     tmp = os.temp_dir()
-    path = "${tmp}/aether_test_pio.bin"
+    path = "${tmp}/aether_test_pio_${os.getpid()}.bin"
     fs.delete(path)
     f, ferr = fs.open(path, "w+")
     if ferr != "" {

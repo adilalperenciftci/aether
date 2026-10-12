@@ -32,7 +32,7 @@ main() {
     print("=== aether_string_ffi_unwrap ===\n\n")
 
     tmp = os.temp_dir()
-    path = "${tmp}/aether_ffi_unwrap.bin"
+    path = "${tmp}/aether_ffi_unwrap_${os.getpid()}.bin"
 
     print("Test 1: setup — write 10-byte file via C shim\n")
     ok = ffi_shim_write_binary(path)

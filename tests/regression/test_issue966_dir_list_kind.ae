@@ -9,12 +9,13 @@
 // mismatch, PASS at the end. Cleans up.
 
 import std.fs(*)
+import std.os
 import std.string
 
 extern exit(code: int)
 
 main() {
-    base = "/tmp/ae_issue966_probe"
+    base = "${os.temp_dir()}/ae_issue966_probe_${os.getpid()}"
 
     // Fresh tree — returns captured so the generated C has no discarded-
     // value warning.
@@ -25,6 +26,7 @@ main() {
         // A sandboxed / read-only environment can't host the probe. Skip
         // rather than fail — the C accessor is exercised elsewhere too.
         println("SKIP dir_list_kind: cannot write probe (${werr})")
+        _rt = remove_tree(base)
         return
     }
     // Symlink is best-effort: some filesystems / platforms disallow it.

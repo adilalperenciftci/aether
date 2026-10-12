@@ -23,7 +23,7 @@ main() {
     print("=== fs.read_binary with embedded NULs ===\n\n")
 
     tmp = os.temp_dir()
-    path = "${tmp}/aether_rb_embedded_nul_test.bin"
+    path = "${tmp}/aether_rb_embedded_nul_test_${os.getpid()}.bin"
 
     print("Test 1: setup — write 10-byte file with NUL at offset 3\n")
     ok = rb_probe_write_binary(path)

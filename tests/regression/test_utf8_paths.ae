@@ -35,7 +35,7 @@ main() {
         return
     }
     println("=== UTF-8 paths and arguments ===")
-    base = "${os.temp_dir()}/aether_utf8_paths_ünï_日本"
+    base = "${os.temp_dir()}/aether_utf8_paths_ünï_日本_${os.getpid()}"
     fs.remove_tree(base)
     check("create a directory with a non-ASCII name", fs.create_dir(base) == "")
     file = "${base}/café.txt"

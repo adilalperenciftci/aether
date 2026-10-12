@@ -324,6 +324,22 @@ that:
   skipping does not belong in a gate (#2132 §3); `AE_SWEEP_OPTIONAL=1 make
   test-ae` puts them back in for a run that has the toolchain.
 
+### Files a test writes
+
+Two sweeps on one machine (two checkouts, or parallel agents) run the same
+tests at once, so a test that writes `"${os.temp_dir()}/my_test"` or
+`/tmp/my_test` has the other run delete or overwrite it mid-test (#2770,
+#2771). A test program names what it writes under the temp directory with
+its process id, `"${os.temp_dir()}/my_test_${os.getpid()}"`, or writes
+inside a directory from `fs.make_temp_dir`, and removes it when done. A
+shell test makes a directory of its own, `TMP="$(mktemp -d)"` removed by
+`trap 'rm -rf "$TMP"' EXIT`, and writes there. `make check-tests` runs
+`tests/scripts/check_ae_tmp.py`, which rejects a fixed name under
+`os.temp_dir()` or `/tmp` that a test `.ae` writes, and
+`tests/scripts/check_shell_tmp.py`, which rejects a fixed `/tmp/<name>` in a
+shell test's code. A write that must fail (and so cannot collide), or a path
+in a container of the test's own, is marked `tmp-ok: <why>`.
+
 ### Ending what a shell test starts
 
 A driver that starts a server or client with `prog &` ends it through

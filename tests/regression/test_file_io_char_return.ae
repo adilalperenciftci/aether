@@ -10,7 +10,7 @@ import std.fs
 main() {
     // Use platform temp dir: TEMP (Windows) or TMPDIR (Unix), fallback /tmp
     tmp = os.temp_dir()
-    test_file = "${tmp}/_aether_test_file_io_char.txt"
+    test_file = "${tmp}/_aether_test_file_io_char_${os.getpid()}.txt"
 
     // Test 1: Write and read back (Go-style wrappers return (value, err))
     _ = io.write_file(test_file, "hello aether")

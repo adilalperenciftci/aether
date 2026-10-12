@@ -32,7 +32,7 @@ main() {
     }
 
     total_ok = 1
-    dir = "/tmp/aeth_statkind_1368"
+    dir = "${os.temp_dir()}/aeth_statkind_1368_${os.getpid()}"
     _ = system("rm -rf ${dir}; mkdir -p ${dir}")
     _ = system("mkfifo ${dir}/f")
     _ = system("touch ${dir}/reg")

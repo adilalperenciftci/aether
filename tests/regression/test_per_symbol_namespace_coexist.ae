@@ -29,7 +29,7 @@ extern exit(code: int)
 // it works on Windows CI too — /tmp is not writable on native Windows.
 main() {
     tmp = os.temp_dir()
-    marker = "${tmp}/per_symbol_repro_marker"
+    marker = "${tmp}/per_symbol_repro_marker_${os.getpid()}"
 
     werr = fs.write(marker, "marker\n")
     if werr != "" {
