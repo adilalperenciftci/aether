@@ -36,7 +36,38 @@ main() {
   (Aether's argument checking is otherwise lenient; the distinct check is
   scoped to distinct types.)
 - **Base kinds:** scalars (`int`/`long`/`uint64`/`float`/`byte`/`bool`),
-  `string`, and `ptr`.
+  `string`, `ptr`, and the lane types (`type vec4 = distinct f32x4`).
+- **Operators** (TBD-2 below, option B, the `Duration` precedent):
+  - The same distinct type on both sides keeps it: `USD + USD` is a `USD`,
+    `vec4 * vec4` a `vec4`, `usd += other_usd` is legal. A comparison is a
+    `bool` (a lane mask for a lane type).
+  - Two *different* distinct types never mix, even over the same base:
+    `USD + EUR`, `USD < EUR`, `usd += eur` and `vec3 + vec4` (both
+    `distinct f32x4`) are each a type error (E0200) naming both types,
+    `'+' mixes distinct types USD and EUR`. Convert one side with `as`.
+  - A distinct lane type scaled by a scalar keeps the type: `vec4 * 0.5` and
+    `s * vec4` (a `float` `s`) are `vec4`s, as `Duration * n` is a
+    `Duration`. The scalar is not the lane type's base, so nothing is
+    unwrapped.
+  - A distinct type beside a plain value of its own base (`USD + 1.0`,
+    `usd * rate` for a `float` `rate`) is computed over the base and gives
+    the base: the result is a `float`, and becomes a `USD` again only
+    through `as USD`.
+
+```aether
+type USD = distinct float
+type EUR = distinct float
+
+main() {
+    a = 1.5 as USD
+    b = 2.0 as USD
+    total = a + b                    // a USD
+    let shown: float = total as float
+    let raw: float = a * 2.0         // USD with its base: a float
+    // a + (1.0 as EUR)              // error: '+' mixes distinct types USD and EUR
+    println("${shown} ${raw}")
+}
+```
 
 Original design rationale and open questions follow.
 
@@ -176,7 +207,12 @@ If `Port = distinct int`, does `port1 + port2` typecheck? Does
 | **C. Nim's `borrow` opt-in** | No operators by default; opt in with `type Port = distinct int with borrow(+, -, <, ==)`. Per-type fine-grained control. |
 | **D. All-or-nothing per declaration** | `type Port = distinct int with borrow` borrows everything; bare `distinct int` borrows nothing. Half-step between B and C. |
 
-**Maintainer call.** The Duration precedent chose option
+**Resolved:** option B, as implemented above (same distinct type keeps
+it, two different distinct types are a type error, a distinct lane type
+scaled by a scalar keeps it, a distinct type with a plain value of its base
+gives the base). Per-operator opt-in (option C) is not offered.
+
+**Maintainer call (original).** The Duration precedent chose option
 **B** behaviour (`Duration + Duration` → `Duration`, `Duration *
 scalar` → `Duration`, mixed comparisons rejected). Consistency
 suggests this is the default to extend; the question is whether to

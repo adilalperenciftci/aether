@@ -1219,6 +1219,7 @@ static int function_can_fail(Type* ret) {
  * none of them reach here as the statement's own expression. */
 Type* infer_type(ASTNode* expr, SymbolTable* table);   /* defined below */
 static void set_node_type(ASTNode* node, Type* fresh);
+static int binary_mixes_distinct(Type* lt, Type* rt, AeTokenType operator);
 static Type* resolve_fnptr_struct_field(SymbolTable* table, const char* recv_name,
                                         const char* field_name, int* out_is_ptr);
 static int check_unconsumed_result(ASTNode* expr, SymbolTable* table) {
@@ -3287,6 +3288,13 @@ Type* infer_type(ASTNode* expr, SymbolTable* table) {
         }
         
         case AST_BINARY_EXPRESSION:
+            /* Two distinct types mixed: already reported, and typed there
+             * so the error does not cascade (typecheck_binary_expression). */
+            if (expr->node_type && expr->child_count >= 2 &&
+                binary_mixes_distinct(expr->children[0]->node_type,
+                                      expr->children[1]->node_type,
+                                      get_token_type_from_string(expr->value)))
+                return clone_type(expr->node_type);
             return infer_binary_type(expr->children[0], expr->children[1],
                                    get_token_type_from_string(expr->value));
 
@@ -3653,7 +3661,55 @@ static ASTNode* numeric_literal_operand(ASTNode* n) {
     return NULL;
 }
 
+/* The two distinct types a binary operator would mix, or 0. `USD + EUR` (two
+ * distinct types over float) and `vec3 + vec4` (two over f32x4) are each a
+ * type error: a distinct type has nominal identity, so the operator is no
+ * more defined across two of them than an assignment or a call argument is.
+ * `=` is an assignment and is checked as one; `in` is a bit_set test. */
+static int binary_mixes_distinct(Type* lt, Type* rt, AeTokenType operator) {
+    if (operator == TOKEN_ASSIGN || operator == TOKEN_IN) return 0;
+    return lt && rt && lt->distinct_name && rt->distinct_name &&
+           strcmp(lt->distinct_name, rt->distinct_name) != 0;
+}
+
+static Type* infer_binary_type_by_kind(ASTNode* left, ASTNode* right, AeTokenType operator);
+
+/* A binary operator over distinct types (#480, docs/distinct-types.md).
+ *  - Two DIFFERENT distinct types never mix: TYPE_UNKNOWN, which the caller
+ *    reports naming both.
+ *  - The SAME distinct type on both sides keeps it: `USD + USD` is a USD and
+ *    `vec4 * vec4` a vec4 (a comparison is still a bool, or a lane mask).
+ *  - A distinct lane type beside a SCALAR keeps it: `vec4 * 0.5` scales a
+ *    vec4 the way `Duration * n` scales a Duration. The scalar is not the
+ *    lane type's base (f32x4), so nothing is unwrapped.
+ *  - A distinct type beside a plain value of its base (`USD + 1.0`,
+ *    `USD + f` for a float f) is unchanged: it is computed over the base and
+ *    the result is the base, which needs `as USD` to become a USD again. */
 Type* infer_binary_type(ASTNode* left, ASTNode* right, AeTokenType operator) {
+    Type* lt = left ? left->node_type : NULL;
+    Type* rt = right ? right->node_type : NULL;
+    if (binary_mixes_distinct(lt, rt, operator)) return create_type(TYPE_UNKNOWN);
+    Type* result = infer_binary_type_by_kind(left, right, operator);
+    if (!result || result->kind == TYPE_UNKNOWN || result->distinct_name ||
+        operator == TOKEN_ASSIGN || operator == TOKEN_IN ||
+        operator == TOKEN_EQUALS || operator == TOKEN_NOT_EQUALS ||
+        operator == TOKEN_LESS || operator == TOKEN_LESS_EQUAL ||
+        operator == TOKEN_GREATER || operator == TOKEN_GREATER_EQUAL ||
+        operator == TOKEN_AND || operator == TOKEN_OR) return result;
+    const char* keep = NULL;
+    Type* dt = (lt && lt->distinct_name) ? lt : (rt && rt->distinct_name) ? rt : NULL;
+    Type* other = (dt == lt) ? rt : lt;
+    if (dt && other && dt->kind == result->kind) {
+        if (other->distinct_name)
+            keep = dt->distinct_name;              /* same distinct both sides */
+        else if (is_lane_type(dt->kind) && !is_lane_type(other->kind))
+            keep = dt->distinct_name;              /* distinct lane * scalar */
+    }
+    if (keep) result->distinct_name = strdup(keep);
+    return result;
+}
+
+static Type* infer_binary_type_by_kind(ASTNode* left, ASTNode* right, AeTokenType operator) {
     Type* left_type = left ? left->node_type : NULL;
     Type* right_type = right ? right->node_type : NULL;
 
@@ -8732,10 +8788,18 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                         return 0;
                     }
                     if (!result_ok) {
-                        char emsg[300];
-                        snprintf(emsg, sizeof(emsg),
-                                 "'%s' is not defined for %s and %s",
-                                 opstr, type_name(symbol->type), type_name(rhs_type));
+                        char emsg[400];
+                        if (binary_mixes_distinct(symbol->type, rhs_type, op))
+                            snprintf(emsg, sizeof(emsg),
+                                     "'%s' mixes distinct types %s and %s: a distinct type does "
+                                     "not combine with another one; convert the right side "
+                                     "explicitly, `<value> as %s`",
+                                     opstr, type_name(symbol->type), type_name(rhs_type),
+                                     type_name(symbol->type));
+                        else
+                            snprintf(emsg, sizeof(emsg),
+                                     "'%s' is not defined for %s and %s",
+                                     opstr, type_name(symbol->type), type_name(rhs_type));
                         type_error(emsg, stmt->line, stmt->column);
                         if (result) free_type(result);
                         free_type(rhs_type);
@@ -11289,6 +11353,32 @@ int typecheck_binary_expression(ASTNode* expr, SymbolTable* table) {
         }
         set_node_type(expr, clone_type(left_type));
     } else {
+        if (binary_mixes_distinct(left_type, right_type, operator)) {
+            /* #480: two distinct types are nominally separate, so an
+             * operator does not mix them, as an assignment or a call
+             * argument does not. Reported by their own names: by their
+             * shared base it would read "float and float". */
+            char msg[400];
+            snprintf(msg, sizeof(msg),
+                     "'%s' mixes distinct types %s and %s: a distinct type does not "
+                     "combine with another one; convert one side explicitly, "
+                     "`<value> as %s`",
+                     expr->value ? expr->value : "?", left_type->distinct_name,
+                     right_type->distinct_name, left_type->distinct_name);
+            type_error(msg, expr->line, expr->column);
+            /* Typed as the operator would type it for one of them, so the
+             * one error is the report rather than the first of a cascade
+             * (`if a < b` "must be boolean", `c as float` "unknown"). */
+            int cmp = operator == TOKEN_EQUALS || operator == TOKEN_NOT_EQUALS ||
+                      operator == TOKEN_LESS || operator == TOKEN_LESS_EQUAL ||
+                      operator == TOKEN_GREATER || operator == TOKEN_GREATER_EQUAL ||
+                      operator == TOKEN_AND || operator == TOKEN_OR;
+            set_node_type(expr, cmp && !is_lane_type(left_type->kind)
+                                    ? create_type(TYPE_BOOL) : clone_type(left_type));
+            free_type(left_type);
+            free_type(right_type);
+            return 0;
+        }
         Type* result_type = infer_binary_type(left, right, operator);
         if (result_type->kind == TYPE_UNKNOWN &&
             left_type && left_type->kind != TYPE_UNKNOWN &&
