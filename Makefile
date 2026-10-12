@@ -3220,7 +3220,9 @@ check-tests:
 	    $$py tests/scripts/test_check_loopback_listeners.py && \
 	    $$py tests/scripts/check_loopback_listeners.py && \
 	    $$py tests/scripts/test_check_shell_kills.py && \
-	    $$py tests/scripts/check_shell_kills.py; \
+	    $$py tests/scripts/check_shell_kills.py && \
+	    $$py tests/scripts/test_check_shell_tmp.py && \
+	    $$py tests/scripts/check_shell_tmp.py; \
 	else \
 	    echo "  [SKIP] test suite checks — no working Python found"; \
 	    echo "         (checked on the Linux/macOS legs, which run the same target)"; \
