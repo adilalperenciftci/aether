@@ -1,0 +1,9 @@
+import std.lanes
+type vec3 = distinct f32x4
+type vec4 = distinct f32x4
+main() {
+    a = lanes.splat4(1.0) as vec3
+    b = lanes.splat4(2.0) as vec4
+    c = a + b
+    println("${(c as f32x4).x}")
+}

@@ -61,7 +61,9 @@ held — `i32x4` for `f32x4`, `i64x2` for `f64x2`. Feed it to `select4` /
 `mask2_and` / `mask2_or` / `mask2_not`), or reduce it to a `bool` with
 `any4` / `all4` / `any2` / `all2` when a branch is wanted. A scalar operand
 splats in a comparison as it does in arithmetic: `v > 2.0` compares every
-lane against 2.
+lane against 2. A scalar variable splats as a literal does (`v * s` with a
+`float` `s` is converted to the lane's element type first), on either side
+of the operator.
 
 `sqrt4` / `sqrt2` and `abs4` / `abs2` are the two libm shapes that belong
 here. Both are EXACT — an IEEE square root is correctly rounded, and

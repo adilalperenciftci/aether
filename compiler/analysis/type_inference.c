@@ -213,7 +213,41 @@ Type* infer_from_literal(const char* value) {
 }
 
 // Infer type from binary operation
+static Type* infer_from_binary_op_by_kind(Type* left, Type* right, const char* operator);
+
+static int ti_is_lane_kind(TypeKind k) {
+    return k == TYPE_F32X4 || k == TYPE_F64X2 || k == TYPE_I32X4 || k == TYPE_I64X2 ||
+           k == TYPE_I16X8 || k == TYPE_F32X8 || k == TYPE_I32X8;
+}
+
+/* #480: the distinct-type rule typechecker.c's infer_binary_type applies (it
+ * is the authority; this pass mirrors it so an inferred local gets the same
+ * type): two different distinct types do not mix, the same distinct type on
+ * both sides of an arithmetic or bitwise operator keeps it, and so does a
+ * distinct lane type scaled by a scalar. */
 Type* infer_from_binary_op(Type* left, Type* right, const char* operator) {
+    if (!left || !right) return create_type(TYPE_UNKNOWN);
+    int arith = strcmp(operator, "+") == 0 || strcmp(operator, "-") == 0 ||
+                strcmp(operator, "*") == 0 || strcmp(operator, "/") == 0 ||
+                strcmp(operator, "%") == 0 || strcmp(operator, "&") == 0 ||
+                strcmp(operator, "|") == 0 || strcmp(operator, "^") == 0 ||
+                strcmp(operator, "<<") == 0 || strcmp(operator, ">>") == 0;
+    if (strcmp(operator, "=") != 0 && strcmp(operator, "in") != 0 &&
+        left->distinct_name && right->distinct_name &&
+        strcmp(left->distinct_name, right->distinct_name) != 0)
+        return create_type(TYPE_UNKNOWN);
+    Type* result = infer_from_binary_op_by_kind(left, right, operator);
+    if (!arith || !result || result->kind == TYPE_UNKNOWN || result->distinct_name)
+        return result;
+    Type* dt = left->distinct_name ? left : right->distinct_name ? right : NULL;
+    Type* other = dt == left ? right : left;
+    if (dt && dt->kind == result->kind &&
+        (other->distinct_name || (ti_is_lane_kind(dt->kind) && !ti_is_lane_kind(other->kind))))
+        result->distinct_name = strdup(dt->distinct_name);
+    return result;
+}
+
+static Type* infer_from_binary_op_by_kind(Type* left, Type* right, const char* operator) {
     if (!left || !right) return create_type(TYPE_UNKNOWN);
     
     // Arithmetic operators: +, -, *, /, %

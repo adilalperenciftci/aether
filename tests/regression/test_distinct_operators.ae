@@ -1,0 +1,75 @@
+// Regression: an operator over distinct types (#480, docs/distinct-types.md).
+// The same distinct type on both sides keeps it (`USD + USD` is a USD, and
+// can be passed where a USD is wanted without a cast), a distinct lane type
+// scaled by a scalar keeps it (`vec4 * s` is a vec4), a comparison is a bool,
+// and a distinct type beside a plain value of its base is computed over the
+// base and gives the base. Mixing two DIFFERENT distinct types is a type
+// error: tests/integration/distinct_types/reject_mixed_*.ae.
+
+import std.lanes
+extern exit(code: int)
+
+type USD = distinct float
+type Fd = distinct int
+type vec4 = distinct f32x4
+
+usd_value(u: USD) -> float { return u as float }
+fd_value(f: Fd) -> int { return f as int }
+vec_y(v: vec4) -> float { return (v as f32x4).y }
+
+twice(u: USD) -> USD { return u + u }
+scaled(v: vec4, s: float) -> vec4 { return v * s }
+
+fail(label: string) {
+    println("FAIL distinct operators: ${label}")
+    exit(1)
+}
+
+main() {
+    a = 1.5 as USD
+    b = 2.0 as USD
+
+    // Same distinct type: the result is that type.
+    if usd_value(a + b) != 3.5 { fail("USD + USD") }
+    if usd_value(b - a) != 0.5 { fail("USD - USD") }
+    if usd_value(a * b) != 3.0 { fail("USD * USD") }
+    if usd_value(twice(a)) != 3.0 { fail("return USD + USD") }
+    total = a + b
+    let kept: USD = total
+    if usd_value(kept) != 3.5 { fail("inferred local of USD + USD") }
+    acc = 0.0 as USD
+    acc += a
+    acc += b
+    if usd_value(acc) != 3.5 { fail("USD += USD") }
+    if !(a < b) { fail("USD < USD") }
+    if a == b { fail("USD == USD") }
+
+    f = 6 as Fd
+    g = 3 as Fd
+    if fd_value(f & g) != 2 { fail("Fd & Fd") }
+    if fd_value(f - g) != 3 { fail("Fd - Fd") }
+
+    // A distinct type with a plain value of its base: computed over the base,
+    // the result is the base (a USD again only through `as`).
+    let raw: float = a + 1.0
+    if raw != 2.5 { fail("USD + float literal") }
+    rate = 2.0
+    let raw2: float = a * rate
+    if raw2 != 3.0 { fail("USD * float variable") }
+    if usd_value((a * rate) as USD) != 3.0 { fail("rewrap with as") }
+
+    // A distinct type over a lane type.
+    v = lanes.f32x4(1.0, 2.0, 3.0, 4.0) as vec4
+    w = lanes.f32x4(10.0, 20.0, 30.0, 40.0) as vec4
+    if vec_y(v + w) != 22.0 { fail("vec4 + vec4") }
+    if vec_y(w - v) != 18.0 { fail("vec4 - vec4") }
+    if vec_y(v * 3.0) != 6.0 { fail("vec4 * literal") }
+    s = 0.5
+    if vec_y(v * s) != 1.0 { fail("vec4 * float variable") }
+    if vec_y(s * w) != 10.0 { fail("float variable * vec4") }
+    if vec_y(scaled(w, s)) != 10.0 { fail("return vec4 * scalar") }
+    m = v < w
+    if !lanes.all4(m) { fail("vec4 < vec4 is a mask") }
+
+    println("PASS: operators over distinct types keep the type, and compare to bool")
+}

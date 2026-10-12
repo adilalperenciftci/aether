@@ -1,0 +1,10 @@
+type USD = distinct float
+type EUR = distinct float
+main() {
+    a = 1.0 as USD
+    b = 2.0 as EUR
+    c = a + b
+    if a < b { println("compared") }
+    a += b
+    println("${c as float}")
+}
