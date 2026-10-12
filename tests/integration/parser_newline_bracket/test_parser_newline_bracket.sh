@@ -2,8 +2,12 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
-SRC="/tmp/ae_528_newline_bracket.ae"
-OUT="/tmp/ae_528_newline_bracket.c"
+# A directory of its own, not fixed /tmp paths: two sweeps at once (two
+# checkouts, or parallel agents) overwrote each other's files (#2770).
+AE_TMP="$(mktemp -d)"
+trap 'rm -rf "$AE_TMP"' EXIT
+SRC="$AE_TMP/ae_528_newline_bracket.ae"
+OUT="$AE_TMP/ae_528_newline_bracket.c"
 
 cat > "$SRC" <<'AEOF'
 main() {
@@ -31,16 +35,16 @@ fi
 
 # Build it. Asserting on the emitted text alone cannot tell "separate
 # statement" from "separate statement that no C compiler accepts".
-BIN="/tmp/ae_528_newline_bracket_bin"
-if ! "$ROOT/build/ae" build "$SRC" -o "$BIN" >/tmp/ae_528_newline_bracket.log 2>&1; then
+BIN="$AE_TMP/ae_528_newline_bracket_bin"
+if ! "$ROOT/build/ae" build "$SRC" -o "$BIN" >$AE_TMP/ae_528_newline_bracket.log 2>&1; then
     echo "FAIL: the generated C does not compile"
-    sed 's/^/        /' /tmp/ae_528_newline_bracket.log | head -10
+    sed 's/^/        /' $AE_TMP/ae_528_newline_bracket.log | head -10
     exit 1
 fi
 if [ "$("$BIN")" != "OK" ]; then
     echo "FAIL: the built program did not print OK"
     exit 1
 fi
-rm -f "$BIN" /tmp/ae_528_newline_bracket.log
+rm -f "$BIN" $AE_TMP/ae_528_newline_bracket.log
 
 echo "PASS parser newline bracket"

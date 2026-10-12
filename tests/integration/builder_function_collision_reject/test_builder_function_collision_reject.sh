@@ -13,12 +13,16 @@
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+# A directory of its own, not fixed /tmp paths: two sweeps at once (two
+# checkouts, or parallel agents) overwrote each other's files (#2770).
+AE_TMP="$(mktemp -d)"
+trap 'rm -rf "$AE_TMP"' EXIT
 
 pass=0
 fail=0
 
 # --- Case 1: builder + function same name → rejected ---------------
-cat > /tmp/ae_bfc_bad.ae << 'EOF'
+cat > $AE_TMP/ae_bfc_bad.ae << 'EOF'
 extern println(s: string)
 
 gem(ctx: ptr, line: string) {
@@ -33,7 +37,7 @@ main() {
     println("x")
 }
 EOF
-output=$(AETHER_HOME="" "$ROOT/build/ae" build /tmp/ae_bfc_bad.ae -o /tmp/ae_bfc_bad_out 2>&1)
+output=$(AETHER_HOME="" "$ROOT/build/ae" build $AE_TMP/ae_bfc_bad.ae -o $AE_TMP/ae_bfc_bad_out 2>&1)
 if echo "$output" | grep -q "duplicate definition of 'gem'"; then
     echo "  [PASS] builder+function name collision rejected with diagnostic"
     pass=$((pass + 1))
@@ -46,7 +50,7 @@ fi
 # --- Case 2: multi-clause plain function (same name) → OK ----------
 # Two clauses of the same plain function is the legal pattern-matching
 # form and must NOT be flagged as a collision.
-cat > /tmp/ae_bfc_multiclause.ae << 'EOF'
+cat > $AE_TMP/ae_bfc_multiclause.ae << 'EOF'
 extern exit(code: int)
 
 classify(0) -> int { return 100 }
@@ -58,8 +62,8 @@ main() {
     exit(0)
 }
 EOF
-if AETHER_HOME="" "$ROOT/build/ae" build /tmp/ae_bfc_multiclause.ae -o /tmp/ae_bfc_mc_out 2>/dev/null; then
-    if /tmp/ae_bfc_mc_out; then
+if AETHER_HOME="" "$ROOT/build/ae" build $AE_TMP/ae_bfc_multiclause.ae -o $AE_TMP/ae_bfc_mc_out 2>/dev/null; then
+    if $AE_TMP/ae_bfc_mc_out; then
         echo "  [PASS] multi-clause plain function not flagged as collision"
         pass=$((pass + 1))
     else
@@ -72,7 +76,7 @@ else
 fi
 
 # --- Case 3: builder + function with DISTINCT names → OK -----------
-cat > /tmp/ae_bfc_distinct.ae << 'EOF'
+cat > $AE_TMP/ae_bfc_distinct.ae << 'EOF'
 extern exit(code: int)
 extern println(s: string)
 
@@ -88,7 +92,7 @@ main() {
     exit(0)
 }
 EOF
-if AETHER_HOME="" "$ROOT/build/ae" build /tmp/ae_bfc_distinct.ae -o /tmp/ae_bfc_d_out 2>/dev/null; then
+if AETHER_HOME="" "$ROOT/build/ae" build $AE_TMP/ae_bfc_distinct.ae -o $AE_TMP/ae_bfc_d_out 2>/dev/null; then
     echo "  [PASS] builder + function with distinct names compiles"
     pass=$((pass + 1))
 else
@@ -97,8 +101,8 @@ else
 fi
 
 # Cleanup
-rm -f /tmp/ae_bfc_bad.ae /tmp/ae_bfc_multiclause.ae /tmp/ae_bfc_distinct.ae \
-      /tmp/ae_bfc_bad_out /tmp/ae_bfc_mc_out /tmp/ae_bfc_d_out
+rm -f $AE_TMP/ae_bfc_bad.ae $AE_TMP/ae_bfc_multiclause.ae $AE_TMP/ae_bfc_distinct.ae \
+      $AE_TMP/ae_bfc_bad_out $AE_TMP/ae_bfc_mc_out $AE_TMP/ae_bfc_d_out
 
 echo ""
 echo "builder_function_collision_reject: $pass passed, $fail failed"

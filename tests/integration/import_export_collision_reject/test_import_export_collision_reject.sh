@@ -14,13 +14,17 @@
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+# A directory of its own, not fixed /tmp paths: two sweeps at once (two
+# checkouts, or parallel agents) overwrote each other's files (#2770).
+AE_TMP="$(mktemp -d)"
+trap 'rm -rf "$AE_TMP"' EXIT
 AE="$ROOT/build/ae"
 
 pass=0
 fail=0
 
 # --- Case 1: local `proxy_opts_new` + import std.http.proxy → reject ----
-cat > /tmp/ae_iec_bad.ae << 'EOF'
+cat > $AE_TMP/ae_iec_bad.ae << 'EOF'
 import std.http.proxy
 extern println(s: string)
 
@@ -31,7 +35,7 @@ main() {
     println("done")
 }
 EOF
-output=$(AETHER_HOME="$ROOT" "$AE" build /tmp/ae_iec_bad.ae -o /tmp/ae_iec_bad_out 2>&1)
+output=$(AETHER_HOME="$ROOT" "$AE" build $AE_TMP/ae_iec_bad.ae -o $AE_TMP/ae_iec_bad_out 2>&1)
 if echo "$output" | grep -q "error\[E1001\]"; then
     echo "  [PASS] import/export symbol collision rejected with error[E1001]"
     pass=$((pass + 1))
@@ -42,7 +46,7 @@ else
 fi
 
 # --- Case 2: same local name, NO colliding import → compiles ------------
-cat > /tmp/ae_iec_noimport.ae << 'EOF'
+cat > $AE_TMP/ae_iec_noimport.ae << 'EOF'
 extern println(s: string)
 
 proxy_opts_new() -> ptr { return 0 }
@@ -52,17 +56,17 @@ main() {
     println("ok")
 }
 EOF
-if AETHER_HOME="$ROOT" "$AE" build /tmp/ae_iec_noimport.ae -o /tmp/ae_iec_noimport_out >/tmp/ae_iec_ni.log 2>&1; then
+if AETHER_HOME="$ROOT" "$AE" build $AE_TMP/ae_iec_noimport.ae -o $AE_TMP/ae_iec_noimport_out >$AE_TMP/ae_iec_ni.log 2>&1; then
     echo "  [PASS] same name without the colliding import still compiles"
     pass=$((pass + 1))
 else
     echo "  [FAIL] false positive: no import should mean no collision:"
-    head -10 /tmp/ae_iec_ni.log | sed 's/^/    /'
+    head -10 $AE_TMP/ae_iec_ni.log | sed 's/^/    /'
     fail=$((fail + 1))
 fi
 
 # --- Case 3: import the module, non-colliding local name → compiles -----
-cat > /tmp/ae_iec_ok.ae << 'EOF'
+cat > $AE_TMP/ae_iec_ok.ae << 'EOF'
 import std.http.proxy
 extern println(s: string)
 
@@ -73,15 +77,15 @@ main() {
     println("ok")
 }
 EOF
-if AETHER_HOME="$ROOT" "$AE" build /tmp/ae_iec_ok.ae -o /tmp/ae_iec_ok_out >/tmp/ae_iec_ok.log 2>&1; then
+if AETHER_HOME="$ROOT" "$AE" build $AE_TMP/ae_iec_ok.ae -o $AE_TMP/ae_iec_ok_out >$AE_TMP/ae_iec_ok.log 2>&1; then
     echo "  [PASS] non-colliding local name with the import compiles"
     pass=$((pass + 1))
 else
     echo "  [FAIL] false positive: non-colliding name rejected:"
-    head -10 /tmp/ae_iec_ok.log | sed 's/^/    /'
+    head -10 $AE_TMP/ae_iec_ok.log | sed 's/^/    /'
     fail=$((fail + 1))
 fi
 
-rm -f /tmp/ae_iec_*.ae /tmp/ae_iec_*_out /tmp/ae_iec_*.log
+rm -f $AE_TMP/ae_iec_*.ae $AE_TMP/ae_iec_*_out $AE_TMP/ae_iec_*.log
 echo "  $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

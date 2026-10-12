@@ -3,6 +3,10 @@
 # Skips languages where dev packages aren't installed
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+# A directory of its own, not fixed /tmp paths: two sweeps at once (two
+# checkouts, or parallel agents) overwrote each other's files (#2770).
+AE_TMP="$(mktemp -d)"
+trap 'rm -rf "$AE_TMP"' EXIT
 PRELOAD="$ROOT/build/libaether_sandbox.so"
 PASS=0
 FAIL=0
@@ -31,7 +35,7 @@ echo ""
 # --- Lua ---
 echo "=== Lua ==="
 if [ $LUA_AVAILABLE -eq 0 ]; then skip "Lua"; else
-LUA_OUT=$(gcc -o /tmp/test_map_lua \
+LUA_OUT=$(gcc -o $AE_TMP/test_map_lua \
     "$ROOT/contrib/host/lua/aether_host_lua.c" \
     "$ROOT/runtime/aether_sandbox.c" \
     "$ROOT/runtime/aether_shared_map.c" \
@@ -70,7 +74,7 @@ int main() {
     return 0;
 }
 CEOF
-LD_PRELOAD="$PRELOAD" /tmp/test_map_lua 2>/dev/null)
+LD_PRELOAD="$PRELOAD" $AE_TMP/test_map_lua 2>/dev/null)
 check "Lua read" "lua:name=Alice,age=30,secret=nil" "$LUA_OUT"
 check "Lua write" "lua:result=hello Alice" "$LUA_OUT"
 check "Lua frozen" "lua:untampered=Alice" "$LUA_OUT"
@@ -80,7 +84,7 @@ fi
 echo ""
 echo "=== JS (Duktape) ==="
 if [ $JS_AVAILABLE -eq 0 ]; then skip "JS"; else
-JS_OUT=$(gcc -o /tmp/test_map_js \
+JS_OUT=$(gcc -o $AE_TMP/test_map_js \
     "$ROOT/contrib/host/duktape/aether_host_duktape.c" \
     "$ROOT/runtime/aether_sandbox.c" \
     "$ROOT/runtime/aether_shared_map.c" \
@@ -117,7 +121,7 @@ int main() {
     return 0;
 }
 CEOF
-/tmp/test_map_js 2>/dev/null)
+$AE_TMP/test_map_js 2>/dev/null)
 check "JS read" "js:name=Bob,count=7,secret=nil" "$JS_OUT"
 check "JS write" "js:result=14" "$JS_OUT"
 check "JS frozen" "js:untampered=Bob" "$JS_OUT"
@@ -127,7 +131,7 @@ fi
 echo ""
 echo "=== Python ==="
 if [ $PY_AVAILABLE -eq 0 ]; then skip "Python"; else
-PY_OUT=$(gcc -o /tmp/test_map_py \
+PY_OUT=$(gcc -o $AE_TMP/test_map_py \
     "$ROOT/contrib/host/python/aether_host_python.c" \
     "$ROOT/runtime/aether_sandbox.c" \
     "$ROOT/runtime/aether_shared_map.c" \
@@ -168,7 +172,7 @@ int main() {
     return 0;
 }
 CEOF
-LD_PRELOAD="$PRELOAD" /tmp/test_map_py 2>/dev/null)
+LD_PRELOAD="$PRELOAD" $AE_TMP/test_map_py 2>/dev/null)
 check "Python read" "py:name=Charlie,factor=5,secret=None" "$PY_OUT"
 check "Python write" "py:result=50" "$PY_OUT"
 check "Python frozen" "py:untampered=Charlie" "$PY_OUT"
@@ -178,7 +182,7 @@ fi
 echo ""
 echo "=== Perl ==="
 if [ $PERL_AVAILABLE -eq 0 ]; then skip "Perl"; else
-PERL_OUT=$(gcc -o /tmp/test_map_perl \
+PERL_OUT=$(gcc -o $AE_TMP/test_map_perl \
     "$ROOT/contrib/host/perl/aether_host_perl.c" \
     "$ROOT/runtime/aether_sandbox.c" \
     "$ROOT/runtime/aether_shared_map.c" \
@@ -216,7 +220,7 @@ int main() {
     return 0;
 }
 CEOF
-LD_PRELOAD="$PRELOAD" /tmp/test_map_perl 2>/dev/null)
+LD_PRELOAD="$PRELOAD" $AE_TMP/test_map_perl 2>/dev/null)
 check "Perl read" "perl:name=Dana,score=88,secret=nil" "$PERL_OUT"
 check "Perl frozen" "perl:untampered=Dana" "$PERL_OUT"
 fi
@@ -225,7 +229,7 @@ fi
 echo ""
 echo "=== Ruby ==="
 if [ $RUBY_AVAILABLE -eq 0 ]; then skip "Ruby"; else
-RUBY_OUT=$(gcc -o /tmp/test_map_ruby \
+RUBY_OUT=$(gcc -o $AE_TMP/test_map_ruby \
     "$ROOT/contrib/host/ruby/aether_host_ruby.c" \
     "$ROOT/runtime/aether_sandbox.c" \
     "$ROOT/runtime/aether_shared_map.c" \
@@ -265,7 +269,7 @@ int main() {
     return 0;
 }
 CEOF
-LD_PRELOAD="$PRELOAD" /tmp/test_map_ruby 2>/dev/null)
+LD_PRELOAD="$PRELOAD" $AE_TMP/test_map_ruby 2>/dev/null)
 check "Ruby read" "ruby:name=Eve,level=5,secret=nil" "$RUBY_OUT"
 check "Ruby frozen" "ruby:untampered=Eve" "$RUBY_OUT"
 fi
@@ -274,7 +278,7 @@ fi
 echo ""
 echo "=== Java ==="
 if [ $JAVA_AVAILABLE -eq 0 ] || [ ! -f "$ROOT/build/aether-sandbox.jar" ]; then skip "Java"; else
-JAVA_OUT=$(gcc -o /tmp/test_map_java \
+JAVA_OUT=$(gcc -o $AE_TMP/test_map_java \
     "$ROOT/runtime/aether_shared_map.c" \
     "$ROOT/runtime/aether_sandbox.c" \
     -I"$ROOT/runtime" \
@@ -320,7 +324,7 @@ int main() {
     return 0;
 }
 CEOF
-/tmp/test_map_java 2>/dev/null)
+$AE_TMP/test_map_java 2>/dev/null)
 check "Java read+write" "java:result=processed Frank" "$JAVA_OUT"
 check "Java status" "java:status=ok" "$JAVA_OUT"
 check "Java frozen" "java:untampered=Frank" "$JAVA_OUT"
@@ -334,7 +338,7 @@ if [ -z "$AETHER_FACTOR_SONAME" ] || [ -z "$AETHER_FACTOR_IMAGE" ] || \
     echo "  [SKIP] Factor: \$AETHER_FACTOR_SONAME / \$AETHER_FACTOR_IMAGE unset"
     echo "         (needs the aether-lang-dev/factor-language fork's libfactor + image)"
 else
-FACTOR_OUT=$(gcc -o /tmp/test_map_factor \
+FACTOR_OUT=$(gcc -o $AE_TMP/test_map_factor \
     "$ROOT/contrib/host/factor/aether_host_factor.c" \
     "$ROOT/runtime/aether_sandbox.c" \
     "$ROOT/runtime/aether_shared_map.c" \
@@ -375,7 +379,7 @@ int main() {
 }
 CEOF
 AETHER_FACTOR_SONAME="$AETHER_FACTOR_SONAME" AETHER_FACTOR_IMAGE="$AETHER_FACTOR_IMAGE" \
-    /tmp/test_map_factor 2>/dev/null)
+    $AE_TMP/test_map_factor 2>/dev/null)
 check "Factor map-reduce the" "factor:the=3" "$FACTOR_OUT"
 check "Factor map-reduce cat" "factor:cat=2" "$FACTOR_OUT"
 check "Factor discovered keys" "factor:keys=6" "$FACTOR_OUT"
@@ -387,5 +391,5 @@ echo "============================================"
 echo "  $PASS passed, $FAIL failed"
 echo "============================================"
 
-rm -f /tmp/test_map_lua /tmp/test_map_js /tmp/test_map_py /tmp/test_map_perl /tmp/test_map_ruby /tmp/test_map_java /tmp/test_map_factor
+rm -f $AE_TMP/test_map_lua $AE_TMP/test_map_js $AE_TMP/test_map_py $AE_TMP/test_map_perl $AE_TMP/test_map_ruby $AE_TMP/test_map_java $AE_TMP/test_map_factor
 exit $FAIL

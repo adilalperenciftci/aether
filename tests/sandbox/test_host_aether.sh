@@ -6,6 +6,10 @@
 #           libaether_sandbox.so in build/.
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+# A directory of its own, not fixed /tmp paths: two sweeps at once (two
+# checkouts, or parallel agents) overwrote each other's files (#2770).
+AE_TMP="$(mktemp -d)"
+trap 'rm -rf "$AE_TMP"' EXIT
 AE="$ROOT/build/ae"
 AETHERC="$ROOT/build/aetherc"
 PRELOAD="$ROOT/build/libaether_sandbox.so"
@@ -66,12 +70,12 @@ fi
 # ---------------------------------------------------------------
 echo "=== Compile ==="
 
-cat > /tmp/ae_host_test_hello.ae << 'EOF'
+cat > $AE_TMP/ae_host_test_hello.ae << 'EOF'
 main() { println("hello from hosted aether") }
 EOF
 
-AETHER_HOME="" "$AE" build /tmp/ae_host_test_hello.ae \
-    -o /tmp/ae_host_test_hello 2>/dev/null
+AETHER_HOME="" "$AE" build $AE_TMP/ae_host_test_hello.ae \
+    -o $AE_TMP/ae_host_test_hello 2>/dev/null
 check_rc "compile simple script" 0 $?
 
 # ---------------------------------------------------------------
@@ -80,7 +84,7 @@ check_rc "compile simple script" 0 $?
 echo ""
 echo "=== Run (unsandboxed) ==="
 
-OUT=$(/tmp/ae_host_test_hello 2>/dev/null)
+OUT=$($AE_TMP/ae_host_test_hello 2>/dev/null)
 check "stdout output" "hello from hosted aether" "$OUT"
 
 # ---------------------------------------------------------------
@@ -90,25 +94,25 @@ echo ""
 echo "=== Run sandboxed (allowed) ==="
 
 # Script that only prints — no network, no fs, no exec
-cat > /tmp/ae_host_test_print.ae << 'EOF'
+cat > $AE_TMP/ae_host_test_print.ae << 'EOF'
 main() { println("sandboxed ok") }
 EOF
 
-AETHER_HOME="" "$AE" build /tmp/ae_host_test_print.ae \
-    -o /tmp/ae_host_test_print 2>/dev/null
+AETHER_HOME="" "$AE" build $AE_TMP/ae_host_test_print.ae \
+    -o $AE_TMP/ae_host_test_print 2>/dev/null
 
 # The preload library needs AETHER_SANDBOX_GRANTS (a file) or
 # AETHER_SANDBOX_SHM to activate.  An empty grants file means
 # deny-all.  We create one for deny-all tests and a permissive
 # one for allow tests.
-DENY_ALL="/tmp/ae_host_grants_deny_$$"
+DENY_ALL="$AE_TMP/ae_host_grants_deny_$$"
 printf "" > "$DENY_ALL"
 
 if [ -f "$PRELOAD" ]; then
     OUT=$(LD_PRELOAD="$PRELOAD" \
           AETHER_SANDBOX_LOG=none \
           AETHER_SANDBOX_GRANTS="$DENY_ALL" \
-          /tmp/ae_host_test_print 2>/dev/null)
+          $AE_TMP/ae_host_test_print 2>/dev/null)
     check "sandboxed print works (deny-all)" \
         "sandboxed ok" "$OUT"
 else
@@ -122,7 +126,7 @@ fi
 echo ""
 echo "=== Run sandboxed (denied file read) ==="
 
-cat > /tmp/ae_host_test_fs.ae << 'EOF'
+cat > $AE_TMP/ae_host_test_fs.ae << 'EOF'
 import std.fs
 main() {
     f = file_open_raw("/etc/hostname", "r")
@@ -135,24 +139,24 @@ main() {
 }
 EOF
 
-AETHER_HOME="" "$AE" build /tmp/ae_host_test_fs.ae \
-    -o /tmp/ae_host_test_fs 2>/dev/null
+AETHER_HOME="" "$AE" build $AE_TMP/ae_host_test_fs.ae \
+    -o $AE_TMP/ae_host_test_fs 2>/dev/null
 
 if [ -f "$PRELOAD" ]; then
     # Deny-all grants file = no fs_read grant
     OUT=$(LD_PRELOAD="$PRELOAD" \
           AETHER_SANDBOX_LOG=none \
           AETHER_SANDBOX_GRANTS="$DENY_ALL" \
-          /tmp/ae_host_test_fs 2>/dev/null)
+          $AE_TMP/ae_host_test_fs 2>/dev/null)
     check "fs denied without grant" "denied" "$OUT"
 
     # With fs_read grant — should succeed
-    ALLOW_FS="/tmp/ae_host_grants_fs_$$"
+    ALLOW_FS="$AE_TMP/ae_host_grants_fs_$$"
     printf "fs_read:/etc/*\n" > "$ALLOW_FS"
     OUT=$(LD_PRELOAD="$PRELOAD" \
           AETHER_SANDBOX_LOG=none \
           AETHER_SANDBOX_GRANTS="$ALLOW_FS" \
-          /tmp/ae_host_test_fs 2>/dev/null)
+          $AE_TMP/ae_host_test_fs 2>/dev/null)
     check "fs allowed with grant" "opened" "$OUT"
     rm -f "$ALLOW_FS"
 else
@@ -166,7 +170,7 @@ fi
 echo ""
 echo "=== Run sandboxed (denied network) ==="
 
-cat > /tmp/ae_host_test_net.ae << 'EOF'
+cat > $AE_TMP/ae_host_test_net.ae << 'EOF'
 extern tcp_connect_raw(host: string, port: int) -> ptr
 main() {
     sock = tcp_connect_raw("127.0.0.1", 80)
@@ -178,14 +182,14 @@ main() {
 }
 EOF
 
-AETHER_HOME="" "$AE" build /tmp/ae_host_test_net.ae \
-    -o /tmp/ae_host_test_net 2>/dev/null
+AETHER_HOME="" "$AE" build $AE_TMP/ae_host_test_net.ae \
+    -o $AE_TMP/ae_host_test_net 2>/dev/null
 
 if [ $? -eq 0 ] && [ -f "$PRELOAD" ]; then
     OUT=$(LD_PRELOAD="$PRELOAD" \
           AETHER_SANDBOX_LOG=none \
           AETHER_SANDBOX_GRANTS="$DENY_ALL" \
-          /tmp/ae_host_test_net 2>/dev/null)
+          $AE_TMP/ae_host_test_net 2>/dev/null)
     check "tcp denied without grant" "net denied" "$OUT"
 else
     echo "  [SKIP] compile failed or sandbox not available"
@@ -215,7 +219,7 @@ SKIP=$((SKIP+1))
 echo ""
 echo "=== Run sandboxed (denied env) ==="
 
-cat > /tmp/ae_host_test_env.ae << 'EOF'
+cat > $AE_TMP/ae_host_test_env.ae << 'EOF'
 extern os_getenv(name: string) -> string
 main() {
     val = os_getenv("HOME")
@@ -227,14 +231,14 @@ main() {
 }
 EOF
 
-AETHER_HOME="" "$AE" build /tmp/ae_host_test_env.ae \
-    -o /tmp/ae_host_test_env 2>/dev/null
+AETHER_HOME="" "$AE" build $AE_TMP/ae_host_test_env.ae \
+    -o $AE_TMP/ae_host_test_env 2>/dev/null
 
 if [ $? -eq 0 ] && [ -f "$PRELOAD" ]; then
     OUT=$(LD_PRELOAD="$PRELOAD" \
           AETHER_SANDBOX_LOG=none \
           AETHER_SANDBOX_GRANTS="$DENY_ALL" \
-          /tmp/ae_host_test_env 2>/dev/null)
+          $AE_TMP/ae_host_test_env 2>/dev/null)
     check "env denied without grant" "env denied" "$OUT"
 else
     echo "  [SKIP] compile failed or sandbox not available"
@@ -244,12 +248,12 @@ fi
 # ---------------------------------------------------------------
 # Cleanup
 # ---------------------------------------------------------------
-rm -f /tmp/ae_host_test_hello /tmp/ae_host_test_hello.ae \
-      /tmp/ae_host_test_print /tmp/ae_host_test_print.ae \
-      /tmp/ae_host_test_fs /tmp/ae_host_test_fs.ae \
-      /tmp/ae_host_test_net /tmp/ae_host_test_net.ae \
-      /tmp/ae_host_test_exec \
-      /tmp/ae_host_test_env /tmp/ae_host_test_env.ae \
+rm -f $AE_TMP/ae_host_test_hello $AE_TMP/ae_host_test_hello.ae \
+      $AE_TMP/ae_host_test_print $AE_TMP/ae_host_test_print.ae \
+      $AE_TMP/ae_host_test_fs $AE_TMP/ae_host_test_fs.ae \
+      $AE_TMP/ae_host_test_net $AE_TMP/ae_host_test_net.ae \
+      $AE_TMP/ae_host_test_exec \
+      $AE_TMP/ae_host_test_env $AE_TMP/ae_host_test_env.ae \
       "$DENY_ALL"
 
 echo ""

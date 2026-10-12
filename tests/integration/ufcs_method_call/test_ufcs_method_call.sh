@@ -13,6 +13,10 @@
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+# A directory of its own, not fixed /tmp paths: two sweeps at once (two
+# checkouts, or parallel agents) overwrote each other's files (#2770).
+AE_TMP="$(mktemp -d)"
+trap 'rm -rf "$AE_TMP"' EXIT
 AE="$ROOT/build/ae"
 
 # --- Positive: the probe program runs and prints the pinned transcript --
@@ -48,31 +52,31 @@ if [ "$out" != "$expected" ]; then
 fi
 
 # --- Precedence: a genuine module call must NOT be hijacked by UFCS ------
-cat > /tmp/ae_ufcs_mod.ae << 'EOF'
+cat > $AE_TMP/ae_ufcs_mod.ae << 'EOF'
 import std.string
 main() {
     s = "hello"
     println("${string.length(s)}")
 }
 EOF
-mod_out=$(AETHER_HOME="" "$AE" run /tmp/ae_ufcs_mod.ae 2>&1)
+mod_out=$(AETHER_HOME="" "$AE" run $AE_TMP/ae_ufcs_mod.ae 2>&1)
 mod_rc=$?
-rm -f /tmp/ae_ufcs_mod.ae
+rm -f $AE_TMP/ae_ufcs_mod.ae
 if [ "$mod_rc" -ne 0 ] || [ "$mod_out" != "5" ]; then
     echo "ufcs_method_call: FAIL (module call regressed: rc=$mod_rc out=[$mod_out])"
     exit 1
 fi
 
 # --- Decline 1: no matching free function -> clean Undefined error -------
-cat > /tmp/ae_ufcs_nomatch.ae << 'EOF'
+cat > $AE_TMP/ae_ufcs_nomatch.ae << 'EOF'
 struct Foo { x }
 main() {
     f = Foo{ x: 1 }
     _ = f.no_such_method(2)
 }
 EOF
-nm_out=$(AETHER_HOME="" "$AE" build /tmp/ae_ufcs_nomatch.ae -o /tmp/ae_ufcs_nomatch_out 2>&1)
-rm -f /tmp/ae_ufcs_nomatch.ae /tmp/ae_ufcs_nomatch_out
+nm_out=$(AETHER_HOME="" "$AE" build $AE_TMP/ae_ufcs_nomatch.ae -o $AE_TMP/ae_ufcs_nomatch_out 2>&1)
+rm -f $AE_TMP/ae_ufcs_nomatch.ae $AE_TMP/ae_ufcs_nomatch_out
 if ! echo "$nm_out" | grep -q "Undefined function"; then
     echo "ufcs_method_call: FAIL (no-match UFCS did not produce Undefined-function error)"
     echo "$nm_out" | head -10 | sed 's/^/  /'
@@ -80,7 +84,7 @@ if ! echo "$nm_out" | grep -q "Undefined function"; then
 fi
 
 # --- Decline 2: first-param type mismatch -> must NOT rewrite ------------
-cat > /tmp/ae_ufcs_mismatch.ae << 'EOF'
+cat > $AE_TMP/ae_ufcs_mismatch.ae << 'EOF'
 struct A { x }
 struct B { y }
 takes_b(b: B, n: int) -> int { return b.y + n }
@@ -89,8 +93,8 @@ main() {
     _ = a.takes_b(2)
 }
 EOF
-mm_out=$(AETHER_HOME="" "$AE" build /tmp/ae_ufcs_mismatch.ae -o /tmp/ae_ufcs_mismatch_out 2>&1)
-rm -f /tmp/ae_ufcs_mismatch.ae /tmp/ae_ufcs_mismatch_out
+mm_out=$(AETHER_HOME="" "$AE" build $AE_TMP/ae_ufcs_mismatch.ae -o $AE_TMP/ae_ufcs_mismatch_out 2>&1)
+rm -f $AE_TMP/ae_ufcs_mismatch.ae $AE_TMP/ae_ufcs_mismatch_out
 if ! echo "$mm_out" | grep -q "Undefined function"; then
     echo "ufcs_method_call: FAIL (type-mismatched receiver was wrongly rewritten)"
     echo "$mm_out" | head -10 | sed 's/^/  /'

@@ -13,10 +13,14 @@
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+# A directory of its own, not fixed /tmp paths: two sweeps at once (two
+# checkouts, or parallel agents) overwrote each other's files (#2770).
+AE_TMP="$(mktemp -d)"
+trap 'rm -rf "$AE_TMP"' EXIT
 AE="$ROOT/build/ae"
 
 # --- Case 1: must be rejected with E0200 -----------------------------
-cat > /tmp/ae_modvar_bad.ae << 'EOF'
+cat > $AE_TMP/ae_modvar_bad.ae << 'EOF'
 import std.os
 var cell = 0
 main() {
@@ -24,8 +28,8 @@ main() {
     println("${cell}")
 }
 EOF
-out1=$(AETHER_HOME="" "$AE" build /tmp/ae_modvar_bad.ae -o /tmp/ae_modvar_bad_out 2>&1)
-rm -f /tmp/ae_modvar_bad.ae /tmp/ae_modvar_bad_out
+out1=$(AETHER_HOME="" "$AE" build $AE_TMP/ae_modvar_bad.ae -o $AE_TMP/ae_modvar_bad_out 2>&1)
+rm -f $AE_TMP/ae_modvar_bad.ae $AE_TMP/ae_modvar_bad_out
 if ! echo "$out1" | grep -q "E0200"; then
     echo "module_var_narrowing: FAIL (inferred-int global was NOT guarded)"
     echo "$out1" | head -20 | sed 's/^/  /'
@@ -33,7 +37,7 @@ if ! echo "$out1" | grep -q "E0200"; then
 fi
 
 # --- Case 2: explicit long global must compile -----------------------
-cat > /tmp/ae_modvar_long.ae << 'EOF'
+cat > $AE_TMP/ae_modvar_long.ae << 'EOF'
 import std.os
 var cell: long = 0
 main() {
@@ -41,9 +45,9 @@ main() {
     println("${cell}")
 }
 EOF
-out2=$(AETHER_HOME="" "$AE" build /tmp/ae_modvar_long.ae -o /tmp/ae_modvar_long_out 2>&1)
+out2=$(AETHER_HOME="" "$AE" build $AE_TMP/ae_modvar_long.ae -o $AE_TMP/ae_modvar_long_out 2>&1)
 rc2=$?
-rm -f /tmp/ae_modvar_long.ae /tmp/ae_modvar_long_out
+rm -f $AE_TMP/ae_modvar_long.ae $AE_TMP/ae_modvar_long_out
 if [ "$rc2" -ne 0 ]; then
     echo "module_var_narrowing: FAIL (explicit-long global was wrongly rejected)"
     echo "$out2" | head -20 | sed 's/^/  /'
@@ -51,7 +55,7 @@ if [ "$rc2" -ne 0 ]; then
 fi
 
 # --- Case 3: plain int global, int assignment must compile -----------
-cat > /tmp/ae_modvar_int.ae << 'EOF'
+cat > $AE_TMP/ae_modvar_int.ae << 'EOF'
 var counter = 0
 main() {
     counter = counter + 1
@@ -59,9 +63,9 @@ main() {
     println("${counter}")
 }
 EOF
-out3=$(AETHER_HOME="" "$AE" build /tmp/ae_modvar_int.ae -o /tmp/ae_modvar_int_out 2>&1)
+out3=$(AETHER_HOME="" "$AE" build $AE_TMP/ae_modvar_int.ae -o $AE_TMP/ae_modvar_int_out 2>&1)
 rc3=$?
-rm -f /tmp/ae_modvar_int.ae /tmp/ae_modvar_int_out
+rm -f $AE_TMP/ae_modvar_int.ae $AE_TMP/ae_modvar_int_out
 if [ "$rc3" -ne 0 ]; then
     echo "module_var_narrowing: FAIL (plain int global was wrongly rejected)"
     echo "$out3" | head -20 | sed 's/^/  /'
