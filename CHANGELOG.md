@@ -14,6 +14,290 @@ cut while your branch is open cannot fold your entry into the released section.
 
 ## [current]
 
+## [0.807.0]
+
+### Changed
+
+- **The language reference lists every `match` pattern.** Match Expressions
+  named only integer and string literals, `_` and list patterns. It now lists
+  each kind (literals, a variable or constant name, ranges, comma-lists,
+  `_`, enum members, sum variants, `none` / `some(v)` and list patterns),
+  what it matches and over what, with runnable examples, and the errors an
+  arm the value cannot match gives (#2730).
+
+### Fixed
+
+- **std.http's server answers a request line that is not HTTP with 400 and
+  closes the connection.** `THIS IS NOT HTTP` was taken for a request (method
+  `THIS`, path `IS`), answered 404, and the connection kept open for a next
+  request the client never sends, so the client sat on it until its own
+  timeout. A request line whose version is not `HTTP/1.0` or `HTTP/1.1`, and
+  any request that does not parse, is now answered `400 Bad Request` with
+  `Connection: close` (#2760).
+
+- **`ae test a.ae b.ae` runs both files.** Every argument that was not a flag
+  was assigned to one target and only that one was collected, so the second
+  file was dropped without a word and a failing test in it passed the run.
+  Every file and directory named now runs, in the order given, and the run
+  fails if any test in any of them fails. A target that is neither a file nor
+  a directory is an error naming it; it used to fall back to running
+  `tests/`, so a mistyped name ran something else and could pass (#2752).
+
+- **`ae <command> --help` prints the command's options and does nothing
+  else.** Inside a project `ae build --help` built the project: the build
+  skipped the flag as consumed by an earlier parse that had never acted on
+  it. Most commands had the same fault in some form: `run`, `check`,
+  `inspect`, `test` and `examples` ran or built, `install` and `upgrade` went
+  to the network, `repl` started, `use` and `lib-info` took `--help` for a
+  name, and `init`, `add`, `cache` and `bindgen` printed their usage as an
+  error. `-h` and `--help` are now answered before any command runs, for
+  every command, with its usage on stdout and exit code 0; after `--`, as in
+  `ae run app.ae -- --help`, they still go to the program. `ae help` lists
+  `lib-info` too (#2753).
+
+- **A hung test on Windows ends as `[TIMEOUT]` without signalling anything.**
+  The sweep's time limits were `timeout(1)`, which ends a hung test by
+  signalling its process group; on Windows a signal to the MSYS2 process
+  standing in for a native program makes the MSYS2 runtime signal unrelated
+  processes found through recycled parent pids, the CI step's own `bash`
+  among them, and a SIGTERM injects an exit into any native process it
+  reaches. On Windows the limits of `run_ae_test.sh`, `run_ae_sh_dir.sh`,
+  `run_stage.sh` (and the `-O0`/`-O2` comparison and `make examples-run`) are
+  now a job object around the test, which a small native watchdog
+  (`tests/lib/sweep_watchdog.c`) ends with TerminateJobObject: the test and
+  everything it started go, nothing else is touched, and the result is the
+  same 124 (#2758). Linux keeps `timeout(1)`.
+
+- **HTTPS on Windows trusts the system certificate store, and both TLS stacks
+  agree on what they trust.** Neither `std.http.client` over OpenSSL nor the
+  pure-Aether `std.cryptography.tls13_client` read the Windows store, so a
+  program copied to a machine without MSYS2 or Git for Windows could make no
+  HTTPS request, and the two looked for different bundle files, so one could
+  work where the other failed. Both now trust, unless `SSL_CERT_FILE` or
+  `SSL_CERT_DIR` is set, every certificate of the ROOT system store together
+  with the first bundle of one shared list: the bundle the release ships
+  beside the program, MSYS2's MINGW64 and UCRT64 bundles, then Git for
+  Windows'. An `SSL_CERT_FILE` that cannot be read now fails closed on the
+  OpenSSL stack too, as it did on the pure one, instead of falling back to
+  the bundle files (#2675).
+
+- **The C written for non-GCC compilers is checked in CI, by cl.exe itself.**
+  `tests/compiler/test_msvc_compat.sh`, which compiles generated C with
+  `AETHER_GCC_COMPAT 0` (the path MSVC takes), was run by no target or
+  workflow, and needed `python3`, which MSYS2 lacks. It now runs as strict C11
+  under gcc on the Linux / GCC leg and under cl.exe in the Windows workflow's
+  MSVC job, where the warnings that mean a C type error (an undeclared
+  function, a wrong argument type, a dropped qualifier) fail it; it gained a
+  closure over arrays a `try` body writes, the case of #2691. `make
+  test-msvc-compat` runs it locally (#2725). A string stored into an array
+  element is still a GNU statement expression on that path, which cl.exe
+  cannot compile (#2765).
+
+- **A `match` arm and a `switch` case are checked against the value they
+  compare.** Nothing checked an arm's pattern against the value matched, so
+  the C compiler met the mistakes: an arm naming no variable (`other ->`) was
+  "'other' undeclared" at a misplaced line, a string arm over an `int`
+  compared a pointer with an integer and never ran, a literal arm over an
+  optional or a sum was dropped without a word, and `none`, `some(v)`, a list
+  pattern or a range over a value they cannot match failed in C. Each is now
+  an error at the arm, saying what the arm compares and how to write it, and
+  a `switch` case is checked the same way. A comma-list of bare enum members
+  (`Red, Green ->`) and a bare member in a `switch` case now name the
+  members, where they were undeclared names in C; a `switch` over a string or
+  a float compares by content or value, where it was a C `switch` on a
+  pointer; and a `uint64` or `uint32` value is matched as itself, where it was
+  cut to an `int` (5000000000 took the arm for 705032704) (#2727).
+
+- **A receive arm frees the strings its locals hold.** A string a receive
+  arm built into a local (`msg = string.concat(w, "!")`) was never freed:
+  the handler declared the local's ownership flag but ran neither the
+  escape walk nor the exit frees a function body gets, so every message
+  that ran the arm leaked the string, and a pattern binding rebound to a
+  heap string (`w = string.concat(w, x)`) leaked the same way. A `string?`
+  or `*StringSeq` local of an arm was not tracked at all. An arm, and the
+  `after` arm of a `receive`, now run the same passes as a function body.
+  A store of such a local into a string state field (`label = msg`) gives
+  the state a string of its own: the local's buffer on the local's last
+  use (its flag cleared), a copy otherwise. The state used to take the
+  pointer while the local kept its flag set, and two state fields stored
+  from one local both owned the same buffer, which was freed twice
+  (#2748).
+
+- **W1004 reports a second arm for an enum member, a variant or `none`.**
+  `Color.Red ->` twice, `Red ->` twice or one of each in one `match` was not
+  reported as unreachable: the member had been lowered to its constant
+  before the arms were compared, and only literal arms were compared. Over an
+  enum, a sum or an optional, where the cases are known, every arm is now
+  compared, and a comma-list arm is reported when earlier arms name all its
+  values. The arm that runs is the first, as reported: a repeated variant arm
+  made a second C `case` for the same value, which the C compiler refused,
+  and a repeated `none` arm, or one after `_`, took the first one's place.
+  The string literal `"_"` is a string, not the wildcard: an arm for it is
+  compared, where it was taken for `_` and failed in C (#2728).
+
+- **The effect-tag error names a module's function as the source does.** An
+  `@pure` (or `@no_os`, ...) function of an imported module reaching a
+  disallowed call was named by its merged C name, `checks_shell`, instead of
+  `checks.shell`. It and the always-false `requires` error now name it as a
+  caller writes it, through the helper the missing-return error used (#2729).
+
+- **A name first bound in a `switch` case and read after the switch is one
+  variable, as one bound in an `if` branch is.** The type checker took the
+  cases for part of the enclosing scope, so `switch x { case 1: v = 10 ...
+  }` then `return v` passed it and failed in the C compiler ("'v'
+  undeclared"), since each case is a C block of its own. Each case is now a
+  scope of its own in the checker too, and the rules that let an `if`
+  branch's binding outlive the `if` apply to a switch's cases: read after a
+  switch at the top of the function body, bound in a `while` body, or bound
+  by every case of a switch with a `default`, it is declared ahead; any other
+  read after the switch is `Undefined variable` (#2732).
+
+- **A `match` whose value is used, with an arm that calls a function
+  returning nothing, is an error at that arm.** The `match` takes its value
+  from the arm that runs, and codegen stored the call's void in the result:
+  the C compiler stopped with "void value not ignored". A `match` that is
+  returned for its value, bound, or the value of an arm of such a `match`
+  now refuses the arm, naming the call and how to give the arm a value. An
+  arm that ends in a statement, such as a `return`, is accepted as before
+  (#2743).
+
+- **Whether a function returns a value is settled right for a tail called
+  on a receiver or through a parameter.** The settle that decides, before any
+  body is checked, which functions return a value (#2736) resolved the calls
+  in their returns by name, so a tail whose callee depends on what it is
+  called on was taken to give a value: a UFCS call (`b.show()`,
+  `mk(n).show()`), a call through a function-pointer field (`o.run(n)`) and a
+  call through a parameter typed `fn(int)` (`f(x)`). The function was emitted
+  as returning nothing while its caller returned its value, and the C
+  compiler stopped ("void value not ignored"), in either definition order.
+  The settle now runs after inference and resolves those calls as the
+  checker does, with the receiver's type. Also, `call(f, x)` through a typed
+  function pointer is the call `f(x)`, where it was emitted as a closure call
+  that C refused (#2744).
+
+- **A loop's local bound by an if-expression or a closure call, read before
+  its binding, has the binding's type.** The inference pass that types a
+  loop's locals before the checker declares them ahead of the loop typed
+  neither an if-expression nor a call through a local bound to a closure
+  literal, so `out = "${out}${prev}"` ahead of `prev = if i > 0 { "x" } else
+  { "y" }` (or `prev = call(f)` with `f = || -> "z"`) printed pointer values
+  as ints. It now types an if-expression by its arms, as the checker does,
+  and a call of a closure literal, directly or through a local every binding
+  of which is such a literal, by what the literal returns (#2745).
+
+- **A struct literal passed straight to a call is destroyed after it.** A
+  function or closure borrows a struct parameter (it disowns the copy's
+  strings on entry, or takes references of its own when it keeps the
+  value), so `reader(Item { name: string.concat(w, "old") })` left the
+  literal's strings to the caller, and nothing destroyed them: every call
+  leaked them, while the same literal bound to a local first was
+  destroyed at the local's scope exit. Such a literal is now a temporary
+  of its statement, as a struct a call returns is (#2582), destroyed once
+  the statement is done, nested literals and closure calls included; a
+  string the callee hands back from it is copied where the call is made,
+  so it outlives the literal (#2749).
+
+- **A `string?` in a tuple a function returns is its caller's own.** A
+  fresh string returned in a `string?` position (`return
+  string.concat(w, "x"), 1`) leaked on every call: the destructure
+  `a, n = two(w)` took it with the local's ownership flag left 0. Each
+  `string?` position of a named function's or a closure's tuple now hands
+  over a string of its own, as a single `string?` result does (#2740): a
+  fresh one or an owning local's as it is, a parameter, a literal or a
+  field copied, `none` as nothing; a whole tuple passed on from a C
+  function or a closure the compiler cannot name is copied the same way.
+  The destructured local owns it and frees the string it replaces, a `_`
+  slot frees it at once, and a `string?` parameter a tuple return copies
+  no longer keeps its caller's argument (#2751).
+
+- **A closure returned in a tuple is released by the local it lands in.**
+  `f, k = pair(piece)` over `return || { ... }, 1` never released the
+  closure's env: the destructure took the slot as a plain value, and the
+  tuple position was never asked whether the function hands its closure
+  over, so every call leaked the env. A position now hands its closure
+  over when every return puts there a closure literal, a call that hands
+  one over, a local nobody else keeps, or the same position of a tuple
+  call passed on, as a single closure result does (#2494). The
+  destructured local releases it at its scope exit, a rebinding releases
+  the one it replaces, a closure cell gives the slot's reference back
+  once it has taken its own, and a `_` slot gives it back at once. A
+  closure the callee only lends (a field it read, a parameter it hands
+  back) is left to its owner (#2756).
+
+- **A `return` from a block whose string shadows a local frees both.** A
+  C-style `for` loop's string variable (#2742), an owning `catch` binding
+  (#2333) and the `some(v)` binding of a match over a `string?` (#2750)
+  each live for one block and may shadow a local of their name. Both exit
+  frees were keyed by the name, so a `return` from inside the block freed
+  the block's value and then tested the block's flag again for the outer
+  local, whose value leaked. Such a binding is now renamed, with every use
+  inside its construct, to a name of its own before code is generated, so
+  each exit free reaches its own variable (#2746).
+
+- **An array a `try` body writes can be passed to a `T[N]` parameter.** Its
+  elements are volatile (#2690), and the callee's plain `E _param_a[N]`
+  discarded the qualifier: a warning, an error under `-Werror`. A `T[N]`
+  parameter is a value its callee copies, so such an argument (a local
+  array, an array field of a local struct, a parameter array, for a
+  function or a closure) is now copied into an array of the call's own,
+  read through a volatile pointer; any other argument passes as before
+  (#2723).
+
+- **A closure frees its `string?` and `*StringSeq` locals.** A closure body
+  ran the heap-string passes a function body runs but not their `string?`
+  and `*StringSeq` counterparts, so such a local was declared with no
+  ownership flag and no exit free, and every call of the closure leaked
+  what it held. The closure body now runs all of them, as a function body
+  does (#2761).
+
+- **A closure can capture a `catch` binding or a `some(v)` binding.** A
+  closure in a `catch e` handler that used `e`, or in the `some(v)` arm of
+  a match over an optional that used `v`, read an undeclared name in its
+  C body: capture discovery counted only declarations and parameters as
+  the enclosing function's locals. It worked only when the function also
+  had a local of the same name. Both bindings are captured now, typed as
+  the panic's reason string and as the optional's value, and the
+  closure's environment takes a reference of its own to a string it
+  captures, as for any string local (#2769).
+
+- **A hung test on macOS ends as `[TIMEOUT]` instead of holding the CI job.**
+  The sweep bounded each test and each `make ci` stage with `timeout(1)` or
+  `gtimeout`, and ran it with no limit where neither exists. GitHub's macOS
+  runners ship no coreutils, so there every `.ae` test, shell test and stage
+  ran unbounded: one hang held the job until GitHub's 6 hour ceiling, and a
+  run cancelled after 40 minutes left no log naming the test. Where neither
+  tool exists the bound is now perl, which every macOS has, with
+  `timeout(1)`'s behaviour: the command runs in a process group of its own,
+  which gets SIGTERM at the limit and SIGKILL after the grace period, and
+  the status is 124 (137 when it had to be killed). The `ci` matrix and the
+  Windows sweep jobs also carry a job-level `timeout-minutes`. The Windows
+  legs split in two give the job that runs all of `make ci` a third of the
+  sweep instead of half, so both halves finish together, and the macOS
+  x86_64 leg runs two half sweeps (with the C unit tests on one), leaving
+  the rest of `make ci` to the ARM64 leg, which runs it on macOS. The macOS
+  leaks gate runs as two jobs, half the regression suite each: on a 3-core
+  runner the whole suite took 19.5 minutes (#2772).
+
+- **`ae build --namespace` removes its temp workspace.** The build writes the
+  synthesized script, the describe stub and the generated C to
+  `<temp>/aether_ns_<pid>`, and left that directory behind after every
+  build, succeeded or failed, so a machine that builds namespaces often
+  collected hundreds of them. It is now removed on every way out of the
+  build, and one an earlier process with the same pid left is cleared before
+  use (#2773).
+
+### Performance
+
+- **`ae build --trace`, and any build from a toolchain without libaether.a,
+  compiles the runtime in parallel.** Such a source build handed every
+  runtime source (about 90) to the one compiler command that links the
+  program, which compiled them one after another. They are now compiled to
+  objects first, as many at a time as there are processors, and the link
+  takes the objects: message_trace's traced build went from 54 s to 17 s on
+  an 8-processor Windows machine. A compile that fails, or a compiler that is
+  a Windows batch file, falls back to the single command, which reports the
+  error as before (#2757).
+
 ## [0.806.0]
 
 ### Fixed
