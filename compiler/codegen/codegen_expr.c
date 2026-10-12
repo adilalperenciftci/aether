@@ -247,6 +247,7 @@ typedef struct ArgDrainWrap {
     int idx[16];        /* their child indices in the call node */
     int identity[16];   /* 1 = identity-guarded release (return-escape-only param) */
     int closure[16];    /* 1 = an owned closure (#2507), released through its env */
+    int optstr[16];     /* 1 = an owned `string?` (#2750), its string freed if it has one */
     int have_value;     /* the call yields a value: of C type ret_ct, or
                          * when that is NULL, of type ret_type */
     const char* ret_ct;
@@ -380,7 +381,7 @@ static int call_hands_back_temp_walk(CodeGenerator* gen, ASTNode* call) {
         ASTNode* arg = call->children[ai];
         /* The arguments arg_drain_select hoists as heap strings. */
         if (!arg || (arg->type != AST_FUNCTION_CALL && arg->type != AST_STRING_INTERP &&
-                     arg->type != AST_OR_ELSE)) continue;
+                     arg->type != AST_OR_ELSE && !is_owned_opt_string_unwrap(gen, arg))) continue;
         if (arg_drain_verdict(gen, call->value, NULL, ai, 0, &w) == 1 &&
             is_heap_string_expr(gen, arg)) return 1;
     }
@@ -472,8 +473,22 @@ static void arg_drain_select(CodeGenerator* gen, ASTNode* expr, int first_arg,
                           !(arg->value && strcmp(arg->value, "trailing") == 0);
         if (arg->type != AST_FUNCTION_CALL &&
             arg->type != AST_STRING_INTERP &&
-            arg->type != AST_OR_ELSE && !literal_arg) continue;
+            arg->type != AST_OR_ELSE && !literal_arg &&
+            !is_owned_opt_string_unwrap(gen, arg)) continue;
         if (arg_drain_lookup(arg)) continue;
+        /* #2750: a `string?` an Aether function handed over is the call's
+         * argument alone: its string is freed after the call when the
+         * parameter keeps nothing of it. */
+        if (is_owned_opt_string_call(gen, arg)) {
+            if (func_name && !g_fnptr_drain &&
+                opt_string_arg_freed_after_call(gen, func_name, ai)) {
+                w->identity[w->count] = 0;
+                w->closure[w->count] = 0;
+                w->optstr[w->count] = 1;
+                w->idx[w->count++] = ai;
+            }
+            continue;
+        }
         /* #2507: a closure a call hands over (call_returns_owned_closure),
          * passed on as an argument anywhere in an expression: dead after
          * the call when the parameter keeps nothing. */
@@ -481,6 +496,7 @@ static void arg_drain_select(CodeGenerator* gen, ASTNode* expr, int first_arg,
             if (owned_closure_arg_drainable(gen, expr, func_name, closure, ai, first_arg)) {
                 w->identity[w->count] = 0;
                 w->closure[w->count] = 1;
+                w->optstr[w->count] = 0;
                 w->idx[w->count++] = ai;
             }
             continue;
@@ -490,6 +506,7 @@ static void arg_drain_select(CodeGenerator* gen, ASTNode* expr, int first_arg,
         if (verdict < 0) continue;
         w->identity[w->count] = verdict;
         w->closure[w->count] = 0;
+        w->optstr[w->count] = 0;
         w->idx[w->count++] = ai;
     }
 }
@@ -525,6 +542,12 @@ static void arg_drain_open(CodeGenerator* gen, ASTNode* expr, ArgDrainWrap* w) {
             fprintf(gen->output, "; ");
             continue;
         }
+        if (w->optstr[h]) {
+            fprintf(gen->output, "%s %s = ", get_c_type(arg->node_type), names[h]);
+            generate_expression(gen, arg);
+            fprintf(gen->output, "; ");
+            continue;
+        }
         fprintf(gen->output, "char* %s = (char*)(", names[h]);
         generate_expression(gen, arg);
         fprintf(gen->output, "); ");
@@ -555,7 +578,7 @@ static void arg_drain_close(CodeGenerator* gen, ASTNode* expr, ArgDrainWrap* w) 
         int n = 0;
         for (int h = 0; h < w->count; h++) {
             const char* nm = arg_drain_lookup(expr->children[w->idx[h]]);
-            if (w->closure[h] || !w->identity[h] || !nm) continue;
+            if (w->closure[h] || w->optstr[h] || !w->identity[h] || !nm) continue;
             fprintf(gen->output, "%s(const char*)_ad_r != %s", n++ ? " && " : "if (", nm);
         }
         if (n) {
@@ -570,6 +593,8 @@ static void arg_drain_close(CodeGenerator* gen, ASTNode* expr, ArgDrainWrap* w) 
         if (!nm) continue;
         if (w->closure[h]) {
             fprintf(gen->output, "_aether_closure_env_release(%s.env); ", nm);
+        } else if (w->optstr[h]) {
+            fprintf(gen->output, "if (%s.has) aether_heap_str_free((void*)%s.val); ", nm, nm);
         } else if (w->identity[h] && !w->discarded) {
             /* Return-escape-only param: free the fresh temp ONLY if the
              * call did not return it. The temp is a fresh heap string of
@@ -635,7 +660,8 @@ int interp_segment_is_text(ASTNode* ch) {
  * must free once printf / _aether_interp has read it. */
 int interp_segment_is_heap_call(CodeGenerator* gen, ASTNode* ch) {
     if (!ch) return 0;
-    if (ch->type != AST_FUNCTION_CALL && ch->type != AST_STRING_INTERP) return 0;
+    if (ch->type != AST_FUNCTION_CALL && ch->type != AST_STRING_INTERP &&
+        !is_owned_opt_string_unwrap(gen, ch)) return 0;   /* #2750 */
     TypeKind tk = ch->node_type ? ch->node_type->kind : TYPE_UNKNOWN;
     if (tk != TYPE_STRING && tk != TYPE_PTR) return 0;
     return is_heap_string_expr(gen, ch);
@@ -4444,7 +4470,8 @@ void emit_message_array_hoists(CodeGenerator* gen, ASTNode* message, MessageDef*
  * Nothing else frees it, so every such send leaked one string. */
 void emit_message_string_copy(CodeGenerator* gen, const char* lv, ASTNode* init) {
     int owned_temp = init &&
-        (init->type == AST_FUNCTION_CALL || init->type == AST_STRING_INTERP) &&
+        (init->type == AST_FUNCTION_CALL || init->type == AST_STRING_INTERP ||
+         is_owned_opt_string_unwrap(gen, init)) &&
         is_heap_string_expr(gen, init);
     fprintf(gen->output,
             "if (%s) { const char* _mt = %s; size_t _ml = aether_string_length(_mt); "
@@ -5319,7 +5346,9 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
     if (expr->type == AST_FUNCTION_CALL ||
         expr->type == AST_STRING_INTERP ||
         expr->type == AST_CLOSURE ||
-        expr->type == AST_OR_ELSE) {
+        expr->type == AST_OR_ELSE ||
+        expr->type == AST_TUPLE_UNWRAP ||
+        expr->type == AST_NULL_COALESCE) {
         const char* sub = arg_drain_lookup(expr);
         if (sub) {
             fprintf(gen->output, "%s", sub);
@@ -5663,7 +5692,19 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
             fprintf(gen->output, "({ %s _nc%d = ", get_c_type(ot), id);
             generate_expression(gen, operand);
             fprintf(gen->output, "; _nc%d.has ? _nc%d.val : (", id, id);
-            generate_expression(gen, expr->children[1]);
+            if (is_owned_opt_string_unwrap(gen, expr)) {
+                /* #2750: over an owned `string?` call the value is the
+                 * call's string, a fresh one, so the default is made one of
+                 * its own too (a fresh default adopted, anything else
+                 * copied): the expression is uniformly a heap string its
+                 * consumer frees, as a fallible's `or` is. */
+                ASTNode* dflt = expr->children[1];
+                fprintf(gen->output, "aether_uniform_heap_str((const char*)(");
+                generate_expression(gen, dflt);
+                fprintf(gen->output, "), %d)", is_fresh_heap_string_temp(gen, dflt) ? 1 : 0);
+            } else {
+                generate_expression(gen, expr->children[1]);
+            }
             fprintf(gen->output, "); })");
             break;
         }
@@ -6336,6 +6377,16 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                     if ((l_opt && r_none) || (r_opt && l_none)) {
                         // `x == none` -> !x.has ;  `x != none` -> x.has
                         ASTNode* opt = l_opt ? L : R;
+                        if (is_owned_opt_string_call(gen, opt)) {
+                            /* #2750: the call's string is the comparison's
+                             * to free once the flag is read. */
+                            fprintf(gen->output, "({ %s _on = ", get_c_type(opt->node_type));
+                            generate_expression(gen, opt);
+                            fprintf(gen->output, "; int _onv = %s_on.has; "
+                                    "if (_on.has) aether_heap_str_free((void*)_on.val); _onv; })",
+                                    is_eq ? "!" : "");
+                            break;
+                        }
                         fprintf(gen->output, "(%s(", is_eq ? "!" : "");
                         generate_expression(gen, opt);
                         fprintf(gen->output, ").has)");
@@ -6359,10 +6410,17 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                         fprintf(gen->output, "; %s _r = ", get_c_type(R->node_type));
                         generate_expression(gen, R);
                         if (str_val) {
+                            /* #2750: an owned `string?` call's string is
+                             * freed once compared. */
                             fprintf(gen->output,
-                                "; %s(_l.has == _r.has && (!_l.has || "
-                                "string_equals(_l.val, _r.val))); }))",
+                                "; int _lrv = %s(_l.has == _r.has && (!_l.has || "
+                                "string_equals(_l.val, _r.val)));",
                                 is_eq ? "" : "!");
+                            if (is_owned_opt_string_call(gen, L))
+                                fprintf(gen->output, " if (_l.has) aether_heap_str_free((void*)_l.val);");
+                            if (is_owned_opt_string_call(gen, R))
+                                fprintf(gen->output, " if (_r.has) aether_heap_str_free((void*)_r.val);");
+                            fprintf(gen->output, " _lrv; }))");
                         } else {
                             fprintf(gen->output,
                                 "; %s(_l.has == _r.has && (!_l.has || _l.val == _r.val)); }))",
@@ -6402,10 +6460,12 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                     ASTNode* cl = expr->children[0];
                     ASTNode* cr = expr->children[1];
                     int drain_l = (cl->type == AST_FUNCTION_CALL ||
-                                   cl->type == AST_STRING_INTERP) &&
+                                   cl->type == AST_STRING_INTERP ||
+                                   is_owned_opt_string_unwrap(gen, cl)) &&
                                   is_heap_string_expr(gen, cl);
                     int drain_r = (cr->type == AST_FUNCTION_CALL ||
-                                   cr->type == AST_STRING_INTERP) &&
+                                   cr->type == AST_STRING_INTERP ||
+                                   is_owned_opt_string_unwrap(gen, cr)) &&
                                   is_heap_string_expr(gen, cr);
                     if (drain_l || drain_r) {
                         if (!skip_parens) fprintf(gen->output, "(");

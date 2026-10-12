@@ -92,6 +92,14 @@ int is_seq_owning_expr(CodeGenerator* gen, ASTNode* expr);
  * temp lifetime wrap (ArgDrainSub) to detect heap-returning
  * function calls in argument position. */
 int is_heap_string_expr(CodeGenerator* gen, ASTNode* expr);
+/* #2750: a call of an Aether function returning `string?` (handed over
+ * owned, #2740), and `!` / `??` over one; a heap string nobody else holds
+ * (a call, an interpolation, an `or`, such an unwrap) that the expression
+ * reading it frees; and whether a `string?` argument is free after a call. */
+int is_owned_opt_string_call(CodeGenerator* gen, ASTNode* e);
+int is_owned_opt_string_unwrap(CodeGenerator* gen, ASTNode* e);
+int is_fresh_heap_string_temp(CodeGenerator* gen, ASTNode* e);
+int opt_string_arg_freed_after_call(CodeGenerator* gen, const char* func_name, int ai);
 
 /* Does evaluating the expression have a side effect (a call, a send, a
  * va_* op)? Defined in codegen_expr.c. Gates the series-collapse

@@ -1807,6 +1807,9 @@ int is_heap_string_expr(CodeGenerator* gen, ASTNode* expr) {
         return 1;
     }
 
+    /* #2750: the string an owned `string?` call yields under `!` or `??`. */
+    if (is_owned_opt_string_unwrap(gen, expr)) return 1;
+
     /* A string result of call(): a string-returning closure hands every
      * result over owned (see should_uniform_heap_return), so the caller
      * owns what it gets, whichever return site produced it (#2054). */
@@ -4094,8 +4097,7 @@ static int struct_array_local_owns(CodeGenerator* gen, const char* name) {
  * string is adopted, anything else (a literal, a local, a field) copied, so
  * every element is the array's own, as a string array cell's are (#2474). */
 void emit_owned_string_element(CodeGenerator* gen, ASTNode* v) {
-    int fresh = v && (v->type == AST_FUNCTION_CALL || v->type == AST_STRING_INTERP ||
-                      v->type == AST_OR_ELSE) && is_heap_string_expr(gen, v);
+    int fresh = is_fresh_heap_string_temp(gen, v);
     if (fresh) {
         generate_expression(gen, v);
         return;
@@ -5366,6 +5368,62 @@ static int is_opt_string_type(Type* t) {
            t->element_type && t->element_type->kind == TYPE_STRING;
 }
 
+/* #2750: is `e` a call of an Aether function returning `string?`? Such a
+ * function hands every string it returns over owned (emit_opt_string_return,
+ * #2740). Bound to a local the result is that local's (is_heap_opt_string_rhs);
+ * anywhere nothing binds it, it is a temporary of the expression that uses
+ * it, which frees it: under `!` and `??` (is_owned_opt_string_unwrap), a
+ * comparison, as a call's argument, or thrown away. Nothing freed it there,
+ * and since #2740 copies a returned literal, even `lookup()! == "Ada"`
+ * leaked. A closure or a C function is not held to #2740, so its result
+ * stays as it was. */
+static ASTNode* callee_memo_fn(CodeGenerator* gen, const char* func_name);
+
+int is_owned_opt_string_call(CodeGenerator* gen, ASTNode* e) {
+    if (!gen || !e || e->type != AST_FUNCTION_CALL || !e->value ||
+        !is_opt_string_type(e->node_type) || strcmp(e->value, "call") == 0 ||
+        typed_fnptr_call(gen, e)) return 0;
+    ASTNode* def = callee_memo_fn(gen, e->value);
+    return def && def->type == AST_FUNCTION_DEFINITION && is_opt_string_type(def->node_type);
+}
+
+/* `call!` or `call ?? d` over such a call, yielding its string: a string of
+ * its own, as fresh as the call's (the `??` default is copied where it is
+ * not fresh itself, AST_NULL_COALESCE), which is_heap_string_expr counts as
+ * a heap string, so every consumer adopts or frees it as it does a
+ * `string.concat` result. */
+int is_owned_opt_string_unwrap(CodeGenerator* gen, ASTNode* e) {
+    if (!e || e->child_count < 1 || !is_owned_opt_string_call(gen, e->children[0])) return 0;
+    if (e->type == AST_TUPLE_UNWRAP) return 1;
+    return e->type == AST_NULL_COALESCE && e->child_count >= 2 && e->children[1] &&
+           !(e->children[1]->node_type && e->children[1]->node_type->kind == TYPE_OPTIONAL);
+}
+
+/* An expression whose value is a heap string nobody else holds, which the
+ * expression that reads it must free: a call or an interpolation that
+ * makes one, a fallible's `or`, an unwrapped `string?` call. */
+int is_fresh_heap_string_temp(CodeGenerator* gen, ASTNode* e) {
+    if (!e) return 0;
+    if (e->type != AST_FUNCTION_CALL && e->type != AST_STRING_INTERP &&
+        e->type != AST_OR_ELSE && !is_owned_opt_string_unwrap(gen, e)) return 0;
+    return is_heap_string_expr(gen, e);
+}
+
+/* Is a `string?` argument the call `func_name` receives at `ai` (an owned
+ * temporary, is_owned_opt_string_call) free once the call returns? Only
+ * with proof the parameter keeps nothing: it does not escape the callee's
+ * body, or escapes only through a `string?` return, which copies it
+ * (#2740). Without a body to read it is kept, a leak, never a free under a
+ * parameter that holds it. */
+int opt_string_arg_freed_after_call(CodeGenerator* gen, const char* func_name, int ai) {
+    if (!func_name || !callee_has_visible_body(gen, func_name) ||
+        is_retain_extern_param(gen, func_name, ai)) return 0;
+    if (!callee_param_escapes_via_body(gen, func_name, ai, 0)) return 1;
+    ASTNode* def = callee_memo_fn(gen, func_name);
+    return def && is_opt_string_type(def->node_type) &&
+           !callee_param_store_escapes_via_body(gen, func_name, ai);
+}
+
 /* Does the RHS of a `string? = <rhs>` assignment produce an optional
  * whose `.val` is a freshly-owned heap buffer this slot must free?
  *
@@ -6622,6 +6680,16 @@ static int value_directly_carries_param(ASTNode* node, const char* pname) {
     if (!node) return 0;
     if (node->type == AST_IDENTIFIER && node->value &&
         strcmp(node->value, pname) == 0) return 1;
+    /* #2750: `o!` and `o ?? d` yield the string of the optional `o`, or `d`,
+     * as they are: a `string?` argument whose string the caller frees after
+     * the call must not be handed back through them. */
+    if ((node->type == AST_TUPLE_UNWRAP || node->type == AST_NULL_COALESCE) &&
+        node->child_count > 0 && node->children[0] && node->children[0]->node_type &&
+        node->children[0]->node_type->kind == TYPE_OPTIONAL) {
+        for (int i = 0; i < node->child_count; i++) {
+            if (value_directly_carries_param(node->children[i], pname)) return 1;
+        }
+    }
     if (node->type == AST_ARRAY_LITERAL || node->type == AST_FIELD_INIT) {
         for (int i = 0; i < node->child_count; i++) {
             if (value_directly_carries_param(node->children[i], pname)) return 1;
@@ -11802,10 +11870,16 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                 ASTNode* drhs = stmt->children[0];
                 int fresh_heap =
                     (drhs->type == AST_FUNCTION_CALL ||
-                     drhs->type == AST_STRING_INTERP) &&
+                     drhs->type == AST_STRING_INTERP ||
+                     is_owned_opt_string_unwrap(gen, drhs)) &&
                     is_heap_string_expr(gen, drhs);
                 print_indent(gen);
-                if (fresh_heap) {
+                if (is_owned_opt_string_call(gen, drhs)) {
+                    /* #2750: a `string?` an Aether function handed over. */
+                    fprintf(gen->output, "{ %s _od = ", get_c_type(drhs->node_type));
+                    generate_expression(gen, drhs);
+                    fprintf(gen->output, "; if (_od.has) aether_heap_str_free((void*)_od.val); }\n");
+                } else if (fresh_heap) {
                     fprintf(gen->output, "aether_heap_str_free((void*)(");
                     generate_expression(gen, drhs);
                     fprintf(gen->output, "));\n");
@@ -13972,6 +14046,39 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                     unindent(gen);
                     print_line(gen, "} else {");
                     indent(gen);
+                    if (is_owned_opt_string_call(gen, match_expr)) {
+                        /* #2750: the string of a `string?` an Aether function
+                         * handed over is the match's, and nothing else frees
+                         * it: the `some` binding (or, with none, a hidden
+                         * one) owns it for the arm, as a local bound to a
+                         * heap string does, freed when the arm ends unless
+                         * the arm hands it on (returns it, stores it, binds
+                         * a local to it). */
+                        ASTNode* arm_body = some_body ? some_body : wild_body;
+                        const char* own = some_bind ? some_bind : cg_internf("_om%d_s", id);
+                        int saved_var_count = gen->declared_var_count;
+                        print_indent(gen);
+                        fprintf(gen->output, "%s %s = _om%d.val; %s _heap_%s = 1; (void)_heap_%s;\n",
+                                volatile_decl_type(try_volatile_qual_for(gen, own), "const char*"),
+                                own, id, try_tracker_type(gen, own), own, own);
+                        ScopedStringLocal sl;
+                        scoped_string_local_begin(gen, &sl, own, arm_body, 1);
+                        print_line(gen, "{");
+                        indent(gen);
+                        enter_scope(gen);
+                        push_scoped_string_local_free(gen, &sl, stmt->line, stmt->column);
+                        emit_opt_match_arm(gen, arm_body);
+                        exit_scope(gen);
+                        unindent(gen);
+                        print_line(gen, "}");
+                        truncate_declared_vars(gen, saved_var_count);
+                        scoped_string_local_end(gen, &sl);
+                        unindent(gen);
+                        print_line(gen, "}");
+                        unindent(gen);
+                        print_line(gen, "}");
+                        break;
+                    }
                     if (some_bind) {
                         print_indent(gen);
                         fprintf(gen->output, "%s %s = _om%d.val;\n", inner_c, some_bind, id);
@@ -15353,9 +15460,19 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                          * answered with a string): freed here, as `_ = e`
                          * frees it. Discarded bare, it leaked one buffer
                          * per statement. */
+                        /* #2750: so is a `string?` an Aether function
+                         * handed over, when it holds one. */
+                        if (is_owned_opt_string_call(gen, inner)) {
+                            gen->discard_call_node = NULL;
+                            fprintf(gen->output, "{ %s _od = ", get_c_type(inner->node_type));
+                            generate_expression(gen, inner);
+                            fprintf(gen->output, "; if (_od.has) aether_heap_str_free((void*)_od.val); }\n");
+                            break;
+                        }
                         if (inner && (inner->type == AST_FUNCTION_CALL ||
                                       inner->type == AST_STRING_INTERP ||
-                                      inner->type == AST_SEND_ASK) &&
+                                      inner->type == AST_SEND_ASK ||
+                                      is_owned_opt_string_unwrap(gen, inner)) &&
                             is_heap_string_expr(gen, inner)) {
                             /* The value is used (freed), not discarded: an
                              * argument drain keeps the result. */
