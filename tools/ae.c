@@ -4192,6 +4192,233 @@ static const char* vendored_sqlite_link(const char* cc, const char* ae_link,
     return rewritten;
 }
 
+/* #2757: a source build (`ae build --trace`, or a toolchain with no
+ * libaether.a) handed every runtime source to the one compiler command that
+ * links the program, and the compiler took them one after another: about 90
+ * sources, 150 s of `ae build --trace` on a Windows CI runner. They are
+ * compiled to objects here first, as many at a time as there are
+ * processors, and the link takes the objects.
+ *
+ * Anything this cannot do the old way still does: a failed compile, a
+ * compiler that is a Windows batch file (whose command line cmd.exe caps),
+ * one processor or one source leave the sources on the link command, which
+ * then compiles them as before and reports an error as before. */
+
+static void ae_remove_tree(const char* path);
+
+static int ae_cpu_count(void) {
+#ifdef _WIN32
+    SYSTEM_INFO si;
+    GetSystemInfo(&si);
+    long n = (long)si.dwNumberOfProcessors;
+#else
+    long n = sysconf(_SC_NPROCESSORS_ONLN);
+#endif
+    if (n < 1) n = 1;
+    if (n > 32) n = 32;
+    return (int)n;
+}
+
+/* Runs the commands `cmds[0..n)` at most `jobs` at a time, each one's
+ * stdout and stderr in the file `logs[i]`. Starts nothing more after a
+ * failure, waits for what is running, and returns the index of the first
+ * command that failed or could not start, or -1 when all succeeded. */
+static int ae_run_parallel(char* const* cmds, char* const* logs, int n, int jobs) {
+    int failed = -1, next = 0, running = 0;
+#ifdef _WIN32
+    HANDLE hs[MAXIMUM_WAIT_OBJECTS];
+    int hidx[MAXIMUM_WAIT_OBJECTS];
+    if (jobs > MAXIMUM_WAIT_OBJECTS) jobs = MAXIMUM_WAIT_OBJECTS;
+    while (next < n || running > 0) {
+        while (failed < 0 && next < n && running < jobs) {
+            char** argv = ae_split_command(cmds[next], NULL);
+            int argc = 0;
+            size_t room = 0;
+            for (; argv && argv[argc]; argc++) room += 2 * strlen(argv[argc]) + 3;
+            char** list = argc ? malloc(((size_t)argc + 1) * sizeof(char*) + room) : NULL;
+            if (!list) { free(argv); failed = next; break; }
+            char* w = (char*)list + ((size_t)argc + 1) * sizeof(char*);
+            for (int i = 0; i < argc; i++) {
+                list[i] = w;
+                w = win_quote_arg(argv[i], w);
+                *w++ = '\0';
+            }
+            list[argc] = NULL;
+            /* The child takes the C runtime's descriptors 1 and 2 as they
+             * are when it starts: pointed at its log for that moment. */
+            int fd = _open(logs[next], _O_WRONLY | _O_CREAT | _O_TRUNC, _S_IREAD | _S_IWRITE);
+            if (fd < 0) { free(list); free(argv); failed = next; break; }
+            fflush(stdout);
+            fflush(stderr);
+            int saved1 = _dup(1), saved2 = _dup(2);
+            _dup2(fd, 1);
+            _dup2(fd, 2);
+            _close(fd);
+            intptr_t h = _spawnvp(_P_NOWAIT, argv[0], (const char* const*)list);
+            if (saved1 >= 0) { _dup2(saved1, 1); _close(saved1); }
+            if (saved2 >= 0) { _dup2(saved2, 2); _close(saved2); }
+            free(list);
+            free(argv);
+            if (h == -1) { failed = next; break; }
+            hs[running] = (HANDLE)h;
+            hidx[running] = next;
+            running++;
+            next++;
+        }
+        if (running == 0) break;
+        DWORD r = WaitForMultipleObjects((DWORD)running, hs, FALSE, INFINITE);
+        if (r < WAIT_OBJECT_0 || r >= WAIT_OBJECT_0 + (DWORD)running) {
+            /* Nothing to wait on any more: end the rest rather than leave
+             * them compiling into a directory about to be removed. */
+            for (int k = 0; k < running; k++) {
+                TerminateProcess(hs[k], 1);
+                CloseHandle(hs[k]);
+            }
+            return failed >= 0 ? failed : hidx[0];
+        }
+        int k = (int)(r - WAIT_OBJECT_0);
+        DWORD code = 1;
+        GetExitCodeProcess(hs[k], &code);
+        CloseHandle(hs[k]);
+        if (code != 0 && failed < 0) failed = hidx[k];
+        hs[k] = hs[running - 1];
+        hidx[k] = hidx[running - 1];
+        running--;
+    }
+#else
+    pid_t* pids = calloc((size_t)n, sizeof(pid_t));
+    if (!pids) return 0;
+    while (next < n || running > 0) {
+        while (failed < 0 && next < n && running < jobs) {
+            char** argv = ae_split_command(cmds[next], NULL);
+            if (!argv || !argv[0]) { free(argv); failed = next; break; }
+            posix_spawn_file_actions_t fa;
+            posix_spawn_file_actions_init(&fa);
+            posix_spawn_file_actions_addopen(&fa, STDOUT_FILENO, logs[next],
+                                             O_WRONLY | O_CREAT | O_TRUNC, 0600);
+            posix_spawn_file_actions_adddup2(&fa, STDOUT_FILENO, STDERR_FILENO);
+            pid_t pid;
+            int ret = posix_spawnp(&pid, argv[0], &fa, NULL, argv, environ);
+            posix_spawn_file_actions_destroy(&fa);
+            free(argv);
+            if (ret != 0) { failed = next; break; }
+            pids[next] = pid;
+            running++;
+            next++;
+        }
+        if (running == 0) break;
+        int status = 0;
+        pid_t p = waitpid(-1, &status, 0);
+        if (p < 0) {
+            if (errno == EINTR) continue;
+            break;   /* ECHILD: none of ours is left */
+        }
+        for (int i = 0; i < next; i++) {
+            if (pids[i] != p) continue;
+            pids[i] = 0;
+            running--;
+            int ok = WIFEXITED(status) && WEXITSTATUS(status) == 0;
+            if (!ok && failed < 0) failed = i;
+            break;
+        }
+    }
+    free(pids);
+#endif
+    return failed;
+}
+
+/* The object directory of this process's source build, removed at exit. */
+static char g_rt_obj_dir[1024];
+
+static void ae_remove_rt_obj_dir(void) {
+    if (g_rt_obj_dir[0]) ae_remove_tree(g_rt_obj_dir);
+    g_rt_obj_dir[0] = '\0';
+}
+
+static int ae_make_rt_obj_dir(void) {
+    if (g_rt_obj_dir[0]) return 1;
+#ifdef _WIN32
+    static int seq = 0;
+    for (int tries = 0; tries < 100; tries++) {
+        snprintf(g_rt_obj_dir, sizeof(g_rt_obj_dir), "%s/ae-rtobj-%d-%d",
+                 get_temp_dir(), (int)getpid(), seq++);
+        for (char* q = g_rt_obj_dir; *q; q++) if (*q == '\\') *q = '/';
+        if (_mkdir(g_rt_obj_dir) == 0) break;
+        g_rt_obj_dir[0] = '\0';
+    }
+#else
+    snprintf(g_rt_obj_dir, sizeof(g_rt_obj_dir), "%s/ae-rtobj-XXXXXX", get_temp_dir());
+    if (!mkdtemp(g_rt_obj_dir)) g_rt_obj_dir[0] = '\0';
+#endif
+    if (!g_rt_obj_dir[0]) return 0;
+    atexit(ae_remove_rt_obj_dir);
+    return 1;
+}
+
+/* Compiles the runtime sources of `srcs` (the quoted list a source build
+ * links) with `cc` and the compile flags `cflags`, in parallel, and returns
+ * the quoted list of their objects for the link (heap, the caller frees),
+ * or NULL to leave the sources on the link command as before. */
+static char* ae_precompile_runtime_srcs(const char* cc, const char* cflags, const char* srcs) {
+    if (!srcs || !srcs[0]) return NULL;
+    int jobs = ae_cpu_count();
+    if (jobs < 2) return NULL;
+#ifdef _WIN32
+    char** ccv = ae_split_command(cc, NULL);
+    int batch = !ccv || !ccv[0] || win_prog_is_batch(ccv[0]);
+    free(ccv);
+    if (batch) return NULL;
+#endif
+    int n = 0;
+    char** src = ae_split_command(srcs, &n);
+    if (!src || n < 2 || !ae_make_rt_obj_dir()) { free(src); return NULL; }
+    char** cmds = calloc((size_t)n, sizeof(char*));
+    char** logs = calloc((size_t)n, sizeof(char*));
+    char** objs = calloc((size_t)n, sizeof(char*));
+    char* list = NULL;
+    size_t list_len = 0;
+    int ok = cmds && logs && objs;
+    for (int i = 0; ok && i < n; i++) {
+        const char* base = strrchr(src[i], '/');
+        const char* b2 = strrchr(src[i], '\\');
+        if (b2 && (!base || b2 > base)) base = b2;
+        base = base ? base + 1 : src[i];
+        /* The index keeps two sources of one name apart. */
+        objs[i] = ae_path_printf("%s/%d_%s.o", g_rt_obj_dir, i, base);
+        logs[i] = ae_path_printf("%s/%d_%s.log", g_rt_obj_dir, i, base);
+        cmds[i] = ae_strdup_printf("%s %s -c \"%s\" -o \"%s\"", cc, cflags, src[i], objs[i]);
+        if (!objs[i] || !logs[i] || !cmds[i]) { ok = 0; break; }
+        list_len += strlen(objs[i]) + 4;
+    }
+    if (ok) {
+        if (tc.verbose)
+            fprintf(stderr, "[cmd] compiling %d runtime sources, %d at a time, into %s\n",
+                    n, jobs, g_rt_obj_dir);
+        int failed = ae_run_parallel(cmds, logs, n, jobs);
+        if (failed >= 0) {
+            if (tc.verbose)
+                fprintf(stderr, "[cmd] %s failed; the link command compiles the sources\n",
+                        cmds[failed]);
+            ok = 0;
+        }
+    }
+    if (ok && (list = malloc(list_len + 1)) != NULL) {
+        size_t o = 0;
+        for (int i = 0; i < n; i++)
+            o += (size_t)snprintf(list + o, list_len + 1 - o, "\"%s\" ", objs[i]);
+    }
+    for (int i = 0; i < n; i++) {
+        if (cmds) free(cmds[i]);
+        if (logs) free(logs[i]);
+        if (objs) free(objs[i]);
+    }
+    free(cmds);
+    free(logs);
+    free(objs);
+    free(src);
+    return ok ? list : NULL;
+}
+
 void build_gcc_cmd(char* cmd, size_t size,
                           const char* c_file, const char* out_file,
                           bool optimize, const char* extra_files) {
@@ -4427,12 +4654,22 @@ void build_gcc_cmd(char* cmd, size_t size,
             cmd_too_long(cmd, size, w);
         }
     } else {
+        /* #2757: the runtime sources compiled to objects in parallel, when
+         * that can be done; else the sources, compiled by this command. */
+        char* rt_objs = NULL;
+        if (!g_emit_obj && !g_emit_csrc) {
+            char* rt_cflags = ae_strdup_printf("%s %s %s %s", opt, tc.include_flags,
+                                               ae_includes, pcre2_src_defs);
+            if (rt_cflags) rt_objs = ae_precompile_runtime_srcs(s_gcc_cmd, rt_cflags, tc.runtime_srcs);
+            free(rt_cflags);
+        }
         /* Order matters, same as the POSIX branch: the host-bridge .a
          * references runtime symbols defined in tc.runtime_srcs, so it must
          * come BEFORE that source list on the command line. */
         int w = snprintf(cmd, size,
             "%s %s %s %s \"%s\"%s %s %s %s%s -o \"%s\" %s %s %s %s %s %s %s %s %s %s %s",
-            s_gcc_cmd, opt, tc.include_flags, ae_includes, c_file, config_c, extra, g_host_bridge_link, pcre2_src_defs, tc.runtime_srcs, out_file, openssl_libs, zlib_libs, nghttp2_libs, pcre2_libs, brotli_libs, zstd_libs, audio_libs, yaml_libs, win_link_libs, ae_link, link_flags);
+            s_gcc_cmd, opt, tc.include_flags, ae_includes, c_file, config_c, extra, g_host_bridge_link, pcre2_src_defs, rt_objs ? rt_objs : tc.runtime_srcs, out_file, openssl_libs, zlib_libs, nghttp2_libs, pcre2_libs, brotli_libs, zstd_libs, audio_libs, yaml_libs, win_link_libs, ae_link, link_flags);
+        free(rt_objs);
         if (w >= (int)size) {
             cmd_too_long(cmd, size, w);
         }
@@ -4690,13 +4927,24 @@ void build_gcc_cmd(char* cmd, size_t size,
             cmd_too_long(cmd, size, w);
         }
     } else {
+        /* #2757: the runtime sources compiled to objects in parallel, when
+         * that can be done; else the sources, compiled by this command. */
+        char* rt_objs = NULL;
+        if (!g_emit_obj && !g_emit_csrc) {
+            char* rt_cflags = ae_strdup_printf("%s %s %s %s %s", opt, tc.include_flags,
+                                               ae_includes, pcre2_src_defs,
+                                               macos_homebrew_flags(0));
+            if (rt_cflags) rt_objs = ae_precompile_runtime_srcs(cc, rt_cflags, tc.runtime_srcs);
+            free(rt_cflags);
+        }
         // Order matters: host-bridge .a files reference runtime
         // symbols defined in tc.runtime_srcs (aether_shared_map_*,
         // etc.), so they appear BEFORE the runtime source list.
         int w = snprintf(cmd, size,
             "%s %s %s %s \"%s\"%s %s %s %s%s -rdynamic -o \"%s\" -pthread -lm %s %s %s %s %s %s %s %s %s %s %s %s%s",
-            cc, opt, tc.include_flags, ae_includes, c_file, config_c, extra, g_host_bridge_link, pcre2_src_defs, tc.runtime_srcs, out_file, openssl_libs, zlib_libs, nghttp2_libs, pcre2_libs, brotli_libs, zstd_libs, casper_libs, audio_libs, yaml_libs, ae_link, link_flags, binimport_link(),
+            cc, opt, tc.include_flags, ae_includes, c_file, config_c, extra, g_host_bridge_link, pcre2_src_defs, rt_objs ? rt_objs : tc.runtime_srcs, out_file, openssl_libs, zlib_libs, nghttp2_libs, pcre2_libs, brotli_libs, zstd_libs, casper_libs, audio_libs, yaml_libs, ae_link, link_flags, binimport_link(),
             macos_homebrew_flags(!g_emit_obj && !g_emit_csrc));
+        free(rt_objs);
         if (w >= (int)size) {
             cmd_too_long(cmd, size, w);
         }
