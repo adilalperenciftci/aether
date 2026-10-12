@@ -14,6 +14,369 @@ cut while your branch is open cannot fold your entry into the released section.
 
 ## [current]
 
+## [0.806.0]
+
+### Fixed
+
+- **A fixed-size array field can be bound from an array.** A struct literal
+  given an array (`Shelf { names: arr }`), a store of one into the field
+  (`s.names = arr`, `s.names = [...]`) and the same store into an actor's
+  array state field (`names = arr`) emitted C that did not compile, since C
+  neither initialises nor assigns an array from an array. The elements are
+  copied one by one, each taken as the field keeps it: a `string[N]` field
+  takes a reference to each element of another array and a copy of each
+  element of a literal, a `fn[N]` field a reference to each closure, and an
+  array of structs that own strings a value of its own per element, an
+  actor's array state field of such structs included (it owns its
+  elements, released by its `destroy_state`); a store takes every new
+  element before storing any, so `s.names = [s.names[1], s.names[0]]`
+  swaps, and gives back each element it replaces. The source must have the
+  field's length: another length, an array literal longer than the field,
+  or a slice or pointer, whose length is not known before the program
+  runs, is a type error (a shorter literal zeroes the rest). Also fixed on
+  the way: a store into a string field of an element of an array of
+  structs (`items[i].name = v`) was a plain store, so a literal stored over
+  an owned string was freed with the array (a crash) and a fresh string
+  leaked (#2688).
+
+- **A string read out of a `string[]` slice is copied where it escapes.**
+  A function returning `xs[0]` of a slice handed the string back borrowed
+  from whatever the slice viewed, and the caller held it after its owner
+  let go of it: an array that owns its elements freed it on the next store
+  or at its exit. A slice owns none of its elements, so a slot its element
+  escapes to now takes a copy of its own, as for an element of an owning
+  array (#2618): a return (directly, in an `if` or `match` arm, as a tuple
+  position), a struct field, a container, or a call that hands its
+  argument back. A local bound to a slice element (`t = s[i]`) still
+  borrows it, so moving elements through a local
+  (`t = s[0]; s[0] = s[1]; s[1] = t`) moves the pointers and keeps none,
+  and the local is valid only while the element is; returned or added to
+  a container, the local is copied in turn. A store into a slice element
+  frees nothing and hands the storage what it stores, so moving an element
+  through a copy (a function returning `s[i]`, stored back over another
+  element) leaks the element it replaces; move elements through a local
+  (#2689).
+
+- **A `break` in a `switch` case leaves the switch, whatever its cases.** In
+  a loop, a `switch` with a ranged case (`case 1..=5:`) is lowered to an
+  if-chain, where the C `break` left the loop instead, and outside any loop
+  it did not compile; a switch of plain cases left the switch but first ran
+  the defers of the loop body around it, which then ran again when the body
+  ended, and inside a `try` it popped the try's frame, which the try body
+  popped again (the program aborted with "aether_try_pop on empty stack"). A
+  `break` in an arm of a `match` on a sum type left the C switch that match
+  lowers to, not the loop. A break now leaves the innermost loop or `switch`
+  in every lowering, running the defers and popping the `try` frames of only
+  what it leaves, so the code agrees with the missing-return check, which
+  already read it that way (a function it accepted could fall off its end).
+  Each case is a scope of its own: a `defer` written in a case ran at the end
+  of the enclosing scope, even when the case never ran (#2696).
+
+- **A variable a `try` body writes keeps what was stored before a
+  panic.** Such a variable must be volatile for its value to survive the
+  longjmp of a panic, and so must the flag that says whether it owns its
+  string. A local declared ahead of its first binding (a string, optional
+  string or `*StringSeq` local, declared at the function's entry, or one
+  first bound in the arms of an `if` or a loop) was declared plain, with
+  its flag, and so were a parameter, a closure's parameter, a message
+  pattern binding and a local declared inside one `try` and written in a
+  nested one. After a caught panic they could hold their values from
+  before the `try` (at -O2 with `ae build`): a string parameter was its
+  caller's string again while its flag said the function owned it, so the
+  function freed its caller's string (heap corruption), and a string
+  stored was lost or freed as if never owned. A string stored inside a
+  `try` into a local declared outside it was also journaled for the try's
+  own frame, so the panic freed it while the local still held it, and the
+  code after the catch read freed memory. All are volatile now, a
+  parameter in the function's own signature, and the string is journaled
+  for the frame the local is declared in, so the local frees it where its
+  scope ends. A struct value so declared is released and replaced through
+  `<Name>_destroy_volatile` and `<Name>_replace_volatile`, which take its
+  volatile pointer: the plain ones warned (`-Wdiscarded-qualifiers`), as
+  did a store into a field of an element of such an array. Each function,
+  closure and receive arm marks its own try-written names; they were
+  carried from one arm or closure to the next, which made an unrelated
+  local volatile. Also fixed on the way: a struct that owns strings,
+  declared ahead of the `if` it is first bound in, is destroyed where it
+  is declared (it leaked what it held at the end), and a `string` state
+  field assigned a message's string is no longer widened to `void*` (the
+  store warned) (#2690).
+
+- **A closure's arrow body `|x| -> { ... }` returns its last value.** It was
+  parsed as a plain block, so `|x| -> { x + 1 }` returned nothing and using
+  its value failed in the C compiler ("invalid use of void expression"). It
+  now follows a function's `-> { ... }` rule: the last expression is returned
+  as the bare expression (#2685), and a trailing statement is not a value
+  (#2694). Neither is a call of a function that returns nothing: an arrow
+  body ending in one, `-> { note(x) }` or `-> note(x)` for a function or a
+  closure, ends with the call and returns nothing, where it emitted a C
+  return of a void value that did not compile (#2697).
+
+- **A legacy `export f()` in the file being compiled is checked and built as
+  a plain definition.** The wrapper stayed in that file's tree and most
+  passes did not look through it. The type checker's third pass skipped an
+  exported function, so an unused local (W1001), code after a `return`
+  (W1002), an escaping `@scoped` binding and an `Isolated[T]` value used
+  twice went unreported. A result type left to inference was never inferred,
+  a function defined after its caller had no C prototype, an `@pure` caller
+  did not see what an exported callee reached, a name taken from libaether
+  (`string_concat`) was not renamed and the link failed, an exported clause
+  left its set (`fact(5)` printed 0), an exported constant was undeclared in
+  the C and an exported actor could not be spawned. The compiler now puts
+  the declaration in the wrapper's place right after parsing; what an
+  importer may name is read from the module's own parse and does not change
+  (#2699).
+
+- **A closure capturing an array a `try` body writes compiles without
+  warnings.** Such an array has volatile elements so its stores survive a
+  panic (#2618). The closure copied it with `memcpy`, and on the non-GCC
+  path (MSVC, emscripten) its constructor `_aether_make_closure_N` took it
+  as a plain pointer, both of which discard the qualifier: GCC, clang and
+  MSVC warned, and a `-Werror` build failed. The copy now reads each
+  element, and the constructor takes a pointer to const volatile elements,
+  which a plain array converts to as well. Copying such an array into
+  another (`b = a`, `int[2] c = a`) and zeroing what a shorter literal
+  stored into it leaves went through `memmove`, `memcpy` and `memset` the
+  same way, and no longer warn (#2691).
+
+- **A C-style `for` body that assigns the loop variable assigns it.** In
+  `for (i = 0; i < 3; ) { i = i + 1 }` the assignment declared a new `int i`
+  in the body, initialised from itself, that shadowed the loop's, so the loop
+  never ended; with an increment as well, the body read an uninitialised
+  value. The variable the init binds is now the loop's in the condition, the
+  increment and the body (#2698).
+
+- **Unreachable code, a duplicate match arm, an escaping `@scoped` binding,
+  an `Isolated[T]` value used twice and an effect-tag violation in an
+  imported module name the module.** They named the importing file with the
+  module's line number (`main.ae:9:5` for `lib/unr/module.ae:9:5`), so the
+  snippet was a line of the wrong file or none at all. They now carry the
+  file of the definition they are in, as the type checker's other
+  diagnostics and the unused-variable warning already did (#2731; see
+  #1946, #2064).
+
+- **Setting into a parsed document's inner containers no longer leaks.** A
+  value set into an object or array inside a parsed document (an object in
+  an array, say) gave that container an arena of its own, which freeing the
+  document never destroyed: 20 KB a document. A parsed or copied container
+  now allocates from its document's arena, and only the document's root
+  destroys it (#2719).
+
+- **`std.http.client` sends a request path of any length whole.** It copied
+  the path into a fixed 1,024-byte buffer, cut a longer one at 1,023 bytes,
+  and sent the request anyway, so the server answered for a path the caller
+  never asked for (a 1,500-byte OpenAlex filter got a 400; a server that
+  takes any path answered 200 for the wrong thing). The path is now sized
+  from the URL, and so are the paths a relative redirect is resolved
+  against and the ones the proxy driver forwards; a URL whose host does not
+  fit is refused as malformed rather than cut. A redirect's origin check now
+  strips `Authorization`, `Cookie` and `Proxy-Authorization` unless both
+  URLs parse and their origins match (#2674).
+
+- **A std.spec suite's failures reach its exit code, and the docs say how.**
+  `docs/testing.md`, `CONTRIBUTING.md` and the example in `std/spec`'s
+  header ended a suite with a bare `spec.run_summary(fw)` and said it exits
+  1 on failure; it returns the verdict and does not exit, so a suite written
+  that way exits 0 with failing cases and `ae test` reports it as passing.
+  The examples now `return spec.run_summary(fw)`. Nine of the repository's
+  own suites (seven in `contrib/jq`, two in `std/jsonpath`) were written the
+  bare way and could not fail; they return their verdict now (all pass),
+  and `make check-tests` rejects a suite that drops it (#2678).
+
+- **An `extern` of a libc function such as `signal` compiles.** The code
+  generator does not emit its own declaration for a libc name (the system
+  header's prototype is the canonical one), but only `stdio.h`, `stdlib.h`,
+  `string.h` and `time.h` were in the generated C, so `extern signal(...)`,
+  `raise`, `getpid`, `isatty` and the other names declared elsewhere had no
+  declaration at all, which gcc 14 rejects. The header of each such name a
+  program declares (`signal.h`, `unistd.h`, `sys/wait.h`, `sys/stat.h`,
+  `fcntl.h`, `sys/time.h`, `strings.h`) is now included, guarded so a
+  header a platform lacks is skipped (#2676).
+
+- **A function passed by name to an extern's `fn(...)` parameter is the C
+  function pointer.** `apply(on_int, 2)`, with `extern apply(handler:
+  fn(int), v: int)`, named an adapter `_aether_bare_adapter_on_int` that was
+  never emitted (gcc: undeclared), and would have handed C a closure struct
+  where it reads a function pointer; only `on_int as fn(int)` worked. A typed
+  fn-pointer parameter of an extern now takes the function's address, as the
+  cast does (#2677).
+
+- **In a source tree, editing a runtime header invalidates `ae`'s build
+  cache.** The key covered the compiler, the driver and `libaether.a`, but
+  not the headers under `runtime/` and `std/` that generated C includes, so
+  after a header edit and `make`, `ae run` served the binary built against
+  the old header and a test reported the old code's result. Those headers'
+  content is now part of the key whenever `ae` runs from a source tree; an
+  installed toolchain's headers change only with an upgrade, which changes
+  the compiler too (#2707).
+
+- **A builder setter whose parameter carries a `where` contract gets the
+  trailing block's `_ctx`.** `set_n(_ctx: ptr, n: int where n >= 0)` called
+  as `set_n(3)` inside a builder block went out without `_ctx`, and gcc
+  reported too few arguments: the contract is kept among the function's
+  children as a requires clause, and the count that decides whether to inject
+  `_ctx` took it for a parameter. It counts parameters only now (#2706).
+
+- **A local named after the function its own initializer calls builds and
+  runs, wherever the code sits.** `helper = helper() + 1` used to get three
+  answers: `ae check` of the module on its own passed; in a main file gcc
+  failed with "called object 'helper' is not a function", because a C
+  declaration is in scope in its own initializer; and a program importing
+  the module failed with E0301 "Undefined function 'helper'", because the
+  merge left the call unrenamed. A local's scope starts after its
+  initializer, so the call is the function's and every later `helper` the
+  local's; the generated C names such a local apart (`ae_local_helper`), the
+  merge renames the calls that come before the binding, and a local that
+  both arms of an `if` bind no longer hides the function from its own
+  initializer in the checker. Calling the function by that name after the
+  binding is an E0301 that says the local hides it, instead of "Undefined
+  function" (#2683).
+
+- **A local named after a C keyword works under a compound assignment, and
+  beside a closure parameter of the same name.** Such a local is renamed for
+  C (`short` becomes `ae_short`), but a compound assignment, which carries
+  its target in the node itself, was left out: `short += 2` wrote a bare
+  `short` and gcc failed. So was a closure parameter: beside a local
+  `short`, `|short: int| -> short + 1` read its parameter as a capture of
+  that local and declared `ae_short` twice (#2738).
+
+- **An arrow body that ends in an assignment stores and returns nothing.**
+  An assignment is a statement, and a trailing statement is not a value
+  (#2694), but the arrow rule returned every trailing binding:
+  `bump() -> { hits = hits + 1 }` emitted `return hits + 1;`, so `hits`
+  never changed, `-> { a += 3 }` did not compile (`return +=3;`), and a new
+  local last (`-> { label = "b=${n}" }`) failed in the C compiler. A body
+  ending in `x = v` (a new local or an existing one), `x += v`, `p.n = v`,
+  `xs[i] = v` or a send now ends with that statement, for a function or a
+  closure, and so does the single expression form `-> n = n + 1`, whose
+  store a closure lost. A `match` last is a value only when one of its arms
+  gives one; one whose arms all call functions that return nothing is a
+  statement, where it emitted a C return of a void value (#2735).
+
+- **Whether a function returns nothing no longer depends on the order the
+  functions are defined in.** With `f(x) -> { g(x) }` defined before
+  `g(x) -> { note(x) }` and `note` returning nothing, `f` was checked while
+  `g` still held its own `return note(x)`, so `f` returned `g`'s void and the
+  C compiler stopped ("void value not ignored"); in the order note, g, f it
+  worked. A closure `|x: int| -> g(x)` with `g` defined after `main` failed
+  the same way. Which of the program's functions return a value is now
+  settled before any body is checked, over the calls their `return`s make,
+  and a call of a closure that returns nothing counts as one of a function
+  that does (#2736).
+
+- **A C-style `for` loop variable that a closure in the body writes is the
+  closure's.** `for (i = 0; i < 6;) { bump = || { i = i + 2 } ... }` did
+  not compile: the closure keeps `i` in a cell it shares, which the
+  condition, the increment and the body read through, but the `for` header
+  declared a plain `int i` (gcc: invalid type argument of unary '*'). The
+  loop now declares the cell as any other such local: one cell for every
+  iteration, as `i = 0` before a while gives, released after the loop, so
+  the loop prints what its while-loop rewrite prints, and a closure that
+  outlives the loop keeps the cell (#2737).
+
+- **A catch binding a nested `try` writes keeps what was stored before
+  its panic.** The handler declared the binding and its ownership flag
+  plain, so a `try` inside the handler that rebound it
+  (`e = string.concat(e, w)`) and then panicked left the two holding their
+  values from before at -O2: the string stored was lost, or freed twice. A
+  variable is now volatile wherever a `try` nested deeper than its
+  declaration writes it, the catch binding of a handler included (#2739).
+
+- **A `string?` a function returns is its caller's own.** The caller of a
+  function returning `string?` frees the string in the result, whatever the
+  function returned, so a borrowed parameter, a literal, or an element of
+  an array or a slice returned as it was got freed by the caller (heap
+  corruption). Every return now hands over a string of its own, as a
+  `-> string` return does: a fresh one, or a local's own, as it is, and
+  anything borrowed copied; an optional passed on is kept when it comes
+  from a call or from a `string?` local that owns its string, and copied
+  otherwise. Such a return no longer keeps the argument it copies, so the
+  caller frees its argument as usual (#2740).
+
+- **`return note(x)` of a function that returns nothing is the call, then a
+  return.** Written out in a function or a closure, it was typed int and
+  failed in the C compiler ("void value not ignored"). It now means what the
+  arrow form `-> note(x)` means: the call, then a `return` of nothing, so it
+  fits a function or closure that returns nothing. In one that returns a
+  value on another path it has nothing to give back, and is an error naming
+  the call (#2733).
+
+- **A C-style `for` loop's variable owns its value as the same binding in
+  a `while` does.** A string loop variable leaked. The step
+  (`for (s = "a"; ...; s = string.concat(s, "b"))`) was a raw C assignment
+  in the header, or a raw store into the cell when a closure writes `s`, so
+  each string it replaced was lost; and the init declared `s` in the header
+  with no ownership flag, so the string the loop ended with was lost too,
+  even with the step in the body. A struct that owns a string leaked the
+  same way. The loop now declares its variable in a block of its own with
+  the statement that binds it, and a step that binds a variable is that
+  statement at the end of each pass, which a `continue` runs. A compound
+  step (`i += 3`), a parse error before, is accepted (#2742).
+
+- **A single expression arrow body may start with a field.** A dotted name
+  after `->` was always read as a qualified return type, so
+  `get(p: *P) -> p.n` and `store(p: *P, v: int) -> p.n = v` were parse
+  errors ("Expected LEFT_BRACE"). The name is a return type when the `{`
+  body, a `requires` / `ensures` clause or a type suffix follows it, as
+  in `-> geo.Point { ... }`, and an expression body otherwise.
+
+- **A loop's local read before its binding has the binding's type.** In a
+  `while` body, `out = "${out}${prev}"` ahead of `prev = "p${i}"` read the
+  value the previous pass bound as an int and printed two pointer values.
+  The checker declares a loop's or a branch's locals ahead of the block,
+  typed from the inference pass before it, which left an interpolation
+  untyped; it types it as a string now, so such a local is a string from
+  its declaration, as a string literal or a string-returning call already
+  made it (#2741).
+
+- **A closure passed to a function that captures it in another closure is
+  released.** The caller releases a closure argument after the call unless
+  the callee keeps it, and a capture by a nested closure counted as a keep.
+  That capture takes a reference of its own, as a field, a global or actor
+  state does, so the caller's reference was the one left over: 2400 bytes
+  per 100 calls, whether the capturing closure lived only for the call or
+  was returned (#2754).
+
+- **A `fn` variable a closure rebinds releases its closures.** A variable a
+  closure writes lives in a shared cell, and a `fn` one took its first value
+  without a reference of its own and never gave back any closure it held:
+  4400 bytes per 100 calls of a function whose nested closure rebinds its
+  `fn` parameter, 9200 for a local rebound the same way. The cell now holds
+  a reference to its closure, as a field or a global does: its first value
+  and every store are taken (a parameter's retained, so the caller still
+  releases the closure it passed), a store gives back the one it replaces,
+  and the cell's last holder gives back the last. A call through the cell
+  holds the closure for the call, so one that rebinds its own cell while it
+  runs is not freed under itself. A cell whose value a `return` or a keeping
+  callee may hold bare keeps every value for good, as before (#2755).
+
+- **The Windows sweep no longer dies with exit code 2304.** A shell test
+  that stopped one of its servers sent a signal to the MSYS2 process
+  standing in for that native program, and the MSYS2 runtime then signalled
+  every MSYS2 process-group leader whose recorded Windows parent pid matched
+  the program's. Windows hands pids out again and never rewrites a recorded
+  parent, so that reached unrelated processes, the CI step's own `bash`
+  among them: the job died with SIGKILL and no test named (#2479). The tests
+  now end what they start through `tests/lib/server_jobs.sh`, which on
+  Windows ends the program itself with TerminateProcess and signals nothing,
+  and `make check-tests` rejects a `kill` of a remembered pid, `pkill` and
+  `killall` in shell tests. `ae run` on Windows keeps the program it launches
+  in a job object, so ending `ae` ends the program too instead of leaving it
+  running with its port bound.
+
+- **A `string?` call result nobody binds is freed.** A function returning
+  `string?` hands its caller a string of its own (#2740), but a result
+  used without binding it was freed by nobody: under `!` and `??`, in a
+  comparison, an interpolation, as a call's argument, as a `match`
+  scrutinee or thrown away, one string leaked per evaluation, even
+  `lookup(true)! == "Ada"` over a function returning a literal (since
+  #2740 copies it). It is now a temporary of its expression: `f()!` and
+  `f() ?? d` yield a heap string of their own (the default copied unless
+  it is fresh) that whatever reads it frees or takes, `f() == none` frees
+  it after reading the flag, an argument is freed after the call when the
+  parameter keeps nothing, a `match`'s `some` binding owns it for its arm,
+  and a discarded one is freed (#2750).
+
 ## [0.805.0]
 
 ### Fixed
