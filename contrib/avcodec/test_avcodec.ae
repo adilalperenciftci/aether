@@ -31,8 +31,9 @@ main() {
     fw = spec.init()
 
     // Video-only clip: 2s of testsrc at 10fps, 64x48. Being video-only
-    // makes it double as the no-audio case further down.
-    clip = "/tmp/_avc_test_clip.mp4"
+    // makes it double as the no-audio case further down. Both clips are
+    // named per process, so two sweeps at once never share one (#2774).
+    clip ="${os.temp_dir()}/_avc_test_clip_${os.getpid()}.mp4"
     av = list.new()
     _ = list.add(av, "-y")
     _ = list.add(av, "-f")
@@ -47,7 +48,7 @@ main() {
     reason = "ffmpeg not available to generate test input"
 
     // A/V clip: same video plus a 2s 440Hz sine, for the audio surface.
-    aclip = "/tmp/_avc_test_av.mp4"
+    aclip = "${os.temp_dir()}/_avc_test_av_${os.getpid()}.mp4"
     have_av = 0
     if have == 1 {
         av2 = list.new()

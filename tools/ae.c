@@ -8304,7 +8304,7 @@ static void emit_namespace_bindings(const char* manifest_path,
 
 #include <dirent.h>
 
-int cmd_build_namespace(int argc, char** argv) {
+static int build_namespace_in(const char* tmpdir, int argc, char** argv) {
     const char* dir = NULL;
     const char* output_name = NULL;
 
@@ -8339,12 +8339,6 @@ int cmd_build_namespace(int argc, char** argv) {
 #else
     const char* lib_ext = ".so";
 #endif
-
-    /* Set up a temp workspace for the synthesized .ae, the .c outputs,
-     * and the describe stub. Nothing here outlives the build. */
-    char tmpdir[1024];
-    snprintf(tmpdir, sizeof(tmpdir), "%s/aether_ns_%d", get_temp_dir(), (int)getpid());
-    mkdirs(tmpdir);
 
     /* Step 1: produce the describe.c stub from manifest.ae. */
     char describe_c[1056];  // tmpdir[1024] + "/aether_describe.c" + NUL
@@ -8623,6 +8617,21 @@ int cmd_build_namespace(int argc, char** argv) {
          * binding target the manifest declared. */
         emit_namespace_bindings(manifest_path, concat_path, out_path, dir);
     }
+    return rc;
+}
+
+/* `ae build --namespace`. The synthesized .ae, the .c outputs and the
+ * describe stub go to a temp workspace of this process's own, removed on
+ * every way out of the build, failed or not: it used to be left behind every
+ * time, one aether_ns_<pid> directory per build (#2773). One left by an
+ * earlier process that had the same pid is cleared first. */
+int cmd_build_namespace(int argc, char** argv) {
+    char tmpdir[1024];
+    snprintf(tmpdir, sizeof(tmpdir), "%s/aether_ns_%d", get_temp_dir(), (int)getpid());
+    ae_remove_tree(tmpdir);
+    mkdirs(tmpdir);
+    int rc = build_namespace_in(tmpdir, argc, argv);
+    ae_remove_tree(tmpdir);
     return rc;
 }
 
