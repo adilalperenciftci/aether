@@ -1,0 +1,88 @@
+// Regression (#2763 follow-up): a function whose parameters include a
+// literal or `_` pattern hands back the argument at the returned
+// parameter's own position.
+//
+// The position of a returned parameter was counted over the variable
+// parameters alone, while it picks an argument of the call, where every
+// parameter has a position. `swap2(0, a, b)` returning `b, a` was taken to
+// hand back its first and second arguments, `0` and `g`, not `k` and `g`:
+// the slot that got `g` did not retain it, `g` was released when it was
+// rebound, and the slot read freed memory (11471 where 2471 was due). The
+// same count made the result of `sel(0, a, b)` nobody's, so every call
+// leaked both closures' environments (6100 bytes per 100 calls). Each
+// parameter now counts, as the call's arguments do.
+//
+// The leak check runs where the heap count is exact (mem.heap_in_use_exact):
+// after a warm-up, some window of the same work grows by exactly 0
+// (mem.steady_growth).
+
+import std.mem
+import std.string
+
+extern exit(code: int)
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+counter(p: string) -> fn {
+    return || { return string.length(p) }
+}
+
+swap2(0, a: fn, b: fn) -> (fn, fn) {
+    return b, a
+}
+
+swap2(_, a: fn, b: fn) -> (fn, fn) {
+    return b, a
+}
+
+sel(0, a: fn, b: fn) -> fn {
+    return b
+}
+
+sel(_, a: fn, b: fn) -> fn {
+    return b
+}
+
+swapped(p: string) -> int {
+    g = counter(p)
+    k = counter(string.concat(p, "zz"))
+    x, y = swap2(0, g, k)
+    g = counter(string.concat(p, "wxyz"))
+    burn = counter(string.concat(p, "123456789"))
+    int n = call(y) * 1000 + call(x) * 100 + call(g) * 10 + call(burn)
+    return n
+}
+
+picked(p: string) -> int {
+    g = counter(p)
+    k = counter(string.concat(p, "zz"))
+    h = sel(0, g, k)
+    g = counter(string.concat(p, "wxyz"))
+    burn = counter(string.concat(p, "123456789"))
+    int n = call(h) * 1000 + call(g) * 100 + call(k) * 10 + call(burn)
+    return n
+}
+
+main() {
+    println("=== test_closure_handback_pattern_params ===")
+    p = string.concat("bc", "")
+    check(swapped(p) == 2471, "slots of a call with a pattern parameter (${swapped(p)})")
+    check(picked(p) == 4651, "a call with a pattern parameter bound (${picked(p)})")
+    if mem.heap_in_use_exact() {
+        grown = mem.steady_growth(|| {
+                i = 0
+                while i < 100 {
+                    swapped(p)
+                    picked(p)
+                    i = i + 1
+                }
+            }, 5)
+        check(grown == 0, "100 calls with a pattern parameter grew the heap by ${grown} bytes in every run")
+    }
+    println("=== test_closure_handback_pattern_params passed ===")
+}

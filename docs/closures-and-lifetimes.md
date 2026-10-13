@@ -238,7 +238,13 @@ lifetime"; shape by shape:
   f }`, `return keep(f)`, or `return f, 5` for a tuple slot) is such an alias
   too: `g2 = keep(g)` and `g2, n = pair(g)` retain, and the argument is judged
   where the call's value goes, as the name would be (#2763; before, `g`
-  stopped owning at the call and `g2` never started). A return, an argument to an extern parameter not marked
+  stopped owning at the call and `g2` never started). The argument is the
+  one at the returned parameter's position, where a literal or `_` pattern
+  parameter takes a position too. `h = keep(o.cb)` retains as `h = o.cb`
+  does. A closure cell is the exception: a call lends its closure with a
+  reference that ends with the call, and the call may rebind the cell, so
+  a cell keeps counting a hand-back as a keep and pins its closures there
+  (#2788). A return, an argument to an extern parameter not marked
   `@noescape` or to a function that keeps it, or a binding to anything
   else leaves the env to the value's holder. A field's name is not a use
   of a local spelled the same (`Hooks { set: f }`, `h.set` beside a local
@@ -367,6 +373,9 @@ either side: `a, b = three()` before the closure is a binding of `a` and `b`
 the closure's `a, b = two()` writes, and so is `a = 1; b = 2` (#2762). Before,
 only a single `name = ...` counted as a binding there, so a closure that
 destructured into names a destructure had bound got locals of its own.
+Each slot that writes an outer local is checked as `a = 7` there is: the
+local keeps its type, so a slot of another kind is a compile error at the
+slot (see "A local has one type" in the language reference).
 A `while` body's variable is one for the function, so its cell is one across
 the passes, as above; a `for` body's or a branch's, used only inside it, is
 the body's own, so its cell is made at the declaration and released at the

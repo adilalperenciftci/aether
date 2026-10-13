@@ -7889,6 +7889,62 @@ static int rhs_returns_void_via_bare_fn(ASTNode* rhs, SymbolTable* table) {
     return 0;
 }
 
+/* #2762: a slot of a tuple destructure re-binds a local an enclosing local
+ * scope already binds (a closure's `a, b = two()` writes the outer `a` and
+ * `b` it sees, as `a = 7` does), so the slot follows the rules a bare
+ * re-bind follows in the AST_VARIABLE_DECLARATION case below: a value of
+ * another kind is refused with the same diagnostic, so is one an inferred
+ * int would truncate (#698), and the local keeps the type of its first
+ * binding. Unchecked, the slot's C store did not compile (`const char*`
+ * from `int`) or truncated a float into an int cell. A local hoisted out of
+ * a branch or loop body, which that case joins over the body first, is left
+ * as it was. Returns 0 once it has reported an error. */
+static int destructure_slot_rebind(ASTNode* var, SymbolTable* table) {
+    if (!var || !var->value || !var->node_type) return 1;
+    Symbol* bound = NULL;
+    SymbolTable* bound_in = NULL;
+    for (SymbolTable* t = table; t && t->parent && !bound; t = t->parent) {
+        bound = lookup_symbol_local(t, var->value);
+        if (bound) bound_in = t;
+    }
+    if (!bound || !bound->type || (bound->branch_hoisted && bound_in != table) ||
+        bound->is_state || bound->is_function || bound->is_actor || bound->is_module_alias)
+        return 1;
+    Type* have = bound->type;
+    Type* got = var->node_type;
+    if (have->kind == TYPE_UNKNOWN || got->kind == TYPE_UNKNOWN || got->kind == TYPE_VOID)
+        return 1;
+    /* A string and a raw pointer convert freely, as for a bare re-bind. */
+    int str_ptr_mix = (got->kind == TYPE_PTR && have->kind == TYPE_STRING) ||
+                      (got->kind == TYPE_STRING && have->kind == TYPE_PTR);
+    if (!str_ptr_mix &&
+        (!is_assignable(got, have) ||
+         (got->kind == TYPE_PTR && is_numeric_scalar(have->kind)) ||
+         (is_numeric_scalar(got->kind) && have->kind == TYPE_PTR))) {
+        char rmsg[400];
+        snprintf(rmsg, sizeof(rmsg),
+            "cannot re-bind '%s' as %s: it was bound as %s by its first "
+            "assignment, and a local keeps that type. Use a new name for "
+            "the %s value, or convert it to %s",
+            var->value, type_name(got), type_name(have), type_name(got), type_name(have));
+        type_error(rmsg, var->line, var->column);
+        return 0;
+    }
+    if (bound->type_inferred && have->kind == TYPE_INT &&
+        (got->kind == TYPE_INT64 || got->kind == TYPE_UINT64 || got->kind == TYPE_UINT32 ||
+         got->kind == TYPE_FLOAT32 || got->kind == TYPE_FLOAT || got->kind == TYPE_LONGDOUBLE)) {
+        char msg[420];
+        narrowing_message(msg, sizeof(msg), var->value, got->kind);
+        type_error(msg, var->line, var->column);
+        return 0;
+    }
+    if (!str_ptr_mix) {
+        free_type(var->node_type);
+        var->node_type = clone_type(have);
+    }
+    return 1;
+}
+
 int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
     if (!stmt) return 0;
 
@@ -7962,18 +8018,32 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
             }
 
             // Assign types to each variable and add to symbol table
+            int slots_ok = 1;
             for (int j = 0; j < var_count; j++) {
                 ASTNode* var = stmt->children[j];
                 if (var->node_type) free_type(var->node_type);
                 var->node_type = clone_type(rhs_type->tuple_types[j]);
                 // Don't register _ (discard) in symbol table
                 if (var->value && strcmp(var->value, "_") != 0) {
+                    /* #2762. A refused slot is bound already; the others are
+                     * still registered, so their uses report nothing more. */
+                    if (!destructure_slot_rebind(var, table)) {
+                        slots_ok = 0;
+                        continue;
+                    }
                     add_symbol(table, var->value, clone_type(var->node_type), 0, 0, 0);
+                    /* A slot is an inferred binding, as `a = ...` is: an
+                     * int one is a 32-bit int a wider value would
+                     * truncate (#698). */
+                    if (var->node_type->kind == TYPE_INT) {
+                        Symbol* s = lookup_symbol_local(table, var->value);
+                        if (s) s->type_inferred = 1;
+                    }
                 }
             }
 
             free_type(rhs_type);
-            return 1;
+            return slots_ok;
         }
 
         case AST_CONST_DECLARATION:

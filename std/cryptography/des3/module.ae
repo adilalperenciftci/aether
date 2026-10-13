@@ -479,8 +479,9 @@ free(ctx: ptr) {
 process_block(ctx: ptr, in8: ptr) -> ptr {
     c = ctx as *Des3Ctx
     out = bytes.new(8)
-    hi = bytes.get_be32(in8, 0)
-    lo = bytes.get_be32(in8, 4)
+    // des_func hands the halves back as `long`s (each within 32 bits).
+    long hi = bytes.get_be32(in8, 0)
+    long lo = bytes.get_be32(in8, 4)
     hi, lo = des_func(c.wk1, hi, lo)
     hi, lo = des_func(c.wk2, hi, lo)
     hi, lo = des_func(c.wk3, hi, lo)

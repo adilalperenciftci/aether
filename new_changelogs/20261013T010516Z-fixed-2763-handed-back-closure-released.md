@@ -11,4 +11,10 @@
   holds through a function that returns `keep(f)`, for `return keep(g)` of
   a local, whose caller now owns the closure, and for a closure literal
   passed to a function that binds its parameter so, which the caller now
-  releases after the call (#2763).
+  releases after the call. The argument is the one at the returned
+  parameter's position, where a literal or `_` pattern parameter takes one
+  too: `h = sel(0, g, k)` over `sel(0, a, b) { return b }` leaked both
+  closures before. `h = keep(o.cb)` retains the field's closure as
+  `h = o.cb` does, so replacing `o` no longer leaves `h` calling a freed
+  environment (#2763). A closure cell passed to such a call still pins
+  what it holds, since the call may rebind the cell; #2788 tracks that.

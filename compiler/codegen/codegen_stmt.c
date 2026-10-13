@@ -2321,7 +2321,10 @@ static int closure_local_is_cell(CodeGenerator* gen, ASTNode* owner, const char*
 
 static ASTNode* closure_handback_leaf_in(CodeGenerator* gen, ASTNode* owner, ASTNode* e,
                                          int depth);
+static ASTNode* closure_handback_end_in(CodeGenerator* gen, ASTNode* owner, ASTNode* e,
+                                        int depth);
 static ASTNode* closure_handback_next(CodeGenerator* gen, ASTNode* owner, ASTNode* call);
+static int closure_view_binding(ASTNode* rhs);
 
 /* #2668: does `decl` (`a = b`, both closures), a statement of `owner`'s
  * body, give the local `a` a reference of its own to the env of `b`, a
@@ -2333,8 +2336,10 @@ static ASTNode* closure_handback_next(CodeGenerator* gen, ASTNode* owner, ASTNod
  * which take their values their own way (closure_local_is_plain).
  *
  * #2763: `a = keep(b)` is one too when `keep` hands its argument back as it
- * is (closure_handback_leaf_in): the call's value is `b`'s own. `depth` is
- * the scan's, which bounds the walk of `keep`. */
+ * is (closure_handback_end_in): the call's value is `b`'s own. So is
+ * `a = keep(o.cb)`, a view of a closure a field holds, which a binding
+ * retains as it retains `a = o.cb` (#2525). `depth` is the scan's, which
+ * bounds the walk of `keep`. */
 static int closure_alias_binding_at(CodeGenerator* gen, ASTNode* owner, ASTNode* decl,
                                     int depth) {
     if (!decl || decl->type != AST_VARIABLE_DECLARATION || !decl->value ||
@@ -2345,8 +2350,14 @@ static int closure_alias_binding_at(CodeGenerator* gen, ASTNode* owner, ASTNode*
     if (!t || t->kind != TYPE_FUNCTION || t->is_fnptr) return 0;
     Type* vt = decl->node_type;
     if (vt && vt->kind != TYPE_UNKNOWN && !(vt->kind == TYPE_FUNCTION && !vt->is_fnptr)) return 0;
-    ASTNode* leaf = closure_handback_leaf_in(gen, owner, rhs, depth);
-    if (!leaf || strcmp(leaf->value, decl->value) == 0) return 0;
+    ASTNode* end = closure_handback_end_in(gen, owner, rhs, depth);
+    if (!end || end->type == AST_FUNCTION_CALL) return 0;
+    if (end->type == AST_IDENTIFIER) {
+        if (!end->value || !end->node_type || end->node_type->kind != TYPE_FUNCTION ||
+            end->node_type->is_fnptr || strcmp(end->value, decl->value) == 0) return 0;
+    } else if (!closure_view_binding(end)) {
+        return 0;
+    }
     return closure_local_is_plain(gen, owner, decl->value);
 }
 
@@ -8187,22 +8198,32 @@ static int g_owned_ret_active_count = 0;
  * was a closure nobody else holds (returns_owned_closure checks the call). */
 static int g_returns_param = -1;
 
-/* The index of parameter `name` of `fdef` (a function definition's pattern
- * variables, a closure's AST_CLOSURE_PARAMs), or -1. */
-static int owned_return_param_index(ASTNode* fdef, const char* name) {
-    int idx = 0;
-    for (int i = 0; fdef && i < fdef->child_count; i++) {
+/* The parameter of `fdef` at argument position `idx`, or NULL: a closure's
+ * AST_CLOSURE_PARAMs, or a function's parameters as fn_param_at takes them,
+ * where every one has a position, a literal or `_` pattern too (a clause's
+ * `sel(0, a, b)`). */
+static ASTNode* handback_param_at(ASTNode* fdef, int idx) {
+    if (!fdef || fdef->type != AST_CLOSURE) return fn_param_at(fdef, idx);
+    for (int i = 0, pos = 0; i < fdef->child_count; i++) {
         ASTNode* p = fdef->children[i];
-        if (!p) continue;
-        if (p->type == AST_BLOCK) break;
-        if (p->type == AST_GUARD_CLAUSE || p->type == AST_REQUIRES_CLAUSE ||
-            p->type == AST_ENSURES_CLAUSE) continue;
-        if (p->type != AST_PATTERN_VARIABLE && p->type != AST_VARIABLE_DECLARATION &&
-            p->type != AST_CLOSURE_PARAM) continue;
-        if (p->value && strcmp(p->value, name) == 0) return idx;
-        idx++;
+        if (p && p->type == AST_CLOSURE_PARAM && pos++ == idx) return p;
     }
-    return -1;
+    return NULL;
+}
+
+/* The argument position of parameter `name` of `fdef` (a function
+ * definition's pattern variable, a closure's AST_CLOSURE_PARAM), counted
+ * as handback_param_at counts, or -1. Counting the variables alone took `b`
+ * of `sel(0, a, b)` for the second argument, so the caller judged the wrong
+ * one handed back (#2763). */
+static int owned_return_param_index(ASTNode* fdef, const char* name) {
+    for (int idx = 0;; idx++) {
+        ASTNode* p = handback_param_at(fdef, idx);
+        if (!p) return -1;
+        if ((p->type == AST_PATTERN_VARIABLE || p->type == AST_VARIABLE_DECLARATION ||
+             p->type == AST_CLOSURE_PARAM) && p->value && strcmp(p->value, name) == 0)
+            return idx;
+    }
 }
 
 /* Every `return` of `fdef` (a closure body's returns are its own) must hand
@@ -8578,13 +8599,9 @@ static int callee_hands_back_clause(CodeGenerator* gen, ASTNode* fdef, ASTNode* 
     handback_scope(&fs, fdef, depth + 1);
     int param = -1;
     if (!handback_returns_in(gen, &fs, fdef, body, pos, &param) || param < 0) return -1;
-    const char* pname = NULL;
-    for (int i = 0, idx = 0; i < fdef->child_count && !pname; i++) {
-        ASTNode* p = fdef->children[i];
-        if (!p || p->type == AST_BLOCK) break;
-        if (p->type != AST_PATTERN_VARIABLE && p->type != AST_VARIABLE_DECLARATION) continue;
-        if (idx++ == param) pname = p->value;
-    }
+    ASTNode* pnode = handback_param_at(fdef, param);
+    const char* pname = pnode && (pnode->type == AST_PATTERN_VARIABLE ||
+                                  pnode->type == AST_VARIABLE_DECLARATION) ? pnode->value : NULL;
     /* Rebound, a returned name may be another value. */
     if (!pname || env_scan_binds(body, pname)) return -1;
     EnvScan ps;
@@ -8655,17 +8672,29 @@ static ASTNode* handed_back_arg(CodeGenerator* gen, EnvScan* s, ASTNode* call, i
     return (p >= 0 && p < call->child_count) ? call->children[p] : NULL;
 }
 
-/* The closure variable `e` is, through calls that hand their argument back:
- * `g` for `g`, `keep(g)` and `keep(keep(g))`. NULL for anything else. */
-static ASTNode* closure_handback_leaf(CodeGenerator* gen, EnvScan* s, ASTNode* e) {
+/* What `e` evaluates to through calls that hand their argument back: `e`
+ * itself when it is no call, `g` for `keep(g)` and `keep(keep(g))`, `o.cb`
+ * for `keep(o.cb)`. NULL for a call that hands nothing back. */
+static ASTNode* closure_handback_end(CodeGenerator* gen, EnvScan* s, ASTNode* e) {
     for (int hops = 0; e && hops <= ENV_SCAN_MAX_DEPTH; hops++) {
-        if (e->type == AST_IDENTIFIER) {
-            Type* t = e->node_type;
-            return (e->value && t && t->kind == TYPE_FUNCTION && !t->is_fnptr) ? e : NULL;
-        }
+        if (e->type != AST_FUNCTION_CALL) return e;
         e = handed_back_arg(gen, s, e, -1);
     }
     return NULL;
+}
+
+/* Is `e` a closure variable (a local, a parameter, a capture)? */
+static int closure_variable_ref(ASTNode* e) {
+    Type* t = e ? e->node_type : NULL;
+    return e && e->type == AST_IDENTIFIER && e->value && t && t->kind == TYPE_FUNCTION &&
+           !t->is_fnptr;
+}
+
+/* The closure variable `e` is, through calls that hand their argument back:
+ * `g` for `g`, `keep(g)` and `keep(keep(g))`. NULL for anything else. */
+static ASTNode* closure_handback_leaf(CodeGenerator* gen, EnvScan* s, ASTNode* e) {
+    ASTNode* end = closure_handback_end(gen, s, e);
+    return closure_variable_ref(end) ? end : NULL;
 }
 
 /* The scope of `owner`'s body, for the questions above: a binding's scan
@@ -8680,15 +8709,18 @@ static void handback_scope(EnvScan* s, ASTNode* owner, int depth) {
     s->cid = -2;
 }
 
-static ASTNode* closure_handback_leaf_in(CodeGenerator* gen, ASTNode* owner, ASTNode* e,
-                                         int depth) {
-    if (e && e->type == AST_IDENTIFIER) {
-        Type* t = e->node_type;
-        return (e->value && t && t->kind == TYPE_FUNCTION && !t->is_fnptr) ? e : NULL;
-    }
+static ASTNode* closure_handback_end_in(CodeGenerator* gen, ASTNode* owner, ASTNode* e,
+                                        int depth) {
+    if (!e || e->type != AST_FUNCTION_CALL) return e;
     EnvScan s;
     handback_scope(&s, owner, depth);
-    return closure_handback_leaf(gen, &s, e);
+    return closure_handback_end(gen, &s, e);
+}
+
+static ASTNode* closure_handback_leaf_in(CodeGenerator* gen, ASTNode* owner, ASTNode* e,
+                                         int depth) {
+    ASTNode* end = closure_handback_end_in(gen, owner, e, depth);
+    return closure_variable_ref(end) ? end : NULL;
 }
 
 /* The argument `call`, in the scope of `owner`, hands back (handed_back_arg),
@@ -8699,21 +8731,29 @@ static ASTNode* closure_handback_next(CodeGenerator* gen, ASTNode* owner, ASTNod
     return handed_back_arg(gen, &s, call, -1);
 }
 
-/* The closure variable tuple destructure `d` gives slot `pos` through a
- * call that hands an argument back there (`g2, n = pair(g)`), in the scope
- * of `owner`; NULL otherwise. */
-static ASTNode* tuple_slot_handback_leaf(CodeGenerator* gen, ASTNode* owner, ASTNode* d,
-                                         int pos, int depth) {
+/* What tuple destructure `d` gives slot `pos` through a call that hands an
+ * argument back there (`g2, n = pair(g)`), in the scope of `owner`
+ * (closure_handback_end); NULL otherwise. */
+static ASTNode* tuple_slot_handback_end(CodeGenerator* gen, ASTNode* owner, ASTNode* d,
+                                        int pos, int depth) {
     if (!d || d->type != AST_TUPLE_DESTRUCTURE || pos < 0 || pos + 1 >= d->child_count)
         return NULL;
     EnvScan s;
     handback_scope(&s, owner, depth);
     ASTNode* arg = handed_back_arg(gen, &s, d->children[d->child_count - 1], pos);
-    return arg ? closure_handback_leaf(gen, &s, arg) : NULL;
+    return arg ? closure_handback_end(gen, &s, arg) : NULL;
 }
 
-/* Is slot `pos` of `d` a plain closure local given a closure variable as it
- * is (tuple_slot_handback_leaf)? Then the destructure retains, as an alias
+/* The closure variable among those: `g` for `g2, n = pair(g)`. */
+static ASTNode* tuple_slot_handback_leaf(CodeGenerator* gen, ASTNode* owner, ASTNode* d,
+                                         int pos, int depth) {
+    ASTNode* end = tuple_slot_handback_end(gen, owner, d, pos, depth);
+    return closure_variable_ref(end) ? end : NULL;
+}
+
+/* Is slot `pos` of `d` a plain closure local given a closure variable, or
+ * a field or element read (closure_view_binding), as it is
+ * (tuple_slot_handback_end)? Then the destructure retains, as an alias
  * binding does, and the slot owns what it holds. */
 static int tuple_slot_alias_binding_at(CodeGenerator* gen, ASTNode* owner, ASTNode* d,
                                        int pos, int depth) {
@@ -8723,7 +8763,8 @@ static int tuple_slot_alias_binding_at(CodeGenerator* gen, ASTNode* owner, ASTNo
         env_scan_mentions(d->children[d->child_count - 1], slot->value)) return 0;
     Type* vt = slot->node_type;
     if (vt && vt->kind != TYPE_UNKNOWN && !(vt->kind == TYPE_FUNCTION && !vt->is_fnptr)) return 0;
-    if (!tuple_slot_handback_leaf(gen, owner, d, pos, depth)) return 0;
+    ASTNode* end = tuple_slot_handback_end(gen, owner, d, pos, depth);
+    if (!closure_variable_ref(end) && !closure_view_binding(end)) return 0;
     return closure_local_is_plain(gen, owner, slot->value);
 }
 
@@ -8949,7 +8990,14 @@ static void env_scan_walk(CodeGenerator* gen, EnvScan* s, ASTNode* node,
                 }
                 return;
             }
-            if (!name[0] || !env_scan_mentions(node, name)) break;
+            /* A cell's value is not handed back as the cell's own: a call
+             * lends it with a reference held for the call alone
+             * (arg_drain_select), and the call may rebind the cell (a
+             * closure it runs), which gives the cell's reference back. The
+             * value handed back then lives on the lent reference, released
+             * before the call's value is used, so the cell pins what it
+             * holds there, as before #2763. */
+            if (!name[0] || s->cell_mode || !env_scan_mentions(node, name)) break;
             /* #2763: a call that hands the name back (`keep(g)`) is the
              * name's own value, judged where it stands as the name would
              * be; its other arguments are walked as any are. */

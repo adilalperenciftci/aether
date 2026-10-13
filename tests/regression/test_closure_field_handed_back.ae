@@ -1,0 +1,81 @@
+// Regression (#2763 follow-up): a closure read out of a field and handed
+// back by a call (`h = keep(o.cb)`) is held by the local it is bound to,
+// as `h = o.cb` is (#2525).
+//
+// The binding took the call's value as a value someone else held and
+// retained nothing, so once the struct's field let the closure go (the
+// struct replaced, here), `h` called a freed environment: a wrong count or
+// a crash. A call that hands back a field or element read is that read,
+// and the local, or the tuple slot it lands in, retains it and releases it
+// at its scope end.
+//
+// After the struct is replaced the freed memory is reused by closures of
+// the same shape (`burn`), so a dead `h` reads another count or crashes.
+// The leak check runs where the heap count is exact (mem.heap_in_use_exact):
+// after a warm-up, some window of the same work grows by exactly 0
+// (mem.steady_growth).
+
+import std.mem
+import std.string
+
+extern exit(code: int)
+
+struct Holder {
+    cb: fn
+}
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+counter(p: string) -> fn {
+    return || { return string.length(p) }
+}
+
+keep(f: fn) -> fn {
+    return f
+}
+
+keep_tuple(f: fn) -> (fn, int) {
+    return f, 5
+}
+
+bound(p: string) -> int {
+    o = Holder { cb: counter(p) }
+    h = keep(o.cb)
+    o = Holder { cb: counter(string.concat(p, "xyz")) }
+    burn = counter(string.concat(p, "123456789"))
+    int n = call(h) * 100 + call(o.cb) * 10 + call(burn)
+    return n
+}
+
+slot(p: string) -> int {
+    o = Holder { cb: counter(p) }
+    h, k = keep_tuple(o.cb)
+    o = Holder { cb: counter(string.concat(p, "xyz")) }
+    burn = counter(string.concat(p, "123456789"))
+    int n = call(h) * 100 + call(o.cb) * 10 + call(burn) + k
+    return n
+}
+
+main() {
+    println("=== test_closure_field_handed_back ===")
+    p = string.concat("bc", "")
+    check(bound(p) == 261, "a field's closure handed back to a local (${bound(p)})")
+    check(slot(p) == 266, "a field's closure handed back to a tuple slot (${slot(p)})")
+    if mem.heap_in_use_exact() {
+        grown = mem.steady_growth(|| {
+                i = 0
+                while i < 100 {
+                    bound(p)
+                    slot(p)
+                    i = i + 1
+                }
+            }, 5)
+        check(grown == 0, "100 fields' closures handed back grew the heap by ${grown} bytes in every run")
+    }
+    println("=== test_closure_field_handed_back passed ===")
+}
