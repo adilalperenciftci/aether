@@ -2583,6 +2583,44 @@ static void reject_non_closure_callee(ASTNode* call, SymbolTable* table) {
     free_type(t);
 }
 
+/* #2840 review: `none` and `[]` are built as a value of the slot they are
+ * given to, an optional or a slice of its element type. Through an erased
+ * `fn` (a bare `fn` with no closure literal known) the closure's parameter
+ * types are not known at the call, so there is no type to build them as;
+ * guessing one (an int optional) handed a `string?` parameter garbage.
+ * Each is refused at the argument, naming the fix. */
+static void reject_untyped_erased_args(ASTNode* call, SymbolTable* table) {
+    if (call->child_count < 2 || !call->children[0] ||
+        call->children[0]->type == AST_CLOSURE)
+        return;
+    Type* t = infer_type(call->children[0], table);
+    int erased = t && t->kind == TYPE_FUNCTION && !t->is_fnptr && fn_type_is_erased(t) &&
+                 !t->closure_literal;
+    if (t) free_type(t);
+    if (!erased) return;
+    const char* callee = call->children[0]->type == AST_IDENTIFIER && call->children[0]->value
+                             ? call->children[0]->value : "the closure";
+    for (int i = 1; i < call->child_count; i++) {
+        ASTNode* a = call->children[i];
+        if (!a || ast_is_trailing_block(a)) continue;
+        int is_none = a->type == AST_NONE_LITERAL;
+        int is_empty = a->type == AST_ARRAY_LITERAL && a->child_count == 0;
+        if (!is_none && !is_empty) continue;
+        char msg[400], help[300];
+        snprintf(msg, sizeof(msg),
+                 "`%s` given to '%s', a bare `fn`: its parameter types are not known here, so "
+                 "there is no %s type to build it as",
+                 is_none ? "none" : "[]", callee, is_none ? "optional" : "slice");
+        snprintf(help, sizeof(help),
+                 "bind it to a local of the parameter's type first (e.g. `let o: %s = %s`) and "
+                 "pass that, or, for a named function, take a typed function pointer (`%s: "
+                 "fn(%s) -> int`)",
+                 is_none ? "string?" : "int[]", is_none ? "none" : "[]", callee,
+                 is_none ? "string?" : "int[]");
+        type_error_hint(msg, help, a->line, a->column);
+    }
+}
+
 static int g_tc_ptr_to_closure = 0;
 int typecheck_ptr_to_closure_seen(void) { return g_tc_ptr_to_closure; }
 
@@ -13245,6 +13283,7 @@ int typecheck_function_call(ASTNode* call, SymbolTable* table) {
         // known, else the erased-call default (#2054) -- the same rule as
         // the explicit call(f, ...) form, so both spellings type alike.
         set_node_type(call, call_builtin_result_type(call, table));
+        reject_untyped_erased_args(call, table);
         return 1;
     }
 
@@ -14086,6 +14125,7 @@ int typecheck_function_call(ASTNode* call, SymbolTable* table) {
     if (call->value && strcmp(call->value, "call") == 0) {
         set_node_type(call, call_builtin_result_type(call, table));
         reject_non_closure_callee(call, table);
+        reject_untyped_erased_args(call, table);
     }
 
     // select() infers its type from the first named arg's value

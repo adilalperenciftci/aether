@@ -8176,14 +8176,17 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                             fprintf(gen->output, ", ");
                             /* #2723: the parameter the cast above declares:
                              * the signature's, else the argument's own. */
-                            Type* pt = (closure_sig && arg_pi < closure_sig->param_count &&
-                                        closure_sig->param_types &&
-                                        closure_sig->param_types[arg_pi] &&
-                                        closure_sig->param_types[arg_pi]->kind != TYPE_UNKNOWN)
-                                       ? closure_sig->param_types[arg_pi]
-                                       : (arg ? arg->node_type : NULL);
+                            Type* sig_pt = (closure_sig && arg_pi < closure_sig->param_count &&
+                                            closure_sig->param_types &&
+                                            closure_sig->param_types[arg_pi] &&
+                                            closure_sig->param_types[arg_pi]->kind != TYPE_UNKNOWN)
+                                           ? closure_sig->param_types[arg_pi] : NULL;
                             arg_pi++;
-                            emit_closure_argument(gen, arg, pt);
+                            /* Coerced only into a parameter type the signature
+                             * gives: with none, the argument's own type is no
+                             * slot to wrap it for (an erased `fn`, #2840). */
+                            if (sig_pt) emit_closure_argument(gen, arg, sig_pt);
+                            else generate_sized_array_argument(gen, arg, arg ? arg->node_type : NULL);
                         }
                         fprintf(gen->output, ")");
                         arg_drain_close(gen, expr, &ad);

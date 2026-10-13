@@ -450,6 +450,20 @@ erasure and its undoing are both ordinary assignments.
 L2's other half — an `if`-expression choosing between two named functions —
 still emits C that does not compile; that is #2055.
 
+The arguments have the same problem the other way: the closure's parameter
+types are gone too. `none` and `[]` are built as a value of the slot they
+are given to, and through an erased call there is no slot type to build
+them as, so `call(f, none)` and `f([])` on a bare `fn` are refused at the
+argument. Bind the value to a local of the parameter's type and pass that:
+
+```aether,fragment
+let o: string? = none
+r = call(f, o)
+```
+
+A bare value or a variant given to an optional or sum parameter through an
+erased call is still passed unwrapped; that is #2847.
+
 **Proper fix:** parameterised closure types (`fn[T]`, like Rust's
 `Fn(i32) -> i32`), so the signature survives the boundary and no annotation
 is needed at the call. Until then the typed binding is the contract.
