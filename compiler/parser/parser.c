@@ -3015,6 +3015,20 @@ static ASTNode* parse_statement_inner(Parser* parser) {
             if (next && next->type == TOKEN_IDENTIFIER && next->line == token->line) {
                 return parse_variable_declaration(parser);
             }
+            // The optional form, `Point? q = ...` (a struct's optional;
+            // `int? o` reaches parse_variable_declaration through the keyword
+            // case). Shape IDENT `?` IDENT, then `=`, `;` or the end of the
+            // line: an ask, `actor ? Msg { ... }`, has its message's `{`
+            // there.
+            if (next && next->type == TOKEN_QUESTION && next->line == token->line) {
+                Token* nm = peek_ahead(parser, 2);
+                Token* after = peek_ahead(parser, 3);
+                if (nm && nm->type == TOKEN_IDENTIFIER && nm->line == token->line &&
+                    (!after || after->line != nm->line || after->type == TOKEN_ASSIGN ||
+                     after->type == TOKEN_SEMICOLON)) {
+                    return parse_variable_declaration(parser);
+                }
+            }
             // The array form of the same declaration, with an element
             // type spelled by an identifier: `uint32[4] xs = [...]`,
             // `uint16[2] hs`, `Pair[8] ps`. Shape IDENT `[` NUMBER? `]`
