@@ -1,0 +1,40 @@
+// Regression (#2809): a function whose result type is a struct's optional
+// parses.
+//
+// `find(n: int) -> Point? { ... }` was "Expected IDENTIFIER, got
+// LEFT_BRACE": the definition parser takes `-> Name` for a written result
+// type only when `{` follows the name (or a bracket group and then `{`), so
+// the `?` sent it to the arrow-body path. A struct returned from it is
+// wrapped into the optional, as a return into any optional is (#2782).
+extern exit(code: int)
+
+struct Point {
+    x: int
+}
+
+find(n: int) -> Point? {
+    if n > 0 {
+        return Point { x: n }
+    }
+    return none
+}
+
+pick(n: int) -> Point? {
+    return match n {
+        1 -> Point { x: 10 }
+        _ -> none
+    }
+}
+
+main() {
+    a = find(3)
+    b = find(0)
+    c = pick(1)
+    d = pick(2)
+    got = (a?.x ?? 0) + (b?.x ?? 100) + (c?.x ?? 0) + (d?.x ?? 1000)
+    if got != 1113 {
+        println("FAIL: optional struct results summed to ${got}, want 1113")
+        exit(1)
+    }
+    println("struct optional result: ok")
+}

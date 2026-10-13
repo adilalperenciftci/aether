@@ -5810,6 +5810,18 @@ ASTNode* parse_function_definition(Parser* parser) {
                     // fell through to the `-> expr` path, leaving `{`
                     // dangling → a top-level parse error).
                     Token* after_name = peek_ahead(parser, 1);
+                    /* #2809: an optional result type, `-> Point? { ... }`:
+                     * the `?` sits between the name and the body. A `-> expr`
+                     * body never puts `{` (or a contract clause) right after
+                     * a postfix `?`. */
+                    if (after_name && after_name->type == TOKEN_QUESTION) {
+                        Token* after_q = peek_ahead(parser, 2);
+                        if (after_q && (after_q->type == TOKEN_LEFT_BRACE ||
+                                        after_q->type == TOKEN_REQUIRES ||
+                                        after_q->type == TOKEN_ENSURES))
+                            is_typed_return = 1;
+                        break;
+                    }
                     if (after_name && after_name->type == TOKEN_LEFT_BRACE) {
                         Token* after_brace = peek_ahead(parser, 2);
                         Token* after_field = peek_ahead(parser, 3);
