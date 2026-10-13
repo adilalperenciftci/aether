@@ -731,7 +731,7 @@ main() {
 }
 ```
 
-What a binding converts, a `return` converts, as C converts it: one numeric scalar to another (`int` to `long` or `float`; into a written `int`, a `long` or a `float` truncates, as `int k = 4.5` does), a bool to an integer and an integer to a bool (a comparison returned from `-> int` is 1 or 0, an extern's int truth value returned from `-> bool` is whether it is nonzero), a `T` to `T?` and `none` to any optional, a variant struct to its sum, an enum to an integer (`byte` included) and an integer to an enum, `null` or an `int` to a `ptr` or a `*T`, and `null` or `[]` to a slice. A `string` and a bare `ptr` are both a C `const char*`, so a C string pointer returned from `-> string` is a borrowed string, and a string returned from `-> ptr` is its pointer:
+What a binding converts, a `return` converts, as C converts it: one numeric scalar to another (`int` to `long` or `float`; into a written `int`, a `long` or a `float` truncates, as `int k = 4.5` does), a bool to an integer and an integer to a bool (a comparison returned from `-> int` is 1 or 0, an extern's int truth value returned from `-> bool` is whether it is nonzero), a `T` to `T?` and `none` to any optional, a variant struct to its sum or to the sum's optional, an enum to an integer (`byte` included) and an integer to an enum, `null` or an `int` to a `ptr` or a `*T`, and `null` or `[]` to a slice. A `string` and a bare `ptr` are both a C `const char*`, so a C string pointer returned from `-> string` is a borrowed string, and a string returned from `-> ptr` is its pointer:
 
 ```aether
 extern getenv(name: string) -> ptr
@@ -2313,7 +2313,8 @@ single-name `type T = A` alias is not a supported form).
 
 A variant struct value flows into a `Shape` slot directly; there is no
 `some(...)`-style constructor. The wrap happens at `let` bindings, function
-parameters, return values, and call arguments:
+parameters, return values, and call arguments, and into the sum's optional
+(`Shape?`) the variant is wrapped into the sum first:
 
 ```aether,fragment
 let s: Shape = Circle { r: 2.0 }      // Circle wraps into Shape

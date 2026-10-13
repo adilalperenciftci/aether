@@ -11561,7 +11561,14 @@ void emit_optional_coerced(CodeGenerator* gen, ASTNode* value, Type* target) {
         return;
     }
     fprintf(gen->output, "(%s){ .has = 1, .val = ", tc);
-    generate_expression(gen, value);
+    /* A variant into a sum's optional is wrapped into the sum first, as it
+     * is into the sum itself (#914): the optional holds a Shape, not the
+     * Circle. */
+    if (target->element_type && target->element_type->kind == TYPE_SUM &&
+        needs_sum_coerce(value, target->element_type))
+        emit_sum_coerced(gen, value, target->element_type);
+    else
+        generate_expression(gen, value);
     fprintf(gen->output, " }");
 }
 

@@ -1,0 +1,56 @@
+// Regression (#2826): a variant put into a sum's optional is wrapped into the
+// sum, then the optional.
+//
+// `maybe_shape(n: int) -> Shape? { return Circle { r: 1.5 } }` failed in the
+// C compiler ("incompatible types when initializing type 'enum <anonymous>'
+// using type 'Circle'"), and so did `let s: Shape? = Circle { ... }` and a
+// variant passed to a `Shape?` parameter: the optional's wrap took the
+// variant as its value, where it holds a Shape.
+extern exit(code: int)
+
+struct Circle {
+    r: float
+}
+
+struct Rect {
+    w: float
+    h: float
+}
+
+type Shape = Circle | Rect
+
+maybe_shape(n: int) -> Shape? {
+    if n > 0 {
+        return Circle { r: 1.5 }
+    }
+    if n < 0 {
+        return Rect { w: 2.0, h: 3.0 }
+    }
+    return none
+}
+
+area(s: Shape) -> float {
+    let a: float = match s {
+        Circle -> s.r
+        Rect -> s.w * s.h
+    }
+    return a
+}
+
+measure(s: Shape?) -> float {
+    if s == none {
+        return 0.0
+    }
+    return area(s!)
+}
+
+main() {
+    let b: Shape? = Circle { r: 2.5 }
+    got = measure(maybe_shape(1)) + measure(maybe_shape(-1)) * 10.0 + measure(maybe_shape(0))
+    got = got + measure(b) * 100.0 + measure(Rect { w: 1.0, h: 4.0 }) * 1000.0
+    if got != 4311.5 {
+        println("FAIL: a variant in a Shape? measured ${got}, want 4311.5")
+        exit(1)
+    }
+    println("variant into a sum's optional: ok")
+}
