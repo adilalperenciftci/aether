@@ -1898,6 +1898,13 @@ static int is_const_struct_literal(ASTNode* e, SymbolTable* table) {
         ASTNode* f = e->children[i];
         if (!f || f->type != AST_ASSIGNMENT || f->child_count < 1) return 0;
         ASTNode* v = f->children[0];
+        /* #2792: `[]` (or `null`, a constant anyway) for a `T[]` field,
+         * which the field's coercion has made the empty slice: a constant,
+         * as for a `T[]` global (#2785). */
+        if (v && v->type == AST_SLICE_FROM_ARRAY && v->child_count > 0 && v->children[0] &&
+            (v->children[0]->type == AST_NULL_LITERAL ||
+             (v->children[0]->type == AST_ARRAY_LITERAL && v->children[0]->child_count == 0)))
+            continue;
         if (!is_const_expression(v, table) && !is_const_struct_literal(v, table)) return 0;
     }
     return 1;

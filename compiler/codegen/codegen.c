@@ -7038,6 +7038,12 @@ static void emit_static_struct_init(CodeGenerator* gen, ASTNode* lit) {
             /* A closure field: the zero closure, as `var f: fn = null` is
              * (#2525); `NULL` is not an initializer for the struct. */
             fprintf(gen->output, "{0}");
+        } else if (is_empty_slice_value(v) ||
+                   (type_is_slice(ft) && (v->type == AST_NULL_LITERAL ||
+                                          (v->type == AST_ARRAY_LITERAL && v->child_count == 0)))) {
+            /* #2792: a `T[]` field's empty slice (`[]` or `null`), the
+             * constant a `T[]` global takes too (#2785). */
+            fprintf(gen->output, "{0}");
         } else {
             generate_expression(gen, v);
         }
