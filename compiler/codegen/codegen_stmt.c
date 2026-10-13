@@ -9437,27 +9437,35 @@ static void emit_opt_string_cell_value(CodeGenerator* gen, ASTNode* value) {
             owned ? 1 : 0);
 }
 
-/* #2795: `name = value` into the cell of an optional `name`, of type `t`:
- * the value as the optional (emit_optional_coerced). A `string?` cell takes
- * a string of its own and gives back the one it held, which its last
- * release would otherwise (_aether_cell_release_optstr). `text`, when set,
- * is the value's C text, already as the cell holds it. */
-static void emit_opt_cell_store(CodeGenerator* gen, const char* name, Type* t, ASTNode* value,
-                                const char* text) {
+/* #2795: `value` stored into `lvalue`, an optional of type `t` that owns
+ * what it holds: a closure cell (`(*name)`, emit_opt_cell_store) or a
+ * module-level `var` (#2800). The value is taken as the optional
+ * (emit_optional_coerced). A `string?` takes a string of its own and gives
+ * back the one it held, which a cell's last release would otherwise
+ * (_aether_cell_release_optstr); a global's last one lives as long as the
+ * program. `text`, when set, is the value's C text, already as the holder
+ * keeps it. */
+static void emit_opt_owner_store(CodeGenerator* gen, const char* lvalue, Type* t, ASTNode* value,
+                                 const char* text) {
     const char* tc = cg_intern(get_c_type(t));
     if (strcmp(tc, "ae_opt_string") == 0) {
         fprintf(gen->output, "{ ae_opt_string _ae_nv = ");
         if (text) fprintf(gen->output, "%s", text);
         else emit_opt_string_cell_value(gen, value);
-        fprintf(gen->output, "; ae_opt_string _ae_ov = *%s; *%s = _ae_nv; "
-                "if (_ae_ov.has) _aether_str_cell_free_val(_ae_ov.val); }\n", name, name);
+        fprintf(gen->output, "; ae_opt_string _ae_ov = %s; %s = _ae_nv; "
+                "if (_ae_ov.has) _aether_str_cell_free_val(_ae_ov.val); }\n", lvalue, lvalue);
         return;
     }
-    fprintf(gen->output, "*%s = ", name);
+    fprintf(gen->output, "%s = ", lvalue);
     if (text) fprintf(gen->output, "%s", text);
     else if (value) emit_optional_coerced(gen, value, t);
     else fprintf(gen->output, "(%s){0}", tc);
     fprintf(gen->output, ";\n");
+}
+
+static void emit_opt_cell_store(CodeGenerator* gen, const char* name, Type* t, ASTNode* value,
+                                const char* text) {
+    emit_opt_owner_store(gen, cg_internf("(*%s)", name), t, value, text);
 }
 
 /* `name = value` into the cell of the promoted capture `name`, of type `t`:
@@ -11932,8 +11940,8 @@ void emit_optional_coerced(CodeGenerator* gen, ASTNode* value, Type* target) {
  * position type `pt`, as an optional of C type `dst_c` holds it: an
  * optional position as it is, any other wrapped, as emit_optional_coerced
  * wraps a value. For a holder that owns its string (`own_str`: a
- * `string?` cell), the string is its own: adopted when the call handed it
- * over (`owned`), copied otherwise (_aether_str_cell_own). */
+ * `string?` cell or global), the string is its own: adopted when the call
+ * handed it over (`owned`), copied otherwise (_aether_str_cell_own). */
 static const char* opt_slot_text(const char* dst_c, Type* pt, int tmp_id, int j, int owned,
                                  int own_str) {
     int optstr = own_str && strcmp(dst_c, "ae_opt_string") == 0;
@@ -11969,10 +11977,17 @@ static Type* module_global_decl_type(CodeGenerator* gen, const char* name) {
  * a string of its own (adopted when the call handed it over, `owned`,
  * copied otherwise, and like every string a global holds never freed) and
  * a reference of its own to a closure (adopted when `closure_owned`, else
- * retained, giving back the one it held). */
+ * retained, giving back the one it held). An optional global (#2800) takes
+ * the slot as the optional, a bare value wrapped, and a `string?` one a
+ * string of its own, giving back the one it held (emit_opt_owner_store). */
 static void emit_destructure_global_store(CodeGenerator* gen, const char* name, Type* pt,
                                           int tmp_id, int j, int owned, int closure_owned) {
     Type* gt = module_global_decl_type(gen, name);
+    if (gt && gt->kind == TYPE_OPTIONAL) {
+        const char* gc = cg_intern(get_c_type(gt));
+        emit_opt_owner_store(gen, name, gt, NULL, opt_slot_text(gc, pt, tmp_id, j, owned, 1));
+        return;
+    }
     if (pt && pt->kind == TYPE_FUNCTION && !pt->is_fnptr) {
         fprintf(gen->output, "{ void* _ae_old = %s.env; %s = %s_tup%d._%d%s; "
                 "_aether_closure_env_release(_ae_old); }\n",
@@ -12983,6 +12998,18 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                                         stmt->child_count > 0 ? stmt->children[0] : NULL, NULL);
                     break;
                 }
+                /* #2800: a module-level optional `var` the binding names,
+                 * with no local or parameter of that name declared, is
+                 * written, as `g = v` writes any global (#701), and owns
+                 * what it holds: a `string?` takes a string of its own and
+                 * gives back the one it held. */
+                if (!is_var_declared(gen, stmt->value) &&
+                    is_module_global_var(gen, stmt->value)) {
+                    print_indent(gen);
+                    emit_opt_owner_store(gen, stmt->value, stmt->node_type,
+                                         stmt->child_count > 0 ? stmt->children[0] : NULL, NULL);
+                    break;
+                }
                 /* `string?` heap-ownership: the local is registered by
                  * hoist_opt_str_trackers, so is_var_declared is already
                  * true here and this always takes the assign-only branch.
@@ -12995,6 +13022,15 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                 int rhs_is_heap = is_opt_str && stmt->child_count > 0 &&
                                   stmt->children[0] &&
                                   is_heap_opt_string_rhs(gen, stmt->children[0]);
+                /* #2800: a `string?` global gives back the string it holds
+                 * when it is re-bound, so a local bound to it takes a copy
+                 * of its own rather than the global's. */
+                ASTNode* grd = stmt->child_count > 0 ? stmt->children[0] : NULL;
+                int global_read = is_opt_str && grd && grd->type == AST_IDENTIFIER && grd->value &&
+                                  is_opt_string_type(grd->node_type) &&
+                                  !is_var_declared(gen, grd->value) &&
+                                  is_module_global_var(gen, grd->value);
+                if (global_read) rhs_is_heap = 1;
                 print_indent(gen);
                 if (is_opt_str) {
                     /* Free the prior owned buffer, then assign the new
@@ -13005,7 +13041,12 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                     fprintf(gen->output, "{ ae_opt_string _opt_old_%s = %s; ",
                             stmt->value, stmt->value);
                     fprintf(gen->output, "%s = ", stmt->value);
-                    if (stmt->child_count > 0 && stmt->children[0]) {
+                    if (global_read) {
+                        fprintf(gen->output, "({ ae_opt_string _ae_ot = ");
+                        generate_expression(gen, grd);
+                        fprintf(gen->output, "; if (_ae_ot.has) "
+                                "_ae_ot.val = aether_uniform_heap_str(_ae_ot.val, 0); _ae_ot; })");
+                    } else if (stmt->child_count > 0 && stmt->children[0]) {
                         emit_optional_coerced(gen, stmt->children[0], stmt->node_type);
                     } else {
                         fprintf(gen->output, "(%s){0}", get_c_type(stmt->node_type));

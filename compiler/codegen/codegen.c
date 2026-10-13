@@ -7076,7 +7076,21 @@ static void emit_module_global_vars(CodeGenerator* gen, ASTNode* program) {
         }
         const char* ctype = get_c_type(cd->node_type);
         fprintf(gen->output, "static %s %s = ", ctype, cd->value);
-        if (cd->children[0]->type == AST_NULL_LITERAL &&
+        if (cd->node_type && cd->node_type->kind == TYPE_OPTIONAL) {
+            /* #2800: an optional's constant is its own struct: `none`
+             * (or no initialiser) is `{0}`, a value `{ .has = 1, .val =
+             * ... }`, a struct literal's as its initializer list. The
+             * value was given bare, which C does not take for the struct. */
+            ASTNode* v = cd->children[0];
+            if (v->type == AST_NONE_LITERAL) {
+                fprintf(gen->output, "{0}");
+            } else {
+                fprintf(gen->output, "{ .has = 1, .val = ");
+                if (v->type == AST_STRUCT_LITERAL) emit_static_struct_init(gen, v);
+                else generate_expression(gen, v);
+                fprintf(gen->output, " }");
+            }
+        } else if (cd->children[0]->type == AST_NULL_LITERAL &&
             strcmp(ctype, "_AeClosure") == 0) {
             /* #2525: a `var name: fn = null` global starts as the
              * zero closure (no body, no env); `NULL` is not an

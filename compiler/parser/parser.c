@@ -7258,8 +7258,16 @@ ASTNode* parse_top_level_decl(Parser* parser) {
                     advance_token(parser); // consume ':'
                     vtype = parse_type(parser);
                 }
-                if (!expect_token(parser, TOKEN_ASSIGN)) { advance_token(parser); return NULL; }
-                ASTNode* vval = parse_expression(parser);
+                ASTNode* vval = NULL;
+                if (vtype && vtype->kind == TYPE_OPTIONAL &&
+                    !(peek_token(parser) && peek_token(parser)->type == TOKEN_ASSIGN)) {
+                    /* #2800: an optional with no initialiser starts as
+                     * `none`, as a local `let a: int?` does. */
+                    vval = create_ast_node(AST_NONE_LITERAL, NULL, vline, vcol);
+                } else {
+                    if (!expect_token(parser, TOKEN_ASSIGN)) { advance_token(parser); return NULL; }
+                    vval = parse_expression(parser);
+                }
                 if (!vval) { advance_token(parser); return NULL; }
                 node = create_ast_node(AST_CONST_DECLARATION, vname->value, vline, vcol);
                 add_child(node, vval);

@@ -7907,6 +7907,17 @@ static int destructure_slot_rebind(ASTNode* var, SymbolTable* table) {
         bound = lookup_symbol_local(t, var->value);
         if (bound) bound_in = t;
     }
+    if (!bound && is_program_global_name(var->value)) {
+        /* #2800: a module-level optional `var` the slot writes (#2796)
+         * keeps its optional type, as a bare re-bind adopts it (#340). */
+        Symbol* g = lookup_symbol(table, var->value);
+        if (g && g->type && g->type->kind == TYPE_OPTIONAL && !g->is_function &&
+            var->node_type->kind != TYPE_OPTIONAL && is_assignable(var->node_type, g->type)) {
+            free_type(var->node_type);
+            var->node_type = clone_type(g->type);
+        }
+        return 1;
+    }
     if (!bound || !bound->type || (bound->branch_hoisted && bound_in != table) ||
         bound->is_state || bound->is_function || bound->is_actor || bound->is_module_alias)
         return 1;
@@ -8177,6 +8188,19 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                     int is_struct_init = stmt->annotation &&
                                          strcmp(stmt->annotation, "global_var") == 0 &&
                                          struct_typed && is_const_struct_literal(init, table);
+                    /* #2800: an optional `var` is initialised with its own
+                     * constant: `none`, or a struct literal of constants
+                     * for a struct optional, which codegen wraps
+                     * (emit_module_global_vars). */
+                    if (!is_struct_init && stmt->annotation &&
+                        strcmp(stmt->annotation, "global_var") == 0 && dt &&
+                        dt->kind == TYPE_OPTIONAL) {
+                        Type* et = dt->element_type;
+                        is_struct_init = init->type == AST_NONE_LITERAL ||
+                                         (et && et->kind == TYPE_STRUCT && et->struct_name &&
+                                          init->value && strcmp(et->struct_name, init->value) == 0 &&
+                                          is_const_struct_literal(init, table));
+                    }
                     if (!is_array_const && !is_struct_init) {
                         char msg[512];
                         if (stmt->annotation && strcmp(stmt->annotation, "global_var") == 0) {
