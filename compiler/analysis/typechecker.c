@@ -11864,13 +11864,9 @@ static ASTNode* tc_closure_body(ASTNode* closure) {
     return NULL;
 }
 
-/* Issue #333: the receiver a member-access call's trailing block resolves
- * its bare calls through (`<receiver>_<name>`, see lookup_symbol): the
- * namespace `ns` of `ns.f(...)` when `table` sees it, else the struct type
- * of the value `v` of `v.f(...)`. NULL when the call names no receiver;
- * a type's name is copied into `buf`. */
-static const char* dsl_receiver_of_call(ASTNode* call, SymbolTable* table, char* buf,
-                                        size_t cap) {
+/* Issue #333: the receiver of a member-access call's trailing block
+ * (typechecker.h). */
+const char* dsl_receiver_of_call(ASTNode* call, SymbolTable* table, char* buf, size_t cap) {
     if (!call || !call->value || !buf || cap == 0) return NULL;
     const char* dot = strchr(call->value, '.');
     if (!dot) return NULL;
@@ -11903,6 +11899,45 @@ static const char* tc_trailing_receiver(ASTNode* call, ASTNode* block, SymbolTab
     return dsl_receiver_of_call(call, table, buf, cap);
 }
 
+static void tc_collect_locals(ASTNode* n, StrMap* locals);
+static void tc_declare_locals(ASTNode* n, SymbolTable* scope);
+
+/* Declare in `scope` every name the block `body` binds, with the type
+ * inference gave it where that is known (tc_declare_locals), else unknown:
+ * the names the checker's scope for the block holds. */
+static void tc_declare_block_names(ASTNode* body, SymbolTable* scope) {
+    if (!body || !scope) return;
+    tc_declare_locals(body, scope);
+    StrMap names;
+    strmap_init(&names);
+    tc_collect_locals(body, &names);
+    for (int i = 0; i < strmap_count(&names); i++) {
+        const char* nm = strmap_key_at(&names, i);
+        if (nm && !lookup_symbol_local(scope, nm))
+            add_symbol(scope, nm, create_type(TYPE_UNKNOWN), 0, 0, 0);
+    }
+    strmap_free(&names);
+}
+
+/* Does the bare call `name`, in the scope `table`, resolve through a DSL
+ * block's receiver, as lookup_symbol resolves it (#333)? Scope by scope from
+ * the innermost: one that binds the name keeps it, and a block's receiver
+ * that has a `<receiver>_<name>` takes it, ahead of anything further out:
+ * the function's own locals and the program's function of that name. */
+static int tc_receiver_resolves(SymbolTable* table, const char* name) {
+    if (!name || strchr(name, '.')) return 0;
+    for (SymbolTable* t = table; t; t = t->parent) {
+        if (lookup_symbol_local(t, name)) return 0;
+        if (t->dsl_receiver && t->dsl_receiver[0]) {
+            char rewritten[512];
+            snprintf(rewritten, sizeof(rewritten), "%.250s_%.250s", t->dsl_receiver, name);
+            for (SymbolTable* u = t; u; u = u->parent)
+                if (lookup_symbol_local(u, rewritten)) return 1;
+        }
+    }
+    return 0;
+}
+
 /* Does a `return` anywhere in `node` give a value? A nested closure's
  * returns are its own; a call's trailing block runs inline, so its returns
  * are the function's (#2766). A bare call in such a block resolves through
@@ -11920,9 +11955,14 @@ static int tc_body_yields(ASTNode* node, SymbolTable* table, StrMap* locals, int
             char buf[256];
             const char* recv = tc_trailing_receiver(node, c, table, buf, sizeof(buf));
             if (recv) {
+                /* The block's scope, as the checker builds it: the
+                 * receiver, and the names the block binds (its own, ahead
+                 * of the receiver's functions; tc_receiver_resolves). */
+                ASTNode* body = tc_closure_body(c);
                 SymbolTable* scope = create_symbol_table(table);
                 scope->dsl_receiver = strdup(recv);
-                int y = tc_body_yields(tc_closure_body(c), scope, locals, depth);
+                tc_declare_block_names(body, scope);
+                int y = tc_body_yields(body, scope, locals, depth);
                 free_symbol_table(scope);
                 if (y) return 1;
                 continue;
@@ -11994,7 +12034,10 @@ static int tc_method_call_yields(const char* recv_name, const char* name, Type* 
  * speaks for what is not one of the program's functions. */
 static int tc_call_yields(ASTNode* call, SymbolTable* table, StrMap* locals, int depth) {
     if (!call->value || depth > 16) return 1;
-    if (locals && strmap_has(locals, call->value))
+    /* In a DSL block a bare call is the receiver's function before it is
+     * one of the definition's own names: the lookup below finds it. */
+    if (locals && strmap_has(locals, call->value) &&
+        !tc_receiver_resolves(table, call->value))
         return tc_bound_callee_yields(strmap_get(locals, call->value), table, locals, depth);
     /* #2744: a call the parser tagged UFCS (`mk(n).show()`), before the
      * checker rewrote it: the function the rewrite will pick, for the type
@@ -12198,6 +12241,24 @@ static void tc_yields_settle(ASTNode* program, SymbolTable* global) {
                 strmap_put(&g_tc_yields, defs[i]->value, TC_YIELDS_VALUE);
                 changed = 1;
             }
+        }
+    }
+
+    /* The answer is what the function's C type follows: a result type the
+     * inference pass gave a function that returns nothing (a call there it
+     * typed otherwise than the checker resolves it) declared `int f(...)`
+     * around the bare returns the checker makes of its returns. */
+    for (int i = 0; i < n; i++) {
+        ASTNode* d = defs[i];
+        Type* t = d->node_type;
+        if (!d->type_inferred || !t || t->kind == TYPE_VOID || t->kind == TYPE_UNKNOWN) continue;
+        if (strmap_get(&g_tc_yields, d->value) != TC_YIELDS_NONE) continue;
+        free_type(d->node_type);
+        d->node_type = create_type(TYPE_VOID);
+        Symbol* fs = lookup_symbol_local(global, d->value);
+        if (fs && fs->is_function) {
+            if (fs->type) free_type(fs->type);
+            fs->type = create_type(TYPE_VOID);
         }
     }
 

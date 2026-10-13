@@ -298,6 +298,12 @@ erroring as undefined. Resolution order:
 3. The current file's scope (existing imports, top-level decls).
 4. Otherwise: undefined-name error.
 
+So the receiver's function also comes before a local of the function the
+block is written in, and before a top-level function of the same name: in
+`blk.run("x") { return note(n) }`, `note` is `blk.note` even beside a
+`note(n: int) -> int` of the program, and the function returns what
+`blk.note` returns.
+
 Pre-fix, every downstream project consuming an SDK module had to
 write a two-line import preamble:
 

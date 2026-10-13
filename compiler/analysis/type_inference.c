@@ -20,6 +20,7 @@ InferenceContext* create_inference_context(SymbolTable* table) {
     ctx->iteration_count = 0;
     ctx->scope_owner = NULL;
     ctx->walk_id = 0;
+    ctx->dsl_depth = 0;
     return ctx;
 }
 
@@ -519,6 +520,27 @@ static ASTNode* called_closure_literal(ASTNode* call, InferenceContext* ctx) {
     return sym->inferred_closure;
 }
 
+/* The function a bare call `name` in the DSL blocks being walked resolves
+ * to through a block's receiver, or NULL for any other call. Block by
+ * block from the innermost, as lookup_symbol walks the checker's scopes: a
+ * name the block binds itself keeps it (NULL), and a receiver that has a
+ * `<receiver>_<name>` takes it, ahead of the enclosing function's names
+ * and the program's function of that name. */
+static Symbol* dsl_block_callee(InferenceContext* ctx, const char* name) {
+    if (!ctx->symbols || ctx->dsl_depth == 0 || !name || strchr(name, '.')) return NULL;
+    Symbol* from = ctx->symbols->symbols;
+    for (int d = ctx->dsl_depth - 1; d >= 0; d--) {
+        for (Symbol* s = from; s && s != ctx->dsl_heads[d]; s = s->next)
+            if (s->name && strcmp(s->name, name) == 0) return NULL;
+        char rewritten[512];
+        snprintf(rewritten, sizeof(rewritten), "%.250s_%.250s", ctx->dsl_receivers[d], name);
+        Symbol* f = lookup_symbol(ctx->symbols, rewritten);
+        if (f && f->is_function) return f;
+        from = ctx->dsl_heads[d];
+    }
+    return NULL;
+}
+
 // Collect constraints from expressions
 void collect_expression_constraints(ASTNode* node, InferenceContext* ctx) {
     if (!node) return;
@@ -792,12 +814,32 @@ void collect_expression_constraints(ASTNode* node, InferenceContext* ctx) {
         case AST_FUNCTION_CALL:
             // Process argument expressions
             for (int i = 0; i < node->child_count; i++) {
-                collect_constraints(node->children[i], ctx);
+                ASTNode* arg = node->children[i];
+                /* A trailing block of a member-access call resolves its bare
+                 * calls through the receiver, as the checker's scope for it
+                 * does (#333): typed by the program's function of the same
+                 * name instead, a `return note(n)` there gave the function
+                 * around it a result its checked returns do not have. */
+                char recv[256];
+                const char* r = (ast_is_trailing_block(arg) && ctx->symbols &&
+                                 ctx->dsl_depth < INFER_MAX_DSL_BLOCKS)
+                    ? dsl_receiver_of_call(node, ctx->symbols, recv, sizeof(recv)) : NULL;
+                if (r) {
+                    ctx->dsl_receivers[ctx->dsl_depth] = strdup(r);
+                    ctx->dsl_heads[ctx->dsl_depth] = ctx->symbols->symbols;
+                    ctx->dsl_depth++;
+                }
+                collect_constraints(arg, ctx);
+                if (r) {
+                    ctx->dsl_depth--;
+                    free(ctx->dsl_receivers[ctx->dsl_depth]);
+                }
             }
 
             // Look up function definition to get return type
             if (node->value) {
-                Symbol* func_sym = lookup_qualified_symbol(ctx->symbols, node->value);
+                Symbol* func_sym = dsl_block_callee(ctx, node->value);
+                if (!func_sym) func_sym = lookup_qualified_symbol(ctx->symbols, node->value);
                 if (func_sym && func_sym->type) {
                     if (!node->node_type || node->node_type->kind == TYPE_UNKNOWN) {
                         /* Calling an fn-typed local (is_fnptr=1): the

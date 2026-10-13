@@ -14,3 +14,14 @@
   variable"), and a bare call returned from a member-access call's block is
   settled through the block's receiver (`return note(n)` in `blk.run() { }`
   is `blk.note`), as the checker resolves it (#2766).
+
+  Such a call is the receiver's function before a function of the program or
+  a local of the function of the same name, in every pass alike: beside a
+  program's `note(n: int) -> int`, inference typed `return note(n)` by that
+  `note`, so the function was declared `int` around the bare `return` the
+  checker made of it; the module prune also dropped `blk.note` when a local
+  was named `note`. Since a return in a block now gives the function its
+  type, some programs print otherwise than before: a function with no written
+  type whose first `return` gives an int inside a block and a later one
+  `return 2.5` returns 2, as it does with the first `return` outside a block,
+  and a `long` returned from a block is no longer cut to an int.

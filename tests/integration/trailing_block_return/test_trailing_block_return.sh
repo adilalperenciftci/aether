@@ -13,6 +13,10 @@
 # missing_return.ae: once those returns count, a function that returns a
 # value from a block on one path and runs off its end on another is the
 # missing-return error, not a C error.
+#
+# clash.ae: such a call is the receiver's function before a function of the
+# program or a local of the same name, in inference, the settle, the module
+# prune and codegen alike, as the checker resolves it.
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
@@ -35,6 +39,23 @@ else
         case "$out" in
             *"$want"*) ;;
             *) echo "  [FAIL] trailing_block_return: no \"$want\" in:"
+               echo "$out" | sed 's/^/        /'
+               fails=$((fails + 1)) ;;
+        esac
+    done
+fi
+
+out=$(cd "$SCRIPT_DIR" && AETHER_HOME="$ROOT" "$AE" run clash.ae 2>&1)
+rc=$?
+if [ $rc -ne 0 ]; then
+    echo "  [FAIL] trailing_block_return: clash.ae did not build and run (exit $rc)"
+    echo "$out" | sed 's/^/        /'
+    fails=$((fails + 1))
+else
+    for want in "local 3" "clash 1001 top 104"; do
+        case "$out" in
+            *"$want"*) ;;
+            *) echo "  [FAIL] trailing_block_return: no \"$want\" in clash.ae's:"
                echo "$out" | sed 's/^/        /'
                fails=$((fails + 1)) ;;
         esac
