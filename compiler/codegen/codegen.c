@@ -8271,10 +8271,16 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
      * -Wunused-value: `list.add(l, string.copy(p))` warned in ordinary user
      * code. A function call discards its result silently, so the conversion
      * lives in these helpers instead. */
+    /* #2810: the container owns an adopted string from here, so the panic
+     * journal must not hold it any more: a panic after the adoption drained
+     * the entry the string's first owner tracked, freeing what the
+     * container then freed again (aether_unwind.h: forget on adoption). */
     print_line(gen, "static inline const char* _aether_list_add_adopted(void* list, void* item) {");
+    print_line(gen, "    aether_unwind_forget(item);");
     print_line(gen, "    return list_add_string_adopted(list, item) ? \"\" : \"list.add failed\";");
     print_line(gen, "}");
     print_line(gen, "static inline const char* _aether_map_put_adopted(void* map, const char* key, void* value) {");
+    print_line(gen, "    aether_unwind_forget(value);");
     print_line(gen, "    return map_put_string_adopted(map, key, value) ? \"\" : \"map.put failed\";");
     print_line(gen, "}");
     /* #2497: the owning entries, for a value the container must hold its
@@ -8467,9 +8473,18 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     // Builder context stack: trailing blocks push/pop the return value
     print_line(gen, "static void* _aether_ctx_stack[64];");
     print_line(gen, "static int _aether_ctx_depth = 0;");
-    print_line(gen, "static inline void _aether_ctx_push(void* ctx) { if (_aether_ctx_depth < 64) _aether_ctx_stack[_aether_ctx_depth++] = ctx; }");
+    print_line(gen, "static void (*_aether_ctx_release[64])(void*);");
+    print_line(gen, "static inline void _aether_ctx_push(void* ctx) { if (_aether_ctx_depth < 64) { _aether_ctx_release[_aether_ctx_depth] = 0; _aether_ctx_stack[_aether_ctx_depth++] = ctx; } }");
     print_line(gen, "static inline void _aether_ctx_pop(void) { if (_aether_ctx_depth > 0) _aether_ctx_depth--; }");
     print_line(gen, "static inline void* _aether_ctx_get(void) { return _aether_ctx_depth > 0 ? _aether_ctx_stack[_aether_ctx_depth-1] : (void*)0; }");
+    /* #2810: a builder call's config is released by its call only on a way
+     * out of the block the call compiles (#2791); a panic leaves the block
+     * by longjmp, which skips that and the pop. The entry a builder block
+     * pushes records the config's release, so a `try` catching the panic
+     * puts the stack back to its depth at the try and releases the configs
+     * of the blocks the panic abandoned. */
+    print_line(gen, "static inline void _aether_ctx_own(void* ctx, void (*release)(void*)) { if (_aether_ctx_depth > 0 && _aether_ctx_stack[_aether_ctx_depth-1] == ctx) _aether_ctx_release[_aether_ctx_depth-1] = release; }");
+    print_line(gen, "static inline void _aether_ctx_unwind(int depth) { while (_aether_ctx_depth > depth) { _aether_ctx_depth--; void (*r)(void*) = _aether_ctx_release[_aether_ctx_depth]; _aether_ctx_release[_aether_ctx_depth] = 0; if (r && _aether_ctx_stack[_aether_ctx_depth]) r(_aether_ctx_stack[_aether_ctx_depth]); } }");
     /* #1704: the sandbox permission stack is SEPARATE from the builder
      * context stack above. They used to be the same array, so entering any
      * trailing block pushed that builder's config object onto the stack the

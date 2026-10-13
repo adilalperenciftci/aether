@@ -7763,6 +7763,10 @@ void emit_trailing_block_body(CodeGenerator* gen, ASTNode* body) {
         static int own_counter = 0;
         own = cg_internf("_ae_cfg_own%d", own_counter++);
         print_line(gen, "void* %s = %s;", own, gen->builder_cfg_var);
+        /* #2810: the stack entry the call pushed records the release, for
+         * a `try` that catches a panic leaving this block. */
+        print_line(gen, "_aether_ctx_own(%s, %s);", gen->builder_cfg_var,
+                   gen->builder_cfg_release);
         ASTNode* release = create_ast_node(AST_EXPRESSION_STATEMENT, NULL,
                                            body->line, body->column);
         if (release) {
@@ -7791,10 +7795,11 @@ void emit_trailing_block_body(CodeGenerator* gen, ASTNode* body) {
 
 /* #2791: the C function that releases what a builder's config factory
  * made, or NULL when none is known: `map_free` for the default `map_new`,
- * and for a `<stem>_new` factory the `<stem>_free(ptr)` the program
- * defines or declares (`list_new`, `list_free`). Any other factory's object
- * belongs to its builder's protocol, which the compiler cannot release
- * for it. */
+ * and for a `<stem>_new` factory the `<stem>_free(ptr)` returning nothing
+ * that the program defines or declares (`list_new`, `list_free`): a C
+ * `void (*)(void*)`, as the context stack records it (#2810). Any other
+ * factory's object belongs to its builder's protocol, which the compiler
+ * cannot release for it. */
 static const char* builder_config_release(CodeGenerator* gen, const char* builder_name) {
     const char* factory = get_builder_factory(gen, builder_name);
     if (!factory) return NULL;
@@ -7807,10 +7812,17 @@ static const char* builder_config_release(CodeGenerator* gen, const char* builde
         if (lookup_extern_param_kind(gen, release, 0) != TYPE_PTR ||
             lookup_extern_param_type(gen, release, 1) != NULL)
             return NULL;
+        Type* rt = lookup_extern_return_type(gen, release);
+        if (rt && rt->kind != TYPE_VOID) return NULL;
         return lookup_extern_c_name(gen, release);
     }
     ASTNode* def = gen->program ? find_function_definition_by_name(gen->program, release) : NULL;
     if (!def || def->type != AST_FUNCTION_DEFINITION || fn_param_count(def) != 1) return NULL;
+    if (def->node_type && def->node_type->kind != TYPE_VOID &&
+        def->node_type->kind != TYPE_UNKNOWN)
+        return NULL;
+    if (def->child_count > 0 && has_return_value(def->children[def->child_count - 1]))
+        return NULL;
     ASTNode* p = fn_param_at(def, 0);
     if (!p || !p->node_type || p->node_type->kind != TYPE_PTR) return NULL;
     return codegen_normalise_callee(safe_c_name(release));
@@ -15947,6 +15959,10 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
             if (gen->uses_sandbox) {
                 print_line(gen, "int _aether_try_sbx_%d = _aether_sandbox_depth;", uid);
             }
+            /* #2810: so does a panic out of a trailing block: the builder
+             * context stack goes back to its depth here, and the configs of
+             * the builder blocks the panic abandoned are released. */
+            print_line(gen, "int _aether_try_ctx_%d = _aether_ctx_depth;", uid);
             print_line(gen, "AetherJmpFrame* _aether_try_%d = aether_try_push();", uid);
             print_line(gen, "if (AETHER_SIGSETJMP(_aether_try_%d->buf, 1) == 0) {", uid);
             indent(gen);
@@ -15961,6 +15977,7 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
             if (gen->uses_sandbox) {
                 print_line(gen, "_aether_sandbox_depth = _aether_try_sbx_%d;", uid);
             }
+            print_line(gen, "_aether_ctx_unwind(_aether_try_ctx_%d);", uid);
             /* #2739: a binding a `try` of its handler writes is volatile,
              * as its ownership flag is (emit_owned_catch_handler): the
              * handler is outside that try, whose setjmp sees both. */

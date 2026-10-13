@@ -609,6 +609,13 @@ named otherwise has no release the compiler can find, and an early exit
 leaves its object unreleased (#2802), so pair a custom factory with its
 `_free`.
 
+A panic that leaves the block skips the builder too. When a `try` catches
+it, the catch puts the builder context stack back to its depth at the `try`
+and releases, with the same function, the configs of the blocks the panic
+abandoned; a block after the `try` fills its own call's config. Before
+(#2810), each caught panic left an entry on the stack, and after 64 of them
+a block's setters filled the config of a call a panic had abandoned.
+
 ### Generated code
 
 For `compile("Main.java") { set_release("21") }`, the compiler generates:
