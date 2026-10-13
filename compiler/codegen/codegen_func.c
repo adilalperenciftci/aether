@@ -2478,6 +2478,16 @@ void generate_struct_definition(CodeGenerator* gen, ASTNode* struct_def) {
     int is_packed = struct_def->annotation &&
                     strcmp(struct_def->annotation, "extern_packed") == 0;
 
+    /* #2820: an optional field embeds its `ae_opt_<T>` by value, so the
+     * typedef is declared ahead of the struct; the program-wide pass
+     * (collect_optional_typedefs) runs after every struct body. */
+    for (int i = 0; i < struct_def->child_count; i++) {
+        ASTNode* field = struct_def->children[i];
+        if (field && field->type == AST_STRUCT_FIELD && field->node_type &&
+            field->node_type->kind == TYPE_OPTIONAL)
+            ensure_optional_typedef(gen, field->node_type);
+    }
+
     // Generate C struct
     if (is_packed) {
         print_line(gen, "typedef struct __attribute__((packed)) %s {", struct_def->value);

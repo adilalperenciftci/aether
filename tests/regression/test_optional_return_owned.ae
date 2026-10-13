@@ -1,0 +1,126 @@
+// Regression (#2834, #2835): a `string` function returning a string its
+// own scope frees at exit hands the caller a string that outlives the call,
+// whether it is the `??` default or the `some(s)` binding of a match on a
+// `string?` local.
+//
+// `par(w, d) { return w ?? d }` captures `d` (it escapes through the
+// return), so `d` was freed at scope exit after `w.has ? w.val : d` was
+// read and before the caller used it; so was a local default bound to a
+// heap string. A `some(s)` binding over a `string?` local was a view of the
+// local's string, freed with the local, through `return s` or a tuple's
+// `return s, 1`. Neither return made the function heap-returning. Now a
+// `??` whose default the function owns is a heap return (the uniform heap
+// return copies whichever value is taken), and the `some` binding over a
+// local is a copy the arm owns (as over a cell, #2795), handed over by
+// `return s` at a single or a tuple position (#2823).
+//
+// After each call, 50 fresh strings (`burn`) reuse what was freed, so a
+// dead return reads another string. The leak check runs where the heap
+// count is exact (mem.heap_in_use_exact): after a warm-up, some window of
+// the same work grows by exactly 0 (mem.steady_growth).
+
+import std.mem
+import std.string
+
+extern exit(code: int)
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+burn() -> int {
+    total = 0
+    i = 0
+    while i < 50 {
+        t = string.concat("burn-burn-", "burn-burn-burn")
+        total = total + string.length(t)
+        i = i + 1
+    }
+    return total
+}
+
+par(w: string?, d: string) -> string {
+    return w ?? d
+}
+
+own_default(n: int) -> string {
+    let w: string? = none
+    d = string.concat("dflt-", "${n}")
+    return w ?? d
+}
+
+from_local(p: string, give: bool) -> string {
+    let l: string? = none
+    if give {
+        l = string.concat(p, "-o")
+    }
+    match l {
+        some(s) -> {
+            return s
+        }
+        none -> {
+            return "x"
+        }
+    }
+}
+
+from_local_tuple(p: string, give: bool) -> (string, int) {
+    let l: string? = none
+    if give {
+        l = string.concat(p, "-t")
+    }
+    match l {
+        some(s) -> {
+            return s, 1
+        }
+        none -> {
+            return "x", 0
+        }
+    }
+}
+
+fn round(p: string) {
+    i = 0
+    while i < 20 {
+        a = par(none, p)
+        b = par("given", p)
+        c = own_default(7)
+        d = from_local(p, true)
+        e = from_local(p, false)
+        f, k = from_local_tuple(p, true)
+        g, _ = from_local_tuple(p, false)
+        par(none, p)
+        from_local(p, true)
+        check(string.length(a) + string.length(b) + string.length(c) + string.length(d) +
+            string.length(e) + string.length(f) + string.length(g) == 23 && k == 1,
+            "the strings returned")
+        i = i + 1
+    }
+}
+
+main() {
+    println("=== test_optional_return_owned ===")
+    p = string.concat("ab", "")
+    a = par(none, p)
+    b = par("given", p)
+    c = own_default(3)
+    d = from_local(p, true)
+    e = from_local(p, false)
+    f, k = from_local_tuple(p, true)
+    burn()
+    check(a == "ab" && b == "given", "a captured parameter as the ?? default ([${a}] [${b}])")
+    check(c == "dflt-3", "a local as the ?? default ([${c}])")
+    check(d == "ab-o" && e == "x", "a some(s) binding of a string? local ([${d}] [${e}])")
+    check(f == "ab-t" && k == 1, "a some(s) binding at a tuple position ([${f}] ${k})")
+    round(p)
+    if mem.heap_in_use_exact() {
+        grown = mem.steady_growth(|| {
+                round(p)
+            }, 5)
+        check(grown == 0, "20 rounds of returns grew the heap by ${grown} bytes in every run")
+    }
+    println("=== test_optional_return_owned passed ===")
+}

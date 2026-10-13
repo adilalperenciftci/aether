@@ -7077,7 +7077,21 @@ static void emit_module_global_vars(CodeGenerator* gen, ASTNode* program) {
         }
         const char* ctype = get_c_type(cd->node_type);
         fprintf(gen->output, "static %s %s = ", ctype, cd->value);
-        if (cd->children[0]->type == AST_NULL_LITERAL &&
+        if (cd->node_type && cd->node_type->kind == TYPE_OPTIONAL) {
+            /* #2800: an optional's constant is its own struct: `none`
+             * (or no initialiser) is `{0}`, a value `{ .has = 1, .val =
+             * ... }`, a struct literal's as its initializer list. The
+             * value was given bare, which C does not take for the struct. */
+            ASTNode* v = cd->children[0];
+            if (v->type == AST_NONE_LITERAL) {
+                fprintf(gen->output, "{0}");
+            } else {
+                fprintf(gen->output, "{ .has = 1, .val = ");
+                if (v->type == AST_STRUCT_LITERAL) emit_static_struct_init(gen, v);
+                else generate_expression(gen, v);
+                fprintf(gen->output, " }");
+            }
+        } else if (cd->children[0]->type == AST_NULL_LITERAL &&
             strcmp(ctype, "_AeClosure") == 0) {
             /* #2525: a `var name: fn = null` global starts as the
              * zero closure (no body, no env); `NULL` is not an
@@ -8080,6 +8094,40 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     print_line(gen, "    _AeCellHeader* h = (_AeCellHeader*)cell - 1;");
     print_line(gen, "    if (_aether_cell_last(h)) { _aether_str_cell_free_val(*(const char**)cell); free(h); }");
     print_line(gen, "}");
+    /* #2795: a `string?` cell owns the string it holds, as a string cell
+     * does: every store gives it one of its own (emit_opt_cell_store), so
+     * the last releaser gives that back. The struct is the layout of the
+     * program's `ae_opt_string`, which is declared later. */
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED void _aether_cell_release_optstr(void* cell) {");
+    print_line(gen, "    if (!cell) return;");
+    print_line(gen, "    _AeCellHeader* h = (_AeCellHeader*)cell - 1;");
+    print_line(gen, "    if (!_aether_cell_last(h)) return;");
+    print_line(gen, "    const struct { int has; const char* val; }* o = cell;");
+    print_line(gen, "    if (o->has) _aether_str_cell_free_val(o->val);");
+    print_line(gen, "    free(h);");
+    print_line(gen, "}");
+    /* #2797: a `ptr` cell a string is stored into (a closure's `x = s`)
+     * holds the string's characters, the C string a `ptr` is, as a `ptr`
+     * local bound to a plain string holds them. The cell keeps the string
+     * those characters belong to in a second slot, a string of its own,
+     * given back at the next string store or the cell's last release, so
+     * the characters live as long as the variable, not as long as the
+     * closure's environment the value came from. A store of any other
+     * pointer writes the first slot alone. */
+    print_line(gen, "extern const char* aether_string_data(const void* s);");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED void _aether_ptr_cell_set_str(void** cell, const char* owned) {");
+    print_line(gen, "    const char* _old = ((const char**)cell)[1];");
+    print_line(gen, "    ((const char**)cell)[1] = owned;");
+    print_line(gen, "    cell[0] = owned ? (void*)aether_string_data(owned) : NULL;");
+    print_line(gen, "    _aether_str_cell_free_val(_old);");
+    print_line(gen, "}");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED void _aether_cell_release_ptr(void* cell) {");
+    print_line(gen, "    if (!cell) return;");
+    print_line(gen, "    _AeCellHeader* h = (_AeCellHeader*)cell - 1;");
+    print_line(gen, "    if (!_aether_cell_last(h)) return;");
+    print_line(gen, "    _aether_str_cell_free_val(((const char**)cell)[1]);");
+    print_line(gen, "    free(h);");
+    print_line(gen, "}");
     /* #2618: a counted string stored carries a reference of its own (a take
      * never hands over a borrowed one; a literal is never freed), so the
      * value replaced is given back even when it is the same pointer:
@@ -8939,6 +8987,8 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
                          * today; the loop keeps this right if it takes more. */
                         Type* ft = fld->node_type;
                         while (ft && ft->kind == TYPE_ARRAY && type_is_sized_array(ft)) ft = ft->element_type;
+                        /* An optional holds its value by value too (#2820). */
+                        if (ft && ft->kind == TYPE_OPTIONAL) ft = ft->element_type;
                         if (!ft || ft->kind != TYPE_STRUCT) continue;
                         const char* dep = get_c_type(ft);
                         if (!dep) continue;
@@ -9116,6 +9166,21 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
                 /* get_c_type already says `const char*` for strings; avoid
                  * emitting a duplicate `const const`. */
                 int already_const = strncmp(ctype, "const ", 6) == 0;
+                if (cd->node_type && cd->node_type->kind == TYPE_OPTIONAL) {
+                    /* #2807: an optional's constant is its own struct, as
+                     * a module `var`'s is (#2800): `{0}` for `none`, a
+                     * value wrapped. Given bare, C refused it. */
+                    fprintf(gen->output, "static const %s %s = ", ctype, cd->value);
+                    if (cd->children[0]->type == AST_NONE_LITERAL) {
+                        fprintf(gen->output, "{0}");
+                    } else {
+                        fprintf(gen->output, "{ .has = 1, .val = ");
+                        generate_expression(gen, cd->children[0]);
+                        fprintf(gen->output, " }");
+                    }
+                    fprintf(gen->output, ";\n");
+                    continue;
+                }
                 fprintf(gen->output, "static %s%s %s = (",
                         already_const ? "" : "const ", ctype, cd->value);
                 generate_expression(gen, cd->children[0]);

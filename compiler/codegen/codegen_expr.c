@@ -2312,8 +2312,20 @@ static int subtree_contains(ASTNode* node, ASTNode* target) {
     return 0;
 }
 
+/* Does statement `s` declare `var_name`: `name = v`, a constant, or a slot
+ * of a tuple destructure `a, name = f()` (#2762)? The destructure's slots
+ * are its children before the value; missed, a closure's own `a, b = g()`
+ * found no binding of `a` before it and declared fresh locals, so the
+ * outer `a` and `b` a destructure had bound never changed. */
 static int declares_name(ASTNode* s, const char* var_name) {
-    return s && (s->type == AST_VARIABLE_DECLARATION || s->type == AST_CONST_DECLARATION) &&
+    if (!s) return 0;
+    if (s->type == AST_TUPLE_DESTRUCTURE) {
+        for (int i = 0; i + 1 < s->child_count; i++) {
+            if (declares_name(s->children[i], var_name)) return 1;
+        }
+        return 0;
+    }
+    return (s->type == AST_VARIABLE_DECLARATION || s->type == AST_CONST_DECLARATION) &&
            s->value && strcmp(s->value, var_name) == 0;
 }
 
@@ -2734,6 +2746,33 @@ static int is_builtin_name(const char* name) {
     return 0;
 }
 
+/* #2820: the declared type of field `field` of the struct `sname`, or
+ * NULL. */
+static Type* struct_literal_field_type(CodeGenerator* gen, const char* sname, const char* field) {
+    ASTNode* sdef = (gen && gen->program && sname)
+                        ? find_struct_definition_by_name(gen->program, sname) : NULL;
+    for (int i = 0; sdef && field && i < sdef->child_count; i++) {
+        ASTNode* f = sdef->children[i];
+        if (f && f->type == AST_STRUCT_FIELD && f->value && strcmp(f->value, field) == 0)
+            return f->node_type;
+    }
+    return NULL;
+}
+
+/* #2805: is `name`, used by the closure `viewer` in scope `scope`, a
+ * module-level `var`, with no parameter of the scope chain spelled the same
+ * (enclosing_decl_line says 0 for one)? Every `name = ...` in a function
+ * writes the global (#701), so the enclosing function's bindings of the
+ * name are the global's, and the closure reads and writes the global
+ * itself. Taken for a capture, the name became a cell, or an env copy,
+ * that shadowed the global for the whole enclosing function: neither the
+ * closure's stores nor the function's own reached it. */
+static int closure_name_is_module_global(CodeGenerator* gen, const char* scope,
+                                         const char* name, ASTNode* viewer) {
+    if (!is_module_global_var(gen, name)) return 0;
+    return enclosing_decl_line(gen->program, scope, name, viewer) != 0;
+}
+
 // Internal recursive worker that tracks the enclosing function name.
 static void discover_closures_scoped(CodeGenerator* gen, ASTNode* node, const char* enclosing_func) {
     if (!node) return;
@@ -2741,9 +2780,16 @@ static void discover_closures_scoped(CodeGenerator* gen, ASTNode* node, const ch
     if (node->type == AST_FUNCTION_DEFINITION || node->type == AST_BUILDER_FUNCTION) {
         /* A clause of a set is a scope of its own (#2644). */
         const char* new_enc = node->value ? fn_scope_name(gen->program, node) : enclosing_func;
+        /* #2805: the function's module decides which globals its closures
+         * reach (is_module_global_var): in a function merged from a module,
+         * a name the program also declares as a `var` is the function's
+         * own local, captured as any other. */
+        const char* saved_origin = gen->current_origin_module;
+        gen->current_origin_module = node->origin_module;
         for (int i = 0; i < node->child_count; i++) {
             discover_closures_scoped(gen, node->children[i], new_enc);
         }
+        gen->current_origin_module = saved_origin;
         return;
     }
     if (node->type == AST_MAIN_FUNCTION) {
@@ -2835,7 +2881,8 @@ static void discover_closures_scoped(CodeGenerator* gen, ASTNode* node, const ch
                 !is_builtin_name(all_ids[i]) &&
                 !is_local_var(body, all_ids[i])) {
                 if (enclosing_func) {
-                    is_cap = is_declared_in_function(gen->program, enclosing_func, all_ids[i]);
+                    is_cap = is_declared_in_function(gen->program, enclosing_func, all_ids[i]) &&
+                             !closure_name_is_module_global(gen, enclosing_func, all_ids[i], node);
                 } else {
                     is_cap = i < first_callee;
                 }
@@ -2903,7 +2950,8 @@ static void discover_closures_scoped(CodeGenerator* gen, ASTNode* node, const ch
                 // mutated through, and stays a capture.
                 int decl_line = enclosing_decl_line(gen->program, enclosing_func,
                                                     writes[i], node);
-                if (decl_line <= node->line) {
+                if (decl_line <= node->line &&
+                    !closure_name_is_module_global(gen, enclosing_func, writes[i], node)) {
                     if (cap_count >= cap_cap) {
                         cap_cap = cap_cap ? cap_cap * 2 : 8;
                         captures = aether_xrealloc(captures, cap_cap * sizeof(char*));
@@ -3601,6 +3649,35 @@ static Type* lookup_var_type(CodeGenerator* gen, const char* var_name, const cha
 const char* lookup_var_c_type(CodeGenerator* gen, const char* var_name, const char* parent_func) {
     Type* t = lookup_var_type(gen, var_name, parent_func);
     return t ? get_c_type(t) : "int"; // fallback
+}
+
+/* #2797: the type the cell of promoted variable `name` was made with, seen
+ * from the scope being emitted: a closure that captures the name reaches
+ * its parent's cell, typed as the closure's prologue types it
+ * (lookup_var_type in the parent scope), and the scope that declares the
+ * name types it by its own first binding. A store into the cell must take
+ * the cell's type: the value's may be another one C converts to it (a
+ * string into a `ptr`), and its own binding in a closure's body says the
+ * value's. NULL when unknown. */
+Type* promoted_cell_type(CodeGenerator* gen, const char* name) {
+    const char* scope = gen ? gen->closure_var_scope : NULL;
+    if (!scope || !name) return NULL;
+    for (int depth = 0; scope && depth < 64 && strncmp(scope, "__closure_", 10) == 0; depth++) {
+        int ci = 0, captured = 0;
+        char nm[64];
+        for (; ci < gen->closure_count; ci++) {
+            closure_scope_name(gen->closures[ci].closure_node, nm, sizeof(nm));
+            if (strcmp(nm, scope) == 0) break;
+        }
+        if (ci == gen->closure_count) return NULL;
+        for (int k = 0; k < gen->closures[ci].capture_count && !captured; k++) {
+            captured = gen->closures[ci].captures[k] &&
+                       strcmp(gen->closures[ci].captures[k], name) == 0;
+        }
+        if (!captured) break;
+        scope = gen->closures[ci].parent_func;
+    }
+    return scope ? lookup_var_type(gen, name, scope) : NULL;
 }
 
 /* #2464: a captured fixed-size array (`int[3] arr`), or NULL. Its C type
@@ -6938,6 +7015,12 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                         fprintf(gen->output,
                                 "_aether_box_closure((_AeClosure){ .fn = (void(*)(void))_aether_bare_adapter_%s, .env = NULL })",
                                 bn ? bn : "unknown");
+                    } else if (is_assignment && ltype && ltype->kind == TYPE_OPTIONAL &&
+                               expr->children[0]->type == AST_MEMBER_ACCESS) {
+                        /* #2820: a store into an optional field takes the
+                         * value as an optional binding does, a bare value
+                         * wrapped and `none` the empty one. */
+                        emit_optional_coerced(gen, expr->children[1], ltype);
                     } else {
                         if (wide_cast && AE_IS_NARROW_INT(rtype)) fprintf(gen->output, "%s", wide_cast);
                         generate_expression(gen, expr->children[1]);
@@ -9259,6 +9342,9 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                 if (field_init && field_init->type == AST_ASSIGNMENT) {
                     if (emitted > 0) fprintf(gen->output, ", ");
                     fprintf(gen->output, ".%s = ", field_init->value);
+                    Type* fv_opt = c_imported ? NULL
+                                   : struct_literal_field_type(gen, expr->value, field_init->value);
+                    if (fv_opt && fv_opt->kind != TYPE_OPTIONAL) fv_opt = NULL;
                     if (field_init->child_count > 0) {
                         /* A header-defined struct's string field is C's
                          * `const char*`: the payload, not a wrapped
@@ -9295,7 +9381,11 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                         int fv_copy = !c_imported && fv && fv->type == AST_IDENTIFIER &&
                                       fv->value && is_heap_string_var(gen, fv->value) &&
                                       alias_source_must_copy(gen, fv->value);
-                        if (take_own && take_own[i][0]) emit_string_take(gen, fv, take_own[i], NULL);
+                        /* #2820: an optional field takes its value as an
+                         * optional binding does, a bare value wrapped and
+                         * `none` the empty one. */
+                        if (fv_opt) emit_optional_coerced(gen, fv, fv_opt);
+                        else if (take_own && take_own[i][0]) emit_string_take(gen, fv, take_own[i], NULL);
                         else if (struct_literal_field_takes_array(gen, expr->value, field_init))
                             fprintf(gen->output, "{0}");   /* #2688: filled below */
                         else if (fv_copy) {
@@ -9310,6 +9400,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                         if (unwrap) fprintf(gen->output, "); _ae_cs ? aether_string_data(_ae_cs) : (const char*)0; })");
                     }
                     emitted++;
+                    if (fv_opt) continue;  /* an optional field has no tracker */
                     if (take_own && take_own[i][0]) continue;  /* tracker set below */
                     /* If the init is heap-classified, also set the hidden
                      * tracker. For a heap-tracked *variable* source, the

@@ -1,0 +1,52 @@
+// Regression (#2803): a typed declaration initialised with a `match`
+// (`int r = match o { ... }`) binds the match's value.
+//
+// The `T name = expr` form parsed its initialiser with parse_expression,
+// which does not parse a `match`: the declaration was left with no
+// initialiser and the match became a statement of its own, so `r` was
+// read uninitialised (`0` where `5` was due). It parses the match as the
+// `let` and bare forms do.
+
+import std.string
+
+extern exit(code: int)
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+int_or(o: int?) -> int {
+    int r = match o {
+        none -> -1
+        some(v) -> v
+    }
+    return r
+}
+
+str_len(o: string?) -> int {
+    int r = match o {
+        none -> -1
+        some(v) -> string.length(v)
+    }
+    return r
+}
+
+label(n: int) -> string {
+    string s = match n {
+        0 -> "zero"
+        1 -> "one"
+        _ -> "many"
+    }
+    return s
+}
+
+main() {
+    println("=== test_typed_match_declaration ===")
+    check(int_or(5) == 5 && int_or(none) == -1, "an int bound to a match on an int? (${int_or(5)})")
+    check(str_len("abc") == 3 && str_len(none) == -1, "an int bound to a match on a string? (${str_len("abc")})")
+    check(label(0) == "zero" && label(1) == "one" && label(7) == "many", "a string bound to a match on an int (${label(7)})")
+    println("=== test_typed_match_declaration passed ===")
+}

@@ -1,0 +1,43 @@
+// Regression (#2797): a closure that stores a string into an outer `ptr`
+// local stores it as the pointer it is.
+//
+// The cell store took the string cell setter from the value's type
+// (`string`, or the tuple slot's) rather than from the cell's (`ptr`, a
+// `void**`), so `_aether_str_cell_set` was handed the `ptr` cell and the
+// program did not compile, through a tuple destructure and through a bare
+// re-bind alike. A `ptr` cell owns no string; the store follows the cell's
+// type.
+
+import std.string
+
+extern exit(code: int)
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+names(p: string) -> (string, int) {
+    return string.concat(p, "!"), 2
+}
+
+main() {
+    println("=== test_closure_ptr_cell_string ===")
+    p = string.concat("bc", "")
+    ptr q = null
+    n = 0
+    set = || {
+        q, n = names(p)
+    }
+    set()
+    ptr r = null
+    put = || {
+        r = p
+    }
+    put()
+    check(q != null && n == 2, "a destructure stores into the ptr cell")
+    check(r != null, "a bare re-bind stores into the ptr cell")
+    println("=== test_closure_ptr_cell_string passed ===")
+}

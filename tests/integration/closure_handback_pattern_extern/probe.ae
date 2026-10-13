@@ -1,0 +1,45 @@
+// Probe for test_closure_handback_pattern_extern.sh: `sel(0, a, b)` hands
+// back `b` and gives `a` to an extern that keeps it. The returned
+// parameter's position was counted over the variable parameters alone, so
+// `g`, the argument at `a`, was taken for the one handed back: its local
+// released it while C still held it, and fire() called a freed
+// environment. Must print "fire 2 use 4".
+
+import std.string
+
+extern stash(boxed: fn)
+extern fire() -> int
+
+counter(p: string) -> fn {
+    return || { return string.length(p) }
+}
+
+sel(0, a: fn, b: fn) -> fn {
+    stash(a)
+    return b
+}
+
+sel(_, a: fn, b: fn) -> fn {
+    stash(a)
+    return b
+}
+
+use(p: string) -> int {
+    g = counter(p)
+    k = counter(string.concat(p, "zz"))
+    h = sel(0, g, k)
+    int n = call(h)
+    return n
+}
+
+main() {
+    p = string.concat("bc", "")
+    n = use(p)
+    // Reuse what a released environment left, so a dead one reads wrong.
+    b1 = counter(string.concat(p, "123456789"))
+    b2 = counter(string.concat(p, "123456789"))
+    b3 = counter(string.concat(p, "123456789"))
+    int f = fire()
+    int burned = call(b1) + call(b2) + call(b3)
+    println("fire ${f} use ${n} burned ${burned}")
+}

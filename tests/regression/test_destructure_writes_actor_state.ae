@@ -1,0 +1,66 @@
+// Regression (#2806): a tuple destructure in a receive arm writes the state
+// fields it names, as `label = v` does.
+//
+// The destructure's slot store did not ask whether the name was a state
+// field, so it declared handler locals (`const char* label = _tup0._0;`)
+// and the state kept its values (`total 0` where `total 306` was due). It
+// writes `self->label` now, the state taking a string of its own (the one
+// it held freed) and a reference of its own to a closure.
+
+import std.string
+
+extern exit(code: int)
+
+message Tag {
+    tag: string
+}
+
+message Ask {}
+
+message Seen {
+    total: int
+}
+
+pair(t: string) -> (string, int) {
+    return string.concat(t, "!"), 300
+}
+
+with_cb(n: int) -> (fn, int) {
+    return || { return n * 2 }, n
+}
+
+actor Keeper {
+    state label = ""
+    state seen = 0
+    state cb = || { return 0 }
+    state count = 0
+
+    receive {
+        Tag(tag) -> {
+            label, seen = pair(tag)
+            cb, count = with_cb(seen)
+        }
+        Ask() -> {
+            reply Seen { total: seen + string.length(label) + call(cb) + count }
+        }
+    }
+}
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+main() {
+    println("=== test_destructure_writes_actor_state ===")
+    k = spawn(Keeper())
+    k ! Tag { tag: "abcde" }
+    int r = k ? Ask {}
+    check(r == 306 + 600 + 300, "state written by a destructure (${r})")
+    k ! Tag { tag: "xy" }
+    int r2 = k ? Ask {}
+    check(r2 == 303 + 600 + 300, "state written again (${r2})")
+    println("=== test_destructure_writes_actor_state passed ===")
+}

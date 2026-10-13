@@ -683,6 +683,7 @@ int is_promoted_capture(CodeGenerator* gen, const char* name);
 /* The C type of `var_name` as `parent_func` declares it (a function name,
  * "main", a receive arm or a hoisted closure scope); "int" when unknown. */
 const char* lookup_var_c_type(CodeGenerator* gen, const char* var_name, const char* parent_func);
+Type* promoted_cell_type(CodeGenerator* gen, const char* name);   /* #2797 */
 const char* promoted_cell_release_fn(CodeGenerator* gen, const char* c_type);
 const char* struct_owning_strings(CodeGenerator* gen, Type* t);
 /* `retain_closures`: 1 where the value at `lvalue` stays a holder of its

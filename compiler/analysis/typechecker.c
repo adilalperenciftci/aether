@@ -7361,8 +7361,35 @@ int typecheck_function_definition(ASTNode* func, SymbolTable* table) {
     return 1;
 }
 
+/* #2822: does a value of type `t` own memory a struct field would have to
+ * free or copy: a string, a closure, or a struct (held by value) with such
+ * a field? */
+static int type_owns_memory(Type* t, SymbolTable* table, int depth) {
+    if (!t || depth > 16) return 0;
+    if (t->kind == TYPE_STRING) return 1;
+    if (t->kind == TYPE_FUNCTION) return !t->is_fnptr;
+    /* An optional, an array (a fixed-size one holds its elements, which a
+     * struct owning them frees) and a tuple own what their elements own. */
+    if (t->kind == TYPE_OPTIONAL || t->kind == TYPE_ARRAY)
+        return type_owns_memory(t->element_type, table, depth + 1);
+    if (t->kind == TYPE_TUPLE) {
+        for (int i = 0; t->tuple_types && i < t->tuple_count; i++)
+            if (type_owns_memory(t->tuple_types[i], table, depth + 1)) return 1;
+        return 0;
+    }
+    if (t->kind != TYPE_STRUCT || !t->struct_name) return 0;
+    Symbol* s = lookup_symbol(table, t->struct_name);
+    ASTNode* def = s ? s->node : NULL;
+    if (!def || def->type != AST_STRUCT_DEFINITION) return 0;
+    for (int i = 0; i < def->child_count; i++) {
+        ASTNode* f = def->children[i];
+        if (f && f->type == AST_STRUCT_FIELD && type_owns_memory(f->node_type, table, depth + 1))
+            return 1;
+    }
+    return 0;
+}
+
 int typecheck_struct_definition(ASTNode* struct_def, SymbolTable* table) {
-    (void)table;  // Unused for now
     if (!struct_def || struct_def->type != AST_STRUCT_DEFINITION) return 0;
     
     // Type check all fields
@@ -7392,6 +7419,23 @@ int typecheck_struct_definition(ASTNode* struct_def, SymbolTable* table) {
             return 0;
         }
         
+        /* #2822: an optional field compiles (#2820), but one whose value
+         * owns memory has none of a `string` field's ownership (destroy,
+         * replace, dup, a take on store), so a string stored there would
+         * leak or dangle. Refused until it has. */
+        if (field->node_type->kind == TYPE_OPTIONAL &&
+            type_owns_memory(field->node_type->element_type, table, 0)) {
+            char error_msg[512];
+            snprintf(error_msg, sizeof(error_msg),
+                     "struct field '%s' is %s: an optional field whose value owns memory (a "
+                     "string, a closure, or a struct holding one) is not supported yet "
+                     "(#2822). Hold the value bare (a `string` with \"\" for none) or keep "
+                     "the optional in a local",
+                     field->value, type_to_string(field->node_type));
+            type_error(error_msg, field->line, field->column);
+            return 0;
+        }
+
         // Check for duplicate field names
         for (int j = 0; j < i; j++) {
             ASTNode* other_field = struct_def->children[j];
@@ -7992,6 +8036,73 @@ static int rhs_returns_void_via_bare_fn(ASTNode* rhs, SymbolTable* table) {
     return 0;
 }
 
+/* #2762: a slot of a tuple destructure re-binds a local an enclosing local
+ * scope already binds (a closure's `a, b = two()` writes the outer `a` and
+ * `b` it sees, as `a = 7` does), so the slot follows the rules a bare
+ * re-bind follows in the AST_VARIABLE_DECLARATION case below: a value of
+ * another kind is refused with the same diagnostic, so is one an inferred
+ * int would truncate (#698), and the local keeps the type of its first
+ * binding. Unchecked, the slot's C store did not compile (`const char*`
+ * from `int`) or truncated a float into an int cell. A local hoisted out of
+ * a branch or loop body, which that case joins over the body first, is left
+ * as it was. Returns 0 once it has reported an error. */
+static int destructure_slot_rebind(ASTNode* var, SymbolTable* table) {
+    if (!var || !var->value || !var->node_type) return 1;
+    Symbol* bound = NULL;
+    SymbolTable* bound_in = NULL;
+    for (SymbolTable* t = table; t && t->parent && !bound; t = t->parent) {
+        bound = lookup_symbol_local(t, var->value);
+        if (bound) bound_in = t;
+    }
+    if (!bound && is_program_global_name(var->value)) {
+        /* #2800: a module-level optional `var` the slot writes (#2796)
+         * keeps its optional type, as a bare re-bind adopts it (#340). */
+        Symbol* g = lookup_symbol(table, var->value);
+        if (g && g->type && g->type->kind == TYPE_OPTIONAL && !g->is_function &&
+            var->node_type->kind != TYPE_OPTIONAL && is_assignable(var->node_type, g->type)) {
+            free_type(var->node_type);
+            var->node_type = clone_type(g->type);
+        }
+        return 1;
+    }
+    if (!bound || !bound->type || (bound->branch_hoisted && bound_in != table) ||
+        bound->is_state || bound->is_function || bound->is_actor || bound->is_module_alias)
+        return 1;
+    Type* have = bound->type;
+    Type* got = var->node_type;
+    if (have->kind == TYPE_UNKNOWN || got->kind == TYPE_UNKNOWN || got->kind == TYPE_VOID)
+        return 1;
+    /* A string and a raw pointer convert freely, as for a bare re-bind. */
+    int str_ptr_mix = (got->kind == TYPE_PTR && have->kind == TYPE_STRING) ||
+                      (got->kind == TYPE_STRING && have->kind == TYPE_PTR);
+    if (!str_ptr_mix &&
+        (!is_assignable(got, have) ||
+         (got->kind == TYPE_PTR && is_numeric_scalar(have->kind)) ||
+         (is_numeric_scalar(got->kind) && have->kind == TYPE_PTR))) {
+        char rmsg[400];
+        snprintf(rmsg, sizeof(rmsg),
+            "cannot re-bind '%s' as %s: it was bound as %s by its first "
+            "assignment, and a local keeps that type. Use a new name for "
+            "the %s value, or convert it to %s",
+            var->value, type_name(got), type_name(have), type_name(got), type_name(have));
+        type_error(rmsg, var->line, var->column);
+        return 0;
+    }
+    if (bound->type_inferred && have->kind == TYPE_INT &&
+        (got->kind == TYPE_INT64 || got->kind == TYPE_UINT64 || got->kind == TYPE_UINT32 ||
+         got->kind == TYPE_FLOAT32 || got->kind == TYPE_FLOAT || got->kind == TYPE_LONGDOUBLE)) {
+        char msg[420];
+        narrowing_message(msg, sizeof(msg), var->value, got->kind);
+        type_error(msg, var->line, var->column);
+        return 0;
+    }
+    if (!str_ptr_mix) {
+        free_type(var->node_type);
+        var->node_type = clone_type(have);
+    }
+    return 1;
+}
+
 int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
     if (!stmt) return 0;
 
@@ -8065,18 +8176,32 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
             }
 
             // Assign types to each variable and add to symbol table
+            int slots_ok = 1;
             for (int j = 0; j < var_count; j++) {
                 ASTNode* var = stmt->children[j];
                 if (var->node_type) free_type(var->node_type);
                 var->node_type = clone_type(rhs_type->tuple_types[j]);
                 // Don't register _ (discard) in symbol table
                 if (var->value && strcmp(var->value, "_") != 0) {
+                    /* #2762. A refused slot is bound already; the others are
+                     * still registered, so their uses report nothing more. */
+                    if (!destructure_slot_rebind(var, table)) {
+                        slots_ok = 0;
+                        continue;
+                    }
                     add_symbol(table, var->value, clone_type(var->node_type), 0, 0, 0);
+                    /* A slot is an inferred binding, as `a = ...` is: an
+                     * int one is a 32-bit int a wider value would
+                     * truncate (#698). */
+                    if (var->node_type->kind == TYPE_INT) {
+                        Symbol* s = lookup_symbol_local(table, var->value);
+                        if (s) s->type_inferred = 1;
+                    }
                 }
             }
 
             free_type(rhs_type);
-            return 1;
+            return slots_ok;
         }
 
         case AST_CONST_DECLARATION:
@@ -8210,6 +8335,23 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                     int is_struct_init = stmt->annotation &&
                                          strcmp(stmt->annotation, "global_var") == 0 &&
                                          struct_typed && is_const_struct_literal(init, table);
+                    /* #2800: an optional `var` is initialised with its own
+                     * constant: `none`, or a struct literal of constants
+                     * for a struct optional, which codegen wraps
+                     * (emit_module_global_vars). */
+                    if (!is_struct_init && stmt->annotation &&
+                        strcmp(stmt->annotation, "global_var") == 0 && dt &&
+                        dt->kind == TYPE_OPTIONAL) {
+                        Type* et = dt->element_type;
+                        is_struct_init = init->type == AST_NONE_LITERAL ||
+                                         (et && et->kind == TYPE_STRUCT && et->struct_name &&
+                                          init->value && strcmp(et->struct_name, init->value) == 0 &&
+                                          is_const_struct_literal(init, table));
+                    }
+                    /* #2807: so is an optional `const`'s `none`. */
+                    if (!is_struct_init && !stmt->annotation && dt && dt->kind == TYPE_OPTIONAL &&
+                        init->type == AST_NONE_LITERAL)
+                        is_struct_init = 1;
                     if (!is_array_const && !is_struct_init) {
                         char msg[512];
                         if (stmt->annotation && strcmp(stmt->annotation, "global_var") == 0) {
