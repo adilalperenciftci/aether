@@ -53,6 +53,7 @@ reject write_capture    E0803 8 "a quote can't write 'v', a variable it captures
 reject compound_capture E0803 8 "a quote can't write 'v', a variable it captures"
 reject step_capture     E0803 8 "a quote can't write 'v', a variable it captures"
 reject address_capture  E0803 8 "a quote can't take the address of 'v', a variable it captures"
+reject global_write     E0803 8 "a quote can't write 'v', a variable it captures"
 
 if "$AE" run "$SCRIPT_DIR/getter_mismatch.ae" >"$TMPDIR/getter.log" 2>&1; then
     echo "  [FAIL] quote_errors: get_int on a string capture did not panic"; exit 1

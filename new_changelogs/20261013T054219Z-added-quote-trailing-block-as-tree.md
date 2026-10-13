@@ -8,7 +8,8 @@
   `distinct f32x4` stays `vec2`), each call recorded with its name as
   written rather than made, and each enclosing variable the block reads a
   capture whose cell is the variable itself, so a change the program makes
-  after the tree is built is seen through it. That is what a shader
+  after the tree is built is seen through it (a program-level `var` is a
+  capture too, its cell the global itself). That is what a shader
   library needs to write GLSL with its uniforms found for it, and what a
   query builder or a test library that prints the failing expression
   needs. The new `std.quote` module reads the tree (kinds, accessors,

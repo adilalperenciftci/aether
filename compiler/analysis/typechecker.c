@@ -305,6 +305,7 @@ void add_symbol(SymbolTable* table, const char* name, Type* type, int is_actor, 
     symbol->hoist_pending = 0;
     symbol->is_const = 0;
     symbol->inferred_closure = NULL;
+    symbol->global_write = 0;
     symtab_link(table, symbol);
 }
 
@@ -485,6 +486,7 @@ void add_module_alias(SymbolTable* table, const char* alias, const char* module_
     symbol->hoist_pending = 0;
     symbol->is_const = 0;
     symbol->inferred_closure = NULL;
+    symbol->global_write = 0;
     symtab_link(table, symbol);
 }
 
@@ -1024,6 +1026,19 @@ ASTNode* tc_program_const(const char* name) {
         ASTNode* c = program->children[i];
         if (c && c->type == AST_CONST_DECLARATION && c->value && strcmp(c->value, name) == 0 &&
             !(c->annotation && strcmp(c->annotation, "global_var") == 0))
+            return c;
+    }
+    return NULL;
+}
+
+/* The program-level `var NAME = ...` (a global variable), or NULL: a quote
+ * reads one as a capture whose cell is the global itself. */
+ASTNode* tc_program_global_var(const char* name) {
+    ASTNode* program = aether_typecheck_program_node();
+    for (int i = 0; program && name && i < program->child_count; i++) {
+        ASTNode* c = program->children[i];
+        if (c && c->type == AST_CONST_DECLARATION && c->value && strcmp(c->value, name) == 0 &&
+            c->annotation && strcmp(c->annotation, "global_var") == 0)
             return c;
     }
     return NULL;
@@ -8711,6 +8726,10 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
             if (stmt->value && strcmp(stmt->value, "_") != 0) {
                 add_symbol(table, stmt->value, clone_type(stmt->node_type), 0, 0, 0);
                 mark_const_symbol(table, stmt);   /* #2516 */
+                if (table->parent && tc_program_global_var(stmt->value)) {
+                    Symbol* gw = lookup_symbol_local(table, stmt->value);
+                    if (gw) gw->global_write = 1;
+                }
                 /* #698: carry the parser's inferred-type marker onto the
                  * binding, but only for a 32-bit int (the sole narrowing
                  * target). A later 64-bit re-bind then triggers the guard

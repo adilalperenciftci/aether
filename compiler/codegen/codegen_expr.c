@@ -3310,6 +3310,7 @@ static void quote_add_closure_captures(CodeGenerator* gen) {
             ASTNode* cnode = gen->closures[ci].closure_node;
             for (int k = 0; k < q->ncaps; k++) {
                 const char* cap = q->caps[k].name;
+                if (q->caps[k].global) continue;
                 if (is_closure_param(cnode, cap)) continue;
                 if (subtree_declares(last_block_child(cnode), cap)) continue;
                 add_capture(gen, ci, cap);
@@ -3322,7 +3323,10 @@ static void quote_promote_captures(CodeGenerator* gen) {
     for (int qi = 0; qi < quote_count(); qi++) {
         QuoteInfo* q = quote_at(qi);
         if (!q || !q->scope) continue;
-        for (int k = 0; k < q->ncaps; k++) promote_up_from(gen, q->scope, q->caps[k].name);
+        for (int k = 0; k < q->ncaps; k++) {
+            if (q->caps[k].global) continue;   /* a global is its own cell */
+            promote_up_from(gen, q->scope, q->caps[k].name);
+        }
     }
 }
 
@@ -9701,9 +9705,16 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                 for (int k = 0; k < q->ncaps; k++) {
                     ASTNode* id = create_ast_node(AST_IDENTIFIER, q->caps[k].name,
                                                   expr->line, expr->column);
-                    id->annotation = strdup("raw_promoted");
                     codegen_own_node(gen, id);
                     if (k) fprintf(gen->output, ", ");
+                    if (q->caps[k].global) {
+                        /* A global's cell is the global itself. */
+                        fprintf(gen->output, "(void*)&(");
+                        generate_expression(gen, id);
+                        fprintf(gen->output, ")");
+                        continue;
+                    }
+                    id->annotation = strdup("raw_promoted");
                     fprintf(gen->output, "(void*)");
                     generate_expression(gen, id);
                 }

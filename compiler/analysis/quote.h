@@ -44,6 +44,8 @@ typedef struct QCapture {
     const char* type;   /* as written: "vec2" */
     const char* base;   /* what the typed getters read it as: "f32x4" */
     Type* var_type;     /* the variable's type, for codegen's cell release */
+    int global;         /* a program-level `var`: its cell is the global itself,
+                         * never promoted, retained or released */
 } QCapture;
 
 typedef struct QuoteInfo {

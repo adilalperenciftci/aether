@@ -176,6 +176,9 @@ static void push_local(Lower* L, const char* name) {
 static Symbol* outer_symbol(Lower* L, const char* name, int* is_local_scope) {
     for (SymbolTable* t = L->outer; t; t = t->parent) {
         Symbol* s = lookup_symbol_local(t, name);
+        /* A bare write to a program-level `var` binds the name in the
+         * function's scope, but the variable is still the global. */
+        if (s && t->parent && s->global_write) continue;
         if (s) {
             *is_local_scope = t->parent != NULL;
             return s;
@@ -185,7 +188,7 @@ static Symbol* outer_symbol(Lower* L, const char* name, int* is_local_scope) {
     return NULL;
 }
 
-static void add_capture(Lower* L, const char* name, Type* t) {
+static void add_capture(Lower* L, const char* name, Type* t, int global) {
     for (int i = 0; i < L->ncaps; i++)
         if (strcmp(L->caps[i].name, name) == 0) return;
     if (L->ncaps == L->capcaps) {
@@ -197,6 +200,18 @@ static void add_capture(Lower* L, const char* name, Type* t) {
     c->type = aether_intern(quote_type_name(t));
     c->base = aether_intern(quote_base_name(t));
     c->var_type = t ? clone_type(t) : NULL;
+    c->global = global;
+}
+
+/* Is `name`, not one of the quote's own, a variable outside it: a local of
+ * an enclosing function or a program-level `var`? (What a quote may read
+ * as a capture and may not write.) */
+static int is_outer_variable(Lower* L, const char* name) {
+    if (!name || is_local(L, name)) return 0;
+    int local_scope = 0;
+    Symbol* s = outer_symbol(L, name, &local_scope);
+    if (!s || s->is_function || s->is_actor || s->is_module_alias) return 0;
+    return local_scope || tc_program_global_var(name) != NULL;
 }
 
 /* The outer variable a write or `&` reaches through, `p` in `p.x.y`. */
@@ -209,10 +224,7 @@ static ASTNode* lvalue_root(ASTNode* e) {
 static int names_capture(Lower* L, ASTNode* target) {
     ASTNode* root = lvalue_root(target);
     if (!root || root->type != AST_IDENTIFIER || !root->value) return 0;
-    if (is_local(L, root->value)) return 0;
-    int local_scope = 0;
-    Symbol* s = outer_symbol(L, root->value, &local_scope);
-    return s && local_scope;
+    return is_outer_variable(L, root->value);
 }
 
 static void capture_write_error(Lower* L, ASTNode* at, const char* name, const char* how) {
@@ -240,9 +252,22 @@ static QNode* lower_identifier(Lower* L, ASTNode* e) {
             return reject(L, e, "a closure value",
                           "it has no node for a closure; call a named function instead");
         }
-        add_capture(L, name, s->type ? s->type : e->node_type);
+        add_capture(L, name, s->type ? s->type : e->node_type, 0);
         return qnode(QK_CAPTURE, quote_type_name(s->type ? s->type : e->node_type), name,
                      NULL, NULL, e->line);
+    }
+    /* A program-level `var` is a capture too, whose cell is the global
+     * itself: it lives as long as the program, so nothing promotes it and
+     * the tree holds no reference to it. */
+    ASTNode* gdecl = (s && !local_scope && !s->is_function) ? tc_program_global_var(name) : NULL;
+    if (gdecl) {
+        Type* t = s->type ? s->type : e->node_type;
+        if (t && t->kind == TYPE_FUNCTION) {
+            return reject(L, e, "a closure value",
+                          "it has no node for a closure; call a named function instead");
+        }
+        add_capture(L, name, t, 1);
+        return qnode(QK_CAPTURE, quote_type_name(t), name, NULL, NULL, e->line);
     }
     /* A program-level constant whose value is a literal reads as that
      * literal: the tree has no node for a global, and a constant does not
@@ -259,7 +284,7 @@ static QNode* lower_identifier(Lower* L, ASTNode* e) {
              name);
     return reject(L, e, what,
                   "it can read its own locals and parameters, the enclosing function's "
-                  "variables (as captures) and constants with a literal value");
+                  "variables and the program's (as captures), and constants with a literal value");
 }
 
 static int is_actor_call(const char* name) {
@@ -464,9 +489,7 @@ static QNode* lower_stmt(Lower* L, ASTNode* s) {
                 if (!v) { free_qnode(t); free_qnode(n); return NULL; }
                 return qadd(qadd(n, t), v);
             }
-            int local_scope = 0;
-            Symbol* outer = outer_symbol(L, s->value, &local_scope);
-            if (outer && local_scope && !outer->is_function) {
+            if (is_outer_variable(L, s->value)) {
                 capture_write_error(L, s, s->value, "write");
                 return NULL;
             }
@@ -490,13 +513,9 @@ static QNode* lower_stmt(Lower* L, ASTNode* s) {
             target.line = s->line;
             target.column = s->column;
             target.node_type = s->node_type;
-            if (!is_local(L, s->value)) {
-                int local_scope = 0;
-                Symbol* outer = outer_symbol(L, s->value, &local_scope);
-                if (outer && local_scope) {
-                    capture_write_error(L, s, s->value, "write");
-                    return NULL;
-                }
+            if (is_outer_variable(L, s->value)) {
+                capture_write_error(L, s, s->value, "write");
+                return NULL;
             }
             return lower_step(L, &target, s->children[0]->value, s->children[1], "", s->line);
         }
@@ -791,6 +810,11 @@ void quote_emit_builder(FILE* out, int index, const char* const* release_fns) {
         emit_c_string(out, q->caps[i].type);
         fputs(", ", out);
         emit_c_string(out, q->caps[i].base);
+        if (q->caps[i].global) {
+            /* A global's cell is the global: no reference to take. */
+            fprintf(out, ", _cells[%d], NULL);\n", i);
+            continue;
+        }
         fprintf(out, ", _aether_cell_retain(_cells[%d]), %s);\n", i,
                 release_fns && release_fns[i] ? release_fns[i] : "_aether_cell_release");
     }

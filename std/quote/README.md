@@ -93,7 +93,9 @@ returning it) hands the duty on with it. Trees are not freed at scope exit
 ## Captures
 
 A capture's cell is the variable itself, so the tree sees the program
-change it. Read the current value with the getter for its type:
+change it. An outer local is moved into a shared cell for it; a global
+(a program-level `var`) is its own cell, and the tree holds no reference
+to it. Read the current value with the getter for its type:
 `get_float`, `get_f32`, `get_int`, `get_long`, `get_bool`, `get_string`,
 `get_ptr`, and `get_f32x4` for a lane type (a `vec2` declared
 `distinct f32x4` reads through `get_f32x4`). A getter of the wrong type

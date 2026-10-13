@@ -113,8 +113,8 @@ shader library declares `sin`, `vec4`, `texture`, `dot` as ordinary Aether
 functions, and the same functions are its CPU evaluator.
 
 **A constant reads as its value.** A program-level `const` with a literal
-value is a `LIT` of that value (`HALF` is `LIT 0.5`); the tree has no node
-for a global.
+value is a `LIT` of that value (`HALF` is `LIT 0.5`). A program-level `var`
+is a capture ([Captures](#captures)), since it can change.
 
 `quote.to_source(t)` prints a tree back as Aether, and `quote.dump(t)` as an
 s-expression with every node's kind, name, operator, literal and type:
@@ -205,6 +205,36 @@ alive in its cell for as long as the tree does, and `quote.free(t)` gives
 the references back. A quote inside a closure captures from the closure and
 from the function around it alike.
 
+A **global variable** (a program-level `var`) is a capture too, whose cell is
+the global itself: nothing is moved, and the tree takes no reference to it,
+since a global lives as long as the program. A light the program updates is
+read through the tree like a captured local:
+
+```aether,run
+import std.quote
+
+struct Light {
+    power: float
+}
+
+var sun = Light { power: 1.0 }
+
+keep(t: quote.Tree) -> quote.Tree { return t }
+
+main() {
+    t = keep() quote |x: float| -> x * sun.power
+    defer quote.free(t)
+    sun.power = 2.5
+    println(quote.dump(t))
+    lit = quote.cell(quote.capture_named(t, "sun")) as *Light
+    println(lit.power)
+}
+```
+```output
+(param x :float) (capture sun :Light) (BLOCK (RETURN :float (BINARY * :float (LOCAL x :float) (FIELD power :float (CAPTURE sun :Light)))))
+2.500000
+```
+
 The cell is read with typed getters (`quote.get_float(c)`, `get_int`,
 `get_long`, `get_bool`, `get_string`, `get_ptr`, `get_f32`, and
 `get_f32x4` for a lane type and the distinct types over one). A getter whose
@@ -232,10 +262,10 @@ error[E0800]: 'defer' can't be quoted
 | E0800 | `match` (and `switch`) | not in v1; it would need the pattern kinds in the tree |
 | E0800 | string interpolation | v1 keeps `LIT` strings only |
 | E0800 | `heap.new`, an array literal, a cast, a tuple | v1 has no node for them |
-| E0800 | a global variable, a closure value | v1 reads locals, parameters, captures and literal constants |
+| E0800 | a closure value; a `const` whose value is not a literal | v1 reads locals, parameters, captures (outer locals and globals) and literal constants |
 | E0801 | a parameter without a type | a quote does not guess one |
 | E0802 | a quote given to a function whose last parameter is not a `quote.Tree`; a closure, `callback` or immediate block given to one that is | the two sides have to agree on what is passed |
-| E0803 | writing a captured variable (`=`, `+=`, `++`) or taking its address | the cell is shared with the program; a quote reads it |
+| E0803 | writing a captured variable, a global among them (`=`, `+=`, `++`), or taking its address | the cell is shared with the program; a quote reads it |
 
 The tests that hold each of these to its message and line are
 `tests/integration/quote_errors/`.
@@ -311,6 +341,11 @@ vec4` is a type error, so the tree's types are GLSL's.
   cell there (`promote_up_from`, the same promotion a closure's written
   capture gets), and a quote inside a hoisted closure adds the variable to
   that closure's env first, so the nested-capture pass carries it out.
+  A global (a program-level `var`) is neither promoted nor added to a
+  closure's env: its cell is its own address, and the builder takes no
+  reference to it. A bare `g = expr` write in the enclosing function binds
+  `g` in that scope (it parses as a declaration); the binding is marked
+  `global_write`, so the quote still resolves `g` to the global.
 - **Codegen** emits, per quote, a static `_quote_build_N(void** cells)` that
   calls std.quote's runtime (`aether_quote_tree`, `aether_quote_node`,
   `aether_quote_add`, `aether_quote_param`, `aether_quote_capture`, …) to

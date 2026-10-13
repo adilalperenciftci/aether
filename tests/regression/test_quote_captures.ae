@@ -4,12 +4,22 @@
 // built is seen through the cell (the shape a shader's uniforms take). A
 // captured function parameter, a captured string, and a quote inside a
 // closure capturing from the closure and from the function around it all
-// work the same way. Typed getters read the cell; a mismatch panics
+// work the same way. A program-level `var` is a capture too, whose cell is
+// the global itself. Typed getters read the cell; a mismatch panics
 // (tests/integration/quote_errors).
 
 import std.quote
 
 extern exit(code: int)
+
+struct Light {
+    power: float
+    on: bool
+}
+
+// Globals a quote reads: captures whose cells are the globals themselves.
+var elapsed = 0.5
+var light = Light { power: 1.5, on: true }
 
 fn check(label: string, got: string, want: string) -> int {
     if got != want {
@@ -38,6 +48,11 @@ in_closure(base: float) -> quote.Tree {
         return q() quote | x: float | -> x + base + inner
     }
     return call(f)
+}
+
+// A parameter named like a global is the parameter.
+shadowed(elapsed: float) -> quote.Tree {
+    return q() quote -> elapsed + 1.0
 }
 
 main() {
@@ -79,6 +94,35 @@ main() {
     fails = fails + check("in closure base", "${quote.get_float(quote.capture_named(v, "base"))}", "1.5")
     fails = fails + check("in closure inner", "${quote.get_int(quote.capture_named(v, "inner"))}", "7")
     quote.free(v)
+
+    // A global read in a quote is a capture: the program changing it after
+    // the tree is built is seen through the cell, which is the global.
+    g = q() quote | x: float | -> x * elapsed + light.power
+    fails = fails + check("global tree", quote.dump(g),
+        "(param x :float) (capture elapsed :float) (capture light :Light) (BLOCK (RETURN :float (BINARY + :float (BINARY * :float (LOCAL x :float) (CAPTURE elapsed :float)) (FIELD power :float (CAPTURE light :Light)))))")
+    elapsed = 3.25
+    light.power = 2.5
+    fails = fails + check("global elapsed", "${quote.get_float(quote.capture_named(g, "elapsed"))}", "3.25")
+    lt = quote.cell(quote.capture_named(g, "light")) as *Light
+    fails = fails + check("global struct", "${lt.power} ${lt.on}", "2.5 true")
+    light.on = false
+    fails = fails + check("global struct after", "${lt.on}", "false")
+    quote.free(g)
+    // Freeing the tree leaves the globals alone.
+    elapsed = elapsed + 1.0
+    fails = fails + check("global after free", "${elapsed} ${light.power}", "4.25 2.5")
+
+    // A quote inside a closure reads a global the same way: the closure
+    // does not capture it.
+    f = || { return q() quote -> elapsed * 2.0 }
+    h = call(f)
+    elapsed = 0.75
+    fails = fails + check("global in closure", "${quote.get_float(quote.capture(h, 0))}", "0.75")
+    quote.free(h)
+
+    s = shadowed(9.5)
+    fails = fails + check("shadowing parameter", "${quote.get_float(quote.capture(s, 0))} ${elapsed}", "9.5 0.75")
+    quote.free(s)
 
     if fails > 0 { exit(1) }
     println("quote captures: ok")
