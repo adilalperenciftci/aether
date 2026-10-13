@@ -1242,10 +1242,12 @@ static int order_hoistable(ASTNode* op) {
     return !(op->node_type && type_is_sized_array(op->node_type));
 }
 
+static const char* ctl_lookup(const ASTNode* node);
+
 /* An operand already standing for a temp: evaluated, with nothing left to
- * order. */
+ * order. A construct run ahead of its statement (ctl_lookup) is one too. */
 static int order_bound(ASTNode* op) {
-    return op && (order_lookup(op) || arg_drain_lookup(op));
+    return op && (order_lookup(op) || arg_drain_lookup(op) || ctl_lookup(op));
 }
 
 /* Mark in `hoist` the operands a later operand conflicts with; 1 if any. */
@@ -6171,6 +6173,16 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
         const char* sub = order_lookup(expr);
         if (sub) {
             fprintf(gen->output, "%s", sub);
+            return;
+        }
+    }
+    /* #2765, #2798: a construct run ahead of its statement is its
+     * temporary, before any wrap: the wrap's temporaries would hold what it
+     * already evaluated, and go unused. */
+    {
+        const char* done = ctl_lookup(expr);
+        if (done) {
+            fprintf(gen->output, "%s", done);
             return;
         }
     }
