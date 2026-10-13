@@ -3175,9 +3175,16 @@ ASTNode* parse_variable_declaration_with_semicolon(Parser* parser, bool expect_s
     
     ASTNode* decl = create_ast_node(AST_VARIABLE_DECLARATION, name->value, name->line, name->column);
     decl->node_type = type;
-    
+
     if (match_token(parser, TOKEN_ASSIGN)) {
-        ASTNode* value = parse_expression(parser);
+        /* #2803: `int r = match o { ... }` binds the match's value, as
+         * `let r: int = match ...` does. parse_expression does not parse a
+         * `match`, so the declaration was left without its initialiser and
+         * the match became a statement of its own. */
+        Token* next_tok = peek_token(parser);
+        ASTNode* value = (next_tok && next_tok->type == TOKEN_MATCH)
+                             ? parse_match_statement(parser)
+                             : parse_expression(parser);
         if (value) {
             add_child(decl, value);
         }
