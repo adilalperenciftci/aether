@@ -19,14 +19,15 @@ show(t: quote.Tree) {
 }
 
 main() {
-    show() quote |x: float, scale: float| -> x * scale + 1.0
+    scale = 2.0
+    show() quote |x: float| -> x * scale + 1.0
 }
 ```
 ```output
-|x: float, scale: float| {
+|x: float| {
     return x * scale + 1.0
 }
-(param x :float) (param scale :float) (BLOCK (RETURN :float (BINARY + :float (BINARY * :float (LOCAL x :float) (LOCAL scale :float)) (LIT 1.0 :float))))
+(param x :float) (capture scale :float) (BLOCK (RETURN :float (BINARY + :float (BINARY * :float (LOCAL x :float) (CAPTURE scale :float)) (LIT 1.0 :float))))
 ```
 
 ## The tree

@@ -2769,8 +2769,9 @@ static void discover_closures_scoped(CodeGenerator* gen, ASTNode* node, const ch
         }
         return;
     }
-    /* docs/quote.md: a lowered quote's body is the tree's, and the node
-     * has no children left; record the scope it is written in. */
+    /* docs/quote.md: a quote's captures are cells of the scope it is
+     * written in; quote_promote_captures promotes them once discovery is
+     * done. Its body is the tree's, and the node has no children left. */
     if (node->type == AST_QUOTE) {
         QuoteInfo* q = quote_of(node);
         if (q) q->scope = enclosing_func ? aether_intern(enclosing_func) : NULL;
@@ -3292,15 +3293,50 @@ static void propagate_nested_captures(CodeGenerator* gen) {
     }
 }
 
+/* docs/quote.md: every variable a quote captures lives in a shared cell for
+ * as long as the tree does, so the tree reads the variable itself, not a
+ * copy, and sees the program change it. A closure promotes a capture only
+ * when it writes it; a quote promotes every one. A quote inside a hoisted
+ * closure needs the variable in that closure's env too, which the nested-
+ * capture pass then carries further out. */
+static void quote_add_closure_captures(CodeGenerator* gen) {
+    for (int qi = 0; qi < quote_count(); qi++) {
+        QuoteInfo* q = quote_at(qi);
+        if (!q || !q->scope || strncmp(q->scope, "__closure_", 10) != 0) continue;
+        for (int ci = 0; ci < gen->closure_count; ci++) {
+            char nm[64];
+            closure_scope_name(gen->closures[ci].closure_node, nm, sizeof(nm));
+            if (strcmp(nm, q->scope) != 0) continue;
+            ASTNode* cnode = gen->closures[ci].closure_node;
+            for (int k = 0; k < q->ncaps; k++) {
+                const char* cap = q->caps[k].name;
+                if (is_closure_param(cnode, cap)) continue;
+                if (subtree_declares(last_block_child(cnode), cap)) continue;
+                add_capture(gen, ci, cap);
+            }
+        }
+    }
+}
+
+static void quote_promote_captures(CodeGenerator* gen) {
+    for (int qi = 0; qi < quote_count(); qi++) {
+        QuoteInfo* q = quote_at(qi);
+        if (!q || !q->scope) continue;
+        for (int k = 0; k < q->ncaps; k++) promote_up_from(gen, q->scope, q->caps[k].name);
+    }
+}
+
 // Public entry point — starts at program root with no enclosing function.
 void discover_closures(CodeGenerator* gen, ASTNode* node) {
     discover_closures_scoped(gen, node, NULL);
     // Second pass: now that closure_var_map is fully populated, propagate
     // return types back onto call() expressions the typechecker left as int.
     propagate_call_return_types(gen, node);
+    quote_add_closure_captures(gen);
     // Third pass: carry captures of nested closures out to their enclosing
     // closure, whose C frame the inner env is built from.
     propagate_nested_captures(gen);
+    quote_promote_captures(gen);
     // Fourth pass: compute which captures need heap promotion per function.
     compute_promoted_captures(gen);
 }

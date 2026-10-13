@@ -4157,6 +4157,17 @@ static void collect_references(ASTNode* node, TrackedVar* vars, int var_count) {
         }
     }
 
+    /* A lowered quote's body is the tree's now: each variable it captures
+     * is read through the tree (docs/quote.md). */
+    if (node->type == AST_QUOTE) {
+        QuoteInfo* q = quote_of(node);
+        for (int k = 0; q && k < q->ncaps; k++) {
+            for (int i = 0; i < var_count; i++) {
+                if (strcmp(vars[i].name, q->caps[k].name) == 0) vars[i].used = 1;
+            }
+        }
+    }
+
     // A call through a local is a use of that local: `g(p)` where `g` was
     // assigned via `f as fn(ptr) -> int` parses as AST_FUNCTION_CALL with
     // the callee name in node->value (no AST_IDENTIFIER child), so match

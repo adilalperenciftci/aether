@@ -1,0 +1,85 @@
+// Regression: `quote` captures (docs/quote.md). An outer variable a quote
+// reads is a CAPTURE node and an entry in the tree's captures, whose cell is
+// the variable ITSELF: the program changing the variable after the tree is
+// built is seen through the cell (the shape a shader's uniforms take). A
+// captured function parameter, a captured string, and a quote inside a
+// closure capturing from the closure and from the function around it all
+// work the same way. Typed getters read the cell; a mismatch panics
+// (tests/integration/quote_errors).
+
+import std.quote
+
+extern exit(code: int)
+
+fn check(label: string, got: string, want: string) -> int {
+    if got != want {
+        println("FAIL quote captures: ${label}")
+        println("  got:  ${got}")
+        println("  want: ${want}")
+        return 1
+    }
+    return 0
+}
+
+q(t: quote.Tree) -> quote.Tree { return t }
+
+// A tree outliving the function that built it, over that function's
+// parameter and local: both stay alive in their cells for the tree.
+scaled(k: float) -> quote.Tree {
+    time = 0.5
+    t = q() quote | a: float | -> a * time + k
+    time = 2.5
+    return t
+}
+
+in_closure(base: float) -> quote.Tree {
+    f = || {
+        inner = 7
+        return q() quote | x: float | -> x + base + inner
+    }
+    return call(f)
+}
+
+main() {
+    fails = 0
+
+    t = scaled(4.0)
+    fails = fails + check("tree", quote.dump(t),
+        "(param a :float) (capture time :float) (capture k :float) (BLOCK (RETURN :float (BINARY + :float (BINARY * :float (LOCAL a :float) (CAPTURE time :float)) (CAPTURE k :float))))")
+    fails = fails + check("count", "${quote.capture_count(t)}", "2")
+    c = quote.capture(t, 0)
+    fails = fails + check("capture", "${quote.capture_name(c)} ${quote.capture_type(c)}", "time float")
+    // Changed after the tree was built, before the function returned.
+    fails = fails + check("time", "${quote.get_float(c)}", "2.5")
+    fails = fails + check("k", "${quote.get_float(quote.capture_named(t, "k"))}", "4")
+    if quote.capture_named(t, "nope") as ptr != null {
+        fails = fails + check("missing capture", "found", "null")
+    }
+    quote.free(t)
+
+    // Changed here, after the tree is built: the tree reads the variable,
+    // not the value it had.
+    level = 1
+    name = "first"
+    u = q() quote -> level * 10
+    w = q() quote -> name
+    fails = fails + check("level before", "${quote.get_int(quote.capture(u, 0))}", "1")
+    level = 42
+    name = "second"
+    fails = fails + check("level after", "${quote.get_int(quote.capture(u, 0))}", "42")
+    fails = fails + check("string after", quote.get_string(quote.capture(w, 0)), "second")
+    level += 1
+    fails = fails + check("level after +=", "${quote.get_int(quote.capture(u, 0))}", "43")
+    quote.free(u)
+    quote.free(w)
+
+    v = in_closure(1.5)
+    fails = fails + check("in closure", quote.dump(v),
+        "(param x :float) (capture base :float) (capture inner :int) (BLOCK (RETURN :float (BINARY + :float (BINARY + :float (LOCAL x :float) (CAPTURE base :float)) (CAPTURE inner :int))))")
+    fails = fails + check("in closure base", "${quote.get_float(quote.capture_named(v, "base"))}", "1.5")
+    fails = fails + check("in closure inner", "${quote.get_int(quote.capture_named(v, "inner"))}", "7")
+    quote.free(v)
+
+    if fails > 0 { exit(1) }
+    println("quote captures: ok")
+}

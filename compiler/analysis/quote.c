@@ -71,6 +71,17 @@ const char* quote_type_name(Type* t) {
     }
 }
 
+/* The type a typed getter reads the cell as: the distinct type's base. */
+static const char* quote_base_name(Type* t) {
+    if (!t) return "";
+    if (!t->distinct_name) return quote_type_name(t);
+    char* saved = t->distinct_name;
+    t->distinct_name = NULL;
+    const char* base = quote_type_name(t);
+    t->distinct_name = saved;
+    return base;
+}
+
 int quote_is_tree_type(Type* t) {
     return t && t->kind == TYPE_PTR && t->distinct_name &&
            strcmp(t->distinct_name, "Tree") == 0;
@@ -174,6 +185,20 @@ static Symbol* outer_symbol(Lower* L, const char* name, int* is_local_scope) {
     return NULL;
 }
 
+static void add_capture(Lower* L, const char* name, Type* t) {
+    for (int i = 0; i < L->ncaps; i++)
+        if (strcmp(L->caps[i].name, name) == 0) return;
+    if (L->ncaps == L->capcaps) {
+        L->capcaps = L->capcaps ? L->capcaps * 2 : 4;
+        L->caps = (QCapture*)aether_xrealloc(L->caps, (size_t)L->capcaps * sizeof(QCapture));
+    }
+    QCapture* c = &L->caps[L->ncaps++];
+    c->name = aether_intern(name);
+    c->type = aether_intern(quote_type_name(t));
+    c->base = aether_intern(quote_base_name(t));
+    c->var_type = t ? clone_type(t) : NULL;
+}
+
 /* The outer variable a write or `&` reaches through, `p` in `p.x.y`. */
 static ASTNode* lvalue_root(ASTNode* e) {
     while (e && (e->type == AST_MEMBER_ACCESS || e->type == AST_ARRAY_ACCESS) && e->child_count > 0)
@@ -210,6 +235,15 @@ static QNode* lower_identifier(Lower* L, ASTNode* e) {
     if (is_local(L, name)) return qnode(QK_LOCAL, node_type_name(e), name, NULL, NULL, e->line);
     int local_scope = 0;
     Symbol* s = outer_symbol(L, name, &local_scope);
+    if (s && local_scope && !s->is_function && !s->is_actor && !s->is_module_alias) {
+        if (s->type && s->type->kind == TYPE_FUNCTION) {
+            return reject(L, e, "a closure value",
+                          "it has no node for a closure; call a named function instead");
+        }
+        add_capture(L, name, s->type ? s->type : e->node_type);
+        return qnode(QK_CAPTURE, quote_type_name(s->type ? s->type : e->node_type), name,
+                     NULL, NULL, e->line);
+    }
     /* A program-level constant whose value is a literal reads as that
      * literal: the tree has no node for a global, and a constant does not
      * change, so nothing is lost. */
@@ -221,9 +255,11 @@ static QNode* lower_identifier(Lower* L, ASTNode* e) {
         return qnode(QK_LIT, quote_type_name(t), NULL, NULL, lit->value, e->line);
     }
     char what[200];
-    snprintf(what, sizeof what, "'%s' (not a local, a parameter or a literal constant)", name);
+    snprintf(what, sizeof what, "'%s' (not a local, a parameter, a captured variable or a literal constant)",
+             name);
     return reject(L, e, what,
-                  "it can read its own locals and parameters, and constants with a literal value");
+                  "it can read its own locals and parameters, the enclosing function's "
+                  "variables (as captures) and constants with a literal value");
 }
 
 static int is_actor_call(const char* name) {
@@ -244,6 +280,10 @@ static QNode* lower_expr(Lower* L, ASTNode* e) {
         case AST_UNARY_EXPRESSION: {
             const char* op = e->value ? e->value : "";
             if (e->child_count < 1) break;
+            if (strcmp(op, "&") == 0 && names_capture(L, e->children[0])) {
+                capture_write_error(L, e, lvalue_root(e->children[0])->value, "take the address of");
+                return NULL;
+            }
             if (strcmp(op, "-") != 0 && strcmp(op, "!") != 0 && strcmp(op, "~") != 0) {
                 char what[64];
                 snprintf(what, sizeof what, "the operator '%s' here", op);
