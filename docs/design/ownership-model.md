@@ -192,12 +192,28 @@ green, and is measured against the benchmarks before it merges.
 
 ## Decisions needed
 
-1. R1: is every Aether `string` an `AetherString` (pinned for literals)?
-   This changes what C sees through `--emit=lib` and bindgen, which must be
-   checked in stage 2.
-2. R3: parameters borrow and a callee that stores takes its own reference,
-   for every Aether function, with the C-only annotations of R4.
-3. Sends: copy a string unless it is uniquely held, or make string counts
-   atomic.
-4. The order: no new per-shape ownership fixes from now on. Ownership
-   findings go into the grid, and the stages close them.
+Stage 1 (the grid) needs none of these: it only measures, and it starts
+now. Each decision has a recommended answer; approving the document
+approves the recommendations.
+
+1. **R1: is every Aether `string` an `AetherString` (pinned for literals)?**
+   Recommended: yes. `string_concat`, interpolation and the `from_*`
+   functions already return one and #2520
+   already pins literals holding a NUL, so this finishes a move that is
+   half made. What C sees through `--emit=lib` and bindgen stays a
+   `const char*` to the characters at the boundary (R4); stage 2 checks
+   every exported signature before it merges.
+2. **R3: parameters borrow, and a callee that stores takes its own
+   reference, for every Aether function.** Recommended: yes. It is the
+   rule that removes reading other functions' bodies, which is where the
+   reviews of #2858, #2869, #2875, #2876 and #2878 found their
+   regressions. The C-only annotations of R4 stay for externs.
+3. **Strings in sends: copy unless uniquely held, or atomic counts?**
+   Recommended: copy unless the count is 1, in which case move. Actors do
+   not share memory by design; a copy at the send keeps every other count
+   operation a plain increment, where atomic counts would make all of them
+   slower to serve the one place strings cross threads. Closure
+   environments keep their atomic counts as they are.
+4. **The order: no new per-shape ownership fixes.** Recommended: yes, in
+   force since 2026-10-13. Ownership findings go into the grid, and the
+   stages close them.
