@@ -233,7 +233,12 @@ lifetime"; shape by shape:
   (#2668; before, the source stopped owning at the copy and the copy never
   started, which leaked an env per pass of a loop that kept its closure in
   an outer local). A parameter a callee only aliases (`a = cb`) is no keep,
-  so the caller releases what it passed (#2670). A return, an argument to an extern parameter not marked
+  so the caller releases what it passed (#2670). A local bound to a call of
+  a function that hands its argument back as it is (`keep(f) -> fn { return
+  f }`, `return keep(f)`, or `return f, 5` for a tuple slot) is such an alias
+  too: `g2 = keep(g)` and `g2, n = pair(g)` retain, and the argument is judged
+  where the call's value goes, as the name would be (#2763; before, `g`
+  stopped owning at the call and `g2` never started). A return, an argument to an extern parameter not marked
   `@noescape` or to a function that keeps it, or a binding to anything
   else leaves the env to the value's holder. A field's name is not a use
   of a local spelled the same (`Hooks { set: f }`, `h.set` beside a local
@@ -248,7 +253,9 @@ lifetime"; shape by shape:
 - **Returned to a caller.** A function whose every `return` hands back a
   closure nothing else holds (a closure literal, a local whose only
   escape is the return, a local bound to another closure, which took a
-  reference of its own, #2671, or another such function's result) gives its
+  reference of its own, #2671, another such function's result, or such a
+  local handed back through a function that returns its argument,
+  `return keep(g)`, #2763) gives its
   reference to the caller, and a local bound to its result is freed like
   a local bound to a literal (#2494). Passed to a call whose parameter
   keeps nothing, anywhere in an expression (`x = take(make_counter())`),
@@ -355,6 +362,11 @@ assignment is then a fresh local of its own (#2189). Before, only the
 enclosing scope's top-level statements and trailing blocks counted, so
 `c = 0; f = || { c = 5 }` in a loop body gave the closure a fresh `c` and the
 loop's `c` never changed (a closure that also read `c` captured it already).
+A tuple destructure declares each name it binds as `name = ...` does, on
+either side: `a, b = three()` before the closure is a binding of `a` and `b`
+the closure's `a, b = two()` writes, and so is `a = 1; b = 2` (#2762). Before,
+only a single `name = ...` counted as a binding there, so a closure that
+destructured into names a destructure had bound got locals of its own.
 A `while` body's variable is one for the function, so its cell is one across
 the passes, as above; a `for` body's or a branch's, used only inside it, is
 the body's own, so its cell is made at the declaration and released at the

@@ -2311,8 +2311,20 @@ static int subtree_contains(ASTNode* node, ASTNode* target) {
     return 0;
 }
 
+/* Does statement `s` declare `var_name`: `name = v`, a constant, or a slot
+ * of a tuple destructure `a, name = f()` (#2762)? The destructure's slots
+ * are its children before the value; missed, a closure's own `a, b = g()`
+ * found no binding of `a` before it and declared fresh locals, so the
+ * outer `a` and `b` a destructure had bound never changed. */
 static int declares_name(ASTNode* s, const char* var_name) {
-    return s && (s->type == AST_VARIABLE_DECLARATION || s->type == AST_CONST_DECLARATION) &&
+    if (!s) return 0;
+    if (s->type == AST_TUPLE_DESTRUCTURE) {
+        for (int i = 0; i + 1 < s->child_count; i++) {
+            if (declares_name(s->children[i], var_name)) return 1;
+        }
+        return 0;
+    }
+    return (s->type == AST_VARIABLE_DECLARATION || s->type == AST_CONST_DECLARATION) &&
            s->value && strcmp(s->value, var_name) == 0;
 }
 

@@ -1,0 +1,196 @@
+// Regression (#2763): a closure passed to a function that hands it back
+// (`keep(f: fn) -> fn { return f }`, or `return f, 5` in a tuple) is
+// released, and so is the copy the call returns.
+//
+// `g2 = keep(g)` binds g2 to g's own value. The argument counted as kept
+// (the callee returns its parameter), so g stopped owning its env at the
+// call, and the binding as a value someone else holds, so g2 never
+// started: nobody released it, 2400 bytes per 100 calls. Such a binding is
+// now an alias binding, as `g2 = g` is (#2668): it retains, each local
+// releases its own reference, and the argument is judged where the call's
+// value goes, as the name would be. So is a tuple slot the call hands the
+// argument back at, a call handing back what another hand-back returns
+// (`return keep(f)`), a local returned through one (`return keep(g)`), and
+// a closure literal passed to a function that binds its parameter so.
+//
+// The leak checks run where the heap count is exact (mem.heap_in_use_exact):
+// after a warm-up, some window of the same work grows by exactly 0
+// (mem.steady_growth), one window per shape.
+
+import std.mem
+import std.string
+import std.list
+
+extern exit(code: int)
+
+struct Holder {
+    cb: fn
+}
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL #2763: ${msg}")
+        exit(1)
+    }
+}
+
+counter(p: string) -> fn {
+    return || { return string.length(p) }
+}
+
+keep(f: fn) -> fn {
+    return f
+}
+
+keep_tuple(f: fn) -> (fn, int) {
+    return f, 5
+}
+
+swap(a: fn, b: fn) -> (fn, fn) {
+    return b, a
+}
+
+// Hands back what another hand-back returns.
+wrap(f: fn) -> fn {
+    return keep(f)
+}
+
+// A local returned through a hand-back: the caller owns it.
+made(p: string) -> fn {
+    g = counter(p)
+    return keep(g)
+}
+
+// Binds its parameter through a hand-back: it keeps nothing of the caller's.
+run(f: fn) -> int {
+    h = keep(f)
+    return call(h)
+}
+
+single(p: string) -> int {
+    g = counter(p)
+    g2 = keep(g)
+    return call(g2) + call(g)
+}
+
+tuple(p: string) -> int {
+    g = counter(p)
+    g2, m = keep_tuple(g)
+    return call(g2) + call(g) + m
+}
+
+chained(p: string) -> int {
+    g = counter(p)
+    g2 = keep(keep(g))
+    g3 = wrap(g)
+    return call(g2) + call(g3) + call(g)
+}
+
+rebound(p: string) -> int {
+    g = counter(p)
+    h = counter(p)
+    t, n = keep_tuple(g)
+    total = 0
+    i = 0
+    while i < 3 {
+        h = keep(g)
+        t, n = keep_tuple(g)
+        total = total + call(h) + call(t) + n
+        i = i + 1
+    }
+    return total + call(g)
+}
+
+nested(p: string) -> int {
+    g = counter(p)
+    one = || {
+        h = keep(g)
+        int r = call(h)
+        return r
+    }
+    two = || {
+        h, n = keep_tuple(g)
+        return call(h) + n
+    }
+    return call(one) + call(two) + call(g)
+}
+
+stored(p: string) -> int {
+    g = counter(p)
+    xs = list.new()
+    _ = list.add(xs, keep(g))
+    list.free(xs)
+    o = Holder { cb: keep(g) }
+    return call(o.cb) + call(g)
+}
+
+discarded(p: string) -> int {
+    g = counter(p)
+    k = counter(p)
+    _, m = keep_tuple(g)
+    x, y = swap(g, k)
+    return call(g) + m + call(x) + call(y) + call(k)
+}
+
+// `c` and `t` are written by a closure, so they live in cells.
+cells(p: string) -> int {
+    g = counter(p)
+    c = counter(p)
+    t = counter(p)
+    n = 0
+    set = || {
+        c = keep(g)
+        t, n = keep_tuple(g)
+    }
+    set()
+    return call(c) + call(t) + n + call(g)
+}
+
+through(p: string) -> int {
+    g = counter(p)
+    h = made(p)
+    return run(g) + run(|| { return string.length(p) }) + call(h) + call(g)
+}
+
+measure(which: int, p: string) -> long {
+    return mem.steady_growth(|| {
+            i = 0
+            while i < 100 {
+                if which == 0 { single(p) }
+                if which == 1 { tuple(p) }
+                if which == 2 { chained(p) }
+                if which == 3 { rebound(p) }
+                if which == 4 { nested(p) }
+                if which == 5 { stored(p) }
+                if which == 6 { discarded(p) }
+                if which == 7 { cells(p) }
+                if which == 8 { through(p) }
+                i = i + 1
+            }
+        }, 5)
+}
+
+main() {
+    println("=== test_closure_handed_back_released ===")
+    p = string.concat("bc", "")
+    check(single(p) == 4, "a handed-back closure bound to a local (${single(p)})")
+    check(tuple(p) == 9, "a handed-back closure in a tuple slot (${tuple(p)})")
+    check(chained(p) == 6, "a closure handed back twice (${chained(p)})")
+    check(rebound(p) == 29, "handed-back closures bound again (${rebound(p)})")
+    check(nested(p) == 11, "handed back in a closure's body (${nested(p)})")
+    check(stored(p) == 4, "a handed-back closure stored (${stored(p)})")
+    check(discarded(p) == 13, "a discarded slot and swapped slots (${discarded(p)})")
+    check(cells(p) == 11, "handed back into cells (${cells(p)})")
+    check(through(p) == 8, "returned and bound through a hand-back (${through(p)})")
+    if mem.heap_in_use_exact() {
+        names = ["a local", "a tuple slot", "a chain", "a rebinding", "a closure's body",
+            "a store", "a discarded or swapped slot", "a cell", "a return or a parameter"]
+        i = 0
+        while i < 9 {
+            grown = measure(i, p)
+            check(grown == 0, "100 closures handed back into ${names[i]} grew the heap by ${grown} bytes in every run")
+            i = i + 1
+        }
+    }
+    println("=== test_closure_handed_back_released passed ===")
+}
