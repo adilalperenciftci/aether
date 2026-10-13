@@ -14,6 +14,40 @@ cut while your branch is open cannot fold your entry into the released section.
 
 ## [current]
 
+## [0.813.0]
+
+### Fixed
+
+- **`*mod.T` is a type, and a qualified type names a module that has it.**
+  `mod.T` parsed in a type position, but its pointer form `*mod.T` stopped
+  at the `.` ("Expected LEFT_BRACE, got DOT"), so `f() -> *gpu.GpuShader`
+  needed a selective `import gpu (GpuShader)` and `*GpuShader`. It now parses
+  in a return type, a parameter, a struct field, an `as` cast and a typed
+  declaration, as the struct the selective import would bring in. The
+  qualifier was also dropped unchecked: `gpu.Missing` reached the C compiler
+  as an unknown type name. It is now an error at the source line, `module
+  'gpu' has no type 'Missing'`, and so are a qualifier naming no imported
+  module and a type the module does not export. `ae fmt` no longer writes a
+  line-leading `*Node n = ...` as `* Node n = ...`.
+
+- **INT64_MIN and INT32_MIN emit as C that compiles warning-free.** The
+  constant folder turns `(0 - 9223372036854775807) - 1` into the literal
+  `-9223372036854775808`, which reached the C as is: `-` applied to a decimal
+  that fits no signed type, which clang warns is taken as unsigned and gcc
+  as "so large that it is unsigned", both errors under CI's -Werror. Folded
+  `(0 - 2147483647) - 1` had the same shape one width down, a `long` that
+  `printf("%d", ...)` warned on. Both now emit as `<stdint.h>` spells them,
+  `(-9223372036854775807LL - 1)` and `(-2147483647 - 1)`, and so does a
+  `@derive(schema)` attribute argument of the minimum.
+
+- **docs/quote.md says what type a lane has in a quote's tree.** It said
+  `uv.x * 10.0` was a `float`; the tree says `f32`, as the checker types
+  `.x` of any `f32x4` or distinct type over one. `f32` is the honest answer
+  (Aether's `float` is a C double, and a lane holds a 32-bit float), so the
+  tree stays as it is: docs/quote.md and std/quote's README now say the
+  types are Aether's spellings and a GLSL back end maps both `float` and
+  `f32` to GLSL's `float`, and `test_quote_fxaa.ae` holds the lane type.
+
 ## [0.812.0]
 
 ### Fixed
