@@ -1,0 +1,54 @@
+// The two minimums, written the way Aether spells them: the constant
+// folder turns each into one negative literal, which codegen has to emit as
+// C that means the same thing without a warning. test_int_min_literal.sh
+// compiles the generated C with -Wall -Wextra -Werror.
+
+import std.reflect
+
+const LONG_MIN: long = (0 - 9223372036854775807) - 1
+const INT_MIN: int = (0 - 2147483647) - 1
+const BOUNDS: long[2] = [(0 - 9223372036854775807) - 1, 9223372036854775807]
+
+// An attribute argument is emitted as a long long of its own.
+@derive(schema)
+struct Limits {
+    lo: long @default(-9223372036854775808)
+    hi: long @default(9223372036854775807)
+}
+
+check(got: string, want: string) {
+    if got != want {
+        println("FAIL: got ${got}, want ${want}")
+        exit(1)
+    }
+}
+
+kind(v: long) -> string {
+    return match v {
+        (0 - 9223372036854775807) - 1 -> "min"
+        _ -> "other"
+    }
+}
+
+main() {
+    long a = (0 - 9223372036854775807) - 1
+    int i = (0 - 2147483647) - 1
+    check("${a}", "-9223372036854775808")
+    check("${i}", "-2147483648")
+    check("${LONG_MIN}", "-9223372036854775808")
+    check("${INT_MIN}", "-2147483648")
+    check("${BOUNDS[0]}", "-9223372036854775808")
+    check("${(0 - 9223372036854775807) - 1}", "-9223372036854775808")
+    check("${(0 - 2147483647) - 1}", "-2147483648")
+    check(kind(a), "min")
+    check(kind(a + 1), "other")
+    // the value is the minimum, not a wrapped or widened neighbour
+    check("${a + 9223372036854775807}", "-1")
+    check("${i + 2147483647}", "-1")
+    s = Limits_schema()
+    check("${reflect.attr_int(s, 0, 0, 0)}", "-9223372036854775808")
+    check("${reflect.attr_int(s, 1, 0, 0)}", "9223372036854775807")
+    // and through println's own format, which is chosen by the type
+    println((0 - 2147483647) - 1)
+    println((0 - 9223372036854775807) - 1)
+}

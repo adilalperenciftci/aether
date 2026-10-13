@@ -31,6 +31,7 @@ Type* create_type(TypeKind kind) {
     type->compound_node = NULL;
     type->closure_literal = NULL;
     type->is_result = 0;   /* #913 `T!` marker — must not inherit malloc garbage */
+    type->qualifier = NULL;
     return type;
 }
 
@@ -466,6 +467,7 @@ Type* clone_type(Type* type) {
     if (type->struct_name) {
         new_type->struct_name = strdup(type->struct_name);
     }
+    new_type->qualifier = type->qualifier;   /* interned */
     if (type->c_alias) {
         new_type->c_alias = strdup(type->c_alias);
     }

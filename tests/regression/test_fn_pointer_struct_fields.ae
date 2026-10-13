@@ -45,7 +45,7 @@ main() {
     if o.combine(10, 20) != 30 { println("FAIL: value o.combine"); exit(1) }
     if run_hash(o, 7) != 107 { println("FAIL: dispatch via value param"); exit(1) }
 
-    * Ops p = malloc(16) as *Ops
+    *Ops p = malloc(16) as *Ops
     p.hash = bump as fn(int) -> int
     p.combine = addf as fn(int, int) -> int
     if run_hash_ptr(p, 9) != 109 { println("FAIL: dispatch via ptr param"); exit(1) }

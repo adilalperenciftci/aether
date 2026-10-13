@@ -374,6 +374,7 @@ static char* layout(Lexeme* lex, size_t n){
     FmtBracket brackets[FMT_MAX_BRACKETS];    // open `[` groups, innermost last
     int nbrackets=0;
     int type_prefix=TP_NONE;                  // where the last tokens stand in `[]*T`
+    int prev_began_line=0;                    // the previous token was its line's first
 
     for (size_t k=0;k<n;k++){
         Lexeme* L=&lex[k];
@@ -409,14 +410,22 @@ static char* layout(Lexeme* lex, size_t n){
                     sp = 0;                             // `[]int`, `[Dir]string`, `[]*Node`
                 if (type_prefix==TP_STAR && is_type_name(L->text))
                     sp = 0;                             // the `Node` of `[]*Node`
+                /* A `*` that begins a line begins a statement, so it is a
+                 * prefix whatever ended the line before: the pointer type
+                 * of `*Node n = ...` / `*mod.Node n`, or a deref `*p = v`.
+                 * Read as infix after the previous line's `)`, it came out
+                 * as `* Node n`. */
+                if (prev_began_line && eq(prev,"*")) sp = 0;
                 if (sp==0 && would_merge(prev, L->text)) sp=1;
             } else sp=0;
             buf_spaces(&out, sp);
         }
 
+        int began_line = !line_started;
         buf_puts(&out, L->text);
 
         if (L->kind==LX_TOKEN){
+            prev_began_line = began_line;
             if (is_open(L->text)) depth++;
             else if (is_close(L->text)){ depth--; if(depth<0) depth=0; }
 

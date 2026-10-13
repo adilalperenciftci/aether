@@ -512,6 +512,12 @@ typedef struct Type {
     // (rather than panics) inside a `T!`-returning function and so an `or {}`
     // handler / the "must handle" check apply. 0 on a plain tuple.
     int is_result;
+    // On a struct type spelled with its module, `mod.T` or `*mod.T`: the
+    // module path as written (`mod`, `a.b`), interned. The struct is still
+    // `struct_name` (struct names are one namespace across modules); the
+    // qualifier is only checked, by check_qualified_types, to name a module
+    // that has the type. NULL on a bare name.
+    const char* qualifier;
 } Type;
 
 /* realloc that cannot fail. The `p = realloc(p, n)` idiom used across

@@ -1,0 +1,30 @@
+// The module the consumer names its types through: `*gpu.GpuShader`.
+exports(GpuShader, Pass, make_shader, shader_id)
+
+extern malloc(size: int) -> ptr
+
+struct GpuShader {
+    id: int
+    name: string
+}
+
+struct Pass {
+    shader: *GpuShader
+    order: int
+}
+
+// Not exported: `gpu.Scratch` names it from outside, and is an error.
+struct Scratch {
+    n: int
+}
+
+make_shader(id: int, name: string) -> ptr {
+    s = malloc(sizeof(GpuShader)) as *GpuShader
+    s.id = id
+    s.name = name
+    return s
+}
+
+shader_id(s: *GpuShader) -> int {
+    return s.id
+}

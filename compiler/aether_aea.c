@@ -112,6 +112,7 @@ static int encode_type(Buf* b, const Type* t, const char** err) {
     if (!encode_type(b, t->return_type, err)) return 0;
     buf_int(b, t->is_fnptr);
     buf_int(b, t->is_result);
+    buf_text(b, t->qualifier);   /* `mod` of `mod.T` (format 4) */
     return 1;
 }
 
@@ -337,6 +338,11 @@ static Type* decode_type(Cursor* c, int depth) {
     t->return_type = decode_type(c, depth + 1);
     t->is_fnptr = (int)cur_int(c);
     t->is_result = (int)cur_int(c);
+    char* qualifier = cur_text(c);
+    if (qualifier) {
+        t->qualifier = aether_intern(qualifier);
+        free(qualifier);
+    }
     return t;
 }
 

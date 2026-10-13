@@ -1,0 +1,9 @@
+import gpu
+
+load() -> *gpu.Missing {
+    return null
+}
+
+main() {
+    println(load() == null)
+}

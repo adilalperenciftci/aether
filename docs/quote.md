@@ -104,9 +104,19 @@ Each node has a `kind`, the `type` the type checker gave it, a `name`, an
 | `FIELD_VALUE` | value | one field of a `MAKE`: `name` is the field (`pos`), the child its value |
 
 **Every node carries the type the type checker gave it.** A back end that
-writes GLSL needs to know `t` is a `float` and `uv.x * 10.0` is a `float`;
-it never infers types again. A distinct type keeps its own name (`vec2`,
-not `f32x4`), so a shader library gets GLSL's type names from the checker.
+writes GLSL needs to know `t` is a `float` and `uv.x` an `f32`; it never
+infers types again. A distinct type keeps its own name (`vec2`, not
+`f32x4`), so a shader library gets GLSL's vector type names from the
+checker.
+
+The scalar types are Aether's, spelled as Aether spells them. `float` is a
+C `double`; `f32` is the 32-bit float, C's `float`. A lane read from an
+`f32x4`, or from a distinct type over one (`uv.x` for a `vec2`), is an
+`f32`, because that is what the lane holds, the type `.x` has outside a quote
+too. A literal beside an `f32` takes it (`uv.x * 10.0` is an `f32`), and a
+`float` beside one widens the expression to `float`, as in C. A back end for
+a language with one 32-bit float, GLSL's `float`, maps both `float` and `f32`
+to it; a CPU evaluator keeps them apart, since they compute differently.
 
 **A call is recorded, not made.** `sin(…)` becomes a `CALL` node named
 `sin`. Nothing is called when the tree is built. The function still has to

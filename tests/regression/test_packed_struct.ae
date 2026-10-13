@@ -37,7 +37,7 @@ main() {
 
     // Round-trip a field through a *sdshdr16 overlay on a raw buffer —
     // proves the packed layout is real, not just a sizeof number.
-    * sdshdr16 h = malloc(8) as *sdshdr16
+    *sdshdr16 h = malloc(8) as *sdshdr16
     h.len = 300
     h.alloc = 512
     h.flags = 7

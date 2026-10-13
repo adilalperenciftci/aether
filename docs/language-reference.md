@@ -3076,6 +3076,24 @@ main() {
 }
 ```
 
+**A type can be qualified the same way.** `mod.T` and `*mod.T` are types
+wherever a type is written (a parameter, a return type, a struct field, an
+`as` cast, a typed declaration), with no selective import of `T`:
+
+```aether,fragment
+import gpu
+
+compile(id: int) -> *gpu.GpuShader {
+    return gpu.make_shader(id) as *gpu.GpuShader
+}
+```
+
+Struct names are one namespace across the modules of a program, so
+`gpu.GpuShader` is the same struct `import gpu (GpuShader)` would bring in;
+the qualifier says where it comes from and is checked: `gpu` has to be a
+module the file imports, and it has to define and export the type (`module
+'gpu' has no type 'Missing'`, `'Scratch' is not exported from module 'gpu'`).
+
 ### Import with Alias
 
 The `import mod as alias` syntax parses and records the alias, but calls through

@@ -63,7 +63,7 @@ main() {
     check("struct field, heap string", o.measure(name), want)
     check("struct field via value param", through_value_field(o, name), want)
 
-    * Ops p = malloc(sizeof(Ops)) as *Ops
+    *Ops p = malloc(sizeof(Ops)) as *Ops
     p.measure = strlen as fn(string) -> int
     check("struct field via pointer", p.measure(name), want)
     check("struct field via pointer param", through_pointer_field(p, name), want)

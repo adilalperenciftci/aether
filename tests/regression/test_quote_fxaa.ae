@@ -155,8 +155,10 @@ main() {
     sums = 0
     returns = ""
     chooses = ""
+    lanes_read = ""
     quote.walk(quote.body(t)) callback | m: quote.Node | {
         k = quote.kind(m)
+        if k == quote.FIELD { lanes_read = "${lanes_read}${quote.name(m)}:${quote.type_of(m)} " }
         if k == quote.BINARY && quote.op(m) == "+" && quote.type_of(m) == "vec2" {
             sums = sums + 1
         }
@@ -166,6 +168,11 @@ main() {
     fails = fails + check("vector arithmetic", "${sums}", "5")
     fails = fails + check("returns", returns, "Fragment Fragment ")
     fails = fails + check("chooses", chooses, "float float float vec2 ")
+    // A lane of a vec2 is an f32, the 32-bit float the lane holds, as the
+    // checker types `.x` of any f32x4: Aether's `float` is a C double, so
+    // the tree saying `float` would claim a precision the lane does not
+    // have. A GLSL back end maps both to GLSL's `float`.
+    fails = fails + check("lanes", lanes_read, "y:f32 x:f32 ")
 
     // The function's parameters are the shader's uniforms, read through
     // their cells.

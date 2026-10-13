@@ -1,0 +1,6 @@
+import gpu
+
+main() {
+    let n: *gpu.Scratch = null
+    println(n == null)
+}

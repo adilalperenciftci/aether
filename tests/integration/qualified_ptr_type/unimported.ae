@@ -1,0 +1,9 @@
+import gpu
+
+use(s: *render.GpuShader) -> int {
+    return 1
+}
+
+main() {
+    println(use(null))
+}

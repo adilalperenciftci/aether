@@ -16,6 +16,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <limits.h>
 
 /* An Aether struct with a C body the compiler emitted: the only kind whose
  * layout offsetof can describe. Extern, opaque and header-imported structs
@@ -143,6 +144,14 @@ static void schema_emit_name(CodeGenerator* gen, const char* s) {
     fputc('"', gen->output);
 }
 
+/* A long long as a C constant expression. `%lldLL` of LLONG_MIN is `-`
+ * applied to 9223372036854775808LL, which fits no signed type: clang warns
+ * it is taken as unsigned, and CI builds with -Werror. */
+static void schema_emit_i64(CodeGenerator* gen, long long i) {
+    if (i == LLONG_MIN) fputs("(-9223372036854775807LL - 1)", gen->output);
+    else fprintf(gen->output, "%lldLL", i);
+}
+
 /* One attribute argument initializer: {kind, text, i, f}. */
 static void schema_emit_arg(CodeGenerator* gen, ASTNode* lit) {
     const char* v = lit->value ? lit->value : "";
@@ -162,7 +171,9 @@ static void schema_emit_arg(CodeGenerator* gen, ASTNode* lit) {
         long long i = (d >= -9.2e18 && d <= 9.2e18) ? (long long)d : 0;
         fprintf(gen->output, "{2, ");
         schema_emit_name(gen, v);
-        fprintf(gen->output, ", %lldLL, %s}", i, v);
+        fputs(", ", gen->output);
+        schema_emit_i64(gen, i);
+        fprintf(gen->output, ", %s}", v);
     } else {
         /* An integer: decimal, or 0x / 0o / 0b (underscores already gone). */
         int neg = v[0] == '-';
@@ -172,10 +183,14 @@ static void schema_emit_arg(CodeGenerator* gen, ASTNode* lit) {
         else if (d[0] == '0' && (d[1] == 'o' || d[1] == 'O')) u = strtoull(d + 2, NULL, 8);
         else if (d[0] == '0' && (d[1] == 'b' || d[1] == 'B')) u = strtoull(d + 2, NULL, 2);
         else u = strtoull(d, NULL, 10);
-        long long i = neg ? -(long long)u : (long long)u;
+        /* negated in unsigned arithmetic: -(long long)u overflows for
+         * u = 2^63, the magnitude of the minimum */
+        long long i = (long long)(neg ? 0ULL - u : u);
         fprintf(gen->output, "{1, ");
         schema_emit_name(gen, v);
-        fprintf(gen->output, ", %lldLL, %.17g}", i, (double)i);
+        fputs(", ", gen->output);
+        schema_emit_i64(gen, i);
+        fprintf(gen->output, ", %.17g}", (double)i);
     }
 }
 
