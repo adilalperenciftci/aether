@@ -8986,6 +8986,8 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
                          * today; the loop keeps this right if it takes more. */
                         Type* ft = fld->node_type;
                         while (ft && ft->kind == TYPE_ARRAY && type_is_sized_array(ft)) ft = ft->element_type;
+                        /* An optional holds its value by value too (#2820). */
+                        if (ft && ft->kind == TYPE_OPTIONAL) ft = ft->element_type;
                         if (!ft || ft->kind != TYPE_STRUCT) continue;
                         const char* dep = get_c_type(ft);
                         if (!dep) continue;

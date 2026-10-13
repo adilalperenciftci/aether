@@ -2745,6 +2745,19 @@ static int is_builtin_name(const char* name) {
     return 0;
 }
 
+/* #2820: the declared type of field `field` of the struct `sname`, or
+ * NULL. */
+static Type* struct_literal_field_type(CodeGenerator* gen, const char* sname, const char* field) {
+    ASTNode* sdef = (gen && gen->program && sname)
+                        ? find_struct_definition_by_name(gen->program, sname) : NULL;
+    for (int i = 0; sdef && field && i < sdef->child_count; i++) {
+        ASTNode* f = sdef->children[i];
+        if (f && f->type == AST_STRUCT_FIELD && f->value && strcmp(f->value, field) == 0)
+            return f->node_type;
+    }
+    return NULL;
+}
+
 /* #2805: is `name`, used by the closure `viewer` in scope `scope`, a
  * module-level `var`, with no parameter of the scope chain spelled the same
  * (enclosing_decl_line says 0 for one)? Every `name = ...` in a function
@@ -6954,6 +6967,12 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                         fprintf(gen->output,
                                 "_aether_box_closure((_AeClosure){ .fn = (void(*)(void))_aether_bare_adapter_%s, .env = NULL })",
                                 bn ? bn : "unknown");
+                    } else if (is_assignment && ltype && ltype->kind == TYPE_OPTIONAL &&
+                               expr->children[0]->type == AST_MEMBER_ACCESS) {
+                        /* #2820: a store into an optional field takes the
+                         * value as an optional binding does, a bare value
+                         * wrapped and `none` the empty one. */
+                        emit_optional_coerced(gen, expr->children[1], ltype);
                     } else {
                         if (wide_cast && AE_IS_NARROW_INT(rtype)) fprintf(gen->output, "%s", wide_cast);
                         generate_expression(gen, expr->children[1]);
@@ -9275,6 +9294,9 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                 if (field_init && field_init->type == AST_ASSIGNMENT) {
                     if (emitted > 0) fprintf(gen->output, ", ");
                     fprintf(gen->output, ".%s = ", field_init->value);
+                    Type* fv_opt = c_imported ? NULL
+                                   : struct_literal_field_type(gen, expr->value, field_init->value);
+                    if (fv_opt && fv_opt->kind != TYPE_OPTIONAL) fv_opt = NULL;
                     if (field_init->child_count > 0) {
                         /* A header-defined struct's string field is C's
                          * `const char*`: the payload, not a wrapped
@@ -9311,7 +9333,11 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                         int fv_copy = !c_imported && fv && fv->type == AST_IDENTIFIER &&
                                       fv->value && is_heap_string_var(gen, fv->value) &&
                                       alias_source_must_copy(gen, fv->value);
-                        if (take_own && take_own[i][0]) emit_string_take(gen, fv, take_own[i], NULL);
+                        /* #2820: an optional field takes its value as an
+                         * optional binding does, a bare value wrapped and
+                         * `none` the empty one. */
+                        if (fv_opt) emit_optional_coerced(gen, fv, fv_opt);
+                        else if (take_own && take_own[i][0]) emit_string_take(gen, fv, take_own[i], NULL);
                         else if (struct_literal_field_takes_array(gen, expr->value, field_init))
                             fprintf(gen->output, "{0}");   /* #2688: filled below */
                         else if (fv_copy) {
@@ -9326,6 +9352,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                         if (unwrap) fprintf(gen->output, "); _ae_cs ? aether_string_data(_ae_cs) : (const char*)0; })");
                     }
                     emitted++;
+                    if (fv_opt) continue;  /* an optional field has no tracker */
                     if (take_own && take_own[i][0]) continue;  /* tracker set below */
                     /* If the init is heap-classified, also set the hidden
                      * tracker. For a heap-tracked *variable* source, the

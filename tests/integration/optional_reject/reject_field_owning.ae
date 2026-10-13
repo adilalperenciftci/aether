@@ -1,0 +1,19 @@
+// #2822: a struct field of an optional type whose value owns memory has no
+// ownership yet, so it is refused. Must not compile.
+struct Named {
+    name: string
+}
+
+struct Tag {
+    label: string?
+}
+
+struct Held {
+    owner: Named?
+}
+
+main() {
+    t = Tag { label: "x" }
+    h = Held { owner: none }
+    println("${t.label ?? "-"} ${h.owner == none}")
+}

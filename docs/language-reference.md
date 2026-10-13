@@ -1834,6 +1834,8 @@ let empty: int? = none      // the absent sentinel
 
 `T?` works for any element type, value types (`int?`, `float?`, `bool?`) and reference types (`string?`, `*Node?`) alike, with one uniform representation, so there is no ambiguity between "the value is a null pointer" and "the key was absent". An optional can also be an element of a tuple, `-> (string?, int)`, returned as `return "pos", n` or `return none, n`.
 
+A struct field can be optional (#2820): `struct Box { v: int?  at: Point? }`. A struct literal (`Box { v: 7, at: none }`) and a field store (`b.v = 9`, `b.v = none`) take the value as an optional binding does, a bare value wrapped. An optional field whose value owns memory, a `string?`, an optional `fn` or an optional of a struct holding a string, is refused for now (#2822): it has none of the ownership a `string` field has, so a string stored there would leak or dangle. Hold the value bare (a `string` with `""` for none) or keep the optional in a local.
+
 ### `none` and equality
 
 `none` is a reserved literal (like `true`, `false`, and `null`), it cannot be used as a variable, parameter or constant name — the compiler refuses the declaration, because every later use of such a binding would read as the literal instead. Compare against it with `==` / `!=`:

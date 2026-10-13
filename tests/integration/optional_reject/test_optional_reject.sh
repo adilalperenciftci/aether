@@ -26,5 +26,17 @@ check_rejected reject_return_nested
 check_rejected reject_let_nested
 check_rejected reject_param_nested
 
-echo "  [PASS] optional_reject: T?? rejected in return / let / param position"
+# #2822: an optional struct field whose value owns memory is refused, both
+# a `string?` and an optional of a struct holding a string, each named.
+name=reject_field_owning
+if "$AETHERC" "$SCRIPT_DIR/$name.ae" "$TMPDIR/$name.c" >"$TMPDIR/$name.log" 2>&1; then
+    echo "  [FAIL] optional_reject: $name.ae compiled (should be rejected)"; exit 1
+fi
+if ! grep -q "struct field 'label' is string?.*#2822" "$TMPDIR/$name.log" ||
+   ! grep -q "struct field 'owner' is .*Named?.*#2822" "$TMPDIR/$name.log"; then
+    echo "  [FAIL] optional_reject: $name.ae rejected, but not for the owning optional field"
+    sed 's/^/    /' "$TMPDIR/$name.log" | head -6; exit 1
+fi
+
+echo "  [PASS] optional_reject: T?? rejected in return / let / param position, an owning optional field refused"
 exit 0

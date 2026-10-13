@@ -7258,8 +7258,27 @@ int typecheck_function_definition(ASTNode* func, SymbolTable* table) {
     return 1;
 }
 
+/* #2822: does a value of type `t` own memory a struct field would have to
+ * free or copy: a string, a closure, or a struct (held by value) with such
+ * a field? */
+static int type_owns_memory(Type* t, SymbolTable* table, int depth) {
+    if (!t || depth > 16) return 0;
+    if (t->kind == TYPE_STRING) return 1;
+    if (t->kind == TYPE_FUNCTION) return !t->is_fnptr;
+    if (t->kind == TYPE_OPTIONAL) return type_owns_memory(t->element_type, table, depth + 1);
+    if (t->kind != TYPE_STRUCT || !t->struct_name) return 0;
+    Symbol* s = lookup_symbol(table, t->struct_name);
+    ASTNode* def = s ? s->node : NULL;
+    if (!def || def->type != AST_STRUCT_DEFINITION) return 0;
+    for (int i = 0; i < def->child_count; i++) {
+        ASTNode* f = def->children[i];
+        if (f && f->type == AST_STRUCT_FIELD && type_owns_memory(f->node_type, table, depth + 1))
+            return 1;
+    }
+    return 0;
+}
+
 int typecheck_struct_definition(ASTNode* struct_def, SymbolTable* table) {
-    (void)table;  // Unused for now
     if (!struct_def || struct_def->type != AST_STRUCT_DEFINITION) return 0;
     
     // Type check all fields
@@ -7289,6 +7308,23 @@ int typecheck_struct_definition(ASTNode* struct_def, SymbolTable* table) {
             return 0;
         }
         
+        /* #2822: an optional field compiles (#2820), but one whose value
+         * owns memory has none of a `string` field's ownership (destroy,
+         * replace, dup, a take on store), so a string stored there would
+         * leak or dangle. Refused until it has. */
+        if (field->node_type->kind == TYPE_OPTIONAL &&
+            type_owns_memory(field->node_type->element_type, table, 0)) {
+            char error_msg[512];
+            snprintf(error_msg, sizeof(error_msg),
+                     "struct field '%s' is %s: an optional field whose value owns memory (a "
+                     "string, a closure, or a struct holding one) is not supported yet "
+                     "(#2822). Hold the value bare (a `string` with \"\" for none) or keep "
+                     "the optional in a local",
+                     field->value, type_to_string(field->node_type));
+            type_error(error_msg, field->line, field->column);
+            return 0;
+        }
+
         // Check for duplicate field names
         for (int j = 0; j < i; j++) {
             ASTNode* other_field = struct_def->children[j];
