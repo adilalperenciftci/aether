@@ -1,0 +1,116 @@
+// Regression (#2793, #2768): a name a match arm's pattern binds (`some(v)`,
+// `[h | t]`, `[x, y]`) is a local of that arm.
+//
+// Codegen declared the binding at the top of the arm's C block but did not
+// record it, so `v = v * 10` in the arm was a second declaration (gcc:
+// "redefinition of 'v'"), and so was the declaration an if/else in the arm
+// hoists. With #2768's hoists, a name the pattern binds was also taken for
+// the outer one the arm binds, and the hoisted variable shadowed the
+// pattern's value in the arm. Now a binding of it in the arm rebinds the
+// pattern's value, nothing declares it again, and no hoist takes it out of
+// the match (tests/integration/match_arm_scope checks that a read after the
+// match is "Undefined variable").
+extern exit(code: int)
+
+var bad = 0
+
+check(label: string, got: int, want: int) {
+    if got != want {
+        println("FAIL ${label}: got ${got}, want ${want}")
+        bad = bad + 1
+    }
+}
+
+rebind(o: int?) -> int {
+    match o {
+        some(v) -> {
+            v = v * 10
+            return v
+        }
+        none -> { return 0 }
+    }
+    return -1
+}
+
+// The if's hoist does not declare `v` again in the arm.
+inner_if(o: int?, c: bool) -> int {
+    match o {
+        some(v) -> {
+            if c {
+                v = v + 1
+            } else {
+                v = v + 2
+            }
+            return v
+        }
+        none -> { return 0 }
+    }
+    return -1
+}
+
+// Nor does a while's.
+inner_while(o: int?) -> int {
+    match o {
+        some(v) -> {
+            i = 0
+            while i < 3 {
+                v = v + 1
+                i = i + 1
+            }
+            return v
+        }
+        none -> { return 0 }
+    }
+    return -1
+}
+
+head_twice(xs: int[]) -> int {
+    match xs {
+        [] -> { return -1 }
+        [h | t] -> {
+            h = h * 2
+            return h + t.len
+        }
+    }
+    return 0
+}
+
+pair_sum(xs: int[]) -> int {
+    match xs {
+        [x, y] -> {
+            x = x + y
+            return x
+        }
+        _ -> { return 0 }
+    }
+    return 0
+}
+
+// The arm's binding is the pattern's, and an outer name of another arm's
+// stays in that arm: the outer `total` is not touched by either.
+outer_untouched(o: int?) -> int {
+    total = 100
+    match o {
+        some(total) -> { total = total + 1 }
+        none -> { println("none") }
+    }
+    return total
+}
+
+main() {
+    check("rebind", rebind(4), 40)
+    check("if in the arm", inner_if(5, true), 6)
+    check("else in the arm", inner_if(5, false), 7)
+    check("while in the arm", inner_while(5), 8)
+    let a: int[3] = [5, 6, 7]
+    check("[h | t]", head_twice(a), 12)
+    let b: int[2] = [3, 4]
+    check("[x, y]", pair_sum(b), 7)
+    check("outer untouched", outer_untouched(1), 100)
+
+    if bad != 0 {
+        println("${bad} check(s) failed")
+        exit(1)
+    }
+    println("match pattern bindings: ok")
+}

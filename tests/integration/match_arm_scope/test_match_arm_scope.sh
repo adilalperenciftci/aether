@@ -5,7 +5,9 @@
 # The reads the hoists make valid compile (tests/regression/
 # test_match_arm_scope.ae; the issue's shape is checked here too). These,
 # which no hoist covers, stay the checker's "Undefined variable", as the same
-# reads of a name an `if` branch binds are, and never reach the C compiler.
+# reads of a name an `if` branch binds are, and never reach the C compiler:
+# among them a name an arm's pattern binds, which no hoist takes out of the
+# match (tests/regression/test_match_pattern_binding.ae has the arm's side).
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
@@ -116,6 +118,57 @@ main() {
 }
 AE
 undefined other_arm v 5:27
+
+# A name an arm's pattern binds is that arm's own, and no hoist takes it out
+# of the match from any arm: in the `some(v)` arm `v = v + 1` rebinds the
+# pattern's value. Hoisted, the outer `v` shadowed it there and the read
+# after the match got 0.
+cat > "$TMP/pattern_some.ae" <<'AE'
+pick(o: int?) -> int {
+    if true {
+        match o {
+            some(v) -> { v = v + 1 }
+            none -> { v = 0 }
+        }
+        return v
+    }
+    return -1
+}
+main() { println("${pick(41)}") }
+AE
+undefined pattern_some v 7:16
+
+cat > "$TMP/pattern_cons.ae" <<'AE'
+first(xs: int[]) -> int {
+    if true {
+        match xs {
+            [] -> { hd = -1 }
+            [hd | tl] -> { hd = hd * 2 }
+        }
+        return hd
+    }
+    return 0
+}
+main() {
+    let a: int[2] = [5, 6]
+    println("${first(a)}")
+}
+AE
+undefined pattern_cons hd 7:16
+
+# At the top of the function body too: the `none` arm's `v` is not hoisted
+# for the read after the match while the `some(v)` arm binds its own.
+cat > "$TMP/pattern_top.ae" <<'AE'
+top(o: int?) -> int {
+    match o {
+        some(v) -> { println("got ${v}") }
+        none -> { v = 7 }
+    }
+    return v
+}
+main() { println("${top(3)}") }
+AE
+undefined pattern_top v 6:12
 
 [ "$fails" -eq 0 ] || exit 1
 echo "  [PASS] match_arm_scope: a match arm's names hoist as an if branch's do"

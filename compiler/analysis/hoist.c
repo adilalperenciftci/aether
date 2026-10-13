@@ -120,6 +120,39 @@ static int is_branching(ASTNode* stmt) {
                     stmt->type == AST_MATCH_STATEMENT);
 }
 
+/* Does the arm pattern `p` bind `name`: `some(name)`, or an element of a
+ * list pattern (`[name, y]`, `[name | t]`)? A bare name in a pattern is a
+ * value compared with, or a sum's variant, and binds nothing. */
+static int pattern_binds_name(const ASTNode* p, const char* name) {
+    if (!p || !name) return 0;
+    if (p->type == AST_PATTERN_VARIABLE)
+        return p->annotation && strcmp(p->annotation, "some_pattern") == 0 && p->value &&
+               strcmp(p->value, name) == 0;
+    if (p->type != AST_PATTERN_LIST && p->type != AST_PATTERN_CONS) return 0;
+    for (int i = 0; i < p->child_count; i++) {
+        const ASTNode* e = p->children[i];
+        if (e && e->type == AST_PATTERN_VARIABLE && e->value && strcmp(e->value, name) == 0)
+            return 1;
+    }
+    return 0;
+}
+
+/* #2768: does an arm pattern of `stmt`, a match, bind `name`? Such a name
+ * is the arm's own, and is not hoisted out of the match by any rule: a
+ * binding of it in that arm rebinds the pattern's value, and one in another
+ * arm stays in its arm too, so a read after the match is no read of either
+ * (the checker's "Undefined variable"). */
+static int match_pattern_binds(const ASTNode* stmt, const char* name) {
+    if (!stmt || stmt->type != AST_MATCH_STATEMENT || !name) return 0;
+    for (int i = 1; i < stmt->child_count; i++) {
+        const ASTNode* a = stmt->children[i];
+        if (a && a->type == AST_MATCH_ARM && a->child_count > 0 &&
+            pattern_binds_name(a->children[0], name))
+            return 1;
+    }
+    return 0;
+}
+
 #define HOIST_MAX_ARMS 256
 
 int hoist_if_branch_candidates(ASTNode* body, const char** out, int cap) {
@@ -146,6 +179,9 @@ int hoist_if_branch_candidates(ASTNode* body, const char** out, int cap) {
             count = hoist_direct_decl_names(arms[j], names, count, HOIST_MAX_NAMES);
         }
     }
+    /* A name a match's pattern binds comes out of no arm of that match;
+     * hoist_if_branch_first_decl, below, finds a binding of it elsewhere or
+     * none. */
 
     int kept = 0;
     for (int n = 0; n < count && kept < cap; n++) {
@@ -181,6 +217,7 @@ int hoist_if_branch_candidates(ASTNode* body, const char** out, int cap) {
 ASTNode* hoist_if_branch_first_decl(ASTNode* body, const char* name) {
     if (!body) return NULL;
     for (int i = 0; i < body->child_count; i++) {
+        if (match_pattern_binds(body->children[i], name)) continue;
         ASTNode* arms[HOIST_MAX_ARMS];
         int na = branch_arms(body->children[i], arms, HOIST_MAX_ARMS);
         for (int j = 0; j < na; j++) {
@@ -211,7 +248,7 @@ int hoist_common_decl_names(ASTNode* stmt, const char** out, int cap) {
     int nfirst = hoist_direct_decl_names(arms[0], first, 0, HOIST_MAX_NAMES);
     int kept = 0;
     for (int i = 0; i < nfirst && kept < cap; i++) {
-        int everywhere = 1;
+        int everywhere = !match_pattern_binds(stmt, first[i]);
         for (int j = 1; j < na && everywhere; j++) {
             if (!hoist_find_decl(arms[j], first[i])) everywhere = 0;
         }
@@ -234,24 +271,48 @@ ASTNode* hoist_common_first_decl(ASTNode* stmt, const char* name) {
     return any;
 }
 
-void hoist_loop_decls(ASTNode* body, HoistDeclVisitor visit, void* user) {
-    if (!body || !visit) return;
+/* The matches whose arms a hoist_loop_decls walk is inside, innermost last:
+ * a name one of their patterns binds is declared in no loop hoist. */
+#define HOIST_MAX_MATCH_DEPTH 64
+typedef struct {
+    HoistDeclVisitor visit;
+    void* user;
+    const ASTNode* matches[HOIST_MAX_MATCH_DEPTH];
+    int depth;
+} LoopWalk;
+
+static void loop_decls_walk(ASTNode* body, LoopWalk* w) {
+    if (!body) return;
     for (int i = 0; i < body->child_count; i++) {
         ASTNode* child = body->children[i];
         if (!child) continue;
-        if (child->type == AST_VARIABLE_DECLARATION && child->value) visit(child, user);
+        if (child->type == AST_VARIABLE_DECLARATION && child->value) {
+            int own = 0;
+            for (int m = 0; m < w->depth && !own; m++)
+                own = match_pattern_binds(w->matches[m], child->value);
+            if (!own) w->visit(child, w->user);
+        }
         /* A switch's children are its cases, whose own children are their
          * bodies: they are visited as an if's arms are (#2732). A match's
          * are its arms, whose bodies are visited the same way (#2768). */
         if (child->type == AST_IF_STATEMENT || child->type == AST_WHILE_LOOP ||
             child->type == AST_FOR_LOOP || child->type == AST_SWITCH_STATEMENT) {
-            for (int j = 0; j < child->child_count; j++) {
-                hoist_loop_decls(child->children[j], visit, user);
-            }
-        } else if (child->type == AST_MATCH_STATEMENT) {
+            for (int j = 0; j < child->child_count; j++) loop_decls_walk(child->children[j], w);
+        } else if (child->type == AST_MATCH_STATEMENT && w->depth < HOIST_MAX_MATCH_DEPTH) {
             ASTNode* arms[HOIST_MAX_ARMS];
             int na = branch_arms(child, arms, HOIST_MAX_ARMS);
-            for (int j = 0; j < na; j++) hoist_loop_decls(arms[j], visit, user);
+            w->matches[w->depth++] = child;
+            for (int j = 0; j < na; j++) loop_decls_walk(arms[j], w);
+            w->depth--;
         }
     }
+}
+
+void hoist_loop_decls(ASTNode* body, HoistDeclVisitor visit, void* user) {
+    if (!body || !visit) return;
+    LoopWalk w;
+    w.visit = visit;
+    w.user = user;
+    w.depth = 0;
+    loop_decls_walk(body, &w);
 }

@@ -1226,6 +1226,13 @@ type (every member of an enum, every variant of a sum, `none` and `some(v)`,
 `Undefined variable`. A `match` whose value is used (bound, returned, or the
 value of another's arm) keeps its arms' names in the arms.
 
+A name an arm's pattern binds (`some(v)`, `[h | t]`, `[x, y]`) is that arm's
+own: `v = v + 1` in the arm rebinds the pattern's value, and no rule declares
+the name ahead of the `match`, from that arm or any other. So
+`some(v) -> { v = v + 1 }  none -> { v = 0 }` followed by `return v` is
+`Undefined variable`: there are two variables named `v`, and neither outlives
+its arm. Use another name for the one the `match` should leave behind.
+
 ```aether,run
 pick(x: int) -> int {
     match x {

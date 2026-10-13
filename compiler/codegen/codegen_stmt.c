@@ -1562,6 +1562,18 @@ static int pattern_needs_array(ASTNode* pattern, ASTNode* body) {
     return 0;
 }
 
+/* A match arm's pattern binding, just declared in the arm's C block, is a
+ * local of the arm: a `h = ...` in the arm rebinds it, and no hoist in the
+ * arm declares it again there ("redefinition of 'h'"). The caller drops it
+ * when the arm ends. `kind` is the C declaration's: an element (`int`), a
+ * `T[]` tail, a StringSeq's head (string) or tail (pointer). */
+static void mark_pattern_binding(CodeGenerator* gen, const char* name, TypeKind kind) {
+    Type* t = kind == TYPE_ARRAY ? create_array_type(create_type(TYPE_INT), -1)
+                                 : create_type(kind);
+    mark_var_declared_typed(gen, name, t);
+    free_type(t);
+}
+
 static void generate_list_pattern_bindings(CodeGenerator* gen, ASTNode* pattern,
                                            ASTNode* match_expr, const char* len_name,
                                            ASTNode* body, int is_seq_match) {
@@ -1582,12 +1594,14 @@ static void generate_list_pattern_bindings(CodeGenerator* gen, ASTNode* pattern,
                 if (expr_references_var(body, head->value)) {
                     print_line(gen, "const char* %s = %s->head;",
                                head->value, len_name);
+                    mark_pattern_binding(gen, head->value, TYPE_STRING);
                 }
             }
             if (tail && tail->type == AST_PATTERN_VARIABLE && tail->value) {
                 if (expr_references_var(body, tail->value)) {
                     print_line(gen, "StringSeq* %s = %s->tail;",
                                tail->value, len_name);
+                    mark_pattern_binding(gen, tail->value, TYPE_PTR);
                 }
             }
         } else if (pattern->type == AST_PATTERN_LIST && pattern->child_count > 0) {
@@ -1603,6 +1617,7 @@ static void generate_list_pattern_bindings(CodeGenerator* gen, ASTNode* pattern,
                     fprintf(gen->output, "%s", len_name);
                     for (int j = 0; j < i; j++) fprintf(gen->output, "->tail");
                     fprintf(gen->output, "->head;\n");
+                    mark_pattern_binding(gen, elem->value, TYPE_STRING);
                 }
             }
         }
@@ -1624,6 +1639,7 @@ static void generate_list_pattern_bindings(CodeGenerator* gen, ASTNode* pattern,
             if (elem && elem->type == AST_PATTERN_VARIABLE && elem->value) {
                 if (expr_references_var(body, elem->value)) {
                     print_line(gen, "int %s = _match_arr[%d];", elem->value, i);
+                    mark_pattern_binding(gen, elem->value, TYPE_INT);
                 }
             }
         }
@@ -1634,6 +1650,7 @@ static void generate_list_pattern_bindings(CodeGenerator* gen, ASTNode* pattern,
         if (head && head->type == AST_PATTERN_VARIABLE && head->value) {
             if (expr_references_var(body, head->value)) {
                 print_line(gen, "int %s = _match_arr[0];", head->value);
+                mark_pattern_binding(gen, head->value, TYPE_INT);
             }
         }
         if (tail && tail->type == AST_PATTERN_VARIABLE && tail->value) {
@@ -1643,6 +1660,7 @@ static void generate_list_pattern_bindings(CodeGenerator* gen, ASTNode* pattern,
                 print_line(gen, "AetherSlice %s = aether_slice_make(&_match_arr[1], (uint64_t)(%s - 1));",
                            tail->value, len_name);
                 print_line(gen, "int %s_len = %s - 1;", tail->value, len_name);
+                mark_pattern_binding(gen, tail->value, TYPE_ARRAY);
             }
         }
     }
@@ -14728,6 +14746,9 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                         fprintf(gen->output, "%s %s = _om%d.val; %s _heap_%s = 1; (void)_heap_%s;\n",
                                 volatile_decl_type(try_volatile_qual_for(gen, own), "const char*"),
                                 own, id, try_tracker_type(gen, own), own, own);
+                        /* The binding is a local of the arm: a `v = ...` there
+                         * rebinds it, and no hoist declares it again. */
+                        if (some_bind) mark_var_declared_typed(gen, some_bind, inner);
                         ScopedStringLocal sl;
                         scoped_string_local_begin(gen, &sl, own, arm_body, 1);
                         print_line(gen, "{");
@@ -14746,11 +14767,17 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                         print_line(gen, "}");
                         break;
                     }
+                    int saved_some_vars = gen->declared_var_count;
                     if (some_bind) {
                         print_indent(gen);
                         fprintf(gen->output, "%s %s = _om%d.val;\n", inner_c, some_bind, id);
+                        /* A local of the arm, declared here: a `v = ...` in
+                         * the arm rebinds it, and no hoist in the arm declares
+                         * it again in the same C block ("redefinition"). */
+                        mark_var_declared_typed(gen, some_bind, inner);
                     }
                     emit_opt_match_arm(gen, some_body ? some_body : wild_body);
+                    truncate_declared_vars(gen, saved_some_vars);
                     unindent(gen);
                     print_line(gen, "}");
                     unindent(gen);
@@ -14963,6 +14990,7 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                     indent(gen);
 
                     // Generate list pattern bindings if needed
+                    int saved_arm_vars = gen->declared_var_count;
                     if (is_list_pattern) {
                         generate_list_pattern_bindings(gen, pattern, match_expr, len_name, result, is_seq_match);
                     }
@@ -14979,6 +15007,7 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                         // Single expression — assign to result var or emit as statement
                         emit_match_result_value(gen, result);
                     }
+                    truncate_declared_vars(gen, saved_arm_vars);
                     unindent(gen);
                     print_line(gen, "}");
                 }
