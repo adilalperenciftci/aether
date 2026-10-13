@@ -14,7 +14,8 @@
 # buffer, compiles and runs as before. A fixed-size array parameter is the
 # function's own copy, so a slice of it is refused too. What a name holds
 # where it leaves decides: one re-bound to a `make` buffer before it leaves
-# is no view any more, when it is on every path to the exit.
+# is no view any more, when it is on every path to the exit, and so is one a
+# call of a local closure re-binds on every path through its body.
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
@@ -289,6 +290,146 @@ out=$(cd "$TMP" && AETHER_HOME="$ROOT" "$AE" run rebound.ae 2>&1)
 case "$out" in
     *"rebound 3 3 2 4 7 3"*) ;;
     *) echo "  [FAIL] rebound: not \"rebound 3 3 2 4 7 3\":"
+       echo "$out" | sed 's/^/        /'
+       fails=$((fails + 1)) ;;
+esac
+
+# A call of a local closure that re-binds the name on every path through its
+# body re-binds it there. One that may not re-bind it (only under an `if`,
+# or after a `return` that may come first), a call that may not run, and a
+# closure passed on, leave what the name held.
+cat > "$TMP/closure_if.ae" <<'AE'
+pick(n: int) -> int[] {
+    arr = [1, 2, 3]
+    let v: int[] = arr
+    reset = || {
+        if n > 0 {
+            v = make([]int, 4)
+        }
+    }
+    reset()
+    return v
+}
+
+main() {
+    println("${pick(1).len}")
+}
+AE
+refused closure_if 10:12 "'pick' returns a slice of its own storage (\`v\`, which holds a slice of it)"
+
+cat > "$TMP/call_maybe.ae" <<'AE'
+pick(n: int) -> int[] {
+    arr = [1, 2, 3]
+    let v: int[] = arr
+    reset = || {
+        v = make([]int, 4)
+    }
+    if n > 0 {
+        reset()
+    }
+    return v
+}
+
+main() {
+    println("${pick(1).len}")
+}
+AE
+refused call_maybe 10:12 "'pick' returns a slice of its own storage (\`v\`, which holds a slice of it)"
+
+cat > "$TMP/closure_passed.ae" <<'AE'
+keep(c: fn) {
+}
+
+pick(n: int) -> int[] {
+    arr = [1, 2, 3]
+    let v: int[] = arr
+    reset = || {
+        v = make([]int, 4)
+    }
+    keep(reset)
+    reset()
+    return v
+}
+
+main() {
+    println("${pick(1).len}")
+}
+AE
+refused closure_passed 12:12 "'pick' returns a slice of its own storage (\`v\`, which holds a slice of it)"
+
+cat > "$TMP/closure_returns.ae" <<'AE'
+pick(n: int) -> int[] {
+    arr = [1, 2, 3]
+    let v: int[] = arr
+    reset = || {
+        if n > 0 {
+            return
+        }
+        v = make([]int, 4)
+    }
+    reset()
+    return v
+}
+
+main() {
+    println("${pick(1).len}")
+}
+AE
+refused closure_returns 11:12 "'pick' returns a slice of its own storage (\`v\`, which holds a slice of it)"
+
+cat > "$TMP/closure_rebinds.ae" <<'AE'
+struct Holder {
+    data: int[]
+}
+
+f() -> int[] {
+    arr = [1, 2, 3]
+    let v: int[] = arr
+    reset = || {
+        v = make([]int, 4)
+    }
+    reset()
+    return v
+}
+
+g() -> Holder {
+    arr = [1, 2, 3]
+    h = Holder { data: arr }
+    reset = || {
+        h.data = make([]int, 6)
+    }
+    reset()
+    return h
+}
+
+both(n: int) -> int[] {
+    arr = [1, 2, 3]
+    let v: int[] = arr
+    reset = || {
+        if n > 0 {
+            v = make([]int, 2)
+        } else {
+            v = make([]int, 5)
+        }
+    }
+    reset()
+    return v
+}
+
+main() {
+    a = f()
+    h = g()
+    b = both(0)
+    println("closure ${a.len} ${h.data.len} ${b.len}")
+    free(a)
+    free(h.data)
+    free(b)
+}
+AE
+out=$(cd "$TMP" && AETHER_HOME="$ROOT" "$AE" run closure_rebinds.ae 2>&1)
+case "$out" in
+    *"closure 4 6 5"*) ;;
+    *) echo "  [FAIL] closure_rebinds: not \"closure 4 6 5\":"
        echo "$out" | sed 's/^/        /'
        fails=$((fails + 1)) ;;
 esac

@@ -38,6 +38,7 @@ typedef struct {
     StrMap locals;    /* name -> its binding node (a local or a parameter) */
     StrMap params;    /* the parameters among them */
     StrMap arrays;    /* the frame's own fixed-size arrays: name -> declaration */
+    StrMap rebinders; /* local closures a call of re-binds: name -> StrMap* of paths */
     LoopExits* loop;  /* the innermost loop being walked */
 } Frame;
 
@@ -175,6 +176,156 @@ static void collect_locals(Esc* esc, Frame* f, ASTNode* n) {
     for (int i = 0; i < n->child_count; i++) collect_locals(esc, f, n->children[i]);
 }
 
+/* ---- closures a call of re-binds the frame's names ---- */
+
+/* Does `n` leave the code it is in early: a `return`, `break`, `continue`
+ * or `panic` anywhere in it (not in a closure of its own)? */
+static int may_exit(ASTNode* n) {
+    if (!n || ast_is_own_function(n)) return 0;
+    if (n->type == AST_RETURN_STATEMENT || n->type == AST_BREAK_STATEMENT ||
+        n->type == AST_CONTINUE_STATEMENT || n->type == AST_PANIC_STATEMENT)
+        return 1;
+    for (int i = 0; i < n->child_count; i++)
+        if (may_exit(n->children[i])) return 1;
+    return 0;
+}
+
+/* A value that holds no view of any frame: a call's result (taken to be
+ * none, as everywhere in this check; `make` is one), `null`, or `[]`. */
+static int holds_no_view(ASTNode* e) {
+    if (!e) return 0;
+    if (e->type == AST_FUNCTION_CALL || e->type == AST_NULL_LITERAL) return 1;
+    return e->type == AST_ARRAY_LITERAL && e->child_count == 0;
+}
+
+static ASTNode* value_path(ASTNode* e, char* out, size_t cap, int* whole);
+static int store_parts(ASTNode* n, ASTNode** left, ASTNode** value);
+
+/* The paths of the frame `f` a closure body's statements re-bind, on every
+ * way through them, to a value that holds no view: `v = make([]T, n)`, or
+ * `h.data = make([]T, n)` for a local `h`. A name the closure declares
+ * itself (a parameter, a written-type declaration, in `own`) is its own.
+ * Only straight-line statements count, and an `if` whose branches both
+ * re-bind the path; the walk stops at the first statement that may leave
+ * early, since what follows it may not run. */
+static void must_rebind(Frame* f, ASTNode* block, StrMap* own, StrMap* out) {
+    if (!block) return;
+    int count = block->type == AST_BLOCK ? block->child_count : 1;
+    for (int i = 0; i < count; i++) {
+        ASTNode* st = block->type == AST_BLOCK ? block->children[i] : block;
+        if (!st) continue;
+        if (st->type == AST_EXPRESSION_STATEMENT && st->child_count > 0) st = st->children[0];
+        if (may_exit(st)) return;
+        if (st->type == AST_VARIABLE_DECLARATION && st->value && st->child_count > 0) {
+            if (!st->type_inferred) {
+                strmap_put(own, st->value, st);
+                continue;
+            }
+            if (!strmap_has(own, st->value) && strmap_has(&f->locals, st->value) &&
+                holds_no_view(st->children[0]))
+                strmap_put(out, st->value, LIVE);
+            continue;
+        }
+        ASTNode *left, *value;
+        if (store_parts(st, &left, &value)) {
+            char path[256];
+            int element = 0;
+            ASTNode* root = value_path(left, path, sizeof(path), &element);
+            if (root && !element && !strmap_has(own, root->value) &&
+                strmap_has(&f->locals, root->value) && holds_no_view(value))
+                strmap_put(out, path, LIVE);
+            continue;
+        }
+        if (st->type == AST_BLOCK) {
+            must_rebind(f, st, own, out);
+            continue;
+        }
+        if (st->type == AST_IF_STATEMENT && st->child_count >= 3) {
+            StrMap a, b;
+            strmap_init(&a);
+            strmap_init(&b);
+            must_rebind(f, st->children[1], own, &a);
+            must_rebind(f, st->children[2], own, &b);
+            for (int j = 0; j < strmap_count(&a); j++) {
+                const char* k = strmap_key_at(&a, j);
+                if (strmap_get(&b, k)) strmap_put(out, k, LIVE);
+            }
+            strmap_free(&a);
+            strmap_free(&b);
+        }
+    }
+}
+
+/* The local closure a call calls by name: `reset()`, which the checker
+ * has made `call(reset)`. NULL for any other call. */
+static const char* called_closure_name(ASTNode* call) {
+    if (!call || call->type != AST_FUNCTION_CALL || !call->value) return NULL;
+    if (strcmp(call->value, "call") == 0)
+        return (call->child_count > 0 && call->children[0] &&
+                call->children[0]->type == AST_IDENTIFIER) ? call->children[0]->value : NULL;
+    return call->value;
+}
+
+/* How often `name` is bound in `n`, closures included, and whether it is
+ * read as a value anywhere (an identifier: passed, stored, captured), as
+ * opposed to called by name. */
+static void closure_name_uses(ASTNode* n, const char* name, int* binds, int* reads) {
+    if (!n) return;
+    if (n->type == AST_VARIABLE_DECLARATION && n->value && strcmp(n->value, name) == 0) (*binds)++;
+    if (n->type == AST_IDENTIFIER && n->value && strcmp(n->value, name) == 0) (*reads)++;
+    int from = 0;
+    /* `call(name, ...)`: the callee is called, not read. */
+    if (n->type == AST_FUNCTION_CALL && n->value && strcmp(n->value, "call") == 0 &&
+        n->child_count > 0 && n->children[0] && n->children[0]->type == AST_IDENTIFIER &&
+        n->children[0]->value && strcmp(n->children[0]->value, name) == 0)
+        from = 1;
+    for (int i = from; i < n->child_count; i++) closure_name_uses(n->children[i], name, binds, reads);
+}
+
+/* The frame's local closures a call of which re-binds some of its paths:
+ * a name bound once, to a closure literal, and used only by calling it by
+ * name, so every call runs that body. A closure passed on, stored or bound
+ * again is left out: what it does when is not known here. */
+static void collect_rebinders_in(Frame* f, ASTNode* body, ASTNode* n) {
+    if (!n || ast_is_own_function(n)) return;
+    if (n->type == AST_VARIABLE_DECLARATION && n->value && n->child_count > 0 &&
+        n->children[0] && n->children[0]->type == AST_CLOSURE &&
+        ast_is_own_function(n->children[0]) && !strmap_has(&f->rebinders, n->value)) {
+        int binds = 0, reads = 0;
+        closure_name_uses(body, n->value, &binds, &reads);
+        if (binds == 1 && reads == 0) {
+            ASTNode* lit = n->children[0];
+            StrMap own;
+            strmap_init(&own);
+            for (int i = 0; i < lit->child_count; i++) {
+                ASTNode* c = lit->children[i];
+                if (c && c->type == AST_CLOSURE_PARAM && c->value) strmap_put(&own, c->value, c);
+            }
+            StrMap* paths = calloc(1, sizeof(StrMap));
+            if (paths) {
+                strmap_init(paths);
+                for (int i = lit->child_count - 1; i >= 0; i--) {
+                    if (lit->children[i] && lit->children[i]->type == AST_BLOCK) {
+                        must_rebind(f, lit->children[i], &own, paths);
+                        break;
+                    }
+                }
+                if (strmap_count(paths) > 0) strmap_put(&f->rebinders, n->value, paths);
+                else {
+                    strmap_free(paths);
+                    free(paths);
+                }
+            }
+            strmap_free(&own);
+        }
+    }
+    for (int i = 0; i < n->child_count; i++) collect_rebinders_in(f, body, n->children[i]);
+}
+
+static void collect_rebinders(Frame* f, ASTNode* body) {
+    collect_rebinders_in(f, body, body);
+}
+
 static ASTNode* frame_body(ASTNode* owner) {
     if (owner->type == AST_MAIN_FUNCTION)
         return owner->child_count > 0 ? owner->children[0] : NULL;
@@ -190,6 +341,7 @@ static void frame_init(Esc* esc, Frame* f, ASTNode* owner) {
     strmap_init(&f->locals);
     strmap_init(&f->params);
     strmap_init(&f->arrays);
+    strmap_init(&f->rebinders);
     if (owner->type == AST_MAIN_FUNCTION) {
         snprintf(f->shown, sizeof(f->shown), "'main'");
     } else if (owner->type == AST_CLOSURE) {
@@ -215,6 +367,7 @@ static void frame_init(Esc* esc, Frame* f, ASTNode* owner) {
     ASTNode* body = frame_body(owner);
     collect_typed(f, body);
     collect_locals(esc, f, body);
+    collect_rebinders(f, body);
 }
 
 static void frame_free(Frame* f) {
@@ -222,6 +375,14 @@ static void frame_free(Frame* f) {
     strmap_free(&f->locals);
     strmap_free(&f->params);
     strmap_free(&f->arrays);
+    for (int i = 0; i < strmap_count(&f->rebinders); i++) {
+        StrMap* paths = strmap_value_at(&f->rebinders, i);
+        if (paths) {
+            strmap_free(paths);
+            free(paths);
+        }
+    }
+    strmap_free(&f->rebinders);
 }
 
 /* ---- what a value views ---- */
@@ -589,6 +750,21 @@ static void flow_loop(Esc* esc, Frame* f, ASTNode* n, Views* v, int rep) {
     strmap_free(&lx.next);
 }
 
+/* A statement that is a call of one of the frame's re-binding closures,
+ * `reset()`, re-binds what its body re-binds on every path, there: those
+ * paths hold no view after it. A call anywhere else in an expression may
+ * not run (`c && reset()`), and is not counted. */
+static void rebind_by_call(Frame* f, ASTNode* st, Views* v) {
+    if (!st) return;
+    if (st->type == AST_EXPRESSION_STATEMENT && st->child_count > 0) st = st->children[0];
+    const char* name = called_closure_name(st);
+    if (!name) return;
+    StrMap* paths = strmap_get(&f->rebinders, name);
+    if (!paths) return;
+    for (int i = 0; i < strmap_count(paths); i++)
+        if (strmap_value_at(paths, i)) views_clear(v, strmap_key_at(paths, i));
+}
+
 /* A block: a name it declares with a written type is a variable of the
  * block, so what the name held outside it holds again after it (joined:
  * the block may also have bound the outer one). */
@@ -604,7 +780,10 @@ static void flow_block(Esc* esc, Frame* f, ASTNode* n, Views* v, int rep, int ne
     }
     Views before;
     if (strmap_count(&mine) > 0) views_copy(&before, v);
-    flow_children(esc, f, n, v, rep, 0);
+    for (int i = 0; i < n->child_count; i++) {
+        flow(esc, f, n->children[i], v, rep);
+        rebind_by_call(f, n->children[i], v);
+    }
     if (strmap_count(&mine) > 0) {
         for (int i = 0; i < strmap_count(&mine); i++) {
             const char* name = strmap_key_at(&mine, i);
