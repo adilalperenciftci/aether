@@ -1,0 +1,11 @@
+// A typed getter reading a capture of another type panics naming both
+// (docs/quote.md). Run by test_quote_errors.sh, which expects the panic.
+import std.quote
+
+q(t: quote.Tree) -> quote.Tree { return t }
+
+main() {
+    name = "world"
+    t = q() quote -> name
+    println(quote.get_int(quote.capture(t, 0)))
+}

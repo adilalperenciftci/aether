@@ -781,6 +781,25 @@ the default expression into the call's argument list and rewrites
 any embedded `__LINE__` / `__FILE__` / `__func__` to use the call
 site's metadata.
 
+### Trailing blocks
+
+A call can be followed, on the same line as its `)`, by one of four blocks:
+
+| Form | Written | The function gets |
+|---|---|---|
+| immediate | `f() { … }` | nothing: the block runs inline, in the function's context |
+| closure | `f() \|x\| { … }` or `f() \|x\| -> expr` | a closure to call (`call(fn, args)`) |
+| callback | `f() callback { … }` | a closure to call, capturing from the enclosing scope |
+| quote | `f() quote \| x: T \| { … }`, `quote -> expr`, `quote { … }` | a tree describing the block, to read ([quote.md](quote.md)) |
+
+The first three are [closures-and-builder-dsl.md](closures-and-builder-dsl.md).
+A quote's block is type-checked as Aether but not compiled to run: the
+function, whose last parameter is a `quote.Tree` (`import std.quote`),
+receives the block as a tree whose every node carries its checked type, and
+whose captures are the enclosing variables themselves (a change the program
+makes is seen through the tree). Its parameters must have types, and what
+it may contain is a subset of Aether (errors E0800 to E0803 below).
+
 ---
 
 ## Pattern Matching Functions
@@ -3574,6 +3593,10 @@ An error stops the build and prints its code, `error[E0301]: ...`, with the sour
 | `E0304` | A name hidden in this scope by `hide` or `seal except` ([hide and seal](hide-and-seal.md)) |
 | `E0600` | An actor rule, such as a closure in a handler writing the actor's state |
 | `E0700` | Missing return: control can reach the end of a function whose result is not void ([Returning on every path](#returning-on-every-path-e0700)) |
+| `E0800` | A construct a quote cannot hold: a closure, `callback` or block inside one, `defer`, `try`, `panic`, an actor operation, `match`, string interpolation, `new`, an array literal ([quote.md](quote.md#what-a-quote-may-contain-and-the-errors)) |
+| `E0801` | A quote parameter without a type |
+| `E0802` | A quote given to a function whose last parameter is not a `quote.Tree`, or a closure, `callback` or block given to one that is |
+| `E0803` | A quote writing a variable it captures, or taking its address |
 
 ## Compiler Warnings
 
@@ -3956,6 +3979,8 @@ The following identifiers are reserved:
 | `int`, `float`, `string`, `bool`, `ptr`, `long` | Type names |
 
 Note: `state` is context-sensitive, it is a keyword only inside actor bodies. In all other code, `state` can be used as a regular variable name.
+
+Note: `quote` is not reserved. It quotes a trailing block only straight after a call's `)` on the same line, followed by `|`, `||`, `{` or `->` (see [quote.md](quote.md)); everywhere else it is an ordinary name, and `std.quote` is a module called `quote`.
 
 Note: **`ptr`, `byte`, `func`, `state` and `after` are usable as ordinary value identifiers**, parameter names, local names, struct field names, struct-literal fields, and field-access targets, *without* the backtick escape. These tokens have meaning only in type position (`ptr`/`byte`), as a declaration head (`func`), or as a statement head (`state`/`after`), none of which overlaps a value position, so a bare `ptr`/`byte`/`func`/`state`/`after` in value position is unambiguously a name:
 

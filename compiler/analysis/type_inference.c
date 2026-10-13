@@ -459,7 +459,7 @@ static unsigned new_walk_id(void) {
 /* The first `return` with a value under `n`, not looking into nested
  * closures; sets *any_string when any such return is a string. */
 static ASTNode* first_value_return(ASTNode* n, int* any_string) {
-    if (!n || n->type == AST_CLOSURE) return NULL;
+    if (!n || n->type == AST_CLOSURE || n->type == AST_QUOTE) return NULL;
     if (n->type == AST_RETURN_STATEMENT && n->child_count > 0 && n->children[0] &&
         n->children[0]->type != AST_PRINT_STATEMENT) {
         Type* t = n->children[0]->node_type;
@@ -1161,7 +1161,7 @@ static void preresolve_return_idents_in(ASTNode* node, ASTNode* outer_block,
     // be resolved from `outer_block`.
     if (node->type == AST_FUNCTION_DEFINITION ||
         node->type == AST_BUILDER_FUNCTION ||
-        node->type == AST_CLOSURE) {
+        node->type == AST_CLOSURE || node->type == AST_QUOTE) {
         return;
     }
 
@@ -1513,7 +1513,8 @@ void collect_constraints(ASTNode* node, InferenceContext* ctx) {
             break;
         }
 
-        case AST_CLOSURE: {
+        case AST_CLOSURE:
+        case AST_QUOTE: {   /* a quote's body is checked as a closure's */
             // A closure's locals belong to the enclosing walk.
             ASTNode* prev_owner = ctx->scope_owner;
             ctx->scope_owner = node;

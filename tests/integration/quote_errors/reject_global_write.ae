@@ -1,0 +1,8 @@
+// Writing a global in a quote: E0803, as for a captured local (docs/quote.md). Must not compile: tests/integration/quote_errors.
+import std.quote
+
+var v = 1
+
+take(t: quote.Tree) {}
+
+main() { take() quote { v += 2 } }

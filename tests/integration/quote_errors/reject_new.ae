@@ -1,0 +1,9 @@
+// heap.new in a quote: E0800 (docs/quote.md). Must not compile: tests/integration/quote_errors.
+import std.quote
+
+take(t: quote.Tree) {}
+struct P { x: int }
+main() {
+    v = 1
+    take() quote -> heap.new(P)
+}

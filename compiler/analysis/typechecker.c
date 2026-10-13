@@ -10,6 +10,7 @@
 #include "../aether_strmap.h"
 #include "actor_reply.h"
 #include "missing_return.h"
+#include "quote.h"
 
 /* Defined with typecheck_program below; infer_type needs it far earlier. */
 static ASTNode* aether_typecheck_program_node(void);
@@ -304,6 +305,7 @@ void add_symbol(SymbolTable* table, const char* name, Type* type, int is_actor, 
     symbol->hoist_pending = 0;
     symbol->is_const = 0;
     symbol->inferred_closure = NULL;
+    symbol->global_write = 0;
     symtab_link(table, symbol);
 }
 
@@ -484,6 +486,7 @@ void add_module_alias(SymbolTable* table, const char* alias, const char* module_
     symbol->hoist_pending = 0;
     symbol->is_const = 0;
     symbol->inferred_closure = NULL;
+    symbol->global_write = 0;
     symtab_link(table, symbol);
 }
 
@@ -1015,6 +1018,38 @@ static void type_error_code_hint(const char* message, const char* hint,
     error_count++;
 }
 
+/* The program-level `const NAME = ...` (not a module `var`), or NULL: a
+ * quote reads a constant with a literal value as that literal. */
+ASTNode* tc_program_const(const char* name) {
+    ASTNode* program = aether_typecheck_program_node();
+    for (int i = 0; program && name && i < program->child_count; i++) {
+        ASTNode* c = program->children[i];
+        if (c && c->type == AST_CONST_DECLARATION && c->value && strcmp(c->value, name) == 0 &&
+            !(c->annotation && strcmp(c->annotation, "global_var") == 0))
+            return c;
+    }
+    return NULL;
+}
+
+/* The program-level `var NAME = ...` (a global variable), or NULL: a quote
+ * reads one as a capture whose cell is the global itself. */
+ASTNode* tc_program_global_var(const char* name) {
+    ASTNode* program = aether_typecheck_program_node();
+    for (int i = 0; program && name && i < program->child_count; i++) {
+        ASTNode* c = program->children[i];
+        if (c && c->type == AST_CONST_DECLARATION && c->value && strcmp(c->value, name) == 0 &&
+            c->annotation && strcmp(c->annotation, "global_var") == 0)
+            return c;
+    }
+    return NULL;
+}
+
+/* analysis/quote.c reports a construct a quote cannot hold through this. */
+static void quote_report_error(const char* message, const char* hint, int line,
+                               int column, AetherErrorCode code) {
+    type_error_code_hint(message, hint, line, column, code);
+}
+
 /* #2614: when `prefix` in `prefix.name` is a module the program loaded but
  * the scope does not import, write the `help:` line naming the import and
  * return 1. Such a module is loaded because some other module imports it,
@@ -1244,7 +1279,8 @@ static int check_unconsumed_result(ASTNode* expr, SymbolTable* table) {
  * are checked separately). */
 static void warn_conditional_defers_walk(ASTNode* node, int can_fail) {
     if (!node) return;
-    if (node->type == AST_CLOSURE || node->type == AST_FUNCTION_DEFINITION) return;
+    if (node->type == AST_CLOSURE || node->type == AST_QUOTE ||
+        node->type == AST_FUNCTION_DEFINITION) return;
     if (node->type == AST_DEFER_STATEMENT && node->value && !can_fail) {
         char msg[220];
         if (strcmp(node->value, "catch") == 0) {
@@ -1623,6 +1659,58 @@ static int last_param_is_fn(ASTNode* func) {
            last_param->node_type->kind == TYPE_FUNCTION;
 }
 
+/* The type of the function's last declared parameter, or NULL. */
+static Type* last_param_type(ASTNode* func) {
+    if (!func) return NULL;
+    ASTNode* last_param = NULL;
+    for (int i = 0; i < func->child_count - 1; i++) {
+        ASTNode* child = func->children[i];
+        if (child && (child->type == AST_VARIABLE_DECLARATION ||
+                      child->type == AST_PATTERN_VARIABLE ||
+                      child->type == AST_PATTERN_LITERAL)) {
+            last_param = child;
+        }
+    }
+    return last_param ? last_param->node_type : NULL;
+}
+
+/* docs/quote.md: a quote goes only to a function whose last parameter is a
+ * quote.Tree, and such a function takes a quote, not a closure, a callback
+ * or a block that runs inline. Reports and returns 0 on a mismatch. */
+static int check_quote_callee(ASTNode* call, Symbol* symbol) {
+    if (!call || call->child_count == 0) return 1;
+    ASTNode* last = call->children[call->child_count - 1];
+    if (!last) return 1;
+    ASTNode* fn = symbol ? symbol->node : NULL;
+    int is_fn = fn && (fn->type == AST_FUNCTION_DEFINITION || fn->type == AST_BUILDER_FUNCTION);
+    int takes_tree = is_fn && quote_is_tree_type(last_param_type(fn));
+    const char* name = call->value ? call->value : "function";
+    if (last->type == AST_QUOTE && !takes_tree) {
+        char msg[320];
+        snprintf(msg, sizeof(msg),
+                 "'%s' is given a quote, but its last parameter is not a quote.Tree", name);
+        type_error_code_hint(msg,
+            "a quote hands its block over as a tree; the function receiving it "
+            "declares its last parameter `t: quote.Tree` (import std.quote). To run "
+            "the block, drop `quote`",
+            last->line, last->column, AETHER_ERR_QUOTE_CALLEE);
+        return 0;
+    }
+    if (takes_tree && last->type == AST_CLOSURE) {
+        int trailing = last->value && strcmp(last->value, "trailing") == 0;
+        char msg[320];
+        snprintf(msg, sizeof(msg),
+                 "'%s' takes a quote.Tree as its last parameter, but is given %s",
+                 name, trailing ? "a block that runs inline" : "a closure or callback");
+        type_error_code_hint(msg,
+            "write `quote |params| { ... }` (or `quote { ... }`) so the block is "
+            "handed over as a tree",
+            last->line, last->column, AETHER_ERR_QUOTE_CALLEE);
+        return 0;
+    }
+    return 1;
+}
+
 static int has_ctx_first_param(ASTNode* func) {
     if (!func || func->child_count == 0) return 0;
     for (int i = 0; i < func->child_count - 1; i++) {
@@ -1935,7 +2023,7 @@ static int is_erased_call(const ASTNode* n);
  * into nested closures; codegen's find_first_return_expr, which picks the
  * closure's C return type, walks the same way. */
 static ASTNode* closure_first_return_expr(ASTNode* node) {
-    if (!node || node->type == AST_CLOSURE) return NULL;
+    if (!node || node->type == AST_CLOSURE || node->type == AST_QUOTE) return NULL;
     if (node->type == AST_RETURN_STATEMENT && node->child_count > 0 &&
         node->children[0] && node->children[0]->type != AST_PRINT_STATEMENT) {
         return node->children[0];
@@ -1949,7 +2037,7 @@ static ASTNode* closure_first_return_expr(ASTNode* node) {
 
 /* The return statement closure_first_return_expr finds the value of. */
 static ASTNode* closure_first_return_stmt(ASTNode* node) {
-    if (!node || node->type == AST_CLOSURE) return NULL;
+    if (!node || node->type == AST_CLOSURE || node->type == AST_QUOTE) return NULL;
     if (node->type == AST_RETURN_STATEMENT && node->child_count > 0 &&
         node->children[0] && node->children[0]->type != AST_PRINT_STATEMENT) {
         return node;
@@ -1962,7 +2050,7 @@ static ASTNode* closure_first_return_stmt(ASTNode* node) {
 }
 
 static int closure_any_return_is_string(ASTNode* node) {
-    if (!node || node->type == AST_CLOSURE) return 0;
+    if (!node || node->type == AST_CLOSURE || node->type == AST_QUOTE) return 0;
     if (node->type == AST_RETURN_STATEMENT && node->child_count > 0 &&
         node->children[0] && node->children[0]->type != AST_PRINT_STATEMENT) {
         return node->children[0]->node_type &&
@@ -4084,6 +4172,17 @@ static void collect_references(ASTNode* node, TrackedVar* vars, int var_count) {
         }
     }
 
+    /* A lowered quote's body is the tree's now: each variable it captures
+     * is read through the tree (docs/quote.md). */
+    if (node->type == AST_QUOTE) {
+        QuoteInfo* q = quote_of(node);
+        for (int k = 0; q && k < q->ncaps; k++) {
+            for (int i = 0; i < var_count; i++) {
+                if (strcmp(vars[i].name, q->caps[k].name) == 0) vars[i].used = 1;
+            }
+        }
+    }
+
     // A call through a local is a use of that local: `g(p)` where `g` was
     // assigned via `f as fn(ptr) -> int` parses as AST_FUNCTION_CALL with
     // the callee name in node->value (no AST_IDENTIFIER child), so match
@@ -5854,6 +5953,7 @@ int typecheck_node(ASTNode* node, SymbolTable* table) {
             return ok;
         }
         case AST_CLOSURE:
+        case AST_QUOTE:
         case AST_IF_EXPRESSION:
             /* An expression reached as a statement child (`return |x| { ... }`,
              * `return if c { a } else { b }`) was walked by typecheck_statement's
@@ -6196,6 +6296,8 @@ static const char* scoped_escape_reason(ASTNode* node, const char* name) {
     }
     if (node->type == AST_CLOSURE && scoped_mentions(node, name))
         return "it is captured by a closure that can outlive the block";
+    if (node->type == AST_QUOTE && scoped_mentions(node, name))
+        return "it is captured by a quote, whose tree can outlive the block";
     if (node->type == AST_FUNCTION_CALL && node->value &&
         scoped_store_call(node->value)) {
         int first = strcmp(node->value, "call") == 0 ? 1 : 0;
@@ -6224,7 +6326,7 @@ static int scoped_check_subtree(ASTNode* node, const char* name) {
         type_error(msg, node->line, node->column);
         return 1;
     }
-    if (node->type == AST_CLOSURE || node->type == AST_FUNCTION_DEFINITION ||
+    if (node->type == AST_CLOSURE || node->type == AST_QUOTE || node->type == AST_FUNCTION_DEFINITION ||
         node->type == AST_BUILDER_FUNCTION || node->type == AST_ACTOR_DEFINITION)
         return 0;
     int found = 0;
@@ -6332,6 +6434,7 @@ static void iso_check(ASTNode* node, IsoSet* moved, IsoSet* iso) {
         case AST_BUILDER_FUNCTION:
         case AST_ACTOR_DEFINITION:
         case AST_CLOSURE:
+        case AST_QUOTE:
             return;
 
         case AST_IDENTIFIER: {
@@ -8623,6 +8726,10 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
             if (stmt->value && strcmp(stmt->value, "_") != 0) {
                 add_symbol(table, stmt->value, clone_type(stmt->node_type), 0, 0, 0);
                 mark_const_symbol(table, stmt);   /* #2516 */
+                if (table->parent && tc_program_global_var(stmt->value)) {
+                    Symbol* gw = lookup_symbol_local(table, stmt->value);
+                    if (gw) gw->global_write = 1;
+                }
                 /* #698: carry the parser's inferred-type marker onto the
                  * binding, but only for a 32-bit int (the sole narrowing
                  * target). A later 64-bit re-bind then triggers the guard
@@ -10457,6 +10564,66 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
             set_node_type(expr, create_type(TYPE_STRING));
             return 1;
 
+        case AST_QUOTE: {
+            /* docs/quote.md: the body is checked as a closure's, then
+             * lowered to the tree it stands for (analysis/quote.c) and taken
+             * off the node, so nothing after this reads the quoted
+             * statements as code to run. A quote met again (a call checked
+             * twice) is already lowered. */
+            Type* tree_type = create_type(TYPE_PTR);
+            tree_type->distinct_name = strdup("Tree");
+            if (expr->node_type) free_type(expr->node_type);
+            expr->node_type = tree_type;
+            if (expr->value) return 1;
+
+            SymbolTable* quote_scope = create_symbol_table(table);
+            int param_errors = 0;
+            for (int i = 0; i < expr->child_count; i++) {
+                ASTNode* child = expr->children[i];
+                if (!child || child->type != AST_CLOSURE_PARAM || !child->value) continue;
+                if (!child->node_type) {
+                    char msg[256], hint[256];
+                    snprintf(msg, sizeof(msg), "quote parameter '%s' has no type", child->value);
+                    snprintf(hint, sizeof(hint),
+                             "write its type, `| %s: float |`: the tree records every node's type, "
+                             "and a quote does not guess one", child->value);
+                    type_error_code_hint(msg, hint, child->line, child->column,
+                                         AETHER_ERR_QUOTE_PARAM);
+                    param_errors++;
+                    /* Still a name in the body, so its uses are not each
+                     * reported again as undefined. */
+                    add_symbol(quote_scope, child->value, create_type(TYPE_UNKNOWN), 0, 0, 0);
+                    continue;
+                }
+                add_symbol(quote_scope, child->value, clone_type(child->node_type), 0, 0, 0);
+            }
+            Type* enclosing_ret = g_tc_return_type;
+            ASTNode* enclosing_owner = g_tc_return_owner;
+            g_tc_return_type = NULL;
+            g_tc_return_owner = expr;
+            int before = error_count;
+            for (int i = 0; i < expr->child_count; i++) {
+                ASTNode* child = expr->children[i];
+                if (child && child->type == AST_BLOCK) {
+                    for (int j = 0; j < child->child_count; j++)
+                        typecheck_statement(child->children[j], quote_scope);
+                }
+            }
+            g_tc_return_type = enclosing_ret;
+            g_tc_return_owner = enclosing_owner;
+            free_symbol_table(quote_scope);
+            if (param_errors || error_count != before) return 0;
+
+            const char* qfile = expr->source_file ? expr->source_file : g_tc_file;
+            if (quote_lower(expr, table, qfile, quote_report_error) != 0) return 0;
+            /* Lowered: the body is the tree's now. */
+            for (int i = 0; i < expr->child_count; i++) {
+                if (expr->children[i]) free_ast_node(expr->children[i]);
+            }
+            expr->child_count = 0;
+            return 1;
+        }
+
         case AST_CLOSURE: {
             // Create a child scope for the closure's parameters
             SymbolTable* closure_scope = create_symbol_table(table);
@@ -11627,7 +11794,7 @@ static int try_ufcs_rewrite(ASTNode* call, SymbolTable* table) {
  * makes void. */
 static int tc_has_return_value(ASTNode* node) {
     if (!node) return 0;
-    if (node->type == AST_CLOSURE) return 0;
+    if (node->type == AST_CLOSURE || node->type == AST_QUOTE) return 0;
     if (node->type == AST_RETURN_STATEMENT && node->child_count > 0 && node->children[0]) {
         if (node->children[0]->type == AST_PRINT_STATEMENT) return 0;
         return 1;
@@ -11772,7 +11939,7 @@ static ASTNode* tc_arm_value(ASTNode* body) {
 /* Does a `return` anywhere in `node` give a value? A nested closure's
  * returns are its own. */
 static int tc_body_yields(ASTNode* node, SymbolTable* table, StrMap* locals, int depth) {
-    if (!node || node->type == AST_CLOSURE) return 0;
+    if (!node || node->type == AST_CLOSURE || node->type == AST_QUOTE) return 0;
     if (node->type == AST_RETURN_STATEMENT && node->child_count > 0 && node->children[0]) {
         if (node->child_count > 1) return 1;   /* `return a, b` */
         return tc_value_yields(node->children[0], table, locals, depth);
@@ -12657,6 +12824,8 @@ int typecheck_function_call(ASTNode* call, SymbolTable* table) {
         type_error(error_msg, call->line, call->column);
         return 0;
     }
+
+    if (!check_quote_callee(call, symbol)) return 0;
 
     // Arity check: user-defined functions have their AST node stored
     if (symbol->node && (symbol->node->type == AST_FUNCTION_DEFINITION || symbol->node->type == AST_BUILDER_FUNCTION)) {

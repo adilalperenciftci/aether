@@ -1,0 +1,9 @@
+// match in a quote: E0800 (docs/quote.md). Must not compile: tests/integration/quote_errors.
+import std.quote
+
+take(t: quote.Tree) {}
+
+main() {
+    v = 1
+    take() quote | k: int | { match k { 1 -> { return 1 } _ -> { return 0 } } }
+}

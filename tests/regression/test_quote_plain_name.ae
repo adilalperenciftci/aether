@@ -1,0 +1,32 @@
+// Regression: `quote` is not a keyword (docs/quote.md). It quotes only
+// straight after a call's `)`, on the same line, followed by `|`, `||`, `{`
+// or `->`; everywhere else it is an ordinary name: a local, a parameter, a
+// function, a struct field (std/jsonpath/parser.ae has a local called
+// `quote`). And std.quote, the module, is itself called `quote`.
+
+extern exit(code: int)
+
+struct Lexer {
+    quote: int
+}
+
+fn quote(c: int) -> int { return c + 1 }
+
+fn is_closing(c: int, quote: int) -> bool { return c == quote }
+
+fn id(x: int) -> int { return x }
+
+main() {
+    quote = 34
+    if !is_closing(34, quote) { exit(1) }
+    lx = Lexer { quote: 39 }
+    if lx.quote != 39 { exit(1) }
+    // A call, then `quote` on the next line: two statements.
+    n = id(1)
+    quote = quote + n
+    if quote != 35 { exit(1) }
+    // `quote` after a call on the same line, as an operand.
+    m = id(2) | quote
+    if m != 35 { exit(1) }
+    println("quote as a name: ok")
+}
