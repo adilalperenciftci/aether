@@ -1,0 +1,160 @@
+// Regression (#2765): an operand evaluated ahead of the rest of its
+// operation, to keep source order (#2478), was held in a GNU statement
+// expression with an `__auto_type` temporary whatever the C compiler, so
+// the C for a compiler that is not GCC-compatible (AETHER_GCC_COMPAT 0, what
+// cl.exe compiles) did not compile. The sequence now spells itself through
+// the _AE_SEQ_* macros: __auto_type where the compiler infers types, a comma
+// expression over temporaries declared with the operand's type ahead of the
+// statement where it does not. An array literal's elements evaluated ahead
+// of their declaration are declared through _AE_AUTO the same way, and so are
+// the fields of a message sent, a send being a statement (a block). This
+// checks the order on whichever path the C compiler takes;
+// tests/compiler/test_msvc_compat.sh compiles it as strict C11, under cl.exe,
+// and runs it with AETHER_GCC_COMPAT forced to 0.
+//
+// A temporary declared with the operand's type holds what C computes only
+// if that is the type C gives the operand: the checker types `b + b`, `~b`
+// and `-b` on a byte as a byte, which C computes in int, and the temporary
+// that was a byte cut the value on the non-GCC path alone (`(b + b) +
+// step()` with b = 200 gave 145 there, 401 under gcc). The narrow operands
+// below are module variables the call writes, so each is evaluated ahead.
+
+extern exit(code: int)
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+struct P {
+    a: int
+    b: int
+}
+
+message Pair { a: int, b: int }
+message Get {}
+
+actor Rec {
+    state int sum
+    receive {
+        Pair(a, b) -> { sum = sum * 100 + a * 10 + b }
+        Get() -> { reply sum }
+    }
+}
+
+var counter = 0
+
+var nb: byte = 200
+var nb2: byte = 100
+var nu8: uint8_t = 200
+var nu16: uint16_t = 60000
+var ni8: int8_t = 100
+var ni8m: int8_t = -128
+var ni16: int16_t = 300
+
+reset_narrow() {
+    nb = 200
+    nb2 = 100
+    nu8 = 200
+    nu16 = 60000
+    ni8 = 100
+    ni8m = -128
+    ni16 = 300
+}
+
+// Writes every narrow variable, so an operand that reads one is evaluated
+// before the call.
+step() -> int {
+    nb = 10
+    nb2 = 1
+    nu8 = 1
+    nu16 = 1
+    ni8 = 1
+    ni8m = 1
+    ni16 = 1
+    return 1
+}
+
+show(a: int, b: int) -> int {
+    return a * 1000 + b
+}
+
+bump() -> int {
+    counter = counter + 1
+    return counter
+}
+
+bump_long() -> long {
+    counter = counter + 1
+    return counter
+}
+
+digits(a: int, b: int, c: int) -> int {
+    return a * 100 + b * 10 + c
+}
+
+main() {
+    // Call arguments, left to right.
+    counter = 0
+    check(digits(bump(), bump(), bump()) == 123, "call arguments in source order")
+
+    // Operands of a binary operation.
+    counter = 0
+    check(bump() * 10 + bump() == 12, "binary operands in source order")
+
+    // A long operand keeps its width through the temporary.
+    counter = 0
+    big = bump_long() * 4000000000 + bump_long()
+    check(big == 4000000002, "a long operand keeps its width")
+
+    // Fields of a struct literal.
+    counter = 0
+    p = P { a: bump(), b: bump() }
+    check(p.a == 1 && p.b == 2, "struct literal fields in source order")
+
+    // An array literal that reads the array it replaces: a swap.
+    xs = [1, 2]
+    xs = [xs[1], xs[0]]
+    check(xs[0] == 2 && xs[1] == 1, "an array literal reads the old elements")
+
+    // Elements of an array literal with side effects.
+    counter = 0
+    ys = [bump(), bump(), bump()]
+    check(ys[0] == 1 && ys[1] == 2 && ys[2] == 3, "array literal elements in source order")
+
+    // The fields of a message sent: the send is a statement, so its
+    // operands go ahead of it in a block.
+    rec = spawn(Rec())
+    v = 1
+    rec ! Pair { a: v++, b: v }
+    total = rec ? Get {}
+    check(total == 12 && v == 2, "message fields in source order")
+
+    // Narrow operands evaluated ahead keep the value C computes for them.
+    reset_narrow()
+    check((nb + nb) + step() == 401, "byte + byte, evaluated ahead")
+    reset_narrow()
+    check((~nb) + step() == -200, "~byte, evaluated ahead")
+    reset_narrow()
+    check((-nb) + step() == -199, "-byte, evaluated ahead")
+    reset_narrow()
+    check(show(nb + nb2, step()) == 300001, "byte + byte as an argument, evaluated ahead")
+    reset_narrow()
+    check((nb * 2) + step() == 401, "byte * 2, evaluated ahead")
+    reset_narrow()
+    check((nu8 + nu8) + step() == 401, "uint8_t + uint8_t, evaluated ahead")
+    reset_narrow()
+    check((nu16 + nu16) + step() == 120001, "uint16_t + uint16_t, evaluated ahead")
+    reset_narrow()
+    check((~nu16) + step() == -60000, "~uint16_t, evaluated ahead")
+    reset_narrow()
+    check((ni8 + ni8) + step() == 201, "int8_t + int8_t, evaluated ahead")
+    reset_narrow()
+    check((-ni8m) + step() == 129, "-int8_t, evaluated ahead")
+    reset_narrow()
+    check((ni16 * ni16) + step() == 90001, "int16_t * int16_t, evaluated ahead")
+
+    println("ok")
+}

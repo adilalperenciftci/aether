@@ -76,7 +76,7 @@ got="$(tr -d '\r' < "$tmp/out.log")"
 
 "$AETHERC" "$tmp/main.ae" "$tmp/main.c" >"$tmp/gen.log" 2>&1 || fail "aetherc failed" "$tmp/gen.log"
 # Both spellings of the read-only call free their temp.
-n="$(grep -c 'char\* _ad_[0-9]* = (char\*)(mk("[xy]")); _closure_fn_0(.*); aether_heap_str_free(_ad_' "$tmp/main.c")"
+n="$(grep -c '_ad_[0-9]* = (char\*)(mk("[xy]")), _closure_fn_0(.*), aether_heap_str_free(_ad_' "$tmp/main.c")"
 [ "$n" = "2" ] || fail "a read-only closure argument is not freed after the call ($n of 2)" "$tmp/main.c"
 # A kept argument is freed too: the closure took a reference of its own.
 grep -q 's = aether_str_capture(s);' "$tmp/main.c"     || fail "the closure that keeps its parameter does not take its own reference" "$tmp/main.c"

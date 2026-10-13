@@ -549,6 +549,10 @@ compile("Main.java") {
 compile("Test.java")
 ```
 
+The call's arguments are evaluated after the block, left to right, just
+before the function runs, whether the call is a statement of its own or a
+value used inside an expression (`println(compile("Main.java") { ... })`).
+
 The setter functions (`set_release`, `set_lint`) are regular DSL functions
 with `_ctx: ptr` they work on whatever was pushed to the context stack. The
 compiler creates the config object (currently a map), pushes it, runs the block,

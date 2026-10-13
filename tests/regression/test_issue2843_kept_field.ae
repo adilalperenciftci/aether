@@ -1,0 +1,68 @@
+// Regression (#2843): a string field of a struct a call returns, handed to
+// a function that keeps its parameter as given (here in a module variable),
+// was freed with the struct when the statement destroyed it, so the kept
+// string pointed at freed memory: the strings made right after it reused
+// the buffer. A local handed to such a function is not freed at its scope
+// exit; the field now gives its reference up the same way. The three
+// shapes: a thrown-away result, a declaration's value, and an argument of
+// another call. A local struct's field handed over keeps its value too.
+
+import std.string
+
+extern exit(code: int)
+
+struct Item {
+    name: string
+    tag: string
+}
+
+make_item(w: string) -> Item {
+    return Item { name: string.concat(w, "#"), tag: string.concat(w, "%") }
+}
+
+var kept: string = ""
+
+keep(s: string) -> string {
+    kept = s
+    return s
+}
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg} (kept ${kept})")
+        exit(1)
+    }
+}
+
+// Strings of the kept one's size, made after it, which reuse its buffer
+// if it was freed.
+churn(w: string) -> int {
+    a = string.concat(w, "@")
+    b = string.concat(w, "$")
+    c = string.concat(w, "&")
+    return string.length(a) + string.length(b) + string.length(c)
+}
+
+main() {
+    w = string.concat("w", "v")
+
+    keep(make_item(w).name)
+    churn(w)
+    check(kept == "wv#", "a thrown-away result")
+
+    z = keep(make_item(w).tag)
+    churn(w)
+    check(kept == "wv%" && z == "wv%", "a declaration's value")
+
+    n = string.length(keep(make_item(w).name))
+    churn(w)
+    check(n == 3 && kept == "wv#", "an argument of another call")
+
+    d = make_item(w)
+    keep(d.tag)
+    check(d.tag == "wv%", "a local's field")
+    churn(w)
+    check(kept == "wv%", "a local's field, kept")
+
+    println("ok")
+}

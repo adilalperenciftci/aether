@@ -23,6 +23,64 @@ const char* cg_internf(const char* fmt, ...)
 #endif
     ;
 
+/* #2765: an expression's temporaries (codegen_stmt.c). A construct that
+ * needs some (an argument freed after the call, a string taken into an
+ * owning slot) opens a TempSeq and writes its parts once:
+ *
+ *     seq_open; t = seq_let(ctype, prefix); <value>; seq_next; <use of t>;
+ *     seq_next; ...; <result>; seq_close
+ *
+ * While a statement is being emitted, that is the comma expression
+ * `(t = <value>, <use>, <result>)`, its temporaries declared ahead of the
+ * statement: plain C, which every C compiler takes. With no statement to
+ * declare them ahead of, it is the GNU statement expression
+ * `({ T t = <value>; <use>; <result>; })`, which only a GCC-compatible
+ * compiler takes. A part is an expression in both: a conditional is
+ * `c ? a : b`, not an `if` statement. An ordered sequence (an operand
+ * evaluated ahead, #2478) infers its temporaries' types with __auto_type on
+ * the GCC path and spells them elsewhere, through the _AE_SEQ_* macros.
+ * seq_decl declares a temporary the parts assign on their own (each arm of
+ * a conditional). */
+typedef struct { int stmt_expr; int ordered; } TempSeq;
+int hoist_ready(CodeGenerator* gen);
+void seq_open(CodeGenerator* gen, TempSeq* s);
+void seq_open_ordered(CodeGenerator* gen, TempSeq* s, int typed);
+const char* seq_let(CodeGenerator* gen, TempSeq* s, const char* ctype, const char* prefix);
+void seq_let_named(CodeGenerator* gen, TempSeq* s, const char* ctype, const char* name);
+void seq_decl(CodeGenerator* gen, TempSeq* s, const char* ctype, const char* name);
+void seq_next(CodeGenerator* gen, TempSeq* s);
+void seq_close(CodeGenerator* gen, TempSeq* s);
+/* A temporary `ctype name;` declared ahead of the statement being emitted
+ * (hoist_ready), for both compilers. */
+void hoist_declare(CodeGenerator* gen, const char* ctype, const char* name);
+/* Where declarations go ahead of a statement, judged by the `n` bytes of C
+ * before it: 0 there, 1 after a null statement (a label precedes), 2 in a
+ * block with the statement (an unbraced body). */
+int codegen_hoist_site(const char* s, size_t n);
+/* #2765: a construct that runs statements (an `or` with a block handler, a
+ * propagating `!`, a call with a trailing block whose value is used), run
+ * ahead of its statement, its value bound for the statement to read
+ * (codegen_expr.c). */
+int is_control_value(CodeGenerator* gen, ASTNode* e);
+int emit_control_prelude(CodeGenerator* gen, ASTNode* e, int discarded);
+/* #2798: the same anywhere in a statement: does `e` hold one, and run the
+ * ones a value or a list of operands holds, with what is evaluated before
+ * them, ahead of the statement (1 when every one is bound). */
+/* #2478, #2813: the memoised call effects (codegen_expr.c), freed. */
+void order_fn_effects_release(CodeGenerator* gen);
+int ctl_contains(CodeGenerator* gen, ASTNode* e);
+int ctl_linearize_value(CodeGenerator* gen, ASTNode* e, int discarded);
+int ctl_linearize_list(CodeGenerator* gen, ASTNode** ops, int n);
+/* The arguments of a builder call, evaluated after its block, left to
+ * right, ahead of the call. */
+void ctl_builder_args(CodeGenerator* gen, ASTNode* call);
+/* `<lhs> = <value>;` as a statement of its own, outside any Aether
+ * statement (an actor state's initializer): temporaries and constructs as
+ * generate_statement handles a statement's. */
+void generate_value_statement(CodeGenerator* gen, const char* lhs, ASTNode* value);
+int control_prelude_depth(void);
+void control_prelude_end(int depth);
+
 /* Utilities (codegen.c) */
 void indent(CodeGenerator* gen);
 void unindent(CodeGenerator* gen);
@@ -173,6 +231,20 @@ int struct_is_observable(CodeGenerator* gen, const char* struct_name);
 int callee_consumes_string_arg(CodeGenerator* gen, const char* func_name, int idx);
 int field_read_can_hand_off(ASTNode* e);
 void emit_string_field_handoff(CodeGenerator* gen, ASTNode* e);
+/* How owned field read `arg`, argument `idx` of a call of `func_name`, is
+ * handed over: STRING_FIELD_CONSUMED to a parameter the callee frees,
+ * STRING_FIELD_KEPT to one it keeps as given (stores past the call), else
+ * 0; and the second shape, the field giving its reference up whatever the
+ * string is. */
+enum { STRING_FIELD_CONSUMED = 1, STRING_FIELD_KEPT = 2 };
+int string_field_handoff_kind(CodeGenerator* gen, const char* func_name, int idx, ASTNode* arg);
+void emit_string_field_giveup(CodeGenerator* gen, ASTNode* e);
+/* Such a field read evaluated ahead of its call: its struct's address into
+ * a temporary (in the ordering sequence `s`, or ahead of the statement for
+ * NULL), and the hand-over the call then makes, at the call. */
+const char* emit_string_field_owner_ahead(CodeGenerator* gen, ASTNode* e, TempSeq* s);
+void emit_string_field_handover_at(CodeGenerator* gen, const char* fo, const char* field,
+                                   const char* value, int kind);
 void emit_string_field_free(CodeGenerator* gen, ASTNode* e, const char* runtime_free);
 /* #2618: the same for an element of an array that owns its elements, when
  * string_element_free_kind says it is one. */
@@ -562,10 +634,11 @@ void emit_closure_take(CodeGenerator* gen, ASTNode* e);
 void emit_owned_array_literal(CodeGenerator* gen, ASTNode* lit, int kind);
 /* #2688: a struct literal's fixed-size array field given another array
  * (`Shelf { names: arr }`): it is `{0}` in the literal, and
- * emit_struct_literal_array_field then fills `_ae_slit.<field>` element by
- * element, each taken as the field keeps it. */
+ * emit_struct_literal_array_field then fills that field of the literal's
+ * temporary `slit`, element by element, each taken as the field keeps it. */
 int struct_literal_field_takes_array(CodeGenerator* gen, const char* sname, ASTNode* field_init);
-void emit_struct_literal_array_field(CodeGenerator* gen, const char* sname, ASTNode* field_init);
+void emit_struct_literal_array_field(CodeGenerator* gen, const char* sname, ASTNode* field_init,
+                                     const char* slit);
 /* #2690: a struct value a `try` body writes is declared volatile; may the
  * lvalue `lv` (a local, or a field or element held by one) be such a value?
  * Its release and replace are then the generated `<Name>_destroy_volatile`

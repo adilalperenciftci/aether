@@ -575,16 +575,20 @@ A function that calls itself recursively (e.g. a `walk_join`-style accumulator-p
 
 ### Argument-temp lifetime (nested heap-returning calls)
 
-`f(g(), h())` where `g()` and `h()` are themselves heap-returning was a pre-fix anonymous-temp leak: the two heap allocations flowed into `f` and had nowhere to be reclaimed. The codegen now wraps every call site that has heap-returning function-call subexpressions in argument position with a GCC statement-expression that:
+`f(g(), h())` where `g()` and `h()` are themselves heap-returning was a pre-fix anonymous-temp leak: the two heap allocations flowed into `f` and had nowhere to be reclaimed. The codegen now wraps every call site that has heap-returning function-call subexpressions in argument position in a sequence of temporaries:
 
 ```c
-({ char* _ad_0 = (char*)(g());
-   char* _ad_1 = (char*)(h());
-   <ret_type> _ad_r = f(_ad_0, _ad_1);
-   aether_heap_str_free(_ad_0);
-   aether_heap_str_free(_ad_1);
-   _ad_r; })
+char* _ad_0; char* _ad_1; <ret_type> _ad_r0;    /* ahead of the statement */
+...
+(_ad_0 = (char*)(g()),
+ _ad_1 = (char*)(h()),
+ _ad_r0 = f(_ad_0, _ad_1),
+ aether_heap_str_free(_ad_0),
+ aether_heap_str_free(_ad_1),
+ _ad_r0)
 ```
+
+It is a comma expression, and its temporaries are declared ahead of the statement it is in (#2765): plain C11, so a C compiler that is not GCC-compatible (cl.exe) takes it as well. It was a GNU statement expression `({ ... })`, which only GCC-compatible compilers take. Every other construct that needs a temporary in the middle of an expression (a string taken into an owning slot, an operand evaluated ahead to keep source order, the `!`, `??`, `?.` and `or` operators) is written the same way. An `or` with a block handler, a `!` that propagates an error, and a call whose trailing block runs where its value is used hold statements, so they run as statements ahead of their statement, its value left in a temporary the statement reads. Whatever the statement evaluates before one (an earlier argument, the left side of an operation, an earlier field) is evaluated into a temporary first, in source order (#2798); one behind `&&` or `||`, in a branch of an `if` expression, in the default of `??` or in an `or` handler runs under the same test, only when that part would; one in a loop condition runs at the top of every pass, and one in a `for` loop's increment where the increment runs. That covers every statement, a `match` arm's value and an actor state's initializer.
 
 The wrap is suppressed when the corresponding callee parameter is storage-shaped (`ptr`, `@retain` string, or unknown-typed), the same `call_arg_escapes` gate the escape walker uses. In those cases the recipient takes ownership and freeing here would dangle the stored copy. A parameter the callee only returns (`ident(s) { return s }`) keeps the temporary alive for the result, which the caller then owns; in statement position the result is thrown away, so the temporary is freed with it.
 
@@ -655,6 +659,8 @@ Strings returned from a function whose ownership the compiler can't infer (e.g. 
 A field store frees the previous string whenever the field's `_heap_<field>` tracker says the struct owns it, wherever the pointer to the struct came from: a `heap.new(T)` box, a call's result, a list element cast back with `as *T`, a cast of a `ptr` parameter, a parameter of a function C may call (#2369). So does a store into a struct-valued field, a closure field or an element of a `string[N]` field through such a pointer. Reading the tracker is sound because every box Aether code allocates starts with its trackers zeroed: `heap.new(T)` allocates with `calloc`, and so does a call of C's `malloc` (declared under any Aether name, `extern malloc(n)` or `@extern("malloc") c_malloc(n)`), which is lowered to `calloc(1, n)` whether its pointer is cast at once (`malloc(n) as *T`) or bound to a `ptr` and cast later (#1873 was a store freeing the garbage tracker of a `malloc`'d box). Memory that reaches a `*T` from elsewhere (the part `realloc` adds, an arena, a C allocator) must be zeroed before a field is stored through it, as it must before `heap.free` destroys it. Before, only a pointer the compiler could trace back to `heap.new` released the old value, and a store through any other leaked it; freeing the old value by hand first (`string.free(p.name)`, or `p.name = set_owned(p.name, v)` with a `set_owned` that frees its first argument) still frees it once, since the field gives up what it is handed to a free (next paragraph). A field freed with C's `free()` is not given up that way: free a string field with `string.free`.
 
 A field handed to a call that frees it gives its reference up (#2566). `string.free(p.name)`, `string.release(p.name)` and `release(p.name)` free the value (through the tracker where it can be read, as for a local) and leave the field empty and owning nothing. Passing `p.name` to a function that frees its parameter, such as `p.name = set_owned(p.name, v)` with `set_owned` freeing its first argument, clears the field's tracker at the call, so neither the store that follows nor the struct's destructor frees the same string again; that includes a field of a struct a call returned, which the statement keeps in a temporary and destroys (#2576). Such a function frees through the runtime, which releases a counted string and leaves a plain `malloc`'d buffer (an `@heap` extern's result) alone, so a plain buffer stays the field's, and the field frees it.
+
+A field handed to a function that keeps its parameter as it was given (stores it past the call where nothing releases it, such as a module-level `var`, and takes no reference of its own) gives it up too, whatever the string is: the field's tracker is cleared at the call and the function's copy of the pointer outlives the struct, as a local handed to such a function is not freed at its scope exit (#2843). Before, the struct's destructor freed what the function kept, at once for a struct a call returned (`keep(make_item(w).name)`).
 
 ---
 

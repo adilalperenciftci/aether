@@ -2103,7 +2103,7 @@ main() {
 
 ### Codegen
 
-A value optional lowers to `typedef struct { int has; T val; } ae_opt_<T>` (one per concrete element type); `none` is `{0}`, a wrapped value is `{ .has = 1, .val = … }`. `!`, `??`, and `?.` lower to single-evaluation GCC statement-expressions, so an operand with side effects is evaluated exactly once.
+A value optional lowers to `typedef struct { int has; T val; } ae_opt_<T>` (one per concrete element type); `none` is `{0}`, a wrapped value is `{ .has = 1, .val = … }`. `!`, `??`, and `?.` evaluate their operand once, into a temporary, so an operand with side effects is evaluated exactly once. The generated C is plain C11 here (a comma expression whose temporary is declared ahead of the statement, #2765), so a C compiler that is not GCC-compatible takes it.
 
 ---
 
@@ -3576,8 +3576,13 @@ when a later one depends on it: one writes a variable the other uses
 change what the other reads. A closure literal reads the variables it
 captures where it stands, so `f(i++, || { return i })` makes the closure
 after the step. A call can change a module global, a variable it shares
-with a closure it runs, and memory it is handed by reference; what a
-function of the program writes is read off its body. A call whose body
+with a closure it runs, memory it is handed by reference, and memory it
+reaches through a pointer or a slice (a field of the struct a global
+pointer points at, say), so an operand that reads memory through one,
+itself or in a call it makes, and a call that writes through one are
+evaluated in source order, whichever comes first; what a function of the
+program reads and writes is read off its body and the bodies of the
+functions it calls, mutually recursive ones included. A call whose body
 the compiler cannot see is opaque: a C extern, a C function pointer, a
 closure, a message send, and a function of the program that makes such a
 call. An opaque call may write anything, so it is evaluated ahead of every

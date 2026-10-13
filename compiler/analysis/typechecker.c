@@ -6198,6 +6198,14 @@ int typecheck_actor_definition(ASTNode* actor, SymbolTable* table) {
                     if (fn && fn->type) {
                         set_node_type(child, clone_type(fn->type));
                     }
+                } else {
+                    /* Any other initializer (`f() or { d }`) has the type
+                     * it infers to. Left unknown, every use of the field in
+                     * the handlers was untyped, and codegen took it for an
+                     * int (#2821). */
+                    Type* it = infer_type(init, actor_table);
+                    if (it && it->kind != TYPE_UNKNOWN) set_node_type(child, it);
+                    else if (it) free_type(it);
                 }
             }
             add_symbol(actor_table, child->value, clone_type(child->node_type), 0, 0, 1);

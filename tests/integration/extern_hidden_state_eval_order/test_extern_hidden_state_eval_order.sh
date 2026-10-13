@@ -41,18 +41,19 @@ if [ "$got" != "$want" ]; then
 fi
 
 # The emitted C: the hidden-state pairs hoist their first operand; the
-# plain pairs do not, even beside a call.
+# plain pairs do not, even beside a call. A hoisted operand is the temporary
+# of an ordered sequence (#2765): `_AE_SEQ_LET(_eoN) (op)`.
 if ! "$AETHERC" "$SCRIPT_DIR/main.ae" "$tmp/main.c" >/dev/null 2>&1; then
     echo "  [FAIL] extern_hidden_state_eval_order: main.ae did not compile to C"
     fail=1
 else
-    if ! grep -q '_eo[0-9]* = (tick())' "$tmp/main.c"; then
+    if ! grep -q '_AE_SEQ_LET(_eo[0-9]*) (tick())' "$tmp/main.c"; then
         echo "  [FAIL] extern_hidden_state_eval_order: tick() beside peek() was not evaluated ahead"
         fail=1
     fi
-    if grep -q '_eo[0-9]* = (x' "$tmp/main.c"; then
+    if grep -q '_AE_SEQ_LET(_eo[0-9]*) (x' "$tmp/main.c"; then
         echo "  [FAIL] extern_hidden_state_eval_order: plain local arithmetic was hoisted"
-        grep -n '_eo[0-9]* = (x' "$tmp/main.c" | head -3 | sed 's/^/        /'
+        grep -n '_AE_SEQ_LET(_eo[0-9]*) (x' "$tmp/main.c" | head -3 | sed 's/^/        /'
         fail=1
     fi
     if ! grep -q 'pair((x + y), (x \* y))' "$tmp/main.c"; then

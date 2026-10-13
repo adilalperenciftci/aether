@@ -1,0 +1,125 @@
+// Regression (#2813): operands are evaluated left to right, an operand a
+// later call can change being evaluated ahead of the call (#2478). Two
+// kinds were not:
+//   - an interpolation segment of a type its temporaries had no shape for
+//     (a byte, a uint16_t, an enum) stayed inline, so it read the value a
+//     call in a later segment wrote: `"${flag} ${gb} ${step()}"` printed the
+//     bool from before the call and the byte from after it;
+//   - a field read through a pointer, beside a call that writes the same
+//     memory through another pointer (one held in a module variable, or one
+//     passed under another name), read the new value: only reads rooted at
+//     the very argument written through were ordered.
+// Each operand list is checked: interpolation segments, call arguments, a
+// binary operation, struct and array literal fields and a message's fields.
+
+extern exit(code: int)
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+struct Box {
+    n: int
+}
+
+struct Pair2 {
+    a: int
+    b: int
+}
+
+enum Color { Red, Green }
+
+message Pair { a: int, b: int }
+message Get {}
+
+actor Rec {
+    state int sum
+    receive {
+        Pair(a, b) -> { sum = a * 10 + b }
+        Get() -> { reply sum }
+    }
+}
+
+var flag: bool = true
+var gb: byte = 1
+var gu: uint16_t = 2
+var gc: Color = Color.Green
+var gp: *Box = null
+
+reset_globals() {
+    flag = true
+    gb = 1
+    gu = 2
+    gc = Color.Green
+}
+
+step() -> int {
+    flag = false
+    gb = 7
+    gu = 8
+    gc = Color.Red
+    return 9
+}
+
+// Writes through the pointer it keeps in a module variable.
+bump() -> int {
+    gp.n = 5
+    return 1
+}
+
+// Writes through the pointer it is given.
+poke(b: *Box) -> int {
+    b.n = 6
+    return 2
+}
+
+show(a: int, b: int) -> int {
+    return a * 1000 + b
+}
+
+main() {
+    // Interpolation segments of every scalar kind, before a call that
+    // changes them.
+    reset_globals()
+    s = "${flag} ${gc == Color.Green} ${gb} ${gu} ${gc} ${step()}"
+    check(s == "true true 1 2 1 9", "interpolation segments in source order (${s})")
+
+    // Narrow globals as call arguments.
+    reset_globals()
+    check(show(gb + gu, step()) == 3009, "narrow arguments in source order")
+
+    p = heap.new(Box)
+    gp = p
+    q = p
+
+    // A field read through a pointer, before a call that writes it through
+    // a module variable or through another name for the same pointer.
+    p.n = 1
+    check(show(p.n, bump()) == 1001, "argument before a write through a global pointer")
+    p.n = 1
+    check(show(p.n, poke(q)) == 1002, "argument before a write through an alias")
+    p.n = 1
+    check(show(p.n, poke(p)) == 1002, "argument before a write through the same pointer")
+    p.n = 1
+    check(p.n * 10 + bump() == 11, "binary operand before a write through a pointer")
+    p.n = 1
+    t = "${p.n} ${bump()} ${p.n}"
+    check(t == "1 1 5", "interpolation around a write through a pointer (${t})")
+    p.n = 1
+    pr = Pair2 { a: p.n, b: poke(q) }
+    check(pr.a == 1 && pr.b == 2, "struct literal fields in source order")
+    p.n = 1
+    xs = [p.n, bump(), p.n]
+    check(xs[0] == 1 && xs[1] == 1 && xs[2] == 5, "array literal elements in source order")
+    p.n = 1
+    rec = spawn(Rec())
+    rec ! Pair { a: p.n, b: bump() }
+    total = rec ? Get {}
+    check(total == 11, "message fields in source order")
+
+    heap.free(p)
+    println("ok")
+}

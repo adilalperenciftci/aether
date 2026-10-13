@@ -1,0 +1,122 @@
+// Regression (#2798): what a statement evaluates before a construct that
+// runs statements is evaluated ahead of it into temporaries, and each such
+// operand must be evaluated as the call it goes to would: an owned field
+// read handed to a function that frees its parameter gives its reference
+// up as it is read (it was read into a plain temporary, and the struct
+// freed the string a second time); a function named as a value needs no
+// temporary (one of the operand's type could not hold it, and the C did
+// not compile). A builder's arguments are evaluated after its block, left
+// to right, whether the call is a value or its own statement (the value
+// form ran a construct in an argument before the block, as a GNU statement
+// expression). tests/compiler/test_msvc_compat.sh compiles this as strict
+// C11 and under cl.exe and runs it without GCC extensions.
+
+import std.map
+import std.string
+
+extern exit(code: int)
+
+struct Doc {
+    name: string
+    n: int
+}
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+num(fail: bool) -> int! {
+    if fail { return 0, "boom" }
+    return 7
+}
+
+word(fail: bool, w: string) -> string! {
+    if fail { return "", string.concat("bad-", w) }
+    return string.concat(w, "!")
+}
+
+eat(s: string, k: int) -> int {
+    string.free(s)
+    return k
+}
+
+one(w: string) -> int {
+    d = Doc { name: string.concat(w, "#1"), n: 0 }
+    return eat(d.name, num(true) or { 1 })
+}
+
+double_it(x: int) -> int {
+    return x * 2
+}
+
+apply(f: fn, x: int) -> int {
+    return call(f, x) * 100 + x
+}
+
+var trail = 0
+
+mark(d: int) -> int {
+    trail = trail * 10 + d
+    return d
+}
+
+t(n: int) -> int {
+    mark(n % 10)
+    return n
+}
+
+set_opt(_ctx: ptr, key: string, value: string) {
+    mark(3)
+    map_put(_ctx, key, value)
+}
+
+builder tag(text: string, n: int): string {
+    suffix = ""
+    if _builder != null && map_has(_builder, "suffix") == 1 { suffix, _ = map.get(_builder, "suffix") }
+    out = string.concat(text, suffix)
+    if _builder != null { map_free(_builder) }
+    return out
+}
+
+main() {
+    // A field handed to a function that frees it, before a construct.
+    total = 0
+    i = 0
+    while i < 100 {
+        total = total + one("w")
+        i = i + 1
+    }
+    check(total == 100, "a field handed over before a construct")
+
+    // A function named as a value, before a construct.
+    r = apply(double_it, num(true) or { 3 })
+    check(r == 603, "a function named before a construct")
+
+    // A builder's arguments, after its block, left to right.
+    trail = 0
+    s = string.concat("<", tag(word(true, "e") or {
+                mark(9)
+                "E"
+            }, t(14)) {
+            set_opt("suffix", "?")
+        })
+    check(s == "<E?" && trail == 394, "a builder's arguments, the call a value")
+    trail = 0
+    s2 = tag(word(true, "e") or {
+            mark(9)
+            "E"
+        }, t(14)) {
+        set_opt("suffix", "!")
+    }
+    check(s2 == "E!" && trail == 394, "a builder's arguments, the call a statement")
+    trail = 0
+    s3 = tag("x", t(15) + t(16)) {
+        set_opt("suffix", "#")
+    }
+    check(s3 == "x#" && trail == 356, "a builder's arguments that call, the call a statement")
+
+    println("ok")
+}
