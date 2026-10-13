@@ -484,7 +484,11 @@ typedef enum { LEAVES_BY_RETURN, LEAVES_TO_GLOBAL, LEAVES_TO_FIELD } Leaves;
 /* `value`, a view of the frame's storage, leaves the frame. `target` names
  * the global or the variable whose field takes it. */
 static void report_escape(Esc* esc, Frame* f, ASTNode* value, Leaves how, const char* target) {
-    char what[200], msg[640];
+    /* Room for the longest message whole: up to three frame names
+     * (Frame.shown, 160 each) and the description (what, 200) beside the
+     * text, so no message is cut short (and gcc's -Wformat-truncation,
+     * an error under -Werror on Linux, has nothing to report). */
+    char what[200], msg[1024];
     describe(f, value, what, sizeof(what));
     /* A closure storing a view of the frame it is written in: the storage
      * is that frame's. */
