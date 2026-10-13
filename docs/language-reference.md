@@ -2006,6 +2006,8 @@ v?.x  = 42                   // writes, v is present
 nv?.x = 99                   // skipped, nv is none, no crash
 ```
 
+A field of an optional is read through `?.`, after `!` (`v!.x`), or where a none-check narrows it; `v.x` on the optional itself is a type error, `Type 'Vec2?' has no field 'x'`.
+
 ### Matching on optionals
 
 `match` destructures an optional with the `none` and `some(binding)` arms, as a statement or as an expression:

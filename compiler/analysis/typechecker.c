@@ -1379,6 +1379,7 @@ static const char* base_type_name(Type* t) {
         case TYPE_FUNCTION:  return "closure";
         case TYPE_TUPLE:    return "tuple";
         case TYPE_OPTIONAL: return "optional";   // #340
+        case TYPE_SUM:      return t->struct_name ? t->struct_name : "sum";
         /* Named nominal types report their own name — "expected uint8_t, got B"
          * is actionable where "got unknown" is not. */
         case TYPE_ENUM:     return t->struct_name ? t->struct_name : "enum";
@@ -11485,6 +11486,24 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                     }
                     free_type(base_type);
                     return 1;
+                }
+
+                /* An optional holds its value or none: a field is read
+                 * through `?.`, after `!`, or where a none-check narrows
+                 * it. Read plainly, it reached C as a field of the
+                 * `ae_opt_<T>` wrapper (gcc: "'ae_opt_Shape' has no member
+                 * named 'r'", #2841 review). */
+                if (base_type && base_type->kind == TYPE_OPTIONAL && expr->value) {
+                    char error_msg[400];
+                    char tn[160];
+                    snprintf(error_msg, sizeof(error_msg),
+                             "Type '%s' has no field '%s': it is an optional, read the field "
+                             "with `?.` or unwrap it first (`!`, or a none-check that "
+                             "narrows it)",
+                             ret_type_spell(base_type, tn, sizeof(tn)), expr->value);
+                    free_type(base_type);
+                    type_error(error_msg, expr->line, expr->column);
+                    return 0;
                 }
 
                 // Reject member access on primitive types — catch the error in Aether, not C

@@ -9,4 +9,6 @@
   `Shape?` local, was "Type mismatch in variable initialization": the early
   pass took `c2` for the Circle last put in `o2`. The first binding of a
   name with no written type now takes the optional or sum it is given
-  (#2841).
+  (#2841). A field read plainly off an optional (`c2.r`, `o2.r`, `p.x` on
+  a `Point?`) was accepted and failed in C ("'ae_opt_Shape' has no member
+  named 'r'"); it is now a type error naming `?.`, `!` and narrowing.
