@@ -12079,7 +12079,24 @@ void emit_optional_coerced(CodeGenerator* gen, ASTNode* value, Type* target) {
         return;
     }
     fprintf(gen->output, "(%s){ .has = 1, .val = ", tc);
-    generate_expression(gen, value);
+    Type* inner = target->element_type;
+    if (value->type == AST_TUPLE_LITERAL && inner && inner->kind == TYPE_TUPLE) {
+        /* A tuple literal is no C expression of its own: it is the
+         * tuple's compound literal, each element cast to its slot's type,
+         * as an extern's tuple argument is packed (#1033). Emitted as an
+         * expression it was its elements' text run together (`(3, 4)`
+         * became `34`). */
+        fprintf(gen->output, "(%s){ ", get_c_type(inner));
+        for (int i = 0; i < value->child_count; i++) {
+            Type* et = i < inner->tuple_count && inner->tuple_types ? inner->tuple_types[i] : NULL;
+            fprintf(gen->output, "%s(%s)(", i > 0 ? ", " : "", et ? get_c_type(et) : "int");
+            generate_expression(gen, value->children[i]);
+            fprintf(gen->output, ")");
+        }
+        fprintf(gen->output, " }");
+    } else {
+        generate_expression(gen, value);
+    }
     fprintf(gen->output, " }");
 }
 

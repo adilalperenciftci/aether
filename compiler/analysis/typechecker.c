@@ -7265,7 +7265,15 @@ static int type_owns_memory(Type* t, SymbolTable* table, int depth) {
     if (!t || depth > 16) return 0;
     if (t->kind == TYPE_STRING) return 1;
     if (t->kind == TYPE_FUNCTION) return !t->is_fnptr;
-    if (t->kind == TYPE_OPTIONAL) return type_owns_memory(t->element_type, table, depth + 1);
+    /* An optional, an array (a fixed-size one holds its elements, which a
+     * struct owning them frees) and a tuple own what their elements own. */
+    if (t->kind == TYPE_OPTIONAL || t->kind == TYPE_ARRAY)
+        return type_owns_memory(t->element_type, table, depth + 1);
+    if (t->kind == TYPE_TUPLE) {
+        for (int i = 0; t->tuple_types && i < t->tuple_count; i++)
+            if (type_owns_memory(t->tuple_types[i], table, depth + 1)) return 1;
+        return 0;
+    }
     if (t->kind != TYPE_STRUCT || !t->struct_name) return 0;
     Symbol* s = lookup_symbol(table, t->struct_name);
     ASTNode* def = s ? s->node : NULL;

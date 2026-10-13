@@ -5,5 +5,6 @@
   it (an optional of a struct after that struct's body), and a literal or
   a field store wraps a bare value as an optional binding does. An
   optional field whose value owns memory (`string?`, an optional `fn`, an
-  optional of a struct holding a string) is refused with a diagnostic
-  until it has a `string` field's ownership (#2820, #2822).
+  optional of a struct, a fixed-size array or a tuple holding a string or
+  a closure) is refused with a diagnostic until it has a `string` field's
+  ownership (#2820, #2822).
