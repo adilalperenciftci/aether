@@ -66,6 +66,8 @@ int emit_control_prelude(CodeGenerator* gen, ASTNode* e, int discarded);
 /* #2798: the same anywhere in a statement: does `e` hold one, and run the
  * ones a value or a list of operands holds, with what is evaluated before
  * them, ahead of the statement (1 when every one is bound). */
+/* #2478, #2813: the memoised call effects (codegen_expr.c), freed. */
+void order_fn_effects_release(CodeGenerator* gen);
 int ctl_contains(CodeGenerator* gen, ASTNode* e);
 int ctl_linearize_value(CodeGenerator* gen, ASTNode* e, int discarded);
 int ctl_linearize_list(CodeGenerator* gen, ASTNode** ops, int n);

@@ -925,9 +925,10 @@ static int order_has_call(ASTNode* node) {
  * change, in either order (#2813).
  *
  * The effects are a property of the call graph: a function's are its
- * body's and its callees'. They are solved to a fixed point over the
- * functions a query reaches (order_fn_effects), so mutually recursive
- * functions get the same answer whichever is asked about first. */
+ * body's and its callees'. They are solved over the functions a query
+ * reaches, component by component (order_fn_effects), so mutually
+ * recursive functions get the same answer whichever is asked about first,
+ * in time linear in the size of the call graph. */
 
 typedef struct OrderFnEffects {
     ASTNode* fn;
@@ -936,6 +937,12 @@ typedef struct OrderFnEffects {
     unsigned writes_through;   /* bit k: memory its parameter k reaches */
     int writes_memory;         /* writes through any pointer or slice */
     int reads_memory;          /* reads through any pointer or slice */
+    int solved;                /* the fields above are final */
+    int* callees;              /* the entries its body calls (once each) */
+    int ncallees;
+    int scc_index;             /* Tarjan: order of discovery, -1 unseen */
+    int scc_low;
+    int scc_on_stack;
 } OrderFnEffects;
 
 /* The definition a call runs, when it is a function of this program, or
@@ -1073,54 +1080,197 @@ static void order_scan_body(CodeGenerator* gen, ASTNode* fn, ASTNode* node, Orde
         order_scan_body(gen, fn, node->children[i], e);
 }
 
-/* Set while order_fn_effects solves: a function first reached then gets an
- * entry of its own, solved with the rest. */
+/* The entry of `fn`, a function of this program, by a hash of its
+ * definition (gen->order_fn_index, open addressing, an index + 1 per slot):
+ * found, or added unsolved. */
+static size_t order_fn_hash(const ASTNode* fn, int cap) {
+    uint64_t h = (uint64_t)(uintptr_t)fn >> 4;
+    h *= 0x9E3779B97F4A7C15ull;
+    return (size_t)(h ^ (h >> 31)) & (size_t)(cap - 1);
+}
+
+static int order_fn_entry(CodeGenerator* gen, ASTNode* fn) {
+    int cap = gen->order_fn_index_cap;
+    for (size_t j = cap ? order_fn_hash(fn, cap) : 0; cap && gen->order_fn_index[j];
+         j = (j + 1) & (size_t)(cap - 1)) {
+        int i = gen->order_fn_index[j] - 1;
+        if (gen->order_fn_effects[i].fn == fn) return i;
+    }
+    if (gen->order_fn_effect_count >= gen->order_fn_effect_capacity) {
+        int ncap = gen->order_fn_effect_capacity ? gen->order_fn_effect_capacity * 2 : 32;
+        gen->order_fn_effects = aether_xrealloc(gen->order_fn_effects,
+                                                (size_t)ncap * sizeof(OrderFnEffects));
+        gen->order_fn_effect_capacity = ncap;
+    }
+    int idx = gen->order_fn_effect_count++;
+    gen->order_fn_effects[idx] = (OrderFnEffects){ .fn = fn, .scc_index = -1 };
+    if ((gen->order_fn_effect_count) * 2 > cap) {
+        int ncap = cap ? cap * 2 : 64;
+        while (gen->order_fn_effect_count * 2 > ncap) ncap *= 2;
+        int* t = (int*)calloc((size_t)ncap, sizeof(int));
+        if (!t) {
+            fprintf(stderr, "Fatal: out of memory indexing functions\n");
+            exit(1);
+        }
+        for (int i = 0; i < gen->order_fn_effect_count; i++) {
+            size_t j = order_fn_hash(gen->order_fn_effects[i].fn, ncap);
+            while (t[j]) j = (j + 1) & (size_t)(ncap - 1);
+            t[j] = i + 1;
+        }
+        free(gen->order_fn_index);
+        gen->order_fn_index = t;
+        gen->order_fn_index_cap = ncap;
+    } else {
+        size_t j = order_fn_hash(fn, cap);
+        while (gen->order_fn_index[j]) j = (j + 1) & (size_t)(cap - 1);
+        gen->order_fn_index[j] = idx + 1;
+    }
+    return idx;
+}
+
+/* The entries the calls in `node` (a part of a body) reach: the functions of
+ * the program order_call_effects would look up, the edges of the graph the
+ * effects are solved over. */
+static void order_collect_callees(CodeGenerator* gen, ASTNode* node, int idx) {
+    if (!node || node->type == AST_CLOSURE) return;
+    if (node->type == AST_FUNCTION_CALL && !order_call_runs_closure(node)) {
+        ASTNode* def = order_callee_def(gen, node);
+        if (def && def->type != AST_EXTERN_FUNCTION) {
+            int c = order_fn_entry(gen, def);
+            OrderFnEffects* e = &gen->order_fn_effects[idx];
+            e->callees = (int*)aether_xrealloc(e->callees, sizeof(int) * (size_t)(e->ncallees + 1));
+            e->callees[e->ncallees++] = c;
+        }
+    }
+    for (int i = 0; i < node->child_count; i++)
+        order_collect_callees(gen, node->children[i], idx);
+}
+
+/* Read entry `i`'s body once more with what its callees are known to do;
+ * 1 when that adds an effect. */
+static int order_fn_rescan(CodeGenerator* gen, int i) {
+    OrderFnEffects e = gen->order_fn_effects[i];
+    ASTNode* f = e.fn;
+    for (int c = 0; c < f->child_count; c++)
+        if (f->children[c] && f->children[c]->type == AST_BLOCK)
+            order_scan_body(gen, f, f->children[c], &e);
+    OrderFnEffects* cur = &gen->order_fn_effects[i];
+    if (e.opaque == cur->opaque && e.writes_shared == cur->writes_shared &&
+        e.writes_through == cur->writes_through && e.writes_memory == cur->writes_memory &&
+        e.reads_memory == cur->reads_memory) return 0;
+    cur->opaque = e.opaque;
+    cur->writes_shared = e.writes_shared;
+    cur->writes_through = e.writes_through;
+    cur->writes_memory = e.writes_memory;
+    cur->reads_memory = e.reads_memory;
+    return 1;
+}
+
+/* Set while order_fn_effects solves: a query from a body being read gets
+ * the entry as it stands. */
 static int g_order_solving = 0;
 
 /* The effects of calling `fn`, a function of this program: an index into
  * gen->order_fn_effects. The first query that reaches a function solves it
- * and every function its body reaches that has no entry yet, to a fixed
- * point: each pass rereads those bodies with what their callees are known
- * to do so far, and only adds effects, until a pass adds none. A function
- * with an entry from an earlier query is solved already, and calls no
- * function without one (that one would have an entry too), so it cannot
- * change. Answered from the first partial read instead, a function reached
- * again while its own body was being read (mutual recursion) fixed its
- * caller's effects early, and the answer depended on which function was
- * asked about first (#2813). */
+ * and every unsolved function its body reaches, by strongly connected
+ * component of the call graph (Tarjan's algorithm, iterative), callees'
+ * components first: a component's bodies are read with what the
+ * components it calls do, final by then, and, when it is a cycle, reread
+ * until a pass adds nothing. Each body is read once, a cycle's a few times,
+ * so the time is linear in the size of the graph; one fixed point over
+ * every reached function took a pass per level of a call chain. Answered
+ * from a partial read instead, a function reached again while its own body
+ * was being read (mutual recursion) fixed its caller's effects early, and
+ * the answer depended on which function was asked about first (#2813). */
 static int order_fn_effects(CodeGenerator* gen, ASTNode* fn) {
-    for (int i = 0; i < gen->order_fn_effect_count; i++)
-        if (gen->order_fn_effects[i].fn == fn) return i;
-    if (gen->order_fn_effect_count >= gen->order_fn_effect_capacity) {
-        int cap = gen->order_fn_effect_capacity ? gen->order_fn_effect_capacity * 2 : 32;
-        gen->order_fn_effects = aether_xrealloc(gen->order_fn_effects,
-                                                (size_t)cap * sizeof(OrderFnEffects));
-        gen->order_fn_effect_capacity = cap;
-    }
-    int idx = gen->order_fn_effect_count++;
-    gen->order_fn_effects[idx] = (OrderFnEffects){ fn, 0, 0, 0, 0, 0 };
-    if (g_order_solving) return idx;
+    int root = order_fn_entry(gen, fn);
+    if (gen->order_fn_effects[root].solved || g_order_solving) return root;
     g_order_solving = 1;
-    int changed;
-    do {
-        changed = 0;
-        for (int i = idx; i < gen->order_fn_effect_count; i++) {
-            OrderFnEffects e = gen->order_fn_effects[i];
-            ASTNode* f = e.fn;
-            for (int c = 0; c < f->child_count; c++)
-                if (f->children[c] && f->children[c]->type == AST_BLOCK)
-                    order_scan_body(gen, f, f->children[c], &e);
-            OrderFnEffects* cur = &gen->order_fn_effects[i];
-            if (e.opaque != cur->opaque || e.writes_shared != cur->writes_shared ||
-                e.writes_through != cur->writes_through ||
-                e.writes_memory != cur->writes_memory || e.reads_memory != cur->reads_memory) {
-                *cur = e;
-                changed = 1;
+    int* stack = NULL;         /* Tarjan's stack of entries */
+    int nstack = 0, capstack = 0;
+    int* frames = NULL;        /* the DFS: an entry, then its next edge */
+    int nframes = 0, capframes = 0;
+    int counter = 0;
+#define ORDER_PUSH(arr, n, cap, v) do { \
+        if ((n) == (cap)) { (cap) = (cap) ? (cap) * 2 : 64; \
+            (arr) = (int*)aether_xrealloc((arr), sizeof(int) * (size_t)(cap)); } \
+        (arr)[(n)++] = (v); } while (0)
+    /* Visit: number it, read its edges, put it on both stacks. */
+#define ORDER_VISIT(v) do { \
+        OrderFnEffects* ve = &gen->order_fn_effects[(v)]; \
+        ve->scc_index = ve->scc_low = counter++; \
+        ve->scc_on_stack = 1; \
+        ORDER_PUSH(stack, nstack, capstack, (v)); \
+        ASTNode* vf = ve->fn; \
+        for (int c_ = 0; c_ < vf->child_count; c_++) \
+            if (vf->children[c_] && vf->children[c_]->type == AST_BLOCK) \
+                order_collect_callees(gen, vf->children[c_], (v)); \
+        ORDER_PUSH(frames, nframes, capframes, (v)); \
+        ORDER_PUSH(frames, nframes, capframes, 0); } while (0)
+    ORDER_VISIT(root);
+    while (nframes > 0) {
+        int v = frames[nframes - 2];
+        int pos = frames[nframes - 1];
+        if (pos < gen->order_fn_effects[v].ncallees) {
+            frames[nframes - 1] = pos + 1;
+            int w = gen->order_fn_effects[v].callees[pos];
+            OrderFnEffects* we = &gen->order_fn_effects[w];
+            if (we->solved) continue;
+            if (we->scc_index < 0) {
+                ORDER_VISIT(w);
+            } else if (we->scc_on_stack && we->scc_index < gen->order_fn_effects[v].scc_low) {
+                gen->order_fn_effects[v].scc_low = we->scc_index;
             }
+            continue;
         }
-    } while (changed);
+        nframes -= 2;
+        OrderFnEffects* ve = &gen->order_fn_effects[v];
+        if (nframes > 0) {
+            OrderFnEffects* pe = &gen->order_fn_effects[frames[nframes - 2]];
+            if (ve->scc_low < pe->scc_low) pe->scc_low = ve->scc_low;
+        }
+        if (ve->scc_low != ve->scc_index) continue;
+        /* `v` roots a component: the entries above it on the stack. */
+        int base = nstack;
+        while (base > 0 && stack[base - 1] != v) base--;
+        base--;
+        int cycle = nstack - base > 1;
+        for (int k = 0; k < gen->order_fn_effects[v].ncallees && !cycle; k++)
+            cycle = gen->order_fn_effects[v].callees[k] == v;
+        int changed;
+        do {
+            changed = 0;
+            for (int k = base; k < nstack; k++)
+                if (order_fn_rescan(gen, stack[k])) changed = 1;
+        } while (cycle && changed);
+        for (int k = base; k < nstack; k++) {
+            OrderFnEffects* me = &gen->order_fn_effects[stack[k]];
+            me->solved = 1;
+            me->scc_on_stack = 0;
+            free(me->callees);
+            me->callees = NULL;
+            me->ncallees = 0;
+        }
+        nstack = base;
+    }
+#undef ORDER_VISIT
+#undef ORDER_PUSH
+    free(stack);
+    free(frames);
     g_order_solving = 0;
-    return idx;
+    return root;
+}
+
+void order_fn_effects_release(CodeGenerator* gen) {
+    for (int i = 0; i < gen->order_fn_effect_count; i++)
+        free(gen->order_fn_effects[i].callees);
+    free(gen->order_fn_effects);
+    gen->order_fn_effects = NULL;
+    gen->order_fn_effect_count = 0;
+    gen->order_fn_effect_capacity = 0;
+    free(gen->order_fn_index);
+    gen->order_fn_index = NULL;
+    gen->order_fn_index_cap = 0;
 }
 
 /* A module global or a variable shared with a closure. */

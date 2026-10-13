@@ -478,6 +478,8 @@ typedef struct {
     struct OrderFnEffects* order_fn_effects;
     int    order_fn_effect_count;
     int    order_fn_effect_capacity;
+    int*   order_fn_index;       /* their entries by definition, hashed */
+    int    order_fn_index_cap;
 
     // Closure support: track closures for hoisted C function generation
     int closure_counter;    // unique ID for closure env structs and functions

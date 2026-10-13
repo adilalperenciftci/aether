@@ -686,6 +686,8 @@ CodeGenerator* create_code_generator(FILE* output) {
     gen->order_fn_effects = NULL;
     gen->order_fn_effect_count = 0;
     gen->order_fn_effect_capacity = 0;
+    gen->order_fn_index = NULL;
+    gen->order_fn_index_cap = 0;
     // Closure support
     gen->closure_counter = 0;
     gen->closures = NULL;
@@ -849,8 +851,7 @@ CodeGenerator* create_code_generator_with_header(FILE* output, FILE* header, con
 void code_generator_release(CodeGenerator* gen) {
     if (gen) {
         program_index_reset();
-        free(gen->order_fn_effects);   /* #2478 */
-        gen->order_fn_effects = NULL;
+        order_fn_effects_release(gen);   /* #2478 */
         clear_captured_string_params(gen);
         free(gen->callee_memo);
         gen->callee_memo = NULL;
