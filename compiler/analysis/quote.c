@@ -361,27 +361,23 @@ static QNode* lower_expr(Lower* L, ASTNode* e) {
             return qadd(qadd(n, o), i);
         }
         case AST_STRUCT_LITERAL: {
-            /* MAKE: `type` the struct; the field each child sets is in
-             * `lit`, comma-separated in child order (a child keeps its own
-             * `name`: a LOCAL's or a CALL's). */
+            /* MAKE: `type` the struct; each child a FIELD_VALUE whose
+             * `name` is the field it sets and whose one child the value. */
             Type* st = e->node_type;
             const char* tname = (st && st->kind == TYPE_STRUCT && st->struct_name)
                                     ? st->struct_name : (e->value ? e->value : "");
-            char fields[1024];
-            fields[0] = 0;
             QNode* n = qnode(QK_MAKE, tname, NULL, NULL, NULL, e->line);
             int ok = 1;
             for (int i = 0; i < e->child_count; i++) {
                 ASTNode* f = e->children[i];
                 if (!f || f->child_count < 1 || !f->value) { ok = 0; continue; }
-                if (fields[0]) strncat(fields, ",", sizeof fields - strlen(fields) - 1);
-                strncat(fields, f->value, sizeof fields - strlen(fields) - 1);
-                QNode* k = lower_expr(L, f->children[0]);
-                if (!k) ok = 0;
-                n = qadd(n, k);
+                QNode* v = lower_expr(L, f->children[0]);
+                if (!v) { ok = 0; continue; }
+                QNode* fv = qnode(QK_FIELD_VALUE, v->type, f->value, NULL, NULL,
+                                  f->line > 0 ? f->line : v->line);
+                n = qadd(n, qadd(fv, v));
             }
             if (!ok) { free_qnode(n); return NULL; }
-            n->lit = aether_intern(fields);
             return n;
         }
         case AST_STRING_INTERP:

@@ -25,11 +25,11 @@ import std.string
 exports(
     Tree, Node, Capture, VERSION,
     BLOCK, LET, ASSIGN, RETURN, IF, WHILE, FOR, BREAK, CONTINUE, EXPR,
-    LIT, LOCAL, CAPTURE, UNARY, BINARY, CHOOSE, CALL, FIELD, INDEX, MAKE,
+    LIT, LOCAL, CAPTURE, UNARY, BINARY, CHOOSE, CALL, FIELD, INDEX, MAKE, FIELD_VALUE,
     kind_name,
     version, body, source, hash, param_count, param_name, param_type,
     capture_count, capture, capture_named,
-    kind, type_of, name, op, lit, line, child_count, child, field,
+    kind, type_of, name, op, lit, line, child_count, child,
     capture_name, capture_type, cell,
     get_float, get_f32, get_int, get_long, get_bool, get_string, get_ptr, get_f32x4,
     to_source, dump, free
@@ -65,7 +65,8 @@ const CHOOSE = 16 // cond, then, else: `if` used as a value
 const CALL = 17 // arguments; `name` is the function as written ("math.sin")
 const FIELD = 18 // object; `name` is the field
 const INDEX = 19 // object, index
-const MAKE = 20 // field values; `type` is the struct; field(n, i) names the field child i sets
+const MAKE = 20 // FIELD_VALUEs, one per field set; `type` is the struct
+const FIELD_VALUE = 21 // value; `name` is the field it sets, in a MAKE
 
 extern aether_quote_version(t: ptr) -> int
 extern aether_quote_body(t: ptr) -> ptr
@@ -122,6 +123,7 @@ kind_name(k: int) -> string {
         18 -> { return "FIELD" }
         19 -> { return "INDEX" }
         20 -> { return "MAKE" }
+        21 -> { return "FIELD_VALUE" }
         _ -> { return "?" }
     }
 }
@@ -163,25 +165,6 @@ lit(n: Node) -> string { return aether_quote_lit(n as ptr) }
 line(n: Node) -> int { return aether_quote_line(n as ptr) }
 child_count(n: Node) -> int { return aether_quote_child_count(n as ptr) }
 child(n: Node, i: int) -> Node { return aether_quote_child(n as ptr, i) as Node }
-
-// The field child `i` of a MAKE sets (MAKE keeps them in `lit`,
-// comma-separated, so each child keeps its own `name`); "" when out of range.
-field(n: Node, i: int) -> string {
-    fields = lit(n)
-    count = string.length(fields)
-    at = 0
-    start = 0
-    k = 0
-    while k <= count {
-        if k == count || string.char_at(fields, k) == 44 {
-            if at == i { return string.substring(fields, start, k) }
-            at = at + 1
-            start = k + 1
-        }
-        k = k + 1
-    }
-    return ""
-}
 
 // ---- captures ----
 
@@ -350,7 +333,7 @@ fn expr_source(n: Node) -> string {
         while i < count {
             f = child(n, i)
             if i > 0 { s = "${s}," }
-            s = "${s} ${field(n, i)}: ${expr_source(f)}"
+            s = "${s} ${name(f)}: ${expr_source(child(f, 0))}"
             i = i + 1
         }
         if count > 0 { s = "${s} " }
@@ -438,9 +421,7 @@ fn dump_node(n: Node) -> string {
     s = "(${kind_name(kind(n))}"
     if name(n) != "" { s = "${s} ${name(n)}" }
     if op(n) != "" { s = "${s} ${op(n)}" }
-    if lit(n) != "" && kind(n) == MAKE {
-        s = "${s} {${lit(n)}}"
-    } else if lit(n) != "" {
+    if lit(n) != "" {
         if type_of(n) == "string" {
             s = "${s} ${quoted(lit(n))}"
         } else {

@@ -98,7 +98,8 @@ Each node has a `kind`, the `type` the type checker gave it, a `name`, an
 | `CALL` | arguments | `name` is the function as written, with its module (`math.sin`) |
 | `FIELD` | object | `.x`; `name` holds the field |
 | `INDEX` | object, index | `a[i]` |
-| `MAKE` | field values | a struct literal, `Varyings { pos: p, uv: t }`; `type` is the struct, and `lit` lists the field each child sets (`"pos,uv"`, read with `quote.field(n, i)`) |
+| `MAKE` | a `FIELD_VALUE` per field | a struct literal, `Varyings { pos: p, uv: t }`; `type` is the struct |
+| `FIELD_VALUE` | value | one field of a `MAKE`: `name` is the field (`pos`), the child its value |
 
 **Every node carries the type the type checker gave it.** A back end that
 writes GLSL needs to know `t` is a `float` and `uv.x * 10.0` is a `float`;

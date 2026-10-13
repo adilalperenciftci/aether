@@ -50,11 +50,10 @@ kinds are the contract.
 |---|---|
 | `kind(n)` | one of the kinds below; `kind_name(k)` spells it |
 | `type_of(n)` | the type the checker gave it: `"float"`, `"vec2"`, a struct's name; `""` on a statement |
-| `name(n)` | a local's, parameter's or capture's name; a called function's (`"math.sin"`); a field's |
+| `name(n)` | a local's, parameter's or capture's name; a called function's (`"math.sin"`); a field's (`FIELD`, `FIELD_VALUE`) |
 | `op(n)` | an operator: `"+"`, `"<"`, `"!"`; on `ASSIGN`, `"="`, `"+="`, ... |
 | `lit(n)` | a literal's text |
 | `child_count(n)`, `child(n, i)` | its children |
-| `field(n, i)` | on `MAKE`: the field child `i` sets |
 | `line(n)` | its source line |
 
 Kinds, version 1 (they are added, never removed or renumbered, and
@@ -80,7 +79,8 @@ Kinds, version 1 (they are added, never removed or renumbered, and
 | `CALL` | arguments; `name` is the function as written |
 | `FIELD` | object; `name` is the field |
 | `INDEX` | object, index |
-| `MAKE` | field values; `type` is the struct, `field(n, i)` each field |
+| `MAKE` | a `FIELD_VALUE` per field; `type` is the struct |
+| `FIELD_VALUE` | value; `name` is the field it sets |
 
 ## Freeing
 
