@@ -1,0 +1,79 @@
+// Regression: `quote` statements (docs/quote.md). A new local is a LET, a
+// later write to it an ASSIGN (with its operator: `+=`, and `i++` as
+// `i += 1`), `if`/`else if`/`else` (an `else if` is the IF itself as the
+// else child), `while`, C-style `for`, `break`, `continue`, an early
+// `return` inside an `if`, and a call made for its effect (EXPR). Each
+// prints back as the source it was written as.
+
+import std.quote
+
+extern exit(code: int)
+
+fn check(label: string, got: string, want: string) -> int {
+    if got != want {
+        println("FAIL quote statements: ${label}")
+        println("  got:\n${got}")
+        println("  want:\n${want}")
+        return 1
+    }
+    return 0
+}
+
+q(t: quote.Tree) -> quote.Tree { return t }
+
+note(x: int) {}
+
+main() {
+    fails = 0
+
+    t = q() quote | n: int | {
+        total = 0
+        i = 0
+        while i < n {
+            i++
+            if i == 3 {
+                continue
+            } else if i > 8 {
+                break
+            } else {
+                total += i
+            }
+        }
+        for (j = 0; j < 4; j++) {
+            total = total - j
+        }
+        note(total)
+        if total < 0 {
+            return 0
+        }
+        return total
+    }
+    want = "|n: int| {\n    total = 0\n    i = 0\n    while i < n {\n        i += 1\n        if i == 3 {\n            continue\n        } else if i > 8 {\n            break\n        } else {\n            total += i\n        }\n    }\n    for (j = 0; j < 4; j += 1) {\n        total = total - j\n    }\n    note(total)\n    if total < 0 {\n        return 0\n    }\n    return total\n}"
+    fails = fails + check("statements", quote.to_source(t), want)
+
+    want = "(param n :int) (BLOCK (LET total :int (LIT 0 :int)) (LET i :int (LIT 0 :int)) (WHILE (BINARY < :bool (LOCAL i :int) (LOCAL n :int)) (BLOCK (ASSIGN += (LOCAL i :int) (LIT 1 :int)) (IF (BINARY == :bool (LOCAL i :int) (LIT 3 :int)) (BLOCK (CONTINUE)) (IF (BINARY > :bool (LOCAL i :int) (LIT 8 :int)) (BLOCK (BREAK)) (BLOCK (ASSIGN += (LOCAL total :int) (LOCAL i :int))))))) (FOR (LET j :int (LIT 0 :int)) (BINARY < :bool (LOCAL j :int) (LIT 4 :int)) (ASSIGN += (LOCAL j :int) (LIT 1 :int)) (BLOCK (ASSIGN = (LOCAL total :int) (BINARY - :int (LOCAL total :int) (LOCAL j :int))))) (EXPR (CALL note (LOCAL total :int))) (IF (BINARY < :bool (LOCAL total :int) (LIT 0 :int)) (BLOCK (RETURN :int (LIT 0 :int)))) (RETURN :int (LOCAL total :int)))"
+    fails = fails + check("statements tree", quote.dump(t), want)
+
+    // A local of a block is that block's: the same name in a sibling block
+    // is a new local there, not a write to the first.
+    t = q() quote | c: bool | {
+        if c {
+            x = 1.0
+            return x
+        } else {
+            x = 2.0
+            return x
+        }
+    }
+    want = "(param c :bool) (BLOCK (IF (LOCAL c :bool) (BLOCK (LET x :float (LIT 1.0 :float)) (RETURN :float (LOCAL x :float))) (BLOCK (LET x :float (LIT 2.0 :float)) (RETURN :float (LOCAL x :float)))))"
+    fails = fails + check("block-scoped locals", quote.dump(t), want)
+
+    // A quote's `return` is the tree's: the function around it goes on.
+    reached = 0
+    t = q() quote { return 1 }
+    reached = 1
+    if reached != 1 { fails = fails + check("return in a quote", "returned", "went on") }
+
+    if fails > 0 { exit(1) }
+    println("quote statements: ok")
+}

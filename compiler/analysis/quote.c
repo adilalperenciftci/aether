@@ -174,6 +174,30 @@ static Symbol* outer_symbol(Lower* L, const char* name, int* is_local_scope) {
     return NULL;
 }
 
+/* The outer variable a write or `&` reaches through, `p` in `p.x.y`. */
+static ASTNode* lvalue_root(ASTNode* e) {
+    while (e && (e->type == AST_MEMBER_ACCESS || e->type == AST_ARRAY_ACCESS) && e->child_count > 0)
+        e = e->children[0];
+    return e;
+}
+
+static int names_capture(Lower* L, ASTNode* target) {
+    ASTNode* root = lvalue_root(target);
+    if (!root || root->type != AST_IDENTIFIER || !root->value) return 0;
+    if (is_local(L, root->value)) return 0;
+    int local_scope = 0;
+    Symbol* s = outer_symbol(L, root->value, &local_scope);
+    return s && local_scope;
+}
+
+static void capture_write_error(Lower* L, ASTNode* at, const char* name, const char* how) {
+    char msg[320];
+    snprintf(msg, sizeof msg, "a quote can't %s '%s', a variable it captures", how, name);
+    lerror(L, at, AETHER_ERR_QUOTE_CAPTURE, msg,
+           "the captured variable's cell is shared with the program; a quote reads it. "
+           "Copy it into a local of the quote and change that");
+}
+
 static QNode* lower_expr(Lower* L, ASTNode* e);
 static QNode* lower_stmt(Lower* L, ASTNode* s);
 
@@ -366,13 +390,94 @@ static QNode* lower_block(Lower* L, ASTNode* b) {
     return n;
 }
 
+/* A block child, or a statement standing where a block is (an `else if`). */
+static QNode* lower_branch(Lower* L, ASTNode* s) {
+    if (s && s->type == AST_BLOCK) return lower_block(L, s);
+    return lower_stmt(L, s);
+}
+
+/* `x++` / `x--`, `x += v`: an ASSIGN with the operator. */
+static QNode* lower_step(Lower* L, ASTNode* target, const char* op, ASTNode* value,
+                         const char* one_type, int line) {
+    if (names_capture(L, target)) {
+        capture_write_error(L, target, lvalue_root(target)->value, "write");
+        return NULL;
+    }
+    QNode* n = qnode(QK_ASSIGN, "", NULL, op, NULL, line);
+    QNode* t = lower_expr(L, target);
+    QNode* v = value ? lower_expr(L, value) : qnode(QK_LIT, one_type, NULL, NULL, "1", line);
+    if (!t || !v) { free_qnode(t); free_qnode(v); free_qnode(n); return NULL; }
+    return qadd(qadd(n, t), v);
+}
+
 static QNode* lower_stmt(Lower* L, ASTNode* s) {
     switch (s->type) {
         case AST_BLOCK:
             return lower_block(L, s);
+        case AST_VARIABLE_DECLARATION: {
+            if (!s->value || s->child_count < 1 || !s->children[0]) {
+                return reject(L, s, "a declaration without a value",
+                              "every local it has starts with a value");
+            }
+            ASTNode* init = s->children[0];
+            if (is_local(L, s->value)) {
+                QNode* n = qnode(QK_ASSIGN, "", NULL, "=", NULL, s->line);
+                QNode* t = qnode(QK_LOCAL, node_type_name(s), s->value, NULL, NULL, s->line);
+                if (!t->type[0]) t->type = aether_intern(node_type_name(init));
+                QNode* v = lower_expr(L, init);
+                if (!v) { free_qnode(t); free_qnode(n); return NULL; }
+                return qadd(qadd(n, t), v);
+            }
+            int local_scope = 0;
+            Symbol* outer = outer_symbol(L, s->value, &local_scope);
+            if (outer && local_scope && !outer->is_function) {
+                capture_write_error(L, s, s->value, "write");
+                return NULL;
+            }
+            QNode* v = lower_expr(L, init);
+            if (!v) return NULL;
+            const char* t = node_type_name(s);
+            if (!t[0]) t = v->type;
+            QNode* n = qnode(QK_LET, t, s->value, NULL, NULL, s->line);
+            push_local(L, aether_intern(s->value));
+            return qadd(n, v);
+        }
+        case AST_ASSIGNMENT: {
+            if (s->child_count < 2) break;
+            return lower_step(L, s->children[0], "=", s->children[1], "", s->line);
+        }
+        case AST_COMPOUND_ASSIGNMENT: {
+            if (!s->value || s->child_count < 2 || !s->children[0] || !s->children[0]->value) break;
+            ASTNode target = {0};
+            target.type = AST_IDENTIFIER;
+            target.value = s->value;
+            target.line = s->line;
+            target.column = s->column;
+            target.node_type = s->node_type;
+            if (!is_local(L, s->value)) {
+                int local_scope = 0;
+                Symbol* outer = outer_symbol(L, s->value, &local_scope);
+                if (outer && local_scope) {
+                    capture_write_error(L, s, s->value, "write");
+                    return NULL;
+                }
+            }
+            return lower_step(L, &target, s->children[0]->value, s->children[1], "", s->line);
+        }
         case AST_EXPRESSION_STATEMENT: {
             if (s->child_count < 1 || !s->children[0]) break;
             ASTNode* x = s->children[0];
+            if (x->type == AST_UNARY_EXPRESSION && x->value && x->child_count == 1 &&
+                (strcmp(x->value, "++") == 0 || strcmp(x->value, "--") == 0)) {
+                return lower_step(L, x->children[0], x->value[0] == '+' ? "+=" : "-=", NULL,
+                                  node_type_name(x->children[0]), s->line);
+            }
+            if (x->type == AST_BINARY_EXPRESSION && x->value && x->child_count == 2 &&
+                strcmp(x->value, "=") == 0) {
+                return lower_step(L, x->children[0], "=", x->children[1], "", s->line);
+            }
+            if (x->type == AST_ASSIGNMENT && x->child_count >= 2)
+                return lower_step(L, x->children[0], "=", x->children[1], "", s->line);
             if (x->type == AST_CLOSURE || x->type == AST_QUOTE || x->type == AST_STRING_INTERP ||
                 x->type == AST_MATCH_STATEMENT || x->type == AST_SEND_FIRE_FORGET ||
                 x->type == AST_SEND_ASK || x->type == AST_SEND_STATEMENT) {
@@ -395,12 +500,87 @@ static QNode* lower_stmt(Lower* L, ASTNode* s) {
             }
             return n;
         }
+        case AST_IF_STATEMENT: {
+            if (s->child_count < 2) break;
+            QNode* n = qnode(QK_IF, "", NULL, NULL, NULL, s->line);
+            QNode* c = lower_expr(L, s->children[0]);
+            QNode* t = lower_branch(L, s->children[1]);
+            QNode* f = (s->child_count > 2 && s->children[2]) ? lower_branch(L, s->children[2]) : NULL;
+            if (!c || !t || (s->child_count > 2 && s->children[2] && !f)) {
+                free_qnode(c); free_qnode(t); free_qnode(f); free_qnode(n);
+                return NULL;
+            }
+            qadd(qadd(n, c), t);
+            if (f) qadd(n, f);
+            return n;
+        }
+        case AST_WHILE_LOOP: {
+            if (s->child_count < 2) break;
+            QNode* n = qnode(QK_WHILE, "", NULL, NULL, NULL, s->line);
+            QNode* c = lower_expr(L, s->children[0]);
+            QNode* b = lower_branch(L, s->children[1]);
+            if (!c || !b) { free_qnode(c); free_qnode(b); free_qnode(n); return NULL; }
+            return qadd(qadd(n, c), b);
+        }
+        case AST_FOR_LOOP: {
+            if (s->child_count != 4 || !s->children[0] || !s->children[1] || !s->children[2])
+                return reject(L, s, "this form of 'for'",
+                              "the tree has the C-style `for (init; cond; step)` only");
+            int mark = L->nlocals;
+            QNode* n = qnode(QK_FOR, "", NULL, NULL, NULL, s->line);
+            QNode* init = lower_stmt(L, s->children[0]);
+            QNode* cond = lower_expr(L, s->children[1]);
+            ASTNode* step = s->children[2];
+            QNode* st = NULL;
+            if (step->type == AST_UNARY_EXPRESSION || step->type == AST_BINARY_EXPRESSION ||
+                step->type == AST_ASSIGNMENT) {
+                ASTNode wrap = {0};
+                ASTNode* kids[1] = { step };
+                wrap.type = AST_EXPRESSION_STATEMENT;
+                wrap.children = kids;
+                wrap.child_count = 1;
+                wrap.line = step->line;
+                wrap.column = step->column;
+                st = lower_stmt(L, &wrap);
+            } else {
+                st = lower_stmt(L, step);
+            }
+            QNode* body = lower_branch(L, s->children[3]);
+            L->nlocals = mark;
+            if (!init || !cond || !st || !body) {
+                free_qnode(init); free_qnode(cond); free_qnode(st); free_qnode(body); free_qnode(n);
+                return NULL;
+            }
+            return qadd(qadd(qadd(qadd(n, init), cond), st), body);
+        }
+        case AST_BREAK_STATEMENT:
+            return qnode(QK_BREAK, "", NULL, NULL, NULL, s->line);
+        case AST_CONTINUE_STATEMENT:
+            return qnode(QK_CONTINUE, "", NULL, NULL, NULL, s->line);
+        case AST_DEFER_STATEMENT:
+            return reject(L, s, "'defer'", "it has no 'defer' node");
+        case AST_TRY_STATEMENT:
+            return reject(L, s, "'try'/'catch'", "it has no node for unwinding");
+        case AST_PANIC_STATEMENT:
+            return reject(L, s, "'panic'", "it has no node for unwinding");
         case AST_SEND_STATEMENT:
         case AST_SEND_FIRE_FORGET:
         case AST_SEND_ASK:
             return reject(L, s, "an actor send", "an actor operation has no meaning in a tree");
         case AST_SPAWN_ACTOR_STATEMENT:
             return reject(L, s, "'spawn'", "an actor operation has no meaning in a tree");
+        case AST_RECEIVE_STATEMENT:
+            return reject(L, s, "'receive'", "an actor operation has no meaning in a tree");
+        case AST_REPLY_STATEMENT:
+            return reject(L, s, "'reply'", "an actor operation has no meaning in a tree");
+        case AST_MATCH_STATEMENT:
+        case AST_SWITCH_STATEMENT:
+            return reject(L, s, s->type == AST_MATCH_STATEMENT ? "'match'" : "'switch'",
+                          "version 1 has no node for patterns");
+        case AST_TUPLE_DESTRUCTURE:
+            return reject(L, s, "a tuple destructure", "version 1 has no node for tuples");
+        case AST_PRINT_STATEMENT:
+            return reject(L, s, "'print'", "it has no node for output");
         default:
             if (s->type == AST_FUNCTION_CALL || s->type == AST_CLOSURE || s->type == AST_QUOTE ||
                 s->type == AST_STRING_INTERP || s->type == AST_IF_EXPRESSION) {

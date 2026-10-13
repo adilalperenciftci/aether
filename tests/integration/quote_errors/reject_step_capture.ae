@@ -1,0 +1,9 @@
+// Incrementing a captured variable in a quote: E0803 (docs/quote.md). Must not compile: tests/integration/quote_errors.
+import std.quote
+
+take(t: quote.Tree) {}
+
+main() {
+    v = 1
+    take() quote { v++ }
+}
