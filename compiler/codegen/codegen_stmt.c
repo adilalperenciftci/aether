@@ -887,19 +887,20 @@ static int is_opt_string_type(Type* t);
 static int is_env_capture_name(CodeGenerator* gen, const char* name);
 
 /* The string a `string?` holder that gives it back when it is re-bound
- * yields: `o ?? d` and `o!`, where `o` is a module-level `var` (#2800) or a
- * closure cell (#2795), both of which own their string and free it at the
- * next store. A local, a field or any owning slot takes a copy of it, as
- * it takes a copy of a `string` cell's string (is_captured_string); taken
- * as it was, a view outlived the re-bind and read freed memory. A `??`
- * whose default is a fresh string is left alone: the copy would leak the
- * default when it is the one taken. */
-/* Is `o` such a holder: a `string?` module var or closure cell? */
+ * yields: `o ?? d` and `o!`, where `o` is a closure cell (#2795), which
+ * owns its string and frees it at the next store. A local, a field or any
+ * owning slot takes a copy of it, as it takes a copy of a `string` cell's
+ * string (is_captured_string); taken as it was, a view outlived the
+ * re-bind and read freed memory. A `??` whose default is a fresh string is
+ * left alone: the copy would leak the default when it is the one taken.
+ * A `string?` module var is no such holder: like a `string` one it keeps
+ * every string it was given (#2800), so a view of it stays valid however
+ * the var is re-bound, a binding or an evaluation-order temporary alike. */
+/* Is `o` such a holder: a `string?` closure cell? */
 static int is_owning_opt_string_holder(CodeGenerator* gen, ASTNode* o) {
     if (!o || o->type != AST_IDENTIFIER || !o->value || !is_opt_string_type(o->node_type))
         return 0;
-    return is_promoted_capture(gen, o->value) || is_env_capture_name(gen, o->value) ||
-           (!is_var_declared(gen, o->value) && is_module_global_var(gen, o->value));
+    return is_promoted_capture(gen, o->value) || is_env_capture_name(gen, o->value);
 }
 
 static int is_owning_opt_string_view(CodeGenerator* gen, ASTNode* e) {
@@ -915,7 +916,7 @@ static int is_owning_opt_string_view(CodeGenerator* gen, ASTNode* e) {
  * element of a string array whose elements are owned (#2474, #2618), or a
  * call that may hand one of those back. Context-free without `cells`; with
  * it, an element of an array a closure writes and the string of a `string?`
- * cell or module var (is_owning_opt_string_view) count too. */
+ * cell (is_owning_opt_string_view) count too. */
 static int is_string_view_read(CodeGenerator* gen, ASTNode* e, int cells) {
     return is_owned_string_field_read(e) || is_owned_string_element(gen, e) ||
            (cells && is_cell_string_element(gen, e)) ||
@@ -9468,23 +9469,28 @@ static void emit_opt_string_cell_value(CodeGenerator* gen, ASTNode* value) {
             owned ? 1 : 0);
 }
 
-/* #2795: `value` stored into `lvalue`, an optional of type `t` that owns
+/* #2795: `value` stored into `lvalue`, an optional of type `t` that keeps
  * what it holds: a closure cell (`(*name)`, emit_opt_cell_store) or a
  * module-level `var` (#2800). The value is taken as the optional
- * (emit_optional_coerced). A `string?` takes a string of its own and gives
- * back the one it held, which a cell's last release would otherwise
- * (_aether_cell_release_optstr); a global's last one lives as long as the
- * program. `text`, when set, is the value's C text, already as the holder
- * keeps it. */
+ * (emit_optional_coerced), and a `string?` takes a string of its own. A
+ * cell, `gives_back`, gives back the one it held, which its last release
+ * would otherwise (_aether_cell_release_optstr). A global keeps it, as a
+ * `string` global keeps every string it was given: a view of it, in a
+ * local or in a temporary of an expression that re-binds the global, has
+ * no owner to outlive. `text`, when set, is the value's C text, already
+ * as the holder keeps it. */
 static void emit_opt_owner_store(CodeGenerator* gen, const char* lvalue, Type* t, ASTNode* value,
-                                 const char* text) {
+                                 const char* text, int gives_back) {
     const char* tc = cg_intern(get_c_type(t));
     if (strcmp(tc, "ae_opt_string") == 0) {
         fprintf(gen->output, "{ ae_opt_string _ae_nv = ");
         if (text) fprintf(gen->output, "%s", text);
         else emit_opt_string_cell_value(gen, value);
-        fprintf(gen->output, "; ae_opt_string _ae_ov = %s; %s = _ae_nv; "
-                "if (_ae_ov.has) _aether_str_cell_free_val(_ae_ov.val); }\n", lvalue, lvalue);
+        if (gives_back)
+            fprintf(gen->output, "; ae_opt_string _ae_ov = %s; %s = _ae_nv; "
+                    "if (_ae_ov.has) _aether_str_cell_free_val(_ae_ov.val); }\n", lvalue, lvalue);
+        else
+            fprintf(gen->output, "; %s = _ae_nv; }\n", lvalue);
         return;
     }
     fprintf(gen->output, "%s = ", lvalue);
@@ -9496,7 +9502,7 @@ static void emit_opt_owner_store(CodeGenerator* gen, const char* lvalue, Type* t
 
 static void emit_opt_cell_store(CodeGenerator* gen, const char* name, Type* t, ASTNode* value,
                                 const char* text) {
-    emit_opt_owner_store(gen, cg_internf("(*%s)", name), t, value, text);
+    emit_opt_owner_store(gen, cg_internf("(*%s)", name), t, value, text, 1);
 }
 
 /* `name = value` into the cell of the promoted capture `name`, of type `t`:
@@ -12017,13 +12023,13 @@ static Type* module_global_decl_type(CodeGenerator* gen, const char* name) {
  * a reference of its own to a closure (adopted when `closure_owned`, else
  * retained, giving back the one it held). An optional global (#2800) takes
  * the slot as the optional, a bare value wrapped, and a `string?` one a
- * string of its own, giving back the one it held (emit_opt_owner_store). */
+ * string of its own, keeping the one it held (emit_opt_owner_store). */
 static void emit_destructure_global_store(CodeGenerator* gen, const char* name, Type* pt,
                                           int tmp_id, int j, int owned, int closure_owned) {
     Type* gt = module_global_decl_type(gen, name);
     if (gt && gt->kind == TYPE_OPTIONAL) {
         const char* gc = cg_intern(get_c_type(gt));
-        emit_opt_owner_store(gen, name, gt, NULL, opt_slot_text(gc, pt, tmp_id, j, owned, 1));
+        emit_opt_owner_store(gen, name, gt, NULL, opt_slot_text(gc, pt, tmp_id, j, owned, 1), 0);
         return;
     }
     if (pt && pt->kind == TYPE_FUNCTION && !pt->is_fnptr) {
@@ -13092,14 +13098,14 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                 }
                 /* #2800: a module-level optional `var` the binding names,
                  * with no local or parameter of that name declared, is
-                 * written, as `g = v` writes any global (#701), and owns
-                 * what it holds: a `string?` takes a string of its own and
-                 * gives back the one it held. */
+                 * written, as `g = v` writes any global (#701): a `string?`
+                 * takes a string of its own and, as a `string` global does,
+                 * keeps the one it held. */
                 if (!is_var_declared(gen, stmt->value) &&
                     is_module_global_var(gen, stmt->value)) {
                     print_indent(gen);
                     emit_opt_owner_store(gen, stmt->value, stmt->node_type,
-                                         stmt->child_count > 0 ? stmt->children[0] : NULL, NULL);
+                                         stmt->child_count > 0 ? stmt->children[0] : NULL, NULL, 0);
                     break;
                 }
                 /* `string?` heap-ownership: the local is registered by
@@ -13114,15 +13120,6 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                 int rhs_is_heap = is_opt_str && stmt->child_count > 0 &&
                                   stmt->children[0] &&
                                   is_heap_opt_string_rhs(gen, stmt->children[0]);
-                /* #2800: a `string?` global gives back the string it holds
-                 * when it is re-bound, so a local bound to it takes a copy
-                 * of its own rather than the global's. */
-                ASTNode* grd = stmt->child_count > 0 ? stmt->children[0] : NULL;
-                int global_read = is_opt_str && grd && grd->type == AST_IDENTIFIER && grd->value &&
-                                  is_opt_string_type(grd->node_type) &&
-                                  !is_var_declared(gen, grd->value) &&
-                                  is_module_global_var(gen, grd->value);
-                if (global_read) rhs_is_heap = 1;
                 print_indent(gen);
                 if (is_opt_str) {
                     /* Free the prior owned buffer, then assign the new
@@ -13133,12 +13130,7 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                     fprintf(gen->output, "{ ae_opt_string _opt_old_%s = %s; ",
                             stmt->value, stmt->value);
                     fprintf(gen->output, "%s = ", stmt->value);
-                    if (global_read) {
-                        fprintf(gen->output, "({ ae_opt_string _ae_ot = ");
-                        generate_expression(gen, grd);
-                        fprintf(gen->output, "; if (_ae_ot.has) "
-                                "_ae_ot.val = aether_uniform_heap_str(_ae_ot.val, 0); _ae_ot; })");
-                    } else if (stmt->child_count > 0 && stmt->children[0]) {
+                    if (stmt->child_count > 0 && stmt->children[0]) {
                         emit_optional_coerced(gen, stmt->children[0], stmt->node_type);
                     } else {
                         fprintf(gen->output, "(%s){0}", get_c_type(stmt->node_type));
@@ -15438,10 +15430,11 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                     unindent(gen);
                     print_line(gen, "} else {");
                     indent(gen);
-                    /* #2800 follow-up: a `string?` module var or closure
-                     * cell gives its string back at its next re-bind, which
-                     * the arm may run (a call that re-binds it), so the
-                     * `some` binding is a copy the arm owns, as below. */
+                    /* #2795: a `string?` closure cell gives its string back
+                     * at its next store, which the arm may run (a closure
+                     * call that re-binds it), so the `some` binding is a
+                     * copy the arm owns, as below. A module var keeps every
+                     * string it held, so its binding stays a view. */
                     int holder_copy = !is_owned_opt_string_call(gen, match_expr) &&
                                       some_bind && is_owning_opt_string_holder(gen, match_expr);
                     if (is_owned_opt_string_call(gen, match_expr) || holder_copy) {

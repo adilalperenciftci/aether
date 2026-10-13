@@ -6,4 +6,7 @@
   a destructure slot. A `string?` cell owns its string, as a string cell
   does: a store takes a string of its own and gives back the one it held,
   a `string?` parameter's cell takes one of its own on entry, and the
-  cell's last release gives back the last (#2795).
+  cell's last release gives back the last. What a local takes out of it
+  (`v = a ?? ""`, `v = a!`, a `some(v)` binding) is a copy of its own, as
+  what it takes out of a string cell is, so it outlives the next store
+  (#2795).

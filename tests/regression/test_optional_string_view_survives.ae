@@ -1,21 +1,25 @@
-// Regression (#2800 follow-up): what a local takes from a `string?` module
-// var, or from a `string?` closure cell, survives the holder's next
-// re-bind.
+// Regression (#2800 follow-up): what is read from a `string?` module var,
+// or from a `string?` closure cell, survives the holder's next re-bind.
 //
-// Both holders own their string and give it back when they are re-bound
-// (#2795, #2800). `v = name ?? ""` and `v = name!` bound the local to that
-// string as it stood, so after a re-bind of `name` the local read freed
-// memory: once other strings had reused it, it printed their bytes, with
-// no diagnostic. A `some(s)` binding of a match on the var, kept in an
-// outer local, did the same. The local takes a copy of its own now, as a
-// local takes one from a `string` closure cell (is_captured_string), and
-// frees it at its scope end; the `some` binding is a copy the arm owns.
-// `let copy: string? = name` already took a copy and is kept here.
+// A `string?` closure cell owns its string and gives it back at its next
+// store (#2795): `v = s ?? ""`, `v = s!` and a `some(x)` binding of a
+// match on it, kept in an outer local, bound the local to that string as
+// it stood, so after a re-bind the local read freed memory and, once other
+// strings had reused it, printed their bytes. The local takes a copy of
+// its own now, as a local takes one from a `string` cell
+// (is_captured_string), and the `some` binding is a copy the arm owns.
+//
+// A `string?` module var gave its string back at a re-bind too, and a copy
+// at each binding did not cover a view held in an evaluation-order
+// temporary: `show(name ?? "", rebind())` read the string `rebind()` had
+// freed. A `string?` global keeps every string it was given now, as a
+// `string` global does, so a view of it is valid however it is held.
 //
 // After each re-bind, 50 fresh strings (`burn`) reuse what was freed, so a
-// dead view reads another string. The leak check runs where the heap count
-// is exact (mem.heap_in_use_exact): after a warm-up, some window of the
-// same work grows by exactly 0 (mem.steady_growth).
+// dead view reads another string. The leak check covers the cell, which
+// owns its strings, where the heap count is exact (mem.heap_in_use_exact):
+// after a warm-up, some window of the same work grows by exactly 0
+// (mem.steady_growth). A global never gives back what it held.
 
 import std.mem
 import std.string
@@ -35,11 +39,6 @@ set_name(p: string) {
     name = string.concat(p, "-name")
 }
 
-rebind() -> int {
-    name = string.concat("zz", "-other-value-xx")
-    return 1
-}
-
 burn() -> int {
     total = 0
     i = 0
@@ -49,6 +48,16 @@ burn() -> int {
         i = i + 1
     }
     return total
+}
+
+rebind() -> int {
+    name = string.concat("zz", "-other-value-xx")
+    burn()
+    return 1
+}
+
+show(s: string, k: int) -> string {
+    return string.concat(s, "")
 }
 
 global_views(p: string) -> int {
@@ -67,12 +76,26 @@ global_views(p: string) -> int {
         }
     }
     rebind()
-    burn()
     check(v == "ab-name", "a ?? view of a string? var after its re-bind ([${v}])")
     check(w == "ab-name", "a ! view of a string? var after its re-bind ([${w}])")
     check((copy ?? "") == "ab-name", "a string? copy of a string? var after its re-bind")
     check(held == "ab-name", "a some(s) binding of a string? var after its re-bind ([${held}])")
     return string.length(v) + string.length(w)
+}
+
+// The view is an operand of the expression whose later operand re-binds
+// the var: it sits in a temporary of the expression, not in a binding.
+same_expression(p: string) -> int {
+    set_name(p)
+    line = "[${name ?? ""}] [${rebind()}]"
+    check(line == "[ab-name] [1]", "a ?? view interpolated beside a re-bind (${line})")
+    set_name(p)
+    n = show(name ?? "", rebind())
+    check(n == "ab-name", "a ?? view passed beside a re-bind ([${n}])")
+    set_name(p)
+    m = show(name!, rebind())
+    check(m == "ab-name", "a ! view passed beside a re-bind ([${m}])")
+    return string.length(n) + string.length(m)
 }
 
 cell_views(p: string) -> int {
@@ -82,6 +105,7 @@ cell_views(p: string) -> int {
     }
     set()
     v = s ?? ""
+    w = s!
     held = ""
     match s {
         none -> {
@@ -97,14 +121,14 @@ cell_views(p: string) -> int {
     again()
     burn()
     check(v == "ab-cell", "a ?? view of a string? cell after its re-bind ([${v}])")
+    check(w == "ab-cell", "a ! view of a string? cell after its re-bind ([${w}])")
     check(held == "ab-cell", "a some(x) binding of a string? cell after its re-bind ([${held}])")
-    return string.length(v)
+    return string.length(v) + string.length(w)
 }
 
 fn round(p: string) {
     i = 0
     while i < 20 {
-        global_views(p)
         cell_views(p)
         i = i + 1
     }
@@ -114,13 +138,14 @@ main() {
     println("=== test_optional_string_view_survives ===")
     p = string.concat("ab", "")
     check(global_views(p) == 14, "views of a string? var")
-    check(cell_views(p) == 7, "views of a string? cell")
+    check(same_expression(p) == 14, "views of a string? var beside its re-bind")
+    check(cell_views(p) == 14, "views of a string? cell")
     if mem.heap_in_use_exact() {
         round(p)
         grown = mem.steady_growth(|| {
                 round(p)
             }, 5)
-        check(grown == 0, "20 rounds of views grew the heap by ${grown} bytes in every run")
+        check(grown == 0, "20 rounds of cell views grew the heap by ${grown} bytes in every run")
     }
     println("=== test_optional_string_view_survives passed ===")
 }

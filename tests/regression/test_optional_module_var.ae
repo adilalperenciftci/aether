@@ -9,15 +9,10 @@
 // declaration needed an initialiser at all. The initialiser is now the
 // optional's own constant (`{ .has = 1, .val = 3 }`, `{0}` for `none` or
 // for no initialiser). A function's `g = v` or `g, n = f()` writes the
-// global, a bare value wrapped, as for a local. A `string?` global owns
-// its string: a re-bind takes a string of its own and gives back the one
-// it held, so re-binding it in a loop grows nothing.
-//
-// The leak check runs where the heap count is exact (mem.heap_in_use_exact):
-// after a warm-up, some window of the same work grows by exactly 0
-// (mem.steady_growth).
+// global, a bare value wrapped, as for a local. A `string?` global takes
+// a string of its own and, like a `string` global, keeps every string it
+// was given, so what a local took from it stays valid after a re-bind.
 
-import std.mem
 import std.string
 
 extern exit(code: int)
@@ -125,7 +120,7 @@ in_loop(p: string) -> int {
     return gi ?? -1
 }
 
-// A local bound to a string? global keeps its own string when the
+// A local bound to a string? global keeps reading its string when the
 // global is re-bound.
 kept_copy(p: string) -> int {
     gs = string.concat(p, "123")
@@ -134,18 +129,6 @@ kept_copy(p: string) -> int {
     gs = none
     int r = string.length(mine ?? "")
     return r
-}
-
-fn round(p: string) {
-    i = 0
-    while i < 100 {
-        set_strs(p)
-        clear_strs()
-        set_strs(p)
-        in_loop(p)
-        kept_copy(p)
-        i = i + 1
-    }
 }
 
 main() {
@@ -171,13 +154,8 @@ main() {
     check(point_sum(gp) == 30 && point_sum(gp_none) == 7, "Point? globals re-bound")
     check(in_loop(p) == 2 && int_or(gi_none) == 40 && (gs ?? "-") == "bc?",
         "optional globals re-bound in a loop and by a closure (${gi ?? -1} ${gi_none ?? -1})")
-    check(kept_copy(p) == 5, "a local keeps a copy of a string? global (${kept_copy(p)})")
-    if mem.heap_in_use_exact() {
-        round(p)
-        grown = mem.steady_growth(|| {
-                round(p)
-            }, 5)
-        check(grown == 0, "100 re-binds of string? globals grew the heap by ${grown} bytes in every run")
-    }
+    check(kept_copy(p) == 5, "a local keeps the string of a string? global (${kept_copy(p)})")
+    clear_strs()
+    check(gs == none && gs_none == none && gs_unset == none, "string? globals re-bound to none")
     println("=== test_optional_module_var passed ===")
 }

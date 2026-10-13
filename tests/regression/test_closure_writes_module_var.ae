@@ -9,7 +9,9 @@
 // function went on seeing `init 3`), and a closure that only read the name
 // read a copy taken when it was made. Every `name = ...` in a function
 // writes a module var (#701), so the name is never a capture; a parameter
-// of the same name still is.
+// of the same name still is. A declaration (`let gnum: int = 70`, `int gnum
+// = 70`, `let gnum = 70`) is such a binding too, in a function or in a
+// closure, as the language reference says.
 
 import std.string
 
@@ -18,6 +20,7 @@ extern exit(code: int)
 var gstr: string = "init"
 var gnum: int = 3
 var gopt: int? = none
+var gx: int = 1
 
 fn check(cond: bool, msg: string) {
     if !cond {
@@ -43,6 +46,19 @@ shadowed(gnum: int) -> int {
     return gnum
 }
 
+// Every declaration form binds the global, as `gnum = v` does.
+declared() -> int {
+    let gnum: int = 70
+    gnum = gnum + 1
+    int gx = 40
+    let gstr = "declared"
+    in_closure = || {
+        let gnum: int = 51
+    }
+    in_closure()
+    return gnum + gx
+}
+
 main() {
     println("=== test_closure_writes_module_var ===")
     gstr = "first"
@@ -63,5 +79,8 @@ main() {
     int now = call(get)
     check(now == 21, "a closure reads the global as it is (${now})")
     check(shadowed(1) == 101 && gnum == 21, "a parameter shadows the global (${gnum})")
+    int d = declared()
+    check(d == 91 && gnum == 51 && gx == 40 && gstr == "declared",
+        "declarations bind the globals (${d} ${gnum} ${gx} ${gstr})")
     println("=== test_closure_writes_module_var passed ===")
 }

@@ -6,8 +6,7 @@
   now takes the optional's own constant (`{ .has = 1, .val = 3 }`, `{0}`
   for `none`), and no initialiser means `none`. A function's `g = v`, or a
   tuple destructure slot, writes the global with a bare value wrapped,
-  including in a loop body or a closure. A `string?` var owns its string:
-  a re-bind gives back the one it held, so re-binding grows nothing, and
-  what a local takes from it (`v = g ?? ""`, `v = g!`, `let c: string? =
-  g`, a `some(v)` binding of a `match` on it) is a copy of its own, so it
-  survives the next re-bind. A `string?` closure cell gives the same (#2800).
+  including in a loop body or a closure. A `string?` var takes a string of
+  its own and keeps every string it was given, as a `string` var does, so
+  whatever reads it (`v = g ?? ""`, `g!`, a `some(v)` binding, a view
+  beside a call that re-binds it) stays valid (#2800).
