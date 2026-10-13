@@ -889,13 +889,22 @@ static int order_has_call(ASTNode* node) {
  * narrows it: a mark on the parameters an extern writes through would still
  * leave its other effects unknown, and holding the earlier operand in a
  * temporary costs nothing once the C compiler has optimised. Operands that
- * read only plain locals and literals stay inline. */
+ * read only plain locals and literals stay inline.
+ *
+ * Memory a call writes through a pointer or a slice may be what another
+ * pointer of the caller reaches: one it keeps in a module variable, one it
+ * was handed under another name, one read out of a field (#2813). So a
+ * call that writes through any pointer or slice is ordered against every
+ * operand that reads through one (a field of a pointer, an element of a
+ * slice, a pointer or slice handed to a call), not only against reads
+ * rooted at the argument it writes through. */
 
 typedef struct OrderFnEffects {
     ASTNode* fn;
     int opaque;                /* makes a call the compiler cannot see */
     int writes_shared;         /* a module global, or runs a closure */
     unsigned writes_through;   /* bit k: memory its parameter k reaches */
+    int writes_memory;         /* writes through any pointer or slice */
 } OrderFnEffects;
 
 /* The definition a call runs, when it is a function of this program, or
@@ -950,6 +959,24 @@ static ASTNode* order_through_lvalue(ASTNode* node) {
     return (lv && (lv->type == AST_MEMBER_ACCESS || lv->type == AST_ARRAY_ACCESS)) ? lv : NULL;
 }
 
+/* Is `t` a reference to memory the caller may share: a pointer, or a slice
+ * (an unsized array, `{ ptr, len }`)? A fixed-size array is a value. */
+static int order_is_memory_ref(const Type* t) {
+    return t && (t->kind == TYPE_PTR || (t->kind == TYPE_ARRAY && t->array_size <= 0));
+}
+
+/* Does the lvalue or read `node` (a field or an element, at any depth)
+ * reach its memory through a pointer or a slice? */
+static int order_access_through_memory(const ASTNode* node) {
+    while (node && (node->type == AST_MEMBER_ACCESS || node->type == AST_ARRAY_ACCESS) &&
+           node->child_count > 0) {
+        const ASTNode* obj = node->children[0];
+        if (obj && order_is_memory_ref(obj->node_type)) return 1;
+        node = obj;
+    }
+    return 0;
+}
+
 static int order_param_index(ASTNode* fn, const char* name) {
     for (int i = 0, k = 0; name && i < fn->child_count; i++) {
         ASTNode* p = fn->children[i];
@@ -975,19 +1002,21 @@ static int order_call_effects(CodeGenerator* gen, ASTNode* call) {
 
 /* The effects of the calls in `node` as seen from `fn`'s own body. */
 static void order_scan_body(CodeGenerator* gen, ASTNode* fn, ASTNode* node,
-                            int* opaque, int* shared, unsigned* through) {
+                            int* opaque, int* shared, unsigned* through, int* memory) {
     if (!node || node->type == AST_CLOSURE) return;
     const char* t = order_write_target(node);
     if (t && is_module_global_var(gen, t)) *shared = 1;
     ASTNode* lv = order_through_lvalue(node);
     int k = lv ? order_param_index(fn, order_lvalue_root(lv)) : -1;
     if (k >= 0) *through |= 1u << k;
+    if (lv && order_access_through_memory(lv)) *memory = 1;
     if (node->type == AST_FUNCTION_CALL) {
         int idx = order_call_effects(gen, node);
         if (idx < 0) {
             *opaque = 1;
         } else {
             if (gen->order_fn_effects[idx].writes_shared) *shared = 1;
+            if (gen->order_fn_effects[idx].writes_memory) *memory = 1;
             unsigned c_through = gen->order_fn_effects[idx].writes_through;
             for (int i = 0, a = 0; i < node->child_count && a < 32; i++) {
                 ASTNode* arg = node->children[i];
@@ -1007,7 +1036,7 @@ static void order_scan_body(CodeGenerator* gen, ASTNode* fn, ASTNode* node,
         *opaque = 1;
     }
     for (int i = 0; i < node->child_count; i++)
-        order_scan_body(gen, fn, node->children[i], opaque, shared, through);
+        order_scan_body(gen, fn, node->children[i], opaque, shared, through, memory);
 }
 
 /* The memoised effects of calling `fn`, a function of this program: an
@@ -1023,16 +1052,18 @@ static int order_fn_effects(CodeGenerator* gen, ASTNode* fn) {
         gen->order_fn_effect_capacity = cap;
     }
     int idx = gen->order_fn_effect_count++;
-    gen->order_fn_effects[idx] = (OrderFnEffects){ fn, 0, 0, 0 };
+    gen->order_fn_effects[idx] = (OrderFnEffects){ fn, 0, 0, 0, 0 };
     int opaque = 0;
     int shared = 0;
     unsigned through = 0;
+    int memory = 0;
     for (int i = 0; i < fn->child_count; i++)
         if (fn->children[i] && fn->children[i]->type == AST_BLOCK)
-            order_scan_body(gen, fn, fn->children[i], &opaque, &shared, &through);
+            order_scan_body(gen, fn, fn->children[i], &opaque, &shared, &through, &memory);
     gen->order_fn_effects[idx].opaque = opaque;
     gen->order_fn_effects[idx].writes_shared = shared;
     gen->order_fn_effects[idx].writes_through = through;
+    gen->order_fn_effects[idx].writes_memory = memory;
     return idx;
 }
 
@@ -1077,6 +1108,27 @@ static int order_reads_through(ASTNode* node, const char* root) {
     return 0;
 }
 
+/* Does `node` read memory through a pointer or a slice: a field or an
+ * element reached through one, or one handed to a call (a callee may read
+ * through it)? */
+static int order_reads_memory(ASTNode* node) {
+    if (!node || node->type == AST_CLOSURE) return 0;
+    if ((node->type == AST_MEMBER_ACCESS || node->type == AST_ARRAY_ACCESS) &&
+        order_access_through_memory(node)) return 1;
+    if (node->type == AST_FUNCTION_CALL) {
+        for (int i = 0; i < node->child_count; i++) {
+            ASTNode* a = node->children[i];
+            while (a && (a->type == AST_SLICE_FROM_ARRAY || a->type == AST_SLICE_TO_PTR ||
+                         a->type == AST_NAMED_ARG) && a->child_count > 0)
+                a = a->children[0];
+            if (a && order_is_memory_ref(a->node_type)) return 1;
+        }
+    }
+    for (int i = 0; i < node->child_count; i++)
+        if (order_reads_memory(node->children[i])) return 1;
+    return 0;
+}
+
 /* Can a call in `x` change what `y` reads, or read what `y` writes? */
 static int order_call_affects(CodeGenerator* gen, ASTNode* x, ASTNode* y) {
     if (!x || x->type == AST_CLOSURE) return 0;
@@ -1092,6 +1144,10 @@ static int order_call_affects(CodeGenerator* gen, ASTNode* x, ASTNode* y) {
         if (shared && (order_reads_shared_var(gen, y) || order_has_call(y))) return 1;
         /* An opaque call may write any memory `y` reads through. */
         if (idx < 0 && order_reads_through(y, NULL)) return 1;
+        /* One that writes through a pointer or a slice may write what `y`
+         * reaches through another (#2813). */
+        if (idx >= 0 && gen->order_fn_effects[idx].writes_memory && order_reads_memory(y))
+            return 1;
         for (int i = 0, a = 0; i < x->child_count && a < 32; i++) {
             ASTNode* arg = x->children[i];
             if (arg && arg->type == AST_CLOSURE && arg->value &&
@@ -1466,6 +1522,14 @@ const char* interp_temp_c_type(Type* t) {
         case TYPE_FLOAT:    return "double";
         case TYPE_FLOAT32:  return "float";
         case TYPE_LONGDOUBLE: return "long double";
+        /* #2813: formatted with %d, read as the int a vararg promotes them
+         * to. Left inline, a byte or a uint16 segment was read after a call
+         * in a later segment had changed it. */
+        case TYPE_BYTE: case TYPE_UINT8: case TYPE_UINT16: case TYPE_ENUM:
+            return "int";
+        case TYPE_BITSTRUCT:
+            return type_promotes_to_int(t) ? "int" : get_c_type(t);
+        case TYPE_BITSET:   return "unsigned long long";
         default:            return NULL;
     }
 }

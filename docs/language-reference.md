@@ -3440,8 +3440,11 @@ when a later one depends on it: one writes a variable the other uses
 change what the other reads. A closure literal reads the variables it
 captures where it stands, so `f(i++, || { return i })` makes the closure
 after the step. A call can change a module global, a variable it shares
-with a closure it runs, and memory it is handed by reference; what a
-function of the program writes is read off its body. A call whose body
+with a closure it runs, memory it is handed by reference, and memory it
+reaches through a pointer or a slice (a field of the struct a global
+pointer points at, say), so an operand that reads memory through one is
+evaluated ahead of a later call that writes through one; what a function
+of the program writes is read off its body. A call whose body
 the compiler cannot see is opaque: a C extern, a C function pointer, a
 closure, a message send, and a function of the program that makes such a
 call. An opaque call may write anything, so it is evaluated ahead of every
