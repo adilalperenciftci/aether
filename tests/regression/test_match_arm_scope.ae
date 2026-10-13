@@ -1,0 +1,157 @@
+// Regression (#2768): a name a `match` arm binds is one variable with the
+// rest of the function exactly where a name an `if` branch binds would be.
+//
+// The language reference (Variables) says a name first bound inside a
+// branch and used after it is one variable for the whole function, and the
+// shared hoists (analysis/hoist.c) made that true of an `if` arm and a
+// `switch` case, but not of a `match` arm: `match x { 1 -> { v = 10 } _ ->
+// { v = 20 } }` then `return v` was "Undefined variable". A match arm's body
+// now joins the three hoists: read after a match at the top of the function
+// body, bound in a `while` body, or bound by every arm of a match that runs
+// an arm for every value (a `_` arm, or arms covering the subject's type).
+// tests/integration/match_arm_scope checks the reads that stay undefined.
+extern exit(code: int)
+
+var bad = 0
+
+check(label: string, got: int, want: int) {
+    if got != want {
+        println("FAIL ${label}: got ${got}, want ${want}")
+        bad = bad + 1
+    }
+}
+
+enum Color { Red, Green, Blue }
+
+// The issue's shape: every arm binds it, and a `_` arm runs for the rest.
+pick(x: int) -> int {
+    match x {
+        1 -> { v = 10 }
+        _ -> { v = 20 }
+    }
+    return v
+}
+
+// At the top of the function body, read after the match: one variable for
+// the function, as for an `if` there (zero when no arm ran).
+top(x: int) -> int {
+    match x {
+        1 -> { v = 10 }
+        2 -> { v = 20 }
+    }
+    return v
+}
+
+// Nested, every arm binds it and `_` covers the rest.
+nested(x: int) -> int {
+    if x > 0 {
+        match x {
+            1 -> { w = 1 }
+            _ -> { w = 2 }
+        }
+        return w
+    }
+    return 0
+}
+
+// Every member of an enum is covered without `_`.
+shade(c: Color) -> string {
+    if true {
+        match c {
+            Red -> { s = "r" }
+            Green -> { s = "g" }
+            Blue -> { s = "b" }
+        }
+        return s
+    }
+    return "?"
+}
+
+// `none` and `some(v)` cover an optional, `true` and `false` a bool.
+opt(m: int?) -> int {
+    if true {
+        match m {
+            none -> { r = -1 }
+            some(v) -> { r = v }
+        }
+        return r
+    }
+    return 0
+}
+
+flag(b: bool) -> int {
+    if true {
+        match b {
+            true -> { f = 1 }
+            false -> { f = 0 }
+        }
+        return f
+    }
+    return 0
+}
+
+// A local of a `while` body: declared before the loop.
+looped(n: int) -> int {
+    i = 0
+    total = 0
+    while i < n {
+        match i % 2 {
+            0 -> { step = 1 }
+            _ -> { step = 10 }
+        }
+        total = total + step
+        i = i + 1
+    }
+    return total
+}
+
+// One variable takes the numeric join of every arm's binding.
+widest(x: int) -> long {
+    if x > 0 {
+        match x {
+            1 -> { n = 1 }
+            _ -> { n = 4000000000 }
+        }
+        return n
+    }
+    return 0
+}
+
+main() {
+    check("pick 1", pick(1), 10)
+    check("pick 2", pick(2), 20)
+    check("top 1", top(1), 10)
+    check("top 2", top(2), 20)
+    check("top, no arm ran", top(3), 0)
+    check("nested 1", nested(1), 1)
+    check("nested 5", nested(5), 2)
+    if shade(Color.Green) != "g" {
+        println("FAIL enum arms: ${shade(Color.Green)}")
+        bad = bad + 1
+    }
+    check("optional some", opt(7), 7)
+    check("optional none", opt(none), -1)
+    check("bool true", flag(true), 1)
+    check("bool false", flag(false), 0)
+    check("while body", looped(4), 22)
+    if widest(2) != 4000000000 {
+        println("FAIL numeric join: ${widest(2)}")
+        bad = bad + 1
+    }
+
+    // A match whose value is used keeps its arms' names in the arms.
+    k = match 3 {
+        3 -> {
+            z = 4
+            z * 2
+        }
+        _ -> { 0 }
+    }
+    check("value match", k, 8)
+
+    if bad != 0 {
+        println("${bad} check(s) failed")
+        exit(1)
+    }
+    println("match arm scope: ok")
+}

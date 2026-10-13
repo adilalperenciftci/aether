@@ -710,6 +710,14 @@ int ast_is_trailing_block(const ASTNode* n);
  * everywhere the others do. */
 int ast_is_own_function(const ASTNode* n);
 
+/* Whether some arm of the `match` `m` runs for every value it can match: it
+ * has a `_` arm, or it covers its subject's type. A match over an enum or a
+ * sum covers it (the checker rejects one that misses a case), as do `none`
+ * and `some(v)` over an optional, `true` and `false` over a bool, and `[]`
+ * with `[h|t]` over a list. Reads the subject's type, so it is asked once
+ * the subject is checked. */
+int ast_match_covers(const ASTNode* m);
+
 /* #2146: the lane index `.x` / `.y` / `.z` / `.w` names on a vector type,
  * or -1 when the name is not a lane accessor or the type has too few lanes
  * (`.z` on an f64x2). One table, so the typechecker and codegen cannot

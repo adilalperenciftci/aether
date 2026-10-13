@@ -14660,6 +14660,12 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
             // match (x) { 1 -> a, 2 -> b, _ -> c }
             // becomes: { T _match_val = x; if (_match_val == 1) { a; } else if ... }
             // Using a temp variable avoids re-evaluating the match expression per arm.
+            /* #2768: the names every arm of a statement match binds, when
+             * an arm runs for every value, are declared before it, as both
+             * arms of an if/else are. A match whose value is used (it has a
+             * result variable) keeps its arms' names in the arms, as the
+             * checker does. */
+            if (!gen->match_result_var) hoist_common_vars(gen, stmt);
             if (stmt->child_count > 0) {
                 ASTNode* match_expr = stmt->children[0];
 

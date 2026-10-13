@@ -481,7 +481,7 @@ Variables are inferred from their initialization or usage context.
 
 **Keywords are not names.** A statement keyword used as a variable (`when = 0.0`, `message = "hi"`) is refused at the keyword: `'when' is a reserved keyword and cannot be used as an identifier; rename it`.
 
-**A local has one type: the one its first binding gave it.** A later bare assignment is an assignment, not a new variable, so `x = 5` then `x = "s"` (or `x = true`, `x = null`) is a compile error, *cannot re-bind 'x' as string: it was bound as int by its first assignment*, rather than a C error about `const char*`. Use a new name for the other value. A name first bound inside a branch or loop body and **used after it** is one variable for the whole function: it takes the numeric join of every binding (`if a { n = 1 } else { n = 4000000000 }` makes `n` a `long`; `f = 1.5` in one branch and `f = 2` in the other keeps `f` a `float`), and a binding of another kind anywhere in the function, or of another struct or pointer type, is the same compile error: *cannot bind 'v' as int: it is bound as string in another branch or loop body of this function*. A `switch` case is a branch here as an `if` arm is. A local of a `while` body is declared before the loop, and a name both arms of an `if`/`else` (or every case of a `switch` with a `default`) bind is declared before the `if` (or `switch`), so each is one variable whether or not it is used after them: `view = p as *Apple` in one `while` and `view = p as *Pear` in the next is that error, where a bare `ptr` or `null` binding would fit either. A read of such a local in the body before its binding, which sees the value the previous pass bound, has the binding's type (`out = "${out}${prev}"` ahead of `prev = "p${i}"` reads a string). A name bound in the bodies of separate `if`s or `for` loops and used only inside them is a separate variable per body, except a `string` local, which is always one variable for the whole function, as its heap tracker is. The conversions the [table below](#casting-between-types) permits still apply at a re-bind, and the local keeps its first type: after `f = 1.5`, `f = 2` stores `2.0` and `f` stays a `float`; after `int x = 0`, `x = 2.5` stores `2`. A `string` accepts `null` (it is a nullable `const char*`), and a value that would not fit an *inferred* `int` (a 64-bit integer, a `uint32`, a float) is the narrowing error described there.
+**A local has one type: the one its first binding gave it.** A later bare assignment is an assignment, not a new variable, so `x = 5` then `x = "s"` (or `x = true`, `x = null`) is a compile error, *cannot re-bind 'x' as string: it was bound as int by its first assignment*, rather than a C error about `const char*`. Use a new name for the other value. A name first bound inside a branch or loop body and **used after it** is one variable for the whole function: it takes the numeric join of every binding (`if a { n = 1 } else { n = 4000000000 }` makes `n` a `long`; `f = 1.5` in one branch and `f = 2` in the other keeps `f` a `float`), and a binding of another kind anywhere in the function, or of another struct or pointer type, is the same compile error: *cannot bind 'v' as int: it is bound as string in another branch or loop body of this function*. A `switch` case is a branch here as an `if` arm is, and so is the body of a `match` arm ([Match Statements](#match-statements)). A local of a `while` body is declared before the loop, and a name both arms of an `if`/`else` (or every case of a `switch` with a `default`, or every arm of a `match` that runs an arm for every value) bind is declared before the `if` (or `switch`, or `match`), so each is one variable whether or not it is used after them: `view = p as *Apple` in one `while` and `view = p as *Pear` in the next is that error, where a bare `ptr` or `null` binding would fit either. A read of such a local in the body before its binding, which sees the value the previous pass bound, has the binding's type (`out = "${out}${prev}"` ahead of `prev = "p${i}"` reads a string). A name bound in the bodies of separate `if`s or `for` loops and used only inside them is a separate variable per body, except a `string` local, which is always one variable for the whole function, as its heap tracker is. The conversions the [table below](#casting-between-types) permits still apply at a re-bind, and the local keeps its first type: after `f = 1.5`, `f = 2` stores `2.0` and `f` stays a `float`; after `int x = 0`, `x = 2.5` stores `2`. A `string` accepts `null` (it is a nullable `const char*`), and a value that would not fit an *inferred* `int` (a 64-bit integer, a `uint32`, a float) is the narrowing error described there.
 
 **A local's scope starts after its initializer.** In `count = count() + 1` the call is the function `count`, and from that binding on, to the end of the function, `count` is the local. So is a local declared ahead of its binding because both arms of an `if` bind it: until the checker reaches the first binding in source order, the name is still the function's. A reference that comes before the binding, such as the function passed as a value, is the function too:
 
@@ -1212,6 +1212,36 @@ match (nums) {
 | `[x, y]` | Two-element array | `x`, `y` = elements |
 | `[x, y, z]` | Three-element array | `x`, `y`, `z` = elements |
 | `[h\|t]` | Non-empty array | `h` = first, `t` = rest |
+
+### Names an arm binds
+
+Each arm's block is a scope of its own, as an `if` branch is: a `defer` in it
+runs when the arm ends, and only when the arm ran. A name an arm binds is one
+variable with the rest of the function exactly where a name an `if` branch
+binds would be ([Variables](#variables)): read after a `match` at the top of
+the function body, bound in a `while` body, or bound by every arm of a `match`
+that runs an arm for every value, one with a `_` arm or whose arms cover its
+type (every member of an enum, every variant of a sum, `none` and `some(v)`,
+`true` and `false`, `[]` and `[h|t]`). Elsewhere a read after the `match` is
+`Undefined variable`. A `match` whose value is used (bound, returned, or the
+value of another's arm) keeps its arms' names in the arms.
+
+```aether,run
+pick(x: int) -> int {
+    match x {
+        1 -> { v = 10 }
+        _ -> { v = 20 }
+    }
+    return v
+}
+
+main() {
+    println("${pick(1)} ${pick(2)}")
+}
+```
+```output
+10 20
+```
 
 ---
 

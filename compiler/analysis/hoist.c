@@ -84,12 +84,15 @@ Type* hoist_join_type(ASTNode* scope_body, const char* name, Type* seed) {
     return acc;
 }
 
-/* The arms of a branching statement: an if's then and else blocks, or a
+/* The arms of a branching statement: an if's then and else blocks, a
  * switch's case statements, whose children (after a case's selector) are
- * its body. A case's selector is never a declaration, so the case node
- * itself is the body hoist_direct_decl_names and hoist_find_decl read
- * (#2732). Returns the count written to `arms` (at most `cap`), 0 for any
- * other statement. */
+ * its body, or a match's arm bodies. A case's selector is never a
+ * declaration, so the case node itself is the body hoist_direct_decl_names
+ * and hoist_find_decl read (#2732). A match arm that binds a name has a
+ * block body (the parser makes `1 -> v = 10` the block `{ v = 10 }`); any
+ * other arm body is a value or a statement that binds nothing, and counts
+ * as an arm all the same (#2768). Returns the count written to `arms` (at
+ * most `cap`), 0 for any other statement. */
 static int branch_arms(ASTNode* stmt, ASTNode** arms, int cap) {
     int n = 0;
     if (!stmt) return 0;
@@ -101,8 +104,20 @@ static int branch_arms(ASTNode* stmt, ASTNode** arms, int cap) {
             ASTNode* c = stmt->children[j];
             if (c && c->type == AST_CASE_STATEMENT) arms[n++] = c;
         }
+    } else if (stmt->type == AST_MATCH_STATEMENT) {
+        for (int j = 1; j < stmt->child_count && n < cap; j++) {
+            ASTNode* a = stmt->children[j];
+            if (a && a->type == AST_MATCH_ARM && a->child_count > 1 && a->children[1])
+                arms[n++] = a->children[1];
+        }
     }
     return n;
+}
+
+/* Is `stmt` a statement whose arms branch_arms lists? */
+static int is_branching(ASTNode* stmt) {
+    return stmt && (stmt->type == AST_IF_STATEMENT || stmt->type == AST_SWITCH_STATEMENT ||
+                    stmt->type == AST_MATCH_STATEMENT);
 }
 
 #define HOIST_MAX_ARMS 256
@@ -141,13 +156,13 @@ int hoist_if_branch_candidates(ASTNode* body, const char** out, int cap) {
         }
         if (dup) continue;
         /* Only a name read outside the arms -- by a top-level statement that
-         * does not branch, or by an if's condition or a switch's subject --
-         * is hoisted. */
+         * does not branch, or by an if's condition or a switch's or a
+         * match's subject -- is hoisted. */
         int referenced_outside = 0;
         for (int i = 0; i < body->child_count && !referenced_outside; i++) {
             ASTNode* child = body->children[i];
             if (!child) continue;
-            if (child->type == AST_IF_STATEMENT || child->type == AST_SWITCH_STATEMENT) {
+            if (is_branching(child)) {
                 if (child->child_count > 0 &&
                     hoist_has_identifier_ref(child->children[0], name)) {
                     referenced_outside = 1;
@@ -181,7 +196,7 @@ int hoist_common_decl_names(ASTNode* stmt, const char** out, int cap) {
     ASTNode* arms[HOIST_MAX_ARMS];
     int na = branch_arms(stmt, arms, HOIST_MAX_ARMS);
     /* Every path must pass through an arm: an if needs its else, a switch
-     * its default. */
+     * its default, a match a `_` arm or arms that cover its type (#2768). */
     if (stmt->type == AST_IF_STATEMENT && na < 2) return 0;
     if (stmt->type == AST_SWITCH_STATEMENT) {
         int has_default = 0;
@@ -190,6 +205,7 @@ int hoist_common_decl_names(ASTNode* stmt, const char** out, int cap) {
         }
         if (!has_default || na < 2) return 0;
     }
+    if (stmt->type == AST_MATCH_STATEMENT && !ast_match_covers(stmt)) return 0;
     if (na == 0) return 0;
     const char* first[HOIST_MAX_NAMES];
     int nfirst = hoist_direct_decl_names(arms[0], first, 0, HOIST_MAX_NAMES);
@@ -225,12 +241,17 @@ void hoist_loop_decls(ASTNode* body, HoistDeclVisitor visit, void* user) {
         if (!child) continue;
         if (child->type == AST_VARIABLE_DECLARATION && child->value) visit(child, user);
         /* A switch's children are its cases, whose own children are their
-         * bodies: they are visited as an if's arms are (#2732). */
+         * bodies: they are visited as an if's arms are (#2732). A match's
+         * are its arms, whose bodies are visited the same way (#2768). */
         if (child->type == AST_IF_STATEMENT || child->type == AST_WHILE_LOOP ||
             child->type == AST_FOR_LOOP || child->type == AST_SWITCH_STATEMENT) {
             for (int j = 0; j < child->child_count; j++) {
                 hoist_loop_decls(child->children[j], visit, user);
             }
+        } else if (child->type == AST_MATCH_STATEMENT) {
+            ASTNode* arms[HOIST_MAX_ARMS];
+            int na = branch_arms(child, arms, HOIST_MAX_ARMS);
+            for (int j = 0; j < na; j++) hoist_loop_decls(arms[j], visit, user);
         }
     }
 }

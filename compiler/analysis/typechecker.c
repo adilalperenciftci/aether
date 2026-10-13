@@ -7421,6 +7421,31 @@ static void declare_loop_hoist(ASTNode* decl, void* user) {
     declare_hoisted_local((SymbolTable*)user, decl->value, hoist_decl_type(decl));
 }
 
+/* #2768: the matches being checked whose value is used: bound, returned,
+ * or yielded by an arm block of another such match (the last statement of
+ * the block). Codegen gives each a result variable and keeps its arms'
+ * names in the arms; a statement match declares the names every arm binds
+ * before it (declare_common_hoists), as an if/else does. */
+#define TC_MAX_VALUE_MATCHES 256
+static ASTNode* tc_value_matches[TC_MAX_VALUE_MATCHES];
+static int tc_value_match_depth = 0;
+
+static void tc_push_value_match(ASTNode* m) {
+    if (tc_value_match_depth < TC_MAX_VALUE_MATCHES)
+        tc_value_matches[tc_value_match_depth] = m;
+    tc_value_match_depth++;   /* always increment so pop stays balanced */
+}
+static void tc_pop_value_match(void) {
+    if (tc_value_match_depth > 0) tc_value_match_depth--;
+}
+static int tc_is_value_match(ASTNode* m) {
+    int n = tc_value_match_depth < TC_MAX_VALUE_MATCHES
+          ? tc_value_match_depth : TC_MAX_VALUE_MATCHES;
+    for (int i = n - 1; i >= 0; i--)
+        if (tc_value_matches[i] == m) return 1;
+    return 0;
+}
+
 /* #893: enclosing loop labels, for validating `break label` / `continue
  * label`. Pushed (one slot per loop, NULL for an unlabeled loop) while a
  * loop body is type-checked. Type-checking is single-threaded, so a file-
@@ -8039,7 +8064,9 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                 }
                 // Match-as-expression: typecheck as statement, then use its type
                 if (init->type == AST_MATCH_STATEMENT) {
+                    tc_push_value_match(init);   /* #2768 */
                     typecheck_statement(init, table);
+                    tc_pop_value_match();
                     check_match_value_arms(init, table);   /* #2743 */
                 } else {
                     typecheck_expression(init, table);
@@ -9301,6 +9328,7 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
              * `is_string_seq_type` for the matching codegen
              * dispatch. */
             int is_seq_match = 0;
+            int value_match = tc_is_value_match(stmt);   /* #2768 */
             if (stmt->child_count > 0) {
                 typecheck_expression(stmt->children[0], table);
                 match_expr_type = stmt->children[0]->node_type;
@@ -9316,6 +9344,13 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
             if (!element_type) {
                 element_type = create_type(TYPE_INT);
             }
+
+            /* #2768: names every arm binds are declared before the match,
+             * where codegen declares them (hoist_common_vars), when an arm
+             * runs for every value, which the subject's type now says. Not
+             * for a match whose value is used: codegen keeps its arms' names
+             * in the arms. */
+            if (!value_match) declare_common_hoists(stmt, table);
 
             // #914 sum `match` bookkeeping: track variant coverage (for the
             // exhaustiveness check) and the scrutinee variable name (for
@@ -9578,7 +9613,14 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                     body->type != AST_ASSIGNMENT) {
                     typecheck_expression(body, arm_table);
                 } else {
+                    /* #2768: a match a value match's arm block yields is a
+                     * value match too, as codegen emits it. */
+                    ASTNode* yields = (value_match && body->type == AST_BLOCK)
+                                    ? match_arm_value(body) : NULL;
+                    int nested = yields && yields->type == AST_MATCH_STATEMENT;
+                    if (nested) tc_push_value_match(yields);
                     typecheck_statement(body, arm_table);
+                    if (nested) tc_pop_value_match();
                 }
 
                 // Propagate arm result type to the match node (for match-as-expression).
@@ -9767,9 +9809,11 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
             // the one value form the statement path owns.
             for (int i = 0; i < stmt->child_count; i++) {
                 coerce_bare_enum_member(stmt->children[i], g_tc_return_type, table);
-                if (stmt->children[i] && stmt->children[i]->type == AST_MATCH_STATEMENT)
+                if (stmt->children[i] && stmt->children[i]->type == AST_MATCH_STATEMENT) {
+                    tc_push_value_match(stmt->children[i]);   /* #2768 */
                     typecheck_node(stmt->children[i], table);
-                else
+                    tc_pop_value_match();
+                } else
                     typecheck_expression(stmt->children[i], table);
             }
             /* #2697, #2733: a return of something with no value, a call of
