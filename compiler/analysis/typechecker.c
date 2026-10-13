@@ -5044,6 +5044,146 @@ static void order_const_declarations(ASTNode* program) {
 
 static void tc_clauses_reset(void);
 
+/* ---- qualified type names: `mod.T`, `*mod.T` ---------------------------
+ *
+ * The parser reads `mod.T` and `*mod.T` in any type position as the struct
+ * `T` (struct names are one namespace across modules, so `T` is what a
+ * selective `import mod (T)` would bring in) and keeps `mod` on the type as
+ * its qualifier. This pass holds each qualifier to what it names: a module
+ * the code it is written in imports, which defines and exports the type.
+ * Without it `*mod.Missing` reached the C compiler as an unknown type name.
+ *
+ * Each file is checked against its own imports: the program's own
+ * declarations against the program's `import`s, and each loaded module's
+ * against its own, by walking the module's parsed AST (a merged struct
+ * carries no record of the module it came from). */
+
+typedef struct {
+    ASTNode* imports_from;   /* the AST whose `import`s are in scope */
+    AetherModule* self;      /* the module being checked, NULL for the program */
+} QualCtx;
+
+static int qual_is_type_decl(const ASTNode* d, const char* name) {
+    if (!d || !d->value || strcmp(d->value, name) != 0) return 0;
+    switch (d->type) {
+        case AST_STRUCT_DEFINITION: case AST_C_STRUCT_DEF:
+        case AST_DISTINCT_TYPE_DEF: case AST_SUM_TYPE_DEF:
+        case AST_ENUM_DEFINITION: case AST_BITSTRUCT_DEFINITION:
+        case AST_CFN_TYPE_DEF: case AST_MESSAGE_DEFINITION:
+        case AST_ACTOR_DEFINITION:
+            return 1;
+        default:
+            return 0;
+    }
+}
+
+static int qual_ast_has_type(const ASTNode* ast, const char* name) {
+    for (int i = 0; ast && i < ast->child_count; i++) {
+        if (qual_is_type_decl(ast->children[i], name)) return 1;
+    }
+    return 0;
+}
+
+/* The module `q` names where `ctx` is written, or NULL. An `import a.b` is
+ * named by its namespace (`b`), its full path, or its alias. */
+static AetherModule* qual_resolve_module(const QualCtx* ctx, const char* q) {
+    if (ctx->self && ctx->self->name &&
+        (strcmp(q, ctx->self->name) == 0 ||
+         strcmp(q, module_namespace_of(ctx->self->name)) == 0))
+        return ctx->self;
+    ASTNode* ast = ctx->imports_from;
+    for (int i = 0; ast && i < ast->child_count; i++) {
+        ASTNode* imp = ast->children[i];
+        if (!imp || imp->type != AST_IMPORT_STATEMENT || !imp->value) continue;
+        if (imp->annotation && strcmp(imp->annotation, "synthetic") == 0) continue;
+        const char* alias = NULL;
+        if (imp->child_count > 0) {
+            ASTNode* last = imp->children[imp->child_count - 1];
+            if (last && last->type == AST_IDENTIFIER && last->annotation &&
+                strcmp(last->annotation, "module_alias") == 0)
+                alias = last->value;
+        }
+        int named = (alias && strcmp(q, alias) == 0) ||
+                    strcmp(q, imp->value) == 0 ||
+                    strcmp(q, module_namespace_of(imp->value)) == 0 ||
+                    strcmp(q, get_namespace_from_path(imp->value)) == 0;
+        if (named) {
+            AetherModule* m = module_find(imp->value);
+            return m ? m : module_find_by_namespace(q);
+        }
+    }
+    return NULL;
+}
+
+static void qual_check_type(const QualCtx* ctx, Type* t, ASTNode* at) {
+    if (!t) return;
+    if (t->qualifier && t->struct_name) {
+        const char* q = t->qualifier;
+        const char* name = t->struct_name;
+        char msg[512];
+        const char* saved = g_tc_file;
+        if (at->source_file) g_tc_file = at->source_file;
+        /* #2631: a module file checked on its own names itself. */
+        int self_entry = !ctx->self && g_entry_self_ns && strcmp(q, g_entry_self_ns) == 0;
+        AetherModule* m = self_entry ? NULL : qual_resolve_module(ctx, q);
+        if (self_entry) {
+            if (!qual_ast_has_type(ctx->imports_from, name)) {
+                snprintf(msg, sizeof(msg), "module '%s' has no type '%s'", q, name);
+                type_error_code_hint(msg, "check the spelling: the module defines no struct or type by that name",
+                                     at->line, at->column, AETHER_ERR_UNDEFINED_TYPE);
+            }
+        } else if (!m) {
+            snprintf(msg, sizeof(msg), "unknown module '%s' in the type '%s.%s'", q, q, name);
+            type_error_code_hint(msg, "a qualified type names a module this file imports: add `import` for it",
+                                 at->line, at->column, AETHER_ERR_UNDEFINED_TYPE);
+        } else if (m->ast) {
+            AetherModule* def = m;
+            if (!qual_ast_has_type(m->ast, name)) {
+                AetherModule* origin = module_resolve_reexport(m, name);  /* #924 */
+                def = (origin && origin->ast && qual_ast_has_type(origin->ast, name)) ? origin : NULL;
+            }
+            if (!def) {
+                snprintf(msg, sizeof(msg), "module '%s' has no type '%s'", q, name);
+                type_error_code_hint(msg, "check the spelling: the module defines no struct or type by that name",
+                                     at->line, at->column, AETHER_ERR_UNDEFINED_TYPE);
+            } else if (m != ctx->self && m->export_count > 0 && !module_exports_symbol(m, name)) {
+                snprintf(msg, sizeof(msg), "'%s' is not exported from module '%s'", name, q);
+                type_error_code_hint(msg, "add it to the module's exports(...) list",
+                                     at->line, at->column, AETHER_ERR_NOT_EXPORTED);
+            }
+        }
+        g_tc_file = saved;
+    }
+    qual_check_type(ctx, t->element_type, at);
+    qual_check_type(ctx, t->return_type, at);
+    for (int i = 0; t->tuple_types && i < t->tuple_count; i++)
+        qual_check_type(ctx, t->tuple_types[i], at);
+    for (int i = 0; t->param_types && i < t->param_count; i++)
+        qual_check_type(ctx, t->param_types[i], at);
+}
+
+static void qual_check_node(const QualCtx* ctx, ASTNode* n) {
+    if (!n) return;
+    qual_check_type(ctx, n->node_type, n);
+    for (int i = 0; i < n->child_count; i++) qual_check_node(ctx, n->children[i]);
+}
+
+static void check_qualified_types(ASTNode* program) {
+    QualCtx prog = { program, NULL };
+    for (int i = 0; i < program->child_count; i++) {
+        ASTNode* c = program->children[i];
+        if (!c || c->is_imported || c->origin_module) continue;
+        qual_check_node(&prog, c);
+    }
+    if (!global_module_registry) return;
+    for (int i = 0; i < global_module_registry->module_count; i++) {
+        AetherModule* m = global_module_registry->modules[i];
+        if (!m || !m->ast || m->ast == program) continue;
+        QualCtx mc = { m->ast, m };
+        qual_check_node(&mc, m->ast);
+    }
+}
+
 int typecheck_program(ASTNode* program) {
     note_program_globals(program);
     if (!program || program->type != AST_PROGRAM) return 0;
@@ -5071,6 +5211,10 @@ int typecheck_program(ASTNode* program) {
     namespace_count = 0;  // Reset imported namespaces
     user_explicit_namespace_count = 0;  // Reset user-explicit namespaces (issue #243)
     // (#878: per-module selective-import filter removed — nothing to reset)
+
+    /* `mod.T` / `*mod.T`: the module has the type (before the passes below
+     * rewrite struct-named types into enums, distincts and sums). */
+    check_qualified_types(program);
 
     // Trusted names in `sandbox.enforce(perms, foo, bar) { ... }`: validate
     // them, mark the calls they cover, and reduce each such call to the

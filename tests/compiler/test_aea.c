@@ -21,6 +21,7 @@ static const char* const RICH_SOURCE =
     "cfn Cmp(a: ptr, b: ptr) -> int\n"
     "pair(a: int) -> (int, string) {\n    return a, \"two words\\nand a line\"\n}\n"
     "area(p: Point) -> float {\n    return p.y * 2.0\n}\n"
+    "moved(p: *demo.Point) -> demo.Point {\n    return Point { x: p.x, y: 0.0 }\n}\n"
     "apply(f: fn(int) -> int, v: int) -> int {\n    return f(v)\n}\n"
     "when defined(AEA_TEST_FLAG) {\n    flagged() -> int { return 1 }\n}\n"
     "main() {\n    n, w = pair(LIMIT)\n    sq = | x: int | -> x * x\n"
@@ -209,6 +210,14 @@ TEST_CATEGORY(aea_round_trip_keeps_types_positions_and_text, TEST_CATEGORY_COMPI
     ASSERT_NOT_NULL(b->node_type);
     ASSERT_EQ(o->node_type->tuple_count, b->node_type->tuple_count);
     ASSERT_EQ(2, b->node_type->tuple_count);
+
+    /* A qualified type keeps its module: check_qualified_types reads it
+     * from an imported module's artifact as from its parse. */
+    b = find_top(back, AST_FUNCTION_DEFINITION, "moved");
+    ASSERT_NOT_NULL(b);
+    ASSERT_NOT_NULL(b->node_type);
+    ASSERT_NOT_NULL(b->node_type->qualifier);
+    ASSERT_STREQ("demo", b->node_type->qualifier);
     free(data);
     free_ast_node(orig);
     free_ast_node(back);
@@ -403,10 +412,14 @@ TEST_CATEGORY(aea_codec_covers_every_ast_field, TEST_CATEGORY_COMPILER) {
     /* Type grew to 136 with `closure_literal` (#2460), a type-checker
      * back-pointer like compound_node: NULL after a parse and refused by
      * encode_type, so the wire format and AEA_FORMAT_VERSION are unchanged
-     * as well. */
+     * as well.
+     *
+     * Type grew to 144 with `qualifier`, the `mod` of `mod.T` / `*mod.T`.
+     * That is parse state, so the codec carries it and AEA_FORMAT_VERSION
+     * went to 4. */
     if (sizeof(void*) == 8 && sizeof(int) == 4) {
         ASSERT_EQ(128, (int)sizeof(ASTNode));
-        ASSERT_EQ(136, (int)sizeof(Type));
+        ASSERT_EQ(144, (int)sizeof(Type));
     }
 }
 

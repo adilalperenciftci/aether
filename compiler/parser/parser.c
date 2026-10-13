@@ -304,6 +304,40 @@ static void parser_message(Parser* parser, const char* message) {
 static Type* parse_type_unsuffixed(Parser* parser);
 static int reject_unbound_binding(Parser* parser, ASTNode* decl, const char* kw);
 
+/* A struct's name in a type position, its first identifier `first` already
+ * consumed: a bare `T`, or `mod.T` / `a.b.T` (#946), the module it comes
+ * from written before it. Struct names are one namespace across modules,
+ * so the struct is the last segment, the one a selective import would
+ * bring in; the module path is kept on the type as its `qualifier`, for
+ * check_qualified_types to hold to a module that has the type. Shared by
+ * `T`, `*T` and `as *T`. */
+static Type* parse_struct_type_name(Parser* parser, Token* first) {
+    const char* type_name = first->value;
+    char path[512];
+    size_t plen = 0;
+    path[0] = '\0';
+    while (peek_token(parser) && peek_token(parser)->type == TOKEN_DOT) {
+        advance_token(parser);  // consume '.'
+        Token* seg = peek_token(parser);
+        if (!seg || (seg->type != TOKEN_IDENTIFIER &&
+                     !token_is_reserved_keyword(seg))) {
+            parser_error(parser,
+                "Expected a type name after '.' in a qualified type");
+            return NULL;
+        }
+        advance_token(parser);  // consume the segment
+        /* the segment before this one joins the module path */
+        int n = snprintf(path + plen, sizeof(path) - plen, "%s%s",
+                         plen ? "." : "", type_name);
+        if (n > 0 && (size_t)n < sizeof(path) - plen) plen += (size_t)n;
+        type_name = seg->value; // last segment is the type
+    }
+    Type* type = create_type(TYPE_STRUCT);
+    type->struct_name = strdup(type_name);
+    if (plen) type->qualifier = aether_intern(path);
+    return type;
+}
+
 // #340: a type may carry a postfix `?` making it optional (`int?`, `string?`,
 // `Vec2?`, `*Node?`). Parse the base type, then wrap once per `?`. In type
 // position `?` is unambiguous (the actor-ask `?` only appears in expressions).
@@ -472,8 +506,9 @@ static Type* parse_type_unsuffixed(Parser* parser) {
         advance_token(parser);
         Token* name_tok = expect_token(parser, TOKEN_IDENTIFIER);
         if (!name_tok) return NULL;
-        Type* struct_type = create_type(TYPE_STRUCT);
-        struct_type->struct_name = strdup(name_tok->value);
+        /* `*mod.T`: the pointer form of the qualified name below. */
+        Type* struct_type = parse_struct_type_name(parser, name_tok);
+        if (!struct_type) return NULL;
         Type* ptr_type = create_type(TYPE_PTR);
         ptr_type->element_type = struct_type;
         return ptr_type;
@@ -848,23 +883,8 @@ static Type* parse_type_unsuffixed(Parser* parser) {
                      * `Type`. The leading identifier (`mod`) was already
                      * consumed; consume the `.` and the type name. Allow a
                      * multi-segment path (`a.b.Type`) by looping. */
-                    const char* type_name = token->value;
-                    while (peek_token(parser) &&
-                           peek_token(parser)->type == TOKEN_DOT) {
-                        advance_token(parser);  // consume '.'
-                        Token* seg = peek_token(parser);
-                        if (!seg || (seg->type != TOKEN_IDENTIFIER &&
-                                     !token_is_reserved_keyword(seg))) {
-                            parser_error(parser,
-                                "Expected a type name after '.' in a "
-                                "qualified type");
-                            return NULL;
-                        }
-                        advance_token(parser);  // consume the segment
-                        type_name = seg->value; // last segment is the type
-                    }
-                    type = create_type(TYPE_STRUCT);
-                    type->struct_name = strdup(type_name);
+                    type = parse_struct_type_name(parser, token);
+                    if (!type) return NULL;
                 } else {
                     // Could be a struct type
                     type = create_type(TYPE_STRUCT);
@@ -2312,9 +2332,20 @@ static ASTNode* parse_postfix_expression(Parser* parser) {
             advance_token(parser);  // consume `*` (was just peeked)
             Token* struct_name_tok = expect_token(parser, TOKEN_IDENTIFIER);
             if (!struct_name_tok) return NULL;
+            /* `as *mod.T`: the struct is `T`; the cast carries the
+             * spelled `*mod.T` as its type until the checker sets its
+             * own, so check_qualified_types sees the module. */
+            Type* target = parse_struct_type_name(parser, struct_name_tok);
+            if (!target) return NULL;
             ASTNode* cast = create_ast_node(AST_PTR_AS_STRUCT_CAST,
-                                            struct_name_tok->value,
+                                            target->struct_name,
                                             op->line, op->column);
+            if (target->qualifier) {
+                cast->node_type = create_type(TYPE_PTR);
+                cast->node_type->element_type = target;
+            } else {
+                free_type(target);
+            }
             add_child(cast, expr);
             expr = cast;
             continue;
@@ -2970,7 +3001,16 @@ static ASTNode* parse_statement_inner(Parser* parser) {
              * redis-porting-language-gaps.md "P0: Typed And Qualified
              * C Pointers". */
             Token* t1 = peek_ahead(parser, 1);  // the struct name
-            Token* t2 = peek_ahead(parser, 2);  // the variable name
+            int off = 2;
+            /* `*mod.T name`: walk the `.IDENT` chain of a qualified name
+             * (a deref-store `*p.f = v` ends at `=`, not at a name) */
+            while (peek_ahead(parser, off) &&
+                   peek_ahead(parser, off)->type == TOKEN_DOT &&
+                   peek_ahead(parser, off + 1) &&
+                   peek_ahead(parser, off + 1)->type == TOKEN_IDENTIFIER) {
+                off += 2;
+            }
+            Token* t2 = peek_ahead(parser, off);  // the variable name
             if (t1 && t1->type == TOKEN_IDENTIFIER &&
                 t2 && t2->type == TOKEN_IDENTIFIER) {
                 return parse_variable_declaration(parser);

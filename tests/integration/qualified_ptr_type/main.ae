@@ -1,0 +1,32 @@
+import gpu
+
+// `*gpu.GpuShader` and `gpu.Pass` in every position a type is written,
+// with no selective `import gpu (GpuShader)`: each resolves to the struct
+// that selective import would bring in.
+
+// a struct field
+struct Frame {
+    first: *gpu.GpuShader
+    pass: gpu.Pass
+}
+
+// a return type
+compile(id: int) -> *gpu.GpuShader {
+    // an `as` cast
+    return gpu.make_shader(id, "fxaa") as *gpu.GpuShader
+}
+
+// a parameter
+describe(s: *gpu.GpuShader, p: gpu.Pass) -> string {
+    return "${s.name}#${s.id}@${p.order}"
+}
+
+main() {
+    // typed declarations, both spellings
+    let s: *gpu.GpuShader = compile(7)
+    *gpu.GpuShader t = compile(8)
+    gpu.Pass p = gpu.Pass { shader: t, order: 2 }
+    f = Frame { first: s, pass: p }
+    println(describe(f.first, f.pass))
+    println(gpu.shader_id(f.pass.shader))
+}

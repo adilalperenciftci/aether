@@ -1214,8 +1214,8 @@ fn ocsp_basic_bounds(der: byte[]) -> (int, int) {
 // signed and OCSPSigning-EKU-bearing, e.g. GoDaddy). Signature algorithms:
 // RSA-PKCS#1-SHA256, ECDSA-P256-SHA256, ECDSA-P384-SHA384.
 // ptr-typed convenience for callers holding an issuer as a bare pointer (e.g.
-// find_issuer_cert's return), where the qualified `as *mod.LeafCert` cast at
-// the call site doesn't parse. Casts internally and delegates.
+// find_issuer_cert's return), so the call site needs no
+// `as *tls13_cert.LeafCert` cast. Casts internally and delegates.
 verify_ocsp_signature_at(der: byte[], issuer: ptr) -> int {
     return verify_ocsp_signature(der, issuer as *LeafCert)
 }
