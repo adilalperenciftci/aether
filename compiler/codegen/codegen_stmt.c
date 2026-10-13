@@ -12302,16 +12302,7 @@ static int stmt_runs_builder(CodeGenerator* gen) {
 }
 
 static void emit_builder_args_prelude(CodeGenerator* gen, ASTNode* call) {
-    if (!hoist_ready(gen)) return;
-    ASTNode* ops[64];
-    int n = 0;
-    for (int i = 0; i < call->child_count && n < 64; i++) {
-        ASTNode* a = call->children[i];
-        if (a && a->type == AST_CLOSURE && a->value && strcmp(a->value, "trailing") == 0) continue;
-        if (a && a->type == AST_NAMED_ARG) a = a->child_count > 0 ? a->children[0] : NULL;
-        if (a) ops[n++] = a;
-    }
-    ctl_linearize_list(gen, ops, n);
+    ctl_builder_args(gen, call);
 }
 
 static void stmt_control_run(CodeGenerator* gen, ASTNode* stmt, int temps_open) {
@@ -15103,8 +15094,10 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                 int order_depth = order_prelude_depth();
                 ctl_linearize_value(gen, step, 1);
                 print_indent(gen);
+                /* Its value is thrown away, and said so (-Wunused-value). */
+                fprintf(gen->output, "(void)(");
                 generate_expression(gen, step);
-                fprintf(gen->output, ";\n");
+                fprintf(gen->output, ");\n");
                 control_prelude_end(ctl_depth);
                 order_prelude_end(order_depth);
             }

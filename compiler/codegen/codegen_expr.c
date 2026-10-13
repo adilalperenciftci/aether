@@ -5584,7 +5584,11 @@ int is_control_value(CodeGenerator* gen, ASTNode* e) {
         ASTNode* ops[ORDER_MAX_OPERANDS];
         int hoist[ORDER_MAX_OPERANDS];
         int n = order_operands(e, ops, ORDER_MAX_OPERANDS);
-        if (n >= 2 && order_hoist_set(gen, ops, n, hoist)) return 0;
+        /* A builder's lowering orders its arguments itself, after its
+         * block (ctl_builder_args). */
+        if (n >= 2 && !(e->value && is_builder_func_reg(gen, e->value)) &&
+            order_hoist_set(gen, ops, n, hoist))
+            return 0;
         return !call_hands_back_temp(gen, e) && !call_returns_view_of_temp(gen, e) &&
                !call_returns_tuple_view_of_temp(gen, e) && !expr_is_c_view_of_slice(gen, e) &&
                !stmt_struct_temp_of(e);
@@ -5666,11 +5670,40 @@ static int ctl_emit_hoist(CodeGenerator* gen, ASTNode* op) {
     return 1;
 }
 
-/* The same where there is something to evaluate: a literal, or an operand
- * already bound, has nothing. */
+/* The same where there is something to evaluate: a literal, an operand
+ * already bound, or a function of the program named as a value (a constant:
+ * its call site writes the function's adapter, and a temporary of the
+ * operand's type could not hold it) has nothing. */
 static int ctl_hoist(CodeGenerator* gen, ASTNode* op) {
     if (!op || !order_hoistable(op) || order_bound(op) || ctl_lookup(op)) return 1;
+    if (op->type == AST_IDENTIFIER && bare_top_level_fn(gen, op)) return 1;
     return ctl_emit_hoist(gen, op);
+}
+
+/* Operand `k` of `parent` (a call, or NULL) evaluated ahead: a field read
+ * the call frees or keeps is handed over as it is read, as the ordering
+ * wrapper hands it over (order_hoist_handoff); read into a plain temporary,
+ * the field kept its tracker and its struct freed it a second time. */
+static int ctl_hoist_operand(CodeGenerator* gen, ASTNode* parent, int k, ASTNode* op) {
+    int kind = parent ? order_operand_hands_off(gen, parent, k) : 0;
+    if (!kind && parent && parent->type == AST_FUNCTION_CALL && parent->value && op &&
+        !order_bound(op) && field_read_can_hand_off(op)) {
+        /* Where the parameter it goes to is not known here (named
+         * arguments), an owned field read is left to the call, which hands
+         * it over itself; the construct after it stays a statement
+         * expression. */
+        for (int i = 0; i < parent->child_count; i++)
+            if (parent->children[i] && parent->children[i]->type == AST_NAMED_ARG) return 0;
+    }
+    if (!kind || !op || order_bound(op) || ctl_lookup(op)) return ctl_hoist(gen, op);
+    const char* name = cg_internf("_eo%d", g_order_counter++);
+    hoist_declare(gen, "const char*", name);
+    print_indent(gen);
+    fprintf(gen->output, "%s = (", name);
+    order_emit_handover(gen, op, kind);
+    fprintf(gen->output, ");\n");
+    order_bind(op, name);
+    return 1;
 }
 
 /* The operands `e` evaluates unconditionally, in source order, into `ops`:
@@ -5762,7 +5795,15 @@ static int ctl_guarded(CodeGenerator* gen, const char* test, ASTNode* c) {
     fprintf(gen->output, "if (%s) {\n", test);
     int ok = ctl_linearize(gen, c, 0) && ctl_hoist(gen, c);
     print_indent(gen);
-    fprintf(gen->output, "}\n");
+    fprintf(gen->output, "}");
+    /* The expression reads the temporary only where the test holds, which
+     * a C compiler cannot always tell (-Wmaybe-uninitialized): it is zero
+     * on the other path. */
+    const char* name = order_lookup(c);
+    if (!name) name = ctl_lookup(c);
+    const char* ct = order_c11_type(c);
+    if (ok && name && ct) fprintf(gen->output, " else { %s = (%s){0}; }", name, ct);
+    fprintf(gen->output, "\n");
     return ok;
 }
 
@@ -5808,18 +5849,23 @@ static int ctl_conditional(CodeGenerator* gen, ASTNode* e) {
     return -1;
 }
 
-/* Run the constructs in operands `ops` (evaluated in this order) ahead of
- * the statement, each operand to the left of the last one that holds one
- * evaluated into a temporary first. */
-int ctl_linearize_list(CodeGenerator* gen, ASTNode** ops, int n) {
+/* Run the constructs in operands `ops` (evaluated in this order) of
+ * `parent` (the call or operation they belong to, or NULL for a
+ * statement's own list) ahead of the statement, each operand to the left
+ * of the last one that holds one evaluated into a temporary first. */
+static int ctl_linearize_ops(CodeGenerator* gen, ASTNode* parent, ASTNode** ops, int n) {
     int last = -1;
     for (int i = 0; i < n; i++)
         if (ctl_contains(gen, ops[i])) last = i;
     for (int i = 0; i < last; i++) {
         if (ctl_contains(gen, ops[i]) && !ctl_linearize(gen, ops[i], 0)) return 0;
-        if (!ctl_hoist(gen, ops[i])) return 0;
+        if (!ctl_hoist_operand(gen, parent, i, ops[i])) return 0;
     }
     return last < 0 || ctl_linearize(gen, ops[last], 0);
+}
+
+int ctl_linearize_list(CodeGenerator* gen, ASTNode** ops, int n) {
+    return ctl_linearize_ops(gen, NULL, ops, n);
 }
 
 /* Is `e` an `&&` or an `||`, whose right side runs only on its left's
@@ -5846,7 +5892,7 @@ static int ctl_linearize(CodeGenerator* gen, ASTNode* e, int discarded) {
             if (!trailing_call_is_builder(gen, e)) {
                 ASTNode* ops[ORDER_MAX_OPERANDS];
                 int n = order_operands(e, ops, ORDER_MAX_OPERANDS);
-                if (n > 0 && !ctl_linearize_list(gen, ops, n)) return 0;
+                if (n > 0 && !ctl_linearize_ops(gen, e, ops, n)) return 0;
             }
         } else if (e->child_count > 0 && !ctl_linearize(gen, e->children[0], 0)) {
             return 0;
@@ -5884,7 +5930,7 @@ static int ctl_linearize(CodeGenerator* gen, ASTNode* e, int discarded) {
     if (n < 0) return 0;
     for (int i = 0; i < e->child_count; i++)
         if (ctl_unreached(gen, e->children[i], ops, n)) return 0;
-    if (!ctl_linearize_list(gen, ops, n)) return 0;
+    if (!ctl_linearize_ops(gen, e, ops, n)) return 0;
     /* A call with a trailing block whose arguments kept it from running
      * ahead (is_control_value: their order needed a wrap) may now, with
      * them evaluated. Not a builder's, whose block runs before them. */
@@ -5896,6 +5942,29 @@ static int ctl_linearize(CodeGenerator* gen, ASTNode* e, int discarded) {
 
 int ctl_linearize_value(CodeGenerator* gen, ASTNode* e, int discarded) {
     return hoist_ready(gen) ? ctl_linearize(gen, e, discarded) : 0;
+}
+
+/* The arguments of builder call `call`, which it evaluates after the
+ * builder's block, the call written as a value (emit_trailing_call_expression)
+ * or run by its statement (emit_builder_args_prelude): when one holds a
+ * construct that runs statements, or their order matters
+ * (order_hoist_set), each is evaluated ahead of the call, left to right,
+ * its constructs first, and all but the last into a temporary. The two
+ * forms evaluate them the same way: the block, then the arguments left to
+ * right. */
+void ctl_builder_args(CodeGenerator* gen, ASTNode* call) {
+    if (!hoist_ready(gen)) return;
+    ASTNode* ops[ORDER_MAX_OPERANDS];
+    int hoist[ORDER_MAX_OPERANDS];
+    int n = order_operands(call, ops, ORDER_MAX_OPERANDS);
+    if (n <= 0) return;
+    int need = n >= 2 && order_hoist_set(gen, ops, n, hoist);
+    for (int i = 0; i < n && !need; i++) need = ctl_contains(gen, ops[i]);
+    if (!need) return;
+    for (int i = 0; i < n; i++) {
+        if (ctl_contains(gen, ops[i]) && !ctl_linearize(gen, ops[i], 0)) return;
+        if (i < n - 1 && !ctl_hoist(gen, ops[i])) return;
+    }
 }
 
 /* `call(args) { block }` where the value is used inside an expression:
@@ -5936,11 +6005,9 @@ static int emit_trailing_call_expression(CodeGenerator* gen, ASTNode* call) {
         }
         emit_trailing_block_body(gen, block);
         if (as_stmts) {
-            /* #2798: the constructs in the arguments, which the call
-             * evaluates after the block. */
-            ASTNode* ops[ORDER_MAX_OPERANDS];
-            int k = order_operands(call, ops, ORDER_MAX_OPERANDS);
-            if (k > 0) ctl_linearize_list(gen, ops, k);
+            /* #2798: the arguments, which the call evaluates after the
+             * block, left to right as the statement form does. */
+            ctl_builder_args(gen, call);
             print_indent(gen);
             fprintf(gen->output, "_tcr%d = ", n);
         }

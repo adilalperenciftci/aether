@@ -11,6 +11,9 @@
   ahead of its statement, after whatever the statement evaluates before
   it, which is evaluated into temporaries first, in source order; one in a
   conditional part runs under the same test, and one in a loop condition at
-  the top of every pass. Nothing in the .ae sweep, or in programs written to
-  reach each of these places, is a statement expression on that path any
-  more (#2798).
+  the top of every pass. A builder's arguments are evaluated after its
+  block, left to right, whether the call is a value or a statement of its
+  own; as a value, an argument holding one of these constructs ran before
+  the block. Nothing in the .ae sweep, or in programs written to reach each
+  of these places, is a statement expression on that path any more
+  (#2798).

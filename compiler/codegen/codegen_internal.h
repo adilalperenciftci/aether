@@ -69,6 +69,9 @@ int emit_control_prelude(CodeGenerator* gen, ASTNode* e, int discarded);
 int ctl_contains(CodeGenerator* gen, ASTNode* e);
 int ctl_linearize_value(CodeGenerator* gen, ASTNode* e, int discarded);
 int ctl_linearize_list(CodeGenerator* gen, ASTNode** ops, int n);
+/* The arguments of a builder call, evaluated after its block, left to
+ * right, ahead of the call. */
+void ctl_builder_args(CodeGenerator* gen, ASTNode* call);
 /* `<lhs> = <value>;` as a statement of its own, outside any Aether
  * statement (an actor state's initializer): temporaries and constructs as
  * generate_statement handles a statement's. */
