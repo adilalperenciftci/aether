@@ -226,6 +226,14 @@ int struct_is_observable(CodeGenerator* gen, const char* struct_name);
 int callee_consumes_string_arg(CodeGenerator* gen, const char* func_name, int idx);
 int field_read_can_hand_off(ASTNode* e);
 void emit_string_field_handoff(CodeGenerator* gen, ASTNode* e);
+/* How owned field read `arg`, argument `idx` of a call of `func_name`, is
+ * handed over: STRING_FIELD_CONSUMED to a parameter the callee frees,
+ * STRING_FIELD_KEPT to one it keeps as given (stores past the call), else
+ * 0; and the second shape, the field giving its reference up whatever the
+ * string is. */
+enum { STRING_FIELD_CONSUMED = 1, STRING_FIELD_KEPT = 2 };
+int string_field_handoff_kind(CodeGenerator* gen, const char* func_name, int idx, ASTNode* arg);
+void emit_string_field_giveup(CodeGenerator* gen, ASTNode* e);
 void emit_string_field_free(CodeGenerator* gen, ASTNode* e, const char* runtime_free);
 /* #2618: the same for an element of an array that owns its elements, when
  * string_element_free_kind says it is one. */

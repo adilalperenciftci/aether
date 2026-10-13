@@ -656,6 +656,8 @@ A field store frees the previous string whenever the field's `_heap_<field>` tra
 
 A field handed to a call that frees it gives its reference up (#2566). `string.free(p.name)`, `string.release(p.name)` and `release(p.name)` free the value (through the tracker where it can be read, as for a local) and leave the field empty and owning nothing. Passing `p.name` to a function that frees its parameter, such as `p.name = set_owned(p.name, v)` with `set_owned` freeing its first argument, clears the field's tracker at the call, so neither the store that follows nor the struct's destructor frees the same string again; that includes a field of a struct a call returned, which the statement keeps in a temporary and destroys (#2576). Such a function frees through the runtime, which releases a counted string and leaves a plain `malloc`'d buffer (an `@heap` extern's result) alone, so a plain buffer stays the field's, and the field frees it.
 
+A field handed to a function that keeps its parameter as it was given (stores it past the call where nothing releases it, such as a module-level `var`, and takes no reference of its own) gives it up too, whatever the string is: the field's tracker is cleared at the call and the function's copy of the pointer outlives the struct, as a local handed to such a function is not freed at its scope exit (#2843). Before, the struct's destructor freed what the function kept, at once for a struct a call returned (`keep(make_item(w).name)`).
+
 ---
 
 ## Examples

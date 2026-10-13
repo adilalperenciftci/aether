@@ -1341,33 +1341,43 @@ static void order_hoist_operand(CodeGenerator* gen, TempSeq* s, ASTNode* op) {
     order_bind(op, name);
 }
 
-/* A field read evaluated ahead of a call that frees it: handed over where
- * it is read (emit_string_field_handoff), once, in its place in the order.
- * At the call it is the temp, and the struct the path named then may not
- * be the one a later operand left there. */
-static void order_hoist_handoff(CodeGenerator* gen, TempSeq* s, ASTNode* op) {
+/* The handed-over value of field read `op` (string_field_handoff_kind):
+ * given to a callee that frees it, or to one that keeps it as given. */
+static void order_emit_handover(CodeGenerator* gen, ASTNode* op, int kind) {
+    if (kind == STRING_FIELD_CONSUMED) emit_string_field_handoff(gen, op);
+    else emit_string_field_giveup(gen, op);
+}
+
+/* A field read evaluated ahead of a call that frees it or keeps it: handed
+ * over where it is read (emit_string_field_handoff), once, in its place in
+ * the order. At the call it is the temp, and the struct the path named
+ * then may not be the one a later operand left there. */
+static void order_hoist_handoff(CodeGenerator* gen, TempSeq* s, ASTNode* op, int kind) {
     const char* name = cg_internf("_eo%d", g_order_counter++);
     seq_let_named(gen, s, "const char*", name);
     fprintf(gen->output, "(");
-    emit_string_field_handoff(gen, op);
+    order_emit_handover(gen, op, kind);
     fprintf(gen->output, ")");
     seq_next(gen, s);
     order_bind(op, name);
 }
 
-/* Is operand `k` of `call` a field read handed to a parameter the callee
- * frees? Only where operands and parameters line up one to one: no named
- * argument, trailing block or injected builder context. */
+/* How operand `k` of `call`, a field read, is handed to the callee
+ * (string_field_handoff_kind), or 0. Only where operands and parameters
+ * line up one to one: no named argument or injected builder context. A
+ * trailing block is the last child and no operand, so the arguments
+ * before it line up. */
 static int order_operand_hands_off(CodeGenerator* gen, ASTNode* call, int k) {
     if (!call || call->type != AST_FUNCTION_CALL || !call->value ||
         is_builder_func_reg(gen, call->value)) return 0;
     for (int i = 0; i < call->child_count; i++) {
         ASTNode* a = call->children[i];
-        if (!a || a->type == AST_NAMED_ARG ||
-            (a->type == AST_CLOSURE && a->value && strcmp(a->value, "trailing") == 0)) return 0;
+        if (!a || a->type == AST_NAMED_ARG) return 0;
     }
-    return k < call->child_count && field_read_can_hand_off(call->children[k]) &&
-           callee_consumes_string_arg(gen, call->value, k);
+    if (k >= call->child_count) return 0;
+    ASTNode* a = call->children[k];
+    if (a->type == AST_CLOSURE && a->value && strcmp(a->value, "trailing") == 0) return 0;
+    return string_field_handoff_kind(gen, call->value, k, a);
 }
 
 int order_prelude_depth(void) {
@@ -1462,7 +1472,8 @@ static int emit_in_operand_order(CodeGenerator* gen, ASTNode* expr) {
     seq_open_ordered(gen, &s, typed);
     for (int k = 0; k < n; k++) {
         if (!hoist[k]) continue;
-        if (order_operand_hands_off(gen, expr, k)) order_hoist_handoff(gen, &s, ops[k]);
+        int kind = order_operand_hands_off(gen, expr, k);
+        if (kind) order_hoist_handoff(gen, &s, ops[k], kind);
         else order_hoist_operand(gen, &s, ops[k]);
     }
     ASTNode* saved_emitting = g_order_emitting;
@@ -9605,11 +9616,16 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                             generate_expression(gen, arg);
                             fprintf(gen->output, ")");
                         } else if (expected == TYPE_STRING && !order_bound(arg) &&
-                                   field_read_can_hand_off(arg) &&
-                                   callee_consumes_string_arg(gen, func_name, arg_printed)) {
+                                   string_field_handoff_kind(gen, func_name, arg_printed, arg)) {
                             /* The callee frees what it is handed: the field
-                             * gives its reference up (callee_consumes_string_arg). */
-                            emit_string_field_handoff(gen, arg);
+                             * gives its reference up (callee_consumes_string_arg).
+                             * Or it keeps it as given: the field gives it up
+                             * whatever it is. */
+                            if (string_field_handoff_kind(gen, func_name, arg_printed, arg) ==
+                                STRING_FIELD_CONSUMED)
+                                emit_string_field_handoff(gen, arg);
+                            else
+                                emit_string_field_giveup(gen, arg);
                         } else {
                             generate_sized_array_argument(gen, arg, expected_type);   /* #2723 */
                         }

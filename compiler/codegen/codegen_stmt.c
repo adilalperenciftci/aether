@@ -17530,18 +17530,48 @@ static const char* emit_field_owner(CodeGenerator* gen, ASTNode* obj, TempSeq* s
  * with (is_consuming_free) are the runtime's, which release a counted
  * AetherString and leave a plain malloc'd buffer alone, so only a counted
  * one leaves the field: the field keeps a plain buffer, and frees it. */
-void emit_string_field_handoff(CodeGenerator* gen, ASTNode* e) {
+static void emit_string_field_handover(CodeGenerator* gen, ASTNode* e, int always) {
     TempSeq s;
     seq_open_ordered(gen, &s, 1);
     const char* fo = emit_field_owner(gen, e->children[0], &s);
     const char* fv = seq_let(gen, &s, "const char*", "_ae_fv");
     fprintf(gen->output, "%s->%s", fo, e->value);
     seq_next(gen, &s);
-    fprintf(gen->output, "aether_str_is_counted(%s) ? (void)(%s->_heap_%s = 0) : (void)0",
-            fv, fo, e->value);
+    if (always)
+        fprintf(gen->output, "(void)(%s->_heap_%s = 0)", fo, e->value);
+    else
+        fprintf(gen->output, "aether_str_is_counted(%s) ? (void)(%s->_heap_%s = 0) : (void)0",
+                fv, fo, e->value);
     seq_next(gen, &s);
     fprintf(gen->output, "%s", fv);
     seq_close(gen, &s);
+}
+
+void emit_string_field_handoff(CodeGenerator* gen, ASTNode* e) {
+    emit_string_field_handover(gen, e, 0);
+}
+
+/* The field's value, given up: a callee that keeps its parameter as given
+ * (stores it past the call, in a module variable, say) holds the pointer
+ * from here on, whatever the string is, so the field stops owning it and
+ * its struct's destroy leaves it alone, as a local handed to such a callee
+ * is not freed at its scope exit. A struct a call returned, which the
+ * statement destroys once done (a statement temporary, #2582, #2817), freed
+ * it under the callee: `keep(make_item(w).name)` left `kept` pointing at
+ * freed memory (#2843). */
+void emit_string_field_giveup(CodeGenerator* gen, ASTNode* e) {
+    emit_string_field_handover(gen, e, 1);
+}
+
+int string_field_handoff_kind(CodeGenerator* gen, const char* func_name, int idx, ASTNode* arg) {
+    if (!func_name || !field_read_can_hand_off(arg)) return 0;
+    if (callee_consumes_string_arg(gen, func_name, idx)) return STRING_FIELD_CONSUMED;
+    /* A function of the program whose body keeps it, as for a local; an
+     * extern's `string` parameter is read only (call_arg_escapes). */
+    if (callee_has_visible_body(gen, func_name) && callee_param_is_string(gen, func_name, idx) &&
+        callee_string_param_kept_as_given(gen, func_name, idx, 0))
+        return STRING_FIELD_KEPT;
+    return 0;
 }
 
 /* #2618: `string.free(arr[i])` / `string.release(arr[i])` / `release(arr[i])`
