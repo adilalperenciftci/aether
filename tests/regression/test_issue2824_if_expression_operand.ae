@@ -1,0 +1,32 @@
+// Regression (#2824): an `if` expression that is an operand of an operator
+// took the wrong value. Its C conditional had no parentheses of its own, and
+// the source's parentheses are not a node, so `y + (if c { 10 } else { 20 })`
+// was `(y + c) ? 10 : 20` and `(if ...) * 2` multiplied the else branch only.
+
+extern exit(code: int)
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+pick(c: int) -> int {
+    return if c == 3 { 10 } else { 20 }
+}
+
+main() {
+    y = 1
+    c = 3
+    a = y + (if c == 3 { 10 } else { 20 })
+    check(a == 11, "an if expression after +")
+    b = (if c == 3 { 10 } else { 20 }) * 2
+    check(b == 20, "an if expression before *")
+    d = 100 - (if c == 4 { 10 } else { 20 }) - 1
+    check(d == 79, "an if expression between -")
+    e = (if c == 3 { 1 } else { 0 }) == 1 && y == 1
+    check(e, "an if expression compared")
+    check(pick(3) + pick(4) == 30, "a returned if expression")
+    println("ok")
+}

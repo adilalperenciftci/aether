@@ -6330,15 +6330,18 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
         }
 
         case AST_IF_EXPRESSION:
-            // if cond { then } else { else } → C ternary: (cond) ? (then) : (else)
+            // if cond { then } else { else } → C ternary: ((cond) ? (then) : (else))
+            /* #2824: parenthesised whole. The source's parentheses are not
+             * a node, and `?:` binds looser than any operator around it:
+             * `y + (if c { 10 } else { 20 })` was `(y + c) ? 10 : 20`. */
             if (expr->child_count >= 3) {
-                fprintf(gen->output, "(");
+                fprintf(gen->output, "((");
                 generate_expression(gen, expr->children[0]);
                 fprintf(gen->output, ") ? (");
                 generate_expression(gen, expr->children[1]);
                 fprintf(gen->output, ") : (");
                 generate_expression(gen, expr->children[2]);
-                fprintf(gen->output, ")");
+                fprintf(gen->output, "))");
             }
             break;
 
