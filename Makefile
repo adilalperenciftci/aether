@@ -1248,7 +1248,7 @@ test-valgrind: compiler stdlib-dbg
 	@echo "Running Tests with Valgrind"
 	@echo "==================================="
 	$(CC) $(AETHER_REQUIRED_CFLAGS) $(CFLAGS_NO_OPT) $(DBG_OPT) $(TEST_SRC) $(BUILD_DIR)/dbg/libaether_compiler.a $(BUILD_DIR)/dbg/libaether.a -Icompiler -Istd -Istd/collections -o $(BUILD_DIR)/test_runner$(EXE_EXT) $(AETHER_REQUIRED_LDFLAGS) $(LDFLAGS)
-	valgrind --leak-check=full --show-leak-kinds=all --track-origins=yes --error-exitcode=1 ./$(BUILD_DIR)/test_runner$(EXE_EXT)
+	valgrind --leak-check=full --show-leak-kinds=all --track-origins=yes --fair-sched=yes --error-exitcode=1 ./$(BUILD_DIR)/test_runner$(EXE_EXT)
 
 # -----------------------------------------------------------------
 # ci-coverage — build with `gcc --coverage`, run the C-level test
@@ -3354,6 +3354,7 @@ valgrind-check: clean
 	@valgrind --leak-check=full \
 		--show-leak-kinds=all \
 		--track-origins=yes \
+		--fair-sched=yes \
 		--error-exitcode=1 \
 		--suppressions=.valgrind-suppressions \
 		./$(BUILD_DIR)/test_runner$(EXE_EXT) || (echo "Valgrind errors detected!" && exit 1)

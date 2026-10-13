@@ -1424,9 +1424,12 @@ jobs:
       run: |
         CFLAGS="-g -O0" make compiler
         CFLAGS="-g -O0" make test-build
+        # --fair-sched=yes: the scheduler tests busy-wait, and Valgrind's
+        # default lock starves the thread they wait on (#2593, #2881).
         valgrind --leak-check=full \
                  --show-leak-kinds=all \
                  --track-origins=yes \
+                 --fair-sched=yes \
                  --error-exitcode=0 \
                  --log-file=valgrind.log \
                  ./build/test_runner 2>&1 || true
