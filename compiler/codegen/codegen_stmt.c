@@ -18609,25 +18609,74 @@ static const char* emit_field_owner_stmt(CodeGenerator* gen, ASTNode* obj) {
     return fo;
 }
 
-/* Field read `e`, which a call frees or keeps, evaluated ahead of that call
- * (by the ordering wrapper, in its sequence `s`, or ahead of the statement,
- * `s` NULL): the address of its struct goes into a temporary, whose name is
- * returned, and the value is read through it. The field is handed over at
- * the call (emit_string_field_handover_at), once every operand has been
- * evaluated: cleared where it was read, its tracker stayed cleared when a
- * later operand left the function (an `or` handler's `return`, a
- * propagating `!`) and the call never ran, and nothing freed the string. */
-const char* emit_string_field_owner_ahead(CodeGenerator* gen, ASTNode* e, TempSeq* s) {
-    return s ? emit_field_owner(gen, e->children[0], s) : emit_field_owner_stmt(gen, e->children[0]);
+/* Field read `e`, which a call frees or keeps (`kind`), evaluated ahead of
+ * that call, by the ordering wrapper (in its sequence `s`) or ahead of the
+ * statement (`s` NULL): handed over where it is read. The value goes into
+ * `value`, and the field gives its reference up to it as the call would
+ * take it (a counted string to a free, any string to a keep), the struct
+ * reached through its address; whether it did goes into a flag, whose name
+ * is returned. From the read on the temporary owns the string: a later
+ * operand that stores into the field, or replaces the struct, frees the
+ * old value no more, and the call takes the temporary's. If the call is not
+ * reached (an `or` handler's `return`, a propagating `!`), the flag says
+ * the temporary's string is to be freed (push_handover_exit_free). Handed
+ * over at the call instead, the field kept its tracker until then, so a
+ * store in between freed the string the call then freed or kept again. */
+const char* emit_string_field_handover_ahead(CodeGenerator* gen, ASTNode* e, int kind,
+                                             TempSeq* s, const char* value) {
+    const char* own = cg_internf("%s_own", value);
+    const char* test = kind == STRING_FIELD_KEPT ? "1" : cg_internf("aether_str_is_counted(%s)", value);
+    if (s) {
+        const char* fo = emit_field_owner(gen, e->children[0], s);
+        seq_let_named(gen, s, "const char*", value);
+        fprintf(gen->output, "%s->%s", fo, e->value);
+        seq_next(gen, s);
+        seq_let_named(gen, s, "int", own);
+        fprintf(gen->output, "%s", test);
+        seq_next(gen, s);
+        fprintf(gen->output, "%s ? (void)(%s->_heap_%s = 0) : (void)0", own, fo, e->value);
+        seq_next(gen, s);
+        return own;
+    }
+    const char* fo = emit_field_owner_stmt(gen, e->children[0]);
+    hoist_declare(gen, "const char*", value);
+    hoist_declare(gen, "int", own);
+    print_indent(gen);
+    fprintf(gen->output, "%s = %s->%s;\n", value, fo, e->value);
+    print_indent(gen);
+    fprintf(gen->output, "%s = %s;\n", own, test);
+    print_indent(gen);
+    fprintf(gen->output, "if (%s) %s->_heap_%s = 0;\n", own, fo, e->value);
+    return own;
 }
 
-void emit_string_field_handover_at(CodeGenerator* gen, const char* fo, const char* field,
-                                   const char* value, int kind) {
-    if (kind == STRING_FIELD_KEPT)
-        fprintf(gen->output, "(void)(%s->_heap_%s = 0)", fo, field);
-    else
-        fprintf(gen->output, "aether_str_is_counted(%s) ? (void)(%s->_heap_%s = 0) : (void)0",
-                value, fo, field);
+/* The exit free of such a temporary: a defer, `if (own) free(value)`, that
+ * fires on any exit taken before the call runs (emit_deferred_one,
+ * try_emit_handover_exit_free); dropped once the call is written
+ * (drop_defer). */
+ASTNode* push_handover_exit_free(CodeGenerator* gen, const char* own, const char* value) {
+    ASTNode* carrier = create_ast_node(AST_EXPRESSION_STATEMENT, NULL, 0, 0);
+    if (!carrier) return NULL;
+    if (carrier->annotation) free(carrier->annotation);
+    carrier->annotation = heap_strf("handover_exit_free:%s:%s", own, value);
+    codegen_own_node(gen, carrier);
+    push_defer(gen, carrier);
+    return carrier;
+}
+
+/* Take defer `carrier` off the stack: it no longer fires on any exit. The
+ * entries above it stay; empty ones at the top of the current scope go. */
+void drop_defer(CodeGenerator* gen, ASTNode* carrier) {
+    if (!carrier) return;
+    for (int d = gen->defer_count - 1; d >= 0; d--) {
+        if (gen->defer_stack[d] != carrier) continue;
+        gen->defer_stack[d] = NULL;
+        break;
+    }
+    while (gen->defer_count > 0 && !gen->defer_stack[gen->defer_count - 1] &&
+           (gen->scope_depth <= 0 ||
+            gen->defer_count > gen->scope_defer_start[gen->scope_depth - 1]))
+        gen->defer_count--;
 }
 
 /* The field's value, handed over. The frees a callee can take a reference
