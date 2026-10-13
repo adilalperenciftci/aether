@@ -62,6 +62,71 @@ static int slice_elements_agree(ASTNode* e, const Type* target) {
     return 0;
 }
 
+int slice_empty_literal_to_null(ASTNode** slot) {
+    if (!slot || !*slot) return 0;
+    ASTNode* e = *slot;
+    if (e->type != AST_ARRAY_LITERAL || e->child_count != 0) return 0;
+    ASTNode* n = create_ast_node(AST_NULL_LITERAL, "null", e->line, e->column);
+    n->source_file = e->source_file ? strdup(e->source_file) : NULL;
+    n->node_type = create_type(TYPE_PTR);
+    free_ast_node(e);
+    *slot = n;
+    return 1;
+}
+
+/* The slot holding the value a match arm gives (match_arm_value's): the
+ * arm's body, or the expression ending its block. NULL when it gives none
+ * (it ends in a statement), or when it ends in a match of its own, which
+ * `nested` then receives. */
+static ASTNode** arm_value_slot(ASTNode* arm, ASTNode** nested) {
+    *nested = NULL;
+    if (!arm || arm->type != AST_MATCH_ARM || arm->child_count < 2 || !arm->children[1])
+        return NULL;
+    ASTNode* body = arm->children[1];
+    if (body->type != AST_BLOCK)
+        return match_arm_value(body) == body ? &arm->children[1] : NULL;
+    if (body->child_count == 0) return NULL;
+    ASTNode* last = body->children[body->child_count - 1];
+    if (!last) return NULL;
+    if (last->type == AST_MATCH_STATEMENT) {
+        *nested = last;
+        return NULL;
+    }
+    /* The block's last expression, as match_arm_value reads it; `[]` has
+     * no type of its own yet, so it is taken here by its shape. */
+    if (last->type != AST_EXPRESSION_STATEMENT || last->child_count < 1 || !last->children[0])
+        return NULL;
+    ASTNode* v = last->children[0];
+    if (v->type == AST_ARRAY_LITERAL || match_arm_value(body) == v) return &last->children[0];
+    return NULL;
+}
+
+/* #2789: a value that branches (an if-expression, a `match` whose value is
+ * used) goes into the slot arm by arm, as each arm's value would on its own:
+ * a `T[N]` arm is viewed, a `[]` or `null` arm is the empty slice. */
+static int coerce_arms(ASTNode* e, const Type* target, int target_is_c_view) {
+    int changed = 0;
+    if (e->type == AST_IF_EXPRESSION) {
+        for (int i = 1; i < e->child_count && i < 3; i++)
+            changed |= slice_coerce_slot(&e->children[i], target, target_is_c_view);
+    } else if (e->type == AST_MATCH_STATEMENT) {
+        for (int i = 1; i < e->child_count; i++) {
+            ASTNode* nested = NULL;
+            ASTNode** vs = arm_value_slot(e->children[i], &nested);
+            if (vs) changed |= slice_coerce_slot(vs, target, target_is_c_view);
+            else if (nested) changed |= coerce_arms(nested, target, target_is_c_view);
+        }
+    }
+    if (changed) {
+        /* The value is now what its arms are: a slice, or in a raw-pointer
+         * slot a pointer. */
+        if (e->node_type) free_type(e->node_type);
+        e->node_type = (type_is_slice(target) && !target_is_c_view)
+            ? clone_type((Type*)target) : create_type(TYPE_PTR);
+    }
+    return changed;
+}
+
 int slice_coerce_slot(ASTNode** slot, const Type* target, int target_is_c_view) {
     if (!slot || !*slot || !target) return 0;
     ASTNode* e = *slot;
@@ -70,6 +135,10 @@ int slice_coerce_slot(ASTNode** slot, const Type* target, int target_is_c_view) 
     int slot_is_slice = type_is_slice(target) && !target_is_c_view;
     int slot_is_raw_ptr = target->kind == TYPE_PTR ||
                           (target->kind == TYPE_ARRAY && target_is_c_view);
+
+    if ((slot_is_slice || slot_is_raw_ptr) &&
+        (e->type == AST_IF_EXPRESSION || e->type == AST_MATCH_STATEMENT))
+        return coerce_arms(e, target, target_is_c_view);
 
     if (slot_is_slice) {
         /* `null`, and the empty literal `[]` (no elements, so no array to
@@ -94,6 +163,9 @@ int slice_coerce_slot(ASTNode** slot, const Type* target, int target_is_c_view) 
         }
         return 0;
     }
+    /* In a raw-pointer slot (a C function's `T[]`, a `ptr`) the empty
+     * literal is the empty slice's pointer, `null` (#2789). */
+    if (slot_is_raw_ptr && slice_empty_literal_to_null(slot)) return 1;
     if (slot_is_raw_ptr) return slice_coerce_to_ptr(slot);
     return 0;
 }

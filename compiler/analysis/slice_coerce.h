@@ -33,4 +33,10 @@ int slice_coerce_to_ptr(ASTNode** slot);
 /* Is `n` one of the two coercion nodes? */
 int slice_is_coercion_node(const ASTNode* n);
 
+/* #2789: replace `*slot`, when it is the empty literal `[]`, with `null`:
+ * the empty slice views no storage, so where its pointer is what is read (a
+ * raw-pointer slot, a comparison with a slice) it is the null pointer.
+ * Returns 1 if replaced. */
+int slice_empty_literal_to_null(ASTNode** slot);
+
 #endif

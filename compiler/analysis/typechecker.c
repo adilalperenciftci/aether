@@ -11247,6 +11247,18 @@ int typecheck_binary_expression(ASTNode* expr, SymbolTable* table) {
         if (l_arr && !left->node_type) left->node_type = clone_type(left_type);
         if (r_arr && !right->node_type) right->node_type = clone_type(right_type);
         if (operator == TOKEN_EQUALS || operator == TOKEN_NOT_EQUALS) {
+            /* #2789: `s == []` compares with the empty slice, which views no
+             * storage: its pointer is null, so it is `s == null`. */
+            if (l_arr && slice_empty_literal_to_null(&expr->children[1])) {
+                right = expr->children[1];
+                r_ptrish = 1;
+                changed = 1;
+            }
+            if (r_arr && slice_empty_literal_to_null(&expr->children[0])) {
+                left = expr->children[0];
+                l_ptrish = 1;
+                changed = 1;
+            }
             if (l_arr && r_ptrish) changed |= slice_coerce_to_ptr(&expr->children[0]);
             if (r_arr && l_ptrish) changed |= slice_coerce_to_ptr(&expr->children[1]);
         } else if (operator == TOKEN_PLUS || operator == TOKEN_MINUS) {
