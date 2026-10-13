@@ -12040,6 +12040,47 @@ static void emit_destructure_global_store(CodeGenerator* gen, const char* name, 
     fprintf(gen->output, "%s = _tup%d._%d;\n", name, tmp_id, j);
 }
 
+/* #2806: slot `j` of `_tup<id>`, of position type `pt`, into the state
+ * field `name` of the actor being generated, taken as the bare `name = v`
+ * takes a value into state: a string of its own (adopted when the call
+ * handed it over, `owned`, copied otherwise), the one it held freed when
+ * the state owned it (its `self->_heap_<name>` tracker); a reference of its
+ * own to a closure, giving back the one it held; a struct that owns strings
+ * replaced (the tuple's struct is the destructure's, #752); an optional a
+ * bare value wraps into. */
+static void emit_destructure_state_store(CodeGenerator* gen, const char* name, Type* pt,
+                                         int tmp_id, int j, int owned, int closure_owned) {
+    const char* trk = actor_state_string_tracked(gen, name)
+                      ? cg_internf("self->_heap_%s", name) : cg_internf("_heap_%s", name);
+    if (pt && pt->kind == TYPE_STRING) {
+        fprintf(gen->output, "{ const char* _tmp_old = self->%s; self->%s = %s_tup%d._%d%s;",
+                name, name, owned ? "(" : "aether_uniform_heap_str(", tmp_id, j,
+                owned ? ")" : ", 0)");
+        if (!is_escaped_string_var(gen, name))
+            fprintf(gen->output, " if (%s) aether_heap_str_free(_tmp_old);", trk);
+        fprintf(gen->output, " %s = 1; (void)_tmp_old; }\n", trk);
+        return;
+    }
+    if (pt && pt->kind == TYPE_FUNCTION && !pt->is_fnptr) {
+        fprintf(gen->output, "{ void* _ae_old = self->%s.env; self->%s = %s_tup%d._%d%s; "
+                "_aether_closure_env_release(_ae_old); }\n",
+                name, name, closure_owned ? "(" : "_aether_closure_retain(", tmp_id, j, ")");
+        return;
+    }
+    const char* sname = struct_owning_strings(gen, pt);
+    if (sname) {
+        fprintf(gen->output, "%s_replace(&self->%s, _tup%d._%d);\n", sname, name, tmp_id, j);
+        return;
+    }
+    Type* st = actor_state_decl(gen, name) ? actor_state_decl(gen, name)->node_type : NULL;
+    if (st && st->kind == TYPE_OPTIONAL) {
+        fprintf(gen->output, "self->%s = %s;\n", name,
+                opt_slot_text(cg_intern(get_c_type(st)), pt, tmp_id, j, 0, 0));
+        return;
+    }
+    fprintf(gen->output, "self->%s = _tup%d._%d;\n", name, tmp_id, j);
+}
+
 static void emit_match_result_value(CodeGenerator* gen, ASTNode* result);
 
 // #2459: a match arm's block body is its own scope, the way an `if` / `switch`
@@ -12835,6 +12876,16 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                         fprintf(gen->output, "_aether_closure_env_release(_tup%d._%d.env);\n",
                                 tmp_id, j);
                     }
+                    continue;
+                }
+                /* #2806: an actor's state field the destructure names, in
+                 * a handler, is written as `label = v` writes it, where a
+                 * handler local of the same name was declared and the
+                 * state kept its value. */
+                if (is_actor_state_var(gen, var->value)) {
+                    emit_destructure_state_store(gen, var->value, pos_t, tmp_id, j,
+                                                 pos_is_string ? pos_is_heap : pos_opt_owned,
+                                                 pos_closure_owned);
                     continue;
                 }
                 /* #2796: a module-level `var` the destructure names is

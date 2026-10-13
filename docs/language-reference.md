@@ -568,6 +568,8 @@ main() {
 
 Constants cost nothing at run time: each is a file-scope `static const` in the generated C. A program's own constants are emitted under the reserved name `ae_const_<NAME>`, so no C header can claim the name: a constant may be called `SIZE`, `NEAR` or `MAX_PATH` on every platform, although `windows.h` owns all three (#2292). A parameter or local named like a constant is still that parameter or local. An imported module's constants carry the module's prefix instead.
 
+A constant of an optional type takes a constant of its inner type or `none` (#2807): `const LIMIT: int? = 3`, `const NO_LABEL: string? = none`. It reads as any optional does (`LIMIT ?? 0`, `match LIMIT { ... }`); the value is wrapped once, in its `static const`.
+
 #### Module-level constant arrays, lookup tables
 
 A `const` array lowers to a file-scope `static const` table, allocated once and shared across every call (not re-initialised per call), the right shape for a table-driven algorithm:

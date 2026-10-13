@@ -9163,6 +9163,21 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
                 /* get_c_type already says `const char*` for strings; avoid
                  * emitting a duplicate `const const`. */
                 int already_const = strncmp(ctype, "const ", 6) == 0;
+                if (cd->node_type && cd->node_type->kind == TYPE_OPTIONAL) {
+                    /* #2807: an optional's constant is its own struct, as
+                     * a module `var`'s is (#2800): `{0}` for `none`, a
+                     * value wrapped. Given bare, C refused it. */
+                    fprintf(gen->output, "static const %s %s = ", ctype, cd->value);
+                    if (cd->children[0]->type == AST_NONE_LITERAL) {
+                        fprintf(gen->output, "{0}");
+                    } else {
+                        fprintf(gen->output, "{ .has = 1, .val = ");
+                        generate_expression(gen, cd->children[0]);
+                        fprintf(gen->output, " }");
+                    }
+                    fprintf(gen->output, ";\n");
+                    continue;
+                }
                 fprintf(gen->output, "static %s%s %s = (",
                         already_const ? "" : "const ", ctype, cd->value);
                 generate_expression(gen, cd->children[0]);

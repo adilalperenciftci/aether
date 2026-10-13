@@ -1,0 +1,55 @@
+// Regression (#2807): a `const` of an optional type takes the optional's
+// own constant, as a module `var` does (#2800).
+//
+// The const was emitted with its value bare (`static const ae_opt_int
+// ae_const_LIMIT = (3);`, which C rejects), and `none` was refused as not a
+// compile-time constant. A value is wrapped now (`{ .has = 1, .val = 3 }`)
+// and `none` is `{0}`.
+
+extern exit(code: int)
+
+const LIMIT: int? = 3
+const NOTHING: int? = none
+const LABEL: string? = "label"
+const NO_LABEL: string? = none
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+limit_or(d: int) -> int {
+    int r = LIMIT ?? d
+    return r
+}
+
+main() {
+    println("=== test_optional_const ===")
+    check((LIMIT ?? -1) == 3 && limit_or(-1) == 3, "an int? const with a value")
+    check((NOTHING ?? -1) == -1, "an int? const of none")
+    check((LABEL ?? "-") == "label" && (NO_LABEL ?? "-") == "-", "string? consts")
+    check(NOTHING == none && LIMIT != none, "comparisons with none")
+    got = 0
+    match LIMIT {
+        some(n) -> {
+            got = n
+        }
+        none -> {
+            got = -1
+        }
+    }
+    check(got == 3, "a match on an int? const (${got})")
+    l = ""
+    match LABEL {
+        some(s) -> {
+            l = s
+        }
+        none -> {
+            l = "-"
+        }
+    }
+    check(l == "label", "a match on a string? const (${l})")
+    println("=== test_optional_const passed ===")
+}

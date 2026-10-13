@@ -8201,6 +8201,10 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                                           init->value && strcmp(et->struct_name, init->value) == 0 &&
                                           is_const_struct_literal(init, table));
                     }
+                    /* #2807: so is an optional `const`'s `none`. */
+                    if (!is_struct_init && !stmt->annotation && dt && dt->kind == TYPE_OPTIONAL &&
+                        init->type == AST_NONE_LITERAL)
+                        is_struct_init = 1;
                     if (!is_array_const && !is_struct_init) {
                         char msg[512];
                         if (stmt->annotation && strcmp(stmt->annotation, "global_var") == 0) {
