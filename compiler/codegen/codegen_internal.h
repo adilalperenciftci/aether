@@ -23,6 +23,75 @@ const char* cg_internf(const char* fmt, ...)
 #endif
     ;
 
+/* #2765: an expression's temporaries (codegen_stmt.c). A construct that
+ * needs some (an argument freed after the call, a string taken into an
+ * owning slot) opens a TempSeq and writes its parts once:
+ *
+ *     seq_open; t = seq_let(ctype, prefix); <value>; seq_next; <use of t>;
+ *     seq_next; ...; <result>; seq_close
+ *
+ * While a statement is being emitted, that is the comma expression
+ * `(t = <value>, <use>, <result>)`, its temporaries declared ahead of the
+ * statement: plain C, which every C compiler takes. With no statement to
+ * declare them ahead of, it is the GNU statement expression
+ * `({ T t = <value>; <use>; <result>; })`, which only a GCC-compatible
+ * compiler takes. A part is an expression in both: a conditional is
+ * `c ? a : b`, not an `if` statement. An ordered sequence (an operand
+ * evaluated ahead, #2478) infers its temporaries' types with __auto_type on
+ * the GCC path and spells them elsewhere, through the _AE_SEQ_* macros.
+ * seq_decl declares a temporary the parts assign on their own (each arm of
+ * a conditional). */
+typedef struct { int stmt_expr; int ordered; } TempSeq;
+int hoist_ready(CodeGenerator* gen);
+void seq_open(CodeGenerator* gen, TempSeq* s);
+void seq_open_ordered(CodeGenerator* gen, TempSeq* s, int typed);
+const char* seq_let(CodeGenerator* gen, TempSeq* s, const char* ctype, const char* prefix);
+void seq_let_named(CodeGenerator* gen, TempSeq* s, const char* ctype, const char* name);
+void seq_decl(CodeGenerator* gen, TempSeq* s, const char* ctype, const char* name);
+void seq_next(CodeGenerator* gen, TempSeq* s);
+void seq_close(CodeGenerator* gen, TempSeq* s);
+/* A temporary `ctype name;` declared ahead of the statement being emitted
+ * (hoist_ready), for both compilers. */
+void hoist_declare(CodeGenerator* gen, const char* ctype, const char* name);
+/* Where declarations go ahead of a statement, judged by the `n` bytes of C
+ * before it: 0 there, 1 after a null statement (a label precedes), 2 in a
+ * block with the statement (an unbraced body). */
+int codegen_hoist_site(const char* s, size_t n);
+/* #2765: a construct that runs statements (an `or` with a block handler, a
+ * propagating `!`, a call with a trailing block whose value is used), run
+ * ahead of its statement, its value bound for the statement to read
+ * (codegen_expr.c). */
+int is_control_value(CodeGenerator* gen, ASTNode* e);
+int emit_control_prelude(CodeGenerator* gen, ASTNode* e, int discarded);
+/* #2798: the same anywhere in a statement: does `e` hold one, and run the
+ * ones a value or a list of operands holds, with what is evaluated before
+ * them, ahead of the statement (1 when every one is bound). */
+/* #2478, #2813: the memoised call effects (codegen_expr.c), freed. */
+void order_fn_effects_release(CodeGenerator* gen);
+int ctl_contains(CodeGenerator* gen, ASTNode* e);
+int ctl_linearize_value(CodeGenerator* gen, ASTNode* e, int discarded);
+int ctl_linearize_list(CodeGenerator* gen, ASTNode** ops, int n);
+/* The arguments of a builder call, evaluated after its block, left to
+ * right, ahead of the call. */
+void ctl_builder_args(CodeGenerator* gen, ASTNode* call);
+/* A builder call whose block has run, as `fn(args..., cfg)` through the
+ * ordinary call emitter; and whether `call` is the one being emitted so. */
+void emit_builder_call(CodeGenerator* gen, ASTNode* call, const char* cfg);
+int builder_call_configured(ASTNode* call);
+typedef struct {
+    ASTNode* trailing_stmt_call;
+    ASTNode* call;
+    const char* var;
+} BuilderCfg;
+BuilderCfg builder_cfg_begin(CodeGenerator* gen, ASTNode* call, const char* cfg);
+void builder_cfg_end(CodeGenerator* gen, BuilderCfg saved);
+/* `<lhs> = <value>;` as a statement of its own, outside any Aether
+ * statement (an actor state's initializer): temporaries and constructs as
+ * generate_statement handles a statement's. */
+void generate_value_statement(CodeGenerator* gen, const char* lhs, ASTNode* value);
+int control_prelude_depth(void);
+void control_prelude_end(int depth);
+
 /* Utilities (codegen.c) */
 void indent(CodeGenerator* gen);
 void unindent(CodeGenerator* gen);
@@ -102,7 +171,7 @@ int is_heap_string_expr(CodeGenerator* gen, ASTNode* expr);
  * (a call, an interpolation, an `or`, such an unwrap) that the expression
  * reading it frees; and whether a `string?` argument is free after a call. */
 int is_owned_opt_string_call(CodeGenerator* gen, ASTNode* e);
-int is_owned_opt_string_unwrap(CodeGenerator* gen, ASTNode* e);
+int is_owned_string_unwrap(CodeGenerator* gen, ASTNode* e);
 int is_fresh_heap_string_temp(CodeGenerator* gen, ASTNode* e);
 int opt_string_arg_freed_after_call(CodeGenerator* gen, const char* func_name, int ai);
 
@@ -173,6 +242,23 @@ int struct_is_observable(CodeGenerator* gen, const char* struct_name);
 int callee_consumes_string_arg(CodeGenerator* gen, const char* func_name, int idx);
 int field_read_can_hand_off(ASTNode* e);
 void emit_string_field_handoff(CodeGenerator* gen, ASTNode* e);
+/* How owned field read `arg`, argument `idx` of a call of `func_name`, is
+ * handed over: STRING_FIELD_CONSUMED to a parameter the callee frees,
+ * STRING_FIELD_KEPT to one it keeps as given (stores past the call), else
+ * 0; and the second shape, the field giving its reference up whatever the
+ * string is. */
+enum { STRING_FIELD_CONSUMED = 1, STRING_FIELD_KEPT = 2 };
+int string_field_handoff_kind(CodeGenerator* gen, const char* func_name, int idx, ASTNode* arg);
+void emit_string_field_giveup(CodeGenerator* gen, ASTNode* e);
+/* Such a field read evaluated ahead of its call (in the ordering sequence
+ * `s`, or ahead of the statement for NULL): handed over to temporary
+ * `value` as it is read, the name of the flag that says it was returned;
+ * and the defer that frees the temporary on an exit taken before the call,
+ * dropped with drop_defer once the call is written. */
+const char* emit_string_field_handover_ahead(CodeGenerator* gen, ASTNode* e, int kind,
+                                             TempSeq* s, const char* value);
+ASTNode* push_handover_exit_free(CodeGenerator* gen, const char* own, const char* value);
+void drop_defer(CodeGenerator* gen, ASTNode* carrier);
 void emit_string_field_free(CodeGenerator* gen, ASTNode* e, const char* runtime_free);
 /* #2618: the same for an element of an array that owns its elements, when
  * string_element_free_kind says it is one. */
@@ -469,6 +555,10 @@ void generate_expression_as_elem_ptr(CodeGenerator* gen, ASTNode* expr);
 /* #1286: emit `expr` as an AetherSlice: a `T[N]` array is wrapped with its
  * static length, a slice is emitted as-is. */
 void generate_expression_as_slice(CodeGenerator* gen, ASTNode* expr);
+/* #2767: is `e` the empty slice, `null` or `[]` in a `T[]` slot (the
+ * typechecker's AST_SLICE_FROM_ARRAY over either)? It views no storage, so
+ * a file-scope static takes it as the constant `{0}`. */
+int is_empty_slice_value(const ASTNode* e);
 /* #2723: emit `arg` for a parameter of type `param_type`: an array a `try`
  * body may have written, for a `T[N]` parameter, as a copy of its own. */
 void generate_sized_array_argument(CodeGenerator* gen, ASTNode* arg, Type* param_type);
@@ -488,6 +578,11 @@ const char* get_builder_factory(CodeGenerator* gen, const char* func_name);
 
 /* A trailing block's statements, in its own scope (codegen_stmt.c). */
 void emit_trailing_block_body(CodeGenerator* gen, ASTNode* body);
+/* #2791: a builder call's trailing block, whose config the C variable
+ * `cfg_var` holds: as emit_trailing_block_body, and a way out of the block
+ * before the builder runs releases the config. */
+void emit_builder_block_body(CodeGenerator* gen, ASTNode* body, const char* cfg_var,
+                             const char* builder_name);
 /* The block of a call's trailing DSL closure: not a closure the function
  * takes as a `fn` parameter. NULL when the call has none (codegen_expr.c). */
 ASTNode* trailing_dsl_block(CodeGenerator* gen, ASTNode* call);
@@ -553,10 +648,11 @@ void emit_closure_take(CodeGenerator* gen, ASTNode* e);
 void emit_owned_array_literal(CodeGenerator* gen, ASTNode* lit, int kind);
 /* #2688: a struct literal's fixed-size array field given another array
  * (`Shelf { names: arr }`): it is `{0}` in the literal, and
- * emit_struct_literal_array_field then fills `_ae_slit.<field>` element by
- * element, each taken as the field keeps it. */
+ * emit_struct_literal_array_field then fills that field of the literal's
+ * temporary `slit`, element by element, each taken as the field keeps it. */
 int struct_literal_field_takes_array(CodeGenerator* gen, const char* sname, ASTNode* field_init);
-void emit_struct_literal_array_field(CodeGenerator* gen, const char* sname, ASTNode* field_init);
+void emit_struct_literal_array_field(CodeGenerator* gen, const char* sname, ASTNode* field_init,
+                                     const char* slit);
 /* #2690: a struct value a `try` body writes is declared volatile; may the
  * lvalue `lv` (a local, or a field or element held by one) be such a value?
  * Its release and replace are then the generated `<Name>_destroy_volatile`
@@ -683,6 +779,7 @@ int is_promoted_capture(CodeGenerator* gen, const char* name);
 /* The C type of `var_name` as `parent_func` declares it (a function name,
  * "main", a receive arm or a hoisted closure scope); "int" when unknown. */
 const char* lookup_var_c_type(CodeGenerator* gen, const char* var_name, const char* parent_func);
+Type* promoted_cell_type(CodeGenerator* gen, const char* name);   /* #2797 */
 const char* promoted_cell_release_fn(CodeGenerator* gen, const char* c_type);
 const char* struct_owning_strings(CodeGenerator* gen, Type* t);
 /* `retain_closures`: 1 where the value at `lvalue` stays a holder of its

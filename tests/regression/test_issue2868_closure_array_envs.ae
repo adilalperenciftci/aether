@@ -1,0 +1,71 @@
+// Regression (#2868): an `fn[N]` local built from closure literals held
+// the one reference to each closure's environment, and nothing released
+// them at its scope exit, so every capturing closure in it leaked its
+// environment. The local now releases them, as a closure local does; a
+// struct the array is given to takes references of its own, which its
+// destroy releases. Each shape runs in a round, and the rounds must not
+// grow the heap.
+
+import std.mem
+
+extern exit(code: int)
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+struct Hooks {
+    fs: fn[2]
+}
+
+called(k: int) -> int {
+    fs = [|| { return k }, || { return k + 1 }]
+    int a = call(fs[0])
+    int b = call(fs[1])
+    return a + b
+}
+
+given(k: int) -> int {
+    fs = [|| { return k * 2 }, || { return k * 3 }]
+    hooks = Hooks { fs: fs }
+    int a = call(hooks.fs[0])
+    int b = call(fs[1])
+    return a + b
+}
+
+held(k: int) -> Hooks {
+    fs = [|| { return k + 10 }, || { return k + 20 }]
+    return Hooks { fs: fs }
+}
+
+round(k: int) -> int {
+    total = 0
+    i = 0
+    while i < 20 {
+        total = total + called(k) + given(k)
+        h = held(k)
+        int c = call(h.fs[1])
+        total = total + c
+        i = i + 1
+    }
+    return total
+}
+
+main() {
+    check(called(5) == 11, "an array's closures called")
+    check(given(5) == 25, "an array given to a struct")
+    h = held(5)
+    int c = call(h.fs[0])
+    check(c == 15, "a struct holding an array's closures, returned")
+    check(round(5) == 20 * (11 + 25 + 25), "the rounds")
+    if mem.heap_in_use_exact() {
+        g = mem.steady_growth(|| {
+                round(5)
+            }, 5)
+        check(g == 0, "the heap grew by ${g} bytes")
+    }
+    println("ok")
+}

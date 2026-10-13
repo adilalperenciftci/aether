@@ -384,10 +384,11 @@ main() {
 - **`s.len`** is the element count, an `int`.
 - **`s[i]` is bounds-checked.** An index outside `0 ..< s.len` is a runtime panic naming the source line, the index and the length (`slice index 5 out of range for length 3`). It is an ordinary panic: `try` catches it, and an actor step that trips it dies cleanly. A negative index is out of range, never a read before the buffer.
 - **`s[lo..hi]`** is the half-open sub-slice `[lo, hi)`, checked the same way (`lo <= hi <= s.len`). `s[lo..]` runs to the end, `s[..hi]` from the start, `s[..]` is the whole thing. The base may be a slice or a `T[N]` array; the result is always a `T[]` over the *same* elements, so a write through it is visible through the original.
-- **A `T[N]` array converts to `T[]` implicitly** wherever a slice is expected: a parameter, a `T[]`-typed binding or field, a `return` from a `-> T[]` function. The length travels with it. `null` converts to the empty slice (`.len` is `0`, and it compares equal to `null`).
+- **A `T[N]` array converts to `T[]` implicitly** wherever a slice is expected: a parameter, a `T[]`-typed binding or field, a `return` from a `-> T[]` function. The length travels with it. `null`, and the empty literal `[]`, convert to the empty slice: `.len` is `0`, it views no storage, and it compares equal to `null`. So `s == []` is `s == null` (it asks whether `s` views any storage; test `s.len == 0` for emptiness), a C function's `T[]` parameter takes `[]` as the null pointer, and an if-expression or a `match` given to a `T[]` converts each arm on its own. A module-level `var` or `const` of type `T[]` takes either as its initial value.
 - **A slice decays to its pointer** wherever a `ptr` is expected, exactly as a `T[N]` array does: a `ptr` parameter, a C extern's parameter (including one declared `T[]`), `free(s)`, a comparison against `null`, and pointer arithmetic (`s + n` is a `ptr` to element `n`). `s as ptr` spells the same conversion explicitly, for a `ptr` return or binding. The length is dropped at that boundary; nothing else about the extern ABI changes.
 - **`make([]T, n)`** allocates `n` zeroed elements and returns them as a bounded slice; `free(s)` releases them.
 - A slice does not own its elements. It is valid for exactly as long as the storage it views: an array in an enclosing scope, a `make` buffer until its `free`, a C buffer until C reclaims it. So a string read out of a `string[]` slice into something that outlives the read (a return value, a struct field, a container) is a copy of its own, while a local bound to one (`t = s[i]`) borrows it and is valid only as long as the element is; a store into a slice element frees nothing: the string it replaces is left to the storage's owner, and the string it stores becomes the storage's ([memory-management.md](memory-management.md)).
+- **A slice of a function's own storage stays in the function** (E0900). An array literal in a slice slot, and a function's own fixed-size array, live in its frame, which ends when the function returns. A slice of either may be used while the function runs and passed down to the functions it calls, but it may not leave the function: returned (alone, in a struct or tuple, or in a closure that captured it), stored in a module-level `var`, or stored in a field of something that may outlive the function: a struct behind a pointer, or a global (a struct value of the function's own may take it, and is then itself such a slice). Each of those is refused at the value that leaves, `'lit' returns a slice of its own storage (an array literal)`. Keep such a slice in storage that lives as long as it: a `make([]T, n)` buffer, a slice the caller passed in, or a module-level array. A slice parameter (`xs: int[]`) views the caller's storage and may be returned; a fixed-size array parameter (`a: int[3]`) is the function's own copy of the caller's array, so a slice of it is a slice of the function's storage. What a name holds where it leaves is what counts, path by path: a local or a field of a local struct re-bound to a `make` buffer before the `return` holds no slice of the frame any more, but one that still holds it on any path to the `return` (an `if` that re-binds it in one branch only, a loop that may `break` before the re-bind) is refused. A re-bind made by calling a closure is not counted: a name that holds a slice of the frame before `reset()` still holds one after it, even when the closure re-binds it to a `make` buffer (following a closure call soundly is future work, #2837). The other way is counted, conservatively: a closure that may store a slice of the function's storage into one of its names (`setview = || { v = arr }`) gives that name a slice from where the closure is written on, whether and whenever it is called, and a store a closure makes through a pointer or into a module-level `var` is judged as the same store written in the function. What the closure stores is judged as the function's own stores are: a fixed-size array of the function or an array literal, a name that holds such a slice at some point of the function, a local of the closure bound to one, or a parameter of the closure it is called with one for (any parameter that can hold a slice, when the closure is passed on or stored). A slice parameter of the function, a `make` buffer, a module-level `var` or `[]` stored by a closure leaves the name as it was. A call's result is taken to be no view of the caller, so a function that hands back the slice it was given is not seen through, in a closure (`v = same(arr)`) or not.
 
 **Views over a raw pointer are unbounded.** `p as T[]` (the typed-array cast) and a `T[]` handed back by a C extern have no length the compiler can know. Such a view indexes without a check, as it always did, and its `.len` is `-1`. Bound it with an explicit end to get checking back:
 
@@ -481,7 +482,7 @@ Variables are inferred from their initialization or usage context.
 
 **Keywords are not names.** A statement keyword used as a variable (`when = 0.0`, `message = "hi"`) is refused at the keyword: `'when' is a reserved keyword and cannot be used as an identifier; rename it`.
 
-**A local has one type: the one its first binding gave it.** A later bare assignment is an assignment, not a new variable, so `x = 5` then `x = "s"` (or `x = true`, `x = null`) is a compile error, *cannot re-bind 'x' as string: it was bound as int by its first assignment*, rather than a C error about `const char*`. Use a new name for the other value. A name first bound inside a branch or loop body and **used after it** is one variable for the whole function: it takes the numeric join of every binding (`if a { n = 1 } else { n = 4000000000 }` makes `n` a `long`; `f = 1.5` in one branch and `f = 2` in the other keeps `f` a `float`), and a binding of another kind anywhere in the function, or of another struct or pointer type, is the same compile error: *cannot bind 'v' as int: it is bound as string in another branch or loop body of this function*. A `switch` case is a branch here as an `if` arm is. A local of a `while` body is declared before the loop, and a name both arms of an `if`/`else` (or every case of a `switch` with a `default`) bind is declared before the `if` (or `switch`), so each is one variable whether or not it is used after them: `view = p as *Apple` in one `while` and `view = p as *Pear` in the next is that error, where a bare `ptr` or `null` binding would fit either. A read of such a local in the body before its binding, which sees the value the previous pass bound, has the binding's type (`out = "${out}${prev}"` ahead of `prev = "p${i}"` reads a string). A name bound in the bodies of separate `if`s or `for` loops and used only inside them is a separate variable per body, except a `string` local, which is always one variable for the whole function, as its heap tracker is. The conversions the [table below](#casting-between-types) permits still apply at a re-bind, and the local keeps its first type: after `f = 1.5`, `f = 2` stores `2.0` and `f` stays a `float`; after `int x = 0`, `x = 2.5` stores `2`. A `string` accepts `null` (it is a nullable `const char*`), and a value that would not fit an *inferred* `int` (a 64-bit integer, a `uint32`, a float) is the narrowing error described there.
+**A local has one type: the one its first binding gave it.** A later bare assignment is an assignment, not a new variable, so `x = 5` then `x = "s"` (or `x = true`, `x = null`) is a compile error, *cannot re-bind 'x' as string: it was bound as int by its first assignment*, rather than a C error about `const char*`. Use a new name for the other value. A name first bound inside a branch or loop body and **used after it** is one variable for the whole function: it takes the numeric join of every binding (`if a { n = 1 } else { n = 4000000000 }` makes `n` a `long`; `f = 1.5` in one branch and `f = 2` in the other keeps `f` a `float`), and a binding of another kind anywhere in the function, or of another struct or pointer type, is the same compile error: *cannot bind 'v' as int: it is bound as string in another branch or loop body of this function*. A `switch` case is a branch here as an `if` arm is, and so is the body of a `match` arm ([Match Statements](#match-statements)). A local of a `while` body is declared before the loop, and a name both arms of an `if`/`else` (or every case of a `switch` with a `default`, or every arm of a `match` that runs an arm for every value) bind is declared before the `if` (or `switch`, or `match`), so each is one variable whether or not it is used after them: `view = p as *Apple` in one `while` and `view = p as *Pear` in the next is that error, where a bare `ptr` or `null` binding would fit either. A read of such a local in the body before its binding, which sees the value the previous pass bound, has the binding's type (`out = "${out}${prev}"` ahead of `prev = "p${i}"` reads a string). A name bound in the bodies of separate `if`s or `for` loops and used only inside them is a separate variable per body, except a `string` local, which is always one variable for the whole function, as its heap tracker is. The conversions the [table below](#casting-between-types) permits still apply at a re-bind, and the local keeps its first type: after `f = 1.5`, `f = 2` stores `2.0` and `f` stays a `float`; after `int x = 0`, `x = 2.5` stores `2`. A `string` accepts `null` (it is a nullable `const char*`), and a value that would not fit an *inferred* `int` (a 64-bit integer, a `uint32`, a float) is the narrowing error described there. Each slot of a tuple destructure that names a bound local re-binds it the same way, whether the local is in the same scope or is an outer one a closure writes (`a, b = two()` in a closure after `a, b = names()`): a slot of another kind is the same error, reported at the slot, a slot C converts is stored as the local's type, and an `int` slot binds an inferred `int`, as `x = 5` does (#2762).
 
 **A local's scope starts after its initializer.** In `count = count() + 1` the call is the function `count`, and from that binding on, to the end of the function, `count` is the local. So is a local declared ahead of its binding because both arms of an `if` bind it: until the checker reaches the first binding in source order, the name is still the function's. A reference that comes before the binding, such as the function passed as a value, is the function too:
 
@@ -568,6 +569,8 @@ main() {
 
 Constants cost nothing at run time: each is a file-scope `static const` in the generated C. A program's own constants are emitted under the reserved name `ae_const_<NAME>`, so no C header can claim the name: a constant may be called `SIZE`, `NEAR` or `MAX_PATH` on every platform, although `windows.h` owns all three (#2292). A parameter or local named like a constant is still that parameter or local. An imported module's constants carry the module's prefix instead.
 
+A constant of an optional type takes a constant of its inner type or `none` (#2807): `const LIMIT: int? = 3`, `const NO_LABEL: string? = none`. It reads as any optional does (`LIMIT ?? 0`, `match LIMIT { ... }`); the value is wrapped once, in its `static const`.
+
 #### Module-level constant arrays, lookup tables
 
 A `const` array lowers to a file-scope `static const` table, allocated once and shared across every call (not re-initialised per call), the right shape for a table-driven algorithm:
@@ -615,8 +618,9 @@ next_rand() -> uint64 {
 ```
 
 - The type annotation is optional: `var hits = 0` infers `int` from the initializer, exactly like a local.
-- A `var` lowers to a **file-scope `static`** in the generated C. Reads and writes from same-module functions are plain identifier access, no accessors, no indirection. A `name = expr` statement whose name is a module `var` always writes that global (the name is in scope everywhere in the module); pick a different name for a function-local.
+- A `var` lowers to a **file-scope `static`** in the generated C. Reads and writes from same-module functions are plain identifier access, no accessors, no indirection. Every binding of a module `var`'s name in a function or a closure writes that global (the name is in scope everywhere in the module): a `name = expr` statement, and a declaration as well, `let name = expr`, `let name: int = expr` or `int name = expr`, which binds the global as `name = expr` does and never declares a local of that name. Pick a different name for a function-local. A closure that reads or writes a module `var` reaches the global itself, never a copy or a cell of its own, so its writes are seen by every function and the enclosing function's writes by the closure (#2805); only a parameter of the same name shadows it.
 - The **initializer must be a compile-time constant expression**, the same restriction as `const` (and for the same underlying reason, C requires a `static`'s initializer to be constant). Initialize to a constant and compute the live value from a function at startup if you need more.
+- An **optional** `var` takes a constant of its inner type, `none`, or no initializer at all, which is `none` (#2800): `var limit: int? = 3`, `var name: string? = none`, `var origin: Point? = Point { x: 0, y: 0 }`, `var cache: string?`. A function writes it with `name = value` or a tuple destructure slot, a bare value wrapped as for a local. A `string?` var keeps every string it was given, as a `string` var does: a re-bind takes a string of its own (a fresh one adopted, a borrowed one copied) and does not give back the one it held, so whatever reads it (`v = name ?? ""`, `v = name!`, a `some(v)` binding, or a view inside one expression beside a call that re-binds the var) stays valid for good. Its strings are never freed, the module-level string rule #2808 tracks.
 - Globals are **module-private** and **non-atomic**, matching the C statics they replace. They are not shared across modules and carry no built-in synchronization; guard concurrent access yourself (or keep such state on an [actor](actor-concurrency.md)).
 
 ---
@@ -705,9 +709,61 @@ main() {
 }
 ```
 
-Control cannot get past a `return`, a `panic(...)` or an `exit(...)`, nor out of a loop whose condition is always true (`while true`, a `for (;;)`, a `const` that is true) unless a `break` leaves it. An `if` lets it through when it has no `else` or when a branch does; a `match` when an arm does or when it may run no arm, which it cannot when it has a `_` arm or covers its type: every member of an enum, every variant of a sum (both checked anyway), `none` and `some(v)` for an optional, `true` and `false` for a bool, `[]` and `[h|t]` for a list; a `switch` when it has no `default`, when a case does, or when a `break` in a case leaves it; a `try` when its body or its `catch` does. A call's trailing block runs inline, so a `return` in it returns from the function it is written in. A condition the compiler decides (`if true`, `if DEBUG` over a `const`) takes only the branch it selects.
+Control cannot get past a `return`, a `panic(...)` or an `exit(...)`, nor out of a loop whose condition is always true (`while true`, a `for (;;)`, a `const` that is true) unless a `break` leaves it. An `if` lets it through when it has no `else` or when a branch does; a `match` when an arm does or when it may run no arm, which it cannot when it has a `_` arm or covers its type: every member of an enum, every variant of a sum (both checked anyway), `none` and `some(v)` for an optional, `true` and `false` for a bool, `[]` and `[h|t]` for a list; a `switch` when it has no `default`, when a case does, or when a `break` in a case leaves it; a `try` when its body or its `catch` does. A call's trailing block runs inline, so a `return` in it returns from the function it is written in, and is one of its returns: a `return` with a value there gives a function with no written type its result, as one anywhere else in its body does. A condition the compiler decides (`if true`, `if DEBUG` over a `const`) takes only the branch it selects.
 
 The rule is the same whether the result type is written or inferred: a function with no written type that returns a value on one path (so its result is inferred from that `return`) returns one on every path. One that returns nothing anywhere is void and may end anywhere. So is a clause of a [clause set](#how-a-clause-set-runs) with no written type that returns nothing: its caller gets the set's default value. Each clause of a set, and each closure that returns a value, is checked as a function of its own; `main()` and actor `receive` handlers have no result. Before this check such a function compiled, and the generated C fell off the end of a non-void function: undefined behaviour, which on Windows printed a string result as `(null)`.
+
+### What a `return` gives [E0200]
+
+A `return` gives a value of the result type, by the rules a typed binding's value follows (`x: T = v`). A value of another kind is a compile error at the `return`, naming both types:
+
+```aether,fails
+word(n: int) -> string {
+    return n
+}
+// error[E0200]: Type mismatch in return: 'word' returns string, but this value is int
+
+both() -> (int, string) {
+    return 1, 2
+}
+// error[E0200]: Type mismatch in return: 'both' returns (int, string), and value 2 here
+// is int, not string
+
+main() {
+    println(word(1))
+}
+```
+
+What a binding converts, a `return` converts, as C converts it: one numeric scalar to another (`int` to `long` or `float`; into a written `int`, a `long` or a `float` truncates, as `int k = 4.5` does), a bool to an integer and an integer to a bool (a comparison returned from `-> int` is 1 or 0, an extern's int truth value returned from `-> bool` is whether it is nonzero), a `T` to `T?` and `none` to any optional, a variant struct to its sum or to the sum's optional, an enum to an integer (`byte` included) and an integer to an enum, `null` or an `int` to a `ptr` or a `*T`, and `null` or `[]` to a slice. A `string` and a bare `ptr` are both a C `const char*`, so a C string pointer returned from `-> string` is a borrowed string, and a string returned from `-> ptr` is its pointer:
+
+```aether
+extern getenv(name: string) -> ptr
+
+home() -> string {
+    return getenv("HOME")      // a C string, borrowed
+}
+
+ratio(n: int) -> float {
+    return n                   // int to float
+}
+
+first(n: int) -> int? {
+    if n > 0 {
+        return n               // wrapped into int?
+    }
+    return none
+}
+
+main() {
+    println("${ratio(3)} ${first(0) ?? 7} ${home() == null}")
+}
+```
+
+A multi-value return is checked value by value against the tuple it returns, and an `if` or a `match` whose value is returned arm by arm. A `return` in a call's trailing block is its function's, and is checked against that function's result type.
+
+With no result type written, the checks use the type the first `return` gives; for a closure, which has no written result type, the type of its first `return`, or `string` when any `return` gives a string, as the closure's C signature does. A later `return` that such an inferred `int` result would truncate (a `long`, a `uint32`, a `float`) is the narrowing error an inferred `int` local gives: write the result type (`-> float`) to keep the value, or `-> int` to make the narrowing explicit.
+
+Some values a binding lets through are refused here, because C cannot convert them: a closure becomes a `ptr` only through `box_closure(f)` and a `ptr` a closure only through `unbox_closure(p)`, a pointer is no value of an optional (return `none` for no value), a slice is no `*T`, and `[]`, the empty slice, is returned only as an array, a slice or a pointer. A bool is not a float, a pointer or an enum, and an enum is not a string, a pointer or a float.
 
 ### Default arguments
 
@@ -1231,6 +1287,43 @@ match (nums) {
 | `[x, y]` | Two-element array | `x`, `y` = elements |
 | `[x, y, z]` | Three-element array | `x`, `y`, `z` = elements |
 | `[h\|t]` | Non-empty array | `h` = first, `t` = rest |
+
+### Names an arm binds
+
+Each arm's block is a scope of its own, as an `if` branch is: a `defer` in it
+runs when the arm ends, and only when the arm ran. A name an arm binds is one
+variable with the rest of the function exactly where a name an `if` branch
+binds would be ([Variables](#variables)): read after a `match` at the top of
+the function body, bound in a `while` body, or bound by every arm of a `match`
+that runs an arm for every value, one with a `_` arm or whose arms cover its
+type (every member of an enum, every variant of a sum, `none` and `some(v)`,
+`true` and `false`, `[]` and `[h|t]`). Elsewhere a read after the `match` is
+`Undefined variable`. A `match` whose value is used (bound, returned, or the
+value of another's arm) keeps its arms' names in the arms.
+
+A name an arm's pattern binds (`some(v)`, `[h | t]`, `[x, y]`) is that arm's
+own: `v = v + 1` in the arm rebinds the pattern's value, and no rule declares
+the name ahead of the `match`, from that arm or any other. So
+`some(v) -> { v = v + 1 }  none -> { v = 0 }` followed by `return v` is
+`Undefined variable`: there are two variables named `v`, and neither outlives
+its arm. Use another name for the one the `match` should leave behind.
+
+```aether,run
+pick(x: int) -> int {
+    match x {
+        1 -> { v = 10 }
+        _ -> { v = 20 }
+    }
+    return v
+}
+
+main() {
+    println("${pick(1)} ${pick(2)}")
+}
+```
+```output
+10 20
+```
 
 ---
 
@@ -1848,7 +1941,9 @@ let maybe: int? = 69        // a present value, implicitly wrapped
 let empty: int? = none      // the absent sentinel
 ```
 
-`T?` works for any element type, value types (`int?`, `float?`, `bool?`) and reference types (`string?`, `*Node?`) alike, with one uniform representation, so there is no ambiguity between "the value is a null pointer" and "the key was absent". An optional can also be an element of a tuple, `-> (string?, int)`, returned as `return "pos", n` or `return none, n`.
+`T?` works for any element type, value types (`int?`, `float?`, `bool?`) and reference types (`string?`, `*Node?`) alike, with one uniform representation, so there is no ambiguity between "the value is a null pointer" and "the key was absent". An optional can also be an element of a tuple, `-> (string?, int)`, returned as `return "pos", n` or `return none, n`, and a tuple can be optional: `let t: (int, int)? = (3, 4)` wraps the tuple literal as it wraps any value (#2833).
+
+A struct field can be optional (#2820): `struct Box { v: int?  at: Point? }`. A struct literal (`Box { v: 7, at: none }`) and a field store (`b.v = 9`, `b.v = none`) take the value as an optional binding does, a bare value wrapped. An optional field whose value owns memory, a `string?`, an optional `fn`, or an optional of a struct, a fixed-size array or a tuple that holds a string or a closure (`Bag?` with `names: string[2]`, `(string, int)?`), is refused for now (#2822): it has none of the ownership a `string` field has, so a string stored there would leak or dangle. Hold the value bare (a `string` with `""` for none) or keep the optional in a local.
 
 ### `none` and equality
 
@@ -1915,6 +2010,8 @@ Chain *assignment* is a no-op when the receiver is `none`:
 v?.x  = 42                   // writes, v is present
 nv?.x = 99                   // skipped, nv is none, no crash
 ```
+
+A field of an optional is read through `?.`, after `!` (`v!.x`), or where a none-check narrows it; `v.x` on the optional itself is a type error, `Type 'Vec2?' has no field 'x'`.
 
 ### Matching on optionals
 
@@ -1988,9 +2085,25 @@ main() {
 }
 ```
 
+A `match` whose value is bound to an optional, or returned from a function whose result is one, is wrapped arm by arm, each arm's value as it would be on its own (`none` is the empty optional):
+
+```aether
+pick(n: int) -> int {
+    int? o = match n {
+        1 -> 41
+        _ -> none
+    }
+    return o ?? 7
+}
+
+main() {
+    println("${pick(1)} ${pick(2)}")   // 41 7
+}
+```
+
 ### Codegen
 
-A value optional lowers to `typedef struct { int has; T val; } ae_opt_<T>` (one per concrete element type); `none` is `{0}`, a wrapped value is `{ .has = 1, .val = … }`. `!`, `??`, and `?.` lower to single-evaluation GCC statement-expressions, so an operand with side effects is evaluated exactly once.
+A value optional lowers to `typedef struct { int has; T val; } ae_opt_<T>` (one per concrete element type); `none` is `{0}`, a wrapped value is `{ .has = 1, .val = … }`. `!`, `??`, and `?.` evaluate their operand once, into a temporary, so an operand with side effects is evaluated exactly once. The generated C is plain C11 here (a comma expression whose temporary is declared ahead of the statement, #2765), so a C compiler that is not GCC-compatible takes it.
 
 ---
 
@@ -2037,7 +2150,9 @@ compile error naming the missing members (the same guarantee sum types give). A
 
 Because an enum is integer-backed, its members interconvert with integer scalars
 (`x: int = Errno.Perm` gives `13`; `code == Errno.NotFound` compares as ints),
-but two **different** enums are never compatible with each other.
+`byte` included, which is C's `uint8_t` as `uint8` is: an enum coded as a byte
+on the wire is bound, passed and returned as a byte and back. Two **different**
+enums are never compatible with each other.
 
 Where the expected type is already a known enum, a member may be written **bare**,
 without the enum prefix. This applies to a function argument, a typed
@@ -2224,7 +2339,9 @@ single-name `type T = A` alias is not a supported form).
 
 A variant struct value flows into a `Shape` slot directly; there is no
 `some(...)`-style constructor. The wrap happens at `let` bindings, function
-parameters, return values, and call arguments:
+parameters, return values, and call arguments (a closure's too, `call(f,
+Circle { ... })`), and as the default of `??` over a `Shape?`; into the
+sum's optional (`Shape?`) the variant is wrapped into the sum first:
 
 ```aether,fragment
 let s: Shape = Circle { r: 2.0 }      // Circle wraps into Shape
@@ -3459,8 +3576,13 @@ when a later one depends on it: one writes a variable the other uses
 change what the other reads. A closure literal reads the variables it
 captures where it stands, so `f(i++, || { return i })` makes the closure
 after the step. A call can change a module global, a variable it shares
-with a closure it runs, and memory it is handed by reference; what a
-function of the program writes is read off its body. A call whose body
+with a closure it runs, memory it is handed by reference, and memory it
+reaches through a pointer or a slice (a field of the struct a global
+pointer points at, say), so an operand that reads memory through one,
+itself or in a call it makes, and a call that writes through one are
+evaluated in source order, whichever comes first; what a function of the
+program reads and writes is read off its body and the bodies of the
+functions it calls, mutually recursive ones included. A call whose body
 the compiler cannot see is opaque: a C extern, a C function pointer, a
 closure, a message send, and a function of the program that makes such a
 call. An opaque call may write anything, so it is evaluated ahead of every
@@ -3597,6 +3719,7 @@ An error stops the build and prints its code, `error[E0301]: ...`, with the sour
 | `E0801` | A quote parameter without a type |
 | `E0802` | A quote given to a function whose last parameter is not a `quote.Tree`, or a closure, `callback` or block given to one that is |
 | `E0803` | A quote writing a variable it captures, or taking its address |
+| `E0900` | A slice of a function's own storage (an array literal, an array of its own) leaves the function: returned, stored in a module-level `var` or in a field that outlives it, or captured by a closure that does ([Slices](#slices-t)) |
 
 ## Compiler Warnings
 

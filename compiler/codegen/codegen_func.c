@@ -823,9 +823,11 @@ int is_noescape_extern_param(CodeGenerator* gen, const char* func_name, int para
 // stop, `|| { inner = |x| { return x*2 }; call(inner, 3) }` would have
 // its outer closure mis-typed as returning-int (picking up inner's
 // `return`) when the outer actually has no return statement of its own.
+// A call's trailing block is no such boundary: it runs inline, and its
+// `return` is the enclosing function's (#2766).
 int has_return_value(ASTNode* node) {
     if (!node) return 0;
-    if (node->type == AST_CLOSURE) return 0;
+    if (ast_is_own_function(node)) return 0;
     if (node->type == AST_RETURN_STATEMENT && node->child_count > 0 && node->children[0]) {
         // Print statements don't count as "return values" - they're void
         if (node->children[0]->type == AST_PRINT_STATEMENT) {
@@ -1543,7 +1545,11 @@ static void emit_function(CodeGenerator* gen, ASTNode* func, const char* clause_
         ensure_tuple_typedef(gen, result);
     }
 
-    // Track current function's return type for multi-return codegen
+    // Track current function's return type for multi-return codegen. Put
+    // back when the function is done: left set, main() emitted after a
+    // `T!` function took its `x!` for a propagation and returned the
+    // result tuple from main.
+    Type* prev_func_return_type = gen->current_func_return_type;
     gen->current_func_return_type = (as_clause && result) ? result : func->node_type;
     // Track the function's AST node so AST_RETURN_STATEMENT codegen
     // can find any `ensures` clauses attached to it (issue #348).
@@ -1767,6 +1773,7 @@ static void emit_function(CodeGenerator* gen, ASTNode* func, const char* clause_
     if (!as_clause && emit_mem_accessor_body(gen, func)) {
         fprintf(gen->output, "}\n\n");
         gen->current_function = prev_current_function;
+        gen->current_func_return_type = prev_func_return_type;
         gen->closure_var_scope = prev_closure_var_scope;
         return;
     }
@@ -2083,6 +2090,7 @@ static void emit_function(CodeGenerator* gen, ASTNode* func, const char* clause_
     gen->current_promoted_captures = prev_promoted;
     gen->current_promoted_capture_count = prev_promoted_count;
     gen->current_function = prev_current_function;
+    gen->current_func_return_type = prev_func_return_type;
     gen->closure_var_scope = prev_closure_var_scope;
 
     unindent(gen);
@@ -2478,6 +2486,16 @@ void generate_struct_definition(CodeGenerator* gen, ASTNode* struct_def) {
     int is_packed = struct_def->annotation &&
                     strcmp(struct_def->annotation, "extern_packed") == 0;
 
+    /* #2820: an optional field embeds its `ae_opt_<T>` by value, so the
+     * typedef is declared ahead of the struct; the program-wide pass
+     * (collect_optional_typedefs) runs after every struct body. */
+    for (int i = 0; i < struct_def->child_count; i++) {
+        ASTNode* field = struct_def->children[i];
+        if (field && field->type == AST_STRUCT_FIELD && field->node_type &&
+            field->node_type->kind == TYPE_OPTIONAL)
+            ensure_optional_typedef(gen, field->node_type);
+    }
+
     // Generate C struct
     if (is_packed) {
         print_line(gen, "typedef struct __attribute__((packed)) %s {", struct_def->value);
@@ -2772,6 +2790,38 @@ void generate_struct_definition(CodeGenerator* gen, ASTNode* struct_def) {
         }
         print_line(gen, "return src;");
         unindent(gen);
+        print_line(gen, "}");
+
+        /* #2765: `_aether_dup_each_<Name>(into, src, n)`: a value of its own
+         * for each element of an array of these a field takes from another
+         * array (emit_array_field_take), as a call. This helper and the two
+         * moves below are named in the generated code's reserved namespace
+         * (`_aether_`, a stem no other is a prefix of, then the struct's
+         * name), so no function of the program can take the name. */
+        print_line(gen, "static inline void _aether_dup_each_%s(%s* into, %s const volatile* src, int n) {",
+                   struct_def->value, struct_def->value, struct_def->value);
+        print_line(gen, "    for (int _k = 0; _k < n; _k++) into[_k] = %s_dup(src[_k]);",
+                   struct_def->value);
+        print_line(gen, "}");
+
+        /* #2765: `_aether_move_<Name>(&local)`: the value a local hands over
+         * on its last use (emit_struct_take). The local disowns every string
+         * and closure it held, so its scope exit releases nothing. A
+         * function, so the move is an expression to any C compiler;
+         * `_aether_volatile_move_<Name>` is for a local a `try` body writes
+         * (#2690). */
+        print_line(gen, "static inline %s _aether_move_%s(%s* s) {",
+                   struct_def->value, struct_def->value, struct_def->value);
+        indent(gen);
+        print_line(gen, "%s v = *s;", struct_def->value);
+        emit_struct_disown(gen, struct_def->value, "(*s)", 0);
+        print_line(gen, "return v;");
+        unindent(gen);
+        print_line(gen, "}");
+        print_line(gen, "static inline %s _aether_volatile_move_%s(%s volatile* s) {",
+                   struct_def->value, struct_def->value, struct_def->value);
+        print_line(gen, "    %s v = *s; %s w = v; (void)_aether_move_%s(&w); *s = w; return v;",
+                   struct_def->value, struct_def->value, struct_def->value);
         print_line(gen, "}");
 
         /* #2458: the release for a shared cell holding one of these (a

@@ -1,0 +1,113 @@
+// Regression (#2794): a tuple destructure that re-binds an optional local
+// stores each slot as the optional, as `a = 7` stores it.
+//
+// The destructure's slot store wrote the bare value into the
+// `ae_opt_<T>` variable, so the program did not compile: in the local's
+// own scope (`let a: int? = none` then `a, b = two()`), and, since #2762,
+// in a closure whose destructure writes outer optionals a destructure
+// bound. A bare value is wrapped now, and a `string?` local or cell takes
+// its string as a bare re-bind does: it gives back the string it held and
+// owns the new one when the call handed it over.
+//
+// The leak check runs where the heap count is exact (mem.heap_in_use_exact):
+// after a warm-up, some window of the same work grows by exactly 0
+// (mem.steady_growth).
+
+import std.mem
+import std.string
+
+extern exit(code: int)
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+opt_pair(n: int) -> (int?, int) {
+    if n > 0 {
+        return n, 1
+    }
+    return none, 0
+}
+
+two() -> (int, int) {
+    return 7, 8
+}
+
+names(p: string) -> (string, int) {
+    return string.concat(p, "!"), 2
+}
+
+opt_names(p: string, n: int) -> (string?, int) {
+    if n > 0 {
+        return string.concat(p, "?"), n
+    }
+    return none, 0
+}
+
+// A closure writes outer optionals a destructure bound.
+closure_written() -> int {
+    a, b = opt_pair(3)
+    set = || {
+        a, b = two()
+    }
+    set()
+    int r = (a ?? -1) * 10 + b
+    return r
+}
+
+closure_written_str(p: string) -> int {
+    s, n = opt_names(p, 1)
+    set = || {
+        s, n = names(p)
+    }
+    set()
+    set()
+    int r = string.length(s ?? "") * 10 + n
+    return r
+}
+
+// The local's own scope.
+same_scope() -> int {
+    let a: int? = none
+    a, b = two()
+    int r = (a ?? -1) * 10 + b
+    return r
+}
+
+same_scope_str(p: string) -> int {
+    let s: string? = none
+    s, n = names(p)
+    s, n = names(string.concat(p, "x"))
+    s, n = opt_names(p, 5)
+    int r = string.length(s ?? "") * 10 + n
+    return r
+}
+
+fn round(p: string) {
+    i = 0
+    while i < 100 {
+        closure_written_str(p)
+        same_scope_str(p)
+        i = i + 1
+    }
+}
+
+main() {
+    println("=== test_destructure_into_optional ===")
+    p = string.concat("bc", "")
+    check(closure_written() == 78, "a closure's destructure into an outer int? (${closure_written()})")
+    check(closure_written_str(p) == 32, "a closure's destructure into an outer string? (${closure_written_str(p)})")
+    check(same_scope() == 78, "a destructure into an int? local (${same_scope()})")
+    check(same_scope_str(p) == 35, "a destructure into a string? local (${same_scope_str(p)})")
+    if mem.heap_in_use_exact() {
+        round(p)
+        grown = mem.steady_growth(|| {
+                round(p)
+            }, 5)
+        check(grown == 0, "100 destructures into string? locals grew the heap by ${grown} bytes in every run")
+    }
+    println("=== test_destructure_into_optional passed ===")
+}

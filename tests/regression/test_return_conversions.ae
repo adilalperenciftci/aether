@@ -1,0 +1,215 @@
+// Regression (#2782): the conversions a `return` keeps.
+//
+// A returned value is checked against the result type with the rules of a
+// typed binding. These are the conversions it keeps: C performs them and the
+// language allows them in a typed binding or a parameter, so they compile and
+// return the value a binding would hold. A check that refused any of them
+// would have drifted stricter than the binding it follows. A `byte` is C's
+// `uint8_t`, as `uint8` is, so an enum coded as a byte (a wire format)
+// converts both ways as one coded as a uint8 does, in a return and in a
+// typed binding alike.
+extern exit(code: int)
+extern getenv(name: string) -> ptr
+
+struct Circle {
+    r: int
+}
+
+struct Square {
+    side: int
+}
+
+type Shape = Circle | Square
+
+enum Hue {
+    Red,
+    Green,
+    Blue
+}
+
+var bad = 0
+
+check(label: string, got: long, want: long) {
+    if got != want {
+        println("FAIL ${label}: got ${got}, want ${want}")
+        bad = bad + 1
+    }
+}
+
+to_long(n: int) -> long {
+    return n
+}
+
+to_float(n: int) -> float {
+    return n
+}
+
+to_int_from_long(v: long) -> int {
+    return v
+}
+
+to_int_from_float(f: float) -> int {
+    return f
+}
+
+to_uint32(b: byte) -> uint32 {
+    return b
+}
+
+to_opt(n: int) -> int? {
+    return n
+}
+
+to_none(n: int) -> int? {
+    if n > 0 {
+        return n
+    }
+    return none
+}
+
+to_null() -> ptr {
+    return null
+}
+
+to_empty_slice() -> int[] {
+    return []
+}
+
+to_null_slice() -> int[] {
+    return null
+}
+
+to_sum(n: int) -> Shape {
+    return Circle { r: n }
+}
+
+to_hue_int(h: Hue) -> int {
+    return h
+}
+
+to_hue(n: int) -> Hue {
+    return n
+}
+
+hue_byte() -> byte {
+    return Hue.Blue
+}
+
+hue_code(h: Hue) -> byte {
+    return h
+}
+
+hue_pair() -> (byte, int) {
+    return Hue.Blue, 1
+}
+
+byte_hue(b: byte) -> Hue {
+    return b
+}
+
+hue_u8(h: Hue) -> uint8 {
+    return h
+}
+
+c_string(name: string) -> string {
+    return getenv(name)
+}
+
+as_pointer(s: string) -> ptr {
+    return s
+}
+
+no_string() -> string {
+    return null
+}
+
+pair() -> (long, float) {
+    return 1, 2
+}
+
+branches(c: bool) -> long {
+    return if c { 1 } else { 2 }
+}
+
+arms(n: int) -> float {
+    return match n {
+        1 -> 10
+        _ -> 2.5
+    }
+}
+
+widening(n: int) {
+    if n > 0 {
+        return 2.5
+    }
+    return n
+}
+
+builder run(label: string) {
+}
+
+from_block(n: int) -> long {
+    run("x") {
+        if n > 0 {
+            return n
+        }
+    }
+    return 0
+}
+
+main() {
+    check("int into long", to_long(7), 7)
+    check("int into float", twice(to_float(3)), 6)
+    check("long into int", to_int_from_long(9), 9)
+    check("float into int", to_int_from_float(4.9), 4)
+    check("byte into uint32", to_uint32(200), 200)
+    check("int into int?", to_opt(5)!, 5)
+    check("none into int?", to_none(0) ?? 11, 11)
+    check("null into ptr", flag(to_null() == null), 1)
+    check("[] into int[]", to_empty_slice().len, 0)
+    check("null into int[]", to_null_slice().len, 0)
+    check("variant into its sum", radius(to_sum(6)), 6)
+    check("enum into int", to_hue_int(Hue.Blue), 2)
+    check("int into enum", to_hue_int(to_hue(1)), 1)
+    check("enum into byte", hue_byte(), 2)
+    check("enum parameter into byte", hue_code(Hue.Green), 1)
+    hb, hk = hue_pair()
+    check("enum into a byte position", hb + hk, 3)
+    check("byte into enum", to_hue_int(byte_hue(2)), 2)
+    check("enum into uint8", hue_u8(Hue.Blue), 2)
+    let wire: byte = Hue.Green
+    let back: Hue = wire
+    check("enum into a byte binding and back", to_hue_int(back), 1)
+    check("C string into string", flag(c_string("AE_RETURN_CONVERSIONS_UNSET") == null), 1)
+    check("string into ptr", flag(as_pointer("p") != null), 1)
+    check("null into string", flag(no_string() == null), 1)
+    a, b = pair()
+    check("tuple, first", a, 1)
+    check("tuple, second", twice(b), 4)
+    check("if-expression", branches(false), 2)
+    check("match arms", twice(arms(2)), 5)
+    check("an inferred float result takes an int", twice(widening(0)), 0)
+    check("a trailing block's return", from_block(12), 12)
+    if bad != 0 {
+        exit(1)
+    }
+    println("return conversions: ok")
+}
+
+radius(s: Shape) -> int {
+    let r: int = match s {
+        Circle -> s.r
+        Square -> s.side
+    }
+    return r
+}
+
+flag(c: bool) -> long {
+    return if c { 1 } else { 0 }
+}
+
+twice(f: float) -> long {
+    let d: float = f * 2.0
+    let n: long = d
+    return n
+}

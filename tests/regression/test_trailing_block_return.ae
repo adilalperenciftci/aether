@@ -1,0 +1,100 @@
+// Regression (#2766): a `return` with a value inside a call's trailing block
+// returns from the function around it, and counts as one of its returns.
+//
+// The block, `f(x) { ... }`, runs inline at the call, but every walk that
+// asks what a function returns stopped at it as if it were a closure of its
+// own: codegen's has_return_value, the checker's mirror, the settle of
+// which functions return a value and return-type inference. A function with
+// no written result type whose only value return was in such a block was
+// emitted `void` (gcc: "'return' with a value, in function returning
+// void"), a binding of its call was refused ("returns no value"), and the
+// same held for a closure. Inside the block the checker also forgot the
+// function's result type, so `return Green` from a `-> Color` function was
+// "Undefined variable".
+extern exit(code: int)
+
+var bad = 0
+
+check(label: string, got: int, want: int) {
+    if got != want {
+        println("FAIL ${label}: got ${got}, want ${want}")
+        bad = bad + 1
+    }
+}
+
+enum Color { Red, Green }
+
+// The block's context: the value of the call it is attached to.
+wrap(tag: int) -> int {
+    return tag
+}
+
+// The only value return is in the block.
+twice(n: int) {
+    wrap(1) {
+        return n * 2
+    }
+}
+
+// So is a string's: the function returns a string.
+named(n: int) {
+    wrap(2) {
+        return "n${n}"
+    }
+}
+
+// A return in a nested block of a trailing block, and one after it.
+first_positive(a: int, b: int) {
+    wrap(3) {
+        if a > 0 {
+            return a
+        }
+    }
+    wrap(4) {
+        if b > 0 {
+            return b
+        }
+    }
+    return 0
+}
+
+// A bare enum member returned from a block takes the function's type.
+pick(n: int) -> Color {
+    wrap(5) {
+        if n > 0 {
+            return Green
+        }
+    }
+    return Red
+}
+
+main() {
+    twice(4)
+    check("a value return in a block, bound", twice(5), 10)
+    s = named(3)
+    if s != "n3" {
+        println("FAIL a string returned from a block: got ${s}")
+        bad = bad + 1
+    }
+    check("first block", first_positive(7, 9), 7)
+    check("second block", first_positive(0, 9), 9)
+    check("after the blocks", first_positive(0, 0), 0)
+    if pick(1) != Color.Green {
+        println("FAIL an enum member returned from a block")
+        bad = bad + 1
+    }
+
+    // A closure whose only value return is in a block returns that value.
+    k = | x: int | {
+        wrap(6) {
+            return x + 1
+        }
+    }
+    check("a closure's return in a block", call(k, 4), 5)
+
+    if bad != 0 {
+        println("${bad} check(s) failed")
+        exit(1)
+    }
+    println("returns in trailing blocks: ok")
+}

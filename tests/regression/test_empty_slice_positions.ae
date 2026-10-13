@@ -1,0 +1,72 @@
+// Regression (#2789): `[]` is the empty slice in the T[] positions #2767 had
+// not reached, and a branching value goes into a T[] slot arm by arm.
+//
+// An if-expression or a `match` bound to a `T[]` was coerced as one value,
+// not arm by arm, so a `[]` arm kept its array-initializer form (gcc:
+// "invalid initializer", "invalid use of void expression"), and a match of
+// arrays into a slice was garbage C; `s == []` compared a slice with `{}`;
+// and `[]` passed to a C function's `T[]` parameter was `{}` in its call.
+// Now each arm is coerced on its own, `s == []` is `s == null` (the empty
+// slice views no storage), and in a C view `[]` is the null pointer.
+extern exit(code: int)
+extern memchr(s: byte[], c: int, n: long) -> ptr
+
+var bad = 0
+
+check(label: string, got: int, want: int) {
+    if got != want {
+        println("FAIL ${label}: got ${got}, want ${want}")
+        bad = bad + 1
+    }
+}
+
+pick(c: bool, a: int[]) -> int[] {
+    return if c { [] } else { a }
+}
+
+main() {
+    c = true
+    let a: int[3] = [1, 2, 3]
+
+    let ys: int[] = if c { [] } else { null }
+    check("an if-expression's [] arm", ys.len, 0)
+    let zs: int[] = if c { a } else { [] }
+    check("an if-expression's array arm", zs.len, 3)
+    check("a returned if-expression", pick(true, a).len, 0)
+    check("its other arm", pick(false, a).len, 3)
+
+    let ws: int[] = match c {
+        true -> []
+        false -> a
+    }
+    check("a match's [] arm", ws.len, 0)
+    let vs: int[] = match c {
+        true -> a
+        false -> []
+    }
+    check("a match's array arm", vs.len, 3)
+
+    // The empty slice views no storage: `s == []` is `s == null`.
+    let e: int[] = null
+    seen = 0
+    if e == [] {
+        seen = seen + 1
+    }
+    if [] != zs {
+        seen = seen + 10
+    }
+    check("comparisons with []", seen, 11)
+
+    // A C function's `T[]` parameter takes `[]` as the null pointer.
+    p = memchr([], 0, 0)
+    if p != null {
+        println("FAIL: memchr([], 0, 0) found something")
+        bad = bad + 1
+    }
+
+    if bad != 0 {
+        println("${bad} check(s) failed")
+        exit(1)
+    }
+    println("empty slice positions: ok")
+}

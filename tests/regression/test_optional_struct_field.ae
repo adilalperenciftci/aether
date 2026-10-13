@@ -1,0 +1,71 @@
+// Regression (#2820): a struct can hold an optional field.
+//
+// The `ae_opt_<T>` typedefs were emitted after every struct body, so a
+// struct holding one by value named an undeclared type, and a struct
+// literal or a field store gave the field a bare value (`.v = 7`) or a bare
+// `{0}` for `none`, which C rejects. The typedef a struct needs is declared
+// ahead of it (and an optional of a struct waits for that struct's body),
+// and a literal or a store takes the value as an optional binding does: a
+// bare value wrapped, `none` the empty one, an optional as it is.
+//
+// An optional field whose value owns memory (`string?`) is refused until it
+// has a `string` field's ownership (#2822).
+
+extern exit(code: int)
+
+// Declared before the struct its optional field holds by value.
+struct Box {
+    v: int?
+    f: float?
+    ok: bool?
+    at: Point?
+}
+
+struct Point {
+    x: int
+    y: int
+}
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+value_of(b: Box) -> int {
+    match b.v {
+        some(n) -> {
+            return n
+        }
+        none -> {
+            return -1
+        }
+    }
+}
+
+build_box(n: int) -> Box {
+    return Box { v: n, f: none, ok: n > 0, at: Point { x: n, y: n } }
+}
+
+main() {
+    println("=== test_optional_struct_field ===")
+    let o: int? = 5
+    b = Box { v: o, f: 1.5, ok: true, at: Point { x: 1, y: 2 } }
+    c = Box { v: 7, f: none, ok: none, at: none }
+    check((b.v ?? -1) == 5 && (c.v ?? -1) == 7, "int? fields from an optional and a bare value")
+    check(value_of(b) == 5 && value_of(c) == 7, "a match on an optional field")
+    check((b.f ?? 0.0) == 1.5 && c.f == none, "float? fields")
+    check((b.ok ?? false) && c.ok == none, "bool? fields")
+    p = b.at ?? Point { x: 0, y: 0 }
+    q = c.at ?? Point { x: 9, y: 9 }
+    check(p.x == 1 && p.y == 2 && q.x == 9, "Point? fields")
+    c.v = 9
+    b.v = none
+    b.at = Point { x: 3, y: 4 }
+    check((b.v ?? -1) == -1 && (c.v ?? -1) == 9, "stores into an int? field")
+    check(((b.at ?? Point { x: 0, y: 0 }).x) == 3, "a store into a Point? field")
+    m = build_box(4)
+    check(value_of(m) == 4 && (m.ok ?? false) && m.f == none, "a returned struct literal")
+    println("=== test_optional_struct_field passed ===")
+}

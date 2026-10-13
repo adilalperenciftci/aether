@@ -1,0 +1,264 @@
+// Regression (#2798): the constructs that run statements (an `or` whose
+// handler is a block, a propagating `!`, a call whose trailing block runs
+// where its value is used) in the parts of a statement that
+// test_issue2798_statement_constructs_anywhere.ae does not reach: a part
+// that runs on a test (a branch of an `if` expression, the default of `??`,
+// an `or` handler that is an expression), a compound assignment, a struct
+// literal's field, a `for` loop's init and increment, a `match` arm's value,
+// a trailing-block call's arguments, and statements that keep the structs
+// calls return in temporaries of their own (an `if`, `while` or `match`, a
+// field or element store, an expression statement). Each runs on the
+// non-GCC path as plain C, in the order the GCC path runs it; this checks
+// the values and the order. tests/compiler/test_msvc_compat.sh compiles it
+// as strict C11 and under cl.exe and runs it without GCC extensions. A
+// thrown-away string made from a field of a struct a call returns is here
+// too: that struct was never destroyed (#2817).
+
+import std.map
+import std.string
+
+extern exit(code: int)
+extern malloc(size: int) -> ptr
+extern free(p: ptr)
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+num(fail: bool) -> int! {
+    if fail { return 0, "boom" }
+    return 7
+}
+
+word(fail: bool, w: string) -> string! {
+    if fail { return "", string.concat("bad-", w) }
+    return string.concat(w, "!")
+}
+
+var calls = 0
+var trail = 0
+
+tick() -> int {
+    calls = calls + 1
+    return calls
+}
+
+// Records the order of the calls that make a value: each appends a digit.
+mark(d: int) -> int {
+    trail = trail * 10 + d
+    return d
+}
+
+show(a: int, b: int) -> int {
+    return a * 100 + b
+}
+
+maybe(n: int) -> int? {
+    if n > 0 { return n }
+    return none
+}
+
+struct Named {
+    label: string
+    n: int
+}
+
+struct Box {
+    v: int
+}
+
+struct Pair {
+    a: int
+    b: int
+}
+
+made(n: int) -> Named {
+    return Named { label: string.concat("l", "x"), n: n }
+}
+
+struct Bag {
+    items: int
+}
+
+bag_of(n: int) -> ptr {
+    mark(1)
+    b = malloc(sizeof(Bag)) as *Bag
+    b.items = n
+    return b
+}
+
+add(_ctx: ptr) {
+    mark(2)
+    b = _ctx as *Bag
+    b.items = b.items + 1
+}
+
+taken(p: ptr) -> int {
+    b = p as *Bag
+    n = b.items
+    free(p)
+    return n
+}
+
+set_opt(_ctx: ptr, key: string, value: string) {
+    mark(3)
+    map_put(_ctx, key, value)
+}
+
+builder label(text: string): string {
+    suffix = ""
+    if _builder != null && map_has(_builder, "suffix") == 1 { suffix, _ = map.get(_builder, "suffix") }
+    out = string.concat(text, suffix)
+    if _builder != null { map_free(_builder) }
+    return out
+}
+
+main() {
+    y = 1
+
+    // The branches of an `if` expression: only the one taken runs.
+    calls = 0
+    a = show(tick(), if y > 0 { num(true) or { calls + 10 } } else { num(true) or { 99 } })
+    b = show(tick(), if y < 0 { num(true) or { 99 } } else { num(true) or { calls + 20 } })
+    check(a == 111 && b == 222 && calls == 2, "the branches of an if expression")
+    lit = if true { 1 } else { num(true) or { tick() } }
+    check(lit == 1 && calls == 2, "an if expression with a literal condition")
+
+    // The default of `??`, run only when there is no value.
+    calls = 0
+    c = maybe(0) ?? (num(true) or { tick() + 30 })
+    d = maybe(5) ?? (num(true) or { tick() + 40 })
+    check(c == 31 && d == 5 && calls == 1, "the default of ??")
+
+    // An `or` handler that is an expression.
+    calls = 0
+    e = num(true) or(num(true) or { tick() + 50 })
+    f = num(false) or(num(true) or { tick() + 60 })
+    check(e == 51 && f == 7 && calls == 1, "an or handler that is an expression")
+
+    // A compound assignment.
+    x = 10
+    x += num(true) or { 5 }
+    check(x == 15, "a compound assignment")
+
+    // A struct literal's field after another.
+    trail = 0
+    p = Pair { a: mark(1), b: num(true) or { mark(2) } }
+    check(p.a == 1 && p.b == 2 && trail == 12, "a struct literal's field")
+
+    // A `for` loop's init (shadowing a local) and increment.
+    j = 100
+    total = 0
+    for (j = (num(true) or { 1 }); j < 4; j = j + 1) {
+        total = total + j
+    }
+    check(total == 6 && j == 100, "a for loop's init")
+    k = 0
+    calls = 0
+    for (_i = 0; k < 3; tick() + (num(true) or { 0 })) {
+        k = k + 1
+        if k == 2 {
+            continue
+        }
+    }
+    check(k == 3 && calls == 3, "a for loop's increment, with a continue")
+
+    // The value of a `match` arm, first and after an operand.
+    calls = 0
+    m1 = match y {
+        1 -> num(true) or { 11 }
+        _ -> 0
+    }
+    m2 = match y {
+        1 -> tick() + (num(true) or { calls * 20 })
+        _ -> 0
+    }
+    check(m1 == 11 && m2 == 21, "the value of a match arm")
+
+    // Statements that keep the structs calls return in temporaries.
+    hit = 0
+    if made(3).n == (num(true) or { 3 }) {
+        hit = 1
+    }
+    check(hit == 1, "an if condition with a struct temporary")
+    w = 0
+    while made(3).n > w + (num(true) or { 0 }) {
+        w = w + 1
+    }
+    check(w == 3, "a while condition with a struct temporary")
+    sub = 0
+    match made(3).n + (num(true) or { 1 }) {
+        4 -> { sub = 1 }
+        _ -> { sub = 2 }
+    }
+    check(sub == 1, "a match subject with a struct temporary")
+    bx = Box { v: 0 }
+    bx.v = made(5).n + (num(true) or { 2 })
+    arr = [0, 0]
+    arr[1] = made(6).n + (num(true) or { 3 })
+    check(bx.v == 7 && arr[1] == 9, "a store with a struct temporary")
+    calls = 0
+    tick() + made(1).n + (num(true) or { tick() })
+    check(calls == 2, "an expression statement with a struct temporary")
+    bag = Named { label: "a", n: 0 }
+    bag.label = string.concat(made(1).label, word(true, "q") or { "d" })
+    check(bag.label == "lxd", "a string field store with a struct temporary")
+
+    // A thrown-away string made from a struct's field (#2817), and one
+    // with a construct after it.
+    string.concat(made(2).label, "e")
+    string.concat(made(2).label, word(true, "q") or { "e" })
+
+    // The arguments of a call whose trailing block runs as a value: a
+    // plain call's before its block, a builder's after it.
+    trail = 0
+    calls = 0
+    t1 = tick() + taken(bag_of(num(true) or { tick() * 100 }) {
+            add()
+        })
+    check(t1 == 202 && trail == 12, "the argument of a trailing-block call")
+    trail = 0
+    s = string.concat("<", label(word(true, "q") or {
+                mark(9)
+                "e"
+            }) {
+            set_opt("suffix", "?")
+        })
+    check(s == "<e?" && trail == 39, "the argument of a builder")
+
+    // A builder call its own statement runs: the block first, then the
+    // argument, whatever the argument holds.
+    trail = 0
+    s2 = label(word(true, "q") or {
+            mark(8)
+            "f"
+        }) {
+        set_opt("suffix", "!")
+    }
+    check(s2 == "f!" && trail == 38, "the argument of a builder a declaration runs")
+    trail = 0
+    s2 = label(word(true, "q") or {
+            mark(7)
+            "g"
+        }) {
+        set_opt("suffix", "#")
+    }
+    check(s2 == "g#" && trail == 37, "the argument of a builder an assignment runs")
+    trail = 0
+    label(word(true, "q") or {
+            mark(6)
+            "h"
+        }) {
+        set_opt("suffix", "%")
+    }
+    check(trail == 36, "the argument of a builder a statement runs")
+
+    // An `if` expression's condition, after an operand.
+    ic = y + (if (num(true) or { 3 }) == 3 { 10 } else { 20 })
+    check(ic == 11, "an if expression's condition")
+
+    println("ok")
+}

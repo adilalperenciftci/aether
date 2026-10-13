@@ -1,0 +1,110 @@
+// Regression (#2870, #2843): two analyses that answered a cycle with a guess
+// they then kept.
+//
+// A function that passes a `string` parameter back to itself was taken to
+// keep it (the cycle answered "kept"), so a struct field handed to one was
+// given up by the struct (#2843) and leaked (std.message's catalog_format
+// and its locale). The self-call now adds no keep: the parameter is kept
+// only when something else in the function keeps it (stash, below, does).
+//
+// Two tuple functions calling each other: the one classified second was
+// told the first's error position was not heap (the cycle break) and kept
+// that answer, so it handed an error string the first had built over as
+// borrowed, and every caller leaked it (std.message's parse_block and
+// parse_pattern_err). An answer resting on a cycle break is now kept only
+// while the function it rested on is being classified.
+
+import std.mem
+import std.string
+
+extern exit(code: int)
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+struct Cat {
+    locale: string
+}
+
+walk(s: string, n: int) -> int {
+    if n == 0 { return string.length(s) }
+    return walk(s, n - 1)
+}
+
+// What stash keeps; the one before is freed, so keeping leaks nothing.
+var held: string = ""
+var holding = 0
+
+stash(s: string, n: int) -> int {
+    if n == 0 {
+        if holding == 1 { string.free(held) }
+        held = s
+        holding = 1
+        return 1
+    }
+    return stash(s, n - 1)
+}
+
+pa(n: int) -> (int, string) {
+    if n <= 0 { return 0, string.concat("deep-", "a") }
+    v, e = pb(n - 1)
+    if e != "" { return 0, e }
+    return v + 1, ""
+}
+
+pb(n: int) -> (int, string) {
+    if n <= 0 { return 0, "bottom" }
+    v, e = pa(n - 1)
+    if e != "" { return 0, e }
+    return v + 1, ""
+}
+
+// Strings the size of the kept ones, which reuse a freed buffer.
+churn(w: string) -> int {
+    a = string.concat(w, "@")
+    b = string.concat(w, "$")
+    return string.length(a) + string.length(b)
+}
+
+round(w: string) -> int {
+    total = 0
+    i = 0
+    while i < 20 {
+        c = Cat { locale: string.concat(w, "#") }
+        total = total + walk(c.locale, 3)
+        loc = string.concat(w, "@")
+        total = total + walk(loc, 2)
+        d = Cat { locale: string.concat(w, "%") }
+        total = total + stash(d.locale, 2)
+        _, e1 = pb(3)
+        _, e2 = pa(4)
+        _, e3 = pb(4)
+        total = total + string.length(e1) + string.length(e2) + string.length(e3)
+        i = i + 1
+    }
+    return total
+}
+
+main() {
+    w = string.concat("w", "v")
+    _, e1 = pb(3)
+    check(e1 == "deep-a", "an error built by the other function (${e1})")
+    _, e2 = pb(4)
+    check(e2 == "bottom", "a literal error (${e2})")
+    check(round(w) == 20 * (3 + 3 + 1 + 6 + 6 + 6), "the rounds")
+    churn(w)
+    check(held == "wv%", "the kept field (${held})")
+    if mem.heap_in_use_exact() {
+        g = mem.steady_growth(|| {
+                round(w)
+            }, 5)
+        check(g == 0, "the heap grew by ${g} bytes")
+    }
+    string.free(held)
+    holding = 0
+    println("ok")
+}

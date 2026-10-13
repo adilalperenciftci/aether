@@ -269,6 +269,13 @@ static int is_value_end(const char* t){
     return 0;
 }
 
+/* Does a `[` after `prev` index it or size it, written tight: a value, or
+ * the `fn` of an array type `fn[N]` (every other type is a name)? A keyword
+ * that ends no value (`return`, `in`) is followed by a literal (#2787). */
+static int bracket_follows_operand(const char* prev){
+    return is_value_end(prev) || eq(prev,"fn");
+}
+
 // Desired spaces (0/1) before `cur`, given the previous two emitted tokens.
 static int spaces_before(const char* prev, const char* prevprev, const char* cur, int cur_had_space){
     if (eq(cur,",") || eq(cur,";")) return 0;
@@ -316,7 +323,10 @@ static int spaces_before(const char* prev, const char* prevprev, const char* cur
         return 1;
     }
     if (eq(cur,"[")){
-        if (is_word_tok(prev) || is_close(prev)) return 0;   // index a[
+        /* An index follows a value (`a[`, `f()[`, `self[`), an array type's
+         * size its element type (`fn[2]`); after any other keyword
+         * (`return [`, `in [`) the `[` opens a literal (#2787). */
+        if (bracket_follows_operand(prev)) return 0;
         return 1;
     }
     if (eq(cur,"{")) return 1;                               // space before a brace
@@ -423,7 +433,7 @@ static char* layout(Lexeme* lex, size_t n){
                     top->one_name = (top->tokens==1) && is_type_name(L->text);
                 }
                 if (eq(L->text,"[") && nbrackets<FMT_MAX_BRACKETS){
-                    int index = prev && (is_word_tok(prev) || is_close(prev));
+                    int index = prev && bracket_follows_operand(prev);   /* #2787 */
                     brackets[nbrackets].prefix = !index;
                     brackets[nbrackets].tokens = 0;
                     brackets[nbrackets].one_name = 0;

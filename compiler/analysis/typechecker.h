@@ -147,6 +147,14 @@ Symbol* lookup_qualified_symbol(SymbolTable* table, const char* qualified_name);
 // module and the modules that module imports; user code sees the modules
 // the user imported.
 int is_visible_namespace(const char* name, SymbolTable* table);
+/* Issue #333: the receiver a member-access call's trailing block resolves
+ * its bare calls through (`<receiver>_<name>`, see lookup_symbol): the
+ * namespace `ns` of `ns.f(...)` when `table` sees it, else the struct type
+ * of the value `v` of `v.f(...)`. NULL when the call names no receiver; the
+ * result is written to `buf` (`cap` bytes). Shared by the checker, which
+ * stamps the block with it, the settle of which functions return a value,
+ * and the inference pass, so the three resolve such a call alike. */
+const char* dsl_receiver_of_call(ASTNode* call, SymbolTable* table, char* buf, size_t cap);
 /* Is `name` a builtin codegen lowers by name (`println`, `exit`, `sleep`,
  * ...)? Such a name belongs to no module and needs no import. */
 int is_builtin_function_name(const char* name);

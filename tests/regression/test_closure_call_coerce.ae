@@ -1,0 +1,44 @@
+// Regression (#2840): a closure call's arguments are coerced to the
+// closure's parameter types, as a direct call's are.
+//
+// `call(f, Circle { r: 1.0 })` into `|o: Shape?|` or `|s: Shape|`, and
+// `call(h, 3)` or `call(h, none)` into `|o: int?|`, passed each argument as
+// it was ("incompatible type for argument 2 of '_closure_fn_0'"). A variant
+// is now wrapped into the sum, and a bare value or `none` into the optional.
+extern exit(code: int)
+
+struct Circle {
+    r: float
+}
+
+struct Rect {
+    w: float
+    h: float
+}
+
+type Shape = Circle | Rect
+
+main() {
+    f = | o: Shape?| {
+        return o == none
+    }
+    g = | s: Shape | {
+        let a: float = match s {
+            Circle -> s.r
+            Rect -> s.w * s.h
+        }
+        return a
+    }
+    h = | o: int?| {
+        return o ?? 7
+    }
+    absent = call(f, Circle { r: 1.0 })
+    area = call(g, Rect { w: 2.0, h: 3.0 })
+    some = call(h, 3)
+    none_given = call(h, none)
+    if absent || area != 6.0 || some != 3 || none_given != 7 {
+        println("FAIL: closure call arguments: ${absent} ${area} ${some} ${none_given}")
+        exit(1)
+    }
+    println("closure call arguments: ok")
+}

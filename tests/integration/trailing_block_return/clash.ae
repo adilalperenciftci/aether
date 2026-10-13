@@ -1,0 +1,50 @@
+// A bare call in a builder's block is the receiver's function before it is
+// a function of the program, or a local, of the same name (#333), and every
+// pass resolves it so. The inference pass typed `note(n)` by the program's
+// `note`, an int, so `noting` was declared `int` around the bare `return`
+// the checker made of `return note(n)` (blk.note returns nothing): gcc
+// "'return' with no value, in function returning non-void". `sized` was
+// declared `const char*` around blk.size's int. The settle took a local
+// `note` for the callee, and the module prune dropped blk.note.
+
+import blk
+
+note(n: int) -> int {
+    return n + 1000
+}
+
+size() -> string {
+    return "top"
+}
+
+// blk.note returns nothing: so does this.
+noting(n: int) {
+    blk.run("noting") {
+        return note(n)
+    }
+}
+
+// blk.size returns an int: so does this.
+sized() {
+    blk.run("sized") {
+        return size()
+    }
+}
+
+// The block's receiver comes before a local of the function.
+noting_local(n: int) {
+    note = | x: int | {
+        return x * 3
+    }
+    println("local ${note(1)}")
+    blk.run("local") {
+        return note(n)
+    }
+}
+
+main() {
+    noting(4)
+    s = sized()
+    noting_local(5)
+    println("clash ${note(1)} ${size()} ${s}")
+}

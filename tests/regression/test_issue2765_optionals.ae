@@ -1,0 +1,77 @@
+// Regression (#2765): `f() or v`, `o!`, `t!`, `o ?? d`, `o?.f` and a bit_set
+// subset test each evaluate an operand once into a temporary, and that was a
+// GNU statement expression whatever the C compiler, so the C for a compiler
+// that is not GCC-compatible (AETHER_GCC_COMPAT 0, what cl.exe compiles) did
+// not compile. Each is a comma expression now, its temporaries declared
+// ahead of the statement. This checks every value they yield;
+// tests/compiler/test_msvc_compat.sh compiles it as strict C11 and under
+// cl.exe.
+
+import std.string
+
+extern exit(code: int)
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+enum Perm { Read, Write, Exec }
+
+struct Vec2 {
+    x: int
+    y: int
+}
+
+num(fail: bool) -> int! {
+    if fail { return 0, "boom" }
+    return 7
+}
+
+word(fail: bool, w: string) -> string! {
+    if fail { return "", string.concat("bad-", w) }
+    return string.concat(w, "!")
+}
+
+lookup(found: bool, w: string) -> string? {
+    if found {
+        return string.concat(w, "?")
+    }
+    return none
+}
+
+pair_ok(w: string) -> (string, string) {
+    return string.concat(w, "+"), ""
+}
+
+main() {
+    // `or` with an expression handler, int and string results.
+    check((num(false) or -1) == 7, "or yields the value")
+    check((num(true) or -1) == -1, "or yields the default")
+    a = word(false, "w") or "dflt"
+    b = word(true, "w") or "dflt"
+    check(a == "w!" && b == "dflt", "or on a string result")
+
+    // Force unwrap and coalescing of an optional.
+    check(lookup(true, "u")! == "u?", "force unwrap")
+    check((lookup(false, "u") ?? "none") == "none", "coalesce to the default")
+    check((lookup(true, "u") ?? "none") == "u?", "coalesce to the value")
+
+    // Optional chaining.
+    let o: Vec2? = Vec2 { x: 3, y: 4 }
+    let no: Vec2? = none
+    check((o?.x ?? 0) == 3, "optional chain on a value")
+    check((no?.y ?? -1) == -1, "optional chain on none")
+
+    // Unwrap a (value, err) tuple in a function that is not a result.
+    check(pair_ok("t")! == "t+", "tuple unwrap")
+
+    // Subset and superset of bit_sets.
+    s1 = bit_set[Perm] { Perm.Read }
+    s2 = bit_set[Perm] { Perm.Read, Perm.Write }
+    check(s1 <= s2 && s2 >= s1 && !(s2 <= s1), "bit_set subset and superset")
+
+    println("ok")
+}

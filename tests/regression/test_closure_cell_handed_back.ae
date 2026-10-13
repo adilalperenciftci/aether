@@ -1,0 +1,101 @@
+// Regression (#2763 follow-up): a closure cell passed to a function that
+// hands it back, and that rebinds the cell while it runs, hands back a
+// closure that is still alive.
+//
+// `g` is a cell (the closure `reset` writes it). A call lends the cell's
+// closure with a reference held for the call alone (arg_drain_select),
+// since the call may rebind the cell, and the cell gives its own reference
+// back when it is rebound. `keep_run(g, reset)` runs `reset`, so when it
+// returns, the closure it hands back lives on the lent reference only, and
+// that is released before the call's value is used. #2763 took such a call
+// for the cell's own value and stopped pinning the cell's closures, so
+// `h = keep_run(g, reset)` retained a freed environment: a crash or a wrong
+// count. A cell's scan judges a hand-back as it did before: the cell pins
+// what it holds there.
+//
+// After each call the freed memory is reused by closures of the same shape
+// (`burn`), so a dead `h` reads another count or crashes.
+//
+// The pin is one reference never given back for each closure the cell
+// held (#2788): 5 blocks a call, 600 over the run, which
+// tests/leaks_known.txt allows the macOS leaks gate.
+
+import std.string
+
+extern exit(code: int)
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+counter(p: string) -> fn {
+    return || { return string.length(p) }
+}
+
+keep_run(f: fn, r: fn) -> fn {
+    call(r)
+    return f
+}
+
+keep_run_tuple(f: fn, r: fn) -> (fn, int) {
+    call(r)
+    return f, 5
+}
+
+use_it(f: fn) -> int {
+    int v = call(f)
+    return v
+}
+
+burn(p: string) -> int {
+    a = counter(string.concat(p, "123456789"))
+    b = counter(string.concat(p, "123456789"))
+    int n = call(a) + call(b)
+    return n
+}
+
+bound(p: string) -> int {
+    g = counter(p)
+    q = string.concat(p, "xyz")
+    reset = || { g = counter(q) }
+    h = keep_run(g, reset)
+    burn(p)
+    int n = call(h) * 10 + call(g)
+    return n
+}
+
+slot(p: string) -> int {
+    g = counter(p)
+    q = string.concat(p, "xyz")
+    reset = || { g = counter(q) }
+    h, n = keep_run_tuple(g, reset)
+    burn(p)
+    int r = call(h) * 10 + call(g) + n
+    return r
+}
+
+passed(p: string) -> int {
+    g = counter(p)
+    q = string.concat(p, "xyz")
+    reset = || { g = counter(q) }
+    a = use_it(keep_run(g, reset))
+    burn(p)
+    int n = a * 10 + call(g)
+    return n
+}
+
+main() {
+    println("=== test_closure_cell_handed_back ===")
+    p = string.concat("bc", "")
+    i = 0
+    while i < 20 {
+        check(bound(p) == 25, "a handed-back cell bound to a local (${bound(p)})")
+        check(slot(p) == 30, "a handed-back cell in a tuple slot (${slot(p)})")
+        check(passed(p) == 25, "a handed-back cell passed on (${passed(p)})")
+        i = i + 1
+    }
+    println("=== test_closure_cell_handed_back passed ===")
+}

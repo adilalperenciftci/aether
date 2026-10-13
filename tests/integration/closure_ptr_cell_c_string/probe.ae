@@ -1,0 +1,100 @@
+// Probe for test_closure_ptr_cell_c_string.sh: a string a closure stores
+// into an outer `ptr` local reaches C as its characters, as a plain string
+// stored by the local's own scope does, and they live as long as the
+// variable, past the closure that stored them. Prints "OK" on success.
+
+import std.mem
+import std.string
+
+extern see(p: ptr) -> int
+extern seen_is(want: string) -> int
+extern exit(code: int)
+
+var gp: ptr = null
+
+names(p: string) -> (string, int) {
+    return string.concat(p, "-tup"), 2
+}
+
+run(f: fn) {
+    f()
+}
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+burn() -> int {
+    total = 0
+    i = 0
+    while i < 50 {
+        t = string.concat("burn-burn-", "burn-burn-burn")
+        total = total + string.length(t)
+        i = i + 1
+    }
+    return total
+}
+
+// A string stored into a `ptr` module var is the pointer it is, through a
+// cast the build log must not warn about (#2811). A global never gives
+// back what it holds, so this runs once, outside the leak window.
+fn ptr_global(p: string) {
+    t = string.concat("ab", "-lit")
+    gp = t
+    check(see(gp) == 6 && seen_is("ab-lit") == 1, "a ptr module var's `gp = t`")
+    s = string.concat(p, "-str")
+    gp = s
+    gp = string.concat(p, "-call")
+    gp = null
+}
+
+// The closures given to `run` are released before C reads the pointer.
+stored(p: string) -> int {
+    s = string.concat(p, "-str")
+    t = string.concat("ab", "-lit")
+    let x: ptr = null
+    run(|| { x = s })
+    let n: ptr = null
+    k = 0
+    run(|| { n, k = names(p) })
+    let y: ptr = null
+    set = || {
+        y = t
+    }
+    set()
+    burn()
+    int a = see(x)
+    check(a == 6 && seen_is("ab-str") == 1, "a closure's `x = s` into a ptr cell (${a})")
+    int b = see(n)
+    check(b == 6 && seen_is("ab-tup") == 1, "a closure's destructure into a ptr cell (${b})")
+    check(k == 2, "the int a closure's destructure writes beside it (${k})")
+    int c = see(y)
+    check(c == 6 && seen_is("ab-lit") == 1, "a closure's `y = t` of a plain string (${c})")
+    let z: ptr = null
+    z = t
+    int d = see(z)
+    check(d == 6 && seen_is("ab-lit") == 1, "the scope's own `z = t` (${d})")
+    x = null
+    check(see(x) == -1, "a ptr cell set to null")
+    return a + b + c + d
+}
+
+main() {
+    p = string.concat("ab", "")
+    check(stored(p) == 24, "strings stored into ptr cells")
+    ptr_global(p)
+    if mem.heap_in_use_exact() {
+        grown = mem.steady_growth(|| {
+                i = 0
+                while i < 50 {
+                    stored(p)
+                    i = i + 1
+                }
+            }, 5)
+        check(grown == 0, "50 stores into ptr cells grew the heap by ${grown} bytes in every run")
+    }
+    println("OK")
+}

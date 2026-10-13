@@ -1,0 +1,165 @@
+// Regression (#2798): an `or` whose handler is a block, a `!` that
+// propagates an error and a call whose trailing block runs where its value
+// is used hold statements. #2765 ran them ahead of their statement, as
+// plain C, where one is the first thing the statement evaluates; anywhere
+// else they stayed GNU statement expressions, which a compiler that is not
+// GCC-compatible (AETHER_GCC_COMPAT 0, what cl.exe compiles) rejects. Now
+// what the statement evaluates before one is evaluated first, into
+// temporaries, and then the construct, ahead of the statement; behind `&&`
+// or `||` it runs only when that side would; in a loop condition it runs at
+// the top of every pass. This checks the values and the order of each;
+// tests/compiler/test_msvc_compat.sh compiles it as strict C11 and under
+// cl.exe and runs it without GCC extensions.
+
+import std.string
+
+extern exit(code: int)
+extern malloc(size: int) -> ptr
+extern free(p: ptr)
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+num(fail: bool) -> int! {
+    if fail { return 0, "boom" }
+    return 7
+}
+
+word(fail: bool, w: string) -> string! {
+    if fail { return "", string.concat("bad-", w) }
+    return string.concat(w, "!")
+}
+
+var calls = 0
+
+tick() -> int {
+    calls = calls + 1
+    return calls
+}
+
+show(a: int, b: int) -> int {
+    return a * 100 + b
+}
+
+halve(x: int) -> int! {
+    if x % 2 != 0 { return 0, "odd" }
+    return x / 2
+}
+
+// A propagating `!` after an operand and inside a call's arguments.
+later(x: int) -> int! {
+    y = 1 + halve(x)!
+    return show(tick(), halve(y)!)
+}
+
+// A propagating `!` in a loop condition.
+steps(x: int) -> int! {
+    n = 0
+    v = x
+    while halve(v)! > 1 {
+        v = v / 2
+        n = n + 1
+    }
+    return n
+}
+
+struct Bag {
+    items: int
+}
+
+new_bag() -> ptr {
+    b = malloc(sizeof(Bag)) as *Bag
+    b.items = 0
+    return b
+}
+
+add(_ctx: ptr) {
+    b = _ctx as *Bag
+    b.items = b.items + 1
+}
+
+taken(p: ptr) -> int {
+    b = p as *Bag
+    n = b.items
+    free(p)
+    return n
+}
+
+main() {
+    // After a variable read first.
+    y = 1
+    x = y + (num(true) or { -1 })
+    check(x == 0, "an or block after an operand")
+
+    // After an argument with a side effect, which runs first.
+    calls = 0
+    z = show(tick(), num(true) or {
+            calls = calls + 10
+            - 2
+        })
+    check(z == 98 && calls == 11, "an or block after an argument")
+
+    // Two in one statement, each after what precedes it.
+    calls = 0
+    w = show(num(true) or { tick() }, num(true) or { tick() * 10 })
+    check(w == 120, "two or blocks in one call")
+
+    // Behind `&&` and `||`, run only when that side runs.
+    calls = 0
+    ok = y > 0 && (num(false) or { 0 }) == 7
+    no = y < 0 && (num(true) or {
+            calls = 99
+            0
+        }) == 7
+    yes = y > 0 || (num(true) or {
+            calls = 98
+            0
+        }) == 7
+    check(ok && !no && yes && calls == 0, "or blocks behind && and ||")
+
+    // A string result, after a literal argument.
+    s = string.concat("<", word(true, "w") or { "d" })
+    check(s == "<d", "a string or block in an argument")
+
+    // In a while and a for condition: evaluated every pass, also after a
+    // continue.
+    i = 0
+    while (num(i > 2) or { 0 }) > 1 {
+        i = i + 1
+    }
+    check(i == 3, "an or block in a while condition")
+    k = 0
+    for (j = 0; (num(j > 3) or { 0 }) > 1; j = j + 1) {
+        if j == 1 {
+            continue
+        }
+        k = k + 1
+    }
+    check(k == 3, "an or block in a for condition, with a continue")
+
+    // A propagating `!` after an operand, in arguments and in a loop.
+    calls = 0
+    a, e = later(12)
+    check(a == 0 && e == "odd" && calls == 1, "a propagating ! after an argument")
+    b, e2 = later(6)
+    check(b == 202 && e2 == "" && calls == 2, "a propagating !, success")
+    n, e3 = steps(8)
+    check(n == 2 && e3 == "", "a propagating ! in a loop condition")
+    n2, e4 = steps(6)
+    check(n2 == 0 && e4 == "odd", "a propagating ! in a loop condition, error")
+
+    // A trailing-block call after an operand that reads what the block
+    // changes.
+    calls = 0
+    m = tick() + taken(new_bag() {
+            add()
+            add()
+        })
+    check(m == 3, "a trailing block call after an operand")
+
+    println("ok")
+}

@@ -15,3 +15,43 @@
 # returned to the OS at exit. Confirmed: an explicit atexit(OPENSSL_cleanup)
 # changed the leaks count by zero.
 test_cryptography_hmac_md4_md5 122
+
+# TRACKED: module-level strings are never given back (#2808).
+# A `string?` module var keeps every string it was given, as a `string`
+# one does: a re-bind takes a string of its own and frees nothing, so a
+# view of the var, held in a binding or in a temporary of the expression
+# that re-binds it, stays valid. Each heap string a re-bind replaces is
+# unreachable at exit: one AetherString header and its bytes, two blocks.
+# Counted on Windows with a malloc/free wrap and matching the macOS run.
+# These tests re-bind on purpose (the views they check survive a re-bind).
+# Drop the entries when #2808 gives the strings back with copy-on-read.
+#   test_optional_module_var: 8 strings the string? globals held before a
+#   re-bind ("bc!!", "bc!", "bc?" x4 from set_strs, opt_names and in_loop,
+#   "bc123" x2 from kept_copy).
+test_optional_module_var 16
+#   test_optional_string_view_survives: the 4 "ab-name" strings set_name
+#   stored, each replaced by rebind() (a folded literal, never freed).
+test_optional_string_view_survives 8
+
+# TRACKED: a cell passed to a hand-back call is pinned (#2788).
+# A closure cell passed to a call that may hand its closure back
+# (keep_run(g, reset)) holds every closure stored in it with one extra
+# reference (emit_closure_cell_value, promoted_closure_cell_owns), so the
+# closure handed back outlives the call's lent reference when the call
+# rebinds the cell. That reference is never given back: each of bound,
+# slot and passed leaves the two closures its cell held (counter(p) and
+# reset's counter(q)) with their captures, 5 blocks a call (two envs, the
+# capture copy of "bc", the "bcxyz" header and bytes), 120 calls. Drop the
+# entry when #2788 holds a reference for the call instead of pinning.
+test_closure_cell_handed_back 600
+
+# TRACKED: a builder that never uses its config leaks it (#2871).
+# A builder whose body never names `_builder` never frees the config its
+# call hands it: with the default factory, the map_new map and its bucket
+# array, two blocks a call. test_builder_default_factory_no_import calls
+# such a builder twice (`a = quiet("q") {}` and early(0)); early(3) leaves
+# its block by a return, and #2791 frees that one. Freeing the config on
+# the builder's entry is unsafe while a setter or a factory can let the
+# config escape, so it waits for an ownership rule. Drop the entry when
+# #2871 gives builders that rule.
+test_builder_default_factory_no_import 4

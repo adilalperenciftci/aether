@@ -1,0 +1,187 @@
+// Regression (#2791): leaving a builder's trailing block before the builder
+// runs releases the config the call made.
+//
+// A builder call makes its config with the builder's factory, runs the
+// block against it, then hands it to the builder, which owns it from then
+// on. A `return` (with a value or without), `break` or `continue` in the
+// block left before the builder ran, and nothing released the config: every
+// call leaked it. The call now releases it on any way out of the block but
+// its natural end, for the default `map_new` and for a `<stem>_new` factory
+// with a `<stem>_free`. In a nested builder call's block, the way out
+// releases both calls' configs.
+import std.map
+import std.list
+import std.mem
+
+extern exit(code: int)
+
+builder run(label: string) {
+    if _builder != null {
+        map_free(_builder)
+    }
+}
+
+builder count(label: string) -> int {
+    if _builder != null {
+        map_free(_builder)
+    }
+    return 1
+}
+
+builder flags(label: string) with list_new {
+    if _builder != null {
+        list_free(_builder)
+    }
+}
+
+opts_new() -> ptr {
+    return map_new()
+}
+
+opts_free(m: ptr) {
+    map_free(m)
+}
+
+builder tuned(label: string) with opts_new {
+    if _builder != null {
+        opts_free(_builder)
+    }
+}
+
+set_opt(_ctx: ptr, key: string, value: string) {
+    map_put(_ctx, key, value)
+}
+
+add_flag(_ctx: ptr, flag: string) {
+    list_add_raw(_ctx, flag)
+}
+
+ret_value(n: int) -> int {
+    run("x") {
+        set_opt("k", "v")
+        return n
+    }
+    return 0
+}
+
+ret_void(n: int) {
+    run("x") {
+        set_opt("k", "v")
+        if n >= 0 {
+            return
+        }
+    }
+}
+
+broke(n: int) -> int {
+    total = 0
+    i = 0
+    while i < n {
+        run("x") {
+            set_opt("k", "v")
+            if i >= 0 {
+                break
+            }
+        }
+        total = total + 1
+        i = i + 1
+    }
+    return total
+}
+
+skipped(n: int) -> int {
+    total = 0
+    i = 0
+    while i < n {
+        i = i + 1
+        got = count("x") {
+            set_opt("k", "v")
+            if i >= 0 {
+                continue
+            }
+        }
+        total = total + got
+    }
+    return total
+}
+
+nested(n: int) -> int {
+    run("outer") {
+        set_opt("a", "b")
+        got = 1 + count("inner") {
+            set_opt("c", "d")
+            if n >= 0 {
+                return n
+            }
+        }
+        println("not reached ${got}")
+    }
+    return 0
+}
+
+stems(n: int) -> int {
+    flags("x") {
+        add_flag("a")
+        if n % 2 == 0 {
+            return n
+        }
+    }
+    tuned("x") {
+        set_opt("k", "v")
+        return n
+    }
+    return 0
+}
+
+falls(n: int) -> int {
+    run("x") {
+        set_opt("k", "v")
+    }
+    return count("x") {
+        set_opt("k", "v")
+    }
+}
+
+grows(which: int) -> int {
+    return mem.steady_growth(|| {
+            k = 0
+            while k < 100 {
+                if which == 1 { ret_value(k) }
+                if which == 2 { ret_void(k) }
+                if which == 3 { broke(1) }
+                if which == 4 { skipped(2) }
+                if which == 5 { nested(k) }
+                if which == 6 { stems(k) }
+                if which == 7 { falls(k) }
+                k = k + 1
+            }
+        }, 5)
+}
+
+main() {
+    ok = ret_value(4) == 4 && broke(3) == 0 && skipped(3) == 0 && nested(5) == 5
+    ok = ok && stems(6) == 6 && stems(7) == 7 && falls(0) == 1
+    if !ok {
+        println("FAIL: a builder block's way out changed a value")
+        exit(1)
+    }
+    if !mem.heap_in_use_exact() {
+        println("builder config on an early exit: no exact heap count, skipped")
+        return
+    }
+    names = ["return", "bare return", "break", "continue", "nested", "list_new and opts_new", "natural end"]
+    failed = 0
+    w = 1
+    while w <= 7 {
+        g = grows(w)
+        if g != 0 {
+            println("FAIL: 100 calls (${names[w - 1]}) grew the heap by ${g}")
+            failed = 1
+        }
+        w = w + 1
+    }
+    if failed != 0 {
+        exit(1)
+    }
+    println("builder config on an early exit: ok")
+}

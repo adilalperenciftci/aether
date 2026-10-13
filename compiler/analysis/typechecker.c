@@ -10,6 +10,7 @@
 #include "../aether_strmap.h"
 #include "actor_reply.h"
 #include "missing_return.h"
+#include "slice_escape.h"
 #include "quote.h"
 
 /* Defined with typecheck_program below; infer_type needs it far earlier. */
@@ -1378,6 +1379,7 @@ static const char* base_type_name(Type* t) {
         case TYPE_FUNCTION:  return "closure";
         case TYPE_TUPLE:    return "tuple";
         case TYPE_OPTIONAL: return "optional";   // #340
+        case TYPE_SUM:      return t->struct_name ? t->struct_name : "sum";
         /* Named nominal types report their own name — "expected uint8_t, got B"
          * is actionable where "got unknown" is not. */
         case TYPE_ENUM:     return t->struct_name ? t->struct_name : "enum";
@@ -1985,6 +1987,13 @@ static int is_const_struct_literal(ASTNode* e, SymbolTable* table) {
         ASTNode* f = e->children[i];
         if (!f || f->type != AST_ASSIGNMENT || f->child_count < 1) return 0;
         ASTNode* v = f->children[0];
+        /* #2792: `[]` (or `null`, a constant anyway) for a `T[]` field,
+         * which the field's coercion has made the empty slice: a constant,
+         * as for a `T[]` global (#2785). */
+        if (v && v->type == AST_SLICE_FROM_ARRAY && v->child_count > 0 && v->children[0] &&
+            (v->children[0]->type == AST_NULL_LITERAL ||
+             (v->children[0]->type == AST_ARRAY_LITERAL && v->children[0]->child_count == 0)))
+            continue;
         if (!is_const_expression(v, table) && !is_const_struct_literal(v, table)) return 0;
     }
     return 1;
@@ -2023,7 +2032,7 @@ static int is_erased_call(const ASTNode* n);
  * into nested closures; codegen's find_first_return_expr, which picks the
  * closure's C return type, walks the same way. */
 static ASTNode* closure_first_return_expr(ASTNode* node) {
-    if (!node || node->type == AST_CLOSURE || node->type == AST_QUOTE) return NULL;
+    if (!node || ast_is_own_function(node)) return NULL;
     if (node->type == AST_RETURN_STATEMENT && node->child_count > 0 &&
         node->children[0] && node->children[0]->type != AST_PRINT_STATEMENT) {
         return node->children[0];
@@ -2037,7 +2046,7 @@ static ASTNode* closure_first_return_expr(ASTNode* node) {
 
 /* The return statement closure_first_return_expr finds the value of. */
 static ASTNode* closure_first_return_stmt(ASTNode* node) {
-    if (!node || node->type == AST_CLOSURE || node->type == AST_QUOTE) return NULL;
+    if (!node || ast_is_own_function(node)) return NULL;
     if (node->type == AST_RETURN_STATEMENT && node->child_count > 0 &&
         node->children[0] && node->children[0]->type != AST_PRINT_STATEMENT) {
         return node;
@@ -2050,7 +2059,7 @@ static ASTNode* closure_first_return_stmt(ASTNode* node) {
 }
 
 static int closure_any_return_is_string(ASTNode* node) {
-    if (!node || node->type == AST_CLOSURE || node->type == AST_QUOTE) return 0;
+    if (!node || ast_is_own_function(node)) return 0;
     if (node->type == AST_RETURN_STATEMENT && node->child_count > 0 &&
         node->children[0] && node->children[0]->type != AST_PRINT_STATEMENT) {
         return node->children[0]->node_type &&
@@ -2575,6 +2584,44 @@ static void reject_non_closure_callee(ASTNode* call, SymbolTable* table) {
     free_type(t);
 }
 
+/* #2840 review: `none` and `[]` are built as a value of the slot they are
+ * given to, an optional or a slice of its element type. Through an erased
+ * `fn` (a bare `fn` with no closure literal known) the closure's parameter
+ * types are not known at the call, so there is no type to build them as;
+ * guessing one (an int optional) handed a `string?` parameter garbage.
+ * Each is refused at the argument, naming the fix. */
+static void reject_untyped_erased_args(ASTNode* call, SymbolTable* table) {
+    if (call->child_count < 2 || !call->children[0] ||
+        call->children[0]->type == AST_CLOSURE)
+        return;
+    Type* t = infer_type(call->children[0], table);
+    int erased = t && t->kind == TYPE_FUNCTION && !t->is_fnptr && fn_type_is_erased(t) &&
+                 !t->closure_literal;
+    if (t) free_type(t);
+    if (!erased) return;
+    const char* callee = call->children[0]->type == AST_IDENTIFIER && call->children[0]->value
+                             ? call->children[0]->value : "the closure";
+    for (int i = 1; i < call->child_count; i++) {
+        ASTNode* a = call->children[i];
+        if (!a || ast_is_trailing_block(a)) continue;
+        int is_none = a->type == AST_NONE_LITERAL;
+        int is_empty = a->type == AST_ARRAY_LITERAL && a->child_count == 0;
+        if (!is_none && !is_empty) continue;
+        char msg[400], help[300];
+        snprintf(msg, sizeof(msg),
+                 "`%s` given to '%s', a bare `fn`: its parameter types are not known here, so "
+                 "there is no %s type to build it as",
+                 is_none ? "none" : "[]", callee, is_none ? "optional" : "slice");
+        snprintf(help, sizeof(help),
+                 "bind it to a local of the parameter's type first (e.g. `let o: %s = %s`) and "
+                 "pass that, or, for a named function, take a typed function pointer (`%s: "
+                 "fn(%s) -> int`)",
+                 is_none ? "string?" : "int[]", is_none ? "none" : "[]", callee,
+                 is_none ? "string?" : "int[]");
+        type_error_hint(msg, help, a->line, a->column);
+    }
+}
+
 static int g_tc_ptr_to_closure = 0;
 int typecheck_ptr_to_closure_seen(void) { return g_tc_ptr_to_closure; }
 
@@ -2611,7 +2658,9 @@ int is_type_compatible(Type* from, Type* to) {
         if (from->kind == TYPE_ENUM && to->kind == TYPE_ENUM)
             return types_equal(from, to);
         TypeKind other = (from->kind == TYPE_ENUM) ? to->kind : from->kind;
-        return is_integer_scalar(other);
+        /* `byte` is C's `uint8_t`, as `uint8` is: a byte-coded enum (a
+         * wire format) converts as a uint8-coded one does. */
+        return is_integer_scalar(other) || other == TYPE_BYTE;
     }
 
     // #1046 bit_set is strictly nominal: never an int, never another enum's
@@ -2876,6 +2925,23 @@ static int fn_name_matches_signature(SymbolTable* table, ASTNode* rhs, Type* tar
  * holding the function's address as a `var` does (#2648); it is never
  * re-bound, so only its annotation counts. */
 static ASTNode* global_var_decl(ASTNode* child);
+
+/* The module-level `var` a bare `name = value` binding assigns: the
+ * program's global of that name, when no local of it is in scope (#701).
+ * NULL for any other binding. */
+static ASTNode* rebound_global_var(ASTNode* stmt, SymbolTable* table) {
+    if (stmt->type != AST_VARIABLE_DECLARATION || !stmt->type_inferred || !stmt->value)
+        return NULL;
+    for (SymbolTable* s = table; s && s->parent; s = s->parent)
+        if (lookup_symbol_local(s, stmt->value)) return NULL;
+    ASTNode* program = aether_typecheck_program_node();
+    for (int i = 0; program && i < program->child_count; i++) {
+        ASTNode* g = global_var_decl(program->children[i]);
+        if (g && strcmp(g->value, stmt->value) == 0) return g;
+    }
+    return NULL;
+}
+
 static Type* fnptr_binding_slot(ASTNode* stmt, SymbolTable* table) {
     Type* t = stmt->node_type;
     if (stmt->type == AST_CONST_DECLARATION &&
@@ -2890,13 +2956,10 @@ static Type* fnptr_binding_slot(ASTNode* stmt, SymbolTable* table) {
             return t && t->kind == TYPE_FUNCTION && t->is_fnptr ? t : NULL;
         }
     }
-    ASTNode* program = aether_typecheck_program_node();
-    for (int i = 0; program && i < program->child_count; i++) {
-        ASTNode* g = global_var_decl(program->children[i]);
-        if (g && strcmp(g->value, stmt->value) == 0) {
-            t = g->node_type;
-            return t && t->kind == TYPE_FUNCTION && t->is_fnptr ? t : NULL;
-        }
+    ASTNode* g = rebound_global_var(stmt, table);
+    if (g) {
+        t = g->node_type;
+        return t && t->kind == TYPE_FUNCTION && t->is_fnptr ? t : NULL;
     }
     return NULL;
 }
@@ -5860,6 +5923,9 @@ int typecheck_program(ASTNode* program) {
      * Asked once the program type-checks: whether a `match` covers its type
      * depends on the type the checker gave the value it matches on. */
     if (error_count == 0) error_count += check_missing_returns(program);
+    /* A slice of a function's own storage must not outlive it (#2785): asked
+     * of the checked program, whose coercions into slices are explicit. */
+    if (error_count == 0) error_count += check_slice_escapes(program);
 
     // #481: validate effect tags over the whole-program call graph.
     check_effect_tags(program);
@@ -6132,6 +6198,14 @@ int typecheck_actor_definition(ASTNode* actor, SymbolTable* table) {
                     if (fn && fn->type) {
                         set_node_type(child, clone_type(fn->type));
                     }
+                } else {
+                    /* Any other initializer (`f() or { d }`) has the type
+                     * it infers to. Left unknown, every use of the field in
+                     * the handlers was untyped, and codegen took it for an
+                     * int (#2821). */
+                    Type* it = infer_type(init, actor_table);
+                    if (it && it->kind != TYPE_UNKNOWN) set_node_type(child, it);
+                    else if (it) free_type(it);
                 }
             }
             add_symbol(actor_table, child->value, clone_type(child->node_type), 0, 0, 1);
@@ -7361,8 +7435,35 @@ int typecheck_function_definition(ASTNode* func, SymbolTable* table) {
     return 1;
 }
 
+/* #2822: does a value of type `t` own memory a struct field would have to
+ * free or copy: a string, a closure, or a struct (held by value) with such
+ * a field? */
+static int type_owns_memory(Type* t, SymbolTable* table, int depth) {
+    if (!t || depth > 16) return 0;
+    if (t->kind == TYPE_STRING) return 1;
+    if (t->kind == TYPE_FUNCTION) return !t->is_fnptr;
+    /* An optional, an array (a fixed-size one holds its elements, which a
+     * struct owning them frees) and a tuple own what their elements own. */
+    if (t->kind == TYPE_OPTIONAL || t->kind == TYPE_ARRAY)
+        return type_owns_memory(t->element_type, table, depth + 1);
+    if (t->kind == TYPE_TUPLE) {
+        for (int i = 0; t->tuple_types && i < t->tuple_count; i++)
+            if (type_owns_memory(t->tuple_types[i], table, depth + 1)) return 1;
+        return 0;
+    }
+    if (t->kind != TYPE_STRUCT || !t->struct_name) return 0;
+    Symbol* s = lookup_symbol(table, t->struct_name);
+    ASTNode* def = s ? s->node : NULL;
+    if (!def || def->type != AST_STRUCT_DEFINITION) return 0;
+    for (int i = 0; i < def->child_count; i++) {
+        ASTNode* f = def->children[i];
+        if (f && f->type == AST_STRUCT_FIELD && type_owns_memory(f->node_type, table, depth + 1))
+            return 1;
+    }
+    return 0;
+}
+
 int typecheck_struct_definition(ASTNode* struct_def, SymbolTable* table) {
-    (void)table;  // Unused for now
     if (!struct_def || struct_def->type != AST_STRUCT_DEFINITION) return 0;
     
     // Type check all fields
@@ -7392,6 +7493,23 @@ int typecheck_struct_definition(ASTNode* struct_def, SymbolTable* table) {
             return 0;
         }
         
+        /* #2822: an optional field compiles (#2820), but one whose value
+         * owns memory has none of a `string` field's ownership (destroy,
+         * replace, dup, a take on store), so a string stored there would
+         * leak or dangle. Refused until it has. */
+        if (field->node_type->kind == TYPE_OPTIONAL &&
+            type_owns_memory(field->node_type->element_type, table, 0)) {
+            char error_msg[512];
+            snprintf(error_msg, sizeof(error_msg),
+                     "struct field '%s' is %s: an optional field whose value owns memory (a "
+                     "string, a closure, or a struct holding one) is not supported yet "
+                     "(#2822). Hold the value bare (a `string` with \"\" for none) or keep "
+                     "the optional in a local",
+                     field->value, type_to_string(field->node_type));
+            type_error(error_msg, field->line, field->column);
+            return 0;
+        }
+
         // Check for duplicate field names
         for (int j = 0; j < i; j++) {
             ASTNode* other_field = struct_def->children[j];
@@ -7508,6 +7626,31 @@ static void declare_common_hoists(ASTNode* stmt, SymbolTable* table) {
 /* Before a while: hoist_loop_vars's names. */
 static void declare_loop_hoist(ASTNode* decl, void* user) {
     declare_hoisted_local((SymbolTable*)user, decl->value, hoist_decl_type(decl));
+}
+
+/* #2768: the matches being checked whose value is used: bound, returned,
+ * or yielded by an arm block of another such match (the last statement of
+ * the block). Codegen gives each a result variable and keeps its arms'
+ * names in the arms; a statement match declares the names every arm binds
+ * before it (declare_common_hoists), as an if/else does. */
+#define TC_MAX_VALUE_MATCHES 256
+static ASTNode* tc_value_matches[TC_MAX_VALUE_MATCHES];
+static int tc_value_match_depth = 0;
+
+static void tc_push_value_match(ASTNode* m) {
+    if (tc_value_match_depth < TC_MAX_VALUE_MATCHES)
+        tc_value_matches[tc_value_match_depth] = m;
+    tc_value_match_depth++;   /* always increment so pop stays balanced */
+}
+static void tc_pop_value_match(void) {
+    if (tc_value_match_depth > 0) tc_value_match_depth--;
+}
+static int tc_is_value_match(ASTNode* m) {
+    int n = tc_value_match_depth < TC_MAX_VALUE_MATCHES
+          ? tc_value_match_depth : TC_MAX_VALUE_MATCHES;
+    for (int i = n - 1; i >= 0; i--)
+        if (tc_value_matches[i] == m) return 1;
+    return 0;
 }
 
 /* #893: enclosing loop labels, for validating `break label` / `continue
@@ -7992,6 +8135,368 @@ static int rhs_returns_void_via_bare_fn(ASTNode* rhs, SymbolTable* table) {
     return 0;
 }
 
+/* #2762: a slot of a tuple destructure re-binds a local an enclosing local
+ * scope already binds (a closure's `a, b = two()` writes the outer `a` and
+ * `b` it sees, as `a = 7` does), so the slot follows the rules a bare
+ * re-bind follows in the AST_VARIABLE_DECLARATION case below: a value of
+ * another kind is refused with the same diagnostic, so is one an inferred
+ * int would truncate (#698), and the local keeps the type of its first
+ * binding. Unchecked, the slot's C store did not compile (`const char*`
+ * from `int`) or truncated a float into an int cell. A local hoisted out of
+ * a branch or loop body, which that case joins over the body first, is left
+ * as it was. Returns 0 once it has reported an error. */
+static int destructure_slot_rebind(ASTNode* var, SymbolTable* table) {
+    if (!var || !var->value || !var->node_type) return 1;
+    Symbol* bound = NULL;
+    SymbolTable* bound_in = NULL;
+    for (SymbolTable* t = table; t && t->parent && !bound; t = t->parent) {
+        bound = lookup_symbol_local(t, var->value);
+        if (bound) bound_in = t;
+    }
+    if (!bound && is_program_global_name(var->value)) {
+        /* #2800: a module-level optional `var` the slot writes (#2796)
+         * keeps its optional type, as a bare re-bind adopts it (#340). */
+        Symbol* g = lookup_symbol(table, var->value);
+        if (g && g->type && g->type->kind == TYPE_OPTIONAL && !g->is_function &&
+            var->node_type->kind != TYPE_OPTIONAL && is_assignable(var->node_type, g->type)) {
+            free_type(var->node_type);
+            var->node_type = clone_type(g->type);
+        }
+        return 1;
+    }
+    if (!bound || !bound->type || (bound->branch_hoisted && bound_in != table) ||
+        bound->is_state || bound->is_function || bound->is_actor || bound->is_module_alias)
+        return 1;
+    Type* have = bound->type;
+    Type* got = var->node_type;
+    if (have->kind == TYPE_UNKNOWN || got->kind == TYPE_UNKNOWN || got->kind == TYPE_VOID)
+        return 1;
+    /* A string and a raw pointer convert freely, as for a bare re-bind. */
+    int str_ptr_mix = (got->kind == TYPE_PTR && have->kind == TYPE_STRING) ||
+                      (got->kind == TYPE_STRING && have->kind == TYPE_PTR);
+    if (!str_ptr_mix &&
+        (!is_assignable(got, have) ||
+         (got->kind == TYPE_PTR && is_numeric_scalar(have->kind)) ||
+         (is_numeric_scalar(got->kind) && have->kind == TYPE_PTR))) {
+        char rmsg[400];
+        snprintf(rmsg, sizeof(rmsg),
+            "cannot re-bind '%s' as %s: it was bound as %s by its first "
+            "assignment, and a local keeps that type. Use a new name for "
+            "the %s value, or convert it to %s",
+            var->value, type_name(got), type_name(have), type_name(got), type_name(have));
+        type_error(rmsg, var->line, var->column);
+        return 0;
+    }
+    if (bound->type_inferred && have->kind == TYPE_INT &&
+        (got->kind == TYPE_INT64 || got->kind == TYPE_UINT64 || got->kind == TYPE_UINT32 ||
+         got->kind == TYPE_FLOAT32 || got->kind == TYPE_FLOAT || got->kind == TYPE_LONGDOUBLE)) {
+        char msg[420];
+        narrowing_message(msg, sizeof(msg), var->value, got->kind);
+        type_error(msg, var->line, var->column);
+        return 0;
+    }
+    if (!str_ptr_mix) {
+        free_type(var->node_type);
+        var->node_type = clone_type(have);
+    }
+    return 1;
+}
+
+/* #2782: a type as a signature spells it, for the return messages: `int?`,
+ * `int[]`, `(int, string)`. */
+static const char* ret_type_spell(Type* t, char* buf, size_t n) {
+    if (!t) return "unknown";
+    if (t->distinct_name) return type_name(t);
+    if (t->kind == TYPE_OPTIONAL && t->element_type) {
+        char inner[160];
+        snprintf(buf, n, "%s?", ret_type_spell(t->element_type, inner, sizeof(inner)));
+        return buf;
+    }
+    if (t->kind == TYPE_ARRAY) return array_type_spell(t, buf, n);
+    if (t->kind == TYPE_TUPLE) {
+        tuple_type_spell(t, buf, n);
+        return buf;
+    }
+    return type_name(t);
+}
+
+/* #2782: may a `return` give the value `v`, of type `vt`, where the result
+ * is `rt`? The rules of a typed binding, `x: rt = v` (is_assignable), with
+ * what a result adds to them and takes from them:
+ *
+ *  - a `string` and a bare `ptr` are both a C `const char*`: a C string
+ *    returned from `-> string` is a borrowed string, and a string returned
+ *    from `-> ptr` its pointer (the casting table; a bare re-bind mixes the
+ *    two the same way);
+ *  - a numeric scalar, `byte` included, converts to another as C converts
+ *    it, as into any written slot, and a bool to an integer and back;
+ *  - what C cannot do with the value is refused, although is_assignable
+ *    lets a binding through: a closure becomes a `ptr` and back only by
+ *    name (box_closure, unbox_closure), a pointer is no value optional, a
+ *    slice is no typed pointer, and `[]` is the empty slice, which only an
+ *    array or a pointer result can take.
+ *
+ * Returns 1 when it fits. When it does not, `*hint` is the fix to suggest,
+ * or NULL for the generic one. */
+static int return_value_fits(ASTNode* v, Type* vt, Type* rt, const char** hint) {
+    *hint = NULL;
+    if (!vt || !rt) return 1;
+    if (v && v->type == AST_ARRAY_LITERAL && v->child_count == 0) {
+        if (rt->kind == TYPE_ARRAY || rt->kind == TYPE_PTR || rt->kind == TYPE_UNKNOWN ||
+            rt->kind == TYPE_WILDCARD)
+            return 1;
+        *hint = "`[]` is the empty slice; return a value of the result type";
+        return 0;
+    }
+    if (vt->kind == TYPE_UNKNOWN || rt->kind == TYPE_UNKNOWN ||
+        vt->kind == TYPE_WILDCARD || rt->kind == TYPE_WILDCARD)
+        return 1;
+    int plain = !vt->distinct_name && !rt->distinct_name;
+    /* A value into an optional result: the optional wraps it, so it is
+     * judged against what the optional holds; `none` and an optional are
+     * judged whole. */
+    if (plain && rt->kind == TYPE_OPTIONAL && vt->kind != TYPE_OPTIONAL && rt->element_type) {
+        Type* inner = rt->element_type;
+        if (vt->kind == TYPE_PTR && inner->kind != TYPE_PTR && inner->kind != TYPE_STRING &&
+            inner->kind != TYPE_UNKNOWN) {
+            *hint = "a pointer is not a value of the optional's type: return `none` for no value";
+            return 0;
+        }
+        return return_value_fits(v, vt, inner, hint);
+    }
+    if (plain && ((vt->kind == TYPE_PTR && !vt->element_type && rt->kind == TYPE_STRING) ||
+                  (vt->kind == TYPE_STRING && rt->kind == TYPE_PTR && !rt->element_type)))
+        return 1;
+    if (plain && (is_numeric_scalar(vt->kind) || vt->kind == TYPE_BYTE) &&
+        (is_numeric_scalar(rt->kind) || rt->kind == TYPE_BYTE))
+        return 1;
+    /* A bool and an integer convert exactly, as C converts them and as a
+     * condition reads an integer: a comparison returned from `-> int` is 1
+     * or 0 (a derived `T_eq` is one), and an extern's int truth value
+     * returned from `-> bool` is whether it is nonzero. */
+    if (plain && ((vt->kind == TYPE_BOOL && (is_integer_scalar(rt->kind) || rt->kind == TYPE_BYTE)) ||
+                  (rt->kind == TYPE_BOOL && (is_integer_scalar(vt->kind) || vt->kind == TYPE_BYTE))))
+        return 1;
+    if (vt->kind == TYPE_FUNCTION && !vt->is_fnptr && rt->kind == TYPE_PTR) {
+        *hint = "a closure is a `ptr` only boxed: return `box_closure(f)`";
+        return 0;
+    }
+    if (vt->kind == TYPE_PTR && rt->kind == TYPE_FUNCTION && !rt->is_fnptr) {
+        *hint = "a closure kept as a `ptr` is a closure again through `unbox_closure(p)`";
+        return 0;
+    }
+    if (type_is_slice(vt) && rt->kind == TYPE_PTR && rt->element_type) return 0;
+    /* A slice returned as a pointer is its `.ptr` (slice_coerce_slot), a
+     * pointer to its elements, so a typed pointer result takes it only to
+     * elements of its own type. */
+    if (v && v->type == AST_SLICE_TO_PTR && rt->kind == TYPE_PTR && rt->element_type &&
+        rt->element_type->kind != TYPE_UNKNOWN && v->child_count > 0 && v->children[0]) {
+        Type* st = v->children[0]->node_type;
+        if (type_is_slice(st) && st->element_type &&
+            !types_equal(st->element_type, rt->element_type))
+            return 0;
+    }
+    return is_assignable(vt, rt);
+}
+
+/* #2782: a value an INFERRED int result would truncate, as an inferred
+ * int local would (#698, the casting table): a 64-bit integer, a uint32,
+ * a float. */
+static int narrows_inferred_int(Type* vt, Type* rt) {
+    if (!vt || !rt || rt->kind != TYPE_INT || rt->distinct_name || vt->distinct_name) return 0;
+    return vt->kind == TYPE_INT64 || vt->kind == TYPE_UINT64 || vt->kind == TYPE_UINT32 ||
+           vt->kind == TYPE_FLOAT32 || vt->kind == TYPE_FLOAT || vt->kind == TYPE_LONGDOUBLE;
+}
+
+/* What a `return` returns from, for the messages: a function by name, or
+ * a closure. */
+typedef struct {
+    const char* fn_name;   /* NULL: a closure */
+    int inferred;          /* the result type was inferred, not written */
+    int position;          /* 1-based value of a multi-value return; 0 for one value */
+    Type* whole;           /* with a position: the tuple the function returns */
+} ReturnOwner;
+
+/* #2782: check one value a `return` gives against the result type `rt`.
+ * A value that branches (an if-expression, a `match` whose value is used)
+ * gives each arm's value, checked on its own. Returns 1 when it fits. */
+static int check_return_value(ASTNode* v, Type* rt, const ReturnOwner* own,
+                              SymbolTable* table) {
+    if (!v || !rt) return 1;
+    if (v->type == AST_IF_EXPRESSION && v->child_count >= 3) {
+        int ok = check_return_value(v->children[1], rt, own, table);
+        return check_return_value(v->children[2], rt, own, table) && ok;
+    }
+    if (v->type == AST_MATCH_STATEMENT) {
+        int ok = 1;
+        for (int i = 0; i < v->child_count; i++) {
+            ASTNode* nested = NULL;
+            ASTNode** slot = match_arm_value_slot(v->children[i], &nested);
+            if (slot) ok = check_return_value(*slot, rt, own, table) && ok;
+            else if (nested) ok = check_return_value(nested, rt, own, table) && ok;
+        }
+        return ok;
+    }
+    /* `call(f, ...)` through an erased `fn` returns what the result type
+     * says (#2054): the declaration is its annotation, so it fits it. The
+     * return case has just typed it so (type_erased_call). */
+    if (is_erased_call(v) ||
+        (v->type == AST_FUNCTION_CALL && v->annotation &&
+         strcmp(v->annotation, "erased_call_typed") == 0))
+        return 1;
+    /* So does `f(...)` through a bare `fn` value, the same call spelled
+     * directly: its signature is gone, and the result type restores it. */
+    if (v->type == AST_FUNCTION_CALL && v->value) {
+        Symbol* s = lookup_symbol(table, v->value);
+        if (s && !s->is_function && s->type && s->type->kind == TYPE_FUNCTION &&
+            !s->type->is_fnptr && !s->type->closure_literal && fn_type_is_erased(s->type))
+            return 1;
+    }
+    /* A function named as a value is its address, which no slot checks by
+     * its result type. */
+    if (v->type == AST_IDENTIFIER && v->value) {
+        Symbol* s = lookup_symbol(table, v->value);
+        if (s && s->is_function) return 1;
+    }
+    Type* vt = infer_type(v, table);
+    /* A closure literal is a closure: inference leaves it unknown, and
+     * its check just stamped it. */
+    if (v->type == AST_CLOSURE && (!vt || vt->kind == TYPE_UNKNOWN) && v->node_type) {
+        if (vt) free_type(vt);
+        vt = clone_type(v->node_type);
+    }
+    const char* hint = NULL;
+    int fits = return_value_fits(v, vt, rt, &hint);
+    char want[200], got[200], msg[600], help[400];
+    if (fits && own->inferred && narrows_inferred_int(vt, rt)) {
+        const char* what = vt->kind == TYPE_UINT32 ? "a uint32, and values past 2^31 would not fit"
+                         : (vt->kind == TYPE_INT64 || vt->kind == TYPE_UINT64)
+                               ? "a 64-bit value, which would truncate"
+                               : "a float, which would truncate";
+        if (own->fn_name)
+            snprintf(msg, sizeof(msg),
+                     "narrowing return from '%s': its result type was inferred as int from "
+                     "its first `return`, but this `return` gives %s", own->fn_name, what);
+        else
+            snprintf(msg, sizeof(msg),
+                     "narrowing return from a closure: its result type was inferred as int "
+                     "from its first `return`, but this `return` gives %s", what);
+        snprintf(help, sizeof(help),
+                 "write the result type to keep the value (`-> %s`), or `-> int` to make the "
+                 "narrowing explicit", ret_type_spell(vt, got, sizeof(got)));
+        type_error_hint(msg, help, v->line, v->column);
+        free_type(vt);
+        return 0;
+    }
+    if (fits) {
+        if (vt) free_type(vt);
+        return 1;
+    }
+    const char* vs = (v->type == AST_ARRAY_LITERAL && v->child_count == 0)
+                         ? "the empty slice `[]`" : ret_type_spell(vt, got, sizeof(got));
+    if (own->position) {
+        char whole[240];
+        snprintf(msg, sizeof(msg),
+                 "Type mismatch in return: %s%s%s returns %s, and value %d here is %s, not %s",
+                 own->fn_name ? "'" : "", own->fn_name ? own->fn_name : "this closure",
+                 own->fn_name ? "'" : "", ret_type_spell(own->whole, whole, sizeof(whole)),
+                 own->position, vs, ret_type_spell(rt, want, sizeof(want)));
+    } else if (own->fn_name)
+        snprintf(msg, sizeof(msg),
+                 "Type mismatch in return: '%s' returns %s%s, but this value is %s",
+                 own->fn_name, ret_type_spell(rt, want, sizeof(want)),
+                 own->inferred ? " (inferred from its first `return`)" : "", vs);
+    else
+        snprintf(msg, sizeof(msg),
+                 "Type mismatch in return: this closure returns %s (the type of its first "
+                 "`return`, or string when any `return` gives one), but this value is %s",
+                 ret_type_spell(rt, want, sizeof(want)), vs);
+    if (!hint) {
+        snprintf(help, sizeof(help), "%s",
+                 !own->fn_name ? "return values of one type from the closure"
+                 : own->inferred ? "return a value of that type, or write the result type the "
+                                   "function means (`-> T`)"
+                                 : "return a value of the result type, or change the result type");
+        hint = help;
+    }
+    type_error_hint(msg, hint, v->line, v->column);
+    if (vt) free_type(vt);
+    return 0;
+}
+
+/* #2782: the values of the `return` statement `ret` against the result
+ * type `rt`: one value, or a multi-value return position by position into
+ * a tuple result. A `T!` result wraps what is returned into its own tuple,
+ * and is checked where that wrapping is decided. Returns 1 when all fit. */
+static int check_return_values(ASTNode* ret, Type* rt, const ReturnOwner* own,
+                               SymbolTable* table) {
+    if (!ret || !rt || ret->child_count == 0 || rt->kind == TYPE_VOID ||
+        rt->kind == TYPE_UNKNOWN || rt->is_result)
+        return 1;
+    if (ret->child_count > 1) {
+        if (rt->kind != TYPE_TUPLE || rt->tuple_count != ret->child_count) return 1;
+        int ok = 1;
+        for (int i = 0; i < ret->child_count; i++) {
+            ReturnOwner at = *own;
+            at.position = i + 1;
+            at.whole = rt;
+            ok = check_return_value(ret->children[i], rt->tuple_types[i], &at, table) && ok;
+        }
+        return ok;
+    }
+    ASTNode* v = ret->children[0];
+    if (!v || v->type == AST_PRINT_STATEMENT) return 1;
+    if (rt->kind == TYPE_TUPLE) {
+        /* One value into a tuple result: a tuple of the same arity is
+         * judged position by position. */
+        Type* vt = infer_type(v, table);
+        int ok = 1;
+        if (vt && vt->kind == TYPE_TUPLE && vt->tuple_count == rt->tuple_count) {
+            for (int i = 0; i < rt->tuple_count && ok; i++) {
+                const char* hint = NULL;
+                if (!return_value_fits(NULL, vt->tuple_types[i], rt->tuple_types[i], &hint))
+                    ok = 0;
+            }
+            if (!ok) {
+                char want[200], got[200], msg[600];
+                snprintf(msg, sizeof(msg), "Type mismatch in return: %s%s%s returns %s, but this "
+                         "value is %s", own->fn_name ? "'" : "",
+                         own->fn_name ? own->fn_name : "this closure", own->fn_name ? "'" : "",
+                         ret_type_spell(rt, want, sizeof(want)),
+                         ret_type_spell(vt, got, sizeof(got)));
+                type_error_hint(msg, "return a value of the result type, or change the result type",
+                                v->line, v->column);
+            }
+            free_type(vt);
+            return ok;
+        }
+        if (vt) free_type(vt);
+    }
+    return check_return_value(v, rt, own, table);
+}
+
+/* #2782: check the `return` statement `ret` against what it returns from
+ * (g_tc_return_owner): a function's result type, written or inferred, or,
+ * for a closure, the result its first value `return` gives it, as codegen's
+ * resolve_closure_return_type picks the C signature (a closure has no
+ * written result type). A trailing block's `return` is its function's.
+ * Returns 1 when every value fits. */
+static int check_return_statement(ASTNode* ret, SymbolTable* table) {
+    ASTNode* o = g_tc_return_owner;
+    ReturnOwner own = { o ? o->value : NULL, o ? o->type_inferred : 0, 0, NULL };
+    Type* rt = g_tc_return_type;
+    Type* made = NULL;
+    if (!rt && o && o->type == AST_CLOSURE) {
+        made = closure_literal_result_type(o);
+        rt = made;
+        own.fn_name = NULL;
+        own.inferred = 1;
+    }
+    int ok = rt ? check_return_values(ret, rt, &own, table) : 1;
+    if (made) free_type(made);
+    return ok;
+}
+
 int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
     if (!stmt) return 0;
 
@@ -8065,18 +8570,32 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
             }
 
             // Assign types to each variable and add to symbol table
+            int slots_ok = 1;
             for (int j = 0; j < var_count; j++) {
                 ASTNode* var = stmt->children[j];
                 if (var->node_type) free_type(var->node_type);
                 var->node_type = clone_type(rhs_type->tuple_types[j]);
                 // Don't register _ (discard) in symbol table
                 if (var->value && strcmp(var->value, "_") != 0) {
+                    /* #2762. A refused slot is bound already; the others are
+                     * still registered, so their uses report nothing more. */
+                    if (!destructure_slot_rebind(var, table)) {
+                        slots_ok = 0;
+                        continue;
+                    }
                     add_symbol(table, var->value, clone_type(var->node_type), 0, 0, 0);
+                    /* A slot is an inferred binding, as `a = ...` is: an
+                     * int one is a 32-bit int a wider value would
+                     * truncate (#698). */
+                    if (var->node_type->kind == TYPE_INT) {
+                        Symbol* s = lookup_symbol_local(table, var->value);
+                        if (s) s->type_inferred = 1;
+                    }
                 }
             }
 
             free_type(rhs_type);
-            return 1;
+            return slots_ok;
         }
 
         case AST_CONST_DECLARATION:
@@ -8128,7 +8647,9 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                 }
                 // Match-as-expression: typecheck as statement, then use its type
                 if (init->type == AST_MATCH_STATEMENT) {
+                    tc_push_value_match(init);   /* #2768 */
                     typecheck_statement(init, table);
+                    tc_pop_value_match();
                     check_match_value_arms(init, table);   /* #2743 */
                 } else {
                     typecheck_expression(init, table);
@@ -8210,7 +8731,29 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                     int is_struct_init = stmt->annotation &&
                                          strcmp(stmt->annotation, "global_var") == 0 &&
                                          struct_typed && is_const_struct_literal(init, table);
-                    if (!is_array_const && !is_struct_init) {
+                    /* #2800: an optional `var` is initialised with its own
+                     * constant: `none`, or a struct literal of constants
+                     * for a struct optional, which codegen wraps
+                     * (emit_module_global_vars). */
+                    if (!is_struct_init && stmt->annotation &&
+                        strcmp(stmt->annotation, "global_var") == 0 && dt &&
+                        dt->kind == TYPE_OPTIONAL) {
+                        Type* et = dt->element_type;
+                        is_struct_init = init->type == AST_NONE_LITERAL ||
+                                         (et && et->kind == TYPE_STRUCT && et->struct_name &&
+                                          init->value && strcmp(et->struct_name, init->value) == 0 &&
+                                          is_const_struct_literal(init, table));
+                    }
+                    /* #2807: so is an optional `const`'s `none`. */
+                    if (!is_struct_init && !stmt->annotation && dt && dt->kind == TYPE_OPTIONAL &&
+                        init->type == AST_NONE_LITERAL)
+                        is_struct_init = 1;
+                    /* #2767: `[]` into a `T[]` global is the empty slice, a
+                     * constant as `null` is. */
+                    int is_empty_slice = init->type == AST_ARRAY_LITERAL &&
+                                         init->child_count == 0 &&
+                                         type_is_slice(stmt->node_type);
+                    if (!is_array_const && !is_struct_init && !is_empty_slice) {
                         char msg[512];
                         if (stmt->annotation && strcmp(stmt->annotation, "global_var") == 0) {
                             /* #701: a module-level `var` lowers to a C file-scope
@@ -8545,7 +9088,18 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                                     have->kind == TYPE_ARRAY && want->kind == TYPE_ARRAY &&
                                     have->element_type && want->element_type &&
                                     have->element_type->kind != want->element_type->kind;
-                    if (scalar_fix || array_fix) {
+                    /* #2841: the first binding of a name copies an optional
+                     * or a sum the early pass took for what was last put in
+                     * it (`o2 = Circle {...}` on a `Shape?` local, then `c2 =
+                     * o2`, typed Circle). The value is the wider type, and
+                     * the binding is a new local: it takes the value's. */
+                    int first_binding = 1;
+                    for (SymbolTable* t = table; t && t->parent && first_binding; t = t->parent)
+                        if (stmt->value && lookup_symbol_local(t, stmt->value)) first_binding = 0;
+                    int wider_fix = first_binding && have->kind != TYPE_UNKNOWN &&
+                                    (want->kind == TYPE_OPTIONAL || want->kind == TYPE_SUM) &&
+                                    !is_assignable(want, have) && is_assignable(have, want);
+                    if (scalar_fix || array_fix || wider_fix) {
                         free_type(stmt->node_type);
                         stmt->node_type = clone_type(init_type);
                     }
@@ -8610,6 +9164,29 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                 /* #1286: `T[N]` / `null` into a `T[]` binding becomes a slice. */
                 if (stmt->child_count > 0 && stmt->node_type)
                     slice_coerce_slot(&stmt->children[0], stmt->node_type, 0);
+                /* #2785: so does one into a module-level `T[]` var that a
+                 * bare `name = value` assigns, with no local of the name in
+                 * scope. The binding writes the global, so it has the
+                 * global's type, as a re-bind of a local has the local's. */
+                if (stmt->child_count > 0) {
+                    ASTNode* gv = rebound_global_var(stmt, table);
+                    if (gv && type_is_slice(gv->node_type)) {
+                        int empty = init->type == AST_NULL_LITERAL ||
+                                    (init->type == AST_ARRAY_LITERAL && init->child_count == 0);
+                        if (!empty && !is_assignable(init_type, gv->node_type)) {
+                            char msg[256];
+                            snprintf(msg, sizeof(msg),
+                                     "Type mismatch in assignment to '%s': expected %s, got %s",
+                                     stmt->value, type_name(gv->node_type), type_name(init_type));
+                            free_type(init_type);
+                            type_error(msg, stmt->line, stmt->column);
+                            return 0;
+                        }
+                        slice_coerce_slot(&stmt->children[0], gv->node_type, 0);
+                        if (stmt->node_type) free_type(stmt->node_type);
+                        stmt->node_type = clone_type(gv->node_type);
+                    }
+                }
                 // #1044 enum-indexed array `[E]T`: the index type must be a real
                 // enum, and a literal initializer supplies one value per member,
                 // in declaration order (an empty `[]` zero-initialises every
@@ -9366,6 +9943,7 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
              * `is_string_seq_type` for the matching codegen
              * dispatch. */
             int is_seq_match = 0;
+            int value_match = tc_is_value_match(stmt);   /* #2768 */
             if (stmt->child_count > 0) {
                 typecheck_expression(stmt->children[0], table);
                 match_expr_type = stmt->children[0]->node_type;
@@ -9381,6 +9959,13 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
             if (!element_type) {
                 element_type = create_type(TYPE_INT);
             }
+
+            /* #2768: names every arm binds are declared before the match,
+             * where codegen declares them (hoist_common_vars), when an arm
+             * runs for every value, which the subject's type now says. Not
+             * for a match whose value is used: codegen keeps its arms' names
+             * in the arms. */
+            if (!value_match) declare_common_hoists(stmt, table);
 
             // #914 sum `match` bookkeeping: track variant coverage (for the
             // exhaustiveness check) and the scrutinee variable name (for
@@ -9643,7 +10228,14 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                     body->type != AST_ASSIGNMENT) {
                     typecheck_expression(body, arm_table);
                 } else {
+                    /* #2768: a match a value match's arm block yields is a
+                     * value match too, as codegen emits it. */
+                    ASTNode* yields = (value_match && body->type == AST_BLOCK)
+                                    ? match_arm_value(body) : NULL;
+                    int nested = yields && yields->type == AST_MATCH_STATEMENT;
+                    if (nested) tc_push_value_match(yields);
                     typecheck_statement(body, arm_table);
+                    if (nested) tc_pop_value_match();
                 }
 
                 // Propagate arm result type to the match node (for match-as-expression).
@@ -9832,9 +10424,11 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
             // the one value form the statement path owns.
             for (int i = 0; i < stmt->child_count; i++) {
                 coerce_bare_enum_member(stmt->children[i], g_tc_return_type, table);
-                if (stmt->children[i] && stmt->children[i]->type == AST_MATCH_STATEMENT)
+                if (stmt->children[i] && stmt->children[i]->type == AST_MATCH_STATEMENT) {
+                    tc_push_value_match(stmt->children[i]);   /* #2768 */
                     typecheck_node(stmt->children[i], table);
-                else
+                    tc_pop_value_match();
+                } else
                     typecheck_expression(stmt->children[i], table);
             }
             /* #2697, #2733: a return of something with no value, a call of
@@ -9887,6 +10481,11 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                 g_tc_return_type->kind != TYPE_TUPLE) {
                 type_erased_call(stmt->children[0], g_tc_return_type, table, 0);
             }
+            /* #2782: what is returned fits the result type, as a typed
+             * binding's value fits its annotation. Unchecked, every
+             * mismatch reached C: an int from `-> string`, a struct of
+             * another name. */
+            if (!check_return_statement(stmt, table)) return 0;
             return 1;
 
         default:
@@ -10681,11 +11280,13 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
              * with a type that belongs to the outer function. */
             Type* enclosing_ret = g_tc_return_type;
             ASTNode* enclosing_owner = g_tc_return_owner;
-            g_tc_return_type = NULL;
             /* A call's trailing block runs inline: a `return` in it returns
-             * from the function it is written in. */
-            if (!(expr->value && strcmp(expr->value, "trailing") == 0))
+             * from the function it is written in, and is checked against
+             * that function's result type (#2766). */
+            if (ast_is_own_function(expr)) {
+                g_tc_return_type = NULL;
                 g_tc_return_owner = expr;
+            }
             for (int i = 0; i < expr->child_count; i++) {
                 ASTNode* child = expr->children[i];
                 if (child && child->type == AST_BLOCK) {
@@ -11037,6 +11638,24 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                     return 1;
                 }
 
+                /* An optional holds its value or none: a field is read
+                 * through `?.`, after `!`, or where a none-check narrows
+                 * it. Read plainly, it reached C as a field of the
+                 * `ae_opt_<T>` wrapper (gcc: "'ae_opt_Shape' has no member
+                 * named 'r'", #2841 review). */
+                if (base_type && base_type->kind == TYPE_OPTIONAL && expr->value) {
+                    char error_msg[400];
+                    char tn[160];
+                    snprintf(error_msg, sizeof(error_msg),
+                             "Type '%s' has no field '%s': it is an optional, read the field "
+                             "with `?.` or unwrap it first (`!`, or a none-check that "
+                             "narrows it)",
+                             ret_type_spell(base_type, tn, sizeof(tn)), expr->value);
+                    free_type(base_type);
+                    type_error(error_msg, expr->line, expr->column);
+                    return 0;
+                }
+
                 // Reject member access on primitive types — catch the error in Aether, not C
                 if (base_type && (base_type->kind == TYPE_INT || base_type->kind == TYPE_FLOAT ||
                                   base_type->kind == TYPE_BOOL || base_type->kind == TYPE_STRING)) {
@@ -11322,6 +11941,18 @@ int typecheck_binary_expression(ASTNode* expr, SymbolTable* table) {
         if (l_arr && !left->node_type) left->node_type = clone_type(left_type);
         if (r_arr && !right->node_type) right->node_type = clone_type(right_type);
         if (operator == TOKEN_EQUALS || operator == TOKEN_NOT_EQUALS) {
+            /* #2789: `s == []` compares with the empty slice, which views no
+             * storage: its pointer is null, so it is `s == null`. */
+            if (l_arr && slice_empty_literal_to_null(&expr->children[1])) {
+                right = expr->children[1];
+                r_ptrish = 1;
+                changed = 1;
+            }
+            if (r_arr && slice_empty_literal_to_null(&expr->children[0])) {
+                left = expr->children[0];
+                l_ptrish = 1;
+                changed = 1;
+            }
             if (l_arr && r_ptrish) changed |= slice_coerce_to_ptr(&expr->children[0]);
             if (r_arr && l_ptrish) changed |= slice_coerce_to_ptr(&expr->children[1]);
         } else if (operator == TOKEN_PLUS || operator == TOKEN_MINUS) {
@@ -11794,7 +12425,7 @@ static int try_ufcs_rewrite(ASTNode* call, SymbolTable* table) {
  * makes void. */
 static int tc_has_return_value(ASTNode* node) {
     if (!node) return 0;
-    if (node->type == AST_CLOSURE || node->type == AST_QUOTE) return 0;
+    if (ast_is_own_function(node)) return 0;   /* a trailing block's are ours (#2766) */
     if (node->type == AST_RETURN_STATEMENT && node->child_count > 0 && node->children[0]) {
         if (node->children[0]->type == AST_PRINT_STATEMENT) return 0;
         return 1;
@@ -11936,24 +12567,120 @@ static ASTNode* tc_arm_value(ASTNode* body) {
     }
 }
 
-/* Does a `return` anywhere in `node` give a value? A nested closure's
- * returns are its own. */
-static int tc_body_yields(ASTNode* node, SymbolTable* table, StrMap* locals, int depth) {
-    if (!node || node->type == AST_CLOSURE || node->type == AST_QUOTE) return 0;
-    if (node->type == AST_RETURN_STATEMENT && node->child_count > 0 && node->children[0]) {
-        if (node->child_count > 1) return 1;   /* `return a, b` */
-        return tc_value_yields(node->children[0], table, locals, depth);
-    }
-    for (int i = 0; i < node->child_count; i++)
-        if (tc_body_yields(node->children[i], table, locals, depth)) return 1;
-    return 0;
-}
-
 static ASTNode* tc_closure_body(ASTNode* closure) {
     for (int i = closure ? closure->child_count - 1 : -1; i >= 0; i--)
         if (closure->children[i] && closure->children[i]->type == AST_BLOCK)
             return closure->children[i];
     return NULL;
+}
+
+/* Issue #333: the receiver of a member-access call's trailing block
+ * (typechecker.h). */
+const char* dsl_receiver_of_call(ASTNode* call, SymbolTable* table, char* buf, size_t cap) {
+    if (!call || !call->value || !buf || cap == 0) return NULL;
+    const char* dot = strchr(call->value, '.');
+    if (!dot) return NULL;
+    size_t prefix_len = (size_t)(dot - call->value);
+    if (prefix_len == 0 || prefix_len >= cap) return NULL;
+    memcpy(buf, call->value, prefix_len);
+    buf[prefix_len] = '\0';
+    /* Namespace receiver: directly visible. */
+    if (is_visible_namespace(buf, table)) return buf;
+    /* Typed-value receiver: the prefix is a local variable; its struct
+     * type's name. */
+    Symbol* recv_sym = lookup_symbol(table, buf);
+    if (!recv_sym || !recv_sym->type) return NULL;
+    const char* tn = base_type_name(recv_sym->type);
+    if (!tn || tn[0] == '\0' || strlen(tn) >= cap ||
+        strcmp(tn, "unknown") == 0 || strcmp(tn, "int") == 0 ||
+        strcmp(tn, "long") == 0 || strcmp(tn, "float") == 0 ||
+        strcmp(tn, "double") == 0 || strcmp(tn, "bool") == 0 ||
+        strcmp(tn, "string") == 0) return NULL;
+    memmove(buf, tn, strlen(tn) + 1);
+    return buf;
+}
+
+/* The receiver trailing block `block` of `call` resolves bare calls
+ * through: the one the checker stamped on it, else the call's. */
+static const char* tc_trailing_receiver(ASTNode* call, ASTNode* block, SymbolTable* table,
+                                        char* buf, size_t cap) {
+    if (block->annotation && strncmp(block->annotation, "dsl_recv:", 9) == 0)
+        return block->annotation[9] ? block->annotation + 9 : NULL;
+    return dsl_receiver_of_call(call, table, buf, cap);
+}
+
+static void tc_collect_locals(ASTNode* n, StrMap* locals);
+static void tc_declare_locals(ASTNode* n, SymbolTable* scope);
+
+/* Declare in `scope` every name the block `body` binds, with the type
+ * inference gave it where that is known (tc_declare_locals), else unknown:
+ * the names the checker's scope for the block holds. */
+static void tc_declare_block_names(ASTNode* body, SymbolTable* scope) {
+    if (!body || !scope) return;
+    tc_declare_locals(body, scope);
+    StrMap names;
+    strmap_init(&names);
+    tc_collect_locals(body, &names);
+    for (int i = 0; i < strmap_count(&names); i++) {
+        const char* nm = strmap_key_at(&names, i);
+        if (nm && !lookup_symbol_local(scope, nm))
+            add_symbol(scope, nm, create_type(TYPE_UNKNOWN), 0, 0, 0);
+    }
+    strmap_free(&names);
+}
+
+/* Does the bare call `name`, in the scope `table`, resolve through a DSL
+ * block's receiver, as lookup_symbol resolves it (#333)? Scope by scope from
+ * the innermost: one that binds the name keeps it, and a block's receiver
+ * that has a `<receiver>_<name>` takes it, ahead of anything further out:
+ * the function's own locals and the program's function of that name. */
+static int tc_receiver_resolves(SymbolTable* table, const char* name) {
+    if (!name || strchr(name, '.')) return 0;
+    for (SymbolTable* t = table; t; t = t->parent) {
+        if (lookup_symbol_local(t, name)) return 0;
+        if (t->dsl_receiver && t->dsl_receiver[0]) {
+            char rewritten[512];
+            snprintf(rewritten, sizeof(rewritten), "%.250s_%.250s", t->dsl_receiver, name);
+            for (SymbolTable* u = t; u; u = u->parent)
+                if (lookup_symbol_local(u, rewritten)) return 1;
+        }
+    }
+    return 0;
+}
+
+/* Does a `return` anywhere in `node` give a value? A nested closure's
+ * returns are its own; a call's trailing block runs inline, so its returns
+ * are the function's (#2766). A bare call in such a block resolves through
+ * the call's DSL receiver (`<receiver>_<name>`), as the checker resolves it
+ * in the block's scope (#333). */
+static int tc_body_yields(ASTNode* node, SymbolTable* table, StrMap* locals, int depth) {
+    if (!node || ast_is_own_function(node)) return 0;
+    if (node->type == AST_RETURN_STATEMENT && node->child_count > 0 && node->children[0]) {
+        if (node->child_count > 1) return 1;   /* `return a, b` */
+        return tc_value_yields(node->children[0], table, locals, depth);
+    }
+    for (int i = 0; i < node->child_count; i++) {
+        ASTNode* c = node->children[i];
+        if (node->type == AST_FUNCTION_CALL && ast_is_trailing_block(c) && table) {
+            char buf[256];
+            const char* recv = tc_trailing_receiver(node, c, table, buf, sizeof(buf));
+            if (recv) {
+                /* The block's scope, as the checker builds it: the
+                 * receiver, and the names the block binds (its own, ahead
+                 * of the receiver's functions; tc_receiver_resolves). */
+                ASTNode* body = tc_closure_body(c);
+                SymbolTable* scope = create_symbol_table(table);
+                scope->dsl_receiver = strdup(recv);
+                tc_declare_block_names(body, scope);
+                int y = tc_body_yields(body, scope, locals, depth);
+                free_symbol_table(scope);
+                if (y) return 1;
+                continue;
+            }
+        }
+        if (tc_body_yields(c, table, locals, depth)) return 1;
+    }
+    return 0;
 }
 
 /* Does a call through a value of function type `t` give a value? A typed C
@@ -12017,7 +12744,10 @@ static int tc_method_call_yields(const char* recv_name, const char* name, Type* 
  * speaks for what is not one of the program's functions. */
 static int tc_call_yields(ASTNode* call, SymbolTable* table, StrMap* locals, int depth) {
     if (!call->value || depth > 16) return 1;
-    if (locals && strmap_has(locals, call->value))
+    /* In a DSL block a bare call is the receiver's function before it is
+     * one of the definition's own names: the lookup below finds it. */
+    if (locals && strmap_has(locals, call->value) &&
+        !tc_receiver_resolves(table, call->value))
         return tc_bound_callee_yields(strmap_get(locals, call->value), table, locals, depth);
     /* #2744: a call the parser tagged UFCS (`mk(n).show()`), before the
      * checker rewrote it: the function the rewrite will pick, for the type
@@ -12221,6 +12951,24 @@ static void tc_yields_settle(ASTNode* program, SymbolTable* global) {
                 strmap_put(&g_tc_yields, defs[i]->value, TC_YIELDS_VALUE);
                 changed = 1;
             }
+        }
+    }
+
+    /* The answer is what the function's C type follows: a result type the
+     * inference pass gave a function that returns nothing (a call there it
+     * typed otherwise than the checker resolves it) declared `int f(...)`
+     * around the bare returns the checker makes of its returns. */
+    for (int i = 0; i < n; i++) {
+        ASTNode* d = defs[i];
+        Type* t = d->node_type;
+        if (!d->type_inferred || !t || t->kind == TYPE_VOID || t->kind == TYPE_UNKNOWN) continue;
+        if (strmap_get(&g_tc_yields, d->value) != TC_YIELDS_NONE) continue;
+        free_type(d->node_type);
+        d->node_type = create_type(TYPE_VOID);
+        Symbol* fs = lookup_symbol_local(global, d->value);
+        if (fs && fs->is_function) {
+            if (fs->type) free_type(fs->type);
+            fs->type = create_type(TYPE_VOID);
         }
     }
 
@@ -12704,6 +13452,7 @@ int typecheck_function_call(ASTNode* call, SymbolTable* table) {
         // known, else the erased-call default (#2054) -- the same rule as
         // the explicit call(f, ...) form, so both spellings type alike.
         set_node_type(call, call_builtin_result_type(call, table));
+        reject_untyped_erased_args(call, table);
         return 1;
     }
 
@@ -13205,64 +13954,31 @@ int typecheck_function_call(ASTNode* call, SymbolTable* table) {
     // closure_scope->dsl_receiver. Idempotent: existing annotations
     // (none today on AST_CLOSURE; `defer` factory annotations live
     // on AST_VARIABLE_DECLARATION) are preserved.
-    if (call->value && strchr(call->value, '.')) {
-        const char* dot = strchr(call->value, '.');
-        size_t prefix_len = (size_t)(dot - call->value);
-        if (prefix_len > 0 && prefix_len < 256) {
-            char prefix[256];
-            memcpy(prefix, call->value, prefix_len);
-            prefix[prefix_len] = '\0';
-
-            const char* dsl_recv_name = NULL;
-            char type_name_buf[256];
-
-            // Namespace receiver: directly visible.
-            if (is_visible_namespace(prefix, table)) {
-                dsl_recv_name = prefix;
-            } else {
-                // Typed-value receiver: prefix is a local variable;
-                // use its struct type's name.
-                Symbol* recv_sym = lookup_symbol(table, prefix);
-                if (recv_sym && recv_sym->type) {
-                    const char* tn = base_type_name(recv_sym->type);
-                    if (tn && tn[0] != '\0' &&
-                        strlen(tn) < sizeof(type_name_buf) &&
-                        strcmp(tn, "unknown") != 0 &&
-                        strcmp(tn, "int") != 0 &&
-                        strcmp(tn, "long") != 0 &&
-                        strcmp(tn, "float") != 0 &&
-                        strcmp(tn, "double") != 0 &&
-                        strcmp(tn, "bool") != 0 &&
-                        strcmp(tn, "string") != 0) {
-                        strncpy(type_name_buf, tn, sizeof(type_name_buf) - 1);
-                        type_name_buf[sizeof(type_name_buf) - 1] = '\0';
-                        dsl_recv_name = type_name_buf;
+    {
+        char recv_buf[256];
+        const char* dsl_recv_name = dsl_receiver_of_call(call, table, recv_buf,
+                                                         sizeof(recv_buf));
+        if (dsl_recv_name) {
+            for (int i = 0; i < call->child_count; i++) {
+                ASTNode* child = call->children[i];
+                if (child && child->type == AST_CLOSURE) {
+                    // Idempotent: skip if already stamped.
+                    if (child->annotation &&
+                        strncmp(child->annotation, "dsl_recv:", 9) == 0) {
+                        continue;
                     }
-                }
-            }
-
-            if (dsl_recv_name) {
-                for (int i = 0; i < call->child_count; i++) {
-                    ASTNode* child = call->children[i];
-                    if (child && child->type == AST_CLOSURE) {
-                        // Idempotent: skip if already stamped.
-                        if (child->annotation &&
-                            strncmp(child->annotation, "dsl_recv:", 9) == 0) {
-                            continue;
-                        }
-                        size_t a_len = 9 + strlen(dsl_recv_name) + 1;
-                        char* ann = malloc(a_len);
-                        if (ann) {
-                            snprintf(ann, a_len, "dsl_recv:%s", dsl_recv_name);
-                            // Defensive: if annotation is unset, set it.
-                            // If it's set to something else (no current
-                            // user of AST_CLOSURE annotation, but be safe),
-                            // leave it alone so we don't stomp.
-                            if (!child->annotation) {
-                                child->annotation = ann;
-                            } else {
-                                free(ann);
-                            }
+                    size_t a_len = 9 + strlen(dsl_recv_name) + 1;
+                    char* ann = malloc(a_len);
+                    if (ann) {
+                        snprintf(ann, a_len, "dsl_recv:%s", dsl_recv_name);
+                        // Defensive: if annotation is unset, set it.
+                        // If it's set to something else (no current
+                        // user of AST_CLOSURE annotation, but be safe),
+                        // leave it alone so we don't stomp.
+                        if (!child->annotation) {
+                            child->annotation = ann;
+                        } else {
+                            free(ann);
                         }
                     }
                 }
@@ -13578,6 +14294,7 @@ int typecheck_function_call(ASTNode* call, SymbolTable* table) {
     if (call->value && strcmp(call->value, "call") == 0) {
         set_node_type(call, call_builtin_result_type(call, table));
         reject_non_closure_callee(call, table);
+        reject_untyped_erased_args(call, table);
     }
 
     // select() infers its type from the first named arg's value

@@ -345,6 +345,10 @@ typedef struct {
     // #2514: when non-NULL, the result variable is a promoted capture of
     // this type: each value arm stores into its cell (emit_cell_store).
     Type* match_result_cell;
+    // When non-NULL, the result is an optional of this type: each value arm
+    // is wrapped into it as a value bound to it would be (a bare value, or
+    // `none`), and a `string?` result's ownership flag follows the arm.
+    Type* match_result_opt;
 
     // #2054: set while the body of a string-returning closure is emitted.
     // A closure is called through a value its caller cannot classify, so
@@ -400,11 +404,17 @@ typedef struct {
     int builder_func_count;
     int builder_func_capacity;
     int in_trailing_block;  // >0 when generating code inside a trailing block
+    /* #2791: set by emit_builder_block_body for the trailing block it is about
+     * to emit: the builder call's config variable and the function that
+     * releases it, so a way out of the block before the builder runs
+     * releases it. NULL otherwise; emit_trailing_block_body consumes it. */
+    const char* builder_cfg_var;
+    const char* builder_cfg_release;
 
     // The call whose result value its expression statement throws away, set
     // just before the statement emits it. A VOID/discarded parent call still
     // drains its heap-returning inline args (the arg-temp wrap emits a
-    // void-yielding `({ T t=...; call(...); free(t); })`). It is that call
+    // void-yielding `(t = ..., call(...), free(t))`). It is that call
     // node's alone: one emitted ahead of it, an argument or an operand the
     // evaluation-order wrapper hoists, is a different node and keeps its
     // value. A flag consumed by the first call emitted went to the hoisted
@@ -478,6 +488,8 @@ typedef struct {
     struct OrderFnEffects* order_fn_effects;
     int    order_fn_effect_count;
     int    order_fn_effect_capacity;
+    int*   order_fn_index;       /* their entries by definition, hashed */
+    int    order_fn_index_cap;
 
     // Closure support: track closures for hoisted C function generation
     int closure_counter;    // unique ID for closure env structs and functions
@@ -682,6 +694,22 @@ typedef struct {
      * an enforced block, or out of a trusted call inside one, must not leave
      * the depth where the panic found it. */
     int uses_sandbox;
+    /* #2765: the temporaries an expression needs, declared ahead of the
+     * statement that holds it, so the expression is a C comma expression:
+     * a GNU statement expression `({ ... })` is not C, and cl.exe rejects
+     * it. They are declared ahead of the outermost statement
+     * generate_statement is emitting, whose text starts at hoist_start in
+     * `output` (-1 while none is, or when the output cannot be read back
+     * and rewritten); hoist_decls holds the declarations collected for it.
+     * hoist_output_ok is 0 until probed, 1 when `output` can be rewritten,
+     * -1 when it cannot (a temporary is then a statement-expression local,
+     * which only a GCC-compatible compiler takes). */
+    int hoist_depth;
+    long hoist_start;
+    char* hoist_decls;
+    size_t hoist_decls_len;
+    size_t hoist_decls_cap;
+    int hoist_output_ok;
 } CodeGenerator;
 
 // Code generation functions

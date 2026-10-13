@@ -19,6 +19,11 @@
 # (C4013 an undeclared function, C4024 and C4133 an argument of the wrong type,
 # C4047 the wrong level of indirection, C4090 a dropped qualifier) are errors;
 # the rest of /W3 is printed and allowed.
+#
+# The programs of tests 5-21 are tests/regression/test_issue<n>_*.ae, which
+# the .ae sweep runs on the GCC path. Under gcc they are also built and run
+# with AETHER_GCC_COMPAT forced to 0, when build/ae is there, so the plain C
+# forms are checked for what they compute, not only that they compile.
 set -e
 
 cd "$(dirname "$0")/../.."
@@ -147,9 +152,8 @@ fi
 # Test 3: a closure over arrays a `try` body writes (#2691). On this path the
 # closure constructor takes its captures as parameters, and an array written
 # in a `try` body has volatile elements (#2618): a parameter without the
-# qualifier dropped it, which MSVC reports as C4090. The arrays are int ones:
-# storing a string into an array element is still a GNU statement expression
-# on this path, which cl.exe cannot compile (#2765).
+# qualifier dropped it, which MSVC reports as C4090. The same over a string
+# array is test 4.
 cat > "$TMP/closure.ae" <<'AEOF'
 capture(k: int) -> fn {
     nums = [1, 2]
@@ -183,6 +187,156 @@ if [ -n "$use_gcc" ]; then
     echo "  [PASS] A closure over try-written arrays syntax-checks under C11"
 fi
 [ -z "$use_cl" ] || cl_compile closure "A closure over try-written arrays"
+
+# strict_c11 <name> <what>: <name>_nogcc.c is C11 with no GNU extension in
+# it. A statement expression `({ ... })` is named by gcc under -pedantic; an
+# __auto_type is not, so the generated C is searched for one outside the
+# preprocessor lines that spell the GCC path (the _AE_SEQ_* macros). The
+# warnings -pedantic gives the runtime headers are not this test's.
+strict_c11() {
+    # shellcheck disable=SC2086
+    if ! gcc -fsyntax-only "$TMP/$1_nogcc.c" $INC $STRICT_POSIX -std=c11 -pedantic \
+            -Wno-unused-label -Werror=implicit-function-declaration \
+            -Werror=incompatible-pointer-types >"$TMP/$1.log" 2>&1; then
+        sed 's/^/    /' "$TMP/$1.log" | grep -v "^    In file included" | head -30
+        echo "  [FAIL] $2 does not compile as C11"
+        exit 1
+    fi
+    if grep -q "braced-groups" "$TMP/$1.log"; then
+        grep -B2 -A3 "braced-groups" "$TMP/$1.log" | sed 's/^/    /' | head -30
+        echo "  [FAIL] $2 has a GNU statement expression on the non-GCC path"
+        exit 1
+    fi
+    if grep -n "__auto_type" "$TMP/$1.c" | grep -v "^[0-9]*:#" | head -5 | sed 's/^/    /' | grep .; then
+        echo "  [FAIL] $2 has __auto_type on the non-GCC path"
+        exit 1
+    fi
+    echo "  [PASS] $2 compiles as strict C11"
+}
+
+# Test 4 (#2765): the program of the issue. A string stored into an element
+# of an array a `try` body writes, read through a closure: the element store
+# takes the string through a temporary, a GNU statement expression on this
+# path until then, which cl.exe rejects (C2059 at the `{`).
+cat > "$TMP/closure_str.ae" <<'AEOF'
+import std.string
+
+capture(w: string) -> fn {
+    names = ["lit", "lit"]
+    try {
+        names[0] = string.concat(w, "a")
+        panic("stop")
+    } catch e {
+        println(e)
+    }
+    f = || {
+        return string.length(names[0])
+    }
+    return f
+}
+
+main() {
+    g = capture("w")
+    int n = call(g)
+    println("${n}")
+}
+AEOF
+generate closure_str
+[ -z "$use_gcc" ] || strict_c11 closure_str "A string stored into a try-written array element"
+[ -z "$use_cl" ] || cl_compile closure_str "A string stored into a try-written array element"
+
+# Tests 5-18: every construct that needs a temporary in the middle of an
+# expression, one program per family, each of which the .ae sweep runs on the
+# GCC path and checks. All of them were GNU statement expressions here (#2765,
+# #2798), and left_to_right read operands out of order (#2813).
+#   string_slots      a string taken into an owning slot: an element of a
+#                     string array, a binding through a call that hands its
+#                     argument back, a returned `if` view, a `string?` or a
+#                     tuple of them returned, a container store, a release
+#                     of a local, a field and an element
+#   call_temps        an argument freed after its call (a value call, a void
+#                     call, a closure literal, a call that may hand it back,
+#                     an unannotated callee), a tuple view of a temporary, an
+#                     interpolation value, a compared heap operand, `string?`
+#                     comparisons, a sequence literal, a closure stored in a
+#                     list, heap.free of an @observable box
+#   operand_order     operands evaluated ahead in source order (#2478), in a
+#                     call, an operation, a struct literal, an array literal
+#                     and a message sent, operands narrower than int among
+#                     them (their temporary has the type C promotes them to)
+#   optionals         `f() or v`, `o!`, `o ?? d`, `o?.f`, `t!` and bit_set
+#                     subsets
+#   struct_values     a struct moved out of a local (also one a `try` writes),
+#                     struct literals that take their fields, array fields
+#                     filled from arrays, a condition's struct temporary
+#   statement_values  an `or` with a block, a propagating `!` and a call with
+#                     a trailing block, run ahead of their statement
+#   helper_names      the struct helpers the forms above call, beside functions
+#                     of the program named as those helpers once were
+#   left_to_right     operands a later call writes, narrow globals and fields
+#                     reached through pointers among them, read before it in
+#                     interpolations, arguments, literals and operations (#2813)
+#   statement_constructs_anywhere
+#                     the constructs of statement_values after other operands,
+#                     behind `&&` and `||`, and in loop conditions (#2798)
+#   statement_constructs_in_parts
+#                     the same in parts that run on a test, compound
+#                     assignments, fields, `for` heads, `match` arms, trailing
+#                     calls' arguments, beside statements' struct temporaries
+#   actor_state_initializer_type
+#                     an actor state initialized by an `or`, and used in a
+#                     handler beside one (#2821, #2798)
+#   operands_ahead    operands evaluated ahead of such a construct as the call
+#                     they go to takes them (a field it frees, a function
+#                     named as a value), and a builder's arguments after its
+#                     block (#2798)
+#   call_effects      calls that read through a pointer they were not handed,
+#                     and mutually recursive writers, ordered (#2813)
+#   handover_at_call  a field a call frees or keeps, read ahead of a construct,
+#                     handed over at the call: none when the construct leaves
+#                     the function first (#2798, #2843)
+#   fallible_error_slots
+#                     a fallible's error slot freed by the `or`, the
+#                     destructure and `x!`, a propagation's copy, a tuple
+#                     nothing binds (#2863, #2864, #2865)
+#   builder_call_statements
+#                     a builder's block and arguments run ahead of the
+#                     statement that stores or throws away its value (#2866)
+#   closure_array_envs
+#                     an `fn[N]` local's closures released at its scope exit
+#                     (#2868)
+PROGS="2765_string_slots 2765_call_temps 2765_operand_order 2765_optionals 2765_struct_values
+    2765_statement_values 2765_helper_names 2813_left_to_right 2798_statement_constructs_anywhere
+    2798_statement_constructs_in_parts 2821_actor_state_initializer_type
+    2798_operands_ahead 2813_call_effects 2798_handover_at_call 2863_fallible_error_slots
+    2866_builder_call_statements 2868_closure_array_envs"
+for issue_prog in $PROGS; do
+    prog="${issue_prog#*_}"
+    cp "tests/regression/test_issue$issue_prog.ae" "$TMP/$prog.ae"
+    generate "$prog"
+    [ -z "$use_gcc" ] || strict_c11 "$prog" "Temporaries: $prog"
+    [ -z "$use_cl" ] || cl_compile "$prog" "Temporaries: $prog"
+done
+
+# The same programs built and run on this path, AETHER_GCC_COMPAT forced to 0
+# by the C compiler's command line, so what the comma expressions compute is
+# checked as well as that they compile. Needs `ae` (make ae stdlib) and gcc.
+AE="./build/ae"
+[ -f "$AE" ] || [ ! -f "$AE.exe" ] || AE="$AE.exe"
+if [ -n "$use_gcc" ] && [ -f "$AE" ]; then
+    for issue_prog in $PROGS; do
+        prog="${issue_prog#*_}"
+        if ! AE_CC="gcc -DAETHER_GCC_COMPAT=0" "$AE" run "tests/regression/test_issue$issue_prog.ae" \
+                >"$TMP/$prog.run" 2>&1 || [ "$(tail -n 1 "$TMP/$prog.run" | tr -d '\r')" != "ok" ]; then
+            sed 's/^/    /' "$TMP/$prog.run" | tail -20
+            echo "  [FAIL] Temporaries: $prog does not run right without GCC extensions"
+            exit 1
+        fi
+        echo "  [PASS] Temporaries: $prog runs right without GCC extensions"
+    done
+elif [ -n "$use_gcc" ]; then
+    echo "  [SKIP] running the programs without GCC extensions: $AE not built"
+fi
 
 echo ""
 echo "=== All MSVC compat tests passed ==="

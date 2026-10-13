@@ -487,7 +487,10 @@ ASTNode* optimize_constant_folding(ASTNode* node) {
         is_string_literal(node->children[0])) {
         int is_array = node->annotation &&
                        strcmp(node->annotation, "array_const") == 0;
-        if (!is_array &&
+        /* #2800: a `string?` var initialised with a string stays a
+         * `string?`; its value is wrapped where it is emitted. */
+        int is_optional = node->node_type && node->node_type->kind == TYPE_OPTIONAL;
+        if (!is_array && !is_optional &&
             (!node->node_type || node->node_type->kind != TYPE_STRING)) {
             if (node->node_type) free_type(node->node_type);
             node->node_type = create_type(TYPE_STRING);

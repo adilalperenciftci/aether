@@ -6,7 +6,7 @@
  * shape flows into a slot of the other, the typechecker wraps the
  * expression in an explicit coercion node:
  *
- *   `T[N]` / `null`  ->  `T[]` slot      AST_SLICE_FROM_ARRAY (len = N / 0)
+ *   `T[N]` / `null` / `[]`  ->  `T[]` slot  AST_SLICE_FROM_ARRAY (len = N / 0 / 0)
  *   `T[]`            ->  raw-pointer slot AST_SLICE_TO_PTR    (`.ptr`)
  *
  * A raw-pointer slot is a `ptr`, or a `T[]` parameter of an extern C
@@ -32,5 +32,17 @@ int slice_coerce_to_ptr(ASTNode** slot);
 
 /* Is `n` one of the two coercion nodes? */
 int slice_is_coercion_node(const ASTNode* n);
+
+/* #2789: replace `*slot`, when it is the empty literal `[]`, with `null`:
+ * the empty slice views no storage, so where its pointer is what is read (a
+ * raw-pointer slot, a comparison with a slice) it is the null pointer.
+ * Returns 1 if replaced. */
+int slice_empty_literal_to_null(ASTNode** slot);
+
+/* #2782: the slot holding the value a `match` arm gives, for a match whose
+ * value is used: the arm's expression, or a block arm's last expression.
+ * NULL when the arm gives none; when that is a `match` of its own, it is
+ * set in `*nested` instead. */
+ASTNode** match_arm_value_slot(ASTNode* arm, ASTNode** nested);
 
 #endif

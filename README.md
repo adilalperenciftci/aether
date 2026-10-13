@@ -228,7 +228,7 @@ An MSYS-style path (`/mingw64/...`) will not work: a compiled Aether program is 
 
 Note also that a source build without OpenSSL has no TLS backend linked at all; such a program must `import std.cryptography.tls13_client` to get HTTPS. The error message says so if you forget.
 
-**Native MSVC (cl.exe / nmake):** not currently supported as a full build path, tracker [#99](https://github.com/aether-lang-dev/aether/issues/99). The MSVC matrix job in CI verifies our public headers parse under `cl.exe`, and that the C the compiler writes for a few programs compiles under it (`make test-msvc-compat` runs the same check locally), so a future native MSVC port stays feasible, but `make` (the build system itself) requires GNU make. The MSYS2 MinGW build above is the supported source-build path for Windows today.
+**Native MSVC (cl.exe / nmake):** not currently supported as a full build path, tracker [#99](https://github.com/aether-lang-dev/aether/issues/99). The MSVC matrix job in CI verifies our public headers parse under `cl.exe`, and that the C the compiler writes for a set of programs compiles under it (`make test-msvc-compat` runs the same check locally; that C has no GNU statement expressions, #2765), so a future native MSVC port stays feasible, but `make` (the build system itself) requires GNU make. The MSYS2 MinGW build above is the supported source-build path for Windows today.
 
 ## Project Structure
 

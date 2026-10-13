@@ -1,0 +1,64 @@
+// Regression (#2833): a tuple literal that becomes an optional keeps its
+// elements.
+//
+// emit_optional_coerced wrapped the value as `.val = <expression>`, and a
+// tuple literal has no C expression of its own: its elements' text ran
+// together, so `(3, 4)` became `34` (printed as `34 0`) and `(s, 1)` became
+// `s1`, an undeclared name. The tuple is its compound literal now, each
+// element cast to its slot's type, as an extern's tuple argument is
+// packed (#1033): in a binding, a struct literal, a field store and an
+// argument.
+
+extern exit(code: int)
+
+struct Box {
+    t: (int, int)?
+}
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+digits(o: (int, int)?) -> int {
+    match o {
+        some(v) -> {
+            a, b = v
+            return a * 10 + b
+        }
+        none -> {
+            return -1
+        }
+    }
+}
+
+label(o: (string, int)?) -> string {
+    match o {
+        some(v) -> {
+            name, n = v
+            return "${name}${n}"
+        }
+        none -> {
+            return "none"
+        }
+    }
+}
+
+main() {
+    println("=== test_optional_tuple_literal ===")
+    let t: (int, int)? = (3, 4)
+    check(digits(t) == 34, "a binding (${digits(t)})")
+    b = Box { t: (5, 6) }
+    check(digits(b.t) == 56, "a struct literal (${digits(b.t)})")
+    b.t = (7, 8)
+    check(digits(b.t) == 78, "a field store (${digits(b.t)})")
+    b.t = none
+    check(digits(b.t) == -1, "a field store of none")
+    check(digits((1, 2)) == 12, "an argument (${digits((1, 2))})")
+    s = "x"
+    let u: (string, int)? = (s, 1)
+    check(label(u) == "x1", "a tuple with a string (${label(u)})")
+    println("=== test_optional_tuple_literal passed ===")
+}

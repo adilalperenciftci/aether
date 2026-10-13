@@ -1,0 +1,41 @@
+// #2822: a struct field of an optional type whose value owns memory has no
+// ownership yet, so it is refused, however the memory is reached: a
+// string, a struct holding one, an array of strings or closures held by a
+// struct, a tuple with a string. Must not compile.
+struct Named {
+    name: string
+}
+
+struct Bag {
+    names: string[2]
+}
+
+struct Calls {
+    cbs: fn[2]
+}
+
+struct Tag {
+    label: string?
+}
+
+struct Held {
+    owner: Named?
+}
+
+struct Holder {
+    bag: Bag?
+}
+
+struct CallHolder {
+    calls: Calls?
+}
+
+struct Pair {
+    t: (string, int)?
+}
+
+main() {
+    t = Tag { label: "x" }
+    h = Held { owner: none }
+    println("${t.label ?? "-"} ${h.owner == none}")
+}

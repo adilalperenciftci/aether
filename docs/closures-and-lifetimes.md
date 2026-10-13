@@ -233,7 +233,18 @@ lifetime"; shape by shape:
   (#2668; before, the source stopped owning at the copy and the copy never
   started, which leaked an env per pass of a loop that kept its closure in
   an outer local). A parameter a callee only aliases (`a = cb`) is no keep,
-  so the caller releases what it passed (#2670). A return, an argument to an extern parameter not marked
+  so the caller releases what it passed (#2670). A local bound to a call of
+  a function that hands its argument back as it is (`keep(f) -> fn { return
+  f }`, `return keep(f)`, or `return f, 5` for a tuple slot) is such an alias
+  too: `g2 = keep(g)` and `g2, n = pair(g)` retain, and the argument is judged
+  where the call's value goes, as the name would be (#2763; before, `g`
+  stopped owning at the call and `g2` never started). The argument is the
+  one at the returned parameter's position, where a literal or `_` pattern
+  parameter takes a position too. `h = keep(o.cb)` retains as `h = o.cb`
+  does. A closure cell is the exception: a call lends its closure with a
+  reference that ends with the call, and the call may rebind the cell, so
+  a cell keeps counting a hand-back as a keep and pins its closures there
+  (#2788). A return, an argument to an extern parameter not marked
   `@noescape` or to a function that keeps it, or a binding to anything
   else leaves the env to the value's holder. A field's name is not a use
   of a local spelled the same (`Hooks { set: f }`, `h.set` beside a local
@@ -248,7 +259,9 @@ lifetime"; shape by shape:
 - **Returned to a caller.** A function whose every `return` hands back a
   closure nothing else holds (a closure literal, a local whose only
   escape is the return, a local bound to another closure, which took a
-  reference of its own, #2671, or another such function's result) gives its
+  reference of its own, #2671, another such function's result, or such a
+  local handed back through a function that returns its argument,
+  `return keep(g)`, #2763) gives its
   reference to the caller, and a local bound to its result is freed like
   a local bound to a literal (#2494). Passed to a call whose parameter
   keeps nothing, anywhere in an expression (`x = take(make_counter())`),
@@ -304,6 +317,30 @@ extern's strdup) becomes a refcounted copy on the way in, so the cell's
 last release frees every value it was ever given; a literal is stored as
 it is and never freed.
 
+An optional a closure writes (`let a: int? = 3` then `|| { a = 5 }`) is a
+cell like any other (#2795): its first binding makes the cell, holding
+`none` until it stores the value, and every store takes the value as the
+optional, a bare value wrapped, whether by `a = v` or a tuple destructure
+slot. A `string?` cell owns its string as a string cell does: a store takes
+a string of its own (a fresh one adopted, a borrowed one copied) and gives
+back the one it held, and a `string?` parameter's cell takes a reference
+or a copy of its own on entry. What a local takes out of a `string?` cell
+(`v = s ?? ""`, `v = s!`, a `some(v)` binding) is a copy of its own, as
+what it takes out of a `string` cell is, so it outlives the cell's next
+store. A string stored into a `ptr` cell (`|| { x = s }`) reaches C as its
+characters, as a plain string stored by the cell's own scope does: the
+cell keeps a string of its own beside the pointer, given back at the next
+string store or the cell's last release, so the characters live as long as
+the variable, not as long as the closure that stored them (#2797). A store
+of any other pointer leaves that string where it is until then.
+
+A module-level `var` is never a cell. A closure that reads or writes one
+reaches the global itself, so a write in the closure is seen by every
+function, and a write in the enclosing function is seen by the closure
+(#2805). A declaration in a function (`int n = 5`, `let n = 5`) writes
+the global as `n = 5` does, so only a parameter of the same name shadows
+it, and that parameter is captured as any other.
+
 A `fn` variable a closure writes is a closure cell, and it holds a
 reference of its own to the closure in it (#2755), as a field, a global or
 actor state does (#2525). Its first value and every store are taken: a
@@ -355,6 +392,14 @@ assignment is then a fresh local of its own (#2189). Before, only the
 enclosing scope's top-level statements and trailing blocks counted, so
 `c = 0; f = || { c = 5 }` in a loop body gave the closure a fresh `c` and the
 loop's `c` never changed (a closure that also read `c` captured it already).
+A tuple destructure declares each name it binds as `name = ...` does, on
+either side: `a, b = three()` before the closure is a binding of `a` and `b`
+the closure's `a, b = two()` writes, and so is `a = 1; b = 2` (#2762). Before,
+only a single `name = ...` counted as a binding there, so a closure that
+destructured into names a destructure had bound got locals of its own.
+Each slot that writes an outer local is checked as `a = 7` there is: the
+local keeps its type, so a slot of another kind is a compile error at the
+slot (see "A local has one type" in the language reference).
 A `while` body's variable is one for the function, so its cell is one across
 the passes, as above; a `for` body's or a branch's, used only inside it, is
 the body's own, so its cell is made at the declaration and released at the
@@ -449,6 +494,20 @@ erasure and its undoing are both ordinary assignments.
 
 L2's other half — an `if`-expression choosing between two named functions —
 still emits C that does not compile; that is #2055.
+
+The arguments have the same problem the other way: the closure's parameter
+types are gone too. `none` and `[]` are built as a value of the slot they
+are given to, and through an erased call there is no slot type to build
+them as, so `call(f, none)` and `f([])` on a bare `fn` are refused at the
+argument. Bind the value to a local of the parameter's type and pass that:
+
+```aether,fragment
+let o: string? = none
+r = call(f, o)
+```
+
+A bare value or a variant given to an optional or sum parameter through an
+erased call is still passed unwrapped; that is #2847.
 
 **Proper fix:** parameterised closure types (`fn[T]`, like Rust's
 `Fn(i32) -> i32`), so the signature survives the boundary and no annotation

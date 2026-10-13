@@ -1,0 +1,119 @@
+// Regression (#2815): returning `w ?? d` or `w!` for a `string?` local
+// that owns its string hands the caller a string that outlives the call.
+//
+// The return read the string out of `w`, then `w`'s scope-exit free gave
+// it back, and the freed pointer was returned: once other strings reused
+// the block, the caller read their bytes. The return classifier did not
+// count the unwrap as a string the function must hand over, so the
+// function was not even heap-returning. Now it is (opt_string_local_unwrap)
+// and the return takes a copy of the local's string, as the uniform heap
+// return takes one of any borrowed value, while the local frees its own;
+// a fresh default is adopted as it is. A tuple position does the same.
+//
+// After each call, 50 fresh strings (`burn`) reuse what was freed, so a
+// dead return reads another string. The leak check runs where the heap
+// count is exact (mem.heap_in_use_exact): after a warm-up, some window of
+// the same work grows by exactly 0 (mem.steady_growth).
+
+import std.mem
+import std.string
+
+extern exit(code: int)
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+burn() -> int {
+    total = 0
+    i = 0
+    while i < 50 {
+        t = string.concat("burn-burn-", "burn-burn-burn")
+        total = total + string.length(t)
+        i = i + 1
+    }
+    return total
+}
+
+word(n: int) -> string {
+    let w: string? = none
+    if n == 2 {
+        w = "two ${n}"
+    }
+    return w ?? "none"
+}
+
+forced(n: int) -> string {
+    let w: string? = none
+    w = "forced ${n}"
+    return w!
+}
+
+fresh_default(n: int) -> string {
+    let w: string? = none
+    if n == 2 {
+        w = "two ${n}"
+    }
+    return w ?? string.concat("dflt", "${n}")
+}
+
+in_tuple(n: int) -> (string, int) {
+    let w: string? = none
+    if n == 2 {
+        w = "pair ${n}"
+    }
+    return w ?? "none", n
+}
+
+// A parameter's string is the caller's: returned as it is.
+param_or(o: string?) -> string {
+    return o ?? "none"
+}
+
+fn round() {
+    i = 0
+    while i < 20 {
+        a = word(2)
+        b = word(1)
+        c = forced(i)
+        d = fresh_default(2)
+        e = fresh_default(1)
+        f, _ = in_tuple(2)
+        word(2)
+        forced(i)
+        fresh_default(1)
+        check(string.length(a) + string.length(b) + string.length(d) + string.length(e) +
+            string.length(f) == 25 && string.length(c) > 7, "the strings returned")
+        i = i + 1
+    }
+}
+
+main() {
+    println("=== test_optional_local_return_survives ===")
+    a = word(2)
+    b = word(1)
+    c = forced(3)
+    d = fresh_default(2)
+    e = fresh_default(1)
+    f, n = in_tuple(2)
+    let mine: string? = string.concat("own", "ed")
+    g = param_or(mine)
+    burn()
+    check(a == "two 2" && b == "none", "w ?? d after the call ([${a}] [${b}])")
+    check(c == "forced 3", "w! after the call ([${c}])")
+    check(d == "two 2" && e == "dflt1", "w ?? a fresh default after the call ([${d}] [${e}])")
+    check(f == "pair 2" && n == 2, "w ?? d in a tuple after the call ([${f}])")
+    check(g == "owned", "a parameter's string returned ([${g}])")
+    check("[${word(2)}] [${word(1)}]" == "[two 2] [none]", "returns used in place")
+    round()
+    if mem.heap_in_use_exact() {
+        grown = mem.steady_growth(|| {
+                round()
+            }, 5)
+        check(grown == 0, "20 rounds of returns grew the heap by ${grown} bytes in every run")
+    }
+    println("=== test_optional_local_return_survives passed ===")
+}

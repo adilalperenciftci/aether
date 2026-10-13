@@ -1,4 +1,11 @@
 import std.http
+
 @no_net
-fetch(u: string) -> string { return http.get(u) }
-main() { println(fetch("http://x")) }
+fetch(u: string) -> (string, string) {
+    return http.get(u)
+}
+
+main() {
+    body, err = fetch("http://x")
+    println("${body} ${err}")
+}

@@ -1,0 +1,96 @@
+// Regression (#2823): a function returning the `some(s)` binding of a match on a
+// `string?` that hands the binding a string of its own (a closure cell's
+// copy, or the string a `string?` function handed over, #2750) gives the
+// caller that string, which the caller frees.
+//
+// `return s` handed the arm's string over, but the function's other
+// return was a literal, so the heap-return classifier
+// (walk_returns_for_heap_check) took the function for one returning
+// borrowed strings, and the caller, bound or not, never freed what it got:
+// 37 bytes a call. The owned binding is heap evidence now, as a `catch`
+// binding is, so the function returns heap strings and its literal return
+// is copied.
+//
+// The leak check runs where the heap count is exact (mem.heap_in_use_exact):
+// after a warm-up, some window of the same work grows by exactly 0
+// (mem.steady_growth).
+
+import std.mem
+import std.string
+
+extern exit(code: int)
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+from_cell(p: string, give: bool) -> string {
+    let gname: string? = none
+    set = || {
+        gname = string.concat(p, "-cell")
+    }
+    if give {
+        set()
+    }
+    match gname {
+        some(s) -> {
+            return s
+        }
+        none -> {
+            return "none"
+        }
+    }
+}
+
+lookup(p: string, give: bool) -> string? {
+    if give {
+        return string.concat(p, "-call")
+    }
+    return none
+}
+
+from_call(p: string, give: bool) -> string {
+    match lookup(p, give) {
+        some(s) -> {
+            return s
+        }
+        none -> {
+            return "none"
+        }
+    }
+}
+
+fn round(p: string) {
+    i = 0
+    while i < 20 {
+        from_cell(p, true)
+        from_cell(p, false)
+        from_call(p, true)
+        from_call(p, false)
+        a = from_cell(p, true)
+        b = from_cell(p, false)
+        c = from_call(p, true)
+        d = from_call(p, false)
+        check(string.length(a) + string.length(b) + string.length(c) + string.length(d) == 22,
+            "the strings returned (${a} ${b} ${c} ${d})")
+        i = i + 1
+    }
+}
+
+main() {
+    println("=== test_some_binding_return_owned ===")
+    p = string.concat("ab", "")
+    check(from_cell(p, true) == "ab-cell" && from_cell(p, false) == "none", "from a cell")
+    check(from_call(p, true) == "ab-call" && from_call(p, false) == "none", "from a call")
+    round(p)
+    if mem.heap_in_use_exact() {
+        grown = mem.steady_growth(|| {
+                round(p)
+            }, 5)
+        check(grown == 0, "20 rounds of returned some(s) bindings grew the heap by ${grown} bytes in every run")
+    }
+    println("=== test_some_binding_return_owned passed ===")
+}

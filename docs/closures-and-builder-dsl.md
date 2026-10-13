@@ -176,6 +176,36 @@ panel("title") {
 }
 ```
 
+Because the block runs inline, it is not a function of its own: a `return` in
+it returns from the function the call is written in, and is one of that
+function's returns. A function with no written result type whose only `return`
+with a value is in a trailing block returns that value, typed from it, and one
+that returns a value from a block on one path must return one on every path
+(the missing-return check). Inside a closure, a block's `return` is the
+closure's.
+
+```aether,run
+scope(tag: int) -> int {
+    return tag
+}
+
+first_positive(a: int, b: int) {
+    scope(1) {
+        if a > 0 {
+            return a
+        }
+    }
+    return b
+}
+
+main() {
+    println("${first_positive(3, 4)} ${first_positive(0, 4)}")
+}
+```
+```output
+3 4
+```
+
 ### Same-line rule for trailing blocks
 
 A trailing block `{ ... }` is recognised as part of a function call only
@@ -272,6 +302,12 @@ erroring as undefined. Resolution order:
 2. `<receiver>_<name>` looked up walking the scope chain.
 3. The current file's scope (existing imports, top-level decls).
 4. Otherwise: undefined-name error.
+
+So the receiver's function also comes before a local of the function the
+block is written in, and before a top-level function of the same name: in
+`blk.run("x") { return note(n) }`, `note` is `blk.note` even beside a
+`note(n: int) -> int` of the program, and the function returns what
+`blk.note` returns.
 
 Pre-fix, every downstream project consuming an SDK module had to
 write a two-line import preamble:
@@ -513,6 +549,10 @@ compile("Main.java") {
 compile("Test.java")
 ```
 
+The call's arguments are evaluated after the block, left to right, just
+before the function runs, whether the call is a statement of its own or a
+value used inside an expression (`println(compile("Main.java") { ... })`).
+
 The setter functions (`set_release`, `set_lint`) are regular DSL functions
 with `_ctx: ptr` they work on whatever was pushed to the context stack. The
 compiler creates the config object (currently a map), pushes it, runs the block,
@@ -564,6 +604,26 @@ The factory just needs to be a zero-argument function returning `ptr`. The
 trailing block's setter functions and the builder function body must agree on the
 protocol, the compiler doesn't care what the object is, only that it can be
 pushed to the context stack as `void*`.
+
+### Leaving the block early
+
+The builder takes the config when the block ends. A `return`, `break` or
+`continue` that leaves the block skips the builder, so the call itself
+releases the config on that way out: with `map_free` for the default
+`map_new`, and with `<stem>_free` for a `<stem>_new` factory the program
+defines or declares with one `ptr` parameter (`list_new` and `list_free`, or a
+`query_builder_free(m: ptr)` beside `query_builder_new` above). In a nested
+builder call's block, the way out releases both calls' configs. A factory
+named otherwise has no release the compiler can find, and an early exit
+leaves its object unreleased (#2802), so pair a custom factory with its
+`_free`.
+
+A panic that leaves the block skips the builder too. When a `try` catches
+it, the catch puts the builder context stack back to its depth at the `try`
+and releases, with the same function, the configs of the blocks the panic
+abandoned; a block after the `try` fills its own call's config. Before
+(#2810), each caught panic left an entry on the stack, and after 64 of them
+a block's setters filled the config of a call a panic had abandoned.
 
 ### Generated code
 

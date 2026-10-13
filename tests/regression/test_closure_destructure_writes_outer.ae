@@ -1,0 +1,145 @@
+// Regression (#2762): a tuple destructure in a closure writes the outer
+// locals it names when those locals were themselves bound by a tuple
+// destructure, as it does when they were bound one at a time.
+//
+// A closure's `a, b = two()` is a write through to an outer `a` and `b`
+// bound before it in a scope it sees; otherwise it binds fresh locals of
+// its own. The lookup of that outer binding took a statement for a
+// binding of `a` only when it was a single `a = ...`: a destructure
+// `a, b = three()` binds `a` too, but was not seen, so the closure got
+// locals of its own and the outer ones kept their values (`12` where
+// `78` was due). Ints, strings and closures, in a function and in main,
+// in a loop body and two closures deep.
+//
+// The string and closure slots live in cells; the leak checks run where
+// the heap count is exact (mem.heap_in_use_exact): after a warm-up, some
+// window of the same work grows by exactly 0 (mem.steady_growth).
+
+import std.mem
+import std.string
+
+extern exit(code: int)
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL #2762: ${msg}")
+        exit(1)
+    }
+}
+
+two() -> (int, int) {
+    return 7, 8
+}
+
+three() -> (int, int) {
+    return 1, 2
+}
+
+named(p: string) -> (string, int) {
+    return string.concat(p, "!"), 3
+}
+
+renamed(p: string) -> (string, int) {
+    return string.concat(p, "?!"), 4
+}
+
+counter(p: string) -> fn {
+    return || { return string.length(p) }
+}
+
+pair(p: string) -> (fn, int) {
+    return || { return string.length(p) }, 1
+}
+
+longer_pair(p: string) -> (fn, int) {
+    return || { return string.length(p) + 10 }, 2
+}
+
+ints() -> int {
+    a, b = three()
+    bump = || {
+        a, b = two()
+    }
+    bump()
+    return a * 10 + b
+}
+
+strings(p: string) -> int {
+    s, n = named(p)
+    rename = || {
+        s, n = renamed(p)
+    }
+    rename()
+    check(s == string.concat(p, "?!"), "the string slot was written (${s})")
+    return string.length(s) + n
+}
+
+closures(p: string) -> int {
+    f, k = pair(p)
+    swap = || {
+        f, k = longer_pair(p)
+    }
+    swap()
+    return call(f) + k
+}
+
+in_loop() -> int {
+    total = 0
+    i = 0
+    while i < 3 {
+        a, b = three()
+        bump = || {
+            a, b = two()
+        }
+        bump()
+        total = total + a * 10 + b
+        i = i + 1
+    }
+    return total
+}
+
+two_deep() -> int {
+    a, b = three()
+    outer = || {
+        inner = || {
+            a, b = two()
+        }
+        inner()
+    }
+    outer()
+    return a * 10 + b
+}
+
+measure(which: int, p: string) -> long {
+    return mem.steady_growth(|| {
+            i = 0
+            while i < 100 {
+                if which == 0 { strings(p) }
+                if which == 1 { closures(p) }
+                i = i + 1
+            }
+        }, 5)
+}
+
+main() {
+    println("=== test_closure_destructure_writes_outer ===")
+    p = string.concat("bc", "")
+    check(ints() == 78, "int slots in a function (${ints()})")
+    check(strings(p) == 8, "string slots (${strings(p)})")
+    check(closures(p) == 14, "closure slots (${closures(p)})")
+    check(in_loop() == 234, "slots bound in a loop body (${in_loop()})")
+    check(two_deep() == 78, "slots written two closures deep (${two_deep()})")
+    a, b = three()
+    bump = || {
+        a, b = two()
+    }
+    bump()
+    check(a * 10 + b == 78, "int slots in main (${a * 10 + b})")
+    if mem.heap_in_use_exact() {
+        grown = measure(0, p)
+        check(grown == 0, "100 rewritten string slots grew the heap by ${grown} bytes in every run")
+        grown = measure(1, p)
+        check(grown == 0, "100 rewritten closure slots grew the heap by ${grown} bytes in every run")
+    }
+    println("=== test_closure_destructure_writes_outer passed ===")
+}

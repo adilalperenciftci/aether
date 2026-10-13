@@ -1,0 +1,72 @@
+// Regression (#2790): a declaration with a C-style type binds a match's value.
+//
+// `int k = match n { ... }` parsed the type and the name, then took the
+// initializer with the expression parser, to which `match` is no
+// expression: the declaration got no value, and the match was parsed as
+// the next statement, its arms' values dropped. `k` read whatever the
+// stack held (0 here) where `k = match` and `let k: int = match` bound the
+// value. The typed form now takes the match as its value, as they do.
+extern exit(code: int)
+
+var bad = 0
+
+check(label: string, got: int, want: int) {
+    if got != want {
+        println("FAIL ${label}: got ${got}, want ${want}")
+        bad = bad + 1
+    }
+}
+
+pick(n: int) -> int {
+    int k = match n {
+        1 -> 10
+        _ -> 20
+    }
+    return k
+}
+
+blocks(n: int) -> int {
+    int k = match n {
+        1 -> {
+            t = n * 7
+            t + 1
+        }
+        _ -> { 0 }
+    }
+    return k
+}
+
+wide(n: int) -> long {
+    long k = match n {
+        1 -> 5000000000
+        _ -> 1
+    }
+    return k
+}
+
+named(n: int) -> string {
+    string s = match n {
+        1 -> "one"
+        _ -> "other"
+    }
+    return s
+}
+
+main() {
+    check("int, first arm", pick(1), 10)
+    check("int, `_` arm", pick(2), 20)
+    check("block arms", blocks(1), 8)
+    if wide(1) != 5000000000 {
+        println("FAIL long: ${wide(1)}")
+        bad = bad + 1
+    }
+    if named(1) != "one" || named(3) != "other" {
+        println("FAIL string: ${named(1)} ${named(3)}")
+        bad = bad + 1
+    }
+    if bad != 0 {
+        println("${bad} check(s) failed")
+        exit(1)
+    }
+    println("typed declarations bind a match: ok")
+}

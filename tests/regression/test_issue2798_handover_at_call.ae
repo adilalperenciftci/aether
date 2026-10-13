@@ -1,0 +1,207 @@
+// Regression (#2798, #2843): a string field that a call frees or keeps,
+// evaluated ahead of the call (ahead of a construct that runs statements
+// later in the argument list, or by the ordering wrapper ahead of a later
+// argument that writes the field), is handed over to its temporary as it
+// is read: the temporary owns the string from then on, the call takes it,
+// and an exit taken before the call (an `or` handler's `return`, a
+// propagating `!`) frees it.
+//
+// Handed over at the call instead (76a810f8), the field kept its tracker
+// until then, so a store into it in between (an `or` handler's, a later
+// argument's through a pointer, a handler re-binding the struct) freed the
+// string the call then freed again, or kept, and the call cleared the new
+// value's tracker. Cleared where it was read with nothing to free it on an
+// early exit (d9a0c09e, 3442f647), the string leaked when the call never
+// ran. Read plainly, the call freed it and the struct's destroy freed it
+// again. Each shape runs 100 times: its result, the kept string after
+// strings that would reuse a freed buffer, and no heap growth.
+
+import std.mem
+import std.string
+
+extern exit(code: int)
+
+struct Doc {
+    name: string
+    n: int
+}
+
+// What keep2 holds; the one before is freed, so keeping leaks nothing.
+var kept: string = ""
+var holding = 0
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+num(fail: bool) -> int! {
+    if fail { return 0, "boom" }
+    return 7
+}
+
+small(x: int) -> int! {
+    if x > 100 { return 0, "big" }
+    return x
+}
+
+plus(a: int, b: int) -> int {
+    return a + b
+}
+
+eat(s: string, k: int) -> int {
+    string.free(s)
+    return k
+}
+
+keep2(s: string, k: int) -> int {
+    if holding == 1 { string.free(kept) }
+    kept = s
+    holding = 1
+    return k
+}
+
+rename(p: *Doc, w: string) -> int {
+    p.name = string.concat(w, "#renamed")
+    return 3
+}
+
+// The call does not run: the handler returns, or the `!` propagates.
+left_by_or(w: string) -> int {
+    d = Doc { name: string.concat(w, "#e"), n: 0 }
+    return eat(d.name, num(true) or { return 5 })
+}
+
+left_by_or_kept(w: string) -> int {
+    d = Doc { name: string.concat(w, "#k"), n: 0 }
+    return keep2(d.name, num(true) or { return 6 })
+}
+
+left_by_bang(w: string) -> int! {
+    d = Doc { name: string.concat(w, "#p"), n: 0 }
+    return eat(d.name, plus(small(3)!, num(true)!))
+}
+
+// The call runs.
+freed(w: string) -> int {
+    d = Doc { name: string.concat(w, "#c"), n: 0 }
+    return eat(d.name, num(true) or { 1 })
+}
+
+kept_by_call(w: string) -> int {
+    d = Doc { name: string.concat(w, "#d"), n: 0 }
+    return keep2(d.name, num(true) or { 2 })
+}
+
+// The field is replaced between the read and the call: by the handler,
+// by a later argument through a pointer, by the handler re-binding the
+// struct.
+stored_by_handler(w: string) -> int {
+    d = Doc { name: string.concat(w, "#old"), n: 0 }
+    return eat(d.name, num(true) or {
+            d.name = string.concat(w, "#new")
+            1
+        })
+}
+
+stored_by_handler_kept(w: string) -> int {
+    d = Doc { name: string.concat(w, "#oldk"), n: 0 }
+    return keep2(d.name, num(true) or {
+            d.name = string.concat(w, "#newk")
+            1
+        })
+}
+
+renamed(w: string) -> int {
+    p = heap.new(Doc)
+    p.name = string.concat(w, "#old2")
+    k = eat(p.name, rename(p, w))
+    heap.free(p)
+    return k
+}
+
+renamed_kept(w: string) -> int {
+    p = heap.new(Doc)
+    p.name = string.concat(w, "#kept2")
+    k = keep2(p.name, rename(p, w))
+    heap.free(p)
+    return k
+}
+
+rebound(w: string) -> int {
+    d = Doc { name: string.concat(w, "#old3"), n: 0 }
+    return eat(d.name, num(true) or {
+            d = Doc { name: string.concat(w, "#new3"), n: 1 }
+            1
+        })
+}
+
+rebound_kept(w: string) -> int {
+    d = Doc { name: string.concat(w, "#old3k"), n: 0 }
+    return keep2(d.name, num(true) or {
+            d = Doc { name: string.concat(w, "#new3k"), n: 1 }
+            1
+        })
+}
+
+rounds(w: string, which: int) -> int {
+    total = 0
+    i = 0
+    while i < 100 {
+        if which == 1 { total = total + left_by_or(w) }
+        if which == 2 { total = total + left_by_or_kept(w) }
+        if which == 3 {
+            _r, e = left_by_bang(w)
+            if e != "" { total = total + 1 }
+        }
+        if which == 4 { total = total + freed(w) }
+        if which == 5 { total = total + kept_by_call(w) }
+        if which == 6 { total = total + stored_by_handler(w) }
+        if which == 7 { total = total + stored_by_handler_kept(w) }
+        if which == 8 { total = total + renamed(w) }
+        if which == 9 { total = total + renamed_kept(w) }
+        if which == 10 { total = total + rebound(w) }
+        if which == 11 { total = total + rebound_kept(w) }
+        i = i + 1
+    }
+    return total
+}
+
+// Strings the size of the kept ones, which reuse a freed buffer.
+churn(w: string) -> int {
+    a = string.concat(w, "@@@@@")
+    b = string.concat(w, "$$$$$")
+    return string.length(a) + string.length(b)
+}
+
+shape(w: string, which: int, want: int, want_kept: string, what: string) {
+    check(rounds(w, which) == want, what)
+    churn(w)
+    if want_kept != "" {
+        check(kept == want_kept, "${what}: kept ${kept}")
+    }
+    if mem.heap_in_use_exact() {
+        g = mem.steady_growth(|| {
+                rounds(w, which)
+            }, 5)
+        check(g == 0, "${what}: the heap grew by ${g} bytes")
+    }
+}
+
+main() {
+    w = string.concat("w", "v")
+    shape(w, 1, 500, "", "an or handler's return")
+    shape(w, 2, 600, "", "an or handler's return, a keeping call")
+    shape(w, 3, 100, "", "a propagating !")
+    shape(w, 4, 100, "", "a freeing call that runs")
+    shape(w, 5, 200, "wv#d", "a keeping call that runs")
+    shape(w, 6, 100, "", "the handler stores into the field")
+    shape(w, 7, 100, "wv#oldk", "the handler stores into the field, a keeping call")
+    shape(w, 8, 300, "", "a later argument stores through a pointer")
+    shape(w, 9, 300, "wv#kept2", "a later argument stores through a pointer, a keeping call")
+    shape(w, 10, 100, "", "the handler re-binds the struct")
+    shape(w, 11, 100, "wv#old3k", "the handler re-binds the struct, a keeping call")
+    println("ok")
+}

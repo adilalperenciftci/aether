@@ -1,0 +1,34 @@
+// Regression (#2801): a builder with the default config factory builds in
+// a program that does not import std.map.
+//
+// A call to such a builder is lowered to a `map_new()` call (and, when its
+// block is left before the builder runs, to `map_free`, #2791). Nothing
+// declared them unless the program imported std.map, and the C compiler
+// rejected the implicit declaration of `map_new`.
+
+extern exit(code: int)
+
+builder quiet(label: string) -> int {
+    return 7
+}
+
+early(n: int) -> int {
+    got = quiet("q") {
+        if n > 0 {
+            return n
+        }
+    }
+    return got
+}
+
+main() {
+    a = quiet("q") {
+    }
+    b = early(0)
+    c = early(3)
+    if a != 7 || b != 7 || c != 3 {
+        println("FAIL: builder without std.map: ${a} ${b} ${c}")
+        exit(1)
+    }
+    println("builder without std.map: ok")
+}
