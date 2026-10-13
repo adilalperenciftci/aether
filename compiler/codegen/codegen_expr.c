@@ -2766,9 +2766,16 @@ static void discover_closures_scoped(CodeGenerator* gen, ASTNode* node, const ch
     if (node->type == AST_FUNCTION_DEFINITION || node->type == AST_BUILDER_FUNCTION) {
         /* A clause of a set is a scope of its own (#2644). */
         const char* new_enc = node->value ? fn_scope_name(gen->program, node) : enclosing_func;
+        /* #2805: the function's module decides which globals its closures
+         * reach (is_module_global_var): in a function merged from a module,
+         * a name the program also declares as a `var` is the function's
+         * own local, captured as any other. */
+        const char* saved_origin = gen->current_origin_module;
+        gen->current_origin_module = node->origin_module;
         for (int i = 0; i < node->child_count; i++) {
             discover_closures_scoped(gen, node->children[i], new_enc);
         }
+        gen->current_origin_module = saved_origin;
         return;
     }
     if (node->type == AST_MAIN_FUNCTION) {
