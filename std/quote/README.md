@@ -49,7 +49,7 @@ kinds are the contract.
 | On a `Node` | |
 |---|---|
 | `kind(n)` | one of the kinds below; `kind_name(k)` spells it |
-| `type_of(n)` | the type the checker gave it: `"float"`, `"vec2"`, a struct's name; `""` on a statement |
+| `type_of(n)` | the type the checker gave it, as Aether spells it: `"float"` (a C double), `"f32"` (a 32-bit float, the type of a lane such as `uv.x`), `"vec2"`, a struct's name; `""` on a statement |
 | `name(n)` | a local's, parameter's or capture's name; a called function's (`"math.sin"`); a field's (`FIELD`, `FIELD_VALUE`) |
 | `op(n)` | an operator: `"+"`, `"<"`, `"!"`; on `ASSIGN`, `"="`, `"+="`, ... |
 | `lit(n)` | a literal's text |
