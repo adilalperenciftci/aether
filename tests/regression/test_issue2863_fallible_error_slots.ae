@@ -1,0 +1,123 @@
+// Regression (#2863): a `T!` function that returns a bare value on success
+// (the auto-wrap `(value, "")`) had the error position of its result taken
+// for a passthrough nobody could free, so an error string another return
+// built (`return 0, string.concat(...)`) was never freed by the `or`, the
+// destructure or the `_, _ =` that discarded it. The position is now heap
+// whenever a return builds its error, the success sentinel is a string the
+// caller owns too, and each of those frees it on both paths. `x!` reads the
+// slot as the `or` does (an owned empty one read raw looked like an error),
+// frees the sentinel on success, and a propagation hands the slot on
+// wrapped, a literal it propagates copied. Also: `x!` in main() after a `T!`
+// function (#2864), a `(string, string)` call thrown away as a statement
+// and `pair()!` compared (#2865), and an `or` compared or interpolated in
+// place, each of which leaked or did not compile. Each shape runs in a
+// round, and the rounds must not grow the heap.
+
+import std.mem
+import std.string
+
+extern exit(code: int)
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+word(fail: bool, w: string) -> string! {
+    if fail { return "", string.concat("bad-", w) }
+    return string.concat(w, "!")
+}
+
+num(fail: bool, w: string) -> int! {
+    if fail { return 0, string.concat("bad-", w) }
+    return 7
+}
+
+lit(fail: bool) -> int! {
+    if fail { return 0, "boom" }
+    return 3
+}
+
+// Propagates num's built error, then lit's literal one.
+prop(fail: bool, w: string) -> int! {
+    v = num(fail, w)!
+    k = lit(false)!
+    return v + k
+}
+
+// Builds an error on one path and propagates a literal one on another.
+prop_lit(fail: bool) -> int! {
+    if fail { return 0, string.concat("x", "y") }
+    v = lit(true)!
+    return v
+}
+
+pair(w: string) -> (string, string) {
+    return string.concat(w, "+"), ""
+}
+
+two(w: string) -> (string, string) {
+    return string.concat(w, "1"), string.concat(w, "2")
+}
+
+round(w: string) -> int {
+    total = 0
+    i = 0
+    while i < 20 {
+        a = word(true, w) or { "d" }
+        b = word(false, w) or { "d" }
+        n = num(true, w) or { 3 }
+        m = num(true, w) or(5)
+        x, e = word(true, w)
+        _, _ = num(true, w)
+        _, _ = word(false, w)
+        p = prop(false, w) or { -1 }
+        q = prop(true, w) or { -2 }
+        r = prop_lit(false) or { -3 }
+        if pair(w)! == string.concat(w, "+") {
+            total = total + 1
+        }
+        two(w)
+        if (word(true, w) or { "d" }) == "d" {
+            total = total + 1
+        }
+        total = total + string.length("${word(false, w) or { "d" }}")
+        total = total + string.length(a) + string.length(b) + n + m
+        total = total + string.length(x) + string.length(e) + p + q + r
+        i = i + 1
+    }
+    return total
+}
+
+// A `T!` function emitted right before main: an unwrap in main is not a
+// propagation.
+last(fail: bool) -> int! {
+    if fail { return 0, string.concat("la", "st") }
+    return 4
+}
+
+main() {
+    w = string.concat("w", "v")
+    check((word(true, w) or { "d" }) == "d", "an or over a built error")
+    check((word(false, w) or { "d" }) == "wv!", "an or over a success")
+    x, e = word(true, w)
+    check(x == "" && e == "bad-wv", "a destructured error")
+    y, f = word(false, w)
+    check(y == "wv!" && f == "", "a destructured success")
+    check((prop(false, w) or { -1 }) == 10, "a propagation that succeeds")
+    check((prop(true, w) or { -2 }) == -2, "a propagated built error")
+    check((prop_lit(false) or { -3 }) == -3, "a propagated literal error")
+    check(pair(w)! == "wv+", "an unwrapped tuple compared")
+    check(round(w) == 20 * 28, "the rounds")
+    if mem.heap_in_use_exact() {
+        g = mem.steady_growth(|| {
+                round(w)
+            }, 5)
+        check(g == 0, "the heap grew by ${g} bytes")
+    }
+    v = last(false)!
+    check(v == 4, "an unwrap in main")
+    println("ok")
+}

@@ -443,7 +443,7 @@ static int call_hands_back_temp_walk(CodeGenerator* gen, ASTNode* call) {
         ASTNode* arg = call->children[ai];
         /* The arguments arg_drain_select hoists as heap strings. */
         if (!arg || (arg->type != AST_FUNCTION_CALL && arg->type != AST_STRING_INTERP &&
-                     arg->type != AST_OR_ELSE && !is_owned_opt_string_unwrap(gen, arg))) continue;
+                     arg->type != AST_OR_ELSE && !is_owned_string_unwrap(gen, arg))) continue;
         if (arg_drain_verdict(gen, call->value, NULL, ai, 0, &w) == 1 &&
             is_heap_string_expr(gen, arg)) return 1;
     }
@@ -550,7 +550,7 @@ static void arg_drain_select(CodeGenerator* gen, ASTNode* expr, int first_arg,
         if (arg->type != AST_FUNCTION_CALL &&
             arg->type != AST_STRING_INTERP &&
             arg->type != AST_OR_ELSE && !literal_arg &&
-            !is_owned_opt_string_unwrap(gen, arg)) continue;
+            !is_owned_string_unwrap(gen, arg)) continue;
         if (arg_drain_lookup(arg)) continue;
         /* #2750: a `string?` an Aether function handed over is the call's
          * argument alone: its string is freed after the call when the
@@ -741,8 +741,13 @@ int interp_segment_is_text(ASTNode* ch) {
  * must free once printf / _aether_interp has read it. */
 int interp_segment_is_heap_call(CodeGenerator* gen, ASTNode* ch) {
     if (!ch) return 0;
+    /* An `or` over a heap value slot yields a string of its own (the
+     * handler's default boxed): read by the interpolation, it leaked. Its
+     * node's own type is not reliably stamped; is_heap_string_expr reads the
+     * fallible's value slot. */
+    if (ch->type == AST_OR_ELSE) return is_heap_string_expr(gen, ch);
     if (ch->type != AST_FUNCTION_CALL && ch->type != AST_STRING_INTERP &&
-        !is_owned_opt_string_unwrap(gen, ch)) return 0;   /* #2750 */
+        !is_owned_string_unwrap(gen, ch)) return 0;   /* #2750 */
     TypeKind tk = ch->node_type ? ch->node_type->kind : TYPE_UNKNOWN;
     if (tk != TYPE_STRING && tk != TYPE_PTR) return 0;
     return is_heap_string_expr(gen, ch);
@@ -5014,7 +5019,7 @@ void emit_message_array_hoists(CodeGenerator* gen, ASTNode* message, MessageDef*
 void emit_message_string_copy(CodeGenerator* gen, const char* lv, ASTNode* init) {
     int owned_temp = init &&
         (init->type == AST_FUNCTION_CALL || init->type == AST_STRING_INTERP ||
-         is_owned_opt_string_unwrap(gen, init)) &&
+         is_owned_string_unwrap(gen, init)) &&
         is_heap_string_expr(gen, init);
     fprintf(gen->output,
             "if (%s) { const char* _mt = %s; size_t _ml = aether_string_length(_mt); "
@@ -6216,6 +6221,49 @@ void ctl_builder_args(CodeGenerator* gen, ASTNode* call) {
  * it can be (emit_control_prelude, #2765, #2798).
  * Returns 0 when there is no such block. */
 static int g_trailing_tmp = 0;
+
+/* The builder call emit_builder_call is emitting, and the C name of the
+ * config its block filled: the call's last argument, `(void*)0` for any
+ * other builder call. */
+static ASTNode* g_builder_cfg_call = NULL;
+static const char* g_builder_cfg_var = NULL;
+
+/* `call`, a builder call with a trailing block, as `fn(args..., cfg)`:
+ * through the ordinary call emitter, so its arguments get what any call's
+ * do (a fresh string freed after the call, a field handed over, the order
+ * wrapper), with `cfg` for the config the block filled. Its arguments were
+ * evaluated ahead, after the block, where they had to be
+ * (ctl_builder_args). Emitted by hand before, the call left every fresh
+ * argument to leak. */
+void emit_builder_call(CodeGenerator* gen, ASTNode* call, const char* cfg) {
+    BuilderCfg saved = builder_cfg_begin(gen, call, cfg);
+    generate_expression(gen, call);
+    builder_cfg_end(gen, saved);
+}
+
+/* From here to builder_cfg_end, `call` is emitted as the plain call with
+ * `cfg` (a statement's own emitter generating its value as it would any
+ * call's). */
+BuilderCfg builder_cfg_begin(CodeGenerator* gen, ASTNode* call, const char* cfg) {
+    BuilderCfg saved = { gen->trailing_stmt_call, g_builder_cfg_call, g_builder_cfg_var };
+    gen->trailing_stmt_call = call;      /* the call alone, its block run */
+    g_builder_cfg_call = call;
+    g_builder_cfg_var = cfg;
+    return saved;
+}
+
+void builder_cfg_end(CodeGenerator* gen, BuilderCfg saved) {
+    gen->trailing_stmt_call = saved.trailing_stmt_call;
+    g_builder_cfg_call = saved.call;
+    g_builder_cfg_var = saved.var;
+}
+
+/* Is `call` the builder call emit_builder_call is emitting, its block run
+ * and its config in hand? Its statement then emits it as a plain call. */
+int builder_call_configured(ASTNode* call) {
+    return call && call == g_builder_cfg_call;
+}
+
 static int emit_trailing_call_expression(CodeGenerator* gen, ASTNode* call) {
     ASTNode* block = trailing_dsl_block(gen, call);
     /* An empty block runs nothing and configures nothing: the plain call,
@@ -6249,16 +6297,8 @@ static int emit_trailing_call_expression(CodeGenerator* gen, ASTNode* call) {
             print_indent(gen);
             fprintf(gen->output, "_tcr%d = ", n);
         }
-        fprintf(gen->output, "%s(", codegen_normalise_callee(safe_c_name(call->value)));
-        int argc = 0;
-        for (int i = 0; i < call->child_count; i++) {
-            ASTNode* arg = call->children[i];
-            if (arg && arg->type == AST_CLOSURE && arg->value &&
-                strcmp(arg->value, "trailing") == 0) continue;
-            if (argc++ > 0) fprintf(gen->output, ", ");
-            generate_expression(gen, arg);
-        }
-        fprintf(gen->output, "%s_tcfg%d)%s", argc > 0 ? ", " : "", n, as_stmts ? ";\n" : "; })");
+        emit_builder_call(gen, call, cg_internf("_tcfg%d", n));
+        fprintf(gen->output, "%s", as_stmts ? ";\n" : "; })");
         if (as_stmts) ctl_bind(call, cg_internf("_tcr%d", n));
         return 1;
     }
@@ -6796,6 +6836,12 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
             int err_idx = tup->tuple_count - 1;
             static int unwrap_tmp_counter = 0;
             int uid = unwrap_tmp_counter++;
+            /* The error slot is read through aether_string_data, as the `or`
+             * reads it: a heap one is a counted AetherString whose first
+             * byte is its header's, so an empty one read raw looked like an
+             * error and `x!` panicked on success. On success a heap slot is
+             * the caller's `""` to free, as the `or` frees it. */
+            int unw_err_heap = or_fallible_error_slot_is_heap(gen, operand);
 
             if (!(gen->current_func_return_type && gen->current_func_return_type->is_result)) {
                 /* #2765: unwrap or panic, a sequence of temporaries. The
@@ -6807,8 +6853,12 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                 generate_expression(gen, operand);
                 seq_next(gen, &s);
                 fprintf(gen->output,
-                        "(_unw%d._%d && _unw%d._%d[0]) ? aether_panic(_unw%d._%d) : (void)0",
+                        "(_unw%d._%d && aether_string_data((const void*)_unw%d._%d)[0]) ? aether_panic(_unw%d._%d) : ",
                         uid, err_idx, uid, err_idx, uid, err_idx);
+                if (unw_err_heap)
+                    fprintf(gen->output, "aether_heap_str_free((void*)_unw%d._%d)", uid, err_idx);
+                else
+                    fprintf(gen->output, "(void)0");
                 seq_next(gen, &s);
                 fprintf(gen->output, "_unw%d._0", uid);
                 seq_close(gen, &s);
@@ -6851,7 +6901,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
              * mid-line (right after `if (...) {`) it is a stray `#` and the
              * C compiler rejects the file. */
             fprintf(gen->output,
-                    "if (_unw%d._%d && _unw%d._%d[0]) {\n",
+                    "if (_unw%d._%d && aether_string_data((const void*)_unw%d._%d)[0]) {\n",
                     uid, err_idx, uid, err_idx);
             /* #1140: propagation is unambiguously an ERROR exit: we are
              * inside the `if` that tested the error slot. So `defer catch`
@@ -6867,11 +6917,40 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
              * ordinary return path does: a propagation is just as
              * non-local an exit as a `return`. */
             emit_try_pops_for_nonlocal_exit(gen);
-            /* Leading newline for the same reason: a defer body can end
-             * mid-line, and the next thing must not be glued onto it. */
-            fprintf(gen->output,
-                    "\nreturn (%s){ ._1 = _unw%d._%d }; } ",
-                    get_c_type(gen->current_func_return_type), uid, err_idx);
+            /* The error slot handed on is the enclosing function's to give:
+             * when its error position is heap (function_def_returns_heap_at
+             * counts this propagation), it is wrapped as every other return
+             * there is, a literal the operand returned copied. The operand's
+             * value slot, discarded here, is freed when it is a heap string,
+             * as the `or` frees it. */
+            {
+                Type* crt = gen->current_func_return_type;
+                int cerr = crt->tuple_count - 1;
+                int cur_err_heap =
+                    cerr > 0 && crt->tuple_types && crt->tuple_types[cerr] &&
+                    crt->tuple_types[cerr]->kind == TYPE_STRING && gen->current_function &&
+                    !gen->in_main_function &&
+                    (gen->current_function->type == AST_FUNCTION_DEFINITION ||
+                     gen->current_function->type == AST_BUILDER_FUNCTION) &&
+                    function_def_returns_heap_at(gen, gen->current_function, cerr);
+                if (tup->tuple_types[0] && tup->tuple_types[0]->kind == TYPE_STRING &&
+                    or_fallible_value_slot_is_heap(gen, operand)) {
+                    fprintf(gen->output, "\naether_heap_str_free((void*)_unw%d._0);", uid);
+                }
+                /* Leading newline for the same reason: a defer body can end
+                 * mid-line, and the next thing must not be glued onto it. */
+                if (cur_err_heap) {
+                    fprintf(gen->output,
+                            "\nreturn (%s){ ._1 = aether_uniform_heap_str((const char*)(_unw%d._%d), %d) }; } ",
+                            get_c_type(crt), uid, err_idx, unw_err_heap ? 1 : 0);
+                } else {
+                    fprintf(gen->output,
+                            "\nreturn (%s){ ._1 = _unw%d._%d }; } ",
+                            get_c_type(crt), uid, err_idx);
+                }
+                if (unw_err_heap)
+                    fprintf(gen->output, "aether_heap_str_free((void*)_unw%d._%d); ", uid, err_idx);
+            }
             if (as_stmts) {
                 fprintf(gen->output, "\n");
                 ctl_bind(expr, cg_internf("_unw%d._0", uid));
@@ -6909,7 +6988,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
             generate_expression(gen, operand);
             seq_next(gen, &s);
             fprintf(gen->output, "_nc%d.has ? _nc%d.val : (", id, id);
-            if (is_owned_opt_string_unwrap(gen, expr)) {
+            if (is_owned_string_unwrap(gen, expr)) {
                 /* #2750: over an owned `string?` call the value is the
                  * call's string, a fresh one, so the default is made one of
                  * its own too (a fresh default adopted, anything else
@@ -7750,14 +7829,10 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                      * literal. So no double-free is possible. */
                     ASTNode* cl = expr->children[0];
                     ASTNode* cr = expr->children[1];
-                    int drain_l = (cl->type == AST_FUNCTION_CALL ||
-                                   cl->type == AST_STRING_INTERP ||
-                                   is_owned_opt_string_unwrap(gen, cl)) &&
-                                  is_heap_string_expr(gen, cl);
-                    int drain_r = (cr->type == AST_FUNCTION_CALL ||
-                                   cr->type == AST_STRING_INTERP ||
-                                   is_owned_opt_string_unwrap(gen, cr)) &&
-                                  is_heap_string_expr(gen, cr);
+                    /* An `or` over a heap value slot is one too: compared in
+                     * place (`(f() or { "d" }) == "d"`), it leaked. */
+                    int drain_l = is_fresh_heap_string_temp(gen, cl);
+                    int drain_r = is_fresh_heap_string_temp(gen, cr);
                     if (drain_l || drain_r) {
                         if (!skip_parens) fprintf(gen->output, "(");
                         TempSeq s;
@@ -9956,10 +10031,13 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                         }
                         arg_printed++;
                     }
-                    // Defer functions get (void*)0 as last arg when called without trailing block
+                    // Defer functions get (void*)0 as last arg when called
+                    // without trailing block, the config its block filled
+                    // when emit_builder_call emits one with it.
                     if (is_builder_func_reg(gen, func_name)) {
                         if (arg_printed > 0) fprintf(gen->output, ", ");
-                        fprintf(gen->output, "(void*)0");
+                        fprintf(gen->output, "%s", expr == g_builder_cfg_call && g_builder_cfg_var
+                                                       ? g_builder_cfg_var : "(void*)0");
                     }
                     fprintf(gen->output, ")");
                     arg_drain_close(gen, expr, &ad);

@@ -1,0 +1,61 @@
+// Regression (#2867): a named function hands every `string?` position of
+// its tuple result over owned, a copy of what it was given (#2751), but
+// the keep analysis took returning one for keeping the parameter: a
+// function that passed its parameter on to such a call took a copy of it
+// on entry (copy-on-keep), and nothing freed the copy. And a tuple local
+// that held such a call's result, returned, was copied, and the strings it
+// held were left to nobody. Each shape runs in a round, and the rounds must
+// not grow the heap.
+
+import std.mem
+
+extern exit(code: int)
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+pair_of(s: string) -> (string?, int) {
+    return s, 1
+}
+
+pass_pair(s: string) -> (string?, int) {
+    return pair_of(s)
+}
+
+pass_local(s: string) -> (string?, int) {
+    t = pair_of(s)
+    return t
+}
+
+round(w: string) -> int {
+    total = 0
+    i = 0
+    while i < 20 {
+        a, b = pass_pair(w)
+        c, d = pass_local(w)
+        if a != none && c != none {
+            total = total + b + d
+        }
+        i = i + 1
+    }
+    return total
+}
+
+main() {
+    a, b = pass_pair("pp")
+    check(a != none && a! == "pp" && b == 1, "a tuple passed on")
+    c, d = pass_local("pl")
+    check(c != none && c! == "pl" && d == 1, "a tuple local passed on")
+    check(round("rw") == 40, "the rounds")
+    if mem.heap_in_use_exact() {
+        g = mem.steady_growth(|| {
+                round("rw")
+            }, 5)
+        check(g == 0, "the heap grew by ${g} bytes")
+    }
+    println("ok")
+}
