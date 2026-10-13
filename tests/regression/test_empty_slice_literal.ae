@@ -99,9 +99,13 @@ main() {
     check("a null var", gn.len, 0)
     check("a const", E.len, 0)
     check("a null const", N.len, 0)
-    gs = arr
-    check("a var re-bound to an array", gs.len, 3)
+    // A slice of storage that outlives the program's functions (a `make`
+    // buffer: a slice of a function's own array cannot be kept here, E0800).
+    gs = make([]int, 3)
+    gs[2] = 3
+    check("a var re-bound to a buffer", gs.len, 3)
     check("its element", gs[2], 3)
+    free(gs)
     reset()
     check("a var re-bound to []", gs.len, 0)
 

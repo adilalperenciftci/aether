@@ -10,6 +10,7 @@
 #include "../aether_strmap.h"
 #include "actor_reply.h"
 #include "missing_return.h"
+#include "slice_escape.h"
 
 /* Defined with typecheck_program below; infer_type needs it far earlier. */
 static ASTNode* aether_typecheck_program_node(void);
@@ -5775,6 +5776,9 @@ int typecheck_program(ASTNode* program) {
      * Asked once the program type-checks: whether a `match` covers its type
      * depends on the type the checker gave the value it matches on. */
     if (error_count == 0) error_count += check_missing_returns(program);
+    /* A slice of a function's own storage must not outlive it (#2785): asked
+     * of the checked program, whose coercions into slices are explicit. */
+    if (error_count == 0) error_count += check_slice_escapes(program);
 
     // #481: validate effect tags over the whole-program call graph.
     check_effect_tags(program);
