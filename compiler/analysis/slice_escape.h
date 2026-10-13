@@ -9,14 +9,22 @@
  * make for itself (a struct behind a pointer, a parameter's pointee, a
  * global), or carried out by a closure that captured it.
  *
+ * A fixed-size array parameter is the function's own copy of the caller's
+ * array, so it is storage of the frame as a local array is.
+ *
  * The check runs over the type-checked program, where the coercions into
- * slice slots are explicit. For each function, closure and `main` it finds
- * the locals that hold such a view (bound to one, or a local struct or array
- * one is stored in), then reports each place one leaves the frame, at the
- * value that leaves (E0800). A slice of a parameter's array, of a `make`
- * buffer or of a module-level array is no such view; a call's result is
- * taken to be none, so a function handing back the slice it was given is
- * not seen through.
+ * slice slots are explicit. For each function, closure and `main` it walks
+ * the body in the order it runs, keeping what holds such a view at each
+ * point: a local bound to one, or a field of a local value one is stored in.
+ * Binding a local or a field again replaces what it held, so a name given
+ * storage that outlives the frame before it leaves holds no view any more.
+ * Where control joins (after the branches of an `if`, a `match` or a
+ * `switch`, around a loop, after a `try`) what holds a view on any path
+ * holds one. Each place a view leaves the frame is reported at the value
+ * that leaves (E0800). A slice of a slice parameter, of a `make` buffer or
+ * of a module-level array is no such view; a call's result is taken to be
+ * none, so a function handing back the slice it was given is not seen
+ * through.
  */
 
 #ifndef AETHER_SLICE_ESCAPE_H

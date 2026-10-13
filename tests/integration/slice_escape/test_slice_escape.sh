@@ -10,8 +10,11 @@
 # can leave the frame is refused at the value that leaves: a return, a store
 # to a module-level `var`, a store to a field of something the function did
 # not make for itself, and a closure that captured such a slice. A slice used
-# while the function runs, passed down, or of a parameter's array or a
-# `make` buffer, compiles and runs as before.
+# while the function runs, passed down, or of a slice parameter or a `make`
+# buffer, compiles and runs as before. A fixed-size array parameter is the
+# function's own copy, so a slice of it is refused too. What a name holds
+# where it leaves decides: one re-bound to a `make` buffer before it leaves
+# is no view any more, when it is on every path to the exit.
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
@@ -144,6 +147,55 @@ main() {
 AE
 refused capture 4:12 "'counter' returns a slice of its own storage (a closure that captured a slice of it)"
 
+cat > "$TMP/array_param.ae" <<'AE'
+first_two(a: int[3]) -> int[] {
+    return a[0..2]
+}
+
+main() {
+    s = first_two([11, 22, 33])
+    println("${s[0]} ${s[1]}")
+}
+AE
+refused array_param 2:13 "'first_two' returns a slice of its own storage (the array parameter \`a\`, its own copy)"
+
+cat > "$TMP/branch_keeps.ae" <<'AE'
+pick(n: int, c: bool) -> int[] {
+    arr = [1, 2, 3]
+    let v: int[] = arr
+    if c {
+        v = make([]int, n)
+    }
+    return v
+}
+
+main() {
+    println("${pick(2, true).len}")
+}
+AE
+refused branch_keeps 7:12 "'pick' returns a slice of its own storage (\`v\`, which holds a slice of it)"
+
+cat > "$TMP/loop_keeps.ae" <<'AE'
+pick(n: int) -> int[] {
+    arr = [1, 2, 3]
+    let v: int[] = make([]int, n)
+    i = 0
+    while i < n {
+        if i == 1 {
+            break
+        }
+        v = arr
+        i = i + 1
+    }
+    return v
+}
+
+main() {
+    println("${pick(3).len}")
+}
+AE
+refused loop_keeps 12:12 "'pick' returns a slice of its own storage (\`v\`, which holds a slice of it)"
+
 # What stays in the frame, or views storage that outlives it, runs.
 cat > "$TMP/stays.ae" <<'AE'
 struct Bag {
@@ -156,10 +208,6 @@ total(xs: int[]) -> int {
         s = s + xs[i]
     }
     return s
-}
-
-first2(a: int[3]) -> int[] {
-    return a[0..2]
 }
 
 made(n: int) -> int[] {
@@ -175,16 +223,72 @@ local_use() -> int {
 }
 
 main() {
-    let a: int[3] = [1, 2, 3]
     m = made(4)
-    println("stays ${first2(a).len} ${m.len} ${local_use()}")
+    println("stays ${m.len} ${local_use()}")
     free(m)
 }
 AE
 out=$(cd "$TMP" && AETHER_HOME="$ROOT" "$AE" run stays.ae 2>&1)
 case "$out" in
-    *"stays 2 4 25"*) ;;
-    *) echo "  [FAIL] stays: not \"stays 2 4 25\":"
+    *"stays 4 25"*) ;;
+    *) echo "  [FAIL] stays: not \"stays 4 25\":"
+       echo "$out" | sed 's/^/        /'
+       fails=$((fails + 1)) ;;
+esac
+
+# A name re-bound to storage that outlives the frame before it leaves holds
+# no view of the frame any more: what it holds where it leaves decides.
+cat > "$TMP/rebound.ae" <<'AE'
+struct Holder {
+    data: int[]
+    n: int
+}
+
+fill(n: int) -> int[] {
+    arr = [1, 2, 3]
+    let v: int[] = arr
+    t = v[0] + v[1]
+    v = make([]int, n)
+    v[0] = t
+    return v
+}
+
+keep(n: int) -> Holder {
+    arr = [1, 2, 3]
+    h = Holder { data: arr, n: 0 }
+    h.n = h.data[1]
+    h.data = make([]int, n)
+    h.data[0] = h.n
+    return h
+}
+
+both(n: int, c: bool) -> int[] {
+    arr = [5, 6, 7]
+    let v: int[] = arr
+    k = v[2]
+    if c {
+        v = make([]int, n)
+    } else {
+        v = make([]int, n + 1)
+    }
+    v[0] = k
+    return v
+}
+
+main() {
+    s = fill(3)
+    h = keep(4)
+    b = both(2, false)
+    println("rebound ${s[0]} ${s.len} ${h.data[0]} ${h.data.len} ${b[0]} ${b.len}")
+    free(s)
+    free(h.data)
+    free(b)
+}
+AE
+out=$(cd "$TMP" && AETHER_HOME="$ROOT" "$AE" run rebound.ae 2>&1)
+case "$out" in
+    *"rebound 3 3 2 4 7 3"*) ;;
+    *) echo "  [FAIL] rebound: not \"rebound 3 3 2 4 7 3\":"
        echo "$out" | sed 's/^/        /'
        fails=$((fails + 1)) ;;
 esac

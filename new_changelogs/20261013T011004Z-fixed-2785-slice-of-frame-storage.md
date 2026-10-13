@@ -7,5 +7,9 @@
   now error E0800 at the value that leaves: a return (alone, in a struct or
   tuple, or in a closure that captured it), a store to a module-level `var`,
   and a store to a field of a struct behind a pointer or of a global. A
-  slice used while the function runs, passed down to a call, or of a
-  parameter's array or a `make` buffer, is unchanged (#2785).
+  fixed-size array parameter is the function's own copy, so a slice of it
+  is refused the same way. What a name holds where it leaves decides: a
+  local or a local struct's field re-bound to a `make` buffer before it
+  leaves is accepted, one that still holds the frame's storage on any path
+  to the exit is not. A slice used while the function runs, passed down to
+  a call, or of a slice parameter or a `make` buffer, is unchanged (#2785).
