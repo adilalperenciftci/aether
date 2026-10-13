@@ -4272,7 +4272,7 @@ void emit_struct_literal_array_field(CodeGenerator* gen, const char* sname, ASTN
      * through a pointer that accepts a volatile array. */
     if (kind == AF_STRING) fprintf(gen->output, "_aether_str_elems_take(%s, ", into);
     else if (kind == AF_CLOSURE) fprintf(gen->output, "_aether_closure_elems_take(%s, ", into);
-    else if (kind == AF_STRUCT) fprintf(gen->output, "%s_dup_elems(%s, ", es, into);
+    else if (kind == AF_STRUCT) fprintf(gen->output, "_aether_dup_each_%s(%s, ", es, into);
     else fprintf(gen->output, "(void)_aether_array_arg_copy(%s, ", into);
     fprintf(gen->output, "(");
     generate_expression(gen, src);
@@ -11328,10 +11328,10 @@ void emit_struct_take(CodeGenerator* gen, ASTNode* e, const char* sname,
         !is_promoted_capture(gen, e->value) && !is_env_capture_name(gen, e->value) &&
         !alias_source_must_copy(gen, e->value)) {
         /* The local hands its value over and disowns what it held
-         * (<Name>_move): a function, so the move is an expression to any
-         * C compiler (#2765). */
-        fprintf(gen->output, "%s_move%s(&%s)", sname,
-                is_try_clobbered_var(gen, e->value) ? "_volatile" : "", e->value);
+         * (_aether_move_<Name>): a function, so the move is an expression
+         * to any C compiler (#2765). */
+        fprintf(gen->output, "_aether_%smove_%s(&%s)",
+                is_try_clobbered_var(gen, e->value) ? "volatile_" : "", sname, e->value);
         return;
     }
     fprintf(gen->output, "%s_dup(", sname);

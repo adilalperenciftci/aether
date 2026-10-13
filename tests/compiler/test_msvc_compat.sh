@@ -20,7 +20,7 @@
 # C4047 the wrong level of indirection, C4090 a dropped qualifier) are errors;
 # the rest of /W3 is printed and allowed.
 #
-# The programs of tests 5-10 are tests/regression/test_issue2765_*.ae, which
+# The programs of tests 5-11 are tests/regression/test_issue2765_*.ae, which
 # the .ae sweep runs on the GCC path. Under gcc they are also built and run
 # with AETHER_GCC_COMPAT forced to 0, when build/ae is there, so the plain C
 # forms are checked for what they compute, not only that they compile.
@@ -245,7 +245,7 @@ generate closure_str
 [ -z "$use_gcc" ] || strict_c11 closure_str "A string stored into a try-written array element"
 [ -z "$use_cl" ] || cl_compile closure_str "A string stored into a try-written array element"
 
-# Tests 5-10 (#2765): every construct that needs a temporary in the middle of
+# Tests 5-11 (#2765): every construct that needs a temporary in the middle of
 # an expression, one program per family, each of which the .ae sweep runs on
 # the GCC path and checks. All of them were GNU statement expressions here.
 #   string_slots      a string taken into an owning slot: an element of a
@@ -260,7 +260,9 @@ generate closure_str
 #                     comparisons, a sequence literal, a closure stored in a
 #                     list, heap.free of an @observable box
 #   operand_order     operands evaluated ahead in source order (#2478), in a
-#                     call, an operation, a struct literal and an array literal
+#                     call, an operation, a struct literal, an array literal
+#                     and a message sent, operands narrower than int among
+#                     them (their temporary has the type C promotes them to)
 #   optionals         `f() or v`, `o!`, `o ?? d`, `o?.f`, `t!` and bit_set
 #                     subsets
 #   struct_values     a struct moved out of a local (also one a `try` writes),
@@ -268,7 +270,10 @@ generate closure_str
 #                     filled from arrays, a condition's struct temporary
 #   statement_values  an `or` with a block, a propagating `!` and a call with
 #                     a trailing block, run ahead of their statement
-for prog in string_slots call_temps operand_order optionals struct_values statement_values; do
+#   helper_names      the struct helpers the forms above call, beside functions
+#                     of the program named as those helpers once were
+for prog in string_slots call_temps operand_order optionals struct_values statement_values \
+        helper_names; do
     cp "tests/regression/test_issue2765_$prog.ae" "$TMP/$prog.ae"
     generate "$prog"
     [ -z "$use_gcc" ] || strict_c11 "$prog" "Temporaries: $prog"
@@ -281,7 +286,8 @@ done
 AE="./build/ae"
 [ -f "$AE" ] || [ ! -f "$AE.exe" ] || AE="$AE.exe"
 if [ -n "$use_gcc" ] && [ -f "$AE" ]; then
-    for prog in string_slots call_temps operand_order optionals struct_values statement_values; do
+    for prog in string_slots call_temps operand_order optionals struct_values statement_values \
+        helper_names; do
         if ! AE_CC="gcc -DAETHER_GCC_COMPAT=0" "$AE" run "tests/regression/test_issue2765_$prog.ae" \
                 >"$TMP/$prog.run" 2>&1 || [ "$(tail -n 1 "$TMP/$prog.run" | tr -d '\r')" != "ok" ]; then
             sed 's/^/    /' "$TMP/$prog.run" | tail -20

@@ -1,0 +1,80 @@
+// Regression (#2765): the struct helpers the plain C forms brought in (the
+// move of a local on its last use, its volatile variant for a local a `try`
+// body writes, and the copy of each element of an array of structs a field
+// takes) were named `<Name>_move`, `<Name>_move_volatile` and
+// `<Name>_dup_elems`, emitted for every struct that owns strings. A
+// function of the program with one of those names then clashed with them,
+// and the C did not compile ("conflicting types"), where it had. They are
+// named in the generated code's reserved namespace now. This defines a
+// function under each of the old names and makes the program use every
+// helper as well; tests/compiler/test_msvc_compat.sh compiles it as strict
+// C11 and under cl.exe and runs it without GCC extensions.
+
+import std.string
+
+extern exit(code: int)
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+struct Ship {
+    name: string
+    speed: int
+}
+
+struct Fleet {
+    ships: Ship[2]
+}
+
+Ship_move(s: Ship, dx: int) -> int {
+    return s.speed + dx
+}
+
+Ship_move_volatile(n: int) -> int {
+    return n + 1
+}
+
+Ship_dup_elems(n: int) -> int {
+    return n * 2
+}
+
+// A local moved into another on its last use.
+moved(w: string) -> string {
+    a = Ship { name: string.concat(w, "!"), speed: 1 }
+    b = a
+    return b.name
+}
+
+// The same for a local a `try` body writes.
+moved_in_try(w: string) -> int {
+    a = Ship { name: "x", speed: 1 }
+    try {
+        a = Ship { name: string.concat(w, "?"), speed: 5 }
+    } catch e {
+        check(false, "no panic")
+    }
+    b = a
+    return b.speed
+}
+
+// An array field taken from another array of ships.
+fleet(w: string) -> string {
+    ships = [Ship { name: string.concat(w, "1"), speed: 1 }, Ship { name: "lit", speed: 2 }]
+    f = Fleet { ships: ships }
+    return f.ships[0].name
+}
+
+main() {
+    s = Ship { name: string.concat("en", "terprise"), speed: 3 }
+    println("${Ship_move(s, 4)} ${Ship_dup_elems(5)} ${s.name}")
+    check(Ship_move(s, 4) == 7 && Ship_dup_elems(5) == 10 && Ship_move_volatile(1) == 2,
+        "the program's own functions")
+    check(moved("m") == "m!", "a struct moved on its last use")
+    check(moved_in_try("t") == 5, "a volatile struct moved")
+    check(fleet("f") == "f1", "an array field of structs from an array")
+    println("ok")
+}

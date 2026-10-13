@@ -1238,14 +1238,38 @@ static void order_bind(ASTNode* node, const char* name) {
     g_order_count++;
 }
 
+/* Does C promote a value of Aether type `t` to int wherever it is an
+ * operand? An integer type narrower than int (byte, uint8_t, uint16_t,
+ * int8_t, int16_t, bool, an enum, a bitstruct over one) is, and so is an
+ * int under any alias. */
+static int type_promotes_to_int(const Type* t) {
+    switch (t->kind) {
+        case TYPE_INT: case TYPE_BOOL: case TYPE_BYTE: case TYPE_UINT8: case TYPE_UINT16:
+        case TYPE_ENUM:
+            return 1;
+        case TYPE_BITSTRUCT:
+            return !t->element_type || type_promotes_to_int(t->element_type);
+        default:
+            return 0;
+    }
+}
+
 /* #2765: the C type an operand's temp is declared with where __auto_type
- * cannot infer it: the operand's Aether type, NULL when it has none a
- * declaration can spell (an unresolved type, an array, which the operand
- * decays from). */
+ * cannot infer it: the type C gives the operand, so the temp holds the
+ * value the operation would have read in place. That is the operand's
+ * Aether type after C's integer promotions: the checker types `b + b`, `~b`
+ * and `-b` on a byte as a byte, which C computes in int, and a temp of the
+ * narrow type cut the value (`(b + b) + f()` with b = 200 gave 145, not
+ * 401). An operand of a narrow type that is no computation (a variable, a
+ * call) holds the same value in an int, and every operator promotes it
+ * there anyway. NULL when the operand has no type a declaration can spell
+ * (an unresolved type, an array, which the operand decays from). */
 static const char* order_c11_type(ASTNode* op) {
     Type* t = op ? op->node_type : NULL;
+    while (t && t->kind == TYPE_ISOLATED && t->element_type) t = t->element_type;
     if (!t || t->kind == TYPE_UNKNOWN || t->kind == TYPE_VOID || t->kind == TYPE_WILDCARD ||
         (t->kind == TYPE_ARRAY && t->array_size > 0)) return NULL;
+    if (type_promotes_to_int(t)) return "int";
     return get_c_type(t);
 }
 
@@ -1350,6 +1374,30 @@ static int emit_in_operand_order(CodeGenerator* gen, ASTNode* expr) {
     int n = order_operands(expr, ops, ORDER_MAX_OPERANDS);
     if (n < 2 || !order_hoist_set(gen, ops, n, hoist)) return 0;
     int saved = g_order_count;
+    if (expr->type == AST_SEND_FIRE_FORGET) {
+        /* A fire-and-forget send is written as a block, a statement, which
+         * no comma expression can hold (#2765): its operands go ahead of it
+         * as declarations in a block of their own, typed as an initializer
+         * list's are (order_prelude_begin). */
+        fprintf(gen->output, "{ ");
+        for (int k = 0; k < n; k++) {
+            if (!hoist[k]) continue;
+            const char* name = cg_internf("_eo%d", g_order_counter++);
+            const char* c11 = order_c11_type(ops[k]);
+            if (c11) fprintf(gen->output, "_AE_AUTO(%s) %s = (", c11, name);
+            else fprintf(gen->output, "__auto_type %s = (", name);
+            generate_expression(gen, ops[k]);
+            fprintf(gen->output, "); ");
+            order_bind(ops[k], name);
+        }
+        ASTNode* saved_emitting = g_order_emitting;
+        g_order_emitting = expr;
+        generate_expression(gen, expr);
+        g_order_emitting = saved_emitting;
+        fprintf(gen->output, " }");
+        order_prelude_end(saved);
+        return 1;
+    }
     int typed = 1;
     for (int k = 0; k < n; k++)
         if (hoist[k] && !order_operand_hands_off(gen, expr, k) && !order_c11_type(ops[k]))
