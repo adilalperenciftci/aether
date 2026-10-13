@@ -434,9 +434,10 @@ static inline void sched_wake(Scheduler* target) {
 // timed as well, so a wake that is missed costs latency, never a hang.
 //
 // The conditions are made once per process and never again. A core's own
-// park_mutex is remade by each scheduler_init(), after its thread was
-// joined; an actor thread is not joined by the scheduler and may still be
-// leaving the park when the next scheduler_init() runs.
+// park_mutex lives for one lifecycle (made by scheduler_init(), destroyed
+// with the core tables once its thread was joined); an actor thread is not
+// joined by the scheduler and may still be leaving the park when the next
+// scheduler_init() runs.
 // ---------------------------------------------------------------------------
 
 static pthread_mutex_t g_actor_park_mutex[MAX_CORES];
@@ -2084,6 +2085,7 @@ void scheduler_init(int cores) {
         schedulers[i].io_map_capacity = schedulers[i].io_map ? AETHER_IO_MAX_FDS : 0;
         schedulers[i].io_registered_count = 0;
 
+        // This lifecycle's; scheduler_free_core_tables() destroys them.
         pthread_mutex_init(&schedulers[i].park_mutex, NULL);
         pthread_cond_init(&schedulers[i].park_cond, NULL);
         pthread_mutex_init(&schedulers[i].foreign_lock, NULL);
@@ -2372,8 +2374,9 @@ void scheduler_shutdown(void) {
 }
 
 // Free the per-core tables scheduler_init allocated: the actor slots, the
-// I/O poller and its fd map. scheduler_cleanup() and a scheduler_init() that
-// follows a scheduler_shutdown() both release them this way.
+// I/O poller and its fd map, the park and foreign-send locks.
+// scheduler_cleanup() and a scheduler_init() that follows a
+// scheduler_shutdown() both release them this way.
 static void scheduler_free_core_tables(void) {
     // Actors never released (a program or host that stops the scheduler
     // with actors alive, a panicked actor) are reachable only through the
@@ -2419,6 +2422,17 @@ static void scheduler_free_core_tables(void) {
     for (int i = 0; i < num_cores; i++) {
         // Clean up thread resources
         schedulers[i].thread = 0;
+
+        // The core's park and foreign-send locks live for one lifecycle:
+        // scheduler_init() makes them and they end here, with the core's
+        // thread joined. On Windows a critical section that has once been
+        // contended holds a heap block (its 48-byte debug record) until
+        // DeleteCriticalSection, so making them again without this lost a
+        // block for each lock contended in the lifecycle: a wake that met
+        // the core at its park, two threads off the cores sending at once.
+        pthread_mutex_destroy(&schedulers[i].park_mutex);
+        pthread_cond_destroy(&schedulers[i].park_cond);
+        pthread_mutex_destroy(&schedulers[i].foreign_lock);
 
         // Clean up I/O event loop
         aether_io_poller_destroy(&schedulers[i].io_poller);
