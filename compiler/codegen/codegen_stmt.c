@@ -2641,16 +2641,14 @@ static ASTNode* def_of_body(CodeGenerator* gen, const char* fn_name, ASTNode* bo
     return (dc && dc->count > 0) ? dc->nodes[0] : NULL;
 }
 
-/* #2815: is `e` `o ?? d` or `o!` over a `string?` named by an identifier
- * that is not a parameter of `fn_def` (a local, a cell, or a module var)?
- * A local owns the string it holds and frees it at scope exit, after the
- * return value is read and before the caller uses it, so a return takes a
- * copy of it. A parameter's string is the caller's and outlives the call;
- * a module var keeps its strings, so a copy of one costs a copy only. */
-static int opt_string_local_unwrap(CodeGenerator* gen, ASTNode* e, ASTNode* fn_def) {
-    if (!e || (e->type != AST_NULL_COALESCE && e->type != AST_TUPLE_UNWRAP) ||
-        e->child_count < 1) return 0;
-    ASTNode* o = e->children[0];
+/* #2815: is `o` a `string?` named by an identifier that is not a
+ * parameter of `fn_def` (a local, a cell, or a module var)? A local owns
+ * the string it holds and frees it at scope exit, after a return value
+ * read from it is taken and before the caller uses it, so a return takes
+ * a copy of it (or the some binding over it is one). A parameter's string
+ * is the caller's and outlives the call; a module var keeps its strings,
+ * so a copy of one costs a copy only. */
+static int opt_string_name_owned(CodeGenerator* gen, ASTNode* o, ASTNode* fn_def) {
     if (!o || o->type != AST_IDENTIFIER || !o->value || !is_opt_string_type(o->node_type))
         return 0;
     for (int i = 0; fn_def && i < fn_def->child_count; i++) {
@@ -2669,6 +2667,13 @@ static int opt_string_local_unwrap(CodeGenerator* gen, ASTNode* e, ASTNode* fn_d
         }
     }
     return 1;
+}
+
+/* #2815: is `e` `o ?? d` or `o!` over such a `string?` (opt_string_name_owned)? */
+static int opt_string_local_unwrap(CodeGenerator* gen, ASTNode* e, ASTNode* fn_def) {
+    if (!e || (e->type != AST_NULL_COALESCE && e->type != AST_TUPLE_UNWRAP) ||
+        e->child_count < 1) return 0;
+    return opt_string_name_owned(gen, e->children[0], fn_def);
 }
 
 static int return_expr_is_heap(CodeGenerator* gen, ASTNode* expr,
@@ -2696,6 +2701,12 @@ static int return_expr_is_heap(CodeGenerator* gen, ASTNode* expr,
      * it at scope exit, before the caller reads it, so the return takes a
      * copy (opt_string_local_unwrap). */
     if (opt_string_local_unwrap(gen, expr, def_of_body(gen, fn_name, fn_body_root))) return 1;
+    /* So does `o ?? d` whose default is a string the function owns (a
+     * local bound to a heap string, a parameter it captured): the default
+     * is freed at scope exit like the local's string, so the return takes
+     * a copy of whichever is taken. */
+    if (expr->type == AST_NULL_COALESCE && expr->child_count >= 2 &&
+        return_expr_is_heap(gen, expr->children[1], fn_body_root, fn_name)) return 1;
     if (expr->type == AST_IF_EXPRESSION && expr->child_count >= 3) {
         return return_expr_is_heap(gen, expr->children[1], fn_body_root, fn_name) ||
                return_expr_is_heap(gen, expr->children[2], fn_body_root, fn_name);
@@ -2731,16 +2742,12 @@ static ASTNode* owned_opt_some_arm(CodeGenerator* gen, ASTNode* node, const char
     if (!node || node->type != AST_MATCH_STATEMENT || node->child_count < 2) return NULL;
     ASTNode* subj = node->children[0];
     if (!subj || !is_opt_string_type(subj->node_type)) return NULL;
-    int owned = is_owned_opt_string_call(gen, subj);
-    if (!owned && subj->type == AST_IDENTIFIER && subj->value && fn_name) {
-        ASTNode* fn_def = def_of_body(gen, fn_name, fn_body_root);
-        const char* scope = fn_def ? fn_scope_name(gen->program, fn_def) : fn_name;
-        char** promoted = NULL;
-        int count = 0;
-        get_promoted_names_for_func(gen, scope, &promoted, &count);
-        for (int i = 0; i < count && !owned; i++)
-            owned = promoted[i] && strcmp(promoted[i], subj->value) == 0;
-    }
+    /* A cell, a local or a parameter a closure writes (#2815): its some
+     * binding is a copy the arm owns. A module var's stays a view, which
+     * the return copies, so counting it costs a copy only. */
+    int owned = is_owned_opt_string_call(gen, subj) ||
+                (fn_name && opt_string_name_owned(gen, subj, def_of_body(gen, fn_name,
+                                                                         fn_body_root)));
     if (!owned) return NULL;
     for (int i = 1; i < node->child_count; i++) {
         ASTNode* arm = node->children[i];
@@ -5047,9 +5054,19 @@ static void walk_returns_for_heap_at_in(CodeGenerator* gen, ASTNode* node,
         cs->names[cs->count++] = node->value;
         pushed = 1;
     }
+    /* The owned `some(s)` binding is heap evidence at a tuple position as
+     * at a single return (#2823, walk_returns_for_heap_check_in). */
+    ASTNode* owned_some_arm = owned_opt_some_arm(gen, node, fn_name, fn_body_root);
     for (int i = 0; i < node->child_count && !*vetoed; i++) {
+        int bound = 0;
+        if (owned_some_arm && node->children[i] == owned_some_arm &&
+            cs->count < CATCH_SCOPE_MAX) {
+            cs->names[cs->count++] = owned_some_arm->children[0]->value;
+            bound = 1;
+        }
         walk_returns_for_heap_at_in(gen, classifier_child(gen, node, i), position,
                                     fn_body_root, fn_name, found, any_heap, vetoed, cs);
+        if (bound) cs->count--;
     }
     if (pushed) cs->count--;
 }
@@ -15553,10 +15570,15 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                     /* #2795: a `string?` closure cell gives its string back
                      * at its next store, which the arm may run (a closure
                      * call that re-binds it), so the `some` binding is a
-                     * copy the arm owns, as below. A module var keeps every
-                     * string it held, so its binding stays a view. */
-                    int holder_copy = !is_owned_opt_string_call(gen, match_expr) &&
-                                      some_bind && is_owning_opt_string_holder(gen, match_expr);
+                     * copy the arm owns, as below. So does a `string?`
+                     * local, at its re-bind or its scope exit, which a
+                     * `return s` in the arm runs before the caller reads
+                     * the binding (#2815). A module var keeps every string
+                     * it held, so its binding stays a view. */
+                    int holder_copy = !is_owned_opt_string_call(gen, match_expr) && some_bind &&
+                                      (is_owning_opt_string_holder(gen, match_expr) ||
+                                       (match_expr->type == AST_IDENTIFIER && match_expr->value &&
+                                        is_opt_str_var(gen, match_expr->value)));
                     if (is_owned_opt_string_call(gen, match_expr) || holder_copy) {
                         /* #2750: the string of a `string?` an Aether function
                          * handed over is the match's, and nothing else frees
