@@ -20,6 +20,7 @@
 // VERSION goes up by one with each addition.
 
 import std.lanes
+import std.list
 import std.string
 
 exports(
@@ -29,7 +30,7 @@ exports(
     kind_name,
     version, body, source, hash, param_count, param_name, param_type,
     capture_count, capture, capture_named,
-    kind, type_of, name, op, lit, line, child_count, child,
+    kind, type_of, name, op, lit, line, child_count, child, children, walk,
     capture_name, capture_type, cell,
     get_float, get_f32, get_int, get_long, get_bool, get_string, get_ptr, get_f32x4,
     to_source, dump, free
@@ -165,6 +166,46 @@ lit(n: Node) -> string { return aether_quote_lit(n as ptr) }
 line(n: Node) -> int { return aether_quote_line(n as ptr) }
 child_count(n: Node) -> int { return aether_quote_child_count(n as ptr) }
 child(n: Node, i: int) -> Node { return aether_quote_child(n as ptr, i) as Node }
+
+// The node's children as a std.list of Node handles (`list.get(l, i)` gives
+// one as a ptr, `as quote.Node` makes it a Node again). The caller frees the
+// list with list.free; the nodes stay the tree's.
+children(n: Node) -> ptr {
+    out = list.new()
+    i = 0
+    count = child_count(n)
+    while i < count {
+        list.add(out, child(n, i) as ptr)
+        i = i + 1
+    }
+    return out
+}
+
+// Call `f` with `n` and then with every node under it, in pre-order (a node
+// before its children, children first to last):
+//
+//   quote.walk(quote.body(t)) callback | m: quote.Node | {
+//       if quote.kind(m) == quote.CALL { println(quote.name(m)) }
+//   }
+walk(n: Node, f: fn) {
+    // A stack of the nodes still to visit, not recursion: a closure passed
+    // on to another call is taken to escape, and its caller would no longer
+    // free it.
+    todo = list.new()
+    if n as ptr != null { list.add(todo, n as ptr) }
+    while list.size(todo) > 0 {
+        last = list.size(todo) - 1
+        m = list.list_get_raw(todo, last) as Node
+        list.remove(todo, last)
+        call(f, m)
+        i = child_count(m) - 1
+        while i >= 0 {
+            list.add(todo, child(m, i) as ptr)
+            i = i - 1
+        }
+    }
+    list.free(todo)
+}
 
 // ---- captures ----
 

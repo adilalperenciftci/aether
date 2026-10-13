@@ -13,6 +13,7 @@
   library needs to write GLSL with its uniforms found for it, and what a
   query builder or a test library that prints the failing expression
   needs. The new `std.quote` module reads the tree (kinds, accessors,
+  `children` and a pre-order `walk` taking a closure,
   typed capture getters that panic naming both types on a mismatch, a
   printer back to Aether source, a typed dump, a hash of the tree's shape
   for caching). `quote` is not a keyword: it quotes only straight after a

@@ -61,7 +61,9 @@ f(args) quote -> expr                   // no parameters, one expression
 
 `quote.Tree`, `quote.Node` and `quote.Capture` are opaque handles read
 through accessors ([std/quote/README.md](../std/quote/README.md) lists
-them). The tree has:
+them): `quote.child(n, i)` one child at a time, `quote.children(n)` all of
+them as a list, and `quote.walk(n) callback | m: quote.Node | { ... }` every
+node under `n`, a node before its children. The tree has:
 
 - the **parameters**, each a name and a type;
 - the **body**, a `BLOCK` node;

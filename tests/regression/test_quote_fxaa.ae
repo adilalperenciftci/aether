@@ -149,13 +149,23 @@ main() {
     fails = fails + check("lc", stmt_type(t, 6), "float")
     fails = fails + check("along", stmt_type(t, 20), "bool")
     fails = fails + check("off", stmt_type(t, 25), "vec2")
-    n = quote.child(quote.child(quote.body(t), 2), 0) // rgb(texture(screen, uv + ...))
-    sum = quote.child(quote.child(n, 0), 1) // uv + vec2(...) * texel
-    fails = fails + check("vector arithmetic", "${quote.op(sum)} ${quote.type_of(sum)} ${quote.type_of(quote.child(sum, 1))}", "+ vec2 vec2")
-    early = quote.child(quote.child(quote.child(quote.body(t), 14), 1), 0)
-    fails = fails + check("early return", "${quote.kind_name(quote.kind(early))} ${quote.type_of(early)}", "RETURN Fragment")
-    choose = quote.child(quote.child(quote.body(t), 25), 0)
-    fails = fails + check("choose", "${quote.kind_name(quote.kind(choose))} ${quote.type_of(choose)}", "CHOOSE vec2")
+
+    // Walking the whole tree: the vector sums, the returns and the `if`s
+    // used as values, each with the checker's type.
+    sums = 0
+    returns = ""
+    chooses = ""
+    quote.walk(quote.body(t)) callback | m: quote.Node | {
+        k = quote.kind(m)
+        if k == quote.BINARY && quote.op(m) == "+" && quote.type_of(m) == "vec2" {
+            sums = sums + 1
+        }
+        if k == quote.RETURN { returns = "${returns}${quote.type_of(m)} " }
+        if k == quote.CHOOSE { chooses = "${chooses}${quote.type_of(m)} " }
+    }
+    fails = fails + check("vector arithmetic", "${sums}", "5")
+    fails = fails + check("returns", returns, "Fragment Fragment ")
+    fails = fails + check("chooses", chooses, "float float float vec2 ")
 
     // The function's parameters are the shader's uniforms, read through
     // their cells.

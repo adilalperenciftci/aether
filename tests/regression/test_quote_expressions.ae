@@ -7,6 +7,7 @@
 // which the dump shows.
 
 import std.quote
+import std.list
 import std.math
 
 extern exit(code: int)
@@ -43,7 +44,7 @@ main() {
         "(param a :float) (param b :int) (BLOCK (RETURN :float (BINARY + :float (BINARY * :float (LOCAL a :float) (LIT 2.0 :float)) (LIT 1.0 :float))))")
     fails = fails + check("params", "${quote.param_count(t)} ${quote.param_name(t, 1)} ${quote.param_type(t, 1)}", "2 b int")
     fails = fails + check("version", "${quote.version(t)}", "${quote.VERSION}")
-    fails = fails + check("source", quote.source(t), "test_quote_expressions.ae:40")
+    fails = fails + check("source", quote.source(t), "test_quote_expressions.ae:41")
     quote.free(t)
 
     // Parentheses come back where precedence needs them, and only there.
@@ -80,10 +81,20 @@ main() {
         "|p: Pair, xs: int[3], i: int| {\n    return Pair { a: p.b, b: if xs[i] > 0 { p.a } else { 0.0 } }\n}")
     fails = fails + check("make tree", tree(t),
         "(param p :Pair) (param xs :int[3]) (param i :int) (BLOCK (RETURN :Pair (MAKE :Pair (FIELD_VALUE a :float (FIELD b :float (LOCAL p :Pair))) (FIELD_VALUE b :float (CHOOSE :float (BINARY > :bool (INDEX :int (LOCAL xs :int[3]) (LOCAL i :int)) (LIT 0 :int)) (FIELD a :float (LOCAL p :Pair)) (LIT 0.0 :float))))))")
+    // A MAKE's children, through quote.children: a FIELD_VALUE per field.
     m = quote.child(quote.child(quote.body(t), 0), 0)
-    a = quote.child(m, 0)
-    fails = fails + check("make fields", "${quote.kind_name(quote.kind(m))} ${quote.child_count(m)} ${quote.kind_name(quote.kind(a))} ${quote.name(a)} ${quote.child_count(a)} ${quote.name(quote.child(m, 1))}",
-        "MAKE 2 FIELD_VALUE a 1 b")
+    kids = quote.children(m)
+    fields = ""
+    i = 0
+    while i < list.size(kids) {
+        k, _ = list.get(kids, i)
+        f = k as quote.Node
+        fields = "${fields}${quote.kind_name(quote.kind(f))}:${quote.name(f)}:${quote.type_of(f)}/${quote.child_count(f)} "
+        i = i + 1
+    }
+    list.free(kids)
+    fails = fails + check("make fields", "${quote.kind_name(quote.kind(m))} ${fields}",
+        "MAKE FIELD_VALUE:a:float/1 FIELD_VALUE:b:float/1 ")
     quote.free(t)
 
     // Walking the tree by hand: the kinds are std.quote's constants.
@@ -93,7 +104,13 @@ main() {
     if quote.kind(ret) != quote.RETURN { fails = fails + check("RETURN kind", "${quote.kind(ret)}", "${quote.RETURN}") }
     if quote.kind(add) != quote.BINARY { fails = fails + check("BINARY kind", "${quote.kind(add)}", "${quote.BINARY}") }
     fails = fails + check("walk", "${quote.op(add)} ${quote.type_of(add)} ${quote.child_count(add)} ${quote.name(quote.child(add, 0))} ${quote.lit(quote.child(add, 1))} ${quote.line(add)}",
-        "+ float 2 x 1.0 90")
+        "+ float 2 x 1.0 101")
+    // quote.walk visits every node, a node before its children.
+    seen = ""
+    quote.walk(quote.body(t)) callback | n: quote.Node | {
+        seen = "${seen}${quote.kind_name(quote.kind(n))} "
+    }
+    fails = fails + check("walk order", seen, "BLOCK RETURN BINARY LOCAL LIT ")
     quote.free(t)
 
     // The hash is of the tree's shape: the same quote written twice hashes

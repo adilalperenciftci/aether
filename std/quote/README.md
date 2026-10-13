@@ -54,6 +54,8 @@ kinds are the contract.
 | `op(n)` | an operator: `"+"`, `"<"`, `"!"`; on `ASSIGN`, `"="`, `"+="`, ... |
 | `lit(n)` | a literal's text |
 | `child_count(n)`, `child(n, i)` | its children |
+| `children(n)` | its children as a `std.list` of Node handles; free the list with `list.free` |
+| `walk(n, f)` | call the closure `f` with `n` and every node under it, in pre-order |
 | `line(n)` | its source line |
 
 Kinds, version 1 (they are added, never removed or renumbered, and
@@ -89,6 +91,38 @@ handed to: free it with `quote.free(t)` when done, `defer quote.free(t)`
 being the idiom. A function that keeps the tree (in a struct, or by
 returning it) hands the duty on with it. Trees are not freed at scope exit
 ([docs/quote.md](../../docs/quote.md#freeing-a-tree) says why).
+
+## Walking a tree
+
+`walk` visits a node and everything under it, a node before its children,
+which is how a back end collects what it needs without a recursive function
+of its own:
+
+```aether,run
+import std.quote
+
+calls(t: quote.Tree) -> string {
+    defer quote.free(t)
+    seen = ""
+    quote.walk(quote.body(t)) callback | n: quote.Node | {
+        if quote.kind(n) == quote.CALL { seen = "${seen}<${quote.name(n)}>" }
+    }
+    return seen
+}
+
+twice(x: float) -> float { return x * 2.0 }
+
+main() {
+    println(calls() quote | x: float | -> twice(x) + twice(twice(x)))
+}
+```
+```output
+<twice><twice><twice>
+```
+
+`children(n)` hands the children over as a list, for a loop:
+`kids = quote.children(n)`, `k, _ = list.get(kids, i)`, `k as quote.Node`,
+then `list.free(kids)` (the nodes stay the tree's).
 
 ## Captures
 
