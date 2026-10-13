@@ -696,6 +696,20 @@ void ast_stamp_source_file(ASTNode* node, const char* path);
  * this, never through its merged C name. */
 const char* ast_source_name(const ASTNode* def, char* buf, size_t cap);
 
+/* A call's trailing block, `f(x) { ... }`: an AST_CLOSURE valued "trailing".
+ * It is no function value: it runs inline, once, where it is written (the
+ * checker refuses one where the callee takes an `fn`), so a `return` in it
+ * returns from the function around it. */
+int ast_is_trailing_block(const ASTNode* n);
+
+/* #2766: is `n` a function of its own, whose `return`s return from it and
+ * not from the function it is written in? A closure is, a trailing block is
+ * not. Every walk that collects a function's returns (whether one gives a
+ * value, which type, whether it is a heap string) stops at these nodes and
+ * goes on into a trailing block, so a return there counts as the function's
+ * everywhere the others do. */
+int ast_is_own_function(const ASTNode* n);
+
 /* #2146: the lane index `.x` / `.y` / `.z` / `.w` names on a vector type,
  * or -1 when the name is not a lane accessor or the type has too few lanes
  * (`.z` on an f64x2). One table, so the typechecker and codegen cannot

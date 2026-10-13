@@ -2528,13 +2528,15 @@ static int is_declared_in_function(ASTNode* program, const char* func_name, cons
 }
 
 // Walk subtree and return the expression of the first return statement
-// carrying a non-print value. Does not descend into inner closures.
+// carrying a non-print value. Does not descend into inner closures; a
+// trailing block's returns are the walked function's (#2766), as in every
+// walk here over a function's returns.
 static ASTNode* find_first_return_expr(ASTNode* node);
 
 /* #2501: the first return statement under `node` that carries a value, not
  * looking into nested closures (find_first_return_expr's walk). */
 static ASTNode* find_first_value_return(ASTNode* node) {
-    if (!node || node->type == AST_CLOSURE) return NULL;
+    if (!node || ast_is_own_function(node)) return NULL;
     if (node->type == AST_RETURN_STATEMENT && node->child_count > 0 &&
         node->children[0] && node->children[0]->type != AST_PRINT_STATEMENT) {
         return node;
@@ -2586,7 +2588,7 @@ static const char* closure_tuple_c_name(Type* t) {
 
 static ASTNode* find_first_return_expr(ASTNode* node) {
     if (!node) return NULL;
-    if (node->type == AST_CLOSURE) return NULL;
+    if (ast_is_own_function(node)) return NULL;
     if (node->type == AST_RETURN_STATEMENT && node->child_count > 0 &&
         node->children[0] && node->children[0]->type != AST_PRINT_STATEMENT) {
         return node->children[0];
@@ -2614,7 +2616,7 @@ static ASTNode* find_first_return_expr(ASTNode* node) {
  * makes the closure a string closure, so every path is wrapped. */
 static int any_return_is_string(ASTNode* node) {
     if (!node) return 0;
-    if (node->type == AST_CLOSURE) return 0;
+    if (ast_is_own_function(node)) return 0;
     if (node->type == AST_RETURN_STATEMENT && node->child_count > 0 &&
         node->children[0] && node->children[0]->type != AST_PRINT_STATEMENT) {
         ASTNode* e = node->children[0];
@@ -3066,7 +3068,9 @@ static void propagate_call_return_types_in(CodeGenerator* gen, ASTNode* node,
      * Carrying the outer type in would stamp `return call(...)` inside
      * a closure with the enclosing function's return type, which is how
      * `bump = || { return call(digit, 1) }` inside a closure-returning
-     * builder got typed as the closure struct instead of int. */
+     * builder got typed as the closure struct instead of int. A call's
+     * trailing block runs inline: its returns are the function's, so it
+     * keeps the function's type (#2766). */
     if (node->type == AST_CLOSURE) {
         char own[64];
         const char* inner = scope;
@@ -3074,8 +3078,9 @@ static void propagate_call_return_types_in(CodeGenerator* gen, ASTNode* node,
             closure_scope_name(node, own, sizeof(own));
             inner = own;
         }
+        Type* ret = ast_is_own_function(node) ? NULL : fn_ret;
         for (int i = 0; i < node->child_count; i++) {
-            propagate_call_return_types_in(gen, node->children[i], NULL, inner);
+            propagate_call_return_types_in(gen, node->children[i], ret, inner);
         }
         return;
     }

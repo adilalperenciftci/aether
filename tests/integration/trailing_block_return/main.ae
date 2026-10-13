@@ -1,0 +1,35 @@
+// #2766: a `return` in a builder's trailing block returns from the function
+// around it. A bare call there resolves through the block's receiver, so
+// whether the function returns a value is settled through that receiver too.
+
+import blk
+
+// The only value return is in the block.
+first(n: int) {
+    blk.run("first") {
+        return n * 2
+    }
+}
+
+// `note` is blk.note, which returns nothing: this function returns nothing.
+noting(n: int) {
+    blk.run("noting") {
+        return note(n)
+    }
+}
+
+// `size` is blk.size, which returns an int.
+sized() {
+    blk.run("sized") {
+        return size()
+    }
+}
+
+main() {
+    first(4)
+    v = first(5)
+    println("first ${v}")
+    noting(3)
+    s = sized()
+    println("sized ${s}")
+}

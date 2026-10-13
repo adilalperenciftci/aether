@@ -67,9 +67,10 @@ static int has_value_type(Type* t) {
 }
 
 /* A `return` with a value anywhere in `n`, outside closures: a closure's
- * `return` is its own. The same test codegen's has_return_value makes. */
+ * `return` is its own, a trailing block's is the function's (#2766). The
+ * same test codegen's has_return_value makes. */
 static int returns_value(ASTNode* n) {
-    if (!n || n->type == AST_CLOSURE) return 0;
+    if (!n || ast_is_own_function(n)) return 0;
     if (n->type == AST_RETURN_STATEMENT && n->child_count > 0 && n->children[0] &&
         n->children[0]->type != AST_PRINT_STATEMENT)
         return 1;
@@ -82,7 +83,7 @@ static int returns_value(ASTNode* n) {
  * block that runs inline at the call (the checker refuses one where the
  * callee takes an `fn`), so it is no function of its own. */
 static int is_trailing_block(ASTNode* n) {
-    return n && n->type == AST_CLOSURE && n->value && strcmp(n->value, "trailing") == 0;
+    return ast_is_trailing_block(n);
 }
 
 static ASTNode* closure_body(ASTNode* closure) {

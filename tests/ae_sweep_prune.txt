@@ -221,6 +221,7 @@ tests/integration/string_plus_reject/
 tests/integration/string_substring_n_no_leak/
 tests/integration/sum_exhaustiveness/
 tests/integration/tcp_poll_fullduplex/
+tests/integration/trailing_block_return/
 tests/integration/transitive_module_import/
 tests/integration/ufcs_cross_module/
 tests/integration/uncalled_module_fn_checked/

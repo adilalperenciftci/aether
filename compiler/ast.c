@@ -769,6 +769,14 @@ const char* ast_source_name(const ASTNode* def, char* buf, size_t cap) {
     return buf;
 }
 
+int ast_is_trailing_block(const ASTNode* n) {
+    return n && n->type == AST_CLOSURE && n->value && strcmp(n->value, "trailing") == 0;
+}
+
+int ast_is_own_function(const ASTNode* n) {
+    return n && n->type == AST_CLOSURE && !ast_is_trailing_block(n);
+}
+
 int annotation_has_marker(const char* annotation, const char* marker) {
     if (!annotation || !marker || !*marker) return 0;
     size_t n = strlen(marker);

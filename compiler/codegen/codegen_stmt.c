@@ -2702,10 +2702,11 @@ static void walk_returns_for_heap_check_in(CodeGenerator* gen, ASTNode* node,
         else         *any_non_heap = 1;
         return;
     }
-    // Don't descend into nested function/lambda definitions.
+    // Don't descend into nested function/lambda definitions. A trailing
+    // block runs inline: its returns are this function's (#2766).
     if (node->type == AST_FUNCTION_DEFINITION ||
         node->type == AST_BUILDER_FUNCTION ||
-        node->type == AST_CLOSURE) {
+        ast_is_own_function(node)) {
         return;
     }
     int pushed = 0;
@@ -3170,7 +3171,7 @@ static int zb_local(CodeGenerator* gen, ASTNode* ctx, const char* name,
 static int zb_returns(CodeGenerator* gen, ASTNode* n, ASTNode* fn, const char* sname,
                       int depth, int* saw) {
     if (!n) return 1;
-    if (n->type == AST_CLOSURE) return 1;   /* its returns are its own */
+    if (ast_is_own_function(n)) return 1;   /* its returns are its own */
     if (n->type == AST_RETURN_STATEMENT) {
         *saw = 1;
         return n->child_count > 0 && zb_expr(gen, n->children[0], fn, sname, depth + 1);
@@ -4877,9 +4878,10 @@ static void walk_returns_for_heap_at_in(CodeGenerator* gen, ASTNode* node,
         }
         return;
     }
+    /* A trailing block's returns are this function's (#2766). */
     if (node->type == AST_FUNCTION_DEFINITION ||
         node->type == AST_BUILDER_FUNCTION ||
-        node->type == AST_CLOSURE) {
+        ast_is_own_function(node)) {
         return;
     }
     int pushed = 0;
@@ -6402,7 +6404,7 @@ int callee_param_store_escapes_via_body(CodeGenerator* gen, const char* func_nam
  * emit_tuple_return_position copies? A closure's returns are its own. */
 static int subtree_mentions_param(ASTNode* node, const char* pname);
 static int tuple_returns_copy_opt_param(ASTNode* node, const char* pname, Type* rt) {
-    if (!node || node->type == AST_CLOSURE) return 1;
+    if (!node || ast_is_own_function(node)) return 1;
     if (node->type == AST_RETURN_STATEMENT) {
         if (node->child_count < 2) return !subtree_mentions_param(node, pname);
         for (int j = 0; j < node->child_count; j++) {
@@ -6484,9 +6486,7 @@ static ASTNode* last_block_child_of(ASTNode* node) {
  * (non-trailing) closure. */
 static ASTNode* closure_first_value_return(ASTNode* node) {
     if (!node) return NULL;
-    if (node->type == AST_CLOSURE && !(node->value && strcmp(node->value, "trailing") == 0)) {
-        return NULL;
-    }
+    if (ast_is_own_function(node)) return NULL;
     if (node->type == AST_RETURN_STATEMENT && node->child_count > 0 && node->children[0] &&
         node->children[0]->type != AST_PRINT_STATEMENT) return node;
     for (int i = 0; i < node->child_count; i++) {
@@ -6504,9 +6504,7 @@ static ASTNode* closure_first_value_return(ASTNode* node) {
  * is a string. `first` is that first return. */
 static int closure_returns_copy_walk(ASTNode* node, ASTNode* first, int* saw_string) {
     if (!node) return 1;
-    if (node->type == AST_CLOSURE && !(node->value && strcmp(node->value, "trailing") == 0)) {
-        return 1;   /* a nested closure's returns are its own */
-    }
+    if (ast_is_own_function(node)) return 1;   /* a nested closure's returns are its own */
     if (node->type == AST_RETURN_STATEMENT && node->child_count > 0) {
         if ((node->child_count > 1) != (first->child_count > 1)) return 0;
         if (node->child_count > 1) {
@@ -10752,7 +10750,7 @@ static int mentions_any_param(ASTNode* fn_def, ASTNode* e) {
  * (type_can_view, per tuple position), a value that mentions a parameter
  * of `fn_def`? A nested closure's returns are its own. */
 static int returns_view_params_walk(ASTNode* fn_def, ASTNode* n, Type* rt) {
-    if (!n || n->type == AST_CLOSURE) return 0;
+    if (!n || ast_is_own_function(n)) return 0;
     if (n->type == AST_RETURN_STATEMENT) {
         for (int j = 0; j < n->child_count; j++) {
             Type* pt = (rt && rt->kind == TYPE_TUPLE && n->child_count > 1 && j < rt->tuple_count)

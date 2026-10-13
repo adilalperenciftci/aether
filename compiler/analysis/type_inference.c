@@ -457,9 +457,10 @@ static unsigned new_walk_id(void) {
 }
 
 /* The first `return` with a value under `n`, not looking into nested
- * closures; sets *any_string when any such return is a string. */
+ * closures (a trailing block's returns are the closure's own, #2766); sets
+ * *any_string when any such return is a string. */
 static ASTNode* first_value_return(ASTNode* n, int* any_string) {
-    if (!n || n->type == AST_CLOSURE) return NULL;
+    if (!n || ast_is_own_function(n)) return NULL;
     if (n->type == AST_RETURN_STATEMENT && n->child_count > 0 && n->children[0] &&
         n->children[0]->type != AST_PRINT_STATEMENT) {
         Type* t = n->children[0]->node_type;
@@ -1181,6 +1182,31 @@ static void preresolve_return_idents_in(ASTNode* node, ASTNode* outer_block,
     }
 }
 
+static Type* infer_return_type_impl(ASTNode* body, SymbolTable* symbols, bool is_top_level);
+
+/* #2766: the type a `return` in a trailing block of statement `n` gives,
+ * `f(x) { return v }`: the block runs inline, so its returns are the
+ * function's. A closure's returns are its own. NULL when none is typed. */
+static Type* trailing_block_return_type(ASTNode* n, SymbolTable* symbols) {
+    for (int i = 0; n && i < n->child_count; i++) {
+        ASTNode* c = n->children[i];
+        if (!c || ast_is_own_function(c)) continue;
+        if (ast_is_trailing_block(c)) {
+            for (int j = c->child_count - 1; j >= 0; j--) {
+                if (c->children[j] && c->children[j]->type == AST_BLOCK) {
+                    Type* rt = infer_return_type_impl(c->children[j], symbols, false);
+                    if (rt) return rt;
+                    break;
+                }
+            }
+            continue;
+        }
+        Type* rt = trailing_block_return_type(c, symbols);
+        if (rt) return rt;
+    }
+    return NULL;
+}
+
 static Type* infer_return_type_impl(ASTNode* body, SymbolTable* symbols, bool is_top_level) {
     if (!body) return NULL;
 
@@ -1336,7 +1362,9 @@ static Type* infer_return_type_impl(ASTNode* body, SymbolTable* symbols, bool is
             }
             break;
         default:
-            break;
+            /* Any other statement returns only through a trailing block
+             * in its expressions. */
+            return trailing_block_return_type(body, symbols);
     }
 
     return NULL;

@@ -823,9 +823,11 @@ int is_noescape_extern_param(CodeGenerator* gen, const char* func_name, int para
 // stop, `|| { inner = |x| { return x*2 }; call(inner, 3) }` would have
 // its outer closure mis-typed as returning-int (picking up inner's
 // `return`) when the outer actually has no return statement of its own.
+// A call's trailing block is no such boundary: it runs inline, and its
+// `return` is the enclosing function's (#2766).
 int has_return_value(ASTNode* node) {
     if (!node) return 0;
-    if (node->type == AST_CLOSURE) return 0;
+    if (ast_is_own_function(node)) return 0;
     if (node->type == AST_RETURN_STATEMENT && node->child_count > 0 && node->children[0]) {
         // Print statements don't count as "return values" - they're void
         if (node->children[0]->type == AST_PRINT_STATEMENT) {

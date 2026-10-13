@@ -1935,7 +1935,7 @@ static int is_erased_call(const ASTNode* n);
  * into nested closures; codegen's find_first_return_expr, which picks the
  * closure's C return type, walks the same way. */
 static ASTNode* closure_first_return_expr(ASTNode* node) {
-    if (!node || node->type == AST_CLOSURE) return NULL;
+    if (!node || ast_is_own_function(node)) return NULL;
     if (node->type == AST_RETURN_STATEMENT && node->child_count > 0 &&
         node->children[0] && node->children[0]->type != AST_PRINT_STATEMENT) {
         return node->children[0];
@@ -1949,7 +1949,7 @@ static ASTNode* closure_first_return_expr(ASTNode* node) {
 
 /* The return statement closure_first_return_expr finds the value of. */
 static ASTNode* closure_first_return_stmt(ASTNode* node) {
-    if (!node || node->type == AST_CLOSURE) return NULL;
+    if (!node || ast_is_own_function(node)) return NULL;
     if (node->type == AST_RETURN_STATEMENT && node->child_count > 0 &&
         node->children[0] && node->children[0]->type != AST_PRINT_STATEMENT) {
         return node;
@@ -1962,7 +1962,7 @@ static ASTNode* closure_first_return_stmt(ASTNode* node) {
 }
 
 static int closure_any_return_is_string(ASTNode* node) {
-    if (!node || node->type == AST_CLOSURE) return 0;
+    if (!node || ast_is_own_function(node)) return 0;
     if (node->type == AST_RETURN_STATEMENT && node->child_count > 0 &&
         node->children[0] && node->children[0]->type != AST_PRINT_STATEMENT) {
         return node->children[0]->node_type &&
@@ -10514,11 +10514,13 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
              * with a type that belongs to the outer function. */
             Type* enclosing_ret = g_tc_return_type;
             ASTNode* enclosing_owner = g_tc_return_owner;
-            g_tc_return_type = NULL;
             /* A call's trailing block runs inline: a `return` in it returns
-             * from the function it is written in. */
-            if (!(expr->value && strcmp(expr->value, "trailing") == 0))
+             * from the function it is written in, and is checked against
+             * that function's result type (#2766). */
+            if (ast_is_own_function(expr)) {
+                g_tc_return_type = NULL;
                 g_tc_return_owner = expr;
+            }
             for (int i = 0; i < expr->child_count; i++) {
                 ASTNode* child = expr->children[i];
                 if (child && child->type == AST_BLOCK) {
@@ -11627,7 +11629,7 @@ static int try_ufcs_rewrite(ASTNode* call, SymbolTable* table) {
  * makes void. */
 static int tc_has_return_value(ASTNode* node) {
     if (!node) return 0;
-    if (node->type == AST_CLOSURE) return 0;
+    if (ast_is_own_function(node)) return 0;   /* a trailing block's are ours (#2766) */
     if (node->type == AST_RETURN_STATEMENT && node->child_count > 0 && node->children[0]) {
         if (node->children[0]->type == AST_PRINT_STATEMENT) return 0;
         return 1;
@@ -11769,24 +11771,80 @@ static ASTNode* tc_arm_value(ASTNode* body) {
     }
 }
 
-/* Does a `return` anywhere in `node` give a value? A nested closure's
- * returns are its own. */
-static int tc_body_yields(ASTNode* node, SymbolTable* table, StrMap* locals, int depth) {
-    if (!node || node->type == AST_CLOSURE) return 0;
-    if (node->type == AST_RETURN_STATEMENT && node->child_count > 0 && node->children[0]) {
-        if (node->child_count > 1) return 1;   /* `return a, b` */
-        return tc_value_yields(node->children[0], table, locals, depth);
-    }
-    for (int i = 0; i < node->child_count; i++)
-        if (tc_body_yields(node->children[i], table, locals, depth)) return 1;
-    return 0;
-}
-
 static ASTNode* tc_closure_body(ASTNode* closure) {
     for (int i = closure ? closure->child_count - 1 : -1; i >= 0; i--)
         if (closure->children[i] && closure->children[i]->type == AST_BLOCK)
             return closure->children[i];
     return NULL;
+}
+
+/* Issue #333: the receiver a member-access call's trailing block resolves
+ * its bare calls through (`<receiver>_<name>`, see lookup_symbol): the
+ * namespace `ns` of `ns.f(...)` when `table` sees it, else the struct type
+ * of the value `v` of `v.f(...)`. NULL when the call names no receiver;
+ * a type's name is copied into `buf`. */
+static const char* dsl_receiver_of_call(ASTNode* call, SymbolTable* table, char* buf,
+                                        size_t cap) {
+    if (!call || !call->value || !buf || cap == 0) return NULL;
+    const char* dot = strchr(call->value, '.');
+    if (!dot) return NULL;
+    size_t prefix_len = (size_t)(dot - call->value);
+    if (prefix_len == 0 || prefix_len >= cap) return NULL;
+    memcpy(buf, call->value, prefix_len);
+    buf[prefix_len] = '\0';
+    /* Namespace receiver: directly visible. */
+    if (is_visible_namespace(buf, table)) return buf;
+    /* Typed-value receiver: the prefix is a local variable; its struct
+     * type's name. */
+    Symbol* recv_sym = lookup_symbol(table, buf);
+    if (!recv_sym || !recv_sym->type) return NULL;
+    const char* tn = base_type_name(recv_sym->type);
+    if (!tn || tn[0] == '\0' || strlen(tn) >= cap ||
+        strcmp(tn, "unknown") == 0 || strcmp(tn, "int") == 0 ||
+        strcmp(tn, "long") == 0 || strcmp(tn, "float") == 0 ||
+        strcmp(tn, "double") == 0 || strcmp(tn, "bool") == 0 ||
+        strcmp(tn, "string") == 0) return NULL;
+    memmove(buf, tn, strlen(tn) + 1);
+    return buf;
+}
+
+/* The receiver trailing block `block` of `call` resolves bare calls
+ * through: the one the checker stamped on it, else the call's. */
+static const char* tc_trailing_receiver(ASTNode* call, ASTNode* block, SymbolTable* table,
+                                        char* buf, size_t cap) {
+    if (block->annotation && strncmp(block->annotation, "dsl_recv:", 9) == 0)
+        return block->annotation[9] ? block->annotation + 9 : NULL;
+    return dsl_receiver_of_call(call, table, buf, cap);
+}
+
+/* Does a `return` anywhere in `node` give a value? A nested closure's
+ * returns are its own; a call's trailing block runs inline, so its returns
+ * are the function's (#2766). A bare call in such a block resolves through
+ * the call's DSL receiver (`<receiver>_<name>`), as the checker resolves it
+ * in the block's scope (#333). */
+static int tc_body_yields(ASTNode* node, SymbolTable* table, StrMap* locals, int depth) {
+    if (!node || ast_is_own_function(node)) return 0;
+    if (node->type == AST_RETURN_STATEMENT && node->child_count > 0 && node->children[0]) {
+        if (node->child_count > 1) return 1;   /* `return a, b` */
+        return tc_value_yields(node->children[0], table, locals, depth);
+    }
+    for (int i = 0; i < node->child_count; i++) {
+        ASTNode* c = node->children[i];
+        if (node->type == AST_FUNCTION_CALL && ast_is_trailing_block(c) && table) {
+            char buf[256];
+            const char* recv = tc_trailing_receiver(node, c, table, buf, sizeof(buf));
+            if (recv) {
+                SymbolTable* scope = create_symbol_table(table);
+                scope->dsl_receiver = strdup(recv);
+                int y = tc_body_yields(tc_closure_body(c), scope, locals, depth);
+                free_symbol_table(scope);
+                if (y) return 1;
+                continue;
+            }
+        }
+        if (tc_body_yields(c, table, locals, depth)) return 1;
+    }
+    return 0;
 }
 
 /* Does a call through a value of function type `t` give a value? A typed C
@@ -13036,64 +13094,31 @@ int typecheck_function_call(ASTNode* call, SymbolTable* table) {
     // closure_scope->dsl_receiver. Idempotent: existing annotations
     // (none today on AST_CLOSURE; `defer` factory annotations live
     // on AST_VARIABLE_DECLARATION) are preserved.
-    if (call->value && strchr(call->value, '.')) {
-        const char* dot = strchr(call->value, '.');
-        size_t prefix_len = (size_t)(dot - call->value);
-        if (prefix_len > 0 && prefix_len < 256) {
-            char prefix[256];
-            memcpy(prefix, call->value, prefix_len);
-            prefix[prefix_len] = '\0';
-
-            const char* dsl_recv_name = NULL;
-            char type_name_buf[256];
-
-            // Namespace receiver: directly visible.
-            if (is_visible_namespace(prefix, table)) {
-                dsl_recv_name = prefix;
-            } else {
-                // Typed-value receiver: prefix is a local variable;
-                // use its struct type's name.
-                Symbol* recv_sym = lookup_symbol(table, prefix);
-                if (recv_sym && recv_sym->type) {
-                    const char* tn = base_type_name(recv_sym->type);
-                    if (tn && tn[0] != '\0' &&
-                        strlen(tn) < sizeof(type_name_buf) &&
-                        strcmp(tn, "unknown") != 0 &&
-                        strcmp(tn, "int") != 0 &&
-                        strcmp(tn, "long") != 0 &&
-                        strcmp(tn, "float") != 0 &&
-                        strcmp(tn, "double") != 0 &&
-                        strcmp(tn, "bool") != 0 &&
-                        strcmp(tn, "string") != 0) {
-                        strncpy(type_name_buf, tn, sizeof(type_name_buf) - 1);
-                        type_name_buf[sizeof(type_name_buf) - 1] = '\0';
-                        dsl_recv_name = type_name_buf;
+    {
+        char recv_buf[256];
+        const char* dsl_recv_name = dsl_receiver_of_call(call, table, recv_buf,
+                                                         sizeof(recv_buf));
+        if (dsl_recv_name) {
+            for (int i = 0; i < call->child_count; i++) {
+                ASTNode* child = call->children[i];
+                if (child && child->type == AST_CLOSURE) {
+                    // Idempotent: skip if already stamped.
+                    if (child->annotation &&
+                        strncmp(child->annotation, "dsl_recv:", 9) == 0) {
+                        continue;
                     }
-                }
-            }
-
-            if (dsl_recv_name) {
-                for (int i = 0; i < call->child_count; i++) {
-                    ASTNode* child = call->children[i];
-                    if (child && child->type == AST_CLOSURE) {
-                        // Idempotent: skip if already stamped.
-                        if (child->annotation &&
-                            strncmp(child->annotation, "dsl_recv:", 9) == 0) {
-                            continue;
-                        }
-                        size_t a_len = 9 + strlen(dsl_recv_name) + 1;
-                        char* ann = malloc(a_len);
-                        if (ann) {
-                            snprintf(ann, a_len, "dsl_recv:%s", dsl_recv_name);
-                            // Defensive: if annotation is unset, set it.
-                            // If it's set to something else (no current
-                            // user of AST_CLOSURE annotation, but be safe),
-                            // leave it alone so we don't stomp.
-                            if (!child->annotation) {
-                                child->annotation = ann;
-                            } else {
-                                free(ann);
-                            }
+                    size_t a_len = 9 + strlen(dsl_recv_name) + 1;
+                    char* ann = malloc(a_len);
+                    if (ann) {
+                        snprintf(ann, a_len, "dsl_recv:%s", dsl_recv_name);
+                        // Defensive: if annotation is unset, set it.
+                        // If it's set to something else (no current
+                        // user of AST_CLOSURE annotation, but be safe),
+                        // leave it alone so we don't stomp.
+                        if (!child->annotation) {
+                            child->annotation = ann;
+                        } else {
+                            free(ann);
                         }
                     }
                 }

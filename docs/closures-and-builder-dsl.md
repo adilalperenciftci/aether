@@ -172,6 +172,36 @@ panel("title") {
 }
 ```
 
+Because the block runs inline, it is not a function of its own: a `return` in
+it returns from the function the call is written in, and is one of that
+function's returns. A function with no written result type whose only `return`
+with a value is in a trailing block returns that value, typed from it, and one
+that returns a value from a block on one path must return one on every path
+(the missing-return check). Inside a closure, a block's `return` is the
+closure's.
+
+```aether,run
+scope(tag: int) -> int {
+    return tag
+}
+
+first_positive(a: int, b: int) {
+    scope(1) {
+        if a > 0 {
+            return a
+        }
+    }
+    return b
+}
+
+main() {
+    println("${first_positive(3, 4)} ${first_positive(0, 4)}")
+}
+```
+```output
+3 4
+```
+
 ### Same-line rule for trailing blocks
 
 A trailing block `{ ... }` is recognised as part of a function call only
