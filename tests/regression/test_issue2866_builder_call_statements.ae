@@ -1,0 +1,132 @@
+// Regression (#2866, #2851, #2853, #2855): a builder call with a trailing
+// block, run by its statement, was emitted by hand: the block, then the
+// call with the config, assigned raw. So a string it returned was never
+// tracked (bound to a local, or replaced, or thrown away, it leaked), a
+// fresh string passed to it was never freed (#2853), a string field passed
+// to one that frees or keeps its parameter was not handed over (#2851), and
+// stored into a struct field it ran unconfigured, its block dropped
+// (#2855). The block and the arguments now run ahead of the statement, and
+// the statement is emitted as for any call, the call made with the filled
+// config. Each shape runs in a round, and the rounds must not grow the heap.
+
+import std.map
+import std.mem
+import std.string
+
+extern exit(code: int)
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+struct Holder {
+    s: string
+}
+
+struct Doc {
+    name: string
+    n: int
+}
+
+var kept: string = ""
+var holding = 0
+
+set_opt(_ctx: ptr, key: string, value: string) {
+    map_put(_ctx, key, value)
+}
+
+builder label(text: string): string {
+    suffix = ""
+    if _builder != null && map_has(_builder, "suffix") == 1 { suffix, _ = map.get(_builder, "suffix") }
+    out = string.concat(text, suffix)
+    if _builder != null { map_free(_builder) }
+    return out
+}
+
+builder eatb(text: string, n: int): int {
+    string.free(text)
+    if _builder != null { map_free(_builder) }
+    return n
+}
+
+// Keeps what it is given, freeing what it kept before.
+builder keepb(text: string, n: int): int {
+    if holding == 1 { string.free(kept) }
+    kept = text
+    holding = 1
+    if _builder != null { map_free(_builder) }
+    return n
+}
+
+round(w: string) -> int {
+    total = 0
+    i = 0
+    while i < 20 {
+        s = label(string.concat(w, "x")) {
+            set_opt("suffix", "!")
+        }
+        total = total + string.length(s)
+        s = label(w) {
+            set_opt("suffix", "?")
+        }
+        total = total + string.length(s)
+        label(string.concat(w, "y")) {
+            set_opt("suffix", "%")
+        }
+        h = Holder { s: "" }
+        h.s = label(w) {
+            set_opt("suffix", "#")
+        }
+        total = total + string.length(h.s)
+        d = Doc { name: string.concat(w, "#1"), n: 0 }
+        total = total + eatb(d.name, 2) {
+            set_opt("suffix", "-")
+        }
+        e = Doc { name: string.concat(w, "#2"), n: 0 }
+        r = keepb(e.name, 3) {
+            set_opt("suffix", "+")
+        }
+        total = total + r
+        n = string.length(label(w) {
+                set_opt("suffix", "!!")
+            })
+        total = total + n
+        i = i + 1
+    }
+    return total
+}
+
+// Strings the size of the kept one, which reuse a freed buffer.
+churn(w: string) -> int {
+    a = string.concat(w, "@@")
+    b = string.concat(w, "$$")
+    return string.length(a) + string.length(b)
+}
+
+main() {
+    w = string.concat("w", "v")
+    s = label("a") {
+        set_opt("suffix", "!")
+    }
+    check(s == "a!", "a builder's string bound to a local (${s})")
+    h = Holder { s: "" }
+    h.s = label("b") {
+        set_opt("suffix", "!")
+    }
+    check(h.s == "b!", "a builder's string stored into a field (${h.s})")
+    check(round(w) == 20 * (4 + 3 + 3 + 2 + 3 + 4), "the rounds")
+    churn(w)
+    check(kept == "wv#2", "the field a builder kept (${kept})")
+    if mem.heap_in_use_exact() {
+        g = mem.steady_growth(|| {
+                round(w)
+            }, 5)
+        check(g == 0, "the heap grew by ${g} bytes")
+    }
+    string.free(kept)
+    holding = 0
+    println("ok")
+}

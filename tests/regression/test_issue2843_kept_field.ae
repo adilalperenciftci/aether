@@ -20,10 +20,15 @@ make_item(w: string) -> Item {
     return Item { name: string.concat(w, "#"), tag: string.concat(w, "%") }
 }
 
+// What keep holds; the one before is freed, so keeping leaks nothing and
+// the last one kept is still reachable at exit.
 var kept: string = ""
+var holding = 0
 
 keep(s: string) -> string {
+    if holding == 1 { string.free(kept) }
     kept = s
+    holding = 1
     return s
 }
 
@@ -64,5 +69,7 @@ main() {
     churn(w)
     check(kept == "wv%", "a local's field, kept")
 
+    string.free(kept)
+    holding = 0
     println("ok")
 }

@@ -1857,6 +1857,26 @@ static int try_emit_str_array_release(CodeGenerator* gen, ASTNode* deferred) {
     return 1;
 }
 
+/* An `fn[N]` local that owns the closures its literal made
+ * (closure_array_owns). Annotation: "closure_array_release:<varname>:<N>".
+ * At scope exit each element's environment is released, as a closure
+ * local's is; a struct that took the array holds references of its own. */
+static int try_emit_closure_array_release(CodeGenerator* gen, ASTNode* deferred) {
+    if (!deferred || !deferred->annotation) return 0;
+    const char* prefix = "closure_array_release:";
+    size_t plen = strlen(prefix);
+    if (strncmp(deferred->annotation, prefix, plen) != 0) return 0;
+    const char* rest = deferred->annotation + plen;
+    const char* sep = strrchr(rest, ':');
+    if (!sep || sep == rest || !sep[1]) return 0;
+    const char* var_buf = cg_intern_n(rest, (size_t)(sep - rest));
+    print_indent(gen);
+    fprintf(gen->output,
+            "/* deferred */ for (int _ae_k = 0; _ae_k < %d; _ae_k++) { _aether_closure_env_release(%s[_ae_k].env); %s[_ae_k].env = (void*)0; }\n",
+            atoi(sep + 1), var_buf, var_buf);
+    return 1;
+}
+
 /* Closure-local env carrier (#2480). Annotation:
  *   "closure_env_free:<closure id or -1>:<own flag 0|1>:<varname>"
  * Pushed by claim_closure_local_env (codegen_stmt.c) for a local bound only
@@ -1990,6 +2010,7 @@ static void emit_deferred_one(CodeGenerator* gen, int i) {
         !try_emit_struct_destroy(gen, deferred) &&
         !try_emit_struct_array_destroy(gen, deferred) &&   /* #2528 */
         !try_emit_str_array_release(gen, deferred) &&      /* #2618 */
+        !try_emit_closure_array_release(gen, deferred) &&
         !try_emit_closure_env_free(gen, deferred)) {
         print_indent(gen);
         fprintf(gen->output, "/* deferred%s */ ",

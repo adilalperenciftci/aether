@@ -70,7 +70,8 @@ pass_pair(s: string) -> (string?, int) {
     return pair_of(s)
 }
 
-// A tuple local passed on: its `string?` is copied for the caller.
+// A tuple local passed on: it holds what pair_of handed over, and hands it
+// on as it is.
 pass_local(s: string) -> (string?, int) {
     t = pair_of(s)
     return t
@@ -100,10 +101,12 @@ main() {
     c, d = pass_local("pl")
     check(c != none && c! == "pl" && d == 1, "a tuple local of string? passed on")
 
-    // Container stores of a value taken from an `if` over views.
+    // Container stores of a value taken from an `if` over views. The list
+    // owns its copy, which list.free releases with it.
     l = list.new()
     list.add(l, if n == 2 { r.name } else { "other" })
     check(list.size(l) == 1, "the list took the value")
+    list.free(l)
 
     // Releases: a tracked local through its flag, a field, an element of a
     // field array the struct owns.

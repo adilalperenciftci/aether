@@ -128,10 +128,12 @@ main() {
     check(string.seq_length(seq) == 3, "a sequence literal")
     string.seq_free(seq)
 
-    // A closure stored into a list where its value is read.
+    // A closure stored into a list where its value is read. The list owns
+    // it, and list.free releases it and its environment.
     l = list.new()
     _stored = list.add(l, || { return k })
     check(list.size(l) == 1, "a closure stored in a list")
+    list.free(l)
 
     // heap.free of an @observable box drops its observers first.
     p = heap.new(Spot)

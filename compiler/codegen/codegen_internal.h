@@ -74,6 +74,17 @@ int ctl_linearize_list(CodeGenerator* gen, ASTNode** ops, int n);
 /* The arguments of a builder call, evaluated after its block, left to
  * right, ahead of the call. */
 void ctl_builder_args(CodeGenerator* gen, ASTNode* call);
+/* A builder call whose block has run, as `fn(args..., cfg)` through the
+ * ordinary call emitter; and whether `call` is the one being emitted so. */
+void emit_builder_call(CodeGenerator* gen, ASTNode* call, const char* cfg);
+int builder_call_configured(ASTNode* call);
+typedef struct {
+    ASTNode* trailing_stmt_call;
+    ASTNode* call;
+    const char* var;
+} BuilderCfg;
+BuilderCfg builder_cfg_begin(CodeGenerator* gen, ASTNode* call, const char* cfg);
+void builder_cfg_end(CodeGenerator* gen, BuilderCfg saved);
 /* `<lhs> = <value>;` as a statement of its own, outside any Aether
  * statement (an actor state's initializer): temporaries and constructs as
  * generate_statement handles a statement's. */
@@ -160,7 +171,7 @@ int is_heap_string_expr(CodeGenerator* gen, ASTNode* expr);
  * (a call, an interpolation, an `or`, such an unwrap) that the expression
  * reading it frees; and whether a `string?` argument is free after a call. */
 int is_owned_opt_string_call(CodeGenerator* gen, ASTNode* e);
-int is_owned_opt_string_unwrap(CodeGenerator* gen, ASTNode* e);
+int is_owned_string_unwrap(CodeGenerator* gen, ASTNode* e);
 int is_fresh_heap_string_temp(CodeGenerator* gen, ASTNode* e);
 int opt_string_arg_freed_after_call(CodeGenerator* gen, const char* func_name, int ai);
 

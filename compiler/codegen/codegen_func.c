@@ -1545,7 +1545,11 @@ static void emit_function(CodeGenerator* gen, ASTNode* func, const char* clause_
         ensure_tuple_typedef(gen, result);
     }
 
-    // Track current function's return type for multi-return codegen
+    // Track current function's return type for multi-return codegen. Put
+    // back when the function is done: left set, main() emitted after a
+    // `T!` function took its `x!` for a propagation and returned the
+    // result tuple from main.
+    Type* prev_func_return_type = gen->current_func_return_type;
     gen->current_func_return_type = (as_clause && result) ? result : func->node_type;
     // Track the function's AST node so AST_RETURN_STATEMENT codegen
     // can find any `ensures` clauses attached to it (issue #348).
@@ -1769,6 +1773,7 @@ static void emit_function(CodeGenerator* gen, ASTNode* func, const char* clause_
     if (!as_clause && emit_mem_accessor_body(gen, func)) {
         fprintf(gen->output, "}\n\n");
         gen->current_function = prev_current_function;
+        gen->current_func_return_type = prev_func_return_type;
         gen->closure_var_scope = prev_closure_var_scope;
         return;
     }
@@ -2085,6 +2090,7 @@ static void emit_function(CodeGenerator* gen, ASTNode* func, const char* clause_
     gen->current_promoted_captures = prev_promoted;
     gen->current_promoted_capture_count = prev_promoted_count;
     gen->current_function = prev_current_function;
+    gen->current_func_return_type = prev_func_return_type;
     gen->closure_var_scope = prev_closure_var_scope;
 
     unindent(gen);
