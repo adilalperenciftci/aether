@@ -33,8 +33,23 @@
 set -u
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-OUT="$ROOT/build/contrib"
+# CONTRIB_OUT: another directory to build into, for a test that must not
+# touch the build/contrib the rest of the sweep links against.
+OUT="${CONTRIB_OUT:-$ROOT/build/contrib}"
 mkdir -p "$OUT"
+
+# Each run builds in a directory of its own and publishes what it built with a
+# rename, which replaces a file in one step (#2780). Tests in the sweep run
+# this script while other tests link against build/contrib, and it used to
+# write there in place: an archive could be read half rewritten, two runs
+# overwrote each other's objects and manifest, and a link that fell between
+# the sqlite veneer and the vendored libsqlite3.a it calls into got macOS's
+# system library, which has no sqlite3_enable_load_extension (the 0.807.0
+# and 0.808.0 macOS release builds failed on it).
+STAGE="$(mktemp -d "$OUT/.stage.XXXXXX")" || exit 1
+trap 'rm -rf "$STAGE"' EXIT
+# publish NAME: puts $STAGE/NAME in place as $OUT/NAME, in one rename.
+publish() { mv -f "$STAGE/$1" "$OUT/$1"; }
 
 CC="${CC:-gcc}"
 BASE_CFLAGS=(
@@ -171,7 +186,7 @@ build_vendored_sqlite() {
              $CC --version 2>/dev/null | head -1
              printf '%s\n%s\n' "$flags" "$CONTRIB_TARGET"; } | sha256_text )
     local cached="$SQLITE_OBJ_CACHE_DIR/sqlite3-${key:0:16}.o"
-    local obj="$OUT/sqlite3.o"
+    local obj="$STAGE/sqlite3.o"
     if [ -f "$cached" ]; then
         cp "$cached" "$obj"
         printf "  %-18s cached object %s\n" "sqlite3" "${cached#"$ROOT"/}"
@@ -179,25 +194,24 @@ build_vendored_sqlite() {
         printf "  %-18s compiling the amalgamation (once per input set)\n" "sqlite3"
         # shellcheck disable=SC2086
         if ! $CC "${BASE_CFLAGS[@]}" -w $SQLITE_CFLAGS -I"$SQLITE_AMAL_DIR" \
-            -c "$SQLITE_AMAL_DIR/sqlite3.c" -o "$obj" 2>"$OUT/sqlite3.err"; then
+            -c "$SQLITE_AMAL_DIR/sqlite3.c" -o "$obj" 2>"$STAGE/sqlite3.err"; then
             printf "  %-18s FAIL (compile)\n" "sqlite3"
-            sed 's/^/      /' "$OUT/sqlite3.err" | head -10
+            sed 's/^/      /' "$STAGE/sqlite3.err" | head -10
             return 2
         fi
-        rm -f "$OUT/sqlite3.err"
         mkdir -p "$SQLITE_OBJ_CACHE_DIR"
         cp "$obj" "$cached.tmp.$$" && mv "$cached.tmp.$$" "$cached"
     fi
-    rm -f "$OUT/libsqlite3.a"
-    if ! $AR rcs "$OUT/libsqlite3.a" "$obj"; then
+    if ! $AR rcs "$STAGE/libsqlite3.a" "$obj"; then
         printf "  %-18s FAIL (archive)\n" "sqlite3"
         return 2
     fi
+    publish libsqlite3.a
     printf "  %-18s OK   build/contrib/libsqlite3.a (SQLite %s, vendored)\n" "sqlite3" \
         "$(sed -n 's/^SQLITE_VERSION=//p' "$ROOT/contrib/sqlite/amalgamation.lock")"
     # Third column: the name to install it under. Every other archive installs
     # as libaether_<name>.a; this one must stay libsqlite3.a for -lsqlite3.
-    echo -e "sqlite3\tbuild/contrib/libsqlite3.a\tlibsqlite3.a" >> "$OUT/MANIFEST.tmp"
+    echo -e "sqlite3\tbuild/contrib/libsqlite3.a\tlibsqlite3.a" >> "$STAGE/MANIFEST"
     return 0
 }
 
@@ -500,18 +514,17 @@ build_module() {
 
     # shellcheck disable=SC2086
     if ! $CC "${BASE_CFLAGS[@]}" -D"$flag" $incs \
-        -c "$ROOT/$src" -o "$OUT/$name.o" 2>"$OUT/$name.err"; then
+        -c "$ROOT/$src" -o "$STAGE/$name.o" 2>"$STAGE/$name.err"; then
         printf "  %-18s FAIL (compile)\n" "$name"
-        sed 's/^/      /' "$OUT/$name.err" | head -10
+        sed 's/^/      /' "$STAGE/$name.err" | head -10
         return 2
     fi
-    rm -f "$OUT/$name.err"
 
     # Archive. In cross mode use `zig ar` so the archive index is written by
     # the same toolchain that produced the foreign objects.
     local AR="ar"
     [ -n "$CROSS_MODE" ] && AR="zig ar"
-    if ! $AR rcs "$OUT/libaether_$name.a" "$OUT/$name.o"; then
+    if ! $AR rcs "$STAGE/libaether_$name.a" "$STAGE/$name.o"; then
         printf "  %-18s FAIL (archive)\n" "$name"
         return 2
     fi
@@ -521,8 +534,8 @@ build_module() {
     # Extract a member with `zig ar` and file(1) it; skip the check only if file
     # is unavailable (never silently ship a mis-arch archive when it IS).
     if [ -n "$CROSS_MODE" ] && [ -n "$CROSS_ARCH_WANT" ] && command -v file >/dev/null 2>&1; then
-        local ck="$OUT/.archck"; rm -rf "$ck"; mkdir -p "$ck"
-        ( cd "$ck" && zig ar x "$OUT/libaether_$name.a" 2>/dev/null || true )
+        local ck="$STAGE/.archck"; rm -rf "$ck"; mkdir -p "$ck"
+        ( cd "$ck" && zig ar x "$STAGE/libaether_$name.a" 2>/dev/null || true )
         local member; member=$(find "$ck" -name '*.o' 2>/dev/null | head -1)
         if [ -n "$member" ]; then
             local desc; desc=$(file -b "$member")
@@ -535,16 +548,19 @@ build_module() {
         rm -rf "$ck"
     fi
 
+    # A veneer compiled against the vendored SQLite calls into it, so the
+    # vendored library is in place before the veneer is (#2780).
+    if [ "$name" = "sqlite" ] && [ -n "$SQLITE_VENDORED" ]; then
+        build_vendored_sqlite "$AR" || return 2
+    fi
+    publish "libaether_$name.a"
     printf "  %-18s OK   build/contrib/libaether_%s.a\n" "$name" "$name"
-    echo -e "$name\tbuild/contrib/libaether_$name.a" >> "$OUT/MANIFEST.tmp"
-    if [ "$name" = "sqlite" ]; then
-        if [ -n "$SQLITE_VENDORED" ]; then
-            build_vendored_sqlite "$AR" || return 2
-        else
-            # A libsqlite3.a left by an earlier vendored build would shadow
-            # the system library this veneer was just compiled against.
-            rm -f "$OUT/libsqlite3.a"
-        fi
+    echo -e "$name\tbuild/contrib/libaether_$name.a" >> "$STAGE/MANIFEST"
+    # A libsqlite3.a left by an earlier vendored build would shadow the system
+    # library this veneer was compiled against; it goes once the veneer that
+    # does not need it is in place.
+    if [ "$name" = "sqlite" ] && [ -z "$SQLITE_VENDORED" ]; then
+        rm -f "$OUT/libsqlite3.a"
     fi
     return 0
 }
@@ -606,7 +622,7 @@ echo "==================================="
 echo "  Requested: $REQUESTED"
 echo ""
 
-: > "$OUT/MANIFEST.tmp"
+: > "$STAGE/MANIFEST"
 
 built=0
 skipped=0
@@ -650,7 +666,7 @@ for short in $REQUESTED; do
     esac
 done
 
-mv "$OUT/MANIFEST.tmp" "$OUT/MANIFEST"
+publish MANIFEST
 
 echo ""
 if [ "$MODE" = "explicit" ] && [ "$failed" -gt 0 ]; then
