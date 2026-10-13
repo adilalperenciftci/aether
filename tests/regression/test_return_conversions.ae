@@ -4,7 +4,10 @@
 // typed binding. These are the conversions it keeps: C performs them and the
 // language allows them in a typed binding or a parameter, so they compile and
 // return the value a binding would hold. A check that refused any of them
-// would have drifted stricter than the binding it follows.
+// would have drifted stricter than the binding it follows. A `byte` is C's
+// `uint8_t`, as `uint8` is, so an enum coded as a byte (a wire format)
+// converts both ways as one coded as a uint8 does, in a return and in a
+// typed binding alike.
 extern exit(code: int)
 extern getenv(name: string) -> ptr
 
@@ -88,6 +91,26 @@ to_hue(n: int) -> Hue {
     return n
 }
 
+hue_byte() -> byte {
+    return Hue.Blue
+}
+
+hue_code(h: Hue) -> byte {
+    return h
+}
+
+hue_pair() -> (byte, int) {
+    return Hue.Blue, 1
+}
+
+byte_hue(b: byte) -> Hue {
+    return b
+}
+
+hue_u8(h: Hue) -> uint8 {
+    return h
+}
+
 c_string(name: string) -> string {
     return getenv(name)
 }
@@ -148,6 +171,15 @@ main() {
     check("variant into its sum", radius(to_sum(6)), 6)
     check("enum into int", to_hue_int(Hue.Blue), 2)
     check("int into enum", to_hue_int(to_hue(1)), 1)
+    check("enum into byte", hue_byte(), 2)
+    check("enum parameter into byte", hue_code(Hue.Green), 1)
+    hb, hk = hue_pair()
+    check("enum into a byte position", hb + hk, 3)
+    check("byte into enum", to_hue_int(byte_hue(2)), 2)
+    check("enum into uint8", hue_u8(Hue.Blue), 2)
+    let wire: byte = Hue.Green
+    let back: Hue = wire
+    check("enum into a byte binding and back", to_hue_int(back), 1)
     check("C string into string", flag(c_string("AE_RETURN_CONVERSIONS_UNSET") == null), 1)
     check("string into ptr", flag(as_pointer("p") != null), 1)
     check("null into string", flag(no_string() == null), 1)

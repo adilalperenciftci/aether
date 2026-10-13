@@ -2531,7 +2531,9 @@ int is_type_compatible(Type* from, Type* to) {
         if (from->kind == TYPE_ENUM && to->kind == TYPE_ENUM)
             return types_equal(from, to);
         TypeKind other = (from->kind == TYPE_ENUM) ? to->kind : from->kind;
-        return is_integer_scalar(other);
+        /* `byte` is C's `uint8_t`, as `uint8` is: a byte-coded enum (a
+         * wire format) converts as a uint8-coded one does. */
+        return is_integer_scalar(other) || other == TYPE_BYTE;
     }
 
     // #1046 bit_set is strictly nominal: never an int, never another enum's
