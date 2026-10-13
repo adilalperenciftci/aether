@@ -567,6 +567,13 @@ const char* get_builder_factory(CodeGenerator* gen, const char* func_name);
 
 /* A trailing block's statements, in its own scope (codegen_stmt.c). */
 void emit_trailing_block_body(CodeGenerator* gen, ASTNode* body);
+/* #2791: the C function that releases what a builder's config factory made,
+ * or NULL when none is known (codegen_stmt.c). */
+const char* builder_config_release(CodeGenerator* gen, const char* builder_name);
+/* A builder a library exports while linking its own copy of the runtime:
+ * a program that imports the library allocates the config it passes with
+ * its own runtime, so the library must not release it (codegen.c). */
+int lib_builder_config_is_foreign(CodeGenerator* gen, ASTNode* fn);
 /* #2791: a builder call's trailing block, whose config the C variable
  * `cfg_var` holds: as emit_trailing_block_body, and a way out of the block
  * before the builder runs releases the config. */

@@ -9,4 +9,9 @@
   `<stem>_free` for a `<stem>_new` factory the program defines or declares
   (`list_new`, `list_free`); a nested builder call's block releases both
   calls' configs. A factory without such a release still leaves its config
-  to the builder's protocol (#2791).
+  to the builder's protocol. A builder whose body never names `_builder`,
+  which therefore never frees, keeps or returns its config, now releases it
+  on entry the same way; every call of one made with a block leaked the
+  config before. A builder exported by a library that links its own copy
+  of the runtime does not: the program importing the library made that
+  config with its runtime (#2791).
