@@ -44,3 +44,14 @@ test_optional_string_view_survives 8
 # capture copy of "bc", the "bcxyz" header and bytes), 120 calls. Drop the
 # entry when #2788 holds a reference for the call instead of pinning.
 test_closure_cell_handed_back 600
+
+# TRACKED: a builder that never uses its config leaks it (#2871).
+# A builder whose body never names `_builder` never frees the config its
+# call hands it: with the default factory, the map_new map and its bucket
+# array, two blocks a call. test_builder_default_factory_no_import calls
+# such a builder twice (`a = quiet("q") {}` and early(0)); early(3) leaves
+# its block by a return, and #2791 frees that one. Freeing the config on
+# the builder's entry is unsafe while a setter or a factory can let the
+# config escape, so it waits for an ownership rule. Drop the entry when
+# #2871 gives builders that rule.
+test_builder_default_factory_no_import 4
