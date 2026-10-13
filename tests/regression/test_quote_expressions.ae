@@ -43,29 +43,35 @@ main() {
     fails = fails + check("params", "${quote.param_count(t)} ${quote.param_name(t, 1)} ${quote.param_type(t, 1)}", "2 b int")
     fails = fails + check("version", "${quote.version(t)}", "${quote.VERSION}")
     fails = fails + check("source", quote.source(t), "test_quote_expressions.ae:39")
+    quote.free(t)
 
     // Parentheses come back where precedence needs them, and only there.
     t = q() quote | a: int, b: int, c: int | -> (a + b) * c - (a - (b - c))
     fails = fails + check("precedence", src(t), "|a: int, b: int, c: int| {\n    return (a + b) * c - (a - (b - c))\n}")
+    quote.free(t)
 
     // No parameters, a block body.
     t = q() quote { return 1 + 2 * 3 }
     fails = fails + check("no params", src(t), "{\n    return 1 + 2 * 3\n}")
     fails = fails + check("no params tree", tree(t),
         "(BLOCK (RETURN :int (BINARY + :int (LIT 1 :int) (BINARY * :int (LIT 2 :int) (LIT 3 :int)))))")
+    quote.free(t)
 
     // Literals of each kind, comparison and logic, unary operators.
     t = q() quote | x: int, ok: bool | -> !ok && -x < 3 || ~x == 7
     fails = fails + check("logic", tree(t),
         "(param x :int) (param ok :bool) (BLOCK (RETURN :bool (BINARY || :bool (BINARY && :bool (UNARY ! :bool (LOCAL ok :bool)) (BINARY < :bool (UNARY - :int (LOCAL x :int)) (LIT 3 :int))) (BINARY == :bool (UNARY ~ :int (LOCAL x :int)) (LIT 7 :int)))))")
+    quote.free(t)
     t = q() quote -> "say \"hi\""
     fails = fails + check("string literal", src(t), "{\n    return \"say \\\"hi\\\"\"\n}")
     fails = fails + check("string literal tree", tree(t), "(BLOCK (RETURN :string (LIT \"say \\\"hi\\\"\" :string)))")
+    quote.free(t)
 
     // A call is recorded, not made, with its module as written.
     t = q() quote | x: float | -> math.sqrt(twice(x)) + HALF
     fails = fails + check("calls", tree(t),
         "(param x :float) (BLOCK (RETURN :float (BINARY + :float (CALL math.sqrt :float (CALL twice :float (LOCAL x :float))) (LIT 0.5 :float))))")
+    quote.free(t)
 
     // Fields, a struct literal, indexing, `if` as a value.
     t = q() quote | p: Pair, xs: int[3], i: int | -> Pair { a: p.b, b: if xs[i] > 0 { p.a } else { 0.0 } }
@@ -76,6 +82,7 @@ main() {
     m = quote.child(quote.child(quote.body(t), 0), 0)
     fails = fails + check("make fields", "${quote.kind_name(quote.kind(m))} ${quote.field(m, 0)} ${quote.field(m, 1)} [${quote.field(m, 2)}]",
         "MAKE a b []")
+    quote.free(t)
 
     // Walking the tree by hand: the kinds are std.quote's constants.
     t = q() quote | x: float | -> x + 1.0
@@ -84,15 +91,19 @@ main() {
     if quote.kind(ret) != quote.RETURN { fails = fails + check("RETURN kind", "${quote.kind(ret)}", "${quote.RETURN}") }
     if quote.kind(add) != quote.BINARY { fails = fails + check("BINARY kind", "${quote.kind(add)}", "${quote.BINARY}") }
     fails = fails + check("walk", "${quote.op(add)} ${quote.type_of(add)} ${quote.child_count(add)} ${quote.name(quote.child(add, 0))} ${quote.lit(quote.child(add, 1))} ${quote.line(add)}",
-        "+ float 2 x 1.0 81")
+        "+ float 2 x 1.0 88")
+    quote.free(t)
 
     // The hash is of the tree's shape: the same quote written twice hashes
     // the same, a different one does not.
-    h1 = quote.hash(q() quote | x: float | -> x + 1.0)
-    h2 = quote.hash(q() quote | x: float | -> x + 1.0)
-    h3 = quote.hash(q() quote | x: float | -> x + 2.0)
-    if h1 != h2 { fails = fails + check("same hash", "${h1}", "${h2}") }
-    if h1 == h3 { fails = fails + check("different hash", "${h1}", "not ${h3}") }
+    t1 = q() quote | x: float | -> x + 1.0
+    t2 = q() quote | x: float | -> x + 1.0
+    t3 = q() quote | x: float | -> x + 2.0
+    defer quote.free(t1)
+    defer quote.free(t2)
+    defer quote.free(t3)
+    if quote.hash(t1) != quote.hash(t2) { fails = fails + check("same hash", "${quote.hash(t1)}", "${quote.hash(t2)}") }
+    if quote.hash(t1) == quote.hash(t3) { fails = fails + check("different hash", "${quote.hash(t1)}", "not ${quote.hash(t3)}") }
 
     if fails > 0 { exit(1) }
     println("quote expressions: ok")

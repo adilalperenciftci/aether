@@ -122,6 +122,7 @@ s-expression with every node's kind, name, operator, literal and type:
 import std.quote
 
 show(t: quote.Tree) {
+    defer quote.free(t)
     println(quote.to_source(t))
     println(quote.dump(t))
 }
@@ -146,6 +147,22 @@ main() {
 }
 (param a :float) (param n :int) (BLOCK (LET total :float (LIT 0.0 :float)) (FOR (LET i :int (LIT 0 :int)) (BINARY < :bool (LOCAL i :int) (LOCAL n :int)) (ASSIGN += (LOCAL i :int) (LIT 1 :int)) (BLOCK (ASSIGN += (LOCAL total :float) (LOCAL a :float)))) (RETURN :float (CHOOSE :float (BINARY > :bool (LOCAL total :float) (LIT 1.0 :float)) (LOCAL total :float) (LIT 0.0 :float))))
 ```
+
+## Freeing a tree
+
+Each evaluation of a quote builds a new tree, and the function it is handed
+to owns it. A function that reads the tree and is done with it frees it,
+`defer quote.free(t)` being the idiom (as `show` above does); one that keeps
+it, in a struct or by returning it, hands that duty on with it, and whoever
+holds it last frees it (`defer quote.free(shader.tree)`). `quote.free` also
+gives back the tree's references to its captured cells.
+
+A tree is not released at scope exit the way a heap string is. A string's
+tracking follows a local the program binds; a tree is born as an argument,
+inside a call, and whether the callee keeps it, returns it or drops it is
+the callee's code, which the call site cannot see. Tracking it would mean
+carrying the heap-string escape analysis (returns, struct fields, closure
+captures, `try` frames) over to a second kind of owned value.
 
 ## Captures
 
@@ -307,7 +324,9 @@ vec4` is a type error, so the tree's types are GLSL's.
 
 - **Built once, shared.** Every evaluation of a quote builds a fresh tree;
   the parts without captures are the same every time and could be built
-  once and shared. A tree is freed with `quote.free(t)`.
+  once and shared.
+- **Freed at scope exit.** A tree is freed by hand, `quote.free(t)`
+  ([Freeing a tree](#freeing-a-tree)).
 - **Uses outside the trailing position**, as a value
   (`q = quote |x: float| -> x * 2.0`): little extra once the trailing form
   exists, and the test-failure use below wants it. Not built.

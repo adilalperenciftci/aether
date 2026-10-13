@@ -14,6 +14,7 @@ import std.quote
 
 // A library function: it receives the block as a tree, not a closure.
 show(t: quote.Tree) {
+    defer quote.free(t)
     println(quote.to_source(t))
     println(quote.dump(t))
 }
@@ -80,6 +81,14 @@ Kinds, version 1 (they are added, never removed or renumbered, and
 | `FIELD` | object; `name` is the field |
 | `INDEX` | object, index |
 | `MAKE` | field values; `type` is the struct, `field(n, i)` each field |
+
+## Freeing
+
+Each evaluation of a quote builds a new tree, owned by the function it is
+handed to: free it with `quote.free(t)` when done, `defer quote.free(t)`
+being the idiom. A function that keeps the tree (in a struct, or by
+returning it) hands the duty on with it. Trees are not freed at scope exit
+([docs/quote.md](../../docs/quote.md#freeing-a-tree) says why).
 
 ## Captures
 

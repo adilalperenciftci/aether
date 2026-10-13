@@ -139,6 +139,8 @@ main() {
     fails = 0
     sh = fxaa(Texture { id: 3 }, vec2(0.25, 0.5), 0.125, 0.03125, 0.75)
     t = sh.tree
+    // The Shader holds its tree; it goes when the shader does.
+    defer quote.free(sh.tree)
     fails = fails + check("source", quote.to_source(t), WANT)
 
     // The checker's types, vector types by their own names.
