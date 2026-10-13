@@ -1,0 +1,9 @@
+// A quote given to a function whose last parameter is not a quote.Tree: E0802 (docs/quote.md). Must not compile: tests/integration/quote_errors.
+import std.quote
+
+take(t: quote.Tree) {}
+plain(x: int) {}
+main() {
+    v = 1
+    plain(v) quote { return 1 }
+}

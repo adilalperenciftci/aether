@@ -1204,7 +1204,7 @@ static void preresolve_return_idents_in(ASTNode* node, ASTNode* outer_block,
     // be resolved from `outer_block`.
     if (node->type == AST_FUNCTION_DEFINITION ||
         node->type == AST_BUILDER_FUNCTION ||
-        node->type == AST_CLOSURE) {
+        node->type == AST_CLOSURE || node->type == AST_QUOTE) {
         return;
     }
 
@@ -1583,7 +1583,8 @@ void collect_constraints(ASTNode* node, InferenceContext* ctx) {
             break;
         }
 
-        case AST_CLOSURE: {
+        case AST_CLOSURE:
+        case AST_QUOTE: {   /* a quote's body is checked as a closure's */
             // A closure's locals belong to the enclosing walk.
             ASTNode* prev_owner = ctx->scope_owner;
             ctx->scope_owner = node;

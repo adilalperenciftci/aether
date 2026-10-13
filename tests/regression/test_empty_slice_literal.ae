@@ -100,7 +100,7 @@ main() {
     check("a const", E.len, 0)
     check("a null const", N.len, 0)
     // A slice of storage that outlives the program's functions (a `make`
-    // buffer: a slice of a function's own array cannot be kept here, E0800).
+    // buffer: a slice of a function's own array cannot be kept here, E0900).
     gs = make([]int, 3)
     gs[2] = 3
     check("a var re-bound to a buffer", gs.len, 3)

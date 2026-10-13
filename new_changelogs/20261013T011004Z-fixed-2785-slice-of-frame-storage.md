@@ -4,7 +4,7 @@
   the next call reused: `gs = [11, 22, 33]` in `fill()`, then any call that
   filled its frame, read `gs[0]` as 0, and a returned slice of a local array
   read garbage the same way. Each way such a slice leaves the function is
-  now error E0800 at the value that leaves: a return (alone, in a struct or
+  now error E0900 at the value that leaves: a return (alone, in a struct or
   tuple, or in a closure that captured it), a store to a module-level `var`,
   and a store to a field of a struct behind a pointer or of a global. A
   fixed-size array parameter is the function's own copy, so a slice of it

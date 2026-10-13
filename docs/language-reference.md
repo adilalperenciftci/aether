@@ -388,7 +388,7 @@ main() {
 - **A slice decays to its pointer** wherever a `ptr` is expected, exactly as a `T[N]` array does: a `ptr` parameter, a C extern's parameter (including one declared `T[]`), `free(s)`, a comparison against `null`, and pointer arithmetic (`s + n` is a `ptr` to element `n`). `s as ptr` spells the same conversion explicitly, for a `ptr` return or binding. The length is dropped at that boundary; nothing else about the extern ABI changes.
 - **`make([]T, n)`** allocates `n` zeroed elements and returns them as a bounded slice; `free(s)` releases them.
 - A slice does not own its elements. It is valid for exactly as long as the storage it views: an array in an enclosing scope, a `make` buffer until its `free`, a C buffer until C reclaims it. So a string read out of a `string[]` slice into something that outlives the read (a return value, a struct field, a container) is a copy of its own, while a local bound to one (`t = s[i]`) borrows it and is valid only as long as the element is; a store into a slice element frees nothing: the string it replaces is left to the storage's owner, and the string it stores becomes the storage's ([memory-management.md](memory-management.md)).
-- **A slice of a function's own storage stays in the function** (E0800). An array literal in a slice slot, and a function's own fixed-size array, live in its frame, which ends when the function returns. A slice of either may be used while the function runs and passed down to the functions it calls, but it may not leave the function: returned (alone, in a struct or tuple, or in a closure that captured it), stored in a module-level `var`, or stored in a field of something that may outlive the function: a struct behind a pointer, or a global (a struct value of the function's own may take it, and is then itself such a slice). Each of those is refused at the value that leaves, `'lit' returns a slice of its own storage (an array literal)`. Keep such a slice in storage that lives as long as it: a `make([]T, n)` buffer, a slice the caller passed in, or a module-level array. A slice parameter (`xs: int[]`) views the caller's storage and may be returned; a fixed-size array parameter (`a: int[3]`) is the function's own copy of the caller's array, so a slice of it is a slice of the function's storage. What a name holds where it leaves is what counts, path by path: a local or a field of a local struct re-bound to a `make` buffer before the `return` holds no slice of the frame any more, but one that still holds it on any path to the `return` (an `if` that re-binds it in one branch only, a loop that may `break` before the re-bind) is refused. A re-bind made by calling a closure is not counted: a name that holds a slice of the frame before `reset()` still holds one after it, even when the closure re-binds it to a `make` buffer (following a closure call soundly is future work, #2837). The other way is counted, conservatively: a closure that may store a slice of the function's storage into one of its names (`setview = || { v = arr }`) gives that name a slice from where the closure is written on, whether and whenever it is called, and a store a closure makes through a pointer or into a module-level `var` is judged as the same store written in the function. A call's result is taken to be no view of the caller, so a function that hands back the slice it was given is not seen through, in a closure (`v = same(arr)`) or not.
+- **A slice of a function's own storage stays in the function** (E0900). An array literal in a slice slot, and a function's own fixed-size array, live in its frame, which ends when the function returns. A slice of either may be used while the function runs and passed down to the functions it calls, but it may not leave the function: returned (alone, in a struct or tuple, or in a closure that captured it), stored in a module-level `var`, or stored in a field of something that may outlive the function: a struct behind a pointer, or a global (a struct value of the function's own may take it, and is then itself such a slice). Each of those is refused at the value that leaves, `'lit' returns a slice of its own storage (an array literal)`. Keep such a slice in storage that lives as long as it: a `make([]T, n)` buffer, a slice the caller passed in, or a module-level array. A slice parameter (`xs: int[]`) views the caller's storage and may be returned; a fixed-size array parameter (`a: int[3]`) is the function's own copy of the caller's array, so a slice of it is a slice of the function's storage. What a name holds where it leaves is what counts, path by path: a local or a field of a local struct re-bound to a `make` buffer before the `return` holds no slice of the frame any more, but one that still holds it on any path to the `return` (an `if` that re-binds it in one branch only, a loop that may `break` before the re-bind) is refused. A re-bind made by calling a closure is not counted: a name that holds a slice of the frame before `reset()` still holds one after it, even when the closure re-binds it to a `make` buffer (following a closure call soundly is future work, #2837). The other way is counted, conservatively: a closure that may store a slice of the function's storage into one of its names (`setview = || { v = arr }`) gives that name a slice from where the closure is written on, whether and whenever it is called, and a store a closure makes through a pointer or into a module-level `var` is judged as the same store written in the function. A call's result is taken to be no view of the caller, so a function that hands back the slice it was given is not seen through, in a closure (`v = same(arr)`) or not.
 
 **Views over a raw pointer are unbounded.** `p as T[]` (the typed-array cast) and a `T[]` handed back by a C extern have no length the compiler can know. Such a view indexes without a check, as it always did, and its `.len` is `-1`. Bound it with an explicit end to get checking back:
 
@@ -833,6 +833,25 @@ The substitution happens at typecheck time: the typechecker clones
 the default expression into the call's argument list and rewrites
 any embedded `__LINE__` / `__FILE__` / `__func__` to use the call
 site's metadata.
+
+### Trailing blocks
+
+A call can be followed, on the same line as its `)`, by one of four blocks:
+
+| Form | Written | The function gets |
+|---|---|---|
+| immediate | `f() { … }` | nothing: the block runs inline, in the function's context |
+| closure | `f() \|x\| { … }` or `f() \|x\| -> expr` | a closure to call (`call(fn, args)`) |
+| callback | `f() callback { … }` | a closure to call, capturing from the enclosing scope |
+| quote | `f() quote \| x: T \| { … }`, `quote -> expr`, `quote { … }` | a tree describing the block, to read ([quote.md](quote.md)) |
+
+The first three are [closures-and-builder-dsl.md](closures-and-builder-dsl.md).
+A quote's block is type-checked as Aether but not compiled to run: the
+function, whose last parameter is a `quote.Tree` (`import std.quote`),
+receives the block as a tree whose every node carries its checked type, and
+whose captures are the enclosing variables themselves (a change the program
+makes is seen through the tree). Its parameters must have types, and what
+it may contain is a subset of Aether (errors E0800 to E0803 below).
 
 ---
 
@@ -3684,7 +3703,11 @@ An error stops the build and prints its code, `error[E0301]: ...`, with the sour
 | `E0304` | A name hidden in this scope by `hide` or `seal except` ([hide and seal](hide-and-seal.md)) |
 | `E0600` | An actor rule, such as a closure in a handler writing the actor's state |
 | `E0700` | Missing return: control can reach the end of a function whose result is not void ([Returning on every path](#returning-on-every-path-e0700)) |
-| `E0800` | A slice of a function's own storage (an array literal, an array of its own) leaves the function: returned, stored in a module-level `var` or in a field that outlives it, or captured by a closure that does ([Slices](#slices-t)) |
+| `E0800` | A construct a quote cannot hold: a closure, `callback` or block inside one, `defer`, `try`, `panic`, an actor operation, `match`, string interpolation, `new`, an array literal ([quote.md](quote.md#what-a-quote-may-contain-and-the-errors)) |
+| `E0801` | A quote parameter without a type |
+| `E0802` | A quote given to a function whose last parameter is not a `quote.Tree`, or a closure, `callback` or block given to one that is |
+| `E0803` | A quote writing a variable it captures, or taking its address |
+| `E0900` | A slice of a function's own storage (an array literal, an array of its own) leaves the function: returned, stored in a module-level `var` or in a field that outlives it, or captured by a closure that does ([Slices](#slices-t)) |
 
 ## Compiler Warnings
 
@@ -4067,6 +4090,8 @@ The following identifiers are reserved:
 | `int`, `float`, `string`, `bool`, `ptr`, `long` | Type names |
 
 Note: `state` is context-sensitive, it is a keyword only inside actor bodies. In all other code, `state` can be used as a regular variable name.
+
+Note: `quote` is not reserved. It quotes a trailing block only straight after a call's `)` on the same line, followed by `|`, `||`, `{` or `->` (see [quote.md](quote.md)); everywhere else it is an ordinary name, and `std.quote` is a module called `quote`.
 
 Note: **`ptr`, `byte`, `func`, `state` and `after` are usable as ordinary value identifiers**, parameter names, local names, struct field names, struct-literal fields, and field-access targets, *without* the backtick escape. These tokens have meaning only in type position (`ptr`/`byte`), as a declaration head (`func`), or as a statement head (`state`/`after`), none of which overlaps a value position, so a bare `ptr`/`byte`/`func`/`state`/`after` in value position is unambiguously a name:
 

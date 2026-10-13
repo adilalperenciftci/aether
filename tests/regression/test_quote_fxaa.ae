@@ -1,0 +1,188 @@
+// Regression: ae3d's FXAA pixel shader written with `quote` (docs/quote.md,
+// the design's section 6). Vector-typed parameter and locals (`vec2`,
+// `vec3`, `vec4`: distinct types over f32x4), `if` as a value (CHOOSE), an
+// early `return` inside an `if`, struct field access, a struct literal
+// (MAKE), and the function's own parameters captured as what a shader
+// library makes its uniforms. The tree prints back as the source, with the
+// checker's vector types on its nodes.
+
+import std.quote
+import std.lanes
+
+extern exit(code: int)
+
+type vec2 = distinct f32x4
+type vec3 = distinct f32x4
+type vec4 = distinct f32x4
+
+struct Texture {
+    id: int
+}
+
+struct Shader {
+    name: string
+    tree: quote.Tree
+}
+
+struct Fragment {
+    color: vec4
+    depth: float
+}
+
+// The shader library's functions: they type-check the quote, and are what a
+// CPU evaluator would call.
+fn vec2(x: float, y: float) -> vec2 { return lanes.f32x4(x, y, 0.0, 0.0) as vec2 }
+fn vec3(x: float, y: float, z: float) -> vec3 { return lanes.f32x4(x, y, z, 0.0) as vec3 }
+fn vec4(c: vec3, w: float) -> vec4 {
+    v = c as f32x4
+    return lanes.f32x4(v.x, v.y, v.z, w) as vec4
+}
+fn texture(t: Texture, uv: vec2) -> vec4 { return lanes.splat4(0.5) as vec4 }
+fn rgb(c: vec4) -> vec3 { return (c as f32x4) as vec3 }
+fn dot(a: vec3, b: vec3) -> float { return lanes.sum4((a as f32x4) * (b as f32x4)) }
+fn min(a: float, b: float) -> float { return if a < b { a } else { b } }
+fn max(a: float, b: float) -> float { return if a > b { a } else { b } }
+fn abs(a: float) -> float { return if a < 0.0 { -a } else { a } }
+fn sign(a: float) -> float { return if a < 0.0 { -1.0 } else { 1.0 } }
+fn clamp(x: float, lo: float, hi: float) -> float { return min(max(x, lo), hi) }
+fn smoothstep(a: float, b: float, x: float) -> float {
+    t = clamp((x - a) / (b - a), 0.0, 1.0)
+    return t * t * (3.0 - 2.0 * t)
+}
+
+fragment(name: string, t: quote.Tree) -> Shader { return Shader { name: name, tree: t } }
+
+fxaa(screen: Texture, texel: vec2, edge: float, edge_min: float, subpixel: float) -> Shader {
+    return fragment("fxaa") quote | uv: vec2 | {
+        luma = vec3(0.299, 0.587, 0.114)
+        c = rgb(texture(screen, uv))
+        n = rgb(texture(screen, uv + vec2(0.0, -1.0) * texel))
+        s = rgb(texture(screen, uv + vec2(0.0, 1.0) * texel))
+        e = rgb(texture(screen, uv + vec2(1.0, 0.0) * texel))
+        w = rgb(texture(screen, uv + vec2(-1.0, 0.0) * texel))
+        lc = dot(c, luma)
+        ln = dot(n, luma)
+        ls = dot(s, luma)
+        le = dot(e, luma)
+        lw = dot(w, luma)
+        lo = min(lc, min(min(ln, ls), min(le, lw)))
+        hi = max(lc, max(max(ln, ls), max(le, lw)))
+        range = hi - lo
+        if range < max(edge_min, hi * edge) {
+            return Fragment { color: vec4(c, 1.0), depth: 0.0 }
+        }
+        avg = (ln + ls + le + lw) * 0.25
+        blend = smoothstep(0.0, 1.0, clamp(abs(avg - lc) / range, 0.0, 1.0))
+        blend = blend * blend * subpixel
+        horiz = abs(-2.0 * lw + lc) + abs(-2.0 * lc + le) * 2.0 + abs(-2.0 * le + lc)
+        vert = abs(-2.0 * ln + lc) + abs(-2.0 * lc + ls) * 2.0 + abs(-2.0 * ls + lc)
+        along = horiz >= vert
+        g1 = (if along { ls } else { le }) - lc
+        g2 = (if along { ln } else { lw }) - lc
+        dir = if (abs(g1) >= abs(g2)) { sign(g1) } else { sign(g2) }
+        step = blend * dir
+        off = if along { vec2(0.0, step * texel.y) } else { vec2(step * texel.x, 0.0) }
+        return Fragment { color: vec4(rgb(texture(screen, uv + off)), 1.0), depth: 0.0 }
+    }
+}
+
+const WANT = <<SRC
+| uv: vec2 | {
+    luma = vec3(0.299, 0.587, 0.114)
+    c = rgb(texture(screen, uv))
+    n = rgb(texture(screen, uv + vec2(0.0, -1.0) * texel))
+    s = rgb(texture(screen, uv + vec2(0.0, 1.0) * texel))
+    e = rgb(texture(screen, uv + vec2(1.0, 0.0) * texel))
+    w = rgb(texture(screen, uv + vec2(-1.0, 0.0) * texel))
+    lc = dot(c, luma)
+    ln = dot(n, luma)
+    ls = dot(s, luma)
+    le = dot(e, luma)
+    lw = dot(w, luma)
+    lo = min(lc, min(min(ln, ls), min(le, lw)))
+    hi = max(lc, max(max(ln, ls), max(le, lw)))
+    range = hi - lo
+    if range < max(edge_min, hi * edge) {
+        return Fragment { color: vec4(c, 1.0), depth: 0.0 }
+    }
+    avg = (ln + ls + le + lw) * 0.25
+    blend = smoothstep(0.0, 1.0, clamp(abs(avg - lc) / range, 0.0, 1.0))
+    blend = blend * blend * subpixel
+    horiz = abs(-2.0 * lw + lc) + abs(-2.0 * lc + le) * 2.0 + abs(-2.0 * le + lc)
+    vert = abs(-2.0 * ln + lc) + abs(-2.0 * lc + ls) * 2.0 + abs(-2.0 * ls + lc)
+    along = horiz >= vert
+    g1 = (if along { ls } else { le }) - lc
+    g2 = (if along { ln } else { lw }) - lc
+    dir = if (abs(g1) >= abs(g2)) { sign(g1) } else { sign(g2) }
+    step = blend * dir
+    off = if along { vec2(0.0, step * texel.y) } else { vec2(step * texel.x, 0.0) }
+    return Fragment { color: vec4(rgb(texture(screen, uv + off)), 1.0), depth: 0.0 }
+}
+SRC
+
+fn check(label: string, got: string, want: string) -> int {
+    if got != want {
+        println("FAIL quote fxaa: ${label}")
+        println("  got:\n${got}")
+        println("  want:\n${want}")
+        return 1
+    }
+    return 0
+}
+
+// The type of statement i's value: a LET's own, a RETURN's value's.
+fn stmt_type(t: quote.Tree, i: int) -> string {
+    return quote.type_of(quote.child(quote.body(t), i))
+}
+
+main() {
+    fails = 0
+    sh = fxaa(Texture { id: 3 }, vec2(0.25, 0.5), 0.125, 0.03125, 0.75)
+    t = sh.tree
+    // The Shader holds its tree; it goes when the shader does.
+    defer quote.free(sh.tree)
+    fails = fails + check("source", quote.to_source(t), WANT)
+
+    // The checker's types, vector types by their own names.
+    fails = fails + check("param", "${quote.param_name(t, 0)}: ${quote.param_type(t, 0)}", "uv: vec2")
+    fails = fails + check("luma", stmt_type(t, 0), "vec3")
+    fails = fails + check("lc", stmt_type(t, 6), "float")
+    fails = fails + check("along", stmt_type(t, 20), "bool")
+    fails = fails + check("off", stmt_type(t, 25), "vec2")
+
+    // Walking the whole tree: the vector sums, the returns and the `if`s
+    // used as values, each with the checker's type.
+    sums = 0
+    returns = ""
+    chooses = ""
+    quote.walk(quote.body(t)) callback | m: quote.Node | {
+        k = quote.kind(m)
+        if k == quote.BINARY && quote.op(m) == "+" && quote.type_of(m) == "vec2" {
+            sums = sums + 1
+        }
+        if k == quote.RETURN { returns = "${returns}${quote.type_of(m)} " }
+        if k == quote.CHOOSE { chooses = "${chooses}${quote.type_of(m)} " }
+    }
+    fails = fails + check("vector arithmetic", "${sums}", "5")
+    fails = fails + check("returns", returns, "Fragment Fragment ")
+    fails = fails + check("chooses", chooses, "float float float vec2 ")
+
+    // The function's parameters are the shader's uniforms, read through
+    // their cells.
+    names = ""
+    i = 0
+    while i < quote.capture_count(t) {
+        c = quote.capture(t, i)
+        names = "${names}${quote.capture_name(c)}:${quote.capture_type(c)} "
+        i = i + 1
+    }
+    fails = fails + check("captures", names, "screen:Texture texel:vec2 edge_min:float edge:float subpixel:float ")
+    tx = quote.get_f32x4(quote.capture_named(t, "texel"))
+    fails = fails + check("texel", "${tx.x} ${tx.y}", "0.25 0.5")
+    fails = fails + check("edge", "${quote.get_float(quote.capture_named(t, "edge"))}", "0.125")
+    scr = quote.cell(quote.capture_named(t, "screen")) as *Texture
+    fails = fails + check("screen", "${scr.id}", "3")
+
+    if fails > 0 { exit(1) }
+    println("quote fxaa: ok")
+}

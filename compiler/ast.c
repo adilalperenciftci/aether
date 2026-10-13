@@ -774,6 +774,7 @@ int ast_is_trailing_block(const ASTNode* n) {
 }
 
 int ast_is_own_function(const ASTNode* n) {
+    if (n && n->type == AST_QUOTE) return 1;
     return n && n->type == AST_CLOSURE && !ast_is_trailing_block(n);
 }
 
@@ -1019,6 +1020,7 @@ const char* ast_node_type_to_string(ASTNodeType type) {
         case AST_CFN_TYPE_DEF: return "CFN_TYPE_DEF";       // #2200
         case AST_FIELD_ATTRIBUTE: return "FIELD_ATTRIBUTE"; // #2298
         case AST_SCHEMA_OF: return "SCHEMA_OF";             // #2298
+        case AST_QUOTE: return "QUOTE";                     // docs/quote.md
         default: return "UNKNOWN";
     }
 }

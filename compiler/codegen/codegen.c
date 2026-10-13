@@ -1,3 +1,4 @@
+#include "../analysis/quote.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -9376,6 +9377,22 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     if (gen->closure_count > 0) {
         print_line(gen, "// Closure declarations");
         emit_closure_declarations(gen);
+    }
+
+    /* docs/quote.md: one tree builder per quote. After the struct
+     * definitions, whose cell releases a struct capture names. */
+    {
+        int any = 0;
+        for (int qi = 0; qi < quote_count(); qi++) {
+            QuoteInfo* q = quote_at(qi);
+            if (!q || !q->scope) continue;
+            if (!any) { quote_emit_prototypes(gen->output); any = 1; }
+            const char** rel = q->ncaps ? (const char**)calloc((size_t)q->ncaps, sizeof(char*)) : NULL;
+            for (int k = 0; k < q->ncaps; k++)
+                rel[k] = promoted_cell_release_fn(gen, get_c_type(q->caps[k].var_type));
+            quote_emit_builder(gen->output, qi, rel);
+            free(rel);
+        }
     }
 
     emit_bare_fn_adapters(gen);

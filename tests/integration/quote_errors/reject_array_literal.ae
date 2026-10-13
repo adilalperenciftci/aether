@@ -1,0 +1,9 @@
+// An array literal in a quote: E0800 (docs/quote.md). Must not compile: tests/integration/quote_errors.
+import std.quote
+
+take(t: quote.Tree) {}
+
+main() {
+    v = 1
+    take() quote -> [1, 2, 3]
+}

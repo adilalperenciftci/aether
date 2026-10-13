@@ -1,5 +1,5 @@
 #!/bin/sh
-# A slice of a function's own storage must not outlive the function (E0800).
+# A slice of a function's own storage must not outlive the function (E0900).
 #
 # An array literal in a slice slot and a function's own fixed-size array
 # live in its frame. A slice of either that left the function viewed memory
@@ -26,7 +26,7 @@ TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 fails=0
 
-# refused <name> <line:col> <text>: `ae check` refuses <name>.ae with E0800
+# refused <name> <line:col> <text>: `ae check` refuses <name>.ae with E0900
 # at that position, its message containing <text>.
 refused() {
     name="$1"; at="$2"; text="$3"
@@ -37,8 +37,8 @@ refused() {
         fails=$((fails + 1)); return
     fi
     case "$out" in
-        *"error[E0800]"*"$text"*"$name.ae:$at"*) ;;
-        *) echo "  [FAIL] $name: not E0800 \"$text\" at $at:"
+        *"error[E0900]"*"$text"*"$name.ae:$at"*) ;;
+        *) echo "  [FAIL] $name: not E0900 \"$text\" at $at:"
            echo "$out" | sed 's/^/        /'
            fails=$((fails + 1)) ;;
     esac

@@ -27,7 +27,7 @@
  * Where control joins (after the branches of an `if`, a `match` or a
  * `switch`, around a loop, after a `try`) what holds a view on any path
  * holds one. Each place a view leaves the frame is reported at the value
- * that leaves (E0800). A slice of a slice parameter, of a `make` buffer or
+ * that leaves (E0900). A slice of a slice parameter, of a `make` buffer or
  * of a module-level array is no such view; a call's result is taken to be
  * none, so a function handing back the slice it was given is not seen
  * through.

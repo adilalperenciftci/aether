@@ -357,7 +357,8 @@ static int yields_value(ASTNode* e) {
 static ASTNode* trailing_block_in(ASTNode* n) {
     for (int i = 0; n && i < n->child_count; i++) {
         ASTNode* c = n->children[i];
-        if (!c || (c->type == AST_CLOSURE && !is_trailing_block(c)) || c->type == AST_BLOCK)
+        if (!c || (c->type == AST_CLOSURE && !is_trailing_block(c)) || c->type == AST_QUOTE ||
+            c->type == AST_BLOCK)
             continue;
         if (is_trailing_block(c) && closure_body(c)) return c;
         ASTNode* inner = trailing_block_in(c);

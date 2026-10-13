@@ -1,0 +1,501 @@
+// std.quote — the tree a `quote` trailing block hands to a function
+// (docs/quote.md).
+//
+//   sky = shader("sky") quote | uv: vec2 | {
+//       t = time * 0.1
+//       return vec4(sin(uv.x * 10.0 + t), 0.0, 0.0, 1.0)
+//   }
+//
+// `shader` is an ordinary function whose last parameter is a `quote.Tree`.
+// The compiler type-checks the block as Aether and, instead of compiling it
+// to run, compiles it to build this tree: every node carries the type the
+// checker gave it, a call is recorded rather than made, and an outer
+// variable the block reads is a CAPTURE whose cell is the variable itself,
+// so a change the program makes is seen through the tree.
+//
+// The tree is read through the accessors below. Tree, Node and Capture are
+// opaque handles: the layout behind them is the runtime's
+// (std/quote/aether_quote.c) and can change; the accessors and the node
+// kinds are the contract. Kinds are added, never removed or renumbered, and
+// VERSION goes up by one with each addition.
+
+import std.lanes
+import std.list
+import std.string
+
+exports(
+    Tree, Node, Capture, VERSION,
+    BLOCK, LET, ASSIGN, RETURN, IF, WHILE, FOR, BREAK, CONTINUE, EXPR,
+    LIT, LOCAL, CAPTURE, UNARY, BINARY, CHOOSE, CALL, FIELD, INDEX, MAKE, FIELD_VALUE,
+    kind_name,
+    version, body, source, hash, param_count, param_name, param_type,
+    capture_count, capture, capture_named,
+    kind, type_of, name, op, lit, line, child_count, child, children, walk,
+    capture_name, capture_type, cell,
+    get_float, get_f32, get_int, get_long, get_bool, get_string, get_ptr, get_f32x4,
+    to_source, dump, free
+)
+
+// The tree a quote builds; one per evaluation of the quote.
+type Tree = distinct ptr
+// One node of it. See the kinds below.
+type Node = distinct ptr
+// An outer variable the quote reads: its name, its type and its cell.
+type Capture = distinct ptr
+
+// The tree format's version. Goes up by one each time a kind is added.
+const VERSION = 1
+
+// Node kinds, version 1. Children are listed after each.
+const BLOCK = 1 // statements
+const LET = 2 // value; `name` is the new local, `type` its type
+const ASSIGN = 3 // target, value; `op` is "=", "+=", ...
+const RETURN = 4 // value, or none
+const IF = 5 // cond, then, else?
+const WHILE = 6 // cond, body
+const FOR = 7 // init, cond, step, body
+const BREAK = 8
+const CONTINUE = 9
+const EXPR = 10 // expr: an expression statement
+const LIT = 11 // `lit` is the literal's text; `type` says which
+const LOCAL = 12 // a local or a parameter, by `name`
+const CAPTURE = 13 // an outer variable, by `name` (see captures)
+const UNARY = 14 // operand; `op` is "-", "!" or "~"
+const BINARY = 15 // left, right; `op` is the operator
+const CHOOSE = 16 // cond, then, else: `if` used as a value
+const CALL = 17 // arguments; `name` is the function as written ("math.sin")
+const FIELD = 18 // object; `name` is the field
+const INDEX = 19 // object, index
+const MAKE = 20 // FIELD_VALUEs, one per field set; `type` is the struct
+const FIELD_VALUE = 21 // value; `name` is the field it sets, in a MAKE
+
+extern aether_quote_version(t: ptr) -> int
+extern aether_quote_body(t: ptr) -> ptr
+extern aether_quote_source(t: ptr) -> string
+extern aether_quote_hash(t: ptr) -> long
+extern aether_quote_param_count(t: ptr) -> int
+extern aether_quote_param_name(t: ptr, i: int) -> string
+extern aether_quote_param_type(t: ptr, i: int) -> string
+extern aether_quote_capture_count(t: ptr) -> int
+extern aether_quote_capture_at(t: ptr, i: int) -> ptr
+extern aether_quote_capture_named(t: ptr, n: string) -> ptr
+extern aether_quote_kind(n: ptr) -> int
+extern aether_quote_type(n: ptr) -> string
+extern aether_quote_name(n: ptr) -> string
+extern aether_quote_op(n: ptr) -> string
+extern aether_quote_lit(n: ptr) -> string
+extern aether_quote_line(n: ptr) -> int
+extern aether_quote_child_count(n: ptr) -> int
+extern aether_quote_child(n: ptr, i: int) -> ptr
+extern aether_quote_capture_name(c: ptr) -> string
+extern aether_quote_capture_type(c: ptr) -> string
+extern aether_quote_capture_cell(c: ptr) -> ptr
+extern aether_quote_capture_base(c: ptr) -> string
+extern aether_quote_read_float(cell: ptr) -> float
+extern aether_quote_read_f32(cell: ptr) -> f32
+extern aether_quote_read_int(cell: ptr) -> int
+extern aether_quote_read_long(cell: ptr) -> long
+extern aether_quote_read_bool(cell: ptr) -> int
+extern aether_quote_read_string(cell: ptr) -> string
+extern aether_quote_read_ptr(cell: ptr) -> ptr
+extern aether_quote_free(t: ptr)
+
+// The kind's name, "BINARY" for BINARY; "?" for a kind this version does
+// not know.
+kind_name(k: int) -> string {
+    match k {
+        1 -> { return "BLOCK" }
+        2 -> { return "LET" }
+        3 -> { return "ASSIGN" }
+        4 -> { return "RETURN" }
+        5 -> { return "IF" }
+        6 -> { return "WHILE" }
+        7 -> { return "FOR" }
+        8 -> { return "BREAK" }
+        9 -> { return "CONTINUE" }
+        10 -> { return "EXPR" }
+        11 -> { return "LIT" }
+        12 -> { return "LOCAL" }
+        13 -> { return "CAPTURE" }
+        14 -> { return "UNARY" }
+        15 -> { return "BINARY" }
+        16 -> { return "CHOOSE" }
+        17 -> { return "CALL" }
+        18 -> { return "FIELD" }
+        19 -> { return "INDEX" }
+        20 -> { return "MAKE" }
+        21 -> { return "FIELD_VALUE" }
+        _ -> { return "?" }
+    }
+}
+
+// ---- the tree ----
+
+// The format version the tree was built with (VERSION when it was built).
+version(t: Tree) -> int { return aether_quote_version(t as ptr) }
+// The quote's body, a BLOCK.
+body(t: Tree) -> Node { return aether_quote_body(t as ptr) as Node }
+// "file:line" of the quote, for a back end's errors.
+source(t: Tree) -> string { return aether_quote_source(t as ptr) }
+// A hash of the tree's shape (kinds, types, names, operators, literals and
+// parameters, not line numbers), the same in every build of the same quote,
+// to cache what a back end makes from it.
+hash(t: Tree) -> long { return aether_quote_hash(t as ptr) }
+param_count(t: Tree) -> int { return aether_quote_param_count(t as ptr) }
+param_name(t: Tree, i: int) -> string { return aether_quote_param_name(t as ptr, i) }
+param_type(t: Tree, i: int) -> string { return aether_quote_param_type(t as ptr, i) }
+capture_count(t: Tree) -> int { return aether_quote_capture_count(t as ptr) }
+capture(t: Tree, i: int) -> Capture { return aether_quote_capture_at(t as ptr, i) as Capture }
+// The capture called `n`, or a null Capture when the quote has none.
+capture_named(t: Tree, n: string) -> Capture {
+    return aether_quote_capture_named(t as ptr, n) as Capture
+}
+
+// Release the tree and its references to the captured variables' cells.
+free(t: Tree) { aether_quote_free(t as ptr) }
+
+// ---- nodes ----
+
+kind(n: Node) -> int { return aether_quote_kind(n as ptr) }
+// The type the checker gave the node: "float", "vec2", "int", a struct's
+// name; "" for a statement.
+type_of(n: Node) -> string { return aether_quote_type(n as ptr) }
+name(n: Node) -> string { return aether_quote_name(n as ptr) }
+op(n: Node) -> string { return aether_quote_op(n as ptr) }
+lit(n: Node) -> string { return aether_quote_lit(n as ptr) }
+line(n: Node) -> int { return aether_quote_line(n as ptr) }
+child_count(n: Node) -> int { return aether_quote_child_count(n as ptr) }
+child(n: Node, i: int) -> Node { return aether_quote_child(n as ptr, i) as Node }
+
+// The node's children as a std.list of Node handles (`list.get(l, i)` gives
+// one as a ptr, `as quote.Node` makes it a Node again). The caller frees the
+// list with list.free; the nodes stay the tree's.
+children(n: Node) -> ptr {
+    out = list.new()
+    i = 0
+    count = child_count(n)
+    while i < count {
+        list.add(out, child(n, i) as ptr)
+        i = i + 1
+    }
+    return out
+}
+
+// Call `f` with `n` and then with every node under it, in pre-order (a node
+// before its children, children first to last):
+//
+//   quote.walk(quote.body(t)) callback | m: quote.Node | {
+//       if quote.kind(m) == quote.CALL { println(quote.name(m)) }
+//   }
+walk(n: Node, f: fn) {
+    // A stack of the nodes still to visit, not recursion: a closure passed
+    // on to another call is taken to escape, and its caller would no longer
+    // free it.
+    todo = list.new()
+    if n as ptr != null { list.add(todo, n as ptr) }
+    while list.size(todo) > 0 {
+        last = list.size(todo) - 1
+        m = list.list_get_raw(todo, last) as Node
+        list.remove(todo, last)
+        call(f, m)
+        i = child_count(m) - 1
+        while i >= 0 {
+            list.add(todo, child(m, i) as ptr)
+            i = i - 1
+        }
+    }
+    list.free(todo)
+}
+
+// ---- captures ----
+
+capture_name(c: Capture) -> string { return aether_quote_capture_name(c as ptr) }
+// The variable's type as written: "float", "vec2", ...
+capture_type(c: Capture) -> string { return aether_quote_capture_type(c as ptr) }
+// The variable's cell: the variable itself, not a copy of its value.
+cell(c: Capture) -> ptr { return aether_quote_capture_cell(c as ptr) }
+
+// Read the variable's current value. Each panics, naming both types, when
+// the capture holds something else (a distinct type reads as its base:
+// a `vec2` over f32x4 through get_f32x4).
+get_float(c: Capture) -> float { return aether_quote_read_float(checked(c, "float")) }
+get_f32(c: Capture) -> f32 { return aether_quote_read_f32(checked(c, "f32")) }
+get_int(c: Capture) -> int { return aether_quote_read_int(checked(c, "int")) }
+get_long(c: Capture) -> long { return aether_quote_read_long(checked(c, "long")) }
+get_bool(c: Capture) -> bool { return aether_quote_read_bool(checked(c, "bool")) != 0 }
+get_string(c: Capture) -> string { return aether_quote_read_string(checked(c, "string")) }
+get_ptr(c: Capture) -> ptr { return aether_quote_read_ptr(checked(c, "ptr")) }
+get_f32x4(c: Capture) -> f32x4 { return lanes.load4(checked(c, "f32x4"), 0) }
+
+// The capture's cell, after checking it holds a `want`; panics naming both
+// types when it does not.
+fn checked(c: Capture, want: string) -> ptr {
+    p = c as ptr
+    if p == null { panic("std.quote: read through a null capture") }
+    base = aether_quote_capture_base(p)
+    if base != want {
+        n = aether_quote_capture_name(p)
+        t = aether_quote_capture_type(p)
+        if t == base { panic("std.quote: capture '${n}' has type ${t}, not ${want}") }
+        panic("std.quote: capture '${n}' has type ${t} (over ${base}), not ${want}")
+    }
+    return aether_quote_capture_cell(p)
+}
+
+// ---- printing ----
+
+fn pad(depth: int) -> string {
+    s = ""
+    i = 0
+    while i < depth {
+        s = "${s}    "
+        i = i + 1
+    }
+    return s
+}
+
+fn prec(o: string) -> int {
+    match o {
+        "||" -> { return 1 }
+        "&&" -> { return 2 }
+        "|" -> { return 3 }
+        "^" -> { return 4 }
+        "&" -> { return 5 }
+        "==" -> { return 6 }
+        "!=" -> { return 6 }
+        "<" -> { return 7 }
+        "<=" -> { return 7 }
+        ">" -> { return 7 }
+        ">=" -> { return 7 }
+        "<<" -> { return 8 }
+        ">>" -> { return 8 }
+        "+" -> { return 9 }
+        "-" -> { return 9 }
+        _ -> { return 10 }
+    }
+}
+
+fn quoted(s: string) -> string {
+    out = "\""
+    n = string.length(s)
+    i = 0
+    while i < n {
+        c = string.char_at(s, i)
+        if c == 34 {
+            out = "${out}\\\""
+        } else if c == 92 {
+            out = "${out}\\\\"
+        } else if c == 10 {
+            out = "${out}\\n"
+        } else {
+            out = "${out}${string.substring(s, i, i + 1)}"
+        }
+        i = i + 1
+    }
+    return "${out}\""
+}
+
+// An operand of a binary operator with precedence `p`: parenthesised when
+// it binds looser (`right` also when equal, operators being left-assoc).
+fn operand(n: Node, p: int, right: int) -> string {
+    s = expr_source(n)
+    k = kind(n)
+    if k == CHOOSE { return "(${s})" }
+    if k == BINARY {
+        q = prec(op(n))
+        if q < p { return "(${s})" }
+        if right == 1 && q == p { return "(${s})" }
+    }
+    return s
+}
+
+fn ends_in_call(n: Node) -> bool {
+    k = kind(n)
+    if k == CALL { return true }
+    if k == BINARY { return ends_in_call(child(n, 1)) }
+    if k == UNARY { return ends_in_call(child(n, 0)) }
+    return false
+}
+
+fn args_source(n: Node, from: int) -> string {
+    s = ""
+    i = from
+    count = child_count(n)
+    while i < count {
+        if i > from { s = "${s}, " }
+        s = "${s}${expr_source(child(n, i))}"
+        i = i + 1
+    }
+    return s
+}
+
+fn expr_source(n: Node) -> string {
+    k = kind(n)
+    if k == LIT {
+        if type_of(n) == "string" { return quoted(lit(n)) }
+        return lit(n)
+    }
+    if k == LOCAL || k == CAPTURE { return name(n) }
+    if k == UNARY {
+        x = child(n, 0)
+        xs = expr_source(x)
+        if kind(x) == BINARY || kind(x) == CHOOSE { xs = "(${xs})" }
+        return "${op(n)}${xs}"
+    }
+    if k == BINARY {
+        p = prec(op(n))
+        l = operand(child(n, 0), p, 0)
+        r = operand(child(n, 1), p, 1)
+        return "${l} ${op(n)} ${r}"
+    }
+    if k == CHOOSE {
+        c = expr_source(child(n, 0))
+        // `if f(x) { a }` as a value would read the `{` as f's trailing
+        // block: such a condition goes in parentheses.
+        if ends_in_call(child(n, 0)) { c = "(${c})" }
+        a = expr_source(child(n, 1))
+        b = expr_source(child(n, 2))
+        return "if ${c} { ${a} } else { ${b} }"
+    }
+    if k == CALL { return "${name(n)}(${args_source(n, 0)})" }
+    if k == FIELD {
+        o = child(n, 0)
+        os = expr_source(o)
+        if kind(o) == BINARY || kind(o) == UNARY || kind(o) == CHOOSE { os = "(${os})" }
+        return "${os}.${name(n)}"
+    }
+    if k == INDEX {
+        return "${expr_source(child(n, 0))}[${expr_source(child(n, 1))}]"
+    }
+    if k == MAKE {
+        s = "${type_of(n)} {"
+        i = 0
+        count = child_count(n)
+        while i < count {
+            f = child(n, i)
+            if i > 0 { s = "${s}," }
+            s = "${s} ${name(f)}: ${expr_source(child(f, 0))}"
+            i = i + 1
+        }
+        if count > 0 { s = "${s} " }
+        return "${s}}"
+    }
+    return "<${kind_name(k)}?>"
+}
+
+// A statement used where Aether has a single clause (a `for` header): no
+// indent, no newline.
+fn clause_source(n: Node) -> string {
+    k = kind(n)
+    if k == LET { return "${name(n)} = ${expr_source(child(n, 0))}" }
+    if k == ASSIGN {
+        return "${expr_source(child(n, 0))} ${op(n)} ${expr_source(child(n, 1))}"
+    }
+    if k == EXPR { return expr_source(child(n, 0)) }
+    return expr_source(n)
+}
+
+fn block_source(n: Node, depth: int) -> string {
+    s = "{\n"
+    i = 0
+    count = child_count(n)
+    while i < count {
+        s = "${s}${stmt_source(child(n, i), depth + 1)}"
+        i = i + 1
+    }
+    return "${s}${pad(depth)}}"
+}
+
+// One statement at `depth`, with its indent and newline.
+fn stmt_source(n: Node, depth: int) -> string {
+    ind = pad(depth)
+    k = kind(n)
+    if k == LET || k == ASSIGN || k == EXPR { return "${ind}${clause_source(n)}\n" }
+    if k == RETURN {
+        if child_count(n) == 0 { return "${ind}return\n" }
+        return "${ind}return ${expr_source(child(n, 0))}\n"
+    }
+    if k == BREAK { return "${ind}break\n" }
+    if k == CONTINUE { return "${ind}continue\n" }
+    if k == BLOCK { return "${ind}${block_source(n, depth)}\n" }
+    if k == IF { return "${ind}${if_source(n, depth)}\n" }
+    if k == WHILE {
+        return "${ind}while ${expr_source(child(n, 0))} ${block_source(child(n, 1), depth)}\n"
+    }
+    if k == FOR {
+        h = "for (${clause_source(child(n, 0))}; ${expr_source(child(n, 1))}; ${clause_source(child(n, 2))})"
+        return "${ind}${h} ${block_source(child(n, 3), depth)}\n"
+    }
+    return "${ind}<${kind_name(k)}?>\n"
+}
+
+fn if_source(n: Node, depth: int) -> string {
+    s = "if ${expr_source(child(n, 0))} ${block_source(child(n, 1), depth)}"
+    if child_count(n) > 2 {
+        e = child(n, 2)
+        if kind(e) == IF { return "${s} else ${if_source(e, depth)}" }
+        return "${s} else ${block_source(e, depth)}"
+    }
+    return s
+}
+
+// The quote printed back as Aether: `| a: T, b: U | { ... }`, or the block
+// alone when it has no parameters. A `->` body comes back as the block it
+// stands for (`{ return expr }`).
+to_source(t: Tree) -> string {
+    s = ""
+    count = param_count(t)
+    if count > 0 {
+        s = "| "
+        i = 0
+        while i < count {
+            if i > 0 { s = "${s}, " }
+            s = "${s}${param_name(t, i)}: ${param_type(t, i)}"
+            i = i + 1
+        }
+        s = "${s} | "
+    }
+    return "${s}${block_source(body(t), 0)}"
+}
+
+fn dump_node(n: Node) -> string {
+    s = "(${kind_name(kind(n))}"
+    if name(n) != "" { s = "${s} ${name(n)}" }
+    if op(n) != "" { s = "${s} ${op(n)}" }
+    if lit(n) != "" {
+        if type_of(n) == "string" {
+            s = "${s} ${quoted(lit(n))}"
+        } else {
+            s = "${s} ${lit(n)}"
+        }
+    }
+    if type_of(n) != "" { s = "${s} :${type_of(n)}" }
+    i = 0
+    count = child_count(n)
+    while i < count {
+        s = "${s} ${dump_node(child(n, i))}"
+        i = i + 1
+    }
+    return "${s})"
+}
+
+// The tree as an s-expression with every node's kind, name, operator,
+// literal and type: `(BINARY * :float (LOCAL a :float) (LIT 2.0 :float))`.
+// For tests and for reading what a back end will see.
+dump(t: Tree) -> string {
+    s = ""
+    i = 0
+    count = param_count(t)
+    while i < count {
+        s = "${s}(param ${param_name(t, i)} :${param_type(t, i)}) "
+        i = i + 1
+    }
+    i = 0
+    count = capture_count(t)
+    while i < count {
+        c = capture(t, i)
+        s = "${s}(capture ${capture_name(c)} :${capture_type(c)}) "
+        i = i + 1
+    }
+    return "${s}${dump_node(body(t))}"
+}

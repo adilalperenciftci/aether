@@ -1262,6 +1262,76 @@ ASTNode* parse_closure_expression(Parser* parser) {
     return closure;
 }
 
+/* docs/quote.md: is the token at `offset` the `quote` of a quoted trailing
+ * block? `quote` is not a keyword (std.quote is a module called `quote`, and
+ * `quote` stays an ordinary name everywhere else): it means quoting only
+ * straight after a call's closing `)`, on the same line, and followed by
+ * `|`, `||`, `{` or `->`. Nothing else can follow a call that way, so
+ * there is no reading of such code that this takes away. */
+static int is_quote_trailing(Parser* parser, int offset, int paren_close_line) {
+    Token* t = peek_ahead(parser, offset);
+    if (!t || t->type != TOKEN_IDENTIFIER || !t->value || strcmp(t->value, "quote") != 0)
+        return 0;
+    if (t->line != paren_close_line) return 0;
+    Token* after = peek_ahead(parser, offset + 1);
+    if (!after) return 0;
+    switch (after->type) {
+        case TOKEN_PIPE:
+        case TOKEN_OR:
+        case TOKEN_LEFT_BRACE:
+        case TOKEN_ARROW:
+            return 1;
+        default:
+            return 0;
+    }
+}
+
+/* Each call in a quoted body keeps its name as written (`math.sin`): the
+ * type checker rewrites `value` to the resolved C-level name, and the tree
+ * records the call as the source spelt it. */
+static void quote_keep_call_names(ASTNode* n) {
+    if (!n) return;
+    if (n->type == AST_FUNCTION_CALL && n->value && !n->source_name)
+        n->source_name = strdup(n->value);
+    for (int i = 0; i < n->child_count; i++) quote_keep_call_names(n->children[i]);
+}
+
+/* `quote |a: T| { body }`, `quote |a: T| -> expr`, `quote { body }` or
+ * `quote -> expr`, with the parser at `quote`. An AST_QUOTE whose children
+ * are the parameters then the body block, as an AST_CLOSURE's are. */
+static ASTNode* parse_quote_trailing(Parser* parser) {
+    Token* q = peek_token(parser);
+    advance_token(parser);  // consume 'quote'
+    Token* next = peek_token(parser);
+    ASTNode* quote = NULL;
+    if (next->type == TOKEN_PIPE || next->type == TOKEN_OR) {
+        quote = parse_closure_expression(parser);
+        if (!quote) return NULL;
+        quote->type = AST_QUOTE;
+        if (quote->node_type) { free_type(quote->node_type); quote->node_type = NULL; }
+    } else {
+        quote = create_ast_node(AST_QUOTE, NULL, q->line, q->column);
+        ASTNode* body = NULL;
+        if (next->type == TOKEN_ARROW) {
+            advance_token(parser);  // consume '->'
+            if (peek_token(parser) && peek_token(parser)->type == TOKEN_LEFT_BRACE) {
+                body = parse_block(parser);
+                arrow_block_return_tail(body);
+            } else {
+                body = parse_arrow_expression_body(parser);
+            }
+        } else {
+            body = parse_block(parser);
+        }
+        if (!body) { free_ast_node(quote); return NULL; }
+        add_child(quote, body);
+    }
+    quote->line = q->line;
+    quote->column = q->column;
+    quote_keep_call_names(quote);
+    return quote;
+}
+
 static ASTNode* parse_expression_inner(Parser* parser);
 static ASTNode* parse_unary_expression_inner(Parser* parser);
 static ASTNode* parse_statement_inner(Parser* parser);
@@ -2446,7 +2516,16 @@ static ASTNode* parse_postfix_expression(Parser* parser) {
             // func(args) callback { body }  or  func(args) callback |x| { body }
             {
                 Token* next_tok = peek_token(parser);
-                if (next_tok && next_tok->type == TOKEN_CALLBACK) {
+                if (is_quote_trailing(parser, 0, paren_close_line)) {
+                    // func(args) quote |x: T| { body } — the block is handed
+                    // over as a tree, not run (docs/quote.md).
+                    ASTNode* quoted = parse_quote_trailing(parser);
+                    if (!quoted) {
+                        free_ast_node(func_call);
+                        return NULL;
+                    }
+                    add_child(func_call, quoted);
+                } else if (next_tok && next_tok->type == TOKEN_CALLBACK) {
                     // Callback trailing block: always a real closure (hoisted, captures vars)
                     // func(args) callback { body }  — zero-param closure
                     // func(args) callback |x| { body }  — parameterized closure

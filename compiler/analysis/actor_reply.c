@@ -13,7 +13,7 @@ static ASTNode* first_reply(ASTNode* node) {
     if (node->type == AST_FUNCTION_DEFINITION ||
         node->type == AST_ACTOR_DEFINITION ||
         node->type == AST_BUILDER_FUNCTION ||
-        node->type == AST_CLOSURE) {
+        node->type == AST_CLOSURE || node->type == AST_QUOTE) {
         return NULL;
     }
     for (int i = 0; i < node->child_count; i++) {

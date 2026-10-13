@@ -1,3 +1,4 @@
+#include "../analysis/quote.h"
 #include "codegen_internal.h"
 #include "../analysis/sandbox_trust.h"
 #include "../aether_defines.h"
@@ -2770,6 +2771,14 @@ static void discover_closures_scoped(CodeGenerator* gen, ASTNode* node, const ch
         }
         return;
     }
+    /* docs/quote.md: a quote's captures are cells of the scope it is
+     * written in; quote_promote_captures promotes them once discovery is
+     * done. Its body is the tree's, and the node has no children left. */
+    if (node->type == AST_QUOTE) {
+        QuoteInfo* q = quote_of(node);
+        if (q) q->scope = enclosing_func ? aether_intern(enclosing_func) : NULL;
+        return;
+    }
     if (node->type == AST_CLOSURE) {
         // Skip trailing blocks — they are inlined at the call site, not hoisted
         if (node->value && strcmp(node->value, "trailing") == 0) {
@@ -3289,15 +3298,54 @@ static void propagate_nested_captures(CodeGenerator* gen) {
     }
 }
 
+/* docs/quote.md: every variable a quote captures lives in a shared cell for
+ * as long as the tree does, so the tree reads the variable itself, not a
+ * copy, and sees the program change it. A closure promotes a capture only
+ * when it writes it; a quote promotes every one. A quote inside a hoisted
+ * closure needs the variable in that closure's env too, which the nested-
+ * capture pass then carries further out. */
+static void quote_add_closure_captures(CodeGenerator* gen) {
+    for (int qi = 0; qi < quote_count(); qi++) {
+        QuoteInfo* q = quote_at(qi);
+        if (!q || !q->scope || strncmp(q->scope, "__closure_", 10) != 0) continue;
+        for (int ci = 0; ci < gen->closure_count; ci++) {
+            char nm[64];
+            closure_scope_name(gen->closures[ci].closure_node, nm, sizeof(nm));
+            if (strcmp(nm, q->scope) != 0) continue;
+            ASTNode* cnode = gen->closures[ci].closure_node;
+            for (int k = 0; k < q->ncaps; k++) {
+                const char* cap = q->caps[k].name;
+                if (q->caps[k].global) continue;
+                if (is_closure_param(cnode, cap)) continue;
+                if (subtree_declares(last_block_child(cnode), cap)) continue;
+                add_capture(gen, ci, cap);
+            }
+        }
+    }
+}
+
+static void quote_promote_captures(CodeGenerator* gen) {
+    for (int qi = 0; qi < quote_count(); qi++) {
+        QuoteInfo* q = quote_at(qi);
+        if (!q || !q->scope) continue;
+        for (int k = 0; k < q->ncaps; k++) {
+            if (q->caps[k].global) continue;   /* a global is its own cell */
+            promote_up_from(gen, q->scope, q->caps[k].name);
+        }
+    }
+}
+
 // Public entry point — starts at program root with no enclosing function.
 void discover_closures(CodeGenerator* gen, ASTNode* node) {
     discover_closures_scoped(gen, node, NULL);
     // Second pass: now that closure_var_map is fully populated, propagate
     // return types back onto call() expressions the typechecker left as int.
     propagate_call_return_types(gen, node);
+    quote_add_closure_captures(gen);
     // Third pass: carry captures of nested closures out to their enclosing
     // closure, whose C frame the inner env is built from.
     propagate_nested_captures(gen);
+    quote_promote_captures(gen);
     // Fourth pass: compute which captures need heap promotion per function.
     compute_promoted_captures(gen);
 }
@@ -9682,6 +9730,40 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
             }
             break;
 
+        case AST_QUOTE: {
+            /* docs/quote.md: build the tree, handing the builder each
+             * captured variable's cell (the raw pointer, not its value). */
+            QuoteInfo* q = quote_of(expr);
+            if (!q) {
+                fprintf(gen->output, "((void*)0)");
+                break;
+            }
+            fprintf(gen->output, "_quote_build_%s(", expr->value);
+            if (q->ncaps == 0) {
+                fprintf(gen->output, "NULL");
+            } else {
+                fprintf(gen->output, "(void*[]){ ");
+                for (int k = 0; k < q->ncaps; k++) {
+                    ASTNode* id = create_ast_node(AST_IDENTIFIER, q->caps[k].name,
+                                                  expr->line, expr->column);
+                    codegen_own_node(gen, id);
+                    if (k) fprintf(gen->output, ", ");
+                    if (q->caps[k].global) {
+                        /* A global's cell is the global itself. */
+                        fprintf(gen->output, "(void*)&(");
+                        generate_expression(gen, id);
+                        fprintf(gen->output, ")");
+                        continue;
+                    }
+                    id->annotation = strdup("raw_promoted");
+                    fprintf(gen->output, "(void*)");
+                    generate_expression(gen, id);
+                }
+                fprintf(gen->output, " }");
+            }
+            fprintf(gen->output, ")");
+            break;
+        }
         case AST_CLOSURE: {
             // Emit inline closure construction
             // The closure's value field was set to its ID by discover_closures

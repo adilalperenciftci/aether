@@ -342,7 +342,17 @@ typedef enum {
     // pass synthesizes `T_schema() -> ptr { return <AST_SCHEMA_OF T> }`, and
     // codegen lowers it to the address of T's static table. `value` is T.
     AST_FIELD_ATTRIBUTE,
-    AST_SCHEMA_OF
+    AST_SCHEMA_OF,
+    // `f(args) quote |a: T| { body }` (docs/quote.md): a trailing block the
+    // call receives as a tree (a std.quote Tree) instead of a closure.
+    // Children are AST_CLOSURE_PARAM nodes, then the AST_BLOCK body, as an
+    // AST_CLOSURE's are. The type checker checks the body, lowers it to the
+    // tree it stands for (analysis/quote.c), and takes the body off the
+    // node, so no later pass sees the quoted statements as code to run;
+    // `value` is then the quote's index in that table. Not an AST_CLOSURE
+    // with a marker: codegen special-cases closures in many places, and
+    // closure discovery would hoist it.
+    AST_QUOTE
 } ASTNodeType;
 
 typedef enum {
@@ -704,10 +714,11 @@ int ast_is_trailing_block(const ASTNode* n);
 
 /* #2766: is `n` a function of its own, whose `return`s return from it and
  * not from the function it is written in? A closure is, a trailing block is
- * not. Every walk that collects a function's returns (whether one gives a
- * value, which type, whether it is a heap string) stops at these nodes and
- * goes on into a trailing block, so a return there counts as the function's
- * everywhere the others do. */
+ * not, and a quote's body is not its enclosing function's either (it is a
+ * tree, docs/quote.md). Every walk that collects a function's returns
+ * (whether one gives a value, which type, whether it is a heap string)
+ * stops at these nodes and goes on into a trailing block, so a return there
+ * counts as the function's everywhere the others do. */
 int ast_is_own_function(const ASTNode* n);
 
 /* Whether some arm of the `match` `m` runs for every value it can match: it

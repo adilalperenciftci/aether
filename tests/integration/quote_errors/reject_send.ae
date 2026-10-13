@@ -1,0 +1,11 @@
+// An actor send in a quote: E0800 (docs/quote.md). Must not compile: tests/integration/quote_errors.
+import std.quote
+
+take(t: quote.Tree) {}
+message Ping { n: int }
+actor A { receive { Ping(n) -> {} } }
+main() {
+    v = 1
+    a = spawn(A())
+    take() quote { a ! Ping { n: 1 } }
+}

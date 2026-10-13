@@ -56,6 +56,10 @@ typedef struct Symbol {
     // rule). Kept off `type`, which is cloned into the AST: a function
     // returning the local must not inherit it.
     struct ASTNode* inferred_closure;
+    // docs/quote.md: a local-scope binding made by a bare `g = expr` write to
+    // the program-level `var g`. It is the global (codegen writes the
+    // static), so a quote reading `g` after it captures the global.
+    int global_write;
     struct Symbol* next;
     // #2007: chain within the scope's hash bucket. A symbol is at the head
     // of its bucket chain exactly when it is the newest of its name in the
@@ -118,6 +122,10 @@ void free_symbol_table(SymbolTable* table);
 void add_symbol(SymbolTable* table, const char* name, Type* type, int is_actor, int is_function, int is_state);
 Symbol* lookup_symbol(SymbolTable* table, const char* name);
 Symbol* lookup_symbol_local(SymbolTable* table, const char* name);
+/* docs/quote.md: the program-level `const NAME`, or NULL. */
+ASTNode* tc_program_const(const char* name);
+/* docs/quote.md: the program-level `var NAME` (a global variable), or NULL. */
+ASTNode* tc_program_global_var(const char* name);
 /* #2007: unlink and free the newest symbol of `table`. The one way to remove
  * a symbol, so the hash index stays in step with the list. */
 void pop_symbol(SymbolTable* table);
