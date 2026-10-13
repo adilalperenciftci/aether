@@ -1,0 +1,50 @@
+// Regression (#2827 review): an ask whose message has no braces is a
+// statement, not a declaration.
+//
+// bce8bab7 read IDENT `?` IDENT at the end of a line as the declaration of
+// an optional (`Point? q`), so `d ? GetCount` became an unused variable
+// `GetCount` of type `d?` (gcc: "unknown type name 'd'"), and with the
+// message's `{` on the next line, "Expected statement in block". The shape
+// is a declaration only when `=` follows the second name or the first names
+// a type; `d` names an actor, so each of these is an ask.
+extern exit(code: int)
+
+message GetCount {}
+message Compute { x: int }
+
+actor Counter {
+    state count = 0
+    receive {
+        GetCount() -> {
+            count = count + 1
+            reply count
+        }
+        Compute(x) -> {
+            count = count + x
+            reply count
+        }
+    }
+}
+
+bump(d: actor_ref) {
+    d ? GetCount
+}
+
+main() {
+    d = spawn(Counter())
+    d ? GetCount
+    d ? GetCount;
+    d ? GetCount // a trailing comment
+    if true {
+        d ? GetCount
+    }
+    d ? Compute
+    { x: 4 }
+    bump(d)
+    n = d ? GetCount {}
+    if n != 10 {
+        println("FAIL: the asks counted ${n}, want 10")
+        exit(1)
+    }
+    println("ask statements: ok")
+}
