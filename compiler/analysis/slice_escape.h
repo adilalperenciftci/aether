@@ -17,10 +17,7 @@
  * the body in the order it runs, keeping what holds such a view at each
  * point: a local bound to one, or a field of a local value one is stored in.
  * Binding a local or a field again replaces what it held, so a name given
- * storage that outlives the frame before it leaves holds no view any more;
- * a statement that calls a local closure (bound once, only ever called by
- * name) re-binds what the closure's body re-binds on every path to a
- * call's result.
+ * storage that outlives the frame before it leaves holds no view any more.
  * Where control joins (after the branches of an `if`, a `match` or a
  * `switch`, around a loop, after a `try`) what holds a view on any path
  * holds one. Each place a view leaves the frame is reported at the value
