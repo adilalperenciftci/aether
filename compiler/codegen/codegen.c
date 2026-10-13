@@ -639,6 +639,7 @@ CodeGenerator* create_code_generator(FILE* output) {
     gen->last_line_file = NULL;
     gen->last_line_num = 0;
     gen->match_result_var = NULL;
+    gen->match_result_opt = NULL;
     gen->match_result_own = NULL;
     gen->match_result_struct = NULL;
     gen->match_result_replace = 0;
@@ -1886,6 +1887,28 @@ static int try_emit_builder_ctx_pop(CodeGenerator* gen, ASTNode* deferred) {
     return 1;
 }
 
+/* #2791: the config of a builder call whose block is left before the
+ * builder runs (a return, a break or continue out of it). Annotation
+ * "builder_cfg_release:<config>:<release>", pushed by
+ * emit_trailing_block_body after the context pop, so it runs first. The
+ * block's natural end clears the config variable, since the builder then
+ * takes the config; on any other way out nothing will, and the call
+ * releases what its factory made. */
+static int try_emit_builder_cfg_release(CodeGenerator* gen, ASTNode* deferred) {
+    static const char prefix[] = "builder_cfg_release:";
+    if (!deferred || !deferred->annotation ||
+        strncmp(deferred->annotation, prefix, sizeof(prefix) - 1) != 0)
+        return 0;
+    char buf[512];
+    snprintf(buf, sizeof(buf), "%s", deferred->annotation + sizeof(prefix) - 1);
+    char* rel = strchr(buf, ':');
+    if (!rel) return 1;
+    *rel++ = '\0';
+    print_indent(gen);
+    fprintf(gen->output, "if (%s) %s(%s);\n", buf, rel, buf);
+    return 1;
+}
+
 /* #1140 — should the defer at stack slot `i` fire at the exit currently being
  * emitted?
  *
@@ -1934,6 +1957,7 @@ static void emit_deferred_one(CodeGenerator* gen, int i) {
     }
 
     if (!try_emit_builder_ctx_pop(gen, deferred) &&
+        !try_emit_builder_cfg_release(gen, deferred) &&
         !try_emit_heap_string_exit_free(gen, deferred) &&
         !try_emit_seq_exit_free(gen, deferred) &&
         !try_emit_opt_str_exit_free(gen, deferred) &&
@@ -7039,6 +7063,12 @@ static void emit_static_struct_init(CodeGenerator* gen, ASTNode* lit) {
             /* A closure field: the zero closure, as `var f: fn = null` is
              * (#2525); `NULL` is not an initializer for the struct. */
             fprintf(gen->output, "{0}");
+        } else if (is_empty_slice_value(v) ||
+                   (type_is_slice(ft) && (v->type == AST_NULL_LITERAL ||
+                                          (v->type == AST_ARRAY_LITERAL && v->child_count == 0)))) {
+            /* #2792: a `T[]` field's empty slice (`[]` or `null`), the
+             * constant a `T[]` global takes too (#2785). */
+            fprintf(gen->output, "{0}");
         } else {
             generate_expression(gen, v);
         }
@@ -7101,6 +7131,10 @@ static void emit_module_global_vars(CodeGenerator* gen, ASTNode* program) {
             /* #2590: a struct literal of constants (the type checker
              * admits no other here) as an initializer list. */
             emit_static_struct_init(gen, cd->children[0]);
+        } else if (is_empty_slice_value(cd->children[0])) {
+            /* #2767: `null` or `[]` into a `T[]` global: the empty slice,
+             * as a constant; aether_slice_make is a call C refuses here. */
+            fprintf(gen->output, "{0}");
         } else {
             generate_expression(gen, cd->children[0]);
         }
@@ -8286,10 +8320,16 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
      * -Wunused-value: `list.add(l, string.copy(p))` warned in ordinary user
      * code. A function call discards its result silently, so the conversion
      * lives in these helpers instead. */
+    /* #2810: the container owns an adopted string from here, so the panic
+     * journal must not hold it any more: a panic after the adoption drained
+     * the entry the string's first owner tracked, freeing what the
+     * container then freed again (aether_unwind.h: forget on adoption). */
     print_line(gen, "static inline const char* _aether_list_add_adopted(void* list, void* item) {");
+    print_line(gen, "    aether_unwind_forget(item);");
     print_line(gen, "    return list_add_string_adopted(list, item) ? \"\" : \"list.add failed\";");
     print_line(gen, "}");
     print_line(gen, "static inline const char* _aether_map_put_adopted(void* map, const char* key, void* value) {");
+    print_line(gen, "    aether_unwind_forget(value);");
     print_line(gen, "    return map_put_string_adopted(map, key, value) ? \"\" : \"map.put failed\";");
     print_line(gen, "}");
     /* #2497: the owning entries, for a value the container must hold its
@@ -8482,9 +8522,18 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     // Builder context stack: trailing blocks push/pop the return value
     print_line(gen, "static void* _aether_ctx_stack[64];");
     print_line(gen, "static int _aether_ctx_depth = 0;");
-    print_line(gen, "static inline void _aether_ctx_push(void* ctx) { if (_aether_ctx_depth < 64) _aether_ctx_stack[_aether_ctx_depth++] = ctx; }");
+    print_line(gen, "static void (*_aether_ctx_release[64])(void*);");
+    print_line(gen, "static inline void _aether_ctx_push(void* ctx) { if (_aether_ctx_depth < 64) { _aether_ctx_release[_aether_ctx_depth] = 0; _aether_ctx_stack[_aether_ctx_depth++] = ctx; } }");
     print_line(gen, "static inline void _aether_ctx_pop(void) { if (_aether_ctx_depth > 0) _aether_ctx_depth--; }");
     print_line(gen, "static inline void* _aether_ctx_get(void) { return _aether_ctx_depth > 0 ? _aether_ctx_stack[_aether_ctx_depth-1] : (void*)0; }");
+    /* #2810: a builder call's config is released by its call only on a way
+     * out of the block the call compiles (#2791); a panic leaves the block
+     * by longjmp, which skips that and the pop. The entry a builder block
+     * pushes records the config's release, so a `try` catching the panic
+     * puts the stack back to its depth at the try and releases the configs
+     * of the blocks the panic abandoned. */
+    print_line(gen, "static inline void _aether_ctx_own(void* ctx, void (*release)(void*)) { if (_aether_ctx_depth > 0 && _aether_ctx_stack[_aether_ctx_depth-1] == ctx) _aether_ctx_release[_aether_ctx_depth-1] = release; }");
+    print_line(gen, "static inline void _aether_ctx_unwind(int depth) { while (_aether_ctx_depth > depth) { _aether_ctx_depth--; void (*r)(void*) = _aether_ctx_release[_aether_ctx_depth]; _aether_ctx_release[_aether_ctx_depth] = 0; if (r && _aether_ctx_stack[_aether_ctx_depth]) r(_aether_ctx_stack[_aether_ctx_depth]); } }");
     /* #1704: the sandbox permission stack is SEPARATE from the builder
      * context stack above. They used to be the same array, so entering any
      * trailing block pushed that builder's config object onto the stack the
@@ -8774,6 +8823,18 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
         gen->builder_funcs_reg[gen->builder_func_reg_count].name = strdup(child->value);
         gen->builder_funcs_reg[gen->builder_func_reg_count].factory = child->annotation ? strdup(child->annotation) : NULL;
         gen->builder_func_reg_count++;
+    }
+    /* #2801: a call to a builder with the default config factory is lowered
+     * to `map_new()`, and a way out of its block before the builder runs to
+     * `map_free` (#2791), whether or not the program imports std.map.
+     * Declare both, as std.map's externs do; the import's identical
+     * declarations, when there are any, are harmless. */
+    for (int i = 0; i < gen->builder_func_reg_count; i++) {
+        const char* f = gen->builder_funcs_reg[i].factory;
+        if (!f || strcmp(f, "map_new") == 0) {
+            fprintf(gen->output, "void* map_new(void);\nvoid map_free(void*);\n");
+            break;
+        }
     }
 
     /* #2520: the string literals holding a NUL, as static AetherStrings,
@@ -9134,7 +9195,13 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
             cd->value && cd->child_count > 0) {
             codegen_note_diag_pos(cd);
             codegen_note_diag_func(NULL);
-            if (cd->annotation && strcmp(cd->annotation, "array_const") == 0) {
+            if (cd->annotation && strcmp(cd->annotation, "array_const") == 0 &&
+                is_empty_slice_value(cd->children[0])) {
+                /* #2767: `const NAME: T[] = []` (or `= null`) has no
+                 * elements to size an array with: it is the empty slice,
+                 * which every read of NAME takes it for. */
+                fprintf(gen->output, "static const AetherSlice %s = {0};\n", cd->value);
+            } else if (cd->annotation && strcmp(cd->annotation, "array_const") == 0) {
                 // static const T NAME[] = {v1, v2, ...};
                 Type* elem_type = (cd->node_type && cd->node_type->element_type)
                                   ? cd->node_type->element_type : NULL;

@@ -469,6 +469,10 @@ void generate_expression_as_elem_ptr(CodeGenerator* gen, ASTNode* expr);
 /* #1286: emit `expr` as an AetherSlice: a `T[N]` array is wrapped with its
  * static length, a slice is emitted as-is. */
 void generate_expression_as_slice(CodeGenerator* gen, ASTNode* expr);
+/* #2767: is `e` the empty slice, `null` or `[]` in a `T[]` slot (the
+ * typechecker's AST_SLICE_FROM_ARRAY over either)? It views no storage, so
+ * a file-scope static takes it as the constant `{0}`. */
+int is_empty_slice_value(const ASTNode* e);
 /* #2723: emit `arg` for a parameter of type `param_type`: an array a `try`
  * body may have written, for a `T[N]` parameter, as a copy of its own. */
 void generate_sized_array_argument(CodeGenerator* gen, ASTNode* arg, Type* param_type);
@@ -488,6 +492,11 @@ const char* get_builder_factory(CodeGenerator* gen, const char* func_name);
 
 /* A trailing block's statements, in its own scope (codegen_stmt.c). */
 void emit_trailing_block_body(CodeGenerator* gen, ASTNode* body);
+/* #2791: a builder call's trailing block, whose config the C variable
+ * `cfg_var` holds: as emit_trailing_block_body, and a way out of the block
+ * before the builder runs releases the config. */
+void emit_builder_block_body(CodeGenerator* gen, ASTNode* body, const char* cfg_var,
+                             const char* builder_name);
 /* The block of a call's trailing DSL closure: not a closure the function
  * takes as a `fn` parameter. NULL when the call has none (codegen_expr.c). */
 ASTNode* trailing_dsl_block(CodeGenerator* gen, ASTNode* call);

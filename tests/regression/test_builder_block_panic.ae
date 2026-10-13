@@ -1,0 +1,114 @@
+// Regression (#2810): a panic out of a builder's trailing block, caught by a
+// `try`, leaves the builder context stack and the heap as they were.
+//
+// The panic leaves the block by longjmp, which skips the block's context pop
+// and the release of the call's config (#2791). Each caught panic left one
+// entry on the program's builder context stack; after 64 the stack stopped
+// growing and every later block's setters wrote into the config of a call a
+// panic had abandoned. And a string a setter handed to the config's map was
+// still in the panic journal its first owner tracked it in, so the panic's
+// drain freed it while the map held it: freeing the map freed it again, and
+// the heap was corrupt within a few hundred catches (0xC0000374). The same
+// happened to a plain map filled in a `try` body. The catch now puts the
+// context stack back to its depth at the `try` and releases the configs of
+// the blocks it abandoned, and a container that adopts a string takes it
+// out of the journal.
+import std.map
+import std.mem
+
+extern exit(code: int)
+
+builder run(label: string) {
+    if _builder != null {
+        map_free(_builder)
+    }
+}
+
+builder probe(label: string) -> int {
+    n = 0
+    if _builder != null {
+        n = map_size(_builder)
+        map_free(_builder)
+    }
+    return n
+}
+
+set_opt(_ctx: ptr, key: string, value: string) {
+    map_put(_ctx, key, value)
+}
+
+boom(n: int) {
+    if n > 0 {
+        panic("boom")
+    }
+}
+
+abandon(times: int) -> int {
+    caught = 0
+    i = 0
+    while i < times {
+        try {
+            run("x") {
+                set_opt("k", "v")
+                boom(1)
+            }
+        } catch e {
+            caught = caught + 1
+        }
+        i = i + 1
+    }
+    return caught
+}
+
+plain_map(times: int) -> int {
+    caught = 0
+    i = 0
+    while i < times {
+        m = map_new()
+        try {
+            set_opt(m, "k", "v")
+            boom(1)
+        } catch e {
+            caught = caught + 1
+        }
+        map_free(m)
+        i = i + 1
+    }
+    return caught
+}
+
+main() {
+    if abandon(300) != 300 {
+        println("FAIL: not every panic out of a builder block was caught")
+        exit(1)
+    }
+    if plain_map(300) != 300 {
+        println("FAIL: not every panic after a map put was caught")
+        exit(1)
+    }
+    // The stack is back where it was: this block's setters fill this call's
+    // config, not one a panic abandoned.
+    entries = probe("x") {
+        set_opt("a", "1")
+        set_opt("b", "2")
+    }
+    if entries != 2 {
+        println("FAIL: a builder block after the panics filled another config (${entries} entries)")
+        exit(1)
+    }
+    if !mem.heap_in_use_exact() {
+        println("builder block panic: ok (no exact heap count, growth not measured)")
+        return
+    }
+    g1 = mem.steady_growth(|| {
+            abandon(50)
+        }, 5)
+    g2 = mem.steady_growth(|| {
+            plain_map(50)
+        }, 5)
+    if g1 != 0 || g2 != 0 {
+        println("FAIL: 50 caught panics grew the heap: builder ${g1}, plain map ${g2}")
+        exit(1)
+    }
+    println("builder block panic: ok")
+}

@@ -67,9 +67,10 @@ static int has_value_type(Type* t) {
 }
 
 /* A `return` with a value anywhere in `n`, outside closures: a closure's
- * `return` is its own. The same test codegen's has_return_value makes. */
+ * `return` is its own, a trailing block's is the function's (#2766). The
+ * same test codegen's has_return_value makes. */
 static int returns_value(ASTNode* n) {
-    if (!n || n->type == AST_CLOSURE || n->type == AST_QUOTE) return 0;
+    if (!n || ast_is_own_function(n)) return 0;
     if (n->type == AST_RETURN_STATEMENT && n->child_count > 0 && n->children[0] &&
         n->children[0]->type != AST_PRINT_STATEMENT)
         return 1;
@@ -82,7 +83,7 @@ static int returns_value(ASTNode* n) {
  * block that runs inline at the call (the checker refuses one where the
  * callee takes an `fn`), so it is no function of its own. */
 static int is_trailing_block(ASTNode* n) {
-    return n && n->type == AST_CLOSURE && n->value && strcmp(n->value, "trailing") == 0;
+    return ast_is_trailing_block(n);
 }
 
 static ASTNode* closure_body(ASTNode* closure) {
@@ -225,47 +226,10 @@ static int switch_has_default(ASTNode* sw) {
     return 0;
 }
 
-/* The arm codegen lowers to an unconditional `else`. The string literal "_"
- * is a string it compares with, not the wildcard. */
-static int is_wildcard_pattern(ASTNode* p) {
-    if (!p) return 0;
-    if (p->node_type && p->node_type->kind == TYPE_WILDCARD) return 1;
-    return p->type == AST_IDENTIFIER && p->value && strcmp(p->value, "_") == 0;
-}
-
-/* A list-pattern element that matches any value: a binding or `_`. */
-static int binds_any(ASTNode* p) {
-    return p && (p->type == AST_PATTERN_VARIABLE || is_wildcard_pattern(p));
-}
-
-/* Whether some arm of `m` runs for every value it can match. */
+/* Whether some arm of `m` runs for every value it can match (ast.c, shared
+ * with the hoist of the names every arm binds, #2768). */
 static int match_covers(ASTNode* m) {
-    Type* t = (m->child_count > 0 && m->children[0]) ? m->children[0]->node_type : NULL;
-    int has_none = 0, has_some = 0, has_true = 0, has_false = 0;
-    int has_empty = 0, has_cons = 0;
-    for (int i = 1; i < m->child_count; i++) {
-        ASTNode* arm = m->children[i];
-        if (!arm || arm->type != AST_MATCH_ARM || arm->child_count < 1) continue;
-        ASTNode* p = arm->children[0];
-        if (!p) continue;
-        if (is_wildcard_pattern(p)) return 1;
-        if (p->type == AST_NONE_LITERAL) has_none = 1;
-        else if (p->type == AST_PATTERN_VARIABLE && p->annotation &&
-                 strcmp(p->annotation, "some_pattern") == 0) has_some = 1;
-        else if (p->type == AST_LITERAL && p->value && strcmp(p->value, "true") == 0) has_true = 1;
-        else if (p->type == AST_LITERAL && p->value && strcmp(p->value, "false") == 0) has_false = 1;
-        else if (p->type == AST_PATTERN_LIST && p->child_count == 0) has_empty = 1;
-        else if (p->type == AST_PATTERN_CONS && p->child_count == 2 &&
-                 binds_any(p->children[0]) && binds_any(p->children[1])) has_cons = 1;
-    }
-    if (t) {
-        /* The checker rejects a match over an enum or a sum that misses a
-         * case, so one that reaches here covers it. */
-        if (t->kind == TYPE_ENUM || t->kind == TYPE_SUM) return 1;
-        if (t->kind == TYPE_OPTIONAL) return has_none && has_some;
-        if (t->kind == TYPE_BOOL) return has_true && has_false;
-    }
-    return has_empty && has_cons;
+    return ast_match_covers(m);
 }
 
 static int match_arms_complete(Flow* f, ASTNode* m) {

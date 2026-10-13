@@ -1,0 +1,23 @@
+// Fixture for #2766: a builder whose trailing block calls the module's
+// functions by their bare names (`note(3)` is `blk.note`, #333).
+
+exports(run, note, size)
+
+// The builder's default config is a std.map (#2783).
+import std.map
+
+var noted = 0
+
+builder run(label: string) {
+    println("run ${label}")
+}
+
+// A setter: returns nothing.
+note(_ctx: ptr, n: int) {
+    noted = noted + n
+}
+
+// Returns a value.
+size(_ctx: ptr) -> int {
+    return noted + 100
+}

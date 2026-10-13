@@ -1,0 +1,33 @@
+// Regression (#2792): a module-level `var` of a struct with a `T[]` field
+// takes the empty slice for that field.
+//
+// The field's `[]` or `null` is coerced to the empty slice, which the check
+// for a constant initializer did not take for one, so `var g: S = S { xs:
+// [], n: 1 }` was refused ("must be a compile-time constant expression"),
+// though the empty slice is the constant `{0}` (#2785). It is one now, in
+// the struct's static initializer as for a `T[]` global.
+extern exit(code: int)
+
+struct S {
+    xs: int[]
+    n: int
+}
+
+var g: S = S { xs: [], n: 1 }
+var h: S = S { xs: null, n: 2 }
+
+main() {
+    bad = 0
+    if g.xs.len != 0 || g.n != 1 {
+        println("FAIL: g is ${g.xs.len} ${g.n}")
+        bad = bad + 1
+    }
+    if h.xs.len != 0 || h.n != 2 {
+        println("FAIL: h is ${h.xs.len} ${h.n}")
+        bad = bad + 1
+    }
+    if bad != 0 {
+        exit(1)
+    }
+    println("struct var with an empty slice field: ok")
+}

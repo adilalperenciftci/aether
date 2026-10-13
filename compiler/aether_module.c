@@ -4507,20 +4507,24 @@ static int prune_is_local(const NameSet* locals, const char* name) {
 }
 
 static void prune_collect_calls_in(ASTNode* node, NameSet* seen, NameStack* worklist,
-                                   const NameSet* locals);
+                                   const NameSet* locals, int in_dsl_block);
 
 static void prune_collect_calls(ASTNode* node, NameSet* seen, NameStack* worklist) {
-    prune_collect_calls_in(node, seen, worklist, NULL);
+    prune_collect_calls_in(node, seen, worklist, NULL, 0);
 }
 
+/* `in_dsl_block`: `node` is in the trailing block of a member-access call,
+ * where a bare call is the receiver's function (`<receiver>_<name>`) ahead
+ * of the enclosing function's names (#333): such a call is a reference to
+ * every function it may name, a local's name included. */
 static void prune_collect_calls_in(ASTNode* node, NameSet* seen, NameStack* worklist,
-                                   const NameSet* locals) {
+                                   const NameSet* locals, int in_dsl_block) {
     if (!node) return;
     if (prune_is_function_scope(node)) {
         NameSet own = {0};
         prune_collect_locals(node, &own);
         for (int i = 0; i < node->child_count; i++) {
-            prune_collect_calls_in(node->children[i], seen, worklist, &own);
+            prune_collect_calls_in(node->children[i], seen, worklist, &own, in_dsl_block);
         }
         if (node->type == AST_BUILDER_FUNCTION && node->annotation) {
             if (nameset_add(seen, node->annotation)) {
@@ -4531,7 +4535,7 @@ static void prune_collect_calls_in(ASTNode* node, NameSet* seen, NameStack* work
         return;
     }
     if (node->type == AST_FUNCTION_CALL && node->value &&
-        !prune_is_local(locals, node->value)) {
+        (in_dsl_block || !prune_is_local(locals, node->value))) {
         if (nameset_add(seen, node->value)) {
             namestack_push(worklist, node->value);
         }
@@ -4616,7 +4620,11 @@ static void prune_collect_calls_in(ASTNode* node, NameSet* seen, NameStack* work
         }
     }
     for (int i = 0; i < node->child_count; i++) {
-        prune_collect_calls_in(node->children[i], seen, worklist, locals);
+        ASTNode* c = node->children[i];
+        int dsl = in_dsl_block ||
+                  (node->type == AST_FUNCTION_CALL && node->value &&
+                   strchr(node->value, '.') && ast_is_trailing_block(c));
+        prune_collect_calls_in(c, seen, worklist, locals, dsl);
     }
 }
 

@@ -1594,6 +1594,18 @@ static int pattern_needs_array(ASTNode* pattern, ASTNode* body) {
     return 0;
 }
 
+/* A match arm's pattern binding, just declared in the arm's C block, is a
+ * local of the arm: a `h = ...` in the arm rebinds it, and no hoist in the
+ * arm declares it again there ("redefinition of 'h'"). The caller drops it
+ * when the arm ends. `kind` is the C declaration's: an element (`int`), a
+ * `T[]` tail, a StringSeq's head (string) or tail (pointer). */
+static void mark_pattern_binding(CodeGenerator* gen, const char* name, TypeKind kind) {
+    Type* t = kind == TYPE_ARRAY ? create_array_type(create_type(TYPE_INT), -1)
+                                 : create_type(kind);
+    mark_var_declared_typed(gen, name, t);
+    free_type(t);
+}
+
 static void generate_list_pattern_bindings(CodeGenerator* gen, ASTNode* pattern,
                                            ASTNode* match_expr, const char* len_name,
                                            ASTNode* body, int is_seq_match) {
@@ -1614,12 +1626,14 @@ static void generate_list_pattern_bindings(CodeGenerator* gen, ASTNode* pattern,
                 if (expr_references_var(body, head->value)) {
                     print_line(gen, "const char* %s = %s->head;",
                                head->value, len_name);
+                    mark_pattern_binding(gen, head->value, TYPE_STRING);
                 }
             }
             if (tail && tail->type == AST_PATTERN_VARIABLE && tail->value) {
                 if (expr_references_var(body, tail->value)) {
                     print_line(gen, "StringSeq* %s = %s->tail;",
                                tail->value, len_name);
+                    mark_pattern_binding(gen, tail->value, TYPE_PTR);
                 }
             }
         } else if (pattern->type == AST_PATTERN_LIST && pattern->child_count > 0) {
@@ -1635,6 +1649,7 @@ static void generate_list_pattern_bindings(CodeGenerator* gen, ASTNode* pattern,
                     fprintf(gen->output, "%s", len_name);
                     for (int j = 0; j < i; j++) fprintf(gen->output, "->tail");
                     fprintf(gen->output, "->head;\n");
+                    mark_pattern_binding(gen, elem->value, TYPE_STRING);
                 }
             }
         }
@@ -1656,6 +1671,7 @@ static void generate_list_pattern_bindings(CodeGenerator* gen, ASTNode* pattern,
             if (elem && elem->type == AST_PATTERN_VARIABLE && elem->value) {
                 if (expr_references_var(body, elem->value)) {
                     print_line(gen, "int %s = _match_arr[%d];", elem->value, i);
+                    mark_pattern_binding(gen, elem->value, TYPE_INT);
                 }
             }
         }
@@ -1666,6 +1682,7 @@ static void generate_list_pattern_bindings(CodeGenerator* gen, ASTNode* pattern,
         if (head && head->type == AST_PATTERN_VARIABLE && head->value) {
             if (expr_references_var(body, head->value)) {
                 print_line(gen, "int %s = _match_arr[0];", head->value);
+                mark_pattern_binding(gen, head->value, TYPE_INT);
             }
         }
         if (tail && tail->type == AST_PATTERN_VARIABLE && tail->value) {
@@ -1675,6 +1692,7 @@ static void generate_list_pattern_bindings(CodeGenerator* gen, ASTNode* pattern,
                 print_line(gen, "AetherSlice %s = aether_slice_make(&_match_arr[1], (uint64_t)(%s - 1));",
                            tail->value, len_name);
                 print_line(gen, "int %s_len = %s - 1;", tail->value, len_name);
+                mark_pattern_binding(gen, tail->value, TYPE_ARRAY);
             }
         }
     }
@@ -2835,10 +2853,11 @@ static void walk_returns_for_heap_check_in(CodeGenerator* gen, ASTNode* node,
         else         *any_non_heap = 1;
         return;
     }
-    // Don't descend into nested function/lambda definitions.
+    // Don't descend into nested function/lambda definitions. A trailing
+    // block runs inline: its returns are this function's (#2766).
     if (node->type == AST_FUNCTION_DEFINITION ||
         node->type == AST_BUILDER_FUNCTION ||
-        node->type == AST_CLOSURE) {
+        ast_is_own_function(node)) {
         return;
     }
     int pushed = 0;
@@ -3317,7 +3336,7 @@ static int zb_local(CodeGenerator* gen, ASTNode* ctx, const char* name,
 static int zb_returns(CodeGenerator* gen, ASTNode* n, ASTNode* fn, const char* sname,
                       int depth, int* saw) {
     if (!n) return 1;
-    if (n->type == AST_CLOSURE) return 1;   /* its returns are its own */
+    if (ast_is_own_function(n)) return 1;   /* its returns are its own */
     if (n->type == AST_RETURN_STATEMENT) {
         *saw = 1;
         return n->child_count > 0 && zb_expr(gen, n->children[0], fn, sname, depth + 1);
@@ -5044,9 +5063,10 @@ static void walk_returns_for_heap_at_in(CodeGenerator* gen, ASTNode* node,
         }
         return;
     }
+    /* A trailing block's returns are this function's (#2766). */
     if (node->type == AST_FUNCTION_DEFINITION ||
         node->type == AST_BUILDER_FUNCTION ||
-        node->type == AST_CLOSURE) {
+        ast_is_own_function(node)) {
         return;
     }
     int pushed = 0;
@@ -6579,7 +6599,7 @@ int callee_param_store_escapes_via_body(CodeGenerator* gen, const char* func_nam
  * emit_tuple_return_position copies? A closure's returns are its own. */
 static int subtree_mentions_param(ASTNode* node, const char* pname);
 static int tuple_returns_copy_opt_param(ASTNode* node, const char* pname, Type* rt) {
-    if (!node || node->type == AST_CLOSURE) return 1;
+    if (!node || ast_is_own_function(node)) return 1;
     if (node->type == AST_RETURN_STATEMENT) {
         if (node->child_count < 2) return !subtree_mentions_param(node, pname);
         for (int j = 0; j < node->child_count; j++) {
@@ -6661,9 +6681,7 @@ static ASTNode* last_block_child_of(ASTNode* node) {
  * (non-trailing) closure. */
 static ASTNode* closure_first_value_return(ASTNode* node) {
     if (!node) return NULL;
-    if (node->type == AST_CLOSURE && !(node->value && strcmp(node->value, "trailing") == 0)) {
-        return NULL;
-    }
+    if (ast_is_own_function(node)) return NULL;
     if (node->type == AST_RETURN_STATEMENT && node->child_count > 0 && node->children[0] &&
         node->children[0]->type != AST_PRINT_STATEMENT) return node;
     for (int i = 0; i < node->child_count; i++) {
@@ -6681,9 +6699,7 @@ static ASTNode* closure_first_value_return(ASTNode* node) {
  * is a string. `first` is that first return. */
 static int closure_returns_copy_walk(ASTNode* node, ASTNode* first, int* saw_string) {
     if (!node) return 1;
-    if (node->type == AST_CLOSURE && !(node->value && strcmp(node->value, "trailing") == 0)) {
-        return 1;   /* a nested closure's returns are its own */
-    }
+    if (ast_is_own_function(node)) return 1;   /* a nested closure's returns are its own */
     if (node->type == AST_RETURN_STATEMENT && node->child_count > 0) {
         if ((node->child_count > 1) != (first->child_count > 1)) return 0;
         if (node->child_count > 1) {
@@ -7935,16 +7951,87 @@ void emit_trailing_block_body(CodeGenerator* gen, ASTNode* body) {
         codegen_own_node(gen, ctx_pop);
         push_defer(gen, ctx_pop);
     }
+    /* #2791: a builder call's config, released on a way out of the block
+     * before the builder runs (try_emit_builder_cfg_release), not at the
+     * block's natural end, after which the builder takes it. The block
+     * holds it under a name of its own: every builder call names its
+     * config `_bcfg`, so in a nested call's block the outer one's is
+     * shadowed, and a way out of both must still release each. */
+    const char* own = NULL;
+    if (gen->builder_cfg_var && gen->builder_cfg_release) {
+        static int own_counter = 0;
+        own = cg_internf("_ae_cfg_own%d", own_counter++);
+        print_line(gen, "void* %s = %s;", own, gen->builder_cfg_var);
+        /* #2810: the stack entry the call pushed records the release, for
+         * a `try` that catches a panic leaving this block. */
+        print_line(gen, "_aether_ctx_own(%s, %s);", gen->builder_cfg_var,
+                   gen->builder_cfg_release);
+        ASTNode* release = create_ast_node(AST_EXPRESSION_STATEMENT, NULL,
+                                           body->line, body->column);
+        if (release) {
+            if (release->annotation) free(release->annotation);
+            release->annotation = heap_strf("builder_cfg_release:%s:%s", own,
+                                            gen->builder_cfg_release);
+            codegen_own_node(gen, release);
+            push_defer(gen, release);
+        }
+    }
+    gen->builder_cfg_var = NULL;
+    gen->builder_cfg_release = NULL;
     gen->in_trailing_block++;
     for (int si = 0; si < body->child_count; si++) {
         generate_statement(gen, body->children[si]);
     }
     gen->in_trailing_block--;
+    /* The natural end: the builder takes the config from here. */
+    if (own) print_line(gen, "%s = NULL;", own);
     exit_scope(gen);
     gen->indent_level--;
     print_indent(gen);
     fprintf(gen->output, "}\n");
     truncate_declared_vars(gen, saved_var_count);
+}
+
+/* #2791: the C function that releases what a builder's config factory
+ * made, or NULL when none is known: `map_free` for the default `map_new`,
+ * and for a `<stem>_new` factory the `<stem>_free(ptr)` returning nothing
+ * that the program defines or declares (`list_new`, `list_free`): a C
+ * `void (*)(void*)`, as the context stack records it (#2810). Any other
+ * factory's object belongs to its builder's protocol, which the compiler
+ * cannot release for it. */
+static const char* builder_config_release(CodeGenerator* gen, const char* builder_name) {
+    const char* factory = get_builder_factory(gen, builder_name);
+    if (!factory) return NULL;
+    size_t n = strlen(factory);
+    if (n <= 4 || strcmp(factory + n - 4, "_new") != 0) return NULL;
+    const char* release = cg_internf("%.*s_free", (int)(n - 4), factory);
+    if (strcmp(factory, "map_new") == 0) return release;
+    if (is_extern_func(gen, release)) {
+        /* One `ptr` parameter: the second slot reads as unknown. */
+        if (lookup_extern_param_kind(gen, release, 0) != TYPE_PTR ||
+            lookup_extern_param_type(gen, release, 1) != NULL)
+            return NULL;
+        Type* rt = lookup_extern_return_type(gen, release);
+        if (rt && rt->kind != TYPE_VOID) return NULL;
+        return lookup_extern_c_name(gen, release);
+    }
+    ASTNode* def = gen->program ? find_function_definition_by_name(gen->program, release) : NULL;
+    if (!def || def->type != AST_FUNCTION_DEFINITION || fn_param_count(def) != 1) return NULL;
+    if (def->node_type && def->node_type->kind != TYPE_VOID &&
+        def->node_type->kind != TYPE_UNKNOWN)
+        return NULL;
+    if (def->child_count > 0 && has_return_value(def->children[def->child_count - 1]))
+        return NULL;
+    ASTNode* p = fn_param_at(def, 0);
+    if (!p || !p->node_type || p->node_type->kind != TYPE_PTR) return NULL;
+    return codegen_normalise_callee(safe_c_name(release));
+}
+
+void emit_builder_block_body(CodeGenerator* gen, ASTNode* body, const char* cfg_var,
+                             const char* builder_name) {
+    gen->builder_cfg_var = cfg_var;
+    gen->builder_cfg_release = builder_config_release(gen, builder_name);
+    emit_trailing_block_body(gen, body);
 }
 
 /* The one closure-argument shape codegen can prove is dead after the call:
@@ -11365,7 +11452,7 @@ static int mentions_any_param(ASTNode* fn_def, ASTNode* e) {
  * (type_can_view, per tuple position), a value that mentions a parameter
  * of `fn_def`? A nested closure's returns are its own. */
 static int returns_view_params_walk(ASTNode* fn_def, ASTNode* n, Type* rt) {
-    if (!n || n->type == AST_CLOSURE) return 0;
+    if (!n || ast_is_own_function(n)) return 0;
     if (n->type == AST_RETURN_STATEMENT) {
         for (int j = 0; j < n->child_count; j++) {
             Type* pt = (rt && rt->kind == TYPE_TUPLE && n->child_count > 1 && j < rt->tuple_count)
@@ -12111,6 +12198,11 @@ void emit_optional_coerced(CodeGenerator* gen, ASTNode* value, Type* target) {
             fprintf(gen->output, ")");
         }
         fprintf(gen->output, " }");
+    } else if (inner && inner->kind == TYPE_SUM && needs_sum_coerce(value, inner)) {
+        /* A variant into a sum's optional is wrapped into the sum first, as
+         * it is into the sum itself (#914): the optional holds a Shape, not
+         * the Circle. */
+        emit_sum_coerced(gen, value, inner);
     } else {
         generate_expression(gen, value);
     }
@@ -12312,6 +12404,20 @@ static void emit_match_result_value_now(CodeGenerator* gen, ASTNode* result) {
         fprintf(gen->output, "%s = ", gen->match_result_var);
         emit_string_take(gen, result, gen->match_result_own, gen->match_result_var);
         fprintf(gen->output, ";\n");
+        return;
+    }
+    if (gen->match_result_var && gen->match_result_opt) {
+        /* An optional result takes the arm's value as a binding of the
+         * optional would: wrapped, or `none`. A `string?` local owns the
+         * value when it is a fresh heap string (is_heap_opt_string_rhs),
+         * as the single-value re-bind decides. */
+        fprintf(gen->output, "%s = ", gen->match_result_var);
+        emit_optional_coerced(gen, result, gen->match_result_opt);
+        fprintf(gen->output, ";");
+        if (is_opt_str_var(gen, gen->match_result_var))
+            fprintf(gen->output, " _heapopt_%s = %d;", gen->match_result_var,
+                    is_heap_opt_string_rhs(gen, result) ? 1 : 0);
+        fprintf(gen->output, "\n");
         return;
     }
     if (gen->match_result_var) {
@@ -12765,7 +12871,11 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
             // or const arr[] = [v1, v2, ...];
             if (stmt->value && stmt->child_count > 0) {
                 mark_var_declared(gen, stmt->value);
-                if (stmt->annotation && strcmp(stmt->annotation, "array_const") == 0) {
+                if (stmt->annotation && strcmp(stmt->annotation, "array_const") == 0 &&
+                    is_empty_slice_value(stmt->children[0])) {
+                    /* #2767: no elements: the empty slice, as at file scope. */
+                    fprintf(gen->output, "static const AetherSlice %s = {0};\n", stmt->value);
+                } else if (stmt->annotation && strcmp(stmt->annotation, "array_const") == 0) {
                     // static const T NAME[] = {v1, v2, ...};
                     Type* elem_type = (stmt->node_type && stmt->node_type->element_type)
                                       ? stmt->node_type->element_type : NULL;
@@ -13213,7 +13323,11 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
             // `none`. Handled here because the generic declarator paths below
             // don't understand the `ae_opt_<T>` tagged-struct wrap.
             if (stmt->value && strcmp(stmt->value, "_") != 0 &&
-                stmt->node_type && stmt->node_type->kind == TYPE_OPTIONAL) {
+                stmt->node_type && stmt->node_type->kind == TYPE_OPTIONAL &&
+                /* A `match` bound to an optional is bound arm by arm, as
+                 * any bound match is (below), each arm's value wrapped. */
+                !(stmt->child_count > 0 && stmt->children[0] &&
+                  stmt->children[0]->type == AST_MATCH_STATEMENT)) {
                 /* #2795: an optional a closure writes is a cell, as any
                  * variable a closure writes is (the closure's env takes
                  * the cell). It was declared and stored as a plain value,
@@ -13563,8 +13677,9 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                         Type* mt = (stmt->node_type && stmt->node_type->kind != TYPE_UNKNOWN)
                                    ? stmt->node_type : match_value_type(match_node);
                         const char* msname = struct_owning_strings(gen, mt);
+                        int opt_result = mt && mt->kind == TYPE_OPTIONAL;
                         print_indent(gen);
-                        fprintf(gen->output, msname ? "%s %s = {0};\n" : "%s %s;\n",
+                        fprintf(gen->output, (msname || opt_result) ? "%s %s = {0};\n" : "%s %s;\n",
                                 volatile_decl_type(try_volatile_qual_for(gen, stmt->value), c_type),
                                 stmt->value);   /* #2690 */
                         if (msname) {
@@ -13598,6 +13713,7 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                     const char* saved_mstruct = gen->match_result_struct;
                     int saved_mreplace = gen->match_result_replace;
                     Type* saved_mcell = gen->match_result_cell;
+                    Type* saved_mopt = gen->match_result_opt;
                     /* #2497: a local that owns a string-owning struct takes
                      * each arm's struct and releases the one it held. */
                     Type* bound = declared_var_type(gen, stmt->value);
@@ -13624,7 +13740,29 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                     gen->match_result_struct = bound_struct;
                     gen->match_result_replace = 1;
                     gen->match_result_cell = cell_type;
+                    /* An optional local takes each arm's value wrapped. */
+                    {
+                        Type* ot = declared_var_type(gen, stmt->value);
+                        if (!ot || ot->kind != TYPE_OPTIONAL) ot = stmt->node_type;
+                        gen->match_result_opt = (ot && ot->kind == TYPE_OPTIONAL && !cell_type)
+                                                ? ot : NULL;
+                    }
+                    /* A `string?` local re-bound by the match frees the
+                     * string it owned once an arm has given it another. */
+                    int opt_str = gen->match_result_opt && is_opt_str_var(gen, stmt->value);
+                    if (opt_str)
+                        print_line(gen, "{ ae_opt_string _opt_old_%s = %s; int _opt_oldheap_%s = "
+                                   "_heapopt_%s; _heapopt_%s = 0;",
+                                   stmt->value, stmt->value, stmt->value, stmt->value,
+                                   stmt->value);
                     generate_statement(gen, stmt->children[0]);
+                    if (opt_str)
+                        print_line(gen, "if (_opt_oldheap_%s && _opt_old_%s.has && !(%s.has && "
+                                   "%s.val == _opt_old_%s.val)) aether_heap_str_free((void*)"
+                                   "_opt_old_%s.val); }",
+                                   stmt->value, stmt->value, stmt->value, stmt->value,
+                                   stmt->value, stmt->value);
+                    gen->match_result_opt = saved_mopt;
                     gen->match_result_var = saved_mvar;
                     gen->match_result_own = saved_mown;
                     gen->match_result_struct = saved_mstruct;
@@ -14320,7 +14458,8 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                                                     get_builder_factory(gen, reinit_call->value));
                                             print_indent(gen);
                                             fprintf(gen->output, "_aether_ctx_push(_bcfg);\n");
-                                            emit_trailing_block_body(gen, trailing->children[bi]);
+                                            emit_builder_block_body(gen, trailing->children[bi], "_bcfg",
+                                                                    reinit_call->value);
                                             print_indent(gen);
                                             const char* c_rfn = codegen_normalise_callee(
                                                 safe_c_name(reinit_call->value));
@@ -14869,7 +15008,8 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                                             print_indent(gen);
                                             fprintf(gen->output, "_aether_ctx_push(_bcfg);\n");
                                             // Run trailing block
-                                            emit_trailing_block_body(gen, trailing->children[bi]);
+                                            emit_builder_block_body(gen, trailing->children[bi], "_bcfg",
+                                                                    init_call->value);
                                             // Reassign variable with defer config
                                             print_indent(gen);
                                             const char* c_dfn = codegen_normalise_callee(
@@ -15042,7 +15182,8 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                                                 get_builder_factory(gen, rhs->value));
                                         print_indent(gen);
                                         fprintf(gen->output, "_aether_ctx_push(_bcfg);\n");
-                                        emit_trailing_block_body(gen, trailing->children[bi]);
+                                        emit_builder_block_body(gen, trailing->children[bi], "_bcfg",
+                                                                rhs->value);
                                         // Reassign with config
                                         print_indent(gen);
                                         gen->generating_lvalue = 1;
@@ -15520,6 +15661,12 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
             // match (x) { 1 -> a, 2 -> b, _ -> c }
             // becomes: { T _match_val = x; if (_match_val == 1) { a; } else if ... }
             // Using a temp variable avoids re-evaluating the match expression per arm.
+            /* #2768: the names every arm of a statement match binds, when
+             * an arm runs for every value, are declared before it, as both
+             * arms of an if/else are. A match whose value is used (it has a
+             * result variable) keeps its arms' names in the arms, as the
+             * checker does. */
+            if (!gen->match_result_var) hoist_common_vars(gen, stmt);
             if (stmt->child_count > 0) {
                 ASTNode* match_expr = stmt->children[0];
 
@@ -15596,6 +15743,9 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                                 own, holder_copy ? "aether_uniform_heap_str(" : "", id,
                                 holder_copy ? ", 0)" : "",
                                 try_tracker_type(gen, own), own, own);
+                        /* The binding is a local of the arm: a `v = ...` there
+                         * rebinds it, and no hoist declares it again. */
+                        if (some_bind) mark_var_declared_typed(gen, some_bind, inner);
                         ScopedStringLocal sl;
                         scoped_string_local_begin(gen, &sl, own, arm_body, 1);
                         print_line(gen, "{");
@@ -15614,11 +15764,17 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                         print_line(gen, "}");
                         break;
                     }
+                    int saved_some_vars = gen->declared_var_count;
                     if (some_bind) {
                         print_indent(gen);
                         fprintf(gen->output, "%s %s = _om%d.val;\n", inner_c, some_bind, id);
+                        /* A local of the arm, declared here: a `v = ...` in
+                         * the arm rebinds it, and no hoist in the arm declares
+                         * it again in the same C block ("redefinition"). */
+                        mark_var_declared_typed(gen, some_bind, inner);
                     }
                     emit_opt_match_arm(gen, some_body ? some_body : wild_body);
+                    truncate_declared_vars(gen, saved_some_vars);
                     unindent(gen);
                     print_line(gen, "}");
                     unindent(gen);
@@ -15831,6 +15987,7 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                     indent(gen);
 
                     // Generate list pattern bindings if needed
+                    int saved_arm_vars = gen->declared_var_count;
                     if (is_list_pattern) {
                         generate_list_pattern_bindings(gen, pattern, match_expr, len_name, result, is_seq_match);
                     }
@@ -15847,6 +16004,7 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                         // Single expression — assign to result var or emit as statement
                         emit_match_result_value(gen, result);
                     }
+                    truncate_declared_vars(gen, saved_arm_vars);
                     unindent(gen);
                     print_line(gen, "}");
                 }
@@ -16098,7 +16256,12 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                 const char* saved_struct = gen->match_result_struct;
                 int saved_replace = gen->match_result_replace;
                 Type* saved_cell = gen->match_result_cell;
+                Type* saved_opt = gen->match_result_opt;
                 gen->match_result_cell = NULL;
+                /* A match returned from an optional result: each arm's
+                 * value wrapped into it. */
+                gen->match_result_opt = (rt && rt->kind == TYPE_OPTIONAL &&
+                                         !is_opt_string_type(rt)) ? rt : NULL;
                 gen->match_result_var = tmp;
                 gen->match_result_own = own[0] ? own : NULL;
                 /* #2497: the caller adopts a returned struct, so each arm hands
@@ -16106,6 +16269,7 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                 gen->match_result_struct = struct_owning_strings(gen, rt);
                 gen->match_result_replace = 0;
                 generate_statement(gen, m);
+                gen->match_result_opt = saved_opt;
                 gen->match_result_var = saved;
                 gen->match_result_own = saved_own;
                 gen->match_result_struct = saved_struct;
@@ -16676,6 +16840,10 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
             if (gen->uses_sandbox) {
                 print_line(gen, "int _aether_try_sbx_%d = _aether_sandbox_depth;", uid);
             }
+            /* #2810: so does a panic out of a trailing block: the builder
+             * context stack goes back to its depth here, and the configs of
+             * the builder blocks the panic abandoned are released. */
+            print_line(gen, "int _aether_try_ctx_%d = _aether_ctx_depth;", uid);
             print_line(gen, "AetherJmpFrame* _aether_try_%d = aether_try_push();", uid);
             print_line(gen, "if (AETHER_SIGSETJMP(_aether_try_%d->buf, 1) == 0) {", uid);
             indent(gen);
@@ -16690,6 +16858,7 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
             if (gen->uses_sandbox) {
                 print_line(gen, "_aether_sandbox_depth = _aether_try_sbx_%d;", uid);
             }
+            print_line(gen, "_aether_ctx_unwind(_aether_try_ctx_%d);", uid);
             /* #2739: a binding a `try` of its handler writes is volatile,
              * as its ownership flag is (emit_owned_catch_handler): the
              * handler is outside that try, whose setjmp sees both. */
@@ -16845,7 +17014,8 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                             for (int bi = 0; bi < trailing->child_count; bi++) {
                                 if (trailing->children[bi] &&
                                     trailing->children[bi]->type == AST_BLOCK) {
-                                    emit_trailing_block_body(gen, trailing->children[bi]);
+                                    emit_builder_block_body(gen, trailing->children[bi], "_bcfg",
+                                                            inner->value);
                                     break;
                                 }
                             }

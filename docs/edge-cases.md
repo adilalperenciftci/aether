@@ -24,8 +24,9 @@ are entirely ours.)
 
 **`null` is an empty slice, but an empty slice is not `null`.** — *Settled,
 and easy to get backwards.* `null` converts to a slice with `.len == 0`
-that compares equal to `null`. The converse does not hold: a zero-length
-slice over real storage — `b[2..2]` of a live buffer — has `.len == 0` and
+that compares equal to `null`, and so does the empty literal `[]`, which has
+no elements to hold and so no storage (#2767). The converse does not hold: a
+zero-length slice over real storage — `b[2..2]` of a live buffer — has `.len == 0` and
 compares **not** equal to `null`, because the comparison
 is on the pointer, not the length. So `if s == null` means "has no
 storage", not "is empty"; test `.len` for emptiness. `free(s)` on either

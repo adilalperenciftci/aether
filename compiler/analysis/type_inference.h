@@ -25,6 +25,15 @@ typedef struct InferenceContext {
     /* #2173: the id of the function walk in progress (0 outside one). Every
      * symbol the walk adds is stamped with it; see rebindable_symbol. */
     unsigned walk_id;
+    /* The DSL blocks being walked, innermost last (#333, #2766): the trailing
+     * block of a member-access call resolves its bare calls through the
+     * call's receiver (`<receiver>_<name>`), as the checker's scope for it
+     * does, and binds names of its own, the symbols added above `dsl_heads`
+     * since it was entered. */
+#define INFER_MAX_DSL_BLOCKS 32
+    char* dsl_receivers[INFER_MAX_DSL_BLOCKS];
+    Symbol* dsl_heads[INFER_MAX_DSL_BLOCKS];
+    int dsl_depth;
 } InferenceContext;
 
 // Main API

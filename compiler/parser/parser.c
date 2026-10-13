@@ -3094,6 +3094,23 @@ static ASTNode* parse_statement_inner(Parser* parser) {
             if (next && next->type == TOKEN_IDENTIFIER && next->line == token->line) {
                 return parse_variable_declaration(parser);
             }
+            // The optional form, `Point? q = ...` (a struct's optional;
+            // `int? o` reaches parse_variable_declaration through the keyword
+            // case), shape IDENT `?` IDENT `=` on one line. An ask has the
+            // first three when its message has no braces (`d ? GetCount`,
+            // with its `{` on the next line or none), even when the first
+            // name is also a type's (`counter ? GetCount` beside `struct
+            // counter`), but never a `=` after the message, so that is what
+            // makes the declaration. One with no value is spelled `let r:
+            // Point? = none`.
+            if (next && next->type == TOKEN_QUESTION && next->line == token->line) {
+                Token* nm = peek_ahead(parser, 2);
+                Token* after = peek_ahead(parser, 3);
+                if (nm && nm->type == TOKEN_IDENTIFIER && nm->line == token->line &&
+                    after && after->line == nm->line && after->type == TOKEN_ASSIGN) {
+                    return parse_variable_declaration(parser);
+                }
+            }
             // The array form of the same declaration, with an element
             // type spelled by an identifier: `uint32[4] xs = [...]`,
             // `uint16[2] hs`, `Pair[8] ps`. Shape IDENT `[` NUMBER? `]`
@@ -3256,14 +3273,14 @@ ASTNode* parse_variable_declaration_with_semicolon(Parser* parser, bool expect_s
     decl->node_type = type;
 
     if (match_token(parser, TOKEN_ASSIGN)) {
-        /* #2803: `int r = match o { ... }` binds the match's value, as
-         * `let r: int = match ...` does. parse_expression does not parse a
-         * `match`, so the declaration was left without its initialiser and
-         * the match became a statement of its own. */
+        /* #2790, #2803: `int k = match n { ... }` binds the match's value,
+         * as `k = match` and `let k: int = match` do. `match` is no
+         * expression to parse_expression, which returned nothing and left it
+         * to parse as the next statement, so `k` was declared with no value. */
         Token* next_tok = peek_token(parser);
         ASTNode* value = (next_tok && next_tok->type == TOKEN_MATCH)
-                             ? parse_match_statement(parser)
-                             : parse_expression(parser);
+                         ? parse_match_statement(parser)
+                         : parse_expression(parser);
         if (value) {
             add_child(decl, value);
         }
@@ -5889,6 +5906,18 @@ ASTNode* parse_function_definition(Parser* parser) {
                     // fell through to the `-> expr` path, leaving `{`
                     // dangling → a top-level parse error).
                     Token* after_name = peek_ahead(parser, 1);
+                    /* #2809: an optional result type, `-> Point? { ... }`:
+                     * the `?` sits between the name and the body. A `-> expr`
+                     * body never puts `{` (or a contract clause) right after
+                     * a postfix `?`. */
+                    if (after_name && after_name->type == TOKEN_QUESTION) {
+                        Token* after_q = peek_ahead(parser, 2);
+                        if (after_q && (after_q->type == TOKEN_LEFT_BRACE ||
+                                        after_q->type == TOKEN_REQUIRES ||
+                                        after_q->type == TOKEN_ENSURES))
+                            is_typed_return = 1;
+                        break;
+                    }
                     if (after_name && after_name->type == TOKEN_LEFT_BRACE) {
                         Token* after_brace = peek_ahead(parser, 2);
                         Token* after_field = peek_ahead(parser, 3);

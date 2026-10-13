@@ -2541,13 +2541,15 @@ static int is_declared_in_function(ASTNode* program, const char* func_name, cons
 }
 
 // Walk subtree and return the expression of the first return statement
-// carrying a non-print value. Does not descend into inner closures.
+// carrying a non-print value. Does not descend into inner closures; a
+// trailing block's returns are the walked function's (#2766), as in every
+// walk here over a function's returns.
 static ASTNode* find_first_return_expr(ASTNode* node);
 
 /* #2501: the first return statement under `node` that carries a value, not
  * looking into nested closures (find_first_return_expr's walk). */
 static ASTNode* find_first_value_return(ASTNode* node) {
-    if (!node || node->type == AST_CLOSURE) return NULL;
+    if (!node || ast_is_own_function(node)) return NULL;
     if (node->type == AST_RETURN_STATEMENT && node->child_count > 0 &&
         node->children[0] && node->children[0]->type != AST_PRINT_STATEMENT) {
         return node;
@@ -2599,7 +2601,7 @@ static const char* closure_tuple_c_name(Type* t) {
 
 static ASTNode* find_first_return_expr(ASTNode* node) {
     if (!node) return NULL;
-    if (node->type == AST_CLOSURE) return NULL;
+    if (ast_is_own_function(node)) return NULL;
     if (node->type == AST_RETURN_STATEMENT && node->child_count > 0 &&
         node->children[0] && node->children[0]->type != AST_PRINT_STATEMENT) {
         return node->children[0];
@@ -2627,7 +2629,7 @@ static ASTNode* find_first_return_expr(ASTNode* node) {
  * makes the closure a string closure, so every path is wrapped. */
 static int any_return_is_string(ASTNode* node) {
     if (!node) return 0;
-    if (node->type == AST_CLOSURE) return 0;
+    if (ast_is_own_function(node)) return 0;
     if (node->type == AST_RETURN_STATEMENT && node->child_count > 0 &&
         node->children[0] && node->children[0]->type != AST_PRINT_STATEMENT) {
         ASTNode* e = node->children[0];
@@ -3123,7 +3125,9 @@ static void propagate_call_return_types_in(CodeGenerator* gen, ASTNode* node,
      * Carrying the outer type in would stamp `return call(...)` inside
      * a closure with the enclosing function's return type, which is how
      * `bump = || { return call(digit, 1) }` inside a closure-returning
-     * builder got typed as the closure struct instead of int. */
+     * builder got typed as the closure struct instead of int. A call's
+     * trailing block runs inline: its returns are the function's, so it
+     * keeps the function's type (#2766). */
     if (node->type == AST_CLOSURE) {
         char own[64];
         const char* inner = scope;
@@ -3131,8 +3135,9 @@ static void propagate_call_return_types_in(CodeGenerator* gen, ASTNode* node,
             closure_scope_name(node, own, sizeof(own));
             inner = own;
         }
+        Type* ret = ast_is_own_function(node) ? NULL : fn_ret;
         for (int i = 0; i < node->child_count; i++) {
-            propagate_call_return_types_in(gen, node->children[i], NULL, inner);
+            propagate_call_return_types_in(gen, node->children[i], ret, inner);
         }
         return;
     }
@@ -5354,6 +5359,14 @@ void generate_sized_array_argument(CodeGenerator* gen, ASTNode* arg, Type* param
     fprintf(gen->output, ", sizeof(%s[%d])))", et, param_type->array_size);
 }
 
+int is_empty_slice_value(const ASTNode* e) {
+    if (!e || e->type != AST_SLICE_FROM_ARRAY || e->child_count < 1 || !e->children[0])
+        return 0;
+    const ASTNode* src = e->children[0];
+    return src->type == AST_NULL_LITERAL ||
+           (src->type == AST_ARRAY_LITERAL && src->child_count == 0);
+}
+
 void generate_expression_as_slice(CodeGenerator* gen, ASTNode* expr) {
     if (expr && type_is_sized_array(expr->node_type) && expr->node_type->array_size > 0) {
         fprintf(gen->output, "aether_slice_make((void*)(");
@@ -5455,6 +5468,22 @@ ASTNode* trailing_dsl_block(CodeGenerator* gen, ASTNode* call) {
  * do: a builder's block configures it before the call; any other call's
  * value is the block's context. Returns 0 when there is no such block. */
 static int g_trailing_tmp = 0;
+/* An argument of `call(f, ...)` for the closure's parameter of type `pt`,
+ * coerced as a direct call's argument is: a bare value or `none` into an
+ * optional parameter, a variant into a sum parameter (#2840); else as it is,
+ * a fixed-size array copied for a `T[N]` parameter (#2723). */
+static void emit_closure_argument(CodeGenerator* gen, ASTNode* arg, Type* pt) {
+    if (pt && pt->kind == TYPE_OPTIONAL && needs_optional_coerce(arg, pt)) {
+        emit_optional_coerced(gen, arg, pt);
+        return;
+    }
+    if (pt && pt->kind == TYPE_SUM && needs_sum_coerce(arg, pt)) {
+        emit_sum_coerced(gen, arg, pt);
+        return;
+    }
+    generate_sized_array_argument(gen, arg, pt);
+}
+
 static int emit_trailing_call_expression(CodeGenerator* gen, ASTNode* call) {
     ASTNode* block = trailing_dsl_block(gen, call);
     /* An empty block runs nothing and configures nothing: the plain call,
@@ -5464,7 +5493,7 @@ static int emit_trailing_call_expression(CodeGenerator* gen, ASTNode* call) {
     if (call->value && is_builder_func_reg(gen, call->value)) {
         fprintf(gen->output, "({ void* _tcfg%d = (void*)(intptr_t)%s(); _aether_ctx_push(_tcfg%d);\n",
                 n, get_builder_factory(gen, call->value), n);
-        emit_trailing_block_body(gen, block);
+        emit_builder_block_body(gen, block, cg_internf("_tcfg%d", n), call->value);
         fprintf(gen->output, "%s(", codegen_normalise_callee(safe_c_name(call->value)));
         int argc = 0;
         for (int i = 0; i < call->child_count; i++) {
@@ -6008,6 +6037,12 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                 fprintf(gen->output, "aether_uniform_heap_str((const char*)(");
                 generate_expression(gen, dflt);
                 fprintf(gen->output, "), %d)", is_fresh_heap_string_temp(gen, dflt) ? 1 : 0);
+            } else if (ot->element_type && ot->element_type->kind == TYPE_SUM &&
+                       needs_sum_coerce(expr->children[1], ot->element_type)) {
+                /* A variant default of a sum's optional is the sum's, as
+                 * the value is: wrapped (#914), or the two arms of the
+                 * conditional had no common type (#2839). */
+                emit_sum_coerced(gen, expr->children[1], ot->element_type);
             } else {
                 generate_expression(gen, expr->children[1]);
             }
@@ -6474,9 +6509,15 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
         case AST_SLICE_FROM_ARRAY:
             /* #1286: a `T[N]` array (or `null`, length 0) into a `T[]` slot.
              * An array LITERAL becomes a C compound literal, which lives as
-             * long as the enclosing block, the same as the `T[N]` it is. */
+             * long as the enclosing block, the same as the `T[N]` it is. The
+             * empty literal `[]` has no elements to hold: like `null`, it is
+             * the empty slice over no storage (#2767). */
             if (expr->child_count > 0) {
                 ASTNode* src = expr->children[0];
+                if (is_empty_slice_value(expr)) {
+                    fprintf(gen->output, "aether_slice_make((void*)0, 0)");
+                    break;
+                }
                 fprintf(gen->output, "aether_slice_make((void*)(");
                 if (src->type == AST_ARRAY_LITERAL && src->child_count > 0)
                     fprintf(gen->output, "(%s[])", slice_elem_c_type(expr->node_type));
@@ -8085,7 +8126,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                                 if (seen++ == lit_pi) { lit_pt = p->node_type; break; }
                             }
                             lit_pi++;
-                            generate_sized_array_argument(gen, arg, lit_pt);   /* #2723 */
+                            emit_closure_argument(gen, arg, lit_pt);
                         }
                         fprintf(gen->output, ")");
                         arg_drain_close(gen, expr, &ad);
@@ -8218,14 +8259,17 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                             fprintf(gen->output, ", ");
                             /* #2723: the parameter the cast above declares:
                              * the signature's, else the argument's own. */
-                            Type* pt = (closure_sig && arg_pi < closure_sig->param_count &&
-                                        closure_sig->param_types &&
-                                        closure_sig->param_types[arg_pi] &&
-                                        closure_sig->param_types[arg_pi]->kind != TYPE_UNKNOWN)
-                                       ? closure_sig->param_types[arg_pi]
-                                       : (arg ? arg->node_type : NULL);
+                            Type* sig_pt = (closure_sig && arg_pi < closure_sig->param_count &&
+                                            closure_sig->param_types &&
+                                            closure_sig->param_types[arg_pi] &&
+                                            closure_sig->param_types[arg_pi]->kind != TYPE_UNKNOWN)
+                                           ? closure_sig->param_types[arg_pi] : NULL;
                             arg_pi++;
-                            generate_sized_array_argument(gen, arg, pt);
+                            /* Coerced only into a parameter type the signature
+                             * gives: with none, the argument's own type is no
+                             * slot to wrap it for (an erased `fn`, #2840). */
+                            if (sig_pt) emit_closure_argument(gen, arg, sig_pt);
+                            else generate_sized_array_argument(gen, arg, arg ? arg->node_type : NULL);
                         }
                         fprintf(gen->output, ")");
                         arg_drain_close(gen, expr, &ad);

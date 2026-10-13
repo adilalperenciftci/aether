@@ -20,6 +20,7 @@ InferenceContext* create_inference_context(SymbolTable* table) {
     ctx->iteration_count = 0;
     ctx->scope_owner = NULL;
     ctx->walk_id = 0;
+    ctx->dsl_depth = 0;
     return ctx;
 }
 
@@ -457,9 +458,10 @@ static unsigned new_walk_id(void) {
 }
 
 /* The first `return` with a value under `n`, not looking into nested
- * closures; sets *any_string when any such return is a string. */
+ * closures (a trailing block's returns are the closure's own, #2766); sets
+ * *any_string when any such return is a string. */
 static ASTNode* first_value_return(ASTNode* n, int* any_string) {
-    if (!n || n->type == AST_CLOSURE || n->type == AST_QUOTE) return NULL;
+    if (!n || ast_is_own_function(n)) return NULL;
     if (n->type == AST_RETURN_STATEMENT && n->child_count > 0 && n->children[0] &&
         n->children[0]->type != AST_PRINT_STATEMENT) {
         Type* t = n->children[0]->node_type;
@@ -516,6 +518,27 @@ static ASTNode* called_closure_literal(ASTNode* call, InferenceContext* ctx) {
     Symbol* sym = lookup_symbol(ctx->symbols, name);
     if (!sym || sym->is_function || sym->inferred_closure == &g_closure_disagrees) return NULL;
     return sym->inferred_closure;
+}
+
+/* The function a bare call `name` in the DSL blocks being walked resolves
+ * to through a block's receiver, or NULL for any other call. Block by
+ * block from the innermost, as lookup_symbol walks the checker's scopes: a
+ * name the block binds itself keeps it (NULL), and a receiver that has a
+ * `<receiver>_<name>` takes it, ahead of the enclosing function's names
+ * and the program's function of that name. */
+static Symbol* dsl_block_callee(InferenceContext* ctx, const char* name) {
+    if (!ctx->symbols || ctx->dsl_depth == 0 || !name || strchr(name, '.')) return NULL;
+    Symbol* from = ctx->symbols->symbols;
+    for (int d = ctx->dsl_depth - 1; d >= 0; d--) {
+        for (Symbol* s = from; s && s != ctx->dsl_heads[d]; s = s->next)
+            if (s->name && strcmp(s->name, name) == 0) return NULL;
+        char rewritten[512];
+        snprintf(rewritten, sizeof(rewritten), "%.250s_%.250s", ctx->dsl_receivers[d], name);
+        Symbol* f = lookup_symbol(ctx->symbols, rewritten);
+        if (f && f->is_function) return f;
+        from = ctx->dsl_heads[d];
+    }
+    return NULL;
 }
 
 // Collect constraints from expressions
@@ -791,12 +814,32 @@ void collect_expression_constraints(ASTNode* node, InferenceContext* ctx) {
         case AST_FUNCTION_CALL:
             // Process argument expressions
             for (int i = 0; i < node->child_count; i++) {
-                collect_constraints(node->children[i], ctx);
+                ASTNode* arg = node->children[i];
+                /* A trailing block of a member-access call resolves its bare
+                 * calls through the receiver, as the checker's scope for it
+                 * does (#333): typed by the program's function of the same
+                 * name instead, a `return note(n)` there gave the function
+                 * around it a result its checked returns do not have. */
+                char recv[256];
+                const char* r = (ast_is_trailing_block(arg) && ctx->symbols &&
+                                 ctx->dsl_depth < INFER_MAX_DSL_BLOCKS)
+                    ? dsl_receiver_of_call(node, ctx->symbols, recv, sizeof(recv)) : NULL;
+                if (r) {
+                    ctx->dsl_receivers[ctx->dsl_depth] = strdup(r);
+                    ctx->dsl_heads[ctx->dsl_depth] = ctx->symbols->symbols;
+                    ctx->dsl_depth++;
+                }
+                collect_constraints(arg, ctx);
+                if (r) {
+                    ctx->dsl_depth--;
+                    free(ctx->dsl_receivers[ctx->dsl_depth]);
+                }
             }
 
             // Look up function definition to get return type
             if (node->value) {
-                Symbol* func_sym = lookup_qualified_symbol(ctx->symbols, node->value);
+                Symbol* func_sym = dsl_block_callee(ctx, node->value);
+                if (!func_sym) func_sym = lookup_qualified_symbol(ctx->symbols, node->value);
                 if (func_sym && func_sym->type) {
                     if (!node->node_type || node->node_type->kind == TYPE_UNKNOWN) {
                         /* Calling an fn-typed local (is_fnptr=1): the
@@ -1181,6 +1224,31 @@ static void preresolve_return_idents_in(ASTNode* node, ASTNode* outer_block,
     }
 }
 
+static Type* infer_return_type_impl(ASTNode* body, SymbolTable* symbols, bool is_top_level);
+
+/* #2766: the type a `return` in a trailing block of statement `n` gives,
+ * `f(x) { return v }`: the block runs inline, so its returns are the
+ * function's. A closure's returns are its own. NULL when none is typed. */
+static Type* trailing_block_return_type(ASTNode* n, SymbolTable* symbols) {
+    for (int i = 0; n && i < n->child_count; i++) {
+        ASTNode* c = n->children[i];
+        if (!c || ast_is_own_function(c)) continue;
+        if (ast_is_trailing_block(c)) {
+            for (int j = c->child_count - 1; j >= 0; j--) {
+                if (c->children[j] && c->children[j]->type == AST_BLOCK) {
+                    Type* rt = infer_return_type_impl(c->children[j], symbols, false);
+                    if (rt) return rt;
+                    break;
+                }
+            }
+            continue;
+        }
+        Type* rt = trailing_block_return_type(c, symbols);
+        if (rt) return rt;
+    }
+    return NULL;
+}
+
 static Type* infer_return_type_impl(ASTNode* body, SymbolTable* symbols, bool is_top_level) {
     if (!body) return NULL;
 
@@ -1336,7 +1404,9 @@ static Type* infer_return_type_impl(ASTNode* body, SymbolTable* symbols, bool is
             }
             break;
         default:
-            break;
+            /* Any other statement returns only through a trailing block
+             * in its expressions. */
+            return trailing_block_return_type(body, symbols);
     }
 
     return NULL;

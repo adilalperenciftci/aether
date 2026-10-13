@@ -345,6 +345,10 @@ typedef struct {
     // #2514: when non-NULL, the result variable is a promoted capture of
     // this type: each value arm stores into its cell (emit_cell_store).
     Type* match_result_cell;
+    // When non-NULL, the result is an optional of this type: each value arm
+    // is wrapped into it as a value bound to it would be (a bare value, or
+    // `none`), and a `string?` result's ownership flag follows the arm.
+    Type* match_result_opt;
 
     // #2054: set while the body of a string-returning closure is emitted.
     // A closure is called through a value its caller cannot classify, so
@@ -400,6 +404,12 @@ typedef struct {
     int builder_func_count;
     int builder_func_capacity;
     int in_trailing_block;  // >0 when generating code inside a trailing block
+    /* #2791: set by emit_builder_block_body for the trailing block it is about
+     * to emit: the builder call's config variable and the function that
+     * releases it, so a way out of the block before the builder runs
+     * releases it. NULL otherwise; emit_trailing_block_body consumes it. */
+    const char* builder_cfg_var;
+    const char* builder_cfg_release;
 
     // The call whose result value its expression statement throws away, set
     // just before the statement emits it. A VOID/discarded parent call still
