@@ -279,10 +279,16 @@ jobs:
     - name: Checkout code
       uses: actions/checkout@v4
 
+    # Linux only, as the setup steps above. The macOS runner already has
+    # clang and make; the brew fallback that ran there installed nothing the
+    # build uses (Homebrew's gcc and make land as gcc-15 and gmake), and its
+    # `brew update` failed the job whenever a tap preinstalled on the runner
+    # could not be fetched (#2895).
     - name: Setup GCC
+      if: matrix.os == 'ubuntu-latest'
       run: |
-        sudo rm -f /etc/apt/sources.list.d/google-chrome.list; sudo apt-get update || brew update
-        sudo apt-get install -y gcc make || brew install gcc make
+        sudo rm -f /etc/apt/sources.list.d/google-chrome.list; sudo apt-get update
+        sudo apt-get install -y gcc make
 
     - name: Verify 64-bit compilation
       run: |
