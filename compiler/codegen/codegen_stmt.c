@@ -17519,6 +17519,71 @@ static const char* emit_field_owner(CodeGenerator* gen, ASTNode* obj, TempSeq* s
     return fo;
 }
 
+/* emit_field_owner as statements ahead of the statement being emitted:
+ * the address into a temporary declared there (hoist_declare), whose name
+ * is returned. */
+static int g_field_owner_ahead = 0;
+static const char* emit_field_owner_stmt(CodeGenerator* gen, ASTNode* obj) {
+    const char* fo = cg_internf("_ae_foa%d", g_field_owner_ahead++);
+    if (obj->node_type->kind == TYPE_PTR) {
+        hoist_declare(gen, get_c_type(obj->node_type), fo);
+        print_indent(gen);
+        fprintf(gen->output, "%s = (", fo);
+        generate_expression(gen, obj);
+        fprintf(gen->output, ");\n");
+        return fo;
+    }
+    hoist_declare(gen, cg_internf("%s%s*", get_c_type(obj->node_type),
+                                  lvalue_may_be_volatile(gen, obj) ? " volatile" : ""), fo);
+    ASTNode* root = obj;
+    while (root->type == AST_MEMBER_ACCESS && root->child_count == 1 &&
+           root->children[0]->node_type && root->children[0]->node_type->kind != TYPE_PTR)
+        root = root->children[0];
+    const char* temp = root->type == AST_FUNCTION_CALL ? stmt_struct_temp_of(root) : NULL;
+    print_indent(gen);
+    if (!temp) {
+        fprintf(gen->output, "%s = &(", fo);
+        generate_expression(gen, obj);
+        fprintf(gen->output, ");\n");
+        return fo;
+    }
+    fprintf(gen->output, "(void)(");
+    generate_expression(gen, root);
+    fprintf(gen->output, ");\n");
+    print_indent(gen);
+    fprintf(gen->output, "%s = &%s", fo, temp);
+    int depth = 0;
+    for (ASTNode* n = obj; n != root; n = n->children[0]) depth++;
+    for (int d = depth; d > 0; d--) {
+        ASTNode* n = obj;
+        for (int k = 1; k < d; k++) n = n->children[0];
+        fprintf(gen->output, ".%s", n->value);
+    }
+    fprintf(gen->output, ";\n");
+    return fo;
+}
+
+/* Field read `e`, which a call frees or keeps, evaluated ahead of that call
+ * (by the ordering wrapper, in its sequence `s`, or ahead of the statement,
+ * `s` NULL): the address of its struct goes into a temporary, whose name is
+ * returned, and the value is read through it. The field is handed over at
+ * the call (emit_string_field_handover_at), once every operand has been
+ * evaluated: cleared where it was read, its tracker stayed cleared when a
+ * later operand left the function (an `or` handler's `return`, a
+ * propagating `!`) and the call never ran, and nothing freed the string. */
+const char* emit_string_field_owner_ahead(CodeGenerator* gen, ASTNode* e, TempSeq* s) {
+    return s ? emit_field_owner(gen, e->children[0], s) : emit_field_owner_stmt(gen, e->children[0]);
+}
+
+void emit_string_field_handover_at(CodeGenerator* gen, const char* fo, const char* field,
+                                   const char* value, int kind) {
+    if (kind == STRING_FIELD_KEPT)
+        fprintf(gen->output, "(void)(%s->_heap_%s = 0)", fo, field);
+    else
+        fprintf(gen->output, "aether_str_is_counted(%s) ? (void)(%s->_heap_%s = 0) : (void)0",
+                value, fo, field);
+}
+
 /* The field's value, handed over. The frees a callee can take a reference
  * with (is_consuming_free) are the runtime's, which release a counted
  * AetherString and leave a plain malloc'd buffer alone, so only a counted

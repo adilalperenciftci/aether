@@ -1,0 +1,125 @@
+// Regression (#2798, #2843): a string field that a call frees or keeps,
+// evaluated ahead of a construct that runs statements later in the same
+// argument list, is handed over at the call, once every operand has been
+// evaluated. It was handed over where it was read: when the construct left
+// the function (an `or` handler's `return`, a propagating `!`), the call
+// never ran, the field's tracker stayed cleared, the struct's destroy left
+// the string, and nothing freed it. Read plainly, the call freed it and
+// the destroy freed it again. Both directions are checked: no growth when
+// the call does not run, and no double free (and the kept string intact)
+// when it does.
+
+import std.mem
+import std.string
+
+extern exit(code: int)
+
+struct Doc {
+    name: string
+    n: int
+}
+
+var kept: string = ""
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+num(fail: bool) -> int! {
+    if fail { return 0, "boom" }
+    return 7
+}
+
+small(x: int) -> int! {
+    if x > 100 { return 0, "big" }
+    return x
+}
+
+plus(a: int, b: int) -> int {
+    return a + b
+}
+
+eat(s: string, k: int) -> int {
+    string.free(s)
+    return k
+}
+
+keep2(s: string, k: int) -> int {
+    kept = s
+    return k
+}
+
+// The call does not run: the handler returns, or the `!` propagates.
+left_by_or(w: string) -> int {
+    d = Doc { name: string.concat(w, "#e"), n: 0 }
+    return eat(d.name, num(true) or { return 5 })
+}
+
+left_by_or_kept(w: string) -> int {
+    d = Doc { name: string.concat(w, "#k"), n: 0 }
+    return keep2(d.name, num(true) or { return 6 })
+}
+
+left_by_bang(w: string) -> int! {
+    d = Doc { name: string.concat(w, "#p"), n: 0 }
+    return eat(d.name, plus(small(3)!, num(true)!))
+}
+
+// The call runs.
+freed(w: string) -> int {
+    d = Doc { name: string.concat(w, "#c"), n: 0 }
+    return eat(d.name, num(true) or { 1 })
+}
+
+kept_by_call(w: string) -> int {
+    d = Doc { name: string.concat(w, "#d"), n: 0 }
+    return keep2(d.name, num(true) or { 2 })
+}
+
+rounds(w: string, which: int) -> int {
+    total = 0
+    i = 0
+    while i < 100 {
+        if which == 1 { total = total + left_by_or(w) }
+        if which == 2 { total = total + left_by_or_kept(w) }
+        if which == 3 {
+            _r, e = left_by_bang(w)
+            if e != "" { total = total + 1 }
+        }
+        i = i + 1
+    }
+    return total
+}
+
+main() {
+    w = string.concat("w", "v")
+    check(rounds(w, 1) == 500, "an or handler's return")
+    check(rounds(w, 2) == 600, "an or handler's return, a keeping call")
+    check(rounds(w, 3) == 100, "a propagating !")
+    if mem.heap_in_use_exact() {
+        g1 = mem.steady_growth(|| {
+                rounds(w, 1)
+            }, 5)
+        check(g1 == 0, "the field read ahead of an or handler's return leaked ${g1} bytes")
+        g2 = mem.steady_growth(|| {
+                rounds(w, 2)
+            }, 5)
+        check(g2 == 0, "the field read ahead of a keeping call left by return leaked ${g2} bytes")
+        g3 = mem.steady_growth(|| {
+                rounds(w, 3)
+            }, 5)
+        check(g3 == 0, "the field read ahead of a propagating ! leaked ${g3} bytes")
+    }
+    total = 0
+    i = 0
+    while i < 100 {
+        total = total + freed(w) + kept_by_call(w)
+        i = i + 1
+    }
+    check(total == 300, "the calls that run")
+    check(kept == "wv#d", "the kept field")
+    println("ok")
+}
