@@ -14,6 +14,572 @@ cut while your branch is open cannot fold your entry into the released section.
 
 ## [current]
 
+## [0.811.0]
+
+### Fixed
+
+- **A closure's tuple destructure writes outer locals a destructure bound.**
+  `a, b = three()` followed by `bump = || { a, b = two() }` left `a` and
+  `b` as they were after `bump()`: the lookup of the outer binding a
+  closure writes through took a statement for a binding of `a` only when
+  it was a single `a = ...`, so the closure's destructure declared locals
+  of its own. A tuple destructure is a binding of every name it binds now,
+  so the closure writes the outer `int`, `string` or `fn` slots through
+  their cells, in a function, in `main`, in a loop body and from a closure
+  nested in another (#2762). Each slot that re-binds a local, outer or in
+  its own scope, is checked as `a = 7` is: a slot of another kind is the
+  "cannot re-bind" error at the slot, a float into an inferred `int` the
+  narrowing error, and a value C converts is stored as the local's type.
+  Before, such a slot reached the C compiler (`assignment to 'const char *'
+  from 'int'`) or truncated silently.
+
+- **A closure passed to a function that hands it back is released.**
+  `g2 = keep(g)` over `keep(f: fn) -> fn { return f }`, or
+  `g2, m = pair(g)` over `return f, 5`, leaked the closure's environment
+  on every call: passing `g` counted as a keep, since the callee returns
+  its parameter, so `g` stopped owning its env at the call, and `g2` was
+  bound to a value someone else held, so it never started. Such a call is
+  now the argument itself: a plain local bound to it, or a tuple slot it
+  hands the argument back at, is an alias that retains, as `g2 = g` does
+  (#2668), and the argument is judged where the call's value goes, as the
+  name would be (a store, a cell, a `_` slot, another call). The same
+  holds through a function that returns `keep(f)`, for `return keep(g)` of
+  a local, whose caller now owns the closure, and for a closure literal
+  passed to a function that binds its parameter so, which the caller now
+  releases after the call. The argument is the one at the returned
+  parameter's position, where a literal or `_` pattern parameter takes one
+  too: `h = sel(0, g, k)` over `sel(0, a, b) { return b }` leaked both
+  closures before. `h = keep(o.cb)` retains the field's closure as
+  `h = o.cb` does, so replacing `o` no longer leaves `h` calling a freed
+  environment (#2763). A closure cell passed to such a call still pins
+  what it holds, since the call may rebind the cell; #2788 tracks that.
+
+- **A `return` in a call's trailing block counts as one of the function's
+  returns.** The block, `f(x) { ... }`, runs inline, so its `return` returns
+  from the function around it, but every pass that asks what a function
+  returns stopped at it as at a closure: codegen's `has_return_value`, the
+  checker's mirror, the settle of which functions return a value, return-type
+  inference and the heap-string return walks. A function with no written
+  result type whose only value `return` was in such a block was emitted
+  `void` (gcc: "'return' with a value, in function returning void"), and a
+  binding of its call was refused ("returns no value"); a closure likewise.
+  The block is now part of its function everywhere: the function returns the
+  value, typed from it, a path that runs off the end after such a return is
+  the missing-return error, the checker checks the `return` against the
+  function's result type (a bare enum member there was "Undefined
+  variable"), and a bare call returned from a member-access call's block is
+  settled through the block's receiver (`return note(n)` in `blk.run() { }`
+  is `blk.note`), as the checker resolves it (#2766).
+
+  Such a call is the receiver's function before a function of the program or
+  a local of the function of the same name, in every pass alike: beside a
+  program's `note(n: int) -> int`, inference typed `return note(n)` by that
+  `note`, so the function was declared `int` around the bare `return` the
+  checker made of it; the module prune also dropped `blk.note` when a local
+  was named `note`. Since a return in a block now gives the function its
+  type, some programs behave otherwise than before: a `long` returned from a
+  block is no longer cut to an int, and a function with no written type whose
+  first `return` gives an int inside a block and a later one `return 2.5` is
+  the narrowing error of #2782, as it is with the first `return` outside a
+  block (before #2782 both returned 2).
+
+- **The empty literal `[]` in a `T[]` slot is the empty slice.** A slice is
+  an AetherSlice struct in C, and the checker turned a `T[N]` array or `null`
+  in a slice slot into one, but not `[]`: `let xs: int[] = []` reached C as
+  `AetherSlice xs = NULL` ("invalid initializer"), and an argument, a
+  `return`, a re-bind or a struct field as `{}`. `[]` is now the empty slice
+  wherever a `T[]` is expected, as `null` is: `.len` is 0, it views no
+  storage, and it compares equal to `null` (#2767).
+- **A module-level `T[]` takes the empty slice.** `var gs: int[] = null` was
+  a call in a static initializer ("initializer element is not constant"),
+  `const E: int[] = null` or `= []` was emitted as a C array, `var gs:
+  int[] = []` was refused as not constant, and `gs = []` in a function
+  reached C uncoerced. Each is now the constant empty slice, and a bare
+  re-bind of a module-level `T[]` var is checked and coerced against the
+  global's type (#2785).
+
+- **A name a `match` arm binds is one variable after the match, as one an
+  `if` branch or a `switch` case binds is.** The language reference says a
+  name first bound inside a branch and used after it is one variable for the
+  whole function, and the shared hoists made that true of `if` and `switch`
+  but not of `match`: `match x { 1 -> { v = 10 } _ -> { v = 20 } }` then
+  `return v` was "Undefined variable". A match arm's body now joins the same
+  hoists, in the checker and in codegen alike: a name read after a match at
+  the top of the function body, bound in a `while` body, or bound by every
+  arm of a match that runs an arm for every value (a `_` arm, or arms that
+  cover its type) is declared ahead of it. A match whose value is used keeps
+  its arms' names in the arms, a name an arm's pattern binds (`some(v)`,
+  `[h | t]`) is that arm's own and is hoisted out of the match by no rule,
+  and any other read after the match is still `Undefined variable` (#2768).
+  As in an `if` branch, a closure made in a match arm inside a `while` that
+  changes a variable the arm binds now changes the one variable the loop
+  declares ahead of it, so closures made on different passes share it (each
+  had its own before).
+- **A match pattern's variable can be bound again in its arm.** `some(v) ->
+  { v = v * 10 }` and `[h | t] -> { h = h * 2 }` failed in the C compiler
+  ("redefinition of 'v'"), as did an if/else in the arm binding `v` in both
+  branches: codegen declared the binding without recording it, so the arm's
+  binding declared it a second time. The binding is now a local of the arm,
+  and `v = ...` there rebinds it (#2793).
+
+- **`ae fmt` keeps the space between a keyword and the array literal after
+  it.** The formatter wrote no space before a `[` that followed any word
+  token, taking it for an index, and a keyword is one: `return []` came out
+  as `return[]` and `for x in [1, 2]` as `in[1, 2]`, so `ae fmt --check`
+  rejected the spelling the language reference uses. An index follows a
+  value (`xs[0]`, `f()[1]`) and `fn[2]` sizes an array type; after any other
+  keyword the `[` opens a literal and keeps its space (#2787).
+
+- **A slice of a function's own storage can no longer leave the function.**
+  An array literal in a slice slot and a function's own fixed-size array live
+  in its frame, so a slice of either that left the function viewed memory
+  the next call reused: `gs = [11, 22, 33]` in `fill()`, then any call that
+  filled its frame, read `gs[0]` as 0, and a returned slice of a local array
+  read garbage the same way. Each way such a slice leaves the function is
+  now error E0900 at the value that leaves: a return (alone, in a struct or
+  tuple, or in a closure that captured it), a store to a module-level `var`,
+  and a store to a field of a struct behind a pointer or of a global. A
+  fixed-size array parameter is the function's own copy, so a slice of it
+  is refused the same way. What a name holds where it leaves decides: a
+  local or a local struct's field re-bound to a `make` buffer before it
+  leaves is accepted, one that still holds the frame's storage on any path
+  to the exit is not. A re-bind made by a closure call is not counted
+  (#2837), and a closure that may store a slice of the frame's storage
+  into one of its names gives the name a slice from where it is written
+  on (a slice parameter, a `make` buffer, a global or `[]` stored by it
+  does not); a closure's store through a pointer is judged as the
+  function's. A slice used while the function runs, passed down to
+  a call, or of a slice parameter or a `make` buffer, is unchanged (#2785).
+
+- **`[]` is the empty slice in an if-expression or match arm, in a
+  comparison and in a C function's `T[]` parameter.** An if-expression or a
+  `match` given to a `T[]` was coerced as one value, so a `[]` arm stayed an
+  array initializer (gcc: "invalid initializer", "invalid use of void
+  expression"), and a `match` of arrays into a slice was not valid C at all.
+  Each arm now goes into the slot on its own. `s == []` compared the slice
+  with `{}`; the empty slice views no storage, so it is now `s == null`
+  (test `s.len == 0` for emptiness). A C function's `T[]` parameter given
+  `[]` had `{}` in its call; it now gets the null pointer (#2789).
+
+- **A module-level struct `var` takes `[]` or `null` for a `T[]` field.**
+  The field's empty slice was not taken for a constant, so `var g: S = S {
+  xs: [], n: 1 }` was refused as not a compile-time constant; it is now the
+  constant `{0}` in the struct's static initializer, as for a `T[]` global
+  (#2792).
+
+- **`int k = match n { ... }` binds the match's value.** The C-style typed
+  declaration parsed its initializer as an expression, and `match` is none,
+  so `k` was declared with no value and the match ran as the next statement
+  with its values dropped: `k` read whatever the stack held. It now takes
+  the match as its value, as `k = match` and `let k: int = match` do
+  (#2790).
+
+- **Leaving a builder's trailing block early releases the builder's
+  config.** A builder call makes its config with the builder's factory, runs
+  the block against it and hands it to the builder, which owns it from then
+  on. A `return` in the block, with a value or without, or a `break` or
+  `continue` out of it, left before the builder ran, and nothing released
+  the config: every such call leaked it (a `map_new` config with one option
+  set, 260 bytes a call). Any way out of the block but its natural end now
+  releases it, with `map_free` for the default `map_new` and with
+  `<stem>_free` for a `<stem>_new` factory the program defines or declares
+  (`list_new`, `list_free`); a nested builder call's block releases both
+  calls' configs. A factory without such a release still leaves its config
+  to the builder's protocol (#2791).
+
+- **A builder with the default config factory builds without `import
+  std.map`.** Its calls are lowered to `map_new()`, which nothing declared
+  unless the program imported std.map, so a program whose builder never
+  touched its config failed in the C compiler ("implicit declaration of
+  function 'map_new'"). The generated C now declares `map_new` and
+  `map_free` whenever a builder uses the default factory (#2801).
+
+- **A returned value is checked against the result type.** The checker
+  checked what a `return` gives on its own and never asked whether it fits
+  the result type, as it asks of a typed binding's value, so every mismatch
+  reached the C compiler: `word(n: int) -> string { return n }` failed with
+  "returning 'int' from a function with return type 'const char *'". A
+  value of another kind is now E0200 at the `return`, naming both types, in
+  a function, a closure and a call's trailing block, value by value in a
+  multi-value return and arm by arm in an `if` or `match` returned for its
+  value. The rules are a typed binding's, with what C converts: numeric
+  scalars into one another, a bool to an integer and back, `T` to `T?`,
+  `none`, a variant to its sum, an enum to an integer and back, `null` or an
+  int to a pointer, `null` or `[]` to a slice, and a C string pointer to a
+  `string` and back. With no result type written, the first `return`'s type
+  is the result, and a later `return` an inferred `int` would truncate (a
+  `long`, a `uint32`, a `float`) is the narrowing error an inferred `int`
+  local gives. Some returns that compiled before are refused, because the
+  value was converted to something it does not mean: an enum returned as a
+  `string`, a pointer, a float, a byte or a bool, a bool returned as a float,
+  a pointer or an enum, a pointer or a float returned as a bool, a float or
+  a byte returned as an enum, a number, a bool, an enum or a typed pointer
+  returned as a `string?`, and `[]` returned as an `int?`. A closure
+  returned as a `ptr`, a pointer returned as a closure or a value optional,
+  and `[]` returned as a scalar failed in the C compiler before and are
+  refused with the fix (`box_closure`, `unbox_closure`, `none`) (#2782).
+
+- **A `match` bound to an optional takes each arm's value wrapped.**
+  `int? o = match n { 1 -> 41  _ -> none }`, its `let o: int? = match`
+  form, a `string?` or a struct's optional bound the same way, a re-bind
+  `o = match ...` and a `match` returned from a `-> T?` function emitted
+  the whole match as one expression inside the optional's wrap (gcc:
+  "'n141_' undeclared", "incompatible types when assigning to type
+  'ae_opt_int'"). The match is now bound arm by arm, as a match of any
+  other type is, each arm's value wrapped into the optional and `none` the
+  empty one; a `string?` local owns the arm's string when it is a fresh
+  one, as a single-value binding decides (#2816).
+
+- **A panic out of a builder block, or after a string went into a map, no
+  longer corrupts the heap when a `try` catches it.** Two faults met in
+  `try { run("x") { set_opt("k", "v")  boom(1) } } catch e { }`, which
+  crashed with heap corruption within a few hundred catches. The panic
+  leaves the block by longjmp, skipping the block's context pop and the
+  config release of #2791: every caught panic left an entry on the builder
+  context stack, and after 64 of them a block's setters filled the config
+  of a call a panic had abandoned. The catch now puts the stack back to its
+  depth at the `try` and releases the configs of the blocks the panic
+  abandoned. And a string a setter passed on to `map.put` (or `list.add`)
+  was adopted by the container while still in the panic journal its first
+  owner kept it in, so the panic's drain freed it under the container and
+  freeing the container freed it again; a plain map filled in a `try` body
+  crashed the same way. A container that adopts a string now takes it out
+  of the journal (#2810).
+
+- **A function whose result type is a struct's optional parses.**
+  `find(n: int) -> Point? { ... }` was "Expected IDENTIFIER, got
+  LEFT_BRACE": the definition parser read `-> Name` as a written result
+  type only when `{` followed the name (or a bracket group and then `{`),
+  so the `?` sent it to the arrow-body path and left the body over. A `?`
+  between the name and the body, or a `requires` / `ensures` clause, now
+  marks a result type as it does after a qualified name (#2809).
+
+- **An enum converts to and from a `byte` as it does a `uint8`.** A `byte`
+  is C's `uint8_t`, as `uint8` is, but the enum rule took only the integer
+  scalars, which leave `byte` out: `let x: byte = Color.Green` and `let c:
+  Color = b` were "Type mismatch in variable initialization", and with the
+  return check of #2782 so were `-> byte { return Color.Blue }`, `-> Color {
+  return b }` and a `(byte, int)` result, while the same programs with
+  `uint8` compiled. A byte-coded enum (a wire format) now binds, passes and
+  returns as a byte and back (#2782).
+
+- **A variant put into a sum's optional is wrapped into the sum.** Returned
+  from a `-> Shape?` function, bound to a `Shape?` local or passed to a
+  `Shape?` parameter, a `Circle { ... }` was written as the optional's value
+  as it was, and the C compiler refused it ("incompatible types when
+  initializing type 'enum <anonymous>' using type 'Circle'"). The optional's
+  wrap now wraps a variant into the sum first, as a variant into the sum
+  itself is (#2826).
+
+- **`Point? q = ...` declares a struct's optional.** The C-style typed
+  declaration took `Point p`, `Pair[8] ps` and `mod.Type t` as declarations,
+  but not a struct's optional: `Point? q = match n { ... }` and `Point? r =
+  Point { x: 7 }` were "unexpected `?` in expression", the `?` read as the
+  ask operator. A name, `?`, a second name and `=` on one line now declare
+  one. Without the `=` the line is still an ask, as `d ? GetCount` is (an
+  ask whose message has no braces, or has them on the next line), whatever
+  the first name also names; a struct's optional with no value is spelled
+  `let r: Point? = none` (#2827).
+
+- **A variant or a bare value reaches a sum or an optional everywhere it is
+  given one.** Three places passed it as it was, and the C compiler refused
+  the result: a variant as the default of `??` over a `Shape?` (`e ?? Circle
+  { r: 1.0 }`, "type mismatch in conditional expression", #2839), and the
+  arguments of a closure call, `call(f, Circle { ... })` into `|s: Shape|`
+  or `|o: Shape?|` and `call(h, 3)` or `call(h, none)` into `|o: int?|`
+  ("incompatible type for argument 2", #2840). Each is now wrapped as a
+  direct call's argument is. And `c2 = o2`, after `o2 = Circle { ... }` on a
+  `Shape?` local, was "Type mismatch in variable initialization": the early
+  pass took `c2` for the Circle last put in `o2`. The first binding of a
+  name with no written type now takes the optional or sum it is given
+  (#2841). A field read plainly off an optional (`c2.r`, `o2.r`, `p.x` on
+  a `Point?`) was accepted and failed in C ("'ae_opt_Shape' has no member
+  named 'r'"); it is now a type error naming `?.`, `!` and narrowing.
+
+- **`none` and `[]` through a bare `fn` are refused, not guessed.** Since
+  #2840 a closure call wraps an argument into the parameter's optional or
+  sum when the closure's parameter types are known. Through an erased call
+  (`apply_none(f: fn) -> int { return call(f, none) }`) they are not, and
+  the argument's own type stood in for them: `none` was built as an int
+  optional ("unresolved type in codegen, defaulting to int"), and given to
+  `|o: string?|` or `|o: Big?|` the program crashed. `none` and `[]` given
+  through a bare `fn`, as `call(f, none)` or `f(none)`, are now an error
+  at the argument; bind the value to a local of the parameter's type and
+  pass that. Arguments are coerced only into parameter types a signature
+  or the closure literal gives (#2840).
+
+- **The C a program gets for a compiler that is not GCC-compatible has no
+  GNU statement expressions.** Every construct that needs a temporary in the
+  middle of an expression wrote `({ ... })` whatever the C compiler, so on
+  the path `AETHER_GCC_COMPAT 0` selects, which is what cl.exe compiles, 445
+  of the 971 programs of the .ae sweep did not compile: storing a string into
+  an array element, an argument freed after its call, an operand evaluated
+  ahead to keep source order (which also used `__auto_type`), and the
+  `!`, `??`, `?.`, `or` and string ownership forms among them. Each is now a
+  comma expression whose temporaries are declared ahead of the statement it
+  is in, the same C for every compiler; an evaluation-order temporary keeps
+  `__auto_type` where the compiler has it and is declared with the
+  operand's type where it does not. An `or` with a block handler, a `!` that
+  propagates an error and a call whose trailing block runs where its value
+  is used run as statements ahead of their statement when they are the
+  first thing it evaluates (anywhere else too since #2798). Every program
+  of the sweep the compiler translates (975 of 977)
+  now compiles as strict C11 with `AETHER_GCC_COMPAT 0` and runs right that
+  way under gcc; under cl.exe 933 compile, the rest on other GCC-isms
+  (#2799). `make test-msvc-compat` compiles a program per construct as
+  strict C11 and under cl.exe, and runs them that way (#2765).
+
+- **A tuple destructure into an optional local compiles.** `let a: int? =
+  none` then `a, b = two()`, or the `string?` equivalent, stored the
+  slot's bare value into the `ae_opt_<T>` variable, and gcc rejected the
+  C. The slot is wrapped now, as `a = 7` wraps a value, and a `string?`
+  local frees the string it held and owns the new one when the call handed
+  it over. The same holds for a closure's destructure that writes an outer
+  optional (#2794).
+
+- **An optional a closure writes is a cell.** `let a: int? = 3` followed by
+  `set = || { a = 5 }` did not compile: the optional declaration path
+  declared and stored a plain `ae_opt_int`, so the closure's capture of
+  the cell was handed a value. The first binding makes the cell now and
+  every store goes through it, a bare value wrapped, whether by `a = v` or
+  a destructure slot. A `string?` cell owns its string, as a string cell
+  does: a store takes a string of its own and gives back the one it held,
+  a `string?` parameter's cell takes one of its own on entry, and the
+  cell's last release gives back the last. What a local takes out of it
+  (`v = a ?? ""`, `v = a!`, a `some(v)` binding) is a copy of its own, as
+  what it takes out of a string cell is, so it outlives the next store
+  (#2795).
+
+- **A tuple destructure writes a module-level `var`.** `gx, n = two()` in a
+  function declared a local `gx` and left the global as it was, where a
+  bare `gx = 7` writes it. The slot writes the global now, taking the value
+  as a global takes one: a string of its own, and a reference of its own
+  to a closure, giving back the one it held. A local or parameter of the
+  same name still shadows the global (#2796).
+
+- **A closure can store a string into an outer `ptr` local.** `q, n =
+  names(p)` or `r = s` in a closure, where `q` and `r` are `ptr` locals the
+  closure writes, handed the `ptr` cell to the string cell setter, and gcc
+  rejected the C. The store follows the cell's type now, and a string
+  stored into a `ptr` cell reaches C as its characters, as a plain string
+  stored by the cell's own scope does: the cell keeps a string of its own
+  beside the pointer until the next string store or its last release, so
+  the characters outlive the closure that stored them (#2797).
+
+- **A module-level optional `var` can be declared.** `var g: int? = 3` gave
+  the file-scope static its value bare, an invalid initialiser for the
+  `ae_opt_int` struct; `= none` was refused as not a constant, a struct
+  literal was refused for a struct optional, and the constant folder
+  re-typed a `string?` with a string value as a plain `string`. The static
+  now takes the optional's own constant (`{ .has = 1, .val = 3 }`, `{0}`
+  for `none`), and no initialiser means `none`. A function's `g = v`, or a
+  tuple destructure slot, writes the global with a bare value wrapped,
+  including in a loop body or a closure. A `string?` var takes a string of
+  its own and keeps every string it was given, as a `string` var does, so
+  whatever reads it (`v = g ?? ""`, `g!`, a `some(v)` binding, a view
+  beside a call that re-binds it) stays valid (#2800).
+
+- **`int r = match o { ... }` binds the match's value.** The `T name =
+  expr` declaration parsed its initialiser as an expression, which does
+  not include `match`, so the declaration had no initialiser and the match
+  ran as a statement of its own: `r` was read uninitialised. It parses the
+  match as `let r: int = match ...` does (#2803).
+
+- **A closure writes a module-level `var` itself.** A closure that wrote a
+  module `var` (`set = || { gnum = 11 }`) turned the name into a cell of
+  the enclosing function's own, for the whole function: neither the
+  closure's stores nor the function's own `gnum = 9` reached the global,
+  so the function saw one value and every other function the old one. A
+  closure that read one took a copy. A module `var` is never captured now:
+  the closure reads and writes the global, and only a parameter of the
+  same name, which shadows it, is captured (#2805).
+
+- **A tuple destructure in a receive arm writes actor state.** `label, seen
+  = pair(tag)`, where `label` and `seen` are state fields, declared handler
+  locals of those names, so the state kept its old values. The slots now
+  write the state, as `label = v` does: a string field takes a string of
+  its own and gives back the one it held, a `fn` field a reference of its
+  own, and an optional field takes the slot as the optional (#2806).
+
+- **A `const` can have an optional type.** `const LIMIT: int? = 3` gave its
+  `static const ae_opt_int` the bare value, which gcc rejected, and `const
+  NO_LABEL: string? = none` was refused as not a constant. The constant
+  takes the optional's own value now (`{ .has = 1, .val = 3 }`, `{0}` for
+  `none`) and reads, `??` and `match` work on it (#2807).
+
+- **A string stored into a module-level `ptr` var builds without a C
+  warning.** `gp = s` or `gp = string.concat(...)`, with `gp` a `ptr`
+  global, assigned a `const char*` to the `void*` static, and gcc warned
+  (discards 'const' qualifier) in the user's build, an error under
+  `-Werror`. The store casts to the global's type (#2811).
+
+- **Every operand a later call can write is read before the call, as
+  written.** In `println("${flag} ${gc == Color.Green} ${gb} ${gu}
+  ${step()}")`, where `step()` rewrites all four module globals, the `bool`
+  and the enum comparison printed their values from before `step()` but the
+  `byte` and the `uint16` printed what it wrote (`true true 7 8 9` for
+  `true true 1 2 9`): an interpolation segment of a type narrower than
+  `int` (a `byte`, `uint8`, `uint16`, enum, bitstruct or bit set) had no
+  temporary type, so it was left in place and read wherever the C compiler
+  evaluated it. And a struct field read through a pointer, before a call
+  that writes that field through a pointer of its own (a global pointer, a
+  parameter), was read after the call in an argument list, a literal or an
+  operation: what a function writes through a pointer did not count among
+  what its call can change. Both are now evaluated ahead of the call, on
+  the GCC path and without GCC extensions. So is a call that reads through
+  a pointer it was not handed (one in a module variable, one inside a
+  struct it was handed) against a call that writes through one, in either
+  order; and what functions read and write is solved over the call graph,
+  so mutually recursive ones answer the same whichever is asked about
+  first (#2813).
+
+- **An `or` with a block, a propagating `!` and a trailing-block call are
+  plain C wherever they are.** On the path `AETHER_GCC_COMPAT 0` selects
+  (what cl.exe compiles), these constructs, which run statements, were GNU
+  statement expressions anywhere but the first thing their statement
+  evaluates: after another operand (`y + (f() or { -1 })`, a second
+  argument), in a loop condition, behind `&&` or `||`, in a branch of an
+  `if` expression or the default of `??`, in a compound assignment, a
+  struct literal's field, a `for` loop's init or increment, a `match` arm's
+  value, an actor state's initializer, and in a statement that keeps the
+  structs its calls return in temporaries. Each now runs as statements
+  ahead of its statement, after whatever the statement evaluates before
+  it, which is evaluated into temporaries first, in source order; one in a
+  conditional part runs under the same test, and one in a loop condition at
+  the top of every pass. A builder's arguments are evaluated after its
+  block, left to right, whether the call is a value or a statement of its
+  own; as a value, an argument holding one of these constructs ran before
+  the block. Nothing in the .ae sweep, or in programs written to reach each
+  of these places, is a statement expression on that path any more
+  (#2798).
+
+- **A thrown-away string made from a field of a struct a call returns no
+  longer leaks the struct.** `string.concat(item(2).label, "e")` on a line
+  of its own freed the string it made but never destroyed the struct
+  `item(2)` returned, so that struct's strings leaked once per statement;
+  the statement now keeps such structs in temporaries and destroys them, as
+  it already did for any other value it throws away (#2817).
+
+- **An actor state initialized by an `or` has the type of its value.** The
+  typechecker took the type of a state's initializer only when it was a
+  plain call, so `state name = word(true, "q") or { "dflt" }` left the field
+  untyped: codegen declared it `int`, and the program did not compile (a
+  string assigned to an int, an int passed to `string.length`). An int
+  field compiled, with warnings, but its uses in the handlers were untyped.
+  Such a field now has the type its initializer infers to (#2821).
+
+- **An `if` expression used as an operand has its own value.** It was
+  written as a C conditional with no parentheses around it, and `?:` binds
+  looser than any operator, so `y + (if c { 10 } else { 20 })` computed
+  `(y + c) ? 10 : 20` and `(if c { 10 } else { 20 }) * 2` doubled the
+  else branch only. The conditional is now parenthesised whole (#2824).
+
+- **A struct can hold an optional field.** `struct Box { v: int? }` named
+  `ae_opt_int` before its typedef, which came after every struct body, and
+  `Box { v: 7 }` or `b.v = none` gave the field a bare value, so gcc
+  rejected the program. The typedef a struct needs is declared ahead of
+  it (an optional of a struct after that struct's body), and a literal or
+  a field store wraps a bare value as an optional binding does. An
+  optional field whose value owns memory (`string?`, an optional `fn`, an
+  optional of a struct, a fixed-size array or a tuple holding a string or
+  a closure) is refused with a diagnostic until it has a `string` field's
+  ownership (#2820, #2822).
+
+- **Returning a `some(s)` binding no longer leaks.** In a function that
+  matched a `string?` call result (or a `string?` closure cell of its own)
+  and returned the `some(s)` binding beside a literal, `return s` handed
+  over the binding's own string, but the function was classified as
+  returning borrowed strings, so the caller never freed it: 37 bytes a
+  call. The binding counts as a heap return now, and the literal beside
+  it is copied (#2823).
+
+- **Returning `w ?? d` or `w!` from a `string?` local no longer returns
+  freed memory.** The return read the string out of the local, the
+  local's scope-exit free gave it back, and the caller got the freed
+  pointer, which printed other strings' bytes once the block was reused.
+  The function is heap-returning for such a return now and hands the
+  caller a copy, the local freeing its own; a fresh default is handed
+  over as it is. A tuple position does the same (#2815).
+
+- **A tuple literal can become an optional.** `let t: (int, int)? = (3, 4)`
+  stored `34` (its elements' text run together) and printed `34 0`, the
+  same in an `(int, int)?` struct field's literal or store, and `(s, 1)`
+  became the undeclared name `s1`. The literal is the tuple's compound
+  literal inside the optional now, each element cast to its slot's type
+  (#2833).
+
+- **Returning `w ?? d` no longer frees `d` first.** With `d` a parameter
+  the function captures (it escapes through that return) or a local bound
+  to a heap string, `return w ?? d` read `d`, then the scope-exit free gave
+  it back and the caller got the freed pointer. Such a return makes the
+  function heap-returning now, and the value taken is copied (#2834).
+
+- **Returning the `some(s)` binding of a `string?` local no longer returns
+  freed memory.** The binding was a view of the local's string, which the
+  local freed at scope exit before the caller read it, through `return s`
+  or a tuple's `return s, 1`. The binding is a copy the arm owns now, as
+  over a closure cell, and both returns hand it over; an owned binding at
+  a tuple position counts as a heap return as it does at a single one
+  (#2835).
+
+- **A struct's string field handed to a function that keeps it stays
+  alive.** A function that stores its `string` parameter where nothing
+  releases it (a module-level `var`, say) keeps the pointer it was given;
+  a local handed to one is not freed at its scope exit, but a struct field
+  was freed by the struct's destructor, at once for a struct a call
+  returned: `n = string.length(keep(make_item(w).name))` left the kept
+  string pointing at freed memory. The field now gives its reference up at
+  the call, as it does to a function that frees it (#2843).
+
+- **A fallible function's built error string is freed.** A `T!` function
+  that returns a bare value on success and builds its error on another path
+  (`return "", string.concat("bad-", w)`) had the error position of its
+  result taken for an unfreeable passthrough, so the `or`, the destructure
+  and `_, _ =` that discarded the error never freed it. The position is now
+  heap whenever a return builds its error, and the success sentinel is a
+  string the caller owns as well. `x!` reads the error slot as the `or` does
+  (an owned empty slot read raw looked like an error, so `x!` panicked on
+  success), frees the sentinel on success, and a propagating `x!` copies a
+  literal error it hands on into a position the caller frees (#2863).
+- **`x!` in main() compiles after a `T!` function.** The function emitted
+  before main left its result type in place, and main's `x!` was lowered as
+  a propagation returning the result tuple from `main` (#2864).
+- **A tuple's heap strings are freed when nothing binds them.** A tuple call
+  thrown away as a statement (`pair(w)`), and `f()!` over a tuple whose first
+  slot is a heap string used in place (`pair(w)! == x`), left the strings to
+  nobody (#2865).
+
+- **A builder call with a trailing block is stored, passed and thrown away
+  as any call is.** Its statement forms assigned `s = label(args, cfg)` by
+  hand after the block, so a string it returned was never tracked (bound to
+  a local, replaced, or thrown away, it leaked, #2866), a fresh string passed
+  to it was never freed (#2853), a string field passed to one that frees or
+  keeps its parameter was not handed over (#2851), and stored into a struct
+  field it ran with its block dropped (#2855). The block and the arguments
+  now run ahead of the statement, which is then emitted as for any value,
+  the call made with the filled config.
+
+- **Passing a parameter on to a `string?` tuple position copies nothing
+  extra.** A named function hands its `string?` tuple positions over owned,
+  a copy, but the keep analysis took them for keeping the parameter, so a
+  function that passed its parameter to one copied it on entry and leaked
+  the copy; and a returned tuple local holding such a call's result was
+  copied, its own string leaked (#2867).
+
+- **An `fn[N]` local releases its closures.** A local array built from
+  capturing closure literals held the one reference to each environment and
+  never released them, so each call of a function holding one leaked them
+  all. Its scope exit now releases them, as a closure local's does; a struct
+  given the array takes references of its own (#2868).
+
+- **Mutually recursive functions agree on what they hand over.** A return
+  classifier answers no for a function it is still classifying, and a
+  function classified from that answer kept it, so of two tuple functions
+  calling each other one could hand an error string the other built over as
+  borrowed, and every caller leaked it (std.message's `parse` on a bad
+  pattern). An answer that rested on such a no is now kept only while the
+  function it rested on is being classified (#2870).
+
 ## [0.810.0]
 
 ### Added
