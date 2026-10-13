@@ -1,0 +1,74 @@
+// Regression (#2765): an operand evaluated ahead of the rest of its
+// operation, to keep source order (#2478), was held in a GNU statement
+// expression with an `__auto_type` temporary whatever the C compiler, so
+// the C for a compiler that is not GCC-compatible (AETHER_GCC_COMPAT 0, what
+// cl.exe compiles) did not compile. The sequence now spells itself through
+// the _AE_SEQ_* macros: __auto_type where the compiler infers types, a comma
+// expression over temporaries declared with the operand's type ahead of the
+// statement where it does not. An array literal's elements evaluated ahead
+// of their declaration are declared through _AE_AUTO the same way. This
+// checks the order on whichever path the C compiler takes;
+// tests/compiler/test_msvc_compat.sh compiles it as strict C11, under cl.exe,
+// and runs it with AETHER_GCC_COMPAT forced to 0.
+
+extern exit(code: int)
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+struct P {
+    a: int
+    b: int
+}
+
+var counter = 0
+
+bump() -> int {
+    counter = counter + 1
+    return counter
+}
+
+bump_long() -> long {
+    counter = counter + 1
+    return counter
+}
+
+digits(a: int, b: int, c: int) -> int {
+    return a * 100 + b * 10 + c
+}
+
+main() {
+    // Call arguments, left to right.
+    counter = 0
+    check(digits(bump(), bump(), bump()) == 123, "call arguments in source order")
+
+    // Operands of a binary operation.
+    counter = 0
+    check(bump() * 10 + bump() == 12, "binary operands in source order")
+
+    // A long operand keeps its width through the temporary.
+    counter = 0
+    big = bump_long() * 4000000000 + bump_long()
+    check(big == 4000000002, "a long operand keeps its width")
+
+    // Fields of a struct literal.
+    counter = 0
+    p = P { a: bump(), b: bump() }
+    check(p.a == 1 && p.b == 2, "struct literal fields in source order")
+
+    // An array literal that reads the array it replaces: a swap.
+    xs = [1, 2]
+    xs = [xs[1], xs[0]]
+    check(xs[0] == 2 && xs[1] == 1, "an array literal reads the old elements")
+
+    // Elements of an array literal with side effects.
+    counter = 0
+    ys = [bump(), bump(), bump()]
+    check(ys[0] == 1 && ys[1] == 2 && ys[2] == 3, "array literal elements in source order")
+
+    println("ok")
+}

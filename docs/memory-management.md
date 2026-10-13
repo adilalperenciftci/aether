@@ -571,16 +571,20 @@ A function that calls itself recursively (e.g. a `walk_join`-style accumulator-p
 
 ### Argument-temp lifetime (nested heap-returning calls)
 
-`f(g(), h())` where `g()` and `h()` are themselves heap-returning was a pre-fix anonymous-temp leak: the two heap allocations flowed into `f` and had nowhere to be reclaimed. The codegen now wraps every call site that has heap-returning function-call subexpressions in argument position with a GCC statement-expression that:
+`f(g(), h())` where `g()` and `h()` are themselves heap-returning was a pre-fix anonymous-temp leak: the two heap allocations flowed into `f` and had nowhere to be reclaimed. The codegen now wraps every call site that has heap-returning function-call subexpressions in argument position in a sequence of temporaries:
 
 ```c
-({ char* _ad_0 = (char*)(g());
-   char* _ad_1 = (char*)(h());
-   <ret_type> _ad_r = f(_ad_0, _ad_1);
-   aether_heap_str_free(_ad_0);
-   aether_heap_str_free(_ad_1);
-   _ad_r; })
+char* _ad_0; char* _ad_1; <ret_type> _ad_r0;    /* ahead of the statement */
+...
+(_ad_0 = (char*)(g()),
+ _ad_1 = (char*)(h()),
+ _ad_r0 = f(_ad_0, _ad_1),
+ aether_heap_str_free(_ad_0),
+ aether_heap_str_free(_ad_1),
+ _ad_r0)
 ```
+
+It is a comma expression, and its temporaries are declared ahead of the statement it is in (#2765): plain C11, so a C compiler that is not GCC-compatible (cl.exe) takes it as well. It was a GNU statement expression `({ ... })`, which only GCC-compatible compilers take. Every other construct that needs a temporary in the middle of an expression (a string taken into an owning slot, an operand evaluated ahead to keep source order, the `!`, `??`, `?.` and `or` operators) is written the same way. An `or` with a block handler, a `!` that propagates an error, and a call whose trailing block runs where its value is used hold statements, so they run as statements ahead of their statement when they are the first thing it evaluates (a binding's value, a returned value, an `if` condition, a call's first argument); anywhere else they are still statement expressions (#2798).
 
 The wrap is suppressed when the corresponding callee parameter is storage-shaped (`ptr`, `@retain` string, or unknown-typed), the same `call_arg_escapes` gate the escape walker uses. In those cases the recipient takes ownership and freeing here would dangle the stored copy. A parameter the callee only returns (`ident(s) { return s }`) keeps the temporary alive for the result, which the caller then owns; in statement position the result is thrown away, so the temporary is freed with it.
 

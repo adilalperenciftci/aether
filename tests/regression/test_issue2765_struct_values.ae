@@ -1,0 +1,109 @@
+// Regression (#2765): a struct value taken into an owning slot (moved out of
+// a local on its last use), a struct literal that takes its fields (a moved
+// local, a view, an array copied element by element) and a condition whose
+// struct temporaries are destroyed once it is read were GNU statement
+// expressions whatever the C compiler, so the C for a compiler that is not
+// GCC-compatible (AETHER_GCC_COMPAT 0, what cl.exe compiles) did not
+// compile. A move is now a call (`<Name>_move`), an array field is filled by
+// a call per field, and the rest are comma expressions whose temporaries are
+// declared ahead of the statement. This checks each value;
+// tests/compiler/test_msvc_compat.sh compiles it as strict C11 and under
+// cl.exe. Strings are built from parameters, as string.concat of two
+// literals folds to a literal.
+
+import std.string
+
+extern exit(code: int)
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+struct Item {
+    name: string
+    tag: string
+}
+
+struct Shelf {
+    names: string[2]
+}
+
+struct Vec3 {
+    xs: int[3]
+}
+
+struct Row {
+    items: Item[2]
+}
+
+struct Hooks {
+    fs: fn[2]
+}
+
+make_item(w: string) -> Item {
+    return Item { name: string.concat(w, "#"), tag: string.concat(w, "%") }
+}
+
+// A local moved into another on its last use.
+moved(w: string) -> string {
+    a = make_item(w)
+    b = a
+    return b.name
+}
+
+// The same for a local a `try` body writes, which is volatile.
+moved_in_try(w: string) -> string {
+    a = make_item("x")
+    try {
+        a = make_item(w)
+    } catch e {
+        check(false, "no panic")
+    }
+    b = a
+    return b.tag
+}
+
+// Struct literals that take their fields.
+literals(w: string) -> int {
+    s = string.concat(w, "1")
+    moved_field = Item { name: s, tag: "t" }
+    other = make_item(w)
+    viewed = Item { name: other.name, tag: "v" }
+    names = [string.concat(w, "a"), "lit"]
+    shelf = Shelf { names: names }
+    xs = [1, 2, 3]
+    v = Vec3 { xs: xs }
+    items = [make_item("p"), make_item("q")]
+    row = Row { items: items }
+    k = 10
+    fs = [|| { return k }, || { return k + 1 }]
+    hooks = Hooks { fs: fs }
+    int h0 = call(hooks.fs[0])
+    check(moved_field.name == "w1", "a moved local in a field")
+    check(viewed.name == "w#" && other.name == "w#", "a field taken from a view")
+    check(shelf.names[0] == "wa" && shelf.names[1] == "lit", "a string[N] field from an array")
+    check(v.xs[0] + v.xs[1] + v.xs[2] == 6, "an int[N] field from an array")
+    check(row.items[1].tag == "q%", "an Item[N] field from an array")
+    check(h0 == 10, "an fn[N] field from an array")
+    return 1
+}
+
+// A condition that destroys the struct its call returns once it is read.
+conditions(w: string) -> int {
+    hits = 0
+    if make_item(w).tag == "w%" {
+        hits = hits + 1
+    }
+    return hits
+}
+
+main() {
+    check(moved("m") == "m#", "a struct moved on its last use")
+    check(moved_in_try("t") == "t%", "a volatile struct moved")
+    check(literals("w") == 1, "struct literals")
+    check(conditions("w") == 1, "a condition with a struct temporary")
+    println("ok")
+}

@@ -1971,7 +1971,7 @@ main() {
 
 ### Codegen
 
-A value optional lowers to `typedef struct { int has; T val; } ae_opt_<T>` (one per concrete element type); `none` is `{0}`, a wrapped value is `{ .has = 1, .val = … }`. `!`, `??`, and `?.` lower to single-evaluation GCC statement-expressions, so an operand with side effects is evaluated exactly once.
+A value optional lowers to `typedef struct { int has; T val; } ae_opt_<T>` (one per concrete element type); `none` is `{0}`, a wrapped value is `{ .has = 1, .val = … }`. `!`, `??`, and `?.` evaluate their operand once, into a temporary, so an operand with side effects is evaluated exactly once. The generated C is plain C11 here (a comma expression whose temporary is declared ahead of the statement, #2765), so a C compiler that is not GCC-compatible takes it.
 
 ---
 

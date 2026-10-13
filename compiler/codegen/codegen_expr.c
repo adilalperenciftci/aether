@@ -14,18 +14,19 @@
  * this is a leak per call. The mechanism here hoists each heap-
  * returning function-call appearing in argument position into a
  * named temporary, calls the parent with the temporaries, and
- * frees them after the parent call returns. Wrapped in a GCC
- * statement-expression `({ ... })` so the call still composes in
- * any expression context.
+ * frees them after the parent call returns. A sequence of temporaries
+ * (TempSeq, #2765), so the call still composes in any expression
+ * context: a comma expression, the temporaries declared ahead of the
+ * statement.
  *
  * Generated shape (parent returns non-void):
  *
- *     ({ const char* _ad_0 = heap_value();
- *        const char* _ad_1 = heap_value();
- *        <ret_type> _ad_r = combine(_ad_0, _ad_1);
- *        free((void*)_ad_0);
- *        free((void*)_ad_1);
- *        _ad_r; })
+ *     (_ad_0 = (char*)(heap_value()),
+ *      _ad_1 = (char*)(heap_value()),
+ *      _ad_r2 = combine(_ad_0, _ad_1),
+ *      aether_heap_str_free(_ad_0),
+ *      aether_heap_str_free(_ad_1),
+ *      _ad_r2)
  *
  * The substitution registry below is consulted at the very top of
  * generate_expression: when an AST_FUNCTION_CALL node has been
@@ -276,6 +277,8 @@ typedef struct ArgDrainWrap {
     const char* ret_ct;
     Type* ret_type;
     int discarded;      /* the value is discarded at statement level */
+    TempSeq seq;        /* the temporaries (#2765) */
+    const char* r;      /* the call's value, when it has one */
 } ArgDrainWrap;
 
 /* Should the fresh heap argument at child `ai` of a call be freed after the
@@ -424,16 +427,19 @@ int call_hands_back_temp(CodeGenerator* gen, ASTNode* call) {
 }
 
 /* #2519: does a call to user function `func_name` yield a value in C? 1 yes,
- * 0 no (a void function), -1 not known (no visible definition). The rule
- * the signature is emitted by (fn_result_type): the declared type, else
- * `int` when the body returns a value, else void, decided over every clause
- * of a set (#2645). */
-static int callee_result_shape(CodeGenerator* gen, const char* func_name) {
+ * its C type then in `*ct`, 0 no (a void function), -1 not known (no visible
+ * definition). The rule the signature is emitted by (fn_result_type): the
+ * declared type, else `int` when the body returns a value, else void,
+ * decided over every clause of a set (#2645). */
+static int callee_result_shape(CodeGenerator* gen, const char* func_name, const char** ct) {
     if (!callee_has_visible_body(gen, func_name)) return -1;
     const char* fn = codegen_normalise_callee(func_name);
     const DefClauses* dc = program_index_clauses(gen->program, fn);
     if (!dc || dc->count < 1 || !dc->nodes[0]) return -1;
-    return fn_result_type(gen, dc->nodes[0]) ? 1 : 0;
+    Type* t = fn_result_type(gen, dc->nodes[0]);
+    if (!t) return 0;
+    *ct = get_c_type(t);
+    return 1;
 }
 
 /* #2507: may the owned closure at child `ai` of call `expr` be released once
@@ -466,9 +472,8 @@ static int owned_closure_arg_drainable(CodeGenerator* gen, ASTNode* expr, const 
  * caller has set have_value, ret_ct and discarded. A VOID parent (e.g. an
  * assert-style helper `check(label, string.from_long(n), want)`) yields no
  * value, but its heap-returning inline args still leak: they are drained
- * by a statement-expression that yields void, `({ T t=...; call(...);
- * free(t); })`, valid wherever a void call appears (it is always a
- * statement, so `({...});` is well-formed C). A value of unknown type is
+ * by a wrap that yields void, `(t = ..., call(...), free(t))`, valid
+ * wherever a void call appears. A value of unknown type is
  * drained only when it is discarded at the statement level, where the wrap
  * yields void and is safe regardless of the declared type. Args that are
  * themselves substitution-registered (inside a parent wrap already) are
@@ -552,7 +557,7 @@ static void arg_drain_select(CodeGenerator* gen, ASTNode* expr, int first_arg,
 static void arg_drain_open(CodeGenerator* gen, ASTNode* expr, ArgDrainWrap* w) {
     if (w->count == 0) return;
     char* names[16] = {0};
-    fprintf(gen->output, "({ ");
+    seq_open(gen, &w->seq);
     /* Pre-mint all temp names BEFORE recursing into generate_expression:
      * the recursion may itself open inner wraps and mint their own temps,
      * advancing g_arg_drain_counter. Reserving names up front keeps the
@@ -572,21 +577,20 @@ static void arg_drain_open(CodeGenerator* gen, ASTNode* expr, ArgDrainWrap* w) {
          * char*` temp. The value is a fresh heap string this wrap owns and
          * frees, so there is nothing const about it. */
         if (w->closure[h]) {
-            fprintf(gen->output, "_AeClosure %s = ", names[h]);
+            seq_let_named(gen, &w->seq, "_AeClosure", names[h]);
             if (w->closure[h] == 2) fprintf(gen->output, "_aether_closure_retain(");
             generate_expression(gen, arg);
-            fprintf(gen->output, w->closure[h] == 2 ? "); " : "; ");
-            continue;
-        }
-        if (w->optstr[h]) {
-            fprintf(gen->output, "%s %s = ", get_c_type(arg->node_type), names[h]);
+            if (w->closure[h] == 2) fprintf(gen->output, ")");
+        } else if (w->optstr[h]) {
+            seq_let_named(gen, &w->seq, get_c_type(arg->node_type), names[h]);
             generate_expression(gen, arg);
-            fprintf(gen->output, "; ");
-            continue;
+        } else {
+            seq_let_named(gen, &w->seq, "char*", names[h]);
+            fprintf(gen->output, "(char*)(");
+            generate_expression(gen, arg);
+            fprintf(gen->output, ")");
         }
-        fprintf(gen->output, "char* %s = (char*)(", names[h]);
-        generate_expression(gen, arg);
-        fprintf(gen->output, "); ");
+        seq_next(gen, &w->seq);
     }
     /* Now bind the outer-arg to outer-temp substitutions. The bind
      * transfers ownership of the name string; arg_drain_truncate frees
@@ -594,18 +598,18 @@ static void arg_drain_open(CodeGenerator* gen, ASTNode* expr, ArgDrainWrap* w) {
     for (int h = 0; h < w->count; h++) {
         arg_drain_bind(expr->children[w->idx[h]], names[h]);
     }
-    /* A void parent emits the call bare (no _ad_r); the statement-
-     * expression yields void via the final free in arg_drain_close. */
+    /* A void parent emits the call bare (no _ad_r); the wrap yields void
+     * through the final free in arg_drain_close. */
+    w->r = NULL;
     if (w->have_value) {
-        fprintf(gen->output, "%s _ad_r = ", w->ret_ct ? w->ret_ct : get_c_type(w->ret_type));
+        w->r = seq_let(gen, &w->seq, w->ret_ct ? w->ret_ct : get_c_type(w->ret_type), "_ad_r");
     }
 }
 
-/* Close the wrap, if one was opened: the per-temp free, the statement-
- * expression's yield value, and the closing brace. */
+/* Close the wrap, if one was opened: the per-temp free, the wrap's value,
+ * and its end. */
 static void arg_drain_close(CodeGenerator* gen, ASTNode* expr, ArgDrainWrap* w) {
     if (w->count == 0) return;
-    fprintf(gen->output, "; ");
     /* #2649: a call taken as owned (call_hands_back_temp) owns what it
      * returns: an argument temporary it handed back, or else a copy, made
      * before the temporaries go. The flag tells generate_expression's take
@@ -615,11 +619,15 @@ static void arg_drain_close(CodeGenerator* gen, ASTNode* expr, ArgDrainWrap* w) 
         for (int h = 0; h < w->count; h++) {
             const char* nm = arg_drain_lookup(expr->children[w->idx[h]]);
             if (w->closure[h] || w->optstr[h] || !w->identity[h] || !nm) continue;
-            fprintf(gen->output, "%s(const char*)_ad_r != %s", n++ ? " && " : "if (", nm);
+            if (n++ == 0) seq_next(gen, &w->seq);
+            else fprintf(gen->output, " && ");
+            fprintf(gen->output, "(const char*)%s != %s", w->r, nm);
         }
         if (n) {
-            fprintf(gen->output, ") _ad_r = aether_uniform_heap_str((const char*)_ad_r, 0); "
-                    "_ae_hb%d = 1; ", g_handback_flag);
+            fprintf(gen->output, " ? (void)(%s = aether_uniform_heap_str((const char*)%s, 0)) : (void)0",
+                    w->r, w->r);
+            seq_next(gen, &w->seq);
+            fprintf(gen->output, "_ae_hb%d = 1", g_handback_flag);
         }
     }
     for (int h = 0; h < w->count; h++) {
@@ -627,10 +635,11 @@ static void arg_drain_close(CodeGenerator* gen, ASTNode* expr, ArgDrainWrap* w) 
          * the wrap's scope. */
         const char* nm = arg_drain_lookup(expr->children[w->idx[h]]);
         if (!nm) continue;
+        seq_next(gen, &w->seq);
         if (w->closure[h]) {
-            fprintf(gen->output, "_aether_closure_env_release(%s.env); ", nm);
+            fprintf(gen->output, "_aether_closure_env_release(%s.env)", nm);
         } else if (w->optstr[h]) {
-            fprintf(gen->output, "if (%s.has) aether_heap_str_free((void*)%s.val); ", nm, nm);
+            fprintf(gen->output, "%s.has ? aether_heap_str_free((void*)%s.val) : (void)0", nm, nm);
         } else if (w->identity[h] && !w->discarded) {
             /* Return-escape-only param: free the fresh temp ONLY if the
              * call did not return it. The temp is a fresh heap string of
@@ -638,23 +647,23 @@ static void arg_drain_close(CodeGenerator* gen, ASTNode* expr, ArgDrainWrap* w) 
              * temps are: string_release, used here before, skips a plain
              * buffer (an `@heap` extern's strdup, `path.join`'s malloc), and
              * every such temp the call did not hand back leaked (#2649). */
-            fprintf(gen->output,
-                    "if ((const char*)_ad_r != %s) aether_heap_str_free(%s); ", nm, nm);
+            fprintf(gen->output, "(const char*)%s != %s ? aether_heap_str_free(%s) : (void)0",
+                    w->r, nm, nm);
         } else {
-            fprintf(gen->output, "aether_heap_str_free(%s); ", nm);
+            fprintf(gen->output, "aether_heap_str_free(%s)", nm);
         }
     }
     if (w->have_value) {
-        /* In statement position the yield is discarded, and a bare
+        /* In statement position the value is discarded, and a bare
          * `_ad_r;` there is -Wunused-value in the user's own build
          * (`fs.delete("${dir}/f")` warned). Cast it away: the wrap then
          * yields void, which is all a statement wants. */
-        fprintf(gen->output, w->discarded ? "(void)_ad_r; })" : "_ad_r; })");
-    } else {
-        /* void parent: the trailing free is the last statement, so the
-         * ({...}) yields void. */
-        fprintf(gen->output, "})");
+        seq_next(gen, &w->seq);
+        fprintf(gen->output, w->discarded ? "(void)%s" : "%s", w->r);
     }
+    /* A void parent: the trailing free is the last part, so the wrap
+     * yields void. */
+    seq_close(gen, &w->seq);
     arg_drain_truncate(w->saved_count);
 }
 
@@ -1229,27 +1238,41 @@ static void order_bind(ASTNode* node, const char* name) {
     g_order_count++;
 }
 
-/* Evaluate operand `op` into a fresh temp and bind it: `__auto_type _eoN = (op); `. */
-static void order_hoist_operand(CodeGenerator* gen, ASTNode* op) {
-    char buf[32];
-    snprintf(buf, sizeof(buf), "_eo%d", g_order_counter++);
-    fprintf(gen->output, "__auto_type %s = (", buf);
+/* #2765: the C type an operand's temp is declared with where __auto_type
+ * cannot infer it: the operand's Aether type, NULL when it has none a
+ * declaration can spell (an unresolved type, an array, which the operand
+ * decays from). */
+static const char* order_c11_type(ASTNode* op) {
+    Type* t = op ? op->node_type : NULL;
+    if (!t || t->kind == TYPE_UNKNOWN || t->kind == TYPE_VOID || t->kind == TYPE_WILDCARD ||
+        (t->kind == TYPE_ARRAY && t->array_size > 0)) return NULL;
+    return get_c_type(t);
+}
+
+/* Evaluate operand `op` into a fresh temp of sequence `s` and bind it:
+ * `_eoN = (op)`, then the separator. */
+static void order_hoist_operand(CodeGenerator* gen, TempSeq* s, ASTNode* op) {
+    const char* name = cg_internf("_eo%d", g_order_counter++);
+    seq_let_named(gen, s, order_c11_type(op), name);
+    fprintf(gen->output, "(");
     generate_expression(gen, op);
-    fprintf(gen->output, "); ");
-    order_bind(op, buf);
+    fprintf(gen->output, ")");
+    seq_next(gen, s);
+    order_bind(op, name);
 }
 
 /* A field read evaluated ahead of a call that frees it: handed over where
  * it is read (emit_string_field_handoff), once, in its place in the order.
  * At the call it is the temp, and the struct the path named then may not
  * be the one a later operand left there. */
-static void order_hoist_handoff(CodeGenerator* gen, ASTNode* op) {
-    char buf[32];
-    snprintf(buf, sizeof(buf), "_eo%d", g_order_counter++);
-    fprintf(gen->output, "__auto_type %s = (", buf);
+static void order_hoist_handoff(CodeGenerator* gen, TempSeq* s, ASTNode* op) {
+    const char* name = cg_internf("_eo%d", g_order_counter++);
+    seq_let_named(gen, s, "const char*", name);
+    fprintf(gen->output, "(");
     emit_string_field_handoff(gen, op);
-    fprintf(gen->output, "); ");
-    order_bind(op, buf);
+    fprintf(gen->output, ")");
+    seq_next(gen, s);
+    order_bind(op, name);
 }
 
 /* Is operand `k` of `call` a field read handed to a parameter the callee
@@ -1300,13 +1323,25 @@ void order_prelude_begin(CodeGenerator* gen, ASTNode** items, int n, const char*
         }
     }
     if (!any) return;
-    for (int k = 0; k < n; k++)
-        if (hoist[k]) order_hoist_operand(gen, items[k]);
+    /* Statements, ahead of the one the list belongs to: `T _eoN = (op);`,
+     * T inferred (__auto_type) where the compiler can, and the operand's
+     * own type elsewhere (#2765). */
+    for (int k = 0; k < n; k++) {
+        if (!hoist[k]) continue;
+        const char* name = cg_internf("_eo%d", g_order_counter++);
+        const char* c11 = order_c11_type(items[k]);
+        if (c11) fprintf(gen->output, "_AE_AUTO(%s) %s = (", c11, name);
+        else fprintf(gen->output, "__auto_type %s = (", name);
+        generate_expression(gen, items[k]);
+        fprintf(gen->output, "); ");
+        order_bind(items[k], name);
+    }
 }
 
 /* Emit `expr` with the operands a later one conflicts with evaluated first,
- * in source order, into temps it then reads:
- *     ({ __auto_type _eo0 = (i++); f(_eo0, i); })
+ * in source order, into temps it then reads, an ordered sequence (#2765):
+ *     ({ __auto_type _eo0 = (i++); f(_eo0, i); })     GCC-compatible
+ *     (_eo0 = (i++), f(_eo0, i))                       any other compiler
  * Returns 0, emitting nothing, when no operand needs it. */
 static int emit_in_operand_order(CodeGenerator* gen, ASTNode* expr) {
     ASTNode* ops[ORDER_MAX_OPERANDS];
@@ -1315,17 +1350,22 @@ static int emit_in_operand_order(CodeGenerator* gen, ASTNode* expr) {
     int n = order_operands(expr, ops, ORDER_MAX_OPERANDS);
     if (n < 2 || !order_hoist_set(gen, ops, n, hoist)) return 0;
     int saved = g_order_count;
-    fprintf(gen->output, "({ ");
+    int typed = 1;
+    for (int k = 0; k < n; k++)
+        if (hoist[k] && !order_operand_hands_off(gen, expr, k) && !order_c11_type(ops[k]))
+            typed = 0;
+    TempSeq s;
+    seq_open_ordered(gen, &s, typed);
     for (int k = 0; k < n; k++) {
         if (!hoist[k]) continue;
-        if (order_operand_hands_off(gen, expr, k)) order_hoist_handoff(gen, ops[k]);
-        else order_hoist_operand(gen, ops[k]);
+        if (order_operand_hands_off(gen, expr, k)) order_hoist_handoff(gen, &s, ops[k]);
+        else order_hoist_operand(gen, &s, ops[k]);
     }
     ASTNode* saved_emitting = g_order_emitting;
     g_order_emitting = expr;
     generate_expression(gen, expr);
     g_order_emitting = saved_emitting;
-    fprintf(gen->output, "; })");
+    seq_close(gen, &s);
     order_prelude_end(saved);
     return 1;
 }
@@ -4785,10 +4825,15 @@ static void emit_closure_container_store(CodeGenerator* gen, ASTNode* call, ASTN
     int temp_val = !arg_drain_lookup(val) &&
         ((val->type == AST_CLOSURE && !(val->value && strcmp(val->value, "trailing") == 0)) ||
          call_returns_owned_closure(gen, val));
+    TempSeq s;
+    const char* lv = NULL;
+    const char* lr = NULL;
     if (temp_val) {
-        fprintf(gen->output, "({ _AeClosure _ae_lv = ");
+        seq_open(gen, &s);
+        lv = seq_let(gen, &s, "_AeClosure", "_ae_lv");
         generate_expression(gen, val);
-        fprintf(gen->output, "; %s _ae_lr = ", e->wrapper ? "const char*" : "int");
+        seq_next(gen, &s);
+        lr = seq_let(gen, &s, e->wrapper ? "const char*" : "int", "_ae_lr");
     }
     fprintf(gen->output, "%s(", fn);
     for (int i = 0; i < e->val_idx; i++) {
@@ -4808,8 +4853,12 @@ static void emit_closure_container_store(CodeGenerator* gen, ASTNode* call, ASTN
         /* A store whose result nobody reads (a statement) yields nothing:
          * a trailing value there is an unused expression to the C
          * compiler (clang -Wunused-value). */
-        fprintf(gen->output, "_ae_lv)); _aether_closure_env_release(_ae_lv.env); %s })",
-                discarded ? "(void)_ae_lr;" : "_ae_lr;");
+        fprintf(gen->output, "%s))", lv);
+        seq_next(gen, &s);
+        fprintf(gen->output, "_aether_closure_env_release(%s.env)", lv);
+        seq_next(gen, &s);
+        fprintf(gen->output, discarded ? "(void)%s" : "%s", lr);
+        seq_close(gen, &s);
     } else {
         generate_expression(gen, val);
         fprintf(gen->output, "))");
@@ -5321,6 +5370,129 @@ ASTNode* trailing_dsl_block(CodeGenerator* gen, ASTNode* call) {
     return NULL;
 }
 
+/* --- Values computed ahead of their statement (#2765) --------------------
+ *
+ * Three constructs run statements as part of an expression: an `or` whose
+ * handler is a block, a `!` that propagates an error by returning, and a
+ * call with a trailing block where its value is used. As expressions they
+ * are GNU statement expressions, which only GCC-compatible compilers take.
+ * Where one is the first thing its statement evaluates (generate_statement
+ * finds it: stmt_control_prelude), it runs as statements ahead of the
+ * statement instead, its value left in a temporary, and the statement reads
+ * the temporary where the construct was: the same order of evaluation, in
+ * plain C. Anywhere else it stays a statement expression (#2798).
+ *
+ * g_ctl_emitting is the construct whose statements are being emitted;
+ * g_ctl_subs maps each one done to the text of its value, until its
+ * statement ends. */
+static const ASTNode* g_ctl_emitting = NULL;
+static ArgDrainSub* g_ctl_subs = NULL;
+static int g_ctl_count = 0;
+static int g_ctl_cap = 0;
+
+static const char* ctl_lookup(const ASTNode* node) {
+    for (int i = g_ctl_count - 1; node && i >= 0; i--)
+        if (g_ctl_subs[i].node == node) return g_ctl_subs[i].name;
+    return NULL;
+}
+
+static void ctl_bind(ASTNode* node, const char* text) {
+    if (g_ctl_count >= g_ctl_cap) {
+        int cap = g_ctl_cap ? g_ctl_cap * 2 : 8;
+        g_ctl_subs = (ArgDrainSub*)aether_xrealloc(g_ctl_subs, sizeof(ArgDrainSub) * (size_t)cap);
+        g_ctl_cap = cap;
+    }
+    g_ctl_subs[g_ctl_count].node = node;
+    g_ctl_subs[g_ctl_count].name = strdup(text);
+    if (!g_ctl_subs[g_ctl_count].name) {
+        fprintf(stderr, "Fatal: out of memory binding a value\n");
+        exit(1);
+    }
+    g_ctl_count++;
+}
+
+int control_prelude_depth(void) {
+    return g_ctl_count;
+}
+
+void control_prelude_end(int depth) {
+    while (g_ctl_count > depth) {
+        g_ctl_count--;
+        free(g_ctl_subs[g_ctl_count].name);
+    }
+}
+
+/* The C type of the value of call `call` with a trailing block: its checked
+ * type, else the type its definition returns (fn_result_type); NULL when
+ * neither names one. */
+static const char* trailing_call_c_type(CodeGenerator* gen, ASTNode* call) {
+    Type* t = call->node_type;
+    if (t && t->kind != TYPE_UNKNOWN && t->kind != TYPE_VOID) return get_c_type(t);
+    if (!call->value || !gen->program) return NULL;
+    ASTNode* def = find_function_definition_by_name(gen->program,
+                                                    codegen_normalise_callee(call->value));
+    Type* r = def ? fn_result_type(gen, def) : NULL;
+    return r ? get_c_type(r) : NULL;
+}
+
+/* Is `e` one of the three constructs, in the form that runs statements, and
+ * one emit_control_prelude can run ahead of its statement? */
+int is_control_value(CodeGenerator* gen, ASTNode* e) {
+    if (!e) return 0;
+    if (e->type == AST_OR_ELSE) {
+        if (e->child_count < 2 || !e->children[1] || e->children[1]->type != AST_BLOCK) return 0;
+        Type* tup = e->children[0] ? e->children[0]->node_type : NULL;
+        return tup && tup->kind == TYPE_TUPLE && tup->tuple_count >= 2 && tup->tuple_types[0];
+    }
+    if (e->type == AST_TUPLE_UNWRAP) {
+        Type* tup = e->child_count > 0 && e->children[0] ? e->children[0]->node_type : NULL;
+        return tup && tup->kind == TYPE_TUPLE && tup->tuple_count >= 2 &&
+               gen->current_func_return_type && gen->current_func_return_type->is_result;
+    }
+    if (e->type == AST_FUNCTION_CALL) {
+        if (e == gen->trailing_stmt_call) return 0;
+        ASTNode* block = trailing_dsl_block(gen, e);
+        if (!block || block->child_count == 0 || !trailing_call_c_type(gen, e)) return 0;
+        /* A call generate_expression wraps before it reaches the block (its
+         * arguments evaluated in order, its result taken as owned or
+         * copied, a statement's struct temporary) is left as it is: the
+         * wrap reads what the call does inside it. */
+        ASTNode* ops[ORDER_MAX_OPERANDS];
+        int hoist[ORDER_MAX_OPERANDS];
+        int n = order_operands(e, ops, ORDER_MAX_OPERANDS);
+        if (n >= 2 && order_hoist_set(gen, ops, n, hoist)) return 0;
+        return !call_hands_back_temp(gen, e) && !call_returns_view_of_temp(gen, e) &&
+               !call_returns_tuple_view_of_temp(gen, e) && !expr_is_c_view_of_slice(gen, e) &&
+               !stmt_struct_temp_of(e);
+    }
+    return 0;
+}
+
+static int emit_trailing_call_expression(CodeGenerator* gen, ASTNode* call);
+
+/* Run `e` (is_control_value) as statements here, ahead of its statement,
+ * and bind its value: `discarded`, the statement throws the value away, so
+ * it reads it as a void expression. Returns 0, emitting nothing, for any
+ * other node or when temporaries cannot be declared ahead of the
+ * statement. */
+int emit_control_prelude(CodeGenerator* gen, ASTNode* e, int discarded) {
+    if (!hoist_ready(gen) || !is_control_value(gen, e)) return 0;
+    int mark = g_ctl_count;
+    const ASTNode* saved = g_ctl_emitting;
+    g_ctl_emitting = e;
+    /* A call goes straight to its block's lowering: nothing wraps it here
+     * (is_control_value). */
+    if (e->type == AST_FUNCTION_CALL) emit_trailing_call_expression(gen, e);
+    else generate_expression(gen, e);
+    g_ctl_emitting = saved;
+    if (g_ctl_count > mark && discarded) {
+        char* v = g_ctl_subs[g_ctl_count - 1].name;
+        g_ctl_subs[g_ctl_count - 1].name = strdup(cg_internf("(void)%s", v));
+        free(v);
+    }
+    return g_ctl_count > mark;
+}
+
 /* `call(args) { block }` where the value is used inside an expression:
  * `return build() { ... }`, `f(build() { ... })`. A declaration, an
  * assignment and an expression statement run the block themselves
@@ -5328,18 +5500,40 @@ ASTNode* trailing_dsl_block(CodeGenerator* gen, ASTNode* call) {
  * skipped with the argument loop's DSL test and silently dropped. Lowered
  * here to a statement expression that runs it the way those statements
  * do: a builder's block configures it before the call; any other call's
- * value is the block's context. Returns 0 when there is no such block. */
+ * value is the block's context. Run ahead of its statement where it is the
+ * first thing the statement evaluates (emit_control_prelude, #2765).
+ * Returns 0 when there is no such block. */
 static int g_trailing_tmp = 0;
 static int emit_trailing_call_expression(CodeGenerator* gen, ASTNode* call) {
     ASTNode* block = trailing_dsl_block(gen, call);
     /* An empty block runs nothing and configures nothing: the plain call,
      * as before (and a builder's config factory is not needed for it). */
     if (!block || block->child_count == 0) return 0;
+    /* #2765: run ahead of the statement (emit_control_prelude): statements,
+     * the value left in a temporary the statement reads. */
+    const char* done = ctl_lookup(call);
+    if (done) {
+        fprintf(gen->output, "%s", done);
+        return 1;
+    }
+    int as_stmts = g_ctl_emitting == call;
     int n = g_trailing_tmp++;
     if (call->value && is_builder_func_reg(gen, call->value)) {
-        fprintf(gen->output, "({ void* _tcfg%d = (void*)(intptr_t)%s(); _aether_ctx_push(_tcfg%d);\n",
-                n, get_builder_factory(gen, call->value), n);
+        if (as_stmts) {
+            hoist_declare(gen, "void*", cg_internf("_tcfg%d", n));
+            hoist_declare(gen, trailing_call_c_type(gen, call), cg_internf("_tcr%d", n));
+            print_indent(gen);
+            fprintf(gen->output, "_tcfg%d = (void*)(intptr_t)%s(); _aether_ctx_push(_tcfg%d);\n",
+                    n, get_builder_factory(gen, call->value), n);
+        } else {
+            fprintf(gen->output, "({ void* _tcfg%d = (void*)(intptr_t)%s(); _aether_ctx_push(_tcfg%d);\n",
+                    n, get_builder_factory(gen, call->value), n);
+        }
         emit_trailing_block_body(gen, block);
+        if (as_stmts) {
+            print_indent(gen);
+            fprintf(gen->output, "_tcr%d = ", n);
+        }
         fprintf(gen->output, "%s(", codegen_normalise_callee(safe_c_name(call->value)));
         int argc = 0;
         for (int i = 0; i < call->child_count; i++) {
@@ -5349,17 +5543,25 @@ static int emit_trailing_call_expression(CodeGenerator* gen, ASTNode* call) {
             if (argc++ > 0) fprintf(gen->output, ", ");
             generate_expression(gen, arg);
         }
-        fprintf(gen->output, "%s_tcfg%d); })", argc > 0 ? ", " : "", n);
+        fprintf(gen->output, "%s_tcfg%d)%s", argc > 0 ? ", " : "", n, as_stmts ? ";\n" : "; })");
+        if (as_stmts) ctl_bind(call, cg_internf("_tcr%d", n));
         return 1;
     }
     ASTNode* saved = gen->trailing_stmt_call;
-    fprintf(gen->output, "({ __auto_type _tcv%d = ", n);
+    if (as_stmts) {
+        hoist_declare(gen, trailing_call_c_type(gen, call), cg_internf("_tcv%d", n));
+        print_indent(gen);
+        fprintf(gen->output, "_tcv%d = ", n);
+    } else {
+        fprintf(gen->output, "({ __auto_type _tcv%d = ", n);
+    }
     gen->trailing_stmt_call = call;      /* the plain call, block skipped */
     generate_expression(gen, call);
     gen->trailing_stmt_call = saved;
     fprintf(gen->output, "; _aether_ctx_push((void*)(intptr_t)_tcv%d);\n", n);
     emit_trailing_block_body(gen, block);
-    fprintf(gen->output, "_tcv%d; })", n);
+    if (as_stmts) ctl_bind(call, cg_internf("_tcv%d", n));
+    else fprintf(gen->output, "_tcv%d; })", n);
     return 1;
 }
 
@@ -5446,9 +5648,18 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
         g_handback_wrapping = expr;
         g_view_copy_wrapping = expr;
         g_handback_flag = id;
-        fprintf(gen->output, "({ int _ae_hb%d = 0; const char* _ae_hv%d = (const char*)(", id, id);
+        TempSeq s;
+        seq_open(gen, &s);
+        seq_let_named(gen, &s, "int", cg_internf("_ae_hb%d", id));
+        fprintf(gen->output, "0");
+        seq_next(gen, &s);
+        seq_let_named(gen, &s, "const char*", cg_internf("_ae_hv%d", id));
+        fprintf(gen->output, "(const char*)(");
         generate_expression(gen, expr);
-        fprintf(gen->output, "); aether_uniform_heap_str(_ae_hv%d, _ae_hb%d); })", id, id);
+        fprintf(gen->output, ")");
+        seq_next(gen, &s);
+        fprintf(gen->output, "aether_uniform_heap_str(_ae_hv%d, _ae_hb%d)", id, id);
+        seq_close(gen, &s);
         g_handback_wrapping = saved;
         g_view_copy_wrapping = saved_view;
         g_handback_flag = saved_flag;
@@ -5478,15 +5689,19 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
         const ASTNode* saved = g_view_copy_wrapping;
         g_view_copy_wrapping = expr;
         Type* tt = expr->node_type;
-        fprintf(gen->output, "({ %s _ae_vt%d = ", get_c_type(tt), id);
+        TempSeq s;
+        seq_open(gen, &s);
+        seq_let_named(gen, &s, get_c_type(tt), cg_internf("_ae_vt%d", id));
         generate_expression(gen, expr);
-        fprintf(gen->output, "; ");
         for (int j = 0; j < tt->tuple_count; j++) {
             if (!tt->tuple_types[j] || tt->tuple_types[j]->kind != TYPE_STRING) continue;
-            fprintf(gen->output, "_ae_vt%d._%d = aether_uniform_heap_str((const char*)(_ae_vt%d._%d), %d); ",
+            seq_next(gen, &s);
+            fprintf(gen->output, "_ae_vt%d._%d = aether_uniform_heap_str((const char*)(_ae_vt%d._%d), %d)",
                     id, j, id, j, tuple_call_returns_heap_at(gen, expr, j) ? 1 : 0);
         }
-        fprintf(gen->output, "_ae_vt%d; })", id);
+        seq_next(gen, &s);
+        fprintf(gen->output, "_ae_vt%d", id);
+        seq_close(gen, &s);
         g_view_copy_wrapping = saved;
         return;
     }
@@ -5609,7 +5824,8 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
              * value. A block handler runs its statements (with `err` bound) and
              * is expected to exit (return/break/…) — matching the codebase's
              * block-body convention; a bare expression handler is the default
-             * value. Single-eval via a GCC statement-expression. */
+             * value. Single-eval through a temporary (#2765: see below for
+             * the forms). */
             if (expr->child_count < 2) break;
             ASTNode* fallible = expr->children[0];
             ASTNode* handler = expr->children[1];
@@ -5617,6 +5833,12 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
             if (!tup || tup->kind != TYPE_TUPLE || tup->tuple_count < 2 ||
                 !tup->tuple_types[0]) {
                 generate_expression(gen, fallible);   // malformed; already flagged
+                break;
+            }
+            /* #2765: done ahead of its statement (emit_control_prelude). */
+            const char* done = ctl_lookup(expr);
+            if (done) {
+                fprintf(gen->output, "%s", done);
                 break;
             }
             const char* tuple_c = get_c_type(tup);
@@ -5653,7 +5875,49 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
             int box_val = (tup->tuple_types[0] &&
                            tup->tuple_types[0]->kind == TYPE_STRING &&
                            or_fallible_value_slot_is_heap(gen, fallible));
-            fprintf(gen->output, "({ %s _oe%d = ", tuple_c, id);
+            if (handler->type != AST_BLOCK) {
+                /* #2765: a handler that is an expression makes the whole
+                 * `or` one: a sequence of temporaries, either path a
+                 * conditional. A block handler holds statements (and may
+                 * leave the function), so it stays a statement expression. */
+                TempSeq s;
+                seq_open(gen, &s);
+                const char* oe = cg_internf("_oe%d", id);
+                const char* oer = cg_internf("_oer%d", id);
+                seq_let_named(gen, &s, tuple_c, oe);
+                generate_expression(gen, fallible);
+                seq_next(gen, &s);
+                int hv_heap = is_heap_string_expr(gen, handler);
+                seq_decl(gen, &s, val_c, oer);
+                fprintf(gen->output, "(%s._%d && aether_string_data((const void*)%s._%d)[0]) ? (%s = ",
+                        oe, err_idx, oe, err_idx, oer);
+                if (box_val) fprintf(gen->output, "aether_uniform_heap_str((const char*)(");
+                generate_expression(gen, handler);
+                if (box_val) fprintf(gen->output, "), %d)", hv_heap ? 1 : 0);
+                if (box_val) fprintf(gen->output, ", aether_heap_str_free((void*)%s._0)", oe);
+                if (err_slot_heap)
+                    fprintf(gen->output, ", aether_heap_str_free((void*)%s._%d)", oe, err_idx);
+                fprintf(gen->output, ", (void)0) : (%s = %s._0", oer, oe);
+                if (err_slot_heap)
+                    fprintf(gen->output, ", aether_heap_str_free((void*)%s._%d)", oe, err_idx);
+                fprintf(gen->output, ", (void)0)");
+                seq_next(gen, &s);
+                fprintf(gen->output, "%s", oer);
+                seq_close(gen, &s);
+                break;
+            }
+            /* #2765: as statements ahead of the statement where it is the
+             * first thing evaluated (emit_control_prelude), a statement
+             * expression elsewhere. */
+            int as_stmts = g_ctl_emitting == expr;
+            if (as_stmts) {
+                hoist_declare(gen, tuple_c, cg_internf("_oe%d", id));
+                hoist_declare(gen, val_c, cg_internf("_oer%d", id));
+                print_indent(gen);
+                fprintf(gen->output, "_oe%d = ", id);
+            } else {
+                fprintf(gen->output, "({ %s _oe%d = ", tuple_c, id);
+            }
             generate_expression(gen, fallible);
             /* "Is this an error" is "is the error slot non-empty", and the
              * slot holds either physical string shape. Indexing it raw reads
@@ -5661,57 +5925,50 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
              * error slot looks non-empty whatever it says: `parse_strict`
              * returns an empty one on SUCCESS and `or` took the handler.
              * aether_string_data yields the payload for either shape. */
-            fprintf(gen->output,
-                    "; %s _oer%d;\nif (_oe%d._%d && aether_string_data((const void*)_oe%d._%d)[0]) {\n",
-                    val_c, id, id, err_idx, id, err_idx);
-            if (handler->type == AST_BLOCK) {
-                /* Block statements emit their own `#line` directives, which
-                 * must begin a line — hence the newlines bracketing them.
-                 *
-                 * The block's LAST statement is the handler's value: a bare
-                 * trailing expression (wrapped by the parser in an
-                 * AST_EXPRESSION_STATEMENT) is assigned to `_oer` so
-                 * `x = f() or { log(err) -1 }` yields -1 on the error path.
-                 * Before this, the trailing expression was emitted as a
-                 * discarded statement and `_oer` was read UNINITIALIZED — a
-                 * silent miscompile whenever the block didn't exit. A block
-                 * ending in an exit statement (return / panic / break /
-                 * continue) never falls through, so no assignment is needed
-                 * there; the typechecker rejects every other ending, so by
-                 * the time we get here the last child is one or the other. */
-                fprintf(gen->output, "const char* err = _oe%d._%d; (void)err;\n",
-                        id, err_idx);
-                int last = handler->child_count - 1;
-                for (int j = 0; j < last; j++) {
-                    generate_statement(gen, handler->children[j]);
-                }
-                if (last >= 0 && handler->children[last] &&
-                    handler->children[last]->type == AST_EXPRESSION_STATEMENT &&
-                    handler->children[last]->child_count > 0) {
-                    ASTNode* hv = handler->children[last]->children[0];
-                    /* is_heap flag = whether hv is ALREADY heap: a heap
-                     * value passes through uniform_heap_str untouched
-                     * (must NOT re-copy — that would leak the original);
-                     * a literal is malloc-copied. */
-                    int hv_heap = is_heap_string_expr(gen, hv);
-                    print_indent(gen);
-                    fprintf(gen->output, "_oer%d = ", id);
-                    if (box_val) fprintf(gen->output, "aether_uniform_heap_str((const char*)(");
-                    generate_expression(gen, hv);
-                    if (box_val) fprintf(gen->output, "), %d)", hv_heap ? 1 : 0);
-                    fprintf(gen->output, ";\n");
-                } else if (last >= 0 && handler->children[last]) {
-                    generate_statement(gen, handler->children[last]);
-                }
-                fprintf(gen->output, "\n");
-            } else {
-                int hv_heap = is_heap_string_expr(gen, handler);
+            if (as_stmts) fprintf(gen->output, ";\n");
+            else fprintf(gen->output, "; %s _oer%d;\n", val_c, id);
+            fprintf(gen->output, "if (_oe%d._%d && aether_string_data((const void*)_oe%d._%d)[0]) {\n",
+                    id, err_idx, id, err_idx);
+            /* The handler is a block (an expression is emitted above).
+             * Block statements emit their own `#line` directives, which
+             * must begin a line, hence the newlines bracketing them.
+             *
+             * The block's LAST statement is the handler's value: a bare
+             * trailing expression (wrapped by the parser in an
+             * AST_EXPRESSION_STATEMENT) is assigned to `_oer` so
+             * `x = f() or { log(err) -1 }` yields -1 on the error path.
+             * Before this, the trailing expression was emitted as a
+             * discarded statement and `_oer` was read UNINITIALIZED: a
+             * silent miscompile whenever the block didn't exit. A block
+             * ending in an exit statement (return / panic / break /
+             * continue) never falls through, so no assignment is needed
+             * there; the typechecker rejects every other ending, so by
+             * the time we get here the last child is one or the other. */
+            fprintf(gen->output, "const char* err = _oe%d._%d; (void)err;\n",
+                    id, err_idx);
+            int last = handler->child_count - 1;
+            for (int j = 0; j < last; j++) {
+                generate_statement(gen, handler->children[j]);
+            }
+            if (last >= 0 && handler->children[last] &&
+                handler->children[last]->type == AST_EXPRESSION_STATEMENT &&
+                handler->children[last]->child_count > 0) {
+                ASTNode* hv = handler->children[last]->children[0];
+                /* is_heap flag = whether hv is ALREADY heap: a heap
+                 * value passes through uniform_heap_str untouched
+                 * (must NOT re-copy: that would leak the original);
+                 * a literal is malloc-copied. */
+                int hv_heap = is_heap_string_expr(gen, hv);
+                print_indent(gen);
                 fprintf(gen->output, "_oer%d = ", id);
                 if (box_val) fprintf(gen->output, "aether_uniform_heap_str((const char*)(");
-                generate_expression(gen, handler);
+                generate_expression(gen, hv);
                 if (box_val) fprintf(gen->output, "), %d)", hv_heap ? 1 : 0);
                 fprintf(gen->output, ";\n");
+            } else if (last >= 0 && handler->children[last]) {
+                generate_statement(gen, handler->children[last]);
             }
+            fprintf(gen->output, "\n");
             /* Error path done. Free the discarded slots the handler
              * replaced:
              *   - the error slot `err`, now dead, if statically heap;
@@ -5736,24 +5993,29 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
              * discarded success-sentinel error slot, again only when heap. */
             if (err_slot_heap) {
                 fprintf(gen->output,
-                        "} else { _oer%d = _oe%d._0; aether_heap_str_free((void*)_oe%d._%d); } _oer%d; })",
-                        id, id, id, err_idx, id);
+                        "} else { _oer%d = _oe%d._0; aether_heap_str_free((void*)_oe%d._%d); }",
+                        id, id, id, err_idx);
             } else {
-                fprintf(gen->output, "} else { _oer%d = _oe%d._0; } _oer%d; })",
-                        id, id, id);
+                fprintf(gen->output, "} else { _oer%d = _oe%d._0; }", id, id);
+            }
+            if (as_stmts) {
+                fprintf(gen->output, "\n");
+                ctl_bind(expr, cg_internf("_oer%d", id));
+            } else {
+                fprintf(gen->output, " _oer%d; })", id);
             }
             break;
         }
 
         case AST_TUPLE_UNWRAP: {
-            /* `expr!` — unwrap-or-trap. Emit a GCC statement-expression
-             * that evaluates the tuple once, panics if the trailing
-             * (string) error slot is non-empty, and yields the first
-             * slot:
+            /* `expr!`, unwrap-or-trap. Evaluate the tuple once into a
+             * temporary, panic if the trailing (string) error slot is
+             * non-empty, and yield the first slot (#2765: a sequence of
+             * temporaries, plain C):
              *
-             *   ({ _tuple_T_string _u = <operand>;
-             *      if (_u._N && _u._N[0]) aether_panic("...");
-             *      _u._0; })
+             *   (_u = <operand>,
+             *    (_u._N && _u._N[0]) ? aether_panic(_u._N) : (void)0,
+             *    _u._0)
              *
              * The error slot is non-empty iff its pointer is non-NULL AND
              * its first byte is not '\0' — matching the `err != ""`
@@ -5769,10 +6031,16 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
             if (ot && ot->kind == TYPE_OPTIONAL) {
                 static int fu_counter = 0;
                 int id = fu_counter++;
-                fprintf(gen->output, "({ %s _fu%d = ", get_c_type(ot), id);
+                TempSeq s;
+                seq_open(gen, &s);
+                seq_let_named(gen, &s, get_c_type(ot), cg_internf("_fu%d", id));
                 generate_expression(gen, operand);
-                fprintf(gen->output, "; if (!_fu%d.has) aether_panic(\"forced_unwrap_none: forced unwrap of `none`\"); _fu%d.val; })",
-                        id, id);
+                seq_next(gen, &s);
+                fprintf(gen->output, "_fu%d.has ? (void)0 : aether_panic(\"forced_unwrap_none: forced unwrap of `none`\")",
+                        id);
+                seq_next(gen, &s);
+                fprintf(gen->output, "_fu%d.val", id);
+                seq_close(gen, &s);
                 break;
             }
             Type* tup = operand->node_type;
@@ -5782,69 +6050,99 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                 generate_expression(gen, operand);
                 break;
             }
+            /* #2765: done ahead of its statement (emit_control_prelude). */
+            const char* done = ctl_lookup(expr);
+            if (done) {
+                fprintf(gen->output, "%s", done);
+                break;
+            }
             ensure_tuple_typedef(gen, tup);
             const char* tuple_c = get_c_type(tup);
             int err_idx = tup->tuple_count - 1;
             static int unwrap_tmp_counter = 0;
             int uid = unwrap_tmp_counter++;
 
-            fprintf(gen->output, "({ %s _unw%d = ", tuple_c, uid);
+            if (!(gen->current_func_return_type && gen->current_func_return_type->is_result)) {
+                /* #2765: unwrap or panic, a sequence of temporaries. The
+                 * propagating form below returns from the function, a
+                 * statement, so it stays a statement expression. */
+                TempSeq s;
+                seq_open(gen, &s);
+                seq_let_named(gen, &s, tuple_c, cg_internf("_unw%d", uid));
+                generate_expression(gen, operand);
+                seq_next(gen, &s);
+                fprintf(gen->output,
+                        "(_unw%d._%d && _unw%d._%d[0]) ? aether_panic(_unw%d._%d) : (void)0",
+                        uid, err_idx, uid, err_idx, uid, err_idx);
+                seq_next(gen, &s);
+                fprintf(gen->output, "_unw%d._0", uid);
+                seq_close(gen, &s);
+                break;
+            }
+            /* Propagating: as statements ahead of the statement where it is
+             * the first thing evaluated (emit_control_prelude), a statement
+             * expression elsewhere (#2765). */
+            int as_stmts = g_ctl_emitting == expr;
+            if (as_stmts) {
+                hoist_declare(gen, tuple_c, cg_internf("_unw%d", uid));
+                print_indent(gen);
+                fprintf(gen->output, "_unw%d = ", uid);
+            } else {
+                fprintf(gen->output, "({ %s _unw%d = ", tuple_c, uid);
+            }
             generate_expression(gen, operand);
-            fprintf(gen->output, "; ");
+            fprintf(gen->output, as_stmts ? ";\n" : "; ");
             /* #913: `expr!` on a (value, err) result. In a function whose
              * return type is itself a result (`T!`), PROPAGATE — return the
              * enclosing result with the error slot set (value slot zero-init),
-             * V-style one-char propagation. Otherwise keep the unwrap-or-PANIC
-             * semantics, so `expr!` in a non-result function is unchanged. The
-             * `return` inside the statement-expression returns from the
-             * enclosing function, which is exactly the propagation we want. */
-            if (gen->current_func_return_type &&
-                gen->current_func_return_type->is_result) {
-                /* The propagation `return` is a genuine function exit, so it
-                 * must run the same cleanup every other `return` site runs.
-                 * Before this it ran NONE of it: a `T!` function that
-                 * propagated an error skipped its user `defer`s AND the
-                 * synthetic RAII carriers the compiler pushes (heap-string /
-                 * *StringSeq / struct-destroy exit frees), leaking everything
-                 * the function was holding — silently, on the error path only.
-                 *
-                 * The defers are emitted INSIDE the statement-expression's
-                 * `if`, immediately before the return, which needs no
-                 * restructuring of the expression — they are ordinary
-                 * statements. The trailing newline before them is load-bearing:
-                 * a defer body carries `#line` directives, and a `#` is only a
-                 * preprocessor directive at the START of a line. Emitted
-                 * mid-line (right after `if (...) {`) it is a stray `#` and the
-                 * C compiler rejects the file. */
-                fprintf(gen->output,
-                        "if (_unw%d._%d && _unw%d._%d[0]) {\n",
-                        uid, err_idx, uid, err_idx);
-                /* #1140: propagation is unambiguously an ERROR exit — we are
-                 * inside the `if` that tested the error slot. So `defer catch`
-                 * fires and `defer try` does not, and it is known statically,
-                 * with no runtime guard needed. */
-                {
-                    DeferExit prev_exit = gen->defer_exit;
-                    gen->defer_exit = DEFER_EXIT_ERROR;
-                    emit_all_defers(gen);
-                    gen->defer_exit = prev_exit;
-                }
-                /* Issue #501: drain in-flight try frames, exactly as the
-                 * ordinary return path does — a propagation is just as
-                 * non-local an exit as a `return`. */
-                emit_try_pops_for_nonlocal_exit(gen);
-                /* Leading newline for the same reason: a defer body can end
-                 * mid-line, and the next thing must not be glued onto it. */
-                fprintf(gen->output,
-                        "\nreturn (%s){ ._1 = _unw%d._%d }; } ",
-                        get_c_type(gen->current_func_return_type), uid, err_idx);
-            } else {
-                fprintf(gen->output,
-                        "if (_unw%d._%d && _unw%d._%d[0]) "
-                        "aether_panic(_unw%d._%d); ",
-                        uid, err_idx, uid, err_idx, uid, err_idx);
+             * V-style one-char propagation (a non-result function unwraps or
+             * panics, above). The `return` inside the statement-expression
+             * returns from the enclosing function, which is exactly the
+             * propagation we want. */
+            /* The propagation `return` is a genuine function exit, so it
+             * must run the same cleanup every other `return` site runs.
+             * Before this it ran NONE of it: a `T!` function that
+             * propagated an error skipped its user `defer`s AND the
+             * synthetic RAII carriers the compiler pushes (heap-string /
+             * *StringSeq / struct-destroy exit frees), leaking everything
+             * the function was holding, silently, on the error path only.
+             *
+             * The defers are emitted INSIDE the statement-expression's
+             * `if`, immediately before the return, which needs no
+             * restructuring of the expression: they are ordinary
+             * statements. The trailing newline before them is load-bearing:
+             * a defer body carries `#line` directives, and a `#` is only a
+             * preprocessor directive at the START of a line. Emitted
+             * mid-line (right after `if (...) {`) it is a stray `#` and the
+             * C compiler rejects the file. */
+            fprintf(gen->output,
+                    "if (_unw%d._%d && _unw%d._%d[0]) {\n",
+                    uid, err_idx, uid, err_idx);
+            /* #1140: propagation is unambiguously an ERROR exit: we are
+             * inside the `if` that tested the error slot. So `defer catch`
+             * fires and `defer try` does not, and it is known statically,
+             * with no runtime guard needed. */
+            {
+                DeferExit prev_exit = gen->defer_exit;
+                gen->defer_exit = DEFER_EXIT_ERROR;
+                emit_all_defers(gen);
+                gen->defer_exit = prev_exit;
             }
-            fprintf(gen->output, "_unw%d._0; })", uid);
+            /* Issue #501: drain in-flight try frames, exactly as the
+             * ordinary return path does: a propagation is just as
+             * non-local an exit as a `return`. */
+            emit_try_pops_for_nonlocal_exit(gen);
+            /* Leading newline for the same reason: a defer body can end
+             * mid-line, and the next thing must not be glued onto it. */
+            fprintf(gen->output,
+                    "\nreturn (%s){ ._1 = _unw%d._%d }; } ",
+                    get_c_type(gen->current_func_return_type), uid, err_idx);
+            if (as_stmts) {
+                fprintf(gen->output, "\n");
+                ctl_bind(expr, cg_internf("_unw%d._0", uid));
+            } else {
+                fprintf(gen->output, "_unw%d._0; })", uid);
+            }
             break;
         }
 
@@ -5870,9 +6168,12 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
             if (!ot || ot->kind != TYPE_OPTIONAL) { generate_expression(gen, operand); break; }
             static int nc_counter = 0;
             int id = nc_counter++;
-            fprintf(gen->output, "({ %s _nc%d = ", get_c_type(ot), id);
+            TempSeq s;
+            seq_open(gen, &s);
+            seq_let_named(gen, &s, get_c_type(ot), cg_internf("_nc%d", id));
             generate_expression(gen, operand);
-            fprintf(gen->output, "; _nc%d.has ? _nc%d.val : (", id, id);
+            seq_next(gen, &s);
+            fprintf(gen->output, "_nc%d.has ? _nc%d.val : (", id, id);
             if (is_owned_opt_string_unwrap(gen, expr)) {
                 /* #2750: over an owned `string?` call the value is the
                  * call's string, a fresh one, so the default is made one of
@@ -5886,7 +6187,8 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
             } else {
                 generate_expression(gen, expr->children[1]);
             }
-            fprintf(gen->output, "); })");
+            fprintf(gen->output, ")");
+            seq_close(gen, &s);
             break;
         }
 
@@ -5904,10 +6206,14 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
             const char* rc = get_c_type(rt);   /* interned, kept across the calls below */
             static int oc_counter = 0;
             int id = oc_counter++;
-            fprintf(gen->output, "({ %s _oc%d = ", get_c_type(ot), id);
+            TempSeq s;
+            seq_open(gen, &s);
+            seq_let_named(gen, &s, get_c_type(ot), cg_internf("_oc%d", id));
             generate_expression(gen, operand);
-            fprintf(gen->output, "; _oc%d.has ? (%s){ .has = 1, .val = _oc%d.val%s%s } : (%s){0}; })",
+            seq_next(gen, &s);
+            fprintf(gen->output, "_oc%d.has ? (%s){ .has = 1, .val = _oc%d.val%s%s } : (%s){0}",
                     id, rc, id, acc, expr->value, rc);
+            seq_close(gen, &s);
             break;
         }
 
@@ -6535,7 +6841,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                 // bit_set must never fall through to numeric `<=`/`-` semantics.
                 // `==`/`!=` are left to the default integer compare (which is
                 // exactly set equality). Subset/superset bind each operand once
-                // via a statement-expression so a side-effecting operand (e.g. a
+                // through a temporary so a side-effecting operand (e.g. a
                 // call returning a set) is evaluated exactly once.
                 if (expr->value) {
                     ASTNode* L = expr->children[0];
@@ -6571,11 +6877,20 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                         if (strcmp(expr->value, "<=") == 0 ||
                             strcmp(expr->value, ">=") == 0) {         // subset/superset
                             int subset = strcmp(expr->value, "<=") == 0;
-                            fprintf(gen->output, "({ unsigned long long _a = (");
+                            TempSeq s;
+                            seq_open(gen, &s);
+                            const char* a = seq_let(gen, &s, "unsigned long long", "_ae_bsa");
+                            fprintf(gen->output, "(");
                             generate_expression(gen, L);
-                            fprintf(gen->output, "); unsigned long long _b = (");
+                            fprintf(gen->output, ")");
+                            seq_next(gen, &s);
+                            const char* b = seq_let(gen, &s, "unsigned long long", "_ae_bsb");
+                            fprintf(gen->output, "(");
                             generate_expression(gen, R);
-                            fprintf(gen->output, "); (_a & _b) == %s; })", subset ? "_a" : "_b");
+                            fprintf(gen->output, ")");
+                            seq_next(gen, &s);
+                            fprintf(gen->output, "(%s & %s) == %s", a, b, subset ? a : b);
+                            seq_close(gen, &s);
                             break;
                         }
                     }
@@ -6597,11 +6912,19 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                         if (is_owned_opt_string_call(gen, opt)) {
                             /* #2750: the call's string is the comparison's
                              * to free once the flag is read. */
-                            fprintf(gen->output, "({ %s _on = ", get_c_type(opt->node_type));
+                            TempSeq s;
+                            seq_open(gen, &s);
+                            const char* on = seq_let(gen, &s, get_c_type(opt->node_type), "_ae_on");
                             generate_expression(gen, opt);
-                            fprintf(gen->output, "; int _onv = %s_on.has; "
-                                    "if (_on.has) aether_heap_str_free((void*)_on.val); _onv; })",
-                                    is_eq ? "!" : "");
+                            seq_next(gen, &s);
+                            const char* onv = seq_let(gen, &s, "int", "_ae_onv");
+                            fprintf(gen->output, "%s%s.has", is_eq ? "!" : "", on);
+                            seq_next(gen, &s);
+                            fprintf(gen->output, "%s.has ? aether_heap_str_free((void*)%s.val) : (void)0",
+                                    on, on);
+                            seq_next(gen, &s);
+                            fprintf(gen->output, "%s", onv);
+                            seq_close(gen, &s);
                             break;
                         }
                         fprintf(gen->output, "(%s(", is_eq ? "!" : "");
@@ -6622,27 +6945,40 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                         // ordinary string-comparison path below does (#2515).
                         Type* elem = L->node_type ? L->node_type->element_type : NULL;
                         int str_val = elem && elem->kind == TYPE_STRING;
-                        fprintf(gen->output, "(({ %s _l = ", get_c_type(L->node_type));
+                        TempSeq s;
+                        fprintf(gen->output, "(");
+                        seq_open(gen, &s);
+                        const char* l = seq_let(gen, &s, get_c_type(L->node_type), "_ae_ol");
                         generate_expression(gen, L);
-                        fprintf(gen->output, "; %s _r = ", get_c_type(R->node_type));
+                        seq_next(gen, &s);
+                        const char* r = seq_let(gen, &s, get_c_type(R->node_type), "_ae_or");
                         generate_expression(gen, R);
+                        seq_next(gen, &s);
                         if (str_val) {
                             /* #2750: an owned `string?` call's string is
                              * freed once compared. */
+                            const char* lrv = seq_let(gen, &s, "int", "_ae_olrv");
                             fprintf(gen->output,
-                                "; int _lrv = %s(_l.has == _r.has && (!_l.has || "
-                                "string_equals(_l.val, _r.val)));",
-                                is_eq ? "" : "!");
-                            if (is_owned_opt_string_call(gen, L))
-                                fprintf(gen->output, " if (_l.has) aether_heap_str_free((void*)_l.val);");
-                            if (is_owned_opt_string_call(gen, R))
-                                fprintf(gen->output, " if (_r.has) aether_heap_str_free((void*)_r.val);");
-                            fprintf(gen->output, " _lrv; }))");
+                                "%s(%s.has == %s.has && (!%s.has || string_equals(%s.val, %s.val)))",
+                                is_eq ? "" : "!", l, r, l, l, r);
+                            if (is_owned_opt_string_call(gen, L)) {
+                                seq_next(gen, &s);
+                                fprintf(gen->output, "%s.has ? aether_heap_str_free((void*)%s.val) : (void)0",
+                                        l, l);
+                            }
+                            if (is_owned_opt_string_call(gen, R)) {
+                                seq_next(gen, &s);
+                                fprintf(gen->output, "%s.has ? aether_heap_str_free((void*)%s.val) : (void)0",
+                                        r, r);
+                            }
+                            seq_next(gen, &s);
+                            fprintf(gen->output, "%s", lrv);
                         } else {
-                            fprintf(gen->output,
-                                "; %s(_l.has == _r.has && (!_l.has || _l.val == _r.val)); }))",
-                                is_eq ? "" : "!");
+                            fprintf(gen->output, "%s(%s.has == %s.has && (!%s.has || %s.val == %s.val))",
+                                    is_eq ? "" : "!", l, r, l, l, r);
                         }
+                        seq_close(gen, &s);
+                        fprintf(gen->output, ")");
                         break;
                     }
                 }
@@ -6686,18 +7022,33 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                                   is_heap_string_expr(gen, cr);
                     if (drain_l || drain_r) {
                         if (!skip_parens) fprintf(gen->output, "(");
-                        fprintf(gen->output, "({ const char* _se_l = (const char*)(");
+                        TempSeq s;
+                        seq_open(gen, &s);
+                        const char* sl = seq_let(gen, &s, "const char*", "_se_l");
+                        fprintf(gen->output, "(const char*)(");
                         generate_expression(gen, cl);
-                        fprintf(gen->output, "); const char* _se_r = (const char*)(");
+                        fprintf(gen->output, ")");
+                        seq_next(gen, &s);
+                        const char* sr = seq_let(gen, &s, "const char*", "_se_r");
+                        fprintf(gen->output, "(const char*)(");
                         generate_expression(gen, cr);
-                        fprintf(gen->output, "); int _se_v = ");
+                        fprintf(gen->output, ")");
+                        seq_next(gen, &s);
+                        const char* sv = seq_let(gen, &s, "int", "_se_v");
                         emit_string_compare_open(gen, expr->value);
-                        fprintf(gen->output, "_se_l, _se_r");
+                        fprintf(gen->output, "%s, %s", sl, sr);
                         emit_string_compare_close(gen, expr->value);
-                        fprintf(gen->output, "; ");
-                        if (drain_l) fprintf(gen->output, "aether_heap_str_free(_se_l); ");
-                        if (drain_r) fprintf(gen->output, "aether_heap_str_free(_se_r); ");
-                        fprintf(gen->output, "_se_v; })");
+                        if (drain_l) {
+                            seq_next(gen, &s);
+                            fprintf(gen->output, "aether_heap_str_free(%s)", sl);
+                        }
+                        if (drain_r) {
+                            seq_next(gen, &s);
+                            fprintf(gen->output, "aether_heap_str_free(%s)", sr);
+                        }
+                        seq_next(gen, &s);
+                        fprintf(gen->output, "%s", sv);
+                        seq_close(gen, &s);
                         if (!skip_parens) fprintf(gen->output, ")");
                     } else {
                         if (!skip_parens) fprintf(gen->output, "(");
@@ -6988,13 +7339,20 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                     /* An @observable box's observers go with it: they hold
                      * closure environments, and an object later allocated at
                      * the same address would inherit them (std.observe). */
-                    fprintf(gen->output, "({ void* _ae_hf = (void*)(");
+                    TempSeq s;
+                    seq_open(gen, &s);
+                    const char* hf = seq_let(gen, &s, "void*", "_ae_hf");
+                    fprintf(gen->output, "(void*)(");
                     generate_expression(gen, arg);
-                    fprintf(gen->output, "); aether_unobserve_all(_ae_hf); ");
+                    fprintf(gen->output, ")");
+                    seq_next(gen, &s);
+                    fprintf(gen->output, "aether_unobserve_all(%s)", hf);
+                    seq_next(gen, &s);
                     if (typed_free)
-                        fprintf(gen->output, "%s_heap_free((%s*)_ae_hf); })", typed_free, typed_free);
+                        fprintf(gen->output, "%s_heap_free((%s*)%s)", typed_free, typed_free, hf);
                     else
-                        fprintf(gen->output, "free(_ae_hf); })");
+                        fprintf(gen->output, "free(%s)", hf);
+                    seq_close(gen, &s);
                     break;
                 }
                 if (typed_free) {
@@ -7466,9 +7824,11 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                 // the argument:
                 //
                 //  1. A heap-tracked local (is_heap_string_var) is freed
-                //     through its runtime ownership flag:
-                //         ({ if (_heap_X) { aether_heap_str_free(X);
-                //              X = NULL; _heap_X = 0; } })
+                //     through its runtime ownership flag, an expression
+                //     (#2765: a statement expression is not C):
+                //         (_heap_X ? (aether_heap_str_free(X), X = NULL,
+                //                     _heap_X = 0, (void)0)
+                //                  : (void)string_release(X))
                 //     aether_heap_str_free reclaims BOTH a magic-tagged
                 //     AetherString* (string.from_int / concat_wrapped /
                 //     fs.read_binary) AND a plain malloc'd char*
@@ -7520,8 +7880,8 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                                  * cannot hurt a borrowed literal, and it is what the
                                  * untracked-identifier path a few lines down already
                                  * does. string.free below has had this arm all along. */
-                                "({ if (_heap_%s) { aether_heap_str_free((void*)%s); "
-                                "%s = NULL; _heap_%s = 0; } else { string_release(%s); } })",
+                                "(_heap_%s ? (aether_heap_str_free((void*)%s), "
+                                "%s = NULL, _heap_%s = 0, (void)0) : (void)string_release(%s))",
                                 arg->value, arg->value, arg->value, arg->value, arg->value);
                         } else if (field_read_can_hand_off(arg)) {
                             emit_string_field_free(gen, arg, "string_release");
@@ -7580,8 +7940,8 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                         /* Same else arm as the bare release() above: a tracked local
                          * holding a field-read value has a 0 flag, and the release
                          * has to still happen (#1977). */
-                        "({ if (_heap_%s) { aether_heap_str_free((void*)%s); "
-                        "%s = NULL; _heap_%s = 0; } else { string_release(%s); } })",
+                        "(_heap_%s ? (aether_heap_str_free((void*)%s), "
+                        "%s = NULL, _heap_%s = 0, (void)0) : (void)string_release(%s))",
                         arg->value, arg->value, arg->value, arg->value, arg->value);
                 }
                 // string.free(X) frees what the runtime cannot: given a
@@ -7601,8 +7961,8 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                          is_heap_string_var(gen, expr->children[0]->value)) {
                     ASTNode* arg = expr->children[0];
                     fprintf(gen->output,
-                        "({ if (_heap_%s) { aether_heap_str_free((void*)%s); "
-                        "%s = NULL; _heap_%s = 0; } else { string_free(%s); } })",
+                        "(_heap_%s ? (aether_heap_str_free((void*)%s), "
+                        "%s = NULL, _heap_%s = 0, (void)0) : (void)string_free(%s))",
                         arg->value, arg->value, arg->value, arg->value, arg->value);
                 }
                 // The same for a struct's string field, which owns its value
@@ -7640,7 +8000,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                     if (arg->type == AST_IDENTIFIER && arg->value &&
                         is_seq_var(gen, arg->value)) {
                         fprintf(gen->output,
-                            "({ string_seq_free(%s); %s = NULL; _seqheap_%s = 0; })",
+                            "(string_seq_free(%s), %s = NULL, _seqheap_%s = 0, (void)0)",
                             arg->value, arg->value, arg->value);
                     } else {
                         fprintf(gen->output, "string_seq_free(");
@@ -8330,36 +8690,52 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                                 break;
                             }
                             if (val && (taken == val || string_take_is_view(gen, val))) {
-                                char own[32];
-                                string_take_new_flag(own, sizeof(own));
-                                fprintf(gen->output, "({ void* _ae_cc = (void*)(");
+                                TempSeq s;
+                                seq_open(gen, &s);
+                                const char* cc = seq_let(gen, &s, "void*", "_ae_cc");
+                                fprintf(gen->output, "(void*)(");
                                 generate_expression(gen, expr->children[0]);
-                                fprintf(gen->output, ");");
+                                fprintf(gen->output, ")");
+                                seq_next(gen, &s);
+                                const char* ck = NULL;
                                 if (is_set_shape) {
-                                    fprintf(gen->output, " int _ae_ci = (");
+                                    ck = seq_let(gen, &s, "int", "_ae_ci");
+                                    fprintf(gen->output, "(");
                                     generate_expression(gen, expr->children[1]);
-                                    fprintf(gen->output, ");");
+                                    fprintf(gen->output, ")");
+                                    seq_next(gen, &s);
                                 } else if (!is_list_shape) {
-                                    fprintf(gen->output, " const char* _ae_ck = (const char*)(");
+                                    ck = seq_let(gen, &s, "const char*", "_ae_ck");
+                                    fprintf(gen->output, "(const char*)(");
                                     generate_expression(gen, expr->children[1]);
-                                    fprintf(gen->output, ");");
+                                    fprintf(gen->output, ")");
+                                    seq_next(gen, &s);
                                 }
-                                fprintf(gen->output, " int %s = 0; void* _ae_cv = (void*)", own);
+                                const char* own = seq_let(gen, &s, "int", "_ae_cco");
+                                fprintf(gen->output, "0");
+                                seq_next(gen, &s);
+                                const char* cv = seq_let(gen, &s, "void*", "_ae_cv");
+                                fprintf(gen->output, "(void*)");
                                 emit_string_take(gen, val, own, NULL);
+                                seq_next(gen, &s);
                                 if (is_list_shape) {
-                                    fprintf(gen->output, "; %s ? %s(_ae_cc, _ae_cv) : %s(_ae_cc, _ae_cv); })",
-                                            own,
+                                    fprintf(gen->output, "%s ? %s(%s, %s) : %s(%s, %s)", own,
                                             is_wrapper ? "_aether_list_add_adopted" : "list_add_string_adopted",
-                                            is_wrapper ? "_aether_list_add_owned" : "list_add_string_owned");
+                                            cc, cv,
+                                            is_wrapper ? "_aether_list_add_owned" : "list_add_string_owned",
+                                            cc, cv);
                                 } else if (is_set_shape) {
-                                    fprintf(gen->output, "; %s ? list_set_string_adopted(_ae_cc, _ae_ci, _ae_cv) : list_set_string_owned(_ae_cc, _ae_ci, _ae_cv); })",
-                                            own);
+                                    fprintf(gen->output, "%s ? list_set_string_adopted(%s, %s, %s) : "
+                                            "list_set_string_owned(%s, %s, %s)",
+                                            own, cc, ck, cv, cc, ck, cv);
                                 } else {
-                                    fprintf(gen->output, "; %s ? %s(_ae_cc, _ae_ck, _ae_cv) : %s(_ae_cc, _ae_ck, _ae_cv); })",
-                                            own,
+                                    fprintf(gen->output, "%s ? %s(%s, %s, %s) : %s(%s, %s, %s)", own,
                                             is_wrapper ? "_aether_map_put_adopted" : "map_put_string_adopted",
-                                            is_wrapper ? "_aether_map_put_owned" : "map_put_string_owned");
+                                            cc, ck, cv,
+                                            is_wrapper ? "_aether_map_put_owned" : "map_put_string_owned",
+                                            cc, ck, cv);
                                 }
+                                seq_close(gen, &s);
                                 break;
                             }
                             /* `list.set` of any other string (a literal, a
@@ -8394,13 +8770,13 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                      * is an anonymous heap allocation with no consumer
                      * — pre-fix this is a leak per call. Hoist each
                      * such arg into a named temporary, run the parent
-                     * call, then free the temps in a GCC statement-
-                     * expression wrapper. See ArgDrainSub at the top
-                     * of this file for the full rationale.
+                     * call, then free the temps (the wrap, a sequence
+                     * of temporaries). See ArgDrainSub at the top of
+                     * this file for the full rationale.
                      *
-                     * Skip when the parent's return type is void /
-                     * unknown — statement-expressions need a final
-                     * value and a void parent has nothing to yield.
+                     * Skip when the parent's return type is unknown:
+                     * the wrap holds the value in a temporary of its
+                     * type (a void parent yields nothing, see below).
                      * Skip when the args are themselves substitution-
                      * registered (we're inside a parent wrap already
                      * — the registered entry handles the lifetime). */
@@ -8418,13 +8794,16 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                          * (an unannotated callee), so the wrap could not
                          * name its result's type and drained nothing. The
                          * callee's definition says whether its C function
-                         * returns a value (the rule generate_function
-                         * emits the signature by), and the temp takes
-                         * whatever type that is. */
-                        int shape = callee_result_shape(gen, func_name);
+                         * returns a value and of what type (the rule
+                         * generate_function emits the signature by), and
+                         * the temp is declared with that type (#2765: not
+                         * inferred, which only GCC-compatible compilers
+                         * can). */
+                        const char* rct = NULL;
+                        int shape = callee_result_shape(gen, func_name, &rct);
                         if (shape > 0) {
                             ad.have_value = 1;
-                            ad.ret_ct = "__auto_type";
+                            ad.ret_ct = rct;
                         } else if (shape == 0) {
                             ad_is_void = 1;
                         }
@@ -8964,7 +9343,10 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                 fprintf(stderr, "Fatal: out of memory hoisting interpolation segments\n");
                 exit(1);
             }
+            /* Printed, the temps are a block's locals (print is a statement);
+             * as a value they are a sequence's (#2765). */
             int it_hoisted = 0;
+            TempSeq it_seq;
             for (int di = 0; di < expr->child_count; di++) {
                 ASTNode* ch = expr->children[di];
                 if (interp_segment_is_text(ch)) continue;
@@ -8972,12 +9354,19 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                 if (!heap && di > it_hoist_upto) continue;
                 const char* ctype = interp_temp_c_type(ch->node_type);
                 if (!ctype) continue;   /* no scalar/string temp shape: leave inline */
-                if (it_hoisted == 0) fprintf(gen->output, as_printf ? "{ " : "({ ");
+                if (it_hoisted == 0) {
+                    if (as_printf) fprintf(gen->output, "{ ");
+                    else seq_open(gen, &it_seq);
+                }
                 it_hoisted++;
                 char* nm = arg_drain_mint_name();
-                fprintf(gen->output, "%s %s = (%s)(", ctype, nm, ctype);
+                if (as_printf) fprintf(gen->output, "%s %s = ", ctype, nm);
+                else seq_let_named(gen, &it_seq, ctype, nm);
+                fprintf(gen->output, "(%s)(", ctype);
                 generate_expression(gen, ch);
-                fprintf(gen->output, "); ");
+                fprintf(gen->output, ")");
+                if (as_printf) fprintf(gen->output, "; ");
+                else seq_next(gen, &it_seq);
                 arg_drain_bind(ch, nm);   /* registry owns nm; truncate frees it */
                 it_names[di] = nm;
                 it_heap[di] = heap;
@@ -8994,26 +9383,36 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                 fprintf(gen->output, ")");
             } else {
                 // Mode 2: heap-allocated C string — always use portable helper function
+                const char* it_r = NULL;
                 if (it_hoisted > 0) {
-                    fprintf(gen->output, "const char* _it_r = ");
+                    it_r = seq_let(gen, &it_seq, "const char*", "_it_r");
                 }
                 fprintf(gen->output, "_aether_interp(\"");
                 EMIT_INTERP_FMT();
                 fprintf(gen->output, "\"");
                 EMIT_INTERP_ARGS();
                 fprintf(gen->output, ")");
+                if (it_hoisted > 0) {
+                    for (int di = 0; di < expr->child_count; di++) {
+                        if (it_names[di] && it_heap[di]) {
+                            seq_next(gen, &it_seq);
+                            fprintf(gen->output, "aether_heap_str_free(%s)", it_names[di]);
+                        }
+                    }
+                    seq_next(gen, &it_seq);
+                    fprintf(gen->output, "%s", it_r);
+                    seq_close(gen, &it_seq);
+                }
             }
             if (it_hoisted > 0) {
-                fprintf(gen->output, "; ");
-                for (int di = 0; di < expr->child_count; di++) {
-                    if (it_names[di] && it_heap[di]) {
-                        fprintf(gen->output, "aether_heap_str_free(%s); ", it_names[di]);
-                    }
-                }
                 if (as_printf) {
+                    fprintf(gen->output, "; ");
+                    for (int di = 0; di < expr->child_count; di++) {
+                        if (it_names[di] && it_heap[di]) {
+                            fprintf(gen->output, "aether_heap_str_free(%s); ", it_names[di]);
+                        }
+                    }
                     fprintf(gen->output, "}");
-                } else {
-                    fprintf(gen->output, "_it_r; })");
                 }
                 arg_drain_truncate(it_saved);
             }
@@ -9076,22 +9475,32 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                  * built right to left. */
                 if (expr->child_count >= 2) {
                     int id = g_seq_lit_counter++;
-                    fprintf(gen->output, "({ ");
+                    TempSeq sq;
+                    seq_open(gen, &sq);
                     for (int i = 0; i < expr->child_count; i++) {
-                        fprintf(gen->output, "const char* _sqe%d_%d = (const char*)(", id, i);
+                        seq_let_named(gen, &sq, "const char*", cg_internf("_sqe%d_%d", id, i));
+                        fprintf(gen->output, "(const char*)(");
                         generate_expression(gen, expr->children[i]);
-                        fprintf(gen->output, "); ");
+                        fprintf(gen->output, ")");
+                        seq_next(gen, &sq);
                     }
-                    fprintf(gen->output,
-                            "StringSeq* _sqa%d = string_seq_empty(); StringSeq* _sqn%d; ",
-                            id, id);
+                    const char* sqa = cg_internf("_sqa%d", id);
+                    const char* sqn = cg_internf("_sqn%d", id);
+                    seq_let_named(gen, &sq, "StringSeq*", sqa);
+                    fprintf(gen->output, "string_seq_empty()");
                     for (int i = expr->child_count - 1; i >= 0; i--) {
-                        fprintf(gen->output,
-                                "_sqn%d = string_seq_cons(_sqe%d_%d, _sqa%d); "
-                                "string_seq_free(_sqa%d); _sqa%d = _sqn%d; ",
-                                id, id, i, id, id, id, id);
+                        seq_next(gen, &sq);
+                        if (i == expr->child_count - 1) seq_let_named(gen, &sq, "StringSeq*", sqn);
+                        else fprintf(gen->output, "%s = ", sqn);
+                        fprintf(gen->output, "string_seq_cons(_sqe%d_%d, %s)", id, i, sqa);
+                        seq_next(gen, &sq);
+                        fprintf(gen->output, "string_seq_free(%s)", sqa);
+                        seq_next(gen, &sq);
+                        fprintf(gen->output, "%s = %s", sqa, sqn);
                     }
-                    fprintf(gen->output, "_sqa%d; })", id);
+                    seq_next(gen, &sq);
+                    fprintf(gen->output, "%s", sqa);
+                    seq_close(gen, &sq);
                     break;
                 }
                 /* 0 or 1 element: no intermediate exists to drop. */
@@ -9137,8 +9546,8 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
              * twice (once via the struct's owned-field free, once via the
              * variable's deferred free) — the double-free crash. We collect
              * the adopted variable names and, after the literal, clear their
-             * `_heap_<v>` flags inside a statement-expression so the exit
-             * free's `if (_heap_<v>)` guard skips them. */
+             * `_heap_<v>` flags in the literal's sequence of temporaries so
+             * the exit free's `if (_heap_<v>)` guard skips them. */
             /* One per field at most. A fixed 16 dropped the 17th, whose
              * flag then stayed set: its string was freed twice. */
             const char** moved_vars = (const char**)aether_xrealloc(NULL,
@@ -9192,16 +9601,24 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                     struct_literal_field_takes_array(gen, expr->value, fi)) any_array_field = 1;
             }
             /* When a variable is moved into a field, build the struct into a
-             * temp inside a statement-expression, clear the moved-from vars'
-             * heap flags, then yield the temp. Otherwise emit the literal
-             * directly. */
+             * temp, clear the moved-from vars' heap flags, then yield the
+             * temp: a sequence of temporaries (#2765). Otherwise emit the
+             * literal directly. */
+            TempSeq sl;
+            const char* slit = NULL;
             if (any_moved || any_take || any_array_field) {
-                fprintf(gen->output, "({ ");
+                static int slit_seq = 0;
+                seq_open(gen, &sl);
                 for (int i = 0; any_take && i < expr->child_count; i++) {
-                    if (take_own[i][0]) fprintf(gen->output, "int %s = 0; ", take_own[i]);
+                    if (!take_own[i][0]) continue;
+                    seq_let_named(gen, &sl, "int", cg_intern(take_own[i]));
+                    fprintf(gen->output, "0");
+                    seq_next(gen, &sl);
                 }
-                if (c_imported) fprintf(gen->output, "%s ", aether_c_tag(expr->value));
-                fprintf(gen->output, "%s _ae_slit = ", expr->value);
+                slit = cg_internf("_ae_slit%d", slit_seq++);
+                seq_let_named(gen, &sl, c_imported ? cg_internf("%s %s", aether_c_tag(expr->value),
+                                                                expr->value)
+                                                   : expr->value, slit);
             }
             if (c_imported) fprintf(gen->output, "(%s %s){", aether_c_tag(expr->value), expr->value);
             else fprintf(gen->output, "(%s){", expr->value);
@@ -9219,7 +9636,13 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                         int unwrap = c_imported && fv && fv->node_type &&
                                      fv->node_type->kind == TYPE_STRING;
                         /* NULL stays NULL, as in the field store. */
-                        if (unwrap) fprintf(gen->output, "({ const void* _ae_cs = (const void*)(");
+                        TempSeq cs_seq;
+                        const char* cs = NULL;
+                        if (unwrap) {
+                            seq_open(gen, &cs_seq);
+                            cs = seq_let(gen, &cs_seq, "const void*", "_ae_cs");
+                            fprintf(gen->output, "(const void*)(");
+                        }
                         /* #2497: a struct field held by value that owns
                          * strings takes the struct it is given. */
                         const char* fv_struct = c_imported ? NULL
@@ -9259,7 +9682,12 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                         else if (fv_closure) emit_closure_take(gen, fv);
                         else if (fv_owned_array) emit_owned_array_literal(gen, fv, fv_owned_array);
                         else generate_expression(gen, fv);
-                        if (unwrap) fprintf(gen->output, "); _ae_cs ? aether_string_data(_ae_cs) : (const char*)0; })");
+                        if (unwrap) {
+                            fprintf(gen->output, ")");
+                            seq_next(gen, &cs_seq);
+                            fprintf(gen->output, "%s ? aether_string_data(%s) : (const char*)0", cs, cs);
+                            seq_close(gen, &cs_seq);
+                        }
                     }
                     emitted++;
                     if (take_own && take_own[i][0]) continue;  /* tracker set below */
@@ -9295,27 +9723,33 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                 /* #911: disown each moved-from variable so its function-exit
                  * `if (_heap_<v>)` free is a no-op (ownership now in the
                  * struct). Then yield the built struct. */
-                fprintf(gen->output, ";");
                 for (int i = 0; any_array_field && i < expr->child_count; i++) {
                     ASTNode* fi = expr->children[i];
                     if (fi && fi->type == AST_ASSIGNMENT &&
-                        struct_literal_field_takes_array(gen, expr->value, fi))
-                        emit_struct_literal_array_field(gen, expr->value, fi);
+                        struct_literal_field_takes_array(gen, expr->value, fi)) {
+                        seq_next(gen, &sl);
+                        emit_struct_literal_array_field(gen, expr->value, fi, slit);
+                    }
                 }
                 for (int i = 0; any_take && i < expr->child_count; i++) {
-                    if (take_own[i][0])
-                        fprintf(gen->output, " _ae_slit._heap_%s = %s;",
-                                expr->children[i]->value, take_own[i]);
+                    if (!take_own[i][0]) continue;
+                    seq_next(gen, &sl);
+                    fprintf(gen->output, "%s._heap_%s = %s",
+                            slit, expr->children[i]->value, take_own[i]);
                 }
                 /* #1301: the struct literal now owns each moved buffer;
                  * the moved-from var's defer is disarmed by the flag
                  * clear, so the unwind journal must drop it too or a
                  * panic drain would free the struct's field. */
-                for (int m = 0; m < moved_count; m++)
-                    fprintf(gen->output,
-                            " _heap_%s = 0; aether_unwind_forget(%s);",
-                            moved_vars[m], moved_vars[m]);
-                fprintf(gen->output, " _ae_slit; })");
+                for (int m = 0; m < moved_count; m++) {
+                    seq_next(gen, &sl);
+                    fprintf(gen->output, "_heap_%s = 0", moved_vars[m]);
+                    seq_next(gen, &sl);
+                    fprintf(gen->output, "aether_unwind_forget(%s)", moved_vars[m]);
+                }
+                seq_next(gen, &sl);
+                fprintf(gen->output, "%s", slit);
+                seq_close(gen, &sl);
             }
             free(take_own);
             free(moved_vars);

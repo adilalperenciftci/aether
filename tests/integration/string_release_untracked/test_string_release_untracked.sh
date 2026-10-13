@@ -25,8 +25,9 @@ if ! "$AETHERC" "$SCRIPT_DIR/probe.ae" "$TMP/out.c" > "$TMP/gen.log" 2>&1; then
 fi
 
 # The guarded free must have a fallback. Without it the release is a no-op
-# whenever the flag is 0, which is the whole bug.
-if ! grep -q "else { string_release(prev); }" "$TMP/out.c"; then
+# whenever the flag is 0, which is the whole bug. The release is a
+# conditional expression (#2765): `(_heap_prev ? (free...) : release)`.
+if ! grep -q ": (void)string_release(prev))" "$TMP/out.c"; then
     echo "  [FAIL] string_release_untracked: the release has no fallback for an"
     echo "         untracked value, so it does nothing when _heap_prev is 0"
     grep -n "_heap_prev" "$TMP/out.c" | sed 's/^/        /' | head -5
@@ -35,7 +36,7 @@ fi
 
 # And it must still free through the flag when the value IS tracked, so the
 # fix did not simply replace one path with the other.
-grep -q "if (_heap_prev) { aether_heap_str_free" "$TMP/out.c" || {
+grep -q "(_heap_prev ? (aether_heap_str_free" "$TMP/out.c" || {
     echo "  [FAIL] string_release_untracked: the tracked-value free was lost"
     exit 1
 }

@@ -58,7 +58,7 @@ AE
 }
 
 freed() {
-    grep -q '_ad_[0-9]* = (char\*)(mk(a)); .*f\.fn)(f\.env, _ad_[0-9]*); aether_heap_str_free' "$tmp/$1.c"
+    grep -q '_ad_[0-9]* = (char\*)(mk(a)), .*f\.fn)(f\.env, _ad_[0-9]*), aether_heap_str_free' "$tmp/$1.c"
 }
 
 gen control "" ""

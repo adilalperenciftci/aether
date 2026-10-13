@@ -1,0 +1,121 @@
+// Regression (#2765): the code that hands a string to an owning slot was
+// written as GNU statement expressions `({ ... })` whatever the C compiler,
+// so the C a program gets when the compiler is not GCC-compatible
+// (AETHER_GCC_COMPAT 0, which is what cl.exe compiles) did not compile. Each
+// is now a comma expression whose temporaries are declared ahead of the
+// statement, the same C for both. This runs every such shape and checks what
+// it yields; tests/compiler/test_msvc_compat.sh compiles this program as
+// strict C11 and under cl.exe.
+
+import std.list
+import std.string
+
+extern exit(code: int)
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+struct Rec {
+    name: string
+    tags: string[2]
+}
+
+// The issue's shape: a string stored into an element of an array a `try`
+// body writes, read back through a closure.
+capture(w: string) -> fn {
+    names = ["lit", "lit"]
+    try {
+        names[0] = string.concat(w, "a")
+        panic("stop")
+    } catch e {
+        check(e == "stop", "the catch sees the panic")
+    }
+    f = || {
+        return string.length(names[0])
+    }
+    return f
+}
+
+// A call that hands its argument back, bound to the argument's own name.
+pass(s: string) -> string {
+    return s
+}
+
+relay(k: int) -> int {
+    w = string.concat("relay-", string.from_int(k))
+    w = pass(w)
+    return string.length(w)
+}
+
+// A return of an `if` over a view and a fresh string.
+pick(r: Rec, first: bool) -> string {
+    return if first { r.name } else { string.concat(r.name, "!") }
+}
+
+// A `string?` return of a parameter: the caller gets a copy of its own.
+maybe(s: string?) -> string? {
+    return s
+}
+
+// A tuple passed on from a function whose `string?` positions are owned.
+pair_of(s: string) -> (string?, int) {
+    return s, 1
+}
+
+pass_pair(s: string) -> (string?, int) {
+    return pair_of(s)
+}
+
+// A tuple local passed on: its `string?` is copied for the caller.
+pass_local(s: string) -> (string?, int) {
+    t = pair_of(s)
+    return t
+}
+
+main() {
+    g = capture("w")
+    int n = call(g)
+    check(n == 2, "the element store holds the concatenation")
+
+    names = ["a", "b"]
+    names[1] = string.concat("x", "y")
+    check(names[1] == "xy", "element store outside a try")
+
+    check(relay(7) == 7, "a handed-back argument bound to its own name")
+
+    r = Rec { name: string.concat("ad", "a"), tags: ["t0", "t1"] }
+    p1 = pick(r, true)
+    p2 = pick(r, false)
+    check(p1 == "ada" && p2 == "ada!", "an `if` view returned")
+
+    m = maybe("m")
+    check(m != none && m! == "m", "a string? parameter returned")
+
+    a, b = pass_pair("pp")
+    check(a != none && a! == "pp" && b == 1, "a tuple of string? passed on")
+    c, d = pass_local("pl")
+    check(c != none && c! == "pl" && d == 1, "a tuple local of string? passed on")
+
+    // Container stores of a value taken from an `if` over views.
+    l = list.new()
+    list.add(l, if n == 2 { r.name } else { "other" })
+    check(list.size(l) == 1, "the list took the value")
+
+    // Releases: a tracked local through its flag, a field, an element of a
+    // field array the struct owns.
+    s1 = string.concat("re", "lease")
+    release(s1)
+    s2 = string.concat("str", "ing")
+    string.release(s2)
+    s3 = string.concat("fr", "ee")
+    string.free(s3)
+    string.free(r.name)
+    string.free(r.tags[0])
+    check(r.tags[1] == "t1", "the other element is left alone")
+
+    println("ok")
+}

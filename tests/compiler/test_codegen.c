@@ -328,11 +328,14 @@ TEST(codegen_interp_value_path_hoists_and_yields_result) {
         "bump() -> int { return 1 }\n"
         "main() { s = \"${bump()}/${bump()}\"\n println(s) }");
     ASSERT_NOT_NULL(buf);
+    /* #2765: a comma expression, its temporaries declared ahead of the
+     * statement, not a GNU statement expression. */
     const char* const pieces[] = {
-        "({ int _ad_", " = (int)(bump()); int _ad_", " = (int)(bump()); ",
-        "const char* _it_r = _aether_interp(\"%d/%d\", (int)_ad_", ", (int)_ad_", "); _it_r; })",
+        "int _ad_", "; int _ad_", "; const char* _it_r", ";",
+        "(_ad_", " = (int)(bump()), _ad_", " = (int)(bump()), _it_r",
+        " = _aether_interp(\"%d/%d\", (int)_ad_", ", (int)_ad_", "), _it_r", ")",
     };
-    ASSERT_TRUE(emitted_in_order(buf, pieces, 6));
+    ASSERT_TRUE(emitted_in_order(buf, pieces, 11));
     free(buf);
 }
 
@@ -395,11 +398,41 @@ TEST(codegen_interp_nested_interp_segment_is_freed_after_call) {
         "main() { x = 3\n s = \"a ${\"${x}-${x}\"} b\"\n println(s) }");
     ASSERT_NOT_NULL(buf);
     const char* const pieces[] = {
-        "({ const char* _ad_", " = (const char*)(_aether_interp(\"%d-%d\", (int)x, (int)x)); ",
-        "const char* _it_r = _aether_interp(\"a %s b\", (const void*)(_ad_", ")); aether_heap_str_free(_ad_", "); _it_r; })",
+        "const char* _ad_", "; const char* _it_r", ";",
+        "(_ad_", " = (const char*)(_aether_interp(\"%d-%d\", (int)x, (int)x)), _it_r",
+        " = _aether_interp(\"a %s b\", (const void*)(_ad_", ")), aether_heap_str_free(_ad_", "), _it_r", ")",
     };
-    ASSERT_TRUE(emitted_in_order(buf, pieces, 5));
+    ASSERT_TRUE(emitted_in_order(buf, pieces, 9));
     free(buf);
+}
+
+/* #2765: where the temporaries of a statement are declared, judged by the
+ * C written before it. */
+static int site_of(const char* before) {
+    return codegen_hoist_site(before, strlen(before));
+}
+
+TEST(codegen_hoist_site_after_a_brace_a_semicolon_or_a_block) {
+    ASSERT_EQ(0, site_of(""));
+    ASSERT_EQ(0, site_of("int f(void) {\n"));
+    ASSERT_EQ(0, site_of("    x = 1;\n"));
+    ASSERT_EQ(0, site_of("    }\n"));
+    /* Directives and comments between say nothing. */
+    ASSERT_EQ(0, site_of("{\n#line 5 \"a.ae\"\n"));
+    ASSERT_EQ(0, site_of("x = 1; /* a note */\n"));
+    ASSERT_EQ(0, site_of("x = 1;\n/* a note\n   on two lines */\n"));
+    ASSERT_EQ(0, site_of("x = 1; // a note\n"));
+    ASSERT_EQ(0, site_of("s = \"a // b\";\n"));
+}
+
+TEST(codegen_hoist_site_after_a_label) {
+    ASSERT_EQ(1, site_of("    case 3:\n"));
+    ASSERT_EQ(1, site_of("default:\n#line 9 \"a.ae\"\n"));
+}
+
+TEST(codegen_hoist_site_in_an_unbraced_body) {
+    ASSERT_EQ(2, site_of("if (c)\n"));
+    ASSERT_EQ(2, site_of("} else\n"));
 }
 
 /* The classifiers behind the hoist, on hand-built nodes. */

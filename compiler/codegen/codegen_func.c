@@ -2774,6 +2774,34 @@ void generate_struct_definition(CodeGenerator* gen, ASTNode* struct_def) {
         unindent(gen);
         print_line(gen, "}");
 
+        /* #2765: `<Name>_dup_elems(into, src, n)`: a value of its own for
+         * each element of an array of these a field takes from another
+         * array (emit_array_field_take), as a call. */
+        print_line(gen, "static inline void %s_dup_elems(%s* into, %s const volatile* src, int n) {",
+                   struct_def->value, struct_def->value, struct_def->value);
+        print_line(gen, "    for (int _k = 0; _k < n; _k++) into[_k] = %s_dup(src[_k]);",
+                   struct_def->value);
+        print_line(gen, "}");
+
+        /* #2765: `<Name>_move(&local)`: the value a local hands over on its
+         * last use (emit_struct_take). The local disowns every string and
+         * closure it held, so its scope exit releases nothing. A function,
+         * so the move is an expression to any C compiler; the volatile one
+         * is for a local a `try` body writes (#2690). */
+        print_line(gen, "static inline %s %s_move(%s* s) {",
+                   struct_def->value, struct_def->value, struct_def->value);
+        indent(gen);
+        print_line(gen, "%s v = *s;", struct_def->value);
+        emit_struct_disown(gen, struct_def->value, "(*s)", 0);
+        print_line(gen, "return v;");
+        unindent(gen);
+        print_line(gen, "}");
+        print_line(gen, "static inline %s %s_move_volatile(%s volatile* s) {",
+                   struct_def->value, struct_def->value, struct_def->value);
+        print_line(gen, "    %s v = *s; %s w = v; (void)%s_move(&w); *s = w; return v;",
+                   struct_def->value, struct_def->value, struct_def->value);
+        print_line(gen, "}");
+
         /* #2458: the release for a shared cell holding one of these (a
          * variable a closure writes; emit_promoted_cell_declaration): the
          * last holder releases the owned fields, then the cell, as a scope

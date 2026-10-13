@@ -1,0 +1,145 @@
+// Regression (#2765): the temporaries a call needs inside an expression (an
+// argument freed after the call, a result taken as owned, a value a
+// comparison or an interpolation frees once read) were GNU statement
+// expressions whatever the C compiler, so the C for a compiler that is not
+// GCC-compatible (AETHER_GCC_COMPAT 0, what cl.exe compiles) did not compile.
+// They are comma expressions now, their temporaries declared ahead of the
+// statement. This runs each shape and checks its value; the strict C11 and
+// cl.exe halves of tests/compiler/test_msvc_compat.sh compile it.
+
+import std.list
+import std.string
+import std.observe
+
+extern exit(code: int)
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+struct Item {
+    name: string
+    tag: string
+}
+
+struct Spot @observable {
+    x: int
+}
+
+make_item(w: string) -> Item {
+    return Item { name: string.concat(w, "#"), tag: string.concat(w, "%") }
+}
+
+pair(a: string, b: string) -> (string, string) {
+    return a, b
+}
+
+// May hand its argument back: a fresh argument that comes back is owned.
+first(xs: string, n: int) -> string {
+    if n > 0 {
+        return xs
+    }
+    return "none"
+}
+
+// Runs a closure it does not keep, so a closure literal passed to it is
+// released after the call.
+apply(f: fn, v: int) -> int {
+    int r = call(f, v)
+    return r
+}
+
+// Arguments that are fresh strings, built from a parameter so nothing
+// folds them at compile time.
+drains(w: string) {
+    n = string.length(string.concat(w, "bcd"))
+    check(n == 4, "a heap argument freed after a value call")
+    say(string.concat(w, "y"))
+    h = first(string.concat(w, "eld"), 1)
+    check(h == "aeld", "a handed-back argument is owned")
+    check(twice(string.concat(w, "bc")) == 6, "an unannotated callee's result")
+}
+
+// A comparison of a fresh string, freed once compared.
+same(a: string, b: string) -> bool {
+    return string.concat(a, b) == "ab"
+}
+
+differs(a: string, b: string) -> bool {
+    return string.concat(a, b) != "ab"
+}
+
+// No declared result: the drain types its result from the definition.
+twice(s) {
+    return string.length(s) * 2
+}
+
+say(s: string) {
+    check(string.length(s) > 0, "a void callee reads its argument")
+}
+
+var counter = 0
+
+bump() -> int {
+    counter = counter + 1
+    return counter
+}
+
+lookup(found: bool) -> string? {
+    if found {
+        return string.concat("fou", "nd")
+    }
+    return none
+}
+
+main() {
+    // Argument drains: a value call, a void call, a call handing back.
+    drains("a")
+    check(first(string.concat(make_item("h").name, "x"), 1) == "h#x",
+        "a call handing back an argument, in an argument")
+
+    // A closure argument released after the call.
+    k = 5
+    check(apply(| v: int | { return v + k }, 2) == 7, "a closure literal argument")
+
+    // A tuple whose strings view a struct temporary: copied out.
+    t, u = pair(make_item("w").name, make_item("w").tag)
+    check(t == "w#" && u == "w%", "a tuple view of a temporary")
+
+    // An interpolation whose segments run in order, as a value.
+    counter = 0
+    s = "${bump()}-${bump()}-${bump()}"
+    check(s == "1-2-3", "interpolation segments in source order")
+
+    // A comparison that frees a heap operand.
+    check(same("a", "b"), "a compared heap operand")
+    check(!differs("a", "b"), "a compared heap operand, negated")
+
+    // An owned string? compared with none, and two optionals compared.
+    check(lookup(true) != none, "an owned string? is not none")
+    check(lookup(false) == none, "none is none")
+    check(lookup(true) == lookup(true), "two owned string? values compare by bytes")
+
+    // A string sequence literal folded through temporaries.
+    let seq: *StringSeq = ["s0", "s1", "s2"]
+    check(string.seq_length(seq) == 3, "a sequence literal")
+    string.seq_free(seq)
+
+    // A closure stored into a list where its value is read.
+    l = list.new()
+    _stored = list.add(l, || { return k })
+    check(list.size(l) == 1, "a closure stored in a list")
+
+    // heap.free of an @observable box drops its observers first.
+    p = heap.new(Spot)
+    hits = 0
+    observe.observe(p, | obj: ptr | { hits = hits + 1 })
+    p.x = 3
+    check(hits == 1, "the observer ran")
+    heap.free(p)
+
+    println("ok")
+}

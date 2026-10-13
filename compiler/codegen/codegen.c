@@ -554,6 +554,7 @@ CodeGenerator* create_code_generator(FILE* output) {
     gen->synthesised_cap = 0;
     gen->uses_sandbox = 0;
     gen->output = output;
+    gen->hoist_start = -1;   /* #2765: no statement is being emitted */
     gen->indent_level = 0;
     gen->actor_count = 0;
     gen->function_count = 0;
@@ -856,6 +857,9 @@ void code_generator_release(CodeGenerator* gen) {
         zb_params_free(gen);
         str_arrays_free(gen);   /* #2618 */
         cell_owns_free(gen);    /* #2755 */
+        free(gen->hoist_decls); /* #2765 */
+        gen->hoist_decls = NULL;
+        gen->hoist_decls_len = gen->hoist_decls_cap = 0;
         /* The emitted-typedef registries: one strdup'd name per distinct
          * tuple / optional / sum shape in the program (#1667). */
         for (int i = 0; i < gen->tuple_type_count; i++) {
@@ -7806,6 +7810,28 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     print_line(gen, "#    define AETHER_GCC_COMPAT 0");
     print_line(gen, "#  endif");
     print_line(gen, "#endif");
+    /* #2765: an operand evaluated ahead of the rest of its operation (#2478)
+     * is held in a temporary of the type C gives it: inferred where the
+     * compiler can (a statement expression with __auto_type), and declared
+     * ahead of the statement with the operand's own type, in a comma
+     * expression, where it cannot. */
+    print_line(gen, "#ifndef _AE_SEQ_OPEN");
+    print_line(gen, "#  if AETHER_GCC_COMPAT");
+    print_line(gen, "#    define _AE_SEQ_OPEN ({");
+    print_line(gen, "#    define _AE_SEQ_LET(n) __auto_type n =");
+    print_line(gen, "#    define _AE_SEQ_NEXT ;");
+    print_line(gen, "#    define _AE_SEQ_CLOSE ; })");
+    print_line(gen, "#    define _AE_C11_ONLY(d)");
+    print_line(gen, "#    define _AE_AUTO(t) __auto_type");
+    print_line(gen, "#  else");
+    print_line(gen, "#    define _AE_SEQ_OPEN (");
+    print_line(gen, "#    define _AE_SEQ_LET(n) n =");
+    print_line(gen, "#    define _AE_SEQ_NEXT ,");
+    print_line(gen, "#    define _AE_SEQ_CLOSE )");
+    print_line(gen, "#    define _AE_C11_ONLY(d) d");
+    print_line(gen, "#    define _AE_AUTO(t) t");
+    print_line(gen, "#  endif");
+    print_line(gen, "#endif");
     /* Suppress unused-function warnings for runtime helpers that may not
        be called in every program (clock_ns, interp, safe_str) */
     print_line(gen, "#if defined(__GNUC__) || defined(__clang__)");
@@ -8100,6 +8126,12 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     print_line(gen, "    if (aether_str_is_counted(s)) { string_retain(s); return s; }");
     print_line(gen, "    return aether_uniform_heap_str(s, 0);");
     print_line(gen, "}");
+    /* #2765: every element of a `string[N]` field taken from another array
+     * (emit_array_field_take), as a call, so a struct literal that fills
+     * one is an expression. */
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED void _aether_str_elems_take(const char** into, const char* const volatile* src, int n) {");
+    print_line(gen, "    for (int _k = 0; _k < n; _k++) into[_k] = _aether_str_elem_dup(src[_k]);");
+    print_line(gen, "}");
     /* #2723: a fixed-size array argument is a value its callee copies, and
      * one a `try` body writes has volatile elements, which the callee's
      * plain `E _param_a[N]` would not take. The call passes a copy instead,
@@ -8337,6 +8369,11 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
      * worker thread while its declaring scope releases on another. */
     print_line(gen, "typedef struct { void (*_dtor)(void*); atomic_long _refs; } _AeEnvHead;");
     print_line(gen, "static inline void _aether_closure_env_retain(void* e) { if (e) atomic_fetch_add_explicit(&((_AeEnvHead*)e)->_refs, 1, memory_order_relaxed); }");
+    /* #2765: every element of an `fn[N]` field taken from another array, a
+     * reference to each env (emit_array_field_take), as a call. */
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED void _aether_closure_elems_take(_AeClosure* into, const volatile _AeClosure* src, int n) {");
+    print_line(gen, "    for (int _k = 0; _k < n; _k++) { into[_k] = src[_k]; _aether_closure_env_retain(into[_k].env); }");
+    print_line(gen, "}");
     /* #2480: releases an env without knowing its closure, for a local bound
      * to more than one closure or to a call's result, and for a captured
      * closure (#2494). */

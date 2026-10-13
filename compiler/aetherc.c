@@ -1778,7 +1778,13 @@ int compile_source(const char* input_path, const char* output_path) {
 
     // Step 4: Code Generation
     if (verbose_mode) printf("Step 4: Generating C code...\n");
-    FILE *output = fopen(output_path, "w");
+    /* Read and write, binary: codegen reads a statement it has written back
+     * to declare its temporaries ahead of it (#2765), at byte offsets that a
+     * text stream on Windows does not take. A path that cannot be opened so
+     * (a write-only device) is written as before, and codegen keeps its
+     * temporaries in statement expressions there. */
+    FILE *output = fopen(output_path, "w+b");
+    if (!output) output = fopen(output_path, "w");
     if (!output) {
         perror("Error opening output file");
         // Cleanup
