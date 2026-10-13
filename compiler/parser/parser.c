@@ -186,45 +186,6 @@ static int token_is_value_ident(const Token* token) {
     }
 }
 
-static int c_abi_alias_kind(const char* name, TypeKind* out_kind);
-
-/* #2827 review: does `name` name a type? A builtin type spelled by a name
- * (`uint32`, `f32`, a lane type, a C ABI alias), or one the file declares:
- * `struct Name`, `union Name`, `enum Name`, `bitstruct Name`, `type Name =`
- * (a sum, a distinct type or an alias), `cfn Name`, `message Name`. The
- * whole token stream is searched, so a type declared after its use counts
- * too. */
-static int name_is_type(Parser* parser, const char* name) {
-    static const char* builtin[] = {
-        "uint8", "uint16", "uint32", "uint64", "int8", "int16", "int32", "f32", "f64",
-        "longdouble", "f32x4", "f64x2", "i32x4", "i64x2", "i16x8", "f32x8", "i32x8",
-        "Duration", NULL
-    };
-    if (!name) return 0;
-    for (int i = 0; builtin[i]; i++)
-        if (strcmp(name, builtin[i]) == 0) return 1;
-    TypeKind k;
-    if (c_abi_alias_kind(name, &k)) return 1;
-    for (int i = 0; i + 1 < parser->token_count; i++) {
-        Token* t = parser->tokens[i];
-        Token* n = parser->tokens[i + 1];
-        if (!t || !n || n->type != TOKEN_IDENTIFIER || !n->value || strcmp(n->value, name) != 0)
-            continue;
-        if (t->type == TOKEN_STRUCT || t->type == TOKEN_UNION ||
-            t->type == TOKEN_MESSAGE_KEYWORD)
-            return 1;
-        if (t->type == TOKEN_IDENTIFIER && t->value &&
-            (strcmp(t->value, "enum") == 0 || strcmp(t->value, "bitstruct") == 0 ||
-             strcmp(t->value, "cfn") == 0))
-            return 1;
-        if (t->type == TOKEN_IDENTIFIER && t->value && strcmp(t->value, "type") == 0 &&
-            i + 2 < parser->token_count && parser->tokens[i + 2] &&
-            parser->tokens[i + 2]->type == TOKEN_ASSIGN)
-            return 1;
-    }
-    return 0;
-}
-
 // C ABI scalar aliases — recognised exact C type spellings. When a
 // type-position identifier matches one, parse_type builds a Type with
 // the given `kind` (which governs all typechecking and arithmetic)
@@ -3135,18 +3096,18 @@ static ASTNode* parse_statement_inner(Parser* parser) {
             }
             // The optional form, `Point? q = ...` (a struct's optional;
             // `int? o` reaches parse_variable_declaration through the keyword
-            // case), shape IDENT `?` IDENT on one line. An ask has the same
-            // shape when its message has no braces (`d ? GetCount`, its `{`
-            // on the next line, or none), so it is a declaration only when
-            // `=` follows, which no ask has, or when the first name is a type
-            // (#2827 review): a struct, enum, sum, distinct type or bitstruct
-            // the file declares, or a builtin type spelled by a name.
+            // case), shape IDENT `?` IDENT `=` on one line. An ask has the
+            // first three when its message has no braces (`d ? GetCount`,
+            // with its `{` on the next line or none), even when the first
+            // name is also a type's (`counter ? GetCount` beside `struct
+            // counter`), but never a `=` after the message, so that is what
+            // makes the declaration. One with no value is spelled `let r:
+            // Point? = none`.
             if (next && next->type == TOKEN_QUESTION && next->line == token->line) {
                 Token* nm = peek_ahead(parser, 2);
                 Token* after = peek_ahead(parser, 3);
                 if (nm && nm->type == TOKEN_IDENTIFIER && nm->line == token->line &&
-                    ((after && after->line == nm->line && after->type == TOKEN_ASSIGN) ||
-                     name_is_type(parser, token->value))) {
+                    after && after->line == nm->line && after->type == TOKEN_ASSIGN) {
                     return parse_variable_declaration(parser);
                 }
             }
