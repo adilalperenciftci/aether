@@ -1250,10 +1250,10 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
                     fprintf(gen->output, ", sizeof(actor->%s));\n", child->value);
                 }
             } else if (child->child_count > 0) {
-                print_indent(gen);
-                fprintf(gen->output, "actor->%s = ", child->value);
-                generate_expression(gen, child->children[0]);
-                fprintf(gen->output, ";\n");
+                /* A statement of its own (#2798): an `or` with a block, say,
+                 * runs ahead of it, in plain C. */
+                generate_value_statement(gen, cg_internf("actor->%s", child->value),
+                                         child->children[0]);
             } else {
                 print_line(gen, "actor->%s = 0;", child->value);
             }

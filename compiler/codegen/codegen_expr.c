@@ -5488,11 +5488,12 @@ ASTNode* trailing_dsl_block(CodeGenerator* gen, ASTNode* call) {
  * handler is a block, a `!` that propagates an error by returning, and a
  * call with a trailing block where its value is used. As expressions they
  * are GNU statement expressions, which only GCC-compatible compilers take.
- * Where one is the first thing its statement evaluates (generate_statement
- * finds it: stmt_control_prelude), it runs as statements ahead of the
- * statement instead, its value left in a temporary, and the statement reads
- * the temporary where the construct was: the same order of evaluation, in
- * plain C. Anywhere else it stays a statement expression (#2798).
+ * Instead each runs as statements ahead of its statement (generate_statement
+ * finds them: stmt_control_prelude), its value left in a temporary, and the
+ * statement reads the temporary where the construct was. What the statement
+ * evaluates before one is evaluated ahead of it too (#2798, below): the same
+ * order of evaluation, in plain C. Where that cannot be done (see
+ * ctl_linearize) it stays a statement expression.
  *
  * g_ctl_emitting is the construct whose statements are being emitted;
  * g_ctl_subs maps each one done to the text of its value, until its
@@ -5605,6 +5606,287 @@ int emit_control_prelude(CodeGenerator* gen, ASTNode* e, int discarded) {
     return g_ctl_count > mark;
 }
 
+/* --- The same anywhere in a statement (#2798) ----------------------------
+ *
+ * A construct that is not the first thing its statement evaluates runs
+ * ahead of the statement too, once everything the statement evaluates
+ * before it has been: each operand to its left (an earlier argument, the
+ * left side of an operation, an earlier field) is evaluated into a
+ * temporary first, in source order, and read from there (bound as an
+ * operand evaluated ahead is, #2478). A construct on the right of `&&` or
+ * `||` runs only when that side would: the operation becomes an `if` ahead
+ * of the statement, its value a temporary. So does one in a part of an
+ * expression that runs on a test (a branch of an `if` expression, the
+ * default of `??`, an `or` handler that is an expression): the test's
+ * operands are evaluated first, and the part under the same test, into a
+ * temporary the expression reads where it reads the part. A loop condition
+ * holding one is evaluated, with it, at the top of each pass (the loop
+ * emitters).
+ *
+ * ctl_contains: does `e` hold such a construct? A closure literal's body,
+ * a block's and a match's statements see to their own. */
+int ctl_contains(CodeGenerator* gen, ASTNode* e) {
+    if (!e || e->type == AST_CLOSURE || e->type == AST_BLOCK ||
+        e->type == AST_MATCH_STATEMENT) return 0;
+    if (is_control_value(gen, e)) return 1;
+    for (int i = 0; i < e->child_count; i++)
+        if (ctl_contains(gen, e->children[i])) return 1;
+    return 0;
+}
+
+/* Is `call` (one with a trailing block) a builder's, whose block runs
+ * before its arguments are evaluated? */
+static int trailing_call_is_builder(CodeGenerator* gen, ASTNode* call) {
+    return call->value && is_builder_func_reg(gen, call->value);
+}
+
+/* Evaluate operand `op` now, ahead of the statement, into a temporary the
+ * statement reads: `_eoN = (op);`. 0 when its type has no C spelling. */
+static int ctl_emit_hoist(CodeGenerator* gen, ASTNode* op) {
+    const char* ct = order_c11_type(op);
+    if (!ct) return 0;
+    const char* name = cg_internf("_eo%d", g_order_counter++);
+    hoist_declare(gen, ct, name);
+    print_indent(gen);
+    fprintf(gen->output, "%s = (", name);
+    generate_expression(gen, op);
+    fprintf(gen->output, ");\n");
+    order_bind(op, name);
+    return 1;
+}
+
+/* The same where there is something to evaluate: a literal, or an operand
+ * already bound, has nothing. */
+static int ctl_hoist(CodeGenerator* gen, ASTNode* op) {
+    if (!op || !order_hoistable(op) || order_bound(op) || ctl_lookup(op)) return 1;
+    return ctl_emit_hoist(gen, op);
+}
+
+/* The operands `e` evaluates unconditionally, in source order, into `ops`:
+ * an operation whose C spelling leaves their order open (order_operands),
+ * and the ones C orders or that have one: a unary operation's, a field's
+ * or an element's object (and index), an array literal's elements, an
+ * interpolation's segments, the operand of `!`, `??`, `?.` and `or` and an
+ * `if` expression's condition (what they run otherwise is conditional). -1
+ * for anything else. */
+static int ctl_operands(CodeGenerator* gen, ASTNode* e, ASTNode** ops, int cap) {
+    (void)gen;
+    int n = 0;
+    if (e->type == AST_BINARY_EXPRESSION && e->child_count == 2 && e->value &&
+        is_assignment_op(e->value)) {
+        /* The target's indexes, then the value: a target with none
+         * (`o.f = v`) is no operand list for order_operands. */
+        n = order_target_operands(e->children[0], ops, 0, cap - 1);
+        ops[n++] = e->children[1];
+        return n;
+    }
+    switch (e->type) {
+        case AST_FUNCTION_CALL: case AST_BINARY_EXPRESSION: case AST_SEND_FIRE_FORGET:
+        case AST_SEND_ASK: case AST_STRUCT_LITERAL: case AST_MESSAGE_CONSTRUCTOR:
+            n = order_operands(e, ops, cap);
+            return n > 0 ? n : -1;
+        case AST_UNARY_EXPRESSION: case AST_MEMBER_ACCESS: case AST_VALUE_CAST:
+        case AST_TUPLE_UNWRAP: case AST_NULL_COALESCE: case AST_OR_ELSE:
+        case AST_OPTIONAL_CHAIN: case AST_IF_EXPRESSION:
+            if (e->child_count < 1) return -1;
+            ops[0] = e->children[0];
+            return 1;
+        case AST_ARRAY_ACCESS:
+            if (e->child_count < 2) return -1;
+            ops[0] = e->children[0];
+            ops[1] = e->children[1];
+            return 2;
+        case AST_ARRAY_LITERAL: case AST_STRING_INTERP:
+            for (int i = 0; i < e->child_count; i++) {
+                ASTNode* c = e->children[i];
+                if (e->type == AST_STRING_INTERP && interp_segment_is_text(c)) continue;
+                if (n == cap) return -1;
+                ops[n++] = c;
+            }
+            return n;
+        default:
+            return -1;
+    }
+}
+
+static int ctl_linearize(CodeGenerator* gen, ASTNode* e, int discarded);
+
+/* Is there a construct in `c`, a child of an expression whose operands are
+ * `ops`, that those operands do not reach? A listed operand is reached, and
+ * so is a node made of listed operands only (a named argument, a field's
+ * initializer, the message a send carries, an assignment's target); a
+ * construct anywhere else is not (it runs on a condition the list does not
+ * have, or in a part no list covers). */
+static int ctl_unreached(CodeGenerator* gen, ASTNode* c, ASTNode** ops, int n) {
+    if (!c || c->type == AST_CLOSURE || c->type == AST_BLOCK ||
+        c->type == AST_MATCH_STATEMENT) return 0;
+    for (int k = 0; k < n; k++)
+        if (ops[k] == c) return 0;
+    if (is_control_value(gen, c)) return 1;
+    for (int i = 0; i < c->child_count; i++)
+        if (ctl_unreached(gen, c->children[i], ops, n)) return 1;
+    return 0;
+}
+
+/* Operand `op` evaluated now into a temporary, a literal too (a test reads
+ * it by name), as the C text that reads it; NULL when it cannot be. */
+static const char* ctl_value_name(CodeGenerator* gen, ASTNode* op) {
+    if (!op) return NULL;
+    if (!order_bound(op) && !ctl_lookup(op) &&
+        (order_hoistable(op) || op->type == AST_LITERAL) && !ctl_emit_hoist(gen, op))
+        return NULL;
+    const char* name = order_lookup(op);
+    if (!name) name = ctl_lookup(op);
+    if (!name) name = arg_drain_lookup(op);
+    return name;
+}
+
+/* `c`, a part of an expression that runs only when `test` holds (a C
+ * condition on operands already evaluated into temporaries, the one the
+ * expression tests), run under that test ahead of the statement, its
+ * constructs and then its value into a temporary: the expression reads the
+ * temporary on the path where it was set. */
+static int ctl_guarded(CodeGenerator* gen, const char* test, ASTNode* c) {
+    print_indent(gen);
+    fprintf(gen->output, "if (%s) {\n", test);
+    int ok = ctl_linearize(gen, c, 0) && ctl_hoist(gen, c);
+    print_indent(gen);
+    fprintf(gen->output, "}\n");
+    return ok;
+}
+
+/* The conditional parts of `e` that hold a construct, run each under the
+ * test that selects it: the branches of an `if` expression, the default of
+ * `??` and an `or` handler that is an expression. -1 when `e` is none of
+ * those, or none of its conditional parts holds one. */
+static int ctl_conditional(CodeGenerator* gen, ASTNode* e) {
+    if (e->type == AST_IF_EXPRESSION && e->child_count >= 3 &&
+        (ctl_contains(gen, e->children[1]) || ctl_contains(gen, e->children[2]))) {
+        if (!ctl_linearize(gen, e->children[0], 0)) return 0;
+        const char* c = ctl_value_name(gen, e->children[0]);
+        if (!c) return 0;
+        int ok = 1;
+        if (ctl_contains(gen, e->children[1]))
+            ok = ctl_guarded(gen, c, e->children[1]);
+        if (ok && ctl_contains(gen, e->children[2]))
+            ok = ctl_guarded(gen, cg_internf("!%s", c), e->children[2]);
+        return ok;
+    }
+    if (e->type == AST_NULL_COALESCE && e->child_count >= 2 &&
+        ctl_contains(gen, e->children[1])) {
+        Type* ot = e->children[0] ? e->children[0]->node_type : NULL;
+        if (!ot || ot->kind != TYPE_OPTIONAL) return -1;   /* the default is not emitted */
+        if (!ctl_linearize(gen, e->children[0], 0)) return 0;
+        const char* o = ctl_value_name(gen, e->children[0]);
+        if (!o) return 0;
+        return ctl_guarded(gen, cg_internf("!%s.has", o), e->children[1]);
+    }
+    if (e->type == AST_OR_ELSE && e->child_count >= 2 && e->children[1] &&
+        e->children[1]->type != AST_BLOCK && ctl_contains(gen, e->children[1])) {
+        Type* tup = e->children[0] ? e->children[0]->node_type : NULL;
+        if (!tup || tup->kind != TYPE_TUPLE || tup->tuple_count < 2 || !tup->tuple_types[0])
+            return 0;
+        if (!ctl_linearize(gen, e->children[0], 0)) return 0;
+        const char* f = ctl_value_name(gen, e->children[0]);
+        if (!f) return 0;
+        /* The test the `or` makes: a non-empty error slot. */
+        int k = tup->tuple_count - 1;
+        return ctl_guarded(gen, cg_internf("%s._%d && aether_string_data((const void*)%s._%d)[0]",
+                                           f, k, f, k), e->children[1]);
+    }
+    return -1;
+}
+
+/* Run the constructs in operands `ops` (evaluated in this order) ahead of
+ * the statement, each operand to the left of the last one that holds one
+ * evaluated into a temporary first. */
+int ctl_linearize_list(CodeGenerator* gen, ASTNode** ops, int n) {
+    int last = -1;
+    for (int i = 0; i < n; i++)
+        if (ctl_contains(gen, ops[i])) last = i;
+    for (int i = 0; i < last; i++) {
+        if (ctl_contains(gen, ops[i]) && !ctl_linearize(gen, ops[i], 0)) return 0;
+        if (!ctl_hoist(gen, ops[i])) return 0;
+    }
+    return last < 0 || ctl_linearize(gen, ops[last], 0);
+}
+
+/* Is `e` an `&&` or an `||`, whose right side runs only on its left's
+ * say? */
+static int ctl_short_circuit(ASTNode* e) {
+    return e->type == AST_BINARY_EXPRESSION && e->child_count == 2 && e->value &&
+           (strcmp(e->value, "&&") == 0 || strcmp(e->value, "||") == 0);
+}
+
+/* Run the constructs `e` holds ahead of the statement, and what it
+ * evaluates before them. 1 when every one is bound, 0 when one sits where
+ * this does not reach (an argument of a call whose trailing block runs as a
+ * value): what was run stays bound, and the rest stays a statement
+ * expression.
+ * `discarded`: the statement throws `e`'s value away. */
+static int ctl_linearize(CodeGenerator* gen, ASTNode* e, int discarded) {
+    if (!e || !ctl_contains(gen, e)) return 1;
+    if (is_control_value(gen, e)) {
+        /* What the construct evaluates first: the tuple an `or` or a `!`
+         * tests, the arguments of a call whose trailing block runs after
+         * it. A builder's block runs first, and its arguments after it, in
+         * its lowering (emit_trailing_call_expression). */
+        if (e->type == AST_FUNCTION_CALL) {
+            if (!trailing_call_is_builder(gen, e)) {
+                ASTNode* ops[ORDER_MAX_OPERANDS];
+                int n = order_operands(e, ops, ORDER_MAX_OPERANDS);
+                if (n > 0 && !ctl_linearize_list(gen, ops, n)) return 0;
+            }
+        } else if (e->child_count > 0 && !ctl_linearize(gen, e->children[0], 0)) {
+            return 0;
+        }
+        return emit_control_prelude(gen, e, discarded);
+    }
+    if (ctl_short_circuit(e)) {
+        ASTNode* l = e->children[0];
+        ASTNode* r = e->children[1];
+        if (!ctl_contains(gen, r)) return ctl_linearize(gen, l, 0);
+        if (!ctl_linearize(gen, l, 0)) return 0;
+        int is_and = strcmp(e->value, "&&") == 0;
+        const char* t = cg_internf("_ae_sc%d", g_order_counter++);
+        hoist_declare(gen, "int", t);
+        print_indent(gen);
+        fprintf(gen->output, "%s = !!(", t);
+        generate_expression(gen, l);
+        fprintf(gen->output, ");\n");
+        print_indent(gen);
+        fprintf(gen->output, "if (%s%s) {\n", is_and ? "" : "!", t);
+        int ok = ctl_linearize(gen, r, 0);
+        print_indent(gen);
+        fprintf(gen->output, "%s = !!(", t);
+        generate_expression(gen, r);
+        fprintf(gen->output, ");\n");
+        print_indent(gen);
+        fprintf(gen->output, "}\n");
+        order_bind(e, t);
+        return ok;
+    }
+    int cond = ctl_conditional(gen, e);
+    if (cond >= 0) return cond;
+    ASTNode* ops[ORDER_MAX_OPERANDS];
+    int n = ctl_operands(gen, e, ops, ORDER_MAX_OPERANDS);
+    if (n < 0) return 0;
+    for (int i = 0; i < e->child_count; i++)
+        if (ctl_unreached(gen, e->children[i], ops, n)) return 0;
+    if (!ctl_linearize_list(gen, ops, n)) return 0;
+    /* A call with a trailing block whose arguments kept it from running
+     * ahead (is_control_value: their order needed a wrap) may now, with
+     * them evaluated. Not a builder's, whose block runs before them. */
+    if (e->type == AST_FUNCTION_CALL && !trailing_call_is_builder(gen, e) &&
+        is_control_value(gen, e))
+        return emit_control_prelude(gen, e, discarded);
+    return 1;
+}
+
+int ctl_linearize_value(CodeGenerator* gen, ASTNode* e, int discarded) {
+    return hoist_ready(gen) ? ctl_linearize(gen, e, discarded) : 0;
+}
+
 /* `call(args) { block }` where the value is used inside an expression:
  * `return build() { ... }`, `f(build() { ... })`. A declaration, an
  * assignment and an expression statement run the block themselves
@@ -5612,8 +5894,8 @@ int emit_control_prelude(CodeGenerator* gen, ASTNode* e, int discarded) {
  * skipped with the argument loop's DSL test and silently dropped. Lowered
  * here to a statement expression that runs it the way those statements
  * do: a builder's block configures it before the call; any other call's
- * value is the block's context. Run ahead of its statement where it is the
- * first thing the statement evaluates (emit_control_prelude, #2765).
+ * value is the block's context. Run ahead of its statement instead where
+ * it can be (emit_control_prelude, #2765, #2798).
  * Returns 0 when there is no such block. */
 static int g_trailing_tmp = 0;
 static int emit_trailing_call_expression(CodeGenerator* gen, ASTNode* call) {
@@ -5643,6 +5925,11 @@ static int emit_trailing_call_expression(CodeGenerator* gen, ASTNode* call) {
         }
         emit_trailing_block_body(gen, block);
         if (as_stmts) {
+            /* #2798: the constructs in the arguments, which the call
+             * evaluates after the block. */
+            ASTNode* ops[ORDER_MAX_OPERANDS];
+            int k = order_operands(call, ops, ORDER_MAX_OPERANDS);
+            if (k > 0) ctl_linearize_list(gen, ops, k);
             print_indent(gen);
             fprintf(gen->output, "_tcr%d = ", n);
         }
@@ -6018,9 +6305,9 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                 seq_close(gen, &s);
                 break;
             }
-            /* #2765: as statements ahead of the statement where it is the
-             * first thing evaluated (emit_control_prelude), a statement
-             * expression elsewhere. */
+            /* #2765, #2798: as statements ahead of the statement
+             * (emit_control_prelude), a statement expression where that
+             * cannot be done. */
             int as_stmts = g_ctl_emitting == expr;
             if (as_stmts) {
                 hoist_declare(gen, tuple_c, cg_internf("_oe%d", id));
@@ -6191,9 +6478,9 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                 seq_close(gen, &s);
                 break;
             }
-            /* Propagating: as statements ahead of the statement where it is
-             * the first thing evaluated (emit_control_prelude), a statement
-             * expression elsewhere (#2765). */
+            /* Propagating: as statements ahead of the statement
+             * (emit_control_prelude), a statement expression where that
+             * cannot be done (#2765, #2798). */
             int as_stmts = g_ctl_emitting == expr;
             if (as_stmts) {
                 hoist_declare(gen, tuple_c, cg_internf("_unw%d", uid));

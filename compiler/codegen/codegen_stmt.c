@@ -11578,7 +11578,14 @@ static void emit_match_result_value(CodeGenerator* gen, ASTNode* result) {
     ValueTemps vt;
     int has = value_temps_open_expr(gen, result,
                                     gen->match_result_var ? TEMP_KEPT : TEMP_FREE, &vt);
+    /* #2798: the constructs that run statements in the value, run ahead of
+     * it as a statement's are (stmt_control_prelude). */
+    int ctl_depth = control_prelude_depth();
+    int order_depth = order_prelude_depth();
+    if (hoist_ready(gen) && ctl_contains(gen, result)) ctl_linearize_value(gen, result, 0);
     emit_match_result_value_now(gen, result);
+    control_prelude_end(ctl_depth);
+    order_prelude_end(order_depth);
     if (has) temps_close(gen, &vt, 1);
 }
 
@@ -12269,34 +12276,97 @@ static ASTNode* stmt_trailing_call(CodeGenerator* gen, ASTNode* stmt) {
     return trailing_dsl_block(gen, call) ? call : NULL;
 }
 
-/* #2765: the construct that runs statements (emit_control_prelude) that
- * `stmt` evaluates before anything else, run ahead of it. The first thing a
- * statement evaluates is its value (an initializer, the value assigned to a
- * name, a returned value, an `if` condition, an expression statement), and
- * within that the leftmost operand, all the way down: a call's first
- * argument, a binary operation's left side, a unary operation's operand,
- * an `if` expression's condition. A literal evaluates nothing, so the
- * operand after one counts as first. A loop's condition is evaluated again
- * on every pass, so it is not one. A construct holding a call whose struct
- * result the statement keeps in a temporary of its own (an `if` condition's,
- * an expression statement's) is left alone: those are set up after this
- * runs. */
-static void stmt_control_prelude(CodeGenerator* gen, ASTNode* stmt) {
+/* #2765, #2798: the constructs that run statements (emit_control_prelude)
+ * in what `stmt` evaluates, run ahead of it with what it evaluates before
+ * them (ctl_linearize_value): its value (an initializer, the value assigned
+ * or added in, a returned value, an `if` condition or a `match` subject, an
+ * expression statement), or its list of values (a multi-value `return`, a
+ * `print`), or an assignment's target indexes and then its value. A loop's
+ * condition is evaluated again on every pass, at the top of the body, and a
+ * `for` loop's init and increment where they run (the loop emitters). A
+ * statement that keeps the struct results of the calls in its value in
+ * temporaries it opens itself (an `if` condition, a `match` subject, an
+ * expression statement) has this run once they are open (`temps_open`), by
+ * its emitter (stmt_control_prelude_deferred): the operands evaluated ahead
+ * hold those results in them too. g_ctl_deferred is the statement waiting
+ * for that. */
+static ASTNode* g_ctl_deferred = NULL;
+
+/* #2798: a builder call its statement runs (gen->trailing_stmt_call) runs
+ * the builder's block first and evaluates its arguments after it, so the
+ * constructs in them run there, from the statement's emitter, after the
+ * block: stmt_control_run leaves such a statement alone. */
+static int stmt_runs_builder(CodeGenerator* gen) {
+    ASTNode* call = gen->trailing_stmt_call;
+    return call && call->value && is_builder_func_reg(gen, call->value);
+}
+
+static void emit_builder_args_prelude(CodeGenerator* gen, ASTNode* call) {
+    if (!hoist_ready(gen)) return;
+    ASTNode* ops[64];
+    int n = 0;
+    for (int i = 0; i < call->child_count && n < 64; i++) {
+        ASTNode* a = call->children[i];
+        if (a && a->type == AST_CLOSURE && a->value && strcmp(a->value, "trailing") == 0) continue;
+        if (a && a->type == AST_NAMED_ARG) a = a->child_count > 0 ? a->children[0] : NULL;
+        if (a) ops[n++] = a;
+    }
+    ctl_linearize_list(gen, ops, n);
+}
+
+static void stmt_control_run(CodeGenerator* gen, ASTNode* stmt, int temps_open) {
+    if (stmt_runs_builder(gen)) return;
     ASTNode* v = NULL;
+    ASTNode* ops[64];
+    int n = 0;
     int whole = 0;          /* an expression statement that is nothing else */
     int own_temps = 0;      /* the statement sets up its struct temporaries */
     switch (stmt->type) {
         case AST_VARIABLE_DECLARATION:
+        case AST_CONST_DECLARATION:
             if (stmt->child_count >= 1) v = stmt->children[0];
             break;
-        case AST_ASSIGNMENT:
-            if (stmt->child_count >= 2 && stmt->children[0] &&
-                stmt->children[0]->type == AST_IDENTIFIER) v = stmt->children[1];
+        case AST_ASSIGNMENT: {
+            if (stmt->child_count < 2) break;
+            ASTNode* lhs = stmt->children[0];
+            if (lhs && lhs->type == AST_IDENTIFIER) {
+                v = stmt->children[1];
+                break;
+            }
+            /* `a[i] = v`: the target's indexes, then the value (#2516). */
+            ASTNode* t = lhs;
+            while (t && (t->type == AST_MEMBER_ACCESS || t->type == AST_ARRAY_ACCESS) &&
+                   t->child_count > 0) {
+                if (t->type == AST_ARRAY_ACCESS && t->child_count >= 2 && n < 63)
+                    ops[n++] = t->children[1];
+                t = t->children[0];
+            }
+            /* Collected from the outside in; evaluated from the inside out. */
+            for (int i = 0; i < n / 2; i++) {
+                ASTNode* x = ops[i];
+                ops[i] = ops[n - 1 - i];
+                ops[n - 1 - i] = x;
+            }
+            ops[n++] = stmt->children[1];
+            break;
+        }
+        case AST_COMPOUND_ASSIGNMENT:
+            if (stmt->child_count >= 2) v = stmt->children[1];
+            break;
+        case AST_TUPLE_DESTRUCTURE:
+            if (stmt->child_count >= 2) v = stmt->children[stmt->child_count - 1];
             break;
         case AST_RETURN_STATEMENT:
-            if (stmt->child_count == 1) v = stmt->children[0];
+        case AST_PRINT_STATEMENT:
+            /* A value, or values evaluated in order (a multi-value return). */
+            if (stmt->type == AST_RETURN_STATEMENT && stmt->child_count == 1) {
+                v = stmt->children[0];
+                break;
+            }
+            for (int i = 0; i < stmt->child_count && n < 64; i++) ops[n++] = stmt->children[i];
             break;
         case AST_IF_STATEMENT:
+        case AST_MATCH_STATEMENT:
             if (stmt->child_count >= 1) v = stmt->children[0];
             own_temps = 1;
             break;
@@ -12314,48 +12384,134 @@ static void stmt_control_prelude(CodeGenerator* gen, ASTNode* stmt) {
         default:
             break;
     }
-    for (ASTNode* e = v; e; ) {
-        if (own_temps && is_control_value(gen, e)) {
-            ASTNode** nodes = NULL;
-            int count = 0, cap = 0;
-            collect_value_struct_temps(gen, e, TEMP_FREE, &nodes, &count, &cap);
-            free(nodes);
-            if (count > 0) return;
-        }
-        if (emit_control_prelude(gen, e, whole && e == v)) return;
-        if (e->child_count < 1 || !e->children[0]) return;
-        switch (e->type) {
-            case AST_FUNCTION_CALL: {
-                ASTNode* a = NULL;
-                for (int i = 0; i < e->child_count; i++) {
-                    a = e->children[i];
-                    if (!a || a->type != AST_LITERAL) break;
-                }
-                if (!a || a->type == AST_LITERAL || a->type == AST_NAMED_ARG ||
-                    (a->type == AST_CLOSURE && a->value && strcmp(a->value, "trailing") == 0))
-                    return;
-                e = a;
-                break;
-            }
-            case AST_BINARY_EXPRESSION: {
-                /* Not an assignment, `=` or compound: its target is not
-                 * evaluated first. */
-                const char* op = e->value;
-                size_t n = op ? strlen(op) : 0;
-                if (n == 0 || e->child_count != 2 || !e->children[1] ||
-                    (op[n - 1] == '=' && strcmp(op, "==") != 0 && strcmp(op, "!=") != 0 &&
-                     strcmp(op, "<=") != 0 && strcmp(op, ">=") != 0)) return;
-                e = e->children[0]->type == AST_LITERAL ? e->children[1] : e->children[0];
-                break;
-            }
-            case AST_UNARY_EXPRESSION:
-            case AST_IF_EXPRESSION:
-                e = e->children[0];
-                break;
-            default:
-                return;
+    if (v) {
+        ops[0] = v;
+        n = 1;
+    }
+    int any = 0;
+    for (int i = 0; i < n && !any; i++) any = ctl_contains(gen, ops[i]);
+    if (!any) return;
+    if (own_temps && !temps_open) {
+        ASTNode** nodes = NULL;
+        int count = 0, cap = 0;
+        collect_value_struct_temps(gen, v, stmt->type == AST_MATCH_STATEMENT ? TEMP_KEPT : TEMP_FREE,
+                                   &nodes, &count, &cap);
+        if (stmt->type == AST_EXPRESSION_STATEMENT)
+            collect_stmt_struct_temps(gen, stmt->children[0], &nodes, &count, &cap);
+        free(nodes);
+        if (count > 0) {
+            g_ctl_deferred = stmt;
+            return;
         }
     }
+    if (v) ctl_linearize_value(gen, v, whole);
+    else if (hoist_ready(gen)) ctl_linearize_list(gen, ops, n);
+}
+
+static void stmt_control_prelude(CodeGenerator* gen, ASTNode* stmt) {
+    stmt_control_run(gen, stmt, 0);
+}
+
+/* The statement's emitter has opened its struct temporaries: run what
+ * stmt_control_prelude left for then, if it left anything. */
+static void stmt_control_prelude_deferred(CodeGenerator* gen, ASTNode* stmt) {
+    if (g_ctl_deferred != stmt) return;
+    g_ctl_deferred = NULL;
+    stmt_control_run(gen, stmt, 1);
+}
+
+/* #2798: condition `cond`, which holds a construct that runs statements,
+ * evaluated as statements here: the struct results of the calls in it held
+ * in temporaries as emit_condition holds them, then its constructs and what
+ * it evaluates before them (ctl_linearize_value), then its value into an
+ * int, then the temporaries destroyed. Returns the int's name. */
+static const char* emit_condition_ahead(CodeGenerator* gen, ASTNode* cond) {
+    static int seq = 0;
+    ASTNode** nodes = NULL;
+    int count = 0, cap = 0;
+    collect_value_struct_temps(gen, cond, TEMP_FREE, &nodes, &count, &cap);
+    const char** names = count > 0
+        ? (const char**)aether_xrealloc(NULL, sizeof(char*) * (size_t)count) : NULL;
+    for (int i = 0; i < count; i++) {
+        const char* ct = get_c_type(nodes[i]->node_type);
+        names[i] = cg_internf("_ae_cta%d", seq++);
+        hoist_declare(gen, ct, names[i]);
+        print_indent(gen);
+        fprintf(gen->output, "%s = (%s){0};\n", names[i], ct);
+    }
+    ASTNode** outer_nodes;
+    const char** outer_names;
+    int outer_count;
+    stmt_struct_temps_get(&outer_nodes, &outer_names, &outer_count);
+    if (count > 0) stmt_struct_temps_set(nodes, names, count);
+    ctl_linearize_value(gen, cond, 0);
+    const char* cv = cg_internf("_ae_cva%d", seq++);
+    hoist_declare(gen, "int", cv);
+    print_indent(gen);
+    fprintf(gen->output, "%s = !!(", cv);
+    gen->in_condition = 1;
+    generate_expression(gen, cond);
+    gen->in_condition = 0;
+    fprintf(gen->output, ");\n");
+    stmt_struct_temps_set(outer_nodes, outer_names, outer_count);
+    for (int i = 0; i < count; i++) {
+        print_indent(gen);
+        fprintf(gen->output, "%s_destroy(&%s);\n",
+                struct_owning_strings(gen, nodes[i]->node_type), names[i]);
+    }
+    free(nodes);
+    free(names);
+    return cv;
+}
+
+/* #2798: a loop condition `cond` that holds a construct running statements:
+ * emitted at the top of the loop's body, `<constructs>; if (!(cond))
+ * break;`, so it is evaluated, constructs and all, on every pass, a
+ * `continue` included. 0 when the loop keeps its condition in its head. */
+static int loop_condition_in_body(CodeGenerator* gen, ASTNode* cond) {
+    return cond && hoist_ready(gen) && ctl_contains(gen, cond);
+}
+
+static void emit_loop_condition_in_body(CodeGenerator* gen, ASTNode* cond) {
+    int ctl_depth = control_prelude_depth();
+    int order_depth = order_prelude_depth();
+    ASTNode** nodes = NULL;
+    int count = 0, cap = 0;
+    collect_value_struct_temps(gen, cond, TEMP_FREE, &nodes, &count, &cap);
+    free(nodes);
+    if (count > 0) {
+        /* Struct results the condition holds: destroyed once it is known. */
+        const char* cv = emit_condition_ahead(gen, cond);
+        print_indent(gen);
+        fprintf(gen->output, "if (!%s) break;\n", cv);
+    } else {
+        ctl_linearize_value(gen, cond, 0);
+        print_indent(gen);
+        fprintf(gen->output, "if (!(");
+        emit_condition(gen, cond);
+        fprintf(gen->output, ")) break;\n");
+    }
+    control_prelude_end(ctl_depth);
+    order_prelude_end(order_depth);
+}
+
+/* `<lhs> = <value>;` emitted as a statement of its own where no Aether
+ * statement is being emitted (an actor state's initializer, in its spawn
+ * function), as generate_statement emits one: its temporaries declared
+ * ahead of it (#2765), and the constructs in it that run statements run
+ * first (#2798). */
+void generate_value_statement(CodeGenerator* gen, const char* lhs, ASTNode* value) {
+    hoist_begin(gen);
+    int order_depth = order_prelude_depth();
+    int ctl_depth = control_prelude_depth();
+    if (hoist_ready(gen) && ctl_contains(gen, value)) ctl_linearize_value(gen, value, 0);
+    print_indent(gen);
+    fprintf(gen->output, "%s = ", lhs);
+    generate_expression(gen, value);
+    fprintf(gen->output, ";\n");
+    control_prelude_end(ctl_depth);
+    order_prelude_end(order_depth);
+    hoist_end(gen);
 }
 
 void generate_statement(CodeGenerator* gen, ASTNode* stmt) {
@@ -12374,6 +12530,7 @@ void generate_statement(CodeGenerator* gen, ASTNode* stmt) {
         stmt_control_prelude(gen, stmt);
     }
     generate_statement_body(gen, stmt);
+    if (g_ctl_deferred == stmt) g_ctl_deferred = NULL;
     control_prelude_end(ctl_depth);
     order_prelude_end(order_depth);
     if (has_vt) value_temps_close(gen, stmt, &vt);
@@ -13850,6 +14007,7 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                                             print_indent(gen);
                                             fprintf(gen->output, "_aether_ctx_push(_bcfg);\n");
                                             emit_trailing_block_body(gen, trailing->children[bi]);
+                                            emit_builder_args_prelude(gen, reinit_call);   /* #2798 */
                                             print_indent(gen);
                                             const char* c_rfn = codegen_normalise_callee(
                                                 safe_c_name(reinit_call->value));
@@ -14399,6 +14557,7 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                                             fprintf(gen->output, "_aether_ctx_push(_bcfg);\n");
                                             // Run trailing block
                                             emit_trailing_block_body(gen, trailing->children[bi]);
+                                            emit_builder_args_prelude(gen, init_call);   /* #2798 */
                                             // Reassign variable with defer config
                                             print_indent(gen);
                                             const char* c_dfn = codegen_normalise_callee(
@@ -14572,6 +14731,7 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                                         print_indent(gen);
                                         fprintf(gen->output, "_aether_ctx_push(_bcfg);\n");
                                         emit_trailing_block_body(gen, trailing->children[bi]);
+                                        emit_builder_args_prelude(gen, rhs);   /* #2798 */
                                         // Reassign with config
                                         print_indent(gen);
                                         gen->generating_lvalue = 1;
@@ -14715,8 +14875,17 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
             // item #2.
             hoist_common_vars(gen, stmt);
 
+            /* #2798: a condition holding a construct that runs statements
+             * and struct results it keeps in temporaries, evaluated ahead. */
+            const char* if_cv = NULL;
+            if (g_ctl_deferred == stmt && stmt->child_count > 0) {
+                g_ctl_deferred = NULL;
+                if_cv = emit_condition_ahead(gen, stmt->children[0]);
+                print_indent(gen);
+            }
             fprintf(gen->output, "if (");
-            if (stmt->child_count > 0) emit_condition(gen, stmt->children[0]);   /* #2582 */
+            if (if_cv) fprintf(gen->output, "%s", if_cv);
+            else if (stmt->child_count > 0) emit_condition(gen, stmt->children[0]);   /* #2582 */
             fprintf(gen->output, ") {\n");
 
             {
@@ -14834,6 +15003,26 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
             ASTNode* step = stmt->child_count > 2 ? stmt->children[2] : NULL;
             int step_stmt = step && (step->type == AST_VARIABLE_DECLARATION ||
                                      step->type == AST_COMPOUND_ASSIGNMENT);
+            /* #2798: an increment expression holding a construct that runs
+             * statements is emitted where a step statement is, with its
+             * constructs ahead of it. */
+            int step_ctl = step && !step_stmt && hoist_ready(gen) && ctl_contains(gen, step);
+            /* #2798: so are the constructs in an init the header keeps, ahead
+             * of the loop: nothing in it is evaluated before the init. */
+            if (!own_block && for_init && hoist_ready(gen)) {
+                ASTNode* iv = for_init;
+                if (iv->type == AST_VARIABLE_DECLARATION) {
+                    iv = iv->child_count > 0 ? iv->children[0] : NULL;
+                } else if (iv->type == AST_BINARY_EXPRESSION && iv->value &&
+                           strcmp(iv->value, "=") == 0 && iv->child_count == 2 &&
+                           iv->children[0] && iv->children[0]->type == AST_IDENTIFIER) {
+                    iv = iv->children[1];
+                }
+                if (iv && ctl_contains(gen, iv)) {
+                    ctl_linearize_value(gen, iv, 0);
+                    print_indent(gen);
+                }
+            }
             if (own_block) print_indent(gen);
             fprintf(gen->output, "for (");
             if (!own_block && for_init) {
@@ -14851,12 +15040,16 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                 }
             }
             fprintf(gen->output, "; ");
-            if (stmt->child_count > 1 && stmt->children[1]) {
+            /* #2798: a condition holding a construct that runs statements is
+             * evaluated at the top of the body, each pass, after the step. */
+            int for_cond_in_body = stmt->child_count > 1 &&
+                                   loop_condition_in_body(gen, stmt->children[1]);
+            if (stmt->child_count > 1 && stmt->children[1] && !for_cond_in_body) {
                 generate_expression(gen, stmt->children[1]); // condition
             }
             // Note: If no condition, C for loop becomes infinite (for (;;))
             fprintf(gen->output, "; ");
-            if (step && !step_stmt) {
+            if (step && !step_stmt && !step_ctl) {
                 generate_expression(gen, step); // increment
             }
             fprintf(gen->output, ") {\n");
@@ -14885,11 +15078,12 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                 gen->loop_label_id[for_lbl_idx] = gen->next_loop_label_id++;
                 gen->loop_label_break_used[for_lbl_idx] = 0;
                 gen->loop_label_continue_used[for_lbl_idx] = 0;
-                gen->loop_step_in_body[for_lbl_idx] = step_stmt;
+                gen->loop_step_in_body[for_lbl_idx] = step_stmt || step_ctl;
                 gen->loop_c_depth[for_lbl_idx] = gen->c_break_depth + 1;
                 gen->loop_nest_depth++;
             }
             gen->c_break_depth++;
+            if (for_cond_in_body) emit_loop_condition_in_body(gen, stmt->children[1]);
             if (stmt->child_count > 3 && stmt->children[3]) {
                 // Body is always a statement (could be a block or single statement)
                 generate_statement(gen, stmt->children[3]); // body
@@ -14902,7 +15096,18 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
             if (for_lbl_idx >= 0 && gen->loop_label_continue_used[for_lbl_idx]) {
                 print_line(gen, "__ae_cont_%d: ;", gen->loop_label_id[for_lbl_idx]);
             }
-            if (step_stmt) generate_statement(gen, step);
+            if (step_stmt) {
+                generate_statement(gen, step);
+            } else if (step_ctl) {
+                int ctl_depth = control_prelude_depth();
+                int order_depth = order_prelude_depth();
+                ctl_linearize_value(gen, step, 1);
+                print_indent(gen);
+                generate_expression(gen, step);
+                fprintf(gen->output, ";\n");
+                control_prelude_end(ctl_depth);
+                order_prelude_end(order_depth);
+            }
             unindent(gen);
 
             print_line(gen, "}");
@@ -14958,8 +15163,13 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
             }
 
             if (td_id) print_indent(gen);   /* the table ended on a fresh line */
+            /* #2798: a condition holding a construct that runs statements is
+             * evaluated at the top of the body, each pass. */
+            int while_cond_in_body = stmt->child_count > 0 &&
+                                     loop_condition_in_body(gen, stmt->children[0]);
             fprintf(gen->output, "while (");
-            if (stmt->child_count > 0) emit_condition(gen, stmt->children[0]);   /* #2582 */
+            if (while_cond_in_body) fprintf(gen->output, "1");
+            else if (stmt->child_count > 0) emit_condition(gen, stmt->children[0]);   /* #2582 */
             fprintf(gen->output, ") {\n");
 
             indent(gen);
@@ -15000,6 +15210,7 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                 gen->td_id = td_id;
                 g_td_in_head = 1;   /* cleared when the dispatch switch starts */
             }
+            if (while_cond_in_body) emit_loop_condition_in_body(gen, stmt->children[0]);
             if (stmt->child_count > 1) {
                 generate_statement(gen, stmt->children[1]);
             }
@@ -15274,6 +15485,7 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                      * field of it, say) is read by every arm. */
                     has_subject_temps = value_temps_open_expr(gen, match_expr, TEMP_KEPT,
                                                               &subject_temps);
+                    stmt_control_prelude_deferred(gen, stmt);   /* #2798 */
                     print_indent(gen);
                     fprintf(gen->output, "%s _match_val = ", match_c_type);
                     generate_expression(gen, match_expr);
@@ -16249,6 +16461,12 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
         case AST_EXPRESSION_STATEMENT:
             if (stmt->child_count > 0) {
                 ASTNode* inner = stmt->children[0];
+                /* The stored value's temporaries, still open for the plain
+                 * store below when the value's constructs ran with them
+                 * (#2798). */
+                ValueTemps held_vt;
+                memset(&held_vt, 0, sizeof(held_vt));
+                int held_vt_open = 0;
 
                 /* Struct-field heap-string ownership (#465). Many
                  * parsers land `<var>.<field> = <rhs>` as
@@ -16275,11 +16493,22 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                     int has_store_vt = !has_trailing_block_call(inner->children[1]) &&
                                        value_temps_open_expr(gen, inner->children[1], TEMP_KEPT,
                                                              &store_vt);
+                    /* #2798: the constructs in the value run once its
+                     * temporaries are open, whichever store takes it: the
+                     * temporaries then stay open until the statement is
+                     * done, the plain store's too. */
+                    int ctl_ran = has_store_vt && g_ctl_deferred == stmt;
+                    if (ctl_ran) stmt_control_prelude_deferred(gen, stmt);
                     int stored = emit_struct_field_heap_assign(gen, inner->children[0],
                                                                inner->children[1]) ||
                                  emit_cell_string_element_store(gen, inner->children[0],
                                                                 inner->children[1]);   /* #2474 */
-                    if (has_store_vt) temps_close(gen, &store_vt, 1);
+                    if (has_store_vt && ctl_ran && !stored) {
+                        held_vt = store_vt;
+                        held_vt_open = 1;
+                    } else if (has_store_vt) {
+                        temps_close(gen, &store_vt, 1);
+                    }
                     if (stored) break;
                     /* `obj.field = builder(args) { ... }`: the right side
                      * carries a trailing block. Emitted as a plain binary
@@ -16369,6 +16598,7 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
 
                     // 3. Context popped by the block's own scope exit
                     //    (see emit_trailing_block_body).
+                    emit_builder_args_prelude(gen, inner);   /* #2798 */
 
                     // 4. Call function with config as extra last arg
                     print_indent(gen);
@@ -16515,33 +16745,6 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                             gen->discard_call_node = NULL;
                             break;
                         }
-                        /* A thrown-away string the statement owns (a
-                         * heap-returning call, an interpolation, an ask
-                         * answered with a string): freed here, as `_ = e`
-                         * frees it. Discarded bare, it leaked one buffer
-                         * per statement. */
-                        /* #2750: so is a `string?` an Aether function
-                         * handed over, when it holds one. */
-                        if (is_owned_opt_string_call(gen, inner)) {
-                            gen->discard_call_node = NULL;
-                            fprintf(gen->output, "{ %s _od = ", get_c_type(inner->node_type));
-                            generate_expression(gen, inner);
-                            fprintf(gen->output, "; if (_od.has) aether_heap_str_free((void*)_od.val); }\n");
-                            break;
-                        }
-                        if (inner && (inner->type == AST_FUNCTION_CALL ||
-                                      inner->type == AST_STRING_INTERP ||
-                                      inner->type == AST_SEND_ASK ||
-                                      is_owned_opt_string_unwrap(gen, inner)) &&
-                            is_heap_string_expr(gen, inner)) {
-                            /* The value is used (freed), not discarded: an
-                             * argument drain keeps the result. */
-                            gen->discard_call_node = NULL;
-                            fprintf(gen->output, "aether_heap_str_free((void*)(");
-                            generate_expression(gen, inner);
-                            fprintf(gen->output, "));\n");
-                            break;
-                        }
                         /* A struct a call returns by value, owning strings,
                          * that nothing in this statement keeps: the result
                          * thrown away, or the argument of another call (a
@@ -16553,7 +16756,10 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                          * statement now keeps each in a temporary and
                          * destroys it once done, as a local's scope exit
                          * would. Zeroed first, so one a short circuit
-                         * skipped destroys nothing. */
+                         * skipped destroys nothing. So does a statement
+                         * that frees the string it throws away (below):
+                         * one read from such a struct's field and handed to
+                         * a call left the struct's strings behind (#2817). */
                         ASTNode** st_nodes = NULL;
                         int st_count = 0, st_cap = 0;
                         collect_stmt_struct_temps(gen, inner, &st_nodes, &st_count, &st_cap);
@@ -16573,17 +16779,43 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                             }
                             stmt_struct_temps_set(st_nodes, st_names, st_count);
                         }
-                        int discards_value = inner && (
-                            inner->type == AST_IDENTIFIER ||
-                            inner->type == AST_LITERAL ||
-                            inner->type == AST_UNARY_EXPRESSION ||
-                            inner->type == AST_SEND_ASK ||
-                            (inner->type == AST_BINARY_EXPRESSION &&
-                             !(inner->value && strcmp(inner->value, "=") == 0)));
-                        if (discards_value) fprintf(gen->output, "(void)(");
-                        generate_expression(gen, inner);
-                        if (discards_value) fprintf(gen->output, ")");
-                        fprintf(gen->output, ";");
+                        stmt_control_prelude_deferred(gen, stmt);   /* #2798 */
+                        /* A thrown-away string the statement owns (a
+                         * heap-returning call, an interpolation, an ask
+                         * answered with a string): freed here, as `_ = e`
+                         * frees it. Discarded bare, it leaked one buffer
+                         * per statement. */
+                        /* #2750: so is a `string?` an Aether function
+                         * handed over, when it holds one. */
+                        if (is_owned_opt_string_call(gen, inner)) {
+                            gen->discard_call_node = NULL;
+                            fprintf(gen->output, "{ %s _od = ", get_c_type(inner->node_type));
+                            generate_expression(gen, inner);
+                            fprintf(gen->output, "; if (_od.has) aether_heap_str_free((void*)_od.val); }");
+                        } else if (inner && (inner->type == AST_FUNCTION_CALL ||
+                                             inner->type == AST_STRING_INTERP ||
+                                             inner->type == AST_SEND_ASK ||
+                                             is_owned_opt_string_unwrap(gen, inner)) &&
+                                   is_heap_string_expr(gen, inner)) {
+                            /* The value is used (freed), not discarded: an
+                             * argument drain keeps the result. */
+                            gen->discard_call_node = NULL;
+                            fprintf(gen->output, "aether_heap_str_free((void*)(");
+                            generate_expression(gen, inner);
+                            fprintf(gen->output, "));");
+                        } else {
+                            int discards_value = inner && (
+                                inner->type == AST_IDENTIFIER ||
+                                inner->type == AST_LITERAL ||
+                                inner->type == AST_UNARY_EXPRESSION ||
+                                inner->type == AST_SEND_ASK ||
+                                (inner->type == AST_BINARY_EXPRESSION &&
+                                 !(inner->value && strcmp(inner->value, "=") == 0)));
+                            if (discards_value) fprintf(gen->output, "(void)(");
+                            generate_expression(gen, inner);
+                            if (discards_value) fprintf(gen->output, ")");
+                            fprintf(gen->output, ";");
+                        }
                         if (st_count > 0) {
                             stmt_struct_temps_set(st_outer_nodes, st_outer_names, st_outer_count);
                             for (int ti = 0; ti < st_count; ti++) {
@@ -16616,9 +16848,10 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                         }
                     }
                 }
+                if (held_vt_open) temps_close(gen, &held_vt, 1);
             }
             break;
-            
+
         case AST_PRINT_STATEMENT:
             // Generate printf call with all arguments
             if (stmt->child_count > 0) {

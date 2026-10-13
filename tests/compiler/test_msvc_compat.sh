@@ -20,7 +20,7 @@
 # C4047 the wrong level of indirection, C4090 a dropped qualifier) are errors;
 # the rest of /W3 is printed and allowed.
 #
-# The programs of tests 5-12 are tests/regression/test_issue<n>_*.ae, which
+# The programs of tests 5-14 are tests/regression/test_issue<n>_*.ae, which
 # the .ae sweep runs on the GCC path. Under gcc they are also built and run
 # with AETHER_GCC_COMPAT forced to 0, when build/ae is there, so the plain C
 # forms are checked for what they compute, not only that they compile.
@@ -245,10 +245,10 @@ generate closure_str
 [ -z "$use_gcc" ] || strict_c11 closure_str "A string stored into a try-written array element"
 [ -z "$use_cl" ] || cl_compile closure_str "A string stored into a try-written array element"
 
-# Tests 5-12: every construct that needs a temporary in the middle of an
+# Tests 5-14: every construct that needs a temporary in the middle of an
 # expression, one program per family, each of which the .ae sweep runs on the
-# GCC path and checks. All of them were GNU statement expressions here
-# (#2765), and left_to_right read operands out of order (#2813).
+# GCC path and checks. All of them were GNU statement expressions here (#2765,
+# #2798), and left_to_right read operands out of order (#2813).
 #   string_slots      a string taken into an owning slot: an element of a
 #                     string array, a binding through a call that hands its
 #                     argument back, a returned `if` view, a `string?` or a
@@ -276,8 +276,16 @@ generate closure_str
 #   left_to_right     operands a later call writes, narrow globals and fields
 #                     reached through pointers among them, read before it in
 #                     interpolations, arguments, literals and operations (#2813)
+#   statement_constructs_anywhere
+#                     the constructs of statement_values after other operands,
+#                     behind `&&` and `||`, and in loop conditions (#2798)
+#   statement_constructs_in_parts
+#                     the same in parts that run on a test, compound
+#                     assignments, fields, `for` heads, `match` arms, trailing
+#                     calls' arguments, beside statements' struct temporaries
 PROGS="2765_string_slots 2765_call_temps 2765_operand_order 2765_optionals 2765_struct_values
-    2765_statement_values 2765_helper_names 2813_left_to_right"
+    2765_statement_values 2765_helper_names 2813_left_to_right 2798_statement_constructs_anywhere
+    2798_statement_constructs_in_parts"
 for issue_prog in $PROGS; do
     prog="${issue_prog#*_}"
     cp "tests/regression/test_issue$issue_prog.ae" "$TMP/$prog.ae"

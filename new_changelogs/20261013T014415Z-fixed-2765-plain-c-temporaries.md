@@ -12,8 +12,8 @@
   operand's type where it does not. An `or` with a block handler, a `!` that
   propagates an error and a call whose trailing block runs where its value
   is used run as statements ahead of their statement when they are the
-  first thing it evaluates (elsewhere they are still statement expressions,
-  #2798). Every program of the sweep the compiler translates (975 of 977)
+  first thing it evaluates (anywhere else too since #2798). Every program
+  of the sweep the compiler translates (975 of 977)
   now compiles as strict C11 with `AETHER_GCC_COMPAT 0` and runs right that
   way under gcc; under cl.exe 933 compile, the rest on other GCC-isms
   (#2799). `make test-msvc-compat` compiles a program per construct as

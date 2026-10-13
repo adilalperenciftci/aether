@@ -63,6 +63,16 @@ int codegen_hoist_site(const char* s, size_t n);
  * (codegen_expr.c). */
 int is_control_value(CodeGenerator* gen, ASTNode* e);
 int emit_control_prelude(CodeGenerator* gen, ASTNode* e, int discarded);
+/* #2798: the same anywhere in a statement: does `e` hold one, and run the
+ * ones a value or a list of operands holds, with what is evaluated before
+ * them, ahead of the statement (1 when every one is bound). */
+int ctl_contains(CodeGenerator* gen, ASTNode* e);
+int ctl_linearize_value(CodeGenerator* gen, ASTNode* e, int discarded);
+int ctl_linearize_list(CodeGenerator* gen, ASTNode** ops, int n);
+/* `<lhs> = <value>;` as a statement of its own, outside any Aether
+ * statement (an actor state's initializer): temporaries and constructs as
+ * generate_statement handles a statement's. */
+void generate_value_statement(CodeGenerator* gen, const char* lhs, ASTNode* value);
 int control_prelude_depth(void);
 void control_prelude_end(int depth);
 
