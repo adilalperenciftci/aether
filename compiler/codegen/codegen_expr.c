@@ -5234,6 +5234,14 @@ void generate_sized_array_argument(CodeGenerator* gen, ASTNode* arg, Type* param
     fprintf(gen->output, ", sizeof(%s[%d])))", et, param_type->array_size);
 }
 
+int is_empty_slice_value(const ASTNode* e) {
+    if (!e || e->type != AST_SLICE_FROM_ARRAY || e->child_count < 1 || !e->children[0])
+        return 0;
+    const ASTNode* src = e->children[0];
+    return src->type == AST_NULL_LITERAL ||
+           (src->type == AST_ARRAY_LITERAL && src->child_count == 0);
+}
+
 void generate_expression_as_slice(CodeGenerator* gen, ASTNode* expr) {
     if (expr && type_is_sized_array(expr->node_type) && expr->node_type->array_size > 0) {
         fprintf(gen->output, "aether_slice_make((void*)(");
@@ -6354,9 +6362,15 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
         case AST_SLICE_FROM_ARRAY:
             /* #1286: a `T[N]` array (or `null`, length 0) into a `T[]` slot.
              * An array LITERAL becomes a C compound literal, which lives as
-             * long as the enclosing block, the same as the `T[N]` it is. */
+             * long as the enclosing block, the same as the `T[N]` it is. The
+             * empty literal `[]` has no elements to hold: like `null`, it is
+             * the empty slice over no storage (#2767). */
             if (expr->child_count > 0) {
                 ASTNode* src = expr->children[0];
+                if (is_empty_slice_value(expr)) {
+                    fprintf(gen->output, "aether_slice_make((void*)0, 0)");
+                    break;
+                }
                 fprintf(gen->output, "aether_slice_make((void*)(");
                 if (src->type == AST_ARRAY_LITERAL && src->child_count > 0)
                     fprintf(gen->output, "(%s[])", slice_elem_c_type(expr->node_type));

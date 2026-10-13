@@ -72,7 +72,10 @@ int slice_coerce_slot(ASTNode** slot, const Type* target, int target_is_c_view) 
                           (target->kind == TYPE_ARRAY && target_is_c_view);
 
     if (slot_is_slice) {
-        if (e->type == AST_NULL_LITERAL) {
+        /* `null`, and the empty literal `[]` (no elements, so no array to
+         * view: its type is no `T[N]`), are the empty slice (#2767). */
+        if (e->type == AST_NULL_LITERAL ||
+            (e->type == AST_ARRAY_LITERAL && e->child_count == 0)) {
             *slot = wrap(e, AST_SLICE_FROM_ARRAY, "0", clone_type((Type*)target));
             return 1;
         }

@@ -2788,6 +2788,23 @@ static int fn_name_matches_signature(SymbolTable* table, ASTNode* rhs, Type* tar
  * holding the function's address as a `var` does (#2648); it is never
  * re-bound, so only its annotation counts. */
 static ASTNode* global_var_decl(ASTNode* child);
+
+/* The module-level `var` a bare `name = value` binding assigns: the
+ * program's global of that name, when no local of it is in scope (#701).
+ * NULL for any other binding. */
+static ASTNode* rebound_global_var(ASTNode* stmt, SymbolTable* table) {
+    if (stmt->type != AST_VARIABLE_DECLARATION || !stmt->type_inferred || !stmt->value)
+        return NULL;
+    for (SymbolTable* s = table; s && s->parent; s = s->parent)
+        if (lookup_symbol_local(s, stmt->value)) return NULL;
+    ASTNode* program = aether_typecheck_program_node();
+    for (int i = 0; program && i < program->child_count; i++) {
+        ASTNode* g = global_var_decl(program->children[i]);
+        if (g && strcmp(g->value, stmt->value) == 0) return g;
+    }
+    return NULL;
+}
+
 static Type* fnptr_binding_slot(ASTNode* stmt, SymbolTable* table) {
     Type* t = stmt->node_type;
     if (stmt->type == AST_CONST_DECLARATION &&
@@ -2802,13 +2819,10 @@ static Type* fnptr_binding_slot(ASTNode* stmt, SymbolTable* table) {
             return t && t->kind == TYPE_FUNCTION && t->is_fnptr ? t : NULL;
         }
     }
-    ASTNode* program = aether_typecheck_program_node();
-    for (int i = 0; program && i < program->child_count; i++) {
-        ASTNode* g = global_var_decl(program->children[i]);
-        if (g && strcmp(g->value, stmt->value) == 0) {
-            t = g->node_type;
-            return t && t->kind == TYPE_FUNCTION && t->is_fnptr ? t : NULL;
-        }
+    ASTNode* g = rebound_global_var(stmt, table);
+    if (g) {
+        t = g->node_type;
+        return t && t->kind == TYPE_FUNCTION && t->is_fnptr ? t : NULL;
     }
     return NULL;
 }
@@ -8107,7 +8121,12 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                     int is_struct_init = stmt->annotation &&
                                          strcmp(stmt->annotation, "global_var") == 0 &&
                                          struct_typed && is_const_struct_literal(init, table);
-                    if (!is_array_const && !is_struct_init) {
+                    /* #2767: `[]` into a `T[]` global is the empty slice, a
+                     * constant as `null` is. */
+                    int is_empty_slice = init->type == AST_ARRAY_LITERAL &&
+                                         init->child_count == 0 &&
+                                         type_is_slice(stmt->node_type);
+                    if (!is_array_const && !is_struct_init && !is_empty_slice) {
                         char msg[512];
                         if (stmt->annotation && strcmp(stmt->annotation, "global_var") == 0) {
                             /* #701: a module-level `var` lowers to a C file-scope
@@ -8507,6 +8526,29 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                 /* #1286: `T[N]` / `null` into a `T[]` binding becomes a slice. */
                 if (stmt->child_count > 0 && stmt->node_type)
                     slice_coerce_slot(&stmt->children[0], stmt->node_type, 0);
+                /* #2785: so does one into a module-level `T[]` var that a
+                 * bare `name = value` assigns, with no local of the name in
+                 * scope. The binding writes the global, so it has the
+                 * global's type, as a re-bind of a local has the local's. */
+                if (stmt->child_count > 0) {
+                    ASTNode* gv = rebound_global_var(stmt, table);
+                    if (gv && type_is_slice(gv->node_type)) {
+                        int empty = init->type == AST_NULL_LITERAL ||
+                                    (init->type == AST_ARRAY_LITERAL && init->child_count == 0);
+                        if (!empty && !is_assignable(init_type, gv->node_type)) {
+                            char msg[256];
+                            snprintf(msg, sizeof(msg),
+                                     "Type mismatch in assignment to '%s': expected %s, got %s",
+                                     stmt->value, type_name(gv->node_type), type_name(init_type));
+                            free_type(init_type);
+                            type_error(msg, stmt->line, stmt->column);
+                            return 0;
+                        }
+                        slice_coerce_slot(&stmt->children[0], gv->node_type, 0);
+                        if (stmt->node_type) free_type(stmt->node_type);
+                        stmt->node_type = clone_type(gv->node_type);
+                    }
+                }
                 // #1044 enum-indexed array `[E]T`: the index type must be a real
                 // enum, and a literal initializer supplies one value per member,
                 // in declaration order (an empty `[]` zero-initialises every

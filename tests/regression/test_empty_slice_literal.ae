@@ -1,0 +1,113 @@
+// Regression (#2767, #2785): the empty array literal `[]` in a `T[]` slot is
+// the empty slice, as `null` is: no elements, `.len` 0, no storage.
+//
+// A slice is an AetherSlice struct in C. The type checker turns a `T[N]`
+// array or `null` in a slice slot into one, but not `[]`, whose type is no
+// `T[N]`, so it reached C as an array initializer: `let xs: int[] = []` was
+// `AetherSlice xs = NULL` ("invalid initializer"), and an argument, a
+// return, a re-bind or a struct field was `{}`. At module level the empty
+// slice was a call C refuses in a static initializer (#2785), `var gs:
+// int[] = []` was refused, and `gs = []` in a function was not coerced.
+extern exit(code: int)
+
+var bad = 0
+
+check(label: string, got: int, want: int) {
+    if got != want {
+        println("FAIL ${label}: got ${got}, want ${want}")
+        bad = bad + 1
+    }
+}
+
+struct Bag {
+    xs: int[]
+}
+
+var gs: int[] = []
+var gn: int[] = null
+const E: int[] = []
+const N: int[] = null
+
+count(xs: int[]) -> int {
+    return xs.len
+}
+
+total(xs: int[]) -> int {
+    s = 0
+    for i in 0..xs.len {
+        s = s + xs[i]
+    }
+    return s
+}
+
+none_of() -> int[] {
+    return []
+}
+
+pair(n: int) -> (int[], string) {
+    if n > 0 {
+        return [], "empty"
+    }
+    return null, "null"
+}
+
+reset() {
+    gs = []
+}
+
+main() {
+    let xs: int[] = []
+    check("a local", xs.len, 0)
+    if xs != null {
+        println("FAIL: [] views storage")
+        bad = bad + 1
+    }
+
+    let arr: int[3] = [1, 2, 3]
+    let ys: int[] = arr
+    check("a view of an array", ys.len, 3)
+    ys = []
+    check("a re-bind", ys.len, 0)
+
+    check("an argument", count([]), 0)
+    check("a sum over it", total([]), 0)
+    check("a return", none_of().len, 0)
+
+    b = Bag { xs: [] }
+    check("a struct field", b.xs.len, 0)
+
+    ps, why = pair(1)
+    check("a tuple position", ps.len, 0)
+    if why != "empty" {
+        println("FAIL: tuple string ${why}")
+        bad = bad + 1
+    }
+
+    let names: string[] = []
+    check("a string slice", names.len, 0)
+
+    // Captured by a closure, and bound inside one.
+    let zs: int[] = arr
+    k = || {
+        zs = []
+    }
+    call(k)
+    check("a closure's re-bind", zs.len, 0)
+
+    // Module level (#2785).
+    check("a var", gs.len, 0)
+    check("a null var", gn.len, 0)
+    check("a const", E.len, 0)
+    check("a null const", N.len, 0)
+    gs = arr
+    check("a var re-bound to an array", gs.len, 3)
+    check("its element", gs[2], 3)
+    reset()
+    check("a var re-bound to []", gs.len, 0)
+
+    if bad != 0 {
+        println("${bad} check(s) failed")
+        exit(1)
+    }
+    println("empty slice literals: ok")
+}

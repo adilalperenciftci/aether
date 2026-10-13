@@ -6,7 +6,7 @@
  * shape flows into a slot of the other, the typechecker wraps the
  * expression in an explicit coercion node:
  *
- *   `T[N]` / `null`  ->  `T[]` slot      AST_SLICE_FROM_ARRAY (len = N / 0)
+ *   `T[N]` / `null` / `[]`  ->  `T[]` slot  AST_SLICE_FROM_ARRAY (len = N / 0 / 0)
  *   `T[]`            ->  raw-pointer slot AST_SLICE_TO_PTR    (`.ptr`)
  *
  * A raw-pointer slot is a `ptr`, or a `T[]` parameter of an extern C

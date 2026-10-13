@@ -469,6 +469,10 @@ void generate_expression_as_elem_ptr(CodeGenerator* gen, ASTNode* expr);
 /* #1286: emit `expr` as an AetherSlice: a `T[N]` array is wrapped with its
  * static length, a slice is emitted as-is. */
 void generate_expression_as_slice(CodeGenerator* gen, ASTNode* expr);
+/* #2767: is `e` the empty slice, `null` or `[]` in a `T[]` slot (the
+ * typechecker's AST_SLICE_FROM_ARRAY over either)? It views no storage, so
+ * a file-scope static takes it as the constant `{0}`. */
+int is_empty_slice_value(const ASTNode* e);
 /* #2723: emit `arg` for a parameter of type `param_type`: an array a `try`
  * body may have written, for a `T[N]` parameter, as a copy of its own. */
 void generate_sized_array_argument(CodeGenerator* gen, ASTNode* arg, Type* param_type);

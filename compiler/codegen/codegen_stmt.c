@@ -12017,7 +12017,11 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
             // or const arr[] = [v1, v2, ...];
             if (stmt->value && stmt->child_count > 0) {
                 mark_var_declared(gen, stmt->value);
-                if (stmt->annotation && strcmp(stmt->annotation, "array_const") == 0) {
+                if (stmt->annotation && strcmp(stmt->annotation, "array_const") == 0 &&
+                    is_empty_slice_value(stmt->children[0])) {
+                    /* #2767: no elements: the empty slice, as at file scope. */
+                    fprintf(gen->output, "static const AetherSlice %s = {0};\n", stmt->value);
+                } else if (stmt->annotation && strcmp(stmt->annotation, "array_const") == 0) {
                     // static const T NAME[] = {v1, v2, ...};
                     Type* elem_type = (stmt->node_type && stmt->node_type->element_type)
                                       ? stmt->node_type->element_type : NULL;

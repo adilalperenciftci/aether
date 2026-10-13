@@ -7086,6 +7086,10 @@ static void emit_module_global_vars(CodeGenerator* gen, ASTNode* program) {
             /* #2590: a struct literal of constants (the type checker
              * admits no other here) as an initializer list. */
             emit_static_struct_init(gen, cd->children[0]);
+        } else if (is_empty_slice_value(cd->children[0])) {
+            /* #2767: `null` or `[]` into a `T[]` global: the empty slice,
+             * as a constant; aether_slice_make is a call C refuses here. */
+            fprintf(gen->output, "{0}");
         } else {
             generate_expression(gen, cd->children[0]);
         }
@@ -9083,7 +9087,13 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
             cd->value && cd->child_count > 0) {
             codegen_note_diag_pos(cd);
             codegen_note_diag_func(NULL);
-            if (cd->annotation && strcmp(cd->annotation, "array_const") == 0) {
+            if (cd->annotation && strcmp(cd->annotation, "array_const") == 0 &&
+                is_empty_slice_value(cd->children[0])) {
+                /* #2767: `const NAME: T[] = []` (or `= null`) has no
+                 * elements to size an array with: it is the empty slice,
+                 * which every read of NAME takes it for. */
+                fprintf(gen->output, "static const AetherSlice %s = {0};\n", cd->value);
+            } else if (cd->annotation && strcmp(cd->annotation, "array_const") == 0) {
                 // static const T NAME[] = {v1, v2, ...};
                 Type* elem_type = (cd->node_type && cd->node_type->element_type)
                                   ? cd->node_type->element_type : NULL;
