@@ -324,9 +324,22 @@ optional, a bare value wrapped, whether by `a = v` or a tuple destructure
 slot. A `string?` cell owns its string as a string cell does: a store takes
 a string of its own (a fresh one adopted, a borrowed one copied) and gives
 back the one it held, and a `string?` parameter's cell takes a reference
-or a copy of its own on entry. A `ptr` cell owns no string: a string
-stored into it, which the type checker types as the string it is, is
-stored as the pointer it is (#2797).
+or a copy of its own on entry. What a local takes out of a `string?` cell
+(`v = s ?? ""`, `v = s!`, a `some(v)` binding) is a copy of its own, as
+what it takes out of a `string` cell is, so it outlives the cell's next
+store. A string stored into a `ptr` cell (`|| { x = s }`) reaches C as its
+characters, as a plain string stored by the cell's own scope does: the
+cell keeps a string of its own beside the pointer, given back at the next
+string store or the cell's last release, so the characters live as long as
+the variable, not as long as the closure that stored them (#2797). A store
+of any other pointer leaves that string where it is until then.
+
+A module-level `var` is never a cell. A closure that reads or writes one
+reaches the global itself, so a write in the closure is seen by every
+function, and a write in the enclosing function is seen by the closure
+(#2805). A declaration in a function (`int n = 5`, `let n = 5`) writes
+the global as `n = 5` does, so only a parameter of the same name shadows
+it, and that parameter is captured as any other.
 
 A `fn` variable a closure writes is a closure cell, and it holds a
 reference of its own to the closure in it (#2755), as a field, a global or

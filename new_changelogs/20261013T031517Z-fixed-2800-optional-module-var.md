@@ -7,5 +7,7 @@
   for `none`), and no initialiser means `none`. A function's `g = v`, or a
   tuple destructure slot, writes the global with a bare value wrapped,
   including in a loop body or a closure. A `string?` var owns its string:
-  a re-bind gives back the one it held, so re-binding grows nothing, and a
-  `string?` local bound to it takes a copy of its own (#2800).
+  a re-bind gives back the one it held, so re-binding grows nothing, and
+  what a local takes from it (`v = g ?? ""`, `v = g!`, `let c: string? =
+  g`, a `some(v)` binding of a `match` on it) is a copy of its own, so it
+  survives the next re-bind. A `string?` closure cell gives the same (#2800).

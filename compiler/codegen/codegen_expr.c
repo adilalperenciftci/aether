@@ -2745,6 +2745,20 @@ static int is_builtin_name(const char* name) {
     return 0;
 }
 
+/* #2805: is `name`, used by the closure `viewer` in scope `scope`, a
+ * module-level `var`, with no parameter of the scope chain spelled the same
+ * (enclosing_decl_line says 0 for one)? Every `name = ...` in a function
+ * writes the global (#701), so the enclosing function's bindings of the
+ * name are the global's, and the closure reads and writes the global
+ * itself. Taken for a capture, the name became a cell, or an env copy,
+ * that shadowed the global for the whole enclosing function: neither the
+ * closure's stores nor the function's own reached it. */
+static int closure_name_is_module_global(CodeGenerator* gen, const char* scope,
+                                         const char* name, ASTNode* viewer) {
+    if (!is_module_global_var(gen, name)) return 0;
+    return enclosing_decl_line(gen->program, scope, name, viewer) != 0;
+}
+
 // Internal recursive worker that tracks the enclosing function name.
 static void discover_closures_scoped(CodeGenerator* gen, ASTNode* node, const char* enclosing_func) {
     if (!node) return;
@@ -2838,7 +2852,8 @@ static void discover_closures_scoped(CodeGenerator* gen, ASTNode* node, const ch
                 !is_builtin_name(all_ids[i]) &&
                 !is_local_var(body, all_ids[i])) {
                 if (enclosing_func) {
-                    is_cap = is_declared_in_function(gen->program, enclosing_func, all_ids[i]);
+                    is_cap = is_declared_in_function(gen->program, enclosing_func, all_ids[i]) &&
+                             !closure_name_is_module_global(gen, enclosing_func, all_ids[i], node);
                 } else {
                     is_cap = i < first_callee;
                 }
@@ -2906,7 +2921,8 @@ static void discover_closures_scoped(CodeGenerator* gen, ASTNode* node, const ch
                 // mutated through, and stays a capture.
                 int decl_line = enclosing_decl_line(gen->program, enclosing_func,
                                                     writes[i], node);
-                if (decl_line <= node->line) {
+                if (decl_line <= node->line &&
+                    !closure_name_is_module_global(gen, enclosing_func, writes[i], node)) {
                     if (cap_count >= cap_cap) {
                         cap_cap = cap_cap ? cap_cap * 2 : 8;
                         captures = aether_xrealloc(captures, cap_cap * sizeof(char*));

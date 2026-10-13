@@ -1,0 +1,67 @@
+// Regression (#2805): a closure that reads or writes a module-level `var`
+// reaches the global itself.
+//
+// Capture discovery took the enclosing function's own `gstr = "first"` for
+// a declaration of a local `gstr` preceding the closure, so the closure's
+// `gstr = "closure"` became a write through a cell declared in the
+// function, and the cell shadowed the global for the whole function:
+// neither the closure's stores nor the function's reached it (another
+// function went on seeing `init 3`), and a closure that only read the name
+// read a copy taken when it was made. Every `name = ...` in a function
+// writes a module var (#701), so the name is never a capture; a parameter
+// of the same name still is.
+
+import std.string
+
+extern exit(code: int)
+
+var gstr: string = "init"
+var gnum: int = 3
+var gopt: int? = none
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+show() -> string {
+    return "${gstr} ${gnum} ${gopt ?? -1}"
+}
+
+reader() -> fn {
+    return || { return gnum }
+}
+
+// A parameter named like the global is the function's own.
+shadowed(gnum: int) -> int {
+    bump = || {
+        gnum = gnum + 100
+    }
+    bump()
+    return gnum
+}
+
+main() {
+    println("=== test_closure_writes_module_var ===")
+    gstr = "first"
+    gnum = 5
+    set = || {
+        gstr = "closure"
+        gnum = 11
+        gopt = 4
+    }
+    set()
+    check(show() == "closure 11 4", "another function after the closure (${show()})")
+    check("${gstr} ${gnum}" == "closure 11", "main after the closure (${gstr} ${gnum})")
+    gstr = "main"
+    gnum = 9
+    check(show() == "main 9 4", "another function after main's store (${show()})")
+    get = reader()
+    gnum = 21
+    int now = call(get)
+    check(now == 21, "a closure reads the global as it is (${now})")
+    check(shadowed(1) == 101 && gnum == 21, "a parameter shadows the global (${gnum})")
+    println("=== test_closure_writes_module_var passed ===")
+}

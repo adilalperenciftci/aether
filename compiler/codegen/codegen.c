@@ -8105,6 +8105,28 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     print_line(gen, "    if (o->has) _aether_str_cell_free_val(o->val);");
     print_line(gen, "    free(h);");
     print_line(gen, "}");
+    /* #2797: a `ptr` cell a string is stored into (a closure's `x = s`)
+     * holds the string's characters, the C string a `ptr` is, as a `ptr`
+     * local bound to a plain string holds them. The cell keeps the string
+     * those characters belong to in a second slot, a string of its own,
+     * given back at the next string store or the cell's last release, so
+     * the characters live as long as the variable, not as long as the
+     * closure's environment the value came from. A store of any other
+     * pointer writes the first slot alone. */
+    print_line(gen, "extern const char* aether_string_data(const void* s);");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED void _aether_ptr_cell_set_str(void** cell, const char* owned) {");
+    print_line(gen, "    const char* _old = ((const char**)cell)[1];");
+    print_line(gen, "    ((const char**)cell)[1] = owned;");
+    print_line(gen, "    cell[0] = owned ? (void*)aether_string_data(owned) : NULL;");
+    print_line(gen, "    _aether_str_cell_free_val(_old);");
+    print_line(gen, "}");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED void _aether_cell_release_ptr(void* cell) {");
+    print_line(gen, "    if (!cell) return;");
+    print_line(gen, "    _AeCellHeader* h = (_AeCellHeader*)cell - 1;");
+    print_line(gen, "    if (!_aether_cell_last(h)) return;");
+    print_line(gen, "    _aether_str_cell_free_val(((const char**)cell)[1]);");
+    print_line(gen, "    free(h);");
+    print_line(gen, "}");
     /* #2618: a counted string stored carries a reference of its own (a take
      * never hands over a borrowed one; a literal is never freed), so the
      * value replaced is given back even when it is the same pointer:

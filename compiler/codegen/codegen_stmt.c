@@ -883,12 +883,43 @@ static int call_hands_back_view(CodeGenerator* gen, ASTNode* e, int cells, int d
     return 0;
 }
 
+static int is_opt_string_type(Type* t);
+static int is_env_capture_name(CodeGenerator* gen, const char* name);
+
+/* The string a `string?` holder that gives it back when it is re-bound
+ * yields: `o ?? d` and `o!`, where `o` is a module-level `var` (#2800) or a
+ * closure cell (#2795), both of which own their string and free it at the
+ * next store. A local, a field or any owning slot takes a copy of it, as
+ * it takes a copy of a `string` cell's string (is_captured_string); taken
+ * as it was, a view outlived the re-bind and read freed memory. A `??`
+ * whose default is a fresh string is left alone: the copy would leak the
+ * default when it is the one taken. */
+/* Is `o` such a holder: a `string?` module var or closure cell? */
+static int is_owning_opt_string_holder(CodeGenerator* gen, ASTNode* o) {
+    if (!o || o->type != AST_IDENTIFIER || !o->value || !is_opt_string_type(o->node_type))
+        return 0;
+    return is_promoted_capture(gen, o->value) || is_env_capture_name(gen, o->value) ||
+           (!is_var_declared(gen, o->value) && is_module_global_var(gen, o->value));
+}
+
+static int is_owning_opt_string_view(CodeGenerator* gen, ASTNode* e) {
+    if (!e || (e->type != AST_NULL_COALESCE && e->type != AST_TUPLE_UNWRAP) ||
+        e->child_count < 1) return 0;
+    if (!is_owning_opt_string_holder(gen, e->children[0])) return 0;
+    if (e->type == AST_NULL_COALESCE && e->child_count > 1 &&
+        is_heap_string_expr(gen, e->children[1])) return 0;
+    return 1;
+}
+
 /* A read an owning slot takes as a copy: a struct's string field, an
  * element of a string array whose elements are owned (#2474, #2618), or a
- * call that may hand one of those back. Context-free without `cells`. */
+ * call that may hand one of those back. Context-free without `cells`; with
+ * it, an element of an array a closure writes and the string of a `string?`
+ * cell or module var (is_owning_opt_string_view) count too. */
 static int is_string_view_read(CodeGenerator* gen, ASTNode* e, int cells) {
     return is_owned_string_field_read(e) || is_owned_string_element(gen, e) ||
            (cells && is_cell_string_element(gen, e)) ||
+           (cells && is_owning_opt_string_view(gen, e)) ||
            call_hands_back_view(gen, e, cells, 0);
 }
 
@@ -9484,11 +9515,14 @@ static void emit_cell_store(CodeGenerator* gen, const char* name, Type* t, ASTNo
     } else if (type_is_closure_value(t) || (value && type_is_closure_value(value->node_type))) {
         emit_closure_cell_store(gen, name, value, NULL);
     } else if (ct && strcmp(ct, "const char*") == 0 && cell_t && cell_t->kind == TYPE_PTR) {
-        /* #2797: a string into a `ptr` cell, which owns no string: stored
-         * as the pointer it is. The value is typed as the string it is, as
-         * a string and a raw pointer convert freely. */
-        fprintf(gen->output, "*%s = (void*)(", name);
-        generate_expression(gen, value);
+        /* #2797: a string into a `ptr` cell (the value is typed as the
+         * string it is, as a string and a raw pointer convert freely): the
+         * cell takes a string of its own, as a string cell would, and
+         * holds its characters (_aether_ptr_cell_set_str). The string
+         * handed over as it stood was the closure's environment copy, its
+         * header in place of the characters, freed with the environment. */
+        fprintf(gen->output, "_aether_ptr_cell_set_str(%s, ", name);
+        emit_cell_element_value(gen, 1, value);
         fprintf(gen->output, ");\n");
     } else if (ct && strcmp(ct, "const char*") == 0) {
         fprintf(gen->output, "_aether_str_cell_set(%s, ", name);
@@ -9677,6 +9711,8 @@ const char* promoted_cell_release_fn(CodeGenerator* gen, const char* c_type) {
     if (c_type && strcmp(c_type, "const char*") == 0) return "_aether_cell_release_str";
     /* #2795: a `string?` cell owns its string too. */
     if (c_type && strcmp(c_type, "ae_opt_string") == 0) return "_aether_cell_release_optstr";
+    /* #2797: a `ptr` cell, the string a string store gave it. */
+    if (c_type && strcmp(c_type, "void*") == 0) return "_aether_cell_release_ptr";
     /* #2755: a closure cell holds a reference to its closure. */
     if (c_type && strcmp(c_type, "_AeClosure") == 0) return "_aether_cell_release_closure";
     /* #2474: a string array cell owns every string element, as a string
@@ -9704,8 +9740,10 @@ void emit_promoted_cell_declaration(CodeGenerator* gen, const char* name,
     const char* cell_decl = promoted_cell_pointer(c_type, name);
     const char* cell_type = promoted_cell_pointer(c_type, NULL);
     const char* elem = "";
-    fprintf(gen->output, "%s = (%s)_aether_cell_new(sizeof(%s));",
-            cell_decl, cell_type, c_type);
+    /* #2797: a `ptr` cell has a second slot, for the string a string store
+     * gives it (_aether_ptr_cell_set_str); zeroed, it holds none. */
+    fprintf(gen->output, "%s = (%s)_aether_cell_new(%ssizeof(%s));",
+            cell_decl, cell_type, strcmp(c_type, "void*") == 0 ? "2 * " : "", c_type);
     int arr_len = promoted_cell_array_len(c_type, &elem);
     /* No initialiser is the hoisted shape (#2024): the cell is declared
      * ahead of the loop or branch that first assigns it, and the
@@ -12764,11 +12802,14 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                                             opt_slot_text(oc, pos_t, tmp_id, j, own, 1));
                         continue;
                     }
-                    /* #2797: a string into a `ptr` cell, which owns no
-                     * string, is stored as the pointer it is. */
+                    /* #2797: a string into a `ptr` cell: the cell takes a
+                     * string of its own (adopted when the call handed it
+                     * over) and holds its characters, as emit_cell_store
+                     * stores one. */
                     if (pos_is_string && cell_t && cell_t->kind == TYPE_PTR &&
                         is_var_declared(gen, var->value)) {
-                        fprintf(gen->output, "*%s = (void*)_tup%d._%d;\n", var->value, tmp_id, j);
+                        fprintf(gen->output, "_aether_ptr_cell_set_str(%s, _aether_str_cell_own(_tup%d._%d, %d));\n",
+                                var->value, tmp_id, j, pos_is_heap);
                         continue;
                     }
                     /* #2514: a string cell owns what it holds, so a slot the
@@ -13491,6 +13532,15 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                     is_module_global_var(gen, stmt->value)) {
                     print_indent(gen);
                     ASTNode* grhs = stmt->child_count > 0 ? stmt->children[0] : NULL;
+                    /* #2811: a `ptr` global holds a string as the pointer
+                     * it is, through a cast: the string is a `const char*`,
+                     * which C does not assign to a `void*` without a
+                     * warning in the user's build. */
+                    Type* gt = module_global_decl_type(gen, stmt->value);
+                    const char* gcast =
+                        gt && gt->kind == TYPE_PTR && grhs && grhs->node_type &&
+                                grhs->node_type->kind == TYPE_STRING
+                            ? cg_internf("(%s)", get_c_type(gt)) : "";
                     if (grhs && (string_take_is_view(gen, grhs) ||
                                  (grhs->type == AST_IDENTIFIER && grhs->value &&
                                   is_heap_string_var(gen, grhs->value)))) {
@@ -13503,7 +13553,7 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                          * never freed. */
                         char own[32];
                         string_take_new_flag(own, sizeof(own));
-                        fprintf(gen->output, "{ int %s = 0; %s = ", own, stmt->value);
+                        fprintf(gen->output, "{ int %s = 0; %s = %s", own, stmt->value, gcast);
                         emit_string_take(gen, stmt->children[0], own, NULL);
                         fprintf(gen->output, "; (void)%s; }\n", own);
                         break;
@@ -13535,7 +13585,7 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                     }
                     fprintf(gen->output, "%s", stmt->value);
                     if (stmt->child_count > 0) {
-                        fprintf(gen->output, " = ");
+                        fprintf(gen->output, " = %s", gcast);
                         generate_expression(gen, stmt->children[0]);
                     }
                     fprintf(gen->output, ";\n");
@@ -15337,7 +15387,13 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                     unindent(gen);
                     print_line(gen, "} else {");
                     indent(gen);
-                    if (is_owned_opt_string_call(gen, match_expr)) {
+                    /* #2800 follow-up: a `string?` module var or closure
+                     * cell gives its string back at its next re-bind, which
+                     * the arm may run (a call that re-binds it), so the
+                     * `some` binding is a copy the arm owns, as below. */
+                    int holder_copy = !is_owned_opt_string_call(gen, match_expr) &&
+                                      some_bind && is_owning_opt_string_holder(gen, match_expr);
+                    if (is_owned_opt_string_call(gen, match_expr) || holder_copy) {
                         /* #2750: the string of a `string?` an Aether function
                          * handed over is the match's, and nothing else frees
                          * it: the `some` binding (or, with none, a hidden
@@ -15349,9 +15405,11 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                         const char* own = some_bind ? some_bind : cg_internf("_om%d_s", id);
                         int saved_var_count = gen->declared_var_count;
                         print_indent(gen);
-                        fprintf(gen->output, "%s %s = _om%d.val; %s _heap_%s = 1; (void)_heap_%s;\n",
+                        fprintf(gen->output, "%s %s = %s_om%d.val%s; %s _heap_%s = 1; (void)_heap_%s;\n",
                                 volatile_decl_type(try_volatile_qual_for(gen, own), "const char*"),
-                                own, id, try_tracker_type(gen, own), own, own);
+                                own, holder_copy ? "aether_uniform_heap_str(" : "", id,
+                                holder_copy ? ", 0)" : "",
+                                try_tracker_type(gen, own), own, own);
                         ScopedStringLocal sl;
                         scoped_string_local_begin(gen, &sl, own, arm_body, 1);
                         print_line(gen, "{");
