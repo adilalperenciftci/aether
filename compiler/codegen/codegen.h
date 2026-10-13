@@ -345,6 +345,10 @@ typedef struct {
     // #2514: when non-NULL, the result variable is a promoted capture of
     // this type: each value arm stores into its cell (emit_cell_store).
     Type* match_result_cell;
+    // When non-NULL, the result is an optional of this type: each value arm
+    // is wrapped into it as a value bound to it would be (a bare value, or
+    // `none`), and a `string?` result's ownership flag follows the arm.
+    Type* match_result_opt;
 
     // #2054: set while the body of a string-returning closure is emitted.
     // A closure is called through a value its caller cannot classify, so

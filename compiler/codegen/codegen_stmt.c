@@ -11643,6 +11643,20 @@ static void emit_match_result_value_now(CodeGenerator* gen, ASTNode* result) {
         fprintf(gen->output, ";\n");
         return;
     }
+    if (gen->match_result_var && gen->match_result_opt) {
+        /* An optional result takes the arm's value as a binding of the
+         * optional would: wrapped, or `none`. A `string?` local owns the
+         * value when it is a fresh heap string (is_heap_opt_string_rhs),
+         * as the single-value re-bind decides. */
+        fprintf(gen->output, "%s = ", gen->match_result_var);
+        emit_optional_coerced(gen, result, gen->match_result_opt);
+        fprintf(gen->output, ";");
+        if (is_opt_str_var(gen, gen->match_result_var))
+            fprintf(gen->output, " _heapopt_%s = %d;", gen->match_result_var,
+                    is_heap_opt_string_rhs(gen, result) ? 1 : 0);
+        fprintf(gen->output, "\n");
+        return;
+    }
     if (gen->match_result_var) {
         fprintf(gen->output, "%s = ", gen->match_result_var);
         generate_expression(gen, result);
@@ -12470,7 +12484,11 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
             // `none`. Handled here because the generic declarator paths below
             // don't understand the `ae_opt_<T>` tagged-struct wrap.
             if (stmt->value && strcmp(stmt->value, "_") != 0 &&
-                stmt->node_type && stmt->node_type->kind == TYPE_OPTIONAL) {
+                stmt->node_type && stmt->node_type->kind == TYPE_OPTIONAL &&
+                /* A `match` bound to an optional is bound arm by arm, as
+                 * any bound match is (below), each arm's value wrapped. */
+                !(stmt->child_count > 0 && stmt->children[0] &&
+                  stmt->children[0]->type == AST_MATCH_STATEMENT)) {
                 /* `string?` heap-ownership: the local is registered by
                  * hoist_opt_str_trackers, so is_var_declared is already
                  * true here and this always takes the assign-only branch.
@@ -12789,8 +12807,9 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                         Type* mt = (stmt->node_type && stmt->node_type->kind != TYPE_UNKNOWN)
                                    ? stmt->node_type : match_value_type(match_node);
                         const char* msname = struct_owning_strings(gen, mt);
+                        int opt_result = mt && mt->kind == TYPE_OPTIONAL;
                         print_indent(gen);
-                        fprintf(gen->output, msname ? "%s %s = {0};\n" : "%s %s;\n",
+                        fprintf(gen->output, (msname || opt_result) ? "%s %s = {0};\n" : "%s %s;\n",
                                 volatile_decl_type(try_volatile_qual_for(gen, stmt->value), c_type),
                                 stmt->value);   /* #2690 */
                         if (msname) {
@@ -12824,6 +12843,7 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                     const char* saved_mstruct = gen->match_result_struct;
                     int saved_mreplace = gen->match_result_replace;
                     Type* saved_mcell = gen->match_result_cell;
+                    Type* saved_mopt = gen->match_result_opt;
                     /* #2497: a local that owns a string-owning struct takes
                      * each arm's struct and releases the one it held. */
                     Type* bound = declared_var_type(gen, stmt->value);
@@ -12850,7 +12870,29 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                     gen->match_result_struct = bound_struct;
                     gen->match_result_replace = 1;
                     gen->match_result_cell = cell_type;
+                    /* An optional local takes each arm's value wrapped. */
+                    {
+                        Type* ot = declared_var_type(gen, stmt->value);
+                        if (!ot || ot->kind != TYPE_OPTIONAL) ot = stmt->node_type;
+                        gen->match_result_opt = (ot && ot->kind == TYPE_OPTIONAL && !cell_type)
+                                                ? ot : NULL;
+                    }
+                    /* A `string?` local re-bound by the match frees the
+                     * string it owned once an arm has given it another. */
+                    int opt_str = gen->match_result_opt && is_opt_str_var(gen, stmt->value);
+                    if (opt_str)
+                        print_line(gen, "{ ae_opt_string _opt_old_%s = %s; int _opt_oldheap_%s = "
+                                   "_heapopt_%s; _heapopt_%s = 0;",
+                                   stmt->value, stmt->value, stmt->value, stmt->value,
+                                   stmt->value);
                     generate_statement(gen, stmt->children[0]);
+                    if (opt_str)
+                        print_line(gen, "if (_opt_oldheap_%s && _opt_old_%s.has && !(%s.has && "
+                                   "%s.val == _opt_old_%s.val)) aether_heap_str_free((void*)"
+                                   "_opt_old_%s.val); }",
+                                   stmt->value, stmt->value, stmt->value, stmt->value,
+                                   stmt->value, stmt->value);
+                    gen->match_result_opt = saved_mopt;
                     gen->match_result_var = saved_mvar;
                     gen->match_result_own = saved_mown;
                     gen->match_result_struct = saved_mstruct;
@@ -15321,7 +15363,12 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                 const char* saved_struct = gen->match_result_struct;
                 int saved_replace = gen->match_result_replace;
                 Type* saved_cell = gen->match_result_cell;
+                Type* saved_opt = gen->match_result_opt;
                 gen->match_result_cell = NULL;
+                /* A match returned from an optional result: each arm's
+                 * value wrapped into it. */
+                gen->match_result_opt = (rt && rt->kind == TYPE_OPTIONAL &&
+                                         !is_opt_string_type(rt)) ? rt : NULL;
                 gen->match_result_var = tmp;
                 gen->match_result_own = own[0] ? own : NULL;
                 /* #2497: the caller adopts a returned struct, so each arm hands
@@ -15329,6 +15376,7 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                 gen->match_result_struct = struct_owning_strings(gen, rt);
                 gen->match_result_replace = 0;
                 generate_statement(gen, m);
+                gen->match_result_opt = saved_opt;
                 gen->match_result_var = saved;
                 gen->match_result_own = saved_own;
                 gen->match_result_struct = saved_struct;

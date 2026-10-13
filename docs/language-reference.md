@@ -2059,6 +2059,22 @@ main() {
 }
 ```
 
+A `match` whose value is bound to an optional, or returned from a function whose result is one, is wrapped arm by arm, each arm's value as it would be on its own (`none` is the empty optional):
+
+```aether
+pick(n: int) -> int {
+    int? o = match n {
+        1 -> 41
+        _ -> none
+    }
+    return o ?? 7
+}
+
+main() {
+    println("${pick(1)} ${pick(2)}")   // 41 7
+}
+```
+
 ### Codegen
 
 A value optional lowers to `typedef struct { int has; T val; } ae_opt_<T>` (one per concrete element type); `none` is `{0}`, a wrapped value is `{ .has = 1, .val = … }`. `!`, `??`, and `?.` lower to single-evaluation GCC statement-expressions, so an operand with side effects is evaluated exactly once.
