@@ -2055,6 +2055,20 @@ int fnptr_call_returns_string(CodeGenerator* gen, ASTNode* call) {
  */
 static const char* translate_integer_literal(const char* value) {
     if (!value || !value[0]) return value;
+    /* A negative literal is the constant folder's (`(0 - 2147483647) - 1`
+     * folds to `-2147483648`); the source has no negative literal. C has
+     * none either: `-2147483648` is `-` applied to 2147483648, which does
+     * not fit an int, so the expression is a long and `printf("%d", ...)`
+     * of it is a -Wformat warning; `-9223372036854775808` is `-` applied
+     * to a decimal that fits no signed type, which clang warns is taken as
+     * unsigned (-Wimplicitly-unsigned-literal) and gcc as __int128 or
+     * unsigned. The two minimums are spelled the way <stdint.h> spells
+     * them, every other negative value already has its type. */
+    if (value[0] == '-') {
+        if (strcmp(value, "-2147483648") == 0) return "(-2147483647 - 1)";
+        if (strcmp(value, "-9223372036854775808") == 0) return "(-9223372036854775807LL - 1)";
+        return value;
+    }
     if (value[0] != '0' || !value[1]) {
         if (value[0] < '1' || value[0] > '9') return value;
         errno = 0;
