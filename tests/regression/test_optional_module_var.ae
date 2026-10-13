@@ -11,7 +11,10 @@
 // for no initialiser). A function's `g = v` or `g, n = f()` writes the
 // global, a bare value wrapped, as for a local. A `string?` global takes
 // a string of its own and, like a `string` global, keeps every string it
-// was given, so what a local took from it stays valid after a re-bind.
+// was given, so what a local took from it stays valid after a re-bind. The
+// 8 strings the globals held before a re-bind are unreachable at exit
+// (#2808), which tests/leaks_known.txt allows the macOS leaks gate (16
+// blocks).
 
 import std.string
 

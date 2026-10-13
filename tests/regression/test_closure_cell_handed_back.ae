@@ -15,6 +15,10 @@
 //
 // After each call the freed memory is reused by closures of the same shape
 // (`burn`), so a dead `h` reads another count or crashes.
+//
+// The pin is one reference never given back for each closure the cell
+// held (#2788): 5 blocks a call, 600 over the run, which
+// tests/leaks_known.txt allows the macOS leaks gate.
 
 import std.string
 

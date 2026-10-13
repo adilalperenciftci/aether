@@ -19,7 +19,9 @@
 // dead view reads another string. The leak check covers the cell, which
 // owns its strings, where the heap count is exact (mem.heap_in_use_exact):
 // after a warm-up, some window of the same work grows by exactly 0
-// (mem.steady_growth). A global never gives back what it held.
+// (mem.steady_growth). A global never gives back what it held: the 4
+// strings it held before a re-bind are unreachable at exit (#2808), which
+// tests/leaks_known.txt allows the macOS leaks gate (8 blocks).
 
 import std.mem
 import std.string
