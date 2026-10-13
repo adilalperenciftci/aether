@@ -43,90 +43,8 @@ if ! AETHER_HOME="$ROOT" "$AE" build server.ae -o "$TMPDIR/server" >"$TMPDIR/bui
     echo "  [FAIL] build:"; head -30 "$TMPDIR/build.log"; exit 1
 fi
 
-# ----- helpers (mirror of part 1) -----------------------------
-
-start_proc() {
-    role="$1"
-    log="$TMPDIR/$role.log"
-    "$TMPDIR/server" "$role" >"$log" 2>&1 &
-    new_pid=$!
-    eval "PID_$role=\$new_pid"
-}
-
-wait_for_port() {
-    role="$1"; port="$2"
-    log="$TMPDIR/$role.log"
-    pid=$(eval echo \$PID_$role)
-    deadline=$(($(date +%s) + 15))
-    while [ "$(date +%s)" -lt "$deadline" ]; do
-        if ! server_alive "$pid"; then
-            echo "  [FAIL] $role died:"; head -30 "$log"; exit 1
-        fi
-        if curl -s -o /dev/null --connect-timeout 0.3 --max-time 1 \
-                "http://127.0.0.1:$port/health" 2>/dev/null; then
-            return 0
-        fi
-        sleep 0.1
-    done
-    echo "  [FAIL] $role never accepted on port $port:"; head -30 "$log"; exit 1
-}
-
-start_three_upstreams() {
-    start_proc upstream_a; PIDS="$PIDS $PID_upstream_a"
-    start_proc upstream_b; PIDS="$PIDS $PID_upstream_b"
-    start_proc upstream_c; PIDS="$PIDS $PID_upstream_c"
-    wait_for_port upstream_a 19101
-    wait_for_port upstream_b 19102
-    wait_for_port upstream_c 19103
-}
-
-# Non-fatal port wait: 0 if up, 1 if the process died or never bound.
-wait_for_port_soft() {
-    role="$1"; port="$2"
-    pid=$(eval echo \$PID_$role)
-    deadline=$(($(date +%s) + 15))
-    while [ "$(date +%s)" -lt "$deadline" ]; do
-        server_alive "$pid" || return 1
-        if curl -s -o /dev/null --connect-timeout 0.3 --max-time 1 \
-                "http://127.0.0.1:$port/health" 2>/dev/null; then
-            return 0
-        fi
-        sleep 0.1
-    done
-    return 1
-}
-
-# Retry the proxy bind: kill_server + immediate rebind on 19100 can briefly lose
-# to a TIME_WAIT listener even with SO_REUSEADDR — transient, so retry.
-start_proxy() {
-    proxy_role="$1"
-    attempt=0
-    while [ "$attempt" -lt 5 ]; do
-        start_proc "$proxy_role"
-        PROXY_PID=$(eval echo \$PID_$proxy_role)
-        if wait_for_port_soft "$proxy_role" 19100; then
-            return 0
-        fi
-        kill_server "$PROXY_PID"
-        attempt=$((attempt + 1))
-        sleep 0.3
-    done
-    echo "  [FAIL] $proxy_role never bound port 19100 after 5 attempts:"
-    head -30 "$TMPDIR/$proxy_role.log"; exit 1
-}
-
-stop_proxy() {
-    if [ -n "$PROXY_PID" ]; then
-        kill_server "$PROXY_PID"
-        PROXY_PID=""
-    fi
-}
-
-clear_upstream_b_503() {
-    curl -s -o /dev/null --max-time 3 -X POST "http://127.0.0.1:19102/admin/200" 2>/dev/null || true
-}
-
-PROXY="http://127.0.0.1:19100"
+# Roles bind ports of their own and report them; see pool_roles.sh (#2812).
+. "$SCRIPT_DIR/pool_roles.sh"
 
 # Comprehensive diagnostic snapshot on every failure — see part 1.
 dump_diagnostics() {
@@ -176,9 +94,9 @@ metric_2xx() {
 # Total 2xx requests forwarded across all 3 upstreams. Used by the
 # cache tests as the "did we hit upstream at all" signal.
 metric_2xx_total() {
-    a=$(metric_2xx "http://localhost:19101")
-    b=$(metric_2xx "http://localhost:19102")
-    c=$(metric_2xx "http://localhost:19103")
+    a=$(metric_2xx "$UP_A")
+    b=$(metric_2xx "$UP_B")
+    c=$(metric_2xx "$UP_C")
     echo $((a + b + c))
 }
 
@@ -249,18 +167,18 @@ if [ "$IS_WIN" = "1" ]; then
     echo "  [SKIP-WIN] Test 9 (breaker-recovery) — open path covered by Test 8"
 else
     start_proxy proxy_breaker
-    curl -s -o /dev/null --max-time 3 -X POST "http://127.0.0.1:19102/admin/503" 2>/dev/null || true
+    curl -s -o /dev/null --max-time 3 -X POST "$UP_B_ADMIN/admin/503" 2>/dev/null || true
     parallel_echo 8
-    wait_for_breaker_state "http://localhost:19102" 1 || exit 1
-    curl -s -o /dev/null --max-time 3 -X POST "http://127.0.0.1:19102/admin/200" 2>/dev/null || true
-    wait_for_breaker_recovery "http://localhost:19102" || exit 1
-    B_AFTER_RECOVERY=$(metric_2xx "http://localhost:19102")
+    wait_for_breaker_state "$UP_B" 1 || exit 1
+    curl -s -o /dev/null --max-time 3 -X POST "$UP_B_ADMIN/admin/200" 2>/dev/null || true
+    wait_for_breaker_recovery "$UP_B" || exit 1
+    B_AFTER_RECOVERY=$(metric_2xx "$UP_B")
     i=0
     while [ $i -lt 9 ]; do
         curl -s -o /dev/null --max-time 3 "$PROXY/echo" 2>/dev/null || true
         i=$((i + 1))
     done
-    B_FINAL=$(metric_2xx "http://localhost:19102")
+    B_FINAL=$(metric_2xx "$UP_B")
     DELTA=$((B_FINAL - B_AFTER_RECOVERY))
     [ "$DELTA" -ge 2 ] || fail "breaker recovery: B delta=$DELTA expected ≥2"
     clear_upstream_b_503
@@ -320,7 +238,7 @@ stop_proxy
 # enough to surface a regression where the retry logic falls back
 # to surfacing the 5xx.
 start_proxy proxy_retry
-curl -s -o /dev/null --max-time 3 -X POST "http://127.0.0.1:19102/admin/503" 2>/dev/null || true
+curl -s -o /dev/null --max-time 3 -X POST "$UP_B_ADMIN/admin/503" 2>/dev/null || true
 if [ "$IS_WIN" = "1" ]; then RETRY_REQS=3; else RETRY_REQS=9; fi
 i=0
 ALL_OK=1

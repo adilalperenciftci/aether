@@ -8,7 +8,7 @@
 #
 # DESIGN — warm upstreams + fresh proxy + proxy-side metrics.
 #
-# 1. Three upstreams (A, B, C on :19101/19102/19103) spawn ONCE at
+# 1. Three upstreams (A, B, C, each on a port of its own) spawn ONCE at
 #    the top and stay alive across every subtest. Per subtest only
 #    the proxy bounces. Cuts process spawns from 4×8=32 to 3+8=11
 #    on the slow Windows MSYS2 runner — proven necessary after
@@ -68,105 +68,8 @@ if ! AETHER_HOME="$ROOT" "$AE" build server.ae -o "$TMPDIR/server" >"$TMPDIR/bui
     echo "  [FAIL] build:"; head -30 "$TMPDIR/build.log"; exit 1
 fi
 
-# ----- helpers ------------------------------------------------
-
-start_proc() {
-    role="$1"
-    log="$TMPDIR/$role.log"
-    "$TMPDIR/server" "$role" >"$log" 2>&1 &
-    new_pid=$!
-    eval "PID_$role=\$new_pid"
-}
-
-# Poll /health on the named port until it answers OR the named pid
-# dies. On timeout dump the role's log so the next failure is
-# self-explaining instead of producing the dreaded "(no output)".
-wait_for_port() {
-    role="$1"; port="$2"
-    log="$TMPDIR/$role.log"
-    pid=$(eval echo \$PID_$role)
-    deadline=$(($(date +%s) + 15))
-    while [ "$(date +%s)" -lt "$deadline" ]; do
-        if ! server_alive "$pid"; then
-            echo "  [FAIL] $role died:"; head -30 "$log"; exit 1
-        fi
-        if curl -s -o /dev/null --connect-timeout 0.3 --max-time 1 \
-                "http://127.0.0.1:$port/health" 2>/dev/null; then
-            return 0
-        fi
-        sleep 0.1
-    done
-    echo "  [FAIL] $role never accepted on port $port:"; head -30 "$log"; exit 1
-}
-
-start_three_upstreams() {
-    start_proc upstream_a; PIDS="$PIDS $PID_upstream_a"
-    start_proc upstream_b; PIDS="$PIDS $PID_upstream_b"
-    start_proc upstream_c; PIDS="$PIDS $PID_upstream_c"
-    wait_for_port upstream_a 19101
-    wait_for_port upstream_b 19102
-    wait_for_port upstream_c 19103
-}
-
-# Non-fatal variant of wait_for_port: returns 0 if the port comes up,
-# 1 if the process died or never bound. Used by start_proxy's rebind
-# retry so a transient TIME_WAIT loss on the proxy port isn't fatal.
-wait_for_port_soft() {
-    role="$1"; port="$2"
-    pid=$(eval echo \$PID_$role)
-    deadline=$(($(date +%s) + 15))
-    while [ "$(date +%s)" -lt "$deadline" ]; do
-        server_alive "$pid" || return 1
-        if curl -s -o /dev/null --connect-timeout 0.3 --max-time 1 \
-                "http://127.0.0.1:$port/health" 2>/dev/null; then
-            return 0
-        fi
-        sleep 0.1
-    done
-    return 1
-}
-
-# Bounce just the proxy. The 3 upstreams stay warm.
-#
-# The proxy is ended with kill_server and immediately restarted on the same
-# port (19100) between subtests. Even though the server sets SO_REUSEADDR,
-# the kernel can briefly hold the previous listener in TIME_WAIT, so a fresh
-# bind occasionally loses the race and the process exits at once. That is a
-# transient, not a real failure — retry the bind a few times before giving up.
-start_proxy() {
-    proxy_role="$1"
-    attempt=0
-    while [ "$attempt" -lt 5 ]; do
-        start_proc "$proxy_role"
-        PROXY_PID=$(eval echo \$PID_$proxy_role)
-        if wait_for_port_soft "$proxy_role" 19100; then
-            return 0
-        fi
-        # bind lost the race (or crashed) — reap and back off before retrying
-        kill_server "$PROXY_PID"
-        attempt=$((attempt + 1))
-        sleep 0.3
-    done
-    echo "  [FAIL] $proxy_role never bound port 19100 after 5 attempts:"
-    head -30 "$TMPDIR/$proxy_role.log"; exit 1
-}
-
-stop_proxy() {
-    if [ -n "$PROXY_PID" ]; then
-        kill_server "$PROXY_PID"
-        PROXY_PID=""
-    fi
-}
-
-# Reset upstream-side test knobs (force_503 only — counters are
-# read from the proxy side now). Idempotent: each subtest that
-# cares calls /admin/200 to undo any prior /admin/503 from another
-# subtest. Per-subtest cleanup, not per-subtest setup.
-clear_upstream_b_503() {
-    curl -s -o /dev/null --max-time 3 -X POST "http://127.0.0.1:19102/admin/200" 2>/dev/null || true
-}
-
-PROXY="http://127.0.0.1:19100"
+# Roles bind ports of their own and report them; see pool_roles.sh (#2812).
+. "$SCRIPT_DIR/pool_roles.sh"
 
 # Dump everything anyone could want to know about the test state in
 # one snapshot, then exit 1. Every failure path on this script
@@ -276,12 +179,15 @@ start_proxy proxy_rr
 if [ "$IS_WIN" = "1" ]; then RR_REQS=3; RR_EACH=1; else RR_REQS=9; RR_EACH=3; fi
 i=0
 while [ $i -lt $RR_REQS ]; do
-    curl -s -o /dev/null --max-time 3 "$PROXY/echo" || true
+    # A request that gets no answer makes the counts below meaningless, so
+    # it fails here with curl's own reason (#2812).
+    rr_err=$(curl -sS -o /dev/null --max-time 10 "$PROXY/echo" 2>&1) \
+        || fail "RR request $((i + 1)) of $RR_REQS got no answer: $rr_err"
     i=$((i + 1))
 done
-A=$(metric_2xx "http://localhost:19101")
-B=$(metric_2xx "http://localhost:19102")
-C=$(metric_2xx "http://localhost:19103")
+A=$(metric_2xx "$UP_A")
+B=$(metric_2xx "$UP_B")
+C=$(metric_2xx "$UP_C")
 [ "$A" = "$RR_EACH" ] || fail "RR A=$A expected $RR_EACH"
 [ "$B" = "$RR_EACH" ] || fail "RR B=$B expected $RR_EACH"
 [ "$C" = "$RR_EACH" ] || fail "RR C=$C expected $RR_EACH"
@@ -295,9 +201,9 @@ if [ "$IS_WIN" = "1" ]; then
 else
     start_proxy proxy_wrr
     parallel_echo 50
-    A=$(metric_2xx "http://localhost:19101")
-    B=$(metric_2xx "http://localhost:19102")
-    C=$(metric_2xx "http://localhost:19103")
+    A=$(metric_2xx "$UP_A")
+    B=$(metric_2xx "$UP_B")
+    C=$(metric_2xx "$UP_C")
     [ "$A" -ge 25 ] && [ "$A" -le 35 ] || fail "WRR A=$A expected 25-35"
     [ "$B" -ge 5  ] && [ "$B" -le 15 ] || fail "WRR B=$B expected 5-15"
     [ "$C" -ge 5  ] && [ "$C" -le 15 ] || fail "WRR C=$C expected 5-15"
@@ -360,9 +266,9 @@ HEALTH_BATCH_HALF=$((BATCH / 2))  # test 7's first "before recovery" probe
 # ---- Test 5: drain — A drained on startup; A counter stays 0 -
 start_proxy proxy_drain
 parallel_echo $HEALTH_BATCH
-A=$(metric_2xx "http://localhost:19101")
-B=$(metric_2xx "http://localhost:19102")
-C=$(metric_2xx "http://localhost:19103")
+A=$(metric_2xx "$UP_A")
+B=$(metric_2xx "$UP_B")
+C=$(metric_2xx "$UP_C")
 [ "$A" = "0" ] || fail "drain: A served $A requests (expected 0)"
 [ $((B + C)) -eq $HEALTH_BATCH ] || fail "drain: B+C=$((B + C)) expected $HEALTH_BATCH"
 stop_proxy
@@ -388,10 +294,10 @@ stop_proxy
 
 # ---- Test 7: health checks kill an unhealthy upstream -----
 start_proxy proxy_health
-curl -s -o /dev/null --max-time 3 -X POST "http://127.0.0.1:19102/admin/503" 2>/dev/null || true
-wait_for_upstream_health "http://localhost:19102" 0 || exit 1
+curl -s -o /dev/null --max-time 3 -X POST "$UP_B_ADMIN/admin/503" 2>/dev/null || true
+wait_for_upstream_health "$UP_B" 0 || exit 1
 parallel_echo $HEALTH_BATCH
-B=$(metric_2xx "http://localhost:19102")
+B=$(metric_2xx "$UP_B")
 # Up to 2 requests may have landed on B before the health-check
 # thread observed and broadcast the unhealthy state.
 [ "$B" -le 2 ] || fail "health: B served $B requests after marked unhealthy"
@@ -406,14 +312,14 @@ if [ "$IS_WIN" = "1" ]; then
     echo "  [SKIP-WIN] Test 8 (health-recovery) - same state machine as Test 7"
 else
     start_proxy proxy_health
-    curl -s -o /dev/null --max-time 3 -X POST "http://127.0.0.1:19102/admin/503" 2>/dev/null || true
-    wait_for_upstream_health "http://localhost:19102" 0 || exit 1
+    curl -s -o /dev/null --max-time 3 -X POST "$UP_B_ADMIN/admin/503" 2>/dev/null || true
+    wait_for_upstream_health "$UP_B" 0 || exit 1
     parallel_echo 6
-    B_BEFORE=$(metric_2xx "http://localhost:19102")
-    curl -s -o /dev/null --max-time 3 -X POST "http://127.0.0.1:19102/admin/200" 2>/dev/null || true
-    wait_for_upstream_health "http://localhost:19102" 1 || exit 1
+    B_BEFORE=$(metric_2xx "$UP_B")
+    curl -s -o /dev/null --max-time 3 -X POST "$UP_B_ADMIN/admin/200" 2>/dev/null || true
+    wait_for_upstream_health "$UP_B" 1 || exit 1
     parallel_echo 12
-    B_AFTER=$(metric_2xx "http://localhost:19102")
+    B_AFTER=$(metric_2xx "$UP_B")
     DELTA=$((B_AFTER - B_BEFORE))
     [ "$DELTA" -ge 2 ] || fail "health recovery: B delta=$DELTA expected ≥2"
     stop_proxy
@@ -421,10 +327,10 @@ fi
 
 # ---- Test 9: circuit breaker opens after consecutive failures ----
 start_proxy proxy_breaker
-curl -s -o /dev/null --max-time 3 -X POST "http://127.0.0.1:19102/admin/503" 2>/dev/null || true
+curl -s -o /dev/null --max-time 3 -X POST "$UP_B_ADMIN/admin/503" 2>/dev/null || true
 parallel_echo $HEALTH_BATCH
 B_5xx=$(curl -s --max-time 3 "$PROXY/proxy-metrics" 2>/dev/null \
-    | grep -F 'aether_proxy_upstream_requests_total{upstream="http://localhost:19102",class="5xx"}' \
+    | grep -F "aether_proxy_upstream_requests_total{upstream=\"$UP_B\",class=\"5xx\"}" \
     | awk '{print $NF}')
 B_5xx="${B_5xx:-0}"
 # Once the breaker opens (at threshold=3), B shouldn't receive
