@@ -342,7 +342,17 @@ typedef enum {
     // pass synthesizes `T_schema() -> ptr { return <AST_SCHEMA_OF T> }`, and
     // codegen lowers it to the address of T's static table. `value` is T.
     AST_FIELD_ATTRIBUTE,
-    AST_SCHEMA_OF
+    AST_SCHEMA_OF,
+    // `f(args) quote |a: T| { body }` (docs/quote.md): a trailing block the
+    // call receives as a tree (a std.quote Tree) instead of a closure.
+    // Children are AST_CLOSURE_PARAM nodes, then the AST_BLOCK body, as an
+    // AST_CLOSURE's are. The type checker checks the body, lowers it to the
+    // tree it stands for (analysis/quote.c), and takes the body off the
+    // node, so no later pass sees the quoted statements as code to run;
+    // `value` is then the quote's index in that table. Not an AST_CLOSURE
+    // with a marker: codegen special-cases closures in many places, and
+    // closure discovery would hoist it.
+    AST_QUOTE
 } ASTNodeType;
 
 typedef enum {

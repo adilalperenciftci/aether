@@ -17,6 +17,11 @@ typedef enum {
     AETHER_ERR_INVALID_OPERAND = 500,
     AETHER_ERR_ACTOR_ERROR = 600,
     AETHER_ERR_MISSING_RETURN = 700,     // control can reach the end of a function whose result is not void (#2684)
+    // `quote` (docs/quote.md)
+    AETHER_ERR_QUOTE_SUBSET = 800,       // a construct a quote's tree has no node for (the v1 subset)
+    AETHER_ERR_QUOTE_PARAM = 801,        // a quote parameter without a type
+    AETHER_ERR_QUOTE_CALLEE = 802,       // a quote where no quote.Tree is taken, or a closure/block where one is
+    AETHER_ERR_QUOTE_CAPTURE = 803,      // writing a captured variable, or taking its address, in a quote
     // Warnings (W-series)
     AETHER_WARN_UNUSED_VAR = 1001,
     AETHER_WARN_UNREACHABLE = 1002,

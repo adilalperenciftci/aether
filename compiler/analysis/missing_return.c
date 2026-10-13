@@ -69,7 +69,7 @@ static int has_value_type(Type* t) {
 /* A `return` with a value anywhere in `n`, outside closures: a closure's
  * `return` is its own. The same test codegen's has_return_value makes. */
 static int returns_value(ASTNode* n) {
-    if (!n || n->type == AST_CLOSURE) return 0;
+    if (!n || n->type == AST_CLOSURE || n->type == AST_QUOTE) return 0;
     if (n->type == AST_RETURN_STATEMENT && n->child_count > 0 && n->children[0] &&
         n->children[0]->type != AST_PRINT_STATEMENT)
         return 1;
@@ -393,7 +393,8 @@ static int yields_value(ASTNode* e) {
 static ASTNode* trailing_block_in(ASTNode* n) {
     for (int i = 0; n && i < n->child_count; i++) {
         ASTNode* c = n->children[i];
-        if (!c || (c->type == AST_CLOSURE && !is_trailing_block(c)) || c->type == AST_BLOCK)
+        if (!c || (c->type == AST_CLOSURE && !is_trailing_block(c)) || c->type == AST_QUOTE ||
+            c->type == AST_BLOCK)
             continue;
         if (is_trailing_block(c) && closure_body(c)) return c;
         ASTNode* inner = trailing_block_in(c);

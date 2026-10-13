@@ -1,0 +1,99 @@
+// Regression: `quote` hands a trailing block to the function as a tree
+// (docs/quote.md), here for expressions: literals, parameters, unary and
+// binary operators (printed back with the parentheses precedence needs),
+// calls recorded with their module, fields, indexing, `if` as a value
+// (CHOOSE), struct literals (MAKE) and constants with a literal value. Every
+// node carries the type the checker gave it, which the dump shows.
+
+import std.quote
+import std.math
+
+extern exit(code: int)
+
+struct Pair {
+    a: float
+    b: float
+}
+
+const HALF = 0.5
+
+fn check(label: string, got: string, want: string) -> int {
+    if got != want {
+        println("FAIL quote expressions: ${label}")
+        println("  got:  ${got}")
+        println("  want: ${want}")
+        return 1
+    }
+    return 0
+}
+
+// The function a quote is handed to: it takes a quote.Tree last.
+q(t: quote.Tree) -> quote.Tree { return t }
+src(t: quote.Tree) -> string { return quote.to_source(t) }
+tree(t: quote.Tree) -> string { return quote.dump(t) }
+
+twice(x: float) -> float { return x * 2.0 }
+
+main() {
+    fails = 0
+    t = q() quote | a: float, b: int | -> a * 2.0 + 1.0
+    fails = fails + check("arrow body", src(t), "|a: float, b: int| {\n    return a * 2.0 + 1.0\n}")
+    fails = fails + check("arrow body tree", tree(t),
+        "(param a :float) (param b :int) (BLOCK (RETURN :float (BINARY + :float (BINARY * :float (LOCAL a :float) (LIT 2.0 :float)) (LIT 1.0 :float))))")
+    fails = fails + check("params", "${quote.param_count(t)} ${quote.param_name(t, 1)} ${quote.param_type(t, 1)}", "2 b int")
+    fails = fails + check("version", "${quote.version(t)}", "${quote.VERSION}")
+    fails = fails + check("source", quote.source(t), "test_quote_expressions.ae:39")
+
+    // Parentheses come back where precedence needs them, and only there.
+    t = q() quote | a: int, b: int, c: int | -> (a + b) * c - (a - (b - c))
+    fails = fails + check("precedence", src(t), "|a: int, b: int, c: int| {\n    return (a + b) * c - (a - (b - c))\n}")
+
+    // No parameters, a block body.
+    t = q() quote { return 1 + 2 * 3 }
+    fails = fails + check("no params", src(t), "{\n    return 1 + 2 * 3\n}")
+    fails = fails + check("no params tree", tree(t),
+        "(BLOCK (RETURN :int (BINARY + :int (LIT 1 :int) (BINARY * :int (LIT 2 :int) (LIT 3 :int)))))")
+
+    // Literals of each kind, comparison and logic, unary operators.
+    t = q() quote | x: int, ok: bool | -> !ok && -x < 3 || ~x == 7
+    fails = fails + check("logic", tree(t),
+        "(param x :int) (param ok :bool) (BLOCK (RETURN :bool (BINARY || :bool (BINARY && :bool (UNARY ! :bool (LOCAL ok :bool)) (BINARY < :bool (UNARY - :int (LOCAL x :int)) (LIT 3 :int))) (BINARY == :bool (UNARY ~ :int (LOCAL x :int)) (LIT 7 :int)))))")
+    t = q() quote -> "say \"hi\""
+    fails = fails + check("string literal", src(t), "{\n    return \"say \\\"hi\\\"\"\n}")
+    fails = fails + check("string literal tree", tree(t), "(BLOCK (RETURN :string (LIT \"say \\\"hi\\\"\" :string)))")
+
+    // A call is recorded, not made, with its module as written.
+    t = q() quote | x: float | -> math.sqrt(twice(x)) + HALF
+    fails = fails + check("calls", tree(t),
+        "(param x :float) (BLOCK (RETURN :float (BINARY + :float (CALL math.sqrt :float (CALL twice :float (LOCAL x :float))) (LIT 0.5 :float))))")
+
+    // Fields, a struct literal, indexing, `if` as a value.
+    t = q() quote | p: Pair, xs: int[3], i: int | -> Pair { a: p.b, b: if xs[i] > 0 { p.a } else { 0.0 } }
+    fails = fails + check("make", src(t),
+        "|p: Pair, xs: int[3], i: int| {\n    return Pair { a: p.b, b: if xs[i] > 0 { p.a } else { 0.0 } }\n}")
+    fails = fails + check("make tree", tree(t),
+        "(param p :Pair) (param xs :int[3]) (param i :int) (BLOCK (RETURN :Pair (MAKE {a,b} :Pair (FIELD b :float (LOCAL p :Pair)) (CHOOSE :float (BINARY > :bool (INDEX :int (LOCAL xs :int[3]) (LOCAL i :int)) (LIT 0 :int)) (FIELD a :float (LOCAL p :Pair)) (LIT 0.0 :float)))))")
+    m = quote.child(quote.child(quote.body(t), 0), 0)
+    fails = fails + check("make fields", "${quote.kind_name(quote.kind(m))} ${quote.field(m, 0)} ${quote.field(m, 1)} [${quote.field(m, 2)}]",
+        "MAKE a b []")
+
+    // Walking the tree by hand: the kinds are std.quote's constants.
+    t = q() quote | x: float | -> x + 1.0
+    ret = quote.child(quote.body(t), 0)
+    add = quote.child(ret, 0)
+    if quote.kind(ret) != quote.RETURN { fails = fails + check("RETURN kind", "${quote.kind(ret)}", "${quote.RETURN}") }
+    if quote.kind(add) != quote.BINARY { fails = fails + check("BINARY kind", "${quote.kind(add)}", "${quote.BINARY}") }
+    fails = fails + check("walk", "${quote.op(add)} ${quote.type_of(add)} ${quote.child_count(add)} ${quote.name(quote.child(add, 0))} ${quote.lit(quote.child(add, 1))} ${quote.line(add)}",
+        "+ float 2 x 1.0 81")
+
+    // The hash is of the tree's shape: the same quote written twice hashes
+    // the same, a different one does not.
+    h1 = quote.hash(q() quote | x: float | -> x + 1.0)
+    h2 = quote.hash(q() quote | x: float | -> x + 1.0)
+    h3 = quote.hash(q() quote | x: float | -> x + 2.0)
+    if h1 != h2 { fails = fails + check("same hash", "${h1}", "${h2}") }
+    if h1 == h3 { fails = fails + check("different hash", "${h1}", "not ${h3}") }
+
+    if fails > 0 { exit(1) }
+    println("quote expressions: ok")
+}

@@ -67,6 +67,7 @@ tests/integration/defer_conditional_warn/
 tests/integration/derive_eq/
 tests/integration/derive_schema_cross_module/
 tests/integration/distinct_types/
+tests/integration/quote_errors/
 tests/integration/dsl_receiver_scoping/
 tests/integration/dsl_receiver_scoping_edge/
 tests/integration/dsl_receiver_scoping_nested/

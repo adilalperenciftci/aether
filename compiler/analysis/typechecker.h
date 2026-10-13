@@ -118,6 +118,8 @@ void free_symbol_table(SymbolTable* table);
 void add_symbol(SymbolTable* table, const char* name, Type* type, int is_actor, int is_function, int is_state);
 Symbol* lookup_symbol(SymbolTable* table, const char* name);
 Symbol* lookup_symbol_local(SymbolTable* table, const char* name);
+/* docs/quote.md: the program-level `const NAME`, or NULL. */
+ASTNode* tc_program_const(const char* name);
 /* #2007: unlink and free the newest symbol of `table`. The one way to remove
  * a symbol, so the hash index stays in step with the list. */
 void pop_symbol(SymbolTable* table);

@@ -2436,7 +2436,8 @@ static void collect_local_names(ASTNode* node, const char** names, int* count, i
          * branches). Collected here they shadowed the enclosing function's
          * whole body, so a call to the module's `item` beside a closure
          * whose parameter is `item` was taken for the parameter (#2637). */
-        if (node->children[i] && node->children[i]->type == AST_CLOSURE) continue;
+        if (node->children[i] && (node->children[i]->type == AST_CLOSURE ||
+                                  node->children[i]->type == AST_QUOTE)) continue;
         collect_local_names(node->children[i], names, count, max);
     }
 }
@@ -2641,7 +2642,7 @@ static void rename_intra_module_refs(ASTNode* node, const char* prefix,
        so this EXTENDS local_names rather than replacing it: parameters and
        body-locals of the closure are appended to whatever the enclosing
        function already contributed. */
-    if (node->type == AST_CLOSURE) {
+    if (node->type == AST_CLOSURE || node->type == AST_QUOTE) {
         const char* clo_locals[128];
         int clo_local_count = 0;
         /* The closure's OWN bindings go in first. The list is capped, and if
@@ -3114,7 +3115,7 @@ static void rewrite_qualified_prefix(ASTNode* node, const char* from, const char
     }
 
     if (node->type == AST_FUNCTION_DEFINITION || node->type == AST_BUILDER_FUNCTION ||
-        node->type == AST_CLOSURE) {
+        node->type == AST_CLOSURE || node->type == AST_QUOTE) {
         const char* scope_locals[128];
         int scope_count = 0;
         collect_local_names(node, scope_locals, &scope_count, 128);
@@ -3193,7 +3194,7 @@ static void rewrite_qualified_prefix_ambiguous(ASTNode* node, const char* from,
     }
 
     if (node->type == AST_FUNCTION_DEFINITION || node->type == AST_BUILDER_FUNCTION ||
-        node->type == AST_CLOSURE) {
+        node->type == AST_CLOSURE || node->type == AST_QUOTE) {
         const char* scope_locals[128];
         int scope_count = 0;
         collect_local_names(node, scope_locals, &scope_count, 128);

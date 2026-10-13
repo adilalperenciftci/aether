@@ -1,3 +1,4 @@
+#include "../analysis/quote.h"
 #include "codegen_internal.h"
 #include "../analysis/sandbox_trust.h"
 #include "../aether_defines.h"
@@ -2766,6 +2767,13 @@ static void discover_closures_scoped(CodeGenerator* gen, ASTNode* node, const ch
         for (int i = 0; i < node->child_count; i++) {
             discover_closures_scoped(gen, node->children[i], arm_name);
         }
+        return;
+    }
+    /* docs/quote.md: a lowered quote's body is the tree's, and the node
+     * has no children left; record the scope it is written in. */
+    if (node->type == AST_QUOTE) {
+        QuoteInfo* q = quote_of(node);
+        if (q) q->scope = enclosing_func ? aether_intern(enclosing_func) : NULL;
         return;
     }
     if (node->type == AST_CLOSURE) {
@@ -9641,6 +9649,33 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
             }
             break;
 
+        case AST_QUOTE: {
+            /* docs/quote.md: build the tree, handing the builder each
+             * captured variable's cell (the raw pointer, not its value). */
+            QuoteInfo* q = quote_of(expr);
+            if (!q) {
+                fprintf(gen->output, "((void*)0)");
+                break;
+            }
+            fprintf(gen->output, "_quote_build_%s(", expr->value);
+            if (q->ncaps == 0) {
+                fprintf(gen->output, "NULL");
+            } else {
+                fprintf(gen->output, "(void*[]){ ");
+                for (int k = 0; k < q->ncaps; k++) {
+                    ASTNode* id = create_ast_node(AST_IDENTIFIER, q->caps[k].name,
+                                                  expr->line, expr->column);
+                    id->annotation = strdup("raw_promoted");
+                    codegen_own_node(gen, id);
+                    if (k) fprintf(gen->output, ", ");
+                    fprintf(gen->output, "(void*)");
+                    generate_expression(gen, id);
+                }
+                fprintf(gen->output, " }");
+            }
+            fprintf(gen->output, ")");
+            break;
+        }
         case AST_CLOSURE: {
             // Emit inline closure construction
             // The closure's value field was set to its ID by discover_closures

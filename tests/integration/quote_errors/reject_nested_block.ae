@@ -1,0 +1,9 @@
+// A trailing block inside a quote: E0800 (docs/quote.md). Must not compile: tests/integration/quote_errors.
+import std.quote
+
+take(t: quote.Tree) {}
+helper() {}
+main() {
+    v = 1
+    take() quote { helper() {} }
+}

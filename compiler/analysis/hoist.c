@@ -61,7 +61,7 @@ Type* hoist_decl_type(ASTNode* decl) {
 
 static Type* join_walk(ASTNode* n, const char* name, Type* acc) {
     if (!n) return acc;
-    if (n->type == AST_CLOSURE) return acc;   /* its own function */
+    if (n->type == AST_CLOSURE || n->type == AST_QUOTE) return acc;   /* its own function */
     if (n->type == AST_VARIABLE_DECLARATION && n->value && n->type_inferred &&
         strcmp(n->value, name) == 0) {
         Type* t = n->node_type;
