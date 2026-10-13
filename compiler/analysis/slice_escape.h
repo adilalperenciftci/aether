@@ -18,6 +18,12 @@
  * point: a local bound to one, or a field of a local value one is stored in.
  * Binding a local or a field again replaces what it held, so a name given
  * storage that outlives the frame before it leaves holds no view any more.
+ * A closure is no part of the walk: what it may store into the frame's
+ * names (a view of the frame's storage) taints them from where it is
+ * written on, whether or when it is called, and a re-bind it makes is not
+ * counted (#2837). Its own stores through a pointer or into a global are
+ * checked in its frame with the storage of the frames it is written in
+ * counted as storage.
  * Where control joins (after the branches of an `if`, a `match` or a
  * `switch`, around a loop, after a `try`) what holds a view on any path
  * holds one. Each place a view leaves the frame is reported at the value

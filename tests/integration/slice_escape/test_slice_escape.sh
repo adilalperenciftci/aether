@@ -393,5 +393,102 @@ main() {
 AE
 refused call_maybe 10:12 "'pick' returns a slice of its own storage (\`v\`, which holds a slice of it)"
 
+# A closure that may store a slice of the frame's storage into one of its
+# names gives that name a view from where the closure is written on,
+# whenever it is called, or whether. A store a closure makes through a
+# pointer is judged as the same store written in the function is.
+cat > "$TMP/closure_stores.ae" <<'AE'
+pick() -> int[] {
+    arr = [1, 2, 3]
+    let v: int[] = make([]int, 4)
+    setview = || {
+        v = arr
+    }
+    setview()
+    return v
+}
+
+main() {
+    println("${pick().len}")
+}
+AE
+refused closure_stores 8:12 "'pick' returns a slice of its own storage (\`v\`, which holds a slice of it)"
+
+cat > "$TMP/closure_never_called.ae" <<'AE'
+pick() -> int[] {
+    arr = [1, 2, 3]
+    let v: int[] = make([]int, 4)
+    setview = || {
+        v = arr
+    }
+    return v
+}
+
+main() {
+    println("${pick().len}")
+}
+AE
+refused closure_never_called 7:12 "'pick' returns a slice of its own storage (\`v\`, which holds a slice of it)"
+
+cat > "$TMP/closure_ptr_store.ae" <<'AE'
+struct Holder {
+    data: int[]
+}
+
+pick() -> Holder {
+    arr = [1, 2, 3]
+    h = Holder { data: make([]int, 2) }
+    hp = &h
+    setv = || {
+        hp.data = arr
+    }
+    setv()
+    return h
+}
+
+main() {
+    println("${pick().data.len}")
+}
+AE
+refused closure_ptr_store 10:19 "a field of \`hp\`, which may outlive 'pick', is given by this closure a slice of the storage of 'pick' (the array \`arr\`)"
+
+cat > "$TMP/closure_safe.ae" <<'AE'
+fresh() -> int[] {
+    let v: int[] = make([]int, 4)
+    reset = || {
+        v = make([]int, 5)
+    }
+    reset()
+    return v
+}
+
+summed() -> int[] {
+    arr = [1, 2, 3]
+    let v: int[] = make([]int, 4)
+    total = 0
+    add = || {
+        total = total + arr[0] + arr[2]
+    }
+    add()
+    v[0] = total
+    return v
+}
+
+main() {
+    a = fresh()
+    b = summed()
+    println("closure safe ${a.len} ${b[0]}")
+    free(a)
+    free(b)
+}
+AE
+out=$(cd "$TMP" && AETHER_HOME="$ROOT" "$AE" run closure_safe.ae 2>&1)
+case "$out" in
+    *"closure safe 5 4"*) ;;
+    *) echo "  [FAIL] closure_safe: not \"closure safe 5 4\":"
+       echo "$out" | sed 's/^/        /'
+       fails=$((fails + 1)) ;;
+esac
+
 [ "$fails" -eq 0 ] || exit 1
 echo "  [PASS] slice_escape: a slice of a function's own storage stays in it"
