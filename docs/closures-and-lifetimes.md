@@ -317,6 +317,17 @@ extern's strdup) becomes a refcounted copy on the way in, so the cell's
 last release frees every value it was ever given; a literal is stored as
 it is and never freed.
 
+An optional a closure writes (`let a: int? = 3` then `|| { a = 5 }`) is a
+cell like any other (#2795): its first binding makes the cell, holding
+`none` until it stores the value, and every store takes the value as the
+optional, a bare value wrapped, whether by `a = v` or a tuple destructure
+slot. A `string?` cell owns its string as a string cell does: a store takes
+a string of its own (a fresh one adopted, a borrowed one copied) and gives
+back the one it held, and a `string?` parameter's cell takes a reference
+or a copy of its own on entry. A `ptr` cell owns no string: a string
+stored into it, which the type checker types as the string it is, is
+stored as the pointer it is (#2797).
+
 A `fn` variable a closure writes is a closure cell, and it holds a
 reference of its own to the closure in it (#2755), as a field, a global or
 actor state does (#2525). Its first value and every store are taken: a

@@ -1,0 +1,97 @@
+// Regression (#2796): a tuple destructure that names a module-level `var`
+// writes the global, as `gx = value` does (#701).
+//
+// A slot not declared as a local was emitted as a fresh C declaration,
+// `int gx = _tup0._0;`, which shadowed the global, and the global kept its
+// value. The slot writes the global now, taking the value as a global
+// takes one: a string of its own, and a closure through a reference of
+// its own (the one it held given back). A parameter or local of the same
+// name declared before shadows the global, as it does for a bare binding.
+//
+// The leak check runs where the heap count is exact (mem.heap_in_use_exact):
+// after a warm-up, some window of the same work grows by exactly 0
+// (mem.steady_growth).
+
+import std.mem
+import std.string
+
+extern exit(code: int)
+
+var gx: int = 0
+var gy: int = 0
+var gname: string = ""
+var gcb: fn = null
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+two() -> (int, int) {
+    return 7, 8
+}
+
+names(p: string) -> (string, int) {
+    return string.concat(p, "!"), 2
+}
+
+counter(p: string) -> fn {
+    return || { return string.length(p) }
+}
+
+with_cb(p: string) -> (fn, int) {
+    return counter(p), 3
+}
+
+set_both() {
+    gx, gy = two()
+}
+
+set_one() -> int {
+    gx, n = two()
+    return n
+}
+
+// A parameter of the same name is the function's own.
+shadowed(gx: int) -> int {
+    gx, n = two()
+    return gx * 10 + n
+}
+
+set_name(p: string) {
+    gname, _ = names(p)
+}
+
+set_cb(p: string) {
+    gcb, _ = with_cb(p)
+}
+
+main() {
+    println("=== test_destructure_writes_global ===")
+    p = string.concat("bc", "")
+    set_both()
+    check(gx == 7 && gy == 8, "both slots write the globals (${gx} ${gy})")
+    gx = 0
+    n = set_one()
+    check(gx == 7 && n == 8, "one slot writes the global (${gx} ${n})")
+    gx = 1
+    check(shadowed(0) == 78 && gx == 1, "a parameter shadows the global (${gx})")
+    set_name(p)
+    check(gname == "bc!", "a string slot writes the global (${gname})")
+    set_cb(p)
+    int c = call(gcb)
+    check(c == 2, "a closure slot writes the global (${c})")
+    if mem.heap_in_use_exact() {
+        grown = mem.steady_growth(|| {
+                i = 0
+                while i < 100 {
+                    set_cb(p)
+                    i = i + 1
+                }
+            }, 5)
+        check(grown == 0, "100 closures destructured into a global grew the heap by ${grown} bytes in every run")
+    }
+    println("=== test_destructure_writes_global passed ===")
+}

@@ -3567,6 +3567,35 @@ const char* lookup_var_c_type(CodeGenerator* gen, const char* var_name, const ch
     return t ? get_c_type(t) : "int"; // fallback
 }
 
+/* #2797: the type the cell of promoted variable `name` was made with, seen
+ * from the scope being emitted: a closure that captures the name reaches
+ * its parent's cell, typed as the closure's prologue types it
+ * (lookup_var_type in the parent scope), and the scope that declares the
+ * name types it by its own first binding. A store into the cell must take
+ * the cell's type: the value's may be another one C converts to it (a
+ * string into a `ptr`), and its own binding in a closure's body says the
+ * value's. NULL when unknown. */
+Type* promoted_cell_type(CodeGenerator* gen, const char* name) {
+    const char* scope = gen ? gen->closure_var_scope : NULL;
+    if (!scope || !name) return NULL;
+    for (int depth = 0; scope && depth < 64 && strncmp(scope, "__closure_", 10) == 0; depth++) {
+        int ci = 0, captured = 0;
+        char nm[64];
+        for (; ci < gen->closure_count; ci++) {
+            closure_scope_name(gen->closures[ci].closure_node, nm, sizeof(nm));
+            if (strcmp(nm, scope) == 0) break;
+        }
+        if (ci == gen->closure_count) return NULL;
+        for (int k = 0; k < gen->closures[ci].capture_count && !captured; k++) {
+            captured = gen->closures[ci].captures[k] &&
+                       strcmp(gen->closures[ci].captures[k], name) == 0;
+        }
+        if (!captured) break;
+        scope = gen->closures[ci].parent_func;
+    }
+    return scope ? lookup_var_type(gen, name, scope) : NULL;
+}
+
 /* #2464: a captured fixed-size array (`int[3] arr`), or NULL. Its C type
  * spells as `int[3]`, which is not a declarator: the env field, the
  * constructor parameter and the body alias each spell `int arr[3]` / the

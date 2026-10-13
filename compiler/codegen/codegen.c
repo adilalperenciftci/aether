@@ -8079,6 +8079,18 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     print_line(gen, "    _AeCellHeader* h = (_AeCellHeader*)cell - 1;");
     print_line(gen, "    if (_aether_cell_last(h)) { _aether_str_cell_free_val(*(const char**)cell); free(h); }");
     print_line(gen, "}");
+    /* #2795: a `string?` cell owns the string it holds, as a string cell
+     * does: every store gives it one of its own (emit_opt_cell_store), so
+     * the last releaser gives that back. The struct is the layout of the
+     * program's `ae_opt_string`, which is declared later. */
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED void _aether_cell_release_optstr(void* cell) {");
+    print_line(gen, "    if (!cell) return;");
+    print_line(gen, "    _AeCellHeader* h = (_AeCellHeader*)cell - 1;");
+    print_line(gen, "    if (!_aether_cell_last(h)) return;");
+    print_line(gen, "    const struct { int has; const char* val; }* o = cell;");
+    print_line(gen, "    if (o->has) _aether_str_cell_free_val(o->val);");
+    print_line(gen, "    free(h);");
+    print_line(gen, "}");
     /* #2618: a counted string stored carries a reference of its own (a take
      * never hands over a borrowed one; a literal is never freed), so the
      * value replaced is given back even when it is the same pointer:
