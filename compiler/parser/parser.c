@@ -3175,9 +3175,16 @@ ASTNode* parse_variable_declaration_with_semicolon(Parser* parser, bool expect_s
     
     ASTNode* decl = create_ast_node(AST_VARIABLE_DECLARATION, name->value, name->line, name->column);
     decl->node_type = type;
-    
+
     if (match_token(parser, TOKEN_ASSIGN)) {
-        ASTNode* value = parse_expression(parser);
+        /* #2790: `int k = match n { ... }` binds the match's value, as `k =
+         * match` and `let k: int = match` do. `match` is no expression to
+         * parse_expression, which returned nothing and left it to parse as
+         * the next statement, so `k` was declared with no value. */
+        Token* next_tok = peek_token(parser);
+        ASTNode* value = (next_tok && next_tok->type == TOKEN_MATCH)
+                         ? parse_match_statement(parser)
+                         : parse_expression(parser);
         if (value) {
             add_child(decl, value);
         }
