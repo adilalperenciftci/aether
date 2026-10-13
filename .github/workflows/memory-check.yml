@@ -231,8 +231,14 @@ jobs:
         make test-build CFLAGS="-DAETHER_MEMORY_TRACKING -O2 -g"
 
     - name: Run memory profiling
+      # --fair-sched=yes for the reason the Valgrind step above gives (#2593):
+      # without it a busy-waiting scheduler test keeps Valgrind's lock while
+      # the thread it waits on starves, and "Scheduler teardown frees the live
+      # actors it spawned" took 4 to 76 s here and now and then ran past the
+      # runner's 120 s limit (#2881).
       run: |
         valgrind --tool=massif \
+                 --fair-sched=yes \
                  --massif-out-file=massif.out \
                  ./build/test_runner
 
