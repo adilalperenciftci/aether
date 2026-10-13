@@ -39,7 +39,7 @@ twice(x: float) -> float { return x * 2.0 }
 main() {
     fails = 0
     t = q() quote | a: float, b: int | -> a * 2.0 + 1.0
-    fails = fails + check("arrow body", src(t), "|a: float, b: int| {\n    return a * 2.0 + 1.0\n}")
+    fails = fails + check("arrow body", src(t), "| a: float, b: int | {\n    return a * 2.0 + 1.0\n}")
     fails = fails + check("arrow body tree", tree(t),
         "(param a :float) (param b :int) (BLOCK (RETURN :float (BINARY + :float (BINARY * :float (LOCAL a :float) (LIT 2.0 :float)) (LIT 1.0 :float))))")
     fails = fails + check("params", "${quote.param_count(t)} ${quote.param_name(t, 1)} ${quote.param_type(t, 1)}", "2 b int")
@@ -49,7 +49,7 @@ main() {
 
     // Parentheses come back where precedence needs them, and only there.
     t = q() quote | a: int, b: int, c: int | -> (a + b) * c - (a - (b - c))
-    fails = fails + check("precedence", src(t), "|a: int, b: int, c: int| {\n    return (a + b) * c - (a - (b - c))\n}")
+    fails = fails + check("precedence", src(t), "| a: int, b: int, c: int | {\n    return (a + b) * c - (a - (b - c))\n}")
     quote.free(t)
 
     // No parameters, a block body.
@@ -78,7 +78,7 @@ main() {
     // Fields, a struct literal, indexing, `if` as a value.
     t = q() quote | p: Pair, xs: int[3], i: int | -> Pair { a: p.b, b: if xs[i] > 0 { p.a } else { 0.0 } }
     fails = fails + check("make", src(t),
-        "|p: Pair, xs: int[3], i: int| {\n    return Pair { a: p.b, b: if xs[i] > 0 { p.a } else { 0.0 } }\n}")
+        "| p: Pair, xs: int[3], i: int | {\n    return Pair { a: p.b, b: if xs[i] > 0 { p.a } else { 0.0 } }\n}")
     fails = fails + check("make tree", tree(t),
         "(param p :Pair) (param xs :int[3]) (param i :int) (BLOCK (RETURN :Pair (MAKE :Pair (FIELD_VALUE a :float (FIELD b :float (LOCAL p :Pair))) (FIELD_VALUE b :float (CHOOSE :float (BINARY > :bool (INDEX :int (LOCAL xs :int[3]) (LOCAL i :int)) (LIT 0 :int)) (FIELD a :float (LOCAL p :Pair)) (LIT 0.0 :float))))))")
     // A MAKE's children, through quote.children: a FIELD_VALUE per field.

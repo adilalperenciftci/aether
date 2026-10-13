@@ -21,11 +21,11 @@ show(t: quote.Tree) {
 
 main() {
     scale = 2.0
-    show() quote |x: float| -> x * scale + 1.0
+    show() quote | x: float | -> x * scale + 1.0
 }
 ```
 ```output
-|x: float| {
+| x: float | {
     return x * scale + 1.0
 }
 (param x :float) (capture scale :float) (BLOCK (RETURN :float (BINARY + :float (BINARY * :float (LOCAL x :float) (CAPTURE scale :float)) (LIT 1.0 :float))))
@@ -39,7 +39,7 @@ kinds are the contract.
 | On a `Tree` | |
 |---|---|
 | `body(t)` | the body, a `BLOCK` node |
-| `param_count(t)`, `param_name(t, i)`, `param_type(t, i)` | the parameters, `|a: T, ...|` |
+| `param_count(t)`, `param_name(t, i)`, `param_type(t, i)` | the parameters, `\| a: T, ... \|` |
 | `capture_count(t)`, `capture(t, i)`, `capture_named(t, n)` | the outer variables the block reads |
 | `source(t)` | `"file.ae:line"` of the quote |
 | `hash(t)` | a hash of the tree's shape, the same in every build, for caching what a back end makes |

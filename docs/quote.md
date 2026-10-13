@@ -7,7 +7,7 @@ body to C that runs, it compiles it to C that **builds a tree describing the
 body**, and passes that tree to the function as its last argument.
 
 ```aether,fragment
-sky = shader("sky") quote |uv: vec2| {
+sky = shader("sky") quote | uv: vec2 | {
     t = time * 0.1
     return vec4(sin(uv.x * 10.0 + t), 0.0, 0.0, 1.0)
 }
@@ -24,7 +24,7 @@ hand the tree over. The library to read it with is
 | immediate | `f() { … }` | nothing: the block runs inline, in the function's context |
 | closure | `f() \|x\| { … }` | a closure to call |
 | callback | `f() callback { … }` | a closure to call |
-| **quote** | `f() quote \|x: T\| { … }` | **a tree to read** |
+| **quote** | `f() quote \| x: T \| { … }` | **a tree to read** |
 
 The design was worked out for ae3d's shaders (the comparison throughout was
 ChrysaLisp's shader language, where a shader is already an s-expression, so
@@ -34,8 +34,8 @@ The uses beyond shaders are in [Beyond shaders](#beyond-shaders).
 ## Syntax
 
 ```aether,fragment
-f(args) quote |a: T, b: U| { body }     // parameters, a block
-f(args) quote |a: T| -> expr            // parameters, one expression
+f(args) quote | a: T, b: U | { body }     // parameters, a block
+f(args) quote | a: T | -> expr            // parameters, one expression
 f(args) quote { body }                  // no parameters
 f(args) quote -> expr                   // no parameters, one expression
 ```
@@ -54,7 +54,7 @@ f(args) quote -> expr                   // no parameters, one expression
   `quote.Tree` (`import std.quote`). Passing a quote to a function whose last
   parameter is not one is an error, and so is passing a closure, a
   `callback` or an immediate block to one that is (E0802).
-- A `->` body is the block it stands for: `quote |x: float| -> x * 2.0` is
+- A `->` body is the block it stands for: `quote | x: float | -> x * 2.0` is
   the tree of `{ return x * 2.0 }`.
 
 ## The tree
@@ -131,7 +131,7 @@ show(t: quote.Tree) {
 }
 
 main() {
-    show() quote |a: float, n: int| {
+    show() quote | a: float, n: int | {
         total = 0.0
         for (i = 0; i < n; i++) {
             total += a
@@ -141,7 +141,7 @@ main() {
 }
 ```
 ```output
-|a: float, n: int| {
+| a: float, n: int | {
     total = 0.0
     for (i = 0; i < n; i += 1) {
         total += a
@@ -186,7 +186,7 @@ keep(t: quote.Tree) -> quote.Tree { return t }
 
 main() {
     time = 0.5
-    t = keep() quote |x: float| -> x * time
+    t = keep() quote | x: float | -> x * time
     time = 2.0
     println(quote.get_float(quote.capture_named(t, "time")))
     quote.free(t)
@@ -224,7 +224,7 @@ var sun = Light { power: 1.0 }
 keep(t: quote.Tree) -> quote.Tree { return t }
 
 main() {
-    t = keep() quote |x: float| -> x * sun.power
+    t = keep() quote | x: float | -> x * sun.power
     defer quote.free(t)
     sun.power = 2.5
     println(quote.dump(t))
@@ -294,7 +294,7 @@ type vec3 = distinct f32x4
 type vec4 = distinct f32x4
 
 fxaa(screen: Texture, texel: vec2, edge: float, edge_min: float, subpixel: float) -> Shader {
-    return fragment("fxaa") quote |uv: vec2| {
+    return fragment("fxaa") quote | uv: vec2 | {
         luma = vec3(0.299, 0.587, 0.114)
         c = rgb(texture(screen, uv))
         n = rgb(texture(screen, uv + vec2(0.0, -1.0) * texel))
@@ -366,7 +366,7 @@ vec4` is a type error, so the tree's types are GLSL's.
 - **Freed at scope exit.** A tree is freed by hand, `quote.free(t)`
   ([Freeing a tree](#freeing-a-tree)).
 - **Uses outside the trailing position**, as a value
-  (`q = quote |x: float| -> x * 2.0`): little extra once the trailing form
+  (`q = quote | x: float | -> x * 2.0`): little extra once the trailing form
   exists, and the test-failure use below wants it. Not built.
 - **Build time instead of start-up**: running the library at compile time,
   as a Lisp macro does, would mean running Aether inside `aetherc`. Not
@@ -383,7 +383,7 @@ vec4` is a type error, so the tree's types are GLSL's.
 - **Test failures that show the expression.** `expect() quote -> a + b == c`
   lets the library print `a + b == c failed: a + b is 7, c is 8`, because it
   can evaluate each side of the `BINARY` node.
-- **Query builders.** `where() quote |p: Person| -> p.age > 30` becomes
+- **Query builders.** `where() quote | p: Person | -> p.age > 30` becomes
   `WHERE age > 30`.
 - **Numeric functions**: a quote with arguments and no pixel, such as a
   matrix product or a physics step, can go to a CPU evaluator, to C, or

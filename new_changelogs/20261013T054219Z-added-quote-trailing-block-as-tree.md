@@ -1,5 +1,5 @@
 - **`quote`: a trailing block handed to the function as a tree.**
-  `f(args) quote |a: T| { body }` (also `quote |a: T| -> expr`,
+  `f(args) quote | a: T | { body }` (also `quote | a: T | -> expr`,
   `quote { body }`, `quote -> expr`) is a fourth trailing-block form beside
   the immediate block, the closure and `callback`. The block is
   type-checked as Aether but never runs: the function, whose last

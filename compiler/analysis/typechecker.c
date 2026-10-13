@@ -10585,7 +10585,7 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                     char msg[256], hint[256];
                     snprintf(msg, sizeof(msg), "quote parameter '%s' has no type", child->value);
                     snprintf(hint, sizeof(hint),
-                             "write its type, `|%s: float|`: the tree records every node's type, "
+                             "write its type, `| %s: float |`: the tree records every node's type, "
                              "and a quote does not guess one", child->value);
                     type_error_code_hint(msg, hint, child->line, child->column,
                                          AETHER_ERR_QUOTE_PARAM);

@@ -29,7 +29,7 @@ Two **independent** axes describe every trailing-block usage:
 | **Immediate** | `func() { body }` | Inline, as DSL structure | Sees enclosing scope directly (it's just inline code) |
 | **Closure (parameterised)** | `func() \|x\| { body }` or `\|x\| -> expr` | Later, when invoked via `call(...)` | Explicit parameters; captures enclosing locals by value |
 | **Callback** | `func() callback { body }` (optionally `callback \|x\|` or `callback \|x\| -> expr`) | Later, when invoked via `call(...)` | Implicit capture of enclosing-scope locals (closure with no required params) |
-| **Quote** | `func() quote \|x: T\| { body }` (or `quote -> expr`, `quote { body }`) | Never: the function receives a tree describing the body ([quote.md](quote.md)) | Each enclosing variable read is a capture whose cell is the variable itself |
+| **Quote** | `func() quote \| x: T \| { body }` (or `quote -> expr`, `quote { body }`) | Never: the function receives a tree describing the body ([quote.md](quote.md)) | Each enclosing variable read is a capture whose cell is the variable itself |
 
 **Axis 2, Trailing-block-accepting function (what the *definition* declares):**
 
@@ -239,7 +239,7 @@ trailing-block mode:
 | Immediate | `func() { block }` | Runs inline as DSL structure |
 | Closure | `func() \|x\| { block }` | Real closure with explicit params |
 | Callback | `func() callback { block }` | Real closure, captures from scope |
-| Quote | `func() quote \|x: T\| { block }` | Not run: handed over as a tree ([quote.md](quote.md)) |
+| Quote | `func() quote \| x: T \| { block }` | Not run: handed over as a tree ([quote.md](quote.md)) |
 
 ```aether,fragment
 counter = ref(0)

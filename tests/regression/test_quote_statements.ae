@@ -48,7 +48,7 @@ main() {
         }
         return total
     }
-    want = "|n: int| {\n    total = 0\n    i = 0\n    while i < n {\n        i += 1\n        if i == 3 {\n            continue\n        } else if i > 8 {\n            break\n        } else {\n            total += i\n        }\n    }\n    for (j = 0; j < 4; j += 1) {\n        total = total - j\n    }\n    note(total)\n    if total < 0 {\n        return 0\n    }\n    return total\n}"
+    want = "| n: int | {\n    total = 0\n    i = 0\n    while i < n {\n        i += 1\n        if i == 3 {\n            continue\n        } else if i > 8 {\n            break\n        } else {\n            total += i\n        }\n    }\n    for (j = 0; j < 4; j += 1) {\n        total = total - j\n    }\n    note(total)\n    if total < 0 {\n        return 0\n    }\n    return total\n}"
     fails = fails + check("statements", quote.to_source(t), want)
 
     want = "(param n :int) (BLOCK (LET total :int (LIT 0 :int)) (LET i :int (LIT 0 :int)) (WHILE (BINARY < :bool (LOCAL i :int) (LOCAL n :int)) (BLOCK (ASSIGN += (LOCAL i :int) (LIT 1 :int)) (IF (BINARY == :bool (LOCAL i :int) (LIT 3 :int)) (BLOCK (CONTINUE)) (IF (BINARY > :bool (LOCAL i :int) (LIT 8 :int)) (BLOCK (BREAK)) (BLOCK (ASSIGN += (LOCAL total :int) (LOCAL i :int))))))) (FOR (LET j :int (LIT 0 :int)) (BINARY < :bool (LOCAL j :int) (LIT 4 :int)) (ASSIGN += (LOCAL j :int) (LIT 1 :int)) (BLOCK (ASSIGN = (LOCAL total :int) (BINARY - :int (LOCAL total :int) (LOCAL j :int))))) (EXPR (CALL note (LOCAL total :int))) (IF (BINARY < :bool (LOCAL total :int) (LIT 0 :int)) (BLOCK (RETURN :int (LIT 0 :int)))) (RETURN :int (LOCAL total :int)))"

@@ -1,7 +1,7 @@
 // std.quote — the tree a `quote` trailing block hands to a function
 // (docs/quote.md).
 //
-//   sky = shader("sky") quote |uv: vec2| {
+//   sky = shader("sky") quote | uv: vec2 | {
 //       t = time * 0.1
 //       return vec4(sin(uv.x * 10.0 + t), 0.0, 0.0, 1.0)
 //   }
@@ -439,21 +439,21 @@ fn if_source(n: Node, depth: int) -> string {
     return s
 }
 
-// The quote printed back as Aether: `|a: T, b: U| { ... }`, or the block
+// The quote printed back as Aether: `| a: T, b: U | { ... }`, or the block
 // alone when it has no parameters. A `->` body comes back as the block it
 // stands for (`{ return expr }`).
 to_source(t: Tree) -> string {
     s = ""
     count = param_count(t)
     if count > 0 {
-        s = "|"
+        s = "| "
         i = 0
         while i < count {
             if i > 0 { s = "${s}, " }
             s = "${s}${param_name(t, i)}: ${param_type(t, i)}"
             i = i + 1
         }
-        s = "${s}| "
+        s = "${s} | "
     }
     return "${s}${block_source(body(t), 0)}"
 }

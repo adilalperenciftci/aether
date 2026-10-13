@@ -790,7 +790,7 @@ A call can be followed, on the same line as its `)`, by one of four blocks:
 | immediate | `f() { … }` | nothing: the block runs inline, in the function's context |
 | closure | `f() \|x\| { … }` or `f() \|x\| -> expr` | a closure to call (`call(fn, args)`) |
 | callback | `f() callback { … }` | a closure to call, capturing from the enclosing scope |
-| quote | `f() quote \|x: T\| { … }`, `quote -> expr`, `quote { … }` | a tree describing the block, to read ([quote.md](quote.md)) |
+| quote | `f() quote \| x: T \| { … }`, `quote -> expr`, `quote { … }` | a tree describing the block, to read ([quote.md](quote.md)) |
 
 The first three are [closures-and-builder-dsl.md](closures-and-builder-dsl.md).
 A quote's block is type-checked as Aether but not compiled to run: the
