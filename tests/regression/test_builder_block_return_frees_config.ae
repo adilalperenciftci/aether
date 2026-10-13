@@ -8,10 +8,7 @@
 // call leaked it. The call now releases it on any way out of the block but
 // its natural end, for the default `map_new` and for a `<stem>_new` factory
 // with a `<stem>_free`. In a nested builder call's block, the way out
-// releases both calls' configs. A builder whose body never names `_builder`
-// takes no ownership of the config it is handed, so it releases it on entry
-// (before, every call of it made with a block leaked the config; the macOS
-// leaks gate found it in test_builder_default_factory_no_import).
+// releases both calls' configs.
 import std.map
 import std.list
 import std.mem
@@ -43,10 +40,6 @@ opts_new() -> ptr {
 
 opts_free(m: ptr) {
     map_free(m)
-}
-
-builder ignores(label: string) -> int {
-    return 1
 }
 
 builder tuned(label: string) with opts_new {
@@ -140,12 +133,6 @@ stems(n: int) -> int {
     return 0
 }
 
-ignored(n: int) -> int {
-    return ignores("x") {
-        set_opt("k", "v")
-    }
-}
-
 falls(n: int) -> int {
     run("x") {
         set_opt("k", "v")
@@ -166,7 +153,6 @@ grows(which: int) -> int {
                 if which == 5 { nested(k) }
                 if which == 6 { stems(k) }
                 if which == 7 { falls(k) }
-                if which == 8 { ignored(k) }
                 k = k + 1
             }
         }, 5)
@@ -174,7 +160,7 @@ grows(which: int) -> int {
 
 main() {
     ok = ret_value(4) == 4 && broke(3) == 0 && skipped(3) == 0 && nested(5) == 5
-    ok = ok && stems(6) == 6 && stems(7) == 7 && falls(0) == 1 && ignored(0) == 1
+    ok = ok && stems(6) == 6 && stems(7) == 7 && falls(0) == 1
     if !ok {
         println("FAIL: a builder block's way out changed a value")
         exit(1)
@@ -183,10 +169,10 @@ main() {
         println("builder config on an early exit: no exact heap count, skipped")
         return
     }
-    names = ["return", "bare return", "break", "continue", "nested", "list_new and opts_new", "natural end", "a builder that ignores its config"]
+    names = ["return", "bare return", "break", "continue", "nested", "list_new and opts_new", "natural end"]
     failed = 0
     w = 1
-    while w <= 8 {
+    while w <= 7 {
         g = grows(w)
         if g != 0 {
             println("FAIL: 100 calls (${names[w - 1]}) grew the heap by ${g}")

@@ -530,21 +530,11 @@ builder compile(src: string) {
         }
     }
     println("compiling ${src} with release=${rel}")
-    if _builder != null {
-        map_free(_builder)    // the builder owns the config it is handed
-    }
 }
 ```
 
 The `_builder` parameter is compiler-injected (like `_ctx` for builder functions).
-The caller never sees it. The builder owns the config it is handed: it frees
-it when it is done with it (`map_free(_builder)` for the default factory),
-keeps it, or returns it (a builder whose result *is* the config, as
-`std.clapae`'s `command` returns its `*Command`). A builder whose body never
-names `_builder` does none of those, so it releases the config on entry,
-with the factory's release (`map_free` for `map_new`, `<stem>_free` for a
-`<stem>_new` factory); before, every call of such a builder made with a
-block leaked its config.
+The caller never sees it.
 
 ### Calling a builder function
 
