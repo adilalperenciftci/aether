@@ -1,0 +1,55 @@
+// Regression (#2821): an actor state field whose initializer is not a plain
+// call (here an `or` with a block) had no type: the typechecker took the
+// type of a call initializer only. Codegen declared the field `int`, so a
+// string one did not compile (an int passed to string.length, a string
+// assigned to an int), and a handler's operation on an int one was untyped,
+// which kept an `or` after it a GNU statement expression on the non-GCC path
+// (#2798). The initializer is a statement of its own in the spawn function
+// too, so its `or` runs ahead of it, in plain C.
+// tests/compiler/test_msvc_compat.sh compiles this as strict C11 and under
+// cl.exe and runs it without GCC extensions.
+
+import std.string
+
+extern exit(code: int)
+
+num(fail: bool) -> int! {
+    if fail { return 0, "boom" }
+    return 7
+}
+
+word(fail: bool, w: string) -> string! {
+    if fail { return "", string.concat("bad-", w) }
+    return string.concat(w, "!")
+}
+
+message Add { v: int }
+message Get {}
+message Total { v: int }
+
+actor Acc {
+    state name = word(true, "q") or { "dflt" }
+    state total = num(true) or { 100 }
+
+    receive {
+        Add(v) -> {
+            total = total + v + (num(true) or { 4 })
+        }
+        Get() -> { reply Total { v: total * 10 + string.length(name) } }
+    }
+}
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+main() {
+    a = spawn(Acc())
+    a ! Add { v: 10 }
+    int t = a ? Get {}
+    check(t == 1144, "state initialized by an or, read in a handler (${t})")
+    println("ok")
+}
