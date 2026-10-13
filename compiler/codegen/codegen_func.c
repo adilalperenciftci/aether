@@ -680,7 +680,6 @@ void emit_bare_fn_adapters(CodeGenerator* gen) {
     }
 }
 
-// Get the factory function for a builder function (default: "map_new").
 /* Does any node under `n` name `_builder`, the config a builder is handed? */
 static int names_builder_config(ASTNode* n) {
     if (!n) return 0;
@@ -690,6 +689,7 @@ static int names_builder_config(ASTNode* n) {
     return 0;
 }
 
+// Get the factory function for a builder function (default: "map_new").
 const char* get_builder_factory(CodeGenerator* gen, const char* func_name) {
     if (!gen || !func_name) return "map_new";
     const char* normalized = codegen_normalise_callee(func_name);
@@ -1830,9 +1830,11 @@ static void emit_function(CodeGenerator* gen, ASTNode* func, const char* clause_
      * returns it. A builder whose body never names `_builder` does none of
      * those, so the config it is given would leak on every call made with
      * a block; it releases it on entry with its factory's release, when one
-     * is known (map_free for the default map_new, `<stem>_free`). */
+     * is known (map_free for the default map_new, `<stem>_free`). Not a
+     * builder a library with its own runtime exports: an importing program
+     * allocates that config with another runtime. */
     if (func->type == AST_BUILDER_FUNCTION && func->value &&
-        !names_builder_config(func)) {
+        !names_builder_config(func) && !lib_builder_config_is_foreign(gen, func)) {
         const char* rel = builder_config_release(gen, func->value);
         if (rel) print_line(gen, "if (_builder) %s(_builder);", rel);
     }

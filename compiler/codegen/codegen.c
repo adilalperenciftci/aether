@@ -3290,6 +3290,19 @@ static int lib_fn_identity(ASTNode* fn, const char** alias,
     return 1;
 }
 
+/* A builder this library exports, when the library links its own copy of
+ * the runtime: an importing program makes the config with its runtime and
+ * passes it in, and freeing it here would charge the free to the wrong
+ * runtime's accounting. With the shared runtime both sides are one. */
+int lib_builder_config_is_foreign(CodeGenerator* gen, ASTNode* fn) {
+    if (!gen || !gen->emit_lib || gen->lib_shared_runtime) return 0;
+    if (!fn || fn->type != AST_BUILDER_FUNCTION || !fn->value) return 0;
+    const char* alias = NULL;
+    const char* name = NULL;
+    const char* module = NULL;
+    return lib_fn_identity(fn, &alias, &name, &module);
+}
+
 /* The public identity of a module-level const in a --emit=lib build. A
  * const merged in from an imported module is part of the surface only when
  * that module belongs to the package (#2297): such consts are not flagged
