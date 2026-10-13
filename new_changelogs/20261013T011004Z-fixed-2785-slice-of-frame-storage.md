@@ -14,5 +14,7 @@
   to the exit is not. A re-bind made by a closure call is not counted
   (#2837), and a closure that may store a slice of the frame's storage
   into one of its names gives the name a slice from where it is written
-  on; a closure's store through a pointer is judged as the function's. A slice used while the function runs, passed down to
+  on (a slice parameter, a `make` buffer, a global or `[]` stored by it
+  does not); a closure's store through a pointer is judged as the
+  function's. A slice used while the function runs, passed down to
   a call, or of a slice parameter or a `make` buffer, is unchanged (#2785).

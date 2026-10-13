@@ -490,5 +490,180 @@ case "$out" in
        fails=$((fails + 1)) ;;
 esac
 
+# Only a view of the frame's own storage taints: a closure storing a slice
+# parameter, a slice of one, a field given one, a closure parameter the
+# closure is called with a non-view for, a slice of a `make` buffer, a local
+# holding one, a module-level `var` or `[]` leaves the name as it was.
+cat > "$TMP/closure_not_views.ae" <<'AE'
+struct Holder {
+    data: int[]
+}
+
+var gs: int[] = null
+
+from_param(xs: int[]) -> int[] {
+    let v: int[] = make([]int, 2)
+    set = || {
+        v = xs
+    }
+    set()
+    return v
+}
+
+from_param_slice(xs: int[]) -> int[] {
+    let v: int[] = make([]int, 2)
+    set = || {
+        v = xs[0..3]
+    }
+    set()
+    return v
+}
+
+field_from_param(xs: int[]) -> Holder {
+    h = Holder { data: make([]int, 1) }
+    set = || {
+        h.data = xs
+    }
+    set()
+    return h
+}
+
+closure_param(xs: int[]) -> int[] {
+    let v: int[] = make([]int, 2)
+    set = |s: int[]| {
+        v = s
+    }
+    set(xs)
+    return v
+}
+
+from_buffer() -> int[] {
+    buf = make([]int, 8)
+    let v: int[] = make([]int, 2)
+    set = || {
+        v = buf[0..4]
+    }
+    set()
+    return v
+}
+
+from_local() -> int[] {
+    a = make([]int, 5)
+    let v: int[] = make([]int, 2)
+    set = || {
+        v = a
+    }
+    set()
+    return v
+}
+
+from_global() -> int[] {
+    let v: int[] = make([]int, 2)
+    set = || {
+        v = gs
+    }
+    set()
+    return v
+}
+
+to_empty() -> int[] {
+    let v: int[] = make([]int, 2)
+    set = || {
+        v = []
+    }
+    set()
+    return v
+}
+
+main() {
+    xs = make([]int, 6)
+    gs = make([]int, 7)
+    println("safe ${from_param(xs).len} ${from_param_slice(xs).len} ${field_from_param(xs).data.len} ${closure_param(xs).len} ${from_buffer().len} ${from_local().len} ${from_global().len} ${to_empty().len}")
+}
+AE
+out=$(cd "$TMP" && AETHER_HOME="$ROOT" "$AE" run closure_not_views.ae 2>&1)
+case "$out" in
+    *"safe 6 3 6 6 4 5 7 0"*) ;;
+    *) echo "  [FAIL] closure_not_views: not \"safe 6 3 6 6 4 5 7 0\":"
+       echo "$out" | sed 's/^/        /'
+       fails=$((fails + 1)) ;;
+esac
+
+cat > "$TMP/closure_local_view.ae" <<'AE'
+pick() -> int[] {
+    arr = [1, 2, 3]
+    let v: int[] = make([]int, 2)
+    set = || {
+        let w: int[] = arr
+        v = w
+    }
+    set()
+    return v
+}
+
+main() {
+    println("${pick().len}")
+}
+AE
+refused closure_local_view 9:12 "'pick' returns a slice of its own storage (\`v\`, which holds a slice of it)"
+
+cat > "$TMP/closure_param_view.ae" <<'AE'
+pick() -> int[] {
+    arr = [1, 2, 3]
+    let v: int[] = make([]int, 2)
+    set = |s: int[]| {
+        v = s
+    }
+    set(arr)
+    return v
+}
+
+main() {
+    println("${pick().len}")
+}
+AE
+refused closure_param_view 8:12 "'pick' returns a slice of its own storage (\`v\`, which holds a slice of it)"
+
+cat > "$TMP/closure_nested_store.ae" <<'AE'
+pick() -> int[] {
+    arr = [1, 2, 3]
+    let v: int[] = make([]int, 2)
+    outer = || {
+        inner = || {
+            v = arr
+        }
+        inner()
+    }
+    outer()
+    return v
+}
+
+main() {
+    println("${pick().len}")
+}
+AE
+refused closure_nested_store 11:12 "'pick' returns a slice of its own storage (\`v\`, which holds a slice of it)"
+
+cat > "$TMP/closure_in_loop.ae" <<'AE'
+pick(n: int) -> int[] {
+    arr = [1, 2, 3]
+    let v: int[] = make([]int, 2)
+    i = 0
+    while i < n {
+        set = || {
+            v = arr
+        }
+        set()
+        i = i + 1
+    }
+    return v
+}
+
+main() {
+    println("${pick(1).len}")
+}
+AE
+refused closure_in_loop 12:12 "'pick' returns a slice of its own storage (\`v\`, which holds a slice of it)"
+
 [ "$fails" -eq 0 ] || exit 1
 echo "  [PASS] slice_escape: a slice of a function's own storage stays in it"

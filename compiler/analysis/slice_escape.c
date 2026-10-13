@@ -720,14 +720,8 @@ static void flow_block(Esc* esc, Frame* f, ASTNode* n, Views* v, int rep, int ne
 /* A value a store may give a view of a frame's storage: anything that can
  * hold one but a call's result (taken to be none, as everywhere in this
  * check), `null` or `[]`. */
-static int may_store_view(ASTNode* e) {
-    if (!e) return 0;
-    if (e->type == AST_FUNCTION_CALL || e->type == AST_NULL_LITERAL) return 0;
-    if (e->type == AST_ARRAY_LITERAL && e->child_count == 0) return 0;
-    if (e->type == AST_LITERAL || e->type == AST_STRING_INTERP) return 0;
-    return may_hold_view(e->node_type);
-}
-
+/* The names a closure declares itself: its parameters and written-type
+ * declarations, and those of the closures nested in it. */
 static void closure_own_names(ASTNode* n, StrMap* own) {
     if (!n) return;
     if ((n->type == AST_CLOSURE_PARAM && n->value) ||
@@ -736,24 +730,146 @@ static void closure_own_names(ASTNode* n, StrMap* own) {
     for (int i = 0; i < n->child_count; i++) closure_own_names(n->children[i], own);
 }
 
+/* The calls of the closure the frame names `name`: `name(...)`, which the
+ * checker makes `call(name, ...)`. For each, whether the argument at the
+ * closure's parameter `pos` may be a view where `j` says what holds one.
+ * Returns 1 when one may. `*reads` counts the uses of the name that are no
+ * call of it (passed on, stored, captured). */
+static int called_with_view(Frame* f, ASTNode* n, const char* name, int pos, Views* j,
+                            int* reads) {
+    if (!n) return 0;
+    int hit = 0, from = 0;
+    if (n->type == AST_FUNCTION_CALL && n->value) {
+        int base = -1;
+        if (strcmp(n->value, "call") == 0 && n->child_count > 0 && n->children[0] &&
+            n->children[0]->type == AST_IDENTIFIER && n->children[0]->value &&
+            strcmp(n->children[0]->value, name) == 0) {
+            base = 1;
+            from = 1;
+        } else if (strcmp(n->value, name) == 0) {
+            base = 0;
+        }
+        if (base >= 0) {
+            int k = 0;
+            for (int i = base; i < n->child_count; i++) {
+                ASTNode* a = n->children[i];
+                if (!a || ast_is_trailing_block(a)) continue;
+                /* An array of the frame passed to a slice parameter is
+                 * viewed by it, coerced or not. */
+                if (k++ == pos && (frame_view(f, j, a) || frame_storage(f, a))) hit = 1;
+            }
+        }
+    }
+    if (n->type == AST_IDENTIFIER && n->value && strcmp(n->value, name) == 0) (*reads)++;
+    for (int i = from; i < n->child_count; i++)
+        if (called_with_view(f, n->children[i], name, pos, j, reads)) hit = 1;
+    return hit;
+}
+
 /* The stores of the closure body `n` (closures nested in it included, as
- * it may call them) into the frame's names: each that may give one a view
+ * it may call them) into the frame's names (not `own`): each whose value
+ * may be a view of the storage of the frame (`j` saying what holds one)
  * taints its path from here on, whenever the closure runs, or whether. */
-static void taint_stores(Frame* f, ASTNode* n, StrMap* own) {
+static void taint_stores(Frame* f, ASTNode* n, StrMap* own, Views* j) {
     if (!n) return;
     if (n->type == AST_VARIABLE_DECLARATION && n->value && n->type_inferred &&
         n->child_count > 0 && !strmap_has(own, n->value) && strmap_has(&f->locals, n->value) &&
-        may_store_view(n->children[0]))
+        frame_view(f, j, n->children[0]))
         strmap_put(&f->sticky, n->value, LIVE);
     ASTNode *left, *value;
-    if (store_parts(n, &left, &value) && may_store_view(value)) {
+    if (store_parts(n, &left, &value) && frame_view(f, j, value)) {
         char path[256];
         int element = 0;
         ASTNode* root = value_path(left, path, sizeof(path), &element);
         if (root && !strmap_has(own, root->value) && strmap_has(&f->locals, root->value))
             strmap_put(&f->sticky, path, LIVE);
     }
-    for (int i = 0; i < n->child_count; i++) taint_stores(f, n->children[i], own);
+    for (int i = 0; i < n->child_count; i++) taint_stores(f, n->children[i], own, j);
+}
+
+/* The closure's own locals (in `own`, not parameters) a binding in `n`
+ * gives a value that may be a view where `j` says what holds one. */
+static void closure_bound_views(Frame* f, ASTNode* n, StrMap* own, Views* j, StrMap* out) {
+    if (!n) return;
+    if (n->type == AST_VARIABLE_DECLARATION && n->value && n->child_count > 0 &&
+        strmap_has(own, n->value)) {
+        ASTNode* d = strmap_get(own, n->value);
+        if (d && d->type != AST_CLOSURE_PARAM && frame_view(f, j, n->children[0]))
+            strmap_put(out, n->value, LIVE);
+    }
+    for (int i = 0; i < n->child_count; i++) closure_bound_views(f, n->children[i], own, j, out);
+}
+
+/* Which of the closure's own names (in `own`) may hold a view of the
+ * frame's storage: a parameter the closure is called with a view for (or
+ * any parameter that can hold one, when the closure is passed on, stored,
+ * or not bound to a name, so its callers are not all here; a nested
+ * closure's parameters too), and a local of its own bound to one. Each is
+ * added to `j`; the others are taken out of it, where the frame has a name
+ * of theirs that holds a view. */
+static void closure_views(Frame* f, ASTNode* lit, const char* name, StrMap* own, Views* j) {
+    for (int i = 0; i < strmap_count(own); i++) views_clear(j, strmap_key_at(own, i));
+    int reads = 0;
+    if (name) called_with_view(f, frame_body(f->owner), name, -1, j, &reads);
+    int pos = 0;
+    for (int i = 0; i < lit->child_count; i++) {
+        ASTNode* p = lit->children[i];
+        if (!p || p->type != AST_CLOSURE_PARAM || !p->value) continue;
+        int view;
+        if (!name || reads > 0) {
+            view = may_hold_view(p->node_type);
+        } else {
+            int r = 0;
+            view = called_with_view(f, frame_body(f->owner), name, pos, j, &r);
+        }
+        if (view) views_set(j, p->value);
+        pos++;
+    }
+    /* A nested closure's parameters: their callers are in this closure. */
+    for (int i = 0; i < strmap_count(own); i++) {
+        ASTNode* d = strmap_value_at(own, i);
+        if (d && d->type == AST_CLOSURE_PARAM && !views_touch(j, d->value) &&
+            may_hold_view(d->node_type)) {
+            int top = 0;
+            for (int k = 0; k < lit->child_count; k++)
+                if (lit->children[k] == d) top = 1;
+            if (!top) views_set(j, d->value);
+        }
+    }
+    /* The closure's locals bound to a view, to a fixpoint. */
+    for (int pass = 0; pass < 8; pass++) {
+        int grew = 0;
+        StrMap todo;
+        strmap_init(&todo);
+        closure_bound_views(f, lit, own, j, &todo);
+        for (int i = 0; i < strmap_count(&todo); i++)
+            if (!views_touch(j, strmap_key_at(&todo, i))) {
+                views_set(j, strmap_key_at(&todo, i));
+                grew = 1;
+            }
+        strmap_free(&todo);
+        if (!grew) break;
+    }
+}
+
+/* A closure met in the frame's walk, bound to `name` (NULL when it is not):
+ * what it may store into the frame's names taints them. Whether a stored
+ * value may be a view of the frame's storage is judged as the frame's own
+ * stores are: a fixed-size array of the frame, an array literal, or a name
+ * that holds a view at some point of the walk (`ever`, complete on the
+ * second walk), or where the closure is written (`v`). */
+static void taint_closure(Frame* f, ASTNode* lit, const char* name, Views* v) {
+    StrMap own;
+    strmap_init(&own);
+    closure_own_names(lit, &own);
+    Views j;
+    views_copy(&j, v);
+    views_join(&j, &f->ever);
+    views_join(&j, &f->sticky);
+    closure_views(f, lit, name, &own, &j);
+    taint_stores(f, lit, &own, &j);
+    strmap_free(&j);
+    strmap_free(&own);
 }
 
 static void flow(Esc* esc, Frame* f, ASTNode* n, Views* v, int rep) {
@@ -762,11 +878,7 @@ static void flow(Esc* esc, Frame* f, ASTNode* n, Views* v, int rep) {
         /* A closure is no flow of this frame's, but what it stores into
          * this frame's names it may store whenever it is called, and it
          * may be called from here on. */
-        StrMap own;
-        strmap_init(&own);
-        closure_own_names(n, &own);
-        taint_stores(f, n, &own);
-        strmap_free(&own);
+        taint_closure(f, n, NULL, v);
         return;
     }
     if (ast_is_own_function(n)) return;
@@ -846,7 +958,11 @@ static void flow(Esc* esc, Frame* f, ASTNode* n, Views* v, int rep) {
             }
             return;
         case AST_VARIABLE_DECLARATION:
-            flow_children(esc, f, n, v, rep, 0);
+            if (n->value && n->child_count > 0 && n->children[0] &&
+                n->children[0]->type == AST_CLOSURE && ast_is_own_function(n->children[0]))
+                taint_closure(f, n->children[0], n->value, v);
+            else
+                flow_children(esc, f, n, v, rep, 0);
             if (!n->value || n->child_count == 0) return;
             if (writes_global(esc, f, n)) {
                 if (rep && frame_view_store(f, v, n->children[0]))
@@ -898,7 +1014,13 @@ static void check_frame(Esc* esc, ASTNode* owner, Frame* parent) {
     frame_init(esc, &f, owner);
     f.parent = parent;
     ASTNode* body = frame_body(owner);
+    /* Two walks: the first only learns which paths ever hold a view, so
+     * that a closure's stores are judged, on the second, against what its
+     * names may hold whenever it runs; the second reports. */
     Views v;
+    strmap_init(&v);
+    flow(esc, &f, body, &v, 0);
+    strmap_free(&v);
     strmap_init(&v);
     flow(esc, &f, body, &v, 1);
     strmap_free(&v);
