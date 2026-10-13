@@ -2641,6 +2641,36 @@ static ASTNode* def_of_body(CodeGenerator* gen, const char* fn_name, ASTNode* bo
     return (dc && dc->count > 0) ? dc->nodes[0] : NULL;
 }
 
+/* #2815: is `e` `o ?? d` or `o!` over a `string?` named by an identifier
+ * that is not a parameter of `fn_def` (a local, a cell, or a module var)?
+ * A local owns the string it holds and frees it at scope exit, after the
+ * return value is read and before the caller uses it, so a return takes a
+ * copy of it. A parameter's string is the caller's and outlives the call;
+ * a module var keeps its strings, so a copy of one costs a copy only. */
+static int opt_string_local_unwrap(CodeGenerator* gen, ASTNode* e, ASTNode* fn_def) {
+    if (!e || (e->type != AST_NULL_COALESCE && e->type != AST_TUPLE_UNWRAP) ||
+        e->child_count < 1) return 0;
+    ASTNode* o = e->children[0];
+    if (!o || o->type != AST_IDENTIFIER || !o->value || !is_opt_string_type(o->node_type))
+        return 0;
+    for (int i = 0; fn_def && i < fn_def->child_count; i++) {
+        ASTNode* c = fn_def->children[i];
+        if (c && (c->type == AST_PATTERN_VARIABLE || c->type == AST_VARIABLE_DECLARATION) &&
+            c->value && strcmp(c->value, o->value) == 0) {
+            /* A parameter a closure writes is a cell holding a string of
+             * its own (#2795), given back when the cell goes. */
+            char** promoted = NULL;
+            int count = 0;
+            get_promoted_names_for_func(gen, fn_scope_name(gen->program, fn_def), &promoted,
+                                        &count);
+            for (int k = 0; k < count; k++)
+                if (promoted[k] && strcmp(promoted[k], o->value) == 0) return 1;
+            return 0;
+        }
+    }
+    return 1;
+}
+
 static int return_expr_is_heap(CodeGenerator* gen, ASTNode* expr,
                                ASTNode* fn_body_root, const char* fn_name) {
     if (!expr) return 0;
@@ -2661,6 +2691,11 @@ static int return_expr_is_heap(CodeGenerator* gen, ASTNode* expr,
      * does whenever one of its value arms does. So does an element of an
      * array that owns its elements, or a call handing one back (#2618). */
     if (is_string_view_read(gen, expr, 0)) return 1;
+    /* #2815: so does `o ?? d` or `o!` over a `string?` that is not a
+     * parameter: a local (or a cell) owns the string it yields and frees
+     * it at scope exit, before the caller reads it, so the return takes a
+     * copy (opt_string_local_unwrap). */
+    if (opt_string_local_unwrap(gen, expr, def_of_body(gen, fn_name, fn_body_root))) return 1;
     if (expr->type == AST_IF_EXPRESSION && expr->child_count >= 3) {
         return return_expr_is_heap(gen, expr->children[1], fn_body_root, fn_name) ||
                return_expr_is_heap(gen, expr->children[2], fn_body_root, fn_name);
@@ -4779,6 +4814,26 @@ static int emit_uniform_heap_return_expr(CodeGenerator* gen, ASTNode* expr) {
          * local moved out of this scope, a field read copied, a fresh
          * value adopted); the shim copies only what is still borrowed. */
         emit_string_take_owned(gen, expr, 0);
+        if (give) fprintf(gen->output, ")");
+        return 1;
+    }
+    /* #2815: `o ?? d` over a `string?` local, `d` a fresh string: the
+     * local's string is copied (the local frees its own at scope exit)
+     * and the default, when it is the one taken, adopted as it is. The
+     * plain path below copies the whole value, which would leak a fresh
+     * default. */
+    if (expr->type == AST_NULL_COALESCE && expr->child_count >= 2 && expr->children[1] &&
+        expr->children[1]->type != AST_IDENTIFIER &&
+        is_heap_string_expr(gen, expr->children[1]) &&
+        opt_string_local_unwrap(gen, expr, NULL)) {
+        static int ro_counter = 0;
+        int id = ro_counter++;
+        fprintf(gen->output, "({ ae_opt_string _ro%d = ", id);
+        generate_expression(gen, expr->children[0]);
+        fprintf(gen->output, "; _ro%d.has ? aether_uniform_heap_str(_ro%d.val, 0) : "
+                "(const char*)(", id, id);
+        generate_expression(gen, expr->children[1]);
+        fprintf(gen->output, "); })");
         if (give) fprintf(gen->output, ")");
         return 1;
     }
