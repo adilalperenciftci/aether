@@ -25,7 +25,7 @@ EXE_EXT="${EXE_EXT:-}"
 VALGRIND="${VALGRIND:-0}"
 LSAN="${LSAN:-0}"
 ONLY="${ONLY:-}"
-VG="valgrind --leak-check=full --error-exitcode=99 --errors-for-leak-kinds=definite"
+VG="valgrind --leak-check=full --fair-sched=yes --error-exitcode=99 --errors-for-leak-kinds=definite"
 
 # LeakSanitizer gate (leakgate = "lsan"). Standalone LSan, not ASan: ASan's
 # memcpy interceptor walks its shadow map, and lavapipe's LLVM JIT maps code
