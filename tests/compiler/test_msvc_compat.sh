@@ -20,7 +20,7 @@
 # C4047 the wrong level of indirection, C4090 a dropped qualifier) are errors;
 # the rest of /W3 is printed and allowed.
 #
-# The programs of tests 5-16 are tests/regression/test_issue<n>_*.ae, which
+# The programs of tests 5-17 are tests/regression/test_issue<n>_*.ae, which
 # the .ae sweep runs on the GCC path. Under gcc they are also built and run
 # with AETHER_GCC_COMPAT forced to 0, when build/ae is there, so the plain C
 # forms are checked for what they compute, not only that they compile.
@@ -245,7 +245,7 @@ generate closure_str
 [ -z "$use_gcc" ] || strict_c11 closure_str "A string stored into a try-written array element"
 [ -z "$use_cl" ] || cl_compile closure_str "A string stored into a try-written array element"
 
-# Tests 5-16: every construct that needs a temporary in the middle of an
+# Tests 5-17: every construct that needs a temporary in the middle of an
 # expression, one program per family, each of which the .ae sweep runs on the
 # GCC path and checks. All of them were GNU statement expressions here (#2765,
 # #2798), and left_to_right read operands out of order (#2813).
@@ -290,10 +290,12 @@ generate closure_str
 #                     they go to takes them (a field it frees, a function
 #                     named as a value), and a builder's arguments after its
 #                     block (#2798)
+#   call_effects      calls that read through a pointer they were not handed,
+#                     and mutually recursive writers, ordered (#2813)
 PROGS="2765_string_slots 2765_call_temps 2765_operand_order 2765_optionals 2765_struct_values
     2765_statement_values 2765_helper_names 2813_left_to_right 2798_statement_constructs_anywhere
     2798_statement_constructs_in_parts 2821_actor_state_initializer_type
-    2798_operands_ahead"
+    2798_operands_ahead 2813_call_effects"
 for issue_prog in $PROGS; do
     prog="${issue_prog#*_}"
     cp "tests/regression/test_issue$issue_prog.ae" "$TMP/$prog.ae"

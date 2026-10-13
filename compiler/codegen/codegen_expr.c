@@ -896,8 +896,17 @@ static int order_has_call(ASTNode* node) {
  * was handed under another name, one read out of a field (#2813). So a
  * call that writes through any pointer or slice is ordered against every
  * operand that reads through one (a field of a pointer, an element of a
- * slice, a pointer or slice handed to a call), not only against reads
- * rooted at the argument it writes through. */
+ * slice, a pointer or slice handed to a call, a call that reads through
+ * one, a call the compiler cannot see), not only against reads rooted at
+ * the argument it writes through. A call that reads through a pointer it
+ * was not handed (one kept in a module variable, one inside a struct value
+ * it was handed) reads memory a call that writes through a pointer may
+ * change, in either order (#2813).
+ *
+ * The effects are a property of the call graph: a function's are its
+ * body's and its callees'. They are solved to a fixed point over the
+ * functions a query reaches (order_fn_effects), so mutually recursive
+ * functions get the same answer whichever is asked about first. */
 
 typedef struct OrderFnEffects {
     ASTNode* fn;
@@ -905,6 +914,7 @@ typedef struct OrderFnEffects {
     int writes_shared;         /* a module global, or runs a closure */
     unsigned writes_through;   /* bit k: memory its parameter k reaches */
     int writes_memory;         /* writes through any pointer or slice */
+    int reads_memory;          /* reads through any pointer or slice */
 } OrderFnEffects;
 
 /* The definition a call runs, when it is a function of this program, or
@@ -1000,23 +1010,26 @@ static int order_call_effects(CodeGenerator* gen, ASTNode* call) {
     return gen->order_fn_effects[idx].opaque ? -1 : idx;
 }
 
-/* The effects of the calls in `node` as seen from `fn`'s own body. */
-static void order_scan_body(CodeGenerator* gen, ASTNode* fn, ASTNode* node,
-                            int* opaque, int* shared, unsigned* through, int* memory) {
+/* The effects of `node`, a part of `fn`'s own body, and of the calls in it,
+ * ORed into `e`. */
+static void order_scan_body(CodeGenerator* gen, ASTNode* fn, ASTNode* node, OrderFnEffects* e) {
     if (!node || node->type == AST_CLOSURE) return;
     const char* t = order_write_target(node);
-    if (t && is_module_global_var(gen, t)) *shared = 1;
+    if (t && is_module_global_var(gen, t)) e->writes_shared = 1;
     ASTNode* lv = order_through_lvalue(node);
     int k = lv ? order_param_index(fn, order_lvalue_root(lv)) : -1;
-    if (k >= 0) *through |= 1u << k;
-    if (lv && order_access_through_memory(lv)) *memory = 1;
+    if (k >= 0) e->writes_through |= 1u << k;
+    if (lv && order_access_through_memory(lv)) e->writes_memory = 1;
+    if ((node->type == AST_MEMBER_ACCESS || node->type == AST_ARRAY_ACCESS) &&
+        order_access_through_memory(node)) e->reads_memory = 1;
     if (node->type == AST_FUNCTION_CALL) {
         int idx = order_call_effects(gen, node);
         if (idx < 0) {
-            *opaque = 1;
+            e->opaque = 1;
         } else {
-            if (gen->order_fn_effects[idx].writes_shared) *shared = 1;
-            if (gen->order_fn_effects[idx].writes_memory) *memory = 1;
+            if (gen->order_fn_effects[idx].writes_shared) e->writes_shared = 1;
+            if (gen->order_fn_effects[idx].writes_memory) e->writes_memory = 1;
+            if (gen->order_fn_effects[idx].reads_memory) e->reads_memory = 1;
             unsigned c_through = gen->order_fn_effects[idx].writes_through;
             for (int i = 0, a = 0; i < node->child_count && a < 32; i++) {
                 ASTNode* arg = node->children[i];
@@ -1024,7 +1037,7 @@ static void order_scan_body(CodeGenerator* gen, ASTNode* fn, ASTNode* node,
                     strcmp(arg->value, "trailing") == 0) continue;
                 if (c_through & (1u << a)) {
                     int pk = order_param_index(fn, order_ref_arg_root(arg));
-                    if (pk >= 0) *through |= 1u << pk;
+                    if (pk >= 0) e->writes_through |= 1u << pk;
                 }
                 a++;
             }
@@ -1033,15 +1046,27 @@ static void order_scan_body(CodeGenerator* gen, ASTNode* fn, ASTNode* node,
                node->type == AST_VA_ARG) {
         /* A handler runs code the body does not show; a varargs read
          * advances state the caller handed over. */
-        *opaque = 1;
+        e->opaque = 1;
     }
     for (int i = 0; i < node->child_count; i++)
-        order_scan_body(gen, fn, node->children[i], opaque, shared, through, memory);
+        order_scan_body(gen, fn, node->children[i], e);
 }
 
-/* The memoised effects of calling `fn`, a function of this program: an
- * index into gen->order_fn_effects. A function reached again while its own
- * body is read (recursion) answers with what is known so far. */
+/* Set while order_fn_effects solves: a function first reached then gets an
+ * entry of its own, solved with the rest. */
+static int g_order_solving = 0;
+
+/* The effects of calling `fn`, a function of this program: an index into
+ * gen->order_fn_effects. The first query that reaches a function solves it
+ * and every function its body reaches that has no entry yet, to a fixed
+ * point: each pass rereads those bodies with what their callees are known
+ * to do so far, and only adds effects, until a pass adds none. A function
+ * with an entry from an earlier query is solved already, and calls no
+ * function without one (that one would have an entry too), so it cannot
+ * change. Answered from the first partial read instead, a function reached
+ * again while its own body was being read (mutual recursion) fixed its
+ * caller's effects early, and the answer depended on which function was
+ * asked about first (#2813). */
 static int order_fn_effects(CodeGenerator* gen, ASTNode* fn) {
     for (int i = 0; i < gen->order_fn_effect_count; i++)
         if (gen->order_fn_effects[i].fn == fn) return i;
@@ -1052,18 +1077,28 @@ static int order_fn_effects(CodeGenerator* gen, ASTNode* fn) {
         gen->order_fn_effect_capacity = cap;
     }
     int idx = gen->order_fn_effect_count++;
-    gen->order_fn_effects[idx] = (OrderFnEffects){ fn, 0, 0, 0, 0 };
-    int opaque = 0;
-    int shared = 0;
-    unsigned through = 0;
-    int memory = 0;
-    for (int i = 0; i < fn->child_count; i++)
-        if (fn->children[i] && fn->children[i]->type == AST_BLOCK)
-            order_scan_body(gen, fn, fn->children[i], &opaque, &shared, &through, &memory);
-    gen->order_fn_effects[idx].opaque = opaque;
-    gen->order_fn_effects[idx].writes_shared = shared;
-    gen->order_fn_effects[idx].writes_through = through;
-    gen->order_fn_effects[idx].writes_memory = memory;
+    gen->order_fn_effects[idx] = (OrderFnEffects){ fn, 0, 0, 0, 0, 0 };
+    if (g_order_solving) return idx;
+    g_order_solving = 1;
+    int changed;
+    do {
+        changed = 0;
+        for (int i = idx; i < gen->order_fn_effect_count; i++) {
+            OrderFnEffects e = gen->order_fn_effects[i];
+            ASTNode* f = e.fn;
+            for (int c = 0; c < f->child_count; c++)
+                if (f->children[c] && f->children[c]->type == AST_BLOCK)
+                    order_scan_body(gen, f, f->children[c], &e);
+            OrderFnEffects* cur = &gen->order_fn_effects[i];
+            if (e.opaque != cur->opaque || e.writes_shared != cur->writes_shared ||
+                e.writes_through != cur->writes_through ||
+                e.writes_memory != cur->writes_memory || e.reads_memory != cur->reads_memory) {
+                *cur = e;
+                changed = 1;
+            }
+        }
+    } while (changed);
+    g_order_solving = 0;
     return idx;
 }
 
@@ -1109,9 +1144,11 @@ static int order_reads_through(ASTNode* node, const char* root) {
 }
 
 /* Does `node` read memory through a pointer or a slice: a field or an
- * element reached through one, or one handed to a call (a callee may read
- * through it)? */
-static int order_reads_memory(ASTNode* node) {
+ * element reached through one, one handed to a call (a callee may read
+ * through it), or a call that reads through one it reaches some other way
+ * (a module variable, a field of a struct it was handed), or that the
+ * compiler cannot see? */
+static int order_reads_memory(CodeGenerator* gen, ASTNode* node) {
     if (!node || node->type == AST_CLOSURE) return 0;
     if ((node->type == AST_MEMBER_ACCESS || node->type == AST_ARRAY_ACCESS) &&
         order_access_through_memory(node)) return 1;
@@ -1123,9 +1160,12 @@ static int order_reads_memory(ASTNode* node) {
                 a = a->children[0];
             if (a && order_is_memory_ref(a->node_type)) return 1;
         }
+        int idx = order_call_effects(gen, node);
+        if (idx < 0 || gen->order_fn_effects[idx].reads_memory) return 1;
     }
+    if (node->type == AST_SEND_ASK || node->type == AST_SEND_FIRE_FORGET) return 1;
     for (int i = 0; i < node->child_count; i++)
-        if (order_reads_memory(node->children[i])) return 1;
+        if (order_reads_memory(gen, node->children[i])) return 1;
     return 0;
 }
 
@@ -1145,8 +1185,8 @@ static int order_call_affects(CodeGenerator* gen, ASTNode* x, ASTNode* y) {
         /* An opaque call may write any memory `y` reads through. */
         if (idx < 0 && order_reads_through(y, NULL)) return 1;
         /* One that writes through a pointer or a slice may write what `y`
-         * reaches through another (#2813). */
-        if (idx >= 0 && gen->order_fn_effects[idx].writes_memory && order_reads_memory(y))
+         * reaches through another, read there or by a call (#2813). */
+        if (idx >= 0 && gen->order_fn_effects[idx].writes_memory && order_reads_memory(gen, y))
             return 1;
         for (int i = 0, a = 0; i < x->child_count && a < 32; i++) {
             ASTNode* arg = x->children[i];

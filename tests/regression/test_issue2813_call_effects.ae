@@ -1,0 +1,95 @@
+// Regression (#2813): an operand that reads memory through a pointer is
+// evaluated ahead of a later call that writes it, and the other way round,
+// also when the read is a call's: one that reads through a pointer it keeps
+// in a module variable, or one inside a struct it is handed. And what a
+// function writes counts through mutual recursion whichever of the two
+// functions is asked about first: a_fn reached b_fn while its own body was
+// being read and b_fn's effects were fixed without a_fn's write, so the
+// first program order below read the field after the write and the second
+// before it.
+
+extern exit(code: int)
+extern malloc(size: int) -> ptr
+
+struct Box {
+    n: int
+}
+
+struct Holder {
+    box: *Box
+}
+
+var gp: *Box = null
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+peek() -> int {
+    return gp.n
+}
+
+peek_h(h: Holder) -> int {
+    return h.box.n
+}
+
+poke(b: *Box) -> int {
+    b.n = 6
+    return 2
+}
+
+show(a: int, b: int) -> int {
+    return a * 1000 + b
+}
+
+a_fn(b: *Box, d: int) -> int {
+    if d == 0 {
+        b.n = 5
+        return 2
+    }
+    return b_fn(b, d - 1)
+}
+
+b_fn(b: *Box, d: int) -> int {
+    return a_fn(b, d)
+}
+
+c_fn(b: *Box, d: int) -> int {
+    if d == 0 {
+        b.n = 5
+        return 2
+    }
+    return d_fn(b, d - 1)
+}
+
+d_fn(b: *Box, d: int) -> int {
+    return c_fn(b, d)
+}
+
+main() {
+    p = malloc(sizeof(Box)) as *Box
+    gp = p
+    p.n = 1
+    check(show(peek(), poke(p)) == 1002, "a call reading through a module pointer")
+    p.n = 1
+    check(show(poke(p), peek()) == 2006, "a call reading through a module pointer, after")
+    p.n = 1
+    h = Holder { box: p }
+    check(show(peek_h(h), poke(p)) == 1002, "a call reading through a struct it is handed")
+
+    // a_fn asked about first, then b_fn.
+    q = p
+    p.n = 1
+    check(show(q.n, a_fn(p, 0)) == 1002, "a_fn, asked first")
+    p.n = 1
+    check(show(q.n, b_fn(p, 1)) == 1002, "b_fn, asked second")
+    // d_fn asked about first, then c_fn.
+    p.n = 1
+    check(show(q.n, d_fn(p, 1)) == 1002, "d_fn, asked first")
+    p.n = 1
+    check(show(q.n, c_fn(p, 0)) == 1002, "c_fn, asked second")
+    println("ok")
+}
