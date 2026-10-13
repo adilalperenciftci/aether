@@ -2684,6 +2684,40 @@ static void walk_returns_for_heap_check_in(CodeGenerator* gen, ASTNode* node,
                                             int* any_heap, int* any_non_heap,
                                             CatchScope* cs);
 
+/* The arm whose `some(s)` binding owns its string, when `node` is a match
+ * statement on a `string?` that hands the binding a string of its own
+ * (the optional match's emission): a call of an Aether function returning
+ * one (#2750), or a `string?` closure cell of the analysed function, whose
+ * binding is a copy (#2795). Resolved structurally against the analysed
+ * function, as the return classifiers must be. The first `some` arm is the
+ * one that runs. NULL otherwise. */
+static ASTNode* owned_opt_some_arm(CodeGenerator* gen, ASTNode* node, const char* fn_name,
+                                   ASTNode* fn_body_root) {
+    if (!node || node->type != AST_MATCH_STATEMENT || node->child_count < 2) return NULL;
+    ASTNode* subj = node->children[0];
+    if (!subj || !is_opt_string_type(subj->node_type)) return NULL;
+    int owned = is_owned_opt_string_call(gen, subj);
+    if (!owned && subj->type == AST_IDENTIFIER && subj->value && fn_name) {
+        ASTNode* fn_def = def_of_body(gen, fn_name, fn_body_root);
+        const char* scope = fn_def ? fn_scope_name(gen->program, fn_def) : fn_name;
+        char** promoted = NULL;
+        int count = 0;
+        get_promoted_names_for_func(gen, scope, &promoted, &count);
+        for (int i = 0; i < count && !owned; i++)
+            owned = promoted[i] && strcmp(promoted[i], subj->value) == 0;
+    }
+    if (!owned) return NULL;
+    for (int i = 1; i < node->child_count; i++) {
+        ASTNode* arm = node->children[i];
+        if (!arm || arm->type != AST_MATCH_ARM || arm->child_count < 2) continue;
+        ASTNode* pat = arm->children[0];
+        if (pat && pat->type == AST_PATTERN_VARIABLE && pat->annotation && pat->value &&
+            strcmp(pat->annotation, "some_pattern") == 0)
+            return arm;
+    }
+    return NULL;
+}
+
 static void walk_returns_for_heap_check(CodeGenerator* gen, ASTNode* node,
                                          const char* fn_being_analyzed,
                                          ASTNode* fn_body_root,
@@ -2770,10 +2804,24 @@ static void walk_returns_for_heap_check_in(CodeGenerator* gen, ASTNode* node,
         cs->names[cs->count++] = node->value;
         pushed = 1;
     }
+    /* #2823: the `some(s)` binding of a match on a `string?` the match
+     * owns (a call handing one over, #2750, or a closure cell, a copy) is
+     * a string of the arm's own, so a `return s` hands it over: heap
+     * evidence, as a catch binding is. Counted as borrowed, the function (with a literal
+     * returned beside it) was classified non-heap and the caller never
+     * freed what `return s` gave it. */
+    ASTNode* owned_some_arm = owned_opt_some_arm(gen, node, fn_being_analyzed, fn_body_root);
     for (int i = 0; i < node->child_count; i++) {
+        int bound = 0;
+        if (owned_some_arm && node->children[i] == owned_some_arm &&
+            cs->count < CATCH_SCOPE_MAX) {
+            cs->names[cs->count++] = owned_some_arm->children[0]->value;
+            bound = 1;
+        }
         walk_returns_for_heap_check_in(gen, classifier_child(gen, node, i),
                                        fn_being_analyzed, fn_body_root,
                                        any_heap, any_non_heap, cs);
+        if (bound) cs->count--;
     }
     if (pushed) cs->count--;
 }
