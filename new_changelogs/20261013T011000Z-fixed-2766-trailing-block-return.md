@@ -21,7 +21,8 @@
   `note`, so the function was declared `int` around the bare `return` the
   checker made of it; the module prune also dropped `blk.note` when a local
   was named `note`. Since a return in a block now gives the function its
-  type, some programs print otherwise than before: a function with no written
-  type whose first `return` gives an int inside a block and a later one
-  `return 2.5` returns 2, as it does with the first `return` outside a block,
-  and a `long` returned from a block is no longer cut to an int.
+  type, some programs behave otherwise than before: a `long` returned from a
+  block is no longer cut to an int, and a function with no written type whose
+  first `return` gives an int inside a block and a later one `return 2.5` is
+  the narrowing error of #2782, as it is with the first `return` outside a
+  block (before #2782 both returned 2).

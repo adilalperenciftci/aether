@@ -39,4 +39,10 @@ int slice_is_coercion_node(const ASTNode* n);
  * Returns 1 if replaced. */
 int slice_empty_literal_to_null(ASTNode** slot);
 
+/* #2782: the slot holding the value a `match` arm gives, for a match whose
+ * value is used: the arm's expression, or a block arm's last expression.
+ * NULL when the arm gives none; when that is a `match` of its own, it is
+ * set in `*nested` instead. */
+ASTNode** match_arm_value_slot(ASTNode* arm, ASTNode** nested);
+
 #endif

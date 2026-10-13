@@ -7939,6 +7939,301 @@ static int rhs_returns_void_via_bare_fn(ASTNode* rhs, SymbolTable* table) {
     return 0;
 }
 
+/* #2782: a type as a signature spells it, for the return messages: `int?`,
+ * `int[]`, `(int, string)`. */
+static const char* ret_type_spell(Type* t, char* buf, size_t n) {
+    if (!t) return "unknown";
+    if (t->distinct_name) return type_name(t);
+    if (t->kind == TYPE_OPTIONAL && t->element_type) {
+        char inner[160];
+        snprintf(buf, n, "%s?", ret_type_spell(t->element_type, inner, sizeof(inner)));
+        return buf;
+    }
+    if (t->kind == TYPE_ARRAY) return array_type_spell(t, buf, n);
+    if (t->kind == TYPE_TUPLE) {
+        tuple_type_spell(t, buf, n);
+        return buf;
+    }
+    return type_name(t);
+}
+
+/* #2782: may a `return` give the value `v`, of type `vt`, where the result
+ * is `rt`? The rules of a typed binding, `x: rt = v` (is_assignable), with
+ * what a result adds to them and takes from them:
+ *
+ *  - a `string` and a bare `ptr` are both a C `const char*`: a C string
+ *    returned from `-> string` is a borrowed string, and a string returned
+ *    from `-> ptr` its pointer (the casting table; a bare re-bind mixes the
+ *    two the same way);
+ *  - a numeric scalar, `byte` included, converts to another as C converts
+ *    it, as into any written slot, and a bool to an integer and back;
+ *  - what C cannot do with the value is refused, although is_assignable
+ *    lets a binding through: a closure becomes a `ptr` and back only by
+ *    name (box_closure, unbox_closure), a pointer is no value optional, a
+ *    slice is no typed pointer, and `[]` is the empty slice, which only an
+ *    array or a pointer result can take.
+ *
+ * Returns 1 when it fits. When it does not, `*hint` is the fix to suggest,
+ * or NULL for the generic one. */
+static int return_value_fits(ASTNode* v, Type* vt, Type* rt, const char** hint) {
+    *hint = NULL;
+    if (!vt || !rt) return 1;
+    if (v && v->type == AST_ARRAY_LITERAL && v->child_count == 0) {
+        if (rt->kind == TYPE_ARRAY || rt->kind == TYPE_PTR || rt->kind == TYPE_UNKNOWN ||
+            rt->kind == TYPE_WILDCARD)
+            return 1;
+        *hint = "`[]` is the empty slice; return a value of the result type";
+        return 0;
+    }
+    if (vt->kind == TYPE_UNKNOWN || rt->kind == TYPE_UNKNOWN ||
+        vt->kind == TYPE_WILDCARD || rt->kind == TYPE_WILDCARD)
+        return 1;
+    int plain = !vt->distinct_name && !rt->distinct_name;
+    /* A value into an optional result: the optional wraps it, so it is
+     * judged against what the optional holds; `none` and an optional are
+     * judged whole. */
+    if (plain && rt->kind == TYPE_OPTIONAL && vt->kind != TYPE_OPTIONAL && rt->element_type) {
+        Type* inner = rt->element_type;
+        if (vt->kind == TYPE_PTR && inner->kind != TYPE_PTR && inner->kind != TYPE_STRING &&
+            inner->kind != TYPE_UNKNOWN) {
+            *hint = "a pointer is not a value of the optional's type: return `none` for no value";
+            return 0;
+        }
+        return return_value_fits(v, vt, inner, hint);
+    }
+    if (plain && ((vt->kind == TYPE_PTR && !vt->element_type && rt->kind == TYPE_STRING) ||
+                  (vt->kind == TYPE_STRING && rt->kind == TYPE_PTR && !rt->element_type)))
+        return 1;
+    if (plain && (is_numeric_scalar(vt->kind) || vt->kind == TYPE_BYTE) &&
+        (is_numeric_scalar(rt->kind) || rt->kind == TYPE_BYTE))
+        return 1;
+    /* A bool and an integer convert exactly, as C converts them and as a
+     * condition reads an integer: a comparison returned from `-> int` is 1
+     * or 0 (a derived `T_eq` is one), and an extern's int truth value
+     * returned from `-> bool` is whether it is nonzero. */
+    if (plain && ((vt->kind == TYPE_BOOL && (is_integer_scalar(rt->kind) || rt->kind == TYPE_BYTE)) ||
+                  (rt->kind == TYPE_BOOL && (is_integer_scalar(vt->kind) || vt->kind == TYPE_BYTE))))
+        return 1;
+    if (vt->kind == TYPE_FUNCTION && !vt->is_fnptr && rt->kind == TYPE_PTR) {
+        *hint = "a closure is a `ptr` only boxed: return `box_closure(f)`";
+        return 0;
+    }
+    if (vt->kind == TYPE_PTR && rt->kind == TYPE_FUNCTION && !rt->is_fnptr) {
+        *hint = "a closure kept as a `ptr` is a closure again through `unbox_closure(p)`";
+        return 0;
+    }
+    if (type_is_slice(vt) && rt->kind == TYPE_PTR && rt->element_type) return 0;
+    /* A slice returned as a pointer is its `.ptr` (slice_coerce_slot), a
+     * pointer to its elements, so a typed pointer result takes it only to
+     * elements of its own type. */
+    if (v && v->type == AST_SLICE_TO_PTR && rt->kind == TYPE_PTR && rt->element_type &&
+        rt->element_type->kind != TYPE_UNKNOWN && v->child_count > 0 && v->children[0]) {
+        Type* st = v->children[0]->node_type;
+        if (type_is_slice(st) && st->element_type &&
+            !types_equal(st->element_type, rt->element_type))
+            return 0;
+    }
+    return is_assignable(vt, rt);
+}
+
+/* #2782: a value an INFERRED int result would truncate, as an inferred
+ * int local would (#698, the casting table): a 64-bit integer, a uint32,
+ * a float. */
+static int narrows_inferred_int(Type* vt, Type* rt) {
+    if (!vt || !rt || rt->kind != TYPE_INT || rt->distinct_name || vt->distinct_name) return 0;
+    return vt->kind == TYPE_INT64 || vt->kind == TYPE_UINT64 || vt->kind == TYPE_UINT32 ||
+           vt->kind == TYPE_FLOAT32 || vt->kind == TYPE_FLOAT || vt->kind == TYPE_LONGDOUBLE;
+}
+
+/* What a `return` returns from, for the messages: a function by name, or
+ * a closure. */
+typedef struct {
+    const char* fn_name;   /* NULL: a closure */
+    int inferred;          /* the result type was inferred, not written */
+    int position;          /* 1-based value of a multi-value return; 0 for one value */
+    Type* whole;           /* with a position: the tuple the function returns */
+} ReturnOwner;
+
+/* #2782: check one value a `return` gives against the result type `rt`.
+ * A value that branches (an if-expression, a `match` whose value is used)
+ * gives each arm's value, checked on its own. Returns 1 when it fits. */
+static int check_return_value(ASTNode* v, Type* rt, const ReturnOwner* own,
+                              SymbolTable* table) {
+    if (!v || !rt) return 1;
+    if (v->type == AST_IF_EXPRESSION && v->child_count >= 3) {
+        int ok = check_return_value(v->children[1], rt, own, table);
+        return check_return_value(v->children[2], rt, own, table) && ok;
+    }
+    if (v->type == AST_MATCH_STATEMENT) {
+        int ok = 1;
+        for (int i = 0; i < v->child_count; i++) {
+            ASTNode* nested = NULL;
+            ASTNode** slot = match_arm_value_slot(v->children[i], &nested);
+            if (slot) ok = check_return_value(*slot, rt, own, table) && ok;
+            else if (nested) ok = check_return_value(nested, rt, own, table) && ok;
+        }
+        return ok;
+    }
+    /* `call(f, ...)` through an erased `fn` returns what the result type
+     * says (#2054): the declaration is its annotation, so it fits it. The
+     * return case has just typed it so (type_erased_call). */
+    if (is_erased_call(v) ||
+        (v->type == AST_FUNCTION_CALL && v->annotation &&
+         strcmp(v->annotation, "erased_call_typed") == 0))
+        return 1;
+    /* So does `f(...)` through a bare `fn` value, the same call spelled
+     * directly: its signature is gone, and the result type restores it. */
+    if (v->type == AST_FUNCTION_CALL && v->value) {
+        Symbol* s = lookup_symbol(table, v->value);
+        if (s && !s->is_function && s->type && s->type->kind == TYPE_FUNCTION &&
+            !s->type->is_fnptr && !s->type->closure_literal && fn_type_is_erased(s->type))
+            return 1;
+    }
+    /* A function named as a value is its address, which no slot checks by
+     * its result type. */
+    if (v->type == AST_IDENTIFIER && v->value) {
+        Symbol* s = lookup_symbol(table, v->value);
+        if (s && s->is_function) return 1;
+    }
+    Type* vt = infer_type(v, table);
+    /* A closure literal is a closure: inference leaves it unknown, and
+     * its check just stamped it. */
+    if (v->type == AST_CLOSURE && (!vt || vt->kind == TYPE_UNKNOWN) && v->node_type) {
+        if (vt) free_type(vt);
+        vt = clone_type(v->node_type);
+    }
+    const char* hint = NULL;
+    int fits = return_value_fits(v, vt, rt, &hint);
+    char want[200], got[200], msg[600], help[400];
+    if (fits && own->inferred && narrows_inferred_int(vt, rt)) {
+        const char* what = vt->kind == TYPE_UINT32 ? "a uint32, and values past 2^31 would not fit"
+                         : (vt->kind == TYPE_INT64 || vt->kind == TYPE_UINT64)
+                               ? "a 64-bit value, which would truncate"
+                               : "a float, which would truncate";
+        if (own->fn_name)
+            snprintf(msg, sizeof(msg),
+                     "narrowing return from '%s': its result type was inferred as int from "
+                     "its first `return`, but this `return` gives %s", own->fn_name, what);
+        else
+            snprintf(msg, sizeof(msg),
+                     "narrowing return from a closure: its result type was inferred as int "
+                     "from its first `return`, but this `return` gives %s", what);
+        snprintf(help, sizeof(help),
+                 "write the result type to keep the value (`-> %s`), or `-> int` to make the "
+                 "narrowing explicit", ret_type_spell(vt, got, sizeof(got)));
+        type_error_hint(msg, help, v->line, v->column);
+        free_type(vt);
+        return 0;
+    }
+    if (fits) {
+        if (vt) free_type(vt);
+        return 1;
+    }
+    const char* vs = (v->type == AST_ARRAY_LITERAL && v->child_count == 0)
+                         ? "the empty slice `[]`" : ret_type_spell(vt, got, sizeof(got));
+    if (own->position) {
+        char whole[240];
+        snprintf(msg, sizeof(msg),
+                 "Type mismatch in return: %s%s%s returns %s, and value %d here is %s, not %s",
+                 own->fn_name ? "'" : "", own->fn_name ? own->fn_name : "this closure",
+                 own->fn_name ? "'" : "", ret_type_spell(own->whole, whole, sizeof(whole)),
+                 own->position, vs, ret_type_spell(rt, want, sizeof(want)));
+    } else if (own->fn_name)
+        snprintf(msg, sizeof(msg),
+                 "Type mismatch in return: '%s' returns %s%s, but this value is %s",
+                 own->fn_name, ret_type_spell(rt, want, sizeof(want)),
+                 own->inferred ? " (inferred from its first `return`)" : "", vs);
+    else
+        snprintf(msg, sizeof(msg),
+                 "Type mismatch in return: this closure returns %s (the type of its first "
+                 "`return`, or string when any `return` gives one), but this value is %s",
+                 ret_type_spell(rt, want, sizeof(want)), vs);
+    if (!hint) {
+        snprintf(help, sizeof(help), "%s",
+                 !own->fn_name ? "return values of one type from the closure"
+                 : own->inferred ? "return a value of that type, or write the result type the "
+                                   "function means (`-> T`)"
+                                 : "return a value of the result type, or change the result type");
+        hint = help;
+    }
+    type_error_hint(msg, hint, v->line, v->column);
+    if (vt) free_type(vt);
+    return 0;
+}
+
+/* #2782: the values of the `return` statement `ret` against the result
+ * type `rt`: one value, or a multi-value return position by position into
+ * a tuple result. A `T!` result wraps what is returned into its own tuple,
+ * and is checked where that wrapping is decided. Returns 1 when all fit. */
+static int check_return_values(ASTNode* ret, Type* rt, const ReturnOwner* own,
+                               SymbolTable* table) {
+    if (!ret || !rt || ret->child_count == 0 || rt->kind == TYPE_VOID ||
+        rt->kind == TYPE_UNKNOWN || rt->is_result)
+        return 1;
+    if (ret->child_count > 1) {
+        if (rt->kind != TYPE_TUPLE || rt->tuple_count != ret->child_count) return 1;
+        int ok = 1;
+        for (int i = 0; i < ret->child_count; i++) {
+            ReturnOwner at = *own;
+            at.position = i + 1;
+            at.whole = rt;
+            ok = check_return_value(ret->children[i], rt->tuple_types[i], &at, table) && ok;
+        }
+        return ok;
+    }
+    ASTNode* v = ret->children[0];
+    if (!v || v->type == AST_PRINT_STATEMENT) return 1;
+    if (rt->kind == TYPE_TUPLE) {
+        /* One value into a tuple result: a tuple of the same arity is
+         * judged position by position. */
+        Type* vt = infer_type(v, table);
+        int ok = 1;
+        if (vt && vt->kind == TYPE_TUPLE && vt->tuple_count == rt->tuple_count) {
+            for (int i = 0; i < rt->tuple_count && ok; i++) {
+                const char* hint = NULL;
+                if (!return_value_fits(NULL, vt->tuple_types[i], rt->tuple_types[i], &hint))
+                    ok = 0;
+            }
+            if (!ok) {
+                char want[200], got[200], msg[600];
+                snprintf(msg, sizeof(msg), "Type mismatch in return: %s%s%s returns %s, but this "
+                         "value is %s", own->fn_name ? "'" : "",
+                         own->fn_name ? own->fn_name : "this closure", own->fn_name ? "'" : "",
+                         ret_type_spell(rt, want, sizeof(want)),
+                         ret_type_spell(vt, got, sizeof(got)));
+                type_error_hint(msg, "return a value of the result type, or change the result type",
+                                v->line, v->column);
+            }
+            free_type(vt);
+            return ok;
+        }
+        if (vt) free_type(vt);
+    }
+    return check_return_value(v, rt, own, table);
+}
+
+/* #2782: check the `return` statement `ret` against what it returns from
+ * (g_tc_return_owner): a function's result type, written or inferred, or,
+ * for a closure, the result its first value `return` gives it, as codegen's
+ * resolve_closure_return_type picks the C signature (a closure has no
+ * written result type). A trailing block's `return` is its function's.
+ * Returns 1 when every value fits. */
+static int check_return_statement(ASTNode* ret, SymbolTable* table) {
+    ASTNode* o = g_tc_return_owner;
+    ReturnOwner own = { o ? o->value : NULL, o ? o->type_inferred : 0, 0, NULL };
+    Type* rt = g_tc_return_type;
+    Type* made = NULL;
+    if (!rt && o && o->type == AST_CLOSURE) {
+        made = closure_literal_result_type(o);
+        rt = made;
+        own.fn_name = NULL;
+        own.inferred = 1;
+    }
+    int ok = rt ? check_return_values(ret, rt, &own, table) : 1;
+    if (made) free_type(made);
+    return ok;
+}
+
 int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
     if (!stmt) return 0;
 
@@ -9877,6 +10172,11 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                 g_tc_return_type->kind != TYPE_TUPLE) {
                 type_erased_call(stmt->children[0], g_tc_return_type, table, 0);
             }
+            /* #2782: what is returned fits the result type, as a typed
+             * binding's value fits its annotation. Unchecked, every
+             * mismatch reached C: an int from `-> string`, a struct of
+             * another name. */
+            if (!check_return_statement(stmt, table)) return 0;
             return 1;
 
         default:

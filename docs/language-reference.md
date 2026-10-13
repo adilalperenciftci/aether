@@ -710,6 +710,58 @@ Control cannot get past a `return`, a `panic(...)` or an `exit(...)`, nor out of
 
 The rule is the same whether the result type is written or inferred: a function with no written type that returns a value on one path (so its result is inferred from that `return`) returns one on every path. One that returns nothing anywhere is void and may end anywhere. So is a clause of a [clause set](#how-a-clause-set-runs) with no written type that returns nothing: its caller gets the set's default value. Each clause of a set, and each closure that returns a value, is checked as a function of its own; `main()` and actor `receive` handlers have no result. Before this check such a function compiled, and the generated C fell off the end of a non-void function: undefined behaviour, which on Windows printed a string result as `(null)`.
 
+### What a `return` gives [E0200]
+
+A `return` gives a value of the result type, by the rules a typed binding's value follows (`x: T = v`). A value of another kind is a compile error at the `return`, naming both types:
+
+```aether,fails
+word(n: int) -> string {
+    return n
+}
+// error[E0200]: Type mismatch in return: 'word' returns string, but this value is int
+
+both() -> (int, string) {
+    return 1, 2
+}
+// error[E0200]: Type mismatch in return: 'both' returns (int, string), and value 2 here
+// is int, not string
+
+main() {
+    println(word(1))
+}
+```
+
+What a binding converts, a `return` converts, as C converts it: one numeric scalar to another (`int` to `long` or `float`; into a written `int`, a `long` or a `float` truncates, as `int k = 4.5` does), a bool to an integer and an integer to a bool (a comparison returned from `-> int` is 1 or 0, an extern's int truth value returned from `-> bool` is whether it is nonzero), a `T` to `T?` and `none` to any optional, a variant struct to its sum, an enum to an integer and an integer to an enum, `null` or an `int` to a `ptr` or a `*T`, and `null` or `[]` to a slice. A `string` and a bare `ptr` are both a C `const char*`, so a C string pointer returned from `-> string` is a borrowed string, and a string returned from `-> ptr` is its pointer:
+
+```aether
+extern getenv(name: string) -> ptr
+
+home() -> string {
+    return getenv("HOME")      // a C string, borrowed
+}
+
+ratio(n: int) -> float {
+    return n                   // int to float
+}
+
+first(n: int) -> int? {
+    if n > 0 {
+        return n               // wrapped into int?
+    }
+    return none
+}
+
+main() {
+    println("${ratio(3)} ${first(0) ?? 7} ${home() == null}")
+}
+```
+
+A multi-value return is checked value by value against the tuple it returns, and an `if` or a `match` whose value is returned arm by arm. A `return` in a call's trailing block is its function's, and is checked against that function's result type.
+
+With no result type written, the checks use the type the first `return` gives; for a closure, which has no written result type, the type of its first `return`, or `string` when any `return` gives a string, as the closure's C signature does. A later `return` that such an inferred `int` result would truncate (a `long`, a `uint32`, a `float`) is the narrowing error an inferred `int` local gives: write the result type (`-> float`) to keep the value, or `-> int` to make the narrowing explicit.
+
+Some values a binding lets through are refused here, because C cannot convert them: a closure becomes a `ptr` only through `box_closure(f)` and a `ptr` a closure only through `unbox_closure(p)`, a pointer is no value of an optional (return `none` for no value), a slice is no `*T`, and `[]`, the empty slice, is returned only as an array, a slice or a pointer. A bool is not a float, a pointer or an enum, and an enum is not a string, a pointer or a float.
+
 ### Default arguments
 
 Parameters can carry a default expression:

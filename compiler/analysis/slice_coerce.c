@@ -101,6 +101,10 @@ static ASTNode** arm_value_slot(ASTNode* arm, ASTNode** nested) {
     return NULL;
 }
 
+ASTNode** match_arm_value_slot(ASTNode* arm, ASTNode** nested) {
+    return arm_value_slot(arm, nested);
+}
+
 /* #2789: a value that branches (an if-expression, a `match` whose value is
  * used) goes into the slot arm by arm, as each arm's value would on its own:
  * a `T[N]` arm is viewed, a `[]` or `null` arm is the empty slice. */
