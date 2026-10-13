@@ -5,7 +5,9 @@
 // C compiler ("incompatible types when initializing type 'enum <anonymous>'
 // using type 'Circle'"), and so did `let s: Shape? = Circle { ... }` and a
 // variant passed to a `Shape?` parameter: the optional's wrap took the
-// variant as its value, where it holds a Shape.
+// variant as its value, where it holds a Shape. A variant as the default of
+// `??` over a `Shape?` had no common type with the value (#2839), and a copy
+// `c2 = o2` of a `Shape?` local given a Circle was refused (#2841).
 extern exit(code: int)
 
 struct Circle {
@@ -44,7 +46,25 @@ measure(s: Shape?) -> float {
     return area(s!)
 }
 
+defaulted(e: Shape?) -> float {
+    s = e ?? Circle { r: 1.0 }
+    return area(s)
+}
+
+copied() -> float {
+    let o2: Shape? = none
+    o2 = Circle { r: 2.0 }
+    c2 = o2
+    return measure(c2)
+}
+
 main() {
+    from_none = defaulted(none)
+    from_rect = defaulted(Rect { w: 2.0, h: 2.0 })
+    if from_none != 1.0 || from_rect != 4.0 || copied() != 2.0 {
+        println("FAIL: a ?? default or a copy of a Shape? lost its value")
+        exit(1)
+    }
     let b: Shape? = Circle { r: 2.5 }
     got = measure(maybe_shape(1)) + measure(maybe_shape(-1)) * 10.0 + measure(maybe_shape(0))
     got = got + measure(b) * 100.0 + measure(Rect { w: 1.0, h: 4.0 }) * 1000.0

@@ -5343,6 +5343,22 @@ ASTNode* trailing_dsl_block(CodeGenerator* gen, ASTNode* call) {
  * do: a builder's block configures it before the call; any other call's
  * value is the block's context. Returns 0 when there is no such block. */
 static int g_trailing_tmp = 0;
+/* An argument of `call(f, ...)` for the closure's parameter of type `pt`,
+ * coerced as a direct call's argument is: a bare value or `none` into an
+ * optional parameter, a variant into a sum parameter (#2840); else as it is,
+ * a fixed-size array copied for a `T[N]` parameter (#2723). */
+static void emit_closure_argument(CodeGenerator* gen, ASTNode* arg, Type* pt) {
+    if (pt && pt->kind == TYPE_OPTIONAL && needs_optional_coerce(arg, pt)) {
+        emit_optional_coerced(gen, arg, pt);
+        return;
+    }
+    if (pt && pt->kind == TYPE_SUM && needs_sum_coerce(arg, pt)) {
+        emit_sum_coerced(gen, arg, pt);
+        return;
+    }
+    generate_sized_array_argument(gen, arg, pt);
+}
+
 static int emit_trailing_call_expression(CodeGenerator* gen, ASTNode* call) {
     ASTNode* block = trailing_dsl_block(gen, call);
     /* An empty block runs nothing and configures nothing: the plain call,
@@ -5896,6 +5912,12 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                 fprintf(gen->output, "aether_uniform_heap_str((const char*)(");
                 generate_expression(gen, dflt);
                 fprintf(gen->output, "), %d)", is_fresh_heap_string_temp(gen, dflt) ? 1 : 0);
+            } else if (ot->element_type && ot->element_type->kind == TYPE_SUM &&
+                       needs_sum_coerce(expr->children[1], ot->element_type)) {
+                /* A variant default of a sum's optional is the sum's, as
+                 * the value is: wrapped (#914), or the two arms of the
+                 * conditional had no common type (#2839). */
+                emit_sum_coerced(gen, expr->children[1], ot->element_type);
             } else {
                 generate_expression(gen, expr->children[1]);
             }
@@ -7973,7 +7995,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                                 if (seen++ == lit_pi) { lit_pt = p->node_type; break; }
                             }
                             lit_pi++;
-                            generate_sized_array_argument(gen, arg, lit_pt);   /* #2723 */
+                            emit_closure_argument(gen, arg, lit_pt);
                         }
                         fprintf(gen->output, ")");
                         arg_drain_close(gen, expr, &ad);
@@ -8113,7 +8135,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                                        ? closure_sig->param_types[arg_pi]
                                        : (arg ? arg->node_type : NULL);
                             arg_pi++;
-                            generate_sized_array_argument(gen, arg, pt);
+                            emit_closure_argument(gen, arg, pt);
                         }
                         fprintf(gen->output, ")");
                         arg_drain_close(gen, expr, &ad);

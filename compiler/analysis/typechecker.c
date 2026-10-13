@@ -8796,7 +8796,18 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                                     have->kind == TYPE_ARRAY && want->kind == TYPE_ARRAY &&
                                     have->element_type && want->element_type &&
                                     have->element_type->kind != want->element_type->kind;
-                    if (scalar_fix || array_fix) {
+                    /* #2841: the first binding of a name copies an optional
+                     * or a sum the early pass took for what was last put in
+                     * it (`o2 = Circle {...}` on a `Shape?` local, then `c2 =
+                     * o2`, typed Circle). The value is the wider type, and
+                     * the binding is a new local: it takes the value's. */
+                    int first_binding = 1;
+                    for (SymbolTable* t = table; t && t->parent && first_binding; t = t->parent)
+                        if (stmt->value && lookup_symbol_local(t, stmt->value)) first_binding = 0;
+                    int wider_fix = first_binding && have->kind != TYPE_UNKNOWN &&
+                                    (want->kind == TYPE_OPTIONAL || want->kind == TYPE_SUM) &&
+                                    !is_assignable(want, have) && is_assignable(have, want);
+                    if (scalar_fix || array_fix || wider_fix) {
                         free_type(stmt->node_type);
                         stmt->node_type = clone_type(init_type);
                     }
