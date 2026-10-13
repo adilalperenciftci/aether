@@ -91,24 +91,39 @@ static int g_order_counter = 0;
 static ASTNode* g_order_emitting = NULL;
 
 /* The field reads evaluated ahead of the call that takes them, a free or a
- * keep (order_hoist_handoff, ctl_hoist_operand): the hand-over the call
- * makes when it reads the temporary (emit_string_field_handover_at). An
- * entry lives as long as the binding at `order_at` does. */
+ * keep (order_hoist_handoff, ctl_hoist_operand): their temporary owns the
+ * string from the read on, and `carrier` is the defer that frees it on an
+ * exit taken before `call` runs (push_handover_exit_free), dropped once
+ * the call is written. An entry lives as long as the binding at `order_at`
+ * does. */
 typedef struct {
     ASTNode* node;
-    const char* fo;
-    const char* field;
-    int kind;
+    ASTNode* call;
+    ASTNode* carrier;
     int order_at;
 } OrderHandover;
 static OrderHandover* g_handovers = NULL;
 static int g_handover_count = 0;
 static int g_handover_cap = 0;
+static const ASTNode* g_handover_call_emitting = NULL;
+static CodeGenerator* g_handover_gen = NULL;   /* whose defer stack the entries' carriers are on */
 
-static const OrderHandover* order_handover_of(const ASTNode* node) {
-    for (int i = g_handover_count - 1; node && i >= 0; i--)
-        if (g_handovers[i].node == node) return &g_handovers[i];
-    return NULL;
+/* Is `call` the call of a field read evaluated ahead whose exit free is
+ * still on the defer stack? */
+static int order_handover_pending(const ASTNode* call) {
+    for (int i = g_handover_count - 1; call && i >= 0; i--)
+        if (g_handovers[i].call == call && g_handovers[i].carrier) return 1;
+    return 0;
+}
+
+/* `call` is written: the strings it takes are its own from here on, so
+ * the exit frees of the fields read ahead for it are dropped. */
+static void order_handover_done(CodeGenerator* gen, const ASTNode* call) {
+    for (int i = 0; i < g_handover_count; i++) {
+        if (g_handovers[i].call != call || !g_handovers[i].carrier) continue;
+        drop_defer(gen, g_handovers[i].carrier);
+        g_handovers[i].carrier = NULL;
+    }
 }
 
 static const char* order_lookup(ASTNode* node) {
@@ -1491,13 +1506,14 @@ static int order_operands(ASTNode* expr, ASTNode** ops, int cap) {
     }
 }
 
-static void order_handover_add(ASTNode* node, const char* fo, const char* field, int kind) {
+static void order_handover_add(CodeGenerator* gen, ASTNode* node, ASTNode* call, ASTNode* carrier) {
+    g_handover_gen = gen;
     if (g_handover_count >= g_handover_cap) {
         int cap = g_handover_cap ? g_handover_cap * 2 : 8;
         g_handovers = (OrderHandover*)aether_xrealloc(g_handovers, sizeof(OrderHandover) * (size_t)cap);
         g_handover_cap = cap;
     }
-    g_handovers[g_handover_count++] = (OrderHandover){ node, fo, field, kind, g_order_count - 1 };
+    g_handovers[g_handover_count++] = (OrderHandover){ node, call, carrier, g_order_count - 1 };
 }
 
 static void order_bind(ASTNode* node, const char* name) {
@@ -1563,20 +1579,18 @@ static void order_hoist_operand(CodeGenerator* gen, TempSeq* s, ASTNode* op) {
     order_bind(op, name);
 }
 
-/* A field read evaluated ahead of a call that frees it or keeps it
- * (string_field_handoff_kind): read in its place in the order through the
- * address of its struct, taken then (the struct the path names at the call
- * may not be the one a later operand left there), and handed over at the
- * call (emit_string_field_handover_at, order_handover_of), once every
- * operand has been evaluated. */
-static void order_hoist_handoff(CodeGenerator* gen, TempSeq* s, ASTNode* op, int kind) {
-    const char* fo = emit_string_field_owner_ahead(gen, op, s);
+/* A field read evaluated ahead of `call`, which frees it or keeps it
+ * (string_field_handoff_kind, `kind`): handed over in its place in the
+ * order, where it is read, to the temporary that holds it until the call
+ * (emit_string_field_handover_ahead), so a later operand that stores into
+ * the field, or replaces its struct, leaves it alone. An exit taken before
+ * the call runs frees it (order_handover_add). */
+static void order_hoist_handoff(CodeGenerator* gen, TempSeq* s, ASTNode* op, int kind,
+                                ASTNode* call) {
     const char* name = cg_internf("_eo%d", g_order_counter++);
-    seq_let_named(gen, s, "const char*", name);
-    fprintf(gen->output, "%s->%s", fo, op->value);
-    seq_next(gen, s);
+    const char* own = emit_string_field_handover_ahead(gen, op, kind, s, name);
     order_bind(op, name);
-    order_handover_add(op, fo, op->value, kind);
+    order_handover_add(gen, op, call, push_handover_exit_free(gen, own, name));
 }
 
 /* How operand `k` of `call`, a field read, is handed to the callee
@@ -1606,8 +1620,13 @@ void order_prelude_end(int depth) {
         g_order_count--;
         free(g_order_subs[g_order_count].name);
     }
-    while (g_handover_count > 0 && g_handovers[g_handover_count - 1].order_at >= depth)
+    while (g_handover_count > 0 && g_handovers[g_handover_count - 1].order_at >= depth) {
+        /* A call never written (none takes the binding any more): its
+         * exit free goes with it, so no later exit frees what it held. */
+        OrderHandover* h = &g_handovers[g_handover_count - 1];
+        if (h->carrier) drop_defer(g_handover_gen, h->carrier);
         g_handover_count--;
+    }
 }
 
 /* #2478: an initializer list (an array literal's `{...}`, the tuple a
@@ -1692,7 +1711,7 @@ static int emit_in_operand_order(CodeGenerator* gen, ASTNode* expr) {
     for (int k = 0; k < n; k++) {
         if (!hoist[k]) continue;
         int kind = order_operand_hands_off(gen, expr, k);
-        if (kind) order_hoist_handoff(gen, &s, ops[k], kind);
+        if (kind) order_hoist_handoff(gen, &s, ops[k], kind, expr);
         else order_hoist_operand(gen, &s, ops[k]);
     }
     ASTNode* saved_emitting = g_order_emitting;
@@ -5904,8 +5923,8 @@ static int ctl_hoist(CodeGenerator* gen, ASTNode* op) {
  * wrapper hands it over (order_hoist_handoff); read into a plain temporary,
  * the field kept its tracker and its struct freed it a second time. */
 static int ctl_hoist_operand(CodeGenerator* gen, ASTNode* parent, int k, ASTNode* op) {
-    /* A field the call frees or keeps: read now, handed over at the call
-     * (order_hoist_handoff). */
+    /* A field the call frees or keeps: handed over to its temporary as it
+     * is read (order_hoist_handoff), a statement ahead of the statement. */
     int kind = parent ? order_operand_hands_off(gen, parent, k) : 0;
     if (!kind && parent && parent->type == AST_FUNCTION_CALL && parent->value && op &&
         !order_bound(op) && field_read_can_hand_off(op)) {
@@ -5918,13 +5937,10 @@ static int ctl_hoist_operand(CodeGenerator* gen, ASTNode* parent, int k, ASTNode
             if (parent->children[i] && parent->children[i]->type == AST_NAMED_ARG) return 0;
     }
     if (!kind || !op || order_bound(op) || ctl_lookup(op)) return ctl_hoist(gen, op);
-    const char* fo = emit_string_field_owner_ahead(gen, op, NULL);
     const char* name = cg_internf("_eo%d", g_order_counter++);
-    hoist_declare(gen, "const char*", name);
-    print_indent(gen);
-    fprintf(gen->output, "%s = %s->%s;\n", name, fo, op->value);
+    const char* own = emit_string_field_handover_ahead(gen, op, kind, NULL, name);
     order_bind(op, name);
-    order_handover_add(op, fo, op->value, kind);
+    order_handover_add(gen, op, parent, push_handover_exit_free(gen, own, name));
     return 1;
 }
 
@@ -6335,6 +6351,16 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
             fprintf(gen->output, "%s", done);
             return;
         }
+    }
+    /* The call of fields read ahead and handed to it: once it is written,
+     * an exit no longer frees them (order_handover_done). */
+    if (g_handover_count > 0 && expr != g_handover_call_emitting && order_handover_pending(expr)) {
+        const ASTNode* saved = g_handover_call_emitting;
+        g_handover_call_emitting = expr;
+        generate_expression(gen, expr);
+        g_handover_call_emitting = saved;
+        order_handover_done(gen, expr);
+        return;
     }
     if (expr != g_order_emitting && emit_in_operand_order(gen, expr)) return;
 
@@ -9912,17 +9938,6 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                             //      the boundary (#351).
                             // Closes #297.
                             fprintf(gen->output, "aether_string_data(");
-                            generate_expression(gen, arg);
-                            fprintf(gen->output, ")");
-                        } else if (expected == TYPE_STRING && order_handover_of(arg)) {
-                            /* A field read evaluated ahead of the call: it
-                             * is handed over here, as the call takes it, not
-                             * where it was read (order_hoist_handoff). */
-                            const OrderHandover* ho = order_handover_of(arg);
-                            fprintf(gen->output, "(");
-                            emit_string_field_handover_at(gen, ho->fo, ho->field, order_lookup(arg),
-                                                          ho->kind);
-                            fprintf(gen->output, ", ");
                             generate_expression(gen, arg);
                             fprintf(gen->output, ")");
                         } else if (expected == TYPE_STRING && !order_bound(arg) &&

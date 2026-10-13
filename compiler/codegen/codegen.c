@@ -1752,6 +1752,26 @@ static int try_emit_opt_str_exit_free(CodeGenerator* gen, ASTNode* deferred) {
     return 1;
 }
 
+/* #2798, #2843: the exit free of a string field read ahead of the call
+ * that frees or keeps it, handed over to its temporary as it was read
+ * (emit_string_field_handover_ahead). Annotation:
+ *   "handover_exit_free:<flag>:<temporary>"
+ * Fires only on an exit taken before the call runs: the call's own write
+ * drops it (drop_defer). */
+static int try_emit_handover_exit_free(CodeGenerator* gen, ASTNode* deferred) {
+    if (!deferred || !deferred->annotation) return 0;
+    const char* prefix = "handover_exit_free:";
+    size_t plen = strlen(prefix);
+    if (strncmp(deferred->annotation, prefix, plen) != 0) return 0;
+    const char* rest = deferred->annotation + plen;
+    const char* sep = strchr(rest, ':');
+    if (!sep || sep == rest || !sep[1]) return 0;
+    const char* flag = cg_intern_n(rest, (size_t)(sep - rest));
+    print_indent(gen);
+    fprintf(gen->output, "/* deferred */ if (%s) aether_heap_str_free((void*)%s);\n", flag, sep + 1);
+    return 1;
+}
+
 /* Struct-destructor defer carrier (#465). Annotation:
  *   "struct_destroy:<varname>:<StructName>"
  * Pushed by the struct-local-declaration site in codegen_stmt.c
@@ -1941,6 +1961,7 @@ static void emit_deferred_one(CodeGenerator* gen, int i) {
         !try_emit_heap_string_exit_free(gen, deferred) &&
         !try_emit_seq_exit_free(gen, deferred) &&
         !try_emit_opt_str_exit_free(gen, deferred) &&
+        !try_emit_handover_exit_free(gen, deferred) &&   /* #2798 */
         !try_emit_struct_destroy(gen, deferred) &&
         !try_emit_struct_array_destroy(gen, deferred) &&   /* #2528 */
         !try_emit_str_array_release(gen, deferred) &&      /* #2618 */

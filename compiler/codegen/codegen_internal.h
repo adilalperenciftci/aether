@@ -239,12 +239,15 @@ void emit_string_field_handoff(CodeGenerator* gen, ASTNode* e);
 enum { STRING_FIELD_CONSUMED = 1, STRING_FIELD_KEPT = 2 };
 int string_field_handoff_kind(CodeGenerator* gen, const char* func_name, int idx, ASTNode* arg);
 void emit_string_field_giveup(CodeGenerator* gen, ASTNode* e);
-/* Such a field read evaluated ahead of its call: its struct's address into
- * a temporary (in the ordering sequence `s`, or ahead of the statement for
- * NULL), and the hand-over the call then makes, at the call. */
-const char* emit_string_field_owner_ahead(CodeGenerator* gen, ASTNode* e, TempSeq* s);
-void emit_string_field_handover_at(CodeGenerator* gen, const char* fo, const char* field,
-                                   const char* value, int kind);
+/* Such a field read evaluated ahead of its call (in the ordering sequence
+ * `s`, or ahead of the statement for NULL): handed over to temporary
+ * `value` as it is read, the name of the flag that says it was returned;
+ * and the defer that frees the temporary on an exit taken before the call,
+ * dropped with drop_defer once the call is written. */
+const char* emit_string_field_handover_ahead(CodeGenerator* gen, ASTNode* e, int kind,
+                                             TempSeq* s, const char* value);
+ASTNode* push_handover_exit_free(CodeGenerator* gen, const char* own, const char* value);
+void drop_defer(CodeGenerator* gen, ASTNode* carrier);
 void emit_string_field_free(CodeGenerator* gen, ASTNode* e, const char* runtime_free);
 /* #2618: the same for an element of an array that owns its elements, when
  * string_element_free_kind says it is one. */
