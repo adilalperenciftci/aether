@@ -8034,7 +8034,7 @@ void emit_trailing_block_body(CodeGenerator* gen, ASTNode* body) {
  * `void (*)(void*)`, as the context stack records it (#2810). Any other
  * factory's object belongs to its builder's protocol, which the compiler
  * cannot release for it. */
-static const char* builder_config_release(CodeGenerator* gen, const char* builder_name) {
+const char* builder_config_release(CodeGenerator* gen, const char* builder_name) {
     const char* factory = get_builder_factory(gen, builder_name);
     if (!factory) return NULL;
     size_t n = strlen(factory);
