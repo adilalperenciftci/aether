@@ -5352,7 +5352,7 @@ static int emit_trailing_call_expression(CodeGenerator* gen, ASTNode* call) {
     if (call->value && is_builder_func_reg(gen, call->value)) {
         fprintf(gen->output, "({ void* _tcfg%d = (void*)(intptr_t)%s(); _aether_ctx_push(_tcfg%d);\n",
                 n, get_builder_factory(gen, call->value), n);
-        emit_trailing_block_body(gen, block);
+        emit_builder_block_body(gen, block, cg_internf("_tcfg%d", n), call->value);
         fprintf(gen->output, "%s(", codegen_normalise_callee(safe_c_name(call->value)));
         int argc = 0;
         for (int i = 0; i < call->child_count; i++) {

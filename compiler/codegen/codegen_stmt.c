@@ -7752,16 +7752,75 @@ void emit_trailing_block_body(CodeGenerator* gen, ASTNode* body) {
         codegen_own_node(gen, ctx_pop);
         push_defer(gen, ctx_pop);
     }
+    /* #2791: a builder call's config, released on a way out of the block
+     * before the builder runs (try_emit_builder_cfg_release), not at the
+     * block's natural end, after which the builder takes it. The block
+     * holds it under a name of its own: every builder call names its
+     * config `_bcfg`, so in a nested call's block the outer one's is
+     * shadowed, and a way out of both must still release each. */
+    const char* own = NULL;
+    if (gen->builder_cfg_var && gen->builder_cfg_release) {
+        static int own_counter = 0;
+        own = cg_internf("_ae_cfg_own%d", own_counter++);
+        print_line(gen, "void* %s = %s;", own, gen->builder_cfg_var);
+        ASTNode* release = create_ast_node(AST_EXPRESSION_STATEMENT, NULL,
+                                           body->line, body->column);
+        if (release) {
+            if (release->annotation) free(release->annotation);
+            release->annotation = heap_strf("builder_cfg_release:%s:%s", own,
+                                            gen->builder_cfg_release);
+            codegen_own_node(gen, release);
+            push_defer(gen, release);
+        }
+    }
+    gen->builder_cfg_var = NULL;
+    gen->builder_cfg_release = NULL;
     gen->in_trailing_block++;
     for (int si = 0; si < body->child_count; si++) {
         generate_statement(gen, body->children[si]);
     }
     gen->in_trailing_block--;
+    /* The natural end: the builder takes the config from here. */
+    if (own) print_line(gen, "%s = NULL;", own);
     exit_scope(gen);
     gen->indent_level--;
     print_indent(gen);
     fprintf(gen->output, "}\n");
     truncate_declared_vars(gen, saved_var_count);
+}
+
+/* #2791: the C function that releases what a builder's config factory
+ * made, or NULL when none is known: `map_free` for the default `map_new`,
+ * and for a `<stem>_new` factory the `<stem>_free(ptr)` the program
+ * defines or declares (`list_new`, `list_free`). Any other factory's object
+ * belongs to its builder's protocol, which the compiler cannot release
+ * for it. */
+static const char* builder_config_release(CodeGenerator* gen, const char* builder_name) {
+    const char* factory = get_builder_factory(gen, builder_name);
+    if (!factory) return NULL;
+    size_t n = strlen(factory);
+    if (n <= 4 || strcmp(factory + n - 4, "_new") != 0) return NULL;
+    const char* release = cg_internf("%.*s_free", (int)(n - 4), factory);
+    if (strcmp(factory, "map_new") == 0) return release;
+    if (is_extern_func(gen, release)) {
+        /* One `ptr` parameter: the second slot reads as unknown. */
+        if (lookup_extern_param_kind(gen, release, 0) != TYPE_PTR ||
+            lookup_extern_param_type(gen, release, 1) != NULL)
+            return NULL;
+        return lookup_extern_c_name(gen, release);
+    }
+    ASTNode* def = gen->program ? find_function_definition_by_name(gen->program, release) : NULL;
+    if (!def || def->type != AST_FUNCTION_DEFINITION || fn_param_count(def) != 1) return NULL;
+    ASTNode* p = fn_param_at(def, 0);
+    if (!p || !p->node_type || p->node_type->kind != TYPE_PTR) return NULL;
+    return codegen_normalise_callee(safe_c_name(release));
+}
+
+void emit_builder_block_body(CodeGenerator* gen, ASTNode* body, const char* cfg_var,
+                             const char* builder_name) {
+    gen->builder_cfg_var = cfg_var;
+    gen->builder_cfg_release = builder_config_release(gen, builder_name);
+    emit_trailing_block_body(gen, body);
 }
 
 /* The one closure-argument shape codegen can prove is dead after the call:
@@ -13478,7 +13537,8 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                                                     get_builder_factory(gen, reinit_call->value));
                                             print_indent(gen);
                                             fprintf(gen->output, "_aether_ctx_push(_bcfg);\n");
-                                            emit_trailing_block_body(gen, trailing->children[bi]);
+                                            emit_builder_block_body(gen, trailing->children[bi], "_bcfg",
+                                                                    reinit_call->value);
                                             print_indent(gen);
                                             const char* c_rfn = codegen_normalise_callee(
                                                 safe_c_name(reinit_call->value));
@@ -14027,7 +14087,8 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                                             print_indent(gen);
                                             fprintf(gen->output, "_aether_ctx_push(_bcfg);\n");
                                             // Run trailing block
-                                            emit_trailing_block_body(gen, trailing->children[bi]);
+                                            emit_builder_block_body(gen, trailing->children[bi], "_bcfg",
+                                                                    init_call->value);
                                             // Reassign variable with defer config
                                             print_indent(gen);
                                             const char* c_dfn = codegen_normalise_callee(
@@ -14200,7 +14261,8 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                                                 get_builder_factory(gen, rhs->value));
                                         print_indent(gen);
                                         fprintf(gen->output, "_aether_ctx_push(_bcfg);\n");
-                                        emit_trailing_block_body(gen, trailing->children[bi]);
+                                        emit_builder_block_body(gen, trailing->children[bi], "_bcfg",
+                                                                rhs->value);
                                         // Reassign with config
                                         print_indent(gen);
                                         gen->generating_lvalue = 1;
@@ -16006,7 +16068,8 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                             for (int bi = 0; bi < trailing->child_count; bi++) {
                                 if (trailing->children[bi] &&
                                     trailing->children[bi]->type == AST_BLOCK) {
-                                    emit_trailing_block_body(gen, trailing->children[bi]);
+                                    emit_builder_block_body(gen, trailing->children[bi], "_bcfg",
+                                                            inner->value);
                                     break;
                                 }
                             }

@@ -400,6 +400,12 @@ typedef struct {
     int builder_func_count;
     int builder_func_capacity;
     int in_trailing_block;  // >0 when generating code inside a trailing block
+    /* #2791: set by emit_builder_block_body for the trailing block it is about
+     * to emit: the builder call's config variable and the function that
+     * releases it, so a way out of the block before the builder runs
+     * releases it. NULL otherwise; emit_trailing_block_body consumes it. */
+    const char* builder_cfg_var;
+    const char* builder_cfg_release;
 
     // The call whose result value its expression statement throws away, set
     // just before the statement emits it. A VOID/discarded parent call still

@@ -492,6 +492,11 @@ const char* get_builder_factory(CodeGenerator* gen, const char* func_name);
 
 /* A trailing block's statements, in its own scope (codegen_stmt.c). */
 void emit_trailing_block_body(CodeGenerator* gen, ASTNode* body);
+/* #2791: a builder call's trailing block, whose config the C variable
+ * `cfg_var` holds: as emit_trailing_block_body, and a way out of the block
+ * before the builder runs releases the config. */
+void emit_builder_block_body(CodeGenerator* gen, ASTNode* body, const char* cfg_var,
+                             const char* builder_name);
 /* The block of a call's trailing DSL closure: not a closure the function
  * takes as a `fn` parameter. NULL when the call has none (codegen_expr.c). */
 ASTNode* trailing_dsl_block(CodeGenerator* gen, ASTNode* call);

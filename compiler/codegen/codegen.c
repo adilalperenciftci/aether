@@ -1885,6 +1885,28 @@ static int try_emit_builder_ctx_pop(CodeGenerator* gen, ASTNode* deferred) {
     return 1;
 }
 
+/* #2791: the config of a builder call whose block is left before the
+ * builder runs (a return, a break or continue out of it). Annotation
+ * "builder_cfg_release:<config>:<release>", pushed by
+ * emit_trailing_block_body after the context pop, so it runs first. The
+ * block's natural end clears the config variable, since the builder then
+ * takes the config; on any other way out nothing will, and the call
+ * releases what its factory made. */
+static int try_emit_builder_cfg_release(CodeGenerator* gen, ASTNode* deferred) {
+    static const char prefix[] = "builder_cfg_release:";
+    if (!deferred || !deferred->annotation ||
+        strncmp(deferred->annotation, prefix, sizeof(prefix) - 1) != 0)
+        return 0;
+    char buf[512];
+    snprintf(buf, sizeof(buf), "%s", deferred->annotation + sizeof(prefix) - 1);
+    char* rel = strchr(buf, ':');
+    if (!rel) return 1;
+    *rel++ = '\0';
+    print_indent(gen);
+    fprintf(gen->output, "if (%s) %s(%s);\n", buf, rel, buf);
+    return 1;
+}
+
 /* #1140 — should the defer at stack slot `i` fire at the exit currently being
  * emitted?
  *
@@ -1933,6 +1955,7 @@ static void emit_deferred_one(CodeGenerator* gen, int i) {
     }
 
     if (!try_emit_builder_ctx_pop(gen, deferred) &&
+        !try_emit_builder_cfg_release(gen, deferred) &&
         !try_emit_heap_string_exit_free(gen, deferred) &&
         !try_emit_seq_exit_free(gen, deferred) &&
         !try_emit_opt_str_exit_free(gen, deferred) &&
@@ -8735,6 +8758,18 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
         gen->builder_funcs_reg[gen->builder_func_reg_count].name = strdup(child->value);
         gen->builder_funcs_reg[gen->builder_func_reg_count].factory = child->annotation ? strdup(child->annotation) : NULL;
         gen->builder_func_reg_count++;
+    }
+    /* #2801: a call to a builder with the default config factory is lowered
+     * to `map_new()`, and a way out of its block before the builder runs to
+     * `map_free` (#2791), whether or not the program imports std.map.
+     * Declare both, as std.map's externs do; the import's identical
+     * declarations, when there are any, are harmless. */
+    for (int i = 0; i < gen->builder_func_reg_count; i++) {
+        const char* f = gen->builder_funcs_reg[i].factory;
+        if (!f || strcmp(f, "map_new") == 0) {
+            fprintf(gen->output, "void* map_new(void);\nvoid map_free(void*);\n");
+            break;
+        }
     }
 
     /* #2520: the string literals holding a NUL, as static AetherStrings,

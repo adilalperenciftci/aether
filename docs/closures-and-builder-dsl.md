@@ -596,6 +596,19 @@ trailing block's setter functions and the builder function body must agree on th
 protocol, the compiler doesn't care what the object is, only that it can be
 pushed to the context stack as `void*`.
 
+### Leaving the block early
+
+The builder takes the config when the block ends. A `return`, `break` or
+`continue` that leaves the block skips the builder, so the call itself
+releases the config on that way out: with `map_free` for the default
+`map_new`, and with `<stem>_free` for a `<stem>_new` factory the program
+defines or declares with one `ptr` parameter (`list_new` and `list_free`, or a
+`query_builder_free(m: ptr)` beside `query_builder_new` above). In a nested
+builder call's block, the way out releases both calls' configs. A factory
+named otherwise has no release the compiler can find, and an early exit
+leaves its object unreleased (#2802), so pair a custom factory with its
+`_free`.
+
 ### Generated code
 
 For `compile("Main.java") { set_release("21") }`, the compiler generates:
