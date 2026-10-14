@@ -569,6 +569,9 @@ int is_aether_extern_param(CodeGenerator* gen, const char* func_name, int param_
 /* #2914: is argument `arg_idx` of a call to extern `func_name` a C vararg,
  * past the declared parameters of an extern declared with `...`? */
 int is_extern_vararg_position(CodeGenerator* gen, const char* func_name, int arg_idx);
+/* R4: is argument `arg_idx` of a call to `func_name` in a C-variadic `...`,
+ * an extern's or an Aether function's? */
+int is_vararg_call_position(CodeGenerator* gen, const char* func_name, int arg_idx);
 /* Returns 1 if extern `func_name`'s parameter at `param_idx` was
    declared `@retain`. Tells the escape walker to mark a heap-string
    arg passed at this slot as escaped (function stores / retains the

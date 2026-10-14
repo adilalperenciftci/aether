@@ -590,6 +590,7 @@ CodeGenerator* create_code_generator(FILE* output) {
     strmap_init(&gen->actor_ptr_fields);
     gen->actor_ptr_fields_ready = 0;
     strmap_init(&gen->zeroed_box_memo);
+    strmap_init(&gen->fault_members);
     // Initialize defer tracking
     gen->defer_count = 0;
     gen->scope_depth = 0;
@@ -980,6 +981,7 @@ void code_generator_release(CodeGenerator* gen) {
         strmap_free(&gen->generated_functions);
         strmap_free(&gen->actor_ptr_fields);
         strmap_free(&gen->zeroed_box_memo);
+        strmap_free(&gen->fault_members);
         if (gen->extern_registry) {
             for (int i = 0; i < gen->extern_registry_count; i++) {
                 free(gen->extern_registry[i].name);
@@ -8942,6 +8944,15 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     /* #2520: the string literals holding a NUL, as static AetherStrings,
      * before anything of the program that may spell one. */
     emit_static_string_literals(gen, program);
+    for (int i = 0; i < program->child_count; i++) {
+        ASTNode* fd = program->children[i];
+        if (!fd || fd->type != AST_FAULT_DEFINITION) continue;
+        for (int mi = 0; mi < fd->child_count; mi++) {
+            ASTNode* m = fd->children[mi];
+            if (m && m->value && m->child_count > 0)
+                strmap_put(&gen->fault_members, m->value, m->children[0]);
+        }
+    }
 
     // Forward-declare struct types BEFORE function forward declarations,
     // so a function signature like `int header_flags(Header*)` resolves
@@ -9355,26 +9366,6 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
                 generate_expression(gen, cd->children[0]);
                 fprintf(gen->output, ");\n");
             }
-        }
-    }
-
-    /* #error-unification P3: fault members. Each mints an interned
-     * `static const char <name>[] = "<ns>.<name>";` — a file-scope string
-     * whose ADDRESS is stable within the TU (enabling a pointer fast-path)
-     * and whose CONTENT is the qualified name (so cross-`.so` identity and
-     * printing both work through the value itself). The member's C symbol is
-     * `<name>` (already namespace-prefixed by the module-merge pass, exactly
-     * like a const), so `fs.NotFound` — rewritten to that identifier —
-     * evaluates to a `const char*` to the interned name. */
-    for (int i = 0; i < program->child_count; i++) {
-        ASTNode* fd = program->children[i];
-        if (!fd || fd->type != AST_FAULT_DEFINITION) continue;
-        for (int mi = 0; mi < fd->child_count; mi++) {
-            ASTNode* m = fd->children[mi];
-            if (!m || !m->value || m->child_count == 0) continue;
-            fprintf(gen->output, "static const char %s[] = ", m->value);
-            generate_expression(gen, m->children[0]);   /* the string content */
-            fprintf(gen->output, ";\n");
         }
     }
 

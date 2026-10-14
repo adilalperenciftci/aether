@@ -55,9 +55,12 @@ void string_free(const void* str) {
 }
 
 // String creation
+/* A copy of `cstr`, which may be a counted or pinned string (every Aether
+ * string value is one) or a plain C string: string_* functions get the
+ * value as it is held, not its characters. */
 AetherString* string_new(const char* cstr) {
     if (!cstr) return string_empty();
-    return string_new_with_length(cstr, strlen(cstr));
+    return string_new_with_length(str_data(cstr), str_len(cstr));
 }
 
 AetherString* string_new_with_length(const char* data, size_t length) {
@@ -1502,57 +1505,53 @@ extern void* list_get_raw(void* list, int index);
 
 AetherString* string_format_list(const char* fmt, void* args) {
     if (!fmt) return string_empty();
+    /* The format as it is held, counted or plain: its bytes up to its
+     * length, a NUL included. */
+    const char* f = str_data(fmt);
+    const char* end = f + str_len(fmt);
     int n_args = args ? list_size(args) : 0;
-    int next_arg = 0;
 
     /* First pass: compute total length so we can allocate exactly
      * once. Read placeholders and arg lengths to size the buffer. */
     size_t total = 0;
-    const char* p = fmt;
-    while (*p) {
-        if (p[0] == '{' && p[1] == '{') { total++; p += 2; continue; }
-        if (p[0] == '}' && p[1] == '}') { total++; p += 2; continue; }
-        if (p[0] == '{' && p[1] == '}') {
+    int next_arg = 0;
+    for (const char* p = f; p < end;) {
+        int pair = p + 1 < end;
+        if (pair && ((p[0] == '{' && p[1] == '{') || (p[0] == '}' && p[1] == '}'))) {
+            total++; p += 2; continue;
+        }
+        if (pair && p[0] == '{' && p[1] == '}') {
             if (next_arg < n_args) {
-                void* a = list_get_raw(args, next_arg);
-                size_t alen = a ? str_len(a) : 0;
-                total += alen;
-                next_arg++;
+                void* a = list_get_raw(args, next_arg++);
+                total += a ? str_len(a) : 0;
             }
             p += 2; continue;
         }
         total++; p++;
     }
 
-    char* out = (char*)malloc(total + 1);
-    if (!out) return string_empty();
+    AetherString* result = string_alloc_inline(total);
+    if (!result) return string_empty();
 
     /* Second pass: write the bytes. */
-    next_arg = 0;
+    char* out = result->data;
     size_t pos = 0;
-    p = fmt;
-    while (*p) {
-        if (p[0] == '{' && p[1] == '{') { out[pos++] = '{'; p += 2; continue; }
-        if (p[0] == '}' && p[1] == '}') { out[pos++] = '}'; p += 2; continue; }
-        if (p[0] == '{' && p[1] == '}') {
+    next_arg = 0;
+    for (const char* p = f; p < end;) {
+        int pair = p + 1 < end;
+        if (pair && p[0] == '{' && p[1] == '{') { out[pos++] = '{'; p += 2; continue; }
+        if (pair && p[0] == '}' && p[1] == '}') { out[pos++] = '}'; p += 2; continue; }
+        if (pair && p[0] == '{' && p[1] == '}') {
             if (next_arg < n_args) {
-                void* a = list_get_raw(args, next_arg);
-                if (a) {
-                    size_t alen = str_len(a);
-                    const char* adata = str_data(a);
-                    if (alen > 0) memcpy(out + pos, adata, alen);
-                    pos += alen;
-                }
-                next_arg++;
+                void* a = list_get_raw(args, next_arg++);
+                size_t alen = a ? str_len(a) : 0;
+                if (alen > 0) memcpy(out + pos, str_data(a), alen);
+                pos += alen;
             }
             p += 2; continue;
         }
         out[pos++] = *p++;
     }
-    out[pos] = '\0';
-
-    AetherString* result = string_new_with_length(out, pos);
-    free(out);
     return result;
 }
 

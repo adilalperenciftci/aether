@@ -148,6 +148,7 @@ typedef struct {
     // The field and local questions walk the program or a function body, so
     // each is answered once.
     StrMap zeroed_box_memo;
+    StrMap fault_members;        // a fault member's name -> its content literal (R1)
 
     // Defer stack: tracks deferred statements for LIFO execution at scope exit
     ASTNode* defer_stack[MAX_DEFER_STACK];
@@ -747,9 +748,12 @@ void emit_c_string_literal(CodeGenerator* gen, const char* str);
 void emit_c_string_body(CodeGenerator* gen, const char* str, int printf_format);  // #2512
 /* #2520: `len` bytes, NULs included, as the inside of a C string literal. */
 void emit_c_string_bytes(CodeGenerator* gen, const char* str, size_t len, int printf_format);
-/* #2520: a string literal node as a C expression: a C string literal, or,
- * when the literal holds a NUL, the static AetherString that carries it. */
+/* A string literal node as an Aether string value: the static, pinned
+ * AetherString that carries it (R1). */
 void emit_string_literal_node(CodeGenerator* gen, const ASTNode* lit);
+/* A string literal node as the characters C reads (R4): a C string literal,
+ * or the pinned string's byte array when the literal holds a NUL. */
+void emit_string_literal_chars(CodeGenerator* gen, const ASTNode* lit);
 /* #2520: `lit` as an fwrite of all its bytes to stdout (print of a literal). */
 void emit_string_literal_write(CodeGenerator* gen, const ASTNode* lit, int newline);
 void emit_print_literal_format(CodeGenerator* gen, const ASTNode* lit);

@@ -98,7 +98,7 @@ held h!
 h!+
 8 e!
 i!"
-grep -q '_ad_[0-9]* = (char\*)(mk("x")), apply(look, _ad_[0-9]*), aether_heap_str_free' "$tmp/borrowed.c" \
+grep -q '_ad_[0-9]* = (char\*)(mk(((const char\*)&_ae_slit_[0-9]*))), apply(look, _ad_[0-9]*), aether_heap_str_free' "$tmp/borrowed.c" \
     || fail "the argument to apply() is not freed" "$tmp/borrowed.c"
 n="$(grep -c '_ad_[0-9]* = (char\*)(mk(a)), .*f\.fn)(f\.env, _ad_[0-9]*), aether_heap_str_free' "$tmp/borrowed.c")"
 [ "$n" = "3" ] || fail "an argument to a call through an fn parameter is not freed ($n of 3)" "$tmp/borrowed.c"
@@ -167,11 +167,11 @@ zzzzzzzzzzzzzzzz!" ;;
     esac
     run "kept_$shape" "$want"
     if [ "$shape" = ptr ]; then
-        if grep -q 'mk("k")), apply(keep, _ad_' "$tmp/kept_$shape.c"; then
+        if grep -q 'mk(((const char\*)&_ae_slit_[0-9]*))), apply(keep, _ad_' "$tmp/kept_$shape.c"; then
             fail "kept_ptr: an argument a closure may keep as a pointer is freed" "$tmp/kept_$shape.c"
         fi
     else
-        grep -q 'mk("k")), apply(keep, _ad_[0-9]*), aether_heap_str_free' "$tmp/kept_$shape.c" \
+        grep -q 'mk(((const char\*)&_ae_slit_[0-9]*))), apply(keep, _ad_[0-9]*), aether_heap_str_free' "$tmp/kept_$shape.c" \
             || fail "kept_$shape: the closure copies what it keeps, yet the argument is not freed" "$tmp/kept_$shape.c"
         grep -q 's = aether_str_capture(s);' "$tmp/kept_$shape.c" \
             || fail "kept_$shape: the closure does not take its own reference to what it keeps" "$tmp/kept_$shape.c"

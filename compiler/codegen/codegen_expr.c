@@ -5863,28 +5863,29 @@ int static_string_literal_index(CodeGenerator* gen, const char* bytes, int len) 
 
 static void collect_static_string_literals(CodeGenerator* gen, ASTNode* node) {
     if (!node) return;
-    if (node->value_len > 0 &&
+    if (node->value &&
         (node->type == AST_LITERAL || node->type == AST_PATTERN_LITERAL) &&
         node->node_type && node->node_type->kind == TYPE_STRING) {
-        static_string_literal_index(gen, node->value, node->value_len);
+        static_string_literal_index(gen, node->value, ast_literal_length(node));
     }
     for (int i = 0; i < node->child_count; i++) {
         collect_static_string_literals(gen, node->children[i]);
     }
 }
 
-/* #2520: a string literal that holds a NUL cannot be a C string literal,
- * which ends at its first NUL. Each such literal of the program is emitted
- * here, once, as a static AetherString with its length, in the layout of
- * std/string/aether_string.h, pinned (AETHER_STRING_PINNED_REFS) so that
- * string_retain and string_release leave it alone and it is never freed.
- * Every string function then sees all of its bytes through str_len and
- * str_data, as it does for a heap string. A literal without a NUL is not
- * here: it stays a plain C string literal. */
+/* R1 of the ownership model: every string literal of the program is a
+ * counted string like any other, so `release` is right on any string value.
+ * Each distinct literal is emitted here, once, as a static AetherString with
+ * its length, in the layout of std/string/aether_string.h, pinned
+ * (AETHER_STRING_PINNED_REFS) so that string_retain and string_release leave
+ * it alone and it is never freed. Its bytes keep every NUL (#2520), since the
+ * length, not a terminator, says where it ends. Where a literal goes to C as
+ * characters (an extern's argument, a C struct's field), it is written as
+ * those characters instead (emit_string_literal_chars). */
 void emit_static_string_literals(CodeGenerator* gen, ASTNode* program) {
     collect_static_string_literals(gen, program);
     if (gen->static_str_count == 0) return;
-    fprintf(gen->output, "/* String literals holding a NUL: static, pinned AetherStrings (#2520). */\n");
+    fprintf(gen->output, "/* The program's string literals: static, pinned AetherStrings. */\n");
     /* The runtime declares AetherString from the same field list, so the
      * layout written here is the layout the string functions read. */
 #define AE_STR_ABI_TEXT_(...) #__VA_ARGS__
@@ -5905,12 +5906,31 @@ void emit_static_string_literals(CodeGenerator* gen, ASTNode* program) {
 }
 
 void emit_string_literal_node(CodeGenerator* gen, const ASTNode* lit) {
+    int idx = static_string_literal_index(gen, lit->value, ast_literal_length(lit));
+    fprintf(gen->output, "((const char*)&_ae_slit_%d)", idx);
+}
+
+void emit_string_literal_chars(CodeGenerator* gen, const ASTNode* lit) {
     if (lit->value_len > 0) {
+        /* Its bytes, a NUL included, as the pinned string holds them. */
         int idx = static_string_literal_index(gen, lit->value, lit->value_len);
-        fprintf(gen->output, "((const char*)&_ae_slit_%d)", idx);
+        fprintf(gen->output, "_ae_slit_%d_bytes", idx);
     } else {
         emit_c_string_literal(gen, lit->value);
     }
+}
+
+/* A string value as the characters C reads (R4): a literal as its C
+ * literal, anything else, a counted or pinned string, through
+ * aether_string_data, which also passes a plain C string as it is. */
+void emit_string_as_c_chars(CodeGenerator* gen, ASTNode* e) {
+    if (e && e->type == AST_LITERAL) {
+        emit_string_literal_chars(gen, e);
+        return;
+    }
+    fprintf(gen->output, "aether_string_data(");
+    generate_expression(gen, e);
+    fprintf(gen->output, ")");
 }
 
 void emit_print_literal_format(CodeGenerator* gen, const ASTNode* lit) {
@@ -7594,6 +7614,16 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
 
         case AST_IDENTIFIER:
             if (!expr->value) { fprintf(gen->output, "/* NULL identifier */0"); break; }
+            /* #error-unification P3: a fault member is its qualified name
+             * (`"<ns>.<name>"`), so it prints and compares through the value
+             * itself, across `.so`s too. Under R1 that is the name's pinned
+             * string: one object per distinct name, which keeps a pointer
+             * fast path for two uses of one fault. A local of the same name
+             * is the local. */
+            if (strmap_has(&gen->fault_members, expr->value) && !is_var_declared(gen, expr->value)) {
+                emit_string_literal_node(gen, strmap_get(&gen->fault_members, expr->value));
+                break;
+            }
             // #1068 flow-narrowed optional: inside `if x != none { ... }` the
             // typechecker marked this read of `x` as narrowed, so emit the inner
             // value `x.val` of the `ae_opt` struct. Presence is proven by the
@@ -8798,7 +8828,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                             if (arg->type == AST_LITERAL) {
                                 // String literal — never NULL, use printf directly
                                 fprintf(gen->output, "printf(");
-                                generate_expression(gen, arg);
+                                emit_string_literal_chars(gen, arg);
                                 fprintf(gen->output, ")");
                             } else {
                                 // Runtime string, could be NULL; by length (#2521)
@@ -8932,7 +8962,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                             } else if (arg->type == AST_LITERAL) {
                                 // String literal — never NULL, use puts() directly
                                 fprintf(gen->output, "puts(");
-                                generate_expression(gen, arg);
+                                emit_string_literal_chars(gen, arg);
                                 fprintf(gen->output, ")");
                             } else if (arg->type == AST_FUNCTION_CALL &&
                                        is_heap_string_expr(gen, arg)) {
@@ -8970,7 +9000,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                         if (a->type == AST_LITERAL && a->node_type && a->node_type->kind == TYPE_STRING) {
                             // println("text") → puts("text") which adds \n automatically
                             fprintf(gen->output, "puts(");
-                            generate_expression(gen, a);
+                            emit_string_literal_chars(gen, a);
                             fprintf(gen->output, ")");
                         } else {
                             fprintf(gen->output, "printf(\"%%d\\n\", ");
@@ -9052,7 +9082,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                 }
                 else if (strcmp(func_name, "getenv") == 0 && expr->child_count == 1) {
                     fprintf(gen->output, "getenv(");
-                    generate_expression(gen, expr->children[0]);
+                    emit_string_as_c_chars(gen, expr->children[0]);
                     fprintf(gen->output, ")");
                 }
                 /* #1993: the builtin only claims this name while the program
@@ -9066,7 +9096,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                 else if (strcmp(func_name, "atoi") == 0 && expr->child_count == 1 &&
                          !find_function_definition_by_name(gen->program, "atoi")) {
                     fprintf(gen->output, "atoi(");
-                    generate_expression(gen, expr->children[0]);
+                    emit_string_as_c_chars(gen, expr->children[0]);
                     fprintf(gen->output, ")");
                 }
                 else if (strcmp(func_name, "exit") == 0) {
@@ -10420,34 +10450,40 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                             /* int <-> ptr parameter: cast emitted. */
                         } else if (expected == TYPE_PTR && arg->node_type &&
                                    arg->node_type->kind == TYPE_STRING) {
-                            if (arg->type == AST_LITERAL) {
-                                /* A string literal is char[] in C: it decays
-                                 * and converts to void* implicitly with no
-                                 * qualifier warning, so it needs no cast, and
-                                 * casting it to void* destroys the constant
-                                 * the C compiler's -Wformat check reads. With
-                                 * the cast, a format/argument bug in a printf
-                                 *-family extern call compiled silently
-                                 * (#1252). libc externs keep their real
-                                 * attributed prototypes (declaration skipped),
-                                 * so the check fires end to end. */
+                            /* A string-aware C function (string_*, aether_string_*)
+                             * takes the string as it is held, as for a `string`
+                             * parameter, and so does an `@aether` one. */
+                            int header = ext_name && (is_aether_extern_param(gen, ext_name, arg_printed) ||
+                                                      is_stdlib_string_aware_extern(c_func_name));
+                            if (arg->type == AST_LITERAL && !header) {
+                                /* A literal used as a `ptr` is its static C
+                                 * characters, whoever receives it, uncast so a
+                                 * printf-family format keeps its -Wformat
+                                 * check (#1252); an Aether function's `ptr`
+                                 * may pass it on to C (#1244). */
+                                emit_string_literal_chars(gen, arg);
+                            } else if (ext_name && !header) {
+                                /* R4: a string handed to C as a `ptr` is its
+                                 * characters, as a `string` parameter's is
+                                 * (#297). */
+                                fprintf(gen->output, "(void*)aether_string_data(");
                                 generate_expression(gen, arg);
+                                fprintf(gen->output, ")");
                             } else {
-                                // Cast const char* expressions to void* to
-                                // silence C's "discards qualifiers" warning
-                                // when passing into a ptr parameter.
+                                /* An Aether function's `ptr`, or an `@aether`
+                                 * C parameter: the string as it is held. The
+                                 * cast silences C's "discards qualifiers". */
                                 fprintf(gen->output, "(void*)(");
                                 generate_expression(gen, arg);
                                 fprintf(gen->output, ")");
                             }
-                        } else if (ext_name && arg->node_type &&
-                                   !is_stdlib_string_aware_extern(c_func_name) &&
-                                   ((expected == TYPE_STRING &&
+                        } else if (arg->node_type && !is_stdlib_string_aware_extern(c_func_name) &&
+                                   ((ext_name && expected == TYPE_STRING &&
                                      (arg->node_type->kind == TYPE_STRING ||
                                       arg->node_type->kind == TYPE_PTR) &&
                                      !is_aether_extern_param(gen, ext_name, arg_printed)) ||
                                     (arg->node_type->kind == TYPE_STRING &&
-                                     is_extern_vararg_position(gen, ext_name, arg_printed)))) {
+                                     is_vararg_call_position(gen, func_name, arg_printed)))) {
                             // The Aether-side value typed `string` may be a
                             // wrapped AetherString* (from string.from_int,
                             // string_concat_wrapped, fs.read_binary, etc.)
@@ -10474,12 +10510,15 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                             //      str_len. Without this, binary content
                             //      with embedded NULs strlen-truncates at
                             //      the boundary (#351).
-                            // Closes #297. A string in a C vararg position
-                            // (`printf(fmt, s)`) goes as its characters too
-                            // (#2914).
-                            fprintf(gen->output, "aether_string_data(");
-                            generate_expression(gen, arg);
-                            fprintf(gen->output, ")");
+                            // Closes #297. A string in a C-variadic `...`
+                            // goes as its characters too, an extern's
+                            // (`printf(fmt, s)`, #2914) or an Aether
+                            // variadic function's, whose `va_arg` or
+                            // forwarded `va_list` reads it as C does.
+                            /* A literal goes as its C literal, which also
+                             * keeps -Wformat reading a printf-family format
+                             * (#1252). */
+                            emit_string_as_c_chars(gen, arg);
                         } else if (expected == TYPE_STRING && !order_bound(arg) &&
                                    string_field_handoff_kind(gen, func_name, arg_printed, arg)) {
                             /* The callee frees what it is handed: the field

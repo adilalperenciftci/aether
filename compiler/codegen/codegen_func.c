@@ -801,6 +801,21 @@ int is_extern_vararg_position(CodeGenerator* gen, const char* func_name, int arg
            arg_idx >= gen->extern_registry[idx].param_count;
 }
 
+/* Is argument `arg_idx` of a call to `func_name` in a C-variadic `...`:
+ * an extern's past its declared parameters (#2914), or an Aether
+ * function's declared `f(fixed..., ...)` past its named ones? The type is
+ * erased there, so whatever reads it, `va_arg` or a forwarded `va_list`
+ * (#1244), reads it as C does (R4). */
+int is_vararg_call_position(CodeGenerator* gen, const char* func_name, int arg_idx) {
+    const char* ext = extern_name_for_call(gen, func_name);
+    if (ext) return is_extern_vararg_position(gen, ext, arg_idx);
+    if (!gen->program || !func_name) return 0;
+    ASTNode* fdef = find_function_definition_by_name(gen->program, func_name);
+    if (!fdef) fdef = find_function_definition_by_name(gen->program, codegen_normalise_callee(func_name));
+    return fdef && annotation_has_marker(fdef->annotation, "varargs") &&
+           arg_idx >= fn_param_count(fdef);
+}
+
 /* Returns 1 if extern `func_name`'s parameter at `param_idx` was
  * declared with `@retain` — meaning the function stores or
  * retains the pointer beyond the call. The escape walker uses

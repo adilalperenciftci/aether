@@ -173,8 +173,11 @@ TEST(codegen_string_ne_zero_literal_compares_content) {
     char* buf = generate_typechecked(
         "main() { a = \"abc\"\n if a != \"0\" { println(\"ne\") } }");
     ASSERT_NOT_NULL(buf);
-    ASSERT_TRUE(strstr(buf, "!string_equals(a, \"0\")") != NULL);
-    ASSERT_TRUE(strstr(buf, "a != \"0\"") == NULL);
+    /* Every literal is a pinned AetherString (R1): "abc" is the first, "0"
+     * the second. */
+    ASSERT_TRUE(strstr(buf, "_ae_slit_1_bytes[] = \"0\"") != NULL);
+    ASSERT_TRUE(strstr(buf, "!string_equals(a, ((const char*)&_ae_slit_1))") != NULL);
+    ASSERT_TRUE(strstr(buf, "a != ((const char*)&_ae_slit_1)") == NULL);
     free(buf);
 }
 
@@ -182,8 +185,9 @@ TEST(codegen_zero_literal_eq_string_compares_content) {
     char* buf = generate_typechecked(
         "main() { a = \"abc\"\n if \"0\" == a { println(\"eq\") } }");
     ASSERT_NOT_NULL(buf);
-    ASSERT_TRUE(strstr(buf, "string_equals(\"0\", a)") != NULL);
-    ASSERT_TRUE(strstr(buf, "\"0\" == a") == NULL);
+    ASSERT_TRUE(strstr(buf, "_ae_slit_1_bytes[] = \"0\"") != NULL);
+    ASSERT_TRUE(strstr(buf, "string_equals(((const char*)&_ae_slit_1), a)") != NULL);
+    ASSERT_TRUE(strstr(buf, "((const char*)&_ae_slit_1) == a") == NULL);
     free(buf);
 }
 
@@ -193,7 +197,8 @@ TEST(codegen_string_order_compares_content) {
     char* buf = generate_typechecked(
         "main() { a = \"abc\"\n if a < \"b\" { println(\"lt\") } }");
     ASSERT_NOT_NULL(buf);
-    ASSERT_TRUE(strstr(buf, "(string_compare(a, \"b\") < 0)") != NULL);
+    ASSERT_TRUE(strstr(buf, "_ae_slit_1_bytes[] = \"b\"") != NULL);
+    ASSERT_TRUE(strstr(buf, "(string_compare(a, ((const char*)&_ae_slit_1)) < 0)") != NULL);
     ASSERT_TRUE(strstr(buf, "strcmp(_aether_safe_str(a)") == NULL);
     free(buf);
 }
