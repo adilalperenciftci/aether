@@ -14,7 +14,7 @@ try_env(name: string) {
     result = os_getenv(name)
     if result != null {
         println("    \x1b[32m[ALLOW]\x1b[0m env ${name} = ${result}")
-        free(result)
+        release(result)
     } else {
         println("    \x1b[31m[DENY]\x1b[0m  env ${name}")
     }
