@@ -41,7 +41,7 @@ exports(
 )
 
 // Detach a borrowed ring-buffer string into an Aether-owned copy.
-extern string_concat(a: string, b: string) -> string
+extern string_concat(a: string, b: string) -> string @heap
 
 // ---- Raw externs (over runtime/sandbox/aether_audit.c) ----
 

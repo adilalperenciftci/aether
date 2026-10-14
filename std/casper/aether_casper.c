@@ -17,6 +17,7 @@
 
 #if defined(__FreeBSD__)
 
+#include "../string/aether_string.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -83,7 +84,7 @@ char* aether_casper_resolve(void* netchan, const char* hostname) {
                              &hints, &res);
     if (rc != 0 || !res) return NULL;
 
-    // Stringify the first result's address into a fresh heap buffer.
+    // Stringify the first result's address into a fresh counted string.
     char buf[INET6_ADDRSTRLEN];
     buf[0] = '\0';
     if (res->ai_family == AF_INET) {
@@ -95,7 +96,7 @@ char* aether_casper_resolve(void* netchan, const char* hostname) {
     }
     freeaddrinfo(res);
     if (buf[0] == '\0') return NULL;
-    return strdup(buf);
+    return (char*)string_new(buf);
 }
 
 long aether_casper_pwd_uid(void* pwdchan, const char* username) {
@@ -109,7 +110,7 @@ char* aether_casper_pwd_home(void* pwdchan, const char* username) {
     if (!pwdchan || !username) return NULL;
     struct passwd* pw = cap_getpwnam((cap_channel_t*)pwdchan, username);
     if (!pw || !pw->pw_dir) return NULL;
-    return strdup(pw->pw_dir);
+    return (char*)string_new(pw->pw_dir);
 }
 
 char* aether_casper_sysctl_str(void* sysctlchan, const char* name) {
@@ -123,7 +124,7 @@ char* aether_casper_sysctl_str(void* sysctlchan, const char* name) {
     // case the value was not already terminated.
     if (len < sizeof(buf)) buf[len] = '\0';
     else buf[sizeof(buf) - 1] = '\0';
-    return strdup(buf);
+    return (char*)string_new(buf);
 }
 
 #else // not FreeBSD — Casper does not exist

@@ -38,7 +38,7 @@ exports(
 )
 
 // Detach a borrowed/heap C string into an Aether-owned copy.
-extern string_concat(a: string, b: string) -> string
+extern string_concat(a: string, b: string) -> string @heap
 
 // ---- Raw externs (over std/casper/aether_casper.c) ----
 

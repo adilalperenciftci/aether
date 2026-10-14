@@ -44,10 +44,10 @@ void aether_casper_close(void* chan);
 // 1 if Casper is usable (FreeBSD with the casper daemon), else 0.
 int aether_casper_available(void);
 
-// The three lookup functions below return a heap-allocated string the
-// caller owns and must free, or NULL on failure. Returning by heap
-// (rather than a caller-supplied buffer) is the idiomatic Aether-extern
-// shape — matches os_getenv / os_which.
+// The three lookup functions below return a counted AetherString the
+// caller owns and releases with string_release, or NULL on failure.
+// Returning by heap (rather than a caller-supplied buffer) is the
+// idiomatic Aether-extern shape — matches os_getenv / os_which.
 
 // ---- DNS service (system.net) ----
 

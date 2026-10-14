@@ -7,7 +7,7 @@
 int os_system(const char* cmd);
 
 // Run a command and capture stdout as a string
-// Returns heap-allocated string (caller must free), or NULL on failure
+// Returns a counted AetherString (caller releases it), or NULL on failure
 char* os_exec_raw(const char* cmd);
 
 // Get environment variable, returns string or NULL if not set
@@ -42,7 +42,7 @@ int os_kill_raw(int pid, int sig);
 // on no-filesystem builds (returns -1).
 int os_chdir_raw(const char* path);
 
-// Current working directory as a fresh heap-allocated string the caller
+// Current working directory as a fresh counted AetherString the caller
 // owns (NULL on failure). POSIX getcwd(3) / Windows GetCurrentDirectoryW
 // (UTF-16 result converted to UTF-8).
 char* os_getcwd_raw(void);
@@ -67,8 +67,8 @@ char* os_which(const char* name);
 //             to inherit the parent's environment.
 int os_run(const char* prog, void* argv, void* env);
 
-// Same as os_run but captures the child's stdout into a heap-allocated
-// string the caller must free. Returns NULL on spawn failure. The
+// Same as os_run but captures the child's stdout into a counted
+// AetherString the caller releases. Returns NULL on spawn failure. The
 // child's exit code is discarded — use `os_run_capture_status_raw`
 // below if you need both stdout and the exit code.
 char* os_run_capture_raw(const char* prog, void* argv, void* env);
@@ -85,15 +85,15 @@ char* os_run_capture_raw(const char* prog, void* argv, void* env);
 // sites that don't see each other's tag.
 //
 // Layout: (stdout, status, err)
-//   - stdout: heap-allocated capture (caller frees), or "" on failure.
+//   - stdout: counted capture the caller releases; "" on failure.
 //   - status: WEXITSTATUS on normal exit; -1 when killed by signal or
 //             when the spawn itself failed.
 //   - err:    "" on successful spawn (regardless of exit code);
 //             non-empty when the fork/exec couldn't run.
 
 // Current UTC time as an ISO-8601 timestamp: "YYYY-MM-DDThh:mm:ssZ"
-// (20 chars + NUL). Returns a heap-allocated string the caller must
-// free. On clock / format failure returns an empty string (never NULL).
+// (20 chars + NUL). Returns a counted AetherString the caller releases.
+// On clock / format failure returns an empty string (never NULL).
 // Thread-safe via gmtime_r / gmtime_s.
 //
 // The `_raw` suffix matches the os_exec_raw / os_run_capture_raw
@@ -143,7 +143,7 @@ char* os_now_local_iso8601_raw(void);
 //   "linux", "darwin", "windows", "freebsd", "openbsd", "netbsd",
 //   "dragonfly", "solaris", "wasm", or "unknown" if nothing matched.
 // Decided at compile time via toolchain-predefined macros; never
-// fails. Returns a strdup'd copy.
+// fails. Returns a counted copy.
 char* os_platform_raw(void);
 
 // CPU architecture of the build target, normalized to the ecosystem
@@ -152,7 +152,7 @@ char* os_platform_raw(void);
 // or "unknown". The companion to os_platform_raw(); together they form
 // the "<os>-<arch>" release-asset token. Decided at compile time via
 // toolchain-predefined macros (so it reports the TARGET arch under a
-// cross-compile, unlike `uname -m`); never fails. strdup'd copy.
+// cross-compile, unlike `uname -m`); never fails. A counted copy.
 char* os_arch_raw(void);
 
 // Number of online logical CPUs (the `nproc` value) — for sizing build

@@ -30,7 +30,7 @@ extern io_print_int(value: int)
 extern io_print_float(value: float)
 
 // File I/O — raw externs
-extern io_read_file_raw(path: string) -> string
+extern io_read_file_raw(path: string) -> string @heap
 extern io_write_file_raw(path: string, content: string) -> int
 extern io_append_file_raw(path: string, content: string) -> int
 extern io_file_exists(path: string) -> int
@@ -41,7 +41,7 @@ extern io_file_info_raw(path: string) -> ptr
 extern io_file_info_free(info: ptr)
 
 // Environment variables
-extern io_getenv(name: string) -> string
+extern io_getenv(name: string) -> string @heap
 extern io_setenv_raw(name: string, value: string) -> int
 extern io_unsetenv_raw(name: string) -> int
 
@@ -55,7 +55,7 @@ extern io_stdout_write_raw(data: string, length: int) -> int
 // errno-based error reporting — see the perror / errno_message
 // wrappers below.
 extern io_perror_raw(name: string)
-extern io_errno_message_raw() -> string
+extern io_errno_message_raw() -> string @heap
 
 // Full fd-level I/O surface. Section 1 of nuther-ask-of-aether-team.md.
 // fd_open_read       → POSIX O_RDONLY  / Win _O_RDONLY | _O_BINARY
@@ -89,7 +89,7 @@ extern io_fd_read_into_raw(fd: int, buf: ptr, length: int) -> int
 extern io_fd_read_line_tuple(fd: int) -> (string @heap, string)
 
 // string_concat for owned-copy duplication
-extern string_concat(a: string, b: string) -> string
+extern string_concat(a: string, b: string) -> string @heap
 
 // Read the entire contents of a file at `path`.
 // Returns (content, "") on success, ("", error) on failure.

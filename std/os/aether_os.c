@@ -3,21 +3,14 @@
 #include "../../runtime/config/aether_optimization_config.h"
 #include "../../runtime/aether_sandbox.h"
 #include "../../runtime/aether_resource_caps.h"
+#include "../string/aether_string.h"
 #include <stdlib.h>
 
-/* Heap-empty sentinel for the position-0 slot on error returns
- * from extern functions annotated `(string @heap, ...)` —
- * specifically os_run_capture_status_raw and
- * os_run_pipe_drain_and_wait_raw. The caller-side heap-string-
- * tracker auto-frees position 0 on function exit; returning a
- * static literal "" would surface as `free((void*)"")` and abort.
- * Allocate a fresh 1-byte buffer so the @heap contract holds
- * uniformly across success and error paths. NULL on OOM is
- * acceptable — `free(NULL)` is a defined no-op. See #420 v2. */
+/* The empty string an `@heap` tuple slot holds on an error return: a
+ * counted one, which the caller releases like any other, never a
+ * literal (#420 v2). */
 static char* aether_os_empty_heap(void) {
-    char* p = (char*)malloc(1);
-    if (p) p[0] = '\0';
-    return p;
+    return (char*)string_empty();
 }
 
 // NOTE on aether_argv0 placement: the implementation lives in
@@ -259,12 +252,7 @@ char* os_exec_raw(const char* cmd) {
     size_t len = 0;
     /* #462: gate the command-output buffer through the capability
      * allocator so a sandboxed plugin can't inflate it without bound.
-     * Caller-owned return — the success path hands `result` to the
-     * Aether heap-string tracker, which frees it with libc free; that
-     * leaves the cap counter drifted up by `capacity` (fail-safe — it
-     * never under-counts), the same documented contract as
-     * io_read_file_raw / os_getenv. Error paths below free through the
-     * cap so the counter stays balanced when nothing escapes. */
+     * The success path adopts it into the counted string it returns. */
     char* result = (char*)aether_caps_malloc(capacity);
     if (!result) {
 #ifdef _WIN32
@@ -308,7 +296,7 @@ char* os_exec_raw(const char* cmd) {
 #else
     pclose(pipe);
 #endif
-    return result;
+    return (char*)string_adopt_caps_buffer(result, len, capacity);
 }
 
 char* os_getenv(const char* name) {
@@ -316,18 +304,14 @@ char* os_getenv(const char* name) {
     if (!aether_sandbox_check("env", name)) return NULL;
     char* val = getenv(name);
     if (!val) return NULL;
-    /* #462: gate through the cap (a plugin can't read an unbounded
-     * environment value past the limit). Caller-owned return freed by
-     * libc free — fail-safe upward drift, identical to io_getenv. */
-    size_t n = strlen(val);
-    char* out = (char*)aether_caps_malloc(n + 1);
-    if (out) memcpy(out, val, n + 1);
-    return out;
+    /* #462: a counted copy, allocated through the cap (a plugin can't
+     * read an unbounded environment value past the limit). */
+    return (char*)string_new_with_length(val, strlen(val));
 }
 
 /* Format the current UTC time as an ISO-8601 timestamp string:
- * "YYYY-MM-DDThh:mm:ssZ" (20 chars + NUL). Returns a malloc'd
- * strdup. Uses gmtime_r for thread safety. On any clock / format
+ * "YYYY-MM-DDThh:mm:ssZ" (20 chars + NUL). Returns a counted
+ * string. Uses gmtime_r for thread safety. On any clock / format
  * failure returns an empty string — callers that care about the
  * distinction should check for "" vs a valid timestamp shape.
  *
@@ -340,18 +324,18 @@ char* os_now_utc_iso8601_raw(void) {
     time_t now = time(NULL);
     struct tm tm_buf;
 #ifdef _WIN32
-    if (gmtime_s(&tm_buf, &now) != 0) return strdup("");
+    if (gmtime_s(&tm_buf, &now) != 0) return (char*)string_empty();
 #else
-    if (!gmtime_r(&now, &tm_buf)) return strdup("");
+    if (!gmtime_r(&now, &tm_buf)) return (char*)string_empty();
 #endif
     char buf[32];
     /* "YYYY-MM-DDThh:mm:ssZ" — 20 bytes + NUL, fits buf easily.
      * Numeric-only conversions, so no locale sensitivity. Do NOT add
      * %b/%a/%p — this is an ISO-8601 wire format, not human-facing text. */
     if (strftime(buf, sizeof buf, "%Y-%m-%dT%H:%M:%SZ", &tm_buf) == 0) {
-        return strdup("");
+        return (char*)string_empty();
     }
-    return strdup(buf);
+    return (char*)string_new(buf);
 }
 
 /* ---- Local wall-clock time ------------------------------------------
@@ -447,11 +431,11 @@ void os_now_local_fill_raw(void* out_ptr) {
  *   "YYYY-MM-DDThh:mm:ss+HH:MM"   (positive offset)
  *   "YYYY-MM-DDThh:mm:ss-HH:MM"   (negative offset)
  *   "YYYY-MM-DDThh:mm:ssZ"        (offset == 0, UTC-equivalent)
- * 25 chars + NUL maximum. Returns strdup'd; "" on failure. */
+ * 25 chars + NUL maximum. Returns a counted string; "" on failure. */
 char* os_now_local_iso8601_raw(void) {
     AetherOsLocalTime lt;
     os_now_local_fill_raw(&lt);
-    if (lt.year == 0) return strdup("");  /* localtime failed */
+    if (lt.year == 0) return (char*)string_empty();  /* localtime failed */
     /* 64 bytes is generous — the longest legitimate output is 25 chars
      * + NUL, and oversizing here avoids gcc's -Wformat-truncation
      * cautious worst-case analysis (it can't prove the int args fit
@@ -469,7 +453,7 @@ char* os_now_local_iso8601_raw(void) {
                  lt.tz_offset_minutes < 0 ? '-' : '+',
                  abs_min / 60, abs_min % 60);
     }
-    return strdup(buf);
+    return (char*)string_new(buf);
 }
 
 /* Platform name as a flat lowercase string, matching the Go/Rust
@@ -488,8 +472,7 @@ char* os_now_local_iso8601_raw(void) {
  *
  * Picked at compile time via the toolchain's standard predefined
  * macros (__APPLE__, __linux__, _WIN32, etc.). The returned string
- * is a strdup'd copy so callers can assign and the runtime's heap-
- * string tracker can free uniformly. */
+ * is a counted copy the caller owns. */
 /* The directory for scratch files.
  *
  * Every caller needing one used to hand-roll TEMP -> TMPDIR -> "/tmp"
@@ -516,7 +499,7 @@ char* os_temp_dir_raw(void) {
 #if defined(_WIN32) || defined(_WIN64)
     wchar_t wbuf[MAX_PATH + 1];
     DWORD n = GetTempPathW(MAX_PATH + 1, wbuf);
-    if (n == 0 || n > MAX_PATH) return strdup("C:\\Windows\\Temp");
+    if (n == 0 || n > MAX_PATH) return (char*)string_new("C:\\Windows\\Temp");
 
     /* Strip the trailing separator GetTempPathW always appends, but
      * never the one in a drive root ("C:\\"), which is part of the
@@ -526,15 +509,16 @@ char* os_temp_dir_raw(void) {
         wbuf[--n] = 0;
     }
 
+    /* `need` counts the NUL, which string_alloc_inline adds itself. */
     int need = WideCharToMultiByte(CP_UTF8, 0, wbuf, -1, NULL, 0, NULL, NULL);
-    if (need <= 0) return strdup("C:\\Windows\\Temp");
-    char* out = (char*)malloc((size_t)need);
-    if (!out) return strdup("C:\\Windows\\Temp");
-    if (WideCharToMultiByte(CP_UTF8, 0, wbuf, -1, out, need, NULL, NULL) <= 0) {
-        free(out);
-        return strdup("C:\\Windows\\Temp");
+    if (need <= 0) return (char*)string_new("C:\\Windows\\Temp");
+    AetherString* out = string_alloc_inline((size_t)need - 1);
+    if (!out) return (char*)string_new("C:\\Windows\\Temp");
+    if (WideCharToMultiByte(CP_UTF8, 0, wbuf, -1, out->data, need, NULL, NULL) <= 0) {
+        string_release(out);
+        return (char*)string_new("C:\\Windows\\Temp");
     }
-    return out;
+    return (char*)out;
 #else
     const char* t = getenv("TMPDIR");
     if (t && *t) {
@@ -542,13 +526,9 @@ char* os_temp_dir_raw(void) {
         /* Strip a trailing slash so the result never doubles one up,
          * except for "/" itself. */
         while (len > 1 && t[len - 1] == '/') len--;
-        char* out = (char*)malloc(len + 1);
-        if (!out) return strdup("/tmp");
-        memcpy(out, t, len);
-        out[len] = 0;
-        return out;
+        return (char*)string_new_with_length(t, len);
     }
-    return strdup("/tmp");
+    return (char*)string_new("/tmp");
 #endif
 }
 
@@ -567,26 +547,27 @@ int os_cpu_count_raw(void) {
 
 char* os_platform_raw(void) {
 #if defined(_WIN32) || defined(_WIN64)
-    return strdup("windows");
+    const char* name = "windows";
 #elif defined(__APPLE__)
-    return strdup("darwin");
+    const char* name = "darwin";
 #elif defined(__linux__)
-    return strdup("linux");
+    const char* name = "linux";
 #elif defined(__FreeBSD__)
-    return strdup("freebsd");
+    const char* name = "freebsd";
 #elif defined(__OpenBSD__)
-    return strdup("openbsd");
+    const char* name = "openbsd";
 #elif defined(__NetBSD__)
-    return strdup("netbsd");
+    const char* name = "netbsd";
 #elif defined(__DragonFly__)
-    return strdup("dragonfly");
+    const char* name = "dragonfly";
 #elif defined(__sun) && (defined(__SVR4) || defined(__svr4__))
-    return strdup("solaris");
+    const char* name = "solaris";
 #elif defined(__EMSCRIPTEN__) || defined(__wasi__) || defined(__wasm__)
-    return strdup("wasm");
+    const char* name = "wasm";
 #else
-    return strdup("unknown");
+    const char* name = "unknown";
 #endif
+    return (char*)string_new(name);
 }
 
 /* CPU architecture of the build target, normalized to the ecosystem vocabulary
@@ -605,28 +586,29 @@ char* os_platform_raw(void) {
  * (__x86_64__ etc.) and MSVC (_M_*). */
 char* os_arch_raw(void) {
 #if defined(__x86_64__) || defined(__amd64__) || defined(_M_X64) || defined(_M_AMD64)
-    return strdup("x86_64");
+    const char* name = "x86_64";
 #elif defined(__aarch64__) || defined(__arm64__) || defined(_M_ARM64)
-    return strdup("arm64");
+    const char* name = "arm64";
 #elif defined(__i386__) || defined(_M_IX86)
-    return strdup("i386");
+    const char* name = "i386";
 #elif defined(__arm__) || defined(_M_ARM)
-    return strdup("arm");
+    const char* name = "arm";
 #elif defined(__riscv) && (__riscv_xlen == 64)
-    return strdup("riscv64");
+    const char* name = "riscv64";
 #elif defined(__loongarch64) || (defined(__loongarch__) && defined(__loongarch_lp64))
-    return strdup("loongarch64");
+    const char* name = "loongarch64";
 #elif defined(__powerpc64__) && (defined(__LITTLE_ENDIAN__) || defined(_LITTLE_ENDIAN))
-    return strdup("ppc64le");
+    const char* name = "ppc64le";
 #elif defined(__s390x__)
-    return strdup("s390x");
+    const char* name = "s390x";
 #elif defined(__wasm64__)
-    return strdup("wasm64");
+    const char* name = "wasm64";
 #elif defined(__wasm__) || defined(__wasm32__) || defined(__EMSCRIPTEN__) || defined(__wasi__)
-    return strdup("wasm32");
+    const char* name = "wasm32";
 #else
-    return strdup("unknown");
+    const char* name = "unknown";
 #endif
+    return (char*)string_new(name);
 }
 
 /* Process identifier for the current process. Useful for tmpfile names
@@ -915,12 +897,12 @@ char* os_which(const char* name) {
     const char* pathext = getenv("PATHEXT");
     if (!pathext || !*pathext) pathext = ".COM;.EXE;.BAT;.CMD";
 
-    // Helper: try a candidate path; return strdup of it if the file exists.
+    // Helper: try a candidate path; return a counted copy of it if the file exists.
     // Inlined via macro since we use it in both the has-path and PATH-search branches.
     #define WIN_WHICH_TRY(candidate) do { \
         DWORD attrs = GetFileAttributesA(candidate); \
         if (attrs != INVALID_FILE_ATTRIBUTES && !(attrs & FILE_ATTRIBUTE_DIRECTORY)) { \
-            return strdup(candidate); \
+            return (char*)string_new(candidate); \
         } \
     } while (0)
 
@@ -992,7 +974,7 @@ char* os_which(const char* name) {
     return NULL;
 #else
     if (strchr(name, '/')) {
-        if (access(name, X_OK) == 0) return strdup(name);
+        if (access(name, X_OK) == 0) return (char*)string_new(name);
         return NULL;
     }
 
@@ -1015,13 +997,13 @@ char* os_which(const char* name) {
                 buf[0] = '.';
                 buf[1] = '/';
                 memcpy(buf + 2, name, name_len + 1);
-                if (access(buf, X_OK) == 0) return strdup(buf);
+                if (access(buf, X_OK) == 0) return (char*)string_new(buf);
             }
         } else if (dirlen + 1 + name_len < sizeof(buf)) {
             memcpy(buf, p, dirlen);
             buf[dirlen] = '/';
             memcpy(buf + dirlen + 1, name, name_len + 1);
-            if (access(buf, X_OK) == 0) return strdup(buf);
+            if (access(buf, X_OK) == 0) return (char*)string_new(buf);
         }
         if (!end) break;
         p = end + 1;
@@ -1070,19 +1052,19 @@ int os_chdir_raw(const char* path) {
     return chdir(path) == 0 ? 0 : -1;
 }
 
-/* Current working directory as a fresh strdup'd buffer (caller owns).
+/* Current working directory as a fresh counted string (caller owns).
  * Grows the buffer until getcwd(3) stops reporting ERANGE so deep paths
  * past PATH_MAX still resolve. NULL on any other error. */
 char* os_getcwd_raw(void) {
     size_t cap = 4096;
     for (;;) {
         /* #462: gate the cwd buffer (a deep path is plugin-influenced).
-         * Caller-owned return on success (libc free, fail-safe drift);
-         * the ERANGE retry frees through the cap before doubling, so the
-         * free size matches the live `cap`. */
+         * Adopted into the returned string on success; the ERANGE retry
+         * frees through the cap before doubling, so the free size matches
+         * the live `cap`. */
         char* buf = (char*)aether_caps_malloc(cap);
         if (!buf) return NULL;
-        if (getcwd(buf, cap)) return buf;
+        if (getcwd(buf, cap)) return (char*)string_adopt_caps_buffer(buf, strlen(buf), cap);
         aether_caps_free(buf, cap);
         if (errno != ERANGE) return NULL;
         if (cap > (size_t)1 << 20) return NULL; /* 1 MiB sanity ceiling */
@@ -1274,9 +1256,8 @@ char* os_run_capture_raw(const char* prog, void* argv_list, void* env_list) {
     size_t len = 0;
     /* #462: bound the captured child stdout — the prime DoS surface
      * (a sandboxed plugin can spawn a process that floods stdout).
-     * Caller-owned return freed by libc free (fail-safe upward drift,
-     * the io_read_file_raw contract); error paths free through the cap
-     * with the live size so the counter stays balanced. */
+     * Adopted into the returned string; error paths free through the
+     * cap with the live size so the counter stays balanced. */
     char* result = (char*)aether_caps_malloc(cap);
     if (!result) {
         close(pipefd[0]);
@@ -1318,7 +1299,7 @@ char* os_run_capture_raw(const char* prog, void* argv_list, void* env_list) {
     close(pipefd[0]);
     int st = 0;
     waitpid(pid, &st, 0);
-    return result;
+    return (char*)string_adopt_caps_buffer(result, len, cap);
 }
 
 /* Tuple-returning sibling of os_run_capture_raw — captures stdout AND
@@ -1387,8 +1368,7 @@ _tuple_string_int_string os_run_capture_status_raw(const char* prog, void* argv_
     size_t cap = 4096;
     size_t len = 0;
     /* #462: cap the captured child stdout (see os_run_capture_raw).
-     * `result` escapes into out._0 (@heap tuple slot, caller frees via
-     * libc — fail-safe drift); error paths free through the cap. */
+     * `result` is adopted into out._0; error paths free through the cap. */
     char* result = (char*)aether_caps_malloc(cap);
     if (!result) {
         close(pipefd[0]);
@@ -1430,19 +1410,14 @@ _tuple_string_int_string os_run_capture_status_raw(const char* prog, void* argv_
     result[len] = '\0';
     close(pipefd[0]);
 
+    string_release(out._0);
+    out._0 = (const char*)string_adopt_caps_buffer(result, len, cap);
     int st = 0;
     if (waitpid(pid, &st, 0) < 0) {
-        /* Free the empty-heap initializer before overwriting with
-         * the captured-output buffer (#420 v2 — keeps the @heap
-         * contract from leaking 1 byte per failed-waitpid call). */
-        free((void*)out._0);
-        out._0 = result;
         out._1 = -1;
         out._2 = "waitpid failed";
         return out;
     }
-    free((void*)out._0);
-    out._0 = result;
     {
         _tuple_int_string s = posix_status_to_tuple(st);
         out._1 = s._0;
@@ -1883,8 +1858,7 @@ _tuple_string_int_string os_run_pipe_drain_and_wait_raw(const char* prog, void* 
     size_t cap = 4096;
     size_t len = 0;
     /* #462: cap the drained IPC-channel payload (see os_run_capture_raw).
-     * `result` escapes into out._0 (@heap, caller frees via libc —
-     * fail-safe drift); error paths free through the cap. */
+     * `result` is adopted into out._0; error paths free through the cap. */
     char* result = (char*)aether_caps_malloc(cap);
     if (!result) {
         close(read_fd);
@@ -1926,18 +1900,14 @@ _tuple_string_int_string os_run_pipe_drain_and_wait_raw(const char* prog, void* 
     result[len] = '\0';
     close(read_fd);
 
+    string_release(out._0);
+    out._0 = (const char*)string_adopt_caps_buffer(result, len, cap);
     int st = 0;
     if (waitpid((pid_t)pid, &st, 0) < 0) {
-        /* Free the empty-heap initializer before overwriting with
-         * the drained payload (#420 v2). */
-        free((void*)out._0);
-        out._0 = result;
         out._1 = -1;
         out._2 = "waitpid failed";
         return out;
     }
-    free((void*)out._0);
-    out._0 = result;
     {
         _tuple_int_string s = posix_status_to_tuple(st);
         out._1 = s._0;
@@ -2218,11 +2188,8 @@ static void aether_os_set_nonblock(int fd) {
  * bytes — binary-safe, NUL bytes included) to the child's stdin, and
  * capture its stdout and stderr SEPARATELY. Returns
  * (stdout, stderr, exit_code, err):
- *   - stdout / stderr: @heap captures the caller owns; "" if empty.
- *     Like os.run_capture they are NUL-terminated C strings, so a
- *     capture containing an embedded NUL reads as truncated through
- *     the string wrappers (the stdin direction has no such limit —
- *     it is written by explicit length).
+ *   - stdout / stderr: @heap counted captures the caller owns; "" if
+ *     empty. They carry their length, so an embedded NUL is kept.
  *   - exit_code: WEXITSTATUS on normal exit, 128+signo if the child
  *     was killed by a signal, 127 on exec failure, -1 on spawn/IO
  *     error (err non-empty in that last case).
@@ -2376,11 +2343,18 @@ _tuple_string_string_int_string os_run_full_raw(const char* prog, void* argv_lis
         return out;
     }
 
-    /* NUL-terminate the captures and hand ownership to the caller,
-     * freeing the empty-heap placeholders first (same #420 v2 contract
-     * the other @heap returns follow). */
-    if (obuf) { obuf[olen] = '\0'; free((void*)out._0); out._0 = obuf; }
-    if (ebuf) { ebuf[elen] = '\0'; free((void*)out._1); out._1 = ebuf; }
+    /* NUL-terminate the captures and hand them to the caller as counted
+     * strings, releasing the empty placeholders (#420 v2). */
+    if (obuf) {
+        obuf[olen] = '\0';
+        string_release(out._0);
+        out._0 = (const char*)string_adopt_caps_buffer(obuf, olen, ocap);
+    }
+    if (ebuf) {
+        ebuf[elen] = '\0';
+        string_release(out._1);
+        out._1 = (const char*)string_adopt_caps_buffer(ebuf, elen, ecap);
+    }
 
     if (WIFEXITED(st))        out._2 = WEXITSTATUS(st);
     else if (WIFSIGNALED(st)) out._2 = 128 + WTERMSIG(st);
@@ -2420,20 +2394,6 @@ static wchar_t* utf8_to_wide(const char* utf8) {
         return NULL;
     }
     return wide;
-}
-
-// UTF-16 → UTF-8. Caller frees. Returns NULL on conversion failure.
-static char* wide_to_utf8(const wchar_t* wide) {
-    if (!wide) return NULL;
-    int len = WideCharToMultiByte(CP_UTF8, 0, wide, -1, NULL, 0, NULL, NULL);
-    if (len <= 0) return NULL;
-    char* utf8 = (char*)malloc((size_t)len);
-    if (!utf8) return NULL;
-    if (WideCharToMultiByte(CP_UTF8, 0, wide, -1, utf8, len, NULL, NULL) <= 0) {
-        free(utf8);
-        return NULL;
-    }
-    return utf8;
 }
 
 // Simple growing wide-string buffer for assembling a command line.
@@ -2918,8 +2878,8 @@ static BOOL win_create_process_inheriting(wchar_t* app, wchar_t* cmdline, DWORD 
 }
 
 // Shared launch path. If `capture_stdout` is non-zero we redirect the
-// child's stdout to a pipe and read it to completion. `out_exit_code`
-// and `out_capture` are optional outputs.
+// child's stdout to a pipe and read it to completion, into a counted
+// string. `out_exit_code` and `out_capture` are optional outputs.
 static int win_launch(const char* prog, void* argv_list, void* env_list,
                       int capture_stdout,
                       int* out_exit_code, char** out_capture) {
@@ -2986,12 +2946,12 @@ static int win_launch(const char* prog, void* argv_list, void* env_list,
         return -1;
     }
 
-    char* capture_buf = NULL;
-    size_t capture_len = 0;
+    char* capture = NULL;
 
     if (capture_stdout) {
         size_t cap = 1024;
-        capture_buf = (char*)malloc(cap);
+        size_t capture_len = 0;
+        char* capture_buf = (char*)aether_caps_malloc(cap);
         if (!capture_buf) {
             CloseHandle(read_pipe);
             CloseHandle(pi.hProcess); CloseHandle(pi.hThread);
@@ -3001,10 +2961,11 @@ static int win_launch(const char* prog, void* argv_list, void* env_list,
         DWORD got = 0;
         while (ReadFile(read_pipe, tmp, sizeof(tmp), &got, NULL) && got > 0) {
             if (capture_len + got + 1 > cap) {
+                size_t old_cap = cap;
                 while (capture_len + got + 1 > cap) cap *= 2;
-                char* bigger = (char*)realloc(capture_buf, cap);
+                char* bigger = (char*)aether_caps_realloc(capture_buf, old_cap, cap);
                 if (!bigger) {
-                    free(capture_buf);
+                    aether_caps_free(capture_buf, old_cap);
                     CloseHandle(read_pipe);
                     CloseHandle(pi.hProcess); CloseHandle(pi.hThread);
                     return -1;
@@ -3016,6 +2977,11 @@ static int win_launch(const char* prog, void* argv_list, void* env_list,
         }
         capture_buf[capture_len] = '\0';
         CloseHandle(read_pipe);
+        capture = (char*)string_adopt_caps_buffer(capture_buf, capture_len, cap);
+        if (!capture) {
+            CloseHandle(pi.hProcess); CloseHandle(pi.hThread);
+            return -1;
+        }
     }
 
     WaitForSingleObject(pi.hProcess, INFINITE);
@@ -3026,8 +2992,8 @@ static int win_launch(const char* prog, void* argv_list, void* env_list,
     CloseHandle(pi.hThread);
 
     if (out_exit_code) *out_exit_code = (int)exit_code;
-    if (out_capture) *out_capture = capture_buf;
-    else free(capture_buf);
+    if (out_capture) *out_capture = capture;
+    else string_release(capture);
 
     return 0;
 }
@@ -3185,16 +3151,21 @@ char* os_getcwd_raw(void) {
     DWORD need = GetCurrentDirectoryW(0, NULL);
     if (need == 0) return NULL;
     /* #462: transient wide-char cwd scratch — alloc'd and freed locally,
-     * sized by the (plugin-influenced) path length. The returned UTF-8
-     * `utf8` stays raw (caller-owned). */
+     * sized by the (plugin-influenced) path length. */
     size_t w_bytes = sizeof(wchar_t) * (size_t)need;
     wchar_t* w = (wchar_t*)aether_caps_malloc(w_bytes);
     if (!w) return NULL;
     DWORD got = GetCurrentDirectoryW(need, w);
     if (got == 0 || got >= need) { aether_caps_free(w, w_bytes); return NULL; }
-    char* utf8 = wide_to_utf8(w);
+    /* `len` counts the NUL, which string_alloc_inline adds itself. */
+    int len = WideCharToMultiByte(CP_UTF8, 0, w, -1, NULL, 0, NULL, NULL);
+    AetherString* out = len > 0 ? string_alloc_inline((size_t)len - 1) : NULL;
+    if (out && WideCharToMultiByte(CP_UTF8, 0, w, -1, out->data, len, NULL, NULL) <= 0) {
+        string_release(out);
+        out = NULL;
+    }
     aether_caps_free(w, w_bytes);
-    return utf8;
+    return (char*)out;
 }
 
 int os_run(const char* prog, void* argv_list, void* env_list) {
@@ -3215,13 +3186,12 @@ char* os_run_capture_raw(const char* prog, void* argv_list, void* env_list) {
     char* capture = NULL;
     int exit_code = 0;
     if (win_launch(prog, argv_list, env_list, 1, &exit_code, &capture) != 0) {
-        free(capture);
         return NULL;
     }
     // Caller conventions: on non-zero exit the POSIX branch still
     // returns the captured stdout so the caller can inspect it.
     (void)exit_code;
-    return capture ? capture : strdup("");
+    return capture;
 }
 
 /* Tuple sibling — exposes exit status. See the POSIX branch for the
@@ -3236,14 +3206,11 @@ _tuple_string_int_string os_run_capture_status_raw(const char* prog, void* argv_
     char* capture = NULL;
     int exit_code = 0;
     if (win_launch(prog, argv_list, env_list, 1, &exit_code, &capture) != 0) {
-        free(capture);
         out._2 = win_launch_error();
         return out;
     }
-    /* Free the empty-heap initializer before overwriting, so the
-     * success path doesn't leak a 1-byte allocation per call. */
-    free((void*)out._0);
-    out._0 = capture ? capture : aether_os_empty_heap();
+    string_release(out._0);
+    out._0 = capture;
     out._1 = exit_code;
     /* err stays "" — Win32 win_launch already returned 0 here, so
      * the spawn itself succeeded. */
@@ -3719,7 +3686,7 @@ static unsigned __stdcall aether_win_drain_thread(void* arg) {
         if (c->len + got + 1 > c->cap) {
             size_t nc = c->cap ? c->cap : 4096;
             while (c->len + got + 1 > nc) nc *= 2;
-            char* b = (char*)realloc(c->buf, nc);
+            char* b = (char*)aether_caps_realloc(c->buf, c->cap, nc);
             if (!b) { c->oom = 1; break; }
             c->buf = b; c->cap = nc;
         }
@@ -3808,11 +3775,19 @@ _tuple_string_string_int_string os_run_full_raw(const char* prog, void* argv_lis
     CloseHandle(pi.hThread); CloseHandle(pi.hProcess);
 
     if (octx.oom || ectx.oom) {
-        free(octx.buf); free(ectx.buf);
+        aether_caps_free(octx.buf, octx.cap); aether_caps_free(ectx.buf, ectx.cap);
         out._3 = "alloc failed"; return out;
     }
-    if (octx.buf) { octx.buf[octx.len] = '\0'; free((void*)out._0); out._0 = octx.buf; }
-    if (ectx.buf) { ectx.buf[ectx.len] = '\0'; free((void*)out._1); out._1 = ectx.buf; }
+    if (octx.buf) {
+        octx.buf[octx.len] = '\0';
+        string_release(out._0);
+        out._0 = (const char*)string_adopt_caps_buffer(octx.buf, octx.len, octx.cap);
+    }
+    if (ectx.buf) {
+        ectx.buf[ectx.len] = '\0';
+        string_release(out._1);
+        out._1 = (const char*)string_adopt_caps_buffer(ectx.buf, ectx.len, ectx.cap);
+    }
     out._2 = (int)code;
     return out;
 }
