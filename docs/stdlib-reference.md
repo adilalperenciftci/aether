@@ -3041,7 +3041,7 @@ spawned child exited 5
 
 **Functions:**
 - `os.run_capture(prog, argv, env)` → `(string, int, string)` - Run to completion: stdout, exit status, error
-- `os.run_full(prog, argv, env, stdin_data)` → `(string, string, int, string)` - Feed `stdin_data` to the child's stdin (binary-safe) and capture stdout and stderr separately: stdout, stderr, exit status, error. No pipe can fill and deadlock, whatever the sizes. `""` gives the child an already-closed stdin
+- `os.run_full(prog, argv, env, stdin_data)` → `(string, string, int, string)` - Feed `stdin_data` to the child's stdin (binary-safe) and capture stdout and stderr separately: stdout, stderr, exit status, error. No pipe can fill and deadlock, whatever the sizes. `""` gives the child an already-closed stdin. Safe to call from several threads at once: each child inherits only its own pipe ends, so a capture never waits for another thread's child (#2917)
 - `os_run(prog, argv, env)` → `int` - Run to completion with this process's stdio; the exit status, or -1 when it could not start
 - `os.spawn_proc(prog, argv, env)` → `(int, string)` - Start without waiting. The first value is a reap token: the pid on POSIX, a handle-table key on Windows, so pass it back to the calls below rather than treating it as a pid. On Windows a token is never a pid: once reaped, `os.kill` and `os.wait_pid_timeout` report it gone rather than reaching whatever process has that number
 - `os.wait(token)` → `(int, string)` - Wait for one child: exit status, error

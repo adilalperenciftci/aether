@@ -1188,12 +1188,43 @@ int os_run(const char* prog, void* argv_list, void* env_list) {
     return -1;
 }
 
+#if defined(__linux__) || defined(__FreeBSD__) || defined(__NetBSD__) || defined(__OpenBSD__) || \
+    defined(__DragonFly__)
+/* Declared here as well: glibc declares it only under _GNU_SOURCE. */
+int pipe2(int pipefd[2], int flags);
+#define AETHER_HAVE_PIPE2 1
+#endif
+
+/* A pipe whose two ends close on exec (#2917). A plain pipe() is copied into
+ * every child that another thread forks while it is open, and that child keeps
+ * the write end across its exec, so a capture reading the pipe waits for EOF
+ * until the unrelated child exits as well. The ends a child keeps are moved
+ * onto its stdio (or fd 3) with aether_child_fd, which clears the flag on the
+ * copy. Where pipe2 is missing (macOS) the flag is set right after pipe(),
+ * which leaves a far narrower window. */
+static int aether_pipe_cloexec(int fds[2]) {
+#ifdef AETHER_HAVE_PIPE2
+    return pipe2(fds, O_CLOEXEC);
+#else
+    if (pipe(fds) != 0) return -1;
+    fcntl(fds[0], F_SETFD, FD_CLOEXEC);
+    fcntl(fds[1], F_SETFD, FD_CLOEXEC);
+    return 0;
+#endif
+}
+
+/* In a forked child: make `fd` the descriptor `target`, open across exec. */
+static int aether_child_fd(int fd, int target) {
+    if (fd == target) return fcntl(target, F_SETFD, 0) == -1 ? -1 : target;
+    return dup2(fd, target);
+}
+
 char* os_run_capture_raw(const char* prog, void* argv_list, void* env_list) {
     if (!prog) return NULL;
     if (!aether_sandbox_check("exec", prog)) return NULL;
 
     int pipefd[2];
-    if (pipe(pipefd) != 0) return NULL;
+    if (aether_pipe_cloexec(pipefd) != 0) return NULL;
 
     char** av = build_argv_array(prog, argv_list);
     if (!av) {
@@ -1215,8 +1246,8 @@ char* os_run_capture_raw(const char* prog, void* argv_list, void* env_list) {
         // Child: redirect stdout to pipe write end, close read end
         aether_child_reset_signals();
         close(pipefd[0]);
-        if (dup2(pipefd[1], 1) < 0) _exit(127);
-        close(pipefd[1]);
+        if (aether_child_fd(pipefd[1], 1) < 0) _exit(127);
+        if (pipefd[1] != 1) close(pipefd[1]);
         if (envp) {
             execve(prog, av, envp);
         } else {
@@ -1309,7 +1340,7 @@ _tuple_string_int_string os_run_capture_status_raw(const char* prog, void* argv_
     }
 
     int pipefd[2];
-    if (pipe(pipefd) != 0) {
+    if (aether_pipe_cloexec(pipefd) != 0) {
         out._2 = "pipe failed";
         return out;
     }
@@ -1335,8 +1366,8 @@ _tuple_string_int_string os_run_capture_status_raw(const char* prog, void* argv_
     if (pid == 0) {
         aether_child_reset_signals();
         close(pipefd[0]);
-        if (dup2(pipefd[1], 1) < 0) _exit(127);
-        close(pipefd[1]);
+        if (aether_child_fd(pipefd[1], 1) < 0) _exit(127);
+        if (pipefd[1] != 1) close(pipefd[1]);
         if (envp) execve(prog, av, envp);
         else      execvp(prog, av);
         _exit(127);
@@ -1480,7 +1511,7 @@ _tuple_int_int_string os_run_pipe_raw(const char* prog, void* argv_list, void* e
     }
 
     int pipefd[2];
-    if (pipe(pipefd) != 0) {
+    if (aether_pipe_cloexec(pipefd) != 0) {
         out._2 = "pipe failed";
         return out;
     }
@@ -1507,7 +1538,7 @@ _tuple_int_int_string os_run_pipe_raw(const char* prog, void* argv_list, void* e
         /* Child — wire pipefd[1] to fd 3 and tell child where it is. */
         aether_child_reset_signals();
         close(pipefd[0]);
-        if (dup2(pipefd[1], 3) < 0) _exit(127);
+        if (aether_child_fd(pipefd[1], 3) < 0) _exit(127);
         /* Close the original write end if dup2 didn't already (it
          * does when pipefd[1] != 3; the conditional close is a
          * defensive no-op when dup2 was a self-dup). */
@@ -2092,12 +2123,12 @@ _tuple_string_string_int_string os_run_full_raw(const char* prog, void* argv_lis
     int in_pipe[2]  = { -1, -1 };
     int out_pipe[2] = { -1, -1 };
     int err_pipe[2] = { -1, -1 };
-    if (pipe(in_pipe) != 0) { out._3 = "pipe failed"; return out; }
-    if (pipe(out_pipe) != 0) {
+    if (aether_pipe_cloexec(in_pipe) != 0) { out._3 = "pipe failed"; return out; }
+    if (aether_pipe_cloexec(out_pipe) != 0) {
         close(in_pipe[0]); close(in_pipe[1]);
         out._3 = "pipe failed"; return out;
     }
-    if (pipe(err_pipe) != 0) {
+    if (aether_pipe_cloexec(err_pipe) != 0) {
         close(in_pipe[0]); close(in_pipe[1]);
         close(out_pipe[0]); close(out_pipe[1]);
         out._3 = "pipe failed"; return out;
@@ -2124,10 +2155,12 @@ _tuple_string_string_int_string os_run_full_raw(const char* prog, void* argv_lis
         /* Child: wire stdin/stdout/stderr to the pipes, close the rest. */
         aether_child_reset_signals();
         close(in_pipe[1]); close(out_pipe[0]); close(err_pipe[0]);
-        if (dup2(in_pipe[0], 0) < 0)  _exit(127);
-        if (dup2(out_pipe[1], 1) < 0) _exit(127);
-        if (dup2(err_pipe[1], 2) < 0) _exit(127);
-        close(in_pipe[0]); close(out_pipe[1]); close(err_pipe[1]);
+        if (aether_child_fd(in_pipe[0], 0) < 0)  _exit(127);
+        if (aether_child_fd(out_pipe[1], 1) < 0) _exit(127);
+        if (aether_child_fd(err_pipe[1], 2) < 0) _exit(127);
+        if (in_pipe[0] != 0) close(in_pipe[0]);
+        if (out_pipe[1] != 1) close(out_pipe[1]);
+        if (err_pipe[1] != 2) close(err_pipe[1]);
         if (envp) execve(prog, av, envp);
         else      execvp(prog, av);
         _exit(127);
@@ -2714,6 +2747,55 @@ static wchar_t* win_prepare_launch(const char* prog, void* argv_list, wchar_t** 
     return b.data;
 }
 
+/* CreateProcessW for a child that inherits exactly `handles` and nothing else
+ * (#2917). bInheritHandles = TRUE alone hands the child every inheritable
+ * handle the process holds at that moment: a pipe end another thread has
+ * just made for its own child is one, and the capture reading that pipe
+ * then waits for EOF until this unrelated child exits too.
+ * PROC_THREAD_ATTRIBUTE_HANDLE_LIST names the handles to pass. Handles that
+ * are NULL, invalid, not inheritable or repeated are left out (the list
+ * refuses them); with none left the child inherits nothing. */
+static BOOL win_create_process_inheriting(wchar_t* app, wchar_t* cmdline, DWORD flags, void* wenv,
+                                          STARTUPINFOW* si, const HANDLE* handles, int n,
+                                          PROCESS_INFORMATION* pi) {
+    HANDLE list[8];
+    int m = 0;
+    for (int i = 0; i < n && m < (int)(sizeof list / sizeof list[0]); i++) {
+        HANDLE h = handles[i];
+        DWORD info = 0;
+        if (!h || h == INVALID_HANDLE_VALUE) continue;
+        if (!GetHandleInformation(h, &info) || !(info & HANDLE_FLAG_INHERIT)) continue;
+        int seen = 0;
+        for (int j = 0; j < m; j++) if (list[j] == h) seen = 1;
+        if (!seen) list[m++] = h;
+    }
+    if (m == 0) {
+        return CreateProcessW(app, cmdline, NULL, NULL, FALSE, flags, wenv, NULL, si, pi);
+    }
+    SIZE_T size = 0;
+    InitializeProcThreadAttributeList(NULL, 1, 0, &size);
+    LPPROC_THREAD_ATTRIBUTE_LIST attrs = (LPPROC_THREAD_ATTRIBUTE_LIST)malloc(size);
+    if (!attrs) return FALSE;
+    if (!InitializeProcThreadAttributeList(attrs, 1, 0, &size)) {
+        free(attrs);
+        return FALSE;
+    }
+    BOOL ok = UpdateProcThreadAttribute(attrs, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
+                                        list, (SIZE_T)m * sizeof(HANDLE), NULL, NULL);
+    if (ok) {
+        STARTUPINFOEXW six;
+        memset(&six, 0, sizeof six);
+        six.StartupInfo = *si;
+        six.StartupInfo.cb = sizeof six;
+        six.lpAttributeList = attrs;
+        ok = CreateProcessW(app, cmdline, NULL, NULL, TRUE, flags | EXTENDED_STARTUPINFO_PRESENT,
+                            wenv, NULL, &six.StartupInfo, pi);
+    }
+    DeleteProcThreadAttributeList(attrs);
+    free(attrs);
+    return ok;
+}
+
 // Shared launch path. If `capture_stdout` is non-zero we redirect the
 // child's stdout to a pipe and read it to completion. `out_exit_code`
 // and `out_capture` are optional outputs.
@@ -2762,17 +2844,12 @@ static int win_launch(const char* prog, void* argv_list, void* env_list,
     DWORD flags = CREATE_UNICODE_ENVIRONMENT;
     /* The absolute program win_prepare_launch resolved (#2171): a bare name
      * handed to lpApplicationName would be a literal file in the CWD (#706),
-     * and NULL let CreateProcessW search the CWD before PATH. */
-    BOOL ok = CreateProcessW(
-        app,           // absolute program: nothing left for Win32 to search
-        cmdline,       // command line (modifiable — CreateProcessW may write)
-        NULL, NULL,
-        capture_stdout ? TRUE : FALSE,  // inherit handles only when capturing
-        flags,
-        wenv,          // NULL = inherit parent env
-        NULL,          // CWD = current
-        &si,
-        &pi);
+     * and NULL let CreateProcessW search the CWD before PATH. When capturing,
+     * the child inherits its own stdio and nothing else (#2917); otherwise
+     * nothing. wenv NULL inherits the parent's environment. */
+    HANDLE inherit[3] = { si.hStdInput, write_pipe, si.hStdError };
+    BOOL ok = win_create_process_inheriting(app, cmdline, flags, wenv, &si,
+                                            inherit, capture_stdout ? 3 : 0, &pi);
 
     free(app);
     free(cmdline);
@@ -3455,9 +3532,11 @@ _tuple_string_string_int_string os_run_full_raw(const char* prog, void* argv_lis
     si.hStdError  = err_w;
     PROCESS_INFORMATION pi; memset(&pi, 0, sizeof pi);
 
-    /* The resolved absolute program, as in win_launch (#2171). */
-    BOOL ok = CreateProcessW(app, cmdline, NULL, NULL, TRUE,
-                             CREATE_UNICODE_ENVIRONMENT, wenv, NULL, &si, &pi);
+    /* The resolved absolute program, as in win_launch (#2171). The child
+     * inherits its three pipe ends and nothing else (#2917). */
+    HANDLE inherit[3] = { in_r, out_w, err_w };
+    BOOL ok = win_create_process_inheriting(app, cmdline, CREATE_UNICODE_ENVIRONMENT, wenv,
+                                            &si, inherit, 3, &pi);
     free(app); free(cmdline); free(wenv);
     /* Close the child-side ends in the parent so EOF propagates correctly. */
     CloseHandle(in_r); CloseHandle(out_w); CloseHandle(err_w);
