@@ -1,6 +1,6 @@
 # One ownership model
 
-Status: proposal for sign-off. Nothing here is implemented yet.
+Status: approved by the owner on 2026-10-14, with the recommended answers below. Stage 1 is in progress; nothing else is implemented yet.
 
 ## Why this exists
 
