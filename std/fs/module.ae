@@ -107,7 +107,7 @@ const KIND_UNAVAILABLE = 99 // platform feature compiled out (reserved for follo
 // File operations - raw externs
 extern file_open_raw(path: string, mode: string) -> ptr
 extern file_close(file: ptr) -> int
-extern file_read_all_raw(file: ptr) -> string
+extern file_read_all_raw(file: ptr) -> string @heap
 extern file_write_raw(file: ptr, data: string, length: int) -> int
 extern file_exists(path: string) -> int
 // Path-agnostic existence check: 1 if anything is at `path`
@@ -154,7 +154,7 @@ extern fs_mkdir_p_raw(path: string) -> int
 //                      Windows stores its separators as backslashes.
 //   fs_readlink_raw:   read a symlink's target (on Windows, a junction's too).
 //                      Returns null if not a link.
-//                      `@heap`: a fresh strdup'd string the tracker frees.
+//                      `@heap`: a fresh counted string the tracker frees.
 //   fs_is_symlink:     does NOT follow; returns 1 only for the link itself.
 //                      On Windows a junction counts: it redirects resolution
 //                      exactly as a symlink does (any name-surrogate reparse
@@ -166,8 +166,8 @@ extern fs_symlink_raw(target: string, link_path: string) -> int
 //                      same filesystem, files only. 1 on success.
 extern fs_hard_link_raw(target: string, link_path: string) -> int
 extern fs_readlink_raw(path: string) -> string @heap
-// Both return a fresh strdup'd path (or null). `@heap` so the heap-tracker
-// frees the C allocation — without it the returned path leaks (caught by the
+// Both return a fresh counted path (or null). `@heap` so the heap-tracker
+// frees it — without it the returned path leaks (caught by the
 // macOS leaks gate).
 extern fs_make_temp_dir_raw(dir: string, prefix: string) -> string @heap
 extern fs_make_temp_file_raw(dir: string, prefix: string) -> string @heap
@@ -322,13 +322,13 @@ extern fs_move_raw(src: string, dst: string) -> (int, int, string)
 // remove ./.. components). Returns (resolved_path, KIND_OK, "") on
 // success, ("", KIND_*, msg) on failure.
 //
-// Position 0 (resolved_path) is `@heap`: realpath(3) on POSIX
-// allocates a fresh buffer (POSIX.1-2008 extension); on Windows
-// the GetFinalPathNameByHandleW result is converted to UTF-8 via
-// a fresh malloc. The destructured LHS owns the buffer; the
-// heap-string-tracker frees it at function exit (or on
-// reassignment). Position 2 (msg) stays default-borrow — error
-// message is a static string literal in the C source.
+// Position 0 (resolved_path) is `@heap`: a fresh counted string on
+// every path, the empty one on failure (realpath(3) on POSIX, the
+// GetFinalPathNameByHandleW result in UTF-8 on Windows). The
+// destructured LHS owns it; the heap-string-tracker frees it at
+// function exit (or on reassignment). Position 2 (msg) stays
+// default-borrow — error message is a static string literal in
+// the C source.
 //
 // Audited callers: only `fs.realpath` (the Aether wrapper below)
 // passes the tuple through; no manual string.release on the
@@ -352,16 +352,16 @@ extern dir_list_kind(list: ptr, index: int) -> int
 extern dir_list_free(list: ptr)
 
 // Path utilities - pure functions, never fail
-extern path_join(path1: string, path2: string) -> string
-extern path_dirname(path: string) -> string
-extern path_basename(path: string) -> string
-extern path_extension(path: string) -> string
+extern path_join(path1: string, path2: string) -> string @heap
+extern path_dirname(path: string) -> string @heap
+extern path_basename(path: string) -> string @heap
+extern path_extension(path: string) -> string @heap
 extern path_is_absolute(path: string) -> int
 
 // Lexical path ops (#632). Pure-string; never touch the filesystem.
-extern path_clean(path: string) -> string
+extern path_clean(path: string) -> string @heap
 extern path_is_within_base(base: string, target: string) -> int
-extern path_rel(base: string, target: string) -> string
+extern path_rel(base: string, target: string) -> string @heap
 // Platform path separator ("/" POSIX, "\\" Windows) — #1369.
 extern path_separator() -> string
 
@@ -400,10 +400,10 @@ extern fs_watch_close(watch: ptr)
 // string_concat used for duplicating borrowed strings. strlen-based —
 // do NOT use for binary payloads (it truncates at the first embedded
 // NUL). Length-aware reads use string_new_with_length.
-extern string_concat(a: string, b: string) -> string
+extern string_concat(a: string, b: string) -> string @heap
 extern string_length(str: string) -> int
 extern string_char_at(str: string, index: int) -> int
-extern string_substring(str: string, start: int, end: int) -> string
+extern string_substring(str: string, start: int, end: int) -> string @heap
 
 // Length-preserving string constructor. Takes an explicit byte count
 // so binary payloads with embedded NULs survive the copy. Returns a

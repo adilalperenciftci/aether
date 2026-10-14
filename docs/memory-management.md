@@ -456,7 +456,8 @@ extern get_pair(s: string)        -> (string @heap, string @borrow)
 ### Stdlib externs annotated `@heap`
 
 `@heap` is used across several stdlib externs, it appears today in `std.bytes`,
-`std.io`, `std.regex`, `std.os`, `std.fs`, and `std.strbuilder`. Each is audited
+`std.io`, `std.regex`, `std.os`, `std.fs`, `std.file`, `std.path`, `std.string`
+and `std.strbuilder`. Each is audited
 and annotated so that its return (whether a single `string @heap` or an `@heap`
 tuple position) auto-frees at function exit; you do **not** need to call
 `string.release` on the resulting strings. Representative carriers:
@@ -466,7 +467,7 @@ tuple position) auto-frees at function exit; you do **not** need to call
 | `bytes.finish` (`aether_bytes_finish`) | result string | length-aware AetherString constructor |
 | `strbuilder.finish` (`aether_strbuilder_finish`) | result string | caller owns the assembled buffer |
 | `regex.replace` / `regex.replace_all` / capture get | result string | fresh malloc per call |
-| `fs.realpath` (`fs_realpath_raw`) | resolved path | POSIX `realpath(NULL)` / Windows `GetFinalPathNameByHandleW` + UTF-8 malloc |
+| `fs.realpath` (`fs_realpath_raw`) | resolved path | counted copy of POSIX `realpath(NULL)` / Windows `GetFinalPathNameByHandleW` in UTF-8 |
 | `fs.read_binary` (`fs_read_binary_tuple`) | bytes | fresh buffer |
 | `io.fd_read_n` / `io.fd_read_line` (tuple) | read buffer | fresh buffer per read |
 | `os.run_capture_status` (`os_run_capture_status_raw`) | captured stdout | realloc-grown buffer |

@@ -95,7 +95,7 @@ _tuple_int_int_string fs_chmod_raw(const char* p, int m) {
 typedef struct { const char* _0; int _1; const char* _2; } _tuple_string_int_string;
 _tuple_string_int_string fs_realpath_raw(const char* p) {
     (void)p;
-    _tuple_string_int_string out = { "", AETHER_FS_KIND_UNAVAILABLE, "fs unavailable" };
+    _tuple_string_int_string out = { (const char*)string_empty(), AETHER_FS_KIND_UNAVAILABLE, "fs unavailable" };
     return out;
 }
 char* path_join(const char* a, const char* b) { (void)a; (void)b; return NULL; }
@@ -773,8 +773,8 @@ int fs_hard_link_raw(const char* target, const char* link_path) {
     return link(target, link_path) == 0 ? 1 : 0;
 }
 
-// Read a symbolic link. Returns the target as a heap-allocated string,
-// or NULL if `path` isn't a symlink or can't be read.
+// Read a symbolic link. Returns the target as a counted string the caller
+// owns, or NULL if `path` isn't a symlink or can't be read.
 char* fs_readlink_raw(const char* path) {
     if (!path) return NULL;
     if (!aether_sandbox_check("fs_read", path)) return NULL;
@@ -782,13 +782,12 @@ char* fs_readlink_raw(const char* path) {
     char buf[4096];
     ssize_t n = readlink(path, buf, sizeof(buf) - 1);
     if (n < 0) return NULL;
-    buf[n] = '\0';
-    return strdup(buf);
+    return (char*)string_new_with_length(buf, (size_t)n);
 }
 
 /* Create a uniquely-named temp DIRECTORY under `dir` whose name starts with
  * `prefix`, atomically (mkdtemp — no TOCTOU race). Returns the created path
- * (strdup'd, caller frees) or NULL on failure. */
+ * (a counted string the caller owns) or NULL on failure. */
 char* fs_make_temp_dir_raw(const char* dir, const char* prefix) {
     if (!dir) dir = "/tmp";
     if (!prefix) prefix = "ae";
@@ -805,14 +804,15 @@ char* fs_make_temp_dir_raw(const char* dir, const char* prefix) {
     int w = snprintf(tmpl, sizeof(tmpl), "%s/%sXXXXXX", dir, prefix);
     if (w <= 0 || (size_t)w >= sizeof(tmpl)) return NULL;
     if (mkdtemp(tmpl) == NULL) return NULL;
-    return strdup(tmpl);
+    return (char*)string_new_with_length(tmpl, (size_t)w);
 #endif
 }
 
 /* Create a uniquely-named temp FILE under `dir` whose name starts with
  * `prefix`, atomically (mkstemp — creates + opens O_EXCL, no race). Returns
- * the created path (strdup'd, caller frees) or NULL on failure. The fd is
- * closed here — the caller writes via the returned path, matching mktemp(1). */
+ * the created path (a counted string the caller owns) or NULL on failure.
+ * The fd is closed here — the caller writes via the returned path, matching
+ * mktemp(1). */
 char* fs_make_temp_file_raw(const char* dir, const char* prefix) {
     if (!dir) dir = "/tmp";
     if (!prefix) prefix = "ae";
@@ -828,7 +828,7 @@ char* fs_make_temp_file_raw(const char* dir, const char* prefix) {
     int fd = mkstemp(tmpl);
     if (fd < 0) return NULL;
     close(fd);
-    return strdup(tmpl);
+    return (char*)string_new_with_length(tmpl, (size_t)w);
 #endif
 }
 
@@ -981,7 +981,7 @@ int fs_symlink_raw(const char* target, const char* link_path) {
  * itself (FILE_FLAG_OPEN_REPARSE_POINT, so the link is opened and not
  * what it points at). The print name is the target as it was given;
  * when a link carries none, the substitute name is used with its `\??\`
- * NT prefix taken off. Returns a fresh malloc'd UTF-8 string, or NULL when
+ * NT prefix taken off. Returns a counted UTF-8 string, or NULL when
  * `path` is not a symlink or cannot be read — the POSIX contract. */
 char* fs_readlink_raw(const char* path) {
     if (!path) return NULL;
@@ -1001,7 +1001,7 @@ char* fs_readlink_raw(const char* path) {
     DWORD got = 0;
     BOOL ok = DeviceIoControl(h, FSCTL_GET_REPARSE_POINT, NULL, 0, rp, (DWORD)buf_bytes, &got, NULL);
     CloseHandle(h);
-    char* out = NULL;
+    AetherString* out = NULL;
     /* A junction's buffer is the symlink layout without the Flags word, so
      * its path buffer starts where Flags would be. */
     const WCHAR* pb = NULL;
@@ -1020,15 +1020,12 @@ char* fs_readlink_raw(const char* path) {
         }
         int u8_len = WideCharToMultiByte(CP_UTF8, 0, name, len, NULL, 0, NULL, NULL);
         if (u8_len >= 0) {
-            out = (char*)malloc((size_t)u8_len + 1);
-            if (out) {
-                WideCharToMultiByte(CP_UTF8, 0, name, len, out, u8_len, NULL, NULL);
-                out[u8_len] = '\0';
-            }
+            out = string_alloc_inline((size_t)u8_len);
+            if (out) WideCharToMultiByte(CP_UTF8, 0, name, len, out->data, u8_len, NULL, NULL);
         }
     }
     aether_caps_free(rp, buf_bytes);
-    return out;
+    return (char*)out;
 }
 
 /* Windows has no mkdtemp/mkstemp. GetTempFileNameA(dir, prefix, 0, out) is the
@@ -1052,7 +1049,7 @@ char* fs_make_temp_dir_raw(const char* dir, const char* prefix) {
         char out[MAX_PATH];
         if (GetTempFileNameA(dir, prefix, 0, out) == 0) return NULL;
         DeleteFileA(out);
-        if (_mkdir(out) == 0) return strdup(out);
+        if (_mkdir(out) == 0) return (char*)string_new(out);
         /* name got taken between delete and mkdir — try a fresh one */
     }
     return NULL;
@@ -1064,7 +1061,7 @@ char* fs_make_temp_file_raw(const char* dir, const char* prefix) {
     char out[MAX_PATH];
     /* uUnique=0 => the file is created here, atomically; mktemp(1)'s contract. */
     if (GetTempFileNameA(dir, prefix, 0, out) == 0) return NULL;
-    return strdup(out);
+    return (char*)string_new(out);
 }
 /* 1 when `path` is a link itself, not what it points at: the directory
  * entry's reparse tag says so without opening anything. A link here is any
@@ -2497,36 +2494,25 @@ _tuple_int_int_string fs_move_raw(const char* src, const char* dst) {
 #endif
 }
 
-/* Tuple ABI for (string, int, string) returns. _0 is a heap-allocated
+/* Tuple ABI for (string, int, string) returns. _0 is a counted
  * resolved-path string the caller (Aether runtime) takes ownership of;
  * _1 is the kind; _2 is a string literal — never freed. Mirrors the
  * shape used by std/os/aether_os.c's _tuple_string_int_string. */
 typedef struct {
-    const char* _0;    // resolved path (heap, runtime owns) or "" on failure
+    const char* _0;    // resolved path (counted, runtime owns), empty on failure
     int _1;            // AETHER_FS_KIND_*
     const char* _2;    // "" on success, error message on failure
 } _tuple_string_int_string;
 
-/* Position-0 sentinel for error returns. The extern is annotated
- * `(string @heap, int, string)` so the caller-side heap-string-
- * tracker auto-frees position 0 on function exit. Returning a
- * static literal `""` would surface as `free((void*)"")` and
- * abort under glibc / dyld. Allocate a fresh 1-byte buffer so
- * the @heap contract holds uniformly across success and error
- * paths; callers comparing `resolved == ""` continue to match
- * via the AetherString-aware string compare (string_equals walks
- * the bytes regardless of allocation origin). */
-static char* aether_fs_sks_empty_heap(void) {
-    char* p = (char*)malloc(1);
-    if (p) p[0] = '\0';
-    return p;
-}
+/* The extern is annotated `(string @heap, int, string)`, so position 0
+ * is released by the caller on every path: an error returns a fresh
+ * empty string, never a literal. */
 static _tuple_string_int_string aether_fs_sks_err(int kind, const char* msg) {
-    _tuple_string_int_string out = { aether_fs_sks_empty_heap(), kind, msg };
+    _tuple_string_int_string out = { (const char*)string_empty(), kind, msg };
     return out;
 }
-static _tuple_string_int_string aether_fs_sks_ok(const char* resolved) {
-    _tuple_string_int_string out = { resolved, aether_fs_errno_to_kind(0), "" };
+static _tuple_string_int_string aether_fs_sks_ok(AetherString* resolved) {
+    _tuple_string_int_string out = { (const char*)resolved, aether_fs_errno_to_kind(0), "" };
     return out;
 }
 
@@ -2555,9 +2541,7 @@ _tuple_string_int_string fs_realpath_raw(const char* path) {
         return aether_fs_sks_err(AETHER_FS_KIND_INVALID, "path UTF-8 invalid");
     }
     /* #462: transient UTF-8 → UTF-16 path scratch — alloc'd and freed
-     * locally, sized by the (plugin-supplied) path length. The eventual
-     * UTF-8 result `u8` below stays raw because it escapes as the
-     * caller-owned path string (PR #845 returned-string contract). */
+     * locally, sized by the (plugin-supplied) path length. */
     size_t wpath_bytes = (size_t)wpath_len * sizeof(wchar_t);
     wchar_t* wpath = (wchar_t*)aether_caps_malloc(wpath_bytes);
     if (!wpath) {
@@ -2594,7 +2578,7 @@ _tuple_string_int_string fs_realpath_raw(const char* path) {
         return aether_fs_sks_err(AETHER_FS_KIND_IO, "GetFinalPathNameByHandleW failed");
     }
     /* #462: transient wide-char result buffer — freed locally on every
-     * path; only the UTF-8 `u8` conversion below escapes (stays raw). */
+     * path; only the UTF-8 conversion below escapes. */
     size_t wresult_bytes = (size_t)need * sizeof(wchar_t);
     wchar_t* wresult = (wchar_t*)aether_caps_malloc(wresult_bytes);
     if (!wresult) {
@@ -2623,15 +2607,13 @@ _tuple_string_int_string fs_realpath_raw(const char* path) {
         aether_caps_free(wresult, wresult_bytes);
         return aether_fs_sks_err(AETHER_FS_KIND_IO, "UTF-16 → UTF-8 failed");
     }
-    /* RAW BY DESIGN (PR #845): `u8` is the resolved-path result handed
-     * back to Aether and freed by the heap-string machinery, not by
-     * aether_caps_free. Cap-accounting it would drift the counter. */
-    char* u8 = (char*)malloc((size_t)u8_len);
+    /* u8_len counts the terminator, which string_alloc_inline writes. */
+    AetherString* u8 = string_alloc_inline((size_t)u8_len - 1);
     if (!u8) {
         aether_caps_free(wresult, wresult_bytes);
         return aether_fs_sks_err(AETHER_FS_KIND_IO, "allocation failed");
     }
-    WideCharToMultiByte(CP_UTF8, 0, wstart, -1, u8, u8_len, NULL, NULL);
+    WideCharToMultiByte(CP_UTF8, 0, wstart, -1, u8->data, u8_len, NULL, NULL);
     aether_caps_free(wresult, wresult_bytes);
     return aether_fs_sks_ok(u8);
 #else
@@ -2646,7 +2628,10 @@ _tuple_string_int_string fs_realpath_raw(const char* path) {
         else if (kind == AETHER_FS_KIND_PERMISSION_DENIED) msg = "access denied";
         return aether_fs_sks_err(kind, msg);
     }
-    return aether_fs_sks_ok(resolved);
+    AetherString* out = string_new(resolved);
+    free(resolved);
+    if (!out) return aether_fs_sks_err(AETHER_FS_KIND_IO, "allocation failed");
+    return aether_fs_sks_ok(out);
 #endif
 }
 
@@ -2737,17 +2722,13 @@ char* path_join(const char* path1, const char* path2) {
     int needs_sep = (len1 > 0 && path1[len1-1] != '/' && path1[len1-1] != '\\');
     size_t total = len1 + len2 + (needs_sep ? 1 : 0);
 
-    char* result = (char*)malloc(total + 1);
+    AetherString* result = string_alloc_inline(total);
     if (!result) return NULL;
-    strcpy(result, path1);
-    if (needs_sep) {
-        result[len1] = sep;
-        strcpy(result + len1 + 1, path2);
-    } else {
-        strcpy(result + len1, path2);
-    }
+    memcpy(result->data, path1, len1);
+    if (needs_sep) result->data[len1] = sep;
+    memcpy(result->data + len1 + (needs_sep ? 1 : 0), path2, len2);
 
-    return result;
+    return (char*)result;
 }
 
 char* path_dirname(const char* path) {
@@ -2761,18 +2742,13 @@ char* path_dirname(const char* path) {
     }
 
     if (!last_sep) {
-        return strdup(".");
+        return (char*)string_new_with_length(".", 1);
     }
 
     size_t len = last_sep - path;
     if (len == 0) len = 1;  // Root directory
 
-    char* result = (char*)malloc(len + 1);
-    if (!result) return NULL;
-    memcpy(result, path, len);
-    result[len] = '\0';
-
-    return result;
+    return (char*)string_new_with_length(path, len);
 }
 
 char* path_basename(const char* path) {
@@ -2786,7 +2762,7 @@ char* path_basename(const char* path) {
     }
 
     const char* base = last_sep ? last_sep + 1 : path;
-    return strdup(base);
+    return (char*)string_new(base);
 }
 
 char* path_extension(const char* path) {
@@ -2801,10 +2777,10 @@ char* path_extension(const char* path) {
     }
 
     if (!last_dot || (last_sep && last_dot < last_sep)) {
-        return strdup("");
+        return (char*)string_empty();
     }
 
-    return strdup(last_dot);
+    return (char*)string_new(last_dot);
 }
 
 int path_is_absolute(const char* path) {
@@ -3371,13 +3347,13 @@ DirList* fs_glob_multi_raw(void* pattern_list) {
 
 /* Walks `path` segment-by-segment using a stack of (start, len) pairs
  * into `path`. Tracks how many leading `..` we couldn't resolve
- * (relative paths only). Reconstructs into a freshly-malloc'd
- * NUL-terminated string the caller frees. */
-char* path_clean(const char* path) {
-    if (!path) return strdup(".");
+ * (relative paths only). Reconstructs into a fresh counted string the
+ * caller owns. */
+static AetherString* path_clean_str(const char* path) {
+    if (!path) return string_new_with_length(".", 1);
 
     size_t in_len = strlen(path);
-    if (in_len == 0) return strdup(".");
+    if (in_len == 0) return string_new_with_length(".", 1);
 
     /* #1369: a Windows volume prefix ("C:", "\\server\share") is not a
      * segment and must be copied through untouched; rootedness is then the
@@ -3439,22 +3415,17 @@ char* path_clean(const char* path) {
     /* Nothing left: the volume root if rooted, else "." (kept after a volume,
      * so "C:" cleans to "C:.", a drive-relative current directory). */
     if (sp == 0) {
-        char* empty = (char*)malloc(vol + 2);
+        AetherString* empty = string_alloc_inline(vol + 1);
         if (!empty) { aether_caps_free(stk, stk_bytes); return NULL; }
-        memcpy(empty, path, vol);
-        if (rooted) {
-            empty[vol] = PATH_SEP_CHAR;
-            empty[vol + 1] = '\0';
-        } else {
-            empty[vol] = '.';
-            empty[vol + 1] = '\0';
-        }
+        memcpy(empty->data, path, vol);
+        empty->data[vol] = rooted ? PATH_SEP_CHAR : '.';
         aether_caps_free(stk, stk_bytes);
         return empty;
     }
 
-    char* out = (char*)malloc(total + 1);
-    if (!out) { aether_caps_free(stk, stk_bytes); return NULL; }
+    AetherString* res = string_alloc_inline(total);
+    if (!res) { aether_caps_free(stk, stk_bytes); return NULL; }
+    char* out = res->data;
     size_t o = 0;
     memcpy(out, path, vol);
     o += vol;
@@ -3464,9 +3435,12 @@ char* path_clean(const char* path) {
         memcpy(out + o, path + stk[k].start, stk[k].len);
         o += stk[k].len;
     }
-    out[o] = '\0';
     aether_caps_free(stk, stk_bytes);
-    return out;
+    return res;
+}
+
+char* path_clean(const char* path) {
+    return (char*)path_clean_str(path);
 }
 
 /* Lexical containment: does the cleaned `target` lie within cleaned
@@ -3487,11 +3461,13 @@ char* path_clean(const char* path) {
  */
 int path_is_within_base(const char* base, const char* target) {
     if (!base || !target) return 0;
-    char* cb = path_clean(base);
-    char* ct = path_clean(target);
-    if (!cb || !ct) { free(cb); free(ct); return 0; }
-    size_t bl = strlen(cb);
-    size_t tl = strlen(ct);
+    AetherString* cbs = path_clean_str(base);
+    AetherString* cts = path_clean_str(target);
+    if (!cbs || !cts) { string_release(cbs); string_release(cts); return 0; }
+    const char* cb = cbs->data;
+    const char* ct = cts->data;
+    size_t bl = cbs->length;
+    size_t tl = cts->length;
 
     /* #1369: compare with the platform's separator and case rules. Byte
      * comparison against a hardcoded '/' let a backslash path slip past the
@@ -3508,8 +3484,8 @@ int path_is_within_base(const char* base, const char* target) {
     } else if (tl > bl && path_span_equal(cb, ct, bl) && path_is_sep(ct[bl])) {
         within = 1;
     }
-    free(cb);
-    free(ct);
+    string_release(cbs);
+    string_release(cts);
     return within;
 }
 
@@ -3517,7 +3493,7 @@ int path_is_within_base(const char* base, const char* target) {
  * target?" Matches Go filepath.Rel: returns a path that, joined onto
  * base and cleaned, equals target.
  *
- * Returns a caller-frees string on success, NULL when there's no
+ * Returns a counted string the caller owns on success, NULL when there's no
  * relative path (one is absolute and the other isn't, or target is
  * outside base on Windows-style drive boundaries — not a concern on
  * POSIX). For POSIX:
@@ -3532,22 +3508,24 @@ int path_is_within_base(const char* base, const char* target) {
  */
 char* path_rel(const char* base, const char* target) {
     if (!base || !target) return NULL;
-    char* cb = path_clean(base);
-    char* ct = path_clean(target);
-    if (!cb || !ct) { free(cb); free(ct); return NULL; }
-    size_t bl = strlen(cb);
-    size_t tl = strlen(ct);
+    AetherString* cbs = path_clean_str(base);
+    AetherString* cts = path_clean_str(target);
+    if (!cbs || !cts) { string_release(cbs); string_release(cts); return NULL; }
+    const char* cb = cbs->data;
+    const char* ct = cts->data;
+    size_t bl = cbs->length;
+    size_t tl = cts->length;
     /* #1369: a relative path between different volumes does not exist, and
      * mixing absolute with relative has no answer either. */
     size_t bvol = path_volume_len(cb, bl);
     size_t tvol = path_volume_len(ct, tl);
     if (bvol != tvol || !path_span_equal(cb, ct, bvol)) {
-        free(cb); free(ct); return NULL;
+        string_release(cbs); string_release(cts); return NULL;
     }
     int b_root = (bvol < bl && path_is_sep(cb[bvol]));
     int t_root = (tvol < tl && path_is_sep(ct[tvol]));
     if (b_root != t_root) {
-        free(cb); free(ct); return NULL;
+        string_release(cbs); string_release(cts); return NULL;
     }
     /* Find shared-prefix segments. */
     size_t bi = b_root ? bvol + 1 : bvol;
@@ -3584,15 +3562,15 @@ char* path_rel(const char* base, const char* target) {
             up++;
             while (p < bl && !path_is_sep(cb[p])) p++;
             if (p - seg == 2 && cb[seg] == '.' && cb[seg + 1] == '.') {
-                free(cb); free(ct); return NULL;
+                string_release(cbs); string_release(cts); return NULL;
             }
             if (p < bl) p++;
         }
     }
     /* Build output: up * "../" + (target remainder). */
     size_t out_cap = up * 3 + (tl - ti) + 2;
-    char* out = (char*)malloc(out_cap);
-    if (!out) { free(cb); free(ct); return NULL; }
+    char* out = (char*)aether_caps_malloc(out_cap);
+    if (!out) { string_release(cbs); string_release(cts); return NULL; }
     size_t o = 0;
     for (size_t u = 0; u < up; u++) {
         out[o++] = '.';
@@ -3607,9 +3585,9 @@ char* path_rel(const char* base, const char* target) {
         out[o++] = '.';
     }
     out[o] = '\0';
-    free(cb);
-    free(ct);
-    return out;
+    string_release(cbs);
+    string_release(cts);
+    return (char*)string_adopt_caps_buffer(out, o, out_cap);
 }
 
 // ============================================================

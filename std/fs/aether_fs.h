@@ -75,9 +75,10 @@ int fs_mkdir_p_raw(const char* path);
 //                 exists). `target` is recorded verbatim — NOT resolved
 //                 at create time, so a relative target stays relative.
 //
-// fs_readlink_raw: read a symlink. Returns a heap-allocated string
-//                  containing the link target, or NULL if `path` is not
-//                  a symlink (or cannot be read). Caller frees. Windows
+// fs_readlink_raw: read a symlink. Returns a counted AetherString
+//                  holding the link target, or NULL if `path` is not
+//                  a symlink (or cannot be read). Caller releases it
+//                  with string_release. Windows
 //                  reads the link's own reparse data; a junction is not
 //                  a symlink.
 //
@@ -100,7 +101,8 @@ char* fs_readlink_raw(const char* path);
 
 // Atomically create a uniquely-named temp dir / file under `dir` with name
 // starting `prefix` (mkdtemp / mkstemp — no TOCTOU race). Returns the created
-// path (caller frees) or NULL on failure. NULL dir → "/tmp", NULL prefix → "ae".
+// path as a counted AetherString (caller releases it with string_release) or
+// NULL on failure. NULL dir → "/tmp", NULL prefix → "ae".
 char* fs_make_temp_dir_raw(const char* dir, const char* prefix);
 char* fs_make_temp_file_raw(const char* dir, const char* prefix);
 int   fs_is_symlink(const char* path);
@@ -214,7 +216,8 @@ void  fs_release_read_binary(void);
  * is). The saturation contract is documented at each implementation
  * site in std/fs/aether_fs.c. */
 
-// Path operations
+// Path operations. Each returns a counted AetherString the caller releases
+// with string_release (NULL on a NULL argument or allocation failure).
 char* path_join(const char* path1, const char* path2);
 char* path_dirname(const char* path);
 char* path_basename(const char* path);
@@ -222,6 +225,8 @@ char* path_extension(const char* path);
 int path_is_absolute(const char* path);
 
 // Lexical path ops (#632). Pure-string; never touch the filesystem.
+// path_clean and path_rel return a counted AetherString the caller
+// releases with string_release.
 // path_clean: Go filepath.Clean semantics (collapse `//`/`./`,
 //             resolve `..` against a segment stack, preserve a leading
 //             `/`, preserve unresolved leading `..` on relative paths).

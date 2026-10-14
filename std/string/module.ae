@@ -77,7 +77,7 @@ extern string_release(str: @retain string)
 extern string_free(str: @retain string)
 
 // String operations
-extern string_concat(a: string, b: string) -> string
+extern string_concat(a: string, b: string) -> string @heap
 // Length-bearing concat. Returns a refcounted AetherString; downstream
 // string.length() honours the stored length rather than falling
 // through to strlen() and silently truncating at the first NUL. Use
@@ -90,7 +90,7 @@ extern string_concat(a: string, b: string) -> string
 // an owned heap string and release it at scope exit, and unwrap it to
 // its payload bytes at naive-C-extern boundaries (#297). The C ABI is
 // unchanged — the header still declares `AetherString*`.
-extern string_concat_wrapped(a: string, b: string) -> string
+extern string_concat_wrapped(a: string, b: string) -> string @heap
 extern string_length(str: string) -> int
 extern string_char_at(str: string, index: int) -> int
 extern string_equals(a: string, b: string) -> int
@@ -114,12 +114,12 @@ extern string_index_of_from(str: string, substring: string, start: int) -> int
 // managed string; `str` is untouched. An empty `old` returns a copy
 // of `str` unchanged (no infinite empty-match expansion). Matches
 // are byte-exact and binary-safe (embedded NULs preserved).
-extern string_replace(str: string, old: string, new: string) -> string
+extern string_replace(str: string, old: string, new: string) -> string @heap
 // Replace every non-overlapping occurrence of `old` with `new`,
 // scanned left to right. Same lifetimes and empty-`old` guard as
 // string_replace. `new` may be empty (deletion) or longer than `old`.
-extern string_replace_all(str: string, old: string, new: string) -> string
-extern string_substring(str: string, start: int, end: int) -> string
+extern string_replace_all(str: string, old: string, new: string) -> string @heap
+extern string_substring(str: string, start: int, end: int) -> string @heap
 
 // Length-aware sibling — caller supplies the source length explicitly.
 // Reach for this when `str` arrives as a `string` parameter at a
@@ -131,7 +131,7 @@ extern string_substring(str: string, start: int, end: int) -> string
 // Trusts the caller's `str_len_bytes` parameter — does NOT consult
 // the AetherString header even if one happens to be present.
 // start / end are clamped to [0, str_len_bytes].
-extern string_substring_n(str: string, str_len_bytes: int, start: int, end: int) -> string
+extern string_substring_n(str: string, str_len_bytes: int, start: int, end: int) -> string @heap
 
 // Identity helper documenting intent: in code that receives a
 // `string` parameter plus an explicit length, the explicit length
@@ -167,9 +167,9 @@ extern string_index_of_from_n(str: string, known_length: int,
 // formats without routing through a NUL-terminated string literal.
 // Always length 1 — code=0 returns a 1-byte NUL string, not "".
 extern string_from_char(code: int) -> ptr
-extern string_to_upper(str: string) -> string
-extern string_to_lower(str: string) -> string
-extern string_trim(str: string) -> string
+extern string_to_upper(str: string) -> string @heap
+extern string_to_lower(str: string) -> string @heap
+extern string_trim(str: string) -> string @heap
 
 // String array operations.
 //
@@ -314,7 +314,7 @@ extern string_seq_concat(a: *StringSeq, b: *StringSeq) -> *StringSeq
 // piecewise building without a seq, use std.strbuilder). Two passes,
 // one exact-size allocation, binary-safe. Returns a fresh owned
 // string; "" for the empty seq.
-extern string_seq_join(s: *StringSeq, sep: string) -> string
+extern string_seq_join(s: *StringSeq, sep: string) -> string @heap
 extern string_seq_take(s: *StringSeq, n: int) -> *StringSeq
 extern string_seq_drop(s: *StringSeq, n: int) -> *StringSeq
 

@@ -23,20 +23,20 @@ exports(
 )
 
 extern string_length(s: string) -> int
-extern path_join(path1: string, path2: string) -> string
-extern path_dirname(path: string) -> string
-extern path_basename(path: string) -> string
-extern path_extension(path: string) -> string
+extern path_join(path1: string, path2: string) -> string @heap
+extern path_dirname(path: string) -> string @heap
+extern path_basename(path: string) -> string @heap
+extern path_extension(path: string) -> string @heap
 extern path_is_absolute(path: string) -> int
 
 // Lexical normalize: collapses `//`, resolves `.` and `..`, drops trailing
 // slashes — purely on the string, never touching the filesystem. Empty input
 // → ".". POSIX-separator aware (`/`); on Windows, normalise `\` to `/` first
 // if needed (see the module note / #1369).
-extern path_clean(path: string) -> string
+extern path_clean(path: string) -> string @heap
 
 // Relative path from `base` to `target`, lexically (no FS access).
-extern path_rel(base: string, target: string) -> string
+extern path_rel(base: string, target: string) -> string @heap
 
 // 1 if `target` is lexically within `base` (no `..` escape), else 0.
 extern path_is_within_base(base: string, target: string) -> int
