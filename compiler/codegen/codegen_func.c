@@ -1560,6 +1560,19 @@ const char* fn_list_param_elem_ctype(CodeGenerator* gen, ASTNode* fn, int pos) {
     return "int";
 }
 
+/* The condition under which the argument `arg` matches the literal pattern
+ * `c`: a string by content, NULL-safe, as a `match` string arm does (#2467,
+ * the argument may be a magic AetherString); any other literal by value. */
+static void emit_pattern_literal_test(CodeGenerator* gen, const char* arg, ASTNode* c) {
+    if (c->node_type && c->node_type->kind == TYPE_STRING) {
+        fprintf(gen->output, "(%s && string_equals(%s, ", arg, arg);
+        emit_string_literal_node(gen, c);   /* all its bytes (#2520) */
+        fprintf(gen->output, "))");
+    } else {
+        fprintf(gen->output, "%s == %s", arg, c->value);
+    }
+}
+
 /* The value a function returns when no pattern, guard or clause matches,
  * of the type it returns (fn_result_type). A string its caller owns is a
  * copy of "" the caller may free, not the literal (#2627); so is each owned
@@ -2006,10 +2019,14 @@ static void emit_function(CodeGenerator* gen, ASTNode* func, const char* clause_
             print_line(gen, "(void)_pattern_%d;", pos);
         } else if (child->type == AST_PATTERN_LITERAL &&
             strcmp(child->value, "_") != 0) {
-            // Generate pattern match check
+            // Generate pattern match check (#2913: a string compares by
+            // content, as in a clause set's dispatcher)
+            char arg[32];
+            snprintf(arg, sizeof(arg), "_pattern_%d", pos);
             print_indent(gen);
-            fprintf(gen->output, "if (_pattern_%d != %s) return ",
-                    pos, child->value);
+            fprintf(gen->output, "if (!(");
+            emit_pattern_literal_test(gen, arg, child);
+            fprintf(gen->output, ")) return ");
             emit_no_match_value(gen, func);
             fprintf(gen->output, ";\n");
         }
@@ -2283,16 +2300,9 @@ static int emit_clause_dispatch(CodeGenerator* gen, ASTNode* clause, int returns
             ASTNode* c = fn_param_at(clause, p);
             if (c->type == AST_PATTERN_LITERAL && strcmp(c->value, "_") != 0) {
                 if (!first_cond) fprintf(gen->output, " && ");
-                if (c->node_type && c->node_type->kind == TYPE_STRING) {
-                    /* #2467: a string pattern compares by content, NULL-safe, as
-                     * a `match` string arm does (emit_selector_condition): the
-                     * argument is a pointer and may be a magic AetherString. */
-                    fprintf(gen->output, "(_arg%d && string_equals(_arg%d, ", p, p);
-                    emit_string_literal_node(gen, c);   /* all its bytes (#2520) */
-                    fprintf(gen->output, "))");
-                } else {
-                    fprintf(gen->output, "_arg%d == %s", p, c->value);
-                }
+                char arg[32];
+                snprintf(arg, sizeof(arg), "_arg%d", p);
+                emit_pattern_literal_test(gen, arg, c);
                 first_cond = 0;
             } else if (c->type == AST_PATTERN_LIST) {
                 if (!first_cond) fprintf(gen->output, " && ");
