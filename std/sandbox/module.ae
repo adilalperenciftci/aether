@@ -132,8 +132,8 @@ enforce(perms: Grants, code: fn) {
     sandbox_push(frozen)
     sandbox_install()
     call(code, null)
-    sandbox_uninstall()
     sandbox_pop()
+    sandbox_uninstall()
 }
 
 // A private copy of a grant list, with copies of its strings: what enforce
