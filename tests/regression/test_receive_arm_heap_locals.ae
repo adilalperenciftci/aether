@@ -160,6 +160,22 @@ labels(k: ptr) -> string {
     return t
 }
 
+// The Keep that k's Forward arm sends reaches peer through k's queue, and
+// main's own messages to peer through main's: messages from two senders
+// carry no order between them (only one sender's messages to one actor
+// do), so peer may answer main before k's Keep is in. Wait for it, bounded.
+labels_reach(k: ptr, want: string) -> bool {
+    tries = 0
+    while tries < 2000 {
+        if labels(k) == want {
+            return true
+        }
+        sleep(1)
+        tries = tries + 1
+    }
+    return false
+}
+
 deliver(k: ptr, which: int, peer: ptr) {
     if which == 0 { k ! Local { w: "w" } }
     if which == 1 { k ! Rebind { w: "w" } }
@@ -210,7 +226,8 @@ main() {
     k ! Seq { w: "w" }
     check(total(k) == 12, "a *StringSeq local in an arm (${total(k)})")
     k ! Forward { w: "w", to: peer }
-    check(total(k) == 15 && labels(peer) == "w-f-k|", "a local sent on (${labels(peer)})")
+    check(total(k) == 15, "a local sent on, counted by the sender (${total(k)})")
+    check(labels_reach(peer, "w-f-k|"), "a local sent on (${labels(peer)})")
     deliver(k, 8, peer)
     k ! Captured { w: "w" }
     check(total(k) == 18, "a local a closure captures (${total(k)})")
