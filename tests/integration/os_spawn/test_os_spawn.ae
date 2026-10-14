@@ -70,7 +70,7 @@ main() {
     _ = list.add(argv_slow, "30")
 
     slow, _ = os.spawn_proc("sleep", argv_slow, null) // spawned first, finishes last
-    fast, _ = os.spawn_proc("true", null, null)       // spawned second, finishes first
+    fast, _ = os.spawn_proc("true", null, null) // spawned second, finishes first
 
     toks = list.new()
     _ = list.add(toks, mem.long_to_ptr(slow as long))
