@@ -3009,6 +3009,25 @@ ci: clean
 test-differential: ae
 	@sh tests/differential/run_differential.sh
 
+# The ownership grid (tests/ownership_grid/README.md): one generated program
+# per value kind x place x transfer, each built as it is and against a
+# poisoning allocator, run and classified (OK, LEAK, UAF, WRONG, NOCOMPILE,
+# CRASH, TIMEOUT). `ownership-grid` writes build/ownership_grid/report.md and
+# report.csv; `ownership-grid-check` also fails when a cell is worse than
+# tests/ownership_grid/baseline.txt and lists the cells that got better. Not
+# part of `make ci`. OWNERSHIP_GRID_ARGS passes options to run.py
+# (`--mode both`, `--only 'K3-*'`, `--update-baseline`).
+# -----------------------------------------------------------------
+.PHONY: ownership-grid ownership-grid-check
+ownership-grid ownership-grid-check: compiler ae stdlib
+	@py=""; \
+	for cand in python3 python "py -3"; do \
+	    if $$cand -c "import sys" >/dev/null 2>&1; then py="$$cand"; break; fi; \
+	done; \
+	if [ -z "$$py" ]; then echo "ownership grid: no python3"; exit 1; fi; \
+	NPROC=$(NPROC) $$py tests/ownership_grid/run.py \
+	    $(if $(filter ownership-grid-check,$@),--check) $(OWNERSHIP_GRID_ARGS)
+
 # The C a program gets when the C compiler is not GCC-compatible
 # (AETHER_GCC_COMPAT 0, which is what MSVC compiles): strict C11 under gcc,
 # and under cl.exe too when it is on PATH (#2725). CI runs the gcc half on the
