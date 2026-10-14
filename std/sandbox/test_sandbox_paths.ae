@@ -15,6 +15,7 @@ import std.sandbox
 import std.os
 import std.fs
 import std.worker
+import std.string
 
 extern exit(code: int)
 
@@ -110,6 +111,29 @@ main() {
             }
             spec.assert_true(err != "", "refused")
             spec.assert_eq(fs.exists("${outside}/new.txt"), 0, "its target not created")
+        }
+    }
+
+    spec.describe(fw, "std.sandbox enforce leaves nothing behind") {
+        spec.it_when(have_links, "after a block, a dangling symlink is one again, and resolves as before", no_links) callback {
+            before = fs.fs_is_symlink("${box}/dangling")
+            sandbox.enforce(in_box) callback {
+                _e = fs.exists("${box}/sub")
+            }
+            spec.assert_eq(before, 1, "a symlink before the block")
+            spec.assert_eq(fs.fs_is_symlink("${box}/dangling"), 1, "and after it: nothing is checked once the block returns")
+            _rp, _k, rerr = fs.realpath("${box}/dangling")
+            spec.assert_true(string.contains(rerr, "sandbox") == 0, "realpath's answer is not the sandbox's")
+        }
+        spec.it("a nested block's end leaves the outer block in force") callback {
+            outer_saw = 1
+            sandbox.enforce(nothing) callback {
+                sandbox.enforce(in_box) callback {
+                    _e = fs.exists("${box}/sub")
+                }
+                if os.getenv("AE_SANDBOX_PATHS_VAR") == null { outer_saw = 0 }
+            }
+            spec.assert_eq(outer_saw, 0, "the outer block still may not read the variable")
         }
     }
 
