@@ -1,0 +1,181 @@
+// os.spawn_proc_to: a child started without waiting, its stdout and stderr in
+// a file, ended with its whole tree by os.kill. Four properties:
+//   - capture: what the child writes to either stream is in the file;
+//   - a child that crashes ends with a failure status at once (on Windows
+//     no error-reporting dialog holds it);
+//   - a kill at a deadline ends the child and the grandchild it started (the
+//     shape of a build tool's compiler), which otherwise would write a file
+//     seconds later;
+//   - many children at once, reaped by wait_any in any order, each with its
+//     own output.
+// The children are this program, re-run with a flag, so the test needs no
+// other binary and runs the same on every platform.
+// sweep-ok: the 30 s sleep is the --parent child's, killed at its 1 s deadline.
+import std.os
+import std.fs
+import std.io
+import std.list
+import std.mem
+import std.string
+
+check(label: string, ok: bool) -> int {
+    if ok {
+        println("ok   ${label}")
+        return 0
+    }
+    println("FAIL ${label}")
+    return 1
+}
+
+// The child modes.
+child(mode: string) -> int {
+    if mode == "--print" {
+        tag = os.args_get(2)
+        println("out ${tag}")
+        io.stderr_write("err ${tag}\n")
+        return 0
+    }
+    if mode == "--parent" {
+        // Starts a grandchild that writes the marker after 3 s, then waits
+        // far longer than the parent's deadline.
+        argv = list.new()
+        _a = list.add(argv, "--late")
+        _b = list.add(argv, os.args_get(2))
+        _t, err = os.spawn_proc(os.argv0(), argv, null)
+        list.free(argv)
+        if err != "" {
+            println("could not start the grandchild: ${err}")
+            return 2
+        }
+        sleep(30000)
+        return 0
+    }
+    if mode == "--late" {
+        sleep(3000)
+        _w = fs.write(os.args_get(2), "the grandchild outlived its parent")
+        return 0
+    }
+    if mode == "--crash" {
+        // A write through a null pointer: an access violation, SIGSEGV.
+        _x = mem.set_byte_unchecked(null, 0, 1)
+        println("not reached")
+        return 0
+    }
+    return 3
+}
+
+file_text(path: string) -> string {
+    text, err = fs.read(path)
+    if err != "" {
+        return ""
+    }
+    return string.copy(text)
+}
+
+main() {
+    if os.args_count() > 1 {
+        exit(child(os.args_get(1)))
+    }
+    fails = 0
+    dir = "${os.temp_dir()}/ae_spawn_to_${os.getpid()}"
+    _m = fs.mkdir_p(dir)
+
+    // ---- capture: both streams in the file ----
+    out1 = "${dir}/print.log"
+    argv = list.new()
+    _p = list.add(argv, "--print")
+    _q = list.add(argv, "one")
+    t1, e1 = os.spawn_proc_to(os.argv0(), argv, null, out1)
+    list.free(argv)
+    fails = fails + check("spawn_proc_to starts the child", e1 == "")
+    s1, w1 = os.wait(t1)
+    fails = fails + check("the child exits 0", s1 == 0 && w1 == "")
+    log1 = file_text(out1)
+    fails = fails + check("stdout is in the file", string.contains(log1, "out one") == 1)
+    fails = fails + check("stderr is in the file", string.contains(log1, "err one") == 1)
+
+    // ---- a crash ends the child at once ----
+    // On Windows the child's job keeps the error-reporting dialog away, so
+    // a crash is an exit with its exception code, not a child held alive.
+    xargv = list.new()
+    _c = list.add(xargv, "--crash")
+    t3, e3 = os.spawn_proc_to(os.argv0(), xargv, null, "${dir}/crash.log")
+    list.free(xargv)
+    xtoks = list.new()
+    _d = list.add(xtoks, mem.long_to_ptr(t3 as long))
+    _g3, s3, to3, w3 = os.wait_any_timeout(xtoks, 10)
+    fails = fails + check("a crashed child ends with a failure status before its 10 s deadline",
+        e3 == "" && to3 == 0 && w3 == "" && s3 != 0)
+    if to3 == 1 {
+        _k3 = os.kill(t3, 9)
+        _s3, _x3 = os.wait(t3)
+    }
+    list.free(xtoks)
+
+    // ---- a kill at the deadline ends the tree ----
+    marker = "${dir}/grandchild.marker"
+    pargv = list.new()
+    _r = list.add(pargv, "--parent")
+    _s = list.add(pargv, marker)
+    t2, e2 = os.spawn_proc_to(os.argv0(), pargv, null, "${dir}/parent.log")
+    list.free(pargv)
+    fails = fails + check("the parent starts", e2 == "")
+    toks = list.new()
+    _u = list.add(toks, mem.long_to_ptr(t2 as long))
+    got, _st, timed_out, werr = os.wait_any_timeout(toks, 1)
+    fails = fails + check("the parent is still running at its 1 s deadline", timed_out == 1 && got == -1 && werr == "")
+    fails = fails + check("kill ends the parent's tree", os.kill(t2, 9) == 0)
+    s2, w2 = os.wait(t2)
+    fails = fails + check("the killed parent reaps 137 (128 + 9)", s2 == 137 && w2 == "")
+    list.free(toks)
+    // The grandchild would write the marker 3 s after it started.
+    sleep(4500)
+    fails = fails + check("the grandchild was ended with it (no marker)", fs.exists(marker) == 0)
+
+    // ---- many children at once ----
+    n = 24
+    many = list.new()
+    i = 0
+    while i < n {
+        cargv = list.new()
+        _v = list.add(cargv, "--print")
+        _x = list.add(cargv, "c${i}")
+        tok, err = os.spawn_proc_to(os.argv0(), cargv, null, "${dir}/many_${i}.log")
+        list.free(cargv)
+        if err != "" {
+            fails = fails + check("child ${i} starts", false)
+        } else {
+            _y = list.add(many, mem.long_to_ptr(tok as long))
+        }
+        i = i + 1
+    }
+    reaped = 0
+    bad = 0
+    while reaped < n {
+        _tok, status, err = os.wait_any(many)
+        if err != "" || status != 0 {
+            bad = bad + 1
+        }
+        reaped = reaped + 1
+    }
+    fails = fails + check("${n} children at once all exit 0", bad == 0)
+    wrong = 0
+    i = 0
+    while i < n {
+        text = file_text("${dir}/many_${i}.log")
+        if string.contains(text, "out c${i}\n") == 0 || string.contains(text, "err c${i}\n") == 0 {
+            wrong = wrong + 1
+        }
+        i = i + 1
+    }
+    fails = fails + check("each child's output is in its own file", wrong == 0)
+    list.free(many)
+
+    _rm = fs.remove_tree(dir)
+    if fails == 0 {
+        println("ALL PASS")
+        return
+    }
+    println("FAILURES: ${fails}")
+    exit(1)
+}

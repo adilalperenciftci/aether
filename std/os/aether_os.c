@@ -74,6 +74,11 @@ _tuple_int_string os_spawn_raw(const char* p, void* a, void* e) {
     _tuple_int_string out = { -1, "os.spawn unavailable" };
     return out;
 }
+_tuple_int_string os_spawn_to_raw(const char* p, void* a, void* e, const char* path) {
+    (void)p; (void)a; (void)e; (void)path;
+    _tuple_int_string out = { -1, "os.spawn unavailable" };
+    return out;
+}
 _tuple_int_string os_wait_raw(int token) {
     (void)token;
     _tuple_int_string out = { -1, "os.wait unavailable" };
@@ -1219,6 +1224,9 @@ static int aether_child_fd(int fd, int target) {
     return dup2(fd, target);
 }
 
+/* Every wait that reaps a pid tells the process-group table (below). */
+static void group_reaped(pid_t pid);
+
 char* os_run_capture_raw(const char* prog, void* argv_list, void* env_list) {
     if (!prog) return NULL;
     if (!aether_sandbox_check("exec", prog)) return NULL;
@@ -1586,6 +1594,7 @@ _tuple_int_string os_wait_pid_raw(int pid) {
         out._1 = "waitpid failed";
         return out;
     }
+    group_reaped((pid_t)pid);
     return posix_status_to_tuple(st);
 }
 
@@ -1662,12 +1671,118 @@ _tuple_int_string os_spawn_raw(const char* prog, void* argv_list, void* env_list
     return out;
 }
 
+/* The children os_spawn_to_raw started, each the leader of a process group
+ * of its own: os_kill_raw signals the whole group for them, so a kill ends
+ * the child's tree. A child leaves the table when it is reaped. */
+#define AETHER_GROUP_SLOTS 4096
+static pid_t g_group_leaders[AETHER_GROUP_SLOTS];
+static int g_group_count = 0;
+static volatile int g_group_lock = 0;
+
+static void group_lock(void) {
+    while (__sync_lock_test_and_set(&g_group_lock, 1)) {
+    }
+}
+
+static void group_unlock(void) {
+    __sync_lock_release(&g_group_lock);
+}
+
+static int group_add(pid_t pid) {
+    group_lock();
+    int ok = g_group_count < AETHER_GROUP_SLOTS;
+    if (ok) g_group_leaders[g_group_count++] = pid;
+    group_unlock();
+    return ok;
+}
+
+static int group_has(pid_t pid) {
+    int found = 0;
+    group_lock();
+    for (int i = 0; i < g_group_count; i++) {
+        if (g_group_leaders[i] == pid) { found = 1; break; }
+    }
+    group_unlock();
+    return found;
+}
+
+/* Called for every pid a wait reaps. */
+static void group_reaped(pid_t pid) {
+    group_lock();
+    for (int i = 0; i < g_group_count; i++) {
+        if (g_group_leaders[i] == pid) {
+            g_group_leaders[i] = g_group_leaders[--g_group_count];
+            break;
+        }
+    }
+    group_unlock();
+}
+
+/* Non-blocking spawn with the child's stdout and stderr written to
+ * `out_path` (created or truncated, mode 0644) and its stdin /dev/null. The
+ * child leads a process group of its own, so os_kill_raw on the token
+ * signals the whole group: the child's tree. The file is opened close-on-exec
+ * in the parent, so no other child inherits it (#2917). Returns (token, err);
+ * reap the token with the wait calls, as an os_spawn_raw one. */
+_tuple_int_string os_spawn_to_raw(const char* prog, void* argv_list, void* env_list,
+                                  const char* out_path) {
+    _tuple_int_string out = { -1, "" };
+    if (!prog) { out._1 = "null prog"; return out; }
+    if (!out_path) { out._1 = "null output path"; return out; }
+    if (!aether_sandbox_check("exec", prog)) { out._1 = "denied by sandbox"; return out; }
+    if (!aether_sandbox_check("fs", out_path)) { out._1 = "denied by sandbox"; return out; }
+
+    int fd = open(out_path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+    if (fd < 0) { out._1 = "cannot open the output file"; return out; }
+    char** av = build_argv_array(prog, argv_list);
+    if (!av) { close(fd); out._1 = "argv build failed"; return out; }
+    char** envp = build_envp_array(env_list);
+
+    pid_t pid = fork();
+    if (pid < 0) {
+        close(fd);
+        free(av);
+        free(envp);
+        out._1 = "fork failed";
+        return out;
+    }
+    if (pid == 0) {
+        aether_child_reset_signals();
+        setpgid(0, 0);
+        int nul = open("/dev/null", O_RDONLY);
+        if (nul >= 0 && nul != 0) {
+            dup2(nul, 0);
+            close(nul);
+        }
+        if (aether_child_fd(fd, 1) < 0) _exit(127);
+        if (dup2(1, 2) < 0) _exit(127);
+        if (fd != 1 && fd != 2) close(fd);
+        if (envp) {
+            execve(prog, av, envp);
+            execvp(prog, av);
+        } else {
+            execvp(prog, av);
+        }
+        _exit(127);
+    }
+    /* Also set here, so the group exists before this call returns whichever
+     * of the two runs first. */
+    setpgid(pid, pid);
+    close(fd);
+    free(av);
+    free(envp);
+    group_add(pid);
+    out._0 = (int)pid;   /* token == pid on POSIX */
+    return out;
+}
+
 _tuple_int_string os_wait_raw(int token) {
     /* On POSIX the token IS the pid, so reap semantics match wait_pid. */
     _tuple_int_string out = { -1, "" };
     if (token <= 0) { out._1 = "invalid token"; return out; }
     int st = 0;
     if (waitpid((pid_t)token, &st, 0) < 0) { out._1 = "waitpid failed"; return out; }
+    group_reaped((pid_t)token);
     return posix_status_to_tuple(st);
 }
 
@@ -1687,6 +1802,7 @@ _tuple_int_int_string os_wait_any_raw(void* token_list) {
     int st = 0;
     pid_t got = waitpid(-1, &st, 0);
     if (got < 0) { out._2 = "waitpid failed"; return out; }
+    group_reaped(got);
 
     _tuple_int_string s = posix_status_to_tuple(st);
     out._0 = (int)got;      /* which token finished */
@@ -1715,6 +1831,7 @@ _tuple_int_int_int_string os_wait_any_timeout_raw(void* token_list, int secs) {
         while ((got = waitpid(-1, &st, 0)) < 0) {
             if (errno != EINTR) { out._3 = "waitpid failed"; return out; }
         }
+        group_reaped(got);
         _tuple_int_string s = posix_status_to_tuple(st);
         out._0 = (int)got;
         out._1 = s._0;
@@ -1726,6 +1843,7 @@ _tuple_int_int_int_string os_wait_any_timeout_raw(void* token_list, int secs) {
     for (;;) {
         pid_t got = waitpid(-1, &st, WNOHANG);
         if (got > 0) {
+            group_reaped(got);
             _tuple_int_string s = posix_status_to_tuple(st);
             out._0 = (int)got;
             out._1 = s._0;
@@ -1848,6 +1966,8 @@ _tuple_string_int_string os_run_pipe_drain_and_wait_raw(const char* prog, void* 
  * process-control action of the same blast radius as spawning one. */
 int os_kill_raw(int pid, int sig) {
     if (!aether_sandbox_check("exec", "kill")) return -1;
+    /* A child os_spawn_to_raw started leads a group: signal all of it. */
+    if (pid > 0 && group_has((pid_t)pid)) return kill(-(pid_t)pid, sig) == 0 ? 0 : -1;
     return kill((pid_t)pid, sig) == 0 ? 0 : -1;
 }
 
@@ -1888,6 +2008,7 @@ _tuple_int_int_string os_wait_pid_timeout_raw(int pid, int secs) {
         }
         (void)reaped;
     }
+    group_reaped((pid_t)pid);
 
     {
         _tuple_int_string s = posix_status_to_tuple(st);
@@ -2935,7 +3056,9 @@ static int win_launch(const char* prog, void* argv_list, void* env_list,
 
 #define WINPROC_TOKEN_BASE (1 << 30)
 
-typedef struct { int token; HANDLE h; } WinProc;
+/* `job` is the Job Object of a child os_spawn_to_raw started (NULL for
+ * os_spawn_raw's): os.kill ends the job, the child's whole tree. */
+typedef struct { int token; HANDLE h; HANDLE job; } WinProc;
 static WinProc  g_winprocs[4096];
 static int      g_winproc_count = 0;
 static int      g_winproc_next_token = WINPROC_TOKEN_BASE;
@@ -2951,8 +3074,9 @@ static void winproc_lock(void) {
 }
 static void winproc_unlock(void) { LeaveCriticalSection(&g_winproc_cs); }
 
-/* Register a live handle, return its token (or -1 if the table is full). */
-static int winproc_register(HANDLE h) {
+/* Register a live handle, and the child's Job Object if it has one; return
+ * its token (or -1 if the table is full). */
+static int winproc_register_job(HANDLE h, HANDLE job) {
     winproc_lock();
     if (g_winproc_count >= (int)(sizeof(g_winprocs)/sizeof(g_winprocs[0]))) {
         winproc_unlock();
@@ -2964,9 +3088,25 @@ static int winproc_register(HANDLE h) {
     g_winproc_next_token = tok == INT_MAX ? WINPROC_TOKEN_BASE : tok + 1;
     g_winprocs[g_winproc_count].token = tok;
     g_winprocs[g_winproc_count].h = h;
+    g_winprocs[g_winproc_count].job = job;
     g_winproc_count++;
     winproc_unlock();
     return tok;
+}
+
+static int winproc_register(HANDLE h) {
+    return winproc_register_job(h, NULL);
+}
+
+/* The Job Object of a live token, or NULL. Borrowed: the slot owns it. */
+static HANDLE winproc_find_job(int token) {
+    HANDLE job = NULL;
+    winproc_lock();
+    for (int i = 0; i < g_winproc_count; i++) {
+        if (g_winprocs[i].token == token) { job = g_winprocs[i].job; break; }
+    }
+    winproc_unlock();
+    return job;
 }
 
 /* Look up a token's handle without removing it. Returns NULL if absent. */
@@ -2980,11 +3120,14 @@ static HANDLE winproc_find(int token) {
     return h;
 }
 
-/* Remove a token's slot (after it has been reaped + CloseHandle'd). */
+/* Remove a token's slot (after it has been reaped + CloseHandle'd), closing
+ * its Job Object. The job has no KILL_ON_JOB_CLOSE, so anything the child
+ * left running goes on, as it does after os_spawn_raw's child exits. */
 static void winproc_remove(int token) {
     winproc_lock();
     for (int i = 0; i < g_winproc_count; i++) {
         if (g_winprocs[i].token == token) {
+            if (g_winprocs[i].job) CloseHandle(g_winprocs[i].job);
             g_winprocs[i] = g_winprocs[g_winproc_count - 1];
             g_winproc_count--;
             break;
@@ -3152,6 +3295,98 @@ _tuple_int_string os_spawn_raw(const char* prog, void* argv_list, void* env_list
     return out;
 }
 
+/* Non-blocking spawn with the child's stdout and stderr written to
+ * `out_path` (created or truncated) and its stdin the null device. The
+ * child starts suspended, joins a Job Object of its own and then runs, so
+ * everything it starts belongs to the job: os_kill_raw on the token ends
+ * the whole tree. The file handle and the null device are the only handles
+ * it inherits (#2917). Returns (token, err); reap the token with the wait
+ * calls, as an os_spawn_raw one. */
+_tuple_int_string os_spawn_to_raw(const char* prog, void* argv_list, void* env_list,
+                                  const char* out_path) {
+    _tuple_int_string out = { -1, "" };
+    if (!prog) { out._1 = "null prog"; return out; }
+    if (!out_path) { out._1 = "null output path"; return out; }
+    if (!aether_sandbox_check("exec", prog)) { out._1 = "denied by sandbox"; return out; }
+    if (!aether_sandbox_check("fs", out_path)) { out._1 = "denied by sandbox"; return out; }
+
+    SECURITY_ATTRIBUTES sa;
+    memset(&sa, 0, sizeof sa);
+    sa.nLength = sizeof sa;
+    sa.bInheritHandle = TRUE;
+    wchar_t* wpath = utf8_to_wide(out_path);
+    if (!wpath) { out._1 = "bad output path"; return out; }
+    HANDLE fh = CreateFileW(wpath, GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                            &sa, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    free(wpath);
+    if (fh == INVALID_HANDLE_VALUE) { out._1 = "cannot open the output file"; return out; }
+    HANDLE nul = CreateFileW(L"NUL", GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, &sa,
+                             OPEN_EXISTING, 0, NULL);
+
+    wchar_t* app = NULL;
+    wchar_t* cmdline = win_prepare_launch(prog, argv_list, &app);
+    if (!cmdline) {
+        CloseHandle(fh);
+        if (nul != INVALID_HANDLE_VALUE) CloseHandle(nul);
+        out._1 = win_launch_error();
+        return out;
+    }
+    wchar_t* wenv = build_environ_block(env_list);
+
+    STARTUPINFOW si;
+    memset(&si, 0, sizeof si);
+    si.cb = sizeof si;
+    si.dwFlags = STARTF_USESTDHANDLES;
+    si.hStdInput = nul;
+    si.hStdOutput = fh;
+    si.hStdError = fh;
+    PROCESS_INFORMATION pi;
+    memset(&pi, 0, sizeof pi);
+    HANDLE inherit[2] = { fh, nul };
+    BOOL ok = win_create_process_inheriting(app, cmdline, CREATE_UNICODE_ENVIRONMENT | CREATE_SUSPENDED,
+                                            wenv, &si, inherit, 2, &pi);
+    free(app);
+    free(cmdline);
+    free(wenv);
+    CloseHandle(fh);
+    if (nul != INVALID_HANDLE_VALUE) CloseHandle(nul);
+    if (!ok) { out._1 = "spawn failed"; return out; }
+
+    /* Joined before it runs a single instruction, so nothing it starts can
+     * escape the job. Should the job fail (it does not on Windows 8 and
+     * later, where jobs nest), the child still runs, and a kill ends it alone. */
+    HANDLE job = CreateJobObjectW(NULL, NULL);
+    if (job) {
+        /* A crash ends the child, or anything it starts, with its exception
+         * code: the job sets SEM_NOGPFAULTERRORBOX in every process it holds,
+         * so no error-reporting dialog keeps a crashed child alive until a
+         * runner's deadline. A child inherits the error mode of the program
+         * that starts it otherwise, and that is often 0, the dialog. */
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION li;
+        memset(&li, 0, sizeof li);
+        li.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION;
+        SetInformationJobObject(job, JobObjectExtendedLimitInformation, &li, sizeof li);
+    }
+    if (job && !AssignProcessToJobObject(job, pi.hProcess)) {
+        CloseHandle(job);
+        job = NULL;
+    }
+    ResumeThread(pi.hThread);
+    CloseHandle(pi.hThread);
+
+    int tok = winproc_register_job(pi.hProcess, job);
+    if (tok < 0) {
+        if (job) { TerminateJobObject(job, 1); CloseHandle(job); }
+        else TerminateProcess(pi.hProcess, 1);
+        WaitForSingleObject(pi.hProcess, INFINITE);
+        CloseHandle(pi.hProcess);
+        out._1 = "process table full";
+        return out;
+    }
+    out._0 = tok;
+    return out;
+}
+
 /* Reap a single token. Returns (exit, err). */
 _tuple_int_string os_wait_raw(int token) {
     _tuple_int_string out = { -1, "" };
@@ -3298,6 +3533,9 @@ int os_kill_raw(int pid, int sig) {
             DWORD w = WaitForSingleObject(tok_h, 0);
             return (w == WAIT_TIMEOUT) ? 0 : -1;   /* still running -> alive */
         }
+        /* A child os_spawn_to_raw started: end its whole job, the tree. */
+        HANDLE job = winproc_find_job(pid);
+        if (job) return TerminateJobObject(job, (UINT)(128 + sig)) ? 0 : -1;
         return TerminateProcess(tok_h, (UINT)(128 + sig)) ? 0 : -1;
     }
     if (pid >= WINPROC_TOKEN_BASE) return -1;   /* a reaped token (#2609) */

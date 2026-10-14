@@ -25,6 +25,7 @@ exports(
     setenv, unsetenv,
     run_pipe, wait_pid, run_pipe_drain_and_wait,
     spawn_proc, wait, wait_any, wait_any_timeout,
+    os_spawn_to_raw, spawn_proc_to,
     os_kill_raw, os_wait_pid_timeout_raw, os_run_supervised_raw,
     kill, wait_pid_timeout, run_supervised,
     os_run_full_raw, run_full,
@@ -145,6 +146,16 @@ extern os_run_pipe_drain_and_wait_raw(prog: string, argv: ptr, env: ptr) -> (str
 // Spawn a child without blocking. Returns (token, err). err is "" on a
 // successful spawn regardless of the child's eventual exit code.
 extern os_spawn_raw(prog: string, argv: ptr, env: ptr) -> (int, string)
+
+// Spawn a child without blocking, its stdout and stderr written to the file
+// `out_path` (created or truncated) and its stdin empty. Returns (token, err),
+// a token the wait calls reap like os_spawn_raw's. The child runs in a Job
+// Object of its own on Windows and leads a process group of its own on
+// POSIX, so os_kill_raw(token, sig) ends its whole tree: a build tool's
+// compilers too. The file and the null device are the only handles it
+// inherits. Anything the child leaves running when it exits on its own is
+// not ended.
+extern os_spawn_to_raw(prog: string, argv: ptr, env: ptr, out_path: string) -> (int, string)
 
 // Reap one token. Blocks until that child exits. Returns (exit_code,
 // err). err is non-empty only for a bad/unknown token or abnormal
@@ -344,6 +355,15 @@ run_pipe_drain_and_wait(prog: string, argv: ptr, env: ptr) -> {
 // reserved keyword (actor spawning). See os_spawn_raw.
 spawn_proc(prog: string, argv: ptr, env: ptr) -> {
     return os_spawn_raw(prog, argv, env)
+}
+
+// Start a child without waiting, its stdout and stderr written to the file
+// `out_path` (created or truncated). Returns (token, err) like spawn_proc;
+// the token works with wait, wait_any and wait_any_timeout, and kill(token,
+// sig) ends the child's whole tree (a Job Object on Windows, a process group
+// on POSIX). See os_spawn_to_raw.
+spawn_proc_to(prog: string, argv: ptr, env: ptr, out_path: string) -> {
+    return os_spawn_to_raw(prog, argv, env, out_path)
 }
 
 // Reap a single spawned token. Blocks until it exits. Returns
