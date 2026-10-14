@@ -18,6 +18,7 @@
 #define get_time_ms() GetTickCount64()
 #else
 #include <unistd.h>
+#include <sched.h>
 #define sleep_ms(ms) usleep((ms) * 1000)
 static long get_time_ms(void) {
     struct timespec ts;
@@ -1094,34 +1095,127 @@ static void teardown_cycle(void) {
     scheduler_cleanup();
 }
 
+// The heap's growth over two equal windows of five cycles, after a warm one
+// (first-use allocations of the runtime). Meaningful where
+// aether_heap_in_use_exact() holds, and there one window must not grow at
+// all: a leak in every cycle grows both, a one-time change at most one.
+// On Windows the walk counts the system's blocks too, and some of those
+// change once in a while with nothing leaking, each time by itself: a
+// critical section a system DLL keeps for the process (ucrtbase's, seen
+// here) gets its 48-byte debug record the first time it is contended;
+// ntdll keeps the records of a few deleted critical sections for reuse, so
+// it holds 48 bytes more the first time more of them are in use at once
+// than before; and the loader's worker threads, which aether_thread_epoch()
+// does not count, free about 1 KB each when they leave, some 30 s after the
+// last library load. A leak that takes a race grows only the windows the
+// race is lost in, so a test that wants one caught makes its race happen in
+// every cycle (test_scheduler_teardown_destroys_core_locks).
+static int heap_steady_over_cycles(void (*cycle)(void), const char* what) {
+    cycle();
+    int64_t start = aether_heap_in_use();
+    for (int round = 0; round < 5; round++) cycle();
+    int64_t mid = aether_heap_in_use();
+    for (int round = 0; round < 5; round++) cycle();
+    int64_t end = aether_heap_in_use();
+    if (!aether_heap_in_use_exact()) return 1;
+    if (mid - start == 0 || end - mid == 0) return 1;
+    fprintf(stderr, "    %s grew the heap: %lld then %lld bytes\n", what,
+            (long long)(mid - start), (long long)(end - mid));
+    return 0;
+}
+
 void test_scheduler_teardown_frees_live_actors(void) {
     memset(&g_caller_actor, 0, sizeof(g_caller_actor));
     mailbox_init(&g_caller_actor.mailbox);
     g_caller_actor.step = (void (*)(void*))counter_step;
     atomic_store(&g_caller_actor.last_value, 4242);
 
-    teardown_cycle();   // warm: first-use allocations of the runtime
-    int64_t start = aether_heap_in_use();
-    for (int round = 0; round < 5; round++) teardown_cycle();
-    int64_t mid = aether_heap_in_use();
-    for (int round = 0; round < 5; round++) teardown_cycle();
-    int64_t end = aether_heap_in_use();
+    int steady = heap_steady_over_cycles(teardown_cycle, "teardown cycles");
 
     // The caller's actor was run and never freed.
     ASSERT_EQ(0, g_caller_actor.scheduler_owned);
     ASSERT_EQ(4242, atomic_load(&g_caller_actor.last_value));
-    if (aether_heap_in_use_exact()) {
-        // Two equal windows, one of which must grow by exactly 0: a leak per
-        // cycle grows both, while a one-time allocation (a high-water mark
-        // in the C runtime or the thread library, reached in whichever cycle
-        // the scheduling of that run reaches it) grows at most one. A single
-        // window failed on the Windows CI runner with 48 bytes over five
-        // cycles, a size no per-cycle leak can have.
-        if (mid - start != 0 && end - mid != 0)
-            fprintf(stderr, "    teardown cycles grew the heap: %lld then %lld bytes\n",
-                    (long long)(mid - start), (long long)(end - mid));
-        ASSERT_TRUE(mid - start == 0 || end - mid == 0);
-    }
+    ASSERT_TRUE(steady);
+}
+
+// A lifecycle's core locks end with it. scheduler_init() made each core's
+// park and foreign-send locks again without the previous lifecycle's being
+// destroyed, and on Windows a critical section that has been contended
+// holds a heap block (its 48-byte debug record) until it is deleted, so
+// every lifecycle in which a lock had been contended lost one. The test
+// above saw that only when wakes happened to meet a core at its park in
+// both of its windows: on a busy runner (240 then 480 bytes on the 0.813.0
+// Windows release build) and now and then locally. Here the core's
+// foreign-send lock is contended in every cycle: this thread holds it while
+// another thread sends through it, and lets go once the sender is waiting.
+// One core and one lock: ntdll keeps the records of a few deleted critical
+// sections for reuse and holds one more each time more of them are in use
+// at once than ever before (see heap_steady_over_cycles), and contending
+// four cores' locks at once, with parks contended by chance on top, raised
+// that count in both windows in 2 runs of 200.
+typedef struct {
+    ActorBase* target;
+    atomic_int sending;
+} LockContender;
+
+static void* lock_contender(void* arg) {
+    LockContender* c = (LockContender*)arg;
+    atomic_store(&c->sending, 1);
+    scheduler_send_remote(c->target, message_create_simple(1, 0, 1), -1);
+    return NULL;
+}
+
+static long long monotonic_us(void) {
+#ifdef _WIN32
+    LARGE_INTEGER f, n;
+    QueryPerformanceFrequency(&f);
+    QueryPerformanceCounter(&n);
+    return (long long)(n.QuadPart / f.QuadPart) * 1000000LL +
+           (long long)(n.QuadPart % f.QuadPart) * 1000000LL / f.QuadPart;
+#else
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (long long)ts.tv_sec * 1000000LL + ts.tv_nsec / 1000;
+#endif
+}
+
+static void yield_cpu(void) {
+#ifdef _WIN32
+    SwitchToThread();
+#else
+    sched_yield();
+#endif
+}
+
+static void contended_lock_cycle(void) {
+    scheduler_init(1);
+    // The first spawn takes main-thread mode, the second ends it and starts
+    // the core thread; the message goes to the second.
+    ASSERT_NOT_NULL(scheduler_spawn_actor(-1, (void (*)(void*))counter_step, sizeof(CounterActor)));
+    LockContender c;
+    atomic_init(&c.sending, 0);
+    c.target = scheduler_spawn_actor(-1, (void (*)(void*))counter_step, sizeof(CounterActor));
+    ASSERT_NOT_NULL(c.target);
+    atomic_store(&((CounterActor*)c.target)->count, 0);   // spawn sets the ActorBase prefix only
+    pthread_mutex_lock(&schedulers[0].foreign_lock);
+    pthread_t sender;
+    int started = pthread_create(&sender, NULL, lock_contender, &c) == 0;
+    // The sender is on its way to the lock: it is let go of a millisecond
+    // later, by when the sender has stopped spinning on it and waits.
+    while (started && !atomic_load(&c.sending)) yield_cpu();
+    long long until = monotonic_us() + 1000;
+    while (started && monotonic_us() < until) yield_cpu();
+    pthread_mutex_unlock(&schedulers[0].foreign_lock);
+    if (started) pthread_join(sender, NULL);
+    ASSERT_TRUE(started);
+    scheduler_wait();
+    ASSERT_EQ(1, atomic_load(&((CounterActor*)c.target)->count));
+    scheduler_shutdown();
+    scheduler_cleanup();
+}
+
+void test_scheduler_teardown_destroys_core_locks(void) {
+    ASSERT_TRUE(heap_steady_over_cycles(contended_lock_cycle, "contended lock cycles"));
 }
 
 // An actor with its own thread (#2517) that is alive when the scheduler
@@ -1377,6 +1471,7 @@ void register_scheduler_tests(void) {
     register_test_with_category("Scheduler actor table grows under readers", test_scheduler_actor_table_growth, TEST_CATEGORY_RUNTIME);
     register_test_with_category("Scheduler frees released actors once no reader holds them", test_scheduler_release_churn, TEST_CATEGORY_RUNTIME);
     register_test_with_category("Scheduler teardown frees the live actors it spawned", test_scheduler_teardown_frees_live_actors, TEST_CATEGORY_RUNTIME);
+    register_test_with_category("Scheduler teardown destroys the core locks", test_scheduler_teardown_destroys_core_locks, TEST_CATEGORY_RUNTIME);
     register_test_with_category("Scheduler teardown with a live actor thread", test_scheduler_teardown_with_live_actor_thread, TEST_CATEGORY_RUNTIME);
     register_test_with_category("Scheduler actor thread holds a released actor it stepped", test_scheduler_actor_thread_holds_released_actor, TEST_CATEGORY_RUNTIME);
     register_test_with_category("Scheduler actor thread parks when idle", test_scheduler_actor_thread_parks_when_idle, TEST_CATEGORY_RUNTIME);

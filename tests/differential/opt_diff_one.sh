@@ -121,8 +121,13 @@ reason=$(awk -v want="$f" '
 ' "$root/tests/differential/opt_diff_carveouts.txt" 2>/dev/null)
 
 if [ "$rc2" != "$rc0" ]; then
+    # stdout as well as stderr: a test's own check (`println("FAIL ...")`
+    # then `exit(1)`) says what failed on stdout, and stderr alone left the
+    # receive_arm_heap_locals failure on main with no reason at all.
     { echo "exit code differs: -O2 exited $rc2, -O0 exited $rc0"
+      echo "(-O0 stdout, last 10 lines)"; tail -n 10 "$work/O0.out"
       echo "(-O0 stderr, last 10 lines)"; tail -n 10 "$work/O0.err"
+      echo "(-O2 stdout, last 10 lines)"; tail -n 10 "$work/O2.out"
       echo "(-O2 stderr, last 10 lines)"; tail -n 10 "$work/O2.err"; } > "$res/$name.why"
     echo "  [DIFF] $name (exit code: -O2 $rc2, -O0 $rc0)"
     touch "$res/DIFF_$name"
