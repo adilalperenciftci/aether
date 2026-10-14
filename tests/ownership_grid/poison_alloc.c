@@ -2,7 +2,10 @@
  *
  * Linked into a cell's program with -Wl,--wrap=free,--wrap=realloc, so every
  * call of free() and realloc() in the program and in the Aether runtime it
- * links reaches the functions below. A freed block is:
+ * links reaches the functions below. They pass straight through to the C
+ * heap unless the environment variable OWNERSHIP_GRID_POISON is set, so one
+ * build of a cell runs twice: as it is, where the heap count measures leaks,
+ * and poisoned. Poisoned, a freed block is:
  *
  *   - filled with 0xDD, so a read of it after the free sees garbage that no
  *     value check accepts (a string compares unequal, a closure environment's
@@ -12,17 +15,17 @@
  *   - recorded, so a second free (or a realloc) of it stops the program with
  *     "POISON: double free" and exit code 86.
  *
- * Memory is never given back, so the heap only grows: a program built with
- * this file cannot measure leaks, and the grid's runner ignores the growth
- * figure of this build.
+ * Poisoned, memory is never given back, so the heap only grows: the grid's
+ * runner ignores the growth figure of that run.
  *
- * gcc/ld only: macOS's linker has no --wrap, and the grid skips this build
- * there. */
+ * gcc/ld only: macOS's linker has no --wrap, and the grid builds without
+ * this file there. */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #if defined(_WIN32)
 #include <malloc.h>
+#include <windows.h>
 #define POISON_BLOCK_SIZE(p) _msize(p)
 #else
 #include <malloc.h>
@@ -34,6 +37,22 @@
 
 void __real_free(void* p);
 void* __real_realloc(void* p, size_t n);
+
+/* 1 when OWNERSHIP_GRID_POISON is set. Read with the OS's own call on
+ * Windows, which works before the C runtime has set up getenv: free() can
+ * run that early, from a constructor. */
+static int poisoning(void) {
+    static volatile int state = -1;
+    if (state < 0) {
+#if defined(_WIN32)
+        char buf[8];
+        state = GetEnvironmentVariableA("OWNERSHIP_GRID_POISON", buf, sizeof buf) > 0;
+#else
+        state = getenv("OWNERSHIP_GRID_POISON") != NULL;
+#endif
+    }
+    return state;
+}
 
 /* Open-addressed set of every freed address. 2^22 slots, at most half full. */
 #define POISON_SLOTS (1u << 22)
@@ -87,6 +106,10 @@ static void stop(const char* what, void* p) {
 #define POISON_STRING_HEADER (4 + 4 + 3 * sizeof(size_t))
 
 void __wrap_free(void* p) {
+    if (!poisoning()) {
+        __real_free(p);
+        return;
+    }
     if (!p) return;
     lock();
     int again = seen_or_record(p, 1);
@@ -107,6 +130,7 @@ void __wrap_free(void* p) {
 }
 
 void* __wrap_realloc(void* p, size_t n) {
+    if (!poisoning()) return __real_realloc(p, n);
     if (!p) return malloc(n);
     lock();
     int freed = seen_or_record(p, 0);

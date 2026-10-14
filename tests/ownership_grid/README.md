@@ -49,17 +49,20 @@ a sweep (an actor ended later, say), is growth, so it is a LEAK. A cell that
 ends actors ends them itself (`scheduler_reclaim_released`) before it reads
 the heap.
 
-`run.py` builds each cell twice: as it is, and against `poison_alloc.c`
-(linked with `-Wl,--wrap=free,--wrap=realloc`), which fills every freed
-block with 0xDD, never hands it back to the heap, and stops the program on a
-second free. To rerun one by hand:
+`run.py` builds each cell once, with `poison_alloc.c` linked
+(`-Wl,--wrap=free,--wrap=realloc`), and runs it twice. Its `free` and
+`realloc` pass straight through to the C heap unless `OWNERSHIP_GRID_POISON`
+is set, so the first run measures the program as it is. The second sets it:
+every freed block is then filled with 0xDD, never handed back to the heap,
+and a second free stops the program. To rerun one by hand:
 
     AE_CC="gcc -Wl,--wrap=free,--wrap=realloc" build/ae build \
         build/ownership_grid/cells/k1_p5_t7.ae --extra tests/ownership_grid/poison_alloc.c -o p.exe
     ./p.exe
+    OWNERSHIP_GRID_POISON=1 ./p.exe
 
-The poisoning build needs a gcc/ld linker: macOS's linker has no `--wrap`,
-so there it is skipped and no cell is UAF. The leak measurement needs an
+The poisoning allocator needs a gcc/ld linker: macOS's linker has no
+`--wrap`, so there the cells are built without it and no cell is UAF. The leak measurement needs an
 exact heap count (`mem.heap_in_use_exact()`: Windows, or a sanitizer
 allocator); elsewhere a cell prints that growth was not measured, and no cell
 is LEAK.
@@ -124,11 +127,31 @@ check then writes no baseline (a regression is recorded only on purpose, by
 check). With `--only`, `--update-baseline` rewrites only the lines of the
 cells it ran.
 
-The baseline was measured on Windows (MinGW gcc), where the heap count is
+The baseline was measured on Windows (MINGW64 gcc), where the heap count is
 exact. A few cells move between UAF and WRONG from run to run (whether the
-freed block was reused before the read), which the check ignores; an actor
-cell can read the heap a little early under heavy parallel load, which is
-why a worse cell is run again before it fails the check.
+freed block was reused before the read), which the check ignores. A cell
+that got worse is run again before it fails the check.
+
+The cells that spawn an actor per call (`K*-P11-T1`) end every released
+actor before the next call, and read the heap over 20 windows of 10 calls
+instead of 5 of 100: the scheduler keeps an ended actor's block for the next
+spawn, so the heap count moves by a block in some windows without a leak,
+and under load five such windows in a row read as growth (1 run in 72, with
+24 copies at once). A leak grows every window, so it is still reported (a
+list leaked per call reads 400 bytes per 10 calls); the 20 short windows
+made 240 runs under the same load all OK.
+
+## In CI
+
+windows.yml's `Windows / ownership grid [k/3]` jobs run the check on the
+default C path, a third of the cells each (`OWNERSHIP_GRID_SHARD=k/3`, the
+cells whose position modulo 3 is k-1, as `AE_SWEEP_SHARD` splits the test
+sweep), on MINGW64 with the runner's own Python
+(`OWNERSHIP_GRID_PYTHON`). Windows is where the heap count is exact, so it
+is where leaks are measured; the jobs upload the report, the cells and their
+logs. `--shard` runs one shard by hand:
+
+    make ownership-grid-check OWNERSHIP_GRID_ARGS="--shard 2/3"
 
 ## Adding a cell
 

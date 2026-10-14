@@ -333,6 +333,108 @@ jobs:
         retention-days: 30
 
   # ============================================================
+  # Ownership grid (tests/ownership_grid/README.md): the regression gate of
+  # the ownership design (docs/design/ownership-model.md). Each cell is a
+  # generated program that checks the values it stored and the heap's growth,
+  # built with a poisoning allocator linked in and run as it is and poisoned;
+  # the check fails when a cell is worse than tests/ownership_grid/baseline.txt
+  # (OK became anything else, LEAK became a compile error, a crash, a wrong
+  # value or a use after free), after running such a cell a second time.
+  #
+  # Windows only: its heap count is exact (mem.heap_in_use_exact), so it is
+  # where a leak is measured at all, and its linker has the --wrap the
+  # poisoning allocator needs. The default C path only; the
+  # -DAETHER_GCC_COMPAT=0 path gave the same status for every cell.
+  #
+  # Three shards of about 585 cells, split by position as the test sweep is
+  # (OWNERSHIP_GRID_SHARD, like AE_SWEEP_SHARD). These runners build a test
+  # program in about 1.9 s of a job (the sweep's 689 builds take 320 s on 4
+  # cores), and a cell is one build and two short runs, about 2.4 s, so the
+  # grid is about 17 minutes of four jobs. Two shards would take about 12
+  # minutes each with the toolchain build; three take about 9, which ends
+  # them before build-mingw's 15.
+  # ============================================================
+  ownership-grid:
+    name: Windows / ownership grid [${{ matrix.part }}]
+    runs-on: windows-latest
+    # Twice the expected run, as for build-mingw (#2772).
+    timeout-minutes: 20
+    # A cross-build failure skips this too, as it skips build-mingw.
+    needs: windows-cross
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - part: "1/3"
+            slot: 1
+          - part: "2/3"
+            slot: 2
+          - part: "3/3"
+            slot: 3
+
+    defaults:
+      run:
+        shell: msys2 {0}
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    # run.py runs on the runner's own Python: the MSYS2 environment below has
+    # none, and this one is a native Windows Python, which is what run.py
+    # expects (it turns off Windows' crash dialog for the cells it starts).
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.12"
+
+    # MINGW64 (msvcrt), the C runtime the baseline was measured on: a heap
+    # count is the C runtime's own.
+    - name: Set up MSYS2 / MinGW-w64
+      uses: msys2/setup-msys2@v2
+      with:
+        msystem: MINGW64
+        update: false
+        install: mingw-w64-x86_64-gcc mingw-w64-x86_64-zlib mingw-w64-x86_64-openssl pkg-config make
+
+    # Each cell builds and runs a new executable; as in ci.yml's Windows leg.
+    # Best-effort: the job must never fail because Defender was not adjustable.
+    - name: Exclude the work tree from Windows Defender
+      shell: pwsh
+      continue-on-error: true
+      run: |
+        Add-MpPreference -ExclusionPath "D:\a" -ErrorAction SilentlyContinue
+        Add-MpPreference -ExclusionPath "$env:RUNNER_TEMP" -ErrorAction SilentlyContinue
+        Add-MpPreference -ExclusionPath "$env:TEMP" -ErrorAction SilentlyContinue
+        foreach ($p in 'gcc.exe','cc1.exe','collect2.exe','ld.exe','as.exe','aetherc.exe','ae.exe','python.exe') {
+          Add-MpPreference -ExclusionProcess $p -ErrorAction SilentlyContinue
+        }
+
+    - name: Build the toolchain
+      run: make -j4 compiler ae stdlib
+
+    - name: Check the ownership grid against its baseline
+      timeout-minutes: 15
+      run: |
+        OWNERSHIP_GRID_SHARD="${{ matrix.part }}" make ownership-grid-check \
+          OWNERSHIP_GRID_PYTHON="$(cygpath -u "$pythonLocation")/python.exe"
+
+    # The report, the cells' programs and their build and run logs: what a
+    # failure is read from.
+    - name: Upload the grid's report
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: ownership-grid-${{ matrix.slot }}
+        path: |
+          build/ownership_grid/report.md
+          build/ownership_grid/report.csv
+          build/ownership_grid/cells/
+          build/ownership_grid/gcc/bin/
+        if-no-files-found: ignore
+        retention-days: 14
+
+  # ============================================================
   # MSVC compatibility check — ensure headers compile under cl.exe
   # No full build yet (runtime needs Win32 threading wiring), but
   # we verify that all public headers pass the MSVC parser, and that

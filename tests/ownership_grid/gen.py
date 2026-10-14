@@ -935,7 +935,7 @@ def check_fn():
 
 
 def program(g, kind, place, transfer, shape_lines, round_lines, main_setup=None, round_params="w: string",
-            round_args='"w"', note="", calls=CALLS):
+            round_args='"w"', note="", calls=CALLS, tries=5):
     """Assemble a whole cell program."""
     cell = g.cell
     head = [
@@ -955,7 +955,8 @@ def program(g, kind, place, transfer, shape_lines, round_lines, main_setup=None,
     head += [
         "// Expected: every value read is the one stored (else WRONG, exit 12),",
         "// and %d calls of the shape do not grow the heap (else LEAK, exit 13)." % calls,
-        "// Also built against tests/ownership_grid/poison_alloc.c by run.py.",
+        "// run.py links tests/ownership_grid/poison_alloc.c and runs it a second time",
+        "// with OWNERSHIP_GRID_POISON=1, which poisons every freed block.",
         "",
     ]
     out = head
@@ -981,7 +982,7 @@ def program(g, kind, place, transfer, shape_lines, round_lines, main_setup=None,
         '        println("OK (growth not measured: the heap count is not exact here)")',
         "        return",
         "    }",
-        "    grown = mem.steady_growth(|| { round(%s) }, 5)" % round_args,
+        "    grown = mem.steady_growth(|| { round(%s) }, %d)" % (round_args, tries),
         "    if grown != 0 {",
         '        println("LEAK: ${grown} bytes per %d calls")' % calls,
         "        exit(13)",
@@ -1280,11 +1281,25 @@ STATE_DECL = {
     "K8": "state Doc[2] v",
 }
 
+# Why the actor-per-call cells read the heap over 20 windows of 10 calls: an
+# actor the scheduler ends keeps its block for the next spawn (a tombstone),
+# so the heap count moves by a block in some windows while the actors leak
+# nothing. Over 40 windows of 100 calls K1-P11-T1 grew in 9 and shrank by
+# 1520 bytes in total; under 24 copies at once, 1 run in 72 met 5 windows in a
+# row that moved, which mem.steady_growth reads as growth. A leak grows every
+# window, so it still fails; 20 shorter windows make a false one negligible.
+P11_T1_NOTE = ("One actor per call: set, asked, then released (destroy_state), and every\n"
+               "released actor ended before the next call. The scheduler keeps an ended\n"
+               "actor's block for the next spawn, so the heap moves by a block in some\n"
+               "windows without a leak: growth is read over 20 windows of 10 calls, and a\n"
+               "leak, which grows every window, is still reported.")
+
 ACTOR_NOTE = ("The actor is spawned once in main and asked after each call, so the\n"
               "heap is read with its mailbox drained.")
 
 
-def actor_program(g, kind, place, t, actor_lines, shape_lines, round_lines, spawn=True, note=""):
+def actor_program(g, kind, place, t, actor_lines, shape_lines, round_lines, spawn=True, note="", calls=CALLS,
+                  tries=5):
     g.decl("message Check", "message Check {}")
     g.decl("message Ack", "message Ack {\n    n: int\n}")
     g.decl("actor Holder", "\n".join(actor_lines))
@@ -1292,7 +1307,7 @@ def actor_program(g, kind, place, t, actor_lines, shape_lines, round_lines, spaw
                    main_setup=["h = spawn(Holder())"] if spawn else None,
                    round_params="w: string, h: ptr" if spawn else "w: string",
                    round_args='"w", h' if spawn else '"w"',
-                   note=(note or (ACTOR_NOTE if spawn else "")))
+                   note=(note or (ACTOR_NOTE if spawn else "")), calls=calls, tries=tries)
 
 
 def state_cell(kind, t):
@@ -1361,8 +1376,8 @@ def state_cell(kind, t):
                                                 "while scheduler_reclaim_released() > 0 {", "}"]
         return actor_program(g, kind, (pid, title), t, actor,
                              shape_fn(None, body, comment="One actor per call, released when the call is done."),
-                             ["shape(w, k)"], spawn=False,
-                             note="One actor per call: set, asked, then released (destroy_state).")
+                             ["shape(w, k)"], spawn=False, calls=10, tries=20,
+                             note=P11_T1_NOTE)
     body = ask + shape_after
     return actor_program(g, kind, (pid, title), t, actor,
                          shape_fn(None, body, params="w: string, k: int, h: ptr",

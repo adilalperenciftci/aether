@@ -4,8 +4,9 @@
     python tests/ownership_grid/run.py [options]
 
 Every cell gen.py makes is written to build/ownership_grid/cells/, built
-with build/ae twice (as it is, and against poison_alloc.c with
--Wl,--wrap=free,--wrap=realloc), run, and given one status:
+with build/ae once, linking poison_alloc.c (-Wl,--wrap=free,--wrap=realloc),
+run twice (as it is, and with OWNERSHIP_GRID_POISON=1, which poisons every
+freed block), and given one status:
 
   OK         every value right, no growth, nothing under the poisoning allocator
   LEAK       mem.steady_growth is not 0 (the bytes per 100 calls are kept)
@@ -28,6 +29,8 @@ Options:
   --no-shim              skip the poisoning allocator build (no UAF column)
   --keep-bins            keep each cell's binaries (deleted after its runs otherwise)
   --report-only          rewrite report.md and report.csv from <out>/results.json
+  --shard k/n            only shard k of n (k may be a list, 2,3/3), as CI splits the grid;
+                         OWNERSHIP_GRID_SHARD sets it too
   --out DIR              output directory (default build/ownership_grid)
 
 Writes <out>/report.md and <out>/report.csv.
@@ -201,7 +204,12 @@ KEEP_BINS = False
 
 
 def run_cell(cell, mode, out, use_shim):
-    """Build and run one cell under one C path; a result dict."""
+    """Build one cell under one C path, run it plain and poisoned; a result dict.
+
+    The one build links poison_alloc.c (where the linker has --wrap), whose
+    free and realloc pass through to the C heap unless OWNERSHIP_GRID_POISON
+    is set: the plain run measures leaks on the C heap as it is, the poisoned
+    run catches double frees and reads of freed blocks."""
     src = os.path.join(out, "cells", cell.file)
     bindir = os.path.join(out, mode.name, "bin")
     stem = os.path.join(bindir, cell.file[:-3])
@@ -209,10 +217,13 @@ def run_cell(cell, mode, out, use_shim):
            "file": os.path.relpath(src, ROOT).replace("\\", "/"), "mode": mode.name,
            "status": "", "detail": "", "leak": "", "run": "", "shim": "", "build_s": 0.0, "run_s": 0.0}
     exe = stem + EXE
-    for f in (exe, stem + ".p" + EXE):
-        if os.path.exists(f):
-            os.remove(f)
-    rc, log, secs = run_cmd([AE, "build", src, "-o", exe], build_env(out, mode.env_cc), bindir, BUILD_TIMEOUT)
+    if os.path.exists(exe):
+        os.remove(exe)
+    argv = [AE, "build", src, "-o", exe]
+    if use_shim:
+        argv[3:3] = ["--extra", SHIM]
+    rc, log, secs = run_cmd(argv, build_env(out, mode.shim_cc if use_shim else mode.env_cc), bindir,
+                            BUILD_TIMEOUT)
     res["build_s"] = secs
     with open(stem + ".build.log", "w", encoding="utf-8") as f:
         f.write(log)
@@ -223,7 +234,9 @@ def run_cell(cell, mode, out, use_shim):
         stage, line = compile_error(log)
         res["status"], res["detail"] = "NOCOMPILE", "%s: %s" % (stage, line[:300])
         return res
-    rc, outp, secs = run_cmd([exe], dict(os.environ), bindir, RUN_TIMEOUT)
+    plain_env = dict(os.environ)
+    plain_env.pop("OWNERSHIP_GRID_POISON", None)
+    rc, outp, secs = run_cmd([exe], plain_env, bindir, RUN_TIMEOUT)
     res["run_s"] = secs
     with open(stem + ".run.log", "w", encoding="utf-8") as f:
         f.write(outp)
@@ -231,31 +244,21 @@ def run_cell(cell, mode, out, use_shim):
     res["run"] = describe_exit(rc)
     shim = None
     if use_shim:
-        pexe = stem + ".p" + EXE
-        prc, plog, psecs = run_cmd([AE, "build", src, "--extra", SHIM, "-o", pexe],
-                                   build_env(out, mode.shim_cc), bindir, BUILD_TIMEOUT)
-        res["build_s"] += psecs
-        with open(stem + ".p.build.log", "w", encoding="utf-8") as f:
-            f.write(plog)
-        if prc != 0 or not os.path.exists(pexe):
-            shim = ("FAILED", "the poisoning build failed: " + compile_error(plog)[1][:200])
-            res["shim"] = "build failed"
-        else:
-            src_rc, soutp, ssecs = run_cmd([pexe], dict(os.environ), bindir, RUN_TIMEOUT)
-            res["run_s"] += ssecs
-            with open(stem + ".p.run.log", "w", encoding="utf-8") as f:
-                f.write(soutp)
-            res["shim"] = describe_exit(src_rc)
-            shim = classify_shim(src_rc, soutp)
+        poison_env = dict(plain_env)
+        poison_env["OWNERSHIP_GRID_POISON"] = "1"
+        src_rc, soutp, ssecs = run_cmd([exe], poison_env, bindir, RUN_TIMEOUT)
+        res["run_s"] += ssecs
+        with open(stem + ".p.run.log", "w", encoding="utf-8") as f:
+            f.write(soutp)
+        res["shim"] = describe_exit(src_rc)
+        shim = classify_shim(src_rc, soutp)
     status, detail = combine(normal, shim)
     res["status"], res["detail"] = status, detail
     if normal[0] == "LEAK":
         res["leak"] = normal[2]
-    if not KEEP_BINS:
-        # The program is the reproducer; its binaries are 4 GB over the grid.
-        for f in (exe, stem + ".p" + EXE):
-            if os.path.exists(f):
-                os.remove(f)
+    if not KEEP_BINS and os.path.exists(exe):
+        # The program is the reproducer; the binaries come to 2 GB over the grid.
+        os.remove(exe)
     return res
 
 
@@ -275,9 +278,12 @@ def classify_run(rc, out):
     if rc == EXIT_WRONG:
         return "WRONG", first_line(out, "WRONG:"), ""
     if rc == EXIT_LEAK:
-        m = re.search(r"LEAK: (-?\d+) bytes", out)
-        n = m.group(1) if m else "?"
-        return "LEAK", "%s bytes per 100 calls" % n, n
+        m = re.search(r"LEAK: (-?\d+) bytes per (\d+) calls", out)
+        if not m:
+            return "LEAK", "growth not read from the output", "?"
+        n = int(m.group(1)) * 100 // max(1, int(m.group(2)))
+        per = "" if m.group(2) == "100" else " (%s per %s calls)" % (m.group(1), m.group(2))
+        return "LEAK", "%d bytes per 100 calls%s" % (n, per), str(n)
     tail = " / ".join(ln.strip() for ln in out.strip().splitlines()[-2:])
     return "CRASH", "%s%s" % (describe_exit(rc), (": " + tail[:200]) if tail else ""), ""
 
@@ -609,6 +615,21 @@ def write_report(out, results, modes, wall, njobs, check_text=None):
 # ---------------------------------------------------------------------------
 
 
+def shard_cells(cells, spec):
+    """The cells of shard k of n (k may be k,k,...): the ones whose 0-based
+    position in the generator's order, modulo n, is k-1, as
+    tests/scripts/sweep_shard.sh splits the test sweep. The order interleaves
+    kinds and places, so every shard gets a like mix of slow and fast cells."""
+    m = re.fullmatch(r"(\d+(?:,\d+)*)/(\d+)", spec.strip())
+    if not m:
+        raise SystemExit("ownership grid: --shard must be k/n or k,k.../n, got '%s'" % spec)
+    n = int(m.group(2))
+    ks = {int(k) for k in m.group(1).split(",")}
+    if n < 1 or any(k < 1 or k > n for k in ks):
+        raise SystemExit("ownership grid: --shard must have 1 <= k <= n, got '%s'" % spec)
+    return [c for i, c in enumerate(cells) if (i % n) + 1 in ks]
+
+
 def main(argv):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--mode", default="gcc", choices=["gcc", "nogcc", "both"])
@@ -620,6 +641,8 @@ def main(argv):
     ap.add_argument("--keep-bins", action="store_true", help="keep each cell's two binaries")
     ap.add_argument("--out", default=os.path.join(ROOT, "build", "ownership_grid"))
     ap.add_argument("--report-only", action="store_true", help="rewrite the report from <out>/results.json")
+    ap.add_argument("--shard", default=os.environ.get("OWNERSHIP_GRID_SHARD", ""),
+                    help="k/n or k,k.../n: only the cells whose position modulo n is k-1")
     a = ap.parse_args(argv)
     global KEEP_BINS
     KEEP_BINS = a.keep_bins
@@ -645,14 +668,17 @@ def main(argv):
     if a.only:
         pats = a.only.split(",")
         cells = [c for c in cells if any(fnmatch.fnmatch(c.id, p) for p in pats)]
+    if a.shard:
+        cells = shard_cells(cells, a.shard)
     os.makedirs(os.path.join(out, "cells"), exist_ok=True)
     for m in modes:
         os.makedirs(os.path.join(out, m.name, "bin"), exist_ok=True)
     for c in cells:
         with open(os.path.join(out, "cells", c.file), "w", encoding="utf-8", newline="\n") as f:
             f.write(c.source)
-    print("ownership grid: %d cells x %d C path(s), %d jobs, poisoning allocator %s"
-          % (len(cells), len(modes), jobs, "on" if use_shim else "off"), flush=True)
+    print("ownership grid: %d cells x %d C path(s)%s, %d jobs, poisoning allocator %s"
+          % (len(cells), len(modes), (", shard " + a.shard) if a.shard else "", jobs,
+             "on" if use_shim else "off"), flush=True)
     t0 = time.time()
     results = []
     lock = threading.Lock()
