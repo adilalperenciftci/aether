@@ -4,36 +4,52 @@
     python tests/ownership_grid/run.py [options]
 
 Every cell gen.py makes is written to build/ownership_grid/cells/, built
-with build/ae once, linking poison_alloc.c (-Wl,--wrap=free,--wrap=realloc),
-run twice (as it is, and with OWNERSHIP_GRID_POISON=1, which poisons every
-freed block), and given one status:
+with build/ae once, linking poison_alloc.c (-Wl,--wrap=free,--wrap=realloc
+and the runtime's NUMA frees), run twice (as it is, and with
+OWNERSHIP_GRID_POISON=1, which poisons every freed block), and given one
+status:
 
-  OK         every value right, no growth, nothing under the poisoning allocator
-  LEAK       mem.steady_growth is not 0 (the bytes per 100 calls are kept)
-  UAF        under the poisoning allocator: a double free, a crash, or a value
-             that is wrong only there (a read of a freed, 0xDD-filled block)
-  WRONG      a value is wrong without the poisoning allocator
-  NOCOMPILE  aetherc refused the program, or the C did not compile (which one
-             is kept)
-  CRASH      the program died without the poisoning allocator, and nothing
-             under it pins a memory error
-  TIMEOUT    the program did not finish
+  OK          every value right, no growth, nothing under the poisoning allocator
+  UNMEASURED  values right and nothing under the poisoning allocator, but the
+              heap count is not exact here (mem.heap_in_use_exact), so growth
+              was not measured
+  LEAK        mem.steady_growth is not 0; the size kept is the median of three
+              runs, in bytes per 100 calls
+  INCOMPLETE  the poisoned run did not finish (a timeout) or could not be built,
+              so the use-after-free check did not happen
+  NOCOMPILE   aetherc refused the program, or the C did not compile (which one
+              is kept)
+  TIMEOUT     the build or the plain run did not finish
+  CRASH       the plain run died, and the poisoned run pins no memory error
+  WRONG       a value is wrong in the plain run
+  UAF         the poisoned run stopped on a double free, crashed (an access
+              violation, heap corruption), or read a wrong value
+  HARNESS     the runner itself failed on the cell twice (never a finding: the
+              check fails and says so)
+
+Each cell also has a TARGET, the status the approved design wants (gen.py):
+OK, or REFUSED for a function that frees a parameter it borrows. The report
+says how far each cell is from it.
 
 Options:
   --mode gcc|nogcc|both  the C path: gcc is the default build, nogcc builds with
                          AE_CC="<cc> -DAETHER_GCC_COMPAT=0" (default gcc)
   --jobs N               parallel cells (default NPROC, else the CPU count / 2)
   --only PAT[,PAT]       only cells whose id matches one of the fnmatch patterns
-  --check                compare with baseline.txt and exit 1 when a cell got worse
-  --update-baseline      write baseline.txt from this run (an --only run updates its cells)
-  --no-shim              skip the poisoning allocator build (no UAF column)
-  --keep-bins            keep each cell's binaries (deleted after its runs otherwise)
-  --report-only          rewrite report.md and report.csv from <out>/results.json
   --shard k/n            only shard k of n (k may be a list, 2,3/3), as CI splits the grid;
                          OWNERSHIP_GRID_SHARD sets it too
+  --check                compare with baseline.txt; exit 1 when a cell got worse or a
+                         baseline cell is no longer generated, 2 on a harness failure
+  --update-baseline      write baseline.txt from this run (an --only run updates its cells)
+  --no-shim              build without the poisoning allocator (no UAF column)
+  --keep-bins            keep each cell's binary (deleted after its runs otherwise)
+  --report-only          rewrite report.md and report.csv from <out>/results.json
   --out DIR              output directory (default build/ownership_grid)
 
-Writes <out>/report.md and <out>/report.csv.
+OWNERSHIP_GRID_FAULT=<cell id> makes the runner fail on that cell (a test of
+the harness-failure path: tests/ownership_grid/test_runner.py).
+
+Writes <out>/report.md, <out>/report.csv and <out>/results.json.
 """
 
 import argparse
@@ -45,11 +61,12 @@ import json
 import os
 import platform
 import re
-import shutil
+import statistics
 import subprocess
 import sys
 import threading
 import time
+import traceback
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
@@ -61,16 +78,28 @@ EXE = ".exe" if WINDOWS else ""
 AE = os.path.join(ROOT, "build", "ae" + EXE)
 SHIM = os.path.join(HERE, "poison_alloc.c")
 BASELINE = os.path.join(HERE, "baseline.txt")
+WRAPS = "-Wl,--wrap=free,--wrap=realloc,--wrap=aether_numa_free,--wrap=aether_numa_free_aligned"
 
 BUILD_TIMEOUT = 600
 RUN_TIMEOUT = 120
-EXIT_WRONG, EXIT_LEAK, EXIT_POISON = 12, 13, 86
+EXIT_WRONG, EXIT_LEAK, EXIT_POISON, EXIT_POISON_HARNESS = 12, 13, 86, 87
 
-STATUSES = ["OK", "LEAK", "NOCOMPILE", "TIMEOUT", "CRASH", "WRONG", "UAF"]
+STATUSES = ["OK", "UNMEASURED", "LEAK", "INCOMPLETE", "NOCOMPILE", "TIMEOUT", "CRASH", "WRONG", "UAF",
+            "HARNESS"]
 # How bad a status is, for the check: a move to a higher tier is a regression.
-TIER = {"OK": 0, "LEAK": 1, "NOCOMPILE": 2, "TIMEOUT": 3, "CRASH": 3, "WRONG": 3, "UAF": 3}
+# UNMEASURED is compared apart (see compare); HARNESS fails the check anyway.
+TIER = {"OK": 0, "UNMEASURED": 0, "LEAK": 1, "INCOMPLETE": 2, "NOCOMPILE": 2, "TIMEOUT": 3, "CRASH": 3,
+        "WRONG": 3, "UAF": 3, "HARNESS": 4}
 # The order the worst cells are listed in.
-SEVERITY = {"UAF": 0, "WRONG": 1, "CRASH": 2, "TIMEOUT": 3, "NOCOMPILE": 4, "LEAK": 5, "OK": 6}
+SEVERITY = {"HARNESS": -1, "UAF": 0, "WRONG": 1, "CRASH": 2, "TIMEOUT": 3, "INCOMPLETE": 4, "NOCOMPILE": 5,
+            "LEAK": 6, "UNMEASURED": 7, "OK": 8}
+
+# A LEAK cell is worse than its baseline when it leaks more than twice as
+# much and more than this many bytes per 100 calls more. Measured: the same
+# cell's growth moved by up to about 1 KB per 100 calls between runs (a few
+# allocator blocks), never by a factor of two; a real new leak in a shape is
+# at least one string or environment per call, 1.8 KB or more per 100 calls.
+LEAK_NOISE_BYTES = 2048
 
 WIN_CODES = {
     0xC0000005: "access violation",
@@ -125,6 +154,29 @@ def run_cmd(argv, env, cwd, timeout):
     return rc, out.decode("utf-8", "replace"), time.time() - t0
 
 
+# Files that could not be removed during the run (Windows holds a file a
+# process is still exiting from, or that Defender is scanning); retried at
+# the end of the run, and reported, never a failure.
+LEFT_FILES = []
+LEFT_LOCK = threading.Lock()
+
+
+def remove_quietly(path, tries=8):
+    """Removes path, retrying with a short backoff; False if it is still there."""
+    delay = 0.05
+    for _ in range(tries):
+        try:
+            if os.path.exists(path):
+                os.remove(path)
+            return True
+        except OSError:
+            time.sleep(delay)
+            delay = min(delay * 2, 1.0)
+    with LEFT_LOCK:
+        LEFT_FILES.append(path)
+    return False
+
+
 def command_output(argv):
     """A command's first line of output, or "" when it cannot run (a native
     Python under MSYS2 make, for one, finds no `git` on its PATH)."""
@@ -156,8 +208,7 @@ def describe_exit(rc):
 ERROR_LINE = re.compile(r"error", re.I)
 C_ERROR = re.compile(r"(\.c|\.h|\.ae):\d+(:\d+)?: (fatal )?error|undefined reference|ld returned|collect2")
 AETHERC_ERROR = re.compile(r"error\[E\d+\]|Type checking failed|aborting: \d+ error|^error: ", re.M)
-
-
+SHIM_ERROR = re.compile(r"__wrap_|__real_|poison_alloc")
 PATH_PREFIX = re.compile(r"(?:[A-Za-z]:)?[\\/][^\s:]*[\\/](?=[^\\/\s:]+\.(?:ae|c|h):)")
 
 
@@ -180,7 +231,7 @@ class Mode:
         base = os.environ.get("AE_CC") or os.environ.get("CC") or ("gcc" if WINDOWS else "cc")
         self.cc = base + (" -DAETHER_GCC_COMPAT=0" if name == "nogcc" else "")
         self.env_cc = None if (name == "gcc" and not os.environ.get("AE_CC")) else self.cc
-        self.shim_cc = self.cc + " -Wl,--wrap=free,--wrap=realloc"
+        self.shim_cc = self.cc + " " + WRAPS
 
 
 def shim_supported():
@@ -203,62 +254,124 @@ def build_env(out, cc):
 KEEP_BINS = False
 
 
-def run_cell(cell, mode, out, use_shim):
-    """Build one cell under one C path, run it plain and poisoned; a result dict.
+def new_result(cell, mode, src):
+    return {"id": cell.id, "kind": cell.kind, "place": cell.place, "transfer": cell.transfer,
+            "target": cell.target, "file": os.path.relpath(src, ROOT).replace("\\", "/"), "mode": mode.name,
+            "status": "", "detail": "", "leak": "", "run": "", "shim": "", "build_s": 0.0, "run_s": 0.0}
 
-    The one build links poison_alloc.c (where the linker has --wrap), whose
-    free and realloc pass through to the C heap unless OWNERSHIP_GRID_POISON
-    is set: the plain run measures leaks on the C heap as it is, the poisoned
-    run catches double frees and reads of freed blocks."""
-    src = os.path.join(out, "cells", cell.file)
-    bindir = os.path.join(out, mode.name, "bin")
-    stem = os.path.join(bindir, cell.file[:-3])
-    res = {"id": cell.id, "kind": cell.kind, "place": cell.place, "transfer": cell.transfer,
-           "file": os.path.relpath(src, ROOT).replace("\\", "/"), "mode": mode.name,
-           "status": "", "detail": "", "leak": "", "run": "", "shim": "", "build_s": 0.0, "run_s": 0.0}
+
+def build(cell, mode, out, src, stem, use_shim, res):
+    """Builds the cell; (exe, None) or (None, (status, detail))."""
     exe = stem + EXE
-    if os.path.exists(exe):
-        os.remove(exe)
+    if not remove_quietly(exe):
+        # A binary from an earlier run that Windows still holds: build beside it.
+        exe = "%s.%d%s" % (stem, os.getpid(), EXE)
+        remove_quietly(exe)
     argv = [AE, "build", src, "-o", exe]
     if use_shim:
         argv[3:3] = ["--extra", SHIM]
-    rc, log, secs = run_cmd(argv, build_env(out, mode.shim_cc if use_shim else mode.env_cc), bindir,
-                            BUILD_TIMEOUT)
-    res["build_s"] = secs
+    rc, log, secs = run_cmd(argv, build_env(out, mode.shim_cc if use_shim else mode.env_cc),
+                            os.path.dirname(stem), BUILD_TIMEOUT)
+    res["build_s"] += secs
     with open(stem + ".build.log", "w", encoding="utf-8") as f:
         f.write(log)
+    if rc is None:
+        return None, ("TIMEOUT", "the build did not finish in %d s" % BUILD_TIMEOUT)
     if rc != 0 or not os.path.exists(exe):
-        if rc is None:
-            res["status"], res["detail"] = "NOCOMPILE", "build timed out"
-            return res
         stage, line = compile_error(log)
-        res["status"], res["detail"] = "NOCOMPILE", "%s: %s" % (stage, line[:300])
+        if use_shim and SHIM_ERROR.search(log):
+            return None, ("SHIM", "the build with poison_alloc.c failed: " + line[:200])
+        return None, ("NOCOMPILE", "%s: %s" % (stage, line[:300]))
+    return exe, None
+
+
+def run_cell(cell, mode, out, use_shim):
+    """Builds one cell under one C path, runs it plain and poisoned; a result dict.
+
+    The one build links poison_alloc.c (where the linker has --wrap), whose
+    frees pass through to the C heap unless OWNERSHIP_GRID_POISON is set: the
+    plain run measures leaks on the C heap as it is, the poisoned run catches
+    double frees and reads of freed blocks."""
+    if os.environ.get("OWNERSHIP_GRID_FAULT") == cell.id:
+        raise RuntimeError("OWNERSHIP_GRID_FAULT names this cell")
+    src = os.path.join(out, "cells", cell.file)
+    stem = os.path.join(out, mode.name, "bin", cell.file[:-3])
+    res = new_result(cell, mode, src)
+    exe, failed = build(cell, mode, out, src, stem, use_shim, res)
+    shim_built = use_shim
+    if failed and failed[0] == "SHIM":
+        # The cell may build without the allocator: run it plain, and say the
+        # use-after-free check did not happen.
+        shim_note = failed[1]
+        shim_built = False
+        exe, failed = build(cell, mode, out, src, stem, False, res)
+    else:
+        shim_note = ""
+    if failed:
+        res["status"], res["detail"] = failed
         return res
     plain_env = dict(os.environ)
     plain_env.pop("OWNERSHIP_GRID_POISON", None)
-    rc, outp, secs = run_cmd([exe], plain_env, bindir, RUN_TIMEOUT)
-    res["run_s"] = secs
+    rc, outp, secs = run_cmd([exe], plain_env, os.path.dirname(stem), RUN_TIMEOUT)
+    res["run_s"] += secs
     with open(stem + ".run.log", "w", encoding="utf-8") as f:
         f.write(outp)
-    normal = classify_run(rc, outp)
+    plain = classify_run(rc, outp)
     res["run"] = describe_exit(rc)
+    if plain[0] == "LEAK":
+        # Two more runs: the size kept is the median, steadier than one run.
+        sizes = [plain[2]]
+        for _ in range(2):
+            rc2, outp2, secs2 = run_cmd([exe], plain_env, os.path.dirname(stem), RUN_TIMEOUT)
+            res["run_s"] += secs2
+            again = classify_run(rc2, outp2)
+            if again[0] == "LEAK":
+                sizes.append(again[2])
+        size = int(statistics.median(sizes))
+        plain = ("LEAK", "%d bytes per 100 calls%s" % (size, plain[3]), size, plain[3])
     shim = None
-    if use_shim:
+    if shim_built:
         poison_env = dict(plain_env)
         poison_env["OWNERSHIP_GRID_POISON"] = "1"
-        src_rc, soutp, ssecs = run_cmd([exe], poison_env, bindir, RUN_TIMEOUT)
+        src_rc, soutp, ssecs = run_cmd([exe], poison_env, os.path.dirname(stem), RUN_TIMEOUT)
         res["run_s"] += ssecs
         with open(stem + ".p.run.log", "w", encoding="utf-8") as f:
             f.write(soutp)
         res["shim"] = describe_exit(src_rc)
         shim = classify_shim(src_rc, soutp)
-    status, detail = combine(normal, shim)
+    elif use_shim:
+        shim = ("NOTRUN", shim_note)
+    status, detail = combine(plain, shim)
     res["status"], res["detail"] = status, detail
-    if normal[0] == "LEAK":
-        res["leak"] = normal[2]
-    if not KEEP_BINS and os.path.exists(exe):
+    if status == "LEAK":
+        res["leak"] = str(plain[2])
+    if not KEEP_BINS:
         # The program is the reproducer; the binaries come to 2 GB over the grid.
-        os.remove(exe)
+        remove_quietly(exe)
+    return res
+
+
+def run_cell_safely(cell, mode, out, use_shim):
+    """run_cell, with any fault of the runner itself caught: the cell is run
+    once more, and a second fault makes it HARNESS, which fails the check
+    with the fault named, never a traceback that ends the whole run."""
+    errors = []
+    for _ in range(2):
+        try:
+            return run_cell(cell, mode, out, use_shim)
+        except Exception as e:  # noqa: BLE001, the point is to catch anything
+            errors.append("%s: %s" % (type(e).__name__, e))
+            last = traceback.format_exc()
+    src = os.path.join(out, "cells", cell.file)
+    res = new_result(cell, mode, src)
+    res["status"] = "HARNESS"
+    res["detail"] = "the runner failed on this cell twice: " + "; ".join(errors)
+    try:
+        with open(os.path.join(out, mode.name, "bin", cell.file[:-3] + ".harness.log"), "w",
+                  encoding="utf-8") as f:
+            f.write(last)
+    except OSError:
+        pass
     return res
 
 
@@ -270,58 +383,93 @@ def first_line(text, prefix):
 
 
 def classify_run(rc, out):
-    """(status, detail, leak bytes) of the run without the shim."""
+    """(status, detail, leak bytes per 100 calls, note) of the plain run."""
     if rc is None:
-        return "TIMEOUT", "no exit within %d s" % RUN_TIMEOUT, ""
+        return "TIMEOUT", "no exit within %d s" % RUN_TIMEOUT, 0, ""
     if rc == 0:
-        return "OK", "", ""
+        if "growth not measured" in out:
+            return "UNMEASURED", "the heap count is not exact here", 0, ""
+        return "OK", "", 0, ""
     if rc == EXIT_WRONG:
-        return "WRONG", first_line(out, "WRONG:"), ""
+        return "WRONG", first_line(out, "WRONG:"), 0, ""
     if rc == EXIT_LEAK:
         m = re.search(r"LEAK: (-?\d+) bytes per (\d+) calls", out)
         if not m:
-            return "LEAK", "growth not read from the output", "?"
+            return "LEAK", "growth not read from the output", 0, ""
         n = int(m.group(1)) * 100 // max(1, int(m.group(2)))
-        per = "" if m.group(2) == "100" else " (%s per %s calls)" % (m.group(1), m.group(2))
-        return "LEAK", "%d bytes per 100 calls%s" % (n, per), str(n)
+        note = "" if m.group(2) == "100" else " (measured per %s calls)" % m.group(2)
+        return "LEAK", "%d bytes per 100 calls%s" % (n, note), abs(n), note
     tail = " / ".join(ln.strip() for ln in out.strip().splitlines()[-2:])
-    return "CRASH", "%s%s" % (describe_exit(rc), (": " + tail[:200]) if tail else ""), ""
+    return "CRASH", "%s%s" % (describe_exit(rc), (": " + tail[:200]) if tail else ""), 0, ""
 
 
 def classify_shim(rc, out):
-    """('UAF' | 'CLEAN' | 'TIMEOUT', detail) of the run under the poisoning allocator."""
+    """(kind, detail) of the poisoned run: CLEAN, DOUBLEFREE, CRASH (a memory
+    fault), WRONG, OTHER (another end), TIMEOUT or HARNESS."""
     if rc is None:
-        return "TIMEOUT", "timed out under the poisoning allocator"
+        return "TIMEOUT", "the poisoned run did not finish in %d s" % RUN_TIMEOUT
     if rc in (0, EXIT_LEAK):  # growth means nothing there: nothing is freed
         return "CLEAN", ""
     if rc == EXIT_POISON:
-        return "UAF", first_line(out, "POISON:") or "double free"
+        return "DOUBLEFREE", first_line(out, "POISON:") or "double free"
+    if rc == EXIT_POISON_HARNESS:
+        return "HARNESS", first_line(out, "POISON HARNESS:") or "the poisoning allocator failed"
     if rc == EXIT_WRONG:
-        return "UAF", "under the poisoning allocator: " + first_line(out, "WRONG:")
-    return "UAF", "under the poisoning allocator: " + describe_exit(rc)
+        return "WRONG", "poisoned: " + first_line(out, "WRONG:")
+    if is_memory_fault(rc):
+        return "CRASH", "poisoned: " + describe_exit(rc)
+    # A stack overflow, a panic's abort or any other end: no evidence of a
+    # freed block, so the plain run's status stands.
+    return "OTHER", "poisoned: " + describe_exit(rc)
 
 
-def combine(normal, shim):
-    st, detail, _ = normal
-    if shim and shim[0] == "UAF" and shim[1].startswith("POISON"):
-        return "UAF", shim[1] + ("" if st == "OK" else " (without it: %s %s)" % (st, detail)).rstrip()
+def is_memory_fault(rc):
+    """An end that a read or a free of freed memory makes: an access
+    violation, heap corruption or a fast fail on Windows; SIGSEGV, SIGBUS or
+    glibc's abort on a bad free elsewhere."""
+    if WINDOWS:
+        return (rc & 0xFFFFFFFF) in (0xC0000005, 0xC0000374, 0xC0000409)
+    return rc in (-11, -7, -6)
+
+
+def combine(plain, shim):
+    """One status from the plain run and the poisoned one (None: not built
+    with the allocator, by choice or on a platform without --wrap)."""
+    st, detail = plain[0], plain[1]
+    besides = "" if st in ("OK", "UNMEASURED") else " (plain run: %s %s)" % (st, detail)
+    if shim and shim[0] in ("DOUBLEFREE", "CRASH"):
+        # A memory error the poisoned run pins outranks what the plain run saw.
+        return "UAF", (shim[1] + besides).strip()
     if st in ("WRONG", "CRASH", "TIMEOUT"):
         return st, detail
-    if shim and shim[0] == "UAF":
+    if shim and shim[0] == "WRONG":
         return "UAF", shim[1]
-    if shim and shim[0] == "FAILED":
-        return st, (detail + "; " if detail else "") + shim[1]
-    if shim and shim[0] == "TIMEOUT" and st == "OK":
-        return "OK", shim[1]
+    if shim and shim[0] == "HARNESS":
+        return "HARNESS", shim[1]
+    if shim and shim[0] in ("TIMEOUT", "NOTRUN", "OTHER"):
+        return "INCOMPLETE", "the use-after-free check did not run: %s%s" % (shim[1], besides)
     return st, detail
 
 
 # ---------------------------------------------------------------------------
-# Baseline
+# Baseline: one line per cell, `<cell> <default path> <nogcc path or ->`, a
+# status being OK, LEAK:<bytes per 100 calls>, UAF, ...
+
+
+def parse_status(tok):
+    if tok.startswith("LEAK:"):
+        return "LEAK", int(tok[5:])
+    return tok, None
+
+
+def format_status(status, leak):
+    if status == "LEAK" and str(leak).lstrip("-").isdigit():
+        return "LEAK:%d" % int(leak)
+    return status
 
 
 def read_baseline():
-    """{id: {mode: status}}."""
+    """{id: {mode: (status, leak bytes or None)}}."""
     base = {}
     if not os.path.exists(BASELINE):
         return base
@@ -331,29 +479,59 @@ def read_baseline():
             if not ln or ln.startswith("#"):
                 continue
             parts = ln.split()
-            base[parts[0]] = {"gcc": parts[1]}
+            base[parts[0]] = {"gcc": parse_status(parts[1])}
             if len(parts) > 2 and parts[2] != "-":
-                base[parts[0]]["nogcc"] = parts[2]
+                base[parts[0]]["nogcc"] = parse_status(parts[2])
     return base
 
 
-def write_baseline(results, modes, old):
+def write_baseline(results, old):
     by = {}
     for r in results:
-        by.setdefault(r["id"], {})[r["mode"]] = r["status"]
+        by.setdefault(r["id"], {})[r["mode"]] = format_status(r["status"], r["leak"])
     # Every cell the generator makes: this run's status where it ran (an
     # --only run updates its own cells), the old line's elsewhere.
     ids = [c.id for c in gen.cells() if c.id in by or c.id in old]
-    by = {cid: by.get(cid, {}) for cid in ids}
     with open(BASELINE, "w", encoding="utf-8", newline="\n") as f:
         f.write("# Ownership grid baseline: each cell's status on main (tests/ownership_grid/README.md).\n")
         f.write("# <cell> <status on the default C path> <status with -DAETHER_GCC_COMPAT=0, or ->\n")
-        f.write("# `make ownership-grid-check` fails when a cell gets worse than this.\n")
+        f.write("# LEAK:<n> is n bytes per 100 calls. `make ownership-grid-check` fails when a cell gets\n")
+        f.write("# worse than this, or leaks more than twice as much and more than %d bytes more.\n"
+                % LEAK_NOISE_BYTES)
         f.write("# Measured at %s (%s) on %s.\n" % (git_head("%h"), compiler_version(), platform.system()))
         for cid in ids:
-            g = by[cid].get("gcc") or old.get(cid, {}).get("gcc", "-")
-            n = by[cid].get("nogcc") or old.get(cid, {}).get("nogcc", "-")
-            f.write("%s %s %s\n" % (cid, g, n))
+            cols = []
+            for mode in ("gcc", "nogcc"):
+                got = by.get(cid, {}).get(mode)
+                if got is None and mode in old.get(cid, {}):
+                    got = format_status(*old[cid][mode])
+                cols.append(got or "-")
+            f.write("%s %s %s\n" % (cid, cols[0], cols[1]))
+
+
+def verdict(r, b):
+    """'worse', 'better', 'changed' or 'same' for result r against baseline b."""
+    bst, bleak = b
+    st = r["status"]
+    if st == "HARNESS":
+        return "worse"
+    if st == "UNMEASURED":
+        # Values and use after free were checked, growth was not.
+        if bst in ("OK", "LEAK", "UNMEASURED"):
+            return "same"
+        return "better" if TIER[bst] > 0 else "same"
+    if TIER[st] > TIER[bst]:
+        return "worse"
+    if TIER[st] < TIER[bst]:
+        return "better"
+    if st == "LEAK" and bleak is not None and r["leak"] not in ("", None):
+        now = int(r["leak"])
+        if now > 2 * bleak and now - bleak > LEAK_NOISE_BYTES:
+            return "worse"
+        if bleak > 2 * now and bleak - now > LEAK_NOISE_BYTES:
+            return "better"
+        return "same"
+    return "changed" if st != bst else "same"
 
 
 def compare(results, base):
@@ -363,20 +541,27 @@ def compare(results, base):
         if b is None:
             new.append(r)
             continue
-        if TIER[r["status"]] > TIER[b]:
+        v = verdict(r, b)
+        if v == "worse":
             worse.append((r, b))
-        elif TIER[r["status"]] < TIER[b]:
+        elif v == "better":
             better.append((r, b))
-        elif r["status"] != b:
+        elif v == "changed":
             changed.append((r, b))
     return worse, better, changed, new
+
+
+def at_target(r):
+    if r["target"] == "REFUSED":
+        return r["status"] == "NOCOMPILE" and r["detail"].startswith("aetherc")
+    return r["status"] == "OK"
 
 
 # ---------------------------------------------------------------------------
 # Report
 
-ABBR = {"OK": "OK", "LEAK": "LEAK", "UAF": "**UAF**", "WRONG": "**WRONG**", "CRASH": "**CRASH**",
-        "TIMEOUT": "TIME", "NOCOMPILE": "NC"}
+ABBR = {"OK": "OK", "UNMEASURED": "UNM", "LEAK": "LEAK", "INCOMPLETE": "INC", "UAF": "**UAF**",
+        "WRONG": "**WRONG**", "CRASH": "**CRASH**", "TIMEOUT": "TIME", "NOCOMPILE": "NC", "HARNESS": "**HARNESS**"}
 
 
 def cell_mark(rs):
@@ -384,21 +569,18 @@ def cell_mark(rs):
     for r in rs:
         s = r["status"]
         if s == "NOCOMPILE":
-            marks.append("NC-c" if r["detail"].startswith("C:") else "NC-a")
+            m = "NC-c" if r["detail"].startswith("C:") else "NC-a"
         else:
-            marks.append(ABBR[s])
+            m = ABBR[s]
+        if r.get("target") == "REFUSED":
+            m += " (R)"
+        marks.append(m)
     return "/".join(marks)
 
 
 def leak_total(rows):
-    """(sum of |growth| over the LEAK cells, how many of them were negative)."""
-    total, neg = 0, 0
-    for r in rows:
-        if r["status"] == "LEAK" and r["leak"] not in ("", "?"):
-            n = int(r["leak"])
-            total += abs(n)
-            neg += n < 0
-    return total, neg
+    """Bytes per 100 calls summed over the LEAK cells (each the median of three runs)."""
+    return sum(int(r["leak"]) for r in rows if r["status"] == "LEAK" and str(r["leak"]).lstrip("-").isdigit())
 
 
 def std_modules():
@@ -453,33 +635,44 @@ def counts(rows):
     return c
 
 
-def write_report(out, results, modes, wall, njobs, check_text=None):
+def present_statuses(rows):
+    c = counts(rows)
+    return [s for s in STATUSES if c[s] or s in ("OK", "LEAK", "UAF", "WRONG")]
+
+
+def write_report(out, results, modes, wall, njobs, check_text=None, left=0):
     order = {c.id: i for i, c in enumerate(gen.cells())}
     results = sorted(results, key=lambda r: (order.get(r["id"], 0), r["mode"]))
     by_id = {}
     for r in results:
         by_id.setdefault(r["id"], []).append(r)
     ncells = len(by_id)
-    version = compiler_version()
-    head = git_head("%h %s")
     L = []
     L.append("# Ownership grid report")
     L.append("")
     L.append("Generated by `tests/ownership_grid/run.py` on %s, %s, at `%s` (%s)."
-             % (datetime.date.today().isoformat(), version, head, platform.platform()))
+             % (datetime.date.today().isoformat(), compiler_version(), git_head("%h %s"), platform.platform()))
     L.append("")
     L.append("%d cells, C path%s: %s. %d combinations skipped (listed at the end), and %d combinations of a "
              "producer kind with a place or transfer outside its axis not generated. Wall time %.0f s with %d jobs, "
              "%.1f cells per minute (all C paths)."
              % (ncells, "s" if len(modes) > 1 else "", ", ".join(m.name for m in modes), len(gen.skipped()),
-                gen.PRODUCER_NOT_CROSSED, wall, njobs, ncells * len(modes) * 60.0 / wall))
+                gen.PRODUCER_NOT_CROSSED, wall, njobs, ncells * len(modes) * 60.0 / max(wall, 1)))
     if not shim_supported():
         L.append("")
         L.append("The poisoning allocator was not built: this linker has no `--wrap` (macOS), so no cell is UAF here.")
+    if any(r["status"] == "UNMEASURED" for r in results):
+        L.append("")
+        L.append("**The heap count is not exact on this platform: growth was not measured, so this run checks "
+                 "values and use after free only.**")
+    if left:
+        L.append("")
+        L.append("%d binaries could not be removed (Windows still held them); they are left in `<path>/bin/`." % left)
     L.append("")
-    L.append("Statuses: OK; LEAK (mem.steady_growth is not 0); UAF (under the poisoning allocator: a double free, a crash, "
-             "or a value wrong only there); WRONG (a wrong value without it); NC-a / NC-c (NOCOMPILE: aetherc refused "
-             "it / the C did not compile); CRASH; TIME (TIMEOUT). Where two C paths ran, a cell shows "
+    L.append("Statuses: OK; UNM (UNMEASURED: growth not measured here); LEAK (mem.steady_growth is not 0, sized by "
+             "the median of three runs); INC (INCOMPLETE: the use-after-free check did not run); NC-a / NC-c "
+             "(NOCOMPILE: aetherc refused it / the C did not compile); TIME (TIMEOUT); CRASH; WRONG; UAF; HARNESS "
+             "(the runner failed). `(R)` marks a cell whose target is REFUSED. Where two C paths ran, a cell shows "
              "`<default>/<-DAETHER_GCC_COMPAT=0>`.")
     if check_text:
         L.append("")
@@ -492,29 +685,47 @@ def write_report(out, results, modes, wall, njobs, check_text=None):
     for m in modes:
         rows = [r for r in results if r["mode"] == m.name]
         c = counts(rows)
-        L.append("**%s** (%d cells): " % (m.name, len(rows)) + ", ".join("%s %d" % (s, c[s]) for s in STATUSES))
+        L.append("**%s** (%d cells): " % (m.name, len(rows)) +
+                 ", ".join("%s %d" % (s, c[s]) for s in STATUSES if c[s] or s in ("OK", "LEAK", "UAF", "WRONG")))
         L.append("")
-        total, n_neg = leak_total(rows)
-        L.append("**Total LEAK on the %s path: %d bytes per 100 calls**, summed over every LEAK cell (the number "
-                 "to drive to zero)%s." % (m.name, total, "; %d of them shrank the heap instead, a free that came a "
-                                            "round late, counted by its size" % n_neg if n_neg else ""))
+        L.append("**Total LEAK on the %s path: %d bytes per 100 calls**, summed over every LEAK cell, each the median "
+                 "of three runs (the number to drive to zero)." % (m.name, leak_total(rows)))
+        L.append("")
+        off = [r for r in rows if not at_target(r)]
+        L.append("**Cells not at their target on the %s path: %d of %d** (the target is OK for %d cells and REFUSED "
+                 "for %d)." % (m.name, len(off), len(rows), sum(r["target"] == "OK" for r in rows),
+                               sum(r["target"] == "REFUSED" for r in rows)))
         L.append("")
     m0 = modes[0].name
     rows0 = [r for r in results if r["mode"] == m0]
-    for title, key, names in (("kind", "kind", None), ("place", "place", None)):
+    cols = present_statuses(rows0)
+    for title, key in (("kind", "kind"), ("place", "place")):
         L.append("By %s (%s path):" % (title, m0))
         L.append("")
-        L.append("| %s | cells | %s |" % (title, " | ".join(STATUSES)))
-        L.append("|---|---|%s|" % "|".join("---" for _ in STATUSES))
+        L.append("| %s | cells | %s | not at target |" % (title, " | ".join(cols)))
+        L.append("|---|---|%s|---|" % "|".join("---" for _ in cols))
         present = {r[key] for r in rows0}
         canon = ([k.id for k in gen.KINDS] + ["KE"]) if key == "kind" else [p for p, _ in gen.PLACES]
         keys = [k for k in canon if k in present] + sorted(present - set(canon))
         for k in keys:
             sub = [r for r in rows0 if r[key] == k]
             c = counts(sub)
-            label = k
-            L.append("| %s | %d | %s |" % (label, len(sub), " | ".join(str(c[s]) if c[s] else "" for s in STATUSES)))
+            L.append("| %s | %d | %s | %d |" % (k, len(sub), " | ".join(str(c[s]) if c[s] else "" for s in cols),
+                                                 sum(not at_target(r) for r in sub)))
         L.append("")
+    # Distance from target.
+    L.append("## Distance from the target (%s path)" % m0)
+    L.append("")
+    L.append("The target is the status the approved design wants: OK, or REFUSED where a function frees a value it "
+             "borrows (a parameter), which the checker will refuse in stage 4. Cells by status today and target:")
+    L.append("")
+    L.append("| target | %s |" % " | ".join(cols))
+    L.append("|---|%s|" % "|".join("---" for _ in cols))
+    for tgt in ("OK", "REFUSED"):
+        sub = [r for r in rows0 if r["target"] == tgt]
+        c = counts(sub)
+        L.append("| %s (%d) | %s |" % (tgt, len(sub), " | ".join(str(c[s]) if c[s] else "" for s in cols)))
+    L.append("")
     # Worst cells.
     L.append("## Worst cells (%s path)" % m0)
     L.append("")
@@ -529,14 +740,14 @@ def write_report(out, results, modes, wall, njobs, check_text=None):
     L.append("Each producer kind takes the string one real std C function makes through the places %s and the "
              "transfers %s." % (", ".join(gen.PRODUCER_PLACES), ", ".join(gen.PRODUCER_TRANSFERS)))
     L.append("")
-    L.append("| kind | class | C function | module | cells | %s | LEAK bytes |" % " | ".join(STATUSES))
-    L.append("|---|---|---|---|---|%s|---|" % "|".join("---" for _ in STATUSES))
+    L.append("| kind | class | C function | module | cells | %s | LEAK bytes |" % " | ".join(cols))
+    L.append("|---|---|---|---|---|%s|---|" % "|".join("---" for _ in cols))
     for k in gen.PRODUCERS:
         sub = [r for r in rows0 if r["kind"] == k.id]
         c = counts(sub)
         L.append("| %s | %s | `%s` | %s | %d | %s | %d |" % (k.id, k.pclass, k.function, k.module, len(sub),
-                                                         " | ".join(str(c[s]) if c[s] else "" for s in STATUSES),
-                                                         leak_total(sub)[0]))
+                                                         " | ".join(str(c[s]) if c[s] else "" for s in cols),
+                                                         leak_total(sub)))
     L.append("")
     # Modules.
     used, unused = modules_exercised(results)
@@ -567,30 +778,30 @@ def write_report(out, results, modes, wall, njobs, check_text=None):
             kinds.append(c.kind)
     for k in kinds:
         kc = [c for c in gen.cells() if c.kind == k and c.id in by_id]
-        cols = [t for t in tcols if any(c.transfer == t for c in kc)]
+        tc = [t for t in tcols if any(c.transfer == t for c in kc)]
         pls = [p for p, _ in gen.PLACES if any(c.place == p for c in kc)]
         L.append("### %s %s" % (k, gen.kind_title(k)))
         L.append("")
-        L.append("| place | %s |" % " | ".join(cols))
-        L.append("|---|%s|" % "|".join("---" for _ in cols))
+        L.append("| place | %s |" % " | ".join(tc))
+        L.append("|---|%s|" % "|".join("---" for _ in tc))
         for p in pls:
             row = []
-            for t in cols:
+            for t in tc:
                 cid = "%s-%s-%s" % (k, p, t)
                 row.append(cell_mark(by_id[cid]) if cid in by_id else "")
             L.append("| %s %s | %s |" % (p, gen.PLACE_TITLE.get(p, ""), " | ".join(row)))
         L.append("")
     L.append("Transfers: " + "; ".join("%s %s" % (t, d) for t, d in gen.TRANSFERS + gen.KE_TRANSFERS) + ".")
     L.append("")
-    # Every non-OK cell.
-    L.append("## Every cell that is not OK")
+    # Every cell not at target.
+    L.append("## Every cell that is not at its target")
     L.append("")
-    L.append("| cell | path | status | detail | program |")
-    L.append("|---|---|---|---|---|")
-    for r in sorted([r for r in results if r["status"] != "OK"],
+    L.append("| cell | path | status | target | detail | program |")
+    L.append("|---|---|---|---|---|---|")
+    for r in sorted([r for r in results if not at_target(r)],
                     key=lambda r: (SEVERITY[r["status"]], order.get(r["id"], 0), r["mode"])):
-        L.append("| %s | %s | %s | %s | `%s` |" % (r["id"], r["mode"], r["status"],
-                                                   (r["detail"] or "-").replace("|", "\\|"), r["file"]))
+        L.append("| %s | %s | %s | %s | %s | `%s` |" % (r["id"], r["mode"], r["status"], r["target"],
+                                                        (r["detail"] or "-").replace("|", "\\|"), r["file"]))
     L.append("")
     # Skips.
     L.append("## Skipped combinations")
@@ -605,11 +816,12 @@ def write_report(out, results, modes, wall, njobs, check_text=None):
         f.write("\n".join(L))
     with open(os.path.join(out, "report.csv"), "w", encoding="utf-8", newline="") as f:
         w = csv.writer(f)
-        w.writerow(["cell", "kind", "place", "transfer", "path", "status", "detail", "leak_bytes_per_100_calls",
-                    "run", "shim_run", "build_s", "run_s", "program"])
+        w.writerow(["cell", "kind", "place", "transfer", "path", "status", "target", "at_target", "detail",
+                    "leak_bytes_per_100_calls", "run", "shim_run", "build_s", "run_s", "program"])
         for r in results:
-            w.writerow([r["id"], r["kind"], r["place"], r["transfer"], r["mode"], r["status"], r["detail"],
-                        r["leak"], r["run"], r["shim"], "%.1f" % r["build_s"], "%.2f" % r["run_s"], r["file"]])
+            w.writerow([r["id"], r["kind"], r["place"], r["transfer"], r["mode"], r["status"], r["target"],
+                        "yes" if at_target(r) else "no", r["detail"], r["leak"], r["run"], r["shim"],
+                        "%.1f" % r["build_s"], "%.2f" % r["run_s"], r["file"]])
 
 
 # ---------------------------------------------------------------------------
@@ -630,6 +842,66 @@ def shard_cells(cells, spec):
     return [c for i, c in enumerate(cells) if (i % n) + 1 in ks]
 
 
+def run_check(results, cells, modes, out, use_shim):
+    """Compares with the baseline; (exit code, report lines)."""
+    base = read_baseline()
+    worse, better, changed, new = compare(results, base)
+    if worse:
+        # A heap count or a thread can make one run unlucky: run the program
+        # again, and count it worse only when it is worse again. Either way
+        # the rerun's result is the one kept.
+        confirmed = []
+        for r, b in worse:
+            if r["status"] == "HARNESS":
+                confirmed.append((r, b))
+                continue
+            cell = next(c for c in cells if c.id == r["id"])
+            again = run_cell_safely(cell, next(m for m in modes if m.name == r["mode"]), out, use_shim)
+            r.update(again)
+            v = verdict(r, b)
+            if v == "worse":
+                confirmed.append((r, b))
+            elif v == "better":
+                better.append((r, b))
+            elif v == "changed":
+                changed.append((r, b))
+        worse = confirmed
+    generated = {c.id for c in gen.cells()}
+    missing = sorted(cid for cid in base if cid not in generated)
+    harness = [r for r in results if r["status"] == "HARNESS"]
+    lines = []
+    if any(r["status"] == "UNMEASURED" for r in results):
+        lines += ["The heap count is not exact on this platform (mem.heap_in_use_exact): this check compares "
+                  "values and use after free only, not leaks.", ""]
+    for title, rows in (("Worse than the baseline (the check fails)", worse),
+                        ("Better than the baseline (update baseline.txt)", better),
+                        ("Changed within a tier", changed)):
+        lines.append("%s: %d" % (title, len(rows)))
+        lines.append("")
+        for r, b in rows:
+            lines.append("- `%s` (%s): %s -> %s %s" % (r["id"], r["mode"], format_status(*b),
+                                                       format_status(r["status"], r["leak"]), r["detail"]))
+        lines.append("")
+    if missing:
+        lines.append("In the baseline but no longer generated (the check fails; a removed cell is removed from "
+                     "baseline.txt on purpose): %d" % len(missing))
+        lines.append("")
+        lines += ["- `%s`" % cid for cid in missing]
+        lines.append("")
+    if new:
+        lines.append("Not in the baseline: %d (%s)" % (len(new), ", ".join(r["id"] for r in new[:20])))
+        lines.append("")
+    if harness:
+        lines.append("HARNESS FAILURE: the runner itself failed on %d cell(s), twice each. This is a fault of the "
+                     "grid's runner or the machine, not a finding about the compiler; the cells' logs end in "
+                     "`.harness.log`:" % len(harness))
+        lines.append("")
+        lines += ["- `%s` (%s): %s" % (r["id"], r["mode"], r["detail"]) for r in harness]
+        lines.append("")
+    rc = 2 if harness else (1 if worse or missing else 0)
+    return rc, lines
+
+
 def main(argv):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--mode", default="gcc", choices=["gcc", "nogcc", "both"])
@@ -638,7 +910,7 @@ def main(argv):
     ap.add_argument("--check", action="store_true")
     ap.add_argument("--update-baseline", action="store_true")
     ap.add_argument("--no-shim", action="store_true")
-    ap.add_argument("--keep-bins", action="store_true", help="keep each cell's two binaries")
+    ap.add_argument("--keep-bins", action="store_true", help="keep each cell's binary")
     ap.add_argument("--out", default=os.path.join(ROOT, "build", "ownership_grid"))
     ap.add_argument("--report-only", action="store_true", help="rewrite the report from <out>/results.json")
     ap.add_argument("--shard", default=os.environ.get("OWNERSHIP_GRID_SHARD", ""),
@@ -654,7 +926,10 @@ def main(argv):
         write_report(out, saved["results"], [Mode(m) for m in saved["modes"]], saved["wall"], saved["jobs"],
                      saved.get("check"))
         if a.update_baseline:
-            write_baseline(saved["results"], None, read_baseline())
+            if any(r["status"] == "UNMEASURED" for r in saved["results"]):
+                print("ownership grid: baseline.txt not written: growth was not measured on this platform")
+                return 1
+            write_baseline(saved["results"], read_baseline())
             print("ownership grid: wrote %s" % os.path.relpath(BASELINE, ROOT))
         return 0
     if not os.path.exists(AE):
@@ -685,7 +960,7 @@ def main(argv):
     done = [0]
     total = len(cells) * len(modes)
     with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as ex:
-        futs = [ex.submit(run_cell, c, m, out, use_shim) for m in modes for c in cells]
+        futs = [ex.submit(run_cell_safely, c, m, out, use_shim) for m in modes for c in cells]
         for fu in concurrent.futures.as_completed(futs):
             r = fu.result()
             with lock:
@@ -695,60 +970,58 @@ def main(argv):
                     print("  [%d/%d] %s %s %s %s" % (done[0], total, r["mode"], r["id"], r["status"],
                                                       r["detail"][:120]), flush=True)
     wall = time.time() - t0
-    with open(os.path.join(out, "results.json"), "w", encoding="utf-8") as f:
-        json.dump({"wall": wall, "jobs": jobs, "modes": [m.name for m in modes], "results": results}, f)
     check_text = None
     rc = 0
     if a.check:
-        base = read_baseline()
-        worse, better, changed, new = compare(results, base)
-        if worse:
-            # A heap count or a thread can make one run unlucky: run the
-            # program again, and count it worse only when it is worse again.
-            confirmed = []
-            for r, b in worse:
-                cell = next(c for c in cells if c.id == r["id"])
-                again = run_cell(cell, next(m for m in modes if m.name == r["mode"]), out, use_shim)
-                if TIER[again["status"]] > TIER[b]:
-                    confirmed.append((again, b))
-                    for x in results:
-                        if x["id"] == r["id"] and x["mode"] == r["mode"]:
-                            x.update(again)
-                else:
-                    changed.append((again, b))
-            worse = confirmed
-        check_text = []
-        for title, rows in (("Worse than the baseline (the check fails)", worse),
-                            ("Better than the baseline (update baseline.txt)", better),
-                            ("Changed within a tier", changed)):
-            check_text.append("%s: %d" % (title, len(rows)))
-            check_text.append("")
-            for r, b in rows:
-                check_text.append("- `%s` (%s): %s -> %s %s" % (r["id"], r["mode"], b, r["status"], r["detail"]))
-            check_text.append("")
-        if new:
-            check_text.append("Not in the baseline: %d (%s)" % (len(new), ", ".join(r["id"] for r in new[:20])))
-            check_text.append("")
+        rc, check_text = run_check(results, cells, modes, out, use_shim)
         print("\n".join(check_text))
-        if worse:
-            rc = 1
+    # The files Windows held during the run: once more now, then left.
+    left = [p for p in list(LEFT_FILES) if not remove_quietly_final(p)]
     with open(os.path.join(out, "results.json"), "w", encoding="utf-8") as f:
         json.dump({"wall": wall, "jobs": jobs, "modes": [m.name for m in modes], "results": results,
                    "check": check_text}, f)
-    write_report(out, results, modes, wall, jobs, check_text)
-    if a.update_baseline and rc:
-        print("ownership grid: baseline.txt not written: a cell got worse (run without --check to record it)")
-    elif a.update_baseline:
-        write_baseline(results, modes, read_baseline())
-        print("ownership grid: wrote %s" % os.path.relpath(BASELINE, ROOT))
+    write_report(out, results, modes, wall, jobs, check_text, len(left))
+    unmeasured = any(r["status"] == "UNMEASURED" for r in results)
+    if a.update_baseline:
+        if rc:
+            print("ownership grid: baseline.txt not written: the check failed (run without --check to record it)")
+        elif unmeasured:
+            print("ownership grid: baseline.txt not written: growth was not measured on this platform, and the "
+                  "baseline records leaks")
+            rc = rc or 1
+        else:
+            write_baseline(results, read_baseline())
+            print("ownership grid: wrote %s" % os.path.relpath(BASELINE, ROOT))
     for m in modes:
         c = counts([r for r in results if r["mode"] == m.name])
-        print("ownership grid (%s): %s" % (m.name, ", ".join("%s %d" % (s, c[s]) for s in STATUSES)))
+        print("ownership grid (%s): %s" % (m.name, ", ".join("%s %d" % (s, c[s]) for s in STATUSES if c[s])))
+    if left:
+        print("ownership grid: %d binaries could not be removed (Windows still held them): %s"
+              % (len(left), ", ".join(os.path.basename(p) for p in left[:5])))
     print("ownership grid: %.0f s wall, %.1f cells/min; report in %s"
-          % (wall, total * 60.0 / wall, os.path.relpath(os.path.join(out, "report.md"), ROOT)))
+          % (wall, total * 60.0 / max(wall, 1), os.path.relpath(os.path.join(out, "report.md"), ROOT)))
     if a.check:
-        print("ownership grid check: %s" % ("FAILED, a cell got worse" if rc else "passed"))
+        if unmeasured:
+            print("ownership grid check: the heap count is not exact here; values and use after free only")
+        msg = {0: "passed", 1: "FAILED, a cell got worse or a baseline cell is no longer generated",
+               2: "FAILED, the runner itself failed (see HARNESS FAILURE above)"}[rc]
+        print("ownership grid check: %s" % msg)
     return rc
+
+
+def remove_quietly_final(path):
+    try:
+        if os.path.exists(path):
+            os.remove(path)
+        return True
+    except OSError:
+        time.sleep(1)
+        try:
+            if os.path.exists(path):
+                os.remove(path)
+            return True
+        except OSError:
+            return False
 
 
 if __name__ == "__main__":

@@ -50,22 +50,28 @@ ends actors ends them itself (`scheduler_reclaim_released`) before it reads
 the heap.
 
 `run.py` builds each cell once, with `poison_alloc.c` linked
-(`-Wl,--wrap=free,--wrap=realloc`), and runs it twice. Its `free` and
-`realloc` pass straight through to the C heap unless `OWNERSHIP_GRID_POISON`
-is set, so the first run measures the program as it is. The second sets it:
-every freed block is then filled with 0xDD, never handed back to the heap,
-and a second free stops the program. To rerun one by hand:
+(`-Wl,--wrap=free,--wrap=realloc,--wrap=aether_numa_free,--wrap=aether_numa_free_aligned`),
+and runs it twice. The wrapped functions pass straight through unless
+`OWNERSHIP_GRID_POISON` is set, so the first run measures the program as it
+is. The second sets it: every freed block is then filled with 0xDD, never
+handed back, and a second free stops the program. The runtime's NUMA frees
+are wrapped beside `free`, because an actor's block goes back through
+`_aligned_free` (or `VirtualFree`) on Windows, which `--wrap=free` never sees.
+A freed string keeps its 32-byte header (so a second release still reaches
+`free` and is caught), which is why every cell compares a string's
+characters, never only its length. To rerun one by hand:
 
-    AE_CC="gcc -Wl,--wrap=free,--wrap=realloc" build/ae build \
-        build/ownership_grid/cells/k1_p5_t7.ae --extra tests/ownership_grid/poison_alloc.c -o p.exe
+    AE_CC="gcc -Wl,--wrap=free,--wrap=realloc,--wrap=aether_numa_free,--wrap=aether_numa_free_aligned" \
+        build/ae build build/ownership_grid/cells/k1_p5_t7.ae \
+        --extra tests/ownership_grid/poison_alloc.c -o p.exe
     ./p.exe
     OWNERSHIP_GRID_POISON=1 ./p.exe
 
 The poisoning allocator needs a gcc/ld linker: macOS's linker has no
-`--wrap`, so there the cells are built without it and no cell is UAF. The leak measurement needs an
-exact heap count (`mem.heap_in_use_exact()`: Windows, or a sanitizer
-allocator); elsewhere a cell prints that growth was not measured, and no cell
-is LEAK.
+`--wrap`, so there the cells are built without it and no cell is UAF. The
+leak measurement needs an exact heap count (`mem.heap_in_use_exact()`:
+Windows, or a sanitizer allocator); elsewhere a cell prints that growth was
+not measured and is UNMEASURED.
 
 Not every combination is meaningful (an array cannot hold an array, a
 module `var` cannot hold an array, only a string has a free a callee can
@@ -78,12 +84,28 @@ combination with its reason; the report lists them grouped by reason.
 | status | meaning |
 |---|---|
 | OK | every value right, no growth, nothing under the poisoning allocator |
-| LEAK | `mem.steady_growth` is not 0; the report gives the bytes per 100 calls |
-| UAF | under the poisoning allocator: a double free, a crash, or a value wrong only there (a read of a freed block) |
-| WRONG | a value is wrong without the poisoning allocator |
+| UNMEASURED | values right and nothing under the poisoning allocator, but the heap count is not exact on this platform, so growth was not measured; never OK |
+| LEAK | `mem.steady_growth` is not 0; the size is the median of three runs, in bytes per 100 calls |
+| INCOMPLETE | the poisoned run did not finish (a timeout, an end that is no memory fault) or could not be built, so the use-after-free check did not happen; never OK |
 | NOCOMPILE | aetherc refused the program (NC-a) or the generated C did not compile (NC-c); the first error is kept |
-| CRASH | the program died without the poisoning allocator, and nothing under it pins a memory error |
-| TIMEOUT | the program did not finish in 120 s |
+| TIMEOUT | the build or the plain run did not finish in its time |
+| CRASH | the plain run died, and the poisoned run pins no memory error |
+| WRONG | a value is wrong in the plain run |
+| UAF | the poisoned run stopped on a double free (of a heap block or a runtime actor block), crashed with an access violation or heap corruption, or read a wrong value; this outranks a plain WRONG or CRASH |
+| HARNESS | the runner itself failed on the cell twice (a file Windows held, a fault of the script): never a finding about the compiler, and the check fails with exit code 2 saying so |
+
+## Targets
+
+Each cell also has a target: the status the approved design wants. It is
+OK for every cell but one family. A function may not free a value it borrows
+(a parameter): under R3 the caller still owns it, so `string.free(param)`
+releases a reference the function does not own, and from stage 4 the checker
+refuses `string.free` or `release` of a parameter, with a message pointing to
+keeping the value (store it) instead. The cells that pass a value to a
+function that frees it, on every path (T8) or on some (T8S), therefore have
+REFUSED as their target, which an aetherc refusal (NC-a) meets. Better and
+worse in the check stay relative to the baseline; the report adds how far
+each cell is from its target, and how many cells are not at it.
 
 ## Running it
 
@@ -108,13 +130,25 @@ a cache of the grid's own, `build/ownership_grid/cache`, capped at 1 GB.
 ## The baseline and the check
 
 `baseline.txt` holds every cell's status on main: `<cell> <default C path>
-<-DAETHER_GCC_COMPAT=0 path, or ->`. `make ownership-grid-check` fails when
-a cell is worse than its baseline: OK became anything else, LEAK became
-NOCOMPILE, TIMEOUT, CRASH, WRONG or UAF, NOCOMPILE became one of the last
-four. A cell that got worse is run again before it counts, so one unlucky
-heap reading does not fail the check. Changes within a tier (UAF to WRONG, a
-LEAK of another size) are listed but do not fail it, and nor do cells that
-got better: those are listed so the baseline can be updated.
+<-DAETHER_GCC_COMPAT=0 path, or ->`, a LEAK with its size (`LEAK:3600` is
+3600 bytes per 100 calls). `make ownership-grid-check` fails when a cell is
+worse than its baseline: OK became anything else; LEAK became INCOMPLETE,
+NOCOMPILE, TIMEOUT, CRASH, WRONG or UAF; INCOMPLETE or NOCOMPILE became one
+of the last four; or a LEAK more than doubled and grew by more than 2 KB per
+100 calls. The size rule is the measured noise: the same cell's growth moved
+by up to about 1 KB per 100 calls between runs, never by a factor of two,
+while a new leak in a shape is at least one string or environment per call,
+1.8 KB or more per 100 calls. The check also fails when a cell in the
+baseline is no longer generated (a removed cell is removed from the baseline
+on purpose), and with exit code 2 on a HARNESS cell. A cell that got worse
+is run again before it counts, and the rerun's result is the one kept in the
+report and in `--update-baseline`. Changes within a tier (UAF to WRONG) are
+listed but do not fail it, and nor do cells that got better: those are
+listed so the baseline can be updated.
+
+Off a platform with an exact heap count every cell that would be OK or LEAK
+is UNMEASURED: the check then compares values and use after free only, says
+so, and refuses `--update-baseline`, since the baseline records leaks.
 
 A fix that makes cells better updates the baseline in the same PR:
 
@@ -152,6 +186,15 @@ is where leaks are measured; the jobs upload the report, the cells and their
 logs. `--shard` runs one shard by hand:
 
     make ownership-grid-check OWNERSHIP_GRID_ARGS="--shard 2/3"
+
+## The runner's own tests
+
+`python3 tests/ownership_grid/test_runner.py` checks two failure paths of
+run.py itself: a cell's binary held open by another process (the run
+completes and reports the file as left), and a fault inside the runner on
+one cell (`OWNERSHIP_GRID_FAULT=<cell>`: the cell becomes HARNESS, the other
+cells keep their statuses, and the check exits 2 with a message, never a
+traceback).
 
 ## Adding a cell
 

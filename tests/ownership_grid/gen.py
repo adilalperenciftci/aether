@@ -147,31 +147,34 @@ def paren_unwrap(expr):
 class K3(Kind):
     id, title, ty, zero = "K3", "closure capturing a fresh string", "fn", "null"
 
+    # The closure hands back the string it captured and the check compares its
+    # characters: the poisoning allocator keeps a freed string's header, so a
+    # length read through a freed environment would still come out right.
     def fresh(self, g, tag):
         c = "c_" + tag
         return (['%s = string.concat(w, "%s")' % (c, SUFFIX[tag])],
-                "|| { return string.length(%s) }" % c)
+                "|| { return %s }" % c)
 
     def check(self, g, expr, tag, what):
         r = g.name("r")
-        return ["int %s = call(%s)" % (r, expr),
-                'check(%s == %d, "%s")' % (r, len(text(tag)), what)]
+        return ["string %s = call(%s)" % (r, expr),
+                'check(%s == "%s", "%s")' % (r, text(tag), what)]
 
 
 class K4(ArrayKind):
     id, title, ty = "K4", "`fn[2]` of capturing closures", "fn[2]"
 
     def fresh(self, g, tag):
-        c = "c_" + tag
-        return (['%s = string.concat(w, "%s")' % (c, SUFFIX[tag])],
-                "[|| { return string.length(%s) }, || { return string.length(%s) + 10 }]" % (c, c))
+        c, c1 = "c_" + tag, "c_%s1" % tag
+        return (['%s = string.concat(w, "%s")' % (c, SUFFIX[tag]),
+                 '%s = string.concat(w, "%s1")' % (c1, SUFFIX[tag])],
+                "[|| { return %s }, || { return %s }]" % (c, c1))
 
     def check(self, g, expr, tag, what):
         r0, r1 = g.name("r"), g.name("r")
-        n = len(text(tag))
-        return ["int %s = call(%s[0])" % (r0, expr),
-                "int %s = call(%s[1])" % (r1, expr),
-                'check(%s == %d && %s == %d, "%s")' % (r0, n, r1, n + 10, what)]
+        return ["string %s = call(%s[0])" % (r0, expr),
+                "string %s = call(%s[1])" % (r1, expr),
+                'check(%s == "%s" && %s == "%s", "%s")' % (r0, text(tag), r1, text(tag, "1"), what)]
 
 
 class K5(Kind):
@@ -558,12 +561,14 @@ class P3B(P1):
     id, title = "P3B", "local bound and used inside one branch of an if"
 
 
+class P3E(P1):
+    id, title = "P3E", "local bound and used inside each branch of an if/else"
+
+
 class P4(Place):
     id, title = "P4", "field of a local struct"
 
     def applies(self, kind):
-        if kind.id == "K9":
-            return "K9 is covered only in a ptr slot and a container"
         return None
 
     def decl_box(self, g, kind):
@@ -591,7 +596,7 @@ class P5(Place):
         if kind.id in ("K4", "K7", "K8"):
             return "arrays are one-dimensional: an array literal cannot hold an array"
         if kind.id == "K9":
-            return "K9 is covered only in a ptr slot and a container"
+            return "K9 is covered in a struct `fn` field, a ptr slot and a container only"
         if kind.id == "K2":
             return "an array of optionals cannot be declared: `let xs: string?[2] = ...` does not parse (E0100)"
         return None
@@ -618,10 +623,8 @@ class P6(Place):
     pre_read = True
 
     def applies(self, kind):
-        if kind.id == "K6":
-            return "a tuple slot holding a tuple: tuples do not nest"
         if kind.id == "K9":
-            return "K9 is covered only in a ptr slot and a container"
+            return "K9 is covered in a struct `fn` field, a ptr slot and a container only"
         return None
 
     def slot_fn(self, g, kind, tag):
@@ -642,6 +645,14 @@ class P6(Place):
         x, n = g.name("x"), g.name("n")
         return ["%s, %s = t" % (x, n), 'check(%s == 7, "the second slot")' % n], x
 
+    def check(self, g, kind, tag, what):
+        # Destructured twice: a destructure that takes the slot's value, or
+        # leaves the tuple holding a view of it, shows on the second.
+        pre1, x1 = self.read(g, kind)
+        pre2, x2 = self.read(g, kind)
+        return (pre1 + kind.check(g, x1, tag, what) +
+                pre2 + kind.check(g, x2, tag, what + ", destructured again"))
+
 
 class P7(Place):
     id, title = "P7", "optional payload"
@@ -652,7 +663,7 @@ class P7(Place):
         if kind.id == "K2":
             return "`T??` is rejected: an optional is a single presence layer"
         if kind.id == "K9":
-            return "K9 is covered only in a ptr slot and a container"
+            return "K9 is covered in a struct `fn` field, a ptr slot and a container only"
         return None
 
     def bind(self, g, kind, tag):
@@ -677,7 +688,7 @@ class P8(Place):
         if kind.zero is None:
             return NO_GLOBAL
         if kind.id == "K9":
-            return "K9 is covered only in a ptr slot and a container"
+            return "K9 is covered in a struct `fn` field, a ptr slot and a container only"
         return None
 
     def setup(self, g, kind):
@@ -702,7 +713,7 @@ class P10L(Place):
     ptr_read = True
 
     def applies(self, kind):
-        if kind.id not in ("K1", "K3", "K9"):
+        if not (kind.is_string or kind.id in ("K3", "K9")):
             return "a list slot holds a string, an int or a pointer; a closure goes in through `box_closure`"
         return None
 
@@ -774,6 +785,10 @@ class P13G(Place):
 
     def boxed(self, g, kind, tag):
         pre, e = kind.fresh(g, tag)
+        if kind.id == "K9":
+            # A named function stored bare, the shape the PR comment names
+            # (P13F boxes it with box_closure).
+            return pre, e
         return pre, "box_closure(%s)" % e
 
     def bind(self, g, kind, tag):
@@ -792,7 +807,7 @@ class P13D(P13G):
 
     def applies(self, kind):
         if kind.id == "K9":
-            return "a named function stored bare is a code address, which unbox_closure refuses by design"
+            return "K9's bare store is K9-P13G (a named function stored as it is)"
         if kind.id != "K3":
             return "a `ptr` slot is this place only for a closure (the fn -> ptr box)"
         return None
@@ -808,6 +823,10 @@ class P13F(P13G):
     def setup(self, g, kind):
         g.decl("struct PtrBox", "struct PtrBox {\n    p: ptr\n}")
         return []
+
+    def boxed(self, g, kind, tag):
+        pre, e = kind.fresh(g, tag)
+        return pre, "box_closure(%s)" % e
 
     def bind(self, g, kind, tag):
         pre, e = self.boxed(g, kind, tag)
@@ -863,11 +882,11 @@ FOUND = {
     "KE-P17-T10M": "tuples: a `T!` function passing an extern's literal errors through vetoes its error position (by reading)",
     "KE-P17-T9M": "tuples: a propagating `x!` in a vetoed function leaks the operand's error (by reading)",
     "KE-P17-T5": "tuples: a non-propagating `x!` panics with a heap error; caught, the reason leaks (by reading)",
-    "K1-P5-T7": "a `string[N]` element handed to a function that keeps it dangles once the array's scope ends (UAF on fed0fbed)",
-    "K3-P13G-T7": "a closure local passed to a function whose `ptr` parameter is stored (UAF on base and head)",
+    "K1-P5-T7": "a `string[N]` element handed to a function that keeps it dangles once the array's scope ends (a use after free on fed0fbed; the kept string reads freed memory, wrong even without the poisoning allocator)",
+    "K3-P13G-T7": "a closure local passed to a function whose `ptr` parameter is stored (a use after free: the stashed closure's environment is freed, and it reads a wrong value even without the poisoning allocator)",
     "K3-P2-T13": "50,000 rebinds of a closure that calls its predecessor overflow the stack at release",
     "K8-P2-T1": "a struct array hoisted into a loop leaks its elements' strings (17500 bytes per 100 calls)",
-    "K8-P3B-T1": "a struct array bound only in an if's branches leaks its strings (74 bytes per call)",
+    "K8-P3E-T1": "a struct array bound and used inside each branch of an if/else leaks its strings (74 bytes per call)",
     "K1-P5-T14": "a `string[N]` element stored into a global string leaks (3600 bytes per 100 calls)",
     "K1-P4-T8S": "a field handed to a function that frees it on some paths only (leak when that path does not run)",
     "K1-P4-T7S": "a field handed to a function that keeps it on some paths only",
@@ -879,11 +898,11 @@ FOUND = {
     "K1-P17-T5": "a string temporary passed to a call that panics, caught (leak: the release is not on the unwind list)",
     "K1-P10L-T15": "a failed adoption (an out-of-range `list_set`) leaks",
     "K5-P5-T16": "a closure capturing an `Item[2]` local, then an element replaced: the closure reads freed strings",
-    "K8-P11-T16": "an actor arm closure reading `Item[2]` state (use after free)",
-    "K4-P11-T16": "an actor arm closure reading `fn[N]` state (now refused by the checker)",
+    "K8-P11-T16": "an actor arm closure reading `Item[2]` state (the comment saw a use after free; the generated C no longer compiles)",
+    "K4-P11-T16": "an actor arm closure reading `fn[N]` state (the comment: refused by the checker; the checker accepts it and the generated C does not compile)",
     "K7-P1-T5": "a string array bound in a try body that panics leaks its strings (37 bytes per call)",
     "K3-P13G-T1": "a closure stored into a `ptr` slot: the box and its env reference are never freed (86 bytes per store)",
-    "K9-P13G-T1": "a bare function stored into a `ptr` slot: the box is never freed",
+    "K9-P13G-T1": "a bare function stored into a `ptr` slot, without box_closure: the box is never freed",
 }
 
 # Cells whose expected value is the design's (R1 to R5) where today's
@@ -909,12 +928,28 @@ def doc_note(cid):
 # Cells
 
 
+# The status the approved design wants a cell to reach. Under R3 a parameter
+# is borrowed, so a function that frees one (`string.free(param)`, on every
+# path or on some) frees a reference it does not own, and the checker refuses
+# it from stage 4 on: such a cell's target is REFUSED. Every other cell's is
+# OK. Better and worse in the check stay relative to the baseline; the report
+# says how far each cell is from its target.
+REFUSED_NOTE = ("Target (the approved design): REFUSED. A function may not free a value it borrows\n"
+                "(a parameter); from stage 4 the checker refuses `string.free` or `release` of a\n"
+                "parameter, and says to keep the value (store it) instead.")
+
+
+def target_of(transfer):
+    return "REFUSED" if transfer in ("T8", "T8S") else "OK"
+
+
 class Cell:
     def __init__(self, kind, place, transfer, source, note=""):
         self.kind = kind
         self.place = place
         self.transfer = transfer
         self.id = "%s-%s-%s" % (kind, place, transfer)
+        self.target = target_of(transfer)
         self.file = self.id.lower().replace("-", "_") + ".ae"
         self.source = source
         self.note = note
@@ -949,6 +984,8 @@ def program(g, kind, place, transfer, shape_lines, round_lines, main_setup=None,
             head.append("// " + ln if ln else "//")
     if cell in FOUND:
         head.append("// Found by hand in the comments on PR #2883: %s." % FOUND[cell])
+    if target_of(transfer) == "REFUSED":
+        head += ["// " + ln for ln in REFUSED_NOTE.split("\n")]
     dn = doc_note(cell) if cell.count("-") == 2 else ""
     if dn:
         head += ["// " + ln for ln in dn.split("\n")]
@@ -1008,7 +1045,7 @@ def shape_fn(ret, body, params="w: string, k: int", name="shape", comment=None):
 
 # ---- simple places ------------------------------------------------------
 
-SIMPLE = [P1(), P2(), P3(), P3B(), P4(), P5(), P5L(), P6(), P7(), P8(), P10L(), P10M(), P13G(), P13D(), P13F(), P18()]
+SIMPLE = [P1(), P2(), P3(), P3B(), P3E(), P4(), P5(), P5L(), P6(), P7(), P8(), P10L(), P10M(), P13G(), P13D(), P13F(), P18()]
 
 
 def simple_cell(kind, place, t):
@@ -1075,10 +1112,10 @@ def simple_cell(kind, place, t):
         return ["if %s {" % " && ".join(conds)] + block(stmts, 1) + ["}"]
 
     if t == "T1":
-        body = setup + bind + chk("a", "the value stored")
+        body = setup + bind + chk("a", "the value stored") + chk("a", "the value, read again")
     elif t == "T2":
         body = setup + bind + chk("a", "the value stored") + place.store(g, kind, "b") + \
-            chk("b", "the value stored over it")
+            chk("b", "the value stored over it") + chk("b", "the value stored over it, read again")
     elif t == "T3":
         inner = setup + bind + chk("a", "the value stored") + ["if j == 1 {", "    continue", "}", "break"]
         body = ["j = 0", "while j < 2 {", "    j = j + 1"] + block(inner, 1) + ["}"]
@@ -1115,7 +1152,7 @@ def simple_cell(kind, place, t):
         helper_keep(g, kind, some)
         pre, r = place.read(g, kind)
         call = "keep_some(%s, k)" % r if some else "keep(%s)" % r
-        body = setup + bind + pre + [call]
+        body = setup + bind + pre + [call] + chk("a", "the place, after a function kept it")
         after = kind.check(g, "kept", "a", "the kept value, after the scope ended")
         round_lines = ["shape(w, k)"] + (["if k % 2 == 0 {"] + block(after, 1) + ["}"] if some else after)
     elif t in ("T8", "T8S"):
@@ -1123,7 +1160,8 @@ def simple_cell(kind, place, t):
         helper_frees(g, some)
         pre, r = place.read(g, kind)
         body = setup + bind + chk("a", "the value stored") + pre + \
-            ["frees_some(%s, k)" % r if some else "frees(%s)" % r]
+            ["frees_some(%s, k)" % r if some else "frees(%s)" % r] + \
+            chk("a", "the place, after a callee freed what it was handed")
     elif t in ("T9", "T10", "T11R"):
         ret = kind.ty
         pre, r = place.read(g, kind)
@@ -1134,9 +1172,18 @@ def simple_cell(kind, place, t):
         if t == "T11R":
             helper_reads(g, kind)
             extra = ["defer reads(%s)" % place.read(g, kind)[1]]
-        body = setup + bind + chk("a", "the value stored") + extra + pre + exit_guard(["return %s" % r])
+        # Two paths: every other call returns the place's value, the others
+        # leave the place and return a fresh value of their own.
+        body = setup + bind + chk("a", "the value stored") + extra + pre + \
+            exit_guard(["return %s" % r], "k % 2 == 0")
+        pc, ec = kind.fresh(g, "c")
+        other = ["// The other path: the place is left, and a fresh value returned."] + pc + ["return %s" % ec]
+        if not loop:
+            body += other
         v = "v"
-        round_lines = [kind.bind_local(v, "shape(w, k)")] + kind.check(g, v, "a", "the returned value")
+        round_lines = [kind.bind_local(v, "shape(w, k)"), "if k % 2 == 0 {"] + \
+            block(kind.check(g, v, "a", "the returned value"), 1) + ["} else {"] + \
+            block(kind.check(g, v, "c", "the value the other path returned"), 1) + ["}"]
     elif t == "T11":
         helper_reads(g, kind)
         body = setup + bind + ["defer reads(%s)" % place.read(g, kind)[1]] + chk("a", "the value stored")
@@ -1153,7 +1200,10 @@ def simple_cell(kind, place, t):
             "while j < 50000 {",
             "    j = j + 1",
             "    prev = x",
-            "    x = || { return call(prev) }",
+            "    x = || {",
+            "        string s = call(prev)",
+            "        return s",
+            "    }",
             "}",
             "return 1",
         ]
@@ -1162,7 +1212,7 @@ def simple_cell(kind, place, t):
     elif t == "T14":
         helper_held(g, kind)
         pre, r = place.read(g, kind)
-        body = setup + bind + pre + ["held = %s" % r]
+        body = setup + bind + pre + ["held = %s" % r] + chk("a", "the place, after it was stored in a module var")
         round_lines = ["shape(w, k)"] + kind.check(g, "held", "a", "the module var, after the scope ended")
     elif t == "T15":
         pre, e = place.value(g, kind, "b")
@@ -1184,8 +1234,11 @@ def simple_cell(kind, place, t):
         if ret == "int":
             body += ["return 0"]
         elif ret:
-            pz, ez = kind.fresh(g, "z")
-            body += ["// not reached: the loop returns on its third pass"] + pz + ["return %s" % ez]
+            body += other
+    if place.id == "P3E":
+        # Bound and used inside each branch. k % 4 < 2 picks the branch, so
+        # each branch meets both paths of a transfer that tests k % 2.
+        body = ["if k % 4 < 2 {"] + block(body, 1) + ["} else {"] + block(body, 1) + ["}"]
     if place.id == "P3B":
         # k counts calls from 0, so the branch always runs; the compiler cannot know.
         body = ["if k >= 0 {"] + block(body, 1) + ["}"]
@@ -1206,7 +1259,7 @@ def simple_cell(kind, place, t):
 def captured_cell(kind, pid, t):
     g = Gen("%s-%s-%s" % (kind.id, pid, t))
     if kind.id == "K9":
-        return "K9 is covered only in a ptr slot and a container"
+        return "K9 is covered in a struct `fn` field, a ptr slot and a container only"
     write = pid == "P9W"
     pa, ea = kind.fresh(g, "a")
     bind = pa + [kind.bind_local("x", ea)]
@@ -1245,16 +1298,23 @@ def captured_cell(kind, pid, t):
         round_lines = ["shape(w, k)", "int n = call(kept)", 'check(n == 1, "the kept closure, after the scope ended")']
     elif t in ("T9", "T10"):
         ret = "fn"
+        r = "f"
         if t == "T10":
             g.decl("fn id", "// Hands its parameter back as it came.\nid(h: fn) -> fn {\n    return h\n}")
-            body = bind + ["return id(f)"]
-        else:
-            body = bind + ["return f"]
+            r = "id(f)"
+        body = bind + ["if k % 2 == 0 {", "    return %s" % r, "}",
+                       "// The other path: the closure is left, and another one returned.",
+                       "return || { return 1 }"]
         round_lines = ["h = shape(w, k)", "int n = call(h)", 'check(n == 1, "the returned closure")',
                        "int n2 = call(h)", 'check(n2 == 1, "the returned closure, called again")']
     elif t == "T11":
         g.decl("fn runs", "// Calls the closure it is given, keeps nothing.\nruns(h: fn) -> int {\n    int n = call(h)\n    return n\n}")
         body = bind + ["defer runs(f)"] + call_f
+    elif t == "T14":
+        g.decl("var held", "var held: fn = null")
+        body = bind + ["held = f"]
+        round_lines = ["shape(w, k)", "int n = call(held)",
+                       'check(n == 1, "the closure in the module var, after the scope ended")']
     elif t == "T12":
         body = bind + ["f2 = f", "f = || { return 0 }", "int n = call(f2)", 'check(n == 1, "the alias of the closure")']
     else:
@@ -1265,7 +1325,7 @@ def captured_cell(kind, pid, t):
                    round_lines)
 
 
-P9_TRANSFERS = ["T1", "T2", "T3", "T4", "T5", "T6", "T7", "T9", "T10", "T11", "T12"]
+P9_TRANSFERS = ["T1", "T2", "T3", "T4", "T5", "T6", "T7", "T9", "T10", "T11", "T12", "T14"]
 
 
 # ---- P11: actor state; P12: message field --------------------------------
@@ -1314,13 +1374,11 @@ def state_cell(kind, t):
     pid, title = "P11", "actor state"
     g = Gen("%s-%s-%s" % (kind.id, pid, t))
     if kind.id == "K9":
-        return "K9 is covered only in a ptr slot and a container"
+        return "K9 is covered in a struct `fn` field, a ptr slot and a container only"
     if kind.id in ("K5", "K8"):
         need_doc(g)
     if t in ("T7", "T14") and kind.zero is None:
         return NO_GLOBAL
-    if kind.id == "K6":
-        return "an actor state field cannot be a tuple: `state (string, int) v` does not parse (E0100)"
     if t == "T9" and kind.id != "K1":
         return "a reply carries back a string or a message's first field; measured for K1"
     g.decl("message Set", "message Set {\n    w: string\n}")
@@ -1394,13 +1452,15 @@ def message_cell(kind, pid, t):
              else "message field the actor only reads (dropped with the message)")
     g = Gen("%s-%s-%s" % (kind.id, pid, t))
     if kind.id == "K9":
-        return "K9 is covered only in a ptr slot and a container"
+        return "K9 is covered in a struct `fn` field, a ptr slot and a container only"
     if kind.id in ("K5", "K8"):
         need_doc(g)
     if t == "T2" and not keeps:
         return "an actor that drops the field has nothing to overwrite"
-    if keeps and kind.id == "K6":
-        return "an actor state field cannot be a tuple: `state (string, int) v` does not parse (E0100)"
+    if t == "T7" and keeps:
+        return "a kept field passed to a keeper is P12D-T7 with the state besides"
+    if t == "T7" and kind.zero is None:
+        return NO_GLOBAL
     g.decl("message Put", "message Put {\n    v: %s\n}" % kind.ty)
     if t == "T2":
         arm = ["Put(v: x) -> {", "    v = x", "}"]
@@ -1409,6 +1469,9 @@ def message_cell(kind, pid, t):
         arm = ["Put(v: x) -> {"] + block(kind.check(g, "x", "a", "the field the actor received"), 1)
         if keeps:
             arm += ["    v = x"]
+        if t == "T7":
+            helper_keep(g, kind)
+            arm += ["    keep(x)"]
         arm += ["}"]
         check_tag = "a"
     check_body = kind.check(g, "v", check_tag, "the state, when asked") if keeps else []
@@ -1416,7 +1479,7 @@ def message_cell(kind, pid, t):
     actor = ["actor Holder {"] + (["    " + STATE_DECL["K1" if kind.is_string else kind.id]] if keeps else []) + ["    receive {"] + \
         block(arm + check_arm, 2) + ["    }", "}"]
     pa, ea = kind.fresh(g, "a")
-    if t == "T1":
+    if t in ("T1", "T7"):
         body = pa + ["h ! Put { v: %s }" % ea]
     elif t == "T2":
         pb, eb = kind.fresh(g, "b")
@@ -1427,15 +1490,17 @@ def message_cell(kind, pid, t):
     else:
         return None
     body += ["int n = h ? Check {}", 'check(n == 1, "the actor answered")']
+    if t == "T7":
+        body += kind.check(g, "kept", "a", "the field the actor kept in a module var, after the message was dropped")
     return actor_program(g, kind, (pid, title), t, actor,
                          shape_fn(None, body, params="w: string, k: int, h: ptr",
-                                  comment="The shape: %s." % ("send a fresh value" if t == "T1" else
+                                  comment="The shape: %s." % ("send a fresh value" if t in ("T1", "T7") else
                                                                  "send two values, the second replaces the first" if t == "T2"
                                                                  else "send a local, read it after the send")),
                          ["shape(w, k, h)"])
 
 
-P12_TRANSFERS = ["T1", "T2", "T12"]
+P12_TRANSFERS = ["T1", "T2", "T7", "T12"]
 
 
 # ---- P14 / P15 / P16: a part of a parameter -------------------------------
@@ -1444,7 +1509,7 @@ P12_TRANSFERS = ["T1", "T2", "T12"]
 def param_cell(kind, pid, t):
     g = Gen("%s-%s-%s" % (kind.id, pid, t))
     if kind.id == "K9":
-        return "K9 is covered only in a ptr slot and a container"
+        return "K9 is covered in a struct `fn` field, a ptr slot and a container only"
     if pid == "P14":
         title = "field of a struct parameter"
         if kind.id in ("K5", "K8"):
@@ -1513,14 +1578,15 @@ def param_cell(kind, pid, t):
         some = t == "T8S"
         helper_frees(g, some)
         ops = ["frees_some(%s, k)" % place if some else "frees(%s)" % place, "return 1"]
-        caller_tag = None
     elif t in ("T9", "T10"):
         callee_ret = kind.ty
+        r = place
         if t == "T10":
             helper_id(g, kind)
-            ops = ["return id(%s)" % place]
-        else:
-            ops = ["return %s" % place]
+            r = "id(%s)" % place
+        pc, ec = kind.fresh(g, "c")
+        ops = ["if k % 2 == 0 {", "    return %s" % r, "}",
+               "// The other path: the part is left, and a fresh value returned."] + pc + ["return %s" % ec]
     elif t == "T12":
         pb, eb = kind.fresh(g, "b")
         ops = [kind.bind_local("y", place)] + pb + ["%s = %s" % (place, eb)] + \
@@ -1550,7 +1616,9 @@ def param_cell(kind, pid, t):
     g.decl("fn use", "\n".join(callee))
     if t in ("T9", "T10"):
         body = make + [kind.bind_local("v", "use(%s, w, k)" % ("h" if pid == "P14" else "xs"))] + \
-            caller_store("b") + kind.check(g, "v", "a", "the returned part, after the caller overwrote its own")
+            caller_store("b") + ["if k % 2 == 0 {"] + \
+            block(kind.check(g, "v", "a", "the returned part, after the caller overwrote its own"), 1) + \
+            ["} else {"] + block(kind.check(g, "v", "c", "the value the other path returned"), 1) + ["}"]
     elif t == "T5":
         arg = "h" if pid == "P14" else "xs"
         body = make + ["try {", "    use(%s, w, k)" % arg] + catch_lines() + \
@@ -1573,7 +1641,7 @@ def temp_cell(kind, t):
     pid, title = "P17", "temporary (a call argument or a value never bound)"
     g = Gen("%s-%s-%s" % (kind.id, pid, t))
     if kind.id == "K9":
-        return "K9 is covered only in a ptr slot and a container"
+        return "K9 is covered in a struct `fn` field, a ptr slot and a container only"
     pa, ea = kind.fresh(g, "a")
     round_lines = ["shape(w, k)"]
     ret = None
@@ -1700,6 +1768,7 @@ PLACES = [
     ("P2", "local rebound in a loop body"),
     ("P3", "local bound only in the branches of an if/else"),
     ("P3B", "local bound and used inside one branch of an if"),
+    ("P3E", "local bound and used inside each branch of an if/else"),
     ("P4", "field of a local struct"),
     ("P5", "element of a fixed-size array local"),
     ("P5L", "element of a fixed-size array local rebound in a loop body"),

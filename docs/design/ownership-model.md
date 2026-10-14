@@ -186,6 +186,13 @@ green, and is measured against the benchmarks before it merges.
 4. **R3's transfers:** parameters borrow, the callee's own store retains,
    returns hand over. The callee-body analyses go: copy-on-keep, the return
    classifier, the pass-through veto, the tuple and cycle classifiers.
+
+   A function may not free a value it borrows (a parameter): the checker
+   refuses `string.free` or `release` of a parameter, with a message
+   pointing to keeping the value (store it) instead. Under R3 such a free
+   would release a reference the function does not own. The grid's cells
+   for a function that frees what it is passed, on every path (T8) or on
+   some (T8S), have REFUSED as their target.
 5. **R5:** last-use moves and pair elision, each measured.
 6. **Docs:** memory-management.md rewritten around R1 to R5; the per-shape
    sections become history.

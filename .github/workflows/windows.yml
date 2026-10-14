@@ -346,13 +346,13 @@ jobs:
   # poisoning allocator needs. The default C path only; the
   # -DAETHER_GCC_COMPAT=0 path gave the same status for every cell.
   #
-  # Three shards of about 585 cells, split by position as the test sweep is
+  # Three shards of about 650 cells, split by position as the test sweep is
   # (OWNERSHIP_GRID_SHARD, like AE_SWEEP_SHARD). These runners build a test
   # program in about 1.9 s of a job (the sweep's 689 builds take 320 s on 4
-  # cores), and a cell is one build and two short runs, about 2.4 s, so the
-  # grid is about 17 minutes of four jobs. Two shards would take about 12
-  # minutes each with the toolchain build; three take about 9, which ends
-  # them before build-mingw's 15.
+  # cores), and a cell is one build and two short runs, so two shards would
+  # take about 12 minutes each with the toolchain build. With three, the
+  # first run on #2916 took 7 to 8 minutes per job, setup included, ending
+  # before build-mingw's 15.
   # ============================================================
   ownership-grid:
     name: Windows / ownership grid [${{ matrix.part }}]
