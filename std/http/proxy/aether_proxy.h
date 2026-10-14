@@ -270,7 +270,7 @@ int aether_middleware_reverse_proxy(HttpRequest* req,
                                     void* user_data);
 
 /* Render the proxy's metric snapshot to a Prometheus-compatible
- * text body (caller frees). Output mirrors the existing
+ * text body. Output mirrors the existing
  * http_server_set_metrics scheme:
  *
  *   aether_proxy_upstream_requests_total{upstream="...",class="2xx"} N
@@ -288,6 +288,7 @@ int aether_middleware_reverse_proxy(HttpRequest* req,
  *   aether_proxy_cache_revalidations_total N
  *   aether_proxy_503_no_upstream_total N
  *
+ * A fresh counted AetherString (cast to char*) the caller releases;
  * NULL on OOM. */
 char* aether_proxy_pool_metrics_text(AetherProxyPool* pool);
 

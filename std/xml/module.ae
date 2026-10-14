@@ -79,16 +79,16 @@ extern xml_builder_attr(b: ptr, name: string, value: string)
 extern xml_builder_text(b: ptr, text: string)
 extern xml_builder_end(b: ptr, name: string)
 extern xml_builder_element(b: ptr, name: string, text: string)
-extern xml_builder_finish(b: ptr) -> string
+extern xml_builder_finish(b: ptr) -> string @heap
 extern xml_builder_free(b: ptr)
 
-extern xml_escape(s: string) -> string
+extern xml_escape(s: string) -> string @heap
 
 // Copy a borrowed C string into an owned Aether string. The reader's
 // name/text/attr accessors return pointers into the parser's scratch
 // that are only valid until the next `next` call; copying makes the
 // value safe to hold across iterations (same pattern as std.json).
-extern string_concat(a: string, b: string) -> string
+extern string_concat(a: string, b: string) -> string @heap
 
 // ============================================================
 // Reader wrappers
@@ -187,9 +187,9 @@ element(b: ptr, name: string, content: string) {
 
 // Finish the document and return it as an owned string (escaping already
 // applied throughout). The builder is still alive — call `free_builder`.
-// The string_concat copies the C buffer into an owned Aether string and
-// lets the codegen reclaim the malloc'd original at scope exit (the same
-// handoff std.json's `stringify` uses).
+// The string_concat copies the C result into an owned Aether string and
+// lets the codegen release the original at scope exit (the same handoff
+// std.json's `stringify` uses).
 finish(b: ptr) -> string {
     raw = xml_builder_finish(b)
     return string_concat(raw, "")

@@ -102,7 +102,7 @@ HttpResponse* http_put_raw(const char* u, const char* b, const char* c) { (void)
 HttpResponse* http_delete_raw(const char* u) { (void)u; return NULL; }
 void http_response_free(HttpResponse* r) { (void)r; }
 int http_response_status(HttpResponse* r) { (void)r; return 0; }
-const char* http_response_body(HttpResponse* r) { (void)r; return ""; }
+const char* http_response_body(HttpResponse* r) { (void)r; return (const char*)string_empty(); }
 int http_response_body_length(HttpResponse* r) { (void)r; return 0; }
 const char* http_response_headers(HttpResponse* r) { (void)r; return ""; }
 const char* http_response_error(HttpResponse* r) { (void)r; return "networking disabled at build time"; }
@@ -129,7 +129,7 @@ const char* http_response_effective_url_raw(HttpResponse* r) { (void)r; return "
 const char* http_response_redirect_error_raw(HttpResponse* r) { (void)r; return ""; }
 int http_request_set_stream_raw(HttpClientRequest* r, int on) { (void)r; (void)on; return -1; }
 int http_response_is_stream_raw(HttpResponse* r) { (void)r; return 0; }
-const char* http_response_read_chunk_raw(HttpResponse* r, int max) { (void)r; (void)max; return ""; }
+const char* http_response_read_chunk_raw(HttpResponse* r, int max) { (void)r; (void)max; return (const char*)string_empty(); }
 /* Linked by the proxy, which is built without networking too (#2517). */
 const char* http_response_body_str(HttpResponse* r) { (void)r; return ""; }
 void http_client_pool_size_for_proxy(void) {}
@@ -486,7 +486,7 @@ static void pem_out_append(PemOut* o, const char* s, size_t n) {
     if (o->len + n + 1 > o->cap) {
         size_t want = o->cap ? o->cap * 2 : 65536;
         while (want < o->len + n + 1) want *= 2;
-        char* grown = (char*)realloc(o->buf, want);
+        char* grown = (char*)aether_caps_realloc(o->buf, o->cap, want);
         if (!grown) { o->oom = 1; return; }
         o->buf = grown;
         o->cap = want;
@@ -527,23 +527,21 @@ static void pem_out_cert(const unsigned char* der, size_t len, void* arg) {
 #endif  // _WIN32
 
 /* Every certificate of the Windows ROOT system store as PEM text, a fresh
- * malloc the caller frees; "" when there is none, and on any other platform.
- * NULL only when out of memory. */
+ * counted string the caller releases; "" when there is none, and on any other
+ * platform. NULL only when out of memory. */
 char* aether_tls_windows_store_pem(void) {
 #ifdef _WIN32
     PemOut o = { NULL, 0, 0, 0 };
     windows_root_store_each(pem_out_cert, &o);
-    if (o.oom) { free(o.buf); return NULL; }
-    if (o.buf) return o.buf;
+    if (o.oom) { aether_caps_free(o.buf, o.cap); return NULL; }
+    if (o.buf) return (char*)string_adopt_caps_buffer(o.buf, o.len, o.cap);
 #endif
-    char* empty = (char*)malloc(1);
-    if (empty) empty[0] = '\0';
-    return empty;
+    return (char*)string_empty();
 }
 
-/* The first bundle file of the list above that exists, a fresh malloc the
- * caller frees; "" when none does, and on any other platform. NULL only when
- * out of memory. */
+/* The first bundle file of the list above that exists, a fresh counted string
+ * the caller releases; "" when none does, and on any other platform. NULL only
+ * when out of memory. */
 char* aether_tls_windows_bundle(void) {
 #ifdef _WIN32
     char path[MAX_PATH + 64];
@@ -553,9 +551,7 @@ char* aether_tls_windows_bundle(void) {
     const char* path = "";
     size_t n = 0;
 #endif
-    char* copy = (char*)malloc(n + 1);
-    if (copy) memcpy(copy, path, n + 1);
-    return copy;
+    return (char*)string_new_with_length(path, n);
 }
 
 // -----------------------------------------------------------------

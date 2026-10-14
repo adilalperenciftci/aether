@@ -15,6 +15,8 @@ typedef struct TcpReceiveResult {
 TcpSocket* tcp_connect_raw(const char* host, int port);
 int tcp_send_raw(TcpSocket* sock, const char* data);
 int tcp_send_n_raw(TcpSocket* sock, const char* data, int length);
+// The bytes received as a fresh counted AetherString (cast to char*) the
+// caller releases; NULL on error or close.
 char* tcp_receive_raw(TcpSocket* sock, int max_bytes);
 TcpReceiveResult tcp_receive_n_raw(TcpSocket* sock, int max_bytes);
 // Byte-buffer forms for std.tcp's slice wrappers (#2301). The Aether

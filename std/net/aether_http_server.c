@@ -3524,13 +3524,13 @@ static char* ws_expected_accept(const char* client_key) {
     char* b64 = cryptography_base64_encode_raw((const char*)digest,
                                                WS_SHA1_LEN);
     if (!b64) return NULL;
-    size_t bl = strlen(b64);
+    size_t bl = aether_string_length(b64);
     char* out = (char*)malloc(bl + 2);
-    if (!out) { free(b64); return NULL; }
-    memcpy(out, b64, bl);
+    if (!out) { string_release(b64); return NULL; }
+    memcpy(out, aether_string_data(b64), bl);
     out[bl] = '=';
     out[bl + 1] = '\0';
-    free(b64);
+    string_release(b64);
     return out;
 }
 
@@ -3637,8 +3637,8 @@ HttpWsConn* http_ws_connect(const char* url) {
     if (!key_b64) { close(fd); return NULL; }
     /* 16 bytes -> 22 unpadded chars; RFC 6455 wants the padded 24. */
     char client_key[32];
-    snprintf(client_key, sizeof(client_key), "%s==", key_b64);
-    free(key_b64);
+    snprintf(client_key, sizeof(client_key), "%s==", aether_string_data(key_b64));
+    string_release(key_b64);
 
     char req[2048];
     int rn = snprintf(req, sizeof(req),
@@ -3771,8 +3771,8 @@ static int ws_send_handshake(HttpConn* conn, const char* client_key) {
         "Connection: Upgrade\r\n"
         "Sec-WebSocket-Accept: %s=\r\n"
         "\r\n",
-        accept_b64);
-    free(accept_b64);
+        aether_string_data(accept_b64));
+    string_release(accept_b64);
     if (rn <= 0 || rn >= (int)sizeof(resp)) return -1;
     if (conn_send(conn, resp, rn) != rn) return -1;
     return 0;

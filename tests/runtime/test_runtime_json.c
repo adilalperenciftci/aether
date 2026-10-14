@@ -1,5 +1,6 @@
 #include "test_harness.h"
 #include "../../std/json/aether_json.h"
+#include "../../std/string/aether_string.h"
 
 TEST_CATEGORY(json_parse_null, TEST_CATEGORY_STDLIB) {
     JsonValue* value = json_parse_raw("null");
@@ -115,10 +116,10 @@ TEST_CATEGORY(json_create_and_stringify, TEST_CATEGORY_STDLIB) {
 
     char* json_str = json_stringify_raw(obj);
     ASSERT_NOT_NULL(json_str);
-    ASSERT_NOT_NULL(strstr(json_str, "name"));
-    ASSERT_NOT_NULL(strstr(json_str, "Bob"));
+    ASSERT_NOT_NULL(strstr(aether_string_data(json_str), "name"));
+    ASSERT_NOT_NULL(strstr(aether_string_data(json_str), "Bob"));
 
-    free(json_str);
+    string_release(json_str);
     json_free(obj);
 }
 
@@ -155,9 +156,9 @@ TEST_CATEGORY(json_set_into_parsed_inner_containers, TEST_CATEGORY_STDLIB) {
         json_object_get_raw(json_array_get_raw(json_object_get_raw(root, "objects"), 0), "fields"), "speed")));
     ASSERT_EQ(2, json_array_size(tags));
     char* text = json_stringify_raw(root);
-    ASSERT_NOT_NULL(strstr(text, "\"speed\":10"));
-    ASSERT_NOT_NULL(strstr(text, "\"kind\":\"Mover\""));
-    free(text);
+    ASSERT_NOT_NULL(strstr(aether_string_data(text), "\"speed\":10"));
+    ASSERT_NOT_NULL(strstr(aether_string_data(text), "\"kind\":\"Mover\""));
+    string_release(text);
 
     json_free(fields);   // borrowed: frees nothing
     json_free(root);

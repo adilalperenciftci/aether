@@ -9,6 +9,7 @@
  */
 #include "aether_xml.h"
 #include "../mem/aether_grow.h"
+#include "../string/aether_string.h"
 #include "../../runtime/aether_resource_caps.h"
 #include <stdlib.h>
 #include <string.h>
@@ -59,6 +60,17 @@ static char* sb_finish(Sb* s) {
     if (!s->data) { return strdup(""); }
     s->data[s->len] = '\0';
     return s->data;  /* ownership transferred */
+}
+
+/* The accumulated bytes as a fresh counted string, leaving `s` empty. A copy:
+ * the parser's buffers come from here too and are freed with free(), so the
+ * buffer is not a cap-accounted one string_adopt_caps_buffer could take.
+ * NULL on OOM. */
+static AetherString* sb_finish_string(Sb* s) {
+    AetherString* out = s->oom ? NULL : string_new_with_length(s->data, s->len);
+    free(s->data);
+    sb_init(s);
+    return out;
 }
 
 /* ------------------------------------------------------------------ */
@@ -672,7 +684,7 @@ static void sb_put_escaped(Sb* s, const char* p) {
 char* xml_escape(const char* s) {
     Sb out; sb_init(&out);
     sb_put_escaped(&out, s);
-    return sb_finish(&out);
+    return (char*)sb_finish_string(&out);
 }
 
 /* ------------------------------------------------------------------ */
@@ -748,13 +760,6 @@ void xml_builder_element(XmlBuilder* b, const char* name, const char* text) {
 char* xml_builder_finish(XmlBuilder* b) {
     if (!b) return NULL;
     close_open_tag(b);
-    char* result = sb_finish(&b->sb);  /* transfers ownership of the buffer */
-    /* Detach so a subsequent xml_builder_free() doesn't double-free the
-     * buffer we just handed to the caller (sb_finish also frees it on OOM,
-     * leaving a dangling pointer — nulling covers both). */
-    b->sb.data = NULL;
-    b->sb.len = 0;
-    b->sb.cap = 0;
-    return result;
+    return (char*)sb_finish_string(&b->sb);
 }
 

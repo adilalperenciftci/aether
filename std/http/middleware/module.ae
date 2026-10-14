@@ -254,7 +254,7 @@ use_vhost(server: ptr, hosts_csv: string) -> {
 // and trim ASCII whitespace from both ends. Returns a heap-allocated
 // string. Uses the existing string_substring(str, start, end) extern
 // from std.string (end-exclusive, not length-based).
-extern string_substring(str: string, start: int, end: int) -> string
+extern string_substring(str: string, start: int, end: int) -> string @heap
 
 substring_trim(s: string, start: int, len: int) -> string {
     // Forward-trim.

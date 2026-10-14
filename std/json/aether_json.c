@@ -1899,7 +1899,7 @@ static int sb_reserve(StrBuf* b, size_t extra) {
         size_t need = b->len + extra + 1;
         size_t new_cap = aether_buf_grow_capacity(b->cap, 256, need, 1);
         if (!new_cap) { b->oom = 1; return 0; }
-        char* nd = (char*)realloc(b->data, new_cap);
+        char* nd = (char*)aether_caps_realloc(b->data, b->cap, new_cap);
         if (!nd) { b->oom = 1; return 0; }
         b->data = nd;
         b->cap = new_cap;
@@ -2131,28 +2131,23 @@ static void sb_emit_value(StrBuf* b, JsonValue* v, int depth) {
     }
 }
 
-/* NULL when the value nests deeper than JSON_MAX_DEPTH (the limit parse
- * enforces), so the caller reports it instead of shipping output that
- * silently replaced the deep part with null. */
+/* A fresh counted string adopting the buffer. NULL when the value nests
+ * deeper than JSON_MAX_DEPTH (the limit parse enforces), so the caller
+ * reports it instead of shipping output that silently replaced the deep
+ * part with null. */
 char* json_stringify_raw(JsonValue* v) {
     StrBuf b = {0};
     sb_emit_value(&b, v, 0);
     if (b.too_deep) {
-        free(b.data);
+        aether_caps_free(b.data, b.cap);
         return NULL;
     }
     if (b.oom) {
-        free(b.data);
+        aether_caps_free(b.data, b.cap);
         // Return an empty string rather than NULL so existing callers
         // that don't check for NULL don't crash — matches prior behavior.
-        char* empty = (char*)malloc(1);
-        if (empty) empty[0] = '\0';
-        return empty;
+        return (char*)string_empty();
     }
-    if (!b.data) {
-        char* empty = (char*)malloc(1);
-        if (empty) empty[0] = '\0';
-        return empty;
-    }
-    return b.data;
+    if (!b.data) return (char*)string_empty();
+    return (char*)string_adopt_caps_buffer(b.data, b.len, b.cap);
 }

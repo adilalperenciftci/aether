@@ -55,7 +55,7 @@ extern json_last_error() -> string
 extern json_last_error_kind() -> int
 extern json_last_error_line() -> int
 extern json_last_error_col() -> int
-extern json_stringify_raw(value: ptr) -> string
+extern json_stringify_raw(value: ptr) -> string @heap
 extern json_free(value: ptr)
 
 // ---- type introspection (infallible, no wrapper needed) ----
@@ -105,7 +105,7 @@ extern json_create_array() -> ptr
 extern json_create_object() -> ptr
 
 // ---- helper used by wrappers for string ownership ----
-extern string_concat(a: string, b: string) -> string
+extern string_concat(a: string, b: string) -> string @heap
 
 // ---- Go-style wrappers ----
 

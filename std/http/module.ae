@@ -144,7 +144,7 @@ extern http_response_ok(response: ptr) -> int
 // string_concat used internally to duplicate borrowed strings before the
 // backing response is freed. The concat of any string with "" produces a
 // new heap-allocated copy that outlives the source.
-extern string_concat(a: string, b: string) -> string
+extern string_concat(a: string, b: string) -> string @heap
 
 // HTTP Client — Go-style result-type wrappers. These are the idiomatic
 // Aether-facing API: they auto-free the underlying response and return

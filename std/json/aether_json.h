@@ -41,10 +41,10 @@ int json_last_error_kind(void);
 int json_last_error_line(void);
 int json_last_error_col(void);
 
-// Serialize `value` to a newly malloc'd compact JSON string. Caller
-// must free. Returns a non-NULL empty string on allocation failure.
-// The Aether-side wrapper `json.stringify` copies into an owned
-// Aether string and frees the raw C buffer; use that from Aether code.
+// Serialize `value` to a fresh counted AetherString (cast to char*) the
+// caller owns and releases with string_release; read it through
+// aether_string_data. Returns an empty one on allocation failure, NULL
+// when the value nests deeper than parse accepts.
 char* json_stringify_raw(JsonValue* value);
 
 // Free the value and every node reachable from it. For parsed roots

@@ -95,16 +95,14 @@ void xml_builder_end(XmlBuilder* b, const char* name);
 /* Convenience: `<name>escaped-text</name>` in one call. */
 void xml_builder_element(XmlBuilder* b, const char* name, const char* text);
 
-/* Return the accumulated document. Caller owns the returned buffer and
- * must free() it. Returns NULL on allocation failure. */
+/* Return the accumulated document as a fresh counted AetherString (cast to
+ * char*) the caller releases with string_release, and empty the builder.
+ * Returns NULL on allocation failure. */
 char* xml_builder_finish(XmlBuilder* b);
 
-/* Escape the five predefined entities (& < > " ') in `s` into a freshly
- * malloc'd NUL-terminated string. Caller frees. NULL on alloc failure.
- * (The std.xml wrappers copy this into an owned Aether string via
- * string_concat — the same ownership handoff std.json uses for
- * json_stringify_raw — so the malloc'd buffer is reclaimed at scope
- * exit and the value joins Aether's refcounted string model.) */
+/* Escape the five predefined entities (& < > " ') in `s` into a fresh
+ * counted AetherString (cast to char*) the caller releases with
+ * string_release. NULL on alloc failure. */
 char* xml_escape(const char* s);
 
 #endif /* AETHER_XML_H */

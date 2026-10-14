@@ -1988,7 +1988,7 @@ Coming from Java's `java.security`, Python's `cryptography`, or Go's `crypto/*`,
 - **URL-safe Base64 (RFC 4648 §5).** Standard alphabet only; URL-safe (`-` / `_` instead of `+` / `/`) is a separate variant the wrappers don't expose.
 - **Constant-time comparison.** Equality checks via `string.equals` are not constant-time; callers comparing hashes for security-sensitive cases need their own constant-time helper.
 
-Raw externs: `cryptography_sha1_hex_raw`, `cryptography_sha256_hex_raw` return allocated `char*` or NULL on failure. The Go-style wrappers translate the NULL into `("", "openssl unavailable")`.
+Raw externs: `cryptography_sha1_hex_raw`, `cryptography_sha256_hex_raw` return a fresh counted string the caller owns, or NULL on failure. The Go-style wrappers translate the NULL into `("", "openssl unavailable")`.
 
 Public-key crypto, symmetric ciphers, and key derivation live under `std.cryptography` as explicitly-imported sub-modules (e.g. `std.cryptography.rsa`, `std.cryptography.x25519`, `std.cryptography.aes`), pure-Aether ports, no OpenSSL. The top-level `std.cryptography` module stays focused on the hash/HMAC/Base64/CSPRNG primitives with a single obvious shape.
 

@@ -39,7 +39,7 @@ extern yaml_emit_node_raw(node: ptr) -> string
 extern yaml_emit_document_raw(doc: ptr) -> string
 
 // Helper for uniform-heap returns
-extern string_concat(a: string, b: string) -> string
+extern string_concat(a: string, b: string) -> string @heap
 
 // ---- Go-style Aether Wrappers ----
 

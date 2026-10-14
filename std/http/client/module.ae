@@ -98,7 +98,7 @@ extern http_response_effective_url_raw(response: ptr) -> string
 extern http_response_free(response: ptr)
 
 // String helpers for the wrappers below.
-extern string_concat(a: string, b: string) -> string
+extern string_concat(a: string, b: string) -> string @heap
 extern string_length(str: string) -> int
 
 // ---- Go-style wrappers ----

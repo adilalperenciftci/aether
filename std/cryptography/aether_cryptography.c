@@ -29,17 +29,17 @@ static inline const unsigned char* cryptography_unwrap_bytes(const char* data, i
     return (const unsigned char*)data;
 }
 
+/* Lowercase hex of the digest as a fresh counted string, NULL on OOM. */
 static char* hex_encode(const unsigned char* digest, size_t digest_len) {
-    /* Two hex chars per byte + trailing NUL. */
-    char* hex = (char*)malloc(digest_len * 2 + 1);
-    if (!hex) return NULL;
+    AetherString* s = string_alloc_inline(digest_len * 2);
+    if (!s) return NULL;
+    char* hex = s->data;
     static const char HEX[] = "0123456789abcdef";
     for (size_t i = 0; i < digest_len; i++) {
         hex[i * 2]     = HEX[(digest[i] >> 4) & 0x0F];
         hex[i * 2 + 1] = HEX[digest[i] & 0x0F];
     }
-    hex[digest_len * 2] = '\0';
-    return hex;
+    return (char*)s;
 }
 
 #ifdef AETHER_HAS_OPENSSL
@@ -220,7 +220,7 @@ int cryptography_hash_bytes_raw(const char* algo, const char* data, int length) 
 }
 
 /* HMAC-SHA256 (#631). Veneer over libcrypto's HMAC() one-shot. The
- * hex variant returns a caller-frees lowercase-hex string (64 chars);
+ * hex variant returns a caller-owned lowercase-hex string (64 chars);
  * the bytes variant stashes the 32-byte raw digest in the binary-
  * digest TLS slot. SigV4's key-derivation chain needs the raw form —
  * each round's output keys the next, so hex would round-trip through
@@ -313,7 +313,7 @@ int cryptography_digest_update_raw(void* handle, const char* data, int length) {
     return EVP_DigestUpdate((EVP_MD_CTX*)handle, bytes, want) == 1 ? 1 : 0;
 }
 
-/* Finalize → caller-frees lowercase hex; frees the context either way. */
+/* Finalize → caller-owned lowercase hex; frees the context either way. */
 char* cryptography_digest_final_hex_raw(void* handle) {
     if (!handle) return NULL;
     EVP_MD_CTX* ctx = (EVP_MD_CTX*)handle;
@@ -490,7 +490,7 @@ static char* ae_b64_encode(const char* data, int length, int pad) {
         if (pad) out[o++] = '=';
     }
     out[o] = '\0';
-    return out;
+    return (char*)string_adopt_caps_buffer(out, o, out_cap);
 }
 
 char* cryptography_base64_encode_raw(const char* data, int length) {
