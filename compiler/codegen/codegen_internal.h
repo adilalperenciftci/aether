@@ -416,6 +416,9 @@ void mark_escaped_heap_string_vars(CodeGenerator* gen, ASTNode* body);
 ASTNode* transient_closure_arg(CodeGenerator* gen, ASTNode* call);
 int call_returns_owned_closure(CodeGenerator* gen, ASTNode* call);   /* #2506 */
 const char* call_c_name(CodeGenerator* gen, const char* func_name);
+/* #2915: the extern table's name for the extern a call to `func_name`
+ * reaches, resolved as call_c_name resolves its C symbol, or NULL. */
+const char* extern_name_for_call(CodeGenerator* gen, const char* func_name);
 ASTNode* closure_container_store_value(CodeGenerator* gen, ASTNode* call);   /* #2518 */
 /* The heap-tracked string local a list add, list set or map put takes
  * (moved or copied, never adopted and left escaped), or NULL. */
@@ -563,6 +566,9 @@ int is_empty_slice_value(const ASTNode* e);
  * body may have written, for a `T[N]` parameter, as a copy of its own. */
 void generate_sized_array_argument(CodeGenerator* gen, ASTNode* arg, Type* param_type);
 int is_aether_extern_param(CodeGenerator* gen, const char* func_name, int param_idx);
+/* #2914: is argument `arg_idx` of a call to extern `func_name` a C vararg,
+ * past the declared parameters of an extern declared with `...`? */
+int is_extern_vararg_position(CodeGenerator* gen, const char* func_name, int arg_idx);
 /* Returns 1 if extern `func_name`'s parameter at `param_idx` was
    declared `@retain`. Tells the escape walker to mark a heap-string
    arg passed at this slot as escaped (function stores / retains the

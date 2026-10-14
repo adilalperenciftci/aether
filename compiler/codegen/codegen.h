@@ -314,6 +314,8 @@ typedef struct {
                              //   callee that keeps nothing (#2523). NULL when
                              //   no param carries the annotation.
         int param_count;
+        int is_variadic;     // declared with a trailing `...`: an argument
+                             //   past param_count is a C vararg (#2914)
         Type* ret_type;      // #1286: the declared return type (borrowed from
                              // the extern's AST), so a call returning `T[]`
                              // can be wrapped into a slice view.

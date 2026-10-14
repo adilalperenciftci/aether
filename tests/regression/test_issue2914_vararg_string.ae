@@ -1,0 +1,38 @@
+// Regression (#2914): an argument past the declared parameters of a
+// C-variadic extern (`extern snprintf(buf: ptr, n: int, fmt: string, ...)`)
+// was passed as the value is held. A string built at run time is an
+// AetherString, so `%s` formatted its header bytes. A string in a vararg
+// position now reaches C as its characters, as a declared `string`
+// parameter does (#297).
+
+import std.bytes
+import std.string
+
+extern exit(code: int)
+extern snprintf(buf: ptr, n: int, fmt: string, ...) -> int
+extern malloc(n: int) -> ptr
+extern free(p: ptr)
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+// Built from a parameter, so the optimizer cannot fold it into a literal.
+join(a: string, b: string) -> string {
+    return string.concat(a, b)
+}
+
+main() {
+    buf = malloc(64)
+    s = join("ab", "cd")
+    n = snprintf(buf, 64, "[%s]", s)
+    check(n == 6, "the formatted length of a counted string")
+    check(bytes.string_from_ptr(buf, n) == "[abcd]", "a counted string in a vararg position")
+    k = snprintf(buf, 64, "<%s|%s|%d>", "x", s, 7)
+    check(bytes.string_from_ptr(buf, k) == "<x|abcd|7>", "a literal and a counted string among varargs")
+    free(buf)
+    println("ok")
+}

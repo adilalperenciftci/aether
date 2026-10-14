@@ -169,6 +169,7 @@ void register_extern_func(CodeGenerator* gen, ASTNode* ext) {
         }
     }
     gen->extern_registry[idx].param_count = ext->child_count;
+    gen->extern_registry[idx].is_variadic = extern_is_varargs(ext);
     gen->extern_registry[idx].ret_type = ext->node_type;
     gen->extern_registry[idx].params = NULL;
     gen->extern_registry[idx].param_full = NULL;
@@ -729,6 +730,25 @@ const char* lookup_extern_c_name(CodeGenerator* gen, const char* func_name) {
     return func_name;
 }
 
+/* The extern table's name for the extern a call to `func_name` reaches, or
+ * NULL: the name itself (whole or dot-normalised), else, for `mod.f` where
+ * `mod_f` is no Aether function of the program, the `f` after the dot, as
+ * call_c_name resolves the call's C symbol. A call's parameter lookups key
+ * on this, never on the C symbol: an `@extern("sym")` binding is filed under
+ * its Aether name, and several bindings may share one symbol with different
+ * parameters (#2915). */
+const char* extern_name_for_call(CodeGenerator* gen, const char* func_name) {
+    if (!gen || !func_name) return NULL;
+    int idx = find_extern_registry_index(gen, func_name);
+    const char* qdot = strchr(func_name, '.');
+    if (idx < 0 && qdot && qdot[1] &&
+        !(gen->program && find_function_definition_by_name(
+              gen->program, codegen_normalise_callee(safe_c_name(func_name))))) {
+        idx = find_extern_registry_index(gen, qdot + 1);
+    }
+    return idx >= 0 ? gen->extern_registry[idx].name : NULL;
+}
+
 // Look up the expected TypeKind for the nth parameter of an extern function.
 // Returns TYPE_UNKNOWN if the function or parameter is not found.
 TypeKind lookup_extern_param_kind(CodeGenerator* gen, const char* func_name, int param_idx) {
@@ -770,6 +790,15 @@ int is_aether_extern_param(CodeGenerator* gen, const char* func_name, int param_
     if (!gen->extern_registry[idx].params_aether) return 0;
     if (param_idx < 0 || param_idx >= gen->extern_registry[idx].param_count) return 0;
     return gen->extern_registry[idx].params_aether[param_idx];
+}
+
+/* Is argument `arg_idx` of a call to extern `func_name` one of its C
+ * varargs: past the declared parameters of an extern declared with a
+ * trailing `...` (#2914)? */
+int is_extern_vararg_position(CodeGenerator* gen, const char* func_name, int arg_idx) {
+    int idx = find_extern_registry_index(gen, func_name);
+    return idx >= 0 && gen->extern_registry[idx].is_variadic &&
+           arg_idx >= gen->extern_registry[idx].param_count;
 }
 
 /* Returns 1 if extern `func_name`'s parameter at `param_idx` was

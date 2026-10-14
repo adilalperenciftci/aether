@@ -9732,6 +9732,9 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                 }
                 else {
                     const char* c_func_name = call_c_name(gen, func_name);
+                    /* The extern table entry the call reaches, by its Aether
+                     * name: what its parameters are looked up by (#2915). */
+                    const char* ext_name = extern_name_for_call(gen, func_name);
 
                     // spawn_ActorName(preferred_core) — pass core hint or -1.
                     // Only the generated actor spawner: a user function or
@@ -10201,7 +10204,8 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                         if (arg_printed > 0) fprintf(gen->output, ", ");
                         // Cast int→void* when param expects void* (TYPE_PTR).
                         // Check extern registry first, then user-defined function params.
-                        TypeKind expected = lookup_extern_param_kind(gen, c_func_name, arg_printed);
+                        TypeKind expected = ext_name ? lookup_extern_param_kind(gen, ext_name, arg_printed)
+                                                      : TYPE_UNKNOWN;
                         /* For TYPE_FUNCTION params we also need the full
                          * Type* so we can read `is_fnptr` — the boxing
                          * coercions below only apply to the closure
@@ -10250,7 +10254,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                          * named an adapter nothing emitted, and handed C an
                          * _AeClosure where it reads a function pointer. */
                         if (!expected_is_fnptr_form && expected == TYPE_FUNCTION && !expected_type) {
-                            Type* ext_fn = lookup_extern_param_type(gen, c_func_name, arg_printed);
+                            Type* ext_fn = ext_name ? lookup_extern_param_type(gen, ext_name, arg_printed) : NULL;
                             if (ext_fn && ext_fn->is_fnptr) expected_is_fnptr_form = 1;
                         }
                         /* #1033: tuple literal → by-value `_tuple_*` struct
@@ -10264,8 +10268,8 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                         Type* tuple_param = NULL;
                         if (arg->type == AST_TUPLE_LITERAL) {
                             if (expected == TYPE_TUPLE) {
-                                tuple_param = lookup_extern_param_type(
-                                    gen, c_func_name, arg_printed);
+                                tuple_param = ext_name ? lookup_extern_param_type(gen, ext_name, arg_printed)
+                                                       : NULL;
                             }
                             if ((!tuple_param || tuple_param->kind != TYPE_TUPLE) &&
                                 arg->node_type &&
@@ -10286,7 +10290,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                          * fn-ptr, optional-coercion and tuple branches below,
                          * which have only ever seen user-function params. */
                         Type* extern_param_t =
-                            lookup_extern_param_type(gen, c_func_name, arg_printed);
+                            ext_name ? lookup_extern_param_type(gen, ext_name, arg_printed) : NULL;
                         if (extern_param_t && extern_param_t->c_alias &&
                             strcmp(extern_param_t->c_alias, "va_list") == 0) {
                             fprintf(gen->output, "*(va_list*)(");
@@ -10356,7 +10360,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                              * stays its owner's: a literal's is released
                              * after the call by the drain, a local's at its
                              * scope end. */
-                            if (is_noescape_extern_param(gen, c_func_name, arg_printed)) {
+                            if (ext_name && is_noescape_extern_param(gen, ext_name, arg_printed)) {
                                 fprintf(gen->output, "_aether_box_closure_in(&(_AeClosureBox){ .tag = 0 }, ");
                             } else {
                                 fprintf(gen->output, "_aether_box_closure(");
@@ -10436,12 +10440,14 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                                 generate_expression(gen, arg);
                                 fprintf(gen->output, ")");
                             }
-                        } else if (expected == TYPE_STRING && arg->node_type &&
-                                   (arg->node_type->kind == TYPE_STRING ||
-                                    arg->node_type->kind == TYPE_PTR) &&
-                                   is_extern_func(gen, func_name) &&
+                        } else if (ext_name && arg->node_type &&
                                    !is_stdlib_string_aware_extern(c_func_name) &&
-                                   !is_aether_extern_param(gen, func_name, arg_printed)) {
+                                   ((expected == TYPE_STRING &&
+                                     (arg->node_type->kind == TYPE_STRING ||
+                                      arg->node_type->kind == TYPE_PTR) &&
+                                     !is_aether_extern_param(gen, ext_name, arg_printed)) ||
+                                    (arg->node_type->kind == TYPE_STRING &&
+                                     is_extern_vararg_position(gen, ext_name, arg_printed)))) {
                             // The Aether-side value typed `string` may be a
                             // wrapped AetherString* (from string.from_int,
                             // string_concat_wrapped, fs.read_binary, etc.)
@@ -10468,7 +10474,9 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                             //      str_len. Without this, binary content
                             //      with embedded NULs strlen-truncates at
                             //      the boundary (#351).
-                            // Closes #297.
+                            // Closes #297. A string in a C vararg position
+                            // (`printf(fmt, s)`) goes as its characters too
+                            // (#2914).
                             fprintf(gen->output, "aether_string_data(");
                             generate_expression(gen, arg);
                             fprintf(gen->output, ")");
