@@ -3016,21 +3016,18 @@ test-differential: ae
 # build/ownership_grid/report.md and report.csv; `ownership-grid-check` also
 # fails when a cell is worse than tests/ownership_grid/baseline.txt and lists
 # the cells that got better. windows.yml runs the check in three shards
-# (OWNERSHIP_GRID_SHARD=k/n). OWNERSHIP_GRID_ARGS passes options to run.py
-# (`--mode both`, `--only 'K3-*'`, `--update-baseline`); OWNERSHIP_GRID_PYTHON
-# names the Python to run it with, where the shell's python3 is not the one
-# to use (a CI runner's own Python, under MSYS2).
+# (OWNERSHIP_GRID_SHARD=k/n). The generator and the runner are Aether
+# (tests/ownership_grid/gen.ae and run.ae), built here into
+# build/ownership_grid/run; OWNERSHIP_GRID_ARGS passes options to it
+# (`--mode both`, `--only 'K3-*'`, `--update-baseline`).
 # -----------------------------------------------------------------
+OWNERSHIP_GRID_RUNNER := $(BUILD_DIR)/ownership_grid/run$(EXE_EXT)
 .PHONY: ownership-grid ownership-grid-check
 ownership-grid ownership-grid-check: compiler ae stdlib
-	@py="$(OWNERSHIP_GRID_PYTHON)"; \
-	if [ -z "$$py" ]; then \
-	    for cand in python3 python "py -3"; do \
-	        if $$cand -c "import sys" >/dev/null 2>&1; then py="$$cand"; break; fi; \
-	    done; \
-	fi; \
-	if [ -z "$$py" ]; then echo "ownership grid: no python3"; exit 1; fi; \
-	NPROC=$(NPROC) $$py tests/ownership_grid/run.py \
+	@mkdir -p $(BUILD_DIR)/ownership_grid
+	@./$(BUILD_DIR)/ae$(EXE_EXT) build tests/ownership_grid/run.ae --lib tests/ownership_grid \
+	    -o $(OWNERSHIP_GRID_RUNNER)
+	NPROC=$(NPROC) ./$(OWNERSHIP_GRID_RUNNER) \
 	    $(if $(filter ownership-grid-check,$@),--check) $(OWNERSHIP_GRID_ARGS)
 
 # The C a program gets when the C compiler is not GCC-compatible

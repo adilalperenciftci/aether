@@ -380,14 +380,6 @@ jobs:
     - name: Checkout repository
       uses: actions/checkout@v4
 
-    # run.py runs on the runner's own Python: the MSYS2 environment below has
-    # none, and this one is a native Windows Python, which is what run.py
-    # expects (it turns off Windows' crash dialog for the cells it starts).
-    - name: Set up Python
-      uses: actions/setup-python@v5
-      with:
-        python-version: "3.12"
-
     # MINGW64 (msvcrt), the C runtime the baseline was measured on: a heap
     # count is the C runtime's own.
     - name: Set up MSYS2 / MinGW-w64
@@ -406,18 +398,18 @@ jobs:
         Add-MpPreference -ExclusionPath "D:\a" -ErrorAction SilentlyContinue
         Add-MpPreference -ExclusionPath "$env:RUNNER_TEMP" -ErrorAction SilentlyContinue
         Add-MpPreference -ExclusionPath "$env:TEMP" -ErrorAction SilentlyContinue
-        foreach ($p in 'gcc.exe','cc1.exe','collect2.exe','ld.exe','as.exe','aetherc.exe','ae.exe','python.exe') {
+        foreach ($p in 'gcc.exe','cc1.exe','collect2.exe','ld.exe','as.exe','aetherc.exe','ae.exe') {
           Add-MpPreference -ExclusionProcess $p -ErrorAction SilentlyContinue
         }
 
     - name: Build the toolchain
       run: make -j4 compiler ae stdlib
 
+    # The runner is tests/ownership_grid/run.ae, which the make target builds
+    # with the toolchain above.
     - name: Check the ownership grid against its baseline
       timeout-minutes: 15
-      run: |
-        OWNERSHIP_GRID_SHARD="${{ matrix.part }}" make ownership-grid-check \
-          OWNERSHIP_GRID_PYTHON="$(cygpath -u "$pythonLocation")/python.exe"
+      run: OWNERSHIP_GRID_SHARD="${{ matrix.part }}" make ownership-grid-check
 
     # The report, the cells' programs and their build and run logs: what a
     # failure is read from.

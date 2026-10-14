@@ -1,0 +1,172 @@
+// Tests of run.ae's own failure paths (not of the compiler):
+//
+//   1. A cell's binary that another process holds open, so it cannot be
+//      removed (on Windows a process still exiting, or Defender scanning,
+//      holds a file for a moment). The run must still complete, the cell
+//      keep its status, and the file be reported as left.
+//   2. A fault inside the runner on one cell (OWNERSHIP_GRID_FAULT names it).
+//      The cell is run once more, then reported as HARNESS, and the check
+//      fails with exit code 2 and a message saying the runner failed, while
+//      the other cell keeps its status.
+//
+//     build/ae run tests/ownership_grid/test_runner.ae      (from the repository root)
+//
+// Needs build/ae (`make compiler ae stdlib`). Builds the runner into
+// build/ownership_grid_test/, runs it there and removes the directory at the
+// end. Exits 0 when both pass. The process that holds the binary is this
+// program, run again with --hold.
+// sweep-ok: the holder sleeps until it is killed, once the run is done.
+
+import std.os
+import std.fs
+import std.list
+import std.string
+
+extern exit(code: int)
+
+// The --hold child: opens the file, says so in `ready`, and waits.
+hold(file_path: string, ready: string) -> int {
+    h, err = fs.open(file_path, "rb")
+    if err != "" {
+        println("could not open ${file_path}: ${err}")
+        return 2
+    }
+    _w = fs.write(ready, "held")
+    sleep(600000)
+    fs.file_close(h)
+    return 0
+}
+
+// Runs the runner with `args` (space-separated); (exit status, stdout and stderr).
+run_grid(runner: string, out_dir: string, args: string) -> (int, string) {
+    argv = list.new()
+    _a = list.add(argv, "--jobs")
+    _b = list.add(argv, "2")
+    _c = list.add(argv, "--out")
+    _d = list.add(argv, out_dir)
+    parts = string.split(args, " ")
+    n = string.array_size(parts)
+    i = 0
+    while i < n {
+        _e = list.add(argv, string.copy(string.array_get(parts, i)))
+        i = i + 1
+    }
+    string.array_free(parts)
+    out, errout, code, err = os.run_full(runner, argv, null, "")
+    list.free(argv)
+    if err != "" {
+        return -1, "could not start the runner: ${err}"
+    }
+    return code, "${out}${errout}"
+}
+
+fail(msg: string, output: string) -> int {
+    println("FAIL: ${msg}")
+    println(output)
+    return 1
+}
+
+held_binary(runner: string, out_dir: string, windows: bool) -> int {
+    bin = "${out_dir}/gcc/bin"
+    _m = fs.mkdir_p(bin)
+    exe = ""
+    if windows {
+        exe = ".exe"
+    }
+    target = "${bin}/k1_p1_t1${exe}"
+    ready = "${out_dir}/held.ready"
+    _w = fs.write(target, "held by test_runner.ae")
+    argv = list.new()
+    _a = list.add(argv, "--hold")
+    _b = list.add(argv, target)
+    _c = list.add(argv, ready)
+    tok, err = os.spawn_proc_to(os.argv0(), argv, null, "${out_dir}/holder.log")
+    list.free(argv)
+    if err != "" {
+        return fail("could not start the holder: ${err}", "")
+    }
+    waited = 0
+    while fs.exists(ready) == 0 && waited < 300 {
+        sleep(100)
+        waited = waited + 1
+    }
+    code, out = run_grid(runner, out_dir, "--only K1-P1-T1")
+    _k = os.kill(tok, 9)
+    _s, _e = os.wait(tok)
+    if waited >= 300 {
+        return fail("the holder never opened the binary", out)
+    }
+    if code != 0 {
+        return fail("the run with a held binary exited ${code}", out)
+    }
+    if string.contains(out, "ownership grid (gcc): OK 1") == 0 {
+        return fail("K1-P1-T1 is not OK with its binary held", out)
+    }
+    if windows && string.contains(out, "could not be removed") == 0 {
+        return fail("the held binary was not reported as left", out)
+    }
+    if windows {
+        println("PASS: a held binary leaves the run complete (reported as left)")
+    } else {
+        println("PASS: a held binary leaves the run complete (POSIX removes an open file)")
+    }
+    return 0
+}
+
+harness_fault(runner: string, out_dir: string) -> int {
+    _s = os.setenv("OWNERSHIP_GRID_FAULT", "K1-P1-T2")
+    code, out = run_grid(runner, out_dir, "--check --only K1-P1-T1,K1-P1-T2")
+    _u = os.unsetenv("OWNERSHIP_GRID_FAULT")
+    if code != 2 {
+        return fail("a runner fault exited ${code}, not 2", out)
+    }
+    if string.contains(out, "HARNESS FAILURE") == 0 || string.contains(out, "K1-P1-T2") == 0 {
+        return fail("a runner fault was not reported as a harness failure of K1-P1-T2", out)
+    }
+    if string.contains(out, "OK 1") == 0 {
+        return fail("the other cell lost its status", out)
+    }
+    println("PASS: a runner fault on one cell is a HARNESS failure (exit 2), the other cell OK")
+    return 0
+}
+
+main() {
+    if os.args_count() > 3 && os.args_get(1) == "--hold" {
+        exit(hold(os.args_get(2), os.args_get(3)))
+    }
+    windows = os.platform() == "windows"
+    exe = ""
+    if windows {
+        exe = ".exe"
+    }
+    ae = "build/ae${exe}"
+    if fs.exists(ae) == 0 {
+        println("test_runner.ae: ${ae} not found; run `make compiler ae stdlib` from the repository root first")
+        exit(2)
+    }
+    out_dir = "${os.getcwd()}/build/ownership_grid_test"
+    _r = fs.remove_tree(out_dir)
+    _m = fs.mkdir_p(out_dir)
+    runner = "${out_dir}/run${exe}"
+    argv = list.new()
+    _a = list.add(argv, "build")
+    _b = list.add(argv, "tests/ownership_grid/run.ae")
+    _c = list.add(argv, "--lib")
+    _d = list.add(argv, "tests/ownership_grid")
+    _e = list.add(argv, "-o")
+    _f = list.add(argv, runner)
+    out, errout, code, err = os.run_full(ae, argv, null, "")
+    list.free(argv)
+    if err != "" || code != 0 {
+        println("test_runner.ae: the runner did not build (${code} ${err})")
+        println("${out}${errout}")
+        exit(2)
+    }
+    bad = held_binary(runner, out_dir, windows)
+    _x = fs.remove_tree("${out_dir}/gcc")
+    bad = bad + harness_fault(runner, out_dir)
+    _y = fs.remove_tree(out_dir)
+    if bad > 0 {
+        exit(1)
+    }
+}

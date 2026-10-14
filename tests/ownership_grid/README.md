@@ -19,7 +19,7 @@ and moved by one **transfer** (store and leave, overwrite, `break`/`continue`,
 early `return`, a caught panic, a reader, a keeper, a freer, return, hand
 back, `defer`, alias, store into a global, capture). Its id is
 `<kind>-<place>-<transfer>`, `K1-P5-T7` for instance, and the tables in
-`gen.py` (`KINDS`, `PLACES`, `TRANSFERS`) say what each code is.
+`gen.ae` (`kind_title`, `place_title`, `transfer_title`) say what each code is.
 
 A fourth axis is the **producer**: which std C function made the string.
 `docs/design/ownership-r1-inventory.md` classes every std function that
@@ -35,7 +35,7 @@ capture, list, message) and transfers (scope exit, overwrite, caught panic,
 keep, return, alias), so a change to how the producers return their strings
 shows in the grid.
 
-Each cell is a standalone program, written by `gen.py` into
+Each cell is a standalone program, written by `gen.ae` into
 `build/ownership_grid/cells/<id>.ae`. It runs the shape in a function called
 100 times per round, checks every value it reads against the one it stored
 (the expected values come from the construction), and measures
@@ -49,7 +49,7 @@ a sweep (an actor ended later, say), is growth, so it is a LEAK. A cell that
 ends actors ends them itself (`scheduler_reclaim_released`) before it reads
 the heap.
 
-`run.py` builds each cell once, with `poison_alloc.c` linked
+`run.ae` builds each cell once, with `poison_alloc.c` linked
 (`-Wl,--wrap=free,--wrap=realloc,--wrap=aether_numa_free,--wrap=aether_numa_free_aligned`),
 and runs it twice. The wrapped functions pass straight through unless
 `OWNERSHIP_GRID_POISON` is set, so the first run measures the program as it
@@ -75,9 +75,10 @@ not measured and is UNMEASURED.
 
 Not every combination is meaningful (an array cannot hold an array, a
 module `var` cannot hold an array, only a string has a free a callee can
-call, a cell that is the same program as another). `gen.py` decides, and
-`python3 tests/ownership_grid/gen.py --skips` lists every skipped
-combination with its reason; the report lists them grouped by reason.
+call, a cell that is the same program as another). `gen.ae` decides, and
+`build/ownership_grid/run --skips` lists every skipped combination with
+its reason (`--list` the cell ids, `--show K1-P5-T7` one cell's program);
+the report lists them grouped by reason.
 
 ## Statuses
 
@@ -92,7 +93,7 @@ combination with its reason; the report lists them grouped by reason.
 | CRASH | the plain run died, and the poisoned run pins no memory error |
 | WRONG | a value is wrong in the plain run |
 | UAF | the poisoned run stopped on a double free (of a heap block or a runtime actor block), crashed with an access violation or heap corruption, or read a wrong value; this outranks a plain WRONG or CRASH |
-| HARNESS | the runner itself failed on the cell twice (a file Windows held, a fault of the script): never a finding about the compiler, and the check fails with exit code 2 saying so |
+| HARNESS | the runner itself failed on the cell twice (a child it could not start, a log it could not read, a fault of the runner): never a finding about the compiler, and the check fails with exit code 2 saying so |
 
 ## Targets
 
@@ -114,6 +115,14 @@ each cell is from its target, and how many cells are not at it.
     make ownership-grid OWNERSHIP_GRID_ARGS="--mode both"     # also -DAETHER_GCC_COMPAT=0
     make ownership-grid OWNERSHIP_GRID_ARGS="--only 'K3-*,K4-P5-*'"
 
+The make targets build the runner, `run.ae` with the generator `gen.ae`, into
+`build/ownership_grid/run` and run it from the repository root, where it can
+also be run by hand (`--help` lists its options). It is one thread: it starts
+up to `NPROC` builds and runs with `os.spawn_proc_to` (each one's output in its
+log file, its whole tree killable), waits for the first to end with
+`os.wait_any_timeout`, kills whichever passes its deadline (600 s for a
+build, 120 s for a run), and reads the log.
+
 `NPROC` bounds the parallel cells. The output is `build/ownership_grid/`:
 `report.md` (counts overall, per kind and per place; the total LEAK, the
 bytes per 100 calls summed over every LEAK cell, which is the number to
@@ -122,7 +131,7 @@ the cells reach and the ones none reaches; the cells the PR #2883 comments
 found by hand; one matrix per kind, places by transfers; every cell that is
 not OK with its first error or wrong value; the skipped combinations),
 `report.csv` (a row per cell and C path), `results.json` (what
-`run.py --report-only` rewrites the report from), `cells/` (the programs)
+`run --report-only` rewrites the report from), `cells/` (the programs)
 and `<path>/bin/` (each build's and run's log; the binaries too with
 `--keep-bins`, deleted otherwise since they come to 4 GB). Builds go through
 a cache of the grid's own, `build/ownership_grid/cache`, capped at 1 GB.
@@ -180,25 +189,24 @@ made 240 runs under the same load all OK.
 windows.yml's `Windows / ownership grid [k/3]` jobs run the check on the
 default C path, a third of the cells each (`OWNERSHIP_GRID_SHARD=k/3`, the
 cells whose position modulo 3 is k-1, as `AE_SWEEP_SHARD` splits the test
-sweep), on MINGW64 with the runner's own Python
-(`OWNERSHIP_GRID_PYTHON`). Windows is where the heap count is exact, so it
-is where leaks are measured; the jobs upload the report, the cells and their
+sweep), on MINGW64. Windows is where the heap count is exact, so it is
+where leaks are measured; the jobs upload the report, the cells and their
 logs. `--shard` runs one shard by hand:
 
     make ownership-grid-check OWNERSHIP_GRID_ARGS="--shard 2/3"
 
 ## The runner's own tests
 
-`python3 tests/ownership_grid/test_runner.py` checks two failure paths of
-run.py itself: a cell's binary held open by another process (the run
-completes and reports the file as left), and a fault inside the runner on
-one cell (`OWNERSHIP_GRID_FAULT=<cell>`: the cell becomes HARNESS, the other
-cells keep their statuses, and the check exits 2 with a message, never a
-traceback).
+`build/ae run tests/ownership_grid/test_runner.ae` (from the repository
+root) checks two failure paths of the runner itself: a cell's binary held
+open by another process (the run completes and reports the file as left),
+and a fault inside the runner on one cell (`OWNERSHIP_GRID_FAULT=<cell>`: the
+cell becomes HARNESS, the other cells keep their statuses, and the check
+exits 2 with a message).
 
 ## Adding a cell
 
-A new ownership finding is a new kind, place or transfer in `gen.py` (or a
+A new ownership finding is a new kind, place or transfer in `gen.ae` (or a
 case the generator skipped that is meaningful after all), not a test of its
 own. Add it, run `make ownership-grid-check`, and add its line to the
 baseline with the status it has on main.
