@@ -1277,12 +1277,15 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
                 print_line(gen, "actor->%s = 0;", child->value);
             }
             /* #2528: the block is not zeroed (a kept one is reused), so the
-             * tracker is set here: the initializer's value is owned when it
-             * is a fresh heap string. */
+             * tracker is set here. R3: the field owns its initial string, a
+             * fresh one as it is and any other taken. */
             if (state_field_owns_string(child)) {
                 int owned = child->child_count > 0 && child->children[0] &&
                             is_heap_string_expr(gen, child->children[0]);
-                print_line(gen, "actor->_heap_%s = %d;", child->value, owned ? 1 : 0);
+                if (!owned)
+                    print_line(gen, "actor->%s = aether_uniform_heap_str(actor->%s, 0);",
+                               child->value, child->value);
+                print_line(gen, "actor->_heap_%s = 1;", child->value);
             }
         }
     }

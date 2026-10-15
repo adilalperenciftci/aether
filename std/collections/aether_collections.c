@@ -184,7 +184,7 @@ int list_add_string_owned(ArrayList* list, const void* item) {
     if (!item) return list_add_raw(list, NULL);
     const void* store = item;
     if (is_aether_string(item)) {
-        string_retain(item);
+        string_retain_shared(item);
     } else {
         size_t n = strlen((const char*)item);
         AetherString* copy = string_new_with_length((const char*)item, n);
@@ -330,7 +330,7 @@ int list_set_string_owned(ArrayList* list, int index, const void* item) {
     if (!list_grow_owned_flags(list)) return 0;
     const void* store = item;
     if (item && is_aether_string(item)) {
-        string_retain(item);
+        string_retain_shared(item);
     } else if (item) {
         AetherString* copy = string_new_with_length((const char*)item, strlen((const char*)item));
         if (!copy) return 0;
@@ -652,7 +652,7 @@ int map_put_string_owned(HashMap* map, const char* key, const void* value) {
     if (!value) return map_put_raw(map, key, NULL);
     const void* store = value;
     if (is_aether_string(value)) {
-        string_retain(value);
+        string_retain_shared(value);
     } else {
         size_t n = strlen((const char*)value);
         AetherString* copy = string_new_with_length((const char*)value, n);

@@ -6,7 +6,10 @@
 // the identical write spelled `i.name = ...` released correctly. Ownership
 // followed how the assignment was SPELLED rather than the type.
 import std.heap
+import std.mem
 import std.string
+
+extern exit(code: int)
 
 struct Inner { name: string }
 struct Outer { inner: *Inner }
@@ -24,7 +27,7 @@ set_direct(i: *Inner, v: string) {
     i.name = string.copy(v)
 }
 
-main() {
+round() {
     // The reported case: assigned through a nested path inside a function.
     a = heap.new(Outer)
     a.inner = heap.new(Inner)
@@ -67,6 +70,22 @@ main() {
     alias.name = string.copy("assigned-through-a-local-alias")
     heap.free(d.inner)
     heap.free(d)
+}
 
+main() {
+    round()
+    if mem.heap_in_use_exact() {
+        grown = mem.steady_growth(|| {
+                k = 0
+                while k < 100 {
+                    round()
+                    k = k + 1
+                }
+            }, 5)
+        if grown != 0 {
+            println("FAIL: a window of 100 rounds grew the heap by ${grown} bytes in every run")
+            exit(1)
+        }
+    }
     println("all freed")
 }

@@ -68,6 +68,9 @@ void string_release(const void* str);
  * a plain char* and NULL are left alone. Call it from the thread that holds
  * the string, before the store publishes it. */
 void aether_string_publish(const void* str);
+/* A reference for a place other threads can reach (a container element, a
+ * closure environment): the string is published, then retained. */
+void string_retain_shared(const void* str);
 void string_free(const void* str);  // Alias for release
 
 // String operations — accept both AetherString* and plain char*.

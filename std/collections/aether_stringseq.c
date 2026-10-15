@@ -29,11 +29,11 @@ StringSeq* string_seq_cons(const char* head, StringSeq* tail) {
     cell->ref_count = 1;
     cell->length = (tail ? tail->length : 0) + 1;
     cell->head = (void*)head;
-    /* Retain the head so the cell holds an independent reference. The
-     * `string_retain` helper is NULL-safe and a no-op on plain
-     * `char*` literals (the magic-byte check fails), so const
+    /* Retain the head so the cell holds an independent reference, published
+     * since a sequence can be read from any thread (#2919). NULL-safe and a
+     * no-op on plain `char*` literals (the magic-byte check fails), so const
      * literals pass through unchanged. */
-    string_retain(head);
+    string_retain_shared(head);
     /* Retain tail so the cell holds its own reference; callers
      * transferring ownership drop their local with `string_seq_free`
      * immediately after the cons. */
@@ -371,7 +371,7 @@ void* string_seq_to_array(StringSeq* s) {
     int i = 0;
     while (cur && i < n) {
         AetherString* as = (AetherString*)cur->head;
-        string_retain(as);
+        string_retain_shared(as);
         arr->strings[i++] = as;
         cur = cur->tail;
     }

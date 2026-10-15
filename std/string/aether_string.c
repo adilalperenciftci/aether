@@ -196,6 +196,11 @@ void aether_string_publish(const void* str) {
     s->ref_count = rc | AETHER_STRING_SHARED_BIT;
 }
 
+void string_retain_shared(const void* str) {
+    aether_string_publish(str);
+    string_retain(str);
+}
+
 // String operations
 // Returns a magic AetherString* (refcounted, length-aware) — the unified
 // owned-heap string representation. Freed via string_release (dispatched
@@ -1130,7 +1135,7 @@ AetherString* string_alloc_inline(size_t length) {
 const char* aether_string_capture_owned(const char* s) {
     if (!s) return s;
     if (is_aether_string(s)) {
-        string_retain(s);
+        string_retain_shared(s);
         return s;
     }
     return (const char*)string_new(s);

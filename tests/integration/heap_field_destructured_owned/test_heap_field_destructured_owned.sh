@@ -1,22 +1,15 @@
 #!/bin/sh
 # #2366: a heap string destructured from a tuple and stored in a struct field
-# must end up owned by the field. The destructured local escapes into the
-# field, and the destructure used to emit a bare `content = _tup._0;` for an
-# escaped local, leaving `_heap_content` at 0. The field store then moved that
-# 0 into `_heap_data`, so the struct's destructor never freed the string and
-# nothing else did either.
-#
-# The leak is silent without a leak checker, so the ownership flag is asserted
-# on the generated C; the program is also built and run to completion, which
-# would abort on a double free if the flag were set twice.
+# ends up owned by the field (prog.ae). The program checks its own heap growth
+# where the count is exact; it also runs to completion, which would abort on
+# a double free, and prints each clip.
 
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 AE="$ROOT/build/ae"
-AETHERC="$ROOT/build/aetherc"
-[ -n "${EXE_EXT:-}" ] && AE="$AE$EXE_EXT" && AETHERC="$AETHERC$EXE_EXT"
+[ -n "${EXE_EXT:-}" ] && AE="$AE$EXE_EXT"
 [ -x "$AE" ] || { echo "  [SKIP] heap_field_destructured_owned: build/ae missing"; exit 0; }
 
 TMP="$(mktemp -d)"
@@ -27,21 +20,7 @@ fail() {
     exit 1
 }
 
-# 1. The destructure records that the escaped local owns the new value, and
-#    the field store moves that ownership into the field's tracker.
-"$AETHERC" "$SCRIPT_DIR/prog.ae" "$TMP/out.c" > "$TMP/gen.log" 2>&1 \
-    || { sed 's/^/        /' "$TMP/gen.log" | head -8; fail "codegen failed"; }
-# Plain, or the reassignment that frees the old value first (the local is
-# no longer escaped once the field store takes it, #2564): the tracker ends
-# at 1 either way.
-if ! grep -qE "content = _tup[0-9]*\._0;( if \(_heap_content\) aether_heap_str_free\(_tmp_old\);)? _heap_content = 1;" "$TMP/out.c"; then
-    grep -n "content = _tup" "$TMP/out.c" | sed 's/^/        /' | head -4
-    fail "the destructure left the escaped local's tracker unset, so nothing owns the string"
-fi
-grep -q "_heap_data = _heap_content; _heap_content = 0;" "$TMP/out.c" \
-    || fail "the field store did not move the local's ownership into the field"
-
-# 2. It runs to completion and prints each clip.
+# It runs to completion and prints each clip.
 AETHER_HOME="$ROOT" "$AE" build "$SCRIPT_DIR/prog.ae" -o "$TMP/prog" > "$TMP/build.log" 2>&1 \
     || { sed 's/^/        /' "$TMP/build.log" | head -8; fail "build failed"; }
 "$TMP/prog" > "$TMP/run.out" 2>&1 || { sed 's/^/        /' "$TMP/run.out" | head -8; fail "program aborted"; }

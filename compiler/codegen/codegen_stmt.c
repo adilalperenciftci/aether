@@ -1149,8 +1149,9 @@ void emit_string_take(CodeGenerator* gen, ASTNode* e, const char* own,
         } else {
             fprintf(gen->output, "%s == (const char*)(", hv);
             generate_expression(gen, hb);
-            fprintf(gen->output, ") && _heap_%s ? (_heap_%s = 0) : (%s = aether_uniform_heap_str(%s, 0), 0)",
-                    v, v, hv, hv);
+            fprintf(gen->output, ") && _heap_%s ? (_heap_%s = 0, aether_unwind_forget(%s), 0) : "
+                    "(%s = aether_uniform_heap_str(%s, 0), 0)",
+                    v, v, v, hv, hv);
         }
         seq_next(gen, &s);
         fprintf(gen->output, "%s = 1", own);
@@ -1171,7 +1172,8 @@ void emit_string_take(CodeGenerator* gen, ASTNode* e, const char* own,
         } else {
             /* Last use (or the slot itself): move the ownership; a source
              * holding a string it does not own gives the slot a copy. */
-            fprintf(gen->output, "(%s = 1, _heap_%s ? (_heap_%s = 0, (const char*)(", own, v, v);
+            fprintf(gen->output, "(%s = 1, _heap_%s ? (_heap_%s = 0, aether_unwind_forget(%s), (const char*)(",
+                    own, v, v, v);
             generate_expression(gen, e);
             fprintf(gen->output, ")) : aether_uniform_heap_str((const char*)(");
             generate_expression(gen, e);
@@ -4205,35 +4207,18 @@ static int box_is_heap_new(CodeGenerator* gen, ASTNode* obj) {
  * owned, wherever the pointer to it came from (#2369): every box Aether
  * allocates starts with its trackers zeroed (heap.new, and malloc lowered to
  * calloc), so the read is sound. */
-static int emit_field_tracker_from_rhs(CodeGenerator* gen, ASTNode* rhs,
-                                       const char* tracker_lvalue);
-
-/* #2461: a field store whose value is a view (another struct's field, an
- * `if` over owned values) takes it with emit_string_take; `own` names the
- * flag the field's tracker is set from, or is empty for a classic store. */
-static void field_store_take_flag(CodeGenerator* gen, ASTNode* rhs,
-                                  char* own, size_t n) {
-    own[0] = '\0';
-    if (string_take_is_view(gen, rhs)) string_take_new_flag(own, n);
-}
-
-static void emit_field_store_value(CodeGenerator* gen, ASTNode* rhs,
-                                   const char* own) {
-    if (own[0]) emit_string_take(gen, rhs, own, NULL);
-    else generate_expression(gen, rhs);
-}
-
-/* Set the field's tracker after the store: from the take's flag, else
- * from the source var's runtime ownership (a bare heap-var identifier),
- * else from the static classification. */
-static void emit_field_store_tracker(CodeGenerator* gen, ASTNode* rhs,
-                                     const char* own, const char* tracker_lv,
-                                     int rhs_is_heap) {
-    if (own[0]) {
-        fprintf(gen->output, " %s = %s;", tracker_lv, own);
-    } else if (!emit_field_tracker_from_rhs(gen, rhs, tracker_lv)) {
-        fprintf(gen->output, " %s = %d;", tracker_lv, rhs_is_heap ? 1 : 0);
+/* Does the struct value `obj` live behind a pointer somewhere along its
+ * path (`p.inner`, `items[0].inner` of a slice)? A string stored there can
+ * be read by other threads, so it is published (#2919). */
+static int value_path_through_pointer(ASTNode* obj) {
+    while (obj && (obj->type == AST_MEMBER_ACCESS || obj->type == AST_ARRAY_ACCESS) &&
+           obj->child_count > 0 && obj->children[0]) {
+        Type* ht = obj->children[0]->node_type;
+        if (ht && (ht->kind == TYPE_PTR || (obj->type == AST_ARRAY_ACCESS && type_is_slice(ht))))
+            return 1;
+        obj = obj->children[0];
     }
+    return 0;
 }
 
 static int struct_array_local_owns(CodeGenerator* gen, const char* name);
@@ -4345,7 +4330,6 @@ static int emit_nested_field_heap_assign(CodeGenerator* gen, ASTNode* lhs,
         matching_field->node_type->kind != TYPE_STRING) return 0;
     if (!struct_owns_heap_strings(gen, sdef)) return 0;
 
-    int rhs_is_heap = is_heap_string_expr(gen, rhs);
     /* Unique per emission: these blocks nest (an argument to the RHS may
      * itself be a nested-path assignment), and a fixed name would shadow. */
     static int nested_tgt_seq = 0;
@@ -4354,7 +4338,7 @@ static int emit_nested_field_heap_assign(CodeGenerator* gen, ASTNode* lhs,
 
     const char* tracker_lv = cg_internf("%s->_heap_%s", tgt, lhs->value);
     char own[32];
-    field_store_take_flag(gen, rhs, own, sizeof(own));
+    string_take_new_flag(own, sizeof(own));
     int release_old = by_value ? value_path_trackers_are_initialised(gen, obj) : 1;
     /* A struct held by a local a `try` body writes is volatile, and so is
      * the pointer to it (#2690). */
@@ -4363,44 +4347,22 @@ static int emit_nested_field_heap_assign(CodeGenerator* gen, ASTNode* lhs,
     fprintf(gen->output, "{ %s%s* %s = %s(", sname, vol ? " volatile" : "", tgt,
             by_value ? "&" : "");
     generate_expression(gen, obj);
-    fprintf(gen->output, ");");
-    if (own[0]) fprintf(gen->output, " int %s = 0;", own);
+    fprintf(gen->output, "); int %s = 0;", own);
     if (release_old) {
         fprintf(gen->output, " const char* _tmp_old = %s->%s;", tgt, lhs->value);
     }
+    /* R3: the field takes the value (moved when fresh or a local's last use,
+     * else retained) and releases the one it held. */
     fprintf(gen->output, " %s->%s = ", tgt, lhs->value);
-    emit_field_store_value(gen, rhs, own);
+    emit_string_take(gen, rhs, own, NULL);
     fprintf(gen->output, ";");
     if (release_old) {
         fprintf(gen->output, " if (%s) aether_heap_str_free(_tmp_old);", tracker_lv);
     }
-    /* Move the source var's runtime ownership when the RHS is a heap-var
-     * identifier (it may hold a borrow); otherwise the static classification. */
-    emit_field_store_tracker(gen, rhs, own, tracker_lv, rhs_is_heap);
+    fprintf(gen->output, " %s = %s;", tracker_lv, own);
+    if (!by_value || value_path_through_pointer(obj))
+        fprintf(gen->output, " aether_string_publish(%s->%s);", tgt, lhs->value);
     fprintf(gen->output, " }\n");
-    return 1;
-}
-
-/* When a heap-string struct field is assigned from a bare heap-tracked-var
- * identifier, the field's `_heap_<field>` tracker must take that variable's
- * RUNTIME ownership, not a static 1. A local classified as a heap-string var
- * can still hold a BORROWED value at runtime (e.g. it was assigned from a
- * function that returns a borrowed/literal pass-through, leaving `_heap_<var>
- * == 0`). Hard-coding the field tracker to 1 then makes the struct destructor
- * free a pointer the program never owned — a literal (free of rodata) or a
- * value still owned elsewhere (double free). This is the field-store analogue
- * of the `_heap_dest = _heap_src` ownership move used for `dest = src` aliases.
- *
- * Writes `<field-tracker-lvalue> = _heap_<var>;` then disowns the source
- * (`_heap_<var> = 0;`) so the freeing duty transfers to the field and the
- * source is not also freed at scope exit. Returns 1 if it handled the RHS
- * (a bare heap-var identifier); 0 to fall back to the static rhs_is_heap. */
-static int emit_field_tracker_from_rhs(CodeGenerator* gen, ASTNode* rhs,
-                                       const char* tracker_lvalue) {
-    if (!gen || !rhs || rhs->type != AST_IDENTIFIER || !rhs->value) return 0;
-    if (!is_heap_string_var(gen, rhs->value)) return 0;
-    fprintf(gen->output, " %s = _heap_%s; _heap_%s = 0;",
-            tracker_lvalue, rhs->value, rhs->value);
     return 1;
 }
 
@@ -4833,18 +4795,18 @@ static int emit_struct_element_store(CodeGenerator* gen, ASTNode* lhs, ASTNode* 
     return 1;
 }
 
-/* Does `lhs = local` go through emit_struct_field_heap_assign's tracked
- * store, which moves a bare heap-tracked local's ownership into the field
- * (emit_field_tracker_from_rhs: the field's tracker takes the local's, the
- * local's is cleared)? A string field of an Aether struct, reached from a
- * named struct value or struct pointer: the shapes that function handles
- * itself, mirrored here for the escape walk. A header-defined struct's field
- * borrows instead, and a nested path is not claimed. */
+/* Is `lhs` a string field of an Aether struct, by any path (a value, a
+ * pointer, a nested field, an element)? The field owns its string and its
+ * store takes the value it is given (R3), so a local stored there keeps its
+ * own reference and its own frees. A header-defined struct's field is C's
+ * (R4) and does not own. */
 static int field_store_takes_local(CodeGenerator* gen, ASTNode* lhs) {
     if (!gen || !gen->program || !lhs || lhs->type != AST_MEMBER_ACCESS || !lhs->value ||
         lhs->child_count != 1 || !lhs->children[0]) return 0;
     ASTNode* obj = lhs->children[0];
-    if (obj->type != AST_IDENTIFIER || !obj->value || !obj->node_type) return 0;
+    /* The spellings emit_struct_field_heap_assign stores through. */
+    if (!obj->node_type || (obj->type != AST_IDENTIFIER && obj->type != AST_MEMBER_ACCESS &&
+                            obj->type != AST_ARRAY_ACCESS)) return 0;
     Type* t = obj->node_type;
     const char* sname = NULL;
     if (t->kind == TYPE_STRUCT) {
@@ -4937,7 +4899,6 @@ static int emit_struct_field_heap_assign(CodeGenerator* gen, ASTNode* lhs, ASTNo
     if (!matching_field || !matching_field->node_type ||
         matching_field->node_type->kind != TYPE_STRING) return 0;
 
-    int rhs_is_heap = is_heap_string_expr(gen, rhs);
     /* A variable a closure writes lives in a shared cell (#2458): the name
      * is the cell pointer, and the struct is `(*name)`, as every other use
      * of it spells it (the AST_IDENTIFIER emission). */
@@ -4952,14 +4913,17 @@ static int emit_struct_field_heap_assign(CodeGenerator* gen, ASTNode* lhs, ASTNo
                        : obj->value;
     const char* tracker_lv = cg_internf("%s%s_heap_%s", objs, acc, lhs->value);
     char own[32];
-    field_store_take_flag(gen, rhs, own, sizeof(own));
+    string_take_new_flag(own, sizeof(own));
     print_indent(gen);
-    fprintf(gen->output, "{ const char* _tmp_old = %s%s%s;", objs, acc, lhs->value);
-    if (own[0]) fprintf(gen->output, " int %s = 0;", own);
-    fprintf(gen->output, " %s%s%s = ", objs, acc, lhs->value);
-    emit_field_store_value(gen, rhs, own);
-    fprintf(gen->output, "; if (%s) aether_heap_str_free(_tmp_old);", tracker_lv);
-    emit_field_store_tracker(gen, rhs, own, tracker_lv, rhs_is_heap);
+    /* R3: the field takes the value and releases the one it held; through a
+     * pointer, other threads may read it, so it is published (#2919). */
+    fprintf(gen->output, "{ const char* _tmp_old = %s%s%s; int %s = 0; %s%s%s = ",
+            objs, acc, lhs->value, own, objs, acc, lhs->value);
+    emit_string_take(gen, rhs, own, NULL);
+    fprintf(gen->output, "; if (%s) aether_heap_str_free(_tmp_old); %s = %s;", tracker_lv,
+            tracker_lv, own);
+    if (acc[0] == '-')
+        fprintf(gen->output, " aether_string_publish(%s%s%s);", objs, acc, lhs->value);
     fprintf(gen->output, " }\n");
     return 1;
 }
@@ -7841,14 +7805,9 @@ static int call_arg_position_escapes(CodeGenerator* gen, ASTNode* call,
     if (callee_has_visible_body(gen, call->value)) {
         /* Visible body → the body-walk is authoritative (sees through
          * read-only accessors, ignores self-assignment `p = p`). A `string`
-         * argument escapes only as callee_keeps_string_arg says: a callee
-         * that keeps it holds a reference of its own, and one whose string
-         * result is uniform-heap hands back a copy of a parameter it
-         * returns (`return p` goes through aether_uniform_heap_str with
-         * the parameter's tracker 0), so only a borrowing callee that
-         * returns the parameter as it is keeps the caller's pointer alive.
-         * Counting every return made the caller keep a local passed to
-         * `_query_key_escape(key)` for ever (the leak in url.parse_query). */
+         * argument escapes only as callee_keeps_string_arg says: one the
+         * callee keeps without a reference of its own, which is one it hands
+         * on to a `ptr` slot that may keep it. */
         if (callee_param_is_string(gen, call->value, arg_idx)) {
             return call_keeps_string_arg(gen, call, arg_idx, 0);
         }
@@ -8047,30 +8006,10 @@ static void escape_walk(CodeGenerator* gen, ASTNode* node,
     if (node->type == AST_VARIABLE_DECLARATION && node->value &&
         node->child_count > 0) {
         const char* lhs = node->value;
-        /* When `lhs` is an env-backed capture of the current closure,
-         * `V = <expr>` writes `_env->V`, which outlives this closure's
-         * activation. So a heap-string assigned to it escapes, exactly
-         * like the non-local `s.field = expr` case below: mark it, or the
-         * closure-exit defer-free reclaims the buffer while the env still
-         * points at it. A promoted capture's cell is not such a slot: it
-         * takes a value of its own (the store moves the local's buffer or
-         * copies it, #2514), so the local keeps its own exit free. */
-        int lhs_is_capture = 0;
-        for (int e = 0; e < gen->current_env_capture_count; e++) {
-            if (gen->current_env_captures[e] &&
-                strcmp(gen->current_env_captures[e], lhs) == 0) {
-                lhs_is_capture = 1; break;
-            }
-        }
-        if (lhs_is_capture) {
-            ASTNode* rhs = node->children[node->child_count - 1];
-            if (rhs && rhs->type == AST_IDENTIFIER && rhs->value &&
-                is_heap_string_var(gen, rhs->value)) {
-                mark_escaped_string_var(gen, rhs->value);
-            }
-            ASTNode* hb = handback_take_leaf(gen, rhs);
-            if (hb) mark_escaped_string_var(gen, hb->value);
-        }
+        /* A string a closure writes into one of its captures goes into the
+         * capture's shared cell, which takes a value of its own (#2514), so
+         * the local stored there keeps its own frees. */
+        int lhs_is_capture = is_env_capture_name(gen, lhs);
         /* #2548: a string slot takes its value (emit_string_take), so a
          * call there that only hands a local back takes the local as
          * `V = local` does. */
@@ -8136,27 +8075,15 @@ static void escape_walk(CodeGenerator* gen, ASTNode* node,
         ASTNode* lhs = node->children[0];
         ASTNode* rhs = node->children[1];
         if (lhs && lhs->type != AST_IDENTIFIER) {
-            /* #2474: an element of a string array a closure writes, or of
-             * one that owns its elements (#2618), takes a buffer of its own
-             * (emit_cell_string_element_store moves the local's or copies
-             * it), so the local keeps its own exit free.
-             * An Aether struct's string field moves the local's ownership
-             * into the field (field_store_takes_local), so the local keeps
-             * its exit free too, a no-op once moved: escaped, a local stored
+            /* A place that owns its string takes the local's value (moved
+             * on its last use, else retained), so the local keeps its own
+             * frees: an element of a string array a closure writes or one
+             * that owns its elements (#2474, #2618), and an Aether struct's
+             * string field (field_store_takes_local). Escaped, a local stored
              * on one path leaked on every other (std.jsonpath's `save_err =
-             * p.err`, restored into p.err only when a speculative parse
-             * failed, leaked its copy on every success). */
-            /* In the function's own blocks the store moves the local into
-             * the field. In a closure's body (emitted as a function of its
-             * own) the local is a capture the env or a cell holds, and the
-             * store copies it (is_captured_string, #2574), so it keeps
-             * nothing of the local either. */
-            int takes = node == g_escape_block_stmt && g_escape_trailing_depth == 0 &&
-                        rhs && rhs->type == AST_IDENTIFIER && rhs->value &&
-                        (g_escape_closure_depth > 0 ||
-                         (!is_promoted_capture(gen, rhs->value) &&
-                          !is_env_capture_name(gen, rhs->value))) &&
-                        field_store_takes_local(gen, lhs);
+             * p.err`). What remains escapes: a store into memory no Aether
+             * place owns (a `string[]` view over C's, a `@c_import` field). */
+            int takes = field_store_takes_local(gen, lhs);
             if (rhs && rhs->type == AST_IDENTIFIER && rhs->value &&
                 is_heap_string_var(gen, rhs->value) &&
                 !is_cell_string_element(gen, lhs) &&
@@ -10050,7 +9977,7 @@ static void emit_cell_store(CodeGenerator* gen, const char* name, Type* t, ASTNo
         emit_cell_element_value(gen, 1, value);
         fprintf(gen->output, ");\n");
     } else if (ct && strcmp(ct, "const char*") == 0) {
-        fprintf(gen->output, "_aether_str_cell_set(%s, ", name);
+        fprintf(gen->output, "_aether_str_cell_set_shared(%s, ", name);
         emit_cell_element_value(gen, 1, value);
         fprintf(gen->output, ");\n");
     } else if (sname) {
@@ -10146,7 +10073,7 @@ static int emit_cell_array_store(CodeGenerator* gen, ASTNode* stmt) {
             fprintf(gen->output, "{ const char* const* _ae_src = (const char* const*)(");
             generate_expression(gen, lit);
             fprintf(gen->output,
-                    "); for (int _ae_k = 0; _ae_k < %d; _ae_k++) _aether_str_cell_set(&(*%s)[_ae_k], aether_uniform_heap_str(_ae_src[_ae_k], 0)); }\n",
+                    "); for (int _ae_k = 0; _ae_k < %d; _ae_k++) _aether_str_cell_set_shared(&(*%s)[_ae_k], aether_uniform_heap_str(_ae_src[_ae_k], 0)); }\n",
                     at->array_size, stmt->value);
         } else {
             fprintf(gen->output, "memmove(*%s, (const void*)(", stmt->value);
@@ -10176,7 +10103,7 @@ static int emit_cell_array_store(CodeGenerator* gen, ASTNode* stmt) {
     }
     if (str_elem) {
         fprintf(gen->output,
-                " for (int _ae_k = 0; _ae_k < %d; _ae_k++) _aether_str_cell_set(&(*%s)[_ae_k], _ae_cell_arr[_ae_k]); }\n",
+                " for (int _ae_k = 0; _ae_k < %d; _ae_k++) _aether_str_cell_set_shared(&(*%s)[_ae_k], _ae_cell_arr[_ae_k]); }\n",
                 at->array_size, stmt->value);
     } else {
         fprintf(gen->output, " memcpy(*%s, _ae_cell_arr, sizeof(_ae_cell_arr)); }\n",
@@ -12593,9 +12520,16 @@ static void emit_destructure_global_store(CodeGenerator* gen, const char* name, 
                 name, name, closure_owned ? "(" : "_aether_closure_retain(", tmp_id, j, ")");
         return;
     }
+    if (pt && pt->kind == TYPE_STRING && gt && gt->kind == TYPE_PTR) {
+        fprintf(gen->output, "%s = (void*)aether_uniform_heap_str(_tup%d._%d, %d);\n",
+                name, tmp_id, j, owned ? 1 : 0);
+        return;
+    }
     if (pt && pt->kind == TYPE_STRING) {
-        fprintf(gen->output, "%s = %saether_uniform_heap_str(_tup%d._%d, %d);\n", name,
-                (gt && gt->kind == TYPE_PTR) ? "(void*)" : "", tmp_id, j, owned ? 1 : 0);
+        /* As `g = v` stores it: taken, published, the old one released. */
+        fprintf(gen->output, "{ const char* _ae_old = %s; %s = aether_uniform_heap_str(_tup%d._%d, %d); "
+                "aether_string_publish(%s); aether_heap_str_free(_ae_old); }\n",
+                name, name, tmp_id, j, owned ? 1 : 0, name);
         return;
     }
     fprintf(gen->output, "%s = _tup%d._%d;\n", name, tmp_id, j);
@@ -14120,7 +14054,7 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                         emit_promoted_cell_declaration(gen, var->value, var_type, NULL, NULL, slot,
                                                        stmt->line, stmt->column);
                     } else if (pos_is_string) {
-                        fprintf(gen->output, "_aether_str_cell_set(%s, %s);\n", var->value, slot);
+                        fprintf(gen->output, "_aether_str_cell_set_shared(%s, %s);\n", var->value, slot);
                     } else if (var_type && strcmp(var_type, "_AeClosure") == 0) {
                         emit_closure_cell_store(gen, var->value, NULL, slot);   /* #2755 */
                     } else {
@@ -14542,97 +14476,19 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                     emit_state_array_store(gen, actor_state_decl(gen, stmt->value),
                                            stmt->children[0])) {
                     /* #2688: a fixed-size array state field, element by element. */
-                } else if (stmt->child_count > 0 &&
-                    string_take_is_view(gen, stmt->children[0])) {
-                    /* #2461: state outlives the handler, so it takes a view
-                     * (a field of a message or local struct, an `if` over
-                     * locals) as a value of its own, the take's flag saying
-                     * whether it owns it. As below, an escaped value's old
-                     * buffer is left to whoever it escaped to. */
+                } else if (stmt->child_count > 0 && actor_state_string_tracked(gen, stmt->value)) {
+                    /* R3: a string state field owns what it holds. The store
+                     * takes the value (moved when fresh or a local's last
+                     * use, else retained, so a message field the envelope
+                     * releases after the handler stays the state's) and
+                     * releases the one it replaces. */
                     char own[32];
                     string_take_new_flag(own, sizeof(own));
                     fprintf(gen->output, "{ const char* _tmp_old = self->%s; int %s = 0; self->%s = ",
                             stmt->value, own, stmt->value);
                     emit_string_take(gen, stmt->children[0], own, stmt->value);
-                    fprintf(gen->output, ";");
-                    if (!is_escaped_string_var(gen, stmt->value)) {
-                        fprintf(gen->output, " if (%s) aether_heap_str_free(_tmp_old);", trk);
-                    }
-                    fprintf(gen->output, " %s = %s; (void)_tmp_old; }\n", trk, own);
-                } else if (stmt->child_count > 0 && stmt->children[0] &&
-                           stmt->children[0]->type == AST_IDENTIFIER && stmt->children[0]->value &&
-                           is_heap_string_var(gen, stmt->children[0]->value) &&
-                           actor_state_string_tracked(gen, stmt->value) &&
-                           !is_promoted_capture(gen, stmt->children[0]->value) &&
-                           !is_env_capture_name(gen, stmt->children[0]->value)) {
-                    /* #2748: a heap-tracked local stored into a string state
-                     * field. The state takes a string of its own: on the
-                     * local's last use, the buffer it owns (its flag cleared,
-                     * so its exit free leaves it to the state); otherwise, or
-                     * when the local escaped elsewhere or owns nothing, a
-                     * copy. The state used to take the pointer with its own
-                     * flag set and the local's left set too, which was only
-                     * safe while nothing freed the handler's locals. */
-                    const char* v = stmt->children[0]->value;
-                    int last_use = gen->hoist_scope_body &&
-                                   count_var_identifier_uses(gen->hoist_scope_body, v) <= 1 &&
-                                   !is_escaped_string_var(gen, v) &&
-                                   !is_return_escaped_string_var(gen, v);
-                    fprintf(gen->output, "{ const char* _tmp_old = self->%s; ", stmt->value);
-                    if (last_use) {
-                        /* The unwind journal drops a moved buffer too, as a
-                         * struct literal's move does (#1301), or a panic
-                         * drain would free what the state holds. */
-                        fprintf(gen->output,
-                                "self->%s = _heap_%s ? %s : aether_uniform_heap_str(%s, 0); "
-                                "if (_heap_%s) aether_unwind_forget(%s); _heap_%s = 0;",
-                                stmt->value, v, v, v, v, v, v);
-                    } else {
-                        fprintf(gen->output, "self->%s = aether_uniform_heap_str(%s, 0);",
-                                stmt->value, v);
-                    }
-                    fprintf(gen->output, " if (%s) aether_heap_str_free(_tmp_old); %s = 1; }\n",
-                            trk, trk);
-                } else if (stmt->child_count > 0 && is_heap_string_expr(gen, stmt->children[0])) {
-                    /* Skip the free if the var has escaped (passed to
-                     * a function that may have stored the pointer):
-                     * freeing now would dangle the stored copy. Leak
-                     * instead — strictly better than a UAF. See
-                     * mark_escaped_heap_string_vars. */
-                    if (is_escaped_string_var(gen, stmt->value)) {
-                        fprintf(gen->output, "self->%s = ", stmt->value);
-                        generate_expression(gen, stmt->children[0]);
-                        fprintf(gen->output, ";\n");
-                    } else {
-                        fprintf(gen->output, "{ const char* _tmp_old = self->%s; ", stmt->value);
-                        fprintf(gen->output, "self->%s = ", stmt->value);
-                        generate_expression(gen, stmt->children[0]);
-                        fprintf(gen->output, "; if (%s) aether_heap_str_free(_tmp_old);", trk);
-                        fprintf(gen->output, " %s = 1; }\n", trk);
-                    }
-                } else if (stmt->child_count > 0 && stmt->children[0] &&
-                           stmt->children[0]->type == AST_IDENTIFIER &&
-                           stmt->children[0]->node_type &&
-                           stmt->children[0]->node_type->kind == TYPE_STRING &&
-                           !is_heap_string_var(gen, stmt->children[0]->value)) {
-                    /* Retaining a BORROWED string into actor state — the
-                     * classic case is a message pattern field (`SetN(in_n)
-                     * -> { n = in_n }`). The field is owned by the message
-                     * envelope and freed by `<Msg>_release_fields` right
-                     * after this handler returns, so storing the raw pointer
-                     * into `self->field` dangles and a LATER message reads
-                     * freed bytes (the aeo actor-state-string corruption).
-                     * Copy into an owned AetherString — the same idiom the
-                     * message SEND site uses for string fields — and free any
-                     * prior owned copy. Marked via `_heap_<field>` so a
-                     * subsequent retain frees the previous one. */
-                    fprintf(gen->output, "{ const char* _tmp_old = self->%s; ", stmt->value);
-                    fprintf(gen->output, "const char* _src = (const char*)(");
-                    generate_expression(gen, stmt->children[0]);
-                    fprintf(gen->output, "); self->%s = _src ? (const char*)string_new_with_length(aether_string_data(_src), (int)aether_string_length(_src)) : _src;",
-                            stmt->value);
-                    fprintf(gen->output, " if (%s) aether_heap_str_free(_tmp_old);", trk);
-                    fprintf(gen->output, " %s = 1; }\n", trk);
+                    fprintf(gen->output, "; if (%s) aether_heap_str_free(_tmp_old); %s = %s; }\n",
+                            trk, trk, own);
                 } else if (stmt->child_count > 0 && actor_state_is_ptr(gen, stmt->value) &&
                            fn_value_into_ptr(gen, stmt->children[0])) {
                     /* #2904: a `ptr` state field takes a closure boxed and a
@@ -14888,21 +14744,19 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                         gt && gt->kind == TYPE_PTR && grhs && grhs->node_type &&
                                 grhs->node_type->kind == TYPE_STRING
                             ? cg_internf("(%s)", get_c_type(gt)) : "";
-                    if (grhs && (string_take_is_view(gen, grhs) ||
-                                 (grhs->type == AST_IDENTIFIER && grhs->value &&
-                                  is_heap_string_var(gen, grhs->value)))) {
-                        /* #2461: a global outlives the function, so it takes
-                         * a view (a field of a local struct, an `if` over
-                         * locals) as a value of its own, and a heap-tracked
-                         * local is moved on its last use or copied, so the
-                         * local's exit free cannot take the global's value
-                         * away; like every heap value a global holds, it is
-                         * never freed. */
+                    if (grhs && grhs->node_type && grhs->node_type->kind == TYPE_STRING &&
+                        !(gt && gt->kind == TYPE_PTR)) {
+                        /* R3: a module `var` owns the string it holds, as a
+                         * local does: the store takes the new value, publishes
+                         * it since any thread may read the global (#2919), and
+                         * releases the one it replaces. */
                         char own[32];
                         string_take_new_flag(own, sizeof(own));
-                        fprintf(gen->output, "{ int %s = 0; %s = %s", own, stmt->value, gcast);
-                        emit_string_take(gen, stmt->children[0], own, NULL);
-                        fprintf(gen->output, "; (void)%s; }\n", own);
+                        fprintf(gen->output, "{ const char* _ae_old = %s; int %s = 0; %s = ",
+                                stmt->value, own, stmt->value);
+                        emit_string_take(gen, grhs, own, NULL);
+                        fprintf(gen->output, "; (void)%s; aether_string_publish(%s); "
+                                "aether_heap_str_free(_ae_old); }\n", own, stmt->value);
                         break;
                     }
                     if (gt && gt->kind == TYPE_PTR && grhs && grhs->node_type &&
@@ -15818,9 +15672,9 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                                 /* R2: moved from an owning source, else taken. */
                                 const char* src = alias_init->value;
                                 fprintf(gen->output,
-                                        "if (_heap_%s) _heap_%s = 0; else %s = aether_uniform_heap_str(%s, 0); "
+                                        "if (_heap_%s) { _heap_%s = 0; aether_unwind_forget(%s); } else %s = aether_uniform_heap_str(%s, 0); "
                                         "_heap_%s = 1;",
-                                        src, src, name, name, name);
+                                        src, src, src, name, name, name);
                             } else if (init_heap) {
                                 fprintf(gen->output, "_heap_%s = 1;", name);
                             } else if (stmt->child_count > 0 && !is_escaped_string_var(gen, name)) {

@@ -12,15 +12,12 @@
 #include "../analysis/actor_reply.h"
 #include "../analysis/sandbox_trust.h"
 
-/* The AetherString header the emitted C inspects, from the definition the
- * runtime uses (std/string/aether_string_abi.h): its magic's bytes in
- * memory order, and its field list as text. */
+/* The AetherString magic the emitted C inspects, from the definition the
+ * runtime uses (std/string/aether_string_abi.h), its bytes in memory order. */
 #define AE_STR_MAGIC_B0 ((unsigned)(AETHER_STRING_MAGIC & 0xFFu))
 #define AE_STR_MAGIC_B1 ((unsigned)((AETHER_STRING_MAGIC >> 8) & 0xFFu))
 #define AE_STR_MAGIC_B2 ((unsigned)((AETHER_STRING_MAGIC >> 16) & 0xFFu))
 #define AE_STR_MAGIC_B3 ((unsigned)((AETHER_STRING_MAGIC >> 24) & 0xFFu))
-#define AE_STR_FIELDS_TEXT_(...) #__VA_ARGS__
-#define AE_STR_FIELDS_TEXT(...) AE_STR_FIELDS_TEXT_(__VA_ARGS__)
 
 /* #2292: defined with the constant rename, used by the symbol catalog. */
 static const char* const_public_name(const ASTNode* cd);
@@ -8034,31 +8031,22 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     print_line(gen, "#include <stddef.h>");
     print_line(gen, "extern void* aether_caps_malloc(size_t bytes);");
     print_line(gen, "extern void* string_new_with_length(const char* data, int length);");
+    print_line(gen, "extern void string_retain(const char*);");
+    print_line(gen, "extern void aether_string_publish(const void*);");
+    /* A take (R3): a counted string is retained (strings are immutable once
+     * made) and a pinned one, a literal, handed over as it is (string_retain
+     * leaves it alone); only a plain C string is copied. The magic is read
+     * byte by byte to stay ASan-clean on short literal allocations. */
     print_line(gen, "static inline const char* aether_uniform_heap_str(const char* s, int is_heap) {");
     print_line(gen, "    if (!s) return (const char*)0;");
     print_line(gen, "    if (is_heap) return s;");
-    print_line(gen, "    /* AetherString-aware length probe, see is_aether_string in");
-    print_line(gen, "     * std/string/aether_string.h. Byte-by-byte to stay ASan-clean");
-    print_line(gen, "     * on short literal allocations (e.g. \"x\"). */");
     print_line(gen, "    const unsigned char* _p = (const unsigned char*)s;");
-    print_line(gen, "    const char* _data = s;");
-    print_line(gen, "    size_t _n;");
     print_line(gen, "    if (_p[0] == 0x%02X && _p[1] == 0x%02X && _p[2] == 0x%02X && _p[3] == 0x%02X) {",
                AE_STR_MAGIC_B0, AE_STR_MAGIC_B1, AE_STR_MAGIC_B2, AE_STR_MAGIC_B3);
-    print_line(gen, "        /* Struct layout: magic(u32), ref_count(i32), length(size_t),");
-    print_line(gen, "         * capacity(size_t), data(char*). Read length and data via");
-    print_line(gen, "         * a typed view, the struct's data pointer is what we copy. */");
-    print_line(gen, "        struct _AeStrHdr { %s };", AE_STR_FIELDS_TEXT(AETHER_STRING_FIELDS));
-    print_line(gen, "        const struct _AeStrHdr* _h = (const struct _AeStrHdr*)s;");
-    /* A pinned string (a literal) lives as long as the program: handed
-     * over as it is, no copy. */
-    print_line(gen, "        if (_h->ref_count == 0x%X) return s;", (unsigned)AETHER_STRING_PINNED_REFS);
-    print_line(gen, "        _n = _h->length;");
-    print_line(gen, "        _data = _h->data ? _h->data : s;");
-    print_line(gen, "    } else {");
-    print_line(gen, "        _n = strlen(s);");
+    print_line(gen, "        string_retain(s);");
+    print_line(gen, "        return s;");
     print_line(gen, "    }");
-    print_line(gen, "    return (const char*)string_new_with_length(_data, (int)_n);");
+    print_line(gen, "    return (const char*)string_new_with_length(s, (int)strlen(s));");
     print_line(gen, "}");
     /* #2586: ownership through a typed fn pointer, decided at run time. A
      * function used as a fn-pointer value that hands over owned strings
@@ -8258,6 +8246,7 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
      * pointer writes the first slot alone. */
     print_line(gen, "extern const char* aether_string_data(const void* s);");
     print_line(gen, "static inline AETHER_MAYBE_UNUSED void _aether_ptr_cell_set_str(void** cell, const char* owned) {");
+    print_line(gen, "    aether_string_publish(owned);");
     print_line(gen, "    const char* _old = ((const char**)cell)[1];");
     print_line(gen, "    ((const char**)cell)[1] = owned;");
     print_line(gen, "    cell[0] = owned ? (void*)aether_string_data(owned) : NULL;");
@@ -8281,6 +8270,12 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     print_line(gen, "    const char* _old = *cell;");
     print_line(gen, "    *cell = v;");
     print_line(gen, "    _aether_str_cell_free_val(_old);");
+    print_line(gen, "}");
+    /* A cell a closure captured: the closure may run on another thread, so
+     * the string is published before it is stored (#2919). */
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED void _aether_str_cell_set_shared(const char* volatile* cell, const char* v) {");
+    print_line(gen, "    aether_string_publish(v);");
+    print_line(gen, "    _aether_str_cell_set(cell, v);");
     print_line(gen, "}");
     /* #2618: an element a string array takes from another array (a
      * parameter's from its caller's, a whole-array copy, a closure's

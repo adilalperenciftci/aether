@@ -108,7 +108,7 @@ int strarr_push_copy_raw(StrArray* a, const char* s) {
     int made_ref = 0;
     if (s) {
         if (is_aether_string(s)) {
-            string_retain(s);                 /* own a reference, no copy */
+            string_retain_shared(s);          /* own a reference, no copy */
             made_ref = 1;
         } else {
             size_t n = strlen(s);

@@ -223,10 +223,12 @@ string, they would be copied up to their first zero byte.
 
 **Published strings (#2919).** Bit `0x40000000` of `ref_count` marks a string
 shared; its retain and release are atomic from then on, every other count is
-plain. `aether_string_publish` sets it and leaves pinned strings alone. A
-store into a cross-thread place (module variable, closure environment,
-container element, field reached through a pointer) is to publish the
-string; the runtime is in, the codegen calls are not yet.
+plain. `aether_string_publish` sets it and leaves pinned strings alone.
+Published where it is stored: a module variable, a closure's captured string
+or shared cell, a container element (list, map, string sequence, strarr:
+`string_retain_shared`), and a struct field reached through a pointer. A
+message does not share: a send deep-copies its strings (#466), so it needs no
+publish. A value read from a published place carries the bit with it.
 
 **Returns (#2920).** An Aether function hands its caller one reference from
 every return: every `-> string`, and every `string` and `string?` position of
@@ -241,18 +243,60 @@ its place.
 program holds is counted and `release` never frees a plain pointer.
 
 **Locals (#2920, R2).** Every string local owns what it holds. A store moves a
-fresh value, or an owning local at its last use; anything else is taken. Until
-retain-on-take, taking a counted string copies it and taking a pinned one
-does nothing.
+fresh value, or an owning local at its last use; anything else is taken.
+Taking retains a counted string (strings are immutable once made; nothing
+writes into one after it is shared), hands a pinned one over as it is, and
+copies only a plain C string. Every other place is a place like a local: a
+module variable, a struct field (by any path, and in a struct literal), an
+actor's state field, a container element (`list.add`, `list.set`, `map.put` of
+any `string`: the container adopts the taken reference and releases it with
+the element). The store takes the new value and releases the one it replaces;
+a module variable's last value lives as long as the program. A fresh string
+passed to a `string` parameter is released after the call. A `ptr` slot is
+not a string place: a string stored there is C's (R4).
 `string.free(x)` or `release(x)` on a local releases its reference and leaves
 the local empty; reading it afterwards reads nothing, as reading freed memory
 would in C, and a pinned literal it held is untouched.
 
+**Escape channels, measured.** The escape walk kept a local alive (no free on
+rebind or exit) when its value might be kept elsewhere. With each channel
+switched off in turn over the whole suite: a store into a closure's captured
+variable breaks nothing (such a variable is a shared cell, which takes); a
+call argument breaks only a string handed to an Aether function's `ptr`
+parameter that stores it (a container, #2922); a store into a field or an
+element breaks views: an element of a `string[]` slice over memory C owns
+(std.strarr, a sort swapping through `tmp`) is no place that owns, and a copy
+taken from it and stored back dangled when the copy was freed. Retain-on-take
+removes that: the local and the view hold the same counted string. A
+header-defined struct's string field (`@c_import`) is C's, as R4 says, and
+keeps the value alive by the escape rule until a C boundary annotation says
+who frees it.
+
+**A string kept through a `ptr` (decided 2026-10-15).** A `ptr` slot is
+untyped memory and owns nothing, so a `string` that reaches one and is kept
+there would live as long as its owner, not as long as the slot. The keep
+analysis caught this by reading callee bodies; it is replaced by a rule in
+the signature, so no call site reads another function's body:
+
+- An Aether function's `ptr` parameter is borrowed for the call. One the
+  function keeps (stores where it outlives the call, returns, captures, or
+  passes to another function's keeping parameter) is declared `@keep`, as an
+  extern's is declared `@retain` (R4).
+- The checker verifies each function against its own body: a `ptr`
+  parameter not declared `@keep` is not kept. A call is checked against the
+  callee's signature.
+- A `string` goes implicitly to a borrowed `ptr` parameter. To a `@keep` one
+  it goes only through `string.keep(s) as ptr`, which hands over one
+  reference the program releases; the implicit form is refused.
+- The std containers' `ptr` entry points take strings through the string
+  routing (a string given to `list.add` is taken by the list), not as a
+  kept `ptr`.
+
 **Order of the remaining #2920 steps.** (1) Switch off each escape channel
-whose receiver already takes, and make the others take. (2) The `_heap_` flags
-are then always 1 and are deleted, with the heap classifiers that set them.
-(3) `--diagnose=ownership` reports R3 (moved or taken, per store), rewritten
-once, after (1). (4) Taking a counted string retains instead of copying.
+whose receiver takes. (2) The `_heap_` flags are then always 1 and are
+deleted, with the heap classifiers that set them, copy-on-keep and the callee
+keep analysis. (3) `--diagnose=ownership` reports R3 (moved or taken, per
+store), rewritten once, after (1).
 
 ## Decisions needed
 

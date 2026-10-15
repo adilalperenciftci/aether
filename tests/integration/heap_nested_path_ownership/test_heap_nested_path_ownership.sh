@@ -10,41 +10,18 @@
 # ordinary shape of a model holding a material holding a texture path.
 #
 # Running to completion is half the assertion (a double free aborts). The
-# emitted ownership claim is checked directly too, so this still means
-# something on the platforms with no leak checker in CI.
+# program checks its own heap growth where the count is exact, and valgrind
+# checks for a definite leak where it is installed.
 
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 AE="$ROOT/build/ae"
-AETHERC="$ROOT/build/aetherc"
 
 TMP="$(mktemp -d)"
 cleanup() { rm -rf "$TMP"; }
 trap cleanup EXIT
-
-if ! "$AETHERC" "$SCRIPT_DIR/prog.ae" "$TMP/out.c" > "$TMP/gen.log" 2>&1; then
-    echo "  [FAIL] heap_nested_path_ownership: codegen failed"
-    sed 's/^/        /' "$TMP/gen.log" | head -8
-    exit 1
-fi
-
-# The direct write already claimed ownership before the fix; the nested one
-# did not. Both must now, and `name` is written both ways in prog.ae, so
-# count the claims rather than merely finding one.
-claims=$(grep -c "_heap_name = 1" "$TMP/out.c" || true)
-if [ "$claims" -lt 4 ]; then
-    echo "  [FAIL] heap_nested_path_ownership: expected >=4 '_heap_name = 1' claims, found $claims"
-    echo "         (set_through_outer, set_direct, the inline write, and the alias)"
-    grep -n "_heap_name" "$TMP/out.c" | sed 's/^/        /' | head -8
-    exit 1
-fi
-# Three levels deep: the object of the assignment is itself a member access.
-if ! grep -q "_heap_tag = 1" "$TMP/out.c"; then
-    echo "  [FAIL] heap_nested_path_ownership: a three-level path did not claim ownership"
-    exit 1
-fi
 
 if ! "$AE" build "$SCRIPT_DIR/prog.ae" -o "$TMP/prog" > "$TMP/build.log" 2>&1; then
     echo "  [FAIL] heap_nested_path_ownership: build failed"

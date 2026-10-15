@@ -5572,38 +5572,15 @@ int container_store_slot(CodeGenerator* gen, ASTNode* call) {
     return e ? e->val_idx : -1;
 }
 
-/* The string local a list add or a map put stores, when the store takes it
- * as every other owning slot does (emit_string_take): moved on its last
- * use, copied otherwise, so the local keeps whatever it did not hand over
- * and the container holds a reference of its own. Only a local some
- * binding of the body may leave owning a heap value, the take reading its
- * tracker (one that only ever holds a literal stays on the raw path, as
- * before), or a `string` parameter of
- * the closure being emitted that took a reference of its own on entry
- * (copy-on-keep, #2499), which is a heap-tracked local from there on.
- * Returns the value node, else NULL. The escape walk asks this same
- * question, so the local's own frees stay in place. Adopting the single
- * reference and marking the local escaped freed it twice when it was
- * stored twice, or stored in a loop, and left a kept parameter's
- * reference to nobody. */
-static ASTNode* current_fn_body_block(CodeGenerator* gen);
+/* The string value a list add, list set or map put stores: the store takes
+ * it (R3, emit_string_take), so a local stored there keeps its own reference
+ * and its own frees, as the escape walk asks. Returns the value node, else
+ * NULL. */
 ASTNode* string_container_store_value(CodeGenerator* gen, ASTNode* call) {
     const ClosureStoreEntry* e = closure_store_entry(gen, call);
     if (!e) return NULL;
     ASTNode* val = call->children[e->val_idx];
-    if (!val || val->type != AST_IDENTIFIER || !val->value ||
-        !is_heap_string_var(gen, val->value)) return NULL;
-    if (body_may_assign_var_from_heap(gen, current_fn_body_block(gen), val->value)) return val;
-    /* A `string` parameter the closure or function keeps took its own
-     * reference on entry (copy-on-keep), so it is heap-tracked here. */
-    ASTNode* fn = gen->current_function;
-    if (fn && fn->type == AST_CLOSURE && is_closure_param(fn, val->value)) return val;
-    for (int i = 0; fn && fn->type != AST_CLOSURE && i < fn->child_count; i++) {
-        ASTNode* c = fn->children[i];
-        if (c && (c->type == AST_PATTERN_VARIABLE || c->type == AST_VARIABLE_DECLARATION) &&
-            c->value && strcmp(c->value, val->value) == 0) return val;
-    }
-    return NULL;
+    return val && val->node_type && val->node_type->kind == TYPE_STRING ? val : NULL;
 }
 
 /* Emit the store of closure value `val` (closure_container_store_value) by
@@ -9171,6 +9148,18 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                      * enforced entirely in the type checker's move pass. */
                     generate_expression(gen, expr->children[0]);
                 }
+                else if (expr->child_count == 1 && consuming_free_symbol(gen, func_name_norm) &&
+                         expr->children[0]->type == AST_IDENTIFIER && expr->children[0]->value &&
+                         !is_var_declared(gen, expr->children[0]->value) &&
+                         is_module_global_var(gen, expr->children[0]->value) &&
+                         expr->children[0]->node_type &&
+                         expr->children[0]->node_type->kind == TYPE_STRING) {
+                    /* R3: a module `var` owns its string as a local does:
+                     * freed, it gives its reference back and is left empty,
+                     * so the next store finds nothing to release. */
+                    const char* g = expr->children[0]->value;
+                    fprintf(gen->output, "(aether_heap_str_free((void*)%s), %s = NULL, (void)0)", g, g);
+                }
                 else if (strcmp(func_name, "release") == 0 && expr->child_count == 1) {
                     ASTNode* arg = expr->children[0];
                     if (arg->node_type && arg->node_type->kind == TYPE_STRING) {
@@ -9874,134 +9863,13 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                         int expected_arg_count = is_list_shape ? 2 : 3;
                         if (expr->child_count == expected_arg_count) {
                             ASTNode* val = expr->children[val_idx];
-                            /* Route the value into the container's
-                             * owning variant only when it is genuinely
-                             * a heap allocation the container should
-                             * free.
-                             *
-                             * For a NON-identifier expression
-                             * (`string.concat(...)`, interpolation, a
-                             * heap-returning call) `is_heap_string_expr`
-                             * is exact — it is statically a fresh
-                             * allocation.
-                             *
-                             * For a bare IDENTIFIER `is_heap_string_expr`
-                             * is too coarse: it answers "is this name
-                             * heap-TRACKED" (every assigned string
-                             * variable is), which is true even for a
-                             * variable that only ever holds a literal
-                             * (`s = "1"`). Routing such a variable into
-                             * `_string_owned` tagged a `.rodata` literal
-                             * as owned and `free()`d it at container
-                             * teardown — a crash (map-put-raw-rewritten-
-                             * to-owned.md). The runtime `_heap_<name>`
-                             * flag can't rescue this either: the value
-                             * has escaped into the container call, so
-                             * the reassignment wrapper that maintains
-                             * the flag is suppressed and it reads stale.
-                             * Resolve the identifier structurally
-                             * instead — it is genuinely heap only if
-                             * some assignment in the enclosing function
-                             * body sets it from a heap source. A
-                             * variable that is only ever literal-
-                             * assigned is left un-rewritten (the
-                             * container does not own it). */
-                            int val_is_heap;
-                            /* A heap-tracked local is taken below, as a
-                             * struct field or an `if` is: moved on its last
-                             * use, copied otherwise (string_container_store_value). */
-                            ASTNode* taken = string_container_store_value(gen, expr);
-                            if (val && val->type == AST_IDENTIFIER && val->value) {
-                                val_is_heap = !taken && body_assigns_var_from_heap(
-                                    gen, current_fn_body_block(gen), val->value);
-                            } else {
-                                val_is_heap = val && is_heap_string_expr(gen, val);
-                            }
-                            if (val_is_heap) {
-                                if (is_list_shape) {
-                                    /* The wrapper shape returns `string`, so
-                                     * it goes through the prelude helper that
-                                     * converts the int result. Emitting the
-                                     * conversion inline would leave every
-                                     * statement-position add discarding a
-                                     * ternary, which is -Wunused-value in the
-                                     * user's own build. */
-                                    fprintf(gen->output, is_wrapper
-                                            ? "_aether_list_add_adopted("
-                                            : "list_add_string_adopted(");
-                                    generate_expression(gen, expr->children[0]);
-                                    fprintf(gen->output, ", (void*)");
-                                    generate_expression(gen, val);
-                                    fprintf(gen->output, ")");
-                                } else if (is_set_shape) {
-                                    fprintf(gen->output, "list_set_string_adopted(");
-                                    generate_expression(gen, expr->children[0]);
-                                    fprintf(gen->output, ", ");
-                                    generate_expression(gen, expr->children[1]);
-                                    fprintf(gen->output, ", (void*)");
-                                    generate_expression(gen, val);
-                                    fprintf(gen->output, ")");
-                                } else {
-                                    fprintf(gen->output, is_wrapper
-                                            ? "_aether_map_put_adopted("
-                                            : "map_put_string_adopted(");
-                                    generate_expression(gen, expr->children[0]);
-                                    /* The key goes as it is, an AetherString
-                                     * with its length or a plain char*: the
-                                     * map reads either shape, and unwrapping
-                                     * to the payload here cut a key at its
-                                     * first NUL (#2469). */
-                                    fprintf(gen->output, ", (const char*)(");
-                                    generate_expression(gen, expr->children[1]);
-                                    fprintf(gen->output, "), (void*)");
-                                    generate_expression(gen, val);
-                                    fprintf(gen->output, ")");
-                                }
-                                break;
-                            }
-                            /* #2497: a value that views a string something
-                             * else owns: a struct field (the struct frees it
-                             * when the field changes or the struct goes), or
-                             * an `if` whose arm is such a view or a local.
-                             * Stored raw, the container kept a pointer the
-                             * owner then freed. A field read goes to the
-                             * owning add, which takes the container's own
-                             * reference (retains a refcounted string, copies
-                             * a plain one), and so does an element of an
-                             * array that owns its elements (#2618). An `if`
-                             * is taken as a binding takes it
-                             * (emit_string_take): what the take owns is
-                             * adopted, what it borrows is added through the
-                             * owning entry. */
-                            if (val && (is_owned_string_field_read(val) ||
-                                        is_owned_string_element(gen, val))) {
-                                if (is_list_shape) {
-                                    fprintf(gen->output, is_wrapper
-                                            ? "_aether_list_add_owned("
-                                            : "list_add_string_owned(");
-                                    generate_expression(gen, expr->children[0]);
-                                    fprintf(gen->output, ", (void*)");
-                                } else if (is_set_shape) {
-                                    fprintf(gen->output, "list_set_string_owned(");
-                                    generate_expression(gen, expr->children[0]);
-                                    fprintf(gen->output, ", ");
-                                    generate_expression(gen, expr->children[1]);
-                                    fprintf(gen->output, ", (void*)");
-                                } else {
-                                    fprintf(gen->output, is_wrapper
-                                            ? "_aether_map_put_owned("
-                                            : "map_put_string_owned(");
-                                    generate_expression(gen, expr->children[0]);
-                                    /* The key as it is (#2469), as above. */
-                                    fprintf(gen->output, ", (const char*)(");
-                                    generate_expression(gen, expr->children[1]);
-                                    fprintf(gen->output, "), (void*)");
-                                }
-                                generate_expression(gen, val);
-                                fprintf(gen->output, ")");
-                                break;
-                            }
-                            if (val && (taken == val || string_take_is_view(gen, val))) {
+                            /* R3: a container element owns its string. The
+                             * value is taken (moved when fresh or a local's
+                             * last use, else retained; a literal is pinned)
+                             * and the container adopts that reference, which
+                             * it releases when the element is replaced or
+                             * removed or the container is freed. */
+                            if (val && val->node_type && val->node_type->kind == TYPE_STRING) {
                                 TempSeq s;
                                 seq_open(gen, &s);
                                 const char* cc = seq_let(gen, &s, "void*", "_ae_cc");
@@ -10017,6 +9885,9 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                                     fprintf(gen->output, ")");
                                     seq_next(gen, &s);
                                 } else if (!is_list_shape) {
+                                    /* The key as it is, an AetherString with
+                                     * its length or a plain char*: the map
+                                     * reads either shape (#2469). */
                                     ck = seq_let(gen, &s, "const char*", "_ae_ck");
                                     fprintf(gen->output, "(const char*)(");
                                     generate_expression(gen, expr->children[1]);
@@ -10030,50 +9901,21 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                                 fprintf(gen->output, "(void*)");
                                 emit_string_take(gen, val, own, NULL);
                                 seq_next(gen, &s);
+                                fprintf(gen->output, "(void)%s, ", own);
                                 if (is_list_shape) {
-                                    fprintf(gen->output, "%s ? %s(%s, %s) : %s(%s, %s)", own,
+                                    fprintf(gen->output, "%s(%s, %s)",
                                             is_wrapper ? "_aether_list_add_adopted" : "list_add_string_adopted",
-                                            cc, cv,
-                                            is_wrapper ? "_aether_list_add_owned" : "list_add_string_owned",
                                             cc, cv);
                                 } else if (is_set_shape) {
-                                    fprintf(gen->output, "%s ? list_set_string_adopted(%s, %s, %s) : "
-                                            "list_set_string_owned(%s, %s, %s)",
-                                            own, cc, ck, cv, cc, ck, cv);
+                                    fprintf(gen->output, "list_set_string_adopted(%s, %s, %s)", cc, ck, cv);
                                 } else {
-                                    fprintf(gen->output, "%s ? %s(%s, %s, %s) : %s(%s, %s, %s)", own,
+                                    fprintf(gen->output, "%s(%s, %s, %s)",
                                             is_wrapper ? "_aether_map_put_adopted" : "map_put_string_adopted",
-                                            cc, ck, cv,
-                                            is_wrapper ? "_aether_map_put_owned" : "map_put_string_owned",
                                             cc, ck, cv);
                                 }
                                 seq_close(gen, &s);
                                 break;
                             }
-                            /* `list.set` of any other string (a literal, a
-                             * borrowed view) owns a copy: only an owning set
-                             * can release the element the slot held, and a
-                             * raw list_set cannot know what the slot held. */
-                            if (is_set_shape && val && val->node_type &&
-                                val->node_type->kind == TYPE_STRING) {
-                                fprintf(gen->output, "list_set_string_owned(");
-                                generate_expression(gen, expr->children[0]);
-                                fprintf(gen->output, ", ");
-                                generate_expression(gen, expr->children[1]);
-                                fprintf(gen->output, ", (void*)");
-                                generate_expression(gen, val);
-                                fprintf(gen->output, ")");
-                                break;
-                            }
-                            /* A `string` PARAMETER of a named function reaches
-                             * here only when the function does not keep it
-                             * (callee_string_param_captures): a function that
-                             * stores its parameter takes a reference of its
-                             * own on entry, after which the parameter is a
-                             * heap-tracked local and is taken above. What
-                             * reaches this raw path is a borrow the container
-                             * must not free: the magic header proves heap
-                             * representation, not ownership. */
                         }
                     }
 
@@ -10917,11 +10759,11 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                     any_moved = 1; break;
                 }
             }
-            /* #2461: a field initialised from a view (another struct's field,
-             * an `if` over owned values) takes the value with
-             * emit_string_take, whose flag sets the field's tracker once the
-             * literal is built. The literal used to borrow it: the source
-             * struct then freed the buffer this one still pointed at. */
+            /* R3: a string field owns what it holds, so it takes its value
+             * (emit_string_take: moved when fresh or a local's last use, else
+             * retained), whose flag sets the field's tracker once the literal
+             * is built. Borrowed, a view's owner freed the buffer the field
+             * still pointed at (#2461), and a parameter's caller did. */
             char (*take_own)[32] = NULL;
             int any_take = 0;
             for (int i = 0; !c_imported && i < expr->child_count; i++) {
@@ -10930,8 +10772,8 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                 Type* fit = fi && fi->value
                             ? struct_literal_field_type(gen, expr->value, fi->value) : NULL;
                 if (fi && fi->type == AST_ASSIGNMENT && fi->value && fi->child_count > 0 &&
-                    !(fit && fit->kind != TYPE_STRING) &&
-                    string_take_is_view(gen, fi->children[0])) {
+                    !(fit && fit->kind != TYPE_STRING) && fi->children[0] &&
+                    fi->children[0]->node_type && fi->children[0]->node_type->kind == TYPE_STRING) {
                     if (!take_own) take_own = calloc((size_t)expr->child_count, sizeof(*take_own));
                     if (!take_own) break;
                     string_take_new_flag(take_own[i], sizeof(take_own[i]));

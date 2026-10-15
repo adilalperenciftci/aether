@@ -1400,6 +1400,14 @@ grid_verdict(r: *GridResult, tok: string) -> string {
     if st == "HARNESS" {
         return "worse"
     }
+    // A cell whose target is REFUSED and that the checker refuses is at the
+    // design's target, whatever it did before.
+    if getf(r, F_TARGET) == "REFUSED" && at_target(r) {
+        if bst == "NOCOMPILE" {
+            return "same"
+        }
+        return "better"
+    }
     if st == "UNMEASURED" {
         // Values and use after free were checked, growth was not.
         if bst == "OK" || bst == "LEAK" || bst == "UNMEASURED" {

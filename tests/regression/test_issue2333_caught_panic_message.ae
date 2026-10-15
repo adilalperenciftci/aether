@@ -149,8 +149,7 @@ main() {
     stash(l, 9)
     v, _gerr = list.get(l, 0)
     check(v == "bad value 9", "stored in a list")
-    // A raw list add does not own its element: the test releases both.
-    string.release(v)
+    // The list owns the string it was given (R3) and releases it with itself.
     list.free(l)
 
     // ---- nothing is left behind ----
