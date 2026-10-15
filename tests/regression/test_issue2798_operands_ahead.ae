@@ -1,9 +1,8 @@
 // Regression (#2798): what a statement evaluates before a construct that
 // runs statements is evaluated ahead of it into temporaries, and each such
 // operand must be evaluated as the call it goes to would: an owned field
-// read handed to a function that frees its parameter gives its reference
-// up as it is read (it was read into a plain temporary, and the struct
-// freed the string a second time); a function named as a value needs no
+// read stays valid in its temporary until the call reads it, and is freed
+// once, by the struct; a function named as a value needs no
 // temporary (one of the operand's type could not hold it, and the C did
 // not compile). A builder's arguments are evaluated after its block, left
 // to right, whether the call is a value or its own statement (the value
@@ -39,7 +38,7 @@ word(fail: bool, w: string) -> string! {
 }
 
 eat(s: string, k: int) -> int {
-    string.free(s)
+    check(string.length(s) > 2, "the field reaches the call")
     return k
 }
 
@@ -82,7 +81,7 @@ builder tag(text: string, n: int): string {
 }
 
 main() {
-    // A field handed to a function that frees it, before a construct.
+    // A field handed to a function that reads it, before a construct.
     total = 0
     i = 0
     while i < 100 {

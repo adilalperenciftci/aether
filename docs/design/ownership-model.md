@@ -204,6 +204,56 @@ green, and is measured against the benchmarks before it merges.
 6. **Docs:** memory-management.md rewritten around R1 to R5; the per-shape
    sections become history.
 
+## Implementation record
+
+What has landed, and the decisions taken while implementing, so later stages
+build on them instead of re-deciding.
+
+**R1 (#2913, #2914, #2915, inventory in `ownership-r1-inventory.md`).** Every
+literal is a static pinned `AetherString`. The runtime's string producers
+return counted strings. R4 as built: an extern's `string` or `ptr` parameter
+gets the characters, unless the parameter is declared `@aether ptr` or the
+function is string-aware (`string_*`, `aether_string_*`); a C variadic `...`
+gets the characters; a store through a C `string[]` view writes the
+characters; the std containers declare `@aether ptr` so they keep the header.
+An extern `-> string` is C text, ended by its NUL. Bytes whose length C
+reports separately (a digest, compressed data, a read buffer) cross as `ptr`
+and become a string through `string_new_with_length(p, n)`: taken as a
+string, they would be copied up to their first zero byte.
+
+**Published strings (#2919).** Bit `0x40000000` of `ref_count` marks a string
+shared; its retain and release are atomic from then on, every other count is
+plain. `aether_string_publish` sets it and leaves pinned strings alone. A
+store into a cross-thread place (module variable, closure environment,
+container element, field reached through a pointer) is to publish the
+string; the runtime is in, the codegen calls are not yet.
+
+**Returns (#2920).** An Aether function hands its caller one reference from
+every return: every `-> string`, and every `string` and `string?` position of
+a tuple. A pinned literal is handed over as it is; a borrowed string is
+copied until retain-on-take lands. A tuple returned whole (`return g()`,
+`return t`) copies each position its source did not hand over (a C function's,
+a closure the compiler cannot name). The caller always moves the result into
+its place.
+
+**C strings in (#2920).** An `@heap` extern's plain `char*` is adopted into an
+`AetherString` at the call (`aether_string_adopt`), so every string the
+program holds is counted and `release` never frees a plain pointer.
+
+**Locals (#2920, R2).** Every string local owns what it holds. A store moves a
+fresh value, or an owning local at its last use; anything else is taken. Until
+retain-on-take, taking a counted string copies it and taking a pinned one
+does nothing.
+`string.free(x)` or `release(x)` on a local releases its reference and leaves
+the local empty; reading it afterwards reads nothing, as reading freed memory
+would in C, and a pinned literal it held is untouched.
+
+**Order of the remaining #2920 steps.** (1) Switch off each escape channel
+whose receiver already takes, and make the others take. (2) The `_heap_` flags
+are then always 1 and are deleted, with the heap classifiers that set them.
+(3) `--diagnose=ownership` reports R3 (moved or taken, per store), rewritten
+once, after (1). (4) Taking a counted string retains instead of copying.
+
 ## Decisions needed
 
 Stage 1 (the grid) needs none of these: it only measures, and it starts

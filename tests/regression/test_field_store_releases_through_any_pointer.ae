@@ -13,9 +13,9 @@
 // bound to a `ptr` first, so every box's trackers can be read and every
 // store releases.
 //
-// A field handed to a function that frees it (ae3d's `core.set_owned`) is
-// given up at the call (#2566), so releasing on the store does not free it
-// twice.
+// ae3d worked around the leak with `core.set_owned`, a function that freed
+// the old value it was passed; a function may not free what it borrows any
+// more (E0901), and the store releases the old value itself.
 //
 // The leak check runs where the heap count is exact (mem.heap_in_use_exact):
 // after a warm-up, some window of the same work grows by exactly 0
@@ -75,18 +75,9 @@ set_parts(w: *Widget, text: string) {
     w.on_click = || { w.n = w.n + string.length(text) }
 }
 
-// ae3d's workaround: free the old value, store a fresh copy.
-set_owned(previous: string, value: string) -> string {
-    fresh = string.copy(value)
-    if previous != null {
-        string.free(previous)
-    }
-    return fresh
-}
-
 rename(items: ptr, text: string) {
     w = widget(items, 0)
-    w.label = set_owned(w.label, text)
+    w.label = string.copy(text)
 }
 
 // A box made with malloc over memory left dirty, cast at once and bound to

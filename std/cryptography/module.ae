@@ -81,11 +81,11 @@ extern cryptography_md5_bytes_raw(data: ptr, length: int) -> int
 extern cryptography_sha1_bytes_raw(data: ptr, length: int) -> int
 extern cryptography_sha256_bytes_raw(data: ptr, length: int) -> int
 extern cryptography_hash_bytes_raw(algo: string, data: ptr, length: int) -> int
-extern cryptography_get_binary_digest() -> string
+extern cryptography_get_binary_digest() -> ptr
 extern cryptography_get_binary_digest_length() -> int
 extern cryptography_release_binary_digest()
 extern cryptography_random_bytes_raw(n: int) -> int
-extern cryptography_get_random_bytes() -> string
+extern cryptography_get_random_bytes() -> ptr
 extern cryptography_get_random_bytes_length() -> int
 extern cryptography_release_random_bytes()
 

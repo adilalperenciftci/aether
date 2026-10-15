@@ -369,7 +369,7 @@ extern path_separator() -> string
 extern fs_pwrite_raw(file: ptr, data: ptr, length: int, offset: long) -> long
 extern fs_pread_raw(file: ptr, length: int, offset: long) -> int
 extern fs_pread_into_raw(file: ptr, buf: ptr, length: int, offset: long) -> int
-extern fs_get_pread() -> string
+extern fs_get_pread() -> ptr
 extern fs_get_pread_length() -> int
 extern fs_release_pread()
 extern fs_ftruncate_raw(file: ptr, length: long) -> string

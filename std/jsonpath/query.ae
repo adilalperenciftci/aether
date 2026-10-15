@@ -25,16 +25,6 @@ import std.regex
 import model
 import parser
 
-// Normalized paths come from strbuilder.finish: length-carrying strings
-// whose header and bytes are one block. list_add_string_owned retains such
-// a string rather than copying it, so this release is the builder's own
-// reference going away and the list's reference keeps the path alive. A raw
-// libc free of the bytes here would be an interior pointer into the block
-// -- see model.ae.
-_free_path(path: string) {
-    string.free(path)
-}
-
 exports(
     query, query_paths, query_values, query_ast,
     result_size, result_value, result_path, free_result
@@ -126,7 +116,7 @@ query_paths(root: ptr, path: string) -> ptr! {
 // reason the AST is a public type.
 query_ast(root: ptr, ast: ptr) -> ptr {
     cursors = _new_result()
-    _push_borrowed(cursors, root, "$")
+    _push(cursors, root, "$")
 
     qp = ast as *Query
     segs = qp.segments
@@ -182,27 +172,12 @@ _new_result() -> ptr {
     return c
 }
 
-// Append one matched node. The path is a borrowed string at this point;
-// list_add_string_owned copies it into the list's managed storage.
+// Append one matched node. The list keeps a reference of its own to the
+// path (list_add_string_owned); the caller still owns what it passed.
 _push(cursors: ptr, value: ptr, path: string) {
     c = cursors as *Cursor
     list.list_add_raw(c.values, value)
     list.list_add_string_owned(c.paths, path)
-}
-
-// _push for a freshly finished path string: the list takes its own
-// reference, then the builder's reference is released.
-_push_owned(cursors: ptr, value: ptr, path: string) {
-    c = cursors as *Cursor
-    list.list_add_raw(c.values, value)
-    list.list_add_string_owned(c.paths, path)
-    _free_path(path)
-}
-
-// _push for a path the caller continues to own (a string literal, or
-// another entry's path read back out of a result set).
-_push_borrowed(cursors: ptr, value: ptr, path: string) {
-    _push(cursors, value, path)
 }
 
 // Free a cursor list without touching values (used when a stage
@@ -218,7 +193,7 @@ _fork(cursors: ptr) -> ptr {
     n = result_size(cursors)
     i = 0
     while i < n {
-        _push_borrowed(out, result_value(cursors, i), result_path(cursors, i))
+        _push(out, result_value(cursors, i), result_path(cursors, i))
         i = i + 1
     }
     return out
@@ -226,7 +201,7 @@ _fork(cursors: ptr) -> ptr {
 
 _fork_single(value: ptr, path: string) -> ptr {
     out = _new_result()
-    _push_borrowed(out, value, path)
+    _push(out, value, path)
     return out
 }
 
@@ -354,7 +329,7 @@ _expand_descendants(cursors: ptr) -> ptr {
 // buffers; the recursive call copies them into the result list and the
 // local buffer is released after the subtree it labels is walked.
 _collect_descendants(value: ptr, path: string, out: ptr) {
-    _push_borrowed(out, value, path)
+    _push(out, value, path)
     t = json.json_type(value)
 
     if t == 4 { // array
@@ -364,7 +339,7 @@ _collect_descendants(value: ptr, path: string, out: ptr) {
             child = json.json_array_get_raw(value, i)
             child_path = normalize_index_segment(path, i)
             _collect_descendants(child, child_path, out)
-            _free_path(child_path)
+            string.free(child_path)
             i = i + 1
         }
         return
@@ -378,7 +353,7 @@ _collect_descendants(value: ptr, path: string, out: ptr) {
             child = json.json_object_value_at(value, i)
             child_path = normalize_name_segment(path, k)
             _collect_descendants(child, child_path, out)
-            _free_path(child_path)
+            string.free(child_path)
             i = i + 1
         }
     }
@@ -395,7 +370,7 @@ _apply_selector(sel: ptr, value: ptr, path: string, out: ptr, root: ptr) {
         if json.json_type(value) != 5 { return }
         if json.json_object_has(value, s.name) == 0 { return }
         child = json.json_object_get_raw(value, s.name)
-        _push_owned(out, child, normalize_name_segment(path, s.name))
+        _push(out, child, normalize_name_segment(path, s.name))
         return
     }
 
@@ -405,7 +380,7 @@ _apply_selector(sel: ptr, value: ptr, path: string, out: ptr, root: ptr) {
             n = json.json_array_size(value)
             i = 0
             while i < n {
-                _push_owned(out, json.json_array_get_raw(value, i), normalize_index_segment(path, i))
+                _push(out, json.json_array_get_raw(value, i), normalize_index_segment(path, i))
                 i = i + 1
             }
             return
@@ -415,7 +390,7 @@ _apply_selector(sel: ptr, value: ptr, path: string, out: ptr, root: ptr) {
             i = 0
             while i < n {
                 k = json.json_object_key_at(value, i)
-                _push_owned(out, json.json_object_value_at(value, i), normalize_name_segment(path, k))
+                _push(out, json.json_object_value_at(value, i), normalize_name_segment(path, k))
                 i = i + 1
             }
         }
@@ -428,7 +403,7 @@ _apply_selector(sel: ptr, value: ptr, path: string, out: ptr, root: ptr) {
         idx = _resolve_index(s.index, n)
         if idx < 0 { return }
         if idx >= n { return }
-        _push_owned(out, json.json_array_get_raw(value, idx), normalize_index_segment(path, idx))
+        _push(out, json.json_array_get_raw(value, idx), normalize_index_segment(path, idx))
         return
     }
 
@@ -479,7 +454,7 @@ _apply_slice(sl: *Slice, value: ptr, path: string, out: ptr) {
 
         var i: long = lower
         while i < upper {
-            _push_owned(out, json.json_array_get_raw(value, i as int), normalize_index_segment(path, i as int))
+            _push(out, json.json_array_get_raw(value, i as int), normalize_index_segment(path, i as int))
             i = i + step
         }
         return
@@ -495,7 +470,7 @@ _apply_slice(sl: *Slice, value: ptr, path: string, out: ptr) {
 
     var i: long = upper
     while i > lower {
-        _push_owned(out, json.json_array_get_raw(value, i as int), normalize_index_segment(path, i as int))
+        _push(out, json.json_array_get_raw(value, i as int), normalize_index_segment(path, i as int))
         i = i + step
     }
 }
@@ -523,7 +498,7 @@ _apply_filter(f: ptr, value: ptr, path: string, out: ptr, root: ptr) {
         while i < n {
             child = json.json_array_get_raw(value, i)
             if _eval_filter(f, child, root) == 1 {
-                _push_owned(out, child, normalize_index_segment(path, i))
+                _push(out, child, normalize_index_segment(path, i))
             }
             i = i + 1
         }
@@ -537,7 +512,7 @@ _apply_filter(f: ptr, value: ptr, path: string, out: ptr, root: ptr) {
             k = json.json_object_key_at(value, i)
             child = json.json_object_value_at(value, i)
             if _eval_filter(f, child, root) == 1 {
-                _push_owned(out, child, normalize_name_segment(path, k))
+                _push(out, child, normalize_name_segment(path, k))
             }
             i = i + 1
         }

@@ -1912,37 +1912,34 @@ See [examples/basics/contracts.ae](../examples/basics/contracts.ae) for runnable
 
 ---
 
-### String ownership for `-> string` functions
+### String ownership
 
-Strings are special-cased in the memory model: every reassignment to a string variable that previously held a heap-allocated value frees the old buffer through a compiler-emitted wrapper. **You do not write `defer string.free(s)` for in-Aether assignments**, the compiler tracks ownership transitions automatically per [docs/memory-management.md "String memory model"](memory-management.md#string-memory-model-heap-string-tracker).
+Every place that holds a string (a local, a struct field, an element, a module-level `var`, a closure's capture) owns one reference to it, and releases it when the place is given a new value or goes away (scope exit on every path, a struct destroyed). **You do not write `defer string.free(s)`.** The model is [docs/design/ownership-model.md](design/ownership-model.md).
 
-A user-defined function declared `-> string` is treated as **heap-returning** iff every return statement in its body yields a heap-string-expression (recursive structural escape analysis):
+- **A function returning a string hands its caller one reference, from every return.** A literal is handed over as it is (literals are static and never freed); a fresh string is moved; a string the function only borrows (a parameter, a field of one) is copied.
+- **A parameter is borrowed for the call.** The caller owns the string and frees it. A function that keeps a parameter (stores it in a field, a module-level `var`, a container) takes a reference of its own there.
+- **A function may not free a parameter** (E0901): `string.free(p)` or `release(p)` on a `string` parameter would release a reference the function does not own. Store it to keep it; a parameter the body re-binds holds a string of its own and may be freed.
+- **`string.free(x)` releases the reference `x` holds and leaves `x` empty**, for a local, a field or a module-level `var`. Nothing frees it again.
 
 ```aether,fragment
 my_concat(a: string, b: string) -> string {
-    return string.concat(a, b)        // heap-string-expr return → my_concat is heap-returning
+    return string.concat(a, b)         // a fresh string, moved to the caller
+}
+
+banner(name: string) -> string {
+    if string.length(name) == 0 {
+        return "guest"                  // a literal, handed over as it is
+    }
+    return string.concat("hi ", name)
 }
 
 s = ""
 i = 0
 while i < 1000000 {
-    s = my_concat(s, "x")              // O(1) memory, old s freed automatically
+    s = my_concat(s, "x")               // O(1) memory: the store releases the old s
     i = i + 1
 }
 ```
-
-A function returning a string literal, or whose returns mix heap and literal sources, is **not** recognised. The wrapper won't try to free its result. This is the conservative stance taken to avoid free-of-literal aborts:
-
-```aether,fragment
-banner(name: string) -> string {
-    if string.length(name) == 0 {
-        return "guest"                 // literal, banner is NOT heap-returning
-    }
-    return string.concat("hi ", name)  // heap, but the function as a whole isn't heap-returning
-}
-```
-
-If you want every return from your `-> string` function to be heap (so the wrapper reclaims it), box any literals: `return string.concat("", "guest")` makes the literal return a heap-string-expression and pushes the function into the heap-returning set.
 
 See [examples/basics/string-ownership.ae](../examples/basics/string-ownership.ae) for a runnable demonstration.
 
@@ -3758,6 +3755,7 @@ An error stops the build and prints its code, `error[E0301]: ...`, with the sour
 | `E0802` | A quote given to a function whose last parameter is not a `quote.Tree`, or a closure, `callback` or block given to one that is |
 | `E0803` | A quote writing a variable it captures, or taking its address |
 | `E0900` | A slice of a function's own storage (an array literal, an array of its own) leaves the function: returned, stored in a module-level `var` or in a field that outlives it, or captured by a closure that does ([Slices](#slices-t)) |
+| `E0901` | A function frees a `string` parameter it only borrows ([String ownership](#string-ownership)) |
 
 ## Compiler Warnings
 

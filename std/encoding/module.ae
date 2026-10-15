@@ -105,7 +105,7 @@ hex_decode(s: string) -> string! {
 extern cryptography_base64_encode_raw(data: ptr, length: int) -> string @heap
 extern cryptography_base64_encode_padded_raw(data: ptr, length: int) -> string @heap
 extern cryptography_base64_decode_raw(b64: string) -> int
-extern cryptography_get_base64_decode() -> string
+extern cryptography_get_base64_decode() -> ptr
 extern cryptography_get_base64_decode_length() -> int
 extern cryptography_release_base64_decode()
 extern string_new_with_length(data: string, length: int) -> ptr

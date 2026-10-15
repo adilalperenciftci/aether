@@ -55,14 +55,6 @@ text(value: string) -> string {
     return value
 }
 
-set_owned(previous: string, value: string) -> string {
-    fresh = string.copy(value)
-    if previous != null {
-        string.free(previous)
-    }
-    return fresh
-}
-
 // A field, returned as a copy of its own.
 name_of(p: ptr) -> string {
     return (p as *Thing).name
@@ -80,7 +72,7 @@ plain_name(p: ptr) -> string {
 
 set_name(p: ptr, value: string) {
     t = p as *Thing
-    t.name = set_owned(t.name, value)
+    t.name = string.copy(value)
 }
 
 new_thing(w: string) -> *Thing {

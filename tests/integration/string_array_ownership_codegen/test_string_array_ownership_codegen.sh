@@ -5,10 +5,11 @@
 # A local `string[N]` array that some store makes own a string releases its
 # elements at its scope exit; a table of literals must stay the plain C
 # array it was, with no release and no copy on a read (the first attempt at
-# #2618 ran such a lookup 2.1x slower). A call of C's malloc is a zeroing
-# allocation, whether its pointer is cast to a struct at once or bound to a
-# `ptr` first, so a field store can read the trackers of any box Aether
-# allocated (#2369).
+# #2618 ran such a lookup 2.1x slower). Returned, an element is taken as every
+# string return is (R3), and a literal is pinned: handed over as it is, no
+# copy. A call of C's malloc is a zeroing allocation, whether its pointer is
+# cast to a struct at once or bound to a `ptr` first, so a field store can
+# read the trackers of any box Aether allocated (#2369).
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
@@ -86,7 +87,7 @@ body "int boxes(" > "$tmp/boxes.c"
 [ -s "$tmp/table.c" ] && [ -s "$tmp/owning.c" ] && [ -s "$tmp/boxes.c" ] ||
     fail "generated functions not found"
 
-if grep -q "_aether_str_cell\|aether_uniform_heap_str" "$tmp/table.c"; then
+if grep -q "_aether_str_cell" "$tmp/table.c"; then
     sed 's/^/    /' "$tmp/table.c"
     fail "a table of literals pays for ownership"
 fi

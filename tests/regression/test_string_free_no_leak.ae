@@ -127,11 +127,12 @@ main() {
         n = n + 1
     }
 
-    // 7. A literal-holding variable was never heap-owned; freeing it must
-    //    not reach free() on static storage.
+    // 7. Freeing a variable that holds a literal must not reach free() on
+    //    static storage: another holder of the same literal still reads it.
     lit = "static text"
+    other = lit
     string.free(lit)
-    fails = fails + check(string.equals(lit, "static text"), "literal damaged")
+    fails = fails + check(string.equals(other, "static text"), "literal damaged")
 
     if fails != 0 {
         println("test_string_free_no_leak: ${fails} failure(s)")

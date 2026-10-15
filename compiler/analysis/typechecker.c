@@ -4537,6 +4537,7 @@ static void check_unreachable_code(ASTNode* body) {
 static void scoped_check_bindings(ASTNode* node, ASTNode* root);
 // #479: enforce Isolated[T] move-only linearity over a function body.
 static void iso_check_function(ASTNode* fn, ASTNode* body);
+static void check_borrowed_param_frees(ASTNode* program, ASTNode* fn, ASTNode* body);
 // #481: validate `@pure`/`@no_fs`/`@no_net`/`@no_os` effect tags.
 static void check_effect_tags(ASTNode* program);
 // #522: fold `__pure(fn)` queries to compile-time bool constants.
@@ -6056,6 +6057,7 @@ int typecheck_program(ASTNode* program) {
             check_unreachable_code(body);
             scoped_check_bindings(body, body);  // #521
             iso_check_function(child, body);    // #479 Isolated[T] move check
+            check_borrowed_param_frees(program, child, body);
         } else if (child->type == AST_MAIN_FUNCTION && child->child_count > 0) {
             // main() has a BLOCK child containing the actual statements
             ASTNode* main_body = child->children[0];
@@ -6768,6 +6770,65 @@ static void iso_check(ASTNode* node, IsoSet* moved, IsoSet* iso) {
 }
 
 /* Entry point: register Isolated-typed parameters, then walk the body. */
+/* #2924: a `string` parameter is borrowed for the call (R3), so freeing it
+ * releases a reference the function does not own. A parameter the body
+ * rebinds holds a string of its own from then on and may be freed. */
+static int binds_symbol(const char* annotation, const char* sym) {
+    size_t n = strlen(sym);
+    return annotation && !strncmp(annotation, "c_symbol:", 9) &&
+           !strncmp(annotation + 9, sym, n) &&
+           (annotation[9 + n] == '\0' || annotation[9 + n] == ';');
+}
+
+/* `release`, `string.free`, `string.release`, or an extern bound to the
+ * runtime's free under another name (`@extern("string_free") drop(s)`). */
+static int is_string_free_call(ASTNode* program, ASTNode* n) {
+    if (!n || n->type != AST_FUNCTION_CALL || !n->value || n->child_count != 1) return 0;
+    const char* f = n->value;
+    if (!strcmp(f, "release") || !strcmp(f, "string.free") || !strcmp(f, "string.release") ||
+        !strcmp(f, "string_free") || !strcmp(f, "string_release") ||
+        !strcmp(f, "string.string_free") || !strcmp(f, "string.string_release")) return 1;
+    for (int i = 0; program && i < program->child_count; i++) {
+        ASTNode* e = program->children[i];
+        if (e && e->type == AST_EXTERN_FUNCTION && e->value && !strcmp(e->value, f))
+            return binds_symbol(e->annotation, "string_free") ||
+                   binds_symbol(e->annotation, "string_release");
+    }
+    return 0;
+}
+
+static int body_rebinds(ASTNode* n, const char* name) {
+    if (!n) return 0;
+    if (n->type == AST_VARIABLE_DECLARATION && n->value && !strcmp(n->value, name)) return 1;
+    for (int i = 0; i < n->child_count; i++)
+        if (body_rebinds(n->children[i], name)) return 1;
+    return 0;
+}
+
+static void check_frees_of_param(ASTNode* program, ASTNode* n, const char* name) {
+    if (!n || n->type == AST_CLOSURE) return;
+    if (is_string_free_call(program, n) && n->children[0] && n->children[0]->type == AST_IDENTIFIER &&
+        n->children[0]->value && !strcmp(n->children[0]->value, name)) {
+        char msg[256];
+        snprintf(msg, sizeof(msg), "'%s' is a parameter: the function borrows it and may not free it", name);
+        type_error_code_hint(msg,
+            "the caller owns the string and frees it; to keep a string of your own, store it",
+            n->line, n->column, AETHER_ERR_FREES_BORROWED);
+        return;
+    }
+    for (int i = 0; i < n->child_count; i++) check_frees_of_param(program, n->children[i], name);
+}
+
+static void check_borrowed_param_frees(ASTNode* program, ASTNode* fn, ASTNode* body) {
+    for (int i = 0; fn && body && i < fn->child_count && fn->children[i] != body; i++) {
+        ASTNode* p = fn->children[i];
+        if (p && (p->type == AST_VARIABLE_DECLARATION || p->type == AST_PATTERN_VARIABLE) &&
+            p->value && p->node_type && p->node_type->kind == TYPE_STRING &&
+            !body_rebinds(body, p->value))
+            check_frees_of_param(program, body, p->value);
+    }
+}
+
 static void iso_check_function(ASTNode* fn, ASTNode* body) {
     if (!body) return;
     IsoSet moved; moved.count = 0;

@@ -15,17 +15,13 @@ struct Leaf { tag: string }
 struct Mid { leaf: *Leaf }
 struct Top { mid: *Mid }
 
-own(previous: string, value: string) -> string {
-    if previous != null { string.free(previous) }
-    return string.copy(value)
-}
-
+// A store releases the value the field held (R3).
 set_through_outer(o: *Outer, v: string) {
-    o.inner.name = own(o.inner.name, v)
+    o.inner.name = string.copy(v)
 }
 
 set_direct(i: *Inner, v: string) {
-    i.name = own(i.name, v)
+    i.name = string.copy(v)
 }
 
 main() {

@@ -880,7 +880,7 @@ extern http_request_body_read_raw(req: ptr, offset: int, max: int) -> int
 // iteration loop detect "done" without comparing offsets against
 // request_body_length.
 extern http_request_body_complete(req: ptr) -> int
-extern http_get_request_body_read() -> string
+extern http_get_request_body_read() -> ptr
 extern http_get_request_body_read_length() -> int
 extern http_release_request_body_read()
 extern string_new_with_length(data: string, length: int) -> ptr

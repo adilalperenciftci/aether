@@ -1,11 +1,11 @@
 // Regression (#2499 copy-on-keep): std.jsonpath releases everything a query
 // allocates, on success and on a syntax error.
 //
-// A named function that frees its `string` parameter takes the caller's
-// reference: jsonpath's `_free_cstr(s: string) { string.free(s) }` is how
-// the AST hands its names back. Copy-on-keep took a reference of its own
-// there, freed that copy, and left the AST's string to nobody: 96 bytes per
-// parse, which valgrind found through contrib.jq's jsonpath tests. And a
+// The AST frees its names where it owns them (`string.free(p.name)`); it
+// once did so through a helper that freed its `string` parameter, which
+// copy-on-keep turned into a free of a copy, leaving the AST's string to
+// nobody: 96 bytes per parse, which valgrind found through contrib.jq's
+// jsonpath tests (a function may not free what it borrows now, E0901). And a
 // diagnostic `_fail` stored in the parser context is now the context's own
 // copy, which a raw free of the context leaked on every failed parse. A
 // filter's operands are parsed speculatively, with the diagnostic saved in a

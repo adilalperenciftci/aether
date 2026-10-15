@@ -56,12 +56,12 @@ extern zlib_backend_available() -> int
 // which misreads a payload beginning with the header's magic bytes as a
 // header; a heap string passed to a `ptr` parameter would feed in its header.
 extern zlib_try_deflate(data: ptr, length: int, level: int) -> int
-extern zlib_get_deflate_bytes() -> string
+extern zlib_get_deflate_bytes() -> ptr
 extern zlib_get_deflate_length() -> int
 extern zlib_release_deflate()
 
 extern zlib_try_inflate(data: ptr, length: int) -> int
-extern zlib_get_inflate_bytes() -> string
+extern zlib_get_inflate_bytes() -> ptr
 extern zlib_get_inflate_length() -> int
 extern zlib_release_inflate()
 
@@ -78,7 +78,7 @@ extern zlib_try_stream_new(format: int, level: int) -> ptr
 extern zlib_try_stream_write(handle: ptr, data: ptr, length: int) -> int
 extern zlib_try_stream_flush(handle: ptr) -> int
 extern zlib_try_stream_finish(handle: ptr) -> int
-extern zlib_get_stream_bytes(handle: ptr) -> string
+extern zlib_get_stream_bytes(handle: ptr) -> ptr
 extern zlib_get_stream_length(handle: ptr) -> int
 extern zlib_release_stream(handle: ptr)
 

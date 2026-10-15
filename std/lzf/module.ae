@@ -25,12 +25,12 @@ extern lzf_max_compressed_size(length: int) -> int
 // which misreads a payload beginning with the header's magic bytes as a
 // header; a heap string passed to a `ptr` parameter would feed in its header.
 extern lzf_try_compress(data: ptr, length: int) -> int
-extern lzf_get_compress_bytes() -> string
+extern lzf_get_compress_bytes() -> ptr
 extern lzf_get_compress_length() -> int
 extern lzf_release_compress()
 
 extern lzf_try_decompress(data: ptr, length: int, output_length: int) -> int
-extern lzf_get_decompress_bytes() -> string
+extern lzf_get_decompress_bytes() -> ptr
 extern lzf_get_decompress_length() -> int
 extern lzf_release_decompress()
 

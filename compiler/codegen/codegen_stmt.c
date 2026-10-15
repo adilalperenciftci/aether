@@ -1094,8 +1094,8 @@ static int is_env_capture_name(CodeGenerator* gen, const char* name) {
     return 0;
 }
 
-/* Emit `e` as the value an owning slot takes, setting the C int `own` to 1
- * when the slot receives a buffer it must free and to 0 when it borrows.
+/* Emit `e` as the value an owning slot takes (R2: moved when fresh or the
+ * last use of an owning local, otherwise taken), setting the C int `own`.
  * `target` is the slot's own name when it is a local, so `w = if c { w }
  * else { ... }` keeps w's buffer rather than freeing what it still holds. */
 void emit_string_take(CodeGenerator* gen, ASTNode* e, const char* own,
@@ -1132,9 +1132,9 @@ void emit_string_take(CodeGenerator* gen, ASTNode* e, const char* own,
         /* #2548: a call that only hands a heap-tracked local back yields
          * the local's buffer, or on another path something the local does
          * not own (`temp_prefix` returns "ae" for an empty prefix). The
-         * slot takes the local as an alias of it would when the pointer is
-         * the local's, and borrows anything else. Before, the alias
-         * borrowed, the local was marked escaped, and the buffer leaked. */
+         * slot takes the local's buffer as an alias of it would (moved, or
+         * copied when the local is read again) and anything else as any
+         * borrowed string (R2). */
         const char* v = hb->value;
         int self = target && strcmp(v, target) == 0;
         TempSeq s;
@@ -1144,17 +1144,18 @@ void emit_string_take(CodeGenerator* gen, ASTNode* e, const char* own,
         generate_expression(gen, e);
         fprintf(gen->output, ")");
         seq_next(gen, &s);
-        fprintf(gen->output, "%s = %s == (const char*)(", own, hv);
-        generate_expression(gen, hb);
-        fprintf(gen->output, ") && _heap_%s", v);
-        seq_next(gen, &s);
         if (!self && alias_source_must_copy(gen, v)) {
-            fprintf(gen->output, "%s ? aether_uniform_heap_str(%s, 0) : %s", own, hv, hv);
+            fprintf(gen->output, "%s = aether_uniform_heap_str(%s, 0)", hv, hv);
         } else {
-            fprintf(gen->output, "%s ? (_heap_%s = 0) : 0", own, v);
-            seq_next(gen, &s);
-            fprintf(gen->output, "%s", hv);
+            fprintf(gen->output, "%s == (const char*)(", hv);
+            generate_expression(gen, hb);
+            fprintf(gen->output, ") && _heap_%s ? (_heap_%s = 0) : (%s = aether_uniform_heap_str(%s, 0), 0)",
+                    v, v, hv, hv);
         }
+        seq_next(gen, &s);
+        fprintf(gen->output, "%s = 1", own);
+        seq_next(gen, &s);
+        fprintf(gen->output, "%s", hv);
         seq_close(gen, &s);
         return;
     }
@@ -1162,26 +1163,33 @@ void emit_string_take(CodeGenerator* gen, ASTNode* e, const char* own,
         const char* v = e->value;
         int self = target && strcmp(v, target) == 0;
         if (!self && alias_source_must_copy(gen, v)) {
-            /* The source is read again: copy what it owns, borrow what it
-             * borrows (the same live-source guard as a bare alias). */
-            fprintf(gen->output, "(%s = _heap_%s, %s ? aether_uniform_heap_str((const char*)(",
-                    own, v, own);
+            /* The source is read again: the slot takes a string of its
+             * own (R2), a pinned literal as it is. */
+            fprintf(gen->output, "(%s = 1, aether_uniform_heap_str((const char*)(", own);
             generate_expression(gen, e);
-            fprintf(gen->output, "), 0) : (const char*)(");
-            generate_expression(gen, e);
-            fprintf(gen->output, "))");
+            fprintf(gen->output, "), 0))");
         } else {
-            /* Last use (or the slot itself): move the ownership. */
-            fprintf(gen->output, "(%s = _heap_%s, _heap_%s = 0, (const char*)(", own, v, v);
+            /* Last use (or the slot itself): move the ownership; a source
+             * holding a string it does not own gives the slot a copy. */
+            fprintf(gen->output, "(%s = 1, _heap_%s ? (_heap_%s = 0, (const char*)(", own, v, v);
             generate_expression(gen, e);
-            fprintf(gen->output, "))");
+            fprintf(gen->output, ")) : aether_uniform_heap_str((const char*)(");
+            generate_expression(gen, e);
+            fprintf(gen->output, "), 0))");
         }
         return;
     }
-    fprintf(gen->output, "(%s = %d, (const char*)(", own,
-            is_heap_string_expr(gen, e) ? 1 : 0);
-    generate_expression(gen, e);
-    fprintf(gen->output, "))");
+    /* R2: the slot owns what it holds: a fresh string is moved in, any other
+     * taken (a pinned literal as it is, anything else copied). */
+    if (is_heap_string_expr(gen, e)) {
+        fprintf(gen->output, "(%s = 1, (const char*)(", own);
+        generate_expression(gen, e);
+        fprintf(gen->output, "))");
+    } else {
+        fprintf(gen->output, "(%s = 1, aether_uniform_heap_str((const char*)(", own);
+        generate_expression(gen, e);
+        fprintf(gen->output, "), 0))");
+    }
 }
 
 /* Emit `e` taken as a value the receiver always owns: the take, then a copy
@@ -5367,6 +5375,9 @@ int function_def_returns_heap_at(CodeGenerator* gen, ASTNode* fn_def,
         position >= fn_def->node_type->tuple_count) {
         return 0;
     }
+    /* R3: a `string` position is handed over from every return. */
+    Type* pos_t = fn_def->node_type->tuple_types ? fn_def->node_type->tuple_types[position] : NULL;
+    if (pos_t && pos_t->kind == TYPE_STRING) return 1;
     /* Memo hit on a pre-parsed positions string. */
     int cached = parse_heap_positions_annotation(fn_def->annotation, position);
     if (cached >= 0) {
@@ -12962,31 +12973,47 @@ static void emit_tuple_call_discard(CodeGenerator* gen, ASTNode* call) {
     fprintf(gen->output, " }");
 }
 
-/* #2751: `return g(...)` passing a whole tuple on, from a function or
- * closure whose `string?` positions are owned: a position `g` did not hand
- * over owned (g is a C function, a closure the compiler cannot name, a
- * tuple local holding anything else) is copied, so the caller never frees a
- * borrowed string. A tuple local that only holds what such calls handed
- * over owns it and hands it on as it is: copied, the strings it held were
- * left to nobody. */
+/* Does the whole tuple `v`, returned as it is, own its string at `j`? */
+static int tuple_value_owns_string_at(CodeGenerator* gen, ASTNode* v, int j) {
+    if (v->type == AST_FUNCTION_CALL) return tuple_pos_own(gen, v, tuple_call_def(gen, v), j).is_heap;
+    return tuple_local_owns_opt_strings(gen, v);
+}
+
+/* #2751, R3: `return g(...)` passing a whole tuple on hands over every
+ * `string` and `string?` position, as each return does: a position `g` did
+ * not hand over owned (g is a C function, a closure the compiler cannot
+ * name, a tuple local holding anything else) is copied, so the caller never
+ * frees a borrowed string. A tuple local that only holds what such calls
+ * handed over owns it and hands it on as it is: copied, the strings it held
+ * were left to nobody. */
+static int passthrough_copies_at(CodeGenerator* gen, ASTNode* v, int opt_owned, int j) {
+    Type* t = gen->current_func_return_type->tuple_types[j];
+    if (is_opt_string_type(t)) return !opt_owned;
+    return t && t->kind == TYPE_STRING && !tuple_value_owns_string_at(gen, v, j);
+}
+
 static int emit_tuple_passthrough_return(CodeGenerator* gen, ASTNode* v) {
     Type* rt = gen->current_func_return_type;
-    if (!rt || rt->kind != TYPE_TUPLE || !emitting_owned_opt_string_tuple(gen) ||
-        !v || !v->node_type || v->node_type->kind != TYPE_TUPLE ||
-        tuple_call_owns_opt_strings(gen, v) || tuple_local_owns_opt_strings(gen, v)) return 0;
+    if (!rt || rt->kind != TYPE_TUPLE || gen->in_main_function || !gen->current_function ||
+        !v || !v->node_type || v->node_type->kind != TYPE_TUPLE) return 0;
+    int opt_owned = !emitting_owned_opt_string_tuple(gen) ||
+                    tuple_call_owns_opt_strings(gen, v) || tuple_local_owns_opt_strings(gen, v);
     int any = 0;
-    for (int j = 0; j < rt->tuple_count; j++)
-        if (is_opt_string_type(rt->tuple_types[j])) any = 1;
+    for (int j = 0; j < rt->tuple_count && !any; j++)
+        any = passthrough_copies_at(gen, v, opt_owned, j);
     if (!any) return 0;
     TempSeq s;
     seq_open(gen, &s);
     const char* tp = seq_let(gen, &s, get_c_type(rt), "_ae_tp");
     generate_expression(gen, v);
     for (int j = 0; j < rt->tuple_count; j++) {
-        if (!is_opt_string_type(rt->tuple_types[j])) continue;
+        if (!passthrough_copies_at(gen, v, opt_owned, j)) continue;
         seq_next(gen, &s);
-        fprintf(gen->output, "%s._%d.has ? (void)(%s._%d.val = aether_uniform_heap_str(%s._%d.val, 0)) : (void)0",
-                tp, j, tp, j, tp, j);
+        if (is_opt_string_type(rt->tuple_types[j]))
+            fprintf(gen->output, "%s._%d.has ? (void)(%s._%d.val = aether_uniform_heap_str(%s._%d.val, 0)) : (void)0",
+                    tp, j, tp, j, tp, j);
+        else
+            fprintf(gen->output, "%s._%d = aether_uniform_heap_str(%s._%d, 0)", tp, j, tp, j);
     }
     seq_next(gen, &s);
     fprintf(gen->output, "%s", tp);
@@ -14245,15 +14272,20 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                             fprintf(gen->output, "%s = _tup%d._%d; _heap_%s = %d;\n",
                                     var->value, tmp_id, j, var->value, new_heap);
                         } else {
+                            /* R2: a string position is the slot's own, taken
+                             * when the call did not hand it over. */
+                            const char* taken = pos_is_string && !pos_is_heap
+                                ? cg_internf("aether_uniform_heap_str(_tup%d._%d, 0)", tmp_id, j)
+                                : cg_internf("_tup%d._%d", tmp_id, j);
                             fprintf(gen->output,
                                 "{ const char* _tmp_old = %s; "
-                                "%s = _tup%d._%d; "
+                                "%s = %s; "
                                 "if (_heap_%s) aether_heap_str_free(_tmp_old); "
                                 "_heap_%s = %d;",
                                 var->value,
-                                var->value, tmp_id, j,
+                                var->value, taken,
                                 var->value,
-                                var->value, new_heap);
+                                var->value, pos_is_string);
                             emit_unwind_track_local(gen, var->value);
                             fprintf(gen->output, " }\n");
                         }
@@ -14264,14 +14296,16 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                     mark_var_declared(gen, var->value);
                     fprintf(gen->output, "%s %s = %s;\n", var_type, var->value, slot_value);
                     if (pos_closure) claim_closure_local_env(gen, var->value, var, 1);   /* #2756 */
-                    /* If the LHS is a hoisted heap-string tracker
-                     * (rare for first-decl since the hoist also
-                     * marks the var declared, but kept defensively
-                     * for the lazy-promote case) and the source
-                     * position is heap, set the tracker. */
-                    if (pos_is_string && var->value &&
-                        is_heap_string_var(gen, var->value) && pos_is_heap) {
+                    /* A hoisted heap-string tracker (rare for first-decl
+                     * since the hoist also marks the var declared): the
+                     * local owns the position, taken when the call did not
+                     * hand it over (R2). */
+                    if (pos_is_string && var->value && is_heap_string_var(gen, var->value) &&
+                        !is_escaped_string_var(gen, var->value)) {
                         print_indent(gen);
+                        if (!pos_is_heap)
+                            fprintf(gen->output, "%s = aether_uniform_heap_str(%s, 0); ",
+                                    var->value, var->value);
                         fprintf(gen->output, "_heap_%s = 1;", var->value);
                         emit_unwind_track_local(gen, var->value);
                         fprintf(gen->output, "\n");
@@ -15146,13 +15180,8 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                         fprintf(gen->output, " _seqheap_%s = %d; }\n",
                                 stmt->value,
                                 (srhs_owning || srhs_alias) ? 1 : 0);
-                    } else if (var_is_string && stmt->child_count > 0 &&
-                               local_take_is_view(gen, stmt->children[0])) {
-                        /* #2461: a field read or an `if` over owned values
-                         * is taken (copied / moved / adopted per arm), not
-                         * borrowed from a buffer its owner may free. */
-                        emit_string_take_rebind(gen, stmt->value, stmt->children[0]);
-                    } else if (var_is_string && stmt->child_count > 0 && var_escaped) {
+                    } else if (var_is_string && stmt->child_count > 0 && var_escaped &&
+                               !local_take_is_view(gen, stmt->children[0])) {
                         /* Escaped-LHS bare assignment. Wrapper-free is
                          * suppressed because the var's old value is
                          * potentially stored by a recipient (list_add,
@@ -15244,82 +15273,7 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                                     stmt->value, rhs_is_heap ? 1 : 0);
                         }
                     } else if (var_is_string && stmt->child_count > 0) {
-                        // Defensive: if the hoist somehow missed this
-                        // name (e.g. promoted via a path the pre-pass
-                        // doesn't walk), declare the tracker now.
-                        // Should be unreachable post-#405; kept as
-                        // belt-and-braces.
-                        if (!is_heap_string_var(gen, stmt->value)) {
-                            fprintf(gen->output, "%s _heap_%s = 0; (void)_heap_%s; ",
-                                    try_tracker_type(gen, stmt->value), stmt->value,
-                                    stmt->value);
-                            mark_heap_string_var(gen, stmt->value);
-                        }
-                        /* Identifier-alias ownership transfer. When
-                         * the RHS is a bare identifier referring to a
-                         * heap-tracked local, this assignment aliases
-                         * the source's buffer. The classifier returns
-                         * `_heap_lhs = 0` for this shape because
-                         * is_heap_string_expr only recognises function
-                         * calls and string interpolation — it can't
-                         * tell whether a bare identifier currently
-                         * holds a heap value. Pre-fix consequence: the
-                         * alias dropped its tracker, the source kept
-                         * its tracker, and the source's next
-                         * reassignment-wrapper freed the buffer the
-                         * alias still pointed at (silent UAF).
-                         *
-                         * Fix: move the heap flag from source to dest.
-                         * The flag IS the ownership token — there is
-                         * only one buffer; only one slot should hold
-                         * the freeing duty. After transfer, the alias
-                         * is responsible for the buffer's lifetime and
-                         * the source's later reassignment frees nothing
-                         * because its flag is now 0.
-                         *
-                         * Self-assignment guard: `a = a` would free
-                         * its own buffer and then keep the flag set —
-                         * a pre-existing bug the fix doesn't make
-                         * worse; we just don't go through the transfer
-                         * path so it falls back to the same buggy
-                         * shape as before. (Real-world code doesn't
-                         * write `a = a`; a separate audit would close
-                         * that as a no-op skip.) */
-                        ASTNode* rhs = stmt->children[0];
-                        int rhs_is_alias_to_heap_var =
-                            (rhs && rhs->type == AST_IDENTIFIER && rhs->value &&
-                             is_heap_string_var(gen, rhs->value) &&
-                             strcmp(rhs->value, stmt->value) != 0);
-                        /* Live-source guard (180-regression.md): if the
-                         * aliased source is read again later, take a
-                         * defensive copy instead of moving its buffer —
-                         * otherwise this slot's next free dangles the
-                         * source. */
-                        int rhs_alias_copy = (rhs_is_alias_to_heap_var &&
-                                              alias_source_must_copy(gen, rhs->value));
-                        fprintf(gen->output, "{ const char* _tmp_old = %s; ", stmt->value);
-                        fprintf(gen->output, "%s = ", stmt->value);
-                        if (rhs_alias_copy) {
-                            fprintf(gen->output, "aether_uniform_heap_str(");
-                            generate_expression(gen, stmt->children[0]);
-                            fprintf(gen->output, ", 0)");
-                        } else {
-                            generate_expression(gen, stmt->children[0]);
-                        }
-                        fprintf(gen->output, "; if (_heap_%s) aether_heap_str_free(_tmp_old);",
-                                stmt->value);
-                        if (rhs_alias_copy) {
-                            fprintf(gen->output, " _heap_%s = 1;", stmt->value);
-                        } else if (rhs_is_alias_to_heap_var) {
-                            fprintf(gen->output,
-                                    " _heap_%s = _heap_%s; _heap_%s = 0;",
-                                    stmt->value, rhs->value, rhs->value);
-                        } else {
-                            fprintf(gen->output, " _heap_%s = %d;",
-                                    stmt->value, rhs_is_heap ? 1 : 0);
-                        }
-                        emit_unwind_track_local(gen, stmt->value);
-                        fprintf(gen->output, " }\n");
+                        emit_string_take_rebind(gen, stmt->value, stmt->children[0]);
                     } else if (rhs_is_heap && var_escaped) {
                         /* Non-string-typed escaped var reassigned to
                          * a heap string. Same gate — skip the free. */
@@ -15853,34 +15807,29 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                              * keeps its flag untouched. */
                             int alias_copied = (init_is_alias_to_heap_var &&
                                                 alias_source_must_copy(gen, alias_init->value));
-                            if (is_heap_string_var(gen, stmt->value)) {
-                                if (alias_copied) {
-                                    fprintf(gen->output, "_heap_%s = 1;", stmt->value);
-                                } else if (init_is_alias_to_heap_var) {
-                                    fprintf(gen->output,
-                                            "_heap_%s = _heap_%s; _heap_%s = 0;",
-                                            stmt->value, alias_init->value, alias_init->value);
-                                } else {
-                                    fprintf(gen->output, "_heap_%s = %d;",
-                                            stmt->value, init_heap ? 1 : 0);
-                                }
-                            } else {
-                                const char* tt = try_tracker_type(gen, stmt->value);   /* #2690 */
-                                if (alias_copied) {
-                                    fprintf(gen->output,
-                                            "%s _heap_%s = 1; (void)_heap_%s;",
-                                            tt, stmt->value, stmt->value);
-                                } else if (init_is_alias_to_heap_var) {
-                                    fprintf(gen->output,
-                                            "%s _heap_%s = _heap_%s; (void)_heap_%s; _heap_%s = 0;",
-                                            tt, stmt->value, alias_init->value,
-                                            stmt->value, alias_init->value);
-                                } else {
-                                    fprintf(gen->output, "%s _heap_%s = %d; (void)_heap_%s;",
-                                            tt, stmt->value, init_heap ? 1 : 0, stmt->value);
-                                }
-                                mark_heap_string_var(gen, stmt->value);
+                            const char* name = stmt->value;
+                            int hoisted = is_heap_string_var(gen, name);
+                            if (!hoisted)
+                                fprintf(gen->output, "%s _heap_%s = 0; (void)_heap_%s; ",
+                                        try_tracker_type(gen, name), name, name);   /* #2690 */
+                            if (alias_copied) {
+                                fprintf(gen->output, "_heap_%s = 1;", name);
+                            } else if (init_is_alias_to_heap_var) {
+                                /* R2: moved from an owning source, else taken. */
+                                const char* src = alias_init->value;
+                                fprintf(gen->output,
+                                        "if (_heap_%s) _heap_%s = 0; else %s = aether_uniform_heap_str(%s, 0); "
+                                        "_heap_%s = 1;",
+                                        src, src, name, name, name);
+                            } else if (init_heap) {
+                                fprintf(gen->output, "_heap_%s = 1;", name);
+                            } else if (stmt->child_count > 0 && !is_escaped_string_var(gen, name)) {
+                                /* R2: the local owns what it holds; a borrowed
+                                 * initializer is taken. */
+                                fprintf(gen->output, "%s = aether_uniform_heap_str(%s, 0); _heap_%s = 1;",
+                                        name, name, name);
                             }
+                            if (!hoisted) mark_heap_string_var(gen, name);
                             emit_unwind_track_local(gen, stmt->value);
                             fprintf(gen->output, "\n");
                         }

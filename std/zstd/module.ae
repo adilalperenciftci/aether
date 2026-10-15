@@ -42,12 +42,12 @@ extern zstd_try_stream_new(level: int) -> ptr
 extern zstd_try_stream_write(handle: ptr, data: ptr, length: int) -> int
 extern zstd_try_stream_flush(handle: ptr) -> int
 extern zstd_try_stream_finish(handle: ptr) -> int
-extern zstd_get_stream_bytes(handle: ptr) -> string
+extern zstd_get_stream_bytes(handle: ptr) -> ptr
 extern zstd_get_stream_length(handle: ptr) -> int
 extern zstd_release_stream(handle: ptr)
 
 extern zstd_try_compress(data: ptr, length: int, level: int) -> int
-extern zstd_get_compress_bytes() -> string
+extern zstd_get_compress_bytes() -> ptr
 extern zstd_get_compress_length() -> int
 extern zstd_release_compress()
 

@@ -22,15 +22,6 @@ import std.strbuilder
 import std.list
 import model
 
-// Parser strings come from strbuilder.finish, a length-carrying string whose
-// header and bytes are one block; string_free releases the block whole. See
-// model.ae for why a raw free of the bytes is wrong.
-@extern("string_free") _release_parser_error_string(s: string)
-
-_free_pstr(s: string) {
-    _release_parser_error_string(s)
-}
-
 exports(
     parse, free_query
 )
@@ -355,7 +346,7 @@ _parse_descendant_inner(p: *Parser) -> ptr {
     }
     name = _parse_member_name(p)
     if p.failed == 1 {
-        _release_parser_error_string(name)
+        string.free(name)
         return seg
     }
     sel = model.new_selector(model.SEL_NAME)
@@ -376,7 +367,7 @@ _parse_child_dot(p: *Parser) -> ptr {
     }
     name = _parse_member_name(p)
     if p.failed == 1 {
-        _release_parser_error_string(name)
+        string.free(name)
         return seg
     }
     sel = model.new_selector(model.SEL_NAME)
@@ -462,7 +453,7 @@ _parse_selector(p: *Parser) -> ptr {
 _parse_quoted_name_selector(p: *Parser) -> ptr {
     s = _parse_string(p)
     if p.failed == 1 {
-        _release_parser_error_string(s)
+        string.free(s)
         return null
     }
     sel = model.new_selector(model.SEL_NAME)
@@ -1231,7 +1222,7 @@ _try_literal(p: *Parser) -> ptr {
 _literal_string(p: *Parser) -> ptr {
     s = _parse_string(p)
     if p.failed == 1 {
-        _release_parser_error_string(s)
+        string.free(s)
         return null
     }
     l = model.new_literal(model.L_STRING)
@@ -1380,7 +1371,7 @@ _parse_singular_query(p: *Parser) -> ptr {
                 p.pos = p.pos + 1
                 name = _parse_member_name(p)
                 if p.failed == 1 {
-                    _release_parser_error_string(name)
+                    string.free(name)
                     return sq
                 }
                 seg = model.new_singular_seg()
@@ -1420,12 +1411,12 @@ _parse_bracketed_singular_seg(p: *Parser) -> ptr {
 _singular_name_seg(p: *Parser) -> ptr {
     name = _parse_string(p)
     if p.failed == 1 {
-        _release_parser_error_string(name)
+        string.free(name)
         return null
     }
     _skip_ws(p)
     if _expect(p, 93, "Expected ']'") == 0 {
-        _free_pstr(name)
+        string.free(name)
         return null
     }
     seg = model.new_singular_seg()
