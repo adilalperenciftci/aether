@@ -1,0 +1,20 @@
+// Ownership micro-benchmark (#2925): a string sequence built by cons in a loop (atomic cell counts).
+// The budget compares a build with the base of the change, the two binaries
+// run interleaved, the median of 11 runs each, on an otherwise idle machine.
+
+import std.string
+main() {
+    total = 0
+    k = 0
+    while k < 500000 {
+        s = string.seq_empty()
+        i = 0
+        while i < 20 {
+            s = string.seq_cons("x", s)
+            i = i + 1
+        }
+        total = total + string.seq_length(s)
+        k = k + 1
+    }
+    println(total)
+}

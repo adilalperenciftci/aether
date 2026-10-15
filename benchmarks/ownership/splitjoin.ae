@@ -1,0 +1,16 @@
+// Ownership micro-benchmark (#2925): split_to_seq then join.
+// The budget compares a build with the base of the change, the two binaries
+// run interleaved, the median of 11 runs each, on an otherwise idle machine.
+
+import std.string
+main() {
+    total = 0
+    i = 0
+    while i < 300000 {
+        parts = string.split_to_seq("a,b,c,d,e,f,g,h", ",")
+        j = string.join(parts, "-")
+        total = total + string.length(j)
+        i = i + 1
+    }
+    println(total)
+}

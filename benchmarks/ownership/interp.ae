@@ -1,0 +1,16 @@
+// Ownership micro-benchmark (#2925): interpolation bound to a local.
+// The budget compares a build with the base of the change, the two binaries
+// run interleaved, the median of 11 runs each, on an otherwise idle machine.
+
+import std.string
+main() {
+    total = 0
+    i = 0
+    name = "w"
+    while i < 3000000 {
+        t = "${name}-${i}"
+        total = total + string.length(t)
+        i = i + 1
+    }
+    println(total)
+}

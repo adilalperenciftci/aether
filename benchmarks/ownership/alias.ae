@@ -1,0 +1,18 @@
+// Ownership micro-benchmark (#2925): a string local copied to other locals (a retain and a release per store).
+// The budget compares a build with the base of the change, the two binaries
+// run interleaved, the median of 11 runs each, on an otherwise idle machine.
+
+import std.string
+main() {
+    a = string.concat("alpha", "beta")
+    total = 0
+    i = 0
+    while i < 10000000 {
+        b = a
+        c = b
+        if i % 3 == 0 { c = a }
+        total = total + string.length(c)
+        i = i + 1
+    }
+    println(total)
+}
