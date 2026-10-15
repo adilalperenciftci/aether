@@ -5933,6 +5933,13 @@ void emit_string_as_c_chars(CodeGenerator* gen, ASTNode* e) {
     fprintf(gen->output, ")");
 }
 
+/* An argument of a builtin the runtime implements in C: a string as its
+ * characters (R4), anything else as it is. */
+static void emit_c_builtin_arg(CodeGenerator* gen, ASTNode* e) {
+    if (e && e->node_type && e->node_type->kind == TYPE_STRING) emit_string_as_c_chars(gen, e);
+    else generate_expression(gen, e);
+}
+
 void emit_print_literal_format(CodeGenerator* gen, const ASTNode* lit) {
     /* A print with only a literal format has no conversions (the type
      * checker refuses one without an argument), so its text is known here:
@@ -8779,7 +8786,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                     fprintf(gen->output, "aether_is_type(");
                     for (int i = 0; i < expr->child_count; i++) {
                         if (i > 0) fprintf(gen->output, ", ");
-                        generate_expression(gen, expr->children[i]);
+                        emit_c_builtin_arg(gen, expr->children[i]);
                     }
                     fprintf(gen->output, ")");
                 }
@@ -8787,7 +8794,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                     fprintf(gen->output, "aether_convert_type(");
                     for (int i = 0; i < expr->child_count; i++) {
                         if (i > 0) fprintf(gen->output, ", ");
-                        generate_expression(gen, expr->children[i]);
+                        emit_c_builtin_arg(gen, expr->children[i]);
                     }
                     fprintf(gen->output, ")");
                 }
@@ -9527,10 +9534,10 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                     fprintf(gen->output, "aether_spawn_sandboxed(");
                     generate_expression(gen, expr->children[0]);
                     fprintf(gen->output, ", ");
-                    generate_expression(gen, expr->children[1]);
+                    emit_c_builtin_arg(gen, expr->children[1]);
                     if (expr->child_count >= 3) {
                         fprintf(gen->output, ", ");
-                        generate_expression(gen, expr->children[2]);
+                        emit_c_builtin_arg(gen, expr->children[2]);
                     } else {
                         fprintf(gen->output, ", NULL");
                     }
