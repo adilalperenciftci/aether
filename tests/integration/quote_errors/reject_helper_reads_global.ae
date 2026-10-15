@@ -1,0 +1,12 @@
+// A @quotable function reading a program variable: E0805 (docs/quote.md).
+import std.quote
+
+var gain = 2.0
+take(t: quote.Tree) {}
+@quotable
+scale(x: float) -> float {
+    return x * gain
+}
+main() {
+    take() quote | r: float | { return scale(r) }
+}

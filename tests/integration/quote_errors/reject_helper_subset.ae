@@ -1,0 +1,12 @@
+// A construct the tree has no node for, in a @quotable function: E0800 (docs/quote.md).
+import std.quote
+
+take(t: quote.Tree) {}
+@quotable
+noisy(x: float) -> float {
+    defer println("done")
+    return x
+}
+main() {
+    take() quote | r: float | { return noisy(r) }
+}

@@ -1,0 +1,12 @@
+// A @quotable function calling itself: E0804 (docs/quote.md).
+import std.quote
+
+take(t: quote.Tree) {}
+@quotable
+fact(n: int) -> int {
+    if n < 2 { return 1 }
+    return n * fact(n - 1)
+}
+main() {
+    take() quote | k: int | { return fact(k) }
+}

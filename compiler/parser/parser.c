@@ -7244,6 +7244,26 @@ ASTNode* parse_top_level_decl(Parser* parser) {
                     node = fdef;
                     break;
                 }
+                // `@quotable` (docs/quote.md, version 2): an ordinary function
+                // a quote may call. Its body is also lowered to a tree, which
+                // travels with each quote that reaches it, so a back end can
+                // write it out as a function of its own (a GLSL function).
+                if (attr && attr->type == TOKEN_IDENTIFIER && attr->value &&
+                    strcmp(attr->value, "quotable") == 0) {
+                    advance_token(parser);  // consume 'quotable'
+                    if (peek_token(parser) && peek_token(parser)->type == TOKEN_FUNC)
+                        advance_token(parser);  // optional 'func'
+                    ASTNode* fdef = parse_function_definition(parser);
+                    if (fdef) {
+                        if (fdef->annotation) {
+                            parser_error(parser, "@quotable cannot combine with another annotation (a variadic `...`, @c_callback or an effect tag) on the same function");
+                            return NULL;
+                        }
+                        fdef->annotation = strdup("quotable");
+                    }
+                    node = fdef;
+                    break;
+                }
                 // #481 effect tags: `@pure` / `@no_fs` / `@no_net` / `@no_os`
                 // declare that the function (transitively) must not touch the
                 // named capability. Stackable (`@no_fs @no_net f() {}`);
@@ -7297,7 +7317,7 @@ ASTNode* parse_top_level_decl(Parser* parser) {
                     break;
                 }
                 if (!attr || attr->type != TOKEN_EXTERN) {
-                    parser_error(parser, "unknown attribute (expected @extern(\"...\"), @c_callback, @derive, or an effect tag @pure/@no_fs/@no_net/@no_os)");
+                    parser_error(parser, "unknown attribute (expected @extern(\"...\"), @c_callback, @derive, @quotable, or an effect tag @pure/@no_fs/@no_net/@no_os)");
                     advance_token(parser);
                     return NULL;
                 }

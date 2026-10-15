@@ -16,6 +16,9 @@
 #include <string.h>
 
 static QuoteInfo** g_quotes = NULL;
+static QHelper** g_helpers = NULL;
+static int g_helper_count = 0;
+static int g_helper_cap = 0;
 static int g_quote_count = 0;
 static int g_quote_cap = 0;
 
@@ -44,11 +47,23 @@ void quote_reset(void) {
         free(q->param_names);
         free(q->param_types);
         free(q->caps);
+        free(q->helpers);
         free(q);
     }
     free(g_quotes);
     g_quotes = NULL;
     g_quote_count = g_quote_cap = 0;
+    for (int i = 0; i < g_helper_count; i++) {
+        QHelper* h = g_helpers[i];
+        free_qnode(h->body);
+        free(h->param_names);
+        free(h->param_types);
+        free(h->callees);
+        free(h);
+    }
+    free(g_helpers);
+    g_helpers = NULL;
+    g_helper_count = g_helper_cap = 0;
 }
 
 /* ---- types ---- */
@@ -102,7 +117,60 @@ typedef struct {
     QCapture* caps;
     int ncaps;
     int capcaps;
+    /* Lowering a @quotable function rather than a quote: its definition. */
+    QHelper* helper;
+    /* The @quotable functions the body calls. */
+    QHelper** called;
+    int ncalled;
+    int capcalled;
 } Lower;
+
+/* ---- @quotable functions (version 2) ---- */
+
+
+void quote_register_helper(ASTNode* def) {
+    if (!def || !def->value) return;
+    for (int i = 0; i < g_helper_count; i++)
+        if (g_helpers[i]->def == def) return;
+    QHelper* h = (QHelper*)calloc(1, sizeof(QHelper));
+    if (!h) { fprintf(stderr, "aetherc: out of memory registering a @quotable function\n"); exit(1); }
+    h->def = def;
+    h->name = aether_intern(def->value);
+    if (g_helper_count == g_helper_cap) {
+        g_helper_cap = g_helper_cap ? g_helper_cap * 2 : 8;
+        g_helpers = (QHelper**)aether_xrealloc(g_helpers, (size_t)g_helper_cap * sizeof(QHelper*));
+    }
+    g_helpers[g_helper_count++] = h;
+}
+
+int quote_helper_count(void) { return g_helper_count; }
+QHelper* quote_helper_at(int index) {
+    return (index >= 0 && index < g_helper_count) ? g_helpers[index] : NULL;
+}
+
+/* The @quotable function a call names, or NULL. A call in a merged module
+ * names it as the module's code does (`fxaa_luma`), a qualified one as
+ * written (`shaderlib.luma`, which is `shaderlib_luma` merged). */
+static QHelper* helper_named(const char* name) {
+    if (!name || !*name) return NULL;
+    char flat[256];
+    snprintf(flat, sizeof flat, "%s", name);
+    for (char* c = flat; *c; c++) if (*c == '.') *c = '_';
+    for (int i = 0; i < g_helper_count; i++) {
+        if (strcmp(g_helpers[i]->name, name) == 0 || strcmp(g_helpers[i]->name, flat) == 0)
+            return g_helpers[i];
+    }
+    return NULL;
+}
+
+static void note_call(Lower* L, QHelper* h) {
+    for (int i = 0; i < L->ncalled; i++) if (L->called[i] == h) return;
+    if (L->ncalled == L->capcalled) {
+        L->capcalled = L->capcalled ? L->capcalled * 2 : 4;
+        L->called = (QHelper**)aether_xrealloc(L->called, (size_t)L->capcalled * sizeof(QHelper*));
+    }
+    L->called[L->ncalled++] = h;
+}
 
 static QNode* qnode(int kind, const char* type, const char* name, const char* op,
                     const char* lit, int line) {
@@ -149,9 +217,15 @@ static void lerror(Lower* L, ASTNode* at, AetherErrorCode code, const char* msg,
 /* A construct the tree has no node for. */
 static QNode* reject(Lower* L, ASTNode* at, const char* what, const char* why) {
     char msg[320], hint[320];
-    snprintf(msg, sizeof msg, "%s can't be quoted", what);
-    snprintf(hint, sizeof hint,
-             "a quote becomes a tree for a library to read; %s", why);
+    if (L->helper) {
+        snprintf(msg, sizeof msg, "%s can't be in a @quotable function", what);
+        snprintf(hint, sizeof hint,
+                 "its body becomes a tree, as a quote's does; %s", why);
+    } else {
+        snprintf(msg, sizeof msg, "%s can't be quoted", what);
+        snprintf(hint, sizeof hint,
+                 "a quote becomes a tree for a library to read; %s", why);
+    }
     lerror(L, at, AETHER_ERR_QUOTE_SUBSET, msg, hint);
     return NULL;
 }
@@ -242,11 +316,28 @@ static const char* node_type_name(ASTNode* e) {
     return quote_type_name(e ? e->node_type : NULL);
 }
 
+/* A @quotable function reads only its parameters and locals: it is emitted
+ * as a function of its own (GLSL, MSL), which has no way to reach a variable
+ * of the program, and the uniforms stay the quote's own captures. The one
+ * place that rule lives; drop the call in lower_identifier to lift it. */
+static QNode* helper_reads_outer(Lower* L, ASTNode* e, const char* name) {
+    char msg[320];
+    snprintf(msg, sizeof msg, "@quotable function '%s' reads '%s', a variable outside it",
+             L->helper->def->value, name);
+    lerror(L, e, AETHER_ERR_QUOTE_HELPER_READ, msg,
+           "a @quotable function is emitted as a function of its own; pass the value "
+           "in as a parameter, and let the quote that calls it capture the variable");
+    return NULL;
+}
+
 static QNode* lower_identifier(Lower* L, ASTNode* e) {
     const char* name = e->value;
     if (is_local(L, name)) return qnode(QK_LOCAL, node_type_name(e), name, NULL, NULL, e->line);
     int local_scope = 0;
     Symbol* s = outer_symbol(L, name, &local_scope);
+    if (L->helper && s && !s->is_function && !s->is_actor && !s->is_module_alias &&
+        (local_scope || tc_program_global_var(name)))
+        return helper_reads_outer(L, e, name);
     if (s && local_scope && !s->is_function && !s->is_actor && !s->is_module_alias) {
         if (s->type && s->type->kind == TYPE_FUNCTION) {
             return reject(L, e, "a closure value",
@@ -358,7 +449,13 @@ static QNode* lower_expr(Lower* L, ASTNode* e) {
                 return reject(L, e, "'spawn'", "an actor operation has no meaning in a tree");
             if (strcmp(written, "call") == 0)
                 return reject(L, e, "a closure call", "it has no node for a closure");
-            QNode* n = qnode(QK_CALL, node_type_name(e), written, NULL, NULL, e->line);
+            /* A @quotable function: a HELPER_CALL naming it as its tree
+             * names it, which a back end emits as a call of the function it
+             * writes out from the helper's tree. */
+            QHelper* h = helper_named(e->value);
+            if (h) note_call(L, h);
+            QNode* n = h ? qnode(QK_HELPER_CALL, node_type_name(e), h->name, NULL, NULL, e->line)
+                         : qnode(QK_CALL, node_type_name(e), written, NULL, NULL, e->line);
             int ok = 1;
             for (int i = 0; i < e->child_count; i++) {
                 ASTNode* a = e->children[i];
@@ -673,6 +770,155 @@ static void hash_node(uint64_t* h, QNode* n) {
     for (int i = 0; i < n->nkids; i++) hash_node(h, n->kids[i]);
 }
 
+/* The hash: the format version, the parameters, the captures, the body,
+ * then each helper the quote reaches (its name, return type, parameters and
+ * body), callees first. Editing a helper changes the hash of every quote
+ * that reaches it, so a back end's cache keyed on it goes stale with it. */
+static uint64_t quote_hash(QuoteInfo* q) {
+    uint64_t h = 14695981039346656037ULL;
+    fnv_int(&h, QUOTE_FORMAT_VERSION);
+    for (int i = 0; i < q->nparams; i++) { fnv(&h, q->param_names[i]); fnv(&h, q->param_types[i]); }
+    for (int i = 0; i < q->ncaps; i++) { fnv(&h, q->caps[i].name); fnv(&h, q->caps[i].type); }
+    hash_node(&h, q->body);
+    for (int i = 0; i < q->nhelpers; i++) {
+        QHelper* x = q->helpers[i];
+        fnv(&h, x->name);
+        fnv(&h, x->ret);
+        for (int k = 0; k < x->nparams; k++) { fnv(&h, x->param_names[k]); fnv(&h, x->param_types[k]); }
+        if (x->body) hash_node(&h, x->body);
+    }
+    return h;
+}
+
+int quote_lower_helper(QHelper* hp, SymbolTable* global, QuoteErrorFn report) {
+    if (!hp || hp->lowered) return hp && hp->lowered < 0 ? 1 : 0;
+    ASTNode* def = hp->def;
+    Lower L;
+    memset(&L, 0, sizeof L);
+    L.quote = def;
+    L.outer = global;
+    L.report = report;
+    L.helper = hp;
+
+    ASTNode* body = NULL;
+    int nparams = 0;
+    for (int i = 0; i < def->child_count; i++) {
+        ASTNode* c = def->children[i];
+        if (!c) continue;
+        if (c->type == AST_BLOCK) body = c;
+        else if (c->type != AST_GUARD_CLAUSE && c->type != AST_REQUIRES_CLAUSE &&
+                 c->type != AST_ENSURES_CLAUSE) nparams++;
+    }
+    hp->param_names = (const char**)calloc((size_t)(nparams ? nparams : 1), sizeof(char*));
+    hp->param_types = (const char**)calloc((size_t)(nparams ? nparams : 1), sizeof(char*));
+    for (int i = 0; i < def->child_count; i++) {
+        ASTNode* c = def->children[i];
+        if (!c || c->type == AST_BLOCK || c->type == AST_GUARD_CLAUSE ||
+            c->type == AST_REQUIRES_CLAUSE || c->type == AST_ENSURES_CLAUSE) continue;
+        if (c->type != AST_PATTERN_VARIABLE) {
+            reject(&L, c, "a parameter pattern in a @quotable function",
+                   "a function written out from the tree takes named parameters");
+            continue;
+        }
+        const char* pn = aether_intern(c->value ? c->value : "");
+        push_local(&L, pn);
+        hp->param_names[hp->nparams] = pn;
+        hp->param_types[hp->nparams] = aether_intern(quote_type_name(c->node_type));
+        hp->nparams++;
+    }
+    for (int i = 0; i < def->child_count; i++) {
+        ASTNode* c = def->children[i];
+        if (c && (c->type == AST_GUARD_CLAUSE || c->type == AST_REQUIRES_CLAUSE ||
+                  c->type == AST_ENSURES_CLAUSE))
+            reject(&L, c, "a guard or contract on a @quotable function",
+                   "the tree has no node for a precondition");
+    }
+    hp->ret = aether_intern(quote_type_name(def->node_type));
+    QNode* tree = lower_block(&L, body);
+    free(L.locals);
+    free(L.caps);
+    if (L.errors) {
+        free_qnode(tree);
+        free(L.called);
+        hp->lowered = -1;
+        return L.errors;
+    }
+    hp->body = tree;
+    hp->callees = L.called;
+    hp->ncallees = L.ncalled;
+    hp->capcallees = L.capcalled;
+    hp->lowered = 1;
+    return 0;
+}
+
+/* Neither GLSL nor MSL allows recursion, and a tree that reaches itself has
+ * no order to emit its functions in: a @quotable function reached again
+ * through @quotable calls is an error, reported once per cycle at the
+ * function that closes it. */
+static int recursion_dfs(QHelper* h, QHelper** stack, int depth, QuoteErrorFn report) {
+    if (h->mark == 2) return 0;
+    if (h->mark == 1) {
+        int start = depth - 1;
+        while (start > 0 && stack[start] != h) start--;
+        char path[512] = "";
+        for (int i = start; i < depth; i++) {
+            size_t len = strlen(path);
+            snprintf(path + len, sizeof path - len, "%s -> ", stack[i]->def->value);
+        }
+        size_t len = strlen(path);
+        snprintf(path + len, sizeof path - len, "%s", h->def->value);
+        char msg[640];
+        snprintf(msg, sizeof msg, "@quotable function '%s' reaches itself: %s",
+                 h->def->value, path);
+        if (report) report(msg, "GLSL and MSL have no recursion, so a quote's helpers can't "
+                           "either; write the repetition as a loop",
+                           stack[depth - 1]->def->line, stack[depth - 1]->def->column,
+                           AETHER_ERR_QUOTE_RECURSION);
+        return 1;
+    }
+    h->mark = 1;
+    stack[depth] = h;
+    int errors = 0;
+    for (int i = 0; i < h->ncallees && depth + 1 < 256; i++)
+        errors += recursion_dfs(h->callees[i], stack, depth + 1, report);
+    h->mark = 2;
+    return errors;
+}
+
+int quote_check_recursion(QuoteErrorFn report) {
+    QHelper* stack[256];
+    int errors = 0;
+    for (int i = 0; i < g_helper_count; i++) g_helpers[i]->mark = 0;
+    for (int i = 0; i < g_helper_count; i++)
+        if (g_helpers[i]->mark == 0) errors += recursion_dfs(g_helpers[i], stack, 0, report);
+    return errors;
+}
+
+/* Every helper `h` reaches, callees before callers, appended once each. */
+static void reach(QHelper* h, QHelper*** out, int* n, int* cap) {
+    for (int i = 0; i < *n; i++) if ((*out)[i] == h) return;
+    for (int i = 0; i < h->ncallees; i++) reach(h->callees[i], out, n, cap);
+    for (int i = 0; i < *n; i++) if ((*out)[i] == h) return;
+    if (*n == *cap) {
+        *cap = *cap ? *cap * 2 : 4;
+        *out = (QHelper**)aether_xrealloc(*out, (size_t)*cap * sizeof(QHelper*));
+    }
+    (*out)[(*n)++] = h;
+}
+
+void quote_finish(void) {
+    for (int q = 0; q < g_quote_count; q++) {
+        QuoteInfo* qi = g_quotes[q];
+        QHelper** all = NULL;
+        int n = 0, cap = 0;
+        for (int i = 0; i < qi->nhelpers; i++) reach(qi->helpers[i], &all, &n, &cap);
+        free(qi->helpers);
+        qi->helpers = all;
+        qi->nhelpers = n;
+        qi->hash = quote_hash(qi);
+    }
+}
+
 /* ---- entry ---- */
 
 int quote_lower(ASTNode* quote, SymbolTable* outer, const char* file, QuoteErrorFn report) {
@@ -699,6 +945,7 @@ int quote_lower(ASTNode* quote, SymbolTable* outer, const char* file, QuoteError
         free_qnode(tree);
         free(L.locals);
         free(L.caps);
+        free(L.called);
         return L.errors;
     }
 
@@ -723,12 +970,9 @@ int quote_lower(ASTNode* quote, SymbolTable* outer, const char* file, QuoteError
     const char* slash = strrchr(f, '/');
     q->source = aether_internf("%s:%d", slash ? slash + 1 : f, quote->line);
 
-    uint64_t h = 14695981039346656037ULL;
-    fnv_int(&h, 1);   /* the format version */
-    for (int i = 0; i < q->nparams; i++) { fnv(&h, q->param_names[i]); fnv(&h, q->param_types[i]); }
-    for (int i = 0; i < q->ncaps; i++) { fnv(&h, q->caps[i].name); fnv(&h, q->caps[i].type); }
-    hash_node(&h, tree);
-    q->hash = h;
+    q->helpers = L.called;
+    q->nhelpers = L.ncalled;
+    q->hash = quote_hash(q);   /* final once quote_finish adds the helpers it reaches */
     free(L.locals);
 
     if (g_quote_count == g_quote_cap) {
@@ -784,7 +1028,9 @@ void quote_emit_prototypes(FILE* out) {
           "void* aether_quote_add(void* parent, void* child);\n"
           "void aether_quote_set_body(void* tree, void* body);\n"
           "void aether_quote_param(void* tree, const char* name, const char* type);\n"
-          "void aether_quote_capture(void* tree, const char* name, const char* type, const char* base, void* cell, void (*release)(void*));\n",
+          "void aether_quote_capture(void* tree, const char* name, const char* type, const char* base, void* cell, void (*release)(void*));\n"
+          "void* aether_quote_helper(const char* name, const char* ret);\n"
+          "void aether_quote_add_helper(void* tree, void* helper);\n",
           out);
 }
 
@@ -819,6 +1065,25 @@ void quote_emit_builder(FILE* out, int index, const char* const* release_fns) {
                 release_fns && release_fns[i] ? release_fns[i] : "_aether_cell_release");
     }
     int counter = 0;
+    /* Version 2: the @quotable functions it reaches, callees first. */
+    for (int i = 0; i < q->nhelpers; i++) {
+        QHelper* h = q->helpers[i];
+        fprintf(out, "    void* _h%d = aether_quote_helper(", i);
+        emit_c_string(out, h->name);
+        fputs(", ", out);
+        emit_c_string(out, h->ret);
+        fputs(");\n", out);
+        for (int k = 0; k < h->nparams; k++) {
+            fprintf(out, "    aether_quote_param(_h%d, ", i);
+            emit_c_string(out, h->param_names[k]);
+            fputs(", ", out);
+            emit_c_string(out, h->param_types[k]);
+            fputs(");\n", out);
+        }
+        int hb = emit_qnode(out, h->body, &counter);
+        fprintf(out, "    aether_quote_set_body(_h%d, _n%d);\n    aether_quote_add_helper(_t, _h%d);\n",
+                i, hb, i);
+    }
     int body = emit_qnode(out, q->body, &counter);
     fprintf(out, "    aether_quote_set_body(_t, _n%d);\n    return _t;\n}\n", body);
 }
