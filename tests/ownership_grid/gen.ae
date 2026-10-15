@@ -1107,6 +1107,12 @@ place_read(g: *GridGen, pid: string, kid: string) -> (string, string) {
     }
     if pid == "P13G" || pid == "P13D" {
         f = gen_name(g, "f")
+        if pid == "P13G" && kid == "K9" {
+            // Stored bare, a named function in a `ptr` slot is its code
+            // address, not a box (memory-management.md, Boxed closures):
+            // it is read back as the typed function pointer it is.
+            return "${f} = slot as fn() -> int", f
+        }
         return "fn ${f} = unbox_closure(slot)", f
     }
     if pid == "P13F" {
