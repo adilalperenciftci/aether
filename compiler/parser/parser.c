@@ -7527,7 +7527,17 @@ ASTNode* parse_top_level_decl(Parser* parser) {
                         }
                         node->node_type = elem_type
                             ? create_array_type(clone_type(elem_type), cval->child_count)
-                            : create_array_type(create_type(TYPE_PTR), cval->child_count);
+                            : create_array_type(create_type(TYPE_UNKNOWN), cval->child_count);
+                        /* Only a guess here: an element that is not a bare
+                         * literal (`-1`, `0 - 1`, `~1`) has no type yet. The
+                         * guess was `ptr`, so `[-1, 2, 3]` was an array of
+                         * pointers, emitted as `const void*[]` (clang refuses
+                         * the ints in it; gcc only warned) and read as
+                         * pointers. Unknown, inference types it from its
+                         * elements; marked inferred, the typechecker gives the
+                         * declaration the literal's type once they are typed
+                         * (a declaration's array_fix). */
+                        node->type_inferred = 1;
                     }
                 } else if (annotated_type) {
                     // Typed scalar const: `const NAME: T = value`.
