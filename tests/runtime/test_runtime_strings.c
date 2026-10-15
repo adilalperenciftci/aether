@@ -334,3 +334,61 @@ TEST_CATEGORY(interp_string_short_and_long, TEST_CATEGORY_STDLIB) {
     string_release(l);
     string_release(nul);
 }
+
+/* #2919: a string other threads can reach is published, and its count then
+ * changes atomically. Eight threads retain and release one published string
+ * at once; with a plain count their increments and decrements are lost and
+ * the count ends wrong (or the string is freed under them). */
+#include "../../runtime/utils/aether_thread.h"
+
+#define SHARED_THREADS 8
+#define SHARED_ROUNDS 200000
+
+static void* shared_count_churn(void* arg) {
+    const void* s = arg;
+    for (int i = 0; i < SHARED_ROUNDS; i++) string_retain(s);
+    for (int i = 0; i < SHARED_ROUNDS; i++) string_release(s);
+    return NULL;
+}
+
+TEST_CATEGORY(string_published_counts_atomically, TEST_CATEGORY_STDLIB) {
+    AetherString* s = string_new("shared");
+    aether_string_publish(s);
+    ASSERT_TRUE((s->ref_count & AETHER_STRING_SHARED_BIT) != 0);
+    ASSERT_EQ(1, s->ref_count & AETHER_STRING_COUNT_MASK);
+
+    pthread_t t[SHARED_THREADS];
+    for (int i = 0; i < SHARED_THREADS; i++)
+        ASSERT_EQ(0, pthread_create(&t[i], NULL, shared_count_churn, s));
+    for (int i = 0; i < SHARED_THREADS; i++) pthread_join(t[i], NULL);
+
+    ASSERT_EQ(1, s->ref_count & AETHER_STRING_COUNT_MASK);
+    ASSERT_STREQ("shared", aether_string_data(s));
+    string_release(s);
+}
+
+/* A string not published keeps its plain count, and publishing leaves a
+ * pinned string, a plain C string and NULL alone. */
+TEST_CATEGORY(string_publish_only_marks_counted, TEST_CATEGORY_STDLIB) {
+    AetherString* s = string_new("plain");
+    string_retain(s);
+    ASSERT_EQ(2, s->ref_count);
+    string_release(s);
+    ASSERT_EQ(1, s->ref_count);
+
+    static char bytes[] = "pinned";
+    AetherString pinned = { AETHER_STRING_MAGIC, AETHER_STRING_PINNED_REFS, 6, 7, bytes };
+    aether_string_publish(&pinned);
+    ASSERT_EQ(AETHER_STRING_PINNED_REFS, pinned.ref_count);
+    string_retain(&pinned);
+    string_release(&pinned);
+    ASSERT_EQ(AETHER_STRING_PINNED_REFS, pinned.ref_count);
+
+    aether_string_publish("c string");
+    aether_string_publish(NULL);
+
+    aether_string_publish(s);
+    aether_string_publish(s);   /* a second publish changes nothing */
+    ASSERT_EQ(AETHER_STRING_SHARED_BIT | 1, s->ref_count);
+    string_release(s);
+}

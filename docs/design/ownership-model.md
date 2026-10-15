@@ -159,6 +159,13 @@ fix of its own.
   between actors. Proposal: a send copies a string unless its count is 1,
   in which case it moves. This needs checking against what the send side
   does today before stage 2.
+
+  Decided 2026-10-15 (#2919): a place other threads can read (a module
+  `var`, a closure environment) can make two actors keep the same string,
+  and R3 keeps by retaining where today copies. A string stored into such
+  a place is published: a bit of its `ref_count` marks it shared, and its
+  retain and release are atomic from then on. Every other string keeps its
+  plain count. The value carries the state, as it carries its count.
 - **Cycles.** A closure environment that ends up holding itself (a closure
   stored in a cell it captures) is never freed by counting. That is today's
   limit too; the model does not make it worse, and a cycle check is out of

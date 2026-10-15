@@ -16,6 +16,14 @@
  * and is never freed. string_retain and string_release leave it alone. */
 #define AETHER_STRING_PINNED_REFS 0x7FFFFFFF
 
+/* A counted string other threads can reach (stored into a module var or a
+ * closure environment) carries this bit in its ref_count, the count in the
+ * bits below it: its retain and release are atomic, every other string's
+ * stay plain (#2919). The pinned count is checked first, so its bits do not
+ * read as a shared count. */
+#define AETHER_STRING_SHARED_BIT 0x40000000
+#define AETHER_STRING_COUNT_MASK 0x3FFFFFFF
+
 /* The header's fields, in layout order. */
 #define AETHER_STRING_FIELDS \
     unsigned int magic;      /* AETHER_STRING_MAGIC */ \

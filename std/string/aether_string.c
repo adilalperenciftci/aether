@@ -14,6 +14,9 @@
 // formats, round-trips) when Aether is embedded in a host that set a locale.
 #include "../../runtime/aether_locale_num.h"
 #include "../../runtime/config/aether_optimization_config.h"  // AETHER_HAS_THREADS
+#if defined(_MSC_VER) && !defined(__clang__)
+#include <intrin.h>   // _InterlockedIncrement / _InterlockedDecrement
+#endif
 
 #ifndef _WIN32
 #include <fnmatch.h>  // POSIX glob-pattern matching (string_glob_match_raw)
@@ -116,39 +119,81 @@ AetherString* string_adopt_caps_buffer(char* buf, size_t length, size_t cap) {
     return s;
 }
 
+/* The count of a shared string changes atomically (#2919): another thread
+ * may retain or release it at the same time. Increments need no ordering;
+ * a decrement orders this thread's reads of the string before another's
+ * free of it. */
+static inline void str_count_inc_shared(int* p) {
+#if !AETHER_HAS_THREADS
+    (*p)++;
+#elif defined(_MSC_VER) && !defined(__clang__)
+    _InterlockedIncrement((volatile long*)p);
+#else
+    __atomic_fetch_add(p, 1, __ATOMIC_RELAXED);
+#endif
+}
+
+static inline int str_count_dec_shared(int* p) {   /* the count before */
+#if !AETHER_HAS_THREADS
+    return (*p)--;
+#elif defined(_MSC_VER) && !defined(__clang__)
+    return (int)_InterlockedDecrement((volatile long*)p) + 1;
+#else
+    return __atomic_fetch_sub(p, 1, __ATOMIC_ACQ_REL);
+#endif
+}
+
+static void string_free_block(AetherString* s) {
+    /* Cap accounting: data buffer was allocated with `capacity` bytes
+     * (length + 1 NUL terminator); struct is one sizeof(AetherString).
+     * Both pair with the alloc-side accounting in string_new_with_length.
+     *
+     * A string from string_alloc_inline holds both in ONE block, with
+     * `data` pointing just past the header, so freeing it separately would
+     * free an interior pointer. Recognised by position, which holds because
+     * no two-block string has its payload there (string_header_for). */
+    if (s->data == (char*)(s + 1)) {
+        aether_caps_free(s, sizeof(AetherString) + s->capacity);
+    } else {
+        aether_caps_free(s->data, s->capacity);
+        aether_caps_free(s, sizeof(AetherString));
+    }
+}
+
 // Reference counting — safe to call with plain char* (no-op)
 void string_retain(const void* str) {
     if (!str || !is_aether_string(str)) return;
     AetherString* s = (AetherString*)str;
+    int rc = s->ref_count;
     /* A pinned string (a literal the compiler made static, #2520) is
      * never freed, so it is not counted either. */
-    if (s->ref_count == AETHER_STRING_PINNED_REFS) return;
-    s->ref_count++;
+    if (rc == AETHER_STRING_PINNED_REFS) return;
+    if (rc & AETHER_STRING_SHARED_BIT) str_count_inc_shared(&s->ref_count);
+    else s->ref_count = rc + 1;
 }
 
 void string_release(const void* str) {
     if (!str || !is_aether_string(str)) return;
     AetherString* s = (AetherString*)str;
-    if (s->ref_count == AETHER_STRING_PINNED_REFS) return;   /* #2520 */
-    s->ref_count--;
-    if (s->ref_count <= 0) {
-        /* Cap accounting: data buffer was allocated with `capacity`
-         * bytes (length + 1 NUL terminator); struct is one
-         * sizeof(AetherString). Both pair with the alloc-side
-         * accounting in string_new_with_length.
-         *
-         * A string from string_alloc_inline holds both in ONE block, with
-         * `data` pointing just past the header, so freeing it separately
-         * would free an interior pointer. Recognised by position, which
-         * holds because no two-block string has its payload there
-         * (string_header_for). */
-        if (s->data == (char*)(s + 1)) {
-            aether_caps_free(s, sizeof(AetherString) + s->capacity);
-        } else {
-            aether_caps_free(s->data, s->capacity);
-            aether_caps_free(s, sizeof(AetherString));
-        }
+    int rc = s->ref_count;
+    if (rc == AETHER_STRING_PINNED_REFS) return;   /* #2520 */
+    if (rc & AETHER_STRING_SHARED_BIT) {
+        if ((str_count_dec_shared(&s->ref_count) & AETHER_STRING_COUNT_MASK) == 1)
+            string_free_block(s);
+        return;
     }
+    s->ref_count = rc - 1;
+    if (rc <= 1) string_free_block(s);
+}
+
+void aether_string_publish(const void* str) {
+    if (!str || !is_aether_string(str)) return;
+    AetherString* s = (AetherString*)str;
+    int rc = s->ref_count;
+    /* Already shared, other threads may be counting it: leave the field
+     * alone. Not shared, no other thread can reach it yet. */
+    if (rc == AETHER_STRING_PINNED_REFS || (rc & AETHER_STRING_SHARED_BIT)) return;
+    s->ref_count = rc | AETHER_STRING_SHARED_BIT;
 }
 
 // String operations

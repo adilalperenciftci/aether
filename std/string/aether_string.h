@@ -61,6 +61,13 @@ AetherString* string_empty(void);
 // Reference counting — safe to call with plain char* (no-op)
 void string_retain(const void* str);
 void string_release(const void* str);
+
+/* Mark a counted string as reachable from other threads before it is
+ * stored where they can read it (a module var, a closure environment):
+ * from then on its retain and release are atomic (#2919). A pinned string,
+ * a plain char* and NULL are left alone. Call it from the thread that holds
+ * the string, before the store publishes it. */
+void aether_string_publish(const void* str);
 void string_free(const void* str);  // Alias for release
 
 // String operations — accept both AetherString* and plain char*.
