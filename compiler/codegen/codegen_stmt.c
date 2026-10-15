@@ -1399,6 +1399,11 @@ static void generate_list_pattern_bindings(CodeGenerator* gen, ASTNode* pattern,
                     print_line(gen, "const char* %s = %s->head;",
                                head->value, len_name);
                     mark_pattern_binding(gen, head->value, TYPE_STRING);
+                    /* A view of the cell's string: one the arm rebinds
+                     * takes a reference of its own first. */
+                    if (struct_param_written(body, head->value))
+                        print_line(gen, "%s = aether_uniform_heap_str(%s, 0);",
+                                   head->value, head->value);
                 }
             }
             if (tail && tail->type == AST_PATTERN_VARIABLE && tail->value) {

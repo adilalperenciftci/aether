@@ -3,7 +3,7 @@
 // just like any other nested block.
 
 extern println(s: string)
-extern string_concat(a: string, b: string) -> string
+extern string_concat(a: string, b: string) -> string @heap
 extern exit(code: int)
 
 message Ping {}

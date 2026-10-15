@@ -662,10 +662,17 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
                                                                 field->value);
                                 if (is_fnptr_type(fsig)) register_fnptr_local(gen, var_name, fsig);
                                 /* The binding is a view of the message's
-                                 * field, which the message releases. */
+                                 * field, which the message releases: one the
+                                 * arm rebinds takes a reference of its own
+                                 * first, as a rebound parameter does (the
+                                 * arm's exit releases a string one). */
                                 if (fsig && arm_body)
                                     own_rebound_binding_take(gen, var_name, fsig, arm_body,
                                                              field->line, field->column);
+                                if (fsig && fsig->kind == TYPE_STRING && arm_body &&
+                                    struct_param_written(arm_body, var_name))
+                                    print_line(gen, "%s = aether_uniform_heap_str(%s, 0);",
+                                               var_name, var_name);
                             }
                         }
 

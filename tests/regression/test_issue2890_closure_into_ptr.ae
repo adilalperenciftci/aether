@@ -4,7 +4,9 @@
 // `ptr` parameter and a `ptr` field store (`h.p = f`) box it. Each of these
 // stores now boxes it the same way, so unbox_closure gives it back (a bare
 // function stays its code address: test_issue2890_bare_fn_ptr_slots). After
-// `gptr = f` the function reads `gptr` back as the `ptr` it is.
+// `gptr = f` the function reads `gptr` back as the `ptr` it is. A `ptr`
+// slot owns nothing: each box hands it a reference of its own, which the
+// program gives back with release_closure once the slot is done with it.
 
 extern exit(code: int)
 
@@ -42,9 +44,11 @@ actor Runner {
     receive {
         Hold(p) -> {
             got = got + run_ptr(p)
+            release_closure(p)
         }
         HoldTagged(p, tag) -> {
             got = got + run_ptr(p) * tag
+            release_closure(p)
             check(got == 908, "closures in ptr message fields (${got})")
         }
     }
@@ -56,16 +60,22 @@ main() {
     fs = [|| { return n + 2 }, || { return n + 3 }]
     gptr = f
     check(run_ptr(gptr) == 8, "a closure local into a ptr global")
+    release_closure(gptr)
     gptr = fs[1]
     check(run_ptr(gptr) == 10, "an fn[N] element into a ptr global")
+    release_closure(gptr)
     h = Holder { p: f }
     check(run_ptr(h.p) == 8, "a closure local into a ptr field")
     h2 = Holder { p: fs[0] }
     check(run_ptr(h2.p) == 9, "an fn[N] element into a ptr field")
+    release_closure(h2.p)
     h3 = Holder { p: || { return n * 2 } }
     check(run_ptr(h3.p) == 14, "a closure literal into a ptr field")
+    release_closure(h3.p)
+    release_closure(h.p)
     h.p = fs[1]
     check(run_ptr(h.p) == 10, "a ptr field store")
+    release_closure(h.p)
     r = spawn(Runner())
     r ! Hold { p: f }
     r ! HoldTagged { p: fs[0], tag: 100 }

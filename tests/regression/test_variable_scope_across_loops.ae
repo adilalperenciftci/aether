@@ -6,7 +6,7 @@
 //
 // Workaround: pre-declare variables before the first while loop.
 
-extern string_concat(a: string, b: string) -> string
+extern string_concat(a: string, b: string) -> string @heap
 extern string_length(s: string) -> int
 
 process_two_lists(a: string, b: string) {

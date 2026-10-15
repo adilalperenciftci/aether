@@ -385,23 +385,29 @@ static int callee_result_shape(CodeGenerator* gen, const char* func_name, const 
 
 /* #2507: is the owned closure at child `ai` of call `expr` released once the
  * call returns? Yes (R3), unless the call takes it over (arg_taken_by_call)
- * or a `ptr` parameter that keeps it is given its box. A builder's injected
- * `_ctx` and named or trailing arguments shift the positions, so those
- * calls leave it to the box or the builder. */
+ * or a `ptr` parameter that keeps it is given its box. A function taking a
+ * builder's `_ctx` first is called with it, or without it (injected, its
+ * parameters then one position on); named and DSL trailing arguments
+ * shift the positions in ways the call does not show, so those calls leave
+ * it to the box or the builder. */
 static int owned_closure_arg_drainable(CodeGenerator* gen, ASTNode* expr, const char* func_name,
                                        int ai) {
     if (!func_name) return 1;
-    if (arg_taken_by_call(gen, func_name, ai) || call_param_keeps(gen, func_name, ai)) return 0;
-    const char* fn = codegen_normalise_callee(func_name);
-    ASTNode* fdef = find_function_definition_by_name(gen->program, fn);
-    if (fdef && fdef->child_count > 0 && fdef->children[0] && fdef->children[0]->value &&
-        strcmp(fdef->children[0]->value, "_ctx") == 0) return 0;
     for (int i = 0; i < expr->child_count; i++) {
         ASTNode* a = expr->children[i];
         if (a && (a->type == AST_NAMED_ARG ||
                   (a->type == AST_CLOSURE && a->value && strcmp(a->value, "trailing") == 0))) return 0;
     }
-    return 1;
+    const char* fn = codegen_normalise_callee(func_name);
+    ASTNode* fdef = find_function_definition_by_name(gen->program, fn);
+    int pi = ai;
+    if (fdef && fdef->child_count > 0 && fdef->children[0] && fdef->children[0]->value &&
+        strcmp(fdef->children[0]->value, "_ctx") == 0) {
+        int np = fn_param_count(fdef);
+        if (expr->child_count == np - 1) pi = ai + 1;
+        else if (expr->child_count != np) return 0;
+    }
+    return !arg_taken_by_call(gen, func_name, pi) && !call_param_keeps(gen, func_name, pi);
 }
 
 /* Pick the arguments of `expr` (from child `first_arg` on) to hoist. The

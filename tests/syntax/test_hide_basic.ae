@@ -7,7 +7,7 @@
 // other statement in the same scope sees the directive.
 
 extern println(s: string)
-extern string_concat(a: string, b: string) -> string
+extern string_concat(a: string, b: string) -> string @heap
 
 // Visible top-level helper that reads `outer_secret` via its own lexical
 // chain. handler() will call this even though it has hidden the same name

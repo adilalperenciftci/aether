@@ -3,7 +3,9 @@
 // 1. A closure stored into a `ptr` local (`let p: ptr = null; p = || ...`,
 //    or as its initializer) or into a `ptr` state field: #2890 covered
 //    globals, struct literal fields and message fields. Every `ptr` slot now
-//    takes a closure boxed and a bare function as its code address.
+//    takes a closure boxed and a bare function as its code address. The
+//    slot owns nothing: the box's reference is the program's, given back
+//    with release_closure.
 // 2. `state fn kept` with no initializer emitted `actor->kept = 0;`. A
 //    closure, struct, optional, tuple or sum state field with no initializer
 //    is now zeroed whole.
@@ -79,6 +81,7 @@ actor Holder {
         }
         Check() -> {
             check(run_ptr(slot) == 14, "a closure in a ptr state field")
+            release_closure(slot)
             check(sorted(cmp) == 102030, "a bare function in a ptr state field")
             int v = call(kept)
             check(v == 8, "an fn state field with no initializer, bound later")
@@ -91,8 +94,10 @@ main() {
     let p: ptr = null
     p = || { return n * 10 }
     check(run_ptr(p) == 40, "a closure stored into a ptr local")
+    release_closure(p)
     let p2: ptr = || { return n + 1 }
     check(run_ptr(p2) == 5, "a closure as a ptr local's initializer")
+    release_closure(p2)
     let c: ptr = null
     c = int_cmp
     check(sorted(c) == 102030, "a bare function stored into a ptr local")

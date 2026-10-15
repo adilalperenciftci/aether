@@ -3,7 +3,7 @@
 // — useful for handlers where you want to enumerate what you do use.
 
 extern println(s: string)
-extern string_concat(a: string, b: string) -> string
+extern string_concat(a: string, b: string) -> string @heap
 extern exit(code: int)
 
 // Top-level helper that handler will whitelist.

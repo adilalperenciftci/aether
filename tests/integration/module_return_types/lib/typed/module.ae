@@ -2,7 +2,7 @@
 // Tests that the type inferrer correctly propagates return types
 // across module boundaries (lookup_qualified_symbol fix).
 
-extern string_concat(a: string, b: string) -> string
+extern string_concat(a: string, b: string) -> string @heap
 extern string_length(s: string) -> int
 extern map_new() -> ptr
 extern map_put_raw(m: ptr, key: string, value: ptr) -> int

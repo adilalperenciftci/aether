@@ -55,7 +55,7 @@ exports(
     aether_mem_set_float64_unchecked, set_float64_unchecked,
     aether_mem_get_byte, aether_mem_set_byte,
     aether_mem_get_byte_sz, aether_mem_set_byte_sz,
-    aether_mem_get_ptr, aether_mem_set_ptr,
+    aether_mem_get_ptr, aether_mem_set_ptr, aether_mem_swap_ptrs,
     aether_mem_get_int, aether_mem_set_int,
     aether_mem_get_long, aether_mem_set_long,
     aether_mem_get_int8, aether_mem_set_int8,
@@ -80,7 +80,7 @@ exports(
     aether_mem_set_u32_le, aether_mem_set_u32_be,
     aether_mem_get_u64_le, aether_mem_get_u64_be,
     aether_mem_set_u64_le, aether_mem_set_u64_be,
-    get_byte, set_byte, get_byte_sz, set_byte_sz, get_ptr, set_ptr,
+    get_byte, set_byte, get_byte_sz, set_byte_sz, get_ptr, set_ptr, swap_ptrs,
     get_int, set_int,
     get_long, set_long,
     get_int8, set_int8, get_uint8, set_uint8,
@@ -140,6 +140,11 @@ extern aether_mem_get_ptr(p: ptr, offset: int) -> ptr
 // `*(void**)out_pp = value` pattern for out-parameter writes
 // across the FFI boundary.
 extern aether_mem_set_ptr(p: ptr, offset: int, value: ptr) -> int
+
+// Exchange the pointers at indices `i` and `j` of the pointer array `p`,
+// taking and releasing nothing: a permutation of an array of strings,
+// whichever side owns them.
+extern aether_mem_swap_ptrs(p: ptr, i: int, j: int)
 
 // Read int32 at byte offset `offset` of `p`. Returns 0 if `p` is
 // null (conflated with stored 0). Slot must be 4-byte aligned.
@@ -323,6 +328,7 @@ get_byte_sz(p: ptr, i: size_t) -> int { return aether_mem_get_byte_sz(p, i) }
 set_byte_sz(p: ptr, i: size_t, value: int) -> int { return aether_mem_set_byte_sz(p, i, value) }
 get_ptr(p: ptr, offset: int) -> ptr { return aether_mem_get_ptr(p, offset) }
 set_ptr(p: ptr, offset: int, value: ptr) -> int { return aether_mem_set_ptr(p, offset, value) }
+swap_ptrs(p: ptr, i: int, j: int) { aether_mem_swap_ptrs(p, i, j) }
 get_int(p: ptr, offset: int) -> int { return aether_mem_get_int(p, offset) }
 set_int(p: ptr, offset: int, value: int) -> int { return aether_mem_set_int(p, offset, value) }
 get_long(p: ptr, offset: int) -> long { return aether_mem_get_long(p, offset) }

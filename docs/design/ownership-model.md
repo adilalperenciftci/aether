@@ -492,13 +492,23 @@ argument temporary then released. A container handed a pinned string (a
 literal) stores it as an element it does not own: a pinned string is never
 released, so owning it would only cost the container its ownership tags.
 
-**A borrowed binding that is rebound.** A parameter, a list pattern's tail
-and a receive arm's field binding borrow their value. One of an owning
+**A borrowed binding that is rebound.** A parameter, a list pattern's head
+and tail and a receive arm's field binding borrow their value. One of an owning
 tuple, optional, closure or sequence type that its body rebinds takes a
 reference of its own first, which its scope exit drops, so the rebind
 releases nothing of the owner's (a struct parameter already did this,
 #2582). The checker refuses `string.seq_free` of a borrowed sequence
 parameter, as it refuses freeing a string one (E0901).
+
+**A permutation takes nothing.** Sorting moves the elements' pointers
+(`mem.swap_ptrs`) and compares through borrowed reads, so it neither copies
+nor releases: the array may be Aether's or C's (a `strarr` view).
+
+**A program re-declaring a std extern declares its contract.** An extern
+says `@heap` when C hands over the string it returns; a program that
+declares `string_concat` itself without it is telling the compiler the
+result is borrowed, and the copy then leaks the original. The regression
+programs that re-declared std functions say `@heap` as std does.
 
 **Teardown in constant stack.** A closure's environment releases what it
 holds when its last reference goes, and what it holds can be a closure

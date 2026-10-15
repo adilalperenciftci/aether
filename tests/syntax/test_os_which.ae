@@ -8,7 +8,7 @@
 import std.os
 
 extern println(s: string)
-extern string_concat(a: string, b: string) -> string
+extern string_concat(a: string, b: string) -> string @heap
 extern string_length(s: string) -> int
 extern string_starts_with(s: string, prefix: string) -> int
 extern exit(code: int)

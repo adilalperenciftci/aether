@@ -11,9 +11,9 @@
 // generated C. This file exercises several variants of that pattern; if
 // codegen regresses, the test will fail to compile.
 
-extern string_concat(a: string, b: string) -> string
-extern string_substring(s: string, start: int, end: int) -> string
-extern string_trim(s: string) -> string
+extern string_concat(a: string, b: string) -> string @heap
+extern string_substring(s: string, start: int, end: int) -> string @heap
+extern string_trim(s: string) -> string @heap
 extern string_length(s: string) -> int
 extern string_index_of(s: string, sub: string) -> int
 extern println(s: string)

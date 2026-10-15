@@ -47,7 +47,7 @@ struct Token {
 // text: their lifetime is then explicit (released in _dispose), with no
 // generated string destructor guessing at ownership.
 struct Lexer {
-    src: ptr,
+    src: string,
     len: int,
     pos: int,
     tokens: ptr,
@@ -62,19 +62,18 @@ const SCAN_RESERVE = 262144
 const SCAN_FALLBACK_MAX = 500
 
 _dispose(lx: *Lexer) {
-    json.json_free(lx.src)
     if lx.err != null { json.json_free(lx.err) }
     heap.free(lx)
 }
 
 _src(lx: *Lexer) -> string {
-    return json.json_get_string_raw(lx.src)
+    return lx.src
 }
 
 // Tokenize `src`. Returns (tokens, "") or (null, diagnostic).
 tokenize(src: string) -> ptr! {
     lx = heap.new(Lexer)
-    lx.src = json.json_create_string(src)
+    lx.src = src
     lx.len = string.length(src)
     lx.pos = 0
     lx.tokens = list.new()

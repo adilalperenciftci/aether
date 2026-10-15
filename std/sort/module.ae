@@ -36,6 +36,7 @@ exports(
 )
 
 import std.string
+import std.mem
 
 // Ciura's gap sequence, extended by *2.25 for larger n. A module-level
 // const array of the fixed prefix; larger gaps are computed on the fly.
@@ -328,18 +329,18 @@ strings(xs: string[]) {
     if n < 2 {
         return
     }
-    v = xs as ptr as string[] // bound checked above; the loops index unchecked
+    // A permutation: the elements' pointers are exchanged, taking and
+    // releasing nothing, so the array may be Aether's or C's (a strarr).
+    base = xs as ptr
     gap = first_gap(n)
     while gap >= 1 {
         i = gap
         while i < n {
-            tmp = v[i]
             j = i
-            while j >= gap && string.compare(v[j - gap], tmp) > 0 {
-                v[j] = v[j - gap]
+            while j >= gap && string.compare(xs[j - gap], xs[j]) > 0 {
+                mem.swap_ptrs(base, j - gap, j)
                 j = j - gap
             }
-            v[j] = tmp
             i = i + 1
         }
         gap = next_gap(gap)
@@ -378,18 +379,16 @@ strings_by(xs: string[], cmp: fn(string, string) -> int) {
     if n < 2 {
         return
     }
-    v = xs as ptr as string[]
+    base = xs as ptr
     gap = first_gap(n)
     while gap >= 1 {
         i = gap
         while i < n {
-            tmp = v[i]
             j = i
-            while j >= gap && cmp(v[j - gap], tmp) > 0 {
-                v[j] = v[j - gap]
+            while j >= gap && cmp(xs[j - gap], xs[j]) > 0 {
+                mem.swap_ptrs(base, j - gap, j)
                 j = j - gap
             }
-            v[j] = tmp
             i = i + 1
         }
         gap = next_gap(gap)
