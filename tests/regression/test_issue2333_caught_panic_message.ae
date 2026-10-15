@@ -5,7 +5,8 @@
 // and every caught one stayed allocated. A heap-tracked local passed to
 // panic was worse: the unwind journal freed it before the catch body read
 // it. Now the catcher owns a built message: the binding is freed at the end
-// of the handler unless it is kept, returned, stored or re-raised.
+// of the handler unless it is kept, returned, stored or re-raised, and a
+// `catch _` frees it too.
 //
 // Pre-fix the round check fails: each caught panic kept its message, 16
 // bytes or more. The measure compares rounds of built messages with rounds
@@ -116,6 +117,7 @@ fn round(base: int) {
     while i < PER_ROUND {
         n = base + i
         try { boom(n) } catch e {}
+        try { boom(n) } catch _ {}
         try { boom_local(n) } catch e {}
         try { rethrow(n) } catch e {}
         k = keep(n)

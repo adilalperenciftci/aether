@@ -14,9 +14,7 @@
 // formats, round-trips) when Aether is embedded in a host that set a locale.
 #include "../../runtime/aether_locale_num.h"
 #include "../../runtime/config/aether_optimization_config.h"  // AETHER_HAS_THREADS
-#if defined(_MSC_VER) && !defined(__clang__)
-#include <intrin.h>   // _InterlockedIncrement / _InterlockedDecrement
-#endif
+#include "../../runtime/utils/aether_count.h"
 
 #ifndef _WIN32
 #include <fnmatch.h>  // POSIX glob-pattern matching (string_glob_match_raw)
@@ -119,30 +117,6 @@ AetherString* string_adopt_caps_buffer(char* buf, size_t length, size_t cap) {
     return s;
 }
 
-/* The count of a shared string changes atomically (#2919): another thread
- * may retain or release it at the same time. Increments need no ordering;
- * a decrement orders this thread's reads of the string before another's
- * free of it. */
-static inline void str_count_inc_shared(int* p) {
-#if !AETHER_HAS_THREADS
-    (*p)++;
-#elif defined(_MSC_VER) && !defined(__clang__)
-    _InterlockedIncrement((volatile long*)p);
-#else
-    __atomic_fetch_add(p, 1, __ATOMIC_RELAXED);
-#endif
-}
-
-static inline int str_count_dec_shared(int* p) {   /* the count before */
-#if !AETHER_HAS_THREADS
-    return (*p)--;
-#elif defined(_MSC_VER) && !defined(__clang__)
-    return (int)_InterlockedDecrement((volatile long*)p) + 1;
-#else
-    return __atomic_fetch_sub(p, 1, __ATOMIC_ACQ_REL);
-#endif
-}
-
 static void string_free_block(AetherString* s) {
     /* Cap accounting: data buffer was allocated with `capacity` bytes
      * (length + 1 NUL terminator); struct is one sizeof(AetherString).
@@ -168,7 +142,7 @@ void string_retain(const void* str) {
     /* A pinned string (a literal the compiler made static, #2520) is
      * never freed, so it is not counted either. */
     if (rc == AETHER_STRING_PINNED_REFS) return;
-    if (rc & AETHER_STRING_SHARED_BIT) str_count_inc_shared(&s->ref_count);
+    if (rc & AETHER_STRING_SHARED_BIT) aether_count_inc(&s->ref_count);
     else s->ref_count = rc + 1;
 }
 
@@ -178,7 +152,7 @@ void string_release(const void* str) {
     int rc = s->ref_count;
     if (rc == AETHER_STRING_PINNED_REFS) return;   /* #2520 */
     if (rc & AETHER_STRING_SHARED_BIT) {
-        if ((str_count_dec_shared(&s->ref_count) & AETHER_STRING_COUNT_MASK) == 1)
+        if ((aether_count_dec(&s->ref_count) & AETHER_STRING_COUNT_MASK) == 1)
             string_free_block(s);
         return;
     }

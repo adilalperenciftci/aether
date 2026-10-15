@@ -65,6 +65,14 @@ int aether_unwind_journal_size(void);
 // (scheduler threads); process exit reclaims the main thread's.
 void aether_unwind_thread_cleanup(void);
 
+// Tear down an object whose last reference was just released, and whose
+// teardown releases others (a closure environment). `obj` starts with its
+// teardown function, `void (*)(void*)`. A teardown called while another runs
+// on this thread is queued and runs once that one returns, so a chain of
+// any length (a closure holding the closure it replaced, 50,000 deep) is
+// torn down in constant stack.
+void aether_teardown(void* obj);
+
 #ifdef __cplusplus
 }
 #endif

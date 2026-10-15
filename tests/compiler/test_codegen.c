@@ -232,7 +232,9 @@ TEST(codegen_int_return_of_int_is_not_cast) {
         "builder rec(w: int) -> int { return w }\n"
         "main() { println(\"${rec(2) {}}\") }");
     ASSERT_NOT_NULL(buf);
-    ASSERT_TRUE(strstr(buf, "return w;") != NULL);
+    /* The builder's exit releases its unused config (#2871), so the value
+     * is held across it. */
+    ASSERT_TRUE(strstr(buf, "int _builder_ret = w;") != NULL);
     ASSERT_TRUE(strstr(buf, "(intptr_t)(w)") == NULL);
     free(buf);
 }
@@ -383,15 +385,14 @@ TEST(codegen_interp_single_impure_segment_stays_inline) {
 
 TEST(codegen_interp_hoisted_heap_segment_is_freed_after_call) {
     char* buf = generate_typechecked(
-        /* The snippet typechecker resolves no std modules, so name the
-         * runtime's heap-producing concat directly; the classifier keys on
-         * the callee name either way. */
-        "extern string_concat(a: string, b: string) -> string\n"
+        /* The snippet typechecker resolves no std modules, so declare the
+         * runtime's concat directly, `@heap` as std.string does. */
+        "extern string_concat(a: string, b: string) -> string @heap\n"
         "bump() -> int { return 1 }\n"
         "main() { name = \"ab\"\n println(\"${string_concat(name, name)} ${bump()}\") }");
     ASSERT_NOT_NULL(buf);
     const char* const pieces[] = {
-        "{ const char* _ad_", " = (const char*)(string_concat(name, name)); int _ad_", " = (int)(bump()); ",
+        "{ const char* _ad_", " = (const char*)(aether_string_adopt(string_concat(name, name))); int _ad_", " = (int)(bump()); ",
         "_aether_interp_print(\"%s %d\\n\", (const void*)(_ad_", "), (int)_ad_", "); aether_heap_str_free(_ad_", "); }",
     };
     ASSERT_TRUE(emitted_in_order(buf, pieces, 7));

@@ -464,6 +464,7 @@ typedef struct {
     const char* runtime;                   /* schema >= 1.5: "shared" or NULL */
     const char* const* closure_modules;    /* schema >= 1.6, parallel to closures */
     int         actors;                    /* schema >= 1.7: the library runs actors */
+    const unsigned char* closure_config_unused; /* schema >= 1.8, parallel to closures */
 } _AeLibInfoMeta;
 
 /* The catalog's schema minor ("1.<minor>"). A reader may touch a field only
@@ -5490,12 +5491,18 @@ static int ae_generate_binimport_stub(const char* so_path, const char* module, F
         int is_void = (strcmp(ret, "void") == 0);
         const char* comma = params[0] ? ", " : "";
         const char* acomma = args[0] ? ", " : "";
+        /* #2860: a builder that never uses its config (schema >= 1.8) is
+         * passed none, so the stub never names `_builder` and releases the
+         * program's config itself, on the program's runtime that made it. */
+        int config_unused = minor >= 8 && m->closure_config_unused &&
+                            m->closure_config_unused[i];
         fprintf(out, "\n@extern(\"%s\") __aeb_%s(%s%s_builder: ptr)%s%s\n",
                 csym, c->name, params, comma,
                 is_void ? "" : " -> ", is_void ? "" : ret);
         fprintf(out, "builder %s(%s) {\n", c->name, params);
-        fprintf(out, "    %s__aeb_%s(%s%s_builder)\n",
-                is_void ? "" : "return ", c->name, args, acomma);
+        fprintf(out, "    %s__aeb_%s(%s%s%s)\n",
+                is_void ? "" : "return ", c->name, args, acomma,
+                config_unused ? "null" : "_builder");
         fprintf(out, "}\n");
     }
 
@@ -11880,6 +11887,8 @@ static int cmd_lib_info(int argc, char** argv) {
                 m->closure_modules[i][0]) {
                 printf("        module: %s\n", m->closure_modules[i]);
             }
+            if (minor >= 8 && m->closure_config_unused && m->closure_config_unused[i])
+                printf("        config: never used\n");
             for (int k = 0; k < c->capture_count && c->captures; k++) {
                 const _AeLibInfoCap* cap = &c->captures[k];
                 printf("        captures %s: %s\n",

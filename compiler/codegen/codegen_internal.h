@@ -96,6 +96,7 @@ void builder_cfg_end(CodeGenerator* gen, BuilderCfg saved);
 void generate_value_statement(CodeGenerator* gen, const char* lhs, ASTNode* value, Type* t);
 const char* c_member_decl(Type* t, const char* name);
 int try_emit_cell_release(CodeGenerator* gen, ASTNode* deferred);
+int builder_never_uses_config(ASTNode* builder);
 void push_builder_config_exit_release(CodeGenerator* gen, ASTNode* builder, ASTNode* body);
 const char* user_defer_ctx(ASTNode* body);
 void emit_defer_thunks(CodeGenerator* gen);

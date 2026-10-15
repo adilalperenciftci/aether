@@ -442,7 +442,11 @@ last use moved out and left empty, anything else retained, a C string
 copied), so `_heap_<name>` is gone, with the actor state's trackers. A store
 takes the new value before it releases the old one, so `s = s` is a retain
 and a release; a scope exit releases unconditionally. A `catch` binding
-takes its reason when the runtime did not hand it over.
+takes its reason when the runtime did not hand it over. The catcher owns
+the reason whatever its binding is: `catch _`, and a binding the handler
+reaches through a closure environment, a capture cell or actor state, read
+it from a hidden owner of the handler's scope that releases it like any
+string local.
 
 **Returns are typed, not classified.** Whether a call hands its caller a
 string is read from the callee's declared result: an Aether function
@@ -460,10 +464,29 @@ it takes its own (#2788). A function frees a caller's string only when it is
 a consuming free like `string.free`, since an Aether function may not free a
 parameter it borrows (E0901).
 
+**Teardown in constant stack.** A closure's environment releases what it
+holds when its last reference goes, and what it holds can be a closure
+whose environment then goes too: a chain of rebinds to a closure calling
+the one it replaced (grid cell K3-P2-T13) tore down one C frame per link,
+and overflowed Windows' 1 MB stack at 50,000. An environment whose count
+reaches zero hands itself to `aether_teardown`, which runs it at once
+unless a teardown is already running on the thread, and then queues it for
+that one to run after it returns. The queue is the thread's, grows only as
+wide as one teardown's fan-out, and is freed with the unwind journal at
+thread exit.
+
 **A builder's unused config (#2871).** A builder owns the config its call
 hands it (it frees it, or returns it as what it built). One whose body never
 names `_builder` does neither, so its exit releases the config through its
 factory's release, decided from the builder's own body.
+
+**A builder across a binary import (#2860).** A library built the default
+way links its own copy of the runtime, so it cannot free a config the
+program's copy made. Its catalog (schema 1.8) marks each builder that never
+names its config; the stub `ae` writes for a binary import passes such a
+builder no config and never names `_builder` itself, so the program
+releases its config on its own runtime, as for any builder that ignores
+it. What an export returns crosses the same boundary and is #2931.
 
 **Fixed-size arrays in every place (#2921).** A message field holds an array
 by value and owns its elements (filled once the message exists; a receive arm

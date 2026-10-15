@@ -162,9 +162,8 @@ static void emit_string_local_decl(CodeGenerator* gen, const char* name) {
  * The C declarations shadow any enclosing ones, and the release is a defer
  * of the handler's own scope, so it runs on fall-through, `break`/`continue`,
  * and `return` alike. */
-static void emit_owned_catch_handler(CodeGenerator* gen, ASTNode* catch_clause, int uid) {
-    const char* name = catch_clause->value;
-    ASTNode* handler = catch_clause->children[0];
+static void emit_owned_catch_handler(CodeGenerator* gen, const char* name,
+                                     ASTNode* handler, int uid) {
     int saved_var_count = gen->declared_var_count;
 
     print_line(gen, "if (!_aether_try_%d->reason_release) %s = aether_uniform_heap_str(%s, 0);",
@@ -5102,12 +5101,21 @@ static const char* builder_config_release(CodeGenerator* gen, const char* builde
     return codegen_normalise_callee(safe_c_name(release));
 }
 
+/* Does the builder `builder` never name its config? Read from its own
+ * body: such a builder neither frees the config nor returns it. */
+int builder_never_uses_config(ASTNode* builder) {
+    if (!builder || builder->type != AST_BUILDER_FUNCTION) return 0;
+    for (int i = 0; i < builder->child_count; i++)
+        if (builder->children[i] && builder->children[i]->type == AST_BLOCK)
+            return !expr_references_var(builder->children[i], "_builder");
+    return 0;
+}
+
 /* #2871: a builder owns the config its call hands it (it frees it, or
  * returns it as what it built). One whose body never names `_builder` does
  * neither, so its exit releases the config through its factory's release. */
 void push_builder_config_exit_release(CodeGenerator* gen, ASTNode* builder, ASTNode* body) {
-    if (!builder || builder->type != AST_BUILDER_FUNCTION || !builder->value || !body ||
-        expr_references_var(body, "_builder")) return;
+    if (!builder->value || !body || !builder_never_uses_config(builder)) return;
     const char* release = builder_config_release(gen, builder->value);
     if (!release) return;
     ASTNode* carrier = create_ast_node(AST_EXPRESSION_STATEMENT, NULL, body->line, body->column);
@@ -12546,24 +12554,25 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                 print_line(gen, "_aether_sandbox_depth = _aether_try_sbx_%d;", uid);
             }
             print_line(gen, "_aether_ctx_unwind(_aether_try_ctx_%d);", uid);
-            /* #2739: a binding a `try` of its handler writes is volatile,
-             * as its ownership flag is (emit_owned_catch_handler): the
-             * handler is outside that try, whose setjmp sees both. */
+            /* #2739: a binding a `try` of its handler writes is volatile:
+             * the handler is outside that try, whose setjmp sees it. */
             print_line(gen, "%s %s = _aether_try_%d->reason ? _aether_try_%d->reason : \"panic\";",
                        volatile_decl_type(try_volatile_qual_for(gen, catch_clause->value),
                                           "const char*"),
                        catch_clause->value, uid, uid);
+            /* #2333: the catcher owns the reason. A binding that is a
+             * plain local of the handler owns it as any string local does;
+             * `_` and a binding the handler reaches through a closure
+             * environment, a capture cell or actor state borrow it from a
+             * hidden owner of the handler's scope. */
             if (catch_binding_can_own(gen, catch_clause->value)) {
-                /* #2333: a heap-built panic message (aether_panic_owned)
-                 * belongs to the catcher. The binding becomes a heap-
-                 * tracked string local for the handler's scope: its flag
-                 * is the frame's ownership, so aliasing, reassignment,
-                 * escape and scope exit follow the rules every other
-                 * owned string local does. */
-                emit_owned_catch_handler(gen, catch_clause, uid);
+                emit_owned_catch_handler(gen, catch_clause->value,
+                                         catch_clause->children[0], uid);
             } else {
-                print_line(gen, "aether_try_pop();");
-                generate_statement(gen, catch_clause->children[0]);
+                char owner[32];
+                snprintf(owner, sizeof(owner), "_ae_rs%d", uid);
+                print_line(gen, "const char* %s = %s;", owner, catch_clause->value);
+                emit_owned_catch_handler(gen, owner, catch_clause->children[0], uid);
             }
             print_line(gen, "(void)%s;", catch_clause->value);
             unindent(gen);

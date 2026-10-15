@@ -1,6 +1,7 @@
 #include "aether_stringseq.h"
 #include "../string/aether_string.h"
 #include "../../runtime/aether_resource_caps.h"
+#include "../../runtime/utils/aether_count.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -21,7 +22,10 @@ StringSeq* string_seq_empty(void) {
     return NULL;
 }
 
-StringSeq* string_seq_cons(const char* head, StringSeq* tail) {
+/* A cell holding `head` in front of `tail`, taking over the reference to
+ * `tail` its caller holds: a builder's own spine, and cons once it has
+ * retained the tail. NULL when out of memory, `tail` still the caller's. */
+static StringSeq* seq_cell(const char* head, StringSeq* tail) {
     /* #463: cap-aware cons cell. Fixed sizeof(StringSeq); the
      * matching free in string_seq_free passes the same size. */
     StringSeq* cell = (StringSeq*)aether_caps_malloc(sizeof(StringSeq));
@@ -34,10 +38,13 @@ StringSeq* string_seq_cons(const char* head, StringSeq* tail) {
      * no-op on plain `char*` literals (the magic-byte check fails), so const
      * literals pass through unchanged. */
     string_retain_shared(head);
-    /* Retain tail so the cell holds its own reference; callers
-     * transferring ownership drop their local with `string_seq_free`
-     * immediately after the cons. */
-    cell->tail = string_seq_retain(tail);
+    cell->tail = tail;
+    return cell;
+}
+
+StringSeq* string_seq_cons(const char* head, StringSeq* tail) {
+    StringSeq* cell = seq_cell(head, tail);
+    if (cell) string_seq_retain(tail);
     return cell;
 }
 
@@ -61,8 +68,10 @@ int string_seq_length(StringSeq* s) {
     return s ? s->length : 0;
 }
 
+/* A sequence crosses threads (a message field, a closure's capture), so
+ * its cells' counts are atomic. */
 StringSeq* string_seq_retain(StringSeq* s) {
-    if (s) s->ref_count++;
+    if (s) aether_count_inc(&s->ref_count);
     return s;
 }
 
@@ -72,7 +81,7 @@ void string_seq_free(StringSeq* s) {
      * decrement: the other owner will eventually run its own free
      * and continue the walk past that point. */
     while (s) {
-        if (--s->ref_count > 0) {
+        if (aether_count_dec(&s->ref_count) > 1) {
             return;
         }
         StringSeq* next = s->tail;
@@ -98,15 +107,11 @@ StringSeq* string_seq_from_array(void* arr_v, int count) {
     /* Build back-to-front so we cons each element in O(1). */
     for (int i = count - 1; i >= 0; i--) {
         AetherString* elem = arr->strings[i];
-        StringSeq* cell = string_seq_cons((const char*)elem, head);
+        StringSeq* cell = seq_cell((const char*)elem, head);
         if (!cell) {
             string_seq_free(head);
             return NULL;
         }
-        /* cons retained the prior `head`; drop our local ref so the
-         * new cell holds the only one. Safe even when head is NULL
-         * (free is a no-op). */
-        string_seq_free(head);
         head = cell;
     }
     return head;
@@ -126,16 +131,11 @@ StringSeq* string_seq_reverse(StringSeq* s) {
     StringSeq* result = NULL;
     StringSeq* cur = s;
     while (cur) {
-        StringSeq* cell = string_seq_cons((const char*)cur->head, result);
+        StringSeq* cell = seq_cell((const char*)cur->head, result);
         if (!cell) {
             string_seq_free(result);
             return NULL;
         }
-        /* cons retained `result` (the prior head of the new spine);
-         * we hold that ref ourselves through `result`. Drop our
-         * local now so the new cell is the sole owner of the rest
-         * of the chain. Safe even when result is NULL. */
-        string_seq_free(result);
         result = cell;
         cur = cur->tail;
     }
@@ -154,17 +154,15 @@ StringSeq* string_seq_concat(StringSeq* a, StringSeq* b) {
     StringSeq* reversed = string_seq_reverse(a);
     if (!reversed) return NULL;
 
-    StringSeq* result = b;
-    string_seq_retain(result); /* match the cons retain pattern below */
+    StringSeq* result = string_seq_retain(b);
     StringSeq* cur = reversed;
     while (cur) {
-        StringSeq* cell = string_seq_cons((const char*)cur->head, result);
+        StringSeq* cell = seq_cell((const char*)cur->head, result);
         if (!cell) {
             string_seq_free(result);
             string_seq_free(reversed);
             return NULL;
         }
-        string_seq_free(result);
         result = cell;
         cur = cur->tail;
     }
@@ -183,12 +181,11 @@ StringSeq* string_seq_take(StringSeq* s, int n) {
     StringSeq* cur = s;
     int taken = 0;
     while (cur && taken < n) {
-        StringSeq* cell = string_seq_cons((const char*)cur->head, reversed_prefix);
+        StringSeq* cell = seq_cell((const char*)cur->head, reversed_prefix);
         if (!cell) {
             string_seq_free(reversed_prefix);
             return NULL;
         }
-        string_seq_free(reversed_prefix);
         reversed_prefix = cell;
         cur = cur->tail;
         taken++;
@@ -258,10 +255,10 @@ StringSeq* string_seq_map(StringSeq* s, void* f) {
     StringSeq* cur = s;
     while (cur) {
         const char* mapped = body(clo.env, (const char*)cur->head);
-        StringSeq* cell = string_seq_cons(mapped, reversed);
+        StringSeq* cell = seq_cell(mapped, reversed);
         /* The closure returns an OWNED heap string (a fresh
          * `string.to_upper` / `string.concat` result has refcount 1).
-         * `cons` took its own retain on `mapped`, so the transient ref
+         * The cell took its own retain on `mapped`, so the transient ref
          * the closure handed us must be released here — otherwise the
          * mapped string leaks one ref and never reaches 0 on
          * `seq_free`. `string_release` is NULL-safe and a no-op on
@@ -273,9 +270,6 @@ StringSeq* string_seq_map(StringSeq* s, void* f) {
             string_seq_free(reversed);
             return NULL;
         }
-        /* cons retained `reversed`; drop our local so the new cell is
-         * the sole owner of the prior chain. */
-        string_seq_free(reversed);
         reversed = cell;
         cur = cur->tail;
     }
@@ -295,12 +289,11 @@ StringSeq* string_seq_filter(StringSeq* s, void* pred) {
     StringSeq* cur = s;
     while (cur) {
         if (test(clo.env, (const char*)cur->head)) {
-            StringSeq* cell = string_seq_cons((const char*)cur->head, reversed);
+            StringSeq* cell = seq_cell((const char*)cur->head, reversed);
             if (!cell) {
                 string_seq_free(reversed);
                 return NULL;
             }
-            string_seq_free(reversed);
             reversed = cell;
         }
         cur = cur->tail;

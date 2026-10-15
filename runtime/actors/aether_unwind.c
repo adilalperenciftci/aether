@@ -159,9 +159,40 @@ void aether_unwind_exit_frame(void) {
     tls_depth--;
 }
 
+typedef void (*AetherTeardown)(void* obj);
+
+static AETHER_TLS_SHARED void** tls_teardown_queue = NULL;
+static AETHER_TLS_SHARED int tls_teardown_count = 0;
+static AETHER_TLS_SHARED int tls_teardown_capacity = 0;
+static AETHER_TLS_SHARED int tls_teardown_running = 0;
+
+void aether_teardown(void* obj) {
+    if (tls_teardown_running) {
+        if (tls_teardown_count == tls_teardown_capacity) {
+            int cap = tls_teardown_capacity ? tls_teardown_capacity * 2 : 16;
+            void** q = (void**)realloc(tls_teardown_queue, (size_t)cap * sizeof(void*));
+            if (!q) abort();
+            tls_teardown_queue = q;
+            tls_teardown_capacity = cap;
+        }
+        tls_teardown_queue[tls_teardown_count++] = obj;
+        return;
+    }
+    tls_teardown_running = 1;
+    (*(AetherTeardown*)obj)(obj);
+    while (tls_teardown_count > 0) {
+        void* next = tls_teardown_queue[--tls_teardown_count];
+        (*(AetherTeardown*)next)(next);
+    }
+    tls_teardown_running = 0;
+}
+
 void aether_unwind_thread_cleanup(void) {
     free(tls_journal.items);
     tls_journal.items = NULL;
     tls_journal.count = 0;
     tls_journal.capacity = 0;
+    free(tls_teardown_queue);
+    tls_teardown_queue = NULL;
+    tls_teardown_capacity = 0;
 }

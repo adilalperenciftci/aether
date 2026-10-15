@@ -4104,7 +4104,8 @@ static void emit_lib_metadata(CodeGenerator* gen, ASTNode* program) {
         "    const char* const* constant_modules;\n"
         "    const char* runtime;\n"
         "    const char* const* closure_modules;\n"
-        "    int actors; };\n\n");
+        "    int actors;\n"
+        "    const unsigned char* closure_config_unused; };\n\n");
 
     fprintf(gen->output,
         "static const struct _AetherLibFn _aether_lib_fns[] = {\n");
@@ -4489,6 +4490,21 @@ static void emit_lib_metadata(CodeGenerator* gen, ASTNode* program) {
      * approximation of "the .ae the user passed to aetherc". The
      * artifact may bundle multiple sources (concat-ae); naming the
      * first one is the simplest stable convention. */
+    /* #2860: parallel to the closure table, 1 for a builder that never
+     * names its config, so a program importing the library keeps the
+     * config on its own runtime. */
+    int config_unused_any = 0;
+    for (int r = 0; r < clo_count; r++)
+        if (strcmp(rec_role[r], "builder") == 0 && builder_never_uses_config(rec_fn[r]))
+            config_unused_any = 1;
+    if (config_unused_any) {
+        fprintf(gen->output, "static const unsigned char _aether_lib_closure_config_unused[] = {");
+        for (int r = 0; r < clo_count; r++)
+            fprintf(gen->output, "%s%d", r ? ", " : " ",
+                    strcmp(rec_role[r], "builder") == 0 && builder_never_uses_config(rec_fn[r]));
+        fprintf(gen->output, " };\n\n");
+    }
+
     const char* primary_src = "";
     for (int i = 0; i < fn_count; i++) {
         if (fns[i]->source_file) { primary_src = fns[i]->source_file; break; }
@@ -4509,8 +4525,10 @@ static void emit_lib_metadata(CodeGenerator* gen, ASTNode* program) {
     /* "1.5": the library links the shared runtime (#2297). */
     /* "1.6": a package library's builder records carry their module. */
     /* "1.7": the library runs actors, its own or an imported library's. */
+    /* "1.8": a builder record says its builder never uses its config. */
     int lib_runs_actors = gen->actor_count > 0 || gen->lib_actors;
-    const char* schema = lib_runs_actors ? "1.7"
+    const char* schema = config_unused_any ? "1.8"
+                       : lib_runs_actors ? "1.7"
                        : (pkg_lib && pkg_closures) ? "1.6"
                        : gen->lib_shared_runtime ? "1.5"
                        : pkg_lib ? "1.4"
@@ -4538,7 +4556,8 @@ static void emit_lib_metadata(CodeGenerator* gen, ASTNode* program) {
     fprintf(gen->output, "%s, ", gen->lib_shared_runtime ? "\"shared\"" : "NULL");
     if (pkg_lib && clo_count > 0) fprintf(gen->output, "_aether_lib_closure_modules, ");
     else                          fprintf(gen->output, "NULL, ");
-    fprintf(gen->output, "%d\n};\n\n", lib_runs_actors ? 1 : 0);
+    fprintf(gen->output, "%d, %s\n};\n\n", lib_runs_actors ? 1 : 0,
+            config_unused_any ? "_aether_lib_closure_config_unused" : "NULL");
 
     /* #996 --emit=csrc: serialize the identical catalog as JSON alongside the
      * C struct. Driven by the same fns[]/closure/const tables emitted above, so
@@ -4629,6 +4648,8 @@ static void emit_lib_metadata(CodeGenerator* gen, ASTNode* program) {
                 fputs(", \"module\": ", j); emit_json_string(j, rec_mod[r]);
             }
             fputs(", \"signature\": ", j);            emit_json_string(j, sig ? sig : "");
+            if (strcmp(rec_role[r], "builder") == 0 && builder_never_uses_config(rec_fn[r]))
+                fputs(", \"config_unused\": true", j);
             fputs(", \"captures\": [", j);
             if (lit_ci[r] >= 0 && gen->closures[lit_ci[r]].capture_count > 0) {
                 ASTNode* owner = NULL;
@@ -7914,6 +7935,7 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     print_line(gen, "extern void aether_unwind_track(const void*, AetherUnwindFree);");
     print_line(gen, "extern void aether_unwind_track_place(const void*, const void*, AetherUnwindFree);");
     print_line(gen, "extern void aether_unwind_forget(const void*);");
+    print_line(gen, "extern void aether_teardown(void*);");
     /* Is `s` a counted AetherString, the one shape string_release frees?
      * The same byte-by-byte probe as aether_heap_str_free below. */
     print_line(gen, "static inline AETHER_MAYBE_UNUSED int aether_str_is_counted(const char* s) {");

@@ -74,12 +74,20 @@
  * running scheduler on the library's first spawn, and calls
  * scheduler_shutdown() before it exits to drain it.
  *
+ * v9 (schema "1.8", #2860) appends `closure_config_unused`, parallel to
+ * `closures`: 1 for a builder record whose builder never names its config
+ * (`_builder`), else 0. Such a builder neither frees nor returns the config,
+ * so a program calling it through a binary import passes it no config and
+ * releases its own with its own runtime: a library linking its own copy of
+ * the runtime cannot free memory the program's copy allocated.
+ *
  * Schema versioning: `schema_version` is "1.0" for function-only
  * artifacts, "1.1" once closure records are present, "1.2" once
  * constant records are present, "1.3" once struct records or source
  * signatures are, "1.4" for a package library, "1.5" for a library
  * linked against the shared runtime, "1.6" for a package library
- * that exports builders, and "1.7" for a library that runs actors. Hosts that read the metadata should
+ * that exports builders, "1.7" for a library that runs actors, and "1.8"
+ * for a library exporting a builder that never uses its config. Hosts that read the metadata should
  * accept any "1.<minor>" — within "1.x" fields are only ever appended,
  * and a reader that predates a field stops at the count/pointer it
  * knows (a "1.0" reader ignores `closures` and `constants` exactly as
@@ -204,6 +212,9 @@ typedef struct {
                                                     closures, or NULL       */
     int                       actors;            /* schema >= 1.7: 1 when the
                                                     library runs actors     */
+    const unsigned char*      closure_config_unused; /* schema >= 1.8;
+                                                    parallel to closures, or
+                                                    NULL                    */
 } AetherLibMeta;
 
 /* The single entry point. Every `--emit=lib` artifact exports this

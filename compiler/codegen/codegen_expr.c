@@ -4571,11 +4571,20 @@ static void emit_closure_env_typedef(CodeGenerator* gen, int ci) {
        or a captured env is freed by whichever holder releases last. The env
        itself is reference-counted too (#2494): an env that captured this
        closure holds a reference, so this destructor is a release and only
-       the last one tears the env down. */
+       the last one tears the env down. The teardown runs through
+       aether_teardown, which queues it when another env's teardown reaches
+       it: a chain of closures each holding the one before is torn down in
+       constant stack. */
+    fprintf(gen->output, "static void _closure_env_%d_teardown(void* _p);\n", id);
     fprintf(gen->output, "static void _closure_env_%d_free(void* _p) {\n", id);
     fprintf(gen->output, "    if (!_p) return;\n");
     fprintf(gen->output, "    _closure_env_%d* _e = (_closure_env_%d*)_p;\n", id, id);
     fprintf(gen->output, "    if (atomic_fetch_sub_explicit(&_e->_refs, 1, memory_order_acq_rel) != 1) return;\n");
+    fprintf(gen->output, "    _e->_dtor = _closure_env_%d_teardown;\n", id);
+    fprintf(gen->output, "    aether_teardown(_p);\n");
+    fprintf(gen->output, "}\n\n");
+    fprintf(gen->output, "static void _closure_env_%d_teardown(void* _p) {\n", id);
+    fprintf(gen->output, "    _closure_env_%d* _e = (_closure_env_%d*)_p;\n", id, id);
     {
         for (int i = 0; i < cap_count; i++) {
             int promoted = capture_is_promoted(gen, captures[i], parent_func);
