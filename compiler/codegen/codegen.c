@@ -4,6 +4,7 @@
 #include <string.h>
 #include <stdarg.h>
 #include <stdbool.h>
+#include <ctype.h>
 #include "codegen_internal.h"
 #include "../../std/string/aether_string_abi.h"
 #include "aether_stdlib_symbols.h"   /* #1366: generated */
@@ -3049,6 +3050,28 @@ static int lib_const_identity(ASTNode* cd, const char** name, const char** modul
 // Functions with unsupported types (tuples, structs, closures) are skipped
 // with a compile-time warning so the user knows the function won't be
 // exposed across the FFI boundary.
+/* #2931: the function a caller gives a string an export returned back to,
+ * so the library's own runtime, which made it, releases it. Named for the
+ * library (its package, else its entry file's stem), and recorded in the
+ * catalog, so an importer never derives it. */
+static const char* lib_string_release_symbol(CodeGenerator* gen) {
+    const char* base = module_lib_package();
+    const char* end = NULL;
+    if (!base) {
+        base = gen->source_file ? gen->source_file : "lib";
+        for (const char* p = base; *p; p++)
+            if (*p == '/' || *p == '\\') base = p + 1;
+        end = strrchr(base, '.');
+    }
+    if (!end) end = base + strlen(base);
+    char id[128];
+    size_t n = 0;
+    for (const char* p = base; p < end && n + 1 < sizeof(id); p++)
+        id[n++] = isalnum((unsigned char)*p) ? *p : '_';
+    id[n] = '\0';
+    return cg_internf("aether_%s_string_release", n ? id : "lib");
+}
+
 static void emit_lib_alias_stubs(CodeGenerator* gen, ASTNode* program) {
     if (!gen || !gen->emit_lib || !program) return;
 
@@ -3098,12 +3121,20 @@ static void emit_lib_alias_stubs(CodeGenerator* gen, ASTNode* program) {
                     "void aether_main_exit(void);\n\n");
         }
     }
-    /* A `string`-returning exported function now yields a magic
-     * AetherString internally; the C ABI contract is a plain `const char*`,
-     * so unwrap to the payload at the boundary (matches the pre-magic
-     * plain-char* return the C consumer expects). aether_string_data is
-     * magic-aware and NULL-safe. */
-    fprintf(gen->output, "extern const char* aether_string_data(const void*);\n\n");
+    /* #2931: a `-> string` export hands its caller one reference to a
+     * counted string (R3): the caller reads it with aether_string_data and
+     * aether_string_length and gives it back through this function, to the
+     * runtime that made it. */
+    const char* release_sym = lib_string_release_symbol(gen);
+    fprintf(gen->output, "void %s(const void* s) { string_release((const char*)s); }\n\n",
+            release_sym);
+    if (gen->csrc_header_file)
+        fprintf(gen->csrc_header_file,
+                "/* A `-> string` export returns a string the caller owns: read it with\n"
+                " * aether_string_data() / aether_string_length(), then give it back. */\n"
+                "const char* aether_string_data(const void* s);\n"
+                "size_t aether_string_length(const void* s);\n"
+                "void %s(const void* s);\n\n", release_sym);
 
     for (int i = 0; i < program->child_count; i++) {
         ASTNode* child = program->children[i];
@@ -3164,7 +3195,9 @@ static void emit_lib_alias_stubs(CodeGenerator* gen, ASTNode* program) {
         // parameter-side check uses. Closes #277.
         /* As the definition decides it, over every clause of a set (#2645). */
         Type* result = sig.result;
-        const char* ret_abi = get_abi_type(result);
+        /* #2931: a string result is the counted string's handle. */
+        const char* ret_abi = result && result->kind == TYPE_STRING ? "const void*"
+                                                                    : get_abi_type(result);
         int returns_value = result != NULL;
         if (!ok) {
             char msg[256];
@@ -3224,12 +3257,7 @@ static void emit_lib_alias_stubs(CodeGenerator* gen, ASTNode* program) {
             }
         }
         fprintf(gen->output, ") {\n    ");
-        int ret_is_string = (result && result->kind == TYPE_STRING);
         if (strcmp(ret_abi, "void") != 0) fprintf(gen->output, "return ");
-        /* Unwrap a magic AetherString return to its C `char*` payload so
-         * C callers (dlsym'd function pointers, etc.) read the bytes, not
-         * the struct header. */
-        if (ret_is_string) fprintf(gen->output, "aether_string_data((const void*)(");
         /* #2297: a typed struct pointer returns as the opaque AetherValue*;
          * cast, as the parameter side does, or GCC 14+ rejects the
          * incompatible pointer under -Werror. */
@@ -3253,9 +3281,7 @@ static void emit_lib_alias_stubs(CodeGenerator* gen, ASTNode* program) {
                 fprintf(gen->output, "%s", param_names[k]);
             }
         }
-        fprintf(gen->output, ")");
-        if (ret_is_string) fprintf(gen->output, "))");
-        fprintf(gen->output, ";\n}\n");
+        fprintf(gen->output, ");\n}\n");
     }
 
     /* #2349: an exported builder of a package module. A builder's ABI is its
@@ -4008,7 +4034,8 @@ static void emit_lib_metadata(CodeGenerator* gen, ASTNode* program) {
         "    const char* runtime;\n"
         "    const char* const* closure_modules;\n"
         "    int actors;\n"
-        "    const unsigned char* closure_config_unused; };\n\n");
+        "    const unsigned char* closure_config_unused;\n"
+        "    const char* string_release; };\n\n");
 
     fprintf(gen->output,
         "static const struct _AetherLibFn _aether_lib_fns[] = {\n");
@@ -4429,8 +4456,24 @@ static void emit_lib_metadata(CodeGenerator* gen, ASTNode* program) {
     /* "1.6": a package library's builder records carry their module. */
     /* "1.7": the library runs actors, its own or an imported library's. */
     /* "1.8": a builder record says its builder never uses its config. */
+    /* "1.9": an export returns a string, given back through string_release. */
+    int strings_returned = 0;
+    for (int i = 0; i < fn_count && !strings_returned; i++) {
+        LibSig rs;
+        const char* rwhy = NULL;
+        if (lib_fn_signature(gen, fns[i], &rs, &rwhy) && rs.result &&
+            rs.result->kind == TYPE_STRING) strings_returned = 1;
+    }
+    for (int r = 0; r < clo_count && !strings_returned; r++) {
+        LibSig rs;
+        const char* rwhy = NULL;
+        if (strcmp(rec_role[r], "builder") == 0 && rec_fn[r] &&
+            lib_fn_signature(gen, rec_fn[r], &rs, &rwhy) && rs.result &&
+            rs.result->kind == TYPE_STRING) strings_returned = 1;
+    }
     int lib_runs_actors = gen->actor_count > 0 || gen->lib_actors;
-    const char* schema = config_unused_any ? "1.8"
+    const char* schema = strings_returned ? "1.9"
+                       : config_unused_any ? "1.8"
                        : lib_runs_actors ? "1.7"
                        : (pkg_lib && pkg_closures) ? "1.6"
                        : gen->lib_shared_runtime ? "1.5"
@@ -4459,8 +4502,10 @@ static void emit_lib_metadata(CodeGenerator* gen, ASTNode* program) {
     fprintf(gen->output, "%s, ", gen->lib_shared_runtime ? "\"shared\"" : "NULL");
     if (pkg_lib && clo_count > 0) fprintf(gen->output, "_aether_lib_closure_modules, ");
     else                          fprintf(gen->output, "NULL, ");
-    fprintf(gen->output, "%d, %s\n};\n\n", lib_runs_actors ? 1 : 0,
+    fprintf(gen->output, "%d, %s, ", lib_runs_actors ? 1 : 0,
             config_unused_any ? "_aether_lib_closure_config_unused" : "NULL");
+    if (strings_returned) fprintf(gen->output, "\"%s\"\n};\n\n", lib_string_release_symbol(gen));
+    else fprintf(gen->output, "NULL\n};\n\n");
 
     /* #996 --emit=csrc: serialize the identical catalog as JSON alongside the
      * C struct. Driven by the same fns[]/closure/const tables emitted above, so
@@ -4477,6 +4522,11 @@ static void emit_lib_metadata(CodeGenerator* gen, ASTNode* program) {
             fputs("  \"runtime\": ", j); emit_json_string(j, "shared"); fputs(",\n", j);
         }
         if (lib_runs_actors) fputs("  \"actors\": true,\n", j);
+        if (strings_returned) {
+            fputs("  \"string_release\": ", j);
+            emit_json_string(j, lib_string_release_symbol(gen));
+            fputs(",\n", j);
+        }
 
         /* capabilities: the --with grants this artifact was built with. The
          * emitted C only contains code paths for granted capabilities, so this

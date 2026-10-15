@@ -465,6 +465,7 @@ typedef struct {
     const char* const* closure_modules;    /* schema >= 1.6, parallel to closures */
     int         actors;                    /* schema >= 1.7: the library runs actors */
     const unsigned char* closure_config_unused; /* schema >= 1.8, parallel to closures */
+    const char* string_release;            /* schema >= 1.9: gives back a returned string */
 } _AeLibInfoMeta;
 
 /* The catalog's schema minor ("1.<minor>"). A reader may touch a field only
@@ -5240,6 +5241,55 @@ static char g_binimport_static_names[1024] = "";
 /* Those of them that run actors (catalog >= 1.7). */
 static char g_binimport_static_actor_names[1024] = "";
 
+// The argument list ("a, b") that forwards a parameter list ("a: A, b: B").
+static void ae_param_names(const char* params, char* args, size_t acap) {
+    size_t off = 0;
+    int depth = 0, first = 1;
+    const char* start = params;
+    args[0] = '\0';
+    for (const char* p = params; ; p++) {
+        if (*p == '(') depth++;
+        else if (*p == ')') depth--;
+        if ((*p == ',' && depth == 0) || *p == '\0') {
+            while (*start == ' ') start++;
+            const char* colon = strchr(start, ':');
+            if (colon && colon < p && colon > start) {
+                int n = snprintf(args + off, acap - off, "%s%.*s", first ? "" : ", ",
+                                 (int)(colon - start), start);
+                if (n > 0 && (size_t)n < acap - off) off += (size_t)n;
+                first = 0;
+            }
+            if (*p == '\0') break;
+            start = p + 1;
+        }
+    }
+}
+
+/* #2931: the declaration of an export whose result is a string, which the
+ * library hands its caller one reference to. On the shared runtime the
+ * declaration takes it as it is (`@heap`). A library with a runtime of its
+ * own made it in that runtime, which alone may free it: the stub copies it
+ * into the program's (aether_string_import) and gives the library's back
+ * through the release its catalog names. `kind` is "" or "builder ". */
+static void ae_emit_string_export(FILE* out, const char* kind, const char* csym,
+                                  const char* ext_name, const char* name,
+                                  const char* ext_params, const char* params,
+                                  const char* call_args, int shared) {
+    if (shared) {
+        fprintf(out, "@extern(\"%s\") %s(%s) -> string @heap\n", csym, ext_name, ext_params);
+        if (!strcmp(ext_name, name)) return;
+        fprintf(out, "%s%s(%s) {\n    return %s(%s)\n}\n", kind, name, params, ext_name,
+                call_args);
+        return;
+    }
+    fprintf(out, "@extern(\"%s\") __aes_%s(%s) -> ptr\n", csym, name, ext_params);
+    fprintf(out, "%s%s(%s)%s {\n", kind, name, params, kind[0] ? "" : " -> string");
+    fprintf(out, "    _aes_h = __aes_%s(%s)\n", name, call_args);
+    fprintf(out, "    _aes_s = __aes_import(_aes_h)\n");
+    fprintf(out, "    __aes_release(_aes_h)\n");
+    fprintf(out, "    return _aes_s\n}\n");
+}
+
 // Split a rendered signature "(A, B) -> R" into an Aether parameter list
 // ("p0: A, p1: B"), a bare argument list ("p0, p1"), and the return type
 // ("R", or "void"). Top-level comma split tracking paren depth; the ABI
@@ -5403,6 +5453,14 @@ static int ae_generate_binimport_stub(const char* so_path, const char* module, F
     }
     if (minor >= 3 && m->struct_count > 0) fprintf(out, "\n");
 
+    /* #2931: a string an export returns is handed over (schema >= 1.9). */
+    int shared_rt = minor >= 5 && m->runtime && strcmp(m->runtime, "shared") == 0;
+    int strings_handed = minor >= 9 && m->string_release && m->string_release[0];
+    if (strings_handed && !shared_rt) {
+        fprintf(out, "@extern(\"aether_string_import\") __aes_import(s: @aether ptr) -> string @heap\n");
+        fprintf(out, "@extern(\"%s\") __aes_release(s: @aether ptr)\n\n", m->string_release);
+    }
+
     // Function-table exports → `@extern("<c_symbol>") <name>(params) -> ret`.
     for (int i = 0; i < m->function_count && m->functions; i++) {
         const _AeLibInfoFn* f = &m->functions[i];
@@ -5426,6 +5484,13 @@ static int ae_generate_binimport_stub(const char* so_path, const char* module, F
                 const char* rt = arrow + 2;
                 while (*rt == ' ') rt++;
                 int plen = (int)(close - ssig - 1);
+                if (strings_handed && strcmp(rt, "string") == 0) {
+                    snprintf(params, sizeof(params), "%.*s", plen, ssig + 1);
+                    ae_param_names(params, args, sizeof(args));
+                    ae_emit_string_export(out, "", f->c_symbol, f->aether_name, f->aether_name,
+                                          params, params, args, shared_rt);
+                    continue;
+                }
                 if (strcmp(rt, "void") == 0) {
                     fprintf(out, "@extern(\"%s\") %s(%.*s)\n",
                             f->c_symbol, f->aether_name, plen, ssig + 1);
@@ -5438,7 +5503,10 @@ static int ae_generate_binimport_stub(const char* so_path, const char* module, F
         }
         ae_split_signature(f->signature, params, sizeof(params),
                             args, sizeof(args), ret, sizeof(ret));
-        if (strcmp(ret, "void") == 0) {
+        if (strings_handed && strcmp(ret, "string") == 0) {
+            ae_emit_string_export(out, "", f->c_symbol, f->aether_name, f->aether_name,
+                                  params, params, args, shared_rt);
+        } else if (strcmp(ret, "void") == 0) {
             fprintf(out, "@extern(\"%s\") %s(%s)\n", f->c_symbol, f->aether_name, params);
         } else {
             fprintf(out, "@extern(\"%s\") %s(%s) -> %s\n",
@@ -5496,6 +5564,18 @@ static int ae_generate_binimport_stub(const char* so_path, const char* module, F
          * program's config itself, on the program's runtime that made it. */
         int config_unused = minor >= 8 && m->closure_config_unused &&
                             m->closure_config_unused[i];
+        if (strings_handed && strcmp(ret, "string") == 0) {
+            char ext_params[1200], call_args[700];
+            snprintf(ext_params, sizeof(ext_params), "%s%s_builder: ptr", params, comma);
+            snprintf(call_args, sizeof(call_args), "%s%s%s", args, acomma,
+                     config_unused ? "null" : "_builder");
+            char aeb[300];
+            snprintf(aeb, sizeof(aeb), "__aeb_%s", c->name);
+            fprintf(out, "\n");
+            ae_emit_string_export(out, "builder ", csym, aeb, c->name,
+                                  ext_params, params, call_args, shared_rt);
+            continue;
+        }
         fprintf(out, "\n@extern(\"%s\") __aeb_%s(%s%s_builder: ptr)%s%s\n",
                 csym, c->name, params, comma,
                 is_void ? "" : " -> ", is_void ? "" : ret);
@@ -11826,6 +11906,8 @@ static int cmd_lib_info(int argc, char** argv) {
     }
     if (minor >= 5) {
         printf("  Runtime:       %s\n", (m->runtime && m->runtime[0]) ? m->runtime : "static");
+    if (minor >= 9 && m->string_release && m->string_release[0])
+        printf("  String release: %s\n", m->string_release);
     }
     if (minor >= 7) {
         printf("  Actors:        %s\n", m->actors ? "yes" : "no");
