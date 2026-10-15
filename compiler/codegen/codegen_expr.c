@@ -5049,14 +5049,10 @@ void emit_closure_definitions(CodeGenerator* gen) {
              * `if (_heap_s) ...`, an undeclared `s` there. */
             char** prev_escaped = gen->escaped_string_vars;
             int prev_escaped_count = gen->escaped_string_var_count;
-            char** prev_ret_escaped = gen->return_escaped_string_vars;
-            int prev_ret_escaped_count = gen->return_escaped_string_var_count;
             char** prev_ret_escaped_struct = gen->return_escaped_struct_vars;
             int prev_ret_escaped_struct_count = gen->return_escaped_struct_var_count;
             gen->escaped_string_vars = NULL;
             gen->escaped_string_var_count = 0;
-            gen->return_escaped_string_vars = NULL;
-            gen->return_escaped_string_var_count = 0;
             char** prev_captured = gen->captured_string_params;
             int prev_captured_count = gen->captured_string_param_count;
             gen->captured_string_params = NULL;
@@ -5310,8 +5306,6 @@ void emit_closure_definitions(CodeGenerator* gen) {
             clear_captured_string_params(gen);
             gen->captured_string_params = prev_captured;
             gen->captured_string_param_count = prev_captured_count;
-            gen->return_escaped_string_vars = prev_ret_escaped;
-            gen->return_escaped_string_var_count = prev_ret_escaped_count;
             gen->return_escaped_struct_vars = prev_ret_escaped_struct;
             gen->return_escaped_struct_var_count = prev_ret_escaped_struct_count;
             gen->current_function = prev_current_function;

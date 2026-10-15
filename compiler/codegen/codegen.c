@@ -706,8 +706,6 @@ CodeGenerator* create_code_generator(FILE* output) {
     gen->heap_string_var_try_depths = NULL;
     gen->escaped_string_vars = NULL;
     gen->escaped_string_var_count = 0;
-    gen->return_escaped_string_vars = NULL;
-    gen->return_escaped_string_var_count = 0;
     gen->captured_string_params = NULL;
     gen->captured_string_param_count = 0;
     gen->callee_memo = NULL;
@@ -880,6 +878,7 @@ void code_generator_release(CodeGenerator* gen) {
         gen->opt_type_names = NULL;
         gen->opt_type_count = 0;
         gen->opt_type_capacity = 0;
+        own_reset();   /* #2921 */
         for (int i = 0; i < gen->static_str_count; i++) free(gen->static_str_bytes[i]);   /* #2520 */
         free(gen->static_str_bytes);
         free(gen->static_str_lens);
@@ -1260,14 +1259,6 @@ void clear_escaped_string_vars(CodeGenerator* gen) {
     }
     gen->escaped_string_vars = NULL;
     gen->escaped_string_var_count = 0;
-    if (gen->return_escaped_string_vars) {
-        for (int i = 0; i < gen->return_escaped_string_var_count; i++) {
-            free(gen->return_escaped_string_vars[i]);
-        }
-        free(gen->return_escaped_string_vars);
-    }
-    gen->return_escaped_string_vars = NULL;
-    gen->return_escaped_string_var_count = 0;
     if (gen->return_escaped_struct_vars) {
         for (int i = 0; i < gen->return_escaped_struct_var_count; i++) {
             free(gen->return_escaped_struct_vars[i]);
@@ -1386,29 +1377,6 @@ void clear_opt_str_vars(CodeGenerator* gen) {
     }
     gen->escaped_opt_str_vars = NULL;
     gen->escaped_opt_str_var_count = 0;
-}
-
-/* Return-escape sibling. See the header comment on
- * `return_escaped_string_vars` for the two-set rationale. */
-int is_return_escaped_string_var(CodeGenerator* gen, const char* var_name) {
-    if (!gen || !var_name) return 0;
-    for (int i = 0; i < gen->return_escaped_string_var_count; i++) {
-        if (strcmp(gen->return_escaped_string_vars[i], var_name) == 0) {
-            return 1;
-        }
-    }
-    return 0;
-}
-
-void mark_return_escaped_string_var(CodeGenerator* gen, const char* var_name) {
-    if (!gen || !var_name) return;
-    if (is_return_escaped_string_var(gen, var_name)) return;
-    char** new_vars = realloc(gen->return_escaped_string_vars,
-                              sizeof(char*) * (gen->return_escaped_string_var_count + 1));
-    if (!new_vars) return;
-    gen->return_escaped_string_vars = new_vars;
-    gen->return_escaped_string_vars[gen->return_escaped_string_var_count] = strdup(var_name);
-    gen->return_escaped_string_var_count++;
 }
 
 /* #752: a struct local returned (directly or as a tuple element)
@@ -1849,6 +1817,21 @@ static int try_emit_struct_destroy(CodeGenerator* gen, ASTNode* deferred) {
     return 1;
 }
 
+/* #2921: a composite local that owns its parts. Annotation "own_drop:<name>",
+ * the local's type on the carrier: the place leaves the journal, then what
+ * it holds is dropped. */
+static int try_emit_own_drop(CodeGenerator* gen, ASTNode* deferred) {
+    if (!deferred || !deferred->annotation ||
+        strncmp(deferred->annotation, "own_drop:", 9) != 0) return 0;
+    const char* name = deferred->annotation + 9;
+    print_indent(gen);
+    fprintf(gen->output, "aether_unwind_forget((const void*)&%s);\n", name);
+    print_indent(gen);
+    fprintf(gen->output, "/* deferred */ %s((%s*)&%s);\n",
+            own_fn(gen, deferred->node_type, "drop"), get_c_type(deferred->node_type), name);
+    return 1;
+}
+
 /* #2528: a local array of structs that own strings or closures. Annotation:
  *   "struct_array_destroy:<varname>:<StructName>:<N>"
  * Each element is destroyed at scope exit. */
@@ -2048,6 +2031,7 @@ static void emit_deferred_one(CodeGenerator* gen, int i) {
         !try_emit_handover_exit_free(gen, deferred) &&   /* #2798 */
         !try_emit_scoped_temp_free(gen, deferred) &&
         !try_emit_struct_destroy(gen, deferred) &&
+        !try_emit_own_drop(gen, deferred) &&               /* #2921 */
         !try_emit_struct_array_destroy(gen, deferred) &&   /* #2528 */
         !try_emit_str_array_release(gen, deferred) &&      /* #2618 */
         !try_emit_closure_array_release(gen, deferred) &&
@@ -5173,6 +5157,60 @@ static void emit_main_shim_for_target(CodeGenerator* gen, ASTNode* program) {
 }
 
 // Emit a typedef for a tuple type if not already emitted
+static void emit_struct_in_order(CodeGenerator* gen, ASTNode* program, int i, char* state);
+
+/* `t name` as a C member declaration: an array's length follows the name
+ * (`const char* _0[2]`); `const char*[2] _0` is not C. */
+static const char* c_member_decl(Type* t, const char* name) {
+    if (t && t->kind == TYPE_ARRAY && t->array_size > 0)
+        return c_member_decl(t->element_type, cg_internf("%s[%d]", name, t->array_size));
+    return cg_internf("%s %s", get_c_type(t), name);
+}
+
+/* The struct definitions and the optional and tuple typedefs a value of
+ * type `t` needs complete, emitted first (emit_struct_in_order). */
+static void emit_value_type_deps(CodeGenerator* gen, ASTNode* program, Type* t, char* state) {
+    if (!t) return;
+    switch (t->kind) {
+    case TYPE_ARRAY:
+        if (type_is_sized_array(t)) emit_value_type_deps(gen, program, t->element_type, state);
+        return;
+    case TYPE_OPTIONAL:
+        emit_value_type_deps(gen, program, t->element_type, state);
+        ensure_optional_typedef(gen, t);
+        return;
+    case TYPE_TUPLE:
+        for (int i = 0; t->tuple_types && i < t->tuple_count; i++)
+            emit_value_type_deps(gen, program, t->tuple_types[i], state);
+        ensure_tuple_typedef(gen, t);
+        return;
+    case TYPE_STRUCT:
+        for (int i = 0; t->struct_name && i < program->child_count; i++) {
+            ASTNode* sd = program->children[i];
+            if (sd && sd->type == AST_STRUCT_DEFINITION && sd->value &&
+                strcmp(sd->value, t->struct_name) == 0) {
+                emit_struct_in_order(gen, program, i, state);
+                return;
+            }
+        }
+        return;
+    default:
+        return;
+    }
+}
+
+static void emit_struct_in_order(CodeGenerator* gen, ASTNode* program, int i, char* state) {
+    if (state[i]) return;
+    state[i] = 1;
+    ASTNode* sd = program->children[i];
+    for (int f = 0; f < sd->child_count; f++) {
+        ASTNode* fld = sd->children[f];
+        if (fld && fld->type == AST_STRUCT_FIELD)
+            emit_value_type_deps(gen, program, fld->node_type, state);
+    }
+    generate_struct_definition(gen, sd);
+}
+
 void ensure_tuple_typedef(CodeGenerator* gen, Type* type) {
     if (!type || type->kind != TYPE_TUPLE) return;
     const char* name = get_c_type(type);
@@ -5195,7 +5233,7 @@ void ensure_tuple_typedef(CodeGenerator* gen, Type* type) {
     // Emit typedef
     fprintf(gen->output, "typedef struct { ");
     for (int i = 0; i < type->tuple_count; i++) {
-        fprintf(gen->output, "%s _%d; ", get_c_type(type->tuple_types[i]), i);
+        fprintf(gen->output, "%s; ", c_member_decl(type->tuple_types[i], cg_internf("_%d", i)));
     }
     fprintf(gen->output, "} %s;\n", name);
 
@@ -5219,9 +5257,9 @@ void ensure_optional_typedef(CodeGenerator* gen, Type* type) {
     }
     /* #2652: an optional tuple embeds the tuple's typedef, declared first. */
     if (type->element_type->kind == TYPE_TUPLE) ensure_tuple_typedef(gen, type->element_type);
-    const char* inner_c = get_c_type(type->element_type);
     const char* opt_name = name;
-    fprintf(gen->output, "typedef struct { int has; %s val; } %s;\n", inner_c, opt_name);
+    fprintf(gen->output, "typedef struct { int has; %s; } %s;\n",
+            c_member_decl(type->element_type, "val"), opt_name);
     if (gen->opt_type_count >= gen->opt_type_capacity) {
         gen->opt_type_capacity = gen->opt_type_capacity ? gen->opt_type_capacity * 2 : 8;
         gen->opt_type_names = aether_xrealloc(gen->opt_type_names, gen->opt_type_capacity * sizeof(char*));
@@ -9133,76 +9171,25 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     // typedef + full body up top, function bodies below.
     //
     // Emitted in field-dependency order, not in the order the modules were
-    // merged (#1856). A struct that holds another BY VALUE, directly or as
-    // the elements of a fixed-size array (#2432), needs that one's
-    // body already in scope: a forward typedef is not enough for a field, and
-    // the merge order puts an importing module's struct ahead of the struct it
-    // imported whenever the inner one was reached transitively. The result was
-    // C that would not compile, "field has incomplete type".
-    //
-    // A field that is a pointer needs only the forward typedef, so it is not a
-    // dependency and a cycle through pointers stays legal. Anything still
-    // unplaced after no pass makes progress is emitted in its original order:
-    // that is a by-value cycle, which is not representable in C and is the
-    // type checker's to reject, not this loop's to hang on.
+    // merged (#1856): a struct is written after every type it holds by
+    // value, directly, as a fixed-size array's elements (#2432), as an
+    // optional's value (#2820) or as a tuple's position, and those
+    // optional and tuple typedefs go out with it. A pointer field needs
+    // only the forward typedef, so a cycle through pointers stays legal; a
+    // by-value cycle is not representable in C and is the type checker's
+    // to reject, so the walk stops at a struct already under way.
     {
         int n = program->child_count;
-        char* emitted = (char*)calloc((size_t)(n > 0 ? n : 1), 1);
-        if (emitted) {
-            int placed;
-            do {
-                placed = 0;
-                for (int i = 0; i < n; i++) {
-                    ASTNode* sd = program->children[i];
-                    if (emitted[i] || !sd || sd->type != AST_STRUCT_DEFINITION) continue;
-
-                    int ready = 1;
-                    for (int f = 0; f < sd->child_count && ready; f++) {
-                        ASTNode* fld = sd->children[f];
-                        if (!fld || fld->type != AST_STRUCT_FIELD) continue;
-                        /* A fixed-size array holds its elements by value, so
-                         * `items: Item[4]` needs Item's body as much as
-                         * `item: Item` does (#2432). A slice (`Item[]`) is a
-                         * pointer and length, and needs only the forward
-                         * typedef. The type grammar takes one `[N]` suffix
-                         * today; the loop keeps this right if it takes more. */
-                        Type* ft = fld->node_type;
-                        while (ft && ft->kind == TYPE_ARRAY && type_is_sized_array(ft)) ft = ft->element_type;
-                        /* An optional holds its value by value too (#2820). */
-                        if (ft && ft->kind == TYPE_OPTIONAL) ft = ft->element_type;
-                        if (!ft || ft->kind != TYPE_STRUCT) continue;
-                        const char* dep = get_c_type(ft);
-                        if (!dep) continue;
-                        /* A struct this program also defines, and not yet out. */
-                        for (int j = 0; j < n; j++) {
-                            ASTNode* other = program->children[j];
-                            if (j == i || emitted[j] || !other ||
-                                other->type != AST_STRUCT_DEFINITION || !other->value)
-                                continue;
-                            if (strcmp(other->value, dep) == 0) { ready = 0; break; }
-                        }
-                    }
-                    if (!ready) continue;
-
-                    generate_struct_definition(gen, sd);
-                    emitted[i] = 1;
-                    placed = 1;
-                }
-            } while (placed);
-
-            for (int i = 0; i < n; i++) {
-                ASTNode* sd = program->children[i];
-                if (!emitted[i] && sd && sd->type == AST_STRUCT_DEFINITION)
-                    generate_struct_definition(gen, sd);
-            }
-            free(emitted);
-        } else {
-            for (int i = 0; i < n; i++) {
-                ASTNode* sd = program->children[i];
-                if (sd && sd->type == AST_STRUCT_DEFINITION)
-                    generate_struct_definition(gen, sd);
-            }
+        char* state = (char*)calloc((size_t)(n > 0 ? n : 1), 1);
+        if (!state) {
+            fprintf(stderr, "aetherc: out of memory ordering struct definitions\n");
+            exit(1);
         }
+        for (int i = 0; i < n; i++) {
+            ASTNode* sd = program->children[i];
+            if (sd && sd->type == AST_STRUCT_DEFINITION) emit_struct_in_order(gen, program, i, state);
+        }
+        free(state);
     }
 
     // #914: sum/variant tagged-union typedefs. Emitted after all struct
@@ -9293,6 +9280,10 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     }
     // #340: emit optional typedefs (after struct bodies, before fn fwd-decls).
     collect_optional_typedefs(gen, program);
+
+    // #2921: the retain and drop of every composite type a place can hold.
+    own_collect_types(gen, program);
+    emit_own_ops(gen);
 
     // #2298: `@derive(schema)` field tables. Here because offsetof/sizeof
     // need every field's type complete, and T_schema()'s body (a function)

@@ -144,8 +144,6 @@ int set_heap_string_var_try_depth(CodeGenerator* gen, const char* var_name, int 
 int is_escaped_string_var(CodeGenerator* gen, const char* var_name);
 void mark_escaped_string_var(CodeGenerator* gen, const char* var_name);
 void clear_escaped_string_vars(CodeGenerator* gen);
-int is_return_escaped_string_var(CodeGenerator* gen, const char* var_name);
-void mark_return_escaped_string_var(CodeGenerator* gen, const char* var_name);
 int is_return_escaped_struct_var(CodeGenerator* gen, const char* var_name);
 void mark_return_escaped_struct_var(CodeGenerator* gen, const char* var_name);
 
@@ -679,6 +677,13 @@ void emit_struct_take(CodeGenerator* gen, ASTNode* e, const char* sname,
                       const char* target);
 const char* struct_owning_strings(CodeGenerator* gen, Type* t);
 ASTNode* find_struct_definition_by_name(ASTNode* program, const char* name);
+
+/* #2921: R2/R3 for composite types (codegen_own.c). */
+int own_type_owns(CodeGenerator* gen, Type* t);
+void own_collect_types(CodeGenerator* gen, ASTNode* node);
+void emit_own_ops(CodeGenerator* gen);
+const char* own_fn(CodeGenerator* gen, Type* t, const char* op);
+void own_reset(void);
 
 /* #2298: emit the `@derive(schema)` field tables and their getters
  * (codegen_schema.c). */

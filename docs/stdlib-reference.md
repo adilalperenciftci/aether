@@ -79,7 +79,7 @@ header comment is the authoritative description.
 | `std.spec` | BDD test framework: describe and it, hooks, assertions, structured reports. | 46 | [guide](../std/spec/README.md) · [source](../std/spec/module.ae) |
 | `std.strarr` | Growable string array whose backing is a `string[]`, for sorting runtime-built lists. | 17 | [guide](../std/strarr/README.md) · [source](../std/strarr/module.ae) |
 | `std.strbuilder` | Amortised-O(1) string building. | 35 | [guide](../std/strbuilder/README.md) · [source](../std/strbuilder/module.ae) |
-| `std.string` | Managed strings: construction, search, slicing, case, split and join. | 99 | [full section](#strings-stdstring) |
+| `std.string` | Managed strings: construction, search, slicing, case, split and join. | 101 | [full section](#strings-stdstring) |
 | `std.sync` | Atomic 64-bit integer cell (load, store, add, sub, compare-and-swap) for refcounts and lock-free reclamation. | 14 | [guide](../std/sync/README.md) · [source](../std/sync/module.ae) |
 | `std.tar` | Streaming POSIX ustar archives: reader and writer. | 24 | [full section](#posix-ustar-archives-stdtar) |
 | `std.tcp` | TCP sockets, re-exported from `std.net`. | 35 | [guide](../std/tcp/README.md) · [source](../std/tcp/module.ae) |
@@ -979,6 +979,8 @@ Raw out-parameter externs are preserved as `string_to_int_raw`, `string_to_long_
 - `string.retain(str)` - Increment reference count
 - `string.release(str)` - Decrement reference count (frees when zero)
 - `string.free(str)` - Alias for `release`
+- `string.keep(s)` → `ptr` - A reference of its own to `s`, as a `ptr`, for a `@keep ptr` parameter or a `ptr` field that holds the string past the call (E0902)
+- `string.release_kept(p)` - Gives back what `string.keep` took
 
 ### Building strings incrementally (avoiding quadratic cost)
 
