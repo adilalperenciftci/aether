@@ -8050,6 +8050,9 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     print_line(gen, "         * a typed view, the struct's data pointer is what we copy. */");
     print_line(gen, "        struct _AeStrHdr { %s };", AE_STR_FIELDS_TEXT(AETHER_STRING_FIELDS));
     print_line(gen, "        const struct _AeStrHdr* _h = (const struct _AeStrHdr*)s;");
+    /* A pinned string (a literal) lives as long as the program: handed
+     * over as it is, no copy. */
+    print_line(gen, "        if (_h->ref_count == 0x%X) return s;", (unsigned)AETHER_STRING_PINNED_REFS);
     print_line(gen, "        _n = _h->length;");
     print_line(gen, "        _data = _h->data ? _h->data : s;");
     print_line(gen, "    } else {");
@@ -8119,6 +8122,7 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     print_line(gen, "    return s && _hp[0] == 0x%02X && _hp[1] == 0x%02X && _hp[2] == 0x%02X && _hp[3] == 0x%02X;",
                AE_STR_MAGIC_B0, AE_STR_MAGIC_B1, AE_STR_MAGIC_B2, AE_STR_MAGIC_B3);
     print_line(gen, "}");
+    print_line(gen, "extern const char* aether_string_adopt(const char*);");
     print_line(gen, "static inline void aether_heap_str_free(const char* s) {");
     print_line(gen, "    if (!s) return;");
     print_line(gen, "    aether_unwind_forget(s);");
@@ -8126,8 +8130,6 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     print_line(gen, "    if (_hp[0] == 0x%02X && _hp[1] == 0x%02X && _hp[2] == 0x%02X && _hp[3] == 0x%02X) {",
                AE_STR_MAGIC_B0, AE_STR_MAGIC_B1, AE_STR_MAGIC_B2, AE_STR_MAGIC_B3);
     print_line(gen, "        string_release(s);");
-    print_line(gen, "    } else {");
-    print_line(gen, "        free((void*)s);");
     print_line(gen, "    }");
     print_line(gen, "}");
     print_line(gen, "static void aether_unwind_free_str(const void* p) {");

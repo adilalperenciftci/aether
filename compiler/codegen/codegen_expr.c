@@ -10134,6 +10134,14 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                             c_func_name = sandbox_trust_wrapper_name(tdef, tsite);
                         }
                     }
+                    /* R4: an `@heap` extern's string is adopted once, so
+                     * the caller owns a counted string whatever C made. */
+                    ASTNode* ext_decl = ext_name ? find_extern_declaration_by_name(gen->program, ext_name)
+                                                 : NULL;
+                    int adopt = ext_decl && ext_decl->annotation &&
+                                annotation_has_marker(ext_decl->annotation, "heap_return") &&
+                                expr->node_type && expr->node_type->kind == TYPE_STRING;
+                    if (adopt) fprintf(gen->output, "aether_string_adopt(");
                     fprintf(gen->output, "%s(", c_func_name);
                     int arg_printed = 0;
                     // Auto-inject builder context for builder functions
@@ -10552,7 +10560,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                         fprintf(gen->output, "%s", expr == g_builder_cfg_call && g_builder_cfg_var
                                                        ? g_builder_cfg_var : "(void*)0");
                     }
-                    fprintf(gen->output, ")");
+                    fprintf(gen->output, adopt ? "))" : ")");
                     arg_drain_close(gen, expr, &ad);
                 }
             }

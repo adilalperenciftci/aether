@@ -867,6 +867,17 @@ const char* string_to_cstr(const void* str) {
 // struct header. These helpers unwrap the AetherString if present and
 // fall back to strlen-based handling for plain char* returns (legacy
 // raw-TLS externs). Safe on NULL.
+/* R4: the string an `@heap` extern hands over, owned once as Aether owns
+ * every string: a counted or pinned string as it is; a plain malloc'd buffer
+ * (a C library's, which predates counted strings) copied into a counted
+ * string and the buffer freed. */
+const char* aether_string_adopt(const char* s) {
+    if (!s || is_aether_string(s)) return s;
+    AetherString* c = string_new_with_length(s, strlen(s));
+    free((void*)s);
+    return (const char*)c;
+}
+
 const char* aether_string_data(const void* s) {
     return str_data(s);
 }

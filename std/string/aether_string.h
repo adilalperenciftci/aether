@@ -194,6 +194,10 @@ const char* string_to_cstr(const void* str);
 // and signals intent to reviewers. See docs/aether-string-abi.md for
 // the full ABI contract.
 const char* aether_string_data(const void* s);
+
+/* R4: what an `@heap` extern returns, as a string the caller owns: a counted
+ * or pinned string as it is, a plain malloc'd buffer copied (and freed). */
+const char* aether_string_adopt(const char* s);
 size_t      aether_string_length(const void* s);
 
 /* #2521: the formatter behind string interpolation and print/println.

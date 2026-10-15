@@ -3170,6 +3170,9 @@ int function_def_returns_heap_string(CodeGenerator* gen, ASTNode* fn_def) {
     /* A tuple's positions are function_def_returns_heap_at's, which keeps
      * its own memo in the same annotation: a "heap_yes" here hid it. */
     if (fn_def->node_type && fn_def->node_type->kind == TYPE_TUPLE) return 0;
+    /* R3: an Aether function returning `string` hands its caller one
+     * reference, from every return. */
+    if (fn_def->node_type && fn_def->node_type->kind == TYPE_STRING) return 1;
     if (classify_open_has(fn_def)) { note_pending(fn_def); return 0; }
     /* One clause hands over an owned string: every clause does, its other
      * returns taken through the uniform-heap shim (should_uniform_heap_return
