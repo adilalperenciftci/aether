@@ -132,7 +132,7 @@ web_server(port: int) {
     return srv
 }
 
-compose(_srv: ptr) { return _srv }
+compose(_srv: @keep ptr) { return _srv }
 
 // The DSL is pure construction — no server, no sockets — so every case
 // below is a straight assertion on the structure web_server() builds.

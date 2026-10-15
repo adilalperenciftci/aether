@@ -75,7 +75,7 @@ struct BN {
 // ---- internal construction helpers ----
 
 // Allocate a BN. `mag` may be null (only valid with len 0 / sign 0).
-bn_alloc(s: int, mag: ptr, len: int) -> *BN {
+bn_alloc(s: int, mag: @keep ptr, len: int) -> *BN {
     n = malloc(sizeof(BN)) as *BN
     n.sign = s
     n.mag = mag
@@ -98,7 +98,7 @@ limb(mag: ptr, i: int) -> long {
 // when no stripping is needed; otherwise copies into a tight array and
 // frees the original. `signum` is the intended sign for a non-zero
 // result.
-bn_from_mag_checked(signum: int, mag: ptr, len: int) -> *BN {
+bn_from_mag_checked(signum: int, mag: @keep ptr, len: int) -> *BN {
     i = 0
     while i < len {
         if (intarr_get_raw(mag, i) & 0xFFFFFFFF) != 0 {

@@ -15,7 +15,7 @@ parsed(s: string) -> ptr {
 }
 
 // Render a result and free it, so an assertion line stays one line.
-str(d: ptr) -> string {
+str(d: @keep ptr) -> string {
     s = decimal.to_string(d)
     decimal.free(d)
     return s
@@ -90,7 +90,7 @@ pow_str(a: string, n: int) -> string {
 }
 
 // d * 10^n; an exponent overflow fails the test.
-shifted(d: ptr, n: int) -> ptr {
+shifted(d: @keep ptr, n: int) -> ptr {
     r, err = decimal.shift(d, n)
     spec.assert_ok(err, "shift by ${n}")
     return r

@@ -604,7 +604,7 @@ pure_digest_new(algo: string) -> {
 }
 
 // Wrap a backend handle so update / final can dispatch on it.
-digest_wrap(kind: int, inner: ptr, dlen: int) -> ptr {
+digest_wrap(kind: int, inner: @keep ptr, dlen: int) -> ptr {
     w = malloc(sizeof(DigestCtx)) as *DigestCtx
     if w == null {
         return null

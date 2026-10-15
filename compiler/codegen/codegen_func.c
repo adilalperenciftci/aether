@@ -536,18 +536,14 @@ static ASTNode* fnval_clause_param(CodeGenerator* gen, const char* name, int cla
 static int fnval_keeps_slot(CodeGenerator* gen, const char* name, int k) {
     const DefClauses* dc = program_index_clauses(gen->program, name);
     int n = dc ? dc->count : 0;
-    int any_string = 0, any_pointer = 0;
+    int any_pointer = 0;
     for (int c = 0; c < n; c++) {
         ASTNode* p = fnval_clause_param(gen, name, c, k);
-        if (!p || !p->node_type) continue;
-        if (p->node_type->kind == TYPE_STRING) any_string = 1;
-        else if (param_may_hold_caller_string(p->node_type)) any_pointer = 1;
+        if (!p || !p->node_type || p->node_type->kind == TYPE_STRING) continue;
+        if (param_may_hold_caller_string(p->node_type)) any_pointer = 1;
     }
-    /* A `string` parameter: kept unless the function takes a reference of
-     * its own; a return of it keeps nothing through a pointer. The walks
-     * read every clause (#2627), each deciding copy-on-keep for itself
-     * (#2644). */
-    if (any_string && callee_string_param_kept_as_given(gen, name, k, 0)) return 1;
+    /* A `string` parameter is never kept as given: whatever keeps it takes a
+     * reference of its own (R3). */
     return any_pointer && callee_param_escapes_via_body(gen, name, k, 0);
 }
 
@@ -2001,21 +1997,6 @@ static void emit_function(CodeGenerator* gen, ASTNode* func, const char* clause_
             } else if (is_sized_array_param(child->node_type)) {
                 print_indent(gen);
                 emit_sized_array_param_copy(gen, child->node_type, child->value, body);   /* #2516 */
-            } else if (fn_def_string_param_captures(gen, func, i)) {
-                /* Copy-on-keep (#2499), as a closure does on entry: a
-                 * `string` parameter this body keeps becomes a reference of
-                 * its own (a refcounted string retained, a plain buffer
-                 * copied) and a heap-tracked local from here on, so a store
-                 * moves or copies it, a return hands it over, and the exit
-                 * frees what is left. The caller borrows its own argument.
-                 * A clause decides for itself (#2644); its callers ask every
-                 * clause (callee_keeps_string_arg). */
-                print_indent(gen);
-                fprintf(gen->output, "%s = aether_str_capture(%s); %s _heap_%s = 1; (void)_heap_%s;\n",
-                        child->value, child->value, try_tracker_type(gen, child->value),
-                        child->value, child->value);
-                mark_heap_string_var(gen, child->value);
-                mark_captured_string_param(gen, child->value);
             }
             /* A struct parameter is a copy of the caller's value, strings
              * included, and the caller still owns those strings: the copy
@@ -2896,6 +2877,13 @@ void generate_struct_definition(CodeGenerator* gen, ASTNode* struct_def) {
                    struct_def->value, struct_def->value);
         print_line(gen, "    %s _ae_v = *s; %s_destroy(&_ae_v); *s = _ae_v;",
                    struct_def->value, struct_def->value);
+        print_line(gen, "}");
+        /* #2923: what a panic's unwind runs on a local of this type, which
+         * is journaled by its address while it is in scope: the destroy of
+         * whatever the place holds then. */
+        print_line(gen, "static inline AETHER_MAYBE_UNUSED void %s_destroy_unwind(const void* p) {",
+                   struct_def->value);
+        print_line(gen, "    %s_destroy_volatile((%s volatile*)p);", struct_def->value, struct_def->value);
         print_line(gen, "}");
         print_line(gen, "static inline void %s_replace_volatile(%s volatile* dst, %s src) {",
                    struct_def->value, struct_def->value, struct_def->value);

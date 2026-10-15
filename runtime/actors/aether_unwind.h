@@ -40,13 +40,13 @@ extern "C" {
 
 typedef void (*AetherUnwindFree)(const void* p);
 void aether_unwind_track(const void* p, AetherUnwindFree free_fn);
-void aether_unwind_track_if(const void* p, int owned, AetherUnwindFree free_fn);
-// Journal `p` for the frame `up` frames out from the innermost one: the
-// frame a local is declared in, stored into from inside `up` nested `try`
-// bodies, whose drains must leave it to the local. With no such frame the
-// entry is dropped.
-void aether_unwind_track_up(const void* p, int up, AetherUnwindFree free_fn);
 void aether_unwind_forget(const void* p);
+// #2923: journal a PLACE, the address of a slot that holds a value, with the
+// address of the flag that says the slot owns it (NULL: it owns whatever it
+// holds). A drain releases what the slot holds then and leaves it empty, so
+// the slot's own stores and releases never touch the journal. Forgotten by
+// the place's address (aether_unwind_forget) where the slot goes out of scope.
+void aether_unwind_track_place(const void* place, const void* owned, AetherUnwindFree release);
 
 // Frame lifecycle, called by aether_try_push / aether_try_pop /
 // aether_panic. enter increments the journal's own frame depth; exit

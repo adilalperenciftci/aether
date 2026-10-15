@@ -1145,6 +1145,14 @@ void aether_string_release_captured(const char* s) {
     if (s) string_release(s);
 }
 
+void* aether_string_keep(const void* s) {
+    return (void*)aether_string_capture_owned((const char*)s);
+}
+
+void aether_string_release_kept(void* p) {
+    aether_string_release_captured((const char*)p);
+}
+
 AetherString* string_from_int(int value) {
     char buffer[32];
     snprintf(buffer, sizeof(buffer), "%d", value);

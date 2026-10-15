@@ -22,19 +22,19 @@ free_query(ast: ptr) {
     parser.free_query(ast)
 }
 
-query(root: ptr, path: string) -> ptr! {
+query(root: @keep ptr, path: string) -> ptr! {
     return query.query(root, path)
 }
 
-query_values(root: ptr, path: string) -> ptr! {
+query_values(root: @keep ptr, path: string) -> ptr! {
     return query.query_values(root, path)
 }
 
-query_paths(root: ptr, path: string) -> ptr! {
+query_paths(root: @keep ptr, path: string) -> ptr! {
     return query.query_paths(root, path)
 }
 
-query_ast(root: ptr, ast: ptr) -> ptr {
+query_ast(root: @keep ptr, ast: ptr) -> ptr {
     return query.query_ast(root, ast)
 }
 

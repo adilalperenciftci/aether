@@ -15,7 +15,7 @@ struct Leaf { a: int }
 struct Other { b: int }
 
 // The reported shape: a bare-ptr slot, later assigned a typed pointer.
-pick(issuer: ptr, flag: int) -> ptr {
+pick(issuer: @keep ptr, flag: int) -> ptr {
     responder = issuer // slot inferred as bare `ptr`
     delegated = null as *Leaf // typed pointer
     if flag == 1 {

@@ -126,7 +126,7 @@ handle_forbidden(req: ptr, res: ptr, ud: ptr) {
 // worked across closures (and the shape downstream tests use). Locals
 // named `out` not `stdout` — Windows MinGW <stdio.h> defines `stdout`
 // as a macro, so a local with that name fails to compile.
-run_process_section(fw: ptr) {
+run_process_section(fw: @keep ptr) {
     spec.describe(fw, "process matchers") {
         // echo "hello world": note os.run_capture synthesises
         // argv[0] from the prog string, so the list holds only the

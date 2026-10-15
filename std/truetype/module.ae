@@ -393,7 +393,7 @@ load_bytes(data: ptr, size: int, name: string) -> *Typeface {
     return adopt(bytes.from_ptr(data, size), size, name)
 }
 
-adopt(blob: ptr, size: int, path: string) -> *Typeface {
+adopt(blob: @keep ptr, size: int, path: string) -> *Typeface {
     f = heap.new(Typeface)
     f.blob = blob
     f.data = bytes.data(blob)

@@ -30,7 +30,7 @@ held(s: string) -> string {
 
 // The line `g_out = env(null)` is what pre-fix reported the E0200 against,
 // though neither this function nor that line has anything to do with `full`.
-env(v: ptr) -> string {
+env(v: @keep ptr) -> string {
     return v
 }
 

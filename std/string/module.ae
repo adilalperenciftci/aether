@@ -42,7 +42,7 @@ exports(
     string_format_list, format,
     string_glob_match_raw, glob_match, glob_match_pathname,
     version_compare,
-    aether_string_raw_ptr, bytes, array_view, seq_from_strings, seq_to_strings
+    aether_string_raw_ptr, bytes, array_view, seq_from_strings, seq_to_strings, keep, release_kept
 )
 
 // String creation
@@ -779,6 +779,23 @@ version_compare(a: string, b: string) -> int {
 // reach for `bytes(s)`, not this, unless you specifically need the bare
 // pointer.
 extern aether_string_raw_ptr(s: ptr) -> ptr
+
+// A reference of its own to `s`, as the `ptr` a `@keep ptr` parameter
+// keeps (#2926): a `string` reaches one only this way, since the slot keeps
+// it past the call while its owner frees it. The string is published (a kept
+// pointer may be read from any thread) and retained, or copied when it is a
+// plain C string. Give the reference back with `release_kept`.
+extern aether_string_keep(s: string) -> ptr
+extern aether_string_release_kept(p: ptr)
+
+keep(s: string) -> ptr {
+    return aether_string_keep(s)
+}
+
+// Give back a reference `keep` handed over.
+release_kept(p: ptr) {
+    aether_string_release_kept(p)
+}
 
 // A bounded, READ-ONLY byte[] view of s's own bytes, for binary/ASCII
 // scanning (indexing, sub-slicing) without re-measuring the string on every

@@ -59,7 +59,7 @@ struct RsaKey {
 
 // Build a key from already-parsed bignums. The key TAKES OWNERSHIP of n,
 // e, d (frees them in key_free) — pass clones if you need to keep them.
-key_from_components(n: ptr, e: ptr, d: ptr) -> ptr {
+key_from_components(n: @keep ptr, e: @keep ptr, d: @keep ptr) -> ptr {
     k = malloc(sizeof(RsaKey)) as *RsaKey
     k.n = n
     k.e = e
@@ -79,7 +79,7 @@ key_free(k: ptr) {
 // Parse a PKCS#1 RSAPrivateKey DER (SEQUENCE { version, n, e, d, p, q,
 // dp, dq, qinv }). Returns (key, "") or (null, err). We keep n, e, d and
 // free the CRT params (this slice doesn't use CRT).
-key_from_pkcs1_der(der: ptr) -> (ptr, string) {
+key_from_pkcs1_der(der: @keep ptr) -> (ptr, string) {
     r = asn1.reader_new(der)
     sub, body, serr = asn1.read_sequence(r)
     if string.equals(serr, "") != 1 {

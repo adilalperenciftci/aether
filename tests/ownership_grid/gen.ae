@@ -1543,7 +1543,7 @@ simple_cell_in(g: *GridGen, kid: string, pid: string, t: string) -> string {
         c1 = place_check(g, pid, kid, "a", "the value, after a reader saw it")
         body = lines_cat3(lines_cat(start, pre), "${n} = reads(${r})\ncheck(${n} == 1, \"the reader ran\")", c1)
     } else if t == "T7" && pid == "P13G" {
-        gen_decl(g, "fn stash", "// Keeps the pointer it is given in the module var.\nstash(p: ptr) {\n    slot = p\n}")
+        gen_decl(g, "fn stash", "// Keeps the pointer it is given in the module var.\nstash(p: @keep ptr) {\n    slot = p\n}")
         pre, e = fresh(g, kid, "a")
         body = lines_cat(pre, "f = ${e}\nstash(f)")
         rpre, r = place_read(g, pid, kid)

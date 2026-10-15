@@ -12,12 +12,15 @@
 #include "../analysis/actor_reply.h"
 #include "../analysis/sandbox_trust.h"
 
-/* The AetherString magic the emitted C inspects, from the definition the
- * runtime uses (std/string/aether_string_abi.h), its bytes in memory order. */
+/* The AetherString header the emitted C inspects, from the definition the
+ * runtime uses (std/string/aether_string_abi.h): its magic's bytes in
+ * memory order, and its field list as text. */
 #define AE_STR_MAGIC_B0 ((unsigned)(AETHER_STRING_MAGIC & 0xFFu))
 #define AE_STR_MAGIC_B1 ((unsigned)((AETHER_STRING_MAGIC >> 8) & 0xFFu))
 #define AE_STR_MAGIC_B2 ((unsigned)((AETHER_STRING_MAGIC >> 16) & 0xFFu))
 #define AE_STR_MAGIC_B3 ((unsigned)((AETHER_STRING_MAGIC >> 24) & 0xFFu))
+#define AE_STR_FIELDS_TEXT_(...) #__VA_ARGS__
+#define AE_STR_FIELDS_TEXT(...) AE_STR_FIELDS_TEXT_(__VA_ARGS__)
 
 /* #2292: defined with the constant rename, used by the symbol catalog. */
 static const char* const_public_name(const ASTNode* cd);
@@ -1227,24 +1230,6 @@ int is_escaped_string_var(CodeGenerator* gen, const char* var_name) {
     return 0;
 }
 
-// Helper: mark a heap-string variable as escaped.
-int is_captured_string_param(CodeGenerator* gen, const char* var_name) {
-    if (!gen || !var_name) return 0;
-    for (int i = 0; i < gen->captured_string_param_count; i++) {
-        if (strcmp(gen->captured_string_params[i], var_name) == 0) return 1;
-    }
-    return 0;
-}
-
-void mark_captured_string_param(CodeGenerator* gen, const char* var_name) {
-    if (!gen || !var_name || is_captured_string_param(gen, var_name)) return;
-    gen->captured_string_params = (char**)aether_xrealloc(
-        gen->captured_string_params,
-        sizeof(char*) * (size_t)(gen->captured_string_param_count + 1));
-    gen->captured_string_params[gen->captured_string_param_count++] =
-        (char*)aether_intern(var_name);
-}
-
 void clear_captured_string_params(CodeGenerator* gen) {
     if (!gen) return;
     free(gen->captured_string_params);   /* the names are interned */
@@ -1743,8 +1728,9 @@ static int try_emit_heap_string_exit_free(CodeGenerator* gen, ASTNode* deferred)
     if (!*name) return 0;
     print_indent(gen);
     fprintf(gen->output,
-            "/* deferred */ if (_heap_%s) { aether_heap_str_free(%s); %s = NULL; _heap_%s = 0; }\n",
-            name, name, name, name);
+            "/* deferred */ aether_unwind_forget((const void*)&%s); "
+            "if (_heap_%s) { aether_heap_str_free(%s); %s = NULL; _heap_%s = 0; }\n",
+            name, name, name, name, name);
     return 1;
 }
 
@@ -1794,6 +1780,21 @@ static int try_emit_opt_str_exit_free(CodeGenerator* gen, ASTNode* deferred) {
  *   "handover_exit_free:<flag>:<temporary>"
  * Fires only on an exit taken before the call runs: the call's own write
  * drops it (drop_defer). */
+/* A temporary that lives to its statement's end (call_returns_view): its
+ * block releases it on every exit, and leaves it NULL for the next time the
+ * block runs. Annotation: "scoped_temp_free:<name>". */
+static int try_emit_scoped_temp_free(CodeGenerator* gen, ASTNode* deferred) {
+    if (!deferred || !deferred->annotation) return 0;
+    const char* prefix = "scoped_temp_free:";
+    size_t plen = strlen(prefix);
+    if (strncmp(deferred->annotation, prefix, plen) != 0) return 0;
+    const char* name = deferred->annotation + plen;
+    print_indent(gen);
+    fprintf(gen->output, "/* deferred */ aether_unwind_forget((const void*)&%s); "
+            "aether_heap_str_free(%s); %s = NULL;\n", name, name, name);
+    return 1;
+}
+
 static int try_emit_handover_exit_free(CodeGenerator* gen, ASTNode* deferred) {
     if (!deferred || !deferred->annotation) return 0;
     const char* prefix = "handover_exit_free:";
@@ -1804,7 +1805,8 @@ static int try_emit_handover_exit_free(CodeGenerator* gen, ASTNode* deferred) {
     if (!sep || sep == rest || !sep[1]) return 0;
     const char* flag = cg_intern_n(rest, (size_t)(sep - rest));
     print_indent(gen);
-    fprintf(gen->output, "/* deferred */ if (%s) aether_heap_str_free((void*)%s);\n", flag, sep + 1);
+    fprintf(gen->output, "/* deferred */ aether_unwind_forget((const void*)&%s); "
+            "if (%s) aether_heap_str_free((void*)%s);\n", sep + 1, flag, sep + 1);
     return 1;
 }
 
@@ -1830,6 +1832,9 @@ static int try_emit_struct_destroy(CodeGenerator* gen, ASTNode* deferred) {
     if (var_len == 0) return 0;
     const char* var_buf = cg_intern_n(rest, var_len);
     const char* struct_name = sep + 1;
+    /* #2923: the place leaves the unwind journal on every exit. */
+    print_indent(gen);
+    fprintf(gen->output, "aether_unwind_forget((const void*)&%s);\n", var_buf);
     /* #752: suppress the destroy when this struct escaped via a return —
      * its heap-string fields now belong to the caller. Consume the defer
      * (return 1) so it is not freed at callee exit. */
@@ -2041,6 +2046,7 @@ static void emit_deferred_one(CodeGenerator* gen, int i) {
         !try_emit_seq_exit_free(gen, deferred) &&
         !try_emit_opt_str_exit_free(gen, deferred) &&
         !try_emit_handover_exit_free(gen, deferred) &&   /* #2798 */
+        !try_emit_scoped_temp_free(gen, deferred) &&
         !try_emit_struct_destroy(gen, deferred) &&
         !try_emit_struct_array_destroy(gen, deferred) &&   /* #2528 */
         !try_emit_str_array_release(gen, deferred) &&      /* #2618 */
@@ -8033,17 +8039,26 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     print_line(gen, "extern void* string_new_with_length(const char* data, int length);");
     print_line(gen, "extern void string_retain(const char*);");
     print_line(gen, "extern void aether_string_publish(const void*);");
+    /* The header of a counted string, as the runtime lays it out. A string
+     * no other thread can reach is counted here, inline; a shared one
+     * (#2919) is counted atomically by the runtime, which also frees the
+     * last reference. Same rules as string_retain and string_release. */
+    print_line(gen, "struct _AeStrHdr { %s };", AE_STR_FIELDS_TEXT(AETHER_STRING_FIELDS));
     /* A take (R3): a counted string is retained (strings are immutable once
-     * made) and a pinned one, a literal, handed over as it is (string_retain
-     * leaves it alone); only a plain C string is copied. The magic is read
-     * byte by byte to stay ASan-clean on short literal allocations. */
+     * made) and a pinned one, a literal, handed over as it is; only a plain
+     * C string is copied. The magic is read byte by byte to stay ASan-clean
+     * on short literal allocations. */
     print_line(gen, "static inline const char* aether_uniform_heap_str(const char* s, int is_heap) {");
     print_line(gen, "    if (!s) return (const char*)0;");
     print_line(gen, "    if (is_heap) return s;");
     print_line(gen, "    const unsigned char* _p = (const unsigned char*)s;");
     print_line(gen, "    if (_p[0] == 0x%02X && _p[1] == 0x%02X && _p[2] == 0x%02X && _p[3] == 0x%02X) {",
                AE_STR_MAGIC_B0, AE_STR_MAGIC_B1, AE_STR_MAGIC_B2, AE_STR_MAGIC_B3);
-    print_line(gen, "        string_retain(s);");
+    print_line(gen, "        struct _AeStrHdr* _h = (struct _AeStrHdr*)(void*)s;");
+    print_line(gen, "        int _rc = _h->ref_count;");
+    print_line(gen, "        if (_rc == 0x%X) return s;", (unsigned)AETHER_STRING_PINNED_REFS);
+    print_line(gen, "        if (_rc & 0x%X) string_retain(s); else _h->ref_count = _rc + 1;",
+               (unsigned)AETHER_STRING_SHARED_BIT);
     print_line(gen, "        return s;");
     print_line(gen, "    }");
     print_line(gen, "    return (const char*)string_new_with_length(s, (int)strlen(s));");
@@ -8092,16 +8107,15 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
      * signature the extern-registry pass also uses, so the duplicate
      * declaration is tolerated by C. */
     print_line(gen, "extern void string_release(const char*);");
-    /* #1301 allocation journal: while a panic frame is live, every armed
-     * deferred free is journaled so aether_panic() can run the frees a
-     * longjmp would skip. This helper is the single free choke point,
-     * so forgetting here keeps the journal free of already-freed
-     * entries (the invariant that makes the unwind drain a leak-fix,
-     * never a use-after-free). */
+    /* #1301, #2923 allocation journal: while a panic frame is live, every
+     * place that owns a string (a local, a temporary, a struct local) is
+     * journaled by its address where it is declared, so aether_panic() runs
+     * the releases a longjmp would skip on what each place holds then. A
+     * release never touches the journal: a value may be held by several
+     * places, and the journal knows places, not values. */
     print_line(gen, "typedef void (*AetherUnwindFree)(const void*);");
     print_line(gen, "extern void aether_unwind_track(const void*, AetherUnwindFree);");
-    print_line(gen, "extern void aether_unwind_track_if(const void*, int, AetherUnwindFree);");
-    print_line(gen, "extern void aether_unwind_track_up(const void*, int, AetherUnwindFree);");
+    print_line(gen, "extern void aether_unwind_track_place(const void*, const void*, AetherUnwindFree);");
     print_line(gen, "extern void aether_unwind_forget(const void*);");
     /* Is `s` a counted AetherString, the one shape string_release frees?
      * The same byte-by-byte probe as aether_heap_str_free below. */
@@ -8113,26 +8127,25 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     print_line(gen, "extern const char* aether_string_adopt(const char*);");
     print_line(gen, "static inline void aether_heap_str_free(const char* s) {");
     print_line(gen, "    if (!s) return;");
-    print_line(gen, "    aether_unwind_forget(s);");
     print_line(gen, "    const unsigned char* _hp = (const unsigned char*)s;");
     print_line(gen, "    if (_hp[0] == 0x%02X && _hp[1] == 0x%02X && _hp[2] == 0x%02X && _hp[3] == 0x%02X) {",
                AE_STR_MAGIC_B0, AE_STR_MAGIC_B1, AE_STR_MAGIC_B2, AE_STR_MAGIC_B3);
+    print_line(gen, "        struct _AeStrHdr* _h = (struct _AeStrHdr*)(void*)s;");
+    print_line(gen, "        int _rc = _h->ref_count;");
+    print_line(gen, "        if (_rc == 0x%X) return;", (unsigned)AETHER_STRING_PINNED_REFS);
+    print_line(gen, "        if (!(_rc & 0x%X) && _rc > 1) { _h->ref_count = _rc - 1; return; }",
+               (unsigned)AETHER_STRING_SHARED_BIT);
     print_line(gen, "        string_release(s);");
     print_line(gen, "    }");
     print_line(gen, "}");
     print_line(gen, "static void aether_unwind_free_str(const void* p) {");
     print_line(gen, "    aether_heap_str_free((const char*)p);");
     print_line(gen, "}");
-    print_line(gen, "static inline void aether_unwind_track_str(const char* s) {");
-    print_line(gen, "    aether_unwind_track(s, aether_unwind_free_str);");
-    print_line(gen, "}");
-    print_line(gen, "static inline void aether_unwind_track_str_if(const char* s, int owned) {");
-    print_line(gen, "    if (owned) aether_unwind_track(s, aether_unwind_free_str);");
-    print_line(gen, "}");
-    /* #2690: a store into a local from inside `up` nested `try` bodies it
-     * is declared outside of is journaled for the local's own frame. */
-    print_line(gen, "static inline void aether_unwind_track_str_up_if(const char* s, int owned, int up) {");
-    print_line(gen, "    if (owned) aether_unwind_track_up(s, up, aether_unwind_free_str);");
+    /* A string place (`owned` the address of its flag, or NULL when it owns
+     * whatever it holds), journaled at the frame it is declared in: a panic
+     * caught by a `try` inside that frame leaves it to the place (#2690). */
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED void aether_unwind_track_str_place(const void* place, const void* owned) {");
+    print_line(gen, "    aether_unwind_track_place(place, owned, aether_unwind_free_str);");
     print_line(gen, "}");
     /* Closure-env string capture: a closure env must OWN its captured
      * strings — the enclosing scope releases its own reference on
@@ -8216,7 +8229,7 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     print_line(gen, "    const unsigned char* _hp = (const unsigned char*)s;");
     print_line(gen, "    if (_hp[0]==0x%02X && _hp[1]==0x%02X && _hp[2]==0x%02X && _hp[3]==0x%02X) {",
                AE_STR_MAGIC_B0, AE_STR_MAGIC_B1, AE_STR_MAGIC_B2, AE_STR_MAGIC_B3);
-    print_line(gen, "        aether_unwind_forget(s); string_release(s);");
+    print_line(gen, "        string_release(s);");
     print_line(gen, "    }");
     print_line(gen, "}");
     print_line(gen, "static inline void _aether_cell_release_str(void* cell) {");
@@ -8429,16 +8442,13 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
      * -Wunused-value: `list.add(l, string.copy(p))` warned in ordinary user
      * code. A function call discards its result silently, so the conversion
      * lives in these helpers instead. */
-    /* #2810: the container owns an adopted string from here, so the panic
-     * journal must not hold it any more: a panic after the adoption drained
-     * the entry the string's first owner tracked, freeing what the
-     * container then freed again (aether_unwind.h: forget on adoption). */
+    /* #2810, #2923: the container owns an adopted string from here. The
+     * journal knows the place it came from, whose flag the move cleared, so
+     * a panic after the adoption leaves it to the container. */
     print_line(gen, "static inline const char* _aether_list_add_adopted(void* list, void* item) {");
-    print_line(gen, "    aether_unwind_forget(item);");
     print_line(gen, "    return list_add_string_adopted(list, item) ? \"\" : \"list.add failed\";");
     print_line(gen, "}");
     print_line(gen, "static inline const char* _aether_map_put_adopted(void* map, const char* key, void* value) {");
-    print_line(gen, "    aether_unwind_forget(value);");
     print_line(gen, "    return map_put_string_adopted(map, key, value) ? \"\" : \"map.put failed\";");
     print_line(gen, "}");
     /* #2497: the owning entries, for a value the container must hold its

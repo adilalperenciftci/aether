@@ -64,14 +64,3 @@ test_builder_default_factory_no_import 4
 # on the macOS run. Drop the entry when a panic releases what each place
 # holds (#2923) and an fn[N] element is a place (#2921).
 test_issue2889_closure_rebound_in_try 18
-
-# TRACKED: a struct literal's `ptr` fields copy the strings they are given
-# (#2921). test_issue2904_ptr_slots_and_state_zero builds
-# `P2 { name: q, other: r }` from two string locals: the struct literal
-# takes each through the string field rule (aether_uniform_heap_str copies
-# them), but the fields are `ptr`, which own nothing, and P2 has no
-# destructor, so the two copies, one block each, are never given back.
-# Measured with leaks --atExit on macOS; the same two leaks before the
-# literals were pinned. Drop the entry when a store into a `ptr` place
-# takes no reference (#2921).
-test_issue2904_ptr_slots_and_state_zero 2

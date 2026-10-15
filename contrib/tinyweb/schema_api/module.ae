@@ -66,7 +66,7 @@ struct ApiGroup {
 // json_api(prefix, schema) { create(...); show(...); ... }
 // Container builder: opens a tinyweb path() at `prefix`, attaches a validating
 // filter driven by `schema`, and returns an ApiGroup for the leaf builders.
-json_api(_ctx: ptr, prefix: string, resource: ptr) -> ptr {
+json_api(_ctx: ptr, prefix: string, resource: @keep ptr) -> ptr {
     // Open a nested path group in tinyweb for this resource.
     grp_ctx = path(_ctx, prefix)
 
@@ -405,7 +405,7 @@ fn build_openapi(groups: ptr) -> string {
 //
 // (Passing the groups explicitly avoids a module-global registry — the caller
 // already holds each group.)
-openapi_route(_ctx: ptr, route_path: string, groups: ptr) {
+openapi_route(_ctx: ptr, route_path: string, groups: @keep ptr) {
     end_point(_ctx, GET, route_path) | req: ptr, res: ptr, ctx: ptr | {
         doc = build_openapi(groups)
         response_set_header(res, "Content-Type", "application/json")

@@ -1,12 +1,12 @@
 #!/bin/sh
-# Integration: `aetherc --diagnose=ownership` prints the same heap/non-heap
-# verdicts the codegen wrapper terminator at codegen_stmt.c:1611-1631 will
-# emit, without running codegen.
+# Integration: `aetherc --diagnose=ownership` prints how each string store
+# is compiled under the ownership model (docs/design/ownership-model.md),
+# without running codegen: a store moves a fresh value and takes anything
+# else, and every string function hands its caller one reference.
 #
-# Compiles a small fixture with both a heap-returning user fn (`my_concat`
-# wrapping `string.concat`) and a non-heap one (`first_or_default` returning
-# either a parameter borrow or a literal), plus assignments that exercise
-# every RHS shape the diagnostic classifies.
+# The fixture has a function returning a fresh string (`my_concat`, through
+# the dotted `string.concat`) and one returning a parameter or a literal
+# (`first_or_default`), and stores of each shape the report classifies.
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
@@ -49,46 +49,35 @@ if ! "$AETHERC" --diagnose=ownership "$tmpdir/fixture.ae" >"$out" 2>&1; then
     exit 1
 fi
 
-# Pass 1 — function verdicts.
-if ! grep -qE "^  my_concat .* HEAP, every return path heap-classified" "$out"; then
-    echo "  [FAIL] diagnose_ownership: my_concat should be classified HEAP"
-    cat "$out"
-    exit 1
-fi
-if ! grep -qE "^  first_or_default .* NOT HEAP" "$out"; then
-    echo "  [FAIL] diagnose_ownership: first_or_default should be classified NOT HEAP"
+# Pass 1: every string function hands its caller one reference.
+for fn in my_concat first_or_default; do
+    if ! grep -qE "^  $fn .* hands its caller one reference from every return" "$out"; then
+        echo "  [FAIL] diagnose_ownership: $fn should hand its caller a reference"
+        cat "$out"
+        exit 1
+    fi
+done
+
+# Pass 2: each store, moved or taken.
+# `s = ""`                    -> take [literal]
+# `s = my_concat(...)`        -> move [fresh: a call's result]
+# `s = "literal"`             -> take [literal]
+# `s = string.concat(s, "!")` -> move [fresh: a call's result] (the dotted
+#                                call is recognised as fresh)
+moves=$(grep -cE "^    line +[0-9]+: s +=.*  move +\[fresh" "$out")
+takes=$(grep -cE "^    line +[0-9]+: s +=.*  take +\[literal" "$out")
+if [ "$moves" != "2" ] || [ "$takes" != "2" ]; then
+    echo "  [FAIL] diagnose_ownership: expected 2 moves and 2 takes of s, got $moves and $takes"
     cat "$out"
     exit 1
 fi
 
-# Pass 2 — assignment verdicts. Each line ends with `_heap_<lhs> = N [shape]`.
-# `s = ""`                      → 0 [literal]
-# `s = my_concat(...)`           → 1 [heap-returning fn → HEAP]
-# `s = "literal"`                → 0 [literal]
-# `s = string.concat(s, "!")`    → 1 [heap-returning fn → HEAP]
-expected_ones=$(grep -c "_heap_s = 1" "$out")
-expected_zeros=$(grep -c "_heap_s = 0" "$out")
-if [ "$expected_ones" != "2" ]; then
-    echo "  [FAIL] diagnose_ownership: expected 2 '_heap_s = 1' lines, got $expected_ones"
-    cat "$out"
-    exit 1
-fi
-if [ "$expected_zeros" != "2" ]; then
-    echo "  [FAIL] diagnose_ownership: expected 2 '_heap_s = 0' lines, got $expected_zeros"
+# The closing note says what KEPT ALIVE means.
+if ! grep -q "A line marked KEPT ALIVE" "$out"; then
+    echo "  [FAIL] diagnose_ownership: missing the KEPT ALIVE note"
     cat "$out"
     exit 1
 fi
 
-# UAF-triage stanza must be present so the porter knows what to do with the
-# verdicts.
-if ! grep -q "UAF triage" "$out"; then
-    echo "  [FAIL] diagnose_ownership: missing UAF triage guidance stanza"
-    cat "$out"
-    exit 1
-fi
-
-# Dotted source-form `string.concat` must be recognised (the bug
-# this whole change request closed). Without the dot-normalisation in
-# is_heap_string_expr, the my_concat verdict above would be NOT HEAP.
-echo "  [PASS] diagnose_ownership: heap/non-heap verdicts + dotted-call recognition + UAF stanza"
+echo "  [PASS] diagnose_ownership: every string function hands over; stores moved or taken; dotted calls recognised"
 exit 0

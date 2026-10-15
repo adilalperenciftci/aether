@@ -122,7 +122,7 @@ struct Asn1Reader {
     last_tag_number: int
 }
 
-reader_new(b: ptr) -> ptr {
+reader_new(b: @keep ptr) -> ptr {
     r = malloc(sizeof(Asn1Reader)) as *Asn1Reader
     r.buf = b
     r.pos = 0
@@ -1032,7 +1032,7 @@ encode_sequence_list(elements_list: ptr) -> ptr {
 // - `is_explicit = 1`: wraps `content` in an explicit tag: [tagClass | PC_CONSTRUCTED | tagNo] -> Length -> content (where content is already a full TLV)
 // - `is_explicit = 0`: implicit tag: replaces the outermost tag byte of `content` with the new tag byte.
 // `content` is consumed (freed).
-encode_tagged(is_explicit: int, tag_class: int, tag_number: int, content: ptr) -> ptr {
+encode_tagged(is_explicit: int, tag_class: int, tag_number: int, content: @keep ptr) -> ptr {
     if is_explicit == 1 {
         // Explicit tag is always constructed (PC = 0x20)
         return wrap_tlv_ext(tag_class, 0x20, tag_number, content)

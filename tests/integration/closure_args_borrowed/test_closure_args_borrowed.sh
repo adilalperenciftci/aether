@@ -4,19 +4,15 @@
 #
 # `apply(f: fn, s: string) { call(f, s) }` has no closure body to read, so
 # passing `s` on was counted as an escape and `apply(g, mk("x"))` leaked the
-# string, as did `call(f, mk(a))` inside such a function. Closures now
-# borrow their arguments: one that keeps a `string` parameter (a list, map
-# or field store, a captured variable) takes a reference of its own when it
-# is entered, so the caller frees its own after the call either way. A
-# `ptr` parameter cannot be copied, so one closure that keeps one turns the
-# convention off for the program and the arguments are left alone. This
-# checks the emitted C both ways, that every program prints what it stored,
-# and that a struct literal returned with a parameter in it counts as
-# keeping it. It did not, and the caller freed the field; then it counted as
-# a keep the function took no reference for, so the caller left its argument
-# alone and nobody freed it. Now the function takes a reference of its own
-# (copy-on-keep), the returned struct owns that, and the caller frees its
-# argument after the call (#2584).
+# string, as did `call(f, mk(a))` inside such a function. Closures borrow
+# their arguments: one that keeps a `string` parameter (a list, map or field
+# store, a captured variable) keeps it through a store that takes a
+# reference of its own (R3), so the caller frees its own after the call
+# either way, and the kept value stays good. A closure's `ptr` parameter is
+# always borrowed (E0902 refuses keeping one, tests/integration/
+# keeps_borrowed). This checks the emitted C, that every program prints
+# what it stored, and that a parameter returned in a struct literal is the
+# struct's own reference, the caller's argument still freed (#2584).
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
@@ -103,11 +99,10 @@ grep -q '_ad_[0-9]* = (char\*)(mk(((const char\*)&_ae_slit_[0-9]*))), apply(look
 n="$(grep -c '_ad_[0-9]* = (char\*)(mk(a)), .*f\.fn)(f\.env, _ad_[0-9]*), aether_heap_str_free' "$tmp/borrowed.c")"
 [ "$n" = "3" ] || fail "an argument to a call through an fn parameter is not freed ($n of 3)" "$tmp/borrowed.c"
 
-# ---- a closure keeps its `string` parameter: it takes its own reference
-# on entry, so the caller still frees its argument and the kept value
-# stays good. A `ptr` parameter it keeps cannot be copied: nothing is
-# freed in that program.
-for shape in list map field cell branch ptr; do
+# ---- a closure keeps its `string` parameter: the store takes its own
+# reference, so the caller still frees its argument and the kept value
+# stays good.
+for shape in list map field cell branch; do
     case $shape in
         list)     keeper='kept = list.new()
     keep = | s: string | { list.add(kept, s) }'
@@ -131,8 +126,6 @@ for shape in list map field cell branch ptr; do
     }'
                   reader='v, _ = list.get(kept, 0)
     println(v)' ;;
-        ptr)      keeper='keep = | p: ptr | { return p }'
-                  reader='println("ptr")' ;;
     esac
     cat > "$tmp/kept_$shape.ae" <<AE
 import std.string
@@ -159,23 +152,10 @@ main() {
     println(junk)
 }
 AE
-    case $shape in
-        ptr) want="ptr
-zzzzzzzzzzzzzzzz!" ;;
-        *) want="k!
-zzzzzzzzzzzzzzzz!" ;;
-    esac
-    run "kept_$shape" "$want"
-    if [ "$shape" = ptr ]; then
-        if grep -q 'mk(((const char\*)&_ae_slit_[0-9]*))), apply(keep, _ad_' "$tmp/kept_$shape.c"; then
-            fail "kept_ptr: an argument a closure may keep as a pointer is freed" "$tmp/kept_$shape.c"
-        fi
-    else
-        grep -q 'mk(((const char\*)&_ae_slit_[0-9]*))), apply(keep, _ad_[0-9]*), aether_heap_str_free' "$tmp/kept_$shape.c" \
-            || fail "kept_$shape: the closure copies what it keeps, yet the argument is not freed" "$tmp/kept_$shape.c"
-        grep -q 's = aether_str_capture(s);' "$tmp/kept_$shape.c" \
-            || fail "kept_$shape: the closure does not take its own reference to what it keeps" "$tmp/kept_$shape.c"
-    fi
+    run "kept_$shape" "k!
+zzzzzzzzzzzzzzzz!"
+    grep -q 'mk(((const char\*)&_ae_slit_[0-9]*))), apply(keep, _ad_[0-9]*), aether_heap_str_free' "$tmp/kept_$shape.c" \
+        || fail "kept_$shape: the closure's store takes its own reference, yet the argument is not freed" "$tmp/kept_$shape.c"
 done
 
 # ---- a struct literal returned with the parameter in it keeps it -----------
@@ -201,8 +181,5 @@ main() {
 }
 AE
 run struct_field "abc! zzzzzzzzzzzzzzzz!"
-if ! grep -q 's = aether_str_capture(s)' "$tmp/struct_field.c"; then
-    fail "a parameter kept in a returned struct literal takes no reference of its own" "$tmp/struct_field.c"
-fi
 
-echo "  [PASS] closure_args_borrowed: closure calls free owned arguments; string keepers copy, a ptr keeper turns it off"
+echo "  [PASS] closure_args_borrowed: closure calls free owned arguments; what a closure keeps it takes for itself"

@@ -408,7 +408,7 @@ struct RecordIO {
     off: int // consumed-so-far offset (records already returned)
 }
 
-fn recio_new(sock: ptr) -> *RecordIO {
+fn recio_new(sock: @keep ptr) -> *RecordIO {
     r = malloc(sizeof(RecordIO)) as *RecordIO
     r.sock = sock
     r.buf = bytes.new(4096)
@@ -715,7 +715,7 @@ fn connect_ex(host: string, port: int, x25519_priv: ptr, client_cert: ptr, clien
 //               dangerous here as there.
 //   cafile      a PEM bundle to trust INSTEAD of the system store (parity with
 //               set_cafile), or "" for the normal resolution.
-fn connect_full(host: string, port: int, x25519_priv: ptr, client_cert: ptr, client_cert_len: int, client_key: ptr, adopt_sock: ptr, insecure: int, cafile: string) -> (ptr, string) {
+fn connect_full(host: string, port: int, x25519_priv: ptr, client_cert: ptr, client_cert_len: int, client_key: ptr, adopt_sock: @keep ptr, insecure: int, cafile: string) -> (ptr, string) {
     // Dial into a FRESH name and pick afterwards, rather than assigning to
     // `sock` twice. A conditional re-assignment here left the slot's type
     // unresolved ("unresolved type in codegen, defaulting to int"), and that
@@ -1015,7 +1015,7 @@ connect_pq(host: string, port: int) -> (ptr, string) {
 // or the ClientHello — the caller does.
 // insecure: 1 skips server authentication entirely (set_insecure parity).
 // cafile:   a PEM bundle to trust instead of the system store, or "".
-fn run_handshake_tail(sock: ptr, rio: ptr, tr: ptr, host: string, shared: byte[], cipher_suite: int, client_cert: ptr, client_cert_len: int, client_key: ptr, insecure: int, cafile: string) -> (ptr, string) {
+fn run_handshake_tail(sock: @keep ptr, rio: @keep ptr, tr: ptr, host: string, shared: byte[], cipher_suite: int, client_cert: ptr, client_cert_len: int, client_key: ptr, insecure: int, cafile: string) -> (ptr, string) {
     rec_aead, rec_key_len, hash_algo, hash_len, suite_err = suite_params(cipher_suite)
     if string.equals(suite_err, "") != 1 { return null, suite_err }
 

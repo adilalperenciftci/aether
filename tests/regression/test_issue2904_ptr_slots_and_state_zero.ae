@@ -8,8 +8,8 @@
 //    closure, struct, optional, tuple or sum state field with no initializer
 //    is now zeroed whole.
 // 3. A struct with `ptr` fields built from `ptr` locals that hold strings
-//    named `_heap_<field>` trackers the struct does not have: a `ptr` field
-//    takes the pointer, which its source keeps.
+//    named `_heap_<field>` trackers the struct does not have. A `ptr` field
+//    takes a reference of its own, through `string.keep` (#2926).
 
 import std.mem
 import std.string
@@ -100,8 +100,13 @@ main() {
     q = "abc"
     let r: ptr = null
     r = string.concat("d", "e")
-    s = P2 { name: q, other: r }
-    check(s.name == q && s.other == r, "ptr fields built from ptr locals holding strings")
+    // A `ptr` field keeps what it holds, so a string goes in as a reference
+    // of its own (#2926), given back once the struct is done with it.
+    s = P2 { name: string.keep(q), other: string.keep(r) }
+    check(string.equals(s.name, "abc") == 1 && string.equals(s.other, "de") == 1,
+        "ptr fields built from ptr locals holding strings")
+    string.release_kept(s.name)
+    string.release_kept(s.other)
     h = spawn(Holder())
     h ! Set { k: 7 }
     h ! Check {}

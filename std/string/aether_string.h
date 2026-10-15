@@ -252,6 +252,10 @@ AetherString* string_adopt_caps_buffer(char* buf, size_t length, size_t cap);
 char* aether_string_mutable_data(void* s);
 
 const char* aether_string_capture_owned(const char* s);
+/* std.string's keep and release_kept (#2926): a reference for a `@keep ptr`
+ * slot, as capture_owned gives a closure environment one. */
+void* aether_string_keep(const void* s);
+void aether_string_release_kept(void* p);
 void        aether_string_release_captured(const char* s);
 
 AetherString* string_from_int(int value);

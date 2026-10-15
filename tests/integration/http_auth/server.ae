@@ -51,7 +51,7 @@ actor SchedHelper {
     receive { Noop() -> { x = 1 } }
 }
 
-run_server(raw: ptr) {
+run_server(raw: @keep ptr) {
     spawn(SchedHelper())
     a = spawn(SrvActor())
     a ! StartSrv { raw: raw }

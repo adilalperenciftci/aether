@@ -144,7 +144,7 @@ actor Painter {
 // ordering-sensitive: both actors must be started before either is polled
 // (see the note below), and keeping it whole in one place makes that
 // constraint legible rather than something to re-derive from an it() body.
-run_painters(dev: ptr) -> (int, int, int, int) {
+run_painters(dev: @keep ptr) -> (int, int, int, int) {
     a = spawn(Painter())
     b = spawn(Painter())
 

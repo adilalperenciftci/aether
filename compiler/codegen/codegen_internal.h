@@ -53,6 +53,11 @@ void seq_close(CodeGenerator* gen, TempSeq* s);
 /* A temporary `ctype name;` declared ahead of the statement being emitted
  * (hoist_ready), for both compilers. */
 void hoist_declare(CodeGenerator* gen, const char* ctype, const char* name);
+/* hoist_declare with a NULL initializer, and the scope-exit release of such
+ * a temporary that lives to its statement's end (call_returns_view). */
+void hoist_declare_null(CodeGenerator* gen, const char* ctype, const char* name);
+void hoist_append_text(CodeGenerator* gen, const char* text);
+void push_scoped_temp_free(CodeGenerator* gen, const char* name);
 /* Where declarations go ahead of a statement, judged by the `n` bytes of C
  * before it: 0 there, 1 after a null statement (a label precedes), 2 in a
  * block with the statement (an unbraced body). */
@@ -243,13 +248,12 @@ int callee_consumes_string_arg(CodeGenerator* gen, const char* func_name, int id
 int field_read_can_hand_off(ASTNode* e);
 void emit_string_field_handoff(CodeGenerator* gen, ASTNode* e);
 /* How owned field read `arg`, argument `idx` of a call of `func_name`, is
- * handed over: STRING_FIELD_CONSUMED to a parameter the callee frees,
- * STRING_FIELD_KEPT to one it keeps as given (stores past the call), else
- * 0; and the second shape, the field giving its reference up whatever the
- * string is. */
-enum { STRING_FIELD_CONSUMED = 1, STRING_FIELD_KEPT = 2 };
+ * handed over: STRING_FIELD_CONSUMED to a parameter the callee frees, else
+ * 0. STRING_FIELD_TAKEN is a read evaluated ahead of a call that borrows it
+ * (order_operand_hands_off): its temporary takes a reference of its own, so
+ * a later operand that stores into the field leaves it valid. */
+enum { STRING_FIELD_CONSUMED = 1, STRING_FIELD_TAKEN = 2 };
 int string_field_handoff_kind(CodeGenerator* gen, const char* func_name, int idx, ASTNode* arg);
-void emit_string_field_giveup(CodeGenerator* gen, ASTNode* e);
 /* Such a field read evaluated ahead of its call (in the ordering sequence
  * `s`, or ahead of the statement for NULL): handed over to temporary
  * `value` as it is read, the name of the flag that says it was returned;
@@ -312,14 +316,6 @@ int closure_param_escapes_via_body(CodeGenerator* gen, ASTNode* closure, int par
 /* #2499: sets gen->closure_args_borrowed. Run after discover_closures and
  * discover_bare_fn_adapters. Defined in codegen_stmt.c. */
 void compute_closure_args_borrowed(CodeGenerator* gen);
-/* #2499: must closure literal `closure` take its own reference to its
- * `string` parameter `param_idx` on entry? Defined in codegen_stmt.c. */
-int closure_string_param_kept(CodeGenerator* gen, ASTNode* closure, int param_idx);
-/* Does some clause of `func_name` keep the caller's own `string` argument
- * past the call, taking no reference of its own (#2644)? A return counts
- * only when `return_is_keep`. */
-int callee_string_param_kept_as_given(CodeGenerator* gen, const char* func_name, int param_idx,
-                                      int return_is_keep);
 
 /* True when `func_name` resolves to a user function with a visible body
  * block; only then may the body-walk override the conservative
@@ -424,13 +420,6 @@ ASTNode* closure_container_store_value(CodeGenerator* gen, ASTNode* call);   /* 
  * (moved or copied, never adopted and left escaped), or NULL. */
 ASTNode* string_container_store_value(CodeGenerator* gen, ASTNode* call);
 int container_store_slot(CodeGenerator* gen, ASTNode* call);
-/* Copy-on-keep for named functions: does the definition `fn_def` (a single
- * one, or one clause of a set, #2644) take its own reference to `string`
- * parameter `param_idx` on entry (it keeps it past the call)? The caller
- * then borrows. callee_keeps_string_arg is the one caller-side rule for a
- * `string` argument (does the caller's pointer live on?), asked of every
- * clause. */
-int fn_def_string_param_captures(CodeGenerator* gen, ASTNode* fn_def, int param_idx);
 int callee_param_is_string(CodeGenerator* gen, const char* func_name, int param_idx);
 /* Release the parameter table box_is_heap_new builds. */
 void zb_params_free(CodeGenerator* gen);
@@ -446,7 +435,6 @@ void code_generator_release(CodeGenerator* gen);
 const char* stmt_struct_temp_of(const ASTNode* expr);
 /* Drop `e as T` between string types before ownership is decided. */
 void erase_string_retype_casts(ASTNode* node);
-int callee_keeps_string_arg(CodeGenerator* gen, const char* func_name, int param_idx, int depth);
 int body_may_assign_var_from_heap(CodeGenerator* gen, ASTNode* node, const char* var_name);
 void emit_message_string_copy(CodeGenerator* gen, const char* lv, ASTNode* init);
 ASTNode* message_field_init_expr(ASTNode* message, const char* name);
@@ -504,7 +492,6 @@ ASTNode* find_extern_declaration_by_name(ASTNode* program, const char* name);
  * and before body codegen. See codegen_stmt.c for the
  * implementation rationale (issue #420 follow-up). */
 void push_heap_string_exit_free_defers(CodeGenerator* gen, ASTNode* body);
-int  is_captured_string_param(CodeGenerator* gen, const char* var_name);
 void stmt_struct_temps_set(ASTNode** nodes, const char** names, int count);
 void stmt_struct_temps_get(ASTNode*** nodes, const char*** names, int* count);
 int  struct_param_kept(CodeGenerator* gen, ASTNode* body, const char* pname);
@@ -514,7 +501,6 @@ int  tuple_call_returns_heap_at(CodeGenerator* gen, ASTNode* call, int j);
 void emit_struct_capture(CodeGenerator* gen, const char* struct_name, const char* lvalue);
 void collect_stmt_struct_temps(CodeGenerator* gen, ASTNode* e,
                                ASTNode*** nodes, int* count, int* cap);
-void mark_captured_string_param(CodeGenerator* gen, const char* var_name);
 void clear_captured_string_params(CodeGenerator* gen);
 
 /* *StringSeq local lifecycle (parallel to the heap-string passes). */
@@ -672,6 +658,7 @@ void emit_struct_literal_array_field(CodeGenerator* gen, const char* sname, ASTN
  * Its release and replace are then the generated `<Name>_destroy_volatile`
  * and `<Name>_replace_volatile`, which these name. */
 int lvalue_may_be_volatile(CodeGenerator* gen, ASTNode* lv);
+void emit_struct_unwind_track(CodeGenerator* gen, const char* var_name, const char* struct_name);
 const char* struct_destroy_fn(const char* sname, int is_volatile);
 const char* struct_replace_fn(const char* sname, int is_volatile);
 /* #2497: does a value of this struct own heap strings, in a `string` field

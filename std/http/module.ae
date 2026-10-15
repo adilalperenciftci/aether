@@ -641,11 +641,9 @@ ws_send_text(ws: ptr, text: string) -> int {
     return http_ws_send_text(ws, text)
 }
 
-// A string or `std.bytes` buffer viewed as a raw pointer. Used to bound a
-// borrowed C buffer the server hands back as a plain `char*` (typed
-// `string`): a `string` passed to a `ptr` parameter arrives as the bare
-// pointer, which is what these buffers are.
-fn as_ptr(p: ptr) -> ptr { return p }
+// The bytes behind a string (std.string): bounds a borrowed buffer the
+// server hands back typed `string` by the length C reports for it.
+extern aether_string_raw_ptr(s: ptr) -> ptr
 
 // Send one binary frame holding the bytes of `data` (#2301: a byte[] whose
 // length travels with it). Returns the send result, -1 on a closed socket.
@@ -729,7 +727,7 @@ ws_message(ws: ptr) -> string {
 ws_message_bytes(ws: ptr) -> byte[] {
     n = http_ws_message_length(ws)
     if n <= 0 { return null }
-    return (as_ptr(http_ws_message_data(ws)) as byte[])[0..n]
+    return (aether_string_raw_ptr(http_ws_message_data(ws)) as byte[])[0..n]
 }
 
 ws_close(ws: ptr, code: int, reason: string) {
@@ -958,7 +956,7 @@ request_body_length(req: ptr) -> int {
 // separately: on a streaming request it reports the declared length
 // WITHOUT materialising, which the chunked request_body_read loop relies on.
 request_body_bytes(req: ptr) -> byte[] {
-    p = as_ptr(http_request_body(req))
+    p = aether_string_raw_ptr(http_request_body(req))
     n = http_request_body_length(req)
     if n <= 0 { return null }
     return (p as byte[])[0..n]

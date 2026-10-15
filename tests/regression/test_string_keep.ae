@@ -1,0 +1,53 @@
+// Regression (#2926): `string.keep(s)` hands a `@keep ptr` parameter a
+// reference of its own, which outlives the string's owner, and
+// `string.release_kept` gives it back.
+//
+// The heap check runs where the count is exact (mem.heap_in_use_exact):
+// after a warm-up, some window of the same work grows by exactly 0
+// (mem.steady_growth). Strings are built from parameters, because
+// string.concat of two literals folds to a literal.
+
+import std.mem
+import std.string
+
+extern exit(code: int)
+
+var kept: ptr = null
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+hold(p: @keep ptr) {
+    if kept != null { string.release_kept(kept) }
+    kept = p
+}
+
+stash(w: string, i: int) {
+    s = "${w}-${i}"
+    hold(string.keep(s))
+}
+
+round(w: string) {
+    i = 0
+    while i < 100 {
+        stash(w, i)
+        check(string.equals(kept, "${w}-${i}") == 1, "the kept string outlives its owner")
+        i = i + 1
+    }
+    hold(string.keep("literal"))
+    check(string.equals(kept, "literal") == 1, "a kept literal")
+}
+
+main() {
+    w = string.concat("ke", "pt")
+    round(w)
+    if mem.heap_in_use_exact() {
+        grown = mem.steady_growth(|| { round(w) }, 5)
+        check(grown == 0, "a window of 100 keeps grew the heap by ${grown} bytes in every run")
+    }
+    println("=== test_string_keep passed ===")
+}

@@ -411,7 +411,7 @@ struct Pipe {
     result: int
 }
 
-pipe_create(pass: ptr, mesh_spv: string, mesh_len: int, frag_spv: string, frag_len: int) -> Pipe {
+pipe_create(pass: @keep ptr, mesh_spv: string, mesh_len: int, frag_spv: string, frag_len: int) -> Pipe {
     p = Pipe{layout: null, pipeline: null, result: 0}
     mesh = shader_module(mesh_spv, mesh_len)
     frag = shader_module(frag_spv, frag_len)

@@ -62,7 +62,7 @@ free(prog: ptr) {
 
 // Bind `$name` for the program (jq's --arg / --argjson). The value is
 // donated to the program.
-set_var(prog: ptr, name: string, v: ptr) {
+set_var(prog: ptr, name: string, v: @keep ptr) {
     eval.program_set_var(prog, name, v)
 }
 
@@ -72,14 +72,14 @@ set_var(prog: ptr, name: string, v: ptr) {
 // whatever `error(x)` raised); on RESULT_HALT `code` is the exit code
 // and the value is halt_error's message, or null for a plain `halt`.
 // The error value, when non-null, is owned by the caller.
-run(prog: ptr, input: ptr, out: ptr) -> (int, int, ptr) {
+run(prog: @keep ptr, input: @keep ptr, out: @keep ptr) -> (int, int, ptr) {
     return run_with_inputs(prog, input, null, out)
 }
 
 // As `run`, with `inputs` (a std.list of borrowed values) feeding the
 // program's `input` and `inputs` builtins. They consume from the front of
 // the list, so afterwards it holds only what the program did not read.
-run_with_inputs(prog: ptr, input: ptr, inputs: ptr, out: ptr) -> (int, int, ptr) {
+run_with_inputs(prog: @keep ptr, input: @keep ptr, inputs: @keep ptr, out: @keep ptr) -> (int, int, ptr) {
     own_inputs = inputs
     if own_inputs == null { own_inputs = list.new() }
     ctx = eval.new_ctx(prog, own_inputs)
@@ -97,13 +97,13 @@ run_with_inputs(prog: ptr, input: ptr, inputs: ptr, out: ptr) -> (int, int, ptr)
 
 // Run and render: every output as compact JSON on its own line. Returns
 // (text, "") or (text so far, "jq: error: ...").
-run_json(prog: ptr, input: ptr) -> string! {
+run_json(prog: @keep ptr, input: @keep ptr) -> string! {
     return run_json_opts(prog, input, 0, 0, 0)
 }
 
 // `indent` spaces per level (0 = compact), `sort_keys` = 1 for --sort-keys,
 // `raw` = 1 to print string outputs without quotes (--raw-output).
-run_json_opts(prog: ptr, input: ptr, indent: int, sort_keys: int, raw: int) -> string! {
+run_json_opts(prog: @keep ptr, input: @keep ptr, indent: int, sort_keys: int, raw: int) -> string! {
     out = list.new()
     status, code, err = run(prog, input, out)
     msg = _diagnostic(status, code, err)

@@ -285,12 +285,62 @@ the signature, so no call site reads another function's body:
 - The checker verifies each function against its own body: a `ptr`
   parameter not declared `@keep` is not kept. A call is checked against the
   callee's signature.
-- A `string` goes implicitly to a borrowed `ptr` parameter. To a `@keep` one
-  it goes only through `string.keep(s) as ptr`, which hands over one
-  reference the program releases; the implicit form is refused.
+- A `string` goes implicitly to a borrowed `ptr` parameter. To a `@keep` one,
+  or into a `ptr` field (a store or a struct literal), it goes only through
+  `string.keep(s)`, which hands over one reference the program gives back
+  with `string.release_kept`; the implicit form is refused (E0902). A `ptr`
+  module variable or local already refuses a string by type.
+- A closure's `ptr` parameter is always borrowed, and a function with a
+  `@keep` parameter is called by name: a call through a value cannot see
+  what the callee keeps. A typed pointer (`*T`) and a `distinct` type over
+  `ptr` are left alone: a string converts to neither.
+- Measured cost: 329 `@keep` annotations across 60 files of std, contrib and
+  the tests, applied until the checker found no more (keeping cascades up
+  through every function that passes its own `ptr` on to a keeper).
 - The std containers' `ptr` entry points take strings through the string
   routing (a string given to `list.add` is taken by the list), not as a
   kept `ptr`.
+
+**A borrowed argument outlives its call.** The callee borrows, so the
+caller guarantees the argument lives through the call. A local or temporary
+of the caller does: the callee cannot reach it. A string read from a place
+the callee can reach and rewrite (a module variable, a field or an element
+by any path) does not: a store into that place inside the call released what
+the argument pointed at. The caller holds such an argument for the call (a
+reference of its own, released after it), as it already held a closure
+cell's value (#2755). A call into C is left alone; C does not rewrite Aether
+places.
+
+**Counting is inline.** A take and a release of a string no other thread can
+reach are a few instructions in the generated code (the header layout comes
+from the runtime's own definition); a shared string, and a release that
+frees, call into the runtime. Against out-of-line calls this cut a loop of
+5,000,000 borrowed local stores from 61 ms to 31 ms, and one of field stores
+from 34 ms to 20 ms (the R1 compiler, which counted none of them: 9 ms each).
+
+**The unwind journal knows places (#2923).** A panic runs the releases a
+longjmp skips. The journal used to hold values: each store tracked the value
+and each release forgot the newest entry with that pointer. Once two places
+can hold the same counted string, a release forgot the other place's entry,
+so a panic skipped a release (a leak) or ran one twice. Now a place that owns
+(a string local or temporary, a struct local) is journaled by its address
+where it is declared or first set, with the address of its ownership flag;
+a drain releases what the place holds then and empties it. Stores, moves and
+releases never touch the journal; a scope exit forgets the place. The drain
+takes its entries off the journal before it runs any release.
+
+**Temporaries live to the end of their statement when a view may point into
+them.** `string.bytes(s)` returns a view of `s`; given a temporary
+(`string.bytes(make())`), freeing the temporary as soon as the call returned
+left the view dangling. As in C++, such a temporary (a fresh string passed to
+a call whose result is a slice or a `ptr`) lives until its statement is done:
+its block releases it on every exit, and a statement run again releases the
+one before. Other temporaries are still released right after their call.
+
+**An operand read ahead of a call takes its own reference.** A field read
+evaluated before a later operand that may store into the field (#2798) holds
+a reference of its own until its statement is done, so the store cannot free
+what the call is given.
 
 **Order of the remaining #2920 steps.** (1) Switch off each escape channel
 whose receiver takes. (2) The `_heap_` flags are then always 1 and are

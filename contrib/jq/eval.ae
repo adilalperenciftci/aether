@@ -214,7 +214,7 @@ free_program(p: ptr) {
 
 // Bind `$name` to `v` (owned by the program from now on) for every run:
 // jq's --arg / --argjson.
-program_set_var(p: ptr, name: string, v: ptr) {
+program_set_var(p: ptr, name: string, v: @keep ptr) {
     prog = p as *Program
     // The caller's name may not outlive this call: keep a copy.
     owned = json.json_create_string(name)
@@ -225,7 +225,7 @@ program_set_var(p: ptr, name: string, v: ptr) {
     list.list_add_raw(prog.frames, f)
 }
 
-_new_frame(kind: int, name: string, arity: int, parent: ptr) -> *Env {
+_new_frame(kind: int, name: string, arity: int, parent: @keep ptr) -> *Env {
     f = heap.new(Env)
     f.kind = kind
     f.name = name
@@ -245,7 +245,7 @@ _new_frame(kind: int, name: string, arity: int, parent: ptr) -> *Env {
 // which remove what they read from its front: the caller sees what is left.
 // ---------------------------------------------------------------------------
 
-new_ctx(prog: ptr, inputs: ptr) -> *Ctx {
+new_ctx(prog: @keep ptr, inputs: @keep ptr) -> *Ctx {
     c = heap.new(Ctx)
     c.status = ST_OK
     c.err = null
@@ -298,7 +298,7 @@ error_message(err: ptr) -> string {
 // Evaluate the program against `input` (borrowed), collecting every output
 // (owned) into `out` (a std.list). Check ctx_status afterwards: on
 // ST_ERROR the outputs produced before the error are still in `out`.
-run_collect(c: ptr, input: ptr, out: ptr) {
+run_collect(c: ptr, input: @keep ptr, out: @keep ptr) {
     ctx = c as *Ctx
     prog = ctx.prog as *Program
     sink = _new_sink(SK_COLLECT, null)
@@ -309,7 +309,7 @@ run_collect(c: ptr, input: ptr, out: ptr) {
 
 // Convenience for specs and the CLI: outputs as one string, each value on
 // its own line, in jq's serialisation.
-run_each_to_json(c: ptr, input: ptr, indent: int, sort_keys: int) -> string {
+run_each_to_json(c: ptr, input: @keep ptr, indent: int, sort_keys: int) -> string {
     out = list.new()
     run_collect(c, input, out)
     sb = strbuilder.new(64)
@@ -337,7 +337,7 @@ _fail(ctx: *Ctx, msg: string) {
 
 // Raise `v` (owned) as the error value. A raise while already unwinding
 // keeps the first one.
-_fail_val(ctx: *Ctx, v: ptr) {
+_fail_val(ctx: *Ctx, v: @keep ptr) {
     if ctx.status != ST_OK {
         json.json_free(v)
         return
@@ -352,7 +352,7 @@ _fresh_id(ctx: *Ctx) -> int {
     return id
 }
 
-_new_sink(kind: int, next: ptr) -> *Sink {
+_new_sink(kind: int, next: @keep ptr) -> *Sink {
     s = heap.new(Sink)
     s.kind = kind
     s.next = next
@@ -378,7 +378,7 @@ _free_val(v: ptr) {
 }
 
 // Extend an owned path with an owned key. Returns the (new) owned path.
-_path_add(p: ptr, key: ptr) -> ptr {
+_path_add(p: @keep ptr, key: ptr) -> ptr {
     json.json_array_add_raw(p, key)
     return p
 }
@@ -397,7 +397,7 @@ _not_a_path(ctx: *Ctx, v: ptr) {
 // emit: hand an owned value (and its owned path, or null) to a sink.
 // ---------------------------------------------------------------------------
 
-emit(ctx: *Ctx, s: *Sink, v: ptr, p: ptr) {
+emit(ctx: *Ctx, s: *Sink, v: @keep ptr, p: @keep ptr) {
     if ctx.status != ST_OK {
         _free_val(v)
         _free_val(p)
@@ -514,7 +514,7 @@ emit(ctx: *Ctx, s: *Sink, v: ptr, p: ptr) {
 // ev: the dispatcher.
 // ---------------------------------------------------------------------------
 
-ev(ctx: *Ctx, node: ptr, input: ptr, env: ptr, sink: *Sink, p: ptr) {
+ev(ctx: *Ctx, node: @keep ptr, input: @keep ptr, env: @keep ptr, sink: *Sink, p: @keep ptr) {
     if ctx.status != ST_OK { return }
     ctx.nest = ctx.nest + 1
     if guard.too_deep(ctx.nest, NEST_RESERVE, FALLBACK_MAX_NEST) != 0 {
@@ -526,7 +526,7 @@ ev(ctx: *Ctx, node: ptr, input: ptr, env: ptr, sink: *Sink, p: ptr) {
     ctx.nest = ctx.nest - 1
 }
 
-_ev_node(ctx: *Ctx, node: ptr, input: ptr, env: ptr, sink: *Sink, p: ptr) {
+_ev_node(ctx: *Ctx, node: @keep ptr, input: @keep ptr, env: @keep ptr, sink: *Sink, p: @keep ptr) {
     n = node as *Node
     k = n.kind
     if k == ast.N_IDENTITY {
@@ -696,7 +696,7 @@ _free_list(l: ptr) {
 
 // Find the innermost frame of `kind` named `name` (with `arity` for
 // functions and closures).
-_lookup(env: ptr, kind: int, name: string, arity: int) -> *Env {
+_lookup(env: @keep ptr, kind: int, name: string, arity: int) -> *Env {
     e = env
     while e != null {
         f = e as *Env
@@ -714,7 +714,7 @@ _lookup(env: ptr, kind: int, name: string, arity: int) -> *Env {
 // Indexing: .[k], .[a:b], .[]
 // ---------------------------------------------------------------------------
 
-_ev_index(ctx: *Ctx, n: *Node, input: ptr, env: ptr, sink: *Sink, p: ptr) {
+_ev_index(ctx: *Ctx, n: *Node, input: @keep ptr, env: @keep ptr, sink: *Sink, p: @keep ptr) {
     // Target values first (outer loop); for each, the key values, which are
     // evaluated against the ORIGINAL input, not the target value.
     t = _new_sink(SK_INDEX_KEY, sink)
@@ -888,7 +888,7 @@ _slice(v: ptr, from: ptr, to: ptr) -> ptr! {
     return null, "Cannot index ${_tname(tv)} with object"
 }
 
-_ev_slice(ctx: *Ctx, n: *Node, input: ptr, env: ptr, sink: *Sink, p: ptr) {
+_ev_slice(ctx: *Ctx, n: *Node, input: @keep ptr, env: @keep ptr, sink: *Sink, p: @keep ptr) {
     outer = _new_sink(SK_COLLECT, null)
     outer.list = list.new()
     if p != null { outer.plist = list.new() }
@@ -920,7 +920,7 @@ _ev_slice(ctx: *Ctx, n: *Node, input: ptr, env: ptr, sink: *Sink, p: ptr) {
 }
 
 // `to` arrived; now the `from` values.
-_emit_slice_to(ctx: *Ctx, s: *Sink, to: ptr, tp: ptr) {
+_emit_slice_to(ctx: *Ctx, s: *Sink, to: @keep ptr, tp: ptr) {
     _free_val(tp)
     f = _new_sink(SK_SLICE_FROM, s.next)
     f.val = s.val
@@ -957,7 +957,7 @@ _emit_slice_from(ctx: *Ctx, s: *Sink, from: ptr, fp: ptr) {
     emit(ctx, s.next as *Sink, out, np)
 }
 
-_ev_iterate(ctx: *Ctx, n: *Node, input: ptr, env: ptr, sink: *Sink, p: ptr) {
+_ev_iterate(ctx: *Ctx, n: *Node, input: @keep ptr, env: @keep ptr, sink: *Sink, p: @keep ptr) {
     outer = _new_sink(SK_COLLECT, null)
     outer.list = list.new()
     if p != null { outer.plist = list.new() }
@@ -1068,7 +1068,7 @@ _emit_neg(ctx: *Ctx, s: *Sink, v: ptr, p: ptr) {
     emit(ctx, s.next as *Sink, value.make_number(0.0 - d), null)
 }
 
-_ev_binop(ctx: *Ctx, n: *Node, input: ptr, env: ptr, sink: *Sink, p: ptr) {
+_ev_binop(ctx: *Ctx, n: *Node, input: @keep ptr, env: @keep ptr, sink: *Sink, p: @keep ptr) {
     op = n.op
     if op == ast.OP_AND || op == ast.OP_OR {
         _ev_logical(ctx, n, input, env, sink)
@@ -1092,7 +1092,7 @@ _ev_binop(ctx: *Ctx, n: *Node, input: ptr, env: ptr, sink: *Sink, p: ptr) {
     heap.free(r)
 }
 
-_emit_binop_r(ctx: *Ctx, s: *Sink, rv: ptr, rp: ptr) {
+_emit_binop_r(ctx: *Ctx, s: *Sink, rv: @keep ptr, rp: ptr) {
     _free_val(rp)
     l = _new_sink(SK_BINOP_L, s.next)
     l.val = rv
@@ -1335,7 +1335,7 @@ _split_string(s: string, sep: string) -> ptr {
 }
 
 // `a and b`, `a or b`: short-circuit, a outer.
-_ev_logical(ctx: *Ctx, n: *Node, input: ptr, env: ptr, sink: *Sink) {
+_ev_logical(ctx: *Ctx, n: *Node, input: @keep ptr, env: @keep ptr, sink: *Sink) {
     left = _new_sink(SK_COLLECT, null)
     left.list = list.new()
     ev(ctx, n.a, input, env, left, null)
@@ -1372,7 +1372,7 @@ _ev_logical(ctx: *Ctx, n: *Node, input: ptr, env: ptr, sink: *Sink) {
 
 // `a // b`: the truthy outputs of a (errors in a end a's stream quietly);
 // if there were none, every output of b.
-_ev_alt(ctx: *Ctx, n: *Node, input: ptr, env: ptr, sink: *Sink, p: ptr) {
+_ev_alt(ctx: *Ctx, n: *Node, input: @keep ptr, env: @keep ptr, sink: *Sink, p: @keep ptr) {
     s = _new_sink(SK_ALT, sink)
     ev(ctx, n.a, input, env, s, p)
     if ctx.status == ST_ERROR && s.flag == 0 {
@@ -1407,7 +1407,7 @@ _emit_if(ctx: *Ctx, s: *Sink, cond: ptr, cp: ptr) {
 // Object construction is a cartesian product over the entries, in order:
 // entry 0's keys outermost, then its values, then entry 1's keys, ...
 // The partial object under construction travels in s.val.
-_ev_object(ctx: *Ctx, n: *Node, input: ptr, env: ptr, sink: *Sink, p: ptr) {
+_ev_object(ctx: *Ctx, n: *Node, input: @keep ptr, env: @keep ptr, sink: *Sink, p: ptr) {
     if p != null {
         _fail(ctx, "Invalid path expression with result {...}")
         return
@@ -1416,7 +1416,7 @@ _ev_object(ctx: *Ctx, n: *Node, input: ptr, env: ptr, sink: *Sink, p: ptr) {
 }
 
 // Continue building `partial` (owned) from entry `i` onwards.
-_object_entry(ctx: *Ctx, entries: ptr, i: int, partial: ptr, input: ptr, env: ptr, sink: *Sink) {
+_object_entry(ctx: *Ctx, entries: @keep ptr, i: int, partial: @keep ptr, input: @keep ptr, env: @keep ptr, sink: *Sink) {
     if ctx.status != ST_OK {
         json.json_free(partial)
         return
@@ -1442,7 +1442,7 @@ _object_entry(ctx: *Ctx, entries: ptr, i: int, partial: ptr, input: ptr, env: pt
     json.json_free(partial)
 }
 
-_emit_objkey(ctx: *Ctx, s: *Sink, key: ptr, kp: ptr) {
+_emit_objkey(ctx: *Ctx, s: *Sink, key: @keep ptr, kp: ptr) {
     _free_val(kp)
     if value.type_of(key) != value.T_STRING {
         msg = "Object keys must be strings"
@@ -1474,7 +1474,7 @@ _emit_objval(ctx: *Ctx, s: *Sink, val: ptr, vp: ptr) {
 
 // String interpolation: parts left to right, each interpolation a
 // generator, earlier parts outer. The text so far travels in s.val.
-_ev_string(ctx: *Ctx, n: *Node, input: ptr, env: ptr, sink: *Sink, p: ptr) {
+_ev_string(ctx: *Ctx, n: *Node, input: @keep ptr, env: @keep ptr, sink: *Sink, p: ptr) {
     if p != null {
         _fail(ctx, "Invalid path expression")
         return
@@ -1482,7 +1482,7 @@ _ev_string(ctx: *Ctx, n: *Node, input: ptr, env: ptr, sink: *Sink, p: ptr) {
     _string_part(ctx, n.list, 0, ast.name_of(n as ptr), json.json_create_string(""), input, env, sink)
 }
 
-_string_part(ctx: *Ctx, parts: ptr, i: int, fmt: string, sofar: ptr, input: ptr, env: ptr, sink: *Sink) {
+_string_part(ctx: *Ctx, parts: @keep ptr, i: int, fmt: string, sofar: @keep ptr, input: @keep ptr, env: @keep ptr, sink: *Sink) {
     if ctx.status != ST_OK {
         json.json_free(sofar)
         return
@@ -1540,7 +1540,7 @@ _tostring(v: ptr) -> ptr {
 // try / catch, reduce / foreach, `as` bindings
 // ---------------------------------------------------------------------------
 
-_ev_try(ctx: *Ctx, n: *Node, input: ptr, env: ptr, sink: *Sink, p: ptr) {
+_ev_try(ctx: *Ctx, n: *Node, input: @keep ptr, env: @keep ptr, sink: *Sink, p: @keep ptr) {
     s = _new_sink(SK_TRY, sink)
     ev(ctx, n.a, input, env, s, p)
     escaped = s.flag
@@ -1559,7 +1559,7 @@ _ev_try(ctx: *Ctx, n: *Node, input: ptr, env: ptr, sink: *Sink, p: ptr) {
 // reduce SRC as PAT (INIT; UPDATE)        (mode 0)
 // foreach SRC as PAT (INIT; UPDATE; EXTRACT)  (mode 1)
 // INIT is a generator: one fold per initial value.
-_ev_reduce(ctx: *Ctx, n: *Node, input: ptr, env: ptr, sink: *Sink, p: ptr, mode: int) {
+_ev_reduce(ctx: *Ctx, n: *Node, input: @keep ptr, env: @keep ptr, sink: *Sink, p: @keep ptr, mode: int) {
     inits = _new_sink(SK_COLLECT, null)
     inits.list = list.new()
     if p != null { inits.plist = list.new() }
@@ -1595,7 +1595,7 @@ _ev_reduce(ctx: *Ctx, n: *Node, input: ptr, env: ptr, sink: *Sink, p: ptr, mode:
 }
 
 // One source value for a fold: bind it, run the update on the state.
-_emit_reduce(ctx: *Ctx, s: *Sink, v: ptr, vp: ptr) {
+_emit_reduce(ctx: *Ctx, s: *Sink, v: @keep ptr, vp: ptr) {
     _free_val(vp)
     // Bind the pattern (possibly generating several environments), and for
     // each environment run one fold step.
@@ -1604,7 +1604,7 @@ _emit_reduce(ctx: *Ctx, s: *Sink, v: ptr, vp: ptr) {
 }
 
 // One fold step in environment `env`: state = last(update(state)).
-_fold_step(ctx: *Ctx, s: *Sink, env: ptr) {
+_fold_step(ctx: *Ctx, s: *Sink, env: @keep ptr) {
     if ctx.status != ST_OK { return }
     if s.kind == SK_REDUCE {
         last = _new_sink(SK_LAST, null)
@@ -1656,7 +1656,7 @@ _fold_step(ctx: *Ctx, s: *Sink, env: ptr) {
 }
 
 // `a as PATTERNS | body`: a value of `a` arrived.
-_emit_bind(ctx: *Ctx, s: *Sink, v: ptr, vp: ptr) {
+_emit_bind(ctx: *Ctx, s: *Sink, v: @keep ptr, vp: ptr) {
     _free_val(vp)
     _bind_alternatives(ctx, s.list, v, s.env, s, 0)
     json.json_free(v)
@@ -1666,7 +1666,7 @@ _emit_bind(ctx: *Ctx, s: *Sink, v: ptr, vp: ptr) {
 // an error while binding OR while running the body moves on to the next
 // alternative (jq's rule), and all variables of all patterns exist in every
 // body (unmatched ones are null).
-_bind_alternatives(ctx: *Ctx, patterns: ptr, v: ptr, env: ptr, s: *Sink, fold: int) {
+_bind_alternatives(ctx: *Ctx, patterns: ptr, v: @keep ptr, env: @keep ptr, s: *Sink, fold: int) {
     n = list.size(patterns)
     if n == 1 {
         _bind_patterns(ctx, list.get_raw(patterns, 0), v, env, s, fold)
@@ -1745,7 +1745,7 @@ _collect_pattern_vars(pat: ptr, names: ptr) {
 // (fold == 0: s.node in s.env with s.input) or a fold step (fold == 1).
 // Object patterns whose key expressions generate several keys make this a
 // generator, hence continuation style again.
-_bind_patterns(ctx: *Ctx, pat: ptr, v: ptr, env: ptr, s: *Sink, fold: int) {
+_bind_patterns(ctx: *Ctx, pat: ptr, v: @keep ptr, env: @keep ptr, s: *Sink, fold: int) {
     if ctx.status != ST_OK { return }
     pn = pat as *Node
     if pn.kind == ast.P_VAR {
@@ -1771,7 +1771,7 @@ _bind_patterns(ctx: *Ctx, pat: ptr, v: ptr, env: ptr, s: *Sink, fold: int) {
     _fail(ctx, "internal error: bad pattern")
 }
 
-_bind_array_elems(ctx: *Ctx, elems: ptr, i: int, v: ptr, env: ptr, s: *Sink, fold: int) {
+_bind_array_elems(ctx: *Ctx, elems: @keep ptr, i: int, v: @keep ptr, env: @keep ptr, s: *Sink, fold: int) {
     if ctx.status != ST_OK { return }
     if i >= list.size(elems) {
         _bind_continue(ctx, s, env, fold)
@@ -1796,7 +1796,7 @@ _bind_array_elems(ctx: *Ctx, elems: ptr, i: int, v: ptr, env: ptr, s: *Sink, fol
     json.json_free(elem)
 }
 
-_bind_object_entries(ctx: *Ctx, entries: ptr, i: int, v: ptr, env: ptr, s: *Sink, fold: int) {
+_bind_object_entries(ctx: *Ctx, entries: @keep ptr, i: int, v: @keep ptr, env: @keep ptr, s: *Sink, fold: int) {
     if ctx.status != ST_OK { return }
     if i >= list.size(entries) {
         _bind_continue(ctx, s, env, fold)
@@ -1879,7 +1879,7 @@ _index_by_string(v: ptr, key: string) -> ptr! {
 
 // Bind a sub-pattern, then resume the enclosing array/object walk held in
 // `c` (kind 2 = array elements, 3 = object entries).
-_bind_sub(ctx: *Ctx, pat: ptr, v: ptr, env: ptr, c: *Sink, which: int) {
+_bind_sub(ctx: *Ctx, pat: ptr, v: @keep ptr, env: @keep ptr, c: *Sink, which: int) {
     if ctx.status != ST_OK { return }
     pn = pat as *Node
     if pn.kind == ast.P_VAR {
@@ -1909,7 +1909,7 @@ _bind_sub(ctx: *Ctx, pat: ptr, v: ptr, env: ptr, c: *Sink, which: int) {
     heap.free(inner)
 }
 
-_bind_resume(ctx: *Ctx, c: *Sink, env: ptr, which: int) {
+_bind_resume(ctx: *Ctx, c: *Sink, env: @keep ptr, which: int) {
     outer = c.node2 as *Sink
     if which == 2 {
         _bind_array_elems(ctx, c.list, c.count, c.val, env, outer, c.id)
@@ -1920,7 +1920,7 @@ _bind_resume(ctx: *Ctx, c: *Sink, env: ptr, which: int) {
 
 // The pattern is fully bound in `env`: run the body / fold step, or resume
 // an enclosing walk when `s` is a nested-pattern continuation.
-_bind_continue(ctx: *Ctx, s: *Sink, env: ptr, fold: int) {
+_bind_continue(ctx: *Ctx, s: *Sink, env: @keep ptr, fold: int) {
     if s.count == -1 {
         _bind_resume(ctx, s.node2 as *Sink, env, s.id)
         return
@@ -1936,7 +1936,7 @@ _bind_continue(ctx: *Ctx, s: *Sink, env: ptr, fold: int) {
 // Variables and function calls
 // ---------------------------------------------------------------------------
 
-_ev_var(ctx: *Ctx, node: ptr, input: ptr, env: ptr, sink: *Sink, p: ptr) {
+_ev_var(ctx: *Ctx, node: ptr, input: ptr, env: @keep ptr, sink: *Sink, p: ptr) {
     name = ast.name_of(node)
     f = _lookup(env, E_VAR, name, 0)
     v = null
@@ -1993,7 +1993,7 @@ const FALLBACK_MAX_DEPTH = 300
 const NEST_RESERVE = 131072
 const FALLBACK_MAX_NEST = 1000
 
-_ev_call(ctx: *Ctx, n: *Node, node: ptr, input: ptr, env: ptr, sink: *Sink, p: ptr) {
+_ev_call(ctx: *Ctx, n: *Node, node: ptr, input: @keep ptr, env: @keep ptr, sink: *Sink, p: @keep ptr) {
     name = ast.name_of(node)
     arity = 0
     if n.list != null { arity = list.size(n.list) }
@@ -2029,7 +2029,7 @@ _ev_call(ctx: *Ctx, n: *Node, node: ptr, input: ptr, env: ptr, sink: *Sink, p: p
 // Bind parameter `i` of `def` and continue; `callee` is the env the body
 // runs in so far (starting at the def's own frame), `caller` the env the
 // arguments are evaluated in.
-_call_bind(ctx: *Ctx, def: *Node, i: int, callee: ptr, caller: ptr, args: ptr, input: ptr, sink: *Sink, p: ptr) {
+_call_bind(ctx: *Ctx, def: *Node, i: int, callee: @keep ptr, caller: @keep ptr, args: ptr, input: @keep ptr, sink: *Sink, p: @keep ptr) {
     if ctx.status != ST_OK { return }
     nparams = 0
     if def.list != null { nparams = list.size(def.list) }
@@ -2130,7 +2130,7 @@ const MAX_ARRAY_INDEX = 67108863
 // A copy of `v` with `newv` (owned) at `path`. On error the result is null
 // and `newv` has been released. Refused when the result would nest past
 // value.MAX_DEPTH, which a long path builds without any constructor.
-_setpath(v: ptr, path: ptr, newv: ptr) -> ptr! {
+_setpath(v: ptr, path: ptr, newv: @keep ptr) -> ptr! {
     out, err = _setpath_at(v, path, 0, 0, newv)
     if out == null { return null, "${err}" }
     return out, ""
@@ -2148,7 +2148,7 @@ _setpath(v: ptr, path: ptr, newv: ptr) -> ptr! {
 // with each level deep-copying the one below into its container, which is
 // quadratic: 76 s for a 100000-step path wherever the stack let the walk
 // get that far (#2277).
-_setpath_at(v: ptr, path: ptr, i: int, above: int, newv: ptr) -> ptr! {
+_setpath_at(v: ptr, path: ptr, i: int, above: int, newv: @keep ptr) -> ptr! {
     n = json.json_array_size(path)
     if i >= n {
         if value.deeper_than(newv, value.MAX_DEPTH - above) == 1 {
@@ -2373,7 +2373,7 @@ _clear_aliases(l: ptr) {
 }
 
 // The paths of `f` against `input`, as a std.list of owned JSON arrays.
-_paths_of(ctx: *Ctx, f: ptr, input: ptr, env: ptr) -> ptr {
+_paths_of(ctx: *Ctx, f: @keep ptr, input: @keep ptr, env: @keep ptr) -> ptr {
     s = _new_sink(SK_PATHS_OF, null)
     s.list = list.new()
     root = json.json_create_array()
@@ -2384,7 +2384,7 @@ _paths_of(ctx: *Ctx, f: ptr, input: ptr, env: ptr) -> ptr {
     return l
 }
 
-_ev_assign(ctx: *Ctx, n: *Node, input: ptr, env: ptr, sink: *Sink, p: ptr) {
+_ev_assign(ctx: *Ctx, n: *Node, input: @keep ptr, env: @keep ptr, sink: *Sink, p: ptr) {
     if p != null {
         _fail(ctx, "Invalid path expression")
         return
@@ -2469,7 +2469,7 @@ _emit_assign_rhs(ctx: *Ctx, s: *Sink, rhs: ptr, rp: ptr) {
 // `a |= f`: for each path, replace the value with the FIRST output of f;
 // no output deletes the path (all deletions applied at the end, so earlier
 // ones do not shift later array indices).
-_update_paths(ctx: *Ctx, paths: ptr, f: ptr, input: ptr, env: ptr, sink: *Sink) {
+_update_paths(ctx: *Ctx, paths: ptr, f: @keep ptr, input: ptr, env: @keep ptr, sink: *Sink) {
     result = value.copy(input)
     dels = json.json_create_array()
     n = list.size(paths)
@@ -2565,7 +2565,7 @@ _emit_getpath(ctx: *Ctx, s: *Sink, pth: ptr, pp: ptr) {
 // Functions that take filters (closures) or are generators go through the
 // first block; everything else evaluates its arguments to values (cartesian
 // product, first argument outermost) and calls _apply.
-_native(ctx: *Ctx, name: string, arity: int, args: ptr, input: ptr, env: ptr, sink: *Sink, p: ptr) {
+_native(ctx: *Ctx, name: string, arity: int, args: ptr, input: @keep ptr, env: @keep ptr, sink: *Sink, p: @keep ptr) {
     if arity == 0 {
         if string.equals(name, "empty") == 1 { return }
         if string.equals(name, "error") == 1 {
@@ -2705,7 +2705,7 @@ _take_input(ctx: *Ctx) -> ptr {
 }
 
 // The first `n` outputs of f.
-_limit(ctx: *Ctx, n: int, f: ptr, input: ptr, env: ptr, sink: *Sink, p: ptr) {
+_limit(ctx: *Ctx, n: int, f: @keep ptr, input: @keep ptr, env: @keep ptr, sink: *Sink, p: @keep ptr) {
     if n <= 0 { return }
     s = _new_sink(SK_LIMIT, sink)
     s.count = n
@@ -2719,7 +2719,7 @@ _limit(ctx: *Ctx, n: int, f: ptr, input: ptr, env: ptr, sink: *Sink, p: ptr) {
 // exact depth-first order the recursive jq definitions produce. The work
 // list holds owned values; an item with a pending condition value is a
 // pair (value, cond) kept in two parallel lists.
-_loop(ctx: *Ctx, mode: int, cond: ptr, update: ptr, input: ptr, env: ptr, sink: *Sink, p: ptr) {
+_loop(ctx: *Ctx, mode: int, cond: @keep ptr, update: @keep ptr, input: ptr, env: @keep ptr, sink: *Sink, p: ptr) {
     if p != null {
         _fail(ctx, "Invalid path expression")
         return
@@ -2775,7 +2775,7 @@ _loop(ctx: *Ctx, mode: int, cond: ptr, update: ptr, input: ptr, env: ptr, sink: 
     _free_list(conds)
 }
 
-_push_updates(ctx: *Ctx, update: ptr, v: ptr, env: ptr, work: ptr, conds: ptr) {
+_push_updates(ctx: *Ctx, update: @keep ptr, v: @keep ptr, env: @keep ptr, work: ptr, conds: ptr) {
     us = _new_sink(SK_COLLECT, null)
     us.list = list.new()
     ev(ctx, update, v, env, us, null)
@@ -2792,7 +2792,7 @@ _push_updates(ctx: *Ctx, update: ptr, v: ptr, env: ptr, work: ptr, conds: ptr) {
 
 // sort_by / group_by / min_by / max_by: the key of each element is the
 // array of f's outputs on it, compared with jq's total order.
-_by(ctx: *Ctx, name: string, f: ptr, input: ptr, env: ptr, sink: *Sink) {
+_by(ctx: *Ctx, name: string, f: @keep ptr, input: ptr, env: @keep ptr, sink: *Sink) {
     if value.type_of(input) != value.T_ARRAY {
         _fail(ctx, "Cannot index ${_tname(value.type_of(input))} with number")
         return
@@ -2883,7 +2883,7 @@ _by(ctx: *Ctx, name: string, f: ptr, input: ptr, env: ptr, sink: *Sink) {
 }
 
 // Cartesian evaluation of value arguments, first argument outermost.
-_args_step(ctx: *Ctx, name: string, arity: int, args: ptr, i: int, vals: ptr, input: ptr, env: ptr, sink: *Sink) {
+_args_step(ctx: *Ctx, name: string, arity: int, args: ptr, i: int, vals: ptr, input: @keep ptr, env: @keep ptr, sink: *Sink) {
     if ctx.status != ST_OK { return }
     if i >= arity {
         _apply(ctx, name, arity, vals, input, sink)
@@ -2961,7 +2961,7 @@ _check_depth(ctx: *Ctx, v: ptr) -> int {
 }
 
 // Emit a native's result, or raise its error.
-_deliver(ctx: *Ctx, sink: *Sink, out: ptr, err: string) {
+_deliver(ctx: *Ctx, sink: *Sink, out: @keep ptr, err: string) {
     if out == null {
         _fail(ctx, err)
         return

@@ -301,7 +301,7 @@ new_literal(kind: int) -> ptr {
     return l
 }
 
-new_comparison(op: int, left: ptr, right: ptr) -> ptr {
+new_comparison(op: int, left: @keep ptr, right: @keep ptr) -> ptr {
     c = heap.new(Comparison)
     c.op = op
     c.left = left

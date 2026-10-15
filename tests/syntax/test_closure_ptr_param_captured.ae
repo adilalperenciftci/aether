@@ -7,7 +7,7 @@
 
 extern exit(code: int)
 
-bump(n: ptr) {
+bump(n: @keep ptr) {
     // The closure captures `n`, which is a parameter of the enclosing
     // function. The fix threads the enclosing function name into the
     // closure's parent_func slot and looks up `n` in that function's

@@ -29,7 +29,7 @@ import std.string
 extern getrusage_max_rss_kb() -> int
 extern exit(code: int)
 
-read_one_oid(der: ptr) -> int {
+read_one_oid(der: @keep ptr) -> int {
     r = asn1.reader_new(der)
     oid, oerr = asn1.read_oid(r)
     n = string.length(oid)

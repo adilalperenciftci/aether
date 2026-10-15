@@ -24,14 +24,12 @@
 #      `find_function_definition_by_name` user-fn path.
 #
 # What this test asserts (via `aetherc --diagnose=ownership`):
-#   - `s = annotated_extern(...)` produces `_heap_s = 1` (HEAP verdict).
-#   - `s = unannotated_extern(...)` produces `_heap_s = 0` (preserves
-#     pre-fix conservative behaviour for unannotated externs — the
-#     opt-in default).
-#   - `s = wrapper_around_annotated_extern(...)` produces `_heap_s = 1`
-#     too — a user fn that just returns the extern call's result is
-#     itself heap-classified, because `is_heap_string_expr` already
-#     recognises the extern at the return site after our fix.
+#   - `s = annotated_extern(...)` is moved: the call's result is fresh.
+#   - `s = unannotated_extern(...)` is taken: the string stays C's, and the
+#     local holds a reference of its own (R4: borrowed unless `@heap`).
+#   - `s = wrapper_around_annotated_extern(...)` is moved too, and the
+#     wrapper hands its caller one reference, as every string function
+#     does (R3).
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
@@ -65,9 +63,9 @@ wrap_owned(seed: string) -> string {
 }
 
 main() {
-    s1 = owned_string("a")          // _heap_s1 = 1  (annotated extern)
-    s2 = borrowed_string("b")       // _heap_s2 = 0  (unannotated extern)
-    s3 = wrap_owned("c")            // _heap_s3 = 1  (inherits via wrapper)
+    s1 = owned_string("a")          // moved: fresh (annotated extern)
+    s2 = borrowed_string("b")       // taken: borrowed (unannotated extern)
+    s3 = wrap_owned("c")            // moved: fresh (through the wrapper)
 }
 AE
 
@@ -78,36 +76,30 @@ if ! "$AETHERC" --diagnose=ownership "$tmpdir/fixture.ae" >"$out" 2>&1; then
     exit 1
 fi
 
-# s1 — annotated extern. Must be classified HEAP.
-if ! grep -qE "_heap_s1 = 1" "$out"; then
-    echo "  [FAIL] extern_single_value_heap: s1 = owned_string(...) should yield _heap_s1 = 1"
+# s1: an annotated extern's result is fresh, and moved into the local.
+if ! grep -qE "^    line +[0-9]+: s1 +=.*  move +\[fresh" "$out"; then
+    echo "  [FAIL] extern_single_value_heap: s1 = owned_string(...) should be moved (fresh)"
     cat "$out"
     exit 1
 fi
 
-# s2 — unannotated extern. Must stay NON-HEAP (preserves pre-fix
-# behaviour, opt-in via annotation only).
-if ! grep -qE "_heap_s2 = 0" "$out"; then
-    echo "  [FAIL] extern_single_value_heap: s2 = borrowed_string(...) should yield _heap_s2 = 0 (unannotated, opt-in only)"
+# s2: an unannotated extern's result is C's, and taken (opt-in via
+# annotation only).
+if ! grep -qE "^    line +[0-9]+: s2 +=.*  take +\[borrowed" "$out"; then
+    echo "  [FAIL] extern_single_value_heap: s2 = borrowed_string(...) should be taken (borrowed)"
     cat "$out"
     exit 1
 fi
 
-# s3 — user wrapper around annotated extern. The structural classifier
-# must walk into the wrapper, see its single return is `owned_string(...)`
-# (now heap-classified), and mark the wrapper itself heap-returning.
-if ! grep -qE "_heap_s3 = 1" "$out"; then
-    echo "  [FAIL] extern_single_value_heap: s3 = wrap_owned(...) should yield _heap_s3 = 1 (wrapper inherits HEAP)"
+# s3: the wrapper's result is fresh as well.
+if ! grep -qE "^    line +[0-9]+: s3 +=.*  move +\[fresh" "$out"; then
+    echo "  [FAIL] extern_single_value_heap: s3 = wrap_owned(...) should be moved (fresh)"
     cat "$out"
     exit 1
 fi
 
-# Pass 1 — wrap_owned itself must show up as HEAP in the user-function
-# verdict pass. Without the extern-aware extension to is_heap_string_expr
-# this prints "NOT HEAP" because the bare extern call at the return site
-# isn't classifiable.
-if ! grep -qE "^  wrap_owned .* HEAP, every return path heap-classified" "$out"; then
-    echo "  [FAIL] extern_single_value_heap: wrap_owned should be classified HEAP (wraps an @heap extern)"
+if ! grep -qE "^  wrap_owned .* hands its caller one reference from every return" "$out"; then
+    echo "  [FAIL] extern_single_value_heap: wrap_owned should hand its caller a reference"
     cat "$out"
     exit 1
 fi

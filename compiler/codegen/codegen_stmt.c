@@ -75,43 +75,6 @@ static char* heap_strf(const char* fmt, ...) {
     }
 }
 
-/* #1301 allocation journal: emit the unwind-track call for a heap-
- * tracked LOCAL right after its `_heap_<name>` flag is armed. Uses the
- * SAME skip set as the function-exit defer push (escaped, return-
- * escaped, closure-env, promoted): the journal must mirror armed
- * deferred frees exactly. A var whose defer is never emitted must
- * never be journaled, or the panic drain frees a pointer someone else
- * owns. Emits ` aether_unwind_track_str_if(name, _heap_name);` with a
- * leading space and no newline so it composes inside `{ ... }`
- * wrapper emissions and after statement-level flag sets alike.
- *
- * #2690: the entry belongs to the frame the local's free is armed in,
- * which is where the local is declared. A store nested in `try` bodies the
- * declaration is outside of (a string local is declared at the function's
- * entry) journals it that many frames out
- * (aether_unwind_track_str_up_if): a panic caught there leaves the local
- * holding it, to be freed where its scope ends. Journaled for the try's
- * own frame, the panic freed it while the local still held it, for the
- * code after the catch to read and the scope exit to free again. */
-static void emit_unwind_track_local(CodeGenerator* gen, const char* name) {
-    if (!gen || !name) return;
-    if (is_escaped_string_var(gen, name)) return;
-    if (is_return_escaped_string_var(gen, name)) return;
-    if (is_promoted_capture(gen, name)) return;
-    for (int e = 0; e < gen->current_env_capture_count; e++) {
-        if (gen->current_env_captures[e] &&
-            strcmp(gen->current_env_captures[e], name) == 0) {
-            return;
-        }
-    }
-    int up = gen->try_frame_depth - heap_string_var_try_depth(gen, name);
-    if (up > 0) {
-        fprintf(gen->output, " aether_unwind_track_str_up_if(%s, _heap_%s, %d);", name, name, up);
-        return;
-    }
-    fprintf(gen->output, " aether_unwind_track_str_if(%s, _heap_%s);", name, name);
-}
-
 /* #2333: can a `catch NAME` binding be a heap-tracked local? Not when
  * NAME is reached through something other than a plain C local in the
  * handler (a closure-env field, a promoted capture cell, actor state):
@@ -199,6 +162,9 @@ static void push_scoped_string_local_free(CodeGenerator* gen, const ScopedString
     carrier->annotation = heap_strf("heap_string_exit_free:%s", sl->name);
     codegen_own_node(gen, carrier);
     push_defer(gen, carrier);
+    print_indent(gen);
+    fprintf(gen->output, "aether_unwind_track_str_place((const void*)&%s, (const void*)&_heap_%s);\n",
+            sl->name, sl->name);
 }
 
 static void scoped_string_local_end(CodeGenerator* gen, const ScopedStringLocal* sl) {
@@ -241,8 +207,8 @@ static void emit_string_local_decl(CodeGenerator* gen, const char* name) {
  *
  *   int _heap_NAME = _aether_try_N->reason_release != NULL;
  *   aether_try_pop();
- *   aether_unwind_track_str_if(NAME, _heap_NAME);   // outer frame's journal
- *   { handler ... ; deferred: if (_heap_NAME) aether_heap_str_free(NAME); }
+ *   { aether_unwind_track_str_place(&NAME, &_heap_NAME);   // outer frame's journal
+ *     handler ... ; deferred: if (_heap_NAME) aether_heap_str_free(NAME); }
  *
  * The binding is tracked only for the handler: the name is marked as a
  * heap string and run through the escape walk over the handler alone,
@@ -263,10 +229,6 @@ static void emit_owned_catch_handler(CodeGenerator* gen, ASTNode* catch_clause, 
     ScopedStringLocal sl;
     scoped_string_local_begin(gen, &sl, name, handler, 0);
 
-    print_indent(gen);
-    fprintf(gen->output, "/* catch %s owns a heap-built reason */", name);
-    emit_unwind_track_local(gen, name);
-    fprintf(gen->output, "\n");
 
     print_line(gen, "{");
     indent(gen);
@@ -290,9 +252,9 @@ static void emit_panic_call(CodeGenerator* gen, ASTNode* arg) {
     if (arg && arg->type == AST_IDENTIFIER && arg->value &&
         is_heap_string_var(gen, arg->value) && catch_binding_can_own(gen, arg->value)) {
         const char* v = arg->value;
-        print_line(gen, "if (_heap_%s) { aether_unwind_forget(%s); _heap_%s = 0; "
+        print_line(gen, "if (_heap_%s) { _heap_%s = 0; "
                         "aether_panic_owned(%s, aether_unwind_free_str); }",
-                   v, v, v, v);
+                   v, v, v);
         print_line(gen, "aether_panic(%s);", v);
         return;
     }
@@ -937,32 +899,7 @@ static int string_take_join(int a, int b) {
 }
 
 static int is_cell_string_element(CodeGenerator* gen, ASTNode* e);
-static ASTNode* handback_leaf_node(CodeGenerator* gen, ASTNode* expr, int depth);
-static ASTNode* handback_take_leaf(CodeGenerator* gen, ASTNode* e);
 static int tuple_call_pos_copied(CodeGenerator* gen, ASTNode* call, int j);   /* #2619 */
-static int handback_param(CodeGenerator* gen, ASTNode* call, int i, int depth);
-
-/* #2618: a call that may hand back, as it came (handback_param), an argument
- * that is itself a view: `first(arr[0], 1)` with `first(s, n) { return s }`
- * is the element, which the next store into the array frees, and
- * `first(o.name, 1)` is the field. Its value is taken as the view would be.
- * A call handed a temporary, or a view of a struct temporary, already
- * yields a copy where it is made (call_hands_back_temp,
- * call_returns_view_of_temp). With `cells`, an element of an array a
- * closure writes counts too; that depends on the function being emitted,
- * so the classifiers leave it out. */
-static int call_hands_back_view(CodeGenerator* gen, ASTNode* e, int cells, int depth) {
-    if (!e || e->type != AST_FUNCTION_CALL || !e->value || depth > 8) return 0;
-    if (call_hands_back_temp(gen, e) || call_returns_view_of_temp(gen, e)) return 0;
-    for (int i = 0; i < e->child_count; i++) {
-        ASTNode* a = e->children[i];
-        if (!a || !(is_owned_string_field_read(a) || is_owned_string_element(gen, a) ||
-                    (cells && is_cell_string_element(gen, a)) ||
-                    call_hands_back_view(gen, a, cells, depth + 1))) continue;
-        if (handback_param(gen, e, i, depth + 1)) return 1;
-    }
-    return 0;
-}
 
 static int is_opt_string_type(Type* t);
 static int is_env_capture_name(CodeGenerator* gen, const char* name);
@@ -1001,8 +938,7 @@ static int is_owning_opt_string_view(CodeGenerator* gen, ASTNode* e) {
 static int is_string_view_read(CodeGenerator* gen, ASTNode* e, int cells) {
     return is_owned_string_field_read(e) || is_owned_string_element(gen, e) ||
            (cells && is_cell_string_element(gen, e)) ||
-           (cells && is_owning_opt_string_view(gen, e)) ||
-           call_hands_back_view(gen, e, cells, 0);
+           (cells && is_owning_opt_string_view(gen, e));
 }
 
 static int is_env_capture_name(CodeGenerator* gen, const char* name);
@@ -1051,7 +987,6 @@ int string_take_kind(CodeGenerator* gen, ASTNode* e) {
         return (e->value && is_heap_string_var(gen, e->value))
                ? STR_TAKE_RUNTIME : STR_TAKE_BORROW;
     }
-    if (handback_take_leaf(gen, e)) return STR_TAKE_RUNTIME;
     return is_heap_string_expr(gen, e) ? STR_TAKE_OWNED : STR_TAKE_BORROW;
 }
 
@@ -1066,7 +1001,6 @@ int string_take_is_view(CodeGenerator* gen, ASTNode* e) {
     if (!e) return 0;
     if (is_string_view_read(gen, e, 1)) return 1;
     if (is_captured_string(gen, e)) return 1;
-    if (handback_take_leaf(gen, e)) return 1;
     return e->type == AST_IF_EXPRESSION &&
            string_take_kind(gen, e) != STR_TAKE_BORROW;
 }
@@ -1127,39 +1061,6 @@ void emit_string_take(CodeGenerator* gen, ASTNode* e, const char* own,
         fprintf(gen->output, "), 0))");
         return;
     }
-    ASTNode* hb = handback_take_leaf(gen, e);
-    if (hb) {
-        /* #2548: a call that only hands a heap-tracked local back yields
-         * the local's buffer, or on another path something the local does
-         * not own (`temp_prefix` returns "ae" for an empty prefix). The
-         * slot takes the local's buffer as an alias of it would (moved, or
-         * copied when the local is read again) and anything else as any
-         * borrowed string (R2). */
-        const char* v = hb->value;
-        int self = target && strcmp(v, target) == 0;
-        TempSeq s;
-        seq_open(gen, &s);
-        const char* hv = seq_let(gen, &s, "const char*", "_ae_hbv");
-        fprintf(gen->output, "(const char*)(");
-        generate_expression(gen, e);
-        fprintf(gen->output, ")");
-        seq_next(gen, &s);
-        if (!self && alias_source_must_copy(gen, v)) {
-            fprintf(gen->output, "%s = aether_uniform_heap_str(%s, 0)", hv, hv);
-        } else {
-            fprintf(gen->output, "%s == (const char*)(", hv);
-            generate_expression(gen, hb);
-            fprintf(gen->output, ") && _heap_%s ? (_heap_%s = 0, aether_unwind_forget(%s), 0) : "
-                    "(%s = aether_uniform_heap_str(%s, 0), 0)",
-                    v, v, v, hv, hv);
-        }
-        seq_next(gen, &s);
-        fprintf(gen->output, "%s = 1", own);
-        seq_next(gen, &s);
-        fprintf(gen->output, "%s", hv);
-        seq_close(gen, &s);
-        return;
-    }
     if (e && e->type == AST_IDENTIFIER && e->value && is_heap_string_var(gen, e->value)) {
         const char* v = e->value;
         int self = target && strcmp(v, target) == 0;
@@ -1172,8 +1073,7 @@ void emit_string_take(CodeGenerator* gen, ASTNode* e, const char* own,
         } else {
             /* Last use (or the slot itself): move the ownership; a source
              * holding a string it does not own gives the slot a copy. */
-            fprintf(gen->output, "(%s = 1, _heap_%s ? (_heap_%s = 0, aether_unwind_forget(%s), (const char*)(",
-                    own, v, v, v);
+            fprintf(gen->output, "(%s = 1, _heap_%s ? (_heap_%s = 0, (const char*)(", own, v, v);
             generate_expression(gen, e);
             fprintf(gen->output, ")) : aether_uniform_heap_str((const char*)(");
             generate_expression(gen, e);
@@ -1233,7 +1133,6 @@ static void emit_string_take_rebind(CodeGenerator* gen, const char* name,
     emit_string_take(gen, rhs, own, name);
     fprintf(gen->output, "; if (_heap_%s) aether_heap_str_free(_tmp_old); _heap_%s = %s;",
             name, name, own);
-    emit_unwind_track_local(gen, name);
     fprintf(gen->output, " }\n");
 }
 
@@ -2390,7 +2289,6 @@ static int string_bind_owns(CodeGenerator* gen, ASTNode* e, int may) {
      * as possibly owning there. */
     if (is_slice_string_element(e)) return may;
     if (is_string_view_read(gen, e, 0)) return 1;
-    if (may && e->type == AST_FUNCTION_CALL && handback_leaf_node(gen, e, 0)) return 1;
     if (e->type == AST_IF_EXPRESSION && e->child_count >= 3) {
         int a = string_bind_owns_arm(gen, e->children[1], may);
         int b = string_bind_owns_arm(gen, e->children[2], may);
@@ -2422,7 +2320,6 @@ static int string_bind_owns_arm(CodeGenerator* gen, ASTNode* e, int may) {
         is_slice_string_element(e) || is_string_view_read(gen, e, 0)) {
         return string_bind_owns(gen, e, may);
     }
-    if (may && e->type == AST_FUNCTION_CALL && handback_leaf_node(gen, e, 0)) return 1;
     return is_heap_string_expr(gen, e);
 }
 
@@ -2571,14 +2468,6 @@ static int alias_source_owns(CodeGenerator* gen, ASTNode* root, const char* name
     int owns = body_assigns_var_from_heap_in(gen, root, name, cs ? &fresh : NULL, root, depth + 1);
     g_alias_chain_top--;
     if (owns) return 1;
-    ASTNode* fn = fn_def_of_body(gen, root);
-    for (int i = 0; fn && i < fn->child_count; i++) {
-        ASTNode* p = fn->children[i];
-        if (p && (p->type == AST_PATTERN_VARIABLE || p->type == AST_VARIABLE_DECLARATION) &&
-            p->value && strcmp(p->value, name) == 0)
-            return p->node_type && p->node_type->kind == TYPE_STRING &&
-                   fn_def_string_param_captures(gen, fn, i);
-    }
     return 0;
 }
 
@@ -2743,7 +2632,6 @@ static int returns_promoted_string(CodeGenerator* gen, ASTNode* expr, const char
  * identifiers, which is the wrong function whenever classification is
  * triggered from a caller's destructure site. `fn_name` is the analysed
  * function's. */
-static int returned_param_is_captured(CodeGenerator* gen, const char* name, ASTNode* fn_def);
 static int classify_open_has(ASTNode* fn);
 
 /* #2649: is `e` a call to a `string` function whose classification is open
@@ -2825,9 +2713,7 @@ static int return_expr_is_heap(CodeGenerator* gen, ASTNode* expr,
         return body_assigns_var_from_heap_or_catch(gen, fn_body_root, expr->value) ||
                body_tuple_destructure_binds_heap(gen, fn_body_root, expr->value) ||
                returns_promoted_string(gen, expr,
-                                       fn_def ? fn_scope_name(gen->program, fn_def) : fn_name) ||
-               /* A kept parameter is this function's own reference. */
-               returned_param_is_captured(gen, expr->value, fn_def);
+                                       fn_def ? fn_scope_name(gen->program, fn_def) : fn_name);
     }
     /* #2461: a field read is taken as a copy at the return site (the
      * struct, often this function's own local, frees its buffer at scope
@@ -3320,54 +3206,6 @@ static void emit_tuple_return_escape_drains(CodeGenerator* gen, ASTNode* stmt) {
                 "if (_heap_%s) { aether_heap_str_free(%s); %s = NULL; _heap_%s = 0; }\n",
                 name, name, name, name);
     }
-}
-
-/* Struct-field heap-string assignment helper (#465).
- *
- * For an assignment `<var>.<field> = <rhs>` where `<var>` is a
- * struct local whose definition has `<field>: string`, emit:
- *
- *     { const char* _tmp_old = <var>.<field>;
- *       <var>.<field> = <rhs>;
- *       if (<var>._heap_<field>) free((void*)_tmp_old);
- *       <var>._heap_<field> = <rhs_is_heap>; }
- *
- * Returns 1 if the wrap was emitted (caller skips the bare
- * assignment), 0 if the LHS shape isn't one of the recognised
- * struct-field patterns (caller falls through to the existing
- * bare-assignment emission). */
-/* #1866: is `name` a POINTER-TO-STRUCT PARAMETER of the function being
- * emitted? A setter takes the box as a parameter, so the field assignment
- * inside it is written through a parameter rather than a local, and the
- * ownership wrapper below used to skip it: the tracker was never set and the
- * box's destructor believed it owned nothing. That left no correct way to
- * write a destructor at all, since freeing the field by hand double-frees
- * when the assignment was written on a local and leaks when it went through a
- * setter.
- *
- * Locals stay excluded, so a raw `malloc(...) as *T` local keeps the #790
- * treatment. That guard is narrower than it looks either way: the generated
- * destructor reads the same `_heap_<field>` tracker unconditionally at free
- * time, so a non-zeroed box is already unsound there regardless of what this
- * assignment site does. heap.new zero-inits, which is the documented way to
- * make one. */
-static int is_ptr_struct_param(CodeGenerator* gen, const char* name) {
-    if (!gen || !gen->current_function || !name) return 0;
-    ASTNode* fn = gen->current_function;
-    for (int i = 0; i < fn->child_count; i++) {
-        ASTNode* p = fn->children[i];
-        /* Parameters come from parse_pattern, so a plain `name: T` is a
-         * pattern-variable node rather than a dedicated parameter node. The
-         * body is the last child and is not a parameter. */
-        if (!p || !p->value) continue;
-        if (p->type != AST_PATTERN_VARIABLE && p->type != AST_IDENTIFIER) continue;
-        if (strcmp(p->value, name) != 0) continue;
-        Type* t = p->node_type;
-        return t && t->kind == TYPE_PTR && t->element_type &&
-               t->element_type->kind == TYPE_STRUCT &&
-               t->element_type->struct_name != NULL;
-    }
-    return 0;
 }
 
 /* #2369: heap.new box provenance.
@@ -6187,7 +6025,6 @@ static ASTNode* g_keep_closure = NULL;
  * pointer's provenance is looked up (box_is_heap_new). */
 static ASTNode* g_keep_fn = NULL;
 static int value_directly_carries_param(ASTNode* node, const char* pname);
-static int handback_leaf_is(CodeGenerator* gen, ASTNode* expr, const char* name, int depth);
 static int is_nonstoring_builtin(const char* fn);
 static int is_consuming_free(CodeGenerator* gen, const char* fn);
 
@@ -6245,12 +6082,6 @@ static int callee_param_is_pattern_literal(CodeGenerator* gen, const char* func_
 static int resolve_callee_param_clause(CodeGenerator* gen, const char* func_name,
                                        int param_idx, int clause, const char** out_pname,
                                        ASTNode** out_body);
-
-static int resolve_callee_param_body(CodeGenerator* gen, const char* func_name,
-                                     int param_idx, const char** out_pname,
-                                     ASTNode** out_body) {
-    return resolve_callee_param_clause(gen, func_name, param_idx, 0, out_pname, out_body);
-}
 
 static int resolve_callee_param_clause(CodeGenerator* gen, const char* func_name,
                                        int param_idx, int clause, const char** out_pname,
@@ -6388,11 +6219,6 @@ static int callee_memo_begin(CodeGenerator* gen, ASTNode* fn, int idx, int query
     return 0;
 }
 
-static void callee_memo_end(CodeGenerator* gen, ASTNode* fn, int idx, int query, int r) {
-    CalleeMemo* m = callee_memo_entry(gen, fn, idx * 8 + query);
-    if (m) m->state = r ? 3 : 2;
-}
-
 /* compute_closure_args_borrowed and discover_fn_values ask under a
  * hypothesis they may drop. */
 static void callee_memo_reset(CodeGenerator* gen) {
@@ -6423,34 +6249,6 @@ int hands_back_temp_memo_begin(CodeGenerator* gen, ASTNode* call, int* out, int*
 void hands_back_temp_memo_end(CodeGenerator* gen, ASTNode* call, int r, int mark) {
     CalleeMemo* m = callee_memo_entry(gen, call, CALL_Q_HANDS_BACK_TEMP);
     if (m) m->state = g_pending_answers != mark ? 0 : r ? 3 : 2;
-}
-
-/* #2499 copy-on-keep, clause by clause: does clause `clause` of `func_name`
- * keep its `string` parameter `param_idx` past the call? The same question
- * closure_string_param_kept asks of a closure literal: a capture or an
- * alias into a local that keeps nothing is no keep. A return counts only
- * when `return_is_keep`. Unresolvable: kept. */
-static int callee_string_param_kept_in_clause(CodeGenerator* gen, const char* func_name,
-                                              int param_idx, int clause, int return_is_keep,
-                                              int depth) {
-    const char* pname; ASTNode* body;
-    int saved_cl = g_escape_param_is_closure;   /* #2528: per walk */
-    if (!resolve_callee_param_clause(gen, func_name, param_idx, clause, &pname, &body)) {
-        g_escape_param_is_closure = saved_cl;
-        return 1;
-    }
-    int saved_flag = g_capture_holds_own_ref;
-    ASTNode* saved_body = g_keep_body;
-    ASTNode* saved_closure = g_keep_closure;
-    g_capture_holds_own_ref = 1;
-    g_keep_body = body;
-    g_keep_closure = NULL;
-    int kept = param_escapes_in_subtree(gen, body, pname, depth, return_is_keep);
-    g_capture_holds_own_ref = saved_flag;
-    g_keep_body = saved_body;
-    g_keep_closure = saved_closure;
-    g_escape_param_is_closure = saved_cl;
-    return kept;
 }
 
 /* Parameter `param_idx` of the definition `fn_def` when it binds a
@@ -6499,111 +6297,7 @@ int callee_param_is_string(CodeGenerator* gen, const char* func_name, int param_
 static int param_opaque_sink(CodeGenerator* gen, ASTNode* node, const char* pname, int depth);
 static int param_consumed(CodeGenerator* gen, ASTNode* node, const char* pname, int depth);
 
-static int def_string_param_captures_walk(CodeGenerator* gen, ASTNode* fn_def,
-                                          int param_idx, int depth);
 
-static int def_string_param_captures_at(CodeGenerator* gen, ASTNode* fn_def,
-                                        int param_idx, int depth) {
-    if (!def_string_param(fn_def, param_idx)) return 0;
-    int r;
-    int known = callee_memo_begin(gen, fn_def, param_idx, CALLEE_Q_CAPTURES, 0, &r);
-    if (known == 1) return r;
-    r = def_string_param_captures_walk(gen, fn_def, param_idx, known == 0 ? 0 : depth);
-    if (known == 0) callee_memo_end(gen, fn_def, param_idx, CALLEE_Q_CAPTURES, r);
-    return r;
-}
-
-static int def_string_param_captures_walk(CodeGenerator* gen, ASTNode* fn_def,
-                                          int param_idx, int depth) {
-    if (depth > 8) return 0;
-    ASTNode* param = def_string_param(fn_def, param_idx);
-    if (!param) return 0;
-    char** promoted = NULL;
-    int promoted_count = 0;
-    get_promoted_names_for_func(gen, fn_scope_name(gen->program, fn_def), &promoted, &promoted_count);
-    for (int k = 0; k < promoted_count; k++) {
-        if (promoted[k] && strcmp(promoted[k], param->value) == 0) return 0;
-    }
-    ASTNode* body = NULL;
-    for (int i = fn_def->child_count - 1; i >= 0 && !body; i--) {
-        if (fn_def->children[i] && fn_def->children[i]->type == AST_BLOCK) body = fn_def->children[i];
-    }
-    if (!body) return 0;
-    const char* pname = param->value;
-    int saved_cl = g_escape_param_is_closure;
-    int saved_flag = g_capture_holds_own_ref;
-    ASTNode* saved_body = g_keep_body;
-    ASTNode* saved_closure = g_keep_closure;
-    ASTNode* saved_fn = g_keep_fn;
-    g_escape_param_is_closure = 0;   /* a `string`, not a closure (#2528) */
-    g_capture_holds_own_ref = 1;
-    g_keep_body = body;
-    g_keep_closure = NULL;
-    g_keep_fn = fn_def;
-    int kept = param_escapes_in_subtree(gen, body, pname, depth, /*return_is_escape=*/0);
-    g_capture_holds_own_ref = saved_flag;
-    g_keep_body = saved_body;
-    g_keep_closure = saved_closure;
-    g_escape_param_is_closure = saved_cl;
-    /* Every keep must be a slot this compiler tracks (a container, a
-     * struct field, a cell, a global, a callee that captures in turn): a
-     * reference handed to an extern's `ptr` parameter, a `@retain`
-     * parameter or a callee without a body has no releaser, so the
-     * function keeps borrowing and its caller keeps the old rule. A
-     * function that frees its parameter takes the caller's reference
-     * (param_consumed), so it takes none of its own either. */
-    int captures = 0;
-    if (kept) {
-        ASTNode* walked_fn = g_keep_fn;
-        g_keep_fn = fn_def;
-        captures = !param_opaque_sink(gen, body, pname, depth) &&
-                   !param_consumed(gen, body, pname, depth);
-        g_keep_fn = walked_fn;
-    }
-    g_keep_fn = saved_fn;
-    return captures;
-}
-
-int fn_def_string_param_captures(CodeGenerator* gen, ASTNode* fn_def, int param_idx) {
-    return def_string_param_captures_at(gen, fn_def, param_idx, 0);
-}
-
-/* Clause `clause` of `func_name` (the single definition for 0), or NULL. */
-static ASTNode* callee_clause_def(CodeGenerator* gen, const char* func_name, int clause) {
-    if (!gen || !gen->program || !func_name) return NULL;
-    const DefClauses* dc = program_index_clauses(gen->program, codegen_normalise_callee(func_name));
-    return dc && clause >= 0 && clause < dc->count ? dc->nodes[clause] : NULL;
-}
-
-/* #2644: does some clause of `func_name` keep the caller's own `string`
- * argument at `param_idx` past the call: keep it (a return counting when
- * `return_is_keep`) without taking a reference of its own? A clause whose
- * pattern there is a literal only compares it. Each clause function takes
- * its own reference when it keeps a parameter (copy-on-keep), and the
- * caller cannot tell which clause a call reaches, so its argument lives on
- * when any clause keeps it as it came. For a single definition this is the
- * plain rule: kept, and not by a reference of its own. */
-static int callee_keeps_given_string(CodeGenerator* gen, const char* func_name, int param_idx,
-                                     int return_is_keep, int depth) {
-    /* Mutual recursion between callees: past the bound the parameter
-     * counts as kept, which only ever keeps a caller's argument alive
-     * longer (the walk through callee_keeps_string_arg restarts here). */
-    if (depth > 8) return 1;
-    int n = callee_clause_count(gen, func_name);
-    for (int c = 0; c < n; c++) {
-        if (n > 1 && callee_param_is_pattern_literal(gen, func_name, param_idx, c)) continue;
-        if (def_string_param_captures_at(gen, callee_clause_def(gen, func_name, c), param_idx, depth))
-            continue;
-        if (callee_string_param_kept_in_clause(gen, func_name, param_idx, c, return_is_keep, depth))
-            return 1;
-    }
-    return 0;
-}
-
-int callee_string_param_kept_as_given(CodeGenerator* gen, const char* func_name, int param_idx,
-                                      int return_is_keep) {
-    return callee_keeps_given_string(gen, func_name, param_idx, return_is_keep, 0);
-}
 /* Is `pname` passed, as a bare argument anywhere under `node`, to a sink
  * the compiler cannot release behind: an extern parameter that keeps it
  * (`ptr`, unknown, `@retain`), a callee without a visible body, or a
@@ -6628,8 +6322,7 @@ static int param_store_through_raw_pointer(CodeGenerator* gen, ASTNode* node,
     if (!is_store) return 0;
     ASTNode* lhs = node->children[0];
     if (!lhs || lhs->type != AST_MEMBER_ACCESS || lhs->child_count < 1) return 0;
-    if (!value_directly_carries_param(node->children[1], pname) &&
-        !handback_leaf_is(gen, node->children[1], pname, 1)) return 0;
+    if (!value_directly_carries_param(node->children[1], pname)) return 0;
     ASTNode* obj = lhs->children[0];
     if (!obj || !obj->node_type || obj->node_type->kind != TYPE_PTR) return 0;
     ASTNode* saved_fn = gen->current_function;
@@ -6650,9 +6343,8 @@ static int param_opaque_sink(CodeGenerator* gen, ASTNode* node, const char* pnam
      * hands the parameter back stores it the same way. */
     if (node->type == AST_VARIABLE_DECLARATION && node->value && node->child_count > 0 &&
         node->children[0] &&
-        ((node->children[0]->type == AST_IDENTIFIER && node->children[0]->value &&
-          strcmp(node->children[0]->value, pname) == 0) ||
-         handback_leaf_is(gen, node->children[0], pname, depth + 1)) &&
+        node->children[0]->type == AST_IDENTIFIER && node->children[0]->value &&
+        strcmp(node->children[0]->value, pname) == 0 &&
         is_module_global_var(gen, node->value)) return 1;
     if (node->type == AST_FUNCTION_CALL && node->value) {
         const char* fn = codegen_normalise_callee(node->value);
@@ -6683,10 +6375,6 @@ static int param_opaque_sink(CodeGenerator* gen, ASTNode* node, const char* pnam
                     int nc = callee_clause_count(gen, node->value);
                     for (int c = 0; c < nc; c++) {   /* #2627: any clause */
                         if (nc > 1 && callee_param_is_pattern_literal(gen, node->value, i, c)) continue;
-                        /* One that takes a reference of its own sinks none
-                         * of ours (#2644: each clause decides). */
-                        if (def_string_param_captures_at(gen, callee_clause_def(gen, node->value, c),
-                                                         i, depth + 1)) continue;
                         const char* cp; ASTNode* cb;
                         int saved_cl = g_escape_param_is_closure;
                         int r = resolve_callee_param_clause(gen, node->value, i, c, &cp, &cb)
@@ -6755,91 +6443,6 @@ static int param_consumed(CodeGenerator* gen, ASTNode* node, const char* pname, 
  * keeps it unless the callee's string result is uniform-heap, which hands
  * back a copy. Shared by the escape walk, the argument drain and the keep
  * walk of an enclosing body, so the three never disagree. */
-static int callee_keeps_string_arg_walk(CodeGenerator* gen, const char* func_name,
-                                        int param_idx, int depth);
-
-/* The question callee_keeps_string_arg is computing, innermost: a function
- * that passes its parameter back to itself at the same position asks it
- * again from its own body. That call keeps the parameter exactly when the
- * function does, so it adds no keep of its own and is answered no: the
- * function keeps the parameter iff something else in it does. Answered
- * "kept" as a cycle, every self-recursive function (std.message's
- * format_nodes) kept the strings it was handed, its callers kept them alive
- * for ever, and a struct field handed to one was given up and leaked. A
- * question reached around a longer cycle is still answered "kept". */
-static ASTNode* g_keeps_open_fn = NULL;
-static int g_keeps_open_idx = -1;
-
-int callee_keeps_string_arg(CodeGenerator* gen, const char* func_name, int param_idx, int depth) {
-    ASTNode* fn = callee_memo_fn(gen, func_name);
-    if (fn && fn == g_keeps_open_fn && param_idx == g_keeps_open_idx) return 0;
-    int r;
-    int known = fn ? callee_memo_begin(gen, fn, param_idx, CALLEE_Q_KEEPS, 1, &r) : -1;
-    if (known == 1) return r;
-    ASTNode* saved_fn = g_keeps_open_fn;
-    int saved_idx = g_keeps_open_idx;
-    g_keeps_open_fn = fn;
-    g_keeps_open_idx = param_idx;
-    r = callee_keeps_string_arg_walk(gen, func_name, param_idx, known == 0 ? 0 : depth);
-    g_keeps_open_fn = saved_fn;
-    g_keeps_open_idx = saved_idx;
-    if (known == 0) callee_memo_end(gen, fn, param_idx, CALLEE_Q_KEEPS, r);
-    return r;
-}
-
-/* Does every return of `fn_def` hand over a copy of what it returns, never
- * a parameter as it came? A string result classified heap does (the
- * uniform-heap wrap). So does a tuple whose every string position is heap
- * and that has no position a string can reach otherwise (a `ptr`): its
- * returns wrap each string position. */
-static int returns_copy_of_params(CodeGenerator* gen, ASTNode* fn_def) {
-    if (!fn_def) return 0;
-    Type* rt = fn_def->node_type;
-    /* #2740: a `string?` result is always handed over owned
-     * (emit_opt_string_return). */
-    if (is_opt_string_type(rt)) return 1;
-    if (rt && rt->kind == TYPE_TUPLE) {
-        for (int p = 0; p < rt->tuple_count; p++) {
-            Type* t = rt->tuple_types ? rt->tuple_types[p] : NULL;
-            if (!t) return 0;
-            /* #2751: a named function hands every `string?` position over
-             * owned, a copy of what it was given (emit_tuple_return_position,
-             * emit_tuple_passthrough_return). Taken for a keep, a function
-             * that passed its parameter on to one took a copy of it on entry
-             * (copy-on-keep) that nothing freed, one per call. */
-            if (is_opt_string_type(t) && fn_def->type == AST_FUNCTION_DEFINITION) continue;
-            if (t->kind == TYPE_STRING) {
-                if (!function_def_returns_heap_at(gen, fn_def, p)) return 0;
-            } else if (param_may_hold_caller_string(t)) {
-                return 0;
-            }
-        }
-        return 1;
-    }
-    return function_def_returns_heap_string(gen, fn_def);
-}
-
-static int callee_keeps_string_arg_walk(CodeGenerator* gen, const char* func_name,
-                                        int param_idx, int depth) {
-    const char* fn = codegen_normalise_callee(func_name);
-    ASTNode* fn_def = gen->program ? find_function_definition_by_name(gen->program, fn) : NULL;
-    int copies = returns_copy_of_params(gen, fn_def);
-    return callee_keeps_given_string(gen, func_name, param_idx, !copies, depth);
-}
-
-/* `return <param>` in `fn_def`: owned when the parameter is the function's
- * own reference (fn_def_string_param_captures; a clause's own, #2644). */
-static int returned_param_is_captured(CodeGenerator* gen, const char* name, ASTNode* fn_def) {
-    if (!gen || !name || !fn_def) return 0;
-    for (int i = 0; i < fn_def->child_count; i++) {
-        ASTNode* c = fn_def->children[i];
-        if (c && (c->type == AST_PATTERN_VARIABLE || c->type == AST_VARIABLE_DECLARATION) &&
-            c->value && strcmp(c->value, name) == 0) {
-            return def_string_param_captures_at(gen, fn_def, i, 0);
-        }
-    }
-    return 0;
-}
 
 /* Does the callee's param STORE-escape (anything except being directly
  * returned)? Used by the call-site identity-drain to distinguish a param
@@ -6939,13 +6542,6 @@ int param_may_hold_caller_string(const Type* t) {
            t->kind == TYPE_OPTIONAL;
 }
 
-static ASTNode* last_block_child_of(ASTNode* node) {
-    for (int i = node ? node->child_count - 1 : -1; i >= 0; i--) {
-        if (node->children[i] && node->children[i]->type == AST_BLOCK) return node->children[i];
-    }
-    return NULL;
-}
-
 /* The first value-carrying return under `node`, not looking into a nested
  * (non-trailing) closure. */
 static ASTNode* closure_first_value_return(ASTNode* node) {
@@ -6988,12 +6584,6 @@ static int closure_returns_copy_walk(ASTNode* node, ASTNode* first, int* saw_str
         if (!closure_returns_copy_walk(node->children[i], first, saw_string)) return 0;
     }
     return 1;
-}
-
-static int closure_returns_copy(ASTNode* body, int* saw_string) {
-    ASTNode* first = closure_first_value_return(body);
-    if (!first) return 1;   /* returns nothing */
-    return closure_returns_copy_walk(body, first, saw_string);
 }
 
 /* #2499: a closure-typed (`fn`, not a raw C function pointer) value. */
@@ -7148,26 +6738,6 @@ void compute_closure_args_borrowed(CodeGenerator* gen) {
     callee_memo_reset(gen);
 }
 
-/* #2499 copy-on-keep: does the closure literal `closure` keep its `string`
- * parameter `param_idx` past the call, so it must take a reference of its
- * own when it is entered? Every way of keeping counts (a list, map or set
- * store, a struct field, a cell or outer variable it is assigned to, a
- * local that keeps it, a nested call that keeps it, a multi-value return)
- * except two that already take their own reference: a capture by a nested
- * closure, and the return of a string closure, which is a copy. A local it
- * is assigned to and that keeps nothing is no keep either. With the
- * reference taken, the caller's own one is its to free after the call,
- * whatever the closure does. */
-int closure_string_param_kept(CodeGenerator* gen, ASTNode* closure, int param_idx) {
-    int saw_string = 0;
-    int returns_copy = closure_returns_copy(last_block_child_of(closure), &saw_string) &&
-                       saw_string;
-    g_capture_holds_own_ref = 1;
-    int kept = closure_param_escapes_via_body(gen, closure, param_idx, !returns_copy);
-    g_capture_holds_own_ref = 0;
-    return kept;
-}
-
 /* Does the user function `func_name` declare a `-> string` return? Only
  * then is the call-site identity-drain meaningful (it compares the call
  * result pointer against the passed temp). */
@@ -7306,107 +6876,6 @@ static int closure_param_store_retains(CodeGenerator* gen, ASTNode* node, const 
     return rhs && rhs->type == AST_IDENTIFIER && rhs->value && strcmp(rhs->value, pname) == 0;
 }
 
-/* #2499: does `call` keep its `string` argument `i` only by handing it
- * back? Its callee returns the parameter as it is (no copy: the string
- * result is not uniform-heap) and stores it nowhere, so the call's value is
- * the argument itself, and the argument goes wherever that value goes. */
-/* Is the value of `call` known to be something other than a string: its own
- * type, or its callee's result, is (a distinct type over string is a string
- * here)? An unknown type is no answer. */
-static int call_result_known_not_string(CodeGenerator* gen, ASTNode* call) {
-    Type* t = call->node_type;
-    if (t && t->kind != TYPE_STRING && t->kind != TYPE_UNKNOWN) return 1;
-    const char* fn = codegen_normalise_callee(call->value);
-    ASTNode* def = gen->program ? find_function_definition_by_name(gen->program, fn) : NULL;
-    Type* rt = def ? def->node_type : NULL;
-    return rt && rt->kind != TYPE_STRING && rt->kind != TYPE_UNKNOWN;
-}
-
-static int handback_param(CodeGenerator* gen, ASTNode* call, int i, int depth) {
-    if (!call || call->type != AST_FUNCTION_CALL || !call->value ||
-        strcmp(call->value, "call") == 0) return 0;
-    /* Only a call whose value is a string can be its string argument. A
-     * callee that keeps the parameter in what it returns (a struct holding
-     * it, #2584) keeps it like any store. Told apart by the two questions
-     * below alone, such a call was taken for a hand-back, and the local it
-     * was bound to was typed as the string, so the C did not compile. */
-    if (call_result_known_not_string(gen, call)) return 0;
-    if (!callee_has_visible_body(gen, call->value) ||
-        !callee_param_is_string(gen, call->value, i)) return 0;
-    /* Asked again while it is being computed (a callee reaching itself), the
-     * answer is no: the call is then judged as a keep of its own, as it was
-     * before hand-backs were told apart. */
-    ASTNode* fn = callee_memo_fn(gen, call->value);
-    int r;
-    int known = fn ? callee_memo_begin(gen, fn, i, CALLEE_Q_HANDBACK, 0, &r) : -1;
-    if (known == 1) return r;
-    int d = known == 0 ? 0 : depth;
-    r = callee_keeps_string_arg(gen, call->value, i, d) &&
-        !callee_keeps_given_string(gen, call->value, i, 0, d);
-    if (known == 0) callee_memo_end(gen, fn, i, CALLEE_Q_HANDBACK, r);
-    return r;
-}
-
-/* The variable whose pointer `expr` evaluates to through calls that only
- * hand it back (handback_param): `s` for `temp_prefix(s)` or
- * `pick(trim_none(s))`, NULL for anything else. A call that names the
- * variable in another argument as well, or hands back two, is no chain.
- * Returns the variable's identifier node. */
-static ASTNode* handback_leaf_node(CodeGenerator* gen, ASTNode* expr, int depth) {
-    if (!expr || depth > 8) return NULL;
-    if (expr->type == AST_IDENTIFIER) return expr->value ? expr : NULL;
-    if (expr->type != AST_FUNCTION_CALL) return NULL;
-    /* #2649: a call handed an argument temporary yields an owned string,
-     * never the variable's pointer (a copy is made of it), so it is no
-     * chain. */
-    if (call_hands_back_temp(gen, expr)) return NULL;
-    ASTNode* leaf = NULL;
-    int at = -1;
-    for (int i = 0; i < expr->child_count; i++) {
-        ASTNode* l = handback_leaf_node(gen, expr->children[i], depth + 1);
-        if (!l || !handback_param(gen, expr, i, depth + 1)) continue;
-        if (leaf) return NULL;
-        leaf = l;
-        at = i;
-    }
-    for (int i = 0; leaf && i < expr->child_count; i++) {
-        if (i != at && subtree_mentions_param(expr->children[i], leaf->value)) return NULL;
-    }
-    return leaf;
-}
-
-static const char* handback_leaf(CodeGenerator* gen, ASTNode* expr, int depth) {
-    ASTNode* leaf = handback_leaf_node(gen, expr, depth);
-    return leaf ? leaf->value : NULL;
-}
-
-static int handback_leaf_is(CodeGenerator* gen, ASTNode* expr, const char* name, int depth) {
-    const char* leaf = expr && expr->type == AST_FUNCTION_CALL ? handback_leaf(gen, expr, depth) : NULL;
-    return leaf && strcmp(leaf, name) == 0;
-}
-
-/* #2548: for the take (emit_string_take), the heap-tracked local a call
- * only hands back, or NULL. A closure's shared cell or env slot frees its
- * string itself, so its value is never moved out. */
-static ASTNode* handback_take_leaf(CodeGenerator* gen, ASTNode* e) {
-    if (!e || e->type != AST_FUNCTION_CALL) return NULL;
-    ASTNode* leaf = handback_leaf_node(gen, e, 0);
-    if (!leaf || !is_heap_string_var(gen, leaf->value) ||
-        is_promoted_capture(gen, leaf->value) || is_env_capture_name(gen, leaf->value)) return NULL;
-    return leaf;
-}
-
-/* Does the named `call` keep its `string` argument `i` past the call? As
- * callee_keeps_string_arg says, except at a call taken as owned
- * (call_hands_back_temp, #2649): an argument it only hands back
- * (handback_param) comes out of it copied, so the pointer passed stays its
- * owner's. Shared by the escape walk and the keep walk, as
- * callee_keeps_string_arg is. */
-static int call_keeps_string_arg(CodeGenerator* gen, ASTNode* call, int i, int depth) {
-    if (call_hands_back_temp(gen, call) && handback_param(gen, call, i, depth)) return 0;
-    return callee_keeps_string_arg(gen, call->value, i, depth);
-}
-
 /* In a keep walk: is passing the parameter as argument `i` of the named
  * call `node` a keep? */
 static int call_position_keeps_param(CodeGenerator* gen, ASTNode* node, int i, int depth) {
@@ -7432,7 +6901,7 @@ static int call_position_keeps_param(CodeGenerator* gen, ASTNode* node, int i, i
          * never drained. A `string` argument is kept only as
          * call_keeps_string_arg says. */
         if (callee_param_is_string(gen, node->value, i))
-            return call_keeps_string_arg(gen, node, i, depth + 1);
+            return 0;   /* R3: a string parameter is never kept as given */
         return callee_param_escapes_via_body(gen, node->value, i, depth + 1);
     }
     if (call_arg_escapes(lookup_callee_param_kind(gen, node->value, i))) return 1;
@@ -7466,7 +6935,6 @@ static int param_escapes_in_subtree(CodeGenerator* gen, ASTNode* node,
     if (!return_is_escape && node->type == AST_RETURN_STATEMENT) {
         for (int i = 0; i < node->child_count; i++) {
             ASTNode* c = node->children[i];
-            if (handback_leaf_is(gen, c, pname, depth + 1)) continue;
             /* The parameter inside what is returned (a field of a struct
              * literal, an element of an array one) is kept, as in any
              * struct field: the value returned holds the function's own
@@ -7531,7 +6999,6 @@ static int param_escapes_in_subtree(CodeGenerator* gen, ASTNode* node,
          * same lhs-is-self exclusion the AST_ASSIGNMENT sink applies. */
         int decl_is_self = node->value && strcmp(node->value, pname) == 0;
         if (!decl_is_self) {
-            int followed = -1;
             for (int i = 0; i < node->child_count; i++) {
                 /* #2750: a local bound to `o ?? d` or `o!` holds the
                  * parameter's string only as long as the local does, so the
@@ -7549,14 +7016,7 @@ static int param_escapes_in_subtree(CodeGenerator* gen, ASTNode* node,
                         continue;
                     return 1;
                 }
-                /* A call that only hands the parameter back
-                 * (`t = temp_prefix(p)`) aliases it as the bare name does. */
-                int handback = 0;
-                if (!value_directly_carries_param(node->children[i], pname)) {
-                    handback = g_capture_holds_own_ref &&
-                               handback_leaf_is(gen, node->children[i], pname, depth + 1);
-                    if (!handback) continue;
-                }
+                if (!value_directly_carries_param(node->children[i], pname)) continue;
                 /* A copy-on-keep query follows an alias into a local: the
                  * reference outlives the call only if the local keeps it
                  * (#2499). Every use of the local's name in the body counts,
@@ -7565,20 +7025,9 @@ static int param_escapes_in_subtree(CodeGenerator* gen, ASTNode* node,
                     if (depth >= 8 ||
                         param_escapes_in_subtree(gen, g_keep_body, node->value, depth + 1,
                                                  return_is_escape)) return 1;
-                    if (handback) followed = i;
                     continue;
                 }
                 return 1;
-            }
-            /* The hand-back names the parameter only along its chain: walked
-             * again, it would count as a keep of its own. */
-            if (followed >= 0) {
-                for (int i = 0; i < node->child_count; i++) {
-                    if (i != followed &&
-                        param_escapes_in_subtree(gen, node->children[i], pname, depth,
-                                                 return_is_escape)) return 1;
-                }
-                return 0;
             }
         }
     }
@@ -7643,15 +7092,6 @@ static int param_escapes_in_subtree(CodeGenerator* gen, ASTNode* node,
             if (!a) continue;
             if (a != list_kept && a->type == AST_IDENTIFIER && a->value &&
                 strcmp(a->value, pname) == 0) {
-                if (call_position_keeps_param(gen, node, i, depth)) return 1;
-                continue;
-            }
-            /* #2499: a call that only hands the parameter back passes it on
-             * to this position (`fs_make_temp_file_raw(d, temp_prefix(p))`),
-             * so the position decides, not the hand-back: counted as a
-             * keep, p was copied and the copy, marked escaped by the same
-             * call, was never freed. */
-            if (a != list_kept && first_arg == 0 && handback_leaf_is(gen, a, pname, depth + 1)) {
                 if (call_position_keeps_param(gen, node, i, depth)) return 1;
                 continue;
             }
@@ -7808,9 +7248,7 @@ static int call_arg_position_escapes(CodeGenerator* gen, ASTNode* call,
          * argument escapes only as callee_keeps_string_arg says: one the
          * callee keeps without a reference of its own, which is one it hands
          * on to a `ptr` slot that may keep it. */
-        if (callee_param_is_string(gen, call->value, arg_idx)) {
-            return call_keeps_string_arg(gen, call, arg_idx, 0);
-        }
+        if (callee_param_is_string(gen, call->value, arg_idx)) return 0;   /* R3 */
         /* A `string?` result is handed over owned as well (#2740,
          * returns_copy_of_params): a `string?` parameter it returns is
          * copied, and does not keep the caller's. */
@@ -7833,61 +7271,6 @@ static int call_arg_position_escapes(CodeGenerator* gen, ASTNode* call,
 
 static void escape_inspect_arg(CodeGenerator* gen, ASTNode* call, int i,
                                const char* consumed_lhs);
-static void escape_walk_chain_rest(CodeGenerator* gen, ASTNode* expr, const char* leaf,
-                                   const char* consumed_lhs);
-
-/* #2548: the calls that only hand a heap-tracked local back
- * (handback_take_leaf) and that an owning slot takes as the local itself
- * (emit_string_take): the value of a binding, of a container store or of a
- * struct literal's field, or an `if` / `match` arm of one. The take moves
- * the local on its last use and copies it otherwise, exactly as it takes a
- * bare local there, so the local does not escape through the call: an
- * escaped local was never freed when another arm ran, or when the take
- * copied. Registered by the node that takes the value, consulted where the
- * walk meets the call; a stack, popped by the registering node. */
-#define TAKEN_HANDBACK_MAX 64
-static ASTNode* g_taken_handbacks[TAKEN_HANDBACK_MAX];
-static int g_taken_handback_count = 0;
-
-static void register_taken_handbacks(CodeGenerator* gen, ASTNode* e) {
-    if (!e) return;
-    if (e->type == AST_IF_EXPRESSION && e->child_count >= 3) {
-        register_taken_handbacks(gen, e->children[1]);
-        register_taken_handbacks(gen, e->children[2]);
-        return;
-    }
-    if (e->type == AST_MATCH_STATEMENT) {
-        for (int i = 1; i < e->child_count; i++) {
-            ASTNode* arm = e->children[i];
-            if (arm && arm->type == AST_MATCH_ARM && arm->child_count >= 2)
-                register_taken_handbacks(gen, match_arm_value(arm->children[1]));
-        }
-        return;
-    }
-    if (g_taken_handback_count < TAKEN_HANDBACK_MAX && handback_take_leaf(gen, e))
-        g_taken_handbacks[g_taken_handback_count++] = e;
-}
-
-static int is_taken_handback(ASTNode* e) {
-    for (int i = g_taken_handback_count - 1; i >= 0; i--) {
-        if (g_taken_handbacks[i] == e) return 1;
-    }
-    return 0;
-}
-
-/* The arguments of the hand-back chain `expr` other than the one carrying
- * `leaf` on (handback_leaf), each inspected as an argument of its call. */
-static void escape_walk_chain_rest(CodeGenerator* gen, ASTNode* expr, const char* leaf,
-                                   const char* consumed_lhs) {
-    if (!expr || expr->type != AST_FUNCTION_CALL) return;
-    for (int i = 0; i < expr->child_count; i++) {
-        if (subtree_mentions_param(expr->children[i], leaf)) {
-            escape_walk_chain_rest(gen, expr->children[i], leaf, consumed_lhs);
-        } else {
-            escape_inspect_arg(gen, expr, i, consumed_lhs);
-        }
-    }
-}
 
 static void escape_inspect_arg(CodeGenerator* gen, ASTNode* call, int i,
                                const char* consumed_lhs) {
@@ -7905,14 +7288,6 @@ static void escape_inspect_arg(CodeGenerator* gen, ASTNode* call, int i,
                 mark_escaped_string_var(gen, arg->value);
             }
         }
-        return;
-    }
-    /* #2499: a call that only hands a variable back passes it on to this
-     * position (`fs_make_temp_file_raw(d, temp_prefix(p))`), which decides
-     * whether it escapes, as handback_leaf_is does in the keep walk. */
-    const char* leaf = arg->type == AST_FUNCTION_CALL ? handback_leaf(gen, arg, 0) : NULL;
-    if (leaf && is_heap_string_var(gen, leaf) && !call_arg_position_escapes(gen, call, i)) {
-        escape_walk_chain_rest(gen, arg, leaf, consumed_lhs);
         return;
     }
     /* Non-identifier arg (literal, nested call, etc.): still recurse to
@@ -7984,18 +7359,7 @@ static void escape_walk(CodeGenerator* gen, ASTNode* node,
      * `value`); the receiver appears as a regular argument among the
      * children. */
     if (node->type == AST_FUNCTION_CALL) {
-        if (is_taken_handback(node)) {
-            ASTNode* hb = handback_take_leaf(gen, node);
-            if (hb && (!consumed_lhs || strcmp(hb->value, consumed_lhs) != 0)) {
-                escape_walk_chain_rest(gen, node, hb->value, consumed_lhs);
-                return;
-            }
-        }
-        int saved_taken = g_taken_handback_count;
-        int slot = container_store_slot(gen, node);
-        if (slot >= 0 && slot < node->child_count) register_taken_handbacks(gen, node->children[slot]);
         escape_inspect_call_args(gen, node, consumed_lhs);
-        g_taken_handback_count = saved_taken;
         return;
     }
 
@@ -8008,21 +7372,10 @@ static void escape_walk(CodeGenerator* gen, ASTNode* node,
         const char* lhs = node->value;
         /* A string a closure writes into one of its captures goes into the
          * capture's shared cell, which takes a value of its own (#2514), so
-         * the local stored there keeps its own frees. */
-        int lhs_is_capture = is_env_capture_name(gen, lhs);
-        /* #2548: a string slot takes its value (emit_string_take), so a
-         * call there that only hands a local back takes the local as
-         * `V = local` does. */
-        int saved_taken = g_taken_handback_count;
-        if (!lhs_is_capture &&
-            (is_heap_string_var(gen, lhs) || is_module_global_var(gen, lhs) ||
-             is_actor_state_var(gen, lhs))) {
-            register_taken_handbacks(gen, node->children[node->child_count - 1]);
-        }
+         * the local stored there keeps its own frees: no escape. */
         for (int i = 0; i < node->child_count; i++) {
             escape_walk(gen, node->children[i], lhs);
         }
-        g_taken_handback_count = saved_taken;
         return;
     }
 
@@ -8127,16 +7480,6 @@ static void escape_walk(CodeGenerator* gen, ASTNode* node,
         return;
     }
 
-    /* #2548: an Aether struct literal takes each string field's value. */
-    int saved_taken = g_taken_handback_count;
-    if (node->type == AST_STRUCT_LITERAL && !(node->value && aether_is_c_import_struct(node->value))) {
-        for (int i = 0; i < node->child_count; i++) {
-            ASTNode* fi = node->children[i];
-            if (fi && (fi->type == AST_ASSIGNMENT || fi->type == AST_FIELD_INIT) && fi->child_count > 0)
-                register_taken_handbacks(gen, fi->children[0]);
-        }
-    }
-
     /* Default: recurse with the same consumed_lhs context. */
     for (int i = 0; i < node->child_count; i++) {
         /* A block's statement, or the expression an expression statement
@@ -8148,7 +7491,6 @@ static void escape_walk(CodeGenerator* gen, ASTNode* node,
         }
         escape_walk(gen, node->children[i], consumed_lhs);
     }
-    g_taken_handback_count = saved_taken;
 }
 
 void mark_escaped_heap_string_vars(CodeGenerator* gen, ASTNode* body) {
@@ -10391,15 +9733,12 @@ void push_heap_string_exit_free_defers(CodeGenerator* gen, ASTNode* body) {
             codegen_own_node(gen, carrier);
             push_defer(gen, carrier);
         }
-        /* #2499: a parameter captured on entry owns its copy from the first
-         * statement on. Journal it now that its exit free is armed, as a
-         * local is journaled where it is assigned (emit_unwind_track_local),
-         * or a panic unwinding through the body leaks the copy. No body
-         * statement has been emitted yet. */
-        if (is_captured_string_param(gen, name)) {
-            print_indent(gen);
-            fprintf(gen->output, "aether_unwind_track_str_if(%s, _heap_%s);\n", name, name);
-        }
+        /* #2923: the place is journaled as its exit free is armed, at the
+         * frame it is declared in, so a panic leaving that frame releases
+         * what it holds then, and one caught inside leaves it to the local. */
+        print_indent(gen);
+        fprintf(gen->output, "aether_unwind_track_str_place((const void*)&%s, (const void*)&_heap_%s);\n",
+                name, name);
     }
 }
 
@@ -11739,8 +11078,7 @@ static int call_may_hand_back_args(CodeGenerator* gen, ASTNode* call) {
                 break;
         }
     }
-    if (rt && rt->kind == TYPE_STRING && is_heap_string_expr(gen, call) &&
-        !handback_take_leaf(gen, call)) return 0;
+    if (rt && rt->kind == TYPE_STRING && is_heap_string_expr(gen, call)) return 0;
     const char* fn = call->value ? codegen_normalise_callee(call->value) : NULL;
     if (!fn) return 1;
     if (strcmp(fn, "call") == 0) {
@@ -12355,7 +11693,50 @@ void push_struct_destroy_defer(CodeGenerator* gen, const char* var_name,
                                         var_name, struct_type->struct_name);
         codegen_own_node(gen, carrier);
         push_defer(gen, carrier);
+        emit_struct_unwind_track(gen, var_name, struct_type->struct_name);
     }
+}
+
+/* #2923: a struct local that owns strings is journaled by its address while
+ * it is in scope, so a panic leaving the scope destroys what it holds then;
+ * its scope exits forget it (try_emit_struct_destroy). A declaration being
+ * written holds the journal call until its `;` (unwind_track_hold), at the
+ * statement level it was pushed at, never inside a statement nested in its
+ * initializer. */
+#define UNWIND_TRACK_MAX 32
+static const char* g_utrack_var[UNWIND_TRACK_MAX];
+static const char* g_utrack_struct[UNWIND_TRACK_MAX];
+static int g_utrack_count = 0;
+static int g_utrack_hold_depth = -1;
+
+static void unwind_track_print(CodeGenerator* gen, const char* var_name, const char* struct_name) {
+    print_indent(gen);
+    fprintf(gen->output, "aether_unwind_track((const void*)&%s, %s_destroy_unwind);\n",
+            var_name, struct_name);
+}
+
+void emit_struct_unwind_track(CodeGenerator* gen, const char* var_name, const char* struct_name) {
+    if (g_utrack_hold_depth < 0) {
+        unwind_track_print(gen, var_name, struct_name);
+        return;
+    }
+    if (g_utrack_count == UNWIND_TRACK_MAX) {
+        fprintf(stderr, "Fatal: too many struct locals declared in one statement\n");
+        exit(1);
+    }
+    g_utrack_var[g_utrack_count] = var_name;
+    g_utrack_struct[g_utrack_count++] = struct_name;
+}
+
+static void unwind_track_hold(CodeGenerator* gen) {
+    if (g_utrack_hold_depth < 0) g_utrack_hold_depth = gen->hoist_depth;
+}
+
+static void unwind_track_release(CodeGenerator* gen) {
+    if (g_utrack_hold_depth < 0 || gen->hoist_depth > g_utrack_hold_depth) return;
+    g_utrack_hold_depth = -1;
+    for (int i = 0; i < g_utrack_count; i++) unwind_track_print(gen, g_utrack_var[i], g_utrack_struct[i]);
+    g_utrack_count = 0;
 }
 
 // #893: innermost enclosing loop whose source label matches `name`, or -1.
@@ -13454,6 +12835,23 @@ void hoist_declare(CodeGenerator* gen, const char* ctype, const char* name) {
     hoist_append(gen, cg_internf("%s %s; ", ctype, name));
 }
 
+void hoist_declare_null(CodeGenerator* gen, const char* ctype, const char* name) {
+    hoist_append(gen, cg_internf("%s %s = NULL; ", ctype, name));
+}
+
+void hoist_append_text(CodeGenerator* gen, const char* text) {
+    hoist_append(gen, text);
+}
+
+void push_scoped_temp_free(CodeGenerator* gen, const char* name) {
+    ASTNode* carrier = create_ast_node(AST_EXPRESSION_STATEMENT, NULL, 0, 0);
+    if (!carrier) return;
+    if (carrier->annotation) free(carrier->annotation);
+    carrier->annotation = heap_strf("scoped_temp_free:%s", name);
+    codegen_own_node(gen, carrier);
+    push_defer(gen, carrier);
+}
+
 /* A temporary the sequence assigns later, in a part of its own (each arm of
  * a conditional): declared, and nothing written in the sequence for it but
  * the declaration a statement expression needs. Takes no seq_next. Its
@@ -13822,6 +13220,7 @@ void generate_statement(CodeGenerator* gen, ASTNode* stmt) {
     }
     gen->trailing_stmt_call = saved_trailing;
     emit_observable_store_notify(gen, stmt);
+    unwind_track_release(gen);
     hoist_end(gen);
 }
 
@@ -14220,7 +13619,6 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                                 var->value, taken,
                                 var->value,
                                 var->value, pos_is_string);
-                            emit_unwind_track_local(gen, var->value);
                             fprintf(gen->output, " }\n");
                         }
                         continue;
@@ -14241,7 +13639,6 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                             fprintf(gen->output, "%s = aether_uniform_heap_str(%s, 0); ",
                                     var->value, var->value);
                         fprintf(gen->output, "_heap_%s = 1;", var->value);
-                        emit_unwind_track_local(gen, var->value);
                         fprintf(gen->output, "\n");
                     }
                     /* #752: a struct-typed tuple position transfers
@@ -14661,7 +14058,6 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                                     stmt->value, own);
                         }
                         fprintf(gen->output, " _heap_%s = %s;", stmt->value, own);
-                        emit_unwind_track_local(gen, stmt->value);
                         fprintf(gen->output, " } (void)_tmp_old_%s; }\n", own);
                     }
                     break;
@@ -15103,7 +14499,6 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                                 stmt->value,
                                 rhs_for_escape->value,
                                 rhs_for_escape->value);
-                            emit_unwind_track_local(gen, stmt->value);
                             fprintf(gen->output, " }\n");
                         } else {
                             /* Record the value's heapness even though this
@@ -15151,7 +14546,6 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                         fprintf(gen->output, "; if (_heap_%s) aether_heap_str_free(_tmp_old);",
                                 stmt->value);
                         fprintf(gen->output, " _heap_%s = 1;", stmt->value);
-                        emit_unwind_track_local(gen, stmt->value);
                         fprintf(gen->output, " }\n");
                     } else if (stmt->child_count > 0 && stmt->children[0] &&
                                (env_scan_is_real_closure(stmt->children[0]) ||
@@ -15294,6 +14688,7 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                     emit_string_take_rebind(gen, stmt->value, stmt->children[0]);
                 } else {
                     // First declaration - generate type + variable
+                    unwind_track_hold(gen);
                     /* #2289: a fixed-size array records its type, so a
                      * later binding of an array literal to the same name
                      * knows how many elements the C array holds. */
@@ -15444,6 +14839,8 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                                         stmt->value, stmt->children[0]->value);
                                     codegen_own_node(gen, carrier);
                                     push_defer(gen, carrier);
+                                    emit_struct_unwind_track(gen, stmt->value,
+                                                             stmt->children[0]->value);
                                 }
                             }
                         }
@@ -15582,6 +14979,7 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                      * frees nothing it did not take. */
                     if (decl_str_array && stmt->child_count == 0) fprintf(gen->output, " = {0}");
                     fprintf(gen->output, ";\n");
+                    unwind_track_release(gen);
                     if (decl_array_src) {
                         print_indent(gen);
                         if (decl_str_array) {
@@ -15672,9 +15070,9 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                                 /* R2: moved from an owning source, else taken. */
                                 const char* src = alias_init->value;
                                 fprintf(gen->output,
-                                        "if (_heap_%s) { _heap_%s = 0; aether_unwind_forget(%s); } else %s = aether_uniform_heap_str(%s, 0); "
+                                        "if (_heap_%s) _heap_%s = 0; else %s = aether_uniform_heap_str(%s, 0); "
                                         "_heap_%s = 1;",
-                                        src, src, src, name, name, name);
+                                        src, src, name, name, name);
                             } else if (init_heap) {
                                 fprintf(gen->output, "_heap_%s = 1;", name);
                             } else if (stmt->child_count > 0 && !is_escaped_string_var(gen, name)) {
@@ -15684,7 +15082,6 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                                         name, name, name);
                             }
                             if (!hoisted) mark_heap_string_var(gen, name);
-                            emit_unwind_track_local(gen, stmt->value);
                             fprintf(gen->output, "\n");
                         }
                     }
@@ -18307,24 +17704,32 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
 // =====================================================================
 // Ownership diagnosis (--diagnose=ownership)
 //
-// The dot-normalisation fix in this same release flipped a class of
-// latent leaks into latent UAFs in downstream code that aliased a
-// heap-string across an ownership-transfer boundary (e.g. handing
-// the string to map.put then reassigning the local). This pass walks
-// the program after parse + typecheck and prints the same heap/non-
-// heap verdicts the wrapper terminator at codegen_stmt.c:1611-1631
-// would emit — without running codegen. The goal is to surface
-// "this variable is now heap-tracked, the wrapper will free its
-// previous value at the next reassignment" so a porter can audit
-// whether the previous value is aliased anywhere before the crash
-// hits at runtime.
+// Prints how each string store is compiled under the ownership model
+// (docs/design/ownership-model.md) without running codegen: a place owns
+// one reference to what it holds; a store moves a fresh value, or an
+// owning local at its last use, and takes (retains) anything else; a
+// literal is pinned and costs no count; a release happens where a place is
+// overwritten and where it goes away; a function hands its caller one
+// reference from every return. A local still handed to C where C may keep
+// it (R4) is kept alive instead of released, and says so.
 // =====================================================================
+
+static const char* diag_store_shape(CodeGenerator* gen, ASTNode* rhs, const char** how) {
+    if (rhs->type == AST_LITERAL) { *how = "take"; return "literal: pinned, no count"; }
+    if (rhs->type == AST_STRING_INTERP) { *how = "move"; return "fresh: an interpolation"; }
+    if (rhs->type == AST_IDENTIFIER) {
+        *how = "move/take";
+        return "a local: moved at its last use, else taken";
+    }
+    if (is_heap_string_expr(gen, rhs)) { *how = "move"; return "fresh: a call's result"; }
+    *how = "take";
+    return "borrowed: retained";
+}
 
 static void diag_walk_assignments(CodeGenerator* gen, ASTNode* node,
                                    FILE* out, int* found_any) {
     if (!node) return;
-    /* Don't descend into nested function/closure definitions — they
-     * get their own pass at the top level. */
+    /* Nested function and closure definitions get their own pass. */
     if (node->type == AST_FUNCTION_DEFINITION ||
         node->type == AST_BUILDER_FUNCTION ||
         node->type == AST_CLOSURE) {
@@ -18333,28 +17738,15 @@ static void diag_walk_assignments(CodeGenerator* gen, ASTNode* node,
     if (node->type == AST_VARIABLE_DECLARATION && node->value &&
         node->child_count > 0) {
         ASTNode* rhs = node->children[0];
-        int rhs_heap = is_heap_string_expr(gen, rhs);
-        int lhs_string =
-            (node->node_type && node->node_type->kind == TYPE_STRING) ||
-            rhs_heap;
+        int lhs_string = (node->node_type && node->node_type->kind == TYPE_STRING) ||
+                         (rhs->node_type && rhs->node_type->kind == TYPE_STRING);
         if (lhs_string) {
-            const char* shape = "non-heap RHS";
-            if (rhs->type == AST_STRING_INTERP) {
-                shape = "string interpolation → HEAP";
-            } else if (rhs->type == AST_FUNCTION_CALL && rhs->value) {
-                shape = rhs_heap ? "heap-returning fn → HEAP"
-                                 : "fn call (not heap-classified)";
-            } else if (rhs->type == AST_LITERAL) {
-                shape = "literal";
-            } else if (rhs->type == AST_IDENTIFIER) {
-                shape = "borrow from another variable";
-            }
-            int escaped = is_escaped_string_var(gen, node->value);
-            fprintf(out,
-                    "    line %4d: %-20s = ...   _heap_%s = %d   [%s]%s\n",
-                    node->line,
-                    node->value, node->value, rhs_heap ? 1 : 0, shape,
-                    escaped ? "  ESCAPED, wrapper skips free" : "");
+            const char* how = NULL;
+            const char* shape = diag_store_shape(gen, rhs, &how);
+            fprintf(out, "    line %4d: %-20s = ...   %-10s [%s]%s\n",
+                    node->line, node->value, how, shape,
+                    is_escaped_string_var(gen, node->value)
+                        ? "  KEPT ALIVE: handed to C, which may keep it (R4)" : "");
             *found_any = 1;
         }
     }
@@ -18408,11 +17800,11 @@ void codegen_diagnose_ownership(ASTNode* program, FILE* out) {
     }
 
     fprintf(out, "=== aether ownership diagnosis ===\n");
-    fprintf(out, "(prints the heap/non-heap verdicts codegen will\n"
-                 " use at the wrapper terminator in\n"
-                 " codegen_stmt.c:1611-1631)\n\n");
+    fprintf(out, "(how each string store is compiled: a place owns one reference;\n"
+                 " a store moves a fresh value or a local at its last use, and takes\n"
+                 " anything else; docs/design/ownership-model.md)\n\n");
 
-    /* Pass 1 — string-returning user functions, with HEAP verdict. */
+    /* Pass 1: string-returning user functions. */
     fprintf(out, "[1] string-returning user functions\n");
     int sr_count = 0;
     for (int i = 0; i < program->child_count; i++) {
@@ -18424,38 +17816,20 @@ void codegen_diagnose_ownership(ASTNode* program, FILE* out) {
          * directly (not a TYPE_FUNCTION wrapper) — see codegen_func.c
          * where `func->node_type` is read straight as the return type. */
         if (!c->node_type || c->node_type->kind != TYPE_STRING) continue;
-        int heap = function_def_returns_heap_string(&gen, c);
-        fprintf(out, "  %-30s line %4d   %s\n",
-                c->value ? c->value : "(anonymous)",
-                c->line,
-                heap ? "HEAP, every return path heap-classified"
-                     : "NOT HEAP, ≥ 1 return literal/borrowed/unclassified");
+        fprintf(out, "  %-30s line %4d   hands its caller one reference from every return\n",
+                c->value ? c->value : "(anonymous)", c->line);
         sr_count++;
     }
     if (sr_count == 0) {
         fprintf(out, "  (none)\n");
     }
 
-    /* Pass 2 — heap-tracked variable assignments, by function.
-     *
-     * Per-function we replay the same prelude codegen runs:
-     * collect_heap_string_var_names → mark_heap_string_var (the
-     * non-emitting half of hoist_heap_string_trackers) → then
-     * mark_escaped_heap_string_vars. This populates the gen-side
-     * registries that diag_walk_assignments queries
-     * (is_heap_string_var, is_escaped_string_var) so the printed
-     * verdicts match what the codegen would actually emit for the
-     * same program. State is cleared between functions so a name
-     * shadowed across fns doesn't carry over. */
-    fprintf(out,
-            "\n[2] string-typed variable assignments\n"
-            "    (the codegen wrapper at line 1611-1631 emits\n"
-            "     `if (_heap_<lhs>) free(_tmp_old); _heap_<lhs> = N`\n"
-            "     after each assignment, with N as shown, except\n"
-            "     where the var is marked ESCAPED, in which case the\n"
-            "     wrapper emits a plain assignment instead, leaving\n"
-            "     the previous heap value alive for the function's\n"
-            "     lifetime so a stored alias stays valid)\n\n");
+    /* Pass 2: string stores, by function. The prelude codegen runs is
+     * replayed (the heap-string locals and the escape walk), so a local
+     * still handed to C is reported as codegen treats it. State is cleared
+     * between functions so a name shadowed across functions does not carry
+     * over. */
+    fprintf(out, "\n[2] string stores\n\n");
     int total = 0;
     for (int i = 0; i < program->child_count; i++) {
         ASTNode* c = program->children[i];
@@ -18503,19 +17877,10 @@ void codegen_diagnose_ownership(ASTNode* program, FILE* out) {
     }
 
     fprintf(out,
-            "\nUAF triage: any line above with `_heap_<lhs> = 1` AND\n"
-            "no ESCAPED tag will have the wrapper free `<lhs>`'s\n"
-            "previous value at the next reassignment. Lines tagged\n"
-            "ESCAPED already had their wrapper-free skipped by the\n"
-            "type-based escape analysis (the var was passed to a `ptr`\n"
-            "parameter, captured by a closure, or returned from the\n"
-            "function, all of which let the recipient store the\n"
-            "pointer past the next reassignment); those leak the value\n"
-            "across the function's lifetime in exchange for alias\n"
-            "safety. If you see an ESCAPED-tagged line that you expected\n"
-            "to free, check whether the recipient really retains the\n"
-            "pointer, and if not, the conservative analysis is leaking\n"
-            "more than necessary (file an issue with a repro).\n"
+            "\nA line marked KEPT ALIVE names a local passed where C may keep\n"
+            "the pointer (a `ptr` or `@retain` parameter of an extern): it is\n"
+            "not released, so C's copy stays good. Declare the extern's\n"
+            "parameter `@noescape` if C only reads it during the call.\n"
             "\n=== end diagnosis ===\n");
     code_generator_release(&gen);
 }
@@ -18657,13 +18022,13 @@ static const char* emit_field_owner_stmt(CodeGenerator* gen, ASTNode* obj) {
     return fo;
 }
 
-/* Field read `e`, which a call frees or keeps (`kind`), evaluated ahead of
- * that call, by the ordering wrapper (in its sequence `s`) or ahead of the
- * statement (`s` NULL): handed over where it is read. The value goes into
- * `value`, and the field gives its reference up to it as the call would
- * take it (a counted string to a free, any string to a keep), the struct
- * reached through its address; whether it did goes into a flag, whose name
- * is returned. From the read on the temporary owns the string: a later
+/* Field read `e`, which a call frees (STRING_FIELD_CONSUMED) or borrows
+ * (STRING_FIELD_TAKEN), evaluated ahead of that call, by the ordering
+ * wrapper (in its sequence `s`) or ahead of the statement (`s` NULL). The
+ * value goes into `value`. For a free the field gives its reference up to it
+ * as the free would take it (a counted string), the struct reached through
+ * its address; for a borrow the temporary takes a reference of its own.
+ * Whether the temporary owns it goes into a flag, whose name is returned. From the read on the temporary owns the string: a later
  * operand that stores into the field, or replaces the struct, frees the
  * old value no more, and the call takes the temporary's. If the call is not
  * reached (an `or` handler's `return`, a propagating `!`), the flag says
@@ -18673,9 +18038,23 @@ static const char* emit_field_owner_stmt(CodeGenerator* gen, ASTNode* obj) {
 const char* emit_string_field_handover_ahead(CodeGenerator* gen, ASTNode* e, int kind,
                                              TempSeq* s, const char* value) {
     const char* own = cg_internf("%s_own", value);
-    const char* test = kind == STRING_FIELD_KEPT ? "1" : cg_internf("aether_str_is_counted(%s)", value);
+    const char* test = cg_internf("aether_str_is_counted(%s)", value);
     if (s) {
         const char* fo = emit_field_owner(gen, e->children[0], s);
+        if (kind == STRING_FIELD_TAKEN) {
+            /* Declared with the statement, so the block's exit releases it;
+             * a statement run again (a loop condition) releases the one
+             * before first. */
+            hoist_declare_null(gen, "const char*", value);
+            hoist_append_text(gen, cg_internf("int %s = 0; ", own));
+            fprintf(gen->output, "aether_unwind_track_str_place((const void*)&%s, (const void*)&%s), ",
+                    value, own);
+            fprintf(gen->output, "%s ? aether_heap_str_free(%s) : (void)0, "
+                    "%s = aether_uniform_heap_str(%s->%s, 0), %s = 1",
+                    own, value, value, fo, e->value, own);
+            seq_next(gen, s);
+            return own;
+        }
         seq_let_named(gen, s, "const char*", value);
         fprintf(gen->output, "%s->%s", fo, e->value);
         seq_next(gen, s);
@@ -18687,9 +18066,24 @@ const char* emit_string_field_handover_ahead(CodeGenerator* gen, ASTNode* e, int
         return own;
     }
     const char* fo = emit_field_owner_stmt(gen, e->children[0]);
-    hoist_declare(gen, "const char*", value);
-    hoist_declare(gen, "int", own);
+    if (kind == STRING_FIELD_TAKEN) {
+        hoist_declare_null(gen, "const char*", value);
+        hoist_append_text(gen, cg_internf("int %s = 0; ", own));
+    } else {
+        hoist_declare(gen, "const char*", value);
+        hoist_declare(gen, "int", own);
+    }
     print_indent(gen);
+    if (kind == STRING_FIELD_TAKEN) {
+        fprintf(gen->output, "aether_unwind_track_str_place((const void*)&%s, (const void*)&%s);\n",
+                value, own);
+        print_indent(gen);
+        fprintf(gen->output, "if (%s) aether_heap_str_free(%s);\n", own, value);
+        print_indent(gen);
+        fprintf(gen->output, "%s = aether_uniform_heap_str(%s->%s, 0); %s = 1;\n",
+                value, fo, e->value, own);
+        return own;
+    }
     fprintf(gen->output, "%s = %s->%s;\n", value, fo, e->value);
     print_indent(gen);
     fprintf(gen->output, "%s = %s;\n", own, test);
@@ -18731,48 +18125,23 @@ void drop_defer(CodeGenerator* gen, ASTNode* carrier) {
  * with (is_consuming_free) are the runtime's, which release a counted
  * AetherString and leave a plain malloc'd buffer alone, so only a counted
  * one leaves the field: the field keeps a plain buffer, and frees it. */
-static void emit_string_field_handover(CodeGenerator* gen, ASTNode* e, int always) {
+void emit_string_field_handoff(CodeGenerator* gen, ASTNode* e) {
     TempSeq s;
     seq_open_ordered(gen, &s, 1);
     const char* fo = emit_field_owner(gen, e->children[0], &s);
     const char* fv = seq_let(gen, &s, "const char*", "_ae_fv");
     fprintf(gen->output, "%s->%s", fo, e->value);
     seq_next(gen, &s);
-    if (always)
-        fprintf(gen->output, "(void)(%s->_heap_%s = 0)", fo, e->value);
-    else
-        fprintf(gen->output, "aether_str_is_counted(%s) ? (void)(%s->_heap_%s = 0) : (void)0",
-                fv, fo, e->value);
+    fprintf(gen->output, "aether_str_is_counted(%s) ? (void)(%s->_heap_%s = 0) : (void)0",
+            fv, fo, e->value);
     seq_next(gen, &s);
     fprintf(gen->output, "%s", fv);
     seq_close(gen, &s);
 }
 
-void emit_string_field_handoff(CodeGenerator* gen, ASTNode* e) {
-    emit_string_field_handover(gen, e, 0);
-}
-
-/* The field's value, given up: a callee that keeps its parameter as given
- * (stores it past the call, in a module variable, say) holds the pointer
- * from here on, whatever the string is, so the field stops owning it and
- * its struct's destroy leaves it alone, as a local handed to such a callee
- * is not freed at its scope exit. A struct a call returned, which the
- * statement destroys once done (a statement temporary, #2582, #2817), freed
- * it under the callee: `keep(make_item(w).name)` left `kept` pointing at
- * freed memory (#2843). */
-void emit_string_field_giveup(CodeGenerator* gen, ASTNode* e) {
-    emit_string_field_handover(gen, e, 1);
-}
-
 int string_field_handoff_kind(CodeGenerator* gen, const char* func_name, int idx, ASTNode* arg) {
     if (!func_name || !field_read_can_hand_off(arg)) return 0;
-    if (callee_consumes_string_arg(gen, func_name, idx)) return STRING_FIELD_CONSUMED;
-    /* A function of the program whose body keeps it, as for a local; an
-     * extern's `string` parameter is read only (call_arg_escapes). */
-    if (callee_has_visible_body(gen, func_name) && callee_param_is_string(gen, func_name, idx) &&
-        callee_string_param_kept_as_given(gen, func_name, idx, 0))
-        return STRING_FIELD_KEPT;
-    return 0;
+    return callee_consumes_string_arg(gen, func_name, idx) ? STRING_FIELD_CONSUMED : 0;
 }
 
 /* #2618: `string.free(arr[i])` / `string.release(arr[i])` / `release(arr[i])`

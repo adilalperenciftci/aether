@@ -6119,8 +6119,16 @@ ASTNode* parse_pattern(Parser* parser) {
             ASTNode* pattern = create_ast_node(AST_PATTERN_VARIABLE, token->value,
                                               token->line, token->column);
 
-            // Optional type annotation: param: type
+            // Optional type annotation: param: type, `param: @keep ptr` for a
+            // pointer the function keeps past the call (#2926).
             if (match_token(parser, TOKEN_COLON)) {
+                if (peek_token(parser) && peek_token(parser)->type == TOKEN_AT &&
+                    peek_ahead(parser, 1) && peek_ahead(parser, 1)->type == TOKEN_IDENTIFIER &&
+                    peek_ahead(parser, 1)->value && strcmp(peek_ahead(parser, 1)->value, "keep") == 0) {
+                    advance_token(parser);
+                    advance_token(parser);
+                    pattern->annotation = annotation_add_marker(pattern->annotation, "keep_param");
+                }
                 Type* param_type = parse_type(parser);
                 if (param_type) {
                     pattern->node_type = param_type;
@@ -6145,8 +6153,7 @@ ASTNode* parse_pattern(Parser* parser) {
                 ASTNode* default_expr = parse_expression(parser);
                 if (default_expr) {
                     add_child(pattern, default_expr);
-                    if (pattern->annotation) free(pattern->annotation);
-                    pattern->annotation = strdup("has_default");
+                    pattern->annotation = annotation_add_marker(pattern->annotation, "has_default");
                 }
             }
 
@@ -6183,8 +6190,7 @@ ASTNode* parse_pattern(Parser* parser) {
                     ASTNode* default_expr = parse_expression(parser);
                     if (default_expr) {
                         add_child(pattern, default_expr);
-                        if (pattern->annotation) free(pattern->annotation);
-                        pattern->annotation = strdup("has_default");
+                        pattern->annotation = annotation_add_marker(pattern->annotation, "has_default");
                     }
                 }
                 return pattern;
@@ -6210,8 +6216,7 @@ ASTNode* parse_pattern(Parser* parser) {
                     ASTNode* default_expr = parse_expression(parser);
                     if (default_expr) {
                         add_child(pattern, default_expr);
-                        if (pattern->annotation) free(pattern->annotation);
-                        pattern->annotation = strdup("has_default");
+                        pattern->annotation = annotation_add_marker(pattern->annotation, "has_default");
                     }
                 }
                 return pattern;

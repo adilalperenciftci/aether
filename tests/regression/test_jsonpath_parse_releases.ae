@@ -30,14 +30,14 @@ fn check(cond: bool, msg: string) {
     }
 }
 
-fn query_round(doc: ptr) {
+fn query_round(doc: @keep ptr) {
     r, err = jsonpath.query(doc, "$.b[*]")
     check(err == "", "the query parses")
     check(jsonpath.result_size(r) == 3, "three matches")
     jsonpath.free_result(r)
 }
 
-fn filter_round(doc: ptr) {
+fn filter_round(doc: @keep ptr) {
     r, err = jsonpath.query(doc, "$.b[?@ > 1]")
     check(err == "", "the filter parses")
     check(jsonpath.result_size(r) == 2, "two matches")
@@ -51,7 +51,7 @@ fn bad_round() {
 }
 
 // Two equal windows of `kind` rounds; one must grow by exactly 0.
-fn steady(doc: ptr, kind: int, what: string) {
+fn steady(doc: @keep ptr, kind: int, what: string) {
     grown = mem.steady_growth(|| {
             i = 0
             while i < 50 {

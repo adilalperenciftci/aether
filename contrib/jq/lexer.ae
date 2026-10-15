@@ -192,7 +192,7 @@ _fail(lx: *Lexer, msg: string, pos: int) -> int {
     return 0
 }
 
-_push(lx: *Lexer, kind: int, text: ptr, num: float, pos: int) {
+_push(lx: *Lexer, kind: int, text: @keep ptr, num: float, pos: int) {
     t = heap.new(Token)
     t.kind = kind
     t.text = text
@@ -394,7 +394,7 @@ _read_hex4(lx: *Lexer) -> int {
 
 // Flush the literal run in `sb` (if any) into `parts`. finish destroys the
 // builder, so the caller continues with the one returned here.
-_flush_literal(sb: ptr, parts: ptr) -> ptr {
+_flush_literal(sb: @keep ptr, parts: ptr) -> ptr {
     if strbuilder.length(sb) > 0 {
         s = strbuilder.finish(sb)
         json.json_array_add_raw(parts, json.json_create_string(s))
