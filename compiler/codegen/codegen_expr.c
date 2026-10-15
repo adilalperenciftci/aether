@@ -8532,6 +8532,15 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                          * freed the env the field still pointed at (aether-
                          * ui asks/aether-closure-drain-through-fn-store.md). */
                         emit_closure_into_ptr(gen, expr->children[1]);
+                    } else if (is_assignment && rtype && rtype->kind == TYPE_STRING &&
+                               expr->children[0]->type == AST_ARRAY_ACCESS &&
+                               expr->children[0]->child_count > 0 &&
+                               (expr->children[0]->children[0]->type == AST_PTR_AS_ARRAY_CAST ||
+                                expr_is_c_view_of_slice(gen, expr->children[0]->children[0]))) {
+                        /* R4: a `string[]` view of a `ptr` is C's memory, a
+                         * `const char**` C reads (Vulkan's extension names):
+                         * a string stored through it is its characters. */
+                        emit_string_as_c_chars(gen, expr->children[1]);
                     } else if (is_assignment && ltype && ltype->kind == TYPE_OPTIONAL &&
                                expr->children[0]->type == AST_MEMBER_ACCESS) {
                         /* #2820: a store into an optional field takes the
