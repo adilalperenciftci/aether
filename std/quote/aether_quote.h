@@ -16,7 +16,7 @@
 
 /* The tree format's version, quote.VERSION. Kinds are added, never removed
  * or renumbered; each addition bumps this by one. */
-#define AETHER_QUOTE_VERSION 1
+#define AETHER_QUOTE_VERSION 2
 
 /* Constructors, called by compiler-emitted builders. The strings are the
  * builder's own static literals and are not copied. */
@@ -32,6 +32,12 @@ void  aether_quote_param(void* tree, const char* name, const char* type);
  * "f32x4", "int", ...); `type` is the Aether type as written ("vec2"). */
 void  aether_quote_capture(void* tree, const char* name, const char* type,
                            const char* base, void* cell, void (*release)(const void*));
+/* Version 2: a @quotable function a quote calls (HELPER_CALL). A helper is a
+ * tree of its own, made with aether_quote_helper (its name as a back end
+ * declares it, and its return type) and given its params and body as a
+ * quote's are; aether_quote_add_helper hands it to the quote, which frees it. */
+void* aether_quote_helper(const char* name, const char* ret);
+void  aether_quote_add_helper(void* tree, void* helper);
 
 /* Accessors (std/quote/module.ae). */
 int         aether_quote_version(void* tree);
@@ -44,6 +50,10 @@ const char* aether_quote_param_type(void* tree, int i);
 int         aether_quote_capture_count(void* tree);
 void*       aether_quote_capture_at(void* tree, int i);
 void*       aether_quote_capture_named(void* tree, const char* name);
+int         aether_quote_helper_count(void* tree);
+void*       aether_quote_helper_at(void* tree, int i);
+const char* aether_quote_function_name(void* tree);
+const char* aether_quote_return_type(void* tree);
 
 int         aether_quote_kind(void* node);
 const char* aether_quote_type(void* node);

@@ -24,8 +24,13 @@ struct SymbolTable;
 enum {
     QK_BLOCK = 1, QK_LET, QK_ASSIGN, QK_RETURN, QK_IF, QK_WHILE, QK_FOR,
     QK_BREAK, QK_CONTINUE, QK_EXPR, QK_LIT, QK_LOCAL, QK_CAPTURE, QK_UNARY,
-    QK_BINARY, QK_CHOOSE, QK_CALL, QK_FIELD, QK_INDEX, QK_MAKE, QK_FIELD_VALUE
+    QK_BINARY, QK_CHOOSE, QK_CALL, QK_FIELD, QK_INDEX, QK_MAKE, QK_FIELD_VALUE,
+    /* version 2 */
+    QK_HELPER_CALL
 };
+
+/* The tree format version (std.quote's VERSION). */
+#define QUOTE_FORMAT_VERSION 2
 
 typedef struct QNode {
     int kind;
@@ -48,6 +53,24 @@ typedef struct QCapture {
                          * never promoted, retained or released */
 } QCapture;
 
+/* A @quotable function: an ordinary Aether function whose body is also a
+ * tree, so a quote can call it and a back end can emit it as a function of
+ * its own (a GLSL function). Lowered once, after type checking. */
+typedef struct QHelper {
+    ASTNode* def;          /* the function definition */
+    const char* name;      /* as declared after merging: a back end's name for it */
+    const char* ret;       /* its return type, as the tree spells types */
+    const char** param_names;
+    const char** param_types;
+    int nparams;
+    QNode* body;
+    struct QHelper** callees;   /* the @quotable functions its body calls */
+    int ncallees;
+    int capcallees;
+    int lowered;           /* 1 once lowered, -1 when lowering reported errors */
+    int mark;              /* the recursion check's DFS state */
+} QHelper;
+
 typedef struct QuoteInfo {
     ASTNode* node;
     const char* source;   /* "file:line" */
@@ -58,6 +81,10 @@ typedef struct QuoteInfo {
     QCapture* caps;
     int ncaps;
     uint64_t hash;
+    /* The @quotable functions its body calls; after quote_finish, every one
+     * it reaches, callees before their callers. */
+    QHelper** helpers;
+    int nhelpers;
     /* Set by codegen: the scope the quote is written in, as closure
      * discovery names scopes (a function, "main", a closure's). */
     const char* scope;
@@ -79,6 +106,18 @@ QuoteInfo* quote_at(int index);
 QuoteInfo* quote_of(ASTNode* node);
 /* Forget every quote (a new compilation). */
 void quote_reset(void);
+
+/* @quotable functions (version 2). The type checker registers each one
+ * before it checks the program (quote_register_helper), lowers each after
+ * (quote_lower_helper, with its own file as the current one), then calls
+ * quote_check_recursion and quote_finish, which gives every quote the
+ * helpers it reaches and its final hash. */
+void quote_register_helper(ASTNode* def);
+int quote_helper_count(void);
+QHelper* quote_helper_at(int index);
+int quote_lower_helper(QHelper* h, struct SymbolTable* global, QuoteErrorFn report);
+int quote_check_recursion(QuoteErrorFn report);
+void quote_finish(void);
 
 /* The name a type is spelled with in the tree: a distinct type's own name
  * ("vec2"), a struct's, a lane type's ("f32x4"), else the scalar's. */

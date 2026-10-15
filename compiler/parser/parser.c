@@ -7256,6 +7256,30 @@ ASTNode* parse_top_level_decl(Parser* parser) {
                     node = fdef;
                     break;
                 }
+                // `@quotable` (docs/quote.md, version 2): an ordinary function
+                // a quote may call. Its body is also lowered to a tree, which
+                // travels with each quote that reaches it, so a back end can
+                // write it out as a function of its own (a GLSL function).
+                if (attr && attr->type == TOKEN_IDENTIFIER && attr->value &&
+                    strcmp(attr->value, "quotable") == 0) {
+                    advance_token(parser);  // consume 'quotable'
+                    if (peek_token(parser) && peek_token(parser)->type == TOKEN_FUNC)
+                        advance_token(parser);  // optional 'func'
+                    ASTNode* fdef = parse_function_definition(parser);
+                    if (fdef) {
+                        if (fdef->annotation) {
+                            parser_error(parser, "@quotable cannot combine with another annotation (a variadic `...`, @c_callback or an effect tag) on the same function");
+                            return NULL;
+                        }
+                        fdef->annotation = strdup("quotable");
+                        /* Its body becomes a tree too, which names each call
+                         * as written (`dot`, not the merged `shaderlib_dot`),
+                         * as a quote's does. */
+                        quote_keep_call_names(fdef);
+                    }
+                    node = fdef;
+                    break;
+                }
                 // #481 effect tags: `@pure` / `@no_fs` / `@no_net` / `@no_os`
                 // declare that the function (transitively) must not touch the
                 // named capability. Stackable (`@no_fs @no_net f() {}`);
@@ -7309,7 +7333,7 @@ ASTNode* parse_top_level_decl(Parser* parser) {
                     break;
                 }
                 if (!attr || attr->type != TOKEN_EXTERN) {
-                    parser_error(parser, "unknown attribute (expected @extern(\"...\"), @c_callback, @derive, or an effect tag @pure/@no_fs/@no_net/@no_os)");
+                    parser_error(parser, "unknown attribute (expected @extern(\"...\"), @c_callback, @derive, @quotable, or an effect tag @pure/@no_fs/@no_net/@no_os)");
                     advance_token(parser);
                     return NULL;
                 }
@@ -7515,7 +7539,17 @@ ASTNode* parse_top_level_decl(Parser* parser) {
                         }
                         node->node_type = elem_type
                             ? create_array_type(clone_type(elem_type), cval->child_count)
-                            : create_array_type(create_type(TYPE_PTR), cval->child_count);
+                            : create_array_type(create_type(TYPE_UNKNOWN), cval->child_count);
+                        /* Only a guess here: an element that is not a bare
+                         * literal (`-1`, `0 - 1`, `~1`) has no type yet. The
+                         * guess was `ptr`, so `[-1, 2, 3]` was an array of
+                         * pointers, emitted as `const void*[]` (clang refuses
+                         * the ints in it; gcc only warned) and read as
+                         * pointers. Unknown, inference types it from its
+                         * elements; marked inferred, the typechecker gives the
+                         * declaration the literal's type once they are typed
+                         * (a declaration's array_fix). */
+                        node->type_inferred = 1;
                     }
                 } else if (annotated_type) {
                     // Typed scalar const: `const NAME: T = value`.

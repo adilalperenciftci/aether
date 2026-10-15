@@ -1,0 +1,97 @@
+// Regression: @quotable functions (docs/quote.md, version 2). A quote that
+// calls one gets a HELPER_CALL naming it, and its tree carries every
+// @quotable function its body reaches, through its own calls or a helper's,
+// callees before callers: the order GLSL wants them declared in. A helper is
+// a tree of its own (name, return type, parameters, body), and still an
+// ordinary function the program calls. The hash covers each helper reached.
+
+import std.quote
+
+extern exit(code: int)
+
+fn check(label: string, got: string, want: string) -> int {
+    if got != want {
+        println("FAIL quote helpers: ${label}")
+        println("  got:  ${got}")
+        println("  want: ${want}")
+        return 1
+    }
+    return 0
+}
+
+q(t: quote.Tree) -> quote.Tree { return t }
+
+@quotable
+sq(x: float) -> float {
+    return x * x
+}
+
+@quotable
+luma(r: float, g: float, b: float) -> float {
+    return sq(r) * 0.299 + g * 0.587 + b * 0.114
+}
+
+// The same shape as luma, a different body. A quote calling it hashes
+// differently from one calling luma (here the call's name differs too;
+// tests/integration/quote_helper_hash edits one helper's body between two
+// builds of the same program, which is the case that needs the helper in the
+// hash).
+@quotable
+luma2(r: float, g: float, b: float) -> float {
+    return sq(r) * 0.3 + g * 0.587 + b * 0.114
+}
+
+// Not @quotable: an ordinary CALL, carrying nothing.
+plain(x: float) -> float {
+    return x + 1.0
+}
+
+main() {
+    fails = 0
+
+    t = q() quote | r: float | {
+        return luma(r, r, r) + sq(r) + plain(r)
+    }
+    fails = fails + check("version", "${quote.version(t)}", "2")
+    fails = fails + check("VERSION", "${quote.VERSION}", "2")
+    fails = fails + check("helper count", "${quote.helper_count(t)}", "2")
+    // Callees first: sq before luma, though the body names luma first.
+    fails = fails + check("first helper", quote.function_name(quote.helper(t, 0)), "sq")
+    fails = fails + check("second helper", quote.function_name(quote.helper(t, 1)), "luma")
+    h = quote.helper_named(t, "luma")
+    fails = fails + check("helper_named", quote.function_name(h), "luma")
+    fails = fails + check("return type", quote.return_type(h), "float")
+    fails = fails + check("helper params", "${quote.param_count(h)} ${quote.param_name(h, 2)}:${quote.param_type(h, 2)}", "3 b:float")
+    fails = fails + check("helper captures", "${quote.capture_count(h)}", "0")
+    fails = fails + check("helper source", quote.to_source(h),
+        "| r: float, g: float, b: float | {\n    return sq(r) * 0.299 + g * 0.587 + b * 0.114\n}")
+    fails = fails + check("helper tree", quote.dump(quote.helper(t, 0)),
+        "(param x :float) (BLOCK (RETURN :float (BINARY * :float (LOCAL x :float) (LOCAL x :float))))")
+    // The body: HELPER_CALL for the two helpers, CALL for the plain function.
+    fails = fails + check("body source", quote.to_source(t),
+        "| r: float | {\n    return luma(r, r, r) + sq(r) + plain(r)\n}")
+    // body -> RETURN -> BINARY(+) -> BINARY(+) -> its left: the luma call
+    sum = quote.child(quote.child(quote.body(t), 0), 0)
+    inner = quote.child(sum, 0)
+    fails = fails + check("luma call kind", quote.kind_name(quote.kind(quote.child(inner, 0))), "HELPER_CALL")
+    fails = fails + check("plain call kind", quote.kind_name(quote.kind(quote.child(sum, 1))), "CALL")
+
+    // The same quote hashes the same; one calling another helper differently.
+    t2 = q() quote | r: float | {
+        return luma(r, r, r) + sq(r) + plain(r)
+    }
+    t3 = q() quote | r: float | {
+        return luma2(r, r, r) + sq(r) + plain(r)
+    }
+    if quote.hash(t) != quote.hash(t2) { fails = fails + check("same hash", "${quote.hash(t)}", "${quote.hash(t2)}") }
+    if quote.hash(t) == quote.hash(t3) { fails = fails + check("helper body in hash", "${quote.hash(t)}", "not ${quote.hash(t3)}") }
+
+    // The helper is still ordinary Aether: what a CPU evaluator calls.
+    fails = fails + check("CPU call", "${luma(0.5, 0.5, 0.5)}", "0.42525")
+    quote.free(t)
+    quote.free(t2)
+    quote.free(t3)
+
+    if fails > 0 { exit(1) }
+    println("quote helpers: ok")
+}

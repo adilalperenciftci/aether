@@ -6039,6 +6039,15 @@ int typecheck_program(ASTNode* program) {
      * resolve it. Inference reads none of these answers. */
     tc_yields_settle(program, global_table);
 
+    /* @quotable functions (docs/quote.md): registered before the pass that
+     * lowers the quotes, so a quote's call of one becomes a HELPER_CALL. */
+    for (int i = 0; i < program->child_count; i++) {
+        ASTNode* top = program->children[i];
+        if (top && top->type == AST_FUNCTION_DEFINITION && top->annotation &&
+            strcmp(top->annotation, "quotable") == 0)
+            quote_register_helper(top);
+    }
+
     // Second pass: type check all nodes
     for (int i = 0; i < program->child_count; i++) {
         ASTNode* top = program->children[i];
@@ -6051,6 +6060,23 @@ int typecheck_program(ASTNode* program) {
         global_table->merged_from = NULL;
         warn_erased_result_closures();   /* #2484 */
     }
+    g_tc_file = NULL;
+
+    /* Each @quotable function, now type-checked, lowered to its tree (its
+     * own file the one its errors name); then the recursion check and each
+     * quote's helpers and final hash. */
+    for (int i = 0; i < quote_helper_count(); i++) {
+        QHelper* h = quote_helper_at(i);
+        g_tc_file = h->def->source_file;
+        global_table->merged_from = h->def->origin_module;
+        quote_lower_helper(h, global_table, quote_report_error);
+        global_table->merged_from = NULL;
+    }
+    if (quote_helper_count() > 0) {
+        g_tc_file = NULL;
+        quote_check_recursion(quote_report_error);
+    }
+    quote_finish();
     g_tc_file = NULL;
 
     /* After the second pass, which turned each `ns.NAME` in an initializer

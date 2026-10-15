@@ -886,7 +886,9 @@ function, whose last parameter is a `quote.Tree` (`import std.quote`),
 receives the block as a tree whose every node carries its checked type, and
 whose captures are the enclosing variables themselves (a change the program
 makes is seen through the tree). Its parameters must have types, and what
-it may contain is a subset of Aether (errors E0800 to E0803 below).
+it may contain is a subset of Aether (errors E0800 to E0805 below). A quote
+may call a `@quotable` function, whose body travels with the tree
+(docs/quote.md, "Helpers").
 
 ---
 
@@ -3772,6 +3774,8 @@ An error stops the build and prints its code, `error[E0301]: ...`, with the sour
 | `E0801` | A quote parameter without a type |
 | `E0802` | A quote given to a function whose last parameter is not a `quote.Tree`, or a closure, `callback` or block given to one that is |
 | `E0803` | A quote writing a variable it captures, or taking its address |
+| `E0804` | A `@quotable` function that reaches itself through `@quotable` calls |
+| `E0805` | A `@quotable` function reading a variable outside it |
 | `E0900` | A slice of a function's own storage (an array literal, an array of its own) leaves the function: returned, stored in a module-level `var` or in a field that outlives it, or captured by a closure that does ([Slices](#slices-t)) |
 | `E0901` | A function frees a `string` or `*StringSeq` parameter it only borrows ([String ownership](#string-ownership)) |
 | `E0902` | A function keeps a `ptr` parameter not declared `@keep`, a `string` is given to a `@keep ptr` without `string.keep` (a `*StringSeq` without `string.seq_retain`), or a function with a `@keep` parameter is used as a value ([String ownership](#string-ownership)) |

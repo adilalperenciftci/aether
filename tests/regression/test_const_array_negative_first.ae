@@ -1,0 +1,24 @@
+// Test: an untyped const array whose first element is not a bare literal
+// (`-1`, `0 - 1`, `~1`) is an array of its elements' type. The parser's
+// guess for it was `ptr`, so `[-1, 2, 3]` was emitted as `const void*[]`
+// (clang refused the ints; gcc only warned) and read back as pointers.
+// Found by ae3d's quote call table, `const CALL_ARGS[] = [-1, -1, -1, 2, ...]`.
+
+const NEG_FIRST[] = [-1, 2, 3]
+const SUM_FIRST[] = [0 - 1, 5]
+const NOT_FIRST[] = [~1, 2]
+const FLOAT_NEG_FIRST[] = [-1.5, 2.0]
+const NEG_LATER[] = [1, -2, 3]
+const NARROW: byte[] = [1, 2]
+
+main() {
+    a = NEG_FIRST[0]
+    println(a) // expect: -1
+    println(NEG_FIRST[0] + NEG_FIRST[2]) // expect: 2
+    println(SUM_FIRST[0]) // expect: -1
+    println(NOT_FIRST[0]) // expect: -2
+    f = FLOAT_NEG_FIRST[0]
+    println(f) // expect: -1.5
+    println(NEG_LATER[1]) // expect: -2
+    println(NARROW[1]) // expect: 2
+}

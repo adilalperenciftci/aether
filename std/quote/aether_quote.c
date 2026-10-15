@@ -33,7 +33,7 @@ typedef struct {
     void (*release)(const void*);
 } AeQuoteCapture;
 
-typedef struct {
+typedef struct AeQuoteTree_ {
     int version;
     const char* source;
     int64_t hash;
@@ -42,6 +42,12 @@ typedef struct {
     int nparams;
     AeQuoteCapture** caps;
     int ncaps;
+    /* Version 2: a helper (a @quotable function) has a name and a return
+     * type; a quote has the helpers its body reaches, callees first. */
+    const char* name;
+    const char* ret;
+    struct AeQuoteTree_** helpers;
+    int nhelpers;
 } AeQuoteTree;
 
 /* Out of memory while building a tree: nothing sensible can follow, and this
@@ -123,6 +129,31 @@ void aether_quote_capture(void* tree, const char* name, const char* type,
     t->caps[t->ncaps++] = c;
 }
 
+void* aether_quote_helper(const char* name, const char* ret) {
+    AeQuoteTree* t = (AeQuoteTree*)aether_quote_tree("", 0);
+    t->name = nz(name);
+    t->ret = nz(ret);
+    return t;
+}
+void aether_quote_add_helper(void* tree, void* helper) {
+    AeQuoteTree* t = (AeQuoteTree*)tree;
+    if (!t || !helper) return;
+    t->helpers = (struct AeQuoteTree_**)quote_grow(t->helpers, (size_t)(t->nhelpers + 1) * sizeof(*t->helpers));
+    t->helpers[t->nhelpers++] = (struct AeQuoteTree_*)helper;
+}
+int aether_quote_helper_count(void* tree) { return tree ? ((AeQuoteTree*)tree)->nhelpers : 0; }
+void* aether_quote_helper_at(void* tree, int i) {
+    AeQuoteTree* t = (AeQuoteTree*)tree;
+    return (t && i >= 0 && i < t->nhelpers) ? t->helpers[i] : NULL;
+}
+const char* aether_quote_function_name(void* tree) {
+    AeQuoteTree* t = (AeQuoteTree*)tree;
+    return (t && t->name) ? t->name : "";
+}
+const char* aether_quote_return_type(void* tree) {
+    AeQuoteTree* t = (AeQuoteTree*)tree;
+    return (t && t->ret) ? t->ret : "";
+}
 int aether_quote_version(void* tree) { return tree ? ((AeQuoteTree*)tree)->version : 0; }
 void* aether_quote_body(void* tree) { return tree ? ((AeQuoteTree*)tree)->body : NULL; }
 const char* aether_quote_source(void* tree) { return tree ? ((AeQuoteTree*)tree)->source : ""; }
@@ -202,5 +233,7 @@ void aether_quote_free(void* tree) {
         free(t->caps[i]);
     }
     free(t->caps);
+    for (int i = 0; i < t->nhelpers; i++) aether_quote_free(t->helpers[i]);
+    free(t->helpers);
     free(t);
 }

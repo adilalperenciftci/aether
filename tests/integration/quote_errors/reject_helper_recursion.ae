@@ -1,0 +1,14 @@
+// @quotable functions calling each other round: E0804 (docs/quote.md). GLSL has no recursion.
+import std.quote
+
+take(t: quote.Tree) {}
+@quotable
+ping(x: float) -> float {
+    if x < 1.0 { return x }
+    return pong(x - 1.0)
+}
+@quotable
+pong(x: float) -> float { return ping(x * 0.5) }
+main() {
+    take() quote | r: float | { return ping(r) }
+}

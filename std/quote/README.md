@@ -41,6 +41,8 @@ kinds are the contract.
 | `body(t)` | the body, a `BLOCK` node |
 | `param_count(t)`, `param_name(t, i)`, `param_type(t, i)` | the parameters, `\| a: T, ... \|` |
 | `capture_count(t)`, `capture(t, i)`, `capture_named(t, n)` | the outer variables the block reads |
+| `helper_count(t)`, `helper(t, i)`, `helper_named(t, n)` | the `@quotable` functions the body reaches, callees first, each a `Tree` (version 2) |
+| `function_name(t)`, `return_type(t)` | a helper's name and return type (`""` for a quote's own tree) |
 | `source(t)` | `"file.ae:line"` of the quote |
 | `hash(t)` | a hash of the tree's shape, the same in every build, for caching what a back end makes |
 | `version(t)` | the format version it was built with (`quote.VERSION`) |
@@ -58,7 +60,7 @@ kinds are the contract.
 | `walk(n, f)` | call the closure `f` with `n` and every node under it, in pre-order |
 | `line(n)` | its source line |
 
-Kinds, version 1 (they are added, never removed or renumbered, and
+Kinds, version 2 (they are added, never removed or renumbered, and
 `VERSION` goes up by one with each addition):
 
 | Kind | Children |
@@ -83,6 +85,7 @@ Kinds, version 1 (they are added, never removed or renumbered, and
 | `INDEX` | object, index |
 | `MAKE` | a `FIELD_VALUE` per field; `type` is the struct |
 | `FIELD_VALUE` | value; `name` is the field it sets |
+| `HELPER_CALL` | arguments; `name` is a `@quotable` function the tree carries (version 2) |
 
 ## Freeing
 

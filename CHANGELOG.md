@@ -14,6 +14,40 @@ cut while your branch is open cannot fold your entry into the released section.
 
 ## [current]
 
+## [0.817.0]
+
+### Fixed
+
+- **An untyped const array whose first element is not a bare literal is an
+  array of its elements' type.** `const T[] = [-1, 2, 3]` (or `[0 - 1, ...]`,
+  `[~1, ...]`, `[-1.5, 2.0]`) was taken for an array of `ptr`: its first
+  element had no type yet when the parser guessed, so it was emitted as
+  `static const void* T[] = {...}`, which clang refuses (gcc only warned)
+  and which read back as pointers (`x = T[0]` was a `void*`). The parser now
+  leaves the element type unknown and marks the declaration inferred, and
+  the typechecker gives it the literal's type once the elements are typed.
+  Found by ae3d's shader call table (`const CALL_ARGS[] = [-1, -1, -1, 2,
+  ...]`), which built with gcc and not with Apple's clang.
+
+## [0.816.0]
+
+### Added
+
+- **`@quotable` functions: helpers a quote can call (std.quote version 2).**
+  A function marked `@quotable` is ordinary Aether whose body is also a tree.
+  A quote's call of one is a `HELPER_CALL`, and the quote's tree carries every
+  `@quotable` function its body reaches, callees first
+  (`quote.helper_count`/`helper`/`helper_named`, each a `quote.Tree` with
+  `function_name` and `return_type`), so a back end can write each out as a
+  function of its own (ae3d's GLSL). The quote's hash covers each helper it
+  reaches, so editing a helper invalidates a cache keyed on the hash. A
+  helper's body is checked against the quote subset where it is defined; one
+  that reaches itself through `@quotable` calls is E0804 (GLSL and MSL have
+  no recursion), and one that reads a variable outside it is E0805.
+  `quote.VERSION` is 2, and the format version is in the hash, so **every
+  quote's hash changes once**: regenerate anything cached under it (ae3d:
+  `build/generate_shaders`).
+
 ## [0.815.0]
 
 ### Fixed

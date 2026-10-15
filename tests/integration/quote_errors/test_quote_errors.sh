@@ -37,6 +37,10 @@ reject wrong_callee     E0802 8 "'plain' is given a quote, but its last paramete
 reject closure_to_tree  E0802 8 "takes a quote.Tree as its last parameter, but is given a closure"
 reject callback_to_tree E0802 8 "takes a quote.Tree as its last parameter, but is given a closure"
 reject block_to_tree    E0802 8 "takes a quote.Tree as its last parameter, but is given a block that runs inline"
+reject helper_recursion        E0804 11 "@quotable function 'ping' reaches itself: ping -> pong -> ping"
+reject helper_self_recursion   E0804 6  "@quotable function 'fact' reaches itself: fact -> fact"
+reject helper_reads_global     E0805 8  "@quotable function 'scale' reads 'gain', a variable outside it"
+reject helper_subset           E0800 7  "'defer' can't be in a @quotable function"
 reject nested_closure   E0800 8 "a closure or callback can't be quoted"
 reject nested_callback  E0800 8 "a closure or callback can't be quoted"
 reject nested_block     E0800 8 "a trailing block can't be quoted"
@@ -73,5 +77,5 @@ if grep -q "unused variable" "$TMPDIR/captures.log"; then
     grep -A2 "unused variable" "$TMPDIR/captures.log" | sed 's/^/    /' | head -8; exit 1
 fi
 
-echo "  [PASS] quote_errors: every construct outside the v1 subset, an untyped parameter, the wrong callee and a write to a capture are rejected; a mistyped getter panics"
+echo "  [PASS] quote_errors: every construct outside the v1 subset, an untyped parameter, the wrong callee, a write to a capture, and a @quotable function that recurses, reads a variable outside it or holds an unquotable construct are rejected; a mistyped getter panics"
 exit 0

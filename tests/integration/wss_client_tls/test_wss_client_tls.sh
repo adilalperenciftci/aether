@@ -69,9 +69,13 @@ openssl req -x509 -newkey rsa:2048 -keyout "$TMP/wrong.key" -out "$TMP/wrong.pem
 "$AE" build "$SCRIPT_DIR/wss_client.ae" -o "$TMP/cli" >"$TMP/b.log" 2>&1 \
     || { sed -n '1,15p' "$TMP/b.log"; fail "client did not build"; }
 
-start_peer() {   # $1=port $2=cert $3=key $4=logfile -> echoes the pid
+# Started in this shell, not in a $(...) subshell: the job must be this
+# shell's for stop_server to find and stop it. Started in a subshell, it was
+# that subshell's job, stop_server found none and left it running, and both
+# peers outlived every run (the next run's on the same ports never became
+# READY). The caller takes the pid from $!.
+start_peer() {   # $1=port $2=cert $3=key $4=logfile
     python3 "$SCRIPT_DIR/peer_tls.py" "$1" "$2" "$3" > "$4" 2>&1 &
-    echo $!
 }
 wait_ready() {   # $1=logfile $2=label
     i=0
@@ -84,9 +88,11 @@ wait_ready() {   # $1=logfile $2=label
     fail "$2 never became READY"
 }
 
-OK_PID=$(start_peer "$PORT_OK" "$TMP/cert.pem" "$TMP/key.pem" "$TMP/ok.log")
+start_peer "$PORT_OK" "$TMP/cert.pem" "$TMP/key.pem" "$TMP/ok.log"
+OK_PID=$!
 wait_ready "$TMP/ok.log" "TLS peer (localhost cert)"
-BAD_PID=$(start_peer "$PORT_BAD" "$TMP/wrong.pem" "$TMP/wrong.key" "$TMP/bad.log")
+start_peer "$PORT_BAD" "$TMP/wrong.pem" "$TMP/wrong.key" "$TMP/bad.log"
+BAD_PID=$!
 wait_ready "$TMP/bad.log" "TLS peer (wrong-host cert)"
 
 # 1. Trusted CA + right host -> must succeed.
