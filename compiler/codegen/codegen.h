@@ -526,6 +526,9 @@ typedef struct {
     // Used to emit free() on reassignment and avoid freeing string literals.
     char** heap_string_vars;
     int heap_string_var_count;
+    // #2894: a call returning an array is wanted as its result struct
+    // (a fill or a return takes it), not held in a statement temporary.
+    int array_call_raw;
     // #2690: parallel to heap_string_vars, how many `try` bodies of the
     // function enclose each one's C declaration (gen->try_frame_depth when
     // it was marked). A store nested in more of them journals the string
@@ -586,16 +589,6 @@ typedef struct {
     void* cell_owns;
     int cell_owns_count;
     int cell_owns_cap;
-
-    // #752: struct locals that escape via a return (directly or as a
-    // tuple element). Such a struct's heap-string fields belong to the
-    // caller once returned, so the function-exit <Struct>_destroy defer
-    // must be suppressed — otherwise the fields are freed at callee exit
-    // while the returned (shallow) copy still points at them, and the
-    // caller reads dangling memory. Populated at each return site before
-    // defers drain; consulted by try_emit_struct_destroy.
-    char** return_escaped_struct_vars;
-    int return_escaped_struct_var_count;
 
     // `*StringSeq` (cons-cell sequence) locals whose current value is a
     // heap-allocated, refcounted seq returned by an OWNING producer
@@ -742,6 +735,7 @@ void emit_string_compare_close(CodeGenerator* gen, const char* op);      // #251
 void generate_type(CodeGenerator* gen, Type* type);
 void ensure_tuple_typedef(CodeGenerator* gen, Type* type);
 void ensure_optional_typedef(CodeGenerator* gen, Type* type);   // #340
+const char* c_result_type(Type* t);   // #2894
 void collect_optional_typedefs(CodeGenerator* gen, ASTNode* node);   // #340
 void emit_sum_typedef(CodeGenerator* gen, ASTNode* def);   // #914
 void emit_enum_typedef(CodeGenerator* gen, ASTNode* def);  // #1044

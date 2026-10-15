@@ -144,8 +144,6 @@ int set_heap_string_var_try_depth(CodeGenerator* gen, const char* var_name, int 
 int is_escaped_string_var(CodeGenerator* gen, const char* var_name);
 void mark_escaped_string_var(CodeGenerator* gen, const char* var_name);
 void clear_escaped_string_vars(CodeGenerator* gen);
-int is_return_escaped_struct_var(CodeGenerator* gen, const char* var_name);
-void mark_return_escaped_struct_var(CodeGenerator* gen, const char* var_name);
 
 /* *StringSeq local registry (parallel to the heap-string set). A seq
  * var owns a refcounted spine freed by string_seq_free (a decrement). */
@@ -261,7 +259,7 @@ const char* emit_string_field_handover_ahead(CodeGenerator* gen, ASTNode* e, int
                                              TempSeq* s, const char* value);
 ASTNode* push_handover_exit_free(CodeGenerator* gen, const char* own, const char* value);
 void drop_defer(CodeGenerator* gen, ASTNode* carrier);
-void emit_string_field_free(CodeGenerator* gen, ASTNode* e, const char* runtime_free);
+void emit_string_field_free(CodeGenerator* gen, ASTNode* e);
 /* #2618: the same for an element of an array that owns its elements, when
  * string_element_free_kind says it is one. */
 int string_element_free_kind(CodeGenerator* gen, ASTNode* e);
@@ -492,11 +490,9 @@ ASTNode* find_extern_declaration_by_name(ASTNode* program, const char* name);
 void push_heap_string_exit_free_defers(CodeGenerator* gen, ASTNode* body);
 void stmt_struct_temps_set(ASTNode** nodes, const char** names, int count);
 void stmt_struct_temps_get(ASTNode*** nodes, const char*** names, int* count);
-int  struct_param_kept(CodeGenerator* gen, ASTNode* body, const char* pname);
 int  call_returns_view_of_temp(CodeGenerator* gen, ASTNode* call);
 int  call_returns_tuple_view_of_temp(CodeGenerator* gen, ASTNode* call);
 int  tuple_call_returns_heap_at(CodeGenerator* gen, ASTNode* call, int j);
-void emit_struct_capture(CodeGenerator* gen, const char* struct_name, const char* lvalue);
 void collect_stmt_struct_temps(CodeGenerator* gen, ASTNode* e,
                                ASTNode*** nodes, int* count, int* cap);
 void clear_captured_string_params(CodeGenerator* gen);
@@ -624,7 +620,6 @@ void emit_owned_string_element(CodeGenerator* gen, ASTNode* v);
  * these helpers at struct-local declaration sites (push the
  * scope-exit destroy defer) and at field-write sites (emit the
  * reassign-wrapper free). */
-int struct_has_heap_string_field(ASTNode* struct_def);
 /* #2525: a `fn` field (a closure value, not a raw C function pointer): it
  * holds a reference of its own to the closure's env, released by
  * `<Name>_destroy` / `_replace`, retained by `_dup`. */
@@ -679,7 +674,24 @@ const char* struct_owning_strings(CodeGenerator* gen, Type* t);
 ASTNode* find_struct_definition_by_name(ASTNode* program, const char* name);
 
 /* #2921: R2/R3 for composite types (codegen_own.c). */
+typedef enum { OWN_RETAIN, OWN_DROP, OWN_ZERO, OWN_PUBLISH } OwnOp;
 int own_type_owns(CodeGenerator* gen, Type* t);
+void own_emit_part(CodeGenerator* gen, Type* pt, const char* lv, OwnOp op);
+void own_emit_prototypes(CodeGenerator* gen, Type* t);
+void emit_composite_take(CodeGenerator* gen, ASTNode* e, Type* t);
+void emit_owning_store(CodeGenerator* gen, const char* lv, Type* t, ASTNode* rhs, int publish);
+void push_own_drop(CodeGenerator* gen, const char* name, Type* t, int line, int column);
+void push_own_drop_carrier(CodeGenerator* gen, const char* name, Type* t, int line, int column);
+void emit_value_take(CodeGenerator* gen, ASTNode* e, Type* t);
+ASTNode* find_message_definition(ASTNode* program, const char* name);
+int message_owns_fields(CodeGenerator* gen, const char* name);
+int expr_is_c_view_of_slice(CodeGenerator* gen, const ASTNode* expr);
+void emit_array_fill(CodeGenerator* gen, const char* dst, ASTNode* e, Type* at);
+void emit_array_fill_c(CodeGenerator* gen, const char* dst, const char* src, Type* at, int retain);
+void emit_array_result_value(CodeGenerator* gen, ASTNode* e, Type* at);
+void emit_owning_array_store(CodeGenerator* gen, const char* name, Type* at, ASTNode* rhs);
+int struct_param_written(ASTNode* n, const char* pname);
+void emit_string_take_owned(CodeGenerator* gen, ASTNode* e, int cell);
 void own_collect_types(CodeGenerator* gen, ASTNode* node);
 void emit_own_ops(CodeGenerator* gen);
 const char* own_fn(CodeGenerator* gen, Type* t, const char* op);
@@ -791,8 +803,6 @@ const char* struct_owning_strings(CodeGenerator* gen, Type* t);
 /* `retain_closures`: 1 where the value at `lvalue` stays a holder of its
  * closure fields (a parameter, a cell a copy is returned from), 0 where it
  * is moved out (#2525). */
-void emit_struct_disown(CodeGenerator* gen, const char* struct_name, const char* lvalue,
-                        int retain_closures);
 void push_struct_destroy_defer(CodeGenerator* gen, const char* var_name,
                                Type* struct_type, int line, int col);
 

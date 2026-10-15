@@ -51,4 +51,16 @@ if command -v valgrind >/dev/null 2>&1; then
     fi
 fi
 
+# Freed exactly once, where a leak checker is available: leaks(1) on macOS,
+# where the heap count is not exact and the program cannot measure itself.
+if [ "$(uname -s)" = Darwin ] && command -v leaks >/dev/null 2>&1; then
+    if ! MallocStackLogging=1 leaks --atExit -- "$TMP/prog" > "$TMP/prog".leaks 2>&1; then
+        if grep -qE "[1-9][0-9]* leak(s)? for" "$TMP/prog".leaks; then
+            echo "  [FAIL] heap_nested_path_ownership: a string leaked"
+            grep -E "leaks? for" "$TMP/prog".leaks | sed 's/^/        /' | head -3
+            exit 1
+        fi
+    fi
+fi
+
 echo "  [PASS] heap_nested_path_ownership: a field assigned through a nested path is owned like a direct one"

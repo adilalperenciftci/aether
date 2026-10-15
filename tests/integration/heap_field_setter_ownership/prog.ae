@@ -2,8 +2,7 @@
 //
 // The ownership wrapper only fired when the assignment was written against a
 // LOCAL heap-box pointer. A setter takes the box as a parameter, so its
-// assignment was a bare store that never set the `_heap_<field>` tracker, and
-// the box's destructor then believed it owned nothing.
+// assignment was a bare store, and the box's destructor released nothing.
 //
 // That left no correct way to write a destructor: freeing the field by hand
 // double-frees in the local case and leaks in the setter case.
@@ -12,7 +11,10 @@
 // completion (a double free aborts) AND report no leak.
 
 import std.heap
+import std.mem
 import std.string
+
+extern exit(code: int)
 
 struct Entry { path: string }
 struct Uniform { name: string, kind: int }
@@ -41,18 +43,34 @@ upsert(value: string) -> *Uniform {
     return u
 }
 
-main() {
+round(say: bool) {
     e = make_entry("local")
-    println("${e.path}")
+    if say { println("${e.path}") }
     heap.free(e)
 
     u = upsert("setter")
-    println("${u.name}")
-    // Reassign through the setter: the previous value must be released by
-    // `own`, and the final one by heap.free.
+    if say { println("${u.name}") }
+    // Reassign through the setter: the store releases the previous value,
+    // and heap.free the final one.
     uniform_set_name(u, "setter-again")
-    println("${u.name}")
+    if say { println("${u.name}") }
     heap.free(u)
+}
 
+main() {
+    round(true)
+    if mem.heap_in_use_exact() {
+        grown = mem.steady_growth(|| {
+                k = 0
+                while k < 100 {
+                    round(false)
+                    k = k + 1
+                }
+            }, 5)
+        if grown != 0 {
+            println("FAIL: a window of 100 rounds grew the heap by ${grown} bytes in every run")
+            exit(1)
+        }
+    }
     println("both freed")
 }

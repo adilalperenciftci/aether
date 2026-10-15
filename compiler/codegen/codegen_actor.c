@@ -338,58 +338,6 @@ static const char* store_target_root(ASTNode* lhs) {
     return (lhs && lhs->type == AST_IDENTIFIER) ? lhs->value : NULL;
 }
 
-static void mark_mentioned_struct_vars(CodeGenerator* gen, ASTNode* node) {
-    if (!node) return;
-    if (node->type == AST_IDENTIFIER && node->value) {
-        mark_return_escaped_struct_var(gen, node->value);
-    }
-    /* Reading a scalar or string field shares nothing with the struct: a
-     * string taken from a field is copied where it is stored (#2461). A
-     * struct-typed (or untyped) field may share the struct's strings. */
-    if (node->type == AST_MEMBER_ACCESS && node->node_type &&
-        node->node_type->kind != TYPE_STRUCT && node->node_type->kind != TYPE_UNKNOWN) {
-        return;
-    }
-    for (int i = 0; i < node->child_count; i++) {
-        mark_mentioned_struct_vars(gen, node->children[i]);
-    }
-}
-
-/* #2498: a value stored into actor state outlives the handler, as a returned
- * one outlives its function. A struct local named anywhere in a state
- * store's value (directly, inside a literal, through a call that may hand it
- * back) therefore gives its strings to the state: its scope-exit destroy is
- * suppressed the way a return suppresses it (#752). Marked before the body
- * is emitted, so an earlier `return` in a loop that later stores is covered
- * too. Naming a non-struct here is harmless: no destroy is keyed to it.
- * A closure that captures the struct holds a copy with strings of its own
- * (#2504), so a capture is no reason to keep them. */
-static void mark_state_stored_struct_vars(CodeGenerator* gen, ASTNode* node) {
-    if (!node) return;
-    if (node->type == AST_VARIABLE_DECLARATION && is_actor_state_var(gen, node->value)) {
-        /* A struct that owns strings is taken by the store (`<Name>_replace`
-         * with emit_struct_take): a local is moved in on its last use and
-         * copied otherwise, so it keeps its scope-exit destroy, which then
-         * releases what it still owns. An array of such structs is copied
-         * element by element (#2688), so the local array keeps its own. */
-        ASTNode* v = node->child_count > 0 ? node->children[0] : NULL;
-        Type* vt = v ? v->node_type : NULL;
-        int taken = vt && (struct_owning_strings(gen, vt) ||
-                           (vt->kind == TYPE_ARRAY && vt->array_size > 0 &&
-                            struct_owning_strings(gen, vt->element_type)));
-        if (!taken)
-            for (int i = 0; i < node->child_count; i++) mark_mentioned_struct_vars(gen, node->children[i]);
-    } else if (node->type == AST_ASSIGNMENT && node->child_count >= 2) {
-        const char* root = store_target_root(node->children[0]);
-        if (root && (strcmp(root, "self") == 0 || is_actor_state_var(gen, root))) {
-            mark_mentioned_struct_vars(gen, node->children[1]);
-        }
-    }
-    for (int i = 0; i < node->child_count; i++) {
-        mark_state_stored_struct_vars(gen, node->children[i]);
-    }
-}
-
 /* #2528: a `string` state field owns what it holds, tracked by
  * `_heap_<name>` beside it (a `ptr`-widened field is a payload the user
  * manages). */
@@ -426,10 +374,11 @@ const char* state_struct_array_owned(CodeGenerator* gen, ASTNode* state_decl, in
 }
 
 /* #2528: `<Actor>_destroy_state(void*)`, the scheduler's hook for what the
- * state fields own: a heap string per its tracker, a closure's environment
- * (#2525), a struct that owns strings or closures through its own
- * destructor. Run once by the free path that ends a scheduler-owned actor,
- * after it can no longer be stepped. Idempotent, as a struct destroy is. */
+ * state fields own, run once by the free path that ends a scheduler-owned
+ * actor, after it can no longer be stepped. Each state field of an owning
+ * type releases what it holds through that type's drop (#2921): a string, a
+ * closure's environment (#2525), a struct, tuple, optional or fixed-size
+ * array that owns. A field widened to a pointer holds nothing of its own. */
 static void emit_actor_destroy_state(CodeGenerator* gen, ASTNode* actor) {
     print_line(gen, "static void %s_destroy_state(void* _p) {", actor->value);
     indent(gen);
@@ -438,35 +387,9 @@ static void emit_actor_destroy_state(CodeGenerator* gen, ASTNode* actor) {
     for (int i = 0; i < actor->child_count; i++) {
         ASTNode* child = actor->children[i];
         if (!child || child->type != AST_STATE_DECLARATION || !child->node_type) continue;
-        Type* t = child->node_type;
-        int oalen = 0;
-        int oak = state_array_owned(child, &oalen);
-        const char* oas = state_struct_array_owned(gen, child, &oalen);
-        if (oas) {
-            /* #2688: each element is a value of the actor's own. */
-            print_line(gen, "for (int _ai = 0; _ai < %d; _ai++) %s_destroy(&self->%s[_ai]);",
-                       oalen, oas, child->value);
-        } else if (state_field_owns_string(child)) {
-            print_line(gen, "if (self->_heap_%s) { aether_heap_str_free(self->%s); self->%s = (const char*)0; self->_heap_%s = 0; }",
-                       child->value, child->value, child->value, child->value);
-        } else if (oak == 1) {
-            /* #2528: a `string[N]` state field owns a copy of each element,
-             * a `fn[N]` one a reference per element (as the struct fields). */
-            print_line(gen, "for (int _ai = 0; _ai < %d; _ai++) if (self->%s[_ai]) { aether_heap_str_free(self->%s[_ai]); self->%s[_ai] = (const char*)0; }",
-                       oalen, child->value, child->value, child->value);
-        } else if (oak == 2) {
-            print_line(gen, "for (int _ai = 0; _ai < %d; _ai++) if (self->%s[_ai].env) { _aether_closure_env_release(self->%s[_ai].env); self->%s[_ai].env = (void*)0; }",
-                       oalen, child->value, child->value, child->value);
-        } else if (t->kind == TYPE_FUNCTION && !t->is_fnptr &&
-                   !state_field_is_ptr(gen, actor, child->value)) {
-            print_line(gen, "if (self->%s.env) { _aether_closure_env_release(self->%s.env); self->%s.env = (void*)0; }",
-                       child->value, child->value, child->value);
-        } else {
-            const char* sname = struct_owning_strings(gen, t);
-            if (sname && !state_field_is_ptr(gen, actor, child->value)) {
-                print_line(gen, "%s_destroy(&self->%s);", sname, child->value);
-            }
-        }
+        if (!own_type_owns(gen, child->node_type) || state_field_is_ptr(gen, actor, child->value))
+            continue;
+        own_emit_part(gen, child->node_type, cg_internf("self->%s", child->value), OWN_DROP);
     }
     unindent(gen);
     print_line(gen, "}");
@@ -793,12 +716,7 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
                          * function left would suppress the destroy of a
                          * local that merely shares a name, and this
                          * handler's must not reach the next function. */
-                        char** outer_escaped = gen->return_escaped_struct_vars;
-                        int outer_escaped_count = gen->return_escaped_struct_var_count;
-                        gen->return_escaped_struct_vars = NULL;
-                        gen->return_escaped_struct_var_count = 0;
                         if (arm_body && arm_body->type == AST_BLOCK) {
-                            mark_state_stored_struct_vars(gen, arm_body);
                             /* #2748: the escape walks and the exit frees a
                              * function body gets (codegen_func.c), so a
                              * string, `*StringSeq` or `string?` local the
@@ -819,12 +737,6 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
                             }
                         }
                         exit_scope(gen);
-                        for (int k = 0; k < gen->return_escaped_struct_var_count; k++) {
-                            free(gen->return_escaped_struct_vars[k]);
-                        }
-                        free(gen->return_escaped_struct_vars);
-                        gen->return_escaped_struct_vars = outer_escaped;
-                        gen->return_escaped_struct_var_count = outer_escaped_count;
 
                         gen->current_promoted_captures = prev_promoted;
                         gen->current_promoted_capture_count = prev_promoted_count;
@@ -1147,14 +1059,7 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
                              * so the release_fields function is
                              * always available. */
                             if (msg_def) {
-                                int msg_has_string = 0;
-                                for (MessageFieldDef* f = msg_def->fields; f; f = f->next) {
-                                    /* #2525: a closure field is released with the strings. */
-                                    if (f->type_kind == TYPE_STRING ||
-                                        (f->type_kind == TYPE_FUNCTION && f->c_type &&
-                                         strcmp(f->c_type, "_AeClosure") == 0)) { msg_has_string = 1; break; }
-                                }
-                                if (msg_has_string) {
+                                if (message_owns_fields(gen, pattern->value)) {
                                     print_line(gen, "%s_release_fields((%s*)_msg_data);",
                                                pattern->value, pattern->value);
                                 }
@@ -1174,14 +1079,7 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
                             /* Same release-fields call as the single-
                              * int branch above (#466). */
                             if (msg_def) {
-                                int msg_has_string = 0;
-                                for (MessageFieldDef* f = msg_def->fields; f; f = f->next) {
-                                    /* #2525: a closure field is released with the strings. */
-                                    if (f->type_kind == TYPE_STRING ||
-                                        (f->type_kind == TYPE_FUNCTION && f->c_type &&
-                                         strcmp(f->c_type, "_AeClosure") == 0)) { msg_has_string = 1; break; }
-                                }
-                                if (msg_has_string) {
+                                if (message_owns_fields(gen, pattern->value)) {
                                     print_line(gen, "%s_release_fields((%s*)_msg_data);",
                                                pattern->value, pattern->value);
                                 }

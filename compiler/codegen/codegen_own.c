@@ -1,13 +1,15 @@
 /* R2/R3 for every owning type, generated once per type (#2921).
  *
  * A value of an owning type holds counted parts: strings, closure
- * environments, `*StringSeq` spines, and composites (structs, tuples,
- * optionals, fixed-size arrays) of those. Every place that holds one does
+ * environments, and composites (structs, tuples, optionals, fixed-size
+ * arrays) of those. Every place that holds one does
  * the same things with it, through functions generated for its type:
  *
  *   _ae_retain_<M>(T* p)        take a reference to every part of *p in
  *                               place: a bit copy becomes a value of its own
  *   _ae_drop_<M>(T* p)          release every part of *p and empty it
+ *   _ae_publish_<M>(T* p)       publish every string part, for a place
+ *                               other threads read (#2919)
  *   _ae_drop_unwind_<M>(p)      the drop the unwind journal runs on a place
  *                               a panic leaves (#2923)
  *
@@ -49,7 +51,6 @@ static const char* own_mangle(Type* t) {
         return cg_internf("arr%d_%s", t->array_size, own_mangle(t->element_type));
     if (t->kind == TYPE_STRING) return "str";
     if (t->kind == TYPE_FUNCTION) return "fn";
-    if (is_string_seq_ptr_type(t)) return "seq";
     return sanitize(get_c_type(t));
 }
 
@@ -60,8 +61,6 @@ int own_type_owns(CodeGenerator* gen, Type* t) {
         return 1;
     case TYPE_FUNCTION:
         return !t->is_fnptr;
-    case TYPE_PTR:
-        return is_string_seq_ptr_type(t);
     case TYPE_STRUCT:
         return struct_owning_strings(gen, t) != NULL;
     case TYPE_TUPLE:
@@ -147,56 +146,80 @@ static const char* own_ptr_type(Type* t) {
     return cg_internf("%s*", get_c_type(t));
 }
 
-/* `fn(<place>)` for the part of type `pt` at lvalue `lv` (an expression
- * of that type), written to the output: the retain (`retain` set) or the
- * drop of one part. */
-static void own_emit_part(CodeGenerator* gen, Type* pt, const char* lv, int retain) {
+/* One statement on the part of type `pt` at lvalue `lv`: OWN_RETAIN takes a
+ * reference to it, OWN_DROP releases it and empties the part, OWN_ZERO
+ * empties it without a release (what a move leaves behind), OWN_PUBLISH
+ * makes its strings' counts atomic, for a place other threads read
+ * (#2919; a closure environment's count is atomic already). */
+void own_emit_part(CodeGenerator* gen, Type* pt, const char* lv, OwnOp op) {
     FILE* o = gen->output;
     if (!own_type_owns(gen, pt)) return;
     switch (pt->kind) {
     case TYPE_STRING:
-        if (retain) fprintf(o, "    %s = aether_uniform_heap_str(%s, 0);\n", lv, lv);
-        else fprintf(o, "    aether_heap_str_free(%s); %s = (const char*)0;\n", lv, lv);
+        if (op == OWN_RETAIN) fprintf(o, "    %s = aether_uniform_heap_str(%s, 0);\n", lv, lv);
+        else if (op == OWN_DROP) fprintf(o, "    aether_heap_str_free(%s); %s = (const char*)0;\n", lv, lv);
+        else if (op == OWN_PUBLISH) fprintf(o, "    aether_string_publish(%s);\n", lv);
+        else fprintf(o, "    %s = (const char*)0;\n", lv);
         return;
     case TYPE_FUNCTION:
-        if (retain) fprintf(o, "    _aether_closure_env_retain(%s.env);\n", lv);
-        else fprintf(o, "    _aether_closure_env_release(%s.env); %s.env = (void*)0;\n", lv, lv);
-        return;
-    case TYPE_PTR:
-        if (retain) fprintf(o, "    string_seq_retain(%s);\n", lv);
-        else fprintf(o, "    string_seq_free(%s); %s = (StringSeq*)0;\n", lv, lv);
+        if (op == OWN_PUBLISH) return;
+        if (op == OWN_RETAIN) fprintf(o, "    _aether_closure_env_retain(%s.env);\n", lv);
+        else if (op == OWN_DROP)
+            fprintf(o, "    _aether_closure_env_release(%s.env); %s.env = (void*)0;\n", lv, lv);
+        else fprintf(o, "    %s.env = (void*)0;\n", lv);
         return;
     case TYPE_STRUCT: {
         const char* s = struct_owning_strings(gen, pt);
-        if (retain) fprintf(o, "    %s = %s_dup(%s);\n", lv, s, lv);
-        else fprintf(o, "    %s_destroy(&%s);\n", s, lv);
+        if (op == OWN_RETAIN) fprintf(o, "    %s = %s_dup(%s);\n", lv, s, lv);
+        else if (op == OWN_DROP) fprintf(o, "    %s_destroy(&%s);\n", s, lv);
+        else if (op == OWN_PUBLISH) fprintf(o, "    %s_publish(&%s);\n", s, lv);
+        else fprintf(o, "    (void)_aether_move_%s(&%s);\n", s, lv);
         return;
     }
     default: {
+        if (op == OWN_ZERO) {
+            fprintf(o, "    memset(&%s, 0, sizeof(%s));\n", lv, lv);
+            return;
+        }
         OwnType* ot = own_find(gen, pt);
-        fprintf(o, "    _ae_%s_%s(%s%s);\n", retain ? "retain" : "drop", ot->mangled,
+        fprintf(o, "    _ae_%s_%s(%s%s);\n",
+                op == OWN_RETAIN ? "retain" : op == OWN_DROP ? "drop" : "publish", ot->mangled,
                 pt->kind == TYPE_ARRAY ? "" : "&", lv);
         return;
     }
     }
 }
 
-static void own_emit_body(CodeGenerator* gen, Type* t, int retain) {
+/* The prototypes of the functions of composite type `t`, for a struct's
+ * functions that call them ahead of the definitions (emit_own_ops). */
+void own_emit_prototypes(CodeGenerator* gen, Type* t) {
+    if (!t || !own_is_composite(t) || !own_type_owns(gen, t)) return;
+    OwnType* ot = own_find(gen, t);
+    const char* pt = own_ptr_type(ot->type);
+    fprintf(gen->output, "static inline AETHER_MAYBE_UNUSED void _ae_retain_%s(%s p);\n",
+            ot->mangled, pt);
+    fprintf(gen->output, "static inline AETHER_MAYBE_UNUSED void _ae_drop_%s(%s p);\n",
+            ot->mangled, pt);
+    fprintf(gen->output, "static inline AETHER_MAYBE_UNUSED void _ae_publish_%s(%s p);\n",
+            ot->mangled, pt);
+}
+
+static void own_emit_body(CodeGenerator* gen, Type* t, OwnOp op) {
     FILE* o = gen->output;
     switch (t->kind) {
     case TYPE_TUPLE:
         for (int i = 0; t->tuple_types && i < t->tuple_count; i++)
-            own_emit_part(gen, t->tuple_types[i], cg_internf("p->_%d", i), retain);
+            own_emit_part(gen, t->tuple_types[i], cg_internf("p->_%d", i), op);
         return;
     case TYPE_OPTIONAL:
         fprintf(o, "  if (p->has) {\n");
-        own_emit_part(gen, t->element_type, "p->val", retain);
-        if (!retain) fprintf(o, "    p->has = 0;\n");
+        own_emit_part(gen, t->element_type, "p->val", op);
+        if (op == OWN_DROP) fprintf(o, "    p->has = 0;\n");
         fprintf(o, "  }\n");
         return;
     case TYPE_ARRAY:
         fprintf(o, "  for (int _i = 0; _i < %d; _i++) {\n", t->array_size);
-        own_emit_part(gen, t->element_type, "p[_i]", retain);
+        own_emit_part(gen, t->element_type, "p[_i]", op);
         fprintf(o, "  }\n");
         return;
     default:
@@ -221,15 +244,19 @@ void emit_own_ops(CodeGenerator* gen) {
         const char* pt = own_ptr_type(ot->type);
         fprintf(o, "static inline AETHER_MAYBE_UNUSED void _ae_retain_%s(%s p);\n", ot->mangled, pt);
         fprintf(o, "static inline AETHER_MAYBE_UNUSED void _ae_drop_%s(%s p);\n", ot->mangled, pt);
+        fprintf(o, "static inline AETHER_MAYBE_UNUSED void _ae_publish_%s(%s p);\n", ot->mangled, pt);
     }
     for (int i = 0; i < g_own_count; i++) {
         OwnType* ot = &g_own_types[i];
         const char* pt = own_ptr_type(ot->type);
         fprintf(o, "static inline AETHER_MAYBE_UNUSED void _ae_retain_%s(%s p) {\n", ot->mangled, pt);
-        own_emit_body(gen, ot->type, 1);
+        own_emit_body(gen, ot->type, OWN_RETAIN);
         fprintf(o, "}\n");
         fprintf(o, "static inline AETHER_MAYBE_UNUSED void _ae_drop_%s(%s p) {\n", ot->mangled, pt);
-        own_emit_body(gen, ot->type, 0);
+        own_emit_body(gen, ot->type, OWN_DROP);
+        fprintf(o, "}\n");
+        fprintf(o, "static inline AETHER_MAYBE_UNUSED void _ae_publish_%s(%s p) {\n", ot->mangled, pt);
+        own_emit_body(gen, ot->type, OWN_PUBLISH);
         fprintf(o, "}\n");
         fprintf(o, "static AETHER_MAYBE_UNUSED void _ae_drop_unwind_%s(const void* p) {\n", ot->mangled);
         fprintf(o, "    _ae_drop_%s((%s)(void*)p);\n", ot->mangled, pt);

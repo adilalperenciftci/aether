@@ -348,6 +348,50 @@ deleted, with the heap classifiers that set them, copy-on-keep and the callee
 keep analysis. (3) `--diagnose=ownership` reports R3 (moved or taken, per
 store), rewritten once, after (1).
 
+**A return is a store into the caller's place.** A string return takes its
+value as any store does: a local on its last use moves out, anything else is
+retained. The return-escape channel (the set of locals a `return` names,
+their skipped exit free, the free each other `return` ran ahead of the
+function's defers) is gone, and with it a free that ran before a user `defer`
+reading the local. Structs, tuples and optionals return the same way; the
+struct return-escape set went with it.
+
+**One retain and one drop per type (#2921).** Every owning type has two
+generated functions, used by every place: `_ae_retain_<T>(T*)` takes a
+reference to each part of a bit copy, `_ae_drop_<T>(T*)` releases each part
+and empties it; `_ae_publish_<T>` makes a value's strings atomic for a place
+other threads read. A struct's are `<Name>_dup` and `<Name>_destroy`; a
+tuple's, an optional's and a fixed-size array's are emitted by
+codegen_own.c once every type is complete, prototypes first, so nested
+composites call each other in any order. A part is a string, a closure's
+environment, or a composite of those.
+
+Struct fields lost their `_heap_<field>` trackers: every string field owns
+what it holds, so a struct's C layout is its declared fields (the punning
+idiom of #1879 holds by construction) and `reflect.field_heap_offset` is
+gone. `<Name>_replace` is a store (keep the old value, put the new one in,
+destroy the old), a move empties the moved-from parts. A struct parameter
+borrows its caller's value; one the body writes into is copied on entry and
+destroyed at its exit, which is a question about the function's own body.
+Copy-on-keep for structs (the "kept" walk, the disown and capture on entry)
+is deleted.
+
+Tuple, optional and array locals, struct and tuple fields, module `var`s,
+array and slice elements, message fields and `_ = v` discards each take and
+drop through these functions. A struct definition is emitted after every type
+it holds by value, tuples and optionals included.
+
+**Array results (#2894).** A named function returns a fixed-size array,
+alone or at a position of a tuple, in a struct of its own (C has no array
+results). A binding moves the elements out, a struct field or a tuple
+position takes them, and a call used as an array is held in a statement
+temporary that its block drops. A closure, an extern and a function type
+still return no array (E0201).
+
+**Owning optional fields (#2822).** An optional field whose value owns
+memory is a part like any other: a literal or a store takes, the struct's
+destroy and a store release.
+
 ## Decisions needed
 
 Stage 1 (the grid) needs none of these: it only measures, and it starts

@@ -1,0 +1,67 @@
+// An optional struct field owns what it holds, as any field does (#2822,
+// #2921): a literal and a store take the value, a store or the struct's
+// destroy releases the one it held, and a copy of the struct holds its own.
+import std.mem
+import std.string
+
+extern exit(code: int)
+
+struct Named {
+    name: string
+}
+
+struct Bag {
+    names: string[2]
+}
+
+struct Tag {
+    label: string?
+}
+
+struct Held {
+    owner: Named?
+}
+
+struct Holder {
+    bag: Bag?
+}
+
+struct Pair {
+    t: (string, int)?
+}
+
+fresh(w: string, s: string) -> string {
+    return string.concat(w, s)
+}
+
+round(w: string, say: bool) {
+    t = Tag { label: fresh(w, "#label") }
+    t.label = fresh(w, "#label2")
+    copy = t
+    t.label = none
+    h = Held { owner: Named { name: fresh(w, "#owner") } }
+    h.owner = Named { name: fresh(w, "#owner2") }
+    b = Holder { bag: Bag { names: [fresh(w, "#0"), fresh(w, "#1")] } }
+    p = Pair { t: (fresh(w, "#t"), 3) }
+    s, n = p.t!
+    if say {
+        println("${copy.label ?? "-"} ${t.label ?? "-"} ${h.owner!.name} ${b.bag!.names[1]} ${s} ${n}")
+    }
+}
+
+main() {
+    round("w", true)
+    if mem.heap_in_use_exact() {
+        grown = mem.steady_growth(|| {
+                k = 0
+                while k < 100 {
+                    round("w", false)
+                    k = k + 1
+                }
+            }, 5)
+        if grown != 0 {
+            println("LEAK: ${grown} bytes per 100 calls")
+            exit(1)
+        }
+    }
+}

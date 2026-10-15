@@ -7903,24 +7903,26 @@ static void array_type_spelling(Type* arr, char* out, size_t cap) {
 }
 
 /* Refuse result type `result` (holding the array `arr`) of what `subject`
- * names: "'pair' returns", "extern 'pair_c' returns", "this closure
- * returns", "parameter 'g' holds the function type || -> int[2], which
- * returns". */
+ * names: "extern 'pair_c' returns", "this closure returns", "parameter 'g'
+ * holds the function type || -> int[2], which returns". A named Aether
+ * function returns one (#2894); a C function cannot, and a closure's or a
+ * function value's result has no struct to carry it. */
 static void refuse_array_result(const char* subject, Type* result, Type* arr, int line,
                                 int column) {
     char spelled[128], msg[512], hint[256];
     array_type_spelling(arr, spelled, sizeof(spelled));
     if (result == arr) {
         snprintf(msg, sizeof(msg),
-                 "%s %s, a fixed-size array: a function cannot return one, alone or in a "
-                 "tuple (#2886)", subject, spelled);
+                 "%s %s, a fixed-size array: only a named function returns one, alone or in "
+                 "a tuple (#2894)", subject, spelled);
     } else {
         snprintf(msg, sizeof(msg),
-                 "%s %s, which holds the fixed-size array %s: a function cannot return one, "
-                 "alone or in a tuple (#2886)", subject, type_to_string(result), spelled);
+                 "%s %s, which holds the fixed-size array %s: only a named function returns "
+                 "one, alone or in a tuple (#2894)", subject, type_to_string(result), spelled);
     }
     snprintf(hint, sizeof(hint),
-             "wrap it in a struct and return the struct: struct Pair { v: %s }", spelled);
+             "return it from a named function, or wrap it in a struct: struct Pair { v: %s }",
+             spelled);
     type_error_code_hint(msg, hint, line, column, AETHER_ERR_ARRAY_RESULT);
 }
 
@@ -8022,16 +8024,6 @@ static int refuse_unknown_type(const char* what, const char* name, Type* t, Symb
 int typecheck_function_definition(ASTNode* func, SymbolTable* table) {
     if (!func || (func->type != AST_FUNCTION_DEFINITION && func->type != AST_BUILDER_FUNCTION)) return 0;
 
-    /* #2886: written (`-> int[2]`) or inferred (`return arr`). */
-    {
-        Type* arr = result_array_type(func->node_type);
-        if (arr) {
-            char who[256];
-            snprintf(who, sizeof(who), "'%s' returns", func->value ? func->value : "function");
-            refuse_array_result(who, func->node_type, arr, func->line, func->column);
-        }
-    }
-
     SymbolTable* func_table = create_symbol_table(table);
 
     // Issue #243 sealed scopes, #2614: a function cloned in from a module
@@ -8105,34 +8097,6 @@ int typecheck_function_definition(ASTNode* func, SymbolTable* table) {
     return 1;
 }
 
-/* #2822: does a value of type `t` own memory a struct field would have to
- * free or copy: a string, a closure, or a struct (held by value) with such
- * a field? */
-static int type_owns_memory(Type* t, SymbolTable* table, int depth) {
-    if (!t || depth > 16) return 0;
-    if (t->kind == TYPE_STRING) return 1;
-    if (t->kind == TYPE_FUNCTION) return !t->is_fnptr;
-    /* An optional, an array (a fixed-size one holds its elements, which a
-     * struct owning them frees) and a tuple own what their elements own. */
-    if (t->kind == TYPE_OPTIONAL || t->kind == TYPE_ARRAY)
-        return type_owns_memory(t->element_type, table, depth + 1);
-    if (t->kind == TYPE_TUPLE) {
-        for (int i = 0; t->tuple_types && i < t->tuple_count; i++)
-            if (type_owns_memory(t->tuple_types[i], table, depth + 1)) return 1;
-        return 0;
-    }
-    if (t->kind != TYPE_STRUCT || !t->struct_name) return 0;
-    Symbol* s = lookup_symbol(table, t->struct_name);
-    ASTNode* def = s ? s->node : NULL;
-    if (!def || def->type != AST_STRUCT_DEFINITION) return 0;
-    for (int i = 0; i < def->child_count; i++) {
-        ASTNode* f = def->children[i];
-        if (f && f->type == AST_STRUCT_FIELD && type_owns_memory(f->node_type, table, depth + 1))
-            return 1;
-    }
-    return 0;
-}
-
 int typecheck_struct_definition(ASTNode* struct_def, SymbolTable* table) {
     if (!struct_def || struct_def->type != AST_STRUCT_DEFINITION) return 0;
     
@@ -8172,23 +8136,6 @@ int typecheck_struct_definition(ASTNode* struct_def, SymbolTable* table) {
             if (refuse_unknown_type("the field", field->value, field->node_type, table,
                                     field->line, field->column))
                 return 0;
-        }
-
-        /* #2822: an optional field compiles (#2820), but one whose value
-         * owns memory has none of a `string` field's ownership (destroy,
-         * replace, dup, a take on store), so a string stored there would
-         * leak or dangle. Refused until it has. */
-        if (field->node_type->kind == TYPE_OPTIONAL &&
-            type_owns_memory(field->node_type->element_type, table, 0)) {
-            char error_msg[512];
-            snprintf(error_msg, sizeof(error_msg),
-                     "struct field '%s' is %s: an optional field whose value owns memory (a "
-                     "string, a closure, or a struct holding one) is not supported yet "
-                     "(#2822). Hold the value bare (a `string` with \"\" for none) or keep "
-                     "the optional in a local",
-                     field->value, type_to_string(field->node_type));
-            type_error(error_msg, field->line, field->column);
-            return 0;
         }
 
         // Check for duplicate field names

@@ -765,20 +765,36 @@ With no result type written, the checks use the type the first `return` gives; f
 
 Some values a binding lets through are refused here, because C cannot convert them: a closure becomes a `ptr` only through `box_closure(f)` and a `ptr` a closure only through `unbox_closure(p)`, a pointer is no value of an optional (return `none` for no value), a slice is no `*T`, and `[]`, the empty slice, is returned only as an array, a slice or a pointer. A bool is not a float, a pointer or an enum, and an enum is not a string, a pointer or a float.
 
-A fixed-size array is no result (E0201): a function, a closure or an extern cannot return a `T[N]`, alone or at a position of a tuple, written (`-> int[2]`, `-> (int[2], int)`) or inferred (`return arr`), and a function type with such a result (`fn() -> int[2]`) cannot be written for a parameter, a field or a local. C returns no array; return a struct that holds it (`struct Pair { v: int[2] }`), which is a value with the array in it, or a slice of storage that outlives the call. (Returning the array itself is #2894.)
+A named function returns a fixed-size array, alone or at a position of a tuple, written (`-> int[2]`, `-> (int[2], int)`) or inferred (`return arr`). C returns no array, so the function returns it in a struct of its own and each use takes the elements out: a binding moves them in, a struct field or a tuple position takes them, and a call used as an array (`pair()[1]`, `sum(pair())`) is held until its statement is done. An array of strings, closures or structs that own them hands its caller a reference to each element, as any return does.
 
-```aether,fails
+```aether,run
 pair() -> int[2] {
     return [1, 2]
 }
-// error[E0201]: 'pair' returns int[2], a fixed-size array: a function cannot return
-// one, alone or in a tuple (#2886)
-// help: wrap it in a struct and return the struct: struct Pair { v: int[2] }
 
 main() {
     a = pair()
+    println("${a[0]} ${a[1]} ${pair()[1]}")
+}
+```
+```output
+1 2 2
+```
+
+A closure, an extern and a function type return no array (E0201): C gives an extern no array result, and a closure's or a function value's result has no struct to carry one. Return it from a named function, or return a struct that holds it (`struct Pair { v: int[2] }`).
+
+```aether,fails
+main() {
+    g = || {
+        int[2] a = [1, 2]
+        return a
+    }
+    a = g()
     println("${a[0]}")
 }
+// error[E0201]: this closure returns int[2], a fixed-size array: only a named
+// function returns one, alone or in a tuple (#2894)
+// help: return it from a named function, or wrap it in a struct: struct Pair { v: int[2] }
 ```
 
 ### Default arguments
@@ -3534,10 +3550,9 @@ time. Fields are numbered in declaration order from 0, the index a
   one (`*T`), or is an array or slice of one names that struct's table
   (`reflect.field_schema`), whether or not that struct derives schema itself.
   A struct that points at itself names its own table.
-- **Strings.** A `string` field's table entry also gives the offset of the
-  flag recording whether the struct owns the string
-  (`reflect.field_heap_offset`), so a generic writer that stores a heap
-  string can hand it over the way a compiled `x.label = ...` does.
+- **Strings.** A `string` field owns a reference to the string it holds,
+  so a generic writer releases the one there and stores one it took a
+  reference to, as a compiled `x.label = ...` does.
 - **Modules.** The derive pass runs after imported modules are merged, so a
   module's own functions call `T_schema()` by its bare name, and an importer
   calls it as `module.T_schema()` when the module lists it in `exports`.
@@ -3744,7 +3759,7 @@ An error stops the build and prints its code, `error[E0301]: ...`, with the sour
 |------|------|
 | `E0100` | Syntax: the source does not parse, or a reserved word stands where a name must |
 | `E0200` | Type mismatch, and the other type rules (a cast the types cannot justify, `string + string`, a `match` arm or `switch` case that can never equal the value it compares, an arm that gives no value to a `match` whose value is used: [Match Expressions](#match-expressions)) |
-| `E0201` | A fixed-size array as a result, alone or in a tuple: of a function, a closure, an extern or a function type ([What a `return` gives](#what-a-return-gives-e0200)) |
+| `E0201` | A fixed-size array as the result of a closure, an extern or a function type, alone or in a tuple (a named function returns one) ([What a `return` gives](#what-a-return-gives-e0200)) |
 | `E0300` | Undefined variable, and a name in a `match` arm or `switch` case that is no variable, constant or member |
 | `E0301` | Undefined function, a function of a module the calling module does not import, or a function a local of its name hides ([a local's scope](#variables)) |
 | `E0302` | A type name that names no type of the program, as a local's, a parameter's or a field's type (`Shape s` with no `Shape`; `x and y`, where AND is `&&`) |

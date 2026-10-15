@@ -835,13 +835,11 @@ static int is_owned_string_array_field(CodeGenerator* gen, ASTNode* base) {
  * is a view that a slot it escapes to copies: a return, a struct field, a
  * container, a call handing it back (is_owned_string_element). Through a
  * slice of an owning array, a returned element was handed over borrowed,
- * and dangled once the array let go of it. A local bound to one is a view
- * as well, as a local bound to any borrowed string is: it is not copied
- * (local_take_is_view), so code that moves elements through a local
- * (`t = s[0]; s[0] = s[1]; s[1] = t`) moves the pointers and keeps none;
- * the local is copied where it escapes in turn, since a return or a
- * container reads its flag and copies what it does not own
- * (string_bind_owns with `may`). */
+ * and dangled once the array let go of it. A local bound to one takes a
+ * reference of its own, as every place does (R3): a store through the slice
+ * releases the element it replaces, so code that moves elements through a
+ * local (`t = s[0]; s[0] = s[1]; s[1] = t`) keeps each alive while it moves
+ * (#2921). */
 static int is_slice_string_element(ASTNode* e) {
     if (!e || e->type != AST_ARRAY_ACCESS || e->child_count < 2 || !e->children[0]) return 0;
     Type* t = e->children[0]->node_type;
@@ -995,13 +993,6 @@ int string_take_is_view(CodeGenerator* gen, ASTNode* e) {
            string_take_kind(gen, e) != STR_TAKE_BORROW;
 }
 
-/* string_take_is_view for the binding of a string local: an element of a
- * `string[]` slice is bound as it is, a view the local borrows
- * (is_slice_string_element, #2689). */
-static int local_take_is_view(CodeGenerator* gen, ASTNode* e) {
-    return !is_slice_string_element(e) && string_take_is_view(gen, e);
-}
-
 /* A fresh name for the ownership flag of one take. Takes nest (an arm may
  * hold a struct literal that takes a field), so the name must not repeat. */
 void string_take_new_flag(char* buf, size_t n) {
@@ -1024,6 +1015,24 @@ static int is_env_capture_name(CodeGenerator* gen, const char* name) {
  * else { ... }` keeps w's buffer rather than freeing what it still holds. */
 void emit_string_take(CodeGenerator* gen, ASTNode* e, const char* own,
                       const char* target) {
+    /* `o ?? d` over a `string?`: a place's string is retained, a call's
+     * handed over; the default is taken as any value is (a fresh one moved
+     * in), so neither leaks nor is taken twice. */
+    if (e && e->type == AST_NULL_COALESCE && e->child_count >= 2 && e->children[0] &&
+        is_opt_string_type(e->children[0]->node_type)) {
+        TempSeq s;
+        seq_open(gen, &s);
+        const char* ov = seq_let(gen, &s, "ae_opt_string", "_ae_oc");
+        generate_expression(gen, e->children[0]);
+        seq_next(gen, &s);
+        if (e->children[0]->type == AST_FUNCTION_CALL)
+            fprintf(gen->output, "%s.has ? (%s = 1, %s.val) : ", ov, own, ov);
+        else
+            fprintf(gen->output, "%s.has ? (%s = 1, aether_uniform_heap_str(%s.val, 0)) : ", ov, own, ov);
+        emit_string_take(gen, e->children[1], own, target);
+        seq_close(gen, &s);
+        return;
+    }
     if (e && e->type == AST_IF_EXPRESSION && e->child_count >= 3) {
         fprintf(gen->output, "((");
         generate_expression(gen, e->children[0]);
@@ -1091,7 +1100,7 @@ void emit_string_take(CodeGenerator* gen, ASTNode* e, const char* own,
  * (a literal is stored as it is), so a plain owned buffer (an `@heap`
  * extern's strdup) is turned into one on the way in (_aether_str_cell_own);
  * passed through, nothing freed it. */
-static void emit_string_take_owned(CodeGenerator* gen, ASTNode* e, int cell) {
+void emit_string_take_owned(CodeGenerator* gen, ASTNode* e, int cell) {
     TempSeq s;
     seq_open(gen, &s);
     const char* own = seq_let(gen, &s, "int", "_ae_tko");
@@ -2274,10 +2283,6 @@ static int string_bind_owns_arm(CodeGenerator* gen, ASTNode* e, int may);
 
 static int string_bind_owns(CodeGenerator* gen, ASTNode* e, int may) {
     if (!e) return 0;
-    /* #2689: a local bound to a slice element borrows it; the return
-     * classifier's shim and a container's take copy it, so the local counts
-     * as possibly owning there. */
-    if (is_slice_string_element(e)) return may;
     if (is_string_view_read(gen, e, 0)) return 1;
     if (e->type == AST_IF_EXPRESSION && e->child_count >= 3) {
         int a = string_bind_owns_arm(gen, e->children[1], may);
@@ -4072,9 +4077,6 @@ static int emit_nested_field_heap_assign(CodeGenerator* gen, ASTNode* lhs,
     char tgt[32];
     snprintf(tgt, sizeof(tgt), "_ae_ntgt%d", nested_tgt_seq++);
 
-    const char* tracker_lv = cg_internf("%s->_heap_%s", tgt, lhs->value);
-    char own[32];
-    string_take_new_flag(own, sizeof(own));
     int release_old = by_value ? value_path_trackers_are_initialised(gen, obj) : 1;
     /* A struct held by a local a `try` body writes is volatile, and so is
      * the pointer to it (#2690). */
@@ -4083,19 +4085,16 @@ static int emit_nested_field_heap_assign(CodeGenerator* gen, ASTNode* lhs,
     fprintf(gen->output, "{ %s%s* %s = %s(", sname, vol ? " volatile" : "", tgt,
             by_value ? "&" : "");
     generate_expression(gen, obj);
-    fprintf(gen->output, "); int %s = 0;", own);
+    fprintf(gen->output, ");");
     if (release_old) {
         fprintf(gen->output, " const char* _tmp_old = %s->%s;", tgt, lhs->value);
     }
     /* R3: the field takes the value (moved when fresh or a local's last use,
      * else retained) and releases the one it held. */
     fprintf(gen->output, " %s->%s = ", tgt, lhs->value);
-    emit_string_take(gen, rhs, own, NULL);
+    emit_string_take_owned(gen, rhs, 0);
     fprintf(gen->output, ";");
-    if (release_old) {
-        fprintf(gen->output, " if (%s) aether_heap_str_free(_tmp_old);", tracker_lv);
-    }
-    fprintf(gen->output, " %s = %s;", tracker_lv, own);
+    if (release_old) fprintf(gen->output, " aether_heap_str_free(_tmp_old);");
     if (!by_value || value_path_through_pointer(obj))
         fprintf(gen->output, " aether_string_publish(%s->%s);", tgt, lhs->value);
     fprintf(gen->output, " }\n");
@@ -4226,6 +4225,7 @@ static int struct_array_local_owns(CodeGenerator* gen, const char* name) {
         const char* a = d ? d->annotation : NULL;
         if (a && strncmp(a, "struct_array_destroy:", 21) == 0 &&
             strncmp(a + 21, name, n) == 0 && a[21 + n] == ':') return 1;
+        if (a && strncmp(a, "own_drop:", 9) == 0 && strcmp(a + 9, name) == 0) return 1;
     }
     return 0;
 }
@@ -4314,6 +4314,13 @@ static void emit_array_field_take(CodeGenerator* gen, int kind, const char* es, 
         }
         return;
     }
+    if (src && src->type == AST_FUNCTION_CALL) {
+        /* #2894: a call's result, its elements handed over. */
+        fprintf(gen->output, " ");
+        emit_array_fill(gen, into, src, at);
+        fprintf(gen->output, ";");
+        return;
+    }
     fprintf(gen->output, " { %s const volatile* _ae_src = (", get_c_type(at->element_type));
     generate_expression(gen, src);
     fprintf(gen->output, "); for (int _ae_k = 0; _ae_k < %d; _ae_k++) ", at->array_size);
@@ -4349,6 +4356,10 @@ void emit_struct_literal_array_field(CodeGenerator* gen, const char* sname, ASTN
     ASTNode* src = field_init->children[0];
     if (src && src->type == AST_SLICE_FROM_ARRAY && src->child_count > 0) src = src->children[0];
     const char* into = cg_internf("%s.%s", slit, field_init->value);
+    if (src && src->type == AST_FUNCTION_CALL) {
+        emit_array_fill(gen, into, src, at);   /* #2894, #2886 */
+        return;
+    }
     /* #2765: an expression, a call per field (the loop is the helper's), as
      * emit_array_field_take fills it with statements. The source is read
      * through a pointer that accepts a volatile array. */
@@ -4561,8 +4572,13 @@ static int field_store_takes_local(CodeGenerator* gen, ASTNode* lhs) {
     return 0;
 }
 
+static int emit_slice_element_store(CodeGenerator* gen, ASTNode* lhs, ASTNode* rhs);
+static int emit_composite_field_store(CodeGenerator* gen, ASTNode* lhs, ASTNode* rhs);
+
 static int emit_struct_field_heap_assign(CodeGenerator* gen, ASTNode* lhs, ASTNode* rhs) {
     if (!gen || !lhs || !rhs) return 0;
+    if (emit_slice_element_store(gen, lhs, rhs)) return 1;   /* #2921 */
+    if (emit_composite_field_store(gen, lhs, rhs)) return 1;  /* #2921 */
     if (emit_struct_element_store(gen, lhs, rhs)) return 1;
     if (emit_array_field_store(gen, lhs, rhs)) return 1;   /* #2688 */
     if (lhs->type != AST_MEMBER_ACCESS || !lhs->value) return 0;
@@ -4647,28 +4663,61 @@ static int emit_struct_field_heap_assign(CodeGenerator* gen, ASTNode* lhs, ASTNo
                        ? cg_internf("%s->%s", gen->state_self_alias ? gen->state_self_alias : "self",
                                     obj->value)
                        : obj->value;
-    const char* tracker_lv = cg_internf("%s%s_heap_%s", objs, acc, lhs->value);
-    char own[32];
-    string_take_new_flag(own, sizeof(own));
     print_indent(gen);
     /* R3: the field takes the value and releases the one it held; through a
      * pointer, other threads may read it, so it is published (#2919). */
-    fprintf(gen->output, "{ const char* _tmp_old = %s%s%s; int %s = 0; %s%s%s = ",
-            objs, acc, lhs->value, own, objs, acc, lhs->value);
-    emit_string_take(gen, rhs, own, NULL);
-    fprintf(gen->output, "; if (%s) aether_heap_str_free(_tmp_old); %s = %s;", tracker_lv,
-            tracker_lv, own);
+    fprintf(gen->output, "{ const char* _tmp_old = %s%s%s; %s%s%s = ",
+            objs, acc, lhs->value, objs, acc, lhs->value);
+    emit_string_take_owned(gen, rhs, 0);
+    fprintf(gen->output, "; aether_heap_str_free(_tmp_old);");
     if (acc[0] == '-')
         fprintf(gen->output, " aether_string_publish(%s%s%s);", objs, acc, lhs->value);
     fprintf(gen->output, " }\n");
     return 1;
 }
 
+/* Is `call` a call of a C function (an extern), whose result it lends
+ * rather than hands over (R4)? */
+static int call_is_extern(CodeGenerator* gen, ASTNode* call) {
+    if (!call || call->type != AST_FUNCTION_CALL || !call->value || !gen->program) return 0;
+    const char* fn = codegen_normalise_callee(call->value);
+    return !find_function_definition_by_name(gen->program, fn) &&
+           find_extern_declaration_by_name(gen->program, fn) != NULL;
+}
+
 /* #2921: `e` as the value a place of the owning composite type `t` takes:
  * a call's result is moved in, each string position the call only lends
  * taken (an extern's borrowed one); anything else is copied, every part
  * retained. */
-static void emit_composite_take(CodeGenerator* gen, ASTNode* e, Type* t) {
+void emit_composite_take(CodeGenerator* gen, ASTNode* e, Type* t) {
+    /* A bare value or `none` into an optional is wrapped, its value taken. */
+    if (t->kind == TYPE_OPTIONAL && needs_optional_coerce(e, t)) {
+        if (e->type == AST_NONE_LITERAL) {
+            fprintf(gen->output, "(%s){0}", get_c_type(t));
+            return;
+        }
+        fprintf(gen->output, "(%s){ .has = 1, .val = ", get_c_type(t));
+        emit_value_take(gen, e, t->element_type);
+        fprintf(gen->output, " }");
+        return;
+    }
+    /* A tuple literal is a fresh value, its compound literal with each
+     * position taken. */
+    if (e->type == AST_TUPLE_LITERAL && t->kind == TYPE_TUPLE) {
+        fprintf(gen->output, "(%s){ ", get_c_type(t));
+        for (int i = 0; i < e->child_count && i < t->tuple_count; i++) {
+            fprintf(gen->output, "%s", i ? ", " : "");
+            emit_value_take(gen, e->children[i], t->tuple_types[i]);
+        }
+        fprintf(gen->output, " }");
+        return;
+    }
+    /* A call hands its result over (R3), C's lending it: an Aether
+     * function's or a closure's is moved in as it is. */
+    if (e->type == AST_FUNCTION_CALL && t->kind != TYPE_TUPLE && !call_is_extern(gen, e)) {
+        generate_expression(gen, e);
+        return;
+    }
     TempSeq s;
     seq_open(gen, &s);
     const char* tv = seq_let(gen, &s, get_c_type(t), "_ae_ct");
@@ -4689,7 +4738,174 @@ static void emit_composite_take(CodeGenerator* gen, ASTNode* e, Type* t) {
     seq_close(gen, &s);
 }
 
-/* #2921: a binding of a local of an owning tuple type. The local owns its
+/* `e` as the value a place of owning type `t` takes (R3): a string, a
+ * closure, a struct or a composite, each by its own take. */
+void emit_value_take(CodeGenerator* gen, ASTNode* e, Type* t) {
+    const char* sname = struct_owning_strings(gen, t);
+    if (t && t->kind == TYPE_STRING) emit_string_take_owned(gen, e, 0);
+    else if (t && t->kind == TYPE_FUNCTION && !t->is_fnptr) emit_closure_take(gen, e);
+    else if (sname) emit_struct_take(gen, e, sname, NULL);
+    else if (own_type_owns(gen, t)) emit_composite_take(gen, e, t);
+    else generate_expression(gen, e);
+}
+
+/* #2894: the array lvalue `dst`, of type `at`, filled with the array value
+ * `e` as a place of its own takes it: an array literal's elements each
+ * taken, a call's result (returned in its struct, c_result_type) moved out,
+ * any other array (a local, a parameter, a field, an element) copied with a
+ * reference taken to each owning element. One expression. */
+void emit_array_fill(CodeGenerator* gen, const char* dst, ASTNode* e, Type* at) {
+    if (e->type == AST_ARRAY_LITERAL) {
+        fprintf(gen->output, "(");
+        for (int i = 0; i < e->child_count; i++) {
+            fprintf(gen->output, "%s%s[%d] = ", i ? ", " : "", dst, i);
+            emit_value_take(gen, e->children[i], at->element_type);
+        }
+        fprintf(gen->output, "%s)", e->child_count ? "" : "(void)0");
+        return;
+    }
+    TempSeq s;
+    seq_open(gen, &s);
+    if (e->type == AST_FUNCTION_CALL) {
+        const char* w = seq_let(gen, &s, c_result_type(at), "_ae_ar");
+        gen->array_call_raw++;
+        generate_expression(gen, e);
+        gen->array_call_raw--;
+        seq_next(gen, &s);
+        fprintf(gen->output, "(void)memcpy((void*)%s, (const void*)%s.a, sizeof(%s.a))", dst, w, w);
+    } else {
+        fprintf(gen->output, "(void)memcpy((void*)%s, (const void*)(", dst);
+        generate_expression(gen, e);
+        fprintf(gen->output, "), sizeof(%s[0]) * %d)", dst, at->array_size);
+        if (own_type_owns(gen, at)) {
+            seq_next(gen, &s);
+            fprintf(gen->output, "%s((%s*)%s)", own_fn(gen, at, "retain"),
+                    get_c_type(at->element_type), dst);
+        }
+    }
+    seq_close(gen, &s);
+}
+
+/* #2894: the array lvalue `dst` filled from the array lvalue `src` of type
+ * `at`: its elements moved (`retain` 0, `src` gives them up) or each owning
+ * one retained. One expression. */
+void emit_array_fill_c(CodeGenerator* gen, const char* dst, const char* src, Type* at, int retain) {
+    fprintf(gen->output, "((void)memcpy((void*)%s, (const void*)%s, sizeof(%s[0]) * %d)",
+            dst, src, dst, at->array_size);
+    if (retain && own_type_owns(gen, at))
+        fprintf(gen->output, ", %s((%s*)%s)", own_fn(gen, at, "retain"),
+                get_c_type(at->element_type), dst);
+    fprintf(gen->output, ")");
+}
+
+/* #2894: the array value `e` as the result of a function returning the
+ * array type `at`: a call's result passes through, anything else is put in
+ * the result's struct (emit_array_fill). */
+void emit_array_result_value(CodeGenerator* gen, ASTNode* e, Type* at) {
+    if (e->type == AST_FUNCTION_CALL) {
+        gen->array_call_raw++;
+        generate_expression(gen, e);
+        gen->array_call_raw--;
+        return;
+    }
+    TempSeq s;
+    seq_open(gen, &s);
+    const char* r = seq_let(gen, &s, c_result_type(at), "_ae_rr");
+    fprintf(gen->output, "(%s){0}", c_result_type(at));
+    seq_next(gen, &s);
+    emit_array_fill(gen, cg_internf("%s.a", r), e, at);
+    seq_next(gen, &s);
+    fprintf(gen->output, "%s", r);
+    seq_close(gen, &s);
+}
+
+/* #2921: `name = <array>` for a fixed-size array local or parameter of
+ * owning elements, declared already: the new value is filled into an array
+ * of its own (emit_array_fill), the old one dropped, the new one copied in,
+ * so a value that reads the array reads it whole. */
+void emit_owning_array_store(CodeGenerator* gen, const char* name, Type* at, ASTNode* rhs) {
+    const char* et = get_c_type(at->element_type);
+    fprintf(gen->output, "{ %s _ae_new[%d] = {0}; ", et, at->array_size);
+    emit_array_fill(gen, "_ae_new", rhs, at);
+    fprintf(gen->output, "; %s((%s*)%s); memcpy((void*)%s, (const void*)_ae_new, sizeof(_ae_new)); }\n",
+            own_fn(gen, at, "drop"), et, name, name);
+}
+
+/* #2921: R3's store of `rhs` into the place `lv` of the owning type `t`
+ * (anything but a fixed-size array): the new value is taken, published when
+ * other threads may read the place (#2919), and the value the place held is
+ * dropped once the new one is in. */
+void emit_owning_store(CodeGenerator* gen, const char* lv, Type* t, ASTNode* rhs, int publish) {
+    fprintf(gen->output, "{ %s _ae_old = %s; %s = ", get_c_type(t), lv, lv);
+    emit_value_take(gen, rhs, t);
+    fprintf(gen->output, ";\n");
+    if (publish) own_emit_part(gen, t, lv, OWN_PUBLISH);
+    own_emit_part(gen, t, "_ae_old", OWN_DROP);
+    print_indent(gen);
+    fprintf(gen->output, "}\n");
+}
+
+/* #2921: `o.f = v` for a field of an owning tuple or optional type: the
+ * field takes `v` and drops what it held; through a pointer, other threads
+ * may read it, so what it takes is published (#2919). */
+static int emit_composite_field_store(CodeGenerator* gen, ASTNode* lhs, ASTNode* rhs) {
+    if (!lhs || lhs->type != AST_MEMBER_ACCESS || lhs->child_count != 1 || !lhs->children[0])
+        return 0;
+    Type* ft = lhs->node_type;
+    Type* ot = lhs->children[0]->node_type;
+    if (!ft || (ft->kind != TYPE_TUPLE && ft->kind != TYPE_OPTIONAL) || !own_type_owns(gen, ft) ||
+        !ot || (ot->kind != TYPE_STRUCT && ot->kind != TYPE_PTR)) return 0;
+    const char* sname = ot->kind == TYPE_STRUCT ? ot->struct_name
+                        : ot->element_type && ot->element_type->kind == TYPE_STRUCT
+                        ? ot->element_type->struct_name : NULL;
+    if (!sname || aether_is_c_import_struct(sname)) return 0;
+    print_indent(gen);
+    fprintf(gen->output, "{ %s* _ae_fp = &(", get_c_type(ft));
+    generate_expression(gen, lhs);
+    fprintf(gen->output, ");\n");
+    print_indent(gen);
+    emit_owning_store(gen, "(*_ae_fp)", ft, rhs, ot->kind == TYPE_PTR);
+    print_indent(gen);
+    fprintf(gen->output, "}\n");
+    return 1;
+}
+
+/* #2921: `p[i] = v` through a slice: the element is a place of the array the
+ * slice views, which owns it, so the store takes `v` and drops what the
+ * element held. Returns 0 for any other store. */
+static int emit_slice_element_store(CodeGenerator* gen, ASTNode* lhs, ASTNode* rhs) {
+    if (!lhs || lhs->type != AST_ARRAY_ACCESS || lhs->child_count < 2 || !lhs->children[0])
+        return 0;
+    Type* at = lhs->children[0]->node_type;
+    if (!at || at->kind != TYPE_ARRAY || at->array_size > 0 || !at->element_type ||
+        at->element_type->kind == TYPE_ARRAY || !own_type_owns(gen, at->element_type))
+        return 0;
+    /* A view of C memory (`p as string[]`, an extern's slice) holds what C
+     * reads, a string's characters (R4): no reference is taken there. */
+    if (lhs->children[0]->type == AST_PTR_AS_ARRAY_CAST ||
+        expr_is_c_view_of_slice(gen, lhs->children[0]))
+        return 0;
+    const char* ct = get_c_type(at->element_type);
+    print_indent(gen);
+    fprintf(gen->output, "{ %s* _ae_ep = &(", ct);
+    generate_expression(gen, lhs);
+    fprintf(gen->output, ");\n");
+    print_indent(gen);
+    emit_owning_store(gen, "(*_ae_ep)", at->element_type, rhs, 0);
+    print_indent(gen);
+    fprintf(gen->output, "}\n");
+    return 1;
+}
+
+/* An owning composite a local binding handles itself: a tuple, or an
+ * optional of anything but a string (a `string?` has its own path). */
+static int composite_local_type(CodeGenerator* gen, Type* t) {
+    if (!t || !own_type_owns(gen, t)) return 0;
+    if (t->kind == TYPE_TUPLE) return 1;
+    return t->kind == TYPE_OPTIONAL && t->element_type && t->element_type->kind != TYPE_STRING;
+}
+
+/* #2921: a binding of a local of an owning tuple or optional type. The local owns its
  * parts: a binding takes the value (emit_composite_take) and drops what the
  * local held after the new value is in; every exit of its scope drops what
  * it holds, and a panic does through the journal (#2923). Returns 0 for
@@ -4697,11 +4913,19 @@ static void emit_composite_take(CodeGenerator* gen, ASTNode* e, Type* t) {
 static int emit_composite_local_binding(CodeGenerator* gen, ASTNode* stmt) {
     Type* t = stmt->node_type;
     const char* name = stmt->value;
-    if (!t || t->kind != TYPE_TUPLE || !name || strcmp(name, "_") == 0 ||
-        stmt->child_count == 0 || !stmt->children[0] || !own_type_owns(gen, t) ||
-        is_promoted_capture(gen, name) || is_module_global_var(gen, name) ||
-        is_actor_state_var(gen, name)) return 0;
+    if (!composite_local_type(gen, t) || !name || strcmp(name, "_") == 0 ||
+        stmt->child_count == 0 || !stmt->children[0] ||
+        is_promoted_capture(gen, name) || is_module_global_var(gen, name)) return 0;
     ASTNode* rhs = stmt->children[0];
+    /* An actor's state field: a store into the actor's place, which its
+     * destroy_state drops. */
+    if (is_actor_state_var(gen, name)) {
+        print_indent(gen);
+        emit_owning_store(gen, cg_internf("%s->%s", gen->state_self_alias ? gen->state_self_alias
+                                                                          : "self", name),
+                          t, rhs, 0);
+        return 1;
+    }
     const char* ct = get_c_type(t);
     print_indent(gen);
     if (is_var_declared(gen, name)) {
@@ -4715,16 +4939,29 @@ static int emit_composite_local_binding(CodeGenerator* gen, ASTNode* stmt) {
     emit_composite_take(gen, rhs, t);
     fprintf(gen->output, ";\n");
     mark_var_declared_typed(gen, name, t);
+    push_own_drop(gen, name, t, stmt->line, stmt->column);
+    return 1;
+}
+
+/* #2921: the local `name` of the owning composite type `t` (a tuple, an
+ * optional, a fixed-size array) is journaled where it is declared, and every
+ * exit of the scope drops what it holds (try_emit_own_drop). */
+void push_own_drop(CodeGenerator* gen, const char* name, Type* t, int line, int column) {
     print_indent(gen);
-    fprintf(gen->output, "aether_unwind_track((const void*)&%s, %s);\n", name,
-            own_fn(gen, t, "drop_unwind"));
-    ASTNode* carrier = create_ast_node(AST_EXPRESSION_STATEMENT, NULL, stmt->line, stmt->column);
+    fprintf(gen->output, "aether_unwind_track((const void*)%s%s, %s);\n",
+            t->kind == TYPE_ARRAY ? "" : "&", name, own_fn(gen, t, "drop_unwind"));
+    push_own_drop_carrier(gen, name, t, line, column);
+}
+
+/* The scope-exit drop of push_own_drop alone, for a place whose journal
+ * entry is written where it is set. */
+void push_own_drop_carrier(CodeGenerator* gen, const char* name, Type* t, int line, int column) {
+    ASTNode* carrier = create_ast_node(AST_EXPRESSION_STATEMENT, NULL, line, column);
     if (carrier->annotation) free(carrier->annotation);
     carrier->annotation = heap_strf("own_drop:%s", name);
     carrier->node_type = clone_type(t);
     codegen_own_node(gen, carrier);
     push_defer(gen, carrier);
-    return 1;
 }
 
 /* Struct-reassignment helper (#465). For `<var> = <value>` where `<var>`
@@ -5304,9 +5541,39 @@ static int emitting_owned_opt_string_tuple(CodeGenerator* gen) {
             gen->current_function->type == AST_CLOSURE);
 }
 
+/* #2894: a tuple position of a fixed-size array type: the compound literal
+ * holds it as `{0}` and emit_tuple_array_fills fills it after, C having no
+ * array initialised from an array. */
+static Type* tuple_return_array_at(CodeGenerator* gen, int j) {
+    Type* rt = gen->current_func_return_type;
+    if (!rt || rt->kind != TYPE_TUPLE || j < 0 || j >= rt->tuple_count) return NULL;
+    return is_sized_array_param(rt->tuple_types[j]) ? rt->tuple_types[j] : NULL;
+}
+
+static int tuple_return_has_array(CodeGenerator* gen, ASTNode* stmt) {
+    for (int j = 0; j < stmt->child_count; j++)
+        if (tuple_return_array_at(gen, j)) return 1;
+    return 0;
+}
+
+/* The array positions of the tuple `var` a `return` built. */
+static void emit_tuple_array_fills(CodeGenerator* gen, ASTNode* stmt, const char* var) {
+    for (int j = 0; j < stmt->child_count; j++) {
+        Type* at = tuple_return_array_at(gen, j);
+        if (!at) continue;
+        print_indent(gen);
+        emit_array_fill(gen, cg_internf("%s._%d", var, j), stmt->children[j], at);
+        fprintf(gen->output, ";\n");
+    }
+}
+
 static void emit_tuple_return_position(CodeGenerator* gen, ASTNode* expr,
                                        int j) {
     Type* rt0 = gen ? gen->current_func_return_type : NULL;
+    if (tuple_return_array_at(gen, j)) {
+        fprintf(gen->output, "{0}");   /* #2894: filled after */
+        return;
+    }
     /* #2751: a `string?` slot hands over a string of its own, as a single
      * `string?` result does (#2740): a fresh one or an owning local's as it
      * is, anything borrowed copied. The caller that destructures the call
@@ -5336,8 +5603,16 @@ static void emit_tuple_return_position(CodeGenerator* gen, ASTNode* expr,
                        function_def_returns_heap_at(gen, gen->current_function, j);
         }
     }
+    Type* pt = rt0 && rt0->kind == TYPE_TUPLE && j >= 0 && j < rt0->tuple_count
+               ? rt0->tuple_types[j] : NULL;
     if (pos_heap) {
         emit_uniform_heap_return_expr(gen, expr);
+    } else if (pt && struct_owning_strings(gen, pt) && !gen->in_main_function) {
+        /* R3: each position hands over a value of its own. */
+        emit_struct_take(gen, expr, struct_owning_strings(gen, pt), NULL);
+    } else if (pt && own_type_owns(gen, pt) && pt->kind != TYPE_STRING &&
+               pt->kind != TYPE_FUNCTION && !gen->in_main_function) {
+        emit_composite_take(gen, expr, pt);
     } else {
         generate_expression(gen, expr);
     }
@@ -9383,6 +9658,15 @@ void emit_sized_array_param_copy(CodeGenerator* gen, Type* t, const char* name, 
         push_str_array_release_defer(gen, name, t->array_size, 0, 0);
     }
     fprintf(gen->output, "\n");
+    /* #2921: an array of other owning elements borrows its caller's, as a
+     * struct parameter does; one the body writes into takes references of
+     * its own and drops them at its exit. */
+    if (!str_arr_type(t) && own_type_owns(gen, t) && struct_param_written(scope, name)) {
+        print_indent(gen);
+        fprintf(gen->output, "%s((%s*)%s);\n", own_fn(gen, t, "retain"),
+                get_c_type(t->element_type), name);
+        push_own_drop(gen, name, t, 0, 0);
+    }
 }
 
 /* The function that gives back one reference to a promoted cell of C type
@@ -9955,6 +10239,15 @@ static void emit_hoisted_local_decl(CodeGenerator* gen, Type* var_type,
         if (str_arr_type(var_type) && string_array_owns(gen, gen->hoist_scope_body, name) &&
             !is_promoted_capture(gen, name))
             push_str_array_release_defer(gen, name, var_type->array_size, line, column);
+        else if (!str_arr_type(var_type) && own_type_owns(gen, var_type) &&
+                 !is_promoted_capture(gen, name))
+            push_own_drop(gen, name, var_type, line, column);   /* #2921 */
+        return;
+    }
+    if (composite_local_type(gen, var_type) && !is_promoted_capture(gen, name)) {
+        fprintf(gen->output, "%s %s = {0};\n",
+                volatile_decl_type(vq, get_c_type(var_type)), name);
+        push_own_drop(gen, name, var_type, line, column);   /* #2921 */
         return;
     }
     const char* c_type = get_c_type(var_type);
@@ -10610,22 +10903,6 @@ void hoist_if_branch_vars(CodeGenerator* gen, ASTNode* body) {
 }
 
 
-/* #752: a struct local returned (directly or as a tuple element) hands
- * ownership of its heap-string fields to the caller. Mark it so the
- * function-exit <Struct>_destroy defer is suppressed (try_emit_struct_
- * destroy) — otherwise the fields are freed at callee exit while the
- * returned shallow copy still points at them. Marking a non-struct
- * identifier is harmless (no struct_destroy defer is keyed to it). */
-static void mark_returned_struct_escaped(CodeGenerator* gen, ASTNode* expr) {
-    if (!expr || expr->type != AST_IDENTIFIER || !expr->value || !gen->program) return;
-    Type* t = expr->node_type;
-    if (!t || t->kind != TYPE_STRUCT || !t->struct_name) return;
-    ASTNode* sdef = find_struct_definition_by_name(gen->program, t->struct_name);
-    if (sdef && struct_owns_heap_strings(gen, sdef)) {
-        mark_return_escaped_struct_var(gen, expr->value);
-    }
-}
-
 /* A struct type whose values own heap strings: it has `_heap_<field>`
  * trackers and a `<Name>_destroy`. NULL otherwise. */
 const char* struct_owning_strings(CodeGenerator* gen, Type* t) {
@@ -10749,135 +11026,6 @@ void collect_stmt_struct_temps(CodeGenerator* gen, ASTNode* e,
         }
         collect_stmt_struct_temps(gen, c, nodes, count, cap);
     }
-}
-
-/* `<lvalue>._heap_<f> = 0;` for every string field of `struct_name`: the
- * value at `lvalue` stops owning its strings, which stay with (or move to)
- * whoever else holds them. */
-/* #2525: a closure field has no tracker apart from its value: the env is
- * the reference. Moving the struct out (`retain_closures` 0) clears it so
- * the old holder releases nothing; a parameter, a copy of the caller's
- * value that stays callable (`retain_closures` 1), takes a reference of its
- * own instead, released by its scope-exit destroy or the store that
- * replaces the field, never the caller's. */
-static void emit_struct_disown_fields(CodeGenerator* gen, ASTNode* sdef,
-                                      const char* lvalue, int depth, int retain_closures) {
-    for (int i = 0; sdef && depth < 32 && i < sdef->child_count; i++) {
-        ASTNode* f = sdef->children[i];
-        if (f && f->type == AST_STRUCT_FIELD && f->node_type &&
-            f->node_type->kind == TYPE_STRING) {
-            fprintf(gen->output, "%s._heap_%s = 0; ", lvalue, f->value);
-        }
-        if (struct_field_is_closure(f)) {
-            if (retain_closures) {
-                fprintf(gen->output, "_aether_closure_env_retain(%s.%s.env); ", lvalue, f->value);
-            } else {
-                fprintf(gen->output, "%s.%s.env = (void*)0; ", lvalue, f->value);
-            }
-        }
-        /* #2528: an owned array's elements move with the value, or a
-         * parameter takes copies (strings) or references (closures) of its
-         * own. */
-        int oalen = 0;
-        int oak = struct_field_owned_array(f, &oalen);
-        if (oak == 1) {
-            if (retain_closures) {
-                fprintf(gen->output, "for (int _ai%d = 0; _ai%d < %d; _ai%d++) if (%s.%s[_ai%d]) %s.%s[_ai%d] = aether_uniform_heap_str(%s.%s[_ai%d], 0); ",
-                        depth, depth, oalen, depth, lvalue, f->value, depth, lvalue, f->value, depth, lvalue, f->value, depth);
-            } else {
-                fprintf(gen->output, "for (int _ai%d = 0; _ai%d < %d; _ai%d++) %s.%s[_ai%d] = (const char*)0; ",
-                        depth, depth, oalen, depth, lvalue, f->value, depth);
-            }
-        } else if (oak == 2) {
-            fprintf(gen->output, "for (int _ai%d = 0; _ai%d < %d; _ai%d++) ", depth, depth, oalen, depth);
-            if (retain_closures) {
-                fprintf(gen->output, "_aether_closure_env_retain(%s.%s[_ai%d].env); ", lvalue, f->value, depth);
-            } else {
-                fprintf(gen->output, "%s.%s[_ai%d].env = (void*)0; ", lvalue, f->value, depth);
-            }
-        }
-        /* #2497: a struct field held by value owns its own strings; #2525:
-         * so does each element of a fixed-size array of them. */
-        int alen = 0;
-        ASTNode* inner = owning_struct_field_def_n(gen, f, &alen);
-        if (inner) {
-            if (alen > 0) {
-                fprintf(gen->output, "for (int _ai%d = 0; _ai%d < %d; _ai%d++) { ",
-                        depth, depth, alen, depth);
-                const char* sub = cg_internf("%s.%s[_ai%d]", lvalue, f->value, depth);
-                emit_struct_disown_fields(gen, inner, sub, depth + 1, retain_closures);
-                fprintf(gen->output, "} ");
-            } else {
-                const char* sub = cg_internf("%s.%s", lvalue, f->value);
-                emit_struct_disown_fields(gen, inner, sub, depth + 1, retain_closures);
-            }
-        }
-    }
-}
-
-void emit_struct_disown(CodeGenerator* gen, const char* struct_name, const char* lvalue,
-                        int retain_closures) {
-    ASTNode* sdef = gen->program ? find_struct_definition_by_name(gen->program, struct_name) : NULL;
-    if (!sdef) return;
-    print_indent(gen);
-    emit_struct_disown_fields(gen, sdef, lvalue, 0, retain_closures);
-    fprintf(gen->output, "\n");
-}
-
-/* #2582: the counterpart of emit_struct_disown_fields for a struct parameter
- * its body keeps as a whole value (struct_param_kept). Each string field
- * becomes the parameter's own: a reference taken on a counted string, a copy
- * of anything else (aether_str_capture), with its tracker set. A closure
- * field and an owned array's elements are taken as a borrowing parameter
- * takes them. The parameter then owns all it holds, as a local does:
- * returned, moved or stored, it hands over strings of its own, and its exit
- * destroys what it did not hand over. The caller keeps its argument either
- * way, as for a `string` parameter a function keeps (#2499). */
-static void emit_struct_capture_fields(CodeGenerator* gen, ASTNode* sdef,
-                                       const char* lvalue, int depth) {
-    for (int i = 0; sdef && depth < 32 && i < sdef->child_count; i++) {
-        ASTNode* f = sdef->children[i];
-        if (f && f->type == AST_STRUCT_FIELD && f->node_type &&
-            f->node_type->kind == TYPE_STRING) {
-            fprintf(gen->output, "%s.%s = aether_str_capture(%s.%s); %s._heap_%s = %s.%s != 0; ",
-                    lvalue, f->value, lvalue, f->value, lvalue, f->value, lvalue, f->value);
-        }
-        if (struct_field_is_closure(f)) {
-            fprintf(gen->output, "_aether_closure_env_retain(%s.%s.env); ", lvalue, f->value);
-        }
-        int oalen = 0;
-        int oak = struct_field_owned_array(f, &oalen);
-        if (oak == 1) {
-            fprintf(gen->output, "for (int _ai%d = 0; _ai%d < %d; _ai%d++) if (%s.%s[_ai%d]) %s.%s[_ai%d] = aether_uniform_heap_str(%s.%s[_ai%d], 0); ",
-                    depth, depth, oalen, depth, lvalue, f->value, depth, lvalue, f->value, depth, lvalue, f->value, depth);
-        } else if (oak == 2) {
-            fprintf(gen->output, "for (int _ai%d = 0; _ai%d < %d; _ai%d++) _aether_closure_env_retain(%s.%s[_ai%d].env); ",
-                    depth, depth, oalen, depth, lvalue, f->value, depth);
-        }
-        int alen = 0;
-        ASTNode* inner = owning_struct_field_def_n(gen, f, &alen);
-        if (inner) {
-            if (alen > 0) {
-                fprintf(gen->output, "for (int _ai%d = 0; _ai%d < %d; _ai%d++) { ",
-                        depth, depth, alen, depth);
-                emit_struct_capture_fields(gen, inner,
-                                           cg_internf("%s.%s[_ai%d]", lvalue, f->value, depth),
-                                           depth + 1);
-                fprintf(gen->output, "} ");
-            } else {
-                emit_struct_capture_fields(gen, inner, cg_internf("%s.%s", lvalue, f->value),
-                                           depth + 1);
-            }
-        }
-    }
-}
-
-void emit_struct_capture(CodeGenerator* gen, const char* struct_name, const char* lvalue) {
-    ASTNode* sdef = gen->program ? find_struct_definition_by_name(gen->program, struct_name) : NULL;
-    if (!sdef) return;
-    print_indent(gen);
-    emit_struct_capture_fields(gen, sdef, lvalue, 0);
-    fprintf(gen->output, "\n");
 }
 
 /* #2582: is `n` an access chain (fields, elements) rooted at identifier
@@ -11073,52 +11221,20 @@ static int tuple_call_pos_copied(CodeGenerator* gen, ASTNode* call, int j) {
            call_returns_tuple_view_of_temp(gen, call);
 }
 
-/* #2582: does a body keep its struct parameter `pname` as a whole value?
- * Any use of the bare name counts but these: the object of an access
- * (`p.name`, `p.items[0].tag`, `p.n = 1`) whose value owns no strings, and
- * an argument of a call that hands back nothing of its arguments
- * (call_may_hand_back_args): such a callee borrows it, and keeps what it
- * keeps by its own entry. Returned (directly, in an `if` or `match` arm, a
- * tuple), aliased (`q = p`), stored, captured by a closure, or read as a
- * field or element that owns strings (`p.inner`, `p.items[0]`), the
- * parameter could reach the caller or outlive the call as a view of the
- * caller's argument, whose strings the caller frees. Conservative: a keep
- * the walk cannot rule out costs a copy of each string field on entry,
- * never a free under someone else. */
-static int struct_param_kept_walk(CodeGenerator* gen, ASTNode* n, ASTNode* parent,
-                                  const char* pname, int depth) {
-    if (!n || depth > 512) return n != NULL;
-    int is_access_object = parent && parent->child_count >= 1 && parent->children[0] == n &&
-                           (parent->type == AST_MEMBER_ACCESS || parent->type == AST_ARRAY_ACCESS);
-    if (n->type == AST_IDENTIFIER && n->value && strcmp(n->value, pname) == 0) {
-        if (is_access_object) return 0;   /* judged at the outermost access */
-        if (parent && parent->type == AST_FUNCTION_CALL && !call_may_hand_back_args(gen, parent)) {
-            const char* fn = parent->value ? codegen_normalise_callee(parent->value) : NULL;
-            /* A closure call's slot 0 is the closure invoked, not an argument. */
-            if (!(fn && strcmp(fn, "call") == 0 && parent->child_count > 0 &&
-                  parent->children[0] == n)) return 0;
-        }
-        return 1;
-    }
-    if ((n->type == AST_MEMBER_ACCESS || n->type == AST_ARRAY_ACCESS) && !is_access_object &&
-        access_chain_rooted_at(n, pname) && type_owns_strings(gen, n->node_type)) {
-        /* A part of the parameter used as a value. Stored into
-         * (`p.inner = v`), it is replaced, not kept. */
-        int stored = parent && parent->child_count >= 1 && parent->children[0] == n &&
-                     (parent->type == AST_ASSIGNMENT ||
-                      (parent->type == AST_BINARY_EXPRESSION && parent->value &&
-                       strcmp(parent->value, "=") == 0));
-        if (!stored) return 1;
-    }
-    for (int i = 0; i < n->child_count; i++) {
-        if (struct_param_kept_walk(gen, n->children[i], n, pname, depth + 1)) return 1;
-    }
+/* R3: does `n` write into the struct parameter `pname`: rebind it, or
+ * store into a field or an element of it (`p.f = v`, `p.xs[i] = v`)? Such
+ * a parameter is made a value of its own on entry, so the store releases
+ * nothing of its caller's; any other borrows. */
+int struct_param_written(ASTNode* n, const char* pname) {
+    if (!n || !pname) return 0;
+    if (n->type == AST_VARIABLE_DECLARATION && n->value && strcmp(n->value, pname) == 0) return 1;
+    if (n->type == AST_BINARY_EXPRESSION && n->value && strcmp(n->value, "=") == 0 &&
+        n->child_count >= 1 && n->children[0] &&
+        (n->children[0]->type == AST_MEMBER_ACCESS || n->children[0]->type == AST_ARRAY_ACCESS) &&
+        access_chain_rooted_at(n->children[0], pname)) return 1;
+    for (int i = 0; i < n->child_count; i++)
+        if (struct_param_written(n->children[i], pname)) return 1;
     return 0;
-}
-
-int struct_param_kept(CodeGenerator* gen, ASTNode* body, const char* pname) {
-    if (!body || !pname) return 0;
-    return struct_param_kept_walk(gen, body, NULL, pname, 0);
 }
 
 static void add_value_temp(ASTNode* e, ASTNode*** nodes, int* count, int* cap) {
@@ -11427,6 +11543,13 @@ static void emit_condition(CodeGenerator* gen, ASTNode* cond) {
  * element) is copied with `<Name>_dup`. Storing the view as it was made two
  * owners of every string: `b = a` freed `a`'s strings twice. */
 int struct_take_shape(ASTNode* e) {
+    if (e && e->type == AST_TUPLE_UNWRAP && e->child_count > 0 && e->children[0]) {
+        /* `o!` reads the payload of the optional place `o` (#2921); a
+         * call's `!` hands its value over. */
+        ASTNode* o = e->children[0];
+        return o->type == AST_IDENTIFIER || o->type == AST_MEMBER_ACCESS ||
+               o->type == AST_ARRAY_ACCESS;
+    }
     return e && (e->type == AST_IDENTIFIER || e->type == AST_MEMBER_ACCESS ||
                  e->type == AST_ARRAY_ACCESS || e->type == AST_IF_EXPRESSION);
 }
@@ -11544,20 +11667,6 @@ static void emit_closure_alias_take(CodeGenerator* gen, ASTNode* rhs) {
         return;
     }
     emit_closure_take(gen, rhs);
-}
-
-/* A promoted struct returned by name hands its owned strings to the caller
- * with the returned copy (#752). The cell is still released at the scope
- * exit, and a closure env may hold it longer: it must not free them too. */
-static void disown_returned_promoted_struct(CodeGenerator* gen, ASTNode* expr) {
-    if (!expr || expr->type != AST_IDENTIFIER || !expr->value ||
-        !is_promoted_capture(gen, expr->value)) return;
-    const char* sname = struct_owning_strings(gen, expr->node_type);
-    if (!sname) return;
-    const char* lv = cg_internf("(*%s)", expr->value);
-    /* The cell keeps its closure references and the returned copy takes
-     * ones of its own (#2525): both are released by their holders. */
-    emit_struct_disown(gen, sname, lv, 1);
 }
 
 /* #752 (caller side): a struct local that RECEIVES ownership of a
@@ -12159,6 +12268,11 @@ static int emit_tuple_passthrough_return(CodeGenerator* gen, ASTNode* v) {
 // Otherwise use the uniform-heap-return wrap or the plain expression.
 static void emit_return_value(CodeGenerator* gen, ASTNode* stmt) {
     if (!stmt || stmt->child_count == 0) return;
+    /* #2894: an array result goes back in its struct. */
+    if (!gen->in_main_function && is_sized_array_param(gen->current_func_return_type)) {
+        emit_array_result_value(gen, stmt->children[0], gen->current_func_return_type);
+        return;
+    }
     if (!gen->in_main_function && is_opt_string_type(gen->current_func_return_type)) {
         emit_opt_string_return(gen, stmt->children[0], gen->current_func_return_type);
         return;
@@ -12225,9 +12339,9 @@ static void emit_return_value(CodeGenerator* gen, ASTNode* stmt) {
             return;
         }
     }
-    /* #2497: a struct field or element returned is still owned by its
-     * holder, which may be released at this function's exit; the caller
-     * adopts what it gets, so it gets a copy. */
+    /* R3: a struct returned hands the caller a value of its own: a local
+     * moves out on its last use, anything else (a parameter, a field, an
+     * element, a capture) is copied, an `if` arm by arm. */
     {
         ASTNode* v = stmt->children[0];
         /* A closure body has no declared return type here: its value's
@@ -12235,16 +12349,7 @@ static void emit_return_value(CodeGenerator* gen, ASTNode* stmt) {
         Type* srt = gen->current_func_return_type ? gen->current_func_return_type
                                                    : (v ? v->node_type : NULL);
         const char* rs = struct_owning_strings(gen, srt);
-        /* An `if` is taken arm by arm (#2582): an arm naming a local or a
-         * parameter that owns its strings moves them out, or copies them,
-         * so the exit's destroy of it does not free what is returned. A
-         * struct a closure captured is its environment's, which frees it
-         * when the closure goes: returned, the caller gets a copy. */
-        int captured = v && v->type == AST_IDENTIFIER && v->value &&
-                       (is_env_capture_name(gen, v->value) ||
-                        is_alias_capture_name(gen, v->value));
-        if (rs && v && (v->type == AST_MEMBER_ACCESS || v->type == AST_ARRAY_ACCESS ||
-                        v->type == AST_IF_EXPRESSION || captured)) {
+        if (rs && v) {
             emit_struct_take(gen, v, rs, NULL);
             return;
         }
@@ -12990,7 +13095,6 @@ void generate_statement(CodeGenerator* gen, ASTNode* stmt) {
     gen->trailing_stmt_call = stmt_trailing_call(gen, stmt);
     ValueTemps vt;
     int has_vt = value_temps_open(gen, stmt, &vt);   /* #2582 */
-    int escaped_mark = gen->return_escaped_struct_var_count;
     int order_depth = order_prelude_depth();   /* #2478 */
     int ctl_depth = control_prelude_depth();   /* #2765 */
     if (hoist_ready(gen)) {
@@ -13019,16 +13123,6 @@ void generate_statement(CodeGenerator* gen, ASTNode* stmt) {
     control_prelude_end(ctl_depth);
     order_prelude_end(order_depth);
     if (has_vt) value_temps_close(gen, stmt, &vt);
-    /* #752 marks a struct local a return hands over, so that return's exit
-     * does not destroy it. The mark is that return's alone (#2582): kept for
-     * the rest of the function, it skipped the destroy on every later exit,
-     * so a struct returned on one path leaked on the others. */
-    if (stmt->type == AST_RETURN_STATEMENT) {
-        while (gen->return_escaped_struct_var_count > escaped_mark) {
-            gen->return_escaped_struct_var_count--;
-            free(gen->return_escaped_struct_vars[gen->return_escaped_struct_var_count]);
-        }
-    }
     gen->trailing_stmt_call = saved_trailing;
     emit_observable_store_notify(gen, stmt);
     unwind_track_release(gen);
@@ -13166,6 +13260,87 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                     : cg_internf("_tup%d._%d", tmp_id, j);
                 Type* pos_t = (rhs_type && rhs_type->kind == TYPE_TUPLE &&
                                j < rhs_type->tuple_count) ? rhs_type->tuple_types[j] : NULL;
+
+                /* #2894: an array position. A call's tuple hands its
+                 * elements over, so the local takes them as they are; a
+                 * tuple another place holds keeps its own, and the local
+                 * retains each. Thrown away, a call's are dropped. */
+                if (pos_t && is_sized_array_param(pos_t) && var->value) {
+                    int moved = rhs && rhs->type == AST_FUNCTION_CALL;
+                    const char* src = cg_internf("_tup%d._%d", tmp_id, j);
+                    const char* et = get_c_type(pos_t->element_type);
+                    if (strcmp(var->value, "_") == 0) {
+                        if (moved && own_type_owns(gen, pos_t)) {
+                            print_indent(gen);
+                            fprintf(gen->output, "%s((%s*)%s);\n", own_fn(gen, pos_t, "drop"), et, src);
+                        }
+                        continue;
+                    }
+                    print_indent(gen);
+                    if (!is_var_declared(gen, var->value)) {
+                        fprintf(gen->output, "%s %s[%d] = {0}; ", et, var->value, pos_t->array_size);
+                        emit_array_fill_c(gen, var->value, src, pos_t, !moved);
+                        fprintf(gen->output, ";\n");
+                        mark_var_declared_typed(gen, var->value, pos_t);
+                        if (own_type_owns(gen, pos_t))
+                            push_own_drop(gen, var->value, pos_t, var->line, var->column);
+                    } else if (own_type_owns(gen, pos_t)) {
+                        fprintf(gen->output, "{ %s _ae_new[%d]; ", et, pos_t->array_size);
+                        emit_array_fill_c(gen, "_ae_new", src, pos_t, !moved);
+                        fprintf(gen->output, "; %s((%s*)%s); memcpy((void*)%s, (const void*)_ae_new, sizeof(_ae_new)); }\n",
+                                own_fn(gen, pos_t, "drop"), et, var->value, var->value);
+                    } else {
+                        emit_array_fill_c(gen, var->value, src, pos_t, 0);
+                        fprintf(gen->output, ";\n");
+                    }
+                    continue;
+                }
+
+                /* #2921: a struct, tuple or optional position that owns,
+                 * as an array position is: a call's tuple hands the part
+                 * over, a tuple another place holds keeps it and the local
+                 * takes a reference of its own. */
+                if (pos_t && var->value && own_type_owns(gen, pos_t) &&
+                    (pos_t->kind == TYPE_STRUCT || pos_t->kind == TYPE_TUPLE ||
+                     (pos_t->kind == TYPE_OPTIONAL && !is_opt_string_type(pos_t))) &&
+                    !is_promoted_capture(gen, var->value) &&
+                    !is_module_global_var(gen, var->value) &&
+                    !is_actor_state_var(gen, var->value)) {
+                    int moved = rhs && rhs->type == AST_FUNCTION_CALL;
+                    const char* src = cg_internf("_tup%d._%d", tmp_id, j);
+                    const char* ct = get_c_type(pos_t);
+                    const char* sname = struct_owning_strings(gen, pos_t);
+                    const char* drop = sname ? cg_internf("%s_destroy", sname)
+                                             : own_fn(gen, pos_t, "drop");
+                    if (strcmp(var->value, "_") == 0) {
+                        if (moved) {
+                            print_indent(gen);
+                            fprintf(gen->output, "%s(&%s);\n", drop, src);
+                        }
+                        continue;
+                    }
+                    const char* taken = moved ? src
+                                        : sname ? cg_internf("%s_dup(%s)", sname, src)
+                                        : NULL;
+                    print_indent(gen);
+                    if (!is_var_declared(gen, var->value)) {
+                        fprintf(gen->output, "%s %s = %s;", ct, var->value, taken ? taken : src);
+                        if (!taken) fprintf(gen->output, " %s(&%s);", own_fn(gen, pos_t, "retain"),
+                                            var->value);
+                        fprintf(gen->output, "\n");
+                        mark_var_declared_typed(gen, var->value, pos_t);
+                        if (sname) push_struct_destroy_defer(gen, var->value, pos_t, var->line,
+                                                             var->column);
+                        else push_own_drop(gen, var->value, pos_t, var->line, var->column);
+                    } else {
+                        fprintf(gen->output, "{ %s _ae_old = %s; %s = %s;", ct, var->value,
+                                var->value, taken ? taken : src);
+                        if (!taken) fprintf(gen->output, " %s(&%s);", own_fn(gen, pos_t, "retain"),
+                                            var->value);
+                        fprintf(gen->output, " %s(&_ae_old); }\n", drop);
+                    }
+                    continue;
+                }
 
                 /* `_` discard slot. If the position is a heap value,
                  * the destructure target has no name to free against
@@ -13630,6 +13805,20 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                     fprintf(gen->output, "_aether_closure_env_release((");
                     generate_expression(gen, drhs);
                     fprintf(gen->output, ").env);\n");
+                } else if ((drhs->type == AST_STRUCT_LITERAL || drhs->type == AST_FUNCTION_CALL) &&
+                           drhs->node_type && drhs->node_type->kind != TYPE_STRING &&
+                           drhs->node_type->kind != TYPE_FUNCTION &&
+                           drhs->node_type->kind != TYPE_ARRAY &&
+                           own_type_owns(gen, drhs->node_type)) {
+                    /* #2921: a struct or composite handed over and thrown
+                     * away is dropped. */
+                    Type* dt = drhs->node_type;
+                    const char* ds = struct_owning_strings(gen, dt);
+                    fprintf(gen->output, "{ %s _od = ", get_c_type(dt));
+                    if (ds) generate_expression(gen, drhs);
+                    else emit_composite_take(gen, drhs, dt);
+                    fprintf(gen->output, "; %s(&_od); }\n",
+                            ds ? cg_internf("%s_destroy", ds) : own_fn(gen, dt, "drop"));
                 } else {
                     fprintf(gen->output, "(void)(");
                     generate_expression(gen, drhs);
@@ -13990,16 +14179,12 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                         fprintf(gen->output, "; _aether_closure_env_release(_ae_old); }\n");
                         break;
                     }
-                    /* A struct that owns strings is taken as a string is
-                     * above: a local or parameter moved on its last use or
-                     * copied, a view copied, a fresh one adopted. Stored as
-                     * it was, the global shared strings its source freed at
-                     * its exit. */
-                    const char* gsname = grhs ? struct_owning_strings(gen, grhs->node_type) : NULL;
-                    if (gsname) {
-                        fprintf(gen->output, "%s = ", stmt->value);
-                        emit_struct_take(gen, grhs, gsname, NULL);
-                        fprintf(gen->output, ";\n");
+                    /* R3: a struct, tuple or optional that owns is stored
+                     * as a string is above, the old value dropped. */
+                    Type* gvt = gt ? gt : (grhs ? grhs->node_type : NULL);
+                    if (grhs && gvt && gvt->kind != TYPE_ARRAY && gvt->kind != TYPE_STRING &&
+                        gvt->kind != TYPE_FUNCTION && own_type_owns(gen, gvt)) {
+                        emit_owning_store(gen, stmt->value, gvt, grhs, 1);
                         break;
                     }
                     fprintf(gen->output, "%s", stmt->value);
@@ -14109,6 +14294,14 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                             emit_owned_str_array_store(gen, stmt, hoisted);   /* #2618 */
                             break;
                         }
+                        /* #2921: an array of owning elements takes each
+                         * element of the literal into a new array, then drops
+                         * the old one and copies the new one in: an element
+                         * that reads the array reads it whole. */
+                        if (own_type_owns(gen, hoisted)) {
+                            emit_owning_array_store(gen, stmt->value, hoisted, lit);
+                            break;
+                        }
                         /* #2478: the literal is evaluated before it is
                          * stored, in source order: an element that reads
                          * the array sees it from before the stores. */
@@ -14134,6 +14327,18 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                     if (stmt->child_count > 0 && stmt->children[0] &&
                         hoisted && is_sized_array_param(hoisted) &&
                         is_sized_array_param(stmt->children[0]->node_type)) {
+                        /* #2894, #2921: an array of owning elements, or a
+                         * call's result, takes the new value whole. */
+                        if (own_type_owns(gen, hoisted) ||
+                            stmt->children[0]->type == AST_FUNCTION_CALL) {
+                            if (own_type_owns(gen, hoisted)) {
+                                emit_owning_array_store(gen, stmt->value, hoisted, stmt->children[0]);
+                            } else {
+                                emit_array_fill(gen, stmt->value, stmt->children[0], hoisted);
+                                fprintf(gen->output, ";\n");
+                            }
+                            break;
+                        }
                         /* #2528: an owning local array replaces each element
                          * with a copy of the source's (a self-copy keeps
                          * every element). */
@@ -14243,7 +14448,7 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                                 stmt->value,
                                 (srhs_owning || srhs_alias) ? 1 : 0);
                     } else if (var_is_string && stmt->child_count > 0 && var_escaped &&
-                               !local_take_is_view(gen, stmt->children[0])) {
+                               !string_take_is_view(gen, stmt->children[0])) {
                         /* Escaped-LHS bare assignment. Wrapper-free is
                          * suppressed because the var's old value is
                          * potentially stored by a recipient (list_add,
@@ -14478,7 +14683,7 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                         }
                     }
                 } else if (stmt->child_count > 0 &&
-                           local_take_is_view(gen, stmt->children[0])) {
+                           string_take_is_view(gen, stmt->children[0])) {
                     /* #2461: first binding of a string local (one the
                      * function-entry hoist did not declare) to a view: declare
                      * it and its tracker, then take the value as the
@@ -14793,20 +14998,16 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                     fprintf(gen->output, ";\n");
                     unwind_track_release(gen);
                     if (decl_array_src) {
+                        /* #2894, #2921: the array takes the value whole (a
+                         * call's result moved out, another array's elements
+                         * retained), and drops what it holds at its exit. */
                         print_indent(gen);
-                        if (decl_str_array) {
-                            /* An owning array takes each element as a
-                             * whole-array store does (_aether_str_elem_dup). */
-                            fprintf(gen->output, "{ const char* const* _ae_src = (const char* const*)(");
-                            generate_expression(gen, decl_array_src);
-                            fprintf(gen->output,
-                                    "); for (int _ae_k = 0; _ae_k < %d; _ae_k++) %s[_ae_k] = _aether_str_elem_dup(_ae_src[_ae_k]); }\n",
-                                    stmt->node_type->array_size, stmt->value);
-                        } else {
-                            fprintf(gen->output, "memcpy((void*)%s, (const void*)(", stmt->value);
-                            generate_expression(gen, decl_array_src);
-                            fprintf(gen->output, "), sizeof(%s));\n", stmt->value);
-                        }
+                        emit_array_fill(gen, stmt->value, decl_array_src, stmt->node_type);
+                        fprintf(gen->output, ";\n");
+                        if (!decl_str_array && own_type_owns(gen, stmt->node_type) &&
+                            !is_promoted_capture(gen, stmt->value))
+                            push_own_drop(gen, stmt->value, stmt->node_type, stmt->line,
+                                          stmt->column);
                     }
                     // Emit heap-ownership flag for string variables.
                     // This flag is checked at reassignment to avoid freeing
@@ -16222,11 +16423,11 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                 Type* ret_type = stmt->children[0]->node_type;
                 const char* ret_c_type =
                     (ret_type && ret_type->kind != TYPE_VOID && ret_type->kind != TYPE_UNKNOWN)
-                    ? get_c_type(ret_type)
+                    ? c_result_type(ret_type)
                     : (gen->current_func_return_type &&
                        gen->current_func_return_type->kind != TYPE_VOID &&
                        gen->current_func_return_type->kind != TYPE_UNKNOWN)
-                        ? get_c_type(gen->current_func_return_type)
+                        ? c_result_type(gen->current_func_return_type)
                         : "int";
                 print_indent(gen);
                 fprintf(gen->output, "{\n");
@@ -16235,8 +16436,6 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                 fprintf(gen->output, "%s result = ", ret_c_type);
                 emit_return_value(gen, stmt);   // #340: coerces into `T?`
                 fprintf(gen->output, ";\n");
-                mark_returned_struct_escaped(gen, stmt->children[0]);
-                disown_returned_promoted_struct(gen, stmt->children[0]);
                 emit_contract_postconditions(gen, gen->current_function);
                 /* Drain function-level defers BEFORE returning so
                  * cleanup happens between the postcondition check
@@ -16330,6 +16529,7 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                         emit_tuple_return_position(gen, stmt->children[j], j);
                     }
                     fprintf(gen->output, "};\n");
+                    emit_tuple_array_fills(gen, stmt, "_builder_ret");
                     if (owned) free_type(tuple);
                     /* #752: any struct element of the returned tuple
                      * escapes — suppress its exit-time `<Struct>_destroy`
@@ -16340,8 +16540,6 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                      * #759 flag-zeroing approach, which only neutered the
                      * callee's destroy and left the caller-side leak. */
                     for (int j = 0; j < stmt->child_count; j++) {
-                        mark_returned_struct_escaped(gen, stmt->children[j]);
-                        disown_returned_promoted_struct(gen, stmt->children[j]);
                     }
                     // Multi-value returns can't be returning a closure
                     // (closures aren't tuples), so the closure-of-captures
@@ -16414,7 +16612,7 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                                      ? fn_ret
                                      : stmt->children[0]->node_type;
                     const char* ret_c_type = (ret_type && ret_type->kind != TYPE_VOID && ret_type->kind != TYPE_UNKNOWN)
-                                             ? get_c_type(ret_type) : "int";
+                                             ? c_result_type(ret_type) : "int";
                     fprintf(gen->output, "%s _builder_ret = ", ret_c_type);
                     /* Uniform-heap return-escape contract: heap-returning
                      * functions route every return through
@@ -16434,8 +16632,6 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                     /* #752: a directly-returned struct escapes — suppress
                      * its exit-time destroy (heap-string fields now owned
                      * by the caller). */
-                    mark_returned_struct_escaped(gen, stmt->children[0]);
-                    disown_returned_promoted_struct(gen, stmt->children[0]);
                     /* #1140: a single-value `return v` is a SUCCESS exit — in a
                      * `T!` function it is wrapped as `{._0 = v, ._1 = ""}`, and
                      * in an ordinary function there is no error channel at all.
@@ -16503,12 +16699,18 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                     const char* tname = get_c_type(tuple);
                     /* #2478: the positions are evaluated left to right. */
                     order_prelude_begin(gen, stmt->children, stmt->child_count, NULL);
-                    fprintf(gen->output, "return (%s){", tname);
+                    int arrays = tuple_return_has_array(gen, stmt);
+                    if (arrays) fprintf(gen->output, "{ %s _ae_tr = (%s){", tname, tname);
+                    else fprintf(gen->output, "return (%s){", tname);
                     for (int j = 0; j < stmt->child_count; j++) {
                         if (j > 0) fprintf(gen->output, ", ");
                         emit_tuple_return_position(gen, stmt->children[j], j);
                     }
                     fprintf(gen->output, "};\n");
+                    if (arrays) {
+                        emit_tuple_array_fills(gen, stmt, "_ae_tr");
+                        print_line(gen, "return _ae_tr; }");
+                    }
                     if (owned) free_type(tuple);
                 } else {
                     /* Issue #501: drain try frames before the
@@ -17799,7 +18001,6 @@ static const char* emit_field_owner_stmt(CodeGenerator* gen, ASTNode* obj) {
 const char* emit_string_field_handover_ahead(CodeGenerator* gen, ASTNode* e, int kind,
                                              TempSeq* s, const char* value) {
     const char* own = cg_internf("%s_own", value);
-    const char* test = cg_internf("aether_str_is_counted(%s)", value);
     if (s) {
         const char* fo = emit_field_owner(gen, e->children[0], s);
         if (kind == STRING_FIELD_TAKEN) {
@@ -17820,9 +18021,9 @@ const char* emit_string_field_handover_ahead(CodeGenerator* gen, ASTNode* e, int
         fprintf(gen->output, "%s->%s", fo, e->value);
         seq_next(gen, s);
         seq_let_named(gen, s, "int", own);
-        fprintf(gen->output, "%s", test);
+        fprintf(gen->output, "1");
         seq_next(gen, s);
-        fprintf(gen->output, "%s ? (void)(%s->_heap_%s = 0) : (void)0", own, fo, e->value);
+        fprintf(gen->output, "%s->%s = (const char*)0", fo, e->value);
         seq_next(gen, s);
         return own;
     }
@@ -17845,11 +18046,8 @@ const char* emit_string_field_handover_ahead(CodeGenerator* gen, ASTNode* e, int
                 value, fo, e->value, own);
         return own;
     }
-    fprintf(gen->output, "%s = %s->%s;\n", value, fo, e->value);
-    print_indent(gen);
-    fprintf(gen->output, "%s = %s;\n", own, test);
-    print_indent(gen);
-    fprintf(gen->output, "if (%s) %s->_heap_%s = 0;\n", own, fo, e->value);
+    fprintf(gen->output, "%s = %s->%s; %s = 1; %s->%s = (const char*)0;\n", value, fo, e->value,
+            own, fo, e->value);
     return own;
 }
 
@@ -17893,8 +18091,7 @@ void emit_string_field_handoff(CodeGenerator* gen, ASTNode* e) {
     const char* fv = seq_let(gen, &s, "const char*", "_ae_fv");
     fprintf(gen->output, "%s->%s", fo, e->value);
     seq_next(gen, &s);
-    fprintf(gen->output, "aether_str_is_counted(%s) ? (void)(%s->_heap_%s = 0) : (void)0",
-            fv, fo, e->value);
+    fprintf(gen->output, "%s->%s = (const char*)0", fo, e->value);
     seq_next(gen, &s);
     fprintf(gen->output, "%s", fv);
     seq_close(gen, &s);
@@ -17944,39 +18141,18 @@ void emit_string_element_free(CodeGenerator* gen, ASTNode* e) {
     seq_close(gen, &s);
 }
 
-/* `string.free(s.f)` / `string.release(s.f)` / `release(s.f)`: what the
- * field owns goes through the shape-aware free, as for a tracked local,
- * wherever its tracker can be read (a struct value or any box, #2369), and
- * the field is left empty, owning nothing. Elsewhere (a struct value that is
- * not a local's) the runtime call frees a counted AetherString, which then
- * leaves the field; a plain buffer it cannot free stays the field's own,
- * as before, for the struct's destructor. */
-void emit_string_field_free(CodeGenerator* gen, ASTNode* e, const char* runtime_free) {
-    ASTNode* obj = e->children[0];
-    int trusted = obj->node_type->kind == TYPE_PTR || value_path_trackers_are_initialised(gen, obj);
-    const char* f = e->value;
+/* `string.free(s.f)` / `string.release(s.f)` / `release(s.f)`: the field
+ * gives back what it holds and is left empty, so neither the next store
+ * into it nor the struct's destroy releases it again. */
+void emit_string_field_free(CodeGenerator* gen, ASTNode* e) {
     TempSeq s;
     seq_open_ordered(gen, &s, 1);
-    const char* fo = emit_field_owner(gen, obj, &s);
-    if (trusted) {
-        fprintf(gen->output,
-                "%s->_heap_%s ? (void)aether_heap_str_free((void*)%s->%s) : (void)%s(%s->%s)",
-                fo, f, fo, f, runtime_free, fo, f);
-        seq_next(gen, &s);
-        fprintf(gen->output, "%s->%s = NULL", fo, f);
-        seq_next(gen, &s);
-        fprintf(gen->output, "%s->_heap_%s = 0", fo, f);
-    } else {
-        const char* fv = seq_let(gen, &s, "const char*", "_ae_fv");
-        fprintf(gen->output, "%s->%s", fo, f);
-        seq_next(gen, &s);
-        const char* fc = seq_let(gen, &s, "int", "_ae_fc");
-        fprintf(gen->output, "aether_str_is_counted(%s)", fv);
-        seq_next(gen, &s);
-        fprintf(gen->output, "%s(%s)", runtime_free, fv);
-        seq_next(gen, &s);
-        fprintf(gen->output, "%s ? (void)(%s->%s = NULL, %s->_heap_%s = 0) : (void)0",
-                fc, fo, f, fo, f);
-    }
+    const char* fo = emit_field_owner(gen, e->children[0], &s);
+    const char* fv = seq_let(gen, &s, "const char*", "_ae_fv");
+    fprintf(gen->output, "%s->%s", fo, e->value);
+    seq_next(gen, &s);
+    fprintf(gen->output, "%s->%s = (const char*)0", fo, e->value);
+    seq_next(gen, &s);
+    fprintf(gen->output, "aether_heap_str_free(%s)", fv);
     seq_close(gen, &s);
 }

@@ -263,12 +263,6 @@ static void schema_emit_table(CodeGenerator* gen, ASTNode* sd) {
             schema_emit_name(gen, spelled);
             fprintf(gen->output, ", %d, %d, %d, offsetof(struct %s, %s), sizeof(((struct %s*)0)->%s), ",
                     kind, elem_kind, alen, S, f->value, S, f->value);
-            /* A string field's `_heap_<name>` ownership tracker sits right
-             * after it in every Aether struct (codegen_func.c). */
-            if (t && t->kind == TYPE_STRING)
-                fprintf(gen->output, "(long)offsetof(struct %s, _heap_%s), ", S, f->value);
-            else
-                fprintf(gen->output, "-1L, ");
             if (nested) fprintf(gen->output, "_ae_schema_%s, ", nested->value);
             else fprintf(gen->output, "NULL, ");
             if (nattr > 0) fprintf(gen->output, "%d, _ae_schema_%s_a%d}", nattr, S, fi);

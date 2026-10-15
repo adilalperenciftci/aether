@@ -827,8 +827,8 @@ TEST(codegen_derive_schema_emits_a_static_table) {
     /* A struct reached by value gets its own table, named by its getter. */
     ASSERT_TRUE(strstr(buf, "static const AetherSchema* _ae_schema_Vec(void) {") != NULL);
     ASSERT_TRUE(strstr(buf, "\"pos\", \"Vec\", 15, 0, 0, offsetof(struct Bob, pos)") != NULL);
-    /* A string names its ownership flag. */
-    ASSERT_TRUE(strstr(buf, "(long)offsetof(struct Bob, _heap_name)") != NULL);
+    /* A string field is its own pointer: there is no ownership flag. */
+    ASSERT_TRUE(strstr(buf, "\"name\", \"string\", 13, 0, 0, offsetof(struct Bob, name), sizeof(((struct Bob*)0)->name), NULL, 0, NULL}") != NULL);
     /* T_schema() returns the table's address. */
     ASSERT_TRUE(strstr(buf, "((void*)_ae_schema_Bob())") != NULL);
     free(buf);

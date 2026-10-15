@@ -717,8 +717,6 @@ CodeGenerator* create_code_generator(FILE* output) {
     gen->cell_owns = NULL;
     gen->cell_owns_count = 0;
     gen->cell_owns_cap = 0;
-    gen->return_escaped_struct_vars = NULL;
-    gen->return_escaped_struct_var_count = 0;
     // *StringSeq ownership tracking — MUST be zero-initialised here:
     // the CodeGenerator is field-initialised (not calloc'd), so leaving
     // these uninitialised made the first clear_seq_vars() free garbage
@@ -1259,14 +1257,6 @@ void clear_escaped_string_vars(CodeGenerator* gen) {
     }
     gen->escaped_string_vars = NULL;
     gen->escaped_string_var_count = 0;
-    if (gen->return_escaped_struct_vars) {
-        for (int i = 0; i < gen->return_escaped_struct_var_count; i++) {
-            free(gen->return_escaped_struct_vars[i]);
-        }
-        free(gen->return_escaped_struct_vars);
-    }
-    gen->return_escaped_struct_vars = NULL;
-    gen->return_escaped_struct_var_count = 0;
 }
 
 /* ---- *StringSeq local registry (parallel to heap_string_vars) ----
@@ -1377,30 +1367,6 @@ void clear_opt_str_vars(CodeGenerator* gen) {
     }
     gen->escaped_opt_str_vars = NULL;
     gen->escaped_opt_str_var_count = 0;
-}
-
-/* #752: a struct local returned (directly or as a tuple element)
- * transfers ownership of its heap-string fields to the caller, so the
- * function-exit <Struct>_destroy defer must NOT fire for it. */
-int is_return_escaped_struct_var(CodeGenerator* gen, const char* var_name) {
-    if (!gen || !var_name) return 0;
-    for (int i = 0; i < gen->return_escaped_struct_var_count; i++) {
-        if (strcmp(gen->return_escaped_struct_vars[i], var_name) == 0) {
-            return 1;
-        }
-    }
-    return 0;
-}
-
-void mark_return_escaped_struct_var(CodeGenerator* gen, const char* var_name) {
-    if (!gen || !var_name) return;
-    if (is_return_escaped_struct_var(gen, var_name)) return;
-    char** new_vars = realloc(gen->return_escaped_struct_vars,
-                              sizeof(char*) * (gen->return_escaped_struct_var_count + 1));
-    if (!new_vars) return;
-    gen->return_escaped_struct_vars = new_vars;
-    gen->return_escaped_struct_vars[gen->return_escaped_struct_var_count] = strdup(var_name);
-    gen->return_escaped_struct_var_count++;
 }
 
 // Normalise a callee name's dots to underscores. Used by every
@@ -1803,12 +1769,6 @@ static int try_emit_struct_destroy(CodeGenerator* gen, ASTNode* deferred) {
     /* #2923: the place leaves the unwind journal on every exit. */
     print_indent(gen);
     fprintf(gen->output, "aether_unwind_forget((const void*)&%s);\n", var_buf);
-    /* #752: suppress the destroy when this struct escaped via a return —
-     * its heap-string fields now belong to the caller. Consume the defer
-     * (return 1) so it is not freed at callee exit. */
-    if (is_return_escaped_struct_var(gen, var_buf)) {
-        return 1;
-    }
     /* A local a `try` body writes is volatile (#2690). */
     print_indent(gen);
     fprintf(gen->output,
@@ -1827,8 +1787,13 @@ static int try_emit_own_drop(CodeGenerator* gen, ASTNode* deferred) {
     print_indent(gen);
     fprintf(gen->output, "aether_unwind_forget((const void*)&%s);\n", name);
     print_indent(gen);
-    fprintf(gen->output, "/* deferred */ %s((%s*)&%s);\n",
-            own_fn(gen, deferred->node_type, "drop"), get_c_type(deferred->node_type), name);
+    Type* t = deferred->node_type;
+    if (t->kind == TYPE_ARRAY)
+        fprintf(gen->output, "/* deferred */ %s((%s*)%s);\n", own_fn(gen, t, "drop"),
+                get_c_type(t->element_type), name);
+    else
+        fprintf(gen->output, "/* deferred */ %s((%s*)&%s);\n", own_fn(gen, t, "drop"),
+                get_c_type(t), name);
     return 1;
 }
 
@@ -1852,7 +1817,6 @@ static int try_emit_struct_array_destroy(CodeGenerator* gen, ASTNode* deferred) 
     if (slen == 0) return 0;
     const char* struct_buf = cg_intern_n(sep + 1, slen);
     int n = atoi(sep2 + 1);
-    if (is_return_escaped_struct_var(gen, var_buf)) return 1;
     print_indent(gen);
     fprintf(gen->output,
             "/* deferred */ for (int _ae_k = 0; _ae_k < %d; _ae_k++) %s(&%s[_ae_k]);\n",
@@ -2444,7 +2408,7 @@ void emit_message_to_header(CodeGenerator* gen, ASTNode* msg_def) {
 }
 
 /* The AST of the message named `name` (exported or not), or NULL. */
-static ASTNode* find_message_definition(ASTNode* program, const char* name) {
+ASTNode* find_message_definition(ASTNode* program, const char* name) {
     if (!program || !name) return NULL;
     for (int i = 0; i < program->child_count; i++) {
         ASTNode* def = program->children[i];
@@ -2457,6 +2421,18 @@ static ASTNode* find_message_definition(ASTNode* program, const char* name) {
         }
     }
     return NULL;
+}
+
+/* #2921: does message `name` hold anything it owns: a string, a closure, a
+ * struct or composite that owns? Its <Msg>_release_fields drops those once
+ * the handler is done. */
+int message_owns_fields(CodeGenerator* gen, const char* name) {
+    ASTNode* def = gen->program ? find_message_definition(gen->program, name) : NULL;
+    for (int i = 0; def && i < def->child_count; i++) {
+        ASTNode* f = def->children[i];
+        if (f && f->type == AST_MESSAGE_FIELD && own_type_owns(gen, f->node_type)) return 1;
+    }
+    return 0;
 }
 
 void emit_actor_to_header(CodeGenerator* gen, ASTNode* actor) {
@@ -3638,7 +3614,7 @@ static void emit_lib_alias_stubs(CodeGenerator* gen, ASTNode* program) {
         int returns = 1;
         if (unannotated && has_return_value(b)) fprintf(gen->output, "int");
         else if (unannotated) { fprintf(gen->output, "void"); returns = 0; }
-        else generate_type(gen, rt);
+        else fprintf(gen->output, "%s", c_result_type(rt));
         fprintf(gen->output, " %s(", sym);
         int np = 0;
         for (int p = 0; p < b->child_count; p++) {
@@ -5243,6 +5219,53 @@ void ensure_tuple_typedef(CodeGenerator* gen, Type* type) {
         gen->tuple_type_names = aether_xrealloc(gen->tuple_type_names, gen->tuple_type_capacity * sizeof(char*));
     }
     gen->tuple_type_names[gen->tuple_type_count++] = strdup(name);
+}
+
+/* #2894: C has no array results, so a function returning a fixed-size
+ * array returns it in a struct of its own, `typedef struct { E a[N]; } W;`.
+ * The C type a result of type `t` is spelled with: that struct for an
+ * array, the type's own spelling for anything else. */
+const char* c_result_type(Type* t) {
+    if (!t || t->kind != TYPE_ARRAY || t->array_size <= 0) return get_c_type(t);
+    const char* e = get_c_type(t->element_type);
+    size_t n = strlen(e);
+    char* id = (char*)aether_xrealloc(NULL, n + 1);
+    for (size_t i = 0; i < n; i++) {
+        char c = e[i];
+        int ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
+                 c == '_';
+        id[i] = ok ? c : '_';
+    }
+    const char* name = cg_internf("_ae_res_%d_%.*s", t->array_size, (int)n, id);
+    free(id);
+    return name;
+}
+
+static void ensure_result_typedef(CodeGenerator* gen, Type* t) {
+    if (!t || t->kind != TYPE_ARRAY || t->array_size <= 0) return;
+    const char* name = c_result_type(t);
+    for (int i = 0; i < gen->tuple_type_count; i++)
+        if (strcmp(gen->tuple_type_names[i], name) == 0) return;
+    Type* e = t->element_type;
+    if (e && e->kind == TYPE_TUPLE) ensure_tuple_typedef(gen, e);
+    else if (e && e->kind == TYPE_OPTIONAL) ensure_optional_typedef(gen, e);
+    fprintf(gen->output, "typedef struct { %s; } %s;\n", c_member_decl(t, "a"), name);
+    if (gen->tuple_type_count >= gen->tuple_type_capacity) {
+        gen->tuple_type_capacity = gen->tuple_type_capacity ? gen->tuple_type_capacity * 2 : 8;
+        gen->tuple_type_names = aether_xrealloc(gen->tuple_type_names,
+                                                gen->tuple_type_capacity * sizeof(char*));
+    }
+    gen->tuple_type_names[gen->tuple_type_count++] = strdup(name);
+}
+
+/* Every array a function returns (closures and function types return
+ * none: the type checker refuses them). */
+void collect_result_typedefs(CodeGenerator* gen, ASTNode* node) {
+    if (!node) return;
+    if ((node->type == AST_FUNCTION_DEFINITION || node->type == AST_BUILDER_FUNCTION) &&
+        node->node_type)
+        ensure_result_typedef(gen, node->node_type);
+    for (int i = 0; i < node->child_count; i++) collect_result_typedefs(gen, node->children[i]);
 }
 
 // #340: emit `typedef struct { bool has; <T> val; } ae_opt_<T>;` once per
@@ -7051,7 +7074,7 @@ static int emit_trust_return_type(CodeGenerator* gen, ASTNode* def) {
         fprintf(gen->output, "void");
         return 0;
     }
-    generate_type(gen, ret_type);
+    fprintf(gen->output, "%s", c_result_type(ret_type));
     return 1;
 }
 
@@ -9170,6 +9193,10 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     // here matches what a user would write in a hand-rolled .c file:
     // typedef + full body up top, function bodies below.
     //
+    // #2921: every composite type a place can hold, registered before a
+    // struct's functions call the retain and drop of its fields.
+    own_collect_types(gen, program);
+
     // Emitted in field-dependency order, not in the order the modules were
     // merged (#1856): a struct is written after every type it holds by
     // value, directly, as a fixed-size array's elements (#2432), as an
@@ -9281,8 +9308,10 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     // #340: emit optional typedefs (after struct bodies, before fn fwd-decls).
     collect_optional_typedefs(gen, program);
 
+    // #2894: the struct an array result is returned in.
+    collect_result_typedefs(gen, program);
+
     // #2921: the retain and drop of every composite type a place can hold.
-    own_collect_types(gen, program);
     emit_own_ops(gen);
 
     // #2298: `@derive(schema)` field tables. Here because offsetof/sizeof
@@ -9749,19 +9778,7 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
                      * fields; the codegen_actor.c dispatch skips
                      * the call in that case via
                      * `message_has_string_field`. */
-                    int msg_has_string_field = 0;
-                    for (int fi = 0; fi < child->child_count; fi++) {
-                        ASTNode* f = child->children[fi];
-                        /* #2525: a closure field holds a reference to its
-                         * env, released with the message's strings. */
-                        if (f && f->type == AST_MESSAGE_FIELD && f->node_type &&
-                            (f->node_type->kind == TYPE_STRING ||
-                             (f->node_type->kind == TYPE_FUNCTION && !f->node_type->is_fnptr))) {
-                            msg_has_string_field = 1;
-                            break;
-                        }
-                    }
-                    if (msg_has_string_field) {
+                    if (message_owns_fields(gen, child->value)) {
                         /* Forward-declare `string_release` here so the
                          * generated release_fields function compiles
                          * even on tests that don't `import std.string`
@@ -9776,21 +9793,12 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
                                    child->value, child->value);
                         indent(gen);
                         print_line(gen, "if (!m) return;");
+                        /* Each field the message owns: a string the sender
+                         * copied, a closure or struct it took (#2525, #2921). */
                         for (int fi = 0; fi < child->child_count; fi++) {
                             ASTNode* f = child->children[fi];
-                            if (f && f->type == AST_MESSAGE_FIELD &&
-                                f->node_type && f->node_type->kind == TYPE_STRING) {
-                                print_line(gen, "if (m->%s) { string_release(m->%s); m->%s = (const char*)0; }",
-                                           f->value, f->value, f->value);
-                            }
-                            if (f && f->type == AST_MESSAGE_FIELD && f->node_type &&
-                                f->node_type->kind == TYPE_FUNCTION && !f->node_type->is_fnptr) {
-                                /* #2525: the sender's take gave the message
-                                 * its own reference; a handler that keeps
-                                 * the closure in state retained its own. */
-                                print_line(gen, "if (m->%s.env) { _aether_closure_env_release(m->%s.env); m->%s.env = (void*)0; }",
-                                           f->value, f->value, f->value);
-                            }
+                            if (f && f->type == AST_MESSAGE_FIELD && own_type_owns(gen, f->node_type))
+                                own_emit_part(gen, f->node_type, cg_internf("m->%s", f->value), OWN_DROP);
                         }
                         unindent(gen);
                         print_line(gen, "}");

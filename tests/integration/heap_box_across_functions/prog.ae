@@ -1,0 +1,36 @@
+// A string field stored on a box another function made is released with the
+// box (#1860).
+import std.heap
+import std.mem
+import std.string
+
+extern exit(code: int)
+
+struct Box { name: string }
+
+build_box() -> *Box { return heap.new(Box) }
+dispose(b: *Box) { heap.free(b) }
+
+once() {
+    b = build_box()
+    b.name = string.copy("hello")
+    dispose(b)
+}
+
+main() {
+    once()
+    if mem.heap_in_use_exact() {
+        grown = mem.steady_growth(|| {
+                k = 0
+                while k < 100 {
+                    once()
+                    k = k + 1
+                }
+            }, 5)
+        if grown != 0 {
+            println("LEAK: ${grown} bytes per 100 calls")
+            exit(1)
+        }
+    }
+    println("OK")
+}

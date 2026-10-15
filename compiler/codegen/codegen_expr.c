@@ -3240,6 +3240,24 @@ static const char* closure_tuple_c_name(Type* t) {
     return names[count++];
 }
 
+/* The closure every `return` under `node` gives, as a variable of `scope`
+ * bound to one literal (closure_var_id): its id; -1 when two returns give
+ * different ones or one gives anything else; `seen` (-2 for none yet) when
+ * there is no return. Nested functions and closures are not walked. */
+static int returns_one_closure(CodeGenerator* gen, ASTNode* node, const char* scope, int seen) {
+    if (!node || seen == -1 || ast_is_own_function(node)) return seen;
+    if (node->type == AST_RETURN_STATEMENT) {
+        ASTNode* v = node->child_count == 1 ? node->children[0] : NULL;
+        int id = !v ? -1
+                 : v->type == AST_CLOSURE && v->value ? atoi(v->value)
+                 : v->type == AST_IDENTIFIER && v->value ? closure_var_id(gen, scope, v->value)
+                 : -1;
+        return (id < 0 || (seen >= 0 && seen != id)) ? -1 : id;
+    }
+    for (int i = 0; i < node->child_count; i++) seen = returns_one_closure(gen, node->children[i], scope, seen);
+    return seen;
+}
+
 static ASTNode* find_first_return_expr(ASTNode* node) {
     if (!node) return NULL;
     if (ast_is_own_function(node)) return NULL;
@@ -3648,21 +3666,18 @@ static void discover_closures_scoped(CodeGenerator* gen, ASTNode* node, const ch
         if (rhs && rhs->type == AST_CLOSURE && rhs->value) {
             cid_to_bind = atoi(rhs->value);
         } else if (rhs && rhs->type == AST_FUNCTION_CALL && rhs->value) {
-            // If the initializer is a call to a user function that returns
-            // a closure variable, bind this var to that closure's id too.
-            // Example: w = build_pair() where build_pair ends in `return wrapped`
-            // and wrapped is a known closure variable.
+            /* A call to a function every `return` of which gives the same
+             * closure variable binds to that closure: `w = build_pair()`
+             * where build_pair ends in `return wrapped`. One that returns
+             * another closure on some path has no single one. */
             ASTNode* target_fn = find_function_definition_by_name(gen->program, rhs->value);
-            if (target_fn) {
-                for (int i = 0; i < target_fn->child_count; i++) {
-                    ASTNode* body = target_fn->children[i];
-                    if (!body || body->type != AST_BLOCK) continue;
-                    ASTNode* ret_expr = find_first_return_expr(body);
-                    if (ret_expr && ret_expr->type == AST_IDENTIFIER && ret_expr->value)
-                        cid_to_bind = closure_var_id(gen, fn_scope_name(gen->program, target_fn),
-                                                    ret_expr->value);
-                    break;
-                }
+            for (int i = 0; target_fn && i < target_fn->child_count; i++) {
+                ASTNode* body = target_fn->children[i];
+                if (!body || body->type != AST_BLOCK) continue;
+                cid_to_bind = returns_one_closure(gen, body,
+                                                  fn_scope_name(gen->program, target_fn), -2);
+                if (cid_to_bind == -2) cid_to_bind = -1;
+                break;
             }
         }
         // A variable previously bound to a different closure (either via
@@ -5049,16 +5064,12 @@ void emit_closure_definitions(CodeGenerator* gen) {
              * `if (_heap_s) ...`, an undeclared `s` there. */
             char** prev_escaped = gen->escaped_string_vars;
             int prev_escaped_count = gen->escaped_string_var_count;
-            char** prev_ret_escaped_struct = gen->return_escaped_struct_vars;
-            int prev_ret_escaped_struct_count = gen->return_escaped_struct_var_count;
             gen->escaped_string_vars = NULL;
             gen->escaped_string_var_count = 0;
             char** prev_captured = gen->captured_string_params;
             int prev_captured_count = gen->captured_string_param_count;
             gen->captured_string_params = NULL;
             gen->captured_string_param_count = 0;
-            gen->return_escaped_struct_vars = NULL;
-            gen->return_escaped_struct_var_count = 0;
             /* #2761: and so do its `*StringSeq` and `string?` locals, which
              * the passes below track as a function's are. */
             char** prev_seq = gen->seq_vars;
@@ -5223,15 +5234,9 @@ void emit_closure_definitions(CodeGenerator* gen) {
                                          p->node_type ? get_c_type(p->node_type) : "int",
                                          param_cname, p->line, p->column);
             }
-            /* #2606: a struct parameter borrows the caller's strings, as a
-             * function's does (codegen_func.c): its trackers are cleared on
-             * entry, so the closure frees, at its exit, only the strings it
-             * stores itself. Left set, a struct argument that a call
-             * returned was freed by the caller's statement temporaries
-             * twice. A closure field is retained. One the body keeps as a
-             * whole value (returns, aliases, stores, captures) takes
-             * references of its own instead (#2582), so what it hands back
-             * is its own. */
+            /* R3: a struct parameter borrows the caller's value, as a
+             * function's does (codegen_func.c); one the body writes into, or
+             * a promoted cell, is made a value of its own on entry. */
             for (int i = 0; i < closure->child_count; i++) {
                 ASTNode* p = closure->children[i];
                 if (!p || p->type != AST_CLOSURE_PARAM || !p->value) continue;
@@ -5242,15 +5247,15 @@ void emit_closure_definitions(CodeGenerator* gen) {
                  * so the walk, the capture and the destroy all use that
                  * name. */
                 const char* cname = safe_value_name(p->value);
-                int kept = struct_param_kept(gen, body, cname);
                 if (closure_param_is_promoted(gen, closure, p->value)) {
                     const char* cell = cg_internf("(*%s)", p->value);
-                    if (kept) emit_struct_capture(gen, owning, cell);
-                    else emit_struct_disown(gen, owning, cell, 1);
+                    print_indent(gen);
+                    fprintf(gen->output, "%s = %s_dup(%s);\n", cell, owning, cell);
                     continue;
                 }
-                if (kept) emit_struct_capture(gen, owning, cname);
-                else emit_struct_disown(gen, owning, cname, 1);
+                if (!struct_param_written(body, cname)) continue;
+                print_indent(gen);
+                fprintf(gen->output, "%s = %s_dup(%s);\n", cname, owning, cname);
                 push_struct_destroy_defer(gen, cname, p->node_type, p->line, p->column);
             }
             /* #2761: the `*StringSeq` and `string?` passes too, in the
@@ -5306,8 +5311,6 @@ void emit_closure_definitions(CodeGenerator* gen) {
             clear_captured_string_params(gen);
             gen->captured_string_params = prev_captured;
             gen->captured_string_param_count = prev_captured_count;
-            gen->return_escaped_struct_vars = prev_ret_escaped_struct;
-            gen->return_escaped_struct_var_count = prev_ret_escaped_struct_count;
             gen->current_function = prev_current_function;
             gen->closure_var_scope = prev_closure_var_scope;
             gen->in_trailing_block--;
@@ -6119,7 +6122,7 @@ static int struct_def_is_extern(const ASTNode* sdef) {
  * type is a `T[]` slice? True for a call into an extern C function
  * declared `-> T[]`, and for a read of an `extern struct`'s `T[]` field.
  * Such a value is wrapped into an unbounded slice view. */
-static int expr_is_c_view_of_slice(CodeGenerator* gen, const ASTNode* expr) {
+int expr_is_c_view_of_slice(CodeGenerator* gen, const ASTNode* expr) {
     if (!expr || !type_is_slice(expr->node_type)) return 0;
     if (expr->type == AST_FUNCTION_CALL && expr->value) {
         const char* name = expr->value;
@@ -6831,6 +6834,31 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
     if (!expr) return;
 
     codegen_note_diag_pos(expr);
+
+    /* #2894: a call returning an array, used as an array (indexed, passed,
+     * thrown away), is held in a temporary of its result struct until its
+     * statement is done; its block releases the elements on every exit, and
+     * a statement run again releases the ones before. */
+    if (expr->type == AST_FUNCTION_CALL && is_sized_array_param(expr->node_type) &&
+        !gen->array_call_raw && hoist_ready(gen)) {
+        static int act_seq = 0;
+        Type* at = expr->node_type;
+        int owns = own_type_owns(gen, at);
+        const char* t = cg_internf("_ae_act%d", act_seq++);
+        hoist_append_text(gen, cg_internf("%s %s = {0}; ", c_result_type(at), t));
+        fprintf(gen->output, "(");
+        if (owns)
+            fprintf(gen->output, "aether_unwind_track((const void*)%s.a, %s), %s((%s*)%s.a), ", t,
+                    own_fn(gen, at, "drop_unwind"), own_fn(gen, at, "drop"),
+                    get_c_type(at->element_type), t);
+        fprintf(gen->output, "%s = ", t);
+        gen->array_call_raw++;
+        generate_expression(gen, expr);
+        gen->array_call_raw--;
+        fprintf(gen->output, ", %s.a)", t);
+        if (owns) push_own_drop_carrier(gen, cg_internf("%s.a", t), at, 0, 0);
+        return;
+    }
 
     /* #2478: an operand already evaluated into a temp, in source order. */
     if (g_order_count > 0) {
@@ -9185,7 +9213,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                                 "%s = NULL, _heap_%s = 0, (void)0) : (void)string_release(%s))",
                                 arg->value, arg->value, arg->value, arg->value, arg->value);
                         } else if (field_read_can_hand_off(arg)) {
-                            emit_string_field_free(gen, arg, "string_release");
+                            emit_string_field_free(gen, arg);
                         } else if (string_element_free_kind(gen, arg)) {
                             emit_string_element_free(gen, arg);   /* #2618 */
                         } else {
@@ -9274,8 +9302,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                           cfree_sym_is(gen, func_name_norm, "string_release")) &&
                          expr->child_count == 1 &&
                          field_read_can_hand_off(expr->children[0])) {
-                    emit_string_field_free(gen, expr->children[0],
-                                           consuming_free_symbol(gen, func_name_norm));
+                    emit_string_field_free(gen, expr->children[0]);
                 }
                 // #2618: and for an element of an array that owns its
                 // elements, which the array would free again.
@@ -10715,71 +10742,14 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
             break;
 
         case AST_STRUCT_LITERAL: {
-            /* Struct-field heap-string ownership (#465): for each
-             * field-init whose expression is heap-classified, also
-             * emit `._heap_<field> = 1` so the auto-emitted
-             * <Struct>_destroy() reclaims the buffer at scope exit.
-             * Plain initializers (literal strings, scalars) default
-             * to _heap_<field> = 0 via C99 designated-init's zero-
-             * fill of unmentioned fields.
-             *
-             * #911: when a field ADOPTS a heap-string *variable* (`.f = v`
-             * with v a tracked heap-string local), ownership MOVES from the
-             * variable into the struct. The variable's own function-exit
-             * free must then be suppressed, or the same buffer is freed
-             * twice (once via the struct's owned-field free, once via the
-             * variable's deferred free) — the double-free crash. We collect
-             * the adopted variable names and, after the literal, clear their
-             * `_heap_<v>` flags in the literal's sequence of temporaries so
-             * the exit free's `if (_heap_<v>)` guard skips them. */
-            /* One per field at most. A fixed 16 dropped the 17th, whose
-             * flag then stayed set: its string was freed twice. */
-            const char** moved_vars = (const char**)aether_xrealloc(NULL,
-                sizeof(const char*) * (size_t)(expr->child_count > 0 ? expr->child_count : 1));
-            int moved_count = 0;
-            int any_moved = 0;
-            /* A header-defined struct (`extern struct ... @c_import`) has no
-             * `_heap_<field>` trackers and no destructor: its string fields
-             * BORROW, as a C struct's `char*` does. Its literal is spelled
-             * `(struct Name){...}` because the header need not typedef the
-             * tag. */
+            /* R2: each field owns what it holds, so it takes its value: a
+             * string as a store takes it (moved when fresh or a local's last
+             * use, retained otherwise), a struct, closure or composite as
+             * its own take does. A header-defined struct (`extern struct ...
+             * @c_import`) owns nothing: its string fields are C's `const
+             * char*`, the payload, and its literal is spelled `(struct
+             * Name){...}` because the header need not typedef the tag. */
             int c_imported = aether_is_c_import_struct(expr->value);
-            /* #2602: a local still used after the literal is copied, as an
-             * alias of it is (alias_source_must_copy): moved, its flag was
-             * cleared while it still pointed at the field's buffer, and a
-             * later `string.free(local)` took the untracked branch and freed
-             * the struct's string, which the struct freed again. */
-            for (int i = 0; !c_imported && i < expr->child_count; i++) {
-                ASTNode* fi = expr->children[i];
-                if (fi && fi->type == AST_ASSIGNMENT && fi->child_count > 0 &&
-                    fi->children[0]->type == AST_IDENTIFIER &&
-                    fi->children[0]->value &&
-                    is_heap_string_var(gen, fi->children[0]->value) &&
-                    !alias_source_must_copy(gen, fi->children[0]->value)) {
-                    any_moved = 1; break;
-                }
-            }
-            /* R3: a string field owns what it holds, so it takes its value
-             * (emit_string_take: moved when fresh or a local's last use, else
-             * retained), whose flag sets the field's tracker once the literal
-             * is built. Borrowed, a view's owner freed the buffer the field
-             * still pointed at (#2461), and a parameter's caller did. */
-            char (*take_own)[32] = NULL;
-            int any_take = 0;
-            for (int i = 0; !c_imported && i < expr->child_count; i++) {
-                ASTNode* fi = expr->children[i];
-                /* #2904: a `ptr` field takes no string: it has no tracker. */
-                Type* fit = fi && fi->value
-                            ? struct_literal_field_type(gen, expr->value, fi->value) : NULL;
-                if (fi && fi->type == AST_ASSIGNMENT && fi->value && fi->child_count > 0 &&
-                    !(fit && fit->kind != TYPE_STRING) && fi->children[0] &&
-                    fi->children[0]->node_type && fi->children[0]->node_type->kind == TYPE_STRING) {
-                    if (!take_own) take_own = calloc((size_t)expr->child_count, sizeof(*take_own));
-                    if (!take_own) break;
-                    string_take_new_flag(take_own[i], sizeof(take_own[i]));
-                    any_take = 1;
-                }
-            }
             /* #2688: a fixed-size array field given another array is filled
              * once the literal is built (emit_struct_literal_array_field). */
             int any_array_field = 0;
@@ -10788,21 +10758,11 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                 if (fi && fi->type == AST_ASSIGNMENT &&
                     struct_literal_field_takes_array(gen, expr->value, fi)) any_array_field = 1;
             }
-            /* When a variable is moved into a field, build the struct into a
-             * temp, clear the moved-from vars' heap flags, then yield the
-             * temp: a sequence of temporaries (#2765). Otherwise emit the
-             * literal directly. */
             TempSeq sl;
             const char* slit = NULL;
-            if (any_moved || any_take || any_array_field) {
+            if (any_array_field) {
                 static int slit_seq = 0;
                 seq_open(gen, &sl);
-                for (int i = 0; any_take && i < expr->child_count; i++) {
-                    if (!take_own[i][0]) continue;
-                    seq_let_named(gen, &sl, "int", cg_intern(take_own[i]));
-                    fprintf(gen->output, "0");
-                    seq_next(gen, &sl);
-                }
                 slit = cg_internf("_ae_slit%d", slit_seq++);
                 seq_let_named(gen, &sl, c_imported ? cg_internf("%s %s", aether_c_tag(expr->value),
                                                                 expr->value)
@@ -10813,128 +10773,71 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
             int emitted = 0;
             for (int i = 0; i < expr->child_count; i++) {
                 ASTNode* field_init = expr->children[i];
-                if (field_init && field_init->type == AST_ASSIGNMENT) {
-                    if (emitted > 0) fprintf(gen->output, ", ");
-                    fprintf(gen->output, ".%s = ", field_init->value);
-                    Type* fv_opt = c_imported ? NULL
-                                   : struct_literal_field_type(gen, expr->value, field_init->value);
-                    if (fv_opt && fv_opt->kind != TYPE_OPTIONAL) fv_opt = NULL;
-                    if (field_init->child_count > 0) {
-                        /* A header-defined struct's string field is C's
-                         * `const char*`: the payload, not a wrapped
-                         * AetherString (see emit_c_import_string_field_store). */
-                        ASTNode* fv = field_init->children[0];
-                        int unwrap = c_imported && fv && fv->node_type &&
-                                     fv->node_type->kind == TYPE_STRING;
-                        /* NULL stays NULL, as in the field store. */
+                if (!field_init || field_init->type != AST_ASSIGNMENT) continue;
+                if (emitted > 0) fprintf(gen->output, ", ");
+                fprintf(gen->output, ".%s = ", field_init->value);
+                emitted++;
+                if (field_init->child_count == 0) continue;
+                ASTNode* fv = field_init->children[0];
+                Type* fdecl = c_imported ? NULL
+                              : struct_literal_field_type(gen, expr->value, field_init->value);
+                if (c_imported) {
+                    /* NULL stays NULL, as in the field store. */
+                    if (fv && fv->node_type && fv->node_type->kind == TYPE_STRING) {
                         TempSeq cs_seq;
-                        const char* cs = NULL;
-                        if (unwrap) {
-                            seq_open(gen, &cs_seq);
-                            cs = seq_let(gen, &cs_seq, "const void*", "_ae_cs");
-                            fprintf(gen->output, "(const void*)(");
-                        }
-                        /* #2497: a struct field held by value that owns
-                         * strings takes the struct it is given. */
-                        const char* fv_struct = c_imported ? NULL
-                                                : struct_owning_strings(gen, fv ? fv->node_type : NULL);
-                        /* #2525: a closure field holds a reference of its
-                         * own: a fresh closure's, or one taken on a view. */
-                        int fv_closure = !c_imported && fv && fv->node_type &&
-                                         fv->node_type->kind == TYPE_FUNCTION &&
-                                         !fv->node_type->is_fnptr;
-                        /* #2890: a `ptr` field takes a closure boxed, as
-                         * `h.p = f` does, and a bare function as its address. */
-                        Type* fv_decl = c_imported ? NULL
-                                        : struct_literal_field_type(gen, expr->value,
-                                                                    field_init->value);
-                        int fv_boxed = fv_decl && fv_decl->kind == TYPE_PTR &&
-                                       fn_value_into_ptr(gen, fv);
-                        /* #2528: a `string[N]` / `fn[N]` field owns every
-                         * element: a literal's elements are copied or
-                         * taken. */
-                        int fv_owned_array = 0;
-                        if (!c_imported && fv && fv->type == AST_ARRAY_LITERAL && gen->program) {
-                            ASTNode* sdef = find_struct_definition_by_name(gen->program, expr->value);
-                            for (int fi = 0; sdef && fi < sdef->child_count; fi++) {
-                                ASTNode* f = sdef->children[fi];
-                                if (f && f->type == AST_STRUCT_FIELD && f->value &&
-                                    strcmp(f->value, field_init->value) == 0) {
-                                    fv_owned_array = struct_field_owned_array(f, NULL);
-                                    break;
-                                }
-                            }
-                        }
-                        int fv_copy = !c_imported && fv && fv->type == AST_IDENTIFIER &&
-                                      fv->value && is_heap_string_var(gen, fv->value) &&
-                                      alias_source_must_copy(gen, fv->value);
-                        /* #2820: an optional field takes its value as an
-                         * optional binding does, a bare value wrapped and
-                         * `none` the empty one. */
-                        if (fv_opt) emit_optional_coerced(gen, fv, fv_opt);
-                        else if (take_own && take_own[i][0]) emit_string_take(gen, fv, take_own[i], NULL);
-                        else if (struct_literal_field_takes_array(gen, expr->value, field_init))
-                            fprintf(gen->output, "{0}");   /* #2688: filled below */
-                        else if (fv_copy) {
-                            fprintf(gen->output, "aether_uniform_heap_str((const char*)(");
-                            generate_expression(gen, fv);
-                            fprintf(gen->output, "), 0)");
-                        }
-                        else if (fv_struct && struct_take_shape(fv)) emit_struct_take(gen, fv, fv_struct, NULL);
-                        else if (fv_boxed) emit_closure_into_ptr(gen, fv);
-                        else if (fv_closure) emit_closure_take(gen, fv);
-                        else if (fv_owned_array) emit_owned_array_literal(gen, fv, fv_owned_array);
-                        else generate_expression(gen, fv);
-                        if (unwrap) {
-                            fprintf(gen->output, ")");
-                            seq_next(gen, &cs_seq);
-                            fprintf(gen->output, "%s ? aether_string_data(%s) : (const char*)0", cs, cs);
-                            seq_close(gen, &cs_seq);
-                        }
+                        seq_open(gen, &cs_seq);
+                        const char* cs = seq_let(gen, &cs_seq, "const void*", "_ae_cs");
+                        fprintf(gen->output, "(const void*)(");
+                        generate_expression(gen, fv);
+                        fprintf(gen->output, ")");
+                        seq_next(gen, &cs_seq);
+                        fprintf(gen->output, "%s ? aether_string_data(%s) : (const char*)0", cs, cs);
+                        seq_close(gen, &cs_seq);
+                    } else {
+                        generate_expression(gen, fv);
                     }
-                    emitted++;
-                    if (fv_opt) continue;  /* an optional field has no tracker */
-                    if (take_own && take_own[i][0]) continue;  /* tracker set below */
-                    /* If the init is heap-classified, also set the hidden
-                     * tracker. For a heap-tracked *variable* source, the
-                     * ownership is RUNTIME-conditional on the variable's own
-                     * `_heap_<v>` flag (#911): `e = s` leaves a borrowed,
-                     * non-heap value, so `._heap_<field> = 1` would make the
-                     * struct free a string it never owned (a bad free of the
-                     * caller's literal). Mirror the runtime flag instead, and
-                     * record the variable as moved-from so its flag is cleared
-                     * (the deferred free becomes a no-op). For non-variable
-                     * heap sources (an interp/concat temp), the value is freshly
-                     * owned, so a constant 1 is correct.
-                     * #2904: only a `string` field has a tracker. A string
-                     * stored into a `ptr` field is a pointer the struct does
-                     * not own, as any `ptr` holds, so the source keeps it. */
-                    Type* tracked_ft = c_imported ? NULL
-                                       : struct_literal_field_type(gen, expr->value,
-                                                                   field_init->value);
-                    if (!c_imported && field_init->child_count > 0 &&
-                        !(tracked_ft && tracked_ft->kind != TYPE_STRING) &&
-                        is_heap_string_expr(gen, field_init->children[0])) {
-                        ASTNode* src = field_init->children[0];
-                        if (src->type == AST_IDENTIFIER && src->value &&
-                            is_heap_string_var(gen, src->value) &&
-                            !alias_source_must_copy(gen, src->value)) {
-                            fprintf(gen->output, ", ._heap_%s = _heap_%s",
-                                    field_init->value, src->value);
-                            moved_vars[moved_count++] = src->value;
-                        } else {
-                            fprintf(gen->output, ", ._heap_%s = 1", field_init->value);
-                        }
-                        emitted++;
-                    }
+                    continue;
+                }
+                /* #2820: an optional field takes its value as an optional
+                 * binding does, a bare value wrapped and `none` the empty
+                 * one. */
+                if (fdecl && fdecl->kind == TYPE_OPTIONAL && own_type_owns(gen, fdecl)) {
+                    emit_composite_take(gen, fv, fdecl);   /* #2921 */
+                } else if (fdecl && fdecl->kind == TYPE_OPTIONAL) {
+                    emit_optional_coerced(gen, fv, fdecl);
+                } else if (fdecl && fdecl->kind == TYPE_STRING && fv && fv->node_type &&
+                           fv->node_type->kind == TYPE_STRING) {
+                    emit_string_take_owned(gen, fv, 0);
+                } else if (struct_literal_field_takes_array(gen, expr->value, field_init)) {
+                    fprintf(gen->output, "{0}");   /* #2688: filled below */
+                } else if (fdecl && fdecl->kind == TYPE_PTR && fn_value_into_ptr(gen, fv)) {
+                    /* #2890: a `ptr` field takes a closure boxed, as `h.p = f`
+                     * does, and a bare function as its address. */
+                    emit_closure_into_ptr(gen, fv);
+                } else if (fv && fv->type == AST_ARRAY_LITERAL && fdecl &&
+                           fdecl->kind == TYPE_ARRAY && own_type_owns(gen, fdecl->element_type) &&
+                           (fdecl->element_type->kind == TYPE_STRING ||
+                            (fdecl->element_type->kind == TYPE_FUNCTION &&
+                             !fdecl->element_type->is_fnptr))) {
+                    /* #2528: a `string[N]` / `fn[N]` field owns every element:
+                     * a literal's elements are copied or taken. */
+                    emit_owned_array_literal(gen, fv, fdecl->element_type->kind == TYPE_STRING ? 1 : 2);
+                } else if (struct_owning_strings(gen, fv ? fv->node_type : NULL) && struct_take_shape(fv)) {
+                    /* #2497: a struct field held by value takes the struct. */
+                    emit_struct_take(gen, fv, struct_owning_strings(gen, fv->node_type), NULL);
+                } else if (fv && fv->node_type && fv->node_type->kind == TYPE_FUNCTION &&
+                           !fv->node_type->is_fnptr) {
+                    /* #2525: a closure field holds a reference of its own. */
+                    emit_closure_take(gen, fv);
+                } else if (fdecl && fdecl->kind == TYPE_TUPLE && own_type_owns(gen, fdecl)) {
+                    emit_composite_take(gen, fv, fdecl);   /* #2921 */
+                } else {
+                    generate_expression(gen, fv);
                 }
             }
             fprintf(gen->output, "}");
-            if (any_moved || any_take || any_array_field) {
-                /* #911: disown each moved-from variable so its function-exit
-                 * `if (_heap_<v>)` free is a no-op (ownership now in the
-                 * struct). Then yield the built struct. */
-                for (int i = 0; any_array_field && i < expr->child_count; i++) {
+            if (any_array_field) {
+                for (int i = 0; i < expr->child_count; i++) {
                     ASTNode* fi = expr->children[i];
                     if (fi && fi->type == AST_ASSIGNMENT &&
                         struct_literal_field_takes_array(gen, expr->value, fi)) {
@@ -10942,25 +10845,10 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                         emit_struct_literal_array_field(gen, expr->value, fi, slit);
                     }
                 }
-                for (int i = 0; any_take && i < expr->child_count; i++) {
-                    if (!take_own[i][0]) continue;
-                    seq_next(gen, &sl);
-                    fprintf(gen->output, "%s._heap_%s = %s",
-                            slit, expr->children[i]->value, take_own[i]);
-                }
-                /* #1301: the struct literal now owns each moved buffer; the
-                 * flag clear disarms the moved-from var's defer and its
-                 * journal entry, a place whose flag a drain reads (#2923). */
-                for (int m = 0; m < moved_count; m++) {
-                    seq_next(gen, &sl);
-                    fprintf(gen->output, "_heap_%s = 0", moved_vars[m]);
-                }
                 seq_next(gen, &sl);
                 fprintf(gen->output, "%s", slit);
                 seq_close(gen, &sl);
             }
-            free(take_own);
-            free(moved_vars);
             break;
         }
 

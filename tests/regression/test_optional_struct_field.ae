@@ -8,8 +8,8 @@
 // and a literal or a store takes the value as an optional binding does: a
 // bare value wrapped, `none` the empty one, an optional as it is.
 //
-// An optional field whose value owns memory (`string?`) is refused until it
-// has a `string` field's ownership (#2822).
+// An optional field whose value owns memory (`string?`) owns it as any
+// field does (#2822): tests/integration/optional_owning_fields.
 
 extern exit(code: int)
 

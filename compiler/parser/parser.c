@@ -4994,7 +4994,9 @@ ASTNode* parse_actor_definition(Parser* parser) {
                             next_tok->type == TOKEN_DURATION ||
                             next_tok->type == TOKEN_FLOAT ||
                             next_tok->type == TOKEN_STRING || next_tok->type == TOKEN_BOOL ||
-                            next_tok->type == TOKEN_BYTE || next_tok->type == TOKEN_PTR))) {
+                            next_tok->type == TOKEN_BYTE || next_tok->type == TOKEN_PTR ||
+                            /* #2921: a tuple type, `state (string, int) v` */
+                            next_tok->type == TOKEN_LEFT_PAREN))) {
                 // Explicit type: state int count = 0  or  state long total = 0
                 state_decl = parse_variable_declaration_with_semicolon(parser, false);
             } else if (next_tok && next_tok->type == TOKEN_IDENTIFIER) {

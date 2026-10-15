@@ -128,12 +128,6 @@ main() {
     check(reflect.field_schema(s, 3) == null, "an int array has no table")
     check(reflect.field_schema(s, 12) == null, "a bare ptr has no table")
 
-    // ---- a string field's ownership flag ----
-    h = reflect.field_heap_offset(s, 6)
-    check(h > reflect.field_offset(s, 6), "the flag follows the string")
-    check(h < reflect.field_offset(s, 7), "and precedes the next field")
-    check(reflect.field_heap_offset(s, 0) == -1, "only a string has one")
-
     // ---- attributes ----
     check(reflect.attr_count(s, 0) == 1, "@key")
     check(reflect.attr_name(s, 0, 0) == "key", "@key's name")
