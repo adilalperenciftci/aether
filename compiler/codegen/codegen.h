@@ -481,10 +481,6 @@ typedef struct {
     char** bare_fn_adapter_names;
     int    bare_fn_adapter_count;
     int    bare_fn_adapter_capacity;
-    /* #2499: no closure the program can call keeps a parameter that can
-     * hold a caller's string, so an owned string argument to any closure
-     * call is freed after it (compute_closure_args_borrowed). */
-    int    closure_args_borrowed;
     /* #2478: what calling each function of the program can change (a module
      * global, memory a parameter reaches), memoised per definition by
      * order_fn_effects in codegen_expr.c. */
@@ -560,15 +556,6 @@ typedef struct {
     char** captured_string_params;
     int captured_string_param_count;
 
-    // The ownership answers about a callee's parameter (does it keep it,
-    // capture it, only hand it back), computed once per program from the
-    // callee's body and remembered (an open-addressed table of CalleeMemo,
-    // private to codegen_stmt.c). Every walk asks them at every call site,
-    // and answering walks the callee's body, whose calls ask them in turn:
-    // unremembered, std.message took minutes to compile.
-    void* callee_memo;
-    int callee_memo_cap;
-    int callee_memo_count;
 
     // #2369: which pointer-to-struct parameters only ever hold a heap.new
     // box, because every call passes one (ZbParams, private to
@@ -608,22 +595,6 @@ typedef struct {
     int seq_var_count;
     char** escaped_seq_vars;
     int escaped_seq_var_count;
-
-    // `string?` (optional-of-string) locals whose `.val` may own a heap
-    // allocation. Parallel to heap_string_vars, but the value is a by-value
-    // `ae_opt_string` struct (`{ int has; const char* val; }`), so the free
-    // targets `<name>.val` guarded by `<name>.has`. The struct's `.has` bit
-    // alone can't tell a heap `.val` from a borrowed literal, so a
-    // `_heapopt_<name>` flag tracks ownership exactly like `_heap_<name>`
-    // does for bare strings — set from is_heap_string_expr on the coerced
-    // initializer/reassignment RHS. The prior `.val` is freed on reassign
-    // and at scope exit via aether_heap_str_free. escaped_opt_str_vars
-    // suppresses the exit-free when the optional is `return`ed (the caller
-    // owns the buffer).
-    char** opt_str_vars;
-    int opt_str_var_count;
-    char** escaped_opt_str_vars;
-    int escaped_opt_str_var_count;
 
     // Ask/reply type map: request message name -> reply shape.
     // Built by scanning actor receive handlers for reply statements.
@@ -682,6 +653,14 @@ typedef struct {
     char* hoist_decls;
     size_t hoist_decls_len;
     size_t hoist_decls_cap;
+    /* #2923: a plain `defer` a panic leaves runs from the unwind journal,
+     * through a thunk written where the defer is: the thunks, how many, and
+     * the offset their prototypes go in at once the program is written. */
+    char* defer_thunks;
+    size_t defer_thunks_len;
+    size_t defer_thunks_cap;
+    int defer_thunk_count;
+    long defer_proto_pos;
     int hoist_output_ok;
 } CodeGenerator;
 

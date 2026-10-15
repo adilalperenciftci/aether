@@ -2,18 +2,16 @@
 //
 //  - A hand-off inside a nested closure's body (`g = || { keep(f) }`). A
 //    keeper that stores into a list takes a reference of its own (#2518),
-//    so the local frees its own. A keeper the walk cannot see through (a
-//    closure variable here) is given a reference by the body right before
-//    the hand-off, so the local and the capturing env still free theirs
-//    and the kept value stays alive; that reference is the one env this
-//    probe keeps.
+//    so the local frees its own. So does a keeper the walk cannot see
+//    through (a closure variable here): the list holds the kept value
+//    alive, and it is freed after its last holder.
 //  - An owned closure passed to a callee whose result type the checker
 //    did not stamp (an unannotated function) is drained after the call.
 //  - An owned closure used directly as the callee (`call(make_counter())`)
 //    is evaluated once and freed after the call.
 //
 // test_closure_local_env_free.sh builds this with env_count.h force-included
-// and checks every env and cell but the kept one is freed exactly once; on
+// and checks every env and cell is freed exactly once; on
 // its own it checks the values (a freed env read back would give a wrong
 // one).
 

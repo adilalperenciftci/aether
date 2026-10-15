@@ -448,7 +448,6 @@ static ASTNode* emit_bare_fn_adapter_signature(CodeGenerator* gen,
 static char** g_fnval_names = NULL;
 static int g_fnval_count = 0;
 static int g_fnval_cap = 0;
-static unsigned long long g_fnptr_args_borrowed = 0;   /* bit k: slot k borrows */
 
 static void fnval_add(const char* name) {
     for (int i = 0; i < g_fnval_count; i++)
@@ -503,9 +502,6 @@ static void discover_fn_values_walk(CodeGenerator* gen, ASTNode* n) {
 void discover_fn_values(CodeGenerator* gen) {
     for (int i = 0; i < g_fnval_count; i++) free(g_fnval_names[i]);
     g_fnval_count = 0;
-    /* Until compute_fnptr_args_borrowed runs, an argument through a fn
-     * pointer escapes (the closure analyses before it see that). */
-    g_fnptr_args_borrowed = 0;
     g_fnval_shadow_count = 0;
     if (!gen || !gen->program) return;
     discover_fn_values_walk(gen, gen->program);
@@ -517,79 +513,6 @@ int fn_value_name(const char* name) {
     for (int i = 0; i < g_fnval_count; i++)
         if (strcmp(g_fnval_names[i], name) == 0) return 1;
     return 0;
-}
-
-/* Parameter `k` of some clause of `name` (one, or each of a set written as
- * clauses, #2627): its node, or NULL when it is a pattern that binds no
- * name (a literal compared, never kept). */
-static ASTNode* fnval_clause_param(CodeGenerator* gen, const char* name, int clause, int k) {
-    const DefClauses* dc = program_index_clauses(gen->program, name);
-    ASTNode* fd = dc && clause < dc->count ? dc->nodes[clause] : NULL;
-    if (!fd || k >= fd->child_count) return NULL;
-    ASTNode* p = fd->children[k];
-    return p && (p->type == AST_PATTERN_VARIABLE || p->type == AST_VARIABLE_DECLARATION) &&
-           p->value ? p : NULL;
-}
-
-/* Does the function `name`, called through a pointer, keep what it receives
- * at parameter `k`, under the current slot answer? */
-static int fnval_keeps_slot(CodeGenerator* gen, const char* name, int k) {
-    const DefClauses* dc = program_index_clauses(gen->program, name);
-    int n = dc ? dc->count : 0;
-    int any_pointer = 0;
-    for (int c = 0; c < n; c++) {
-        ASTNode* p = fnval_clause_param(gen, name, c, k);
-        if (!p || !p->node_type || p->node_type->kind == TYPE_STRING) continue;
-        if (param_may_hold_caller_string(p->node_type)) any_pointer = 1;
-    }
-    /* A `string` parameter is never kept as given: whatever keeps it takes a
-     * reference of its own (R3). */
-    return any_pointer && callee_param_escapes_via_body(gen, name, k, 0);
-}
-
-/* The walks assume the answer for calls between fn pointers (an argument
- * passed on through one at a borrowing slot is not kept), so it is iterated
- * to a fixed point: start from every slot borrowing, drop each slot some
- * function keeps at under the current answer, and ask again until nothing
- * drops. Then no function keeps at a slot left borrowing, by induction, as
- * for closures (compute_closure_args_borrowed). A slot is a parameter's
- * position, a literal pattern's included, as the C signature counts them;
- * a list pattern's two C parameters end the analysis there (every later
- * slot escapes). */
-void compute_fnptr_args_borrowed(CodeGenerator* gen) {
-    g_fnptr_args_borrowed = 0;
-    if (!gen || !gen->program || g_fnval_count == 0) return;
-    unsigned long long mask = ~0ULL;
-    for (;;) {
-        g_fnptr_args_borrowed = mask;
-        callee_memo_clear(gen);
-        unsigned long long next = mask;
-        for (int i = 0; i < g_fnval_count; i++) {
-            const char* name = g_fnval_names[i];
-            ASTNode* fd = find_function_definition_by_name(gen->program, name);
-            for (int k = 0; fd && k < fd->child_count && k < 64; k++) {
-                ASTNode* p = fd->children[k];
-                if (!p || p->type == AST_GUARD_CLAUSE || p->type == AST_BLOCK ||
-                    p->type == AST_REQUIRES_CLAUSE || p->type == AST_ENSURES_CLAUSE) continue;
-                if (p->type == AST_PATTERN_LIST || p->type == AST_PATTERN_CONS) {
-                    next &= (k == 0) ? 0ULL : ((1ULL << k) - 1ULL);
-                    break;
-                }
-                unsigned long long bit = 1ULL << k;
-                if ((next & bit) && fnval_keeps_slot(gen, name, k)) next &= ~bit;
-            }
-        }
-        if (next == mask) break;
-        mask = next;
-    }
-    g_fnptr_args_borrowed = mask;
-    callee_memo_clear(gen);
-}
-
-/* Does an argument at `slot` of a call through a typed fn pointer stay the
- * caller's (compute_fnptr_args_borrowed)? */
-int fnptr_arg_borrowed(int slot) {
-    return slot >= 0 && slot < 64 && ((g_fnptr_args_borrowed >> slot) & 1ULL);
 }
 
 /* #943: emit FORWARD DECLARATIONS for every registered bare-fn adapter.
@@ -1935,7 +1858,6 @@ static void emit_function(CodeGenerator* gen, ASTNode* func, const char* clause_
     clear_heap_string_vars(gen);
     clear_captured_string_params(gen);
     clear_seq_vars(gen);
-    clear_opt_str_vars(gen);
     clear_escaped_string_vars(gen);
 
     // Mark function parameters as declared so they aren't re-declared
@@ -2161,10 +2083,8 @@ static void emit_function(CodeGenerator* gen, ASTNode* func, const char* clause_
             // refcount-decrement scope-exit free (parallel to the
             // heap-string passes immediately around this).
             hoist_seq_trackers(gen, body);
-            // `string?` locals: hoist their _heapopt flags + function-
-            // scope decl, mark escapes, and push the scope-exit free of
-            // the owned `.val` buffer (parallel to the seq passes).
-            hoist_opt_str_trackers(gen, body);
+            // `string?` locals: declared at function scope with their drop.
+            hoist_opt_string_locals(gen, body);
             // Mark heap-string vars that escape via call argument or
             // closure capture. The wrapper at codegen_stmt.c:1611
             // skips its `free(_tmp_old)` for escaped vars to avoid
@@ -2173,7 +2093,6 @@ static void emit_function(CodeGenerator* gen, ASTNode* func, const char* clause_
             // cost of leaking the value over the function's lifetime.
             mark_escaped_heap_string_vars(gen, body);
             mark_escaped_seq_vars(gen, body);
-            mark_escaped_opt_str_vars(gen, body);
             // Push a function-exit defer-free for every non-escaped
             // hoisted heap-string var (#420 follow-up). The
             // wrapper-on-reassignment frees the previous value on
@@ -2184,7 +2103,6 @@ static void emit_function(CodeGenerator* gen, ASTNode* func, const char* clause_
             // every explicit return.
             push_heap_string_exit_free_defers(gen, body);
             push_seq_exit_free_defers(gen, body);
-            push_opt_str_exit_free_defers(gen, body);
         }
         // If body is a block, it handles its own scope
         // If not a block, we still need to generate the statements
@@ -2263,7 +2181,6 @@ static void begin_dispatch_scope(CodeGenerator* gen, ASTNode* clause) {
     clear_heap_string_vars(gen);
     clear_captured_string_params(gen);
     clear_seq_vars(gen);
-    clear_opt_str_vars(gen);
     clear_escaped_string_vars(gen);
     clear_try_clobbered_vars(gen);
 }
@@ -2631,10 +2548,10 @@ static void emit_struct_ops(CodeGenerator* gen, ASTNode* sd) {
     print_line(gen, "static inline %s _aether_volatile_move_%s(%s volatile* s) {", n, n, n);
     print_line(gen, "    %s v = *s; %s w = v; (void)_aether_move_%s(&w); *s = w; return v;", n, n, n);
     print_line(gen, "}");
-    print_line(gen, "static inline void %s_cell_release(void* cell) {", n);
+    print_line(gen, "static inline void %s_cell_release(const void* cell) {", n);
     print_line(gen, "    if (!cell) return;");
     print_line(gen, "    _AeCellHeader* h = (_AeCellHeader*)cell - 1;");
-    print_line(gen, "    if (_aether_cell_last(h)) { %s_destroy((%s*)cell); free(h); }", n, n);
+    print_line(gen, "    if (_aether_cell_last(h)) { %s_destroy((%s*)(void*)cell); free(h); }", n, n);
     print_line(gen, "}");
 }
 

@@ -122,7 +122,9 @@ void aether_unwind_drain_current(void) {
         }
     }
     tls_journal.count = w;
-    for (int i = 0; i < d; i++) {
+    /* Newest first, as scope exits run: a deferred statement still sees the
+     * locals declared before it. */
+    for (int i = d - 1; i >= 0; i--) {
         AetherUnwindEntry* e = &drained[i];
         if (!e->place) {
             e->free_fn(e->ptr);

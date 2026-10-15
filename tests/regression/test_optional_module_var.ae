@@ -10,11 +10,9 @@
 // optional's own constant (`{ .has = 1, .val = 3 }`, `{0}` for `none` or
 // for no initialiser). A function's `g = v` or `g, n = f()` writes the
 // global, a bare value wrapped, as for a local. A `string?` global takes
-// a string of its own and, like a `string` global, keeps every string it
-// was given, so what a local took from it stays valid after a re-bind. The
-// 8 strings the globals held before a re-bind are unreachable at exit
-// (#2808), which tests/leaks_known.txt allows the macOS leaks gate (16
-// blocks).
+// a string of its own and, as a `string` global does, gives back the one it
+// held at a re-bind; a local takes a reference of its own from it, so what
+// it read stays valid after a re-bind (R3, #2808).
 
 import std.string
 

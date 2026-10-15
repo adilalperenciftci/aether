@@ -1,17 +1,13 @@
 #!/bin/sh
-# A closure the program did not compile may keep its argument, so a call
-# through an `fn` parameter frees nothing when one can be called (#2499).
-#
-# A closure call borrows its arguments only when the compiler has seen the
-# body of every closure the program can call and none keeps a parameter.
-# A closure can also come from outside: a box a host bridge or another
-# library made, recovered with `unbox_closure` or by passing a `ptr` to an
-# `fn` slot; a closure an extern returns; one C passes to a @c_callback;
-# one C stores in a struct the program reads (an extern struct, a struct an
-# extern fills, a raw pointer viewed as such a struct); and in a library
-# build, whatever the host passes to an exported function. In each case the
-# owned argument must stay alive: this checks the emitted C does not free it,
-# against a control program that does.
+# A call borrows its arguments (R3), whoever compiled the closure it calls
+# (#2499). A closure can come from outside the program: a box a host bridge
+# or another library made, recovered with `unbox_closure` or by passing a
+# `ptr` to an `fn` slot; a closure an extern returns; one C passes to a
+# @c_callback; one C stores in a struct the program reads (an extern struct,
+# a struct an extern fills, a raw pointer viewed as such a struct); and in a
+# library build, whatever the host passes to an exported function. C that
+# keeps an argument copies it, as an extern does (R4), so in each case the
+# owned argument is freed after the call, as in the control program.
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
@@ -58,11 +54,11 @@ AE
 }
 
 freed() {
-    grep -q '_ad_[0-9]* = (char\*)(mk(a)), .*f\.fn)(f\.env, _ad_[0-9]*), aether_heap_str_free' "$tmp/$1.c"
+    grep -q '_ad_[0-9]* = (char\*)(mk(a)), .*f\.fn)(f\.env, _ad_[0-9]*), aether_unwind_forget((const void\*)\&_ad_[0-9]*), aether_heap_str_free' "$tmp/$1.c"
 }
 
 gen control "" ""
-freed control || fail "control: the argument is not freed, so this test proves nothing" "$tmp/control.c"
+freed control || fail "control: the argument is not freed" "$tmp/control.c"
 
 gen unbox "" 'g = unbox_closure(box_closure(look))
     apply_owned(g, "y")'
@@ -90,8 +86,6 @@ extern host_ptr() -> ptr' 'h = host_ptr() as *Holder
 gen library "" "" "--emit=lib"
 
 for c in unbox ptr_slot extern_fn c_callback extern_struct extern_fills ptr_view library; do
-    if freed "$c"; then
-        fail "$c: a closure from outside the program can be called, yet the argument is freed" "$tmp/$c.c"
-    fi
+    freed "$c" || fail "$c: a closure from outside the program can be called, and the argument is not freed" "$tmp/$c.c"
 done
-echo "  [PASS] closure_args_foreign: no argument is freed when a closure from outside the program can be called"
+echo "  [PASS] closure_args_foreign: an argument is freed after the call, whoever made the closure"

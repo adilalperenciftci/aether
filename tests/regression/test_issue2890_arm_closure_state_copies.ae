@@ -3,12 +3,12 @@
 // reads, since the next store into the state releases what the field held.
 // These are the kinds it copies safely: a string (retained), a closure
 // (retained), a struct owning strings (duplicated), a plain struct, an
-// int[N], a string[N] (its elements retained) and an array of plain
-// structs. Each closure here is kept in a global, the state is stored
-// over several times, and the closure is run after: it must read the
-// values it was made with. Reading an fn[N] or an array of structs that
-// own strings is refused (tests/integration/closure_actor_state_read_reject);
-// reading their elements into arm locals first is the way, checked last.
+// int[N], a string[N] (its elements retained), an array of plain structs,
+// an fn[N] (each closure retained) and an array of structs owning strings
+// (each duplicated, #2921). Each closure here is kept in a global, the
+// state is stored over several times, and the closure is run after: it
+// must read the values it was made with. Reading elements into arm locals
+// first works as well, checked last.
 
 import std.string
 
@@ -39,6 +39,7 @@ message Run {}
 
 var kept: fn = null
 var kept_locals: fn = null
+var kept_arrays: fn = null
 
 fn check(cond: bool, msg: string) {
     if !cond {
@@ -77,6 +78,9 @@ actor Box {
                 int v = call(f0)
                 return v * 100 + string.length(first)
             }
+            kept_arrays = || {
+                return call(fs[1]) * 100 + string.length(items[1].name)
+            }
         }
         Change(w) -> {
             label = string.concat(w, "!!")
@@ -99,6 +103,8 @@ actor Box {
                 "a kept closure reads the state it was made with (${v})")
             int u = call(kept_locals)
             check(u == 607, "fn[N] and struct array elements read into locals (${u})")
+            int w = call(kept_arrays)
+            check(w == 706, "fn[N] and struct array state copied whole (${w})")
         }
     }
 }

@@ -30,7 +30,7 @@ typedef struct {
     const char* type;
     const char* base;
     void* cell;
-    void (*release)(void*);
+    void (*release)(const void*);
 } AeQuoteCapture;
 
 typedef struct {
@@ -110,7 +110,7 @@ void aether_quote_param(void* tree, const char* name, const char* type) {
 }
 
 void aether_quote_capture(void* tree, const char* name, const char* type,
-                          const char* base, void* cell, void (*release)(void*)) {
+                          const char* base, void* cell, void (*release)(const void*)) {
     AeQuoteTree* t = (AeQuoteTree*)tree;
     if (!t) return;
     AeQuoteCapture* c = (AeQuoteCapture*)quote_alloc(sizeof(AeQuoteCapture));

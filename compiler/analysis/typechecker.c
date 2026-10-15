@@ -918,7 +918,7 @@ static int builtin_lowered_by_name(const char* name, int params) {
         {"typeof", 0, -1}, {"is_type", 0, -1}, {"convert_type", 0, -1},
         {"char_at", 1, -1}, {"str_eq", 2, 2},
         {"ref", 1, 1}, {"ref_get", 1, 1}, {"ref_set", 2, 2}, {"ref_free", 1, 1},
-        {"box_closure", 1, 1}, {"unbox_closure", 1, 1},
+        {"box_closure", 1, 1}, {"unbox_closure", 1, 1}, {"release_closure", 1, 1},
         {"print", 0, -1}, {"println", 0, -1}, {"print_char", 1, -1},
         {"read_char", 0, 0}, {"raw_mode", 0, 0}, {"cooked_mode", 0, 0},
         {"exit", 0, -1}, {"sleep", 1, 1}, {"free", 1, 1}, {"getenv", 1, 1},
@@ -5381,6 +5381,8 @@ int typecheck_program(ASTNode* program) {
     add_symbol(global_table, "box_closure", box_closure_type, 0, 1, 0);
     Type* unbox_closure_type = create_type(TYPE_FUNCTION);
     add_symbol(global_table, "unbox_closure", unbox_closure_type, 0, 1, 0);
+    Type* release_closure_type = create_type(TYPE_VOID);
+    add_symbol(global_table, "release_closure", release_closure_type, 0, 1, 0);
     Type* ref_type = create_type(TYPE_PTR);
     add_symbol(global_table, "ref", ref_type, 0, 1, 0);
     /* Both cells hold an intptr_t; typing the read `int` truncated every
@@ -12127,6 +12129,11 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                                         fields_ok = 0;
                                     free_type(fvt);
                                 }
+                                /* A function named in a closure field is a
+                                 * closure value (#2055). */
+                                if (fv && fd->node_type && fd->node_type->kind == TYPE_FUNCTION &&
+                                    !fd->node_type->is_fnptr)
+                                    function_value_annotate(fv, table);
                                 break;
                             }
                         }
@@ -12707,6 +12714,13 @@ int typecheck_binary_expression(ASTNode* expr, SymbolTable* table) {
             free_type(left_type);
             free_type(right_type);
             return 0;
+        }
+        /* A function named as the value of a closure place is a closure
+         * (#2055). */
+        if (left_type && left_type->kind == TYPE_FUNCTION && !left_type->is_fnptr &&
+            function_value_annotate(right, table)) {
+            free_type(right_type);
+            right_type = infer_type(right, table);
         }
         /* #2628: a closure stored in a typed fn-pointer field (`f.cb = |p|
          * ...`, through a pointer too) or element. Checked first: the test
@@ -14969,6 +14983,9 @@ int typecheck_function_call(ASTNode* call, SymbolTable* table) {
         reject_non_closure_callee(call, table);
         reject_untyped_erased_args(call, table);
     }
+    /* box_closure(add_fn) boxes the closure value of a named function. */
+    if (call->value && strcmp(call->value, "box_closure") == 0 && call->child_count == 1)
+        function_value_annotate(call->children[0], table);
 
     // select() infers its type from the first named arg's value
     if (call->value && strcmp(call->value, "select") == 0 &&

@@ -91,7 +91,7 @@ if grep -q "_aether_str_cell" "$tmp/table.c"; then
     sed 's/^/    /' "$tmp/table.c"
     fail "a table of literals pays for ownership"
 fi
-grep -q "_aether_str_cell_free_val(t\[" "$tmp/owning.c" ||
+grep -qF "_ae_drop_arr2_str(((const char**)t))" "$tmp/owning.c" ||
     fail "an owning array is not released at its exit"
 grep -q "aether_uniform_heap_str((const char\*)(t\[" "$tmp/owning.c" ||
     fail "an owning array's element is returned without a copy"

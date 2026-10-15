@@ -62,7 +62,7 @@ extern qjs_memory_used(q: ptr) -> long
 extern qjs_eval(q: ptr, code: string, filename: string, flags: int) -> int
 extern qjs_call(q: ptr, f: int, this_h: int, args: int) -> int
 extern qjs_run_jobs(q: ptr) -> int
-extern qjs_function(q: ptr, name: string, arity: int, cb: fn) -> int
+extern qjs_function(q: ptr, name: string, arity: int, cb: @retain fn) -> int
 extern qjs_throw(q: ptr, kind: string, msg: string) -> int
 extern qjs_rethrow(q: ptr) -> int
 extern qjs_release(q: ptr, h: int)

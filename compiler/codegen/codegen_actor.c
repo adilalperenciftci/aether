@@ -329,15 +329,6 @@ int actor_state_field_is_atomic(CodeGenerator* gen, const char* actor_name,
     return 0;
 }
 
-/* The variable an assignment target writes through: `x`, `x.f`, `x[i]`. */
-static const char* store_target_root(ASTNode* lhs) {
-    while (lhs && (lhs->type == AST_MEMBER_ACCESS || lhs->type == AST_ARRAY_ACCESS) &&
-           lhs->child_count > 0) {
-        lhs = lhs->children[0];
-    }
-    return (lhs && lhs->type == AST_IDENTIFIER) ? lhs->value : NULL;
-}
-
 /* #2528: a `string` state field owns what it holds, tracked by
  * `_heap_<name>` beside it (a `ptr`-widened field is a payload the user
  * manages). */
@@ -571,7 +562,6 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
                         clear_heap_string_vars(gen);
                         clear_captured_string_params(gen);
                         clear_seq_vars(gen);
-                        clear_opt_str_vars(gen);
                         /* #2748: and the escape marks the last function or
                          * handler left, as a function clears them, so they
                          * neither keep this handler's locals nor reach the
@@ -625,6 +615,12 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
                                         fdef = fdef->next;
                                     }
                                 }
+                                /* A fixed-size array binds a view of the
+                                 * message's, as an array parameter is. */
+                                Type* aft = message_field_type(gen->program, pattern->value,
+                                                               field->value);
+                                if (type_is_sized_array(aft))
+                                    c_type = cg_internf("%s*", get_c_type(aft->element_type));
                                 const char* var_name = field->value;
                                 if (field->child_count > 0 && field->children[0] &&
                                     field->children[0]->type == AST_PATTERN_VARIABLE && field->children[0]->value) {
@@ -708,7 +704,7 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
                             /* #2748: its `*StringSeq` and `string?` locals
                              * too, as a function's are. */
                             hoist_seq_trackers(gen, arm_body);
-                            hoist_opt_str_trackers(gen, arm_body);
+                            hoist_opt_string_locals(gen, arm_body);
                         }
 
                         // Generate handler body
@@ -728,10 +724,8 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
                              * so the local keeps its own exit free. */
                             mark_escaped_heap_string_vars(gen, arm_body);
                             mark_escaped_seq_vars(gen, arm_body);
-                            mark_escaped_opt_str_vars(gen, arm_body);
                             push_heap_string_exit_free_defers(gen, arm_body);
                             push_seq_exit_free_defers(gen, arm_body);
-                            push_opt_str_exit_free_defers(gen, arm_body);
                             for (int k = 0; k < arm_body->child_count; k++) {
                                 generate_statement(gen, arm_body->children[k]);
                             }
@@ -848,19 +842,16 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
             clear_heap_string_vars(gen);
             clear_captured_string_params(gen);
             clear_seq_vars(gen);
-            clear_opt_str_vars(gen);
             clear_escaped_string_vars(gen);
             if (tbody->type == AST_BLOCK) {
                 gen->hoist_scope_body = tbody;
                 hoist_heap_string_trackers(gen, tbody);
                 hoist_seq_trackers(gen, tbody);
-                hoist_opt_str_trackers(gen, tbody);
+                hoist_opt_string_locals(gen, tbody);
                 mark_escaped_heap_string_vars(gen, tbody);
                 mark_escaped_seq_vars(gen, tbody);
-                mark_escaped_opt_str_vars(gen, tbody);
                 push_heap_string_exit_free_defers(gen, tbody);
                 push_seq_exit_free_defers(gen, tbody);
-                push_opt_str_exit_free_defers(gen, tbody);
                 for (int j = 0; j < tbody->child_count; j++) {
                     generate_statement(gen, tbody->children[j]);
                 }
@@ -1123,49 +1114,18 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
         if (child->type == AST_STATE_DECLARATION) {
             if (type_is_sized_array(child->node_type) && child->node_type->array_size > 0 &&
                 !state_field_is_ptr(gen, actor, child->value)) {
-                /* #2464: an array field does not assign. Zero it, then set
-                 * the elements an array-literal initializer gives. */
+                /* #2464: an array field does not assign. Zeroed, then
+                 * filled from its initializer, each element taken. */
                 print_line(gen, "memset(actor->%s, 0, sizeof(actor->%s));",
                            child->value, child->value);
-                ASTNode* init = child->child_count > 0 ? child->children[0] : NULL;
-                /* #2688: an array of owning structs takes a value of its own
-                 * per element. */
-                const char* oas = state_struct_array_owned(gen, child, NULL);
-                if (init && init->type == AST_ARRAY_LITERAL) {
-                    /* #2528: an owned array's elements are copied or taken. */
-                    int oak = state_array_owned(child, NULL);
-                    for (int e = 0; e < init->child_count &&
-                                    e < child->node_type->array_size; e++) {
-                        print_indent(gen);
-                        fprintf(gen->output, "actor->%s[%d] = ", child->value, e);
-                        if (oak == 1) {
-                            emit_owned_string_element(gen, init->children[e]);
-                        } else if (oak == 2) {
-                            emit_closure_take(gen, init->children[e]);
-                        } else if (oas) {
-                            emit_struct_take(gen, init->children[e], oas, NULL);
-                        } else {
-                            generate_expression(gen, init->children[e]);
-                        }
-                        fprintf(gen->output, ";\n");
-                    }
-                } else if (init && oas) {
-                    print_indent(gen);
-                    fprintf(gen->output, "{ %s const volatile* _ae_src = (", oas);
-                    generate_expression(gen, init);
-                    fprintf(gen->output, "); for (int _ae_k = 0; _ae_k < %d; _ae_k++) actor->%s[_ae_k] = %s_dup(_ae_src[_ae_k]); }\n",
-                            child->node_type->array_size, child->value, oas);
-                } else if (init) {
-                    print_indent(gen);
-                    fprintf(gen->output, "memcpy(actor->%s, ", child->value);
-                    generate_expression(gen, init);
-                    fprintf(gen->output, ", sizeof(actor->%s));\n", child->value);
-                }
+                if (child->child_count > 0)
+                    generate_value_statement(gen, cg_internf("actor->%s", child->value),
+                                             child->children[0], child->node_type);
             } else if (child->child_count > 0) {
                 /* A statement of its own (#2798): an `or` with a block, say,
                  * runs ahead of it, in plain C. */
                 generate_value_statement(gen, cg_internf("actor->%s", child->value),
-                                         child->children[0]);
+                                         child->children[0], child->node_type);
             } else if (state_zero_is_aggregate(child->node_type)) {
                 /* #2904: a closure, a struct, an optional, a tuple or a sum
                  * has no `0` to take; its zero value is all bytes zero. */

@@ -31,7 +31,7 @@ void  aether_quote_param(void* tree, const char* name, const char* type);
  * is the type the cell holds as the typed getters know it ("float",
  * "f32x4", "int", ...); `type` is the Aether type as written ("vec2"). */
 void  aether_quote_capture(void* tree, const char* name, const char* type,
-                           const char* base, void* cell, void (*release)(void*));
+                           const char* base, void* cell, void (*release)(const void*));
 
 /* Accessors (std/quote/module.ae). */
 int         aether_quote_version(void* tree);

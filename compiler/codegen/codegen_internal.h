@@ -93,7 +93,11 @@ void builder_cfg_end(CodeGenerator* gen, BuilderCfg saved);
 /* `<lhs> = <value>;` as a statement of its own, outside any Aether
  * statement (an actor state's initializer): temporaries and constructs as
  * generate_statement handles a statement's. */
-void generate_value_statement(CodeGenerator* gen, const char* lhs, ASTNode* value);
+void generate_value_statement(CodeGenerator* gen, const char* lhs, ASTNode* value, Type* t);
+const char* c_member_decl(Type* t, const char* name);
+int try_emit_cell_release(CodeGenerator* gen, ASTNode* deferred);
+const char* user_defer_ctx(ASTNode* body);
+void emit_defer_thunks(CodeGenerator* gen);
 int control_prelude_depth(void);
 void control_prelude_end(int depth);
 
@@ -152,11 +156,6 @@ void mark_seq_var(CodeGenerator* gen, const char* var_name);
 void clear_seq_vars(CodeGenerator* gen);
 int is_escaped_seq_var(CodeGenerator* gen, const char* var_name);
 void mark_escaped_seq_var(CodeGenerator* gen, const char* var_name);
-int is_opt_str_var(CodeGenerator* gen, const char* var_name);
-void mark_opt_str_var(CodeGenerator* gen, const char* var_name);
-void clear_opt_str_vars(CodeGenerator* gen);
-int is_escaped_opt_str_var(CodeGenerator* gen, const char* var_name);
-void mark_escaped_opt_str_var(CodeGenerator* gen, const char* var_name);
 /* Classifier: does the expression produce an OWNED *StringSeq (a fresh
  * ref the caller must free), vs a borrowed spine pointer (seq_tail)?
  * Defined in codegen_stmt.c. */
@@ -174,7 +173,6 @@ int is_heap_string_expr(CodeGenerator* gen, ASTNode* expr);
 int is_owned_opt_string_call(CodeGenerator* gen, ASTNode* e);
 int is_owned_string_unwrap(CodeGenerator* gen, ASTNode* e);
 int is_fresh_heap_string_temp(CodeGenerator* gen, ASTNode* e);
-int opt_string_arg_freed_after_call(CodeGenerator* gen, const char* func_name, int ai);
 
 /* Does evaluating the expression have a side effect (a call, a send, a
  * va_* op)? Defined in codegen_expr.c. Gates the series-collapse
@@ -309,10 +307,6 @@ int callee_returns_string(CodeGenerator* gen, const char* func_name);
 int closure_param_escapes_via_body(CodeGenerator* gen, ASTNode* closure, int param_idx,
                                    int return_is_escape);
 
-/* #2499: sets gen->closure_args_borrowed. Run after discover_closures and
- * discover_bare_fn_adapters. Defined in codegen_stmt.c. */
-void compute_closure_args_borrowed(CodeGenerator* gen);
-
 /* True when `func_name` resolves to a user function with a visible body
  * block; only then may the body-walk override the conservative
  * call_arg_escapes heuristic. Defined in codegen_stmt.c. */
@@ -350,6 +344,9 @@ void emit_closure_env_drained_call(CodeGenerator* gen, ASTNode* call,
 MessageFieldDef* find_msg_field(MessageDef* msg_def, const char* name);
 Type* message_field_type(ASTNode* program, const char* msg, const char* field);
 void emit_message_field_init(CodeGenerator* gen, MessageFieldDef* fdef, ASTNode* rhs);
+int message_has_array_fields(CodeGenerator* gen, ASTNode* message);
+void emit_message_field_inits(CodeGenerator* gen, ASTNode* message, MessageDef* msg_def);
+void emit_message_array_fills(CodeGenerator* gen, ASTNode* message, const char* lv, TempSeq* s);
 void emit_message_array_hoists(CodeGenerator* gen, ASTNode* message, MessageDef* msg_def);
 
 /* Statement generation (codegen_stmt.c) */
@@ -423,7 +420,6 @@ void zb_params_free(CodeGenerator* gen);
  * a slot takes as views (codegen_stmt.c). */
 void str_arrays_free(CodeGenerator* gen);
 int string_array_owns(CodeGenerator* gen, ASTNode* scope, const char* name);
-int closure_captures_string_view_array(CodeGenerator* gen, ASTNode* closure, const char* name);
 int is_owned_string_element(CodeGenerator* gen, ASTNode* e);
 int is_owning_array_string_element(CodeGenerator* gen, ASTNode* e);
 void code_generator_release(CodeGenerator* gen);
@@ -503,9 +499,7 @@ void mark_escaped_seq_vars(CodeGenerator* gen, ASTNode* body);
 void push_seq_exit_free_defers(CodeGenerator* gen, ASTNode* body);
 
 /* `string?` heap-ownership lifecycle (parallel to the seq passes). */
-void hoist_opt_str_trackers(CodeGenerator* gen, ASTNode* body);
-void mark_escaped_opt_str_vars(CodeGenerator* gen, ASTNode* body);
-void push_opt_str_exit_free_defers(CodeGenerator* gen, ASTNode* body);
+void hoist_opt_string_locals(CodeGenerator* gen, ASTNode* body);
 
 /* Actor generation (codegen_actor.c) */
 void generate_actor_definition(CodeGenerator* gen, ASTNode* actor);
@@ -588,17 +582,13 @@ void emit_bare_fn_adapters(CodeGenerator* gen);
 void emit_bare_fn_adapter_decls(CodeGenerator* gen);
 void discover_bare_fn_adapters(CodeGenerator* gen);
 void discover_fn_values(CodeGenerator* gen);                       /* #2586 */
-void compute_fnptr_args_borrowed(CodeGenerator* gen);              /* #2586 */
 int fn_value_name(const char* name);
 int emitting_marked_fn_value(CodeGenerator* gen);
-int fnptr_arg_borrowed(int slot);
 int typed_fnptr_call(CodeGenerator* gen, ASTNode* call);
 int param_may_hold_caller_string(const Type* t);
-void callee_memo_clear(CodeGenerator* gen);
 int fnptr_call_returns_string(CodeGenerator* gen, ASTNode* call);
-int call_hands_back_temp(CodeGenerator* gen, ASTNode* call);       /* #2649 */
-int hands_back_temp_memo_begin(CodeGenerator* gen, ASTNode* call, int* out, int* mark);
-void hands_back_temp_memo_end(CodeGenerator* gen, ASTNode* call, int r, int mark);
+int call_frees_arg(CodeGenerator* gen, const char* fn);
+int call_param_keeps(CodeGenerator* gen, const char* func_name, int idx);
 
 /* Function/struct generation (codegen_func.c) */
 int has_return_value(ASTNode* node);
@@ -695,6 +685,9 @@ void emit_string_take_owned(CodeGenerator* gen, ASTNode* e, int cell);
 void own_collect_types(CodeGenerator* gen, ASTNode* node);
 void emit_own_ops(CodeGenerator* gen);
 const char* own_fn(CodeGenerator* gen, Type* t, const char* op);
+const char* own_cell_release_fn(const char* c_type);
+const char* own_place_lvalue(Type* t, const char* name);
+const char* own_unwind_fn(CodeGenerator* gen, Type* t);
 void own_reset(void);
 
 /* #2298: emit the `@derive(schema)` field tables and their getters

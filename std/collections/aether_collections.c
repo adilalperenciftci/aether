@@ -281,8 +281,11 @@ int list_add_closure_owned(ArrayList* list, void* box) {
  * and releases what the slot owned before (#2518). The box is the caller's
  * to free when the index is out of range (returns 0). */
 int list_set_closure_owned(ArrayList* list, int index, void* box) {
-    if (!list || index < 0 || index >= list->size) return 0;
-    if (!list_grow_owned_flags(list)) return 0;
+    /* A store that fails gives the box back: it was made for the list. */
+    if (!list || index < 0 || index >= list->size || !list_grow_owned_flags(list)) {
+        free(box);
+        return 0;
+    }
     closure_box_retain_env(box);
     list_release_slot(list, index);
     list->items[index] = box;
@@ -345,8 +348,11 @@ int list_set_string_owned(ArrayList* list, int index, const void* item) {
 /* The adopting form: the caller's single reference to a fresh string moves
  * into the slot, the old element released. */
 int list_set_string_adopted(ArrayList* list, int index, const void* item) {
-    if (!list || index < 0 || index >= list->size) return 0;
-    if (!list_grow_owned_flags(list)) return 0;
+    /* A store that fails gives the string it adopted back. */
+    if (!list || index < 0 || index >= list->size || !list_grow_owned_flags(list)) {
+        release_owned_value((void*)item, 1);
+        return 0;
+    }
     list_release_slot(list, index);
     list->items[index] = (void*)item;
     list->owned_flags[index] = item ? 1 : 0;

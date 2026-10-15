@@ -261,7 +261,40 @@ void emit_own_ops(CodeGenerator* gen) {
         fprintf(o, "static AETHER_MAYBE_UNUSED void _ae_drop_unwind_%s(const void* p) {\n", ot->mangled);
         fprintf(o, "    _ae_drop_%s((%s)(void*)p);\n", ot->mangled, pt);
         fprintf(o, "}\n");
+        /* A shared cell holding one (a variable a closure writes): the last
+         * holder drops what it holds, then frees the cell (#2458). */
+        fprintf(o, "static AETHER_MAYBE_UNUSED void _ae_cell_release_%s(const void* cell) {\n", ot->mangled);
+        fprintf(o, "    if (!cell) return;\n");
+        fprintf(o, "    _AeCellHeader* h = (_AeCellHeader*)cell - 1;\n");
+        fprintf(o, "    if (_aether_cell_last(h)) { _ae_drop_%s((%s)(void*)cell); free(h); }\n", ot->mangled, pt);
+        fprintf(o, "}\n");
     }
+}
+
+/* The cell release of the composite whose C type is spelled `c_type` (a
+ * cell's type is known by its spelling, promoted_cell_release_fn), or NULL
+ * when no owning composite has it. */
+const char* own_cell_release_fn(const char* c_type) {
+    for (int i = 0; c_type && i < g_own_count; i++)
+        if (strcmp(get_c_type(g_own_types[i].type), c_type) == 0)
+            return cg_internf("_ae_cell_release_%s", g_own_types[i].mangled);
+    return NULL;
+}
+
+/* The local `name` of owning type `t` as an lvalue own_emit_part takes: a
+ * volatile local (one a `try` body writes, #2690) seen through a plain
+ * pointer, as the generated functions take it. */
+const char* own_place_lvalue(Type* t, const char* name) {
+    if (t->kind == TYPE_ARRAY) return cg_internf("((%s*)%s)", get_c_type(t->element_type), name);
+    return cg_internf("(*(%s*)&%s)", get_c_type(t), name);
+}
+
+/* The drop the unwind journal runs on a place of owning type `t` (#2923). */
+const char* own_unwind_fn(CodeGenerator* gen, Type* t) {
+    if (t->kind == TYPE_FUNCTION) return "_aether_closure_drop_unwind";
+    const char* s = struct_owning_strings(gen, t);
+    if (s) return cg_internf("%s_destroy_unwind", s);
+    return own_fn(gen, t, "drop_unwind");
 }
 
 const char* own_fn(CodeGenerator* gen, Type* t, const char* op) {

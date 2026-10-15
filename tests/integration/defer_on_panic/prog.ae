@@ -1,0 +1,78 @@
+// A plain `defer` runs on every exit of its scope (language reference),
+// the exit a caught panic takes too (#2923): newest first, across the
+// frames the panic leaves, over the locals as they are when it leaves.
+import std.mem
+import std.list
+import std.string
+
+extern exit(code: int)
+
+var trail = 0
+var seen = 0
+
+fn check(ok: bool, what: string) {
+    if !ok {
+        println("FAIL: ${what}")
+        exit(1)
+    }
+}
+
+inner(n: int) {
+    x = 1
+    defer seen = seen * 100 + x
+    x = n
+    defer trail = trail * 10 + 2
+    if n > 0 {
+        defer trail = trail * 10 + 1
+        panic("stop")
+    }
+}
+
+outer(n: int) {
+    defer trail = trail * 10 + 3
+    inner(n)
+}
+
+// A deferred statement writes a local the frame still reads after a
+// normal exit.
+counted() -> int {
+    hits = 0
+    {
+        defer hits = hits + 1
+    }
+    return hits
+}
+
+// What a deferred statement frees on the way out of a panic.
+round(w: string) {
+    try {
+        l = list.new()
+        defer list.free(l)
+        list.add(l, string.concat(w, "#a"))
+        panic("stop")
+    } catch e {
+        check(e == "stop", "the panic, caught")
+    }
+}
+
+main() {
+    try {
+        outer(7)
+    } catch e {
+        check(e == "stop", "the panic")
+    }
+    check(trail == 123, "the defers ran newest first, across frames")
+    check(seen == 7, "a defer reads a local as it is when the panic leaves")
+    trail = 0
+    outer(0)
+    check(trail == 23, "a normal exit runs each defer once")
+    check(counted() == 1, "a defer's write to a local is the frame's")
+    if mem.heap_in_use_exact() {
+        round("w")
+        grown = mem.steady_growth(|| {
+            round("w")
+        }, 4)
+        check(grown == 0, "a panic leaves nothing a defer frees")
+    }
+    println("ok ${trail} ${seen}")
+}

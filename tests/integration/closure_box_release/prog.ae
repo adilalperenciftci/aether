@@ -1,0 +1,60 @@
+// A `ptr` slot owns nothing (#2926): a closure kept in one is boxed with a
+// reference of its own, which the program gives back with
+// `release_closure`. A `ptr` parameter that only borrows is given a box on
+// the caller's stack, and the closure stays the caller's.
+import std.mem
+import std.string
+
+extern exit(code: int)
+
+struct Hook {
+    p: ptr
+}
+
+var slot: ptr = null
+
+fn check(ok: bool, what: string) {
+    if !ok {
+        println("FAIL: ${what}")
+        exit(1)
+    }
+}
+
+stash(p: @keep ptr) {
+    release_closure(slot)
+    slot = p
+}
+
+runs(p: ptr) -> int {
+    f = unbox_closure(p)
+    string s = call(f)
+    return string.length(s)
+}
+
+round(w: string) -> int {
+    c = string.concat(w, "#a")
+    h = Hook { p: box_closure(|| { return c }) }
+    defer release_closure(h.p)
+    f = || { return string.concat(c, "!") }
+    stash(f)
+    n = runs(f) + runs(|| { return c })
+    g = unbox_closure(h.p)
+    string r = call(g)
+    check(r == "w#a", "the boxed closure")
+    return n
+}
+
+main() {
+    check(round("w") == 7, "the borrowed boxes ran")
+    g = unbox_closure(slot)
+    string r = call(g)
+    check(r == "w#a!", "the kept closure, after its scope ended")
+    if mem.heap_in_use_exact() {
+        grown = mem.steady_growth(|| {
+            round("w")
+        }, 4)
+        check(grown == 0, "the boxes are given back")
+    }
+    release_closure(slot)
+    println("ok")
+}

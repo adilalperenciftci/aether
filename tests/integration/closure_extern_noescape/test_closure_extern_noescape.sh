@@ -1,8 +1,9 @@
 #!/bin/sh
 # Regression (#2523): an extern parameter declared `@noescape` tells the
 # compiler the C function uses the closure only during the call, so the
-# closure's environment is released once the call returns; an unannotated
-# extern that stores the closure keeps it alive for the later call from C.
+# closure's environment is released once the call returns; an extern that
+# stores the closure declares it `@retain` (R4) and keeps it alive for the
+# later call from C.
 #
 # probe.ae passes capturing closures (literals and a local, by value and
 # through a `ptr` slot) to the annotated shims many times and, where the

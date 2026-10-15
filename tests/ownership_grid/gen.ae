@@ -957,6 +957,17 @@ place_boxed(g: *GridGen, pid: string, kid: string, tag: string) -> (string, stri
     return pre, "box_closure(${e})"
 }
 
+// A `ptr` slot owns nothing: a closure kept there in a box is the
+// program's to give back (`release_closure`), so a store gives back the box
+// the slot held first (none is a no-op). K9 in the module var is a bare
+// code address, not a box.
+slot_give_back(pid: string, kid: string, lv: string) -> string {
+    if pid == "P13G" && kid == "K9" {
+        return ""
+    }
+    return "release_closure(${lv})"
+}
+
 slot_fn(g: *GridGen, kid: string, tag: string) -> string {
     name = "slot_${tag}"
     pre, e = fresh(g, kid, tag)
@@ -1012,11 +1023,11 @@ place_bind(g: *GridGen, pid: string, kid: string, tag: string) -> string {
     }
     if pid == "P13G" || pid == "P13D" {
         pre, e = place_boxed(g, pid, kid, tag)
-        return lines_cat(pre, "slot = ${e}")
+        return lines_cat3(pre, slot_give_back(pid, kid, "slot"), "slot = ${e}")
     }
     if pid == "P13F" {
         pre, e = place_boxed(g, pid, kid, tag)
-        return lines_cat(pre, "h = PtrBox { p: ${e} }")
+        return lines_cat3(pre, "h = PtrBox { p: ${e} }", "defer release_closure(h.p)")
     }
     // P18
     need_doc(g)
@@ -1055,11 +1066,11 @@ place_store(g: *GridGen, pid: string, kid: string, tag: string) -> string {
     }
     if pid == "P13G" || pid == "P13D" {
         pre, e = place_boxed(g, pid, kid, tag)
-        return lines_cat(pre, "slot = ${e}")
+        return lines_cat3(pre, slot_give_back(pid, kid, "slot"), "slot = ${e}")
     }
     if pid == "P13F" {
         pre, e = place_boxed(g, pid, kid, tag)
-        return lines_cat(pre, "h.p = ${e}")
+        return lines_cat3(pre, slot_give_back(pid, kid, "h.p"), "h.p = ${e}")
     }
     if pid == "P18" {
         _p, e = fresh(g, kid, tag)
@@ -1543,7 +1554,7 @@ simple_cell_in(g: *GridGen, kid: string, pid: string, t: string) -> string {
         c1 = place_check(g, pid, kid, "a", "the value, after a reader saw it")
         body = lines_cat3(lines_cat(start, pre), "${n} = reads(${r})\ncheck(${n} == 1, \"the reader ran\")", c1)
     } else if t == "T7" && pid == "P13G" {
-        gen_decl(g, "fn stash", "// Keeps the pointer it is given in the module var.\nstash(p: @keep ptr) {\n    slot = p\n}")
+        gen_decl(g, "fn stash", "// Keeps the pointer it is given in the module var.\nstash(p: @keep ptr) {\n    release_closure(slot)\n    slot = p\n}")
         pre, e = fresh(g, kid, "a")
         body = lines_cat(pre, "f = ${e}\nstash(f)")
         rpre, r = place_read(g, pid, kid)

@@ -9,19 +9,17 @@
 // its own now, as a local takes one from a `string` cell
 // (is_captured_string), and the `some` binding is a copy the arm owns.
 //
-// A `string?` module var gave its string back at a re-bind too, and a copy
-// at each binding did not cover a view held in an evaluation-order
-// temporary: `show(name ?? "", rebind())` read the string `rebind()` had
-// freed. A `string?` global keeps every string it was given now, as a
-// `string` global does, so a view of it is valid however it is held.
+// A `string?` module var gives its string back at a re-bind (R3), and a
+// view of it held in an evaluation-order temporary or an interpolation
+// segment (`show(name ?? "", rebind())`, `"${name ?? ""} ${rebind()}"`)
+// holds a reference of its own until its statement is done, so the re-bind
+// cannot free what it reads (#2808, #2921).
 //
 // After each re-bind, 50 fresh strings (`burn`) reuse what was freed, so a
-// dead view reads another string. The leak check covers the cell, which
-// owns its strings, where the heap count is exact (mem.heap_in_use_exact):
-// after a warm-up, some window of the same work grows by exactly 0
-// (mem.steady_growth). A global never gives back what it held: the 4
-// strings it held before a re-bind are unreachable at exit (#2808), which
-// tests/leaks_known.txt allows the macOS leaks gate (8 blocks).
+// dead view reads another string. The leak check covers the cell and the
+// global where the heap count is exact (mem.heap_in_use_exact): after a
+// warm-up, some window of the same work grows by exactly 0
+// (mem.steady_growth); the macOS leaks gate finds nothing.
 
 import std.mem
 import std.string
