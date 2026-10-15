@@ -30,5 +30,6 @@ main() {
     check(strlen((names as ptr[])[0]) == 30, "a literal stored through a C view is its characters")
     check(strlen((names as ptr[])[1]) == 14, "a counted string stored through a C view is its characters")
     free(names)
+    release(counted)
     println("ok")
 }
