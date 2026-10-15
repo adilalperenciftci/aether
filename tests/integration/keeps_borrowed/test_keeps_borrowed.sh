@@ -194,6 +194,18 @@ main() { put(heap.new(N), string.split_to_seq("a,b", ",")) }
 AE
 refused seq_field 6:15 "a \`*StringSeq\` is given to a \`ptr\` field"
 
+cat > "$TMP/c_view_temp.ae" <<'AE'
+import std.string
+
+extern calloc(n: int, size: int) -> ptr
+
+main() {
+    names = calloc(2, 8)
+    (names as string[])[0] = string.concat("a", string.from_int(1))
+}
+AE
+refused c_view_temp 7:36 "a string built here is stored into C memory"
+
 cat > "$TMP/declared.ae" <<'AE'
 import std.string
 

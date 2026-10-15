@@ -500,6 +500,19 @@ releases nothing of the owner's (a struct parameter already did this,
 #2582). The checker refuses `string.seq_free` of a borrowed sequence
 parameter, as it refuses freeing a string one (E0901).
 
+**C memory owns nothing.** A string stored into C memory viewed as
+`string[]` (`(names as string[])[i] = s`) gives C its characters and takes
+no reference: the program keeps the string alive while C reads it, as for
+any `ptr` slot. The checker refuses a string built in the statement itself
+(a call, an interpolation), which nothing would keep (E0902); bind it to a
+local first. An earlier pass gave the stored string a reference of its own,
+which nothing could release (C holds only the characters), so every such
+store leaked.
+
+**A literal may be kept as it is.** E0902 refuses a `string` given to a
+`@keep ptr` without `string.keep`, but a string literal is pinned and never
+released, so a slot may keep it as it stands (`pqueue.push(q, 1, "job")`).
+
 **A permutation takes nothing.** Sorting moves the elements' pointers
 (`mem.swap_ptrs`) and compares through borrowed reads, so it neither copies
 nor releases: the array may be Aether's or C's (a `strarr` view).

@@ -7069,10 +7069,12 @@ static int is_seq_retain_call(ASTNode* e) {
 }
 
 /* The kind of value `e` is when a `ptr` that keeps it would hold no
- * reference of its own ("string", "*StringSeq"), or NULL. */
+ * reference of its own ("string", "*StringSeq"), or NULL. A string literal
+ * is pinned, never released, so a `ptr` may keep it as it is. */
 static const char* unkept_value_kind(ASTNode* e) {
     if (!e || !e->node_type) return NULL;
-    if (e->node_type->kind == TYPE_STRING && !is_string_keep_call(e)) return "string";
+    if (e->node_type->kind == TYPE_STRING && e->type != AST_LITERAL && !is_string_keep_call(e))
+        return "string";
     if (is_string_seq_ptr_type(e->node_type) && !is_seq_retain_call(e)) return "*StringSeq";
     return NULL;
 }
@@ -7091,6 +7093,18 @@ static void report_unkept_into_ptr(ASTNode* at, const char* kind, const char* wh
 
 static void check_strings_into_keep(ASTNode* program, ASTNode* n) {
     if (!n) return;
+    /* C memory viewed as `string[]` owns nothing: a string stored into it
+     * must outlive C's reads, which one built in the statement does not. */
+    if (n->type == AST_BINARY_EXPRESSION && n->value && !strcmp(n->value, "=") && n->child_count == 2 &&
+        n->children[0] && n->children[0]->type == AST_ARRAY_ACCESS &&
+        n->children[0]->child_count > 0 && n->children[0]->children[0] &&
+        n->children[0]->children[0]->type == AST_PTR_AS_ARRAY_CAST && n->children[1] &&
+        n->children[1]->node_type && n->children[1]->node_type->kind == TYPE_STRING &&
+        (n->children[1]->type == AST_FUNCTION_CALL || n->children[1]->type == AST_STRING_INTERP))
+        type_error_code_hint(
+            "a string built here is stored into C memory, which owns nothing and reads it after this statement",
+            "bind it to a local that outlives C's use, then store the local",
+            n->children[1]->line, n->children[1]->column, AETHER_ERR_KEEPS_BORROWED);
     /* A `ptr` field keeps what it is given, as a `@keep` parameter does. */
     if (n->type == AST_BINARY_EXPRESSION && n->value && !strcmp(n->value, "=") && n->child_count == 2 &&
         n->children[0] && is_bare_ptr_type(n->children[0]->node_type) &&

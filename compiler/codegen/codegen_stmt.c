@@ -3608,16 +3608,17 @@ static int emit_slice_element_store(CodeGenerator* gen, ASTNode* lhs, ASTNode* r
     if (!at || at->kind != TYPE_ARRAY || at->array_size > 0 || !at->element_type ||
         at->element_type->kind == TYPE_ARRAY || !own_type_owns(gen, at->element_type))
         return 0;
-    /* A view of C memory (`p as string[]`, an extern's slice) holds the
-     * characters C reads and frees nothing: a string stored into it is given
-     * a reference of its own (R4), which nothing in the program releases. */
+    /* A view of C memory (`p as string[]`, an extern's slice) owns nothing
+     * (R4): a string stored into it gives C its characters, and the program
+     * keeps the string alive while C reads them (the checker refuses one
+     * built in the statement, which nothing would keep, E0902). */
     if (lhs->children[0]->type == AST_PTR_AS_ARRAY_CAST ||
         expr_is_c_view_of_slice(gen, lhs->children[0])) {
         if (at->element_type->kind != TYPE_STRING) return 0;
         print_indent(gen);
         generate_expression(gen, lhs);
         fprintf(gen->output, " = aether_string_data(");
-        emit_string_take_owned(gen, rhs, 0);
+        generate_expression(gen, rhs);
         fprintf(gen->output, ");\n");
         return 1;
     }
