@@ -27,9 +27,11 @@ exports(
     Tree, Node, Capture, VERSION,
     BLOCK, LET, ASSIGN, RETURN, IF, WHILE, FOR, BREAK, CONTINUE, EXPR,
     LIT, LOCAL, CAPTURE, UNARY, BINARY, CHOOSE, CALL, FIELD, INDEX, MAKE, FIELD_VALUE,
+    HELPER_CALL,
     kind_name,
     version, body, source, hash, param_count, param_name, param_type,
     capture_count, capture, capture_named,
+    helper_count, helper, helper_named, function_name, return_type,
     kind, type_of, name, op, lit, line, child_count, child, children, walk,
     capture_name, capture_type, cell,
     get_float, get_f32, get_int, get_long, get_bool, get_string, get_ptr, get_f32x4,
@@ -44,7 +46,7 @@ type Node = distinct ptr
 type Capture = distinct ptr
 
 // The tree format's version. Goes up by one each time a kind is added.
-const VERSION = 1
+const VERSION = 2
 
 // Node kinds, version 1. Children are listed after each.
 const BLOCK = 1 // statements
@@ -68,6 +70,8 @@ const FIELD = 18 // object; `name` is the field
 const INDEX = 19 // object, index
 const MAKE = 20 // FIELD_VALUEs, one per field set; `type` is the struct
 const FIELD_VALUE = 21 // value; `name` is the field it sets, in a MAKE
+// Version 2.
+const HELPER_CALL = 22 // arguments; `name` is a @quotable function the tree carries (helper_named)
 
 extern aether_quote_version(t: ptr) -> int
 extern aether_quote_body(t: ptr) -> ptr
@@ -99,6 +103,10 @@ extern aether_quote_read_bool(cell: ptr) -> int
 extern aether_quote_read_string(cell: ptr) -> string
 extern aether_quote_read_ptr(cell: ptr) -> ptr
 extern aether_quote_free(t: ptr)
+extern aether_quote_helper_count(t: ptr) -> int
+extern aether_quote_helper_at(t: ptr, i: int) -> ptr
+extern aether_quote_function_name(t: ptr) -> string
+extern aether_quote_return_type(t: ptr) -> string
 
 // The kind's name, "BINARY" for BINARY; "?" for a kind this version does
 // not know.
@@ -125,6 +133,7 @@ kind_name(k: int) -> string {
         19 -> { return "INDEX" }
         20 -> { return "MAKE" }
         21 -> { return "FIELD_VALUE" }
+        22 -> { return "HELPER_CALL" }
         _ -> { return "?" }
     }
 }
@@ -153,6 +162,30 @@ capture_named(t: Tree, n: string) -> Capture {
 
 // Release the tree and its references to the captured variables' cells.
 free(t: Tree) { aether_quote_free(t as ptr) }
+
+// ---- @quotable functions (version 2) ----
+//
+// Every @quotable function a quote's body reaches, through its own calls or
+// a helper's, callees before their callers: the order a back end that wants
+// each declared before its use (GLSL) writes them in. Each is a Tree with a
+// name, a return type, its parameters and its body, and no captures; a
+// HELPER_CALL names one. They are freed with the quote's tree.
+helper_count(t: Tree) -> int { return aether_quote_helper_count(t as ptr) }
+helper(t: Tree, i: int) -> Tree { return aether_quote_helper_at(t as ptr, i) as Tree }
+// The helper a HELPER_CALL's `name` names; a null Tree when there is none.
+helper_named(t: Tree, n: string) -> Tree {
+    count = helper_count(t)
+    i = 0
+    while i < count {
+        h = helper(t, i)
+        if function_name(h) == n { return h }
+        i = i + 1
+    }
+    return null as Tree
+}
+// A helper's name and return type ("" for a quote's own tree).
+function_name(t: Tree) -> string { return aether_quote_function_name(t as ptr) }
+return_type(t: Tree) -> string { return aether_quote_return_type(t as ptr) }
 
 // ---- nodes ----
 
@@ -311,7 +344,7 @@ fn operand(n: Node, p: int, right: int) -> string {
 
 fn ends_in_call(n: Node) -> bool {
     k = kind(n)
-    if k == CALL { return true }
+    if k == CALL || k == HELPER_CALL { return true }
     if k == BINARY { return ends_in_call(child(n, 1)) }
     if k == UNARY { return ends_in_call(child(n, 0)) }
     return false
@@ -357,7 +390,7 @@ fn expr_source(n: Node) -> string {
         b = expr_source(child(n, 2))
         return "if ${c} { ${a} } else { ${b} }"
     }
-    if k == CALL { return "${name(n)}(${args_source(n, 0)})" }
+    if k == CALL || k == HELPER_CALL { return "${name(n)}(${args_source(n, 0)})" }
     if k == FIELD {
         o = child(n, 0)
         os = expr_source(o)
@@ -495,6 +528,13 @@ dump(t: Tree) -> string {
     while i < count {
         c = capture(t, i)
         s = "${s}(capture ${capture_name(c)} :${capture_type(c)}) "
+        i = i + 1
+    }
+    i = 0
+    count = helper_count(t)
+    while i < count {
+        h = helper(t, i)
+        s = "${s}(helper ${function_name(h)} :${return_type(h)} ${dump(h)}) "
         i = i + 1
     }
     return "${s}${dump_node(body(t))}"

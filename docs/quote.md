@@ -69,9 +69,12 @@ node under `n`, a node before its children. The tree has:
 - the **body**, a `BLOCK` node;
 - the **captures**, one per outer variable the body reads (below);
 - the **source**, `"file.ae:line"` of the quote, for a back end's errors;
+- the **helpers**, the `@quotable` functions the body reaches
+  ([Helpers](#helpers-quotable-functions));
 - a **hash**, a 64-bit FNV-1a of the tree's shape (the format version, the
   parameters, the captures' names and types, and every node's kind, type,
-  name, operator, literal and child count; not line numbers or the file), a
+  name, operator, literal and child count; then each helper's name, return
+  type, parameters and body; not line numbers or the file), a
   constant the compiler computes, so a back end can cache what it made
   (GLSL, SPIR-V, native code) under it plus a hash of the back end itself.
   The same quote hashes the same in every build and wherever it moves in
@@ -102,6 +105,7 @@ Each node has a `kind`, the `type` the type checker gave it, a `name`, an
 | `INDEX` | object, index | `a[i]` |
 | `MAKE` | a `FIELD_VALUE` per field | a struct literal, `Varyings { pos: p, uv: t }`; `type` is the struct |
 | `FIELD_VALUE` | value | one field of a `MAKE`: `name` is the field (`pos`), the child its value |
+| `HELPER_CALL` (version 2) | arguments | a call of a `@quotable` function; `name` is the function as the tree carries it (`quote.helper_named`) |
 
 **Every node carries the type the type checker gave it.** A back end that
 writes GLSL needs to know `t` is a `float` and `uv.x` an `f32`; it never
@@ -253,6 +257,51 @@ The cell is read with typed getters (`quote.get_float(c)`, `get_int`,
 type does not match the capture's panics with both types named. A struct is
 read through `quote.cell(c) as *T`.
 
+## Helpers: `@quotable` functions
+
+A shader repeats small functions: a luma, a tonemap, a falloff. Written as
+ordinary functions they would be `CALL`s a back end cannot write out, since
+it has only their names. `@quotable` marks a function whose body is also a
+tree:
+
+```aether,fragment
+@quotable
+luma(c: vec3) -> float {
+    return dot(c, vec3(0.299, 0.587, 0.114))
+}
+
+fxaa(screen: Texture, texel: vec2) -> *GpuShader {
+    return fragment("fxaa") quote | uv: vec2 | {
+        lc = luma(rgb(texture(screen, uv)))
+        ...
+    }
+}
+```
+
+- A call of a `@quotable` function in a quote is a `HELPER_CALL`, and the
+  quote's tree carries every `@quotable` function its body reaches, through
+  its own calls or a helper's, **callees before their callers**: the order a
+  back end that declares a function before its use (GLSL) writes them in.
+  `quote.helper_count(t)` and `quote.helper(t, i)` list them,
+  `quote.helper_named(t, name)` finds the one a `HELPER_CALL` names. Each is
+  a `quote.Tree` with a name (`quote.function_name`), a return type
+  (`quote.return_type`), its parameters and its body; it is freed with the
+  quote's tree.
+- The function stays ordinary Aether: the program calls it, and a CPU
+  evaluator of the tree calls it as it calls `dot`.
+- Its body is held to the same subset as a quote's, checked where it is
+  defined, and it may read only its parameters and locals: it is written
+  out as a function of its own, which has no way to reach the program's
+  variables, and a shader's uniforms stay the quote's captures (E0805).
+- A `@quotable` function that reaches itself through `@quotable` calls is an
+  error (E0804): GLSL and MSL have no recursion.
+- The quote's hash covers every helper it reaches, so editing a helper's
+  body, even one reached only through another helper, changes the hash of
+  each quote that reaches it, and a cache keyed on the hash goes stale with
+  the edit.
+- A helper in a module is named as the module's code names it once merged
+  (`shaderlib_luma`), which also keeps two modules' `luma`s apart.
+
 ## What a quote may contain, and the errors
 
 The block is type-checked as a closure body, then checked against version
@@ -278,6 +327,11 @@ error[E0800]: 'defer' can't be quoted
 | E0801 | a parameter without a type | a quote does not guess one |
 | E0802 | a quote given to a function whose last parameter is not a `quote.Tree`; a closure, `callback` or immediate block given to one that is | the two sides have to agree on what is passed |
 | E0803 | writing a captured variable, a global among them (`=`, `+=`, `++`), or taking its address | the cell is shared with the program; a quote reads it |
+| E0804 | a `@quotable` function that reaches itself through `@quotable` calls | GLSL and MSL have no recursion |
+| E0805 | a `@quotable` function reading a variable outside it | it is written out as a function of its own; pass the value as a parameter |
+
+A `@quotable` function's body is checked against the same subset, where it
+is defined; its errors say "can't be in a @quotable function".
 
 The tests that hold each of these to its message and line are
 `tests/integration/quote_errors/`.
@@ -286,7 +340,7 @@ The tests that hold each of these to its message and line are
 
 The subset grows by adding kinds. That is the only way the tree changes:
 **kinds are added, never removed or renumbered**, and `quote.VERSION` goes
-up by one each time (it is 1). A tree records the version it was built with
+up by one each time (it is 2: version 2 added `HELPER_CALL` and a tree's helpers). A tree records the version it was built with
 (`quote.version(t)`). A back end that meets a kind it does not know reports
 it with the node's line.
 

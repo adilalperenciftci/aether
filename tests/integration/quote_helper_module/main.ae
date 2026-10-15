@@ -1,0 +1,13 @@
+import std.quote
+import shlib
+
+q(t: quote.Tree) -> quote.Tree { return t }
+
+main() {
+    t = q() quote | a: float | {
+        return shlib.length2(a, a)
+    }
+    println(quote.dump(quote.helper(t, 0)))
+    println("${shlib.length2(3.0, 4.0)}")
+    quote.free(t)
+}

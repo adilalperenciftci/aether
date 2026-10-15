@@ -22,6 +22,8 @@ typedef enum {
     AETHER_ERR_QUOTE_PARAM = 801,        // a quote parameter without a type
     AETHER_ERR_QUOTE_CALLEE = 802,       // a quote where no quote.Tree is taken, or a closure/block where one is
     AETHER_ERR_QUOTE_CAPTURE = 803,      // writing a captured variable, or taking its address, in a quote
+    AETHER_ERR_QUOTE_RECURSION = 804,    // a @quotable function reached again through @quotable calls
+    AETHER_ERR_QUOTE_HELPER_READ = 805,  // a @quotable function reading a variable outside it
     AETHER_ERR_DANGLING_VIEW = 900,      // a slice of a function's own storage outlives the function (#2785)
     // Warnings (W-series)
     AETHER_WARN_UNUSED_VAR = 1001,
