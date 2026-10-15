@@ -7260,6 +7260,10 @@ ASTNode* parse_top_level_decl(Parser* parser) {
                             return NULL;
                         }
                         fdef->annotation = strdup("quotable");
+                        /* Its body becomes a tree too, which names each call
+                         * as written (`dot`, not the merged `shaderlib_dot`),
+                         * as a quote's does. */
+                        quote_keep_call_names(fdef);
                     }
                     node = fdef;
                     break;

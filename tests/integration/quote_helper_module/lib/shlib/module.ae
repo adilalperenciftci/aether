@@ -1,0 +1,11 @@
+import std.math(sqrt)
+
+exports(length2)
+
+// A @quotable function in a module, calling a function its module imports
+// selectively: merged into the program, the call is renamed (`math_sqrt`),
+// but its tree names it as written.
+@quotable
+length2(x: float, y: float) -> float {
+    return sqrt(x * x + y * y)
+}
