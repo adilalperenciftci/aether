@@ -7,11 +7,10 @@
  * thread. Either way `done(result)` runs on a thread the CALLER controls, never
  * on the worker — that is the whole point.
  *
- * Closure envs are NOT freed here: per the closure-lifetime rules a captured
- * env is a bounded per-closure leak by design (retain-on-capture never
- * releases), the fail-safe direction (leak >> use-after-free). We own and free
- * only the WorkerJob wrapper. The `void*` result is likewise owned by the
- * `done` closure — we never touch it. */
+ * The `work` and `done` closures are declared `@retain`, so each job holds a
+ * reference to their environments, released when the job is reclaimed
+ * (free_job_envs); the poster's is kept for the program's life.
+ * The `void*` result is owned by the `done` closure — we never touch it. */
 #include "aether_worker.h"
 #include "../../runtime/utils/aether_thread.h"
 #include "../../runtime/utils/aether_cpu_available.h"
@@ -161,11 +160,9 @@ static WorkerJob* ready_pop(void) {
 
 /* ---- job execution ----------------------------------------------------- */
 
-/* Reclaim a job's per-job closure environments. The env is heap-allocated by
- * the compiler for the closure's captures; because we received the closures
- * through an extern boundary, codegen does NOT free them (the env-drain is
- * suppressed, closure_extern_retains_no_uaf), so ownership is ours once the
- * closures have fired.
+/* Give back the job's references to its closures' environments: the call
+ * handed them over (`@retain`), so they are the job's once the closures have
+ * fired.
  *
  * Goes through the env's own destructor (#1398), so the references its string
  * captures own are released too. A plain free reclaimed the struct and leaked

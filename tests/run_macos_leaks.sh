@@ -14,13 +14,8 @@
 # Scope: the FULL tests/regression suite. Every regression program is
 # built with `ae build` (release -O2) and run under
 # `MallocStackLogging=1 leaks --atExit`; a non-zero leak count fails the
-# gate. Two audited side-lists qualify this:
+# gate. One audited side-list qualifies this:
 #
-#   tests/leaks_known.txt    — per-test MAX allowed leak count (third-
-#                              party library process-globals + tracked
-#                              known leaks). A test absent here must
-#                              report 0; a test present may report up to
-#                              its cap. Exceeding the cap fails.
 #   tests/leaks_exclude.txt  — programs leaks(1) cannot run (they fork
 #                              child processes; leaks --atExit hangs).
 #                              Leak-checked on Linux CI instead.
@@ -35,9 +30,8 @@
 
 # NOTE: deliberately no `set -e`. Every build / leaks invocation has its
 # exit code captured and handled explicitly below, and leaks(1) itself
-# exits non-zero whenever it reports leaks — including the audited
-# allowed counts in leaks_known.txt — so `set -e` would abort the whole
-# gate on the first allowed leak.
+# exits non-zero whenever it reports leaks, which this gate reports with
+# the allocation stacks rather than stopping at the first.
 
 if [ "$(uname -s)" != "Darwin" ]; then
     echo "[SKIP] test-macos-leaks: leaks(1) is macOS-only (Linux uses Valgrind/ASan)"
@@ -62,14 +56,7 @@ sh "$ROOT/tests/scripts/sweep_shard.sh" < /dev/null || exit 2
 TESTS="$(for f in "$REG"/test_*.ae; do basename "$f" .ae; done | sort \
     | sh "$ROOT/tests/scripts/sweep_shard.sh")"
 
-KNOWN_FILE="$ROOT/tests/leaks_known.txt"
 EXCLUDE_FILE="$ROOT/tests/leaks_exclude.txt"
-
-# Max allowed leaks for $1 (0 if not listed in leaks_known.txt).
-allowed_leaks() {
-    [ -f "$KNOWN_FILE" ] || { echo 0; return; }
-    awk -v t="$1" '!/^#/ && NF>=2 && $1==t { print $2; found=1 } END { if (!found) print 0 }' "$KNOWN_FILE" | head -1
-}
 
 # True if $1 is listed in leaks_exclude.txt.
 is_excluded() {
@@ -168,17 +155,12 @@ check_one() {
     # `leaks` prints "Process N: K leaks for B total leaked bytes."
     count="$(sed -nE 's/.*: ([0-9]+) leaks for [0-9]+ total.*/\1/p' "$lk_out" | head -1)"
     count="${count:-0}"
-    allow="$(allowed_leaks "$t")"
-    if [ "$count" -le "$allow" ]; then
-        if [ "$allow" -gt 0 ]; then
-            echo "  [PASS] $t: $count leaks (allowed ≤ $allow — see tests/leaks_known.txt)"
-        else
-            echo "  [PASS] $t: 0 leaks"
-        fi
+    if [ "$count" -eq 0 ]; then
+        echo "  [PASS] $t: 0 leaks"
         : >"$tmpdir/pass_$t"
     else
         {
-            echo "  [FAIL] $t: $count leaks (allowed ≤ $allow)"
+            echo "  [FAIL] $t: $count leaks"
             grep -E "leaks for" "$lk_out" | head -1 | sed 's/^/      /'
             # Each leak's allocation stack, as MallocStackLogging recorded
             # it, so the report names the code that allocated the block,
@@ -220,10 +202,10 @@ excluded=$(ls "$tmpdir" | grep -c '^skip_')
 fails=$(ls "$tmpdir" | grep -c '^fail_')
 
 echo "--------------------------------------------------"
-echo "covered $covered programs, $excluded excluded, $fails over budget"
+echo "covered $covered programs, $excluded excluded, $fails leaking"
 if [ "$fails" -ne 0 ]; then
-    echo "FAIL: macOS leaks gate found leaks above the audited budget:"
+    echo "FAIL: macOS leaks gate found leaks:"
     ls "$tmpdir" | sed -n 's/^fail_/  /p'
     exit 1
 fi
-echo "PASS: macOS leaks gate clean (within tests/leaks_known.txt budget)"
+echo "PASS: macOS leaks gate clean"

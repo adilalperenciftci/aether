@@ -645,7 +645,7 @@ CodeGenerator* create_code_generator(FILE* output) {
     gen->last_line_num = 0;
     gen->match_result_var = NULL;
     gen->match_result_opt = NULL;
-    gen->match_result_own = NULL;
+    gen->match_result_string = 0;
     gen->match_result_struct = NULL;
     gen->match_result_replace = 0;
     gen->match_result_cell = NULL;
@@ -706,16 +706,11 @@ CodeGenerator* create_code_generator(FILE* output) {
     gen->heap_string_vars = NULL;
     gen->heap_string_var_count = 0;
     gen->heap_string_var_try_depths = NULL;
-    gen->escaped_string_vars = NULL;
-    gen->escaped_string_var_count = 0;
     gen->captured_string_params = NULL;
     gen->captured_string_param_count = 0;
     gen->zb_params = NULL;
     gen->zb_params_state = 0;
     gen->str_arrays = NULL;
-    gen->cell_owns = NULL;
-    gen->cell_owns_count = 0;
-    gen->cell_owns_cap = 0;
     // *StringSeq ownership tracking — MUST be zero-initialised here:
     // the CodeGenerator is field-initialised (not calloc'd), so leaving
     // these uninitialised made the first clear_seq_vars() free garbage
@@ -849,7 +844,6 @@ void code_generator_release(CodeGenerator* gen) {
         clear_captured_string_params(gen);
         zb_params_free(gen);
         str_arrays_free(gen);   /* #2618 */
-        cell_owns_free(gen);    /* #2755 */
         free(gen->hoist_decls); /* #2765 */
         gen->hoist_decls = NULL;
         free(gen->defer_thunks);
@@ -964,7 +958,6 @@ void code_generator_release(CodeGenerator* gen) {
         clear_heap_string_vars(gen);
         clear_captured_string_params(gen);
     clear_seq_vars(gen);
-        clear_escaped_string_vars(gen);
         clear_try_clobbered_vars(gen);  /* Issue #501 follow-up */
         if (gen->message_registry) {
             free_message_registry(gen->message_registry);
@@ -1204,23 +1197,6 @@ void clear_heap_string_vars(CodeGenerator* gen) {
     gen->heap_string_var_count = 0;
 }
 
-// Helper: check whether a heap-string variable has escaped — its
-// value has been passed somewhere (call argument outside its own
-// assignment's RHS, closure capture, etc.) where the recipient may
-// have stored the pointer. The wrapper at codegen_stmt.c:1611 uses
-// this to gate `free(_tmp_old)` and avoid dangling the stored copy.
-// Conservative: alias-safe (no UAF) at the cost of leaking. See
-// mark_escaped_heap_string_vars for the analysis.
-int is_escaped_string_var(CodeGenerator* gen, const char* var_name) {
-    if (!gen || !var_name) return 0;
-    for (int i = 0; i < gen->escaped_string_var_count; i++) {
-        if (strcmp(gen->escaped_string_vars[i], var_name) == 0) {
-            return 1;
-        }
-    }
-    return 0;
-}
-
 void clear_captured_string_params(CodeGenerator* gen) {
     if (!gen) return;
     free(gen->captured_string_params);   /* the names are interned */
@@ -1228,30 +1204,6 @@ void clear_captured_string_params(CodeGenerator* gen) {
     gen->captured_string_param_count = 0;
 }
 
-void mark_escaped_string_var(CodeGenerator* gen, const char* var_name) {
-    if (!gen || !var_name) return;
-    if (is_escaped_string_var(gen, var_name)) return;
-    char** new_vars = realloc(gen->escaped_string_vars,
-                              sizeof(char*) * (gen->escaped_string_var_count + 1));
-    if (!new_vars) return;
-    gen->escaped_string_vars = new_vars;
-    gen->escaped_string_vars[gen->escaped_string_var_count] = strdup(var_name);
-    gen->escaped_string_var_count++;
-}
-
-// Helper: clear escaped string vars (call at function start, alongside
-// clear_heap_string_vars).
-void clear_escaped_string_vars(CodeGenerator* gen) {
-    if (!gen) return;
-    if (gen->escaped_string_vars) {
-        for (int i = 0; i < gen->escaped_string_var_count; i++) {
-            free(gen->escaped_string_vars[i]);
-        }
-        free(gen->escaped_string_vars);
-    }
-    gen->escaped_string_vars = NULL;
-    gen->escaped_string_var_count = 0;
-}
 
 /* ---- *StringSeq local registry (parallel to heap_string_vars) ----
  * A seq var owns a refcounted spine; string_seq_free is a decrement, so
@@ -1601,8 +1553,7 @@ static int try_emit_heap_string_exit_free(CodeGenerator* gen, ASTNode* deferred)
     print_indent(gen);
     fprintf(gen->output,
             "/* deferred */ aether_unwind_forget((const void*)&%s); "
-            "if (_heap_%s) { aether_heap_str_free(%s); %s = NULL; _heap_%s = 0; }\n",
-            name, name, name, name, name);
+            "aether_heap_str_free(%s); %s = NULL;\n", name, name, name);
     return 1;
 }
 
@@ -5364,7 +5315,6 @@ static void begin_main_c_function(CodeGenerator* gen) {
     clear_heap_string_vars(gen);
     clear_captured_string_params(gen);   /* #2499: a parameter set is per body */
     clear_seq_vars(gen);
-    clear_escaped_string_vars(gen);
     clear_try_clobbered_vars(gen);  /* Issue #501 follow-up */
     // Reset defer state for main function and enter scope
     gen->defer_count = 0;
@@ -5451,7 +5401,6 @@ static void emit_main_body(CodeGenerator* gen, ASTNode* main) {
             hoist_heap_string_trackers(gen, main->children[0]);
             hoist_seq_trackers(gen, main->children[0]);
             hoist_opt_string_locals(gen, main->children[0]);
-            mark_escaped_heap_string_vars(gen, main->children[0]);
             mark_escaped_seq_vars(gen, main->children[0]);
             /* Mirror the regular-function path in
              * codegen_func.c::generate_function_definition: push a
@@ -7876,48 +7825,10 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     print_line(gen, "    return (int64_t)_ts.tv_sec * 1000000000LL + _ts.tv_nsec;");
     print_line(gen, "}");
     print_line(gen, "#endif");
-    /* Uniform-heap return-escape helper. For every function classified
-     * heap-returning by walk_returns_for_heap_check, every return site
-     * routes its value through this helper:
-     *
-     *     return aether_uniform_heap_str(<expr>, <static-or-runtime-flag>);
-     *
-     * When the flag is true, the value is already heap-owned (e.g.
-     * string.concat result, _aether_interp result, or a heap-tracked
-     * local with `_heap_<name> == 1`) and ownership transfers to the
-     * caller as-is — fast path is one branch + one return. When the
-     * flag is false, the value is a literal / static pointer and the
-     * caller's unconditional `free()` would crash on it; the helper
-     * duplicates so the caller's free reclaims the dup uniformly.
-     *
-     * The cold-path dup mints a refcounted AetherString rather than a
-     * bare buffer, because the caller cannot free a bare one. Aether's
-     * `string` is either shape, and given a plain `char*` the runtime
-     * cannot tell a heap payload from a static literal, so
-     * `string.free(s)` no-ops on it and the value leaks: one block per
-     * call at every `json.parse` error slot, every interpolation, every
-     * HTTP body a caller dutifully frees (#1461).
-     *
-     * The hot path is untouched, so nothing that was already owned pays
-     * for this, and the shape is not new to callers: the sibling path of
-     * every one of these returns already hands back a string_concat
-     * result, which is the same refcounted shape. Both `string_release`
-     * and the codegen's `aether_heap_str_free` reclaim it, and printing
-     * and comparison go through `aether_string_data`, which reads either
-     * shape. What must NOT appear is a plain `free()` on the result: that
-     * would reclaim the header and leak the payload.
-     *
-     * Binary-safety: Aether's `string` carries either plain `char*` or
-     * a length-bearing `AetherString*` (magic-header struct). The cold-
-     * path duplication must respect the source shape — a naive
-     * `strlen` on an AetherString reads struct-header bytes and
-     * truncates the payload at the first NUL inside the header. The
-     * helper detects the magic header byte-by-byte (matching
-     * `is_aether_string`'s ASan-clean shape) and uses the stored
-     * `length` field. The duplicate is always a plain malloc-owned
-     * buffer so the caller's plain `free()` reclaims it — the
-     * helper's contract is "pointer the caller may free", not
-     * "preserve AetherString shape". */
+    /* The take of a string (R2): with `is_heap` the value is the taker's
+     * already and passes as it is; otherwise a counted string is retained, a
+     * pinned literal passes, and a C string is copied into a counted one,
+     * its length read from the header where there is one. */
     print_line(gen, "#include <string.h>");
     print_line(gen, "#include <stdlib.h>");
     print_line(gen, "#include <stddef.h>");

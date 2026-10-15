@@ -329,9 +329,8 @@ int actor_state_field_is_atomic(CodeGenerator* gen, const char* actor_name,
     return 0;
 }
 
-/* #2528: a `string` state field owns what it holds, tracked by
- * `_heap_<name>` beside it (a `ptr`-widened field is a payload the user
- * manages). */
+/* #2528: a `string` state field owns what it holds (a `ptr`-widened field
+ * is a payload the user manages). */
 int state_field_owns_string(ASTNode* state_decl) {
     return state_decl && state_decl->type == AST_STATE_DECLARATION &&
            state_decl->node_type && state_decl->node_type->kind == TYPE_STRING;
@@ -471,15 +470,6 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
                     fprintf(gen->output, " %s;\n", child->value);
                 }
             }
-            /* #2528: a string state field's ownership tracker lives with
-             * the field, for the handlers (which alias `_heap_<name>` to
-             * it) and for the destructor. It used to be a handler local,
-             * reset to 0 on every message: a value stored by an earlier
-             * message was never freed on overwrite, and the one stored
-             * last never at all. */
-            if (state_field_owns_string(child)) {
-                print_line(gen, "int _heap_%s;", child->value);
-            }
         }
     }
 
@@ -566,7 +556,6 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
                          * handler left, as a function clears them, so they
                          * neither keep this handler's locals nor reach the
                          * next function. */
-                        clear_escaped_string_vars(gen);
                         /* #2690: the names this arm's `try` bodies write,
                          * and no other arm's (a local of the same name in
                          * an arm with no `try` was declared volatile), are
@@ -722,7 +711,6 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
                              * state field takes a string of its own (the
                              * local's moved on its last use, else copied),
                              * so the local keeps its own exit free. */
-                            mark_escaped_heap_string_vars(gen, arm_body);
                             mark_escaped_seq_vars(gen, arm_body);
                             push_heap_string_exit_free_defers(gen, arm_body);
                             push_seq_exit_free_defers(gen, arm_body);
@@ -842,13 +830,11 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
             clear_heap_string_vars(gen);
             clear_captured_string_params(gen);
             clear_seq_vars(gen);
-            clear_escaped_string_vars(gen);
             if (tbody->type == AST_BLOCK) {
                 gen->hoist_scope_body = tbody;
                 hoist_heap_string_trackers(gen, tbody);
                 hoist_seq_trackers(gen, tbody);
                 hoist_opt_string_locals(gen, tbody);
-                mark_escaped_heap_string_vars(gen, tbody);
                 mark_escaped_seq_vars(gen, tbody);
                 push_heap_string_exit_free_defers(gen, tbody);
                 push_seq_exit_free_defers(gen, tbody);
@@ -1134,16 +1120,14 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
             } else {
                 print_line(gen, "actor->%s = 0;", child->value);
             }
-            /* #2528: the block is not zeroed (a kept one is reused), so the
-             * tracker is set here. R3: the field owns its initial string, a
-             * fresh one as it is and any other taken. */
+            /* R3: the field owns its initial string, a fresh one as it is
+             * and any other taken. */
             if (state_field_owns_string(child)) {
                 int owned = child->child_count > 0 && child->children[0] &&
                             is_heap_string_expr(gen, child->children[0]);
                 if (!owned)
                     print_line(gen, "actor->%s = aether_uniform_heap_str(actor->%s, 0);",
                                child->value, child->value);
-                print_line(gen, "actor->_heap_%s = 1;", child->value);
             }
         }
     }

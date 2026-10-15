@@ -96,6 +96,7 @@ void builder_cfg_end(CodeGenerator* gen, BuilderCfg saved);
 void generate_value_statement(CodeGenerator* gen, const char* lhs, ASTNode* value, Type* t);
 const char* c_member_decl(Type* t, const char* name);
 int try_emit_cell_release(CodeGenerator* gen, ASTNode* deferred);
+void push_builder_config_exit_release(CodeGenerator* gen, ASTNode* builder, ASTNode* body);
 const char* user_defer_ctx(ASTNode* body);
 void emit_defer_thunks(CodeGenerator* gen);
 int control_prelude_depth(void);
@@ -145,9 +146,6 @@ void unmark_heap_string_var(CodeGenerator* gen, const char* var_name);
 void clear_heap_string_vars(CodeGenerator* gen);
 int heap_string_var_try_depth(CodeGenerator* gen, const char* var_name);         /* #2690 */
 int set_heap_string_var_try_depth(CodeGenerator* gen, const char* var_name, int depth);
-int is_escaped_string_var(CodeGenerator* gen, const char* var_name);
-void mark_escaped_string_var(CodeGenerator* gen, const char* var_name);
-void clear_escaped_string_vars(CodeGenerator* gen);
 
 /* *StringSeq local registry (parallel to the heap-string set). A seq
  * var owns a refcounted spine freed by string_seq_free (a decrement). */
@@ -265,17 +263,8 @@ void emit_string_element_free(CodeGenerator* gen, ASTNode* e);
 int string_take_kind(CodeGenerator* gen, ASTNode* e);
 int string_take_is_view(CodeGenerator* gen, ASTNode* e);
 int alias_source_must_copy(CodeGenerator* gen, const char* src_name);
-void string_take_new_flag(char* buf, size_t n);
-void emit_string_take(CodeGenerator* gen, ASTNode* e, const char* own,
-                      const char* target);
+void emit_string_take(CodeGenerator* gen, ASTNode* e, const char* target);
 
-/* Escape gate for heap-string arguments: returns 1 if a callee's
- * parameter slot of the given type-kind is treated as storage (the
- * recipient may stash the pointer beyond the call). Used by the
- * escape walker (codegen_stmt.c) AND by the codegen_expr.c
- * argument-temp lifetime wrap to decide whether freeing a hoisted
- * heap argument is safe. Defined in codegen_stmt.c. */
-int call_arg_escapes(TypeKind param_kind);
 
 /* Resolve a callee's parameter kind by name + index. Consults the
  * extern registry first, then the user-fn definitions in
@@ -283,33 +272,11 @@ int call_arg_escapes(TypeKind param_kind);
  * resolved or the index is out of range. Defined in codegen_stmt.c. */
 TypeKind lookup_callee_param_kind(CodeGenerator* gen, const char* func_name, int param_idx);
 
-/* Interprocedural escape: does parameter `param_idx` of user function
- * `func_name` flow into an escaping sink within its body (a container
- * put / `@retain` / `ptr` callee param, transitively, or a return)?
- * Catches storing wrappers with `string`-typed value params that
- * `call_arg_escapes` alone would misjudge as read-only — the map-value
- * use-after-free. `depth` is the recursion guard (start at 0). Defined
- * in codegen_stmt.c. */
-int callee_param_escapes_via_body(CodeGenerator* gen, const char* func_name, int param_idx, int depth);
-
-/* For the call-site identity-drain (codegen_expr.c). `_store_escapes`:
- * does the callee's param escape via a STORE (anything but being directly
- * returned)? If so the value is owned by a sink and must NOT be freed.
- * `_returns_string`: does the callee declare `-> string` (so the result
- * pointer can be identity-compared against the passed temp)? Defined in
- * codegen_stmt.c. */
-int callee_param_store_escapes_via_body(CodeGenerator* gen, const char* func_name, int param_idx);
+/* Does `func_name` declare a `-> string` result? */
 int callee_returns_string(CodeGenerator* gen, const char* func_name);
 
-/* #2493: the same body walk for parameter `param_idx` of the closure
- * literal `closure` (an AST_CLOSURE). `return_is_escape` picks between the
- * two questions above. Unresolvable: escapes. Defined in codegen_stmt.c. */
-int closure_param_escapes_via_body(CodeGenerator* gen, ASTNode* closure, int param_idx,
-                                   int return_is_escape);
-
-/* True when `func_name` resolves to a user function with a visible body
- * block; only then may the body-walk override the conservative
- * call_arg_escapes heuristic. Defined in codegen_stmt.c. */
+/* Does `func_name` resolve to a user function with a body (not an extern)?
+ * Defined in codegen_stmt.c. */
 int callee_has_visible_body(CodeGenerator* gen, const char* func_name);
 
 /* Normalise a callee name's dots to underscores. The AST stores
@@ -333,12 +300,6 @@ void exit_scope(CodeGenerator* gen);
 
 /* Expression generation (codegen_expr.c) */
 void generate_expression(CodeGenerator* gen, ASTNode* expr);
-
-/* Emit `call` so a transient capturing-closure argument's heap env is
- * freed after the call (codegen_expr.c). Caller must verify the receiving
- * parameter does not store/return the closure. */
-void emit_closure_env_drained_call(CodeGenerator* gen, ASTNode* call,
-                                   ASTNode* closure_node);
 
 /* Message field helpers (codegen_expr.c) — shared with codegen_stmt.c */
 MessageFieldDef* find_msg_field(MessageDef* msg_def, const char* name);
@@ -390,19 +351,6 @@ int  emit_contract_postconditions(CodeGenerator* gen, ASTNode* func);
    codegen path which runs after that point. */
 void hoist_heap_string_trackers(CodeGenerator* gen, ASTNode* body);
 
-/* Walk `body` and mark every heap-string variable whose value escapes
-   — i.e. is passed as an argument in a function/method call (in any
-   context other than the RHS of `V = ...` whose LHS is V), or
-   captured by a closure body. The wrapper at codegen_stmt.c:1611
-   skips its `free(_tmp_old)` for escaped vars to avoid dangling
-   pointers stored on the recipient side (map.put values, list.add
-   elements, struct fields, actor message fields, closure captures).
-   Conservative: alias-safe at the cost of leaking the value over
-   the function's lifetime. Run after hoist_heap_string_trackers so
-   the heap-string-var registry is populated. */
-void mark_escaped_heap_string_vars(CodeGenerator* gen, ASTNode* body);
-/* The closure argument a call provably drops on return, or NULL. */
-ASTNode* transient_closure_arg(CodeGenerator* gen, ASTNode* call);
 int call_returns_owned_closure(CodeGenerator* gen, ASTNode* call);   /* #2506 */
 const char* call_c_name(CodeGenerator* gen, const char* func_name);
 /* #2915: the extern table's name for the extern a call to `func_name`
@@ -466,9 +414,7 @@ void emit_promoted_param_cell(CodeGenerator* gen, const char* name,
  * closure cell; and the release of the remembered answers. */
 ASTNode* promoted_cell_declaring_scope(CodeGenerator* gen, const char* scope, const char* name,
                                        ASTNode** body);
-int promoted_closure_cell_owns(CodeGenerator* gen, const char* name);
 int is_closure_cell_read(CodeGenerator* gen, ASTNode* e);
-void cell_owns_free(CodeGenerator* gen);
 /* The program's own definition of `name`, or NULL. Shared rather than
    duplicated: the builtin fast-paths need it to know when a program has
    defined a function of its own with a builtin's name. */

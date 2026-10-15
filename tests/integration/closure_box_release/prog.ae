@@ -51,8 +51,8 @@ main() {
     check(r == "w#a!", "the kept closure, after its scope ended")
     if mem.heap_in_use_exact() {
         grown = mem.steady_growth(|| {
-            round("w")
-        }, 4)
+                round("w")
+            }, 4)
         check(grown == 0, "the boxes are given back")
     }
     release_closure(slot)

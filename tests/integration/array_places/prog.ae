@@ -55,10 +55,10 @@ main() {
     check(got == "wawb", "the array the actor kept from the message")
     if mem.heap_in_use_exact() {
         grown = mem.steady_growth(|| {
-            shape("w", h)
-            string s = h ? Check {}
-            check(s == "wawb", "kept, again")
-        }, 4)
+                shape("w", h)
+                string s = h ? Check {}
+                check(s == "wawb", "kept, again")
+            }, 4)
         check(grown == 0, "the arrays are released")
     }
     println("ok")

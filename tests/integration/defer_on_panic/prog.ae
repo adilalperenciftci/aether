@@ -70,8 +70,8 @@ main() {
     if mem.heap_in_use_exact() {
         round("w")
         grown = mem.steady_growth(|| {
-            round("w")
-        }, 4)
+                round("w")
+            }, 4)
         check(grown == 0, "a panic leaves nothing a defer frees")
     }
     println("ok ${trail} ${seen}")

@@ -336,10 +336,9 @@ typedef struct {
 
     // Match-as-expression: when non-NULL, match arms assign to this variable
     const char* match_result_var;
-    // #2461: when non-NULL, the result variable is an owning string local:
-    // each value arm takes its value with emit_string_take, setting this C
-    // int flag to whether the local owns what it got (-1: no arm assigned).
-    const char* match_result_own;
+    // #2461: the result variable is an owning string local: each value arm
+    // takes its value and releases the one the local held.
+    int match_result_string;
     // #2497: when non-NULL, the result is a struct of this name that owns
     // heap strings: each value arm is taken with emit_struct_take, and when
     // match_result_replace is set it replaces the value the result held.
@@ -531,22 +530,6 @@ typedef struct {
     // for the frame the declaration is in (emit_unwind_track_local).
     int* heap_string_var_try_depths;
 
-    // Subset of `heap_string_vars`: names whose value is passed as a
-    // function-call argument (or captured by a closure) somewhere in
-    // the function body, in any context other than the RHS of `V = ...`
-    // where the LHS is V itself. The wrapper at codegen_stmt.c:1611
-    // skips the `free(_tmp_old)` when the var is escaped — the
-    // recipient of the escape may have stored the pointer (map.put,
-    // list.add, struct field, actor message field, closure capture)
-    // and freeing the local would dangle the stored copy. Conservative
-    // analysis: we do not know which callees store vs. consume, so we
-    // assume any non-trivial use means storage. Result: alias-safe
-    // (no UAF) at the cost of leaking the value over the function's
-    // lifetime — strictly better than the pre-pass UAF. Populated by
-    // mark_escaped_heap_string_vars (codegen_stmt.c) before the body
-    // is generated, alongside hoist_heap_string_trackers.
-    char** escaped_string_vars;
-    int escaped_string_var_count;
 
     // #2499 copy-on-keep: the `string` parameters of the body being
     // generated that hold a reference of their own (captured on entry),
@@ -569,13 +552,6 @@ typedef struct {
     // private to codegen_stmt.c). Built once, the first time it is asked.
     void* str_arrays;
 
-    // #2755: whether each closure cell gives back the closures it holds
-    // (promoted_closure_cell_owns, private to codegen_stmt.c), by the scope
-    // that declares it and its name, decided once so the scope and every
-    // closure that writes the cell agree.
-    void* cell_owns;
-    int cell_owns_count;
-    int cell_owns_cap;
 
     // `*StringSeq` (cons-cell sequence) locals whose current value is a
     // heap-allocated, refcounted seq returned by an OWNING producer

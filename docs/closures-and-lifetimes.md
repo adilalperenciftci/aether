@@ -173,19 +173,17 @@ and the last one tears the env down. The rules are stated in
 [`docs/memory-management.md`](memory-management.md) → "Closure environment
 lifetime"; shape by shape:
 
-- **Transient callback.** A capturing closure created inline and passed to
-  a parameter that only *calls* it and neither stores nor returns it
-  (`run(cb) { cb() }`) is dead once the call returns, so its env is freed
-  right after the call. This is gated on a proven non-escape, invoking a
-  closure parameter (`cb()`, an indirect-`call` node whose first child is
-  the callee) is not an escape, nor is passing it on to a function whose
-  body only calls it (`it(cb) { it_impl(cb) }`), whereas a stored or
-  returned closure suppresses the drain so its env follows the owner. An
-  extern has no body to read, so a closure passed to one is kept unless
-  the extern declares the parameter `@noescape` (used only during the
-  call, #2523): the std seq combinators, `fs.walk` and `string_list_sort`
-  do, so their callbacks are released after the call like any transient
-  callback.
+- **Passed to a call.** A call borrows its arguments (R3): a capturing
+  closure created inline and passed to a function, a closure, a typed
+  function pointer or an extern is released right after the call, and a
+  callee that keeps it (stores, returns or captures it) takes a reference of
+  its own. Nothing is read from the callee to decide it. An extern that
+  keeps a closure past the call declares the parameter `@retain` (R4), and
+  the call hands it a reference: `observe`, the worker pool, the http and
+  net server route handlers and the QuickJS binding do. A closure passed to
+  a `ptr` parameter is boxed: on the caller's stack for a parameter that
+  only borrows, on the heap, with its own reference, for one declared
+  `@keep` or `@retain`.
 
 - **Stored in a list or a map.** A closure value stored into a list or a
   map is heap-boxed (the `fn -> ptr` coercion, or an explicit
@@ -244,9 +242,8 @@ lifetime"; shape by shape:
   does. A closure cell is the exception: a call lends its closure with a
   reference that ends with the call, and the call may rebind the cell, so
   a cell keeps counting a hand-back as a keep and pins its closures there
-  (#2788). A return, an argument to an extern parameter not marked
-  `@noescape` or to a function that keeps it, or a binding to anything
-  else leaves the env to the value's holder. A field's name is not a use
+  (#2788). A return, an argument to an `@retain` extern parameter, or
+  a binding to anything else leaves the env to the value's holder. A field's name is not a use
   of a local spelled the same (`Hooks { set: f }`, `h.set` beside a local
   `set`, #2669).
 

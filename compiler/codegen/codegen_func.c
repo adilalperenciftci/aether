@@ -1858,7 +1858,6 @@ static void emit_function(CodeGenerator* gen, ASTNode* func, const char* clause_
     clear_heap_string_vars(gen);
     clear_captured_string_params(gen);
     clear_seq_vars(gen);
-    clear_escaped_string_vars(gen);
 
     // Mark function parameters as declared so they aren't re-declared
     // (e.g., by hoist_loop_vars when a parameter is reassigned in a loop).
@@ -2091,7 +2090,6 @@ static void emit_function(CodeGenerator* gen, ASTNode* func, const char* clause_
             // dangling pointers held by `map.put`/`list.add`/actor
             // message fields/etc. Conservative — alias-safe at the
             // cost of leaking the value over the function's lifetime.
-            mark_escaped_heap_string_vars(gen, body);
             mark_escaped_seq_vars(gen, body);
             // Push a function-exit defer-free for every non-escaped
             // hoisted heap-string var (#420 follow-up). The
@@ -2103,6 +2101,7 @@ static void emit_function(CodeGenerator* gen, ASTNode* func, const char* clause_
             // every explicit return.
             push_heap_string_exit_free_defers(gen, body);
             push_seq_exit_free_defers(gen, body);
+            push_builder_config_exit_release(gen, func, body);   /* #2871 */
         }
         // If body is a block, it handles its own scope
         // If not a block, we still need to generate the statements
@@ -2181,7 +2180,6 @@ static void begin_dispatch_scope(CodeGenerator* gen, ASTNode* clause) {
     clear_heap_string_vars(gen);
     clear_captured_string_params(gen);
     clear_seq_vars(gen);
-    clear_escaped_string_vars(gen);
     clear_try_clobbered_vars(gen);
 }
 

@@ -111,6 +111,10 @@ int cryptography_hash_supported_raw(const char* algo) {
  * options on RHEL/FIPS systems). */
 #if defined(AETHER_HAS_OPENSSL) && OPENSSL_VERSION_NUMBER >= 0x30000000L
 static int md4_provider_attempted = 0;
+/* The providers this module loads stay loaded for the program's life; the
+ * module holds them, so they are reachable until exit. */
+static OSSL_PROVIDER* default_provider = NULL;
+static OSSL_PROVIDER* legacy_provider = NULL;
 static void ensure_legacy_provider(void) {
     if (md4_provider_attempted) return;
     md4_provider_attempted = 1;
@@ -121,8 +125,8 @@ static void ensure_legacy_provider(void) {
      * elsewhere in this file, but once we explicitly touch the
      * provider system that auto-load behavior changes — we have to
      * be explicit. */
-    OSSL_PROVIDER_load(NULL, "default");
-    OSSL_PROVIDER_load(NULL, "legacy");
+    default_provider = OSSL_PROVIDER_load(NULL, "default");
+    legacy_provider = OSSL_PROVIDER_load(NULL, "legacy");
 }
 #else
 static void ensure_legacy_provider(void) { /* nothing to do */ }

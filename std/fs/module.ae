@@ -409,7 +409,7 @@ extern string_substring(str: string, start: int, end: int) -> string @heap
 // so binary payloads with embedded NULs survive the copy. Returns a
 // ref-counted AetherString with the exact byte content — consumers
 // reading up to `length` see the full file.
-extern string_new_with_length(data: string, length: int) -> ptr
+extern string_new_with_length(data: string, length: int) -> ptr @heap
 
 // ---- Go-style wrappers ----
 

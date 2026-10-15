@@ -4,7 +4,8 @@
 // A call to such a builder is lowered to a `map_new()` call (and, when its
 // block is left before the builder runs, to `map_free`, #2791). Nothing
 // declared them unless the program imported std.map, and the C compiler
-// rejected the implicit declaration of `map_new`.
+// rejected the implicit declaration of `map_new`. `quiet` never names its
+// config, so its exit releases it (#2871): the macOS leaks gate checks it.
 
 extern exit(code: int)
 

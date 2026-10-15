@@ -268,9 +268,9 @@ element breaks views: an element of a `string[]` slice over memory C owns
 (std.strarr, a sort swapping through `tmp`) is no place that owns, and a copy
 taken from it and stored back dangled when the copy was freed. Retain-on-take
 removes that: the local and the view hold the same counted string. A
-header-defined struct's string field (`@c_import`) is C's, as R4 says, and
-keeps the value alive by the escape rule until a C boundary annotation says
-who frees it.
+header-defined struct's string field (`@c_import`) is C's, as R4 says; it kept
+the value alive by the escape rule until the walk was deleted (see "C's
+places are given a reference" below).
 
 **A string kept through a `ptr` (decided 2026-10-15).** A `ptr` slot is
 untyped memory and owns nothing, so a `string` that reaches one and is kept
@@ -343,7 +343,7 @@ a reference of its own until its statement is done, so the store cannot free
 what the call is given.
 
 **Order of the remaining #2920 steps.** (1) Switch off each escape channel
-whose receiver takes. (2) The `_heap_` flags are then always 1 and are
+whose receiver takes (done 2026-10-15: the escape walk is deleted). (2) The `_heap_` flags are then always 1 and are
 deleted, with the heap classifiers that set them, copy-on-keep and the callee
 keep analysis. (3) `--diagnose=ownership` reports R3 (moved or taken, per
 store), rewritten once, after (1).
@@ -391,6 +391,87 @@ still return no array (E0201).
 **Owning optional fields (#2822).** An optional field whose value owns
 memory is a part like any other: a literal or a store takes, the struct's
 destroy and a store release.
+
+**Every call borrows its arguments (decided 2026-10-15).** A fresh value
+passed to any call (a function, a closure, a typed function pointer, an
+extern) is released after the call, and journaled for it, since the callee
+may panic. Nothing is read from the callee to decide it: a callee that keeps
+or returns an argument takes a reference of its own (R3), and C that keeps
+one copies it or declares the parameter `@retain` (R4). A closure the program
+did not compile (a host's box, a `@c_callback`'s argument) borrows the same
+way. The hand-back classifier, the callee memo, the closure-argument and
+fn-pointer conventions and the escape walk, all of which read other
+functions' bodies, are deleted.
+
+**`@retain` hands over a reference (R4).** A call to an extern parameter
+declared `@retain` hands it one reference: a fresh value as it is, a place's
+retained. This holds for a `string` and for a closure; the std externs that
+keep a closure (observe, worker jobs and the main-thread poster, the http and
+net server handlers, the QuickJS function binding) are declared so, and they
+release what they keep through the closure's own destructor.
+
+**C's places are given a reference (R4).** A string stored into a
+header-defined struct's field or into a slice over C memory is given a
+reference of its own, which nothing in the program releases; the local it
+came from keeps its own and releases it as any local does.
+
+**A closure in a `ptr` slot (#2926, decided 2026-10-15).** A `ptr` slot owns
+nothing, as for strings: a closure kept in one goes in a box holding a
+reference of its own (`box_closure(f)`, or the coercion a store into a `ptr`
+makes), and the program gives the box back with `release_closure(p)`, the
+closure counterpart of `string.release_kept`. A `ptr` parameter that keeps
+what it is given is declared `@keep` and is given that heap box; any other
+`ptr` parameter only borrows, so it is given a box on the caller's stack and
+nothing is allocated. Containers keep their own reference as before.
+
+**A `defer` runs when a caught panic leaves its scope (#2923, decided
+2026-10-15).** The language reference says a plain `defer` runs on every
+exit; a panic skipped it. While its scope is live, a plain `defer` is in the
+unwind journal with a thunk: the deferred statement, generated where it is
+written, over copies of the frame's locals it names, copied back after it
+runs. The journal drains before the jump, newest first, so a deferred
+statement sees every local declared before it. A normal exit forgets the
+entry and runs the statement in place. `defer try` and `defer catch` are not
+journaled: a panic is neither outcome. A frame per `defer` (a setjmp at each
+registration) was the alternative; it counted against the panic nesting
+limit, so a recursive function with a `defer` inside a `try` would abort.
+
+**No per-local flags (#2920, step 2).** A string local always owns what it
+holds: every take hands it a reference (a fresh value moved, a local at its
+last use moved out and left empty, anything else retained, a C string
+copied), so `_heap_<name>` is gone, with the actor state's trackers. A store
+takes the new value before it releases the old one, so `s = s` is a retain
+and a release; a scope exit releases unconditionally. A `catch` binding
+takes its reason when the runtime did not hand it over.
+
+**Returns are typed, not classified.** Whether a call hands its caller a
+string is read from the callee's declared result: an Aether function
+returning `string` (or a `string` tuple position) always does, and an
+extern does when it says `@heap`, on a `string` or on a `ptr` result (a
+counted string returned untyped, `string.from_int`). The return classifiers
+that walked function bodies, their cycle breaks and memo, and the producer
+name list are deleted.
+
+**No body-reading analysis is left.** The parameter escape walk, the
+closure environment scan (EnvScan), the hand-back walks and the copy-on-keep
+query are deleted. A closure cell always owns the closure it holds: a call
+lends it with a reference held for the call, and whatever keeps or returns
+it takes its own (#2788). A function frees a caller's string only when it is
+a consuming free like `string.free`, since an Aether function may not free a
+parameter it borrows (E0901).
+
+**A builder's unused config (#2871).** A builder owns the config its call
+hands it (it frees it, or returns it as what it built). One whose body never
+names `_builder` does neither, so its exit releases the config through its
+factory's release, decided from the builder's own body.
+
+**Fixed-size arrays in every place (#2921).** A message field holds an array
+by value and owns its elements (filled once the message exists; a receive arm
+binds a view of it); an optional wraps one through a temporary its array is
+filled into; an array literal of owning elements passed to a function is a
+statement temporary, journaled and dropped by its block; one discarded is
+filled into a temporary and dropped. A store into an element of an owning
+array local takes and drops whatever the element holds.
 
 ## Decisions needed
 

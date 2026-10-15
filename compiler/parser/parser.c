@@ -5362,9 +5362,13 @@ static void parse_extern_trailing_attrs(Parser* parser, ASTNode* ext) {
 
         if (strcmp(tag->value, "heap") == 0) {
             advance_token(parser);  /* consume '@' */
-            if (!ext->node_type || ext->node_type->kind != TYPE_STRING) {
+            /* A `ptr` result is a counted string returned untyped
+             * (string.from_int and the like): `@heap` says the caller owns
+             * it, as for a `string` result (R1). */
+            if (!ext->node_type || (ext->node_type->kind != TYPE_STRING &&
+                                    ext->node_type->kind != TYPE_PTR)) {
                 parser_error(parser,
-                    "@heap on extern return is only valid on `-> string`");
+                    "@heap on extern return is only valid on `-> string` or `-> ptr`");
             } else {
                 ext->annotation =
                     annotation_add_marker(ext->annotation, "heap_return");

@@ -49,7 +49,7 @@ exports(
 extern string_new(cstr: string) -> ptr
 extern string_from_cstr(cstr: string) -> ptr
 extern string_from_literal(cstr: string) -> ptr
-extern string_new_with_length(data: string, length: int) -> ptr
+extern string_new_with_length(data: string, length: int) -> ptr @heap
 extern string_empty() -> ptr
 
 // Reference counting.
@@ -166,7 +166,7 @@ extern string_index_of_from_n(str: string, known_length: int,
 // is emitting known single-byte separators (\x01, \x02) into packed
 // formats without routing through a NUL-terminated string literal.
 // Always length 1 — code=0 returns a 1-byte NUL string, not "".
-extern string_from_char(code: int) -> ptr
+extern string_from_char(code: int) -> ptr @heap
 extern string_to_upper(str: string) -> string @heap
 extern string_to_lower(str: string) -> string @heap
 extern string_trim(str: string) -> string @heap
@@ -346,9 +346,9 @@ extern string_seq_zip_each(a: *StringSeq, b: *StringSeq, f: @noescape ptr)
 
 // Conversion
 extern string_to_cstr(str: string) -> string
-extern string_from_int(value: int) -> ptr
-extern string_from_long(value: long) -> ptr
-extern string_from_float(value: float) -> ptr
+extern string_from_int(value: int) -> ptr @heap
+extern string_from_long(value: long) -> ptr @heap
+extern string_from_float(value: float) -> ptr @heap
 extern string_from_double(value: float) -> string @heap
 
 // Inverse of to_int_radix. Render `value` in base `radix` (2..36).
@@ -359,14 +359,14 @@ extern string_from_double(value: float) -> string @heap
 // Headline use: hex emit for color round-trips (RGB → #rrggbb). Pair
 // with `string.pad_start(s, 2, 48)` to get the JS
 // `r.toString(16).padStart(2, '0')` shape.
-extern string_from_int_radix(value: long, radix: int) -> ptr
+extern string_from_int_radix(value: long, radix: int) -> ptr @heap
 
 // Pad to a fixed width with `pad_char` (single-byte char code —
 // `48` for '0', `32` for ' '). If `s` is already >= total_width
 // chars, returns a fresh copy (no truncation). total_width <= 0
 // also returns a fresh copy. pad_start prepends; pad_end appends.
-extern string_pad_start(s: string, total_width: int, pad_char: int) -> ptr
-extern string_pad_end(s: string, total_width: int, pad_char: int) -> ptr
+extern string_pad_start(s: string, total_width: int, pad_char: int) -> ptr @heap
+extern string_pad_end(s: string, total_width: int, pad_char: int) -> ptr @heap
 
 // Parsing — raw externs (escape hatch)
 extern string_to_int_raw(str: string, out_value: ptr) -> int
@@ -518,7 +518,7 @@ join(s: *StringSeq, sep: string) -> string {
 //
 // Non-string values (ints, floats) need explicit conversion via
 // `string.from_int(n)` etc. before being added to the list.
-extern string_format_list(fmt: string, args: ptr) -> ptr
+extern string_format_list(fmt: string, args: ptr) -> ptr @heap
 
 format(fmt: string, args: ptr) -> string {
     return string_format_list(fmt, args)
