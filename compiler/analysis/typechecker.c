@@ -6835,7 +6835,8 @@ static int binds_symbol(const char* annotation, const char* sym) {
 static int is_string_free_call(ASTNode* program, ASTNode* n) {
     if (!n || n->type != AST_FUNCTION_CALL || !n->value || n->child_count != 1) return 0;
     const char* f = n->value;
-    if (!strcmp(f, "release") || !strcmp(f, "string.free") || !strcmp(f, "string.release") ||
+    if (!strcmp(f, "release") || !strcmp(f, "free") || !strcmp(f, "string.free") ||
+        !strcmp(f, "string.release") ||
         !strcmp(f, "string_free") || !strcmp(f, "string_release") ||
         !strcmp(f, "string.string_free") || !strcmp(f, "string.string_release")) return 1;
     for (int i = 0; program && i < program->child_count; i++) {

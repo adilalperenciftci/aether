@@ -8945,7 +8945,11 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                     }
                     fprintf(gen->output, ")");
                 }
-                else if (strcmp(func_name, "free") == 0 && expr->child_count == 1) {
+                /* A string is released as `release` releases it (below): the
+                 * place it is read from owns a counted string (R2). */
+                else if (strcmp(func_name, "free") == 0 && expr->child_count == 1 &&
+                         !(expr->children[0]->node_type &&
+                           expr->children[0]->node_type->kind == TYPE_STRING)) {
                     fprintf(gen->output, "free((void*)");
                     generate_expression_as_elem_ptr(gen, expr->children[0]);   /* #1286 */
                     fprintf(gen->output, ")");
@@ -8991,7 +8995,8 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                     const char* g = expr->children[0]->value;
                     fprintf(gen->output, "(aether_heap_str_free((void*)%s), %s = NULL, (void)0)", g, g);
                 }
-                else if (strcmp(func_name, "release") == 0 && expr->child_count == 1) {
+                else if ((strcmp(func_name, "release") == 0 || strcmp(func_name, "free") == 0) &&
+                         expr->child_count == 1) {
                     ASTNode* arg = expr->children[0];
                     if (arg->node_type && arg->node_type->kind == TYPE_STRING) {
                         if (arg->type == AST_IDENTIFIER && arg->value &&
