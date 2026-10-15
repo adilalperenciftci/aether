@@ -30,6 +30,7 @@ EXE=""
 [ -x "$ROOT/build/ae" ] || EXE=".exe"
 AE="$ROOT/build/ae$EXE"
 AETHERC="$ROOT/build/aetherc$EXE"
+. "$ROOT/tests/lib/server_jobs.sh"
 if [ ! -x "$AE" ] || [ ! -x "$AETHERC" ]; then
     echo "  [SKIP] clause_set_scaling: compiler not built"
     exit 0
@@ -62,13 +63,12 @@ for shape in int heap guard tuple; do
     "$AETHERC" "$TMP/big_$shape.ae" "$TMP/big_$shape.c" > "$TMP/big_$shape.log" 2>&1 &
     pid=$!
     waited=0
-    while kill -0 "$pid" 2>/dev/null && [ "$waited" -lt "$LIMIT" ]; do
+    while server_alive "$pid" && [ "$waited" -lt "$LIMIT" ]; do
         sleep 1
         waited=$((waited + 1))
     done
-    if kill -0 "$pid" 2>/dev/null; then
-        kill "$pid" 2>/dev/null
-        wait "$pid" 2>/dev/null
+    if server_alive "$pid"; then
+        kill_server "$pid"
         echo "  [FAIL] clause_set_scaling: 6000 $shape clauses took over ${LIMIT} s"
         fail=1
         continue
