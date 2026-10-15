@@ -165,6 +165,35 @@ main() { n = mk("x") }
 AE
 refused string_literal_field 4:23 "a \`string\` is given to a \`ptr\` field"
 
+cat > "$TMP/seq_to_keep.ae" <<'AE'
+import std.string
+
+var kept: ptr = null
+
+hold(p: @keep ptr) {
+    kept = p
+}
+
+main() {
+    s = string.split_to_seq("a,b", ",")
+    hold(s)
+}
+AE
+refused seq_to_keep 11:10 "a \`*StringSeq\` is given to a \`@keep ptr\` parameter"
+
+cat > "$TMP/seq_field.ae" <<'AE'
+import std.string
+
+struct N { child: ptr }
+
+put(n: *N, s: *StringSeq) {
+    n.child = s
+}
+
+main() { put(heap.new(N), string.split_to_seq("a,b", ",")) }
+AE
+refused seq_field 6:15 "a \`*StringSeq\` is given to a \`ptr\` field"
+
 cat > "$TMP/declared.ae" <<'AE'
 import std.string
 
@@ -193,9 +222,12 @@ main() {
     hold(string.keep("text"))
     println("${read(null, n)}")
     string.release_kept(kept)
+    seq = string.split_to_seq("a,b", ",")
+    hold(string.seq_retain(seq))
+    string.seq_free(kept)
 }
 AE
 accepted declared
 
 if [ "$fails" -ne 0 ]; then exit 1; fi
-echo "  [PASS] keeps_borrowed: a borrowed ptr parameter is never kept; @keep, string.keep and a re-bound parameter are"
+echo "  [PASS] keeps_borrowed: a borrowed ptr parameter is never kept; @keep, string.keep, string.seq_retain and a re-bound parameter are"

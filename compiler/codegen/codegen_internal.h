@@ -97,6 +97,8 @@ void generate_value_statement(CodeGenerator* gen, const char* lhs, ASTNode* valu
 const char* c_member_decl(Type* t, const char* name);
 int try_emit_cell_release(CodeGenerator* gen, ASTNode* deferred);
 int builder_never_uses_config(ASTNode* builder);
+void own_rebound_binding_take(CodeGenerator* gen, const char* name, Type* t, ASTNode* body,
+                              int line, int column);
 void push_builder_config_exit_release(CodeGenerator* gen, ASTNode* builder, ASTNode* body);
 const char* user_defer_ctx(ASTNode* body);
 void emit_defer_thunks(CodeGenerator* gen);
@@ -150,15 +152,11 @@ int set_heap_string_var_try_depth(CodeGenerator* gen, const char* var_name, int 
 
 /* *StringSeq local registry (parallel to the heap-string set). A seq
  * var owns a refcounted spine freed by string_seq_free (a decrement). */
-int is_seq_var(CodeGenerator* gen, const char* var_name);
-void mark_seq_var(CodeGenerator* gen, const char* var_name);
-void clear_seq_vars(CodeGenerator* gen);
-int is_escaped_seq_var(CodeGenerator* gen, const char* var_name);
-void mark_escaped_seq_var(CodeGenerator* gen, const char* var_name);
 /* Classifier: does the expression produce an OWNED *StringSeq (a fresh
  * ref the caller must free), vs a borrowed spine pointer (seq_tail)?
  * Defined in codegen_stmt.c. */
-int is_seq_owning_expr(CodeGenerator* gen, ASTNode* expr);
+int seq_value_is_fresh(CodeGenerator* gen, ASTNode* e);
+void emit_seq_take(CodeGenerator* gen, ASTNode* e);
 
 /* Classifier: does the expression produce a heap-allocated string?
  * Defined in codegen_stmt.c. Used by the codegen_expr.c argument-
@@ -207,13 +205,8 @@ int or_fallible_value_slot_is_heap(CodeGenerator* gen, ASTNode* fallible);
 /* Returns 1 if some `AST_VARIABLE_DECLARATION` for `var_name` inside
  * `node` assigns it from a heap-string source (`is_heap_string_expr`
  * of the RHS). A structural "is this variable ever heap-valued"
- * query — coarser than the runtime `_heap_<name>` flag but reliable
- * for escaped variables, whose flag the reassignment wrapper stops
- * maintaining. Skips nested function / closure scopes. Defined in
- * codegen_stmt.c; used by the map/list owned-value routing in
- * codegen_expr.c. */
-int body_assigns_var_from_heap(CodeGenerator* gen, ASTNode* node,
-                               const char* var_name);
+ * query. Skips nested function / closure scopes. Defined in
+ * codegen_stmt.c. */
 
 /* #2461: how an owning string slot (a local, a struct field, a return value)
  * takes a value that may view a buffer someone else owns: a struct field
@@ -337,16 +330,13 @@ void hoist_if_branch_vars(CodeGenerator* gen, ASTNode* body);
 void emit_contract_preconditions(CodeGenerator* gen, ASTNode* func);
 int  emit_contract_postconditions(CodeGenerator* gen, ASTNode* func);
 
-/* Hoist `_heap_<name>` companion trackers for every string variable
-   in `body` to function-entry scope. Closes #405 — the architectural
-   blocker that kept user-defined `-> string` functions from
-   participating in the heap-string-reassignment wrapper. Called from
+/* Mark every string variable in `body` as a string local and hoist
+   its declaration to function-entry scope (#405). Called from
    codegen_func.c immediately after hoist_if_branch_vars.
 
-   The structural escape analysis that recognises user-defined
-   `-> string` functions reads `gen->program` to look up callee
-   bodies; the call site of `hoist_heap_string_trackers` (and the
-   per-stmt call sites of the underlying `is_heap_string_expr`)
+   `is_heap_string_expr` reads `gen->program` to look up callees;
+   the call site of `hoist_heap_string_trackers` (and the
+   per-stmt call sites of `is_heap_string_expr`)
    therefore must not run before generate_program populates that
    field. All current call sites are inside the function-body
    codegen path which runs after that point. */
@@ -358,10 +348,7 @@ const char* call_c_name(CodeGenerator* gen, const char* func_name);
  * reaches, resolved as call_c_name resolves its C symbol, or NULL. */
 const char* extern_name_for_call(CodeGenerator* gen, const char* func_name);
 ASTNode* closure_container_store_value(CodeGenerator* gen, ASTNode* call);   /* #2518 */
-/* The heap-tracked string local a list add, list set or map put takes
- * (moved or copied, never adopted and left escaped), or NULL. */
-ASTNode* string_container_store_value(CodeGenerator* gen, ASTNode* call);
-int container_store_slot(CodeGenerator* gen, ASTNode* call);
+/* The string value a list add, list set or map put takes, or NULL. */
 int callee_param_is_string(CodeGenerator* gen, const char* func_name, int param_idx);
 /* Release the parameter table box_is_heap_new builds. */
 void zb_params_free(CodeGenerator* gen);
@@ -376,7 +363,6 @@ void code_generator_release(CodeGenerator* gen);
 const char* stmt_struct_temp_of(const ASTNode* expr);
 /* Drop `e as T` between string types before ownership is decided. */
 void erase_string_retype_casts(ASTNode* node);
-int body_may_assign_var_from_heap(CodeGenerator* gen, ASTNode* node, const char* var_name);
 void emit_message_string_copy(CodeGenerator* gen, const char* lv, ASTNode* init);
 ASTNode* message_field_init_expr(ASTNode* message, const char* name);
 /* Does some return site of `fn_def` hand back a heap string? Memoised on
@@ -422,14 +408,9 @@ int is_closure_cell_read(CodeGenerator* gen, ASTNode* e);
 ASTNode* find_function_definition_by_name(ASTNode* program, const char* name);
 ASTNode* find_extern_declaration_by_name(ASTNode* program, const char* name);
 
-/* Push function-exit defer-free statements for every hoisted
- * heap-string var that's NOT escaped. Closes the single-call
- * leak shape: a heap-string variable assigned once and never
- * reassigned still has a live allocation when the function
- * exits; without this defer it leaks per-call. Run after
- * mark_escaped_heap_string_vars (so escape state is final)
- * and before body codegen. See codegen_stmt.c for the
- * implementation rationale (issue #420 follow-up). */
+/* Push a function-exit release for every hoisted string local: a
+ * local owns what it holds, so its scope exit releases it (issue #420
+ * follow-up). Run before body codegen. See codegen_stmt.c. */
 void push_heap_string_exit_free_defers(CodeGenerator* gen, ASTNode* body);
 void stmt_struct_temps_set(ASTNode** nodes, const char** names, int count);
 void stmt_struct_temps_get(ASTNode*** nodes, const char*** names, int* count);
@@ -441,9 +422,6 @@ void collect_stmt_struct_temps(CodeGenerator* gen, ASTNode* e,
 void clear_captured_string_params(CodeGenerator* gen);
 
 /* *StringSeq local lifecycle (parallel to the heap-string passes). */
-void hoist_seq_trackers(CodeGenerator* gen, ASTNode* body);
-void mark_escaped_seq_vars(CodeGenerator* gen, ASTNode* body);
-void push_seq_exit_free_defers(CodeGenerator* gen, ASTNode* body);
 
 /* `string?` heap-ownership lifecycle (parallel to the seq passes). */
 void hoist_opt_string_locals(CodeGenerator* gen, ASTNode* body);
@@ -494,10 +472,10 @@ int is_extern_vararg_position(CodeGenerator* gen, const char* func_name, int arg
  * an extern's or an Aether function's? */
 int is_vararg_call_position(CodeGenerator* gen, const char* func_name, int arg_idx);
 /* Returns 1 if extern `func_name`'s parameter at `param_idx` was
-   declared `@retain`. Tells the escape walker to mark a heap-string
-   arg passed at this slot as escaped (function stores / retains the
-   pointer beyond the call). 0 for non-extern callees, missing
-   annotations, or out-of-range index. See codegen_func.c. */
+   declared `@retain`: the function keeps the pointer beyond the call,
+   so the call hands it a reference of its own (R4). 0 for non-extern
+   callees, missing annotations, or out-of-range index. See
+   codegen_func.c. */
 int is_retain_extern_param(CodeGenerator* gen, const char* func_name, int param_idx);
 int is_noescape_extern_param(CodeGenerator* gen, const char* func_name, int param_idx);   /* #2523 */
 const char* lookup_extern_c_name(CodeGenerator* gen, const char* func_name);
@@ -539,8 +517,8 @@ int call_param_keeps(CodeGenerator* gen, const char* func_name, int idx);
 
 /* Function/struct generation (codegen_func.c) */
 int has_return_value(ASTNode* node);
-/* #2528 (codegen_actor.c): a `string` state field, tracked by `_heap_<name>`
- * in the actor struct and released by `<Actor>_destroy_state`. */
+/* #2528 (codegen_actor.c): a `string` state field, which owns what it
+ * holds and is released by `<Actor>_destroy_state`. */
 int state_field_owns_string(ASTNode* state_decl);
 /* #2528: a `string[N]` (1) / `fn[N]` (2) state field, length in `*len`. */
 int state_array_owned(ASTNode* state_decl, int* len);
@@ -551,12 +529,11 @@ const char* state_struct_array_owned(CodeGenerator* gen, ASTNode* state_decl, in
 void emit_owned_string_element(CodeGenerator* gen, ASTNode* v);
 
 /* Struct-field heap-string ownership (#465). The struct typedef
- * emitter (generate_struct_definition) appends a hidden
- * `int _heap_<field>` tracker per `string`-typed field, and a
- * `<Name>_destroy()` function. The statement-codegen consumes
+ * emitter (generate_struct_definition) emits a `<Name>_destroy()`
+ * for a struct whose fields own. The statement-codegen consumes
  * these helpers at struct-local declaration sites (push the
- * scope-exit destroy defer) and at field-write sites (emit the
- * reassign-wrapper free). */
+ * scope-exit destroy defer) and at field-write sites (the store
+ * takes the new value and releases the old). */
 /* #2525: a `fn` field (a closure value, not a raw C function pointer): it
  * holds a reference of its own to the closure's env, released by
  * `<Name>_destroy` / `_replace`, retained by `_dup`. */

@@ -140,6 +140,12 @@ int list_add_raw(ArrayList* list, void* item) {
  * its own ownership independently. */
 /* Store `item` in the list's owned slot `slot`, tagging it for release
  * by list_free. Shared by the adopting and owning entry points. */
+/* A pinned string (a literal) is never released, so a container that
+ * takes one stores it as an element it does not own. */
+static int is_pinned_string(const void* p) {
+    return is_aether_string(p) && ((const AetherString*)p)->ref_count == AETHER_STRING_PINNED_REFS;
+}
+
 static int list_store_owned(ArrayList* list, const void* item) {
     /* Lazy-allocate the flags array on first owned-put. Best-effort:
      * on alloc failure the item is still stored and the buffer leaks
@@ -165,6 +171,7 @@ static int list_store_owned(ArrayList* list, const void* item) {
  * list_add_string_owned below. */
 int list_add_string_adopted(ArrayList* list, const void* item) {
     if (!list) return 0;
+    if (is_pinned_string(item)) return list_add_raw(list, (void*)item);
     return list_store_owned(list, item);
 }
 
@@ -355,7 +362,7 @@ int list_set_string_adopted(ArrayList* list, int index, const void* item) {
     }
     list_release_slot(list, index);
     list->items[index] = (void*)item;
-    list->owned_flags[index] = item ? 1 : 0;
+    list->owned_flags[index] = item && !is_pinned_string(item);
     return 1;
 }
 
@@ -625,7 +632,7 @@ int map_put_string_adopted(HashMap* map, const char* key, const void* value) {
             if (entry->hash == hash && key_equals(entry, kd, key_len)) {
                 release_owned_value(entry->value, entry->value_owned);
                 entry->value = (void*)value;
-                entry->value_owned = 1;
+                entry->value_owned = !is_pinned_string(value);
                 return 1;
             }
             entry = entry->next;
@@ -642,7 +649,7 @@ int map_put_string_adopted(HashMap* map, const char* key, const void* value) {
     unsigned int hash = key_hash(key, &kd, &key_len);
     unsigned int index = hash % (unsigned int)map->capacity;
     HashMapEntry* head = map->buckets[index];
-    if (head) head->value_owned = 1;
+    if (head) head->value_owned = !is_pinned_string(value);
     return 1;
 }
 

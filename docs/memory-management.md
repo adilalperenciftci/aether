@@ -277,6 +277,14 @@ field takes one; a closure passed to an `fn` parameter is borrowed. A
 variable a closure writes lives in a shared cell, counted the same way, so
 the closure and its creator see one value.
 
+### String sequences
+
+A `*StringSeq` is counted per cell and owned like a closure: every place
+holding one owns a reference, a fresh sequence (a literal, an Aether
+function's result, a `string.seq_*` producer's) moves in, any other is
+retained, and `string.seq_tail` lends. The counts are atomic, so a sequence
+crosses actors by reference. See docs/sequences.md.
+
 ### Structs, tuples, optionals and fixed-size arrays
 
 Each owning type has one generated retain and one drop, which every place

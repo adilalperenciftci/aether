@@ -259,7 +259,7 @@ extern string_array_free(arr: ptr)
 // directly. Same split semantics: empty input → single-cell list
 // with "", delimiter longer than input → single-cell list with the
 // whole input, trailing/leading delimiters produce empty pieces.
-extern string_split_to_seq(str: string, delimiter: string) -> *StringSeq
+extern string_split_to_seq(str: string, delimiter: string) -> *StringSeq @heap
 
 // lines(s) — split on "\n" into a *StringSeq, EMPTY-SAFE: "" → an empty
 // sequence (length 0), not the single "" cell split_to_seq("","\n") returns.
@@ -288,15 +288,17 @@ extern string_join(seq: *StringSeq, sep: string) -> string @heap
 // Cons-cell construction + destructuring. Names mirror the C
 // runtime symbols; users call them via dot-notation `string.seq_X(...)`
 // (the qualified-name resolver joins `string` + `seq_X` → `string_seq_X`).
-extern string_seq_empty() -> *StringSeq
-extern string_seq_cons(head: string, tail: *StringSeq) -> *StringSeq
+// A `@heap` result hands the caller a reference of its own; `seq_tail`
+// lends the sequence's own tail.
+extern string_seq_empty() -> *StringSeq @heap
+extern string_seq_cons(head: string, tail: *StringSeq) -> *StringSeq @heap
 extern string_seq_head(s: *StringSeq) -> string
 extern string_seq_tail(s: *StringSeq) -> *StringSeq
 extern string_seq_is_empty(s: *StringSeq) -> int
 extern string_seq_length(s: *StringSeq) -> int
-extern string_seq_retain(s: *StringSeq) -> *StringSeq
+extern string_seq_retain(s: *StringSeq) -> *StringSeq @heap
 extern string_seq_free(s: *StringSeq)
-extern string_seq_from_array(arr: ptr, count: int) -> *StringSeq
+extern string_seq_from_array(arr: ptr, count: int) -> *StringSeq @heap
 extern string_seq_to_array(s: *StringSeq) -> ptr
 
 // Closure-free combinators. The shape deliberately avoids passing
@@ -306,8 +308,8 @@ extern string_seq_to_array(s: *StringSeq) -> ptr
 // four below are pure structural ops over the cons cells, all
 // refcount-correct on shared tails, all O(min(n, length)) or
 // O(length) work with no auxiliary stack.
-extern string_seq_reverse(s: *StringSeq) -> *StringSeq
-extern string_seq_concat(a: *StringSeq, b: *StringSeq) -> *StringSeq
+extern string_seq_reverse(s: *StringSeq) -> *StringSeq @heap
+extern string_seq_concat(a: *StringSeq, b: *StringSeq) -> *StringSeq @heap
 // Join every element of a *StringSeq with `sep` between adjacent
 // elements: the complement of split_to_seq, and the linear-cost
 // escape from O(n^2) interpolation self-append accumulation (for
@@ -315,8 +317,8 @@ extern string_seq_concat(a: *StringSeq, b: *StringSeq) -> *StringSeq
 // one exact-size allocation, binary-safe. Returns a fresh owned
 // string; "" for the empty seq.
 extern string_seq_join(s: *StringSeq, sep: string) -> string @heap
-extern string_seq_take(s: *StringSeq, n: int) -> *StringSeq
-extern string_seq_drop(s: *StringSeq, n: int) -> *StringSeq
+extern string_seq_take(s: *StringSeq, n: int) -> *StringSeq @heap
+extern string_seq_drop(s: *StringSeq, n: int) -> *StringSeq @heap
 
 // Closure-bearing combinators (#421 — multi-sequence iteration). Each
 // takes an Aether closure as the per-element callback. The callback
@@ -339,8 +341,8 @@ extern string_seq_drop(s: *StringSeq, n: int) -> *StringSeq
 // automatically at scope exit like any seq local). `reduce` returns the
 // caller's accumulator (`ptr`). `each`/`zip_each` return nothing.
 extern string_seq_each(s: *StringSeq, f: @noescape ptr)
-extern string_seq_map(s: *StringSeq, f: @noescape ptr) -> *StringSeq
-extern string_seq_filter(s: *StringSeq, pred: @noescape ptr) -> *StringSeq
+extern string_seq_map(s: *StringSeq, f: @noescape ptr) -> *StringSeq @heap
+extern string_seq_filter(s: *StringSeq, pred: @noescape ptr) -> *StringSeq @heap
 extern string_seq_reduce(s: *StringSeq, init: ptr, f: @noescape ptr) -> ptr
 extern string_seq_zip_each(a: *StringSeq, b: *StringSeq, f: @noescape ptr)
 

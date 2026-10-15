@@ -464,6 +464,42 @@ it takes its own (#2788). A function frees a caller's string only when it is
 a consuming free like `string.free`, since an Aether function may not free a
 parameter it borrows (E0901).
 
+**String sequences own like every other kind (#2921).** `*StringSeq` is an
+owning type of the generated take and drop: a place takes a fresh sequence
+(a literal, an Aether function's or a closure's result, an extern's whose
+result says `@heap`) and retains any other, and drops what it holds when it
+is overwritten or left; a struct field, a tuple position, an optional, an
+array element, a capture, a cell, a message field, actor state and a module
+`var` follow from that. The std producers say `@heap`; `string.seq_tail`
+lends. The per-local `_seqheap_` flags, the escape walk that kept a
+sequence alive when it was passed to anything but a `string.seq_*` op, and
+the producer name list are deleted. A sequence crosses threads in a message
+or a capture, so its cell counts are atomic, as a closure environment's
+are; the builders adopt the tail they are handed instead of retaining and
+releasing it, so a build costs no more than before. A send takes a
+reference rather than copying the cells, which are immutable.
+
+`string.seq_free` of a place (a local, a field, an element) releases what
+the place holds and leaves it empty, so the place's own release (its scope
+exit, its box's `heap.free`) finds nothing; std.language freed a field by
+hand and then the box, which released it twice.
+
+**Containers and counted strings typed `ptr`.** A string a `-> ptr @heap`
+constructor returns (`string.from_int`) is a counted string handed to the
+caller, and `list.add`, `list.set` and `map.put` adopt it as they adopt a
+`string`; routed to the plain add, the list kept a pointer the call's
+argument temporary then released. A container handed a pinned string (a
+literal) stores it as an element it does not own: a pinned string is never
+released, so owning it would only cost the container its ownership tags.
+
+**A borrowed binding that is rebound.** A parameter, a list pattern's tail
+and a receive arm's field binding borrow their value. One of an owning
+tuple, optional, closure or sequence type that its body rebinds takes a
+reference of its own first, which its scope exit drops, so the rebind
+releases nothing of the owner's (a struct parameter already did this,
+#2582). The checker refuses `string.seq_free` of a borrowed sequence
+parameter, as it refuses freeing a string one (E0901).
+
 **Teardown in constant stack.** A closure's environment releases what it
 holds when its last reference goes, and what it holds can be a closure
 whose environment then goes too: a chain of rebinds to a closure calling

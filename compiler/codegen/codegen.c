@@ -711,14 +711,6 @@ CodeGenerator* create_code_generator(FILE* output) {
     gen->zb_params = NULL;
     gen->zb_params_state = 0;
     gen->str_arrays = NULL;
-    // *StringSeq ownership tracking — MUST be zero-initialised here:
-    // the CodeGenerator is field-initialised (not calloc'd), so leaving
-    // these uninitialised made the first clear_seq_vars() free garbage
-    // pointers (glibc abort / SEGV on Linux CI; tolerated on macOS).
-    gen->seq_vars = NULL;
-    gen->seq_var_count = 0;
-    gen->escaped_seq_vars = NULL;
-    gen->escaped_seq_var_count = 0;
     // `string?` heap-ownership tracking — same zero-init requirement as
     // the seq registry above (field-initialised, not calloc'd).
     // Ask/reply type map
@@ -957,7 +949,6 @@ void code_generator_release(CodeGenerator* gen) {
         }
         clear_heap_string_vars(gen);
         clear_captured_string_params(gen);
-    clear_seq_vars(gen);
         clear_try_clobbered_vars(gen);  /* Issue #501 follow-up */
         if (gen->message_registry) {
             free_message_registry(gen->message_registry);
@@ -1204,60 +1195,6 @@ void clear_captured_string_params(CodeGenerator* gen) {
     gen->captured_string_param_count = 0;
 }
 
-
-/* ---- *StringSeq local registry (parallel to heap_string_vars) ----
- * A seq var owns a refcounted spine; string_seq_free is a decrement, so
- * freeing on reassign / scope-exit is refcount-safe even when shared. */
-int is_seq_var(CodeGenerator* gen, const char* var_name) {
-    if (!gen || !var_name) return 0;
-    for (int i = 0; i < gen->seq_var_count; i++) {
-        if (strcmp(gen->seq_vars[i], var_name) == 0) return 1;
-    }
-    return 0;
-}
-
-void mark_seq_var(CodeGenerator* gen, const char* var_name) {
-    if (!gen || !var_name) return;
-    if (is_seq_var(gen, var_name)) return;
-    char** nv = realloc(gen->seq_vars, sizeof(char*) * (gen->seq_var_count + 1));
-    if (!nv) return;
-    gen->seq_vars = nv;
-    gen->seq_vars[gen->seq_var_count++] = strdup(var_name);
-}
-
-int is_escaped_seq_var(CodeGenerator* gen, const char* var_name) {
-    if (!gen || !var_name) return 0;
-    for (int i = 0; i < gen->escaped_seq_var_count; i++) {
-        if (strcmp(gen->escaped_seq_vars[i], var_name) == 0) return 1;
-    }
-    return 0;
-}
-
-void mark_escaped_seq_var(CodeGenerator* gen, const char* var_name) {
-    if (!gen || !var_name) return;
-    if (is_escaped_seq_var(gen, var_name)) return;
-    char** nv = realloc(gen->escaped_seq_vars,
-                        sizeof(char*) * (gen->escaped_seq_var_count + 1));
-    if (!nv) return;
-    gen->escaped_seq_vars = nv;
-    gen->escaped_seq_vars[gen->escaped_seq_var_count++] = strdup(var_name);
-}
-
-void clear_seq_vars(CodeGenerator* gen) {
-    if (!gen) return;
-    if (gen->seq_vars) {
-        for (int i = 0; i < gen->seq_var_count; i++) free(gen->seq_vars[i]);
-        free(gen->seq_vars);
-    }
-    gen->seq_vars = NULL;
-    gen->seq_var_count = 0;
-    if (gen->escaped_seq_vars) {
-        for (int i = 0; i < gen->escaped_seq_var_count; i++) free(gen->escaped_seq_vars[i]);
-        free(gen->escaped_seq_vars);
-    }
-    gen->escaped_seq_vars = NULL;
-    gen->escaped_seq_var_count = 0;
-}
 
 // Normalise a callee name's dots to underscores. Used by every
 // callee-name lookup in codegen — heap-string allowlist
@@ -1531,16 +1468,11 @@ void enter_scope(CodeGenerator* gen) {
 // AST_EXPRESSION_STATEMENT whose annotation encodes the variable
 // name as `"heap_string_exit_free:<name>"`. The defer-emit loops
 // (here and in emit_all_defers) detect the prefix and
-// render the conditional-free directly:
-//
-//     if (_heap_<name>) { free((void*)<name>); <name> = NULL; _heap_<name> = 0; }
-//
-// without descending through generate_statement (the carrier's
-// body is intentionally empty). The reset-after-free is defensive:
-// a defer can be drained from emit_all_defers at a return site;
-// the C var is dead from the caller's perspective either way, but
-// keeping the tracker honest means a re-emitted scope-exit drain
-// is idempotent. Returns 1 if the defer was a heap-exit-free
+// render the release directly, without descending through
+// generate_statement (the carrier's body is intentionally empty):
+// the local leaves the unwind journal, its reference is released
+// and it is left NULL, so a re-emitted scope-exit drain is
+// idempotent. Returns 1 if the defer was a heap-exit-free
 // carrier and was rendered; 0 otherwise (caller falls through to
 // the standard `generate_statement` path).
 static int try_emit_heap_string_exit_free(CodeGenerator* gen, ASTNode* deferred) {
@@ -1554,24 +1486,6 @@ static int try_emit_heap_string_exit_free(CodeGenerator* gen, ASTNode* deferred)
     fprintf(gen->output,
             "/* deferred */ aether_unwind_forget((const void*)&%s); "
             "aether_heap_str_free(%s); %s = NULL;\n", name, name, name);
-    return 1;
-}
-
-/* *StringSeq scope-exit free carrier. Annotation: "seq_exit_free:<name>".
- * string_seq_free is a refcount decrement, so this is safe even when the
- * spine is shared; the flag guard + NULL keep it idempotent against an
- * explicit string.seq_free that already ran. */
-static int try_emit_seq_exit_free(CodeGenerator* gen, ASTNode* deferred) {
-    if (!deferred || !deferred->annotation) return 0;
-    const char* prefix = "seq_exit_free:";
-    size_t plen = strlen(prefix);
-    if (strncmp(deferred->annotation, prefix, plen) != 0) return 0;
-    const char* name = deferred->annotation + plen;
-    if (!*name) return 0;
-    print_indent(gen);
-    fprintf(gen->output,
-            "/* deferred */ if (_seqheap_%s) { string_seq_free(%s); %s = NULL; _seqheap_%s = 0; }\n",
-            name, name, name, name);
     return 1;
 }
 
@@ -1617,8 +1531,7 @@ static int try_emit_handover_exit_free(CodeGenerator* gen, ASTNode* deferred) {
  * for every local struct variable whose definition has at least
  * one heap-string field. The emitted defer calls the auto-
  * generated <StructName>_destroy(&<varname>) function, which
- * walks every `_heap_<field>` tracker and frees the matching
- * field's buffer if set. */
+ * releases every field that owns. */
 static int try_emit_struct_destroy(CodeGenerator* gen, ASTNode* deferred) {
     if (!deferred || !deferred->annotation) return 0;
     const char* prefix = "struct_destroy:";
@@ -1749,7 +1662,6 @@ static void emit_deferred_one(CodeGenerator* gen, int i) {
     if (!try_emit_builder_ctx_pop(gen, deferred) &&
         !try_emit_builder_cfg_release(gen, deferred) &&
         !try_emit_heap_string_exit_free(gen, deferred) &&
-        !try_emit_seq_exit_free(gen, deferred) &&
         !try_emit_handover_exit_free(gen, deferred) &&   /* #2798 */
         !try_emit_scoped_temp_free(gen, deferred) &&
         !try_emit_struct_destroy(gen, deferred) &&
@@ -2087,15 +1999,6 @@ const char* volatile_decl_type(const char* vq, const char* c_type) {
     size_t n = strlen(c_type);
     if (n > 0 && c_type[n - 1] == '*') return cg_internf("%s volatile", c_type);
     return cg_internf("volatile %s", c_type);
-}
-
-// The C type of the ownership flag beside the local `name` (`_heap_<name>`,
-// `_seqheap_<name>`, `_heapopt_<name>`): `volatile int` wherever the local
-// itself is, since every store into the local sets the flag too, and a flag
-// left in a register by the longjmp says the local owns what it no longer
-// holds, or does not own what it does (#2690).
-const char* try_tracker_type(CodeGenerator* gen, const char* name) {
-    return volatile_decl_type(try_volatile_qual_for(gen, name), "int");
 }
 
 // ============================================================================
@@ -5335,7 +5238,6 @@ static void begin_main_c_function(CodeGenerator* gen) {
     clear_fnptr_locals(gen);
     clear_heap_string_vars(gen);
     clear_captured_string_params(gen);   /* #2499: a parameter set is per body */
-    clear_seq_vars(gen);
     clear_try_clobbered_vars(gen);  /* Issue #501 follow-up */
     // Reset defer state for main function and enter scope
     gen->defer_count = 0;
@@ -5399,13 +5301,10 @@ static void emit_main_body(CodeGenerator* gen, ASTNode* main) {
         int prev_promoted_count = gen->current_promoted_capture_count;
         get_promoted_names_for_func(gen, "main",
             &gen->current_promoted_captures, &gen->current_promoted_capture_count);
-        // Issue #405: hoist `_heap_<name>` companions for every
-        // string variable in main() to function-entry scope so the
-        // tracker is visible across every nesting depth. Without
-        // this, cross-block reassignment from a heap-string-returning
-        // user function fails to compile (`'_heap_x' undeclared`)
-        // because the lazy tracker init was scope-local. Mirror of
-        // the call in codegen_func.c::generate_function_definition.
+        // Issue #405: hoist every string variable in main() to
+        // function-entry scope so it is visible across every nesting
+        // depth. Mirror of the call in
+        // codegen_func.c::generate_function_definition.
         if (main->children[0] && main->children[0]->type == AST_BLOCK) {
             /* #2029: same pre-pass the regular-function path runs (#278),
              * and in the same position -- before hoist_heap_string_trackers,
@@ -5420,26 +5319,12 @@ static void emit_main_body(CodeGenerator* gen, ASTNode* main) {
             mark_try_clobbered_vars(gen, main->children[0]);
             hoist_if_branch_vars(gen, main->children[0]);
             hoist_heap_string_trackers(gen, main->children[0]);
-            hoist_seq_trackers(gen, main->children[0]);
             hoist_opt_string_locals(gen, main->children[0]);
-            mark_escaped_seq_vars(gen, main->children[0]);
             /* Mirror the regular-function path in
              * codegen_func.c::generate_function_definition: push a
-             * function-exit defer-free for every non-escaped
-             * hoisted heap-string variable so heap allocations
-             * surviving to main()'s tail are reclaimed at exit
-             * instead of leaking per-process. Without this the
-             * tracker would correctly free on every reassignment
-             * but the FINAL allocation in main() would never be
-             * freed — a constant per-program leak.
-             *
-             * Safety: the @retain annotations on string_retain/
-             * release/free (std/string/module.ae) mark vars that
-             * the user explicitly hands to a refcount call as
-             * escaped, so the auto-free here cannot double-free
-             * a buffer the user already released manually. */
+             * function-exit release for every hoisted string local,
+             * so what main() holds at its tail is released at exit. */
             push_heap_string_exit_free_defers(gen, main->children[0]);
-            push_seq_exit_free_defers(gen, main->children[0]);
         }
         generate_statement(gen, main->children[0]);
         gen->current_promoted_captures = prev_promoted;
@@ -5566,8 +5451,8 @@ void generate_main_function(CodeGenerator* gen, ASTNode* main) {
     if (lib_entry && report_lib_main_name_collisions(gen, gen->program)) return;
 
     /* Track `main` as the current function so body-structural queries
-     * (e.g. body_assigns_var_from_heap, used by the map/list owned-
-     * value routing) can reach `main`'s body. Restored at function end.
+     * (current_fn_body_block) can reach `main`'s body. Restored at
+     * function end.
      * All other `gen->current_function` consumers gate on
      * `!gen->in_main_function` first, so a main node here is inert
      * for them. */
@@ -5667,7 +5552,7 @@ void generate_main_function(CodeGenerator* gen, ASTNode* main) {
 // from C with `extern const ... @c_import`.
 // Rather than thread the mangler through the ~100 codegen sites that emit a
 // variable's name (declarations, references, params, and derived temporaries
-// like `_heap_<name>` / `_seqheap_<name>` / `<name>_len`), rewrite the name
+// like `<name>_len`), rewrite the name
 // ONCE on the AST before codegen: every site then reads the already-safe name
 // and stays consistent by construction.
 //
@@ -7901,26 +7786,12 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     print_line(gen, "static inline const char* aether_fnptr_take(const char* r) {");
     print_line(gen, "    return aether_uniform_heap_str(r, aether_fnptr_claim((const void*)r));");
     print_line(gen, "}");
-    /* AetherString-aware heap-string release. A `_heap_<name>` slot
-     * tracked by the codegen can hold two physically distinct shapes:
-     *
-     *   - a plain libc-malloc'd char* — string.concat, interpolation,
-     *     and `@heap` externs (fs.realpath, os.run_capture) all return
-     *     this; a plain free() reclaims it fully.
-     *   - a refcounted AetherString* — struct plus a SEPARATELY
-     *     allocated data buffer (`string_new_with_length`, the result
-     *     shape behind `bytes.finish`). free() on the struct alone
-     *     leaks the data buffer; the whole value must go through
-     *     `string_release`, which frees both with their recorded
-     *     sizes.
-     *
-     * Probe the AetherString magic header byte-by-byte with short-
-     * circuit (ASan-clean on 1-byte allocations — identical shape to
-     * aether_uniform_heap_str above and is_aether_string in
-     * std/string/aether_string.h). On a hit, route to string_release;
-     * string_release re-validates the full header internally, so a
-     * plain char* whose first four bytes coincidentally match the
-     * magic degrades to a 1-in-2^32 no-op (a leak, never a crash).
+    /* Release of the reference a place holds (aether_heap_str_free below).
+     * Every string a place holds is a counted AetherString: a pinned one
+     * is left alone, an unshared count above one is decremented in place,
+     * and anything else goes through `string_release`. The magic header is
+     * probed byte-by-byte with short-circuit (ASan-clean on 1-byte
+     * allocations, the shape of aether_uniform_heap_str above).
      * string_release is forward-declared with the `const char*`
      * signature the extern-registry pass also uses, so the duplicate
      * declaration is tolerated by C. */
@@ -8366,6 +8237,8 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     print_line(gen, "static inline _AeClosure _aether_closure_retain(_AeClosure c) { _aether_closure_env_retain(c.env); return c; }");
     /* #2921: the journal's drop of a closure place a panic leaves. */
     print_line(gen, "static AETHER_MAYBE_UNUSED void _aether_closure_drop_unwind(const void* p) { _AeClosure* c = (_AeClosure*)p; _aether_closure_env_release(c->env); c->env = (void*)0; }");
+    print_line(gen, "static AETHER_MAYBE_UNUSED void _aether_seq_drop_unwind(const void* p) { StringSeq** s = (StringSeq**)p; string_seq_free(*s); *s = (StringSeq*)0; }");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED void _aether_seq_free_place(StringSeq** p) { string_seq_free(*p); *p = (StringSeq*)0; }");
     /* #2755: a closure cell (a `fn` variable a closure writes) holds a
      * reference of its own to the closure in it, as a string cell owns its
      * string: a store gives back the one it replaces, and the last holder
@@ -8375,6 +8248,11 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     print_line(gen, "    if (!cell) return;");
     print_line(gen, "    _AeCellHeader* h = (_AeCellHeader*)cell - 1;");
     print_line(gen, "    if (_aether_cell_last(h)) { _aether_closure_env_release(((_AeClosure*)cell)->env); free(h); }");
+    print_line(gen, "}");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED void _aether_cell_release_seq(const void* cell) {");
+    print_line(gen, "    if (!cell) return;");
+    print_line(gen, "    _AeCellHeader* h = (_AeCellHeader*)cell - 1;");
+    print_line(gen, "    if (_aether_cell_last(h)) { string_seq_free(*(StringSeq**)cell); free(h); }");
     print_line(gen, "}");
     /* #2220: the post-store hook for `struct T @observable`. Declared
      * unconditionally (it is one prototype); only a store on an observable

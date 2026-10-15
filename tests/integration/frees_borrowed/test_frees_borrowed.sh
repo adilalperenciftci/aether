@@ -1,5 +1,6 @@
 #!/bin/sh
-# A function may not free a `string` parameter (E0901, #2924).
+# A function may not free a `string` or `*StringSeq` parameter (E0901,
+# #2924).
 #
 # A parameter is borrowed for the call: the caller owns the string and frees
 # it (docs/design/ownership-model.md, R3). `string.free(p)`, `release(p)`,
@@ -103,6 +104,31 @@ set_owned(previous: string, value: string) -> string {
 main() { println(set_owned("a", "b")) }
 AE
 refused second_param 5:33 previous
+
+cat > "$TMP/seq_param.ae" <<'AE'
+import std.string
+
+drop(s: *StringSeq) {
+    string.seq_free(s)
+}
+
+main() { drop(string.split_to_seq("a,b", ",")) }
+AE
+refused seq_param 4:11 s
+
+cat > "$TMP/seq_rebound.ae" <<'AE'
+import std.string
+
+walk(s: *StringSeq) -> int {
+    s = string.seq_tail(s)
+    n = string.seq_length(s)
+    string.seq_free(s)
+    return n
+}
+
+main() { println("${walk(string.split_to_seq("a,b", ","))}") }
+AE
+accepted seq_rebound
 
 cat > "$TMP/rebound.ae" <<'AE'
 import std.string

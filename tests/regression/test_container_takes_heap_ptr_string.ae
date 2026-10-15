@@ -1,0 +1,51 @@
+// A counted string a call returns typed `ptr` (`string.from_int` and the
+// other `-> ptr @heap` constructors) is handed to its caller, and a
+// container it is stored into must take it (R3). `list.add`, `list.set` and
+// `map.put` routed only a `string`-typed value through the adopting add;
+// the `ptr` one went to the plain add, which keeps the pointer without a
+// reference, and the call's argument temporary released the string after
+// the call, so the container held freed memory. Each value is read back
+// after the statements that stored it have finished.
+
+import std.string
+import std.list
+import std.map
+
+extern exit(code: int)
+
+fn check(ok: bool, what: string) {
+    if !ok {
+        println("FAIL: ${what}")
+        exit(1)
+    }
+}
+
+main() {
+    l = list.new()
+    i = 0
+    while i < 100 {
+        list.add(l, string.from_int(i * 7))
+        i = i + 1
+    }
+    list.set(l, 3, string.from_int(12345))
+    m = map.new()
+    map.put(m, "k", string.from_int(4242))
+    // Churn the allocator so a released block is reused.
+    j = 0
+    while j < 1000 {
+        s = string.concat(string.from_int(j), "padding-padding")
+        check(string.length(s) > 0, "churn")
+        j = j + 1
+    }
+    v0, _e0 = list.get(l, 0)
+    v99, _e99 = list.get(l, 99)
+    v3, _e3 = list.get(l, 3)
+    check(v0 == "0", "list.add element 0")
+    check(v99 == "693", "list.add element 99")
+    check(v3 == "12345", "list.set element")
+    mv, _me = map.get(m, "k")
+    check(mv == "4242", "map.put value")
+    list.free(l)
+    map.free(m)
+    println("OK")
+}

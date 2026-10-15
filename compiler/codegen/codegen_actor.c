@@ -288,9 +288,11 @@ static int state_field_is_ptr(CodeGenerator* gen, ASTNode* actor, const char* fi
                 ASTNode* c = a->children[j];
                 /* A `string` field is a pointer already: assigned a message's
                  * string (`label = w`), it was widened to `void*`, and the
-                 * store of a `const char*` into it discarded the qualifier. */
+                 * store of a `const char*` into it discarded the qualifier.
+                 * A string sequence is a typed pointer that owns its cells. */
                 if (c && c->type == AST_STATE_DECLARATION && c->value &&
                     !(c->node_type && c->node_type->kind == TYPE_STRING) &&
+                    !is_string_seq_ptr_type(c->node_type) &&
                     state_field_used_as_ptr_in_actor(gen, a, c->value)) {
                     mark_ptr_field(gen, a->value, c->value);
                 }
@@ -551,7 +553,6 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
                         clear_fnptr_locals(gen);
                         clear_heap_string_vars(gen);
                         clear_captured_string_params(gen);
-                        clear_seq_vars(gen);
                         /* #2748: and the escape marks the last function or
                          * handler left, as a function clears them, so they
                          * neither keep this handler's locals nor reach the
@@ -642,8 +643,8 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
                                     gen->closure_var_scope = seed_scope;
                                     continue;
                                 }
-                                /* A binding a `try` body writes is volatile,
-                                 * as its ownership flag is (#2690). */
+                                /* A binding a `try` body writes is volatile
+                                 * (#2690). */
                                 print_line(gen, "%s %s = _pattern->%s;",
                                            volatile_decl_type(try_volatile_qual_for(gen, var_name),
                                                               c_type),
@@ -660,6 +661,11 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
                                 Type* fsig = message_field_type(gen->program, pattern->value,
                                                                 field->value);
                                 if (is_fnptr_type(fsig)) register_fnptr_local(gen, var_name, fsig);
+                                /* The binding is a view of the message's
+                                 * field, which the message releases. */
+                                if (fsig && arm_body)
+                                    own_rebound_binding_take(gen, var_name, fsig, arm_body,
+                                                             field->line, field->column);
                             }
                         }
 
@@ -673,26 +679,19 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
                         const char* prev_closure_var_scope = gen->closure_var_scope;
                         gen->closure_var_scope = arm_name;   /* #2513 */
 
-                        // Pre-hoist `_heap_<name>` companions for string
-                        // locals in the handler body, exactly as
-                        // generate_function_definition does for regular
-                        // functions (codegen_func.c) and main (codegen.c).
-                        // Without this, a handler that builds a heap string
-                        // — e.g. `n = string.concat(in_n, "")` to retain a
-                        // message field into state — emits a `_heap_n`
-                        // tracker reference that is never declared, producing
-                        // `'_heap_n' undeclared` in the generated C. The
-                        // handler is its own C function, so it needs the same
-                        // function-scope hoist pass.
+                        // Pre-hoist the string locals in the handler body,
+                        // exactly as generate_function_definition does for
+                        // regular functions (codegen_func.c) and main
+                        // (codegen.c): the handler is its own C function, so
+                        // it needs the same function-scope hoist pass.
                         if (arm_body && arm_body->type == AST_BLOCK) {
                             /* #2124: the handler is the hoist scope for
                              * its own branch-local joins, as a function
                              * body is. */
                             gen->hoist_scope_body = arm_body;
                             hoist_heap_string_trackers(gen, arm_body);
-                            /* #2748: its `*StringSeq` and `string?` locals
-                             * too, as a function's are. */
-                            hoist_seq_trackers(gen, arm_body);
+                            /* #2748: its `string?` locals too, as a
+                             * function's are. */
                             hoist_opt_string_locals(gen, arm_body);
                         }
 
@@ -702,18 +701,12 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
                          * local that merely shares a name, and this
                          * handler's must not reach the next function. */
                         if (arm_body && arm_body->type == AST_BLOCK) {
-                            /* #2748: the escape walks and the exit frees a
-                             * function body gets (codegen_func.c), so a
-                             * string, `*StringSeq` or `string?` local the
-                             * handler binds is freed when the handler ends
-                             * unless it was handed on. It never was, and
-                             * each message leaked it. A store into a string
-                             * state field takes a string of its own (the
-                             * local's moved on its last use, else copied),
-                             * so the local keeps its own exit free. */
-                            mark_escaped_seq_vars(gen, arm_body);
+                            /* #2748: the exit releases a function body
+                             * gets (codegen_func.c), so a local the handler
+                             * binds is released when the handler ends. A
+                             * store into a state field takes a reference of
+                             * its own (R3). */
                             push_heap_string_exit_free_defers(gen, arm_body);
-                            push_seq_exit_free_defers(gen, arm_body);
                             for (int k = 0; k < arm_body->child_count; k++) {
                                 generate_statement(gen, arm_body->children[k]);
                             }
@@ -829,15 +822,11 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
             clear_fnptr_locals(gen);
             clear_heap_string_vars(gen);
             clear_captured_string_params(gen);
-            clear_seq_vars(gen);
             if (tbody->type == AST_BLOCK) {
                 gen->hoist_scope_body = tbody;
                 hoist_heap_string_trackers(gen, tbody);
-                hoist_seq_trackers(gen, tbody);
                 hoist_opt_string_locals(gen, tbody);
-                mark_escaped_seq_vars(gen, tbody);
                 push_heap_string_exit_free_defers(gen, tbody);
-                push_seq_exit_free_defers(gen, tbody);
                 for (int j = 0; j < tbody->child_count; j++) {
                     generate_statement(gen, tbody->children[j]);
                 }

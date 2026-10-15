@@ -6821,6 +6821,13 @@ static int is_string_free_call(ASTNode* program, ASTNode* n) {
     return 0;
 }
 
+/* `string.seq_free`, the release of a string sequence. */
+static int is_seq_free_call(ASTNode* n) {
+    if (!n || n->type != AST_FUNCTION_CALL || !n->value || n->child_count != 1) return 0;
+    return !strcmp(n->value, "string.seq_free") || !strcmp(n->value, "string_seq_free") ||
+           !strcmp(n->value, "string.string_seq_free");
+}
+
 static int body_rebinds(ASTNode* n, const char* name) {
     if (!n) return 0;
     if (n->type == AST_VARIABLE_DECLARATION && n->value && !strcmp(n->value, name)) return 1;
@@ -6829,27 +6836,32 @@ static int body_rebinds(ASTNode* n, const char* name) {
     return 0;
 }
 
-static void check_frees_of_param(ASTNode* program, ASTNode* n, const char* name) {
+/* `seq` says the parameter is a string sequence, freed by
+ * `string.seq_free`, rather than a string. */
+static void check_frees_of_param(ASTNode* program, ASTNode* n, const char* name, int seq) {
     if (!n || n->type == AST_CLOSURE) return;
-    if (is_string_free_call(program, n) && n->children[0] && n->children[0]->type == AST_IDENTIFIER &&
-        n->children[0]->value && !strcmp(n->children[0]->value, name)) {
+    if ((seq ? is_seq_free_call(n) : is_string_free_call(program, n)) && n->children[0] &&
+        n->children[0]->type == AST_IDENTIFIER && n->children[0]->value &&
+        !strcmp(n->children[0]->value, name)) {
         char msg[256];
         snprintf(msg, sizeof(msg), "'%s' is a parameter: the function borrows it and may not free it", name);
         type_error_code_hint(msg,
-            "the caller owns the string and frees it; to keep a string of your own, store it",
+            seq ? "the caller owns the sequence and frees it; to keep a sequence of your own, store it"
+                : "the caller owns the string and frees it; to keep a string of your own, store it",
             n->line, n->column, AETHER_ERR_FREES_BORROWED);
         return;
     }
-    for (int i = 0; i < n->child_count; i++) check_frees_of_param(program, n->children[i], name);
+    for (int i = 0; i < n->child_count; i++) check_frees_of_param(program, n->children[i], name, seq);
 }
 
 static void check_borrowed_param_frees(ASTNode* program, ASTNode* fn, ASTNode* body) {
     for (int i = 0; fn && body && i < fn->child_count && fn->children[i] != body; i++) {
         ASTNode* p = fn->children[i];
         if (p && (p->type == AST_VARIABLE_DECLARATION || p->type == AST_PATTERN_VARIABLE) &&
-            p->value && p->node_type && p->node_type->kind == TYPE_STRING &&
+            p->value && p->node_type &&
+            (p->node_type->kind == TYPE_STRING || is_string_seq_ptr_type(p->node_type)) &&
             !body_rebinds(body, p->value))
-            check_frees_of_param(program, body, p->value);
+            check_frees_of_param(program, body, p->value, p->node_type->kind != TYPE_STRING);
     }
 }
 
@@ -7023,41 +7035,56 @@ static Type* struct_field_decl_type(ASTNode* program, const char* sname, const c
     return NULL;
 }
 
-static void report_string_into_ptr(ASTNode* at, const char* where) {
-    char msg[200];
-    snprintf(msg, sizeof(msg), "a `string` is given to %s, which keeps it past the statement", where);
-    type_error_code_hint(msg, "hand over a reference of its own with `string.keep(s)`",
-                         at->line, at->column, AETHER_ERR_KEEPS_BORROWED);
+/* A string sequence the same way, through `string.seq_retain(s)`. */
+static int is_seq_retain_call(ASTNode* e) {
+    return e && e->type == AST_FUNCTION_CALL && e->value &&
+           (!strcmp(e->value, "string.seq_retain") || !strcmp(e->value, "string_seq_retain"));
 }
 
-static int is_plain_string_value(ASTNode* e) {
-    return e && e->node_type && e->node_type->kind == TYPE_STRING && !is_string_keep_call(e);
+/* The kind of value `e` is when a `ptr` that keeps it would hold no
+ * reference of its own ("string", "*StringSeq"), or NULL. */
+static const char* unkept_value_kind(ASTNode* e) {
+    if (!e || !e->node_type) return NULL;
+    if (e->node_type->kind == TYPE_STRING && !is_string_keep_call(e)) return "string";
+    if (is_string_seq_ptr_type(e->node_type) && !is_seq_retain_call(e)) return "*StringSeq";
+    return NULL;
+}
+
+static void report_unkept_into_ptr(ASTNode* at, const char* kind, const char* where,
+                                   const char* until) {
+    char msg[200];
+    snprintf(msg, sizeof(msg), "a `%s` is given to %s, which keeps it past the %s", kind, where,
+             until);
+    type_error_code_hint(msg,
+                         !strcmp(kind, "string")
+                             ? "hand over a reference of its own with `string.keep(s)`"
+                             : "hand over a reference of its own with `string.seq_retain(s)`",
+                         at->line, at->column, AETHER_ERR_KEEPS_BORROWED);
 }
 
 static void check_strings_into_keep(ASTNode* program, ASTNode* n) {
     if (!n) return;
     /* A `ptr` field keeps what it is given, as a `@keep` parameter does. */
     if (n->type == AST_BINARY_EXPRESSION && n->value && !strcmp(n->value, "=") && n->child_count == 2 &&
-        n->children[0] && is_bare_ptr_type(n->children[0]->node_type) && is_plain_string_value(n->children[1]))
-        report_string_into_ptr(n->children[1], "a `ptr` field");
+        n->children[0] && is_bare_ptr_type(n->children[0]->node_type) &&
+        unkept_value_kind(n->children[1]))
+        report_unkept_into_ptr(n->children[1], unkept_value_kind(n->children[1]), "a `ptr` field",
+                               "statement");
     if (n->type == AST_STRUCT_LITERAL && n->value) {
         for (int i = 0; i < n->child_count; i++) {
             ASTNode* f = n->children[i];
-            if (f && f->value && f->child_count > 0 && is_plain_string_value(f->children[0]) &&
+            if (f && f->value && f->child_count > 0 && unkept_value_kind(f->children[0]) &&
                 is_bare_ptr_type(struct_field_decl_type(program, n->value, f->value)))
-                report_string_into_ptr(f->children[0], "a `ptr` field");
+                report_unkept_into_ptr(f->children[0], unkept_value_kind(f->children[0]),
+                                       "a `ptr` field", "statement");
         }
     }
     if (n->type == AST_FUNCTION_CALL && n->value) {
         ASTNode* def = effect_resolve_callee(program, n->value);
         for (int i = 0; def && i < n->child_count; i++) {
             ASTNode* a = n->children[i];
-            if (is_plain_string_value(a) && is_keep_param(call_param_of(def, n, i))) {
-                type_error_code_hint(
-                    "a `string` is given to a `@keep ptr` parameter, which keeps it past the call",
-                    "hand over a reference of its own with `string.keep(s)`",
-                    a->line, a->column, AETHER_ERR_KEEPS_BORROWED);
-            }
+            if (unkept_value_kind(a) && is_keep_param(call_param_of(def, n, i)))
+                report_unkept_into_ptr(a, unkept_value_kind(a), "a `@keep ptr` parameter", "call");
         }
     }
     for (int i = 0; i < n->child_count; i++) check_strings_into_keep(program, n->children[i]);
@@ -11450,12 +11477,11 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
             }
             /* #790: a struct with `string` fields IS allowed. The box owns
              * its string fields under the same ownership model value structs
-             * already use: each string field carries a hidden `_heap_<field>`
-             * tracker (codegen_func.c), a field store adopts a heap string and
-             * sets the tracker, and `heap.free(p)` routes through the generated
+             * already use: a field store takes the new value and releases the
+             * old, and `heap.free(p)` routes through the generated
              * `<Name>_heap_free` (release every owned field, then free the box).
-             * calloc in heap.new zero-inits the trackers, so an unset field is
-             * never mistaken for owned. No POD gate to apply. */
+             * calloc in heap.new zero-inits the fields, so an unset field holds
+             * nothing. No POD gate to apply. */
             /* Result type: *T (TYPE_PTR -> TYPE_STRUCT{name}). */
             if (expr->node_type) free_type(expr->node_type);
             Type* inner = create_type(TYPE_STRUCT);

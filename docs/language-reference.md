@@ -1935,10 +1935,10 @@ Every place that holds a string (a local, a struct field, an element, a module-l
 
 - **A function returning a string hands its caller one reference, from every return.** A literal is handed over as it is (literals are static and never freed); a fresh string, or a local at its last use, is moved; a string the function only borrows (a parameter, a field of one) is retained, and a plain C string copied.
 - **A parameter is borrowed for the call.** The caller owns the string and frees it. A function that keeps a parameter (stores it in a field, a module-level `var`, a container) takes a reference of its own there.
-- **A function may not free a parameter** (E0901): `string.free(p)` or `release(p)` on a `string` parameter would release a reference the function does not own. Store it to keep it; a parameter the body re-binds holds a string of its own and may be freed.
+- **A function may not free a parameter** (E0901): `string.free(p)` or `release(p)` on a `string` parameter, or `string.seq_free(p)` on a `*StringSeq` one, would release a reference the function does not own. Store it to keep it; a parameter the body re-binds holds a string of its own and may be freed.
 - **`string.free(x)` releases the reference `x` holds and leaves `x` empty**, for a local, a field or a module-level `var`. Nothing frees it again.
 
-- **A `ptr` parameter is borrowed for the call unless it is declared `@keep`** (E0902). A `ptr` owns nothing, so a pointer a function keeps (stores where it outlives the call, returns, captures in a closure, puts in a struct or a message, or passes to another `@keep` parameter) is declared `p: @keep ptr`. The checker verifies each function against its own body, and a call against the callee's signature. A `string` reaches a `@keep ptr` only through `string.keep(s)`, which hands over a reference of its own (`string.release_kept(p)` gives it back). A closure's `ptr` parameter is always borrowed, and a function with a `@keep` parameter is called by name, not used as a value. A typed pointer (`*Node`) and a `distinct` type over `ptr` are not checked: a string converts to neither.
+- **A `ptr` parameter is borrowed for the call unless it is declared `@keep`** (E0902). A `ptr` owns nothing, so a pointer a function keeps (stores where it outlives the call, returns, captures in a closure, puts in a struct or a message, or passes to another `@keep` parameter) is declared `p: @keep ptr`. The checker verifies each function against its own body, and a call against the callee's signature. A `string` reaches a `@keep ptr` only through `string.keep(s)`, which hands over a reference of its own (`string.release_kept(p)` gives it back), and a `*StringSeq` only through `string.seq_retain(s)` (`string.seq_free` gives it back). A closure's `ptr` parameter is always borrowed, and a function with a `@keep` parameter is called by name, not used as a value. A typed pointer (`*Node`) and a `distinct` type over `ptr` are not checked: a string converts to neither.
 
 ```aether,fragment
 my_concat(a: string, b: string) -> string {
@@ -3773,8 +3773,8 @@ An error stops the build and prints its code, `error[E0301]: ...`, with the sour
 | `E0802` | A quote given to a function whose last parameter is not a `quote.Tree`, or a closure, `callback` or block given to one that is |
 | `E0803` | A quote writing a variable it captures, or taking its address |
 | `E0900` | A slice of a function's own storage (an array literal, an array of its own) leaves the function: returned, stored in a module-level `var` or in a field that outlives it, or captured by a closure that does ([Slices](#slices-t)) |
-| `E0901` | A function frees a `string` parameter it only borrows ([String ownership](#string-ownership)) |
-| `E0902` | A function keeps a `ptr` parameter not declared `@keep`, a `string` is given to a `@keep ptr` without `string.keep`, or a function with a `@keep` parameter is used as a value ([String ownership](#string-ownership)) |
+| `E0901` | A function frees a `string` or `*StringSeq` parameter it only borrows ([String ownership](#string-ownership)) |
+| `E0902` | A function keeps a `ptr` parameter not declared `@keep`, a `string` is given to a `@keep ptr` without `string.keep` (a `*StringSeq` without `string.seq_retain`), or a function with a `@keep` parameter is used as a value ([String ownership](#string-ownership)) |
 
 ## Compiler Warnings
 

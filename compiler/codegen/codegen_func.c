@@ -736,11 +736,9 @@ int is_vararg_call_position(CodeGenerator* gen, const char* func_name, int arg_i
 }
 
 /* Returns 1 if extern `func_name`'s parameter at `param_idx` was
- * declared with `@retain` — meaning the function stores or
- * retains the pointer beyond the call. The escape walker uses
- * this to mark a heap-string arg as escaped so the function-
- * exit defer-free skips the free (would otherwise UAF the
- * stored copy). See codegen_func.c::register_extern_func and
+ * declared with `@retain`: the function keeps the pointer beyond
+ * the call, so the call hands it a reference of its own (R4).
+ * See codegen_func.c::register_extern_func and
  * the parser's @retain handling. Returns 0 if the function
  * isn't a registered extern, has no annotation, or the index
  * is out of range. */
@@ -1857,7 +1855,6 @@ static void emit_function(CodeGenerator* gen, ASTNode* func, const char* clause_
     clear_fnptr_locals(gen);   // #2130: fn-typed parameters/locals are this function's
     clear_heap_string_vars(gen);
     clear_captured_string_params(gen);
-    clear_seq_vars(gen);
 
     // Mark function parameters as declared so they aren't re-declared
     // (e.g., by hoist_loop_vars when a parameter is reassigned in a loop).
@@ -1941,6 +1938,9 @@ static void emit_function(CodeGenerator* gen, ASTNode* func, const char* clause_
                                                   child->line, child->column);
                 }
             }
+            if (!is_promoted && child->type == AST_PATTERN_VARIABLE && body)
+                own_rebound_binding_take(gen, child->value, child->node_type, body,
+                                         child->line, child->column);
         }
     }
 
@@ -2068,39 +2068,16 @@ static void emit_function(CodeGenerator* gen, ASTNode* func, const char* clause_
              * the signature, so the hoists below declare them volatile
              * too (#2690). */
             hoist_if_branch_vars(gen, body);
-            // Pre-hoist `_heap_<name>` companions for every string
-            // variable in the body so the tracker is visible across
-            // every nesting depth — closes the architectural blocker
-            // from issue #405. The first-decl codegen path becomes
-            // an assignment-only after this; cross-block reassignment
-            // resolves to the function-scope tracker instead of an
-            // undeclared local. See codegen_stmt.c::
-            // hoist_heap_string_trackers for the full rationale.
+            // Pre-hoist every string variable in the body to function
+            // scope so it is visible across every nesting depth (#405).
+            // The first-decl codegen path becomes an assignment after
+            // this. See codegen_stmt.c::hoist_heap_string_trackers.
             hoist_heap_string_trackers(gen, body);
-            // *StringSeq locals: hoist their _seqheap flags + function-
-            // scope decl, mark return/raw-store escapes, and push the
-            // refcount-decrement scope-exit free (parallel to the
-            // heap-string passes immediately around this).
-            hoist_seq_trackers(gen, body);
             // `string?` locals: declared at function scope with their drop.
             hoist_opt_string_locals(gen, body);
-            // Mark heap-string vars that escape via call argument or
-            // closure capture. The wrapper at codegen_stmt.c:1611
-            // skips its `free(_tmp_old)` for escaped vars to avoid
-            // dangling pointers held by `map.put`/`list.add`/actor
-            // message fields/etc. Conservative — alias-safe at the
-            // cost of leaking the value over the function's lifetime.
-            mark_escaped_seq_vars(gen, body);
-            // Push a function-exit defer-free for every non-escaped
-            // hoisted heap-string var (#420 follow-up). The
-            // wrapper-on-reassignment frees the previous value on
-            // every assignment; this defer closes the single-call
-            // leak shape (variable assigned once, never reassigned,
-            // function exits with a live heap allocation). Drained
-            // by exit_scope at function end and emit_all_defers at
-            // every explicit return.
+            // Every string local releases what it holds when the function
+            // exits, by every path (R2), and is journaled for a panic.
             push_heap_string_exit_free_defers(gen, body);
-            push_seq_exit_free_defers(gen, body);
             push_builder_config_exit_release(gen, func, body);   /* #2871 */
         }
         // If body is a block, it handles its own scope
@@ -2179,7 +2156,6 @@ static void begin_dispatch_scope(CodeGenerator* gen, ASTNode* clause) {
     clear_fnptr_locals(gen);
     clear_heap_string_vars(gen);
     clear_captured_string_params(gen);
-    clear_seq_vars(gen);
     clear_try_clobbered_vars(gen);
 }
 
