@@ -482,7 +482,9 @@ static void arg_drain_select(CodeGenerator* gen, ASTNode* expr, int first_arg,
             }
             continue;
         }
-        if (string_arg_held(gen, arg)) {
+        /* A callee that frees or keeps its argument takes the place's own
+         * reference, so a hold of it would be what it takes instead. */
+        if (string_arg_held(gen, arg) && !arg_taken_by_call(gen, func_name, ai)) {
             if (!arg_drain_lookup(arg)) {
                 w->closure[w->count] = 0;
                 w->held[w->count] = 1;
@@ -10112,10 +10114,12 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                         } else if (ext_name && arg->node_type && arg->node_type->kind == TYPE_STRING &&
                                    (expected == TYPE_STRING || expected == TYPE_PTR) &&
                                    is_retain_extern_param(gen, ext_name, arg_printed) &&
+                                   !call_frees_arg(gen, codegen_normalise_callee(ext_name)) &&
                                    arg->type != AST_LITERAL && !is_heap_string_expr(gen, arg)) {
                             /* R4: an `@retain` extern keeps the string, so the
                              * call hands it a reference of its own (a fresh
-                             * one is handed over as it is). */
+                             * one is handed over as it is). A free consumes
+                             * the place's own reference instead. */
                             int header = is_aether_extern_param(gen, ext_name, arg_printed) ||
                                          is_stdlib_string_aware_extern(c_func_name);
                             fprintf(gen->output, "%s%saether_uniform_heap_str((const char*)(",

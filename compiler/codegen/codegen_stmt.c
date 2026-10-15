@@ -13016,6 +13016,10 @@ int string_field_handoff_kind(CodeGenerator* gen, const char* func_name, int idx
 int string_element_free_kind(CodeGenerator* gen, ASTNode* e) {
     if (is_cell_string_element(gen, e) || is_owning_array_string_element(gen, e)) return 1;
     ASTNode* base = e && e->type == AST_ARRAY_ACCESS && e->child_count >= 2 ? e->children[0] : NULL;
+    /* An element of a slice: the array it views owns it (#2921). */
+    if (base && base->node_type && base->node_type->kind == TYPE_ARRAY &&
+        base->node_type->array_size <= 0 && base->node_type->element_type &&
+        base->node_type->element_type->kind == TYPE_STRING) return 2;
     if (!base || !str_arr_type(base->node_type)) return 0;
     if (base->type == AST_MEMBER_ACCESS) return is_owned_string_array_field(gen, base) ? 2 : 0;
     return base->type == AST_IDENTIFIER && base->value && is_actor_state_var(gen, base->value)
