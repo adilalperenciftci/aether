@@ -30,6 +30,11 @@ on:
     branches: [ main, develop ]
     paths-ignore: [ 'CHANGELOG.md', 'VERSION', 'new_changelogs/**' ]
   workflow_dispatch:
+    inputs:
+      update_grid_baseline:
+        description: "Measure the ownership grid's baseline (tests/ownership_grid/README.md) and upload it"
+        type: boolean
+        default: false
 
 # Build the Aether compiler and ae CLI on Windows using MinGW (GCC).
 # MinGW gives us the same GCC/Clang toolchain surface without an MSVC license,
@@ -424,6 +429,53 @@ jobs:
           build/ownership_grid/cells/
           build/ownership_grid/gcc/bin/
         if-no-files-found: ignore
+        retention-days: 14
+
+  # The grid's baseline, where it is measured: a fix that makes cells better
+  # updates baseline.txt in the same PR (tests/ownership_grid/README.md),
+  # with both C paths, over every cell. Run by hand (workflow_dispatch with
+  # update_grid_baseline); the baseline.txt it uploads is the one to commit.
+  ownership-grid-baseline:
+    name: Windows / ownership grid baseline
+    if: github.event_name == 'workflow_dispatch' && inputs.update_grid_baseline
+    runs-on: windows-latest
+    timeout-minutes: 90
+    needs: windows-cross
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+    - name: Set up MSYS2 / MinGW-w64
+      uses: msys2/setup-msys2@v2
+      with:
+        msystem: MINGW64
+        update: false
+        install: mingw-w64-x86_64-gcc mingw-w64-x86_64-zlib mingw-w64-x86_64-openssl pkg-config make
+    - name: Exclude the work tree from Windows Defender
+      shell: pwsh
+      continue-on-error: true
+      run: |
+        Add-MpPreference -ExclusionPath "D:\a" -ErrorAction SilentlyContinue
+        Add-MpPreference -ExclusionPath "$env:RUNNER_TEMP" -ErrorAction SilentlyContinue
+        Add-MpPreference -ExclusionPath "$env:TEMP" -ErrorAction SilentlyContinue
+        foreach ($p in 'gcc.exe','cc1.exe','collect2.exe','ld.exe','as.exe','aetherc.exe','ae.exe') {
+          Add-MpPreference -ExclusionProcess $p -ErrorAction SilentlyContinue
+        }
+    - name: Build the toolchain
+      run: make -j4 compiler ae stdlib
+    - name: Check the grid and write its baseline
+      timeout-minutes: 80
+      run: make ownership-grid-check OWNERSHIP_GRID_ARGS="--mode both --update-baseline"
+    - name: Upload the baseline
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: ownership-grid-baseline
+        path: |
+          tests/ownership_grid/baseline.txt
+          build/ownership_grid/report.md
         retention-days: 14
 
   # ============================================================
