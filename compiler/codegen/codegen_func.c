@@ -1663,6 +1663,8 @@ static void emit_function(CodeGenerator* gen, ASTNode* func, const char* clause_
         // copies dedupe at link while the symbol stays externally addressable.
         // (#2041-adjacent: asks/pure-tls-client-defined-non-static-in-every-tu.)
         fprintf(gen->output, "AETHER_WEAK_DEF ");
+    } else if (lib_fn_is_local(gen, func)) {
+        fprintf(gen->output, "AETHER_LIB_LOCAL ");
     }
 
     /* Issue #501 follow-up: mark the names this function's `try` bodies
@@ -2311,6 +2313,8 @@ void generate_combined_function(CodeGenerator* gen, ASTNode** clauses, int claus
                                                            : "static AETHER_MAYBE_UNUSED ");
     } else if (cb_def) {
         fprintf(gen->output, "AETHER_WEAK_DEF ");
+    } else if (lib_fn_is_local(gen, first)) {
+        fprintf(gen->output, "AETHER_LIB_LOCAL ");
     }
     emit_fn_result_c_type(gen, first);
     const char* cb_sym = cb_def ? c_callback_symbol(cb_def) : NULL;

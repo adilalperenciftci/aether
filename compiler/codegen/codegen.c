@@ -3015,6 +3015,22 @@ static int lib_fn_identity(ASTNode* fn, const char** alias,
     return 1;
 }
 
+/* #2937: a library function whose `aether_<name>` alias is its export keeps
+ * its own name inside the library (AETHER_LIB_LOCAL): on ELF a call through
+ * an exported name binds to the first definition in the process, so a host
+ * function of the same name took over the library's own calls. */
+int lib_fn_is_local(CodeGenerator* gen, ASTNode* fn) {
+    if (!gen->emit_lib || !fn || fn->type != AST_FUNCTION_DEFINITION || !fn->value ||
+        fn_has_internal_linkage(fn) || !gen->program) return 0;
+    const char* alias;
+    const char* name;
+    const char* module;
+    LibSig sig;
+    const char* why = NULL;
+    return lib_fn_identity(fn, &alias, &name, &module) &&
+           lib_fn_is_export_head(gen->program, fn) && lib_fn_signature(gen, fn, &sig, &why);
+}
+
 /* The public identity of a module-level const in a --emit=lib build. A
  * const merged in from an imported module is part of the surface only when
  * that module belongs to the package (#2297): such consts are not flagged
@@ -7253,6 +7269,16 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     print_line(gen, "#    define AETHER_WEAK_DEF");
     print_line(gen, "#  endif");
     print_line(gen, "#endif");
+    /* #2937: a library function exported through its aether_<name> alias,
+       out of the library's exported names (lib_fn_is_local). A DLL exports
+       what it names, so PE needs nothing. */
+    print_line(gen, "#ifndef AETHER_LIB_LOCAL");
+    print_line(gen, "#  if (defined(__GNUC__) || defined(__clang__)) && !defined(_WIN32)");
+    print_line(gen, "#    define AETHER_LIB_LOCAL __attribute__((visibility(\"hidden\")))");
+    print_line(gen, "#  else");
+    print_line(gen, "#    define AETHER_LIB_LOCAL");
+    print_line(gen, "#  endif");
+    print_line(gen, "#endif");
     /* #2146: vector lanes. The GCC/Clang vector extensions are the whole
        implementation — lane-wise `+ - * /`, `v[i]`, a comparison yielding an
        all-ones/zero mask per lane, and a vector `?:` that selects per lane.
@@ -9120,6 +9146,8 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
         if (!cb_def && fn_has_internal_linkage(child)) {
             fprintf(gen->output, fn_is_inline_candidate(child) ? "static inline AETHER_MAYBE_UNUSED "
                                                                : "static AETHER_MAYBE_UNUSED ");
+        } else if (!cb_def && lib_fn_is_local(gen, child)) {
+            fprintf(gen->output, "AETHER_LIB_LOCAL ");
         }
 
         // The return type and the parameters exactly as the definition
