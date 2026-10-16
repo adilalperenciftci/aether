@@ -5690,7 +5690,7 @@ void emit_static_string_literals(CodeGenerator* gen, ASTNode* program) {
         fprintf(gen->output, "static const char _ae_slit_%d_bytes[] = \"", i);
         emit_c_string_bytes(gen, gen->static_str_bytes[i], (size_t)len, 0);
         fprintf(gen->output, "\";\n");
-        fprintf(gen->output, "static _AeStaticStr _ae_slit_%d = { 0x%Xu, 0x%X, %d, %d, (char*)_ae_slit_%d_bytes };\n",
+        fprintf(gen->output, "static const _AeStaticStr _ae_slit_%d = { 0x%Xu, 0x%X, %d, %d, (char*)_ae_slit_%d_bytes };\n",
                 i, (unsigned)AETHER_STRING_MAGIC, (unsigned)AETHER_STRING_PINNED_REFS,
                 len, len + 1, i);
     }
@@ -9673,6 +9673,22 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                              * removed or the container is freed. So does a
                              * counted string returned as `ptr` (`@heap`,
                              * `string.from_int`): the call hands it over. */
+                            /* R5: a literal is pinned (R1), so a list
+                             * adds it taking nothing and never releases
+                             * it: the plain add of the pinned string, an
+                             * element the list does not own. A set or a
+                             * put replaces an element, so it keeps the
+                             * owning entry. */
+                            if (is_list_shape && !is_explicit_owned_list && val &&
+                                val->type == AST_LITERAL && val->value && val->node_type &&
+                                val->node_type->kind == TYPE_STRING) {
+                                fprintf(gen->output, "%s((void*)(", c_func_name);
+                                generate_expression(gen, expr->children[0]);
+                                fprintf(gen->output, "), (void*)");
+                                emit_string_literal_node(gen, val);
+                                fprintf(gen->output, ")");
+                                break;
+                            }
                             if (val && val->node_type &&
                                 (val->node_type->kind == TYPE_STRING ||
                                  (val->node_type->kind == TYPE_PTR && is_heap_string_expr(gen, val)))) {

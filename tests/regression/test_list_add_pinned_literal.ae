@@ -1,0 +1,43 @@
+// Regression (#2925): `list.add(l, "...")` adds the pinned literal itself.
+//
+// A literal is a static pinned string (R1), so the list stores it as an
+// element it does not own, taking nothing. It must be the pinned string,
+// not its characters: an element read back is taken as a string, and
+// characters would be copied on every read and cut at a NUL. A `list.set`
+// over such an element, and one over an owned element, still release what
+// they replace (the leaks gate runs this program).
+
+import std.list
+import std.string
+
+extern exit(code: int)
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+main() {
+    l = list.new()
+    list.add(l, "a\0b")
+    list.add(l, "plain")
+    list.add(l, string.concat("he", "ap"))
+    check(list.size(l) == 3, "three elements")
+
+    v0, _e0 = list.get(l, 0)
+    check(string.length(v0) == 3, "a literal with a NUL keeps its length")
+    v1, _e1 = list.get(l, 1)
+    check(v1 == "plain", "a literal reads back")
+
+    list.set(l, 1, string.concat("re", "placed"))
+    list.set(l, 2, "lit")
+    v1b, _e1b = list.get(l, 1)
+    v2, _e2 = list.get(l, 2)
+    check(v1b == "replaced", "a set over a literal element")
+    check(v2 == "lit", "a set of a literal over an owned element")
+
+    list.free(l)
+    println("OK")
+}
