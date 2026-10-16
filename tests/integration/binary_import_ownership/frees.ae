@@ -1,0 +1,13 @@
+// A builder that frees its config, as the builder protocol allows (#2861).
+
+import std.map
+
+builder keep(t: string) {
+    if _builder != null {
+        map_free(_builder)
+    }
+    return t
+}
+
+main() {
+}

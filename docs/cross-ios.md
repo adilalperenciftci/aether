@@ -85,10 +85,12 @@ ae build --target=aarch64-ios --emit=csrc mylib.ae -o mylib   # -> mylib.h
 let sum = aether_add(2, 3)
 ```
 
-A `-> string` export surfaces as `const char*`: the generated `aether_<name>()`
-wrapper calls `aether_string_data()` on the `AetherString*` for you, so Swift
-receives a NUL-terminated C string. Copy it (`String(cString:)`) rather than
-retaining the pointer.
+A `-> string` export returns a string Swift owns, as an opaque handle: read it
+with `aether_string_data()` / `aether_string_length()`, copy it, and give it
+back through the library's `aether_<lib>_string_release()`, which the
+generated header declares. The example is in
+[swiftui-ios-app.md](swiftui-ios-app.md#types-across-the-boundary), and the
+rule in [emit-lib.md](emit-lib.md#strings-an-export-returns).
 
 ## Deployment target
 

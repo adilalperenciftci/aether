@@ -555,6 +555,36 @@ statement temporary, journaled and dropped by its block; one discarded is
 filled into a temporary and dropped. A store into an element of an owning
 array local takes and drops whatever the element holds.
 
+**A string an export returns (#2931).** R3 at the C boundary: an
+`--emit=lib` export's `-> string` (and a builder's) hands its caller one
+reference, as the counted string's handle (`const void*`), and the caller
+gives it back through `aether_<lib>_string_release`, which the library
+exports and its catalog names (schema 1.9). This replaces recommendation 1's
+"a `const char*` to the characters at the boundary", which nothing could
+release: characters cannot be mapped back to their string (an adopted
+buffer is not stored after its header), and a per-thread "last result"
+freed by the next call would be a deferred-free list. A copy the caller
+frees costs a copy per call and loses bytes after a NUL without a length;
+the handle costs nothing and keeps every byte. `<lib>` is the package, else
+the entry file's stem, so every target built from one source exports the
+same release (a `--namespace` library is built from a generated file, so
+`ae` names it). A binary import on the shared runtime takes the handle
+(`-> string @heap`); with a runtime of its own, its stub copies the string
+in (`aether_string_import`) and gives the library's back.
+
+**Two copies of the runtime (#2931, #2861).** Each copy frees only what it
+made. A string crosses as a copy, since its bytes are all there is to it. A
+struct holding a string has no such copy: by value, the program's drop
+releases the library's strings, and through a typed pointer the program's
+stores do. A builder that uses its config fills, grows or frees a map the
+program made, and a factory in the library would not help, since the
+trailing block fills the config with the program's runtime. So where the
+copies stay apart (macOS, Windows: no ELF interposition) `ae` refuses to
+import a static-runtime library whose exports pass such a struct or whose
+builders use their config, and names the rebuild with `--shared-runtime`.
+Closures cross either way: an environment carries its own release, which
+runs in the library that made it.
+
 ## Decisions needed
 
 Stage 1 (the grid) needs none of these: it only measures, and it starts

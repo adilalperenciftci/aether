@@ -1,0 +1,18 @@
+import std.mem
+import std.string
+import rec
+
+extern println(s: string)
+
+main() {
+    t = rec.tag(7)
+    println("${t.name} ${t.n}")
+    g = mem.steady_growth(|| {
+            k = 0
+            while k < 200 {
+                _u = rec.tag(k)
+                k = k + 1
+            }
+        }, 5)
+    println("exact ${mem.heap_in_use_exact()} grew ${g}")
+}

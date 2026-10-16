@@ -162,20 +162,22 @@ function safe to call from the UI thread.
 | `float` | `double` / `Double` |
 | `bool` | `int` / `Int32` (0 or 1) |
 | `string` (param) | `const char*` / `UnsafePointer<CChar>` |
-| `string` (return) | `const char*` / `UnsafePointer<CChar>?` |
+| `string` (return) | `const void*` / `UnsafeRawPointer?` |
 
 The full table is in [emit-lib.md](emit-lib.md#type-mapping).
 
-**Strings need care.** For a `-> string` export the generated wrapper calls
-`aether_string_data()` for you, so what Swift receives really is a
-NUL-terminated C string rather than an opaque handle. Copy it immediately and
-do not retain the raw pointer:
+**Strings need care.** A `-> string` export hands Swift a string it owns, as
+an opaque handle. Read its bytes with `aether_string_data()` and
+`aether_string_length()`, copy them, and give the handle back through the
+library's release function, which the generated header declares
+(`aether_fibcore_string_release` for `libfibcore.a`):
 
 ```swift
-if let p = aether_greet("SwiftUI") {
-    let s = String(cString: p)     // copy now
-    // `p` must not be stored — its lifetime is not yours to manage
-}
+let h = aether_greet("SwiftUI")
+defer { aether_fibcore_string_release(h) }
+let bytes = UnsafeRawBufferPointer(start: aether_string_data(h),
+                                   count: aether_string_length(h))
+let s = String(decoding: bytes, as: UTF8.self)   // a copy
 ```
 
 Prefer scalars across the boundary where you can. If you need to return

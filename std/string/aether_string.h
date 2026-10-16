@@ -202,6 +202,10 @@ const char* aether_string_data(const void* s);
  * or pinned string as it is, a plain malloc'd buffer copied (and freed). */
 const char* aether_string_adopt(const char* s);
 size_t      aether_string_length(const void* s);
+/* #2931: a string another copy of the runtime made (a binary library's
+ * export result), copied into this one, every byte kept: the caller owns
+ * the copy and gives the original back to the runtime that made it. */
+const char* aether_string_import(const void* s);
 
 /* #2521: the formatter behind string interpolation and print/println.
  * `fmt` is a printf format the compiler wrote: text and the conversions

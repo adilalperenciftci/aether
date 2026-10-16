@@ -6,9 +6,10 @@
 #
 # Asserts:
 #   1. `ae lib-info` exits 0
-#   2. Schema is 1.8: closure records (1.1), `each`'s closure parameter
+#   2. Schema is 1.9: closure records (1.1), `each`'s closure parameter
 #      crossing by value (#2297) so the function table carries source
-#      signatures (1.3), and `route` never using its config (1.8, #2860)
+#      signatures (1.3), `route` never using its config (1.8, #2860), and a
+#      string returned (1.9, #2931)
 #   3. Closure count is 3
 #   4. The `builder` record names `route` with role [builder]
 #   5. The closure-typed param `action` of `each` is recorded [param]
@@ -71,7 +72,7 @@ fi
 
 fail() { echo "  [FAIL] $1"; echo "--- output:"; echo "$OUT"; exit 1; }
 
-echo "$OUT" | grep -q "Schema:[[:space:]]*1\\.8" || fail "schema not 1.8"
+echo "$OUT" | grep -q "Schema:[[:space:]]*1\\.9" || fail "schema not 1.9"
 echo "$OUT" | grep -q "config: never used" || fail "route is not recorded as never using its config"
 echo "$OUT" | grep -q "Closures:[[:space:]]*3" || fail "closure count not 3"
 
@@ -97,4 +98,4 @@ echo "$OUT" | grep -qE "sum_with\\(int, int\\) -> int" \
 echo "$OUT" | grep -qE "as: each\\(items: ptr, action: fn\\)" \
     || fail "function table missing each, whose closure parameter crosses by value"
 
-echo "  [PASS] lib_meta_closures: 8/8 — schema 1.8, 3 closure records, builder/param/literal, capture, function table coexists, each exported"
+echo "  [PASS] lib_meta_closures: 8/8 — schema 1.9, 3 closure records, builder/param/literal, capture, function table coexists, each exported"

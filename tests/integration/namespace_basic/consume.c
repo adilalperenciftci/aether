@@ -37,7 +37,11 @@ static const char* lib_error(void) { return dlerror(); }
 #endif
 
 typedef const AetherNamespaceManifest* (*describe_fn)(void);
-typedef const char* (*say_hi_fn)(const char*);
+/* A `-> string` export hands its caller the counted string (#2931): read
+ * with aether_string_data, given back through the library's release. */
+typedef const void* (*say_hi_fn)(const char*);
+typedef const char* (*string_data_fn)(const void*);
+typedef void (*string_release_fn)(const void*);
 
 #define FAIL(fmt, ...) do { \
     fprintf(stderr, "FAIL (line %d): " fmt "\n", __LINE__, ##__VA_ARGS__); \
@@ -57,6 +61,10 @@ int main(int argc, char** argv) {
     say_hi_fn say_hi    = (say_hi_fn)lib_sym(h, "aether_say_hi");
     if (!describe) FAIL("aether_describe missing: %s", lib_error());
     if (!say_hi)   FAIL("aether_say_hi missing: %s", lib_error());
+    string_data_fn string_data = (string_data_fn)lib_sym(h, "aether_string_data");
+    string_release_fn string_release = (string_release_fn)lib_sym(h, "aether_greet_string_release");
+    if (!string_data)    FAIL("aether_string_data missing: %s", lib_error());
+    if (!string_release) FAIL("aether_greet_string_release missing: %s", lib_error());
 
     /* aether_describe matches what manifest.ae declared. */
     const AetherNamespaceManifest* m = describe();
@@ -78,8 +86,10 @@ int main(int argc, char** argv) {
 
     /* Round-trip: registered handler fires, exported function returns. */
     aether_event_register("Greeted", on_greeted);
-    const char* r = say_hi("alice");
-    if (!r || strcmp(r, "alice") != 0) FAIL("say_hi returned %s", r ? r : "(null)");
+    const void* r = say_hi("alice");
+    const char* rs = r ? string_data(r) : NULL;
+    if (!rs || strcmp(rs, "alice") != 0) FAIL("say_hi returned %s", rs ? rs : "(null)");
+    string_release(r);
     if (g_last_id != 42) FAIL("Greeted handler last_id = %lld, expected 42", (long long)g_last_id);
 
     lib_close(h);

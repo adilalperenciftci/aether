@@ -1,0 +1,10 @@
+import std.map
+import frees
+
+extern println(s: string)
+
+main() {
+    s = frees.keep("kept") {
+    }
+    println(s)
+}

@@ -34,7 +34,11 @@ static const char* lib_error(void) { return dlerror(); }
 #endif
 
 typedef int32_t (*aether_ping_fn)(void);
-typedef const char* (*aether_echo_fn)(const char*);
+/* A `-> string` export hands its caller the counted string (#2931): read
+ * with aether_string_data, given back through the library's release. */
+typedef const void* (*aether_echo_fn)(const char*);
+typedef const char* (*aether_string_data_fn)(const void*);
+typedef void (*aether_string_release_fn)(const void*);
 
 int main(int argc, char** argv) {
     if (argc < 2) {
@@ -52,6 +56,13 @@ int main(int argc, char** argv) {
     aether_echo_fn echo = (aether_echo_fn)lib_sym(h, "aether_echo");
     if (!ping) { fprintf(stderr, "FAIL: aether_ping not found: %s\n", lib_error()); return 1; }
     if (!echo) { fprintf(stderr, "FAIL: aether_echo not found: %s\n", lib_error()); return 1; }
+    aether_string_data_fn string_data = (aether_string_data_fn)lib_sym(h, "aether_string_data");
+    aether_string_release_fn string_release =
+        (aether_string_release_fn)lib_sym(h, "aether_netmod_string_release");
+    if (!string_data || !string_release) {
+        fprintf(stderr, "FAIL: the string accessors are missing: %s\n", lib_error());
+        return 1;
+    }
 
     int32_t p = ping();
     if (p != 7) {
@@ -59,11 +70,13 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    const char* e = echo("hi");
+    const void* eh = echo("hi");
+    const char* e = eh ? string_data(eh) : NULL;
     if (!e || strcmp(e, "echo:hi") != 0) {
         fprintf(stderr, "FAIL: aether_echo(\"hi\") = %s, expected \"echo:hi\"\n", e ? e : "(null)");
         return 1;
     }
+    string_release(eh);
 
     lib_close(h);
     printf("OK: --emit=lib --with=net library links, loads, and round-trips\n");

@@ -1,0 +1,15 @@
+// A struct holding a string, returned by value (#2931).
+
+import std.string
+
+struct Tag {
+    name: string
+    n: int
+}
+
+tag(k: int) -> Tag {
+    return Tag { name: string.concat("t", string.from_int(k)), n: k }
+}
+
+main() {
+}

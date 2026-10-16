@@ -465,6 +465,7 @@ typedef struct {
     const char* const* closure_modules;    /* schema >= 1.6, parallel to closures */
     int         actors;                    /* schema >= 1.7: the library runs actors */
     const unsigned char* closure_config_unused; /* schema >= 1.8, parallel to closures */
+    const char* string_release;            /* schema >= 1.9: gives back a returned string */
 } _AeLibInfoMeta;
 
 /* The catalog's schema minor ("1.<minor>"). A reader may touch a field only
@@ -535,6 +536,12 @@ static char g_emit_deps_path[1200] = "";
  * one library, and the aetherc flag that says so. */
 static char g_build_package[256] = "";
 static char g_lib_package_flag[300] = "";
+
+/* #2931: a namespace library's name, as the aetherc flag that passes it,
+ * since its source is a generated file: it names the release a string one
+ * of the library's exports returns goes back through. Any other library is
+ * named by its package or entry file, the same on every target. */
+static char g_lib_id_flag[300] = "";
 
 static char* ae_path_printf(const char* fmt, ...);
 
@@ -675,10 +682,10 @@ void build_aetherc_cmd(char* cmd, size_t cmd_size, const char* input, const char
      * and a program importing it follows (#2297). */
     const char* shared_rt_flag = (g_shared_runtime && g_emit_lib) ? " --shared-runtime" : "";
     const char* lib_actors_flag = g_binimport_actors ? " --lib-actors" : "";
-    int w = snprintf(cmd, cmd_size, "\"%s\"%s%s%s%s%s%s%s%s%s%s%s \"%s\" \"%s\"",
+    int w = snprintf(cmd, cmd_size, "\"%s\"%s%s%s%s%s%s%s%s%s%s%s%s \"%s\" \"%s\"",
                      tc.compiler, emit_flag, csrc_hdr_flag, csrc_json_flag, with_flag, stub_flags,
-                     g_lib_package_flag, shared_rt_flag, lib_actors_flag, defines_flags(), lib_flags,
-                     deps_flag, input, output);
+                     g_lib_package_flag, g_lib_id_flag, shared_rt_flag,
+                     lib_actors_flag, defines_flags(), lib_flags, deps_flag, input, output);
     free(lib_flags);
     if (w >= (int)cmd_size) cmd_too_long(cmd, cmd_size, w);
 }
@@ -5240,6 +5247,55 @@ static char g_binimport_static_names[1024] = "";
 /* Those of them that run actors (catalog >= 1.7). */
 static char g_binimport_static_actor_names[1024] = "";
 
+// The argument list ("a, b") that forwards a parameter list ("a: A, b: B").
+static void ae_param_names(const char* params, char* args, size_t acap) {
+    size_t off = 0;
+    int depth = 0, first = 1;
+    const char* start = params;
+    args[0] = '\0';
+    for (const char* p = params; ; p++) {
+        if (*p == '(') depth++;
+        else if (*p == ')') depth--;
+        if ((*p == ',' && depth == 0) || *p == '\0') {
+            while (*start == ' ') start++;
+            const char* colon = strchr(start, ':');
+            if (colon && colon < p && colon > start) {
+                int n = snprintf(args + off, acap - off, "%s%.*s", first ? "" : ", ",
+                                 (int)(colon - start), start);
+                if (n > 0 && (size_t)n < acap - off) off += (size_t)n;
+                first = 0;
+            }
+            if (*p == '\0') break;
+            start = p + 1;
+        }
+    }
+}
+
+/* #2931: the declaration of an export whose result is a string, which the
+ * library hands its caller one reference to. On the shared runtime the
+ * declaration takes it as it is (`@heap`). A library with a runtime of its
+ * own made it in that runtime, which alone may free it: the stub copies it
+ * into the program's (aether_string_import) and gives the library's back
+ * through the release its catalog names. `kind` is "" or "builder ". */
+static void ae_emit_string_export(FILE* out, const char* kind, const char* csym,
+                                  const char* ext_name, const char* name,
+                                  const char* ext_params, const char* params,
+                                  const char* call_args, int shared) {
+    if (shared) {
+        fprintf(out, "@extern(\"%s\") %s(%s) -> string @heap\n", csym, ext_name, ext_params);
+        if (!strcmp(ext_name, name)) return;
+        fprintf(out, "%s%s(%s) {\n    return %s(%s)\n}\n", kind, name, params, ext_name,
+                call_args);
+        return;
+    }
+    fprintf(out, "@extern(\"%s\") __aes_%s(%s) -> ptr\n", csym, name, ext_params);
+    fprintf(out, "%s%s(%s)%s {\n", kind, name, params, kind[0] ? "" : " -> string");
+    fprintf(out, "    _aes_h = __aes_%s(%s)\n", name, call_args);
+    fprintf(out, "    _aes_s = __aes_import(_aes_h)\n");
+    fprintf(out, "    __aes_release(_aes_h)\n");
+    fprintf(out, "    return _aes_s\n}\n");
+}
+
 // Split a rendered signature "(A, B) -> R" into an Aether parameter list
 // ("p0: A, p1: B"), a bare argument list ("p0, p1"), and the return type
 // ("R", or "void"). Top-level comma split tracking paren depth; the ABI
@@ -5325,6 +5381,120 @@ static int ae_lib_provides_module(const char* so_path, const char* module) {
     return found;
 }
 
+/* #2931: whether a value of catalog type `type` holds a counted string,
+ * itself or in a field of a struct the catalog records (by value or through
+ * a typed pointer). A function pointer holds none. */
+static int ae_type_holds_string(const _AeLibInfoMeta* m, int minor, const char* type, int depth) {
+    while (*type == ' ' || *type == '*') type++;
+    if (strncmp(type, "struct ", 7) == 0) type += 7;
+    if (strncmp(type, "fn", 2) == 0 && !(isalnum((unsigned char)type[2]) || type[2] == '_'))
+        return 0;
+    size_t n = 0;
+    while (isalnum((unsigned char)type[n]) || type[n] == '_') n++;
+    if (n == 6 && strncmp(type, "string", 6) == 0) return 1;
+    if (depth > 16 || minor < 3 || !m->structs) return 0;
+    for (int i = 0; i < m->struct_count; i++) {
+        const _AeLibInfoStruct* st = &m->structs[i];
+        if (!st->name || strlen(st->name) != n || strncmp(st->name, type, n) != 0) continue;
+        for (int k = 0; k < st->field_count && st->fields; k++)
+            if (st->fields[k].type &&
+                ae_type_holds_string(m, minor, st->fields[k].type, depth + 1)) return 1;
+        return 0;
+    }
+    return 0;
+}
+
+/* The struct a signature ("(a: A, b: B) -> R" or "(A, B) -> R") passes
+ * that holds a counted string, NULL when there is none; a plain string
+ * crosses as itself, so it does not count here. */
+static const char* ae_signature_string_struct(const _AeLibInfoMeta* m, int minor,
+                                              const char* sig, char* out, size_t cap) {
+    if (!sig) return NULL;
+    int depth = 0;
+    const char* start = sig[0] == '(' ? sig + 1 : sig;
+    for (const char* p = start; ; p++) {
+        if (*p == '(') depth++;
+        else if (*p == ')' && depth > 0) depth--;
+        else if (*p == '\0' || (depth == 0 && (*p == ',' || *p == ')'))) {
+            const char* t = start;
+            for (const char* q = start; q < p; q++)
+                if (*q == ':') { t = q + 1; break; }
+            while (t < p && (*t == ' ' || *t == '-' || *t == '>')) t++;
+            snprintf(out, cap, "%.*s", (int)(p - t), t);
+            size_t len = strlen(out);
+            while (len > 0 && out[len - 1] == ' ') out[--len] = '\0';
+            const char* bare = out;
+            while (*bare == '*') bare++;
+            if (strncmp(bare, "struct ", 7) == 0) bare += 7;
+            if (strcmp(bare, "string") != 0 && ae_type_holds_string(m, minor, out, 0)) return out;
+            if (*p == '\0') return NULL;
+            start = p + 1;
+            if (*p == ')') {
+                /* The parameters end here; the result follows the arrow. */
+                const char* arrow = strstr(start, "->");
+                if (!arrow) return NULL;
+                p = arrow + 1;
+                start = arrow + 2;
+            }
+        }
+    }
+}
+
+/* #2931, #2861: two copies of the runtime cannot free each other's counted
+ * values. A string crosses as a copy; a struct holding strings (by value or
+ * through a typed pointer, where the program's stores release the
+ * library's strings) and a builder's config the library uses have no copy,
+ * so where the library keeps its own runtime (no ELF interposition) such an
+ * import is refused, naming the rebuild that gives both one runtime. */
+static void ae_refuse_split_ownership(const _AeLibInfoMeta* m, int minor, const char* module,
+                                      const char* so_path) {
+#if defined(_WIN32) || defined(__APPLE__)
+    char ty[200];
+    int refused = 0;
+    for (int i = 0; i < m->function_count && m->functions; i++) {
+        const _AeLibInfoFn* f = &m->functions[i];
+        if (!f->aether_name) continue;
+        if (module && !(minor >= 4 && m->function_modules && m->function_modules[i] &&
+                        strcmp(m->function_modules[i], module) == 0)) continue;
+        const char* sig = (minor >= 3 && m->source_signatures && m->source_signatures[i])
+                          ? m->source_signatures[i] : f->signature;
+        const char* st = ae_signature_string_struct(m, minor, sig, ty, sizeof(ty));
+        if (!st) continue;
+        fprintf(stderr, "Error: %s: `%s` passes %s, which holds strings, between the program "
+                        "and the library's own copy of the runtime\n", so_path, f->aether_name, st);
+        refused = 1;
+    }
+    for (int i = 0; i < m->closure_count && m->closures; i++) {
+        const _AeLibInfoClosure* c = &m->closures[i];
+        if (!c->role || strcmp(c->role, "builder") != 0 || !c->name) continue;
+        const char* cmod = (minor >= 6 && m->closure_modules && m->closure_modules[i])
+                           ? m->closure_modules[i] : "";
+        if (module ? strcmp(cmod, module) != 0 : cmod[0] != '\0') continue;
+        const char* st = ae_signature_string_struct(m, minor, c->signature, ty, sizeof(ty));
+        if (st) {
+            fprintf(stderr, "Error: %s: builder `%s` passes %s, which holds strings, between the "
+                            "program and the library's own copy of the runtime\n",
+                    so_path, c->name, st);
+            refused = 1;
+        }
+        if (!(minor >= 8 && m->closure_config_unused && m->closure_config_unused[i])) {
+            fprintf(stderr, "Error: %s: builder `%s` uses its config, which the program's "
+                            "runtime makes, from the library's own copy of the runtime\n",
+                    so_path, c->name);
+            refused = 1;
+        }
+    }
+    if (refused) {
+        fprintf(stderr, "       Each copy of the runtime frees only what it made. Rebuild the "
+                        "library with\n       `ae build --emit=lib --shared-runtime` so it runs "
+                        "on the program's runtime.\n");
+        exit(1);
+    }
+#else
+    (void)m; (void)minor; (void)module; (void)so_path;
+#endif
+}
+
 /* `module` NULL: the whole catalog (a bare import of a one-module
  * library). Otherwise only the functions and constants of that module of
  * a package library (#2297); struct records are shared by all its
@@ -5403,6 +5573,15 @@ static int ae_generate_binimport_stub(const char* so_path, const char* module, F
     }
     if (minor >= 3 && m->struct_count > 0) fprintf(out, "\n");
 
+    /* #2931: a string an export returns is handed over (schema >= 1.9). */
+    int shared_rt = minor >= 5 && m->runtime && strcmp(m->runtime, "shared") == 0;
+    if (!shared_rt) ae_refuse_split_ownership(m, minor, module, so_path);
+    int strings_handed = minor >= 9 && m->string_release && m->string_release[0];
+    if (strings_handed && !shared_rt) {
+        fprintf(out, "@extern(\"aether_string_import\") __aes_import(s: @aether ptr) -> string @heap\n");
+        fprintf(out, "@extern(\"%s\") __aes_release(s: @aether ptr)\n\n", m->string_release);
+    }
+
     // Function-table exports → `@extern("<c_symbol>") <name>(params) -> ret`.
     for (int i = 0; i < m->function_count && m->functions; i++) {
         const _AeLibInfoFn* f = &m->functions[i];
@@ -5426,6 +5605,13 @@ static int ae_generate_binimport_stub(const char* so_path, const char* module, F
                 const char* rt = arrow + 2;
                 while (*rt == ' ') rt++;
                 int plen = (int)(close - ssig - 1);
+                if (strings_handed && strcmp(rt, "string") == 0) {
+                    snprintf(params, sizeof(params), "%.*s", plen, ssig + 1);
+                    ae_param_names(params, args, sizeof(args));
+                    ae_emit_string_export(out, "", f->c_symbol, f->aether_name, f->aether_name,
+                                          params, params, args, shared_rt);
+                    continue;
+                }
                 if (strcmp(rt, "void") == 0) {
                     fprintf(out, "@extern(\"%s\") %s(%.*s)\n",
                             f->c_symbol, f->aether_name, plen, ssig + 1);
@@ -5438,7 +5624,10 @@ static int ae_generate_binimport_stub(const char* so_path, const char* module, F
         }
         ae_split_signature(f->signature, params, sizeof(params),
                             args, sizeof(args), ret, sizeof(ret));
-        if (strcmp(ret, "void") == 0) {
+        if (strings_handed && strcmp(ret, "string") == 0) {
+            ae_emit_string_export(out, "", f->c_symbol, f->aether_name, f->aether_name,
+                                  params, params, args, shared_rt);
+        } else if (strcmp(ret, "void") == 0) {
             fprintf(out, "@extern(\"%s\") %s(%s)\n", f->c_symbol, f->aether_name, params);
         } else {
             fprintf(out, "@extern(\"%s\") %s(%s) -> %s\n",
@@ -5496,6 +5685,18 @@ static int ae_generate_binimport_stub(const char* so_path, const char* module, F
          * program's config itself, on the program's runtime that made it. */
         int config_unused = minor >= 8 && m->closure_config_unused &&
                             m->closure_config_unused[i];
+        if (strings_handed && strcmp(ret, "string") == 0) {
+            char ext_params[1200], call_args[700];
+            snprintf(ext_params, sizeof(ext_params), "%s%s_builder: ptr", params, comma);
+            snprintf(call_args, sizeof(call_args), "%s%s%s", args, acomma,
+                     config_unused ? "null" : "_builder");
+            char aeb[300];
+            snprintf(aeb, sizeof(aeb), "__aeb_%s", c->name);
+            fprintf(out, "\n");
+            ae_emit_string_export(out, "builder ", csym, aeb, c->name,
+                                  ext_params, params, call_args, shared_rt);
+            continue;
+        }
         fprintf(out, "\n@extern(\"%s\") __aeb_%s(%s%s_builder: ptr)%s%s\n",
                 csym, c->name, params, comma,
                 is_void ? "" : " -> ", is_void ? "" : ret);
@@ -7516,7 +7717,8 @@ static char* snake_of(const char* in) {
 static int emit_python_sdk(const CapturedManifest* m,
                            const CapturedFunction* fns, int fn_count,
                            const char* lib_path,
-                           const char* out_dir) {
+                           const char* out_dir,
+                           const char* str_release) {
     if (!m->py_module[0]) return 0;  /* no python binding declared */
 
     char* out_path = ae_path_printf("%s/%s.py", out_dir, m->py_module);
@@ -7660,9 +7862,11 @@ static int emit_python_sdk(const CapturedManifest* m,
         }
         if (!ok) continue;
 
-        /* C-side aether_<name> bind: argtypes + restype. */
+        /* C-side aether_<name> bind: argtypes + restype. A string result is
+         * the counted string's handle (#2931), read and given back below. */
         fprintf(f, "        self._lib.aether_%s.restype = %s\n", fn->name,
-                strcmp(fn->ret, "void") == 0 ? "None" : ret_ct);
+                strcmp(fn->ret, "void") == 0 ? "None"
+                : strcmp(fn->ret, "string") == 0 ? "ctypes.c_void_p" : ret_ct);
         fprintf(f, "        self._lib.aether_%s.argtypes = [", fn->name);
         for (int p = 0; p < fn->param_count; p++) {
             if (p > 0) fputs(", ", f);
@@ -7670,6 +7874,16 @@ static int emit_python_sdk(const CapturedManifest* m,
         }
         fprintf(f, "]\n");
     }
+    /* #2931: a string an export returns is read through these and given
+     * back to the library's runtime, which made it. */
+    fprintf(f,
+"        self._lib.aether_string_data.restype = ctypes.c_void_p\n"
+"        self._lib.aether_string_data.argtypes = [ctypes.c_void_p]\n"
+"        self._lib.aether_string_length.restype = ctypes.c_size_t\n"
+"        self._lib.aether_string_length.argtypes = [ctypes.c_void_p]\n"
+"        self._string_release = self._lib.%s\n"
+"        self._string_release.restype = None\n"
+"        self._string_release.argtypes = [ctypes.c_void_p]\n", str_release);
 
     fprintf(f, "\n");
 
@@ -7741,9 +7955,17 @@ static int emit_python_sdk(const CapturedManifest* m,
         }
         fprintf(f, ")\n");
 
-        /* Unmarshal string return via .decode() */
+        /* A string result: its bytes, every one of them, then the handle
+         * given back (#2931). */
         if (strcmp(fn->ret, "string") == 0) {
-            fprintf(f, "        return result.decode() if result else None\n");
+            fprintf(f,
+"        if not result:\n"
+"            return None\n"
+"        try:\n"
+"            return ctypes.string_at(self._lib.aether_string_data(result),\n"
+"                                    self._lib.aether_string_length(result)).decode()\n"
+"        finally:\n"
+"            self._string_release(result)\n");
         } else if (strcmp(fn->ret, "void") == 0) {
             fprintf(f, "        return None\n");
         } else {
@@ -7782,7 +8004,8 @@ static int emit_python_sdk(const CapturedManifest* m,
 static int emit_ruby_sdk(const CapturedManifest* m,
                          const CapturedFunction* fns, int fn_count,
                          const char* lib_path,
-                         const char* out_dir) {
+                         const char* out_dir,
+                           const char* str_release) {
     if (!m->rb_module[0]) return 0;  /* no ruby binding declared */
 
     char* out_path = ae_path_printf("%s/%s.rb", out_dir, m->rb_module);
@@ -7956,6 +8179,15 @@ static int emit_ruby_sdk(const CapturedManifest* m,
         fprintf(f, "],\n");
         fprintf(f, "      %s)\n", ret_ft);
     }
+    /* #2931: a string an export returns is read through these and given
+     * back to the library's runtime, which made it. */
+    fprintf(f,
+"    @h_aether_string_data = Fiddle::Function.new(\n"
+"      @lib['aether_string_data'], [Fiddle::TYPE_VOIDP], Fiddle::TYPE_VOIDP)\n"
+"    @h_aether_string_length = Fiddle::Function.new(\n"
+"      @lib['aether_string_length'], [Fiddle::TYPE_VOIDP], Fiddle::TYPE_SIZE_T)\n"
+"    @h_string_release = Fiddle::Function.new(\n"
+"      @lib['%s'], [Fiddle::TYPE_VOIDP], Fiddle::TYPE_VOID)\n", str_release);
     fprintf(f, "  end\n\n");
 
     /* Per-input setter. Ruby has accessors above; setX wraps for symmetry
@@ -8031,11 +8263,16 @@ static int emit_ruby_sdk(const CapturedManifest* m,
         fprintf(f, ")\n");
 
         if (strcmp(fn->ret, "string") == 0) {
-            /* result is an integer address; wrap in Fiddle::Pointer to
-             * read the C string. */
+            /* result is the counted string's handle (#2931): its bytes,
+             * every one of them, then the handle given back. */
             fprintf(f,
-"    return nil if result.nil? || result == 0\n"
-"    Fiddle::Pointer.new(result.to_i).to_s\n");
+"    return nil if result.nil? || result.to_i == 0\n"
+"    begin\n"
+"      Fiddle::Pointer.new(@h_aether_string_data.call(result).to_i)\n"
+"        .to_s(@h_aether_string_length.call(result))\n"
+"    ensure\n"
+"      @h_string_release.call(result)\n"
+"    end\n");
         } else if (strcmp(fn->ret, "void") == 0) {
             fprintf(f, "    nil\n");
         } else {
@@ -8112,7 +8349,8 @@ static void to_lower_camel(const char* in, char* out, size_t out_size) {
 static int emit_java_sdk(const CapturedManifest* m,
                          const CapturedFunction* fns, int fn_count,
                          const char* lib_path,
-                         const char* out_dir) {
+                         const char* out_dir,
+                           const char* str_release) {
     if (!m->java_class[0] || !m->java_pkg[0]) return 0;
 
     /* package name → directory path: com.example.foo → com/example/foo.
@@ -8184,7 +8422,10 @@ static int emit_java_sdk(const CapturedManifest* m,
     /* Cached method handles for every function + the runtime helpers. */
     fprintf(f,
 "    private final MethodHandle h_aether_event_register;\n"
-"    private final MethodHandle h_aether_describe;\n");
+"    private final MethodHandle h_aether_describe;\n"
+"    private final MethodHandle h_string_data;\n"
+"    private final MethodHandle h_string_length;\n"
+"    private final MethodHandle h_string_release;\n");
     for (int i = 0; i < fn_count; i++) {
         const CapturedFunction* fn = &fns[i];
         if (is_skipped_function(fn->name)) continue;
@@ -8220,8 +8461,17 @@ static int emit_java_sdk(const CapturedManifest* m,
 "            FunctionDescriptor.of(JAVA_INT, ADDRESS, ADDRESS));\n"
 "        h_aether_describe = linker.downcallHandle(\n"
 "            lib.find(\"aether_describe\").orElseThrow(),\n"
-"            FunctionDescriptor.of(ADDRESS));\n",
-        m->java_class);
+"            FunctionDescriptor.of(ADDRESS));\n"
+"        h_string_data = linker.downcallHandle(\n"
+"            lib.find(\"aether_string_data\").orElseThrow(),\n"
+"            FunctionDescriptor.of(ADDRESS, ADDRESS));\n"
+"        h_string_length = linker.downcallHandle(\n"
+"            lib.find(\"aether_string_length\").orElseThrow(),\n"
+"            FunctionDescriptor.of(JAVA_LONG, ADDRESS));\n"
+"        h_string_release = linker.downcallHandle(\n"
+"            lib.find(\"%s\").orElseThrow(),\n"
+"            FunctionDescriptor.ofVoid(ADDRESS));\n",
+        m->java_class, str_release);
 
     /* Bind each script function. */
     for (int i = 0; i < fn_count; i++) {
@@ -8367,9 +8617,18 @@ static int emit_java_sdk(const CapturedManifest* m,
         if (strcmp(jret, "void") == 0) {
             /* nothing to return */
         } else if (strcmp(fn->ret, "string") == 0) {
+            /* The counted string's handle (#2931): its bytes, every one
+             * of them, then the handle given back. */
             fprintf(f,
 "            if (_r.equals(MemorySegment.NULL)) return null;\n"
-"            return _r.reinterpret(Long.MAX_VALUE).getString(0);\n");
+"            try {\n"
+"                MemorySegment _d = (MemorySegment) h_string_data.invokeExact(_r);\n"
+"                long _n = (long) h_string_length.invokeExact(_r);\n"
+"                return new String(_d.reinterpret(_n).toArray(JAVA_BYTE),\n"
+"                                  java.nio.charset.StandardCharsets.UTF_8);\n"
+"            } finally {\n"
+"                h_string_release.invokeExact(_r);\n"
+"            }\n");
         }
 
         fprintf(f,
@@ -8503,6 +8762,24 @@ static void emit_namespace_bindings(const char* manifest_path,
     int fn_count = parse_function_list(fn_list, &fns);
     free(fn_list);
 
+    /* #2931: a string an export returns is the caller's; the SDK gives it
+     * back through the release the library exports, which the compiler
+     * names. */
+    char* str_release = NULL;
+    char* query = ae_path_printf("--print-string-release%s", g_lib_id_flag);
+    int qrc = aetherc_capture_stdout_whole(query, concat_path, NULL, &str_release);
+    free(query);
+    if (qrc != 0) {
+        fprintf(stderr, "Warning: --print-string-release failed; skipping SDK generation\n");
+        free(str_release);
+        captured_manifest_free(&m);
+        captured_functions_free(fns, fn_count);
+        return;
+    }
+    for (size_t n = strlen(str_release); n > 0 && (str_release[n - 1] == '\n' ||
+                                                    str_release[n - 1] == '\r'); n--)
+        str_release[n - 1] = '\0';
+
     /* Determine where to write SDKs. Place them next to the .so so
      * users can `cp libfoo.so foo_module.py /target/` together. The
      * directory whole, as the library's path is (#2888). */
@@ -8514,15 +8791,16 @@ static void emit_namespace_bindings(const char* manifest_path,
     else { free(out_dir); out_dir = ae_path_printf("."); }
 
     if (m.py_module[0]) {
-        emit_python_sdk(&m, fns, fn_count, lib_path, out_dir);
+        emit_python_sdk(&m, fns, fn_count, lib_path, out_dir, str_release);
     }
     if (m.rb_module[0]) {
-        emit_ruby_sdk(&m, fns, fn_count, lib_path, out_dir);
+        emit_ruby_sdk(&m, fns, fn_count, lib_path, out_dir, str_release);
     }
     if (m.java_class[0] && m.java_pkg[0]) {
-        emit_java_sdk(&m, fns, fn_count, lib_path, out_dir);
+        emit_java_sdk(&m, fns, fn_count, lib_path, out_dir, str_release);
     }
     free(out_dir);
+    free(str_release);
     captured_functions_free(fns, fn_count);
     captured_manifest_free(&m);
 
@@ -8843,6 +9121,7 @@ static int build_namespace_with(const char* tmpdir, const char* dir, const char*
 
     g_emit_lib = true;
     g_emit_exe = false;
+    snprintf(g_lib_id_flag, sizeof(g_lib_id_flag), " \"--lib-id=%s\"", base_name);
 
     char* sub_argv[10];
     int sub_argc = 0;
@@ -11826,6 +12105,8 @@ static int cmd_lib_info(int argc, char** argv) {
     }
     if (minor >= 5) {
         printf("  Runtime:       %s\n", (m->runtime && m->runtime[0]) ? m->runtime : "static");
+    if (minor >= 9 && m->string_release && m->string_release[0])
+        printf("  String release: %s\n", m->string_release);
     }
     if (minor >= 7) {
         printf("  Actors:        %s\n", m->actors ? "yes" : "no");
