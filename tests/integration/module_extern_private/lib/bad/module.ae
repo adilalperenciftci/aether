@@ -1,0 +1,7 @@
+exports(copy_short)
+
+// Its own memcpy, called with too few arguments: still an error, reported
+// against this file's own declaration.
+extern memcpy(dst: ptr, src: ptr, n: long) -> ptr
+
+copy_short(dst: ptr, src: ptr) -> ptr { return memcpy(dst, src) }

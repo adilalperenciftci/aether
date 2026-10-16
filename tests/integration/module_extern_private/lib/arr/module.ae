@@ -1,0 +1,6 @@
+exports(copy3)
+
+// Declares memcpy with an int[] source.
+extern memcpy(dst: ptr, src: int[], n: long) -> ptr
+
+copy3(dst: ptr, src: int[]) -> ptr { return memcpy(dst, src, 12) }

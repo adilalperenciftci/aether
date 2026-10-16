@@ -1,0 +1,6 @@
+exports(own)
+
+// strdup declared `@heap`: its result is the caller's, adopted.
+extern strdup(s: string) -> string @heap
+
+own(s: string) -> string { return strdup(s) }

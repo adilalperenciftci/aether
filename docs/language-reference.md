@@ -3232,6 +3232,14 @@ Externs are useful for:
 - Custom C extensions
 - Platform-specific APIs
 
+A bare `extern` belongs to the file that declares it. Two files may declare
+one C function differently, as `extern memcpy(dst: ptr, src: int[], n: long)`
+in one module and `extern memcpy(dst: ptr, src: ptr, n: long)` in another:
+each file's calls are checked, and generated, against its own declaration
+(its parameter types, `@heap`, `@retain`), whatever else the program imports.
+A file that calls an extern it does not declare gets another file's
+declaration of that name.
+
 ### Typed and qualified C pointers
 
 Plain `ptr` lowers to C `void *`. C headers use richer pointer spellings, and when an Aether `extern` (or an Aether-owned public function) must match a header **exactly**, so the generated C compiles with that header force-included, and the C compiler still cross-checks the signature against every caller, use these forms. Each affects only the *emitted C spelling*; the Aether-side `kind` (and so all typechecking) is unchanged.

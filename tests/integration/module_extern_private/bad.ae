@@ -1,0 +1,6 @@
+import arr
+import bad
+
+main() {
+    println("unreachable")
+}

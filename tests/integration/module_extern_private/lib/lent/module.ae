@@ -1,0 +1,6 @@
+exports(peek)
+
+// strdup declared without `@heap`: its result is C's (borrowed).
+extern strdup(s: string) -> string
+
+peek(s: string) -> string { return strdup(s) }

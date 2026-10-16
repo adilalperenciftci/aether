@@ -1551,6 +1551,30 @@ ASTNode* find_extern_declaration_by_name(ASTNode* program,
     return NULL;
 }
 
+/* The extern a call in the function being generated names: the declaration
+ * in its own file first (the module it was merged from, or the program's
+ * own), so two files declaring one C function differently each get theirs,
+ * as the typechecker checked them; else the first one anywhere. */
+ASTNode* find_extern_declaration_in_scope(CodeGenerator* gen, const char* name) {
+    if (!gen || !name) return NULL;
+    ASTNode* scope = NULL;
+    if (gen->current_origin_module) {
+        AetherModule* m = module_find(gen->current_origin_module);
+        scope = m ? m->ast : NULL;
+    } else {
+        scope = gen->program;
+    }
+    for (int i = 0; scope && i < scope->child_count; i++) {
+        ASTNode* d = scope->children[i];
+        if (d && d->type == AST_EXPORT_STATEMENT && d->child_count > 0) d = d->children[0];
+        if (!d || d->type != AST_EXTERN_FUNCTION || !d->value || strcmp(d->value, name) != 0)
+            continue;
+        if (!gen->current_origin_module && d->origin_module) continue;
+        return d;
+    }
+    return find_extern_declaration_by_name(gen->program, name);
+}
+
 // Does an extern declaration carry a `@heap` return annotation, parsed
 // in parse_extern_declaration as the string token "heap_return"
 // appended to (or set as) the extern's annotation slot? Used by
@@ -1576,8 +1600,8 @@ int seq_value_is_fresh(CodeGenerator* gen, ASTNode* e) {
     if (!e || !e->node_type || !is_string_seq_ptr_type(e->node_type)) return 0;
     if (e->type == AST_ARRAY_LITERAL) return 1;
     if (e->type != AST_FUNCTION_CALL || !e->value) return 0;
-    ASTNode* ext = gen->program ? find_extern_declaration_by_name(
-                                      gen->program, codegen_normalise_callee(e->value))
+    ASTNode* ext = gen->program ? find_extern_declaration_in_scope(
+                                      gen, codegen_normalise_callee(e->value))
                                 : NULL;
     if (!ext || find_function_definition_by_name(gen->program, codegen_normalise_callee(e->value)))
         return 1;
@@ -1699,7 +1723,7 @@ int is_heap_string_expr(CodeGenerator* gen, ASTNode* expr) {
             if (fn_def)
                 return expr->node_type && expr->node_type->kind == TYPE_STRING &&
                        function_def_returns_heap_string(gen, fn_def);
-            ASTNode* ext_def = find_extern_declaration_by_name(gen->program, fn);
+            ASTNode* ext_def = find_extern_declaration_in_scope(gen, fn);
             if (ext_def && extern_returns_heap_string(ext_def) &&
                 !is_string_seq_ptr_type(expr->node_type)) return 1;
         }
@@ -3374,7 +3398,7 @@ static int call_is_extern(CodeGenerator* gen, ASTNode* call) {
     if (!call || call->type != AST_FUNCTION_CALL || !call->value || !gen->program) return 0;
     const char* fn = codegen_normalise_callee(call->value);
     return !find_function_definition_by_name(gen->program, fn) &&
-           find_extern_declaration_by_name(gen->program, fn) != NULL;
+           find_extern_declaration_in_scope(gen, fn) != NULL;
 }
 
 /* May evaluating `e` hold an owning value in a statement temporary (a
@@ -6413,7 +6437,7 @@ int tuple_call_returns_heap_at(CodeGenerator* gen, ASTNode* call, int j) {
     const char* fn = codegen_normalise_callee(call->value);
     ASTNode* callee = find_function_definition_by_name(gen->program, fn);
     if (callee) return function_def_returns_heap_at(gen, callee, j);
-    ASTNode* ext = find_extern_declaration_by_name(gen->program, fn);
+    ASTNode* ext = find_extern_declaration_in_scope(gen, fn);
     return ext && ext->node_type && ext->node_type->kind == TYPE_TUPLE &&
            ext->node_type->tuple_heap_flags && j < ext->node_type->tuple_count &&
            ext->node_type->tuple_heap_flags[j];
