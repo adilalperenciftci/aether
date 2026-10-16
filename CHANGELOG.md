@@ -14,6 +14,547 @@ cut while your branch is open cannot fold your entry into the released section.
 
 ## [current]
 
+## [0.818.0]
+
+### Added
+
+- **`os.spawn_proc_to(prog, argv, env, out_path)` starts a child without waiting, its stdout and stderr written to a file, in a Job Object (Windows) or process group (POSIX) of its own, so `os.kill(token, sig)` ends its whole tree.** It works with `wait`, `wait_any` and `wait_any_timeout`, which makes a parallel runner with per-child deadlines possible in one thread: until now a child could be captured or bounded by a timeout, never both, and a kill ended a build tool but left its compilers running. A child that crashes ends at once with its status: on Windows its job keeps the error-reporting dialog away, which otherwise held a crashed child for seconds or until someone closed it. The ownership grid's runner (tests/ownership_grid) is built on it.
+
+- **A string other threads can reach counts atomically.** The runtime
+  can publish a counted string (`aether_string_publish`): a bit of its
+  count marks it shared, and its retain and release are atomic from then
+  on, while every other string keeps its plain count. Stage 3 of the
+  ownership model keeps a string by retaining it where it copied, and a
+  module `var` or a closure environment can be read by several actors at
+  once; their strings are published where they are stored (#2919).
+
+- **A function returns a fixed-size array** (`-> int[2]`, `-> (Doc[2],
+  int)`), returned in a struct of its own since C has no array results. A
+  binding moves the elements out, a struct field or a tuple position takes
+  them, and `pair()[1]` or `sum(pair())` holds the result until the
+  statement is done. A closure, an extern and a function type still return
+  none (E0201) (#2894).
+- **An optional struct field may hold a string, a closure, or a struct or
+  tuple that owns one** (`label: string?`); it owns what it holds as any
+  field does (#2822).
+
+### Changed
+
+- **The codec, crypto and network producers hand over counted strings.**
+  `json_stringify_raw`, `xml_builder_finish`, `xml_escape`, the two base64
+  encoders, the seven `*_hex_raw` digests, `tcp_receive_raw`,
+  `aether_proxy_pool_metrics_text` and the two Windows trust-anchor helpers
+  returned a plain malloc'd `char*`; each now returns a fresh AetherString
+  the caller releases with `string_release`, adopting its buffer where it
+  was already cap-accounted, so every `string` they produce is counted as
+  the ownership model's R1 asks. Their declarations, and the `string_concat`
+  and `string_substring` redeclarations in std.json, std.xml, std.yaml,
+  std.http, std.http.client and std.http.middleware, say `@heap`. Without
+  networking, `http_response_body` and `http_response_read_chunk_raw`
+  returned a literal `""` under `@heap`, which the caller's release then
+  freed; they return an empty counted string now. `tcp_receive_raw`'s
+  result keeps the length received instead of stopping at a NUL.
+
+- **The path and filesystem string producers return counted strings.**
+  `path.join`, `path.dirname`, `path.basename`, `path.extension`,
+  `path.clean`, `path.rel` (and their std.fs spellings), `fs.readlink`,
+  `fs.make_temp_dir`, `fs.make_temp_file` and the path slot of
+  `fs.realpath` handed back a plain `malloc`'d buffer, which
+  `string.release` cannot see and so leaves alone, and the std.path and
+  std.fs externs for the path functions were not declared `@heap`, so
+  only a list of names in the compiler kept them from leaking. Each now
+  returns a refcounted string the caller owns and is declared `@heap`,
+  as are the std.string, std.fs and std.file externs whose C already
+  returned one (`string_concat`, `string_substring`, `string_replace`,
+  `string_trim`, `file_read_all_raw` and the rest). `fs.realpath`
+  without filesystem support returns an empty counted string where it
+  returned a literal the caller would free. C code calling these
+  functions reads the result with `aether_string_data` and releases it
+  with `string_release`. This is part of stage 2 (R1) of the ownership
+  model.
+
+- **std.os, std.io and std.casper hand back counted strings.** The C side
+  of `os.exec`, `os.run_capture`, `os.run_full`, `os.run_pipe_drain_and_wait`,
+  `os.getenv`, `os.which`, `os.getcwd`, `os.temp_dir`, `os.platform`,
+  `os.arch`, the two ISO-8601 clocks, `io.read_file`, `io.getenv`,
+  `io.errno_message` and the three casper lookups returned a plain
+  `malloc`'d buffer, which `string.release` cannot free and which held no
+  length. Each returns a counted `AetherString` now, adopting its buffer
+  where it already has one, and is declared `@heap`, as are the
+  `string_concat` and `os_getenv` redeclarations in std.os, std.io,
+  std.audit, std.casper and std.cas. A capture keeps an embedded NUL
+  (`os.run_full` and `os.run_capture` read as truncated at it before),
+  and the memory cap's counter returns to where it was once the string
+  is released. A C caller reads the result through `aether_string_data`
+  and releases it with `string_release`. Stage 2 (R1) of the ownership
+  model.
+
+- **Every string literal is a counted string, and C gets characters.**
+  Stage 2 (R1) of the ownership model: a string literal is a static,
+  pinned `AetherString` (retain and release leave it alone), as a literal
+  holding a NUL already was (#2520), so every string value the program
+  holds has the same shape and releasing one is always right. Where a
+  string reaches C it is passed as its characters (R4): an extern's
+  `string` or `ptr` parameter, a C-variadic `...` (an extern's or an
+  Aether variadic function's, read by `va_arg` or forwarded as a
+  `va_list`), and the `getenv` and `atoi` builtins. A C function that
+  wants the string itself declares the parameter `@aether`, on a `ptr` as
+  on a `string`; std's containers do. A literal used as a `ptr` stays its
+  C characters wherever it goes. A fault is its name's pinned string.
+  `string.new` and `string.format` read a counted string's bytes, where
+  they read its header. C that calls an Aether `-> string` function
+  through a pointer reads the result with `aether_string_data`, as
+  docs/c-interop.md says of every Aether string.
+
+- **A string stored through a C memory view is its characters.** A
+  `string[]` view of a `ptr` (`(names as string[])[0] = "VK_KHR_..."`) is
+  C's memory, read as a `const char**`: a string stored through it is now
+  its characters, as at every other C boundary (R4), where it was the
+  string as Aether holds it. Vulkan's extension name arrays are built
+  this way.
+
+- **A function may not free a string it was passed (E0901).** A `string`
+  parameter is borrowed for the call: the caller owns it and frees it.
+  `string.free(p)`, `release(p)` or the runtime free bound under another
+  name, on any path, released a reference the function did not own, which
+  the compiler then had to guess around at every caller. Store the string to
+  keep it; a parameter the body re-binds holds a string of its own and may
+  be freed. std.jsonpath and contrib.tinyweb free their strings where they
+  own them (#2924).
+
+- **Every string local owns what it holds, and every string a function
+  returns is the caller's.** A store moves a fresh string, or an owning
+  local at its last use, and copies anything else (a literal is static and
+  never copied); a `string` result and every `string` position of a tuple
+  is handed over from every return. `string.free(x)` releases what `x`
+  holds and leaves it empty. The C byte getters behind std's codecs,
+  digests and reads (`zlib_get_inflate_bytes` and the like) return `ptr`:
+  bytes whose length C reports separately are not a C string (#2920).
+
+- **Every string place takes a reference of its own, and shared ones count
+  atomically.** A store into a module `var`, a struct field (any path, and a
+  struct literal), an actor's state field or a container element (`list.add`,
+  `list.set`, `map.put` of any `string`) takes the value: a fresh one moved,
+  any other retained, a literal handed over as it is. The store releases the
+  value it replaces; a module `var` used to keep every value it ever held.
+  A string stored where another thread can read it (a module `var`, a
+  closure's capture or cell, a container, a field behind a pointer) is
+  published, so its count is atomic (#2919). `string.free(g)` on a module
+  `var` releases it and leaves it empty. A list owns the strings it was
+  given: freeing them by hand as well is a double free (#2920).
+
+- **A function that keeps a `ptr` parameter says so: `p: @keep ptr` (E0902).**
+  A `ptr` owns nothing, so a string passed where a `ptr` is expected and kept
+  there was freed under it by its owner; the compiler kept the caller's
+  value alive by reading the callee's body, and leaked it. Now a `ptr`
+  parameter is borrowed for the call unless declared `@keep`, and each
+  function is checked against its own body: storing a borrowed one where it
+  outlives the call, returning it, capturing it, or passing it to a `@keep`
+  parameter is refused, naming the parameter. A `string` reaches a `@keep`
+  parameter only through `string.keep(s)`; `string.release_kept(p)` gives
+  that reference back. A closure's `ptr` parameter is always borrowed, and a
+  function with a `@keep` parameter is called by name. Breaking: code that
+  keeps `ptr` parameters adds `@keep`; std, contrib and the tests carry 329
+  such annotations (#2926).
+
+- **`aetherc --diagnose=ownership` reports the ownership model.** Each
+  string store is listed as moved (a fresh value, or a local at its last
+  use) or taken (retained; a literal costs nothing), and a local still
+  handed to C where C may keep it is marked KEPT ALIVE. Every string
+  function hands its caller one reference, so the HEAP / NOT HEAP verdicts
+  are gone (#2920).
+
+- **A struct's C layout is its declared fields.** The hidden
+  `_heap_<field>` int that followed each `string` field is gone: a string
+  field always owns the string it holds. `reflect.field_heap_offset` is
+  removed; a generic writer releases the string a field holds and stores
+  one it took a reference to (#2921).
+
+- **Every call borrows its arguments.** A fresh value passed to a function,
+  a closure, a function pointer or an extern is released after the call;
+  a callee that keeps or returns one takes a reference of its own (R3). The
+  compiler no longer reads a callee's body, or every closure in the
+  program, to decide it. An extern that keeps what it is given declares the
+  parameter `@retain` (R4): the call then hands it a reference, as it now
+  does for a closure (#2920).
+- **`@retain` on the std externs that keep a closure.** `observe`, the
+  worker pool's jobs and main-thread poster, the http and net server route
+  handlers, and the QuickJS function binding keep the closure they are
+  given; their declarations now say so (#2920).
+- **A closure in a `ptr` slot is the program's to give back.** A `ptr`
+  slot owns nothing: `box_closure(f)`, or a closure stored into a `ptr`,
+  makes a box holding a reference of its own, which `release_closure(p)`
+  gives back. A borrowing `ptr` parameter gets a box on the caller's stack
+  instead, so passing a closure to one allocates nothing (#2926).
+- **A failed `list.set` gives back the value it was handed.** An index out
+  of range kept the string or closure box the store had taken (#2922).
+
+### Fixed
+
+- **A call of a clause set is ordered by what every clause does.** The
+  evaluation-order rule read a set's effects off its first clause, so a
+  write through a pointer in a later clause, or in a guard, went unseen:
+  `show(q.n, wr(p, 3))` read `q.n` after `wr(p, 3)` wrote it and printed
+  5002 for 1002. The set's entry now reads every clause's body, guard and
+  contracts, each against its own parameters, counted by position (a
+  literal pattern ahead of a pointer no longer shifts which argument is
+  written through). Sets whose clauses write nothing still get no
+  temporaries (#2857).
+
+- **`ae` builds every path and name whole, or refuses it.** gcc 15 and 16
+  at `-O2 -Wall -Wformat-truncation=1` found fixed buffers in `tools/ae.c`
+  that a long value could overflow, and `ae` then went on with the cut
+  value: the shared runtime's link argument, the toolchain root taken from
+  `AETHER_HOME` or the working directory (and every probe below it), a
+  dependency's declared module path, a package's module names (and the
+  `--package` name), a namespace's function list entries, script paths and
+  import lines, a project directory's `src/main.ae`, the `.wasm` path (two
+  bytes past its buffer), an example's path, the Windows abnormal-exit note
+  (always cut) and `AETHERC` for `ae help`. They are heap paths now,
+  writes that report an overflow, or buffers sized for the longest value; a
+  root too long for the toolchain, or a package name past 255 bytes, is an
+  error. `tools/ae.c` compiles with no such warning on either compiler
+  (#2862).
+
+- **An array bound in an `if`'s branches can be read after it.** The
+  branch hoist declared the name with its C type before it, and an array's
+  C type is `E[N]`, so `if c { a = [1, 2] } else { a = [3, 4] }` followed
+  by a read of `a` failed in C. The hoist now declares it as a loop's
+  does, `E a[N]` (#2877).
+
+- **Closures a `try` body binds hold after the catch without statement
+  expressions.** With `AETHER_GCC_COMPAT` 0 (MSVC, emscripten, a C11
+  compiler), a capturing closure literal was a call returning the closure
+  struct through a hidden slot. A local a `try` body writes is volatile, and
+  gcc 16 at -O1 and -O2 inlined that call into the local and dropped the
+  store, so once the panic was caught the local, an `fn[N]` or one of its
+  elements, still held the closures from before the `try`. The literal is
+  now a compound literal around the environment its constructor returns,
+  as it is on the GCC path (#2889).
+
+- **A closure goes into a `ptr` slot, and an arm's closure reads state.**
+  A closure stored straight into a `ptr` module variable, a `ptr` field of
+  a struct literal or a `ptr` message field emitted C that did not compile:
+  the slot got the closure itself, where a `ptr` parameter and a `ptr`
+  field store box it. Every such store now boxes it the same way (a bare
+  function through its adapter), and a function reads a `ptr` global it
+  stored a closure into back as a `ptr`. A closure made in a receive arm
+  that read the actor's state did not compile either (`'n' undeclared`):
+  it now captures the state's value when it is made, as it captures a
+  local; writing state from a closure is still refused (#2890).
+
+- **A call that writes its fixed-size array parameter no longer orders the
+  caller's reads of the array.** A `T[N]` parameter is the function's own
+  copy (as E0900 treats it), so a store into it, or into a slice of it by a
+  function it calls, changes nothing the caller reads. The evaluation-order
+  rule counted it as a write through the parameter, and
+  `first(arr, 9) + arr[0]` held `arr[0]` in a temporary for nothing. The
+  results were already right; the C is now what it was without the call's
+  write (#2887).
+
+- **The `os.wait_any` completion-order test no longer rests on timing.** It
+  checked the order with two `sleep` children a second apart, and under load
+  both had exited before `wait_any` looked, so it failed. The slow child now
+  never exits on its own: the first `wait_any` can only return the fast one,
+  then the test ends the slow child and the second `wait_any` returns it.
+  The `wait_any_timeout` check's short child exits at once for the same
+  reason (#2892).
+
+- **`ae build --namespace` binds every function, parameter and name whole.**
+  The SDK generator read the function list into 16 KB and a table of 64
+  functions with 16 parameters each, names of 127 bytes and types of 63:
+  past those it dropped functions and parameters, or skipped the SDK. The
+  list is read whole and grown, names and types are kept as they are, and
+  the Java method name is built for its length. The namespace's manifest
+  path, the describe command and the SDK directory are built whole too, a
+  capture of aetherc's output that does not fit its buffer is reported
+  instead of parsed cut, and on macOS and FreeBSD the Homebrew or
+  `LOCALBASE` flags, the executable's path and the `install_name_tool`
+  command no longer cut a long path (#2888).
+
+- **A fixed-size array as a result is refused with E0201, not left to fail
+  in C.** No function can return a `T[N]`: C returns no array, and the
+  code generator does not wrap one, so `pair() -> int[2]` compiled to
+  `int[2] pair(void);` and a struct literal given such a call
+  (`Row { docs: two("w") }`) failed in `_aether_dup_each_Doc`. The type
+  checker now refuses the result, alone or at a position of a tuple,
+  written or inferred, of a function, a closure or an extern, and a
+  function type with such a result written for a parameter, a field or a
+  local, with a help line naming the struct to return instead
+  (`struct Pair { v: int[2] }`). No program that built before is refused.
+  Returning the array itself is #2894. Closes #2886.
+
+- **`ae build --namespace` takes the manifest whole, and refuses what
+  `aether_describe()` cannot hold.** The SDK generator copied the
+  manifest's namespace, module, class, input and event names into 128-byte
+  fields and its inputs and events into tables of 64, and built class,
+  setter and handler names in 128 and 160 bytes; the library's name and
+  paths were cut at 256, 512 and 1024 bytes. They are built whole now, and
+  a namespace declaring more than the 64 inputs or events the
+  `aether_describe()` layout holds is refused by aetherc with the count,
+  where the rest were dropped without a word (#2888).
+
+- **`ae` works again in a working directory longer than 1023 bytes.** A
+  checkout found by its `build/aetherc` in the working directory takes the
+  directory as its toolchain root; #2862 refused one longer than the root
+  holds, where `ae` had used "." for it. The directory is now read whole,
+  and one too long for the root is named "." again, which is exact while
+  `ae` runs there (#2862).
+
+- **`ae examples` takes every example, however many.** #2862 made the
+  513th example on an error each, counted as a failure, while the header
+  still said "Building 512 example(s)". The list grows now, and the paths
+  built from each example's (its name, its C file and executable, its
+  directory and the C sources beside it) are whole (#2862).
+
+- **A type name that names nothing is an Aether error, not C.**
+  `while i < 2 and eat(i) { ... }` passed aetherc and failed in the C
+  compiler ("unknown type name 'and'"): Aether's AND is `&&`, so
+  `and eat` read as a declaration of `eat` of a type `and`. Any name that
+  is no type of the program did the same as a local's, a parameter's or a
+  field's type. The type checker refuses it (E0302), and for `and` and
+  `not` the help names `&&` and `!` (#2896).
+
+- **A clause set compiles in time near linear in its size.** A set of
+  2000 clauses took about 4 s to compile and one of 5000 about 79 s:
+  the heap-return classification memoised its answer on the first 64
+  clauses only, so each later clause classified the set again, with a
+  scan of the set per return; and the set a definition is one of, its
+  @c_callback clause, its parameter types and, for a set returning a
+  tuple, the typing of its calls were each a scan of the set or of the
+  program per clause. Each comes from the program index or a memo now:
+  2000 clauses compile in about 0.1 s and 8000 in under half a second,
+  to the same C (#2897).
+
+- **A bare function in a `ptr` slot is its code address again.** The
+  first #2890 fix boxed a bare top-level function like a closure in every
+  `ptr` slot it touched, so C code calling through the slot got a box
+  where it reads a function: `Sorter { cmp: int_cmp }` then
+  `qsort(buf, n, sz, s.cmp)` crashed, and a bare function named only in a
+  struct literal's or a message's `ptr` field did not compile (an adapter
+  was named and never emitted). A bare function, a `@c_callback` one too,
+  now stays a raw code pointer in a struct literal's field, a field
+  store, a module variable and a message field, as the box documentation
+  and unbox_closure's panic state; only a closure is boxed (#2890).
+
+- **A receive arm's closure is refused a state field it cannot copy.**
+  Since #2890 a closure made in a receive arm copies the state fields it
+  reads. The copy of an `fn[N]` or of an array of structs that own strings
+  took none of the elements' references, so the next store into the state
+  freed what the closure read: wrong values, or a crash. Reading such a
+  field (or an optional, a tuple or a slice) from an arm's closure is now
+  a compile-time error naming the field, its type and the way out: read
+  what the closure needs into arm locals first. Scalars, enums, bitsets,
+  `ptr` and actor references, strings, closures, structs and fixed-size
+  arrays of scalars, handles, plain structs or strings are still copied
+  (#2890).
+
+- **A builder call with a trailing block runs its block whatever its result
+  is stored into.** Each statement form ran the block itself, and the ones
+  that stored into a module global or an actor's state did not: the builder
+  ran with a null config and its block was dropped (#2873). A declaration of
+  a struct a builder returns did not compile, since the declaration was
+  emitted with ` = 0` to be assigned after the block (#2874). The block and
+  the arguments now run ahead of the statement, once, for every target, and
+  the statement is emitted as for any value, the call made with the filled
+  config.
+
+- **A closure's write reaches a local first bound in a branch or a loop.**
+  A local first bound in an `if`'s branches (or a switch's cases, or a
+  while body) and then rebound by a closure kept its old value: the closure
+  declared a C local of its own, though the local is one variable for the
+  function. `if k > 0 { n = 1 } else { n = 2 }` then `rebind = || { n = 7 }`
+  and `rebind()` left `n` at 1, and the same for strings and arrays. Such
+  a closure now writes the variable (#2901).
+
+- **An optional or sum local a `try` body writes keeps the value after the
+  catch.** Every other variable a `try` body writes is declared `volatile`,
+  so the panic's longjmp cannot leave it in a register; an `int?`,
+  `long?`, struct or `fn?` optional local, and a sum local, were not, and
+  at -O1 and -O2 the catch and the code after it read the value from
+  before the `try` (an `int?` gave -1 for 50), on both C paths. Their
+  declarations now take the qualifier (#2902).
+
+- **A tuple destructure rebinds a closure local.** `f = || { return 1 }`,
+  then `f, n = pair(5)` where `pair` returns a closure and an int, then
+  `call(f)` ran the first literal again: the call was emitted as a direct
+  call of that literal's function, as if `f` had never been rebound. A
+  destructure slot now counts as a binding of the variable wherever the
+  direct-call shortcut is decided, so the call goes through the closure
+  the variable holds (#2903).
+
+- **Closures into `ptr` locals and state, zeroed state, `ptr` fields from
+  strings.** A closure stored into a `ptr` local (as a rebinding or as its
+  initializer) or into a `ptr` state field did not compile; it is now
+  boxed there, and a bare function stored as its code address, as in every
+  other `ptr` slot. A `state fn kept` (or a struct, optional, tuple or sum
+  state field) with no initializer was set with `= 0`, which C refuses for
+  those; it is now zeroed whole. A struct literal whose `ptr` field took a
+  `ptr` local holding a string named a `_heap_<field>` tracker the struct
+  does not have; a `ptr` field takes the pointer, which its source keeps
+  (#2904).
+
+- **The plain C path has no GNU statement expression left in the sweep.**
+  Four `string?` constructs (a `string?` parameter a closure writes, a
+  destructure into a `string?` cell or module var, a `??` over a `string?`
+  local returned) were still spelled as statement expressions whatever the
+  C compiler, so cl.exe and a strict C11 compiler rejected the programs
+  using them. A cell or global now binds the value and then takes its
+  string as a statement, and the returned `??` is a sequence of
+  temporaries declared ahead of the return, as the rest of that path is.
+  CI's strict C11 step now checks the C of every program the sweep builds,
+  reading the C the sweep kept (`AE_SWEEP_KEEP_C=1`, ae's `AE_KEEP_C`), so
+  a later construct cannot bring one back unseen (#2885).
+
+- **`os.run_full`, `os.run_capture` and `run_capture_status` are safe to call from several threads at once (#2917).** A child inherited every inheritable handle the process held when it started: on Windows `CreateProcessW` ran with `bInheritHandles` and no handle list, and on POSIX the pipes had no close-on-exec flag. A child another thread started while a capture's pipes were open kept their write ends, so that capture waited for EOF until the unrelated child exited, seconds or forever. Each child now inherits its own stdio ends and nothing else (`PROC_THREAD_ATTRIBUTE_HANDLE_LIST`; `pipe2(O_CLOEXEC)`).
+
+- **A function of one clause can take a string literal pattern.**
+  `only_hi("hi") -> int { ... }` emitted the literal into the C as a bare
+  identifier, so the program did not compile ("'hi' undeclared"). Its
+  check compares by content now, NULL-safe, as a clause set's dispatcher
+  does (#2467), so a counted string with the same characters matches
+  (#2913).
+
+- **A string reaches every C extern as its characters.** An argument in
+  a C-variadic extern's `...` (`printf(fmt, s)`) was passed as it is held,
+  so a string built at run time formatted its AetherString header (#2914).
+  An extern bound to another symbol (`@extern("sym") name(...)`) had its
+  parameters looked up by that symbol, which the extern table does not
+  file entries under, so none of its `string` arguments were unwrapped;
+  std.strbuilder's `append_format` formatted a counted format string's
+  header (#2915). A call finds its extern by the Aether name now, and a
+  string in a vararg position is unwrapped as a declared `string`
+  parameter is.
+
+- **A panic releases what each place holds, once.** The unwind journal now
+  records places (a string local, a temporary, a struct local) by address
+  where they are declared, and a panic releases what each holds at that
+  moment. It used to record values: once two places could hold the same
+  string, a release forgot the other place's entry, so a caught panic leaked
+  a string or released one twice. The drain also no longer runs a release
+  while it walks the journal (#2923).
+
+- **Arguments and temporaries outlive what uses them.** A string read from
+  a module `var` or a field and passed to a function is held by the caller
+  for the call, so a store into that place inside the call no longer frees
+  the argument. A fresh string passed to a call that returns a view of it
+  (`string.bytes(make())`) lives to the end of its statement, as a
+  temporary does in C++; it was freed as the call returned, and the view
+  read freed memory (std.cryptography's argon2 hashed garbage). A field
+  read ahead of a call holds a reference of its own (#2920).
+
+- **Structs, tuples, optionals and fixed-size arrays own what they hold.**
+  Each owning type has one generated retain and one drop, used by every
+  place: a tuple, optional or array local, a struct or tuple field, a module
+  `var`, an array or slice element, a message field, a discard (`_ = v`).
+  A tuple local held its strings without releasing them, an alias of it
+  shared them, a struct stored into a module `var` leaked the one it
+  replaced, an array local rebound in a loop leaked its elements, and a
+  store through a slice leaked the element it replaced. A struct parameter
+  borrows its caller's value, and one the body writes into is copied on
+  entry (#2921).
+- **A call through a closure value calls the closure it holds.** A local
+  bound to a function's result was taken to hold the closure that
+  function's first `return` gave, and was called directly; a function that
+  returned another closure on another path crashed (#2921).
+
+- **A `defer` runs when a caught panic leaves its scope.** The language
+  reference says a plain `defer` runs on every exit; a panic skipped it, so
+  `defer list.free(l)` in a `try` body, or in a function a panic passed
+  through, leaked the list. While its scope is live a plain `defer` is now
+  in the unwind journal, and a panic runs it there, newest first, over the
+  locals as they are at that moment (#2923).
+- **A caught panic releases each owning array, cell and argument.** A
+  `string[N]` or struct array local, a variable a closure writes (its
+  shared cell), an argument a call holds for its duration, and an `x!`
+  error string handed to the catcher were not released when a panic left
+  them (#2923).
+
+- **A fixed-size array goes wherever a value goes.** A message field holds
+  one by value and owns its elements; an optional wraps one
+  (`let o: string[2]? = [...]`); an array literal of owning elements passed
+  to a function is a temporary of its statement; one thrown away
+  (`_ = [...]`) is dropped. These did not compile (#2921).
+- **An element store into an owning array local takes its value.**
+  `xs[0] = f` on a `fn[N]` or tuple array local leaked what the element held
+  (#2921).
+- **A `string?`, tuple or struct message field takes its value.** A send
+  shared the sender's string with the message, and the receiver's release
+  freed it under the sender (#2922).
+
+- **A string local always owns what it holds.** The per-variable ownership
+  flag (`_heap_<name>`) and the escape walk that kept a value alive when it
+  might be stored are gone: every take hands the local a reference, a store
+  releases the old value, a scope exit releases what is left, and a string
+  given to C's memory (a header struct's field, a C view, an `@retain`
+  extern) is given a reference of its own. A parameter the body rebinds
+  takes its own reference on entry (#2920).
+- **Whether a call hands back a string is read from its signature.** An
+  Aether function returning `string`, or an extern returning `-> string
+  @heap` or `-> ptr @heap`, hands its caller one reference; the body-walking
+  return classifiers and the producer name list are gone, and the std
+  constructors returning a counted string as `ptr` (`string.from_int` and the
+  like, `string_new_with_length` wherever it is declared) say `@heap` (#2920).
+- **No ownership decision reads another function's body.** The closure
+  environment scan, the hand-back walks, the parameter escape walk and the
+  copy-on-keep query are deleted; a closure cell always owns its closure, so
+  a cell passed to a call that hands it back no longer pins it (#2788).
+- **A builder that never names its config releases it** at its exit (#2871).
+  Through a binary import the program releases it instead: a library's
+  catalog (schema 1.8) marks such builders, and the import's stub passes
+  them no config, so a library linking its own runtime never frees memory
+  the program's runtime made (#2860). `ae lib-info` shows the mark as
+  `config: never used`.
+- **A string sequence is owned by every place that holds it.** A sequence
+  passed to a function other than a `string.seq_*` op, returned, built from
+  a call argument or holding a freshly built literal element was never
+  released; a function returning its parameter handed back a reference it
+  did not take. Every place now takes and releases its own reference, the
+  std producers say `-> *StringSeq @heap`, and freeing a borrowed sequence
+  parameter is refused (E0901) (#2921).
+- **`list.add`, `list.set` and `map.put` keep a string a `-> ptr @heap`
+  constructor returns** (`string.from_int(i)`): the container held freed
+  memory once those constructors said `@heap` (#2920).
+- **A string argument read from a field or an element is evaluated once.**
+  The call took its own reference to the value and then read the place
+  again, so a place built by calls (`f(make_item(w)).name`) ran them twice
+  and leaked the first results (#2920).
+- **A closure literal passed to a function taking a builder's `_ctx`**
+  (`spec.it(...) callback { }`) is released after the call; every
+  capturing callback leaked its environment (#2921).
+- **`sort.strings` and `sort.strings_by` permute without taking or
+  releasing** (`mem.swap_ptrs`), so sorting a C-owned `strarr` no longer
+  copies and leaks its elements (#2920).
+- **A receive arm's string binding, or a list pattern's head, that the arm
+  rebinds takes a reference of its own first**: the rebind released the
+  message's string, which the message released again (#2920).
+- **A string stored into C memory viewed as `string[]` takes no
+  reference**: the program keeps it alive while C reads it, and storing a
+  string built in the same statement is refused (E0902), since nothing
+  would keep it (#2926).
+- **`pqueue.push` takes its item `@keep`** (the queue keeps it past the
+  call): a string goes in through `string.keep(s)` and comes back out
+  through `string.release_kept`. A string literal may be given to any
+  `@keep ptr` as it is, being pinned (#2926).
+- **`free(s)` of a string releases it as `release(s)` does**, leaving the
+  place empty: a string local freed with the builtin (`defer free(home)`
+  after `io.getenv`) was released again at its scope exit (#2920).
+- **`string.free` of a place frees the place's own reference.** An `@retain`
+  parameter took a reference of its own for the call, so a free through
+  `string_free` released only that one and the place kept the string; a
+  slice element is emptied as it is freed, as a field is (#2920).
+- **A parameter or pattern binding the body rebinds no longer releases its
+  owner's value** for tuples, optionals, closures and sequences (#2921).
+- **A chain of closures, each holding the one before, is released in
+  constant stack.** 50,000 rebinds to a closure calling the closure it
+  replaced overflowed the stack on Windows when the chain was released
+  (#2921).
+- **`catch _` releases a panic reason built at run time**, which it kept
+  before (#2920).
+- **`tests/leaks_known.txt` is deleted**: every regression program reports 0
+  leaks under the macOS gate, the OpenSSL test included (the cryptography
+  module keeps the providers it loads) (#2925).
+
 ## [0.817.0]
 
 ### Fixed
