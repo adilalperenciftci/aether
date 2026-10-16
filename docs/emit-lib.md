@@ -293,6 +293,10 @@ and every DLL `ae` links export no `main`.
   are not (an executable leaves those to process exit too).
 - Call both from one thread, the host's main or UI thread. They are not
   synchronized against each other.
+- Stop the host's own threads that send to the program's actors before
+  `aether_main_exit`: its drain waits for the actors to go idle. A send from
+  such a thread while the program is not running is dropped, counted by
+  `scheduler_stopped_sends()` and reported once (#2912).
 
 **Finding them.** They are plain exported symbols: `dlsym(h, "aether_main")`,
 a weak reference, or the `--emit=csrc` header, which declares both when the

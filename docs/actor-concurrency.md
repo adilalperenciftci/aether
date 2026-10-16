@@ -322,6 +322,7 @@ int main() {
 **Scheduler lifecycle functions:**
 - `scheduler_wait()` -- waits for quiescence (all pending messages processed). Non-destructive: scheduler threads keep running. Safe to call multiple times.
 - `scheduler_shutdown()` -- waits for quiescence, then stops scheduler threads and joins them. Called once at program exit.
+- **Senders the scheduler does not own** (a `std.worker` job, an http pool worker, a C host's thread) must be stopped before `scheduler_shutdown()`: its quiescence wait does not end while one keeps sending. A send from such a thread while the scheduler is not running (shut down, starting again, cleaned up) is refused before it touches a core: the message is dropped, its payload released, the drop counted by `scheduler_stopped_sends()` and reported once on stderr (#2912).
 
 ### Core Assignment and Migration
 
