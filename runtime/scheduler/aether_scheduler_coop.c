@@ -125,6 +125,12 @@ uint64_t scheduler_released_sends(void) {
     return g_coop_released_sends;
 }
 
+/* The cooperative scheduler runs on its one thread: no other thread sends
+ * to it, stopped or not (#2912). */
+uint64_t scheduler_stopped_sends(void) {
+    return 0;
+}
+
 static int coop_send_to_dead_actor(ActorBase* actor, Message* msg) {
     int dead = actor ? atomic_load_explicit(&actor->dead, memory_order_relaxed) : 1;
     if (!dead) return 0;
