@@ -1,0 +1,115 @@
+// Regression: a string local returned from a function whose result is a
+// `ptr` hands the caller the string, not freed memory.
+//
+// A function with no result type takes the type of what it returns, and a
+// string local re-bound from a `ptr @heap` extern (`out = "x"`, then `out =
+// string.from_int(n)`) is typed by its last binding, so the result is `ptr`.
+// The local still owns its string and its scope exit releases it. The return
+// moved a local out only for a `string` result, so here it returned `out` as
+// it was and the exit drain freed it first: the caller read freed memory ('',
+// or garbage). The return now moves the local out whatever its result type
+// says, as a `string` return does: an untyped one, a `-> ptr` one, an early
+// return, a tuple position. Found by aeb's toolchain-selection tests.
+//
+// Each value is read after churn, allocations of the same sizes that would
+// take over a freed block. A `ptr` result is the caller's to release, as it
+// was before: the caller is not told it holds a string.
+
+import std.string
+
+extern exit(code: int)
+
+fn check(got: string, want: string, msg: string) {
+    if got != want {
+        println("FAIL ${msg}: got '${got}', want '${want}'")
+        exit(1)
+    }
+}
+
+num(s: string) -> int { return string.length(s) * 10 + 1 }
+
+churn(w: string) -> int {
+    n = 0
+    i = 0
+    while i < 8 {
+        a = string.from_int(num(w))
+        b = string.concat(w, "!")
+        n = n + string.length(a) + string.length(b)
+        i = i + 1
+    }
+    return n
+}
+
+// The reported shape: no result type, the local re-bound from an extern.
+major(seg: string) {
+    out = "x"
+    out = string.from_int(num(seg))
+    return out
+}
+
+// The only binding is the extern's.
+only(seg: string) {
+    out = string.from_int(num(seg))
+    return out
+}
+
+// An early return of the local.
+early(seg: string) {
+    out = "x"
+    out = string.from_int(num(seg))
+    if string.length(seg) > 0 { return out }
+    return "none"
+}
+
+// A declared `ptr` result.
+declared(seg: string) -> ptr {
+    out = "x"
+    out = string.from_int(num(seg))
+    return out
+}
+
+// A tuple position of type `ptr`.
+pair(seg: string) {
+    out = "x"
+    out = string.from_int(num(seg))
+    return out, 1
+}
+
+// Shapes typed `string` by inference, which were right: kept so.
+interp(seg: string) { return "v ${seg}" }
+param(seg: string) { return seg }
+
+main() {
+    println("=== test_string_local_returned_as_ptr ===")
+    i = 0
+    while i < 50 {
+        m = major("ab")
+        churn("ab")
+        check(m, "21", "an untyped return of a re-bound string local")
+        o = only("abc")
+        churn("abc")
+        check(o, "31", "an untyped return of a string local")
+        e = early("a")
+        churn("a")
+        check(e, "11", "an early return of a string local")
+        d = declared("abcd")
+        churn("abcd")
+        check(d, "41", "a string local returned as `-> ptr`")
+        p, n = pair("ab")
+        churn("ab")
+        check(p, "21", "a string local in a `ptr` tuple position")
+        if n != 1 {
+            println("FAIL the tuple's int position")
+            exit(1)
+        }
+        string.release(m)
+        string.release(o)
+        string.release(e)
+        string.release(d)
+        string.release(p)
+        check(interp("q"), "v q", "an untyped return of an interpolation")
+        check(param("p"), "p", "an untyped return of a string parameter")
+        i = i + 1
+    }
+    println("=== test_string_local_returned_as_ptr passed ===")
+}
