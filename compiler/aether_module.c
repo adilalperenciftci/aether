@@ -2824,11 +2824,10 @@ static int program_has_fault_member(ASTNode* program, const char* prefixed_name)
     return 0;
 }
 
-// Is a struct with the given name already a top-level child of `program`?
-// Used by module_merge_into_program to dedup struct definitions when the
-// consumer imports a module that exposes one. Imported structs share the
-// consumer's struct namespace (no `<ns>_` prefix) — see the design rationale
-// at the merge site.
+// The definition of kind `node_type` named `name` among `program`'s top-level
+// children, or NULL. The merge dedups imported definitions with it: a
+// struct by its merged name (`<ns>_<Name>`, see ss_build_table), the other
+// kinds by the name they were written with.
 static ASTNode* program_find_def(ASTNode* program, ASTNodeType node_type, const char* name) {
     if (!program || !name) return NULL;
     for (int m = 0; m < program->child_count; m++) {
@@ -2906,6 +2905,19 @@ static int definition_already_merged(ASTNode* program, ASTNode* decl, const char
                  "namespace across modules, so `spawn(%s())` in either would build the "
                  "same actor; rename one of them",
                  what, decl->value, here, there, decl->value);
+    } else if (decl->type == AST_STRUCT_DEFINITION) {
+        /* Struct types are module-scoped, each merged as `<ns>_<Name>`;
+         * only an `--emit=lib` build's exported structs keep their plain
+         * C name (ss_build_table), and two of those can still meet. */
+        char have[256], want[256];
+        struct_fields_summary(existing, have, sizeof(have));
+        struct_fields_summary(decl, want, sizeof(want));
+        snprintf(msg, sizeof(msg),
+                 "struct '%s' is defined differently in two modules: %s in %s and %s in %s. "
+                 "In an --emit=lib build a struct its module exports keeps its plain C "
+                 "name, the library's ABI, so both would be one C type; rename one of "
+                 "them, stop exporting one, or make the definitions identical",
+                 decl->value, want, here, have, there);
     } else {
         char have[256], want[256];
         struct_fields_summary(existing, have, sizeof(have));
@@ -2915,7 +2927,7 @@ static int definition_already_merged(ASTNode* program, ASTNode* decl, const char
                  "%s names are one namespace across modules, so both would share "
                  "one layout; rename one of them (or make the definitions identical)",
                  what, decl->value, want, here, have, there,
-                 decl->type == AST_MESSAGE_DEFINITION ? "Message" : "Struct");
+                 "Message");
     }
     AetherError e = { decl->source_file, NULL, decl->line, decl->column, msg, NULL, NULL,
                       AETHER_ERR_TYPE_MISMATCH };
@@ -3524,8 +3536,473 @@ static void inject_synthetic_bare_imports_from(ASTNode* program,
     }
 }
 
+/* ---- Module-scoped struct types -------------------------------------------
+ *
+ * A struct belongs to the module that defines it. `gpu.Shader` and
+ * `core.Shader` are two types, and a program may use both: each module's
+ * struct is merged under `<ns>_<Name>`, the namespace its functions carry
+ * (`gpu_Shader`), which is also its C name. The program's own structs keep
+ * their names. Before this, struct names were one namespace across modules
+ * and two modules defining one name differently was a clash (#2129).
+ *
+ * A struct name is resolved where it is written, the way a function's is:
+ *   - qualified, `gpu.Shader` / `*gpu.Shader` / `gpu.Shader { ... }`: the
+ *     module the qualifier names in that file (its imports, by namespace,
+ *     path or alias, or the file's own module), or the module a re-export
+ *     there leads to (#924);
+ *   - bare, `Shader`: the file's own struct of that name; else the one
+ *     struct of that name among the modules the file imports (a selective
+ *     `import gpu (Shader)` decides between several); else, as before, the
+ *     one struct of that name in the build. Two candidates are an error
+ *     that names them and asks for the qualified spelling.
+ *
+ * Two modules defining one name IDENTICALLY (same fields, each field's type
+ * resolving to the same type) still share one type, as #2129 made them: the
+ * later definition resolves to the earlier one. So does an imported struct
+ * identical to one of the program's own.
+ *
+ * `--emit=lib`: a struct a module exports keeps its plain C name in a
+ * library build, since a C host or a header may spell it (the ABI note in
+ * AGENTS.md); two exported structs of one name in one library are still the
+ * #2129 clash. Only unexported module structs are mangled there.
+ *
+ * `extern struct`s name C's own types and are never renamed. */
+
+typedef struct {
+    AetherModule* mod;     /* NULL: the program's own */
+    const char* name;      /* as written, interned */
+    const char* cname;     /* the merged and C name, interned */
+    ASTNode* decl;         /* the definition as parsed */
+    int shared;            /* takes an earlier identical definition's name */
+} ScopedStruct;
+
+static ScopedStruct* g_ss = NULL;
+static int g_ss_count = 0, g_ss_cap = 0;
+static int g_ss_emit_lib = 0;
+static ASTNode* g_ss_program = NULL;
+
+void module_set_emit_lib(int on) { g_ss_emit_lib = on ? 1 : 0; }
+
+static void ss_reset(void) {
+    free(g_ss);
+    g_ss = NULL;
+    g_ss_count = g_ss_cap = 0;
+}
+
+static int ss_is_scoped_struct(const ASTNode* d) {
+    return d && d->type == AST_STRUCT_DEFINITION && d->value &&
+           !(d->annotation && strncmp(d->annotation, "extern", 6) == 0);
+}
+
+static void ss_add(AetherModule* m, ASTNode* decl, const char* cname) {
+    if (g_ss_count == g_ss_cap) {
+        g_ss_cap = g_ss_cap ? g_ss_cap * 2 : 64;
+        g_ss = aether_xrealloc(g_ss, (size_t)g_ss_cap * sizeof(ScopedStruct));
+    }
+    ScopedStruct* s = &g_ss[g_ss_count++];
+    s->mod = m;
+    s->name = aether_intern(decl->value);
+    s->cname = aether_intern(cname);
+    s->decl = decl;
+    s->shared = 0;
+}
+
+static ScopedStruct* ss_find(const AetherModule* m, const char* name) {
+    for (int i = 0; i < g_ss_count; i++)
+        if (g_ss[i].mod == m && strcmp(g_ss[i].name, name) == 0) return &g_ss[i];
+    return NULL;
+}
+
+/* Does `ast` define a type other than a scoped struct under `name` (an enum,
+ * sum, distinct, cfn, bitstruct, C struct or `extern struct`)? Then a bare
+ * `name` written there is that type, not some module's struct. */
+static int ss_ast_has_other_type(const ASTNode* ast, const char* name) {
+    for (int i = 0; ast && i < ast->child_count; i++) {
+        const ASTNode* d = ast->children[i];
+        if (d && d->type == AST_EXPORT_STATEMENT && d->child_count > 0) d = d->children[0];
+        if (!d || !d->value || strcmp(d->value, name) != 0) continue;
+        switch (d->type) {
+            case AST_STRUCT_DEFINITION:
+                if (!ss_is_scoped_struct(d)) return 1;
+                break;
+            case AST_C_STRUCT_DEF: case AST_DISTINCT_TYPE_DEF: case AST_SUM_TYPE_DEF:
+            case AST_ENUM_DEFINITION: case AST_BITSTRUCT_DEFINITION:
+            case AST_CFN_TYPE_DEF: case AST_MESSAGE_DEFINITION:
+                return 1;
+            default:
+                break;
+        }
+    }
+    return 0;
+}
+
+/* The struct `name` of module `m`, followed through a re-export (#924). */
+static ScopedStruct* ss_of_module(AetherModule* m, const char* name) {
+    if (!m) return NULL;
+    ScopedStruct* s = ss_find(m, name);
+    if (s) return s;
+    AetherModule* origin = module_resolve_reexport(m, name);
+    return origin ? ss_find(origin, name) : NULL;
+}
+
+/* The module the qualifier `q` names in the file whose AST is `scope_ast`
+ * (`self` its module, NULL for the program): the file's own module, or an
+ * import, by alias, path or namespace. Mirrors the typechecker's
+ * check_qualified_types, which reports what this cannot resolve. */
+static AetherModule* ss_qualifier_module(AetherModule* self, ASTNode* scope_ast, const char* q) {
+    if (self && self->name &&
+        (strcmp(q, self->name) == 0 || strcmp(q, module_namespace_of(self->name)) == 0 ||
+         strcmp(q, module_last_segment(self->name)) == 0))
+        return self;
+    for (int i = 0; scope_ast && i < scope_ast->child_count; i++) {
+        ASTNode* imp = scope_ast->children[i];
+        if (!imp || imp->type != AST_IMPORT_STATEMENT || !imp->value) continue;
+        if (imp->annotation && strcmp(imp->annotation, "synthetic") == 0) continue;
+        if (strcmp(q, import_written_prefix(imp)) == 0 || strcmp(q, imp->value) == 0 ||
+            strcmp(q, module_namespace_of(imp->value)) == 0 ||
+            strcmp(q, module_last_segment(imp->value)) == 0) {
+            AetherModule* m = module_find(imp->value);
+            return m ? m : module_find_by_namespace(q);
+        }
+    }
+    return NULL;
+}
+
+typedef struct {
+    AetherModule* self;    /* the module the code was written in; NULL: the program */
+    ASTNode* scope_ast;    /* the AST whose imports are in scope there */
+    const char* file;      /* for diagnostics */
+} SsScope;
+
+/* One ambiguity report per name and line. */
+static const char* g_ss_reported[64];
+static int g_ss_reported_line[64];
+static int g_ss_reported_count = 0;
+
+static int g_ss_quiet = 0;   /* resolving to compare, not for a use: report nothing */
+
+static void ss_report_ambiguous(const SsScope* sc, const char* name, ScopedStruct** cands,
+                                int ncand, int line, int column, int via_imports) {
+    if (g_ss_quiet) return;
+    for (int i = 0; i < g_ss_reported_count; i++)
+        if (g_ss_reported_line[i] == line && strcmp(g_ss_reported[i], name) == 0) return;
+    if (g_ss_reported_count < 64) {
+        g_ss_reported[g_ss_reported_count] = aether_intern(name);
+        g_ss_reported_line[g_ss_reported_count++] = line;
+    }
+    char where[400];
+    size_t off = 0;
+    where[0] = '\0';
+    for (int i = 0; i < ncand && off + 40 < sizeof(where); i++) {
+        const char* mn = cands[i]->mod ? cands[i]->mod->name : "the program";
+        off += (size_t)snprintf(where + off, sizeof(where) - off, "%s'%s'",
+                                i == 0 ? "" : (i == ncand - 1 ? " and " : ", "), mn);
+    }
+    char msg[900], hint[600];
+    snprintf(msg, sizeof(msg),
+             "struct '%s' is ambiguous here: %s modules %s each define one",
+             name, via_imports ? "the imported" : "the", where);
+    off = 0;
+    hint[0] = '\0';
+    off += (size_t)snprintf(hint, sizeof(hint), "name the one you mean with its module: ");
+    for (int i = 0; i < ncand && off + 40 < sizeof(hint); i++) {
+        if (!cands[i]->mod) continue;
+        off += (size_t)snprintf(hint + off, sizeof(hint) - off, "%s%s.%s",
+                                i == 0 ? "" : " or ",
+                                module_namespace_of(cands[i]->mod->name), name);
+    }
+    AetherError e = { sc->file, NULL, line, column, msg, hint, NULL,
+                      AETHER_ERR_UNDEFINED_TYPE };
+    aether_error_report(&e);
+}
+
+/* The struct a name written in `sc` resolves to, or NULL when it is no
+ * module-scoped struct (then the name is left as written). */
+static ScopedStruct* ss_resolve(const SsScope* sc, const char* name, const char* qualifier,
+                                int line, int column) {
+    if (!name || g_ss_count == 0) return NULL;
+    if (qualifier) {
+        AetherModule* m = ss_qualifier_module(sc->self, sc->scope_ast, qualifier);
+        return m ? ss_of_module(m, name) : NULL;
+    }
+    ScopedStruct* own = ss_find(sc->self, name);
+    if (own) return own;
+    if (ss_ast_has_other_type(sc->scope_ast, name)) return NULL;
+
+    /* The modules the file imports. A selective import naming `name` picks
+     * that module outright. */
+    ScopedStruct* cands[16];
+    int ncand = 0;
+    int other = 0;   /* an import defines an enum, sum, ... of that name */
+    for (int i = 0; sc->scope_ast && i < sc->scope_ast->child_count; i++) {
+        ASTNode* imp = sc->scope_ast->children[i];
+        if (!imp || imp->type != AST_IMPORT_STATEMENT || !imp->value) continue;
+        if (imp->annotation && strcmp(imp->annotation, "synthetic") == 0) continue;
+        AetherModule* im = module_find(imp->value);
+        ScopedStruct* s = ss_of_module(im, name);
+        if (!s) {
+            if (im && ss_ast_has_other_type(im->ast, name)) other = 1;
+            continue;
+        }
+        for (int k = 0; k < imp->child_count; k++) {
+            ASTNode* sel = imp->children[k];
+            if (sel && sel->type == AST_IDENTIFIER && sel->value &&
+                !(sel->annotation && strcmp(sel->annotation, "module_alias") == 0) &&
+                strcmp(sel->value, name) == 0)
+                return s;
+        }
+        int dup = 0;
+        for (int k = 0; k < ncand; k++) dup |= cands[k]->cname == s->cname;
+        if (!dup && ncand < 16) cands[ncand++] = s;
+    }
+    if (ncand == 1) return cands[0];
+    if (ncand > 1) {
+        ss_report_ambiguous(sc, name, cands, ncand, line, column, 1);
+        return NULL;
+    }
+    if (other) return NULL;
+
+    /* None imported: the one struct of that name in the build, as when
+     * struct names were global (a module's body may name a struct of a
+     * module it reaches only transitively). */
+    for (int i = 0; i < g_ss_count; i++) {
+        ScopedStruct* s = &g_ss[i];
+        if (strcmp(s->name, name) != 0) continue;
+        int dup = 0;
+        for (int k = 0; k < ncand; k++) dup |= cands[k]->cname == s->cname;
+        if (!dup && ncand < 16) cands[ncand++] = s;
+    }
+    if (ncand == 1) return cands[0];
+    if (ncand > 1) ss_report_ambiguous(sc, name, cands, ncand, line, column, 0);
+    return NULL;
+}
+
+static void ss_rename(char** slot, const ScopedStruct* s) {
+    if (!s || !*slot || strcmp(*slot, s->cname) == 0) return;
+    free(*slot);
+    *slot = strdup(s->cname);
+}
+
+static void ss_rewrite_type(const SsScope* sc, Type* t, const ASTNode* at) {
+    if (!t) return;
+    if (t->kind == TYPE_STRUCT && t->struct_name) {
+        ScopedStruct* s = ss_resolve(sc, t->struct_name, t->qualifier,
+                                     at ? at->line : 0, at ? at->column : 0);
+        ss_rename(&t->struct_name, s);
+    }
+    ss_rewrite_type(sc, t->element_type, at);
+    ss_rewrite_type(sc, t->return_type, at);
+    for (int i = 0; t->tuple_types && i < t->tuple_count; i++)
+        ss_rewrite_type(sc, t->tuple_types[i], at);
+    for (int i = 0; t->param_types && i < t->param_count; i++)
+        ss_rewrite_type(sc, t->param_types[i], at);
+}
+
+static void ss_rewrite_node(const SsScope* sc, ASTNode* n) {
+    if (!n) return;
+    ss_rewrite_type(sc, n->node_type, n);
+    switch (n->type) {
+        case AST_STRUCT_LITERAL:
+        case AST_PTR_AS_STRUCT_CAST:
+        case AST_SIZEOF:
+        case AST_OFFSETOF:
+        case AST_PATTERN_STRUCT:
+        case AST_HEAP_NEW:
+            if (n->value) {
+                /* A qualified `gpu.T { ... }` / `as *gpu.T` carries the
+                 * qualifier on its parsed type, already resolved above. */
+                const char* q = NULL;
+                if (n->node_type) {
+                    Type* t = n->node_type;
+                    while (t && t->kind != TYPE_STRUCT) t = t->element_type;
+                    if (t && t->struct_name) {
+                        q = t->qualifier;
+                        if (q) {
+                            if (strcmp(n->value, t->struct_name) != 0 &&
+                                strcmp(ast_struct_source_name(t->struct_name), n->value) == 0) {
+                                free(n->value);
+                                n->value = strdup(t->struct_name);
+                                /* Resolved. A literal's qualifier was never
+                                 * held to the module's exports (the parser
+                                 * dropped it), and is not now; one that
+                                 * resolves to nothing stays for
+                                 * check_qualified_types to report. */
+                                if (n->type == AST_STRUCT_LITERAL) t->qualifier = NULL;
+                            }
+                            break;
+                        }
+                    }
+                }
+                ss_rename(&n->value, ss_resolve(sc, n->value, NULL, n->line, n->column));
+            }
+            break;
+        case AST_SUM_TYPE_DEF:
+            /* `type Shape = Circle | Rect`: each variant names a struct. */
+            for (int i = 0; i < n->child_count; i++) {
+                ASTNode* v = n->children[i];
+                if (v && v->type == AST_IDENTIFIER && v->value)
+                    ss_rename(&v->value, ss_resolve(sc, v->value, NULL, v->line, v->column));
+            }
+            return;
+        default:
+            break;
+    }
+    for (int i = 0; i < n->child_count; i++) ss_rewrite_node(sc, n->children[i]);
+}
+
+/* Resolve the struct names in `node`, code written in module `m` (NULL: the
+ * program). */
+static void ss_scope_node(ASTNode* node, AetherModule* m) {
+    if (!node || g_ss_count == 0) return;
+    SsScope sc = { m, m ? m->ast : g_ss_program,
+                   node->source_file ? node->source_file : (m ? m->file_path : NULL) };
+    ss_rewrite_node(&sc, node);
+}
+
+/* Is the field list of `a` (module `ma`) the same as `b`'s (module `mb`),
+ * each struct-typed field resolving to one type in both? */
+static int ss_fields_resolve_alike(const Type* ta, const Type* tb, AetherModule* ma,
+                                   AetherModule* mb) {
+    if (!ta || !tb) return ta == tb;
+    if (ta->kind == TYPE_STRUCT && ta->struct_name && tb->struct_name) {
+        SsScope sa = { ma, ma ? ma->ast : g_ss_program, NULL };
+        SsScope sb = { mb, mb ? mb->ast : g_ss_program, NULL };
+        g_ss_quiet = 1;   /* a real use of the name reports */
+        ScopedStruct* ra = ss_resolve(&sa, ta->struct_name, ta->qualifier, 0, 0);
+        ScopedStruct* rb = ss_resolve(&sb, tb->struct_name, tb->qualifier, 0, 0);
+        g_ss_quiet = 0;
+        if (strcmp(ra ? ra->cname : ta->struct_name, rb ? rb->cname : tb->struct_name) != 0)
+            return 0;
+    }
+    if (!ss_fields_resolve_alike(ta->element_type, tb->element_type, ma, mb)) return 0;
+    if (!ss_fields_resolve_alike(ta->return_type, tb->return_type, ma, mb)) return 0;
+    return 1;
+}
+
+static int ss_same_definition(const ScopedStruct* a, const ScopedStruct* b) {
+    if (!ast_defs_equal(a->decl, b->decl)) return 0;
+    for (int i = 0; i < a->decl->child_count; i++) {
+        ASTNode* fa = a->decl->children[i];
+        ASTNode* fb = b->decl->children[i];
+        if (fa && fb && !ss_fields_resolve_alike(fa->node_type, fb->node_type, a->mod, b->mod))
+            return 0;
+    }
+    return 1;
+}
+
+/* Every struct of the program and of each loaded module, with the name it
+ * is merged and emitted under. */
+static void ss_build_table(ASTNode* program) {
+    ss_reset();
+    ast_struct_names_reset();
+    g_ss_reported_count = 0;
+    g_ss_program = program;
+    for (int i = 0; i < program->child_count; i++) {
+        ASTNode* d = unwrap_export(program->children[i]);
+        if (ss_is_scoped_struct(d) && !d->is_imported && !ss_find(NULL, d->value))
+            ss_add(NULL, d, d->value);
+    }
+    if (!global_module_registry) return;
+    int first_module = g_ss_count;
+    for (int mi = 0; mi < global_module_registry->module_count; mi++) {
+        AetherModule* m = global_module_registry->modules[mi];
+        if (!m || !m->ast || m->ast == program || !m->name) continue;
+        const char* ns = module_namespace_of(m->name);
+        for (int j = 0; j < m->ast->child_count; j++) {
+            ASTNode* d = unwrap_export(m->ast->children[j]);
+            if (!ss_is_scoped_struct(d) || ss_find(m, d->value)) continue;
+            int keep_plain = g_ss_emit_lib &&
+                             (m->export_count == 0 || module_exports_symbol(m, d->value));
+            if (keep_plain) {
+                ss_add(m, d, d->value);
+            } else {
+                char cname[512];
+                snprintf(cname, sizeof(cname), "%s_%s", ns, d->value);
+                ss_add(m, d, cname);
+            }
+        }
+    }
+    /* Identical definitions are one type (#2129): a module's struct takes
+     * the name of an earlier identical one, the program's own first. Runs
+     * to a fixed point, since a struct's fields may name one that only
+     * becomes shared in an earlier round. */
+    for (int changed = 1, rounds = 0; changed && rounds < 8; rounds++) {
+        changed = 0;
+        for (int i = first_module; i < g_ss_count; i++) {
+            ScopedStruct* s = &g_ss[i];
+            for (int k = 0; k < i; k++) {
+                ScopedStruct* p = &g_ss[k];
+                if (p->mod == s->mod || strcmp(p->name, s->name) != 0) continue;
+                if (p->cname == s->cname) break;
+                if (ss_same_definition(p, s)) {
+                    s->cname = p->cname;
+                    s->shared = 1;
+                    changed = 1;
+                    break;
+                }
+            }
+        }
+    }
+    for (int i = first_module; i < g_ss_count; i++) {
+        ScopedStruct* s = &g_ss[i];
+        if (s->shared) continue;
+        ast_struct_name_register(s->cname, s->name,
+                                 aether_internf("%s.%s", module_namespace_of(s->mod->name), s->name));
+    }
+}
+
+/* The merged definition of module `m`'s struct `decl`: renamed to its
+ * merged name, the struct names its fields write resolved in `m`. NULL when
+ * the program already has it (the same struct reached twice, or one
+ * identical to an earlier definition). */
+static ASTNode* ss_clone_struct(ASTNode* program, ASTNode* decl, AetherModule* m) {
+    ScopedStruct* s = ss_find(m, decl->value);
+    const char* cname = s ? s->cname : decl->value;
+    ASTNode* existing = program_find_def(program, AST_STRUCT_DEFINITION, cname);
+    if (existing) {
+        /* The same struct reached again, or one identical to an earlier
+         * definition and so sharing its name. Two different plain names,
+         * which only `--emit=lib`'s exported structs keep, are still the
+         * clash #2129 reports. */
+        int plain = !s || strcmp(cname, decl->value) == 0;
+        if (plain && !(s && s->shared))
+            definition_already_merged(program, decl, "struct");
+        return NULL;
+    }
+    ASTNode* clone = clone_ast_node(decl);
+    clone->is_imported = 1;
+    if (strcmp(cname, decl->value) != 0) {
+        free(clone->source_name);
+        clone->source_name = strdup(decl->value);
+        free(clone->value);
+        clone->value = strdup(cname);
+    }
+    stamp_origin(clone, m);
+    ss_scope_node(clone, m);
+    return clone;
+}
+
 void module_merge_into_program(ASTNode* program) {
     if (!program || !global_module_registry) return;
+
+    /* Module-scoped structs: name each struct of each module, then resolve
+     * the struct names the program's own code writes, and those of the
+     * modules' bare externs, which stay in the registry rather than being
+     * cloned (their prototypes are emitted from there). */
+    ss_build_table(program);
+    for (int i = 0; i < program->child_count; i++) {
+        ASTNode* child = program->children[i];
+        if (!child || child->type == AST_IMPORT_STATEMENT || child->is_imported) continue;
+        ss_scope_node(child, NULL);
+    }
+    for (int mi = 0; mi < global_module_registry->module_count; mi++) {
+        AetherModule* m = global_module_registry->modules[mi];
+        if (!m || !m->ast || m->ast == program) continue;
+        for (int j = 0; j < m->ast->child_count; j++) {
+            ASTNode* d = unwrap_export(m->ast->children[j]);
+            if (d && d->type == AST_EXTERN_FUNCTION) ss_scope_node(d, m);
+        }
+    }
 
     /* #2209: the program's own code names its imports by alias or last
      * segment; point each at the imported module's namespace before any
@@ -3651,6 +4128,7 @@ void module_merge_into_program(ASTNode* program) {
                 // names from M's own `import X (a, b)` statements — see
                 // apply_inherited_selective_imports comment for why.
                 apply_inherited_selective_imports(clone, mod_ast);
+                ss_scope_node(clone, mod);
 
                 insert_child_at(program, clone, insert_idx++);
                 merge_pass_add(&pass, clone);
@@ -3690,6 +4168,7 @@ void module_merge_into_program(ASTNode* program) {
                 clone->value = strdup(prefixed);
                 /* Merged, not the program's own (#2632 reads the mark). */
                 stamp_origin(clone, mod);
+                ss_scope_node(clone, mod);
                 insert_child_at(program, clone, insert_idx++);
             } else if (decl->type == AST_CONST_DECLARATION && decl->value) {
                 /* Constants and module-level `var`s (#701) merge whatever the
@@ -3715,6 +4194,7 @@ void module_merge_into_program(ASTNode* program) {
                 rename_intra_module_refs(clone, ns, func_names, func_count,
                                          const_names, const_count, NULL, 0);
                 apply_inherited_selective_imports(clone, mod_ast);
+                ss_scope_node(clone, mod);
 
                 insert_child_at(program, clone, insert_idx++);
             } else if (decl->type == AST_FAULT_DEFINITION) {
@@ -3767,27 +4247,23 @@ void module_merge_into_program(ASTNode* program) {
                 }
             } else if (decl->type == AST_STRUCT_DEFINITION && decl->value) {
                 // Struct definitions from imported modules enter the
-                // consumer's program AST under their bare name (no
-                // `<ns>_` prefix). Closes the cross-`import` struct
-                // visibility gap that blocked the opaque-handle
-                // pattern: a module exposing `new_slot() -> ptr` whose
-                // body does `s = raw as *Slot` failed to typecheck once
-                // imported, because the consumer's symbol table lacked
-                // `Slot`.
+                // consumer's program AST. Closes the cross-`import` struct
+                // visibility gap that blocked the opaque-handle pattern: a
+                // module exposing `new_slot() -> ptr` whose body does
+                // `s = raw as *Slot` failed to typecheck once imported,
+                // because the consumer's symbol table lacked `Slot`.
                 //
                 // Bypasses the selective-import filter on purpose: a
                 // function body that casts to `*Slot` cannot type-check
                 // without the struct in scope, so even
                 // `import handle (new_slot)` must pull in `Slot`.
                 //
-                // Dedup by name. If the consumer already has a struct
-                // with the same name (its own, or an earlier merge) and
-                // the same fields, it is one type and we skip; a
-                // different definition is a clash, reported (#2129).
-                if (definition_already_merged(program, decl, "struct")) continue;
-
-                ASTNode* clone = clone_ast_node(decl);
-                clone->is_imported = 1;
+                // Module-scoped: merged as `<ns>_<Name>` (ss_build_table),
+                // so two modules' same-named structs are two types; the
+                // same struct reached twice is merged once, as is one
+                // identical to an earlier definition (#2129).
+                ASTNode* clone = ss_clone_struct(program, decl, mod);
+                if (!clone) continue;
                 insert_child_at(program, clone, insert_idx++);
             } else if (decl->type == AST_DISTINCT_TYPE_DEF && decl->value) {
                 // #908: `type X = distinct Base` from an imported module must
@@ -3804,6 +4280,7 @@ void module_merge_into_program(ASTNode* program) {
                 if (program_has_distinct(program, decl->value)) continue;
                 ASTNode* clone = clone_ast_node(decl);
                 clone->is_imported = 1;
+                ss_scope_node(clone, mod);
                 insert_child_at(program, clone, insert_idx++);
             } else if (decl->type == AST_CFN_TYPE_DEF && decl->value) {
                 // #2200: a `cfn Name(...) -> R` from an imported module enters
@@ -3815,6 +4292,7 @@ void module_merge_into_program(ASTNode* program) {
                 if (program_has_cfn(program, decl->value)) continue;
                 ASTNode* clone = clone_ast_node(decl);
                 clone->is_imported = 1;
+                ss_scope_node(clone, mod);
                 insert_child_at(program, clone, insert_idx++);
             } else if (decl->type == AST_BITSTRUCT_DEFINITION && decl->value) {
                 // A `bitstruct Name : <backing> { ... }` from an imported module
@@ -3854,6 +4332,7 @@ void module_merge_into_program(ASTNode* program) {
                 if (program_has_sum(program, decl->value)) continue;
                 ASTNode* clone = clone_ast_node(decl);
                 clone->is_imported = 1;
+                ss_scope_node(clone, mod);
                 insert_child_at(program, clone, insert_idx++);
             } else if (decl->type == AST_MESSAGE_DEFINITION && decl->value) {
                 // #1006: `message X { ... }` from an imported module enters the
@@ -3868,6 +4347,7 @@ void module_merge_into_program(ASTNode* program) {
                 if (definition_already_merged(program, decl, "message")) continue;
                 ASTNode* clone = clone_ast_node(decl);
                 clone->is_imported = 1;
+                ss_scope_node(clone, mod);
                 insert_child_at(program, clone, insert_idx++);
             } else if (decl->type == AST_ACTOR_DEFINITION && decl->value) {
                 // #1006: `actor X { ... }` from an imported module enters the
@@ -3889,6 +4369,7 @@ void module_merge_into_program(ASTNode* program) {
                 rename_intra_module_refs(clone, ns, func_names, func_count,
                                          const_names, const_count, NULL, 0);
                 apply_inherited_selective_imports(clone, mod_ast);
+                ss_scope_node(clone, mod);
                 insert_child_at(program, clone, insert_idx++);
             }
             // Skip AST_MAIN_FUNCTION, AST_IMPORT_STATEMENT, etc.
@@ -4053,6 +4534,7 @@ void module_merge_into_program(ASTNode* program) {
                     rename_intra_module_refs(clone, ns, func_names, func_count,
                                              const_names, const_count, NULL, 0);
                     apply_inherited_selective_imports(clone, mod_ast);
+                    ss_scope_node(clone, dep_mod);
 
                     insert_child_at(program, clone, insert_idx++);
                     merge_pass_add(&pass, clone);
@@ -4074,6 +4556,7 @@ void module_merge_into_program(ASTNode* program) {
                     rename_intra_module_refs(clone, ns, func_names, func_count,
                                              const_names, const_count, NULL, 0);
                     apply_inherited_selective_imports(clone, mod_ast);
+                    ss_scope_node(clone, dep_mod);
 
                     insert_child_at(program, clone, insert_idx++);
                 } else if (decl->type == AST_STRUCT_DEFINITION) {
@@ -4082,22 +4565,22 @@ void module_merge_into_program(ASTNode* program) {
                     // BFS. A merged function body that casts to `*T` needs
                     // T in scope regardless of which import edge brought
                     // the function in.
-                    if (definition_already_merged(program, decl, "struct")) continue;
-
-                    ASTNode* clone = clone_ast_node(decl);
-                    clone->is_imported = 1;
+                    ASTNode* clone = ss_clone_struct(program, decl, dep_mod);
+                    if (!clone) continue;
                     insert_child_at(program, clone, insert_idx++);
                 } else if (decl->type == AST_DISTINCT_TYPE_DEF && decl->value) {
                     // #908: transitive sibling of the distinct-def merge above.
                     if (program_has_distinct(program, decl->value)) continue;
                     ASTNode* clone = clone_ast_node(decl);
                     clone->is_imported = 1;
+                    ss_scope_node(clone, dep_mod);
                     insert_child_at(program, clone, insert_idx++);
                 } else if (decl->type == AST_CFN_TYPE_DEF && decl->value) {
                     // #2200: transitive sibling of the cfn-def merge above.
                     if (program_has_cfn(program, decl->value)) continue;
                     ASTNode* clone = clone_ast_node(decl);
                     clone->is_imported = 1;
+                    ss_scope_node(clone, dep_mod);
                     insert_child_at(program, clone, insert_idx++);
                 } else if (decl->type == AST_BITSTRUCT_DEFINITION && decl->value) {
                     // Transitive sibling of the bitstruct merge above: a
@@ -4118,6 +4601,7 @@ void module_merge_into_program(ASTNode* program) {
                     if (program_has_sum(program, decl->value)) continue;
                     ASTNode* clone = clone_ast_node(decl);
                     clone->is_imported = 1;
+                    ss_scope_node(clone, dep_mod);
                     insert_child_at(program, clone, insert_idx++);
                 }
             }
@@ -4258,6 +4742,7 @@ void module_merge_into_program(ASTNode* program) {
                     rename_intra_module_refs(clone, ons, of_names, of_count,
                                              oc_names, oc_count, NULL, 0);
                     apply_inherited_selective_imports(clone, origin->ast);
+                    ss_scope_node(clone, origin);
                     insert_child_at(program, clone, insert_idx++);
                     /* Every clause of a set written as several (#2643). */
                     continue;
@@ -4272,6 +4757,7 @@ void module_merge_into_program(ASTNode* program) {
                     rename_intra_module_refs(clone, ons, of_names, of_count,
                                              oc_names, oc_count, NULL, 0);
                     apply_inherited_selective_imports(clone, origin->ast);
+                    ss_scope_node(clone, origin);
                     insert_child_at(program, clone, insert_idx++);
                 }
                 break;

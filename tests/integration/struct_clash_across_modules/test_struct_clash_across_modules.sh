@@ -1,13 +1,19 @@
 #!/bin/sh
-# Two modules defining one struct name differently is a diagnosed clash
-# (#2129). Struct names are one namespace across modules and the merge
-# keeps the first definition it sees, so a program importing both used to
-# see the LOSER's own code fail — "Struct 'Quat' has no field 's'",
-# pointing into that module — or the C compiler. The clash is reported at
-# the second definition, naming both field lists and both files; two
-# identical definitions still share one type, silently.
+# Two modules defining one struct name (#2129), now that struct types are
+# module-scoped.
 #
-# Message and actor names are the same one namespace: a `message Ping {}`
+# Struct names used to be one namespace across modules and the merge kept
+# the first definition it saw, so a program importing two modules that each
+# define `Quat` saw the LOSER's own code fail, until #2129 made it a
+# diagnosed clash. Struct types are module-scoped now: each module's `Quat`
+# is its own type (`geo.Quat`, `phys.Quat`, merged as `geo_Quat` and
+# `phys_Quat`), so that program compiles and runs, as does one whose own
+# `Quat` differs from an imported one. Two identical definitions still share
+# one type. In an `--emit=lib` build a struct its module exports keeps its
+# plain C name (the library's ABI), so there the clash is still reported,
+# naming both field lists and both files.
+#
+# Message and actor names are still one namespace: a `message Ping {}`
 # in one module and a `message Ping { x: int }` in another failed in the C
 # compiler, attributed to the wrong module; two modules each defining
 # `actor Worker` merged silently, and the loser's `spawn(Worker())` built
@@ -57,42 +63,70 @@ main() {
     println("${geo.qx(a)} ${phys.ps(b)}")
 }
 AE
-rm -f "$tmp/out.c"
-if (cd "$tmp" && AETHER_HOME="$ROOT" "$AETHERC" clash.ae out.c >/dev/null 2>&1) || [ -s "$tmp/out.c" ]; then
-    echo "  [FAIL] struct_clash_across_modules: the clash did not stop compilation (aetherc exited 0 or emitted C)"
-    fail=1
-fi
-out="$(cd "$tmp" && AETHER_HOME="$ROOT" "$AETHERC" clash.ae out.c 2>&1)"
-if ! printf '%s' "$out" | grep -q "struct 'Quat' is defined differently in two modules: {v: Vec3, s: float} in lib/phys/module.ae and {x: float, y: float, z: float, w: float} in lib/geo/module.ae"; then
-    echo "  [FAIL] struct_clash_across_modules: differing definitions were not reported with both field lists and files"
+out="$(cd "$tmp" && AETHER_HOME="$ROOT" "$AE" run clash.ae 2>&1)"
+got="$(printf '%s\n' "$out" | tail -1)"
+if [ "$got" != "1 9" ]; then
+    echo "  [FAIL] struct_clash_across_modules: two modules' different 'Quat' structs did not build and run as two types (got '$got')"
     printf '%s\n' "$out" | grep -E "^error|-->" | head -4 | sed 's/^/        /'
     fail=1
 fi
 
-# Importing two modules whose clashing struct is used by neither is still
-# refused: the pruner drops the bodies, so nothing later would notice.
+# Importing both with neither used compiles too.
 cat > "$tmp/unused.ae" <<'AE'
 import geo
 import phys
 main() { println("x") }
 AE
-if (cd "$tmp" && AETHER_HOME="$ROOT" "$AETHERC" unused.ae out.c >/dev/null 2>&1); then
-    echo "  [FAIL] struct_clash_across_modules: a clash between unused imports compiled"
+if ! (cd "$tmp" && AETHER_HOME="$ROOT" "$AETHERC" unused.ae out.c >/dev/null 2>&1); then
+    echo "  [FAIL] struct_clash_across_modules: importing two modules with a same-named struct did not compile"
     fail=1
 fi
 
-# The program's own struct against an imported one.
+# The program's own struct beside an imported one of the same name: the
+# program's `Quat` is its own, geo's is geo.Quat.
 cat > "$tmp/own.ae" <<'AE'
 import geo
 struct Quat { a: int }
 main() {
     q = Quat { a: 1 }
-    println("${q.a}")
+    g = geo.make_q()
+    println("${q.a} ${geo.qx(g)}")
 }
 AE
-out="$(cd "$tmp" && AETHER_HOME="$ROOT" "$AETHERC" own.ae out.c 2>&1)"
-if ! printf '%s' "$out" | grep -q "struct 'Quat' is defined differently in two modules: {v: Vec3, s: float} in lib/geo/module.ae and {a: int} in own.ae\|struct 'Quat' is defined differently in two modules: {x: float, y: float, z: float, w: float} in lib/geo/module.ae and {a: int} in own.ae"; then
-    echo "  [FAIL] struct_clash_across_modules: a program struct clashing with an imported one was not reported"
+out="$(cd "$tmp" && AETHER_HOME="$ROOT" "$AE" run own.ae 2>&1)"
+got="$(printf '%s\n' "$out" | tail -1)"
+if [ "$got" != "1 1" ]; then
+    echo "  [FAIL] struct_clash_across_modules: a program struct beside a same-named imported one did not run (got '$got')"
+    printf '%s\n' "$out" | grep -E "^error|-->" | head -4 | sed 's/^/        /'
+    fail=1
+fi
+
+# --emit=lib keeps an exported struct's plain C name, so two exported
+# structs of one name in one library are still the clash, reported with
+# both field lists and files.
+mkdir -p "$tmp/lib/xgeo" "$tmp/lib/xphys"
+cat > "$tmp/lib/xgeo/module.ae" <<'AE'
+exports(Quat, make_q)
+struct Quat { x: float, y: float, z: float, w: float }
+make_q() -> Quat { return Quat { x: 1.0, y: 2.0, z: 3.0, w: 4.0 } }
+AE
+cat > "$tmp/lib/xphys/module.ae" <<'AE'
+exports(Quat, make_p)
+struct Quat { s: float }
+make_p() -> Quat { return Quat { s: 9.0 } }
+AE
+cat > "$tmp/libclash.ae" <<'AE'
+import xgeo
+import xphys
+gx() -> float { q = xgeo.make_q(); return q.x }
+ps() -> float { q = xphys.make_p(); return q.s }
+AE
+rm -f "$tmp/out.c"
+out="$(cd "$tmp" && AETHER_HOME="$ROOT" "$AETHERC" --emit=lib libclash.ae out.c 2>&1)"
+rc=$?
+if [ "$rc" -eq 0 ] || [ -s "$tmp/out.c" ] ||
+   ! printf '%s' "$out" | grep -q "struct 'Quat' is defined differently in two modules: {s: float} in lib/xphys/module.ae and {x: float, y: float, z: float, w: float} in lib/xgeo/module.ae. In an --emit=lib build a struct its module exports keeps its plain C name"; then
+    echo "  [FAIL] struct_clash_across_modules: two exported same-named structs in an --emit=lib build were not reported"
     printf '%s\n' "$out" | grep -E "^error|-->" | head -4 | sed 's/^/        /'
     fail=1
 fi
@@ -167,6 +201,6 @@ if ! printf '%s' "$out" | grep -q "actor 'Worker' is defined in two modules: lib
 fi
 
 if [ "$fail" = 0 ]; then
-    echo "  [PASS] struct_clash_across_modules: differing definitions of one struct, message or actor name are reported; identical ones share the type"
+    echo "  [PASS] struct_clash_across_modules: same-named structs of two modules are two types (a clash only between --emit=lib exports); identical ones share the type; messages and actors still clash"
 fi
 exit $fail

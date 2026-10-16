@@ -841,6 +841,13 @@ typedef struct {
   re-declared (an opaque or header-defined `extern` type, a union or
   bit-width field, a field of enum, sum or distinct type) is left out with
   a compile-time warning naming why.
+- A struct's C name. Struct types are module-scoped, and an executable
+  emits a module's struct as `<ns>_<Name>`. A library keeps the plain name
+  for a struct its module exports (all of them when the module has no
+  `exports` list), since a C host or header may spell it; only unexported
+  module structs are mangled there. So two modules of one library that
+  both export a struct of one name still clash, as every same-named pair
+  did before struct types were module-scoped.
 - `source_signatures[i]` is `functions[i]`'s signature as Aether source,
   with parameter names: `"(m: *Model, p: Vec3) -> void"`. An entry is `""`
   when an export has no source spelling.

@@ -1,0 +1,3 @@
+import abi
+vx(x: float) -> float { v = abi.make_v(x, 0.0); return v.x }
+both(a: int, b: int) -> int { return abi.scratch_sum(a, b) }

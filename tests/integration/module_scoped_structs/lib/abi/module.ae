@@ -1,0 +1,11 @@
+// For the --emit=lib check: an exported struct keeps its plain C name in a
+// library build, an unexported one is mangled.
+exports(Vec2, make_v, scratch_sum)
+struct Vec2 { x: float, y: float }
+struct Scratch { n: int }
+make_v(x: float, y: float) -> Vec2 { return Vec2 { x: x, y: y } }
+scratch_sum(a: int, b: int) -> int {
+    s = Scratch { n: a }
+    s.n = s.n + b
+    return s.n
+}

@@ -306,10 +306,10 @@ static int reject_unbound_binding(Parser* parser, ASTNode* decl, const char* kw)
 
 /* A struct's name in a type position, its first identifier `first` already
  * consumed: a bare `T`, or `mod.T` / `a.b.T` (#946), the module it comes
- * from written before it. Struct names are one namespace across modules,
- * so the struct is the last segment, the one a selective import would
- * bring in; the module path is kept on the type as its `qualifier`, for
- * check_qualified_types to hold to a module that has the type. Shared by
+ * from written before it. The struct is the last segment and the module
+ * path is kept on the type as its `qualifier`: the merge resolves it to
+ * that module's struct (struct types are module-scoped), and
+ * check_qualified_types holds it to a module that has the type. Shared by
  * `T`, `*T` and `as *T`. */
 static Type* parse_struct_type_name(Parser* parser, Token* first) {
     const char* type_name = first->value;
@@ -875,12 +875,10 @@ static Type* parse_type_unsuffixed(Parser* parser) {
                     /* #946: qualified type name `mod.Type` in a type
                      * position (param / return / var annotation / field).
                      * The qualified call surface already accepts `mod.fn()`
-                     * (#878); this is the type-position analogue. An
-                     * exported struct type is usable cross-module by its
-                     * BARE name (the merge brings it into the consumer's
-                     * struct namespace unprefixed), so the qualifier is a
-                     * disambiguator only — resolve `mod.Type` to the bare
-                     * `Type`. The leading identifier (`mod`) was already
+                     * (#878); this is the type-position analogue. The
+                     * type is `Type` with `mod` as its qualifier, which
+                     * the merge resolves to that module's struct (struct
+                     * types are module-scoped). The leading identifier (`mod`) was already
                      * consumed; consume the `.` and the type name. Allow a
                      * multi-segment path (`a.b.Type`) by looping. */
                     type = parse_struct_type_name(parser, token);
@@ -1663,13 +1661,11 @@ static ASTNode* parse_primary_expression_inner(Parser* parser) {
 
             /* Qualified struct literal: `module.Type { field: value }`.
              * Pattern: IDENTIFIER `.` IDENTIFIER `{` IDENTIFIER `:`
-             * (with the empty-struct variant `module.Type{}`). Parse
-             * the dotted name into the struct_name so the rest of the
-             * struct-literal lowering uses `Type` as the struct (which
-             * is what the rename pass produces — modules' struct
-             * definitions go into the program AST by their bare name,
-             * not module-prefixed). Filed in aether/new_aevg_asks.md
-             * ASK 2 from the AeVG port. */
+             * (with the empty-struct variant `module.Type{}`). The
+             * literal names `Type`, and keeps `module` on its parsed
+             * type for the merge to resolve to that module's struct.
+             * Filed in aether/new_aevg_asks.md ASK 2 from the AeVG
+             * port. */
             if (next && next->type == TOKEN_DOT && !parser->in_condition) {
                 Token* t_type = peek_ahead(parser, 2);
                 Token* t_brace = peek_ahead(parser, 3);
@@ -1687,8 +1683,6 @@ static ASTNode* parse_primary_expression_inner(Parser* parser) {
                         }
                     }
                     if (looks_qualified_struct) {
-                        /* Drop the module prefix — module structs land
-                         * in the program AST by their bare name. */
                         char* struct_name = strdup(t_type->value);
                         int s_line = token->line;
                         int s_col = token->column;
@@ -1698,6 +1692,15 @@ static ASTNode* parse_primary_expression_inner(Parser* parser) {
                         advance_token(parser);  /* { */
 
                         ASTNode* struct_lit = create_ast_node(AST_STRUCT_LITERAL, struct_name, s_line, s_col);
+                        /* The module stays on the literal's parsed type, as
+                         * on `as *mod.T`: the merge resolves `mod.T` to that
+                         * module's struct (struct types are module-scoped),
+                         * and check_qualified_types holds `mod` to a module
+                         * that has it. The checker sets the literal's own
+                         * type in its place. */
+                        struct_lit->node_type = create_type(TYPE_STRUCT);
+                        struct_lit->node_type->struct_name = strdup(struct_name);
+                        struct_lit->node_type->qualifier = aether_intern(token->value);
                         /* create_ast_node keeps its own copy, so this one is
                          * dead the moment it returns. Leaked once per struct
                          * literal in the program before this. */

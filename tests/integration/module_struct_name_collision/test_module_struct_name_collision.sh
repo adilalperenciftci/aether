@@ -102,7 +102,7 @@ if ! grep -q '#include "aether_arr_inline.h"' "$tmp/proj/out.c"; then
     echo "  [FAIL] module_struct_name_collision: the runtime header did not reach the TU, so the build proves nothing"
     fail=1
 fi
-if ! grep -q '} IntArray;' "$tmp/proj/out.c"; then
+if ! grep -q '} phys_IntArray;' "$tmp/proj/out.c"; then
     echo "  [FAIL] module_struct_name_collision: the module's own IntArray is not in the generated C"
     fail=1
 fi

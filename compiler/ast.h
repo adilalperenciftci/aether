@@ -513,10 +513,11 @@ typedef struct Type {
     // handler / the "must handle" check apply. 0 on a plain tuple.
     int is_result;
     // On a struct type spelled with its module, `mod.T` or `*mod.T`: the
-    // module path as written (`mod`, `a.b`), interned. The struct is still
-    // `struct_name` (struct names are one namespace across modules); the
-    // qualifier is only checked, by check_qualified_types, to name a module
-    // that has the type. NULL on a bare name.
+    // module path as written (`mod`, `a.b`), interned. Struct types are
+    // module-scoped: the merge resolves `mod.T` to that module's struct
+    // (renaming `struct_name` to its merged `<ns>_T`), and
+    // check_qualified_types holds the qualifier to a module that defines and
+    // exports the type. NULL on a bare name.
     const char* qualifier;
 } Type;
 
@@ -656,6 +657,14 @@ Type* create_result_type(Type* inner);    // #913 fallible `T!` -> (T, string)
 Type* create_function_type(int param_count, Type** param_types, Type* return_type);
 void free_type(Type* type);
 const char* type_to_string(Type* type);
+/* Module-scoped struct types: the merged name `<ns>_<Name>` of a module's
+ * struct, mapped back to the name it was written with (`Name`) and to its
+ * module-qualified spelling (`ns.Name`). Any other name maps to itself.
+ * Registered by the module merge; reset at the start of each merge. */
+void ast_struct_names_reset(void);
+void ast_struct_name_register(const char* cname, const char* source, const char* display);
+const char* ast_struct_source_name(const char* cname);
+const char* ast_struct_display_name(const char* cname);
 /* #2297: `type` as Aether source that parse_type reads back to the same
  * type. Returns 0 (and an empty buf) when it has no faithful spelling. */
 int type_to_aether_source(const Type* type, char* buf, size_t cap);

@@ -1,0 +1,32 @@
+// A GPU-side shader and the pass that runs it. `Shader` is gpu.Shader;
+// core has a Shader of its own, a different type with different fields.
+exports(Shader, Pass, compile, describe, pass_of, order_sum, stage_of)
+
+extern malloc(size: int) -> ptr
+
+struct Shader {
+    id: int
+    stage: string
+}
+
+// A field naming this module's own Shader, bare.
+struct Pass {
+    shader: *Shader
+    order: int
+}
+
+compile(id: int, stage: string) -> *Shader {
+    s = heap.new(Shader)
+    s.id = id
+    s.stage = stage
+    return s
+}
+
+describe(s: *Shader) -> string { return "gpu.Shader#${s.id}/${s.stage}" }
+
+pass_of(s: *Shader, order: int) -> Pass { return Pass { shader: s, order: order } }
+
+// Its own type, spelled with the module: `gpu.Pass` inside gpu.
+order_sum(a: gpu.Pass, b: Pass) -> int { return a.order + b.order }
+
+stage_of(p: *Pass) -> string { return p.shader.stage }

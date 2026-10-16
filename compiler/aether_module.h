@@ -81,6 +81,12 @@ const char* module_lib_package(void);
 int module_in_lib_package(const AetherModule* m);
 AetherModule* module_lib_package_module_of(const ASTNode* decl);
 
+/* Module-scoped struct types: each module's struct is merged and emitted
+ * as `<ns>_<Name>` (ast_struct_source_name maps it back). Called before the
+ * merge: in an `--emit=lib` build a struct its module exports keeps its
+ * plain C name. */
+void module_set_emit_lib(int on);
+
 // Import/export handling
 void module_add_export(AetherModule* module, const char* symbol);
 void module_add_import(AetherModule* module, const char* module_name);

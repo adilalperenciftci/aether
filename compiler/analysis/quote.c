@@ -79,7 +79,10 @@ const char* quote_type_name(Type* t) {
         case TYPE_I16X8: return "i16x8";
         case TYPE_F32X8: return "f32x8";
         case TYPE_I32X8: return "i32x8";
-        case TYPE_STRUCT: return t->struct_name ? t->struct_name : "struct";
+        /* The struct as written: a module's struct is emitted as
+         * `<ns>_<Name>`, and a tree spells it `Name`, so its hash and what
+         * a back end writes from it do not depend on the C name. */
+        case TYPE_STRUCT: return t->struct_name ? ast_struct_source_name(t->struct_name) : "struct";
         case TYPE_VOID: return "";
         case TYPE_UNKNOWN: return "";
         default: return type_to_string(t);
@@ -488,6 +491,7 @@ static QNode* lower_expr(Lower* L, ASTNode* e) {
             Type* st = e->node_type;
             const char* tname = (st && st->kind == TYPE_STRUCT && st->struct_name)
                                     ? st->struct_name : (e->value ? e->value : "");
+            tname = ast_struct_source_name(tname);
             QNode* n = qnode(QK_MAKE, tname, NULL, NULL, NULL, e->line);
             int ok = 1;
             for (int i = 0; i < e->child_count; i++) {

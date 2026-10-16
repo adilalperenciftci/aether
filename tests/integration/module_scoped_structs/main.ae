@@ -1,0 +1,52 @@
+// Two modules each define `struct Shader`; the program uses both. Before
+// struct types were module-scoped this was E0200 ("struct 'Shader' is
+// defined differently in two modules").
+import gpu
+import core
+import render
+import twin
+
+// The program's own Shader is a third type.
+struct Shader {
+    label: string
+}
+
+struct Frame {
+    program: *gpu.Shader
+    material: core.Shader
+    own: Shader
+}
+
+with_material(f: *Frame, m: core.Shader) {
+    f.material = m
+}
+
+main() {
+    // pointers to one, values of the other, from each module's functions
+    g = gpu.compile(7, "frag")
+    c = core.material("bloom", 3)
+    f = Frame { program: g, material: c, own: Shader { label: "mine" } }
+    println(gpu.describe(f.program))
+    println(core.describe(f.material))
+    println(f.own.label)
+
+    // qualified struct literals, and a typed declaration of each
+    let c2: core.Shader = core.Shader { name: "fxaa", uniforms: 1, weight: 2.0 }
+    *gpu.Shader g2 = gpu.compile(9, "vert")
+    with_material(&f, c2)
+    println("${core.describe(f.material)} ${core.weight_of(&f.material)}")
+
+    // a module's struct holding a pointer to its other struct
+    p = gpu.pass_of(g2, 2)
+    q = gpu.Pass { shader: g, order: 3 }
+    println("${gpu.order_sum(p, q)} ${gpu.stage_of(&p)}")
+
+    // across a third module that names both
+    b = render.bind(g2, c2)
+    println(render.summary(&b))
+    println(render.first_id(q))
+
+    // identical definitions in two modules are one type
+    t = twin.twin(4)
+    println(gpu.describe(&t))
+}

@@ -1,0 +1,7 @@
+import gpu
+import core
+
+main() {
+    m = Shader { name: "x", uniforms: 1, weight: 1.0 }
+    println(core.describe(m))
+}

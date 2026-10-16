@@ -319,6 +319,53 @@ static const char* spelled_list(const char* open, Type** items, int count,
     return r;
 }
 
+/* Module-scoped struct types: a module's struct is merged and emitted as
+ * `<ns>_<Name>`. The merge records each such name with the name the struct
+ * was written with and its module-qualified spelling, so what speaks the
+ * source language (diagnostics, a quote's tree, derived names, schema
+ * tables) can say `Shader` / `gpu.Shader` rather than `gpu_Shader`. */
+typedef struct { const char* cname; const char* source; const char* display; } StructNameEntry;
+static StructNameEntry* g_struct_names = NULL;
+static int g_struct_name_count = 0, g_struct_name_cap = 0;
+
+void ast_struct_names_reset(void) {
+    free(g_struct_names);
+    g_struct_names = NULL;
+    g_struct_name_count = g_struct_name_cap = 0;
+}
+
+void ast_struct_name_register(const char* cname, const char* source, const char* display) {
+    if (!cname || !source || strcmp(cname, source) == 0) return;
+    for (int i = 0; i < g_struct_name_count; i++)
+        if (strcmp(g_struct_names[i].cname, cname) == 0) return;
+    if (g_struct_name_count == g_struct_name_cap) {
+        g_struct_name_cap = g_struct_name_cap ? g_struct_name_cap * 2 : 32;
+        g_struct_names = aether_xrealloc(g_struct_names,
+                                         (size_t)g_struct_name_cap * sizeof(StructNameEntry));
+    }
+    StructNameEntry* e = &g_struct_names[g_struct_name_count++];
+    e->cname = aether_intern(cname);
+    e->source = aether_intern(source);
+    e->display = aether_intern(display ? display : source);
+}
+
+static const StructNameEntry* struct_name_entry(const char* cname) {
+    if (!cname) return NULL;
+    for (int i = 0; i < g_struct_name_count; i++)
+        if (strcmp(g_struct_names[i].cname, cname) == 0) return &g_struct_names[i];
+    return NULL;
+}
+
+const char* ast_struct_source_name(const char* cname) {
+    const StructNameEntry* e = struct_name_entry(cname);
+    return e ? e->source : cname;
+}
+
+const char* ast_struct_display_name(const char* cname) {
+    const StructNameEntry* e = struct_name_entry(cname);
+    return e ? e->display : cname;
+}
+
 const char* type_to_string(Type* type) {
     if (!type) return "UNKNOWN";
 
@@ -337,7 +384,9 @@ const char* type_to_string(Type* type) {
         case TYPE_PTR: return "ptr";
         case TYPE_MESSAGE: return "Message";
         case TYPE_STRUCT:
-            return aether_internf("struct %s", type->struct_name ? type->struct_name : "unnamed");
+            return aether_internf("struct %s", type->struct_name
+                                                   ? ast_struct_display_name(type->struct_name)
+                                                   : "unnamed");
         case TYPE_ARRAY:
             if (type->index_enum_name) {
                 // #1044 enum-indexed array `[E]T`

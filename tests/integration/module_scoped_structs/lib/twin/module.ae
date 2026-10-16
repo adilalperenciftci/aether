@@ -1,0 +1,8 @@
+// The same Shader as gpu's, field for field: identical definitions in two
+// modules are one type, as before.
+exports(Shader, twin)
+struct Shader {
+    id: int
+    stage: string
+}
+twin(id: int) -> Shader { return Shader { id: id, stage: "twin" } }

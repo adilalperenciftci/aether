@@ -1,0 +1,4 @@
+exports(Key, key)
+@derive(eq)
+struct Key { id: int }
+key(n: int) -> Key { return Key { id: n } }

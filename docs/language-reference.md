@@ -3124,11 +3124,45 @@ compile(id: int) -> *gpu.GpuShader {
 }
 ```
 
-Struct names are one namespace across the modules of a program, so
-`gpu.GpuShader` is the same struct `import gpu (GpuShader)` would bring in;
-the qualifier says where it comes from and is checked: `gpu` has to be a
-module the file imports, and it has to define and export the type (`module
-'gpu' has no type 'Missing'`, `'Scratch' is not exported from module 'gpu'`).
+`gpu.GpuShader` is the struct `import gpu (GpuShader)` would bring in. The
+qualifier is checked: `gpu` has to be a module the file imports, and it has
+to define and export the type (`module 'gpu' has no type 'Missing'`,
+`'Scratch' is not exported from module 'gpu'`).
+
+**Struct types belong to their module.** Two modules may each define a
+struct of one name, and a program may use both: `gpu.Shader` and
+`core.Shader` are different types, as `gpu.compile` and `core.compile` are
+different functions.
+
+```aether,fragment
+import gpu      // struct Shader { id: int, stage: string }
+import core     // struct Shader { name: string, uniforms: int }
+
+struct Frame {
+    program: *gpu.Shader
+    material: core.Shader
+}
+```
+
+A struct name resolves where it is written, the way a function's does:
+
+- `gpu.Shader`, `*gpu.Shader` and `gpu.Shader { ... }` name gpu's.
+- A bare `Shader` is the file's own struct of that name, if it has one; a
+  module's code names its own structs bare, as before.
+- Otherwise it is the one struct of that name among the modules the file
+  imports. When two imports define one, a selective import naming it
+  decides (`import gpu (Shader)`); without one the bare name is an error,
+  `struct 'Shader' is ambiguous here: the imported modules 'gpu' and 'core'
+  each define one`, and the qualified spelling is the fix.
+
+Diagnostics spell a module's struct qualified (`expected *core.Shader, got
+*gpu.Shader`). Two modules defining a struct identically, field for field,
+still share one type. In the C a module's struct is `<ns>_<Name>`
+(`gpu_Shader`), its module's namespace as its functions carry it; the
+program's own structs keep their names, and so, in an `--emit=lib` build,
+does a struct its module exports, since that name is part of the library's
+ABI (see [emit-lib.md](emit-lib.md)). Messages and actors are still one
+namespace across modules.
 
 ### Import with Alias
 
@@ -3558,7 +3592,9 @@ time. Fields are numbered in declaration order from 0, the index a
   reference to, as a compiled `x.label = ...` does.
 - **Modules.** The derive pass runs after imported modules are merged, so a
   module's own functions call `T_schema()` by its bare name, and an importer
-  calls it as `module.T_schema()` when the module lists it in `exports`.
+  calls it as `module.T_schema()` when the module lists it in `exports`. A
+  derived function is named after the struct as written, so of two modules'
+  same-named structs only one can derive (a second is an error naming both).
 
 `@derive(schema)` combines with `@derive(eq)` (`@derive(eq, schema)`) and
 with `@observable`. The table's C layout is `runtime/aether_schema.h`, for a
