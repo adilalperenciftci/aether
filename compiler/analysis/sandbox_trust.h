@@ -2,8 +2,11 @@
  *
  * Inside the block every sandbox-checked operation is held to `perms`. The
  * names after `perms` are exempt: a call to one of them, written in the
- * block, runs with the sandbox depth the `enforce` was entered at, i.e. with
- * the authority of the code that wrote the `enforce`. A name is a function
+ * block, runs with the sandbox levels in force when the `enforce` was
+ * entered, i.e. with the authority of the code that wrote the `enforce`. It
+ * does so by pushing a barrier that hides the levels from its site up, not by
+ * dropping the depth: an enforce inside the trusted function pushes above the
+ * barrier, so it cannot overwrite (and free) the block's grants. A name is a function
  * (`foo`) or an imported module (`db`, covering every `db.x(...)`).
  *
  * The pass runs at the start of type checking. It validates the names, marks
@@ -13,7 +16,7 @@
  * two-argument `enforce`. Codegen then routes each marked call through a
  * generated wrapper with the target's exact signature, so the call's
  * arguments are still evaluated inside the sandbox; only the trusted
- * function's own body runs at the lowered depth. */
+ * function's own body runs behind the barrier. */
 #ifndef AETHER_SANDBOX_TRUST_H
 #define AETHER_SANDBOX_TRUST_H
 

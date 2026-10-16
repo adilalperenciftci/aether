@@ -51,6 +51,45 @@ boom() -> int {
     return 0
 }
 
+// A trusted service with a fence of its own, as an injected service keeps
+// one: it enforces a sandbox granting only the secret, and reads both the
+// secret and a second variable its fence does not grant.
+// What fenced's block read (a closure's assignments stay in the closure).
+var g_seen = ""
+var g_other = ""
+
+fn env_or_hidden(name: string) -> string {
+    v = os.getenv(name)
+    if v == null { return "hidden" }
+    return v
+}
+
+fenced() -> string {
+    fence = sandbox.new("fence") {
+        grant_env("AE_TRUST_SECRET")
+    }
+    defer sandbox.free(fence)
+    g_seen = "unset"
+    g_other = "unset"
+    sandbox.enforce(fence) callback {
+        g_seen = env_or_hidden("AE_TRUST_SECRET")
+        g_other = env_or_hidden("AE_TRUST_OTHER")
+    }
+    return "${g_seen}/${g_other}"
+}
+
+// The same, panicking inside its fence.
+fenced_boom() -> string {
+    fence = sandbox.new("fence") {
+        grant_env("AE_TRUST_SECRET")
+    }
+    defer sandbox.free(fence)
+    sandbox.enforce(fence) callback {
+        panic("fenced boom")
+    }
+    return "unreached"
+}
+
 fn direct_read() -> string {
     v = os.getenv("AE_TRUST_SECRET")
     if v == null { return "hidden" }
@@ -61,6 +100,8 @@ main() {
     fw = spec.init()
     env_err = os.setenv("AE_TRUST_SECRET", "s3cret")
     if env_err != "" { println("cannot set the test variable: ${env_err}") }
+    other_err = os.setenv("AE_TRUST_OTHER", "0ther")
+    if other_err != "" { println("cannot set the test variable: ${other_err}") }
 
     spec.describe(fw, "sandbox.enforce trusted names") {
         spec.it("refuses the read when it is written in the block") callback {
@@ -133,6 +174,38 @@ main() {
             }
             spec.assert_str_eq(caught, "out", "the panic left the block")
             spec.assert_str_eq(direct_read(), "s3cret", "outside the block nothing is held to its grants")
+            sandbox.free(w)
+        }
+
+        // A trusted call drops the stack to its site's level; an enforce of
+        // the trusted function's own used to push into the level that hid,
+        // overwriting the block's grants with the function's, which it then
+        // freed: the next call was checked against freed memory and refused,
+        // and so was the block.
+        spec.it("keeps a trusted function's own enforce from taking the block's place, call after call") callback {
+            w = sandbox.new("nothing") {}
+            sandbox.enforce(w, fenced) callback {
+                spec.assert_str_eq(fenced(), "s3cret/hidden", "the first call: its fence grants the secret only")
+                spec.assert_str_eq(fenced(), "s3cret/hidden", "the second, as the first")
+                spec.assert_str_eq(fenced(), "s3cret/hidden", "the third, as the first")
+                spec.assert_str_eq(direct_read(), "hidden", "and the block is still held to its own grants")
+            }
+            sandbox.free(w)
+        }
+
+        spec.it("restores the block's grants when a trusted function panics inside its own enforce") callback {
+            w = sandbox.new("nothing") {}
+            sandbox.enforce(w, fenced_boom, fenced) callback {
+                caught = ""
+                try {
+                    _ = fenced_boom()
+                } catch e {
+                    caught = e
+                }
+                spec.assert_str_eq(caught, "fenced boom", "the panic reached the block's catch")
+                spec.assert_str_eq(direct_read(), "hidden", "the block is held to its own grants again")
+                spec.assert_str_eq(fenced(), "s3cret/hidden", "and a trusted call still runs as before")
+            }
             sandbox.free(w)
         }
 

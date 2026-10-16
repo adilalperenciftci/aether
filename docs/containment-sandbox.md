@@ -1241,10 +1241,13 @@ This keeps the property that made `doPrivileged` unnecessary. The
 exemption is granted by the container, in the container's code, at the
 point it hands the work over; contained code cannot claim it. Concretely:
 
-- A trusted call's authority is the depth the `enforce` was entered at.
-  Contained code that writes its own `enforce(everything, peek)` enters it
-  already sandboxed, so a call it trusts drops back no further than the
-  sandbox it is in.
+- A trusted call's authority is the sandbox levels in force when the
+  `enforce` was entered: it pushes a barrier hiding the levels from that
+  `enforce` up, so an `enforce` the trusted function writes itself stacks
+  above the barrier and cannot disturb the block's grants. Contained code
+  that writes its own `enforce(everything, peek)` enters it already
+  sandboxed, so a call it trusts drops back no further than the sandbox it
+  is in.
 - Trust is lexical. It covers calls written in the block (and nested
   blocks and closures written there), not a function called from
   elsewhere that happens to call `audit_log`, and the names cannot be used

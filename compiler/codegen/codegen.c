@@ -8437,15 +8437,31 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     if (has_sandbox) {
         /* Trusted names in `sandbox.enforce(perms, foo) { ... }`: each level
          * of the stack records which enforce site pushed it (0 for any other
-         * push). A trusted call drops the depth to the level its own site was
-         * entered at, so it runs with the authority of the code that wrote
-         * the enforce. Never higher: the depth only ever goes down, and a
-         * site found nowhere on the live stack (a block that escaped its
-         * enforce, a level a panic abandoned) lowers nothing. */
+         * push). A trusted call runs with the authority of the code that
+         * wrote the enforce: it pushes a barrier, a level whose skip_to
+         * names the level its own site was entered at, and the checker
+         * walking down from the top jumps from the barrier to below that
+         * level, so the levels between (the block's grants, and any
+         * enforce inside it) do not apply. Never higher: a site is looked
+         * for only among the levels in force (not ones an earlier barrier
+         * hides), and one found nowhere on the live stack (a block that
+         * escaped its enforce, a level a panic abandoned) pushes nothing.
+         *
+         * It used to drop the depth to that level instead, and put it back
+         * after. An enforce inside the trusted function then pushed into the
+         * level it had dropped, over the block's grants, and freed what it
+         * pushed when it ended: the block was checked against freed memory
+         * from then on (allowing or refusing whatever that held), and with
+         * the depth at 0 the inner enforce's end uninstalled the checker for
+         * the rest of the block. A barrier only ever adds a level above the
+         * ones it hides, so nothing pushed inside reaches them, and a panic
+         * unwound by a `try`, which puts the depth back, leaves them as
+         * they were. */
         print_line(gen, "static AETHER_TLS int _aether_sandbox_site_at[64];");
+        print_line(gen, "static AETHER_TLS int _aether_sandbox_skip_to[64];");
         print_line(gen, "static AETHER_TLS int _aether_sandbox_pending_site = 0;");
-        print_line(gen, "static inline void _aether_sandbox_push(void* ctx) { if (_aether_sandbox_depth < 64) { _aether_sandbox_site_at[_aether_sandbox_depth] = _aether_sandbox_pending_site; _aether_sandbox_stack[_aether_sandbox_depth++] = ctx; } _aether_sandbox_pending_site = 0; }");
-        print_line(gen, "static inline AETHER_MAYBE_UNUSED int _aether_sandbox_trust_enter(int site) { int saved = _aether_sandbox_depth; for (int l = _aether_sandbox_depth - 1; l >= 0; l--) { if (_aether_sandbox_site_at[l] == site) { _aether_sandbox_depth = l; break; } } return saved; }");
+        print_line(gen, "static inline void _aether_sandbox_push(void* ctx) { if (_aether_sandbox_depth < 64) { _aether_sandbox_site_at[_aether_sandbox_depth] = _aether_sandbox_pending_site; _aether_sandbox_skip_to[_aether_sandbox_depth] = -1; _aether_sandbox_stack[_aether_sandbox_depth++] = ctx; } _aether_sandbox_pending_site = 0; }");
+        print_line(gen, "static inline AETHER_MAYBE_UNUSED int _aether_sandbox_trust_enter(int site) { int saved = _aether_sandbox_depth; for (int l = _aether_sandbox_depth - 1; l >= 0; l--) { if (_aether_sandbox_skip_to[l] >= 0) { l = _aether_sandbox_skip_to[l]; continue; } if (_aether_sandbox_site_at[l] == site) { if (_aether_sandbox_depth < 64) { _aether_sandbox_site_at[_aether_sandbox_depth] = 0; _aether_sandbox_skip_to[_aether_sandbox_depth] = l; _aether_sandbox_stack[_aether_sandbox_depth++] = (void*)0; } break; } } return saved; }");
     } else {
         print_line(gen, "static inline void _aether_sandbox_push(void* ctx) { if (_aether_sandbox_depth < 64) _aether_sandbox_stack[_aether_sandbox_depth++] = ctx; }");
     }
@@ -8481,9 +8497,16 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
         print_line(gen, "static int _aether_sandbox_check_impl(const char* category, const char* resource) {");
         print_line(gen, "    if (_aether_sandbox_depth <= 0) return 1;");
         print_line(gen, "    int _allowed = 1;");
-        print_line(gen, "    for (int level = 0; level < _aether_sandbox_depth; level++) {");
+        /* From the top down, a trusted call's barrier jumping over the
+         * levels it hides. With none left in force the check is the one an
+         * unsandboxed program makes: allowed, and not audited. */
+        print_line(gen, "    int _in_force = 0;");
+        print_line(gen, "    for (int level = _aether_sandbox_depth - 1; level >= 0; level--) {");
+        print_line(gen, "        if (_aether_sandbox_skip_to[level] >= 0) { level = _aether_sandbox_skip_to[level]; continue; }");
+        print_line(gen, "        _in_force = 1;");
         print_line(gen, "        if (!_aether_perms_allow(_aether_sandbox_stack[level], category, resource)) { _allowed = 0; break; }");
         print_line(gen, "    }");
+        print_line(gen, "    if (!_in_force) return 1;");
         // Audit every in-process permission check — allowed and denied.
         // The sink is opt-in (AETHER_SANDBOX_AUDIT) and the ring buffer
         // is cheap, so this is unconditional. Note this runs only when a
