@@ -58,7 +58,14 @@ typedef struct QCapture {
  * its own (a GLSL function). Lowered once, after type checking. */
 typedef struct QHelper {
     ASTNode* def;          /* the function definition */
-    const char* name;      /* as declared after merging: a back end's name for it */
+    /* Its name in a tree (HELPER_CALL, quote.function_name) and in the
+     * hash: a module's helper is its module's full path, dots as
+     * underscores, then the function (`ae3d_shaders_sky_oct_decode`); the
+     * program's own is its name. The same in every program, unlike the
+     * merged C name, whose prefix depends on what else the program loads
+     * (#2209). */
+    const char* name;
+    const char* c_name;    /* as declared after merging: what a call names */
     const char* ret;       /* its return type, as the tree spells types */
     const char** param_names;
     const char** param_types;

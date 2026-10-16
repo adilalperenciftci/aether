@@ -11,6 +11,7 @@
 
 #include "quote.h"
 #include "typechecker.h"
+#include "../aether_module.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -131,6 +132,24 @@ typedef struct {
 /* ---- @quotable functions (version 2) ---- */
 
 
+/* A helper's name in a tree: the same in every program. A merged module's
+ * function is `<ns>_<fn>`, and its namespace `ns` is the module's last
+ * segment or, when another loaded module ends the same way, its full path
+ * (#2209), so the C name depends on the rest of the program. The tree names
+ * it by the full path always: `ae3d.shaders.sky`'s `oct_decode` is
+ * `ae3d_shaders_sky_oct_decode` whether or not `ae3d.sky` is loaded too. */
+static const char* helper_tree_name(ASTNode* def) {
+    if (!def->origin_module) return aether_intern(def->value);
+    const char* ns = module_namespace_of(def->origin_module);
+    size_t n = strlen(ns);
+    const char* fn = def->value;
+    if (strncmp(fn, ns, n) == 0 && fn[n] == '_' && fn[n + 1]) fn += n + 1;
+    char buf[512];
+    snprintf(buf, sizeof buf, "%s_%s", def->origin_module, fn);
+    for (char* c = buf; *c; c++) if (*c == '.') *c = '_';
+    return aether_intern(buf);
+}
+
 void quote_register_helper(ASTNode* def) {
     if (!def || !def->value) return;
     for (int i = 0; i < g_helper_count; i++)
@@ -138,7 +157,8 @@ void quote_register_helper(ASTNode* def) {
     QHelper* h = (QHelper*)calloc(1, sizeof(QHelper));
     if (!h) { fprintf(stderr, "aetherc: out of memory registering a @quotable function\n"); exit(1); }
     h->def = def;
-    h->name = aether_intern(def->value);
+    h->c_name = aether_intern(def->value);
+    h->name = helper_tree_name(def);
     if (g_helper_count == g_helper_cap) {
         g_helper_cap = g_helper_cap ? g_helper_cap * 2 : 8;
         g_helpers = (QHelper**)aether_xrealloc(g_helpers, (size_t)g_helper_cap * sizeof(QHelper*));
@@ -160,7 +180,7 @@ static QHelper* helper_named(const char* name) {
     snprintf(flat, sizeof flat, "%s", name);
     for (char* c = flat; *c; c++) if (*c == '.') *c = '_';
     for (int i = 0; i < g_helper_count; i++) {
-        if (strcmp(g_helpers[i]->name, name) == 0 || strcmp(g_helpers[i]->name, flat) == 0)
+        if (strcmp(g_helpers[i]->c_name, name) == 0 || strcmp(g_helpers[i]->c_name, flat) == 0)
             return g_helpers[i];
     }
     return NULL;

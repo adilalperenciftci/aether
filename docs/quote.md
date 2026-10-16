@@ -299,8 +299,15 @@ fxaa(screen: Texture, texel: vec2) -> *GpuShader {
   body, even one reached only through another helper, changes the hash of
   each quote that reaches it, and a cache keyed on the hash goes stale with
   the edit.
-- A helper in a module is named as the module's code names it once merged
-  (`shaderlib_luma`), which also keeps two modules' `luma`s apart.
+- A helper in a module is named by the module's full path, dots as
+  underscores, and the function: `shaderlib`'s `luma` is `shaderlib_luma`,
+  `ae3d.shaders.sky`'s `oct_decode` is `ae3d_shaders_sky_oct_decode`. That
+  keeps two modules' `luma`s apart, and it is the same in every program: the
+  function's C name is `sky_oct_decode` in a program that loads no other
+  module ending in `sky` and `ae3d_shaders_sky_oct_decode` in one that also
+  loads `ae3d.sky`, but its name in the tree, and so the quote's hash, does
+  not depend on what else the program imports. A helper in the program's own
+  file is named as declared (`luma`).
 
 ## What a quote may contain, and the errors
 
@@ -343,6 +350,16 @@ The subset grows by adding kinds. That is the only way the tree changes:
 up by one each time (it is 2: version 2 added `HELPER_CALL` and a tree's helpers). A tree records the version it was built with
 (`quote.version(t)`). A back end that meets a kind it does not know reports
 it with the node's line.
+
+A helper's name is data in the tree, not a kind, and does not move the
+version. Helpers in a module of more than one segment were once named by
+their C name, which changes with what the program imports; they are now
+named by the module's full path ([Helpers](#helpers-quotable-functions)).
+That renamed them (`sky_oct_decode` became `ae3d_shaders_sky_oct_decode`)
+and changed the hash of each quote reaching one, once, with no new kind and
+`quote.VERSION` still 2: a back end that writes the name out as an
+identifier and finds a `HELPER_CALL`'s helper with `quote.helper_named` is
+unchanged, and a cache keyed on the hash misses once and is rebuilt.
 
 ## ae3d's FXAA, written with `quote`
 
