@@ -568,7 +568,11 @@ The generated bindings wrap `AetherValue*` as a proxy class per target
 language, Python gets `AetherValue`, Java gets a `class AetherValue`,
 etc. Users see idiomatic API calls; the opaque pointer is hidden.
 
-See `tests/integration/emit_lib_swig/` for a worked Python round-trip.
+A `-> string` export returns a handle the caller gives back
+([Strings an export returns](#strings-an-export-returns)), so wrap it
+with a helper that copies the bytes out, calls the release, and returns
+the copy as `%newobject`. See `tests/integration/emit_lib_swig/` for a
+worked Python round-trip, that helper included.
 
 ## Per-call resource caps
 
