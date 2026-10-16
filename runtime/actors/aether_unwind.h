@@ -40,13 +40,13 @@ extern "C" {
 
 typedef void (*AetherUnwindFree)(const void* p);
 void aether_unwind_track(const void* p, AetherUnwindFree free_fn);
-void aether_unwind_track_if(const void* p, int owned, AetherUnwindFree free_fn);
-// Journal `p` for the frame `up` frames out from the innermost one: the
-// frame a local is declared in, stored into from inside `up` nested `try`
-// bodies, whose drains must leave it to the local. With no such frame the
-// entry is dropped.
-void aether_unwind_track_up(const void* p, int up, AetherUnwindFree free_fn);
 void aether_unwind_forget(const void* p);
+// #2923: journal a PLACE, the address of a slot that holds a value, with the
+// address of the flag that says the slot owns it (NULL: it owns whatever it
+// holds). A drain releases what the slot holds then and leaves it empty, so
+// the slot's own stores and releases never touch the journal. Forgotten by
+// the place's address (aether_unwind_forget) where the slot goes out of scope.
+void aether_unwind_track_place(const void* place, const void* owned, AetherUnwindFree release);
 
 // Frame lifecycle, called by aether_try_push / aether_try_pop /
 // aether_panic. enter increments the journal's own frame depth; exit
@@ -64,6 +64,14 @@ int aether_unwind_journal_size(void);
 // Release the journal's TLS backing storage. Call at thread exit
 // (scheduler threads); process exit reclaims the main thread's.
 void aether_unwind_thread_cleanup(void);
+
+// Tear down an object whose last reference was just released, and whose
+// teardown releases others (a closure environment). `obj` starts with its
+// teardown function, `void (*)(void*)`. A teardown called while another runs
+// on this thread is queued and runs once that one returns, so a chain of
+// any length (a closure holding the closure it replaced, 50,000 deep) is
+// torn down in constant stack.
+void aether_teardown(void* obj);
 
 #ifdef __cplusplus
 }

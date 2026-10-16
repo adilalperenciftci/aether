@@ -34,14 +34,15 @@ fail() {
 cat > "$tmp/typed.ae" <<'AE'
 import std.string
 
-// A pass-through closure returned from a `-> ptr` function.
-pass_through(f: fn, x: ptr) -> ptr {
+// A pass-through closure returned from a `-> ptr` function. The closure
+// captures `x`, so the function keeps it (#2926).
+pass_through(f: fn, x: @keep ptr) -> ptr {
     g = || { return call(f, x) }
     return call(g)
 }
 
 // A typed binding of a pass-through closure's result.
-via_binding(f: fn, x: ptr) -> ptr {
+via_binding(f: fn, x: @keep ptr) -> ptr {
     g = || { return call(f, x) }
     let r: ptr = call(g)
     return r
@@ -56,10 +57,13 @@ twice(f: fn, s: string) -> string {
 }
 
 main() {
-    p = "alpha"
-    id = | x: ptr | { return x }
+    p = string.keep("alpha")
+    // A closure's `ptr` parameter is borrowed, so it hands back the pointer
+    // it captured rather than the one it is given.
+    id = | x: ptr | { return p }
     println(pass_through(id, p) == p)
     println(via_binding(id, p) == p)
+    string.release_kept(p)
     up = | s: string | { return string.concat(s, "!") }
     println(twice(up, "hey"))
 }
@@ -79,13 +83,13 @@ fi
 # The issue's program: the closure leaves through `-> fn`, so nothing types
 # it. It is int as before, and the compiler says so at its return.
 cat > "$tmp/erased.ae" <<'AE'
-apply(f: fn, x: ptr) -> fn {
+apply(f: fn, x: @keep ptr) -> fn {
     return || { return call(f, x) }
 }
 main() {
-    g = apply(| x: ptr | { return x }, "alpha")
+    g = apply(| y: ptr | { return null }, null)
     let r: ptr = call(g)
-    println(r)
+    println(r == null)
 }
 AE
 "$AETHERC" "$tmp/erased.ae" "$tmp/erased.c" >"$tmp/erased.log" 2>&1 || fail "aetherc failed on the erased program" "$tmp/erased.log"

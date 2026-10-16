@@ -68,7 +68,7 @@ of the point.
 ```aether,run
 import std.decimal
 
-show(label: string, d: ptr) {
+show(label: string, d: @keep ptr) {
     println("${label} ${decimal.to_string(d)}")
     decimal.free(d)
 }

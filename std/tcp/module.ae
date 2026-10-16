@@ -95,8 +95,7 @@ write_n(sock: ptr, data: byte[]) -> {
 
 // Read up to max_bytes from a socket. Returns (data, "") on success,
 // ("", error) on transport failure or connection close. The caller owns
-// the data. This text wrapper is strlen-shaped; use read_n when the
-// payload may contain embedded NUL bytes.
+// the data, which keeps the length received; read_n also returns it.
 read(sock: ptr, max_bytes: int) -> {
     data = tcp_receive_raw(sock, max_bytes)
     if data == null {

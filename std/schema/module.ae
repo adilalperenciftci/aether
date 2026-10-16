@@ -226,7 +226,7 @@ fn new_field(name: string, ty: int) -> *Field {
 // The record a field() call in this block belongs to: record()'s own, an
 // OBJECT field's nested record, or the record each item of an array of
 // OBJECT is checked against. Null in a scalar field's block.
-fn record_of(ctx: ptr) -> *Schema {
+fn record_of(ctx: @keep ptr) -> *Schema {
     s = ctx as *Schema
     if s.kind == KIND_SCHEMA {
         return s
@@ -246,7 +246,7 @@ fn record_of(ctx: ptr) -> *Schema {
 // returns it so the trailing block's rule calls accumulate onto it. Inside
 // an OBJECT field's block it declares one of that object's fields; inside
 // an array(OBJECT) field's block, one of each item's.
-field(_ctx: ptr, name: string, ty: int) -> ptr {
+field(_ctx: @keep ptr, name: string, ty: int) -> ptr {
     s = record_of(_ctx)
     if s == null {
         parent = _ctx as *Field
@@ -270,7 +270,7 @@ items(_ctx: ptr) -> ptr {
 
 // -- rule builders (run inside a field() block; _ctx is the *Field) --
 
-fn add_rule(_ctx: ptr, kind: int, ival: long, ival2: long, sval: string, refine_fn: ptr) {
+fn add_rule(_ctx: ptr, kind: int, ival: long, ival2: long, sval: string, refine_fn: @keep ptr) {
     f = _ctx as *Field
     if f.kind != KIND_FIELD {
         panic("schema rules belong in a field's block, not directly in a record's")

@@ -8,6 +8,7 @@ typedef enum {
     AETHER_ERR_NONE = 0,
     AETHER_ERR_SYNTAX = 100,
     AETHER_ERR_TYPE_MISMATCH = 200,
+    AETHER_ERR_ARRAY_RESULT = 201,       // a function's result is a fixed-size array, alone or in a tuple (#2886)
     AETHER_ERR_UNDEFINED_VAR = 300,
     AETHER_ERR_UNDEFINED_FUNC = 301,
     AETHER_ERR_UNDEFINED_TYPE = 302,
@@ -25,6 +26,8 @@ typedef enum {
     AETHER_ERR_QUOTE_RECURSION = 804,    // a @quotable function reached again through @quotable calls
     AETHER_ERR_QUOTE_HELPER_READ = 805,  // a @quotable function reading a variable outside it
     AETHER_ERR_DANGLING_VIEW = 900,      // a slice of a function's own storage outlives the function (#2785)
+    AETHER_ERR_FREES_BORROWED = 901,     // a function frees a `string` parameter it only borrows (#2924)
+    AETHER_ERR_KEEPS_BORROWED = 902,     // a function keeps a `ptr` parameter not declared `@keep` (#2926)
     // Warnings (W-series)
     AETHER_WARN_UNUSED_VAR = 1001,
     AETHER_WARN_UNREACHABLE = 1002,

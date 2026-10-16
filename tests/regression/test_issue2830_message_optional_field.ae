@@ -1,0 +1,48 @@
+// Issue #2830: a message with an optional field did not compile in C. The
+// message struct's field was not given its optional type, and the message
+// literal did not wrap the value into the optional, as a struct literal
+// does. The field owns its string as a `string` field does: the send takes
+// it and the message releases it after the receive arm.
+
+import std.string
+
+extern exit(code: int)
+
+message Note {
+    text: string?
+}
+
+actor Inbox {
+    state seen = 0
+    receive {
+        Note(text) -> {
+            seen = seen + 1
+            if seen == 1 && (text ?? "-") != "hi" {
+                println("FAIL: the first note")
+                exit(1)
+            }
+            if seen == 2 && (text ?? "-") != "-" {
+                println("FAIL: an empty note")
+                exit(1)
+            }
+            if seen == 3 {
+                if (text ?? "-") != "built 3" {
+                    println("FAIL: a note built at run time")
+                    exit(1)
+                }
+                println("OK")
+                exit(0)
+            }
+        }
+    }
+}
+
+main() {
+    a = spawn(Inbox())
+    a ! Note { text: "hi" }
+    a ! Note { text: none }
+    a ! Note { text: string.concat("built ", string.from_int(3)) }
+    sleep(5000)
+    println("FAIL: the notes were not all received")
+    exit(1)
+}

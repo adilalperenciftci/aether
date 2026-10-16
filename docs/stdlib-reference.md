@@ -54,7 +54,7 @@ header comment is the authoritative description.
 | `std.lzf` | One-shot LZF compression and decompression. | 10 | [guide](../std/lzf/README.md) · [source](../std/lzf/module.ae) |
 | `std.map` | Hash map, re-exported from `std.collections`, with readable key snapshots. | 18 | [guide](../std/map/README.md) · [source](../std/map/module.ae) |
 | `std.math` | Arithmetic, trigonometry, rounding and floating-point helpers. | 45 | [full section](#math-stdmath) |
-| `std.mem` | Byte-level reads and writes over caller-allocated raw pointers. | 178 | [guide](../std/mem/README.md) · [source](../std/mem/module.ae) |
+| `std.mem` | Byte-level reads and writes over caller-allocated raw pointers. | 180 | [guide](../std/mem/README.md) · [source](../std/mem/module.ae) |
 | `std.message` | ICU MessageFormat formatting and message catalogues. | 8 | [guide](../std/message/README.md) · [source](../std/message/module.ae) |
 | `std.msgpack` | MessagePack serialisation and deserialisation. | 39 | [guide](../std/msgpack/README.md) · [source](../std/msgpack/module.ae) |
 | `std.mutation` | Text-based mutation-testing driver for `std.spec` suites. | 1 | [guide](../std/mutation/README.md) · [source](../std/mutation/module.ae) |
@@ -62,11 +62,11 @@ header comment is the authoritative description.
 | `std.net` | TCP sockets and the HTTP client and server externs. | 69 | [guide](../std/net/README.md) · [source](../std/net/module.ae) |
 | `std.number` | Locale-aware number, percent and currency formatting. | 15 | [guide](../std/number/README.md) · [source](../std/number/module.ae) |
 | `std.observe` | Observable struct models: run closures after every field store on a `struct T @observable` value. | 17 | [guide](../std/observe/README.md) · [source](../std/observe/module.ae) |
-| `std.os` | Shell and process execution: run, capture, spawn, pipes, wait. | 85 | [full section](#os-stdos) |
+| `std.os` | Shell and process execution: run, capture, spawn, pipes, wait. | 87 | [full section](#os-stdos) |
 | `std.path` | Lexical path manipulation, with no filesystem access. | 19 | [guide](../std/path/README.md) · [source](../std/path/module.ae) |
 | `std.plural` | CLDR plural-rule categories. | 2 | [guide](../std/plural/README.md) · [source](../std/plural/module.ae) |
 | `std.pqueue` | Priority queue over (priority, item) pairs, backed by a binary heap. | 18 | [guide](../std/pqueue/README.md) · [source](../std/pqueue/module.ae) |
-| `std.reflect` | Read a struct's field table from `@derive(schema)`: names, types, offsets, sizes, attributes. | 68 | [guide](../std/reflect/README.md) · [source](../std/reflect/module.ae) |
+| `std.reflect` | Read a struct's field table from `@derive(schema)`: names, types, offsets, sizes, attributes. | 66 | [guide](../std/reflect/README.md) · [source](../std/reflect/module.ae) |
 | `std.quote` | The tree a `quote` trailing block hands to a function: typed nodes, captures read through their cells, and a printer. | 66 | [guide](../std/quote/README.md) · [source](../std/quote/module.ae) |
 | `std.regex` | Perl-compatible regular expressions, backed by PCRE2. | 45 | [guide](../std/regex/README.md) · [source](../std/regex/module.ae) |
 | `std.resp` | RESP codec (Redis Serialization Protocol): RESP3-native, RESP2-compatible, resumable decoder. | 42 | [guide](../std/resp/README.md) · [source](../std/resp/module.ae) |
@@ -79,7 +79,7 @@ header comment is the authoritative description.
 | `std.spec` | BDD test framework: describe and it, hooks, assertions, structured reports. | 46 | [guide](../std/spec/README.md) · [source](../std/spec/module.ae) |
 | `std.strarr` | Growable string array whose backing is a `string[]`, for sorting runtime-built lists. | 17 | [guide](../std/strarr/README.md) · [source](../std/strarr/module.ae) |
 | `std.strbuilder` | Amortised-O(1) string building. | 35 | [guide](../std/strbuilder/README.md) · [source](../std/strbuilder/module.ae) |
-| `std.string` | Managed strings: construction, search, slicing, case, split and join. | 99 | [full section](#strings-stdstring) |
+| `std.string` | Managed strings: construction, search, slicing, case, split and join. | 101 | [full section](#strings-stdstring) |
 | `std.sync` | Atomic 64-bit integer cell (load, store, add, sub, compare-and-swap) for refcounts and lock-free reclamation. | 14 | [guide](../std/sync/README.md) · [source](../std/sync/module.ae) |
 | `std.tar` | Streaming POSIX ustar archives: reader and writer. | 24 | [full section](#posix-ustar-archives-stdtar) |
 | `std.tcp` | TCP sockets, re-exported from `std.net`. | 35 | [guide](../std/tcp/README.md) · [source](../std/tcp/module.ae) |
@@ -979,6 +979,8 @@ Raw out-parameter externs are preserved as `string_to_int_raw`, `string_to_long_
 - `string.retain(str)` - Increment reference count
 - `string.release(str)` - Decrement reference count (frees when zero)
 - `string.free(str)` - Alias for `release`
+- `string.keep(s)` → `ptr` - A reference of its own to `s`, as a `ptr`, for a `@keep ptr` parameter or a `ptr` field that holds the string past the call (E0902)
+- `string.release_kept(p)` - Gives back what `string.keep` took
 
 ### Building strings incrementally (avoiding quadratic cost)
 
@@ -1988,7 +1990,7 @@ Coming from Java's `java.security`, Python's `cryptography`, or Go's `crypto/*`,
 - **URL-safe Base64 (RFC 4648 §5).** Standard alphabet only; URL-safe (`-` / `_` instead of `+` / `/`) is a separate variant the wrappers don't expose.
 - **Constant-time comparison.** Equality checks via `string.equals` are not constant-time; callers comparing hashes for security-sensitive cases need their own constant-time helper.
 
-Raw externs: `cryptography_sha1_hex_raw`, `cryptography_sha256_hex_raw` return allocated `char*` or NULL on failure. The Go-style wrappers translate the NULL into `("", "openssl unavailable")`.
+Raw externs: `cryptography_sha1_hex_raw`, `cryptography_sha256_hex_raw` return a fresh counted string the caller owns, or NULL on failure. The Go-style wrappers translate the NULL into `("", "openssl unavailable")`.
 
 Public-key crypto, symmetric ciphers, and key derivation live under `std.cryptography` as explicitly-imported sub-modules (e.g. `std.cryptography.rsa`, `std.cryptography.x25519`, `std.cryptography.aes`), pure-Aether ports, no OpenSSL. The top-level `std.cryptography` module stays focused on the hash/HMAC/Base64/CSPRNG primitives with a single obvious shape.
 
@@ -3041,9 +3043,10 @@ spawned child exited 5
 
 **Functions:**
 - `os.run_capture(prog, argv, env)` → `(string, int, string)` - Run to completion: stdout, exit status, error
-- `os.run_full(prog, argv, env, stdin_data)` → `(string, string, int, string)` - Feed `stdin_data` to the child's stdin (binary-safe) and capture stdout and stderr separately: stdout, stderr, exit status, error. No pipe can fill and deadlock, whatever the sizes. `""` gives the child an already-closed stdin
+- `os.run_full(prog, argv, env, stdin_data)` → `(string, string, int, string)` - Feed `stdin_data` to the child's stdin (binary-safe) and capture stdout and stderr separately: stdout, stderr, exit status, error. No pipe can fill and deadlock, whatever the sizes. `""` gives the child an already-closed stdin. Safe to call from several threads at once: each child inherits only its own pipe ends, so a capture never waits for another thread's child (#2917)
 - `os_run(prog, argv, env)` → `int` - Run to completion with this process's stdio; the exit status, or -1 when it could not start
 - `os.spawn_proc(prog, argv, env)` → `(int, string)` - Start without waiting. The first value is a reap token: the pid on POSIX, a handle-table key on Windows, so pass it back to the calls below rather than treating it as a pid. On Windows a token is never a pid: once reaped, `os.kill` and `os.wait_pid_timeout` report it gone rather than reaching whatever process has that number
+- `os.spawn_proc_to(prog, argv, env, out_path)` → `(int, string)` - Start without waiting, the child's stdout and stderr written to the file `out_path` (created or truncated) and its stdin empty. The token works with every call below. The child runs in a Job Object of its own on Windows and leads a process group of its own on POSIX, so `os.kill(token, sig)` ends its whole tree, the compilers a build tool started included. The file is the only handle it inherits. What the child leaves running when it exits on its own is not ended. A child that crashes ends at once, with its exception code on Windows (its job keeps the error-reporting dialog, and the seconds Windows spends reporting, away whatever error mode the parent has) and 128 plus the signal on POSIX. With `os.wait_any_timeout` this is a parallel runner in one thread: start N, wait for the first, kill whichever passes its deadline, read each one's file
 - `os.wait(token)` → `(int, string)` - Wait for one child: exit status, error
 - `os.wait_any(tokens)` → `(int, int, string)` - Wait for whichever of a list finishes first: its token, exit status, error. Box each token into the list with `mem.long_to_ptr(token)`
 - `os.wait_any_timeout(tokens, secs)` → `(int, int, int, string)` - The same with a deadline: token, status, `timed_out`, error. On a timeout the children keep running; `secs <= 0` waits indefinitely

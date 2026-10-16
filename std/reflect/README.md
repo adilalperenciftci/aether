@@ -85,11 +85,9 @@ a replicator can keep a changed-field bitmask and look each bit up here.
   (`KIND_PTR` to `*T`), or is an array or slice of one names that struct's
   table: `field_schema(s, i)`. The nested struct need not derive schema
   itself. A struct that points at itself names its own table.
-- A `KIND_STRING` field's `field_heap_offset` is the offset of the `int` that
-  records whether the struct owns the string (1: a heap string it frees on
-  reassignment and when destroyed). A generic writer that stores a heap
-  string frees the old one when that flag was 1, then sets it to 1; one that
-  stores a string it does not hand over sets it to 0.
+- A `KIND_STRING` field owns a reference to the string it holds, as every
+  string place does. A generic writer releases the string the field holds
+  (`string.release`) and stores one it took a reference to (`string.retain`).
 
 ## Attributes
 
@@ -126,7 +124,6 @@ nothing is allocated or freed.
 | `field_len(s, i)` | `int` | a fixed array's length, else `0` |
 | `field_offset(s, i)` | `int` | byte offset; `-1` out of range |
 | `field_size(s, i)` | `int` | bytes |
-| `field_heap_offset(s, i)` | `int` | a string's ownership flag; `-1` otherwise |
 | `field_schema(s, i)` | `ptr` | the nested struct's table, or `null` |
 | `attr_count(s, i)` | `int` | |
 | `attr_index(s, i, attr_name)` | `int` | `-1` when absent |

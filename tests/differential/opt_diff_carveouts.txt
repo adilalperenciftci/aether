@@ -33,3 +33,4 @@ tests/regression/test_stdlib_binary_safety_batch.ae prints its own pid
 # Thread interleaving.
 tests/syntax/test_coop_many_actors.ae ten actors print in the order the scheduler runs them
 tests/syntax/test_coop_self_send.ae two self-sending actors print their totals in either order
+tests/integration/os_run_full_threads/test_os_run_full_threads.ae prints how many short captures ran beside the long children, which depends on how the threads interleave

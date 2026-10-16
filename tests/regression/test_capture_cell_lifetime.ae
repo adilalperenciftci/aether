@@ -9,7 +9,7 @@
 // tuple destructure, which the walk never looked at, and fs.walk owns and
 // frees the closure before it returns — so the cell had no holder left and
 // nobody to free it. fs.find_ext leaked one cell per call for the same
-// reason, and shipped behind a cap in tests/leaks_known.txt.
+// reason.
 //
 // The cell is reference-counted now: the scope releases at exit, each env
 // retains when built and releases in its destructor, and the last one

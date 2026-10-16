@@ -61,6 +61,16 @@ AetherString* string_empty(void);
 // Reference counting — safe to call with plain char* (no-op)
 void string_retain(const void* str);
 void string_release(const void* str);
+
+/* Mark a counted string as reachable from other threads before it is
+ * stored where they can read it (a module var, a closure environment):
+ * from then on its retain and release are atomic (#2919). A pinned string,
+ * a plain char* and NULL are left alone. Call it from the thread that holds
+ * the string, before the store publishes it. */
+void aether_string_publish(const void* str);
+/* A reference for a place other threads can reach (a container element, a
+ * closure environment): the string is published, then retained. */
+void string_retain_shared(const void* str);
 void string_free(const void* str);  // Alias for release
 
 // String operations — accept both AetherString* and plain char*.
@@ -187,6 +197,10 @@ const char* string_to_cstr(const void* str);
 // and signals intent to reviewers. See docs/aether-string-abi.md for
 // the full ABI contract.
 const char* aether_string_data(const void* s);
+
+/* R4: what an `@heap` extern returns, as a string the caller owns: a counted
+ * or pinned string as it is, a plain malloc'd buffer copied (and freed). */
+const char* aether_string_adopt(const char* s);
 size_t      aether_string_length(const void* s);
 
 /* #2521: the formatter behind string interpolation and print/println.
@@ -238,6 +252,10 @@ AetherString* string_adopt_caps_buffer(char* buf, size_t length, size_t cap);
 char* aether_string_mutable_data(void* s);
 
 const char* aether_string_capture_owned(const char* s);
+/* std.string's keep and release_kept (#2926): a reference for a `@keep ptr`
+ * slot, as capture_owned gives a closure environment one. */
+void* aether_string_keep(const void* s);
+void aether_string_release_kept(void* p);
 void        aether_string_release_captured(const char* s);
 
 AetherString* string_from_int(int value);

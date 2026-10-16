@@ -1,0 +1,67 @@
+// Regression: a module `var` owns its string as a local does (R3). A store
+// releases the value it replaces, and `string.free(g)` gives the reference
+// back and leaves `g` empty, so the store after it finds nothing to release.
+//
+// std.truetype kept its error this way (free the old message, then store a
+// new one); when stores into a module var began releasing what they replace,
+// the free left the old pointer in place and the store released it a second
+// time, a corrupt heap that failed the truetype test one run in three.
+//
+// The heap check runs where the count is exact (mem.heap_in_use_exact):
+// after a warm-up, some window of the same work grows by exactly 0
+// (mem.steady_growth). Strings are built from parameters, because
+// string.concat of two literals folds to a literal.
+
+import std.mem
+import std.string
+
+extern exit(code: int)
+
+var g_error = ""
+var g_owned = false
+var g_plain = ""
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+set_error(reason: string, detail: string) {
+    if g_owned { string.free(g_error) }
+    g_error = string.concat(reason, detail)
+    g_owned = true
+}
+
+round(w: string, i: int) {
+    set_error(w, ": first")
+    set_error(w, ": second")
+    check(g_error == "${w}: second", "the stored error reads back (${g_error})")
+    g_plain = string.concat(w, "#")
+    release(g_plain)
+    g_plain = "${w}${i}"
+    check(g_plain == "${w}${i}", "a store after a release reads back")
+    string.release(g_plain)
+    check(g_plain == null, "a freed module var is empty")
+}
+
+main() {
+    w = string.concat("err", "or")
+    i = 0
+    while i < 50 {
+        round(w, i)
+        i = i + 1
+    }
+    if mem.heap_in_use_exact() {
+        grown = mem.steady_growth(|| {
+                k = 0
+                while k < 200 {
+                    round(w, k)
+                    k = k + 1
+                }
+            }, 5)
+        check(grown == 0, "a window of 200 rounds grew the heap by ${grown} bytes in every run")
+    }
+    println("=== test_module_var_string_free_then_store passed ===")
+}

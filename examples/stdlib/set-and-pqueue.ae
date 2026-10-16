@@ -62,13 +62,13 @@ main() {
     empty = pqueue.is_empty(jobs)
     print("\n  queue empty: ${empty}\n")
 
-    // The queue holds item pointers without owning them, so anything
-    // heap allocated is still yours to release after popping.
+    // The queue holds item pointers without owning them: a string goes in
+    // as a reference of its own (string.keep) and is given back once popped.
     owned = pqueue.new()
     defer pqueue.free(owned)
     label = string.concat("build-", "artifact")
-    pqueue.push(owned, 1, label)
+    pqueue.push(owned, 1, string.keep(label))
     popped = pqueue.pop(owned)
-    string.free(popped)
+    string.release_kept(popped)
     print("  caller-owned item released after pop\n")
 }

@@ -176,7 +176,7 @@ labels_reach(k: ptr, want: string) -> bool {
     return false
 }
 
-deliver(k: ptr, which: int, peer: ptr) {
+deliver(k: ptr, which: int, peer: @keep ptr) {
     if which == 0 { k ! Local { w: "w" } }
     if which == 1 { k ! Rebind { w: "w" } }
     if which == 2 { k ! Keep { w: "w" } }
@@ -193,7 +193,7 @@ deliver(k: ptr, which: int, peer: ptr) {
     if which == 10 { k ! Guarded { w: "w" } }
 }
 
-measure(k: ptr, which: int, peer: ptr) -> long {
+measure(k: @keep ptr, which: int, peer: @keep ptr) -> long {
     return mem.steady_growth(|| {
             j = 0
             while j < 10 {

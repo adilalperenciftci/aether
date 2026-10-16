@@ -1,5 +1,6 @@
 /* #2586: the C side of fnptr_string_c_side. */
 #include <string.h>
+const char* aether_string_data(const void* s);
 
 /* A C function returning a string C owns (a literal, as strerror returns
  * a static buffer). */
@@ -46,12 +47,16 @@ const char* c_label(int n) {
     return n > 0 ? "label-pos" : "label-neg";
 }
 
-/* Calls a function pointer it was handed and reads its result as C text. */
+/* Calls a function pointer it was handed and reads its result as C text.
+ * An Aether function returns its string as Aether holds it, a counted or
+ * pinned AetherString, so C reads the characters through
+ * aether_string_data (docs/c-interop.md), which also passes a plain
+ * char* through. */
 int c_len_of(void* fn) {
     const char* (*f)(int) = (const char* (*)(int))fn;
-    return (int)strlen(f(0));
+    return (int)strlen(aether_string_data(f(0)));
 }
 
 int c_len_typed(const char* (*f)(int)) {
-    return (int)strlen(f(0));
+    return (int)strlen(aether_string_data(f(0)));
 }

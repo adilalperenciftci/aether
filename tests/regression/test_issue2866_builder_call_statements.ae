@@ -3,7 +3,7 @@
 // call with the config, assigned raw. So a string it returned was never
 // tracked (bound to a local, or replaced, or thrown away, it leaked), a
 // fresh string passed to it was never freed (#2853), a string field passed
-// to one that frees or keeps its parameter was not handed over (#2851), and
+// to one that keeps its parameter was not handed over (#2851), and
 // stored into a struct field it ran unconfigured, its block dropped
 // (#2855). The block and the arguments now run ahead of the statement, and
 // the statement is emitted as for any call, the call made with the filled
@@ -47,7 +47,7 @@ builder label(text: string): string {
 }
 
 builder eatb(text: string, n: int): int {
-    string.free(text)
+    check(string.length(text) > 2, "the field reaches the builder")
     if _builder != null { map_free(_builder) }
     return n
 }

@@ -3,22 +3,15 @@
 // closure that is still alive.
 //
 // `g` is a cell (the closure `reset` writes it). A call lends the cell's
-// closure with a reference held for the call alone (arg_drain_select),
-// since the call may rebind the cell, and the cell gives its own reference
-// back when it is rebound. `keep_run(g, reset)` runs `reset`, so when it
-// returns, the closure it hands back lives on the lent reference only, and
-// that is released before the call's value is used. #2763 took such a call
-// for the cell's own value and stopped pinning the cell's closures, so
-// `h = keep_run(g, reset)` retained a freed environment: a crash or a wrong
-// count. A cell's scan judges a hand-back as it did before: the cell pins
-// what it holds there.
+// closure with a reference held for the call alone, since the call may
+// rebind the cell, and the cell gives its own reference back when it is
+// rebound. `keep_run(g, reset)` runs `reset`, then returns the closure it
+// was given, which hands its caller a reference of its own (R3): `h` stays
+// alive after the cell let go of it, and nothing is pinned (#2788).
 //
 // After each call the freed memory is reused by closures of the same shape
-// (`burn`), so a dead `h` reads another count or crashes.
-//
-// The pin is one reference never given back for each closure the cell
-// held (#2788): 5 blocks a call, 600 over the run, which
-// tests/leaks_known.txt allows the macOS leaks gate.
+// (`burn`), so a dead `h` reads another count or crashes; the macOS leaks
+// gate checks that every closure is released.
 
 import std.string
 

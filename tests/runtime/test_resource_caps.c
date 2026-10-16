@@ -10,6 +10,7 @@
 #include "../../std/bytes/aether_bytes.h"
 #include "../../std/os/aether_os.h"
 #include "../../std/fs/aether_fs.h"
+#include "../../std/string/aether_string.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -152,12 +153,13 @@ TEST_CATEGORY(caps_os_getenv_denied_past_cap, TEST_CATEGORY_STDLIB) {
     setenv("AETHER_CAP_TEST_VAR",
            "0123456789012345678901234567890123456789012345678901234567890123", 1);
 
-    /* Uncapped: the value is returned (and is cap-allocated). The
-     * caller-owned contract is libc free / fail-safe upward drift,
-     * exactly as in production. */
+    /* Uncapped: the value is returned as a counted string, allocated
+     * through the cap, and releasing it returns the counter to baseline. */
+    uint64_t before = aether_caps_used_bytes();
     char* ok = os_getenv("AETHER_CAP_TEST_VAR");
     ASSERT_TRUE(ok != NULL);
-    free(ok);
+    string_release(ok);
+    ASSERT_EQ(before, aether_caps_used_bytes());
 
     /* Cap below the value length: the os_getenv allocation is refused. */
     caps_reset();

@@ -110,7 +110,7 @@ struct Node {
 }
 
 // A node with up to two children; the caller fills the rest.
-new_node(kind: int, a: ptr, b: ptr) -> ptr {
+new_node(kind: int, a: @keep ptr, b: @keep ptr) -> ptr {
     n = heap.new(Node)
     n.kind = kind
     n.op = 0

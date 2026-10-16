@@ -48,7 +48,7 @@ int io_stdout_write_raw(const char* data, int length);
 // Error reporting off the current errno. Both must be called
 // immediately after the failing libc call. perror prints
 // "name: <message>\n" to stderr; errno_message returns the message
-// as a heap string the caller owns (NULL only on OOM).
+// as a counted string the caller owns (NULL only on OOM).
 void  io_perror_raw(const char* name);
 char* io_errno_message_raw(void);
 

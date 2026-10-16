@@ -1,10 +1,11 @@
-// Regression (#2798, #2843): a string field that a call frees or keeps,
+// Regression (#2798, #2843): a string field that a call reads or keeps,
 // evaluated ahead of the call (ahead of a construct that runs statements
 // later in the argument list, or by the ordering wrapper ahead of a later
-// argument that writes the field), is handed over to its temporary as it
-// is read: the temporary owns the string from then on, the call takes it,
-// and an exit taken before the call (an `or` handler's `return`, a
-// propagating `!`) frees it.
+// argument that writes the field), stays valid until the call: a store into
+// the field in between does not free what the call is handed, a keeping call
+// takes a reference of its own, and an exit taken before the call (an `or`
+// handler's `return`, a propagating `!`) leaks nothing. A function that freed
+// the field it was passed was part of this test; that is refused now (E0901).
 //
 // Handed over at the call instead (76a810f8), the field kept its tracker
 // until then, so a store into it in between (an `or` handler's, a later
@@ -52,7 +53,7 @@ plus(a: int, b: int) -> int {
 }
 
 eat(s: string, k: int) -> int {
-    string.free(s)
+    check(string.length(s) > 2, "the field reaches the call")
     return k
 }
 
@@ -195,7 +196,7 @@ main() {
     shape(w, 1, 500, "", "an or handler's return")
     shape(w, 2, 600, "", "an or handler's return, a keeping call")
     shape(w, 3, 100, "", "a propagating !")
-    shape(w, 4, 100, "", "a freeing call that runs")
+    shape(w, 4, 100, "", "a reading call that runs")
     shape(w, 5, 200, "wv#d", "a keeping call that runs")
     shape(w, 6, 100, "", "the handler stores into the field")
     shape(w, 7, 100, "wv#oldk", "the handler stores into the field, a keeping call")

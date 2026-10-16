@@ -100,6 +100,9 @@ create_vk_instance(kind: int, with_surface: int) -> ptr {
     ci.sType = vk.STRUCTURE_TYPE_INSTANCE_CREATE_INFO
     ci.pApplicationInfo = app as ptr
     names = calloc(3, 8)
+    // The C array reads the extension name until vkCreateInstance returns,
+    // so the string is held here for that long.
+    surface = vk.surface_extension(kind)
     n = 0
     exts, ne, _re = vk.vkEnumerateInstanceExtensionProperties_all(null)
     if lists_extension(exts, ne, vk.KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME) == 1 {
@@ -110,8 +113,8 @@ create_vk_instance(kind: int, with_surface: int) -> ptr {
     if with_surface == 1 && lists_extension(exts, ne, vk.KHR_SURFACE_EXTENSION_NAME) == 1 {
         (names as string[])[n] = vk.KHR_SURFACE_EXTENSION_NAME
         n = n + 1
-        if lists_extension(exts, ne, vk.surface_extension(kind)) == 1 {
-            (names as string[])[n] = vk.surface_extension(kind)
+        if lists_extension(exts, ne, surface) == 1 {
+            (names as string[])[n] = surface
             n = n + 1
         }
     }

@@ -708,23 +708,23 @@ main() {
 }
 ```
 
-…the codegen emits `probe_consume(aether_string_data(raw), raw_len)` rather than passing `raw` straight through. `aether_string_data` dispatches on the AetherString magic header: returns `s->data` for wrapped strings, the bare pointer for plain `char*` values (string literals). Idempotent and safe on either shape.
+…the codegen emits `probe_consume(aether_string_data(raw), raw_len)` rather than passing `raw` straight through. Every Aether string value is an AetherString, a literal included (a static, pinned one), and `aether_string_data` returns its `s->data`; given a plain `char*` (a string C returned) it returns the pointer as it is. A literal argument is written as its C literal, so a printf-family format keeps its `-Wformat` check. A string in a C-variadic `...` is passed the same way, whether the variadic function is an extern (`printf(fmt, s)`) or an Aether function declared `f(fixed..., ...)`, whose `va_arg` or forwarded `va_list` reads it as C does.
 
 This means C shim authors don't have to remember to unwrap on the receiving side; the C function can `memcpy(...)` or `strlen(...)` on the `const char*` parameter and get the payload bytes regardless of what the Aether caller passed.
 
 **Stdlib exception:** C functions whose names start with `string_` or `aether_string_` are treated as "string-aware" and are *not* unwrapped at the call site. They use `str_data` / `str_len` internally and need the AetherString header to recover the stored length on binary content. If a downstream user-defined function happens to match those name prefixes, rename it (or expose it via a different namespace).
 
-**Sophisticated-consumer escape hatch.** A C function that *wants* the AetherString header pointer (e.g. so it can call `aether_string_data` / `aether_string_length` itself to recover the stored length on binary content) should declare its parameter as `ptr` rather than `string`:
+**A string passed for a `ptr` is its characters too.** A C function's `ptr` parameter that receives a `string` gets the payload, as a `string` parameter does: C reads a `void*` as bytes. A C function that *wants* the AetherString itself (so it can call `aether_string_data` / `aether_string_length` to recover the stored length of binary content, or keep the string as Aether holds it) declares the parameter `@aether`, on a `ptr` as on a `string` (next section):
 
 ```aether,fragment
 // Naive consumer, receives payload bytes; codegen auto-unwraps:
 extern memcpy_into_buf(content: string, len: int) -> int
 
-// Sophisticated consumer, receives raw pointer; consumer dispatches:
-extern parse_with_explicit_length(s: ptr) -> int
+// Sophisticated consumer, receives the AetherString; consumer dispatches:
+extern parse_with_explicit_length(s: @aether ptr) -> int
 ```
 
-The C function then takes `const void*` (or `const AetherString*`) and goes through the helpers manually. This is the escape hatch for any FFI shim that needs binary-safe length reads, declaring `s: string` would auto-unwrap and `aether_string_length` would fall back to `strlen`, truncating at the first NUL.
+The C function then takes `const void*` (or `const AetherString*`) and goes through the helpers. std's containers take their elements this way (`list_add_raw(list: ptr, item: @aether ptr)`, `map_put_raw`'s value), so a stored string keeps its length and its count. A string literal passed for a `ptr` is its static C characters wherever it goes, an Aether function's `ptr` parameter included, unless the parameter is `@aether`.
 
 ### Aether-emitted receivers, `name: @aether string`
 
@@ -763,17 +763,18 @@ extern do_thing(aether_msg: @aether string,
 - The receiver is hand-written C that takes `const char*`. Use bare `s: string` the auto-unwrap is doing the right thing.
 - The receiver works on text content with no NULs. `strlen()` and the stored length agree, so either annotation works; bare is simpler.
 
-The `@aether` annotation is a sibling to the `: ptr` escape hatch above. Both opt out of the auto-unwrap; they differ in what the receiving side sees:
+What the receiving side sees for a `string` argument:
 
 | Param declaration | Call site emits | Receiver sees |
 |---|---|---|
 | `s: string` | `foo(aether_string_data(s))` | unwrapped `const char*` (strlen-bounded) |
 | `s: @aether string` | `foo(s)` | AetherString pointer with header, dispatches via `str_len` |
-| `s: ptr` | `foo(s)` | `void*` caller dispatches manually with `aether_string_data` / `aether_string_length` |
+| `s: ptr` | `foo((void*)aether_string_data(s))` | unwrapped characters as a `void*` |
+| `s: @aether ptr` | `foo((void*)(s))` | AetherString pointer as a `void*`; the receiver dispatches with `aether_string_data` / `aether_string_length` |
 
 A call through a typed function pointer (`f = p as fn(uint32, string) -> int`, a `cb: fn(string) -> int` parameter, or a `fn(...)`-typed struct field) unwraps a `string` argument the same way: `f(7, name)` emits `f(7, aether_string_data(name))`. A `ptr` parameter in the pointer's type passes the value as it is, for a callee that wants the header.
 
-A `string` a typed function pointer returns is the caller's, and the caller frees it once done (#2586). A pointer may point at an Aether function or at C, so the call decides at run time: an Aether function that hands over owned strings marks the one it returns, and the call takes a marked result as it is and copies any other (a literal or borrowed string an Aether function returned, or a C function's string). C's string is never freed, however its pointer arrived: cast from a raw `ptr` (`dl.symbol_raw(h, "strerror") as fn(int) -> string`), a raw `ptr` passed for a typed parameter, an extern's result, a field of a struct laid over C memory or filled by C, an extern named as a value, or a pointer C passes to an Aether callback. An Aether function handed to C (by name, `as ptr`, through a typed local or parameter) is the function itself, so C reads its string as text. An owned `string` argument to such a call is freed after the call at each argument position where no Aether function used as a pointer keeps what it receives (see [memory-management.md](memory-management.md#closure-arguments-are-borrowed)); a C function behind the pointer takes it borrowed, as an extern's `string` parameter does.
+A `string` a typed function pointer returns is the caller's, and the caller frees it once done (#2586). A pointer may point at an Aether function or at C, so the call decides at run time: an Aether function that hands over owned strings marks the one it returns, and the call takes a marked result as it is and copies any other (a literal or borrowed string an Aether function returned, or a C function's string). C's string is never freed, however its pointer arrived: cast from a raw `ptr` (`dl.symbol_raw(h, "strerror") as fn(int) -> string`), a raw `ptr` passed for a typed parameter, an extern's result, a field of a struct laid over C memory or filled by C, an extern named as a value, or a pointer C passes to an Aether callback. An Aether function handed to C (by name, `as ptr`, through a typed local or parameter) is the function itself, so the string C gets back is an AetherString, as from any Aether function: C reads its text through `aether_string_data`. An owned `string` argument to such a call is freed after the call at each argument position where no Aether function used as a pointer keeps what it receives (see [memory-management.md](memory-management.md#closure-arguments-are-borrowed)); a C function behind the pointer takes it borrowed, as an extern's `string` parameter does.
 
 The regression range was v0.97.0 → v0.98.0 (the blanket auto-unwrap landed in v0.98.0); the `@aether` annotation restores the v0.97.0 behaviour for Aether-to-Aether crossings without re-breaking the v0.98.0 fix for naive C externs.
 

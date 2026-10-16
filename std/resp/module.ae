@@ -441,7 +441,7 @@ fn parse_one(data: byte[], pos: int) -> (ptr, int, int) {
 }
 
 // Adopt an already-owned bytes buffer as v's payload (transfers ownership).
-fn adopt_payload(v: *RespValue, b: ptr, len: int) {
+fn adopt_payload(v: *RespValue, b: @keep ptr, len: int) {
     v.str_bytes = b
     v.str_len = len
 }

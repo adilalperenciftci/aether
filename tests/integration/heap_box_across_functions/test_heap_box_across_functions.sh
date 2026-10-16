@@ -3,13 +3,12 @@
 #
 # Two bugs met here. `return heap.new(T)` outside main lost the node's pointer
 # type and fell back to calloc(1, sizeof(void)) -- a ONE BYTE allocation for
-# the whole struct, so field writes ran past the end of it. And box provenance
-# was per-function, so `b = build_box()` lost it and `b.name = ...` became a
-# bare store that never set the _heap_<field> tracker, leaving the box's
-# destructor believing it owned nothing.
+# the whole struct, so field writes ran past the end of it. And `b.name = ...`
+# on a box another function made was a bare store, so heap.free released
+# nothing and the string leaked.
 #
-# The generated C is asserted directly because the leak only reproduces under a
-# leak checker, which is not available on every platform this suite runs on.
+# The allocation size is asserted in the generated C; the ownership by
+# prog.ae's own heap growth, where the heap count is exact.
 
 set -e
 
@@ -54,10 +53,6 @@ if ! grep -q "sizeof(Box)" out.c; then
     echo "  [FAIL] heap_box_across_functions: no sizeof(Box) allocation emitted"
     exit 1
 fi
-if ! grep -q "_heap_name = 1" out.c; then
-    echo "  [FAIL] heap_box_across_functions: field assignment did not claim ownership"
-    exit 1
-fi
 
 if ! "$AE" build main.ae -o prog > build.log 2>&1; then
     echo "  [FAIL] heap_box_across_functions: build failed"
@@ -68,6 +63,28 @@ out="$(./prog)"
 if [ "$out" != "hello" ]; then
     echo "  [FAIL] heap_box_across_functions: got '$out', want 'hello'"
     exit 1
+fi
+if ! "$AE" build "$SCRIPT_DIR/prog.ae" -o grow > grow.log 2>&1; then
+    echo "  [FAIL] heap_box_across_functions: prog.ae did not build"
+    cat grow.log
+    exit 1
+fi
+if ! ./grow > grow.txt 2>&1; then
+    echo "  [FAIL] heap_box_across_functions: the box's string leaked or was freed twice"
+    sed 's/^/        /' grow.txt | head -4
+    exit 1
+fi
+
+# Freed exactly once, where a leak checker is available: leaks(1) on macOS,
+# where the heap count is not exact and the program cannot measure itself.
+if [ "$(uname -s)" = Darwin ] && command -v leaks >/dev/null 2>&1; then
+    if ! MallocStackLogging=1 leaks --atExit -- ./grow > ./grow.leaks 2>&1; then
+        if grep -qE "[1-9][0-9]* leak(s)? for" ./grow.leaks; then
+            echo "  [FAIL] heap_box_across_functions: a string leaked"
+            grep -E "leaks? for" ./grow.leaks | sed 's/^/        /' | head -3
+            exit 1
+        fi
+    fi
 fi
 
 echo "  [PASS] heap_box_across_functions: the box is sized right and owns its string field"

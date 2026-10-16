@@ -36,7 +36,7 @@ struct Outer { holder: Holder }
 ints_size(a: *Ints) -> int { return a.capacity * 4 }
 buffer_size(b: *Buffer) -> int { return b.capacity * b.stride }
 raw_size(b: ptr) -> int { return (b as *Buffer).capacity }
-new_buffer(block: ptr) -> *Buffer {
+new_buffer(block: @keep ptr) -> *Buffer {
     b = block as *Buffer
     b.capacity = 5
     b.stride = 2
@@ -57,7 +57,7 @@ expect_error() {  # file, fixed string, label
 # module function taking another struct's pointer.
 cat > "$tmp/field.ae" <<'AE'
 import lib
-holder_of(block: ptr) -> *Holder { return block as *Holder }
+holder_of(block: @keep ptr) -> *Holder { return block as *Holder }
 main() {
     h = Holder { ints: Ints { data: null, capacity: 3 }, buffer: Buffer { data: null, capacity: 2, stride: 8 } }
     p = holder_of((&h) as ptr)
@@ -112,7 +112,7 @@ extern free(p: ptr)
 @c_struct Hdr {
     a: uint32 @0
 }
-holder_of(block: ptr) -> *Holder { return block as *Holder }
+holder_of(block: @keep ptr) -> *Holder { return block as *Holder }
 takes_buffer(b: *Buffer) -> int { return lib.buffer_size(b) }
 takes_raw(b: ptr) -> int { return lib.raw_size(b) }
 by_value(x: lib.Buffer) -> int { return lib.buffer_size(&x) + takes_buffer(&x) }

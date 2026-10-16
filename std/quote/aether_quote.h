@@ -31,7 +31,7 @@ void  aether_quote_param(void* tree, const char* name, const char* type);
  * is the type the cell holds as the typed getters know it ("float",
  * "f32x4", "int", ...); `type` is the Aether type as written ("vec2"). */
 void  aether_quote_capture(void* tree, const char* name, const char* type,
-                           const char* base, void* cell, void (*release)(void*));
+                           const char* base, void* cell, void (*release)(const void*));
 /* Version 2: a @quotable function a quote calls (HELPER_CALL). A helper is a
  * tree of its own, made with aether_quote_helper (its name as a back end
  * declares it, and its return type) and given its params and body as a

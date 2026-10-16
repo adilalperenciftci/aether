@@ -1,0 +1,19 @@
+// Ownership micro-benchmark (#2925): string stores into a struct field, one field from another.
+// The budget compares a build with the base of the change, the two binaries
+// run interleaved, the median of 11 runs each, on an otherwise idle machine.
+
+import std.string
+struct Rec { name: string, tag: string, n: int }
+main() {
+    a = string.concat("alpha", "beta")
+    r = Rec { name: a, tag: "t", n: 0 }
+    total = 0
+    i = 0
+    while i < 5000000 {
+        r.name = a
+        r.tag = r.name
+        total = total + string.length(r.tag)
+        i = i + 1
+    }
+    println(total)
+}

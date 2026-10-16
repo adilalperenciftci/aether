@@ -140,8 +140,9 @@ void aether_pure_tls_client_set_error(const char* msg);
 /* The Windows trust anchors both HTTPS clients use (#2675), for
  * std.cryptography.tls13_client: every certificate of the ROOT system store as
  * PEM text, and the first bundle file of the list std.http.client's OpenSSL
- * path looks for. Each a fresh malloc the caller frees, "" when there is
- * nothing (always, off Windows), NULL only when out of memory. */
+ * path looks for. Each a fresh counted AetherString (cast to char*) the
+ * caller releases with string_release, "" when there is nothing (always, off
+ * Windows), NULL only when out of memory. */
 char* aether_tls_windows_store_pem(void);
 char* aether_tls_windows_bundle(void);
 long long http_client_rx_buffer_allocs_raw(void);

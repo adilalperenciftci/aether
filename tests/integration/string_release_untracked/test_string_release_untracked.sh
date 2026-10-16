@@ -1,6 +1,7 @@
 #!/bin/sh
-# string.release on a tracked local holding an untracked value still releases
-# it (#1977).
+# string.release on a string local releases what it holds, whichever way the
+# value came (#1977): a local owns its value (R2), so the release has no
+# condition.
 #
 # Asserted on the GENERATED C rather than by leak-counting a running binary:
 # the defect is that one branch was never emitted, so the emitted code is the
@@ -24,22 +25,13 @@ if ! "$AETHERC" "$SCRIPT_DIR/probe.ae" "$TMP/out.c" > "$TMP/gen.log" 2>&1; then
     exit 1
 fi
 
-# The guarded free must have a fallback. Without it the release is a no-op
-# whenever the flag is 0, which is the whole bug. The release is a
-# conditional expression (#2765): `(_heap_prev ? (free...) : release)`.
-if ! grep -q ": (void)string_release(prev))" "$TMP/out.c"; then
-    echo "  [FAIL] string_release_untracked: the release has no fallback for an"
-    echo "         untracked value, so it does nothing when _heap_prev is 0"
-    grep -n "_heap_prev" "$TMP/out.c" | sed 's/^/        /' | head -5
+# A string local owns what it holds (R2), so the release is unconditional and
+# leaves the local empty: what it held is released whichever way it came.
+if ! grep -q "(aether_heap_str_free((void\*)prev), prev = NULL, (void)0)" "$TMP/out.c"; then
+    echo "  [FAIL] string_release_untracked: the release of the local is not unconditional"
+    grep -n "prev" "$TMP/out.c" | sed 's/^/        /' | head -5
     exit 1
 fi
-
-# And it must still free through the flag when the value IS tracked, so the
-# fix did not simply replace one path with the other.
-grep -q "(_heap_prev ? (aether_heap_str_free" "$TMP/out.c" || {
-    echo "  [FAIL] string_release_untracked: the tracked-value free was lost"
-    exit 1
-}
 
 # The program still builds and runs.
 if [ -x "$AE" ]; then

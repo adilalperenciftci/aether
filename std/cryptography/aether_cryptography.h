@@ -24,9 +24,9 @@
 #ifndef AETHER_CRYPTOGRAPHY_H
 #define AETHER_CRYPTOGRAPHY_H
 
-/* Return a newly-allocated, NUL-terminated lowercase-hex digest
- * (40 chars for SHA-1, 64 chars for SHA-256) or NULL on failure.
- * Caller owns the returned buffer and frees it with free().
+/* Return a lowercase-hex digest (40 chars for SHA-1, 64 chars for
+ * SHA-256) as a fresh counted AetherString (cast to char*), or NULL on
+ * failure. Caller owns it and releases it with string_release().
  *
  * `data` may be an AetherString* or a plain char*; `length` is the
  * explicit byte count (binary-safe, embedded NULs OK). A `length`
@@ -39,7 +39,7 @@ char* cryptography_sha256_hex_raw(const char* data, int length);
  * or any other name OpenSSL's EVP_get_digestbyname() recognizes
  * ("sha384", "sha512", "sha3-256", ...). Returns the same
  * lowercase-hex shape as the per-algorithm functions, or NULL on
- * unknown algorithm / digest failure / no OpenSSL. Caller frees. */
+ * unknown algorithm / digest failure / no OpenSSL. Caller releases. */
 char* cryptography_hash_hex_raw(const char* algo, const char* data, int length);
 
 /* Probe whether the OpenSSL backend in this build can compute `algo`.
@@ -67,7 +67,7 @@ char* cryptography_md5_hex_raw(const char* data, int length);
 /* HMAC-SHA256 (#631). Thin veneer over libcrypto's HMAC(). The
  * raw variant returns the 32-byte digest via the binary-digest TLS
  * split-accessor (see below); the hex variant returns
- * lowercase hex (64 chars) the caller frees. SigV4's key-derivation
+ * lowercase hex (64 chars) the caller releases. SigV4's key-derivation
  * chain needs the raw form — each round's output keys the next. */
 char* cryptography_hmac_sha256_hex_raw(const char* key, int key_len,
                                       const char* msg, int msg_len);
@@ -115,7 +115,7 @@ void        cryptography_release_binary_digest(void);
  *   digest_update(ctx,d,n)  → 1 on success, 0 on failure. Binary-safe;
  *                             `d` may be an AetherString* or char*.
  *                             Feeding 0 bytes is a no-op success.
- *   digest_final_hex(ctx)   → caller-frees lowercase hex; FREES ctx.
+ *   digest_final_hex(ctx)   → caller-released lowercase hex; FREES ctx.
  *   digest_final_bytes(ctx) → raw digest into the binary-digest TLS
  *                             slot (for SigV4 chaining); FREES ctx.
  *   digest_free(ctx)        → abandon without finalizing (aborted
@@ -133,8 +133,8 @@ void  cryptography_digest_free_raw(void* handle);
 /* Base64 encode `length` bytes of `data` using the RFC 4648 §4
  * standard alphabet, unpadded (callers needing `=` padding append
  * `=` themselves to make the length a multiple of 4). Returns a
- * newly-allocated NUL-terminated string the caller frees, or NULL
- * on OOM / no OpenSSL. */
+ * fresh counted AetherString (cast to char*) the caller releases
+ * with string_release(), or NULL on OOM. */
 char* cryptography_base64_encode_raw(const char* data, int length);
 
 /* Padded sibling of cryptography_base64_encode_raw — RFC 4648 §4
@@ -142,8 +142,7 @@ char* cryptography_base64_encode_raw(const char* data, int length);
  * by callers whose wire format expects padded base64 (most decoders
  * that aren't RFC-strict; some auth headers; common JSON-encoded
  * blob formats). Same lifetime contract as the unpadded form:
- * caller frees the returned NUL-terminated string. Returns NULL on
- * OOM / no OpenSSL. */
+ * caller releases the returned string. Returns NULL on OOM. */
 char* cryptography_base64_encode_padded_raw(const char* data, int length);
 
 /* Decode a Base64 string. Returns 1 on success, 0 on failure

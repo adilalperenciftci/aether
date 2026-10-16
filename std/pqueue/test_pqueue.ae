@@ -109,7 +109,7 @@ main() {
     // Push descending priorities so every insert sifts to the root.
     i = 40
     while i > 0 {
-        pqueue.push(q, i, string.from_int(i))
+        pqueue.push(q, i, string.keep(string.from_int(i)))
         i = i - 1
     }
     if pqueue.size(q) != 40 {
@@ -123,10 +123,10 @@ main() {
             fail("heap order violated after growth: ${p} came after ${prev}")
         }
         prev = p
-        // The queue never owns its items, so the strings pushed above
-        // are released here by the caller that allocated them.
+        // The queue never owns its items: each string pushed above went in
+        // as a reference of its own and is given back as it comes out.
         item = pqueue.pop(q)
-        string.free(item)
+        string.release_kept(item)
     }
     println("PASS 8: growth past initial capacity preserves heap order")
 

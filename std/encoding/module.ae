@@ -102,13 +102,13 @@ hex_decode(s: string) -> string! {
 // `data` is `ptr`: the encoders pass a byte[] slice's raw data pointer
 // (#2301), which a `string` parameter would route through the AetherString
 // unwrap — misreading a payload that begins with the header's magic bytes.
-extern cryptography_base64_encode_raw(data: ptr, length: int) -> string
-extern cryptography_base64_encode_padded_raw(data: ptr, length: int) -> string
+extern cryptography_base64_encode_raw(data: ptr, length: int) -> string @heap
+extern cryptography_base64_encode_padded_raw(data: ptr, length: int) -> string @heap
 extern cryptography_base64_decode_raw(b64: string) -> int
-extern cryptography_get_base64_decode() -> string
+extern cryptography_get_base64_decode() -> ptr
 extern cryptography_get_base64_decode_length() -> int
 extern cryptography_release_base64_decode()
-extern string_new_with_length(data: string, length: int) -> ptr
+extern string_new_with_length(data: string, length: int) -> ptr @heap
 
 // Standard-alphabet base64 WITHOUT padding (RFC 4648 §4, the `+/` alphabet;
 // no trailing `=`). Encodes the bytes of `data`.

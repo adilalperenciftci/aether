@@ -1,0 +1,2408 @@
+// The ownership grid's generator (stage 1 of docs/design/ownership-model.md).
+//
+// A cell is one value KIND held in one PLACE and moved by one TRANSFER. For
+// every meaningful combination this module writes one standalone Aether
+// program that
+//
+//   1. runs the shape inside a function called 100 times per round;
+//   2. checks every value it can read against the one the shape stored
+//      (expected values come from the construction, never from running main);
+//      a mismatch prints "WRONG: ..." and exits 12;
+//   3. measures mem.steady_growth over rounds of 100 calls and expects 0;
+//      growth prints "LEAK: <n> bytes per 100 calls" and exits 13;
+//   4. is run a second time by run.ae with poison_alloc.c linked and
+//      OWNERSHIP_GRID_POISON set, which poisons and never reuses freed blocks
+//      and stops a double free.
+//
+// build() makes every cell and records every combination left out, with the
+// reason; run.ae reads them through the accessors below (and prints them with
+// --list, --skips and --show). The axes are the stage-1 grid's (kinds K1-K8,
+// places P1-P13, transfers T1-T11), extended with the shapes the comments on
+// PR #2883 found by hand, and a producer axis (the S* kinds: one real std
+// function per class of docs/design/ownership-r1-inventory.md) crossed with
+// the main places and transfers. See README.md.
+//
+// A list of statements is one string, its lines joined by "\n", and "" is the
+// empty list: lines_cat joins two lists, lines_block indents one. Strings
+// kept past a call live in collections string lists, never in struct fields.
+
+import std.string
+import std.strbuilder
+import std.collections
+
+exports(
+    build, cell_count, cell_id, cell_kind, cell_place, cell_transfer, cell_target, cell_file,
+    cell_source, skip_count, skip_id, skip_reason, not_crossed,
+    kind_count, kind_at, kind_title, is_producer, producer_count, producer_at, producer_class,
+    producer_function, producer_module, producer_places, producer_transfers,
+    place_count, place_at, place_title, column_count, column_at, transfer_title,
+    found_count, found_id, found_text, target_of
+)
+
+const CALLS = 100
+
+// ---------------------------------------------------------------------------
+// Statement lists.
+
+lines_cat(a: string, b: string) -> string {
+    if a == "" {
+        return string.copy(b)
+    }
+    if b == "" {
+        return string.copy(a)
+    }
+    return "${a}\n${b}"
+}
+
+lines_cat3(a: string, b: string, c: string) -> string {
+    return lines_cat(lines_cat(a, b), c)
+}
+
+// Every line indented by `depth` levels of four spaces; an empty line stays
+// empty.
+lines_block(text: string, depth: int) -> string {
+    if text == "" {
+        return ""
+    }
+    pad = ""
+    i = 0
+    while i < depth {
+        pad = "${pad}    "
+        i = i + 1
+    }
+    b = strbuilder.new(0)
+    n = string.length(text)
+    start = 0
+    done = false
+    while !done {
+        cut = string.index_of_from(text, "\n", start)
+        stop = cut
+        if cut < 0 {
+            stop = n
+            done = true
+        }
+        if start > 0 {
+            strbuilder.append(b, "\n")
+        }
+        if stop > start {
+            strbuilder.append(b, pad)
+            strbuilder.append(b, string.substring(text, start, stop))
+        }
+        start = stop + 1
+    }
+    return strbuilder.finish(b)
+}
+
+// Every line of `note` as a comment line ("//" for an empty one).
+comment_lines(note: string) -> string {
+    b = strbuilder.new(0)
+    n = string.length(note)
+    start = 0
+    done = false
+    while !done {
+        cut = string.index_of_from(note, "\n", start)
+        stop = cut
+        if cut < 0 {
+            stop = n
+            done = true
+        }
+        if start > 0 {
+            strbuilder.append(b, "\n")
+        }
+        if stop > start {
+            strbuilder.append(b, "// ")
+            strbuilder.append(b, string.substring(note, start, stop))
+        } else {
+            strbuilder.append(b, "//")
+        }
+        start = stop + 1
+    }
+    return strbuilder.finish(b)
+}
+
+// Whether `w` is one of the space-separated `words`.
+in_words(words: string, w: string) -> bool {
+    return string.contains(" ${words} ", " ${w} ") == 1
+}
+
+list_has(l: ptr, s: string) -> bool {
+    n = collections.string_list_size(l)
+    i = 0
+    while i < n {
+        if collections.string_list_get(l, i) == s {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+// ---------------------------------------------------------------------------
+// Values. A tag names one fresh value; its strings are built from the
+// parameter `w` ("w"), because string.concat of two literals folds to a
+// literal that owns nothing.
+
+suffix(tag: string) -> string {
+    return match tag {
+        "a" -> "#a"
+        "b" -> "#bb"
+        "c" -> "#ccc"
+        _ -> "#z"
+    }
+}
+
+tag_num(tag: string) -> int {
+    return match tag {
+        "a" -> 1
+        "b" -> 2
+        "c" -> 3
+        _ -> 0
+    }
+}
+
+tag_word(tag: string) -> string {
+    return match tag {
+        "a" -> "a"
+        "b" -> "bb"
+        "c" -> "ccc"
+        _ -> "z"
+    }
+}
+
+text_of(tag: string) -> string {
+    return "w${suffix(tag)}"
+}
+
+// ---------------------------------------------------------------------------
+// One program being generated: its module declarations (in first-use order),
+// its imports, the lines main runs first, the cell id (meta[0]) and a counter
+// for fresh names.
+
+struct GridGen {
+    decl_keys: ptr
+    decl_bodies: ptr
+    imports: ptr
+    main_lines: ptr
+    meta: ptr
+    counter: int
+}
+
+gen_new(cell: string) -> *GridGen {
+    g = heap.new(GridGen)
+    g.decl_keys = collections.string_list_new()
+    g.decl_bodies = collections.string_list_new()
+    g.imports = collections.string_list_new()
+    g.main_lines = collections.string_list_new()
+    g.meta = collections.string_list_new()
+    g.counter = 0
+    collections.string_list_add(g.meta, cell)
+    collections.string_list_add(g.imports, "std.mem")
+    collections.string_list_add(g.imports, "std.string")
+    return g
+}
+
+gen_free(g: *GridGen) {
+    collections.string_list_free(g.decl_keys)
+    collections.string_list_free(g.decl_bodies)
+    collections.string_list_free(g.imports)
+    collections.string_list_free(g.main_lines)
+    collections.string_list_free(g.meta)
+    heap.free(g)
+}
+
+gen_cell(g: *GridGen) -> string {
+    return string.copy(collections.string_list_get(g.meta, 0))
+}
+
+gen_name(g: *GridGen, base: string) -> string {
+    g.counter = g.counter + 1
+    return "${base}${g.counter}"
+}
+
+gen_decl(g: *GridGen, key: string, body: string) {
+    if !list_has(g.decl_keys, key) {
+        collections.string_list_add(g.decl_keys, key)
+        collections.string_list_add(g.decl_bodies, body)
+    }
+}
+
+gen_import(g: *GridGen, module_name: string) {
+    if !list_has(g.imports, module_name) {
+        collections.string_list_add(g.imports, module_name)
+    }
+}
+
+gen_main_line(g: *GridGen, line: string) {
+    collections.string_list_add(g.main_lines, line)
+}
+
+need_doc(g: *GridGen) {
+    gen_decl(g, "struct Doc", "struct Doc {\n    name: string\n    n: int\n}")
+}
+
+// ---------------------------------------------------------------------------
+// Kinds.
+
+kind_count() -> int {
+    return 20
+}
+
+kind_at(i: int) -> string {
+    return match i {
+        0 -> "K1"
+        1 -> "K2"
+        2 -> "K3"
+        3 -> "K4"
+        4 -> "K5"
+        5 -> "K6"
+        6 -> "K7"
+        7 -> "K8"
+        8 -> "K9"
+        9 -> "SA1"
+        10 -> "SA2"
+        11 -> "SAR"
+        12 -> "SB1"
+        13 -> "SB2"
+        14 -> "SC1"
+        15 -> "SC2"
+        16 -> "SD1"
+        17 -> "SD2"
+        18 -> "ST1"
+        _ -> "ST2"
+    }
+}
+
+kind_title(kid: string) -> string {
+    return match kid {
+        "K1" -> "fresh string (`string.concat`)"
+        "K2" -> "`string?` holding a fresh string"
+        "K3" -> "closure capturing a fresh string"
+        "K4" -> "`fn[2]` of capturing closures"
+        "K5" -> "struct owning a string field (`Doc`)"
+        "K6" -> "tuple `(string, int)` from a function"
+        "K7" -> "`string[2]`"
+        "K8" -> "array of string-owning structs (`Doc[2]`)"
+        "K9" -> "named function as a closure value (no environment)"
+        "SA1" -> "string from `string.replace` (class A: counted, the caller owns it)"
+        "SA2" -> "string from `string.concat_wrapped` (class A: counted, the caller owns it)"
+        "SAR" -> "string from `string_list_get` (class A~: counted, the list holds it)"
+        "SB1" -> "string from `path.join` (class B: a plain malloc'd buffer the caller owns)"
+        "SB2" -> "string from `path.rel` (class B: a plain malloc'd buffer the caller owns)"
+        "SC1" -> "string from `string.seq_head` (class C: a pointer into the sequence's cell)"
+        "SC2" -> "string from `string.to_cstr` (class C: a pointer into the string's characters)"
+        "SD1" -> "string from `path.separator` (class D: a C literal)"
+        "SD2" -> "string from `http.mime_type` (class D: a C literal)"
+        "ST1" -> "string in the data slot of `fs.read_binary` (a tuple: A data, C error)"
+        "ST2" -> "string in the path slot of `fs.realpath` (a tuple: B path, D or C error)"
+        "KE" -> "fresh error string in the error slot of an `int!` result"
+        _ -> ""
+    }
+}
+
+// The producers: a string a std C function makes (the R1 inventory).
+// docs/design/ownership-r1-inventory.md classes every std C function that
+// returns a string by the shape of what it returns: A, a counted string the
+// caller owns; A~, a counted string someone else holds; B, a plain malloc'd
+// buffer the caller owns; C, a pointer into memory C keeps; D, a literal; and
+// tuples carrying one of those in a slot. A producer kind is K1 with its value
+// made by one real std function of a class instead of string.concat, crossed
+// with the main places and transfers only (producer_places,
+// producer_transfers), so that R1's change to the producers shows in the
+// grid. Its values are checked with string.equals, which reads a `ptr` (a
+// list element) as well as a string.
+is_producer(kid: string) -> bool {
+    return producer_class(kid) != ""
+}
+
+producer_count() -> int {
+    return 11
+}
+
+producer_at(i: int) -> string {
+    return kind_at(9 + i)
+}
+
+producer_places() -> string {
+    return "P1 P4 P5 P8 P9 P10L P12K"
+}
+
+producer_transfers() -> string {
+    return "T1 T2 T5 T7 T9 T12"
+}
+
+producer_class(kid: string) -> string {
+    return match kid {
+        "SA1" -> "A"
+        "SA2" -> "A"
+        "SAR" -> "A~"
+        "SB1" -> "B"
+        "SB2" -> "B"
+        "SC1" -> "C"
+        "SC2" -> "C"
+        "SD1" -> "D"
+        "SD2" -> "D"
+        "ST1" -> "tuple A"
+        "ST2" -> "tuple B"
+        _ -> ""
+    }
+}
+
+producer_function(kid: string) -> string {
+    return match kid {
+        "SA1" -> "string_replace"
+        "SA2" -> "string_concat_wrapped"
+        "SAR" -> "string_list_get"
+        "SB1" -> "path_join"
+        "SB2" -> "path_rel"
+        "SC1" -> "string_seq_head"
+        "SC2" -> "string_to_cstr"
+        "SD1" -> "path_separator"
+        "SD2" -> "http_mime_type"
+        "ST1" -> "fs_read_binary_tuple"
+        "ST2" -> "fs_realpath_raw"
+        _ -> ""
+    }
+}
+
+producer_module(kid: string) -> string {
+    return match kid {
+        "SAR" -> "std.collections"
+        "SB1" -> "std.path"
+        "SB2" -> "std.path"
+        "SD1" -> "std.path"
+        "SD2" -> "std.http"
+        "ST1" -> "std.fs"
+        "ST2" -> "std.fs"
+        _ -> "std.string"
+    }
+}
+
+// The module a producer's call needs imported, "" for std.string (always).
+producer_import(kid: string) -> string {
+    m = producer_module(kid)
+    if m == "std.string" {
+        return ""
+    }
+    return m
+}
+
+kind_ty(kid: string) -> string {
+    return match kid {
+        "K2" -> "string?"
+        "K3" -> "fn"
+        "K4" -> "fn[2]"
+        "K5" -> "Doc"
+        "K6" -> "(string, int)"
+        "K7" -> "string[2]"
+        "K8" -> "Doc[2]"
+        "K9" -> "fn"
+        _ -> "string"
+    }
+}
+
+// The constant initializer of a module var of this kind; "" when none can be
+// declared (an array or a tuple).
+kind_zero(kid: string) -> string {
+    return match kid {
+        "K2" -> "none"
+        "K3" -> "null"
+        "K4" -> ""
+        "K5" -> "Doc { name: \"\", n: 0 }"
+        "K6" -> ""
+        "K7" -> ""
+        "K8" -> ""
+        "K9" -> "null"
+        _ -> "\"\""
+    }
+}
+
+has_zero(kid: string) -> bool {
+    return kind_zero(kid) != ""
+}
+
+kind_is_string(kid: string) -> bool {
+    return kid == "K1" || is_producer(kid)
+}
+
+// The state declaration of an actor holding a value of the kind.
+state_decl(kid: string) -> string {
+    if kind_is_string(kid) {
+        return "state v = \"\""
+    }
+    return match kid {
+        "K2" -> "state string? v = none"
+        "K3" -> "state v = || { return 0 }"
+        "K4" -> "state fn[2] v"
+        "K5" -> "state v = Doc { name: \"\", n: 0 }"
+        "K6" -> "state (string, int) v"
+        "K7" -> "state string[2] v"
+        _ -> "state Doc[2] v"
+    }
+}
+
+// An inferred binding of a named array is a pointer to its first element
+// (array-to-pointer decay), so an array local is declared with its type,
+// which copies the elements.
+bind_local(kid: string, name: string, expr: string) -> string {
+    if kid == "K2" {
+        return "string? ${name} = ${expr}"
+    }
+    if kid == "K4" || kid == "K7" || kid == "K8" {
+        return "${kind_ty(kid)} ${name} = ${expr}"
+    }
+    return "${name} = ${expr}"
+}
+
+is_identifier(s: string) -> bool {
+    n = string.length(s)
+    if n == 0 {
+        return false
+    }
+    i = 0
+    while i < n {
+        c = string.char_at(s, i)
+        letter = (c >= 97 && c <= 122) || (c >= 65 && c <= 90) || c == 95
+        digit = c >= 48 && c <= 57
+        if !letter && !(digit && i > 0) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+// A file main writes, named after the cell so parallel cells do not share it.
+data_file(g: *GridGen, tag: string) -> string {
+    low = string.replace_all(string.to_lower(gen_cell(g)), "-", "_")
+    name = "grid_${low}_${tag}.txt"
+    gen_import(g, "std.fs")
+    gen_main_line(g, "fs.write(\"${name}\", \"${text_of(tag)}\")")
+    return name
+}
+
+// (statements, expression) of a fresh value of the kind.
+fresh(g: *GridGen, kid: string, tag: string) -> (string, string) {
+    sx = suffix(tag)
+    if is_producer(kid) {
+        module_name = producer_import(kid)
+        if module_name != "" {
+            gen_import(g, module_name)
+        }
+    }
+    if kid == "K3" {
+        return "c_${tag} = string.concat(w, \"${sx}\")", "|| { return c_${tag} }"
+    }
+    if kid == "K4" {
+        return "c_${tag} = string.concat(w, \"${sx}\")\nc_${tag}1 = string.concat(w, \"${sx}1\")",
+        "[|| { return c_${tag} }, || { return c_${tag}1 }]"
+    }
+    if kid == "K5" {
+        need_doc(g)
+        return "", "Doc { name: string.concat(w, \"${sx}\"), n: ${tag_num(tag)} }"
+    }
+    if kid == "K6" {
+        gen_decl(g, "fn pair", "pair(w: string, t: string) -> (string, int) {\n    return string.concat(w, t), string.length(t)\n}")
+        return "", "pair(w, \"${sx}\")"
+    }
+    if kid == "K7" {
+        return "", "[string.concat(w, \"${sx}\"), string.concat(w, \"${sx}1\")]"
+    }
+    if kid == "K8" {
+        need_doc(g)
+        num = tag_num(tag)
+        return "", "[Doc { name: string.concat(w, \"${sx}\"), n: ${num} }, Doc { name: string.concat(w, \"${sx}1\"), n: ${num} }]"
+    }
+    if kid == "K9" {
+        gen_decl(g, "fn named_${tag}", "named_${tag}() -> int {\n    return ${string.length(text_of(tag))}\n}")
+        return "", "named_${tag}"
+    }
+    if kid == "SA1" {
+        return "", "string.replace(w, \"w\", \"${text_of(tag)}\")"
+    }
+    if kid == "SA2" {
+        return "", "string.concat_wrapped(w, \"${sx}\")"
+    }
+    if kid == "SAR" {
+        return "sl_${tag} = collections.string_list_new()\ndefer collections.string_list_free(sl_${tag})\ncollections.string_list_add(sl_${tag}, string.concat(w, \"${sx}\"))",
+        "collections.string_list_get(sl_${tag}, 0)"
+    }
+    if kid == "SB1" {
+        return "", "path.join(w, \"${tag_word(tag)}\")"
+    }
+    if kid == "SB2" {
+        return "", "path.rel(w, \"w/${tag_word(tag)}\")"
+    }
+    if kid == "SC1" {
+        return "sq_${tag} = string.seq_cons(string.concat(w, \"${sx}\"), string.seq_empty())", "string.seq_head(sq_${tag})"
+    }
+    if kid == "SC2" {
+        return "cs_${tag} = string.concat(w, \"${sx}\")", "string.to_cstr(cs_${tag})"
+    }
+    if kid == "SD1" {
+        return "", "path.separator()"
+    }
+    if kid == "SD2" {
+        return "", "http.mime_type(w)"
+    }
+    if kid == "ST1" {
+        fname = data_file(g, tag)
+        return "d_${tag}, _, _ = fs.read_binary(\"${fname}\")", "d_${tag}"
+    }
+    if kid == "ST2" {
+        fname = data_file(g, tag)
+        return "rp_${tag}, _, _ = fs.realpath(\"${fname}\")", "rp_${tag}"
+    }
+    // K1, K2
+    return "", "string.concat(w, \"${sx}\")"
+}
+
+producer_expected(kid: string, tag: string) -> string {
+    return match kid {
+        "SB1" -> "w/${tag_word(tag)}"
+        "SB2" -> tag_word(tag)
+        "SD2" -> "application/octet-stream"
+        _ -> text_of(tag)
+    }
+}
+
+// Statements checking that `expr` holds the value `tag`.
+kind_check(g: *GridGen, kid: string, expr: string, tag: string, what: string) -> string {
+    t = text_of(tag)
+    if kid == "K2" {
+        if is_identifier(expr) {
+            return "check(${expr}! == \"${t}\", \"${what}\")"
+        }
+        return "check((${expr})! == \"${t}\", \"${what}\")"
+    }
+    if kid == "K3" {
+        r = gen_name(g, "r")
+        return "string ${r} = call(${expr})\ncheck(${r} == \"${t}\", \"${what}\")"
+    }
+    if kid == "K4" {
+        r0 = gen_name(g, "r")
+        r1 = gen_name(g, "r")
+        return "string ${r0} = call(${expr}[0])\nstring ${r1} = call(${expr}[1])\ncheck(${r0} == \"${t}\" && ${r1} == \"${t}1\", \"${what}\")"
+    }
+    if kid == "K5" {
+        need_doc(g)
+        return "check(${expr}.name == \"${t}\" && ${expr}.n == ${tag_num(tag)}, \"${what}\")"
+    }
+    if kid == "K6" {
+        s = gen_name(g, "s")
+        n = gen_name(g, "n")
+        return "${s}, ${n} = ${expr}\ncheck(${s} == \"${t}\" && ${n} == ${string.length(suffix(tag))}, \"${what}\")"
+    }
+    if kid == "K7" {
+        return "check(${expr}[0] == \"${t}\" && ${expr}[1] == \"${t}1\", \"${what}\")"
+    }
+    if kid == "K8" {
+        need_doc(g)
+        return "check(${expr}[0].name == \"${t}\" && ${expr}[1].name == \"${t}1\", \"${what}\")"
+    }
+    if kid == "K9" {
+        r = gen_name(g, "r")
+        return "int ${r} = call(${expr})\ncheck(${r} == ${string.length(t)}, \"${what}\")"
+    }
+    if kid == "SD1" {
+        // One character, '/' (47) or '\' (92), whichever the platform uses.
+        return "check(string.length(${expr}) == 1 && (string.char_at(${expr}, 0) == 47 || string.char_at(${expr}, 0) == 92), \"${what}\")"
+    }
+    if kid == "ST2" {
+        name = data_file(g, tag)
+        return "check(string.ends_with(${expr}, \"${name}\") == 1, \"${what}\")"
+    }
+    if is_producer(kid) {
+        return "check(string.equals(${expr}, \"${producer_expected(kid, tag)}\") == 1, \"${what}\")"
+    }
+    return "check(${expr} == \"${t}\", \"${what}\")"
+}
+
+// K1 read back from a container: the element comes back as a `ptr`.
+check_ptr_string(expr: string, tag: string, what: string) -> string {
+    return "check(string.equals(${expr}, \"${text_of(tag)}\") == 1, \"${what}\")"
+}
+
+no_global() -> string {
+    return "no module `var` can hold this kind: a `var` needs a constant initializer, and an array or tuple has none (E0200)"
+}
+
+k9_elsewhere() -> string {
+    return "K9 is covered in a struct `fn` field, a ptr slot and a container only"
+}
+
+// ---------------------------------------------------------------------------
+// Transfers (the column titles): T1 to T16, then the two only the KE cells
+// (an `int!` error slot) take.
+
+column_count() -> int {
+    return 21
+}
+
+// The transfers every kind is crossed with: the first 19 columns.
+transfer_count() -> int {
+    return 19
+}
+
+column_at(i: int) -> string {
+    return match i {
+        0 -> "T1"
+        1 -> "T2"
+        2 -> "T3"
+        3 -> "T4"
+        4 -> "T5"
+        5 -> "T6"
+        6 -> "T7"
+        7 -> "T7S"
+        8 -> "T8"
+        9 -> "T8S"
+        10 -> "T9"
+        11 -> "T10"
+        12 -> "T11"
+        13 -> "T11R"
+        14 -> "T12"
+        15 -> "T13"
+        16 -> "T14"
+        17 -> "T15"
+        18 -> "T16"
+        19 -> "T9M"
+        _ -> "T10M"
+    }
+}
+
+transfer_title(t: string) -> string {
+    return match t {
+        "T1" -> "store, then leave the scope normally"
+        "T2" -> "overwrite in place"
+        "T3" -> "leave by `continue` and `break`"
+        "T4" -> "leave by an early `return` (every other call)"
+        "T5" -> "leave by a panic caught by `try`"
+        "T6" -> "pass to a function that only reads it"
+        "T7" -> "pass to a function that keeps it in a module `var`; read after the scope ended"
+        "T7S" -> "pass to a function that keeps it on some paths only"
+        "T8" -> "pass to a function that frees it"
+        "T8S" -> "pass to a function that frees it on some paths only"
+        "T9" -> "return it; the caller reads it"
+        "T10" -> "hand it back through an identity function, returned"
+        "T11" -> "a `defer` reads it"
+        "T11R" -> "a `defer` reads it, and the function returns it"
+        "T12" -> "alias: bind a second local to it, overwrite the first"
+        "T13" -> "rebind 50,000 times to a closure that holds the previous one"
+        "T14" -> "store it into a module `var` directly; read after the scope ended"
+        "T15" -> "a store that fails (`list.set` out of range)"
+        "T16" -> "captured by a closure, then overwritten, then the closure called"
+        "T9M" -> "propagated by `x!` in a function whose error position a pass-through vetoes"
+        "T10M" -> "passed through from C on one path, a fresh error of its own on the other"
+        _ -> ""
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Helper functions a transfer calls. Each takes the kind's type.
+
+helper_reads(g: *GridGen, kid: string) {
+    chk = kind_check(g, kid, "v", "a", "the parameter a reader sees")
+    gen_decl(g, "fn reads", "// Only reads its parameter.\nreads(v: ${kind_ty(kid)}) -> int {\n${lines_block(chk, 1)}\n    return 1\n}")
+}
+
+helper_keep(g: *GridGen, kid: string, some_paths: bool) {
+    ty = kind_ty(kid)
+    gen_decl(g, "var kept", "var kept: ${ty} = ${kind_zero(kid)}")
+    if some_paths {
+        gen_decl(g, "fn keep_some", "// Keeps its parameter in a module var on even calls only.\nkeep_some(v: ${ty}, k: int) {\n    if k % 2 == 0 {\n        kept = v\n    }\n}")
+    } else {
+        gen_decl(g, "fn keep", "// Keeps its parameter in a module var.\nkeep(v: ${ty}) {\n    kept = v\n}")
+    }
+}
+
+helper_frees(g: *GridGen, some_paths: bool) {
+    if some_paths {
+        gen_decl(g, "fn frees_some", "// Frees its parameter on even calls only.\nfrees_some(v: string, k: int) {\n    if k % 2 == 0 {\n        string.free(v)\n    }\n}")
+    } else {
+        gen_decl(g, "fn frees", "// Frees its parameter.\nfrees(v: string) {\n    string.free(v)\n}")
+    }
+}
+
+helper_id(g: *GridGen, kid: string) {
+    ty = kind_ty(kid)
+    gen_decl(g, "fn id", "// Hands its parameter back as it came.\nid(v: ${ty}) -> ${ty} {\n    return v\n}")
+}
+
+helper_held(g: *GridGen, kid: string) {
+    gen_decl(g, "var held", "var held: ${kind_ty(kid)} = ${kind_zero(kid)}")
+}
+
+helper_boom(g: *GridGen, kid: string) {
+    gen_decl(g, "fn boom", "// Panics while it holds its parameter.\nboom(v: ${kind_ty(kid)}, k: int) -> int {\n    if k >= 0 {\n        panic(\"stop\")\n    }\n    return 0\n}")
+}
+
+catch_lines() -> string {
+    return "} catch e {\n    check(e == \"stop\", \"the caught panic\")\n}"
+}
+
+// ---------------------------------------------------------------------------
+// Places.
+
+place_count() -> int {
+    return 26
+}
+
+place_at(i: int) -> string {
+    return match i {
+        0 -> "P1"
+        1 -> "P2"
+        2 -> "P3"
+        3 -> "P3B"
+        4 -> "P3E"
+        5 -> "P4"
+        6 -> "P5"
+        7 -> "P5L"
+        8 -> "P6"
+        9 -> "P7"
+        10 -> "P8"
+        11 -> "P9"
+        12 -> "P9W"
+        13 -> "P10L"
+        14 -> "P10M"
+        15 -> "P11"
+        16 -> "P12K"
+        17 -> "P12D"
+        18 -> "P13G"
+        19 -> "P13D"
+        20 -> "P13F"
+        21 -> "P14"
+        22 -> "P15"
+        23 -> "P16"
+        24 -> "P17"
+        _ -> "P18"
+    }
+}
+
+// The title the report gives a place.
+place_title(pid: string) -> string {
+    return match pid {
+        "P1" -> "local"
+        "P2" -> "local rebound in a loop body"
+        "P3" -> "local bound only in the branches of an if/else"
+        "P3B" -> "local bound and used inside one branch of an if"
+        "P3E" -> "local bound and used inside each branch of an if/else"
+        "P4" -> "field of a local struct"
+        "P5" -> "element of a fixed-size array local"
+        "P5L" -> "element of a fixed-size array local rebound in a loop body"
+        "P6" -> "slot of a tuple local"
+        "P7" -> "optional payload"
+        "P8" -> "module `var`"
+        "P9" -> "captured by a closure that reads it (a copy)"
+        "P9W" -> "captured by a closure that rebinds it (a shared cell)"
+        "P10L" -> "element of a `std.list`"
+        "P10M" -> "value of a `std.map`"
+        "P11" -> "actor state"
+        "P12K" -> "message field the actor keeps"
+        "P12D" -> "message field the actor drops"
+        "P13G" -> "module `ptr` var holding a closure"
+        "P13D" -> "module `ptr` var assigned a closure bare"
+        "P13F" -> "`ptr` field of a local struct holding a closure"
+        "P14" -> "field of a struct parameter"
+        "P15" -> "element of a fixed-size array parameter"
+        "P16" -> "element reached through a slice parameter"
+        "P17" -> "temporary (never bound)"
+        "P18" -> "string field of an element of a struct array local"
+        _ -> ""
+    }
+}
+
+// The title a simple cell's header gives its place (P10L, P10M and P13D say more).
+simple_title(pid: string) -> string {
+    return match pid {
+        "P10L" -> "element of a `std.list` (closures through `box_closure`)"
+        "P10M" -> "value of a `std.map` (closures through `box_closure`)"
+        "P13D" -> "module `ptr` var assigned a closure bare (the fn -> ptr coercion, no `box_closure`)"
+        _ -> place_title(pid)
+    }
+}
+
+// A read of the place needs statements (a destructure, an unbox).
+pre_read(pid: string) -> bool {
+    return pid == "P6" || pid == "P10L" || pid == "P10M" || pid == "P13G" || pid == "P13D" || pid == "P13F"
+}
+
+global_place(pid: string) -> bool {
+    return pid == "P8" || pid == "P13G" || pid == "P13D"
+}
+
+ptr_read(pid: string) -> bool {
+    return pid == "P10L" || pid == "P10M"
+}
+
+// Why a simple place does not take a kind; "" when it does.
+place_applies(pid: string, kid: string) -> string {
+    if pid == "P5" || pid == "P5L" {
+        if kid == "K4" || kid == "K7" || kid == "K8" {
+            return "arrays are one-dimensional: an array literal cannot hold an array"
+        }
+        if kid == "K9" {
+            return k9_elsewhere()
+        }
+        if kid == "K2" {
+            return "an array of optionals cannot be declared: `let xs: string?[2] = ...` does not parse (E0100)"
+        }
+        return ""
+    }
+    if pid == "P6" {
+        if kid == "K9" {
+            return k9_elsewhere()
+        }
+        return ""
+    }
+    if pid == "P7" {
+        if kid == "K1" {
+            return "the same cell as K2-P1 (a `string?` local)"
+        }
+        if kid == "K2" {
+            return "`T??` is rejected: an optional is a single presence layer"
+        }
+        if kid == "K9" {
+            return k9_elsewhere()
+        }
+        return ""
+    }
+    if pid == "P8" {
+        if !has_zero(kid) {
+            return no_global()
+        }
+        if kid == "K9" {
+            return k9_elsewhere()
+        }
+        return ""
+    }
+    if pid == "P10L" {
+        if !(kind_is_string(kid) || kid == "K3" || kid == "K9") {
+            return "a list slot holds a string, an int or a pointer; a closure goes in through `box_closure`"
+        }
+        return ""
+    }
+    if pid == "P10M" {
+        if kid != "K1" && kid != "K3" {
+            return "a map value is a string or a pointer; a closure goes in through `box_closure`"
+        }
+        return ""
+    }
+    if pid == "P13G" || pid == "P13F" {
+        if kid != "K3" && kid != "K9" {
+            return "a `ptr` slot is this place only for a closure (the fn -> ptr box)"
+        }
+        return ""
+    }
+    if pid == "P13D" {
+        if kid == "K9" {
+            return "K9's bare store is K9-P13G (a named function stored as it is)"
+        }
+        if kid != "K3" {
+            return "a `ptr` slot is this place only for a closure (the fn -> ptr box)"
+        }
+        return ""
+    }
+    if pid == "P18" {
+        if kid != "K1" {
+            return "the field of an element is a string place: K1 only"
+        }
+        return ""
+    }
+    return ""
+}
+
+place_setup(g: *GridGen, pid: string, kid: string) -> string {
+    if pid == "P8" {
+        if kid == "K5" {
+            need_doc(g)
+        }
+        gen_decl(g, "var g", "var g: ${kind_ty(kid)} = ${kind_zero(kid)}")
+        return ""
+    }
+    if pid == "P10L" {
+        gen_import(g, "std.list")
+        return "l = list.new()\ndefer list.free(l)"
+    }
+    if pid == "P10M" {
+        gen_import(g, "std.map")
+        return "m = map.new()\ndefer map.free(m)"
+    }
+    if pid == "P13G" || pid == "P13D" {
+        gen_decl(g, "var slot", "var slot: ptr = null")
+        return ""
+    }
+    if pid == "P13F" {
+        gen_decl(g, "struct PtrBox", "struct PtrBox {\n    p: ptr\n}")
+        return ""
+    }
+    return ""
+}
+
+// A list or map element: a closure goes in boxed.
+place_value(g: *GridGen, kid: string, tag: string) -> (string, string) {
+    pre, e = fresh(g, kid, tag)
+    if kid == "K3" || kid == "K9" {
+        return pre, "box_closure(${e})"
+    }
+    return pre, e
+}
+
+// A closure for a `ptr` slot: boxed with box_closure, except a named
+// function in the module var (stored bare, the shape the PR comment names)
+// and every P13D store.
+place_boxed(g: *GridGen, pid: string, kid: string, tag: string) -> (string, string) {
+    pre, e = fresh(g, kid, tag)
+    if pid == "P13D" || (pid == "P13G" && kid == "K9") {
+        return pre, e
+    }
+    return pre, "box_closure(${e})"
+}
+
+// A `ptr` slot owns nothing: a closure kept there in a box is the
+// program's to give back (`release_closure`), so a store gives back the box
+// the slot held first (none is a no-op). K9 in the module var is a bare
+// code address, not a box.
+slot_give_back(pid: string, kid: string, lv: string) -> string {
+    if pid == "P13G" && kid == "K9" {
+        return ""
+    }
+    return "release_closure(${lv})"
+}
+
+slot_fn(g: *GridGen, kid: string, tag: string) -> string {
+    name = "slot_${tag}"
+    pre, e = fresh(g, kid, tag)
+    body = lines_cat(pre, "return ${e}, 7")
+    gen_decl(g, "fn ${name}", "// A tuple whose first slot holds a fresh value.\n${name}(w: string) -> (${kind_ty(kid)}, int) {\n${lines_block(body, 1)}\n}")
+    return name
+}
+
+place_bind(g: *GridGen, pid: string, kid: string, tag: string) -> string {
+    if pid == "P1" || pid == "P2" || pid == "P3B" || pid == "P3E" {
+        pre, e = fresh(g, kid, tag)
+        return lines_cat(pre, bind_local(kid, "x", e))
+    }
+    if pid == "P3" {
+        pre, e = fresh(g, kid, tag)
+        inner = lines_block(lines_cat(pre, bind_local(kid, "x", e)), 1)
+        return "if k % 2 == 0 {\n${inner}\n} else {\n${inner}\n}"
+    }
+    if pid == "P4" {
+        if kid == "K5" || kid == "K8" {
+            need_doc(g)
+        }
+        gen_decl(g, "struct Box", "struct Box {\n    v: ${kind_ty(kid)}\n}")
+        pre, e = fresh(g, kid, tag)
+        return lines_cat(pre, "h = Box { v: ${e} }")
+    }
+    if pid == "P5" || pid == "P5L" {
+        pre, e = fresh(g, kid, tag)
+        pz, ez = fresh(g, kid, "z")
+        return lines_cat3(pre, pz, "xs = [${e}, ${ez}]")
+    }
+    if pid == "P6" {
+        return "t = ${slot_fn(g, kid, tag)}(w)"
+    }
+    if pid == "P7" {
+        if kid == "K5" || kid == "K8" {
+            need_doc(g)
+        }
+        pre, e = fresh(g, kid, tag)
+        return lines_cat(pre, "let o: ${kind_ty(kid)}? = ${e}")
+    }
+    if pid == "P8" {
+        pre, e = fresh(g, kid, tag)
+        return lines_cat(pre, "g = ${e}")
+    }
+    if pid == "P10L" {
+        pre, e = place_value(g, kid, tag)
+        return lines_cat(pre, "list.add(l, ${e})")
+    }
+    if pid == "P10M" {
+        pre, e = place_value(g, kid, tag)
+        return lines_cat(pre, "map.put(m, \"k\", ${e})")
+    }
+    if pid == "P13G" || pid == "P13D" {
+        pre, e = place_boxed(g, pid, kid, tag)
+        return lines_cat3(pre, slot_give_back(pid, kid, "slot"), "slot = ${e}")
+    }
+    if pid == "P13F" {
+        pre, e = place_boxed(g, pid, kid, tag)
+        return lines_cat3(pre, "h = PtrBox { p: ${e} }", "defer release_closure(h.p)")
+    }
+    // P18
+    need_doc(g)
+    _pa, e = fresh(g, kid, tag)
+    _pz, ez = fresh(g, kid, "z")
+    return "ds = [Doc { name: ${e}, n: 1 }, Doc { name: ${ez}, n: 0 }]"
+}
+
+place_store(g: *GridGen, pid: string, kid: string, tag: string) -> string {
+    if pid == "P4" {
+        pre, e = fresh(g, kid, tag)
+        return lines_cat(pre, "h.v = ${e}")
+    }
+    if pid == "P5" || pid == "P5L" {
+        pre, e = fresh(g, kid, tag)
+        return lines_cat(pre, "xs[0] = ${e}")
+    }
+    if pid == "P6" {
+        return "t = ${slot_fn(g, kid, tag)}(w)"
+    }
+    if pid == "P7" {
+        pre, e = fresh(g, kid, tag)
+        return lines_cat(pre, "o = ${e}")
+    }
+    if pid == "P8" {
+        pre, e = fresh(g, kid, tag)
+        return lines_cat(pre, "g = ${e}")
+    }
+    if pid == "P10L" {
+        pre, e = place_value(g, kid, tag)
+        return lines_cat(pre, "list.set(l, 0, ${e})")
+    }
+    if pid == "P10M" {
+        pre, e = place_value(g, kid, tag)
+        return lines_cat(pre, "map.put(m, \"k\", ${e})")
+    }
+    if pid == "P13G" || pid == "P13D" {
+        pre, e = place_boxed(g, pid, kid, tag)
+        return lines_cat3(pre, slot_give_back(pid, kid, "slot"), "slot = ${e}")
+    }
+    if pid == "P13F" {
+        pre, e = place_boxed(g, pid, kid, tag)
+        return lines_cat3(pre, slot_give_back(pid, kid, "h.p"), "h.p = ${e}")
+    }
+    if pid == "P18" {
+        _p, e = fresh(g, kid, tag)
+        return "ds[0].name = ${e}"
+    }
+    // P1, P2, P3, P3B, P3E
+    pre, e = fresh(g, kid, tag)
+    return lines_cat(pre, "x = ${e}")
+}
+
+// (statements, expression) reading the place.
+place_read(g: *GridGen, pid: string, kid: string) -> (string, string) {
+    if pid == "P4" {
+        return "", "h.v"
+    }
+    if pid == "P5" || pid == "P5L" {
+        return "", "xs[0]"
+    }
+    if pid == "P6" {
+        x = gen_name(g, "x")
+        n = gen_name(g, "n")
+        return "${x}, ${n} = t\ncheck(${n} == 7, \"the second slot\")", x
+    }
+    if pid == "P7" {
+        return "", "o!"
+    }
+    if pid == "P8" {
+        return "", "g"
+    }
+    if pid == "P10L" {
+        if kid == "K3" || kid == "K9" {
+            f = gen_name(g, "f")
+            return "fn ${f} = unbox_closure(list.get_raw(l, 0))", f
+        }
+        e = gen_name(g, "e")
+        return "${e}, _ = list.get(l, 0)", e
+    }
+    if pid == "P10M" {
+        if kid == "K3" {
+            f = gen_name(g, "f")
+            return "fn ${f} = unbox_closure(map.get_raw(m, \"k\"))", f
+        }
+        e = gen_name(g, "e")
+        return "${e}, _ = map.get(m, \"k\")", e
+    }
+    if pid == "P13G" || pid == "P13D" {
+        f = gen_name(g, "f")
+        if pid == "P13G" && kid == "K9" {
+            // Stored bare, a named function in a `ptr` slot is its code
+            // address, not a box (memory-management.md, Boxed closures):
+            // it is read back as the typed function pointer it is.
+            return "${f} = slot as fn() -> int", f
+        }
+        return "fn ${f} = unbox_closure(slot)", f
+    }
+    if pid == "P13F" {
+        f = gen_name(g, "f")
+        return "fn ${f} = unbox_closure(h.p)", f
+    }
+    if pid == "P18" {
+        return "", "ds[0].name"
+    }
+    return "", "x"
+}
+
+place_check(g: *GridGen, pid: string, kid: string, tag: string, what: string) -> string {
+    if pid == "P6" {
+        // Destructured twice: a destructure that takes the slot's value, or
+        // leaves the tuple holding a view of it, shows on the second.
+        pre1, x1 = place_read(g, pid, kid)
+        pre2, x2 = place_read(g, pid, kid)
+        c1 = kind_check(g, kid, x1, tag, what)
+        c2 = kind_check(g, kid, x2, tag, "${what}, destructured again")
+        return lines_cat(lines_cat(pre1, c1), lines_cat(pre2, c2))
+    }
+    pre, expr = place_read(g, pid, kid)
+    // A string read back from a container is a `ptr`: compare its characters.
+    // (The producer kinds always compare with string.equals.)
+    if ptr_read(pid) && kid == "K1" {
+        return lines_cat(pre, check_ptr_string(expr, tag, what))
+    }
+    return lines_cat(pre, kind_check(g, kid, expr, tag, what))
+}
+
+// ---------------------------------------------------------------------------
+// The cells the comments on PR #2883 found by hand, before the grid existed.
+// "by reading" marks the ones the comment derived without running them.
+
+found_count() -> int {
+    return 35
+}
+
+found_id(i: int) -> string {
+    return match i {
+        0 -> "K3-P5-T10"
+        1 -> "K3-P5L-T12"
+        2 -> "K4-P9W-T1"
+        3 -> "K4-P1-T6"
+        4 -> "K4-P9-T9"
+        5 -> "K4-P1-T12"
+        6 -> "K3-P5-T7"
+        7 -> "K6-P1-T6"
+        8 -> "K6-P1-T12"
+        9 -> "K6-P9-T1"
+        10 -> "K6-P1-T11R"
+        11 -> "KE-P17-T10M"
+        12 -> "KE-P17-T9M"
+        13 -> "KE-P17-T5"
+        14 -> "K1-P5-T7"
+        15 -> "K3-P13G-T7"
+        16 -> "K3-P2-T13"
+        17 -> "K8-P2-T1"
+        18 -> "K8-P3E-T1"
+        19 -> "K1-P5-T14"
+        20 -> "K1-P4-T8S"
+        21 -> "K1-P4-T7S"
+        22 -> "K1-P18-T8S"
+        23 -> "K1-P14-T8"
+        24 -> "K1-P15-T8"
+        25 -> "K5-P16-T2"
+        26 -> "K8-P9W-T9"
+        27 -> "K1-P17-T5"
+        28 -> "K1-P10L-T15"
+        29 -> "K5-P5-T16"
+        30 -> "K8-P11-T16"
+        31 -> "K4-P11-T16"
+        32 -> "K7-P1-T5"
+        33 -> "K3-P13G-T1"
+        _ -> "K9-P13G-T1"
+    }
+}
+
+found_text(i: int) -> string {
+    return match i {
+        0 -> "closure arrays: return a handed-back element, `return keep(fs[0])` (measured: 9600 bytes per 100 calls)"
+        1 -> "closure arrays: bind an element to a local in a loop, `g = fs[1]; call(g)` (measured: 32000 bytes per 100 calls)"
+        2 -> "closure arrays: a closure writes the array, so it lives in a cell, #2879 (measured: 1600 bytes per 100 calls)"
+        3 -> "closure arrays: the whole array passed (by reading)"
+        4 -> "closure arrays: the array captured (by reading)"
+        5 -> "closure arrays: the whole array copied (leak)"
+        6 -> "closure arrays: an element stored (by reading)"
+        7 -> "tuples: a tuple local passed as an argument owns nothing (measured with the poisoning allocator's live blocks)"
+        8 -> "tuples: a tuple local aliased owns nothing"
+        9 -> "tuples: a tuple local captured owns nothing"
+        10 -> "tuples: a defer that destructures a tuple local in a function that returns it (regression R1 of the reverted #2869 fix)"
+        11 -> "tuples: a `T!` function passing an extern's literal errors through vetoes its error position (by reading)"
+        12 -> "tuples: a propagating `x!` in a vetoed function leaks the operand's error (by reading)"
+        13 -> "tuples: a non-propagating `x!` panics with a heap error; caught, the reason leaks (by reading)"
+        14 -> "a `string[N]` element handed to a function that keeps it dangles once the array's scope ends (a use after free on fed0fbed; the kept string reads freed memory, wrong even without the poisoning allocator)"
+        15 -> "a closure local passed to a function whose `ptr` parameter is stored (a use after free: the stashed closure's environment is freed, and it reads a wrong value even without the poisoning allocator)"
+        16 -> "50,000 rebinds of a closure that calls its predecessor overflow the stack at release"
+        17 -> "a struct array hoisted into a loop leaks its elements' strings (17500 bytes per 100 calls)"
+        18 -> "a struct array bound and used inside each branch of an if/else leaks its strings (74 bytes per call)"
+        19 -> "a `string[N]` element stored into a global string leaks (3600 bytes per 100 calls)"
+        20 -> "a field handed to a function that frees it on some paths only (leak when that path does not run)"
+        21 -> "a field handed to a function that keeps it on some paths only"
+        22 -> "an array element's field handed to a function that frees it on some paths only"
+        23 -> "a struct parameter's field handed to a function that frees it (double free)"
+        24 -> "an element of a fixed-array parameter handed to a function that frees it (double free)"
+        25 -> "a struct stored into an element through a slice leaks the replaced element's string"
+        26 -> "an array of string-owning structs a closure writes, then handed over (leak)"
+        27 -> "a string temporary passed to a call that panics, caught (leak: the release is not on the unwind list)"
+        28 -> "a failed adoption (an out-of-range `list_set`) leaks"
+        29 -> "a closure capturing an `Item[2]` local, then an element replaced: the closure reads freed strings"
+        30 -> "an actor arm closure reading `Item[2]` state (the comment saw a use after free; the generated C no longer compiles)"
+        31 -> "an actor arm closure reading `fn[N]` state (the comment: refused by the checker; the checker accepts it and the generated C does not compile)"
+        32 -> "a string array bound in a try body that panics leaks its strings (37 bytes per call)"
+        33 -> "a closure stored into a `ptr` slot: the box and its env reference are never freed (86 bytes per store)"
+        _ -> "a bare function stored into a `ptr` slot, without box_closure: the box is never freed"
+    }
+}
+
+// The finding of a cell found by hand; "" for the others.
+found_note(cid: string) -> string {
+    i = 0
+    while i < found_count() {
+        if found_id(i) == cid {
+            return found_text(i)
+        }
+        i = i + 1
+    }
+    return ""
+}
+
+// Cells whose expected value is the design's (R1 to R5) where today's
+// documented rule says otherwise. The cell still counts by its run; the note
+// says which rule it measures against.
+doc_note(kid: string, pid: string, t: string) -> string {
+    if pid == "P16" && t == "T12" {
+        return "Today's rule (memory-management.md, slices): a local bound to a slice element is a view\nthat dangles once the element is replaced; under the design's R2 it holds a reference."
+    }
+    if pid == "P16" && t == "T2" {
+        return "Today's rule (memory-management.md, slices): a store through a slice frees nothing, and the\narray's owner never sees the string it replaced; under the design's R3 the store releases it."
+    }
+    if (pid == "P8" || t == "T7" || t == "T7S" || t == "T14") && (kid == "K1" || kid == "K2") {
+        return "Today's rule (#2808): a module var never gives back a string it held, so a re-bind leaks\nthe one it replaces; under the design a re-bind is a store, which releases it."
+    }
+    return ""
+}
+
+// ---------------------------------------------------------------------------
+// The status the approved design wants a cell to reach. Under R3 a parameter
+// is borrowed, so a function that frees one (`string.free(param)`, on every
+// path or on some) frees a reference it does not own, and the checker refuses
+// it from stage 4 on: such a cell's target is REFUSED. Every other cell's is
+// OK. Better and worse in the check stay relative to the baseline; the report
+// says how far each cell is from its target.
+
+target_of(t: string) -> string {
+    if t == "T8" || t == "T8S" {
+        return "REFUSED"
+    }
+    return "OK"
+}
+
+refused_note() -> string {
+    return "Target (the approved design): REFUSED. A function may not free a value it borrows\n(a parameter); from stage 4 the checker refuses `string.free` or `release` of a\nparameter, and says to keep the value (store it) instead."
+}
+
+check_fn() -> string {
+    return "fn check(ok: bool, what: string) {\n    if !ok {\n        println(\"WRONG: \$\{what}\")\n        exit(12)\n    }\n}"
+}
+
+// A whole cell program: the header, the imports, the declarations, the
+// shape, the round of `calls` calls and main.
+program(g: *GridGen, kid: string, pid: string, ptitle: string, t: string, shape: string, round_lines: string,
+    main_setup: string, round_params: string, round_args: string, note: string, calls: int,
+    tries: int) -> string {
+    cell = gen_cell(g)
+    b = strbuilder.new(4096)
+    strbuilder.append(b, "// Ownership grid cell ${cell} (tests/ownership_grid, generated by gen.ae).\n")
+    strbuilder.append(b, "//   kind:     ${kid} ${kind_title(kid)}\n")
+    strbuilder.append(b, "//   place:    ${pid} ${ptitle}\n")
+    strbuilder.append(b, "//   transfer: ${t} ${transfer_title(t)}\n")
+    if note != "" {
+        strbuilder.append(b, "${comment_lines(note)}\n")
+    }
+    fnote = found_note(cell)
+    if fnote != "" {
+        strbuilder.append(b, "// Found by hand in the comments on PR #2883: ${fnote}.\n")
+    }
+    if target_of(t) == "REFUSED" {
+        strbuilder.append(b, "${comment_lines(refused_note())}\n")
+    }
+    dn = doc_note(kid, pid, t)
+    if dn != "" {
+        strbuilder.append(b, "${comment_lines(dn)}\n")
+    }
+    strbuilder.append(b, "// Expected: every value read is the one stored (else WRONG, exit 12),\n")
+    strbuilder.append(b, "// and ${calls} calls of the shape do not grow the heap (else LEAK, exit 13).\n")
+    strbuilder.append(b, "// run.ae links tests/ownership_grid/poison_alloc.c and runs it a second time\n")
+    strbuilder.append(b, "// with OWNERSHIP_GRID_POISON=1, which poisons every freed block.\n\n")
+    n = collections.string_list_size(g.imports)
+    i = 0
+    while i < n {
+        strbuilder.append(b, "import ${collections.string_list_get(g.imports, i)}\n")
+        i = i + 1
+    }
+    strbuilder.append(b, "\nextern exit(code: int)\n\n${check_fn()}\n\n")
+    n = collections.string_list_size(g.decl_bodies)
+    i = 0
+    while i < n {
+        strbuilder.append(b, "${collections.string_list_get(g.decl_bodies, i)}\n\n")
+        i = i + 1
+    }
+    strbuilder.append(b, "${shape}\n\n")
+    strbuilder.append(b, "round(${round_params}) {\n    k = 0\n    while k < ${calls} {\n")
+    strbuilder.append(b, "${lines_block(round_lines, 2)}\n")
+    strbuilder.append(b, "        k = k + 1\n    }\n}\n\nmain() {\n")
+    // main's own lines first, each once.
+    seen = collections.string_list_new()
+    n = collections.string_list_size(g.main_lines)
+    i = 0
+    while i < n {
+        ln = collections.string_list_get(g.main_lines, i)
+        if !list_has(seen, ln) {
+            collections.string_list_add(seen, ln)
+            strbuilder.append(b, "    ${ln}\n")
+        }
+        i = i + 1
+    }
+    collections.string_list_free(seen)
+    if main_setup != "" {
+        strbuilder.append(b, "${lines_block(main_setup, 1)}\n")
+    }
+    strbuilder.append(b, "    round(${round_args})\n")
+    strbuilder.append(b, "    if !mem.heap_in_use_exact() {\n")
+    strbuilder.append(b, "        println(\"OK (growth not measured: the heap count is not exact here)\")\n")
+    strbuilder.append(b, "        return\n    }\n")
+    strbuilder.append(b, "    grown = mem.steady_growth(|| { round(${round_args}) }, ${tries})\n")
+    strbuilder.append(b, "    if grown != 0 {\n")
+    strbuilder.append(b, "        println(\"LEAK: \$\{grown} bytes per ${calls} calls\")\n")
+    strbuilder.append(b, "        exit(13)\n    }\n")
+    strbuilder.append(b, "    println(\"OK\")\n}\n")
+    return strbuilder.finish(b)
+}
+
+// The common case: the default round.
+program_simple(g: *GridGen, kid: string, pid: string, ptitle: string, t: string, shape: string,
+    round_lines: string, note: string, calls: int) -> string {
+    return program(g, kid, pid, ptitle, t, shape, round_lines, "", "w: string", "\"w\"", note, calls, 5)
+}
+
+shape_fn(ret: string, body: string, params: string, comment: string) -> string {
+    head = ""
+    if comment != "" {
+        head = "// ${comment}\n"
+    }
+    sig = "shape(${params})"
+    if ret != "" {
+        sig = "${sig} -> ${ret}"
+    }
+    if body == "" {
+        return "${head}${sig} {\n}"
+    }
+    return "${head}${sig} {\n${lines_block(body, 1)}\n}"
+}
+
+shape_default(ret: string, body: string, t: string) -> string {
+    return shape_fn(ret, body, "w: string, k: int", "The shape: ${transfer_title(t)}.")
+}
+
+is_source(res: string) -> bool {
+    return string.starts_with(res, "// Ownership grid cell") == 1
+}
+
+loop3(body: string) -> string {
+    return "j = 0\nwhile j < 3 {\n    j = j + 1\n${lines_block(body, 1)}\n}"
+}
+
+// The statement that leaves at a guard: as it is, or under `if <cond> {`,
+// with the loop's last pass (`last`) joined to the condition.
+exit_guard(stmts: string, cond: string, last: string) -> string {
+    conds = cond
+    if last != "" {
+        if conds == "" {
+            conds = last
+        } else {
+            conds = "${cond} && ${last}"
+        }
+    }
+    if conds == "" {
+        return stmts
+    }
+    return "if ${conds} {\n${lines_block(stmts, 1)}\n}"
+}
+
+// ---------------------------------------------------------------------------
+// Simple places: set up and filled inside the shape function.
+
+simple_cell(kid: string, pid: string, t: string) -> string {
+    g = gen_new("${kid}-${pid}-${t}")
+    res = simple_cell_in(g, kid, pid, t)
+    gen_free(g)
+    return res
+}
+
+// Why a simple place does not take a transfer; "" when it does.
+simple_skip(kid: string, pid: string, t: string) -> string {
+    ptr_place = pid == "P10L" || pid == "P10M" || pid == "P13G" || pid == "P13F"
+    if t == "T13" {
+        if !(kid == "K3" && pid == "P2") {
+            return "the chain is a closure local rebound in a loop: K3-P2 only"
+        }
+    }
+    if t == "T15" && pid != "P10L" {
+        return "only a list store can fail (an index out of range)"
+    }
+    if (t == "T8" || t == "T8S") && !(kid == "K1" && !ptr_read(pid)) {
+        if kind_is_string(kid) {
+            return "the element comes back as a `ptr`, which no rule counts"
+        }
+        return "only a string has a free a callee can call; a part of a value is its own cell (K1 in P4, P5, P14, P15, P18)"
+    }
+    if global_place(pid) && (t == "T3" || t == "T4" || t == "T11" || t == "T11R") {
+        return "a module var is never left by a scope exit"
+    }
+    if ptr_place && (pid == "P10L" || pid == "P10M") && in_words("T6 T7 T7S T9 T10 T11 T11R T12 T14", t) {
+        return "the element comes back from the container as a `ptr` (or a closure unboxed from one), which no rule counts"
+    }
+    if (pid == "P13G" || pid == "P13D" || pid == "P13F") && in_words("T7S T9 T10 T11 T11R T12 T14", t) {
+        return "the closure is read out of the `ptr` slot by `unbox_closure`, a view no rule counts"
+    }
+    if pre_read(pid) && (t == "T11" || t == "T11R") {
+        return "the place is read through a statement (a destructure), which a `defer` cannot hold"
+    }
+    if (t == "T7" || t == "T7S" || t == "T14") && !has_zero(kid) {
+        return no_global()
+    }
+    if t == "T16" {
+        if pid == "P1" {
+            return "the same cell as P9-T2 (a captured local, overwritten after the capture)"
+        }
+        if global_place(pid) {
+            return "a closure reaches a module var itself; there is no capture"
+        }
+        if ptr_place {
+            return "the place is reached through a pointer; a closure sees its later stores, nothing is copied"
+        }
+    }
+    if t == "T3" && pid == "P2" {
+        return "the same cell as P1-T3 (a local bound in a loop body, left by continue and break)"
+    }
+    if t == "T3" && pid == "P5L" {
+        return "the same cell as P5-T3 (the array bound in a loop body, left by continue and break)"
+    }
+    if pid == "P13D" && t != "T1" {
+        return "a bare store into a `ptr` is measured once (T1); the other transfers use `box_closure` (P13G)"
+    }
+    if kid == "K9" && t != "T1" && t != "T2" {
+        return "K9 (a named function, no environment) is measured for store and overwrite only"
+    }
+    if t == "T7" && pid == "P13F" {
+        return "a closure kept from a `ptr` field is the same keep as from the global slot (P13G-T7)"
+    }
+    return ""
+}
+
+simple_cell_in(g: *GridGen, kid: string, pid: string, t: string) -> string {
+    reason = place_applies(pid, kid)
+    if reason != "" {
+        return reason
+    }
+    reason = simple_skip(kid, pid, t)
+    if reason != "" {
+        return reason
+    }
+    in_loop = pid == "P2" || pid == "P5L"
+
+    setup = place_setup(g, pid, kid)
+    bound = place_bind(g, pid, kid, "a")
+    start = lines_cat(setup, bound)
+    ret = ""
+    round_lines = "shape(w, k)"
+    body = ""
+    last = ""
+    if in_loop {
+        last = "j == 3"
+    }
+    note = ""
+    other = ""
+
+    if t == "T1" {
+        c1 = place_check(g, pid, kid, "a", "the value stored")
+        c2 = place_check(g, pid, kid, "a", "the value, read again")
+        body = lines_cat3(start, c1, c2)
+    } else if t == "T2" {
+        c1 = place_check(g, pid, kid, "a", "the value stored")
+        st = place_store(g, pid, kid, "b")
+        c2 = place_check(g, pid, kid, "b", "the value stored over it")
+        c3 = place_check(g, pid, kid, "b", "the value stored over it, read again")
+        body = lines_cat(lines_cat3(start, c1, st), lines_cat(c2, c3))
+    } else if t == "T3" {
+        c1 = place_check(g, pid, kid, "a", "the value stored")
+        inner = lines_cat3(start, c1, "if j == 1 {\n    continue\n}\nbreak")
+        body = "j = 0\nwhile j < 2 {\n    j = j + 1\n${lines_block(inner, 1)}\n}"
+        in_loop = false
+    } else if t == "T4" {
+        ret = "int"
+        c1 = place_check(g, pid, kid, "a", "the value stored")
+        c2 = place_check(g, pid, kid, "a", "the value, on the path that does not return early")
+        body = lines_cat(lines_cat3(start, c1, exit_guard("return 1", "k % 2 == 0", last)), c2)
+        if !in_loop {
+            body = lines_cat(body, "return 0")
+        }
+    } else if t == "T5" {
+        c1 = place_check(g, pid, kid, "a", "the value stored")
+        inner = lines_cat3(start, c1, exit_guard("panic(\"stop\")", "", last))
+        if in_loop {
+            inner = loop3(inner)
+            in_loop = false
+        }
+        body = "try {\n${lines_block(inner, 1)}\n${catch_lines()}"
+        if global_place(pid) {
+            body = lines_cat(body, place_check(g, pid, kid, "a", "the value stored before the panic, read after the catch"))
+        }
+    } else if t == "T6" {
+        helper_reads(g, kid)
+        pre, r = place_read(g, pid, kid)
+        n = gen_name(g, "n")
+        c1 = place_check(g, pid, kid, "a", "the value, after a reader saw it")
+        body = lines_cat3(lines_cat(start, pre), "${n} = reads(${r})\ncheck(${n} == 1, \"the reader ran\")", c1)
+    } else if t == "T7" && pid == "P13G" {
+        gen_decl(g, "fn stash", "// Keeps the pointer it is given in the module var.\nstash(p: @keep ptr) {\n    release_closure(slot)\n    slot = p\n}")
+        pre, e = fresh(g, kid, "a")
+        body = lines_cat(pre, "f = ${e}\nstash(f)")
+        rpre, r = place_read(g, pid, kid)
+        round_lines = lines_cat3("shape(w, k)", rpre, kind_check(g, kid, r, "a", "the stashed closure, after the scope ended"))
+        note = "A closure local passed to a function whose `ptr` parameter is stored."
+    } else if t == "T7" || t == "T7S" {
+        some_paths = t == "T7S"
+        helper_keep(g, kid, some_paths)
+        pre, r = place_read(g, pid, kid)
+        call_s = "keep(${r})"
+        if some_paths {
+            call_s = "keep_some(${r}, k)"
+        }
+        c1 = place_check(g, pid, kid, "a", "the place, after a function kept it")
+        body = lines_cat3(lines_cat(start, pre), call_s, c1)
+        after = kind_check(g, kid, "kept", "a", "the kept value, after the scope ended")
+        if some_paths {
+            round_lines = "shape(w, k)\nif k % 2 == 0 {\n${lines_block(after, 1)}\n}"
+        } else {
+            round_lines = lines_cat("shape(w, k)", after)
+        }
+    } else if t == "T8" || t == "T8S" {
+        some_paths = t == "T8S"
+        helper_frees(g, some_paths)
+        pre, r = place_read(g, pid, kid)
+        c1 = place_check(g, pid, kid, "a", "the value stored")
+        call_s = "frees(${r})"
+        if some_paths {
+            call_s = "frees_some(${r}, k)"
+        }
+        c2 = place_check(g, pid, kid, "a", "the place, after a callee freed what it was handed")
+        body = lines_cat(lines_cat3(start, c1, pre), lines_cat(call_s, c2))
+    } else if t == "T9" || t == "T10" || t == "T11R" {
+        ret = kind_ty(kid)
+        pre, r = place_read(g, pid, kid)
+        if t == "T10" {
+            helper_id(g, kid)
+            r = "id(${r})"
+        }
+        extra = ""
+        if t == "T11R" {
+            helper_reads(g, kid)
+            _rp, rr = place_read(g, pid, kid)
+            extra = "defer reads(${rr})"
+        }
+        // Two paths: every other call returns the place's value, the others
+        // leave the place and return a fresh value of their own.
+        c1 = place_check(g, pid, kid, "a", "the value stored")
+        body = lines_cat(lines_cat3(start, c1, extra), lines_cat(pre, exit_guard("return ${r}", "k % 2 == 0", last)))
+        pc, ec = fresh(g, kid, "c")
+        other = lines_cat3("// The other path: the place is left, and a fresh value returned.", pc, "return ${ec}")
+        if !in_loop {
+            body = lines_cat(body, other)
+        }
+        v1 = kind_check(g, kid, "v", "a", "the returned value")
+        v2 = kind_check(g, kid, "v", "c", "the value the other path returned")
+        round_lines = "${bind_local(kid, "v", "shape(w, k)")}\nif k % 2 == 0 {\n${lines_block(v1, 1)}\n} else {\n${lines_block(v2, 1)}\n}"
+    } else if t == "T11" {
+        helper_reads(g, kid)
+        _rp, rr = place_read(g, pid, kid)
+        c1 = place_check(g, pid, kid, "a", "the value stored")
+        body = lines_cat3(start, "defer reads(${rr})", c1)
+    } else if t == "T12" {
+        pre, r = place_read(g, pid, kid)
+        st = place_store(g, pid, kid, "b")
+        c1 = kind_check(g, kid, "y", "a", "the alias, after the place was overwritten")
+        c2 = place_check(g, pid, kid, "b", "the place, after the overwrite")
+        body = lines_cat(lines_cat3(lines_cat(start, pre), bind_local(kid, "y", r), st), lines_cat(c1, c2))
+    } else if t == "T13" {
+        ret = "int"
+        pre, e = fresh(g, kid, "a")
+        c1 = place_check(g, pid, kid, "a", "the first closure")
+        chain = "j = 0\nwhile j < 50000 {\n    j = j + 1\n    prev = x\n    x = || {\n        string s = call(prev)\n        return s\n    }\n}\nreturn 1"
+        body = lines_cat3(lines_cat(pre, "x = ${e}"), c1, chain)
+        in_loop = false
+        note = "The release at scope exit walks a chain 50,000 environments deep."
+    } else if t == "T14" {
+        helper_held(g, kid)
+        pre, r = place_read(g, pid, kid)
+        c1 = place_check(g, pid, kid, "a", "the place, after it was stored in a module var")
+        body = lines_cat3(lines_cat(start, pre), "held = ${r}", c1)
+        round_lines = lines_cat("shape(w, k)", kind_check(g, kid, "held", "a", "the module var, after the scope ended"))
+    } else if t == "T15" {
+        pre, e = place_value(g, kid, "b")
+        c1 = place_check(g, pid, kid, "a", "the element, after a store that failed")
+        body = lines_cat3(lines_cat(start, pre), "list.set(l, 5, ${e})\ncheck(list.size(l) == 1, \"the list size\")", c1)
+    } else if t == "T16" {
+        helper_reads(g, kid)
+        pre, r = place_read(g, pid, kid)
+        f = gen_name(g, "f")
+        n = gen_name(g, "n")
+        closure_s = "${f} = || {\n${lines_block(lines_cat(pre, "return reads(${r})"), 1)}\n}"
+        st = place_store(g, pid, kid, "b")
+        c1 = place_check(g, pid, kid, "b", "the place, after the overwrite")
+        called = "int ${n} = call(${f})\ncheck(${n} == 1, \"the closure read its copy\")"
+        body = lines_cat(lines_cat3(start, closure_s, st), lines_cat(called, c1))
+    } else {
+        return "not a transfer of this place"
+    }
+
+    if in_loop {
+        body = loop3(body)
+        if ret == "int" {
+            body = lines_cat(body, "return 0")
+        } else if ret != "" {
+            body = lines_cat(body, other)
+        }
+    }
+    if pid == "P3E" {
+        // Bound and used inside each branch. k % 4 < 2 picks the branch, so
+        // each branch meets both paths of a transfer that tests k % 2.
+        inner = lines_block(body, 1)
+        body = "if k % 4 < 2 {\n${inner}\n} else {\n${inner}\n}"
+    }
+    if pid == "P3B" {
+        // k counts calls from 0, so the branch always runs; the compiler cannot know.
+        body = "if k >= 0 {\n${lines_block(body, 1)}\n}"
+        if ret == "int" {
+            body = lines_cat(body, "return 0")
+        } else if ret != "" {
+            pz, ez = fresh(g, kid, "z")
+            body = lines_cat3(body, lines_cat("// not reached: the branch always runs", pz), "return ${ez}")
+        }
+    }
+    calls = CALLS
+    if t == "T13" {
+        calls = 2
+    }
+    return program_simple(g, kid, pid, simple_title(pid), t, shape_default(ret, body, t), round_lines, note, calls)
+}
+
+// ---------------------------------------------------------------------------
+// P9 / P9W: captured by a closure.
+
+captured_cell(kid: string, pid: string, t: string) -> string {
+    if kid == "K9" {
+        return k9_elsewhere()
+    }
+    g = gen_new("${kid}-${pid}-${t}")
+    res = captured_cell_in(g, kid, pid, t)
+    gen_free(g)
+    return res
+}
+
+captured_cell_in(g: *GridGen, kid: string, pid: string, t: string) -> string {
+    writes = pid == "P9W"
+    pa, ea = fresh(g, kid, "a")
+    inner = "return reads(x)"
+    if writes {
+        pb, eb = fresh(g, kid, "b")
+        inner = lines_cat3(lines_cat(pb, "x = ${eb}"), kind_check(g, kid, "x", "b", "the cell, inside the closure"), "return 1")
+    } else {
+        helper_reads(g, kid)
+    }
+    bound = lines_cat3(pa, bind_local(kid, "x", ea), "f = || {\n${lines_block(inner, 1)}\n}")
+    call_f = "int n = call(f)\ncheck(n == 1, \"the closure ran\")"
+    after_call = ""
+    if writes {
+        after_call = kind_check(g, kid, "x", "b", "the local, which the closure rebound")
+    }
+    round_lines = "shape(w, k)"
+    ret = ""
+    body = ""
+    if t == "T1" {
+        body = lines_cat3(bound, call_f, after_call)
+    } else if t == "T2" {
+        pc, ec = fresh(g, kid, "c")
+        body = lines_cat(lines_cat3(bound, pc, "x = ${ec}"), lines_cat(call_f, after_call))
+    } else if t == "T3" {
+        inner2 = lines_cat3(bound, call_f, "if j == 1 {\n    continue\n}\nbreak")
+        body = "j = 0\nwhile j < 2 {\n    j = j + 1\n${lines_block(inner2, 1)}\n}"
+    } else if t == "T4" {
+        ret = "int"
+        body = lines_cat3(bound, call_f, "if k % 2 == 0 {\n    return 1\n}\nint n2 = call(f)\ncheck(n2 == 1, \"the closure ran again\")\nreturn 0")
+    } else if t == "T5" {
+        inner5 = lines_cat3(bound, call_f, "panic(\"stop\")")
+        body = "try {\n${lines_block(inner5, 1)}\n${catch_lines()}"
+    } else if t == "T6" {
+        gen_decl(g, "fn runs", "// Calls the closure it is given, keeps nothing.\nruns(h: fn) -> int {\n    int n = call(h)\n    return n\n}")
+        body = lines_cat3(bound, "n = runs(f)\ncheck(n == 1, \"the closure ran\")", after_call)
+    } else if t == "T7" {
+        gen_decl(g, "var kept", "var kept: fn = null")
+        gen_decl(g, "fn keep", "// Keeps the closure in a module var.\nkeep(h: fn) {\n    kept = h\n}")
+        body = lines_cat(bound, "keep(f)")
+        round_lines = "shape(w, k)\nint n = call(kept)\ncheck(n == 1, \"the kept closure, after the scope ended\")"
+    } else if t == "T9" || t == "T10" {
+        ret = "fn"
+        r = "f"
+        if t == "T10" {
+            gen_decl(g, "fn id", "// Hands its parameter back as it came.\nid(h: fn) -> fn {\n    return h\n}")
+            r = "id(f)"
+        }
+        body = lines_cat(bound, "if k % 2 == 0 {\n    return ${r}\n}\n// The other path: the closure is left, and another one returned.\nreturn || { return 1 }")
+        round_lines = "h = shape(w, k)\nint n = call(h)\ncheck(n == 1, \"the returned closure\")\nint n2 = call(h)\ncheck(n2 == 1, \"the returned closure, called again\")"
+    } else if t == "T11" {
+        gen_decl(g, "fn runs", "// Calls the closure it is given, keeps nothing.\nruns(h: fn) -> int {\n    int n = call(h)\n    return n\n}")
+        body = lines_cat3(bound, "defer runs(f)", call_f)
+    } else if t == "T14" {
+        gen_decl(g, "var held", "var held: fn = null")
+        body = lines_cat(bound, "held = f")
+        round_lines = "shape(w, k)\nint n = call(held)\ncheck(n == 1, \"the closure in the module var, after the scope ended\")"
+    } else if t == "T12" {
+        body = lines_cat(bound, "f2 = f\nf = || { return 0 }\nint n = call(f2)\ncheck(n == 1, \"the alias of the closure\")")
+    } else {
+        return ""
+    }
+    title = "captured by a closure that reads it (a copy)"
+    if writes {
+        title = "captured by a closure that rebinds it (a shared cell)"
+    }
+    return program_simple(g, kid, pid, title, t, shape_default(ret, body, t), round_lines, "", CALLS)
+}
+
+// ---------------------------------------------------------------------------
+// P11: actor state; P12: message field.
+
+// Why the actor-per-call cells read the heap over 20 windows of 10 calls: an
+// actor the scheduler ends keeps its block for the next spawn (a tombstone),
+// so the heap count moves by a block in some windows while the actors leak
+// nothing. Over 40 windows of 100 calls K1-P11-T1 grew in 9 and shrank by
+// 1520 bytes in total; under 24 copies at once, 1 run in 72 met 5 windows in a
+// row that moved, which mem.steady_growth reads as growth. A leak grows every
+// window, so it still fails; 20 shorter windows make a false one negligible.
+p11_t1_note() -> string {
+    return "One actor per call: set, asked, then released (destroy_state), and every\nreleased actor ended before the next call. The scheduler keeps an ended\nactor's block for the next spawn, so the heap moves by a block in some\nwindows without a leak: growth is read over 20 windows of 10 calls, and a\nleak, which grows every window, is still reported."
+}
+
+actor_note() -> string {
+    return "The actor is spawned once in main and asked after each call, so the\nheap is read with its mailbox drained."
+}
+
+actor_program(g: *GridGen, kid: string, pid: string, ptitle: string, t: string, actor_src: string, shape: string,
+    round_lines: string, spawned: bool, note: string, calls: int, tries: int) -> string {
+    gen_decl(g, "message Check", "message Check {}")
+    gen_decl(g, "message Ack", "message Ack {\n    n: int\n}")
+    gen_decl(g, "actor Holder", actor_src)
+    if spawned {
+        n = note
+        if n == "" {
+            n = actor_note()
+        }
+        return program(g, kid, pid, ptitle, t, shape, round_lines, "h = spawn(Holder())", "w: string, h: ptr",
+            "\"w\", h", n, calls, tries)
+    }
+    return program(g, kid, pid, ptitle, t, shape, round_lines, "", "w: string", "\"w\"", note, calls, tries)
+}
+
+state_cell(kid: string, t: string) -> string {
+    if kid == "K9" {
+        return k9_elsewhere()
+    }
+    if (t == "T7" || t == "T14") && !has_zero(kid) {
+        return no_global()
+    }
+    if t == "T9" && kid != "K1" {
+        return "a reply carries back a string or a message's first field; measured for K1"
+    }
+    if !in_words("T1 T2 T6 T7 T9 T12 T14 T16", t) {
+        return ""
+    }
+    g = gen_new("${kid}-P11-${t}")
+    res = state_cell_in(g, kid, t)
+    gen_free(g)
+    return res
+}
+
+state_cell_in(g: *GridGen, kid: string, t: string) -> string {
+    if kid == "K5" || kid == "K8" {
+        need_doc(g)
+    }
+    gen_decl(g, "message Set", "message Set {\n    w: string\n}")
+    pa, ea = fresh(g, kid, "a")
+    bound = lines_cat(pa, "v = ${ea}")
+    check_tag = "a"
+    extra_arms = ""
+    shape_after = ""
+    ops = bound
+    if t == "T6" {
+        helper_reads(g, kid)
+        ops = lines_cat(bound, "n = reads(v)\ncheck(n == 1, \"the reader ran\")")
+    } else if t == "T7" {
+        helper_keep(g, kid, false)
+        ops = lines_cat(bound, "keep(v)")
+        shape_after = kind_check(g, kid, "kept", "a", "the kept value, read by the sender")
+    } else if t == "T14" {
+        helper_held(g, kid)
+        ops = lines_cat(bound, "held = v")
+        shape_after = kind_check(g, kid, "held", "a", "the module var, read by the sender")
+    } else if t == "T16" {
+        helper_reads(g, kid)
+        ops = lines_cat(bound, "f = || { return reads(v) }\nint n = call(f)\ncheck(n == 1, \"the closure in the arm read the state\")")
+    } else if t == "T2" {
+        pb, eb = fresh(g, kid, "b")
+        ops = lines_cat3(bound, kind_check(g, kid, "v", "a", "the state"), lines_cat(pb, "v = ${eb}"))
+        check_tag = "b"
+    } else if t == "T12" {
+        pb, eb = fresh(g, kid, "b")
+        ops = lines_cat3(lines_cat(bound, bind_local(kid, "y", "v")), lines_cat(pb, "v = ${eb}"),
+            kind_check(g, kid, "y", "a", "the alias of the state, after the state was overwritten"))
+        check_tag = "b"
+    } else if t == "T9" {
+        gen_decl(g, "message Get", "message Get {}")
+        extra_arms = "Get() -> {\n    reply v\n}"
+    }
+    check_arm = "Check() -> {\n${lines_block(kind_check(g, kid, "v", check_tag, "the state, when asked"), 1)}\n    reply Ack { n: 1 }\n}"
+    set_arm = "Set(w: w) -> {\n${lines_block(ops, 1)}\n}"
+    actor_src = "actor Holder {\n    ${state_decl(kid)}\n    receive {\n${lines_block(lines_cat3(set_arm, extra_arms, check_arm), 2)}\n    }\n}"
+    ask = "h ! Set { w: w }\nint n = h ? Check {}\ncheck(n == 1, \"the actor answered\")"
+    if t == "T9" {
+        ask = lines_cat3(ask, "string s = h ? Get {}", kind_check(g, kid, "s", "a", "the state, replied"))
+    }
+    if t == "T1" {
+        gen_decl(g, "extern release", "extern scheduler_release_actor(a: ptr) @c_import\nextern scheduler_reclaim_released() -> int @c_import")
+        body = lines_cat3("h = spawn(Holder())", ask, "let hp: ptr = h\nscheduler_release_actor(hp)\n// End it now, so no later sweep frees what it held.\nwhile scheduler_reclaim_released() > 0 {\n}")
+        return actor_program(g, kid, "P11", "actor state", t, actor_src,
+            shape_fn("", body, "w: string, k: int", "One actor per call, released when the call is done."),
+            "shape(w, k)", false, p11_t1_note(), 10, 20)
+    }
+    body = lines_cat(ask, shape_after)
+    return actor_program(g, kid, "P11", "actor state", t, actor_src,
+        shape_fn("", body, "w: string, k: int, h: ptr", "The shape runs in the actor: ${transfer_title(t)}."),
+        "shape(w, k, h)", true, "", CALLS, 5)
+}
+
+message_cell(kid: string, pid: string, t: string) -> string {
+    keeps = pid == "P12K"
+    if kid == "K9" {
+        return k9_elsewhere()
+    }
+    if t == "T2" && !keeps {
+        return "an actor that drops the field has nothing to overwrite"
+    }
+    if t == "T7" && keeps {
+        return "a kept field passed to a keeper is P12D-T7 with the state besides"
+    }
+    if t == "T7" && !has_zero(kid) {
+        return no_global()
+    }
+    if !in_words("T1 T2 T7 T12", t) {
+        return ""
+    }
+    g = gen_new("${kid}-${pid}-${t}")
+    res = message_cell_in(g, kid, pid, t, keeps)
+    gen_free(g)
+    return res
+}
+
+message_cell_in(g: *GridGen, kid: string, pid: string, t: string, keeps: bool) -> string {
+    title = "message field the actor only reads (dropped with the message)"
+    if keeps {
+        title = "message field the actor keeps in its state"
+    }
+    if kid == "K5" || kid == "K8" {
+        need_doc(g)
+    }
+    gen_decl(g, "message Put", "message Put {\n    v: ${kind_ty(kid)}\n}")
+    arm = ""
+    check_tag = "a"
+    if t == "T2" {
+        arm = "Put(v: x) -> {\n    v = x\n}"
+        check_tag = "b"
+    } else {
+        arm = "Put(v: x) -> {\n${lines_block(kind_check(g, kid, "x", "a", "the field the actor received"), 1)}"
+        if keeps {
+            arm = "${arm}\n    v = x"
+        }
+        if t == "T7" {
+            helper_keep(g, kid, false)
+            arm = "${arm}\n    keep(x)"
+        }
+        arm = "${arm}\n}"
+    }
+    check_body = ""
+    if keeps {
+        check_body = kind_check(g, kid, "v", check_tag, "the state, when asked")
+    }
+    check_arm = lines_cat3("Check() -> {", lines_block(check_body, 1), "    reply Ack { n: 1 }\n}")
+    head = "actor Holder {"
+    if keeps {
+        head = "${head}\n    ${state_decl(kid)}"
+    }
+    actor_src = "${head}\n    receive {\n${lines_block(lines_cat(arm, check_arm), 2)}\n    }\n}"
+    pa, ea = fresh(g, kid, "a")
+    body = ""
+    comment = "send a local, read it after the send"
+    if t == "T1" || t == "T7" {
+        body = lines_cat(pa, "h ! Put { v: ${ea} }")
+        comment = "send a fresh value"
+    } else if t == "T2" {
+        pb, eb = fresh(g, kid, "b")
+        body = lines_cat(lines_cat(pa, "h ! Put { v: ${ea} }"), lines_cat(pb, "h ! Put { v: ${eb} }"))
+        comment = "send two values, the second replaces the first"
+    } else {
+        body = lines_cat3(pa, "${bind_local(kid, "x", ea)}\nh ! Put { v: x }", kind_check(g, kid, "x", "a", "the sender's local, after the send"))
+    }
+    body = lines_cat(body, "int n = h ? Check {}\ncheck(n == 1, \"the actor answered\")")
+    if t == "T7" {
+        body = lines_cat(body, kind_check(g, kid, "kept", "a", "the field the actor kept in a module var, after the message was dropped"))
+    }
+    return actor_program(g, kid, pid, title, t, actor_src, shape_fn("", body, "w: string, k: int, h: ptr", "The shape: ${comment}."),
+        "shape(w, k, h)", true, "", CALLS, 5)
+}
+
+// ---------------------------------------------------------------------------
+// P14 / P15 / P16: a part of a parameter.
+
+param_cell(kid: string, pid: string, t: string) -> string {
+    if kid == "K9" {
+        return k9_elsewhere()
+    }
+    if pid != "P14" {
+        if kid == "K4" || kid == "K7" || kid == "K8" {
+            return "arrays are one-dimensional: an array cannot hold an array"
+        }
+        if kid == "K2" || kid == "K6" {
+            return "an array of optionals or tuples is not measured (P5 covers the local)"
+        }
+    }
+    if (t == "T7" || t == "T7S" || t == "T14") && !has_zero(kid) {
+        return no_global()
+    }
+    if (t == "T8" || t == "T8S") && kid != "K1" {
+        return "only a string has a free a callee can call"
+    }
+    if t == "T16" && pid == "P16" {
+        return "a slice is a view: a closure that captures it sees the stores made through it"
+    }
+    if !in_words("T1 T2 T4 T5 T6 T7 T7S T8 T8S T9 T10 T12 T14 T16", t) {
+        return ""
+    }
+    g = gen_new("${kid}-${pid}-${t}")
+    res = param_cell_in(g, kid, pid, t)
+    gen_free(g)
+    return res
+}
+
+// The caller's store of a fresh value over its own part.
+param_caller_store(g: *GridGen, kid: string, pid: string, tag: string) -> string {
+    pre, e = fresh(g, kid, tag)
+    if pid == "P14" {
+        return lines_cat(pre, "h = Box { v: ${e} }")
+    }
+    return lines_cat(pre, "xs[0] = ${e}")
+}
+
+param_cell_in(g: *GridGen, kid: string, pid: string, t: string) -> string {
+    title = "field of a struct parameter"
+    ptype = "Box"
+    place = "p.v"
+    made = ""
+    caller_read = "h.v"
+    arg = "h"
+    if pid == "P14" {
+        if kid == "K5" || kid == "K8" {
+            need_doc(g)
+        }
+        gen_decl(g, "struct Box", "struct Box {\n    v: ${kind_ty(kid)}\n}")
+        pa, ea = fresh(g, kid, "a")
+        made = lines_cat(pa, "h = Box { v: ${ea} }")
+    } else {
+        title = "element reached through a slice parameter"
+        ptype = "${kind_ty(kid)}[]"
+        if pid == "P15" {
+            title = "element of a fixed-size array parameter"
+            ptype = "${kind_ty(kid)}[2]"
+        }
+        place = "p[0]"
+        pa, ea = fresh(g, kid, "a")
+        pz, ez = fresh(g, kid, "z")
+        made = lines_cat3(pa, pz, "xs = [${ea}, ${ez}]")
+        caller_read = "xs[0]"
+        arg = "xs"
+    }
+    slice_param = pid == "P16"
+    // The transfer, inside the callee.
+    callee_ret = "int"
+    caller_tag = "a"
+    round_lines = "shape(w, k)"
+    ops = ""
+    if t == "T1" {
+        ops = lines_cat(kind_check(g, kid, place, "a", "the parameter's part"), "return 1")
+    } else if t == "T2" {
+        pb, eb = fresh(g, kid, "b")
+        // One side-effecting call per statement: C leaves the order of a
+        // call's arguments open, and each check may take a fresh name.
+        c1 = kind_check(g, kid, place, "a", "the parameter's part")
+        c2 = kind_check(g, kid, place, "b", "the part, after the callee overwrote it")
+        ops = lines_cat(lines_cat3(c1, pb, "${place} = ${eb}"), lines_cat(c2, "return 1"))
+        if slice_param {
+            caller_tag = "b"
+        }
+    } else if t == "T4" {
+        c1 = kind_check(g, kid, place, "a", "the parameter's part")
+        c2 = kind_check(g, kid, place, "a", "the part, late")
+        ops = lines_cat3(c1, "if k % 2 == 0 {\n    return 1\n}", lines_cat(c2, "return 0"))
+    } else if t == "T5" {
+        ops = lines_cat(kind_check(g, kid, place, "a", "the parameter's part"), "panic(\"stop\")\nreturn 0")
+    } else if t == "T6" {
+        helper_reads(g, kid)
+        ops = "n = reads(${place})\ncheck(n == 1, \"the reader ran\")\nreturn n"
+    } else if t == "T7" || t == "T7S" {
+        some_paths = t == "T7S"
+        helper_keep(g, kid, some_paths)
+        ops = "keep(${place})\nreturn 1"
+        if some_paths {
+            ops = "keep_some(${place}, k)\nreturn 1"
+        }
+        after = kind_check(g, kid, "kept", "a", "the kept value, after the scope ended")
+        if some_paths {
+            round_lines = "shape(w, k)\nif k % 2 == 0 {\n${lines_block(after, 1)}\n}"
+        } else {
+            round_lines = lines_cat("shape(w, k)", after)
+        }
+    } else if t == "T8" || t == "T8S" {
+        some_paths = t == "T8S"
+        helper_frees(g, some_paths)
+        ops = "frees(${place})\nreturn 1"
+        if some_paths {
+            ops = "frees_some(${place}, k)\nreturn 1"
+        }
+    } else if t == "T9" || t == "T10" {
+        callee_ret = kind_ty(kid)
+        r = place
+        if t == "T10" {
+            helper_id(g, kid)
+            r = "id(${place})"
+        }
+        pc, ec = fresh(g, kid, "c")
+        ops = lines_cat3("if k % 2 == 0 {\n    return ${r}\n}\n// The other path: the part is left, and a fresh value returned.", pc, "return ${ec}")
+    } else if t == "T12" {
+        pb, eb = fresh(g, kid, "b")
+        c1 = kind_check(g, kid, "y", "a", "the alias, after the part was overwritten")
+        c2 = kind_check(g, kid, place, "b", "the part, after the overwrite")
+        ops = lines_cat(lines_cat3(bind_local(kid, "y", place), pb, "${place} = ${eb}"), lines_cat3(c1, c2, "return 1"))
+        if slice_param {
+            caller_tag = "b"
+        }
+    } else if t == "T14" {
+        helper_held(g, kid)
+        ops = "held = ${place}\nreturn 1"
+        round_lines = lines_cat("shape(w, k)", kind_check(g, kid, "held", "a", "the module var, after the scope ended"))
+    } else {
+        // T16
+        helper_reads(g, kid)
+        pb, eb = fresh(g, kid, "b")
+        ops = lines_cat3("f = || { return reads(${place}) }", pb, "${place} = ${eb}\nint n = call(f)\ncheck(n == 1, \"the closure read its copy\")\nreturn n")
+    }
+    gen_decl(g, "fn use", "// The callee: ${transfer_title(t)}, on its parameter's part.\nuse(p: ${ptype}, w: string, k: int) -> ${callee_ret} {\n${lines_block(ops, 1)}\n}")
+    body = ""
+    if t == "T9" || t == "T10" {
+        st = param_caller_store(g, kid, pid, "b")
+        v1 = kind_check(g, kid, "v", "a", "the returned part, after the caller overwrote its own")
+        v2 = kind_check(g, kid, "v", "c", "the value the other path returned")
+        body = lines_cat3(lines_cat(made, bind_local(kid, "v", "use(${arg}, w, k)")), st,
+            "if k % 2 == 0 {\n${lines_block(v1, 1)}\n} else {\n${lines_block(v2, 1)}\n}")
+    } else if t == "T5" {
+        body = lines_cat3(made, "try {\n    use(${arg}, w, k)\n${catch_lines()}",
+            kind_check(g, kid, caller_read, "a", "the caller's value, after the callee panicked"))
+    } else {
+        body = lines_cat3(made, "n = use(${arg}, w, k)", kind_check(g, kid, caller_read, caller_tag, "the caller's value, after the call"))
+    }
+    return program_simple(g, kid, pid, title, t, shape_fn("", body, "w: string, k: int", "The caller."), round_lines, "", CALLS)
+}
+
+// ---------------------------------------------------------------------------
+// P17: a temporary.
+
+temp_cell(kid: string, t: string) -> string {
+    if kid == "K9" {
+        return k9_elsewhere()
+    }
+    if (t == "T7" || t == "T7S") && !has_zero(kid) {
+        return no_global()
+    }
+    if (t == "T8" || t == "T8S") && kid != "K1" {
+        return "only a string has a free a callee can call"
+    }
+    if !in_words("T1 T5 T6 T7 T7S T8 T8S T9 T10", t) {
+        return ""
+    }
+    g = gen_new("${kid}-P17-${t}")
+    res = temp_cell_in(g, kid, t)
+    gen_free(g)
+    return res
+}
+
+temp_cell_in(g: *GridGen, kid: string, t: string) -> string {
+    pa, ea = fresh(g, kid, "a")
+    round_lines = "shape(w, k)"
+    ret = ""
+    body = ""
+    if t == "T1" {
+        body = lines_cat(pa, "_ = ${ea}")
+    } else if t == "T5" {
+        helper_boom(g, kid)
+        body = "try {\n${lines_block(lines_cat(pa, "n = boom(${ea}, k)"), 1)}\n${catch_lines()}"
+    } else if t == "T6" {
+        helper_reads(g, kid)
+        body = lines_cat(pa, "n = reads(${ea})\ncheck(n == 1, \"the reader ran\")")
+    } else if t == "T7" || t == "T7S" {
+        some_paths = t == "T7S"
+        helper_keep(g, kid, some_paths)
+        call_s = "keep(${ea})"
+        if some_paths {
+            call_s = "keep_some(${ea}, k)"
+        }
+        body = lines_cat(pa, call_s)
+        after = kind_check(g, kid, "kept", "a", "the kept value, after the call")
+        if some_paths {
+            round_lines = "shape(w, k)\nif k % 2 == 0 {\n${lines_block(after, 1)}\n}"
+        } else {
+            round_lines = lines_cat("shape(w, k)", after)
+        }
+    } else if t == "T8" || t == "T8S" {
+        some_paths = t == "T8S"
+        helper_frees(g, some_paths)
+        call_s = "frees(${ea})"
+        if some_paths {
+            call_s = "frees_some(${ea}, k)"
+        }
+        body = lines_cat(pa, call_s)
+    } else {
+        // T9, T10
+        ret = kind_ty(kid)
+        if t == "T10" {
+            helper_id(g, kid)
+            body = lines_cat(pa, "return id(${ea})")
+        } else {
+            body = lines_cat(pa, "return ${ea}")
+        }
+        round_lines = lines_cat(bind_local(kid, "v", "shape(w, k)"), kind_check(g, kid, "v", "a", "the returned value"))
+    }
+    return program_simple(g, kid, "P17", "temporary (a call argument or a value never bound)", t,
+        shape_default(ret, body, t), round_lines, "", CALLS)
+}
+
+// ---------------------------------------------------------------------------
+// KE: the error string of a `T!` result. The fallible-result cells of the
+// PR's tuple comment: a heap error in the error slot of an `int!`, through
+// `x!`, `or`, a destructure and a pass-through.
+
+// One KE cell. Besides fails(), it declares (k1, b1) and (k2, b2), each when
+// its key is not "".
+error_cell(pid: string, ptitle: string, t: string, k1: string, b1: string, k2: string, b2: string, shape: string,
+    note: string) -> string {
+    g = gen_new("KE-${pid}-${t}")
+    gen_decl(g, "fn fails", "// Fails with a fresh error string.\nfails(w: string) -> int! {\n    return 0, string.concat(w, \"#a\")\n}")
+    if k1 != "" {
+        gen_decl(g, k1, b1)
+    }
+    if k2 != "" {
+        gen_decl(g, k2, b2)
+    }
+    res = program_simple(g, "KE", pid, ptitle, t, shape, "shape(w, k)", note, CALLS)
+    gen_free(g)
+    return res
+}
+
+ke_shape(body: string) -> string {
+    return shape_fn("", body, "w: string, k: int", "")
+}
+
+add_error_cells() {
+    p1 = "locals bound by a destructure"
+    p17 = "temporary (the result never bound)"
+    src = error_cell("P1", p1, "T1", "", "", "", "",
+        ke_shape("n, e = fails(w)\ncheck(n == 0 && e == \"w#a\", \"the error slot\")"), "")
+    add_cell("KE", "P1", "T1", src)
+    src = error_cell("P17", p17, "T5", "", "", "", "",
+        ke_shape("try {\n    n = fails(w)!\n    check(n == 1, \"not reached\")\n} catch e {\n    check(e == \"w#a\", \"the panic carries the error\")\n}"),
+        "The panic reason is the heap error string (PR #2883, tuples comment).")
+    add_cell("KE", "P17", "T5", src)
+    src = error_cell("P17", p17, "T6", "", "", "", "",
+        ke_shape("n = fails(w) or {\n    check(err == \"w#a\", \"the error in the handler\")\n    -1\n}\ncheck(n == -1, \"the handler's value\")"), "")
+    add_cell("KE", "P17", "T6", src)
+    relay = "// Propagates the error with `!`.\nrelay(w: string) -> int! {\n    n = fails(w)!\n    return n + 1\n}"
+    src = error_cell("P17", p17, "T9", "fn relay", relay, "", "",
+        ke_shape("n, e = relay(w)\ncheck(e == \"w#a\", \"the propagated error\")"), "")
+    add_cell("KE", "P17", "T9", src)
+    pass_fn = "// Passes the whole result through.\npass(w: string) -> int! {\n    return fails(w)\n}"
+    src = error_cell("P17", p17, "T10", "fn pass", pass_fn, "", "",
+        ke_shape("n, e = pass(w)\ncheck(e == \"w#a\", \"the passed-through error\")"), "")
+    add_cell("KE", "P17", "T10", src)
+    open_fn = "extern io_fd_open_read_tuple(path: string) -> (int, string)"
+    mixed = "// Passes a C function's result through on odd calls (its error is a\n// literal), and fails with a fresh error of its own on even calls.\nmixed(w: string, k: int) -> int! {\n    if k % 2 == 1 {\n        return io_fd_open_read_tuple(\"/nonexistent/ownership-grid\")\n    }\n    return 0, string.concat(w, \"#a\")\n}"
+    src = error_cell("P17", p17, "T10M", "extern open", open_fn, "fn mixed", mixed,
+        ke_shape("n, e = mixed(w, k)\nif k % 2 == 0 {\n    check(e == \"w#a\", \"the function's own error\")\n} else {\n    check(e != \"\", \"the extern's error\")\n}"),
+        "PR #2883 (tuples comment): the pass-through vetoes the error position.")
+    add_cell("KE", "P17", "T10M", src)
+    vetoed = "// One return passes a C function's result through (vetoing the error\n// position); the other propagates fails()'s heap error with `!`.\nvetoed(w: string, k: int) -> int! {\n    if k % 2 == 1 {\n        return io_fd_open_read_tuple(\"/nonexistent/ownership-grid\")\n    }\n    n = fails(w)!\n    return n\n}"
+    src = error_cell("P17", p17, "T9M", "extern open", open_fn, "fn vetoed", vetoed,
+        ke_shape("n, e = vetoed(w, k)\nif k % 2 == 0 {\n    check(e == \"w#a\", \"the propagated error\")\n} else {\n    check(e != \"\", \"the extern's error\")\n}"),
+        "PR #2883 (tuples comment): the propagated operand's error leaks.")
+    add_cell("KE", "P17", "T9M", src)
+}
+
+// ---------------------------------------------------------------------------
+// The whole grid, built once.
+
+var cells_ids: ptr = null
+var cells_kinds: ptr = null
+var cells_places: ptr = null
+var cells_transfers: ptr = null
+var cells_sources: ptr = null
+var skips_ids: ptr = null
+var skips_reasons: ptr = null
+var crossed_out: int = 0
+
+add_cell(kid: string, pid: string, t: string, src: string) {
+    collections.string_list_add(cells_ids, "${kid}-${pid}-${t}")
+    collections.string_list_add(cells_kinds, kid)
+    collections.string_list_add(cells_places, pid)
+    collections.string_list_add(cells_transfers, t)
+    collections.string_list_add(cells_sources, src)
+}
+
+// A cell's program, or the reason the combination is skipped.
+cell_or_reason(kid: string, pid: string, t: string) -> string {
+    res = ""
+    if pid == "P9" || pid == "P9W" {
+        if !in_words("T1 T2 T3 T4 T5 T6 T7 T9 T10 T11 T12 T14", t) {
+            return "not a transfer of a captured value"
+        }
+        res = captured_cell(kid, pid, t)
+    } else if pid == "P11" {
+        if !in_words("T1 T2 T6 T7 T9 T12 T14 T16", t) {
+            if in_words("T3 T4 T5 T11 T11R", t) {
+                return "the state outlives every arm: no scope of its own to leave"
+            }
+            return "not a transfer of actor state"
+        }
+        res = state_cell(kid, t)
+    } else if pid == "P12K" || pid == "P12D" {
+        if !in_words("T1 T2 T7 T12", t) {
+            return "a message field is sent: store, overwrite or send a local"
+        }
+        res = message_cell(kid, pid, t)
+    } else if pid == "P14" || pid == "P15" || pid == "P16" {
+        if !in_words("T1 T2 T4 T5 T6 T7 T7S T8 T8S T9 T10 T12 T14 T16", t) {
+            return "not a transfer of a parameter's part"
+        }
+        res = param_cell(kid, pid, t)
+    } else if pid == "P17" {
+        if !in_words("T1 T5 T6 T7 T7S T8 T8S T9 T10", t) {
+            return "a temporary is never stored, overwritten or aliased"
+        }
+        res = temp_cell(kid, t)
+    } else {
+        res = simple_cell(kid, pid, t)
+    }
+    if res == "" {
+        return "not meaningful"
+    }
+    return res
+}
+
+build() {
+    if cells_ids != null {
+        return
+    }
+    cells_ids = collections.string_list_new()
+    cells_kinds = collections.string_list_new()
+    cells_places = collections.string_list_new()
+    cells_transfers = collections.string_list_new()
+    cells_sources = collections.string_list_new()
+    skips_ids = collections.string_list_new()
+    skips_reasons = collections.string_list_new()
+    crossed_out = 0
+    ki = 0
+    while ki < kind_count() {
+        kid = kind_at(ki)
+        pi = 0
+        while pi < place_count() {
+            pid = place_at(pi)
+            ti = 0
+            while ti < transfer_count() {
+                t = column_at(ti)
+                if is_producer(kid) && (!in_words(producer_places(), pid) || !in_words(producer_transfers(), t)) {
+                    crossed_out = crossed_out + 1
+                } else {
+                    res = cell_or_reason(kid, pid, t)
+                    if is_source(res) {
+                        add_cell(kid, pid, t, res)
+                    } else {
+                        collections.string_list_add(skips_ids, "${kid}-${pid}-${t}")
+                        collections.string_list_add(skips_reasons, res)
+                    }
+                }
+                ti = ti + 1
+            }
+            pi = pi + 1
+        }
+        ki = ki + 1
+    }
+    add_error_cells()
+}
+
+// ---------------------------------------------------------------------------
+// Accessors (build() first).
+
+cell_count() -> int {
+    return collections.string_list_size(cells_ids)
+}
+
+cell_id(i: int) -> string {
+    return string.copy(collections.string_list_get(cells_ids, i))
+}
+
+cell_kind(i: int) -> string {
+    return string.copy(collections.string_list_get(cells_kinds, i))
+}
+
+cell_place(i: int) -> string {
+    return string.copy(collections.string_list_get(cells_places, i))
+}
+
+cell_transfer(i: int) -> string {
+    return string.copy(collections.string_list_get(cells_transfers, i))
+}
+
+cell_target(i: int) -> string {
+    return target_of(collections.string_list_get(cells_transfers, i))
+}
+
+// The file a cell is written to: its id in lower case, "-" as "_".
+cell_file(i: int) -> string {
+    low = string.to_lower(collections.string_list_get(cells_ids, i))
+    return "${string.replace_all(low, "-", "_")}.ae"
+}
+
+cell_source(i: int) -> string {
+    return string.copy(collections.string_list_get(cells_sources, i))
+}
+
+skip_count() -> int {
+    return collections.string_list_size(skips_ids)
+}
+
+skip_id(i: int) -> string {
+    return string.copy(collections.string_list_get(skips_ids, i))
+}
+
+skip_reason(i: int) -> string {
+    return string.copy(collections.string_list_get(skips_reasons, i))
+}
+
+// The combinations of a producer kind with a place or transfer outside its
+// axis, which are not generated.
+not_crossed() -> int {
+    return crossed_out
+}

@@ -140,6 +140,12 @@ int list_add_raw(ArrayList* list, void* item) {
  * its own ownership independently. */
 /* Store `item` in the list's owned slot `slot`, tagging it for release
  * by list_free. Shared by the adopting and owning entry points. */
+/* A pinned string (a literal) is never released, so a container that
+ * takes one stores it as an element it does not own. */
+static int is_pinned_string(const void* p) {
+    return is_aether_string(p) && ((const AetherString*)p)->ref_count == AETHER_STRING_PINNED_REFS;
+}
+
 static int list_store_owned(ArrayList* list, const void* item) {
     /* Lazy-allocate the flags array on first owned-put. Best-effort:
      * on alloc failure the item is still stored and the buffer leaks
@@ -165,6 +171,7 @@ static int list_store_owned(ArrayList* list, const void* item) {
  * list_add_string_owned below. */
 int list_add_string_adopted(ArrayList* list, const void* item) {
     if (!list) return 0;
+    if (is_pinned_string(item)) return list_add_raw(list, (void*)item);
     return list_store_owned(list, item);
 }
 
@@ -184,7 +191,7 @@ int list_add_string_owned(ArrayList* list, const void* item) {
     if (!item) return list_add_raw(list, NULL);
     const void* store = item;
     if (is_aether_string(item)) {
-        string_retain(item);
+        string_retain_shared(item);
     } else {
         size_t n = strlen((const char*)item);
         AetherString* copy = string_new_with_length((const char*)item, n);
@@ -281,8 +288,11 @@ int list_add_closure_owned(ArrayList* list, void* box) {
  * and releases what the slot owned before (#2518). The box is the caller's
  * to free when the index is out of range (returns 0). */
 int list_set_closure_owned(ArrayList* list, int index, void* box) {
-    if (!list || index < 0 || index >= list->size) return 0;
-    if (!list_grow_owned_flags(list)) return 0;
+    /* A store that fails gives the box back: it was made for the list. */
+    if (!list || index < 0 || index >= list->size || !list_grow_owned_flags(list)) {
+        free(box);
+        return 0;
+    }
     closure_box_retain_env(box);
     list_release_slot(list, index);
     list->items[index] = box;
@@ -330,7 +340,7 @@ int list_set_string_owned(ArrayList* list, int index, const void* item) {
     if (!list_grow_owned_flags(list)) return 0;
     const void* store = item;
     if (item && is_aether_string(item)) {
-        string_retain(item);
+        string_retain_shared(item);
     } else if (item) {
         AetherString* copy = string_new_with_length((const char*)item, strlen((const char*)item));
         if (!copy) return 0;
@@ -345,11 +355,14 @@ int list_set_string_owned(ArrayList* list, int index, const void* item) {
 /* The adopting form: the caller's single reference to a fresh string moves
  * into the slot, the old element released. */
 int list_set_string_adopted(ArrayList* list, int index, const void* item) {
-    if (!list || index < 0 || index >= list->size) return 0;
-    if (!list_grow_owned_flags(list)) return 0;
+    /* A store that fails gives the string it adopted back. */
+    if (!list || index < 0 || index >= list->size || !list_grow_owned_flags(list)) {
+        release_owned_value((void*)item, 1);
+        return 0;
+    }
     list_release_slot(list, index);
     list->items[index] = (void*)item;
-    list->owned_flags[index] = item ? 1 : 0;
+    list->owned_flags[index] = item && !is_pinned_string(item);
     return 1;
 }
 
@@ -619,7 +632,7 @@ int map_put_string_adopted(HashMap* map, const char* key, const void* value) {
             if (entry->hash == hash && key_equals(entry, kd, key_len)) {
                 release_owned_value(entry->value, entry->value_owned);
                 entry->value = (void*)value;
-                entry->value_owned = 1;
+                entry->value_owned = !is_pinned_string(value);
                 return 1;
             }
             entry = entry->next;
@@ -636,7 +649,7 @@ int map_put_string_adopted(HashMap* map, const char* key, const void* value) {
     unsigned int hash = key_hash(key, &kd, &key_len);
     unsigned int index = hash % (unsigned int)map->capacity;
     HashMapEntry* head = map->buckets[index];
-    if (head) head->value_owned = 1;
+    if (head) head->value_owned = !is_pinned_string(value);
     return 1;
 }
 
@@ -652,7 +665,7 @@ int map_put_string_owned(HashMap* map, const char* key, const void* value) {
     if (!value) return map_put_raw(map, key, NULL);
     const void* store = value;
     if (is_aether_string(value)) {
-        string_retain(value);
+        string_retain_shared(value);
     } else {
         size_t n = strlen((const char*)value);
         AetherString* copy = string_new_with_length((const char*)value, n);

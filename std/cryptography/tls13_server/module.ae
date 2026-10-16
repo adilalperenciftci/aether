@@ -66,7 +66,7 @@ struct RecordIO {
     off: int
 }
 
-fn recio_new(sock: ptr) -> *RecordIO {
+fn recio_new(sock: @keep ptr) -> *RecordIO {
     r = malloc(sizeof(RecordIO)) as *RecordIO
     r.sock = sock
     r.buf = bytes.new(4096)
@@ -278,7 +278,7 @@ fn transcript_hash_algo(tr: ptr, algo: string) -> ptr {
 }
 
 // Perform the TLS 1.3 server handshake over `sock`.
-accept(sock: ptr, cert_chain: ptr, cert_lens: ptr, priv_key: ptr, x25519_priv: ptr) -> (ptr, string) {
+accept(sock: @keep ptr, cert_chain: ptr, cert_lens: ptr, priv_key: ptr, x25519_priv: ptr) -> (ptr, string) {
     if sock == null { return null, "socket is null" }
     if cert_chain == null { return null, "certificate chain is null" }
     if priv_key == null { return null, "private key is null" }

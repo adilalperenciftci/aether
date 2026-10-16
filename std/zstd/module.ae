@@ -42,19 +42,19 @@ extern zstd_try_stream_new(level: int) -> ptr
 extern zstd_try_stream_write(handle: ptr, data: ptr, length: int) -> int
 extern zstd_try_stream_flush(handle: ptr) -> int
 extern zstd_try_stream_finish(handle: ptr) -> int
-extern zstd_get_stream_bytes(handle: ptr) -> string
+extern zstd_get_stream_bytes(handle: ptr) -> ptr
 extern zstd_get_stream_length(handle: ptr) -> int
 extern zstd_release_stream(handle: ptr)
 
 extern zstd_try_compress(data: ptr, length: int, level: int) -> int
-extern zstd_get_compress_bytes() -> string
+extern zstd_get_compress_bytes() -> ptr
 extern zstd_get_compress_length() -> int
 extern zstd_release_compress()
 
 // Length-preserving string constructor from std.string — takes an explicit
 // byte count so binary payloads with embedded NULs survive the copy out of
 // the borrowed C buffer into an owned AetherString.
-extern string_new_with_length(data: string, length: int) -> ptr
+extern string_new_with_length(data: string, length: int) -> ptr @heap
 
 // libzstd's own range. 3 is its default and a good general choice; higher
 // levels cost markedly more time for modest gains.

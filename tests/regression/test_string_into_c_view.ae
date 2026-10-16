@@ -1,0 +1,35 @@
+// R4 of the ownership model: a `string[]` view of a `ptr` is C's memory, a
+// `const char**` C reads (Vulkan's ppEnabledExtensionNames is built this
+// way). A string stored through it is its characters, a literal or a counted
+// string alike; stored as the AetherString Aether holds, C read its header.
+
+import std.string
+
+extern exit(code: int)
+extern calloc(n: int, size: int) -> ptr
+extern free(p: ptr)
+extern strlen(s: ptr) -> int
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+// Built from a parameter, so the optimizer cannot fold it into a literal.
+join(a: string, b: string) -> string {
+    return string.concat(a, b)
+}
+
+main() {
+    names = calloc(2, 8)
+    counted = join("VK_KHR_", "surface")
+    (names as string[])[0] = "VK_KHR_portability_enumeration"
+    (names as string[])[1] = counted
+    check(strlen((names as ptr[])[0]) == 30, "a literal stored through a C view is its characters")
+    check(strlen((names as ptr[])[1]) == 14, "a counted string stored through a C view is its characters")
+    free(names)
+    release(counted)
+    println("ok")
+}

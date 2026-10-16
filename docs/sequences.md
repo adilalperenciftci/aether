@@ -86,9 +86,14 @@ walk(s: *StringSeq) {
 
 ## Automatic ownership
 
-A `*StringSeq` local is reclaimed **automatically**, the compiler frees
-it on reassignment and at scope exit, so the explicit `string.seq_free(s)`
-above is optional. This mirrors the heap-string ownership model:
+Every place that holds a `*StringSeq` owns a reference to it, as it does a
+string (docs/memory-management.md, "Values the program owns"): a local, a
+struct field, a tuple position, an optional, an array element, a closure's
+capture, a message field, an actor's state and a module `var`. A place takes
+a fresh sequence (a literal, or a call whose result hands one over: an Aether
+function's, or a `string.seq_*` producer's) and retains any other; it
+releases what it holds when it is overwritten or left, a panic included. So
+the explicit `string.seq_free(s)` above is optional:
 
 ```aether,fragment
 deep = string.seq_empty()
@@ -100,17 +105,27 @@ while i < 1000 {
 // `deep` freed here at scope exit, no leak, no manual free needed
 ```
 
-It is safe to *also* call `string.seq_free(s)` yourself: the explicit
-free clears the ownership tracker so the scope-exit free does not run
-twice. Freeing is a refcount **decrement** (`string_seq_free`), so a
-structurally-shared tail survives until its last owner is freed,
-`string.seq_cons(x, t)` and `string.seq_cons(y, t)` share `t` safely, and
-each rooted list can be freed independently.
+It is safe to *also* call `string.seq_free(s)` on a local yourself: the
+local is left empty, so its own release finds nothing. Freeing is a
+refcount **decrement** (`string_seq_free`), so a structurally-shared tail
+survives until its last owner is freed, `string.seq_cons(x, t)` and
+`string.seq_cons(y, t)` share `t` safely, and each rooted list can be freed
+independently. A parameter is borrowed: the function may not free it
+(E0901), and one it rebinds takes a reference of its own first.
 
-A sequence that **escapes** the function, returned, captured by a
-closure, or stored raw in a non-seq container (`list.add`, an actor
-message field), is *not* auto-freed; ownership transfers to the
-recipient, which is responsible for the eventual `string.seq_free`.
+A function returning a sequence hands its caller a reference (a local's, or
+a new one to a parameter it returns), and a call passing a fresh sequence as
+an argument releases it after the call. A message field takes a reference
+at the send and the message releases it after the receive arm; the cell
+counts are atomic, so a sequence may be shared across actors. `string.seq_tail`
+lends the tail of a sequence the caller holds; a place that keeps it takes a
+reference of its own.
+
+A `ptr` slot (a `list.add` element, a `ptr` field, a `@keep ptr` parameter)
+owns nothing. A sequence kept there needs a reference of its own,
+`string.seq_retain(s)`, given back with `string.seq_free` when it is taken
+out; giving one a `@keep ptr` parameter or a `ptr` field without it is
+refused (E0902).
 
 ## Pattern match
 

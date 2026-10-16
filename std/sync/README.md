@@ -103,7 +103,7 @@ guarded_rc(g: ptr) -> ptr { return mem.long_to_ptr(mem.get_long(g, 8)) }
 guarded_payload(g: ptr) -> int { return mem.get_int(g, 0) }
 
 // A reader that loaded this value takes a reference.
-hold_ref(g: ptr) -> ptr { _n = sync.atomic_add(guarded_rc(g), 1)  return g }
+hold_ref(g: @keep ptr) -> ptr { _n = sync.atomic_add(guarded_rc(g), 1)  return g }
 
 // Drop a reference. At zero, no holder remains — reclaim.
 drop_ref(g: ptr) {

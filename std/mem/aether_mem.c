@@ -95,6 +95,17 @@ void* aether_mem_get_ptr(void* p, int offset) {
  * Drives the `*(void**)out_pp = value` pattern for out-parameters
  * across the FFI boundary, used by ported C functions whose
  * signatures take `T**` arguments. */
+/* Exchange the pointers at indices `i` and `j` of the pointer array `p`.
+ * Ownership-neutral: what each slot holds moves, nothing is taken or
+ * released, so it permutes an array of strings whoever owns them (an
+ * Aether array or a C one). */
+void aether_mem_swap_ptrs(void* p, int i, int j) {
+    void** a = (void**)p;
+    void* t = a[i];
+    a[i] = a[j];
+    a[j] = t;
+}
+
 int aether_mem_set_ptr(void* p, int offset, void* value) {
     if (!p) return 0;
     *(void**)((char*)p + offset) = value;

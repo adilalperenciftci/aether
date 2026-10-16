@@ -7,8 +7,8 @@
  * call returns.
  *
  * register_cb stores the closure for fire_cb to invoke later: the callback-
- * registry shape, left unannotated, so the caller must keep the environment
- * alive. The box layout mirrors the codegen prologue's `_AeClosure`
+ * registry shape, declared `@retain`, so the call hands it a reference of
+ * its own. The box layout mirrors the codegen prologue's `_AeClosure`
  * {fn, env} prefix. */
 
 typedef struct {

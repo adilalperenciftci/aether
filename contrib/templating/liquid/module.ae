@@ -2002,7 +2002,7 @@ filter_kind(name: string) -> int {
 // input's text and each argument that is a variable path or a keyword
 // literal resolved to its text (#2182); a value filter gets the values
 // themselves. An unknown filter passes the value through unchanged.
-apply_filter_in(ctx: ptr, val: string, name: string, args: string) -> (string, string) {
+apply_filter_in(ctx: @keep ptr, val: string, name: string, args: string) -> (string, string) {
     kind = filter_kind(name)
     if kind == FILTER_NONE { return val, "" }
     raw = split_commas(args)
@@ -2183,7 +2183,7 @@ sort_cmp(ctx: ptr, a: string, b: string, property: string, has_property: int, na
 // `sort` / `sort_natural`, with an optional property to sort objects by.
 // Numbers with strings, and booleans, arrays or objects, do not order
 // against each other, and `sort` says so as Liquid does; nil goes last.
-filter_sort(ctx: ptr, val: string, property: string, has_property: int, natural: int) -> (string, string) {
+filter_sort(ctx: @keep ptr, val: string, property: string, has_property: int, natural: int) -> (string, string) {
     items = iter_items(ctx, val)
     n = string_list_size(items)
     if natural == 0 {
@@ -2213,7 +2213,7 @@ filter_sort(ctx: ptr, val: string, property: string, has_property: int, natural:
 
 // The filters that take and give values of any kind (filter_kind's
 // FILTER_VALUE).
-apply_value_filter(ctx: ptr, val: string, name: string, raw: ptr) -> (string, string) {
+apply_value_filter(ctx: @keep ptr, val: string, name: string, raw: ptr) -> (string, string) {
     // The positional arguments' values, and default's allow_false.
     args = string_list_new()
     allow_false = 0
@@ -2240,7 +2240,7 @@ apply_value_filter(ctx: ptr, val: string, name: string, raw: ptr) -> (string, st
     return out, err
 }
 
-value_filter(ctx: ptr, val: string, name: string, args: ptr, allow_false: int) -> (string, string) {
+value_filter(ctx: @keep ptr, val: string, name: string, args: ptr, allow_false: int) -> (string, string) {
     argc = string_list_size(args)
     k = value_kind(val)
     if string.equals(name, "split") == 1 {
@@ -2486,7 +2486,7 @@ filter_date(ctx: ptr, val: string, format: string) -> (string, string) {
 // Evaluate an OUTPUT body -- the trimmed contents of `{{ ... }}`, or an
 // assign's right-hand side: a value (eval_value), then each `| filter`
 // stage in turn. Returns (value, "") or (nil, error).
-render_output(ctx: ptr, body: string) -> (string, string) {
+render_output(ctx: @keep ptr, body: string) -> (string, string) {
     stages = split_pipes(body)
     sn = string_list_size(stages)
     if sn == 0 {
@@ -2544,7 +2544,7 @@ tag_head(body: string) -> (string, string) {
 // `{% assign NAME = EXPR %}` — bind NAME in ctx to EXPR's value: a
 // literal or a variable path, then any filter stages (render_output). An
 // array stays an array (`{% assign parts = s | split: "," %}`).
-exec_assign(ctx: ptr, rest: string) -> string {
+exec_assign(ctx: @keep ptr, rest: string) -> string {
     n = string_length(rest)
     eq = find_outside_quotes(rest, n, 0, 61) // '='
     if eq < 0 { return "assign: missing `=`" }
@@ -2560,7 +2560,7 @@ exec_assign(ctx: ptr, rest: string) -> string {
 }
 
 // Dispatch a TAG body. Returns "" on success, or an error message.
-exec_tag(ctx: ptr, body: string) -> string {
+exec_tag(ctx: @keep ptr, body: string) -> string {
     head, rest = tag_head(body)
     if string.equals(head, "assign") == 1 {
         return exec_assign(ctx, rest)
@@ -3491,7 +3491,7 @@ find_block_branch(kinds: ptr, contents: ptr, start: int, end: int,
 // recurse into the inner slice to build the captured string, then
 // bind it. Any other unknown tag goes to exec_tag, which currently
 // dispatches `assign` and errors on everything else.
-render_range(kinds: ptr, contents: ptr, start: int, end: int, ctx: ptr) -> (string, string) {
+render_range(kinds: ptr, contents: ptr, start: int, end: int, ctx: @keep ptr) -> (string, string) {
     sb = strbuilder.new(64)
     i = start
     while i < end {
@@ -3643,7 +3643,7 @@ find_capture_end(kinds: ptr, contents: ptr, start: int, end: int) -> (int, strin
 // Appends the chosen branch's output to `sb`. Returns
 // (after_endif_index, "") on success or (start, error).
 render_if_block(kinds: ptr, contents: ptr, start: int, end: int,
-    ctx: ptr, sb: ptr, first_cond: string, invert: int)
+    ctx: @keep ptr, sb: ptr, first_cond: string, invert: int)
 -> (int, string) {
     open_kw = "if"
     end_kw = "endif"
@@ -3715,7 +3715,7 @@ render_if_block(kinds: ptr, contents: ptr, start: int, end: int,
 // comma-separated alternatives: `{% when 1, 2, 3 %}` matches if subject
 // equals any of them. `else` is the default branch.
 render_case_block(kinds: ptr, contents: ptr, start: int, end: int,
-    ctx: ptr, sb: ptr, subject_expr: string)
+    ctx: @keep ptr, sb: ptr, subject_expr: string)
 -> (int, string) {
     subject_str = trim(subject_expr)
     if string_length(subject_str) == 0 {
@@ -4082,7 +4082,7 @@ forloop_at(fnode: ptr, k: int, length: int) {
 // `__break__` and `__continue__`, which this catches. Returns
 // (index_of_endfor_token, "") on success or (start, error).
 render_for_block(kinds: ptr, contents: ptr, start: int, end: int,
-    ctx: ptr, sb: ptr, rest: string)
+    ctx: @keep ptr, sb: ptr, rest: string)
 -> (int, string) {
     body_start = start + 1
     end_at, ferr = find_for_end(kinds, contents, body_start, end)
@@ -4151,7 +4151,7 @@ render_for_block(kinds: ptr, contents: ptr, start: int, end: int,
 // With no `cols`, all items go in one row. Inside the body the same
 // variable and `forloop` that `for` binds are bound.
 render_tablerow_block(kinds: ptr, contents: ptr, start: int, end: int,
-    ctx: ptr, sb: ptr, rest: string)
+    ctx: @keep ptr, sb: ptr, rest: string)
 -> (int, string) {
     body_start = start + 1
     end_at, ferr = find_tablerow_end(kinds, contents, body_start, end)
@@ -4400,7 +4400,7 @@ parse_render_args(outer_ctx: ptr, body: string, start_after_name: int) -> (ptr, 
 
 // Dispatch `{% include %}` / `{% render %}` body. `strict` is 1 for
 // the `render` form (fresh ctx) or 0 for `include` (inherit ctx).
-render_include_tag(outer_ctx: ptr, rest: string, strict: int) -> (string, string) {
+render_include_tag(outer_ctx: @keep ptr, rest: string, strict: int) -> (string, string) {
     tag_name = "include"
     if strict == 1 { tag_name = "render" }
     rn = string_length(rest)
@@ -4611,7 +4611,7 @@ layout_target(kinds: ptr, contents: ptr, n: int) -> (int, string, string) {
 render_block_from(chain_kinds: ptr, chain_contents: ptr, chain_blocks: ptr, levels: int,
     from: int, name: string,
     base_kinds: ptr, base_contents: ptr, base_lo: int, base_hi: int,
-    ctx: ptr) -> (string, string) {
+    ctx: @keep ptr) -> (string, string) {
     lv = from
     while lv < levels {
         if map_has(list_get_raw(chain_blocks, lv), name) == 1 { break }
@@ -4648,7 +4648,7 @@ render_block_from(chain_kinds: ptr, chain_contents: ptr, chain_blocks: ptr, leve
 // the templates below the base, most derived first.
 render_base_with_chain(base_kinds: ptr, base_contents: ptr, base_n: int,
     chain_kinds: ptr, chain_contents: ptr, chain_blocks: ptr,
-    levels: int, ctx: ptr) -> (string, string) {
+    levels: int, ctx: @keep ptr) -> (string, string) {
     sb = strbuilder.new(64)
     i = 0
     while i < base_n {
@@ -4730,7 +4730,7 @@ free_layout_chain(chain_kinds: ptr, chain_contents: ptr, chain_blocks: ptr,
 // `context_set_include_root`; rejects path traversal; a parent reached
 // twice is a cycle; the whole chain counts against the depth-100 budget.
 render_layout_template(child_kinds: ptr, child_contents: ptr, child_n: int,
-    lay_idx: int, parent_name: string, ctx: ptr) -> (string, string) {
+    lay_idx: int, parent_name: string, ctx: @keep ptr) -> (string, string) {
     root, has_root = get_include_root(ctx)
     if has_root == 0 {
         return "", "layout: no include-root set — call context_set_include_root() first"
@@ -4834,7 +4834,7 @@ render_layout_template(child_kinds: ptr, child_contents: ptr, child_n: int,
 // context's value store returns -- not an include or a `{% render %}`
 // inside it -- the arrays and objects it made that no binding reaches are
 // reclaimed (store_collect), once enough have been made to be worth it.
-render(t: ptr, ctx: ptr) -> (string, string) {
+render(t: ptr, ctx: @keep ptr) -> (string, string) {
     sp = store_of(ctx)
     st = sp as *LiquidStore
     st.depth = st.depth + 1
@@ -4846,7 +4846,7 @@ render(t: ptr, ctx: ptr) -> (string, string) {
     return out, err
 }
 
-render_template(t: ptr, ctx: ptr) -> (string, string) {
+render_template(t: ptr, ctx: @keep ptr) -> (string, string) {
     kinds = list_get_raw(t, 0)
     contents = list_get_raw(t, 1)
     n = string_list_size(kinds)
@@ -4876,7 +4876,7 @@ render_template(t: ptr, ctx: ptr) -> (string, string) {
 // on success or an error string. Partial output written before an
 // error is left in the strbuilder (matches `render`'s "partial output
 // plus error" shape).
-render_to_strbuilder(t: ptr, ctx: ptr, sb: ptr) -> string {
+render_to_strbuilder(t: ptr, ctx: @keep ptr, sb: ptr) -> string {
     out, err = render(t, ctx)
     strbuilder.append(sb, out)
     return err

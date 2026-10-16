@@ -1,0 +1,40 @@
+// Regression (#2913): a function defined in one clause whose parameter is a
+// string literal pattern emitted the literal into the C as a bare identifier
+// (`if (_pattern_0 != hi)`), so the program did not compile. The check now
+// compares by content, NULL-safe, as a clause set's dispatcher does (#2467):
+// a matching argument runs the body, any other string, a counted one with the
+// same characters included, gets the function's no-match value.
+
+import std.string
+
+extern exit(code: int)
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+only_hi("hi") -> int {
+    return 1
+}
+
+tag("x", n: int) -> string {
+    return "x${n}"
+}
+
+// Built from a parameter, so the optimizer cannot fold it into a literal.
+join(a: string, b: string) -> string {
+    return string.concat(a, b)
+}
+
+main() {
+    check(only_hi("hi") == 1, "a literal argument matches")
+    check(only_hi(join("h", "i")) == 1, "a counted string with the same characters matches")
+    check(only_hi("ho") == 0, "another string gets the no-match value")
+    check(only_hi("") == 0, "the empty string gets the no-match value")
+    check(tag("x", 7) == "x7", "a string pattern beside another parameter")
+    check(tag("y", 7) == "", "a mismatch beside another parameter")
+    println("ok")
+}

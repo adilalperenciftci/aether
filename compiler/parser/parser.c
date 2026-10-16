@@ -4994,7 +4994,9 @@ ASTNode* parse_actor_definition(Parser* parser) {
                             next_tok->type == TOKEN_DURATION ||
                             next_tok->type == TOKEN_FLOAT ||
                             next_tok->type == TOKEN_STRING || next_tok->type == TOKEN_BOOL ||
-                            next_tok->type == TOKEN_BYTE || next_tok->type == TOKEN_PTR))) {
+                            next_tok->type == TOKEN_BYTE || next_tok->type == TOKEN_PTR ||
+                            /* #2921: a tuple type, `state (string, int) v` */
+                            next_tok->type == TOKEN_LEFT_PAREN))) {
                 // Explicit type: state int count = 0  or  state long total = 0
                 state_decl = parse_variable_declaration_with_semicolon(parser, false);
             } else if (next_tok && next_tok->type == TOKEN_IDENTIFIER) {
@@ -5360,9 +5362,14 @@ static void parse_extern_trailing_attrs(Parser* parser, ASTNode* ext) {
 
         if (strcmp(tag->value, "heap") == 0) {
             advance_token(parser);  /* consume '@' */
-            if (!ext->node_type || ext->node_type->kind != TYPE_STRING) {
+            /* A `ptr` result is a counted string returned untyped
+             * (string.from_int and the like) or a `*StringSeq`: `@heap`
+             * says the caller owns a reference, as for a `string` result
+             * (R1). */
+            if (!ext->node_type || (ext->node_type->kind != TYPE_STRING &&
+                                    ext->node_type->kind != TYPE_PTR)) {
                 parser_error(parser,
-                    "@heap on extern return is only valid on `-> string`");
+                    "@heap on extern return is only valid on `-> string` or `-> ptr`");
             } else {
                 ext->annotation =
                     annotation_add_marker(ext->annotation, "heap_return");
@@ -6119,8 +6126,16 @@ ASTNode* parse_pattern(Parser* parser) {
             ASTNode* pattern = create_ast_node(AST_PATTERN_VARIABLE, token->value,
                                               token->line, token->column);
 
-            // Optional type annotation: param: type
+            // Optional type annotation: param: type, `param: @keep ptr` for a
+            // pointer the function keeps past the call (#2926).
             if (match_token(parser, TOKEN_COLON)) {
+                if (peek_token(parser) && peek_token(parser)->type == TOKEN_AT &&
+                    peek_ahead(parser, 1) && peek_ahead(parser, 1)->type == TOKEN_IDENTIFIER &&
+                    peek_ahead(parser, 1)->value && strcmp(peek_ahead(parser, 1)->value, "keep") == 0) {
+                    advance_token(parser);
+                    advance_token(parser);
+                    pattern->annotation = annotation_add_marker(pattern->annotation, "keep_param");
+                }
                 Type* param_type = parse_type(parser);
                 if (param_type) {
                     pattern->node_type = param_type;
@@ -6145,8 +6160,7 @@ ASTNode* parse_pattern(Parser* parser) {
                 ASTNode* default_expr = parse_expression(parser);
                 if (default_expr) {
                     add_child(pattern, default_expr);
-                    if (pattern->annotation) free(pattern->annotation);
-                    pattern->annotation = strdup("has_default");
+                    pattern->annotation = annotation_add_marker(pattern->annotation, "has_default");
                 }
             }
 
@@ -6183,8 +6197,7 @@ ASTNode* parse_pattern(Parser* parser) {
                     ASTNode* default_expr = parse_expression(parser);
                     if (default_expr) {
                         add_child(pattern, default_expr);
-                        if (pattern->annotation) free(pattern->annotation);
-                        pattern->annotation = strdup("has_default");
+                        pattern->annotation = annotation_add_marker(pattern->annotation, "has_default");
                     }
                 }
                 return pattern;
@@ -6210,8 +6223,7 @@ ASTNode* parse_pattern(Parser* parser) {
                     ASTNode* default_expr = parse_expression(parser);
                     if (default_expr) {
                         add_child(pattern, default_expr);
-                        if (pattern->annotation) free(pattern->annotation);
-                        pattern->annotation = strdup("has_default");
+                        pattern->annotation = annotation_add_marker(pattern->annotation, "has_default");
                     }
                 }
                 return pattern;

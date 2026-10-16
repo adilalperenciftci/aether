@@ -81,11 +81,11 @@ extern cryptography_md5_bytes_raw(data: ptr, length: int) -> int
 extern cryptography_sha1_bytes_raw(data: ptr, length: int) -> int
 extern cryptography_sha256_bytes_raw(data: ptr, length: int) -> int
 extern cryptography_hash_bytes_raw(algo: string, data: ptr, length: int) -> int
-extern cryptography_get_binary_digest() -> string
+extern cryptography_get_binary_digest() -> ptr
 extern cryptography_get_binary_digest_length() -> int
 extern cryptography_release_binary_digest()
 extern cryptography_random_bytes_raw(n: int) -> int
-extern cryptography_get_random_bytes() -> string
+extern cryptography_get_random_bytes() -> ptr
 extern cryptography_get_random_bytes_length() -> int
 extern cryptography_release_random_bytes()
 
@@ -97,7 +97,7 @@ extern cryptography_digest_free_raw(handle: ptr)
 extern malloc(size: int) -> ptr
 extern free(p: ptr)
 
-extern string_new_with_length(data: string, length: int) -> ptr
+extern string_new_with_length(data: string, length: int) -> ptr @heap
 
 // Compute the SHA-1 hex digest of the first `length` bytes of `data`.
 // Returns (digest, "") on success, ("", error) when OpenSSL is
@@ -604,7 +604,7 @@ pure_digest_new(algo: string) -> {
 }
 
 // Wrap a backend handle so update / final can dispatch on it.
-digest_wrap(kind: int, inner: ptr, dlen: int) -> ptr {
+digest_wrap(kind: int, inner: @keep ptr, dlen: int) -> ptr {
     w = malloc(sizeof(DigestCtx)) as *DigestCtx
     if w == null {
         return null

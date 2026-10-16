@@ -25,6 +25,7 @@ exports(
     setenv, unsetenv,
     run_pipe, wait_pid, run_pipe_drain_and_wait,
     spawn_proc, wait, wait_any, wait_any_timeout,
+    os_spawn_to_raw, spawn_proc_to,
     os_kill_raw, os_wait_pid_timeout_raw, os_run_supervised_raw,
     kill, wait_pid_timeout, run_supervised,
     os_run_full_raw, run_full,
@@ -38,7 +39,7 @@ extern os_system(cmd: string) -> int
 
 // Run a command and capture stdout as a string. Raw extern returns
 // NULL on failure. Use the Go-style wrapper `os.exec` below in most code.
-extern os_exec_raw(cmd: string) -> string
+extern os_exec_raw(cmd: string) -> string @heap
 
 // Run a child process directly via fork+execvp+waitpid (POSIX). NO SHELL
 // is interpreted: argv items are passed verbatim, so paths-with-spaces,
@@ -56,15 +57,15 @@ extern os_run(prog: string, argv: ptr, env: ptr) -> int
 // null on spawn failure. Use the Go-style wrapper `os.run_capture` in
 // most code. The child's exit code is discarded — use os_run, or the
 // tuple-returning `os_run_capture_status_raw` below, if you need both.
-extern os_run_capture_raw(prog: string, argv: ptr, env: ptr) -> string
+extern os_run_capture_raw(prog: string, argv: ptr, env: ptr) -> string @heap
 
 // Tuple sibling that exposes the child's exit code. Returns
 // (stdout, status, err) — see the Aether-side `run_capture` wrapper
 // for the per-slot semantics. Issue #289.
 //
 // Position 0 (stdout) is `@heap`: the C side accumulates the child's
-// output into a malloc'd buffer that grows via realloc as bytes
-// arrive. The destructured LHS owns it; the heap-string-tracker
+// output into a buffer that grows as bytes arrive and hands it over as
+// a counted string. The destructured LHS owns it; the heap-string-tracker
 // frees it on reassignment / at function exit. Position 2 (err)
 // stays default-borrow — error messages are static string literals
 // in aether_os.c.
@@ -117,11 +118,11 @@ extern os_wait_pid_raw(pid: int) -> (int, string)
 // On Windows, returns ("", -1, "unsupported on Windows").
 //
 // Position 0 (channel_payload) is `@heap`: the C side accumulates
-// the drained pipe contents into a malloc'd buffer that grows via
-// realloc. The destructured LHS owns it; the heap-string-tracker
-// frees it on reassignment / at function exit. Position 2 (err)
-// stays default-borrow — every error path returns a static
-// string literal.
+// the drained pipe contents into a buffer that grows as it reads and
+// hands it over as a counted string. The destructured LHS owns it;
+// the heap-string-tracker frees it on reassignment / at function
+// exit. Position 2 (err) stays default-borrow — every error path
+// returns a static string literal.
 //
 // Audited callers: no manual string.release on the channel
 // payload anywhere in stdlib, tests/, examples/, tools/, or
@@ -145,6 +146,16 @@ extern os_run_pipe_drain_and_wait_raw(prog: string, argv: ptr, env: ptr) -> (str
 // Spawn a child without blocking. Returns (token, err). err is "" on a
 // successful spawn regardless of the child's eventual exit code.
 extern os_spawn_raw(prog: string, argv: ptr, env: ptr) -> (int, string)
+
+// Spawn a child without blocking, its stdout and stderr written to the file
+// `out_path` (created or truncated) and its stdin empty. Returns (token, err),
+// a token the wait calls reap like os_spawn_raw's. The child runs in a Job
+// Object of its own on Windows and leads a process group of its own on
+// POSIX, so os_kill_raw(token, sig) ends its whole tree: a build tool's
+// compilers too. The file and the null device are the only handles it
+// inherits. Anything the child leaves running when it exits on its own is
+// not ended.
+extern os_spawn_to_raw(prog: string, argv: ptr, env: ptr, out_path: string) -> (int, string)
 
 // Reap one token. Blocks until that child exits. Returns (exit_code,
 // err). err is non-empty only for a bad/unknown token or abnormal
@@ -176,7 +187,7 @@ extern os_wait_any_raw(tokens: ptr) -> (int, int, string)
 extern os_wait_any_timeout_raw(tokens: ptr, secs: int) -> (int, int, int, string)
 
 // Get environment variable, returns string or NULL if not set
-extern os_getenv(name: string) -> string
+extern os_getenv(name: string) -> string @heap
 
 // Set / unset environment variable. The C-side functions live in
 // std.io for legacy reasons; std.os re-exposes them so callers
@@ -188,7 +199,7 @@ extern io_unsetenv_raw(name: string) -> int
 // Search PATH for an executable. Returns the absolute path to the
 // first hit, or "" if not found. If `name` already contains '/', it's
 // returned as-is when it's executable.
-extern os_which(name: string) -> string
+extern os_which(name: string) -> string @heap
 
 // Command-line arguments
 extern aether_args_count() -> int
@@ -268,7 +279,7 @@ extern os_execv(prog: string, argv_list: ptr) -> int
 
 // string_concat used to detach the borrowed output string from the
 // internal popen buffer.
-extern string_concat(a: string, b: string) -> string
+extern string_concat(a: string, b: string) -> string @heap
 
 // Execute a shell command and capture stdout. Returns (output, "")
 // on success, ("", error) on failure.
@@ -344,6 +355,15 @@ run_pipe_drain_and_wait(prog: string, argv: ptr, env: ptr) -> {
 // reserved keyword (actor spawning). See os_spawn_raw.
 spawn_proc(prog: string, argv: ptr, env: ptr) -> {
     return os_spawn_raw(prog, argv, env)
+}
+
+// Start a child without waiting, its stdout and stderr written to the file
+// `out_path` (created or truncated). Returns (token, err) like spawn_proc;
+// the token works with wait, wait_any and wait_any_timeout, and kill(token,
+// sig) ends the child's whole tree (a Job Object on Windows, a process group
+// on POSIX). See os_spawn_to_raw.
+spawn_proc_to(prog: string, argv: ptr, env: ptr, out_path: string) -> {
+    return os_spawn_to_raw(prog, argv, env, out_path)
 }
 
 // Reap a single spawned token. Blocks until it exits. Returns
@@ -478,9 +498,8 @@ extern string_length(str: string) -> int
 // err):
 //   - stdout / stderr: the child's two streams, captured independently
 //     (the `2>&1`-merged shape is not this call). "" when empty. Like
-//     os.run_capture they are NUL-terminated, so a capture holding an
-//     embedded NUL reads as truncated through the string ops — the
-//     stdin direction has no such limit.
+//     os.run_capture they are counted strings carrying their length, so
+//     an embedded NUL is kept.
 //   - exit_code: WEXITSTATUS on normal exit, 128+signo if signalled,
 //     127 on exec failure, -1 on spawn/IO error.
 //   - err: "" on a successful spawn (regardless of exit code);
@@ -506,7 +525,7 @@ run_full(prog: string, argv: ptr, env: ptr, stdin_data: string) -> {
 // needs these to run build steps relative to a project root.
 
 extern os_chdir_raw(path: string) -> int
-extern os_getcwd_raw() -> string
+extern os_getcwd_raw() -> string @heap
 
 // Change the process working directory. Returns "" on success, an error
 // message on failure (e.g. directory missing or not a directory).
@@ -518,8 +537,8 @@ chdir(path: string) -> string {
 }
 
 // Current working directory, or "" on failure. Returns a fresh
-// refcounted string the caller owns (the raw strdup is reclaimed by the
-// heap-string tracker — os_getcwd_raw is classified owned-heap in codegen).
+// refcounted string the caller owns (the raw result is `@heap`, released
+// by the heap-string tracker).
 getcwd() -> string {
     s = os_getcwd_raw()
     if s == null {
@@ -548,7 +567,7 @@ argv0() -> {
 // human-readable UTC timestamp is wanted (rev-blob date fields, JSON
 // response timestamps, log-line prefixes). Sub-second precision and
 // timezone offsets are out of scope; additive variants can land later.
-extern os_now_utc_iso8601_raw() -> string
+extern os_now_utc_iso8601_raw() -> string @heap
 
 now_utc_iso8601() -> string {
     s = os_now_utc_iso8601_raw()
@@ -590,7 +609,7 @@ struct LocalTime {
 }
 
 extern os_now_local_fill_raw(out: ptr)
-extern os_now_local_iso8601_raw() -> string
+extern os_now_local_iso8601_raw() -> string @heap
 extern malloc(n: int) -> ptr
 
 // Returns a heap-allocated LocalTime populated with the current
@@ -641,7 +660,7 @@ now_local_iso8601() -> string {
 // net.pipe_open() < 0) gives a sharper answer than the platform
 // name alone. See CONTRIBUTING.md "Coding for portability" for
 // the broader pattern.
-// Both strdup a fresh char* (or null); `@heap` so the heap-tracker frees it.
+// Each returns a fresh counted string (or null); `@heap` so the heap-tracker frees it.
 // Without it the string_concat below leaked the original (the macOS leaks gate
 // caught this via a test that calls temp_dir()).
 extern os_platform_raw() -> string @heap

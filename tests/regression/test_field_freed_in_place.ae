@@ -1,22 +1,17 @@
-// Regression: a struct's string field handed to a call that frees it gives
-// its reference up, so nothing frees the same buffer again.
+// Regression: a struct's string field freed where it lives gives its
+// reference up, so nothing frees the same buffer again.
 //
-// A function that frees its `string` parameter takes the reference its
-// caller passed. A local handed to one already counted as escaped; a field
-// kept its `_heap_<field>` tracker set, so the next free of the field freed
-// the buffer a second time:
-//   - `p.name = set_owned(p.name, v)`, `set_owned` freeing its first
-//     argument, through a box whose tracker the store reads (a heap.new
-//     local, and a parameter every call fills with one): the store freed
-//     the old value set_owned had already freed;
-//   - `string.free(p.name)` or a helper that frees its argument, then
-//     heap.free(p): the destructor freed it again;
-//   - a field of a struct a call returned, kept in a temporary the
-//     statement destroys: `drop(make_box(w).item.name)`.
-// The frees a callee can take a reference with release a counted
-// AetherString and leave a plain malloc'd buffer (an `@heap` extern's,
-// os.getenv here) alone, so a plain buffer stays the field's own, for the
-// field to free.
+// The field owns its string (R2). Freed in place (`string.free(p.name)`,
+// `release(p.name)`, or the runtime free bound under another name), the
+// field is left empty: the store that replaces it next, and the destructor
+// of the struct that holds it (`heap.free(p)`, a statement's temporary),
+// find nothing to release. A store releases the value it replaces. Plain
+// malloc'd buffers from an `@heap` extern (os.getenv here) are adopted as
+// counted strings at the call, so they take the same path.
+//
+// Before R3 this test also covered a function that freed the string it was
+// passed (`drop(s: string) { string.free(s) }`); that is refused now, E0901
+// (tests/integration/frees_borrowed).
 //
 // The heap check runs where the count is exact (mem.heap_in_use_exact):
 // after a warm-up, some window of the same work grows by exactly 0
@@ -28,8 +23,8 @@ import std.os
 import std.string
 
 extern exit(code: int)
-// The runtime free under another name, as std.jsonpath binds it: a free all
-// the same, so a local or field handed to it gives its reference up.
+// The runtime free under another name, as std.jsonpath once bound it: a
+// free all the same, so a local or field handed to it gives its reference up.
 @extern("string_free") drop_raw(s: string)
 
 struct Item {
@@ -49,16 +44,6 @@ fn check(cond: bool, msg: string) {
     }
 }
 
-set_owned(previous: string, value: string) -> string {
-    fresh = string.copy(value)
-    if previous != null { string.free(previous) }
-    return fresh
-}
-
-drop(s: string) {
-    string.free(s)
-}
-
 var made = 0
 var seen = 0
 
@@ -68,15 +53,14 @@ counted_box(w: string) -> Box {
 }
 
 // The second argument reads what the first one's call changes, so the
-// first is evaluated ahead of the call into a temporary (#2478); the field
-// is handed over there, once.
-eat(s: string, n: int) {
-    string.free(s)
+// first is evaluated ahead of the call into a temporary (#2478).
+note(s: string, n: int) {
+    check(s == "abc#", "the field reaches the call")
     seen = n
 }
 
 set_name(it: *Item, name: string) {
-    it.name = set_owned(it.name, name)
+    it.name = string.copy(name)
 }
 
 make_box(w: string) -> Box {
@@ -87,15 +71,13 @@ round(w: string) -> int {
     it = heap.new(Item)
     set_name(it, w)
     set_name(it, w)
-    it.name = set_owned(it.name, w)
-    check(it.name == w, "set_owned through a parameter and a local box")
+    it.name = string.copy(w)
+    check(it.name == w, "a store through a parameter and a local box")
     it.tag = string.concat(w, "#")
     string.free(it.tag)
     it.tag = string.concat(w, "%")
-    drop(it.tag)
+    release(it.tag)
     // Plain malloc'd buffers.
-    it.tag = os.getenv("PATH")
-    drop(it.tag)
     it.tag = os.getenv("PATH")
     string.free(it.tag)
     it.tag = os.getenv("PATH")
@@ -107,10 +89,10 @@ round(w: string) -> int {
     it.tag = string.concat(w, "^")
     drop_raw(it.tag)
     // A field of a statement's temporary struct.
-    drop(make_box(w).item.name)
-    drop(make_box(w).item.tag)
+    string.free(make_box(w).item.name)
+    release(make_box(w).item.tag)
     before = made
-    eat(counted_box(w).item.name, made)
+    note(counted_box(w).item.name, made)
     check(made == before + 1 && seen == made, "the struct's call runs once, before the next argument")
     n = string.length(it.name)
     heap.free(it)
@@ -118,7 +100,7 @@ round(w: string) -> int {
 }
 
 main() {
-    println("=== test_field_handed_to_consuming_call ===")
+    println("=== test_field_freed_in_place ===")
     check(string.length(os.getenv("PATH")) > 0, "a PATH in the environment")
     check(round("abc") == 3, "the name survives every replacement")
     i = 0
@@ -136,5 +118,5 @@ main() {
             }, 5)
         check(grown == 0, "a window of 200 rounds grew the heap by ${grown} bytes in every run")
     }
-    println("=== test_field_handed_to_consuming_call passed ===")
+    println("=== test_field_freed_in_place passed ===")
 }

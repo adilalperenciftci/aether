@@ -3,9 +3,8 @@
  *
  * Reads the `_Atomic` per-upstream counters (no pool lock needed
  * for those — atomic loads are lock-free) plus the pool-level
- * counters, snapshots them into a malloc'd text buffer in
- * Prometheus 0.0.4 exposition format. Caller frees the returned
- * string.
+ * counters, snapshots them into a counted string in Prometheus
+ * 0.0.4 exposition format. Caller releases the returned string.
  *
  * The buffer grows dynamically because the size is bounded by
  * upstream count × per-upstream-line-bytes; we don't predict
@@ -23,6 +22,7 @@
 
 #include "aether_proxy_internal.h"
 #include "../../mem/aether_grow.h"
+#include "../../../runtime/aether_resource_caps.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -40,7 +40,7 @@ static int tb_reserve(TextBuf* b, size_t need) {
     if (b->len + need + 1 <= b->cap) return 0;
     size_t cap = aether_buf_grow_capacity(b->cap, 4096, b->len + need + 1, 1);
     if (!cap) return -1;
-    char* g = (char*)realloc(b->data, cap);
+    char* g = (char*)aether_caps_realloc(b->data, b->cap, cap);
     if (!g) return -1;
     b->data = g;
     b->cap = cap;
@@ -238,14 +238,14 @@ char* aether_proxy_pool_metrics_text(AetherProxyPool* pool) {
     free(snap);
     if (buf.data == NULL) {
         /* No metrics emitted at all (empty pool, no allocations). */
-        buf.data = strdup("# Aether proxy: empty pool, no metrics.\n");
+        return (char*)string_new("# Aether proxy: empty pool, no metrics.\n");
     }
-    return buf.data;
+    return (char*)string_adopt_caps_buffer(buf.data, buf.len, buf.cap);
 
 oom:
     free(esc);
     free(snap);
-    free(buf.data);
+    aether_caps_free(buf.data, buf.cap);
     return NULL;
 }
 

@@ -11,11 +11,11 @@
 
 import std.list
 
-grid(_ctx: ptr) {
+grid(_ctx: @keep ptr) {
     return _ctx
 }
 
-row(_ctx: ptr) {
+row(_ctx: @keep ptr) {
     return _ctx
 }
 

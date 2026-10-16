@@ -982,7 +982,7 @@ fn dtc_set_err(ctx: *DirTreeCtx, msg: string) {
 // entry name (use "" for none; a trailing "/" is added if missing and prefix
 // is non-empty). `method`/`level` apply to every file. Returns "" or the first
 // error encountered.
-add_dir_tree(wp: ptr, fs_root: string, arc_prefix: string, method: int, level: int) -> string {
+add_dir_tree(wp: @keep ptr, fs_root: string, arc_prefix: string, method: int, level: int) -> string {
     if wp == null { return "zip: null writer" }
 
     root_len = string_length(fs_root)

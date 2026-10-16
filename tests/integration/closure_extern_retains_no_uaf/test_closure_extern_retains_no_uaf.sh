@@ -3,11 +3,10 @@
 # that retains the closure (heap-use-after-free).
 #
 # The probe registers a capturing closure with a C-side sink that
-# stores it, then triggers the C side to invoke it. With the pre-fix
-# codegen, register_cb's call site emitted `free(_ad_0.env)` because
-# the extern callee had no visible body and the escape-analysis
-# walker defaulted to "doesn't escape". On invocation the closure
-# body dereferenced the freed env → UAF.
+# stores it, then triggers the C side to invoke it. An extern lends its
+# arguments unless the parameter is declared `@retain` (R4): the sink's
+# is, so the call hands it a reference of its own and the caller's
+# release after the call leaves the closure alive for the later call.
 #
 # We run the probe under ASan (whose `heap-use-after-free` report
 # is the canonical detector for this shape). It must print

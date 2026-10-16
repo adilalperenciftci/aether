@@ -447,8 +447,9 @@ main() {
 (e.g. `make`, `list.new`, `map.new`). `defer free(...)` or `defer
 list.free(...)` ensure cleanup on scope exit.
 
-For `std.string` managed strings (`string.new()`, `string.to_upper()`, etc.),
-use `defer string.release(s)` for reference counting.
+A string needs no cleanup: the local, field or element holding it releases
+it when it is overwritten or goes out of scope. `free(s)` or `release(s)` on
+a string releases it early and leaves the place empty.
 
 ## Pattern Matching
 
@@ -574,14 +575,13 @@ import std.os
 
 main() {
     home = os.getenv("HOME")
-    defer free(home)
     if home != 0 {
         println("Home directory: ${home}")
     }
 }
 ```
 
-The builtin `getenv()` also works without an import for quick scripts (returns a malloc'd string, use `defer free()`).
+The builtin `getenv()` also works without an import for quick scripts; its string is released with the local that holds it.
 
 ## When something doesn't compile
 

@@ -1,0 +1,44 @@
+// A closure rebound to one that calls the closure it replaced holds that
+// closure's environment, so a loop of such rebinds builds a chain of
+// environments, each holding the one before. Releasing the chain released
+// each environment from inside the teardown of the one after it, one C
+// stack frame per link: 50,000 links overflowed Windows' 1 MB stack (grid
+// cell K3-P2-T13) and 2,000,000 overflow an 8 MB one (signal 11). The
+// teardown of an environment reached from another's now waits until that
+// one returns, so the chain is torn down in constant stack.
+
+import std.string
+
+extern exit(code: int)
+
+shape(w: string, n: int) -> string {
+    c_a = string.concat(w, "#a")
+    x = || { return c_a }
+    j = 0
+    while j < n {
+        j = j + 1
+        prev = x
+        x = || {
+            string s = call(prev)
+            return s
+        }
+    }
+    // A short chain is called through, so the links still work.
+    if n <= 100 {
+        string s = call(x)
+        return s
+    }
+    return c_a
+}
+
+main() {
+    if shape("w", 100) != "w#a" {
+        println("FAIL: a 100-link chain returned the wrong value")
+        exit(1)
+    }
+    if shape("w", 2000000) != "w#a" {
+        println("FAIL: a 2,000,000-link chain")
+        exit(1)
+    }
+    println("OK")
+}

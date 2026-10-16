@@ -7,7 +7,9 @@ value comes out first** — it is a min-heap. For largest-first, negate the
 priority on the way in.
 
 Items are stored as `ptr`, so the queue holds whatever the caller points at
-and does not own it.
+and does not own it. A string goes in as a reference of its own,
+`string.keep(s)`, and is given back with `string.release_kept(p)` once
+popped; a string literal may go in as it is.
 
 ```aether,run
 import std.pqueue

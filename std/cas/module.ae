@@ -42,7 +42,7 @@ import std.string
 // it here directly so the C codegen emits the prototype above this
 // module's function bodies. (Same pattern std/fs uses to redeclare
 // std/string's `string_concat` / `string_length`.)
-extern os_getenv(name: string) -> string
+extern os_getenv(name: string) -> string @heap
 
 exports(
     // Aether-native API.

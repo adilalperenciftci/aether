@@ -14,7 +14,7 @@ parsed(s: string) -> ptr {
     return d
 }
 
-str(d: ptr) -> string {
+str(d: @keep ptr) -> string {
     s = decimal.to_string(d)
     decimal.free(d)
     return s

@@ -16,7 +16,7 @@ import std.string
 
 extern println(s: string)
 extern exit(code: int)
-extern os_exec_raw(cmd: string) -> string
+extern os_exec_raw(cmd: string) -> string @heap
 extern string_starts_with(s: string, prefix: string) -> int
 
 fail(msg: string) {

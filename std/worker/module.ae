@@ -82,9 +82,9 @@ exports(
 // and invokes it (on the worker thread for `work`, on the loop thread for
 // `done`) with the emitted fn(env, args...) convention. `ptr` job handles are
 // opaque WorkerJob*.
-extern aether_worker_run(work: fn, done: fn) -> int
-extern aether_worker_run_detached(work: fn) -> int
-extern aether_worker_set_main_poster(poster: fn)
+extern aether_worker_run(work: @retain fn, done: @retain fn) -> int
+extern aether_worker_run_detached(work: @retain fn) -> int
+extern aether_worker_set_main_poster(poster: @retain fn)
 extern aether_worker_deliver(job: ptr)
 extern aether_worker_drain(max: int) -> int
 extern aether_worker_pending() -> int

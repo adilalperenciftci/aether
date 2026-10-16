@@ -78,11 +78,6 @@ int aether_schema_field_size(const void* s, int field) {
     return f ? (int)f->size : 0;
 }
 
-int aether_schema_field_heap_offset(const void* s, int field) {
-    const AetherSchemaField* f = field_at(s, field);
-    return f ? (int)f->heap_offset : -1;
-}
-
 const void* aether_schema_field_schema(const void* s, int field) {
     const AetherSchemaField* f = field_at(s, field);
     return (f && f->nested) ? (const void*)f->nested() : NULL;

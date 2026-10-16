@@ -81,7 +81,7 @@ static int ae_open_for_read (const char* p) { return open(p, O_RDONLY); }
 static int ae_open_for_write(const char* p) { return open(p, O_WRONLY | O_CREAT | O_TRUNC, 0644); }
 #endif
 
-#include "../string/aether_string.h"  // string_new_with_length / string_empty
+#include "../string/aether_string.h"  // the counted strings returned below
 
 // Console I/O
 void io_print(const char* str) {
@@ -111,11 +111,11 @@ void io_print_float(double value) {
 }
 
 // File I/O
-/* Grow-and-read an open stream to EOF into a caller-owned, NUL-terminated
- * buffer. Fallback for when the size-based path can't work: `/proc` and `/sys`
+/* Grow-and-read an open stream to EOF into a counted string the caller owns.
+ * Fallback for when the size-based path can't work: `/proc` and `/sys`
  * seq-files report size 0 from ftell, pipes/sockets aren't seekable — the
  * size-based path would silently return an empty string (#1116). Returns NULL
- * on OOM or a read error. Cap-aware; caller frees with plain libc free. */
+ * on OOM or a read error. Cap-aware. */
 static char* io_read_stream_to_eof(FILE* fp) {
     size_t cap = 65536;
     size_t len = 0;
@@ -135,7 +135,7 @@ static char* io_read_stream_to_eof(FILE* fp) {
     }
     if (ferror(fp)) { aether_caps_free(buffer, cap); return NULL; }
     buffer[len] = '\0';
-    return buffer;
+    return (char*)string_adopt_caps_buffer(buffer, len, cap);
 }
 
 char* io_read_file_raw(const char* path) {
@@ -148,8 +148,8 @@ char* io_read_file_raw(const char* path) {
      * Fall through to the EOF loop when the file isn't seekable (pipe/socket)
      * or reports size 0 (any /proc or /sys seq-file) — the old code returned
      * an empty string with no error there (#1116, the /proc silent-truncation
-     * bug). Cap-aware (#343): OS-supplied size is gated; caller frees with
-     * plain libc free() per the caller-owned-return contract. */
+     * bug). Cap-aware (#343): OS-supplied size is gated, and the buffer is
+     * adopted into the counted string returned. */
     char* buffer = NULL;
     if (fseek(file, 0, SEEK_END) == 0) {
         long size = ftell(file);
@@ -159,7 +159,7 @@ char* io_read_file_raw(const char* path) {
             size_t read = fread(buffer, 1, (size_t)size, file);
             buffer[read] = '\0';
             fclose(file);
-            return buffer;
+            return (char*)string_adopt_caps_buffer(buffer, read, (size_t)size + 1);
         }
         fseek(file, 0, SEEK_SET);   /* best-effort rewind before streaming */
     }
@@ -236,16 +236,10 @@ char* io_getenv(const char* name) {
     if (!name) return NULL;
     const char* value = getenv(name);
     if (!value) return NULL;
-    /* Cap-aware (#462): gate the allocation against the memory cap, same
-     * caller-owned-return contract as file_read_all_raw above — the
-     * caller frees with plain libc free(), so the counter drifts up on
-     * this cold path. The gate is fail-safe: a plugin accumulating env
-     * copies is denied once it would cross the cap, never allowed past. */
-    size_t n = strlen(value);
-    char* out = (char*)aether_caps_malloc(n + 1);
-    if (!out) return NULL;
-    memcpy(out, value, n + 1);
-    return out;
+    /* Cap-aware (#462): the counted copy is allocated against the memory
+     * cap, so a plugin accumulating env copies is denied once it would
+     * cross the cap, never allowed past. */
+    return (char*)string_new_with_length(value, strlen(value));
 }
 
 int io_setenv_raw(const char* name, const char* value) {
@@ -311,19 +305,14 @@ void io_perror_raw(const char* name) {
     perror(name && *name ? name : "error");
 }
 
-/* strerror(errno) for the *current* errno, as a heap string the
+/* strerror(errno) for the *current* errno, as a counted string the
  * caller owns. Same "call right after the failure" constraint.
  * Returns a fresh copy so the static strerror buffer can't be
- * clobbered under the caller. NULL only on OOM. */
+ * clobbered under the caller. NULL only on OOM (cap-aware, #462). */
 char* io_errno_message_raw(void) {
     const char* m = strerror(errno);
     if (!m) m = "unknown error";
-    size_t n = strlen(m);
-    /* Cap-aware (#462): gate via the resource cap, caller-owned-return
-     * contract (libc free, fail-safe upward drift) — same as io_getenv. */
-    char* out = (char*)aether_caps_malloc(n + 1);
-    if (out) memcpy(out, m, n + 1);
-    return out;
+    return (char*)string_new_with_length(m, strlen(m));
 }
 
 /* ─── Full fd surface (Section 1 of nuther-ask-of-aether-team.md) ──

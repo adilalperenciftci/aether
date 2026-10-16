@@ -209,7 +209,7 @@ _expect_kw(p: *JqParser, s: string) -> int {
     return 0
 }
 
-_mk(p: *JqParser, kind: int, a: ptr, b: ptr) -> ptr {
+_mk(p: *JqParser, kind: int, a: @keep ptr, b: @keep ptr) -> ptr {
     n = ast.new_node(kind, a, b)
     (n as *Node).pos = _pos(p)
     return n
@@ -437,7 +437,7 @@ _parse_postfix(p: *JqParser, allow_as: int) -> ptr {
 }
 
 // `[`  ]  |  [e]  |  [e:]  |  [:e]  |  [e:e]   applied to target `t`.
-_parse_bracket_suffix(p: *JqParser, t: ptr) -> ptr {
+_parse_bracket_suffix(p: *JqParser, t: @keep ptr) -> ptr {
     _advance(p) // '['
     if _is_op(p, "]") == 1 {
         _advance(p)

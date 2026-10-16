@@ -1,0 +1,65 @@
+// A fixed-size array of owning elements in the places a value goes (#2921):
+// a message field holds it by value (taken at the send, released with the
+// message, kept by an actor's state), an optional wraps one, an array
+// literal passed to a function is a temporary of its statement, and one
+// thrown away is dropped.
+import std.mem
+import std.string
+
+extern exit(code: int)
+
+message Put {
+    v: string[2]
+}
+
+message Check {}
+
+message Ack {
+    n: string
+}
+
+actor Holder {
+    state string[2] kept = ["", ""]
+    receive {
+        Put(v: x) -> {
+            kept = x
+        }
+        Check() -> {
+            reply Ack { n: string.concat(kept[0], kept[1]) }
+        }
+    }
+}
+
+fn check(ok: bool, what: string) {
+    if !ok {
+        println("FAIL: ${what}")
+        exit(1)
+    }
+}
+
+total(xs: string[2]) -> int {
+    return string.length(xs[0]) + string.length(xs[1])
+}
+
+shape(w: string, h: ptr) -> int {
+    h ! Put { v: [string.concat(w, "a"), string.concat(w, "b")] }
+    let o: string[2]? = [string.concat(w, "c"), string.concat(w, "dd")]
+    _ = [string.concat(w, "e"), string.concat(w, "f")]
+    return total([string.concat(w, "g"), string.concat(w, "h")]) + string.length(o![1])
+}
+
+main() {
+    h = spawn(Holder())
+    check(shape("w", h) == 7, "the array arguments and the optional's array")
+    string got = h ? Check {}
+    check(got == "wawb", "the array the actor kept from the message")
+    if mem.heap_in_use_exact() {
+        grown = mem.steady_growth(|| {
+                shape("w", h)
+                string s = h ? Check {}
+                check(s == "wawb", "kept, again")
+            }, 4)
+        check(grown == 0, "the arrays are released")
+    }
+    println("ok")
+}

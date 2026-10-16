@@ -68,8 +68,8 @@ const ANY_FIELD = -1
 // `fn` lowers to the compiler's _AeClosure ({fn, env}); the runtime stores it
 // and invokes it as fn(env, obj) after each store on `obj` (fn(env, obj,
 // field) when registered through aether_observe_fields).
-extern aether_observe(obj: ptr, on_change: fn) -> long
-extern aether_observe_fields(obj: ptr, on_change: fn) -> long
+extern aether_observe(obj: ptr, on_change: @retain fn) -> long
+extern aether_observe_fields(obj: ptr, on_change: @retain fn) -> long
 extern aether_observe_notify(obj: ptr)
 extern aether_observe_notify_field(obj: ptr, field: int)
 extern aether_unobserve(obj: ptr, token: long) -> int

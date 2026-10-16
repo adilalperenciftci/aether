@@ -6,10 +6,16 @@
 #include "../utils/aether_compiler.h"
 #include <stdlib.h>
 
+/* An entry is a value (`free_fn(ptr)` on a drain) or a place (#2923): `ptr`
+ * is the address of a slot holding a value, `owned` the address of the flag
+ * that says the slot owns it (NULL: it owns whatever it holds), and a drain
+ * releases what the slot holds then, leaving it empty. */
 typedef struct {
     const void* ptr;
+    const void* owned;
     AetherUnwindFree free_fn;
     int depth;
+    int place;
 } AetherUnwindEntry;
 
 typedef struct {
@@ -37,20 +43,16 @@ void aether_unwind_track(const void* p, AetherUnwindFree free_fn) {
     journal_at(p, free_fn, tls_depth);
 }
 
-// An allocation held by a local declared `up` frames out from the innermost
-// one (a local outside the `try` whose body stores into it): a panic caught
-// by those inner frames leaves the local holding it, so only a drain of the
-// local's own frame may free it. Outside every frame nothing does, and an
-// entry an inner frame holds for it (a value moved in from a local of that
-// frame) goes.
-void aether_unwind_track_up(const void* p, int up, AetherUnwindFree free_fn) {
-    if (!p || !free_fn) return;
-    int depth = tls_depth - (up > 0 ? up : 0);
-    if (depth <= 0) {
-        aether_unwind_forget(p);
-        return;
+void aether_unwind_track_place(const void* place, const void* owned, AetherUnwindFree release) {
+    if (tls_depth == 0 || !place || !release) return;
+    journal_at(place, release, tls_depth);
+    for (int i = tls_journal.count - 1; i >= 0; i--) {
+        if (tls_journal.items[i].ptr == place) {
+            tls_journal.items[i].owned = owned;
+            tls_journal.items[i].place = 1;
+            return;
+        }
     }
-    journal_at(p, free_fn, depth);
 }
 
 static void journal_at(const void* p, AetherUnwindFree free_fn, int depth) {
@@ -74,13 +76,11 @@ static void journal_at(const void* p, AetherUnwindFree free_fn, int depth) {
         tls_journal.capacity = cap;
     }
     tls_journal.items[tls_journal.count].ptr = p;
+    tls_journal.items[tls_journal.count].owned = NULL;
     tls_journal.items[tls_journal.count].free_fn = free_fn;
     tls_journal.items[tls_journal.count].depth = depth;
+    tls_journal.items[tls_journal.count].place = 0;
     tls_journal.count++;
-}
-
-void aether_unwind_track_if(const void* p, int owned, AetherUnwindFree free_fn) {
-    if (owned) aether_unwind_track(p, free_fn);
 }
 
 void aether_unwind_forget(const void* p) {
@@ -104,16 +104,41 @@ int aether_unwind_journal_size(void) {
 // owning stack frames are still intact (the entries themselves are
 // TLS, so intactness only matters for the free functions, which take
 // the raw pointer and touch nothing else).
+//
+// The entries are taken off the journal before any release runs: a release
+// may forget or track other entries, which must not move under the loop.
 void aether_unwind_drain_current(void) {
-    int w = 0;
+    int n = 0;
+    for (int i = 0; i < tls_journal.count; i++)
+        if (tls_journal.items[i].depth >= tls_depth) n++;
+    if (n == 0) return;
+    AetherUnwindEntry* drained = (AetherUnwindEntry*)malloc((size_t)n * sizeof(AetherUnwindEntry));
+    int w = 0, d = 0;
     for (int i = 0; i < tls_journal.count; i++) {
-        if (tls_journal.items[i].depth >= tls_depth) {
-            tls_journal.items[i].free_fn(tls_journal.items[i].ptr);
-        } else {
+        if (tls_journal.items[i].depth < tls_depth) {
             tls_journal.items[w++] = tls_journal.items[i];
+        } else if (drained) {
+            drained[d++] = tls_journal.items[i];
         }
     }
     tls_journal.count = w;
+    /* Newest first, as scope exits run: a deferred statement still sees the
+     * locals declared before it. */
+    for (int i = d - 1; i >= 0; i--) {
+        AetherUnwindEntry* e = &drained[i];
+        if (!e->place) {
+            e->free_fn(e->ptr);
+            continue;
+        }
+        const void* volatile* slot = (const void* volatile*)e->ptr;
+        volatile int* owned = (volatile int*)e->owned;
+        const void* v = *slot;
+        if (!v || (owned && !*owned)) continue;
+        if (owned) *owned = 0;
+        *slot = NULL;
+        e->free_fn(v);
+    }
+    free(drained);
 }
 
 // Normal frame exit: surviving entries of the popped depth are owned by
@@ -134,9 +159,40 @@ void aether_unwind_exit_frame(void) {
     tls_depth--;
 }
 
+typedef void (*AetherTeardown)(void* obj);
+
+static AETHER_TLS_SHARED void** tls_teardown_queue = NULL;
+static AETHER_TLS_SHARED int tls_teardown_count = 0;
+static AETHER_TLS_SHARED int tls_teardown_capacity = 0;
+static AETHER_TLS_SHARED int tls_teardown_running = 0;
+
+void aether_teardown(void* obj) {
+    if (tls_teardown_running) {
+        if (tls_teardown_count == tls_teardown_capacity) {
+            int cap = tls_teardown_capacity ? tls_teardown_capacity * 2 : 16;
+            void** q = (void**)realloc(tls_teardown_queue, (size_t)cap * sizeof(void*));
+            if (!q) abort();
+            tls_teardown_queue = q;
+            tls_teardown_capacity = cap;
+        }
+        tls_teardown_queue[tls_teardown_count++] = obj;
+        return;
+    }
+    tls_teardown_running = 1;
+    (*(AetherTeardown*)obj)(obj);
+    while (tls_teardown_count > 0) {
+        void* next = tls_teardown_queue[--tls_teardown_count];
+        (*(AetherTeardown*)next)(next);
+    }
+    tls_teardown_running = 0;
+}
+
 void aether_unwind_thread_cleanup(void) {
     free(tls_journal.items);
     tls_journal.items = NULL;
     tls_journal.count = 0;
     tls_journal.capacity = 0;
+    free(tls_teardown_queue);
+    tls_teardown_queue = NULL;
+    tls_teardown_capacity = 0;
 }

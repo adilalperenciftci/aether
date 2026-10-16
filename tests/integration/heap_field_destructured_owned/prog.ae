@@ -1,9 +1,14 @@
 // #2366: a heap string destructured from a tuple and then stored in a struct
-// field must be owned by the field. The destructured local escapes into the
-// field, which suppresses the local's own frees; the field store moves the
-// local's tracker into the field's, so the tracker has to say the value is
-// owned or the struct's destructor never frees it.
+// field is owned by the field. It used to be stored with the local's
+// ownership left unset, so the struct's destructor never freed it and
+// nothing else did either.
+//
+// The heap check runs where the count is exact (mem.heap_in_use_exact):
+// after a warm-up, some window of the same work grows by exactly 0.
+import std.mem
 import std.string
+
+extern exit(code: int)
 
 struct Clip {
     data: string
@@ -31,6 +36,20 @@ main() {
         println(c.data)
         heap.free(c)
         i = i + 1
+    }
+    if mem.heap_in_use_exact() {
+        grown = mem.steady_growth(|| {
+                k = 0
+                while k < 200 {
+                    c = keep(k % 7)
+                    heap.free(c)
+                    k = k + 1
+                }
+            }, 5)
+        if grown != 0 {
+            println("FAIL: a window of 200 clips grew the heap by ${grown} bytes in every run")
+            exit(1)
+        }
     }
     println("done")
 }

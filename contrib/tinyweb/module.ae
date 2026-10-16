@@ -413,7 +413,7 @@ web_server_full(host: string, port: int, ws_port: int, sse_port: int) {
 // a start-up error rather than serving plaintext on a port a caller believes
 // is encrypted. That failure mode is why this is not a silent no-op: a server
 // that quietly downgrades to HTTP is worse than one that refuses to start.
-with_tls(srv: ptr, cert_path: string, key_path: string) {
+with_tls(srv: @keep ptr, cert_path: string, key_path: string) {
     map_put(srv, "tls_cert", cert_path)
     map_put(srv, "tls_key", key_path)
     return srv
@@ -1107,13 +1107,13 @@ tw_stop(srv: ptr) {
 // ---------------------------------------------------------------------------
 
 // compose(server) { path("/module") { ... } }
-compose(_srv: ptr) {
+compose(_srv: @keep ptr) {
     // Returns the server map itself so trailing block DSL functions work
     return _srv
 }
 
 // compose_at(server, root_path) { path(root_path) { ... } }
-compose_at(_srv: ptr, root_path: string) {
+compose_at(_srv: @keep ptr, root_path: string) {
     // Just syntactic sugar — the caller still uses path() inside
     return _srv
 }

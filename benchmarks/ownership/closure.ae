@@ -1,0 +1,16 @@
+// Ownership micro-benchmark (#2925): a closure capturing a string, made and called in a loop.
+// The budget compares a build with the base of the change, the two binaries
+// run interleaved, the median of 11 runs each, on an otherwise idle machine.
+
+import std.string
+main() {
+    a = string.concat("alpha", "beta")
+    total = 0
+    i = 0
+    while i < 3000000 {
+        f = || { return string.length(a) }
+        total = total + f()
+        i = i + 1
+    }
+    println(total)
+}

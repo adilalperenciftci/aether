@@ -38,7 +38,7 @@ enum {
     AETHER_SCHEMA_F32        = 10,  /* C float */
     AETHER_SCHEMA_LONGDOUBLE = 11,
     AETHER_SCHEMA_DURATION   = 12,  /* signed 64-bit nanoseconds */
-    AETHER_SCHEMA_STRING     = 13,  /* const char*; see heap_offset */
+    AETHER_SCHEMA_STRING     = 13,  /* const char*, a reference the struct owns */
     AETHER_SCHEMA_PTR        = 14,  /* `ptr` or `*T` (nested names T's table) */
     AETHER_SCHEMA_STRUCT     = 15,  /* a struct value (nested names its table) */
     AETHER_SCHEMA_ARRAY      = 16,  /* fixed `T[N]`: len = N, elem_kind = T's */
@@ -81,10 +81,6 @@ typedef struct {
     int len;                 /* ARRAY: the element count; else 0 */
     size_t offset;
     size_t size;
-    /* STRING: the offset of the field's heap-ownership flag (an int, 1 when
-     * the struct owns the string and frees it on reassignment); -1 for every
-     * other kind. A generic writer that stores a heap string sets it. */
-    long heap_offset;
     /* STRUCT, PTR to a struct, and ARRAY/SLICE of structs: the struct's
      * table, when it is an Aether struct; NULL otherwise (an extern C
      * struct, a scalar). A function, so tables may refer to each other in
@@ -121,7 +117,6 @@ int aether_schema_field_elem_kind(const void* s, int field);
 int aether_schema_field_len(const void* s, int field);
 int aether_schema_field_offset(const void* s, int field);             /* -1 */
 int aether_schema_field_size(const void* s, int field);               /* 0 */
-int aether_schema_field_heap_offset(const void* s, int field);        /* -1 */
 const void* aether_schema_field_schema(const void* s, int field);      /* NULL */
 int aether_schema_attr_count(const void* s, int field);
 int aether_schema_attr_index(const void* s, int field, const char* name);  /* -1 */

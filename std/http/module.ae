@@ -144,7 +144,7 @@ extern http_response_ok(response: ptr) -> int
 // string_concat used internally to duplicate borrowed strings before the
 // backing response is freed. The concat of any string with "" produces a
 // new heap-allocated copy that outlives the source.
-extern string_concat(a: string, b: string) -> string
+extern string_concat(a: string, b: string) -> string @heap
 
 // HTTP Client — Go-style result-type wrappers. These are the idiomatic
 // Aether-facing API: they auto-free the underlying response and return
@@ -515,14 +515,14 @@ server_set_metrics(server: ptr, metrics_endpoint: string) -> {
 // Inside the handler, call sse_send / sse_send_id to push events,
 // or sse_close to terminate explicitly. The connection closes
 // when the handler returns.
-extern http_server_sse(server: ptr, path: string, handler: ptr, user_data: ptr)
+extern http_server_sse(server: ptr, path: string, handler: @retain ptr, user_data: ptr)
 extern http_sse_send_event(sse: ptr, event_name: string, data: string) -> int
 extern http_sse_send_event_id(sse: ptr, event_name: string, data: string, id: string) -> int
 extern http_sse_send_event_full(sse: ptr, event_name: string, data: string, id: string, retry_ms: int) -> int
 extern http_response_sse_upgrade_raw(res: ptr) -> ptr
 extern http_sse_close(sse: ptr)
 
-server_sse(server: ptr, path: string, handler: ptr, user_data: ptr) {
+server_sse(server: ptr, path: string, handler: @keep ptr, user_data: ptr) {
     http_server_sse(server, path, handler, user_data)
 }
 
@@ -592,7 +592,7 @@ sse_close(sse: ptr) {
 //   ws_close(ws, code, reason) — 1000 = normal, 1001 = going away, ...
 //
 // Control frames (ping/pong) are auto-handled inside ws_recv.
-extern http_server_websocket(server: ptr, path: string, handler: ptr, user_data: ptr)
+extern http_server_websocket(server: ptr, path: string, handler: @retain ptr, user_data: ptr)
 extern http_ws_send_text(ws: ptr, text: string) -> int
 extern http_ws_send_binary(ws: ptr, data: ptr, length: int) -> int
 extern http_ws_recv(ws: ptr) -> int
@@ -605,7 +605,7 @@ extern http_ws_close(ws: ptr, code: int, reason: string)
 extern http_ws_connect(url: string) -> ptr
 extern http_ws_client_free(ws: ptr)
 
-server_websocket(server: ptr, path: string, handler: ptr, user_data: ptr) {
+server_websocket(server: ptr, path: string, handler: @keep ptr, user_data: ptr) {
     http_server_websocket(server, path, handler, user_data)
 }
 
@@ -641,11 +641,9 @@ ws_send_text(ws: ptr, text: string) -> int {
     return http_ws_send_text(ws, text)
 }
 
-// A string or `std.bytes` buffer viewed as a raw pointer. Used to bound a
-// borrowed C buffer the server hands back as a plain `char*` (typed
-// `string`): a `string` passed to a `ptr` parameter arrives as the bare
-// pointer, which is what these buffers are.
-fn as_ptr(p: ptr) -> ptr { return p }
+// The bytes behind a string (std.string): bounds a borrowed buffer the
+// server hands back typed `string` by the length C reports for it.
+extern aether_string_raw_ptr(s: ptr) -> ptr
 
 // Send one binary frame holding the bytes of `data` (#2301: a byte[] whose
 // length travels with it). Returns the send result, -1 on a closed socket.
@@ -729,7 +727,7 @@ ws_message(ws: ptr) -> string {
 ws_message_bytes(ws: ptr) -> byte[] {
     n = http_ws_message_length(ws)
     if n <= 0 { return null }
-    return (as_ptr(http_ws_message_data(ws)) as byte[])[0..n]
+    return (aether_string_raw_ptr(http_ws_message_data(ws)) as byte[])[0..n]
 }
 
 ws_close(ws: ptr, code: int, reason: string) {
@@ -797,11 +795,11 @@ server_start_background(server: ptr) -> {
 // The slot is per-route, so a server can host routes with distinct
 // contexts without coordination. Passing `0` for `user_data`
 // continues to work — opting in is purely additive.
-extern http_server_add_route(server: ptr, method: string, path: string, handler: ptr, user_data: ptr)
-extern http_server_get(server: ptr, path: string, handler: ptr, user_data: ptr)
-extern http_server_post(server: ptr, path: string, handler: ptr, user_data: ptr)
-extern http_server_put(server: ptr, path: string, handler: ptr, user_data: ptr)
-extern http_server_delete(server: ptr, path: string, handler: ptr, user_data: ptr)
+extern http_server_add_route(server: ptr, method: string, path: string, handler: @retain ptr, user_data: ptr)
+extern http_server_get(server: ptr, path: string, handler: @retain ptr, user_data: ptr)
+extern http_server_post(server: ptr, path: string, handler: @retain ptr, user_data: ptr)
+extern http_server_put(server: ptr, path: string, handler: @retain ptr, user_data: ptr)
+extern http_server_delete(server: ptr, path: string, handler: @retain ptr, user_data: ptr)
 
 // HTTP Server - middleware
 extern http_server_use_middleware(server: ptr, middleware: ptr, user_data: ptr)
@@ -880,10 +878,10 @@ extern http_request_body_read_raw(req: ptr, offset: int, max: int) -> int
 // iteration loop detect "done" without comparing offsets against
 // request_body_length.
 extern http_request_body_complete(req: ptr) -> int
-extern http_get_request_body_read() -> string
+extern http_get_request_body_read() -> ptr
 extern http_get_request_body_read_length() -> int
 extern http_release_request_body_read()
-extern string_new_with_length(data: string, length: int) -> ptr
+extern string_new_with_length(data: string, length: int) -> ptr @heap
 extern http_request_query(req: ptr) -> string
 
 // Trusted TCP peer address — the IP `getpeername(2)` reports for the
@@ -958,7 +956,7 @@ request_body_length(req: ptr) -> int {
 // separately: on a streaming request it reports the declared length
 // WITHOUT materialising, which the chunked request_body_read loop relies on.
 request_body_bytes(req: ptr) -> byte[] {
-    p = as_ptr(http_request_body(req))
+    p = aether_string_raw_ptr(http_request_body(req))
     n = http_request_body_length(req)
     if n <= 0 { return null }
     return (p as byte[])[0..n]

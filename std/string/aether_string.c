@@ -14,6 +14,7 @@
 // formats, round-trips) when Aether is embedded in a host that set a locale.
 #include "../../runtime/aether_locale_num.h"
 #include "../../runtime/config/aether_optimization_config.h"  // AETHER_HAS_THREADS
+#include "../../runtime/utils/aether_count.h"
 
 #ifndef _WIN32
 #include <fnmatch.h>  // POSIX glob-pattern matching (string_glob_match_raw)
@@ -55,9 +56,12 @@ void string_free(const void* str) {
 }
 
 // String creation
+/* A copy of `cstr`, which may be a counted or pinned string (every Aether
+ * string value is one) or a plain C string: string_* functions get the
+ * value as it is held, not its characters. */
 AetherString* string_new(const char* cstr) {
     if (!cstr) return string_empty();
-    return string_new_with_length(cstr, strlen(cstr));
+    return string_new_with_length(str_data(cstr), str_len(cstr));
 }
 
 AetherString* string_new_with_length(const char* data, size_t length) {
@@ -113,39 +117,62 @@ AetherString* string_adopt_caps_buffer(char* buf, size_t length, size_t cap) {
     return s;
 }
 
+static void string_free_block(AetherString* s) {
+    /* Cap accounting: data buffer was allocated with `capacity` bytes
+     * (length + 1 NUL terminator); struct is one sizeof(AetherString).
+     * Both pair with the alloc-side accounting in string_new_with_length.
+     *
+     * A string from string_alloc_inline holds both in ONE block, with
+     * `data` pointing just past the header, so freeing it separately would
+     * free an interior pointer. Recognised by position, which holds because
+     * no two-block string has its payload there (string_header_for). */
+    if (s->data == (char*)(s + 1)) {
+        aether_caps_free(s, sizeof(AetherString) + s->capacity);
+    } else {
+        aether_caps_free(s->data, s->capacity);
+        aether_caps_free(s, sizeof(AetherString));
+    }
+}
+
 // Reference counting — safe to call with plain char* (no-op)
 void string_retain(const void* str) {
     if (!str || !is_aether_string(str)) return;
     AetherString* s = (AetherString*)str;
+    int rc = s->ref_count;
     /* A pinned string (a literal the compiler made static, #2520) is
      * never freed, so it is not counted either. */
-    if (s->ref_count == AETHER_STRING_PINNED_REFS) return;
-    s->ref_count++;
+    if (rc == AETHER_STRING_PINNED_REFS) return;
+    if (rc & AETHER_STRING_SHARED_BIT) aether_count_inc(&s->ref_count);
+    else s->ref_count = rc + 1;
 }
 
 void string_release(const void* str) {
     if (!str || !is_aether_string(str)) return;
     AetherString* s = (AetherString*)str;
-    if (s->ref_count == AETHER_STRING_PINNED_REFS) return;   /* #2520 */
-    s->ref_count--;
-    if (s->ref_count <= 0) {
-        /* Cap accounting: data buffer was allocated with `capacity`
-         * bytes (length + 1 NUL terminator); struct is one
-         * sizeof(AetherString). Both pair with the alloc-side
-         * accounting in string_new_with_length.
-         *
-         * A string from string_alloc_inline holds both in ONE block, with
-         * `data` pointing just past the header, so freeing it separately
-         * would free an interior pointer. Recognised by position, which
-         * holds because no two-block string has its payload there
-         * (string_header_for). */
-        if (s->data == (char*)(s + 1)) {
-            aether_caps_free(s, sizeof(AetherString) + s->capacity);
-        } else {
-            aether_caps_free(s->data, s->capacity);
-            aether_caps_free(s, sizeof(AetherString));
-        }
+    int rc = s->ref_count;
+    if (rc == AETHER_STRING_PINNED_REFS) return;   /* #2520 */
+    if (rc & AETHER_STRING_SHARED_BIT) {
+        if ((aether_count_dec(&s->ref_count) & AETHER_STRING_COUNT_MASK) == 1)
+            string_free_block(s);
+        return;
     }
+    s->ref_count = rc - 1;
+    if (rc <= 1) string_free_block(s);
+}
+
+void aether_string_publish(const void* str) {
+    if (!str || !is_aether_string(str)) return;
+    AetherString* s = (AetherString*)str;
+    int rc = s->ref_count;
+    /* Already shared, other threads may be counting it: leave the field
+     * alone. Not shared, no other thread can reach it yet. */
+    if (rc == AETHER_STRING_PINNED_REFS || (rc & AETHER_STRING_SHARED_BIT)) return;
+    s->ref_count = rc | AETHER_STRING_SHARED_BIT;
+}
+
+void string_retain_shared(const void* str) {
+    aether_string_publish(str);
+    string_retain(str);
 }
 
 // String operations
@@ -819,6 +846,17 @@ const char* string_to_cstr(const void* str) {
 // struct header. These helpers unwrap the AetherString if present and
 // fall back to strlen-based handling for plain char* returns (legacy
 // raw-TLS externs). Safe on NULL.
+/* R4: the string an `@heap` extern hands over, owned once as Aether owns
+ * every string: a counted or pinned string as it is; a plain malloc'd buffer
+ * (a C library's, which predates counted strings) copied into a counted
+ * string and the buffer freed. */
+const char* aether_string_adopt(const char* s) {
+    if (!s || is_aether_string(s)) return s;
+    AetherString* c = string_new_with_length(s, strlen(s));
+    free((void*)s);
+    return (const char*)c;
+}
+
 const char* aether_string_data(const void* s) {
     return str_data(s);
 }
@@ -1071,7 +1109,7 @@ AetherString* string_alloc_inline(size_t length) {
 const char* aether_string_capture_owned(const char* s) {
     if (!s) return s;
     if (is_aether_string(s)) {
-        string_retain(s);
+        string_retain_shared(s);
         return s;
     }
     return (const char*)string_new(s);
@@ -1079,6 +1117,14 @@ const char* aether_string_capture_owned(const char* s) {
 
 void aether_string_release_captured(const char* s) {
     if (s) string_release(s);
+}
+
+void* aether_string_keep(const void* s) {
+    return (void*)aether_string_capture_owned((const char*)s);
+}
+
+void aether_string_release_kept(void* p) {
+    aether_string_release_captured((const char*)p);
 }
 
 AetherString* string_from_int(int value) {
@@ -1502,57 +1548,53 @@ extern void* list_get_raw(void* list, int index);
 
 AetherString* string_format_list(const char* fmt, void* args) {
     if (!fmt) return string_empty();
+    /* The format as it is held, counted or plain: its bytes up to its
+     * length, a NUL included. */
+    const char* f = str_data(fmt);
+    const char* end = f + str_len(fmt);
     int n_args = args ? list_size(args) : 0;
-    int next_arg = 0;
 
     /* First pass: compute total length so we can allocate exactly
      * once. Read placeholders and arg lengths to size the buffer. */
     size_t total = 0;
-    const char* p = fmt;
-    while (*p) {
-        if (p[0] == '{' && p[1] == '{') { total++; p += 2; continue; }
-        if (p[0] == '}' && p[1] == '}') { total++; p += 2; continue; }
-        if (p[0] == '{' && p[1] == '}') {
+    int next_arg = 0;
+    for (const char* p = f; p < end;) {
+        int pair = p + 1 < end;
+        if (pair && ((p[0] == '{' && p[1] == '{') || (p[0] == '}' && p[1] == '}'))) {
+            total++; p += 2; continue;
+        }
+        if (pair && p[0] == '{' && p[1] == '}') {
             if (next_arg < n_args) {
-                void* a = list_get_raw(args, next_arg);
-                size_t alen = a ? str_len(a) : 0;
-                total += alen;
-                next_arg++;
+                void* a = list_get_raw(args, next_arg++);
+                total += a ? str_len(a) : 0;
             }
             p += 2; continue;
         }
         total++; p++;
     }
 
-    char* out = (char*)malloc(total + 1);
-    if (!out) return string_empty();
+    AetherString* result = string_alloc_inline(total);
+    if (!result) return string_empty();
 
     /* Second pass: write the bytes. */
-    next_arg = 0;
+    char* out = result->data;
     size_t pos = 0;
-    p = fmt;
-    while (*p) {
-        if (p[0] == '{' && p[1] == '{') { out[pos++] = '{'; p += 2; continue; }
-        if (p[0] == '}' && p[1] == '}') { out[pos++] = '}'; p += 2; continue; }
-        if (p[0] == '{' && p[1] == '}') {
+    next_arg = 0;
+    for (const char* p = f; p < end;) {
+        int pair = p + 1 < end;
+        if (pair && p[0] == '{' && p[1] == '{') { out[pos++] = '{'; p += 2; continue; }
+        if (pair && p[0] == '}' && p[1] == '}') { out[pos++] = '}'; p += 2; continue; }
+        if (pair && p[0] == '{' && p[1] == '}') {
             if (next_arg < n_args) {
-                void* a = list_get_raw(args, next_arg);
-                if (a) {
-                    size_t alen = str_len(a);
-                    const char* adata = str_data(a);
-                    if (alen > 0) memcpy(out + pos, adata, alen);
-                    pos += alen;
-                }
-                next_arg++;
+                void* a = list_get_raw(args, next_arg++);
+                size_t alen = a ? str_len(a) : 0;
+                if (alen > 0) memcpy(out + pos, str_data(a), alen);
+                pos += alen;
             }
             p += 2; continue;
         }
         out[pos++] = *p++;
     }
-    out[pos] = '\0';
-
-    AetherString* result = string_new_with_length(out, pos);
-    free(out);
     return result;
 }
 

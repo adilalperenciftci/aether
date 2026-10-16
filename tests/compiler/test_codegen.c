@@ -173,8 +173,11 @@ TEST(codegen_string_ne_zero_literal_compares_content) {
     char* buf = generate_typechecked(
         "main() { a = \"abc\"\n if a != \"0\" { println(\"ne\") } }");
     ASSERT_NOT_NULL(buf);
-    ASSERT_TRUE(strstr(buf, "!string_equals(a, \"0\")") != NULL);
-    ASSERT_TRUE(strstr(buf, "a != \"0\"") == NULL);
+    /* Every literal is a pinned AetherString (R1): "abc" is the first, "0"
+     * the second. */
+    ASSERT_TRUE(strstr(buf, "_ae_slit_1_bytes[] = \"0\"") != NULL);
+    ASSERT_TRUE(strstr(buf, "!string_equals(a, ((const char*)&_ae_slit_1))") != NULL);
+    ASSERT_TRUE(strstr(buf, "a != ((const char*)&_ae_slit_1)") == NULL);
     free(buf);
 }
 
@@ -182,8 +185,9 @@ TEST(codegen_zero_literal_eq_string_compares_content) {
     char* buf = generate_typechecked(
         "main() { a = \"abc\"\n if \"0\" == a { println(\"eq\") } }");
     ASSERT_NOT_NULL(buf);
-    ASSERT_TRUE(strstr(buf, "string_equals(\"0\", a)") != NULL);
-    ASSERT_TRUE(strstr(buf, "\"0\" == a") == NULL);
+    ASSERT_TRUE(strstr(buf, "_ae_slit_1_bytes[] = \"0\"") != NULL);
+    ASSERT_TRUE(strstr(buf, "string_equals(((const char*)&_ae_slit_1), a)") != NULL);
+    ASSERT_TRUE(strstr(buf, "((const char*)&_ae_slit_1) == a") == NULL);
     free(buf);
 }
 
@@ -193,7 +197,8 @@ TEST(codegen_string_order_compares_content) {
     char* buf = generate_typechecked(
         "main() { a = \"abc\"\n if a < \"b\" { println(\"lt\") } }");
     ASSERT_NOT_NULL(buf);
-    ASSERT_TRUE(strstr(buf, "(string_compare(a, \"b\") < 0)") != NULL);
+    ASSERT_TRUE(strstr(buf, "_ae_slit_1_bytes[] = \"b\"") != NULL);
+    ASSERT_TRUE(strstr(buf, "(string_compare(a, ((const char*)&_ae_slit_1)) < 0)") != NULL);
     ASSERT_TRUE(strstr(buf, "strcmp(_aether_safe_str(a)") == NULL);
     free(buf);
 }
@@ -227,7 +232,9 @@ TEST(codegen_int_return_of_int_is_not_cast) {
         "builder rec(w: int) -> int { return w }\n"
         "main() { println(\"${rec(2) {}}\") }");
     ASSERT_NOT_NULL(buf);
-    ASSERT_TRUE(strstr(buf, "return w;") != NULL);
+    /* The builder's exit releases its unused config (#2871), so the value
+     * is held across it. */
+    ASSERT_TRUE(strstr(buf, "int _builder_ret = w;") != NULL);
     ASSERT_TRUE(strstr(buf, "(intptr_t)(w)") == NULL);
     free(buf);
 }
@@ -266,10 +273,10 @@ TEST(codegen_closure_does_not_capture_sibling_trailing_block_local) {
         "}\n");
     ASSERT_NOT_NULL(buf);
     /* First block's callback reads the outer name: captured. */
-    ASSERT_TRUE(strstr(buf, "_aether_make_closure_0(ml)") != NULL);
+    ASSERT_TRUE(strstr(buf, "_aether_make_env_0(ml)") != NULL);
     /* Second block's callback binds its own: only `root` crosses into it. */
-    ASSERT_TRUE(strstr(buf, "_aether_make_closure_1(root)") != NULL);
-    ASSERT_TRUE(strstr(buf, "_aether_make_closure_1(root, ml)") == NULL);
+    ASSERT_TRUE(strstr(buf, "_aether_make_env_1(root)") != NULL);
+    ASSERT_TRUE(strstr(buf, "_aether_make_env_1(root, ml)") == NULL);
     free(buf);
 }
 
@@ -286,7 +293,7 @@ TEST(codegen_closure_captures_same_trailing_block_local_it_mutates) {
         "    }\n"
         "}\n");
     ASSERT_NOT_NULL(buf);
-    ASSERT_TRUE(strstr(buf, "_aether_make_closure_0(hits)") != NULL);
+    ASSERT_TRUE(strstr(buf, "_aether_make_env_0(hits)") != NULL);
     free(buf);
 }
 
@@ -378,15 +385,14 @@ TEST(codegen_interp_single_impure_segment_stays_inline) {
 
 TEST(codegen_interp_hoisted_heap_segment_is_freed_after_call) {
     char* buf = generate_typechecked(
-        /* The snippet typechecker resolves no std modules, so name the
-         * runtime's heap-producing concat directly; the classifier keys on
-         * the callee name either way. */
-        "extern string_concat(a: string, b: string) -> string\n"
+        /* The snippet typechecker resolves no std modules, so declare the
+         * runtime's concat directly, `@heap` as std.string does. */
+        "extern string_concat(a: string, b: string) -> string @heap\n"
         "bump() -> int { return 1 }\n"
         "main() { name = \"ab\"\n println(\"${string_concat(name, name)} ${bump()}\") }");
     ASSERT_NOT_NULL(buf);
     const char* const pieces[] = {
-        "{ const char* _ad_", " = (const char*)(string_concat(name, name)); int _ad_", " = (int)(bump()); ",
+        "{ const char* _ad_", " = (const char*)(aether_string_adopt(string_concat(name, name))); int _ad_", " = (int)(bump()); ",
         "_aether_interp_print(\"%s %d\\n\", (const void*)(_ad_", "), (int)_ad_", "); aether_heap_str_free(_ad_", "); }",
     };
     ASSERT_TRUE(emitted_in_order(buf, pieces, 7));
@@ -822,8 +828,8 @@ TEST(codegen_derive_schema_emits_a_static_table) {
     /* A struct reached by value gets its own table, named by its getter. */
     ASSERT_TRUE(strstr(buf, "static const AetherSchema* _ae_schema_Vec(void) {") != NULL);
     ASSERT_TRUE(strstr(buf, "\"pos\", \"Vec\", 15, 0, 0, offsetof(struct Bob, pos)") != NULL);
-    /* A string names its ownership flag. */
-    ASSERT_TRUE(strstr(buf, "(long)offsetof(struct Bob, _heap_name)") != NULL);
+    /* A string field is its own pointer: there is no ownership flag. */
+    ASSERT_TRUE(strstr(buf, "\"name\", \"string\", 13, 0, 0, offsetof(struct Bob, name), sizeof(((struct Bob*)0)->name), NULL, 0, NULL}") != NULL);
     /* T_schema() returns the table's address. */
     ASSERT_TRUE(strstr(buf, "((void*)_ae_schema_Bob())") != NULL);
     free(buf);

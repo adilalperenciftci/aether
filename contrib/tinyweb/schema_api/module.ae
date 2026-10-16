@@ -66,7 +66,7 @@ struct ApiGroup {
 // json_api(prefix, schema) { create(...); show(...); ... }
 // Container builder: opens a tinyweb path() at `prefix`, attaches a validating
 // filter driven by `schema`, and returns an ApiGroup for the leaf builders.
-json_api(_ctx: ptr, prefix: string, resource: ptr) -> ptr {
+json_api(_ctx: ptr, prefix: string, resource: @keep ptr) -> ptr {
     // Open a nested path group in tinyweb for this resource.
     grp_ctx = path(_ctx, prefix)
 
@@ -365,7 +365,7 @@ fn build_openapi(groups: ptr) -> string {
         strbuilder.append(b, "/schema\":{\"get\":{\"summary\":\"JSON Schema for ")
         strbuilder.append(b, name)
         strbuilder.append(b, "\"}}")
-        name_free(name)
+        string.string_free(name)
         i = i + 1
     }
     strbuilder.append(b, "},")
@@ -385,18 +385,13 @@ fn build_openapi(groups: ptr) -> string {
         strbuilder.append(b, "\":")
         strbuilder.append(b, js)
         string.string_free(js)
-        name_free(name)
+        string.string_free(name)
         i = i + 1
     }
     strbuilder.append(b, "}}}")
 
     raw = strbuilder.finish(b)
     return string_concat(raw, "")
-}
-
-// schema_name_for returns an owned string in the general case; free it.
-fn name_free(s: string) {
-    string.string_free(s)
 }
 
 // openapi_route(path, groups) — mount GET <path> serving one aggregate OpenAPI
@@ -410,7 +405,7 @@ fn name_free(s: string) {
 //
 // (Passing the groups explicitly avoids a module-global registry — the caller
 // already holds each group.)
-openapi_route(_ctx: ptr, route_path: string, groups: ptr) {
+openapi_route(_ctx: ptr, route_path: string, groups: @keep ptr) {
     end_point(_ctx, GET, route_path) | req: ptr, res: ptr, ctx: ptr | {
         doc = build_openapi(groups)
         response_set_header(res, "Content-Type", "application/json")

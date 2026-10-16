@@ -50,7 +50,7 @@ add_and_rebind(l: ptr, s: string) {
     list.add(l, s)
 }
 // Keeps it in a closure of its own (the env takes its own reference).
-add_later(l: ptr, s: string) -> int {
+add_later(l: @keep ptr, s: string) -> int {
     f = || { add_name(l, s) }
     call(f)
     return list.size(l)

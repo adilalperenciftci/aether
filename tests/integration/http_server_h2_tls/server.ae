@@ -11,7 +11,7 @@ extern exit(code: int)
 // Use raw form: actor receive handlers can't cleanly discard the
 // wrapper's string return without an unused-result warning.
 extern http_server_start_raw(server: ptr) -> int
-extern os_getenv(name: string) -> string
+extern os_getenv(name: string) -> string @heap
 extern http_server_bind_raw(server: ptr, host: string, port: int) -> int
 extern http_server_port(server: ptr) -> int
 

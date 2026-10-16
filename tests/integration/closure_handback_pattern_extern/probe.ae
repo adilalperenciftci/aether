@@ -7,7 +7,7 @@
 
 import std.string
 
-extern stash(boxed: fn)
+extern stash(boxed: @retain fn)
 extern fire() -> int
 
 counter(p: string) -> fn {

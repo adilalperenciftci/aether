@@ -9337,7 +9337,7 @@ vkCmdDrawMeshTasksIndirectCountEXT(commandBuffer: ptr, buffer: ptr, offset: uint
 // program's, not the instance's: call it before other threads use the
 // commands, and with null after destroying the instance, which puts them
 // back on the loader's dispatch (and drops an adopted vkGetInstanceProcAddr).
-load_instance(instance: ptr) -> int {
+load_instance(instance: @keep ptr) -> int {
     return load_instance_with(null, instance)
 }
 
@@ -9351,7 +9351,7 @@ load_instance(instance: ptr) -> int {
 // load_device then finds the device's vkGetDeviceProcAddr through it, and
 // surface_create resolves the platform create function through it. A null
 // `gipa` is the loader's own.
-load_instance_with(gipa: ptr, instance: ptr) -> int {
+load_instance_with(gipa: @keep ptr, instance: @keep ptr) -> int {
     n = 0
     pin = 1
     gpin = 1

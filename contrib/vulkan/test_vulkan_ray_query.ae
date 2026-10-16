@@ -357,7 +357,7 @@ struct Accel {
 
 // Builds an acceleration structure of `kind` over `geometry`, one primitive,
 // on the device: sizes, storage, create, scratch, build, wait.
-accel_build(kind: int, geometry: ptr) -> Accel {
+accel_build(kind: int, geometry: @keep ptr) -> Accel {
     a = Accel{handle: null, storage: Buf{buffer: null, memory: null, address: 0, mapped: null},
               scratch: Buf{buffer: null, memory: null, address: 0, mapped: null}, address: 0, result: 0}
     info = calloc(1, sizeof(VkAccelerationStructureBuildGeometryInfoKHR)) as *VkAccelerationStructureBuildGeometryInfoKHR
@@ -631,7 +631,7 @@ triangle_geometry(address: uint64) -> *VkAccelerationStructureGeometryKHR {
 // descriptor set layout, pool and set, shader module, pipeline layout and
 // pipeline, then a command buffer that binds them and dispatches two
 // invocations. Returns the first VkResult that was not SUCCESS.
-trace(tlas: ptr, results: ptr, spv: string, spv_len: int) -> int {
+trace(tlas: @keep ptr, results: @keep ptr, spv: string, spv_len: int) -> int {
     r = vk.SUCCESS
 
     bindings = calloc(2, sizeof(VkDescriptorSetLayoutBinding))

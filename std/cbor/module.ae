@@ -96,7 +96,7 @@ fn set_str_payload(cv: *CborValue, src: string, len: int) {
 // Adopt an already-owned AetherBytes buffer (e.g. an assembled indefinite-
 // string buffer) as cv's payload, transferring ownership. `len` is the
 // logical byte length.
-fn adopt_str_payload(cv: *CborValue, b: ptr, len: int) {
+fn adopt_str_payload(cv: *CborValue, b: @keep ptr, len: int) {
     if len <= 0 {
         cv.str_bytes = null
         cv.str_len = 0
@@ -1496,7 +1496,7 @@ undefined_value() -> ptr {
     return cv as ptr
 }
 
-tag(tag_num: long, child: ptr) -> ptr {
+tag(tag_num: long, child: @keep ptr) -> ptr {
     cv = heap.new(CborValue)
     cv.type = CBOR_TAG
     cv.tag_val = tag_num

@@ -16,16 +16,6 @@
 import std.list
 import std.string
 
-// AST names come from strbuilder.finish, which hands back a length-carrying
-// string (an inline AetherString: header and bytes in one block). They are
-// released through string.free, which dispatches on the header and frees the
-// block whole. A raw libc free of the *bytes* would be an interior pointer
-// into that block -- which is what this did when finish returned a bare
-// buffer, and what corrupted the heap the day it stopped.
-_free_cstr(s: string) {
-    string.free(s)
-}
-
 exports(
     // Node kinds
     SEG_CHILD, SEG_DESCENDANT,
@@ -311,7 +301,7 @@ new_literal(kind: int) -> ptr {
     return l
 }
 
-new_comparison(op: int, left: ptr, right: ptr) -> ptr {
+new_comparison(op: int, left: @keep ptr, right: @keep ptr) -> ptr {
     c = heap.new(Comparison)
     c.op = op
     c.left = left
@@ -397,7 +387,7 @@ free_segment(s: ptr) {
 free_selector(s: ptr) {
     if s == null { return }
     p = s as *Selector
-    if p.name_owned == 1 { _free_cstr(p.name) }
+    if p.name_owned == 1 { string.free(p.name) }
     if p.slice != null { heap.free(p.slice) }
     if p.filter != null { free_filter(p.filter) }
     heap.free(s)
@@ -441,7 +431,7 @@ free_fnarg(a: ptr) {
 free_literal(l: ptr) {
     if l == null { return }
     p = l as *Literal
-    if p.sval_owned == 1 { _free_cstr(p.sval) }
+    if p.sval_owned == 1 { string.free(p.sval) }
     heap.free(l)
 }
 
@@ -472,6 +462,6 @@ free_singular(s: ptr) {
 _free_singular_seg(s: ptr) {
     if s == null { return }
     p = s as *SingularSeg
-    if p.name_owned == 1 { _free_cstr(p.name) }
+    if p.name_owned == 1 { string.free(p.name) }
     heap.free(s)
 }

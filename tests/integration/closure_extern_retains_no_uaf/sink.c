@@ -1,11 +1,9 @@
 /* C-side closure-retention sink for the
  * closure_extern_retains_no_uaf regression. Models the canonical
  * "callback registry" extern callsite: register_cb() stores a boxed
- * closure pointer; fire_cb() invokes it later. With the pre-fix
- * codegen, the closure's heap env was freed at the call site of
- * register_cb(), so fire_cb() read freed memory (UAF). With the
- * fix, the env survives — extern callee args are conservatively
- * treated as escaping. */
+ * closure pointer; fire_cb() invokes it later. register_cb is
+ * declared `@retain`, so the call hands it a reference of its own and
+ * the env outlives the caller's release. */
 
 typedef struct {
     void (*fn)(void);

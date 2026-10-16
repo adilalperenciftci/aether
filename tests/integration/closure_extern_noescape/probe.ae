@@ -1,7 +1,7 @@
 // Regression (#2523): a capturing closure passed to an extern whose
 // parameter is `@noescape` is released once the call returns, by value
 // (`fn`) and through a `ptr` slot, as a literal and as a local passed many
-// times; a closure passed to an unannotated extern that stores it stays
+// times; a closure passed to an extern that keeps it (`@retain`, R4) stays
 // alive for the later call from C.
 //
 // The heap check runs where the count is exact (mem.heap_in_use_exact):
@@ -15,7 +15,7 @@ import std.string
 
 extern run_cb(boxed: @noescape fn) -> int
 extern run_box(box: @noescape ptr) -> int
-extern register_cb(boxed: fn)
+extern register_cb(boxed: @retain fn)
 extern fire_cb() -> int
 extern exit(code: int)
 

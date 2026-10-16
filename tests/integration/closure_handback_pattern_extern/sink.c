@@ -1,6 +1,6 @@
 /* C side of the closure_handback_pattern_extern regression: stash() keeps
- * the closure it is given, with no reference of its own (an unannotated
- * extern parameter is a keep), and fire() calls it later. */
+ * the closure it is given (declared `@retain`, so the call hands it a
+ * reference of its own), and fire() calls it later. */
 
 typedef struct {
     void (*fn)(void);

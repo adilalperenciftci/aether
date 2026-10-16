@@ -918,7 +918,7 @@ static int builtin_lowered_by_name(const char* name, int params) {
         {"typeof", 0, -1}, {"is_type", 0, -1}, {"convert_type", 0, -1},
         {"char_at", 1, -1}, {"str_eq", 2, 2},
         {"ref", 1, 1}, {"ref_get", 1, 1}, {"ref_set", 2, 2}, {"ref_free", 1, 1},
-        {"box_closure", 1, 1}, {"unbox_closure", 1, 1},
+        {"box_closure", 1, 1}, {"unbox_closure", 1, 1}, {"release_closure", 1, 1},
         {"print", 0, -1}, {"println", 0, -1}, {"print_char", 1, -1},
         {"read_char", 0, 0}, {"raw_mode", 0, 0}, {"cooked_mode", 0, 0},
         {"exit", 0, -1}, {"sleep", 1, 1}, {"free", 1, 1}, {"getenv", 1, 1},
@@ -1581,8 +1581,7 @@ static int count_function_params(ASTNode* func) {
 // DECLARATION node by the parser, with annotation="has_default" so
 // they are distinguishable from struct/list-pattern children.
 static int param_has_default(ASTNode* param) {
-    return param && param->annotation &&
-           strcmp(param->annotation, "has_default") == 0 &&
+    return param && annotation_has_marker(param->annotation, "has_default") &&
            param->child_count > 0 && param->children[0] != NULL;
 }
 
@@ -2275,6 +2274,17 @@ static int function_value_annotate(ASTNode* ident, SymbolTable* table) {
         ASTNode* p = def->children[i];
         if (p && p->type != AST_GUARD_CLAUSE && p->type != AST_BLOCK &&
             p->type != AST_REQUIRES_CLAUSE && p->type != AST_ENSURES_CLAUSE) count++;
+        /* #2926: a call through a value cannot see what the callee keeps,
+         * so a function that keeps a `ptr` parameter is called by name. */
+        if (p && annotation_has_marker(p->annotation, "keep_param")) {
+            char msg[256];
+            snprintf(msg, sizeof(msg),
+                     "'%s' keeps its `ptr` parameter '%s' (`@keep`), so it cannot be used as a value",
+                     ident->value, p->value ? p->value : "?");
+            type_error_code_hint(msg,
+                "call it by name: a call through a function value treats every `ptr` as borrowed",
+                ident->line, ident->column, AETHER_ERR_KEEPS_BORROWED);
+        }
     }
     Type** params = count ? malloc(sizeof(Type*) * (size_t)count) : NULL;
     int k = 0;
@@ -4537,6 +4547,14 @@ static void check_unreachable_code(ASTNode* body) {
 static void scoped_check_bindings(ASTNode* node, ASTNode* root);
 // #479: enforce Isolated[T] move-only linearity over a function body.
 static void iso_check_function(ASTNode* fn, ASTNode* body);
+static void check_borrowed_param_frees(ASTNode* program, ASTNode* fn, ASTNode* body);
+static void check_borrowed_ptr_params(ASTNode* program, ASTNode* fn, ASTNode* body,
+                                      const char** globals, int nglobals);
+static void check_closures_ptr_params(ASTNode* program, ASTNode* n,
+                                      const char** globals, int nglobals);
+static ASTNode* effect_resolve_callee(ASTNode* program, const char* name);
+static int has_ctx_first_param(ASTNode* func);
+static void check_strings_into_keep(ASTNode* program, ASTNode* n);
 // #481: validate `@pure`/`@no_fs`/`@no_net`/`@no_os` effect tags.
 static void check_effect_tags(ASTNode* program);
 // #522: fold `__pure(fn)` queries to compile-time bool constants.
@@ -5184,6 +5202,12 @@ static void check_qualified_types(ASTNode* program) {
     }
 }
 
+/* #2886: results no function can give (defined with typecheck_function_definition). */
+static Type* result_array_type(Type* t);
+static void refuse_array_result(const char* subject, Type* result, Type* arr, int line,
+                                int column);
+static void refuse_fn_type_array_result(const char* subject, Type* t, int line, int column);
+
 int typecheck_program(ASTNode* program) {
     note_program_globals(program);
     if (!program || program->type != AST_PROGRAM) return 0;
@@ -5357,6 +5381,8 @@ int typecheck_program(ASTNode* program) {
     add_symbol(global_table, "box_closure", box_closure_type, 0, 1, 0);
     Type* unbox_closure_type = create_type(TYPE_FUNCTION);
     add_symbol(global_table, "unbox_closure", unbox_closure_type, 0, 1, 0);
+    Type* release_closure_type = create_type(TYPE_VOID);
+    add_symbol(global_table, "release_closure", release_closure_type, 0, 1, 0);
     Type* ref_type = create_type(TYPE_PTR);
     add_symbol(global_table, "ref", ref_type, 0, 1, 0);
     /* Both cells hold an intptr_t; typing the read `int` truncated every
@@ -6076,6 +6102,10 @@ int typecheck_program(ASTNode* program) {
             check_unreachable_code(body);
             scoped_check_bindings(body, body);  // #521
             iso_check_function(child, body);    // #479 Isolated[T] move check
+            check_borrowed_param_frees(program, child, body);
+            check_borrowed_ptr_params(program, child, body, global_var_names, global_var_count);
+            check_closures_ptr_params(program, body, global_var_names, global_var_count);
+            check_strings_into_keep(program, body);
         } else if (child->type == AST_MAIN_FUNCTION && child->child_count > 0) {
             // main() has a BLOCK child containing the actual statements
             ASTNode* main_body = child->children[0];
@@ -6083,6 +6113,8 @@ int typecheck_program(ASTNode* program) {
             check_unreachable_code(main_body);
             scoped_check_bindings(main_body, main_body);  // #521
             iso_check_function(child, main_body);  // #479 Isolated[T] move check
+            check_closures_ptr_params(program, main_body, global_var_names, global_var_count);
+            check_strings_into_keep(program, main_body);
         }
     }
     g_tc_file = NULL;
@@ -6138,9 +6170,30 @@ int typecheck_node(ASTNode* node, SymbolTable* table) {
                 return typecheck_node(node->children[0], table);
             }
             return 1;
-        case AST_EXTERN_FUNCTION:
-            // Extern functions have no body to check - just a declaration
+        case AST_EXTERN_FUNCTION: {
+            // Extern functions have no body to check - just a declaration.
+            // #2886: a C function returns no array either, nor does a
+            // function type given to or returned by one.
+            Type* arr = result_array_type(node->node_type);
+            if (arr) {
+                char who[256];
+                snprintf(who, sizeof(who), "extern '%s' returns", node->value ? node->value : "?");
+                refuse_array_result(who, node->node_type, arr, node->line, node->column);
+            } else {
+                char who[256];
+                snprintf(who, sizeof(who), "the result of extern '%s'", node->value ? node->value : "?");
+                refuse_fn_type_array_result(who, node->node_type, node->line, node->column);
+            }
+            for (int i = 0; i < node->child_count; i++) {
+                ASTNode* p = node->children[i];
+                if (!p || !p->value) continue;
+                char who[256];
+                snprintf(who, sizeof(who), "parameter '%s' of extern '%s'", p->value,
+                         node->value ? node->value : "?");
+                refuse_fn_type_array_result(who, p->node_type, p->line, p->column);
+            }
             return 1;
+        }
         case AST_C_STRUCT_DEF:
             // #891 @c_struct overlay: a declaration of (field, type, offset)
             // tuples — no body, no statements to check. The name set is
@@ -6767,6 +6820,342 @@ static void iso_check(ASTNode* node, IsoSet* moved, IsoSet* iso) {
 }
 
 /* Entry point: register Isolated-typed parameters, then walk the body. */
+/* #2924: a `string` parameter is borrowed for the call (R3), so freeing it
+ * releases a reference the function does not own. A parameter the body
+ * rebinds holds a string of its own from then on and may be freed. */
+static int binds_symbol(const char* annotation, const char* sym) {
+    size_t n = strlen(sym);
+    return annotation && !strncmp(annotation, "c_symbol:", 9) &&
+           !strncmp(annotation + 9, sym, n) &&
+           (annotation[9 + n] == '\0' || annotation[9 + n] == ';');
+}
+
+/* `release`, `string.free`, `string.release`, or an extern bound to the
+ * runtime's free under another name (`@extern("string_free") drop(s)`). */
+static int is_string_free_call(ASTNode* program, ASTNode* n) {
+    if (!n || n->type != AST_FUNCTION_CALL || !n->value || n->child_count != 1) return 0;
+    const char* f = n->value;
+    if (!strcmp(f, "release") || !strcmp(f, "free") || !strcmp(f, "string.free") ||
+        !strcmp(f, "string.release") ||
+        !strcmp(f, "string_free") || !strcmp(f, "string_release") ||
+        !strcmp(f, "string.string_free") || !strcmp(f, "string.string_release")) return 1;
+    for (int i = 0; program && i < program->child_count; i++) {
+        ASTNode* e = program->children[i];
+        if (e && e->type == AST_EXTERN_FUNCTION && e->value && !strcmp(e->value, f))
+            return binds_symbol(e->annotation, "string_free") ||
+                   binds_symbol(e->annotation, "string_release");
+    }
+    return 0;
+}
+
+/* `string.seq_free`, the release of a string sequence. */
+static int is_seq_free_call(ASTNode* n) {
+    if (!n || n->type != AST_FUNCTION_CALL || !n->value || n->child_count != 1) return 0;
+    return !strcmp(n->value, "string.seq_free") || !strcmp(n->value, "string_seq_free") ||
+           !strcmp(n->value, "string.string_seq_free");
+}
+
+static int body_rebinds(ASTNode* n, const char* name) {
+    if (!n) return 0;
+    if (n->type == AST_VARIABLE_DECLARATION && n->value && !strcmp(n->value, name)) return 1;
+    for (int i = 0; i < n->child_count; i++)
+        if (body_rebinds(n->children[i], name)) return 1;
+    return 0;
+}
+
+/* `seq` says the parameter is a string sequence, freed by
+ * `string.seq_free`, rather than a string. */
+static void check_frees_of_param(ASTNode* program, ASTNode* n, const char* name, int seq) {
+    if (!n || n->type == AST_CLOSURE) return;
+    if ((seq ? is_seq_free_call(n) : is_string_free_call(program, n)) && n->children[0] &&
+        n->children[0]->type == AST_IDENTIFIER && n->children[0]->value &&
+        !strcmp(n->children[0]->value, name)) {
+        char msg[256];
+        snprintf(msg, sizeof(msg), "'%s' is a parameter: the function borrows it and may not free it", name);
+        type_error_code_hint(msg,
+            seq ? "the caller owns the sequence and frees it; to keep a sequence of your own, store it"
+                : "the caller owns the string and frees it; to keep a string of your own, store it",
+            n->line, n->column, AETHER_ERR_FREES_BORROWED);
+        return;
+    }
+    for (int i = 0; i < n->child_count; i++) check_frees_of_param(program, n->children[i], name, seq);
+}
+
+static void check_borrowed_param_frees(ASTNode* program, ASTNode* fn, ASTNode* body) {
+    for (int i = 0; fn && body && i < fn->child_count && fn->children[i] != body; i++) {
+        ASTNode* p = fn->children[i];
+        if (p && (p->type == AST_VARIABLE_DECLARATION || p->type == AST_PATTERN_VARIABLE) &&
+            p->value && p->node_type &&
+            (p->node_type->kind == TYPE_STRING || is_string_seq_ptr_type(p->node_type)) &&
+            !body_rebinds(body, p->value))
+            check_frees_of_param(program, body, p->value, p->node_type->kind != TYPE_STRING);
+    }
+}
+
+/* #2926: a `ptr` parameter is borrowed for the call unless it is declared
+ * `@keep`. Each function is checked against its own body: a borrowed one is
+ * not kept (stored where it outlives the call, returned, captured, put in a
+ * struct or a message, or passed on to a `@keep` parameter), and a call is
+ * checked against the callee's signature, never its body. A closure's `ptr`
+ * parameter is always borrowed. Only an untyped `ptr`: a string converts to
+ * nothing else implicitly. A parameter the body re-binds holds a value of
+ * its own, as for E0901. */
+#define KEEP_SET_MAX 64
+/* Each name that holds a borrowed `ptr` parameter (the parameter, or a
+ * local bound to it) and the parameter it holds. */
+typedef struct { const char* names[KEEP_SET_MAX]; const char* params[KEEP_SET_MAX]; int count; } KeepSet;
+
+static const char* keep_set_param(const KeepSet* s, const char* n) {
+    for (int i = 0; n && i < s->count; i++)
+        if (!strcmp(s->names[i], n)) return s->params[i];
+    return NULL;
+}
+
+static void keep_set_add(KeepSet* s, const char* n, const char* param) {
+    if (n && !keep_set_param(s, n) && s->count < KEEP_SET_MAX) {
+        s->names[s->count] = n;
+        s->params[s->count++] = param;
+    }
+}
+
+/* The borrowed parameter `e` is, or is a view of, or NULL. */
+static const char* carries_borrowed_ptr(ASTNode* e, const KeepSet* s) {
+    if (!e) return NULL;
+    switch (e->type) {
+        case AST_IDENTIFIER: return keep_set_param(s, e->value);
+        case AST_PTR_AS_STRUCT_CAST: case AST_PTR_AS_ARRAY_CAST: case AST_PTR_AS_FN_CAST:
+        case AST_VALUE_CAST:
+            return e->child_count > 0 ? carries_borrowed_ptr(e->children[0], s) : NULL;
+        case AST_IF_EXPRESSION: {
+            if (e->child_count < 3) return NULL;
+            const char* p = carries_borrowed_ptr(e->children[1], s);
+            return p ? p : carries_borrowed_ptr(e->children[2], s);
+        }
+        default: return NULL;
+    }
+}
+
+static const char* mentions_name(ASTNode* n, const KeepSet* s) {
+    if (!n) return NULL;
+    if (n->type == AST_IDENTIFIER && keep_set_param(s, n->value)) return keep_set_param(s, n->value);
+    for (int i = 0; i < n->child_count; i++) {
+        const char* p = mentions_name(n->children[i], s);
+        if (p) return p;
+    }
+    return NULL;
+}
+
+static int is_keep_param(ASTNode* p) {
+    return p && annotation_has_marker(p->annotation, "keep_param");
+}
+
+/* The parameter of the Aether function `def` that argument `i` of `call`
+ * fills, or NULL. A builder's `_ctx` is filled from the enclosing block
+ * when the call leaves it out; its trailing block is no argument. */
+static ASTNode* call_param_of(ASTNode* def, ASTNode* call, int i) {
+    int nparams = 0;
+    for (int c = 0; c + 1 < def->child_count; c++) {
+        ASTNode* p = def->children[c];
+        if (p && (p->type == AST_PATTERN_VARIABLE || p->type == AST_VARIABLE_DECLARATION)) nparams++;
+    }
+    int nargs = call->child_count;
+    ASTNode* last = nargs > 0 ? call->children[nargs - 1] : NULL;
+    if (last && last->type == AST_CLOSURE && last->value && !strcmp(last->value, "trailing")) nargs--;
+    if (i >= nargs) return NULL;
+    int k = (has_ctx_first_param(def) && nargs == nparams - 1) ? -1 : 0;
+    for (int c = 0; c + 1 < def->child_count; c++) {
+        ASTNode* p = def->children[c];
+        if (!p || (p->type != AST_PATTERN_VARIABLE && p->type != AST_VARIABLE_DECLARATION)) continue;
+        if (k++ == i) return p;
+    }
+    return NULL;
+}
+
+/* Does the call `call` keep its argument `i`: a `@keep` parameter of an
+ * Aether function, a `@retain` one of an extern? */
+static int call_keeps_arg(ASTNode* program, ASTNode* call, int i) {
+    ASTNode* def = effect_resolve_callee(program, call->value);
+    if (def) return is_keep_param(call_param_of(def, call, i));
+    for (int c = 0; program && c < program->child_count; c++) {
+        ASTNode* e = program->children[c];
+        if (!e || e->type != AST_EXTERN_FUNCTION || !e->value || strcmp(e->value, call->value)) continue;
+        ASTNode* p = i < e->child_count ? e->children[i] : NULL;
+        return p && p->annotation && strstr(p->annotation, "retain_param") != NULL;
+    }
+    return 0;
+}
+
+static void report_borrowed_keep(ASTNode* at, const char* param, const char* how) {
+    char msg[256];
+    snprintf(msg, sizeof(msg), "'%s' is a borrowed `ptr` parameter, %s, which outlives the call",
+             param, how);
+    type_error_code_hint(msg,
+        "declare the parameter `@keep ptr` if the function keeps it (a closure's cannot be)",
+        at->line, at->column, AETHER_ERR_KEEPS_BORROWED);
+}
+
+static void check_ptr_keeps_in(ASTNode* program, ASTNode* n, KeepSet* s,
+                               const char** globals, int nglobals) {
+    if (!n) return;
+    if (n->type == AST_FUNCTION_DEFINITION || n->type == AST_BUILDER_FUNCTION) return;
+    const char* p;
+    if (n->type == AST_CLOSURE) {
+        if ((p = mentions_name(n, s))) report_borrowed_keep(n, p, "captured by a closure");
+        return;
+    }
+    if (n->type == AST_VARIABLE_DECLARATION && n->value && n->child_count > 0 &&
+        (p = carries_borrowed_ptr(n->children[n->child_count - 1], s))) {
+        int global = 0;
+        for (int g = 0; g < nglobals; g++)
+            if (!strcmp(globals[g], n->value)) global = 1;
+        if (global) report_borrowed_keep(n, p, "stored in a module-level `var`");
+        else keep_set_add(s, n->value, p);
+    }
+    if (n->type == AST_BINARY_EXPRESSION && n->value && !strcmp(n->value, "=") &&
+        n->child_count == 2 && n->children[0] && n->children[0]->type != AST_IDENTIFIER &&
+        (p = carries_borrowed_ptr(n->children[1], s)))
+        report_borrowed_keep(n, p, "stored in a field or an element");
+    if (n->type == AST_RETURN_STATEMENT) {
+        for (int i = 0; i < n->child_count; i++)
+            if ((p = carries_borrowed_ptr(n->children[i], s))) report_borrowed_keep(n, p, "returned");
+    }
+    if (n->type == AST_STRUCT_LITERAL || n->type == AST_MESSAGE_CONSTRUCTOR) {
+        for (int i = 0; i < n->child_count; i++) {
+            ASTNode* f = n->children[i];
+            if (f && f->child_count > 0 && (p = carries_borrowed_ptr(f->children[0], s)))
+                report_borrowed_keep(f, p, n->type == AST_STRUCT_LITERAL ? "put in a struct"
+                                                                         : "sent in a message");
+        }
+    }
+    if (n->type == AST_FUNCTION_CALL && n->value) {
+        for (int i = 0; i < n->child_count; i++)
+            if ((p = carries_borrowed_ptr(n->children[i], s)) && call_keeps_arg(program, n, i))
+                report_borrowed_keep(n->children[i], p, "passed to a parameter that keeps it");
+    }
+    for (int i = 0; i < n->child_count; i++)
+        check_ptr_keeps_in(program, n->children[i], s, globals, nglobals);
+}
+
+/* #2926: a `string` reaches a `@keep ptr` parameter only through
+ * `string.keep(s)`, which hands over a reference of its own; given as it
+ * is, the slot would keep a string its owner frees. */
+static int is_string_keep_call(ASTNode* e) {
+    return e && e->type == AST_FUNCTION_CALL && e->value &&
+           (!strcmp(e->value, "string.keep") || !strcmp(e->value, "string_keep"));
+}
+
+static int is_bare_ptr_type(Type* t) {
+    return t && t->kind == TYPE_PTR && !t->element_type && !t->distinct_name;
+}
+
+/* The declared type of field `field` of struct `sname`, or NULL. */
+static Type* struct_field_decl_type(ASTNode* program, const char* sname, const char* field) {
+    for (int i = 0; program && sname && field && i < program->child_count; i++) {
+        ASTNode* s = program->children[i];
+        if (!s || s->type != AST_STRUCT_DEFINITION || !s->value || strcmp(s->value, sname)) continue;
+        for (int f = 0; f < s->child_count; f++) {
+            ASTNode* fd = s->children[f];
+            if (fd && fd->type == AST_STRUCT_FIELD && fd->value && !strcmp(fd->value, field))
+                return fd->node_type;
+        }
+    }
+    return NULL;
+}
+
+/* A string sequence the same way, through `string.seq_retain(s)`. */
+static int is_seq_retain_call(ASTNode* e) {
+    return e && e->type == AST_FUNCTION_CALL && e->value &&
+           (!strcmp(e->value, "string.seq_retain") || !strcmp(e->value, "string_seq_retain"));
+}
+
+/* The kind of value `e` is when a `ptr` that keeps it would hold no
+ * reference of its own ("string", "*StringSeq"), or NULL. A string literal
+ * is pinned, never released, so a `ptr` may keep it as it is. */
+static const char* unkept_value_kind(ASTNode* e) {
+    if (!e || !e->node_type) return NULL;
+    if (e->node_type->kind == TYPE_STRING && e->type != AST_LITERAL && !is_string_keep_call(e))
+        return "string";
+    if (is_string_seq_ptr_type(e->node_type) && !is_seq_retain_call(e)) return "*StringSeq";
+    return NULL;
+}
+
+static void report_unkept_into_ptr(ASTNode* at, const char* kind, const char* where,
+                                   const char* until) {
+    char msg[200];
+    snprintf(msg, sizeof(msg), "a `%s` is given to %s, which keeps it past the %s", kind, where,
+             until);
+    type_error_code_hint(msg,
+                         !strcmp(kind, "string")
+                             ? "hand over a reference of its own with `string.keep(s)`"
+                             : "hand over a reference of its own with `string.seq_retain(s)`",
+                         at->line, at->column, AETHER_ERR_KEEPS_BORROWED);
+}
+
+static void check_strings_into_keep(ASTNode* program, ASTNode* n) {
+    if (!n) return;
+    /* C memory viewed as `string[]` owns nothing: a string stored into it
+     * must outlive C's reads, which one built in the statement does not. */
+    if (n->type == AST_BINARY_EXPRESSION && n->value && !strcmp(n->value, "=") && n->child_count == 2 &&
+        n->children[0] && n->children[0]->type == AST_ARRAY_ACCESS &&
+        n->children[0]->child_count > 0 && n->children[0]->children[0] &&
+        n->children[0]->children[0]->type == AST_PTR_AS_ARRAY_CAST && n->children[1] &&
+        n->children[1]->node_type && n->children[1]->node_type->kind == TYPE_STRING &&
+        (n->children[1]->type == AST_FUNCTION_CALL || n->children[1]->type == AST_STRING_INTERP))
+        type_error_code_hint(
+            "a string built here is stored into C memory, which owns nothing and reads it after this statement",
+            "bind it to a local that outlives C's use, then store the local",
+            n->children[1]->line, n->children[1]->column, AETHER_ERR_KEEPS_BORROWED);
+    /* A `ptr` field keeps what it is given, as a `@keep` parameter does. */
+    if (n->type == AST_BINARY_EXPRESSION && n->value && !strcmp(n->value, "=") && n->child_count == 2 &&
+        n->children[0] && is_bare_ptr_type(n->children[0]->node_type) &&
+        unkept_value_kind(n->children[1]))
+        report_unkept_into_ptr(n->children[1], unkept_value_kind(n->children[1]), "a `ptr` field",
+                               "statement");
+    if (n->type == AST_STRUCT_LITERAL && n->value) {
+        for (int i = 0; i < n->child_count; i++) {
+            ASTNode* f = n->children[i];
+            if (f && f->value && f->child_count > 0 && unkept_value_kind(f->children[0]) &&
+                is_bare_ptr_type(struct_field_decl_type(program, n->value, f->value)))
+                report_unkept_into_ptr(f->children[0], unkept_value_kind(f->children[0]),
+                                       "a `ptr` field", "statement");
+        }
+    }
+    if (n->type == AST_FUNCTION_CALL && n->value) {
+        ASTNode* def = effect_resolve_callee(program, n->value);
+        for (int i = 0; def && i < n->child_count; i++) {
+            ASTNode* a = n->children[i];
+            if (unkept_value_kind(a) && is_keep_param(call_param_of(def, n, i)))
+                report_unkept_into_ptr(a, unkept_value_kind(a), "a `@keep ptr` parameter", "call");
+        }
+    }
+    for (int i = 0; i < n->child_count; i++) check_strings_into_keep(program, n->children[i]);
+}
+
+/* The same check for every closure in `n`, each against its own body. */
+static void check_closures_ptr_params(ASTNode* program, ASTNode* n,
+                                      const char** globals, int nglobals) {
+    if (!n) return;
+    if (n->type == AST_CLOSURE && n->child_count > 0)
+        check_borrowed_ptr_params(program, n, n->children[n->child_count - 1], globals, nglobals);
+    for (int i = 0; i < n->child_count; i++)
+        check_closures_ptr_params(program, n->children[i], globals, nglobals);
+}
+
+static void check_borrowed_ptr_params(ASTNode* program, ASTNode* fn, ASTNode* body,
+                                      const char** globals, int nglobals) {
+    KeepSet s = { {0}, {0}, 0 };
+    for (int i = 0; fn && body && i < fn->child_count && fn->children[i] != body; i++) {
+        ASTNode* p = fn->children[i];
+        if (p && (p->type == AST_PATTERN_VARIABLE || p->type == AST_VARIABLE_DECLARATION ||
+                  p->type == AST_CLOSURE_PARAM) &&
+            p->value && p->node_type && p->node_type->kind == TYPE_PTR &&
+            !p->node_type->element_type && !p->node_type->distinct_name &&
+            !is_keep_param(p) && !body_rebinds(body, p->value))
+            keep_set_add(&s, p->value, p->value);
+    }
+    if (s.count) check_ptr_keeps_in(program, body, &s, globals, nglobals);
+}
+
 static void iso_check_function(ASTNode* fn, ASTNode* body) {
     if (!body) return;
     IsoSet moved; moved.count = 0;
@@ -7536,6 +7925,172 @@ static void resolve_purity_queries(ASTNode* node, ASTNode* program,
         resolve_purity_queries(node->children[i], program, globals, nglobals);
 }
 
+/* #2886: a result no function can give. C returns no array, and the code
+ * generator does not wrap one (making it a value a function returns is
+ * #2894), so a fixed-size array result, alone or at a position of a tuple
+ * result, compiled to C that did not build (`int[2] pair(void);`). The
+ * offending array type of result type `t`, or NULL. A slice (`T[]`) is a
+ * value and may be returned. */
+static Type* result_array_type(Type* t) {
+    if (!t) return NULL;
+    if (type_is_sized_array(t)) return t;
+    if (t->kind == TYPE_TUPLE) {
+        for (int i = 0; t->tuple_types && i < t->tuple_count; i++) {
+            Type* a = result_array_type(t->tuple_types[i]);
+            if (a) return a;
+        }
+    }
+    return NULL;
+}
+
+/* A function type written inside `t` (`t` itself, a parameter's or the
+ * result's of one, an element's) whose result is such an array: the
+ * function type, or NULL. */
+static Type* fn_type_with_array_result(Type* t, int depth) {
+    if (!t || depth > 16) return NULL;
+    if (t->kind == TYPE_FUNCTION) {
+        if (result_array_type(t->return_type)) return t;
+        for (int i = 0; t->param_types && i < t->param_count; i++) {
+            Type* f = fn_type_with_array_result(t->param_types[i], depth + 1);
+            if (f) return f;
+        }
+        return fn_type_with_array_result(t->return_type, depth + 1);
+    }
+    for (int i = 0; t->tuple_types && i < t->tuple_count; i++) {
+        Type* f = fn_type_with_array_result(t->tuple_types[i], depth + 1);
+        if (f) return f;
+    }
+    return fn_type_with_array_result(t->element_type, depth + 1);
+}
+
+/* `arr` as it is written in Aether (`Doc[2]`, `[Dir]int`), for the help. */
+static void array_type_spelling(Type* arr, char* out, size_t cap) {
+    Type* el = arr->element_type;
+    const char* e = el && el->kind == TYPE_STRUCT && el->struct_name ? el->struct_name
+                                                                      : type_to_string(el);
+    if (arr->index_enum_name) snprintf(out, cap, "[%s]%s", arr->index_enum_name, e);
+    else snprintf(out, cap, "%s[%d]", e, arr->array_size);
+}
+
+/* Refuse result type `result` (holding the array `arr`) of what `subject`
+ * names: "extern 'pair_c' returns", "this closure returns", "parameter 'g'
+ * holds the function type || -> int[2], which returns". A named Aether
+ * function returns one (#2894); a C function cannot, and a closure's or a
+ * function value's result has no struct to carry it. */
+static void refuse_array_result(const char* subject, Type* result, Type* arr, int line,
+                                int column) {
+    char spelled[128], msg[512], hint[256];
+    array_type_spelling(arr, spelled, sizeof(spelled));
+    if (result == arr) {
+        snprintf(msg, sizeof(msg),
+                 "%s %s, a fixed-size array: only a named function returns one, alone or in "
+                 "a tuple (#2894)", subject, spelled);
+    } else {
+        snprintf(msg, sizeof(msg),
+                 "%s %s, which holds the fixed-size array %s: only a named function returns "
+                 "one, alone or in a tuple (#2894)", subject, type_to_string(result), spelled);
+    }
+    snprintf(hint, sizeof(hint),
+             "return it from a named function, or wrap it in a struct: struct Pair { v: %s }",
+             spelled);
+    type_error_code_hint(msg, hint, line, column, AETHER_ERR_ARRAY_RESULT);
+}
+
+/* Refuse a written type `t` of what `subject` names (a parameter, a field, a
+ * local) when it holds a function type whose result is such an array. */
+static void refuse_fn_type_array_result(const char* subject, Type* t, int line, int column) {
+    Type* f = fn_type_with_array_result(t, 0);
+    if (!f) return;
+    char who[256];
+    snprintf(who, sizeof(who), "%s holds the function type %s, which returns",
+             subject, type_to_string(f));
+    refuse_array_result(who, f->return_type, result_array_type(f->return_type), line, column);
+}
+
+/* The first `return` of a closure's own body whose value would make the
+ * closure return such an array (alone, or at a position of a tuple): the
+ * array type, the statement in *at. Not a nested closure's. */
+static Type* closure_array_return(ASTNode* node, ASTNode** at) {
+    if (!node || ast_is_own_function(node)) return NULL;
+    if (node->type == AST_RETURN_STATEMENT) {
+        for (int i = 0; i < node->child_count; i++) {
+            ASTNode* v = node->children[i];
+            Type* a = v ? result_array_type(v->node_type) : NULL;
+            if (a) {
+                *at = node;
+                return a;
+            }
+        }
+    }
+    for (int i = 0; i < node->child_count; i++) {
+        Type* a = closure_array_return(node->children[i], at);
+        if (a) return a;
+    }
+    return NULL;
+}
+
+/* #2896: does symbol `s` name a type: a struct (a C import's included), a
+ * sum, an enum, a bitstruct, a message or an actor of the program? */
+static int symbol_names_type(Symbol* s) {
+    if (!s || s->is_function) return 0;
+    if (s->node) {
+        switch (s->node->type) {
+            case AST_STRUCT_DEFINITION: case AST_SUM_TYPE_DEF: case AST_ENUM_DEFINITION:
+            case AST_BITSTRUCT_DEFINITION: case AST_MESSAGE_DEFINITION:
+            case AST_ACTOR_DEFINITION: case AST_C_STRUCT_DEF: case AST_CFN_TYPE_DEF:
+            case AST_DISTINCT_TYPE_DEF:
+                return 1;
+            default:
+                break;
+        }
+    }
+    return s->type && (s->type->kind == TYPE_STRUCT || s->type->kind == TYPE_SUM ||
+                       s->type->kind == TYPE_ENUM || s->type->kind == TYPE_BITSTRUCT ||
+                       s->type->kind == TYPE_MESSAGE);
+}
+
+/* #2896: the first type name held by value in `t` (itself, an array's or
+ * an optional's element, a tuple's, a function type's parameter or result)
+ * that names no type of the program, or NULL. Such a name reached C as is
+ * (`and eat` declared `eat` of a type `and`: "unknown type name 'and'").
+ * Distinct and cfn names are resolved before checking. A name behind a
+ * pointer may be an opaque C type, and a qualified one (`mod.T`) is the
+ * module checks' to resolve; both are left alone. */
+static const char* type_unknown_name(Type* t, SymbolTable* table, int depth) {
+    if (!t || depth > 32 || t->kind == TYPE_PTR) return NULL;
+    if (t->kind == TYPE_STRUCT && t->struct_name && !strchr(t->struct_name, '.') &&
+        !symbol_names_type(lookup_symbol(table, t->struct_name)) &&
+        !c_struct_def_node(t->struct_name))
+        return t->struct_name;
+    const char* u = type_unknown_name(t->element_type, table, depth + 1);
+    for (int i = 0; !u && t->tuple_types && i < t->tuple_count; i++)
+        u = type_unknown_name(t->tuple_types[i], table, depth + 1);
+    for (int i = 0; !u && t->param_types && i < t->param_count; i++)
+        u = type_unknown_name(t->param_types[i], table, depth + 1);
+    return u ? u : type_unknown_name(t->return_type, table, depth + 1);
+}
+
+/* Refuse `what` (a local, a parameter, a field, named `name`) of type `t`
+ * when `t` holds a name of no type (#2896). `and` and `not`, the operator
+ * words of other languages, read as such a name before an identifier
+ * (`while i < 2 and eat(i)` declares `eat` of a type `and`), so the help
+ * names the operator Aether spells. Returns 1 when refused. */
+static int refuse_unknown_type(const char* what, const char* name, Type* t, SymbolTable* table,
+                               int line, int column) {
+    const char* u = type_unknown_name(t, table, 0);
+    if (!u) return 0;
+    char msg[512];
+    snprintf(msg, sizeof(msg), "Unknown type '%s': %s '%s' is declared of a type the program "
+             "does not define", u, what, name ? name : "?");
+    const char* hint = strcmp(u, "and") == 0
+        ? "Aether's logical AND is `&&` (`a && b`), and OR is `||`"
+        : strcmp(u, "not") == 0
+        ? "Aether's logical NOT is `!` (`!a`)"
+        : "declare the struct, enum or sum, or check the spelling";
+    type_error_code_hint(msg, hint, line, column, AETHER_ERR_UNDEFINED_TYPE);
+    return 1;
+}
+
 int typecheck_function_definition(ASTNode* func, SymbolTable* table) {
     if (!func || (func->type != AST_FUNCTION_DEFINITION && func->type != AST_BUILDER_FUNCTION)) return 0;
 
@@ -7555,6 +8110,13 @@ int typecheck_function_definition(ASTNode* func, SymbolTable* table) {
         if (param->type == AST_VARIABLE_DECLARATION || param->type == AST_PATTERN_VARIABLE) {
             Type* param_type = param->node_type ? clone_type(param->node_type) : create_type(TYPE_UNKNOWN);
             add_symbol(func_table, param->value, param_type, 0, 0, 0);
+            if (param->value) {
+                char who[192];
+                snprintf(who, sizeof(who), "parameter '%s'", param->value);
+                refuse_fn_type_array_result(who, param->node_type, param->line, param->column);
+                refuse_unknown_type("the parameter", param->value, param->node_type, table,
+                                    param->line, param->column);   /* #2896 */
+            }
         }
     }
 
@@ -7605,34 +8167,6 @@ int typecheck_function_definition(ASTNode* func, SymbolTable* table) {
     return 1;
 }
 
-/* #2822: does a value of type `t` own memory a struct field would have to
- * free or copy: a string, a closure, or a struct (held by value) with such
- * a field? */
-static int type_owns_memory(Type* t, SymbolTable* table, int depth) {
-    if (!t || depth > 16) return 0;
-    if (t->kind == TYPE_STRING) return 1;
-    if (t->kind == TYPE_FUNCTION) return !t->is_fnptr;
-    /* An optional, an array (a fixed-size one holds its elements, which a
-     * struct owning them frees) and a tuple own what their elements own. */
-    if (t->kind == TYPE_OPTIONAL || t->kind == TYPE_ARRAY)
-        return type_owns_memory(t->element_type, table, depth + 1);
-    if (t->kind == TYPE_TUPLE) {
-        for (int i = 0; t->tuple_types && i < t->tuple_count; i++)
-            if (type_owns_memory(t->tuple_types[i], table, depth + 1)) return 1;
-        return 0;
-    }
-    if (t->kind != TYPE_STRUCT || !t->struct_name) return 0;
-    Symbol* s = lookup_symbol(table, t->struct_name);
-    ASTNode* def = s ? s->node : NULL;
-    if (!def || def->type != AST_STRUCT_DEFINITION) return 0;
-    for (int i = 0; i < def->child_count; i++) {
-        ASTNode* f = def->children[i];
-        if (f && f->type == AST_STRUCT_FIELD && type_owns_memory(f->node_type, table, depth + 1))
-            return 1;
-    }
-    return 0;
-}
-
 int typecheck_struct_definition(ASTNode* struct_def, SymbolTable* table) {
     if (!struct_def || struct_def->type != AST_STRUCT_DEFINITION) return 0;
     
@@ -7663,21 +8197,15 @@ int typecheck_struct_definition(ASTNode* struct_def, SymbolTable* table) {
             return 0;
         }
         
-        /* #2822: an optional field compiles (#2820), but one whose value
-         * owns memory has none of a `string` field's ownership (destroy,
-         * replace, dup, a take on store), so a string stored there would
-         * leak or dangle. Refused until it has. */
-        if (field->node_type->kind == TYPE_OPTIONAL &&
-            type_owns_memory(field->node_type->element_type, table, 0)) {
-            char error_msg[512];
-            snprintf(error_msg, sizeof(error_msg),
-                     "struct field '%s' is %s: an optional field whose value owns memory (a "
-                     "string, a closure, or a struct holding one) is not supported yet "
-                     "(#2822). Hold the value bare (a `string` with \"\" for none) or keep "
-                     "the optional in a local",
-                     field->value, type_to_string(field->node_type));
-            type_error(error_msg, field->line, field->column);
-            return 0;
+        /* #2886: a field of a function type that returns a fixed-size array. */
+        {
+            char who[192];
+            snprintf(who, sizeof(who), "struct field '%s'", field->value ? field->value : "?");
+            refuse_fn_type_array_result(who, field->node_type, field->line, field->column);
+            /* #2896: a field of a type that names nothing. */
+            if (refuse_unknown_type("the field", field->value, field->node_type, table,
+                                    field->line, field->column))
+                return 0;
         }
 
         // Check for duplicate field names
@@ -8781,6 +9309,17 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                 type_error(error_msg, stmt->line, stmt->column);
                 return 0;
             }
+            /* #2886: a local written as a function type that returns a
+             * fixed-size array. */
+            if (stmt->type == AST_VARIABLE_DECLARATION && stmt->value) {
+                char who[192];
+                snprintf(who, sizeof(who), "'%s'", stmt->value);
+                refuse_fn_type_array_result(who, stmt->node_type, stmt->line, stmt->column);
+                /* #2896: a type name that names nothing reached C. */
+                if (refuse_unknown_type("the local", stmt->value, stmt->node_type, table,
+                                        stmt->line, stmt->column))
+                    return 0;
+            }
             if (stmt->child_count > 0) {
                 // Has initializer
                 ASTNode* init = stmt->children[0];
@@ -9353,6 +9892,15 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                             return 0;
                         }
                         slice_coerce_slot(&stmt->children[0], gv->node_type, 0);
+                        if (stmt->node_type) free_type(stmt->node_type);
+                        stmt->node_type = clone_type(gv->node_type);
+                    } else if (gv && gv->node_type && gv->node_type->kind == TYPE_PTR &&
+                               init_type && init_type->kind == TYPE_FUNCTION) {
+                        /* #2890: so does a closure into a `ptr` global,
+                         * which holds it boxed (as a `ptr` field does): the
+                         * function reads the global back as the `ptr` it
+                         * is, not as the closure, which made every later
+                         * read box it again. */
                         if (stmt->node_type) free_type(stmt->node_type);
                         stmt->node_type = clone_type(gv->node_type);
                     }
@@ -10970,12 +11518,11 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
             }
             /* #790: a struct with `string` fields IS allowed. The box owns
              * its string fields under the same ownership model value structs
-             * already use: each string field carries a hidden `_heap_<field>`
-             * tracker (codegen_func.c), a field store adopts a heap string and
-             * sets the tracker, and `heap.free(p)` routes through the generated
+             * already use: a field store takes the new value and releases the
+             * old, and `heap.free(p)` routes through the generated
              * `<Name>_heap_free` (release every owned field, then free the box).
-             * calloc in heap.new zero-inits the trackers, so an unset field is
-             * never mistaken for owned. No POD gate to apply. */
+             * calloc in heap.new zero-inits the fields, so an unset field holds
+             * nothing. No POD gate to apply. */
             /* Result type: *T (TYPE_PTR -> TYPE_STRUCT{name}). */
             if (expr->node_type) free_type(expr->node_type);
             Type* inner = create_type(TYPE_STRUCT);
@@ -11418,6 +11965,9 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                     Type* ptype = child->node_type ? clone_type(child->node_type)
                                                    : create_type(TYPE_INT); // default to int
                     add_symbol(closure_scope, child->value, ptype, 0, 0, 0);
+                    char who[192];
+                    snprintf(who, sizeof(who), "closure parameter '%s'", child->value);
+                    refuse_fn_type_array_result(who, child->node_type, child->line, child->column);
                 }
             }
 
@@ -11467,6 +12017,28 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
             }
             g_tc_return_type = enclosing_ret;
             g_tc_return_owner = enclosing_owner;
+
+            /* #2886: what a closure of its own returns (a call's trailing
+             * block returns from its enclosing function, checked there). */
+            if (ast_is_own_function(expr)) {
+                for (int i = 0; i < expr->child_count; i++) {
+                    ASTNode* body = expr->children[i];
+                    if (!body || body->type != AST_BLOCK) continue;
+                    ASTNode* at = NULL;
+                    Type* arr = closure_array_return(body, &at);
+                    if (arr && at) {
+                        ASTNode* v = NULL;
+                        for (int k = 0; k < at->child_count && !v; k++)
+                            if (at->children[k] && result_array_type(at->children[k]->node_type))
+                                v = at->children[k];
+                        Type* result = at->child_count == 1 ? at->children[0]->node_type : NULL;
+                        refuse_array_result(result ? "this closure returns"
+                                                   : "this closure returns, among its values,",
+                                            result ? result : arr, arr,
+                                            v ? v->line : at->line, v ? v->column : at->column);
+                    }
+                }
+            }
 
             free_symbol_table(closure_scope);
 
@@ -11624,6 +12196,11 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                                         fields_ok = 0;
                                     free_type(fvt);
                                 }
+                                /* A function named in a closure field is a
+                                 * closure value (#2055). */
+                                if (fv && fd->node_type && fd->node_type->kind == TYPE_FUNCTION &&
+                                    !fd->node_type->is_fnptr)
+                                    function_value_annotate(fv, table);
                                 break;
                             }
                         }
@@ -12204,6 +12781,13 @@ int typecheck_binary_expression(ASTNode* expr, SymbolTable* table) {
             free_type(left_type);
             free_type(right_type);
             return 0;
+        }
+        /* A function named as the value of a closure place is a closure
+         * (#2055). */
+        if (left_type && left_type->kind == TYPE_FUNCTION && !left_type->is_fnptr &&
+            function_value_annotate(right, table)) {
+            free_type(right_type);
+            right_type = infer_type(right, table);
         }
         /* #2628: a closure stored in a typed fn-pointer field (`f.cb = |p|
          * ...`, through a pointer too) or element. Checked first: the test
@@ -14466,6 +15050,9 @@ int typecheck_function_call(ASTNode* call, SymbolTable* table) {
         reject_non_closure_callee(call, table);
         reject_untyped_erased_args(call, table);
     }
+    /* box_closure(add_fn) boxes the closure value of a named function. */
+    if (call->value && strcmp(call->value, "box_closure") == 0 && call->child_count == 1)
+        function_value_annotate(call->children[0], table);
 
     // select() infers its type from the first named arg's value
     if (call->value && strcmp(call->value, "select") == 0 &&

@@ -1,0 +1,102 @@
+// os.run_full from several threads at once (#2917). A capture reads its
+// child's pipes until EOF, and EOF comes only when every holder of the write
+// end has exited. A child that another thread starts while this call's pipes
+// are open must not inherit them, or this short child's capture waits until
+// that unrelated long child exits too.
+//
+// Five threads run long children (each sleeps 4 s) back to back, so long
+// children start often; one thread runs short children (each prints a line
+// and exits) the whole time and times every call. A short capture never
+// takes as long as a long child: the one bound is 2.5 s, against tens of
+// milliseconds without the stall, so a busy machine does not trip it.
+// The children are this program, re-run with a flag.
+import std.os
+import std.list
+import std.mem
+import std.worker
+
+var longest_short: long = 0
+var shorts_run = 0
+
+child(mode: string) -> int {
+    if mode == "--long" {
+        sleep(4000)
+        println("long")
+        return 0
+    }
+    if mode == "--short" {
+        println("short")
+        return 0
+    }
+    return 3
+}
+
+// Two long children, one after the other.
+long_loop() -> int {
+    argv = list.new()
+    _a = list.add(argv, "--long")
+    i = 0
+    bad = 0
+    while i < 2 {
+        _out, _err_out, status, err = os.run_full(os.argv0(), argv, null, "")
+        if status != 0 || err != "" {
+            bad = bad + 1
+        }
+        i = i + 1
+    }
+    list.free(argv)
+    return bad
+}
+
+// Short children for 8 s; the longest single capture, in milliseconds.
+short_loop() -> long {
+    argv = list.new()
+    _a = list.add(argv, "--short")
+    start = os.now_monotonic_ms()
+    longest = 0 as long
+    n = 0
+    while os.now_monotonic_ms() - start < 8000 {
+        t0 = os.now_monotonic_ms()
+        _out, _err_out, status, err = os.run_full(os.argv0(), argv, null, "")
+        took = os.now_monotonic_ms() - t0
+        if took > longest {
+            longest = took
+        }
+        n = n + 1
+    }
+    list.free(argv)
+    shorts_run = n
+    return longest
+}
+
+main() {
+    if os.args_count() > 1 {
+        exit(child(os.args_get(1)))
+    }
+    worker.pool_size(6)
+    i = 0
+    while i < 5 {
+        _ok = worker.run(|| {
+                long_loop()
+                return null
+            }, | r: ptr | {
+            })
+        i = i + 1
+    }
+    _ok2 = worker.run(|| {
+            return mem.long_to_ptr(short_loop())
+        }, | r: ptr | {
+            longest_short = mem.ptr_to_long(r)
+        })
+    worker.wait()
+    println("short captures: ${shorts_run}, the longest took ${longest_short} ms")
+    if longest_short > 2500 {
+        println("FAIL: a short capture waited ${longest_short} ms, for a long child it does not own")
+        exit(1)
+    }
+    if shorts_run < 5 {
+        println("FAIL: too few short captures ran (${shorts_run})")
+        exit(1)
+    }
+    println("ALL PASS")
+}

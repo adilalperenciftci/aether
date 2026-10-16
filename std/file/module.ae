@@ -18,7 +18,7 @@ exports(
 // Raw ptr/int externs (escape hatch).
 extern file_open_raw(path: string, mode: string) -> ptr
 extern file_close(file: ptr) -> int
-extern file_read_all_raw(file: ptr) -> string
+extern file_read_all_raw(file: ptr) -> string @heap
 extern file_write_raw(file: ptr, data: string, length: int) -> int
 extern file_exists(path: string) -> int
 extern file_delete_raw(path: string) -> int
@@ -28,7 +28,7 @@ extern file_size_raw(path: string) -> long
 extern file_fd_raw(file: ptr) -> int
 
 // string_concat used to duplicate borrowed strings across free boundaries.
-extern string_concat(a: string, b: string) -> string
+extern string_concat(a: string, b: string) -> string @heap
 extern string_length(str: string) -> int
 
 // Open a file. Returns (handle, "") on success, (null, error) on failure.

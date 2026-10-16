@@ -180,8 +180,7 @@ char* tcp_receive_raw(TcpSocket* sock, int max_bytes) {
 
     /* Cap-aware (#343): max_bytes is caller-supplied (program-
      * controlled, but plugin-host paths surface it as untrusted).
-     * Caller frees with plain libc free per the caller-owned-return
-     * contract (aether_resource_caps.h:89-94). */
+     * The buffer becomes the payload of the counted string returned. */
     char* buffer = (char*)aether_caps_malloc((size_t)max_bytes + 1);
     if (!buffer) return NULL;
     int received = recv(sock->fd, buffer, max_bytes, 0);
@@ -201,7 +200,8 @@ char* tcp_receive_raw(TcpSocket* sock, int max_bytes) {
     }
 
     buffer[received] = '\0';
-    return buffer;
+    return (char*)string_adopt_caps_buffer(buffer, (size_t)received,
+                                           (size_t)max_bytes + 1);
 }
 
 TcpReceiveResult tcp_receive_n_raw(TcpSocket* sock, int max_bytes) {

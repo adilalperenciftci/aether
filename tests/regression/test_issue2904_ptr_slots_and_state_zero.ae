@@ -1,0 +1,120 @@
+// Regression (#2904): three shapes failed in C.
+//
+// 1. A closure stored into a `ptr` local (`let p: ptr = null; p = || ...`,
+//    or as its initializer) or into a `ptr` state field: #2890 covered
+//    globals, struct literal fields and message fields. Every `ptr` slot now
+//    takes a closure boxed and a bare function as its code address. The
+//    slot owns nothing: the box's reference is the program's, given back
+//    with release_closure.
+// 2. `state fn kept` with no initializer emitted `actor->kept = 0;`. A
+//    closure, struct, optional, tuple or sum state field with no initializer
+//    is now zeroed whole.
+// 3. A struct with `ptr` fields built from `ptr` locals that hold strings
+//    named `_heap_<field>` trackers the struct does not have. A `ptr` field
+//    takes a reference of its own, through `string.keep` (#2926).
+
+import std.mem
+import std.string
+
+extern exit(code: int)
+extern malloc(sz: long) -> ptr
+extern free(p: ptr)
+extern qsort(base: ptr, n: long, sz: long, cmp: ptr)
+
+struct P2 {
+    name: ptr
+    other: ptr
+}
+
+struct Pt {
+    a: int
+    b: int
+}
+
+message Set {
+    k: int
+}
+
+message Check {}
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+run_ptr(p: ptr) -> int {
+    fn f = unbox_closure(p)
+    int v = call(f)
+    return v
+}
+
+int_cmp(a: ptr, b: ptr) -> int {
+    return mem.get_int(a, 0) - mem.get_int(b, 0)
+}
+
+sorted(cmp: ptr) -> int {
+    buf = malloc(12)
+    mem.set_int(buf, 0, 30)
+    mem.set_int(buf, 4, 10)
+    mem.set_int(buf, 8, 20)
+    qsort(buf, 3, 4, cmp)
+    r = mem.get_int(buf, 0) * 10000 + mem.get_int(buf, 4) * 100 + mem.get_int(buf, 8)
+    free(buf)
+    return r
+}
+
+actor Holder {
+    state ptr slot = null
+    state ptr cmp = null
+    state fn kept
+    state Pt pt
+    state int? o
+
+    receive {
+        Set(k) -> {
+            check(pt.a == 0 && pt.b == 0 && (o ?? 5) == 5, "state with no initializer is zeroed")
+            slot = || { return k * 2 }
+            cmp = int_cmp
+            kept = || { return k + 1 }
+        }
+        Check() -> {
+            check(run_ptr(slot) == 14, "a closure in a ptr state field")
+            release_closure(slot)
+            check(sorted(cmp) == 102030, "a bare function in a ptr state field")
+            int v = call(kept)
+            check(v == 8, "an fn state field with no initializer, bound later")
+        }
+    }
+}
+
+main() {
+    n = 4
+    let p: ptr = null
+    p = || { return n * 10 }
+    check(run_ptr(p) == 40, "a closure stored into a ptr local")
+    release_closure(p)
+    let p2: ptr = || { return n + 1 }
+    check(run_ptr(p2) == 5, "a closure as a ptr local's initializer")
+    release_closure(p2)
+    let c: ptr = null
+    c = int_cmp
+    check(sorted(c) == 102030, "a bare function stored into a ptr local")
+    let q: ptr = null
+    q = "abc"
+    let r: ptr = null
+    r = string.concat("d", "e")
+    // A `ptr` field keeps what it holds, so a string goes in as a reference
+    // of its own (#2926), given back once the struct is done with it.
+    s = P2 { name: string.keep(q), other: string.keep(r) }
+    check(string.equals(s.name, "abc") == 1 && string.equals(s.other, "de") == 1,
+        "ptr fields built from ptr locals holding strings")
+    string.release_kept(s.name)
+    string.release_kept(s.other)
+    h = spawn(Holder())
+    h ! Set { k: 7 }
+    h ! Check {}
+    wait_for_idle()
+    println("ok")
+}

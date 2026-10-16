@@ -4,7 +4,7 @@ import std.string
 import std.io
 extern string_char_at_n(str: string, known_length: int, index: int) -> int
 extern string_length(s: string) -> int
-extern string_concat(a: string, b: string) -> string
+extern string_concat(a: string, b: string) -> string @heap
 // Build a bytes buffer from a string (CRLF written as \r\n literally).
 fn sb(s: string) -> ptr { n = string_length(s); b = bytes.new(n); if n > 0 { bytes.set(b, n - 1, 0) } i = 0
     while i < n { bytes.set(b, i, string_char_at_n(s, n, i) & 0xFF); i = i + 1 } return b }

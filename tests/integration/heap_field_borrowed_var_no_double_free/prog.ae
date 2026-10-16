@@ -1,35 +1,24 @@
-// A heap-string struct field assigned from a heap-tracked LOCAL that at
-// runtime holds a BORROWED value must not be freed by the struct destructor.
+// A string struct field stored from a local frees, at the struct's destroy,
+// exactly the reference the field holds: never a value the program does not
+// own, never one left to nobody.
 //
-// `passthru` returns its parameter straight through, so it is classified
-// non-heap: `borrowed` is a heap-string var (it is reassignable to owned
-// strings elsewhere in a real program) but its runtime `_heap_borrowed` is 0.
-// Before the fix, `a.value = borrowed` hard-coded `_heap_value = 1`, so
-// `heap.free(a)` freed a value the program never owned — a literal string
-// (free of rodata) — aborting with SIGSEGV / "invalid pointer" at teardown.
-// The store must instead MOVE the source's runtime ownership:
-//   a->value = borrowed; a->_heap_value = _heap_borrowed; _heap_borrowed = 0;
+// `passthru` returns its parameter, a literal here: the field holds the
+// pinned literal, which a release leaves alone. Freeing it as an owned buffer
+// (a free of rodata) aborted at teardown; that is the FFI/closure-callback
+// shape a downstream HTML sanitizer hit, a hook returning a literal threaded
+// through `-> string` helpers into a heap-boxed attr. `runtime_owned` is
+// built through a call the constant folder cannot see through (string.concat
+// of two literals folds to a literal), so it is a fresh string: left to
+// nobody, it leaked (std.message leaked 60 allocations this way).
 //
-// This is the FFI/closure-callback shape a downstream sanitizer hit: a hook
-// returns a literal, the engine threads it through `-> string` helpers into a
-// heap-boxed attr's string field, and teardown double-freed it.
-//
-// The `owned` half proves the fix does not regress the leak it protects:
-// a genuinely-heap value is still freed exactly once.
-//
-// `owned` alone is not enough, and the reason is worth stating: the compiler
-// constant-folds `string.concat("https://", "cdn.example/style.css")` into a
-// literal, so that half runs with `_heap_owned == 0` and exercises the
-// borrowed path a second time rather than the owned one. `runtime_owned` is
-// built through a call the folder cannot see through, so it is genuinely heap
-// at runtime -- and it is the shape that leaked: for a var whose value escapes
-// into a struct field, the assignment used to leave `_heap_<var>` at its stale
-// 0, and moving that 0 into the field tracker told the destructor the buffer
-// was borrowed. std.message leaked 60 allocations exactly this way.
+// The heap check runs where the count is exact (mem.heap_in_use_exact): after
+// a warm-up, some window of the same work grows by exactly 0.
 
-import std.io
+import std.mem
 import std.string
 import std.strbuilder
+
+extern exit(code: int)
 
 struct Attr {
     name: string
@@ -40,8 +29,6 @@ fn passthru(u: string) -> string {
     return u
 }
 
-// Built through a call, so the constant folder cannot reduce it to a literal:
-// the result is genuinely heap-allocated at runtime.
 fn build_owned(n: int) -> string {
     b = strbuilder.new(16)
     strbuilder.append(b, "https://cdn.example/")
@@ -49,35 +36,53 @@ fn build_owned(n: int) -> string {
     return strbuilder.finish(b)
 }
 
-main() {
-    // Borrowed: value the program does not own. Must NOT be freed at teardown.
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+fn round(n: int) {
     a = heap.new(Attr)
     a.name = "src"
     borrowed = passthru("https://cdn.example/logo.png")
     ap = a as *Attr
     ap.value = borrowed
-    println("borrowed: ${a.value}")
+    check(a.value == "https://cdn.example/logo.png", "the borrowed value reads back")
     heap.free(a)
 
-    // Owned: genuinely-heap value. Must be freed exactly once (no leak).
     b = heap.new(Attr)
     b.name = "href"
     owned = string.concat("https://", "cdn.example/style.css")
     bp = b as *Attr
     bp.value = owned
-    println("owned: ${b.value}")
+    check(b.value == "https://cdn.example/style.css", "the folded value reads back")
     heap.free(b)
 
-    // Genuinely heap at runtime, and escaping into a struct field. The field
-    // tracker must receive 1 so the destructor reclaims it exactly once:
-    // freeing nothing here is the leak, freeing twice is the crash above.
     c = heap.new(Attr)
     c.name = "src"
-    runtime_owned = build_owned(7)
+    runtime_owned = build_owned(n)
     cp = c as *Attr
     cp.value = runtime_owned
-    println("runtime_owned: ${c.value}")
+    check(c.value == "https://cdn.example/${n}", "the fresh value reads back")
     heap.free(c)
+}
 
+main() {
+    round(7)
+    if mem.heap_in_use_exact() {
+        grown = mem.steady_growth(|| {
+                k = 0
+                while k < 200 {
+                    round(k % 10)
+                    k = k + 1
+                }
+            }, 5)
+        if grown != 0 {
+            println("FAIL: a window of 200 rounds grew the heap by ${grown} bytes in every run")
+            exit(1)
+        }
+    }
     println("done")
 }

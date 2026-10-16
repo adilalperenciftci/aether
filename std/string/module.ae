@@ -42,14 +42,14 @@ exports(
     string_format_list, format,
     string_glob_match_raw, glob_match, glob_match_pathname,
     version_compare,
-    aether_string_raw_ptr, bytes, array_view, seq_from_strings, seq_to_strings
+    aether_string_raw_ptr, bytes, array_view, seq_from_strings, seq_to_strings, keep, release_kept
 )
 
 // String creation
 extern string_new(cstr: string) -> ptr
 extern string_from_cstr(cstr: string) -> ptr
 extern string_from_literal(cstr: string) -> ptr
-extern string_new_with_length(data: string, length: int) -> ptr
+extern string_new_with_length(data: string, length: int) -> ptr @heap
 extern string_empty() -> ptr
 
 // Reference counting.
@@ -77,7 +77,7 @@ extern string_release(str: @retain string)
 extern string_free(str: @retain string)
 
 // String operations
-extern string_concat(a: string, b: string) -> string
+extern string_concat(a: string, b: string) -> string @heap
 // Length-bearing concat. Returns a refcounted AetherString; downstream
 // string.length() honours the stored length rather than falling
 // through to strlen() and silently truncating at the first NUL. Use
@@ -90,7 +90,7 @@ extern string_concat(a: string, b: string) -> string
 // an owned heap string and release it at scope exit, and unwrap it to
 // its payload bytes at naive-C-extern boundaries (#297). The C ABI is
 // unchanged — the header still declares `AetherString*`.
-extern string_concat_wrapped(a: string, b: string) -> string
+extern string_concat_wrapped(a: string, b: string) -> string @heap
 extern string_length(str: string) -> int
 extern string_char_at(str: string, index: int) -> int
 extern string_equals(a: string, b: string) -> int
@@ -114,12 +114,12 @@ extern string_index_of_from(str: string, substring: string, start: int) -> int
 // managed string; `str` is untouched. An empty `old` returns a copy
 // of `str` unchanged (no infinite empty-match expansion). Matches
 // are byte-exact and binary-safe (embedded NULs preserved).
-extern string_replace(str: string, old: string, new: string) -> string
+extern string_replace(str: string, old: string, new: string) -> string @heap
 // Replace every non-overlapping occurrence of `old` with `new`,
 // scanned left to right. Same lifetimes and empty-`old` guard as
 // string_replace. `new` may be empty (deletion) or longer than `old`.
-extern string_replace_all(str: string, old: string, new: string) -> string
-extern string_substring(str: string, start: int, end: int) -> string
+extern string_replace_all(str: string, old: string, new: string) -> string @heap
+extern string_substring(str: string, start: int, end: int) -> string @heap
 
 // Length-aware sibling — caller supplies the source length explicitly.
 // Reach for this when `str` arrives as a `string` parameter at a
@@ -131,7 +131,7 @@ extern string_substring(str: string, start: int, end: int) -> string
 // Trusts the caller's `str_len_bytes` parameter — does NOT consult
 // the AetherString header even if one happens to be present.
 // start / end are clamped to [0, str_len_bytes].
-extern string_substring_n(str: string, str_len_bytes: int, start: int, end: int) -> string
+extern string_substring_n(str: string, str_len_bytes: int, start: int, end: int) -> string @heap
 
 // Identity helper documenting intent: in code that receives a
 // `string` parameter plus an explicit length, the explicit length
@@ -166,10 +166,10 @@ extern string_index_of_from_n(str: string, known_length: int,
 // is emitting known single-byte separators (\x01, \x02) into packed
 // formats without routing through a NUL-terminated string literal.
 // Always length 1 — code=0 returns a 1-byte NUL string, not "".
-extern string_from_char(code: int) -> ptr
-extern string_to_upper(str: string) -> string
-extern string_to_lower(str: string) -> string
-extern string_trim(str: string) -> string
+extern string_from_char(code: int) -> ptr @heap
+extern string_to_upper(str: string) -> string @heap
+extern string_to_lower(str: string) -> string @heap
+extern string_trim(str: string) -> string @heap
 
 // String array operations.
 //
@@ -259,7 +259,7 @@ extern string_array_free(arr: ptr)
 // directly. Same split semantics: empty input → single-cell list
 // with "", delimiter longer than input → single-cell list with the
 // whole input, trailing/leading delimiters produce empty pieces.
-extern string_split_to_seq(str: string, delimiter: string) -> *StringSeq
+extern string_split_to_seq(str: string, delimiter: string) -> *StringSeq @heap
 
 // lines(s) — split on "\n" into a *StringSeq, EMPTY-SAFE: "" → an empty
 // sequence (length 0), not the single "" cell split_to_seq("","\n") returns.
@@ -288,15 +288,17 @@ extern string_join(seq: *StringSeq, sep: string) -> string @heap
 // Cons-cell construction + destructuring. Names mirror the C
 // runtime symbols; users call them via dot-notation `string.seq_X(...)`
 // (the qualified-name resolver joins `string` + `seq_X` → `string_seq_X`).
-extern string_seq_empty() -> *StringSeq
-extern string_seq_cons(head: string, tail: *StringSeq) -> *StringSeq
+// A `@heap` result hands the caller a reference of its own; `seq_tail`
+// lends the sequence's own tail.
+extern string_seq_empty() -> *StringSeq @heap
+extern string_seq_cons(head: string, tail: *StringSeq) -> *StringSeq @heap
 extern string_seq_head(s: *StringSeq) -> string
 extern string_seq_tail(s: *StringSeq) -> *StringSeq
 extern string_seq_is_empty(s: *StringSeq) -> int
 extern string_seq_length(s: *StringSeq) -> int
-extern string_seq_retain(s: *StringSeq) -> *StringSeq
+extern string_seq_retain(s: *StringSeq) -> *StringSeq @heap
 extern string_seq_free(s: *StringSeq)
-extern string_seq_from_array(arr: ptr, count: int) -> *StringSeq
+extern string_seq_from_array(arr: ptr, count: int) -> *StringSeq @heap
 extern string_seq_to_array(s: *StringSeq) -> ptr
 
 // Closure-free combinators. The shape deliberately avoids passing
@@ -306,17 +308,17 @@ extern string_seq_to_array(s: *StringSeq) -> ptr
 // four below are pure structural ops over the cons cells, all
 // refcount-correct on shared tails, all O(min(n, length)) or
 // O(length) work with no auxiliary stack.
-extern string_seq_reverse(s: *StringSeq) -> *StringSeq
-extern string_seq_concat(a: *StringSeq, b: *StringSeq) -> *StringSeq
+extern string_seq_reverse(s: *StringSeq) -> *StringSeq @heap
+extern string_seq_concat(a: *StringSeq, b: *StringSeq) -> *StringSeq @heap
 // Join every element of a *StringSeq with `sep` between adjacent
 // elements: the complement of split_to_seq, and the linear-cost
 // escape from O(n^2) interpolation self-append accumulation (for
 // piecewise building without a seq, use std.strbuilder). Two passes,
 // one exact-size allocation, binary-safe. Returns a fresh owned
 // string; "" for the empty seq.
-extern string_seq_join(s: *StringSeq, sep: string) -> string
-extern string_seq_take(s: *StringSeq, n: int) -> *StringSeq
-extern string_seq_drop(s: *StringSeq, n: int) -> *StringSeq
+extern string_seq_join(s: *StringSeq, sep: string) -> string @heap
+extern string_seq_take(s: *StringSeq, n: int) -> *StringSeq @heap
+extern string_seq_drop(s: *StringSeq, n: int) -> *StringSeq @heap
 
 // Closure-bearing combinators (#421 — multi-sequence iteration). Each
 // takes an Aether closure as the per-element callback. The callback
@@ -339,16 +341,16 @@ extern string_seq_drop(s: *StringSeq, n: int) -> *StringSeq
 // automatically at scope exit like any seq local). `reduce` returns the
 // caller's accumulator (`ptr`). `each`/`zip_each` return nothing.
 extern string_seq_each(s: *StringSeq, f: @noescape ptr)
-extern string_seq_map(s: *StringSeq, f: @noescape ptr) -> *StringSeq
-extern string_seq_filter(s: *StringSeq, pred: @noescape ptr) -> *StringSeq
+extern string_seq_map(s: *StringSeq, f: @noescape ptr) -> *StringSeq @heap
+extern string_seq_filter(s: *StringSeq, pred: @noescape ptr) -> *StringSeq @heap
 extern string_seq_reduce(s: *StringSeq, init: ptr, f: @noescape ptr) -> ptr
 extern string_seq_zip_each(a: *StringSeq, b: *StringSeq, f: @noescape ptr)
 
 // Conversion
 extern string_to_cstr(str: string) -> string
-extern string_from_int(value: int) -> ptr
-extern string_from_long(value: long) -> ptr
-extern string_from_float(value: float) -> ptr
+extern string_from_int(value: int) -> ptr @heap
+extern string_from_long(value: long) -> ptr @heap
+extern string_from_float(value: float) -> ptr @heap
 extern string_from_double(value: float) -> string @heap
 
 // Inverse of to_int_radix. Render `value` in base `radix` (2..36).
@@ -359,14 +361,14 @@ extern string_from_double(value: float) -> string @heap
 // Headline use: hex emit for color round-trips (RGB → #rrggbb). Pair
 // with `string.pad_start(s, 2, 48)` to get the JS
 // `r.toString(16).padStart(2, '0')` shape.
-extern string_from_int_radix(value: long, radix: int) -> ptr
+extern string_from_int_radix(value: long, radix: int) -> ptr @heap
 
 // Pad to a fixed width with `pad_char` (single-byte char code —
 // `48` for '0', `32` for ' '). If `s` is already >= total_width
 // chars, returns a fresh copy (no truncation). total_width <= 0
 // also returns a fresh copy. pad_start prepends; pad_end appends.
-extern string_pad_start(s: string, total_width: int, pad_char: int) -> ptr
-extern string_pad_end(s: string, total_width: int, pad_char: int) -> ptr
+extern string_pad_start(s: string, total_width: int, pad_char: int) -> ptr @heap
+extern string_pad_end(s: string, total_width: int, pad_char: int) -> ptr @heap
 
 // Parsing — raw externs (escape hatch)
 extern string_to_int_raw(str: string, out_value: ptr) -> int
@@ -518,7 +520,7 @@ join(s: *StringSeq, sep: string) -> string {
 //
 // Non-string values (ints, floats) need explicit conversion via
 // `string.from_int(n)` etc. before being added to the list.
-extern string_format_list(fmt: string, args: ptr) -> ptr
+extern string_format_list(fmt: string, args: ptr) -> ptr @heap
 
 format(fmt: string, args: ptr) -> string {
     return string_format_list(fmt, args)
@@ -779,6 +781,23 @@ version_compare(a: string, b: string) -> int {
 // reach for `bytes(s)`, not this, unless you specifically need the bare
 // pointer.
 extern aether_string_raw_ptr(s: ptr) -> ptr
+
+// A reference of its own to `s`, as the `ptr` a `@keep ptr` parameter
+// keeps (#2926): a `string` reaches one only this way, since the slot keeps
+// it past the call while its owner frees it. The string is published (a kept
+// pointer may be read from any thread) and retained, or copied when it is a
+// plain C string. Give the reference back with `release_kept`.
+extern aether_string_keep(s: string) -> ptr
+extern aether_string_release_kept(p: ptr)
+
+keep(s: string) -> ptr {
+    return aether_string_keep(s)
+}
+
+// Give back a reference `keep` handed over.
+release_kept(p: ptr) {
+    aether_string_release_kept(p)
+}
 
 // A bounded, READ-ONLY byte[] view of s's own bytes, for binary/ASCII
 // scanning (indexing, sub-slicing) without re-measuring the string on every

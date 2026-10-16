@@ -138,7 +138,7 @@ actor Host {
     }
 }
 
-introduce(to: ptr, me: ptr) {
+introduce(to: ptr, me: @keep ptr) {
     to ! Hello { from: me }
 }
 

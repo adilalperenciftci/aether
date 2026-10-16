@@ -1,0 +1,150 @@
+// A string sequence is a value every place owns (#2921, R2): a local, a
+// parameter the body rebinds, a pattern's tail the arm rebinds, a struct
+// field, a closure's capture, a module `var`, a call's argument and its
+// result. Each place takes a reference of its own (a fresh sequence moved
+// in, any other retained) and releases it when it is overwritten or left,
+// a panic included. Before, a per-local flag and an escape walk decided:
+// a sequence passed to any function that was not a `string.seq_*` op, or
+// returned, was never released, and one the program built from a call
+// argument or a literal element leaked too (123 leaks, 4320 bytes, in this
+// program under the macOS leaks gate). A function returning its parameter
+// now hands its caller a reference, and nothing is released twice.
+
+import std.string
+import std.mem
+
+extern exit(code: int)
+
+struct Holder {
+    items: *StringSeq
+    n: int
+}
+
+var g_seq: *StringSeq = null
+
+fn check(ok: bool, what: string) {
+    if !ok {
+        println("WRONG: ${what}")
+        exit(12)
+    }
+}
+
+mk(w: string) -> *StringSeq {
+    return string.split_to_seq(string.concat(w, ",b,c"), ",")
+}
+
+count(s: *StringSeq) -> int {
+    return string.seq_length(s)
+}
+
+keep_first(s: *StringSeq) -> *StringSeq {
+    return s
+}
+
+// The parameter is rebound: it takes a reference of its own first.
+rebind_param(s: *StringSeq) -> int {
+    s = string.seq_tail(s)
+    return string.seq_length(s)
+}
+
+walk(s: *StringSeq) -> int {
+    n = 0
+    cur = s
+    while string.seq_is_empty(cur) == 0 {
+        n = n + 1
+        cur = string.seq_tail(cur)
+    }
+    return n
+}
+
+boom(s: *StringSeq) {
+    if string.seq_length(s) > 0 {
+        panic(string.concat("bad ", string.seq_head(s)))
+    }
+}
+
+shape(w: string) {
+    // local, rebind accumulator
+    acc = string.seq_empty()
+    i = 0
+    while i < 5 {
+        acc = string.seq_cons(string.concat(w, "x"), acc)
+        i = i + 1
+    }
+    check(string.seq_length(acc) == 5, "accumulator")
+    // pass to a non-seq Aether function, and directly from a call
+    check(count(acc) == 5, "count local")
+    check(count(mk(w)) == 3, "count fresh")
+    // return through a function that returns its parameter
+    k = keep_first(acc)
+    check(string.seq_length(k) == 5, "returned param")
+    // walk with a rebound local
+    check(walk(acc) == 5, "walk")
+    // struct field
+    h = Holder { items: mk(w), n: 1 }
+    check(string.seq_length(h.items) == 3, "field")
+    h.items = acc
+    check(string.seq_length(h.items) == 5, "field restore")
+    // freed by hand through a field, then the box released: the free
+    // empties the field, so the box's release finds nothing
+    hb = heap.new(Holder)
+    hb.items = mk(w)
+    string.seq_free(hb.items)
+    heap.free(hb)
+    // closure capture
+    f = || { return string.seq_length(acc) }
+    check(f() == 5, "capture")
+    // global
+    g_seq = mk(w)
+    check(string.seq_length(g_seq) == 3, "global")
+    // combinators
+    m = string.seq_map(acc, | x: string | { return string.concat(x, "!") })
+    check(string.seq_length(m) == 5, "map")
+    r = string.seq_reverse(string.seq_concat(acc, mk(w)))
+    check(string.seq_length(r) == 8, "reverse concat")
+    // literal with a fresh element
+    *StringSeq lit = ["a", string.concat(w, "y"), "c"]
+    check(string.seq_length(lit) == 3, "literal")
+    // panic with seqs live
+    try {
+        local = mk(w)
+        boom(local)
+    } catch e {
+        check(e == "bad w", "panic reason")
+    }
+    // a rebound parameter, and a pattern's tail the arm rebinds
+    check(rebind_param(acc) == 4, "rebound parameter")
+    check(string.seq_length(acc) == 5, "the caller's sequence after a rebound parameter")
+    match acc {
+        [] -> { check(false, "empty") }
+        [hd | tl] -> {
+            check(string.seq_length(tl) == 4, "match tail")
+            tl = string.seq_cons(hd, tl)
+            check(string.seq_length(tl) == 5, "rebound tail")
+        }
+    }
+    check(string.seq_length(acc) == 5, "the matched sequence after its tail was rebound")
+}
+
+round(w: string) {
+    k = 0
+    while k < 2 {
+        shape(w)
+        k = k + 1
+    }
+}
+
+main() {
+    round("w")
+    g_seq = null
+    if !mem.heap_in_use_exact() {
+        println("OK (growth not measured)")
+        return
+    }
+    grown = mem.steady_growth(|| { round("w") }, 5)
+    if grown != 0 {
+        println("LEAK: ${grown} bytes per round")
+        exit(13)
+    }
+    println("OK")
+}

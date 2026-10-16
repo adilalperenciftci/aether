@@ -41,7 +41,8 @@
 #                the container's free, removed, overwritten, cleared (#2518).
 #   leaks_2519.ae a hand-off inside a nested closure's body, an owned closure
 #                passed to an unannotated callee, and one used as the callee
-#                (#2519); the one env an opaque keeper keeps is the one left.
+#                (#2519); what a keeper the walk cannot see through keeps is
+#                freed after its last holder too.
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
@@ -156,22 +157,21 @@ expect_clean expr_positions "expression positions ok" "owned closures inside exp
 expect_clean shared "shared ok" "closures kept by list slots and map entries are freed once, after their last holder"
 
 # leaks_2519 hands one closure, inside a nested closure's body, to a keeper
-# the walk cannot see through, which keeps the reference it is given:
-# exactly that env and its cell stay, nothing else, and nothing is freed
-# twice.
+# the walk cannot see through: the list takes a reference of its own (R3),
+# so every env and cell is freed, each once.
 if run_probe leaks_2519; then
     out="$(tr -d '\r' < "$tmp/leaks_2519/out.txt")"
     if [ "$out" != "leaks 2519 ok" ]; then
         echo "  [FAIL] closure_local_env_free: leaks_2519 computed the wrong values"
         printf '%s\n' "$out" | sed 's/^/        /' | tail -5
         fail=1
-    elif [ "$(field leaks_2519 env_live)" != 1 ] || [ "$(field leaks_2519 cell_live)" != 1 ] ||
+    elif [ "$(field leaks_2519 env_live)" != 0 ] || [ "$(field leaks_2519 cell_live)" != 0 ] ||
          [ "$(field leaks_2519 double_frees)" != 0 ]; then
-        echo "  [FAIL] closure_local_env_free: leaks_2519 leaks more than the opaque keeper's env or double frees"
+        echo "  [FAIL] closure_local_env_free: leaks_2519 leaks an env or a cell, or double frees"
         sed 's/^/        /' "$tmp/leaks_2519/count.txt"
         fail=1
     else
-        echo "  [PASS] closure_local_env_free: nested hand-offs, unannotated callees and owned callees free their envs ($(field leaks_2519 envs) envs, one kept by an opaque keeper)"
+        echo "  [PASS] closure_local_env_free: nested hand-offs, unannotated callees and owned callees free their envs ($(field leaks_2519 envs) envs, each freed once)"
     fi
 fi
 

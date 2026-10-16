@@ -159,6 +159,13 @@ fix of its own.
   between actors. Proposal: a send copies a string unless its count is 1,
   in which case it moves. This needs checking against what the send side
   does today before stage 2.
+
+  Decided 2026-10-15 (#2919): a place other threads can read (a module
+  `var`, a closure environment) can make two actors keep the same string,
+  and R3 keeps by retaining where today copies. A string stored into such
+  a place is published: a bit of its `ref_count` marks it shared, and its
+  retain and release are atomic from then on. Every other string keeps its
+  plain count. The value carries the state, as it carries its count.
 - **Cycles.** A closure environment that ends up holding itself (a closure
   stored in a cell it captures) is never freed by counting. That is today's
   limit too; the model does not make it worse, and a cycle check is out of
@@ -186,9 +193,367 @@ green, and is measured against the benchmarks before it merges.
 4. **R3's transfers:** parameters borrow, the callee's own store retains,
    returns hand over. The callee-body analyses go: copy-on-keep, the return
    classifier, the pass-through veto, the tuple and cycle classifiers.
+
+   A function may not free a value it borrows (a parameter): the checker
+   refuses `string.free` or `release` of a parameter, with a message
+   pointing to keeping the value (store it) instead. Under R3 such a free
+   would release a reference the function does not own. The grid's cells
+   for a function that frees what it is passed, on every path (T8) or on
+   some (T8S), have REFUSED as their target.
 5. **R5:** last-use moves and pair elision, each measured.
 6. **Docs:** memory-management.md rewritten around R1 to R5; the per-shape
    sections become history.
+
+## Implementation record
+
+What has landed, and the decisions taken while implementing, so later stages
+build on them instead of re-deciding.
+
+**R1 (#2913, #2914, #2915, inventory in `ownership-r1-inventory.md`).** Every
+literal is a static pinned `AetherString`. The runtime's string producers
+return counted strings. R4 as built: an extern's `string` or `ptr` parameter
+gets the characters, unless the parameter is declared `@aether ptr` or the
+function is string-aware (`string_*`, `aether_string_*`); a C variadic `...`
+gets the characters; a store through a C `string[]` view writes the
+characters; the std containers declare `@aether ptr` so they keep the header.
+An extern `-> string` is C text, ended by its NUL. Bytes whose length C
+reports separately (a digest, compressed data, a read buffer) cross as `ptr`
+and become a string through `string_new_with_length(p, n)`: taken as a
+string, they would be copied up to their first zero byte.
+
+**Published strings (#2919).** Bit `0x40000000` of `ref_count` marks a string
+shared; its retain and release are atomic from then on, every other count is
+plain. `aether_string_publish` sets it and leaves pinned strings alone.
+Published where it is stored: a module variable, a closure's captured string
+or shared cell, a container element (list, map, string sequence, strarr:
+`string_retain_shared`), and a struct field reached through a pointer. A
+message does not share: a send deep-copies its strings (#466), so it needs no
+publish. A value read from a published place carries the bit with it.
+
+**Returns (#2920).** An Aether function hands its caller one reference from
+every return: every `-> string`, and every `string` and `string?` position of
+a tuple. A pinned literal is handed over as it is; a borrowed string is
+copied until retain-on-take lands. A tuple returned whole (`return g()`,
+`return t`) copies each position its source did not hand over (a C function's,
+a closure the compiler cannot name). The caller always moves the result into
+its place.
+
+**C strings in (#2920).** An `@heap` extern's plain `char*` is adopted into an
+`AetherString` at the call (`aether_string_adopt`), so every string the
+program holds is counted and `release` never frees a plain pointer.
+
+**Locals (#2920, R2).** Every string local owns what it holds. A store moves a
+fresh value, or an owning local at its last use; anything else is taken.
+Taking retains a counted string (strings are immutable once made; nothing
+writes into one after it is shared), hands a pinned one over as it is, and
+copies only a plain C string. Every other place is a place like a local: a
+module variable, a struct field (by any path, and in a struct literal), an
+actor's state field, a container element (`list.add`, `list.set`, `map.put` of
+any `string`: the container adopts the taken reference and releases it with
+the element). The store takes the new value and releases the one it replaces;
+a module variable's last value lives as long as the program. A fresh string
+passed to a `string` parameter is released after the call. A `ptr` slot is
+not a string place: a string stored there is C's (R4).
+`string.free(x)` or `release(x)` on a local releases its reference and leaves
+the local empty; reading it afterwards reads nothing, as reading freed memory
+would in C, and a pinned literal it held is untouched.
+
+**Escape channels, measured.** The escape walk kept a local alive (no free on
+rebind or exit) when its value might be kept elsewhere. With each channel
+switched off in turn over the whole suite: a store into a closure's captured
+variable breaks nothing (such a variable is a shared cell, which takes); a
+call argument breaks only a string handed to an Aether function's `ptr`
+parameter that stores it (a container, #2922); a store into a field or an
+element breaks views: an element of a `string[]` slice over memory C owns
+(std.strarr, a sort swapping through `tmp`) is no place that owns, and a copy
+taken from it and stored back dangled when the copy was freed. Retain-on-take
+removes that: the local and the view hold the same counted string. A
+header-defined struct's string field (`@c_import`) is C's, as R4 says; it kept
+the value alive by the escape rule until the walk was deleted (see "C's
+places are given a reference" below).
+
+**A string kept through a `ptr` (decided 2026-10-15).** A `ptr` slot is
+untyped memory and owns nothing, so a `string` that reaches one and is kept
+there would live as long as its owner, not as long as the slot. The keep
+analysis caught this by reading callee bodies; it is replaced by a rule in
+the signature, so no call site reads another function's body:
+
+- An Aether function's `ptr` parameter is borrowed for the call. One the
+  function keeps (stores where it outlives the call, returns, captures, or
+  passes to another function's keeping parameter) is declared `@keep`, as an
+  extern's is declared `@retain` (R4).
+- The checker verifies each function against its own body: a `ptr`
+  parameter not declared `@keep` is not kept. A call is checked against the
+  callee's signature.
+- A `string` goes implicitly to a borrowed `ptr` parameter. To a `@keep` one,
+  or into a `ptr` field (a store or a struct literal), it goes only through
+  `string.keep(s)`, which hands over one reference the program gives back
+  with `string.release_kept`; the implicit form is refused (E0902). A `ptr`
+  module variable or local already refuses a string by type.
+- A closure's `ptr` parameter is always borrowed, and a function with a
+  `@keep` parameter is called by name: a call through a value cannot see
+  what the callee keeps. A typed pointer (`*T`) and a `distinct` type over
+  `ptr` are left alone: a string converts to neither.
+- Measured cost: 329 `@keep` annotations across 60 files of std, contrib and
+  the tests, applied until the checker found no more (keeping cascades up
+  through every function that passes its own `ptr` on to a keeper).
+- The std containers' `ptr` entry points take strings through the string
+  routing (a string given to `list.add` is taken by the list), not as a
+  kept `ptr`.
+
+**A borrowed argument outlives its call.** The callee borrows, so the
+caller guarantees the argument lives through the call. A local or temporary
+of the caller does: the callee cannot reach it. A string read from a place
+the callee can reach and rewrite (a module variable, a field or an element
+by any path) does not: a store into that place inside the call released what
+the argument pointed at. The caller holds such an argument for the call (a
+reference of its own, released after it), as it already held a closure
+cell's value (#2755). A call into C is left alone; C does not rewrite Aether
+places.
+
+**Counting is inline.** A take and a release of a string no other thread can
+reach are a few instructions in the generated code (the header layout comes
+from the runtime's own definition); a shared string, and a release that
+frees, call into the runtime. Against out-of-line calls this cut a loop of
+5,000,000 borrowed local stores from 61 ms to 31 ms, and one of field stores
+from 34 ms to 20 ms (the R1 compiler, which counted none of them: 9 ms each).
+
+**The unwind journal knows places (#2923).** A panic runs the releases a
+longjmp skips. The journal used to hold values: each store tracked the value
+and each release forgot the newest entry with that pointer. Once two places
+can hold the same counted string, a release forgot the other place's entry,
+so a panic skipped a release (a leak) or ran one twice. Now a place that owns
+(a string local or temporary, a struct local) is journaled by its address
+where it is declared or first set, with the address of its ownership flag;
+a drain releases what the place holds then and empties it. Stores, moves and
+releases never touch the journal; a scope exit forgets the place. The drain
+takes its entries off the journal before it runs any release.
+
+**Temporaries live to the end of their statement when a view may point into
+them.** `string.bytes(s)` returns a view of `s`; given a temporary
+(`string.bytes(make())`), freeing the temporary as soon as the call returned
+left the view dangling. As in C++, such a temporary (a fresh string passed to
+a call whose result is a slice or a `ptr`) lives until its statement is done:
+its block releases it on every exit, and a statement run again releases the
+one before. Other temporaries are still released right after their call.
+
+**An operand read ahead of a call takes its own reference.** A field read
+evaluated before a later operand that may store into the field (#2798) holds
+a reference of its own until its statement is done, so the store cannot free
+what the call is given.
+
+**Order of the remaining #2920 steps.** (1) Switch off each escape channel
+whose receiver takes (done 2026-10-15: the escape walk is deleted). (2) The `_heap_` flags are then always 1 and are
+deleted, with the heap classifiers that set them, copy-on-keep and the callee
+keep analysis. (3) `--diagnose=ownership` reports R3 (moved or taken, per
+store), rewritten once, after (1).
+
+**A return is a store into the caller's place.** A string return takes its
+value as any store does: a local on its last use moves out, anything else is
+retained. The return-escape channel (the set of locals a `return` names,
+their skipped exit free, the free each other `return` ran ahead of the
+function's defers) is gone, and with it a free that ran before a user `defer`
+reading the local. Structs, tuples and optionals return the same way; the
+struct return-escape set went with it.
+
+**One retain and one drop per type (#2921).** Every owning type has two
+generated functions, used by every place: `_ae_retain_<T>(T*)` takes a
+reference to each part of a bit copy, `_ae_drop_<T>(T*)` releases each part
+and empties it; `_ae_publish_<T>` makes a value's strings atomic for a place
+other threads read. A struct's are `<Name>_dup` and `<Name>_destroy`; a
+tuple's, an optional's and a fixed-size array's are emitted by
+codegen_own.c once every type is complete, prototypes first, so nested
+composites call each other in any order. A part is a string, a closure's
+environment, or a composite of those.
+
+Struct fields lost their `_heap_<field>` trackers: every string field owns
+what it holds, so a struct's C layout is its declared fields (the punning
+idiom of #1879 holds by construction) and `reflect.field_heap_offset` is
+gone. `<Name>_replace` is a store (keep the old value, put the new one in,
+destroy the old), a move empties the moved-from parts. A struct parameter
+borrows its caller's value; one the body writes into is copied on entry and
+destroyed at its exit, which is a question about the function's own body.
+Copy-on-keep for structs (the "kept" walk, the disown and capture on entry)
+is deleted.
+
+Tuple, optional and array locals, struct and tuple fields, module `var`s,
+array and slice elements, message fields and `_ = v` discards each take and
+drop through these functions. A struct definition is emitted after every type
+it holds by value, tuples and optionals included.
+
+**Array results (#2894).** A named function returns a fixed-size array,
+alone or at a position of a tuple, in a struct of its own (C has no array
+results). A binding moves the elements out, a struct field or a tuple
+position takes them, and a call used as an array is held in a statement
+temporary that its block drops. A closure, an extern and a function type
+still return no array (E0201).
+
+**Owning optional fields (#2822).** An optional field whose value owns
+memory is a part like any other: a literal or a store takes, the struct's
+destroy and a store release.
+
+**Every call borrows its arguments (decided 2026-10-15).** A fresh value
+passed to any call (a function, a closure, a typed function pointer, an
+extern) is released after the call, and journaled for it, since the callee
+may panic. Nothing is read from the callee to decide it: a callee that keeps
+or returns an argument takes a reference of its own (R3), and C that keeps
+one copies it or declares the parameter `@retain` (R4). A closure the program
+did not compile (a host's box, a `@c_callback`'s argument) borrows the same
+way. The hand-back classifier, the callee memo, the closure-argument and
+fn-pointer conventions and the escape walk, all of which read other
+functions' bodies, are deleted.
+
+**`@retain` hands over a reference (R4).** A call to an extern parameter
+declared `@retain` hands it one reference: a fresh value as it is, a place's
+retained. This holds for a `string` and for a closure; the std externs that
+keep a closure (observe, worker jobs and the main-thread poster, the http and
+net server handlers, the QuickJS function binding) are declared so, and they
+release what they keep through the closure's own destructor.
+
+**C's places are given a reference (R4).** A string stored into a
+header-defined struct's field or into a slice over C memory is given a
+reference of its own, which nothing in the program releases; the local it
+came from keeps its own and releases it as any local does.
+
+**A closure in a `ptr` slot (#2926, decided 2026-10-15).** A `ptr` slot owns
+nothing, as for strings: a closure kept in one goes in a box holding a
+reference of its own (`box_closure(f)`, or the coercion a store into a `ptr`
+makes), and the program gives the box back with `release_closure(p)`, the
+closure counterpart of `string.release_kept`. A `ptr` parameter that keeps
+what it is given is declared `@keep` and is given that heap box; any other
+`ptr` parameter only borrows, so it is given a box on the caller's stack and
+nothing is allocated. Containers keep their own reference as before.
+
+**A `defer` runs when a caught panic leaves its scope (#2923, decided
+2026-10-15).** The language reference says a plain `defer` runs on every
+exit; a panic skipped it. While its scope is live, a plain `defer` is in the
+unwind journal with a thunk: the deferred statement, generated where it is
+written, over copies of the frame's locals it names, copied back after it
+runs. The journal drains before the jump, newest first, so a deferred
+statement sees every local declared before it. A normal exit forgets the
+entry and runs the statement in place. `defer try` and `defer catch` are not
+journaled: a panic is neither outcome. A frame per `defer` (a setjmp at each
+registration) was the alternative; it counted against the panic nesting
+limit, so a recursive function with a `defer` inside a `try` would abort.
+
+**No per-local flags (#2920, step 2).** A string local always owns what it
+holds: every take hands it a reference (a fresh value moved, a local at its
+last use moved out and left empty, anything else retained, a C string
+copied), so `_heap_<name>` is gone, with the actor state's trackers. A store
+takes the new value before it releases the old one, so `s = s` is a retain
+and a release; a scope exit releases unconditionally. A `catch` binding
+takes its reason when the runtime did not hand it over. The catcher owns
+the reason whatever its binding is: `catch _`, and a binding the handler
+reaches through a closure environment, a capture cell or actor state, read
+it from a hidden owner of the handler's scope that releases it like any
+string local.
+
+**Returns are typed, not classified.** Whether a call hands its caller a
+string is read from the callee's declared result: an Aether function
+returning `string` (or a `string` tuple position) always does, and an
+extern does when it says `@heap`, on a `string` or on a `ptr` result (a
+counted string returned untyped, `string.from_int`). The return classifiers
+that walked function bodies, their cycle breaks and memo, and the producer
+name list are deleted.
+
+**No body-reading analysis is left.** The parameter escape walk, the
+closure environment scan (EnvScan), the hand-back walks and the copy-on-keep
+query are deleted. A closure cell always owns the closure it holds: a call
+lends it with a reference held for the call, and whatever keeps or returns
+it takes its own (#2788). A function frees a caller's string only when it is
+a consuming free like `string.free`, since an Aether function may not free a
+parameter it borrows (E0901).
+
+**String sequences own like every other kind (#2921).** `*StringSeq` is an
+owning type of the generated take and drop: a place takes a fresh sequence
+(a literal, an Aether function's or a closure's result, an extern's whose
+result says `@heap`) and retains any other, and drops what it holds when it
+is overwritten or left; a struct field, a tuple position, an optional, an
+array element, a capture, a cell, a message field, actor state and a module
+`var` follow from that. The std producers say `@heap`; `string.seq_tail`
+lends. The per-local `_seqheap_` flags, the escape walk that kept a
+sequence alive when it was passed to anything but a `string.seq_*` op, and
+the producer name list are deleted. A sequence crosses threads in a message
+or a capture, so its cell counts are atomic, as a closure environment's
+are; the builders adopt the tail they are handed instead of retaining and
+releasing it, so a build costs no more than before. A send takes a
+reference rather than copying the cells, which are immutable.
+
+`string.seq_free` of a place (a local, a field, an element) releases what
+the place holds and leaves it empty, so the place's own release (its scope
+exit, its box's `heap.free`) finds nothing; std.language freed a field by
+hand and then the box, which released it twice.
+
+**Containers and counted strings typed `ptr`.** A string a `-> ptr @heap`
+constructor returns (`string.from_int`) is a counted string handed to the
+caller, and `list.add`, `list.set` and `map.put` adopt it as they adopt a
+`string`; routed to the plain add, the list kept a pointer the call's
+argument temporary then released. A container handed a pinned string (a
+literal) stores it as an element it does not own: a pinned string is never
+released, so owning it would only cost the container its ownership tags.
+
+**A borrowed binding that is rebound.** A parameter, a list pattern's head
+and tail and a receive arm's field binding borrow their value. One of an owning
+tuple, optional, closure or sequence type that its body rebinds takes a
+reference of its own first, which its scope exit drops, so the rebind
+releases nothing of the owner's (a struct parameter already did this,
+#2582). The checker refuses `string.seq_free` of a borrowed sequence
+parameter, as it refuses freeing a string one (E0901).
+
+**C memory owns nothing.** A string stored into C memory viewed as
+`string[]` (`(names as string[])[i] = s`) gives C its characters and takes
+no reference: the program keeps the string alive while C reads it, as for
+any `ptr` slot. The checker refuses a string built in the statement itself
+(a call, an interpolation), which nothing would keep (E0902); bind it to a
+local first. An earlier pass gave the stored string a reference of its own,
+which nothing could release (C holds only the characters), so every such
+store leaked.
+
+**A literal may be kept as it is.** E0902 refuses a `string` given to a
+`@keep ptr` without `string.keep`, but a string literal is pinned and never
+released, so a slot may keep it as it stands (`pqueue.push(q, 1, "job")`).
+
+**A permutation takes nothing.** Sorting moves the elements' pointers
+(`mem.swap_ptrs`) and compares through borrowed reads, so it neither copies
+nor releases: the array may be Aether's or C's (a `strarr` view).
+
+**A program re-declaring a std extern declares its contract.** An extern
+says `@heap` when C hands over the string it returns; a program that
+declares `string_concat` itself without it is telling the compiler the
+result is borrowed, and the copy then leaks the original. The regression
+programs that re-declared std functions say `@heap` as std does.
+
+**Teardown in constant stack.** A closure's environment releases what it
+holds when its last reference goes, and what it holds can be a closure
+whose environment then goes too: a chain of rebinds to a closure calling
+the one it replaced (grid cell K3-P2-T13) tore down one C frame per link,
+and overflowed Windows' 1 MB stack at 50,000. An environment whose count
+reaches zero hands itself to `aether_teardown`, which runs it at once
+unless a teardown is already running on the thread, and then queues it for
+that one to run after it returns. The queue is the thread's, grows only as
+wide as one teardown's fan-out, and is freed with the unwind journal at
+thread exit.
+
+**A builder's unused config (#2871).** A builder owns the config its call
+hands it (it frees it, or returns it as what it built). One whose body never
+names `_builder` does neither, so its exit releases the config through its
+factory's release, decided from the builder's own body.
+
+**A builder across a binary import (#2860).** A library built the default
+way links its own copy of the runtime, so it cannot free a config the
+program's copy made. Its catalog (schema 1.8) marks each builder that never
+names its config; the stub `ae` writes for a binary import passes such a
+builder no config and never names `_builder` itself, so the program
+releases its config on its own runtime, as for any builder that ignores
+it. What an export returns crosses the same boundary and is #2931.
+
+**Fixed-size arrays in every place (#2921).** A message field holds an array
+by value and owns its elements (filled once the message exists; a receive arm
+binds a view of it); an optional wraps one through a temporary its array is
+filled into; an array literal of owning elements passed to a function is a
+statement temporary, journaled and dropped by its block; one discarded is
+filled into a temporary and dropped. A store into an element of an owning
+array local takes and drops whatever the element holds.
 
 ## Decisions needed
 

@@ -657,7 +657,7 @@ struct CertReaderView {
 // Parse the [3] extensions content: SEQUENCE OF Extension, each
 // { extnID OID, critical BOOLEAN OPTIONAL, extnValue OCTET STRING }. When the
 // OID is subjectAltName (2.5.29.17), decode its dNSNames into out.dns_names.
-fn parse_extensions_for_san(ext_wrapper: ptr, out: *LeafCert) {
+fn parse_extensions_for_san(ext_wrapper: @keep ptr, out: *LeafCert) {
     wr = asn1.reader_new(ext_wrapper)
     // [3] wraps a single SEQUENCE OF Extension.
     seq_content, serr = asn1.read_tlv(wr)
@@ -702,7 +702,7 @@ fn parse_extensions_for_san(ext_wrapper: ptr, out: *LeafCert) {
 // The SAN extnValue OCTET STRING wraps GeneralNames ::= SEQUENCE OF GeneralName.
 // dNSName is [2] IMPLICIT IA5String (context tag 0x82). Add each to dns_names,
 // rejecting any with an embedded NUL.
-fn decode_san_dnsnames(octet_content: ptr, out: *LeafCert) {
+fn decode_san_dnsnames(octet_content: @keep ptr, out: *LeafCert) {
     or = asn1.reader_new(octet_content)
     gn_content, gerr = asn1.read_tlv(or) // the GeneralNames SEQUENCE content
     asn1.reader_free(or)

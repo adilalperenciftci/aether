@@ -1028,7 +1028,7 @@ void quote_emit_prototypes(FILE* out) {
           "void* aether_quote_add(void* parent, void* child);\n"
           "void aether_quote_set_body(void* tree, void* body);\n"
           "void aether_quote_param(void* tree, const char* name, const char* type);\n"
-          "void aether_quote_capture(void* tree, const char* name, const char* type, const char* base, void* cell, void (*release)(void*));\n"
+          "void aether_quote_capture(void* tree, const char* name, const char* type, const char* base, void* cell, void (*release)(const void*));\n"
           "void* aether_quote_helper(const char* name, const char* ret);\n"
           "void aether_quote_add_helper(void* tree, void* helper);\n",
           out);

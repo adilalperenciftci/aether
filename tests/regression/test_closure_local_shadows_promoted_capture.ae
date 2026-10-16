@@ -16,9 +16,7 @@
 //
 // Compiling IS the assertion (the bug was a C-compile failure); the value
 // check guards that both the promoted-capture path and the own-local path
-// still compute correctly. No heap collections/strings are allocated so the
-// only leak is the promoted cell itself (inherent to capture promotion,
-// independent of this bug — see tests/leaks_known.txt).
+// still compute correctly.
 
 import std.string
 

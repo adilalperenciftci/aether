@@ -52,8 +52,11 @@ new() -> ptr {
 }
 
 // Enqueue `item` at `priority`. Lower priority values pop first.
-// Returns false on a null queue or allocation failure.
-push(pq: ptr, priority: long, item: ptr) -> bool {
+// Returns false on a null queue or allocation failure. The queue keeps the
+// item past the call without owning it: a string goes in as a reference of
+// its own, `string.keep(s)`, given back with `string.release_kept` once it
+// is popped (#2926).
+push(pq: ptr, priority: long, item: @keep ptr) -> bool {
     return aether_pqueue_push(pq, priority, item) == 1
 }
 

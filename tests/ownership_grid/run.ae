@@ -1,0 +1,3079 @@
+// The ownership grid's runner: generate, build, run, classify, report
+// (tests/ownership_grid/README.md).
+//
+//     make ownership-grid                     (builds this program, then runs it)
+//     build/ownership_grid/run [options]      (from the repository root)
+//
+// Every cell gen.ae makes is written to build/ownership_grid/cells/, built
+// with build/ae once, linking poison_alloc.c (-Wl,--wrap=free,--wrap=realloc
+// and the runtime's NUMA frees), run twice (as it is, and with
+// OWNERSHIP_GRID_POISON=1, which poisons every freed block), and given one
+// status:
+//
+//   OK          every value right, no growth, nothing under the poisoning allocator
+//   UNMEASURED  values right and nothing under the poisoning allocator, but the
+//               heap count is not exact here (mem.heap_in_use_exact), so growth
+//               was not measured
+//   LEAK        mem.steady_growth is not 0; the size kept is the median of three
+//               runs, in bytes per 100 calls
+//   INCOMPLETE  the poisoned run did not finish (a timeout) or could not be built,
+//               so the use-after-free check did not happen
+//   NOCOMPILE   aetherc refused the program, or the C did not compile (which one
+//               is kept)
+//   TIMEOUT     the build or the plain run did not finish
+//   CRASH       the plain run died, and the poisoned run pins no memory error
+//   WRONG       a value is wrong in the plain run
+//   UAF         the poisoned run stopped on a double free, crashed (an access
+//               violation, heap corruption), or read a wrong value
+//   HARNESS     the runner itself failed on the cell twice (never a finding: the
+//               check fails and says so)
+//
+// Each cell also has a TARGET, the status the approved design wants (gen.ae):
+// OK, or REFUSED for a function that frees a parameter it borrows. The report
+// says how far each cell is from it.
+//
+// Options:
+//   --mode gcc|nogcc|both  the C path: gcc is the default build, nogcc builds with
+//                          AE_CC="<cc> -DAETHER_GCC_COMPAT=0" (default gcc)
+//   --jobs N               parallel cells (default NPROC, else the CPU count / 2)
+//   --only PAT[,PAT]       only cells whose id matches one of the glob patterns
+//   --shard k/n            only shard k of n (k may be a list, 2,3/3), as CI splits the grid;
+//                          OWNERSHIP_GRID_SHARD sets it too
+//   --check                compare with baseline.txt; exit 1 when a cell got worse or a
+//                          baseline cell is no longer generated, 2 on a harness failure
+//   --update-baseline      write baseline.txt from this run (an --only run updates its cells)
+//   --no-shim              build without the poisoning allocator (no UAF column)
+//   --keep-bins            keep each cell's binary (deleted after its runs otherwise)
+//   --report-only          rewrite report.md and report.csv from <out>/results.json
+//   --out DIR              output directory (default build/ownership_grid)
+//   --list                 print every cell id; --skips every skipped combination with
+//                          its reason; --show ID one cell's program
+//
+// The runner is one thread. It starts up to N children with
+// os.spawn_proc_to (each one's output in its log file, its whole tree
+// killable), waits for the first to end with os.wait_any_timeout, kills
+// whichever passes its deadline, and reads the log.
+//
+// OWNERSHIP_GRID_FAULT=<cell id> makes the runner fail on that cell (a test of
+// the harness-failure path: tests/ownership_grid/test_runner.ae).
+//
+// Writes <out>/report.md, <out>/report.csv and <out>/results.json.
+
+import std.os
+import std.fs
+import std.list
+import std.mem
+import std.path
+import std.string
+import std.strbuilder
+import std.collections
+import std.regex
+import std.json
+import std.io
+import gen
+
+extern exit(code: int)
+
+const BUILD_TIMEOUT = 600
+const RUN_TIMEOUT = 120
+const EXIT_WRONG = 12
+const EXIT_LEAK = 13
+const EXIT_POISON = 86
+const EXIT_POISON_HARNESS = 87
+const MAX_JOBS = 60
+
+// A LEAK cell is worse than its baseline when it leaks more than twice as
+// much and more than this many bytes per 100 calls more. Measured: the same
+// cell's growth moved by up to about 1 KB per 100 calls between runs (a few
+// allocator blocks), never by a factor of two; a real new leak in a shape is
+// at least one string or environment per call, 1.8 KB or more per 100 calls.
+const LEAK_NOISE_BYTES = 2048
+
+// A line on stdout, written at once (unbuffered), so a CI log shows the
+// progress as it comes.
+say(s: string) {
+    _w = io.stdout_write("${s}\n")
+}
+
+// ---------------------------------------------------------------------------
+// Statuses.
+
+status_count() -> int {
+    return 10
+}
+
+status_at(i: int) -> string {
+    return match i {
+        0 -> "OK"
+        1 -> "UNMEASURED"
+        2 -> "LEAK"
+        3 -> "INCOMPLETE"
+        4 -> "NOCOMPILE"
+        5 -> "TIMEOUT"
+        6 -> "CRASH"
+        7 -> "WRONG"
+        8 -> "UAF"
+        _ -> "HARNESS"
+    }
+}
+
+status_index(s: string) -> int {
+    i = 0
+    while i < status_count() {
+        if status_at(i) == s {
+            return i
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+// How bad a status is, for the check: a move to a higher tier is a
+// regression. UNMEASURED is compared apart (see grid_verdict); HARNESS fails
+// the check anyway.
+tier(s: string) -> int {
+    return match s {
+        "OK" -> 0
+        "UNMEASURED" -> 0
+        "LEAK" -> 1
+        "INCOMPLETE" -> 2
+        "NOCOMPILE" -> 2
+        "HARNESS" -> 4
+        _ -> 3
+    }
+}
+
+// The order the worst cells are listed in.
+severity(s: string) -> int {
+    return match s {
+        "HARNESS" -> -1
+        "UAF" -> 0
+        "WRONG" -> 1
+        "CRASH" -> 2
+        "TIMEOUT" -> 3
+        "INCOMPLETE" -> 4
+        "NOCOMPILE" -> 5
+        "LEAK" -> 6
+        "UNMEASURED" -> 7
+        _ -> 8
+    }
+}
+
+abbr(s: string) -> string {
+    return match s {
+        "UNMEASURED" -> "UNM"
+        "INCOMPLETE" -> "INC"
+        "UAF" -> "**UAF**"
+        "WRONG" -> "**WRONG**"
+        "CRASH" -> "**CRASH**"
+        "TIMEOUT" -> "TIME"
+        "NOCOMPILE" -> "NC"
+        "HARNESS" -> "**HARNESS**"
+        _ -> s
+    }
+}
+
+// The statuses a count line always names.
+always_counted(s: string) -> bool {
+    return s == "OK" || s == "LEAK" || s == "UAF" || s == "WRONG"
+}
+
+mode_name(m: int) -> string {
+    if m == 1 {
+        return "nogcc"
+    }
+    return "gcc"
+}
+
+// ---------------------------------------------------------------------------
+// Configuration, set once in main. The strings live in a string list.
+
+var g_conf: ptr = null
+const C_ROOT = 0
+const C_OUT = 1
+const C_AE = 2
+const C_SHIM = 3
+const C_BASELINE = 4
+const C_EXE = 5
+const C_CC = 6
+const C_AE_CC = 7
+const C_FAULT = 8
+const C_SYSTEM = 9
+const C_CACHE_MAX = 10
+const C_CACHE_DIR = 11
+const C_COUNT = 12
+
+var g_windows: int = 0
+var g_keep_bins: int = 0
+var g_use_shim: int = 0
+var g_has_ae_cc: int = 0
+var g_had_cache_max: int = 0
+var g_had_cache_dir: int = 0
+
+conf(i: int) -> string {
+    return string.copy(collections.string_list_get(g_conf, i))
+}
+
+set_conf(i: int, s: string) {
+    collections.string_list_set(g_conf, i, s)
+}
+
+wraps() -> string {
+    return "-Wl,--wrap=free,--wrap=realloc,--wrap=aether_numa_free,--wrap=aether_numa_free_aligned"
+}
+
+backslash() -> string {
+    return <<BACKSLASH
+\
+BACKSLASH
+}
+
+// A path with "/" separators.
+slashes(p: string) -> string {
+    return string.replace_all(p, backslash(), "/")
+}
+
+// An absolute, cleaned path with "/" separators.
+absolute(p: string) -> string {
+    full = p
+    if path.is_absolute(p) == 0 {
+        full = "${os.getcwd()}/${p}"
+    }
+    return slashes(path.clean(full))
+}
+
+// The C compiler of a mode: AE_CC, else CC, else gcc (cc off Windows), with
+// -DAETHER_GCC_COMPAT=0 on the nogcc path.
+mode_cc(m: int) -> string {
+    if m == 1 {
+        return "${conf(C_CC)} -DAETHER_GCC_COMPAT=0"
+    }
+    return conf(C_CC)
+}
+
+// AE_CC for a plain build: unset on the gcc path unless the caller set it.
+plain_cc(m: int) -> string {
+    if m == 0 && g_has_ae_cc == 0 {
+        return ""
+    }
+    return mode_cc(m)
+}
+
+shim_cc(m: int) -> string {
+    return "${mode_cc(m)} ${wraps()}"
+}
+
+env_restore(name: string, had: int, value: string) {
+    if had == 1 {
+        _s = os.setenv(name, value)
+    } else {
+        _u = os.unsetenv(name)
+    }
+}
+
+// The runner is one thread, so a child's environment is the runner's at the
+// moment it starts: a build gets the grid's cache of its own (bounded, so
+// its thousands of programs neither evict the user's builds from
+// ~/.aether/cache nor fill the disk) and its AE_CC ("" unsets it).
+set_build_env(cc: string) {
+    _d = os.setenv("AETHER_CACHE_DIR", "${conf(C_OUT)}/cache")
+    if g_had_cache_max == 0 {
+        _m = os.setenv("AETHER_CACHE_MAX_MB", "1024")
+    }
+    if cc == "" {
+        _u = os.unsetenv("AE_CC")
+    } else {
+        _s = os.setenv("AE_CC", cc)
+    }
+}
+
+// A cell runs in the runner's own environment, with OWNERSHIP_GRID_POISON
+// set for the poisoned run and unset for the plain one.
+set_run_env(poison: bool) {
+    env_restore("AETHER_CACHE_DIR", g_had_cache_dir, conf(C_CACHE_DIR))
+    env_restore("AETHER_CACHE_MAX_MB", g_had_cache_max, conf(C_CACHE_MAX))
+    env_restore("AE_CC", g_has_ae_cc, conf(C_AE_CC))
+    if poison {
+        _s = os.setenv("OWNERSHIP_GRID_POISON", "1")
+    } else {
+        _u = os.unsetenv("OWNERSHIP_GRID_POISON")
+    }
+}
+
+env_or_empty(name: string) -> string {
+    v = os.getenv(name)
+    if v == null {
+        return ""
+    }
+    return string.copy(v)
+}
+
+// ---------------------------------------------------------------------------
+// Text helpers.
+
+// The lines of a text ended by "\n" or "\r\n"; a final line break gives no
+// empty last line.
+split_lines(text: string) -> ptr {
+    out = collections.string_list_new()
+    n = string.length(text)
+    start = 0
+    while start < n {
+        cut = string.index_of_from(text, "\n", start)
+        stop = cut
+        if cut < 0 {
+            stop = n
+        }
+        line_end = stop
+        if line_end > start && string.char_at_n(text, n, line_end - 1) == 13 {
+            line_end = line_end - 1
+        }
+        collections.string_list_add(out, string.substring(text, start, line_end))
+        start = stop + 1
+    }
+    return out
+}
+
+// The first `n` characters of `s` (UTF-8 code points, not bytes).
+prefix_chars(s: string, n: int) -> string {
+    len = string.length(s)
+    count = 0
+    i = 0
+    while i < len {
+        b = string.char_at_n(s, len, i) & 255
+        if (b & 192) != 128 {
+            if count == n {
+                return string.substring(s, 0, i)
+            }
+            count = count + 1
+        }
+        i = i + 1
+    }
+    return string.copy(s)
+}
+
+// The first line of `text` that starts with `prefix`, stripped; "" if none.
+first_line(text: string, prefix: string) -> string {
+    lines = split_lines(text)
+    n = collections.string_list_size(lines)
+    i = 0
+    while i < n {
+        ln = collections.string_list_get(lines, i)
+        if string.starts_with(ln, prefix) == 1 {
+            res = string.trim(ln)
+            collections.string_list_free(lines)
+            return res
+        }
+        i = i + 1
+    }
+    collections.string_list_free(lines)
+    return ""
+}
+
+parse_long(s: string) -> long {
+    if string.try_long(s) == 1 {
+        return string.get_long(s)
+    }
+    return 0 as long
+}
+
+hex_upper(v: long) -> string {
+    digits = "0123456789ABCDEF"
+    if v == 0 {
+        return "0"
+    }
+    out = ""
+    x = v
+    while x > 0 {
+        d = (x % 16) as int
+        out = "${string.substring(digits, d, d + 1)}${out}"
+        x = x / 16
+    }
+    return out
+}
+
+// Milliseconds as seconds with `places` decimals (0, 1 or 2), rounded.
+seconds_text(ms: long, places: int) -> string {
+    if places == 0 {
+        return "${(ms + 500) / 1000}"
+    }
+    if places == 1 {
+        tenths = (ms + 50) / 100
+        return "${tenths / 10}.${tenths % 10}"
+    }
+    hundredths = (ms + 5) / 10
+    frac = hundredths % 100
+    if frac < 10 {
+        return "${hundredths / 100}.0${frac}"
+    }
+    return "${hundredths / 100}.${frac}"
+}
+
+// a/b with one decimal, rounded; b > 0.
+ratio_text(a: long, b: long) -> string {
+    tenths = (a * 10 + b / 2) / b
+    return "${tenths / 10}.${tenths % 10}"
+}
+
+escape_pipes(s: string) -> string {
+    return string.replace_all(s, "|", "${backslash()}|")
+}
+
+// ---------------------------------------------------------------------------
+// Regular expressions, compiled once.
+
+var re_c_error: ptr = null
+var re_aetherc_error: ptr = null
+var re_error_line: ptr = null
+var re_shim_error: ptr = null
+var re_path_prefix: ptr = null
+var re_leak: ptr = null
+var re_std_extern: ptr = null
+var re_cell_extern: ptr = null
+var re_cell_import: ptr = null
+var re_shard: ptr = null
+
+compile_re(pattern: string) -> ptr {
+    re, err = regex.compile(pattern)
+    if err != "" {
+        say("ownership grid: a pattern of the runner does not compile: ${err}")
+        exit(2)
+    }
+    return re
+}
+
+// The patterns are heredocs, which keep their backslashes.
+compile_patterns() {
+    p1 = <<RX
+(\.c|\.h|\.ae):\d+(:\d+)?: (fatal )?error|undefined reference|ld returned|collect2
+RX
+    re_c_error = compile_re(p1)
+    p2 = <<RX
+error\[E\d+\]|Type checking failed|aborting: \d+ error|^error:\x20
+RX
+    re_aetherc_error = compile_re(p2)
+    re_error_line = compile_re("(?i)error")
+    re_shim_error = compile_re("__wrap_|__real_|poison_alloc")
+    p3 = <<RX
+(?:[A-Za-z]:)?[\/][^\s:]*[\/](?=[^\/\s:]+\.(?:ae|c|h):)
+RX
+    re_path_prefix = compile_re(p3)
+    p4 = <<RX
+LEAK: (-?\d+) bytes per (\d+) calls
+RX
+    re_leak = compile_re(p4)
+    p5 = <<RX
+^\s*extern\s+([A-Za-z_]\w*)\s*\(
+RX
+    re_std_extern = compile_re(p5)
+    p6 = <<RX
+^extern ([A-Za-z_]\w*)\(
+RX
+    re_cell_extern = compile_re(p6)
+    p7 = <<RX
+^import (std\.[\w.]+)
+RX
+    re_cell_import = compile_re(p7)
+    p8 = <<RX
+^\s*(\d+(?:,\d+)*)/(\d+)\s*$
+RX
+    re_shard = compile_re(p8)
+}
+
+// Group `i` of the first match of `re` in `s`; "" when there is none.
+re_group(re: ptr, s: string, i: int) -> string {
+    caps, err = regex.captures(re, s)
+    if err != "" || caps == null {
+        return ""
+    }
+    g = string.copy(regex.capture(caps, i))
+    regex.captures_free(caps)
+    return g
+}
+
+// ---------------------------------------------------------------------------
+// Processes and files.
+
+// Where a status comes from: an exit code, or a deadline the process missed.
+describe_exit(rc: int, timed_out: int) -> string {
+    if timed_out == 1 {
+        return "timeout"
+    }
+    if g_windows == 1 {
+        code = (rc as long) & 4294967295
+        name = ""
+        if code == 3221225477 {
+            name = "access violation"
+        } else if code == 3221225725 {
+            name = "stack overflow"
+        } else if code == 3221226356 {
+            name = "heap corruption"
+        } else if code == 3221226505 {
+            name = "stack buffer overrun / fast fail"
+        } else if code == 3221225501 {
+            name = "illegal instruction"
+        } else if code == 3221225620 {
+            name = "integer divide by zero"
+        } else if code == 2147483651 {
+            name = "breakpoint"
+        } else if code == 3 {
+            name = "abort()"
+        }
+        if name != "" {
+            return "exit 0x${hex_upper(code)} (${name})"
+        }
+        return "exit ${code}"
+    }
+    if rc > 128 && rc < 160 {
+        return "signal ${rc - 128}"
+    }
+    return "exit ${rc}"
+}
+
+// An end that a read or a free of freed memory makes: an access violation,
+// heap corruption or a fast fail on Windows; SIGSEGV, SIGBUS or glibc's
+// abort on a bad free elsewhere (a signal is 128 plus its number).
+is_memory_fault(rc: int) -> bool {
+    if g_windows == 1 {
+        code = (rc as long) & 4294967295
+        return code == 3221225477 || code == 3221226356 || code == 3221226505
+    }
+    return rc == 139 || rc == 135 || rc == 134
+}
+
+// Files that could not be removed when the runner was done with them
+// (Windows holds a file a process is still exiting from, or that Defender
+// is scanning): retried while the run goes on and at its end, and
+// reported, never a failure.
+var g_left: ptr = null
+
+remove_now(p: string) -> bool {
+    if fs.exists(p) == 0 {
+        return true
+    }
+    _d = fs.delete(p)
+    return fs.exists(p) == 0
+}
+
+remove_later(p: string) {
+    if !remove_now(p) {
+        collections.string_list_add(g_left, p)
+    }
+}
+
+retry_left() {
+    n = collections.string_list_size(g_left)
+    if n == 0 {
+        return
+    }
+    keep = collections.string_list_new()
+    i = 0
+    while i < n {
+        p = collections.string_list_get(g_left, i)
+        if !remove_now(p) {
+            collections.string_list_add(keep, p)
+        }
+        i = i + 1
+    }
+    collections.string_list_free(g_left)
+    g_left = keep
+}
+
+// A command's output, stripped, or "" when it cannot run (git missing). The
+// arguments are `argv`, which this frees.
+command_output(prog: string, argv: ptr) -> string {
+    out, code, err = os.run_capture(prog, argv, null)
+    list.free(argv)
+    if err != "" || code != 0 {
+        return ""
+    }
+    return string.trim(out)
+}
+
+compiler_version() -> string {
+    argv = list.new()
+    _a = list.add(argv, "--version")
+    v = command_output("${conf(C_ROOT)}/build/aetherc${conf(C_EXE)}", argv)
+    if v == "" {
+        return "aetherc"
+    }
+    return v
+}
+
+git_head(fmt: string) -> string {
+    argv = list.new()
+    _a = list.add(argv, "-C")
+    _b = list.add(argv, conf(C_ROOT))
+    _c = list.add(argv, "log")
+    _d = list.add(argv, "-1")
+    _e = list.add(argv, "--format=${fmt}")
+    v = command_output("git", argv)
+    if v == "" {
+        return "an unknown commit"
+    }
+    return v
+}
+
+// ---------------------------------------------------------------------------
+// Classification.
+
+// ('aetherc' | 'C', first error line), file names without their directory.
+compile_error(log_text: string) -> (string, string) {
+    raw = split_lines(log_text)
+    n = collections.string_list_size(raw)
+    first_c = ""
+    first_a = ""
+    first_e = ""
+    last = ""
+    i = 0
+    while i < n {
+        ln, _e = regex.replace_all(re_path_prefix, string.trim(collections.string_list_get(raw, i)), "")
+        if first_c == "" && regex.matches(re_c_error, ln) == 1 {
+            first_c = ln
+        }
+        if first_a == "" && regex.matches(re_aetherc_error, ln) == 1 {
+            first_a = ln
+        }
+        if first_e == "" && regex.matches(re_error_line, ln) == 1 {
+            first_e = ln
+        }
+        last = ln
+        i = i + 1
+    }
+    collections.string_list_free(raw)
+    if first_a != "" && first_c == "" {
+        return "aetherc", first_a
+    }
+    if first_c != "" {
+        return "C", first_c
+    }
+    if first_e != "" {
+        return "aetherc", first_e
+    }
+    return "aetherc", last
+}
+
+// (status, detail, leak bytes per 100 calls, note) of the plain run.
+classify_run(rc: int, timed_out: int, text: string) -> (string, string, long, string) {
+    zero = 0 as long
+    if timed_out == 1 {
+        return "TIMEOUT", "no exit within ${RUN_TIMEOUT} s", zero, ""
+    }
+    if rc == 0 {
+        if string.contains(text, "growth not measured") == 1 {
+            return "UNMEASURED", "the heap count is not exact here", zero, ""
+        }
+        return "OK", "", zero, ""
+    }
+    if rc == EXIT_WRONG {
+        return "WRONG", first_line(text, "WRONG:"), zero, ""
+    }
+    if rc == EXIT_LEAK {
+        bytes_s = re_group(re_leak, text, 1)
+        calls_s = re_group(re_leak, text, 2)
+        if bytes_s == "" {
+            return "LEAK", "growth not read from the output", zero, ""
+        }
+        calls = parse_long(calls_s)
+        if calls < 1 {
+            calls = 1
+        }
+        n = parse_long(bytes_s) * 100 / calls
+        note = ""
+        if calls_s != "100" {
+            note = " (measured per ${calls_s} calls)"
+        }
+        size = n
+        if size < 0 {
+            size = 0 - size
+        }
+        return "LEAK", "${n} bytes per 100 calls${note}", size, note
+    }
+    // The last two lines of the output, stripped and joined.
+    lines = split_lines(string.trim(text))
+    k = collections.string_list_size(lines)
+    tail = ""
+    if k == 1 {
+        tail = string.trim(collections.string_list_get(lines, 0))
+    } else if k >= 2 {
+        before = string.trim(collections.string_list_get(lines, k - 2))
+        tail = "${before} / ${string.trim(collections.string_list_get(lines, k - 1))}"
+    }
+    collections.string_list_free(lines)
+    if tail == "" {
+        return "CRASH", describe_exit(rc, 0), zero, ""
+    }
+    return "CRASH", "${describe_exit(rc, 0)}: ${prefix_chars(tail, 200)}", zero, ""
+}
+
+// (kind, detail) of the poisoned run: CLEAN, DOUBLEFREE, CRASH (a memory
+// fault), WRONG, OTHER (another end), TIMEOUT or HARNESS.
+classify_shim(rc: int, timed_out: int, text: string) -> (string, string) {
+    if timed_out == 1 {
+        return "TIMEOUT", "the poisoned run did not finish in ${RUN_TIMEOUT} s"
+    }
+    if rc == 0 || rc == EXIT_LEAK {
+        // Growth means nothing there: nothing is freed.
+        return "CLEAN", ""
+    }
+    if rc == EXIT_POISON {
+        l = first_line(text, "POISON:")
+        if l == "" {
+            l = "double free"
+        }
+        return "DOUBLEFREE", l
+    }
+    if rc == EXIT_POISON_HARNESS {
+        l = first_line(text, "POISON HARNESS:")
+        if l == "" {
+            l = "the poisoning allocator failed"
+        }
+        return "HARNESS", l
+    }
+    if rc == EXIT_WRONG {
+        return "WRONG", "poisoned: ${first_line(text, "WRONG:")}"
+    }
+    if is_memory_fault(rc) {
+        return "CRASH", "poisoned: ${describe_exit(rc, 0)}"
+    }
+    // A stack overflow, a panic's abort or any other end: no evidence of a
+    // freed block, so the plain run's status stands.
+    return "OTHER", "poisoned: ${describe_exit(rc, 0)}"
+}
+
+// One status from the plain run and the poisoned one (shim kind "": not
+// built with the allocator, by choice or on a platform without --wrap).
+combine(st: string, detail: string, shim: string, shim_detail: string) -> (string, string) {
+    besides = ""
+    if st != "OK" && st != "UNMEASURED" {
+        besides = " (plain run: ${st} ${detail})"
+    }
+    if shim == "DOUBLEFREE" || shim == "CRASH" {
+        // A memory error the poisoned run pins outranks what the plain run saw.
+        return "UAF", string.trim("${shim_detail}${besides}")
+    }
+    if st == "WRONG" || st == "CRASH" || st == "TIMEOUT" {
+        return st, detail
+    }
+    if shim == "WRONG" {
+        return "UAF", shim_detail
+    }
+    if shim == "HARNESS" {
+        return "HARNESS", shim_detail
+    }
+    if shim == "TIMEOUT" || shim == "NOTRUN" || shim == "OTHER" {
+        return "INCOMPLETE", "the use-after-free check did not run: ${shim_detail}${besides}"
+    }
+    return st, detail
+}
+
+// ---------------------------------------------------------------------------
+// Results. One per cell and C path; its strings live in `fields`.
+
+struct GridResult {
+    order: int
+    mode: int
+    step: int
+    token: int
+    attempt: int
+    shim_build: int
+    shim_built: int
+    extra_runs: int
+    nsizes: int
+    started: long
+    deadline: long
+    build_ms: long
+    run_ms: long
+    size0: long
+    size1: long
+    size2: long
+    fields: ptr
+}
+
+const F_ID = 0
+const F_KIND = 1
+const F_PLACE = 2
+const F_TRANSFER = 3
+const F_TARGET = 4
+const F_FILE = 5
+const F_MODE = 6
+const F_STATUS = 7
+const F_DETAIL = 8
+const F_LEAK = 9
+const F_RUN = 10
+const F_SHIM = 11
+const F_EXE = 12
+const F_STEM = 13
+const F_SHIM_NOTE = 14
+const F_P_STATUS = 15
+const F_P_DETAIL = 16
+const F_P_NOTE = 17
+const F_ERRORS = 18
+const F_OUTPUT = 19
+const F_COUNT = 20
+
+const S_IDLE = 0
+const S_BUILD = 1
+const S_RUN = 2
+const S_LEAK = 3
+const S_POISON = 4
+const S_DONE = 5
+
+getf(r: *GridResult, i: int) -> string {
+    return string.copy(collections.string_list_get(r.fields, i))
+}
+
+setf(r: *GridResult, i: int, s: string) {
+    collections.string_list_set(r.fields, i, s)
+}
+
+new_result(order: int, m: int) -> *GridResult {
+    r = heap.new(GridResult)
+    r.fields = collections.string_list_new()
+    i = 0
+    while i < F_COUNT {
+        collections.string_list_add(r.fields, "")
+        i = i + 1
+    }
+    r.order = order
+    r.mode = m
+    setf(r, F_MODE, mode_name(m))
+    if order >= 0 {
+        setf(r, F_ID, gen.cell_id(order))
+        setf(r, F_KIND, gen.cell_kind(order))
+        setf(r, F_PLACE, gen.cell_place(order))
+        setf(r, F_TRANSFER, gen.cell_transfer(order))
+        setf(r, F_TARGET, gen.cell_target(order))
+        src = "${conf(C_OUT)}/cells/${gen.cell_file(order)}"
+        rel = slashes(path.rel(conf(C_ROOT), src))
+        if rel == "" {
+            rel = src
+        }
+        setf(r, F_FILE, rel)
+    }
+    return r
+}
+
+// Back to a fresh result (a retry after a harness fault).
+reset_result(r: *GridResult) {
+    r.step = S_IDLE
+    r.token = 0
+    r.shim_build = 0
+    r.shim_built = 0
+    r.extra_runs = 0
+    r.nsizes = 0
+    r.build_ms = 0 as long
+    r.run_ms = 0 as long
+    i = F_STATUS
+    while i < F_COUNT {
+        if i != F_ERRORS {
+            setf(r, i, "")
+        }
+        i = i + 1
+    }
+}
+
+result_at(l: ptr, i: int) -> *GridResult {
+    return list.get_raw(l, i) as *GridResult
+}
+
+at_target(r: *GridResult) -> bool {
+    st = getf(r, F_STATUS)
+    if getf(r, F_TARGET) == "REFUSED" {
+        return st == "NOCOMPILE" && string.starts_with(getf(r, F_DETAIL), "aetherc") == 1
+    }
+    return st == "OK"
+}
+
+// The bytes per 100 calls of a LEAK result, 0 for any other.
+leak_of(r: *GridResult) -> long {
+    if getf(r, F_STATUS) != "LEAK" {
+        return 0 as long
+    }
+    return parse_long(getf(r, F_LEAK))
+}
+
+// ---------------------------------------------------------------------------
+// The state of one cell: build (with the poisoning allocator where the
+// linker has --wrap; without it when that build fails on the allocator),
+// the plain run (two more when it leaks, for the median), the poisoned run.
+
+bin_dir(m: int) -> string {
+    return "${conf(C_OUT)}/${mode_name(m)}/bin"
+}
+
+cell_stem(r: *GridResult) -> string {
+    f = gen.cell_file(r.order)
+    return "${bin_dir(r.mode)}/${string.substring(f, 0, string.length(f) - 3)}"
+}
+
+// Starts a child for the result; false (and a harness fault) when it cannot.
+start_child(r: *GridResult, prog: string, argv: ptr, out_path: string, timeout_s: int, step: int) -> bool {
+    _c = os.chdir(bin_dir(r.mode))
+    tok, err = os.spawn_proc_to(prog, argv, null, out_path)
+    list.free(argv)
+    if err != "" {
+        harness_fault(r, "could not start ${prog}: ${err}")
+        return false
+    }
+    r.token = tok
+    r.step = step
+    r.started = os.now_monotonic_ms()
+    r.deadline = r.started + (timeout_s as long) * 1000
+    setf(r, F_OUTPUT, out_path)
+    return true
+}
+
+start_build(r: *GridResult) {
+    stem = getf(r, F_STEM)
+    argv = list.new()
+    _a = list.add(argv, "build")
+    _b = list.add(argv, "${conf(C_OUT)}/cells/${gen.cell_file(r.order)}")
+    if r.shim_build == 1 {
+        _c = list.add(argv, "--extra")
+        _d = list.add(argv, conf(C_SHIM))
+    }
+    _e = list.add(argv, "-o")
+    _f = list.add(argv, getf(r, F_EXE))
+    if r.shim_build == 1 {
+        set_build_env(shim_cc(r.mode))
+    } else {
+        set_build_env(plain_cc(r.mode))
+    }
+    _ok = start_child(r, conf(C_AE), argv, "${stem}.build.log", BUILD_TIMEOUT, S_BUILD)
+}
+
+start_run(r: *GridResult, poison: bool, log_name: string, step: int) {
+    set_run_env(poison)
+    _ok = start_child(r, getf(r, F_EXE), list.new(), "${getf(r, F_STEM)}${log_name}", RUN_TIMEOUT, step)
+}
+
+start_cell(r: *GridResult) {
+    reset_result(r)
+    if getf(r, F_ID) == conf(C_FAULT) {
+        harness_fault(r, "OWNERSHIP_GRID_FAULT names this cell")
+        return
+    }
+    stem = cell_stem(r)
+    setf(r, F_STEM, stem)
+    exe = "${stem}${conf(C_EXE)}"
+    if !remove_now(exe) {
+        // A binary from an earlier run that Windows still holds: build beside
+        // it, and try the old one again later.
+        if !in_list(g_left, exe) {
+            collections.string_list_add(g_left, exe)
+        }
+        exe = "${stem}.${os.getpid()}${conf(C_EXE)}"
+        _r = remove_now(exe)
+    }
+    setf(r, F_EXE, exe)
+    r.shim_build = g_use_shim
+    start_build(r)
+}
+
+// A fault of the runner itself on this cell: the cell is run once more, and
+// a second fault makes it HARNESS, which fails the check with the fault
+// named.
+harness_fault(r: *GridResult, why: string) {
+    errors = getf(r, F_ERRORS)
+    if errors == "" {
+        setf(r, F_ERRORS, why)
+    } else {
+        setf(r, F_ERRORS, "${errors}; ${why}")
+    }
+    r.attempt = r.attempt + 1
+    if r.attempt < 2 {
+        start_cell(r)
+        return
+    }
+    setf(r, F_STATUS, "HARNESS")
+    setf(r, F_DETAIL, "the runner failed on this cell twice: ${getf(r, F_ERRORS)}")
+    _w = fs.write("${cell_stem(r)}.harness.log", "${getf(r, F_ERRORS)}\n")
+    r.step = S_DONE
+}
+
+finish_cell(r: *GridResult, shim: string, shim_detail: string) {
+    status, detail = combine(getf(r, F_P_STATUS), getf(r, F_P_DETAIL), shim, shim_detail)
+    setf(r, F_STATUS, status)
+    setf(r, F_DETAIL, detail)
+    if status == "LEAK" {
+        setf(r, F_LEAK, "${r.size0}")
+    }
+    if g_keep_bins == 0 {
+        // The program is the reproducer; the binaries come to 2 GB over the grid.
+        remove_later(getf(r, F_EXE))
+    }
+    r.step = S_DONE
+}
+
+fail_cell(r: *GridResult, status: string, detail: string) {
+    setf(r, F_STATUS, status)
+    setf(r, F_DETAIL, detail)
+    r.step = S_DONE
+}
+
+after_plain(r: *GridResult) {
+    if r.shim_built == 1 {
+        start_run(r, true, ".p.run.log", S_POISON)
+        return
+    }
+    if g_use_shim == 1 {
+        finish_cell(r, "NOTRUN", getf(r, F_SHIM_NOTE))
+        return
+    }
+    finish_cell(r, "", "")
+}
+
+median_size(r: *GridResult) -> long {
+    if r.nsizes == 1 {
+        return r.size0
+    }
+    if r.nsizes == 2 {
+        return (r.size0 + r.size1) / 2
+    }
+    a = r.size0
+    b = r.size1
+    c = r.size2
+    if (a <= b && b <= c) || (c <= b && b <= a) {
+        return b
+    }
+    if (b <= a && a <= c) || (c <= a && a <= b) {
+        return a
+    }
+    return c
+}
+
+// A child of the result ended (or was killed at its deadline): read its
+// output and take the next step.
+child_ended(r: *GridResult, rc: int, timed_out: int) {
+    took = os.now_monotonic_ms() - r.started
+    if r.step == S_BUILD {
+        r.build_ms = r.build_ms + took
+    } else {
+        r.run_ms = r.run_ms + took
+    }
+    out_path = getf(r, F_OUTPUT)
+    text, err = fs.read(out_path)
+    if err != "" {
+        if fs.exists(out_path) == 0 {
+            harness_fault(r, "the output ${out_path} is missing")
+            return
+        }
+        text = ""
+    }
+    if r.step == S_BUILD {
+        if timed_out == 1 {
+            fail_cell(r, "TIMEOUT", "the build did not finish in ${BUILD_TIMEOUT} s")
+            return
+        }
+        if rc != 0 || fs.exists(getf(r, F_EXE)) == 0 {
+            stage, line = compile_error(text)
+            if r.shim_build == 1 && regex.matches(re_shim_error, text) == 1 {
+                // The cell may build without the allocator: run it plain, and
+                // say the use-after-free check did not happen.
+                setf(r, F_SHIM_NOTE, "the build with poison_alloc.c failed: ${prefix_chars(line, 200)}")
+                r.shim_build = 0
+                start_build(r)
+                return
+            }
+            fail_cell(r, "NOCOMPILE", "${stage}: ${prefix_chars(line, 300)}")
+            return
+        }
+        r.shim_built = r.shim_build
+        start_run(r, false, ".run.log", S_RUN)
+        return
+    }
+    if r.step == S_RUN {
+        setf(r, F_RUN, describe_exit(rc, timed_out))
+        st, detail, size, note = classify_run(rc, timed_out, text)
+        setf(r, F_P_STATUS, st)
+        setf(r, F_P_DETAIL, detail)
+        setf(r, F_P_NOTE, note)
+        r.size0 = size
+        r.nsizes = 1
+        if st == "LEAK" {
+            // Two more runs: the size kept is the median, steadier than one run.
+            r.extra_runs = 0
+            start_run(r, false, ".leak.log", S_LEAK)
+            return
+        }
+        after_plain(r)
+        return
+    }
+    if r.step == S_LEAK {
+        _r = remove_now(out_path)
+        st, _d, size, _n = classify_run(rc, timed_out, text)
+        if st == "LEAK" {
+            if r.nsizes == 1 {
+                r.size1 = size
+            } else {
+                r.size2 = size
+            }
+            r.nsizes = r.nsizes + 1
+        }
+        r.extra_runs = r.extra_runs + 1
+        if r.extra_runs < 2 {
+            start_run(r, false, ".leak.log", S_LEAK)
+            return
+        }
+        // The median of two is their mean, rounded down.
+        m = median_size(r)
+        r.size0 = m
+        setf(r, F_P_DETAIL, "${m} bytes per 100 calls${getf(r, F_P_NOTE)}")
+        after_plain(r)
+        return
+    }
+    // S_POISON
+    setf(r, F_SHIM, describe_exit(rc, timed_out))
+    kind, detail = classify_shim(rc, timed_out, text)
+    finish_cell(r, kind, detail)
+}
+
+// Runs every result of `todo`, at most `jobs` at once: start, wait for the
+// first child to end or the nearest deadline, kill what passed its
+// deadline, read, go on. Prints a line per cell that is not OK, and every
+// 50 cells, when `show` is set.
+run_all(todo: ptr, jobs: int, show: bool) {
+    n = list.size(todo)
+    slots = list.new()
+    i = 0
+    while i < jobs {
+        _a = list.add(slots, null)
+        i = i + 1
+    }
+    next_i = 0
+    done = 0
+    while true {
+        // Fill the free slots.
+        s = 0
+        while s < jobs {
+            while list.get_raw(slots, s) == null && next_i < n {
+                r = result_at(todo, next_i)
+                next_i = next_i + 1
+                start_cell(r)
+                if r.step == S_DONE {
+                    done = done + 1
+                    if show {
+                        progress(r, done, n)
+                    }
+                } else {
+                    list.set(slots, s, r)
+                }
+            }
+            s = s + 1
+        }
+        busy = 0
+        nearest = 0 as long
+        s = 0
+        while s < jobs {
+            p = list.get_raw(slots, s)
+            if p != null {
+                r = p as *GridResult
+                if busy == 0 || r.deadline < nearest {
+                    nearest = r.deadline
+                }
+                busy = busy + 1
+            }
+            s = s + 1
+        }
+        if busy == 0 {
+            break
+        }
+        now = os.now_monotonic_ms()
+        if nearest > now {
+            secs = ((nearest - now + 999) / 1000) as int
+            if secs < 1 {
+                secs = 1
+            }
+            toks = list.new()
+            s = 0
+            while s < jobs {
+                p = list.get_raw(slots, s)
+                if p != null {
+                    r = p as *GridResult
+                    _t = list.add(toks, mem.long_to_ptr(r.token as long))
+                }
+                s = s + 1
+            }
+            got, status, timed_out, err = os.wait_any_timeout(toks, secs)
+            list.free(toks)
+            if err != "" {
+                say("ownership grid: HARNESS FAILURE: waiting for the cells failed: ${err}")
+                exit(2)
+            }
+            if timed_out == 0 {
+                s = 0
+                while s < jobs {
+                    p = list.get_raw(slots, s)
+                    if p != null {
+                        r = p as *GridResult
+                        if r.token == got {
+                            r.token = 0
+                            child_ended(r, status, 0)
+                            if r.step == S_DONE {
+                                list.set(slots, s, null)
+                                done = done + 1
+                                if show {
+                                    progress(r, done, n)
+                                }
+                            }
+                            // A child the result starts now may get the same token.
+                            s = jobs
+                        }
+                    }
+                    s = s + 1
+                }
+            }
+        }
+        // Kill whatever passed its deadline.
+        now = os.now_monotonic_ms()
+        s = 0
+        while s < jobs {
+            p = list.get_raw(slots, s)
+            if p != null {
+                r = p as *GridResult
+                if r.token != 0 && now >= r.deadline {
+                    _k = os.kill(r.token, 9)
+                    _w, _e = os.wait(r.token)
+                    r.token = 0
+                    child_ended(r, -1, 1)
+                    if r.step == S_DONE {
+                        list.set(slots, s, null)
+                        done = done + 1
+                        if show {
+                            progress(r, done, n)
+                        }
+                    }
+                }
+            }
+            s = s + 1
+        }
+        retry_left()
+    }
+    list.free(slots)
+}
+
+progress(r: *GridResult, done: int, total: int) {
+    st = getf(r, F_STATUS)
+    if st != "OK" || done % 50 == 0 {
+        say("  [${done}/${total}] ${getf(r, F_MODE)} ${getf(r, F_ID)} ${st} ${prefix_chars(getf(r, F_DETAIL), 120)}")
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Baseline: one line per cell, `<cell> <default path> <nogcc path or ->`, a
+// status being OK, LEAK:<bytes per 100 calls>, UAF, ...
+
+var base_ids: ptr = null
+var base_gcc: ptr = null
+var base_nogcc: ptr = null
+
+read_baseline() {
+    base_ids = collections.string_list_new()
+    base_gcc = collections.string_list_new()
+    base_nogcc = collections.string_list_new()
+    text, err = fs.read(conf(C_BASELINE))
+    if err != "" {
+        return
+    }
+    lines = split_lines(text)
+    n = collections.string_list_size(lines)
+    i = 0
+    while i < n {
+        ln = string.trim(collections.string_list_get(lines, i))
+        if ln != "" && string.starts_with(ln, "#") == 0 {
+            parts = string.split(ln, " ")
+            k = string.array_size(parts)
+            collections.string_list_add(base_ids, string.copy(string.array_get(parts, 0)))
+            gcc_tok = "-"
+            nogcc_tok = "-"
+            if k > 1 {
+                gcc_tok = string.copy(string.array_get(parts, 1))
+            }
+            if k > 2 {
+                nogcc_tok = string.copy(string.array_get(parts, 2))
+            }
+            collections.string_list_add(base_gcc, gcc_tok)
+            collections.string_list_add(base_nogcc, nogcc_tok)
+            string.array_free(parts)
+        }
+        i = i + 1
+    }
+    collections.string_list_free(lines)
+}
+
+base_index(id: string) -> int {
+    n = collections.string_list_size(base_ids)
+    i = 0
+    while i < n {
+        if collections.string_list_get(base_ids, i) == id {
+            return i
+        }
+        i = i + 1
+    }
+    return -1
+}
+
+// The baseline token of a cell on a path: "OK", "LEAK:3600", ...; "-" when
+// the baseline has none.
+base_token(id: string, m: int) -> string {
+    i = base_index(id)
+    if i < 0 {
+        return "-"
+    }
+    if m == 1 {
+        return string.copy(collections.string_list_get(base_nogcc, i))
+    }
+    return string.copy(collections.string_list_get(base_gcc, i))
+}
+
+token_status(tok: string) -> string {
+    if string.starts_with(tok, "LEAK:") == 1 {
+        return "LEAK"
+    }
+    return tok
+}
+
+// The leak bytes of a token, -1 when it has none.
+token_leak(tok: string) -> long {
+    if string.starts_with(tok, "LEAK:") == 1 {
+        return parse_long(string.substring(tok, 5, string.length(tok)))
+    }
+    return 0 - (1 as long)
+}
+
+format_status(r: *GridResult) -> string {
+    st = getf(r, F_STATUS)
+    if st == "LEAK" && getf(r, F_LEAK) != "" {
+        return "LEAK:${getf(r, F_LEAK)}"
+    }
+    return st
+}
+
+write_baseline(results: ptr) {
+    b = strbuilder.new(65536)
+    strbuilder.append(b, "# Ownership grid baseline: each cell's status on main (tests/ownership_grid/README.md).\n")
+    strbuilder.append(b, "# <cell> <status on the default C path> <status with -DAETHER_GCC_COMPAT=0, or ->\n")
+    strbuilder.append(b, "# LEAK:<n> is n bytes per 100 calls. `make ownership-grid-check` fails when a cell gets\n")
+    strbuilder.append(b, "# worse than this, or leaks more than twice as much and more than ${LEAK_NOISE_BYTES} bytes more.\n")
+    strbuilder.append(b, "# Measured at ${git_head("%h")} (${compiler_version()}) on ${conf(C_SYSTEM)}.\n")
+    // Every cell the generator makes: this run's status where it ran (an
+    // --only run updates its own cells), the old line's elsewhere.
+    nr = list.size(results)
+    n = gen.cell_count()
+    c = 0
+    while c < n {
+        id = gen.cell_id(c)
+        cols = collections.string_list_new()
+        m = 0
+        while m < 2 {
+            got = ""
+            i = 0
+            while i < nr {
+                r = result_at(results, i)
+                if r.order == c && r.mode == m {
+                    got = format_status(r)
+                }
+                i = i + 1
+            }
+            if got == "" {
+                got = base_token(id, m)
+            }
+            collections.string_list_add(cols, got)
+            m = m + 1
+        }
+        g0 = collections.string_list_get(cols, 0)
+        g1 = collections.string_list_get(cols, 1)
+        if g0 != "-" || g1 != "-" || base_index(id) >= 0 {
+            strbuilder.append(b, "${id} ${g0} ${g1}\n")
+        }
+        collections.string_list_free(cols)
+        c = c + 1
+    }
+    _w = fs.write(conf(C_BASELINE), strbuilder.finish(b))
+}
+
+// "worse", "better", "changed" or "same" for a result against its baseline token.
+grid_verdict(r: *GridResult, tok: string) -> string {
+    bst = token_status(tok)
+    bleak = token_leak(tok)
+    st = getf(r, F_STATUS)
+    if st == "HARNESS" {
+        return "worse"
+    }
+    // A cell whose target is REFUSED and that the checker refuses is at the
+    // design's target, whatever it did before.
+    if getf(r, F_TARGET) == "REFUSED" && at_target(r) {
+        if bst == "NOCOMPILE" {
+            return "same"
+        }
+        return "better"
+    }
+    if st == "UNMEASURED" {
+        // Values and use after free were checked, growth was not.
+        if bst == "OK" || bst == "LEAK" || bst == "UNMEASURED" {
+            return "same"
+        }
+        if tier(bst) > 0 {
+            return "better"
+        }
+        return "same"
+    }
+    if tier(st) > tier(bst) {
+        return "worse"
+    }
+    if tier(st) < tier(bst) {
+        return "better"
+    }
+    if st == "LEAK" && bleak >= 0 && getf(r, F_LEAK) != "" {
+        now = parse_long(getf(r, F_LEAK))
+        if now > 2 * bleak && now - bleak > LEAK_NOISE_BYTES {
+            return "worse"
+        }
+        if bleak > 2 * now && bleak - now > LEAK_NOISE_BYTES {
+            return "better"
+        }
+        return "same"
+    }
+    if st != bst {
+        return "changed"
+    }
+    return "same"
+}
+
+any_status(results: ptr, s: string) -> bool {
+    n = list.size(results)
+    i = 0
+    while i < n {
+        if getf(result_at(results, i), F_STATUS) == s {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+// Compares with the baseline; (exit code, report lines joined by "\n").
+run_check(results: ptr) -> (int, string) {
+    read_baseline()
+    worse = list.new()
+    better = list.new()
+    changed = list.new()
+    fresh = list.new()
+    n = list.size(results)
+    i = 0
+    while i < n {
+        r = result_at(results, i)
+        tok = base_token(getf(r, F_ID), r.mode)
+        if tok == "-" {
+            _a = list.add(fresh, r)
+        } else {
+            v = grid_verdict(r, tok)
+            if v == "worse" {
+                _b = list.add(worse, r)
+            } else if v == "better" {
+                _c = list.add(better, r)
+            } else if v == "changed" {
+                _d = list.add(changed, r)
+            }
+        }
+        i = i + 1
+    }
+    // The baseline tokens, kept before a rerun replaces the result.
+    if list.size(worse) > 0 {
+        // A heap count or a thread can make one run unlucky: run the program
+        // again, one at a time, and count it worse only when it is worse
+        // again. Either way the rerun's result is the one kept.
+        again = list.new()
+        k = 0
+        while k < list.size(worse) {
+            r = result_at(worse, k)
+            if getf(r, F_STATUS) != "HARNESS" {
+                r.attempt = 0
+                setf(r, F_ERRORS, "")
+                _e = list.add(again, r)
+            }
+            k = k + 1
+        }
+        run_all(again, 1, false)
+        list.free(again)
+        confirmed = list.new()
+        k = 0
+        while k < list.size(worse) {
+            r = result_at(worse, k)
+            v = grid_verdict(r, base_token(getf(r, F_ID), r.mode))
+            if v == "worse" {
+                _f = list.add(confirmed, r)
+            } else if v == "better" {
+                _g = list.add(better, r)
+            } else if v == "changed" {
+                _h = list.add(changed, r)
+            }
+            k = k + 1
+        }
+        list.free(worse)
+        worse = confirmed
+    }
+    // Baseline cells the generator no longer makes.
+    missing = collections.string_list_new()
+    nb = collections.string_list_size(base_ids)
+    i = 0
+    while i < nb {
+        id = collections.string_list_get(base_ids, i)
+        found = false
+        c = 0
+        while c < gen.cell_count() && !found {
+            if gen.cell_id(c) == id {
+                found = true
+            }
+            c = c + 1
+        }
+        if !found {
+            collections.string_list_add(missing, id)
+        }
+        i = i + 1
+    }
+    collections.string_list_sort_lex(missing)
+    lines = strbuilder.new(4096)
+    first = true
+    if any_status(results, "UNMEASURED") {
+        strbuilder.append(lines, "The heap count is not exact on this platform (mem.heap_in_use_exact): this check compares values and use after free only, not leaks.\n")
+        first = false
+    }
+    t = 0
+    while t < 3 {
+        rows = worse
+        title = "Worse than the baseline (the check fails)"
+        if t == 1 {
+            rows = better
+            title = "Better than the baseline (update baseline.txt)"
+        } else if t == 2 {
+            rows = changed
+            title = "Changed within a tier"
+        }
+        if !first {
+            strbuilder.append(lines, "\n")
+        }
+        first = false
+        strbuilder.append(lines, "${title}: ${list.size(rows)}\n")
+        k = 0
+        while k < list.size(rows) {
+            r = result_at(rows, k)
+            strbuilder.append(lines, "\n- `${getf(r, F_ID)}` (${getf(r, F_MODE)}): ${base_token(getf(r, F_ID), r.mode)} -> ${format_status(r)} ${getf(r, F_DETAIL)}")
+            k = k + 1
+        }
+        strbuilder.append(lines, "\n")
+        t = t + 1
+    }
+    nm = collections.string_list_size(missing)
+    if nm > 0 {
+        strbuilder.append(lines, "\nIn the baseline but no longer generated (the check fails; a removed cell is removed from baseline.txt on purpose): ${nm}\n")
+        k = 0
+        while k < nm {
+            strbuilder.append(lines, "\n- `${collections.string_list_get(missing, k)}`")
+            k = k + 1
+        }
+        strbuilder.append(lines, "\n")
+    }
+    nf = list.size(fresh)
+    if nf > 0 {
+        ids = ""
+        k = 0
+        while k < nf && k < 20 {
+            if k > 0 {
+                ids = "${ids}, "
+            }
+            ids = "${ids}${getf(result_at(fresh, k), F_ID)}"
+            k = k + 1
+        }
+        strbuilder.append(lines, "\nNot in the baseline: ${nf} (${ids})\n")
+    }
+    nh = 0
+    hb = strbuilder.new(0)
+    i = 0
+    while i < n {
+        r = result_at(results, i)
+        if getf(r, F_STATUS) == "HARNESS" {
+            strbuilder.append(hb, "\n- `${getf(r, F_ID)}` (${getf(r, F_MODE)}): ${getf(r, F_DETAIL)}")
+            nh = nh + 1
+        }
+        i = i + 1
+    }
+    hlist = strbuilder.finish(hb)
+    if nh > 0 {
+        strbuilder.append(lines, "\nHARNESS FAILURE: the runner itself failed on ${nh} cell(s), twice each. This is a fault of the grid's runner or the machine, not a finding about the compiler; the cells' logs end in `.harness.log`:\n")
+        strbuilder.append(lines, hlist)
+        strbuilder.append(lines, "\n")
+    }
+    rc = 0
+    if nh > 0 {
+        rc = 2
+    } else if list.size(worse) > 0 || nm > 0 {
+        rc = 1
+    }
+    // The lines end with an empty one, as the report's section does.
+    text = strbuilder.finish(lines)
+    return rc, text
+}
+
+// ---------------------------------------------------------------------------
+// Report.
+
+// Counts of each status among `rows`, in a list of boxed longs.
+count_statuses(rows: ptr) -> ptr {
+    c = list.new()
+    i = 0
+    while i < status_count() {
+        _a = list.add(c, mem.long_to_ptr(0 as long))
+        i = i + 1
+    }
+    n = list.size(rows)
+    i = 0
+    while i < n {
+        k = status_index(getf(result_at(rows, i), F_STATUS))
+        list.set(c, k, mem.long_to_ptr(mem.ptr_to_long(list.get_raw(c, k)) + 1))
+        i = i + 1
+    }
+    return c
+}
+
+count_of(c: ptr, k: int) -> long {
+    return mem.ptr_to_long(list.get_raw(c, k))
+}
+
+// The statuses a table shows: those present, and OK, LEAK, UAF and WRONG.
+present_statuses(rows: ptr) -> ptr {
+    c = count_statuses(rows)
+    cols = collections.string_list_new()
+    i = 0
+    while i < status_count() {
+        if count_of(c, i) > 0 || always_counted(status_at(i)) {
+            collections.string_list_add(cols, status_at(i))
+        }
+        i = i + 1
+    }
+    list.free(c)
+    return cols
+}
+
+// " | "-joined counts of `cols` among `rows`, "" for a zero.
+count_cells(rows: ptr, cols: ptr) -> string {
+    c = count_statuses(rows)
+    out = ""
+    n = collections.string_list_size(cols)
+    i = 0
+    while i < n {
+        v = count_of(c, status_index(collections.string_list_get(cols, i)))
+        cell = ""
+        if v > 0 {
+            cell = "${v}"
+        }
+        if i == 0 {
+            out = cell
+        } else {
+            out = "${out} | ${cell}"
+        }
+        i = i + 1
+    }
+    list.free(c)
+    return out
+}
+
+join_list(l: ptr, sep: string) -> string {
+    b = strbuilder.new(0)
+    n = collections.string_list_size(l)
+    i = 0
+    while i < n {
+        if i > 0 {
+            strbuilder.append(b, sep)
+        }
+        strbuilder.append(b, collections.string_list_get(l, i))
+        i = i + 1
+    }
+    return strbuilder.finish(b)
+}
+
+dashes(n: int) -> string {
+    out = ""
+    i = 0
+    while i < n {
+        if i == 0 {
+            out = "---"
+        } else {
+            out = "${out}|---"
+        }
+        i = i + 1
+    }
+    return out
+}
+
+leak_total(rows: ptr) -> long {
+    total = 0 as long
+    n = list.size(rows)
+    i = 0
+    while i < n {
+        total = total + leak_of(result_at(rows, i))
+        i = i + 1
+    }
+    return total
+}
+
+not_at_target_count(rows: ptr) -> int {
+    k = 0
+    n = list.size(rows)
+    i = 0
+    while i < n {
+        if !at_target(result_at(rows, i)) {
+            k = k + 1
+        }
+        i = i + 1
+    }
+    return k
+}
+
+// The results whose field `f` is `value` (all of them for f < 0), in order.
+rows_where(results: ptr, f: int, value: string) -> ptr {
+    out = list.new()
+    n = list.size(results)
+    i = 0
+    while i < n {
+        r = result_at(results, i)
+        if f < 0 || getf(r, f) == value {
+            _a = list.add(out, r)
+        }
+        i = i + 1
+    }
+    return out
+}
+
+// Sort orders: 0 (cell, path), 1 (severity, leak descending, cell),
+// 2 (severity, cell, path).
+compare_results(a: *GridResult, b: *GridResult, how: int) -> int {
+    if how != 0 {
+        sa = severity(getf(a, F_STATUS))
+        sb = severity(getf(b, F_STATUS))
+        if sa != sb {
+            return sa - sb
+        }
+        if how == 1 {
+            la = parse_long(getf(a, F_LEAK))
+            lb = parse_long(getf(b, F_LEAK))
+            if la != lb {
+                if la > lb {
+                    return -1
+                }
+                return 1
+            }
+        }
+    }
+    oa = a.order
+    if oa < 0 {
+        oa = 0
+    }
+    ob = b.order
+    if ob < 0 {
+        ob = 0
+    }
+    if oa != ob {
+        return oa - ob
+    }
+    if how == 1 {
+        return 0
+    }
+    return a.mode - b.mode
+}
+
+// A stable insertion sort of a list of results.
+sort_results(l: ptr, how: int) {
+    n = list.size(l)
+    i = 1
+    while i < n {
+        p = list.get_raw(l, i)
+        x = p as *GridResult
+        j = i
+        while j > 0 && compare_results(result_at(l, j - 1), x, how) > 0 {
+            list.set(l, j, list.get_raw(l, j - 1))
+            j = j - 1
+        }
+        list.set(l, j, p)
+        i = i + 1
+    }
+}
+
+cell_mark(rs: ptr) -> string {
+    out = ""
+    n = list.size(rs)
+    i = 0
+    while i < n {
+        r = result_at(rs, i)
+        s = getf(r, F_STATUS)
+        m = abbr(s)
+        if s == "NOCOMPILE" {
+            m = "NC-a"
+            if string.starts_with(getf(r, F_DETAIL), "C:") == 1 {
+                m = "NC-c"
+            }
+        }
+        if getf(r, F_TARGET) == "REFUSED" {
+            m = "${m} (R)"
+        }
+        if i == 0 {
+            out = m
+        } else {
+            out = "${out}/${m}"
+        }
+        i = i + 1
+    }
+    return out
+}
+
+// The std modules, in the order a top-down walk of std/ meets them, and the
+// externs each module.ae declares (the first module to declare a name owns it).
+var mod_names: ptr = null
+var ext_names: ptr = null
+var ext_mods: ptr = null
+
+walk_std(dir: string, rel: string) {
+    if fs.exists("${dir}/module.ae") == 1 {
+        module_id = "std.${string.replace_all(rel, "/", ".")}"
+        collections.string_list_add(mod_names, module_id)
+        text, err = fs.read("${dir}/module.ae")
+        if err == "" {
+            lines = split_lines(text)
+            n = collections.string_list_size(lines)
+            i = 0
+            while i < n {
+                name = re_group(re_std_extern, collections.string_list_get(lines, i), 1)
+                if name != "" && !in_list(ext_names, name) {
+                    collections.string_list_add(ext_names, name)
+                    collections.string_list_add(ext_mods, module_id)
+                }
+                i = i + 1
+            }
+            collections.string_list_free(lines)
+        }
+    }
+    entries, err2 = fs.list_dir(dir)
+    if err2 != "" || entries == null {
+        return
+    }
+    k = fs.dir_list_count(entries)
+    subs = collections.string_list_new()
+    i = 0
+    while i < k {
+        if fs.dir_list_kind(entries, i) == 2 {
+            collections.string_list_add(subs, string.copy(fs.dir_list_get(entries, i)))
+        }
+        i = i + 1
+    }
+    fs.dir_list_free(entries)
+    n = collections.string_list_size(subs)
+    i = 0
+    while i < n {
+        sub = collections.string_list_get(subs, i)
+        if sub != "." && sub != ".." {
+            if rel == "" {
+                walk_std("${dir}/${sub}", sub)
+            } else {
+                walk_std("${dir}/${sub}", "${rel}/${sub}")
+            }
+        }
+        i = i + 1
+    }
+    collections.string_list_free(subs)
+}
+
+in_list(l: ptr, s: string) -> bool {
+    n = collections.string_list_size(l)
+    i = 0
+    while i < n {
+        if collections.string_list_get(l, i) == s {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+str_index(l: ptr, s: string) -> int {
+    n = collections.string_list_size(l)
+    i = 0
+    while i < n {
+        if collections.string_list_get(l, i) == s {
+            return i
+        }
+        i = i + 1
+    }
+    return -1
+}
+
+// "Imported by a cell, or reached through an extern a cell declares": the
+// module list with its cell counts, and the gaps.
+modules_text(results: ptr) -> (string, string) {
+    mod_names = collections.string_list_new()
+    ext_names = collections.string_list_new()
+    ext_mods = collections.string_list_new()
+    walk_std("${conf(C_ROOT)}/std", "")
+    hit_mods = collections.string_list_new()
+    hit_counts = list.new()
+    files = collections.string_list_new()
+    n = list.size(results)
+    i = 0
+    while i < n {
+        f = getf(result_at(results, i), F_FILE)
+        if !in_list(files, f) {
+            collections.string_list_add(files, f)
+        }
+        i = i + 1
+    }
+    nf = collections.string_list_size(files)
+    i = 0
+    while i < nf {
+        text, err = fs.read("${conf(C_ROOT)}/${collections.string_list_get(files, i)}")
+        if err == "" {
+            seen = collections.string_list_new()
+            lines = split_lines(text)
+            k = collections.string_list_size(lines)
+            j = 0
+            while j < k {
+                ln = collections.string_list_get(lines, j)
+                imp = re_group(re_cell_import, ln, 1)
+                if imp != "" && !in_list(seen, imp) {
+                    collections.string_list_add(seen, imp)
+                }
+                ext = re_group(re_cell_extern, ln, 1)
+                if ext != "" && ext != "exit" {
+                    at = str_index(ext_names, ext)
+                    if at >= 0 {
+                        module_id = collections.string_list_get(ext_mods, at)
+                        if !in_list(seen, module_id) {
+                            collections.string_list_add(seen, module_id)
+                        }
+                    }
+                }
+                j = j + 1
+            }
+            collections.string_list_free(lines)
+            ns = collections.string_list_size(seen)
+            j = 0
+            while j < ns {
+                module_id = collections.string_list_get(seen, j)
+                at = str_index(hit_mods, module_id)
+                if at < 0 {
+                    collections.string_list_add(hit_mods, module_id)
+                    _a = list.add(hit_counts, mem.long_to_ptr(1 as long))
+                } else {
+                    list.set(hit_counts, at, mem.long_to_ptr(mem.ptr_to_long(list.get_raw(hit_counts, at)) + 1))
+                }
+                j = j + 1
+            }
+            collections.string_list_free(seen)
+        }
+        i = i + 1
+    }
+    // Used: by count descending, then by name.
+    order = collections.string_list_new()
+    nh = collections.string_list_size(hit_mods)
+    i = 0
+    while i < nh {
+        collections.string_list_add(order, collections.string_list_get(hit_mods, i))
+        i = i + 1
+    }
+    collections.string_list_sort_lex(order)
+    used = collections.string_list_new()
+    counts = list.new()
+    i = 0
+    while i < nh {
+        module_id = collections.string_list_get(order, i)
+        cnt = mem.ptr_to_long(list.get_raw(hit_counts, str_index(hit_mods, module_id)))
+        // Insert before the first entry with a smaller count.
+        pos = collections.string_list_size(used)
+        j = 0
+        while j < collections.string_list_size(used) && pos == collections.string_list_size(used) {
+            if mem.ptr_to_long(list.get_raw(counts, j)) < cnt {
+                pos = j
+            }
+            j = j + 1
+        }
+        collections.string_list_add(used, module_id)
+        _a = list.add(counts, mem.long_to_ptr(cnt))
+        q = collections.string_list_size(used) - 1
+        while q > pos {
+            collections.string_list_set(used, q, collections.string_list_get(used, q - 1))
+            list.set(counts, q, list.get_raw(counts, q - 1))
+            q = q - 1
+        }
+        collections.string_list_set(used, pos, module_id)
+        list.set(counts, pos, mem.long_to_ptr(cnt))
+        i = i + 1
+    }
+    ub = strbuilder.new(0)
+    nu = collections.string_list_size(used)
+    i = 0
+    while i < nu {
+        if i > 0 {
+            strbuilder.append(ub, ", ")
+        }
+        strbuilder.append(ub, "${collections.string_list_get(used, i)} (${mem.ptr_to_long(list.get_raw(counts, i))})")
+        i = i + 1
+    }
+    unused = collections.string_list_new()
+    nmods = collections.string_list_size(mod_names)
+    i = 0
+    while i < nmods {
+        module_id = collections.string_list_get(mod_names, i)
+        if !in_list(hit_mods, module_id) {
+            collections.string_list_add(unused, module_id)
+        }
+        i = i + 1
+    }
+    collections.string_list_sort_lex(unused)
+    gaps = "none"
+    if collections.string_list_size(unused) > 0 {
+        gaps = join_list(unused, ", ")
+    }
+    return strbuilder.finish(ub), gaps
+}
+
+csv_field(s: string) -> string {
+    if string.contains(s, ",") == 1 || string.contains(s, "\"") == 1 || string.contains(s, "\n") == 1 ||
+    string.contains(s, "\r") == 1 {
+        q = "\""
+        doubled = string.replace_all(s, q, "${q}${q}")
+        return "${q}${doubled}${q}"
+    }
+    return string.copy(s)
+}
+
+write_report(results_in: ptr, modes: ptr, wall_ms: long, jobs: int, check_text: string, has_check: bool, left: int) {
+    results = rows_where(results_in, -1, "")
+    sort_results(results, 0)
+    // The results of each cell, by id: the ids in order, and a list per id.
+    ids = collections.string_list_new()
+    groups = list.new()
+    n = list.size(results)
+    i = 0
+    last = ""
+    while i < n {
+        r = result_at(results, i)
+        id = getf(r, F_ID)
+        at = -1
+        if id == last {
+            at = collections.string_list_size(ids) - 1
+        } else {
+            at = str_index(ids, id)
+        }
+        if at < 0 {
+            collections.string_list_add(ids, id)
+            g = list.new()
+            _a = list.add(g, r)
+            _b = list.add(groups, g)
+        } else {
+            _c = list.add(list.get_raw(groups, at), r)
+        }
+        last = id
+        i = i + 1
+    }
+    ncells = collections.string_list_size(ids)
+    nmodes = collections.string_list_size(modes)
+    b = strbuilder.new(262144)
+    strbuilder.append(b, "# Ownership grid report\n\n")
+    date = string.substring(os.now_utc_iso8601(), 0, 10)
+    strbuilder.append(b, "Generated by `tests/ownership_grid/run.ae` on ${date}, ${compiler_version()}, at `${git_head("%h %s")}` (${conf(C_SYSTEM)} ${os.arch()}).\n\n")
+    plural = ""
+    if nmodes > 1 {
+        plural = "s"
+    }
+    wall_s = wall_ms
+    if wall_s < 1000 {
+        wall_s = 1000 as long
+    }
+    rate = ratio_text((ncells as long) * (nmodes as long) * 60000, wall_s)
+    strbuilder.append(b, "${ncells} cells, C path${plural}: ${join_list(modes, ", ")}. ${gen.skip_count()} combinations skipped (listed at the end), and ${gen.not_crossed()} combinations of a producer kind with a place or transfer outside its axis not generated. Wall time ${seconds_text(wall_ms, 0)} s with ${jobs} jobs, ${rate} cells per minute (all C paths).\n")
+    if conf(C_SYSTEM) == "Darwin" {
+        strbuilder.append(b, "\nThe poisoning allocator was not built: this linker has no `--wrap` (macOS), so no cell is UAF here.\n")
+    }
+    if any_status(results, "UNMEASURED") {
+        strbuilder.append(b, "\n**The heap count is not exact on this platform: growth was not measured, so this run checks values and use after free only.**\n")
+    }
+    if left > 0 {
+        strbuilder.append(b, "\n${left} binaries could not be removed (Windows still held them); they are left in `<path>/bin/`.\n")
+    }
+    strbuilder.append(b, "\nStatuses: OK; UNM (UNMEASURED: growth not measured here); LEAK (mem.steady_growth is not 0, sized by the median of three runs); INC (INCOMPLETE: the use-after-free check did not run); NC-a / NC-c (NOCOMPILE: aetherc refused it / the C did not compile); TIME (TIMEOUT); CRASH; WRONG; UAF; HARNESS (the runner failed). `(R)` marks a cell whose target is REFUSED. Where two C paths ran, a cell shows `<default>/<-DAETHER_GCC_COMPAT=0>`.\n")
+    if has_check {
+        strbuilder.append(b, "\n## Check against baseline.txt\n\n")
+        // The check's lines end with an empty one; one more line break
+        // closes the section, as the report's other sections end.
+        strbuilder.append(b, check_text)
+        strbuilder.append(b, "\n")
+    }
+    strbuilder.append(b, "\n## Counts\n\n")
+    m = 0
+    while m < nmodes {
+        mn = collections.string_list_get(modes, m)
+        rows = rows_where(results, F_MODE, mn)
+        c = count_statuses(rows)
+        parts = collections.string_list_new()
+        k = 0
+        while k < status_count() {
+            if count_of(c, k) > 0 || always_counted(status_at(k)) {
+                collections.string_list_add(parts, "${status_at(k)} ${count_of(c, k)}")
+            }
+            k = k + 1
+        }
+        list.free(c)
+        strbuilder.append(b, "**${mn}** (${list.size(rows)} cells): ${join_list(parts, ", ")}\n\n")
+        strbuilder.append(b, "**Total LEAK on the ${mn} path: ${leak_total(rows)} bytes per 100 calls**, summed over every LEAK cell, each the median of three runs (the number to drive to zero).\n\n")
+        n_ok = list.size(rows_where(rows, F_TARGET, "OK"))
+        n_ref = list.size(rows_where(rows, F_TARGET, "REFUSED"))
+        strbuilder.append(b, "**Cells not at their target on the ${mn} path: ${not_at_target_count(rows)} of ${list.size(rows)}** (the target is OK for ${n_ok} cells and REFUSED for ${n_ref}).\n\n")
+        m = m + 1
+    }
+    m0 = collections.string_list_get(modes, 0)
+    rows0 = rows_where(results, F_MODE, m0)
+    cols = present_statuses(rows0)
+    ncols = collections.string_list_size(cols)
+    t = 0
+    while t < 2 {
+        title = "kind"
+        key = F_KIND
+        if t == 1 {
+            title = "place"
+            key = F_PLACE
+        }
+        strbuilder.append(b, "By ${title} (${m0} path):\n\n")
+        strbuilder.append(b, "| ${title} | cells | ${join_list(cols, " | ")} | not at target |\n")
+        strbuilder.append(b, "|---|---|${dashes(ncols)}|---|\n")
+        // The canonical order, then any other (sorted).
+        canon = collections.string_list_new()
+        if t == 0 {
+            k = 0
+            while k < gen.kind_count() {
+                collections.string_list_add(canon, gen.kind_at(k))
+                k = k + 1
+            }
+            collections.string_list_add(canon, "KE")
+        } else {
+            k = 0
+            while k < gen.place_count() {
+                collections.string_list_add(canon, gen.place_at(k))
+                k = k + 1
+            }
+        }
+        present = collections.string_list_new()
+        k = 0
+        while k < list.size(rows0) {
+            v = getf(result_at(rows0, k), key)
+            if !in_list(present, v) {
+                collections.string_list_add(present, v)
+            }
+            k = k + 1
+        }
+        keys = collections.string_list_new()
+        k = 0
+        while k < collections.string_list_size(canon) {
+            v = collections.string_list_get(canon, k)
+            if in_list(present, v) {
+                collections.string_list_add(keys, v)
+            }
+            k = k + 1
+        }
+        others = collections.string_list_new()
+        k = 0
+        while k < collections.string_list_size(present) {
+            v = collections.string_list_get(present, k)
+            if !in_list(canon, v) {
+                collections.string_list_add(others, v)
+            }
+            k = k + 1
+        }
+        collections.string_list_sort_lex(others)
+        k = 0
+        while k < collections.string_list_size(others) {
+            collections.string_list_add(keys, collections.string_list_get(others, k))
+            k = k + 1
+        }
+        k = 0
+        while k < collections.string_list_size(keys) {
+            v = collections.string_list_get(keys, k)
+            sub = rows_where(rows0, key, v)
+            strbuilder.append(b, "| ${v} | ${list.size(sub)} | ${count_cells(sub, cols)} | ${not_at_target_count(sub)} |\n")
+            list.free(sub)
+            k = k + 1
+        }
+        strbuilder.append(b, "\n")
+        t = t + 1
+    }
+    // Distance from target.
+    strbuilder.append(b, "## Distance from the target (${m0} path)\n\n")
+    strbuilder.append(b, "The target is the status the approved design wants: OK, or REFUSED where a function frees a value it borrows (a parameter), which the checker will refuse in stage 4. Cells by status today and target:\n\n")
+    strbuilder.append(b, "| target | ${join_list(cols, " | ")} |\n")
+    strbuilder.append(b, "|---|${dashes(ncols)}|\n")
+    t = 0
+    while t < 2 {
+        tgt = "OK"
+        if t == 1 {
+            tgt = "REFUSED"
+        }
+        sub = rows_where(rows0, F_TARGET, tgt)
+        strbuilder.append(b, "| ${tgt} (${list.size(sub)}) | ${count_cells(sub, cols)} |\n")
+        t = t + 1
+    }
+    strbuilder.append(b, "\n")
+    // Worst cells.
+    strbuilder.append(b, "## Worst cells (${m0} path)\n\n")
+    bad = list.new()
+    k = 0
+    while k < list.size(rows0) {
+        r = result_at(rows0, k)
+        if getf(r, F_STATUS) != "OK" {
+            _a = list.add(bad, r)
+        }
+        k = k + 1
+    }
+    sort_results(bad, 1)
+    k = 0
+    while k < list.size(bad) && k < 10 {
+        r = result_at(bad, k)
+        d = getf(r, F_DETAIL)
+        if d == "" {
+            d = "-"
+        }
+        strbuilder.append(b, "- `${getf(r, F_ID)}` ${getf(r, F_STATUS)}: ${d} (`${getf(r, F_FILE)}`)\n")
+        k = k + 1
+    }
+    strbuilder.append(b, "\n")
+    // Producers.
+    strbuilder.append(b, "## Producers (the R1 inventory's classes)\n\n")
+    pp = string.replace_all(gen.producer_places(), " ", ", ")
+    pt = string.replace_all(gen.producer_transfers(), " ", ", ")
+    strbuilder.append(b, "Each producer kind takes the string one real std C function makes through the places ${pp} and the transfers ${pt}.\n\n")
+    strbuilder.append(b, "| kind | class | C function | module | cells | ${join_list(cols, " | ")} | LEAK bytes |\n")
+    strbuilder.append(b, "|---|---|---|---|---|${dashes(ncols)}|---|\n")
+    k = 0
+    while k < gen.producer_count() {
+        kid = gen.producer_at(k)
+        sub = rows_where(rows0, F_KIND, kid)
+        strbuilder.append(b, "| ${kid} | ${gen.producer_class(kid)} | `${gen.producer_function(kid)}` | ${gen.producer_module(kid)} | ${list.size(sub)} | ${count_cells(sub, cols)} | ${leak_total(sub)} |\n")
+        list.free(sub)
+        k = k + 1
+    }
+    strbuilder.append(b, "\n")
+    // Modules.
+    used, gaps = modules_text(results)
+    strbuilder.append(b, "## Std modules the grid exercises\n\n")
+    strbuilder.append(b, "Imported by a cell, or reached through an extern a cell declares (cells per module): ${used}.\n\n")
+    strbuilder.append(b, "Std modules no cell reaches (the gaps): ${gaps}.\n\n")
+    // The shapes found by hand before the grid existed.
+    strbuilder.append(b, "## Cells the comments on PR #2883 found by hand\n\n")
+    strbuilder.append(b, "| cell | status | the comment's finding |\n")
+    strbuilder.append(b, "|---|---|---|\n")
+    k = 0
+    while k < gen.found_count() {
+        fid = gen.found_id(k)
+        at = str_index(ids, fid)
+        if at >= 0 {
+            rs = list.get_raw(groups, at)
+            got = ""
+            q = 0
+            while q < list.size(rs) {
+                r = result_at(rs, q)
+                one = string.trim("${getf(r, F_STATUS)} ${getf(r, F_DETAIL)}")
+                if q == 0 {
+                    got = one
+                } else {
+                    got = "${got} / ${one}"
+                }
+                q = q + 1
+            }
+            strbuilder.append(b, "| ${fid} | ${escape_pipes(got)} | ${gen.found_text(k)} |\n")
+        }
+        k = k + 1
+    }
+    strbuilder.append(b, "\n")
+    // Matrices.
+    strbuilder.append(b, "## Matrices: places x transfers, one per kind\n\n")
+    // Which generated cells have a result (by position in gen's order).
+    has_res = list.new()
+    k = 0
+    while k < gen.cell_count() {
+        _h = list.add(has_res, mem.long_to_ptr(0 as long))
+        k = k + 1
+    }
+    k = 0
+    while k < n {
+        r = result_at(results, k)
+        if r.order >= 0 {
+            list.set(has_res, r.order, mem.long_to_ptr(1 as long))
+        }
+        k = k + 1
+    }
+    kinds = collections.string_list_new()
+    k = 0
+    while k < gen.cell_count() {
+        kid = gen.cell_kind(k)
+        if mem.ptr_to_long(list.get_raw(has_res, k)) == 1 && !in_list(kinds, kid) {
+            collections.string_list_add(kinds, kid)
+        }
+        k = k + 1
+    }
+    nk = collections.string_list_size(kinds)
+    q = 0
+    while q < nk {
+        kid = collections.string_list_get(kinds, q)
+        // The transfers and places this kind's cells have, in column order.
+        tc = collections.string_list_new()
+        pls = collections.string_list_new()
+        has_t = collections.string_list_new()
+        has_p = collections.string_list_new()
+        k = 0
+        while k < gen.cell_count() {
+            if mem.ptr_to_long(list.get_raw(has_res, k)) == 1 && gen.cell_kind(k) == kid {
+                collections.string_list_add(has_t, gen.cell_transfer(k))
+                collections.string_list_add(has_p, gen.cell_place(k))
+            }
+            k = k + 1
+        }
+        k = 0
+        while k < gen.column_count() {
+            if in_list(has_t, gen.column_at(k)) {
+                collections.string_list_add(tc, gen.column_at(k))
+            }
+            k = k + 1
+        }
+        k = 0
+        while k < gen.place_count() {
+            if in_list(has_p, gen.place_at(k)) {
+                collections.string_list_add(pls, gen.place_at(k))
+            }
+            k = k + 1
+        }
+        strbuilder.append(b, "### ${kid} ${gen.kind_title(kid)}\n\n")
+        strbuilder.append(b, "| place | ${join_list(tc, " | ")} |\n")
+        strbuilder.append(b, "|---|${dashes(collections.string_list_size(tc))}|\n")
+        k = 0
+        while k < collections.string_list_size(pls) {
+            p = collections.string_list_get(pls, k)
+            row = ""
+            j = 0
+            while j < collections.string_list_size(tc) {
+                cid = "${kid}-${p}-${collections.string_list_get(tc, j)}"
+                at = str_index(ids, cid)
+                mark = ""
+                if at >= 0 {
+                    mark = cell_mark(list.get_raw(groups, at))
+                }
+                if j == 0 {
+                    row = mark
+                } else {
+                    row = "${row} | ${mark}"
+                }
+                j = j + 1
+            }
+            strbuilder.append(b, "| ${p} ${gen.place_title(p)} | ${row} |\n")
+            k = k + 1
+        }
+        strbuilder.append(b, "\n")
+        collections.string_list_free(tc)
+        collections.string_list_free(pls)
+        collections.string_list_free(has_t)
+        collections.string_list_free(has_p)
+        q = q + 1
+    }
+    tl = collections.string_list_new()
+    k = 0
+    while k < gen.column_count() {
+        collections.string_list_add(tl, "${gen.column_at(k)} ${gen.transfer_title(gen.column_at(k))}")
+        k = k + 1
+    }
+    strbuilder.append(b, "Transfers: ${join_list(tl, "; ")}.\n\n")
+    // Every cell not at target.
+    strbuilder.append(b, "## Every cell that is not at its target\n\n")
+    strbuilder.append(b, "| cell | path | status | target | detail | program |\n")
+    strbuilder.append(b, "|---|---|---|---|---|---|\n")
+    off = list.new()
+    k = 0
+    while k < list.size(results) {
+        r = result_at(results, k)
+        if !at_target(r) {
+            _a = list.add(off, r)
+        }
+        k = k + 1
+    }
+    sort_results(off, 2)
+    k = 0
+    while k < list.size(off) {
+        r = result_at(off, k)
+        d = getf(r, F_DETAIL)
+        if d == "" {
+            d = "-"
+        }
+        strbuilder.append(b, "| ${getf(r, F_ID)} | ${getf(r, F_MODE)} | ${getf(r, F_STATUS)} | ${getf(r, F_TARGET)} | ${escape_pipes(d)} | `${getf(r, F_FILE)}` |\n")
+        k = k + 1
+    }
+    strbuilder.append(b, "\n")
+    // Skips, grouped by reason, the largest group first.
+    strbuilder.append(b, "## Skipped combinations\n\n")
+    reasons = collections.string_list_new()
+    members = list.new()
+    k = 0
+    while k < gen.skip_count() {
+        why = gen.skip_reason(k)
+        at = str_index(reasons, why)
+        if at < 0 {
+            collections.string_list_add(reasons, why)
+            g = collections.string_list_new()
+            collections.string_list_add(g, gen.skip_id(k))
+            _a = list.add(members, g)
+        } else {
+            collections.string_list_add(list.get_raw(members, at), gen.skip_id(k))
+        }
+        k = k + 1
+    }
+    nr = collections.string_list_size(reasons)
+    printed = collections.string_list_new()
+    k = 0
+    while k < nr {
+        // The largest group not yet printed; the first met on a tie.
+        best = -1
+        bestn = -1
+        j = 0
+        while j < nr {
+            if !in_list(printed, collections.string_list_get(reasons, j)) {
+                cnt = collections.string_list_size(list.get_raw(members, j))
+                if cnt > bestn {
+                    best = j
+                    bestn = cnt
+                }
+            }
+            j = j + 1
+        }
+        why = collections.string_list_get(reasons, best)
+        collections.string_list_add(printed, why)
+        g = list.get_raw(members, best)
+        shown = ""
+        j = 0
+        while j < bestn && j < 12 {
+            if j == 0 {
+                shown = collections.string_list_get(g, j)
+            } else {
+                shown = "${shown}, ${collections.string_list_get(g, j)}"
+            }
+            j = j + 1
+        }
+        if bestn > 12 {
+            shown = "${shown}, ..."
+        }
+        strbuilder.append(b, "- ${why} (${bestn}): ${shown}\n")
+        k = k + 1
+    }
+    _w = fs.write("${conf(C_OUT)}/report.md", strbuilder.finish(b))
+    // The CSV, a row per cell and path in the report's order, quoted where
+    // a field needs it, lines ending in CRLF (RFC 4180).
+    cb = strbuilder.new(262144)
+    strbuilder.append(cb, "cell,kind,place,transfer,path,status,target,at_target,detail,leak_bytes_per_100_calls,run,shim_run,build_s,run_s,program\r\n")
+    k = 0
+    while k < list.size(results) {
+        r = result_at(results, k)
+        yes = "no"
+        if at_target(r) {
+            yes = "yes"
+        }
+        strbuilder.append(cb, "${csv_field(getf(r, F_ID))},${csv_field(getf(r, F_KIND))},${csv_field(getf(r, F_PLACE))},${csv_field(getf(r, F_TRANSFER))},${csv_field(getf(r, F_MODE))},")
+        strbuilder.append(cb, "${csv_field(getf(r, F_STATUS))},${csv_field(getf(r, F_TARGET))},${yes},${csv_field(getf(r, F_DETAIL))},${csv_field(getf(r, F_LEAK))},")
+        strbuilder.append(cb, "${csv_field(getf(r, F_RUN))},${csv_field(getf(r, F_SHIM))},${seconds_text(r.build_ms, 1)},${seconds_text(r.run_ms, 2)},${csv_field(getf(r, F_FILE))}\r\n")
+        k = k + 1
+    }
+    _c = fs.write("${conf(C_OUT)}/report.csv", strbuilder.finish(cb))
+}
+
+// ---------------------------------------------------------------------------
+// results.json: what --report-only rewrites the report from.
+
+write_results_json(results: ptr, modes: ptr, wall_ms: long, jobs: int, check_text: string, has_check: bool) {
+    root = json.obj()
+    _a = json.set(root, "wall", json.num((wall_ms as float) / 1000.0))
+    _b = json.set(root, "jobs", json.num(jobs as float))
+    ma = json.arr()
+    i = 0
+    while i < collections.string_list_size(modes) {
+        _c = json.push(ma, json.str(collections.string_list_get(modes, i)))
+        i = i + 1
+    }
+    _d = json.set(root, "modes", ma)
+    ra = json.arr()
+    n = list.size(results)
+    i = 0
+    while i < n {
+        r = result_at(results, i)
+        o = json.obj()
+        _e = json.set(o, "id", json.str(getf(r, F_ID)))
+        _f = json.set(o, "kind", json.str(getf(r, F_KIND)))
+        _g = json.set(o, "place", json.str(getf(r, F_PLACE)))
+        _h = json.set(o, "transfer", json.str(getf(r, F_TRANSFER)))
+        _j = json.set(o, "target", json.str(getf(r, F_TARGET)))
+        _k = json.set(o, "file", json.str(getf(r, F_FILE)))
+        _l = json.set(o, "mode", json.str(getf(r, F_MODE)))
+        _m = json.set(o, "status", json.str(getf(r, F_STATUS)))
+        _n = json.set(o, "detail", json.str(getf(r, F_DETAIL)))
+        _o = json.set(o, "leak", json.str(getf(r, F_LEAK)))
+        _p = json.set(o, "run", json.str(getf(r, F_RUN)))
+        _q = json.set(o, "shim", json.str(getf(r, F_SHIM)))
+        _r = json.set(o, "build_s", json.num((r.build_ms as float) / 1000.0))
+        _s = json.set(o, "run_s", json.num((r.run_ms as float) / 1000.0))
+        _t = json.push(ra, o)
+        i = i + 1
+    }
+    _u = json.set(root, "results", ra)
+    if has_check {
+        // The check's lines, the empty last one too.
+        ca = json.arr()
+        n = string.length(check_text)
+        start = 0
+        while start <= n {
+            cut = string.index_of_from(check_text, "\n", start)
+            stop = cut
+            if cut < 0 {
+                stop = n
+            }
+            _v = json.push(ca, json.str(string.substring(check_text, start, stop)))
+            start = stop + 1
+        }
+        _x = json.set(root, "check", ca)
+    } else {
+        _y = json.set(root, "check", json.null_value())
+    }
+    text, err = json.encode(root)
+    if err == "" {
+        _z = fs.write("${conf(C_OUT)}/results.json", text)
+    }
+    json.free(root)
+}
+
+jfield_text(o: ptr, key: string) -> string {
+    v, err = json.object_get(o, key)
+    if err != "" || v == null || json.type(v) != 3 {
+        return ""
+    }
+    s, _e = json.get_string(v)
+    return string.copy(s)
+}
+
+jfield_number(o: ptr, key: string) -> float {
+    v, err = json.object_get(o, key)
+    if err != "" || v == null || json.type(v) != 2 {
+        return 0.0
+    }
+    return json.get_number(v)
+}
+
+// Reads <out>/results.json (written by this runner or by the Python one it
+// replaced): the results, the modes, the wall time, the jobs and the check.
+read_results_json(results: ptr, modes: ptr) -> (long, int, string, bool) {
+    text, err = fs.read("${conf(C_OUT)}/results.json")
+    if err != "" {
+        say("ownership grid: cannot read ${conf(C_OUT)}/results.json: ${err}")
+        exit(2)
+    }
+    root, perr = json.parse(text)
+    if perr != "" {
+        say("ownership grid: results.json does not parse: ${perr}")
+        exit(2)
+    }
+    ma, _a = json.object_get(root, "modes")
+    i = 0
+    while i < json.array_size(ma) {
+        v, _b = json.array_get(ma, i)
+        s, _c = json.get_string(v)
+        collections.string_list_add(modes, string.copy(s))
+        i = i + 1
+    }
+    ra, _d = json.object_get(root, "results")
+    n = json.array_size(ra)
+    i = 0
+    while i < n {
+        o, _e = json.array_get(ra, i)
+        id = jfield_text(o, "id")
+        m = 0
+        if jfield_text(o, "mode") == "nogcc" {
+            m = 1
+        }
+        order = -1
+        c = 0
+        while c < gen.cell_count() && order < 0 {
+            if gen.cell_id(c) == id {
+                order = c
+            }
+            c = c + 1
+        }
+        r = new_result(order, m)
+        setf(r, F_ID, id)
+        setf(r, F_KIND, jfield_text(o, "kind"))
+        setf(r, F_PLACE, jfield_text(o, "place"))
+        setf(r, F_TRANSFER, jfield_text(o, "transfer"))
+        setf(r, F_TARGET, jfield_text(o, "target"))
+        setf(r, F_FILE, jfield_text(o, "file"))
+        setf(r, F_STATUS, jfield_text(o, "status"))
+        setf(r, F_DETAIL, jfield_text(o, "detail"))
+        setf(r, F_LEAK, jfield_text(o, "leak"))
+        setf(r, F_RUN, jfield_text(o, "run"))
+        setf(r, F_SHIM, jfield_text(o, "shim"))
+        r.build_ms = (jfield_number(o, "build_s") * 1000.0) as long
+        r.run_ms = (jfield_number(o, "run_s") * 1000.0) as long
+        _f = list.add(results, r)
+        i = i + 1
+    }
+    wall = (jfield_number(root, "wall") * 1000.0) as long
+    jobs = jfield_number(root, "jobs") as int
+    has_check = false
+    check = ""
+    ca, _g = json.object_get(root, "check")
+    if ca != null && json.type(ca) == 4 && json.array_size(ca) > 0 {
+        has_check = true
+        cb = strbuilder.new(0)
+        k = 0
+        while k < json.array_size(ca) {
+            if k > 0 {
+                strbuilder.append(cb, "\n")
+            }
+            v, _h = json.array_get(ca, k)
+            s, _j = json.get_string(v)
+            strbuilder.append(cb, s)
+            k = k + 1
+        }
+        check = strbuilder.finish(cb)
+    }
+    return wall, jobs, check, has_check
+}
+
+// ---------------------------------------------------------------------------
+// Selection.
+
+// The cells of shard k of n (k may be k,k,...): the ones whose 0-based
+// position in the generator's order, modulo n, is k-1, as
+// tests/scripts/sweep_shard.sh splits the test sweep. The order interleaves
+// kinds and places, so every shard gets a like mix of slow and fast cells.
+shard_filter(cells: ptr, spec: string) -> ptr {
+    ks = re_group(re_shard, spec, 1)
+    ns = re_group(re_shard, spec, 2)
+    if ks == "" {
+        say("ownership grid: --shard must be k/n or k,k.../n, got '${spec}'")
+        exit(2)
+    }
+    n = parse_long(ns)
+    parts = string.split(ks, ",")
+    np = string.array_size(parts)
+    wanted = list.new()
+    i = 0
+    while i < np {
+        k = parse_long(string.array_get(parts, i))
+        if n < 1 || k < 1 || k > n {
+            say("ownership grid: --shard must have 1 <= k <= n, got '${spec}'")
+            exit(2)
+        }
+        _a = list.add(wanted, mem.long_to_ptr(k))
+        i = i + 1
+    }
+    string.array_free(parts)
+    out = list.new()
+    nc = list.size(cells)
+    i = 0
+    while i < nc {
+        pos = ((i as long) % n) + 1
+        hit = false
+        j = 0
+        while j < list.size(wanted) {
+            if mem.ptr_to_long(list.get_raw(wanted, j)) == pos {
+                hit = true
+            }
+            j = j + 1
+        }
+        if hit {
+            _b = list.add(out, list.get_raw(cells, i))
+        }
+        i = i + 1
+    }
+    return out
+}
+
+// The cells whose id matches one of the comma-separated glob patterns.
+only_filter(cells: ptr, pats: string) -> ptr {
+    parts = string.split(pats, ",")
+    np = string.array_size(parts)
+    out = list.new()
+    nc = list.size(cells)
+    i = 0
+    while i < nc {
+        c = mem.ptr_to_long(list.get_raw(cells, i)) as int
+        id = gen.cell_id(c)
+        hit = false
+        j = 0
+        while j < np {
+            if string.glob_match(string.array_get(parts, j), id) == 1 {
+                hit = true
+            }
+            j = j + 1
+        }
+        if hit {
+            _a = list.add(out, list.get_raw(cells, i))
+        }
+        i = i + 1
+    }
+    string.array_free(parts)
+    return out
+}
+
+// ---------------------------------------------------------------------------
+
+usage() {
+    say("usage: build/ownership_grid/run [--mode gcc|nogcc|both] [--jobs N] [--only PAT,...] [--shard k/n]")
+    say("       [--check] [--update-baseline] [--no-shim] [--keep-bins] [--report-only] [--out DIR]")
+    say("       [--list] [--skips] [--show CELL]")
+    say("Run from the repository root; see tests/ownership_grid/README.md.")
+}
+
+system_name() -> string {
+    p = os.platform()
+    return match p {
+        "windows" -> "Windows"
+        "linux" -> "Linux"
+        "darwin" -> "Darwin"
+        "freebsd" -> "FreeBSD"
+        "openbsd" -> "OpenBSD"
+        "netbsd" -> "NetBSD"
+        _ -> p
+    }
+}
+
+main() {
+    mode = "gcc"
+    jobs = 0
+    only = ""
+    check = false
+    update = false
+    no_shim = false
+    report_only = false
+    out_arg = ""
+    shard = env_or_empty("OWNERSHIP_GRID_SHARD")
+    show = ""
+    want_list = false
+    want_skips = false
+    // Options: "--name value" or "--name=value".
+    argc = os.args_count()
+    i = 1
+    while i < argc {
+        a = os.args_get(i)
+        name = a
+        value = ""
+        has_value = false
+        eq = string.index_of(a, "=")
+        if string.starts_with(a, "--") == 1 && eq > 0 {
+            name = string.substring(a, 0, eq)
+            value = string.substring(a, eq + 1, string.length(a))
+            has_value = true
+        }
+        takes = name == "--mode" || name == "--jobs" || name == "--only" || name == "--out" || name == "--shard" ||
+        name == "--show"
+        if takes && !has_value {
+            if i + 1 >= argc {
+                say("ownership grid: ${name} needs a value")
+                usage()
+                exit(2)
+            }
+            i = i + 1
+            value = os.args_get(i)
+        }
+        if name == "--mode" {
+            if value != "gcc" && value != "nogcc" && value != "both" {
+                say("ownership grid: --mode is gcc, nogcc or both, not '${value}'")
+                exit(2)
+            }
+            mode = value
+        } else if name == "--jobs" {
+            jobs = parse_long(value) as int
+        } else if name == "--only" {
+            only = value
+        } else if name == "--out" {
+            out_arg = value
+        } else if name == "--shard" {
+            shard = value
+        } else if name == "--show" {
+            show = value
+        } else if name == "--check" {
+            check = true
+        } else if name == "--update-baseline" {
+            update = true
+        } else if name == "--no-shim" {
+            no_shim = true
+        } else if name == "--keep-bins" {
+            g_keep_bins = 1
+        } else if name == "--report-only" {
+            report_only = true
+        } else if name == "--list" {
+            want_list = true
+        } else if name == "--skips" {
+            want_skips = true
+        } else if name == "--help" || name == "-h" {
+            usage()
+            return
+        } else {
+            say("ownership grid: unknown option '${a}'")
+            usage()
+            exit(2)
+        }
+        i = i + 1
+    }
+
+    gen.build()
+    if want_list {
+        k = 0
+        while k < gen.cell_count() {
+            say(gen.cell_id(k))
+            k = k + 1
+        }
+        _e = io.stderr_write("${gen.cell_count()} cells\n")
+        return
+    }
+    if want_skips {
+        k = 0
+        while k < gen.skip_count() {
+            say("${gen.skip_id(k)}: ${gen.skip_reason(k)}")
+            k = k + 1
+        }
+        return
+    }
+    if show != "" {
+        k = 0
+        while k < gen.cell_count() {
+            if gen.cell_id(k) == show {
+                _o = io.stdout_write(gen.cell_source(k))
+                return
+            }
+            k = k + 1
+        }
+        say("no cell ${show}")
+        exit(1)
+    }
+
+    g_conf = collections.string_list_new()
+    k = 0
+    while k < C_COUNT {
+        collections.string_list_add(g_conf, "")
+        k = k + 1
+    }
+    g_left = collections.string_list_new()
+    if os.platform() == "windows" {
+        g_windows = 1
+        set_conf(C_EXE, ".exe")
+    }
+    set_conf(C_SYSTEM, system_name())
+    root = slashes(os.getcwd())
+    set_conf(C_ROOT, root)
+    set_conf(C_SHIM, "${root}/tests/ownership_grid/poison_alloc.c")
+    set_conf(C_BASELINE, "${root}/tests/ownership_grid/baseline.txt")
+    set_conf(C_AE, "${root}/build/ae${conf(C_EXE)}")
+    if fs.exists(conf(C_SHIM)) == 0 {
+        say("ownership grid: run this from the repository root (${conf(C_SHIM)} not found)")
+        exit(2)
+    }
+    if out_arg == "" {
+        out_arg = "${root}/build/ownership_grid"
+    }
+    set_conf(C_OUT, absolute(out_arg))
+    set_conf(C_FAULT, env_or_empty("OWNERSHIP_GRID_FAULT"))
+    ae_cc = env_or_empty("AE_CC")
+    if ae_cc != "" {
+        g_has_ae_cc = 1
+    }
+    set_conf(C_AE_CC, ae_cc)
+    base = ae_cc
+    if base == "" {
+        base = env_or_empty("CC")
+    }
+    if base == "" {
+        base = "cc"
+        if g_windows == 1 {
+            base = "gcc"
+        }
+    }
+    set_conf(C_CC, base)
+    cache_max = os.getenv("AETHER_CACHE_MAX_MB")
+    if cache_max != null {
+        g_had_cache_max = 1
+        set_conf(C_CACHE_MAX, string.copy(cache_max))
+    }
+    cache_dir = os.getenv("AETHER_CACHE_DIR")
+    if cache_dir != null {
+        g_had_cache_dir = 1
+        set_conf(C_CACHE_DIR, string.copy(cache_dir))
+    }
+    compile_patterns()
+
+    if report_only {
+        results = list.new()
+        modes = collections.string_list_new()
+        wall, saved_jobs, saved_check, saved_has_check = read_results_json(results, modes)
+        write_report(results, modes, wall, saved_jobs, saved_check, saved_has_check, 0)
+        if update {
+            if any_status(results, "UNMEASURED") {
+                say("ownership grid: baseline.txt not written: growth was not measured on this platform")
+                exit(1)
+            }
+            read_baseline()
+            write_baseline(results)
+            say("ownership grid: wrote tests/ownership_grid/baseline.txt")
+        }
+        return
+    }
+    if fs.exists(conf(C_AE)) == 0 {
+        say("ownership grid: ${conf(C_AE)} not found; run `make compiler ae stdlib` first")
+        exit(2)
+    }
+    if jobs <= 0 {
+        jobs = parse_long(env_or_empty("NPROC")) as int
+    }
+    if jobs <= 0 {
+        jobs = os.cpu_count() / 2
+        if jobs < 1 {
+            jobs = 1
+        }
+    }
+    if jobs > MAX_JOBS {
+        jobs = MAX_JOBS
+    }
+    modes = collections.string_list_new()
+    if mode == "both" {
+        collections.string_list_add(modes, "gcc")
+        collections.string_list_add(modes, "nogcc")
+    } else {
+        collections.string_list_add(modes, mode)
+    }
+    if conf(C_SYSTEM) != "Darwin" && !no_shim {
+        g_use_shim = 1
+    }
+    cells = list.new()
+    k = 0
+    while k < gen.cell_count() {
+        _a = list.add(cells, mem.long_to_ptr(k as long))
+        k = k + 1
+    }
+    if only != "" {
+        cells = only_filter(cells, only)
+    }
+    if shard != "" {
+        cells = shard_filter(cells, shard)
+    }
+    _m = fs.mkdir_p("${conf(C_OUT)}/cells")
+    nm = collections.string_list_size(modes)
+    k = 0
+    while k < nm {
+        _b = fs.mkdir_p("${conf(C_OUT)}/${collections.string_list_get(modes, k)}/bin")
+        k = k + 1
+    }
+    nc = list.size(cells)
+    k = 0
+    while k < nc {
+        c = mem.ptr_to_long(list.get_raw(cells, k)) as int
+        _w = fs.write("${conf(C_OUT)}/cells/${gen.cell_file(c)}", gen.cell_source(c))
+        k = k + 1
+    }
+    shard_note = ""
+    if shard != "" {
+        shard_note = ", shard ${shard}"
+    }
+    on_off = "off"
+    if g_use_shim == 1 {
+        on_off = "on"
+    }
+    say("ownership grid: ${nc} cells x ${nm} C path(s)${shard_note}, ${jobs} jobs, poisoning allocator ${on_off}")
+    t0 = os.now_monotonic_ms()
+    results = list.new()
+    k = 0
+    while k < nm {
+        m = 0
+        if collections.string_list_get(modes, k) == "nogcc" {
+            m = 1
+        }
+        j = 0
+        while j < nc {
+            c = mem.ptr_to_long(list.get_raw(cells, j)) as int
+            _r = list.add(results, new_result(c, m))
+            j = j + 1
+        }
+        k = k + 1
+    }
+    run_all(results, jobs, true)
+    wall = os.now_monotonic_ms() - t0
+    check_text = ""
+    rc = 0
+    if check {
+        rc, check_text = run_check(results)
+        say(check_text)
+    }
+    // The files Windows held during the run: once more now, then left.
+    retry_left()
+    if collections.string_list_size(g_left) > 0 {
+        sleep(1000)
+        retry_left()
+    }
+    left = collections.string_list_size(g_left)
+    write_results_json(results, modes, wall, jobs, check_text, check)
+    write_report(results, modes, wall, jobs, check_text, check, left)
+    unmeasured = any_status(results, "UNMEASURED")
+    if update {
+        if rc != 0 {
+            say("ownership grid: baseline.txt not written: the check failed (run without --check to record it)")
+        } else if unmeasured {
+            say("ownership grid: baseline.txt not written: growth was not measured on this platform, and the baseline records leaks")
+            rc = 1
+        } else {
+            read_baseline()
+            write_baseline(results)
+            say("ownership grid: wrote tests/ownership_grid/baseline.txt")
+        }
+    }
+    k = 0
+    while k < nm {
+        mn = collections.string_list_get(modes, k)
+        rows = rows_where(results, F_MODE, mn)
+        counted = count_statuses(rows)
+        parts = collections.string_list_new()
+        j = 0
+        while j < status_count() {
+            if count_of(counted, j) > 0 {
+                collections.string_list_add(parts, "${status_at(j)} ${count_of(counted, j)}")
+            }
+            j = j + 1
+        }
+        say("ownership grid (${mn}): ${join_list(parts, ", ")}")
+        k = k + 1
+    }
+    if left > 0 {
+        names = collections.string_list_new()
+        j = 0
+        while j < left && j < 5 {
+            names_p = collections.string_list_get(g_left, j)
+            collections.string_list_add(names, path.basename(names_p))
+            j = j + 1
+        }
+        say("ownership grid: ${left} binaries could not be removed (Windows still held them): ${join_list(names, ", ")}")
+    }
+    total = (nc as long) * (nm as long)
+    wall_div = wall
+    if wall_div < 1000 {
+        wall_div = 1000 as long
+    }
+    say("ownership grid: ${seconds_text(wall, 0)} s wall, ${ratio_text(total * 60000, wall_div)} cells/min; report in ${slashes(path.rel(root, conf(C_OUT)))}/report.md")
+    if check {
+        if unmeasured {
+            say("ownership grid check: the heap count is not exact here; values and use after free only")
+        }
+        msg = "passed"
+        if rc == 1 {
+            msg = "FAILED, a cell got worse or a baseline cell is no longer generated"
+        } else if rc == 2 {
+            msg = "FAILED, the runner itself failed (see HARNESS FAILURE above)"
+        }
+        say("ownership grid check: ${msg}")
+    }
+    exit(rc)
+}

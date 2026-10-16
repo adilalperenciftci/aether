@@ -1,0 +1,22 @@
+// Ownership micro-benchmark (#2925): list.add of a string built at run time.
+// The budget compares a build with the base of the change, the two binaries
+// run interleaved, the median of 11 runs each, on an otherwise idle machine.
+
+import std.string
+import std.list
+main() {
+    total = 0
+    k = 0
+    while k < 100000 {
+        l = list.new()
+        i = 0
+        while i < 50 {
+            list.add(l, string.from_int(i))
+            i = i + 1
+        }
+        total = total + list.size(l)
+        list.free(l)
+        k = k + 1
+    }
+    println(total)
+}

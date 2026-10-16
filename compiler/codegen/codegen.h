@@ -148,6 +148,7 @@ typedef struct {
     // The field and local questions walk the program or a function body, so
     // each is answered once.
     StrMap zeroed_box_memo;
+    StrMap fault_members;        // a fault member's name -> its content literal (R1)
 
     // Defer stack: tracks deferred statements for LIFO execution at scope exit
     ASTNode* defer_stack[MAX_DEFER_STACK];
@@ -296,16 +297,10 @@ typedef struct {
                              //   per-extern allocation in the common case).
         int* params_retain;  // 1 per index when the param was declared
                              //   `name: @retain string` — function stores /
-                             //   retains the pointer beyond the call. Tells the
-                             //   escape walker to mark a heap-string arg at
-                             //   this slot as escaped, so the heap-string-
-                             //   tracker wrapper and function-exit defer-free
-                             //   both skip freeing it. Without this, default
-                             //   string-param treatment is "read-only" — correct
-                             //   for string.length / equals / println but a UAF
-                             //   for retainers like string_list_add or
-                             //   map_put_raw's key. See #420 follow-up. NULL
-                             //   when no param carries the annotation.
+                             //   retains the pointer beyond the call, so the
+                             //   call hands it a reference of its own (R4).
+                             //   See #420 follow-up. NULL when no param
+                             //   carries the annotation.
         int* params_noescape; // 1 per index when the param was declared
                              //   `name: @noescape ptr` (or `fn`): the function
                              //   uses the argument only during the call, so a
@@ -314,6 +309,8 @@ typedef struct {
                              //   callee that keeps nothing (#2523). NULL when
                              //   no param carries the annotation.
         int param_count;
+        int is_variadic;     // declared with a trailing `...`: an argument
+                             //   past param_count is a C vararg (#2914)
         Type* ret_type;      // #1286: the declared return type (borrowed from
                              // the extern's AST), so a call returning `T[]`
                              // can be wrapped into a slice view.
@@ -333,10 +330,9 @@ typedef struct {
 
     // Match-as-expression: when non-NULL, match arms assign to this variable
     const char* match_result_var;
-    // #2461: when non-NULL, the result variable is an owning string local:
-    // each value arm takes its value with emit_string_take, setting this C
-    // int flag to whether the local owns what it got (-1: no arm assigned).
-    const char* match_result_own;
+    // #2461: the result variable is an owning string local: each value arm
+    // takes its value and releases the one the local held.
+    int match_result_string;
     // #2497: when non-NULL, the result is a struct of this name that owns
     // heap strings: each value arm is taken with emit_struct_take, and when
     // match_result_replace is set it replaces the value the result held.
@@ -478,10 +474,6 @@ typedef struct {
     char** bare_fn_adapter_names;
     int    bare_fn_adapter_count;
     int    bare_fn_adapter_capacity;
-    /* #2499: no closure the program can call keeps a parameter that can
-     * hold a caller's string, so an owned string argument to any closure
-     * call is freed after it (compute_closure_args_borrowed). */
-    int    closure_args_borrowed;
     /* #2478: what calling each function of the program can change (a module
      * global, memory a parameter reaches), memoised per definition by
      * order_fn_effects in codegen_expr.c. */
@@ -523,51 +515,15 @@ typedef struct {
     // Used to emit free() on reassignment and avoid freeing string literals.
     char** heap_string_vars;
     int heap_string_var_count;
+    // #2894: a call returning an array is wanted as its result struct
+    // (a fill or a return takes it), not held in a statement temporary.
+    int array_call_raw;
     // #2690: parallel to heap_string_vars, how many `try` bodies of the
     // function enclose each one's C declaration (gen->try_frame_depth when
     // it was marked). A store nested in more of them journals the string
     // for the frame the declaration is in (emit_unwind_track_local).
     int* heap_string_var_try_depths;
 
-    // Subset of `heap_string_vars`: names whose value is passed as a
-    // function-call argument (or captured by a closure) somewhere in
-    // the function body, in any context other than the RHS of `V = ...`
-    // where the LHS is V itself. The wrapper at codegen_stmt.c:1611
-    // skips the `free(_tmp_old)` when the var is escaped — the
-    // recipient of the escape may have stored the pointer (map.put,
-    // list.add, struct field, actor message field, closure capture)
-    // and freeing the local would dangle the stored copy. Conservative
-    // analysis: we do not know which callees store vs. consume, so we
-    // assume any non-trivial use means storage. Result: alias-safe
-    // (no UAF) at the cost of leaking the value over the function's
-    // lifetime — strictly better than the pre-pass UAF. Populated by
-    // mark_escaped_heap_string_vars (codegen_stmt.c) before the body
-    // is generated, alongside hoist_heap_string_trackers.
-    char** escaped_string_vars;
-    int escaped_string_var_count;
-
-    // Subset of `heap_string_vars`: names whose ONLY escape is via a
-    // `return <name>;` statement — no container, struct-field, or
-    // closure-capture site stores the pointer. The two-set split is
-    // load-bearing for the uniform-heap return-escape contract:
-    //
-    //   - Container-escaped vars (the `escaped_string_vars` set above):
-    //     wrapper-free at reassignment is suppressed because a recipient
-    //     may have stored the pointer. Pre-existing PR #450 behaviour.
-    //
-    //   - Return-only-escaped vars: NO recipient stashes the pointer.
-    //     The wrapper-free at reassignment MUST fire so intermediate
-    //     accumulator buffers (e.g. avn-bench `sorted = string.concat(
-    //     sorted, ...)` inside a loop) are reclaimed each iteration.
-    //     The function-exit defer-free is still suppressed for these
-    //     names (otherwise it would dangle the return value).
-    //
-    // mark_return_escaped_string_var populates this; the reassign-
-    // wrapper at codegen_stmt.c:2533 consults `is_escaped_string_var`
-    // alone (container-only) for the free decision, and the function-
-    // exit defer pre-pass consults both for the defer-suppression.
-    char** return_escaped_string_vars;
-    int return_escaped_string_var_count;
 
     // #2499 copy-on-keep: the `string` parameters of the body being
     // generated that hold a reference of their own (captured on entry),
@@ -577,15 +533,6 @@ typedef struct {
     char** captured_string_params;
     int captured_string_param_count;
 
-    // The ownership answers about a callee's parameter (does it keep it,
-    // capture it, only hand it back), computed once per program from the
-    // callee's body and remembered (an open-addressed table of CalleeMemo,
-    // private to codegen_stmt.c). Every walk asks them at every call site,
-    // and answering walks the callee's body, whose calls ask them in turn:
-    // unremembered, std.message took minutes to compile.
-    void* callee_memo;
-    int callee_memo_cap;
-    int callee_memo_count;
 
     // #2369: which pointer-to-struct parameters only ever hold a heap.new
     // box, because every call passes one (ZbParams, private to
@@ -599,58 +546,7 @@ typedef struct {
     // private to codegen_stmt.c). Built once, the first time it is asked.
     void* str_arrays;
 
-    // #2755: whether each closure cell gives back the closures it holds
-    // (promoted_closure_cell_owns, private to codegen_stmt.c), by the scope
-    // that declares it and its name, decided once so the scope and every
-    // closure that writes the cell agree.
-    void* cell_owns;
-    int cell_owns_count;
-    int cell_owns_cap;
 
-    // #752: struct locals that escape via a return (directly or as a
-    // tuple element). Such a struct's heap-string fields belong to the
-    // caller once returned, so the function-exit <Struct>_destroy defer
-    // must be suppressed — otherwise the fields are freed at callee exit
-    // while the returned (shallow) copy still points at them, and the
-    // caller reads dangling memory. Populated at each return site before
-    // defers drain; consulted by try_emit_struct_destroy.
-    char** return_escaped_struct_vars;
-    int return_escaped_struct_var_count;
-
-    // `*StringSeq` (cons-cell sequence) locals whose current value is a
-    // heap-allocated, refcounted seq returned by an OWNING producer
-    // (string_seq_cons / reverse / concat / take / drop / from_array /
-    // split_to_seq / retain / empty — NOT string_seq_tail, which borrows
-    // into an existing spine). Parallel to heap_string_vars: the codegen
-    // frees the prior value on reassignment and at scope exit via
-    // string_seq_free(), which is a refcount DECREMENT — so freeing a
-    // shared spine is safe (it survives while another owner holds a ref).
-    // Because every seq_* op retains or reads (never steals the caller's
-    // ref), the only escapes are `return <name>` and a raw store into a
-    // non-seq container; escaped_seq_vars records those so their
-    // scope-exit free is suppressed. A `_seqheap_<name>` flag tracks
-    // whether the slot currently owns a ref (set from an owning producer,
-    // cleared by an explicit seq_free / borrowed assignment).
-    char** seq_vars;
-    int seq_var_count;
-    char** escaped_seq_vars;
-    int escaped_seq_var_count;
-
-    // `string?` (optional-of-string) locals whose `.val` may own a heap
-    // allocation. Parallel to heap_string_vars, but the value is a by-value
-    // `ae_opt_string` struct (`{ int has; const char* val; }`), so the free
-    // targets `<name>.val` guarded by `<name>.has`. The struct's `.has` bit
-    // alone can't tell a heap `.val` from a borrowed literal, so a
-    // `_heapopt_<name>` flag tracks ownership exactly like `_heap_<name>`
-    // does for bare strings — set from is_heap_string_expr on the coerced
-    // initializer/reassignment RHS. The prior `.val` is freed on reassign
-    // and at scope exit via aether_heap_str_free. escaped_opt_str_vars
-    // suppresses the exit-free when the optional is `return`ed (the caller
-    // owns the buffer).
-    char** opt_str_vars;
-    int opt_str_var_count;
-    char** escaped_opt_str_vars;
-    int escaped_opt_str_var_count;
 
     // Ask/reply type map: request message name -> reply shape.
     // Built by scanning actor receive handlers for reply statements.
@@ -709,6 +605,14 @@ typedef struct {
     char* hoist_decls;
     size_t hoist_decls_len;
     size_t hoist_decls_cap;
+    /* #2923: a plain `defer` a panic leaves runs from the unwind journal,
+     * through a thunk written where the defer is: the thunks, how many, and
+     * the offset their prototypes go in at once the program is written. */
+    char* defer_thunks;
+    size_t defer_thunks_len;
+    size_t defer_thunks_cap;
+    int defer_thunk_count;
+    long defer_proto_pos;
     int hoist_output_ok;
 } CodeGenerator;
 
@@ -745,9 +649,12 @@ void emit_c_string_literal(CodeGenerator* gen, const char* str);
 void emit_c_string_body(CodeGenerator* gen, const char* str, int printf_format);  // #2512
 /* #2520: `len` bytes, NULs included, as the inside of a C string literal. */
 void emit_c_string_bytes(CodeGenerator* gen, const char* str, size_t len, int printf_format);
-/* #2520: a string literal node as a C expression: a C string literal, or,
- * when the literal holds a NUL, the static AetherString that carries it. */
+/* A string literal node as an Aether string value: the static, pinned
+ * AetherString that carries it (R1). */
 void emit_string_literal_node(CodeGenerator* gen, const ASTNode* lit);
+/* A string literal node as the characters C reads (R4): a C string literal,
+ * or the pinned string's byte array when the literal holds a NUL. */
+void emit_string_literal_chars(CodeGenerator* gen, const ASTNode* lit);
 /* #2520: `lit` as an fwrite of all its bytes to stdout (print of a literal). */
 void emit_string_literal_write(CodeGenerator* gen, const ASTNode* lit, int newline);
 void emit_print_literal_format(CodeGenerator* gen, const ASTNode* lit);
@@ -759,6 +666,7 @@ void emit_string_compare_close(CodeGenerator* gen, const char* op);      // #251
 void generate_type(CodeGenerator* gen, Type* type);
 void ensure_tuple_typedef(CodeGenerator* gen, Type* type);
 void ensure_optional_typedef(CodeGenerator* gen, Type* type);   // #340
+const char* c_result_type(Type* t);   // #2894
 void collect_optional_typedefs(CodeGenerator* gen, ASTNode* node);   // #340
 void emit_sum_typedef(CodeGenerator* gen, ASTNode* def);   // #914
 void emit_enum_typedef(CodeGenerator* gen, ASTNode* def);  // #1044
@@ -840,10 +748,5 @@ const char* try_volatile_qual_for(CodeGenerator* gen, const char* name);
 // as a declaration of the variable spells it: after the `*` of a pointer
 // (`const char* volatile`), before anything else. #2618.
 const char* volatile_decl_type(const char* vq, const char* c_type);
-
-// The C type of the ownership flag beside the local `name`: `volatile int`
-// where the local is volatile (try_volatile_qual_for), `int` elsewhere.
-// #2690.
-const char* try_tracker_type(CodeGenerator* gen, const char* name);
 
 #endif

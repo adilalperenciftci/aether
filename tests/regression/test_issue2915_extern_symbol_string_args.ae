@@ -1,0 +1,42 @@
+// Regression (#2915): an extern bound to another C symbol
+// (`@extern("sym") name(...)`) did not get the call-site unwrap of its
+// `string` parameters: the call looked its parameter types up by the C
+// symbol, which the extern table does not file entries under, so a counted
+// string reached the C function as its AetherString header. A call now
+// finds the extern by its Aether name, so its parameters are what the
+// declaration says, and std.strbuilder's append_format (an `@extern` binding
+// that is also C-variadic, #2914) formats a counted format string and a
+// counted `%s` argument by their characters.
+
+import std.strbuilder
+import std.string
+
+extern exit(code: int)
+@extern("strlen") c_strlen(s: string) -> int
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+// Built from a parameter, so the optimizer cannot fold it into a literal.
+join(a: string, b: string) -> string {
+    return string.concat(a, b)
+}
+
+main() {
+    s = join("hello", " world")
+    check(c_strlen(s) == 11, "a counted string reaches a bound C symbol as its characters")
+
+    b = strbuilder.new(16)
+    fmt = join("%", "d")
+    strbuilder.append_format(b, fmt, 7)
+    check(strbuilder.finish(b) == "7", "a counted format string")
+
+    b2 = strbuilder.new(16)
+    strbuilder.append_format(b2, "[%s]", s)
+    check(strbuilder.finish(b2) == "[hello world]", "a counted string in the binding's varargs")
+    println("ok")
+}

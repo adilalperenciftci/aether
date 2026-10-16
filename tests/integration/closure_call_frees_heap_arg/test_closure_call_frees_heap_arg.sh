@@ -8,8 +8,8 @@
 # wrap. This test checks the emitted C for both spellings, and that an
 # argument the closure keeps (stored in a captured list, captured by a
 # nested closure that outlives the call) is still good after the call: the
-# closure keeps its own reference (#2499 copy-on-keep, or the capture's), so
-# the caller's argument is freed too.
+# place that keeps it takes a reference of its own (the list's store, the
+# capture), so the caller's argument is freed too.
 # tests/regression/test_closure_call_frees_heap_arg.ae runs the ownership
 # cases under the leaks gate.
 
@@ -76,8 +76,6 @@ got="$(tr -d '\r' < "$tmp/out.log")"
 
 "$AETHERC" "$tmp/main.ae" "$tmp/main.c" >"$tmp/gen.log" 2>&1 || fail "aetherc failed" "$tmp/gen.log"
 # Both spellings of the read-only call free their temp.
-n="$(grep -c '_ad_[0-9]* = (char\*)(mk("[xy]")), _closure_fn_0(.*), aether_heap_str_free(_ad_' "$tmp/main.c")"
+n="$(grep -c '_ad_[0-9]* = (char\*)(mk(((const char\*)&_ae_slit_[0-9]*))), aether_unwind_track_str_place((const void\*)\&_ad_[0-9]*, NULL), _closure_fn_0(.*), aether_unwind_forget((const void\*)\&_ad_[0-9]*), aether_heap_str_free(_ad_' "$tmp/main.c")"
 [ "$n" = "2" ] || fail "a read-only closure argument is not freed after the call ($n of 2)" "$tmp/main.c"
-# A kept argument is freed too: the closure took a reference of its own.
-grep -q 's = aether_str_capture(s);' "$tmp/main.c"     || fail "the closure that keeps its parameter does not take its own reference" "$tmp/main.c"
-echo "  [PASS] closure_call_frees_heap_arg: closure calls free their heap arguments; a closure keeps its own reference"
+echo "  [PASS] closure_call_frees_heap_arg: closure calls free their heap arguments; a kept one stays good"

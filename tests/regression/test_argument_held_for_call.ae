@@ -1,0 +1,77 @@
+// Regression (R3): a callee borrows its arguments, so each must outlive the
+// call. A string read from a place the callee can rewrite (a module `var`, a
+// field reached through a pointer) is held by the caller for the call: the
+// callee's store into that place releases the place's reference, not the one
+// the argument stands on. Borrowed as it stood, the argument was freed under
+// the callee, which then printed freed memory.
+//
+// The heap check runs where the count is exact (mem.heap_in_use_exact):
+// after a warm-up, some window of the same work grows by exactly 0
+// (mem.steady_growth). Strings are built from parameters, because
+// string.concat of two literals folds to a literal.
+
+import std.mem
+import std.string
+
+extern exit(code: int)
+
+var g: string = ""
+
+struct Box {
+    v: string
+}
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+rebind_then_read(w: string, s: string) -> int {
+    g = string.concat(w, "-new")
+    churn(w)
+    return string.length(s)
+}
+
+store_then_read(w: string, b: *Box, s: string) -> int {
+    b.v = string.concat(w, "-other")
+    churn(w)
+    return string.length(s)
+}
+
+// Allocations the size of the freed strings, which would reuse them.
+churn(w: string) {
+    a = string.concat(w, "-zzz")
+    b = string.concat(w, "-yyy")
+    check(string.length(a) + string.length(b) > 0, "churn")
+}
+
+round(w: string) {
+    g = string.concat(w, "-old")
+    check(rebind_then_read(w, g) == string.length(w) + 4, "a module var rebound under its argument")
+    bx = heap.new(Box)
+    bx.v = string.concat(w, "-field")
+    check(store_then_read(w, bx, bx.v) == string.length(w) + 6, "a field stored under its argument")
+    heap.free(bx)
+}
+
+main() {
+    w = string.concat("ab", "cd")
+    i = 0
+    while i < 50 {
+        round(w)
+        i = i + 1
+    }
+    if mem.heap_in_use_exact() {
+        grown = mem.steady_growth(|| {
+                k = 0
+                while k < 200 {
+                    round(w)
+                    k = k + 1
+                }
+            }, 5)
+        check(grown == 0, "a window of 200 rounds grew the heap by ${grown} bytes in every run")
+    }
+    println("=== test_argument_held_for_call passed ===")
+}

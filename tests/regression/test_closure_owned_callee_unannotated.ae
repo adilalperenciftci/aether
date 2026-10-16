@@ -66,7 +66,7 @@ direct_callee(r: int) -> int {
     return w
 }
 
-nested_handoff(l: ptr, r: int) -> int {
+nested_handoff(l: @keep ptr, r: int) -> int {
     acc = 0
     f = || { acc = acc + 1 }
     g = || { keep(l, f) }

@@ -48,7 +48,7 @@ json_ctx(key: string, text: string) -> ptr {
 }
 
 // Render `src` against `ctx`: the output, or "ERR <message>".
-render_in(src: string, ctx: ptr) -> string {
+render_in(src: string, ctx: @keep ptr) -> string {
     t, perr = liquid.parse_string(src)
     if perr != "" { return string.concat("PARSE ", perr) }
     out, err = liquid.render(t, ctx)

@@ -201,7 +201,7 @@ _depth_of(ctx: ptr) -> int {
 // Return the framework context for a given _ctx (which may itself be
 // the framework context if the call is at top level, or a suite
 // context if the call is inside a describe trailing block).
-_fw_of(ctx: ptr) -> ptr {
+_fw_of(ctx: @keep ptr) -> ptr {
     if map.has(ctx, "fw") == 1 {
         f = map.get_raw(ctx, "fw")
         return f
@@ -215,7 +215,7 @@ _fw_of(ctx: ptr) -> ptr {
 // register against it.
 // ---------------------------------------------------------------------------
 
-describe(_ctx: ptr, description: string) -> ptr {
+describe(_ctx: @keep ptr, description: string) -> ptr {
     fw = _fw_of(_ctx)
     d = _depth_of(_ctx)
     for (i = 0; i < d; i++) { print("  ") }
@@ -285,7 +285,7 @@ _run_afters(s: ptr) {
 // before and after to know whether anything failed in this run.
 // ---------------------------------------------------------------------------
 
-it(_ctx: ptr, description: string, test_fn: fn) {
+it(_ctx: @keep ptr, description: string, test_fn: fn) {
     // test_fn is CALLED here, not forwarded: a fn param that is only
     // invoked lets the caller's codegen prove the closure never escapes
     // and free its environment right after this call returns (#1577 —
@@ -315,7 +315,7 @@ it(_ctx: ptr, description: string, test_fn: fn) {
 // the structured report carries it. Mirrors _it_end's bookkeeping minus
 // the timing and the hooks — a body that never ran has no duration, and
 // before/after hooks exist to set up a body that is not going to run.
-_record_skip(_ctx: ptr, description: string, reason: string) {
+_record_skip(_ctx: @keep ptr, description: string, reason: string) {
     fw = _fw_of(_ctx)
     skipped_ref = map.get_raw(fw, "skipped")
     its_list = map.get_raw(fw, "its")
@@ -355,7 +355,7 @@ _record_skip(_ctx: ptr, description: string, reason: string) {
 //
 // test_fn is CALLED here rather than forwarded, for the closure-env
 // reason documented on it().
-it_when(_ctx: ptr, cond: int, description: string, reason: string, test_fn: fn) {
+it_when(_ctx: @keep ptr, cond: int, description: string, reason: string, test_fn: fn) {
     if cond == 0 {
         _record_skip(_ctx, description, reason)
         return
@@ -370,7 +370,7 @@ it_when(_ctx: ptr, cond: int, description: string, reason: string, test_fn: fn) 
 // platform) where the body is kept for the day it is re-enabled. Use
 // it_when for dependency gating; an unconditional skip that is really a
 // missing dependency hides the provisioning gap.
-skip_it(_ctx: ptr, description: string, reason: string, test_fn: fn) {
+skip_it(_ctx: @keep ptr, description: string, reason: string, test_fn: fn) {
     // test_fn is deliberately unused — the body does not run. It stays in
     // the signature so re-enabling is a one-word edit (skip_it -> it).
     _ = test_fn
@@ -403,7 +403,7 @@ skip_all_if(fw: ptr, cond: int, reason: string) -> int {
 // that asserts cleanly but runs over budget still goes red. Uses the
 // same monotonic elapsed the report already records, so there's no
 // extra measurement. `budget` is a Duration literal (`50ms`, `2s`).
-it_within(_ctx: ptr, description: string, budget: Duration, test_fn: fn) {
+it_within(_ctx: @keep ptr, description: string, budget: Duration, test_fn: fn) {
     rec, old_failed, t0 = _it_begin(_ctx, description)
     call(test_fn)
     _it_end(_ctx, description, rec, old_failed, t0, budget.ns)
@@ -415,7 +415,7 @@ it_within(_ctx: ptr, description: string, budget: Duration, test_fn: fn) {
 // test_fn themselves — see it()'s comment). Returns the it-record, the
 // failed-counter snapshot, and the monotonic start. Tuple slot rule:
 // t0 is a long — the success arm returns it first so the slot pins wide.
-_it_begin(_ctx: ptr, description: string) -> (ptr, int, long) {
+_it_begin(_ctx: @keep ptr, description: string) -> (ptr, int, long) {
     fw = _fw_of(_ctx)
     failed_ref = map.get_raw(fw, "failed")
 
@@ -441,7 +441,7 @@ _it_begin(_ctx: ptr, description: string) -> (ptr, int, long) {
 }
 
 // Second half: everything after the test body ran.
-_it_end(_ctx: ptr, description: string, it_rec: ptr, old_failed: int, t_start_ns: long, budget_ns: long) {
+_it_end(_ctx: @keep ptr, description: string, it_rec: ptr, old_failed: int, t_start_ns: long, budget_ns: long) {
     fw = _fw_of(_ctx)
     passed_ref = map.get_raw(fw, "passed")
     failed_ref = map.get_raw(fw, "failed")
