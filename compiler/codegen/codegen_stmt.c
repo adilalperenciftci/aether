@@ -882,6 +882,12 @@ void emit_string_take(CodeGenerator* gen, ASTNode* e, const char* target) {
         fprintf(gen->output, ")");
         return;
     }
+    /* R5: a literal is pinned (R1); taking it is the literal itself. */
+    if (e && e->type == AST_LITERAL && e->value && e->node_type &&
+        e->node_type->kind == TYPE_STRING) {
+        emit_string_literal_node(gen, e);
+        return;
+    }
     fprintf(gen->output, "aether_uniform_heap_str((const char*)(");
     generate_expression(gen, e);
     fprintf(gen->output, "), 0)");

@@ -230,6 +230,44 @@ or shared cell, a container element (list, map, string sequence, strarr:
 message does not share: a send deep-copies its strings (#466), so it needs no
 publish. A value read from a published place carries the bit with it.
 
+**Within the budgets (#2925).** Measured on an Apple M1 Pro, each
+`benchmarks/ownership/` program built by #2916's merge (c5f20025) and by its
+first parent, the same output from both, 21 runs each interleaved, the
+fastest of each compared. R5 as built: a literal is pinned, so taking one is
+the literal itself (no run-time probe), a list adds it as an element it does
+not own, and the pinned strings are `const`, so the C compiler folds a probe
+of one away. After that, against the base:
+
+| benchmark | change |
+|---|---|
+| alias | -87.5% |
+| fields | -51.9% |
+| closure | -38.7% |
+| interp | -14.5% |
+| concat | -1.4% |
+| splitjoin | -0.5% |
+| listheap | +0.8% |
+| list (a literal) | +3.1% (+44.3% before) |
+| seq (cons) | +13.0% |
+| passret | +23.2% |
+
+Two are accepted as what the model costs, not tuned further:
+
+- **passret,** a function returning its parameter: the return hands over a
+  reference (R3), a retain in the callee and a release in the caller, about
+  0.8 ns a call (3.46 to 4.26 ns). The base returned a borrowed pointer,
+  the shape behind the use-after-free bugs #2916 fixed. Removing the pair
+  needs to know the callee returns its parameter, which is reading its
+  body.
+- **seq,** a cons: a sequence crosses actors by reference, so its cells'
+  counts are atomic, and the base raced on them. Plain counts until a cell
+  is published, as for strings, measured 2 to 5 points of the 13, and a
+  place that failed to publish would be a data race; the atomics stay.
+
+The concurrent cache benchmark could not be measured to 3% on this machine:
+its actor-backed structures vary by more than that between runs of one
+binary. #2935 has the method for a quiet one.
+
 **Returns (#2920).** An Aether function hands its caller one reference from
 every return: every `-> string`, and every `string` and `string?` position of
 a tuple. A pinned literal is handed over as it is; a borrowed string is
