@@ -122,6 +122,17 @@ too. A literal beside an `f32` takes it (`uv.x * 10.0` is an `f32`), and a
 a language with one 32-bit float, GLSL's `float`, maps both `float` and `f32`
 to it; a CPU evaluator keeps them apart, since they compute differently.
 
+The unsigned integers are `uint8`, `uint16`, `uint32` and `uint64`. An
+integer literal that fits beside a `uint32` in `&`, `|`, `^` or a comparison
+takes the `uint32` (`bits & 0xAAAAAAAA` is a `uint32`, and so is the
+literal), there and outside a quote, since the value cannot change; a back
+end writes it as GLSL's `0xAAAAAAAAu`. Arithmetic and shifts keep their rules
+(`x + 0xFFFFFFFF` is a `long`), because `uint32` arithmetic wraps. These
+names are not kinds, so they did not move `quote.VERSION` (still 2): a
+`uint32`, `uint16` or `uint8` node used to be typed `UNKNOWN`, which no back
+end could write, and a back end that does not know `uint32` refuses it as it
+refused `UNKNOWN`.
+
 **A call is recorded, not made.** `sin(…)` becomes a `CALL` node named
 `sin`. Nothing is called when the tree is built. The function still has to
 exist and type-check, which is what makes a quote checkable at all: a
