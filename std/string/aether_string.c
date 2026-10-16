@@ -861,6 +861,10 @@ const char* aether_string_data(const void* s) {
     return str_data(s);
 }
 
+const char* aether_string_import(const void* s) {
+    return (const char*)string_new_with_length(str_data(s), str_len(s));
+}
+
 /* One print holds the stream's lock across all of its writes, as a single
  * printf call does, so lines printed by two threads never interleave
  * (#2521). The lock is recursive, so fwrite inside it is fine. A build

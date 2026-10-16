@@ -124,6 +124,16 @@ static bool emit_namespace_describe = false;
 // what aether_<name>() exports the .so will contain.
 static bool list_functions_mode = false;
 
+// --print-string-release: print the symbol through which a caller gives back
+// a string an export of the library built from the input returns (#2931),
+// for the namespace pipeline's SDK generators.
+static bool print_string_release_mode = false;
+
+// --lib-id=<name>: the library's name, which names the release its exports'
+// strings go back through, for a library built from a generated source (a
+// namespace); otherwise its package or entry file names it (#2931).
+static const char* g_lib_id = NULL;
+
 // --diagnose=ownership: print the per-function string-ownership
 // verdicts the codegen would use at the wrapper terminator
 // (codegen_stmt.c:1611-1631) — without running codegen. Helps
@@ -1330,6 +1340,10 @@ static int close_generated_file(FILE* f, const char* path) {
 }
 
 int compile_source(const char* input_path, const char* output_path) {
+    if (print_string_release_mode) {
+        printf("%s\n", lib_string_release_symbol_for(g_lib_id, module_lib_package(), input_path));
+        return 1;
+    }
     // Read input file
     FILE *input = fopen(input_path, "r");
     if (!input) {
@@ -1896,6 +1910,7 @@ int compile_source(const char* input_path, const char* output_path) {
     codegen->emit_main_target = emit_main_target;  // NULL when not requested
     // Source path so codegen can expand `__FILE__` literally (#265).
     codegen->source_file = input_path;
+    codegen->lib_id = g_lib_id;
     int errors_before_codegen = aether_error_count();
     generate_program(codegen, program);
     int write_ok = close_generated_file(output, output_path);
@@ -2239,6 +2254,8 @@ void print_help(const char* program_name) {
     printf("                                   the scheduler, a library's catalog says so (#2297)\n");
     printf("  --lib-package=<pkg>              With --emit=lib: export every <pkg>.* module the build\n");
     printf("                                   imports, as one package library (#2297)\n");
+    printf("  --lib-id=<name>                  With --emit=lib: the library's name, which names the\n");
+    printf("                                   release its exports' strings go back through (#2931)\n");
     printf("  --emit-main=<func>               With --emit=lib: also emit a thin main(argc,argv) shim\n");
     printf("                                   that calls <func>(). Closes the exe/lib symmetry.\n");
     printf("  --emit-namespace-manifest        Print the manifest JSON for a manifest.ae and exit\n");
@@ -2532,6 +2549,13 @@ int main(int argc, char *argv[]) {
             }
             module_set_lib_package(val);
             arg_offset++;
+        } else if (strncmp(argv[arg_offset], "--lib-id=", 9) == 0) {
+            g_lib_id = argv[arg_offset] + 9;
+            if (!*g_lib_id) {
+                fprintf(stderr, "Error: --lib-id= requires a library name\n");
+                return 1;
+            }
+            arg_offset++;
         } else if (strncmp(argv[arg_offset], "--emit-main=", 12) == 0) {
             // --emit-main=<func>: a follow-up to --emit=lib. The codegen
             // emits a thin main() shim calling the named function, so a
@@ -2591,6 +2615,9 @@ int main(int argc, char *argv[]) {
             arg_offset++;
         } else if (strcmp(argv[arg_offset], "--list-functions") == 0) {
             list_functions_mode = true;
+            arg_offset++;
+        } else if (strcmp(argv[arg_offset], "--print-string-release") == 0) {
+            print_string_release_mode = true;
             arg_offset++;
         } else {
             fprintf(stderr, "Unknown option: %s\n", argv[arg_offset]);

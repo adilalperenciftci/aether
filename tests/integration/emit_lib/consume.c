@@ -32,7 +32,11 @@ static const char* lib_error(void) { return dlerror(); }
 #endif
 
 typedef int32_t (*aether_sum_fn)(int32_t, int32_t);
-typedef const char* (*aether_greet_fn)(const char*);
+/* A `-> string` export hands its caller the counted string (#2931): read
+ * with aether_string_data, given back through the library's release. */
+typedef const void* (*aether_greet_fn)(const char*);
+typedef const char* (*aether_string_data_fn)(const void*);
+typedef void (*aether_string_release_fn)(const void*);
 typedef int32_t (*aether_multiply_by_two_fn)(int32_t);
 
 int main(int argc, char** argv) {
@@ -54,6 +58,13 @@ int main(int argc, char** argv) {
     if (!sum)   { fprintf(stderr, "FAIL: aether_sum not found: %s\n", lib_error()); return 1; }
     if (!greet) { fprintf(stderr, "FAIL: aether_greet not found: %s\n", lib_error()); return 1; }
     if (!mul2)  { fprintf(stderr, "FAIL: aether_multiply_by_two not found: %s\n", lib_error()); return 1; }
+    aether_string_data_fn string_data = (aether_string_data_fn)lib_sym(h, "aether_string_data");
+    aether_string_release_fn string_release =
+        (aether_string_release_fn)lib_sym(h, "aether_config_string_release");
+    if (!string_data || !string_release) {
+        fprintf(stderr, "FAIL: the string accessors are missing: %s\n", lib_error());
+        return 1;
+    }
 
     int32_t s = sum(7, 35);
     if (s != 42) {
@@ -61,11 +72,13 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    const char* g = greet("hello");
+    const void* gh = greet("hello");
+    const char* g = gh ? string_data(gh) : NULL;
     if (!g || strcmp(g, "hello") != 0) {
         fprintf(stderr, "FAIL: aether_greet(\"hello\") = %s, expected \"hello\"\n", g ? g : "(null)");
         return 1;
     }
+    string_release(gh);
 
     int32_t m = mul2(21);
     if (m != 42) {

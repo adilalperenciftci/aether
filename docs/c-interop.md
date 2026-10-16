@@ -685,8 +685,11 @@ void load(const char* path, char* out, size_t cap) {
     size_t      len    = aether_string_length(result);   // exact length
     if (len > cap) len = cap;
     memcpy(out, data, len);                               // binary-safe
+    string_release(result);                               // the shim owns it
 }
 ```
+
+The result is the caller's: an Aether function's return hands over one reference (R3 in [the ownership model](design/ownership-model.md)), so the shim releases it once it has copied what it needs. A string an `--emit=lib` export returns goes back through the library's own release function instead; see [emit-lib.md](emit-lib.md#strings-an-export-returns).
 
 Both helpers accept either an `AetherString*` (the common case) or a raw `char*` (legacy TLS-arena externs whose names end in `_raw`), so shims can be agnostic about which flavour they got. Both are safe on NULL.
 

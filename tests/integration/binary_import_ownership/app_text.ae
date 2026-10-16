@@ -1,0 +1,23 @@
+import std.map
+import std.mem
+import std.string
+import text
+
+extern println(s: string)
+
+main() {
+    println(text.greet("world"))
+    s = text.section("intro") {
+    }
+    println(s)
+    g = mem.steady_growth(|| {
+            k = 0
+            while k < 200 {
+                _a = text.greet(string.from_int(k))
+                _b = text.section("intro") {
+                }
+                k = k + 1
+            }
+        }, 5)
+    println("exact ${mem.heap_in_use_exact()} grew ${g}")
+}

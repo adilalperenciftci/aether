@@ -81,13 +81,22 @@
  * releases its own with its own runtime: a library linking its own copy of
  * the runtime cannot free memory the program's copy allocated.
  *
+ * v10 (schema "1.9", #2931) appends `string_release`: the name of the
+ * function `void <name>(const void* s)` the library exports. A `-> string`
+ * export (and a builder returning a string) hands its caller one reference
+ * to a counted string, which the caller reads with aether_string_data and
+ * aether_string_length and gives back through that function, so the
+ * library's runtime, which made it, releases it. Set only when some export
+ * returns a string.
+ *
  * Schema versioning: `schema_version` is "1.0" for function-only
  * artifacts, "1.1" once closure records are present, "1.2" once
  * constant records are present, "1.3" once struct records or source
  * signatures are, "1.4" for a package library, "1.5" for a library
  * linked against the shared runtime, "1.6" for a package library
- * that exports builders, "1.7" for a library that runs actors, and "1.8"
- * for a library exporting a builder that never uses its config. Hosts that read the metadata should
+ * that exports builders, "1.7" for a library that runs actors, "1.8"
+ * for a library exporting a builder that never uses its config, and "1.9"
+ * for a library with an export returning a string. Hosts that read the metadata should
  * accept any "1.<minor>" — within "1.x" fields are only ever appended,
  * and a reader that predates a field stops at the count/pointer it
  * knows (a "1.0" reader ignores `closures` and `constants` exactly as
@@ -215,6 +224,9 @@ typedef struct {
     const unsigned char*      closure_config_unused; /* schema >= 1.8;
                                                     parallel to closures, or
                                                     NULL                    */
+    const char*               string_release;    /* schema >= 1.9: the symbol
+                                                    a caller gives a returned
+                                                    string back through     */
 } AetherLibMeta;
 
 /* The single entry point. Every `--emit=lib` artifact exports this

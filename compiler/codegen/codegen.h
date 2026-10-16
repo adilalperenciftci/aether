@@ -114,6 +114,7 @@ typedef struct {
     int emit_exe;            // Emit the int main(int,char**) entry point
     int emit_lib;            // Emit aether_<name> alias stubs for top-level functions
     int lib_shared_runtime;  // #2297: the library links the shared runtime (catalog says so)
+    const char* lib_id;      // #2931: the library's name (--lib-id), which names its string release
     int lib_actors;          // #2297: an imported binary library runs actors, so main() runs the scheduler
     struct ASTNode* trailing_stmt_call; // the call whose trailing block the current statement runs itself
     FILE* csrc_header_file;  // #996 --emit=csrc: if set, write each export's C
@@ -748,5 +749,10 @@ const char* try_volatile_qual_for(CodeGenerator* gen, const char* name);
 // as a declaration of the variable spells it: after the `*` of a pointer
 // (`const char* volatile`), before anything else. #2618.
 const char* volatile_decl_type(const char* vq, const char* c_type);
+
+// #2931: the function a library built from `source_file` (or as `package`)
+// exports for giving back a string one of its exports returned.
+const char* lib_string_release_symbol_for(const char* lib_id, const char* package,
+                                          const char* source_file);
 
 #endif

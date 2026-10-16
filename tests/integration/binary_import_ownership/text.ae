@@ -1,0 +1,16 @@
+// Strings an export returns (#2931): each call hands its caller one
+// reference, which a binary importer copies in and gives back, and a C
+// host reads and gives back through the release the catalog names.
+
+import std.string
+
+builder section(title: string) {
+    return title
+}
+
+greet(name: string) -> string {
+    return string.concat("hi ", name)
+}
+
+main() {
+}
