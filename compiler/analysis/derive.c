@@ -36,6 +36,7 @@
 
 #include "derive.h"
 #include "typechecker.h"
+#include "../aether_error.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -205,8 +206,10 @@ static ASTNode* synth_eq(ASTNode* struct_def) {
      * regardless of source length — keeps -Werror=format-truncation
      * builds happy. Identifiers above 250 bytes don't occur in
      * practice. */
+    /* Named after the struct as written: a module's struct is merged as
+     * `<ns>_<Name>`, and its derive is still `Name_eq`. */
     char fname[256];
-    snprintf(fname, sizeof(fname), "%.250s_eq", type_name);
+    snprintf(fname, sizeof(fname), "%.250s_eq", ast_struct_source_name(type_name));
     ASTNode* func = create_ast_node(AST_FUNCTION_DEFINITION, fname, line, column);
     func->node_type = create_type(TYPE_INT);
 
@@ -299,7 +302,7 @@ static ASTNode* synth_schema(ASTNode* struct_def) {
     if (!ok) return NULL;
 
     char fname[256];
-    snprintf(fname, sizeof(fname), "%.240s_schema", type_name);
+    snprintf(fname, sizeof(fname), "%.240s_schema", ast_struct_source_name(type_name));
     ASTNode* func = create_ast_node(AST_FUNCTION_DEFINITION, fname, line, column);
     func->node_type = create_type(TYPE_PTR);
 
@@ -378,6 +381,31 @@ int derive_synthesize_pass(ASTNode* program) {
      * (add_child) handles realloc for us. */
     for (int i = 0; i < task_count; i++) {
         DeriveTask t = tasks[i];
+        /* Two modules' same-named structs are two types, but a derive is
+         * named after the struct as written (`Name_eq`), so only one of
+         * them can derive. */
+        int clash = 0;
+        for (int k = 0; k < i; k++) {
+            ASTNode* o = tasks[k].sd;
+            if ((tasks[k].flags & t.flags) && o->value && t.sd->value &&
+                strcmp(o->value, t.sd->value) != 0 &&
+                strcmp(ast_struct_source_name(o->value), ast_struct_source_name(t.sd->value)) == 0) {
+                char msg[512];
+                snprintf(msg, sizeof(msg),
+                         "@derive on two structs named '%.120s' (%.120s and %.120s): a derived "
+                         "function is named after the struct as written, so both would define "
+                         "the same one",
+                         ast_struct_source_name(t.sd->value), ast_struct_display_name(o->value),
+                         ast_struct_display_name(t.sd->value));
+                AetherError e = { t.sd->source_file, NULL, t.sd->line, t.sd->column, msg,
+                                  "derive on one of them, or write the other's function by hand",
+                                  NULL, AETHER_ERR_REDEFINITION };
+                aether_error_report(&e);
+                clash = 1;
+                break;
+            }
+        }
+        if (clash) { errors++; continue; }
         if (t.flags & DERIVE_EQ) {
             ASTNode* fn = synth_eq(t.sd);
             if (!fn) {

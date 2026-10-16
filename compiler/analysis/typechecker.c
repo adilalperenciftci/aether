@@ -1199,7 +1199,7 @@ static void check_interp_operand(ASTNode* child, SymbolTable* table,
             snprintf(msg, sizeof(msg),
                 "cannot interpolate a struct%s%s: interpolate a field instead, "
                 "e.g. `${value.field}`",
-                t->struct_name ? " " : "", t->struct_name ? t->struct_name : "");
+                t->struct_name ? " " : "", t->struct_name ? ast_struct_display_name(t->struct_name) : "");
             break;
         case TYPE_ARRAY:
             snprintf(msg, sizeof(msg),
@@ -1375,7 +1375,7 @@ static const char* base_type_name(Type* t) {
         case TYPE_ACTOR_REF: return "actor_ref";
         case TYPE_MESSAGE:  return "message";
         case TYPE_ARRAY:    return "array";
-        case TYPE_STRUCT:   return t->struct_name ? t->struct_name : "struct";
+        case TYPE_STRUCT:   return t->struct_name ? ast_struct_display_name(t->struct_name) : "struct";
         case TYPE_FUNCTION:  return "closure";
         case TYPE_TUPLE:    return "tuple";
         case TYPE_OPTIONAL: return "optional";   // #340
@@ -2454,7 +2454,7 @@ static void reject_struct_argument(ASTNode* call, ASTNode* arg, Type* arg_type,
     snprintf(emsg, sizeof(emsg),
              "Argument %d '%s' of '%s': expected %s, got %s",
              index, param_name ? param_name : "?", call->value ? call->value : "?",
-             param_type->struct_name, arg_type->struct_name);
+             ast_struct_display_name(param_type->struct_name), ast_struct_display_name(arg_type->struct_name));
     type_error(emsg, arg->line, arg->column);
 }
 
@@ -5137,7 +5137,7 @@ static void qual_check_type(const QualCtx* ctx, Type* t, ASTNode* at) {
     if (!t) return;
     if (t->qualifier && t->struct_name) {
         const char* q = t->qualifier;
-        const char* name = t->struct_name;
+        const char* name = ast_struct_source_name(t->struct_name);
         char msg[512];
         const char* saved = g_tc_file;
         if (at->source_file) g_tc_file = at->source_file;
@@ -10842,6 +10842,17 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                             if (vt && vt->struct_name &&
                                 strcmp(vt->struct_name, pattern->value) == 0) { vidx = vi; break; }
                         }
+                        /* A variant that is a module's struct is merged as
+                         * `<ns>_<Name>`; the arm names it as written. */
+                        for (int vi = 0; vidx < 0 && vi < sum_nvar; vi++) {
+                            Type* vt = match_expr_type->tuple_types[vi];
+                            if (vt && vt->struct_name &&
+                                strcmp(ast_struct_source_name(vt->struct_name), pattern->value) == 0) {
+                                vidx = vi;
+                                free(pattern->value);
+                                pattern->value = strdup(vt->struct_name);
+                            }
+                        }
                         if (vidx < 0) {
                             char msg[256];
                             snprintf(msg, sizeof(msg),
@@ -12493,7 +12504,7 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                             char error_msg[256];
                             snprintf(error_msg, sizeof(error_msg),
                                      "Struct '%s' has no field '%s'",
-                                     base_type->struct_name, expr->value ? expr->value : "?");
+                                     ast_struct_display_name(base_type->struct_name), expr->value ? expr->value : "?");
                             free_type(base_type);
                             type_error(error_msg, expr->line, expr->column);
                             return 0;
@@ -12547,7 +12558,7 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                             char error_msg[256];
                             snprintf(error_msg, sizeof(error_msg),
                                      "Struct '%s' has no field '%s'",
-                                     base_type->element_type->struct_name,
+                                     ast_struct_display_name(base_type->element_type->struct_name),
                                      expr->value ? expr->value : "?");
                             free_type(base_type);
                             type_error(error_msg, expr->line, expr->column);
@@ -12802,7 +12813,7 @@ int typecheck_binary_expression(ASTNode* expr, SymbolTable* table) {
                 Type* ot = infer_type(left->children[0], table);
                 Type* st = ot && ot->kind == TYPE_PTR ? ot->element_type : ot;
                 if (st && st->kind == TYPE_STRUCT && st->struct_name)
-                    snprintf(slot, sizeof(slot), "%s.%s", st->struct_name,
+                    snprintf(slot, sizeof(slot), "%s.%s", ast_struct_display_name(st->struct_name),
                              left->value ? left->value : "?");
                 free_type(ot);
             } else if (left->type == AST_ARRAY_ACCESS && left->child_count > 0) {
@@ -12849,7 +12860,7 @@ int typecheck_binary_expression(ASTNode* expr, SymbolTable* table) {
             Type* ot = left->child_count > 0 ? infer_type(left->children[0], table) : NULL;
             Type* st = ot && ot->kind == TYPE_PTR ? ot->element_type : ot;
             if (st && st->kind == TYPE_STRUCT && st->struct_name)
-                snprintf(slot, sizeof(slot), "field '%s.%s'", st->struct_name, left->value);
+                snprintf(slot, sizeof(slot), "field '%s.%s'", ast_struct_display_name(st->struct_name), left->value);
             else
                 snprintf(slot, sizeof(slot), "field '%s'", left->value);
             free_type(ot);

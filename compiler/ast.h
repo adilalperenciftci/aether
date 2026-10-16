@@ -656,6 +656,14 @@ Type* create_result_type(Type* inner);    // #913 fallible `T!` -> (T, string)
 Type* create_function_type(int param_count, Type** param_types, Type* return_type);
 void free_type(Type* type);
 const char* type_to_string(Type* type);
+/* Module-scoped struct types: the merged name `<ns>_<Name>` of a module's
+ * struct, mapped back to the name it was written with (`Name`) and to its
+ * module-qualified spelling (`ns.Name`). Any other name maps to itself.
+ * Registered by the module merge; reset at the start of each merge. */
+void ast_struct_names_reset(void);
+void ast_struct_name_register(const char* cname, const char* source, const char* display);
+const char* ast_struct_source_name(const char* cname);
+const char* ast_struct_display_name(const char* cname);
 /* #2297: `type` as Aether source that parse_type reads back to the same
  * type. Returns 0 (and an empty buf) when it has no faithful spelling. */
 int type_to_aether_source(const Type* type, char* buf, size_t cap);

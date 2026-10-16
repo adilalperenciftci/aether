@@ -124,6 +124,8 @@ static const char* schema_spell(const Type* t) {
         case TYPE_OPTIONAL:
             return cg_internf("%s?", schema_spell(t->element_type));
         case TYPE_STRUCT:
+            /* As written: a module's struct is emitted as `<ns>_<Name>`. */
+            return t->struct_name ? ast_struct_source_name(t->struct_name) : "?";
         case TYPE_ENUM:
         case TYPE_SUM:
             return t->struct_name ? t->struct_name : "?";
@@ -274,7 +276,7 @@ static void schema_emit_table(CodeGenerator* gen, ASTNode* sd) {
     }
 
     fprintf(gen->output, "static const AetherSchema _ae_schema_%s_table = { ", S);
-    schema_emit_name(gen, S);
+    schema_emit_name(gen, ast_struct_source_name(S));
     if (nfields > 0)
         fprintf(gen->output, ", sizeof(struct %s), %d, _ae_schema_%s_fields };\n", S, nfields, S);
     else
