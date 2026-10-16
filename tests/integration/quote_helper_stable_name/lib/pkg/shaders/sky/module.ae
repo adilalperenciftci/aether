@@ -1,0 +1,10 @@
+exports(decode)
+
+// A @quotable function in a module whose last segment, `sky`, another
+// module shares. Its C name depends on which modules the program loads
+// (`sky_decode` alone, `pkg_shaders_sky_decode` beside pkg.sky); its name
+// in a quote's tree, and so the quote's hash, must not.
+@quotable
+decode(x: float) -> float {
+    return x * 2.0 + 1.0
+}

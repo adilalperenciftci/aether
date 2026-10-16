@@ -1,0 +1,8 @@
+exports(decode)
+
+// Another module whose path ends in `sky`: loaded beside pkg.shaders.sky,
+// it moves both off the short `sky_` prefix (#2209). Not @quotable, and no
+// quote reaches it; it is here only to change the program's naming.
+decode(x: float) -> float {
+    return x - 1.0
+}

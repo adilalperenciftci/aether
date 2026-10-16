@@ -42,7 +42,7 @@ kinds are the contract.
 | `param_count(t)`, `param_name(t, i)`, `param_type(t, i)` | the parameters, `\| a: T, ... \|` |
 | `capture_count(t)`, `capture(t, i)`, `capture_named(t, n)` | the outer variables the block reads |
 | `helper_count(t)`, `helper(t, i)`, `helper_named(t, n)` | the `@quotable` functions the body reaches, callees first, each a `Tree` (version 2) |
-| `function_name(t)`, `return_type(t)` | a helper's name and return type (`""` for a quote's own tree) |
+| `function_name(t)`, `return_type(t)` | a helper's name and return type (`""` for a quote's own tree); a module's helper is named by the module's full path and the function (`ae3d_shaders_sky_oct_decode`), the same in every program |
 | `source(t)` | `"file.ae:line"` of the quote |
 | `hash(t)` | a hash of the tree's shape, the same in every build, for caching what a back end makes |
 | `version(t)` | the format version it was built with (`quote.VERSION`) |

@@ -1,0 +1,16 @@
+import std.quote
+import pkg.shaders.sky as ssky
+
+q(t: quote.Tree) -> quote.Tree { return t }
+
+// Only the helper's module: its C name is `sky_decode`.
+main() {
+    t = q() quote | a: float | {
+        return ssky.decode(a)
+    }
+    println("${quote.hash(t)}")
+    println(quote.function_name(quote.helper(t, 0)))
+    println(quote.dump(t))
+    println("${ssky.decode(3.0)}")
+    quote.free(t)
+}
