@@ -113,6 +113,7 @@ tests/integration/host_racket/
 tests/integration/host_rhombus/
 tests/integration/host_tinygo/
 tests/integration/http_actor_mode_release/
+tests/integration/http_server_hook_state/
 tests/integration/http_auth/
 tests/integration/http_client_bad_status/
 tests/integration/http_client_custom_ca/

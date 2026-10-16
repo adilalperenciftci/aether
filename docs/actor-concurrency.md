@@ -142,7 +142,7 @@ For single-int messages, the code generator emits an inline path that stores the
 The `receive` block in the actor definition becomes the step function. The code generator emits a computed goto dispatch table for message handler selection:
 
 ```c
-void ActorName_step(ActorName* self) {
+void _aether_step_ActorName(ActorName* self) {
     Message msg;
     if (!mailbox_receive(&self->base.mailbox, &msg)) {
         self->base.active = 0;

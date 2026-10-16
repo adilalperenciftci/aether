@@ -398,7 +398,7 @@ struct return-escape set went with it.
 generated functions, used by every place: `_ae_retain_<T>(T*)` takes a
 reference to each part of a bit copy, `_ae_drop_<T>(T*)` releases each part
 and empties it; `_ae_publish_<T>` makes a value's strings atomic for a place
-other threads read. A struct's are `<Name>_dup` and `<Name>_destroy`; a
+other threads read. A struct's are `_aether_copy_<Name>` and `_aether_drop_<Name>`; a
 tuple's, an optional's and a fixed-size array's are emitted by
 codegen_own.c once every type is complete, prototypes first, so nested
 composites call each other in any order. A part is a string, a closure's
@@ -407,7 +407,7 @@ environment, or a composite of those.
 Struct fields lost their `_heap_<field>` trackers: every string field owns
 what it holds, so a struct's C layout is its declared fields (the punning
 idiom of #1879 holds by construction) and `reflect.field_heap_offset` is
-gone. `<Name>_replace` is a store (keep the old value, put the new one in,
+gone. `_aether_store_<Name>` is a store (keep the old value, put the new one in,
 destroy the old), a move empties the moved-from parts. A struct parameter
 borrows its caller's value; one the body writes into is copied on entry and
 destroyed at its exit, which is a question about the function's own body.
