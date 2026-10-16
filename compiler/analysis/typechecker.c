@@ -5065,9 +5065,9 @@ static void tc_clauses_reset(void);
 /* ---- qualified type names: `mod.T`, `*mod.T` ---------------------------
  *
  * The parser reads `mod.T` and `*mod.T` in any type position as the struct
- * `T` (struct names are one namespace across modules, so `T` is what a
- * selective `import mod (T)` would bring in) and keeps `mod` on the type as
- * its qualifier. This pass holds each qualifier to what it names: a module
+ * `T` and keeps `mod` on the type as its qualifier; the merge has resolved
+ * it to that module's struct, merged as `<ns>_T` (struct types are
+ * module-scoped). This pass holds each qualifier to what it names: a module
  * the code it is written in imports, which defines and exports the type.
  * Without it `*mod.Missing` reached the C compiler as an unknown type name.
  *
@@ -5137,6 +5137,8 @@ static void qual_check_type(const QualCtx* ctx, Type* t, ASTNode* at) {
     if (!t) return;
     if (t->qualifier && t->struct_name) {
         const char* q = t->qualifier;
+        /* The merge has resolved it to the module's own struct, renamed
+         * `<ns>_<Name>`; the module defines it under its written name. */
         const char* name = ast_struct_source_name(t->struct_name);
         char msg[512];
         const char* saved = g_tc_file;

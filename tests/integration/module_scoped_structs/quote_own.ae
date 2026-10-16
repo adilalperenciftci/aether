@@ -1,0 +1,20 @@
+// quote_module.ae's quote with the struct and function the program's own:
+// the same tree and the same hash.
+import std.quote
+
+struct Light {
+    power: float
+}
+
+keep(t: quote.Tree) -> quote.Tree { return t }
+
+main() {
+    sun = Light { power: 1.5 }
+    t = keep() quote | x: float | {
+        l = Light { power: x }
+        return l.power * sun.power
+    }
+    defer quote.free(t)
+    println(quote.dump(t))
+    println(quote.hash(t))
+}

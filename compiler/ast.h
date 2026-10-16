@@ -513,10 +513,11 @@ typedef struct Type {
     // handler / the "must handle" check apply. 0 on a plain tuple.
     int is_result;
     // On a struct type spelled with its module, `mod.T` or `*mod.T`: the
-    // module path as written (`mod`, `a.b`), interned. The struct is still
-    // `struct_name` (struct names are one namespace across modules); the
-    // qualifier is only checked, by check_qualified_types, to name a module
-    // that has the type. NULL on a bare name.
+    // module path as written (`mod`, `a.b`), interned. Struct types are
+    // module-scoped: the merge resolves `mod.T` to that module's struct
+    // (renaming `struct_name` to its merged `<ns>_T`), and
+    // check_qualified_types holds the qualifier to a module that defines and
+    // exports the type. NULL on a bare name.
     const char* qualifier;
 } Type;
 

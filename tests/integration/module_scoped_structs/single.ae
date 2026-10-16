@@ -1,0 +1,8 @@
+// One import defining `Shader`: a bare `Shader` is that one, as it always
+// was.
+import core
+
+main() {
+    s = Shader { name: "solo", uniforms: 5, weight: 1.0 }
+    println(core.describe(s))
+}

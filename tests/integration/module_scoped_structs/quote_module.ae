@@ -1,0 +1,15 @@
+import std.quote
+import shade
+
+keep(t: quote.Tree) -> quote.Tree { return t }
+
+main() {
+    sun = shade.light(1.5)
+    t = keep() quote | x: float | {
+        l = shade.Light { power: x }
+        return l.power * sun.power
+    }
+    defer quote.free(t)
+    println(quote.dump(t))
+    println(quote.hash(t))
+}

@@ -1,0 +1,8 @@
+// A module's struct that a quote names: its tree spells it `Light`, as
+// written, not by its merged C name (shade_Light).
+exports(Light, light, power_of)
+struct Light {
+    power: float
+}
+light(p: float) -> Light { return Light { power: p } }
+power_of(l: Light) -> float { return l.power }

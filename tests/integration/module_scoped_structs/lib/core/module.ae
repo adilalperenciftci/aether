@@ -1,0 +1,16 @@
+// The scene's material shader: a different `Shader` from gpu's.
+exports(Shader, material, describe, weight_of)
+
+struct Shader {
+    name: string
+    uniforms: int
+    weight: float
+}
+
+material(name: string, uniforms: int) -> Shader {
+    return Shader { name: name, uniforms: uniforms, weight: 0.5 }
+}
+
+describe(s: Shader) -> string { return "core.Shader:${s.name}/${s.uniforms}" }
+
+weight_of(s: *Shader) -> float { return s.weight }

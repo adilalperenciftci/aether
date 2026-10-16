@@ -111,9 +111,9 @@ if "$AE" check module_bad.ae > module_bad.log 2>&1; then
     fail "a Vec3f passed for a module's Vec3 was accepted" module_bad.log
 fi
 tr -d '\r' < module_bad.log > module_bad.txt
-grep -qF "Argument 1 'a' of 'geo.dot': expected Vec3, got Vec3f" module_bad.txt ||
+grep -qF "Argument 1 'a' of 'geo.dot': expected geo.Vec3, got geo.Vec3f" module_bad.txt ||
     fail "missing argument 1" module_bad.txt
-grep -qF "Argument 2 'b' of 'geo.dot': expected Vec3, got Vec3f" module_bad.txt ||
+grep -qF "Argument 2 'b' of 'geo.dot': expected geo.Vec3, got geo.Vec3f" module_bad.txt ||
     fail "missing argument 2" module_bad.txt
 
 # The valid shapes still compile and run.

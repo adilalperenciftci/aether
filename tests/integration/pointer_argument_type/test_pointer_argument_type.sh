@@ -64,7 +64,7 @@ main() {
     println("${lib.buffer_size(&p.ints)}")
 }
 AE
-expect_error field.ae "Argument 1 'b' of 'lib.buffer_size': expected *Buffer, got *Ints" \
+expect_error field.ae "Argument 1 'b' of 'lib.buffer_size': expected *lib.Buffer, got *lib.Ints" \
     "&p.field of another struct type was not refused at the call"
 
 cat > "$tmp/local.ae" <<'AE'
@@ -74,7 +74,7 @@ main() {
     println("${lib.buffer_size(&ints)}")
 }
 AE
-expect_error local.ae "Argument 1 'b' of 'lib.buffer_size': expected *Buffer, got *Ints" \
+expect_error local.ae "Argument 1 'b' of 'lib.buffer_size': expected *lib.Buffer, got *lib.Ints" \
     "&local of another struct type was not refused at the call"
 
 cat > "$tmp/nested.ae" <<'AE'
@@ -87,7 +87,7 @@ main() {
     println("${size_of(&oo.holder.ints)}")
 }
 AE
-expect_error nested.ae "Argument 1 'b' of 'size_of': expected *Buffer, got *Ints" \
+expect_error nested.ae "Argument 1 'b' of 'size_of': expected *lib.Buffer, got *lib.Ints" \
     "&p.a.b of another struct type was not refused at a same-module call"
 
 cat > "$tmp/typed.ae" <<'AE'
@@ -99,7 +99,7 @@ main() {
     println("${size_of(view)}")
 }
 AE
-expect_error typed.ae "Argument 1 'b' of 'size_of': expected *Buffer, got *Ints" \
+expect_error typed.ae "Argument 1 'b' of 'size_of': expected *lib.Buffer, got *lib.Ints" \
     "a typed pointer local of another struct type was not refused"
 
 # What stays legal, built and run: same-type pointers, a bare `ptr`

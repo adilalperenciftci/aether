@@ -1,0 +1,7 @@
+import gpu
+import core
+
+main() {
+    let s: *Shader = gpu.compile(1, "frag")
+    println(gpu.describe(s))
+}

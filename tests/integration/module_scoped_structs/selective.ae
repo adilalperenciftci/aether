@@ -1,0 +1,12 @@
+// A bare `Shader` written beside two imports that define one resolves
+// through the selective import that names it.
+import gpu(Shader, compile, describe)
+import core
+
+show(s: *Shader) -> string { return describe(s) }
+
+main() {
+    let s: *Shader = compile(1, "comp")
+    println(show(s))
+    println(core.describe(core.material("m", 2)))
+}

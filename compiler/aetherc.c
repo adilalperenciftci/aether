@@ -1548,6 +1548,7 @@ int compile_source(const char* input_path, const char* output_path) {
     }
 
     // Step 2.6: Merge pure Aether module functions into program AST
+    module_set_emit_lib(emit_lib);
     module_merge_into_program(program);
     /* The merge reports a struct defined differently in two modules
      * (#2129). Nothing downstream re-checks the count before codegen, so

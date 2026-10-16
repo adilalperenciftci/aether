@@ -1,0 +1,22 @@
+// A module that uses both Shaders: qualified throughout, since a bare
+// `Shader` here would be ambiguous. Passes them across to their modules.
+import gpu
+import core
+
+exports(Binding, bind, summary, first_id)
+
+struct Binding {
+    program: *gpu.Shader
+    material: core.Shader
+    passes: int
+}
+
+bind(p: *gpu.Shader, m: core.Shader) -> Binding {
+    return Binding { program: p, material: m, passes: 1 }
+}
+
+summary(b: *Binding) -> string {
+    return "${gpu.describe(b.program)} + ${core.describe(b.material)}"
+}
+
+first_id(ps: gpu.Pass) -> int { return ps.shader.id }

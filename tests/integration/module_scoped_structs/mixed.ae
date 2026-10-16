@@ -1,0 +1,8 @@
+// gpu.Shader where core.Shader is expected: two types, not one.
+import gpu
+import core
+
+main() {
+    g = gpu.compile(1, "frag")
+    println(core.weight_of(g))
+}

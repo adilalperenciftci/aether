@@ -1,0 +1,7 @@
+import dera
+import derb
+main() {
+    a = dera.key(1)
+    b = derb.key("b")
+    println("${a.id} ${b.name}")
+}
