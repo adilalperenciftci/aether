@@ -10,6 +10,7 @@
 /custom_lib_dir/
 /lib/
 tests/integration/actor_alignment/
+tests/integration/actor_ref_after_release/
 tests/integration/ae_inspect/
 tests/integration/ae_add_release_artifact/
 tests/integration/ae_run_cflags/

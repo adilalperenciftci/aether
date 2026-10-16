@@ -1288,6 +1288,26 @@ static void wait_for_foreign_senders(void) {
     while (atomic_load(&g_foreign_senders) != 0) AETHER_PAUSE();
 }
 
+AetherActorRef scheduler_actor_ref(ActorBase* actor) {
+    AetherActorRef ref = { actor, actor ? __atomic_load_n(&actor->id, __ATOMIC_ACQUIRE) : 0 };
+    return ref;
+}
+
+void scheduler_send_ref(AetherActorRef ref, Message msg) {
+    if (ref.actor && __atomic_load_n(&ref.actor->id, __ATOMIC_ACQUIRE) == ref.id) {
+        scheduler_send_remote(ref.actor, msg, current_core_id);
+        return;
+    }
+    // The block is another actor's now: the one the reference was taken
+    // from was released.
+    release_undelivered(&msg);
+    atomic_fetch_add_explicit(&g_released_sends, 1, memory_order_relaxed);
+    if (!atomic_flag_test_and_set_explicit(&g_released_send_reported, memory_order_relaxed)) {
+        fprintf(stderr, "aether: message type %d sent to actor %d after its release; "
+                        "dropped (reported once)\n", msg.type, ref.id);
+    }
+}
+
 static void actor_free_now(ActorBase* actor) {
     // Whatever is still in the mailbox was sent against the release contract.
     // Release it and credit it as processed, as a panicked actor's drain does,
@@ -3167,7 +3187,9 @@ ActorBase* scheduler_spawn_actor(int preferred_core, void (*step)(void*), size_t
 
     actor->alloc_size = actor_size;
     actor->destroy_state = NULL;   // the generated spawn sets it (#2528)
-    actor->id = atomic_fetch_add(&next_actor_id, 1);
+    /* Published for scheduler_send_ref, which may read a reused block's id
+     * from another thread (#2527). */
+    __atomic_store_n(&actor->id, atomic_fetch_add(&next_actor_id, 1), __ATOMIC_RELEASE);
     actor->step = step;
     atomic_init(&actor->active, 0);  // inactive until first message send
     actor->thread = 0;
