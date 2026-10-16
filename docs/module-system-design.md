@@ -781,7 +781,7 @@ it is passed on every build regardless of which regions survived.
 - Multiple module imports in the same program
 - Mixing pure modules with stdlib imports
 - Parameter/local variable shadowing of module constants
-- Actors and their message types: `spawn` an `actor` and send a `message` declared in an imported module. Both enter the program under their bare name (like structs), so `spawn(Worker())` and `w ! Ping { ... }` resolve; the actor's handlers still have their intra-module function/constant references rewritten, and the per-program message registry assigns runtime type ids across the merge.
+- Actors and their message types: `spawn` an `actor` and send a `message` declared in an imported module. Both enter the program under their bare name (unlike structs, which are module-scoped and merged as `<ns>_<Name>`), so `spawn(Worker())` and `w ! Ping { ... }` resolve; the actor's handlers still have their intra-module function/constant references rewritten, and the per-program message registry assigns runtime type ids across the merge.
 
 **On the module-system roadmap (language-level):**
 - Module-level mutable state
