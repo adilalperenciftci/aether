@@ -264,9 +264,14 @@ Two are accepted as what the model costs, not tuned further:
   is published, as for strings, measured 2 to 5 points of the 13, and a
   place that failed to publish would be a data race; the atomics stay.
 
-The concurrent cache benchmark could not be measured to 3% on this machine:
-its actor-backed structures vary by more than that between runs of one
-binary. #2935 has the method for a quiet one.
+The concurrent cache benchmark (#2935), against the same base, 31 runs each
+interleaved, compared by median ops/sec with a 95% bootstrap interval: every
+row's median is within the 3% budget, the worst -2.4%. The COW snapshot cell
+rows lose 1.6% to 2.3% (intervals within -1.3% and -2.5%), the in-flight
+count a send from the main thread takes (#2912). Of the actor-backed rows,
+the write-heavy single-owner actor is 46.7% faster, the read-heavy one -2.2%
+[-3.3%, -1.2%], and the write-heavy sharded actor map -2.4%, an interval
+([-14.2%, +8.7%]) its run-to-run spread leaves too wide to resolve.
 
 **Returns (#2920).** An Aether function hands its caller one reference from
 every return: every `-> string`, and every `string` and `string?` position of
