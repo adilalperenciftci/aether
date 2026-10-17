@@ -4,7 +4,6 @@
  * and made again between lifecycles, and after the cleanup there are no
  * cores at all. */
 
-#include <pthread.h>
 #include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -12,6 +11,7 @@
 #include <string.h>
 #include <unistd.h>
 
+#include "aether_thread.h"
 #include "multicore_scheduler.h"
 #include "actor_state_machine.h"
 
