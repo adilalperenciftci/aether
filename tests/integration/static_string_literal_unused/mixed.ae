@@ -1,0 +1,14 @@
+// Some literals need their static pinned AetherString ("kept", a string
+// value), one only its bytes (a literal holding a NUL, to an extern), and
+// the rest are plain characters (println of a literal).
+import std.string
+
+extern strlen(s: string) -> int
+
+main() {
+    println("plain")
+    s = "kept"
+    println("${s} ${string.length(s)}")
+    n = strlen("a\0b")
+    println(n)
+}
