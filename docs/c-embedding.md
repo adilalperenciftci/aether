@@ -132,21 +132,19 @@ typedef struct {
     int counter;       // Your state
 } MyCounter;
 
-// Message handler
+// Message handler: one message per call (see "Message Handler Pattern")
 void my_counter_step(void* self) {
     MyCounter* actor = (MyCounter*)self;
     Message msg;
 
-    // Process messages from mailbox
-    while (mailbox_receive(&actor->base.mailbox, &msg)) {
-        switch (msg.type) {
-            case 1:  // Increment
-                actor->counter += msg.payload_int;
-                break;
-            case 2:  // Print
-                printf("Counter: %d\n", actor->counter);
-                break;
-        }
+    if (!mailbox_receive(&actor->base.mailbox, &msg)) return;
+    switch (msg.type) {
+        case 1:  // Increment
+            actor->counter += msg.payload_int;
+            break;
+        case 2:  // Print
+            printf("Counter: %d\n", actor->counter);
+            break;
     }
 }
 
@@ -232,6 +230,8 @@ ActorBase* scheduler_spawn_actor(
 // thread can still be looking at it. Safe from the actor's own step. Call it
 // only when nothing sends to the actor any more.
 void scheduler_release_actor(ActorBase* actor);
+AetherActorRef scheduler_actor_ref(ActorBase* actor);   // the actor and its id
+void scheduler_send_ref(AetherActorRef ref, Message msg); // dropped once the actor is released
 
 // Register existing actor (alternative to pooled)
 int scheduler_register_actor(ActorBase* actor, int preferred_core);
@@ -303,28 +303,32 @@ the `AETHER_ACTOR_BASE_FIELDS` macro in `runtime/scheduler/multicore_scheduler.h
 
 ## Message Handler Pattern
 
+A step takes **one** message per call, as a generated step does: the
+scheduler calls it once for each message it delivers and counts each call as
+one message processed. A step that drained its whole mailbox would leave
+`scheduler_wait()`, and so `scheduler_shutdown()`, waiting for messages it
+counts as never processed.
+
 ```c
 void my_actor_step(void* self) {
     MyActor* actor = (MyActor*)self;
     Message msg;
 
-    // Drain all pending messages
-    while (mailbox_receive(&actor->base.mailbox, &msg)) {
-        switch (msg.type) {
-            case MSG_TYPE_1:
-                // Handle message type 1
-                handle_type_1(actor, msg.payload_int);
-                break;
+    if (!mailbox_receive(&actor->base.mailbox, &msg)) return;
+    switch (msg.type) {
+        case MSG_TYPE_1:
+            // Handle message type 1
+            handle_type_1(actor, msg.payload_int);
+            break;
 
-            case MSG_TYPE_2:
-                // Handle message type 2
-                handle_type_2(actor, (SomeStruct*)msg.payload_ptr);
-                break;
+        case MSG_TYPE_2:
+            // Handle message type 2
+            handle_type_2(actor, (SomeStruct*)msg.payload_ptr);
+            break;
 
-            default:
-                // Unknown message type
-                break;
-        }
+        default:
+            // Unknown message type
+            break;
     }
 }
 ```
@@ -380,7 +384,7 @@ The C host and the Aether runtime share a process but have distinct ownership ru
 
 1. **State is message-only.** Actor state is owned by the actor; the host reads and writes it exclusively through messages. Reach-in access bypasses message-ordering guarantees and races with the scheduler.
 2. **Sends are fire-and-forget.** There's no synchronous reply from `aether_send_message()`. When you need a value back, either (a) have the actor send a response message to a host-registered event handler, or (b) have the actor write into shared atomic state the host polls.
-3. **References are manually lifetime-managed.** The host holds the raw `ActorBase*` (or the generated `Counter*`) returned by spawn; there's no handle type or automatic refcount across the FFI boundary. Keep the pointer as long as you intend to send to the actor. Release it with `scheduler_release_actor()` when done, after the last message you send it has been handled: the actor is reclaimed later, once the scheduler threads are past it. Nothing may send to it after the release. A send that does so anyway is defined, not a use after free: a released actor's memory is kept, marked released, until a later spawn of the same size reuses it, so the message is dropped (counted by `scheduler_released_sends()`, reported once on stderr), but a send made after the memory has become another actor reaches that actor, which a raw pointer cannot detect.
+3. **References are manually lifetime-managed.** The host holds the raw `ActorBase*` (or the generated `Counter*`) returned by spawn; there's no automatic refcount across the FFI boundary. Keep the pointer as long as you intend to send to the actor. Release it with `scheduler_release_actor()` when done, after the last message you send it has been handled: the actor is reclaimed later, once the scheduler threads are past it. Nothing may send to it after the release. A send that does so anyway is defined, not a use after free: a released actor's memory is kept, marked released, until a later spawn of the same size reuses it, so the message is dropped (counted by `scheduler_released_sends()`, reported once on stderr), but a send made after the memory has become another actor reaches that actor, which a raw pointer cannot detect. A host that may send late holds an `AetherActorRef` instead (`scheduler_actor_ref(actor)`, the actor and its id) and sends with `scheduler_send_ref(ref, msg)`: a new actor in the same memory has an id of its own, so such a send is dropped and counted as well (#2527).
 4. **One runtime per process.** `aether_runtime_init()` initializes process-global scheduler state. Calling it twice from the same process is not supported; use separate processes if you need isolated runtimes.
 
 ## Header Generation
