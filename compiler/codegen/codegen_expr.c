@@ -9796,7 +9796,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                     }
                     /* R4: an `@heap` extern's string is adopted once, so
                      * the caller owns a counted string whatever C made. */
-                    ASTNode* ext_decl = ext_name ? find_extern_declaration_by_name(gen->program, ext_name)
+                    ASTNode* ext_decl = ext_name ? find_extern_declaration_in_scope(gen, ext_name)
                                                  : NULL;
                     int adopt = ext_decl && ext_decl->annotation &&
                                 annotation_has_marker(ext_decl->annotation, "heap_return") &&

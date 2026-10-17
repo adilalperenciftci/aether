@@ -1,0 +1,14 @@
+import raw
+import arr
+
+extern malloc(n: long) -> ptr
+extern memcmp(a: ptr, b: ptr, n: long) -> int
+
+main() {
+    xs = [1, 2, 3]
+    p = malloc(16)
+    q = malloc(16)
+    arr.copy3(p, xs)
+    raw.copy12(q, p)
+    println("${memcmp(p, q, 12)}")
+}

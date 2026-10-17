@@ -1,0 +1,7 @@
+exports(copy12)
+
+// Declares memcpy with a ptr source: its own call is checked against this,
+// whatever other file the program loads that declares memcpy differently.
+extern memcpy(dst: ptr, src: ptr, n: long) -> ptr
+
+copy12(dst: ptr, src: ptr) -> ptr { return memcpy(dst, src, 12) }

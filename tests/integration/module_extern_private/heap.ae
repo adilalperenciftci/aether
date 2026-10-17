@@ -1,0 +1,8 @@
+import lent
+import owned
+
+main() {
+    a = owned.own("x")
+    b = lent.peek("y")
+    println("${a}${b}")
+}

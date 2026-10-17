@@ -407,6 +407,7 @@ int is_closure_cell_read(CodeGenerator* gen, ASTNode* e);
    defined a function of its own with a builtin's name. */
 ASTNode* find_function_definition_by_name(ASTNode* program, const char* name);
 ASTNode* find_extern_declaration_by_name(ASTNode* program, const char* name);
+ASTNode* find_extern_declaration_in_scope(CodeGenerator* gen, const char* name);
 
 /* Push a function-exit release for every hoisted string local: a
  * local owns what it holds, so its scope exit releases it (issue #420

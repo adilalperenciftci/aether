@@ -360,6 +360,60 @@ Symbol* lookup_symbol(SymbolTable* table, const char* name) {
     return lookup_symbol_in(table, name, table->merged_from);
 }
 
+/* A bare `extern` is private to the file that declares it, but every
+ * file's externs share the one global table, so the first registered
+ * declaration of a name was the one every file's calls were checked
+ * against: a program importing a module that declares
+ * `extern memcpy(dst: ptr, src: int[], n: long)` failed another module's
+ * `memcpy(d, p, 8)` (`expected int[], got a bare ptr`), and which one won
+ * depended on what the program imported. A file that declares the extern
+ * itself is checked against its own declaration. */
+static ASTNode* g_typecheck_program;
+
+static ASTNode* own_extern_decl(const char* merged_from, const char* name) {
+    ASTNode* scope = NULL;
+    if (merged_from) {
+        AetherModule* m = module_find(merged_from);
+        scope = m ? m->ast : NULL;
+    } else {
+        scope = g_typecheck_program;
+    }
+    for (int i = 0; scope && i < scope->child_count; i++) {
+        ASTNode* d = scope->children[i];
+        if (d && d->type == AST_EXPORT_STATEMENT && d->child_count > 0) d = d->children[0];
+        if (!d || d->type != AST_EXTERN_FUNCTION || !d->value || strcmp(d->value, name) != 0)
+            continue;
+        /* The program's own, not a module's merged `@extern` clone. */
+        if (!merged_from && d->origin_module) continue;
+        return d;
+    }
+    return NULL;
+}
+
+typedef struct { ASTNode* decl; SymbolTable* table; } OwnExtern;
+static OwnExtern* g_own_externs = NULL;
+static int g_own_extern_count = 0;
+
+static Symbol* own_extern_symbol(Symbol* found, const char* merged_from, const char* name) {
+    if (!found || !found->node || found->node->type != AST_EXTERN_FUNCTION) return found;
+    ASTNode* own = own_extern_decl(merged_from, name);
+    if (!own || own == found->node) return found;
+    for (int i = 0; i < g_own_extern_count; i++)
+        if (g_own_externs[i].decl == own) return lookup_symbol_local(g_own_externs[i].table, name);
+    OwnExtern* grown = realloc(g_own_externs, sizeof(OwnExtern) * (size_t)(g_own_extern_count + 1));
+    if (!grown) return found;
+    g_own_externs = grown;
+    SymbolTable* t = create_symbol_table(NULL);
+    add_symbol(t, name, clone_type(own->node_type), 0, 1, 0);
+    Symbol* s = lookup_symbol_local(t, name);
+    if (!s) return found;
+    s->node = own;
+    g_own_externs[g_own_extern_count].decl = own;
+    g_own_externs[g_own_extern_count].table = t;
+    g_own_extern_count++;
+    return s;
+}
+
 /* `merged_from` is the scope the lookup STARTED in: a merged body's, even
  * when the walk reaches a file scope whose own merged_from says otherwise. */
 static Symbol* lookup_symbol_in(SymbolTable* table, const char* name, const char* merged_from) {
@@ -390,6 +444,7 @@ static Symbol* lookup_symbol_in(SymbolTable* table, const char* name, const char
      * program imported the module (aeo's runner and agent disagreed). */
     if (symbol && merged_from && !table->parent && find_import_alias(name))
         return NULL;
+    if (symbol && !table->parent) return own_extern_symbol(symbol, merged_from, name);
     if (symbol) return symbol;
 
     // Issue #333 DSL block receiver fallback: when this scope is the
@@ -4887,7 +4942,7 @@ static Type* c_struct_field_decl_type(const char* sname, const char* field) {
  * from the actor that answers it. infer_type takes only an expression and a
  * symbol table, and threading a program through every one of its call sites
  * would touch far more than the one case that needs it. */
-static ASTNode* g_typecheck_program = NULL;
+static ASTNode* g_typecheck_program = NULL;   /* declared above, at own_extern_decl */
 
 static ASTNode* aether_typecheck_program_node(void) { return g_typecheck_program; }
 
