@@ -1,0 +1,9 @@
+// The program's glob import of std.list (which defines a `free` of its
+// own) must not hide the builtin `free` from another module.
+import std.list(*)
+import mymod
+
+main() {
+    mymod.rel(mymod.mk())
+    println("ok")
+}

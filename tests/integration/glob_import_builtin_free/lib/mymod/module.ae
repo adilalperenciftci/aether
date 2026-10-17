@@ -1,0 +1,7 @@
+// Calls the builtin `free` without declaring it, as std.cryptography does.
+// It imports nothing: whatever the program imports is not this module's.
+extern malloc(n: int) -> ptr
+
+mk() -> ptr { return malloc(8) }
+
+rel(p: ptr) { free(p) }

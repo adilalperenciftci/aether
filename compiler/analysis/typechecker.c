@@ -308,6 +308,7 @@ void add_symbol(SymbolTable* table, const char* name, Type* type, int is_actor, 
     symbol->is_const = 0;
     symbol->inferred_closure = NULL;
     symbol->global_write = 0;
+    symbol->import_bound = 0;
     symtab_link(table, symbol);
 }
 
@@ -441,8 +442,13 @@ static Symbol* lookup_symbol_in(SymbolTable* table, const char* name, const char
      * prefixed name (`http_server_create`) when it was merged. So a bare
      * name a merged body finds through the program's import is one the
      * module never imported, and whether it built depended on which
-     * program imported the module (aeo's runner and agent disagreed). */
-    if (symbol && merged_from && !table->parent && find_import_alias(name))
+     * program imported the module (aeo's runner and agent disagreed).
+     * Only a name the import itself bound: the builtin `free` is not
+     * std.string's although its glob names `free` too, and asking the
+     * alias table hid it from every module of a program that glob-imported
+     * std.string, std.list or std.map (std.cryptography's `free` was
+     * "Undefined function"). */
+    if (symbol && merged_from && !table->parent && symbol->import_bound)
         return NULL;
     if (symbol && !table->parent) return own_extern_symbol(symbol, merged_from, name);
     if (symbol) return symbol;
@@ -544,6 +550,7 @@ void add_module_alias(SymbolTable* table, const char* alias, const char* module_
     symbol->is_const = 0;
     symbol->inferred_closure = NULL;
     symbol->global_write = 0;
+    symbol->import_bound = 0;
     symtab_link(table, symbol);
 }
 
@@ -6061,13 +6068,15 @@ int typecheck_program(ASTNode* program) {
                         existing_short->type = full_sym->type ? clone_type(full_sym->type) : create_type(TYPE_UNKNOWN);
                         existing_short->is_function = full_sym->is_function;
                         existing_short->node = full_sym->node;
+                        existing_short->import_bound = 1;
                     } else {
                         add_symbol(global_table, local_name,
                                    full_sym->type ? clone_type(full_sym->type) : create_type(TYPE_UNKNOWN),
                                    0, full_sym->is_function, 0);
-                        Symbol* short_sym = lookup_symbol(global_table, local_name);
-                        if (short_sym && full_sym->node) {
-                            short_sym->node = full_sym->node;
+                        Symbol* short_sym = lookup_symbol_local(global_table, local_name);
+                        if (short_sym) {
+                            if (full_sym->node) short_sym->node = full_sym->node;
+                            short_sym->import_bound = 1;
                         }
                     }
                 }
@@ -14249,8 +14258,11 @@ int typecheck_function_call(ASTNode* call, SymbolTable* table) {
         }
     }
 
-    // Rewrite import alias to qualified name for codegen (e.g. "release" -> "build.release")
-    if (symbol && symbol->is_function && call->value) {
+    // Rewrite import alias to qualified name for codegen (e.g. "release" -> "build.release").
+    // The program's imports only: a module's merged body did not make them
+    // (its own were renamed to the prefixed name when it was merged), so a
+    // bare `free` there is the builtin, not the program's `string.free`.
+    if (symbol && symbol->is_function && call->value && !table->merged_from) {
         const char* alias_target = find_import_alias(call->value);
         if (alias_target) {
             free(call->value);
