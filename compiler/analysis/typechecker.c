@@ -19,6 +19,7 @@ static ASTNode* aether_typecheck_program_node(void);
 #include "../parser/parser.h"
 #include "../aether_error.h"
 #include "../aether_module.h"
+#include <errno.h>
 #include "contract_eval.h"
 
 // #1062: the canonical C-type-name renderer (codegen.c). The tuple-extern
@@ -3835,6 +3836,44 @@ static int binary_mixes_distinct(Type* lt, Type* rt, AeTokenType operator) {
 
 static Type* infer_binary_type_by_kind(ASTNode* left, ASTNode* right, AeTokenType operator);
 
+/* An integer literal beside a uint32 takes the uint32 when its value fits
+ * (0 to 0xFFFFFFFF), as a literal beside an f32 takes the f32 (#2151):
+ * `bits & 0xAAAAAAAA` is a uint32, not a long, and so is the literal. Only
+ * where the value cannot change: `&`, `|`, `^` of two values in 0..2^32-1
+ * stay in it, and a comparison compares the same numbers. Arithmetic and
+ * shifts keep their rules, since uint32 arithmetic wraps where a long's
+ * does not. A quote's tree carries these types, so a shader back end
+ * writes `0xAAAAAAAAu` and a uint expression, not a 64-bit one. */
+static int uint32_literal_fits(ASTNode* n) {
+    if (!n || n->type != AST_LITERAL || !n->value || !n->node_type) return 0;
+    if (n->node_type->kind != TYPE_INT && n->node_type->kind != TYPE_INT64) return 0;
+    if (n->node_type->distinct_name || n->node_type->c_alias) return 0;
+    char digits[64];
+    size_t k = 0;
+    for (const char* c = n->value; *c && k + 1 < sizeof digits; c++)
+        if (*c != '_') digits[k++] = *c;
+    digits[k] = '\0';
+    if (digits[0] == '-' || digits[0] == '+') return 0;
+    char* end = NULL;
+    errno = 0;
+    unsigned long long v = strtoull(digits, &end, 0);
+    if (errno || !end || *end || end == digits) return 0;
+    return v <= 0xFFFFFFFFull;
+}
+
+/* Gives the literal side of `uint32 op literal` the uint32; 1 if it did. */
+static int uint32_takes_literal(ASTNode* left, ASTNode* right) {
+    Type* lt = left ? left->node_type : NULL;
+    Type* rt = right ? right->node_type : NULL;
+    if (!lt || !rt) return 0;
+    ASTNode* lit = NULL;
+    if (lt->kind == TYPE_UINT32 && !lt->distinct_name && uint32_literal_fits(right)) lit = right;
+    else if (rt->kind == TYPE_UINT32 && !rt->distinct_name && uint32_literal_fits(left)) lit = left;
+    if (!lit) return 0;
+    lit->node_type->kind = TYPE_UINT32;
+    return 1;
+}
+
 /* A binary operator over distinct types (#480, docs/distinct-types.md).
  *  - Two DIFFERENT distinct types never mix: TYPE_UNKNOWN, which the caller
  *    reports naming both.
@@ -3955,6 +3994,19 @@ static Type* infer_binary_type_by_kind(ASTNode* left, ASTNode* right, AeTokenTyp
                 return create_type(TYPE_UNKNOWN);
             default: break;
         }
+    }
+
+    switch (operator) {
+        case TOKEN_EQUALS: case TOKEN_NOT_EQUALS:
+        case TOKEN_LESS: case TOKEN_LESS_EQUAL:
+        case TOKEN_GREATER: case TOKEN_GREATER_EQUAL:
+            uint32_takes_literal(left, right);
+            break;
+        case TOKEN_AMPERSAND: case TOKEN_PIPE: case TOKEN_CARET:
+            if (uint32_takes_literal(left, right)) return create_type(TYPE_UINT32);
+            break;
+        default:
+            break;
     }
 
     // Comparison and logical operators always produce bool, even with unknown operands

@@ -84,6 +84,12 @@ const char* quote_type_name(Type* t) {
          * `<ns>_<Name>`, and a tree spells it `Name`, so its hash and what
          * a back end writes from it do not depend on the C name. */
         case TYPE_STRUCT: return t->struct_name ? ast_struct_source_name(t->struct_name) : "struct";
+        /* type_to_string has no name for these (it says UNKNOWN); the
+         * tree spells them as Aether does. A C ABI alias (`uint32_t`) is
+         * its kind's name too. */
+        case TYPE_UINT32: return "uint32";
+        case TYPE_UINT16: return "uint16";
+        case TYPE_UINT8: return "uint8";
         case TYPE_VOID: return "";
         case TYPE_UNKNOWN: return "";
         default: return type_to_string(t);

@@ -1,0 +1,88 @@
+// Regression: unsigned types in a quote's tree (docs/quote.md). A uint32,
+// uint16 or uint8 node was typed `UNKNOWN` (type_to_string has no name for
+// them), so a shader back end could not write ae3d's radical-inverse bit
+// twiddling. And a literal past int beside a uint32 was a `long`
+// (`bits & 0xAAAAAAAA`), making the expression 64-bit. Now the tree spells
+// them as Aether does, and an integer literal that fits beside a uint32 in
+// `&`, `|`, `^` or a comparison takes the uint32, where its value cannot
+// change. Arithmetic keeps its rules: `x + 0xFFFFFFFF` is still a long.
+
+import std.quote
+
+extern exit(code: int)
+
+fn check(label: string, got: string, want: string) -> int {
+    if got != want {
+        println("FAIL quote unsigned: ${label}")
+        println("  got:  ${got}")
+        println("  want: ${want}")
+        return 1
+    }
+    return 0
+}
+
+q(t: quote.Tree) -> quote.Tree { return t }
+
+// The same body the quote holds, run on the CPU.
+swap_bits(x: uint32) -> uint32 {
+    bits = x
+    bits = (bits << 16) | (bits >> 16)
+    bits = ((bits & 0x55555555) << 1) | ((bits & 0xAAAAAAAA) >> 1)
+    return bits
+}
+
+uint_of(i: int) -> uint32 { return i as uint32 }
+
+// ae3d's radical inverse, the shape that found this: a @quotable helper with
+// a declared uint32 local.
+@quotable
+radical(i: int) -> uint32 {
+    uint32 bits = uint_of(i)
+    bits = (bits << 16) | (bits >> 16)
+    bits = ((bits & 0x55555555) << 1) | ((bits & 0xAAAAAAAA) >> 1)
+    return bits
+}
+
+wide(x: uint32) -> long {
+    return x + 0xFFFFFFFF
+}
+
+main() {
+    fails = 0
+
+    t = q() quote | x: uint32 | {
+        bits = x
+        bits = (bits << 16) | (bits >> 16)
+        bits = ((bits & 0x55555555) << 1) | ((bits & 0xAAAAAAAA) >> 1)
+        return bits
+    }
+    fails = fails + check("uint32 bit twiddling", quote.dump(t),
+        "(param x :uint32) (BLOCK (LET bits :uint32 (LOCAL x :uint32)) (ASSIGN = (LOCAL bits :uint32) (BINARY | :uint32 (BINARY << :uint32 (LOCAL bits :uint32) (LIT 16 :int)) (BINARY >> :uint32 (LOCAL bits :uint32) (LIT 16 :int)))) (ASSIGN = (LOCAL bits :uint32) (BINARY | :uint32 (BINARY << :uint32 (BINARY & :uint32 (LOCAL bits :uint32) (LIT 0x55555555 :uint32)) (LIT 1 :int)) (BINARY >> :uint32 (BINARY & :uint32 (LOCAL bits :uint32) (LIT 0xAAAAAAAA :uint32)) (LIT 1 :int)))) (RETURN :uint32 (LOCAL bits :uint32)))")
+    quote.free(t)
+
+    t2 = q() quote | a: uint16, b: uint8, c: uint32 | {
+        return c == 0xFFFFFFFF && a > 0 && b > 0
+    }
+    fails = fails + check("uint16, uint8 parameters", "${quote.param_type(t2, 0)} ${quote.param_type(t2, 1)} ${quote.param_type(t2, 2)}", "uint16 uint8 uint32")
+    fails = fails + check("a comparison's literal", quote.dump(t2),
+        "(param a :uint16) (param b :uint8) (param c :uint32) (BLOCK (RETURN :bool (BINARY && :bool (BINARY && :bool (BINARY == :bool (LOCAL c :uint32) (LIT 0xFFFFFFFF :uint32)) (BINARY > :bool (LOCAL a :uint16) (LIT 0 :int))) (BINARY > :bool (LOCAL b :uint8) (LIT 0 :int)))))")
+    quote.free(t2)
+
+    t3 = q() quote | i: int | {
+        return radical(i)
+    }
+    h = quote.helper(t3, 0)
+    fails = fails + check("a @quotable helper's return type", quote.return_type(h), "uint32")
+    fails = fails + check("a @quotable helper's tree", quote.dump(h),
+        "(param i :int) (BLOCK (LET bits :uint32 (CALL uint_of :uint32 (LOCAL i :int))) (ASSIGN = (LOCAL bits :uint32) (BINARY | :uint32 (BINARY << :uint32 (LOCAL bits :uint32) (LIT 16 :int)) (BINARY >> :uint32 (LOCAL bits :uint32) (LIT 16 :int)))) (ASSIGN = (LOCAL bits :uint32) (BINARY | :uint32 (BINARY << :uint32 (BINARY & :uint32 (LOCAL bits :uint32) (LIT 0x55555555 :uint32)) (LIT 1 :int)) (BINARY >> :uint32 (BINARY & :uint32 (LOCAL bits :uint32) (LIT 0xAAAAAAAA :uint32)) (LIT 1 :int)))) (RETURN :uint32 (LOCAL bits :uint32)))")
+    fails = fails + check("the helper on the CPU", "${radical(1)}", "131072")
+    quote.free(t3)
+
+    // The values are what they were.
+    fails = fails + check("CPU value", "${swap_bits(1)}", "131072")
+    fails = fails + check("CPU value, the top bit", "${swap_bits(0x80000000)}", "16384")
+    fails = fails + check("arithmetic is not narrowed", "${wide(1)}", "4294967296")
+
+    if fails > 0 { exit(1) }
+    println("quote unsigned: ok")
+}
