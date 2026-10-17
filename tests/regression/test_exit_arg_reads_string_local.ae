@@ -1,0 +1,50 @@
+// Regression: `exit(f(s))` handed `f` a string local the scope had already
+// released.
+//
+// `exit` does not return, so the statement drains the function's pending
+// releases ahead of the call (otherwise every live local would leak). The
+// drain was emitted before the call's argument was evaluated, so it freed
+// `s` and set it to NULL, and then `f(s)` read NULL. Harmless while a
+// string local only borrowed what it held; since a string local owns its
+// value (0.818.0), `exit(check(s))` saw "(null)" and `exit(string.length(s))`
+// exited 0. The status is now evaluated into a temporary first, then the
+// scope is drained, then the process exits, which is the order a
+// `return f(s)` already used.
+//
+// The exit status is the test's verdict: `verdict` returns 0 only when it
+// sees every value intact, and anything else fails the harness. The
+// `defer` and the loop-body local keep a drain of more than one scope in
+// front of the call.
+
+import std.string
+
+verdict(a: string, b: string, n: int) -> int {
+    if a != "hello world" {
+        println("FAIL: exit's argument read a released local: [${a}]")
+        return 1
+    }
+    if b != "nested-7" {
+        println("FAIL: exit's argument read a released block local: [${b}]")
+        return 2
+    }
+    if n != 11 {
+        println("FAIL: string.length of the local was ${n}, wanted 11")
+        return 3
+    }
+    println("exit argument saw its locals")
+    return 0
+}
+
+main() {
+    // Built at runtime: string.concat of two literals folds to a literal.
+    head = string.concat("hello", "")
+    s = string.concat(head, " world")
+    defer println("deferred drain ran")
+    i = 0
+    while i < 1 {
+        t = "nested-${i + 7}"
+        exit(verdict(s, t, string.length(s)))
+    }
+    println("FAIL: exit returned")
+    exit(9)
+}

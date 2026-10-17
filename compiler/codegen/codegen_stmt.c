@@ -12196,6 +12196,25 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                      * string/seq locals. */
                     if (inner && inner->type == AST_FUNCTION_CALL && inner->value &&
                         strcmp(inner->value, "exit") == 0) {
+                        /* The status is evaluated BEFORE the drain, as a
+                         * `return f(s)` evaluates its value before its
+                         * defers: the drain releases the scope's string
+                         * locals, so `exit(f(s))` used to hand `f` a freed
+                         * (NULLed) `s`. That was harmless while a string
+                         * local borrowed what it held; once a local owns
+                         * its string (0.818), the argument read nothing.
+                         * Evaluate into a temporary, drain, then exit. */
+                        if (inner->child_count == 1) {
+                            fprintf(gen->output, "{ int _ae_exit_code = (int)(");
+                            generate_expression(gen, inner->children[0]);
+                            fprintf(gen->output, ");\n");
+                            emit_all_defers(gen);
+                            print_indent(gen);
+                            fprintf(gen->output, "exit(_ae_exit_code); }\n");
+                            gen->discard_call_node = NULL;
+                            if (held_vt_open) temps_close(gen, &held_vt, 1);
+                            break;
+                        }
                         emit_all_defers(gen);
                     }
                     /* A bare call-statement discards the call's value, so
