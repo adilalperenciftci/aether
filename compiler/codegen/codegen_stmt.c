@@ -4006,6 +4006,9 @@ static void emit_tuple_array_fills(CodeGenerator* gen, ASTNode* stmt, const char
     }
 }
 
+static int return_moves_string_local(CodeGenerator* gen, ASTNode* v, Type* rt);
+static void emit_string_local_moved_out(CodeGenerator* gen, ASTNode* v);
+
 static void emit_tuple_return_position(CodeGenerator* gen, ASTNode* expr,
                                        int j) {
     Type* rt0 = gen ? gen->current_func_return_type : NULL;
@@ -4052,6 +4055,8 @@ static void emit_tuple_return_position(CodeGenerator* gen, ASTNode* expr,
     } else if (pt && own_type_owns(gen, pt) && pt->kind != TYPE_STRING &&
                !gen->in_main_function) {
         emit_composite_take(gen, expr, pt);   /* a closure: emit_closure_take */
+    } else if (return_moves_string_local(gen, expr, pt ? pt : expr->node_type)) {
+        emit_string_local_moved_out(gen, expr);
     } else {
         generate_expression(gen, expr);
     }
@@ -7489,6 +7494,26 @@ static int emit_tuple_passthrough_return(CodeGenerator* gen, ASTNode* v) {
     return 1;
 }
 
+/* A string local returned where the result is a `ptr`: a function whose
+ * result was inferred from the local's last binding (`out = "x"` then `out =
+ * string.from_int(n)`, a `ptr @heap` extern, leaves the return typed `ptr`)
+ * or one declared `-> ptr`. The local owns the string all the same (R2) and
+ * its scope exit releases it, so the return moves it out, as a `string`
+ * return does (R3): emitted bare, the exit drain freed what the caller was
+ * handed. A capture is the closure's env's or cell's, which no exit frees. */
+static int return_moves_string_local(CodeGenerator* gen, ASTNode* v, Type* rt) {
+    return v && v->type == AST_IDENTIFIER && v->value && !gen->in_main_function &&
+           rt && rt->kind == TYPE_PTR && is_heap_string_var(gen, v->value) &&
+           !is_promoted_capture(gen, v->value) && !is_env_capture_name(gen, v->value) &&
+           !is_alias_capture_name(gen, v->value);
+}
+
+static void emit_string_local_moved_out(CodeGenerator* gen, ASTNode* v) {
+    fprintf(gen->output, "(void*)(");
+    emit_string_take(gen, v, NULL);
+    fprintf(gen->output, ")");
+}
+
 // Emit a function's return value. #340: when the return type is `T?`,
 // coerce a bare value / `none` into the optional (`return 5` / `return none`).
 // Otherwise use the uniform-heap-return wrap or the plain expression.
@@ -7591,8 +7616,12 @@ static void emit_return_value(CodeGenerator* gen, ASTNode* stmt) {
             return;
         }
     }
+    Type* ret_t = gen->current_func_return_type ? gen->current_func_return_type
+                                                 : stmt->children[0]->node_type;
     if (should_uniform_heap_return(gen, stmt)) {
         emit_uniform_heap_return_expr(gen, stmt->children[0]);
+    } else if (return_moves_string_local(gen, stmt->children[0], ret_t)) {
+        emit_string_local_moved_out(gen, stmt->children[0]);
     } else if (gen->current_func_return_type &&
                emit_int_ptr_bridged(gen, stmt->children[0],
                                     gen->current_func_return_type->kind)) {
