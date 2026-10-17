@@ -7885,6 +7885,20 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     print_line(gen, "    }");
     print_line(gen, "    return (const char*)string_new_with_length(s, (int)strlen(s));");
     print_line(gen, "}");
+    /* A string handed out as a `ptr` result: a pinned string (a literal, a
+     * fault's name) is its C characters, as a literal used as a `ptr` is
+     * wherever it goes; a counted string is the string itself, the
+     * reference the return hands over. Read byte by byte, as above. */
+    print_line(gen, "static inline void* aether_str_as_ptr_result(const char* s) {");
+    print_line(gen, "    if (!s) return (void*)0;");
+    print_line(gen, "    const unsigned char* _p = (const unsigned char*)s;");
+    print_line(gen, "    if (_p[0] == 0x%02X && _p[1] == 0x%02X && _p[2] == 0x%02X && _p[3] == 0x%02X &&",
+               AE_STR_MAGIC_B0, AE_STR_MAGIC_B1, AE_STR_MAGIC_B2, AE_STR_MAGIC_B3);
+    print_line(gen, "        ((const struct _AeStrHdr*)(const void*)s)->ref_count == 0x%X)",
+               (unsigned)AETHER_STRING_PINNED_REFS);
+    print_line(gen, "        return (void*)((const struct _AeStrHdr*)(const void*)s)->data;");
+    print_line(gen, "    return (void*)s;");
+    print_line(gen, "}");
     /* #2586: ownership through a typed fn pointer, decided at run time. A
      * function used as a fn-pointer value that hands over owned strings
      * marks the one it returns (give, at its uniform-heap returns); a call

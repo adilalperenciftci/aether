@@ -1,0 +1,57 @@
+// Regression: a `-> ptr` function returning a string literal returned the
+// literal's header, not its characters.
+//
+// Since 0.818.0 every literal is a pinned counted string (R1), and a
+// literal used as a `ptr` is meant to stay its C characters wherever it
+// goes (R4). A literal passed straight to a `ptr` parameter still was, but
+// `return "constructor"` from a `-> ptr` function, or a local holding the
+// literal, returned the pinned string's header, so C reading the result
+// read the header's bytes (strlen gave 9, not 11). A pinned string
+// returned as a `ptr` is now its characters, a literal directly and
+// anything else (a local, a parameter, a branch) when it is pinned at run
+// time. A counted string is still handed over as itself.
+
+import std.string
+
+extern strlen(s: ptr) -> long
+extern strcmp(a: ptr, b: ptr) -> int
+extern exit(code: int)
+
+lit_ret() -> ptr { return "constructor" }
+
+local_ret() -> ptr {
+    s = "constructor"
+    return s
+}
+
+param_ret(s: string) -> ptr { return s }
+
+branch_ret(n: int) -> ptr {
+    if n == 0 { return "zero" }
+    if n == 1 { return "one" }
+    return "many"
+}
+
+deferred_ret() -> ptr {
+    s = "constructor"
+    defer println("deferred ran")
+    return s
+}
+
+fn check(p: ptr, want: string, what: string) {
+    if strlen(p) != string.length(want) || strcmp(p, want) != 0 {
+        println("FAIL: ${what} is not the characters of '${want}' (strlen ${strlen(p)})")
+        exit(1)
+    }
+}
+
+main() {
+    check(lit_ret(), "constructor", "a returned literal")
+    check(local_ret(), "constructor", "a returned local holding a literal")
+    check(param_ret("constructor"), "constructor", "a returned parameter holding a literal")
+    check(branch_ret(0), "zero", "branch 0")
+    check(branch_ret(1), "one", "branch 1")
+    check(branch_ret(5), "many", "the last return")
+    check(deferred_ret(), "constructor", "a return through a defer")
+    println("a pinned string returned as ptr is its characters")
+}
