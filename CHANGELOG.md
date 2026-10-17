@@ -14,6 +14,44 @@ cut while your branch is open cannot fold your entry into the released section.
 
 ## [current]
 
+## [0.822.0]
+
+### Fixed
+
+- **A string local returned from a function whose result is a `ptr` is
+  handed to the caller, not freed first.** A function with no result type
+  takes the type of what it returns, and a string local re-bound from a
+  `ptr @heap` extern (`out = "x"`, then `out = string.from_int(n)`) gives it
+  `ptr`. The return moved a local out only for a `string` result, so here it
+  returned the local as it was and the local's scope exit freed it before
+  the caller read it: the caller got freed memory (`''` or garbage) since
+  0.818.0. The return now moves the local out whatever the result's type,
+  as a `string` return does: an untyped return, a `-> ptr` one, an early
+  return and a tuple position. Found by aeb's toolchain-selection tests.
+
+- **`return f("x ${i}")`, where `f` returns a `ptr` or a slice, releases
+  the string it passed.** Since 0.818.0 such an argument lives to the end of
+  its statement (the result may be a view into it), released by the
+  statement's block on every exit. A `return` with no exit work of its own
+  was written as a bare `return v;`, so that release landed after it and
+  never ran: each call leaked the argument, and a module `var` or a field
+  held for the call leaked its reference. Such a return now goes through
+  the exit drain, which releases them once the value is computed. Found by
+  ae3d.
+
+- **Each file's `extern` calls are checked against its own declaration.**
+  Every file's bare externs shared one global symbol, so the first
+  declaration of a name registered was the one every file's calls were
+  checked, and generated, against. A program importing a module that
+  declares `extern memcpy(dst: ptr, src: int[], n: long)` failed another
+  module's own `memcpy(d, p, 8)` ("expected int[], got a bare ptr"), and
+  which declaration won depended on what the program imported and in what
+  order (ae3d: ae3d.vkspirv's memcpy broke 119 calls in other modules, and a
+  test's `sin`). A file that declares an extern now gets its own
+  declaration, in the type checker and in code generation (`@heap`
+  adoption, `@retain`); one that calls an extern it does not declare gets
+  another file's, as before.
+
 ## [0.821.0]
 
 ### Fixed
