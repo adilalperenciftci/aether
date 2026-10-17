@@ -1,0 +1,9 @@
+// Names no constant itself, but calls a std.fs function whose body names
+// STAT_KIND_DIR: the constant that function reads is kept with it.
+import std.fs
+import std.string
+
+main() {
+    e = fs.remove_tree(string.from_int(987654321))
+    println(string.length(e))
+}

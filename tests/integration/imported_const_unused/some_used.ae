@@ -1,0 +1,6 @@
+// Names one of std.fs's constants qualified; the rest go unused.
+import std.fs
+
+main() {
+    println(fs.KIND_EXISTS)
+}
