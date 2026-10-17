@@ -9,6 +9,8 @@
 # found was the builtin, which the glob does not bind. It now asks whether
 # the import bound the symbol. The module's bare `free` is also not
 # rewritten to the program's `string.free`, so it frees with C's free.
+# And a glob-imported constant written bare is renamed to the module's, as
+# a selected one is (the C used to name an undeclared identifier).
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 AE="$ROOT/build/ae"
@@ -46,5 +48,13 @@ if [ "$out" != "64" ]; then
     printf '%s\n' "$out" | head -8 | sed 's/^/        |/'
     fail=1
 fi
-[ $fail -eq 0 ] && echo "  [PASS] glob_import_builtin_free: a glob import binds its own names, never another module's builtin free"
+# A constant a glob import binds, written bare, is the module's constant:
+# the C named an undeclared KIND_NO_SPACE.
+out="$(cd "$SCRIPT_DIR" && AETHER_HOME="$ROOT" "$AE" run glob_const.ae --lib lib 2>&1)"
+if [ "$out" != "9 7 7 42 5" ]; then
+    echo "  [FAIL] glob_import_builtin_free: glob-imported constants should read as the module's"
+    printf '%s\n' "$out" | head -8 | sed 's/^/        |/'
+    fail=1
+fi
+[ $fail -eq 0 ] && echo "  [PASS] glob_import_builtin_free: a glob import binds its own names (constants too), never another module's builtin free"
 exit $fail

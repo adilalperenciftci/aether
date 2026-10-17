@@ -1,0 +1,13 @@
+// A constant a glob import brings in, written bare: std.fs's KIND_NO_SPACE
+// and a library module's. A local named after one stays the local.
+import std.fs(*)
+import cmod(*)
+
+shadow() -> int {
+    other = 40
+    return other + 2
+}
+
+main() {
+    println("${KIND_NO_SPACE} ${LIMIT} ${lim()} ${shadow()} ${other}")
+}
