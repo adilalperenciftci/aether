@@ -1,0 +1,139 @@
+// Regression: `return f("x ${i}")`, where `f` returns a `ptr`, releases the
+// interpolated string.
+//
+// A fresh string passed to a call whose result is a view (a `ptr` or a
+// slice) lives to the end of its statement, and the statement's block
+// releases it on every exit. A `return` with no exit work of its own was
+// written as a bare `return v;`, and the release the call's temporary pushed
+// while `v` was emitted landed after it, where it never runs: every call
+// leaked the string. Strings read from a place the call can store into (a
+// module `var`, a field), held for their statement the same way, leaked
+// their hold, and a multi-value return did the same. Such a return now goes
+// through the exit drain, which releases them once its value is computed, as
+// a `return` in a function with string locals already did. Found by ae3d.
+//
+// The leak check runs where the heap count is exact (mem.heap_in_use_exact):
+// after a warm-up, some window of the same work grows by exactly 0
+// (mem.steady_growth). The macOS leaks gate and valgrind check it elsewhere.
+
+import std.mem
+import std.string
+
+extern exit(code: int)
+
+struct Box { s: string }
+
+var seen = 0
+var g = "init"
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL ${msg}")
+        exit(1)
+    }
+}
+
+// A function returning a `ptr`, which reads its argument.
+takes(name: string) -> ptr {
+    seen = seen + string.length(name)
+    return null
+}
+
+two(a: string, b: int) -> ptr {
+    seen = seen + string.length(a) + b
+    return null
+}
+
+bump(b: *Box) -> int {
+    b.s = "n${string.length(b.s)}"
+    return 1
+}
+
+// The reported shape, and its untyped twin (inferred `ptr`).
+r_interp(id: int) -> ptr { return takes("bone ${id}") }
+r_untyped(id: int) { return takes("bone ${id}") }
+
+// An early return, inside an `if`.
+r_early(id: int) -> ptr {
+    if id >= 0 { return takes("early ${id}") }
+    return null
+}
+
+// A position of a multi-value return.
+r_pair(id: int) { return takes("pair ${id}"), id }
+
+// A call's fresh string as the argument.
+r_call(id: int) -> ptr { return takes(string.from_int(id)) }
+
+// A string parameter: nothing to release, still read.
+r_param(p: string) -> ptr { return takes(p) }
+
+// A module `var` and a field, held for the call.
+r_glob() -> ptr { return takes(g) }
+r_field(b: *Box) -> ptr { return two(b.s, bump(b)) }
+
+round(b: *Box) {
+    i = 0
+    while i < 10 {
+        r_interp(i)
+        r_untyped(i)
+        r_early(i)
+        r_call(i)
+        p, k = r_pair(i)
+        r_param("pp")
+        r_glob()
+        r_field(b)
+        i = i + 1
+    }
+}
+
+main() {
+    println("=== test_return_view_call_temp_released ===")
+    g = "g${string.length("abc")}"
+    b = heap.new(Box)
+    b.s = "v${string.length("abcd")}"
+
+    // The values reach the callee.
+    seen = 0
+    r_interp(7)
+    check(seen == 6, "the interpolated argument reached the callee: ${seen}")
+    seen = 0
+    r_untyped(12)
+    check(seen == 7, "the untyped return's argument reached the callee: ${seen}")
+    seen = 0
+    r_early(3)
+    check(seen == 7, "the early return's argument reached the callee: ${seen}")
+    seen = 0
+    p, k = r_pair(5)
+    check(seen == 6 && k == 5, "the tuple position's argument reached the callee: ${seen}")
+    seen = 0
+    r_call(4242)
+    check(seen == 4, "the call's argument reached the callee: ${seen}")
+    seen = 0
+    r_param("abc")
+    check(seen == 3, "the parameter reached the callee: ${seen}")
+    seen = 0
+    r_glob()
+    check(seen == 2, "the module var reached the callee: ${seen}")
+    seen = 0
+    r_field(b)
+    check(seen == 3, "the field read ahead reached the callee: ${seen}")
+
+    n = 0
+    while n < 20 {
+        round(b)
+        n = n + 1
+    }
+    if mem.heap_in_use_exact() {
+        grown = mem.steady_growth(|| {
+                m = 0
+                while m < 20 {
+                    round(b)
+                    m = m + 1
+                }
+            }, 5)
+        check(grown == 0, "a window of 20 rounds grew the heap by ${grown} bytes in every run")
+    }
+    heap.free(b)
+    println("=== test_return_view_call_temp_released passed ===")
+}

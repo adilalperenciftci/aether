@@ -8559,6 +8559,20 @@ void generate_statement(CodeGenerator* gen, ASTNode* stmt) {
     hoist_end(gen);
 }
 
+/* Does a `return`'s value hold a temporary for its statement
+ * (value_holds_statement_temps), which its exit drain must release? Not a
+ * value that is a slice: it may be a view of that very temporary, and the
+ * caller would be left a dangling view. */
+static int return_holds_statement_temps(CodeGenerator* gen, ASTNode* stmt) {
+    if (!hoist_ready(gen)) return 0;
+    for (int i = 0; i < stmt->child_count; i++) {
+        ASTNode* v = stmt->children[i];
+        if (v && v->type != AST_PRINT_STATEMENT && !type_is_slice(v->node_type) &&
+            value_holds_statement_temps(gen, v)) return 1;
+    }
+    return 0;
+}
+
 static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
     if (!stmt) return;
 
@@ -11528,8 +11542,11 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                 break;
             }
             // Emit ALL defers before return (unwind entire function)
+            /* And when the value holds a temporary for its statement
+             * (return_holds_statement_temps). */
             if (gen->defer_count > 0 ||
-                (stmt->child_count == 1 && value_holds_temps(gen, stmt->children[0], 1))) {
+                (stmt->child_count == 1 && value_holds_temps(gen, stmt->children[0], 1)) ||
+                return_holds_statement_temps(gen, stmt)) {
                 // Multi-value return + defer: build a _builder_ret typed
                 // as the function's tuple return so the existing defer-
                 // unwind machinery still applies. Without this branch,
