@@ -1,0 +1,9 @@
+// std.fs's remove_tree destructures `k, _s, _m, serr = file_stat(path)` and
+// reads only `k` and `serr`. Removing a path that does not exist is a no-op.
+import std.fs
+import std.string
+
+main() {
+    e = fs.remove_tree(string.from_int(987654321))
+    println(string.length(e))
+}
