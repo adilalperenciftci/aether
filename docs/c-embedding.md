@@ -132,21 +132,19 @@ typedef struct {
     int counter;       // Your state
 } MyCounter;
 
-// Message handler
+// Message handler: one message per call (see "Message Handler Pattern")
 void my_counter_step(void* self) {
     MyCounter* actor = (MyCounter*)self;
     Message msg;
 
-    // Process messages from mailbox
-    while (mailbox_receive(&actor->base.mailbox, &msg)) {
-        switch (msg.type) {
-            case 1:  // Increment
-                actor->counter += msg.payload_int;
-                break;
-            case 2:  // Print
-                printf("Counter: %d\n", actor->counter);
-                break;
-        }
+    if (!mailbox_receive(&actor->base.mailbox, &msg)) return;
+    switch (msg.type) {
+        case 1:  // Increment
+            actor->counter += msg.payload_int;
+            break;
+        case 2:  // Print
+            printf("Counter: %d\n", actor->counter);
+            break;
     }
 }
 
@@ -305,28 +303,32 @@ the `AETHER_ACTOR_BASE_FIELDS` macro in `runtime/scheduler/multicore_scheduler.h
 
 ## Message Handler Pattern
 
+A step takes **one** message per call, as a generated step does: the
+scheduler calls it once for each message it delivers and counts each call as
+one message processed. A step that drained its whole mailbox would leave
+`scheduler_wait()`, and so `scheduler_shutdown()`, waiting for messages it
+counts as never processed.
+
 ```c
 void my_actor_step(void* self) {
     MyActor* actor = (MyActor*)self;
     Message msg;
 
-    // Drain all pending messages
-    while (mailbox_receive(&actor->base.mailbox, &msg)) {
-        switch (msg.type) {
-            case MSG_TYPE_1:
-                // Handle message type 1
-                handle_type_1(actor, msg.payload_int);
-                break;
+    if (!mailbox_receive(&actor->base.mailbox, &msg)) return;
+    switch (msg.type) {
+        case MSG_TYPE_1:
+            // Handle message type 1
+            handle_type_1(actor, msg.payload_int);
+            break;
 
-            case MSG_TYPE_2:
-                // Handle message type 2
-                handle_type_2(actor, (SomeStruct*)msg.payload_ptr);
-                break;
+        case MSG_TYPE_2:
+            // Handle message type 2
+            handle_type_2(actor, (SomeStruct*)msg.payload_ptr);
+            break;
 
-            default:
-                // Unknown message type
-                break;
-        }
+        default:
+            // Unknown message type
+            break;
     }
 }
 ```

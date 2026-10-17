@@ -19,13 +19,14 @@ typedef struct {
     atomic_int fresh_seen;
 } Probe;
 
+/* One message per call, as a generated step takes them: the scheduler
+ * counts a step as one message processed. */
 static void probe_step(void* self) {
     Probe* p = (Probe*)self;
     Message m;
-    while (mailbox_receive(&p->base.mailbox, &m)) {
-        if (m.type == STALE_TYPE) atomic_fetch_add(&p->stale_seen, 1);
-        else atomic_fetch_add(&p->fresh_seen, 1);
-    }
+    if (!mailbox_receive(&p->base.mailbox, &m)) return;
+    if (m.type == STALE_TYPE) atomic_fetch_add(&p->stale_seen, 1);
+    else if (m.type == 1) atomic_fetch_add(&p->fresh_seen, 1);
 }
 
 static Probe* spawn_probe(void) {
@@ -47,16 +48,22 @@ int actor_ref_probe(void) {
     scheduler_release_actor(&first->base);
 
     /* The released block goes to a later spawn of its size once every core
-     * has passed the top of its loop; spawn until one gets it. */
+     * has passed the top of its loop since; an idle core parks instead, so
+     * each actor spawned is sent a message, which keeps the cores going.
+     * Spawn until one gets the block. */
     Probe* reused = NULL;
-    Probe* others[4096];
-    int n = 0;
     for (int tries = 0; tries < 4096 && !reused; tries++) {
         Probe* p = spawn_probe();
         if (!p) return 2;
-        if (p == first) reused = p;
-        else others[n++] = p;
-        usleep(200);
+        if (p == first) {
+            reused = p;
+            break;
+        }
+        Message wake;
+        memset(&wake, 0, sizeof(wake));
+        wake.type = 2;
+        scheduler_send_remote(&p->base, wake, -1);
+        scheduler_wait();
     }
     if (!reused) {
         printf("FAIL: the released block was never reused\n");
@@ -88,7 +95,6 @@ int actor_ref_probe(void) {
         printf("FAIL: a send through the new actor's reference was not delivered\n");
         ok = 0;
     }
-    (void)others;
     scheduler_shutdown();
     if (ok) printf("actor_ref_after_release passed\n");
     return ok ? 0 : 4;
