@@ -14,6 +14,55 @@ cut while your branch is open cannot fold your entry into the released section.
 
 ## [current]
 
+## [0.821.0]
+
+### Fixed
+
+- **A quote's helpers, and so `quote.hash`, are named the same in every
+  program.** A `@quotable` function in a module was named in the tree by its
+  merged C name, whose prefix is the module's last segment unless another
+  loaded module ends the same way (#2209). So `ae3d.shaders.sky`'s
+  `oct_decode` was `sky_oct_decode` in a program importing only it and
+  `ae3d_shaders_sky_oct_decode` in one that also imports `ae3d.sky`, the
+  same quote hashed differently in the two, and ae3d refused its
+  precompiled SPIR-V. A module's helper is now named by the module's full
+  path, dots as underscores, and the function, always
+  (`ae3d_shaders_sky_oct_decode`, `shaderlib_luma`), in `HELPER_CALL`,
+  `quote.function_name`, `quote.helper_named` and the hash; calls still
+  reach the function's C name. `quote.VERSION` stays 2 (no kind changed),
+  but helpers in a module of more than one segment are renamed and the hash
+  of each quote reaching one changes once: regenerate anything cached on it.
+
+- **A trusted function's own `sandbox.enforce` no longer takes the block's
+  grants with it.** In `sandbox.enforce(perms, svc) { svc.read() }`, the
+  trusted call dropped the sandbox stack to its site's level and put the
+  depth back after. If `svc.read` then wrote an enforce of its own, as an
+  injected service keeping a fixed-path fence does, that enforce pushed into
+  the level the call had dropped, over the block's grants, and freed what it
+  pushed when it ended. From then on the block was checked against freed
+  memory: a service called three times read once and was refused twice,
+  and valgrind reported invalid reads in `_aether_sandbox_check_impl`. With
+  the enforce at the outermost level, the inner enforce's end also
+  uninstalled the checker for the rest of the block. A trusted call now
+  pushes a barrier level above the ones it hides instead of dropping the
+  depth, and the checker walks the stack from the top, jumping from a
+  barrier to below the level it names, so nothing pushed inside a trusted
+  call reaches the block's grants, and a `try` unwinding a panic out of one
+  finds them as they were. Covered in `std/sandbox/test_sandbox_trust.ae`
+  (a fenced service called three times, and one panicking inside its fence).
+
+- **A quote's tree names the unsigned types, and a literal beside a
+  `uint32` is one.** A `uint32`, `uint16` or `uint8` node was typed
+  `UNKNOWN` in the tree, so a shader back end could not write ae3d's
+  radical-inverse bit twiddling, and `bits & 0xAAAAAAAA` was a `long`, the
+  literal being past `int`. The tree now spells them `uint32`, `uint16`,
+  `uint8`. An integer literal that fits (0 to 0xFFFFFFFF) beside a `uint32`
+  in `&`, `|`, `^` or a comparison takes the `uint32`, in a quote and
+  outside one, where its value cannot change: `b = x & 0xFFFFFFF0` now
+  infers `b` as a `uint32`, as `x & 0xF0` already did. Arithmetic and shifts
+  are unchanged (`x + 0xFFFFFFFF` is still a `long`). `quote.VERSION` stays
+  2: type names are not kinds.
+
 ## [0.820.0]
 
 ### Changed
