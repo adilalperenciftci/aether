@@ -4799,9 +4799,10 @@ void module_merge_into_program(ASTNode* program) {
 //   4. Record any AST_FUNCTION_DEFINITION / AST_BUILDER_FUNCTION whose
 //      `is_imported` flag is set and whose name is NOT in the reachable
 //      set; the sweep drops exactly those once they are checked.
-//      Constants stay: they're cheap, and pruning them would need an
-//      additional reachability pass keyed on identifier references,
-//      which isn't worth it for the size of a constant.
+//   5. The imported constants nothing names are dropped by the sweep too
+//      (module_sweep_unreferenced_consts): not for their size, but because
+//      each is an unused `static const` in the C, which -Wall -Werror
+//      rejects.
 //
 // Qualified call sites carry dotted names (`os.argv0`); codegen rewrites
 // dot-to-underscore at emission. We normalise the same way when adding
@@ -5269,9 +5270,88 @@ void module_mark_unreachable(ASTNode* program) {
     nameset_free(&reachable);
 }
 
+/* An imported constant the sweep may drop: one merged in from a module
+ * (origin_module; a merged constant is not marked is_imported) that the
+ * module wrote as a plain `const`, a scalar or an array. Not a module `var`
+ * (global_var), not one a C header owns (c_import_const), and not one a
+ * package library exports. */
+static int const_sweepable(const ASTNode* c) {
+    if (!c || c->type != AST_CONST_DECLARATION || !c->origin_module || !c->value) return 0;
+    if (c->annotation && strcmp(c->annotation, "array_const") != 0) return 0;
+    return module_lib_package_module_of(c) == NULL;
+}
+
+/* Every name `node` and what it holds spell, normalised (`fs.KIND_OK` files
+ * as `fs_KIND_OK`). A superset of the references: any identifier, call,
+ * member or pattern that spells a constant's name keeps the constant. */
+static void const_refs_collect(const ASTNode* node, NameSet* refs) {
+    if (!node) return;
+    if (node->value) nameset_add(refs, node->value);
+    for (int i = 0; i < node->child_count; i++) const_refs_collect(node->children[i], refs);
+}
+
+/* Is the constant `name` spelled among `refs`, by its merged name or by any
+ * `_`-separated tail of it (the bare `KIND_OK` a glob or selective import
+ * writes for `fs_KIND_OK`, the same suffix match the function prune makes)? */
+static int const_is_referenced(const NameSet* refs, const char* name) {
+    if (nameset_contains(refs, name)) return 1;
+    for (const char* p = strchr(name, '_'); p; p = strchr(p + 1, '_')) {
+        if (p[1] && nameset_contains(refs, p + 1)) return 1;
+    }
+    return 0;
+}
+
+/* The imported constants nothing names, dropped. Each is a file-scope
+ * `static const` in the C, and an unused one is -Wunused-const-variable,
+ * which -Wall turns on for C on gcc and clang: `import std.fs` alone gave a
+ * program fourteen of them (ae_const_fs_KIND_*), so it could not be built
+ * with -Wall -Werror. Run with the function sweep, after type checking, so
+ * the dropped ones were checked like every other declaration. A constant
+ * another kept constant's initializer names is kept with it. */
+static void module_sweep_unreferenced_consts(ASTNode* program) {
+    int candidates = 0;
+    for (int i = 0; i < program->child_count; i++) {
+        if (const_sweepable(program->children[i])) candidates++;
+    }
+    if (candidates == 0) return;
+    char* keep = calloc((size_t)program->child_count, 1);
+    if (!keep) return;   /* OOM: every constant is kept and emitted */
+    NameSet refs = {0};
+    for (int i = 0; i < program->child_count; i++) {
+        ASTNode* c = program->children[i];
+        if (!const_sweepable(c)) const_refs_collect(c, &refs);
+    }
+    int changed = 1;
+    while (changed) {
+        changed = 0;
+        for (int i = 0; i < program->child_count; i++) {
+            ASTNode* c = program->children[i];
+            if (keep[i] || !const_sweepable(c) || !const_is_referenced(&refs, c->value)) continue;
+            keep[i] = 1;
+            changed = 1;
+            for (int k = 0; k < c->child_count; k++) const_refs_collect(c->children[k], &refs);
+        }
+    }
+    int kept = 0;
+    for (int i = 0; i < program->child_count; i++) {
+        ASTNode* c = program->children[i];
+        if (const_sweepable(c) && !keep[i]) {
+            free_ast_node(c);
+        } else {
+            program->children[kept++] = c;
+        }
+    }
+    program->child_count = kept;
+    nameset_free(&refs);
+    free(keep);
+}
+
 void module_sweep_unreachable(ASTNode* program) {
     if (!program || g_unreachable_count == 0) {
         module_unreachable_reset();
+        /* After the functions, so a constant only a dropped one named
+         * goes too. */
+        if (program) module_sweep_unreferenced_consts(program);
         return;
     }
     qsort(g_unreachable, (size_t)g_unreachable_count, sizeof(ASTNode*),
@@ -5293,6 +5373,7 @@ void module_sweep_unreachable(ASTNode* program) {
     }
     program->child_count = kept;
     module_unreachable_reset();
+    module_sweep_unreferenced_consts(program);
 }
 
 void module_prune_unreachable(ASTNode* program) {

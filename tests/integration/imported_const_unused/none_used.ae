@@ -1,0 +1,9 @@
+// Imports modules with many constants and names none of them. No string
+// literal either, so nothing else of the program is a static to warn about.
+import std.fs
+import std.json
+
+main() {
+    n = 7
+    println(n)
+}
