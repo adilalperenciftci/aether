@@ -394,6 +394,15 @@ typedef struct {
     int* static_str_lens;
     int static_str_count;
     int static_str_capacity;
+    /* Which of them the C names, the pinned string (bit 1) or only its
+     * bytes (bit 2), and the offset in `output` their definitions go in at
+     * once the program is written (emit_used_static_string_literals); -1
+     * when every one was written up front instead, the output being one
+     * that cannot be read back. A literal every use of which is written as
+     * plain C characters ("x" to puts) is left out: an unused static const
+     * is -Wunused-const-variable, an error under -Wall -Werror. */
+    unsigned char* static_str_used;
+    long static_str_pos;
 
     // Builder function registry: functions with _ctx: ptr as first param
     // get builder_context() auto-injected at call sites inside trailing blocks
@@ -661,6 +670,7 @@ void emit_string_literal_write(CodeGenerator* gen, const ASTNode* lit, int newli
 void emit_print_literal_format(CodeGenerator* gen, const ASTNode* lit);
 int  static_string_literal_index(CodeGenerator* gen, const char* bytes, int len);
 void emit_static_string_literals(CodeGenerator* gen, ASTNode* program);
+void emit_used_static_string_literals(CodeGenerator* gen);
 int  binary_is_string_compare(const ASTNode* expr);                      // #2515
 void emit_string_compare_open(CodeGenerator* gen, const char* op);       // #2515
 void emit_string_compare_close(CodeGenerator* gen, const char* op);      // #2515   // #2467

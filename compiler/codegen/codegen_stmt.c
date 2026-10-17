@@ -7824,6 +7824,10 @@ static int hoist_output_usable(CodeGenerator* gen) {
     return readable;
 }
 
+int codegen_output_rewritable(CodeGenerator* gen) {
+    return hoist_output_usable(gen);
+}
+
 int hoist_ready(CodeGenerator* gen) {
     return gen->hoist_depth > 0 && gen->hoist_start >= 0;
 }

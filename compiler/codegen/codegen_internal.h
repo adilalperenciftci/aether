@@ -43,6 +43,8 @@ const char* cg_internf(const char* fmt, ...)
  * a conditional). */
 typedef struct { int stmt_expr; int ordered; } TempSeq;
 int hoist_ready(CodeGenerator* gen);
+/* Can gen->output be read back and written over (hoist_output_usable)? */
+int codegen_output_rewritable(CodeGenerator* gen);
 int value_holds_statement_temps(CodeGenerator* gen, ASTNode* e);
 void seq_open(CodeGenerator* gen, TempSeq* s);
 void seq_open_ordered(CodeGenerator* gen, TempSeq* s, int typed);

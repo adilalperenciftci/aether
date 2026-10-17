@@ -5658,6 +5658,8 @@ int static_string_literal_index(CodeGenerator* gen, const char* bytes, int len) 
                                                 gen->static_str_capacity * sizeof(char*));
         gen->static_str_lens = aether_xrealloc(gen->static_str_lens,
                                                gen->static_str_capacity * sizeof(int));
+        gen->static_str_used = aether_xrealloc(gen->static_str_used,
+                                               (size_t)gen->static_str_capacity);
     }
     char* copy = malloc((size_t)len + 1);
     if (!copy) {
@@ -5668,6 +5670,7 @@ int static_string_literal_index(CodeGenerator* gen, const char* bytes, int len) 
     copy[len] = '\0';
     gen->static_str_bytes[gen->static_str_count] = copy;
     gen->static_str_lens[gen->static_str_count] = len;
+    gen->static_str_used[gen->static_str_count] = 0;
     return gen->static_str_count++;
 }
 
@@ -5683,18 +5686,24 @@ static void collect_static_string_literals(CodeGenerator* gen, ASTNode* node) {
     }
 }
 
-/* R1 of the ownership model: every string literal of the program is a
- * counted string like any other, so `release` is right on any string value.
- * Each distinct literal is emitted here, once, as a static AetherString with
- * its length, in the layout of std/string/aether_string.h, pinned
- * (AETHER_STRING_PINNED_REFS) so that string_retain and string_release leave
- * it alone and it is never freed. Its bytes keep every NUL (#2520), since the
- * length, not a terminator, says where it ends. Where a literal goes to C as
- * characters (an extern's argument, a C struct's field), it is written as
- * those characters instead (emit_string_literal_chars). */
-void emit_static_string_literals(CodeGenerator* gen, ASTNode* program) {
-    collect_static_string_literals(gen, program);
-    if (gen->static_str_count == 0) return;
+#define AE_SLIT_USED_STRING 1   /* `&_ae_slit_<i>`, the pinned string */
+#define AE_SLIT_USED_BYTES  2   /* `_ae_slit_<i>_bytes` only */
+
+/* The static string of literal `i`, and its bytes, in the layout of
+ * std/string/aether_string.h; the pinned string only when `with_string`. */
+static void emit_static_string_literal(CodeGenerator* gen, int i, int with_string) {
+    int len = gen->static_str_lens[i];
+    fprintf(gen->output, "static const char _ae_slit_%d_bytes[] = \"", i);
+    emit_c_string_bytes(gen, gen->static_str_bytes[i], (size_t)len, 0);
+    fprintf(gen->output, "\";\n");
+    if (!with_string) return;
+    fprintf(gen->output, "static const _AeStaticStr _ae_slit_%d = { 0x%Xu, 0x%X, %d, %d, (char*)_ae_slit_%d_bytes };\n",
+            i, (unsigned)AETHER_STRING_MAGIC, (unsigned)AETHER_STRING_PINNED_REFS,
+            len, len + 1, i);
+}
+
+/* The heading and the struct type the literals are written with. */
+static void emit_static_string_literals_head(CodeGenerator* gen) {
     fprintf(gen->output, "/* The program's string literals: static, pinned AetherStrings. */\n");
     /* The runtime declares AetherString from the same field list, so the
      * layout written here is the layout the string functions read. */
@@ -5704,19 +5713,79 @@ void emit_static_string_literals(CodeGenerator* gen, ASTNode* program) {
             AE_STR_ABI_TEXT(AETHER_STRING_FIELDS));
 #undef AE_STR_ABI_TEXT
 #undef AE_STR_ABI_TEXT_
-    for (int i = 0; i < gen->static_str_count; i++) {
-        int len = gen->static_str_lens[i];
-        fprintf(gen->output, "static const char _ae_slit_%d_bytes[] = \"", i);
-        emit_c_string_bytes(gen, gen->static_str_bytes[i], (size_t)len, 0);
-        fprintf(gen->output, "\";\n");
-        fprintf(gen->output, "static const _AeStaticStr _ae_slit_%d = { 0x%Xu, 0x%X, %d, %d, (char*)_ae_slit_%d_bytes };\n",
-                i, (unsigned)AETHER_STRING_MAGIC, (unsigned)AETHER_STRING_PINNED_REFS,
-                len, len + 1, i);
+}
+
+/* R1 of the ownership model: every string literal of the program is a
+ * counted string like any other, so `release` is right on any string value.
+ * Each distinct literal is emitted once, as a static AetherString with its
+ * length, in the layout of std/string/aether_string.h, pinned
+ * (AETHER_STRING_PINNED_REFS) so that string_retain and string_release leave
+ * it alone and it is never freed. Its bytes keep every NUL (#2520), since the
+ * length, not a terminator, says where it ends. Where a literal goes to C as
+ * characters (an extern's argument, a C struct's field, println's puts), it
+ * is written as those characters instead (emit_string_literal_chars).
+ *
+ * So a literal may be registered here and never named by the C: `println("x")`
+ * is `puts("x")`. Its static would be an unused `static const`, which
+ * -Wunused-const-variable (in -Wall, for C, on gcc and clang) reports and
+ * -Werror fails the build on. The definitions are therefore written once the
+ * program is, at the offset noted here, for the literals the C names
+ * (emit_used_static_string_literals). An output that cannot be read back and
+ * rewritten (a write-only device) gets every one here, as before. */
+void emit_static_string_literals(CodeGenerator* gen, ASTNode* program) {
+    collect_static_string_literals(gen, program);
+    if (gen->static_str_count == 0) return;
+    if (codegen_output_rewritable(gen) && fflush(gen->output) == 0) {
+        gen->static_str_pos = ftell(gen->output);
+        if (gen->static_str_pos >= 0) return;
     }
+    gen->static_str_pos = -1;
+    emit_static_string_literals_head(gen);
+    for (int i = 0; i < gen->static_str_count; i++) {
+        emit_static_string_literal(gen, i, 1);
+    }
+}
+
+/* The definitions of the literals the C names, where
+ * emit_static_string_literals left room for them: the file from there is
+ * written again after them. Called once everything else is written. */
+void emit_used_static_string_literals(CodeGenerator* gen) {
+    long pos = gen->static_str_pos;
+    if (pos < 0) return;
+    gen->static_str_pos = -1;
+    int any = 0;
+    for (int i = 0; i < gen->static_str_count; i++) {
+        if (gen->static_str_used[i]) { any = 1; break; }
+    }
+    if (!any) return;
+    FILE* out = gen->output;
+    if (fflush(out) != 0) goto fail;
+    long end = ftell(out);
+    if (end < pos) goto fail;
+    size_t n = (size_t)(end - pos);
+    char* tail = (char*)aether_xrealloc(NULL, n ? n : 1);
+    if (fseek(out, pos, SEEK_SET) != 0 || fread(tail, 1, n, out) != n ||
+        fseek(out, pos, SEEK_SET) != 0) {
+        free(tail);
+        goto fail;
+    }
+    emit_static_string_literals_head(gen);
+    for (int i = 0; i < gen->static_str_count; i++) {
+        unsigned char used = gen->static_str_used[i];
+        if (used) emit_static_string_literal(gen, i, (used & AE_SLIT_USED_STRING) != 0);
+    }
+    fwrite(tail, 1, n, out);
+    fflush(out);
+    free(tail);
+    return;
+fail:
+    fprintf(stderr, "Fatal: the program's string literals could not be written\n");
+    exit(1);
 }
 
 void emit_string_literal_node(CodeGenerator* gen, const ASTNode* lit) {
     int idx = static_string_literal_index(gen, lit->value, ast_literal_length(lit));
+    gen->static_str_used[idx] |= AE_SLIT_USED_STRING;
     fprintf(gen->output, "((const char*)&_ae_slit_%d)", idx);
 }
 
@@ -5724,6 +5793,7 @@ void emit_string_literal_chars(CodeGenerator* gen, const ASTNode* lit) {
     if (lit->value_len > 0) {
         /* Its bytes, a NUL included, as the pinned string holds them. */
         int idx = static_string_literal_index(gen, lit->value, lit->value_len);
+        gen->static_str_used[idx] |= AE_SLIT_USED_BYTES;
         fprintf(gen->output, "_ae_slit_%d_bytes", idx);
     } else {
         emit_c_string_literal(gen, lit->value);

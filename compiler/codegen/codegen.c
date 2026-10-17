@@ -666,6 +666,8 @@ CodeGenerator* create_code_generator(FILE* output) {
     gen->static_str_lens = NULL;
     gen->static_str_count = 0;
     gen->static_str_capacity = 0;
+    gen->static_str_used = NULL;
+    gen->static_str_pos = -1;
     // Builder function registry
     gen->builder_funcs = NULL;
     gen->builder_func_count = 0;
@@ -862,6 +864,8 @@ void code_generator_release(CodeGenerator* gen) {
         for (int i = 0; i < gen->static_str_count; i++) free(gen->static_str_bytes[i]);   /* #2520 */
         free(gen->static_str_bytes);
         free(gen->static_str_lens);
+        free(gen->static_str_used);
+        gen->static_str_used = NULL;
         gen->static_str_bytes = NULL;
         gen->static_str_lens = NULL;
         gen->static_str_count = 0;
@@ -9668,6 +9672,8 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     // ships as both a loadable library and a binary. Issue #268.3.
     emit_main_shim_for_target(gen, program);
     emit_defer_thunks(gen);
+    /* Last of all: it writes the file over from the literals' place on. */
+    emit_used_static_string_literals(gen);
 
     // Close header file if emitting
     if (gen->emit_header && gen->header_file) {

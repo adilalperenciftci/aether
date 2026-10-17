@@ -1,0 +1,11 @@
+// Every literal here reaches the C as plain characters: println of a
+// literal is puts, an extern's string argument is a C string. None needs
+// its static pinned AetherString.
+extern strlen(s: string) -> int
+
+main() {
+    println("Usage:")
+    println("  plain [options]")
+    n = strlen("abc")
+    println(n)
+}
