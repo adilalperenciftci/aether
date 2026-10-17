@@ -260,9 +260,15 @@ main() {
             sst, sperr = sqlite.prepare(db, "SELECT v FROM b")
             spec.assert_str_eq(sperr, "", "prepare select succeeds")
             spec.assert_eq(sqlite.next_row(sst, db), 1, "the row is there")
-            _data, n, berr = sqlite.column_blob(sst, 0)
+            data, n, berr = sqlite.column_blob(sst, 0)
             spec.assert_str_eq(berr, "", "column_blob succeeds")
             spec.assert_eq(n, 5, "all 5 bytes come back — the NUL did not truncate")
+            // The bytes after the NUL, not only the count: the getter bound
+            // to a local was a C string, copied up to the NUL, and the
+            // length-aware copy then read past that copy's end.
+            spec.assert_eq(string.length(data), 5, "the string holds all 5 bytes")
+            spec.assert_eq(string.char_at(data, 3), 99, "byte 3 is 'c'")
+            spec.assert_eq(string.char_at(data, 4), 100, "byte 4 is 'd'")
             _f2 = sqlite.finalize(sst)
         }
 

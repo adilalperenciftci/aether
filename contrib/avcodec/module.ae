@@ -60,13 +60,16 @@ extern avc_fps_num_raw(dec: ptr) -> int
 extern avc_fps_den_raw(dec: ptr) -> int
 extern avc_pts_ms_raw(dec: ptr) -> int
 extern avc_try_next_frame(dec: ptr) -> int
-extern avc_get_frame_bytes() -> string
+// The frame and PCM getters hand back bytes whose length C reports
+// separately, not a C string: a `ptr`, so binding one to a local does not
+// copy it up to the first NUL.
+extern avc_get_frame_bytes() -> ptr
 extern avc_get_frame_length() -> int
 extern avc_release_frame()
 extern avc_copy_frame_into_raw(dec: ptr, buf: ptr, cap: int) -> int
 extern avc_error_raw(dec: ptr) -> string
 extern avc_audio_decode_raw(url: string) -> int
-extern avc_audio_get_pcm() -> string
+extern avc_audio_get_pcm() -> ptr
 extern avc_audio_get_pcm_length() -> int
 extern avc_audio_sample_rate() -> int
 extern avc_audio_channels() -> int

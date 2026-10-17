@@ -109,6 +109,32 @@ main() {
             avcodec.close(d)
         }
 
+        // The frame's bytes, not only its count: the getter behind
+        // next_frame was a C string, so binding it to a local copied it up
+        // to the first NUL (testsrc's bars are full of 0 channels), and the
+        // length-aware copy read past that. The first frame from each path
+        // must agree byte for byte.
+        spec.it_when(have, "the allocating path's frame matches the buffer path's", reason) callback {
+            d, _e = avcodec.open(clip, 64, 48)
+            px, n, _ferr = avcodec.next_frame(d)
+            avcodec.close(d)
+            d2, _e2 = avcodec.open(clip, 64, 48)
+            buf = bytes.new(frame_bytes)
+            m, _e3 = avcodec.next_frame_into(d2, bytes.data(buf), frame_bytes)
+            avcodec.close(d2)
+            _ = bytes.set_length(buf, m)
+            spec.assert_eq(n, m, "both paths decode a whole frame")
+            spec.assert_eq(string.length(px), frame_bytes, "the string holds the whole frame")
+            diff = 0
+            i = 0
+            while i < frame_bytes {
+                if string.char_at(px, i) != bytes.get(buf, i) { diff = diff + 1 }
+                i = i + 1
+            }
+            spec.assert_eq(diff, 0, "no byte differs")
+            bytes.free(buf)
+        }
+
         // The zero-allocation path, one buffer reused to EOF. Running to
         // the end also proves EOF is reported as n==0 rather than looping
         // forever. The count is asserted as a RANGE: 2s at 10fps is ~20
