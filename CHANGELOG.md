@@ -14,6 +14,54 @@ cut while your branch is open cannot fold your entry into the released section.
 
 ## [current]
 
+## [0.824.0]
+
+### Added
+
+- **`AetherActorRef` for a C host that may send late.** `scheduler_actor_ref`
+  pairs an actor with its id and `scheduler_send_ref` drops and counts a send
+  whose actor has been released, even once a new actor has taken its block,
+  which a send through the bare pointer reaches (#2527).
+
+### Fixed
+
+- **A server frees its access log's and metrics' state.** `http_server_free`
+  left behind the `MetricsState` (with its mutex and every route it recorded)
+  of a server given metrics, and the format and open file of one given an
+  access log (#2910).
+
+- **A failed bounds check's panic message is whole.** It was formatted into a
+  192-byte static buffer, so a long source path cut off the part saying what
+  went wrong, and two threads failing a check at once wrote the same buffer
+  (#2932).
+
+- **A library calls its own functions, not a host's.** An `--emit=lib`
+  library exported each function under its own name too, and on ELF a host
+  or another library defining the same name took over the library's calls
+  to it: the SWIG round-trip recursed until it overflowed its stack. A
+  function exported through its `aether_<name>` alias is now hidden under
+  its own name (#2937).
+
+- **A function may be named like a generated helper.** A program function
+  called `Ship_dup`, `Note_release_fields` or `Counter_step` collided with
+  the helper the compiler generates for that struct, message or actor, and
+  the C did not compile. The helpers are in the reserved `_aether_`
+  namespace now; a function named `spawn_<Actor>`, which a C host calls, is
+  an error naming the actor (#2804).
+
+- **E0900 sees slices that dangle through a closure.** A closure storing its
+  own array literal into a variable of the frame it is written in (directly
+  or through a local), a bare binding inside a closure carrying a view of
+  the frame's storage, and `call(get)` of a closure returning one were
+  accepted and read freed memory (#2846).
+
+- **A send from another thread while the scheduler is stopped is refused.**
+  A `std.worker` job, an http pool worker or a C host's thread sending while
+  the scheduler was shut down, starting again or cleaned up could take a
+  core's lock between its destroy and its init, or divide by a core count of
+  0. Such a send is now dropped, its payload released, counted by
+  `scheduler_stopped_sends()` and reported once (#2912).
+
 ## [0.823.0]
 
 ### Fixed
