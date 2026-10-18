@@ -1,0 +1,64 @@
+// Regression: a string local or parameter holding a literal, passed to an
+// Aether function's `ptr` parameter, reached it as the literal's header,
+// not its characters.
+//
+// Since 0.818.0 every literal is a pinned counted string (R1), and a
+// literal used as a `ptr` is meant to stay its C characters wherever it
+// goes (R4). A literal written straight into the call was, and so was any
+// string handed to an extern's `ptr` parameter, but `s = "constructor"`
+// then `take(s)` with `take(p: ptr)` gave the callee the pinned string's
+// header, so C reading it read the header's bytes (strlen 9, not 11).
+// The return path had the same hole (#2967). A pinned string passed to an
+// Aether `ptr` parameter is now its characters; a counted string is still
+// passed as itself.
+
+import std.string
+
+extern strlen(s: ptr) -> long
+extern strcmp(a: ptr, b: ptr) -> int
+extern exit(code: int)
+
+fn check(p: ptr, want: string, what: string) {
+    if strlen(p) != string.length(want) || strcmp(p, want) != 0 {
+        println("FAIL: ${what} is not the characters of '${want}' (strlen ${strlen(p)})")
+        exit(1)
+    }
+}
+
+pass_on(s: string) {
+    check(s, "constructor", "a string parameter holding a literal")
+}
+
+struct Named {
+    name: string
+}
+
+main() {
+    check("constructor", "constructor", "a literal")
+
+    s = "constructor"
+    check(s, "constructor", "a local holding a literal")
+
+    int magic = 0
+    cproto = "constructor"
+    if magic == 1 { cproto = "constructor_magic" }
+    check(cproto, "constructor", "a local re-bound in a branch")
+    magic = 1
+    c2 = "constructor"
+    if magic == 1 { c2 = "constructor_magic" }
+    check(c2, "constructor_magic", "the branch's literal")
+
+    pass_on("constructor")
+
+    n = Named { name: "constructor" }
+    check(n.name, "constructor", "a struct field holding a literal")
+
+    // A counted string is handed over as itself, as before; read it back
+    // through the string API rather than as C characters.
+    built = string.concat("constr", "uctor")
+    if string.length(built) != 11 {
+        println("FAIL: counted string")
+        exit(1)
+    }
+    println("a pinned string passed as ptr is its characters")
+}
