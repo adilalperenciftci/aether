@@ -36,11 +36,11 @@ main() {
     defer quote.free(t)
     fails = 0
     fails = fails + check("the field is a vec4[4], its element a vec4", quote.dump(t),
-                          "(param k :int) (capture haze :Haze) (BLOCK (RETURN :vec4 (INDEX :vec4 (FIELD column :vec4[4] (CAPTURE haze :Haze)) (LOCAL k :int))))")
+        "(param k :int) (capture haze :Haze) (BLOCK (RETURN :vec4 (INDEX :vec4 (FIELD column :vec4[4] (CAPTURE haze :Haze)) (LOCAL k :int))))")
     s = q() quote | k: int | -> haze.scale[k]
     defer quote.free(s)
     fails = fails + check("a float array keeps its name", quote.dump(s),
-                          "(param k :int) (capture haze :Haze) (BLOCK (RETURN :float (INDEX :float (FIELD scale :float[4] (CAPTURE haze :Haze)) (LOCAL k :int))))")
+        "(param k :int) (capture haze :Haze) (BLOCK (RETURN :float (INDEX :float (FIELD scale :float[4] (CAPTURE haze :Haze)) (LOCAL k :int))))")
     if fails > 0 { exit(1) }
     println("quote array of distinct: ok")
 }
