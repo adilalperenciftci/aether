@@ -4619,7 +4619,9 @@ void module_merge_into_program(ASTNode* program) {
     for (int i = 0; i < program->child_count; i++) {
         ASTNode* import_node = program->children[i];
         if (!import_node || import_node->type != AST_IMPORT_STATEMENT || !import_node->value) continue;
-        if (!import_has_selection(import_node)) continue;
+        int is_glob = (import_node->annotation &&
+                       strcmp(import_node->annotation, "glob_import") == 0);
+        if (!is_glob && !import_has_selection(import_node)) continue;
 
         const char* module_path = import_node->value;
         AetherModule* mod = module_find(module_path);
@@ -4643,7 +4645,24 @@ void module_merge_into_program(ASTNode* program) {
         int alias_is_const[AETHER_MODULE_MAX_DECLS];
         int alias_count = 0;
 
-        for (int k = 0; k < import_node->child_count; k++) {
+        /* A glob import's constants, written bare. The typechecker binds
+         * each `<ns>_<NAME>` a glob brings in to its bare `NAME`, so a bare
+         * `KIND_NO_SPACE` after `import std.fs (*)` checked, but nothing
+         * renamed it, and the C named an undeclared `KIND_NO_SPACE`. Its
+         * functions need no rename here: the checker rewrites a call
+         * through its import alias. Same rules as the glob's binding: a
+         * leading underscore is private, and a name the program defines
+         * itself is the program's (#2632). */
+        if (is_glob) {
+            for (int k = 0; k < mod_const_count &&
+                            sel_const_count < AETHER_MODULE_MAX_DECLS; k++) {
+                const char* cn = mod_const_names[k];
+                if (!cn || cn[0] == '_' || module_defines_own_name(program, cn)) continue;
+                sel_const_names[sel_const_count++] = cn;
+            }
+        }
+
+        for (int k = 0; !is_glob && k < import_node->child_count; k++) {
             ASTNode* sel = import_node->children[k];
             if (!sel || sel->type != AST_IDENTIFIER || !sel->value) continue;
             // Skip alias nodes — the parser marks them with annotation="module_alias".

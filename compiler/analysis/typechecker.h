@@ -60,6 +60,12 @@ typedef struct Symbol {
     // the program-level `var g`. It is the global (codegen writes the
     // static), so a quote reading `g` after it captures the global.
     int global_write;
+    // A file-scope name the program's selective or glob import bound
+    // (`import std.string (*)` binds `length`). A module's merged body
+    // never sees one. A name the import found already bound to a function
+    // (the builtin `free`, which std.string's glob also names) is not the
+    // import's, and stays visible to every module.
+    int import_bound;
     struct Symbol* next;
     // #2007: chain within the scope's hash bucket. A symbol is at the head
     // of its bucket chain exactly when it is the newest of its name in the

@@ -1,0 +1,5 @@
+// Constants a program reads bare through a glob import.
+const LIMIT = 7
+const other = 5
+
+lim() -> int { return LIMIT }

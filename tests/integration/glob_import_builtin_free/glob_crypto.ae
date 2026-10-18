@@ -1,0 +1,10 @@
+// std.cryptography calls the builtin `free` bare; a program glob-importing
+// std.string could not use it at all ("Undefined function 'free'" inside
+// std.cryptography).
+import std.string(*)
+import std.cryptography
+
+main() {
+    h, _ = cryptography.sha256_hex(bytes("abc"))
+    println("${length(h)}")
+}
