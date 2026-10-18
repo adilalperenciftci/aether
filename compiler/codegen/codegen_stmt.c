@@ -8503,6 +8503,34 @@ void emit_defer_thunks(CodeGenerator* gen) {
     g_udefer_count = 0;
 }
 
+/* Does `node` read `name`: as a value, as the function a call goes through,
+ * or as the receiver of a dotted call (`name.field(...)`)? A binding's own
+ * target (AST_VARIABLE_DECLARATION) is a write, not a read. */
+static int tree_reads_name(const ASTNode* node, const char* name, size_t len) {
+    if (!node) return 0;
+    if ((node->type == AST_IDENTIFIER || node->type == AST_FUNCTION_CALL) && node->value &&
+        strncmp(node->value, name, len) == 0 &&
+        (node->value[len] == '\0' || node->value[len] == '.')) return 1;
+    for (int i = 0; i < node->child_count; i++)
+        if (tree_reads_name(node->children[i], name, len)) return 1;
+    return 0;
+}
+
+/* Is a local a destructure declares one the program never reads? A name
+ * spelled with a leading `_` says so (the type checker does not warn about
+ * it), and any other is looked for in the function being emitted. Such a
+ * local is written `(void)name;` after its declaration, as a guard's
+ * binding is (emit_guard_binding): left as it was, it is -Wunused-variable,
+ * which -Wall turns on, and `k, _s, _m, err = file_stat(p)` (std.fs's
+ * remove_tree) failed every program built with -Wall -Werror that called
+ * it. A read the scan misses only costs a `(void)` that does nothing. */
+static int destructure_local_unread(CodeGenerator* gen, const char* name) {
+    if (!name) return 0;
+    if (name[0] == '_') return 1;
+    return !gen->current_function ||
+           !tree_reads_name(gen->current_function, name, strlen(name));
+}
+
 void generate_value_statement(CodeGenerator* gen, const char* lhs, ASTNode* value, Type* t) {
     hoist_begin(gen);
     int order_depth = order_prelude_depth();
@@ -8719,7 +8747,10 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                     if (!is_var_declared(gen, var->value)) {
                         fprintf(gen->output, "%s %s[%d] = {0}; ", et, var->value, pos_t->array_size);
                         emit_array_fill_c(gen, var->value, src, pos_t, !moved);
-                        fprintf(gen->output, ";\n");
+                        fprintf(gen->output, ";");
+                        if (!own_type_owns(gen, pos_t) && destructure_local_unread(gen, var->value))
+                            fprintf(gen->output, " (void)%s;", var->value);
+                        fprintf(gen->output, "\n");
                         mark_var_declared_typed(gen, var->value, pos_t);
                         if (own_type_owns(gen, pos_t))
                             push_own_drop(gen, var->value, pos_t, var->line, var->column);
@@ -8990,7 +9021,10 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                     fprintf(gen->output, "%s = %s;\n", var->value, slot_value);
                 } else {
                     mark_var_declared(gen, var->value);
-                    fprintf(gen->output, "%s %s = %s;\n", var_type, var->value, slot_value);
+                    fprintf(gen->output, "%s %s = %s;", var_type, var->value, slot_value);
+                    if (destructure_local_unread(gen, var->value))
+                        fprintf(gen->output, " (void)%s;", var->value);
+                    fprintf(gen->output, "\n");
                     /* A hoisted string local (rare for first-decl
                      * since the hoist also marks the var declared): the
                      * local owns the position, taken when the call did not

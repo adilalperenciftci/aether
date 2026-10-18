@@ -1,0 +1,25 @@
+// Tuple destructures whose locals are not all read: one spelled with a
+// leading `_` (the discard convention), one the program never reads, one
+// read only inside a nested block, and the same shapes in a nested block.
+// No string literal and no import, so nothing else of the program is an
+// unused static.
+pair() -> (int, int) {
+    return 3, 4
+}
+
+triple() -> (int, int, int) {
+    return 5, 6, 7
+}
+
+main() {
+    a, _b = pair()
+    println(a)
+    c, d = pair()
+    println(c)
+    _e, f, g = triple()
+    if f > 0 {
+        h, _i = pair()
+        println(h + g)
+    }
+    _x, _y, _z = triple()
+}
