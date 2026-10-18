@@ -280,8 +280,12 @@ extern fs_get_block_transport() -> string
 // a TLS-owned buffer; fs_get_read_binary / fs_get_read_binary_length
 // read that buffer borrowed. fs_release_read_binary frees early
 // (otherwise it's released on the next fs_try_read_binary call).
+// The buffer is bytes whose length C reports separately, not a C string,
+// so the getter is a `ptr`: as a `string`, binding it to a local copied
+// it up to the first NUL. Copy it with string_new_with_length(p, n), or
+// call read_binary, which does.
 extern fs_try_read_binary(path: string) -> int
-extern fs_get_read_binary() -> string
+extern fs_get_read_binary() -> ptr
 extern fs_get_read_binary_length() -> int
 extern fs_release_read_binary()
 

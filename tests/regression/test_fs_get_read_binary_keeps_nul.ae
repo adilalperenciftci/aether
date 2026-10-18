@@ -1,0 +1,73 @@
+// Regression: the split-accessor binary read lost every byte after the
+// first NUL once its buffer was bound to a local.
+//
+// std.fs declared `fs_get_read_binary() -> string`. Since a string local
+// owns what it holds (0.818.0), `s = fs.fs_get_read_binary()` copies the
+// borrowed C buffer, and a C string is copied up to its first NUL, so the
+// bytes a length-aware copy then read from `s` were the 8-byte PNG
+// signature and whatever followed that short copy, never the file (a PNG
+// loader got null for every image). The getter now returns `ptr`, as the
+// other byte getters with a separately reported length do (#2920): a ptr
+// local is the C buffer itself.
+//
+// A 4 KiB file with a NUL at offset 4 (and every 256th byte after) is
+// written, read back through the split accessor bound to a local, and every
+// byte is compared, the ones after each NUL included. Big enough that the
+// read past the 4-byte copy cannot land on the same bytes by chance.
+
+import std.fs
+import std.os
+import std.bytes
+
+extern exit(code: int)
+
+// The byte at offset i: 0 at 4, 260, 516, ..., never 0 anywhere else.
+want_at(i: int) -> int {
+    if i % 256 == 4 { return 0 }
+    return 1 + (i * 7) % 255
+}
+
+main() {
+    n_want = 4096
+    b = bytes.new(n_want)
+    i = 0
+    while i < n_want {
+        _ = bytes.set(b, i, want_at(i))
+        i = i + 1
+    }
+    _ = bytes.set_length(b, n_want)
+    path = "${os.temp_dir()}/ae_get_read_binary_nul_${os.getpid()}.bin"
+    werr = fs.write_binary(path, bytes.view(b))
+    if werr != "" {
+        println("FAIL: write_binary: ${werr}")
+        exit(1)
+    }
+
+    if fs.fs_try_read_binary(path) == 0 {
+        println("FAIL: fs_try_read_binary could not read ${path}")
+        exit(1)
+    }
+    n = fs.fs_get_read_binary_length()
+    s = fs.fs_get_read_binary()
+    got = bytes.new(n)
+    _ = bytes.copy_from_string(got, 0, s, n)
+    fs.fs_release_read_binary()
+    fs.delete(path)
+
+    if n != n_want {
+        println("FAIL: length ${n}, wanted ${n_want}")
+        exit(1)
+    }
+    j = 0
+    while j < n_want {
+        v = bytes.get(got, j)
+        if v != want_at(j) {
+            println("FAIL: byte ${j} is ${v}, wanted ${want_at(j)} (cut at a NUL)")
+            exit(1)
+        }
+        j = j + 1
+    }
+    bytes.free(b)
+    bytes.free(got)
+    println("fs_get_read_binary kept all ${n} bytes")
+}

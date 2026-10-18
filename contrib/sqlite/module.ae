@@ -239,7 +239,9 @@ extern sqlite_column_i64_hi_raw(stmt: ptr, col: int) -> int
 extern sqlite_column_i64_lo_raw(stmt: ptr, col: int) -> int
 extern sqlite_column_text_raw(stmt: ptr, col: int) -> string
 extern sqlite_try_column_blob(stmt: ptr, col: int) -> int
-extern sqlite_get_blob_bytes() -> string
+// Bytes whose length C reports separately, not a C string: a `ptr`, so
+// binding it to a local does not copy it up to the first NUL.
+extern sqlite_get_blob_bytes() -> ptr
 extern sqlite_get_blob_length() -> int
 extern sqlite_release_blob()
 extern sqlite_reset_raw(stmt: ptr) -> int
