@@ -10271,10 +10271,20 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                                 fprintf(gen->output, "(void*)aether_string_data(");
                                 generate_expression(gen, arg);
                                 fprintf(gen->output, ")");
+                            } else if (!ext_name) {
+                                /* An Aether function's `ptr`: a pinned string
+                                 * (a literal held in a local, a parameter or a
+                                 * field) is its C characters, as the literal
+                                 * itself is just above and as a `-> ptr`
+                                 * return of one is (#2967); a counted string
+                                 * is the string as it is held, as in 0.817. */
+                                fprintf(gen->output, "aether_str_as_ptr_result(");
+                                generate_expression(gen, arg);
+                                fprintf(gen->output, ")");
                             } else {
-                                /* An Aether function's `ptr`, or an `@aether`
-                                 * C parameter: the string as it is held. The
-                                 * cast silences C's "discards qualifiers". */
+                                /* An `@aether` C parameter: the string as it
+                                 * is held. The cast silences C's "discards
+                                 * qualifiers". */
                                 fprintf(gen->output, "(void*)(");
                                 generate_expression(gen, arg);
                                 fprintf(gen->output, ")");

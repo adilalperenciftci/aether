@@ -15063,6 +15063,41 @@ int typecheck_function_call(ASTNode* call, SymbolTable* table) {
                 }
             }
 
+            /* A string is not a slice. The conversions into a `T[]` slot are
+             * a `T[N]` array, `null` and `[]` (language reference, Slices),
+             * and a binding or a `return` already refused a string. An
+             * argument let one through: an Aether function's `T[]`
+             * parameter got a `const char*` where C wants an AetherSlice, so
+             * the generated C did not compile, and an extern's got the
+             * counted string's header, not its bytes. A view of a string's
+             * bytes is `string.bytes(s)`, which carries its length. */
+            if (type_is_slice(param_type)) {
+                ASTNode* sarg = call->children[arg_slot];
+                Type* sa = sarg ? infer_type(sarg, table) : NULL;
+                if (sa && sa->kind == TYPE_STRING) {
+                    char aty[64];
+                    snprintf(aty, sizeof(aty), "%s[]",
+                        param_type->element_type ? type_name(param_type->element_type) : "");
+                    int bytes_slot = param_type->element_type &&
+                                     param_type->element_type->kind == TYPE_BYTE;
+                    char emsg[512];
+                    snprintf(emsg, sizeof(emsg),
+                        "Argument %d '%s' of '%s': expected %s, got string; a string "
+                        "is not a slice%s",
+                        arg_slot + 1, param->value ? param->value : "?",
+                        call->value ? call->value : "?", aty,
+                        bytes_slot ? ": pass `string.bytes(s)` for a view of its bytes" : "");
+                    if (bytes_slot)
+                        type_error_code_hint(emsg,
+                            "string.bytes(s) is a bounded, read-only byte[] view of the "
+                            "string's own bytes, valid as long as the string is",
+                            sarg->line, sarg->column, AETHER_ERR_TYPE_MISMATCH);
+                    else
+                        type_error(emsg, sarg->line, sarg->column);
+                }
+                if (sa) free_type(sa);
+            }
+
             /* #1286: a `T[N]` array into a `T[]` parameter becomes a slice; a
              * slice into a `ptr` parameter, or into any parameter of an
              * extern C function, decays to its pointer. */
