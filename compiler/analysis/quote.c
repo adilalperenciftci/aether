@@ -90,6 +90,13 @@ const char* quote_type_name(Type* t) {
         case TYPE_UINT32: return "uint32";
         case TYPE_UINT16: return "uint16";
         case TYPE_UINT8: return "uint8";
+        /* An array spells its element as the tree does: type_to_string has
+         * no name for a distinct type (`vec4 = distinct f32x4`), so a
+         * struct's `vec4[4]` field came out as UNKNOWN[4]. */
+        case TYPE_ARRAY:
+            if (!t->index_enum_name && t->element_type)
+                return aether_internf("%s[%d]", quote_type_name(t->element_type), t->array_size);
+            return type_to_string(t);
         case TYPE_VOID: return "";
         case TYPE_UNKNOWN: return "";
         default: return type_to_string(t);
