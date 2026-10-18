@@ -1,6 +1,6 @@
 # One ownership model
 
-Status: approved by the owner on 2026-10-14, with the recommended answers below. Stage 1 is in progress; nothing else is implemented yet.
+Status: approved by the owner on 2026-10-14 and implemented: every stage landed in #2916 (merged 2026-10-16), the leaks and memory-safety bugs left after it in #2940. The ownership grid (`tests/ownership_grid/`) is at its target in every cell (1909 OK; the 30 cells where a function frees a parameter are refused by the checker), `tests/leaks_known.txt` is gone, and CI fails any change that makes a cell worse. What was built, and each decision taken on the way, is in the implementation record below.
 
 ## Why this exists
 
