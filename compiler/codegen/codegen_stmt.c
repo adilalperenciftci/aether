@@ -7618,6 +7618,35 @@ static void emit_return_value(CodeGenerator* gen, ASTNode* stmt) {
     }
     Type* ret_t = gen->current_func_return_type ? gen->current_func_return_type
                                                  : stmt->children[0]->node_type;
+    /* A string returned from a `-> ptr` function: a literal is its C
+     * characters, as a literal used as a `ptr` is wherever it goes (R4).
+     * Since 0.818 every literal is a pinned counted string, so `return
+     * "constructor"` (or a local holding it) returned the header, and C
+     * reading the result read the header's bytes. A counted string is
+     * still the string itself, moved out as before (#2945); a pinned one,
+     * whatever expression produced it, is its characters. */
+    {
+        ASTNode* v = stmt->children[0];
+        if (!gen->in_main_function && gen->current_func_return_type &&
+            gen->current_func_return_type->kind == TYPE_PTR && v &&
+            v->node_type && v->node_type->kind == TYPE_STRING) {
+            if (v->type == AST_LITERAL) {
+                fprintf(gen->output, "(void*)");
+                emit_string_literal_chars(gen, v);
+                return;
+            }
+            fprintf(gen->output, "aether_str_as_ptr_result(");
+            if (should_uniform_heap_return(gen, stmt)) {
+                emit_uniform_heap_return_expr(gen, v);
+            } else if (return_moves_string_local(gen, v, ret_t)) {
+                emit_string_local_moved_out(gen, v);
+            } else {
+                generate_expression(gen, v);
+            }
+            fprintf(gen->output, ")");
+            return;
+        }
+    }
     if (should_uniform_heap_return(gen, stmt)) {
         emit_uniform_heap_return_expr(gen, stmt->children[0]);
     } else if (return_moves_string_local(gen, stmt->children[0], ret_t)) {
