@@ -5607,9 +5607,10 @@ void generate_main_function(CodeGenerator* gen, ASTNode* main) {
     emit_main_body(gen, main);
 
     // All return paths in main() jump here via goto main_exit. Only emit the
-    // label if it's actually targeted by a goto (actors or return in main),
-    // otherwise GCC warns about an unused label.
-    if (needs_main_exit) {
+    // label if a goto was actually written to it: a main with actors and no
+    // `return` needs main_exit_ret but not the label, and an unused label is
+    // -Wunused-label under -Wall.
+    if (needs_main_exit && gen->main_exit_targeted) {
         print_line(gen, "main_exit:");
     }
     // The executable drains the scheduler here; a library leaves it running
@@ -8626,7 +8627,7 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
         print_line(gen, "   compiler on MinGW, and a call has one ABI either way (#1751). */");
         print_line(gen, "");
         print_line(gen, "// Benchmark timing function");
-        print_line(gen, "static inline uint64_t rdtsc() {");
+        print_line(gen, "static inline AETHER_MAYBE_UNUSED uint64_t rdtsc() {");
         print_line(gen, "#if defined(_MSC_VER) && (defined(_M_X64) || defined(_M_IX86))");
         print_line(gen, "    return __rdtsc();");
         print_line(gen, "#elif defined(__x86_64__) || defined(__i386__)");
@@ -8665,8 +8666,8 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
         print_line(gen, "#endif");
         /* #2528: the release of a closure handed back by an expression
          * reply, for a reply the asker never took. */
-        print_line(gen, "static void _aether_release_closure_buf(void* p) { if (p) _aether_closure_env_release(((_AeClosure*)p)->env); }");
-        print_line(gen, "static void _aether_release_string_buf(void* p) { if (p && *(const char**)p) aether_heap_str_free(*(const char**)p); }");
+        print_line(gen, "static AETHER_MAYBE_UNUSED void _aether_release_closure_buf(void* p) { if (p) _aether_closure_env_release(((_AeClosure*)p)->env); }");
+        print_line(gen, "static AETHER_MAYBE_UNUSED void _aether_release_string_buf(void* p) { if (p && *(const char**)p) aether_heap_str_free(*(const char**)p); }");
     }
     /* Every include is above this line; the program's own declarations
      * follow. */

@@ -1,0 +1,35 @@
+// A program whose generated C carries static helpers it does not call: a
+// closure (its env's `_free`), an actor (its handler table's init, the
+// reply-buffer releases, rdtsc), a struct that owns a string (its copy,
+// move, store, cell and heap helpers), and a main with actors and no
+// `return` (no goto to `main_exit:`).
+struct Item {
+    name: string,
+    n: int
+}
+
+message Add { n: int }
+
+actor Sum {
+    state total = 0
+
+    receive {
+        Add(n) -> {
+            total = total + n
+            println(total)
+        }
+    }
+}
+
+main() {
+    k = 4
+    add = | x: int | { return x + k }
+    println(add(1))
+
+    it = Item { name: "a", n: 2 }
+    println(it.n)
+
+    s = spawn(Sum())
+    s ! Add { n: 3 }
+    wait_for_idle()
+}

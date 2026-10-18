@@ -741,7 +741,7 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
         print_line(gen, "static int %s_handlers_initialized = 0;", actor->value);
         print_line(gen, "");
         
-        print_line(gen, "static void _aether_init_handlers_%s(%s* self) {", actor->value, actor->value);
+        print_line(gen, "static AETHER_MAYBE_UNUSED void _aether_init_handlers_%s(%s* self) {", actor->value, actor->value);
         indent(gen);
         print_line(gen, "if (%s_handlers_initialized) return;", actor->value);
         
