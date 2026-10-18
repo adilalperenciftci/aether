@@ -4614,6 +4614,9 @@ static void emit_closure_env_typedef(CodeGenerator* gen, int ci) {
     fprintf(gen->output, "}\n\n");
     fprintf(gen->output, "static void _closure_env_%d_teardown(void* _p) {\n", id);
     fprintf(gen->output, "    _closure_env_%d* _e = (_closure_env_%d*)_p;\n", id, id);
+    /* Where the releases start: an env with nothing to release reads no
+     * field, and `_e` unread is -Wunused-variable under -Wall. */
+    long releases_at = ftell(gen->output);
     {
         for (int i = 0; i < cap_count; i++) {
             int promoted = capture_is_promoted(gen, captures[i], parent_func);
@@ -4645,6 +4648,8 @@ static void emit_closure_env_typedef(CodeGenerator* gen, int ci) {
             }
         }
     }
+    if (releases_at < 0 || ftell(gen->output) == releases_at)
+        fprintf(gen->output, "    (void)_e;\n");
     fprintf(gen->output, "    free(_p);\n");
     fprintf(gen->output, "}\n\n");
 }

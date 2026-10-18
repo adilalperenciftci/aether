@@ -11,10 +11,9 @@
 #
 # locals.ae: `_`-prefixed and never-read destructure locals, at the top of
 #   main and in a nested block. Its C compiles with -Wall -Werror.
-# remove_tree.ae: calls fs.remove_tree. Its C has no unused-variable
-#   warning. Unused constants are left to their own tests
-#   (static_string_literal_unused, imported_const_unused), so this one
-#   passes -Wno-unused-const-variable.
+# remove_tree.ae: calls fs.remove_tree. Its C compiles with -Wall -Werror
+#   too, now that unused literal statics (#2953) and imported constants
+#   (#2958) are left out as well.
 # Both on every one of gcc and clang that is installed; both programs run.
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -49,13 +48,11 @@ for prog in locals remove_tree; do
         head -20 "$TMP/$prog.log" | sed 's/^/          /'
         exit 1
     fi
-    extra=""
-    [ "$prog" = remove_tree ] && extra="-Wno-unused-const-variable"
     for cc in $CCS; do
         # shellcheck disable=SC2086
-        if ! "$cc" -c -Wall -Werror $extra $cflags "$TMP/$prog.c" -o "$TMP/$prog.$cc.o" \
+        if ! "$cc" -c -Wall -Werror $cflags "$TMP/$prog.c" -o "$TMP/$prog.$cc.o" \
                 >"$TMP/$prog.$cc.log" 2>&1; then
-            echo "  [FAIL] $NAME: $prog.ae's C does not compile with $cc -Wall -Werror $extra"
+            echo "  [FAIL] $NAME: $prog.ae's C does not compile with $cc -Wall -Werror"
             grep -E 'error' "$TMP/$prog.$cc.log" | head -10 | sed 's/^/          /'
             fail=1
         fi

@@ -1,0 +1,61 @@
+// Locals the generated C declares and nothing reads, each a shape that was
+// -Wunused-variable under -Wall: a closure env with nothing to release
+// (`_e`), an actor arm that binds no field (`_pattern`) or binds one it
+// never reads, a `_`-prefixed local and one never read, a `_ = f()` in a
+// loop (hoisted), a match whose arms are all `_` (`_match_val`), and a
+// list pattern's unread tail length.
+message Tick {}
+message Count { n: int, tag: int }
+
+actor Counter {
+    state total = 0
+
+    receive {
+        Tick() -> {
+            total = total + 1
+        }
+        Count(n, tag) -> {
+            total = total + n
+            println(total)
+        }
+    }
+}
+
+side(x: int) -> int {
+    return x + 1
+}
+
+tail_sum(xs: int[]) -> int {
+    match xs {
+        [] -> { return 0 }
+        [h | t] -> { return h * 2 + t.len }
+    }
+    return -1
+}
+
+main() {
+    k = 4
+    add = | x: int | { return x + k }
+    println(add(1))
+
+    _x = 5
+    y = 6 // never read: the type checker warns, the C must not fail
+    i = 0
+    while i < 3 {
+        _ = side(i)
+        i = i + 1
+    }
+
+    w = 9
+    label = match w {
+        _ -> 42
+    }
+    println(label)
+
+    println(tail_sum([3, 4, 5]))
+
+    c = spawn(Counter())
+    c ! Tick {}
+    c ! Count { n: 2, tag: 7 }
+    wait_for_idle()
+}

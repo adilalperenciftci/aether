@@ -565,7 +565,16 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
                         clear_try_clobbered_vars(gen);
                         if (arm_body && arm_body->type == AST_BLOCK)
                             mark_try_clobbered_vars(gen, arm_body);
-                        print_line(gen, "%s* _pattern = (%s*)_msg_data;", pattern->value, pattern->value);
+                        /* A message the arm binds no field of is never
+                         * read through `_pattern`, which unread is
+                         * -Wunused-variable under -Wall. */
+                        int binds_field = 0;
+                        for (int k = 0; k < pattern->child_count; k++)
+                            if (pattern->children[k] &&
+                                pattern->children[k]->type == AST_PATTERN_FIELD) binds_field = 1;
+                        print_line(gen, binds_field ? "%s* _pattern = (%s*)_msg_data;"
+                                                    : "%s* _pattern = (%s*)_msg_data; (void)_pattern;",
+                                   pattern->value, pattern->value);
                         mark_var_declared(gen, "_pattern");
 
                         // This arm's Route 1 promoted names (published
@@ -645,10 +654,15 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
                                 }
                                 /* A binding a `try` body writes is volatile
                                  * (#2690). */
-                                print_line(gen, "%s %s = _pattern->%s;",
+                                /* A field the arm never reads is bound
+                                 * unread: -Wunused-variable under -Wall. */
+                                int field_read = arm_body &&
+                                                 codegen_tree_reads_name(arm_body, var_name);
+                                print_line(gen, field_read ? "%s %s = _pattern->%s;"
+                                                           : "%s %s = _pattern->%s; (void)%s;",
                                            volatile_decl_type(try_volatile_qual_for(gen, var_name),
                                                               c_type),
-                                           var_name, field->value);
+                                           var_name, field->value, var_name);
                                 // Pattern fields are now C-locals at the
                                 // top of the handler — record them so a
                                 // subsequent hoist pass doesn't attempt
