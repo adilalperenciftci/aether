@@ -1881,6 +1881,17 @@ static void emit_function(CodeGenerator* gen, ASTNode* func, const char* clause_
         }
     }
 
+    /* A builder's hidden `void* _builder` parameter is one of its locals
+     * as much as a named one: a `defer` reading it is journaled with a
+     * panic thunk (#2923) that copies each local it reads out of a cell, and
+     * one the codegen did not know about was left out of the cell, so the
+     * thunk named an undeclared `_builder`. */
+    if (func->type == AST_BUILDER_FUNCTION) {
+        Type* bt = create_type(TYPE_PTR);
+        mark_var_declared_typed(gen, "_builder", bt);
+        free_type(bt);
+    }
+
     // Reset defer state for new function and enter function scope
     gen->defer_count = 0;
     gen->scope_depth = 0;

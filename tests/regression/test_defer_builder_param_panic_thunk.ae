@@ -1,0 +1,72 @@
+// Regression: `defer f(_builder)` in a builder function emitted C that did
+// not compile ("use of undeclared identifier '_builder'").
+//
+// A plain `defer` is journaled with a panic thunk (#2923) that copies each
+// local the deferred statement reads out of a cell, so the statement can
+// run over the frame's values when a caught panic leaves it. The thunk's
+// list of locals came from the names the codegen knew were declared, and a
+// builder's hidden `void* _builder` parameter was not one of them: the cell
+// was empty and the thunk named a `_builder` it never declared. The hidden
+// parameter is now declared like a named one, so it is captured.
+//
+// Each builder frees its options bag with `defer bag_free(_builder)`, on a
+// normal return and on a panic caught by the caller (which runs the thunk).
+
+extern exit(code: int)
+
+var freed = 0
+
+struct Opts {
+    n: int
+}
+
+opts_new() -> ptr { return heap.new(Opts) as ptr }
+
+bag_free(p: ptr) {
+    freed = freed + 1
+    heap.free(p as *Opts)
+}
+
+with_n(_ctx: ptr, v: int) {
+    o = _ctx as *Opts
+    o.n = v
+}
+
+read_n(o: ptr) -> int {
+    x = o as *Opts
+    return x.n
+}
+
+builder send_with(label: string): int with opts_new {
+    defer bag_free(_builder)
+    return read_n(_builder)
+}
+
+builder fail_with(label: string): int with opts_new {
+    defer bag_free(_builder)
+    if read_n(_builder) > 0 {
+        panic("stop ${label}")
+    }
+    return 0
+}
+
+main() {
+    r = send_with("x") { with_n(7) }
+    if r != 7 || freed != 1 {
+        println("FAIL: normal return: r=${r} freed=${freed}")
+        exit(1)
+    }
+    try {
+        _ = fail_with("y") { with_n(3) }
+    } catch e {
+        if e != "stop y" {
+            println("FAIL: caught '${e}'")
+            exit(1)
+        }
+    }
+    if freed != 2 {
+        println("FAIL: the caught panic did not run the defer: freed=${freed}")
+        exit(1)
+    }
+    println("defer of _builder ran on return and on a caught panic")
+}
