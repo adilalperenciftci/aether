@@ -14,6 +14,117 @@ cut while your branch is open cannot fold your entry into the released section.
 
 ## [current]
 
+## [0.829.0]
+
+### Fixed
+
+- **`exit(f(s))` reads `s` before the scope releases it.** A call to `exit`
+  drains the function's pending releases first, since nothing runs after
+  it, and that drain was emitted ahead of the argument, so `f` got the
+  freed string local as NULL (`exit(check(file))` saw `(null)`,
+  `exit(string.length(s))` exited 0). It came in with 0.818.0, when a
+  string local started owning its value. The exit status is now evaluated
+  into a temporary, then the scope is drained, then the process exits,
+  which is the order `return f(s)` uses. Found by aeci.
+
+- **`fs.fs_get_read_binary()` returns `ptr`, so the bytes after a NUL
+  survive.** The split-accessor getter was declared `-> string`, and since
+  a string local owns its value (0.818.0) `s = fs.fs_get_read_binary()`
+  copied the borrowed buffer as a C string, up to the first NUL; a
+  length-aware copy from `s` then read past that short copy (a PNG loader
+  got null for every image). It now returns `ptr`, as the other byte
+  getters whose length C reports separately do since #2920. contrib's
+  `sqlite_get_blob_bytes`, `avc_get_frame_bytes` and `avc_audio_get_pcm`
+  had the same declaration, and `sqlite.column_blob`, `avcodec.next_frame`
+  and `avcodec.audio_pcm` bound them to a local before their length-aware
+  copy, so a blob, frame or PCM buffer with a NUL in it came back right in
+  length and wrong after the first NUL (read past the end of the short
+  copy). They return `ptr` too. Found by aebiten.
+
+- **`defer f(_builder)` in a builder compiles again.** A plain `defer` is
+  journaled with a panic thunk (#2923) that copies the locals its statement
+  reads out of a cell, and a builder's hidden `_builder` parameter was not
+  among the names the codegen knew were declared, so the thunk named an
+  undeclared `_builder` and the C did not compile. The hidden parameter is
+  now declared like a named one, so a defer reading it runs on a return and
+  on a caught panic. A 0.818.0 regression, found by datastar-aether.
+
+- **A glob import of std.string, std.list or std.map no longer hides the
+  builtin `free` from other modules.** Since 0.805.0 a module's merged body
+  does not see the program's imports: a bare name it finds through one is a
+  name it never imported. The check asked whether the program imported the
+  NAME, and the glob of a module defining `free` (`string.free`,
+  `list.free`, `map.free`) names `free`, though the symbol a module found
+  was the builtin, which the glob does not bind. So every module calling
+  `free` undeclared, std.cryptography among them, was "Undefined function
+  'free'" in a program with `import std.string (*)`. The check now asks
+  whether the import bound the symbol, and a module's bare `free` is no
+  longer rewritten to the program's `string.free`. Found by zsync-port.
+
+- **A `-> ptr` function returning a string literal returns its
+  characters.** Since 0.818.0 every literal is a pinned counted string,
+  and a literal used as a `ptr` is meant to stay its C characters; one
+  passed straight to a `ptr` parameter was, but `return "constructor"`
+  from a `-> ptr` function, or a local or parameter holding a literal,
+  returned the pinned string's header, so C reading the result read its
+  bytes (`strlen` gave 9, not 11). A pinned string returned as a `ptr` is
+  now its characters; a counted string is still handed over as itself, as
+  #2945 moves it. Found by mquickjs-ae.
+
+- **A constant a glob import brings in can be written bare.** After
+  `import std.fs (*)`, a bare `KIND_NO_SPACE` type-checked (the glob binds
+  each of the module's names) but nothing renamed it to the module's
+  constant, so the C named an undeclared identifier. The program's bare
+  references to a glob-imported constant are now renamed as a selected
+  one's are; a local of that name stays the local, and a name the program
+  defines itself is the program's.
+
+- **More generated locals no longer break a `-Wall -Werror` build.** Some
+  locals the C declared were never read, which is `-Wunused-variable` under
+  `-Wall` on gcc and clang:
+  - a closure env's teardown with nothing to release (`_e`);
+  - an actor arm that binds no field (`_pattern`), or binds one it never
+    reads;
+  - a `_`-prefixed or never-read local (`_x = 5`), including a `_ = f()`
+    hoisted out of a loop;
+  - a match whose arms are all `_` (`_match_val`);
+  - a list pattern's unread tail length.
+
+  Each is now followed by `(void)name;`, as a destructure's unread local
+  already is. Across the C generated from `tests/` and `examples/`, clang's
+  `-Wunused-variable` count drops from 709 to 10.
+
+- **A string passed to a slice parameter is a type error at the call.**
+  `cryptography.sha256_hex("abc")`, or any string literal or string local
+  given to a `byte[]` (or other `T[]`) parameter, type-checked and then
+  produced C that did not compile: a `const char*` where an `AetherSlice`
+  is expected. An extern's `byte[]` parameter got the counted string's
+  header, not its bytes. A binding and a `return` already refused a
+  string there, since a string is not a slice. The call now refuses it
+  too, and for a `byte[]` slot the diagnostic names `string.bytes(s)`,
+  the string's bytes as a bounded view.
+
+- **A string holding a literal reaches an Aether function's `ptr`
+  parameter as its characters.** Since 0.818.0 every literal is a pinned
+  counted string, and a literal used as a `ptr` is meant to stay its C
+  characters wherever it goes. One written straight into the call was, but
+  a local, parameter or field holding it (`s = "constructor"`, then
+  `take(s)` with `take(p: ptr)`) passed the pinned string's header, so C
+  reading the `ptr` read the header's bytes (`strlen` gave 9, not 11). A
+  pinned string passed to an Aether function's `ptr` parameter is now its
+  characters, as #2967 made it for a `-> ptr` return; a counted string is
+  still passed as itself, and an `@aether` C parameter still gets the
+  string as Aether holds it. Found by mquickjs-ae's generator.
+
+- **A quote names an array of a distinct type by its element.** A captured
+  struct's `vec4[4]` field, where `vec4` is a distinct `f32x4`, was typed
+  `UNKNOWN[4]` in the tree. The array was spelled through `type_to_string`,
+  which has no name for a distinct type, while an `INDEX` of it was typed
+  `vec4`. An array's element is now spelled as the tree spells any type, so
+  the field is `vec4[4]`. A captured array of structs is now `Name[4]`, not
+  `struct Name[4]`, as a struct alone already was. Found writing ae3d's
+  composite.
+
 ## [0.828.0]
 
 ### Fixed
