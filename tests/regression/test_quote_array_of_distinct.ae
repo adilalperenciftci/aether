@@ -1,0 +1,46 @@
+// Regression: a quote names an array of a distinct type by its element's
+// name. A captured struct's `vec4[4]` field (vec4 a distinct f32x4) was
+// typed UNKNOWN[4] in the tree, since the array was spelled through
+// type_to_string, which has no name for a distinct type; an INDEX of it was
+// typed vec4 all the while. Found writing ae3d's composite (a struct of
+// columns of hot air captured by a shader).
+
+import std.quote
+
+extern exit(code: int)
+
+type vec4 = distinct f32x4
+
+struct Haze {
+    count: int
+    column: vec4[4]
+    scale: float[4]
+}
+
+var haze = Haze { count: 0 }
+
+q(t: quote.Tree) -> quote.Tree { return t }
+
+fn check(label: string, got: string, want: string) -> int {
+    if got != want {
+        println("FAIL quote array of distinct: ${label}")
+        println("  got:  ${got}")
+        println("  want: ${want}")
+        return 1
+    }
+    return 0
+}
+
+main() {
+    t = q() quote | k: int | -> haze.column[k]
+    defer quote.free(t)
+    fails = 0
+    fails = fails + check("the field is a vec4[4], its element a vec4", quote.dump(t),
+        "(param k :int) (capture haze :Haze) (BLOCK (RETURN :vec4 (INDEX :vec4 (FIELD column :vec4[4] (CAPTURE haze :Haze)) (LOCAL k :int))))")
+    s = q() quote | k: int | -> haze.scale[k]
+    defer quote.free(s)
+    fails = fails + check("a float array keeps its name", quote.dump(s),
+        "(param k :int) (capture haze :Haze) (BLOCK (RETURN :float (INDEX :float (FIELD scale :float[4] (CAPTURE haze :Haze)) (LOCAL k :int))))")
+    if fails > 0 { exit(1) }
+    println("quote array of distinct: ok")
+}
