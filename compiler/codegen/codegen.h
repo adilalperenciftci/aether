@@ -624,6 +624,9 @@ typedef struct {
     int defer_thunk_count;
     long defer_proto_pos;
     int hoist_output_ok;
+    /* Was a `goto main_exit;` written (a `return` in main)? Its label is
+     * written only then. */
+    int main_exit_targeted;
 } CodeGenerator;
 
 // Code generation functions

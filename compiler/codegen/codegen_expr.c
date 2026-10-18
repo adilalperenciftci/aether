@@ -4605,7 +4605,7 @@ static void emit_closure_env_typedef(CodeGenerator* gen, int ci) {
        it: a chain of closures each holding the one before is torn down in
        constant stack. */
     fprintf(gen->output, "static void _closure_env_%d_teardown(void* _p);\n", id);
-    fprintf(gen->output, "static void _closure_env_%d_free(void* _p) {\n", id);
+    fprintf(gen->output, "static AETHER_MAYBE_UNUSED void _closure_env_%d_free(void* _p) {\n", id);
     fprintf(gen->output, "    if (!_p) return;\n");
     fprintf(gen->output, "    _closure_env_%d* _e = (_closure_env_%d*)_p;\n", id, id);
     fprintf(gen->output, "    if (atomic_fetch_sub_explicit(&_e->_refs, 1, memory_order_acq_rel) != 1) return;\n");

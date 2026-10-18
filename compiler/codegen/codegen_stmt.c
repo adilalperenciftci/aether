@@ -11569,6 +11569,7 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                     fprintf(gen->output, "main_exit_ret = ");
                     generate_expression(gen, stmt->children[0]);
                     fprintf(gen->output, "; goto main_exit;\n");
+                    gen->main_exit_targeted = 1;
                 } else {
                     if (stmt->child_count > 0 && stmt->children[0] &&
                         stmt->children[0]->type == AST_PRINT_STATEMENT) {
@@ -11576,6 +11577,7 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                         print_indent(gen);
                     }
                     print_line(gen, "goto main_exit;");
+                    gen->main_exit_targeted = 1;
                 }
                 break;
             }
