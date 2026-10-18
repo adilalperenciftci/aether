@@ -1478,7 +1478,10 @@ static void generate_list_pattern_bindings(CodeGenerator* gen, ASTNode* pattern,
                  * is kept for code that still reads the companion. */
                 print_line(gen, "AetherSlice %s = aether_slice_make(&_match_arr[1], (uint64_t)(%s - 1));",
                            tail->value, len_name);
-                print_line(gen, "int %s_len = %s - 1;", tail->value, len_name);
+                print_line(gen, expr_references_var(body, cg_internf("%s_len", tail->value))
+                                    ? "int %s_len = %s - 1;"
+                                    : "int %s_len = %s - 1; (void)%s_len;",
+                           tail->value, len_name, tail->value);
                 mark_pattern_binding(gen, tail->value, TYPE_ARRAY);
             }
         }
@@ -5500,8 +5503,11 @@ static void emit_hoisted_local_decl(CodeGenerator* gen, Type* var_type,
         return;
     }
     const char* c_type = get_c_type(var_type);
-    fprintf(gen->output, "%s %s%s;\n", volatile_decl_type(vq, c_type), name,
+    fprintf(gen->output, "%s %s%s;", volatile_decl_type(vq, c_type), name,
             hoisted_zero_init(var_type, c_type));
+    /* A hoisted local nothing reads (`_ = f()` in a loop) is unused. */
+    if (codegen_local_unread(gen, name)) fprintf(gen->output, " (void)%s;", name);
+    fprintf(gen->output, "\n");
     /* A struct that owns strings is released where it is declared, as at
      * its binding: each binding replaces the zeroed value (the local is
      * declared already), so nothing else destroyed it, and the strings it
@@ -8531,6 +8537,14 @@ static int destructure_local_unread(CodeGenerator* gen, const char* name) {
            !tree_reads_name(gen->current_function, name, strlen(name));
 }
 
+int codegen_local_unread(CodeGenerator* gen, const char* name) {
+    return destructure_local_unread(gen, name);
+}
+
+int codegen_tree_reads_name(const ASTNode* node, const char* name) {
+    return name && tree_reads_name(node, name, strlen(name));
+}
+
 void generate_value_statement(CodeGenerator* gen, const char* lhs, ASTNode* value, Type* t) {
     hoist_begin(gen);
     int order_depth = order_prelude_depth();
@@ -8552,6 +8566,14 @@ void generate_value_statement(CodeGenerator* gen, const char* lhs, ASTNode* valu
 
 void generate_statement(CodeGenerator* gen, ASTNode* stmt) {
     if (!stmt) return;
+    /* A local this statement declares and nothing reads (`_x = 5`, or a
+     * name the function never reads) is written `(void)name;` after it,
+     * as a destructure's is (destructure_local_unread): left unread it is
+     * -Wunused-variable under -Wall, and -Werror failed. */
+    const char* new_local = NULL;
+    if (stmt->type == AST_VARIABLE_DECLARATION && stmt->value &&
+        !is_var_declared(gen, stmt->value))
+        new_local = stmt->value;
     hoist_begin(gen);   /* #2765 */
     ASTNode* saved_trailing = gen->trailing_stmt_call;
     gen->trailing_stmt_call = stmt_trailing_call(gen, stmt);
@@ -8589,6 +8611,9 @@ void generate_statement(CodeGenerator* gen, ASTNode* stmt) {
     emit_observable_store_notify(gen, stmt);
     unwind_track_release(gen);
     hoist_end(gen);
+    if (new_local && is_var_declared(gen, new_local) &&
+        destructure_local_unread(gen, new_local))
+        print_line(gen, "(void)%s;", new_local);
 }
 
 /* Does a `return`'s value hold a temporary for its statement
@@ -11133,7 +11158,21 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                     print_indent(gen);
                     fprintf(gen->output, "%s _match_val = ", match_c_type);
                     generate_expression(gen, match_expr);
-                    fprintf(gen->output, ";\n");
+                    fprintf(gen->output, ";");
+                    /* A match whose every arm is `_` compares nothing, and
+                     * `_match_val` unread is -Wunused-variable. */
+                    int compares = 0;
+                    for (int a = 1; a < stmt->child_count && !compares; a++) {
+                        ASTNode* ma = stmt->children[a];
+                        if (!ma || ma->type != AST_MATCH_ARM || ma->child_count < 2) continue;
+                        ASTNode* mp = ma->children[0];
+                        int wild = mp && ((mp->type == AST_IDENTIFIER && mp->value &&
+                                           strcmp(mp->value, "_") == 0) ||
+                                          (mp->node_type && mp->node_type->kind == TYPE_WILDCARD));
+                        if (!wild) compares = 1;
+                    }
+                    if (!compares) fprintf(gen->output, " (void)_match_val;");
+                    fprintf(gen->output, "\n");
                     if (has_subject_temps) temps_unmap(&subject_temps);
                 }
 

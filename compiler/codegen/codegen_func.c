@@ -2022,8 +2022,12 @@ static void emit_function(CodeGenerator* gen, ASTNode* func, const char* clause_
                                            cg_internf("%s*", ttype)),
                         child->children[1]->value, pos);
                 print_indent(gen);
-                fprintf(gen->output, "int %s_len = _len_%d - 1;\n",
+                fprintf(gen->output, "int %s_len = _len_%d - 1;",
                         child->children[1]->value, pos);
+                const char* len_name = cg_internf("%s_len", child->children[1]->value);
+                if (codegen_local_unread(gen, len_name))
+                    fprintf(gen->output, " (void)%s;", len_name);
+                fprintf(gen->output, "\n");
             }
         }
 
