@@ -6599,19 +6599,33 @@ static void emit_closure_argument(CodeGenerator* gen, ASTNode* arg, Type* pt) {
  * carry its parameter types, in the function its `.fn` points at: every
  * closure literal of the program and every function used as a value has
  * one known here. So the call compares `.fn` with each of them whose
- * parameters take these arguments only coerced (wrapped into an optional
- * or a sum, converted between numbers), and calls a match through its own
- * signature with the arguments coerced, as a call to the literal is
- * (#2840). Any other closure, C's among them, is called as before. */
+ * parameters take these arguments only coerced by the assignment rules,
+ * never narrowed (wrapped into an optional or a sum, a number widened), and
+ * calls a match through its own signature with the arguments coerced, as a
+ * call to the literal is (#2840), a widening spelled as a cast. Any other
+ * closure, C's among them, is called as before. */
 
-static int erased_scalar_kind(TypeKind k) {
-    return k == TYPE_INT || k == TYPE_INT64 || k == TYPE_UINT64 || k == TYPE_UINT32 ||
-           k == TYPE_UINT16 || k == TYPE_UINT8 || k == TYPE_BYTE || k == TYPE_FLOAT ||
-           k == TYPE_FLOAT32 || k == TYPE_LONGDOUBLE || k == TYPE_BOOL || k == TYPE_ENUM;
+/* A number's place in the widening order, -1 for anything else: a value
+ * converts to a number of the same or a later place without narrowing (an
+ * int to a long or a float, an f32 to a float), never back. */
+static int erased_number_rank(TypeKind k) {
+    switch (k) {
+        case TYPE_BYTE: case TYPE_UINT8: return 0;
+        case TYPE_UINT16: return 1;
+        case TYPE_INT: case TYPE_UINT32: case TYPE_ENUM: return 2;
+        case TYPE_INT64: case TYPE_UINT64: return 3;
+        case TYPE_FLOAT32: return 4;
+        case TYPE_FLOAT: return 5;
+        case TYPE_LONGDOUBLE: return 6;
+        default: return -1;
+    }
 }
 
-/* How an argument of type `a` reaches a parameter of type `p`: 0 as it is
- * (the same C type, or a type not known), 1 only coerced, -1 not at all. */
+/* How an argument of type `a` reaches a parameter of type `p` by the
+ * assignment rules, never narrowing: 0 as it is (the same C type, or a type
+ * not known), 1 only coerced (wrapped into an optional or a sum, a number
+ * widened), -1 not at all. A closure whose parameter takes an argument
+ * only by narrowing it (a float into an int) is no target of the call. */
 static int erased_arg_fit(Type* a, Type* p) {
     if (!a || !p || a->kind == TYPE_UNKNOWN || p->kind == TYPE_UNKNOWN) return 0;
     if (strcmp(cg_intern(get_c_type(a)), cg_intern(get_c_type(p))) == 0) return 0;
@@ -6624,8 +6638,32 @@ static int erased_arg_fit(Type* a, Type* p) {
                 return 1;
         return -1;
     }
-    if (erased_scalar_kind(a->kind) && erased_scalar_kind(p->kind)) return 1;
+    int ra = erased_number_rank(a->kind), rp = erased_number_rank(p->kind);
+    if (ra >= 0 && rp >= ra) return 1;
     return -1;
+}
+
+/* An argument for the parameter of type `p` it reaches only coerced
+ * (erased_arg_fit 1): a number widened by an explicit cast, also as an
+ * optional's value, so no C compiler warns of the conversion; a wrap into
+ * an optional or a sum as a call to the literal makes it. */
+static void erased_emit_arg(CodeGenerator* gen, ASTNode* arg, Type* p) {
+    Type* a = arg ? arg->node_type : NULL;
+    if (a && erased_number_rank(a->kind) >= 0 && erased_number_rank(p->kind) >= 0) {
+        fprintf(gen->output, "(%s)(", get_c_type(p));
+        generate_expression(gen, arg);
+        fprintf(gen->output, ")");
+        return;
+    }
+    Type* in = p->kind == TYPE_OPTIONAL ? p->element_type : NULL;
+    if (a && in && erased_number_rank(a->kind) >= 0 && erased_number_rank(in->kind) >= 0 &&
+        strcmp(cg_intern(get_c_type(a)), cg_intern(get_c_type(in))) != 0) {
+        fprintf(gen->output, "(%s){ .has = 1, .val = (%s)(", get_c_type(p), get_c_type(in));
+        generate_expression(gen, arg);
+        fprintf(gen->output, ") }");
+        return;
+    }
+    emit_closure_argument(gen, arg, p);
 }
 
 /* The arguments of `call(f, args...)`, the trailing DSL block left out. */
@@ -6674,7 +6712,10 @@ static int erased_dispatch_branch(CodeGenerator* gen, ASTNode* call, ASTNode* f,
     fprintf(gen->output, ".env");
     for (int i = 0; i < na; i++) {
         fprintf(gen->output, ", ");
-        emit_closure_argument(gen, args[i], ps[i]);
+        if (erased_arg_fit(args[i] ? args[i]->node_type : NULL, ps[i]) > 0)
+            erased_emit_arg(gen, args[i], ps[i]);
+        else
+            emit_closure_argument(gen, args[i], ps[i]);
     }
     fprintf(gen->output, ") : ");
     return 1;
