@@ -6268,6 +6268,8 @@ static void emit_match_operand(CodeGenerator* gen, ASTNode* m) {
     Type* saved_cell = gen->match_result_cell;
     Type* saved_opt = gen->match_result_opt;
     Type* saved_own = gen->match_result_own;
+    ASTNode* saved_bound = gen->match_result_bound;
+    gen->match_result_bound = NULL;
     gen->match_result_var = tmp;
     gen->match_result_string = 0;
     gen->match_result_struct = NULL;
@@ -6283,6 +6285,7 @@ static void emit_match_operand(CodeGenerator* gen, ASTNode* m) {
     gen->match_result_cell = saved_cell;
     gen->match_result_opt = saved_opt;
     gen->match_result_own = saved_own;
+    gen->match_result_bound = saved_bound;
     if (!as_stmts) {
         fprintf(gen->output, "%s; })", tmp);
         return;

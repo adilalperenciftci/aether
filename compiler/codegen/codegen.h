@@ -352,6 +352,11 @@ typedef struct {
     // (emit_owning_store), or an array filled (emit_array_fill). The
     // expression around the `match` reads the temporary as a place.
     Type* match_result_own;
+    // #2993: when non-NULL, the declaration `x = match ...` being bound:
+    // each value arm is stored into its place as `x = <the arm's value>`
+    // stores it (emit_bound_match_store), whatever the place is: a local, a
+    // closure's cell, a module variable, an actor's state.
+    struct ASTNode* match_result_bound;
 
     // #2054: set while the body of a string-returning closure is emitted.
     // A closure is called through a value its caller cannot classify, so

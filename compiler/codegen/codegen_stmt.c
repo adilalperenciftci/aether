@@ -7267,9 +7267,43 @@ static void emit_match_arm_block(CodeGenerator* gen, ASTNode* block) {
 // match's flag whether it owns it.
 static void emit_match_result_value_now(CodeGenerator* gen, ASTNode* result);
 
+/* #2993: an arm's value of a bound match, `x = match ...`, stored into the
+ * place as the statement `x = <value>` stores it: a local (its string or
+ * struct taken, the old one released), a closure's cell, a sum wrapped, a
+ * module variable, an actor's state. The bound form stored a bare `x =`
+ * for a plain local only, so a store into another place was the match as
+ * an expression, a GNU statement expression the strict C path refuses (an
+ * actor's state), or a local that hid the module variable it named. The
+ * statement is the arm's own: its value's temporaries and constructs that
+ * run statements are its. */
+static void emit_bound_match_store(CodeGenerator* gen, ASTNode* result) {
+    ASTNode* bound = gen->match_result_bound;
+    ASTNode* store = create_ast_node(AST_VARIABLE_DECLARATION, bound->value,
+                                     result->line ? result->line : bound->line,
+                                     result->line ? result->column : bound->column);
+    if (bound->node_type) store->node_type = clone_type(bound->node_type);
+    store->type_inferred = bound->type_inferred;
+    add_child(store, result);
+    const char* saved_var = gen->match_result_var;
+    ASTNode* saved_bound = gen->match_result_bound;
+    gen->match_result_var = NULL;
+    gen->match_result_bound = NULL;
+    generate_statement(gen, store);
+    gen->match_result_var = saved_var;
+    gen->match_result_bound = saved_bound;
+    /* The value is the arm's node, which the arm keeps. */
+    store->children[0] = NULL;
+    store->child_count = 0;
+    codegen_own_node(gen, store);
+}
+
 /* #2582: an arm's value, with the temporaries of the structs calls in it
  * return, destroyed once the match's result has taken what it keeps. */
 static void emit_match_result_value(CodeGenerator* gen, ASTNode* result) {
+    if (gen->match_result_var && gen->match_result_bound) {
+        emit_bound_match_store(gen, result);
+        return;
+    }
     ValueTemps vt;
     int has = value_temps_open_expr(gen, result,
                                     gen->match_result_var ? TEMP_KEPT : TEMP_FREE, &vt);
@@ -9221,7 +9255,11 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
             // declaration / re-bind, wrapping a variant struct initializer into
             // the tagged union (a value already of the sum type passes through).
             if (stmt->value && strcmp(stmt->value, "_") != 0 &&
-                stmt->node_type && stmt->node_type->kind == TYPE_SUM) {
+                stmt->node_type && stmt->node_type->kind == TYPE_SUM &&
+                /* A match is bound arm by arm (below), each arm's value
+                 * wrapped as this wraps one (#2993). */
+                !(stmt->child_count > 0 && stmt->children[0] &&
+                  stmt->children[0]->type == AST_MATCH_STATEMENT)) {
                 print_indent(gen);
                 if (!is_var_declared(gen, stmt->value)) {
                     /* #2902: volatile where a `try` body writes it. */
@@ -9345,7 +9383,11 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                 }
             }
             
-            if (is_state_var) {
+            /* #2993: a match bound to state is bound arm by arm (below),
+             * each arm's value stored as this stores one. */
+            int bound_match = stmt->child_count > 0 && stmt->children[0] &&
+                              stmt->children[0]->type == AST_MATCH_STATEMENT;
+            if (is_state_var && !bound_match) {
                 /* Generate as assignment to self->field. */
                 if (stmt->child_count > 0 &&
                     emit_state_array_store(gen, actor_state_decl(gen, stmt->value),
@@ -9418,7 +9460,13 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                                 stmt->line, stmt->column);
                         }
                     }
-                    if (!is_var_declared(gen, stmt->value)) {
+                    /* A local of this function is declared here, before
+                     * the arms store into it; a module variable and an
+                     * actor's state are the places they are, and `_`
+                     * names none (#2993). */
+                    if (!is_var_declared(gen, stmt->value) && !is_state_var &&
+                        !is_module_global_var(gen, stmt->value) &&
+                        strcmp(stmt->value, "_") != 0) {
                         mark_var_declared(gen, stmt->value);
                         // Infer type from first match arm result
                         const char* c_type = get_c_type(stmt->node_type);
@@ -9451,13 +9499,14 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                             !is_promoted_capture(gen, stmt->value))
                             mark_heap_string_var(gen, stmt->value);
                     }
-                    /* #2461: a string local takes each arm's value as it
-                     * would take it on its own (emit_string_take_rebind)
-                     * and releases the value it held before, like the
-                     * reassignment wrapper. The arms used to store a bare
-                     * pointer: a borrow of a buffer its owner then freed,
-                     * and the old value leaked. A block or statement arm
-                     * leaves the local as it was. */
+                    /* #2993: each arm stores its value into the place as
+                     * `x = <value>` stores it (emit_bound_match_store): a
+                     * string local takes it and releases the one it held
+                     * (#2461), a string-owning struct is replaced (#2497),
+                     * an optional wraps it, a closure's cell takes it
+                     * (#2514), a sum wraps a variant, and a module variable
+                     * and an actor's state are written where they are. A
+                     * block or statement arm leaves the place as it was. */
                     const char* saved_mvar = gen->match_result_var;
                     int saved_mstring = gen->match_result_string;
                     const char* saved_mstruct = gen->match_result_struct;
@@ -9465,34 +9514,17 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                     Type* saved_mcell = gen->match_result_cell;
                     Type* saved_mopt = gen->match_result_opt;
                     Type* saved_mown = gen->match_result_own;
-                    gen->match_result_own = NULL;
-                    /* #2497: a local that owns a string-owning struct takes
-                     * each arm's struct and releases the one it held. */
-                    Type* bound = declared_var_type(gen, stmt->value);
-                    if (!bound || bound->kind != TYPE_STRUCT) bound = stmt->node_type;
-                    if (!bound || bound->kind != TYPE_STRUCT)
-                        bound = match_value_type(stmt->children[0]);
-                    const char* bound_struct =
-                        (!is_promoted_capture(gen, stmt->value) &&
-                         !is_env_capture_name(gen, stmt->value))
-                        ? struct_owning_strings(gen, bound) : NULL;
-                    int owning = is_heap_string_var(gen, stmt->value) &&
-                                 !is_promoted_capture(gen, stmt->value) &&
-                                 !is_env_capture_name(gen, stmt->value);
-                    // Generate match with result assignment
+                    ASTNode* saved_mbound = gen->match_result_bound;
                     gen->match_result_var = stmt->value;
-                    gen->match_result_string = owning;
-                    gen->match_result_struct = bound_struct;
-                    gen->match_result_replace = 1;
-                    gen->match_result_cell = cell_type;
-                    /* An optional local takes each arm's value wrapped. */
-                    {
-                        Type* ot = declared_var_type(gen, stmt->value);
-                        if (!ot || ot->kind != TYPE_OPTIONAL) ot = stmt->node_type;
-                        gen->match_result_opt = (ot && ot->kind == TYPE_OPTIONAL && !cell_type)
-                                                ? ot : NULL;
-                    }
+                    gen->match_result_bound = stmt;
+                    gen->match_result_string = 0;
+                    gen->match_result_struct = NULL;
+                    gen->match_result_replace = 0;
+                    gen->match_result_cell = NULL;
+                    gen->match_result_opt = NULL;
+                    gen->match_result_own = NULL;
                     generate_statement(gen, stmt->children[0]);
+                    gen->match_result_bound = saved_mbound;
                     gen->match_result_own = saved_mown;
                     gen->match_result_opt = saved_mopt;
                     gen->match_result_var = saved_mvar;
@@ -11641,6 +11673,8 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                 Type* saved_cell = gen->match_result_cell;
                 Type* saved_opt = gen->match_result_opt;
                 Type* saved_own = gen->match_result_own;
+                ASTNode* saved_bound = gen->match_result_bound;
+                gen->match_result_bound = NULL;
                 gen->match_result_cell = NULL;
                 gen->match_result_own = NULL;
                 /* A match returned from an optional result: each arm's
@@ -11655,6 +11689,7 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                 gen->match_result_replace = 0;
                 generate_statement(gen, m);
                 gen->match_result_own = saved_own;
+                gen->match_result_bound = saved_bound;
                 gen->match_result_opt = saved_opt;
                 gen->match_result_var = saved;
                 gen->match_result_string = saved_string;
