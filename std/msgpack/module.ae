@@ -4,14 +4,11 @@
 // Memory model
 // ------------
 // A MsgValue tree owns its string/binary payloads through a std.bytes
-// buffer (s_bytes), NOT through a refcounted AetherString field. Storing
-// an AetherString in a heap.new struct field leaks: heap.free(struct) frees
-// only the struct, never the string, and manually releasing the field
-// double-frees (the escape walker does not follow a string into a struct
-// field). std.bytes is malloc-backed with an explicit bytes.free, which is
-// leak-clean the same way the crypto modules' byte buffers are. So every
-// str/bin/ext payload is an owned AetherBytes; free() reclaims it with
-// bytes.free alongside the structs and lists. get_string / get_bin mint a
+// buffer (s_bytes), not through a `string` field. The choice dates from
+// before a heap.new struct released its string fields on heap.free (it
+// does now); the buffer is kept because every str/bin/ext payload is then
+// one owned AetherBytes, which free() reclaims with bytes.free alongside
+// the structs and lists. get_string / get_bin mint a
 // fresh caller-owned AetherString from those bytes on demand (the caller
 // releases that copy; the tree keeps its buffer). On unpack the cursor's
 // read_slice already returns a freshly-owned AetherBytes, so the payload is

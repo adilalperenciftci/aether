@@ -36,14 +36,12 @@ const CBOR_FLOAT = 7
 const CBOR_MAX_DEPTH = 256
 
 // Memory model: a CborValue tree owns its text/byte-string payloads as an
-// AetherBytes buffer (str_bytes + str_len), NOT a refcounted `string` field.
-// A `string` stored in a heap.new struct field leaks — heap.free reclaims
-// only the struct, and the escape walker won't follow a string into a struct
-// field so it can't be released manually without a double-free. std.bytes is
-// malloc-backed with an explicit bytes.free (leak-clean); free_value reclaims
-// the buffer alongside the struct. get_string/get_bytes mint a fresh
-// caller-owned string on demand via the non-consuming bytes.to_string. This
-// is the same treatment std.msgpack uses for the identical problem.
+// AetherBytes buffer (str_bytes + str_len), not a `string` field. The choice
+// dates from before a heap.new struct released its string fields on
+// heap.free (it does now); the buffer is kept because free_value reclaims it
+// alongside the struct with an explicit bytes.free. get_string/get_bytes
+// mint a fresh caller-owned string on demand via the non-consuming
+// bytes.to_string. std.msgpack does the same.
 //
 // How a parsed item was encoded is kept with it (#2470), so `encode` writes
 // it back byte for byte and `diagnose` can show it: `ind` is the size of the
@@ -137,12 +135,9 @@ fn str_payload_equals_key(cv: *CborValue, key: string) -> bool {
     return eq
 }
 
-// The reader holds an owned std.bytes copy of the input, NOT the caller's
-// string. Borrowing the caller's string into this struct field trips the
-// escape walker, which then suppresses the caller's release of that string
-// (it leaks). Copying into a bytes buffer we own and free ourselves keeps
-// the caller's input fully the caller's to release — the same approach
-// std.msgpack's unpack uses.
+// The reader holds an owned std.bytes copy of the input, not the caller's
+// string, and frees it itself; the caller's input stays the caller's to
+// release. std.msgpack's unpack does the same.
 struct Reader {
     buf: ptr // owned std.bytes copy of the input
     len: int

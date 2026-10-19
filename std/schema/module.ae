@@ -719,8 +719,8 @@ parse(schema_ptr: ptr, input: ptr) -> (ptr, ptr) {
 
         if present_in == 0 {
             if f.has_default == 1 {
-                // absent + default → supply it. map.put auto-routes a string
-                // value to the owning sibling, so values_free reclaims it.
+                // absent + default → supply it. map.put of a string gives
+                // the map a reference of its own, so values_free reclaims it.
                 map.put(values, f.name, string_concat(f.default_val, ""))
             } else if f.is_optional == 0 {
                 push_error(errors, f.name, "missing", "${f.name} is required")
@@ -748,7 +748,7 @@ parse(schema_ptr: ptr, input: ptr) -> (ptr, ptr) {
         // 2. the rules
         cur, failed = run_rules(errors, f, f.name, typed)
         if failed == 0 {
-            // map.put auto-routes the owned string `cur` to the owning sibling.
+            // map.put gives the map a reference of its own to `cur`.
             map.put(values, f.name, cur)
         } else {
             string_free(cur)

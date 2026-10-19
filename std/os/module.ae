@@ -537,8 +537,8 @@ chdir(path: string) -> string {
 }
 
 // Current working directory, or "" on failure. Returns a fresh
-// refcounted string the caller owns (the raw result is `@heap`, released
-// by the heap-string tracker).
+// counted string the caller owns (the raw result is `@heap`, adopted at
+// the call and released by the place that holds it).
 getcwd() -> string {
     s = os_getcwd_raw()
     if s == null {

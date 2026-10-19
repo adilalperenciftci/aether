@@ -1746,9 +1746,10 @@ void exit_scope(CodeGenerator* gen) {
 
 // Emit ALL deferred statements (for return - unwinds entire function), in
 // LIFO order across all scopes. Nothing is held back for the returned value:
-// a closure local it returns has no env-free (a return is an escape to
-// claim_closure_local_env), and the cells and closures a returned closure
-// captured are kept alive by the references its env took (#2019, #2494).
+// the return took a reference of its own to what it hands the caller (R3), so
+// a returned closure local releases only its own reference here, and the cells
+// and closures a returned closure captured are kept alive by the references
+// its env took (#2019, #2494).
 void emit_all_defers(CodeGenerator* gen) {
     for (int i = gen->defer_count - 1; i >= 0; i--) {
         if (!gen->defer_stack[i]) continue;

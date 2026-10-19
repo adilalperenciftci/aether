@@ -719,9 +719,7 @@ fn w_add_entry(w: *ZipWriter, name: string, name_len: int,
     // Compress if asked, but never let a "compressed" entry come out larger
     // than stored — fall back to stored, as every real zip writer does. The
     // whole entry is emitted inside the arm that owns the compressed string,
-    // so that string (`cc`) is freed exactly once in its own scope and the
-    // heap-string tracker keeps it classified (a pre-declared `var c: string`
-    // reassigned across a branch loses that classification).
+    // so that string (`cc`) is released once, at the end of its own scope.
     var use_method: int = METHOD_STORED
     var comp_len: int = data_len
     lfh_off = w.pos

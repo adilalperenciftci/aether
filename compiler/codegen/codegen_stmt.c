@@ -5350,13 +5350,12 @@ void push_heap_string_exit_free_defers(CodeGenerator* gen, ASTNode* body) {
     for (int i = 0; i < gen->heap_string_var_count; i++) {
         const char* name = gen->heap_string_vars[i];
         if (!name) continue;
-        /* Skip closure-env vars and promoted captures — they have
-         * their own defer-free shapes via the existing closure /
-         * promoted-cell paths (see claim_closure_local_env and
-         * emit_promoted_cell_declaration below). Adding a heap-
-         * string-exit defer on top would emit a free on a name
-         * that doesn't live as a `const char*` at function
-         * scope. */
+        /* Skip a capture the closure reads from its environment and
+         * a promoted capture: the first is released by the env's
+         * destructor, the second lives in a cell that
+         * emit_promoted_cell_declaration (above) declares and
+         * releases. A string exit release on top would release a
+         * name that is not a `const char*` at function scope. */
         int is_env_cap = 0;
         for (int e = 0; e < gen->current_env_capture_count; e++) {
             if (gen->current_env_captures[e] &&
@@ -11854,12 +11853,13 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                      * emit_uniform_heap_return_expr. */
                     emit_return_value(gen, stmt);   // #340: coerces into `T?`
                     fprintf(gen->output, ";\n");
-                    /* Every env-free here is sound to run: a closure local
-                     * the value returns has none (claim_closure_local_env
-                     * counts a return as an escape), and a closure that the
-                     * returned one captured is kept by the reference the
-                     * capture took (#2494). Holding those frees back, as
-                     * this return used to, only leaked the captured env. */
+                    /* Every env release the exit runs is sound: the
+                     * return value above took a reference of its own (R3),
+                     * so a returned closure local releases only its own,
+                     * and a closure the returned one captured is kept by
+                     * the reference the capture took (#2494). Holding those
+                     * releases back, as this return used to, only leaked
+                     * the captured env. */
                     /* #1140: a single-value `return v` is a SUCCESS exit — in a
                      * `T!` function it is wrapped as `{._0 = v, ._1 = ""}`, and
                      * in an ordinary function there is no error channel at all.

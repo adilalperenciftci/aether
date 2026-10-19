@@ -30,12 +30,12 @@ exports(
 extern list_new() -> ptr
 extern list_new_in(alloc: ptr) -> ptr
 extern list_add_raw(list: ptr, item: @aether ptr) -> int
-// Heap-string-aware add (#467). Retains the value, tags the list,
-// stores the pointer. list_free releases owned-string elements
-// before freeing the backing array. Codegen auto-routes
-// `list.add(l, heap_string_expr)` here when the value is heap-
-// classified — direct callers pick this when they want explicit
-// ownership transfer.
+// String-aware add (#467), for C and `ptr` callers: the list takes a
+// reference of its own (a counted string retained, a plain C pointer
+// copied), tags the element and stores it; list_free releases owned
+// elements before freeing the backing array. `list.add(l, s)` of a
+// `string` in Aether code is a store into the list (R3): the compiler
+// hands the list a reference, moving a fresh value in.
 extern list_add_string_owned(list: ptr, item: @aether ptr) -> int
 extern list_get_raw(list: ptr, index: int) -> ptr
 extern list_set(list: ptr, index: int, item: @aether ptr)
@@ -102,32 +102,21 @@ intarr_view(arr: ptr) -> int[] {
     return intarr.array(arr)
 }
 
-// ---- StringList: refcount-aware list for AetherString values ----
-// The plain ArrayList stores items as raw `void*` and doesn't retain
-// on insert / release on remove. That works for caller-managed
-// lifetimes but silently dangles when the list is asked to hold
-// AetherString-bearing values whose refcount drops to zero before
-// the list itself is freed (the original variable goes out of
-// scope, the string frees, the list is left with a stale pointer).
-//
-// StringList wraps the same backing storage but takes a strong
-// reference on every insert and releases on remove / clear / free.
-// Plain `string` literals pass through unchanged — string_retain
-// is a no-op on values that don't bear the AetherString magic
-// header. Issue #274.
+// ---- StringList: a list whose elements are strings it owns ----
+// It wraps the ArrayList's backing storage, stores its own copy of
+// every string added or set, and frees those copies on remove, clear,
+// an overwriting set and free. (`list.add` of a `string` gives an
+// ordinary list a reference of its own too; StringList is the C-facing
+// shape typed for strings.) Issue #274.
 extern string_list_new() -> ptr
 // `s` is COPIED, not retained: the list owns an independent copy of
 // all the string's bytes, embedded NULs included (#2469), and frees it
-// itself (in remove / clear / free / overwriting set). The caller therefore keeps
-// ownership of its argument — a `string`-typed param is read-only to
-// the escape walker, so the caller's heap value is reclaimed normally
-// at its own scope exit. This is why there is no `@retain` here: an
-// earlier version stored the caller's pointer (needing `@retain` to
-// suppress the caller's free and avoid a UAF), but that leaked every
-// plain `char*` element — `string_retain`/`string_release` are no-ops
-// on non-magic `char*`, so the list could never reclaim a
-// `string.concat`/`split` result. Copy-on-add owns the bytes outright,
-// fixing the leak with no UAF. (#420 / leak-tail follow-up.)
+// itself (in remove / clear / free / overwriting set). The caller keeps
+// its argument, borrowed for the call as every argument is, and releases
+// it as usual. This is why there is no `@retain` here: an earlier version
+// stored the caller's pointer and could never reclaim a plain `char*`
+// element. Copy-on-add owns the bytes outright. (#420 / leak-tail
+// follow-up.)
 extern string_list_add(list: ptr, s: string) -> int
 extern string_list_get(list: ptr, index: int) -> string
 // `s` is copied, same as string_list_add; the overwritten element is freed.
