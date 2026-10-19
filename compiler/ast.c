@@ -503,6 +503,23 @@ Type* numeric_join_type(Type* a, Type* b) {
     return clone_type(rb > ra ? b : a);
 }
 
+/* A float literal, or one under a unary minus or plus. */
+static int is_float_literal_arm(const ASTNode* n) {
+    if (n && n->type == AST_UNARY_EXPRESSION && n->child_count == 1 && n->value &&
+        (strcmp(n->value, "-") == 0 || strcmp(n->value, "+") == 0))
+        n = n->children[0];
+    return n && n->type == AST_LITERAL && n->node_type && n->node_type->kind == TYPE_FLOAT;
+}
+
+Type* branch_join_type(Type* a, const ASTNode* a_arm, Type* b, const ASTNode* b_arm) {
+    if (!a || !b) return NULL;
+    if (a->kind == TYPE_FLOAT32 && b->kind == TYPE_FLOAT && is_float_literal_arm(b_arm))
+        return clone_type(a);
+    if (b->kind == TYPE_FLOAT32 && a->kind == TYPE_FLOAT && is_float_literal_arm(a_arm))
+        return clone_type(b);
+    return numeric_join_type(a, b);
+}
+
 Type* clone_type(Type* type) {
     if (!type) return NULL;
 

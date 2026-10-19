@@ -3117,6 +3117,8 @@ static Type* try_resolve_using_field(SymbolTable* table, ASTNode* struct_def,
     return NULL;
 }
 
+static ASTNode* numeric_literal_operand(ASTNode* n);   /* defined below */
+
 // Type inference functions
 Type* infer_type(ASTNode* expr, SymbolTable* table) {
     if (!expr) return NULL;
@@ -3476,7 +3478,18 @@ Type* infer_type(ASTNode* expr, SymbolTable* table) {
         }
 
         case AST_IF_EXPRESSION:
-            // Type is the type of the then-branch expression
+            /* The then branch's type, or with two numeric branches their
+             * common type (#2854): a long else branch was narrowed into the
+             * int of the then branch. */
+            if (expr->child_count >= 3) {
+                Type* th = infer_type(expr->children[1], table);
+                Type* el = infer_type(expr->children[2], table);
+                Type* t = branch_join_type(th, expr->children[1], el, expr->children[2]);
+                free_type(el);
+                if (!t) return th;
+                free_type(th);
+                return t;
+            }
             if (expr->child_count >= 2) {
                 return infer_type(expr->children[1], table);
             }
@@ -3491,13 +3504,32 @@ Type* infer_type(ASTNode* expr, SymbolTable* table) {
                 return clone_type(expr->node_type);
             }
             /* #2496: the first arm that yields a value (a block arm yields
-             * its final expression). */
-            for (int i = 1; i < expr->child_count; i++) {
-                ASTNode* arm = expr->children[i];
-                ASTNode* v = (arm && arm->child_count >= 2) ? match_arm_value(arm->children[1]) : NULL;
-                if (v) return infer_type(v, table);
+             * its final expression); numeric arms after it join with it, as
+             * an if-expression's branches do (#2854). */
+            {
+                Type* acc = NULL;
+                /* The first arm, while every arm after it is a literal: a
+                 * float literal's type is then what the join says it is. */
+                ASTNode* acc_arm = NULL;
+                for (int i = 1; i < expr->child_count; i++) {
+                    ASTNode* arm = expr->children[i];
+                    ASTNode* v = (arm && arm->child_count >= 2) ? match_arm_value(arm->children[1]) : NULL;
+                    if (!v) continue;
+                    Type* vt = infer_type(v, table);
+                    if (!acc) {
+                        acc = vt;
+                        acc_arm = v;
+                        continue;
+                    }
+                    Type* j = branch_join_type(acc, acc_arm, vt, v);
+                    free_type(vt);
+                    if (!j) continue;   /* not numeric, or not known yet */
+                    free_type(acc);
+                    acc = j;
+                    if (!numeric_literal_operand(v)) acc_arm = NULL;
+                }
+                return acc ? acc : create_type(TYPE_UNKNOWN);
             }
-            return create_type(TYPE_UNKNOWN);
 
         case AST_ARRAY_LITERAL:
             // Return the inferred array type
@@ -11012,6 +11044,10 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
             int enum_wildcard_line = -1;
 
             int opt_match = (match_expr_type && match_expr_type->kind == TYPE_OPTIONAL);
+            /* #2854: the first arm yielding a value, while every one after it
+             * is a literal (branch_join_type's float literal rule). */
+            ASTNode* first_value_arm = NULL;
+            int value_arm_seen = 0;
 
             // Type check each match arm
             for (int i = 1; i < stmt->child_count; i++) {
@@ -11274,6 +11310,17 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                         yielded->node_type->kind != TYPE_UNKNOWN) {
                         set_node_type(stmt, clone_type(yielded->node_type));
                     }
+                } else if (yielded) {
+                    /* #2854: numeric arms' common type, a long arm's beside
+                     * an int one's, as an if-expression's branches join. */
+                    Type* j = branch_join_type(stmt->node_type, first_value_arm,
+                                               yielded->node_type, yielded);
+                    if (j) set_node_type(stmt, j);
+                }
+                if (yielded) {
+                    if (!value_arm_seen) first_value_arm = yielded;
+                    else if (!numeric_literal_operand(yielded)) first_value_arm = NULL;
+                    value_arm_seen = 1;
                 }
 
                 free_symbol_table(arm_table);
@@ -11967,12 +12014,17 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                 function_value_annotate(expr->children[i], table);
             }
             if (expr->child_count >= 2) {
-                Type* then_type = infer_type(expr->children[1], table);
+                /* #2854: the common type of the branches. One the early
+                 * pass gave from a branch it knew alone widens to it. */
+                Type* t = infer_type(expr, table);
                 if (!expr->node_type || expr->node_type->kind == TYPE_UNKNOWN) {
                     if (expr->node_type) free_type(expr->node_type);
-                    expr->node_type = clone_type(then_type);
+                    expr->node_type = clone_type(t);
+                } else {
+                    Type* j = numeric_join_type(expr->node_type, t);
+                    if (j) { free_type(expr->node_type); expr->node_type = j; }
                 }
-                free_type(then_type);
+                free_type(t);
             }
             return 1;
 

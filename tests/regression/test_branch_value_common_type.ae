@@ -1,0 +1,56 @@
+// An if expression took the type of its then branch, and a value match the
+// type of its first arm, so a wider value in another branch was narrowed:
+// `v = if c == 1 { 1 } else { big }` with a `long big` declared `v` an int
+// and printed 1705032704 for 6000000000, and a float arm beside an int one
+// was truncated to its integer part. The branches now join as C's `?:`
+// computes their common type (a long over an int, a float over either), and
+// a float literal beside an f32 branch takes the f32, as it does beside an
+// f32 operand. This test reads each wide branch back through the local.
+
+struct V {
+    x: f32
+}
+
+main() {
+    c = 0
+    long big = 6000000000
+    v = if c == 1 { 1 } else { big }
+    if v != 6000000000 {
+        println("if: long else branch narrowed: ${v}")
+        exit(1)
+    }
+    w = match c {
+        1 -> 1
+        _ -> big
+    }
+    if w != 6000000000 {
+        println("match: long arm narrowed: ${w}")
+        exit(1)
+    }
+    f = if c == 1 { 1 } else { 2.5 }
+    if f != 2.5 {
+        println("if: float else branch narrowed: ${f}")
+        exit(1)
+    }
+    g = match c {
+        1 -> 1
+        _ -> 2.5
+    }
+    if g != 2.5 {
+        println("match: float arm narrowed: ${g}")
+        exit(1)
+    }
+    byte b = 7
+    m = if c == 1 { b } else { 300 }
+    if m != 300 {
+        println("if: int else branch narrowed to a byte: ${m}")
+        exit(1)
+    }
+    p = V { x: 0.5 }
+    h = if c == 1 { 0.25 } else { p.x }
+    if h != 0.5 {
+        println("if: f32 branch beside a float literal: ${h}")
+        exit(1)
+    }
+    println("ok")
+}

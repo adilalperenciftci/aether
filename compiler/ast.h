@@ -675,6 +675,14 @@ int types_equal(Type* a, Type* b);
  * join rule for an array literal's elements, a local bound in several
  * branches, and the early inference pass's view of such a local. */
 Type* numeric_join_type(Type* a, Type* b);
+/* #2854: the type of a value that branches, from two numeric arms (`a` is
+ * the type the arm `a_arm` yields, `b` the one `b_arm` does): an
+ * if-expression's then and else, a value match's arms in turn. They join
+ * (numeric_join_type), as C's `?:` computes the type of the two, so a `long`
+ * arm is not narrowed into an `int` one; a float literal beside an `f32`
+ * arm takes the f32, as it does beside an f32 operand (#2151). A fresh Type,
+ * or NULL when either arm is not numeric: the caller's own rule types it. */
+Type* branch_join_type(Type* a, const ASTNode* a_arm, Type* b, const ASTNode* b_arm);
 Type* clone_type(Type* type);
 
 /* True when `t` is a typed pointer to the cons-cell `StringSeq`

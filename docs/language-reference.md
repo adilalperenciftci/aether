@@ -1073,7 +1073,7 @@ println(if x > 0 { x } else { 0 - x })
 grade = if score >= 90 { 4 } else { if score >= 80 { 3 } else { 2 } }
 ```
 
-Both branches must produce a value of the same type. The `else` branch is required.
+Both branches must produce a value of the same type. The `else` branch is required. Two numeric branches have their common type, as C's `?:` computes it: `if c { 1 } else { big }` with a `long big` is a `long`, and an `int` beside a `float` is a `float`, so neither branch is narrowed into the other's type. A float literal beside an `f32` branch takes the `f32`, as it does beside an `f32` operand. A value `match` types its arms the same way.
 
 ### While Loops
 

@@ -548,24 +548,32 @@ void collect_expression_constraints(ASTNode* node, InferenceContext* ctx) {
     switch (node->type) {
         case AST_IF_EXPRESSION:
             /* #2745: an if-expression has the type of its branches, as the
-             * checker gives it: the then branch's, or the else branch's while
-             * the then branch's is not known. Left untyped here, a local it
-             * binds was untyped until the checker reached the binding, and
-             * the hoists that declare a loop's or a branch's local ahead of
-             * its block (hoist_decl_type) declared it so: a read of it before
-             * the binding, the value the previous pass bound, was
-             * interpolated as an int (#2741 for interpolations). */
+             * checker gives it: two numeric branches' common type (#2854),
+             * otherwise the then branch's, or the else branch's while the
+             * then branch's is not known. Left untyped here, a local it binds
+             * was untyped until the checker reached the binding, and the
+             * hoists that declare a loop's or a branch's local ahead of its
+             * block (hoist_decl_type) declared it so: a read of it before the
+             * binding, the value the previous pass bound, was interpolated
+             * as an int (#2741 for interpolations). */
             for (int i = 0; i < node->child_count; i++) {
                 collect_constraints(node->children[i], ctx);
             }
             if (node->child_count >= 3 &&
                 (!node->node_type || node->node_type->kind == TYPE_UNKNOWN)) {
-                Type* t = node->children[1] ? node->children[1]->node_type : NULL;
-                if (!t || t->kind == TYPE_UNKNOWN || t->kind == TYPE_VOID)
-                    t = node->children[2] ? node->children[2]->node_type : NULL;
-                if (t && t->kind != TYPE_UNKNOWN && t->kind != TYPE_VOID) {
+                ASTNode* th = node->children[1];
+                ASTNode* el = node->children[2];
+                Type* t = branch_join_type(th ? th->node_type : NULL, th,
+                                           el ? el->node_type : NULL, el);
+                if (!t) {
+                    Type* k = th ? th->node_type : NULL;
+                    if (!k || k->kind == TYPE_UNKNOWN || k->kind == TYPE_VOID)
+                        k = el ? el->node_type : NULL;
+                    if (k && k->kind != TYPE_UNKNOWN && k->kind != TYPE_VOID) t = clone_type(k);
+                }
+                if (t) {
                     if (node->node_type) free_type(node->node_type);
-                    node->node_type = clone_type(t);
+                    node->node_type = t;
                 }
             }
             break;
