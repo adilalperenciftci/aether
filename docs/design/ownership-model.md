@@ -325,6 +325,14 @@ the signature, so no call site reads another function's body:
   function keeps (stores where it outlives the call, returns, captures, or
   passes to another function's keeping parameter) is declared `@keep`, as an
   extern's is declared `@retain` (R4).
+  A struct local to the function, or a closure that runs and is dropped
+  inside the call, does not outlive it (decided 2026-10-19): the checker
+  counts one that holds the parameter only when the struct or the closure
+  itself escapes (returned, stored in a field, a module variable or a
+  container, or passed to a `@keep` or `@retain` parameter). The first
+  checker counted every struct literal and every capture, which made
+  downstream code (aephysics, ae3d, aeb) declare `@keep` for a struct or a
+  callback that never left the call.
 - The checker verifies each function against its own body: a `ptr`
   parameter not declared `@keep` is not kept. A call is checked against the
   callee's signature.

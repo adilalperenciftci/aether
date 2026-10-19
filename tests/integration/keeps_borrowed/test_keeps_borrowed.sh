@@ -5,8 +5,12 @@
 # A `ptr` slot owns nothing, so a pointer kept there lives only as long as
 # its owner: a string a caller passed would be freed under it. Each function
 # is checked against its own body: a borrowed `ptr` parameter is not stored
-# where it outlives the call, returned, captured, put in a struct or a
-# message, or passed to a `@keep` parameter. A call is checked against the
+# where it outlives the call, returned, sent in a message, or passed to a
+# `@keep` parameter. A struct local to the function, and a closure that runs
+# and is dropped inside the call, do not outlive it: putting the parameter in
+# one is a keep only when the struct or the closure escapes itself (returned,
+# stored in a field, a module-level `var` or a container, or passed to a
+# `@keep` or `@retain` parameter). A call is checked against the
 # callee's signature: a `string` reaches a `@keep ptr`, or a `ptr` field,
 # only through `string.keep(s)`. A closure's `ptr` parameter is always borrowed, and a
 # function with a `@keep` parameter is called by name, never as a value.
@@ -88,7 +92,7 @@ later(p: ptr) -> fn {
 
 main() { call(later(null)) }
 AE
-refused captured 2:12 "'p' is a borrowed \`ptr\` parameter, captured by a closure"
+refused captured 2:12 "'p' is a borrowed \`ptr\` parameter captured by a closure that is returned"
 
 cat > "$TMP/passed_on.ae" <<'AE'
 var kept: ptr = null
@@ -241,5 +245,255 @@ main() {
 AE
 accepted declared
 
+# A struct or a closure that holds a borrowed parameter keeps it only when
+# it escapes itself (Nic, 2026-10-19): each escaping form is still E0902.
+
+cat > "$TMP/struct_returned.ae" <<'AE'
+struct Pair { a: ptr, b: int }
+
+wrap(p: ptr) -> Pair {
+    s = Pair { a: p, b: 1 }
+    return s
+}
+
+main() { println("${wrap(null).b}") }
+AE
+refused struct_returned 5:12 "'p' is a borrowed \`ptr\` parameter held by a struct that is returned"
+
+cat > "$TMP/struct_lit_returned.ae" <<'AE'
+struct Pair { a: ptr, b: int }
+
+wrap(p: ptr) -> Pair {
+    return Pair { a: p, b: 1 }
+}
+
+main() { println("${wrap(null).b}") }
+AE
+refused struct_lit_returned 4:12 "'p' is a borrowed \`ptr\` parameter held by a struct that is returned"
+
+cat > "$TMP/struct_in_field.ae" <<'AE'
+struct Pair { a: ptr, b: int }
+struct Holder { pair: Pair }
+
+put(h: *Holder, p: ptr) {
+    s = Pair { a: p, b: 1 }
+    h.pair = s
+}
+
+main() { put(heap.new(Holder), null) }
+AE
+refused struct_in_field 6:12 "'p' is a borrowed \`ptr\` parameter held by a struct that is stored in a field or an element"
+
+cat > "$TMP/struct_in_global.ae" <<'AE'
+struct Pair { a: ptr, b: int }
+var last: Pair = Pair { a: null, b: 0 }
+
+put(p: ptr) {
+    s = Pair { a: p, b: 1 }
+    last = s
+}
+
+main() { put(null) }
+AE
+refused struct_in_global 6:5 "'p' is a borrowed \`ptr\` parameter held by a struct that is stored in a module-level \`var\`"
+
+cat > "$TMP/struct_field_read_escapes.ae" <<'AE'
+struct Pair { a: ptr, b: int }
+var kept: ptr = null
+
+put(p: ptr) {
+    s = Pair { a: p, b: 1 }
+    kept = s.a
+}
+
+main() { put(null) }
+AE
+refused struct_field_read_escapes 6:5 "'p' is a borrowed \`ptr\` parameter, stored in a module-level \`var\`"
+
+cat > "$TMP/struct_to_keep.ae" <<'AE'
+struct Pair { a: ptr, b: int }
+var kept: ptr = null
+
+hold(q: @keep ptr) { kept = q }
+
+put(p: ptr) {
+    s = Pair { a: p, b: 1 }
+    hold(&s)
+}
+
+main() { put(null) }
+AE
+refused struct_to_keep 8:10 "'p' is a borrowed \`ptr\` parameter held by a struct that is passed to a parameter that keeps it"
+
+cat > "$TMP/closure_local_returned.ae" <<'AE'
+later(p: ptr) -> fn {
+    f = || { println("${p == null}") }
+    return f
+}
+
+main() { call(later(null)) }
+AE
+refused closure_local_returned 3:12 "'p' is a borrowed \`ptr\` parameter captured by a closure that is returned"
+
+cat > "$TMP/closure_in_field.ae" <<'AE'
+struct Holder { cb: fn }
+
+put(h: *Holder, p: ptr) {
+    h.cb = || { println("${p == null}") }
+}
+
+main() { put(heap.new(Holder), null) }
+AE
+refused closure_in_field 4:10 "'p' is a borrowed \`ptr\` parameter captured by a closure that is stored in a field or an element"
+
+cat > "$TMP/closure_in_global.ae" <<'AE'
+var on_tick: ptr = null
+
+put(p: ptr) {
+    on_tick = || { println("${p == null}") }
+}
+
+main() { put(null) }
+AE
+refused closure_in_global 4:5 "'p' is a borrowed \`ptr\` parameter captured by a closure that is stored in a module-level \`var\`"
+
+cat > "$TMP/closure_in_container.ae" <<'AE'
+import std.list
+
+put(l: ptr, p: ptr) {
+    f = || { println("${p == null}") }
+    list.add(l, f)
+}
+
+main() { put(list.new(), null) }
+AE
+refused closure_in_container 5:17 "'p' is a borrowed \`ptr\` parameter captured by a closure that is stored in a container"
+
+cat > "$TMP/closure_to_keep.ae" <<'AE'
+var kept: ptr = null
+
+hold(f: @keep fn) { kept = f }
+
+put(p: ptr) {
+    hold(|| { println("${p == null}") })
+}
+
+main() { put(null) }
+AE
+refused closure_to_keep 6:10 "'p' is a borrowed \`ptr\` parameter captured by a closure that is passed to a parameter that keeps it"
+
+cat > "$TMP/closure_to_retain.ae" <<'AE'
+extern c_register(f: @retain fn)
+
+put(p: ptr) {
+    c_register(|| { println("${p == null}") })
+}
+
+main() { put(null) }
+AE
+refused closure_to_retain 4:16 "'p' is a borrowed \`ptr\` parameter captured by a closure that is passed to a parameter that keeps it"
+
+cat > "$TMP/closure_stores_inside.ae" <<'AE'
+var kept: ptr = null
+
+run(cb: fn) { cb() }
+
+put(p: ptr) {
+    run(|| { kept = p })
+}
+
+main() { put(null) }
+AE
+refused closure_stores_inside 6:14 "'p' is a borrowed \`ptr\` parameter, stored in a module-level \`var\`"
+
+# Need no `@keep`: the aephysics shape (a struct local to the function holds
+# the parameter, or has it stored into a field, and dies with the call) and
+# the aeb shape (a closure that captures it runs inside the call and is
+# dropped there).
+
+cat > "$TMP/struct_local.ae" <<'AE'
+import std.list
+
+struct Pair { a: ptr, b: int }
+
+first(p: ptr) -> int {
+    s = Pair { a: p, b: 1 }
+    return s.b
+}
+
+main() {
+    x = list.new()
+    println("${first(x)}")
+}
+AE
+accepted struct_local
+
+cat > "$TMP/struct_field_store.ae" <<'AE'
+struct Pair { a: ptr, b: int }
+struct Job { p: ptr, n: int }
+
+reads(j: *Job) -> int { return j.n }
+
+second(p: ptr, n: int) -> int {
+    s = Pair { a: null, b: 2 }
+    s.a = p
+    job = Job { p: p, n: n }
+    if s.a == null { return reads(&job) }
+    return s.b + reads(&job)
+}
+
+main() { println("${second(null, 3)}") }
+AE
+accepted struct_field_store
+
+cat > "$TMP/closure_sync.ae" <<'AE'
+import std.list
+
+run(cb: fn) { cb() }
+
+count_into(dst: ptr) {
+    run(|| { list.add(dst, "x") })
+    f = || { list.add(dst, "y") }
+    call(f)
+    run(f)
+}
+
+main() {
+    l = list.new()
+    count_into(l)
+    println("${list.size(l)}")
+}
+AE
+accepted closure_sync
+
+# #2977: a struct local whose address goes only to a borrowing parameter,
+# `@scoped` or not.
+cat > "$TMP/struct_addr_borrowed.ae" <<'AE'
+struct Holder {
+    p: ptr
+    n: int
+}
+
+reads(h: ptr) -> int {
+    return (h as *Holder).n
+}
+
+look(own: ptr) -> int {
+    @scoped h = Holder { p: own, n: 7 }
+    return reads((&h) as ptr)
+}
+
+look2(own: ptr) -> int {
+    h = Holder { p: own, n: 8 }
+    return reads((&h) as ptr)
+}
+
+main() {
+    x = 0
+    println("${look((&x) as ptr)} ${look2((&x) as ptr)}")
+}
+AE
+accepted struct_addr_borrowed
+
 if [ "$fails" -ne 0 ]; then exit 1; fi
-echo "  [PASS] keeps_borrowed: a borrowed ptr parameter is never kept; @keep, string.keep, string.seq_retain and a re-bound parameter are"
+echo "  [PASS] keeps_borrowed: a borrowed ptr parameter is never kept, alone or in a struct or closure that escapes; @keep, string.keep, string.seq_retain, a re-bound parameter, a struct local and a closure run in the call are"
