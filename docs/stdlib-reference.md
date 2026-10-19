@@ -231,8 +231,9 @@ maps.
 
 ### String list (`string_list_*`)
 
-A list typed for `AetherString` values, from `std.collections`: every
-entry is a counted string the list holds a reference to.
+A list typed for strings, from `std.collections`: every entry is a copy
+the list owns, made when the string is added or set and freed when it is
+removed, cleared, overwritten or the list is freed.
 
 ```aether,run
 import std.collections
@@ -241,15 +242,15 @@ import std.string
 build() -> ptr {
     L = string_list_new()
     s = string.copy("ephemeral")
-    string_list_add(L, s)          // the list takes a reference of its own
+    string_list_add(L, s)          // the list stores a copy of its own
     return L
-    // `s` releases its own here; the list's reference keeps the string.
+    // `s` is released here; the list's copy stays.
 }
 
 main() {
     L = build()
     println(string_list_get(L, 0))
-    string_list_free(L)             // releases every entry
+    string_list_free(L)             // frees every entry
 }
 ```
 
@@ -257,17 +258,15 @@ main() {
 ephemeral
 ```
 
-A literal is pinned, so the list stores it without a count.
-
 **Functions:**
 - `string_list_new()` → `ptr` - Allocate an empty list
-- `string_list_add(list, s)` → `int` - Append; takes a reference; returns 1 on success, 0 on OOM
+- `string_list_add(list, s)` → `int` - Append a copy; returns 1 on success, 0 on OOM
 - `string_list_get(list, index)` → `string` - The entry, which a place that keeps it takes a reference to; null on OOB
-- `string_list_set(list, index, s)` - Replace at index; releases old + retains new
+- `string_list_set(list, index, s)` - Replace at index with a copy of `s`; frees the copy it replaces
 - `string_list_size(list)` → `int` - -1 on null
-- `string_list_remove(list, index)` - Remove + release the entry
+- `string_list_remove(list, index)` - Remove the entry and free its copy
 - `string_list_clear(list)` - Drop every entry, keep the backing alloc
-- `string_list_free(list)` - Release every entry then free
+- `string_list_free(list)` - Free every entry, then the list
 - `string_list_sort_lex(list)` - Stable ascending lexicographic (byte-wise) sort, in place
 - `string_list_sort(list, cmp)` - Stable in-place sort by a comparator closure `|a: string, b: string| { ... }` returning negative / 0 / positive (like `strcmp`)
 
