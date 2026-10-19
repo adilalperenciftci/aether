@@ -4958,6 +4958,21 @@ static void emit_value_type_deps(CodeGenerator* gen, ASTNode* program, Type* t, 
             }
         }
         return;
+    case TYPE_FUNCTION:
+        /* #3000: a typed function pointer's declarator names the types of
+         * its parameters and result, so an optional's or a tuple's typedef
+         * goes first: `int (*f)(ae_opt_int)` in a struct came before
+         * `ae_opt_int` and was not C. A struct there need not be complete. */
+        if (!t->is_fnptr) return;
+        for (int i = 0; t->param_types && i < t->param_count; i++) {
+            Type* pt = t->param_types[i];
+            if (pt && (pt->kind == TYPE_OPTIONAL || pt->kind == TYPE_TUPLE))
+                emit_value_type_deps(gen, program, pt, state);
+        }
+        if (t->return_type && (t->return_type->kind == TYPE_OPTIONAL ||
+                               t->return_type->kind == TYPE_TUPLE))
+            emit_value_type_deps(gen, program, t->return_type, state);
+        return;
     case TYPE_SUM:
         /* #2985: a sum held by value embeds its variants: its typedef and
          * theirs go first. */

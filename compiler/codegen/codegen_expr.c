@@ -1874,7 +1874,13 @@ static int is_stdlib_string_aware_extern(const char* c_func_name) {
  * an extern passes one. A heap string (interpolated, concatenated, built by
  * a string op) is an AetherString whose header would otherwise reach the
  * callee in place of the characters; aether_string_data yields the payload
- * for either shape. Every other parameter takes the expression as written. */
+ * for either shape. Every other parameter takes the argument as a call
+ * through a closure does (emit_closure_argument, #3000): a bare value or
+ * `none` into an optional, a variant into a sum, a fixed-size array for a
+ * `T[N]`. Written as it was, `h(4)` for an `fn(int?) -> int` passed an int
+ * where C wants an ae_opt_int, and `h(none)` an initializer list. */
+static void emit_closure_argument(CodeGenerator* gen, ASTNode* arg, Type* pt);
+
 static void generate_fnptr_call_args(CodeGenerator* gen, Type* sig, ASTNode* call) {
     for (int i = 0; i < call->child_count; i++) {
         ASTNode* arg = call->children[i];
@@ -1887,7 +1893,7 @@ static void generate_fnptr_call_args(CodeGenerator* gen, Type* sig, ASTNode* cal
             generate_expression(gen, arg);
             fprintf(gen->output, ")");
         } else {
-            generate_expression(gen, arg);
+            emit_closure_argument(gen, arg, param);
         }
     }
 }
