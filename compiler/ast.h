@@ -790,6 +790,12 @@ int lane_accessor_index(TypeKind kind, const char* field);
 int annotation_has_marker(const char* annotation, const char* marker);
 char* annotation_add_marker(char* annotation, const char* marker);
 
+/* #2993: is `m` a `match` that is an operand of an expression (of an
+ * operation, a call, a condition, an interpolation)? The checker marks each
+ * one it types as an expression; a bound or returned `match`, an arm's, and
+ * a statement are the statement's own. */
+int ast_match_is_operand(const ASTNode* m);
+
 /* #2496: the value a `match` arm body yields when the match is an
  * expression, or NULL when it yields none and leaves the result as it was.
  * An expression body yields itself. A `{ ... }` block yields its last

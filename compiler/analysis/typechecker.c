@@ -2097,6 +2097,8 @@ static void tc_yields_settle(ASTNode* program, SymbolTable* global);
 static int tc_return_settle(ASTNode* ret, SymbolTable* table);
 /* #2743: every arm of a `match` whose value is used gives one. */
 static int check_match_value_arms(ASTNode* m, SymbolTable* table);
+/* #2993: a `match` that is an operand of an expression. */
+static int typecheck_match_operand(ASTNode* m, SymbolTable* table);
 
 // Type compatibility functions
 /* A `fn` with no signature: nothing known about parameters or result. */
@@ -6867,6 +6869,7 @@ int typecheck_actor_definition(ASTNode* actor, SymbolTable* table) {
         ASTNode* child = actor->children[i];
         
         if (child->type == AST_STATE_DECLARATION) {
+            int checked = 0;
             if ((!child->node_type || child->node_type->kind == TYPE_UNKNOWN)
                 && child->child_count > 0 && child->children[0]) {
                 ASTNode* init = child->children[0];
@@ -6879,13 +6882,19 @@ int typecheck_actor_definition(ASTNode* actor, SymbolTable* table) {
                     /* Any other initializer (`f() or { d }`) has the type
                      * it infers to. Left unknown, every use of the field in
                      * the handlers was untyped, and codegen took it for an
-                     * int (#2821). */
+                     * int (#2821). It is checked first: a `match` operand's
+                     * type is what its check settles (#2993), so `1.5 *
+                     * match k { ... }` had none before it, and the field
+                     * was an int. */
+                    typecheck_node(child, actor_table);
+                    checked = 1;
                     Type* it = infer_type(init, actor_table);
                     if (it && it->kind != TYPE_UNKNOWN) set_node_type(child, it);
                     else if (it) free_type(it);
                 }
             }
             add_symbol(actor_table, child->value, clone_type(child->node_type), 0, 0, 1);
+            if (checked) continue;
         } else if (child->type == AST_RECEIVE_STATEMENT) {
             // Handle receive statement
             SymbolTable* receive_table = create_symbol_table(actor_table);
@@ -12589,6 +12598,9 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
             if (!expr->node_type) expr->node_type = create_type(TYPE_PTR);
             return 1;
 
+        case AST_MATCH_STATEMENT:
+            return typecheck_match_operand(expr, table);
+
         case AST_PTR_AS_STRUCT_CAST:
             /* Walk the operand, then set our own node_type via the
              * shared inference path so codegen sees the
@@ -14757,6 +14769,79 @@ static int check_match_value_arms(ASTNode* m, SymbolTable* table) {
         refused++;
     }
     return refused;
+}
+
+/* Does arm body `body` leave the `match` without a value: a `return`,
+ * `break`, `continue`, `panic` or `exit(...)`, or a block ending in one? */
+static int tc_arm_leaves(ASTNode* body) {
+    if (body && body->type == AST_BLOCK)
+        body = body->child_count > 0 ? body->children[body->child_count - 1] : NULL;
+    if (!body) return 0;
+    switch (body->type) {
+        case AST_RETURN_STATEMENT: case AST_BREAK_STATEMENT:
+        case AST_CONTINUE_STATEMENT: case AST_PANIC_STATEMENT:
+            return 1;
+        case AST_EXPRESSION_STATEMENT:
+            body = body->child_count > 0 ? body->children[0] : NULL;
+            /* fall through */
+        default:
+            return body && body->type == AST_FUNCTION_CALL && body->value &&
+                   strcmp(body->value, "exit") == 0;
+    }
+}
+
+/* #2993: a `match` that is an operand (of an operation, a call, a
+ * condition, an interpolation) gives the value the expression reads where
+ * it stands, so it gives one whenever it does not leave: it runs an arm for
+ * every value (a `_` arm, or arms that cover the subject's type), and each
+ * arm ends in a value (or a `match` that gives one) or leaves. A bound or
+ * returned `match` falls back on the variable or the `return`; an operand
+ * has nothing to fall back on, and the expression read memory nothing had
+ * set. Returns the number of refusals. */
+static int check_match_operand_gives(ASTNode* m, SymbolTable* table) {
+    int refused = 0;
+    if (!ast_match_covers(m)) {
+        type_error_hint("this `match` is used as a value, and it runs no arm for some values "
+                        "of what it matches, so it would have none to give",
+                        "add a `_` arm that gives a value",
+                        m->line, m->column);
+        refused++;
+    }
+    for (int i = 1; i < m->child_count; i++) {
+        ASTNode* arm = m->children[i];
+        if (!arm || arm->type != AST_MATCH_ARM || arm->child_count < 2) continue;
+        ASTNode* given = tc_arm_value(arm->children[1]);
+        if (given && given->type == AST_MATCH_STATEMENT) {
+            refused += check_match_operand_gives(given, table);
+        } else if (!given && !tc_arm_leaves(arm->children[1])) {
+            /* At the arm's pattern: a block records no position. */
+            ASTNode* at = arm->children[1]->line ? arm->children[1] : arm->children[0];
+            int line = at && at->line ? at->line : m->line;
+            int col = at && at->line ? at->column : m->column;
+            type_error_hint("this arm gives the `match` no value, and the `match` is used as one",
+                            "end the arm with a value, or leave with `return`, `break` or "
+                            "`continue`",
+                            line, col);
+            refused++;
+        }
+    }
+    return refused;
+}
+
+static int typecheck_match_operand(ASTNode* m, SymbolTable* table) {
+    /* Codegen runs it ahead of the expression into a temporary of its own
+     * (codegen_expr.c, emit_match_operand); a bound or returned `match` is
+     * the statement's own and is never typed here. */
+    m->annotation = annotation_add_marker(m->annotation, "operand");
+    tc_push_value_match(m);   /* #2768: its arms keep their names */
+    int ok = typecheck_statement(m, table);
+    tc_pop_value_match();
+    if (check_match_value_arms(m, table) > 0) ok = 0;
+    if (check_match_operand_gives(m, table) > 0) ok = 0;
+    Type* t = infer_type(m, table);
+    if (t && t->kind != TYPE_UNKNOWN) set_node_type(m, t);
+    else if (t) free_type(t);
+    return ok;
 }
 
 /* A checked `return` of a call or a `match`, `ret`: when what it returns

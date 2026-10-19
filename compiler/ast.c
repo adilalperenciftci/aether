@@ -976,6 +976,10 @@ int ast_match_covers(const ASTNode* m) {
     return has_empty && has_cons;
 }
 
+int ast_match_is_operand(const ASTNode* m) {
+    return m && m->type == AST_MATCH_STATEMENT && annotation_has_marker(m->annotation, "operand");
+}
+
 int annotation_has_marker(const char* annotation, const char* marker) {
     if (!annotation || !marker || !*marker) return 0;
     size_t n = strlen(marker);

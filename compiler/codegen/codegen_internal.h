@@ -614,6 +614,8 @@ void emit_array_fill(CodeGenerator* gen, const char* dst, ASTNode* e, Type* at);
 void emit_array_fill_c(CodeGenerator* gen, const char* dst, const char* src, Type* at, int retain);
 void emit_array_result_value(CodeGenerator* gen, ASTNode* e, Type* at);
 void emit_owning_array_store(CodeGenerator* gen, const char* name, Type* at, ASTNode* rhs);
+/* The type a match expression's arms yield (match_arm_value), or NULL. */
+Type* match_value_type(ASTNode* m);
 int struct_param_written(ASTNode* n, const char* pname);
 void emit_string_take_owned(CodeGenerator* gen, ASTNode* e, int cell);
 void own_collect_types(CodeGenerator* gen, ASTNode* node);

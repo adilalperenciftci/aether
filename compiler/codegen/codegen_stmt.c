@@ -690,7 +690,7 @@ int is_owning_array_string_element(CodeGenerator* gen, ASTNode* e) {
 
 /* The type a match expression's arms yield: the first value an arm yields
  * (match_arm_value, so a block arm's final expression counts, #2496). */
-static Type* match_value_type(ASTNode* m) {
+Type* match_value_type(ASTNode* m) {
     for (int i = 1; m && i < m->child_count; i++) {
         ASTNode* arm = m->children[i];
         if (!arm || arm->type != AST_MATCH_ARM || arm->child_count < 2) continue;
@@ -6249,12 +6249,13 @@ static int call_may_hand_back_args(CodeGenerator* gen, ASTNode* call);
 /* The calls in an expression statement whose value is a struct, owning
  * strings, returned by value: temporaries the statement destroys once done
  * (see the expression-statement path). Not into a closure, whose body is
- * its own function. A struct literal a call borrows is one too (#2749),
- * unless the call's result may be a view into it, and it keeps what its
- * fields hold, which go with it. */
+ * its own function, nor into a `match` used as an operand (#2993), whose
+ * arms are statements with temporaries of their own. A struct literal a
+ * call borrows is one too (#2749), unless the call's result may be a view
+ * into it, and it keeps what its fields hold, which go with it. */
 void collect_stmt_struct_temps(CodeGenerator* gen, ASTNode* e,
                                ASTNode*** nodes, int* count, int* cap) {
-    if (!e || e->type == AST_CLOSURE) return;
+    if (!e || e->type == AST_CLOSURE || e->type == AST_MATCH_STATEMENT) return;
     if (e->type == AST_FUNCTION_CALL && e->node_type &&
         e->node_type->kind == TYPE_STRUCT && struct_owning_strings(gen, e->node_type)) {
         if (*count == *cap) {
@@ -6376,9 +6377,10 @@ static int call_may_hand_back_args(CodeGenerator* gen, ASTNode* call) {
 }
 
 /* #2619: is a struct a call returns, owning strings, somewhere in `e`? Or a
- * struct literal a call borrows (#2749), which is a temporary as well. */
+ * struct literal a call borrows (#2749), which is a temporary as well. Not
+ * one in the arms of a `match` (#2993): an arm is a statement of its own. */
 static int holds_struct_call(CodeGenerator* gen, ASTNode* e) {
-    if (!e || e->type == AST_CLOSURE) return 0;
+    if (!e || e->type == AST_CLOSURE || e->type == AST_MATCH_STATEMENT) return 0;
     if (e->type == AST_FUNCTION_CALL && e->node_type && e->node_type->kind == TYPE_STRUCT &&
         struct_owning_strings(gen, e->node_type)) return 1;
     for (int i = 0; i < e->child_count; i++) {
@@ -7286,6 +7288,21 @@ static void emit_match_result_value(CodeGenerator* gen, ASTNode* result) {
 
 static void emit_match_result_value_now(CodeGenerator* gen, ASTNode* result) {
     print_indent(gen);
+    if (gen->match_result_var && gen->match_result_own) {
+        /* #2993: the temporary of a `match` used as an operand owns what
+         * it holds (R2), and drops what it held (R3). A fixed-size array
+         * is filled, as C assigns no arrays. */
+        Type* ot = gen->match_result_own;
+        if (ot->kind == TYPE_ARRAY && own_type_owns(gen, ot)) {
+            emit_owning_array_store(gen, gen->match_result_var, ot, result);
+        } else if (ot->kind == TYPE_ARRAY) {
+            emit_array_fill(gen, gen->match_result_var, result, ot);
+            fprintf(gen->output, ";\n");
+        } else {
+            emit_owning_store(gen, gen->match_result_var, ot, result, 0);
+        }
+        return;
+    }
     if (gen->match_result_var && gen->match_result_cell) {
         /* #2514: a closure's variable takes the arm's value in its cell. */
         emit_cell_store(gen, gen->match_result_var, gen->match_result_cell, result);
@@ -8255,6 +8272,15 @@ static void stmt_control_run(CodeGenerator* gen, ASTNode* stmt, int temps_open) 
         case AST_MATCH_STATEMENT:
             if (stmt->child_count >= 1) v = stmt->children[0];
             own_temps = 1;
+            break;
+        case AST_SWITCH_STATEMENT:
+        case AST_PANIC_STATEMENT:
+        case AST_REPLY_STATEMENT:
+            /* #2993: a `switch` subject, the reason a `panic` gives, the
+             * message a `reply` sends. Not run ahead, a `match` operand in
+             * one was a statement expression, which only GCC-compatible
+             * compilers take. */
+            if (stmt->child_count >= 1) v = stmt->children[0];
             break;
         case AST_EXPRESSION_STATEMENT:
             if (stmt->child_count < 1 || !stmt->children[0]) break;
@@ -9440,6 +9466,8 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                     int saved_mreplace = gen->match_result_replace;
                     Type* saved_mcell = gen->match_result_cell;
                     Type* saved_mopt = gen->match_result_opt;
+                    Type* saved_mown = gen->match_result_own;
+                    gen->match_result_own = NULL;
                     /* #2497: a local that owns a string-owning struct takes
                      * each arm's struct and releases the one it held. */
                     Type* bound = declared_var_type(gen, stmt->value);
@@ -9467,6 +9495,7 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                                                 ? ot : NULL;
                     }
                     generate_statement(gen, stmt->children[0]);
+                    gen->match_result_own = saved_mown;
                     gen->match_result_opt = saved_mopt;
                     gen->match_result_var = saved_mvar;
                     gen->match_result_string = saved_mstring;
@@ -11604,7 +11633,9 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                 int saved_replace = gen->match_result_replace;
                 Type* saved_cell = gen->match_result_cell;
                 Type* saved_opt = gen->match_result_opt;
+                Type* saved_own = gen->match_result_own;
                 gen->match_result_cell = NULL;
+                gen->match_result_own = NULL;
                 /* A match returned from an optional result: each arm's
                  * value wrapped into it. */
                 gen->match_result_opt = (rt && rt->kind == TYPE_OPTIONAL &&
@@ -11616,6 +11647,7 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                 gen->match_result_struct = struct_owning_strings(gen, rt);
                 gen->match_result_replace = 0;
                 generate_statement(gen, m);
+                gen->match_result_own = saved_own;
                 gen->match_result_opt = saved_opt;
                 gen->match_result_var = saved;
                 gen->match_result_string = saved_string;

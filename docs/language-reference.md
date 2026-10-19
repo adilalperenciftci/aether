@@ -4367,6 +4367,47 @@ main() {
 // `{ note(...)  0 }`
 ```
 
+A `match` is an expression wherever a value goes, not only bound or returned:
+an operand (`total = total + match k { ... }`), an argument, a condition (an
+`if`, a `while`, which evaluates it on every pass, the right side of `&&`,
+which runs it only when the left side holds), an interpolation, the subject of
+another `match`, or an arm of one. It runs where the expression reaches it, in
+the order the expression is written. A `match` used this way has no variable
+or `return` to fall back on, so it must give a value on every path that
+reaches the expression: it runs an arm for every value (a `_` arm, or arms
+that cover the subject's type), and each arm ends in a value or leaves with
+`return`, `break`, `continue` or `panic` (E0200 otherwise).
+
+```aether,run
+label(k: int) -> string {
+    return "k${k}"
+}
+
+main() {
+    total = 0
+    for k in 0..4 {
+        total = total + match k {
+            0 -> 10
+            1, 2 -> 5
+            _ -> 1
+        }
+    }
+    println("total ${total}")
+    if match total { 21 -> true  _ -> false } {
+        println("as expected")
+    }
+    for k in 0..2 {
+        println("${match k { 0 -> "zero"  _ -> label(k) }} and ${2 * match k { 0 -> 3  _ -> 4 }}")
+    }
+}
+```
+```output
+total 21
+as expected
+zero and 6
+k1 and 8
+```
+
 ---
 
 ## Keywords

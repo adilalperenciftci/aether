@@ -346,6 +346,12 @@ typedef struct {
     // is wrapped into it as a value bound to it would be (a bare value, or
     // `none`), and a `string?` result's ownership flag follows the arm.
     Type* match_result_opt;
+    // #2993: when non-NULL, the result is the temporary of a `match` used
+    // as an operand, of this owning type or fixed-size array type: each
+    // value arm is taken into it and the value it held dropped
+    // (emit_owning_store), or an array filled (emit_array_fill). The
+    // expression around the `match` reads the temporary as a place.
+    Type* match_result_own;
 
     // #2054: set while the body of a string-returning closure is emitted.
     // A closure is called through a value its caller cannot classify, so

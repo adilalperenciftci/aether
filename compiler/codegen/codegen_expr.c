@@ -6163,10 +6163,21 @@ static const char* trailing_call_c_type(CodeGenerator* gen, ASTNode* call) {
     return r ? get_c_type(r) : NULL;
 }
 
+/* The type of the value of `match` operand `m` (ast_match_is_operand): its
+ * checked type, else the first value an arm gives. */
+static Type* match_operand_type(ASTNode* m) {
+    Type* t = m->node_type;
+    if (t && t->kind != TYPE_UNKNOWN && t->kind != TYPE_VOID) return t;
+    t = match_value_type(m);
+    return t && t->kind != TYPE_UNKNOWN && t->kind != TYPE_VOID ? t : NULL;
+}
+
 /* Is `e` one of the three constructs, in the form that runs statements, and
- * one emit_control_prelude can run ahead of its statement? */
+ * one emit_control_prelude can run ahead of its statement? A `match` used
+ * as an operand (#2993) is a fourth: it is a statement whatever its form. */
 int is_control_value(CodeGenerator* gen, ASTNode* e) {
     if (!e) return 0;
+    if (e->type == AST_MATCH_STATEMENT) return ast_match_is_operand(e) && match_operand_type(e);
     if (e->type == AST_OR_ELSE) {
         if (e->child_count < 2 || !e->children[1] || e->children[1]->type != AST_BLOCK) return 0;
         Type* tup = e->children[0] ? e->children[0]->node_type : NULL;
@@ -6201,6 +6212,77 @@ int is_control_value(CodeGenerator* gen, ASTNode* e) {
 }
 
 static int emit_trailing_call_expression(CodeGenerator* gen, ASTNode* call);
+
+/* #2993: `match` operand `m` (ast_match_is_operand) runs as the statement
+ * it is, ahead of the statement it is in (emit_control_prelude), each arm
+ * storing its value into a temporary that the expression reads where the
+ * `match` stands. A temporary of an owning type owns what it holds: each
+ * arm's value is taken into it and the value it held before dropped (R2,
+ * R3), so a pass of a loop that runs it again releases the last one, and
+ * its scope's exits release it; the expression reads it as it reads a
+ * local. A fixed-size array is an array of its own, which each arm fills
+ * (emit_array_fill), since C assigns no arrays. Where nothing can be
+ * declared ahead of the statement (no statement), a statement expression
+ * holds the same, its value read as the arm gave it. */
+static int g_match_operand_seq = 0;
+
+static void emit_match_operand(CodeGenerator* gen, ASTNode* m) {
+    const char* done = ctl_lookup(m);
+    if (done) {
+        fprintf(gen->output, "%s", done);
+        return;
+    }
+    Type* vt = match_operand_type(m);
+    int arr = vt && type_is_sized_array(vt) && vt->element_type;
+    const char* ct = vt ? get_c_type(arr ? vt->element_type : vt) : "int";
+    const char* dims = arr ? cg_internf("[%d]", vt->array_size) : "";
+    int as_stmts = g_ctl_emitting == m;
+    int owns = as_stmts && vt && own_type_owns(gen, vt);
+    const char* tmp = cg_internf("_mv%d", g_match_operand_seq++);
+    if (as_stmts) {
+        /* Zeroed: an owning store drops what the temporary held, nothing
+         * the first time. Its release is armed before the arms run, so an
+         * arm that leaves (`return`, `break`) releases what an earlier pass
+         * left in it. */
+        hoist_append_text(gen, cg_internf("%s %s%s = {0}; ", ct, tmp, dims));
+        if (owns && vt->kind == TYPE_STRING) {
+            print_indent(gen);
+            fprintf(gen->output, "aether_unwind_track_str_place((const void*)&%s, NULL);\n", tmp);
+            push_scoped_temp_free(gen, tmp);
+        } else if (owns) {
+            push_own_drop(gen, tmp, vt, m->line, m->column);
+        }
+    } else {
+        fprintf(gen->output, "({\n%s %s%s = {0};\n", ct, tmp, dims);
+    }
+    const char* saved_var = gen->match_result_var;
+    int saved_string = gen->match_result_string;
+    const char* saved_struct = gen->match_result_struct;
+    int saved_replace = gen->match_result_replace;
+    Type* saved_cell = gen->match_result_cell;
+    Type* saved_opt = gen->match_result_opt;
+    Type* saved_own = gen->match_result_own;
+    gen->match_result_var = tmp;
+    gen->match_result_string = 0;
+    gen->match_result_struct = NULL;
+    gen->match_result_replace = 0;
+    gen->match_result_cell = NULL;
+    gen->match_result_own = owns || arr ? vt : NULL;
+    gen->match_result_opt = !owns && vt && vt->kind == TYPE_OPTIONAL ? vt : NULL;
+    generate_statement(gen, m);
+    gen->match_result_var = saved_var;
+    gen->match_result_string = saved_string;
+    gen->match_result_struct = saved_struct;
+    gen->match_result_replace = saved_replace;
+    gen->match_result_cell = saved_cell;
+    gen->match_result_opt = saved_opt;
+    gen->match_result_own = saved_own;
+    if (!as_stmts) {
+        fprintf(gen->output, "%s; })", tmp);
+        return;
+    }
+    ctl_bind(m, tmp);
+}
 
 /* Run `e` (is_control_value) as statements here, ahead of its statement,
  * and bind its value: `discarded`, the statement throws the value away, so
@@ -6243,11 +6325,12 @@ int emit_control_prelude(CodeGenerator* gen, ASTNode* e, int discarded) {
  * emitters).
  *
  * ctl_contains: does `e` hold such a construct? A closure literal's body,
- * a block's and a match's statements see to their own. */
+ * a block's and a match's statements see to their own: a `match` operand is
+ * one, and one that is not an operand is its statement's. */
 int ctl_contains(CodeGenerator* gen, ASTNode* e) {
-    if (!e || e->type == AST_CLOSURE || e->type == AST_BLOCK ||
-        e->type == AST_MATCH_STATEMENT) return 0;
+    if (!e || e->type == AST_CLOSURE || e->type == AST_BLOCK) return 0;
     if (is_control_value(gen, e)) return 1;
+    if (e->type == AST_MATCH_STATEMENT) return 0;
     for (int i = 0; i < e->child_count; i++)
         if (ctl_contains(gen, e->children[i])) return 1;
     return 0;
@@ -6356,11 +6439,11 @@ static int ctl_linearize(CodeGenerator* gen, ASTNode* e, int discarded);
  * construct anywhere else is not (it runs on a condition the list does not
  * have, or in a part no list covers). */
 static int ctl_unreached(CodeGenerator* gen, ASTNode* c, ASTNode** ops, int n) {
-    if (!c || c->type == AST_CLOSURE || c->type == AST_BLOCK ||
-        c->type == AST_MATCH_STATEMENT) return 0;
+    if (!c || c->type == AST_CLOSURE || c->type == AST_BLOCK) return 0;
     for (int k = 0; k < n; k++)
         if (ops[k] == c) return 0;
     if (is_control_value(gen, c)) return 1;
+    if (c->type == AST_MATCH_STATEMENT) return 0;
     for (int i = 0; i < c->child_count; i++)
         if (ctl_unreached(gen, c->children[i], ops, n)) return 1;
     return 0;
@@ -7117,6 +7200,10 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
     }
 
     switch (expr->type) {
+        case AST_MATCH_STATEMENT:   /* #2993: a `match` used as an operand */
+            emit_match_operand(gen, expr);
+            break;
+
         case AST_LITERAL:
             if (expr->node_type && expr->node_type->kind == TYPE_STRING) {
                 emit_string_literal_node(gen, expr);
