@@ -29,7 +29,7 @@ fn rand_into(n: int) -> ptr {
 
 That shipped in a TLS server draft, and its three callers used the result as
 the server random, the **ECDSA P-256 signing nonce**, and the **X25519 private
-key**. A predictable ECDSA nonce discloses the signing key outright — one
+key**. A predictable ECDSA nonce discloses the signing key outright: one
 signature is enough. The handshake completes; the test passes; the key is gone.
 
 ```aether,fragment
@@ -44,7 +44,7 @@ fn rand_into(n: int) -> ptr {
 
 The general form: **a security primitive has no safe default.** Where ordinary
 code degrades gracefully, this code stops. Check the length returned as well as
-the error — a short read is a failure.
+the error: a short read is a failure.
 
 ## Compare secrets in constant time
 
@@ -68,7 +68,7 @@ fn bytes_equal(a: ptr, b: ptr, n: int) -> int {
 
 A `while` loop that `return 0`s on the first mismatch leaks the length of the
 matching prefix, which is enough to recover a tag byte by byte over enough
-attempts. This applies to `string.equals` on a secret too — it is a plain
+attempts. This applies to `string.equals` on a secret too: it is a plain
 comparison and is fine for a route name, wrong for a token.
 
 ## Fail closed, and name what failed
@@ -112,7 +112,7 @@ it behind an explicit debug flag the caller opts into.
 `std.cryptography` carries the primitives (AES, ChaCha20-Poly1305, P-256/384/521,
 Ed25519, X25519, RSA, SHA-2/3, HKDF, ML-KEM, and the TLS 1.3 record, key
 schedule, handshake and certificate layers). Before writing a construction,
-check whether the piece exists — and whether the piece you need is the *inverse*
+check whether the piece exists, and whether the piece you need is the *inverse*
 of something already present. The TLS server work was one layer, not a stack,
 because the record layer and key schedule were already role-neutral.
 

@@ -597,9 +597,9 @@ name = "selaenium"
 modules = "aether, selenium_core, selenium_core/drivermgr"
 ```
 
-Each entry names an **importable module**, and what joins the search path is that module's parent directory — because `--lib D` means "D contains modules" (`D/<name>.ae` or `D/<name>/module.ae`). So `selenium_core/drivermgr` puts `<package>/selenium_core` on the path and `import drivermgr` resolves. Either module form counts: `aether/webdriver` names a single-file `aether/webdriver.ae` just as readily as a directory holding `module.ae`.
+Each entry names an **importable module**, and what joins the search path is that module's parent directory, because `--lib D` means "D contains modules" (`D/<name>.ae` or `D/<name>/module.ae`). So `selenium_core/drivermgr` puts `<package>/selenium_core` on the path and `import drivermgr` resolves. Either module form counts: `aether/webdriver` names a single-file `aether/webdriver.ae` just as readily as a directory holding `module.ae`.
 
-This is why the declaration lives with the publisher rather than the consumer: a package can move its directories in a patch release without any consumer changing a path. A consumer names the dependency and nothing else. A package with no `aether.toml`, or none with a `modules` key, exports nothing and says so — the package root is never joined speculatively, since a real package is a whole repository whose root holds docs, scripts and tests as well as modules.
+This is why the declaration lives with the publisher rather than the consumer: a package can move its directories in a patch release without any consumer changing a path. A consumer names the dependency and nothing else. A package with no `aether.toml`, or none with a `modules` key, exports nothing and says so: the package root is never joined speculatively, since a real package is a whole repository whose root holds docs, scripts and tests as well as modules.
 
 ### Exporting the package root: `modules = "."`
 
@@ -613,7 +613,7 @@ phonelib/
     metadata.ae
 ```
 
-A dotted `import core.phonenumber` resolves only when the **package root** is on the search path (so `core/` is a subdirectory under it). But there is no `.ae` module at the root to name, so no ordinary `modules` entry joins the root — and the package's *own* internal `import core.metadata` needs the root too, so even a flat-importing consumer cannot help. Such a package could be `ae add`-consumable only by flattening its namespace to `import phonenumber` throughout.
+A dotted `import core.phonenumber` resolves only when the **package root** is on the search path (so `core/` is a subdirectory under it). But there is no `.ae` module at the root to name, so no ordinary `modules` entry joins the root, and the package's *own* internal `import core.metadata` needs the root too, so even a flat-importing consumer cannot help. Such a package could be `ae add`-consumable only by flattening its namespace to `import phonenumber` throughout.
 
 `modules = "."` is the explicit opt-in that joins the package **root** onto the consumer's search path:
 
@@ -623,7 +623,7 @@ name = "phonelib"
 modules = "."
 ```
 
-With it, a consumer does `import core.phonenumber` through a normal `ae add` dependency — no `--lib`, no path knowledge — and the package keeps its dotted namespacing. This is a deliberate, publisher-chosen export, so the "root is never joined **speculatively**" principle holds: the root joins only because the author wrote `.`, never as a guess by the toolchain. Combine it with named entries when a package exports both a rooted dotted package and other modules (`modules = ".", widgets`).
+With it, a consumer does `import core.phonenumber` through a normal `ae add` dependency (no `--lib`, no path knowledge), and the package keeps its dotted namespacing. This is a deliberate, publisher-chosen export, so the "root is never joined **speculatively**" principle holds: the root joins only because the author wrote `.`, never as a guess by the toolchain. Combine it with named entries when a package exports both a rooted dotted package and other modules (`modules = ".", widgets`).
 
 A dependency that is declared but not installed fails by name:
 
@@ -636,13 +636,13 @@ rather than as an unresolved-import error naming a module the user never typed.
 
 #### Overriding a dependency
 
-Two forms, both of which **announce themselves** — an override that applied silently would mean a green local build against a working copy that CI does not have:
+Two forms, both of which **announce themselves**: an override that applied silently would mean a green local build against a working copy that CI does not have:
 
 ```sh
 ae run x.ae --override github.com/aether-lang-dev/selaenium=../selaenium
 ```
 
-per-invocation, leaving no trace in the manifest — right for "just this once" and for CI proving a change against an unpublished branch. And in the manifest, a separate stanza so an override cannot be shipped by accident inside a `[dependencies]` line:
+per-invocation, leaving no trace in the manifest, right for a one-off and for CI proving a change against an unpublished branch. And in the manifest, a separate stanza so an override cannot be shipped by accident inside a `[dependencies]` line:
 
 ```toml
 [patch]
@@ -745,8 +745,8 @@ within one `@link` is preserved, which matters for single-pass linkers
 `ae build` reads that comment back and puts the tokens on its own link
 command (#1549), so a consumer does not restate them in `aether.toml`. They
 are placed *before* `link_flags`, which therefore still wins. `-L` search
-paths remain the consumer's job — those are site-specific in a way a module
-cannot know — except for `<lib_dir>/contrib`, which is added automatically so
+paths remain the consumer's job (those are site-specific in a way a module
+cannot know), except for `<lib_dir>/contrib`, which is added automatically so
 the veneer archives `make contrib` builds resolve without configuration.
 
 **A header a module needs in the TU (`@c_include`, #1986).** A module whose
@@ -777,7 +777,7 @@ may contain a space. A directive in the entry file resolves beside it.
 Transitive: a program that never names `contrib.sqlite` still links it when
 something it imports does, at any depth. `-D`-sensitive: an `import` inside a
 losing `when defined(...)` region is gone before codegen, so its `@link`
-contributes nothing and the library is absent from the binary entirely — not
+contributes nothing and the library is absent from the binary entirely, not
 merely uncalled. That is the half a static `link_flags` cannot express, since
 it is passed on every build regardless of which regions survived.
 
