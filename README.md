@@ -12,7 +12,7 @@ A compiled actor language whose permissions are part of the source, enforced fro
 
 ## Overview
 
-Most languages treat "what may this program touch?" as a deployment problem. Aether makes it a language problem: code runs against an explicit grant list, enforced three times over. At compile time, `--emit=lib` starts capability-empty and the host opts modules in with `--with=fs,net,os`. At scope level, `hide` and `seal except` stop ambient names from leaking into any lexical block, a closure, a trailing-block DSL, an actor handler. At runtime, an `LD_PRELOAD` shim checks libc itself (`open*`, `connect`/`bind`, `execve`, `mmap`, `dlopen`, `getenv`) against the same grants, inherited across `execve` — this third layer is Linux/FreeBSD only (there is no `LD_PRELOAD` on Windows). See [Containment Sandbox](docs/containment-sandbox.md) for the threat model, the prior art it draws on, and the known bypass surface.
+Most languages treat "what may this program touch?" as a deployment problem. Aether makes it a language problem: code runs against an explicit grant list, enforced three times over. At compile time, `--emit=lib` starts capability-empty and the host opts modules in with `--with=fs,net,os`. At scope level, `hide` and `seal except` stop ambient names from leaking into any lexical block, a closure, a trailing-block DSL, an actor handler. At runtime, an `LD_PRELOAD` shim checks libc itself (`open*`, `connect`/`bind`, `execve`, `mmap`, `dlopen`, `getenv`) against the same grants, inherited across `execve`. This third layer is Linux/FreeBSD only (there is no `LD_PRELOAD` on Windows). See [Containment Sandbox](docs/containment-sandbox.md) for the threat model, the prior art it draws on, and the known bypass surface.
 
 Concurrency is actor-shaped: `actor`, `receive` and `!`, with automatic multi-core scheduling, lock-free mailboxes, and migration that converges chatty actors onto one core. The compiler emits readable C, not bytecode and not a VM, which is an implementation choice rather than the pitch: it buys native speed, direct linking against existing C libraries, and a runtime that ports anywhere a C toolchain reaches.
 
@@ -23,9 +23,9 @@ The load-bearing features:
 - **Actor concurrency**, scheduled across cores by the runtime: lock-free messaging, locality-aware spawning, work stealing. See [Actor Concurrency](docs/actor-concurrency.md).
 - **Config IS code**: library APIs double as typed, sandboxable configuration DSLs via trailing-block closures, so operators run real Aether instead of YAML. See [Config IS Code](docs/config-is-code.md).
 - **Polyglot host, both directions**: run Lua / Python / Perl / Ruby / Tcl / JS in-process under the same grant list, or embed Aether into Python, Java, and Ruby through `--emit=lib` typed SDKs with per-guest memory and deadline caps. See [Embedding & emit=lib](docs/emit-lib.md).
-- **Production networking in the stdlib**: an HTTP server with TLS, HTTP/2, WebSocket, SSE, and zero-copy `sendfile(2)`, plus an nginx-class reverse proxy. See [HTTP Server](docs/http-server.md) and [Reverse Proxy](docs/http-reverse-proxy.md).
-- **A deliberate memory model**: manual-first with `defer`, automatic string-ownership tracking, and `requires`/`ensures` contracts that compile out at zero cost. See [Memory Management](docs/memory-management.md).
-- **Ergonomics**: type inference, `(value, err)` multi-value returns, `@derive(eq)` and `@derive(schema)`, and a single `ae` command for build, run, test, fmt and packages. See [Language Reference](docs/language-reference.md).
+- **Networking in the stdlib**: an HTTP server with TLS, HTTP/2, WebSocket, SSE, and zero-copy `sendfile(2)`, plus a reverse proxy with load balancing, health checks, caching and a circuit breaker. See [HTTP Server](docs/http-server.md) and [Reverse Proxy](docs/http-reverse-proxy.md).
+- **Deterministic memory, no garbage collector**: strings, closures and the structs, tuples and optionals built from them are reference counted by the compiler and released at a point the source shows; containers and C resources are freed with `defer`. Every combination of value kind, place and transfer is a cell of the ownership grid, which CI runs on every pull request to catch leaks, double frees and use after free. See [Memory Management](docs/memory-management.md).
+- **Ergonomics**: type inference, `(value, err)` multi-value returns, optionals and sum types checked at compile time, named and default arguments, `requires`/`ensures` contracts, `@derive(eq)` and `@derive(schema)`, and a single `ae` command for build, run, test, fmt and packages. See [Language Reference](docs/language-reference.md).
 - **Portability as a feature**: Linux, macOS, Windows, FreeBSD, WebAssembly, and embedded targets; cross-compile with `ae build --target=<triple>`. See [Architecture](docs/architecture.md).
 
 ## Benchmarks
@@ -44,11 +44,11 @@ See [Performance Benchmarks](docs/performance-benchmarks.md) for methodology and
 
 **Linux / macOS / FreeBSD, prebuilt binary (no toolchain, no build):**
 
-Every [release](https://github.com/aether-lang-dev/aether/releases/latest) ships a ready-to-run tarball (`ae` + `aetherc` + stdlib) named `aether-<version>-<platform>.tar.gz`, where `<platform>` is one of `linux-x86_64`, `macos-arm64`, `macos-x86_64`, `freebsd-x86_64`. Grab the URL for your platform from the [latest release](https://github.com/aether-lang-dev/aether/releases/latest), then extract and add its `bin/` to your `PATH`:
+Every [release](https://github.com/aether-lang-dev/aether/releases/latest) ships a ready-to-run tarball (`ae` + `aetherc` + stdlib) named `aether-<version>-<platform>.tar.gz`, where `<platform>` is one of `linux-x86_64`, `macos-arm64`, `macos-x86_64`, `freebsd-x86_64`, `android-aarch64`. Take the version and your platform from the [latest release](https://github.com/aether-lang-dev/aether/releases/latest), then extract and add its `bin/` to your `PATH`:
 
 ```bash
-# Example (substitute the current version + your platform from the Releases page):
-VER=0.458.0; PLATFORM=linux-x86_64
+# Substitute the latest version and your platform:
+VER=0.830.0; PLATFORM=linux-x86_64
 curl -fsSL "https://github.com/aether-lang-dev/aether/releases/download/v${VER}/aether-${VER}-${PLATFORM}.tar.gz" | tar xz -C ~/.local
 export PATH="$HOME/.local/bin:$PATH"     # add to ~/.bashrc / ~/.zshrc to persist
 ae version
@@ -147,6 +147,7 @@ ae build [file.ae]       # Compile to executable
 ae build --trace f.ae    # ...with message tracing compiled in (docs/message-tracing.md)
 ae check [file.ae]       # Type-check without compiling (skips codegen + link)
 ae fmt [--check] [path]  # Format source (stdin, or .ae files/dirs in place)
+ae fmt --short-names src # Rewrite json.json_free(v) as json.free(v) where both are one function
 ae test [file|dir]...    # Discover and run tests (every file and directory named)
 ae examples [dir]        # Build all example programs
 ae add <host/user/repo>  # Add a dependency (any git host)
@@ -159,6 +160,7 @@ ae bindgen consts <h>    # Import C macro constants from a header as Aether cons
 ae cflags                # Print -I/-L/-laether for embedding in external builds
 ae checksec <binary>     # Report the hardening a built artifact carries
 ae lib-path              # Print the resolved module-search chain
+ae lib-info <library>    # Print the symbol catalog of an --emit=lib library
 ae version               # Show current version
 ae upgrade               # Install the latest release and switch to it
 ae install <v>           # Install a specific release (latest if omitted)
@@ -228,7 +230,7 @@ An MSYS-style path (`/mingw64/...`) will not work: a compiled Aether program is 
 
 Note also that a source build without OpenSSL has no TLS backend linked at all; such a program must `import std.cryptography.tls13_client` to get HTTPS. The error message says so if you forget.
 
-**Native MSVC (cl.exe / nmake):** not currently supported as a full build path, tracker [#99](https://github.com/aether-lang-dev/aether/issues/99). The MSVC matrix job in CI verifies our public headers parse under `cl.exe`, and that the C the compiler writes for a set of programs compiles under it (`make test-msvc-compat` runs the same check locally; that C has no GNU statement expressions, #2765), so a future native MSVC port stays feasible, but `make` (the build system itself) requires GNU make. The MSYS2 MinGW build above is the supported source-build path for Windows today.
+**Native MSVC (cl.exe / nmake):** not a supported build path. The MSVC job in CI checks that the public headers parse under `cl.exe`, and that the C the compiler writes for a set of programs compiles under it (`make test-msvc-compat` runs the same check locally; that C has no GNU statement expressions, #2765), but the build itself requires GNU make. The MSYS2 MinGW build above is the supported source build on Windows.
 
 ## Project Structure
 
@@ -270,9 +272,11 @@ aether/
 │   ├── os/             # Shell execution, command capture, env vars, ISO-8601 time
 │   └── log/            # Structured logging
 ├── contrib/            # Optional / opinionated modules outside std/
-│   ├── cryptography/   # Extra crypto beyond std.cryptography
-│   ├── parsers/        # xml_expat (SAX XML via libexpat)
+│   ├── vulkan/         # GPU tier: Vulkan, with d3d12/ and metal/ of the same shape
 │   ├── sqlite/         # SQLite bindings (open, prepare, bind, step, column, ...)
+│   ├── quickjs/        # Embedded QuickJS (quickjs-ng)
+│   ├── jq/             # The jq language over std.json values
+│   ├── parsers/        # xml_expat (SAX XML via libexpat)
 │   ├── templating/     # liquid (Shopify-Liquid port) + native emitter DSL
 │   ├── tinyweb/        # Server-side request/response DSL
 │   └── host/<lang>/    # Embed js, lua, perl, python, ruby, tcl, duktape,
@@ -333,7 +337,7 @@ main() {
 
 ## Closures and Builder DSL
 
-Aether closures take three shapes after a function call. They look similar but have different semantics, picking the right one is the language's main lever for separating DSL structure from runtime behaviour.
+A block after a function call takes one of three shapes. They look alike but differ in semantics, and the choice is how a program separates DSL structure from runtime behaviour.
 
 | Mode | Syntax | Semantics |
 |------|--------|-----------|
@@ -359,7 +363,7 @@ btn("increment") callback { ref_set(counter, ref_get(counter) + 1) }
 btn("decrement") callback { ref_set(counter, ref_get(counter) - 1) }
 ```
 
-The compiler distinguishes them at parse time, which is what makes the sandboxing story (above) work: `hide`/`seal except` checks happen against the hoisted form of `closure` and `callback` blocks, so a `seal except req, res` on a callback body genuinely prevents the body from reaching outer scope. Immediate blocks inherit the caller's lexical scope by design, they're structure, not callbacks.
+The compiler distinguishes them at parse time, which is what the sandboxing above relies on: `hide`/`seal except` checks run against the hoisted form of `closure` and `callback` blocks, so a `seal except req, res` on a callback body keeps the body from reaching the outer scope. Immediate blocks inherit the caller's lexical scope by design: they are structure, not callbacks.
 
 Inspired by Smalltalk blocks, Ruby's blocks/procs, Groovy closures, and Kotlin/SwiftUI's trailing-block DSLs. See [Closures and Builder DSL](docs/closures-and-builder-dsl.md) for the builder-context mechanism, ref cells, and full DSL pattern; see [Closure lineage and runtime tradeoffs](docs/design/closure-lineage-and-runtime-tradeoffs.md) for why Aether keeps closure-shaped values without adopting a Lisp/Smalltalk runtime.
 
@@ -406,7 +410,10 @@ Same file is config, validation, conditional logic, and the entry point. No seco
 - [Architecture Overview](docs/architecture.md) - Runtime and compiler design
 - **Design & rationale** (why Aether is built the way it is): [closure model](docs/design/closure-lineage-and-runtime-tradeoffs.md), [parse, don't validate](docs/design/parse-dont-validate-review.md), [Aether through Chlipala's lens](docs/design/chlipala-lens.md), [DSL as a rules engine](docs/design/aether-dsl-as-a-rules-engine.md), and concurrency patterns ([sharded actor map](docs/design/sharded-actor-map.md), [snapshot cell](docs/design/snapshot-cell.md), [cache benchmark](docs/design/concurrent-cache-benchmark.md))
 - [Language comparisons](docs/cross-references/) (design history): surveys of Fir, Flint, Zym, and GoogleCloudPlatform/Aether
-- [Memory Management](docs/memory-management.md) - defer-first manual model, arena allocators
+- [Memory Management](docs/memory-management.md) - Reference-counted values, the ownership rules, `defer` for handles, the ownership grid
+- [Closures and Environment Lifetimes](docs/closures-and-lifetimes.md) - Where a closure's environment is held and released
+- [Named Arguments and select()](docs/named-args-and-select.md) - `f(b: 1, a: 2)`, default parameters, platform selection
+- [Formatter](docs/formatter.md) - `ae fmt`, `--check`, `--short-names`
 - [Structured Concurrency](docs/structured-concurrency.md) - Proposal: supervision trees + capability-scoped spawn/send (not yet shipped)
 - [Runtime Optimizations](docs/runtime-optimizations.md) - Performance techniques
 - [Message Tracing](docs/message-tracing.md) - `ae build --trace`, per-message delivery trace as JSONL; compiled out entirely by default
@@ -418,7 +425,7 @@ Same file is config, validation, conditional logic, and the entry point. No seco
 ### Running Tests
 
 ```bash
-# Full CI suite (10 steps, -Werror), runs on your current platform
+# Full CI suite (11 steps; the compiler is built with -Werror), on your current platform
 make ci
 
 # Unit tests only (runtime C test suite)
@@ -439,7 +446,7 @@ make docker-ci
 
 ### Cross-Platform Testing
 
-**CI runs automatically on:** Linux (GCC + Clang), macOS (ARM64 + x86_64), Windows (MinGW/MSYS2)
+**CI runs on every pull request on:** Linux (GCC, Clang, and a hardened GCC build), macOS (ARM64 and x86_64), Windows (MinGW/MSYS2, including the ownership grid), FreeBSD (a native build with the unit tests), and cross-compiles for FreeBSD and Android.
 
 ```bash
 # Cooperative scheduler (no Docker needed)
@@ -459,7 +466,7 @@ make docker-ci-embedded
 make ci-portability
 ```
 
-**`make ci` tests your current OS only.** No OS can locally test another OS natively, macOS cannot be virtualized on Linux/Windows, Windows build+run requires MSYS2. GitHub Actions CI automatically tests all 5 platform targets (Linux GCC, Linux Clang, macOS ARM64, macOS x86_64, Windows MinGW) on every PR. Docker targets (`docker-ci-windows`, `docker-ci-wasm`, `docker-ci-embedded`) provide cross-compilation syntax checking from any host.
+**`make ci` tests your current OS only.** macOS cannot be virtualized on Linux or Windows, and a Windows build and run needs MSYS2, so the other platforms are covered by GitHub Actions on every pull request. The Docker targets (`docker-ci-windows`, `docker-ci-wasm`, `docker-ci-embedded`) check cross-compilation from any host.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the full pre-PR checklist.
 
