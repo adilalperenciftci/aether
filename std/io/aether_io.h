@@ -74,6 +74,12 @@ typedef struct {
     const char* _1;     // "" on success or clean EOF, error message otherwise
 } _tuple_ptrstr_io;
 
+typedef struct {
+    void* _0;           // owned AetherString* line (empty on error)
+    int _1;             // bool tuple ABI is int; 1 on clean EOF, otherwise 0
+    const char* _2;     // empty on success/EOF, error message otherwise
+} _tuple_ptrboolstr_io;
+
 // File-descriptor lifecycle. `mode` is implicit in the function name:
 // fd_open_read       → O_RDONLY
 // fd_open_write      → O_WRONLY | O_CREAT | O_TRUNC, mode 0644 on POSIX
@@ -107,10 +113,15 @@ int io_fd_read_into_raw(int fd, void* buf, int length);
 // Read one '\n'-delimited line from `fd`. Trailing '\n' is stripped
 // (a trailing '\r' before it is also stripped, so CRLF input yields
 // CR-and-LF-stripped content). On clean EOF with no bytes pending
-// returns ("", ""). On read error or EOF mid-line returns
-// ("", "<reason>"). The returned AetherString is owned by the
+// returns ("", ""). EOF mid-line returns (partial, ""); a read error
+// returns ("", "<reason>"). The returned AetherString is owned by the
 // caller (refcount 1).
 _tuple_ptrstr_io io_fd_read_line_tuple(int fd);
+
+// EOF-aware sibling: (line, eof, err). Newline-terminated lines have eof=false;
+// clean EOF has eof=true, including an unterminated final line. Errors have
+// eof=false. CR stripping and string ownership match io_fd_read_line_tuple.
+_tuple_ptrboolstr_io io_fd_read_line_status_tuple(int fd);
 
 #endif // AETHER_IO_H
 

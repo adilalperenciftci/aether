@@ -1,0 +1,94 @@
+// EOF-aware line input: blank lines, final partial lines, compatibility and
+// owned results that survive subsequent reads && descriptor closure.
+import std.io
+import std.os
+import std.string
+
+assert(ok: bool, label: string) {
+    if !ok {
+        panic(label)
+    }
+}
+
+check_line(fd: int, expected: string, expected_eof: bool) {
+    line, eof, err = io.fd_read_line_status(fd)
+    assert(err == "", "line read must succeed")
+    assert(line == expected, "line content")
+    assert(eof == expected_eof, "EOF status")
+}
+
+check_legacy(fd: int, expected: string) {
+    line, err = io.fd_read_line(fd)
+    assert(err == "", "legacy read must succeed")
+    assert(line == expected, "legacy content")
+}
+
+main() {
+    path = "${os.temp_dir()}/aether_line_status_${os.getpid()}.txt"
+    defer io.delete_file(path)
+
+    assert(io.write_file(path, "") == "", "create empty input")
+    fd, open_err = io.fd_open_read(path)
+    assert(open_err == "", "open empty input")
+    check_line(fd, "", true)
+    check_line(fd, "", true)
+    check_legacy(fd, "")
+    assert(io.fd_close(fd) == "", "close empty input")
+
+    // Cross the initial 256-byte buffer && several reallocations.
+    long_line = ""
+    for i in 0..2048 {
+        long_line = "${long_line}x"
+    }
+    payload = "\n\nordinary\ncrlf\r\n\r\n${long_line}\nfinal"
+    assert(io.write_file(path, payload) == "", "create mixed input")
+    mixed_fd, mixed_err = io.fd_open_read(path)
+    assert(mixed_err == "", "open mixed input")
+    check_line(mixed_fd, "", false)
+    check_line(mixed_fd, "", false)
+    saved, saved_eof, saved_err = io.fd_read_line_status(mixed_fd)
+    assert(saved_err == "" && !saved_eof, "save ordinary line")
+    check_line(mixed_fd, "crlf", false)
+    check_line(mixed_fd, "", false)
+    check_line(mixed_fd, long_line, false)
+    final_line, final_eof, final_err = io.fd_read_line_status(mixed_fd)
+    assert(final_err == "" && final_eof, "unterminated line reaches EOF")
+    // Repeated EOF results are owned too; exercise automatic cleanup.
+    for i in 0..1000 {
+        check_line(mixed_fd, "", true)
+    }
+    assert(io.fd_close(mixed_fd) == "", "close mixed input")
+    assert(saved == "ordinary", "saved line survives later reads && close")
+    assert(final_line == "final", "final line survives later reads && close")
+
+    // The legacy entry point consumes the same payload with its old shape.
+    old_fd, old_err = io.fd_open_read(path)
+    assert(old_err == "", "open legacy input")
+    check_legacy(old_fd, "")
+    check_legacy(old_fd, "")
+    check_legacy(old_fd, "ordinary")
+    check_legacy(old_fd, "crlf")
+    check_legacy(old_fd, "")
+    check_legacy(old_fd, long_line)
+    check_legacy(old_fd, "final")
+    check_legacy(old_fd, "")
+    assert(io.fd_close(old_fd) == "", "close legacy input")
+
+    // A newline ends the line without reading ahead to discover EOF.
+    assert(io.write_file(path, "last\n") == "", "create terminated input")
+    last_fd, last_err = io.fd_open_read(path)
+    assert(last_err == "", "open terminated input")
+    check_line(last_fd, "last", false)
+    check_line(last_fd, "", true)
+    assert(io.fd_close(last_fd) == "", "close terminated input")
+
+    bad, bad_eof, bad_err = io.fd_read_line_status(-1)
+    assert(bad == "" && !bad_eof && bad_err != "", "invalid fd is an error")
+    // Valid descriptor with the wrong access mode exercises read() failure.
+    write_fd, write_err = io.fd_open_write(path)
+    assert(write_err == "", "open write-only descriptor")
+    unreadable, unreadable_eof, unreadable_err = io.fd_read_line_status(write_fd)
+    assert(unreadable == "" && !unreadable_eof && unreadable_err != "", "read failure is not EOF")
+    assert(io.fd_close(write_fd) == "", "close write-only descriptor")
+    println("PASS EOF-aware fd line input")
+}

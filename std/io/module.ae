@@ -14,13 +14,13 @@ exports(
     io_stderr_write_raw, io_stdout_write_raw,
     io_perror_raw, io_errno_message_raw,
     io_fd_open_read_tuple, io_fd_open_write_tuple, io_fd_close_raw,
-    io_fd_read_n_tuple, io_fd_read_line_tuple,
+    io_fd_read_n_tuple, io_fd_read_line_tuple, io_fd_read_line_status_tuple,
     io_fd_read_into_raw,
     read_file, write_file, append_file, delete_file, file_info,
     setenv, unsetenv,
     stderr_write, stdout_write, perror, errno_message,
     fd_open_read, fd_open_write, fd_close,
-    fd_write, fd_read_n, fd_read_into, fd_read_line
+    fd_write, fd_read_n, fd_read_into, fd_read_line, fd_read_line_status
 )
 
 // Console I/O — infallible in practice
@@ -87,6 +87,7 @@ extern io_fd_write_n(fd: int, data: ptr, length: int) -> int
 extern io_fd_read_n_tuple(fd: int, n: int) -> (string @heap, int, string)
 extern io_fd_read_into_raw(fd: int, buf: ptr, length: int) -> int
 extern io_fd_read_line_tuple(fd: int) -> (string @heap, string)
+extern io_fd_read_line_status_tuple(fd: int) -> (string @heap, bool, string)
 
 // string_concat for owned-copy duplication
 extern string_concat(a: string, b: string) -> string @heap
@@ -322,4 +323,14 @@ fd_read_into(fd: int, buf: byte[]) -> int! {
 //   - Read error: ("", "<reason>").
 fd_read_line(fd: int) -> {
     return io_fd_read_line_tuple(fd)
+}
+
+// EOF-aware line input: (line, eof, err). An empty line is ("", false, "");
+// clean EOF is ("", true, ""). An unterminated final line returns its content
+// with eof=true: process the content before exiting. Errors return
+// ("", false, error). Trailing CR/LF stripping matches fd_read_line.
+// The line is an owned, refcounted string, released automatically at scope
+// exit and valid across subsequent reads and fd_close (also on EOF/error).
+fd_read_line_status(fd: int) -> {
+    return io_fd_read_line_status_tuple(fd)
 }
