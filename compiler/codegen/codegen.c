@@ -648,6 +648,7 @@ CodeGenerator* create_code_generator(FILE* output) {
     gen->match_result_opt = NULL;
     gen->match_result_own = NULL;
     gen->match_result_bound = NULL;
+    gen->match_result_type = NULL;
     gen->match_result_string = 0;
     gen->match_result_struct = NULL;
     gen->match_result_replace = 0;

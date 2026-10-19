@@ -1,0 +1,174 @@
+// #2996, #3003, #3004: a value that branches (an if expression, a value
+// match) has the type its branches have in common for every kind of value,
+// by one rule (branch_join_type), where only numbers, an optional beside
+// its value and a sum beside its variant joined before:
+// - two variants of one sum are the sum, each branch wrapped into it; a
+//   match giving a Circle and a Square stored both into a Circle (#2996);
+// - fixed-size arrays of one element type and length are that type; bound,
+//   the local was declared `int[3] v;`, which is not C (#3004);
+// - tuples join position by position, and a tuple literal is the tuple of
+//   its elements' types wherever it stands; `t = (5, "z")` had no type and
+//   could not be destructured, and through a fn pointer it was `5("z")` in
+//   C (#3003).
+// Bound, returned, and as an operand. Before the fix this program did not
+// compile.
+
+import std.mem
+
+extern exit(code: int)
+
+struct Circle {
+    r: int
+}
+
+struct Square {
+    side: int
+}
+
+type Shape = Circle | Square
+
+var bad = 0
+
+check(what: string, got: string, want: string) {
+    if got != want {
+        println("FAIL ${what}: got ${got}, want ${want}")
+        bad = 1
+    }
+}
+
+label(k: int) -> string {
+    return "k${k}"
+}
+
+area(s: Shape) -> int {
+    return match s {
+        Circle -> 3 * s.r * s.r
+        Square -> s.side * s.side
+    }
+}
+
+pick(k: int) -> Shape {
+    return match k {
+        0 -> Circle { r: 1 }
+        _ -> Square { side: 2 }
+    }
+}
+
+pick_if(k: int) -> Shape {
+    return if k == 0 { Circle { r: 1 } } else { Square { side: 2 } }
+}
+
+choose(k: int, a: int[3], b: int[3]) -> int[3] {
+    return match k {
+        0 -> a
+        _ -> b
+    }
+}
+
+choose_if(k: int, a: int[3], b: int[3]) -> int[3] {
+    return if k == 0 { a } else { b }
+}
+
+total(xs: int[3]) -> int {
+    return xs[0] + xs[1] + xs[2]
+}
+
+pair(k: int) -> (int, string) {
+    return match k {
+        0 -> (1, "one")
+        _ -> (2, label(k))
+    }
+}
+
+pair_if(k: int) -> (int, string) {
+    return if k == 0 { (1, "one") } else { (2, label(k)) }
+}
+
+first(p: (int, string)) -> int {
+    a, _ = p
+    return a
+}
+
+sums(k: int) {
+    s = match k {
+        0 -> Circle { r: 3 }
+        _ -> Square { side: 4 }
+    }
+    t = if k == 0 { Circle { r: 5 } } else { Square { side: 6 } }
+    let u: Shape = match k {
+        0 -> Circle { r: 7 }
+        _ -> Square { side: 8 }
+    }
+    check("sums", "${area(s)} ${area(t)} ${area(u)} ${area(pick(k))} ${area(pick_if(k))}",
+        if k == 0 { "27 75 147 3 3" } else { "16 36 64 4 4" })
+    check("sum operand", "${area(match k { 0 -> Circle { r: 2 } _ -> Square { side: 5 } })}",
+        if k == 0 { "12" } else { "25" })
+}
+
+arrays(k: int) {
+    a = [1, 2, 3]
+    b = [10, 20, 30]
+    v = match k {
+        0 -> a
+        _ -> b
+    }
+    w = if k == 0 { a } else { b }
+    check("arrays", "${v[0]} ${w[1]} ${choose(k, a, b)[2]} ${choose_if(k, a, b)[0]}",
+        if k == 0 { "1 2 3 1" } else { "10 20 30 10" })
+    check("array operand", "${total(match k { 0 -> a _ -> b })}", if k == 0 { "6" } else { "60" })
+}
+
+tuples(k: int) {
+    t = (k, label(k))
+    n, s = t
+    p = match k % 2 {
+        0 -> (1, label(10))
+        _ -> (2, "lit")
+    }
+    a, b = p
+    q = if k % 2 == 0 { (3, label(30)) } else { (4, "four") }
+    c, d = q
+    e, f = pair(k)
+    g, h = pair_if(k)
+    fp = first as fn((int, string)) -> int
+    picked = "2 k${k}"
+    if k == 0 {
+        picked = "1 one"
+    }
+    want = "${k} k${k} 2 lit 4 four ${picked} ${picked} 5"
+    if k % 2 == 0 {
+        want = "${k} k${k} 1 k10 3 k30 ${picked} ${picked} 5"
+    }
+    check("tuples", "${n} ${s} ${a} ${b} ${c} ${d} ${e} ${f} ${g} ${h} ${fp((5, label(5)))}", want)
+}
+
+work(k: int) {
+    sums(k % 2)
+    arrays(k % 2)
+    tuples(k)
+}
+
+main() {
+    k = 0
+    while k < 6 {
+        work(k)
+        k = k + 1
+    }
+    if mem.heap_in_use_exact() {
+        grown = mem.steady_growth(|| {
+                j = 0
+                while j < 100 {
+                    work(j)
+                    j = j + 1
+                }
+            }, 5)
+        if grown != 0 {
+            println("FAIL leak: ${grown} bytes a round")
+            bad = 1
+        }
+    }
+    if bad != 0 {
+        exit(1)
+    }
+    println("ok")
+}

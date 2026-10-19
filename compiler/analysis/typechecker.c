@@ -3152,6 +3152,30 @@ int is_assignable(Type* from, Type* to) {
     return is_type_compatible(from, to);
 }
 
+/* #2983, #2996, #3003, #3004: the type a value with branches `a` and `b`
+ * gives (an if-expression's two, a value match's arms in turn; `a_arm` and
+ * `b_arm` the nodes that give them): their join (branch_join_type, the one
+ * rule for numbers, optionals, sums and their variants, fixed-size arrays
+ * and tuples), else the one the other fits into, as a binding of it would
+ * take it (`null` beside a pointer). A fresh Type, or NULL when either is
+ * not known yet, or when the two give values of no one type, which sets
+ * `*refused`. */
+static Type* tc_branch_value_type(Type* a, const ASTNode* a_arm, Type* b, const ASTNode* b_arm,
+                                  int* refused) {
+    if (!a || !b || a->kind == TYPE_UNKNOWN || b->kind == TYPE_UNKNOWN ||
+        a->kind == TYPE_VOID || b->kind == TYPE_VOID) return NULL;
+    Type* j = branch_join_type(a, a_arm, b, b_arm);
+    if (j) return j;
+    /* Fixed-size arrays of another length or element type, and tuples of
+     * another shape, give no one value, however a binding would take them. */
+    int arrays = type_is_sized_array(a) && type_is_sized_array(b);
+    int tuples = a->kind == TYPE_TUPLE && b->kind == TYPE_TUPLE;
+    if (!arrays && !tuples && is_assignable(b, a)) return clone_type(a);
+    if (!arrays && !tuples && is_assignable(a, b)) return clone_type(b);
+    if (refused) *refused = 1;
+    return NULL;
+}
+
 int is_callable(Type* type) {
     if (!type) return 0;
     switch (type->kind) {
@@ -3655,7 +3679,31 @@ Type* infer_type(ASTNode* expr, SymbolTable* table) {
         case AST_ARRAY_LITERAL:
             // Return the inferred array type
             return expr->node_type ? clone_type(expr->node_type) : create_type(TYPE_UNKNOWN);
-            
+
+        case AST_TUPLE_LITERAL: {
+            /* #3003: a tuple literal is the tuple of its elements' types,
+             * wherever it stands; one its slot stamped (an extern's tuple
+             * parameter, #1033) keeps that. Unknown while an element is
+             * (a bare `none`: the slot it goes into says). */
+            if (expr->node_type && expr->node_type->kind == TYPE_TUPLE)
+                return clone_type(expr->node_type);
+            if (expr->child_count < 2) return create_type(TYPE_UNKNOWN);
+            Type* t = create_type(TYPE_TUPLE);
+            t->tuple_count = expr->child_count;
+            t->tuple_types = (Type**)calloc((size_t)expr->child_count, sizeof(Type*));
+            for (int i = 0; i < expr->child_count; i++) {
+                Type* et = infer_type(expr->children[i], table);
+                t->tuple_types[i] = et;
+                if (!et || et->kind == TYPE_UNKNOWN || et->kind == TYPE_VOID ||
+                    (et->kind == TYPE_OPTIONAL &&
+                     (!et->element_type || et->element_type->kind == TYPE_UNKNOWN))) {
+                    free_type(t);
+                    return create_type(TYPE_UNKNOWN);
+                }
+            }
+            return t;
+        }
+
         case AST_IDENTIFIER: {
             if (expr->annotation && strcmp(expr->annotation, "fn_value") == 0 && expr->node_type) {
                 return clone_type(expr->node_type);
@@ -8529,6 +8577,8 @@ static void sum_rewrite_ast(ASTNode* n, SumDef* defs, int ndefs) {
 }
 
 static void resolve_sum_types(ASTNode* program) {
+    /* #2996: the sums a branch value's arms join to (branch_join_type). */
+    ast_sums_reset();
     if (!program) return;
     SumDef defs[AETHER_MAX_SUMS];
     int ndefs = 0;
@@ -8538,6 +8588,10 @@ static void resolve_sum_types(ASTNode* program) {
             defs[ndefs].name = c->value;
             defs[ndefs].def = c;
             ndefs++;
+            Type* st = create_sum_type(c->value);
+            sum_apply(st, c);
+            ast_sum_register(st);
+            free_type(st);
         }
     }
     if (ndefs == 0) return;
@@ -10176,6 +10230,22 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                             expected_enum = ex->type;
                     }
                     coerce_bare_enum_member(init, expected_enum, table);
+                }
+                /* #2996: a value that branches into a sum-typed place (the
+                 * local's annotation or an existing local's own type) takes
+                 * that sum first, so its arms join with it, a sum beside
+                 * each of its variants: arms whose variants two sums share
+                 * are the sum the local says. */
+                if (init->type == AST_MATCH_STATEMENT || init->type == AST_IF_EXPRESSION) {
+                    Type* slot = (!stmt->type_inferred && stmt->node_type &&
+                                  stmt->node_type->kind != TYPE_UNKNOWN) ? stmt->node_type : NULL;
+                    if (!slot && stmt->value) {
+                        Symbol* ex = lookup_symbol(table, stmt->value);
+                        if (ex && !ex->is_function && !ex->hoist_pending && ex->type &&
+                            ex->type->kind != TYPE_UNKNOWN)
+                            slot = ex->type;
+                    }
+                    if (slot && slot->kind == TYPE_SUM) set_node_type(init, clone_type(slot));
                 }
                 // Match-as-expression: typecheck as statement, then use its type
                 if (init->type == AST_MATCH_STATEMENT) {
@@ -11845,11 +11915,29 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                         set_node_type(stmt, clone_type(yielded->node_type));
                     }
                 } else if (yielded) {
-                    /* #2854: numeric arms' common type, a long arm's beside
-                     * an int one's, as an if-expression's branches join. */
-                    Type* j = branch_join_type(stmt->node_type, first_value_arm,
-                                               yielded->node_type, yielded);
+                    /* #2854: the arms' common type, as an if-expression's
+                     * branches join: a long arm's beside an int one's, and
+                     * (#2996, #3003, #3004) two variants of one sum, a
+                     * fixed-size array beside one of its element type and
+                     * length, tuples position by position. A match whose
+                     * value is used refuses arms that give values of no one
+                     * type, as an if expression does (#2983). */
+                    int refused = 0;
+                    Type* j = tc_branch_value_type(stmt->node_type, first_value_arm,
+                                                   yielded->node_type, yielded, &refused);
                     if (j) set_node_type(stmt, j);
+                    if (refused && value_match && yielded->type != AST_NONE_LITERAL) {
+                        char msg[512];
+                        snprintf(msg, sizeof(msg),
+                                 "the arms of this match give values of types %s and %s: "
+                                 "every arm must give a value of one type",
+                                 type_spelled(stmt->node_type), type_spelled(yielded->node_type));
+                        type_error_hint(msg,
+                            "convert one arm to the others' type, or bind each arm's value "
+                            "in a statement `match`",
+                            yielded->line ? yielded->line : stmt->line,
+                            yielded->line ? yielded->column : stmt->column);
+                    }
                 }
                 if (yielded) {
                     if (!value_arm_seen) first_value_arm = yielded;
@@ -12032,6 +12120,16 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
             // the one value form the statement path owns.
             for (int i = 0; i < stmt->child_count; i++) {
                 coerce_bare_enum_member(stmt->children[i], g_tc_return_type, table);
+                /* #2996: a returned value that branches takes a sum result
+                 * type first: its arms join with it, a sum beside each of
+                 * its variants. */
+                if (stmt->child_count == 1 && stmt->children[i] && g_tc_return_type &&
+                    g_tc_return_type->kind != TYPE_UNKNOWN && g_tc_return_type->kind != TYPE_VOID &&
+                    g_tc_return_owner && g_tc_return_owner->type != AST_CLOSURE &&
+                    !g_tc_return_owner->type_inferred && g_tc_return_type->kind == TYPE_SUM &&
+                    (stmt->children[i]->type == AST_MATCH_STATEMENT ||
+                     stmt->children[i]->type == AST_IF_EXPRESSION))
+                    set_node_type(stmt->children[i], clone_type(g_tc_return_type));
                 if (stmt->children[i] && stmt->children[i]->type == AST_MATCH_STATEMENT) {
                     tc_push_value_match(stmt->children[i]);   /* #2768 */
                     typecheck_node(stmt->children[i], table);
@@ -12539,7 +12637,11 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
             set_node_type(expr, create_type(TYPE_VOID));
             return 1;
 
-        case AST_IF_EXPRESSION:
+        case AST_IF_EXPRESSION: {
+            /* The type the place it goes into gave it (a local's
+             * annotation, #2996), or the early pass's: each branch fits it. */
+            Type* slot = (expr->node_type && expr->node_type->kind != TYPE_UNKNOWN)
+                         ? clone_type(expr->node_type) : NULL;
             // Typecheck all children (condition, then-expr, else-expr)
             for (int i = 0; i < expr->child_count; i++) {
                 typecheck_expression(expr->children[i], table);
@@ -12555,7 +12657,7 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                     if (expr->node_type) free_type(expr->node_type);
                     expr->node_type = clone_type(t);
                 } else {
-                    Type* j = numeric_join_type(expr->node_type, t);
+                    Type* j = branch_join_type(expr->node_type, NULL, t, NULL);
                     if (j) { free_type(expr->node_type); expr->node_type = j; }
                     /* #2983: or the wider type a branch has, which the early
                      * pass could not see (a sum, an optional). */
@@ -12578,9 +12680,22 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                 expr->children[2]->type != AST_NONE_LITERAL) {
                 Type* th = infer_type(expr->children[1], table);
                 Type* el = infer_type(expr->children[2], table);
-                int known = th && el && th->kind != TYPE_UNKNOWN && el->kind != TYPE_UNKNOWN &&
-                            th->kind != TYPE_VOID && el->kind != TYPE_VOID;
-                if (known && !is_assignable(el, th) && !is_assignable(th, el)) {
+                int refused = 0;
+                Type* bt = tc_branch_value_type(th, expr->children[1], el, expr->children[2],
+                                                &refused);
+                if (bt) free_type(bt);
+                if (refused && slot) {
+                    /* Branches of no one type between them that each fit
+                     * the place's (two variants that two sums share, in a
+                     * local of one of them) are that type. */
+                    int r1 = 0, r2 = 0;
+                    Type* x = tc_branch_value_type(slot, NULL, th, expr->children[1], &r1);
+                    Type* y = tc_branch_value_type(slot, NULL, el, expr->children[2], &r2);
+                    if (x) free_type(x);
+                    if (y) free_type(y);
+                    refused = r1 || r2;
+                }
+                if (refused) {
                     char msg[512];
                     snprintf(msg, sizeof(msg),
                              "the branches of this if expression give values of types %s and "
@@ -12591,12 +12706,15 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                         expr->line, expr->column);
                     free_type(th);
                     free_type(el);
+                    if (slot) free_type(slot);
                     return 0;
                 }
                 free_type(th);
                 free_type(el);
             }
+            if (slot) free_type(slot);
             return 1;
+        }
 
         case AST_NULL_LITERAL:
             // null is always TYPE_PTR
@@ -12781,10 +12899,16 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
              * the extern-call argument check validates shape (element
              * count, scalar element kinds) against the tuple-typed
              * parameter and stamps expr->node_type with the param's
-             * tuple type. Anywhere else the literal is left untyped and
-             * the consuming context reports its own mismatch. */
+             * tuple type. #3003: anywhere else the literal is the tuple of
+             * its elements' types: left untyped, `t = (5, "z")` declared a
+             * local nothing could destructure. */
             for (int i = 0; i < expr->child_count; i++) {
                 typecheck_expression(expr->children[i], table);
+            }
+            if (!expr->node_type || expr->node_type->kind != TYPE_TUPLE) {
+                Type* t = infer_type(expr, table);
+                if (t && t->kind == TYPE_TUPLE) set_node_type(expr, t);
+                else if (t) free_type(t);
             }
             return 1;
         }
