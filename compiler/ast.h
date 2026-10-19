@@ -637,6 +637,15 @@ typedef struct ASTNode {
      * is also what tells the program's own definitions, which shadow a glob
      * import, from merged ones (#2632). */
     char* origin_module;
+
+    /* #2850: on a call whose named arguments the checker put in parameter
+     * order, the order they are evaluated in, which is the order written:
+     * arg_order[k] is the index among `children` of the k-th argument the
+     * source gives (the defaults it leaves out after them, in parameter
+     * order). arg_order_count is child_count when it was set; NULL and 0
+     * on every other node. */
+    int* arg_order;
+    int arg_order_count;
 } ASTNode;
 
 // Type functions

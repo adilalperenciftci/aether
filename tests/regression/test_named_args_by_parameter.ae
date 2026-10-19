@@ -1,0 +1,115 @@
+// #2850: named arguments written in another order than the parameters
+// were passed in the order written. `sub(b: 1, a: 10)` with `sub(a, b)`
+// gave -9, and `eat(k: 1, s: w)` with parameters of two types did not
+// compile in C. Each named argument now goes to the parameter it names
+// (the checker puts the arguments in parameter order and fills a default
+// left out), and the arguments are still evaluated in the order written,
+// through temporaries where one changes what another reads.
+// Before the fix this program printed wrong values (or failed in C);
+// it checks the results, the order of the side effects, a default
+// skipped over, strings passed by name, a closure argument and a
+// trailing one, an extern and a module function.
+
+import std.string
+
+extern abs(x: int) -> int
+
+eat(s: string, k: int) -> int {
+    return string.length(s) * 10 + k
+}
+
+sub(a: int, b: int) -> int {
+    return a - b
+}
+
+var trace = 0
+
+note(v: int) -> int {
+    trace = trace * 10 + v
+    return v
+}
+
+word(n: int) -> string {
+    trace = trace * 10 + n
+    return string.concat("w", "${n}")
+}
+
+joined(x: string, y: string) -> string {
+    return string.concat(x, y)
+}
+
+three(a: int, b: int = 5, c: int = 7) -> int {
+    return a * 100 + b * 10 + c
+}
+
+run(n: int, f: fn) -> int {
+    return n * 10 + call(f)
+}
+
+pick(xs: int[], i: int) -> int {
+    return xs[i]
+}
+
+struct Doc {
+    name: string
+    n: int
+}
+
+// A field read by name, in either order, from a struct that frees it.
+one(w: string) -> int {
+    d = Doc { name: string.concat(w, "#1"), n: 0 }
+    e = Doc { name: string.concat(w, "#22"), n: 0 }
+    return eat(s: d.name, k: 1) + eat(k: 2, s: e.name)
+}
+
+check(ok: bool, what: string) {
+    if !ok {
+        println("FAIL: ${what}")
+        exit(1)
+    }
+}
+
+main() {
+    w = string.concat("ab", "c")
+    check(eat(k: 1, s: w) == 31, "a string and an int named in reverse")
+    string.free(w)
+    check(sub(b: 1, a: 10) == 9, "two ints named in reverse")
+    check(sub(a: 10, b: 1) == 9, "two ints named in order")
+
+    trace = 0
+    r = sub(b: note(1), a: note(2))
+    check(r == 1, "calls named in reverse")
+    check(trace == 12, "named arguments are evaluated in the order written")
+
+    i = 0
+    check(sub(b: i++, a: i) == 1, "a step before a read, named in reverse")
+
+    check(three(c: 1, a: 2) == 251, "a default skipped over")
+    check(three(2, c: 3) == 253, "positional, then a name past a default")
+    check(three(b: 0, a: 1) == 107, "a trailing default after names")
+
+    trace = 0
+    j = joined(y: word(1), x: word(2))
+    check(string.equals(j, "w2w1"), "strings named in reverse")
+    check(trace == 12, "string arguments are evaluated in the order written")
+    string.free(j)
+
+    check(run(f: || { return 4 }, n: 3) == 34, "a closure named first")
+    check(run(n: 5) callback { return 6 } == 56, "a trailing closure after a name")
+
+    arr = [5, 6, 7]
+    check(pick(i: 2, xs: arr) == 7, "an array named after the index")
+    check(abs(x: -3) == 3, "an extern by name")
+    c = string.concat(b: "y", a: "x")
+    check(string.equals(c, "xy"), "a module function by name, in reverse")
+    string.free(c)
+
+    total = 0
+    k = 0
+    while k < 100 {
+        total = total + one("w")
+        k = k + 1
+    }
+    check(total == 100 * (31 + 42), "a struct's string fields passed by name")
+    println("named args by parameter ok")
+}

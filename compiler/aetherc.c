@@ -952,8 +952,10 @@ static void emit_ast_node_recursive(FILE* out, ASTNode* node, int* first,
                 free(resolved);
             }
 
-            // Emit args[]: one object per positional/named arg, in
-            // source order. Literal args (string/int/float/bool) get
+            // Emit args[]: one object per argument, in parameter
+            // order (the checker puts a named argument in the place
+            // of the parameter it names, #2850, and fills a default
+            // left out). Literal args (string/int/float/bool) get
             // {"literal":"<value>"}; anything else gets {"computed":
             // true}. Trailing closures / DSL bodies are NOT args and
             // are filtered out via arg_is_capturable. Per

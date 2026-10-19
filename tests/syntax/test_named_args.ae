@@ -28,10 +28,10 @@ main() {
     // Mix: positional first, named last
     greet("charlie", count: 1)
 
-    // Named args preserve order — b before a still works positionally
-    // (names are documentation, C receives positional)
-    result2 = add(a: 3, b: 7)
+    // In any order: each goes to the parameter it names (#2850)
+    result2 = add(b: 7, a: 3)
     println(result2)
+    describe(value: 7, label: "reversed")
 
     // Named args with string values
     describe(label: "score", value: 42)

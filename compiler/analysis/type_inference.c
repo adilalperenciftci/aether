@@ -1873,13 +1873,27 @@ static int call_index_build(CallIndex* ix, ASTNode* program) {
     return 1;
 }
 
-/* Unify one call site's argument types into the definition's parameters. */
+/* Unify one call site's argument types into the definition's parameters. A
+ * named argument goes to the parameter of its name, wherever it is written
+ * (#2850); the checker puts it there later. */
 static int propagate_call_site(ASTNode* call, ASTNode* func_def, int param_count) {
     int changed = 0;
     int arg_count = call->child_count;
-    for (int i = 0; i < arg_count && i < param_count; i++) {
+    for (int i = 0; i < arg_count; i++) {
         ASTNode* arg = call->children[i];
-        ASTNode* param = func_def->children[i];
+        ASTNode* param = i < param_count ? func_def->children[i] : NULL;
+        if (arg && arg->type == AST_NAMED_ARG) {
+            param = NULL;
+            for (int p = 0; arg->value && p < param_count; p++) {
+                ASTNode* c = func_def->children[p];
+                if (c && (c->type == AST_VARIABLE_DECLARATION || c->type == AST_PATTERN_VARIABLE) &&
+                    c->value && strcmp(c->value, arg->value) == 0) {
+                    param = c;
+                    break;
+                }
+            }
+            arg = arg->child_count > 0 ? arg->children[0] : NULL;
+        }
         if (!arg || !param) continue;
         if (param->type != AST_VARIABLE_DECLARATION && param->type != AST_PATTERN_VARIABLE) continue;
 

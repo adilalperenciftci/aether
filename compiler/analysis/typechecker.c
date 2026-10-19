@@ -14662,6 +14662,250 @@ static int call_yields_no_value(ASTNode* call, SymbolTable* table) {
     return fn_yields_no_value(sym->node);
 }
 
+/* The first named argument of `call`, or NULL. */
+static ASTNode* first_named_argument(ASTNode* call) {
+    for (int i = 0; call && i < call->child_count; i++)
+        if (call->children[i] && call->children[i]->type == AST_NAMED_ARG) return call->children[i];
+    return NULL;
+}
+
+/* #2850: a callee whose parameters have no names here (a closure, a
+ * function pointer, a builtin) cannot take a named argument: there is no
+ * parameter to give it to. Reports the first one; 0 when there is one. */
+static int reject_named_arguments(ASTNode* call, const char* what) {
+    ASTNode* named = first_named_argument(call);
+    if (!named) return 1;
+    char msg[320];
+    snprintf(msg, sizeof(msg), "named argument '%s' in a call of %s, whose parameters have no names",
+             named->value ? named->value : "?", what);
+    type_error_code_hint(msg, "pass the arguments by position, in the order of the parameters",
+                         named->line, named->column, AETHER_ERR_TYPE_MISMATCH);
+    return 0;
+}
+
+/* A node that declares a parameter of a function definition: a name, or a
+ * pattern of a clause (a literal, a struct, a list, a cons). */
+static int is_param_node(const ASTNode* p) {
+    if (!p) return 0;
+    switch (p->type) {
+        case AST_VARIABLE_DECLARATION: case AST_PATTERN_VARIABLE: case AST_PATTERN_LITERAL:
+        case AST_PATTERN_STRUCT: case AST_PATTERN_LIST: case AST_PATTERN_CONS:
+            return 1;
+        default:
+            return 0;
+    }
+}
+
+/* #2850: a named argument is passed to the parameter it names, not in the
+ * place it is written. `sub(b: 1, a: 10)` passed 1 as `a`, and with
+ * parameters of two types the C did not compile. The arguments are put in
+ * parameter order here, before anything reads them against the parameters,
+ * so every later step (the checks, the coercions, codegen) sees argument i
+ * as parameter i's, as in a call written by position. A parameter the call
+ * leaves out takes its default.
+ *
+ * The order written stays the order of evaluation: the call records it
+ * (ASTNode.arg_order), and codegen evaluates the arguments in that order,
+ * through temporaries where one could change what another reads.
+ *
+ * Positional arguments come first and fill the parameters from the first
+ * (after the `_ctx` a builder's call leaves out); a closure or block after
+ * the named arguments, a trailing one, is the last argument. A name no
+ * parameter has, a parameter given twice, a positional argument after a
+ * named one and a parameter with no default left out are errors. select()
+ * is keyed by platform names, which are no parameters. Returns 0 after
+ * reporting. */
+static int bind_named_arguments(ASTNode* call, Symbol* symbol) {
+    ASTNode* first_named = first_named_argument(call);
+    if (!first_named) return 1;
+    if (call->value && strcmp(call->value, "select") == 0) return 1;
+    ASTNode* fn = symbol ? symbol->node : NULL;
+    int is_ext = fn && fn->type == AST_EXTERN_FUNCTION;
+    int is_def = fn && (fn->type == AST_FUNCTION_DEFINITION || fn->type == AST_BUILDER_FUNCTION);
+    if (!is_ext && !is_def) {
+        char what[300];
+        if (call->value && strcmp(call->value, "call") == 0)
+            snprintf(what, sizeof(what), "a closure");
+        else
+            snprintf(what, sizeof(what), "'%s'", call->value ? call->value : "?");
+        return reject_named_arguments(call, what);
+    }
+    const char* fname = call->value ? call->value : "?";
+
+    int limit = is_ext ? fn->child_count : fn->child_count - 1;
+    ASTNode** params = malloc(sizeof(ASTNode*) * (size_t)(limit > 0 ? limit : 1));
+    if (!params) { fprintf(stderr, "Fatal: out of memory binding arguments\n"); exit(1); }
+    int np = 0;
+    for (int i = 0; i < limit; i++) {
+        ASTNode* p = fn->children[i];
+        if (is_ext ? (p && p->type == AST_IDENTIFIER) : is_param_node(p)) params[np++] = p;
+    }
+
+    /* The written arguments: positional ones, then named ones, then a
+     * trailing closure or block. */
+    int argc = call->child_count;
+    int last_named = -1;
+    for (int i = 0; i < argc; i++)
+        if (call->children[i] && call->children[i]->type == AST_NAMED_ARG) last_named = i;
+    ASTNode* trailing = NULL;
+    int written = argc;
+    ASTNode* last = argc > 0 ? call->children[argc - 1] : NULL;
+    if (last && last_named < argc - 1 && (last->type == AST_CLOSURE || last->type == AST_QUOTE)) {
+        trailing = last;
+        written = argc - 1;
+    }
+    int npos = 0;
+    while (npos < written && call->children[npos] && call->children[npos]->type != AST_NAMED_ARG)
+        npos++;
+    int ok = 1;
+    for (int i = npos; i < written && ok; i++) {
+        ASTNode* a = call->children[i];
+        if (a && a->type != AST_NAMED_ARG) {
+            type_error_code_hint("a positional argument after a named one",
+                                 "give the positional arguments first, or name this one too",
+                                 a->line, a->column, AETHER_ERR_TYPE_MISMATCH);
+            ok = 0;
+        }
+    }
+    int nnamed = written - npos;
+
+    /* A builder's `_ctx` the call does not give is injected (as for a call
+     * by position, one argument short of the parameters). */
+    int names_ctx = 0;
+    for (int i = npos; i < written; i++)
+        if (call->children[i]->value && strcmp(call->children[i]->value, "_ctx") == 0) names_ctx = 1;
+    int ctx_first = np > 0 && params[0]->value && strcmp(params[0]->value, "_ctx") == 0 &&
+                    (is_ext || has_ctx_first_param(fn));
+    int trailing_is_arg = trailing && !(trailing->type == AST_CLOSURE && trailing->value &&
+                                        strcmp(trailing->value, "trailing") == 0);
+    int skip = (ctx_first && !names_ctx && npos + nnamed + trailing_is_arg < np) ? 1 : 0;
+
+    ASTNode** slot = calloc((size_t)(np > 0 ? np : 1), sizeof(ASTNode*));
+    int* src = calloc((size_t)(np > 0 ? np : 1), sizeof(int));
+    if (!slot || !src) { fprintf(stderr, "Fatal: out of memory binding arguments\n"); exit(1); }
+    for (int i = 0; i < npos && ok; i++) {
+        if (skip + i >= np) {
+            char msg[300];
+            snprintf(msg, sizeof(msg), "Function '%s' expects %d argument(s), got more", fname,
+                     np - skip);
+            type_error(msg, call->children[i]->line, call->children[i]->column);
+            ok = 0;
+            break;
+        }
+        slot[skip + i] = call->children[i];
+        src[skip + i] = i;
+    }
+    for (int i = npos; i < written && ok; i++) {
+        ASTNode* a = call->children[i];
+        int j = -1;
+        for (int k = 0; k < np; k++) {
+            ASTNode* p = params[k];
+            int named_param = is_ext || p->type == AST_VARIABLE_DECLARATION ||
+                              p->type == AST_PATTERN_VARIABLE;
+            if (named_param && p->value && a->value && strcmp(p->value, a->value) == 0) { j = k; break; }
+        }
+        if (j < 0) {
+            char msg[320];
+            snprintf(msg, sizeof(msg), "'%s' has no parameter named '%s'", fname, a->value ? a->value : "?");
+            char hint[512];
+            size_t used = (size_t)snprintf(hint, sizeof(hint), "its parameters are");
+            for (int k = skip; k < np && used < sizeof(hint); k++) {
+                int named_param = is_ext || params[k]->type == AST_VARIABLE_DECLARATION ||
+                                  params[k]->type == AST_PATTERN_VARIABLE;
+                used += (size_t)snprintf(hint + used, sizeof(hint) - used, "%s %s",
+                                         k > skip ? "," : "",
+                                         named_param && params[k]->value ? params[k]->value : "(a pattern)");
+            }
+            type_error_code_hint(msg, hint, a->line, a->column, AETHER_ERR_TYPE_MISMATCH);
+            ok = 0;
+        } else if (slot[j]) {
+            char msg[320];
+            snprintf(msg, sizeof(msg), "parameter '%s' of '%s' is given twice", a->value, fname);
+            type_error_code_hint(msg, "give each parameter one argument", a->line, a->column,
+                                 AETHER_ERR_TYPE_MISMATCH);
+            ok = 0;
+        } else {
+            slot[j] = a;
+            src[j] = i;
+        }
+    }
+
+    /* The parameters the call leaves out: the last one is a trailing
+     * closure's, and any other takes its default. */
+    int defaults = 0;
+    for (int j = skip; j < np && ok; j++) {
+        if (slot[j]) continue;
+        if (j == np - 1 && trailing &&
+            (trailing_is_arg || (params[j]->node_type && params[j]->node_type->kind == TYPE_FUNCTION))) {
+            slot[j] = trailing;
+            src[j] = argc - 1;
+            trailing = NULL;
+            continue;
+        }
+        if (is_def && param_has_default(params[j])) {
+            ASTNode* d = clone_ast_node(params[j]->children[0]);
+            rewrite_caller_site_intrinsics(d, call->line, call->column);
+            slot[j] = d;
+            src[j] = argc + defaults++;
+            continue;
+        }
+        char msg[320];
+        int named_param = is_ext || params[j]->type == AST_VARIABLE_DECLARATION ||
+                          params[j]->type == AST_PATTERN_VARIABLE;
+        snprintf(msg, sizeof(msg), "the call of '%s' gives no argument for parameter %d '%s'", fname,
+                 j - skip + 1, named_param && params[j]->value ? params[j]->value : "(a pattern)");
+        type_error_code_hint(msg, "pass it by position or by name", call->line, call->column,
+                             AETHER_ERR_TYPE_MISMATCH);
+        ok = 0;
+    }
+    if (!ok) {
+        /* The defaults cloned for a call that does not stand are not in it. */
+        for (int j = 0; j < np; j++)
+            if (slot[j] && src[j] >= argc) free_ast_node(slot[j]);
+        free(slot); free(src); free(params);
+        return 0;
+    }
+
+    /* The new argument list, in parameter order, each named argument its
+     * value; and the order the source evaluates them in. */
+    int n = np - skip + (trailing ? 1 : 0);
+    ASTNode** kids = malloc(sizeof(ASTNode*) * (size_t)(n > 0 ? n : 1));
+    int* from = malloc(sizeof(int) * (size_t)(n > 0 ? n : 1));
+    if (!kids || !from) { fprintf(stderr, "Fatal: out of memory binding arguments\n"); exit(1); }
+    int m = 0;
+    for (int j = skip; j < np; j++) {
+        ASTNode* a = slot[j];
+        if (a->type == AST_NAMED_ARG) {
+            ASTNode* v = a->child_count > 0 ? a->children[0] : NULL;
+            a->child_count = 0;
+            free_ast_node(a);
+            a = v;
+        }
+        kids[m] = a;
+        from[m] = src[j];
+        m++;
+    }
+    if (trailing) { kids[m] = trailing; from[m] = argc - 1; m++; }
+    /* arg_order[k]: the new index of the k-th argument evaluated. */
+    int* order = malloc(sizeof(int) * (size_t)(m > 0 ? m : 1));
+    if (!order) { fprintf(stderr, "Fatal: out of memory binding arguments\n"); exit(1); }
+    for (int k = 0; k < m; k++) order[k] = k;
+    for (int a = 1; a < m; a++) {   /* insertion sort by source position */
+        int v = order[a], b = a - 1;
+        while (b >= 0 && from[order[b]] > from[v]) { order[b + 1] = order[b]; b--; }
+        order[b + 1] = v;
+    }
+    free(call->children);
+    call->children = kids;
+    call->child_count = m;
+    call->child_capacity = m;
+    free(call->arg_order);
+    call->arg_order = order;
+    call->arg_order_count = m;
+    free(from); free(slot); free(src); free(params);
+    return 1;
+}
+
 int typecheck_function_call(ASTNode* call, SymbolTable* table) {
     if (!call || call->type != AST_FUNCTION_CALL) return 0;
 
@@ -14830,6 +15074,7 @@ int typecheck_function_call(ASTNode* call, SymbolTable* table) {
     if (symbol && !symbol->is_function && symbol->type &&
         symbol->type->kind == TYPE_FUNCTION && symbol->type->is_fnptr &&
         call->value) {
+        if (!reject_named_arguments(call, "a function pointer")) return 0;
         /* #2586: codegen's ownership analyses tell such a call from a
          * direct one without its function's locals registered. */
         if (!call->annotation) call->annotation = strdup("fnptr_local_call");
@@ -14858,6 +15103,7 @@ int typecheck_function_call(ASTNode* call, SymbolTable* table) {
     if (symbol && !symbol->is_function && symbol->type &&
         symbol->type->kind == TYPE_FUNCTION && !symbol->type->is_fnptr &&
         call->value) {
+        if (!reject_named_arguments(call, "a closure")) return 0;
         // Build a new child list: [fn_ref, original_args...]
         ASTNode* fn_ref = create_ast_node(AST_IDENTIFIER, call->value,
                                           call->line, call->column);
@@ -14913,6 +15159,7 @@ int typecheck_function_call(ASTNode* call, SymbolTable* table) {
             int is_ptr = 0;
             Type* fsig = resolve_fnptr_struct_field(table, recv, dot + 1, &is_ptr);
             if (fsig) {
+                if (!reject_named_arguments(call, "a function pointer")) return 0;
                 for (int i = 0; i < call->child_count; i++) {
                     typecheck_expression(call->children[i], table);
                 }
@@ -15012,6 +15259,7 @@ int typecheck_function_call(ASTNode* call, SymbolTable* table) {
     }
 
     if (!check_quote_callee(call, symbol)) return 0;
+    if (!bind_named_arguments(call, symbol)) return 0;
 
     // Arity check: user-defined functions have their AST node stored
     if (symbol->node && (symbol->node->type == AST_FUNCTION_DEFINITION || symbol->node->type == AST_BUILDER_FUNCTION)) {

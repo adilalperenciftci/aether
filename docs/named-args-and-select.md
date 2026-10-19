@@ -19,17 +19,46 @@ greet("alice", 3)
 
 // Mixed: positional first, named after
 greet("alice", count: 3)
+
+// Any order: each goes to the parameter it names
+greet(count: 3, name: "alice")
 ```
 
-Named arguments are documentation at the call site, they make code
-more readable but don't change semantics. The C compiler receives
-positional arguments regardless.
+A named argument is passed to the parameter it names, wherever it is
+written. A parameter with a default can be left out, and a named
+argument can skip over it:
+
+```aether,run
+box(w: int, h: int = 1, d: int = 1) -> int {
+    return w * 100 + h * 10 + d
+}
+
+main() {
+    println(box(2, d: 4))
+    println(box(d: 3, w: 5))
+}
+```
+
+```output
+214
+513
+```
+
+The arguments are still evaluated in the order written, left to right:
+`f(b: next(), a: next())` calls `next()` for `b` first.
 
 ### Rules
 
 - Names use colon: `name: value` (not `name = value`)
-- Positional and named can be mixed in the same call
-- Names are not validated against parameter names (they're comments)
+- Positional arguments come first, then named ones; a positional
+  argument after a named one is an error
+- A name must be one of the function's parameters, and a parameter takes
+  one argument: an unknown name, or a parameter given twice (by name, or
+  by position and by name), is an error
+- A parameter with no default that the call leaves out is an error
+- A trailing closure or block after the parentheses is the last argument
+- Only a function or an extern whose parameters have names takes named
+  arguments; a closure or a function pointer called with one is an error
 - The colon syntax is consistent with parameter definitions: `func(name: type)`
 
 ## List Literals

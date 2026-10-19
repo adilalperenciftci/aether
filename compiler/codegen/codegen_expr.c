@@ -1472,7 +1472,11 @@ static int order_operands(ASTNode* expr, ASTNode** ops, int cap) {
     switch (expr->type) {
         case AST_FUNCTION_CALL:
             if (expr->value && strcmp(expr->value, "select") == 0) return 0;
-            for (int i = 0; i < expr->child_count; i++) {
+            for (int k = 0; k < expr->child_count; k++) {
+                /* Named arguments stand in parameter order and are
+                 * evaluated in the order written (#2850). */
+                int i = expr->arg_order && expr->arg_order_count == expr->child_count
+                        ? expr->arg_order[k] : k;
                 ASTNode* a = expr->children[i];
                 if (a && a->type == AST_CLOSURE && a->value &&
                     strcmp(a->value, "trailing") == 0) continue;
@@ -1623,19 +1627,24 @@ static void order_hoist_handoff(CodeGenerator* gen, TempSeq* s, ASTNode* op, int
     order_handover_add(gen, op, call, push_handover_exit_free(gen, own, name), kind);
 }
 
-/* How operand `k` of `call`, a field read, is handed to the callee
- * (string_field_handoff_kind), or 0. Only where operands and parameters
- * line up one to one: no named argument or injected builder context. A
- * trailing block is the last child and no operand, so the arguments
- * before it line up. */
-static int order_operand_hands_off(CodeGenerator* gen, ASTNode* call, int k) {
+/* How operand `op` of `call`, a field read, is handed to the callee
+ * (string_field_handoff_kind), or 0. Only where arguments and parameters
+ * line up one to one: no named argument left (select's) or injected
+ * builder context. A trailing block is the last child and no operand, so
+ * the arguments before it line up. The operand is found by its place among
+ * the arguments, which is its parameter's: operands are listed in the
+ * order they are evaluated, which named arguments can make another
+ * (#2850). */
+static int order_operand_hands_off(CodeGenerator* gen, ASTNode* call, ASTNode* op) {
     if (!call || call->type != AST_FUNCTION_CALL || !call->value ||
         is_builder_func_reg(gen, call->value)) return 0;
+    int k = -1;
     for (int i = 0; i < call->child_count; i++) {
         ASTNode* a = call->children[i];
         if (!a || a->type == AST_NAMED_ARG) return 0;
+        if (a == op) k = i;
     }
-    if (k >= call->child_count) return 0;
+    if (k < 0) return 0;
     ASTNode* a = call->children[k];
     if (a->type == AST_CLOSURE && a->value && strcmp(a->value, "trailing") == 0) return 0;
     int kind = string_field_handoff_kind(gen, call->value, k, a);
@@ -1738,13 +1747,13 @@ static int emit_in_operand_order(CodeGenerator* gen, ASTNode* expr) {
     }
     int typed = 1;
     for (int k = 0; k < n; k++)
-        if (hoist[k] && !order_operand_hands_off(gen, expr, k) && !order_c11_type(ops[k]))
+        if (hoist[k] && !order_operand_hands_off(gen, expr, ops[k]) && !order_c11_type(ops[k]))
             typed = 0;
     TempSeq s;
     seq_open_ordered(gen, &s, typed);
     for (int k = 0; k < n; k++) {
         if (!hoist[k]) continue;
-        int kind = order_operand_hands_off(gen, expr, k);
+        int kind = order_operand_hands_off(gen, expr, ops[k]);
         if (kind) order_hoist_handoff(gen, &s, ops[k], kind, expr);
         else order_hoist_operand(gen, &s, ops[k]);
     }
@@ -6275,24 +6284,14 @@ static int ctl_hoist(CodeGenerator* gen, ASTNode* op) {
     return ctl_emit_hoist(gen, op);
 }
 
-/* Operand `k` of `parent` (a call, or NULL) evaluated ahead: a field read
+/* Operand `op` of `parent` (a call, or NULL) evaluated ahead: a field read
  * the call frees or keeps is handed over as it is read, as the ordering
  * wrapper hands it over (order_hoist_handoff); read into a plain temporary,
  * the field kept its tracker and its struct freed it a second time. */
-static int ctl_hoist_operand(CodeGenerator* gen, ASTNode* parent, int k, ASTNode* op) {
+static int ctl_hoist_operand(CodeGenerator* gen, ASTNode* parent, ASTNode* op) {
     /* A field the call frees or keeps: handed over to its temporary as it
      * is read (order_hoist_handoff), a statement ahead of the statement. */
-    int kind = parent ? order_operand_hands_off(gen, parent, k) : 0;
-    if (!kind && parent && parent->type == AST_FUNCTION_CALL && parent->value && op &&
-        !order_bound(op) && field_read_can_hand_off(op)) {
-        /* Where the parameter it goes to is not known here (named
-         * arguments), an owned field read is not evaluated ahead: it stays
-         * in place at the call, and the construct after it a statement
-         * expression. (The call does not hand a named argument over
-         * either, #2849.) */
-        for (int i = 0; i < parent->child_count; i++)
-            if (parent->children[i] && parent->children[i]->type == AST_NAMED_ARG) return 0;
-    }
+    int kind = parent ? order_operand_hands_off(gen, parent, op) : 0;
     if (!kind || !op || order_bound(op) || ctl_lookup(op)) return ctl_hoist(gen, op);
     const char* name = cg_internf("_eo%d", g_order_counter++);
     const char* own = emit_string_field_handover_ahead(gen, op, kind, NULL, name);
@@ -6454,7 +6453,7 @@ static int ctl_linearize_ops(CodeGenerator* gen, ASTNode* parent, ASTNode** ops,
         if (ctl_contains(gen, ops[i])) last = i;
     for (int i = 0; i < last; i++) {
         if (ctl_contains(gen, ops[i]) && !ctl_linearize(gen, ops[i], 0)) return 0;
-        if (!ctl_hoist_operand(gen, parent, i, ops[i])) return 0;
+        if (!ctl_hoist_operand(gen, parent, ops[i])) return 0;
     }
     return last < 0 || ctl_linearize(gen, ops[last], 0);
 }

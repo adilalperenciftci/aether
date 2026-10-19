@@ -757,6 +757,8 @@ ASTNode* create_ast_node(ASTNodeType type, const char* value, int line, int colu
     node->source_name = NULL;
     node->value_len = 0;
     node->origin_module = NULL;
+    node->arg_order = NULL;
+    node->arg_order_count = 0;
     return node;
 }
 
@@ -822,6 +824,15 @@ ASTNode* clone_ast_node(ASTNode* node) {
     clone->end_column = node->end_column;
     clone->source_name = node->source_name ? strdup(node->source_name) : NULL;
     clone->origin_module = node->origin_module ? strdup(node->origin_module) : NULL;
+    if (node->arg_order && node->arg_order_count > 0) {
+        clone->arg_order = malloc(sizeof(int) * (size_t)node->arg_order_count);
+        if (!clone->arg_order) {
+            fprintf(stderr, "Fatal: out of memory cloning a call\n");
+            exit(1);
+        }
+        memcpy(clone->arg_order, node->arg_order, sizeof(int) * (size_t)node->arg_order_count);
+        clone->arg_order_count = node->arg_order_count;
+    }
     if (node->value_len > 0) ast_set_literal_bytes(clone, node->value, node->value_len);   /* #2520 */
 
     /* Slot for slot: an empty one stays where it is, as the parser left it. */
@@ -852,6 +863,7 @@ void free_ast_node(ASTNode* node) {
     }
 
     free(node->origin_module);
+    free(node->arg_order);
 
     if (node->node_type) {
         free_type(node->node_type);
