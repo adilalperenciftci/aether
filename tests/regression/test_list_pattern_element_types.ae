@@ -1,0 +1,110 @@
+// #2997: a list pattern in a match arm binds its elements with the type of
+// the value matched. Every name was an `int`, read through an `int*`, so a
+// match over a `float[]`, a `string[]` or a struct array did not compile.
+// A string element is a view of the array's string; one the arm re-binds
+// takes a reference of its own, which the arm releases. Re-bound, a list's
+// head leaked that reference, over a `*StringSeq` too. Before the fix this
+// program did not compile.
+
+import std.mem
+import std.string
+
+extern exit(code: int)
+
+struct Pt {
+    x: int
+    y: int
+}
+
+var bad = 0
+
+check(what: string, got: string, want: string) {
+    if got != want {
+        println("FAIL ${what}: got ${got}, want ${want}")
+        bad = 1
+    }
+}
+
+label(k: int) -> string {
+    return "k${k}"
+}
+
+// Strings, the head re-bound.
+join(xs: string[]) -> string {
+    return match xs {
+        [] -> ""
+        [h | t] -> {
+            h = "${h}."
+            "${h}${join(t)}"
+        }
+    }
+}
+
+// The same over a `*StringSeq`.
+join_seq(xs: *StringSeq) -> string {
+    return match xs {
+        [] -> ""
+        [h | t] -> {
+            h = "${h}."
+            "${h}${join_seq(t)}"
+        }
+    }
+}
+
+sum_pts(ps: Pt[]) -> int {
+    return match ps {
+        [] -> 0
+        [p | rest] -> p.x + p.y + sum_pts(rest)
+    }
+}
+
+pair_sum(fs: float[]) -> float {
+    return match fs {
+        [a, b] -> a + b
+        _ -> 0.0
+    }
+}
+
+work(k: int) {
+    names = [label(k), "b", label(k + 1)]
+    check("strings", join(names), "k${k}.b.k${k + 1}.")
+    s = string.seq_empty()
+    s = string.seq_cons(label(k), s)
+    s = string.seq_cons("a", s)
+    check("seq", join_seq(s), "a.k${k}.")
+    ps = [Pt { x: 1, y: 2 }, Pt { x: 3, y: 4 }]
+    check("structs", "${sum_pts(ps)}", "10")
+    fs = [1.5, 2.25]
+    check("floats", "${pair_sum(fs)}", "3.75")
+    pair = ["p", label(k)]
+    got = match pair {
+        [a, b] -> "${b}-${a}"
+        _ -> "?"
+    }
+    check("fixed strings", got, "k${k}-p")
+}
+
+main() {
+    k = 0
+    while k < 10 {
+        work(k)
+        k = k + 1
+    }
+    if mem.heap_in_use_exact() {
+        grown = mem.steady_growth(|| {
+                j = 0
+                while j < 100 {
+                    work(j)
+                    j = j + 1
+                }
+            }, 5)
+        if grown != 0 {
+            println("FAIL leak: ${grown} bytes a round")
+            bad = 1
+        }
+    }
+    if bad != 0 {
+        exit(1)
+    }
+    println("ok")
+}

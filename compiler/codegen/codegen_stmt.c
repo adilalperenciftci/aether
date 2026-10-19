@@ -1391,6 +1391,21 @@ static void mark_pattern_binding(CodeGenerator* gen, const char* name, TypeKind 
     free_type(t);
 }
 
+/* #2997: a list pattern's string binding is a view of the string the list
+ * holds. One the arm re-binds takes a reference of its own first, and is
+ * then a string local of the arm's scope: each re-binding releases the
+ * value it held and the arm's exits the last. The reference it took was
+ * released by nothing, so `[h | t] -> { h = "${h}."  ... }` leaked one
+ * string a match, over a `*StringSeq` and an array alike. */
+static void own_rebound_string_binding(CodeGenerator* gen, const char* name, ASTNode* body,
+                                       int line, int column) {
+    if (!struct_param_written(body, name)) return;
+    print_line(gen, "%s = aether_uniform_heap_str(%s, 0);", name, name);
+    ScopedStringLocal sl;
+    scoped_string_local_begin(gen, &sl, name, body, 1);
+    push_scoped_string_local_free(gen, &sl, line, column);
+}
+
 static void generate_list_pattern_bindings(CodeGenerator* gen, ASTNode* pattern,
                                            ASTNode* match_expr, const char* len_name,
                                            ASTNode* body, int is_seq_match) {
@@ -1413,10 +1428,9 @@ static void generate_list_pattern_bindings(CodeGenerator* gen, ASTNode* pattern,
                                head->value, len_name);
                     mark_pattern_binding(gen, head->value, TYPE_STRING);
                     /* A view of the cell's string: one the arm rebinds
-                     * takes a reference of its own first. */
-                    if (struct_param_written(body, head->value))
-                        print_line(gen, "%s = aether_uniform_heap_str(%s, 0);",
-                                   head->value, head->value);
+                     * takes a reference of its own first (#2997). */
+                    own_rebound_string_binding(gen, head->value, body, head->line,
+                                               head->column);
                 }
             }
             if (tail && tail->type == AST_PATTERN_VARIABLE && tail->value) {
@@ -1444,29 +1458,46 @@ static void generate_list_pattern_bindings(CodeGenerator* gen, ASTNode* pattern,
                     for (int j = 0; j < i; j++) fprintf(gen->output, "->tail");
                     fprintf(gen->output, "->head;\n");
                     mark_pattern_binding(gen, elem->value, TYPE_STRING);
+                    own_rebound_string_binding(gen, elem->value, body, elem->line,
+                                               elem->column);
                 }
             }
         }
         return;
     }
 
+    /* #2997: the elements are of the subject's element type, as the
+     * checker types the names an arm binds: an `int` only where the subject
+     * says nothing. They were all `int`, so a match over a `float[]` or a
+     * `string[]` did not compile. */
+    Type* st = match_expr ? match_expr->node_type : NULL;
+    Type* et = (st && st->kind == TYPE_ARRAY && st->element_type &&
+                st->element_type->kind != TYPE_UNKNOWN) ? st->element_type : NULL;
+    Type* int_t = et ? NULL : create_type(TYPE_INT);
+    Type* elem_t = et ? et : int_t;
+    const char* ect = get_c_type(elem_t);
+
     // Only declare the array pointer if this arm actually uses element bindings
     int needs_arr = pattern_needs_array(pattern, body);
     if (needs_arr) {
         print_indent(gen);
-        fprintf(gen->output, "int* _match_arr = ");
+        fprintf(gen->output, "%s* _match_arr = (%s*)(", ect, ect);
         generate_expression_as_elem_ptr(gen, match_expr);   /* #1286 */
-        fprintf(gen->output, ";\n");
+        fprintf(gen->output, ");\n");
     }
 
     if (pattern->type == AST_PATTERN_LIST && pattern->child_count > 0) {
         for (int i = 0; i < pattern->child_count; i++) {
             ASTNode* elem = pattern->children[i];
-            if (elem && elem->type == AST_PATTERN_VARIABLE && elem->value) {
-                if (expr_references_var(body, elem->value)) {
-                    print_line(gen, "int %s = _match_arr[%d];", elem->value, i);
-                    mark_pattern_binding(gen, elem->value, TYPE_INT);
-                }
+            if (elem && elem->type == AST_PATTERN_VARIABLE && elem->value &&
+                expr_references_var(body, elem->value)) {
+                print_line(gen, "%s %s = _match_arr[%d];", ect, elem->value, i);
+                mark_var_declared_typed(gen, elem->value, elem_t);
+                /* A view of the array's string: one the arm re-binds takes
+                 * a reference of its own first, as a list's head does. */
+                if (elem_t->kind == TYPE_STRING)
+                    own_rebound_string_binding(gen, elem->value, body, elem->line,
+                                               elem->column);
             }
         }
     } else if (pattern->type == AST_PATTERN_CONS && pattern->child_count >= 2) {
@@ -1475,8 +1506,11 @@ static void generate_list_pattern_bindings(CodeGenerator* gen, ASTNode* pattern,
 
         if (head && head->type == AST_PATTERN_VARIABLE && head->value) {
             if (expr_references_var(body, head->value)) {
-                print_line(gen, "int %s = _match_arr[0];", head->value);
-                mark_pattern_binding(gen, head->value, TYPE_INT);
+                print_line(gen, "%s %s = _match_arr[0];", ect, head->value);
+                mark_var_declared_typed(gen, head->value, elem_t);
+                if (elem_t->kind == TYPE_STRING)
+                    own_rebound_string_binding(gen, head->value, body, head->line,
+                                               head->column);
             }
         }
         if (tail && tail->type == AST_PATTERN_VARIABLE && tail->value) {
@@ -1487,10 +1521,13 @@ static void generate_list_pattern_bindings(CodeGenerator* gen, ASTNode* pattern,
                  * declared one, and the C local hid a user's of that name. */
                 print_line(gen, "AetherSlice %s = aether_slice_make(&_match_arr[1], (uint64_t)(%s - 1));",
                            tail->value, len_name);
-                mark_pattern_binding(gen, tail->value, TYPE_ARRAY);
+                Type* tt = create_array_type(clone_type(elem_t), -1);
+                mark_var_declared_typed(gen, tail->value, tt);
+                free_type(tt);
             }
         }
     }
+    if (int_t) free_type(int_t);
 }
 
 static int has_list_patterns(ASTNode* match_stmt) {

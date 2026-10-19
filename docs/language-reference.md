@@ -1376,8 +1376,10 @@ are unaffected.
 
 Arrays, slices and `*StringSeq` values can be matched with list patterns. A
 fixed-size array (`T[N]`) is matched by its length `N`, known when it is
-compiled, and a slice by the length it carries. A cons pattern's tail (`t`
-in `[h|t]`) is a slice of the rest, its length `t.len`:
+compiled, and a slice by the length it carries. Each name a list pattern
+binds has the element type of the value matched: a `float` over a `float[]`,
+a `string` over a `string[]`, a struct over a struct array. A cons pattern's
+tail (`t` in `[h|t]`) is a slice of the rest, its length `t.len`:
 
 ```aether,run
 main() {
