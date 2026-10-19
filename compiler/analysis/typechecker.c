@@ -847,6 +847,18 @@ int is_imported_namespace(const char* name) {
     return 0;
 }
 
+/* #2978: the C name `ns.name` reaches. The module's own function, builder
+ * or `@extern` whose Aether name is `name`, under the C name the merge gave
+ * it: `<ns>_<name>`, or `ae_<ns>_<name>` for a function whose joined
+ * spelling is one of the module's externs (module_function_c_name). Else
+ * the joined `<ns>_<name>`, which is how an extern of the module is
+ * reached, and a name the module lists in the prefixed form. */
+static void qualified_c_name(const char* ns, const char* name, char* buf, size_t cap) {
+    if (global_module_registry && module_function_c_name(ns, name, buf, cap)) return;
+    /* A name too long for `buf` names nothing. */
+    if (snprintf(buf, cap, "%s_%s", ns, name) >= (int)cap) buf[0] = '\0';
+}
+
 Symbol* lookup_qualified_symbol(SymbolTable* table, const char* qualified_name) {
     if (!table || !qualified_name) return NULL;
     // Split qualified name on '.'
@@ -908,7 +920,7 @@ Symbol* lookup_qualified_symbol(SymbolTable* table, const char* qualified_name) 
             // surface is available whenever the namespace is visible, in any
             // import form. (export visibility + hide/seal above still apply.)
             char c_func_name[512];
-            snprintf(c_func_name, sizeof(c_func_name), "%s_%s", prefix, suffix);
+            qualified_c_name(prefix, suffix, c_func_name, sizeof(c_func_name));   /* #2978 */
             Symbol* sym = lookup_member_symbol(table, c_func_name);
             /* #924 re-export: `hub.fn()` where hub re-exports an imported
              * `fn`. No local `hub_fn` symbol exists; redirect to the
@@ -918,8 +930,8 @@ Symbol* lookup_qualified_symbol(SymbolTable* table, const char* qualified_name) 
                 AetherModule* origin = module_resolve_reexport(hub, suffix);
                 if (origin && origin->name) {
                     char c_origin[512];
-                    snprintf(c_origin, sizeof(c_origin), "%s_%s",
-                             module_namespace_of(origin->name), suffix);
+                    qualified_c_name(module_namespace_of(origin->name), suffix, c_origin,
+                                     sizeof(c_origin));
                     sym = lookup_member_symbol(table, c_origin);
                 }
             }
@@ -6239,9 +6251,10 @@ int typecheck_program(ASTNode* program) {
                 }
             }
 
-            // Build the full C name: namespace_shortname
+            // Build the full C name: namespace_shortname (#2978: as
+            // `ns.short` reaches it)
             char full_name[256];
-            snprintf(full_name, sizeof(full_name), "%s_%s", ns, short_name);
+            qualified_c_name(ns, short_name, full_name, sizeof(full_name));
 
             Symbol* full_sym = lookup_symbol(global_table, full_name);
             if (full_sym) {
@@ -6322,11 +6335,19 @@ int typecheck_program(ASTNode* program) {
     for (int a = 0; a < import_alias_count; a++) {
         const char* short_name = import_aliases[a].short_name;
         const char* dotted = import_aliases[a].qualified_name;
-        // Build the underscored full C name from the dotted alias
-        // ("fs.list_dir" -> "fs_list_dir").
+        // The full C name the dotted alias reaches ("fs.list_dir" ->
+        // "fs_list_dir", #2978: as a qualified call reaches it).
         char full_name[256];
         snprintf(full_name, sizeof(full_name), "%s", dotted);
-        for (char* p = full_name; *p; p++) { if (*p == '.') *p = '_'; }
+        char* adot = strchr(full_name, '.');
+        if (adot && adot == strrchr(full_name, '.')) {
+            char ns_part[256];
+            snprintf(ns_part, sizeof(ns_part), "%.*s", (int)(adot - full_name), full_name);
+            qualified_c_name(ns_part, dotted + (adot - full_name) + 1, full_name,
+                             sizeof(full_name));
+        } else {
+            for (char* p = full_name; *p; p++) { if (*p == '.') *p = '_'; }
+        }
 
         Symbol* full_sym = lookup_symbol(global_table, full_name);
         Symbol* short_sym = lookup_symbol_local(global_table, short_name);
@@ -15151,6 +15172,25 @@ int typecheck_function_call(ASTNode* call, SymbolTable* table) {
         if (alias_target) {
             free(call->value);
             call->value = strdup(alias_target);
+        }
+    }
+
+    /* #2978: a qualified call (as written, or as an import's alias made it)
+     * of a module function the merge gave a C name other than the joined
+     * `<ns>_<name>` codegen spells (one apart from an extern of its module)
+     * carries the definition's name. */
+    if (symbol && symbol->is_function && symbol->node && call->value &&
+        (symbol->node->type == AST_FUNCTION_DEFINITION ||
+         symbol->node->type == AST_BUILDER_FUNCTION) && symbol->node->value) {
+        const char* dot = strchr(call->value, '.');
+        if (dot && dot == strrchr(call->value, '.')) {
+            char joined[512];
+            snprintf(joined, sizeof(joined), "%.*s_%s", (int)(dot - call->value), call->value,
+                     dot + 1);
+            if (strcmp(joined, symbol->node->value) != 0) {
+                free(call->value);
+                call->value = strdup(symbol->node->value);
+            }
         }
     }
 

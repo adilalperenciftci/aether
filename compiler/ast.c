@@ -895,6 +895,13 @@ const char* ast_source_name(const ASTNode* def, char* buf, size_t cap) {
     if (!def || !def->origin_module || !buf || cap == 0) return name;
     const char* ns = strrchr(def->origin_module, '.');
     ns = ns ? ns + 1 : def->origin_module;
+    /* #2978: a merged function under a C name of its own keeps the name it
+     * was written with. */
+    if (def->source_name && (def->type == AST_FUNCTION_DEFINITION ||
+                             def->type == AST_BUILDER_FUNCTION)) {
+        snprintf(buf, cap, "%s.%s", ns, def->source_name);
+        return buf;
+    }
     size_t n = strlen(ns);
     if (strncmp(name, ns, n) != 0 || name[n] != '_' || !name[n + 1]) return name;
     snprintf(buf, cap, "%s.%s", ns, name + n + 1);

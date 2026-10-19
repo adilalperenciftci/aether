@@ -2271,31 +2271,88 @@ static int name_is_module_global_var(const char* ns, const char* name) {
 }
 
 // Does the module declare an extern C function with this exact name?
-//
-// This is the check that prevents the namespace-prefix/extern collision
-// bug: if a module named `contrib.aether_ui` has both
-//     extern aether_ui_app_create(...) -> int       // raw C name
-//     app_create(...) { return aether_ui_app_create(...) }  // wrapper
-// then merging the wrapper with the `aether_ui_` prefix produces a C
-// symbol that is identical to the extern's name. Both then live in the
-// same translation unit: the extern is a forward declaration, the
-// wrapper is the definition. The wrapper's body calls the extern by
-// name, but C resolves the call to the nearest definition — itself —
-// and the process infinite-recurses until the stack blows (rc=139).
-//
-// The fix is to detect this collision at merge time and skip emitting
-// the wrapper. Qualified calls `aether_ui.app_create(...)` from outside
-// the module are already mangled by codegen to `aether_ui_app_create`
-// (see normalize_func_name in codegen_func.c), which is exactly the
-// extern's name — so with the wrapper gone, those calls resolve
-// directly to the extern. Net effect: zero change for callers, no
-// recursive stub in the generated C.
 static int module_has_extern_named(ASTNode* mod_ast, const char* name) {
     if (!mod_ast || !name) return 0;
     for (int i = 0; i < mod_ast->child_count; i++) {
         ASTNode* decl = unwrap_export(mod_ast->children[i]);
         if (decl && decl->type == AST_EXTERN_FUNCTION && decl->value &&
             strcmp(decl->value, name) == 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* #2978: the C name the merge gives function (or builder) `name` of the
+ * module `mod_ast`, whose namespace is `ns`: `<ns>_<name>`, the spelling C
+ * uses for its own functions, unless the module declares a bare extern of
+ * that name. Then it is `ae_<ns>_<name>`, a spelling no C symbol uses.
+ *
+ * A module like contrib.aether_ui has both
+ *     extern aether_ui_app_create(...) -> int                 // the C name
+ *     app_create(...) { return aether_ui_app_create(...) }   // its wrapper
+ * and merged as `aether_ui_app_create` the wrapper was the extern's C
+ * symbol: its call of the extern bound to itself and recursed until the
+ * stack blew. The merge used to drop such a wrapper and let `ns.f` reach
+ * the extern, which is the same only when the wrapper forwards unchanged:
+ * `http.server_set_host` returned the extern's nothing where it documents
+ * a string, and `http.ws_send_binary(ws, data)` took the extern's three
+ * parameters where it documents two. Under its own spelling the wrapper is
+ * kept, its body's call of the extern by the extern's name still reaches
+ * the extern, and `ns.f` reaches the wrapper (module_function_c_name), as
+ * the entry file's function colliding with an extern becomes `ae_<name>`
+ * (#1366). */
+static int module_defines_function(ASTNode* mod_ast, const char* name) {
+    if (!mod_ast || !name) return 0;
+    for (int i = 0; i < mod_ast->child_count; i++) {
+        ASTNode* decl = unwrap_export(mod_ast->children[i]);
+        if (decl && decl->value && strcmp(decl->value, name) == 0 &&
+            (decl->type == AST_FUNCTION_DEFINITION || decl->type == AST_BUILDER_FUNCTION))
+            return 1;
+    }
+    return 0;
+}
+
+static void merged_function_name(const char* ns, ASTNode* mod_ast, const char* name,
+                                 char* buf, size_t cap) {
+    snprintf(buf, cap, "%s_%s", ns, name);
+    if (module_has_extern_named(mod_ast, buf) && module_defines_function(mod_ast, name))
+        snprintf(buf, cap, "ae_%s_%s", ns, name);
+}
+
+/* A merged function whose C name is not `<ns>_<name>` keeps the name it was
+ * written with, for diagnostics (ast_source_name). */
+static void stamp_written_name(ASTNode* clone, const char* ns, const char* name) {
+    char joined[512];
+    snprintf(joined, sizeof(joined), "%s_%s", ns, name);
+    if (!clone->value || strcmp(clone->value, joined) == 0) return;
+    free(clone->source_name);
+    clone->source_name = strdup(name);
+}
+
+/* merged_function_name for a name of the module whose namespace is `ns`,
+ * found by it (a rename inside a merged body knows only that). A name the
+ * module binds to one of its externs (`length` for std.string's
+ * `string_length`, from a glob) is that extern's `<ns>_<name>`. */
+static void merged_function_name_ns(const char* ns, const char* name, char* buf, size_t cap) {
+    AetherModule* m = module_find_by_namespace(ns);
+    merged_function_name(ns, m ? m->ast : NULL, name, buf, cap);
+}
+
+int module_function_c_name(const char* ns, const char* name, char* buf, size_t cap) {
+    if (!ns || !name || !buf || cap == 0) return 0;
+    AetherModule* m = module_find_by_namespace(ns);
+    if (!m || !m->ast) return 0;
+    for (int i = 0; i < m->ast->child_count; i++) {
+        ASTNode* decl = unwrap_export(m->ast->children[i]);
+        if (!decl || !decl->value || strcmp(decl->value, name) != 0) continue;
+        if (decl->type == AST_FUNCTION_DEFINITION || decl->type == AST_BUILDER_FUNCTION) {
+            merged_function_name(m->ns ? m->ns : ns, m->ast, name, buf, cap);
+            return 1;
+        }
+        if (decl->type == AST_EXTERN_FUNCTION && decl->annotation &&
+            strncmp(decl->annotation, "c_symbol:", 9) == 0) {
+            snprintf(buf, cap, "%s_%s", m->ns ? m->ns : ns, name);
             return 1;
         }
     }
@@ -2377,7 +2434,10 @@ static int check_namespace_prefix_collision(ASTNode* program) {
                              strncmp(decl->annotation, "c_symbol:", 9) == 0));
             if (!callable) continue;
             char prefixed[256];
-            snprintf(prefixed, sizeof(prefixed), "%s_%s", ns, decl->value);
+            if (decl->type == AST_EXTERN_FUNCTION)
+                snprintf(prefixed, sizeof(prefixed), "%s_%s", ns, decl->value);
+            else
+                merged_function_name(ns, mod->ast, decl->value, prefixed, sizeof(prefixed));
             for (int u = 0; u < un; u++) {
                 if (strcmp(user_names[u], prefixed) != 0) continue;
                 fprintf(stderr,
@@ -2489,12 +2549,10 @@ static void rename_refs_before_binding(ASTNode* node, const char* prefix,
      * binding (a loop's, from the previous pass), is the local to the
      * checker, which passes over such a local only for a function. */
     if (!name_in_list(node->value, func_names, func_count)) return;
-    size_t n = strlen(prefix) + 1 + strlen(node->value) + 1;
-    char* prefixed = (char*)malloc(n);
-    if (!prefixed) { fprintf(stderr, "out of memory\n"); exit(1); }
-    snprintf(prefixed, n, "%s_%s", prefix, node->value);
+    char prefixed[512];
+    merged_function_name_ns(prefix, node->value, prefixed, sizeof(prefixed));
     free(node->value);
-    node->value = prefixed;
+    node->value = strdup(prefixed);
 }
 
 static void rename_refs_before_binding_in(ASTNode* scope, const char* prefix,
@@ -2533,7 +2591,7 @@ static void rename_intra_module_refs(ASTNode* node, const char* prefix,
         for (int i = 0; !renamed && i < func_count; i++) {
             if (strcmp(node->value, func_names[i]) == 0) {
                 char prefixed[256];
-                snprintf(prefixed, sizeof(prefixed), "%s_%s", prefix, node->value);
+                merged_function_name_ns(prefix, node->value, prefixed, sizeof(prefixed));
                 free(node->value);
                 node->value = strdup(prefixed);
                 renamed = 1;
@@ -2587,7 +2645,7 @@ static void rename_intra_module_refs(ASTNode* node, const char* prefix,
         for (int i = 0; i < func_count; i++) {
             if (strcmp(node->annotation, func_names[i]) == 0) {
                 char prefixed[256];
-                snprintf(prefixed, sizeof(prefixed), "%s_%s", prefix, node->annotation);
+                merged_function_name_ns(prefix, node->annotation, prefixed, sizeof(prefixed));
                 free(node->annotation);
                 node->annotation = strdup(prefixed);
                 break;
@@ -2621,7 +2679,7 @@ static void rename_intra_module_refs(ASTNode* node, const char* prefix,
                 for (int i = 0; i < func_count; i++) {
                     if (strcmp(node->value, func_names[i]) == 0) {
                         char prefixed[256];
-                        snprintf(prefixed, sizeof(prefixed), "%s_%s", prefix, node->value);
+                        merged_function_name_ns(prefix, node->value, prefixed, sizeof(prefixed));
                         free(node->value);
                         node->value = strdup(prefixed);
                         break;
@@ -3429,10 +3487,13 @@ static void apply_inherited_selective_imports(ASTNode* clone, ASTNode* mod_ast) 
                 if (sel->annotation &&
                     strncmp(sel->annotation, "select_alias:", 13) == 0) {
                     char prefixed[256];
-                    snprintf(prefixed, sizeof(prefixed), "%s_%s", sub_ns, sel->value);
-                    rename_aliased_import_refs(clone, sel->annotation + 13, prefixed,
-                                               name_in_list(sel->value, sub_const_names,
-                                                            sub_const_count));
+                    int is_const = name_in_list(sel->value, sub_const_names, sub_const_count);
+                    if (is_const)
+                        snprintf(prefixed, sizeof(prefixed), "%s_%s", sub_ns, sel->value);
+                    else
+                        merged_function_name(sub_ns, sub_mod->ast, sel->value, prefixed,
+                                             sizeof(prefixed));
+                    rename_aliased_import_refs(clone, sel->annotation + 13, prefixed, is_const);
                     continue;
                 }
                 if (name_in_list(sel->value, sub_func_names, sub_func_count) &&
@@ -4094,15 +4155,10 @@ void module_merge_into_program(ASTNode* program) {
             ASTNode* decl = unwrap_export(mod_ast->children[j]);
 
             if ((decl->type == AST_FUNCTION_DEFINITION || decl->type == AST_BUILDER_FUNCTION) && decl->value) {
-                // Build prefixed name: "double_it" -> "mymath_double_it"
+                // Build prefixed name: "double_it" -> "mymath_double_it",
+                // apart from an extern of the module (#2978).
                 char prefixed[256];
-                snprintf(prefixed, sizeof(prefixed), "%s_%s", ns, decl->value);
-
-                // Collision with an extern declared in the same module.
-                // See the comment on module_has_extern_named above for
-                // why this check is necessary. Skipping the wrapper
-                // makes qualified calls resolve directly to the extern.
-                if (module_has_extern_named(mod_ast, prefixed)) continue;
+                merged_function_name(ns, mod_ast, decl->value, prefixed, sizeof(prefixed));
 
                 // Skip if already merged (e.g. from a prior non-selective
                 // import); every clause of a set is merged (#2643).
@@ -4119,6 +4175,7 @@ void module_merge_into_program(ASTNode* program) {
                 // ld64, which does not support --allow-multiple-definition).
                 clone->is_imported = 1;
                 stamp_origin(clone, mod);
+                stamp_written_name(clone, ns, decl->value);   /* #2978 */
 
                 // Rename intra-module function calls and constant refs within the cloned body
                 rename_intra_module_refs(clone, ns, func_names, func_count,
@@ -4518,9 +4575,7 @@ void module_merge_into_program(ASTNode* program) {
                 if (decl->type == AST_FUNCTION_DEFINITION ||
                     decl->type == AST_BUILDER_FUNCTION) {
                     char prefixed[256];
-                    snprintf(prefixed, sizeof(prefixed), "%s_%s", ns, decl->value);
-
-                    if (module_has_extern_named(mod_ast, prefixed)) continue;
+                    merged_function_name(ns, mod_ast, decl->value, prefixed, sizeof(prefixed));
                     /* Every clause of a set (#2643). */
                     if (program_has_function_before(program, prefixed, &pass)) continue;
 
@@ -4529,6 +4584,7 @@ void module_merge_into_program(ASTNode* program) {
                     clone->value = strdup(prefixed);
                     clone->is_imported = 1;
                     stamp_origin(clone, dep_mod);
+                    stamp_written_name(clone, ns, decl->value);   /* #2978 */
 
                     rename_intra_module_refs(clone, ns, func_names, func_count,
                                              const_names, const_count, NULL, 0);
@@ -4704,7 +4760,10 @@ void module_merge_into_program(ASTNode* program) {
                                      sel_const_names, sel_const_count, NULL, 0);
             for (int a = 0; a < alias_count; a++) {
                 char prefixed[256];
-                snprintf(prefixed, sizeof(prefixed), "%s_%s", ns, alias_to_name[a]);
+                if (alias_is_const[a])
+                    snprintf(prefixed, sizeof(prefixed), "%s_%s", ns, alias_to_name[a]);
+                else
+                    merged_function_name_ns(ns, alias_to_name[a], prefixed, sizeof(prefixed));
                 rename_aliased_import_refs(top, alias_from[a], prefixed,
                                            alias_is_const[a]);
             }
@@ -4736,7 +4795,9 @@ void module_merge_into_program(ASTNode* program) {
             const char* ons = module_get_namespace(origin->name);
             char prefixed[256];
             snprintf(prefixed, sizeof(prefixed), "%s_%s", ons, sym);
-            if (program_has_function(program, prefixed)) continue;
+            char fn_name[256];   /* a function's, apart from an extern (#2978) */
+            merged_function_name(ons, origin->ast, sym, fn_name, sizeof(fn_name));
+            if (program_has_function(program, fn_name)) continue;
 
             const char* of_names[AETHER_MODULE_MAX_DECLS];
             int of_count = collect_module_func_names(origin->ast, of_names,
@@ -4751,12 +4812,12 @@ void module_merge_into_program(ASTNode* program) {
 
                 if (decl->type == AST_FUNCTION_DEFINITION ||
                     decl->type == AST_BUILDER_FUNCTION) {
-                    if (module_has_extern_named(origin->ast, prefixed)) break;
                     ASTNode* clone = clone_ast_node(decl);
                     free(clone->value);
-                    clone->value = strdup(prefixed);
+                    clone->value = strdup(fn_name);
                     clone->is_imported = 1;
                     stamp_origin(clone, origin);
+                    stamp_written_name(clone, ons, sym);   /* #2978 */
                     rename_intra_module_refs(clone, ons, of_names, of_count,
                                              oc_names, oc_count, NULL, 0);
                     apply_inherited_selective_imports(clone, origin->ast);

@@ -1279,6 +1279,16 @@ of that name is emitted as `ae_string_replace_all`. Calls follow the rename;
 `string.replace_all(...)` still reaches the standard library. It is invisible
 to Aether source.
 
+A module's functions are merged as `<module>_<name>`, the spelling C gives its
+own functions, and a module often wraps its extern of that very name:
+`std.http` declares `extern http_server_set_host(...)` and an Aether
+`server_set_host` that calls it. Such a function is merged as
+`ae_<module>_<name>` instead (#2978). `http.server_set_host(...)` reaches it,
+as does a bare call inside the module or an import of the name, while its
+body's call of `http_server_set_host` still reaches the extern. The merge used
+to drop the function and let calls reach the extern, which differed where the
+wrapper did more than forward.
+
 A top-level function of the entry file keeps external linkage, under its own
 name when nothing collides with it: a C file built into the program can call
 it, against a header it shares with the Aether definition (#703). Making those
