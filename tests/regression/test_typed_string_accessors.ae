@@ -4,7 +4,7 @@
 // The bug: a `ptr` given to a `string` local (`s, _ = map.get(m, k)`) was
 // read as text whatever it pointed at, so a map or list holding a nested
 // list, a struct or a buffer gave back its bytes as a string up to the first
-// zero (now W1005, an error in a later release).
+// zero (W1005 in 0.830/0.831, refused as E0202 since).
 // Before the accessors there was no way to say "this element is a string"
 // and have it checked; this test fails without them (they do not exist) and
 // fails if one hands back a list pointer as text.

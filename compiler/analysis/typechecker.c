@@ -9664,9 +9664,10 @@ static int rhs_returns_void_via_bare_fn(ASTNode* rhs, SymbolTable* table) {
 /* A bare `ptr` re-binding a `string` local (`s = map_get_raw(m, k)`, or a
  * tuple slot, `s, err = map.get(m, k)`) is taken as text: whatever the
  * pointer points at, a list, a struct, bytes without an end, is read up to
- * its first zero byte. W1005 now, an error in a later release (Nic,
- * 2026-10-19). The typed accessors say which element is a string, and
- * return an error for one that is not. */
+ * its first zero byte. An error, E0202 (W1005, a warning, in 0.830.0 and
+ * 0.831.0, while the family moved off it; Nic, 2026-10-19). The typed
+ * accessors say which element is a string, and return an error for one
+ * that is not. */
 static const char* ptr_string_accessor(ASTNode* e) {
     while (e && (e->type == AST_TUPLE_UNWRAP || e->type == AST_VALUE_CAST) && e->child_count > 0)
         e = e->children[0];
@@ -9690,21 +9691,14 @@ static int is_string_producer_call(ASTNode* e) {
                  !strncmp(f, "aether_string_", 14));
 }
 
-static void warn_ptr_into_string(const char* name, ASTNode* rhs, int line, int column) {
+static void report_ptr_into_string(const char* name, ASTNode* rhs, int line, int column) {
     if (is_string_producer_call(rhs)) return;
     char msg[300], hint[200];
     snprintf(msg, sizeof(msg),
-             "'%s' is a `string`, and a `ptr` given to it is read as text whatever it points at; "
-             "this becomes an error in a later release", name ? name : "?");
+             "'%s' is a `string`, and a `ptr` given to it would be read as text whatever it points at",
+             name ? name : "?");
     snprintf(hint, sizeof(hint), "say it is a string with `%s`", ptr_string_accessor(rhs));
-    AetherError w = {
-        .filename = g_tc_file, .source_code = NULL,
-        .line = line, .column = column,
-        .message = msg, .suggestion = hint,
-        .context = NULL, .code = AETHER_WARN_PTR_INTO_STRING
-    };
-    aether_warning_report(&w);
-    warning_count++;
+    type_error_code_hint(msg, hint, line, column, AETHER_ERR_PTR_INTO_STRING);
 }
 
 /* #2762: a slot of a tuple destructure re-binds a local an enclosing local
@@ -9748,7 +9742,7 @@ static int destructure_slot_rebind(ASTNode* var, SymbolTable* table, ASTNode* rh
                       (got->kind == TYPE_STRING && have->kind == TYPE_PTR);
     if (got->kind == TYPE_PTR && !got->element_type && !got->distinct_name &&
         have->kind == TYPE_STRING)
-        warn_ptr_into_string(var->value, rhs, var->line, var->column);
+        report_ptr_into_string(var->value, rhs, var->line, var->column);
     if (!str_ptr_mix &&
         (!is_assignable(got, have) ||
          (got->kind == TYPE_PTR && is_numeric_scalar(have->kind)) ||
@@ -10740,7 +10734,7 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                     if (bound->type->kind == TYPE_STRING && init_type->kind == TYPE_PTR &&
                         !init_type->element_type && !init_type->distinct_name &&
                         init->type != AST_NULL_LITERAL)
-                        warn_ptr_into_string(stmt->value, init, stmt->line, stmt->column);
+                        report_ptr_into_string(stmt->value, init, stmt->line, stmt->column);
                     if (!str_ptr_mix) {
                         if (stmt->node_type) free_type(stmt->node_type);
                         stmt->node_type = clone_type(bound->type);

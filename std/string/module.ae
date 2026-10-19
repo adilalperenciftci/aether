@@ -798,8 +798,8 @@ release_kept(p: ptr) {
 extern aether_string_is_string(p: @aether ptr) -> int
 
 // The string a `ptr` holds, typed as one. A `ptr` given to a `string` local
-// as it is (`s = p`) is read as text whatever it points at (W1005, an error
-// in a later release); this says it is a string, and checks:
+// as it is (`s = p`) would be read as text whatever it points at, and is
+// refused (E0202); this says it is a string, and checks:
 // - (s, "")                : `p` is an Aether string
 // - (null, "")             : `p` is null
 // - (null, "not a string") : `p` points at something else

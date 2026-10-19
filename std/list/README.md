@@ -57,8 +57,8 @@ unchecked form, for a loop that has already bounded the index by
 `list_size`.
 
 **A string element is read with `get_string`.** `get` hands back a `ptr`,
-which a `string` local would read as text whatever it points at (W1005, an
-error in a later release). `list.get_string(l, i)` says the element is a
+which a `string` local would read as text whatever it points at, so giving
+it to one is refused (E0202). `list.get_string(l, i)` says the element is a
 string and checks it is one: an element that is some other pointer (a nested
 list, a struct) gives `(null, "not a string")`, with the index and null-list
 errors `get` gives.

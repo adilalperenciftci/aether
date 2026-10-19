@@ -30,9 +30,11 @@
 // (borrow assumption — the buffer is opaque from the heap-string-
 // tracker's perspective, so don't claim ownership of it).
 //
-// A `ptr` slot re-binding a string local is W1005 now (an error in a later
-// release; `map.get_string` is the typed form). This file keeps the implicit
-// form on purpose: the `ptr` position is the path under test.
+// A `ptr` slot re-binding a string local is refused now (E0202, W1005 in
+// 0.830/0.831), so the cases read the map with `map.get_string`, whose slot is
+// a `string`. What is left under test is the same heap-string LHS: its
+// previous heap value is freed and its flag follows the slot, not the
+// function-exit free of a value it no longer owns.
 
 import std.string
 import std.map
@@ -47,7 +49,7 @@ main() {
     map.put(opts, "include", "monorepo.*")
     pkg_name = "monorepo"
     pkg_include = "${pkg_name}*" // heap (interp result)
-    pkg_include, _ = map.get(opts, "include")
+    pkg_include, _ = map.get_string(opts, "include")
     if string.length(pkg_include) != 10 { // "monorepo.*"
         println("FAIL 1: length = ${string.length(pkg_include)}, expected 10")
         exit(1)
@@ -61,7 +63,7 @@ main() {
     opts2 = map.new()
     map.put(opts2, "k", "value-from-map")
     held = string.concat("prefix-", "old") // heap
-    held, _ = map.get(opts2, "k")
+    held, _ = map.get_string(opts2, "k")
     if string.length(held) != 14 {
         println("FAIL 2: length = ${string.length(held)}, expected 14")
         exit(1)
@@ -78,7 +80,7 @@ main() {
     map.put(opts3, "y", "why")
     name3 = "starter-name" // bare literal (not heap)
     name3 = string.concat("n=", name3) // heap
-    name3, _ = map.get(opts3, "x")
+    name3, _ = map.get_string(opts3, "x")
     if string.length(name3) != 2 {
         println("FAIL 3: length = ${string.length(name3)}, expected 2")
         exit(1)
@@ -91,7 +93,7 @@ main() {
     opts4 = map.new()
     map.put(opts4, "p", "borrowed")
     lit = "starts-as-literal"
-    lit, _ = map.get(opts4, "p")
+    lit, _ = map.get_string(opts4, "p")
     if string.length(lit) != 8 {
         println("FAIL 4: length = ${string.length(lit)}, expected 8")
         exit(1)

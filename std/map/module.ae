@@ -61,8 +61,8 @@ get(map: ptr, key: string) -> {
 }
 
 // Look up a key whose value is a string. `get` hands back a `ptr`, which a
-// `string` local reads as text whatever it points at (W1005); this says the
-// value is a string, and checks it is one:
+// `string` local would read as text whatever it points at (refused, E0202);
+// this says the value is a string, and checks it is one:
 // - (value, "")              : key present, its value a string
 // - (null, "")               : key absent (not an error — use map.has)
 // - (null, "not a string")   : the value is some other pointer
