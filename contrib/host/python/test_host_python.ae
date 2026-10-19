@@ -23,12 +23,12 @@ main() {
     fw = spec.init()
 
     have_python = 0
-    if python.python_init() == 0 { have_python = 1 }
+    if python.init() == 0 { have_python = 1 }
     reason = "libpython not loadable (set AETHER_PYTHON_SONAME)"
 
     spec.describe(fw, "contrib.host.python") {
         spec.it_when(have_python, "evaluates a script and reports success", reason) callback {
-            spec.assert_eq(python.python_run("aether_probe = 1"), 0,
+            spec.assert_eq(python.run("aether_probe = 1"), 0,
                 "a valid script returns 0")
         }
 
@@ -38,9 +38,9 @@ main() {
         // and a second eval asserts on it Python-side, erroring when the
         // arithmetic did not happen.
         spec.it_when(have_python, "really executes — Python-side state persists", reason) callback {
-            spec.assert_eq(python.python_run("import builtins; builtins.aether_sum = (2 + 3) * 7"), 0,
+            spec.assert_eq(python.run("import builtins; builtins.aether_sum = (2 + 3) * 7"), 0,
                 "computation evaluates")
-            spec.assert_eq(python.python_run("import builtins
+            spec.assert_eq(python.run("import builtins
 assert builtins.aether_sum == 35, 'wrong'"), 0,
                 "Python sees 35 — the interpreter genuinely ran")
         }
@@ -49,28 +49,28 @@ assert builtins.aether_sum == 35, 'wrong'"), 0,
         // cannot run at all: the caller believes the script worked.
         // Asserted negatively so the bridge may change its error code.
         spec.it_when(have_python, "propagates a runtime error as failure", reason) callback {
-            spec.assert_not_eq(python.python_run("raise Exception('deliberate')"), 0,
+            spec.assert_not_eq(python.run("raise Exception('deliberate')"), 0,
                 "an erroring script must NOT report success")
         }
 
         // A syntax error takes a different path through the Python loader
         // than a runtime error, and must also be reported.
         spec.it_when(have_python, "reports a syntax error as failure", reason) callback {
-            spec.assert_not_eq(python.python_run("def ("), 0,
+            spec.assert_not_eq(python.run("def ("), 0,
                 "unparseable code must NOT report success")
         }
 
         // A host that defensively calls init before each eval must not
         // pay for it or crash: while the VM is live, init is a no-op.
         spec.it_when(have_python, "init is idempotent while the VM is live", reason) callback {
-            spec.assert_eq(python.python_init(), 0, "second init returns 0")
-            spec.assert_eq(python.python_run("aether_probe = 1"), 0,
+            spec.assert_eq(python.init(), 0, "second init returns 0")
+            spec.assert_eq(python.run("aether_probe = 1"), 0,
                 "the VM still evaluates afterwards")
         }
     }
 
     _rc = spec.run_summary(fw)
 
-    if have_python == 1 { python.python_finalize() }
+    if have_python == 1 { python.finalize() }
     return _rc
 }

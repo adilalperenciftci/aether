@@ -77,7 +77,7 @@ hkdf_extract(algo: string, salt: byte[], ikm: byte[]) -> ptr {
         }
         use_salt = bytes.view(made)[0..hl]
     }
-    prk = hmac.hmac_bytes(algo, use_salt, ikm)
+    prk = hmac.bytes(algo, use_salt, ikm)
     if made != null {
         bytes.free(made)
     }
@@ -127,7 +127,7 @@ hkdf_expand(algo: string, prk: byte[], info: byte[], out_len: int) -> ptr {
         }
         bytes.set(tin, off, counter & 0xFF)
 
-        ti = hmac.hmac_bytes(algo, prk, bytes.view(tin)[0..tlen])
+        ti = hmac.bytes(algo, prk, bytes.view(tin)[0..tlen])
         bytes.free(tin)
         if ti == null {
             if prev != null {

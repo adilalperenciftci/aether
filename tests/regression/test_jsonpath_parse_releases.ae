@@ -84,6 +84,6 @@ main() {
         steady(doc, 1, "failed parses")
         steady(doc, 2, "filter queries")
     }
-    json.json_free(doc)
+    json.free(doc)
     println("OK")
 }

@@ -30,9 +30,9 @@ main() {
 
     spec.describe(fw, "std.string.array_view (#2301)") {
         spec.it("gives an owned snapshot of a split result") callback {
-            arr = string.string_split("a,b,c", ",")
+            arr = string.split("a,b,c", ",")
             v = string.array_view(arr)
-            string.string_array_free(arr) // v must outlive this
+            string.array_free(arr) // v must outlive this
             spec.assert_eq(v.len, 3, "three elements")
             spec.assert_str_eq(v[0], "a", "index 0")
             spec.assert_str_eq(v[1], "b", "index 1")

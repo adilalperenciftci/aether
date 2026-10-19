@@ -911,11 +911,11 @@ encrypted_extensions() -> ptr {
 // cert_lens: list of lengths
 // ctx_len: context length (0 for server)
 certificate_msg(cert_chain: ptr, cert_lens: ptr, ctx_len: int) -> ptr {
-    n = list.list_size(cert_chain)
+    n = list.size(cert_chain)
     entries_len = 0
     i = 0
     while i < n {
-        c = list.list_get_raw(cert_chain, i)
+        c = list.get_raw(cert_chain, i)
         c_len = bytes.length(c)
         entries_len = entries_len + 3 + c_len + 2
         i = i + 1
@@ -931,7 +931,7 @@ certificate_msg(cert_chain: ptr, cert_lens: ptr, ctx_len: int) -> ptr {
     p = p + 3
     i = 0
     while i < n {
-        c = list.list_get_raw(cert_chain, i)
+        c = list.get_raw(cert_chain, i)
         c_len = bytes.length(c)
         put24(m, p, c_len)
         p = p + 3

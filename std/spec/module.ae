@@ -762,7 +762,7 @@ expect_str(v: string) -> StrSubject {
     c = string.copy(v)
     if current_fw != null {
         sc = map.get_raw(current_fw, "str_copies")
-        if sc != null { list.list_add_raw(sc, c) }
+        if sc != null { list.add_raw(sc, c) }
     }
     return StrSubject { value: c, negated: 0 }
 }

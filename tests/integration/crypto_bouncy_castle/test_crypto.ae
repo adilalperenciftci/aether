@@ -333,32 +333,32 @@ main() {
     // ---- MD5 Tests ----
     println("=== MD5 Tests ===")
     fails = fails + check("MD5 empty",
-        md5.md5_hex(string.bytes("")),
+        md5.hex(string.bytes("")),
         "d41d8cd98f00b204e9800998ecf8427e")
 
     fails = fails + check("MD5 a",
-        md5.md5_hex(string.bytes("a")),
+        md5.hex(string.bytes("a")),
         "0cc175b9c0f1b6a831c399e269772661")
 
     fails = fails + check("MD5 abc",
-        md5.md5_hex(string.bytes("abc")),
+        md5.hex(string.bytes("abc")),
         "900150983cd24fb0d6963f7d28e17f72")
 
     fails = fails + check("MD5 alphabet",
-        md5.md5_hex(string.bytes("abcdefghijklmnopqrstuvwxyz")),
+        md5.hex(string.bytes("abcdefghijklmnopqrstuvwxyz")),
         "c3fcd3d76192e4007dfb496cca67e13b")
 
     // Remaining RFC 1321 / HAC suite vectors (BC tests a subset; full suite here).
     fails = fails + check("MD5 message digest",
-        md5.md5_hex(string.bytes("message digest")),
+        md5.hex(string.bytes("message digest")),
         "f96b697d7cb7938d525a2f31aaf161d0")
 
     fails = fails + check("MD5 mixcase62",
-        md5.md5_hex(string.bytes("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789")),
+        md5.hex(string.bytes("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789")),
         "d174ab98d277d9f5a5611c2c9f419d9f")
 
     fails = fails + check("MD5 digits80",
-        md5.md5_hex(string.bytes("12345678901234567890123456789012345678901234567890123456789012345678901234567890")),
+        md5.hex(string.bytes("12345678901234567890123456789012345678901234567890123456789012345678901234567890")),
         "57edf4a22be3c955ac49da2e2107b67a")
 
     // MD5 Streaming (two-part, at "abc" boundary)
@@ -389,32 +389,32 @@ main() {
     // ---- MD4 Tests ----
     println("=== MD4 Tests ===")
     fails = fails + check("MD4 empty",
-        md4.md4_hex(string.bytes("")),
+        md4.hex(string.bytes("")),
         "31d6cfe0d16ae931b73c59d7e0c089c0")
 
     fails = fails + check("MD4 a",
-        md4.md4_hex(string.bytes("a")),
+        md4.hex(string.bytes("a")),
         "bde52cb31de33e46245e05fbdbd6fb24")
 
     fails = fails + check("MD4 abc",
-        md4.md4_hex(string.bytes("abc")),
+        md4.hex(string.bytes("abc")),
         "a448017aaf21d8525fc10ae87aa6729d")
 
     fails = fails + check("MD4 long",
-        md4.md4_hex(string.bytes("12345678901234567890123456789012345678901234567890123456789012345678901234567890")),
+        md4.hex(string.bytes("12345678901234567890123456789012345678901234567890123456789012345678901234567890")),
         "e33b4ddc9c38f2199c3e7b164fcc0536")
 
     // Remaining RFC 1320 suite vectors (BC tests a subset; full suite here).
     fails = fails + check("MD4 message digest",
-        md4.md4_hex(string.bytes("message digest")),
+        md4.hex(string.bytes("message digest")),
         "d9130a8164549fe818874806e1c7014b")
 
     fails = fails + check("MD4 alphabet",
-        md4.md4_hex(string.bytes("abcdefghijklmnopqrstuvwxyz")),
+        md4.hex(string.bytes("abcdefghijklmnopqrstuvwxyz")),
         "d79e1c308aa5bbcdeea8ed63df412da9")
 
     fails = fails + check("MD4 mixcase62",
-        md4.md4_hex(string.bytes("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789")),
+        md4.hex(string.bytes("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789")),
         "043f8582f241db351ce627e153e7f0e4")
 
     // MD4 Streaming (two-part, at "abc" boundary)
@@ -444,32 +444,32 @@ main() {
     // ---- SHA-1 Tests ----
     println("=== SHA-1 Tests ===")
     fails = fails + check("SHA-1 empty",
-        sha1.sha1_hex(string.bytes("")),
+        sha1.hex(string.bytes("")),
         "da39a3ee5e6b4b0d3255bfef95601890afd80709")
 
     fails = fails + check("SHA-1 a",
-        sha1.sha1_hex(string.bytes("a")),
+        sha1.hex(string.bytes("a")),
         "86f7e437faa5a7fce15d1ddcb9eaeaea377667b8")
 
     fails = fails + check("SHA-1 abc",
-        sha1.sha1_hex(string.bytes("abc")),
+        sha1.hex(string.bytes("abc")),
         "a9993e364706816aba3e25717850c26c9cd0d89d")
 
     fails = fails + check("SHA-1 alphabet",
-        sha1.sha1_hex(string.bytes("abcdefghijklmnopqrstuvwxyz")),
+        sha1.hex(string.bytes("abcdefghijklmnopqrstuvwxyz")),
         "32d10c7b8cf96570ca04ce37f2a19d84240d3a89")
 
     // Additional standard vectors (HAC / RFC 3174 companion set).
     fails = fails + check("SHA-1 message digest",
-        sha1.sha1_hex(string.bytes("message digest")),
+        sha1.hex(string.bytes("message digest")),
         "c12252ceda8be8994d5fa0290a47231c1d16aae3")
 
     fails = fails + check("SHA-1 mixcase62",
-        sha1.sha1_hex(string.bytes("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789")),
+        sha1.hex(string.bytes("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789")),
         "761c457bf73b14d27e9e9265c46f4b4dda11f940")
 
     fails = fails + check("SHA-1 digits80",
-        sha1.sha1_hex(string.bytes("12345678901234567890123456789012345678901234567890123456789012345678901234567890")),
+        sha1.hex(string.bytes("12345678901234567890123456789012345678901234567890123456789012345678901234567890")),
         "50abf5706a150990a08b2c5ea40fa0e585554732")
 
     // SHA-1 Streaming (two-part, at "abc" boundary)
@@ -500,7 +500,7 @@ main() {
     println("=== Ascon Tests ===")
     // Ascon-Hash
     fails = fails + check("Ascon-Hash empty",
-        ascon.ascon_hex(string.bytes("")),
+        ascon.hex(string.bytes("")),
         "7346bc14f036e87ae03d0997913088f5f68411434b3cf8b54fa796a80d251f91")
 
     // Use hex_to_bytes to avoid Aether string literal NUL-truncation
@@ -524,7 +524,7 @@ main() {
 
     // Ascon-HashA
     fails = fails + check("Ascon-HashA empty",
-        ascon.ascon_a_hex(string.bytes("")),
+        ascon.a_hex(string.bytes("")),
         "aecd027026d0675f9de7a8ad8ccf512db64b1edcf0b20c388a0c7cc617aaa2c4")
 
     ctx_ascon_a_00, _ = ascon.new("ascon-a")

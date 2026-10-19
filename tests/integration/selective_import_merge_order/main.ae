@@ -16,7 +16,7 @@ import std.os(getenv)
 extern exit(code: int)
 
 main() {
-    ns = dep.dep_now() // must resolve os.now_monotonic_ns() inside dep
+    ns = dep.now() // must resolve os.now_monotonic_ns() inside dep
     // A non-empty numeric string proves the qualified os.* call ran.
     println("OK ${ns}")
     exit(0)

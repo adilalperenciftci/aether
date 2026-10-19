@@ -297,7 +297,7 @@ main() {
     map_free(e18)
     print("PASS: error getters out of range read empty\n")
 
-    schema.schema_free(person)
+    schema.free(person)
 
     // ---- Float + bool coercion in their own small schema ----
     measures = schema.record() {
@@ -327,7 +327,7 @@ main() {
     expect_err("bool not boolean", measures, eb, "active", "invalid_type")
     map_free(eb)
 
-    schema.schema_free(measures)
+    schema.free(measures)
 
     // ---- "parse, don't validate": the returned values are typed & usable ----
     // A successful parse hands back coerced values keyed by field name; reading
@@ -359,7 +359,7 @@ main() {
     schema.values_free(uval)
     schema.errors_free(uerr)
     map_free(uin)
-    schema.schema_free(acct)
+    schema.free(acct)
 
     // ---- defaults + transforms + new checks (positive/nonneg/pattern) ----
     ext = schema.record() {
@@ -442,7 +442,7 @@ main() {
     }
     print("PASS: to_json_schema emits draft-07 with constraints\n")
     string_free(js)
-    schema.schema_free(ext)
+    schema.free(ext)
 
     print("\nAll PASS\n")
 }

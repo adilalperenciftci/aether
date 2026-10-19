@@ -1261,7 +1261,7 @@ fn equal_val(a: ptr, b: ptr) -> bool {
         if n != list.size(bcv.list_val) { return false }
         i = 0
         while i < n {
-            if !equal_val(list.list_get_raw(acv.list_val, i), list.list_get_raw(bcv.list_val, i)) { return false }
+            if !equal_val(list.get_raw(acv.list_val, i), list.get_raw(bcv.list_val, i)) { return false }
             i = i + 1
         }
         return true
@@ -1271,12 +1271,12 @@ fn equal_val(a: ptr, b: ptr) -> bool {
         if n != list.size(bcv.map_keys) { return false }
         i = 0
         while i < n {
-            ak = list.list_get_raw(acv.map_keys, i)
+            ak = list.get_raw(acv.map_keys, i)
             matched = false
             j = 0
             while j < n && !matched {
-                if equal_val(ak, list.list_get_raw(bcv.map_keys, j)) {
-                    if !equal_val(list.list_get_raw(acv.map_values, i), list.list_get_raw(bcv.map_values, j)) { return false }
+                if equal_val(ak, list.get_raw(bcv.map_keys, j)) {
+                    if !equal_val(list.get_raw(acv.map_values, i), list.get_raw(bcv.map_values, j)) { return false }
                     matched = true
                 }
                 j = j + 1
@@ -1321,11 +1321,11 @@ object_set(obj_ptr: ptr, key: string, value: ptr) -> string {
     n = list.size(cv.map_keys)
     i = 0
     while i < n {
-        k = list.list_get_raw(cv.map_keys, i) as *CborValue
+        k = list.get_raw(cv.map_keys, i) as *CborValue
         if k.type == CBOR_TEXT && str_payload_equals_key(k, key) {
-            old = list.list_get_raw(cv.map_values, i)
+            old = list.get_raw(cv.map_values, i)
             if old != value { free_value(old) }
-            list.list_set(cv.map_values, i, value)
+            list.set(cv.map_values, i, value)
             return ""
         }
         i = i + 1

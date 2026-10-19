@@ -125,7 +125,7 @@ fn mount_schema_route(g: *ApiGroup) {
         js = schema.to_json_schema(resource)
         response_set_header(res, "Content-Type", "application/schema+json")
         response_json(res, js)
-        string.string_free(js)
+        string.free(js)
     }
 }
 
@@ -153,9 +153,9 @@ fn validate_body(res: ptr, req: ptr, resource: ptr) -> int {
         write_validation_errors(res, errors)
     }
 
-    json.json_free(values)
+    json.free(values)
     schema.errors_free(errors)
-    json.json_free(root)
+    json.free(root)
 
     if passed == 1 {
         return CONTINUE
@@ -365,7 +365,7 @@ fn build_openapi(groups: ptr) -> string {
         strbuilder.append(b, "/schema\":{\"get\":{\"summary\":\"JSON Schema for ")
         strbuilder.append(b, name)
         strbuilder.append(b, "\"}}")
-        string.string_free(name)
+        string.free(name)
         i = i + 1
     }
     strbuilder.append(b, "},")
@@ -384,8 +384,8 @@ fn build_openapi(groups: ptr) -> string {
         strbuilder.append(b, name)
         strbuilder.append(b, "\":")
         strbuilder.append(b, js)
-        string.string_free(js)
-        string.string_free(name)
+        string.free(js)
+        string.free(name)
         i = i + 1
     }
     strbuilder.append(b, "}}}")
@@ -410,6 +410,6 @@ openapi_route(_ctx: ptr, route_path: string, groups: @keep ptr) {
         doc = build_openapi(groups)
         response_set_header(res, "Content-Type", "application/json")
         response_json(res, doc)
-        string.string_free(doc)
+        string.free(doc)
     }
 }

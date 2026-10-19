@@ -31,54 +31,54 @@ main() {
 
     spec.describe(fw, "std.map put and get") {
         spec.it("starts empty") callback {
-            m = map.map_new()
-            spec.assert_eq(map.map_size(m), 0, "new map has size 0")
-            map.map_free(m)
+            m = map.new()
+            spec.assert_eq(map.size(m), 0, "new map has size 0")
+            map.free(m)
         }
 
         spec.it("binds a key and reads it back") callback {
-            m = map.map_new()
+            m = map.new()
             v = collections.list_new()
             spec.assert_ok(map.put(m, "key", v), "put succeeds")
-            spec.assert_eq(map.map_size(m), 1, "size is 1")
+            spec.assert_eq(map.size(m), 1, "size is 1")
             got, err = map.get(m, "key")
             spec.assert_ok(err, "get succeeds")
             spec.assert_true(same_ptr(got, v), "the bound value comes back")
-            map.map_free(m)
+            map.free(m)
             collections.list_free(v)
         }
 
         spec.it("replaces a rebound key without growing") callback {
-            m = map.map_new()
+            m = map.new()
             first = collections.list_new()
             second = collections.list_new()
             map.put(m, "key", first)
             map.put(m, "key", second)
-            spec.assert_eq(map.map_size(m), 1,
+            spec.assert_eq(map.size(m), 1,
                 "rebinding does not add an entry")
             got, err = map.get(m, "key")
             spec.assert_ok(err, "get succeeds")
             spec.assert_true(same_ptr(got, second),
                 "the later binding wins")
-            map.map_free(m)
+            map.free(m)
             collections.list_free(first)
             collections.list_free(second)
         }
 
         spec.it("keeps distinct keys apart") callback {
-            m = map.map_new()
+            m = map.new()
             a = collections.list_new()
             b = collections.list_new()
             map.put(m, "a", a)
             map.put(m, "b", b)
-            spec.assert_eq(map.map_size(m), 2, "two entries")
+            spec.assert_eq(map.size(m), 2, "two entries")
             got_a, e1 = map.get(m, "a")
             got_b, e2 = map.get(m, "b")
             spec.assert_ok(e1, "get(a) succeeds")
             spec.assert_ok(e2, "get(b) succeeds")
             spec.assert_true(same_ptr(got_a, a), "a maps to its own value")
             spec.assert_true(same_ptr(got_b, b), "b maps to its own value")
-            map.map_free(m)
+            map.free(m)
             collections.list_free(a)
             collections.list_free(b)
         }
@@ -86,47 +86,47 @@ main() {
 
     spec.describe(fw, "std.map membership and removal") {
         spec.it("reports membership for bound and unbound keys") callback {
-            m = map.map_new()
+            m = map.new()
             v = collections.list_new()
             map.put(m, "present", v)
-            spec.assert_eq(map.map_has(m, "present"), 1, "present is bound")
-            spec.assert_eq(map.map_has(m, "absent"), 0, "absent is not bound")
-            map.map_free(m)
+            spec.assert_eq(map.has(m, "present"), 1, "present is bound")
+            spec.assert_eq(map.has(m, "absent"), 0, "absent is not bound")
+            map.free(m)
             collections.list_free(v)
         }
 
         spec.it("drops a key on remove") callback {
-            m = map.map_new()
+            m = map.new()
             v = collections.list_new()
             map.put(m, "gone", v)
-            map.map_remove(m, "gone")
-            spec.assert_eq(map.map_has(m, "gone"), 0, "no longer bound")
-            spec.assert_eq(map.map_size(m), 0, "size back to 0")
-            map.map_free(m)
+            map.remove(m, "gone")
+            spec.assert_eq(map.has(m, "gone"), 0, "no longer bound")
+            spec.assert_eq(map.size(m), 0, "size back to 0")
+            map.free(m)
             collections.list_free(v)
         }
 
         spec.it("tolerates removing an unbound key") callback {
-            m = map.map_new()
+            m = map.new()
             v = collections.list_new()
             map.put(m, "keep", v)
-            map.map_remove(m, "never-bound")
-            spec.assert_eq(map.map_size(m), 1,
+            map.remove(m, "never-bound")
+            spec.assert_eq(map.size(m), 1,
                 "removing an absent key leaves the map alone")
-            spec.assert_eq(map.map_has(m, "keep"), 1, "the other key survives")
-            map.map_free(m)
+            spec.assert_eq(map.has(m, "keep"), 1, "the other key survives")
+            map.free(m)
             collections.list_free(v)
         }
 
         spec.it("empties on clear") callback {
-            m = map.map_new()
+            m = map.new()
             v = collections.list_new()
             map.put(m, "a", v)
             map.put(m, "b", v)
-            map.map_clear(m)
-            spec.assert_eq(map.map_size(m), 0, "size is 0 after clear")
-            spec.assert_eq(map.map_has(m, "a"), 0, "a is gone")
-            map.map_free(m)
+            map.clear(m)
+            spec.assert_eq(map.size(m), 0, "size is 0 after clear")
+            spec.assert_eq(map.has(m, "a"), 0, "a is gone")
+            map.free(m)
             collections.list_free(v)
         }
     }
@@ -138,12 +138,12 @@ main() {
             // empty err as success and must additionally null-check the
             // pointer. map_has is the unambiguous membership test.
             // Pinned so that changing it is a deliberate, visible act.
-            m = map.map_new()
+            m = map.new()
             got, err = map.get(m, "never-bound")
             spec.assert_ok(err, "a miss reports success today")
             spec.assert_true(same_ptr(got, null),
                 "...but hands back null, so use map_has to test membership")
-            map.map_free(m)
+            map.free(m)
         }
     }
 

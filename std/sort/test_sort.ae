@@ -229,7 +229,7 @@ main() {
     // An unbounded view has no length to sort: it panics rather than
     // sorting nothing, or reading past a buffer it cannot see the end of.
     uh, _ = intarr.new_filled(3, 0)
-    raw = intarr.intarr_data(uh) // the C accessor: a view with no bound
+    raw = intarr.data(uh) // the C accessor: a view with no bound
     caught = 0
     try {
         sort.ints(raw)

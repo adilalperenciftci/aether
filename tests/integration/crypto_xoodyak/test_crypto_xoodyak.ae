@@ -80,7 +80,7 @@ main() {
     bytes.free(msg4)
 
     // One-shot wrappers check
-    res_one_shot = xoodyak.xoodyak_hex(string.bytes(""))
+    res_one_shot = xoodyak.hex(string.bytes(""))
     fails = fails + check("xoodyak one-shot empty", res_one_shot, "EA152F2B47BCE24EFB66C479D4ADF17BD324D806E85FF75EE369EE50DC8F8BD1")
 
     // Multi-part streaming across the 16-byte absorb rate: a 20-byte message

@@ -205,13 +205,13 @@ new_map() -> ptr {
 // Append a child to an array/set/push (ownership moves into the aggregate).
 array_add(agg: ptr, child: ptr) {
     a = agg as *RespValue
-    if a.items != null { list.list_add_raw(a.items, child) }
+    if a.items != null { list.add_raw(a.items, child) }
 }
 // Append a key/value pair to a map (ownership of both moves into the map).
 map_add(m: ptr, key: ptr, val: ptr) {
     mv = m as *RespValue
-    if mv.map_keys != null { list.list_add_raw(mv.map_keys, key) }
-    if mv.map_vals != null { list.list_add_raw(mv.map_vals, val) }
+    if mv.map_keys != null { list.add_raw(mv.map_keys, key) }
+    if mv.map_vals != null { list.add_raw(mv.map_vals, val) }
 }
 
 // ---- predicates / accessors ------------------------------------------------
@@ -410,7 +410,7 @@ fn parse_one(data: byte[], pos: int) -> (ptr, int, int) {
         while k < (cnt as int) {
             child, np, st = parse_one(data, cur)
             if st != PS_OK { free_value(v as ptr) return null, pos, st }
-            list.list_add_raw(v.items, child)
+            list.add_raw(v.items, child)
             cur = np
             k = k + 1
         }
@@ -429,8 +429,8 @@ fn parse_one(data: byte[], pos: int) -> (ptr, int, int) {
             if st1 != PS_OK { free_value(v as ptr) return null, pos, st1 }
             val, np2, st2 = parse_one(data, np1)
             if st2 != PS_OK { free_value(key) free_value(v as ptr) return null, pos, st2 }
-            list.list_add_raw(v.map_keys, key)
-            list.list_add_raw(v.map_vals, val)
+            list.add_raw(v.map_keys, key)
+            list.add_raw(v.map_vals, val)
             cur = np2
             k = k + 1
         }

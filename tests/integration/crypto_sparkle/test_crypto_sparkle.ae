@@ -66,7 +66,7 @@ main() {
 
     // ---- ESCH-256 ----
     fails = fails + check("esch-256 empty",
-        sparkle.sparkle_hex("esch-256", string.bytes("")),
+        sparkle.hex("esch-256", string.bytes("")),
         "c0e815d78b875dc768c6c8b3afa51987cd69e5c087d387368628a511cfad5730")
 
     b_00 = hex_to_bytes("00")
@@ -85,7 +85,7 @@ main() {
 
     // ---- ESCH-384 ----
     fails = fails + check("esch-384 empty",
-        sparkle.sparkle_hex("esch-384", string.bytes("")),
+        sparkle.hex("esch-384", string.bytes("")),
         "2981715e2263ebd0cb6e5c2c99d0776d5e691ee737fde05247895e75d02e7447fd6ab707e2ec8385a539777965e472ee")
 
     ctx3, _ = sparkle.new("esch-384")

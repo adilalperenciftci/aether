@@ -228,7 +228,7 @@ walk(n: Node, f: fn) {
     if n as ptr != null { list.add(todo, n as ptr) }
     while list.size(todo) > 0 {
         last = list.size(todo) - 1
-        m = list.list_get_raw(todo, last) as Node
+        m = list.get_raw(todo, last) as Node
         list.remove(todo, last)
         call(f, m)
         i = child_count(m) - 1

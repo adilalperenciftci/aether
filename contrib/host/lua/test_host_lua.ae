@@ -23,12 +23,12 @@ main() {
     fw = spec.init()
 
     have_lua = 0
-    if lua.lua_init() == 0 { have_lua = 1 }
+    if lua.init() == 0 { have_lua = 1 }
     reason = "liblua not loadable (set AETHER_LUA_SONAME)"
 
     spec.describe(fw, "contrib.host.lua") {
         spec.it_when(have_lua, "evaluates a script and reports success", reason) callback {
-            spec.assert_eq(lua.lua_run("aether_probe = 1"), 0,
+            spec.assert_eq(lua.run("aether_probe = 1"), 0,
                 "a valid script returns 0")
         }
 
@@ -38,9 +38,9 @@ main() {
         // and a second eval asserts on it Lua-side, erroring when the
         // arithmetic did not happen.
         spec.it_when(have_lua, "really executes — Lua-side state persists", reason) callback {
-            spec.assert_eq(lua.lua_run("aether_sum = (2 + 3) * 7"), 0,
+            spec.assert_eq(lua.run("aether_sum = (2 + 3) * 7"), 0,
                 "computation evaluates")
-            spec.assert_eq(lua.lua_run("if aether_sum ~= 35 then error('wrong') end"), 0,
+            spec.assert_eq(lua.run("if aether_sum ~= 35 then error('wrong') end"), 0,
                 "Lua sees 35 — the interpreter genuinely ran")
         }
 
@@ -48,28 +48,28 @@ main() {
         // cannot run at all: the caller believes the script worked.
         // Asserted negatively so the bridge may change its error code.
         spec.it_when(have_lua, "propagates a runtime error as failure", reason) callback {
-            spec.assert_not_eq(lua.lua_run("error('deliberate')"), 0,
+            spec.assert_not_eq(lua.run("error('deliberate')"), 0,
                 "an erroring script must NOT report success")
         }
 
         // A syntax error takes a different path through the Lua loader
         // than a runtime error, and must also be reported.
         spec.it_when(have_lua, "reports a syntax error as failure", reason) callback {
-            spec.assert_not_eq(lua.lua_run("function ("), 0,
+            spec.assert_not_eq(lua.run("function ("), 0,
                 "unparseable code must NOT report success")
         }
 
         // A host that defensively calls init before each eval must not
         // pay for it or crash: while the VM is live, init is a no-op.
         spec.it_when(have_lua, "init is idempotent while the VM is live", reason) callback {
-            spec.assert_eq(lua.lua_init(), 0, "second init returns 0")
-            spec.assert_eq(lua.lua_run("aether_probe = 2"), 0,
+            spec.assert_eq(lua.init(), 0, "second init returns 0")
+            spec.assert_eq(lua.run("aether_probe = 2"), 0,
                 "the VM still evaluates afterwards")
         }
     }
 
     _rc = spec.run_summary(fw)
 
-    if have_lua == 1 { lua.lua_finalize() }
+    if have_lua == 1 { lua.finalize() }
     return _rc
 }

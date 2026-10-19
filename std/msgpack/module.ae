@@ -182,15 +182,15 @@ bin(val: string) -> ptr {
 arr() -> ptr {
     let v = heap.new(MsgValue)
     v.type_id = TYPE_ARRAY
-    v.arr_val = list.list_new()
+    v.arr_val = list.new()
     return v as ptr
 }
 
 map() -> ptr {
     let v = heap.new(MsgValue)
     v.type_id = TYPE_MAP
-    v.map_keys = list.list_new()
-    v.map_values = list.list_new()
+    v.map_keys = list.new()
+    v.map_values = list.new()
     return v as ptr
 }
 
@@ -277,22 +277,22 @@ array_size(val: ptr) -> int {
     if val == null { return -1 }
     let m = val as *MsgValue
     if m.type_id != TYPE_ARRAY { return -1 }
-    return list.list_size(m.arr_val)
+    return list.size(m.arr_val)
 }
 
 array_get(val: ptr, index: int) -> ptr {
     if val == null { return null }
     let m = val as *MsgValue
     if m.type_id != TYPE_ARRAY { return null }
-    if index < 0 || index >= list.list_size(m.arr_val) { return null }
-    return list.list_get_raw(m.arr_val, index)
+    if index < 0 || index >= list.size(m.arr_val) { return null }
+    return list.get_raw(m.arr_val, index)
 }
 
 array_add(val: ptr, item: ptr) -> int {
     if val == null || item == null { return 0 }
     let m = val as *MsgValue
     if m.type_id != TYPE_ARRAY { return 0 }
-    list.list_add_raw(m.arr_val, item)
+    list.add_raw(m.arr_val, item)
     return 1
 }
 
@@ -300,23 +300,23 @@ map_size(val: ptr) -> int {
     if val == null { return -1 }
     let m = val as *MsgValue
     if m.type_id != TYPE_MAP { return -1 }
-    return list.list_size(m.map_keys)
+    return list.size(m.map_keys)
 }
 
 map_get_key(val: ptr, index: int) -> ptr {
     if val == null { return null }
     let m = val as *MsgValue
     if m.type_id != TYPE_MAP { return null }
-    if index < 0 || index >= list.list_size(m.map_keys) { return null }
-    return list.list_get_raw(m.map_keys, index)
+    if index < 0 || index >= list.size(m.map_keys) { return null }
+    return list.get_raw(m.map_keys, index)
 }
 
 map_get_value(val: ptr, index: int) -> ptr {
     if val == null { return null }
     let m = val as *MsgValue
     if m.type_id != TYPE_MAP { return null }
-    if index < 0 || index >= list.list_size(m.map_values) { return null }
-    return list.list_get_raw(m.map_values, index)
+    if index < 0 || index >= list.size(m.map_values) { return null }
+    return list.get_raw(m.map_values, index)
 }
 
 // Compare a string-typed key node's payload against `key` byte-for-byte.
@@ -336,12 +336,12 @@ map_get(val: ptr, key: string) -> ptr {
     if val == null { return null }
     let m = val as *MsgValue
     if m.type_id != TYPE_MAP { return null }
-    let sz = list.list_size(m.map_keys)
+    let sz = list.size(m.map_keys)
     let i = 0
     while i < sz {
-        let k = list.list_get_raw(m.map_keys, i) as *MsgValue
+        let k = list.get_raw(m.map_keys, i) as *MsgValue
         if key_matches(k, key) {
-            return list.list_get_raw(m.map_values, i)
+            return list.get_raw(m.map_values, i)
         }
         i = i + 1
     }
@@ -352,23 +352,23 @@ map_set(val: ptr, key: string, value: ptr) -> int {
     if val == null || value == null { return 0 }
     let m = val as *MsgValue
     if m.type_id != TYPE_MAP { return 0 }
-    let sz = list.list_size(m.map_keys)
+    let sz = list.size(m.map_keys)
     let i = 0
     while i < sz {
-        let k = list.list_get_raw(m.map_keys, i) as *MsgValue
+        let k = list.get_raw(m.map_keys, i) as *MsgValue
         if key_matches(k, key) {
-            let old_val = list.list_get_raw(m.map_values, i)
+            let old_val = list.get_raw(m.map_values, i)
             // Setting the value a key already holds must not free it: the
             // map would keep a freed pointer (#2470).
             if old_val != null && old_val != value { free(old_val) }
-            list.list_set(m.map_values, i, value)
+            list.set(m.map_values, i, value)
             return 1
         }
         i = i + 1
     }
     let new_key = str(key)
-    list.list_add_raw(m.map_keys, new_key)
-    list.list_add_raw(m.map_values, value)
+    list.add_raw(m.map_keys, new_key)
+    list.add_raw(m.map_values, value)
     return 1
 }
 
@@ -379,28 +379,28 @@ free(val: ptr) {
     let m = val as *MsgValue
     if m.type_id == TYPE_ARRAY {
         if m.arr_val != null {
-            let sz = list.list_size(m.arr_val)
+            let sz = list.size(m.arr_val)
             let i = 0
             while i < sz {
-                let item = list.list_get_raw(m.arr_val, i)
+                let item = list.get_raw(m.arr_val, i)
                 if item != null { free(item) }
                 i = i + 1
             }
-            list.list_free(m.arr_val)
+            list.free(m.arr_val)
         }
     } else if m.type_id == TYPE_MAP {
         if m.map_keys != null {
-            let sz = list.list_size(m.map_keys)
+            let sz = list.size(m.map_keys)
             let i = 0
             while i < sz {
-                let k = list.list_get_raw(m.map_keys, i)
-                let v = list.list_get_raw(m.map_values, i)
+                let k = list.get_raw(m.map_keys, i)
+                let v = list.get_raw(m.map_values, i)
                 if k != null { free(k) }
                 if v != null { free(v) }
                 i = i + 1
             }
-            list.list_free(m.map_keys)
-            list.list_free(m.map_values)
+            list.free(m.map_keys)
+            list.free(m.map_values)
         }
     }
     if m.s_bytes != null {
@@ -582,7 +582,7 @@ fn pack_val(val: ptr, b: ptr, offset: int) -> int {
         return next_off + len
     }
     if m.type_id == 6 { // TYPE_ARRAY
-        let sz = list.list_size(m.arr_val)
+        let sz = list.size(m.arr_val)
         let next_off = offset
         if sz <= 15 {
             bytes.set(b, offset, 0x90 | sz)
@@ -598,14 +598,14 @@ fn pack_val(val: ptr, b: ptr, offset: int) -> int {
         }
         let i = 0
         while i < sz {
-            let item = list.list_get_raw(m.arr_val, i)
+            let item = list.get_raw(m.arr_val, i)
             next_off = pack_val(item, b, next_off)
             i = i + 1
         }
         return next_off
     }
     if m.type_id == 7 { // TYPE_MAP
-        let sz = list.list_size(m.map_keys)
+        let sz = list.size(m.map_keys)
         let next_off = offset
         if sz <= 15 {
             bytes.set(b, offset, 0x80 | sz)
@@ -621,8 +621,8 @@ fn pack_val(val: ptr, b: ptr, offset: int) -> int {
         }
         let i = 0
         while i < sz {
-            let k = list.list_get_raw(m.map_keys, i)
-            let v = list.list_get_raw(m.map_values, i)
+            let k = list.get_raw(m.map_keys, i)
+            let v = list.get_raw(m.map_values, i)
             next_off = pack_val(k, b, next_off)
             next_off = pack_val(v, b, next_off)
             i = i + 1
@@ -743,8 +743,8 @@ fn unpack_inner(c: ptr, depth: int) -> (ptr, string) {
         let sz = m & 0x0f
         let v = heap.new(MsgValue)
         v.type_id = TYPE_MAP
-        v.map_keys = list.list_new()
-        v.map_values = list.list_new()
+        v.map_keys = list.new()
+        v.map_values = list.new()
         let i = 0
         while i < sz {
             let key, err_k = unpack_inner(c, depth + 1)
@@ -760,8 +760,8 @@ fn unpack_inner(c: ptr, depth: int) -> (ptr, string) {
                 return null, err_v
             }
             string.release(err_v)
-            list.list_add_raw(v.map_keys, key)
-            list.list_add_raw(v.map_values, val)
+            list.add_raw(v.map_keys, key)
+            list.add_raw(v.map_values, val)
             i = i + 1
         }
         return v as ptr, ok
@@ -772,7 +772,7 @@ fn unpack_inner(c: ptr, depth: int) -> (ptr, string) {
         let sz = m & 0x0f
         let v = heap.new(MsgValue)
         v.type_id = TYPE_ARRAY
-        v.arr_val = list.list_new()
+        v.arr_val = list.new()
         let i = 0
         while i < sz {
             let item, err = unpack_inner(c, depth + 1)
@@ -781,7 +781,7 @@ fn unpack_inner(c: ptr, depth: int) -> (ptr, string) {
                 return null, err
             }
             string.release(err) // success-path heap "" from the child; discard
-            list.list_add_raw(v.arr_val, item)
+            list.add_raw(v.arr_val, item)
             i = i + 1
         }
         return v as ptr, ok
@@ -1176,7 +1176,7 @@ fn unpack_inner(c: ptr, depth: int) -> (ptr, string) {
         if !count_fits(c, sz, 1) { return null, "EOF reading array 16 items" }
         let v = heap.new(MsgValue)
         v.type_id = TYPE_ARRAY
-        v.arr_val = list.list_new()
+        v.arr_val = list.new()
         let i = 0
         while i < sz {
             let item, err = unpack_inner(c, depth + 1)
@@ -1185,7 +1185,7 @@ fn unpack_inner(c: ptr, depth: int) -> (ptr, string) {
                 return null, err
             }
             string.release(err) // success-path heap "" from the child; discard
-            list.list_add_raw(v.arr_val, item)
+            list.add_raw(v.arr_val, item)
             i = i + 1
         }
         return v as ptr, ok
@@ -1198,7 +1198,7 @@ fn unpack_inner(c: ptr, depth: int) -> (ptr, string) {
         if !count_fits(c, sz, 1) { return null, "EOF reading array 32 items" }
         let v = heap.new(MsgValue)
         v.type_id = TYPE_ARRAY
-        v.arr_val = list.list_new()
+        v.arr_val = list.new()
         let i = 0
         while i < sz {
             let item, err = unpack_inner(c, depth + 1)
@@ -1207,7 +1207,7 @@ fn unpack_inner(c: ptr, depth: int) -> (ptr, string) {
                 return null, err
             }
             string.release(err) // success-path heap "" from the child; discard
-            list.list_add_raw(v.arr_val, item)
+            list.add_raw(v.arr_val, item)
             i = i + 1
         }
         return v as ptr, ok
@@ -1220,8 +1220,8 @@ fn unpack_inner(c: ptr, depth: int) -> (ptr, string) {
         if !count_fits(c, sz, 2) { return null, "EOF reading map 16 entries" }
         let v = heap.new(MsgValue)
         v.type_id = TYPE_MAP
-        v.map_keys = list.list_new()
-        v.map_values = list.list_new()
+        v.map_keys = list.new()
+        v.map_values = list.new()
         let i = 0
         while i < sz {
             let key, err_k = unpack_inner(c, depth + 1)
@@ -1237,8 +1237,8 @@ fn unpack_inner(c: ptr, depth: int) -> (ptr, string) {
                 return null, err_v
             }
             string.release(err_v)
-            list.list_add_raw(v.map_keys, key)
-            list.list_add_raw(v.map_values, val)
+            list.add_raw(v.map_keys, key)
+            list.add_raw(v.map_values, val)
             i = i + 1
         }
         return v as ptr, ok
@@ -1251,8 +1251,8 @@ fn unpack_inner(c: ptr, depth: int) -> (ptr, string) {
         if !count_fits(c, sz, 2) { return null, "EOF reading map 32 entries" }
         let v = heap.new(MsgValue)
         v.type_id = TYPE_MAP
-        v.map_keys = list.list_new()
-        v.map_values = list.list_new()
+        v.map_keys = list.new()
+        v.map_values = list.new()
         let i = 0
         while i < sz {
             let key, err_k = unpack_inner(c, depth + 1)
@@ -1268,8 +1268,8 @@ fn unpack_inner(c: ptr, depth: int) -> (ptr, string) {
                 return null, err_v
             }
             string.release(err_v)
-            list.list_add_raw(v.map_keys, key)
-            list.list_add_raw(v.map_values, val)
+            list.add_raw(v.map_keys, key)
+            list.add_raw(v.map_values, val)
             i = i + 1
         }
         return v as ptr, ok

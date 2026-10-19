@@ -257,7 +257,7 @@ main() {
 
     _rc = spec.run_summary(fw)
 
-    schema.schema_free(user)
+    schema.free(user)
 
     // The server actor keeps the process alive after the specs finish, so
     // exit explicitly — as the original driver did — carrying run_summary's

@@ -4,7 +4,7 @@ import std.plural
 import std.string
 
 fn assert_category(lang: string, n: int, expected: string) {
-    res = plural.plural_category(lang, n)
+    res = plural.category(lang, n)
     if string_equals(res, expected) != 1 {
         print("FAIL: plural_category(\"${lang}\", ${n}) expected ${expected}, got ${res}\n")
         exit(1)
@@ -12,7 +12,7 @@ fn assert_category(lang: string, n: int, expected: string) {
 }
 
 fn assert_category_decimal(lang: string, n: float, i: long, v: int, w: int, f: long, t: long, expected: string) {
-    res = plural.plural_category_decimal(lang, n, i, v, w, f, t)
+    res = plural.category_decimal(lang, n, i, v, w, f, t)
     if string_equals(res, expected) != 1 {
         print("FAIL: plural_category_decimal(\"${lang}\", ...) expected ${expected}, got ${res}\n")
         exit(1)

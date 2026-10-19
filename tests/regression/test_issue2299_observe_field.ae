@@ -45,7 +45,7 @@ main() {
     p = heap.new(Inner)
     got = -9
     count = 0
-    t_p = observe.observe_fields(p, | obj: ptr, field: int | {
+    t_p = observe.fields(p, | obj: ptr, field: int | {
             got = field
             count = count + 1
         })
@@ -69,9 +69,9 @@ main() {
     // ---- nested value stores: each level hears its own field ----
     o = Outer { tag: 0, inner: Inner { a: 0, b: 0 }, link: heap.new(Inner), last: 0 }
     trail = ""
-    t_o = observe.observe_fields(&o, | obj: ptr, field: int | { trail = "${trail}O${field}" })
-    t_i = observe.observe_fields(&o.inner, | obj: ptr, field: int | { trail = "${trail}I${field}" })
-    t_l = observe.observe_fields(o.link, | obj: ptr, field: int | { trail = "${trail}L${field}" })
+    t_o = observe.fields(&o, | obj: ptr, field: int | { trail = "${trail}O${field}" })
+    t_i = observe.fields(&o.inner, | obj: ptr, field: int | { trail = "${trail}I${field}" })
+    t_l = observe.fields(o.link, | obj: ptr, field: int | { trail = "${trail}L${field}" })
     o.last = 1
     check(trail == "O3", "a direct store names the outer field")
     o.inner.b = 2
@@ -87,7 +87,7 @@ main() {
     seen = -9
     value = 0
     s_hits = 0
-    _ts = observe.observe_fields(s, | obj: ptr, field: int | {
+    _ts = observe.fields(s, | obj: ptr, field: int | {
             seen = field
             value = s.b // the store has landed when the observer runs
             s_hits = s_hits + 1
@@ -113,7 +113,7 @@ main() {
     // ---- a null object is a no-op ----
     observe.notify(null)
     observe.notify_field(null, 0)
-    check(observe.observe_fields(null, | obj: ptr, field: int | {}) == 0, "observe_fields(null) is 0")
+    check(observe.fields(null, | obj: ptr, field: int | {}) == 0, "observe_fields(null) is 0")
 
     observe.unobserve_all(g)
     observe.unobserve_all(s)

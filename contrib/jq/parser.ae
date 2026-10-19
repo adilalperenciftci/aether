@@ -61,8 +61,8 @@ const MAX_INTERPOLATION_DEPTH = 256
 // Strings the parser keeps are JSON strings (like the AST's names) so their
 // lifetime is explicit: released here, never by a generated destructor.
 _dispose(p: *JqParser) {
-    if p.err != null { json.json_free(p.err) }
-    json.json_free(p.src)
+    if p.err != null { json.free(p.err) }
+    json.free(p.src)
     heap.free(p)
 }
 
@@ -88,7 +88,7 @@ _parse_at(src: string, depth: int, interp: int) -> ptr! {
     p.err = null
     p.err_pos = 0
     p.no_comma = 0
-    p.src = json.json_create_string(src)
+    p.src = json.create_string(src)
     p.depth = depth
     p.interp = interp
     node = _parse_pipe(p)
@@ -100,7 +100,7 @@ _parse_at(src: string, depth: int, interp: int) -> ptr! {
     if p.failed == 1 {
         ast.free_node(node)
         line = _line_of(src, p.err_pos)
-        msg = "syntax error: ${json.json_get_string_raw(p.err)} at line ${line}, position ${p.err_pos}"
+        msg = "syntax error: ${json.get_string_raw(p.err)} at line ${line}, position ${p.err_pos}"
         lexer.free_tokens(toks)
         _dispose(p)
         return null, msg
@@ -185,7 +185,7 @@ _describe(p: *JqParser) -> string {
 _fail(p: *JqParser, msg: string) -> ptr {
     if p.failed == 0 {
         p.failed = 1
-        p.err = json.json_create_string(msg)
+        p.err = json.create_string(msg)
         p.err_pos = _pos(p)
     }
     return null
@@ -478,7 +478,7 @@ _parse_bracket_suffix(p: *JqParser, t: @keep ptr) -> ptr {
 
 _string_literal(p: *JqParser, s: string) -> ptr {
     n = _mk(p, ast.N_LITERAL, null, null)
-    (n as *Node).val = json.json_create_string(s)
+    (n as *Node).val = json.create_string(s)
     return n
 }
 
@@ -531,9 +531,9 @@ _parse_term_kind(p: *JqParser) -> ptr {
         name = _text(p)
         if string.equals(name, "__loc__") == 1 {
             n = _mk(p, ast.N_LOC, null, null)
-            loc = json.json_create_object()
-            json.json_object_set_raw(loc, "file", json.json_create_string("<stdin>"))
-            json.json_object_set_raw(loc, "line", json.json_create_int(_line_of(json.json_get_string_raw(p.src), _pos(p)) as long))
+            loc = json.create_object()
+            json.object_set_raw(loc, "file", json.create_string("<stdin>"))
+            json.object_set_raw(loc, "line", json.create_int(_line_of(json.get_string_raw(p.src), _pos(p)) as long))
             (n as *Node).val = loc
             _advance(p)
             return n
@@ -628,9 +628,9 @@ _parse_term_kind(p: *JqParser) -> ptr {
             _advance(p)
             n = _mk(p, ast.N_LITERAL, null, null)
             if string.equals(name, "null") == 1 {
-                (n as *Node).val = json.json_create_null()
+                (n as *Node).val = json.create_null()
             } else {
-                (n as *Node).val = json.json_create_bool(string.equals(name, "true"))
+                (n as *Node).val = json.create_bool(string.equals(name, "true"))
             }
             return n
         }
@@ -651,7 +651,7 @@ _parse_term_kind(p: *JqParser) -> ptr {
             saved = p.no_comma
             p.no_comma = 0
             while p.failed == 0 {
-                list.list_add_raw(args, _parse_pipe(p))
+                list.add_raw(args, _parse_pipe(p))
                 if _is_op(p, ";") == 1 {
                     _advance(p)
                 } else {
@@ -674,15 +674,15 @@ _parse_string_token(p: *JqParser, format: string) -> ptr {
     if string.length(format) > 0 { ast.set_name(n, format) }
     l = list.new()
     (n as *Node).list = l
-    count = json.json_array_size(parts)
+    count = json.array_size(parts)
     i = 0
     while i < count {
-        part = json.json_array_get_raw(parts, i)
+        part = json.array_get_raw(parts, i)
         pn = _mk(p, ast.N_STR_PART, null, null)
-        if json.json_type(part) == 3 {
-            (pn as *Node).val = json.json_create_string(json.json_get_string_raw(part))
+        if json.type(part) == 3 {
+            (pn as *Node).val = json.create_string(json.get_string_raw(part))
         } else {
-            src = json.json_get_string_raw(json.json_array_get_raw(part, 0))
+            src = json.get_string_raw(json.array_get_raw(part, 0))
             if p.interp >= MAX_INTERPOLATION_DEPTH {
                 ast.free_node(pn)
                 _fail(p, "string interpolation nested too deeply")
@@ -705,7 +705,7 @@ _parse_string_token(p: *JqParser, format: string) -> ptr {
             }
             (pn as *Node).a = sub
         }
-        list.list_add_raw(l, pn)
+        list.add_raw(l, pn)
         i = i + 1
     }
     _advance(p)
@@ -724,7 +724,7 @@ _parse_object(p: *JqParser) -> ptr {
     }
     while p.failed == 0 {
         e = _parse_object_entry(p)
-        if e != null { list.list_add_raw(entries, e) }
+        if e != null { list.add_raw(entries, e) }
         if p.failed == 1 { break }
         if _is_op(p, ",") == 1 {
             _advance(p)
@@ -891,7 +891,7 @@ _parse_funcdef(p: *JqParser) -> ptr {
             prm = _mk(p, ast.N_PARAM, null, null)
             ast.set_name(prm, _text(p))
             if k == lexer.TK_VAR { (prm as *Node).op = 1 }
-            list.list_add_raw(params, prm)
+            list.add_raw(params, prm)
             _advance(p)
             if _is_op(p, ";") == 1 {
                 _advance(p)
@@ -913,11 +913,11 @@ _parse_funcdef(p: *JqParser) -> ptr {
 // PAT (?// PAT)*
 _parse_patterns(p: *JqParser) -> ptr {
     pats = list.new()
-    list.list_add_raw(pats, _parse_pattern(p))
+    list.add_raw(pats, _parse_pattern(p))
     while p.failed == 0 {
         if _is_op(p, "?//") == 0 { break }
         _advance(p)
-        list.list_add_raw(pats, _parse_pattern(p))
+        list.add_raw(pats, _parse_pattern(p))
     }
     return pats
 }
@@ -936,7 +936,7 @@ _parse_pattern(p: *JqParser) -> ptr {
         l = list.new()
         (n as *Node).list = l
         while p.failed == 0 {
-            list.list_add_raw(l, _parse_pattern(p))
+            list.add_raw(l, _parse_pattern(p))
             if _is_op(p, ",") == 1 {
                 _advance(p)
             } else {
@@ -953,7 +953,7 @@ _parse_pattern(p: *JqParser) -> ptr {
         (n as *Node).list = l
         while p.failed == 0 {
             e = _parse_pattern_entry(p)
-            if e != null { list.list_add_raw(l, e) }
+            if e != null { list.add_raw(l, e) }
             if p.failed == 1 { break }
             if _is_op(p, ",") == 1 {
                 _advance(p)

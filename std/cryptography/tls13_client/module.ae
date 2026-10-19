@@ -344,7 +344,7 @@ finished_verify_data(secret: ptr, th: byte[]) -> ptr {
 
 finished_verify_data_algo(secret: ptr, th: byte[], hash_algo: string, hlen: int) -> ptr {
     fk = finished_key_algo(secret, hash_algo, hlen)
-    vd = hmac.hmac_bytes(hash_algo, bytes.view(fk)[0..hlen], th)
+    vd = hmac.bytes(hash_algo, bytes.view(fk)[0..hlen], th)
     bytes.free(fk)
     return vd
 }
@@ -1797,7 +1797,7 @@ fn connect_resume_ed(host: string, port: int, x25519_priv: ptr, ticket: ptr, ear
     bkey = tls13_ks.binder_key(algo, early)
     bfk = finished_key_algo(bkey, algo, hl)
     trunc_hash = hash_bytes_algo(bytes.view(ch)[0..pch.truncated_len], algo)
-    binder = hmac.hmac_bytes(algo, bytes.view(bfk)[0..hl], bytes.view(trunc_hash)[0..hl])
+    binder = hmac.bytes(algo, bytes.view(bfk)[0..hl], bytes.view(trunc_hash)[0..hl])
     bp = 0
     while bp < hl { bytes.set(ch, pch.binder_off + bp, bytes.get(binder, bp) & 0xFF); bp = bp + 1 }
     bytes.free(bkey); bytes.free(bfk); bytes.free(trunc_hash); bytes.free(binder)
@@ -2183,8 +2183,8 @@ fn load_trust_anchors(cafile: string) -> (ptr, string) {
     // literal text "(null)", which was once returned AS THE PATH and made
     // every fallback unreachable. The null check has to come first, exactly
     // as std/cas/module.ae does it.
-    env_file = os.os_getenv("SSL_CERT_FILE")
-    env_dir = os.os_getenv("SSL_CERT_DIR")
+    env_file = os.getenv("SSL_CERT_FILE")
+    env_dir = os.getenv("SSL_CERT_DIR")
     have_file = 0
     if env_file != null { if string.length(env_file) > 0 { have_file = 1 } }
     have_dir = 0

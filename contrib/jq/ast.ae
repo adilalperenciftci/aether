@@ -133,15 +133,15 @@ new_leaf(kind: int) -> ptr {
 // Give the node an owned copy of `name`.
 set_name(n: ptr, name: string) {
     p = n as *Node
-    if p.name != null { json.json_free(p.name) }
-    p.name = json.json_create_string(name)
+    if p.name != null { json.free(p.name) }
+    p.name = json.create_string(name)
 }
 
 // The node's name, borrowed ("" when it has none).
 name_of(n: ptr) -> string {
     p = n as *Node
     if p.name == null { return "" }
-    return json.json_get_string_raw(p.name)
+    return json.get_string_raw(p.name)
 }
 
 // Release a tree. Every child pointer is a node and every list holds nodes,
@@ -154,7 +154,7 @@ name_of(n: ptr) -> string {
 free_node(n: ptr) {
     if n == null { return }
     work = list.new()
-    list.list_add_raw(work, n)
+    list.add_raw(work, n)
     while list.size(work) > 0 {
         last = list.size(work) - 1
         p = list.get_raw(work, last) as *Node
@@ -175,15 +175,15 @@ free_node(n: ptr) {
             }
             list.free(p.list)
         }
-        if p.val != null { json.json_free(p.val) }
-        if p.name != null { json.json_free(p.name) }
+        if p.val != null { json.free(p.val) }
+        if p.name != null { json.free(p.name) }
         heap.free(p)
     }
     list.free(work)
 }
 
 _push_child(work: ptr, child: ptr) {
-    if child != null { list.list_add_raw(work, child) }
+    if child != null { list.add_raw(work, child) }
 }
 
 free_node_list(l: ptr) {

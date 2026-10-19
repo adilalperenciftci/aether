@@ -65,18 +65,18 @@ main() {
         exit(1)
     }
 
-    tests = json.json_object_get_raw(doc, "tests")
-    n = json.json_array_size(tests)
+    tests = json.object_get_raw(doc, "tests")
+    n = json.array_size(tests)
     println("RFC 9535 compliance test suite: ${n} cases")
     println("")
 
     i = 0
     while i < n {
-        _run_case(json.json_array_get_raw(tests, i))
+        _run_case(json.array_get_raw(tests, i))
         i = i + 1
     }
 
-    json.json_free(doc)
+    json.free(doc)
 
     total = _passed + _failed
     println("")
@@ -92,8 +92,8 @@ _run_case(t: ptr) {
     selector = _str_field(t, "selector")
 
     // Invalid-selector case: parsing must fail.
-    if json.json_object_has(t, "invalid_selector") == 1 {
-        if json.json_get_bool(json.json_object_get_raw(t, "invalid_selector")) == 1 {
+    if json.object_has(t, "invalid_selector") == 1 {
+        if json.get_bool(json.object_get_raw(t, "invalid_selector")) == 1 {
             ast, _perr = parser.parse(selector)
             if ast == null {
                 _passed = _passed + 1
@@ -105,7 +105,7 @@ _run_case(t: ptr) {
         }
     }
 
-    document = json.json_object_get_raw(t, "document")
+    document = json.object_get_raw(t, "document")
     if document == null {
         // A valid-selector case with no document only asserts parseability.
         ast, perr = parser.parse(selector)
@@ -125,12 +125,12 @@ _run_case(t: ptr) {
     }
 
     ok = 0
-    if json.json_object_has(t, "result") == 1 {
-        ok = _match_one(cursors, json.json_object_get_raw(t, "result"),
+    if json.object_has(t, "result") == 1 {
+        ok = _match_one(cursors, json.object_get_raw(t, "result"),
             _opt(t, "result_paths"))
     } else {
-        if json.json_object_has(t, "results") == 1 {
-            ok = _match_any(cursors, json.json_object_get_raw(t, "results"),
+        if json.object_has(t, "results") == 1 {
+            ok = _match_any(cursors, json.object_get_raw(t, "results"),
                 _opt(t, "results_paths"))
         } else {
             // No expectation recorded — parseability only.
@@ -150,21 +150,21 @@ _run_case(t: ptr) {
 // given) one expected array of normalized paths.
 _match_one(cursors: ptr, want: ptr, want_paths: ptr) -> int {
     n = query.result_size(cursors)
-    if json.json_array_size(want) != n { return 0 }
+    if json.array_size(want) != n { return 0 }
 
     i = 0
     while i < n {
-        if _json_equal(query.result_value(cursors, i), json.json_array_get_raw(want, i)) == 0 {
+        if _json_equal(query.result_value(cursors, i), json.array_get_raw(want, i)) == 0 {
             return 0
         }
         i = i + 1
     }
 
     if want_paths != null {
-        if json.json_array_size(want_paths) != n { return 0 }
+        if json.array_size(want_paths) != n { return 0 }
         i = 0
         while i < n {
-            wp = json.json_get_string_raw(json.json_array_get_raw(want_paths, i))
+            wp = json.get_string_raw(json.array_get_raw(want_paths, i))
             if string.equals(query.result_path(cursors, i), wp) == 0 { return 0 }
             i = i + 1
         }
@@ -176,16 +176,16 @@ _match_one(cursors: ptr, want: ptr, want_paths: ptr) -> int {
 // pass. When `results_paths` is present its i-th entry pairs with
 // `results`' i-th entry.
 _match_any(cursors: ptr, wants: ptr, want_paths: ptr) -> int {
-    n = json.json_array_size(wants)
+    n = json.array_size(wants)
     i = 0
     while i < n {
         paths = null
         if want_paths != null {
-            if i < json.json_array_size(want_paths) {
-                paths = json.json_array_get_raw(want_paths, i)
+            if i < json.array_size(want_paths) {
+                paths = json.array_get_raw(want_paths, i)
             }
         }
-        if _match_one(cursors, json.json_array_get_raw(wants, i), paths) == 1 { return 1 }
+        if _match_one(cursors, json.array_get_raw(wants, i), paths) == 1 { return 1 }
         i = i + 1
     }
     return 0
@@ -194,52 +194,52 @@ _match_any(cursors: ptr, wants: ptr, want_paths: ptr) -> int {
 // Structural JSON equality, for comparing a matched node against the
 // suite's expected value.
 _json_equal(a: ptr, b: ptr) -> int {
-    ta = json.json_type(a)
-    tb = json.json_type(b)
+    ta = json.type(a)
+    tb = json.type(b)
     if ta != tb { return 0 }
 
     if ta == 0 { return 1 }
     if ta == 1 {
-        if json.json_get_bool(a) == json.json_get_bool(b) { return 1 }
+        if json.get_bool(a) == json.get_bool(b) { return 1 }
         return 0
     }
     if ta == 2 {
-        if json.json_get_number(a) == json.json_get_number(b) { return 1 }
+        if json.get_number(a) == json.get_number(b) { return 1 }
         return 0
     }
     if ta == 3 {
-        return string.equals(json.json_get_string_raw(a), json.json_get_string_raw(b))
+        return string.equals(json.get_string_raw(a), json.get_string_raw(b))
     }
     if ta == 4 {
-        n = json.json_array_size(a)
-        if n != json.json_array_size(b) { return 0 }
+        n = json.array_size(a)
+        if n != json.array_size(b) { return 0 }
         i = 0
         while i < n {
-            if _json_equal(json.json_array_get_raw(a, i), json.json_array_get_raw(b, i)) == 0 { return 0 }
+            if _json_equal(json.array_get_raw(a, i), json.array_get_raw(b, i)) == 0 { return 0 }
             i = i + 1
         }
         return 1
     }
-    n = json.json_object_size_raw(a)
-    if n != json.json_object_size_raw(b) { return 0 }
+    n = json.object_size_raw(a)
+    if n != json.object_size_raw(b) { return 0 }
     i = 0
     while i < n {
-        k = json.json_object_key_at(a, i)
-        if json.json_object_has(b, k) == 0 { return 0 }
-        if _json_equal(json.json_object_value_at(a, i), json.json_object_get_raw(b, k)) == 0 { return 0 }
+        k = json.object_key_at(a, i)
+        if json.object_has(b, k) == 0 { return 0 }
+        if _json_equal(json.object_value_at(a, i), json.object_get_raw(b, k)) == 0 { return 0 }
         i = i + 1
     }
     return 1
 }
 
 _opt(t: ptr, key: string) -> ptr {
-    if json.json_object_has(t, key) == 0 { return null }
-    return json.json_object_get_raw(t, key)
+    if json.object_has(t, key) == 0 { return null }
+    return json.object_get_raw(t, key)
 }
 
 _str_field(t: ptr, key: string) -> string {
-    if json.json_object_has(t, key) == 0 { return "" }
-    return json.json_get_string_raw(json.json_object_get_raw(t, key))
+    if json.object_has(t, key) == 0 { return "" }
+    return json.get_string_raw(json.object_get_raw(t, key))
 }
 
 // Render actual-vs-expected for a failing case.
@@ -249,17 +249,17 @@ _describe(cursors: ptr, t: ptr) -> string {
     i = 0
     while i < n {
         if i > 0 { got = string.concat(got, ", ") }
-        got = string.concat(got, json.json_stringify_raw(query.result_value(cursors, i)))
+        got = string.concat(got, json.stringify_raw(query.result_value(cursors, i)))
         i = i + 1
     }
     got = string.concat(got, "]")
 
     want = "(none)"
-    if json.json_object_has(t, "result") == 1 {
-        want = json.json_stringify_raw(json.json_object_get_raw(t, "result"))
+    if json.object_has(t, "result") == 1 {
+        want = json.stringify_raw(json.object_get_raw(t, "result"))
     } else {
-        if json.json_object_has(t, "results") == 1 {
-            want = json.json_stringify_raw(json.json_object_get_raw(t, "results"))
+        if json.object_has(t, "results") == 1 {
+            want = json.stringify_raw(json.object_get_raw(t, "results"))
         }
     }
 

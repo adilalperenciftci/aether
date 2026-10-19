@@ -27,15 +27,15 @@ query(root: @keep ptr, path: string) -> ptr! {
 }
 
 query_values(root: @keep ptr, path: string) -> ptr! {
-    return query.query_values(root, path)
+    return query.values(root, path)
 }
 
 query_paths(root: @keep ptr, path: string) -> ptr! {
-    return query.query_paths(root, path)
+    return query.paths(root, path)
 }
 
 query_ast(root: @keep ptr, ast: ptr) -> ptr {
-    return query.query_ast(root, ast)
+    return query.ast(root, ast)
 }
 
 result_size(results: ptr) -> int {

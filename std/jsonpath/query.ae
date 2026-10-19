@@ -88,7 +88,7 @@ query_values(root: @keep ptr, path: string) -> ptr! {
     n = result_size(cursors)
     i = 0
     while i < n {
-        list.list_add_raw(out, result_value(cursors, i))
+        list.add_raw(out, result_value(cursors, i))
         i = i + 1
     }
     free_result(cursors)
@@ -176,8 +176,8 @@ _new_result() -> ptr {
 // path (list_add_string_owned); the caller still owns what it passed.
 _push(cursors: ptr, value: ptr, path: string) {
     c = cursors as *Cursor
-    list.list_add_raw(c.values, value)
-    list.list_add_string_owned(c.paths, path)
+    list.add_raw(c.values, value)
+    list.add_string_owned(c.paths, path)
 }
 
 // Free a cursor list without touching values (used when a stage
@@ -330,13 +330,13 @@ _expand_descendants(cursors: ptr) -> ptr {
 // local buffer is released after the subtree it labels is walked.
 _collect_descendants(value: ptr, path: string, out: ptr) {
     _push(out, value, path)
-    t = json.json_type(value)
+    t = json.type(value)
 
     if t == 4 { // array
-        n = json.json_array_size(value)
+        n = json.array_size(value)
         i = 0
         while i < n {
-            child = json.json_array_get_raw(value, i)
+            child = json.array_get_raw(value, i)
             child_path = normalize_index_segment(path, i)
             _collect_descendants(child, child_path, out)
             string.free(child_path)
@@ -346,11 +346,11 @@ _collect_descendants(value: ptr, path: string, out: ptr) {
     }
 
     if t == 5 { // object
-        n = json.json_object_size_raw(value)
+        n = json.object_size_raw(value)
         i = 0
         while i < n {
-            k = json.json_object_key_at(value, i)
-            child = json.json_object_value_at(value, i)
+            k = json.object_key_at(value, i)
+            child = json.object_value_at(value, i)
             child_path = normalize_name_segment(path, k)
             _collect_descendants(child, child_path, out)
             string.free(child_path)
@@ -367,30 +367,30 @@ _apply_selector(sel: ptr, value: ptr, path: string, out: ptr, root: @keep ptr) {
     s = sel as *Selector
 
     if s.kind == model.SEL_NAME {
-        if json.json_type(value) != 5 { return }
-        if json.json_object_has(value, s.name) == 0 { return }
-        child = json.json_object_get_raw(value, s.name)
+        if json.type(value) != 5 { return }
+        if json.object_has(value, s.name) == 0 { return }
+        child = json.object_get_raw(value, s.name)
         _push(out, child, normalize_name_segment(path, s.name))
         return
     }
 
     if s.kind == model.SEL_WILDCARD {
-        t = json.json_type(value)
+        t = json.type(value)
         if t == 4 {
-            n = json.json_array_size(value)
+            n = json.array_size(value)
             i = 0
             while i < n {
-                _push(out, json.json_array_get_raw(value, i), normalize_index_segment(path, i))
+                _push(out, json.array_get_raw(value, i), normalize_index_segment(path, i))
                 i = i + 1
             }
             return
         }
         if t == 5 {
-            n = json.json_object_size_raw(value)
+            n = json.object_size_raw(value)
             i = 0
             while i < n {
-                k = json.json_object_key_at(value, i)
-                _push(out, json.json_object_value_at(value, i), normalize_name_segment(path, k))
+                k = json.object_key_at(value, i)
+                _push(out, json.object_value_at(value, i), normalize_name_segment(path, k))
                 i = i + 1
             }
         }
@@ -398,12 +398,12 @@ _apply_selector(sel: ptr, value: ptr, path: string, out: ptr, root: @keep ptr) {
     }
 
     if s.kind == model.SEL_INDEX {
-        if json.json_type(value) != 4 { return }
-        n = json.json_array_size(value)
+        if json.type(value) != 4 { return }
+        n = json.array_size(value)
         idx = _resolve_index(s.index, n)
         if idx < 0 { return }
         if idx >= n { return }
-        _push(out, json.json_array_get_raw(value, idx), normalize_index_segment(path, idx))
+        _push(out, json.array_get_raw(value, idx), normalize_index_segment(path, idx))
         return
     }
 
@@ -436,8 +436,8 @@ _resolve_index(idx: long, n: int) -> int {
 // After clamping, i stays within [-1, len] and moves by at most 2^53-1, so
 // i + step cannot overflow a long.
 _apply_slice(sl: *Slice, value: ptr, path: string, out: ptr) {
-    if json.json_type(value) != 4 { return }
-    var len: long = json.json_array_size(value)
+    if json.type(value) != 4 { return }
+    var len: long = json.array_size(value)
 
     var step: long = 1
     if sl.has_step == 1 { step = sl.step }
@@ -454,7 +454,7 @@ _apply_slice(sl: *Slice, value: ptr, path: string, out: ptr) {
 
         var i: long = lower
         while i < upper {
-            _push(out, json.json_array_get_raw(value, i as int), normalize_index_segment(path, i as int))
+            _push(out, json.array_get_raw(value, i as int), normalize_index_segment(path, i as int))
             i = i + step
         }
         return
@@ -470,7 +470,7 @@ _apply_slice(sl: *Slice, value: ptr, path: string, out: ptr) {
 
     var i: long = upper
     while i > lower {
-        _push(out, json.json_array_get_raw(value, i as int), normalize_index_segment(path, i as int))
+        _push(out, json.array_get_raw(value, i as int), normalize_index_segment(path, i as int))
         i = i + step
     }
 }
@@ -490,13 +490,13 @@ _clamp(v: long, lo: long, hi: long) -> long {
 // A filter selector tests each CHILD of the current node (RFC 9535
 // §2.3.5.2), not the node itself.
 _apply_filter(f: ptr, value: ptr, path: string, out: ptr, root: @keep ptr) {
-    t = json.json_type(value)
+    t = json.type(value)
 
     if t == 4 {
-        n = json.json_array_size(value)
+        n = json.array_size(value)
         i = 0
         while i < n {
-            child = json.json_array_get_raw(value, i)
+            child = json.array_get_raw(value, i)
             if _eval_filter(f, child, root) == 1 {
                 _push(out, child, normalize_index_segment(path, i))
             }
@@ -506,11 +506,11 @@ _apply_filter(f: ptr, value: ptr, path: string, out: ptr, root: @keep ptr) {
     }
 
     if t == 5 {
-        n = json.json_object_size_raw(value)
+        n = json.object_size_raw(value)
         i = 0
         while i < n {
-            k = json.json_object_key_at(value, i)
-            child = json.json_object_value_at(value, i)
+            k = json.object_key_at(value, i)
+            child = json.object_value_at(value, i)
             if _eval_filter(f, child, root) == 1 {
                 _push(out, child, normalize_name_segment(path, k))
             }
@@ -625,8 +625,8 @@ _eval_comparison(c: ptr, current: @keep ptr, root: @keep ptr) -> int {
 
     // A function result (length/count/value) is a freshly-built json
     // value this comparison owns; a query result is borrowed.
-    if lhs.owned != null { json.json_free(lhs.owned) }
-    if rhs.owned != null { json.json_free(rhs.owned) }
+    if lhs.owned != null { json.free(lhs.owned) }
+    if rhs.owned != null { json.free(rhs.owned) }
     heap.free(lhs)
     heap.free(rhs)
     return r
@@ -739,11 +739,11 @@ _eval_comparable(c: ptr, current: @keep ptr, root: @keep ptr) -> *Slot {
 // path. The caller frees it via Slot.owned.
 _literal_to_json(l: ptr) -> ptr {
     lp = l as *Literal
-    if lp.kind == model.L_INT { return json.json_create_int(lp.ival) }
-    if lp.kind == model.L_FLOAT { return json.json_create_number(lp.fval) }
-    if lp.kind == model.L_STRING { return json.json_create_string(lp.sval) }
-    if lp.kind == model.L_BOOL { return json.json_create_bool(lp.bval) }
-    return json.json_create_null()
+    if lp.kind == model.L_INT { return json.create_int(lp.ival) }
+    if lp.kind == model.L_FLOAT { return json.create_number(lp.fval) }
+    if lp.kind == model.L_STRING { return json.create_string(lp.sval) }
+    if lp.kind == model.L_BOOL { return json.create_bool(lp.bval) }
+    return json.create_null()
 }
 
 // Walk a singular query. Returns the borrowed value, or null for
@@ -761,15 +761,15 @@ _eval_singular(sq: ptr, current: @keep ptr, root: @keep ptr) -> ptr {
         seg = list.get_raw(segs, i) as *SingularSeg
 
         if seg.is_name == 1 {
-            if json.json_type(node) != 5 { return null }
-            if json.json_object_has(node, seg.name) == 0 { return null }
-            node = json.json_object_get_raw(node, seg.name)
+            if json.type(node) != 5 { return null }
+            if json.object_has(node, seg.name) == 0 { return null }
+            node = json.object_get_raw(node, seg.name)
         } else {
-            if json.json_type(node) != 4 { return null }
-            len = json.json_array_size(node)
+            if json.type(node) != 4 { return null }
+            len = json.array_size(node)
             idx = _resolve_index(seg.index, len)
             if idx < 0 { return null }
-            node = json.json_array_get_raw(node, idx)
+            node = json.array_get_raw(node, idx)
         }
         i = i + 1
     }
@@ -786,13 +786,13 @@ _eval_singular(sq: ptr, current: @keep ptr, root: @keep ptr) -> ptr {
 // ---------------------------------------------------------------------------
 
 _json_eq(a: ptr, b: ptr) -> int {
-    ta = json.json_type(a)
-    tb = json.json_type(b)
+    ta = json.type(a)
+    tb = json.type(b)
 
     // Numbers compare numerically regardless of int/float spelling.
     if ta == 2 {
         if tb == 2 {
-            if json.json_get_number(a) == json.json_get_number(b) { return 1 }
+            if json.get_number(a) == json.get_number(b) { return 1 }
             return 0
         }
         return 0
@@ -802,33 +802,33 @@ _json_eq(a: ptr, b: ptr) -> int {
 
     if ta == 0 { return 1 } // null == null
     if ta == 1 { // bool
-        if json.json_get_bool(a) == json.json_get_bool(b) { return 1 }
+        if json.get_bool(a) == json.get_bool(b) { return 1 }
         return 0
     }
     if ta == 3 { // string
-        return string.equals(json.json_get_string_raw(a), json.json_get_string_raw(b))
+        return string.equals(json.get_string_raw(a), json.get_string_raw(b))
     }
 
     if ta == 4 { // array — element-wise, order-sensitive
-        n = json.json_array_size(a)
-        if n != json.json_array_size(b) { return 0 }
+        n = json.array_size(a)
+        if n != json.array_size(b) { return 0 }
         i = 0
         while i < n {
-            if _json_eq(json.json_array_get_raw(a, i), json.json_array_get_raw(b, i)) == 0 { return 0 }
+            if _json_eq(json.array_get_raw(a, i), json.array_get_raw(b, i)) == 0 { return 0 }
             i = i + 1
         }
         return 1
     }
 
     if ta == 5 { // object — same keys, same values, order-INsensitive
-        n = json.json_object_size_raw(a)
-        if n != json.json_object_size_raw(b) { return 0 }
+        n = json.object_size_raw(a)
+        if n != json.object_size_raw(b) { return 0 }
         i = 0
         while i < n {
-            k = json.json_object_key_at(a, i)
-            if json.json_object_has(b, k) == 0 { return 0 }
-            va = json.json_object_value_at(a, i)
-            vb = json.json_object_get_raw(b, k)
+            k = json.object_key_at(a, i)
+            if json.object_has(b, k) == 0 { return 0 }
+            va = json.object_value_at(a, i)
+            vb = json.object_get_raw(b, k)
             if _json_eq(va, vb) == 0 { return 0 }
             i = i + 1
         }
@@ -850,13 +850,13 @@ _json_eq(a: ptr, b: ptr) -> int {
 const CMP_UNORDERED = 99
 
 _json_cmp(a: ptr, b: ptr) -> int {
-    ta = json.json_type(a)
-    tb = json.json_type(b)
+    ta = json.type(a)
+    tb = json.type(b)
 
     if ta == 2 {
         if tb != 2 { return CMP_UNORDERED }
-        x = json.json_get_number(a)
-        y = json.json_get_number(b)
+        x = json.get_number(a)
+        y = json.get_number(b)
         if x < y { return -1 }
         if x > y { return 1 }
         return 0
@@ -869,7 +869,7 @@ _json_cmp(a: ptr, b: ptr) -> int {
         // NORMALIZED to -1/0/1: string.compare hands back the raw byte
         // difference, and the callers below treat the magnitude as
         // meaningful only through its sign.
-        d = string.compare(json.json_get_string_raw(a), json.json_get_string_raw(b))
+        d = string.compare(json.get_string_raw(a), json.get_string_raw(b))
         if d < 0 { return -1 }
         if d > 0 { return 1 }
         return 0
@@ -890,14 +890,14 @@ _eval_value_fn(fp: *TestFn, current: ptr, root: @keep ptr) -> ptr {
         v = _arg_to_value(arg, current, root)
         if v == null { return null }
         out = null
-        t = json.json_type(v)
+        t = json.type(v)
         if t == 3 {
             // Length of a string is its CODEPOINT count, not its byte
             // count (RFC 9535 §2.4.4).
-            out = json.json_create_int(_utf8_length(json.json_get_string_raw(v)) as long)
+            out = json.create_int(_utf8_length(json.get_string_raw(v)) as long)
         }
-        if t == 4 { out = json.json_create_int(json.json_array_size(v) as long) }
-        if t == 5 { out = json.json_create_int(json.json_object_size_raw(v) as long) }
+        if t == 4 { out = json.create_int(json.array_size(v) as long) }
+        if t == 5 { out = json.create_int(json.object_size_raw(v) as long) }
         _release_arg_value(arg, v)
         return out
     }
@@ -905,7 +905,7 @@ _eval_value_fn(fp: *TestFn, current: ptr, root: @keep ptr) -> ptr {
     if fp.kind == model.FN_COUNT {
         arg = list.get_raw(fp.args, 0)
         n = _arg_nodelist_size(arg, current, root)
-        return json.json_create_int(n as long)
+        return json.create_int(n as long)
     }
 
     if fp.kind == model.FN_VALUE {
@@ -981,7 +981,7 @@ _arg_value_is_owned(arg: ptr) -> int {
 
 _release_arg_value(arg: ptr, value: ptr) {
     if value != null {
-        if _arg_value_is_owned(arg) == 1 { json.json_free(value) }
+        if _arg_value_is_owned(arg) == 1 { json.free(value) }
     }
 }
 
@@ -1020,11 +1020,11 @@ _eval_regex_fn(fp: *TestFn, current: ptr, root: @keep ptr, substring: int) -> in
     lhs_arg = list.get_raw(fp.args, 0)
     lhs = _arg_to_value(lhs_arg, current, root)
     if lhs == null { return 0 }
-    if json.json_type(lhs) != 3 {
+    if json.type(lhs) != 3 {
         _release_arg_value(lhs_arg, lhs)
         return 0
     }
-    input = json.json_get_string_raw(lhs)
+    input = json.get_string_raw(lhs)
 
     rhs_arg = list.get_raw(fp.args, 1)
     rhs = _arg_to_value(rhs_arg, current, root)
@@ -1032,12 +1032,12 @@ _eval_regex_fn(fp: *TestFn, current: ptr, root: @keep ptr, substring: int) -> in
         _release_arg_value(lhs_arg, lhs)
         return 0
     }
-    if json.json_type(rhs) != 3 {
+    if json.type(rhs) != 3 {
         _release_arg_value(lhs_arg, lhs)
         _release_arg_value(rhs_arg, rhs)
         return 0
     }
-    pattern = json.json_get_string_raw(rhs)
+    pattern = json.get_string_raw(rhs)
 
     prepared = _iregexp_dot(pattern)
     if substring == 0 {
@@ -1154,26 +1154,26 @@ _utf8_length(s: string) -> int {
 
 // A deep copy of a json value, so value() can hand back an owned result.
 _json_copy(v: ptr) -> ptr {
-    t = json.json_type(v)
-    if t == 0 { return json.json_create_null() }
-    if t == 1 { return json.json_create_bool(json.json_get_bool(v)) }
-    if t == 2 { return json.json_create_number(json.json_get_number(v)) }
-    if t == 3 { return json.json_create_string(json.json_get_string_raw(v)) }
+    t = json.type(v)
+    if t == 0 { return json.create_null() }
+    if t == 1 { return json.create_bool(json.get_bool(v)) }
+    if t == 2 { return json.create_number(json.get_number(v)) }
+    if t == 3 { return json.create_string(json.get_string_raw(v)) }
     if t == 4 {
-        a = json.json_create_array()
-        n = json.json_array_size(v)
+        a = json.create_array()
+        n = json.array_size(v)
         i = 0
         while i < n {
-            json.json_array_add_raw(a, _json_copy(json.json_array_get_raw(v, i)))
+            json.array_add_raw(a, _json_copy(json.array_get_raw(v, i)))
             i = i + 1
         }
         return a
     }
-    o = json.json_create_object()
-    n = json.json_object_size_raw(v)
+    o = json.create_object()
+    n = json.object_size_raw(v)
     i = 0
     while i < n {
-        json.json_object_set_raw(o, json.json_object_key_at(v, i), _json_copy(json.json_object_value_at(v, i)))
+        json.object_set_raw(o, json.object_key_at(v, i), _json_copy(json.object_value_at(v, i)))
         i = i + 1
     }
     return o

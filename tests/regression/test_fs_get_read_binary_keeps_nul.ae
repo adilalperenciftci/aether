@@ -43,15 +43,15 @@ main() {
         exit(1)
     }
 
-    if fs.fs_try_read_binary(path) == 0 {
+    if fs.try_read_binary(path) == 0 {
         println("FAIL: fs_try_read_binary could not read ${path}")
         exit(1)
     }
-    n = fs.fs_get_read_binary_length()
-    s = fs.fs_get_read_binary()
+    n = fs.get_read_binary_length()
+    s = fs.get_read_binary()
     got = bytes.new(n)
     _ = bytes.copy_from_string(got, 0, s, n)
-    fs.fs_release_read_binary()
+    fs.release_read_binary()
     fs.delete(path)
 
     if n != n_want {

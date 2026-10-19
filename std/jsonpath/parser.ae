@@ -305,10 +305,10 @@ _parse_segments(p: *Parser) -> ptr {
         }
         seg = _parse_segment(p)
         if p.failed == 1 {
-            list.list_add_raw(segs, seg)
+            list.add_raw(segs, seg)
             return segs
         }
-        list.list_add_raw(segs, seg)
+        list.add_raw(segs, seg)
     }
     return segs
 }
@@ -341,7 +341,7 @@ _parse_descendant_inner(p: *Parser) -> ptr {
     }
     if _peek(p) == 42 { // '*'
         p.pos = p.pos + 1
-        list.list_add_raw((seg as *Segment).selectors, model.new_selector(model.SEL_WILDCARD))
+        list.add_raw((seg as *Segment).selectors, model.new_selector(model.SEL_WILDCARD))
         return seg
     }
     name = _parse_member_name(p)
@@ -352,7 +352,7 @@ _parse_descendant_inner(p: *Parser) -> ptr {
     sel = model.new_selector(model.SEL_NAME)
     (sel as *Selector).name = name
     (sel as *Selector).name_owned = 1
-    list.list_add_raw((seg as *Segment).selectors, sel)
+    list.add_raw((seg as *Segment).selectors, sel)
     return seg
 }
 
@@ -362,7 +362,7 @@ _parse_child_dot(p: *Parser) -> ptr {
     seg = model.new_segment(model.SEG_CHILD)
     if _peek(p) == 42 { // '*'
         p.pos = p.pos + 1
-        list.list_add_raw((seg as *Segment).selectors, model.new_selector(model.SEL_WILDCARD))
+        list.add_raw((seg as *Segment).selectors, model.new_selector(model.SEL_WILDCARD))
         return seg
     }
     name = _parse_member_name(p)
@@ -373,7 +373,7 @@ _parse_child_dot(p: *Parser) -> ptr {
     sel = model.new_selector(model.SEL_NAME)
     (sel as *Selector).name = name
     (sel as *Selector).name_owned = 1
-    list.list_add_raw((seg as *Segment).selectors, sel)
+    list.add_raw((seg as *Segment).selectors, sel)
     return seg
 }
 
@@ -385,20 +385,20 @@ _parse_bracketed_into(p: *Parser, seg: ptr) {
 
     first = _parse_selector(p)
     if p.failed == 1 {
-        if first != null { list.list_add_raw(sp.selectors, first) }
+        if first != null { list.add_raw(sp.selectors, first) }
         return
     }
-    list.list_add_raw(sp.selectors, first)
+    list.add_raw(sp.selectors, first)
     _skip_ws(p)
 
     while _accept(p, 44) == 1 { // ','
         _skip_ws(p)
         s = _parse_selector(p)
         if p.failed == 1 {
-            if s != null { list.list_add_raw(sp.selectors, s) }
+            if s != null { list.add_raw(sp.selectors, s) }
             return
         }
-        list.list_add_raw(sp.selectors, s)
+        list.add_raw(sp.selectors, s)
         _skip_ws(p)
     }
 
@@ -802,12 +802,12 @@ _parse_logical_or(p: *Parser) -> ptr {
     if _starts_with(p, "||") == 0 { return first }
 
     f = model.new_filter(model.F_OR)
-    list.list_add_raw((f as *Filter).children, first)
+    list.add_raw((f as *Filter).children, first)
     while _starts_with(p, "||") == 1 {
         p.pos = p.pos + 2
         _skip_ws(p)
         next = _parse_logical_and(p)
-        list.list_add_raw((f as *Filter).children, next)
+        list.add_raw((f as *Filter).children, next)
         if p.failed == 1 { return f }
         _skip_ws(p)
     }
@@ -822,12 +822,12 @@ _parse_logical_and(p: *Parser) -> ptr {
     if _starts_with(p, "&&") == 0 { return first }
 
     f = model.new_filter(model.F_AND)
-    list.list_add_raw((f as *Filter).children, first)
+    list.add_raw((f as *Filter).children, first)
     while _starts_with(p, "&&") == 1 {
         p.pos = p.pos + 2
         _skip_ws(p)
         next = _parse_filter_unit(p)
-        list.list_add_raw((f as *Filter).children, next)
+        list.add_raw((f as *Filter).children, next)
         if p.failed == 1 { return f }
         _skip_ws(p)
     }
@@ -1067,14 +1067,14 @@ _parse_fn_args(p: *Parser, kind: int, arity: int) -> ptr {
     }
 
     a = _parse_fn_arg(p)
-    list.list_add_raw(fp.args, a)
+    list.add_raw(fp.args, a)
     if p.failed == 1 { return f }
     _skip_ws(p)
 
     while _accept(p, 44) == 1 { // ','
         _skip_ws(p)
         a2 = _parse_fn_arg(p)
-        list.list_add_raw(fp.args, a2)
+        list.add_raw(fp.args, a2)
         if p.failed == 1 { return f }
         _skip_ws(p)
     }
@@ -1362,10 +1362,10 @@ _parse_singular_query(p: *Parser) -> ptr {
         if c == 91 { // '['
             seg = _parse_bracketed_singular_seg(p)
             if p.failed == 1 {
-                if seg != null { list.list_add_raw(sqp.segments, seg) }
+                if seg != null { list.add_raw(sqp.segments, seg) }
                 return sq
             }
-            list.list_add_raw(sqp.segments, seg)
+            list.add_raw(sqp.segments, seg)
         } else {
             if c == 46 { // '.'
                 p.pos = p.pos + 1
@@ -1379,7 +1379,7 @@ _parse_singular_query(p: *Parser) -> ptr {
                 sp.is_name = 1
                 sp.name = name
                 sp.name_owned = 1
-                list.list_add_raw(sqp.segments, seg)
+                list.add_raw(sqp.segments, seg)
             } else {
                 break
             }

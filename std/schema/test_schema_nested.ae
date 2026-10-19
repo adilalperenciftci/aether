@@ -48,7 +48,7 @@ fn run(s: ptr, text: string) -> (ptr, ptr) {
     root, err = json.parse(text)
     if err != "" { println("FAIL: test JSON does not parse: ${err}"); exit(1) }
     values, errors = schema.parse_json(s, root)
-    json.json_free(root)
+    json.free(root)
     return values, errors
 }
 
@@ -81,7 +81,7 @@ fn test_valid(s: ptr) -> int {
     // the missing gift took its default as a boolean, undeclared "extra" is gone.
     want = "{\"id\":7,\"customer\":{\"name\":\"Ada\",\"email\":\"ada@example.com\",\"address\":{\"city\":\"Paris\",\"zip\":\"75001\"}},\"lines\":[{\"sku\":\"AB-1\",\"qty\":2,\"gift\":false},{\"sku\":\"CD-2\",\"qty\":1,\"gift\":true}],\"tags\":[\"red\",\"new\"],\"grid\":[[1,2],[3]]}"
     fails = fails + ck(string_equals(out, want) == 1, "the values tree:\n  got  ${out}\n  want ${want}")
-    json.json_free(values)
+    json.free(values)
     schema.errors_free(errors)
     return fails
 }
@@ -103,7 +103,7 @@ fn test_paths(s: ptr) -> int {
     // What passed is still returned: id, and nothing of the failed subtrees.
     out, _ = json.stringify(values)
     fails = fails + ck(string_equals(out, "{\"id\":3}") == 1, "only the passing fields remain (${out})")
-    json.json_free(values)
+    json.free(values)
     schema.errors_free(errors)
     return fails
 }
@@ -113,26 +113,26 @@ fn test_shapes(s: ptr) -> int {
     v1, e1 = run(s, "{\"id\": 1, \"customer\": \"Ada\", \"lines\": {}}")
     fails = fails + ck(has_error(e1, "customer", "invalid_type"), "a string where an object goes")
     fails = fails + ck(has_error(e1, "lines", "invalid_type"), "an object where an array goes")
-    json.json_free(v1)
+    json.free(v1)
     schema.errors_free(e1)
 
     v2, e2 = run(s, "{\"id\": 1, \"customer\": {\"name\": \"A\", \"email\": \"a@b.co\"}, \"lines\": [], \"tags\": [\"a\", \"b\", \"c\", \"d\"]}")
     fails = fails + ck(has_error(e2, "lines", "too_small"), "an empty lines array is below min(1)")
     fails = fails + ck(has_error(e2, "tags", "too_big"), "four tags are above max(3)")
-    json.json_free(v2)
+    json.free(v2)
     schema.errors_free(e2)
 
     v3, e3 = run(s, "{\"id\": 1, \"customer\": {\"name\": \"A\", \"email\": \"a@b.co\", \"address\": null}, \"lines\": [{\"sku\": \"s\", \"qty\": 1}], \"tags\": null}")
     fails = fails + ck(schema.ok(e3) == 1, "null is absent: the optional address and tags may be null")
     if schema.ok(e3) != 1 { dump(e3) }
-    json.json_free(v3)
+    json.free(v3)
     schema.errors_free(e3)
 
     root, _ = json.parse("[1, 2]")
     v4, e4 = schema.parse_json(s, root)
     fails = fails + ck(has_error(e4, "", "invalid_type"), "a root that is not an object")
-    json.json_free(root)
-    json.json_free(v4)
+    json.free(root)
+    json.free(v4)
     schema.errors_free(e4)
     return fails
 }
@@ -147,9 +147,9 @@ fn test_strict_and_flat() -> int {
     v, e = run(strict_s, "{\"n\": \"5\", \"s\": 12}")
     out, _ = json.stringify(v)
     fails = fails + ck(schema.ok(e) == 1 && string_equals(out, "{\"n\":5,\"s\":\"12\"}") == 1, "lax coercion (${out})")
-    json.json_free(v)
+    json.free(v)
     schema.errors_free(e)
-    schema.schema_free(strict_s)
+    schema.free(strict_s)
 
     // The flat parse cannot carry nesting, and says so.
     nested = order_schema()
@@ -163,7 +163,7 @@ fn test_strict_and_flat() -> int {
     schema.values_free(fv)
     schema.errors_free(fe)
     map_free(input)
-    schema.schema_free(nested)
+    schema.free(nested)
     return fails
 }
 
@@ -184,14 +184,14 @@ fn test_int_range() -> int {
     fails = fails + ck(has_error(e1, "xs[1]", "too_small"), "xs[1] -5000000000 is negative")
     fails = fails + ck(schema.error_count(e1) == 2, "two errors (got ${schema.error_count(e1)})")
     if fails > 0 { dump(e1) }
-    json.json_free(v1)
+    json.free(v1)
     schema.errors_free(e1)
 
     v2, e2 = run(s, "{\"big\": 5000000000, \"xs\": [9223372036854775807, \"-4\"]}")
     fails = fails + ck(has_error(e2, "xs[1]", "too_small"), "lax \"-4\" is an int and negative")
     out2, _ = json.stringify(v2)
     fails = fails + ck(string_equals(out2, "{\"big\":5000000000}") == 1, "a 64-bit int is kept (${out2})")
-    json.json_free(v2)
+    json.free(v2)
     schema.errors_free(e2)
 
     v3, e3 = run(s, "{\"big\": 99999999999999999999, \"xs\": [1, 18446744073709551616]}")
@@ -199,9 +199,9 @@ fn test_int_range() -> int {
     fails = fails + ck(has_error(e3, "xs[1]", "invalid_type"), "xs[1] is past int64")
     out3, _ = json.stringify(v3)
     fails = fails + ck(string_equals(out3, "{}") == 1, "nothing past int64 is kept (${out3})")
-    json.json_free(v3)
+    json.free(v3)
     schema.errors_free(e3)
-    schema.schema_free(s)
+    schema.free(s)
     return fails
 }
 
@@ -228,7 +228,7 @@ main() {
     fails = fails + test_paths(s)
     fails = fails + test_shapes(s)
     fails = fails + test_json_schema(s)
-    schema.schema_free(s)
+    schema.free(s)
     fails = fails + test_strict_and_flat()
     fails = fails + test_int_range()
     if fails > 0 { println("${fails} failure(s)"); exit(1) }

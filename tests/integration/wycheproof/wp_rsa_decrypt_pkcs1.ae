@@ -65,7 +65,7 @@ main() {
         exit(1)
     }
 
-    groups = json.json_object_get_raw(root, "testGroups")
+    groups = json.object_get_raw(root, "testGroups")
     ngroups = json.array_size(groups)
 
     passed = 0
@@ -74,10 +74,10 @@ main() {
     gi = 0
     while gi < ngroups {
         g = json.array_get_raw(groups, gi)
-        pkobj = json.json_object_get_raw(g, "privateKey")
-        mod_hex = json.json_get_string_raw(json.json_object_get_raw(pkobj, "modulus"))
-        exp_hex = json.json_get_string_raw(json.json_object_get_raw(pkobj, "publicExponent"))
-        d_hex = json.json_get_string_raw(json.json_object_get_raw(pkobj, "privateExponent"))
+        pkobj = json.object_get_raw(g, "privateKey")
+        mod_hex = json.get_string_raw(json.object_get_raw(pkobj, "modulus"))
+        exp_hex = json.get_string_raw(json.object_get_raw(pkobj, "publicExponent"))
+        d_hex = json.get_string_raw(json.object_get_raw(pkobj, "privateExponent"))
         mb = from_hex(mod_hex)
         eb = from_hex(exp_hex)
         db = from_hex(d_hex)
@@ -89,15 +89,15 @@ main() {
         bytes.free(db)
         k = rsa.key_from_components(n, e, dd)
 
-        tests = json.json_object_get_raw(g, "tests")
+        tests = json.object_get_raw(g, "tests")
         nt = json.array_size(tests)
         ti = 0
         while ti < nt {
             t = json.array_get_raw(tests, ti)
-            tc_id = json.json_get_int(json.json_object_get_raw(t, "tcId"))
-            res = json.json_get_string_raw(json.json_object_get_raw(t, "result"))
-            msg_hex = json.json_get_string_raw(json.json_object_get_raw(t, "msg"))
-            ct_hex = json.json_get_string_raw(json.json_object_get_raw(t, "ct"))
+            tc_id = json.get_int(json.object_get_raw(t, "tcId"))
+            res = json.get_string_raw(json.object_get_raw(t, "result"))
+            msg_hex = json.get_string_raw(json.object_get_raw(t, "msg"))
+            ct_hex = json.get_string_raw(json.object_get_raw(t, "ct"))
             ct = from_hex(ct_hex)
             pt, derr = rsa.decrypt_pkcs1(k, ct)
             if res == "valid" {

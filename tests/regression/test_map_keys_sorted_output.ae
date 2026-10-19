@@ -21,7 +21,7 @@ fail(msg: string) {
 
 main() {
     words = ["pear", "apple", "fig", "apple", "banana", "fig", "apple"]
-    m = map.map_new()
+    m = map.new()
     i = 0
     while i < 7 {
         w = words[i]
@@ -65,7 +65,7 @@ main() {
     if fv != 2 { fail("fig count ${fv}, want 2") }
 
     map.keys_free(k)
-    map.map_free(m)
+    map.free(m)
 
     println("PASS: map keys read, sorted, and printed in a deterministic order")
 }

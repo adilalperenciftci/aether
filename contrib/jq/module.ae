@@ -91,7 +91,7 @@ run_with_inputs(prog: @keep ptr, input: @keep ptr, inputs: @keep ptr, out: @keep
     if inputs == null { list.free(own_inputs) }
     if status == eval.ST_ERROR { return RESULT_ERROR, 5, err }
     if status == eval.ST_HALT { return RESULT_HALT, code, err }
-    if err != null { json.json_free(err) }
+    if err != null { json.free(err) }
     return RESULT_OK, 0, null
 }
 
@@ -107,7 +107,7 @@ run_json_opts(prog: @keep ptr, input: @keep ptr, indent: int, sort_keys: int, ra
     out = list.new()
     status, code, err = run(prog, input, out)
     msg = _diagnostic(status, code, err)
-    if err != null { json.json_free(err) }
+    if err != null { json.free(err) }
     // Returned straight from the call so the string stays caller-owned.
     return render(out, indent, sort_keys, raw), msg
 }
@@ -137,7 +137,7 @@ query(src: string, input_text: string) -> string! {
         return "", "jq: error: invalid JSON input: ${jerr}"
     }
     text, rerr = run_json(prog, input)
-    json.json_free(input)
+    json.free(input)
     free(prog)
     return _chomp(text), "${rerr}"
 }
@@ -163,7 +163,7 @@ render(out: ptr, indent: int, sort_keys: int, raw: int) -> string {
             strbuilder.append(sb, value.to_json_indent(v, indent, sort_keys))
         }
         strbuilder.append_byte(sb, 10)
-        json.json_free(v)
+        json.free(v)
         list.set(out, i, null)
         i = i + 1
     }
@@ -189,7 +189,7 @@ parse_stream(text: string) -> ptr! {
                 free_values(out)
                 return null, "${err} (in the JSON text at byte ${start})"
             }
-            list.list_add_raw(out, v)
+            list.add_raw(out, v)
         }
     }
     return out, ""
@@ -202,7 +202,7 @@ free_values(l: ptr) {
     i = 0
     while i < n {
         v = list.get_raw(l, i)
-        if v != null { json.json_free(v) }
+        if v != null { json.free(v) }
         list.set(l, i, null)
         i = i + 1
     }

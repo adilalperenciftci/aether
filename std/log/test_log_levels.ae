@@ -33,11 +33,11 @@ main() {
     spec.describe(fw, "std.log level filtering") {
         spec.it("writes a message at or above the threshold") callback {
             spec.assert_ok(log.init(logfile, WARN), "init succeeds")
-            log.log_set_timestamps(0)
-            log.log_set_colors(0)
-            log.log_write(WARN, "kept warning")
-            log.log_write(ERROR, "kept error")
-            log.log_shutdown()
+            log.set_timestamps(0)
+            log.set_colors(0)
+            log.write(WARN, "kept warning")
+            log.write(ERROR, "kept error")
+            log.shutdown()
             body, err = fs.read(logfile)
             spec.assert_ok(err, "log file readable")
             spec.assert_contains(body, "kept warning", "the WARN line is there")
@@ -50,11 +50,11 @@ main() {
             // through would flood the log, and one that dropped the
             // case above would lose the errors.
             spec.assert_ok(log.init(logfile, WARN), "init succeeds")
-            log.log_set_timestamps(0)
-            log.log_set_colors(0)
-            log.log_write(DEBUG, "dropped debug")
-            log.log_write(INFO, "dropped info")
-            log.log_shutdown()
+            log.set_timestamps(0)
+            log.set_colors(0)
+            log.write(DEBUG, "dropped debug")
+            log.write(INFO, "dropped info")
+            log.shutdown()
             body, err = fs.read(logfile)
             spec.assert_ok(err, "log file readable")
             spec.assert_true(string.contains(body, "dropped debug") == 0,
@@ -66,10 +66,10 @@ main() {
 
         spec.it("labels each line with its level") callback {
             spec.assert_ok(log.init(logfile, DEBUG), "init succeeds")
-            log.log_set_timestamps(0)
-            log.log_set_colors(0)
-            log.log_write(ERROR, "tagged")
-            log.log_shutdown()
+            log.set_timestamps(0)
+            log.set_colors(0)
+            log.write(ERROR, "tagged")
+            log.shutdown()
             body, err = fs.read(logfile)
             spec.assert_ok(err, "log file readable")
             spec.assert_contains(body, "ERROR", "the level name is on the line")
@@ -78,12 +78,12 @@ main() {
 
         spec.it("honours a threshold raised after init") callback {
             spec.assert_ok(log.init(logfile, DEBUG), "init succeeds")
-            log.log_set_timestamps(0)
-            log.log_set_colors(0)
-            log.log_write(INFO, "before raise")
-            log.log_set_level(ERROR)
-            log.log_write(INFO, "after raise")
-            log.log_shutdown()
+            log.set_timestamps(0)
+            log.set_colors(0)
+            log.write(INFO, "before raise")
+            log.set_level(ERROR)
+            log.write(INFO, "after raise")
+            log.shutdown()
             body, err = fs.read(logfile)
             spec.assert_ok(err, "log file readable")
             spec.assert_contains(body, "before raise",
@@ -99,7 +99,7 @@ main() {
             err = log.init("/nonexistent-directory-xyz/app.log", DEBUG)
             spec.assert_err_contains(err, "cannot open log file",
                 "an unopenable path is reported")
-            log.log_shutdown()
+            log.shutdown()
         }
 
         spec.it("does not export its level constants") callback {

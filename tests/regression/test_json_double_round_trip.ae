@@ -44,7 +44,7 @@ round_trip_differs(x: float) -> int {
     if serr != "" { return 1 }
     back, perr = json.parse(text)
     if perr != "" { return 1 }
-    y = json.json_get_number(back)
+    y = json.get_number(back)
     json.free(back)
     if y != x {
         println("  FAIL ${text} reads back as ${y}")

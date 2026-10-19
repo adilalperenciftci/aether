@@ -87,13 +87,13 @@ update(ctx: *DrbgCtx, provided_data: byte[]) {
         bytes.set(buf, ms + 1 + j, provided_data[j])
         j = j + 1
     }
-    new_k = hmac.hmac_bytes(ctx.algo, bytes.view(ctx.k)[0..ms], bytes.view(buf)[0..ms + 1 + pd_len])
+    new_k = hmac.bytes(ctx.algo, bytes.view(ctx.k)[0..ms], bytes.view(buf)[0..ms + 1 + pd_len])
     bytes.free(buf)
     bytes.free(ctx.k)
     ctx.k = new_k
 
     // V = HMAC(K, V)
-    new_v = hmac.hmac_bytes(ctx.algo, bytes.view(ctx.k)[0..ms], bytes.view(ctx.v)[0..ms])
+    new_v = hmac.bytes(ctx.algo, bytes.view(ctx.k)[0..ms], bytes.view(ctx.v)[0..ms])
     bytes.free(ctx.v)
     ctx.v = new_v
 
@@ -114,13 +114,13 @@ update(ctx: *DrbgCtx, provided_data: byte[]) {
         bytes.set(buf2, ms + 1 + j, provided_data[j])
         j = j + 1
     }
-    new_k2 = hmac.hmac_bytes(ctx.algo, bytes.view(ctx.k)[0..ms], bytes.view(buf2)[0..ms + 1 + pd_len])
+    new_k2 = hmac.bytes(ctx.algo, bytes.view(ctx.k)[0..ms], bytes.view(buf2)[0..ms + 1 + pd_len])
     bytes.free(buf2)
     bytes.free(ctx.k)
     ctx.k = new_k2
 
     // V = HMAC(K, V)
-    new_v2 = hmac.hmac_bytes(ctx.algo, bytes.view(ctx.k)[0..ms], bytes.view(ctx.v)[0..ms])
+    new_v2 = hmac.bytes(ctx.algo, bytes.view(ctx.k)[0..ms], bytes.view(ctx.v)[0..ms])
     bytes.free(ctx.v)
     ctx.v = new_v2
 }
@@ -215,7 +215,7 @@ generate_core(c: *DrbgCtx, num_bytes: int, addl: byte[]) -> ptr {
     produced = 0
     while produced < num_bytes {
         // V = HMAC(K, V)
-        new_v = hmac.hmac_bytes(c.algo, bytes.view(c.k)[0..ms], bytes.view(c.v)[0..ms])
+        new_v = hmac.bytes(c.algo, bytes.view(c.k)[0..ms], bytes.view(c.v)[0..ms])
         bytes.free(c.v)
         c.v = new_v
         // append min(ms, remaining) bytes of V

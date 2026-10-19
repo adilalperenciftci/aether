@@ -50,7 +50,7 @@ main() {
     }
     println("PASS 3: out-of-range accessors return empty")
 
-    fs.fs_release_mounts()
+    fs.release_mounts()
     n2, err2 = fs.mounts()
     if string.equals(err2, "") != 1 {
         fail("reload after release errored: ${err2}")
