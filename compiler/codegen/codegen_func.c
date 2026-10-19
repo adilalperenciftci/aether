@@ -1590,6 +1590,75 @@ static void emit_list_pattern_bindings(CodeGenerator* gen, const char* slice, co
     }
 }
 
+/* #2988: does struct pattern `p` test anything, a literal field of its own
+ * or of a struct pattern over one of its fields? */
+static int struct_pattern_tests(const ASTNode* p) {
+    for (int k = 0; p && k < p->child_count; k++) {
+        const ASTNode* fp = p->children[k];
+        if (!fp || fp->type != AST_ASSIGNMENT || fp->child_count < 1) continue;
+        const ASTNode* sub = fp->children[0];
+        if (sub->type == AST_PATTERN_LITERAL && sub->value && strcmp(sub->value, "_") != 0) return 1;
+        if (sub->type == AST_PATTERN_STRUCT && struct_pattern_tests(sub)) return 1;
+    }
+    return 0;
+}
+
+/* #2988: the condition under which struct pattern `p` matches the struct
+ * value `val` (C text): each literal field equal, a string by content
+ * (emit_pattern_literal_test), and a struct pattern over a field matching
+ * that field. Writes ` && ` before each term but the first (*first). */
+static void emit_struct_pattern_test(CodeGenerator* gen, const char* val, ASTNode* p, int* first) {
+    for (int k = 0; k < p->child_count; k++) {
+        ASTNode* fp = p->children[k];
+        if (!fp || fp->type != AST_ASSIGNMENT || !fp->value || fp->child_count < 1) continue;
+        ASTNode* sub = fp->children[0];
+        const char* field = cg_internf("%s.%s", val, fp->value);
+        if (sub->type == AST_PATTERN_STRUCT) {
+            emit_struct_pattern_test(gen, field, sub, first);
+        } else if (sub->type == AST_PATTERN_LITERAL && sub->value && strcmp(sub->value, "_") != 0) {
+            if (!*first) fprintf(gen->output, " && ");
+            fprintf(gen->output, "(");
+            emit_pattern_literal_test(gen, field, sub);
+            fprintf(gen->output, ")");
+            *first = 0;
+        }
+    }
+}
+
+/* #2988: the names struct pattern `p` binds from the struct value `val`,
+ * each to its field, typed as the field; only those `reads` mentions. They
+ * are borrowed, as a parameter is; one `body` rebinds takes a reference of
+ * its own first (R3, own_rebound_binding_take). */
+static void emit_struct_pattern_bindings(CodeGenerator* gen, const char* val, ASTNode* p,
+                                         ASTNode* reads, ASTNode* body) {
+    for (int k = 0; k < p->child_count; k++) {
+        ASTNode* fp = p->children[k];
+        if (!fp || fp->type != AST_ASSIGNMENT || !fp->value || fp->child_count < 1) continue;
+        ASTNode* sub = fp->children[0];
+        const char* field = cg_internf("%s.%s", val, fp->value);
+        if (sub->type == AST_PATTERN_STRUCT) {
+            emit_struct_pattern_bindings(gen, field, sub, reads, body);
+            continue;
+        }
+        if (sub->type != AST_PATTERN_VARIABLE || !sub->value || strcmp(sub->value, "_") == 0 ||
+            !sub->node_type || !expr_mentions(reads, sub->value)) continue;
+        print_indent(gen);
+        if (is_fnptr_type(sub->node_type)) {
+            emit_fnptr_decl(gen, sub->node_type, sub->value);
+            fprintf(gen->output, " = %s;\n", field);
+            register_fnptr_local(gen, sub->value, sub->node_type);
+        } else {
+            fprintf(gen->output, "%s %s = %s;\n",
+                    volatile_decl_type(try_volatile_qual_for(gen, sub->value),
+                                       get_c_type(sub->node_type)),
+                    sub->value, field);
+        }
+        mark_var_declared_typed(gen, sub->value, sub->node_type);
+        if (body) own_rebound_binding_take(gen, sub->value, sub->node_type, body, sub->line,
+                                           sub->column);
+    }
+}
+
 /* The value a function returns when no pattern, guard or clause matches,
  * of the type it returns (fn_result_type). A string its caller owns is a
  * copy of "" the caller may free, not the literal (#2627); so is each owned
@@ -1837,8 +1906,13 @@ static void emit_function(CodeGenerator* gen, ASTNode* func, const char* clause_
             last_param_cname = cg_internf("_pattern_%d", param_count);
             param_count++;
         } else if (child->type == AST_PATTERN_STRUCT) {
+            /* The struct the checker resolved the pattern's name to, under
+             * its C name (#2988), of its position across a clause set. */
             if (param_count > 0) fprintf(gen->output, ", ");
-            fprintf(gen->output, "%s _pattern_%d", child->value, param_count);
+            Type* st = as_clause ? fn_param_type_at(gen, func, param_count) : child->node_type;
+            if (st && st->kind == TYPE_STRUCT) generate_type(gen, st);
+            else fprintf(gen->output, "%s", child->value);
+            fprintf(gen->output, " _pattern_%d", param_count);
             last_param_cname = cg_internf("_pattern_%d", param_count);
             param_count++;
         } else if (child->type == AST_PATTERN_LIST || child->type == AST_PATTERN_CONS) {
@@ -2053,6 +2127,22 @@ static void emit_function(CodeGenerator* gen, ASTNode* func, const char* clause_
             emit_list_pattern_bindings(gen, slice, et, child, body, body);
         }
 
+        /* A struct pattern (#2988), the same way: its literal fields tested
+         * here or by the dispatcher, its names bound. */
+        if (child->type == AST_PATTERN_STRUCT) {
+            const char* val = cg_internf("_pattern_%d", pos);
+            if (!as_clause && struct_pattern_tests(child)) {
+                int first = 1;
+                print_indent(gen);
+                fprintf(gen->output, "if (!(");
+                emit_struct_pattern_test(gen, val, child, &first);
+                fprintf(gen->output, ")) return ");
+                emit_no_match_value(gen, func);
+                fprintf(gen->output, ";\n");
+            }
+            emit_struct_pattern_bindings(gen, val, child, body, body);
+        }
+
         if (is_param_node(child)) pos++;
 
         // Generate guard clause check
@@ -2218,6 +2308,7 @@ static int emit_clause_dispatch(CodeGenerator* gen, ASTNode* clause, int returns
     for (int p = 0; p < npos; p++) {
         ASTNode* c = fn_param_at(clause, p);
         if (is_list_param_node(c) ||
+            (c->type == AST_PATTERN_STRUCT && struct_pattern_tests(c)) ||
             (c->type == AST_PATTERN_LITERAL && strcmp(c->value, "_") != 0)) has_cond = 1;
     }
     print_indent(gen);
@@ -2243,6 +2334,8 @@ static int emit_clause_dispatch(CodeGenerator* gen, ASTNode* clause, int returns
                                        fn_list_param_elem_ctype(gen, clause, p), c);
                 fprintf(gen->output, ")");
                 first_cond = 0;
+            } else if (c->type == AST_PATTERN_STRUCT) {
+                emit_struct_pattern_test(gen, cg_internf("_arg%d", p), c, &first_cond);   /* #2988 */
             }
         }
         fprintf(gen->output, ") {\n");
@@ -2268,6 +2361,8 @@ static int emit_clause_dispatch(CodeGenerator* gen, ASTNode* clause, int returns
                 /* Plain copies, as the guard's other names are. */
                 emit_list_pattern_bindings(gen, cg_internf("_arg%d", p),
                                            fn_list_param_elem_ctype(gen, clause, p), c, guard, NULL);
+            } else if (c->type == AST_PATTERN_STRUCT) {
+                emit_struct_pattern_bindings(gen, cg_internf("_arg%d", p), c, guard, NULL);   /* #2988 */
             }
         }
         print_indent(gen);

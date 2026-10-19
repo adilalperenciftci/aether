@@ -5532,6 +5532,123 @@ static void settle_list_param_types(ASTNode* program) {
     }
 }
 
+/* #2988: a struct pattern (`Pt { x: 0, y: _ }`, `Pt { x: a }`) takes a
+ * value of the struct it names, and each field it lists is a pattern of
+ * its own over that field: a literal the field must equal, `_` any value,
+ * a name bound to the field's value (typed as the field), or a struct
+ * pattern over a field of a struct type. The parser built it and nothing
+ * read it, so its fields were never tested and its names never bound.
+ * Types it and its names, and reports a struct or a field that does not
+ * exist, a literal of another type than its field, and a field pattern of
+ * any other shape. Returns 0 after reporting. */
+static int settle_struct_pattern(ASTNode* p, SymbolTable* table) {
+    Symbol* ss = p->value ? lookup_symbol(table, p->value) : NULL;
+    if (!ss || !ss->node || ss->node->type != AST_STRUCT_DEFINITION) {
+        char msg[300];
+        snprintf(msg, sizeof(msg), "the struct pattern names '%s', which is no struct",
+                 p->value ? p->value : "?");
+        type_error_code_hint(msg, "a struct pattern is written `Name { field: pattern, ... }`",
+                             p->line, p->column, AETHER_ERR_UNDEFINED_TYPE);
+        return 0;
+    }
+    if (p->node_type) free_type(p->node_type);
+    p->node_type = create_type(TYPE_STRUCT);
+    p->node_type->struct_name = strdup(ss->node->value);
+    int ok = 1;
+    for (int k = 0; k < p->child_count; k++) {
+        ASTNode* fp = p->children[k];
+        if (!fp || fp->type != AST_ASSIGNMENT || !fp->value || fp->child_count < 1) continue;
+        Type* ft = NULL;
+        for (int f = 0; f < ss->node->child_count; f++) {
+            ASTNode* fd = ss->node->children[f];
+            if (fd && fd->type == AST_STRUCT_FIELD && fd->value && strcmp(fd->value, fp->value) == 0) {
+                ft = fd->node_type;
+                break;
+            }
+        }
+        if (!ft) {
+            char msg[300];
+            snprintf(msg, sizeof(msg), "'%s' has no field '%s'", p->value, fp->value);
+            type_error_code_hint(msg, "a struct pattern lists fields of the struct it names",
+                                 fp->line, fp->column, AETHER_ERR_TYPE_MISMATCH);
+            ok = 0;
+            continue;
+        }
+        ASTNode* sub = fp->children[0];
+        if (sub->type == AST_PATTERN_VARIABLE) {
+            if (type_is_sized_array(ft)) {
+                /* An array is no value a C declaration can be bound to. */
+                char msg[300];
+                snprintf(msg, sizeof(msg), "field '%s' of '%s' is a fixed-size array, which a "
+                         "struct pattern cannot bind to a name", fp->value, p->value);
+                type_error_code_hint(msg, "bind the struct itself and index its field",
+                                     sub->line, sub->column, AETHER_ERR_TYPE_MISMATCH);
+                ok = 0;
+                continue;
+            }
+            if (sub->node_type) free_type(sub->node_type);
+            sub->node_type = clone_type(ft);
+        } else if (sub->type == AST_PATTERN_LITERAL) {
+            if (sub->value && strcmp(sub->value, "_") == 0) continue;
+            if (sub->node_type && !is_type_compatible(sub->node_type, ft)) {
+                char msg[400];
+                snprintf(msg, sizeof(msg), "field '%s' of '%s' is %s, and the pattern gives it %s",
+                         fp->value, p->value, type_spelled(ft), type_spelled(sub->node_type));
+                type_error_code_hint(msg, "match the field with a value of its type, `_` or a name",
+                                     sub->line, sub->column, AETHER_ERR_TYPE_MISMATCH);
+                ok = 0;
+            }
+        } else if (sub->type == AST_PATTERN_STRUCT) {
+            if (!settle_struct_pattern(sub, table)) { ok = 0; continue; }
+            if (ft->kind != TYPE_STRUCT || !ft->struct_name ||
+                strcmp(ft->struct_name, sub->node_type->struct_name) != 0) {
+                char msg[400];
+                snprintf(msg, sizeof(msg), "field '%s' of '%s' is %s, and the pattern is a '%s'",
+                         fp->value, p->value, type_spelled(ft), sub->value);
+                type_error_code_hint(msg, "a struct pattern over a field names the field's struct",
+                                     sub->line, sub->column, AETHER_ERR_TYPE_MISMATCH);
+                ok = 0;
+            }
+        } else {
+            char msg[300];
+            snprintf(msg, sizeof(msg), "field '%s' of a struct pattern is matched by an expression",
+                     fp->value);
+            type_error_code_hint(msg,
+                                 "a field of a struct pattern takes a literal, `_`, a name or a "
+                                 "struct pattern",
+                                 sub->line, sub->column, AETHER_ERR_TYPE_MISMATCH);
+            ok = 0;
+        }
+    }
+    return ok;
+}
+
+static void settle_struct_param_types(ASTNode* program, SymbolTable* table) {
+    for (int i = 0; i < program->child_count; i++) {
+        ASTNode* fn = program->children[i];
+        if (!is_definition(fn)) continue;
+        for (int c = 0; c < fn->child_count - 1; c++)
+            if (fn->children[c] && fn->children[c]->type == AST_PATTERN_STRUCT)
+                settle_struct_pattern(fn->children[c], table);
+    }
+}
+
+/* The names a struct pattern binds, into `table`, typed as their fields. */
+static void bind_struct_pattern_names(ASTNode* p, SymbolTable* table) {
+    for (int k = 0; k < p->child_count; k++) {
+        ASTNode* fp = p->children[k];
+        if (!fp || fp->type != AST_ASSIGNMENT || fp->child_count < 1) continue;
+        ASTNode* sub = fp->children[0];
+        if (sub->type == AST_PATTERN_STRUCT) {
+            bind_struct_pattern_names(sub, table);
+        } else if (sub->type == AST_PATTERN_VARIABLE && sub->value && strcmp(sub->value, "_") != 0) {
+            add_symbol(table, sub->value,
+                       sub->node_type ? clone_type(sub->node_type) : create_type(TYPE_UNKNOWN),
+                       0, 0, 0);
+        }
+    }
+}
+
 int typecheck_program(ASTNode* program) {
     note_program_globals(program);
     if (!program || program->type != AST_PROGRAM) return 0;
@@ -6314,6 +6431,7 @@ int typecheck_program(ASTNode* program) {
         return 0;
     }
     settle_list_param_types(program);   /* #2898 */
+    settle_struct_param_types(program, global_table);   /* #2988 */
 
     // Update symbol table with inferred types
     for (int i = 0; i < program->child_count; i++) {
@@ -8755,6 +8873,10 @@ int typecheck_function_definition(ASTNode* func, SymbolTable* table) {
                            name->node_type ? clone_type(name->node_type) : create_type(TYPE_UNKNOWN),
                            0, 0, 0);
             }
+        } else if (param->type == AST_PATTERN_STRUCT) {
+            /* #2988: the names a struct pattern binds, typed as their
+             * fields (settle_struct_pattern). */
+            bind_struct_pattern_names(param, func_table);
         }
     }
 
@@ -15994,17 +16116,19 @@ int typecheck_function_call(ASTNode* call, SymbolTable* table) {
             param_idx++;
             if (arg_slot < 0 || arg_slot >= call->child_count) continue;
             /* A list pattern takes a slice: an array is viewed as one, `[]`
-             * is the empty one (#2898). Another pattern has no declared type
-             * to check the argument against. */
+             * is the empty one (#2898). A struct pattern takes its struct,
+             * checked as a parameter of that type is (#2988). A literal
+             * pattern has no declared type to check the argument against. */
             if (is_list_param_node(param)) {
                 if (param->node_type)
                     slice_coerce_slot(&call->children[arg_slot], param->node_type, 0);
                 continue;
             }
+            int struct_pattern = param->type == AST_PATTERN_STRUCT && param->node_type;
             if (param->type != AST_VARIABLE_DECLARATION && param->type != AST_PATTERN_VARIABLE &&
-                param->type != AST_IDENTIFIER) continue;
+                param->type != AST_IDENTIFIER && !struct_pattern) continue;
 
-            if (cf_env.count < CONTRACT_ENV_MAX_PARAMS && param->value) {
+            if (!struct_pattern && cf_env.count < CONTRACT_ENV_MAX_PARAMS && param->value) {
                 cf_env.names[cf_env.count] = param->value;
                 cf_env.args[cf_env.count] = call->children[arg_slot];
                 cf_env.count++;

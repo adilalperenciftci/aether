@@ -960,10 +960,42 @@ main() {
 6
 ```
 
+### Struct Patterns
+
+A parameter can be a struct pattern: `Name { field: pattern, ... }` takes a
+value of the struct `Name`, and each field it lists is matched by a pattern of
+its own. A literal must equal the field (a string by content), `_` takes any
+value, a name is bound to the field's value, and a struct pattern over a field
+of a struct type matches that field. Fields it does not list take any value.
+
+```aether,run
+struct Pt {
+    x: int
+    y: int
+}
+
+kind(Pt { x: 0, y: _ }) -> string {
+    return "on the y axis"
+}
+
+kind(Pt { x: a, y: b }) -> string {
+    return "at ${a},${b}"
+}
+
+main() {
+    println(kind(Pt { x: 0, y: 5 }))
+    println(kind(Pt { x: 3, y: 4 }))
+}
+```
+```output
+on the y axis
+at 3,4
+```
+
 ### How a Clause Set Runs
 
-The clauses are tried in order. A call runs the first clause whose literal
-and list patterns all match its arguments and whose guard, if it has one, is true, and
+The clauses are tried in order. A call runs the first clause whose literal,
+list and struct patterns all match its arguments and whose guard, if it has one, is true, and
 returns what that clause returns. Each guard is evaluated once, for the call
 that reaches its clause, and no clause after one that matches every call (no
 literal pattern, no guard) is ever tried. When no clause matches, a set that

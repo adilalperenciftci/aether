@@ -1,0 +1,99 @@
+// #2988: a struct pattern in a clause head was parsed and then ignored:
+// no field was tested and no name bound, so `kind(Pt { x: 0, y: _ })`
+// matched every call (it printed `1 1` for an x of 0 and of 3), and a name
+// in one (`Pt { x: a }`) was "Undefined variable". A struct pattern now
+// takes a value of its struct; the clause runs when each literal field is
+// equal (a string by content), `_` takes any value, a name is bound to its
+// field, typed as the field, and a struct pattern over a field matches that
+// field, in the dispatcher of a clause set and in a single definition.
+// Before the fix this program printed wrong values.
+
+import std.string
+
+struct Pt {
+    x: int
+    y: int
+}
+
+struct Named {
+    name: string
+    at: Pt
+}
+
+kind(Pt { x: 0, y: _ }) -> int {
+    return 1
+}
+
+kind(p: Pt) -> int {
+    return 2
+}
+
+// Names bound to fields.
+sum(Pt { x: a, y: b }) -> int {
+    return a * 10 + b
+}
+
+// A string field by content, a nested struct pattern, and a guard reading a
+// name the nested pattern binds.
+label(Named { name: "origin", at: _ }) -> string {
+    return "o"
+}
+
+label(Named { name: n, at: Pt { x: 0, y: y } }) when y > 1 -> string {
+    return string.concat(n, "@y")
+}
+
+label(other: Named) -> string {
+    return "?"
+}
+
+// A single definition: a call it does not match gets the default.
+only(Pt { x: 1, y: y }) -> int {
+    return y
+}
+
+// A bound string the body rebinds is the clause's own, not the caller's.
+shout(Named { name: s, at: _ }) -> string {
+    s = string.concat(s, "!")
+    return s
+}
+
+check(ok: bool, what: string) {
+    if !ok {
+        println("FAIL: ${what}")
+        exit(1)
+    }
+}
+
+main() {
+    a = Pt { x: 0, y: 5 }
+    b = Pt { x: 3, y: 5 }
+    check(kind(a) == 1, "a literal field that matches")
+    check(kind(b) == 2, "a literal field that does not match")
+    check(sum(b) == 35, "names bound to fields")
+
+    o = Named { name: "origin", at: b }
+    m = Named { name: "m", at: a }
+    q = Named { name: "q", at: Pt { x: 0, y: 1 } }
+    lo = label(o)
+    lm = label(m)
+    lq = label(q)
+    check(string.equals(lo, "o"), "a string field by content")
+    check(string.equals(lm, "m@y"), "a nested pattern and a guard on its name")
+    check(string.equals(lq, "?"), "the guard false")
+
+    c = Pt { x: 1, y: 9 }
+    check(only(c) == 9, "a single definition matching")
+    check(only(a) == 0, "a single definition not matching")
+
+    total = 0
+    i = 0
+    while i < 100 {
+        v = Named { name: string.concat("ab", "c"), at: a }
+        r = shout(v)
+        total = total + string.length(r) + string.length(v.name)
+        i = i + 1
+    }
+    check(total == 700, "a rebound string leaves the caller's field")
+    println("clause struct pattern params ok")
+}
