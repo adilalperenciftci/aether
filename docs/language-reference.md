@@ -40,7 +40,7 @@ The placement is deliberate, Aether picks the pieces of each tradition that comp
 ### Where Aether is neither, it's just systems-pragmatic
 
 - Manual heap discipline is visible, `box_closure` / `unbox_closure` / `release_closure`, `ref()` cells, counted strings and closures released where their places end ([memory-management.md](memory-management.md)), `defer` for resource cleanup. Closer to Rust's explicit ownership story than to either paradigm's purist position.
-- Aether's closure model deliberately trades Lisp/Smalltalk-style runtime-owned environments for generated C structs whose lifetimes are mostly inferred by the compiler. See [Closure lineage and runtime tradeoffs](design/closure-lineage-and-runtime-tradeoffs.md) for the comparison.
+- Aether's closure model trades Lisp/Smalltalk-style runtime-owned environments for generated C structs whose environments the compiler reference counts. See [Closure lineage and runtime tradeoffs](design/closure-lineage-and-runtime-tradeoffs.md) for the comparison.
 - The C ABI / `extern` boundary is a first-class concern, not a hidden detail. The typechecker pragmatically allows `int ↔ ptr` and `fn ↔ ptr` coercions because surface ergonomics matter more than type-purity at the FFI boundary.
 - The capability + sandbox system (compile-time module gate / scope-level `hide` / `seal except` / LD_PRELOAD libc gate) is its own concern, orthogonal to both paradigms.
 
@@ -60,17 +60,25 @@ Aether is not, and has no plans to be, a pure FP language (no Hindley-Milner inf
 6. [Match Statements](#match-statements)
 7. [Switch Statements](#switch-statements)
 8. [Defer Statement](#defer-statement)
-9. [Memory Management](#memory-management)
-10. [Optionals](#optionals)
-11. [Structs](#structs)
-12. [Messages](#messages)
-13. [Actors](#actors)
-14. [Operators](#operators)
-15. [Modules and Imports](#modules-and-imports)
-16. [Extern Functions](#extern-functions)
-17. [Built-in Functions](#built-in-functions)
-18. [Comments](#comments)
-19. [Compilation](#compilation)
+9. [Scope Directives: `hide` and `seal except`](#scope-directives-hide-and-seal-except)
+10. [Memory Management](#memory-management)
+11. [Optionals](#optionals)
+12. [Enums](#enums), [Bit Sets](#bit-sets), [Bitstructs](#bitstructs)
+13. [Sum / Variant Types](#sum--variant-types)
+14. [Structs](#structs)
+15. [Messages](#messages)
+16. [Actors](#actors)
+17. [Operators](#operators)
+18. [Modules and Imports](#modules-and-imports)
+19. [Extern Functions](#extern-functions)
+20. [Built-in Functions](#built-in-functions)
+21. [Compiler Errors](#compiler-errors) and [Warnings](#compiler-warnings)
+22. [Match Expressions](#match-expressions)
+23. [Keywords](#keywords)
+24. [Comments](#comments)
+25. [Conditional Compilation](#conditional-compilation)
+26. [Compilation](#compilation)
+27. [Type System](#type-system)
 
 ---
 
@@ -83,7 +91,7 @@ Aether is not, and has no plans to be, a pure FP language (no Hindley-Milner inf
 | `int` | 32-bit signed integer | `42`, `-17`, `0xFF`, `0b1010` |
 | `float` | 64-bit floating point | `3.14`, `-0.5` |
 | `f32` | 32-bit floating point (C `float`): GPU buffers, C structs, single-precision maths; `f32 op f32` is a `float` op | `f32 x = 1.5`, `v as f32` |
-| `f32x4`, `f64x2`, `f32x8` | SIMD lanes — four single-precision, two double-precision or eight single-precision values | `lanes.splat4(1.0)`, `a * b`, `v.x` |
+| `f32x4`, `f64x2`, `f32x8` | SIMD lanes: four single-precision, two double-precision or eight single-precision values | `lanes.splat4(1.0)`, `a * b`, `v.x` |
 | `i32x4`, `i64x2`, `i32x8` | The mask a lane comparison yields (four 32-bit, two 64-bit or eight 32-bit lanes), and integer lanes in their own right | `a > b`, `lanes.select4(m, a, b)` |
 | `string` | UTF-8 encoded strings | `"Hello"` |
 | `bool` | Boolean type | `true`, `false` |
@@ -124,7 +132,7 @@ main() {
 
 #### `f32` 32-bit float
 
-`f32` is C's `float`: the number every GPU reads — vertex buffers, instance transforms, bone palettes, uniform blocks, `VkViewport` — and the one thing `float` (a C `double`) cannot be. A struct field of it has C's layout and alignment, so an `extern` taking such a struct by pointer sees a C struct of floats; an `f32[]` view over a `ptr` stores one C `float` per element; a local or parameter of it is a C `float`; and arithmetic between `f32` values is a C `float` operation.
+`f32` is C's `float`: the number every GPU reads (vertex buffers, instance transforms, bone palettes, uniform blocks, `VkViewport`), and the one thing `float` (a C `double`) cannot be. A struct field of it has C's layout and alignment, so an `extern` taking such a struct by pointer sees a C struct of floats; an `f32[]` view over a `ptr` stores one C `float` per element; a local or parameter of it is a C `float`; and arithmetic between `f32` values is a C `float` operation.
 
 ```aether,run
 struct Viewport { x: f32, y: f32, w: f32, h: f32 }
@@ -150,7 +158,7 @@ main() {
 
 **Conversion.** `f32` converts with `float` and the integer kinds exactly as C converts `float` and `double`: `x as f32` and `f as float` are the explicit spellings, and assignment performs the same conversion (`verts[i] = v`, `Viewport { x: 1.0 }`). A cast to or from a non-numeric kind is refused.
 
-**Arithmetic is single precision.** `a * b` on two `f32` values is an `f32`, computed in C `float`, and so is `f32 op <integer>` — C's usual arithmetic conversions. A numeric *literal* beside an `f32` operand takes the `f32` (an untyped constant, as in Go): `v * 0.5` — or `v * -0.5` — is one float multiply, and the literal reaches the C as `0.5f`. A `float` (double) *value* on the other side widens the expression to `float`, as in C, so a pipeline that wants double maths keeps its operands `float` and narrows once, at the buffer; one that wants single precision — a physics engine matching its reference's float solver — keeps them `f32` and gets float ops throughout. Comparison follows the same conversions.
+**Arithmetic is single precision.** `a * b` on two `f32` values is an `f32`, computed in C `float`, and so is `f32 op <integer>`, by C's usual arithmetic conversions. A numeric *literal* beside an `f32` operand takes the `f32` (an untyped constant, as in Go): `v * 0.5`, or `v * -0.5`, is one float multiply, and the literal reaches the C as `0.5f`. A `float` (double) *value* on the other side widens the expression to `float`, as in C, so a pipeline that wants double maths keeps its operands `float` and narrows once, at the buffer; one that wants single precision (a physics engine matching its reference's float solver) keeps them `f32` and gets float ops throughout. Comparison follows the same conversions.
 
 ```aether,run
 main() {
@@ -204,7 +212,7 @@ an `f64x2` names a lane it does not have.
 
 **A comparison yields a mask, not a bool.** `a < b` on lane values is an
 integer vector of the *same width* whose lane is all-ones where the
-comparison held: `i32x4` for `f32x4`, `i64x2` for `f64x2` — the widths match
+comparison held: `i32x4` for `f32x4`, `i64x2` for `f64x2`. The widths match
 because a mask of the other width would reinterpret the same register and
 scramble the lanes. That is what `lanes.select4` / `select2` take, what
 `mask_and` / `mask_or` / `mask_not` (and their `mask2_*` siblings) combine,
@@ -212,7 +220,7 @@ and what `any4` / `all4` / `any2` / `all2` reduce to a `bool` when a branch
 is wanted. A scalar `if` over lanes is a mistake the type catches.
 
 **A scalar operand splats.** `v * 2.0`, `v + n` (an integer) and `v > 2.0`
-apply to every lane, as in C — arithmetic and comparison alike, with the
+apply to every lane, as in C: arithmetic and comparison alike, with the
 scalar on either side, and a variable as well as a literal: `v * s` for a
 `float` `s` beside an `f32x4` converts `s` to the lane's element type and
 then broadcasts it. The same holds for every lane type and for a distinct
@@ -388,7 +396,7 @@ main() {
 - **A string is not a slice.** Passing one where a `T[]` is expected (a parameter, a binding, a `return`) is a type error; `string.bytes(s)` is the bounded, read-only `byte[]` view of a string's bytes, and it decays to their pointer at a C extern like any slice.
 - **A slice decays to its pointer** wherever a `ptr` is expected, exactly as a `T[N]` array does: a `ptr` parameter, a C extern's parameter (including one declared `T[]`), `free(s)`, a comparison against `null`, and pointer arithmetic (`s + n` is a `ptr` to element `n`). `s as ptr` spells the same conversion explicitly, for a `ptr` return or binding. The length is dropped at that boundary; nothing else about the extern ABI changes.
 - **`make([]T, n)`** allocates `n` zeroed elements and returns them as a bounded slice; `free(s)` releases them.
-- A slice does not own its elements. It is valid for exactly as long as the storage it views: an array in an enclosing scope, a `make` buffer until its `free`, a C buffer until C reclaims it. So a string read out of a `string[]` slice into something that outlives the read (a return value, a struct field, a container) is a copy of its own, while a local bound to one (`t = s[i]`) borrows it and is valid only as long as the element is; a store into a slice element frees nothing: the string it replaces is left to the storage's owner, and the string it stores becomes the storage's ([memory-management.md](memory-management.md)).
+- A slice does not own the storage it views. It is valid for exactly as long as that storage: an array in an enclosing scope, a `make` buffer until its `free`, a C buffer until C reclaims it. The elements are the storage's: a string read out of a `string[]` slice (`t = s[i]`, a return, a field) takes a reference of its own, and a store into an element (`s[i] = v`) takes the new string and releases the one it replaces, as a store into the array itself does. Memory C owns, viewed as `p as string[]`, owns nothing: a store there gives C the characters and takes no reference ([memory-management.md](memory-management.md#ptr-slots)).
 - **A slice of a function's own storage stays in the function** (E0900). An array literal in a slice slot, and a function's own fixed-size array, live in its frame, which ends when the function returns. A slice of either may be used while the function runs and passed down to the functions it calls, but it may not leave the function: returned (alone, in a struct or tuple, or in a closure that captured it), stored in a module-level `var`, or stored in a field of something that may outlive the function: a struct behind a pointer, or a global (a struct value of the function's own may take it, and is then itself such a slice). Each of those is refused at the value that leaves, `'lit' returns a slice of its own storage (an array literal)`. Keep such a slice in storage that lives as long as it: a `make([]T, n)` buffer, a slice the caller passed in, or a module-level array. A slice parameter (`xs: int[]`) views the caller's storage and may be returned; a fixed-size array parameter (`a: int[3]`) is the function's own copy of the caller's array, so a slice of it is a slice of the function's storage. What a name holds where it leaves is what counts, path by path: a local or a field of a local struct re-bound to a `make` buffer before the `return` holds no slice of the frame any more, but one that still holds it on any path to the `return` (an `if` that re-binds it in one branch only, a loop that may `break` before the re-bind) is refused. A re-bind made by calling a closure is not counted: a name that holds a slice of the frame before `reset()` still holds one after it, even when the closure re-binds it to a `make` buffer (following a closure call soundly is future work, #2837). The other way is counted, conservatively: a closure that may store a slice of the function's storage into one of its names (`setview = || { v = arr }`) gives that name a slice from where the closure is written on, whether and whenever it is called, and a store a closure makes through a pointer or into a module-level `var` is judged as the same store written in the function. What the closure stores is judged as the function's own stores are: a fixed-size array of the function or an array literal, a name that holds such a slice at some point of the function, a local of the closure bound to one, or a parameter of the closure it is called with one for (any parameter that can hold a slice, when the closure is passed on or stored). A slice parameter of the function, a `make` buffer, a module-level `var` or `[]` stored by a closure leaves the name as it was. A call's result is taken to be no view of the caller, so a function that hands back the slice it was given is not seen through, in a closure (`v = same(arr)`) or not.
 
 **Views over a raw pointer are unbounded.** `p as T[]` (the typed-array cast) and a `T[]` handed back by a C extern have no length the compiler can know. Such a view indexes without a check, as it always did, and its `.len` is `-1`. Bound it with an explicit end to get checking back:
@@ -452,7 +460,7 @@ All numeric literal formats work with bitwise operators and in any expression co
 
 A string literal is double-quoted. Its escapes are decoded once, in a plain literal and in the text of an interpolated one alike: `\n`, `\t`, `\r`, `\\`, `\"`, `\xN` / `\xNN` (one or two hex digits), `\N` to `\NNN` (octal), and any other `\c` is the character `c`.
 
-A literal may hold a NUL byte (`"a\0b"`, `"a\x00b"`, `"a\0b ${n}"`), and it keeps every byte: `string.length("a\0b")` is 3, `==` compares all of its bytes, and it is a whole key in a map or set, a whole value for `std.json` and `std.fs`, and a whole operand of `string.concat`, in a `match` arm and in a function-clause pattern, as a string built at run time is. The compiler emits such a literal as a static string that carries its length; it is never freed, and `string.free` on it is a no-op. A literal without a NUL stays the plain C string it always was, at no cost.
+Every literal is emitted as a static, pinned `AetherString` that carries its length: its count never changes, it is never freed, `string.free` on it is a no-op, and taking it (a store, an argument, a return) is the literal itself, with no count operation. A literal may hold a NUL byte (`"a\0b"`, `"a\x00b"`, `"a\0b ${n}"`), and it keeps every byte: `string.length("a\0b")` is 3, `==` compares all of its bytes, and it is a whole key in a map or set, a whole value for `std.json` and `std.fs`, and a whole operand of `string.concat`, in a `match` arm and in a function-clause pattern, as a string built at run time is.
 
 One boundary keeps the C view: a C extern whose parameter is `string` receives the literal's bytes up to the first NUL, since that is all a `const char*` can carry; a parameter declared `@aether string` receives the whole string. `print` and `println` write all of the literal's bytes.
 
@@ -479,11 +487,11 @@ Variables are inferred from their initialization or usage context.
 
 **`let` / `var` are optional keywords**, accepted but not required. Bare Python-style assignment is the canonical form and is what most stdlib code uses. `let x = 10` and `var x = 10` parse identically to `x = 10`. There is no semantic distinction between `let` and `var` Aether is not Rust; mutability is a property of the binding's later use, not its declaration. There is no `mut`: `let mut x = 0` is an error, because a `let` must bind something and `mut` is not a keyword the language has. A typed declaration is written without `let` (`int n = 0`, `Pair p`), so two names after `let` is always a mistake.
 
-**Semicolons are optional.** Aether parses end-of-line as a statement terminator. The samples above use no semicolons; older samples in this doc may show `;` for clarity. Either is fine, after any statement — `if x { a } ; b` is `if x { a }` then `b`.
+**Semicolons are optional.** Aether parses end-of-line as a statement terminator. The samples above use no semicolons; older samples in this doc may show `;` for clarity. Either is fine, after any statement: `if x { a } ; b` is `if x { a }` then `b`.
 
 **Keywords are not names.** A statement keyword used as a variable (`when = 0.0`, `message = "hi"`) is refused at the keyword: `'when' is a reserved keyword and cannot be used as an identifier; rename it`.
 
-**A local has one type: the one its first binding gave it.** A later bare assignment is an assignment, not a new variable, so `x = 5` then `x = "s"` (or `x = true`, `x = null`) is a compile error, *cannot re-bind 'x' as string: it was bound as int by its first assignment*, rather than a C error about `const char*`. Use a new name for the other value. A name first bound inside a branch or loop body and **used after it** is one variable for the whole function: it takes the numeric join of every binding (`if a { n = 1 } else { n = 4000000000 }` makes `n` a `long`; `f = 1.5` in one branch and `f = 2` in the other keeps `f` a `float`), and a binding of another kind anywhere in the function, or of another struct or pointer type, is the same compile error: *cannot bind 'v' as int: it is bound as string in another branch or loop body of this function*. A `switch` case is a branch here as an `if` arm is, and so is the body of a `match` arm ([Match Statements](#match-statements)). A local of a `while` body is declared before the loop, and a name both arms of an `if`/`else` (or every case of a `switch` with a `default`, or every arm of a `match` that runs an arm for every value) bind is declared before the `if` (or `switch`, or `match`), so each is one variable whether or not it is used after them: `view = p as *Apple` in one `while` and `view = p as *Pear` in the next is that error, where a bare `ptr` or `null` binding would fit either. A read of such a local in the body before its binding, which sees the value the previous pass bound, has the binding's type (`out = "${out}${prev}"` ahead of `prev = "p${i}"` reads a string). A name bound in the bodies of separate `if`s or `for` loops and used only inside them is a separate variable per body, except a `string` local, which is always one variable for the whole function, as its heap tracker is. The conversions the [table below](#casting-between-types) permits still apply at a re-bind, and the local keeps its first type: after `f = 1.5`, `f = 2` stores `2.0` and `f` stays a `float`; after `int x = 0`, `x = 2.5` stores `2`. A `string` accepts `null` (it is a nullable `const char*`), and a value that would not fit an *inferred* `int` (a 64-bit integer, a `uint32`, a float) is the narrowing error described there. Each slot of a tuple destructure that names a bound local re-binds it the same way, whether the local is in the same scope or is an outer one a closure writes (`a, b = two()` in a closure after `a, b = names()`): a slot of another kind is the same error, reported at the slot, a slot C converts is stored as the local's type, and an `int` slot binds an inferred `int`, as `x = 5` does (#2762).
+**A local has one type: the one its first binding gave it.** A later bare assignment is an assignment, not a new variable, so `x = 5` then `x = "s"` (or `x = true`, `x = null`) is a compile error, *cannot re-bind 'x' as string: it was bound as int by its first assignment*, rather than a C error about `const char*`. Use a new name for the other value. A name first bound inside a branch or loop body and **used after it** is one variable for the whole function: it takes the numeric join of every binding (`if a { n = 1 } else { n = 4000000000 }` makes `n` a `long`; `f = 1.5` in one branch and `f = 2` in the other keeps `f` a `float`), and a binding of another kind anywhere in the function, or of another struct or pointer type, is the same compile error: *cannot bind 'v' as int: it is bound as string in another branch or loop body of this function*. A `switch` case is a branch here as an `if` arm is, and so is the body of a `match` arm ([Match Statements](#match-statements)). A local of a `while` body is declared before the loop, and a name both arms of an `if`/`else` (or every case of a `switch` with a `default`, or every arm of a `match` that runs an arm for every value) bind is declared before the `if` (or `switch`, or `match`), so each is one variable whether or not it is used after them: `view = p as *Apple` in one `while` and `view = p as *Pear` in the next is that error, where a bare `ptr` or `null` binding would fit either. A read of such a local in the body before its binding, which sees the value the previous pass bound, has the binding's type (`out = "${out}${prev}"` ahead of `prev = "p${i}"` reads a string). A name bound in the bodies of separate `if`s or `for` loops and used only inside them is a separate variable per body, except a `string` local, which is always one variable for the whole function. The conversions the [table below](#casting-between-types) permits still apply at a re-bind, and the local keeps its first type: after `f = 1.5`, `f = 2` stores `2.0` and `f` stays a `float`; after `int x = 0`, `x = 2.5` stores `2`. A `string` accepts `null` (it is a nullable `const char*`), and a value that would not fit an *inferred* `int` (a 64-bit integer, a `uint32`, a float) is the narrowing error described there. Each slot of a tuple destructure that names a bound local re-binds it the same way, whether the local is in the same scope or is an outer one a closure writes (`a, b = two()` in a closure after `a, b = names()`): a slot of another kind is the same error, reported at the slot, a slot C converts is stored as the local's type, and an `int` slot binds an inferred `int`, as `x = 5` does (#2762).
 
 **A local's scope starts after its initializer.** In `count = count() + 1` the call is the function `count`, and from that binding on, to the end of the function, `count` is the local. So is a local declared ahead of its binding because both arms of an `if` bind it: until the checker reaches the first binding in source order, the name is still the function's. A reference that comes before the binding, such as the function passed as a value, is the function too:
 
@@ -536,9 +544,9 @@ After `as` the parser also accepts a primitive **value cast**: `n as int` and ot
 | `int` → `ptr` (e.g. passing an int to a `ptr`-typed extern param) | Implicit. The compiler emits `(void*)(intptr_t)` automatically at the call site. |
 | `string` → C `const char*` (passing a `string` to a C extern, or through a `fn(...)` pointer) | Implicit. The auto-unwrap injects `aether_string_data(arg)` at call sites for `string`-typed extern parameters, and for `string` parameters of a typed function pointer (a cast local, a `fn(...)` parameter, a struct field). |
 | `int` → `string` | `string.from_int(n)` (and `string.from_long(n)`, `string.from_float(f)`). |
-| C `const char*` → Aether `string` | Assignment to a `string`-typed variable, or returning from a function declared `-> string`. The returned `ptr` is treated as a borrowed C-string until it crosses into refcounted-string territory. |
-| `int` ↔ `int64` / `byte` ↔ `int` | Implicit safe widenings (`byte → int`, `int → int64`). The narrowing direction (`int → byte`) requires a literal-range check and truncates non-literals at runtime. See [§ `byte`](#byte-unsigned-8-bit). Spelled out with `as`, `b as int` widens a `byte` (always 0–255, it is unsigned) and `n as byte` keeps the low 8 bits, as for `uint8`. |
-| `float` → `int` | Into an **explicitly** typed slot (`int k = 4.5`, an `int` parameter or field, an element of `int[N] xs`) the value truncates, as in C. Into a slot whose `int` type was **inferred** (`r = 0` then `r = 2.5`; `xs = [1, 2]` then `xs[0] = 7.5`) it is a compile error naming the fix — the same rule as a 64-bit value into an inferred `int` — because the truncation was never chosen. |
+| C `const char*` → Aether `string` | Assignment to a `string`-typed variable, or a `return` from a function declared `-> string`. The place takes the value as it takes any string: C's characters are copied into a counted string the place owns, and a counted string behind the pointer is retained. An extern declared `-> string @heap` hands over a string the caller adopts without a copy. |
+| `int` ↔ `int64` / `byte` ↔ `int` | Implicit safe widenings (`byte → int`, `int → int64`). The narrowing direction (`int → byte`) requires a literal-range check and truncates non-literals at runtime. See [§ `byte`](#byte-unsigned-8-bit). Spelled out with `as`, `b as int` widens a `byte` (always 0 to 255, it is unsigned) and `n as byte` keeps the low 8 bits, as for `uint8`. |
+| `float` → `int` | Into an **explicitly** typed slot (`int k = 4.5`, an `int` parameter or field, an element of `int[N] xs`) the value truncates, as in C. Into a slot whose `int` type was **inferred** (`r = 0` then `r = 2.5`; `xs = [1, 2]` then `xs[0] = 7.5`) it is a compile error naming the fix (the same rule as a 64-bit value into an inferred `int`), because the truncation was never chosen. |
 | `uint32` → `int` | Explicit slots convert as in C. Into an **inferred** `int` (`k = 5` then `k = some_uint32`) it is the same narrowing error: values past 2³¹ do not fit. Annotate `uint32 k = ...` to keep it unsigned. |
 | Reinterpret a raw `ptr` as a typed struct view, function pointer, or array | `expr as *StructName`, `expr as fn(...) -> R`, or `expr as T[]` (the only `as` forms for values). |
 
@@ -621,7 +629,7 @@ next_rand() -> uint64 {
 - The type annotation is optional: `var hits = 0` infers `int` from the initializer, exactly like a local.
 - A `var` lowers to a **file-scope `static`** in the generated C. Reads and writes from same-module functions are plain identifier access, no accessors, no indirection. Every binding of a module `var`'s name in a function or a closure writes that global (the name is in scope everywhere in the module): a `name = expr` statement, and a declaration as well, `let name = expr`, `let name: int = expr` or `int name = expr`, which binds the global as `name = expr` does and never declares a local of that name. Pick a different name for a function-local. A closure that reads or writes a module `var` reaches the global itself, never a copy or a cell of its own, so its writes are seen by every function and the enclosing function's writes by the closure (#2805); only a parameter of the same name shadows it.
 - The **initializer must be a compile-time constant expression**, the same restriction as `const` (and for the same underlying reason, C requires a `static`'s initializer to be constant). Initialize to a constant and compute the live value from a function at startup if you need more.
-- An **optional** `var` takes a constant of its inner type, `none`, or no initializer at all, which is `none` (#2800): `var limit: int? = 3`, `var name: string? = none`, `var origin: Point? = Point { x: 0, y: 0 }`, `var cache: string?`. A function writes it with `name = value` or a tuple destructure slot, a bare value wrapped as for a local. A `string?` var keeps every string it was given, as a `string` var does: a re-bind takes a string of its own (a fresh one adopted, a borrowed one copied) and does not give back the one it held, so whatever reads it (`v = name ?? ""`, `v = name!`, a `some(v)` binding, or a view inside one expression beside a call that re-binds the var) stays valid for good. Its strings are never freed, the module-level string rule #2808 tracks.
+- An **optional** `var` takes a constant of its inner type, `none`, or no initializer at all, which is `none` (#2800): `var limit: int? = 3`, `var name: string? = none`, `var origin: Point? = Point { x: 0, y: 0 }`, `var cache: string?`. A function writes it with `name = value` or a tuple destructure slot, a bare value wrapped as for a local. A `string?` var owns the string it holds, as a `string` var does: a re-bind takes the new string and releases the one it held, and what a reader took out of it (`v = name ?? ""`, `v = name!`, a `some(v)` binding) holds a reference of its own, so it outlives the re-bind. A call that may re-bind the var is given a reference held for the call, so an argument read from it stays valid inside the call. The var's last value lives as long as the program.
 - Globals are **module-private** and **non-atomic**, matching the C statics they replace. They are not shared across modules and carry no built-in synchronization; guard concurrent access yourself (or keep such state on an [actor](actor-concurrency.md)).
 
 ---
@@ -665,7 +673,7 @@ print_hello() {
 
 There is no `void` keyword in the return-type position, a missing return-type annotation IS the void declaration (`-> void`, the conventional spelling, means the same). The `main()` function is the entry point and is always void.
 
-**Builtin names cannot be redefined.** A call to a builtin (`isolate`, `consume`, `release`, `make`, `sizeof`, `typeof`, `sleep`, …) is lowered by name, so a user function spelled the same would compile and never run; the definition is refused instead: `'isolate' is a builtin function and cannot be redefined … rename it (e.g. 'isolate_')`. A user function whose name is a *C library* symbol (`read`, `time`, `index`, `remove`, …) is fine: it is emitted under a mangled C name in every position — direct calls, `f as fn(...)`, and as a bare `fn` value.
+**Builtin names cannot be redefined.** A call to a builtin (`isolate`, `consume`, `release`, `make`, `sizeof`, `typeof`, `sleep`, …) is lowered by name, so a user function spelled the same would compile and never run; the definition is refused instead: `'isolate' is a builtin function and cannot be redefined … rename it (e.g. 'isolate_')`. A user function whose name is a *C library* symbol (`read`, `time`, `index`, `remove`, …) is fine: it is emitted under a mangled C name in every position: direct calls, `f as fn(...)`, and as a bare `fn` value.
 
 **`main()` takes no parameters.** There is no Aether-side `main(argc, argv)` form, the signature is uniform across every program. The runtime stashes the C-side `argc` / `argv` at startup (the codegen wraps your zero-arg `main()` in a C `int main(int argc, char** argv)` that calls `aether_args_init(argc, argv)` before any user code runs), and Aether code reaches command-line arguments through `std.os`:
 
@@ -735,13 +743,13 @@ main() {
 }
 ```
 
-What a binding converts, a `return` converts, as C converts it: one numeric scalar to another (`int` to `long` or `float`; into a written `int`, a `long` or a `float` truncates, as `int k = 4.5` does), a bool to an integer and an integer to a bool (a comparison returned from `-> int` is 1 or 0, an extern's int truth value returned from `-> bool` is whether it is nonzero), a `T` to `T?` and `none` to any optional, a variant struct to its sum or to the sum's optional, an enum to an integer (`byte` included) and an integer to an enum, `null` or an `int` to a `ptr` or a `*T`, and `null` or `[]` to a slice. A `string` and a bare `ptr` are both a C `const char*`, so a C string pointer returned from `-> string` is a borrowed string, and a string returned from `-> ptr` is its pointer:
+What a binding converts, a `return` converts, as C converts it: one numeric scalar to another (`int` to `long` or `float`; into a written `int`, a `long` or a `float` truncates, as `int k = 4.5` does), a bool to an integer and an integer to a bool (a comparison returned from `-> int` is 1 or 0, an extern's int truth value returned from `-> bool` is whether it is nonzero), a `T` to `T?` and `none` to any optional, a variant struct to its sum or to the sum's optional, an enum to an integer (`byte` included) and an integer to an enum, `null` or an `int` to a `ptr` or a `*T`, and `null` or `[]` to a slice. A `string` and a bare `ptr` are both a C `const char*`, so a C string pointer returned from `-> string` becomes a string (its characters copied into a counted string the caller owns), and a string returned from `-> ptr` is its pointer:
 
 ```aether
 extern getenv(name: string) -> ptr
 
 home() -> string {
-    return getenv("HOME")      // a C string, borrowed
+    return getenv("HOME")      // C's characters, copied
 }
 
 ratio(n: int) -> float {
@@ -800,30 +808,42 @@ main() {
 
 ### Default arguments
 
-Parameters can carry a default expression:
+A parameter can carry a default expression, used when a call leaves the
+parameter out. A call can also name its arguments, which binds each to the
+parameter it names whatever the order ([named-args-and-select.md](named-args-and-select.md)):
 
-```aether,fragment
+```aether,run
 greet(name: string, greeting: string = "Hello") -> string {
     return "${greeting}, ${name}!"
 }
 
-greet("Ada")        // -> "Hello, Ada!"
-greet("Ada", "Hi")  // -> "Hi, Ada!"
+main() {
+    println(greet("Ada"))
+    println(greet("Ada", "Hi"))
+    println(greet(greeting: "Hey", name: "Ada"))
+}
+```
+
+```output
+Hello, Ada!
+Hi, Ada!
+Hey, Ada!
 ```
 
 Rules:
-- By convention, defaults should trail required parameters (the Python
-  shape): once a default appears, every subsequent parameter should
-  also have one. This is a style convention, not a compiler-enforced
-  rule, the typechecker does not currently reject a default that is
-  followed by a required parameter, but positional calls to such a
-  function are awkward, so don't write them.
+- A positional call leaves out trailing parameters only; a named argument
+  can skip a defaulted parameter in the middle (`box(2, d: 4)`). The
+  compiler does not require defaults to trail the required parameters, but
+  a required parameter after a defaulted one can then only be given by
+  position after it, or by name.
+- A required parameter the call leaves out is an error, as are an unknown
+  name, a parameter given twice and a positional argument after a named one.
 - The default expression is evaluated at the **call site**, not the
   declaration site. Default expressions cannot reference other
-  parameters of the same function (they're typechecked in the
-  caller's scope where parameter values aren't visible).
-- The default-fill happens at typecheck time, codegen sees a
-  fully-populated call.
+  parameters of the same function (they are type-checked in the
+  caller's scope, where parameter values are not visible).
+- The default is filled in at type-check time, so code generation sees a
+  call with every argument.
 
 ### Source-location intrinsics
 
@@ -848,8 +868,8 @@ main() {
 }
 ```
 
-Used as **default values**, they substitute the caller's location,
-the killer ergonomic for logging / assertion frameworks:
+Used as **default values**, they substitute the caller's location, which is
+what a logging or assertion helper needs:
 
 ```aether
 my_log(msg: string,
@@ -1134,7 +1154,7 @@ println(if x > 0 { x } else { 0 - x })
 grade = if score >= 90 { 4 } else { if score >= 80 { 3 } else { 2 } }
 ```
 
-Both branches must produce a value of the same type. The `else` branch is required. Two numeric branches have their common type, as C's `?:` computes it: `if c { 1 } else { big }` with a `long big` is a `long`, and an `int` beside a `float` is a `float`, so neither branch is narrowed into the other's type. A float literal beside an `f32` branch takes the `f32`, as it does beside an `f32` operand. A value `match` types its arms the same way. A branch whose type the other branch's takes (a variant beside its sum, a `T` beside a `T?`) is converted into it, and the expression has the wider type. Two branches neither of which takes the other (an `int` and a `string`, two variants of a sum) are a compile error naming both types.
+The `else` branch is required, and the expression has the type its branches have in common. Two numeric branches have their common type, as C's `?:` computes it: `if c { 1 } else { big }` with a `long big` is a `long`, and an `int` beside a `float` is a `float`, so neither branch is narrowed into the other's type. A float literal beside an `f32` branch takes the `f32`, as it does beside an `f32` operand. A value `match` types its arms the same way. A branch whose type the other branch's takes (a variant beside its sum, a `T` beside a `T?`) is converted into it, and the expression has the wider type. Two branches neither of which takes the other (an `int` and a `string`, two variants of a sum) are a compile error naming both types.
 
 ### While Loops
 
@@ -1199,8 +1219,8 @@ main() {
 A step that binds a variable (`i = i + 3`, `i += 3`, `s = string.concat(s, "b")`)
 is that binding, made at the end of each pass, and a `continue` runs it before
 the condition is tested again. The loop's variable owns its value as any local
-does: a string the step or the body replaces is freed, and so is the one the
-loop ends with.
+does: a string the step or the body replaces is released, and so is the one
+the loop ends with.
 
 ```aether,run
 main() {
@@ -1548,7 +1568,7 @@ main() {
 ```
 
 Alternatives are the comma-list, in `switch` and `match` alike. A `|` between
-values is the bitwise OR — `1 | 2 | 3` is the number 3 — so the compiler
+values is the bitwise OR (`1 | 2 | 3` is the number 3), so the compiler
 refuses it in a selector and names the comma form.
 
 ### Interpreter dispatch loops
@@ -1632,7 +1652,7 @@ A plain `defer` runs on **every** exit, a panic that a `try` catches further up
 included. Two qualified forms run on only one, and neither on a panic:
 
 ```aether,fragment
-defer       cleanup()    // always — on every exit
+defer       cleanup()    // always: on every exit
 defer try   commit()     // only when the function returns SUCCESSFULLY
 defer catch rollback()   // only when the function returns an ERROR
 ```
@@ -1647,11 +1667,11 @@ the acquire leaking and without a half-built result being published.
 ```aether,fragment
 acquire(path: string) -> (ptr, string) {
     p = malloc(SIZE)
-    defer catch free(p)              // we bailed — release it
+    defer catch free(p)              // on an error return, release it
     cfg, err = parse(path)
     if err != "" { return null, err } // ...and `p` is freed on the way out
     init(p, cfg)
-    return p, ""                     // succeeded — the caller owns `p` now
+    return p, ""                     // success: the caller owns `p` now
 }
 ```
 
@@ -1659,7 +1679,7 @@ Without them, every early return needs its own `if err != "" { free(p); return }
 and the one you forget is the leak.
 
 Ordering is unchanged: **all** defers still run in LIFO order, and the
-conditional ones interleave with the unconditional ones by registration order
+conditional ones interleave with the unconditional ones by registration order;
 they are not hoisted into separate groups. In
 
 ```aether,fragment
@@ -1673,8 +1693,9 @@ a successful return logs `T`, `A`; an error return logs `C`, `A`.
 **Cost.** One predictable compare on the return path, and not even that where
 the outcome is known at compile time. An `expr!` propagation is *always* an error
 exit and a bare `return v` is *always* a success exit, so in a `T!` function both
-are resolved statically and no guard is emitted at all. There is no runtime defer
-stack; as with a plain `defer`, the bodies are emitted inline at each exit.
+are resolved statically and no guard is emitted at all. As with a plain `defer`,
+the bodies are emitted inline at each exit; a plain `defer` is also recorded in
+the unwind journal while a `try` is live, so a caught panic runs it.
 
 **They only mean something in a function that can fail.** In a function with no
 error channel, a `defer catch` could never fire and a `defer try` is just a plain
@@ -1739,11 +1760,18 @@ For the full design rationale, edge cases, and worked examples, see [hide-and-se
 
 ## Memory Management
 
-Aether uses **deterministic scope-exit cleanup** -- no garbage collector, no GC pauses. The primary mechanism is `defer`.
+Aether has no garbage collector. Values the program owns (strings, closures,
+string sequences, and the structs, tuples, optionals and fixed-size arrays
+built from them) are reference counted by the compiler: every place holds one
+reference, a store takes one, and leaving a scope releases what the scope held,
+so the program writes no free for them ([String ownership](#string-ownership)).
+Handles (a list, a map, a C buffer, an open file) are `ptr`s, which own
+nothing, and the program frees them, with `defer`. [Memory Management
+Guide](memory-management.md) states the rules in full.
 
-### `defer` for Cleanup (default)
+### `defer` for handles
 
-Allocate, immediately defer the free, then use the resource. Cleanup runs at scope exit in LIFO order:
+Allocate, defer the free at once, then use the handle. Cleanup runs at scope exit in LIFO order:
 
 ```aether
 import std.list
@@ -1759,11 +1787,11 @@ main() {
 }
 ```
 
-This works with any function, not just stdlib types.
+A `defer` runs any statement, not only a stdlib free.
 
-### Returning Allocated Values
+### Returning a handle
 
-The caller receives ownership and is responsible for cleanup:
+A function that returns a handle it allocated gives it to the caller, which frees it:
 
 ```aether
 import std.list
@@ -1786,8 +1814,6 @@ main() {
     print("\n")
 }
 ```
-
-See [Memory Management Guide](memory-management.md) for the full reference.
 
 ### Multiple Return Values (Result Types)
 
@@ -1945,6 +1971,12 @@ add(a: int, b: int) -> int
 
 **Lowering**:
 
+- `requires <expr>` lowers to `if (!(<expr>)) aether_panic("precondition_violation: <expr> in <fn>");` emitted at function entry, after parameters are declared and before any user code runs. Parameters are in scope.
+- `ensures <expr>` lowers to a pre-return wrapper `{ <T> result = <return-expr>; if (!(<expr>)) aether_panic("postcondition_violation: <expr> in <fn>"); return result; }` emitted before each `return` statement. The synthetic `result` local is the return value about to be returned and is scoped to the wrapper block; it shadows any outer `result`.
+
+Clauses may appear in any number and order. Each is checked on its own, so the panic message names the predicate that failed, and the panic's stack trace names the call.
+
+A parameter may carry its precondition inline: `b: int where b != 0` is the same check as `requires b != 0`.
 
 #### Panic categories
 
@@ -1961,11 +1993,6 @@ downstream triage match on it, so it does not change with the prose after it.
 A failure that forwards an existing error value (`expr!` on a fallible) prints
 that error's own message rather than a category, because the message came from
 the callee and is not one of these classes.
-
-- `requires <expr>` lowers to `if (!(<expr>)) aether_panic("precondition_violation: <expr> in <fn>");` emitted at function entry, after parameters are declared and before any user code runs. Parameters are in scope.
-- `ensures <expr>` lowers to a pre-return wrapper `{ <T> result = <return-expr>; if (!(<expr>)) aether_panic("postcondition violation: <expr> in <fn>"); return result; }` emitted before each `return` statement. The synthetic `result` local is the return value about to be returned and is scoped to the wrapper block, it shadows any outer `result` cleanly.
-
-Multiple clauses in any order, freely interleaved. Each is checked independently, so the panic message names the specific failed predicate. The diagnostic plays nicely with `panic` stack traces for actionable error reporting.
 
 **`--no-contracts` build flag**:
 
@@ -1996,7 +2023,7 @@ outcomes:
   divide(a: int, b: int where b != 0) -> int { return a / b }
 
   divide(10, 0)     // error: precondition violation at compile time:
-                    //        b != 0 in divide — this call's constant
+                    //        b != 0 in divide, this call's constant
                     //        arguments can never satisfy it
   divide(10, n)     // n is runtime → runtime check, exactly as before
   ```
@@ -2035,7 +2062,7 @@ See [examples/basics/contracts.ae](../examples/basics/contracts.ae) for runnable
 Every place that holds a string (a local, a struct field, an element, a module-level `var`, a closure's capture) owns one reference to it, and releases it when the place is given a new value or goes away (scope exit on every path, a struct destroyed). **You do not write `defer string.free(s)`.** The model is [docs/design/ownership-model.md](design/ownership-model.md).
 
 - **A function returning a string hands its caller one reference, from every return.** A literal is handed over as it is (literals are static and never freed); a fresh string, or a local at its last use, is moved; a string the function only borrows (a parameter, a field of one) is retained, and a plain C string copied.
-- **A parameter is borrowed for the call.** The caller owns the string and frees it. A function that keeps a parameter (stores it in a field, a module-level `var`, a container) takes a reference of its own there.
+- **A parameter is borrowed for the call.** The caller owns the string and releases it. A function that keeps a parameter (stores it in a field, a module-level `var`, a container) takes a reference of its own there.
 - **A function may not free a parameter** (E0901): `string.free(p)` or `release(p)` on a `string` parameter, or `string.seq_free(p)` on a `*StringSeq` one, would release a reference the function does not own. Store it to keep it; a parameter the body re-binds holds a string of its own and may be freed.
 - **`string.free(x)` releases the reference `x` holds and leaves `x` empty**, for a local, a field or a module-level `var`. Nothing frees it again.
 
@@ -2076,11 +2103,11 @@ let empty: int? = none      // the absent sentinel
 
 `T?` works for any element type, value types (`int?`, `float?`, `bool?`, an enum's `Color?`, a distinct type's `Meters?`) and reference types (`string?`, `*Node?`) alike, with one uniform representation, so there is no ambiguity between "the value is a null pointer" and "the key was absent". An optional can also be an element of a tuple, `-> (string?, int)`, returned as `return "pos", n` or `return none, n`, and a tuple can be optional: `let t: (int, int)? = (3, 4)` wraps the tuple literal as it wraps any value (#2833).
 
-A struct field can be optional (#2820): `struct Box { v: int?  at: Point? }`. A struct literal (`Box { v: 7, at: none }`) and a field store (`b.v = 9`, `b.v = none`) take the value as an optional binding does, a bare value wrapped. An optional field whose value owns memory, a `string?`, an optional `fn`, or an optional of a struct, a fixed-size array or a tuple that holds a string or a closure (`Bag?` with `names: string[2]`, `(string, int)?`), is refused for now (#2822): it has none of the ownership a `string` field has, so a string stored there would leak or dangle. Hold the value bare (a `string` with `""` for none) or keep the optional in a local.
+A struct field can be optional (#2820): `struct Box { v: int?  at: Point? }`. A struct literal (`Box { v: 7, at: none }`) and a field store (`b.v = 9`, `b.v = none`) take the value as an optional binding does, a bare value wrapped. An optional field whose value owns memory (a `string?`, an optional `fn`, or an optional of a struct, a fixed-size array or a tuple that holds a string or a closure, such as `(string, int)?`) owns it as a field of the bare type does: a literal or a store takes the value, and a later store and the struct's destroy release it (#2822).
 
 ### `none` and equality
 
-`none` is a reserved literal (like `true`, `false`, and `null`), it cannot be used as a variable, parameter or constant name — the compiler refuses the declaration, because every later use of such a binding would read as the literal instead. Compare against it with `==` / `!=`:
+`none` is a reserved literal (like `true`, `false`, and `null`): it cannot be used as a variable, parameter or constant name, and the compiler refuses the declaration, because every later use of such a binding would read as the literal instead. Compare against it with `==` / `!=`:
 
 ```aether,fragment
 if empty == none {
@@ -3287,22 +3314,26 @@ namespace across modules.
 
 ### Import with Alias
 
-The `import mod as alias` syntax parses and records the alias, but calls through
-the alias prefix (`str.new(...)`) do not currently resolve, the aliased name is
-not wired into namespace lookup, so the call fails typechecking. Until that lands,
-use the module's own namespace directly:
+`import mod as alias` gives the module a second prefix in the importing file.
+A qualified call through the alias reaches the module as its own name does,
+and the module's own name keeps working beside it:
 
-```aether,fragment
-// Aliased-call form parses but does not yet resolve:
-// import std.string as str
-// s = str.new("hello")            // typecheck error: undefined function
+```aether,run
+import std.string as str
 
-// Working form: use the module name directly
-import std.string
-s = string.new("hello")
-len = string.length(s)
-string.release(s)
+main() {
+    s = str.concat("Hello, ", "Ada")
+    println("${str.length(s)} ${string.to_upper(s)}")
+}
 ```
+
+```output
+10 HELLO, ADA
+```
+
+An alias is resolved in the file that writes it, a library module's file
+included (#2209), and an alias-only import of a local package merges the
+package's functions as a plain import does.
 
 ### Local Module Imports
 
@@ -3390,17 +3421,30 @@ Passing a plain `ptr` where the C conversion is safe stays allowed at call sites
 
 A C function's body is not visible to the compiler, and its declaration does not narrow what it does: it may write through any pointer it is given and any state of its own (a reader of stdin, a random generator with no handle parameter). So a call of an extern is evaluated ahead of any later operand that calls anything or reads memory through a pointer, see **Evaluation order** under [Built-in Functions](#built-in-functions); `pair(pqueue.pop(q), pqueue.pop(q))` pops in source order, and `pair(strbuilder.append(b, "xy"), strbuilder.length(b))` reads the length after the append.
 
-### `@noescape` the extern uses this parameter only during the call
+### `@retain` and `@noescape`: what an extern does with a parameter
 
-A closure passed to an extern is a callback the C side may keep (an event handler, a server route, a timer), so by default the compiler never releases its environment after the call: freeing it would be a use after free if the callee stored the closure. A parameter marked `@noescape` says the function uses the argument only during the call, neither storing it, handing it to another thread, nor freeing it. The caller then keeps the closure's environment and releases it once the call returns, exactly as after a call to an Aether function that keeps nothing: a literal's right after the call, a local's at the end of its scope. A `ptr` slot receives a box built on the caller's stack instead of a heap one, and a wrapper that forwards its own `fn` parameter to such a slot (`fs.walk` into `fs_walk_raw`) keeps nothing either.
+An extern borrows what it is given, as every call does: a fresh argument is
+released after the call, and a local's value stays the caller's. An extern
+that keeps a closure or a string past the call (an event handler, a server
+route, a timer) declares that parameter `@retain`, and the call then hands it
+a reference of its own: a fresh value as it is, a place's retained. C gives a
+kept closure back through the closure's own destructor. A closure passed to a
+`ptr` parameter is boxed: on the caller's stack when the parameter only
+borrows, so nothing is allocated, and on the heap, with its own reference,
+when the parameter is `@retain`.
 
 ```aether,fragment
 extern string_seq_each(s: *StringSeq, f: @noescape ptr)     // calls f per element, keeps nothing
-extern run_now(cb: @noescape fn) -> int                      // by value, same contract
-extern register_handler(cb: fn)                              // stored: no mark, the env lives on
+extern register_handler(cb: @retain fn)                      // stores the closure: it gets a reference
+extern http_server_get(server: ptr, path: string, handler: @retain ptr, user_data: ptr)
 ```
 
-It is only valid on `ptr` and `fn` parameters (a `string` parameter is borrowed unless `@retain` says otherwise). The C function must not free the box or the environment. The std callbacks that carry it: the string seq combinators (`seq_each`, `seq_map`, `seq_filter`, `seq_reduce`, `seq_zip_each`), `fs.walk`'s callback, `string_list_sort`'s comparator and the `std.mem` function-pointer shims. Externs that store the callback (`observe`, `worker.run`, the HTTP server handlers) stay unmarked.
+`@noescape` states what an unmarked parameter already is: the C function uses
+the argument only during the call, neither storing it, handing it to another
+thread, nor freeing it. It is accepted on `ptr` and `fn` parameters. The std
+externs that keep a closure are declared `@retain`: `observe`, the worker
+pool's jobs and main-thread poster, and the HTTP server's route, SSE and
+WebSocket handlers.
 
 ### `@extern("c_name")` bind to a renamed C symbol
 
@@ -3526,7 +3570,7 @@ reduce(f: fn(int, int) -> int, x: int, y: int) -> int {
 }
 ```
 
-Pass an Aether function's address with the `as fn(...)` cast, `walk(my_handler as fn(ptr, ptr) -> void, p, q)` or a C function pointer obtained from an extern. A `string` argument reaches the callee as its bytes: the call wraps it in `aether_string_data(arg)`, as a call to an extern does, so a heap string (interpolated, concatenated) arrives as its characters and not as its `AetherString` header. This holds for every typed-pointer call: a `fn(...)` parameter, a cast local (`f = p as fn(uint32, string) -> int; f(7, name)`) and a function-pointer struct field. A closure cannot go there — it carries an environment and a C function pointer has none — and the compiler says so at the call (`a closure cannot be passed as a typed function pointer`); a callback that may be a closure takes a bare `fn` parameter and is invoked with `call(cb, …)`. This is the parameter form of the same typed-fn-pointer machinery used by `as fn(...)` locals and function-pointer struct fields; the prototype matches the C signature exactly (needed for callback APIs like `qsort`, `dictScan`, signal handlers, libcurl/sqlite hooks).
+Pass an Aether function's address with the `as fn(...)` cast, `walk(my_handler as fn(ptr, ptr) -> void, p, q)` or a C function pointer obtained from an extern. A `string` argument reaches the callee as its bytes: the call wraps it in `aether_string_data(arg)`, as a call to an extern does, so a heap string (interpolated, concatenated) arrives as its characters and not as its `AetherString` header. This holds for every typed-pointer call: a `fn(...)` parameter, a cast local (`f = p as fn(uint32, string) -> int; f(7, name)`) and a function-pointer struct field. A closure cannot go there (it carries an environment, and a C function pointer has none), and the compiler says so at the call (`a closure cannot be passed as a typed function pointer`); a callback that may be a closure takes a bare `fn` parameter and is invoked with `call(cb, …)`. This is the parameter form of the same typed-fn-pointer machinery used by `as fn(...)` locals and function-pointer struct fields; the prototype matches the C signature exactly (needed for callback APIs like `qsort`, `dictScan`, signal handlers, libcurl/sqlite hooks).
 
 A named Aether function bound to a typed function pointer is its address there too, without the cast: an argument to such a parameter, a struct or message field of that type, a `let` local of it, a module-level `var` (its initializer, and an assignment to it in a function body) or `const` (`const CB: fn(int) -> string = label`, called `CB(1)`), and a function's result. The signature is checked: the parameter types must match, and so must the result, where `fn(ptr, int)` and `fn(ptr, int) -> void` are the same type.
 
@@ -3752,14 +3796,14 @@ println("Hello, ${name}! You are ${age} years old.")
 
 The text around the `${expr}` parts takes the same escapes as a plain string literal, with the same meaning wherever they sit: `"a\\0b ${n}"` holds a backslash followed by `0b`, `"a\0b ${n}"` holds a NUL byte that the result keeps, and `\${` writes a literal `${` rather than starting an interpolation. A `${s}` segment writes the string `s` by its length, so a value holding a NUL goes in whole; `print` and `println` write a string value the same way.
 
-Interpolated strings produce a `ptr` (heap-allocated C string) when used as values:
+An interpolated string used as a value is a fresh, counted `string`, which the place it is stored in owns ([String ownership](#string-ownership)):
 
 ```aether,fragment
-msg = "Hello, ${name}!"         // msg is a ptr (char*), not an int
-tcp_send_raw(conn, msg)          // can be passed to any function expecting ptr
+msg = "Hello, ${name}!"         // msg owns the new string
+tcp.write(conn, msg)            // borrowed for the call; msg still owns it
 ```
 
-When used directly inside `print`/`println`, the compiler optimizes to a `printf` call (no allocation). `print` flushes stdout after it writes, interpolated or not, so partial-line output appears at once and survives a process that is killed or leaves through `_exit`; `println` leaves stdout's buffering to the C library.
+Used directly inside `print`/`println`, it compiles to a `printf` call, with no allocation. `print` flushes stdout after it writes, interpolated or not, so partial-line output appears at once and survives a process that is killed or leaves through `_exit`; `println` leaves stdout's buffering to the C library.
 
 **Evaluation order.** The `${expr}` segments of one interpolated string are
 evaluated left to right, in source order, on every C compiler and
@@ -3874,7 +3918,7 @@ always closes.) The marker must also be alone on its line: `done MARKER` and
 surrounding code without that indentation leaking into the string:
 
 ```aether,fragment
-fn describe() -> string {
+describe() -> string {
     return <<TEXT
         line one
           line two
@@ -3892,7 +3936,7 @@ Rules:
   stops there, Aether never shifts past a column where lines differ. To keep a
   literal common indent in the string, indent one line one notch less than the
   rest (so the common prefix is shorter than the indent you want kept).
-- A line indented *less* than the common prefix simply loses what leading
+- A line indented *less* than the common prefix loses what leading
   whitespace it has and lands at column 0.
 
 ### Timing
@@ -3944,6 +3988,7 @@ An error stops the build and prints its code, `error[E0301]: ...`, with the sour
 | `E0900` | A slice of a function's own storage (an array literal, an array of its own) leaves the function: returned, stored in a module-level `var` or in a field that outlives it, or captured by a closure that does ([Slices](#slices-t)) |
 | `E0901` | A function frees a `string` or `*StringSeq` parameter it only borrows ([String ownership](#string-ownership)) |
 | `E0902` | A function keeps a `ptr` parameter not declared `@keep`, a `string` is given to a `@keep ptr` without `string.keep` (a `*StringSeq` without `string.seq_retain`), a string C memory viewed as `string[]` would read after its owner frees it (one built in the statement, or any but a pinned literal where the memory outlives the function), or a function with a `@keep` parameter is used as a value ([String ownership](#string-ownership)) |
+| `E1000` | A file defines a function under a name it also imports selectively (`import std.string (length)` beside its own `length`), so a bare call in the function's body would reach itself ([module-system-design.md](module-system-design.md)) |
 
 ## Compiler Warnings
 
@@ -3999,13 +4044,13 @@ long span = 250000000 - 200000000
 cv = span * 50 / 225000000          // 11, no warning
 ```
 
-A `long` expression is folded in 64 bits the same way — exactly, so
+A `long` expression is folded in 64 bits the same way, exactly, so
 `9007199254740993 + 0` keeps its low bit, and past `LLONG_MAX` it wraps with
 `long constant expression overflows 64 bits and wraps to … at runtime`.
 
 The runtime is held to the same rule. Aether compiles to C, where signed
 overflow is *undefined behaviour* rather than a wrap, so every command line the
-toolchain uses to compile generated code carries `-fwrapv` — `ae run`,
+toolchain uses to compile generated code carries `-fwrapv`: `ae run`,
 `ae build` at any optimisation level, the cross and wasm backends, and
 `ae cflags` for build systems that compile `aetherc` output themselves. Two's
 complement wrapping is the specified behaviour of `int`, not an artifact of the
@@ -4334,18 +4379,23 @@ The following identifiers are reserved:
 | `while`, `for`, `in`, `break`, `continue` | Loops |
 | `return` | Function return |
 | `match`, `switch`, `case`, `default` | Pattern matching / dispatch |
-| `actor`, `receive`, `spawn`, `reply`, `after` | Actor system |
-| `message`, `struct` | Type definitions |
+| `when` | Guard clauses, `when defined(...)` regions |
+| `defer`, `try`, `catch`, `panic` | Scope-exit cleanup and panics |
+| `requires`, `ensures` | Function contracts |
+| `actor`, `receive`, `spawn`, `spawn_actor`, `send`, `reply`, `after`, `self` | Actor system |
 | `state` | Actor state (only reserved inside actor bodies) |
-| `import`, `extern` | Modules and C interop |
-| `as` | Import aliasing (`import std.string as str`) |
-| `const` | Top-level constants |
-| `var` | Mutable module-level globals |
-| `defer` | Scope-exit cleanup |
+| `message`, `struct`, `union`, `builder`, `func`, `callback` | Definitions and trailing-block forms |
+| `let`, `var`, `const` | Bindings, module-level globals, constants |
+| `import`, `as`, `export`, `exports`, `module`, `extern` | Modules and C interop |
 | `hide`, `seal`, `except` | Scope-level name denial (see [hide-and-seal.md](hide-and-seal.md)) |
 | `null`, `true`, `false` | Literals |
-| `when` | Guard clauses |
-| `int`, `float`, `string`, `bool`, `ptr`, `long` | Type names |
+| `main`, `print`, `make` | The entry point and two builtins |
+| `int`, `long`, `uint64`, `float`, `bool`, `byte`, `string`, `ptr`, `Duration`, `actor_ref`, `ActorRef`, `Message` | Type names |
+
+`none` is not a keyword but cannot be declared as a name either: it is the
+empty optional's literal ([Optionals](#none-and-equality)). `enum`, `type`,
+`fn` and `cfn` are recognised where a declaration starts and are ordinary
+names elsewhere.
 
 Note: `state` is context-sensitive, it is a keyword only inside actor bodies. In all other code, `state` can be used as a regular variable name.
 
@@ -4401,14 +4451,13 @@ rename and the `` `<kw>` `` escape.
 Module paths are the exception: a segment there is a name and nothing else, so
 `import std.message` needs no escape. Calling through the bare module name
 still would (`message.format(...)` puts a keyword in expression position), so
-import the symbols you need by name:
+import the symbols you need by name, or give the module an alias
+([Import with Alias](#import-with-alias)):
 
 ```aether,fragment
 import std.message (format, catalog_new)   // format(...), catalog_new(...)
+import std.message as msg                  // msg.format(...)
 ```
-
-(`import std.message as msg` parses, but qualified calls through an alias do
-not resolve yet, see [Import with Alias](#import-with-alias).)
 
 ---
 
@@ -4488,7 +4537,7 @@ still compiles and links every line of the subsystem you meant to leave out.
 **A dropped `import` takes its native dependencies with it.** The effect is
 not limited to your own symbols. A module declares its native libraries with
 `@link`, and those flags reach the linker only when the module is in the
-resolved import closure — so guarding the `import` removes the C library too,
+resolved import closure, so guarding the `import` removes the C library too,
 transitively and at any depth:
 
 ```aether,fragment
@@ -4498,7 +4547,7 @@ when defined(WITH_SQLITE) {
 }
 ```
 
-Built without `WITH_SQLITE`, the binary does not link `libsqlite3` at all —
+Built without `WITH_SQLITE`, the binary does not link `libsqlite3` at all:
 `ldd` does not list it. That is usually the reason to reach for `when` in the
 first place: the measured difference on this example is 4.4x. A C file the
 module ships (`@source("lanes.c")`) is dropped the same way: it is compiled
@@ -4573,7 +4622,7 @@ aetherc --dump-ast program.ae
 
 ## Type System
 
-Aether uses static typing with full type inference, explicit annotations are never required, but are always accepted.
+Aether uses static typing with type inference: an Aether function or local needs no annotation, and accepts one anywhere. An `extern` is the exception, below.
 
 ### Inference rules
 
