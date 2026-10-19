@@ -7043,6 +7043,20 @@ void emit_optional_coerced(CodeGenerator* gen, ASTNode* value, Type* target) {
         fprintf(gen->output, "(%s){0}", tc);
         return;
     }
+    /* #2845: an if-expression goes into the optional arm by arm, as a match
+     * does: each arm wrapped (a tuple literal as its compound literal),
+     * `none` the empty optional, an optional arm as it is. Wrapped whole,
+     * `if c { 3 } else { none }` was `.val = (c ? 3 : {0})`. */
+    if (value->type == AST_IF_EXPRESSION && value->child_count >= 3) {
+        fprintf(gen->output, "((");
+        generate_expression(gen, value->children[0]);
+        fprintf(gen->output, ") ? ");
+        emit_optional_coerced(gen, value->children[1], target);
+        fprintf(gen->output, " : ");
+        emit_optional_coerced(gen, value->children[2], target);
+        fprintf(gen->output, ")");
+        return;
+    }
     if (value->node_type && value->node_type->kind == TYPE_OPTIONAL) {
         generate_expression(gen, value);   // already an optional
         return;
@@ -7671,6 +7685,11 @@ static void emit_return_value(CodeGenerator* gen, ASTNode* stmt) {
 int needs_optional_coerce(ASTNode* value, Type* target) {
     if (!value || !target || target->kind != TYPE_OPTIONAL) return 0;
     if (value->type == AST_NONE_LITERAL) return 1;
+    /* #2845: an if-expression goes in arm by arm, so it needs the coercion
+     * when either arm does, whatever type the then arm gave it. */
+    if (value->type == AST_IF_EXPRESSION && value->child_count >= 3)
+        return needs_optional_coerce(value->children[1], target) ||
+               needs_optional_coerce(value->children[2], target);
     if (value->node_type && value->node_type->kind == TYPE_OPTIONAL) return 0;
     return 1;
 }
@@ -11501,6 +11520,28 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
         }
             
         case AST_RETURN_STATEMENT: {
+            /* #2845: `return a, b` (or `return (a, b)`) from a function whose
+             * result is an optional tuple is the tuple wrapped into it, as
+             * a binding of the tuple literal is (#2833): re-dispatched as
+             * the return of one tuple literal, which emit_return_value
+             * coerces into the optional. The multi-value paths below build
+             * the result tuple itself, which an optional is not. */
+            if (stmt->child_count > 1 && !gen->in_main_function &&
+                gen->current_func_return_type &&
+                gen->current_func_return_type->kind == TYPE_OPTIONAL &&
+                gen->current_func_return_type->element_type &&
+                gen->current_func_return_type->element_type->kind == TYPE_TUPLE &&
+                gen->current_func_return_type->element_type->tuple_count == stmt->child_count) {
+                ASTNode* lit = create_ast_node(AST_TUPLE_LITERAL, NULL, stmt->line, stmt->column);
+                for (int j = 0; j < stmt->child_count; j++) add_child(lit, stmt->children[j]);
+                lit->node_type = clone_type(gen->current_func_return_type->element_type);
+                ASTNode* rstmt = create_ast_node(AST_RETURN_STATEMENT, NULL, stmt->line, stmt->column);
+                add_child(rstmt, lit);
+                generate_statement(gen, rstmt);
+                lit->child_count = 0;   /* the elements are this return's */
+                free_ast_node(rstmt);
+                break;
+            }
             // #1054: `return match x { ... }`, a match in return position, is a
             // value-producing expression, not a statement. Lower it via the same
             // result-variable mechanism the working `v = match x { ... }` form

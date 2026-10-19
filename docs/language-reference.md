@@ -2126,7 +2126,7 @@ main() {
 }
 ```
 
-A `match` whose value is bound to an optional, or returned from a function whose result is one, is wrapped arm by arm, each arm's value as it would be on its own (`none` is the empty optional):
+A `match` or an if-expression whose value goes into an optional (a binding, a return, an argument, a field) is wrapped arm by arm, each arm's value as it would be on its own (`none` is the empty optional, an optional arm passes as it is). A function whose result is an optional tuple returns one as `return a, b` or `return (a, b)`, the tuple wrapped:
 
 ```aether
 pick(n: int) -> int {
@@ -2137,8 +2137,14 @@ pick(n: int) -> int {
     return o ?? 7
 }
 
+span(n: int) -> (int, int)? {
+    return if n > 0 { (n, n + 1) } else { none }
+}
+
 main() {
-    println("${pick(1)} ${pick(2)}")   // 41 7
+    int? c = if pick(1) > 40 { 3 } else { none }
+    a, b = span(4)!
+    println("${pick(1)} ${pick(2)} ${c ?? 0} ${a} ${b}")   // 41 7 3 4 5
 }
 ```
 
