@@ -50,7 +50,7 @@ main() {
 
 Actors are the core abstraction in Aether, lightweight concurrent entities that process messages.
 
-```aether
+```aether,run
 message Ping {}
 
 actor Counter {
@@ -74,8 +74,7 @@ main() {
 }
 ```
 
-**Output:**
-```
+```output
 Count: 1
 Count: 2
 Count: 3
@@ -96,7 +95,7 @@ Without `wait_for_idle()`, main could exit before the actor processes its messag
 
 Actors can handle multiple message types and carry state across messages:
 
-```aether
+```aether,run
 message Increment { amount: int }
 message Decrement { amount: int }
 message Reset {}
@@ -135,8 +134,7 @@ main() {
 }
 ```
 
-**Output:**
-```
+```output
 Current value: 15
 Current value: 12
 Current value: 0
@@ -150,7 +148,7 @@ Messages are processed **in order** within a single actor. State (`count`) is pr
 
 Aether has standard control structures:
 
-```aether
+```aether,run
 main() {
     // For loops (with compound assignment operators)
     sum = 0
@@ -184,8 +182,7 @@ main() {
 }
 ```
 
-**Output:**
-```
+```output
 Sum 1..10 = 55
 Collatz steps for 16: 4
 Grade: B
@@ -201,7 +198,7 @@ Pattern matching, inspired by Erlang, lets you dispatch on argument values and s
 
 Define functions with multiple clauses that match on argument values:
 
-```aether
+```aether,run
 // Recursive factorial with pattern matching
 factorial(0) -> 1
 factorial(n) when n > 0 -> n * factorial(n - 1)
@@ -225,8 +222,7 @@ main() {
 }
 ```
 
-**Output:**
-```
+```output
 5! = 120
 fib(8) = 21
 classify(-3) = negative
@@ -238,7 +234,7 @@ classify(7) = positive
 
 For value dispatch inside functions or message handlers:
 
-```aether
+```aether,run
 message Process { code: int }
 
 actor Dispatcher {
@@ -263,8 +259,7 @@ main() {
 }
 ```
 
-**Output:**
-```
+```output
 OK
 Error
 Unknown code: 99
@@ -344,7 +339,7 @@ String interpolation works with `println` and any function that accepts a string
 Interpolated strings produce a real string value when assigned to a variable, so they can be passed to any function:
 
 ```aether,fragment
-msg = "Hello, ${name}!"     // msg is a string pointer
+msg = "Hello, ${name}!"     // msg owns the new string; it is released with msg
 ```
 
 ---
@@ -416,7 +411,8 @@ main() {
 
 ### If-Expressions
 
-Use `if`/`else` as a value-producing expression:
+Use `if`/`else` as a value-producing expression. The `else` is required, and
+the branches must have a type in common (an `int` and a `string` do not):
 
 ```aether
 main() {

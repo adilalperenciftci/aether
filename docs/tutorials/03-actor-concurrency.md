@@ -516,7 +516,7 @@ actor Counter {
 The scheduler automatically delivers and processes messages:
 
 ```aether,fragment
-// Just send - no manual stepping needed
+// Send; the scheduler delivers, with no manual stepping
 counter ! Increment {}
 counter ! Increment {}
 counter ! Increment {}
