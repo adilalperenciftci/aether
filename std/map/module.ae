@@ -10,7 +10,7 @@ exports(
     map_new, map_put_raw, map_put_string_owned, map_get_raw, map_has, map_remove,
     map_size, map_clear, map_free, map_keys_raw, map_keys_free,
     map_keys_size_raw, map_keys_get_raw,
-    put, get, keys, keys_size, keys_get
+    put, get, get_string, keys, keys_size, keys_get
 )
 
 // Keys cross as `@aether string`: the C map reads the AetherString's length,
@@ -36,6 +36,7 @@ extern map_keys_raw(map: ptr) -> ptr
 extern map_keys_free(keys: ptr)
 extern map_keys_size_raw(keys: ptr) -> int
 extern map_keys_get_raw(keys: ptr, index: int) -> string
+extern aether_string_is_string(p: @aether ptr) -> int
 
 // Insert or update a key-value pair. Returns "" on success, error on
 // failure (null map/key or OOM).
@@ -56,6 +57,27 @@ get(map: ptr, key: string) -> {
         return null, "null map"
     }
     v = map_get_raw(map, key)
+    return v, ""
+}
+
+// Look up a key whose value is a string. `get` hands back a `ptr`, which a
+// `string` local reads as text whatever it points at (W1005); this says the
+// value is a string, and checks it is one:
+// - (value, "")              : key present, its value a string
+// - (null, "")               : key absent (not an error — use map.has)
+// - (null, "not a string")   : the value is some other pointer
+// - (null, "null map")       : `map` is null
+get_string(map: ptr, key: string) -> (string, string) {
+    if map == null {
+        return null, "null map"
+    }
+    v = map_get_raw(map, key)
+    if v == null {
+        return null, ""
+    }
+    if aether_string_is_string(v) == 0 {
+        return null, "not a string"
+    }
     return v, ""
 }
 

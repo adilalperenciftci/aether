@@ -3990,6 +3990,28 @@ partially-handled enum is doing real work and is never reported.
 This pairs with the exhaustiveness check, which reports the opposite
 direction, a `match` over a sum type or enum that is missing a case.
 
+### Pointer Given to a String Local [W1005]
+
+A `ptr` is untyped, so a `string` local re-bound to one (`s = map_get_raw(m, k)`,
+or a tuple slot, `name, err = map.get(m, k)`) reads it as text whatever it points
+at: a list, a struct, or bytes with no end. Say the value is a string with the
+typed accessor, which also checks it is one:
+
+```aether,fragment
+name = ""
+name, _ = map.get(m, "name")        // warning[W1005]: 'name' is a `string`, and a
+                                    // `ptr` given to it is read as text ...
+                                    // help: say it is a string with `map.get_string(m, key)`
+name, _ = map.get_string(m, "name") // (null, "not a string") if it is not one
+```
+
+`map.get_string`, `list.get_string` and `string.from_ptr` each return
+`(string, string)`: the string, or `null` with `"not a string"` when the pointer
+is something else. C text (a `char*` with no Aether header) is copied with
+`bytes.string_from_ptr(p, n)`. A `ptr` result of a `string.*` function
+(`string.from_int`) is a string already and is not warned about. This is a
+warning now and becomes an error in a later release.
+
 ## Match Expressions
 
 `match` can be used as a statement or as an expression:
@@ -4220,6 +4242,7 @@ main() { let byte = 7  println("${byte}") }  // keyword-spelled local
 Two members of that family stay reserved in value position: `match` (it heads a match expression, so `match` as a bare value is genuinely ambiguous) and `union` (a C keyword, a value named `union` could not be emitted as valid C). For those, rename or use the backtick escape below. As a type keyword, `byte`/`ptr` still works in type position too: `byte b` declares `b` of type `byte` (the `<type> <name>` C-style form), while `byte: int` / `byte` in name position is the name.
 
 Note: `void` is **not** a reserved word, there is no `void` token. It is a plain identifier used by convention to *spell* the absence of a return value (e.g. `extern free(p: ptr) -> void`); a function that omits its `-> Type` annotation is the canonical void declaration. See [Functions](#functions).
+
 
 ### Raw identifiers, using a keyword as a name
 

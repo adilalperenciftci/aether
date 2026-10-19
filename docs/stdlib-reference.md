@@ -48,11 +48,11 @@ header comment is the authoritative description.
 | `std.ksuid` | KSUID: 160-bit lexicographically sortable identifier. | 1 | [guide](../std/ksuid/README.md) · [source](../std/ksuid/module.ae) |
 | `std.language` | BCP 47 language tags and matching (RFC 5646, RFC 4647). | 11 | [guide](../std/language/README.md) · [source](../std/language/module.ae) |
 | `std.lanes` | SIMD lanes: four or eight floats, or two doubles, per vector, with masks and select. | 105 | [guide](../std/lanes/README.md) · [source](../std/lanes/module.ae) |
-| `std.list` | Dynamic array, re-exported from `std.collections`. | 12 | [guide](../std/list/README.md) · [source](../std/list/module.ae) |
+| `std.list` | Dynamic array, re-exported from `std.collections`. | 13 | [guide](../std/list/README.md) · [source](../std/list/module.ae) |
 | `std.log` | Levelled logging with timestamps, colours and counters. | 9 | [full section](#logging-stdlog) |
 | `std.longarr` | Fixed-size packed-long buffer. | 16 | [guide](../std/longarr/README.md) · [source](../std/longarr/module.ae) |
 | `std.lzf` | One-shot LZF compression and decompression. | 10 | [guide](../std/lzf/README.md) · [source](../std/lzf/module.ae) |
-| `std.map` | Hash map, re-exported from `std.collections`, with readable key snapshots. | 18 | [guide](../std/map/README.md) · [source](../std/map/module.ae) |
+| `std.map` | Hash map, re-exported from `std.collections`, with readable key snapshots. | 19 | [guide](../std/map/README.md) · [source](../std/map/module.ae) |
 | `std.math` | Arithmetic, trigonometry, rounding and floating-point helpers. | 45 | [full section](#math-stdmath) |
 | `std.mem` | Byte-level reads and writes over caller-allocated raw pointers. | 180 | [guide](../std/mem/README.md) · [source](../std/mem/module.ae) |
 | `std.message` | ICU MessageFormat formatting and message catalogues. | 8 | [guide](../std/message/README.md) · [source](../std/message/module.ae) |
@@ -79,7 +79,7 @@ header comment is the authoritative description.
 | `std.spec` | BDD test framework: describe and it, hooks, assertions, structured reports. | 46 | [guide](../std/spec/README.md) · [source](../std/spec/module.ae) |
 | `std.strarr` | Growable string array whose backing is a `string[]`, for sorting runtime-built lists. | 17 | [guide](../std/strarr/README.md) · [source](../std/strarr/module.ae) |
 | `std.strbuilder` | Amortised-O(1) string building. | 35 | [guide](../std/strbuilder/README.md) · [source](../std/strbuilder/module.ae) |
-| `std.string` | Managed strings: construction, search, slicing, case, split and join. | 101 | [full section](#strings-stdstring) |
+| `std.string` | Managed strings: construction, search, slicing, case, split and join. | 103 | [full section](#strings-stdstring) |
 | `std.sync` | Atomic 64-bit integer cell (load, store, add, sub, compare-and-swap) for refcounts and lock-free reclamation. | 14 | [guide](../std/sync/README.md) · [source](../std/sync/module.ae) |
 | `std.tar` | Streaming POSIX ustar archives: reader and writer. | 24 | [full section](#posix-ustar-archives-stdtar) |
 | `std.tcp` | TCP sockets, re-exported from `std.net`. | 35 | [guide](../std/tcp/README.md) · [source](../std/tcp/module.ae) |
@@ -306,6 +306,7 @@ main() {
 - `map.new()` - Create new map
 - `map.put(map, key, value)` → `string` - Insert or update, return error string
 - `map.get(map, key)` - Get value by key (null if missing)
+- `map.get_string(map, key)` → `(string, string)` - Get a string value: `(null, "")` if missing, `(null, "not a string")` if the value is some other pointer
 - `map.has(map, key)` - Check if key exists
 - `map.remove(map, key)` - Remove key-value pair
 - `map.size(map)` - Get number of entries
@@ -981,6 +982,7 @@ Raw out-parameter externs are preserved as `string_to_int_raw`, `string_to_long_
 - `string.free(str)` - Alias for `release`
 - `string.keep(s)` → `ptr` - A reference of its own to `s`, as a `ptr`, for a `@keep ptr` parameter or a `ptr` field that holds the string past the call (E0902)
 - `string.release_kept(p)` - Gives back what `string.keep` took
+- `string.from_ptr(p)` → `(string, string)` - The string a `ptr` holds, typed as one: `(null, "not a string")` when `p` points at something else (W1005)
 
 ### Building strings incrementally (avoiding quadratic cost)
 

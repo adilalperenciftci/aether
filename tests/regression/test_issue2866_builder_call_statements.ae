@@ -40,7 +40,7 @@ set_opt(_ctx: ptr, key: string, value: string) {
 
 builder label(text: string): string {
     suffix = ""
-    if _builder != null && map_has(_builder, "suffix") == 1 { suffix, _ = map.get(_builder, "suffix") }
+    if _builder != null && map_has(_builder, "suffix") == 1 { suffix, _ = map.get_string(_builder, "suffix") }
     out = string.concat(text, suffix)
     if _builder != null { map_free(_builder) }
     return out

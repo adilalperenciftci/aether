@@ -526,7 +526,7 @@ builder compile(src: string) {
     rel = ""
     if _builder != null {
         if map_has(_builder, "release") == 1 {
-            rel = map_get_raw(_builder, "release")
+            rel, _ = map.get_string(_builder, "release")
         }
     }
     println("compiling ${src} with release=${rel}")
@@ -565,7 +565,7 @@ builder make_greeting(name: string): string {
     prefix = "Hello"
     if _builder != null {
         if map_has(_builder, "prefix") == 1 {
-            prefix = map_get_raw(_builder, "prefix")
+            prefix, _ = map.get_string(_builder, "prefix")
         }
     }
     return "${prefix}, ${name}!"

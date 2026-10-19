@@ -495,5 +495,23 @@ main() {
 AE
 accepted struct_addr_borrowed
 
+# A `ptr` returned at a `string` position is taken as a string: the return
+# hands the caller a reference of its own, so the pointer is not kept.
+cat > "$TMP/returned_as_string.ae" <<'AE'
+as_text(p: ptr) -> string {
+    return p
+}
+
+pair(p: ptr) -> (string, int) {
+    return p, 1
+}
+
+main() {
+    s, n = pair("b")
+    println("${as_text("a")}${s}${n}")
+}
+AE
+accepted returned_as_string
+
 if [ "$fails" -ne 0 ]; then exit 1; fi
 echo "  [PASS] keeps_borrowed: a borrowed ptr parameter is never kept, alone or in a struct or closure that escapes; @keep, string.keep, string.seq_retain, a re-bound parameter, a struct local and a closure run in the call are"

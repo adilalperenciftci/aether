@@ -56,8 +56,15 @@ so an empty error always means the value is good. `list_get_raw` is the
 unchecked form, for a loop that has already bounded the index by
 `list_size`.
 
+**A string element is read with `get_string`.** `get` hands back a `ptr`,
+which a `string` local would read as text whatever it points at (W1005, an
+error in a later release). `list.get_string(l, i)` says the element is a
+string and checks it is one: an element that is some other pointer (a nested
+list, a struct) gives `(null, "not a string")`, with the index and null-list
+errors `get` gives.
+
 ## Exports
 
 `list_new`, `list_new_in`, `add`, `list_add_raw`, `list_add_string_owned`,
-`get`, `list_get_raw`, `list_set`, `list_size`, `list_remove`, `list_clear`,
+`get`, `get_string`, `list_get_raw`, `list_set`, `list_size`, `list_remove`, `list_clear`,
 `list_free`.

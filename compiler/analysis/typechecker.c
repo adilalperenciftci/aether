@@ -7035,7 +7035,19 @@ typedef struct {
     const char* params[KEEP_SET_MAX];
     const char* vias[KEEP_SET_MAX];
     int count;
+    Type* ret;   /* the function's declared result, or NULL */
 } KeepSet;
+
+/* Is position `i` of a `return` with `n` values a `string` of the result
+ * `ret`? A `ptr` returned there is taken as a string: the return hands the
+ * caller a reference of its own (R3), so the pointer is not kept. */
+static int returns_string_at(Type* ret, int i, int n) {
+    if (!ret) return 0;
+    if (ret->kind == TYPE_STRING) return n == 1;
+    if (ret->kind == TYPE_TUPLE && n == ret->tuple_count && i < ret->tuple_count)
+        return ret->tuple_types[i] && ret->tuple_types[i]->kind == TYPE_STRING;
+    return 0;
+}
 
 /* What a value carries of a borrowed parameter: the parameter, and what
  * holds it (NULL: the value is the pointer itself, or a view of it). */
@@ -7244,7 +7256,8 @@ static void check_ptr_keeps_in(ASTNode* program, ASTNode* n, KeepSet* s,
     }
     if (n->type == AST_RETURN_STATEMENT && !in_closure) {
         for (int i = 0; i < n->child_count; i++)
-            if ((c = carries_borrowed_ptr(n->children[i], s)).param)
+            if ((c = carries_borrowed_ptr(n->children[i], s)).param &&
+                !(!c.via && returns_string_at(s->ret, i, n->child_count)))
                 report_borrowed_keep(c.via ? n->children[i] : n, c, "returned");
     }
     if (n->type == AST_MESSAGE_CONSTRUCTOR) {
@@ -7375,7 +7388,7 @@ static void check_closures_ptr_params(ASTNode* program, ASTNode* n,
 
 static void check_borrowed_ptr_params(ASTNode* program, ASTNode* fn, ASTNode* body,
                                       const char** globals, int nglobals) {
-    KeepSet s = { {0}, {0}, {0}, 0 };
+    KeepSet s = { {0}, {0}, {0}, 0, (fn && fn->type != AST_CLOSURE) ? fn->node_type : NULL };
     for (int i = 0; fn && body && i < fn->child_count && fn->children[i] != body; i++) {
         ASTNode* p = fn->children[i];
         if (p && (p->type == AST_PATTERN_VARIABLE || p->type == AST_VARIABLE_DECLARATION ||
@@ -9065,6 +9078,52 @@ static int rhs_returns_void_via_bare_fn(ASTNode* rhs, SymbolTable* table) {
     return 0;
 }
 
+/* A bare `ptr` re-binding a `string` local (`s = map_get_raw(m, k)`, or a
+ * tuple slot, `s, err = map.get(m, k)`) is taken as text: whatever the
+ * pointer points at, a list, a struct, bytes without an end, is read up to
+ * its first zero byte. W1005 now, an error in a later release (Nic,
+ * 2026-10-19). The typed accessors say which element is a string, and
+ * return an error for one that is not. */
+static const char* ptr_string_accessor(ASTNode* e) {
+    while (e && (e->type == AST_TUPLE_UNWRAP || e->type == AST_VALUE_CAST) && e->child_count > 0)
+        e = e->children[0];
+    const char* f = (e && e->type == AST_FUNCTION_CALL) ? e->value : NULL;
+    if (f) {
+        if (!strcmp(f, "map.get") || !strcmp(f, "map_get_raw") || !strcmp(f, "map.map_get_raw"))
+            return "map.get_string(m, key)";
+        if (!strcmp(f, "list.get") || !strcmp(f, "list_get_raw") || !strcmp(f, "list.list_get_raw"))
+            return "list.get_string(l, index)";
+    }
+    return "string.from_ptr(p)";
+}
+
+/* A string-aware producer whose result is typed `ptr` (`string.from_int`
+ * returns a counted string untyped, R4): its value is a string. */
+static int is_string_producer_call(ASTNode* e) {
+    while (e && (e->type == AST_TUPLE_UNWRAP || e->type == AST_VALUE_CAST) && e->child_count > 0)
+        e = e->children[0];
+    const char* f = (e && e->type == AST_FUNCTION_CALL) ? e->value : NULL;
+    return f && (!strncmp(f, "string.", 7) || !strncmp(f, "string_", 7) ||
+                 !strncmp(f, "aether_string_", 14));
+}
+
+static void warn_ptr_into_string(const char* name, ASTNode* rhs, int line, int column) {
+    if (is_string_producer_call(rhs)) return;
+    char msg[300], hint[200];
+    snprintf(msg, sizeof(msg),
+             "'%s' is a `string`, and a `ptr` given to it is read as text whatever it points at; "
+             "this becomes an error in a later release", name ? name : "?");
+    snprintf(hint, sizeof(hint), "say it is a string with `%s`", ptr_string_accessor(rhs));
+    AetherError w = {
+        .filename = g_tc_file, .source_code = NULL,
+        .line = line, .column = column,
+        .message = msg, .suggestion = hint,
+        .context = NULL, .code = AETHER_WARN_PTR_INTO_STRING
+    };
+    aether_warning_report(&w);
+    warning_count++;
+}
+
 /* #2762: a slot of a tuple destructure re-binds a local an enclosing local
  * scope already binds (a closure's `a, b = two()` writes the outer `a` and
  * `b` it sees, as `a = 7` does), so the slot follows the rules a bare
@@ -9075,7 +9134,7 @@ static int rhs_returns_void_via_bare_fn(ASTNode* rhs, SymbolTable* table) {
  * from `int`) or truncated a float into an int cell. A local hoisted out of
  * a branch or loop body, which that case joins over the body first, is left
  * as it was. Returns 0 once it has reported an error. */
-static int destructure_slot_rebind(ASTNode* var, SymbolTable* table) {
+static int destructure_slot_rebind(ASTNode* var, SymbolTable* table, ASTNode* rhs) {
     if (!var || !var->value || !var->node_type) return 1;
     Symbol* bound = NULL;
     SymbolTable* bound_in = NULL;
@@ -9104,6 +9163,9 @@ static int destructure_slot_rebind(ASTNode* var, SymbolTable* table) {
     /* A string and a raw pointer convert freely, as for a bare re-bind. */
     int str_ptr_mix = (got->kind == TYPE_PTR && have->kind == TYPE_STRING) ||
                       (got->kind == TYPE_STRING && have->kind == TYPE_PTR);
+    if (got->kind == TYPE_PTR && !got->element_type && !got->distinct_name &&
+        have->kind == TYPE_STRING)
+        warn_ptr_into_string(var->value, rhs, var->line, var->column);
     if (!str_ptr_mix &&
         (!is_assignable(got, have) ||
          (got->kind == TYPE_PTR && is_numeric_scalar(have->kind)) ||
@@ -9509,7 +9571,7 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                 if (var->value && strcmp(var->value, "_") != 0) {
                     /* #2762. A refused slot is bound already; the others are
                      * still registered, so their uses report nothing more. */
-                    if (!destructure_slot_rebind(var, table)) {
+                    if (!destructure_slot_rebind(var, table, stmt->children[var_count])) {
                         slots_ok = 0;
                         continue;
                     }
@@ -10064,6 +10126,10 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                         (bound->type->kind == TYPE_STRING && init_type->kind == TYPE_PTR &&
                          init->type != AST_NULL_LITERAL) ||
                         (bound->type->kind == TYPE_PTR && init_type->kind == TYPE_STRING);
+                    if (bound->type->kind == TYPE_STRING && init_type->kind == TYPE_PTR &&
+                        !init_type->element_type && !init_type->distinct_name &&
+                        init->type != AST_NULL_LITERAL)
+                        warn_ptr_into_string(stmt->value, init, stmt->line, stmt->column);
                     if (!str_ptr_mix) {
                         if (stmt->node_type) free_type(stmt->node_type);
                         stmt->node_type = clone_type(bound->type);

@@ -41,6 +41,37 @@ unbound: 0
 membership, so `map.get(m, "absent")` returns `(null, "")`. Use `map_has` for
 the unambiguous membership test, and null-check the pointer.
 
+**A string value is read with `get_string`.** `get` hands back a `ptr`, and a
+`ptr` given to a `string` local as it is (`name, _ = map.get(m, "k")` after
+`name = ""`) is read as text whatever it points at: W1005, an error in a later
+release. `map.get_string(m, key)` says the value is a string and checks it is
+one: `(value, "")`, `(null, "")` for a missing key, and `(null, "not a
+string")` when the value is some other pointer (a list, a struct).
+
+```aether,run
+import std.map
+import std.list
+
+main() {
+    m = map.new()
+    inner = list.new()
+    map.put(m, "name", "Ada")
+    map.put(m, "items", inner)
+
+    name, err = map.get_string(m, "name")
+    println("name=${name} err='${err}'")
+    _, err2 = map.get_string(m, "items")
+    println("items: ${err2}")
+
+    map.free(m)
+    list.free(inner)
+}
+```
+```output
+name=Ada err=''
+items: not a string
+```
+
 `map_keys` returns the key set for iteration, and must be released with
 `map_keys_free`. Read it with `keys_size` and `keys_get`.
 
@@ -59,6 +90,6 @@ matters.
 
 ## Exports
 
-`map_new`, `put`, `map_put_raw`, `map_put_string_owned`, `get`,
+`map_new`, `put`, `map_put_raw`, `map_put_string_owned`, `get`, `get_string`,
 `map_get_raw`, `map_has`, `map_remove`, `map_size`, `map_clear`, `keys`,
 `map_keys_raw`, `map_keys_free`, `keys_size`, `keys_get`, `map_free`.

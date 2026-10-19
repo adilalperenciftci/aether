@@ -1,0 +1,79 @@
+// The typed string accessors: map.get_string, list.get_string and
+// string.from_ptr hand a `ptr` back as a `string` only when it is one.
+//
+// The bug: a `ptr` given to a `string` local (`s, _ = map.get(m, k)`) was
+// read as text whatever it pointed at, so a map or list holding a nested
+// list, a struct or a buffer gave back its bytes as a string up to the first
+// zero (now W1005, an error in a later release).
+// Before the accessors there was no way to say "this element is a string"
+// and have it checked; this test fails without them (they do not exist) and
+// fails if one hands back a list pointer as text.
+// It exercises: a literal, a counted string and a `string.from_int` result
+// each come back whole; a nested list comes back as (null, "not a string");
+// a missing key, an index out of range and a null container give their
+// errors; and a string read out survives freeing its container.
+
+import std.map
+import std.list
+import std.string
+
+extern exit(code: int)
+
+check(ok: bool, msg: string) {
+    if !ok {
+        println("FAIL ${msg}")
+        exit(1)
+    }
+}
+
+main() {
+    m = map.new()
+    inner = list.new()
+    map.put(m, "lit", "v")
+    map.put(m, "num", string.from_int(42))
+    map.put(m, "cat", string.concat("a", "b"))
+    map.put(m, "list", inner)
+
+    s, err = map.get_string(m, "lit")
+    check(s == "v" && err == "", "map literal")
+    n, nerr = map.get_string(m, "num")
+    check(n == "42" && nerr == "", "map from_int")
+    c, cerr = map.get_string(m, "cat")
+    check(c == "ab" && cerr == "", "map counted")
+    nl, nlerr = map.get_string(m, "list")
+    check(nl == null && nlerr == "not a string", "map list pointer is not text")
+    ab, aberr = map.get_string(m, "absent")
+    check(ab == null && aberr == "", "map absent")
+    nm, nmerr = map.get_string(null, "x")
+    check(nm == null && nmerr == "null map", "null map")
+
+    l = list.new()
+    list.add(l, "a")
+    list.add(l, string.concat("b", "c"))
+    list.add(l, inner)
+    a, aerr = list.get_string(l, 0)
+    check(a == "a" && aerr == "", "list literal")
+    b, berr = list.get_string(l, 1)
+    check(b == "bc" && berr == "", "list counted")
+    li, lierr = list.get_string(l, 2)
+    check(li == null && lierr == "not a string", "list pointer is not text")
+    o, oerr = list.get_string(l, 9)
+    check(o == null && oerr == "index out of range", "list out of range")
+    ln, lnerr = list.get_string(null, 0)
+    check(ln == null && lnerr == "null list", "null list")
+
+    p = list_get_raw(l, 1)
+    t, terr = string.from_ptr(p)
+    check(t == "bc" && terr == "", "from_ptr string")
+    u, uerr = string.from_ptr(inner)
+    check(u == null && uerr == "not a string", "from_ptr list pointer is not text")
+    z, zerr = string.from_ptr(null)
+    check(z == null && zerr == "", "from_ptr null")
+
+    // What was read out holds a reference of its own.
+    map.free(m)
+    list.free(l)
+    list.free(inner)
+    check(s == "v" && n == "42" && c == "ab" && b == "bc" && t == "bc", "outlives its container")
+    println("typed string accessors: ok")
+}

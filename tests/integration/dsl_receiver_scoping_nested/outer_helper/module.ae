@@ -6,7 +6,7 @@ builder open(label: string) {
     mval = "<unset>"
     if _builder != null {
         if map_has(_builder, "mark") == 1 {
-            mval, _ = map.get(_builder, "mark")
+            mval, _ = map.get_string(_builder, "mark")
         }
     }
     println("outer: label=${label} mark=${mval}")

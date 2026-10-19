@@ -15,7 +15,7 @@ builder compile(src: string) {
     rel = ""
     if _builder != null {
         if map_has(_builder, "release") == 1 {
-            rel, _ = map.get(_builder, "release")
+            rel, _ = map.get_string(_builder, "release")
         }
     }
     println("compile: ${src} release=${rel}")
@@ -65,8 +65,8 @@ builder execute_query(db: string) with query_builder_new {
     table = ""
     where_clause = ""
     if _builder != null {
-        if map_has(_builder, "table") == 1 { table, _ = map.get(_builder, "table") }
-        if map_has(_builder, "where") == 1 { where_clause, _ = map.get(_builder, "where") }
+        if map_has(_builder, "table") == 1 { table, _ = map.get_string(_builder, "table") }
+        if map_has(_builder, "where") == 1 { where_clause, _ = map.get_string(_builder, "where") }
     }
     println("query: db=${db} table=${table} where=${where_clause}")
 }
