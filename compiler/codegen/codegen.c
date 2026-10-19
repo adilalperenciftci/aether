@@ -4919,6 +4919,7 @@ static void emit_main_shim_for_target(CodeGenerator* gen, ASTNode* program) {
 
 // Emit a typedef for a tuple type if not already emitted
 static void emit_struct_in_order(CodeGenerator* gen, ASTNode* program, int i, char* state);
+static void emit_sum_in_order(CodeGenerator* gen, ASTNode* program, int i, char* state);
 
 /* `t name` as a C member declaration: an array's length follows the name
  * (`const char* _0[2]`); `const char*[2] _0` is not C. */
@@ -4955,6 +4956,18 @@ static void emit_value_type_deps(CodeGenerator* gen, ASTNode* program, Type* t, 
             }
         }
         return;
+    case TYPE_SUM:
+        /* #2985: a sum held by value embeds its variants: its typedef and
+         * theirs go first. */
+        for (int i = 0; t->struct_name && i < program->child_count; i++) {
+            ASTNode* sd = program->children[i];
+            if (sd && sd->type == AST_SUM_TYPE_DEF && sd->value &&
+                strcmp(sd->value, t->struct_name) == 0) {
+                emit_sum_in_order(gen, program, i, state);
+                return;
+            }
+        }
+        return;
     default:
         return;
     }
@@ -4970,6 +4983,27 @@ static void emit_struct_in_order(CodeGenerator* gen, ASTNode* program, int i, ch
             emit_value_type_deps(gen, program, fld->node_type, state);
     }
     generate_struct_definition(gen, sd);
+}
+
+/* #2985: a sum's typedef, after the variant structs its union embeds by
+ * value, once: where a struct field first needs it, or with the rest. */
+static void emit_sum_in_order(CodeGenerator* gen, ASTNode* program, int i, char* state) {
+    if (state[i]) return;
+    state[i] = 1;
+    ASTNode* def = program->children[i];
+    for (int v = 0; v < def->child_count; v++) {
+        ASTNode* var = def->children[v];
+        if (!var || var->type != AST_IDENTIFIER || !var->value) continue;
+        for (int j = 0; j < program->child_count; j++) {
+            ASTNode* sd = program->children[j];
+            if (sd && sd->type == AST_STRUCT_DEFINITION && sd->value &&
+                strcmp(sd->value, var->value) == 0) {
+                emit_struct_in_order(gen, program, j, state);
+                break;
+            }
+        }
+    }
+    emit_sum_typedef(gen, def);
 }
 
 void ensure_tuple_typedef(CodeGenerator* gen, Type* type) {
@@ -9011,17 +9045,15 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
             ASTNode* sd = program->children[i];
             if (sd && sd->type == AST_STRUCT_DEFINITION) emit_struct_in_order(gen, program, i, state);
         }
-        free(state);
-    }
-
-    // #914: sum/variant tagged-union typedefs. Emitted after all struct
-    // bodies (each union member embeds a variant struct by value) and before
-    // the function forward declarations that reference `Name` in signatures.
-    for (int i = 0; i < program->child_count; i++) {
-        ASTNode* sd = program->children[i];
-        if (sd && sd->type == AST_SUM_TYPE_DEF) {
-            emit_sum_typedef(gen, sd);
+        // #914: sum/variant tagged-union typedefs, after the variant structs
+        // their unions embed by value and before the function forward
+        // declarations that reference `Name` in signatures. A sum a struct
+        // field holds by value went out ahead of that struct (#2985).
+        for (int i = 0; i < n; i++) {
+            ASTNode* sd = program->children[i];
+            if (sd && sd->type == AST_SUM_TYPE_DEF) emit_sum_in_order(gen, program, i, state);
         }
+        free(state);
     }
 
     // #1132: bitstructs. Register the layout (so field access can lower to

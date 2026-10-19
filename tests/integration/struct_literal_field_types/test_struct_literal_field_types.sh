@@ -6,7 +6,8 @@
 # fits its field by the rules a store follows: a coercion, a wrap into an
 # optional or a sum, `null` or `[]` into a slice, `null` into a string, a
 # named function of the signature into a typed function pointer, a byte
-# literal in range. The diagnostic names the field and both types.
+# literal in range. The diagnostic names the field and both types. A variant
+# into a sum field builds since #2985.
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
@@ -51,11 +52,23 @@ done
 [ $fail -ne 0 ] && printf '%s\n' "$out" | grep -E "^error|-->" | head -12 | sed 's/^/        |/'
 
 cat > "$tmp/good.ae" <<'AE'
+struct Circle {
+    r: float
+}
+
+struct Rect {
+    w: float
+    h: float
+}
+
+type Shape = Circle | Rect
+
 struct All {
     f: float
     l: long
     s: string
     o: int?
+    sh: Shape
     xs: int[]
     cb: fn
     p: ptr
@@ -66,13 +79,18 @@ twice(x: int) -> int {
 }
 
 main() {
-    a = All { f: 1, l: 2, s: null, o: 3, xs: [], cb: twice, p: null }
-    b = All { f: 2.5, l: 6000000000, s: "x", o: none, xs: null, cb: |x: int| -> x + 1, p: 0 }
-    println("${a.f} ${b.l} ${a.o ?? 0} ${b.o ?? 9} ${call(a.cb, 4)} ${call(b.cb, 4)} ${a.s == null} ${a.xs.len}")
+    a = All { f: 1, l: 2, s: null, o: 3, sh: Circle { r: 1.5 }, xs: [], cb: twice, p: null }
+    b = All { f: 2.5, l: 6000000000, s: "x", o: none, sh: Rect { w: 2.0, h: 3.0 }, xs: null, cb: |x: int| -> x + 1, p: 0 }
+    sh = a.sh
+    let r: float = match sh {
+        Circle -> sh.r
+        Rect -> 0.0
+    }
+    println("${a.f} ${b.l} ${a.o ?? 0} ${b.o ?? 9} ${r} ${call(a.cb, 4)} ${call(b.cb, 4)} ${a.s == null} ${a.xs.len}")
 }
 AE
 out="$(AETHER_HOME="$ROOT" "$AE" run "$tmp/good.ae" 2>&1)"
-if [ "$out" != "1 6000000000 3 9 8 5 true 0" ]; then
+if [ "$out" != "1 6000000000 3 9 1.5 8 5 true 0" ]; then
     echo "  [FAIL] struct_literal_field_types: the fitting values should build and run"
     printf '%s\n' "$out" | head -10 | sed 's/^/        |/'
     fail=1

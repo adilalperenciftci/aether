@@ -8684,6 +8684,10 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                          * value as an optional binding does, a bare value
                          * wrapped and `none` the empty one. */
                         emit_optional_coerced(gen, expr->children[1], ltype);
+                    } else if (is_assignment && ltype && ltype->kind == TYPE_SUM &&
+                               needs_sum_coerce(expr->children[1], ltype)) {
+                        /* #2985: a store into a sum place wraps a variant. */
+                        emit_sum_coerced(gen, expr->children[1], ltype);
                     } else {
                         if (wide_cast && AE_IS_NARROW_INT(rtype)) fprintf(gen->output, "%s", wide_cast);
                         generate_expression(gen, expr->children[1]);
@@ -10956,6 +10960,10 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                     emit_composite_take(gen, fv, fdecl);   /* #2921 */
                 } else if (fdecl && fdecl->kind == TYPE_OPTIONAL) {
                     emit_optional_coerced(gen, fv, fdecl);
+                } else if (fdecl && fdecl->kind == TYPE_SUM && needs_sum_coerce(fv, fdecl)) {
+                    /* #2985: a sum field takes a variant wrapped into the
+                     * sum, as a binding of the sum does. */
+                    emit_sum_coerced(gen, fv, fdecl);
                 } else if (fdecl && fdecl->kind == TYPE_STRING && fv && fv->node_type &&
                            fv->node_type->kind == TYPE_STRING) {
                     emit_string_take_owned(gen, fv, 0);

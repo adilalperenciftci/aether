@@ -1,0 +1,60 @@
+// A struct field of a sum type did not build: the struct was emitted
+// before the sum's typedef ("unknown type name 'Shape'"), and a variant
+// given to the field in a struct literal or a store was not wrapped into
+// the sum. Type definitions now go out in dependency order (a sum after
+// the variants its union embeds, a struct after the sums its fields hold by
+// value, directly or as an optional), and a variant into a sum field is
+// wrapped as a binding of the sum wraps it. This test builds the shapes and
+// reads each one back through a match.
+
+extern exit(code: int)
+
+struct Circle {
+    r: float
+}
+
+struct Rect {
+    w: float
+    h: float
+}
+
+type Shape = Circle | Rect
+
+struct Holder {
+    sh: Shape
+    n: int
+}
+
+struct Outer {
+    h: Holder
+    o: Shape?
+}
+
+fn check(ok: bool, what: string) {
+    if !ok {
+        println("FAIL: ${what}")
+        exit(1)
+    }
+}
+
+area(s: Shape) -> float {
+    let a: float = match s {
+        Circle -> s.r
+        Rect -> s.w * s.h
+    }
+    return a
+}
+
+main() {
+    let s: Shape = Circle { r: 1.5 }
+    h = Holder { sh: s, n: 1 }
+    check(area(h.sh) == 1.5, "a sum value in a sum field")
+    g = Holder { sh: Rect { w: 2.0, h: 3.0 }, n: 2 }
+    check(area(g.sh) == 6.0, "a variant wrapped into a sum field")
+    o = Outer { h: Holder { sh: Circle { r: 4.0 }, n: 3 }, o: Rect { w: 1.0, h: 2.0 } }
+    check(area(o.h.sh) == 4.0, "a nested struct's sum field")
+    check(area(o.o!) == 2.0, "a variant into an optional sum field")
+    g.sh = Circle { r: 2.5 }
+    check(area(g.sh) == 2.5, "a variant stored into a sum field")
+    println("ok")
+}

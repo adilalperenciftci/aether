@@ -2388,8 +2388,10 @@ single-name `type T = A` alias is not a supported form).
 A variant struct value flows into a `Shape` slot directly; there is no
 `some(...)`-style constructor. The wrap happens at `let` bindings, function
 parameters, return values, and call arguments (a closure's too, `call(f,
-Circle { ... })`), and as the default of `??` over a `Shape?`; into the
-sum's optional (`Shape?`) the variant is wrapped into the sum first:
+Circle { ... })`), a struct field of the sum's type (`Holder { sh: Circle {
+r: 1.0 } }`, `h.sh = Rect { ... }`), a branch of an if expression beside a
+`Shape`, and as the default of `??` over a `Shape?`; into the sum's optional
+(`Shape?`) the variant is wrapped into the sum first:
 
 ```aether,fragment
 let s: Shape = Circle { r: 2.0 }      // Circle wraps into Shape
