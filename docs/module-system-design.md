@@ -156,6 +156,14 @@ main() {
 - A module may list a name in its prefixed form, `<module>_<name>`: std.math
   exports `math_sqrt`, and that is what `math.sqrt(x)` and
   `import std.math (sqrt)` reach.
+- `m.x` is resolved by the names the module declares, not by building a C
+  name: the module's function, builder or `@extern` named `x` first, else
+  the declaration named in the prefixed form `m_x`, of any kind. An Aether
+  function so named is reached like an extern: std.md5's `md5_hex` is
+  `md5.hex` (and still `md5.md5_hex`), a module's `rexxae_create` is
+  `rexxae.create`. A module function whose C name would be one of the
+  module's own externs is merged under a name of its own and `m.x` reaches
+  it (#2978).
 
 ### Legacy `export <fn>` form (deprecated)
 

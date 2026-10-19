@@ -847,14 +847,23 @@ int is_imported_namespace(const char* name) {
     return 0;
 }
 
-/* #2978: the C name `ns.name` reaches. The module's own function, builder
- * or `@extern` whose Aether name is `name`, under the C name the merge gave
- * it: `<ns>_<name>`, or `ae_<ns>_<name>` for a function whose joined
- * spelling is one of the module's externs (module_function_c_name). Else
- * the joined `<ns>_<name>`, which is how an extern of the module is
- * reached, and a name the module lists in the prefixed form. */
+/* #2978, #2976: the C name `ns.name` reaches, found by Aether name. The
+ * module's own function, builder or `@extern` named `name`, under the C
+ * name the merge gave it: `<ns>_<name>`, or `ae_<ns>_<name>` for a function
+ * whose joined spelling is one of the module's externs
+ * (module_function_c_name). Else the one named in the prefixed form,
+ * `<ns>_<name>`, which a module may list a name as: an Aether function so
+ * named (std.md5's `md5_hex`, merged as `md5_md5_hex`) as much as an
+ * extern, whose C name is that joined spelling. `md5.hex` built a C name,
+ * `md5_hex`, and so reached the extern form only (#2976). */
 static void qualified_c_name(const char* ns, const char* name, char* buf, size_t cap) {
-    if (global_module_registry && module_function_c_name(ns, name, buf, cap)) return;
+    if (global_module_registry) {
+        if (module_function_c_name(ns, name, buf, cap)) return;
+        char prefixed[512];
+        if (snprintf(prefixed, sizeof(prefixed), "%s_%s", ns, name) < (int)sizeof(prefixed) &&
+            module_function_c_name(ns, prefixed, buf, cap))
+            return;
+    }
     /* A name too long for `buf` names nothing. */
     if (snprintf(buf, cap, "%s_%s", ns, name) >= (int)cap) buf[0] = '\0';
 }
