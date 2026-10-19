@@ -41,7 +41,7 @@ header comment is the authoritative description.
 | `std.http1` | Pure-Aether HTTP/1.1 response reader (RFC 9112). | 14 | [guide](../std/http1/README.md) · [source](../std/http1/module.ae) |
 | `std.intarr` | Fixed-size packed-int buffer. | 16 | [guide](../std/intarr/README.md) · [source](../std/intarr/module.ae) |
 | `std.intmap` | Hash map from `long` keys to `long` values, for integer-keyed counting and lookup. | 25 | [guide](../std/intmap/README.md) · [source](../std/intmap/module.ae) |
-| `std.io` | Console output, whole-file reads and writes, file descriptors, environment variables. | 42 | [full section](#io-stdio) |
+| `std.io` | Console output, whole-file reads and writes, file descriptors, environment variables. | 44 | [full section](#io-stdio) |
 | `std.ipc` | Child-to-parent back-channel for processes started by `std.os`. | 4 | [guide](../std/ipc/README.md) · [source](../std/ipc/module.ae) |
 | `std.json` | JSON parsing, building and serialisation. | 55 | [full section](#json-stdjson) |
 | `std.jsonpath` | RFC 9535 JSONPath queries over parsed JSON, with a reusable compiled path. | 10 | [guide](../std/jsonpath/README.md) · [source](../std/jsonpath/module.ae) |
@@ -3579,7 +3579,9 @@ main() {
 - `io.fd_close(fd)` → `string` - `""` on success, error string on failure. Single attempt, does not retry on EINTR (Linux requires not retrying; the descriptor is already gone).
 - `io.fd_write(fd, data: byte[])` → `int` - Write every byte of the slice to `fd`; the length travels with it, so embedded NULs survive. Loops on partial writes; retries EINTR on POSIX. Returns 0 on success, -1 on error; an empty slice writes nothing and returns 0. For a string pass `string.bytes(s)`, for a `std.bytes` buffer `bytes.view(buf)`.
 - `io.fd_read_n(fd, n)` → `(ptr, int, string)` - Read up to `n` bytes from `fd`. Returns `(bytes, count, err)`: `bytes` is a refcounted AetherString carrying the explicit byte count (binary-safe, embedded NULs survive), `count` is the number actually read (1..n on success, 0 on clean EOF or error), `err` is `""` on success or clean EOF, otherwise an error message.
-- `io.fd_read_line(fd)` → `(ptr, string)` - Read one `\n`-delimited line from `fd`. Trailing `\n` is stripped (a preceding `\r` is also stripped, so CRLF input yields content with neither). Returns `(line, "")` on a normal line, `("", "")` on clean EOF before any byte, `(partial, "")` on EOF mid-line (server-side dump streams sometimes omit a trailing newline), `("", error)` on read error.
+- `io.fd_read_line(fd)` → `(string, string)` - Read one `\n`-delimited line from `fd`. Trailing `\n` is stripped (a preceding `\r` is also stripped, so CRLF input yields content with neither). Returns `(line, "")` on a normal line, `("", "")` on clean EOF before any byte, `(partial, "")` on EOF mid-line (server-side dump streams sometimes omit a trailing newline), `("", error)` on read error.
+
+- `io.fd_read_line_status(fd)` → `(string, bool, string)` - EOF-aware line input returning `(line, eof, err)`. A blank line returns `("", false, "")`; clean EOF returns `("", true, "")`. A final unterminated line returns `(content, true, "")`: process its content before exiting. A newline-terminated line has `eof=false`, even if it is the last line; no read-ahead is performed. Errors return `("", false, error)`. Trailing CR/LF stripping matches `fd_read_line`, including stripping a final CR at EOF. The line is an owned, refcounted string, automatically released at scope exit and valid across later reads and descriptor closure, just like `fd_read_n` and `fd_read_line`. The existing `fd_read_line` API retains its two-result shape and behavior.
 
 **File Operations (Go-style):**
 - `io.read_file(path)` → `(string, string)` - Read entire file

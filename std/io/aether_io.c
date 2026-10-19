@@ -43,6 +43,7 @@ int io_fd_write_n(int fd, const char* d, int n) { (void)fd; (void)d; (void)n; re
 _tuple_ptrintstr_io io_fd_read_n_tuple(int fd, int n) { (void)fd; (void)n; _tuple_ptrintstr_io t; t._0 = NULL; t._1 = 0; t._2 = "filesystem disabled"; return t; }
 int io_fd_read_into_raw(int fd, void* buf, int length) { (void)fd; (void)buf; (void)length; return -1; }
 _tuple_ptrstr_io   io_fd_read_line_tuple(int fd) { (void)fd; _tuple_ptrstr_io t; t._0 = NULL; t._1 = "filesystem disabled"; return t; }
+_tuple_ptrboolstr_io io_fd_read_line_status_tuple(int fd) { (void)fd; _tuple_ptrboolstr_io t; t._0 = NULL; t._1 = 0; t._2 = "filesystem disabled"; return t; }
 #else
 
 #include <stdio.h>
@@ -456,11 +457,12 @@ int io_fd_read_into_raw(int fd, void* buf, int length) {
     }
 }
 
-_tuple_ptrstr_io io_fd_read_line_tuple(int fd) {
-    _tuple_ptrstr_io out;
+_tuple_ptrboolstr_io io_fd_read_line_status_tuple(int fd) {
+    _tuple_ptrboolstr_io out;
     out._0 = (void*)string_empty();
-    out._1 = "";
-    if (fd < 0) { out._1 = "invalid fd"; return out; }
+    out._1 = 0;
+    out._2 = "";
+    if (fd < 0) { out._2 = "invalid fd"; return out; }
 
     /* Grow-on-demand line buffer. Initial 256 bytes covers the common
      * case (svn dump record lines are short); we double when full.
@@ -469,7 +471,7 @@ _tuple_ptrstr_io io_fd_read_line_tuple(int fd) {
      * recent capacity so the counter tracks current-usage. */
     size_t cap = 256;
     char* buf = (char*)aether_caps_malloc(cap);
-    if (!buf) { out._1 = "out of memory"; return out; }
+    if (!buf) { out._2 = "out of memory"; return out; }
     size_t len = 0;
 
     for (;;) {
@@ -480,14 +482,10 @@ _tuple_ptrstr_io io_fd_read_line_tuple(int fd) {
         long r = AE_FD_READ(fd, &c, 1);
 #endif
         if (r == 0) {
-            /* Clean EOF. If we haven't read anything yet, return the
-             * empty-string / empty-error pair (the porter doc spells
-             * this out as the EOF signal). Otherwise return the
-             * partial line — server-side dump streams sometimes end
-             * without a trailing '\n' on the last record. */
+            out._1 = 1;
             if (len == 0) {
                 aether_caps_free(buf, cap);
-                return out;  /* both fields already "" */
+                return out;
             }
             break;
         }
@@ -496,14 +494,14 @@ _tuple_ptrstr_io io_fd_read_line_tuple(int fd) {
             if (errno == EINTR) continue;
 #endif
             aether_caps_free(buf, cap);
-            out._1 = "read failed";
+            out._2 = "read failed";
             return out;
         }
         if (c == '\n') break;
         if (len + 1 >= cap) {
             size_t new_cap = cap * 2;
             char* nb = (char*)aether_caps_realloc(buf, cap, new_cap);
-            if (!nb) { aether_caps_free(buf, cap); out._1 = "out of memory"; return out; }
+            if (!nb) { aether_caps_free(buf, cap); out._2 = "out of memory"; return out; }
             buf = nb;
             cap = new_cap;
         }
@@ -515,9 +513,18 @@ _tuple_ptrstr_io io_fd_read_line_tuple(int fd) {
 
     AetherString* s = string_new_with_length(buf, len);
     aether_caps_free(buf, cap);
-    if (!s) { out._1 = "out of memory"; return out; }
+    if (!s) { out._1 = 0; out._2 = "out of memory"; return out; }
     string_release(out._0);
     out._0 = (void*)s;
+    return out;
+}
+
+/* Preserve the original two-field ABI and EOF convention. */
+_tuple_ptrstr_io io_fd_read_line_tuple(int fd) {
+    _tuple_ptrboolstr_io status = io_fd_read_line_status_tuple(fd);
+    _tuple_ptrstr_io out;
+    out._0 = status._0;
+    out._1 = status._2;
     return out;
 }
 
