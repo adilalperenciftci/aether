@@ -450,7 +450,7 @@ signature; `@scoped` checks the escapes written in the binding's own scope.
 
 ## How the rules are tested
 
-The ownership grid (`tests/ownership_grid/`) generates one program per
+The ownership grid (`tests/ownership_grid/`) generates one program per meaningful
 combination of a value kind (a fresh string, a `string?`, a closure that
 captures a string, an `fn[2]`, a struct owning a string, a tuple, a string
 array, ...), a place (a local, a struct field, an array element, a tuple slot,
