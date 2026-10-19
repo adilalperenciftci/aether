@@ -2992,6 +2992,50 @@ static int fn_name_matches_signature(SymbolTable* table, ASTNode* rhs, Type* tar
     return declared == target->param_count;
 }
 
+/* #2982: does the value `init` (a struct literal's `field: value`) fit the
+ * field `fd` of struct `sdef`, by the rules a store into the field
+ * (`b.f = value`) follows: assignable (a coercion, a wrap into an optional
+ * or a sum), `null` or `[]` into a slice, a named function of the signature
+ * into a typed function pointer, a byte literal in range. Reports the field
+ * and both types when it does not. A fixed-size array field and a closure
+ * in a function pointer field are refused by their own checks before this. */
+static int struct_field_value_fits(SymbolTable* table, ASTNode* sdef, ASTNode* fd,
+                                   ASTNode* init) {
+    ASTNode* fv = init->child_count > 0 ? init->children[0] : NULL;
+    Type* ft = fd->node_type;
+    if (!fv || !ft || ft->kind == TYPE_UNKNOWN) return 1;
+    if (ft->kind == TYPE_ARRAY && ft->array_size > 0) return 1;
+    if (type_is_slice(ft) && (fv->type == AST_NULL_LITERAL ||
+                              (fv->type == AST_ARRAY_LITERAL && fv->child_count == 0)))
+        return 1;
+    /* A string is a nullable C string, as a binding of one takes `null`. */
+    if (ft->kind == TYPE_STRING && fv->type == AST_NULL_LITERAL) return 1;
+    const char* sname = sdef->value ? ast_struct_display_name(sdef->value) : "?";
+    if (ft->kind == TYPE_BYTE && byte_assignment_literal_out_of_range(fv)) {
+        char msg[256];
+        snprintf(msg, sizeof(msg),
+                 "byte literal out of range for field '%s' of '%s': %s does not fit in 0..255",
+                 fd->value, sname, fv->value ? fv->value : "?");
+        type_error(msg, fv->line, fv->column);
+        return 0;
+    }
+    Type* vt = infer_type(fv, table);
+    int ok = !vt || vt->kind == TYPE_UNKNOWN || is_assignable(vt, ft) ||
+             (ft->kind == TYPE_FUNCTION && fn_name_matches_signature(table, fv, ft));
+    if (!ok) {
+        char msg[512];
+        if (fv->type == AST_NULL_LITERAL)
+            snprintf(msg, sizeof(msg), "field '%s' of '%s' is %s: it cannot take null",
+                     fd->value, sname, type_spelled(ft));
+        else
+            snprintf(msg, sizeof(msg), "field '%s' of '%s' is %s: it cannot take a value of type %s",
+                     fd->value, sname, type_spelled(ft), type_spelled(vt));
+        type_error(msg, fv->line, fv->column);
+    }
+    free_type(vt);
+    return ok;
+}
+
 /* #2623: the typed C function pointer (`fn(ptr, int)`, is_fnptr) that the
  * binding `stmt` writes, or NULL when it writes anything else. That is the
  * declaration's own annotation; for a bare `name = value`, the type of the
@@ -12743,6 +12787,8 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                                 if (fv && fd->node_type && fd->node_type->kind == TYPE_FUNCTION &&
                                     !fd->node_type->is_fnptr)
                                     function_value_annotate(fv, table);
+                                if (fv && !struct_field_value_fits(table, sdef, fd, field_init))
+                                    fields_ok = 0;
                                 break;
                             }
                         }

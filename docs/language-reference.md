@@ -2483,6 +2483,8 @@ struct Config {
 }
 ```
 
+A struct literal's value for a typed field fits it by the rules a store into the field does (`c.timeout = v`): it converts where an assignment converts (an `int` into a `float` field), wraps into an optional or a sum field, and a `string` field takes `null`. Anything else is a compile error naming the field: `Config { timeout: "5" }` is *field 'timeout' of 'Config' is int: it cannot take a value of type string*, and a byte field refuses a literal out of 0..255.
+
 ### Field injection with `using` (composition, no vtables)
 
 A field declared `using embed: Sub` embeds a sub-struct and **promotes its
