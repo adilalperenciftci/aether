@@ -61,7 +61,7 @@ needs is declared by that module, with `@link` at the top of its `module.ae`:
 Codegen unions those declarations across the resolved import closure into a
 `// aether-link:` comment on the generated C, and `ae build` puts them on the
 link command (#1549). So `import contrib.sqlite` links SQLite without any
-`aether.toml` entry, and it works transitively — a module three imports deep
+`aether.toml` entry, and it works transitively: a module three imports deep
 contributes its own dependencies.
 
 Two consequences worth knowing:
@@ -70,7 +70,7 @@ Two consequences worth knowing:
   command line, so anything you specify takes precedence.
 - **A `-D`-dropped import drops its libraries too.** Because the flags come
   from the AST, an `import` inside a losing `when defined(...)` region never
-  contributes them — the library is absent from the binary, not merely
+  contributes them: the library is absent from the binary, not merely
   unused. Restating it in `link_flags` defeats this, since that is static and
   applies to every build. Prefer `@link` for a module's own dependencies.
 
@@ -81,14 +81,14 @@ exception is `<lib_dir>/contrib`, added automatically so the veneer archives
 The `// aether-link:` comment also lists libraries for std modules backed by
 native code (`std.http` names `-lssl -lcrypto -lnghttp2`). Those are there for
 downstream C builds; `ae build` skips them, because it already passes the same
-libraries from its own pkg-config detection — and passes *nothing* when the
+libraries from its own pkg-config detection, and passes *nothing* when the
 library was not found, so `std.http` still links on a box without libnghttp2
 and the h2 surface falls back to its "unavailable" stub. A module's `@link` is
 for dependencies the toolchain does not probe for.
 
 ### C sources a module ships (`@source`)
 
-The same reasoning applies to a C file a *module* owns — a SIMD kernel, an
+The same reasoning applies to a C file a *module* owns: a SIMD kernel, an
 FFI shim written against the module's own externs. It is declared beside
 `@link`, at the top of the module's `module.ae`, relative to that directory:
 
@@ -108,7 +108,7 @@ region contributes nothing. The file is a dependency of the build, so a
 cached `ae run` rebuilds when it changes (#2125).
 
 Before this, every program importing such a module had to name the file
-itself, once per `[[bin]]` — twenty tests and benches, twenty entries — and
+itself, once per `[[bin]]` (twenty tests and benches, twenty entries), and
 the file was compiled whether or not the import survived.
 
 ### A header a module needs in the translation unit (`@c_include`)
@@ -178,7 +178,7 @@ perf report --stdio
 ```
 
 Neither other mode serves this. The default `-O2` build carries no DWARF and
-omits frame pointers, so a sampling profiler cannot unwind it — profiling
+omits frame pointers, so a sampling profiler cannot unwind it: profiling
 `std.http.server.lb` under load, gdb resolved 239 of 240 sampled frames as
 `??`. And `--quick`'s `-O0` inlines nothing and keeps every temporary live, so
 the hot spots it reports are not the ones the shipped binary has.
@@ -193,7 +193,7 @@ needs `-O0`, which is a correctness requirement rather than a preference.
 ### `--size` for shipped artifacts
 
 `--size` compiles with `-Os -g0` (`-Oz` under `--target`) and strips at link
-time — `-Wl,--strip-all -Wl,--gc-sections` with GNU ld and LLD,
+time: `-Wl,--strip-all -Wl,--gc-sections` with GNU ld and LLD,
 `-Wl,-x -Wl,-dead_strip` on Apple targets, whose linker rejects the GNU
 spellings as unknown options:
 
@@ -202,12 +202,12 @@ ae build --target=wasm32-wasi --emit=lib mylib.ae -o lib.wasm          # 956,573
 ae build --target=wasm32-wasi --emit=lib --size mylib.ae -o lib.wasm   #  24,942 bytes
 ```
 
-Every other mode points at debugging — `--quick` is `-O0 -g`, `--profile` is
-`-O2 -g -fno-omit-frame-pointer`, `--coverage` is `-O0 -g --coverage` — and the
+Every other mode points at debugging (`--quick` is `-O0 -g`, `--profile` is
+`-O2 -g -fno-omit-frame-pointer`, `--coverage` is `-O0 -g --coverage`), and the
 default `-O2` sits between them. `--size` is the one that points at shipping.
 
 **It matters most under `--target`.** `zig cc` emits DWARF **by default**, even
-at `-O2`, and the cross backend passed no `-g0` — so a cross-compiled
+at `-O2`, and the cross backend passed no `-g0`, so a cross-compiled
 `--emit=lib` artifact was overwhelmingly debug information. Measured on a
 two-function wasi library, 97.4% of the module was `.debug*`/`name` sections;
 code and data were the remaining 2.6%. The equivalent native `.so` has **zero**
@@ -216,11 +216,11 @@ every target shipped. Native builds still benefit, just far less: about 14% on
 the same library, from `-Oz` and the symbol table.
 
 Stripping is behaviour-preserving. The 24 KB module above still instantiates,
-still exports every symbol, and still runs identically — including the
+still exports every symbol, and still runs identically, including the
 fail-stop panic path WASI has.
 
 `-Os` rather than `-Oz` on the native path: gcc only gained `-Oz` in GCC 12,
-and Ubuntu 22.04 — the CI baseline — ships GCC 11, where it is a hard error.
+and Ubuntu 22.04 (the CI baseline) ships GCC 11, where it is a hard error.
 `-Os` is supported everywhere and gives nearly the same result. Cross builds do
 use `-Oz`, because zig bundles its own clang and the version is not the host's
 to vary.
@@ -252,7 +252,7 @@ When the positional argument doesn't exist as a file, `ae` checks `aether.toml`'
 
 If you run `ae build` from a subdirectory and there's no `aether.toml` in the current directory, `ae` walks up the directory tree looking for one. When it finds an ancestor `aether.toml`, it switches to that directory before resolving paths, so `cd src && ae build main.ae` works as if you had run `ae build src/main.ae` from the project root, and `extra_sources`, `[build] defines`, `cflags` and `link_flags` declared in the toml are still applied. The paths *you* typed keep meaning what they meant where you typed them: a relative `--extra shim.c` and a relative `-o app` resolve against the directory you ran the command from, as `cc -o` does. Walk-up only happens when there's no toml in the current directory; a project with a local `aether.toml` always wins, and the walk stops at a repository boundary (a `.git`), so a checkout with no manifest never adopts an unrelated ancestor's.
 
-`ae run`, `ae check`, `ae test` and `ae inspect` find the manifest the same way but do **not** change directory (#2148): under `ae run` the process cwd is also the cwd the program starts in, so a script reading `./data.txt` from `src/` keeps reading `src/data.txt`. They read the manifest where it is; a path the manifest states relative to itself — a `[[bin]] path`, an `extra_sources` entry, the project-mode `src/main.ae` — is resolved from the directory you ran the command in. `cflags` and `link_flags` are passed verbatim, so a relative `-I` in them is relative to wherever the compile runs (`ae build` runs it from the project root).
+`ae run`, `ae check`, `ae test` and `ae inspect` find the manifest the same way but do **not** change directory (#2148): under `ae run` the process cwd is also the cwd the program starts in, so a script reading `./data.txt` from `src/` keeps reading `src/data.txt`. They read the manifest where it is; a path the manifest states relative to itself (a `[[bin]] path`, an `extra_sources` entry, the project-mode `src/main.ae`) is resolved from the directory you ran the command in. `cflags` and `link_flags` are passed verbatim, so a relative `-I` in them is relative to wherever the compile runs (`ae build` runs it from the project root).
 
 ---
 
@@ -261,7 +261,7 @@ If you run `ae build` from a subdirectory and there's no `aether.toml` in the cu
 Aether's `int` is 32 bits and **wraps**: `2147483647 + 1` is `-2147483648`, and
 the compiler's constant folder says so out loud
 ([W1003](language-reference.md#constant-expression-overflow-w1003)). The code
-generator emits it as a C `int`, and C leaves signed overflow *undefined* — so
+generator emits it as a C `int`, and C leaves signed overflow *undefined*, so
 the flag that makes the two agree has to be on every command line that compiles
 generated C:
 
@@ -275,7 +275,7 @@ Without it the guarantee held only up to `-O1`. At `-O2` GCC 15.2 folded
 g_seed = (g_seed * 1103515245 + 12345) & 0x7FFFFFFF;
 ```
 
-down to a three-value cycle — the mask proves `g_seed >= 0`, "a signed multiply
+down to a three-value cycle: the mask proves `g_seed >= 0`, "a signed multiply
 does not overflow" then proves `g_seed <= 2^31 / 1103515245`, and value-range
 propagation finishes the job. `ae run` compiles at `-O0` and was unaffected, so
 the disagreement appeared only in shipped binaries.
@@ -523,7 +523,7 @@ cross-build the **`ae`/`aetherc` toolchain itself** for another OS, both via
 # FreeBSD x86_64 (needs a base sysroot: zig bundles no FreeBSD libc)
 make compiler ae stdlib FREEBSD=1 ZIG=/path/to/zig AETHER_SYSROOT=/path/to/base
 
-# Windows x86_64 — no sysroot needed: zig bundles the mingw-w64 headers + CRT
+# Windows x86_64, no sysroot needed: zig bundles the mingw-w64 headers + CRT
 make compiler ae stdlib WINDOWS=1 ZIG=/path/to/zig
 file build/ae.exe    # PE32+ executable (console) x86-64, for MS Windows
 ```
@@ -554,8 +554,8 @@ build compiles `runtime/windows/aether.manifest` with `windres` into
 `aether-lsp.exe`, and `ae build`/`ae run` link it (from beside
 `libaether.a`, where `install.sh` also ships it) into every executable they
 produce. The manifest declares the UTF-8 process code page, so the C
-runtime and every narrow Win32 call — `fopen`, `_stat`, `FindFirstFileA`,
-`argv`, the environment — read Aether's UTF-8 strings as UTF-8 (Windows 10
+runtime and every narrow Win32 call (`fopen`, `_stat`, `FindFirstFileA`,
+`argv`, the environment) read Aether's UTF-8 strings as UTF-8 (Windows 10
 1903+; older kernels ignore it). Without it a program that writes
 `café.txt` creates `cafÃ©.txt`. An external build that links `libaether.a`
 by hand should add that object too.
@@ -566,21 +566,21 @@ section.
 ### Testing with a runner (`AE_TEST_RUNNER`)
 
 `ae run` and `ae test` normally exec the binary they just built. Setting
-`AE_TEST_RUNNER` makes them prefix it with a wrapper instead — the same idea as
+`AE_TEST_RUNNER` makes them prefix it with a wrapper instead: the same idea as
 cargo's `CARGO_TARGET_<triple>_RUNNER`:
 
 ```bash
 # Run the cross-built Windows toolchain's output under Wine
 AE_TEST_RUNNER=wine make test-ae WINDOWS=1 ZIG=/path/to/zig
 
-# Any wrapper works — qemu-user, a tracer, a timing harness
+# Any wrapper works: qemu-user, a tracer, a timing harness
 AE_TEST_RUNNER="qemu-aarch64 -L /sysroot" ae test
 ```
 
 Unset or empty means "exec directly", so it is inert by default. The value may
 carry its own arguments. Because the hook sits at the *edge*, nothing in
 `std.spec` or in your test sources needs to know it is running under an
-emulator — the same `describe`/`it` blocks run either way, and the
+emulator: the same `describe`/`it` blocks run either way, and the
 `AE_SPEC_FORMAT`/`AE_SPEC_REPORT` structured-report contract is inherited
 straight through the wrapper.
 
@@ -754,7 +754,7 @@ C program.
 dynamically, so the artifact carries the GLIBC symbol version of whatever
 built it and will not start on an older distro. The `-linux-musl` triples
 link musl statically instead: no dynamic libc dependency, no version floor,
-and the same binary runs on any Linux of that architecture — including Alpine
+and the same binary runs on any Linux of that architecture, including Alpine
 and other musl distros. Prefer musl for anything you publish; see
 **[release-glibc-portability.md](release-glibc-portability.md)**.
 
@@ -772,8 +772,8 @@ Xcode-licensed and not redistributable, so `aarch64-ios`,
 `aarch64-ios-simulator`, `x86_64-ios-simulator` and the Mac Catalyst triples
 (`aarch64-ios-macabi`, `x86_64-ios-macabi`) shell to `xcrun clang`
 instead and require a macOS host with Xcode. `--emit=staticlib` produces a
-single `.a` holding the program plus the Aether runtime and stdlib — the shape
-an App Store build needs, since iOS forbids third-party dynamic libraries —
+single `.a` holding the program plus the Aether runtime and stdlib (the shape
+an App Store build needs, since iOS forbids third-party dynamic libraries),
 and `--emit=lib` produces an `@rpath`-installed Mach-O dylib for local
 development. Either way an iOS app is built by Xcode, and what it wants from
 Aether is a library, not a standalone binary. Full details, including the sandbox restrictions that apply
@@ -796,7 +796,7 @@ program uses such a module (`std.http`, `std.net`, `std.cryptography`,
 those libraries is the documented follow-up; staging them via
 `CROSSBUILD_SYSROOT` (provisioned by aether-crossbuild) links them for real
 today. **`std.regex` is the exception: it always works on cross builds, with
-no sysroot** — its engine is vendored in-tree (`std/regex/pcre2/`, pinned
+no sysroot**, because its engine is vendored in-tree (`std/regex/pcre2/`, pinned
 upstream PCRE2 compiled by `std/regex/aether_pcre2_vendored.c`; #1389), so a
 regex-using program cross-builds self-contained for every target. A
 CROSSBUILD_SYSROOT that stages a real libpcre2-8 takes precedence over the
@@ -825,14 +825,14 @@ an executable link is the whole increment.
 Windows needs `--export-all-symbols` for the reason the native path documents
 (#993): GCC's auto-export heuristic switches off as soon as any symbol carries
 an explicit `__declspec(dllexport)`, and the `aether_<name>` catalog exports
-then vanish from the DLL. A Windows `--emit=lib` is named `.dll`, not `.exe` —
+then vanish from the DLL. A Windows `--emit=lib` is named `.dll`, not `.exe`:
 the executable suffix is applied only to executables.
 
 **`--emit=both` is still rejected under `--target`**: it wants an executable
 *and* a library from one invocation, and the cross path links once. Run it
 twice with different `--emit` modes.
 That makes it the route to a **cross-compiled linkable library without
-cross-link support** — emit the C here, and let the consumer compile it for
+cross-link support**: emit the C here, and let the consumer compile it for
 their target into the `.so` / `.a` / `.wasm` they need.
 
 The emitted C is **target-neutral**, not target-parameterised: platform
@@ -841,11 +841,11 @@ by the consumer's compiler, which defines those macros for whatever target it
 builds. `--target` therefore does not change the bytes emitted (asserted by
 `tests/integration/emit_csrc_cross/`); it is accepted so one command line
 works for both native and cross consumers. For the same reason csrc under
-`--target` does **not** require `zig` on PATH — nothing is compiled or linked.
+`--target` does **not** require `zig` on PATH: nothing is compiled or linked.
 
 `--emit=obj` is the other non-linking mode, and is allowed under `--target` for
 the same reason: it stops at `zig cc -target <triple> -c`. Unlike csrc it emits
-a **target-format object** — real machine code for the triple — so it *does*
+a **target-format object** (real machine code for the triple), so it *does*
 need `zig`:
 
 ```
@@ -891,7 +891,7 @@ requires Exception handling support"*), and WASI has no POSIX signal API
 without `-D_WASI_EMULATED_SIGNAL`. `ae build` adds both when the target
 resolves to a WASI triple, so nothing needs passing by hand.
 
-**A full executable link works** as of #1655 — including actor programs:
+**A full executable link works** as of #1655, including actor programs:
 
 ```
 $ ae build --target=wasm32-wasi hello.ae -o hello.wasm
@@ -903,7 +903,7 @@ Four things had to change for that, and they are worth knowing because each
 was a place where WASI had been forgotten beside Emscripten:
 
 - **The scheduler.** WASI has no usable threads, but zig's wasi-libc ships
-  pthread *stubs* whose `pthread_create` returns `EAGAIN` — so the threaded
+  pthread *stubs* whose `pthread_create` returns `EAGAIN`, so the threaded
   runtime linked, started, printed "Failed to create scheduler thread", and
   then span forever on `scheduler_start()`'s readiness barrier. A wasi exe now
   selects the cooperative scheduler, the same substitution the Emscripten
@@ -920,7 +920,7 @@ was a place where WASI had been forgotten beside Emscripten:
 - **`setjmp`/`longjmp` selection.** `aether_panic.c` guarded its crash handler
   with `!defined(__wasi__)`, but `aether_panic.h`'s macro selection did not.
   WASI is hosted and does not define `__EMSCRIPTEN__`, so it fell into the
-  POSIX arm and got `_setjmp`/`_longjmp` — which wasi-libc declares but never
+  POSIX arm and got `_setjmp`/`_longjmp`, which wasi-libc declares but never
   implements. A **link** error, so it surfaced only at the end of a cross
   build (`undefined symbol: _longjmp`). See the caveat below.
 
@@ -929,7 +929,7 @@ was a place where WASI had been forgotten beside Emscripten:
 There is no working `setjmp` on `wasm32-wasi` in either spelling. `_setjmp` is
 declared but unimplemented; plain `setjmp` is a hard `#error` in wasi-libc
 directing you to `-mllvm -wasm-enable-sjlj` and an engine implementing the
-exception-handling proposal (measured on zig 0.16.0, that flag does not help —
+exception-handling proposal (measured on zig 0.16.0, that flag does not help:
 the `#error` fires first). Real support needs the WebAssembly
 exception-handling proposal in both toolchain and engine.
 
@@ -961,7 +961,7 @@ target-neutral bytes as every other target anyway.
 
 The same vendored engine backs two native cases: a build box with no system
 libpcre2-8 (`make` compiles the vendored copy instead of stubbing
-`std.regex` out — `PCRE2=0` restores the stub, `PCRE2=vendored` forces the
+`std.regex` out: `PCRE2=0` restores the stub, `PCRE2=vendored` forces the
 vendored engine even when a system library exists), and `ae`'s
 no-`libaether.a` source fallback, which always compiles the vendored engine
 so an installed toolchain never ships a silently-stubbed regex.
@@ -978,8 +978,8 @@ so an installed toolchain never ships a silently-stubbed regex.
 | WASM | `PLATFORM=wasm` | Cooperative scheduler, Emscripten |
 | Embedded | `PLATFORM=embedded` | Cooperative scheduler, no OS |
 | Cross-OS/arch | `ae build --target=<triple>` | `zig cc` backend, POSIX host, executables + `--emit=csrc`/`--emit=obj` |
-| iOS arm64 | `ae build --target=aarch64-ios` | Xcode/`xcrun` backend, macOS host, `--emit=staticlib` (App Store) / `--emit=lib` — see [cross-ios.md](cross-ios.md), and [swiftui-ios-app.md](swiftui-ios-app.md) to call it from a SwiftUI app |
-| Mac Catalyst | `ae build --target=aarch64-ios-macabi` | Xcode/`xcrun` backend on the macOS SDK, platform `MACCATALYST`, min 13.1 (x86_64) / 14.0 (arm64) — see [cross-ios.md](cross-ios.md) |
+| iOS arm64 | `ae build --target=aarch64-ios` | Xcode/`xcrun` backend, macOS host, `--emit=staticlib` (App Store) / `--emit=lib`: see [cross-ios.md](cross-ios.md), and [swiftui-ios-app.md](swiftui-ios-app.md) to call it from a SwiftUI app |
+| Mac Catalyst | `ae build --target=aarch64-ios-macabi` | Xcode/`xcrun` backend on the macOS SDK, platform `MACCATALYST`, min 13.1 (x86_64) / 14.0 (arm64): see [cross-ios.md](cross-ios.md) |
 | Cross-wasm | `ae build --target=wasm32-wasi` | `zig cc` backend; executables + `--emit=csrc`/`--emit=obj` |
 
 ## Hardening (`HARDEN=1`)

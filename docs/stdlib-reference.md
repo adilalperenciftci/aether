@@ -2705,7 +2705,7 @@ arm.
 | Function | Returns | Description |
 |---|---|---|
 | `net.await_io(fd)` | `string` | Register `fd` with the current core's I/O poller and suspend the calling actor. Returns `""` on success, error string on failure. One-shot: the fd is automatically unregistered after the next `IoReady` delivery. |
-| `net.ae_io_cancel(fd)` |, | Abandon a pending `await_io` without waiting for the message. Rarely needed due to one-shot policy. |
+| `net.ae_io_cancel(fd)` | none | Abandon a pending `await_io` without waiting for the message. Rarely needed due to one-shot policy. |
 
 **Constraints:**
 

@@ -68,7 +68,7 @@ ABI, `defer catch`'s guard, and dynamic message strings all keep working,
 while `err == fs.NotFound` becomes a pointer compare. C3's benefits
 one-char propagation, can't-forget-to-check, cheap identity, without C3's
 payload loss and without fighting the axis split Aether documents as
-deliberate. Estimated ~1,000–1,500 lines across three PRs (§8), each
+deliberate. Estimated ~1,000-1,500 lines across three PRs (§8), each
 independently shippable.
 
 ## 1. What Aether already owns (the §5.5 inventory)
@@ -204,7 +204,7 @@ lookup-shaped API (`map.get`, "first element", search) that legitimately
 wants `T?` for absence *and* an error channel for I/O failure.
 
 Blast radius: every optional test, every fallible signature, both operator
-families, the narrowing pass, in one coordinated change. Estimated 3–5×
+families, the narrowing pass, in one coordinated change. Estimated 3-5×
 Option B's cost, for a semantic model the language's own docs argue against.
 **Declined.** (If a future need arises for "fallible optional", `T?!`
 an optional inside a result, composes from Option B's parts for free.)
@@ -282,8 +282,8 @@ read(path: string) -> string! {
 
 // caller
 data, err = fs.read(p)
-if err == fs.NotFound { return default_config() }   // identity compare — NEW
-if err != "" { return "", err }                      // presence — unchanged
+if err == fs.NotFound { return default_config() }   // identity compare (new)
+if err != "" { return "", err }                      // presence (unchanged)
 ```
 
 Design pinned by the compilation model (§1.3):
@@ -333,23 +333,23 @@ typed mechanism nobody uses plus an untyped convention everybody uses.
   ignore): `!` already means propagate-or-panic; overloading it to "ignore"
   would invert its meaning. Explicit `_, _ =` is the discard.
 - **Narrowing for `T!`** (`if e == "" { use v unchecked }`): real value,
-  real cost (the narrowing machinery generalized). Not needed for phases 1–3;
+  real cost (the narrowing machinery generalized). Not needed for phases 1-3;
   natural fourth phase if wanted.
 
 ## 8. Costing
 
 | Phase | Piece | Est. lines | Risk |
 | --- | --- | --- | --- |
-| 0 | `or {}` value-block fix + tests (own PR) | 60–120 | low, one emission branch |
-| 1 | `std/` signature migration to `T!` (17 sigs, 279 sites reviewed) | 300–600 churn | low, mechanical; the review burden IS the cost |
+| 0 | `or {}` value-block fix + tests (own PR) | 60-120 | low, one emission branch |
+| 1 | `std/` signature migration to `T!` (17 sigs, 279 sites reviewed) | 300-600 churn | low, mechanical; the review burden IS the cost |
 | 1 | `??` accepts `T!` (optional) | ~40 | low |
-| 2 | discard-check in typechecker + diagnostics | 100–150 | low, expression-statement walk |
-| 2 | tests: reject suite + silence suite (consumption forms) | 150–250 |, |
-| 3 | `fault` declarations: parser + interned-global emission | 120–180 | low, enum/bitstruct pattern |
-| 3 | `==`-on-fault lowering (ptr-then-strcmp) + typecheck | 80–120 | low |
-| 3 | tests incl. a **binary_import cross-boundary identity test** | 200–300 | the one genuinely novel test |
-|, | docs (language-reference, AGENTS.md, CHANGELOG ×3) | 200–300 |, |
-| | **Total, phases 0–3** | **~1,200–2,000** | three-to-four PRs |
+| 2 | discard-check in typechecker + diagnostics | 100-150 | low, expression-statement walk |
+| 2 | tests: reject suite + silence suite (consumption forms) | 150-250 | none |
+| 3 | `fault` declarations: parser + interned-global emission | 120-180 | low, enum/bitstruct pattern |
+| 3 | `==`-on-fault lowering (ptr-then-strcmp) + typecheck | 80-120 | low |
+| 3 | tests incl. a **binary_import cross-boundary identity test** | 200-300 | the one genuinely novel test |
+| none | docs (language-reference, AGENTS.md, CHANGELOG ×3) | 200-300 | none |
+| | **Total, phases 0-3** | **~1,200-2,000** | three-to-four PRs |
 
 Calibration: `bitstruct` ~1,050 staged; `defer catch` ~620; contract folding
 ~1,234. Each phase here is at or below that band, and no phase depends on a
@@ -375,7 +375,7 @@ later one landing.
 ## 10. Recommendation
 
 Ship Phase 0 (the `or {}` fix) immediately, it is a miscompile regardless
-of any design decision. Then phases 1–3 in order, one PR each, pausing
+of any design decision. Then phases 1-3 in order, one PR each, pausing
 after each for the same review this document got. The window argument from
 contract folding applies at larger scale: `std/` gains fallible signatures
 every release, every one written against the stringly convention, and

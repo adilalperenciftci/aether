@@ -66,13 +66,13 @@ cross targets still reject it. The dylib is linked with
 expects; without it the load command would record the build-machine path and the
 library would fail to load from inside the bundle.
 
-For a step-by-step walkthrough of wiring one of these into an actual app —
-bridging header, calling from SwiftUI, bundling, and the mistakes that cost
-the most time — see **[swiftui-ios-app.md](swiftui-ios-app.md)**.
+For a step-by-step walkthrough of wiring one of these into an actual app
+(bridging header, calling from SwiftUI, bundling, and the mistakes that cost
+the most time) see **[swiftui-ios-app.md](swiftui-ios-app.md)**.
 
 The exported symbols are the ordinary `aether_<name>()` C ABI (see
 [emit-lib.md](emit-lib.md)), so Swift and Objective-C call them through a
-bridging header with no glue. Note that `--emit=lib` writes only the library —
+bridging header with no glue. Note that `--emit=lib` writes only the library:
 the **header comes from `--emit=csrc`** (same catalog codegen, so the two cannot
 drift) or from `aetherc --emit-header`:
 
@@ -98,7 +98,7 @@ The deployment target is part of the clang triple, so it is fixed at build
 time. The default is **iOS 15.0** for the device and simulator targets. Catalyst
 has its own floor, and it differs by architecture: **13.1** on x86_64 (the
 `macabi` ABI does not exist before it) and **14.0** on arm64, since arm64
-Catalyst did not exist until Apple Silicon — clang silently raises anything
+Catalyst did not exist until Apple Silicon: clang silently raises anything
 lower to 14.0, so asking for less produces a triple that does not describe its
 own output. Override any of them with `AETHER_IOS_MIN`:
 
@@ -120,10 +120,10 @@ plan around.
 | `os.system` (shell-out) | Always returns `-1`. iOS marks `system(3)` unavailable, so there is no shell to exec into. See `AETHER_HAS_SHELL`. |
 | `os.run` / `os.run_capture` | Compile and link, but iOS forbids spawning child processes in an app sandbox. |
 | `std.dl` | `dlopen` is restricted to libraries already inside the app bundle. |
-| `std.audio` | Reports unavailable. miniaudio's iOS backend is AVAudioSession (Objective-C), which is not valid C, so the null backend is selected via `-DMA_NO_COREAUDIO` — the same treatment the macOS cross target gets. |
+| `std.audio` | Reports unavailable. miniaudio's iOS backend is AVAudioSession (Objective-C), which is not valid C, so the null backend is selected via `-DMA_NO_COREAUDIO`: the same treatment the macOS cross target gets. |
 | `libaether_sandbox.so` | Not available. It is an `LD_PRELOAD` mechanism, which iOS has no equivalent of. Use `--emit=lib` capability gating and `hide` / `seal except` instead, both of which are compile-time and work everywhere. |
 | `std.fs` paths | Confined to the app's container by the OS sandbox. |
-| OpenSSL / zlib / nghttp2 | Not linked, so HTTPS/TLS, hashing, base64 and compression report errors at runtime — the same warn-and-degrade as every other cross target without a `CROSSBUILD_SYSROOT`. `std.regex` is the exception and always works (vendored PCRE2). |
+| OpenSSL / zlib / nghttp2 | Not linked, so HTTPS/TLS, hashing, base64 and compression report errors at runtime: the same warn-and-degrade as every other cross target without a `CROSSBUILD_SYSROOT`. `std.regex` is the exception and always works (vendored PCRE2). |
 
 `AETHER_HAS_SHELL` is a Tier-0 platform capability alongside
 `AETHER_HAS_FILESYSTEM` and friends (`runtime/config/aether_optimization_config.h`).
@@ -140,7 +140,7 @@ ae build --target=aarch64-ios-simulator --emit=staticlib mylib.ae -o sim/libmyli
 ae build --target=aarch64-ios-macabi    --emit=staticlib mylib.ae -o catalyst/libmylib.a
 
 # Device and simulator slices cannot go in one fat binary (same arch, different
-# platform) — that is exactly what an XCFramework is for.
+# platform); that is exactly what an XCFramework is for.
 xcodebuild -create-xcframework \
     -library device/libmylib.a \
     -library sim/libmylib.a \
