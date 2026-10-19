@@ -100,11 +100,11 @@ and `a - b` identically, re-spacing between separated tokens cannot change how
 the source parses; the one hazard, gluing two tokens that would re-lex as one
 (`a b` becoming `ab`, or `<` `<` becoming `<<`), is explicitly prevented.
 
-This is verified, not just asserted: formatting every program in `examples/` and
+This is verified, not only asserted: formatting every program in `examples/` and
 `tests/` produces byte-identical generated C (modulo `#line` directives), and
 formatting is idempotent (`fmt(fmt(x)) == fmt(x)`) across the whole corpus.
 
-Both properties are enforced in CI, not just described:
+Both properties are enforced in CI:
 `tests/integration/fmt_gate/test_fmt_gate.sh` fails the build if any
 checked-in `.ae` file under `std/`, `examples/`, or `tests/` is not
 canonically formatted (`ae fmt --check`), if formatting stops being

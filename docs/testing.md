@@ -14,10 +14,11 @@ mutation-testing facility remain in aeocha; `std.spec` is
 
 ## A first test
 
-`std.spec` is a normal stdlib module — no install step, no `--lib`:
+`std.spec` is a normal stdlib module, with no install step and no `--lib`:
 
-```aether,fragment
+```aether
 import std.spec
+import std.math
 
 main() {
     fw = spec.init()
@@ -27,7 +28,7 @@ main() {
             spec.assert_eq(2 + 3, 5, "2 + 3")
         }
         spec.it("prefers the fluent style") callback {
-            spec.expect_int(abs(-7)).to_equal(7)
+            spec.expect_int(math.abs_int(-7)).to_equal(7)
         }
     }
 
@@ -81,7 +82,7 @@ suite context (`_ctx`) into the trailing block.
 
 ```aether,fragment
 spec.describe(fw, "outer") {
-    spec.describe("inner") {           // no fw — injected
+    spec.describe("inner") {           // no fw: it is injected
         spec.before_each() callback { reset() }
         spec.after_each() callback { close_resources() }
         spec.it("does something") callback { /* ... */ }
@@ -91,7 +92,7 @@ spec.describe(fw, "outer") {
 
 `before_each` runs outermost-to-innermost, `after_each`
 innermost-to-outermost, and both are inherited by descendant suites. One
-framework is supported per process — a second `init()` rebinds the
+framework is supported per process: a second `init()` rebinds the
 ambient context.
 
 Because a passing run *returns* (rather than exiting), a test that starts
@@ -120,8 +121,8 @@ spec.assert_null(ptr, "was freed")
 spec.assert_not_null(user, "was loaded")
 ```
 
-`assert_eq` takes `int`. Passing a value wider than 32 bits — a
-`mem.get_long`, a u64 accessor, an IEEE 754 bit pattern — narrows it at the
+`assert_eq` takes `int`. Passing a value wider than 32 bits (a
+`mem.get_long`, a u64 accessor, an IEEE 754 bit pattern) narrows it at the
 call boundary, and the consequence is worse than a wrong comparison: it has
 aborted the process outright on Windows while passing on Linux, where both
 truncated halves happened to agree. Reach for `assert_eq_long` whenever the
@@ -129,7 +130,7 @@ value can exceed 32 bits.
 
 ### Asserting on the failure path
 
-`std` returns `(value, err)` throughout — `err` is `""` on success and a
+`std` returns `(value, err)` throughout: `err` is `""` on success and a
 message on failure. Three matchers state that outcome directly:
 
 ```aether,fragment
@@ -150,12 +151,12 @@ reads as a mechanism rather than an outcome.
 without pinning the exact wording, so rephrasing a message does not break
 every spec that asserts on it.
 
-`assert_ok` is worth reaching for even when the call "obviously" succeeds — it
+`assert_ok` is worth reaching for even when the call "obviously" succeeds: it
 is the one people omit, and a suite with only error-path assertions stays green
 while the success path rots.
 
 `assert_str_eq_diff` aligns the two values and points a caret at the first
-differing byte — reach for it when a plain "expected X got Y" would bury
+differing byte; reach for it when a plain "expected X got Y" would bury
 the difference in a long string.
 
 ### Fluent assertions
@@ -206,7 +207,7 @@ what it always was.
 
 `to_equal_str` switches to the caret-aligned diff (the same form
 `assert_str_eq_diff` uses) once either string is long enough that
-eyeballing a quoted pair stops working — on a long whitelist the index
+eyeballing a quoted pair stops working: on a long whitelist the index
 and caret are what actually locate the differing byte. Short strings
 keep the compact `expected 'x', got 'y'` form.
 
@@ -214,11 +215,11 @@ keep the compact `expected 'x', got 'y'` form.
 
 `IntSubject` and `StrSubject` are exported. A free function whose first
 parameter is one of those types participates in Aether's UFCS method
-syntax — no base class, no registration:
+syntax, with no base class and no registration:
 
 ```aether,fragment
 to_be_even(s: spec.IntSubject, msg: string) -> spec.IntSubject {
-    if s.value % 2 != 0 { spec.fail("${msg} — ${s.value} is not even") }
+    if s.value % 2 != 0 { spec.fail("${msg}: ${s.value} is not even") }
     return s
 }
 
@@ -226,17 +227,17 @@ spec.expect_int(count).to_be_gt(0).to_be_even("even count")
 ```
 
 Return the subject so callers can keep chaining. A flat custom matcher is
-even simpler — any function that calls `spec.fail(msg)`:
+any function that calls `spec.fail(msg)`:
 
 ```aether,fragment
 expect_prime(n: int, msg: string) {
-    if !is_prime(n) { spec.fail("${msg} — ${n} is not prime") }
+    if !is_prime(n) { spec.fail("${msg}: ${n} is not prime") }
 }
 ```
 
 ### Collection matchers
 
-Operate on a `std.list` of strings — the common shape for captured lines,
+Operate on a `std.list` of strings, the common shape for captured lines,
 names, or ids:
 
 ```aether,fragment
@@ -267,13 +268,13 @@ do_work()
 spec.expect_elapsed_under(os.now_monotonic_ns() - t0, 50ms, "fast path")
 ```
 
-Use monotonic-clock deltas (not wall-clock) — only the delta is
+Use monotonic-clock deltas (not wall-clock): only the delta is
 meaningful and a wall jump would corrupt it.
 
 ### Skipping a test whose dependency may be absent
 
-A spec whose subject may not exist on the host — a host-language bridge, a
-driver, a daemon, a system library — needs a third outcome besides pass and
+A spec whose subject may not exist on the host (a host-language bridge, a
+driver, a daemon, a system library) needs a third outcome besides pass and
 fail. Failing presents a *provisioning* gap as a code defect (and gets the
 test deleted from the sweep); passing silently is worse, because a box that
 skips everything then looks exactly like a box that passes everything.
@@ -297,13 +298,13 @@ contrib.host.ruby
   5 skipped
 ```
 
-Exit status is 0 — a skip is not a failure — but the count is on stdout and
+Exit status is 0 (a skip is not a failure), but the count is on stdout and
 `skipped=N` is in the structured report, so a degraded box is visible rather
 than quietly green.
 
 | verb | use for |
 |---|---|
-| `it_when(cond, desc, reason)` | dependency gating — the common case. `cond` is a plain int the caller computes, keeping the probe visible at the call site. |
+| `it_when(cond, desc, reason)` | dependency gating, the common case. `cond` is a plain int the caller computes, keeping the probe visible at the call site. |
 | `skip_it(desc, reason)` | a **permanent** exclusion (known-broken path, unsupported platform) where the body is kept for the day it is re-enabled. |
 | `skip_all_if(fw, cond, reason)` | file-level bail-out; returns 1 when the caller should `return`. The condition is evaluated eagerly, so guard an expensive probe yourself. |
 
@@ -349,7 +350,7 @@ contributes a single point derived from its exit code.
 
 ### aeocha v1
 
-`--format=aeocha-v1` emits the aeocha v1 report format — a `version=1`
+`--format=aeocha-v1` emits the aeocha v1 report format: a `version=1`
 key/value header, a `---` separator, then tab-packed `PASS`/`FAIL` rows
 (status, index, quoted name, per-row nanosecond duration, and the failure
 message for a FAIL). `ae test` emits one block per file, each preceded by
@@ -359,8 +360,8 @@ a `# <path>` comment line, so multiple blocks are separable (split on
 ### How it works (and running it yourself)
 
 Under a `--format` flag, `ae test` hands each child two environment
-variables — `AE_SPEC_FORMAT` (the format name) and `AE_SPEC_REPORT` (a
-path) — and `spec.run_summary` writes the report there. You can drive that
+variables, `AE_SPEC_FORMAT` (the format name) and `AE_SPEC_REPORT` (a
+path), and `spec.run_summary` writes the report there. You can drive that
 directly without the runner:
 
 ```bash
@@ -369,7 +370,7 @@ cat /tmp/out.tap
 ```
 
 With neither variable set, `run_summary` writes no report and the human
-`✓`/`✗` output is the only output — the default.
+`✓`/`✗` output is the only output, the default.
 
 ## Conventions
 
@@ -380,15 +381,15 @@ With neither variable set, `run_summary` writes no report and the human
   "Where a std module's tests live" in CONTRIBUTING.md.
 - Keep test source canonically formatted; CI enforces it
   (`ae fmt tests`).
-- Assertions are soft — prefer several small `expect_`/`assert_` checks
+- Assertions are soft: prefer several small `expect_`/`assert_` checks
   over one compound condition, so a failure names exactly what broke.
 
 ## See also
 
-- [Standard Library Reference](stdlib-reference.md) — the full stdlib surface.
-- [Closures and Builder DSL](closures-and-builder-dsl.md) — the
+- [Standard Library Reference](stdlib-reference.md): the full stdlib surface.
+- [Closures and Builder DSL](closures-and-builder-dsl.md): the
   trailing-block / `_ctx` injection mechanism `describe`/`it` are built on.
-- [aeocha](https://github.com/aether-lang-dev/aeocha) — the upstream
+- [aeocha](https://github.com/aether-lang-dev/aeocha): the upstream
   framework, including the process/HTTP integration matchers and mutation
   testing that live outside the stdlib.
 
@@ -396,10 +397,10 @@ With neither variable set, `run_summary` writes no report and the human
 
 The framework core (`std.spec`) is deliberately dependency-light. Two
 sibling modules carry the integration-shape matchers that consume other
-std surfaces, reporting through the same ambient framework cell — so
+std surfaces, reporting through the same ambient framework cell, so
 they compose with `describe`/`it` and count into the same summary:
 
-- **`import std.os.testing`** — process matchers over the
+- **`import std.os.testing`**: process matchers over the
   `(stdout, exit, stderr)` triple from `os.run_capture`:
   `testing.expect_exit`, `testing.expect_no_spawn_error`,
   `testing.expect_stdout_contains` / `_line_count` / `_line_field` /
@@ -409,7 +410,7 @@ they compose with `describe`/`it` and count into the same summary:
 
 - **`import std.http.client.httptest`** (named per Go's
   `net/http/httptest`; the namespace tail must differ from
-  `std.os.testing`'s) — response-handle matchers
+  `std.os.testing`'s): response-handle matchers
   (`httptest.expect_http_status` / `_no_error` / `_body_eq` /
   `_body_contains` / `_header` / `_body_json_field`), one-call
   GET/POST conveniences (`httptest.expect_http_get_status`, …), and the
@@ -422,7 +423,7 @@ standalone use. See `tests/integration/std_testing_arms/probe.ae` for
 an end-to-end example driving both arms against real subprocesses and
 an in-process fixture server.
 
-## Test report format (aeocha-v1) — a stable, versioned contract
+## Test report format (aeocha-v1), a stable, versioned contract
 
 `std.spec`'s `run_summary` writes a machine-readable report to the path
 in `AE_SPEC_REPORT` when `AE_SPEC_FORMAT=aeocha` (or `aeocha-v1`) is
@@ -445,7 +446,7 @@ duration_ns=<N>
 ```
 
 `skipped=` was **added** under `version=1` (#1610), which the additive rule
-below permits — no version bump, and a consumer that does not know the key
+below permits: no version bump, and a consumer that does not know the key
 ignores it. Note `total` deliberately remains `passed + failed`: folding
 skips into it would *repurpose* an existing key, which the rules forbid.
 Rows for skipped tests carry `SKIP` as their `<STATUS>` and a duration of
@@ -459,10 +460,10 @@ The rules a consumer may rely on, and an editor must preserve:
    keys); existing keys are never renamed, repurposed, or removed.
 2. The header ends at the first `---` line (`\n---\n`); rows follow.
 3. Each row is tab-separated: STATUS (`PASS`/`FAIL`), a 1-based index,
-   the double-quoted test name, a duration (nanoseconds today — treat
-   the unit as unspecified within v1 and do not compute from it), and —
-   only when present — a trailing message field.
-4. **Any change that breaks rules 1–3 bumps the leading `version=`**
+   the double-quoted test name, a duration (nanoseconds today; treat
+   the unit as unspecified within v1 and do not compute from it), and,
+   only when present, a trailing message field.
+4. **Any change that breaks rules 1 to 3 bumps the leading `version=`**
    so a pinned consumer detects v2 instead of misparsing v1.
 
 `_format_aeocha_v1` in `std/spec/module.ae` is the single producer;
@@ -475,7 +476,7 @@ The aeocha framework was absorbed into the stdlib: `import std.spec`
 (process matchers), `import std.http.client.httptest` (HTTP matchers,
 `within`/`without`/`eventually`). No std or contrib module references
 `contrib.aeocha`, and nothing in a test's closure requires the aeocha
-repo or its old IPC-pipe report convention — the env-file transport
+repo or its old IPC-pipe report convention: the env-file transport
 above replaces it. Downstreams still importing `contrib.aeocha` from
 pre-spinout snapshots should migrate to the modules above; the
 standalone aeocha repo remains only as a thin compatibility facade
