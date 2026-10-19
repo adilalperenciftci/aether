@@ -2695,6 +2695,44 @@ static void reject_untyped_erased_args(ASTNode* call, SymbolTable* table) {
     }
 }
 
+/* #2856: the arguments of a call through a closure or a function pointer
+ * (from child `first` on, a trailing block left out) go into its
+ * parameters `pts` as a direct call's go into a function's (the argument
+ * checks of typecheck_function_call): `[]` and `null` into a `T[]` are the
+ * empty slice, a `T[N]` array is a view of it, and an `if` or a `match` is
+ * coerced arm by arm (slice_coerce_slot, #2767). Such a call never was, so
+ * a `[]` reached C as an initializer list and an array as a pointer, and
+ * neither compiled. */
+static void coerce_args_to_params(ASTNode* call, int first, Type** pts, int n) {
+    for (int i = first, p = 0; pts && i < call->child_count && p < n; i++) {
+        if (!call->children[i] || ast_is_trailing_block(call->children[i])) continue;
+        Type* pt = pts[p++];
+        if (pt && pt->kind != TYPE_UNKNOWN) slice_coerce_slot(&call->children[i], pt, 0);
+    }
+}
+
+/* The same for `call(f, ...)`: the parameters of the closure literal `f`
+ * is or holds, which codegen calls it through, else of `f`'s signature. An
+ * erased `fn` has neither (and refuses `[]` itself,
+ * reject_untyped_erased_args). */
+static void coerce_closure_call_args(ASTNode* call, SymbolTable* table) {
+    if (call->child_count < 2 || !call->children[0]) return;
+    ASTNode* lit = call_callee_literal(call, table);
+    if (lit) {
+        Type* pts[64];
+        int n = 0;
+        for (int i = 0; i < lit->child_count && n < 64; i++)
+            if (lit->children[i] && lit->children[i]->type == AST_CLOSURE_PARAM)
+                pts[n++] = lit->children[i]->node_type;
+        coerce_args_to_params(call, 1, pts, n);
+        return;
+    }
+    Type* ft = infer_type(call->children[0], table);
+    if (ft && ft->kind == TYPE_FUNCTION && !ft->is_fnptr)
+        coerce_args_to_params(call, 1, ft->param_types, ft->param_count);
+    if (ft) free_type(ft);
+}
+
 static int g_tc_ptr_to_closure = 0;
 int typecheck_ptr_to_closure_seen(void) { return g_tc_ptr_to_closure; }
 
@@ -15081,6 +15119,7 @@ int typecheck_function_call(ASTNode* call, SymbolTable* table) {
         for (int i = 0; i < call->child_count; i++) {
             typecheck_expression(call->children[i], table);
         }
+        coerce_args_to_params(call, 0, symbol->type->param_types, symbol->type->param_count);
         if (symbol->type->return_type) {
             set_node_type(call, clone_type(symbol->type->return_type));
         } else {
@@ -15136,6 +15175,7 @@ int typecheck_function_call(ASTNode* call, SymbolTable* table) {
         // the explicit call(f, ...) form, so both spellings type alike.
         set_node_type(call, call_builtin_result_type(call, table));
         reject_untyped_erased_args(call, table);
+        coerce_closure_call_args(call, table);
         return 1;
     }
 
@@ -15163,6 +15203,7 @@ int typecheck_function_call(ASTNode* call, SymbolTable* table) {
                 for (int i = 0; i < call->child_count; i++) {
                     typecheck_expression(call->children[i], table);
                 }
+                coerce_args_to_params(call, 0, fsig->param_types, fsig->param_count);
                 set_node_type(call, fsig->return_type
                     ? clone_type(fsig->return_type) : create_type(TYPE_UNKNOWN));
                 if (call->annotation) free(call->annotation);
@@ -16015,6 +16056,7 @@ int typecheck_function_call(ASTNode* call, SymbolTable* table) {
         set_node_type(call, call_builtin_result_type(call, table));
         reject_non_closure_callee(call, table);
         reject_untyped_erased_args(call, table);
+        coerce_closure_call_args(call, table);
     }
     /* box_closure(add_fn) boxes the closure value of a named function. */
     if (call->value && strcmp(call->value, "box_closure") == 0 && call->child_count == 1)
