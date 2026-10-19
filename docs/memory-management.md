@@ -323,16 +323,28 @@ string is adopted at the call, and the caller owns it. Any other string an
 extern returns is C's and is copied when a place takes it.
 
 A string stored into a header-defined struct's field (`extern struct ...
-@c_import`) or into a slice over C memory is given a reference of its own,
-which nothing in the program releases: it is C's from then on.
+@c_import`) is given a reference of its own, which nothing in the program
+releases: it is C's from then on. One stored into C memory viewed as
+`string[]` is given no reference (see `ptr` slots, below).
 
 ### `ptr` slots
 
 A `ptr` slot owns nothing. A string goes into one only through
 `string.keep(s)`, which hands over a reference the program gives back with
-`string.release_kept(p)`; a closure goes into one boxed (`box_closure(f)`,
-or the coercion a store into a `ptr` makes), the box holding a reference of
-its own, which `release_closure(p)` gives back. A function that keeps a
+`string.release_kept(p)`. C memory viewed as `string[]` owns nothing either:
+`(names as string[])[i] = s` gives C the characters and no reference, so
+the string must outlive every read. A local does only while the memory
+ends with the function (an argv array built, handed to C and freed in one
+function). Memory that outlives it (reached through a parameter, a
+module-level `var`, a field or a heap box, or whose pointer is returned or
+stored) takes `(names as ptr[])[i] = string.keep(s)`, given back with
+`string.release_kept` where the memory is freed; any other string stored
+there is refused (E0902), as is a string built in the statement. A literal
+is pinned and goes into either as it is.
+
+A closure goes into a `ptr` slot boxed (`box_closure(f)`, or the coercion a
+store into a `ptr` makes), the box holding a reference of its own, which
+`release_closure(p)` gives back. A function that keeps a
 `ptr` parameter declares it `@keep` (E0902); a `ptr` parameter that only
 borrows is given a closure in a box on the caller's stack, so nothing is
 allocated.

@@ -555,8 +555,18 @@ parameter, as it refuses freeing a string one (E0901).
 `string[]` (`(names as string[])[i] = s`) gives C its characters and takes
 no reference: the program keeps the string alive while C reads it, as for
 any `ptr` slot. The checker refuses a string built in the statement itself
-(a call, an interpolation), which nothing would keep (E0902); bind it to a
-local first. An earlier pass gave the stored string a reference of its own,
+(a call, an interpolation), which nothing would keep (E0902). A local lives
+long enough only when C's use of the memory ends with the function, so a
+string that is not pinned (anything but a literal or a `const` bound to
+one) stored into C memory that outlives the function is refused too
+(#2979): memory reached through a parameter, a module-level `var`, a field
+or a heap box, or a local allocation whose pointer escapes as a borrowed
+`ptr` would (E0902's facts: returned, stored, captured by a closure that
+escapes, sent, passed to a `@keep` parameter). Such a slot takes
+`string.keep(s)` through a `ptr[]` view and gives it back with
+`string.release_kept`, as any `ptr` slot does. Memory the function
+allocates and does not let escape (an argv array handed to C) takes a
+local. An earlier pass gave the stored string a reference of its own,
 which nothing could release (C holds only the characters), so every such
 store leaked.
 

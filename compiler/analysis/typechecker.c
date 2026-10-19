@@ -4704,7 +4704,8 @@ static void check_closures_ptr_params(ASTNode* program, ASTNode* n,
                                       const char** globals, int nglobals);
 static ASTNode* effect_resolve_callee(ASTNode* program, const char* name);
 static int has_ctx_first_param(ASTNode* func);
-static void check_strings_into_keep(ASTNode* program, ASTNode* n);
+static void check_strings_into_keep(ASTNode* program, ASTNode* fn, ASTNode* body,
+                                    const char** globals, int nglobals);
 // #481: validate `@pure`/`@no_fs`/`@no_net`/`@no_os` effect tags.
 static void check_effect_tags(ASTNode* program);
 // #522: fold `__pure(fn)` queries to compile-time bool constants.
@@ -6259,7 +6260,7 @@ int typecheck_program(ASTNode* program) {
             check_borrowed_param_frees(program, child, body);
             check_borrowed_ptr_params(program, child, body, global_var_names, global_var_count);
             check_closures_ptr_params(program, body, global_var_names, global_var_count);
-            check_strings_into_keep(program, body);
+            check_strings_into_keep(program, child, body, global_var_names, global_var_count);
         } else if (child->type == AST_MAIN_FUNCTION && child->child_count > 0) {
             // main() has a BLOCK child containing the actual statements
             ASTNode* main_body = child->children[0];
@@ -6268,7 +6269,7 @@ int typecheck_program(ASTNode* program) {
             scoped_check_bindings(main_body, main_body);  // #521
             iso_check_function(child, main_body);  // #479 Isolated[T] move check
             check_closures_ptr_params(program, main_body, global_var_names, global_var_count);
-            check_strings_into_keep(program, main_body);
+            check_strings_into_keep(program, child, main_body, global_var_names, global_var_count);
         }
     }
     g_tc_file = NULL;
@@ -7066,13 +7067,23 @@ static void check_borrowed_param_frees(ASTNode* program, ASTNode* fn, ASTNode* b
  * bound to it, or a local struct or closure that holds it), the parameter
  * it holds, and what holds it ("held by a struct", "captured by a closure";
  * NULL for the pointer itself). */
+typedef struct KeepCtx KeepCtx;
 typedef struct {
     const char* names[KEEP_SET_MAX];
     const char* params[KEEP_SET_MAX];
     const char* vias[KEEP_SET_MAX];
     int count;
     Type* ret;   /* the function's declared result, or NULL */
+    /* #2979: a probe reports nothing; it records that a name escapes. Its
+     * function, so a store into memory that ends with the function (a
+     * field of a local allocation) is no escape. */
+    int probe;
+    int escaped;
+    const KeepCtx* ctx;
+    int depth;
 } KeepSet;
+
+static int c_lvalue_outlives(const KeepCtx* c, ASTNode* lhs, int depth);
 
 /* Is position `i` of a `return` with `n` values a `string` of the result
  * `ret`? A `ptr` returned there is taken as a string: the return hands the
@@ -7219,7 +7230,10 @@ static int call_keeps_arg(ASTNode* program, ASTNode* call, int i) {
     return 0;
 }
 
-static void report_borrowed_keep(ASTNode* at, Carried c, const char* how) {
+/* A place where what `c` holds outlives the call: E0902, or for a probe
+ * (#2979), a note that it escapes. */
+static void report_borrowed_keep(KeepSet* s, ASTNode* at, Carried c, const char* how) {
+    if (s->probe) { s->escaped = 1; return; }
     char msg[256];
     if (c.via)
         snprintf(msg, sizeof(msg),
@@ -7260,7 +7274,7 @@ static const char* local_struct_root(ASTNode* lhs, const char** globals, int ngl
  * function unless the closure escapes, which is checked where it goes. */
 static void check_ptr_keeps_in(ASTNode* program, ASTNode* n, KeepSet* s,
                                const char** globals, int nglobals, int in_closure) {
-    if (!n) return;
+    if (!n || (s->probe && s->escaped)) return;
     if (n->type == AST_FUNCTION_DEFINITION || n->type == AST_BUILDER_FUNCTION) return;
     Carried c;
     if (n->type == AST_CLOSURE) {
@@ -7272,7 +7286,7 @@ static void check_ptr_keeps_in(ASTNode* program, ASTNode* n, KeepSet* s,
     if (n->type == AST_VARIABLE_DECLARATION && n->value && n->child_count > 0 &&
         (c = carries_borrowed_ptr(n->children[n->child_count - 1], s)).param) {
         if (is_global_name(n->value, globals, nglobals))
-            report_borrowed_keep(n, c, "stored in a module-level `var`");
+            report_borrowed_keep(s, n, c, "stored in a module-level `var`");
         else keep_set_add(s, n->value, c.param, c.via);
     }
     if (n->type == AST_BINARY_EXPRESSION && n->value && !strcmp(n->value, "=") &&
@@ -7282,25 +7296,27 @@ static void check_ptr_keeps_in(ASTNode* program, ASTNode* n, KeepSet* s,
         const char* root;
         if (lhs->type == AST_IDENTIFIER) {
             if (is_global_name(lhs->value, globals, nglobals))
-                report_borrowed_keep(n, c, "stored in a module-level `var`");
+                report_borrowed_keep(s, n, c, "stored in a module-level `var`");
             else keep_set_add(s, lhs->value, c.param, c.via);
         } else if ((root = local_struct_root(lhs, globals, nglobals))) {
             keep_set_add(s, root, c.param, "held by a struct");
-        } else {
-            report_borrowed_keep(n, c, "stored in a field or an element");
+        } else if (!(s->probe && s->ctx && !c_lvalue_outlives(s->ctx, lhs, s->depth))) {
+            /* #2979: for a probe, memory that ends with the function holds
+             * it no longer than the function does. */
+            report_borrowed_keep(s, n, c, "stored in a field or an element");
         }
     }
     if (n->type == AST_RETURN_STATEMENT && !in_closure) {
         for (int i = 0; i < n->child_count; i++)
             if ((c = carries_borrowed_ptr(n->children[i], s)).param &&
                 !(!c.via && returns_string_at(s->ret, i, n->child_count)))
-                report_borrowed_keep(c.via ? n->children[i] : n, c, "returned");
+                report_borrowed_keep(s, c.via ? n->children[i] : n, c, "returned");
     }
     if (n->type == AST_MESSAGE_CONSTRUCTOR) {
         for (int i = 0; i < n->child_count; i++) {
             ASTNode* f = n->children[i];
             if (f && f->child_count > 0 && (c = carries_borrowed_ptr(f->children[0], s)).param)
-                report_borrowed_keep(f, c, "sent in a message");
+                report_borrowed_keep(s, f, c, "sent in a message");
         }
     }
     if (n->type == AST_FUNCTION_CALL && n->value) {
@@ -7308,9 +7324,9 @@ static void check_ptr_keeps_in(ASTNode* program, ASTNode* n, KeepSet* s,
         for (int i = 0; i < n->child_count; i++) {
             if (!(c = carries_borrowed_ptr(n->children[i], s)).param) continue;
             if (call_keeps_arg(program, n, i))
-                report_borrowed_keep(n->children[i], c, "passed to a parameter that keeps it");
+                report_borrowed_keep(s, n->children[i], c, "passed to a parameter that keeps it");
             else if (container && c.via)
-                report_borrowed_keep(n->children[i], c, "stored in a container");
+                report_borrowed_keep(s, n->children[i], c, "stored in a container");
         }
     }
     for (int i = 0; i < n->child_count; i++)
@@ -7372,20 +7388,165 @@ static void report_unkept_into_ptr(ASTNode* at, const char* kind, const char* wh
                          at->line, at->column, AETHER_ERR_KEEPS_BORROWED);
 }
 
-static void check_strings_into_keep(ASTNode* program, ASTNode* n) {
+/* The function a string-into-keep walk is in, for #2979's question of
+ * whether the C memory a store writes outlives it. */
+struct KeepCtx {
+    ASTNode* program;
+    ASTNode* fn;     /* its parameters come before `body` */
+    ASTNode* body;
+    const char** globals;
+    int nglobals;
+};
+
+static int c_name_outlives(const KeepCtx* c, const char* name, int depth);
+
+/* `e` without the casts that only retype the pointer it is. */
+static ASTNode* strip_ptr_casts(ASTNode* e) {
+    while (e && (e->type == AST_VALUE_CAST || e->type == AST_PTR_AS_STRUCT_CAST ||
+                 e->type == AST_PTR_AS_ARRAY_CAST || e->type == AST_PTR_AS_FN_CAST) &&
+           e->child_count > 0)
+        e = e->children[0];
+    return e;
+}
+
+/* #2979: does the C memory the pointer `e` points at outlive the function?
+ * A fresh allocation (a call's result) or `null` does not by itself; a
+ * local is asked by its bindings; memory reached through a field, an
+ * element or anything else is taken to. */
+static int c_pointer_outlives(const KeepCtx* c, ASTNode* e, int depth) {
+    e = strip_ptr_casts(e);
+    if (!e || e->type == AST_NULL_LITERAL || e->type == AST_FUNCTION_CALL) return 0;
+    if (e->type == AST_IDENTIFIER && e->value) return c_name_outlives(c, e->value, depth + 1);
+    return 1;
+}
+
+typedef struct { int found; int outlives; } PtrBindings;
+
+static void scan_ptr_bindings(const KeepCtx* c, ASTNode* n, const char* name, PtrBindings* b,
+                              int depth) {
+    if (!n || b->outlives) return;
+    if (n->type == AST_FUNCTION_DEFINITION || n->type == AST_BUILDER_FUNCTION) return;
+    ASTNode* v = NULL;
+    if (n->type == AST_VARIABLE_DECLARATION && n->value && !strcmp(n->value, name) &&
+        n->child_count > 0)
+        v = n->children[n->child_count - 1];
+    else if (n->type == AST_BINARY_EXPRESSION && n->value && !strcmp(n->value, "=") &&
+             n->child_count == 2 && n->children[0] && n->children[0]->type == AST_IDENTIFIER &&
+             n->children[0]->value && !strcmp(n->children[0]->value, name))
+        v = n->children[1];
+    if (v) {
+        b->found = 1;
+        if (c_pointer_outlives(c, v, depth)) b->outlives = 1;
+    }
+    for (int i = 0; i < n->child_count; i++) scan_ptr_bindings(c, n->children[i], name, b, depth);
+}
+
+/* #2979: does the C memory the pointer local or parameter `name` points at
+ * outlive the function? It does when it is reached through a parameter or
+ * a module-level `var`, when a binding of the local takes it from memory
+ * that does, or when the pointer escapes as a borrowed `ptr` parameter would
+ * (the E0902 facts, check_ptr_keeps_in run as a probe: returned, stored in a
+ * field, an element, a container or a module var, captured by a closure
+ * that escapes, sent in a message, passed to a `@keep` parameter). A local
+ * allocation whose pointer does none of that ends with the function. A
+ * name with no binding here is taken to outlive it. */
+static int c_name_outlives(const KeepCtx* c, const char* name, int depth) {
+    if (depth > 8) return 1;
+    for (int g = 0; g < c->nglobals; g++)
+        if (!strcmp(c->globals[g], name)) return 1;
+    for (int i = 0; c->fn && i < c->fn->child_count && c->fn->children[i] != c->body; i++) {
+        ASTNode* p = c->fn->children[i];
+        if (p && p->value && !strcmp(p->value, name)) return 1;
+    }
+    PtrBindings b = { 0, 0 };
+    scan_ptr_bindings(c, c->body, name, &b, depth);
+    if (!b.found || b.outlives) return 1;
+    KeepSet s;
+    memset(&s, 0, sizeof s);
+    s.probe = 1;
+    s.ctx = c;
+    s.depth = depth;
+    keep_set_add(&s, name, name, NULL);
+    check_ptr_keeps_in(c->program, c->body, &s, c->globals, c->nglobals, 0);
+    return s.escaped;
+}
+
+/* Does the memory the store target `lhs` writes (`p.f`, `p[i]`, `(p as
+ * T[])[i]`) outlive the function? That of the pointer it is reached
+ * through: a local allocation that does not escape ends with it. */
+static int c_lvalue_outlives(const KeepCtx* c, ASTNode* lhs, int depth) {
+    ASTNode* e = lhs;
+    while (e && (e->type == AST_MEMBER_ACCESS || e->type == AST_ARRAY_ACCESS ||
+                 e->type == AST_VALUE_CAST || e->type == AST_PTR_AS_STRUCT_CAST ||
+                 e->type == AST_PTR_AS_ARRAY_CAST) && e->child_count > 0)
+        e = e->children[0];
+    if (!e || e->type != AST_IDENTIFIER || !e->value || !e->node_type ||
+        e->node_type->kind != TYPE_PTR)
+        return 1;
+    return c_name_outlives(c, e->value, depth + 1);
+}
+
+/* A module-level `const` bound to a string literal: pinned, as the literal
+ * is. */
+static int is_const_string_literal(ASTNode* program, const char* name) {
+    for (int i = 0; program && name && i < program->child_count; i++) {
+        ASTNode* d = program->children[i];
+        if (d && d->type == AST_CONST_DECLARATION && d->value && !strcmp(d->value, name) &&
+            d->child_count > 0 && d->children[d->child_count - 1] &&
+            d->children[d->child_count - 1]->type == AST_LITERAL)
+            return 1;
+    }
+    return 0;
+}
+
+/* A string pinned for the program's life: a literal, a `const` bound to
+ * one, or a choice of two. */
+static int is_pinned_string(ASTNode* program, ASTNode* e) {
+    if (!e) return 0;
+    if (e->type == AST_LITERAL) return 1;
+    if (e->type == AST_IDENTIFIER) return is_const_string_literal(program, e->value);
+    return e->type == AST_IF_EXPRESSION && e->child_count >= 3 &&
+           is_pinned_string(program, e->children[1]) && is_pinned_string(program, e->children[2]);
+}
+
+#define KEEP_IN_C_HELP \
+    "store `string.keep(s)` through a `ptr[]` view, `(p as ptr[])[i] = string.keep(s)`, " \
+    "and give it back with `string.release_kept(q)` where the memory is freed"
+
+static void strings_into_keep_walk(const KeepCtx* c, ASTNode* n) {
     if (!n) return;
+    ASTNode* program = c->program;
     /* C memory viewed as `string[]` owns nothing: a string stored into it
-     * must outlive C's reads, which one built in the statement does not. */
+     * must outlive C's reads. One built in the statement does not (#2979:
+     * nor does a local, or a string another owner frees, when the memory
+     * outlives the function); a literal is pinned and does. */
     if (n->type == AST_BINARY_EXPRESSION && n->value && !strcmp(n->value, "=") && n->child_count == 2 &&
         n->children[0] && n->children[0]->type == AST_ARRAY_ACCESS &&
         n->children[0]->child_count > 0 && n->children[0]->children[0] &&
         n->children[0]->children[0]->type == AST_PTR_AS_ARRAY_CAST && n->children[1] &&
         n->children[1]->node_type && n->children[1]->node_type->kind == TYPE_STRING &&
-        (n->children[1]->type == AST_FUNCTION_CALL || n->children[1]->type == AST_STRING_INTERP))
-        type_error_code_hint(
-            "a string built here is stored into C memory, which owns nothing and reads it after this statement",
-            "bind it to a local that outlives C's use, then store the local",
-            n->children[1]->line, n->children[1]->column, AETHER_ERR_KEEPS_BORROWED);
+        !is_pinned_string(program, n->children[1])) {
+        ASTNode* v = n->children[1];
+        ASTNode* view = n->children[0]->children[0];
+        int built = v->type == AST_FUNCTION_CALL || v->type == AST_STRING_INTERP;
+        int outlives = c_pointer_outlives(c, view->child_count > 0 ? view->children[0] : NULL, 0);
+        if (built && !outlives)
+            type_error_code_hint(
+                "a string built here is stored into C memory, which owns nothing and reads it after this statement",
+                "if C's use of the memory ends in this block, bind the string to a local here and "
+                "store the local; if the memory outlives the function, " KEEP_IN_C_HELP,
+                v->line, v->column, AETHER_ERR_KEEPS_BORROWED);
+        else if (built)
+            type_error_code_hint(
+                "a string built here is stored into C memory that outlives the function, which "
+                "owns nothing and reads it after this statement",
+                KEEP_IN_C_HELP, v->line, v->column, AETHER_ERR_KEEPS_BORROWED);
+        else if (outlives)
+            type_error_code_hint(
+                "a string is stored into C memory that outlives the function, which owns nothing: "
+                "it reads the string after its owner frees it",
+                KEEP_IN_C_HELP, v->line, v->column, AETHER_ERR_KEEPS_BORROWED);
+    }
     /* A `ptr` field keeps what it is given, as a `@keep` parameter does. */
     if (n->type == AST_BINARY_EXPRESSION && n->value && !strcmp(n->value, "=") && n->child_count == 2 &&
         n->children[0] && is_bare_ptr_type(n->children[0]->node_type) &&
@@ -7409,7 +7570,13 @@ static void check_strings_into_keep(ASTNode* program, ASTNode* n) {
                 report_unkept_into_ptr(a, unkept_value_kind(a), "a `@keep ptr` parameter", "call");
         }
     }
-    for (int i = 0; i < n->child_count; i++) check_strings_into_keep(program, n->children[i]);
+    for (int i = 0; i < n->child_count; i++) strings_into_keep_walk(c, n->children[i]);
+}
+
+static void check_strings_into_keep(ASTNode* program, ASTNode* fn, ASTNode* body,
+                                    const char** globals, int nglobals) {
+    KeepCtx c = { program, fn, body, globals, nglobals };
+    strings_into_keep_walk(&c, body);
 }
 
 /* The same check for every closure in `n`, each against its own body. */
@@ -7424,7 +7591,9 @@ static void check_closures_ptr_params(ASTNode* program, ASTNode* n,
 
 static void check_borrowed_ptr_params(ASTNode* program, ASTNode* fn, ASTNode* body,
                                       const char** globals, int nglobals) {
-    KeepSet s = { {0}, {0}, {0}, 0, (fn && fn->type != AST_CLOSURE) ? fn->node_type : NULL };
+    KeepSet s;
+    memset(&s, 0, sizeof s);
+    s.ret = (fn && fn->type != AST_CLOSURE) ? fn->node_type : NULL;
     for (int i = 0; fn && body && i < fn->child_count && fn->children[i] != body; i++) {
         ASTNode* p = fn->children[i];
         if (p && (p->type == AST_PATTERN_VARIABLE || p->type == AST_VARIABLE_DECLARATION ||

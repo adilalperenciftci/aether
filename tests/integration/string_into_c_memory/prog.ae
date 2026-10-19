@@ -1,0 +1,83 @@
+// #2979: a string stored into C memory viewed as `string[]` is the string's
+// characters, which the memory does not own. Where the memory ends in the
+// block that fills it (an argv array built and handed to C), a local string
+// lives long enough; where it outlives the function, the slot takes
+// `string.keep(s)` through a `ptr[]` view and gives it back with
+// `string.release_kept`. Run as it is and under the poisoning allocator;
+// the heap check runs where the count is exact, on the plain run. Strings
+// are built from parameters, because string.concat of two literals folds to
+// a literal.
+
+import std.mem
+import std.string
+
+extern exit(code: int)
+extern calloc(n: int, size: int) -> ptr
+extern free(p: ptr)
+extern strlen(s: ptr) -> int
+extern getenv(name: string) -> ptr
+
+const TAIL = "tail"
+
+fn check(ok: bool, what: string) {
+    if !ok {
+        println("FAIL: ${what}")
+        exit(1)
+    }
+}
+
+// An argv array built here, read by C here, freed here: the local string
+// outlives every read.
+argv_len(w: string) -> int {
+    argv = calloc(4, 8)
+    arg = string.concat(w, "-arg")
+    (argv as string[])[0] = arg
+    (argv as string[])[1] = "lit"
+    (argv as string[])[2] = TAIL
+    n = strlen((argv as ptr[])[0]) + strlen((argv as ptr[])[1]) + strlen((argv as ptr[])[2])
+    check((argv as string[])[0] == "${w}-arg", "the local string, read back")
+    free(argv)
+    return n
+}
+
+// The memory outlives the function: each slot keeps a reference of its own.
+fill(names: ptr, w: string, i: int) {
+    name = "${w}-${i}"
+    (names as ptr[])[i] = string.keep(name)
+}
+
+round(w: string) -> int {
+    names = calloc(8, 8)
+    i = 0
+    while i < 8 {
+        fill(names, w, i)
+        i = i + 1
+    }
+    i = 0
+    ok = 1
+    while i < 8 {
+        if string.equals((names as ptr[])[i], "${w}-${i}") != 1 {
+            ok = 0
+        }
+        string.release_kept((names as ptr[])[i])
+        i = i + 1
+    }
+    free(names)
+    return ok
+}
+
+main() {
+    w = string.concat("ani", "m")
+    check(argv_len(w) == 15, "the argv strings' lengths")
+    check(round(w) == 1, "every kept name read back after its owner ended")
+    // The poisoning allocator never hands a freed block back: the count
+    // measures nothing there.
+    if mem.heap_in_use_exact() && getenv("OWNERSHIP_GRID_POISON") == null {
+        grown = mem.steady_growth(|| {
+                argv_len(w)
+                round(w)
+            }, 4)
+        check(grown == 0, "the kept names are given back")
+    }
+    println("ok")
+}
