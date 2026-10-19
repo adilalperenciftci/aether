@@ -43,8 +43,8 @@ the unambiguous membership test, and null-check the pointer.
 
 **A string value is read with `get_string`.** `get` hands back a `ptr`, and a
 `ptr` given to a `string` local as it is (`name, _ = map.get(m, "k")` after
-`name = ""`) is read as text whatever it points at: W1005, an error in a later
-release. `map.get_string(m, key)` says the value is a string and checks it is
+`name = ""`) would be read as text whatever it points at, and is refused:
+E0202. `map.get_string(m, key)` says the value is a string and checks it is
 one: `(value, "")`, `(null, "")` for a missing key, and `(null, "not a
 string")` when the value is some other pointer (a list, a struct).
 

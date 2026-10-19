@@ -3981,6 +3981,7 @@ An error stops the build and prints its code, `error[E0301]: ...`, with the sour
 | `E0100` | Syntax: the source does not parse, or a reserved word stands where a name must |
 | `E0200` | Type mismatch, and the other type rules (a cast the types cannot justify, `string + string`, a `match` arm or `switch` case that can never equal the value it compares, an arm that gives no value to a `match` whose value is used: [Match Expressions](#match-expressions)) |
 | `E0201` | A fixed-size array as the result of a closure, an extern or a function type, alone or in a tuple (a named function returns one) ([What a `return` gives](#what-a-return-gives-e0200)) |
+| `E0202` | A bare `ptr` given to a `string` local, which would read it as text whatever it points at ([A pointer given to a string local](#a-pointer-given-to-a-string-local-e0202)) |
 | `E0300` | Undefined variable, and a name in a `match` arm or `switch` case that is no variable, constant or member |
 | `E0301` | Undefined function, a function of a module the calling module does not import, or a function a local of its name hides ([a local's scope](#variables)) |
 | `E0302` | A type name that names no type of the program, as a local's, a parameter's or a field's type (`Shape s` with no `Shape`; `x and y`, where AND is `&&`) |
@@ -3998,6 +3999,68 @@ An error stops the build and prints its code, `error[E0301]: ...`, with the sour
 | `E0901` | A function frees a `string` or `*StringSeq` parameter it only borrows ([String ownership](#string-ownership)) |
 | `E0902` | A function keeps a `ptr` parameter not declared `@keep`, a `string` is given to a `@keep ptr` without `string.keep` (a `*StringSeq` without `string.seq_retain`), a string C memory viewed as `string[]` would read after its owner frees it (one built in the statement, or any but a pinned literal where the memory outlives the function), or a function with a `@keep` parameter is used as a value ([String ownership](#string-ownership)) |
 | `E1000` | A file defines a function under a name it also imports selectively (`import std.string (length)` beside its own `length`), so a bare call in the function's body would reach itself ([module-system-design.md](module-system-design.md)) |
+
+### A Pointer Given to a String Local [E0202]
+
+A `ptr` is untyped, so a `string` local re-bound to one (`s = map_get_raw(m, k)`,
+or a tuple slot, `name, err = map.get(m, k)`) would read it as text whatever it
+points at: a list, a struct, or bytes with no end. That is refused:
+
+```aether,fails
+import std.map
+
+main() {
+    m = map.new()
+    map.put(m, "name", "Ada")
+    name = ""
+    name, _ = map.get(m, "name")
+    println(name)
+}
+// error[E0202]: 'name' is a `string`, and a `ptr` given to it would be read
+// as text whatever it points at
+// help: say it is a string with `map.get_string(m, key)`
+```
+
+Say the value is a string with the typed accessor, which also checks it is one:
+
+```aether,run
+import std.map
+import std.list
+import std.string
+
+main() {
+    m = map.new()
+    map.put(m, "name", "Ada")
+    name, err = map.get_string(m, "name")
+    println("${name} [${err}]")
+
+    l = list.new()
+    inner = list.new()
+    list.add(l, inner)
+    s, serr = list.get_string(l, 0)
+    println("${s == null} ${serr}")
+
+    p = map_get_raw(m, "name")
+    t, _ = string.from_ptr(p)
+    println(t)
+    list.free(inner)
+    list.free(l)
+    map.free(m)
+}
+```
+```output
+Ada []
+true not a string
+Ada
+```
+
+`map.get_string`, `list.get_string` and `string.from_ptr` each return
+`(string, string)`: the string, or `null` with `"not a string"` when the pointer
+is something else. C text (a `char*` with no Aether header, as
+`string.string_array_get` hands back) is copied with `bytes.string_from_ptr(p, n)`
+or `string.concat(p, "")`. A `ptr` result of a `string.*` function
+(`string.from_int`) is a string already and is accepted. This was the warning
+W1005 in 0.830.0 and 0.831.0.
 
 ## Compiler Warnings
 
@@ -4163,28 +4226,6 @@ partially-handled enum is doing real work and is never reported.
 
 This pairs with the exhaustiveness check, which reports the opposite
 direction, a `match` over a sum type or enum that is missing a case.
-
-### Pointer Given to a String Local [W1005]
-
-A `ptr` is untyped, so a `string` local re-bound to one (`s = map_get_raw(m, k)`,
-or a tuple slot, `name, err = map.get(m, k)`) reads it as text whatever it points
-at: a list, a struct, or bytes with no end. Say the value is a string with the
-typed accessor, which also checks it is one:
-
-```aether,fragment
-name = ""
-name, _ = map.get(m, "name")        // warning[W1005]: 'name' is a `string`, and a
-                                    // `ptr` given to it is read as text ...
-                                    // help: say it is a string with `map.get_string(m, key)`
-name, _ = map.get_string(m, "name") // (null, "not a string") if it is not one
-```
-
-`map.get_string`, `list.get_string` and `string.from_ptr` each return
-`(string, string)`: the string, or `null` with `"not a string"` when the pointer
-is something else. C text (a `char*` with no Aether header) is copied with
-`bytes.string_from_ptr(p, n)`. A `ptr` result of a `string.*` function
-(`string.from_int`) is a string already and is not warned about. This is a
-warning now and becomes an error in a later release.
 
 ## Match Expressions
 
