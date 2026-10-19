@@ -16,8 +16,6 @@
 // depends on a write the caller just made at offset i - run_length
 // (RLE expansion is the canonical case).
 
-import std.string
-
 exports(
     aether_bytes_new, aether_bytes_set, aether_bytes_get,
     aether_bytes_length,
