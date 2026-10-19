@@ -3567,7 +3567,7 @@ The rules for which object hears about a store:
   `&a` is observing one object. Order the struct so a nested observable
   value is not the first field when the two must be told apart.
 
-An observer registered with `observe.observe_fields` receives the field
+An observer registered with `observe.fields` receives the field
 index as a second argument (`|obj: ptr, field: int|`); one registered with
 `observe.observe` takes the object alone. A store made where the compiler
 cannot see it, by offset through `std.mem`, is reported with

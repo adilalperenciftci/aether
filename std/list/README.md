@@ -30,18 +30,18 @@ import std.collections
 import std.mem
 
 main() {
-    l = list.list_new()
+    l = list.new()
 
     // Any pointer will do; a second list makes a convenient one.
     item = collections.list_new()
 
     err = list.add(l, item)
-    println("add err='${err}' size=${list.list_size(l)}")
+    println("add err='${err}' size=${list.size(l)}")
 
     got, gerr = list.get(l, 0)
     println("same pointer back: ${mem.ptr_to_long(got) == mem.ptr_to_long(item)}")
 
-    list.list_free(l)
+    list.free(l)
     collections.list_free(item)
 }
 ```

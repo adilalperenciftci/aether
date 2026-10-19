@@ -72,12 +72,12 @@ main() {
     while i < n {
         value = jsonpath.result_value(results, i)   // borrowed json pointer
         path  = jsonpath.result_path(results, i)    // e.g. $['store']['book'][0]['title']
-        println("${path} = ${json.json_stringify_raw(value)}")
+        println("${path} = ${json.stringify_raw(value)}")
         i = i + 1
     }
 
     jsonpath.free_result(results)
-    json.json_free(doc)
+    json.free(doc)
 }
 ```
 ```output
@@ -133,7 +133,7 @@ main() {
     jsonpath.free_result(results)
 
     jsonpath.free_query(ast)
-    json.json_free(doc)
+    json.free(doc)
 }
 ```
 ```output
@@ -144,15 +144,15 @@ matches: 2
 
 Result sets **borrow** their JSON values from the document, which must outlive
 them, and **own** their path strings. So: `free_result(results)` before
-`json.json_free(doc)`, and copy a path with `string.copy` if it must outlive
+`json.free(doc)`, and copy a path with `string.copy` if it must outlive
 the result set.
 
 The same rule applies to the convenience functions: `query_values` returns a
 list of borrowed JSON pointers, while `query_paths` returns a list whose path
 strings are owned by that list. Free the list with `list.free`; never call
-`json.json_free` on an individual value returned by JSONPath. To serialise a
+`json.free` on an individual value returned by JSONPath. To serialise a
 selected value, pass the borrowed pointer directly to
-`json.json_stringify_raw(value)` while the source document is alive.
+`json.stringify_raw(value)` while the source document is alive.
 
 ## Supported syntax
 

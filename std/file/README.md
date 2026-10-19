@@ -23,9 +23,9 @@ main() {
         println("write failed: ${werr}")
     }
 
-    file.file_close(handle)
+    file.close(handle)
 
-    println("exists: ${file.file_exists("/tmp/notes.txt")}")
+    println("exists: ${file.exists("/tmp/notes.txt")}")
     file.delete("/tmp/notes.txt")
 }
 ```

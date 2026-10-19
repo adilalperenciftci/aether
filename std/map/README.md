@@ -18,16 +18,16 @@ import std.map
 import std.collections
 
 main() {
-    m = map.map_new()
+    m = map.new()
     value = collections.list_new()
 
     err = map.put(m, "key", value)
-    println("put err='${err}' size=${map.map_size(m)}")
+    println("put err='${err}' size=${map.size(m)}")
 
-    println("bound:   ${map.map_has(m, "key")}")
-    println("unbound: ${map.map_has(m, "absent")}")
+    println("bound:   ${map.has(m, "key")}")
+    println("unbound: ${map.has(m, "absent")}")
 
-    map.map_free(m)
+    map.free(m)
     collections.list_free(value)
 }
 ```

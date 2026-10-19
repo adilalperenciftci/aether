@@ -79,6 +79,25 @@ operations that are:
   global registry. They're not silent failures, they're a different
   pattern.
 
+### One name per operation, and the short one at call sites
+
+A module's extern is spelt with the module's prefix (`json_free`) because
+that is its C name, but a caller reaches it by its short name: `json.free(v)`
+resolves to the extern `json_free`, as `md5.hex` resolves to std.md5's Aether
+function `md5_hex` (a module's names are looked up as written, then in the
+prefixed form, #2976). Write calls, examples and READMEs with the short name;
+`json.json_free(v)` names the module twice for the same function, and
+`ae fmt --short-names` rewrites such calls where the compiler resolves both
+spellings to one declaration.
+
+A wrapper and its extern should not answer to one short name with different
+behaviour. When a module function `x` wraps an extern spelt `<module>_x`, the
+function is merged under a name of its own and `module.x` reaches it (#2978),
+so `module.<module>_x` is the extern and the two spellings are two
+operations. Give an extern that callers need beside a wrapper a name that
+says it is raw, as the `_raw` externs above do, rather than the wrapper's own
+name with the module prefix.
+
 ### Return shapes
 
 | Operation | Success return | Failure return |

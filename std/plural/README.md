@@ -13,11 +13,11 @@ import std.plural
 
 main() {
     // English: one, then other.
-    println("en 1: ${plural.plural_category("en", 1)}")
-    println("en 5: ${plural.plural_category("en", 5)}")
+    println("en 1: ${plural.category("en", 1)}")
+    println("en 5: ${plural.category("en", 5)}")
 
     // Polish distinguishes a "few" category that English has no word for.
-    println("pl 2: ${plural.plural_category("pl", 2)}")
+    println("pl 2: ${plural.category("pl", 2)}")
 }
 ```
 ```output

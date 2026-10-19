@@ -143,8 +143,8 @@ exits**. So this prints `done` and nothing else:
 import contrib.host.ruby
 
 main() {
-    _ = ruby.ruby_init_host()
-    _ = ruby.ruby_run("puts 'hello from ruby'")   // never appears!
+    _ = ruby.init_host()
+    _ = ruby.run("puts 'hello from ruby'")   // never appears!
     println("done")
 }
 ```
@@ -157,10 +157,10 @@ Two ways to get the output:
 
 ```aether
 // 1. Finalize before exit — flushes as part of VM teardown.
-ruby.ruby_finalize_host()
+ruby.finalize_host()
 
 // 2. Or make Ruby's stdout unbuffered, if you need output as it happens.
-_ = ruby.ruby_run("$stdout.sync = true")
+_ = ruby.run("$stdout.sync = true")
 ```
 
 This is why [`test_host_ruby.ae`](test_host_ruby.ae) asserts on **return

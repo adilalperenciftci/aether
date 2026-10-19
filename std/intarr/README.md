@@ -46,7 +46,7 @@ the handle is a bare `ptr`, so `[]` has no element type to dispatch on. A
 **view** is typed, and does:
 
 ```aether,fragment
-a = intarr.intarr_new_raw(n)
+a = intarr.new_raw(n)
 v = intarr.intarr_array(a)      // a `int[]` over the same buffer
 v[3] = 42
 total = total + v[3]

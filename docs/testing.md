@@ -280,11 +280,11 @@ skips everything then looks exactly like a box that passes everything.
 
 ```aether,fragment
 have_ruby = 0
-if ruby.ruby_init_host() == 0 { have_ruby = 1 }
+if ruby.init_host() == 0 { have_ruby = 1 }
 
 spec.describe(fw, "contrib.host.ruby") {
     spec.it_when(have_ruby, "evaluates a script", "libruby not loadable") callback {
-        spec.assert_eq(ruby.ruby_run("$x = 1"), 0, "eval")
+        spec.assert_eq(ruby.run("$x = 1"), 0, "eval")
     }
 }
 ```

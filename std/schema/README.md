@@ -54,7 +54,7 @@ main() {
     schema.values_free(values)
     schema.errors_free(errors)
     map_free(input)
-    schema.schema_free(person)
+    schema.free(person)
 }
 ```
 
@@ -119,10 +119,10 @@ main() {
         println("${schema.error_field(errors, i)}: ${schema.error_message(errors, i)}")
         i = i + 1
     }
-    json.json_free(values)
+    json.free(values)
     schema.errors_free(errors)
-    json.json_free(root)
-    schema.schema_free(order)
+    json.free(root)
+    schema.free(order)
 }
 ```
 
@@ -131,7 +131,7 @@ main() {
 - **Values are a `std.json` object** of the fields that passed, typed: an `INT`
   is a JSON integer, a `BOOL` a boolean, an `OBJECT` an object, an array an
   array. Keys the schema does not declare are left out. Free it with
-  `json.json_free`.
+  `json.free`.
 - **A JSON `null` is an absent field**, so an `optional()` field may be null.
 - **Lax mode** also takes a number or boolean for a `STR` field as its text.
   Strict mode refuses that, and refuses a string for an `INT`, `FLOAT` or
@@ -278,7 +278,7 @@ JSON Schema; it does not consume external JSON Schema documents.
   `string → string`; returns a coerced value-map and an error list (both always
   non-null, both owned by the caller)
 - `parse_json(schema, root) -> (values, errors)` — `root` is a `std.json`
-  object; returns a typed `std.json` object (free with `json.json_free`) and an
+  object; returns a typed `std.json` object (free with `json.free`) and an
   error list whose fields are paths
 
 ### Projection

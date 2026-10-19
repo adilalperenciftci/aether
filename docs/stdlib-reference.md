@@ -502,7 +502,7 @@ the handle is a bare `ptr`, so `[]` has no element type to dispatch on. A
 **view** is typed, and does:
 
 ```aether,fragment
-a = intarr.intarr_new_raw(n)
+a = intarr.new_raw(n)
 v = intarr.intarr_array(a)      // a `int[]` over the same buffer
 v[3] = 42
 total = total + v[3]
@@ -558,7 +558,7 @@ the handle is a bare `ptr`, so `[]` has no element type to dispatch on. A
 **view** is typed, and does:
 
 ```aether,fragment
-a = floatarr.floatarr_new_raw(n)
+a = floatarr.new_raw(n)
 v = floatarr.floatarr_array(a)      // a `float[]` over the same buffer
 v[3] = 1.5
 total = total + v[3]
@@ -586,7 +586,7 @@ main() {
     // std.intarr, for values that overflow 32 bits -- nanosecond
     // timestamps, byte offsets in large files, 64-bit hashes.
     n = 4
-    a = longarr.longarr_new_raw(n)
+    a = longarr.new_raw(n)
 
     // The checked accessors return an error for an index out of range.
     serr = longarr.set(a, 0, 9000000000)
@@ -605,7 +605,7 @@ main() {
     }
     println("doubling: ${view[1]} ${view[2]} ${view[3]}")
 
-    longarr.longarr_free(a)
+    longarr.free(a)
 }
 ```
 ```output
@@ -616,11 +616,11 @@ doubling: 18000000000 36000000000 72000000000
 
 **Functions:**
 - `longarr.new(n)` / `new_filled(n, v)` → `(ptr, string)` - The error names a negative size or a failed allocation
-- `longarr.longarr_new_raw(n)` / `longarr_new_filled_raw(n, v)` → `ptr` (null on failure), `longarr_free(a)`
+- `longarr.new_raw(n)` / `longarr_new_filled_raw(n, v)` → `ptr` (null on failure), `longarr_free(a)`
 - `longarr.get(a, i)` → `(long, string)`, `longarr.set(a, i, v)` → `string` - Bounds-checked
-- `longarr.longarr_get_unchecked(a, i)` / `longarr_set_unchecked(a, i, v)` - Unchecked, inlined
+- `longarr.get_unchecked(a, i)` / `longarr_set_unchecked(a, i, v)` - Unchecked, inlined
 - `longarr.array(a)` → `long[]` - A typed view: `v[i]` reads and writes the array itself
-- `longarr.longarr_size(a)` → `int`, `longarr.longarr_fill(a, v)`
+- `longarr.size(a)` → `int`, `longarr.fill(a, v)`
 
 ### Mutable byte buffer (`std.bytes`)
 
@@ -722,7 +722,7 @@ _by_length(a: string, b: string) -> int {
 main() {
     // Every entry point takes a slice, which carries its length. A packed
     // array hands over its elements as one: `intarr.array(h)`.
-    nums = intarr.intarr_new_raw(5)
+    nums = intarr.new_raw(5)
     v = intarr.array(nums)
     for i in 0..v.len {
         v[i] = (i * 7) % 5
@@ -732,7 +732,7 @@ main() {
     // A binary search over the sorted slice. A miss returns the insertion
     // point rather than -1, so it also answers "where would this go?".
     println("3 is at ${sort.int_search(v, 3)}")
-    intarr.intarr_free(nums)
+    intarr.free(nums)
 
     // A prefix or any run sorts on its own: `xs[..n]`, `xs[lo..hi]`.
     words = ["pear", "fig", "apple", "kiwi"]
@@ -1322,7 +1322,7 @@ main() {
 - `fs.create_dir_with_mode(path, mode)` → `string` - Like `fs.create_dir` but takes an explicit POSIX mode (0777-masked). Use this for private dirs (e.g. `0o700` for keys), sets the bits at creation time, closing the `mkdir` → `chmod` race window. Windows ignores the mode at the directory layer; the parameter is accepted for portability.
 - `fs.mtime(path)` → `(int, string)` - File's mtime as Unix epoch seconds, in the standard `(value, err)` shape. Distinguishes "stat failed" from "file's mtime is 0 (1970 epoch)", the older `file_mtime` extern collapsed both into a single 0 sentinel and is kept only for back-compat.
 - `fs.file_stat(path)` → `(kind, size, mtime, err)` - One `lstat(2)`; symlinks report kind 3, target is not followed. Kind is 1 = file, 2 = directory, 3 = symlink, 4 = other, 5 = socket, 6 = FIFO, 7 = device (char and block devices share 7). Sockets, FIFOs and devices are distinguished on POSIX only; Windows reports them as 4. Use the `fs.STAT_KIND_*` constants rather than the literals.
-- `fs.fs_is_socket(path)` → `int` - 1 if `path` is a UNIX-domain socket, 0 otherwise (including when nothing is there). Unlike `fs.fs_is_symlink` this **follows** symlinks, since a caller asking "is this a socket" wants the target. POSIX only; always 0 on Windows. Pair it with `os.user_id()` to locate a per-user runtime socket such as `/run/user/${os.user_id()}/podman/podman.sock`.
+- `fs.is_socket(path)` → `int` - 1 if `path` is a UNIX-domain socket, 0 otherwise (including when nothing is there). Unlike `fs.is_symlink` this **follows** symlinks, since a caller asking "is this a socket" wants the target. POSIX only; always 0 on Windows. Pair it with `os.user_id()` to locate a per-user runtime socket such as `/run/user/${os.user_id()}/podman/podman.sock`.
 - `fs.read_binary(path)` → `(content, length, err)` - Length-aware read preserving embedded NULs.
 
 ### Structured-error pilot
@@ -3824,7 +3824,7 @@ main() {
 - `spawn(ActorName())` - Create actor instance
 - `wait_for_idle()` - Block until all actors finish
 - `sleep(milliseconds)` - Pause execution
-- `release(s)` - Decrement an AetherString's refcount and free if it reaches zero. Sugar for `string.release(s)` argument must be `string`-typed (other heap types call their typed release, e.g. `string.string_seq_free`). Pair with `defer` to undo allocations made by stdlib functions returning ownership: `body, err = http.get(url); defer release(body)`.
+- `release(s)` - Decrement an AetherString's refcount and free if it reaches zero. Sugar for `string.release(s)` argument must be `string`-typed (other heap types call their typed release, e.g. `string.seq_free`). Pair with `defer` to undo allocations made by stdlib functions returning ownership: `body, err = http.get(url); defer release(body)`.
 
 ### Blocking work off the loop (`std.worker`)
 
@@ -4350,13 +4350,13 @@ import std.plural
 main() {
     // CLDR plural categories: which form of a word a number takes. English
     // has two; many languages have more, and the rules are not guessable.
-    println("en 1: ${plural.plural_category("en", 1)}")
-    println("en 2: ${plural.plural_category("en", 2)}")
-    println("ru 1: ${plural.plural_category("ru", 1)}")
-    println("ru 3: ${plural.plural_category("ru", 3)}")
-    println("ru 5: ${plural.plural_category("ru", 5)}")
-    println("ru 21: ${plural.plural_category("ru", 21)}")
-    println("ja 7: ${plural.plural_category("ja", 7)}")
+    println("en 1: ${plural.category("en", 1)}")
+    println("en 2: ${plural.category("en", 2)}")
+    println("ru 1: ${plural.category("ru", 1)}")
+    println("ru 3: ${plural.category("ru", 3)}")
+    println("ru 5: ${plural.category("ru", 5)}")
+    println("ru 21: ${plural.category("ru", 21)}")
+    println("ja 7: ${plural.category("ja", 7)}")
 }
 ```
 ```output
@@ -4370,8 +4370,8 @@ ja 7: other
 ```
 
 **Functions:**
-- `plural.plural_category(lang, n)` → `string` - `"zero"`, `"one"`, `"two"`, `"few"`, `"many"` or `"other"`
-- `plural.plural_category_decimal(lang, n, i, v, w, f, t)` → `string` - The same for a decimal, given CLDR's operands
+- `plural.category(lang, n)` → `string` - `"zero"`, `"one"`, `"two"`, `"few"`, `"many"` or `"other"`
+- `plural.category_decimal(lang, n, i, v, w, f, t)` → `string` - The same for a decimal, given CLDR's operands
 
 ### Message formatting (`std.message`)
 

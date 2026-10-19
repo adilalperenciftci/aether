@@ -19,12 +19,12 @@ main() {
     println("name: ${text}")
 
     age, aerr = json.object_get(doc, "age")
-    println("age: ${json.json_get_int(age)}")
+    println("age: ${json.get_int(age)}")
 
     tags, gerr = json.object_get(doc, "tags")
     println("tags: ${json.array_size(tags)}")
 
-    json.json_free(doc)
+    json.free(doc)
 
     // A parse error names where it gave up.
     _, bad = json.parse("{oops")
@@ -73,15 +73,15 @@ main() {
     node = json.num(value)
     text, _ = json.stringify(node)
     back, _ = json.parse(text)
-    same = json.json_get_number(back) == value
+    same = json.get_number(back) == value
     println("${text} reads back as the same double: ${same}")
-    json.json_free(node)
-    json.json_free(back)
+    json.free(node)
+    json.free(back)
 
     tenth = json.num(0.1)
     short, _ = json.stringify(tenth)
     println(short)
-    json.json_free(tenth)
+    json.free(tenth)
 }
 ```
 ```output

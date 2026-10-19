@@ -33,7 +33,7 @@ main() {
         println("  ${dir.list_get(entries, i)} kind=${dir.list_kind(entries, i)}")
     }
 
-    dir.dir_list_free(entries)
+    dir.list_free(entries)
     dir.delete("/tmp/aether-example")
 }
 ```

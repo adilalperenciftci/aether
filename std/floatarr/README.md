@@ -33,7 +33,7 @@ the handle is a bare `ptr`, so `[]` has no element type to dispatch on. A
 **view** is typed, and does:
 
 ```aether,fragment
-a = floatarr.floatarr_new_raw(n)
+a = floatarr.new_raw(n)
 v = floatarr.floatarr_array(a)      // a `float[]` over the same buffer
 v[3] = 1.5
 total = total + v[3]
