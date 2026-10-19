@@ -68,7 +68,7 @@ operations that are:
 - **Sentinel-returning infallibles** where the sentinel is part of the
   contract, not an error. Example: `file_mtime` returns `0` for missing
   files or stat failure, callers already handle zero as "no mtime", so
-  wrapping would just add noise.
+  wrapping would only add noise.
 - **Intentionally void fire-and-forget operations.** Example:
   [`log_write`](../std/log/module.ae) in `std.log` the module
   deliberately degrades to stderr if the log file is unopenable, so
@@ -164,11 +164,13 @@ open(path: string, mode: string) -> {
 
 ### Ownership of returned strings
 
-If the underlying C function returns a borrowed `const char*` (pointer
-into another object's memory), the wrapper **must** copy it before
-returning so the caller's string outlives the source object. The
-idiomatic copy in Aether is `string_concat(borrowed, "")` see
-[`std.fs`](../std/fs/module.ae)'s `readlink` wrapper for the pattern.
+Declare each extern's string result by what C hands over (R4 of the
+[ownership rules](memory-management.md#c-boundaries-r4)): `-> string @heap`
+when C returns a string the caller owns, which the call adopts with no
+copy, and plain `-> string` when C returns a pointer into memory it keeps.
+A wrapper that returns a borrowed result needs no copy of its own: a
+`return` hands the caller one reference, and a plain C string is copied
+into a counted one there, so the caller's string outlives the source object.
 
 ## Worked example: `std.fs`
 
