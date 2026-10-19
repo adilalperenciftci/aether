@@ -14,7 +14,7 @@
 #   1. baseline passes,
 #   2. exact score "1/3 ... 33%",
 #   3. a STR->EMPTY survivor is reported (string mutation works),
-#   4. NO ADD->SUB mutant appears — the ` + ` inside help()'s string was
+#   4. NO ADD->SUB mutant appears: the ` + ` inside help()'s string was
 #      skipped (the boundary-awareness / false-mutant fix),
 #   5. SUT restored byte-identical.
 
@@ -45,7 +45,7 @@ AETHER_CACHE_DIR="$TMPDIR/cache"
 export AETHER_CACHE_DIR
 
 fail() {
-    echo "  [FAIL] mutation_testing_strings — $1"
+    echo "  [FAIL] mutation_testing_strings: $1"
     [ -f "$TMPDIR/out.log" ] && tail -40 "$TMPDIR/out.log" | sed 's/^/    /'
     exit 1
 }
@@ -65,7 +65,7 @@ SUT_AFTER="$($MD5 "$SUT" | awk '{print $1}')"
 [ "$SUT_BEFORE" = "$SUT_AFTER" ] || fail "SUT not restored (md5 $SUT_BEFORE -> $SUT_AFTER)"
 
 grep -q "baseline: suite passes" "$TMPDIR/out.log" || fail "no baseline-pass line"
-grep -q "1/3 mutants killed — mutation score 33%" "$TMPDIR/out.log" \
+grep -q "1/3 mutants killed, mutation score 33%" "$TMPDIR/out.log" \
     || fail "unexpected score (wanted 1/3, 33%)"
 # Survivors/kill are anchored to source lines: name() killed on line 10,
 # motto() survives on line 12.
@@ -76,7 +76,7 @@ grep -Eq "killed +sut\.ae:10 +STR->EMPTY" "$TMPDIR/out.log" \
 # The crucial boundary-awareness check: the ` + ` inside help()'s string
 # must NOT have produced an operator mutant.
 if grep -q "ADD->SUB" "$TMPDIR/out.log"; then
-    fail "ADD->SUB appeared — operator inside a string literal was NOT skipped"
+    fail "ADD->SUB appeared: operator inside a string literal was NOT skipped"
 fi
 
 echo "  [PASS] mutation_testing_strings"

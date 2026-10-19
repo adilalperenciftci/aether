@@ -83,7 +83,7 @@ Aether mutation testing (std.mutation)
   killed     calc.ae:11  SUB->ADD
   killed     calc.ae:11  LT->GT
 
-  3/3 mutants killed — mutation score 100%
+  3/3 mutants killed, mutation score 100%
 ```
 
 100%: every single-operator change to `calc.ae` was caught by `calc_test.ae`.
@@ -103,7 +103,7 @@ negative-input case from `calc_test.ae` (the `abs(-7)` assertion), and the
   SURVIVED   calc.ae:11  SUB->ADD
   killed     calc.ae:11  LT->GT
 
-  2/3 mutants killed — mutation score 66%
+  2/3 mutants killed, mutation score 66%
   1 survived (test gaps):
     - calc.ae:11  SUB->ADD
 ```
@@ -147,7 +147,7 @@ String-literal mutators target the literal's *content* (quotes preserved):
   add a test that distinguishes it, or convince yourself it's an *equivalent
   mutant* (see caveats).
 - **No-compile** mutants (the mutation produced invalid code) are reported as
-  `(N excluded — did not compile)` and left out of the denominator: they were
+  `(N excluded: did not compile)` and left out of the denominator: they were
   never really tested, so they neither help nor hurt the score. With the core
   operator set they're rare (most operator swaps stay valid), but the category
   keeps the score honest when they happen.

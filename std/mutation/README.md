@@ -30,7 +30,7 @@ Aether mutation testing (std.mutation)
   killed     calc.ae:42  GTE->LT
   SURVIVED   calc.ae:87  EQ->NE
   ...
-  14/15 mutants killed — mutation score 93%
+  14/15 mutants killed, mutation score 93%
   1 survived (test gaps):
     - calc.ae:87  EQ->NE
 ```

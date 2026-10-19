@@ -194,7 +194,7 @@ spec.expect_int(n).to_be_gt(0, "a derived attempt budget is never zero")
 ```
 
 ```
-FAIL: a node's egress set is exactly its declared whitelist — strings differ at index 14
+FAIL: a node's egress set is exactly its declared whitelist: strings differ at index 14
         expected: "api.github.com, api.anthropic.com"
         actual:   "api.github.com"
                                  ^
