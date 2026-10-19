@@ -249,12 +249,12 @@ __attribute__((weak)) int main(int argc, char** argv) {
 }
 ```
 
-So any build tool that links the object into a program — aeb's `c.program`, a
-Makefile, `cc app.o $(ae cflags --libs)` — gets the program's entry point, and
+So any build tool that links the object into a program (aeb's `c.program`, a
+Makefile, `cc app.o $(ae cflags --libs)`) gets the program's entry point, and
 its exit code, without a hand-written C file. A host that has its own `main()`
 keeps it: a strong definition beats a weak one. A shared library that `ae`
-links itself (`--emit=lib`, native or `--target=`) leaves it out — it exports
-no entry point — as does wasm (emscripten runs a module's `main` on load,
+links itself (`--emit=lib`, native or `--target=`) leaves it out (it exports
+no entry point), as does wasm (emscripten runs a module's `main` on load,
 which would turn a library into a program) and a compiler without weak
 definitions. `-DAETHER_NO_LIB_MAIN` leaves it out anywhere else.
 
@@ -322,7 +322,8 @@ public ABI:
 |---|---|---|
 | `int` | `int32_t` | Fixed width for cross-language clarity |
 | `long` | `int64_t` | The Aether source keyword for 64-bit integers is `long`; the lexer token `TOKEN_INT64` backs both `long` and `int64_t` internally |
-| `float` | `float` | IEEE 754 binary32 |
+| `float` | `double` | IEEE 754 binary64, as everywhere in Aether |
+| `f32` | `float` | IEEE 754 binary32 |
 | `bool` | `int32_t` | `0` = false, `1` = true |
 | `string` (parameter) | `const char*` | Borrowed for the call |
 | `string` (result) | `const void*` | A string the caller owns; see below |
@@ -735,7 +736,7 @@ Node-API, hand-rolled `dlsym`) can walk directly.
 The entry point is emitted **weak** (`__attribute__((weak))` under
 GCC/Clang, #1590), so an orchestrator that links several `--emit=lib`
 TUs into one artifact (aeb's regen shape: one C per module, one final
-link) needs no `-Wl,--allow-multiple-definition` — the multi-TU
+link) needs no `-Wl,--allow-multiple-definition`: the multi-TU
 static-clone link model of 0.539 holds for lib TUs too, on ld64 as well
 as GNU ld. In a lone `.so` nothing changes: one definition, same dlsym
 contract. In a deliberate multi-TU link the first TU's catalog wins;
