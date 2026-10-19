@@ -4,7 +4,7 @@ Locale-aware number formatting: decimals, percentages and currency.
 
 Unlike the rest of `std`, this module is **deliberately locale-sensitive**.
 `std.string` and `std.json` are pinned to the C locale so a serialised float
-is byte-identical everywhere; `std.number` is for the other job — rendering a
+is byte-identical everywhere; `std.number` is for the other job: rendering a
 number for a person to read, where the separators should follow their
 conventions.
 
@@ -36,13 +36,13 @@ grouping, minimum and maximum fraction digits, build a `FormatOptions` with
 `format_percent` or `format_currency`.
 
 The `*_string` variants take and return strings throughout, for callers
-holding a decimal that must not go through a float at all — arbitrary-precision
+holding a decimal that must not go through a float at all: arbitrary-precision
 values, or money where a rounding step would be a bug.
 
 ## Byte sizes
 
 `bytes(n, style, locale)` renders a byte count the way a file manager does.
-The decimal-vs-binary choice is **explicit** in the style — `GB` and `GiB` are
+The decimal-vs-binary choice is **explicit** in the style: `GB` and `GiB` are
 not interchangeable, and picking one silently is how two views of the same file
 come to disagree:
 

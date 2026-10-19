@@ -3,7 +3,7 @@
 A command-line argument parser: a builder DSL, typed arguments, subcommands
 and generated help.
 
-Modelled on Rust's clap — the design, not the code: the builder API,
+Modelled on Rust's clap (the design, not the code): the builder API,
 option and subcommand handling, and the help-text UX were studied and
 reimplemented in idiomatic Aether. Pure Aether throughout, no C.
 
@@ -43,10 +43,10 @@ The example **compiles but is not run** in CI: `parse` reads the process's own
 argv, so its output depends on how the example was invoked.
 
 `long_` and `short` carry trailing underscores where the natural name is a
-reserved word — the same reason `std.message` needs backticks to import.
+reserved word: the same reason `std.message` needs backticks to import.
 
 Argument kinds are declared, not inferred: `string_arg()`, `int_arg()`,
-`flag()`, `positional()`, `required()`. That is the point of declaring them —
+`flag()`, `positional()`, `required()`. That is the point of declaring them:
 the parser validates at the boundary, so a handler receives a value already
 known to be the right type rather than a string it must re-check.
 

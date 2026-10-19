@@ -1,13 +1,13 @@
 # std.zstd
 
-Zstandard compression (RFC 8878) — streaming and one-shot.
+Zstandard compression (RFC 8878): streaming and one-shot.
 
 Zstandard is a different **format** from DEFLATE, not a faster implementation
 of it: this wraps **libzstd** (`apt install libzstd-dev`, `brew install zstd`)
 and has nothing to do with `std.zlib` beyond the similar library name.
 
-Its case is strongest away from the browser — archives, logs, snapshots,
-internal RPC — because `Content-Encoding: zstd` support is still thinner than
+Its case is strongest away from the browser (archives, logs, snapshots,
+internal RPC), because `Content-Encoding: zstd` support is still thinner than
 `br` and `gzip`. It compresses harder than gzip at comparable speed, and
 decompresses faster than both.
 
@@ -27,7 +27,7 @@ tail,  n, err = zstd.stream_finish(s)     // close the frame
                 zstd.stream_free(s)
 ```
 
-`stream_write` usually returns **0 bytes** — the encoder buffers internally for
+`stream_write` usually returns **0 bytes**: the encoder buffers internally for
 compression ratio. `stream_flush` emits a decodable boundary while keeping the
 window, so later events cost far less than the first: three repetitive events
 compress to 37, 12 and 13 bytes.
@@ -37,7 +37,7 @@ without fighting over it. Always `stream_free`.
 
 ## Level
 
-`level` is 1–22; **3 is libzstd's default** and a good general choice. Higher
+`level` is 1-22; **3 is libzstd's default** and a good general choice. Higher
 levels cost markedly more time for modest gains. Out-of-range values are
 clamped rather than rejected, matching `std.zlib`'s treatment of `level`.
 

@@ -2,7 +2,7 @@
 
 YAML parsing: documents, mappings, sequences and scalars.
 
-`parse` returns `(document, err)`. Navigate from `root` by node type —
+`parse` returns `(document, err)`. Navigate from `root` by node type:
 `mapping_size` / `mapping_get_key` / `mapping_get_value` for a mapping,
 `sequence_size` / `sequence_get` for a sequence, `get_scalar` for a leaf.
 
@@ -59,7 +59,7 @@ config file's author usually assumes it, and iterating in document order is
 what makes a round-trip readable.
 
 Scalars come back as text. YAML's implicit typing (`36` as a number, `yes` as
-a boolean) is not applied — convert at the point of use with
+a boolean) is not applied: convert at the point of use with
 `string.get_int` and friends, where you know what the field means.
 
 ## Exports

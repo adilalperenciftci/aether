@@ -4,7 +4,7 @@ Non-cryptographic hash functions: FNV-1a, MurmurHash3, SipHash-2-4 and
 CRC-32.
 
 **None of these is a substitute for `std.cryptography`.** They are for hash
-tables, checksums and sharding — fast, well-distributed, and trivially
+tables, checksums and sharding: fast, well-distributed, and trivially
 reversible by anyone who cares to. Never hash a password or sign a message
 with them.
 

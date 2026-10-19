@@ -4,9 +4,9 @@ Low-level networking primitives, shared by `std.tcp` and `std.http`.
 
 Mostly plumbing: raw descriptor writes (`fd_write`, `fd_close`) and the HTTP
 response accessors that both the client and the server build on. There is no
-`fd_read` here — reading is `std.tcp`'s job, and the one consumer of this
+`fd_read` here: reading is `std.tcp`'s job, and the one consumer of this
 layer that only needs to write is `std.ipc`. Application code usually wants `std.tcp` for sockets or
-`std.http` for HTTP — reach here when you hold a descriptor from somewhere
+`std.http` for HTTP: reach here when you hold a descriptor from somewhere
 else and need to move bytes over it.
 
 `std.ipc` is built on `fd_write` for exactly that reason: the back-channel is
@@ -31,7 +31,7 @@ main() {
 }
 ```
 
-`fd_write` returns the byte count, or negative on failure — the C convention
+`fd_write` returns the byte count, or negative on failure: the C convention
 rather than the `(value, err)` one used above this layer, because this is the
 layer where the wrapping happens.
 

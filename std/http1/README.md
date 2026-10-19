@@ -4,7 +4,7 @@ The HTTP/1.1 wire format, on its own.
 
 Parsing a status line, parsing headers, feeding bytes incrementally until a
 response is complete. `std.http`'s client and server use this; it is exposed
-separately for code that has bytes from somewhere else — a proxy relaying a
+separately for code that has bytes from somewhere else: a proxy relaying a
 response, a test double, a protocol that tunnels HTTP inside itself.
 
 The example **compiles but is not run** in CI: it needs a live connection.
@@ -17,7 +17,7 @@ main() {
     resp = http1.response_new()
 
     // feed takes a chunk and reports "complete", "incomplete", or an
-    // error — hand it whatever bytes have arrived so far.
+    // error: hand it whatever bytes have arrived so far.
     head = "HTTP/1.1 200 OK\r\n\r\n"
     state = http1.feed(resp, string.bytes(head), 0)
     println("state: ${state}")
@@ -33,7 +33,7 @@ more can still come, which is what distinguishes a truncated response from one
 that is merely unfinished.
 
 `parse_status_line` and `parse_headers` are the lower-level pieces, operating
-on a response struct and a raw buffer — reach for them only when `feed`'s
+on a response struct and a raw buffer: reach for them only when `feed`'s
 framing is not what you want.
 
 `read_response_conn` is the convenience form when you do have a connection and

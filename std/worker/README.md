@@ -2,7 +2,7 @@
 
 An off-scheduler thread pool, for blocking work.
 
-Aether's model is actors, not locks — but a **blocking** call (a synchronous
+Aether's model is actors, not locks, but a **blocking** call (a synchronous
 read, a `sleep`, a long CPU burn) run on a scheduler thread stalls every actor
 sharing it. `std.worker` is the escape hatch: hand the blocking work to a
 pthread outside the scheduler and get a callback when it finishes.
@@ -40,7 +40,7 @@ and would need a deterministic completion order to assert output.
 
 The `done` callback runs on the **main** thread, not the pool thread, which is
 what makes it safe to touch actor state or anything else with thread affinity.
-The work callback has no such guarantee — treat everything it touches as
+The work callback has no such guarantee: treat everything it touches as
 thread-local or immutable.
 
 `pending()` reports queued-and-unfinished work, which is how a shutdown path

@@ -5,7 +5,7 @@ Directory creation, deletion and listing.
 Listing returns a handle rather than an array, with `list_count` /
 `list_get` / `list_kind` accessors and a `dir_list_free` to release it. The
 kind comes straight from `readdir`'s `d_type`, so a listing does not pay for a
-`stat` per entry — worth having when walking a large tree.
+`stat` per entry: worth having when walking a large tree.
 
 The example **compiles but is not run** in CI: it touches the filesystem, and
 a documentation example should not need a scratch directory to be checked.
@@ -39,7 +39,7 @@ main() {
 ```
 
 **`list_kind` can return 0.** Not every filesystem reports a type through
-`readdir` — network mounts often do not — and 0 means "unknown, stat it if you
+`readdir` (network mounts often do not), and 0 means "unknown, stat it if you
 need to know". Code that assumes 1-or-2 will misclassify entries on those
 filesystems.
 

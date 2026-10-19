@@ -7,7 +7,7 @@ u16/u32/u64, float storage and bit reinterpretation, plus `copy`, `move` and
 `compare`. This is what a codec, a binary parser or a port of C code uses to
 get at bytes.
 
-**`std.mem` has no allocator.** It reads and writes memory someone else owns —
+**`std.mem` has no allocator.** It reads and writes memory someone else owns:
 `std.arena` is the usual source. Note that a `std.bytes` handle is a *struct*,
 not a pointer to its payload: writing through one with these accessors
 overwrites the struct's own fields and corrupts the heap.
@@ -46,7 +46,7 @@ as int8: -1, as uint8: 255
 
 Every accessor here takes a **byte offset**, whatever its width:
 `get_float32(p, 4)` reads the second float, not the fifth. (`std.lanes`, the
-other module that reaches into a raw buffer, indexes by **element** — the
+other module that reaches into a raw buffer, indexes by **element**: the
 convention an `f32[]` view uses.)
 
 Use `alloc_aligned` when the wider accessors are involved: `set_long` and the
@@ -54,7 +54,7 @@ u64 pair at an unaligned offset are undefined on strict-alignment targets even
 where x86 tolerates them.
 
 `get_uint32` and `set_uint32` take and return `long`, so the full unsigned
-range works without masking — they used to be `int`, which made `0xFFFFFFFF`
+range works without masking: they used to be `int`, which made `0xFFFFFFFF`
 read back as -1 (#1699). `set_uint32` truncates a wider value to the field
 rather than spilling into the next one.
 
@@ -86,7 +86,7 @@ alias-safe memcpy lowering. `--audit-mem` reports these accesses too.
 
 `copy`, `move`, `compare` and `set` all start at byte 0 of each buffer. Since
 Aether has no pointer arithmetic, that left no way to express a bulk
-operation on an **interior** span — copying one scanline out of a larger
+operation on an **interior** span: copying one scanline out of a larger
 framebuffer meant going byte at a time, even though the operation is
 memcpy-shaped.
 
@@ -115,7 +115,7 @@ main() {
 
 Contracts match the offset-less forms exactly: a null buffer is a no-op
 returning `dst` (`0` for `compare_at`), and offsets are the caller's
-responsibility in the same way `n` already is — no range checking is added,
+responsibility in the same way `n` already is: no range checking is added,
 because none exists in the offset-less forms.
 
 **Use `move_at`, not `copy_at`, when the spans overlap.** An image scrolling
@@ -241,7 +241,7 @@ mem.fill_slice(v[40..48], 0)
 `read_u16_le` through `write_u64_be` have the widths and byte order of
 `get_u16_le` through `set_u64_be`. `compare_slice(a, b)` is `compare`'s
 slice form: lexicographic, comparing the overlapping prefix first and, if
-every shared byte matches, the shorter slice sorting first — two
+every shared byte matches, the shorter slice sorting first: two
 different-length slices are therefore never "equal" even when one is a
 prefix of the other.
 

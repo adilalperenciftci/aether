@@ -24,17 +24,17 @@ a[1]=1.5 err=''
 ```
 
 Float text here follows the C locale, so `1.5` prints with a point on every
-platform — see `std.number` for locale-aware rendering.
+platform: see `std.number` for locale-aware rendering.
 
 `std.sort` sorts one in place with `sort.floats`.
 
-**Indexing with `v[i]` (#2041).** `a[i]` on the handle itself cannot work —
+**Indexing with `v[i]` (#2041).** `a[i]` on the handle itself cannot work:
 the handle is a bare `ptr`, so `[]` has no element type to dispatch on. A
 **view** is typed, and does:
 
 ```aether,fragment
 a = floatarr.new_raw(n)
-v = floatarr.floatarr_array(a)      // a `float[]` over the same buffer
+v = floatarr.array(a)               // a `float[]` over the same buffer
 v[3] = 1.5
 total = total + v[3]
 ```

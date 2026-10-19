@@ -13,14 +13,14 @@ deque.push_back(d, 1)        // WRONG: the result is thrown away
 d = deque.push_back(d, 1)    // right
 ```
 
-At capacity, `push_back` drops the front element to make room — a bounded ring
+At capacity, `push_back` drops the front element to make room: a bounded ring
 buffer, not an error. That makes it a natural fit for a rolling window of the
 last N samples.
 
 **When every element matters, use `try_push_back` / `try_push_front` instead.**
 They never overwrite: on a full buffer they return an error and leave the deque
 untouched. The distinction matters most for BFS frontiers, tree traversals and
-work queues, where an underestimated capacity does not fail loudly — it quietly
+work queues, where an underestimated capacity does not fail loudly: it quietly
 drops pending work and yields an answer that looks plausible and is wrong.
 
 ```aether,run
@@ -67,7 +67,7 @@ main() {
     front, ferr = deque.peek_front(d)
     println("front=${front} err='${ferr}'")
 
-    // pop_front returns (value, new_deque, err) — rebind the deque.
+    // pop_front returns (value, new_deque, err): rebind the deque.
     value, rest, perr = deque.pop_front(d)
     println("popped=${value} remaining=${deque.len(rest)}")
 

@@ -5,7 +5,7 @@ HTTP client and server.
 The server handles keep-alive, connection parking, TLS termination, routing,
 middleware and HTTP/2; the client does requests, connection reuse and TLS
 verification. This is the largest module in `std`, and
-`docs/http-server.md` is the reference for the server side — this page is the
+`docs/http-server.md` is the reference for the server side: this page is the
 orientation.
 
 The example **compiles but is not run** in CI: a server binds a port and does
@@ -37,7 +37,7 @@ A handler takes `(request, response, user_data)` and fills the response; the
 handler reaches application state without a global.
 
 **Keep-alive is on by default**, and an idle connection is parked in a poller
-rather than holding a worker thread — so concurrency bounds on file
+rather than holding a worker thread, so concurrency bounds on file
 descriptors, not on the `cores * 2` worker count. `AETHER_HTTP_PARKING=0`
 turns that off if a regression needs bisecting.
 
@@ -47,7 +47,7 @@ freed with `http_response_free`. Connection reuse is on by default.
 ## TLS
 
 `server_set_tls(server, cert_path, key_path)` before `server_start` turns a
-server into an HTTPS one. It returns an error string, `""` on success — check
+server into an HTTPS one. It returns an error string, `""` on success: check
 it, because a bad path or an unreadable key is the common failure and the
 server otherwise starts happily in plaintext.
 
@@ -61,7 +61,7 @@ if err != "" {
 
 **Two backends.** OpenSSL is the default wherever it is compiled in. The other
 is a pure-Aether TLS 1.3 implementation with no OpenSSL dependency at all,
-selected with `AETHER_PURE_TLS=1` — and used automatically when the build has
+selected with `AETHER_PURE_TLS=1`, and used automatically when the build has
 no OpenSSL, which is what lets a cross-compiled binary (`ae build --target=…`,
 which links none) serve HTTPS at all.
 
@@ -78,7 +78,7 @@ The pure backend has constraints the OpenSSL one does not, and each fails as a
 **dropped connection rather than a message**, so they are worth knowing before
 debugging one:
 
-- the server key must be **ECDSA P-256** — there is no RSA signing path, so an
+- the server key must be **ECDSA P-256**: there is no RSA signing path, so an
   RSA certificate produces a server that fails at the signature step
   (`openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1`)
 - key exchange is **X25519 only**
@@ -87,7 +87,7 @@ debugging one:
 
 The client side is the mirror, and is now wired the same way (#1849):
 `std.http.client` does HTTPS through OpenSSL where it is compiled in, and
-falls back to `std.cryptography.tls13_client` where it is not — which is every
+falls back to `std.cryptography.tls13_client` where it is not, which is every
 `ae build --target=` cross-build, since zig bundles no TLS. Add
 
 ```aether,fragment
@@ -103,39 +103,39 @@ Without that import the pure client is not linked, and an https request in a
 no-OpenSSL build fails with an error naming the missing import rather than
 returning an empty body. (`std.http.client` does not import it for you:
 `std.cryptography` reaches `std.fs`, and an implicit import would make
-`--emit=lib --with=net` reject every `std.http.client` user — the same reason
+`--emit=lib --with=net` reject every `std.http.client` user, the same reason
 the server side is opt-in.)
 
-In a build that HAS OpenSSL, `AETHER_PURE_TLS=1` — the variable that already
-selects the pure server — moves client requests onto the pure client as well,
+In a build that HAS OpenSSL, `AETHER_PURE_TLS=1` (the variable that already
+selects the pure server) moves client requests onto the pure client as well,
 provided the program imports it (otherwise the request fails, naming the
 import). That is how the pure path is tested on every platform, not only in
 cross-builds.
 
 **Trust store.** The pure client verifies against, in order: the `set_cafile`
 pin alone, when there is one; else the union of `SSL_CERT_FILE` (a PEM bundle)
-and `SSL_CERT_DIR` (a directory of PEM files, or a `:`-separated list — `;` on
+and `SSL_CERT_DIR` (a directory of PEM files, or a `:`-separated list (`;` on
 Windows) when either is set; else, on Windows, every certificate of the system
 ROOT store together with the first bundle file of the list the OpenSSL path
 uses too (the bundle the release ships beside the program, MSYS2's, Git for
 Windows'; see the README's Windows section); else the first system bundle that
 exists (`/etc/ssl/certs/ca-certificates.crt`, `/etc/pki/tls/certs/ca-bundle.crt`,
 `/etc/ssl/cert.pem`); else the first
-certificate directory that loads — Android's `/apex/com.android.conscrypt/cacerts`
+certificate directory that loads) Android's `/apex/com.android.conscrypt/cacerts`
 (Android 14+) and `/system/etc/security/cacerts`, which are one certificate per
 file with no bundle at all, then `/etc/ssl/certs`. If nothing loads, the
 handshake fails closed.
 
 **Scope and errors.** The pure client speaks TLS 1.3 only. A server that does
 not is refused with an error that says so (`server does not support TLS 1.3`),
-not a hang. Handshake failures carry the real cause — an untrusted chain, a
-certificate not valid for the requested host, no trust store — prefixed with
+not a hang. Handshake failures carry the real cause (an untrusted chain, a
+certificate not valid for the requested host, no trust store) prefixed with
 `TLS handshake failed (pure-Aether TLS 1.3):`.
 
 **Performance.** A pure handshake against a real CDN (a P-256 leaf over
 secp384r1 intermediates) completes in about 1.3 seconds, and a full cross-built
 HTTPS request in under a second. That is slower than OpenSSL but well inside any
-server's handshake deadline. An earlier version of this note measured 12–22
+server's handshake deadline. An earlier version of this note measured 12-22
 seconds and warned that the default request timeout could expire mid-handshake;
 that cost was `std.bignum`'s bit-serial division inside every P-256 and P-384
 field reduction, and it is gone: the division is Knuth's Algorithm D (#2595),
@@ -146,7 +146,7 @@ and `docs/http-server.md` for routing, middleware, TLS and the HTTP/2 path.
 
 ## WebSockets
 
-The server side has shipped since v0.96 — `server_websocket(srv, path, handler,
+The server side has shipped since v0.96: `server_websocket(srv, path, handler,
 user_data)` registers a route whose handler gets a live `ws` handle and uses
 `ws_recv` / `ws_message` / `ws_send_text` / `ws_close`.
 
@@ -169,7 +169,7 @@ http.ws_client_free(w)
 
 `ws_recv` returns `1` for a text message, `2` for binary, `-1` once the peer
 has closed; ping/pong is handled inside it on both ends. Free a **client**
-handle with `ws_client_free` — server-side handles belong to the request loop
+handle with `ws_client_free`: server-side handles belong to the request loop
 and must not be passed to it.
 
 `ws_connect` returns `null` rather than raising: on a malformed URL, an
@@ -177,7 +177,7 @@ unreachable host, a response that is not `101`, or a `Sec-WebSocket-Accept`
 that does not match the key it sent. That last check is what stops any `101`
 being accepted, including one from a server that never saw the handshake.
 
-**`wss://` dials over TLS**, reusing the HTTP client's trust store — the same
+**`wss://` dials over TLS**, reusing the HTTP client's trust store: the same
 system CA discovery and TLS floor as `https`. The peer certificate is verified
 and pinned to the host in the URL, so a certificate with a valid chain but the
 wrong host is refused. The default port follows the scheme: 80 for `ws`, 443
@@ -193,7 +193,7 @@ handle does not.
 exchange and wrong for a **multiplexed** one. WebDriver-BiDi is the motivating
 case: many commands in flight at once, each awaited by `id`, plus unsolicited
 events on the same socket. That needs one reader routing frames to an id-keyed
-table or an event queue — and built on a blocking `ws_recv`, that reader has to
+table or an event queue, and built on a blocking `ws_recv`, that reader has to
 own a thread.
 
 Three calls avoid it:
@@ -215,7 +215,7 @@ building block for a pump: call it, route whatever comes back, return.
 
 The timeout bounds the wait for the **start** of a frame. Once a header has
 been read the frame is finished even if that blocks, because WebSocket framing
-has no resynchronisation point — abandoning a half-read frame would leave the
+has no resynchronisation point: abandoning a half-read frame would leave the
 next read treating payload as a header. Pings and continuation frames handled
 during the wait do not restart the clock, so a chatty peer cannot extend the
 call.
@@ -231,7 +231,7 @@ call.
 That is not a theoretical caveat. Over `wss://`, OpenSSL decrypts an entire
 TLS record at once, so a peer that writes two frames together leaves the
 second one decrypted and waiting while `poll(2)` on the descriptor reports
-nothing — measured, not assumed. `ws_poll` checks the connection buffer, then
+nothing: measured, not assumed. `ws_poll` checks the connection buffer, then
 the TLS layer, then the socket, so it cannot answer "not ready" while a frame
 is already in hand. Prefer it whenever you want one authoritative answer;
 reach for `ws_fd` only when an event loop needs a real descriptor.

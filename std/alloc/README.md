@@ -6,7 +6,7 @@ a parameter instead of hardcoding it.
 `alloc.system()` is malloc/free. `alloc.of_arena(ar)` wraps a `std.arena` so
 the same code allocates by bump instead. `std.tracking.wrap(inner)` wraps
 either and counts what is still live. Because they are all the same handle
-type, a caller swaps allocation strategy — or adds leak detection — without
+type, a caller swaps allocation strategy (or adds leak detection) without
 the code under it changing.
 
 `resize` and `release` take the **old size** as well as the pointer. That is
@@ -42,7 +42,7 @@ released
 
 Swapping `alloc.system()` for `tracking.wrap(alloc.system())` in that example
 would leave the body untouched and let the program assert, at the end, that
-nothing leaked — see `std/tracking`.
+nothing leaked: see `std/tracking`.
 
 ## Exports
 

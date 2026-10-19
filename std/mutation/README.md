@@ -4,7 +4,7 @@ Mutation testing: change the code under test, and check the tests notice.
 
 A green suite proves the tests ran, not that they would catch anything.
 Mutation testing closes that gap by making small semantic changes to the
-subject — `>=` to `<`, `==` to `!=`, a string literal to empty — and rerunning
+subject (`>=` to `<`, `==` to `!=`, a string literal to empty), and rerunning
 the suite. A mutant the tests still pass is a **survivor**: a change to the
 code that nothing objected to, which is a gap in the tests.
 
@@ -37,14 +37,14 @@ Aether mutation testing (std.mutation)
 
 The operators are the arithmetic and comparison swaps (`>=`→`<`, `==`→`!=`,
 `+`→`-`, `&&`→`||`), plus two string ones: a non-empty literal to empty, and
-an empty literal to a marker. Mutations inside string literals are skipped —
+an empty literal to a marker. Mutations inside string literals are skipped:
 changing text a program merely prints is not a semantic change.
 
 **The baseline is checked first.** If the suite does not pass on the
 unmutated subject, the run aborts rather than reporting a meaningless score:
 every mutant would "die" for the wrong reason.
 
-A mutant that does not compile is excluded rather than counted as killed —
+A mutant that does not compile is excluded rather than counted as killed:
 counting it would inflate the score with changes no test could have caught.
 
 This module is exercised by shell drivers rather than a co-located spec,

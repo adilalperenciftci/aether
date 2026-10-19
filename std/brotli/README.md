@@ -1,9 +1,9 @@
 # std.brotli
 
-Brotli compression (RFC 7932) — streaming and one-shot.
+Brotli compression (RFC 7932): streaming and one-shot.
 
 `br` is what current browsers actually prefer: every modern browser lists it
-ahead of `gzip` in `Accept-Encoding`, and it typically beats gzip by 15–25% on
+ahead of `gzip` in `Accept-Encoding`, and it typically beats gzip by 15-25% on
 text at comparable speed. This module wraps the system **libbrotlienc**
 (`apt install libbrotli-dev`, `brew install brotli`).
 
@@ -23,7 +23,7 @@ tail,  n, err = brotli.stream_finish(s)     // at connection close
                 brotli.stream_free(s)
 ```
 
-`stream_write` usually returns **0 bytes** — the encoder buffers internally for
+`stream_write` usually returns **0 bytes**: the encoder buffers internally for
 compression ratio. `stream_flush` is what emits a decodable boundary while
 keeping the window, so later events cost far less than the first: three
 repetitive events compress to 31, 13 and 13 bytes.
@@ -34,9 +34,9 @@ SSE connections on one event loop) without fighting over it. Always
 
 ## Quality
 
-`quality` is 0–11. **11 is the library default and is slow** — `FAST_QUALITY`
+`quality` is 0-11. **11 is the library default and is slow**: `FAST_QUALITY`
 (5) is the usual choice for a live HTTP response. `window` is the lg2 window
-size (10–24); pass 0 for the library default. Both are clamped rather than
+size (10-24); pass 0 for the library default. Both are clamped rather than
 rejected, matching how `std.zlib` treats `level`.
 
 ## One-shot

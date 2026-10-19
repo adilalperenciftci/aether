@@ -2,7 +2,7 @@
 
 FreeBSD Capsicum: capability-mode sandboxing.
 
-`enter()` puts the process into capability mode permanently — no path can be
+`enter()` puts the process into capability mode permanently: no path can be
 opened afterwards, only descriptors already held can be used, and there is no
 way back out. That one-way door is the security property: code after the call
 cannot widen its own reach even if it is compromised.
@@ -32,8 +32,8 @@ available: 0
 not sandboxing on this platform
 ```
 
-`rights_limit` narrows what a specific descriptor may do — read but not write,
-say — which is how a process keeps an fd it needs while giving up the
+`rights_limit` narrows what a specific descriptor may do (read but not write,
+say), which is how a process keeps an fd it needs while giving up the
 operations it does not.
 
 `in_mode()` reports whether capability mode is already active, so library code

@@ -3,7 +3,7 @@
 Explicit file handles: open, read, write, close.
 
 `std.fs` reads and writes whole files in one call, which is what most code
-wants. `std.file` is for when you need the handle itself — a long-lived
+wants. `std.file` is for when you need the handle itself: a long-lived
 descriptor, an incremental write, or an fd to hand to something else.
 
 The example **compiles but is not run** in CI: it touches the filesystem.

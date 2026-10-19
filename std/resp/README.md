@@ -2,18 +2,18 @@
 
 RESP, the Redis Serialization Protocol: RESP3-native, RESP2-compatible.
 
-RESP3 is a strict **superset** of RESP2 — every RESP2 marker (`+ - : $ *`) is
+RESP3 is a strict **superset** of RESP2: every RESP2 marker (`+ - : $ *`) is
 valid RESP3, which merely adds types (null `_`, boolean `#`, double `,`, big
 number `(`, verbatim string `=`, map `%`, set `~`, push `>`). So this is one
 codec, not two protocols: a single decoder that reads the full RESP3 grammar
 (and therefore any RESP2 stream), and a single encoder whose dialect flag
 selects the wire form for the handful of types that differ. RESP3 is opt-in per
 connection (a client sends `HELLO 3`), which is exactly why a client or server
-must still be able to speak RESP2 — so `encode` emits RESP3 and `encode_resp2`
+must still be able to speak RESP2, so `encode` emits RESP3 and `encode_resp2`
 emits the RESP2 form of the same value.
 
 Transport-agnostic, like `std.json` and `std.cbor`: it works over byte buffers
-and never touches a socket. The decoder is **resumable** — `parse_prefix`
+and never touches a socket. The decoder is **resumable**: `parse_prefix`
 distinguishes *incomplete* (needs more bytes: it returns a null value, `0`
 consumed, and no error) from *malformed* (a protocol error: a non-empty error
 string). A caller reading a socket can accumulate bytes and retry a partial
@@ -49,10 +49,10 @@ speed = 42
 ## Building values
 
 Scalars have direct constructors: `new_simple`, `new_error`, `new_integer`,
-`new_bulk` (binary-safe — pass the byte length), `new_null`, `new_bool`,
+`new_bulk` (binary-safe, pass the byte length), `new_null`, `new_bool`,
 `new_double`. Aggregates start empty and take children: `new_array` / `new_set`
 / `new_push` with `array_add`, and `new_map` with `map_add`. Ownership moves
-**into** the aggregate — freeing a value you have already added, then freeing
+**into** the aggregate: freeing a value you have already added, then freeing
 its parent, is a double free. Every value you still own is freed with
 `free_value`, which reclaims the whole tree.
 
@@ -67,7 +67,7 @@ its parent, is a double free. Every value you still own is freed with
 ## Decoding a stream
 
 `parse` decodes exactly one complete value from a buffer and errors on trailing
-bytes — use it for a single self-contained frame. `parse_prefix` decodes the
+bytes: use it for a single self-contained frame. `parse_prefix` decodes the
 first value from a buffer that may hold more (or less) than one frame, returning
 how many bytes it consumed; loop on it, advancing by `consumed`, and stop when
 it reports incomplete to wait for more socket data.

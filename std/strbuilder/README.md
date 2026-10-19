@@ -7,8 +7,8 @@ everything accumulated so far. A builder appends into a growing buffer and
 copies once, at `finish`. For a few pieces it does not matter; for a loop over
 a thousand rows it is the difference between instant and noticeable.
 
-`new` takes a capacity hint. Getting it wrong is not an error — the buffer
-grows — but a reasonable guess avoids the regrowth.
+`new` takes a capacity hint. Getting it wrong is not an error (the buffer
+grows), but a reasonable guess avoids the regrowth.
 
 ```aether,run
 import std.strbuilder
@@ -37,8 +37,8 @@ building, read `length` as you go and call `finish` once at the end.
 laid out as an inline string from the first byte, and `finish` fills in the
 header and hands the block over without copying. `string.length`,
 `string.char_at` and `string.substring` read that length in O(1), so a
-character-by-character scan of a finished string — a tokenizer, an
-interpreter, a template renderer — is linear:
+character-by-character scan of a finished string (a tokenizer, an
+interpreter, a template renderer) is linear:
 
 ```aether,fragment
 s = strbuilder.finish(b)
@@ -56,7 +56,7 @@ that contains NUL bytes survives `finish` in full too.
 
 `finish_with_length` returns a bounded `byte[]` (#2301): a raw buffer with no
 NUL terminator appended, for binary protocol assembly where the bytes are
-handed to C or freed by the caller — `free(result)` decays to the same raw
+handed to C or freed by the caller: `free(result)` decays to the same raw
 libc pointer it always returned. It shifts the content down over the block's
 header, so it costs one `memmove` of the content and no allocation.
 

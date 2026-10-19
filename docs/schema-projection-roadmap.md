@@ -8,7 +8,7 @@ that shape is Ash's *thinnest outer ring*. Ash is a declarative
 resource/domain framework whose real substance is everything behind the
 resource: relationships, actions, lifecycle hooks, calculations/aggregates, a
 pluggable data layer with a query DSL and SAT-solver-backed authorization
-policies: and, crucially, **projections**: one resource declaration generates
+policies, and, crucially, **projections**: one resource declaration generates
 JSON:API, GraphQL, OpenAPI, admin UIs, and typed code interfaces.
 
 The question this doc answers: *how much of Ash should Aether pursue, and where

@@ -9,14 +9,14 @@ shape: `string.split` hands back an opaque array handle, `fs.glob` a
 to pass to `std.sort`.
 
 `strarr` fills that gap. It is the string companion to `std.intarr` /
-`std.longarr` / `std.floatarr`, except it **grows** (`push`) — the whole point
+`std.longarr` / `std.floatarr`, except it **grows** (`push`): the whole point
 is a count you don't know up front. Its `array()` view is a `string[]` bounded
 by the current size (#2301), so `std.sort.strings_by` (and `strings` /
 `string_search`) sort it in place, and `v[i]` past the end is the slice
 bounds panic. A push may reallocate: take the view after the last push.
 
-**Ownership:** `push` *borrows* — exactly like a `string[]` literal, which
-points at strings the caller owns — so keep the pushed strings alive for as long
+**Ownership:** `push` *borrows* (exactly like a `string[]` literal, which
+points at strings the caller owns), so keep the pushed strings alive for as long
 as the array (or any sort result taken from it) is read. When you push a string
 you just built (a per-iteration `concat` or basename), reach for **`push_copy`**
 instead: the array takes its own reference and frees it in `free`, so a reused
@@ -53,5 +53,5 @@ newest = app-1.12.0.jar
 ```
 
 Passing a bare `ptr` (say a `string.split` result) where a `string[]` is
-expected is a compile error, not a silent crash — cast with `as string[]` only
+expected is a compile error, not a silent crash: cast with `as string[]` only
 when you know the pointer names a contiguous string buffer.

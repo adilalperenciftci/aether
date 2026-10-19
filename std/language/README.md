@@ -27,13 +27,13 @@ base:   en
 region: US
 ```
 
-That `as language.Tag` is not ceremony you can skip — `base(raw)` is a type
+That `as language.Tag` is not ceremony you can skip: `base(raw)` is a type
 error. The distinct type is what stops an arbitrary string being passed where
 a validated tag is expected.
 
 `Matcher` is the other half: given the locales an application actually ships
 and the list a browser sent in `Accept-Language`, it picks the best available
-match. That is more than string equality — a request for `en-GB` should be
+match. That is more than string equality: a request for `en-GB` should be
 served `en` rather than falling through to the default, and `zh-Hant` should
 not be matched by `zh-Hans`.
 

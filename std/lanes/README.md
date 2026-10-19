@@ -28,7 +28,7 @@ main() {
 
 `load4(buf, index)` and `store4(buf, index, v)` read and write 16 bytes at
 `index` **elements** into a raw buffer (4 bytes per element for `f32x4` and
-`i32x4`, 8 for `f64x2`) — an element index, like an `f32[]` view's, **not**
+`i32x4`, 8 for `f64x2`): an element index, like an `f32[]` view's, **not**
 the byte offset `std.mem`'s accessors take. A loop over a float buffer
 advances by 4 per `f32x4`, and by 2 per `f64x2`. No alignment is required, and the bounds are the
 caller's to know, as they are for `std.mem`'s accessors:
@@ -52,11 +52,11 @@ i7-1265U).
 array: a scalar becomes lanes through `splat4` / `f32x4`, and lanes become
 scalars through `.x` / `.y` / `.z` / `.w`, `lane4` or `sum4`. `a + d` for an
 `f32x4` and an `f64x2` is a type error, and `.z` on an `f64x2` names a lane
-it does not have — the compiler says so, at the source line.
+it does not have: the compiler says so, at the source line.
 
 A comparison (`<`, `<=`, `>`, `>=`, `==`, `!=`, or the `lt4`/`le4`/… spellings)
 yields an integer vector of the same width whose lane is all-ones where it
-held — `i32x4` for `f32x4`, `i64x2` for `f64x2`. Feed it to `select4` /
+held: `i32x4` for `f32x4`, `i64x2` for `f64x2`. Feed it to `select4` /
 `select2`, combine masks with `mask_and` / `mask_or` / `mask_not` (or
 `mask2_and` / `mask2_or` / `mask2_not`), or reduce it to a `bool` with
 `any4` / `all4` / `any2` / `all2` when a branch is wanted. A scalar operand
@@ -66,8 +66,8 @@ lane against 2. A scalar variable splats as a literal does (`v * s` with a
 of the operator.
 
 `sqrt4` / `sqrt2` and `abs4` / `abs2` are the two libm shapes that belong
-here. Both are EXACT — an IEEE square root is correctly rounded, and
-clearing the sign bit is not an approximation — so the lane form gives the
+here. Both are EXACT (an IEEE square root is correctly rounded, and
+clearing the sign bit is not an approximation), so the lane form gives the
 same lanes as calling the scalar function four times, in the one instruction
 the hardware has had since SSE2 rather than four extracts, four calls and a
 rebuild. The transcendentals are deliberately absent: `sin` and `exp` per
@@ -140,8 +140,8 @@ returns an `f32x8` by value has to use the same `-m` flags as the program.
 
 ## Integer lanes (#2212)
 
-For the integer image and audio kernels — a JPEG IDCT, YCbCr→RGB, PNG
-filters, PCM mixing — `i32x4` (four 32-bit lanes) and `i16x8` (eight 16-bit
+For the integer image and audio kernels (a JPEG IDCT, YCbCr→RGB, PNG
+filters, PCM mixing) `i32x4` (four 32-bit lanes) and `i16x8` (eight 16-bit
 lanes) carry the arithmetic those need:
 
 ```aether,fragment
@@ -161,7 +161,7 @@ lanes.i32lane(a, 0) / lanes.i32sum(a)     // read one lane / sum (as long)
 `i16max`, `i16load`, `i16store`, `i16lane`, `i16splat`, `i16x8`), with 16-bit
 lanes read back sign-extended to `int`.
 
-The hot exit of these kernels is a **saturating pack** — narrow wide
+The hot exit of these kernels is a **saturating pack**: narrow wide
 accumulators to the next size down, clamping (not wrapping) out-of-range
 lanes:
 
@@ -180,10 +180,10 @@ saturated value, never a wrapped one.
 
 Every load/store above takes a raw `ptr` and trusts the caller's bound, like
 `std.mem`'s accessors. The `_slice` siblings take a typed slice instead and
-check that the WHOLE vector width fits before decaying it to a pointer —
-`load4_slice`/`store4_slice` and `load8_slice`/`store8_slice` (`f32[]`), `load2_slice`/`store2_slice`
+check that the WHOLE vector width fits before decaying it to a pointer
+(`load4_slice`/`store4_slice` and `load8_slice`/`store8_slice` (`f32[]`), `load2_slice`/`store2_slice`
 (`float[]`), `i32load_slice`/`i32store_slice` (`int[]`),
-`i16load_slice`/`i16store_slice` (`uint16[]` — the lane width the array
+`i16load_slice`/`i16store_slice` (`uint16[]`) the lane width the array
 element type matches; there is no first-class signed 16-bit array element),
 and `pack_i16_u8_slice` (`out: byte[]`, needing room for all 16 bytes). An
 out-of-range call panics naming the lane count, the element index and the
@@ -197,14 +197,14 @@ lanes.load4_slice(buf, 1)   // panics: 4 lanes at element 1 need 5 elements, buf
 ```
 
 The raw `ptr` forms remain the right choice for a buffer that isn't an
-Aether slice at all — an external C buffer, or one reached through `std.mem`
+Aether slice at all: an external C buffer, or one reached through `std.mem`
 without going via `make`/a fixed array.
 
 ## Requirements
 
 The types lower to the GCC/Clang vector extensions
 (`__attribute__((vector_size(16)))`, and `(32)` for an AVX2 `f32x8`), which
-every compiler the toolchain drives has — gcc, clang and `zig cc` on every target. A compiler without them
+every compiler the toolchain drives has: gcc, clang and `zig cc` on every target. A compiler without them
 defines `AETHER_HAS_LANES` as 0 and the generated file simply carries no lane
 types; a program that uses one will not compile there, and one that does not
 is unaffected. Each entry point here is a `static inline`

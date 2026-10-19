@@ -3,8 +3,8 @@
 The container primitives, in one module: pointer lists, string-keyed maps,
 owned-string vectors and packed int arrays.
 
-Most of this surface is also available as focused modules — `std.list`,
-`std.map`, `std.intarr` — which is usually the clearer import. Reach for
+Most of this surface is also available as focused modules (`std.list`,
+`std.map`, `std.intarr`), which is usually the clearer import. Reach for
 `std.collections` when a file needs several of them and one import reads
 better than four.
 
@@ -39,8 +39,8 @@ so a request-scoped container can be carved from an arena and freed in one
 `arena.reset` rather than element by element.
 
 `intarr_view(arr)` (#2301) gives the same bounded `int[]` view
-`std.intarr.array()` does — `v.len` is `intarr_size(arr)`, and an
-out-of-range `v[i]` panics rather than reading past the buffer — through this
+`std.intarr.array()` does (`v.len` is `intarr_size(arr)`, and an
+out-of-range `v[i]` panics rather than reading past the buffer) through this
 facade's own import, so a caller using only `std.collections` doesn't need a
 second import to get it. Borrowed, not owned: valid until `arr` is freed.
 

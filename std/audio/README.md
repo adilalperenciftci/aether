@@ -1,11 +1,11 @@
 # std.audio
 
 Audio playback: open a device, load samples, play them, and the mixer tier a
-game engine needs per source — pan, pitch, looping, groups, a queue source,
+game engine needs per source: pan, pitch, looping, groups, a queue source,
 and a headless engine that holds a mix to numbers.
 
 The backend is chosen at build time. When none is available the module falls
-back to a **null backend** that accepts everything and produces no sound —
+back to a **null backend** that accepts everything and produces no sound:
 `is_null_backend()` reports which you have, so a program can warn rather than
 appearing broken.
 
@@ -27,7 +27,7 @@ main() {
         return
     }
 
-    // load_wav takes the BYTES, not a path — read the file yourself,
+    // load_wav takes the BYTES, not a path: read the file yourself,
     // which keeps the module out of the filesystem. Despite the name it
     // sniffs the container: WAV, MP3, FLAC and OGG Vorbis all load here.
     data, dlen, rerr = fs.read_binary("chime.wav")
@@ -52,7 +52,7 @@ main() {
 ```
 
 `load_wav` decodes a WAV container from bytes; `load_pcm` takes raw samples
-with an explicit format — one of the `FORMAT_*` constants — for audio that
+with an explicit format (one of the `FORMAT_*` constants) for audio that
 arrives already decoded. Both return `ptr!`, so a corrupt file is a value to
 handle rather than a crash.
 
@@ -69,8 +69,8 @@ A source on a game object and a listener on the camera need more than a
 volume. Each source also has a `pan` (equal-power, the Web Audio
 StereoPannerNode law, so the engine can compute its expected numbers from
 the spec), a `pitch` ratio (Doppler, an engine note), `looping` (rain, wind)
-and a `fade_ms`. Sources are routed through **groups** — music, effects,
-ambience, voice — each with a volume of its own.
+and a `fade_ms`. Sources are routed through **groups** (music, effects,
+ambience, voice) each with a volume of its own.
 
 ```aether,fragment
 import std.audio
@@ -97,7 +97,7 @@ main() {
 
 `load_wav` decodes as the mixer pulls, so a long track costs its encoded
 size and needs no separate streaming path. For audio that does not exist yet
-— a procedural wind, a decoder of your own — `stream_open` makes a **queue
+ (a procedural wind, a decoder of your own) `stream_open` makes a **queue
 source**: a bounded ring the program `stream_push`es PCM into while it plays.
 An empty ring plays silence and counts an underrun (`stream_underruns`)
 rather than ending the sound.

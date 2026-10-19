@@ -3,8 +3,8 @@
 JSON parsing, building and serialisation.
 
 `parse` returns `(value, err)`; the value is a tree you navigate with typed
-accessors. Errors carry a position — `last_error_line` and `last_error_col`,
-and the message itself names it — so a malformed config points at the line
+accessors. Errors carry a position (`last_error_line` and `last_error_col`,
+and the message itself names it), so a malformed config points at the line
 rather than just failing.
 
 ```aether,run
@@ -42,7 +42,7 @@ bad: expected string key in object at 1:2
 `json_free` on the root frees the whole tree; children must not be freed
 separately.
 
-Accessors that can fail return `(value, err)` — `get_string` above — while
+Accessors that can fail return `(value, err)` (`get_string` above), while
 `json_get_int` and friends return the value directly and rely on the caller
 having checked `json_type` first. Check the type when the input is
 untrusted.

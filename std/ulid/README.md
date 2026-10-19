@@ -30,7 +30,7 @@ Within a single millisecond the ordering is by the random tail, so
 same-millisecond ULIDs sort arbitrarily relative to each other. Across
 milliseconds the ordering holds.
 
-Compared with `std.uuid`'s v7 — same idea, different encoding: ULID is 26
+Compared with `std.uuid`'s v7, the idea is the same and the encoding differs: ULID is 26
 characters of base32, UUID v7 is 36 of hex-with-hyphens and fits anywhere a
 UUID is already expected.
 

@@ -2,7 +2,7 @@
 
 Civil dates and times, and the arithmetic between them.
 
-A `DateTime` is a civil timestamp — year, month, day, hour, minute, second —
+A `DateTime` is a civil timestamp (year, month, day, hour, minute, second)
 plus the derived weekday and day-of-year. `to_unix` converts to seconds since
 the epoch; `from_unix` goes back.
 
@@ -33,7 +33,7 @@ weekday: 6
 Feb 2024:  29 days
 ```
 
-`weekday` is 0-based from Sunday, so 6 is Saturday — 22 August 2026 is indeed
+`weekday` is 0-based from Sunday, so 6 is Saturday: 22 August 2026 is indeed
 a Saturday.
 
 ## Formatting and parsing
@@ -45,9 +45,9 @@ combinations `%F %T %D %c`, and Ruby's flags between the `%` and the letter
 (`-` for no padding, `_` for spaces, `^` for upper case). A conversion it does
 not know is written as it stands.
 
-`parse_iso8601_offset` reads the ISO-8601 forms people write — a date alone,
+`parse_iso8601_offset` reads the ISO-8601 forms people write (a date alone,
 `T` or a space before the clock, seconds and a fraction optional, and a zone
-of `Z`, `UTC` or `+HH:MM` — and returns the instant with the offset it was
+of `Z`, `UTC` or `+HH:MM`), and returns the instant with the offset it was
 written at. `strftime_at` prints an instant at such an offset.
 
 ```aether,run

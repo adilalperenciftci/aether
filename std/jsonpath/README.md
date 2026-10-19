@@ -1,13 +1,13 @@
 # aether-jsonpath
 
 [JSONPath](https://www.rfc-editor.org/rfc/rfc9535.html) for
-[Aether](https://github.com/aether-lang-dev/aether) — a query language for JSON,
+[Aether](https://github.com/aether-lang-dev/aether), a query language for JSON,
 the way XPath is one for XML.
 
 **Fully compliant with RFC 9535: 703/703 cases of the official
 [JSONPath Compliance Test Suite](https://github.com/jsonpath-standard/jsonpath-compliance-test-suite).**
 
-Ported from Boris Zhguchev's two prior implementations of the same RFC —
+Ported from Boris Zhguchev's two prior implementations of the same RFC:
 [jsonpath-rust](https://github.com/besok/jsonpath-rust) and
 [zig-jsonpath](https://github.com/besok/zig-jsonpath). The AST follows the Rust
 model, the recursive-descent parser follows the Zig one, and the cursor-list
@@ -91,9 +91,9 @@ Three entry points, mirroring jsonpath-rust's `query` / `query_only_path` /
 
 | Function | Returns |
 |---|---|
-| `query(root, path) -> ptr!` | `(results, err)` — values *and* normalized paths |
-| `query_values(root, path) -> ptr!` | `(list, err)` — borrowed JSON pointers |
-| `query_paths(root, path) -> ptr!` | `(list, err)` — normalized path strings |
+| `query(root, path) -> ptr!` | `(results, err)`: values *and* normalized paths |
+| `query_values(root, path) -> ptr!` | `(list, err)`: borrowed JSON pointers |
+| `query_paths(root, path) -> ptr!` | `(list, err)`: normalized path strings |
 | `query_ast(root, ast) -> ptr` | a result set for a previously parsed AST |
 
 Each returns the Go-style `(value, err)` pair Aether's stdlib uses throughout:
@@ -158,13 +158,13 @@ selected value, pass the borrowed pointer directly to
 
 Everything in RFC 9535:
 
-- **Segments** — child (`.name`, `[...]`) and descendant (`..`)
-- **Selectors** — name (`.name`, `['name']`, `["name"]`), wildcard (`*`),
+- **Segments**: child (`.name`, `[...]`) and descendant (`..`)
+- **Selectors**: name (`.name`, `['name']`, `["name"]`), wildcard (`*`),
   index (`[0]`, `[-1]`), slice (`[1:5:2]`, `[::-1]`), and filter (`[?...]`)
-- **Unions** — `[0, 2]`, `['a', 'b']`, mixed kinds
-- **Filters** — comparisons (`==` `!=` `<` `<=` `>` `>=`), logical operators
+- **Unions**: `[0, 2]`, `['a', 'b']`, mixed kinds
+- **Filters**: comparisons (`==` `!=` `<` `<=` `>` `>=`), logical operators
   (`&&`, `||`, `!`), grouping, existence tests, `@` (current) and `$` (root)
-- **Function extensions** — `length()`, `count()`, `value()`, `match()`,
+- **Function extensions**: `length()`, `count()`, `value()`, `match()`,
   `search()`, with the §2.4.3 well-typedness rules enforced at parse time
 - **Normalized paths** (§2.7) for every match
 
@@ -183,14 +183,14 @@ The suites live beside the module and run standalone; the CTS is the
 conformance gate. All four run as part of `make test-ae`:
 
 ```sh
-ae run std/jsonpath/test_conformance.ae  # 703/703 — the official RFC 9535 suite
-ae run std/jsonpath/test_parser.ae       # 34 specs — grammar, incl. negative cases
-ae run std/jsonpath/test_query.ae        # 51 specs — evaluation and ownership
+ae run std/jsonpath/test_conformance.ae  # 703/703: the official RFC 9535 suite
+ae run std/jsonpath/test_parser.ae       # 34 specs: grammar, incl. negative cases
+ae run std/jsonpath/test_query.ae        # 51 specs: evaluation and ownership
 ae run std/jsonpath/test_concurrency.ae  # parser reentrancy across actor workers
 ```
 
 The parser and query spec files use [`std.spec`](https://github.com/aether-lang-dev/aether/blob/main/std/spec/module.ae),
-Aether's mocha-style BDD framework — `describe` / `it` via trailing blocks and
+Aether's mocha-style BDD framework: `describe` / `it` via trailing blocks and
 closures:
 
 ```aether,fragment

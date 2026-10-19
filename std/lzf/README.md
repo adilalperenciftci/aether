@@ -2,13 +2,13 @@
 
 LZF compression: very fast, modest ratio.
 
-LZF trades compression ratio for speed — it is the algorithm to reach for when
+LZF trades compression ratio for speed: it is the algorithm to reach for when
 the cost of compressing must stay near the cost of copying, such as an
 in-memory cache or a value on its way to a socket you already know is the
 bottleneck. For archival or wire formats where size matters more, `std.zlib`
 compresses harder.
 
-**LZF refuses any input it cannot shrink.** Not a length floor — a
+**LZF refuses any input it cannot shrink.** Not a length floor: a
 compressibility one: `compress` returns an error rather than emitting a block
 larger than its input, so already-compressed or random data is declined. The
 error is opaque (`"lzf compress failed"`), so a caller feeding it arbitrary
@@ -36,7 +36,7 @@ compressed 36 -> 11 err=''
 round trip ok: 1 err=''
 ```
 
-`max_compressed_size(n)` gives the worst-case output bound, which exceeds `n` —
+`max_compressed_size(n)` gives the worst-case output bound, which exceeds `n`:
 useful for sizing a buffer, though this API allocates for you.
 
 ## Exports

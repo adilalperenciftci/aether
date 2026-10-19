@@ -3,7 +3,7 @@
 Hex, Base64, Base32 and CSV field splitting.
 
 Every encoder takes an explicit **length** alongside the data, because Aether
-strings are length-carrying and may contain NUL bytes — passing a length means
+strings are length-carrying and may contain NUL bytes: passing a length means
 a binary payload encodes correctly rather than stopping at the first zero.
 
 Decoders return `string!`, so a malformed input is a value you must handle

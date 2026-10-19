@@ -3,7 +3,7 @@
 A string-keyed map of pointers.
 
 Like `std.list`, it stores `ptr` and does not own the values. Rebinding a key
-replaces its value without growing the map, and does not free the old one —
+replaces its value without growing the map, and does not free the old one:
 that is the caller's, because the map never claimed it.
 
 A key is all of its bytes: two keys that differ only after an embedded NUL

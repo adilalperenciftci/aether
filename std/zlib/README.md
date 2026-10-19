@@ -3,7 +3,7 @@
 DEFLATE compression, in both the zlib and gzip framings.
 
 `deflate`/`inflate` use the zlib container; `gzip_deflate`/`gzip_inflate` use
-the gzip one. **They are not interchangeable** — feeding a raw deflate stream
+the gzip one. **They are not interchangeable**: feeding a raw deflate stream
 to `gzip_inflate` is an error rather than a silent misparse, which is what you
 want when the framing is decided by a `Content-Encoding` header.
 
@@ -32,7 +32,7 @@ main() {
         return
     }
 
-    // inflate does not need the original length — the zlib
+    // inflate does not need the original length: the zlib
     // container carries what it needs.
     back, blen, derr = zlib.inflate(string.bytes(packed)[0..plen])
     println("round trip ok: ${string.equals(back, src)} err='${derr}'")
@@ -47,7 +47,7 @@ whether or not the machine running it has the backend, and it is the shape a
 caller should copy.
 
 Every entry point returns `"zlib unavailable"` when the backend is absent, so
-an unchecked caller gets an error rather than a wrong result — but checking
+an unchecked caller gets an error rather than a wrong result, but checking
 `available()` once is clearer than threading that error through every call.
 
 Unlike `std.lzf`, deflating an incompressible input succeeds and simply
@@ -71,7 +71,7 @@ tail, n, err = zlib.stream_finish(s)        // at connection close
 zlib.stream_free(s)
 ```
 
-`stream_write` usually returns **0 bytes** — deflate buffers internally for
+`stream_write` usually returns **0 bytes**: deflate buffers internally for
 compression ratio. `stream_flush` is what emits a decodable boundary while
 keeping the window, so later events cost far less than the first: three
 repetitive events in the test compress to 34, 12 and 11 bytes. Emit whatever

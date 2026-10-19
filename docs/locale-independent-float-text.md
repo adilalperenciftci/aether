@@ -426,7 +426,7 @@ for a bug that sat unnoticed since #1429 merged.
 
 3. Provisioning note in `tests/cachyos/README.md`: uncomment `de_DE.UTF-8 UTF-8` in
    `/etc/locale.gen` and run `locale-gen` (Arch ships `glibc` with the locale *sources* present but
-   ungenerated: same as this dev box, verified: `locale -a` lists only C/C.utf8/en_US.utf8 while
+   ungenerated, the same as on this dev box, verified: `locale -a` lists only C/C.utf8/en_US.utf8 while
    `/usr/share/i18n/locales/de_DE` exists).
 
 The Aether-side test still SKIPs cleanly when the locale is absent (§4.3a): that keeps it harmless

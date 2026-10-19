@@ -3,8 +3,8 @@
 A BDD test framework: `describe`, `it`, hooks, assertions and structured
 reports.
 
-Aether's own `std` modules test themselves with it — every `std/<mod>/test_*.ae`
-is a `std.spec` suite — so the framework is exercised by the same runs that
+Aether's own `std` modules test themselves with it (every `std/<mod>/test_*.ae`
+is a `std.spec` suite), so the framework is exercised by the same runs that
 exercise the library.
 
 ```aether
@@ -40,7 +40,7 @@ arithmetic
 output with ANSI escapes, which do not belong in an asserted `output`
 block.)
 
-`run_summary` **returns** the verdict — `0` all-green, `1` if anything failed —
+`run_summary` **returns** the verdict (`0` all-green, `1` if anything failed),
 and you should `return` it from `main()`. A bare `main()` takes no return
 annotation (`main() -> int` is a parse error) and its return value becomes the
 process exit status, so the suite works as a test binary with no extra wiring.
@@ -62,7 +62,7 @@ does the most damage.
 ## Assertions
 
 `assert_eq` takes `int`. **Use `assert_eq_long` for anything wider than 32
-bits** — a `mem.get_long`, a u64 accessor, an IEEE 754 bit pattern. Narrowing
+bits**: a `mem.get_long`, a u64 accessor, an IEEE 754 bit pattern. Narrowing
 at the call boundary is not merely a wrong comparison: it has aborted the
 process on Windows while passing on Linux, where both truncated halves happened
 to agree.
@@ -82,7 +82,7 @@ the assertion that catches the day it stops.
 
 ## Hooks
 
-`before_each()` takes **no argument** — the context is injected by the
+`before_each()` takes **no argument**: the context is injected by the
 trailing-block mechanism. Passing `fw` explicitly registers the hook on the
 framework root instead of the enclosing `describe`, which silently means it
 never runs between the cases you meant it for.

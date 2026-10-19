@@ -2,7 +2,7 @@
 
 MessagePack: a binary serialisation format with JSON's data model.
 
-Same shapes as JSON — nil, bool, number, string, binary, array, map — encoded
+Same shapes as JSON (nil, bool, number, string, binary, array, map) encoded
 compactly. Small integers cost one byte, and there is a real `bin` type, so a
 byte payload does not need base64'ing the way it does in JSON.
 
@@ -38,7 +38,7 @@ freeing a container frees what it holds. `map_set` on a key the map already
 has frees the old value, unless it is the very value being set.
 
 `get_type` returns the type tag, so a reader dispatches on the wire type
-rather than assuming — the same discipline `std.json`'s `json_type` asks for.
+rather than assuming: the same discipline `std.json`'s `json_type` asks for.
 
 `unpack` treats its input as untrusted, and reads one value that must be
 the whole input. It refuses, with an error rather than a value:

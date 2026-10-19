@@ -2,7 +2,7 @@
 
 Dynamic library loading: `dlopen`, `dlsym`, `dlclose`.
 
-For plugins and optional dependencies — code that may or may not be present at
+For plugins and optional dependencies: code that may or may not be present at
 runtime, resolved by name rather than linked. If the library is a hard
 requirement, link it instead; this is for the cases where absence is a
 supported outcome.
@@ -37,7 +37,7 @@ main() {
 than the error string and worth logging when a load fails unexpectedly.
 
 A resolved symbol is a raw `ptr`. Calling it requires a matching signature at
-the call site, and Aether cannot check that for you — a mismatch is undefined
+the call site, and Aether cannot check that for you: a mismatch is undefined
 behaviour rather than a type error, so this is one of the few places where the
 compiler is not covering you.
 

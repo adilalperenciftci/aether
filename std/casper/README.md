@@ -2,7 +2,7 @@
 
 FreeBSD Casper: services that survive entering capability mode.
 
-Capsicum's capability mode forbids opening anything by name — which also
+Capsicum's capability mode forbids opening anything by name, which also
 forbids DNS resolution and password-database lookups, since both open files.
 Casper is the answer: a helper process, forked **before** the sandbox closes,
 that performs those lookups on the sandboxed process's behalf over an existing
@@ -21,7 +21,7 @@ main() {
         return
     }
 
-    // init BEFORE entering capability mode — afterwards is too late.
+    // init BEFORE entering capability mode; afterwards is too late.
     ok = casper.init()
     println("init: ${ok}")
 }

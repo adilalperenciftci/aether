@@ -14,7 +14,7 @@ the channel, and outside one `parent_channel` reports that there is none.
 import std.ipc
 
 main() {
-    // A bare fd, or negative when there is no channel — not being
+    // A bare fd, or negative when there is no channel; not being
     // spawned with one is a normal outcome, not an error.
     ch = ipc.parent_channel()
     if ch < 0 {

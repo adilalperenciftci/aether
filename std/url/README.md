@@ -3,7 +3,7 @@
 Percent-encoding and query-string parsing, matching Go's `net/url` semantics.
 
 Three encoders, because the correct escaping depends on where the text is
-going. Using the wrong one is a real bug and a quiet one — a `+` that should
+going. Using the wrong one is a real bug and a quiet one: a `+` that should
 have been `%2B` round-trips fine through a lenient server and corrupts a
 signature.
 
@@ -24,7 +24,7 @@ main() {
     // Path segment: space -> %20, because '+' means '+' in a path.
     println(url.encode_path("a/b c"))
 
-    // decode returns (value, err) — err is "" on success.
+    // decode returns (value, err); err is "" on success.
     decoded, err = url.decode("a%20b")
     println("${decoded} err='${err}'")
 }
