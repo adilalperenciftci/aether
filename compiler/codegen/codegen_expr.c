@@ -6589,6 +6589,143 @@ static void emit_closure_argument(CodeGenerator* gen, ASTNode* arg, Type* pt) {
     generate_sized_array_argument(gen, arg, pt);
 }
 
+/* ---- #2847: a call through an erased `fn` ------------------------------
+ *
+ * A bare `fn` carries no parameter types, so `call(f, 5)` passes the 5 as
+ * the int it is, through a function type built from the arguments. A
+ * closure whose parameter is an `int?`, a `Shape` given a Circle, or a
+ * `float` given an int, then read its argument from the wrong place: an
+ * `int?` saw 0 for 5, a sum's optional crashed. The closure value does
+ * carry its parameter types, in the function its `.fn` points at: every
+ * closure literal of the program and every function used as a value has
+ * one known here. So the call compares `.fn` with each of them whose
+ * parameters take these arguments only coerced (wrapped into an optional
+ * or a sum, converted between numbers), and calls a match through its own
+ * signature with the arguments coerced, as a call to the literal is
+ * (#2840). Any other closure, C's among them, is called as before. */
+
+static int erased_scalar_kind(TypeKind k) {
+    return k == TYPE_INT || k == TYPE_INT64 || k == TYPE_UINT64 || k == TYPE_UINT32 ||
+           k == TYPE_UINT16 || k == TYPE_UINT8 || k == TYPE_BYTE || k == TYPE_FLOAT ||
+           k == TYPE_FLOAT32 || k == TYPE_LONGDOUBLE || k == TYPE_BOOL || k == TYPE_ENUM;
+}
+
+/* How an argument of type `a` reaches a parameter of type `p`: 0 as it is
+ * (the same C type, or a type not known), 1 only coerced, -1 not at all. */
+static int erased_arg_fit(Type* a, Type* p) {
+    if (!a || !p || a->kind == TYPE_UNKNOWN || p->kind == TYPE_UNKNOWN) return 0;
+    if (strcmp(cg_intern(get_c_type(a)), cg_intern(get_c_type(p))) == 0) return 0;
+    if (p->kind == TYPE_OPTIONAL && a->kind != TYPE_OPTIONAL && p->element_type)
+        return erased_arg_fit(a, p->element_type) < 0 ? -1 : 1;
+    if (p->kind == TYPE_SUM && a->kind == TYPE_STRUCT && a->struct_name) {
+        for (int i = 0; p->tuple_types && i < p->tuple_count; i++)
+            if (p->tuple_types[i] && p->tuple_types[i]->struct_name &&
+                strcmp(p->tuple_types[i]->struct_name, a->struct_name) == 0)
+                return 1;
+        return -1;
+    }
+    if (erased_scalar_kind(a->kind) && erased_scalar_kind(p->kind)) return 1;
+    return -1;
+}
+
+/* The arguments of `call(f, args...)`, the trailing DSL block left out. */
+static int erased_call_args(ASTNode* call, ASTNode** out, int cap) {
+    int n = 0;
+    for (int i = 1; i < call->child_count; i++) {
+        ASTNode* a = call->children[i];
+        if (a && a->type == AST_CLOSURE && a->value && strcmp(a->value, "trailing") == 0) continue;
+        if (n >= cap) return -1;
+        out[n++] = a;
+    }
+    return n;
+}
+
+/* One target the erased call may reach: its C function `sym`, parameter
+ * types `ps` and C result `rc`. When the call's arguments reach it only
+ * coerced, writes `((f.fn == sym) ? <its call> : ` and returns 1. A call
+ * whose value is not used (`is_void`) takes any result, each branch cast
+ * to void; one whose value is used, only the C type it reads. */
+static int erased_dispatch_branch(CodeGenerator* gen, ASTNode* call, ASTNode* f,
+                                  const char* ret, int is_void, const char* sym, Type** ps,
+                                  int np, const char* rc) {
+    ASTNode* args[16];
+    int na = erased_call_args(call, args, 16);
+    if (na < 0 || na != np || !rc) return 0;
+    if (!is_void && strcmp(rc, ret) != 0) return 0;
+    int coerced = 0;
+    for (int i = 0; i < na; i++) {
+        /* A `T[N]` parameter is declared as its own array, which no cast
+         * below spells. */
+        if (is_sized_array_param(ps[i])) return 0;
+        int fit = erased_arg_fit(args[i] ? args[i]->node_type : NULL, ps[i]);
+        if (fit < 0) return 0;
+        if (fit > 0) coerced = 1;
+    }
+    if (!coerced) return 0;
+    fprintf(gen->output, "((");   /* the second closes the test; the first, after the plain call */
+    generate_expression(gen, f);
+    fprintf(gen->output, ".fn == (void(*)(void))%s) ? %s((%s(*)(void*", sym,
+            is_void ? "(void)" : "", rc);
+    for (int i = 0; i < np; i++) fprintf(gen->output, ", %s", get_c_type(ps[i]));
+    fprintf(gen->output, "))");
+    generate_expression(gen, f);
+    fprintf(gen->output, ".fn)(");
+    generate_expression(gen, f);
+    fprintf(gen->output, ".env");
+    for (int i = 0; i < na; i++) {
+        fprintf(gen->output, ", ");
+        emit_closure_argument(gen, args[i], ps[i]);
+    }
+    fprintf(gen->output, ") : ");
+    return 1;
+}
+
+static const char* resolve_closure_return_type(CodeGenerator* gen, int ci);
+
+/* The branches of the erased call `call` for every closure literal and
+ * function value of the program it may reach only with its arguments
+ * coerced, each opening a `?:`; returns how many, which the caller closes
+ * after the plain call. `f` is read once per branch, so only a name, a
+ * field of one, or the temporary a closure the call owns was taken into
+ * (`call(make(), ...)`) is dispatched on. */
+static int emit_erased_call_dispatch(CodeGenerator* gen, ASTNode* call, ASTNode* f,
+                                     const char* ret, int is_void) {
+    ASTNode* base = f;
+    while (base && base->type == AST_MEMBER_ACCESS && base->child_count > 0) base = base->children[0];
+    if (!arg_drain_lookup(f) && (!base || base->type != AST_IDENTIFIER)) return 0;
+    int n = 0;
+    for (int cj = 0; cj < gen->closure_count; cj++) {
+        ASTNode* lit = gen->closures[cj].closure_node;
+        if (!lit || lit->type != AST_CLOSURE) continue;
+        Type* ps[16];
+        int np = 0, over = 0;
+        for (int k = 0; k < lit->child_count; k++) {
+            ASTNode* p = lit->children[k];
+            if (!p || p->type != AST_CLOSURE_PARAM) continue;
+            if (np >= 16) { over = 1; break; }
+            ps[np++] = p->node_type;
+        }
+        if (over) continue;
+        const char* sym = cg_internf("_closure_fn_%d", gen->closures[cj].id);
+        n += erased_dispatch_branch(gen, call, f, ret, is_void, sym, ps, np,
+                                    cg_intern(resolve_closure_return_type(gen, cj)));
+    }
+    for (int a = 0; gen->program && a < gen->bare_fn_adapter_declared; a++) {
+        const char* name = gen->bare_fn_adapter_names[a];
+        ASTNode* fdef = find_function_definition_by_name(gen->program, name);
+        if (!fdef) continue;
+        int np = fn_param_count(fdef);
+        if (np > 16) continue;
+        Type* ps[16];
+        for (int k = 0; k < np; k++) ps[k] = fn_param_type_at(gen, fdef, k);
+        Type* rt = fn_result_type(gen, fdef);
+        n += erased_dispatch_branch(gen, call, f, ret, is_void,
+                                    cg_internf("_aether_bare_adapter_%s", name), ps, np,
+                                    cg_intern(rt ? get_c_type(rt) : "void"));
+    }
+    return n;
+}
+
 /* The builder call emit_builder_call is emitting, and the C name of the
  * config its block filled: the call's last argument, `(void*)0` for any
  * other builder call. */
@@ -9662,6 +9799,14 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                             ad.idx[ad.count++] = 0;
                         }
                         arg_drain_open(gen, expr, &ad);
+                        /* #2847: with no parameter types to coerce to, the
+                         * closures this call reaches only coerced are
+                         * called through their own. */
+                        int erased = !closure_sig || closure_sig->param_count == 0;
+                        int as_void = !ad.have_value || ad_call_discarded;
+                        int dispatched = erased ? emit_erased_call_dispatch(gen, expr, closure_arg,
+                                                                            ret, as_void) : 0;
+                        if (dispatched && as_void) fprintf(gen->output, "(void)");
                         fprintf(gen->output, "((%s(*)(void*", ret);
                         int sig_pi = 0;
                         for (int i = 1; i < expr->child_count; i++) {
@@ -9708,6 +9853,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                             else generate_sized_array_argument(gen, arg, arg ? arg->node_type : NULL);
                         }
                         fprintf(gen->output, ")");
+                        for (int d = 0; d < dispatched; d++) fprintf(gen->output, ")");
                         arg_drain_close(gen, expr, &ad);
                     }
                 }

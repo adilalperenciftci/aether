@@ -503,8 +503,16 @@ let o: string? = none
 r = call(f, o)
 ```
 
-A bare value or a variant given to an optional or sum parameter through an
-erased call is still passed unwrapped; that is #2847.
+A bare value, a variant or a number given through an erased call to a
+parameter that takes it only coerced (an optional's, a sum's, a number of
+another type) is coerced as a direct call coerces it (#2847). The function
+a closure value points at still has the parameter types: the call compares
+the closure's function with each closure literal and function value of the
+program whose parameters take these arguments only coerced, and calls the
+one it is through its own signature, the arguments wrapped or converted, so
+`call(f, 5)` into `|o: int?|` sees 5 and a Circle into `|o: Shape?|` is the
+Shape. A closure the program did not compile (one C hands back) is called
+with the arguments as they are.
 
 **Proper fix:** parameterised closure types (`fn[T]`, like Rust's
 `Fn(i32) -> i32`), so the signature survives the boundary and no annotation

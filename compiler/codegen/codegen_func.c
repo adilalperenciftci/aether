@@ -532,6 +532,7 @@ void emit_bare_fn_adapter_decls(CodeGenerator* gen) {
             fprintf(gen->output, ";\n");
         }
     }
+    gen->bare_fn_adapter_declared = gen->bare_fn_adapter_count;
 }
 
 /* Emit `_aether_bare_adapter_<name>(void* env, args) -> R` for every

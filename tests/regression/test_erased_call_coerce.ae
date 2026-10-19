@@ -1,0 +1,108 @@
+// A call through an erased `fn` passed its arguments as they were: a bare
+// `fn` has no parameter types, so `call(f, 5)` into `|o: int?|` handed the
+// closure an int where it read an optional (it saw 0, not 5), a Circle into
+// `|o: Shape?|` or `|s: Shape|` crashed, and an int into `|x: float|` read
+// 0.0. The closure's own function carries its parameter types, so the call
+// now compares `.fn` with each closure literal and function value of the
+// program whose parameters take these arguments only coerced, and calls a
+// match through its own signature with the arguments wrapped or converted.
+// This test calls each shape through a `fn` parameter, a struct field, a
+// local holding a returned closure, a returned closure called at once, a
+// statement call, and `f(...)` written directly.
+
+extern exit(code: int)
+
+struct Circle {
+    r: float
+}
+
+struct Rect {
+    w: float
+    h: float
+}
+
+type Shape = Circle | Rect
+
+struct Holder {
+    cb: fn
+}
+
+fn check(ok: bool, what: string) {
+    if !ok {
+        println("FAIL: ${what}")
+        exit(1)
+    }
+}
+
+var seen: float = 0.0
+
+named(o: int?) -> int {
+    return o ?? 3
+}
+
+apply(f: fn) -> int {
+    return call(f, 5)
+}
+
+direct(f: fn) -> int {
+    return f(6)
+}
+
+applyf(f: fn) -> float {
+    return call(f, 5)
+}
+
+shape(f: fn) -> int {
+    return call(f, Circle { r: 1.0 })
+}
+
+through_field(h: Holder) -> int {
+    return call(h.cb, 9)
+}
+
+shaper() -> fn {
+    return | o: Shape?| {
+        if o == none {
+            return 0
+        }
+        return 2
+    }
+}
+
+record(f: fn) {
+    call(f, Rect { w: 2.0, h: 3.0 })
+}
+
+passes_optional(f: fn) -> int {
+    let o: int? = 4
+    return call(f, o)
+}
+
+main() {
+    g = | o: int?| {
+        return o ?? 7
+    }
+    fl = | x: float | {
+        return x * 2.0
+    }
+    check(apply(g) == 5, "an int into an int? parameter")
+    check(direct(g) == 6, "f(6) through a bare fn")
+    check(direct(named) == 6, "a named function's int? parameter")
+    check(applyf(fl) == 10.0, "an int into a float parameter")
+    check(shape(shaper()) == 2, "a Circle into a Shape? parameter")
+    k = shaper()
+    check(call(k, Circle { r: 1.0 }) == 2, "a returned closure held in a local")
+    check(call(shaper(), Rect { w: 1.0, h: 2.0 }) == 2, "a returned closure called at once")
+    check(through_field(Holder { cb: g }) == 9, "a closure in a struct field")
+    check(passes_optional(g) == 4, "an optional into an int? parameter, as it is")
+    s = | o: Shape | {
+        let a: float = match o {
+            Circle -> o.r
+            Rect -> o.w * o.h
+        }
+        seen = a
+    }
+    record(s)
+    check(seen == 6.0, "a Rect into a Shape parameter, from a statement call")
+    println("ok")
+}

@@ -484,6 +484,9 @@ typedef struct {
     char** bare_fn_adapter_names;
     int    bare_fn_adapter_count;
     int    bare_fn_adapter_capacity;
+    /* #2847: how many of them have a prototype ahead of the functions
+     * (emit_bare_fn_adapter_decls), so an erased call may name them. */
+    int    bare_fn_adapter_declared;
     /* #2478: what calling each function of the program can change (a module
      * global, memory a parameter reaches), memoised per definition by
      * order_fn_effects in codegen_expr.c. */
