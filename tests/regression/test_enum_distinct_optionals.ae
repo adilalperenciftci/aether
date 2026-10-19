@@ -1,0 +1,71 @@
+// An optional of an enum or of a distinct type was refused for a local and
+// a field store, "Type mismatch in variable initialization" for `let a:
+// Color? = Color.Blue`, while a struct literal's field took the same value.
+// The checker's enum and distinct rules decided before its optional rule
+// was reached, and they hold an enum or a distinct type to its own kind,
+// so the wrap into the optional of that same type was refused. The optional
+// rule is now first and leaves the inner types to them. This test binds,
+// stores, passes, returns, defaults and matches an enum optional and a
+// distinct-int one, and checks what each holds.
+
+enum Color { Red, Blue }
+
+type Meters = distinct int
+
+struct Box {
+    c: Color?
+    m: Meters?
+}
+
+show(c: Color?) -> string {
+    return match c {
+        none -> "none"
+        some(v) -> if v == Color.Red { "red" } else { "blue" }
+    }
+}
+
+dist(m: Meters?) -> int {
+    let d: Meters = m ?? (0 as Meters)
+    return d as int
+}
+
+pick(n: int) -> Color? {
+    if n > 0 {
+        return Color.Red
+    }
+    return none
+}
+
+expect(label: string, got: string, want: string) {
+    if got != want {
+        println("${label}: got ${got}, want ${want}")
+        exit(1)
+    }
+}
+
+main() {
+    let a: Color? = Color.Blue
+    b = Box { c: Color.Blue, m: 5 as Meters }
+    expect("literal field", show(b.c), "blue")
+    b.c = Color.Red
+    let m: Meters? = 7 as Meters
+    let n: Color? = none
+    expect("local", show(a), "blue")
+    expect("store", show(b.c), "red")
+    expect("none local", show(n), "none")
+    expect("bare argument", show(Color.Red), "red")
+    expect("returned", show(pick(1)), "red")
+    expect("returned none", show(pick(0)), "none")
+    expect("literal distinct field", "${dist(b.m)}", "5")
+    b.m = m
+    expect("distinct local", "${dist(m)}", "7")
+    expect("distinct store", "${dist(b.m)}", "7")
+    expect("distinct none", "${dist(none)}", "0")
+    expect("distinct argument", "${dist(3 as Meters)}", "3")
+    c = a ?? Color.Red
+    expect("default", "${c == Color.Blue}", "true")
+    if a != none {
+        expect("narrowed", "${a == Color.Blue}", "true")
+    }
+    println("ok")
+}

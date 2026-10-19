@@ -2704,6 +2704,24 @@ int is_type_compatible(Type* from, Type* to) {
     // Unknown types match anything (for inference)
     if (from->kind == TYPE_UNKNOWN || to->kind == TYPE_UNKNOWN) return 1;
 
+    // #340 optionals. Assigning INTO a `T?`:
+    //   - `none` (optional with unknown inner) fits any optional;
+    //   - `U?` fits `T?` when inner U is compatible with inner T;
+    //   - a bare `U` implicitly WRAPS into `T?` when U is compatible with T.
+    // There is no implicit UNWRAP (`T?` -> `T`): the user must write `!` or
+    // `??`, so no rule for `from->kind == TYPE_OPTIONAL && to non-optional`.
+    // #2831: ahead of the nominal rules below, which decide for the inner
+    // types here. Behind them, a distinct type's or an enum's rule refused
+    // the optional of the same type, `let c: Color? = Color.Blue`, which a
+    // struct literal's field took.
+    if (to->kind == TYPE_OPTIONAL) {
+        if (from->kind == TYPE_OPTIONAL) {
+            if (!from->element_type || from->element_type->kind == TYPE_UNKNOWN) return 1;
+            return is_type_compatible(from->element_type, to->element_type);
+        }
+        return is_type_compatible(from, to->element_type);
+    }
+
     // #480 distinct types: a distinct type converts to/from any other type
     // ONLY via an explicit `as` cast — never implicitly, even when the base
     // `kind` matches. So if either side is distinct, they are compatible only
@@ -2927,20 +2945,6 @@ int is_type_compatible(Type* from, Type* to) {
                 strcmp(vt->struct_name, from->struct_name) == 0) return 1;
         }
         return 0;
-    }
-
-    // #340 optionals. Assigning INTO a `T?`:
-    //   - `none` (optional with unknown inner) fits any optional;
-    //   - `U?` fits `T?` when inner U is compatible with inner T;
-    //   - a bare `U` implicitly WRAPS into `T?` when U is compatible with T.
-    // There is no implicit UNWRAP (`T?` -> `T`): the user must write `!` or
-    // `??`, so no rule for `from->kind == TYPE_OPTIONAL && to non-optional`.
-    if (to->kind == TYPE_OPTIONAL) {
-        if (from->kind == TYPE_OPTIONAL) {
-            if (!from->element_type || from->element_type->kind == TYPE_UNKNOWN) return 1;
-            return is_type_compatible(from->element_type, to->element_type);
-        }
-        return is_type_compatible(from, to->element_type);
     }
 
     return 0;
