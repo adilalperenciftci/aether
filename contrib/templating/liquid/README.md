@@ -1,4 +1,4 @@
-# `contrib.templating.liquid` — Shopify Liquid for Aether
+# `contrib.templating.liquid`: Shopify Liquid for Aether
 
 A pure-Aether port of the [Liquid template language](https://shopify.github.io/liquid/).
 Sandbox-friendly: no reflection, no eval, the filter and tag set is
@@ -119,11 +119,11 @@ Literals: `"string"` / `'string'`, `42`, `3.7`, `-5`, `true`, `false`, `nil` /
 
 ### Tags
 
-- `{% if cond %}` / `{% elsif cond %}` / `{% else %}` / `{% endif %}` —
+- `{% if cond %}` / `{% elsif cond %}` / `{% else %}` / `{% endif %}`,
   with `==` `!=` `<` `>` `<=` `>=`, `and` `or`, and `contains`.
-- `{% unless cond %}` / `{% endunless %}` — inverted `if`.
-- `{% case x %}{% when v, w %}…{% else %}…{% endcase %}` — pattern match.
-- `{% for x in SOURCE %}…{% else %}…{% endfor %}` — SOURCE is a range
+- `{% unless cond %}` / `{% endunless %}`: inverted `if`.
+- `{% case x %}{% when v, w %}…{% else %}…{% endcase %}`: pattern match.
+- `{% for x in SOURCE %}…{% else %}…{% endfor %}`: SOURCE is a range
   `(lo..hi)` (inclusive; the bounds may be variables), an array, an object
   (iterated as `[key, value]` pairs, in key order), or a string, iterated
   once as itself. nil and an empty collection iterate zero times, and the
@@ -131,27 +131,27 @@ Literals: `"string"` / `'string'`, `42`, `3.7`, `-5`, `true`, `false`, `nil` /
   variable) and `reversed` slice the source; `forloop.index` / `index0` /
   `rindex` / `rindex0` / `first` / `last` / `length` / `name`, and
   `forloop.parentloop` in a nested loop, are bound inside.
-- `{% break %}` / `{% continue %}` — for-body control flow.
-- `{% assign name = expr %}` — bind a name in the context (full filter
+- `{% break %}` / `{% continue %}`: for-body control flow.
+- `{% assign name = expr %}`: bind a name in the context (full filter
   chain on the right; an array stays an array).
-- `{% capture name %}…{% endcapture %}` — render the block to a
+- `{% capture name %}…{% endcapture %}`: render the block to a
   string and assign it.
-- `{% increment x %}` / `{% decrement x %}` — Shopify counters,
+- `{% increment x %}` / `{% decrement x %}`: Shopify counters,
   namespace independent from `assign`.
-- `{% cycle 'a', 'b', 'c' %}` — anonymous and named-group lockstep.
-- `{% tablerow %}` — HTML-table iterator over the same sources as `for`,
+- `{% cycle 'a', 'b', 'c' %}`: anonymous and named-group lockstep.
+- `{% tablerow %}`: HTML-table iterator over the same sources as `for`,
   with `cols` / `limit` / `offset` / `reversed`.
-- `{% comment %}` / `{% endcomment %}` — body suppressed.
-- `{% raw %}` / `{% endraw %}` — body emitted verbatim (no
+- `{% comment %}` / `{% endcomment %}`: body suppressed.
+- `{% raw %}` / `{% endraw %}`: body emitted verbatim (no
   interpolation).
-- `{%# inline comment %}` — Shopify's single-tag comment form.
-- `{% liquid %}` — line-per-tag block form.
+- `{%# inline comment %}`: Shopify's single-tag comment form.
+- `{% liquid %}`: line-per-tag block form.
 - `{{- … -}}` / `{%- … -%}` whitespace control on adjacent text
   tokens, symmetric on comment/raw open and close edges.
 
 ### Includes & layouts
 
-- `{% include 'partial' %}` and `{% render 'partial', key: value %}` —
+- `{% include 'partial' %}` and `{% render 'partial', key: value %}`:
   read a partial from a configurable root, parse it, render it inline.
   `include` shares the caller's context; `render` gets a fresh one holding
   just its arguments (an array or object argument included).
@@ -159,12 +159,12 @@ Literals: `"string"` / `'string'`, `42`, `3.7`, `-5`, `true`, `false`, `nil` /
   before render or an error is raised. Path traversal escapes are
   rejected via `std.fs.is_within_base`. Depth-limited at 100 to
   prevent infinite-include recursion.
-- `{% layout 'parent' %}` + `{% block name %}…{% endblock %}` —
+- `{% layout 'parent' %}` + `{% block name %}…{% endblock %}`:
   Jekyll-style template inheritance, to any depth: a layout may itself have
   a layout. The most derived template that defines a block supplies it, and
   a cycle is an error.
-- `{% extends 'parent' %}` — Django/Jinja alias for `{% layout %}`.
-- `{{ block.super }}` — inside a block override, emits the same block as
+- `{% extends 'parent' %}`: Django/Jinja alias for `{% layout %}`.
+- `{{ block.super }}`: inside a block override, emits the same block as
   the next template up the chain defines it (its own `block.super`
   included).
 
@@ -211,36 +211,36 @@ The array filters read their input as Liquid's `InputIterator` does: an
 array is its elements with nested arrays flattened into them, nil is no
 elements, and any other value is the one element.
 
-- `split: pattern` — Ruby's `String#split`: a single space splits on runs
+- `split: pattern`, as Ruby's `String#split`: a single space splits on runs
   of whitespace, the empty pattern into characters, and empty strings at
   the end are dropped (`"a,b,," | split: ","` is `["a", "b"]`).
-- `join: sep` — the elements' text, `" "` between them by default.
-- `first` / `last` — an array's first and last element, a string's first
+- `join: sep`: the elements' text, `" "` between them by default.
+- `first` / `last`: an array's first and last element, a string's first
   and last character, an object's first `[key, value]` pair.
-- `size` — an array's length, an object's key count, a string's length in
+- `size`: an array's length, an object's key count, a string's length in
   bytes.
-- `reverse` — an array reversed; a string's bytes reversed.
-- `sort` / `sort_natural` (optionally `: "property"` to sort objects by) —
+- `reverse`: an array reversed; a string's bytes reversed.
+- `sort` / `sort_natural` (optionally `: "property"` to sort objects by):
   numbers as numbers and strings byte by byte, nil last; sort_natural by
   text, ignoring case. Numbers mixed with strings, and booleans, arrays or
   objects, cannot be sorted, and `sort` says so as Liquid does.
-- `uniq` (optionally `: "property"`) — the first of each set of equal
+- `uniq` (optionally `: "property"`): the first of each set of equal
   elements; `1` and `"1"` stay two.
-- `map: "property"` — each object's value for the property.
-- `where: "property", value` — the objects whose property equals value;
+- `map: "property"`: each object's value for the property.
+- `where: "property", value`: the objects whose property equals value;
   `where: "property"` keeps those whose property is true.
-- `compact` (optionally `: "property"`) — drops nil elements.
-- `concat: array` — the elements of both; an argument that is not an
+- `compact` (optionally `: "property"`): drops nil elements.
+- `concat: array`: the elements of both; an argument that is not an
   array is an error.
 
 `default: value` gives `value` for nil, false (unless `allow_false: true`),
 an empty array or object, and the empty string. For a string it also fires
-on `"false"`, `"nil"` and `"null"` when `allow_false` is `"true"` — how
+on `"false"`, `"nil"` and `"null"` when `allow_false` is `"true"`: how
 the string-typed context has always spelt a missing value.
 
-`date: format` reads its input as a time — an ISO-8601 date or date-time
+`date: format` reads its input as a time (an ISO-8601 date or date-time
 (`2024-01-02`, `2024-01-02T10:20:30Z`, `2024-01-02 10:20:30 +0530`), a
-Unix timestamp (an integer, or a string of digits), or `now` / `today` —
+Unix timestamp (an integer, or a string of digits), or `now` / `today`),
 and writes it through Ruby's `strftime` pattern: `%Y %m %d %H %M %S`, the
 names `%B %b %A %a`, `%j %e %I %l %p`, the offset `%z` / `%:z`, `%Z`, ISO
 weeks `%V %G`, `%s`, the combinations `%F %T %D %c`, and Ruby's flags
@@ -345,13 +345,13 @@ an explicit root directory; partials resolved against that root are
 checked with `std.fs.is_within_base` so an attacker-supplied filename
 like `'../../etc/passwd'` is rejected.
 
-The context's own state — the include root and depth, the counters and
-cycles, the partial cache, the value store — sits under keys that start with a
+The context's own state (the include root and depth, the counters and
+cycles, the partial cache, the value store) sits under keys that start with a
 control character, which the lexer refuses inside a tag, so a template can
 neither read nor write it.
 
 Under `--emit=lib`, `import contrib.templating.liquid` requires
-`--with=fs` — the module transitively imports `std.fs`, and Aether's
+`--with=fs`: the module transitively imports `std.fs`, and Aether's
 import gate refuses the transitive dependency without explicit
 opt-in. So a host that links your `.so` and embeds Liquid renders
 is making an explicit acknowledgement that its filesystem surface
@@ -364,7 +364,7 @@ clock, so it does not import `std.os`. Verified by
 
 - Parsing is single-pass over a token stream; render walks the tokens
   with no AST allocation per render.
-- Strings are `std.string` (refcounted heap strings); the renderer
+- Strings are Aether strings (counted, released by the compiler); the renderer
   uses `std.strbuilder` for output accumulation so output assembly
   is O(N).
 - A value is a packed string: a kind letter and a colon in front of its

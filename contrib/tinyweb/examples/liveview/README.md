@@ -1,7 +1,7 @@
 # LiveView-lite spike
 
-A proof that Phoenix-LiveView's core loop — `mount → handle_event → render →
-push` — works on Aether's own primitives (tinyweb WebSocket + per-connection
+A proof that Phoenix-LiveView's core loop (`mount → handle_event → render →
+push`) works on Aether's own primitives (tinyweb WebSocket + per-connection
 state), with **no** `~H` template-diff compiler and **no** JS framework.
 
 This is a *spike*, not the library. The staged plan for turning it into a real
@@ -10,11 +10,11 @@ This is a *spike*, not the library. The staged plan for turning it into a real
 
 ## Files
 
-- `example_counter_live.ae` — the server. Drives `tinyweb.ws_accept_loop` directly
+- `example_counter_live.ae`: the server. Drives `tinyweb.ws_accept_loop` directly
   (WS-only) rather than through `tw_start`; see the roadmap's "structural
   blocker" section for why. Per-connection count kept server-side, keyed by the
   connection's socket ptr.
-- `drive_live.py` — a Python `websocket-client` driver that asserts the loop:
+- `drive_live.py`: a Python `websocket-client` driver that asserts the loop:
   `mount → 0, inc → 1, inc → 2, dec → 1, reset → 0`.
 
 ## Run it

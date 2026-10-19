@@ -1,4 +1,4 @@
-# contrib.host.aether — Aether-hosts-Aether Sandbox
+# contrib.host.aether: Aether-hosts-Aether Sandbox
 
 Run Aether scripts as sandboxed subprocesses from an Aether host
 application.  The child process is compiled to a native binary and
@@ -7,7 +7,7 @@ launched with `LD_PRELOAD=libaether_sandbox.so` so its libc calls
 grant list.
 
 Unlike the Lua/Python/Ruby host modules which embed an interpreter
-in-process, this module launches a **separate process** — because
+in-process, this module launches a **separate process**, because
 Aether is compiled, not interpreted.
 
 ## How it differs from other host modules
@@ -63,7 +63,7 @@ map, token = shared_map_new()
 shared_map_put(map, "sku", "WIDGET-1")
 shared_map_put(map, "quantity", "5")
 
-// Run script — it reads inputs via aether_map_get("sku")
+// Run script: it reads inputs via aether_map_get("sku")
 // and writes outputs via aether_map_put("result", "...")
 worker = sandbox.new("worker") { grant_env("AETHER_MAP_SHM") }
 aether.run_script_sandboxed_with_map(worker, "rules/pricing.ae", token)
@@ -79,19 +79,19 @@ shared_map_free(map)
 | Variable | Purpose |
 |---|---|
 | `AETHER_AE_PATH` | Path to `ae` compiler (default: `ae` on PATH) |
-| `AETHER_SANDBOX_SHM` | Set on child — POSIX shm name for grants |
-| `AETHER_MAP_SHM` | Set on child — shared memory name for map I/O |
+| `AETHER_SANDBOX_SHM` | Set on child: POSIX shm name for grants |
+| `AETHER_MAP_SHM` | Set on child: shared memory name for map I/O |
 
 The grant list is serialized to POSIX shared memory by
 `aether_spawn_sandboxed()` (in `runtime/aether_spawn_sandboxed.c`)
 and read by `libaether_sandbox.so` at child startup.  No env-var
-encoding of grants — the same mechanism used by all host modules.
+encoding of grants: the same mechanism used by all host modules.
 
 ## Security model
 
 The **facade** is the security boundary: the child process can only
 do what the grant list allows.  `LD_PRELOAD` enforces this at the
-libc level — `connect()`, `open()`, `execve()`, `getenv()` are all
+libc level: `connect()`, `open()`, `execve()`, `getenv()` are all
 intercepted.
 
 `hide`/`seal except` within the hosted script is author-side hygiene
@@ -128,4 +128,4 @@ to an empty stub, and the discovery phase skips it.
 - [ ] Pre-compiled binary caching (avoid recompiling unchanged scripts)
 - [ ] Wall-clock timeout (kill child after N ms)
 - [ ] Allocation budget (rlimit on child process)
-- [ ] Windows support (no LD_PRELOAD — needs alternative containment)
+- [ ] Windows support (no LD_PRELOAD: needs alternative containment)

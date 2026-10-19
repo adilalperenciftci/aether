@@ -1,8 +1,8 @@
-# `contrib.templating.native` — escape-correct HTML emission
+# `contrib.templating.native`: escape-correct HTML emission
 
 Templating as plain Aether code, no template DSL. The output format
 and the escape rules live in the helper functions, not in the
-template syntax — so an HTML template author physically cannot
+template syntax, so an HTML template author physically cannot
 produce un-escaped user content in an attribute.
 
 This is the inverse of [`contrib.templating.liquid`](../liquid/),
@@ -31,7 +31,7 @@ out = native.render_html() {
 
 The `for` is a *real Aether `for` loop*, not a re-implementation
 inside a templating engine. Same with `if`, `switch`, `${...}`
-interpolation, ref-cells, closures — everything you'd write
+interpolation, ref-cells, closures: everything you'd write
 anywhere else in Aether is in scope and behaves identically. The
 only DSL bits are `render_html`, `tag`, `text`, and `raw`.
 
@@ -41,12 +41,12 @@ Surface:
 render_html() { ... }            // returns the rendered string
 tag(name) { ... }                // emit <name>BODY</name>; BODY is the block
 text(s)                          // append HTML-escaped (5 entities)
-raw(s)                           // append verbatim — trusted markup only
+raw(s)                           // append verbatim; trusted markup only
 ```
 
 **Note the parentheses on `render_html()` and `tag(...)`.** Aether's
 trailing-block syntax attaches a block to a call site only when the
-call has parentheses — `render_html { ... }` (no parens) parses as
+call has parentheses: `render_html { ... }` (no parens) parses as
 "function reference, then unrelated block" and is a silent typing
 error. `render_html() { ... }` parses correctly.
 
@@ -91,7 +91,7 @@ lifts into child elements (`<item><name>x</name></item>` rather than
 `<item name="x"/>`) or uses `xml_raw` to write a hand-built tag.
 Adding `xml_attr` requires either (a) attributes-as-map on the tag
 call (`xml_tag(name, attrs: m) { ... }`) or (b) a "pending tag" state
-machine where `xml_attr` flushes the `>` on first non-attr call —
+machine where `xml_attr` flushes the `>` on first non-attr call:
 each has trade-offs and neither has a real user yet. We'll add it
 once the first downstream user tells us which call-site shape they
 need.
@@ -104,7 +104,7 @@ any of these.
 
 ### Pretty-print (debug-only)
 
-Both `render_html()` and `render_xml()` emit tight output — no
+Both `render_html()` and `render_xml()` emit tight output: no
 indentation, no inter-element whitespace, byte-deterministic. For
 human reading or diffing during development, two post-processors
 take that tight output and return an indented version:
@@ -134,9 +134,9 @@ pretty_print_xml(s: string, indent_size: int)  -> string
 
 `indent_size` is 2 or 4 in normal use; any value in `1..8` is
 honoured, anything out of range falls back to 2. Line endings are
-always `\n` — pretty-print is for humans, not machines.
+always `\n`: pretty-print is for humans, not machines.
 
-**Caveats — read these before using pretty-print in production:**
+**Caveats: read these before using pretty-print in production:**
 
 - **It's for debugging, not serving.** The tight output is the
   ground truth; pretty-print is a transform layer for human eyes.
@@ -153,7 +153,7 @@ always `\n` — pretty-print is for humans, not machines.
   pretty-printed output is *not equivalent* to the tight version
   for the consuming parser. Use the tight renderer for such cases.
 - **Not a general formatter.** The post-processor understands tags
-  this module emits — `<name>`, `</name>`, `<name/>`, plus a
+  this module emits: `<name>`, `</name>`, `<name/>`, plus a
   fall-through for `<?...?>`, `<!--...-->`, and `<![CDATA[...]]>`.
   Arbitrary HTML / XML with attributes (today) or unusual entity
   use will be formatted on a best-effort basis. For arbitrary
@@ -178,7 +178,7 @@ render_greeting(name: string) -> string {
     sb = strbuilder.new(64)
     nt.html_text(sb, "Hello ")
     nt.html_tag_open(sb, "b")
-    nt.html_text(sb, name)         // auto-escapes — works even for `<script>`
+    nt.html_text(sb, name)         // auto-escapes: works even for `<script>`
     nt.html_tag_close(sb, "b")
     return strbuilder.finish(sb)
 }
@@ -190,19 +190,19 @@ Surface:
 
 ```aether
 html_text(sb: ptr, s: string)             // append, HTML-escaped
-html_raw(sb: ptr, s: string)              // append verbatim — trusted markup only
+html_raw(sb: ptr, s: string)              // append verbatim; trusted markup only
 html_tag_open(sb: ptr, name: string)      // <name>
 html_tag_close(sb: ptr, name: string)     // </name>
 html_tag(sb: ptr, name: string, body: string)  // <name>escaped-body</name>
 ```
 
-The DSL is built on top of these — `tag()` ultimately writes
+The DSL is built on top of these: `tag()` ultimately writes
 through `strbuilder.append`, and `text()` calls `html_text`. No
 behavioural divergence between the two surfaces; they're the same
 output, different ergonomic trade-offs.
 
 The five canonical HTML entities (`& < > " '`) are escaped. Tag names
-are NOT escaped — the markup-author writes `<div>`, user-data goes
+are NOT escaped: the markup-author writes `<div>`, user-data goes
 through `html_text()`. Standard contract.
 
 ## Why this shape?
@@ -217,7 +217,7 @@ it can layer on top of these helpers, because the escape rule lives
 in `html_text`, not in syntax.
 
 For control flow (`if`, `for`, `each` in Liquid terms), use Aether's
-own — same `sb`, same escape contract:
+own: same `sb`, same escape contract:
 
 ```aether
 for item in items {
@@ -235,7 +235,7 @@ for item in items {
 - Attribute helpers (`html_attr(sb, name, value)`). The current
   surface emits only bare `<name>` opens. If you need attributes:
   `html_raw(sb, " class=\"")`, `html_text(sb, css_class)`,
-  `html_raw(sb, "\"")` — explicit and escape-correct, but verbose.
+  `html_raw(sb, "\"")`, explicit and escape-correct, but verbose.
   A real `html_attr` helper is a v1 follow-up.
 - The trailing-block builder DSL (`html { ... }`). When that lands,
   this module will gain a builder veneer that calls these helpers.
@@ -247,7 +247,7 @@ for item in items {
   compiler to catch typos in variable names rather than the
   rendering engine to silently substitute empty strings.
 - **Use `templating.liquid`** when an *operator* (a designer,
-  marketer, sysadmin) writes the template — Liquid's flat syntax
+  marketer, sysadmin) writes the template: Liquid's flat syntax
   is friendlier to non-programmers and lets you reload the template
   at runtime without recompiling.
 
@@ -256,7 +256,7 @@ for item in items {
 The module imports only `std.strbuilder` and `std.string`. Neither
 is capability-gated, so `contrib.templating.native` works under
 `--emit=lib` with no `--with=` flags. No filesystem, no network, no
-process spawn — by construction, since the surface is just
+process spawn: by construction, since the surface is just
 "append to a string".
 
 ## Testing

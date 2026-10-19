@@ -30,19 +30,19 @@ server_start(server)
 
 ## Features
 
-- **HTTP endpoints** — GET, POST, PUT, DELETE, PATCH, HEAD, OPTIONS, and 18 extended methods
-- **Path nesting** — `path("/api") { path("/v1") { end_point(...) } }`
-- **Filters** — `filter(GET, "/.*") |req, res, ctx| { CONTINUE / STOP }`
-- **Composition** — `compose(server) { ... }` to add routes after construction
-- **WebSocket** — server + client with RFC 6455 handshake
-- **SSE** — `sse_endpoint("/events") |stream| { sse_send(stream, data) }`
-- **Static files** — MIME detection, traversal protection, index.html fallback
-- **Chunked transfer** — `chunked_start`, `write_chunk`, `chunked_end`
-- **Cookies** — `request_get_cookie(req, "name")`
-- **Attributes** — `ctx_set_attribute` / `ctx_get_attribute` for filter-to-endpoint data
-- **Error callbacks** — `on_error`, `on_server_error`, `on_ws_timeout`, `on_ws_error`
-- **Statistics** — `on_stats(server) |stats| { ... }`
-- **Config** — `with_timeout`, `with_backlog`, `with_ws_backlog`, `with_keep_alive`, `with_tls`
+- **HTTP endpoints**: GET, POST, PUT, DELETE, PATCH, HEAD, OPTIONS, and 18 extended methods
+- **Path nesting**: `path("/api") { path("/v1") { end_point(...) } }`
+- **Filters**: `filter(GET, "/.*") |req, res, ctx| { CONTINUE / STOP }`
+- **Composition**: `compose(server) { ... }` to add routes after construction
+- **WebSocket**: server + client with RFC 6455 handshake
+- **SSE**: `sse_endpoint("/events") |stream| { sse_send(stream, data) }`
+- **Static files**: MIME detection, traversal protection, index.html fallback
+- **Chunked transfer**: `chunked_start`, `write_chunk`, `chunked_end`
+- **Cookies**: `request_get_cookie(req, "name")`
+- **Attributes**: `ctx_set_attribute` / `ctx_get_attribute` for filter-to-endpoint data
+- **Error callbacks**: `on_error`, `on_server_error`, `on_ws_timeout`, `on_ws_error`
+- **Statistics**: `on_stats(server) |stats| { ... }`
+- **Config**: `with_timeout`, `with_backlog`, `with_ws_backlog`, `with_keep_alive`, `with_tls`
 
 ### TLS
 
@@ -58,17 +58,17 @@ err = tinyweb.tw_start(server)
 
 Both paths are PEM. `tw_start` applies them before registering routes, so a
 missing file or a malformed pair is a **start-up error** rather than a server
-that quietly serves plaintext on a port callers believe is encrypted — passing
+that quietly serves plaintext on a port callers believe is encrypted: passing
 a cert without a key is refused for the same reason.
-- **Declarative JSON APIs** (`schema_api`) — mount a [`std.schema`](../../std/schema/)
+- **Declarative JSON APIs** (`schema_api`): mount a [`std.schema`](../../std/schema/)
   resource as a validated JSON API; see below.
 
-## Declarative JSON APIs — `schema_api` + `std.schema`
+## Declarative JSON APIs: `schema_api` + `std.schema`
 
 `contrib/tinyweb/schema_api` bridges [`std.schema`](../../std/schema/) (typed,
-composable validation — inspired by Zod/Pydantic/io-ts/Ash) to the router. You
+composable validation: inspired by Zod/Pydantic/io-ts/Ash) to the router. You
 declare a resource once and mount it; every write request is JSON-parsed and
-validated **before** your handler runs. Invalid bodies never reach the handler —
+validated **before** your handler runs. Invalid bodies never reach the handler:
 they get a JSON:API `422` with per-field, coded errors; malformed JSON a `400`.
 
 ```aether
@@ -84,7 +84,7 @@ registry = list.new()
 server = tinyweb.web_server_host("127.0.0.1", 8080) {
     u = schema_api.json_api("/users", user) {
         schema_api.create() |req, res, ctx| {
-            // body already parsed, coerced, and normalized — just handle it
+            // body already parsed, coerced, and normalized: handle it
             tinyweb.response_write_status(res, "{\"ok\":true}", 201)
         }
     }
@@ -95,13 +95,13 @@ server = tinyweb.web_server_host("127.0.0.1", 8080) {
 
 Every mounted resource **projects itself**, not just gates requests:
 
-- `GET {prefix}/schema` — auto-serves the resource's **draft-07 JSON Schema**
+- `GET {prefix}/schema`: auto-serves the resource's **draft-07 JSON Schema**
   (`std.schema.to_json_schema`): `enum`, `format:email`, `minimum`/`maximum`,
   `default`, `required`, …
-- `GET /openapi.json` (via `openapi_route`) — an aggregate **OpenAPI 3.0**
+- `GET /openapi.json` (via `openapi_route`): an aggregate **OpenAPI 3.0**
   document for every resource: `paths` + `components.schemas`, `$ref`-linked.
 
-The validator is HTTP-agnostic — the same `record` validates a config file or a
+The validator is HTTP-agnostic: the same `record` validates a config file or a
 CLI arg set off the web entirely. Runnable demo: `example_schema_api.ae`. The
 JSON:API error envelopes and the schema/OpenAPI docs are built with `strbuilder`
 (leak-clean; avoids the `std.json` builder-nesting leak, upstream #1447).
@@ -114,8 +114,8 @@ block runs once at registration time and may contain more DSL calls) or
 
 | Call            | Trailing block runs…  | What gets stored             | Can nest DSL inside? |
 |-----------------|-----------------------|------------------------------|----------------------|
-| `web_server`    | now (once, root)      | nothing                      | yes — root container |
-| `path`          | now (once)            | nothing — block populates parent | yes — `path`, `end_point`, `filter`, `web_socket`, `sse_endpoint`, `serve_static` |
+| `web_server`    | now (once, root)      | nothing                      | yes: root container |
+| `path`          | now (once)            | nothing (block populates parent | yes) `path`, `end_point`, `filter`, `web_socket`, `sse_endpoint`, `serve_static` |
 | `end_point`     | later (per request)   | the block, as a handler      | leaf only            |
 | `filter`        | later (per request)   | the block, as a handler      | leaf only            |
 | `web_socket`    | later (per message)   | the block, as a handler      | leaf only            |
@@ -123,27 +123,27 @@ block runs once at registration time and may contain more DSL calls) or
 | `serve_static`  | n/a (no block)        | base→dir mapping             | leaf only            |
 
 Only `web_server` and `path` are nesting containers. Everything else is a
-leaf — its block, if any, is a request-time handler, not more DSL.
+leaf: its block, if any, is a request-time handler, not more DSL.
 
 ## Files
 
-- `module.ae` — The library
-- `ws_client.ae` — WebSocket client
-- `ws_handshake.c` — SHA-1 + Base64 for the WebSocket accept key, plus
-  `ws_unmask` (RFC 6455 §5.3 frame unmasking) — C externs
-- `example_app.ae` — HTTP endpoints with filters and nested paths
-- `example_composition.ae` — Modular composition, deep nesting, auth filters
-- `example_websocket.ae` — HTTP + WebSocket server with echo handler
-- `example_static.ae` — Static file serving
-- `example_sse.ae` — Server-Sent Events + chunked transfer
-- `example_auth.ae` — Cookie parsing + filter-to-endpoint attributes
-- `example_schema_api.ae` — Declarative JSON API: rich `std.schema` validation +
+- `module.ae`: The library
+- `ws_client.ae`: WebSocket client
+- `ws_handshake.c` (SHA-1 + Base64 for the WebSocket accept key, plus
+  `ws_unmask` (RFC 6455 §5.3 frame unmasking)) C externs
+- `example_app.ae`: HTTP endpoints with filters and nested paths
+- `example_composition.ae`: Modular composition, deep nesting, auth filters
+- `example_websocket.ae`: HTTP + WebSocket server with echo handler
+- `example_static.ae`: Static file serving
+- `example_sse.ae`: Server-Sent Events + chunked transfer
+- `example_auth.ae`: Cookie parsing + filter-to-endpoint attributes
+- `example_schema_api.ae`: a declarative JSON API with rich `std.schema` validation +
   transforms + coercion, auto `/schema` (draft-07) and `/openapi.json` (OpenAPI 3.0)
-- `schema_api/` — the `std.schema`-backed JSON API layer (`json_api`, `openapi_route`)
-- `test_schema_api.ae` — schema_api integration tests (validation + schema/OpenAPI endpoints)
-- `test_spec.ae` — DSL registration unit tests
-- `test_integration.ae` — HTTP round-trip integration tests
-- `test_websocket.ae` — WebSocket codec round-trip (handshake, client-frame
+- `schema_api/`: the `std.schema`-backed JSON API layer (`json_api`, `openapi_route`)
+- `test_schema_api.ae`: schema_api integration tests (validation + schema/OpenAPI endpoints)
+- `test_spec.ae`: DSL registration unit tests
+- `test_integration.ae`: HTTP round-trip integration tests
+- `test_websocket.ae`: WebSocket codec round-trip (handshake, client-frame
   unmasking, and extended-length server framing). Its C extern,
   `ws_handshake.c`, is compiled in by the module's `@source`, so
   `ae run test_websocket.ae` needs no `--extra`

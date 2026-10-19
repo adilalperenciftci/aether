@@ -1,4 +1,4 @@
-# contrib.sqlite — SQLite bindings for Aether
+# contrib.sqlite: SQLite bindings for Aether
 
 Thin veneer over SQLite: the pinned amalgamation compiled from source,
 or the system `libsqlite3` when the amalgamation is not available (see
@@ -18,12 +18,12 @@ main() {
     if err != "" { return }
     defer sqlite.close(db)
 
-    // DDL / INSERT / UPDATE — no rows back.
+    // DDL / INSERT / UPDATE: no rows back.
     sqlite.exec(db, "CREATE TABLE users (id INTEGER, name TEXT)")
     sqlite.exec(db, "INSERT INTO users VALUES (1, 'Alice')")
     sqlite.exec(db, "INSERT INTO users VALUES (2, 'Bob')")
 
-    // SELECT — rows materialised into a ResultSet.
+    // SELECT: rows materialised into a ResultSet.
     rs, err2 = sqlite.query(db, "SELECT id, name FROM users ORDER BY id")
     if err2 != "" { return }
     defer sqlite.free(rs)
@@ -39,20 +39,20 @@ main() {
 }
 ```
 
-## v1 — convenience surface for trusted-input SQL
+## v1: convenience surface for trusted-input SQL
 
 - `sqlite.open(path) -> (db, err)`
 - `sqlite.close(db) -> err`
-- `sqlite.exec(db, sql) -> err` — for DDL and no-row DML
-- `sqlite.query(db, sql) -> (rs, err)` — for SELECT
+- `sqlite.exec(db, sql) -> err`: for DDL and no-row DML
+- `sqlite.query(db, sql) -> (rs, err)`: for SELECT
 - `sqlite.row_count(rs)`, `sqlite.col_count(rs)`, `sqlite.col_name(rs, i)`, `sqlite.cell(rs, row, col)`, `sqlite.free(rs)`
 
 Every cell is returned as a `string`. Numeric columns are rendered
-by SQLite's internal text conversion — callers parse them back with
+by SQLite's internal text conversion: callers parse them back with
 `string.to_int` / `string.to_float` from `std.string` if they need
 typed values.
 
-## v2 — prepared statements + parameter binding
+## v2: prepared statements + parameter binding
 
 For SQL that takes user input (and so for *any* SQL where string
 concatenation is a SQL-injection risk) use the prepared-statement
@@ -89,11 +89,11 @@ main() {
 
 **Key points:**
 
-- `bind_text` uses `SQLITE_TRANSIENT` — SQLite copies the string immediately, so callers can drop their buffers right after the bind. Load-bearing inside loops with short-lived strings.
+- `bind_text` uses `SQLITE_TRANSIENT`: SQLite copies the string immediately, so callers can drop their buffers right after the bind. Load-bearing inside loops with short-lived strings.
 - `bind_blob(stmt, idx, data, len)` is binary-safe via the explicit length. AetherString-aware on the input side; embedded NULs survive.
 - `bind_i64(stmt, idx, hi, lo)` splits 64-bit integers because Aether's `int` width isn't guaranteed 64-bit (it's 32-bit on MSVC). Reassemble with `((int64_t)hi << 32) | (uint32_t)lo`. Symmetric `column_i64(stmt, col) -> (hi, lo)` for the read side.
-- `column_blob(stmt, col)` returns `(bytes, length, err)` — a length-aware AetherString plus byte count, same shape as `std.fs.read_binary`. Embedded NULs survive both directions.
-- `step` returns `(rc, err)` where `rc` is one of the exported constants `SQLITE_ROW` (100 — row available, read columns), `SQLITE_DONE` (101 — no more rows / DML completed), or any other code (error; `err` carries `errmsg(db)` text).
+- `column_blob(stmt, col)` returns `(bytes, length, err)`: a length-aware AetherString plus byte count, same shape as `std.fs.read_binary`. Embedded NULs survive both directions.
+- `step` returns `(rc, err)` where `rc` is one of the exported constants `SQLITE_ROW` (100 (row available, read columns), `SQLITE_DONE` (101) no more rows / DML completed), or any other code (error; `err` carries `errmsg(db)` text).
 - Streaming the row loop is a pure-Aether `while sqlite.step(stmt, db) == SQLITE_ROW { … }` on top of these primitives. No new C externs needed.
 - `next_row(stmt, db) -> int` is cursor-iteration sugar over `step`. Returns `1` on row available, `0` on `SQLITE_DONE`, `-1` on error (call `sqlite.errmsg(db)` for text). Replaces the doubled-`step()` shape that's the most common bug in cursor APIs (forget to step at the end → infinite loop; forget to step at the start → skip row 0). Canonical use:
   ```aether
@@ -108,7 +108,7 @@ main() {
   `step` / `errmsg` / explicit rc compare remain available for callers that want to distinguish DONE from ROW with their own control flow.
 - `finalize(stmt)` MUST be called before `close(db)`, otherwise close fails with "unable to close due to unfinalized statements".
 
-## v3 — holding a connection to its file, and typed rows
+## v3: holding a connection to its file, and typed rows
 
 For a host that runs SQL someone else wrote (sae gives each installed app
 databases by name and must keep every connection to its one file), and for
@@ -185,7 +185,7 @@ main() {
 
 ## Still out of scope (v4 candidates)
 
-- **`for_each_row(stmt) { … }` block-passing DSL sugar.** Needs Aether language-level support for closure-passing. The minor shape — `sqlite.next_row(stmt, db) -> int` — has shipped and removes the doubled-`step()` foot-gun, but a true block form is still future work.
+- **`for_each_row(stmt) { … }` block-passing DSL sugar.** Needs Aether language-level support for closure-passing. The minor shape (`sqlite.next_row(stmt, db) -> int`) has shipped and removes the doubled-`step()` foot-gun, but a true block form is still future work.
 - **Transactions as first-class.** `sqlite.exec(db, "BEGIN")` / `"COMMIT"` / `"ROLLBACK"` is idiomatic SQLite C API too.
 - **Pragmas as named primitives.** `set_pragma(db, "journal_mode", "WAL")` is just `exec` underneath.
 - **Migrations helper.** Generic enough to belong here, opinionated enough that real users (e.g. the subversion port's `wc/db_schema.ae` migration with PRAGMA introspection) hand-roll their own.
