@@ -1,222 +1,29 @@
-# Aether Memory Management
+# Memory Management
 
-Aether's memory model is **deterministic scope-exit cleanup**, not garbage collection.
+Aether has no garbage collector. Every allocation is released at a point the
+source shows, in one of two ways:
 
-The guiding principle:
-> **Allocations visible at call site. Cleanup explicit and composable. `defer` is your primary tool.**
+- **Values the program owns are counted by the compiler.** Strings, closures,
+  string sequences, and the structs, tuples, optionals and fixed-size arrays
+  built from them carry a reference count. Every place that holds one owns a
+  reference, a store takes one, and leaving a scope releases what the scope
+  held. The program writes no free for them.
+- **Handles are freed by the program.** A container (`list.new()`,
+  `map.new()`), a C buffer (`malloc`), a parsed document or an open file is a
+  `ptr`, and a `ptr` owns nothing by itself. The module that made the handle
+  has a `free` or `close` for it, and `defer` keeps that call next to the
+  allocation.
 
-Allocations are visible at the call site, and there are no GC pauses.
-
-### Why `defer`?
-
-1. **Visible** -- you can see every allocation and its cleanup in the source
-2. **Composable** -- works with any function, not just stdlib types
-3. **Predictable** -- no special naming conventions, no hidden registry, no surprises
-4. **Familiar** -- same pattern as Go's `defer` and Zig's `defer`
-
-The one-line cost (`defer type.free(x)`) is the price for knowing exactly what your program does.
-
----
-
-## The Actual Model
-
-Aether uses two allocation mechanisms:
-
-| Layer | What | When |
-|-------|------|------|
-| **Actor allocation** | Actor state + inline mailbox | One NUMA-aware allocation per actor, freed when the actor is destroyed |
-| **Stdlib heap** | `map.new()`, `list.new()`, etc. | Freed via `defer` or explicit `.free()` call |
-
-There is **no garbage collector**.
-
-### Arena vs defer: when to use which
-
-They solve different problems and are used in different layers:
-
-| | Arena | defer |
-|---|--------|--------|
-| **What** | A region of memory; many small allocations share one region. One "free" destroys the whole region. | A language construct: run cleanup when leaving the current scope. |
-| **Who uses it** | A general-purpose arena allocator backs bulk-allocation use cases such as `std.arena` and JSON parsing. You opt into it explicitly. The actor path does **not** use arenas. | **You** use it in Aether code for stdlib types (`list.new`/`list.free`, `map.new`/`map.free`) and FFI buffers. |
-| **Lifetime** | Everything in the arena lives until the arena is destroyed in one shot. | The resource lives until scope exit; the deferred call runs then. |
-| **Typical use** | Bulk allocation where many objects share one lifetime and are reclaimed together (e.g. all nodes of a parsed JSON document). | Any heap allocation you make: `items = list.new(); defer list.free(items);` so the list is freed when the function (or block) exits. |
-
----
-
-## Stdlib Convention
-
-All stdlib types follow one consistent naming pattern. In Aether you call them with dot syntax; the underlying C functions use underscores (`type_new`/`type_free`):
-
-```
-type.new()    -> allocates on the heap, returns a pointer (must be freed)
-type.free(t)  -> frees the allocation
-```
-
-| Module | Constructor | Destructor |
-|--------|-------------|------------|
-| `std.map` | `map.new()` | `map.free(m)` |
-| `std.list` | `list.new()` | `list.free(l)` |
-| `std.string` | `string.new()` | `string.free(s)` |
-| `std.dir` | `dir.list(path)` | `dir.list_free(l)` |
-
-**Rule**: Any function whose name ends in `_new()` or `_create()` (at the C level) returns an allocated object. Its matching `_free()` is its destructor. In Aether, use `type.new()` and `type.free(x)`.
-
----
-
-## The `defer` Pattern
-
-Aether's primary memory management pattern is `defer`: allocate, immediately defer the free, then use the resource. Cleanup runs at scope exit in LIFO order, on every exit: a `return`, a `break`, or a panic a `try` catches further up.
-
-```aether
-import std.map
-
-main() {
-    m = map.new()
-    defer map.free(m)
-
-    map.put(m, "k", "v")
-    print(map.get(m, "k"))
-    print("\n")
-    // map.free(m) runs here (scope exit)
-}
-```
-
-This is explicit, visible, and composable. It works with any function -- not just stdlib types.
-
-### Multiple allocations
-
-```aether
-import std.list
-import std.map
-
-main() {
-    m = map.new()
-    defer map.free(m)
-
-    items = list.new()
-    defer list.free(items)
-
-    // Use both...
-    // At scope exit: list.free(items) runs first (LIFO), then map.free(m)
-}
-```
-
-### Returning allocated values
-
-When a function allocates and returns a value, the caller receives ownership:
-
-```aether
-import std.list
-
-build_items(n) : ptr {
-    result = list.new()
-    i = 0
-    while i < n {
-        list.add(result, i)
-        i = i + 1
-    }
-    return result
-}
-
-main() {
-    items = build_items(10)
-    defer list.free(items)
-
-    print(list.size(items))
-    print("\n")
-}
-```
-
----
-
-## Actor State
-
-Actor `state` variables initialized with `*.new()` outlive any single message handler. Free them in the actor's `Stop` handler (or wherever the actor is shut down):
-
-```aether,fragment
-import std.map
-
-message Store { key: string, value: string }
-message Lookup { key: string }
-message Stop {}
-
-actor Cache {
-    state data = map.new()
-
-    receive {
-        Store(key, value) -> {
-            map.put(data, key, value)
-        }
-        Lookup(key) -> {
-            print(map.get(data, key))
-            print("\n")
-        }
-        Stop() -> {
-            map.free(data)
-        }
-    }
-}
-```
-
-The actor runtime frees the actor's single NUMA-aware allocation (the actor struct and its inline mailbox) when the actor is shut down. Stdlib allocations held in `state` fields are not part of that block, free them yourself, e.g. in the `Stop` handler above.
-
----
-
-## Common Mistakes
-
-**Forgetting `defer` after allocation:**
-
-```aether,fragment
-m = map.new()
-map.put(m, "k", "v")
-// LEAK: m is never freed
-```
-
-Fix: always pair allocation with `defer`:
-
-```aether,fragment
-m = map.new()
-defer map.free(m)
-```
-
-**Deferring before the allocation succeeds:**
-
-`defer` registers immediately. Place it right after the allocation, not before.
-
-**Allocating inside a loop:**
-
-`defer` is block-scoped: a `defer` placed inside a loop body fires at the end of
-each iteration, not just once at function exit. So an allocation made inside the
-loop is reclaimed every pass, no manual per-iteration free is needed:
-
-```aether,fragment
-while i < n {
-    item = list.new()
-    defer list.free(item)   // runs at the end of THIS iteration
-    // ... use item ...
-    i = i + 1
-}
-```
-
----
-
-## Summary: When to Use What
-
-| Situation | Approach |
-|-----------|----------|
-| Typical local allocation | `defer type.free(x)` right after allocation |
-| Value returned from function | Caller defers the free |
-| Value passed to an actor via `!` | Actor owns it; no defer in sender |
-| Actor `state` initialized with `*.new()` | Free in `Stop` handler: `map.free(data)` |
-
----
+Counting is deterministic: a program releases the same values at the same
+points on every run, and nothing pauses to collect. Its one limit is a cycle:
+a value that reaches itself through its own references is not released
+([Cycles](#cycles)). The rules below are checked by a generated test grid that
+CI runs on every pull request ([How the rules are tested](#how-the-rules-are-tested)).
 
 ## Values the program owns
 
-Strings, closures and the composites built from them (structs, tuples,
-optionals, fixed-size arrays) are managed by the compiler, with no `defer`
-and no garbage collector: every value is released at a point the source
-shows. Five rules decide where (the design and its record are in
-[design/ownership-model.md](design/ownership-model.md)):
+Five rules decide where a counted value is released (the design and its
+implementation record are in [design/ownership-model.md](design/ownership-model.md)):
 
 - **R1, every value carries its own count.** A `string` is a counted
   `AetherString`; a literal is pinned (its count never changes and it is
@@ -242,7 +49,7 @@ shows. Five rules decide where (the design and its record are in
 No rule reads another function's body: what a call does with its
 arguments, and what it hands back, is decided by the callee's signature.
 
-```aether
+```aether,run
 import std.string
 
 label(n: int) -> string {
@@ -258,6 +65,10 @@ main() {
 }                                   // a and b are released here
 ```
 
+```output
+item-1! item-1
+```
+
 ### Strings
 
 A string local owns the value it holds, whatever it was given: a literal, a
@@ -269,13 +80,51 @@ string is safe; a string stored where other threads can read it (a module
 `var`, a closure environment, a value reached through a pointer) is
 published, and its count becomes atomic from then on.
 
+### Reading a string out of a container or a `ptr`
+
+A container element and a `ptr` are untyped, so a `string` local given one
+reads it as text whatever it points at. The typed accessors say the value is
+a string and check that it is one: `list.get_string(l, i)`,
+`map.get_string(m, key)` and `string.from_ptr(p)` each return
+`(string, string)`, the string with `""`, or `null` with `"not a string"` when
+the element is some other pointer. The string handed back holds a reference
+of its own, so it outlives the container.
+
+```aether,run
+import std.list
+
+main() {
+    names = list.new()
+    defer list.free(names)
+    list.add(names, "ada")
+    nested = list.new()
+    defer list.free(nested)
+    list.add(nested, names)
+
+    first, err = list.get_string(names, 0)
+    println("${first} [${err}]")
+    text, err2 = list.get_string(nested, 0)
+    println("${text == null} [${err2}]")
+}
+```
+
+```output
+ada []
+true [not a string]
+```
+
+A `string` local re-bound to a bare `ptr` (`name, _ = map.get(m, "name")`)
+is warning W1005, which names the accessor to use; a later release makes it
+an error ([W1005](language-reference.md#pointer-given-to-a-string-local-w1005)).
+
 ### Closures
 
 A closure literal's environment is counted. A local holding a closure owns a
 reference; capturing a variable takes one; a closure field, element or state
 field takes one; a closure passed to an `fn` parameter is borrowed. A
 variable a closure writes lives in a shared cell, counted the same way, so
-the closure and its creator see one value.
+the closure and its creator see one value. [closures-and-lifetimes.md](closures-and-lifetimes.md)
+goes through each place a closure can be held.
 
 ### String sequences
 
@@ -283,7 +132,7 @@ A `*StringSeq` is counted per cell and owned like a closure: every place
 holding one owns a reference, a fresh sequence (a literal, an Aether
 function's result, a `string.seq_*` producer's) moves in, any other is
 retained, and `string.seq_tail` lends. The counts are atomic, so a sequence
-crosses actors by reference. See docs/sequences.md.
+crosses actors by reference. See [sequences.md](sequences.md).
 
 ### Structs, tuples, optionals and fixed-size arrays
 
@@ -344,10 +193,17 @@ is pinned and goes into either as it is.
 
 A closure goes into a `ptr` slot boxed (`box_closure(f)`, or the coercion a
 store into a `ptr` makes), the box holding a reference of its own, which
-`release_closure(p)` gives back. A function that keeps a
-`ptr` parameter declares it `@keep` (E0902); a `ptr` parameter that only
-borrows is given a closure in a box on the caller's stack, so nothing is
-allocated.
+`release_closure(p)` gives back.
+
+A function that keeps a `ptr` parameter (stores it where it outlives the
+call, returns it, or passes it to another keeping parameter) declares it
+`@keep`; keeping one that is not declared so is E0902. A struct local to the
+function, or a closure that runs and is dropped inside the call, does not
+outlive it: putting the parameter in one keeps nothing unless the struct or
+the closure escapes itself. A `ptr` parameter that only borrows is given a
+closure in a box on the caller's stack, so nothing is allocated. The full
+rule, with what counts as escaping, is in the language reference's
+[String ownership](language-reference.md#string-ownership).
 
 ### Panics
 
@@ -356,40 +212,6 @@ exits would have: every owning local, temporary and argument is recorded in
 an unwind journal while it is live, and every plain `defer` of those scopes
 runs, newest first. `defer try` and `defer catch` do not run on a panic.
 
-### `@scoped` bindings, checked non-escape
-
-A `let`/`var` declaration can be annotated `@scoped` to declare that its value
-**must not outlive the lexical block** that introduced it. This is opt-in
-escape analysis, not a borrow checker (Aether has none). It turns a footgun
-into a compile-time invariant and documents intent at the binding site:
-
-```aether,fragment
-process() -> long {
-    @scoped buf = make_buffer(64 * 1024)
-    return buf.checksum()        // ok, a scalar DERIVED from buf escapes
-}
-
-leak() -> *Buffer {
-    @scoped buf = make_buffer(64 * 1024)
-    return buf                   // compile error: the @scoped binding escapes
-}
-```
-
-The typechecker rejects every way the binding's value could outlive the block:
-
-- returning the binding,
-- assigning/aliasing it into another binding or a struct field,
-- placing it as an element of an array / struct / message literal,
-- capturing it in a closure (closures lower to plain C functions, so their
-  lifetime is statically known),
-- inserting it into a container (`list.add`, `map.put`, `set.add`, …).
-
-Only a value *derived* from the binding via a call (`buf.checksum()`,
-`string.length(buf)`) may escape, that carries the call result, not the
-binding. A value handed to a function that retains it beyond the call is
-governed by that function's own contract; `@scoped` checks the direct escape
-sites at the binding's own scope.
-
 ### Cycles
 
 Counting does not free a cycle: a closure stored in a cell it captures, or
@@ -397,7 +219,257 @@ values that hold each other through `ptr` slots, live until the program
 ends. Break the cycle (store `none`, release the slot) before dropping the
 last outside reference.
 
-### History
+## Handles and `defer`
+
+A handle is a `ptr` to memory a module or C allocated: a list, a map, a set,
+a string builder, a parsed document, a `malloc` buffer, an open file. A `ptr`
+owns nothing, so the program frees each handle itself. `defer` schedules the
+free when the handle is made, and runs it when the scope ends, in LIFO order,
+on every exit: a `return`, a `break`, or a panic a `try` catches further up.
+
+```aether,run
+import std.map
+
+main() {
+    m = map.new()
+    defer map.free(m)
+
+    map.put(m, "k", "v")
+    v, _ = map.get_string(m, "k")
+    println(v)
+    // map.free(m) runs here (scope exit)
+}
+```
+
+```output
+v
+```
+
+### The stdlib convention
+
+A module's constructor returns a handle and its destructor frees it. In Aether
+they are called through the module (`list.new()`, `list.free(l)`); the C
+functions underneath carry the module prefix (`list_new`, `list_free`).
+
+| Module | Constructor | Destructor |
+|--------|-------------|------------|
+| `std.list` | `list.new()` | `list.free(l)` |
+| `std.map` | `map.new()` | `map.free(m)` |
+| `std.set` | `set.new()` | `set.free(s)` |
+| `std.strbuilder` | `strbuilder.new(n)` | `strbuilder.finish(b)` (the built string) or `strbuilder.free(b)` |
+| `std.dir` | `dir.list(path)` | `dir.list_free(l)` |
+
+A function whose C name ends in `_new` or `_create` returns an allocated
+object, and its module's `free` (or `close`) is the destructor.
+
+A string needs none of this. `string.new(s)` exists for C-facing code: it
+returns a counted copy typed `ptr`, which no place owns, so a program that
+calls it gives the copy back with `string.release`. Code that works with
+`string` values never needs it.
+
+### Several handles
+
+```aether
+import std.list
+import std.map
+
+main() {
+    m = map.new()
+    defer map.free(m)
+
+    items = list.new()
+    defer list.free(items)
+
+    // Use both...
+    // At scope exit: list.free(items) runs first (LIFO), then map.free(m)
+}
+```
+
+### Returning a handle
+
+A function that allocates a handle and returns it gives it to the caller,
+which frees it:
+
+```aether
+import std.list
+
+build_items(n) : ptr {
+    result = list.new()
+    i = 0
+    while i < n {
+        list.add(result, i)
+        i = i + 1
+    }
+    return result
+}
+
+main() {
+    items = build_items(10)
+    defer list.free(items)
+
+    print(list.size(items))
+    print("\n")
+}
+```
+
+### Actor state
+
+An actor `state` field initialized with a constructor outlives any single
+message handler. Free it in the handler that shuts the actor down:
+
+```aether,fragment
+import std.map
+
+message Store { key: string, value: string }
+message Lookup { key: string }
+message Stop {}
+
+actor Cache {
+    state data = map.new()
+
+    receive {
+        Store(key, value) -> {
+            map.put(data, key, value)
+        }
+        Lookup(key) -> {
+            v, _ = map.get_string(data, key)
+            println(v)
+        }
+        Stop() -> {
+            map.free(data)
+        }
+    }
+}
+```
+
+The runtime frees the actor's own allocation (the actor struct and its inline
+mailbox) and releases its counted state (strings, closures) when the actor is
+destroyed. A handle held in `state` is not part of that; free it yourself, as
+in the `Stop` handler above.
+
+### Common mistakes
+
+**A handle with no `defer`:**
+
+```aether,fragment
+m = map.new()
+map.put(m, "k", "v")
+// LEAK: m is never freed
+```
+
+Pair the allocation with its free:
+
+```aether,fragment
+m = map.new()
+defer map.free(m)
+```
+
+**A `defer` placed before the allocation:** `defer` registers when it runs.
+Place it right after the allocation it frees.
+
+**Allocating inside a loop:** `defer` is block-scoped, so a `defer` inside a
+loop body runs at the end of each iteration, not once at function exit. An
+allocation made inside the loop is freed on every pass:
+
+```aether,fragment
+while i < n {
+    item = list.new()
+    defer list.free(item)   // runs at the end of THIS iteration
+    // ... use item ...
+    i = i + 1
+}
+```
+
+### Arenas
+
+An arena is a region in which many small allocations share one lifetime and
+are freed together. `std.arena` provides one, and the JSON parser uses one for
+a parsed document's nodes. An arena is opt-in; the actor path does not use
+arenas. Where `defer` frees one handle at scope exit, an arena frees a whole
+batch at once. [allocators.md](allocators.md) covers `std.alloc`, the
+allocator handle the containers accept.
+
+### Summary
+
+| Situation | What the program does |
+|-----------|----------|
+| A string, a closure, or a struct, tuple or optional of them | Nothing: the compiler releases it |
+| A string read out of a container or a `ptr` | `list.get_string`, `map.get_string` or `string.from_ptr` |
+| A handle the function allocates | `defer type.free(x)` right after the allocation |
+| A handle returned from a function | The caller defers the free |
+| A handle sent to an actor in a `ptr` field | The receiver frees it; the sender does not |
+| A handle in actor `state` | Free it in the handler that stops the actor |
+
+## `@scoped` bindings, checked non-escape
+
+A binding annotated `@scoped` (`@scoped buf = ...`, or with `let` or `var`)
+states that its value must not outlive the block that introduced it, and the
+type checker enforces it. This
+is opt-in escape checking for one binding, not a borrow checker (Aether has
+none):
+
+```aether,run
+import std.string
+
+total(n: int) -> int {
+    @scoped buf = string.concat("abc", "def")
+    return string.length(buf) + n      // a value derived from buf leaves
+}
+
+main() {
+    println(total(1))
+}
+```
+
+```output
+7
+```
+
+The type checker refuses every way the binding's value itself could outlive
+the block: returning it, assigning or aliasing it into another binding or a
+struct field, placing it in an array, struct or message literal, capturing it
+in a closure or a quote (either can outlive the block), and inserting it into
+a container (`list.add`, `list.set`, `map.put`, `set.add`):
+
+```aether,fails
+import std.string
+
+leak() -> string {
+    @scoped buf = string.concat("abc", "def")
+    return buf      // error: `@scoped` binding 'buf' escapes its block: it is returned
+}
+
+main() {
+    println(leak())
+}
+```
+
+Only a value derived from the binding through a call (`string.length(buf)`)
+may leave. A function the value is passed to is governed by its own
+signature; `@scoped` checks the escapes written in the binding's own scope.
+
+## How the rules are tested
+
+The ownership grid (`tests/ownership_grid/`) generates one program per
+combination of a value kind (a fresh string, a `string?`, a closure that
+captures a string, an `fn[2]`, a struct owning a string, a tuple, a string
+array, ...), a place (a local, a struct field, an array element, a tuple slot,
+an optional, a module `var`, a capture or cell, a list or map, actor state, a
+message field, a `ptr` slot, ...) and a transfer (an overwrite, a `break`, an
+early `return`, a caught panic, a keeper, a return, an alias, ...). Each
+program checks every value it reads against the one it stored, measures heap
+growth over rounds of 100 calls, and runs a second time under an allocator
+that poisons freed memory and stops on a double free.
+
+Every cell is at its target. The baseline (`tests/ownership_grid/baseline.txt`)
+records 1909 cells that run clean, and 30 in which a function frees a
+parameter it borrows, which the compiler refuses (E0901). The Windows CI
+workflow runs the grid on every pull request, where the heap count is exact,
+and fails when any cell is worse than its baseline: a leak, a wrong value, a
+use after free, or a program that stopped compiling. See
+[tests/ownership_grid/README.md](../tests/ownership_grid/README.md).
+
+## History
 
 Before this model, each value kind and place had its own mechanism: a
 per-variable ownership flag for strings (`_heap_<name>`), an escape walk
@@ -410,8 +482,7 @@ that recorded them, and the implementation record is in
 
 ## Examples
 
-See the following runnable examples:
-
-- [examples/basics/memory_defer.ae](../examples/basics/memory_defer.ae) -- defer pattern (recommended)
-- [examples/basics/memory_manual.ae](../examples/basics/memory_manual.ae) -- manual free pattern
-- [examples/basics/memory_escape.ae](../examples/basics/memory_escape.ae) -- returning allocated values
+- [examples/basics/string-ownership.ae](../examples/basics/string-ownership.ae): strings released by the compiler, with no `free`
+- [examples/basics/memory_defer.ae](../examples/basics/memory_defer.ae): handles freed with `defer`
+- [examples/basics/memory_manual.ae](../examples/basics/memory_manual.ae): the same pattern with one list
+- [examples/basics/memory_escape.ae](../examples/basics/memory_escape.ae): a handle returned to the caller
