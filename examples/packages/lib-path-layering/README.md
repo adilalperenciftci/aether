@@ -76,4 +76,4 @@ lib
 
 ## See also
 
-- [`docs/module-system-design.md`](../../../docs/module-system-design.md#lib-search-path-413) — full design, normalization rules, and edge cases.
+- [`docs/module-system-design.md`](../../../docs/module-system-design.md#lib-search-path): full design, normalization rules, and edge cases.
