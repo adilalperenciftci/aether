@@ -1998,6 +1998,12 @@ equal values: `a == b` for `int?` compares the ints, and for `string?` compares
 the **contents** (via the same header-aware string comparison the language uses
 elsewhere), not the underlying pointers.
 
+An optional compared with a bare value compares as the value wrapped into the
+optional, as a binding wraps it: `maybe == 69` is true when `maybe` is present
+and holds 69, and false when it is `none`. Both operands are evaluated. A value
+the optional cannot hold (`maybe == "69"` for an `int?`) is a type error, as is
+an optional of another inner type.
+
 An optional is a **single** presence layer, `T??` is rejected at parse time
 (*"nested optional `T??` is not supported"*). If you find yourself wanting one,
 you almost certainly want the distinct "fallible-and-absent" spelling instead,

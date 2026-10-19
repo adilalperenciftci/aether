@@ -8227,6 +8227,60 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                         fprintf(gen->output, ")");
                         break;
                     }
+                    if ((l_opt && !r_none) || (r_opt && !l_none)) {
+                        /* #2829: an optional and a bare value compare as the
+                         * value wrapped into the optional would (`lo == 3` as
+                         * `lo == some(3)`): equal when present with an equal
+                         * value, a string? by its contents. Both operands are
+                         * evaluated, in source order, and a fresh string
+                         * operand (or an owned string? call's) is freed once
+                         * compared, as a string comparison frees it. */
+                        ASTNode* opt = l_opt ? L : R;
+                        ASTNode* bare = l_opt ? R : L;
+                        Type* elem = opt->node_type->element_type;
+                        int str_val = elem && elem->kind == TYPE_STRING;
+                        Type* bt = bare->node_type && bare->node_type->kind != TYPE_UNKNOWN
+                                   ? bare->node_type : elem;
+                        int drain_bare = str_val && is_fresh_heap_string_temp(gen, bare);
+                        int drain_opt = str_val && is_owned_opt_string_call(gen, opt);
+                        const char* o = NULL;
+                        const char* v = NULL;
+                        TempSeq s;
+                        fprintf(gen->output, "(");
+                        seq_open(gen, &s);
+                        for (int side = 0; side < 2; side++) {
+                            ASTNode* e = side == 0 ? L : R;
+                            if (e == opt) {
+                                o = seq_let(gen, &s, get_c_type(opt->node_type), "_ae_ol");
+                                generate_expression(gen, opt);
+                            } else {
+                                v = seq_let(gen, &s, str_val ? "const char*" : get_c_type(bt), "_ae_ov");
+                                generate_expression(gen, bare);
+                            }
+                            seq_next(gen, &s);
+                        }
+                        const char* res = seq_let(gen, &s, "int", "_ae_oe");
+                        if (str_val)
+                            fprintf(gen->output, "%s(%s.has && string_equals(%s.val, %s))",
+                                    is_eq ? "" : "!", o, o, v);
+                        else
+                            fprintf(gen->output, "%s(%s.has && %s.val == %s)",
+                                    is_eq ? "" : "!", o, o, v);
+                        if (drain_opt) {
+                            seq_next(gen, &s);
+                            fprintf(gen->output, "%s.has ? aether_heap_str_free((void*)%s.val) : (void)0",
+                                    o, o);
+                        }
+                        if (drain_bare) {
+                            seq_next(gen, &s);
+                            fprintf(gen->output, "aether_heap_str_free((void*)%s)", v);
+                        }
+                        seq_next(gen, &s);
+                        fprintf(gen->output, "%s", res);
+                        seq_close(gen, &s);
+                        fprintf(gen->output, ")");
+                        break;
+                    }
                 }
                 int skip_parens = gen->in_condition;
                 gen->in_condition = 0;

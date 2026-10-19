@@ -13088,6 +13088,32 @@ int typecheck_binary_expression(ASTNode* expr, SymbolTable* table) {
         int l_none = left->type  == AST_NONE_LITERAL;
         int r_none = right->type == AST_NONE_LITERAL;
         if (l_opt || r_opt || l_none || r_none) {
+            /* #2829: the other side of an optional is `none`, an optional, or
+             * a bare value, which is compared as that value wrapped into the
+             * optional would be (present and equal). Each must be what the
+             * optional holds; codegen compares the values as C does. */
+            if ((l_opt && !r_none) || (r_opt && !l_none)) {
+                Type* opt_t = l_opt ? left_type : right_type;
+                Type* other = l_opt ? right_type : left_type;
+                Type* want = opt_t->element_type;
+                Type* got = (other && other->kind == TYPE_OPTIONAL) ? other->element_type : other;
+                if (want && got && want->kind != TYPE_UNKNOWN && got->kind != TYPE_UNKNOWN &&
+                    !is_type_compatible(got, want) && !is_type_compatible(want, got)) {
+                    char msg[512];
+                    snprintf(msg, sizeof(msg),
+                             "'%s' compares the optional '%s' with '%s', which it cannot hold",
+                             expr->value ? expr->value : "==",
+                             type_to_string(opt_t), type_to_string(other));
+                    type_error_hint(msg,
+                        "an optional compares with `none`, with an optional of its inner type, "
+                        "or with a value of its inner type (present and equal)",
+                        expr->line, expr->column);
+                    free_type(left_type);
+                    free_type(right_type);
+                    set_node_type(expr, create_type(TYPE_BOOL));
+                    return 0;
+                }
+            }
             if (r_none && l_opt && (!right->node_type ||
                 right->node_type->kind != TYPE_OPTIONAL || !right->node_type->element_type)) {
                 if (right->node_type) free_type(right->node_type);
