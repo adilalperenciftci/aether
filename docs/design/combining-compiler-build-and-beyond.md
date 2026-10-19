@@ -8,7 +8,7 @@ reads almost like a description of the Aether family, which already owns more
 of its stack than any of the projects it cites. At the end are four concrete
 things we could do. None of them is started; this is for discussing.
 
-— Paul (drafted with Claude, 2026-10-06)
+Paul (drafted with Claude, 2026-10-06)
 
 ## What the essay argues
 
@@ -72,7 +72,7 @@ one this week (below).
 | Build system | **aeb** | the build graph across languages, with content-addressed artifact keys |
 | Package manager | **aeb** too (`ae-add`, `override-dep`, `.packages.ae`, pinned `get.sh`), plus **aether-crossbuild**'s per-target sysroots | sources and versions across package boundaries; the essay's `@libfour:out:four` is close to what aeb's dependency nodes already are |
 | "System" (the essay's `system { packages … config … }`) | **aeo** | a declarative composition of what runs where (VMs, jails, containers), with snapshots and rollback |
-| Filesystem, scheduler | — | not worth chasing, per the above |
+| Filesystem, scheduler | none | not worth chasing, per the above |
 
 And `ae` already compiles a program plus its whole module closure into one C
 translation unit, so we have whole-program compilation by construction.

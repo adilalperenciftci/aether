@@ -129,7 +129,7 @@ downstream C consumers; `dtoa.c` the one exception", plus the lzf precedent):
   with no decoders; SDL_mixer drags SDL; OpenAL is 3D-game-shaped;
   per-platform hand C is five backends of Tier-3 work we'd own forever.
 
-The glue (`aether_audio.c`, est. 150–300 lines) rides **miniaudio's high-level
+The glue (`aether_audio.c`, est. 150-300 lines) rides **miniaudio's high-level
 engine** (`ma_engine` / `ma_sound`): device + decode + mixer + per-sound
 volume/seek in one battle-tested layer, so v1's C is bindings, not logic.
 
@@ -206,7 +206,7 @@ audio.play(src)                               // start / resume
 audio.pause(src)
 audio.seek(src, 90s)                          // Duration in, frames inside
 audio.volume(src, 0.8)                        // 0.0..1.0, ma_sound volume
-pos  = audio.position(src)                    // Duration — feeds the seek slider
+pos  = audio.position(src)                    // Duration: feeds the seek slider
 dur  = audio.duration(src)                    // Duration
 playing = audio.is_playing(src)               // poll from ui.timer (§6)
 audio.unload(src)
@@ -221,10 +221,10 @@ Fallible ops return `T!`; error identities as declared faults
 | Piece | Est. |
 | --- | --- |
 | vendored `miniaudio.h` (+ bundled dr_wav/dr_mp3) | 0 written lines; ~1 file |
-| `std/audio/aether_audio.c` glue (engine init, sound handles, null-backend switch) | 150–300 |
-| `std/audio/module.ae` | 120–200 |
-| tests (decode fixtures + null-device regression) | 120–180 |
-| **Total written** | **~400–700 lines**, one PR |
+| `std/audio/aether_audio.c` glue (engine init, sound handles, null-backend switch) | 150-300 |
+| `std/audio/module.ae` | 120-200 |
+| tests (decode fixtures + null-device regression) | 120-180 |
+| **Total written** | **~400-700 lines**, one PR |
 
 ### Explicitly OUT of v1 (named later tiers)
 

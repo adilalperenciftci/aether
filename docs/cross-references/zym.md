@@ -280,7 +280,7 @@ zym_defineNative(vm, "ProcessSpawn(command, args, options)",   nativeProcess_spa
 ```
 
 There's also explicit dispatcher construction visible in
-`ZymVM.c:784–794`:
+`ZymVM.c:784-794`:
 
 ```c
 ZymValue call_dispatcher = zym_createDispatcher(vm);
@@ -306,7 +306,7 @@ downstream user (svn-aether, for instance) asks.
 This is the most original idea in Zym and the one most worth lifting.
 
 ```javascript
-// In Zym source, from src/natives/ZymVM.c:737–814 readout
+// In Zym source, from src/natives/ZymVM.c:737-814 readout
 var sandbox = ZymVM();             // creates a fresh, nested ZymVM
 var bc = sandbox.compileSource("func add(a,b) { return a+b; }");
 sandbox.load(bc);                  // or sandbox.loadSource("...") in one shot
@@ -346,7 +346,7 @@ can't cross. That's a real isolation guarantee.
 
 There's also a concession to ergonomics: Zym registers `call_0` through
 `call_8` (each a separate C function, lots of repetition, see
-`ZymVM.c:212–584`) and unifies them via a runtime dispatcher. If
+`ZymVM.c:212-584`) and unifies them via a runtime dispatcher. If
 Aether picks this up, varargs in the C runtime would let you collapse
 those into one. Or just generate the boilerplate.
 
@@ -547,7 +547,7 @@ endif()
 ```
 
 Two-stage build: instrument, run a representative workload, rebuild
-using the profile. Worth ~5–15% on hot-loop-heavy code.
+using the profile. Worth ~5-15% on hot-loop-heavy code.
 
 For Aether: a `make pgo-gen && ./build/aetherc tests/regression/*.ae &&
 make pgo-use` cycle would be straightforward to add. Use the
@@ -643,7 +643,7 @@ Quick inventory so this comparison isn't one-sided.
   head/tail string sequence. No equivalent in Zym; lists are mutable
   arrays.
 
-Don't trade any of these for Zym's features. The lifts in §1–§8 are
+Don't trade any of these for Zym's features. The lifts in §1 to §8 are
 **additive**, every one of them can coexist with Aether's existing
 guarantees.
 
@@ -679,13 +679,13 @@ In the [zym-lang/zym](https://github.com/zym-lang/zym) repository:
 - `src/natives/ZymVM.c` (entire file, 814 lines), the native binding
   that exposes `ZymVM()` to scripts. Pattern-match the
   `nativeZymVM_create` builder, the `VMData` struct, the `CREATE_METHOD`
-  macro at line 760, and the dispatcher construction at 784–794.
+  macro at line 760, and the dispatcher construction at 784-794.
 - `src/natives/marshal.c` (149 lines), the cross-VM value-copy logic.
   `marshal_reconstruct_value` at line 125 is the dispatch point;
   primitives pass through, containers recurse, unsupported types
   return null and the call sites check for it.
 - `src/runtime_loader.c` (the `while (result == ZYM_STATUS_YIELD)` loop
-  pattern, lines 172–175 and 189–192), the embedder-side yield/resume
+  pattern, lines 172-175 and 189-192), the embedder-side yield/resume
   shape that §2.3 recommends.
 - `src/natives/natives.c` (58 lines), the native registration table.
   Useful as a reference for how Zym names script-facing functions; the

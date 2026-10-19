@@ -262,7 +262,7 @@ semantics remains substantial even when borrowing another system's lessons.
 
 ## See also
 
-- [`../closures-and-builder-dsl.md`](../closures-and-builder-dsl.md) — the
+- [`../closures-and-builder-dsl.md`](../closures-and-builder-dsl.md): the
   immediate trailing-block and builder mechanisms used by the proposed facade.
-- [`closure-lineage-and-runtime-tradeoffs.md`](closure-lineage-and-runtime-tradeoffs.md)
-  — the host closure representation and its lifetime tradeoffs.
+- [`closure-lineage-and-runtime-tradeoffs.md`](closure-lineage-and-runtime-tradeoffs.md):
+  the host closure representation and its lifetime tradeoffs.
