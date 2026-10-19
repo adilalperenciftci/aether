@@ -4,8 +4,8 @@ Aether has no garbage collector. Every allocation is released at a point the
 source shows, in one of two ways:
 
 - **Values the program owns are counted by the compiler.** Strings, closures,
-  string sequences, and the structs, tuples, optionals and fixed-size arrays
-  built from them carry a reference count. Every place that holds one owns a
+  string sequences, and the structs, tuples, optionals, sums and fixed-size
+  arrays built from them carry a reference count. Every place that holds one owns a
   reference, a store takes one, and leaving a scope releases what the scope
   held. The program writes no free for them.
 - **Handles are freed by the program.** A container (`list.new()`,
@@ -134,10 +134,12 @@ function's result, a `string.seq_*` producer's) moves in, any other is
 retained, and `string.seq_tail` lends. The counts are atomic, so a sequence
 crosses actors by reference. See [sequences.md](sequences.md).
 
-### Structs, tuples, optionals and fixed-size arrays
+### Structs, tuples, optionals, sums and fixed-size arrays
 
 Each owning type has one generated retain and one drop, which every place
-uses: a copy retains every part, a drop releases every part. A struct
+uses: a copy retains every part, a drop releases every part. A sum's parts
+are its variants: a sum owns when one of its variant structs does, and its
+retain and drop are that variant's, for the variant its tag names. A struct
 parameter is borrowed; one its body writes into is copied on entry. A
 struct boxed with `heap.new(T)` owns its fields as a local struct does, and
 `heap.free(p)` releases them before it frees the box. A

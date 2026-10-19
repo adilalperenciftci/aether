@@ -596,10 +596,12 @@ void emit_struct_take(CodeGenerator* gen, ASTNode* e, const char* sname,
                       const char* target);
 const char* struct_owning_strings(CodeGenerator* gen, Type* t);
 ASTNode* find_struct_definition_by_name(ASTNode* program, const char* name);
+ASTNode* find_sum_definition_by_name(ASTNode* program, const char* name);
 
 /* #2921: R2/R3 for composite types (codegen_own.c). */
 typedef enum { OWN_RETAIN, OWN_DROP, OWN_ZERO, OWN_PUBLISH } OwnOp;
 int own_type_owns(CodeGenerator* gen, Type* t);
+int own_value_composite(CodeGenerator* gen, Type* t);
 void own_emit_part(CodeGenerator* gen, Type* pt, const char* lv, OwnOp op);
 void own_emit_prototypes(CodeGenerator* gen, Type* t);
 void emit_composite_take(CodeGenerator* gen, ASTNode* e, Type* t);

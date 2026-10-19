@@ -3950,9 +3950,9 @@ static ASTNode* find_enclosing_actor(ASTNode* root, ASTNode* arm_node) {
  *   - a string is retained (aether_str_capture), a closure too (#2494);
  *   - a struct is copied, by `_aether_copy_<Name>` when it owns strings, closures
  *     or arrays (#2504), so the copy holds its own;
- *   - a tuple, an optional and a fixed-size array are copied with a
- *     reference taken to each part they own (capture_take, #2921).
- * A sum or a slice is not judged here and is refused. */
+ *   - a tuple, an optional, a sum and a fixed-size array are copied with a
+ *     reference taken to each part they own (capture_take, #2921, #3005).
+ * A slice is not judged here and is refused. */
 static const char* arm_closure_state_read_refusal(CodeGenerator* gen, ASTNode* closure,
                                                   ASTNode* sd) {
     Type* t = sd ? sd->node_type : NULL;
@@ -3963,7 +3963,7 @@ static const char* arm_closure_state_read_refusal(CodeGenerator* gen, ASTNode* c
         case TYPE_LONGDOUBLE: case TYPE_FLOAT32: case TYPE_BOOL: case TYPE_BYTE:
         case TYPE_ENUM: case TYPE_BITSET: case TYPE_BITSTRUCT:
         case TYPE_PTR: case TYPE_ACTOR_REF: case TYPE_STRING: case TYPE_FUNCTION:
-        case TYPE_STRUCT: case TYPE_TUPLE: case TYPE_OPTIONAL:
+        case TYPE_STRUCT: case TYPE_TUPLE: case TYPE_OPTIONAL: case TYPE_SUM:
             return NULL;
         case TYPE_ARRAY: {
             Type* e = t->element_type;
@@ -3976,7 +3976,7 @@ static const char* arm_closure_state_read_refusal(CodeGenerator* gen, ASTNode* c
                 case TYPE_PTR: case TYPE_ACTOR_REF:
                     return NULL;
                 case TYPE_STRING: case TYPE_FUNCTION: case TYPE_STRUCT:
-                case TYPE_TUPLE: case TYPE_OPTIONAL:
+                case TYPE_TUPLE: case TYPE_OPTIONAL: case TYPE_SUM:
                     /* The copy takes a reference to each element (#2921). */
                     return NULL;
                 default:
@@ -4319,14 +4319,14 @@ static const char* capture_source(CodeGenerator* gen, const char* name) {
 
 static int capture_is_promoted(CodeGenerator* gen, const char* name, const char* parent_func);
 
-/* #2921: a capture of an owning tuple, optional, string sequence or
+/* #2921: a capture of an owning tuple, optional, sum, string sequence or
  * fixed-size array (not a shared cell): its type, or NULL. The environment's copy takes a reference
  * to each part (capture_take) and drops them with itself. */
 static Type* capture_composite_type(CodeGenerator* gen, const char* name, const char* parent_func) {
     if (capture_is_promoted(gen, name, parent_func)) return NULL;
     Type* t = lookup_var_type(gen, name, parent_func);
     if (!t || !own_type_owns(gen, t)) return NULL;
-    if (t->kind == TYPE_TUPLE || t->kind == TYPE_OPTIONAL || t->kind == TYPE_PTR) return t;
+    if (own_value_composite(gen, t) || t->kind == TYPE_PTR) return t;
     return type_is_sized_array(t) && t->array_size > 0 ? t : NULL;
 }
 
@@ -7021,12 +7021,12 @@ static int call_is_c_malloc(CodeGenerator* gen, ASTNode* call) {
     return sym && strcmp(sym, "malloc") == 0;
 }
 
-/* The owning optional, tuple or string sequence parameter type `t` when
- * argument `arg` passes it a value nothing holds (a call's result, a
+/* The owning optional, tuple, sum or string sequence parameter type `t`
+ * when argument `arg` passes it a value nothing holds (a call's result, a
  * literal, a fresh string wrapped); NULL for a place, which the callee
  * borrows as it is, and for a sequence a call lends (`string.seq_tail`). */
 static Type* fresh_composite_arg_type(CodeGenerator* gen, ASTNode* arg, Type* t) {
-    if (!t || (t->kind != TYPE_OPTIONAL && t->kind != TYPE_TUPLE && !is_string_seq_ptr_type(t)) ||
+    if (!t || (!own_value_composite(gen, t) && !is_string_seq_ptr_type(t)) ||
         !own_type_owns(gen, t))
         return NULL;
     if (!arg || arg->type == AST_NONE_LITERAL || !hoist_ready(gen)) return NULL;
@@ -11142,9 +11142,10 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                 }
                 /* #2820: an optional field takes its value as an optional
                  * binding does, a bare value wrapped and `none` the empty
-                 * one. */
-                if (fdecl && fdecl->kind == TYPE_OPTIONAL && own_type_owns(gen, fdecl)) {
-                    emit_composite_take(gen, fv, fdecl);   /* #2921 */
+                 * one; an owning optional, tuple or sum field takes it as
+                 * its local does (#2921, #3005). */
+                if (own_value_composite(gen, fdecl)) {
+                    emit_composite_take(gen, fv, fdecl);
                 } else if (fdecl && fdecl->kind == TYPE_OPTIONAL) {
                     emit_optional_coerced(gen, fv, fdecl);
                 } else if (fdecl && fdecl->kind == TYPE_SUM && needs_sum_coerce(fv, fdecl)) {
@@ -11176,8 +11177,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                             !fv->node_type->is_fnptr)) {
                     /* #2525: a closure field holds a reference of its own. */
                     emit_closure_take(gen, fv);
-                } else if (fdecl && (fdecl->kind == TYPE_TUPLE || is_string_seq_ptr_type(fdecl)) &&
-                           own_type_owns(gen, fdecl)) {
+                } else if (is_string_seq_ptr_type(fdecl)) {
                     emit_composite_take(gen, fv, fdecl);   /* #2921 */
                 } else {
                     generate_expression(gen, fv);

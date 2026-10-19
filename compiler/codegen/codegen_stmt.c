@@ -3502,6 +3502,16 @@ void emit_composite_take(CodeGenerator* gen, ASTNode* e, Type* t) {
         fprintf(gen->output, " }");
         return;
     }
+    /* #3005: a variant into its sum is wrapped, the variant taken as a
+     * place of its struct type takes it. */
+    if (t->kind == TYPE_SUM && needs_sum_coerce(e, t)) {
+        const char* v = e->node_type->struct_name;
+        fprintf(gen->output, "(%s){ .tag = %s__%s, .data.%s_ = ", t->struct_name, t->struct_name,
+                v, v);
+        emit_value_take(gen, e, e->node_type);
+        fprintf(gen->output, " }");
+        return;
+    }
     /* #3003: a value that branches is taken branch by branch, each as the
      * value it gives is (a tuple literal's parts taken, a call's result
      * moved in). Copied whole, a fresh string in a branch's tuple was
@@ -3660,7 +3670,7 @@ void emit_owning_store(CodeGenerator* gen, const char* lv, Type* t, ASTNode* rhs
     fprintf(gen->output, "}\n");
 }
 
-/* #2921: `o.f = v` for a field of an owning tuple, optional or string
+/* #2921: `o.f = v` for a field of an owning tuple, optional, sum or string
  * sequence type: the field takes `v` and drops what it held; through a
  * pointer, other threads may read it, so what it takes is published
  * (#2919). */
@@ -3669,7 +3679,7 @@ static int emit_composite_field_store(CodeGenerator* gen, ASTNode* lhs, ASTNode*
         return 0;
     Type* ft = lhs->node_type;
     Type* ot = lhs->children[0]->node_type;
-    if (!ft || (ft->kind != TYPE_TUPLE && ft->kind != TYPE_OPTIONAL && !is_string_seq_ptr_type(ft)) ||
+    if (!ft || (!own_value_composite(gen, ft) && !is_string_seq_ptr_type(ft)) ||
         !own_type_owns(gen, ft) || !ot || (ot->kind != TYPE_STRUCT && ot->kind != TYPE_PTR))
         return 0;
     const char* sname = ot->kind == TYPE_STRUCT ? ot->struct_name
@@ -3723,11 +3733,12 @@ static int emit_slice_element_store(CodeGenerator* gen, ASTNode* lhs, ASTNode* r
     return 1;
 }
 
-/* An owning local a binding handles itself: a tuple, an optional or a
- * closure (#2921; a string and a struct have paths of their own). */
+/* An owning local a binding handles itself: a tuple, an optional, a
+ * closure, a string sequence or a sum (#2921, #3005; a string and a struct
+ * have paths of their own). */
 static int composite_local_type(CodeGenerator* gen, Type* t) {
     return t && (t->kind == TYPE_TUPLE || t->kind == TYPE_OPTIONAL || t->kind == TYPE_FUNCTION ||
-                 t->kind == TYPE_PTR) &&
+                 t->kind == TYPE_PTR || t->kind == TYPE_SUM) &&
            own_type_owns(gen, t);
 }
 
@@ -5015,10 +5026,10 @@ static void emit_cell_store(CodeGenerator* gen, const char* name, Type* t, ASTNo
     const char* sname = struct_owning_strings(gen, t);
     Type* cell_t = promoted_cell_type(gen, name);
     Type* ot = (cell_t && cell_t->kind == TYPE_OPTIONAL) ? cell_t : t;
-    if (ot && (ot->kind == TYPE_OPTIONAL || ot->kind == TYPE_TUPLE || is_string_seq_ptr_type(ot)) &&
+    if (ot && (own_value_composite(gen, ot) || is_string_seq_ptr_type(ot)) &&
         !is_opt_string_type(ot) && own_type_owns(gen, ot)) {
-        /* #2921: a tuple, optional or string sequence cell takes the value
-         * and drops the one it held; the closures sharing it may run
+        /* #2921: a tuple, optional, sum or string sequence cell takes the
+         * value and drops the one it held; the closures sharing it may run
          * anywhere (#2919). */
         emit_owning_store(gen, cg_internf("(*%s)", name), ot, value, 1);
     } else if ((t && t->kind == TYPE_OPTIONAL) || (cell_t && cell_t->kind == TYPE_OPTIONAL)) {
@@ -5047,7 +5058,9 @@ static void emit_cell_store(CodeGenerator* gen, const char* name, Type* t, ASTNo
         fprintf(gen->output, ");\n");
     } else {
         fprintf(gen->output, "*%s = ", name);
-        generate_expression(gen, value);
+        /* A variant into a sum cell is wrapped (#3005). */
+        if (t && t->kind == TYPE_SUM) emit_sum_coerced(gen, value, t);
+        else generate_expression(gen, value);
         fprintf(gen->output, ";\n");
     }
 }
@@ -5323,6 +5336,12 @@ void emit_promoted_cell_declaration(CodeGenerator* gen, const char* name,
             /* #2921: a string sequence cell holds a reference of its own. */
             if (init_expr) emit_seq_take(gen, init_expr);
             else fprintf(gen->output, "string_seq_retain(%s)", init_text);
+        } else if (init_expr && own_value_composite(gen, var_type)) {
+            /* R3: an owning composite cell holds a value of its own, a
+             * variant wrapped into its sum (#3005). */
+            emit_composite_take(gen, init_expr, var_type);
+        } else if (init_expr && var_type && var_type->kind == TYPE_SUM) {
+            emit_sum_coerced(gen, init_expr, var_type);
         } else if (init_expr) {
             generate_expression(gen, init_expr);
         } else {
@@ -7615,12 +7634,14 @@ static void emit_tuple_call_discard(CodeGenerator* gen, ASTNode* call) {
     fprintf(gen->output, " }");
 }
 
-static int emit_tuple_passthrough_return(CodeGenerator* gen, ASTNode* v) {
+static int emit_composite_passthrough_return(CodeGenerator* gen, ASTNode* v) {
     Type* rt = gen->current_func_return_type;
-    if (!rt || rt->kind != TYPE_TUPLE || gen->in_main_function || !gen->current_function ||
-        !v || !v->node_type || v->node_type->kind != TYPE_TUPLE || !own_type_owns(gen, rt))
+    if (!rt || (rt->kind != TYPE_TUPLE && rt->kind != TYPE_SUM) || gen->in_main_function ||
+        !gen->current_function || !v || !v->node_type || !own_type_owns(gen, rt) ||
+        (rt->kind == TYPE_TUPLE && v->node_type->kind != TYPE_TUPLE))
         return 0;
-    /* R3: the caller gets references of its own, a call's moved through. */
+    /* R3: the caller gets references of its own, a call's moved through; a
+     * sum's variant is wrapped, taken as its struct is (#3005). */
     emit_composite_take(gen, v, rt);
     return 1;
 }
@@ -7659,7 +7680,7 @@ static void emit_return_value(CodeGenerator* gen, ASTNode* stmt) {
         emit_opt_string_return(gen, stmt->children[0], gen->current_func_return_type);
         return;
     }
-    if (emit_tuple_passthrough_return(gen, stmt->children[0])) return;   /* #2751 */
+    if (emit_composite_passthrough_return(gen, stmt->children[0])) return;   /* #2751 */
     if (gen->current_func_return_type &&
         gen->current_func_return_type->kind == TYPE_OPTIONAL &&
         needs_optional_coerce(stmt->children[0], gen->current_func_return_type)) {
@@ -9317,6 +9338,9 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
             // the tagged union (a value already of the sum type passes through).
             if (stmt->value && strcmp(stmt->value, "_") != 0 &&
                 stmt->node_type && stmt->node_type->kind == TYPE_SUM &&
+                /* A closure's variable is a cell, as any variable a
+                 * closure writes is (Route 1 below, #3005). */
+                !is_promoted_capture(gen, stmt->value) &&
                 /* A match is bound arm by arm (below), each arm's value
                  * wrapped as this wraps one (#2993). */
                 !(stmt->child_count > 0 && stmt->children[0] &&
@@ -11746,18 +11770,20 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                 int arr_ret = type_is_sized_array(rtt);
                 /* #3003: a tuple that owns its parts is a local of its own,
                  * as an array is: each arm's value taken into it, and its
-                 * scope's exits drop it once the return has taken its copy. */
-                int tup_ret = !arr_ret && rtt && rtt->kind == TYPE_TUPLE &&
+                 * scope's exits drop it once the return has taken its copy.
+                 * A sum that owns is one too (#3005). */
+                int own_ret = !arr_ret && rtt &&
+                              (rtt->kind == TYPE_TUPLE || rtt->kind == TYPE_SUM) &&
                               own_type_owns(gen, rtt);
                 print_indent(gen);
                 if (arr_ret)
                     fprintf(gen->output, "%s = {0};\n", c_member_decl(rtt, tmp));
-                else if (tup_ret)
+                else if (own_ret)
                     fprintf(gen->output, "%s %s = {0};\n", ct, tmp);
                 else
                     fprintf(gen->output, str_ret ? "%s %s = NULL;\n" : "%s %s;\n", ct, tmp);
                 if (str_ret) mark_heap_string_var(gen, tmp);
-                if ((arr_ret || tup_ret) && own_type_owns(gen, rtt)) {
+                if ((arr_ret || own_ret) && own_type_owns(gen, rtt)) {
                     mark_var_declared_typed(gen, tmp, rtt);
                     push_own_drop(gen, tmp, rtt, stmt->line, stmt->column);
                 }
@@ -11772,7 +11798,7 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                 gen->match_result_bound = NULL;
                 Type* saved_type = gen->match_result_type;
                 gen->match_result_cell = NULL;
-                gen->match_result_own = (arr_ret || tup_ret) ? rtt : NULL;
+                gen->match_result_own = (arr_ret || own_ret) ? rtt : NULL;
                 /* #2996: a variant arm is wrapped into a sum result. */
                 gen->match_result_type = rtt;
                 /* A match returned from an optional result: each arm's

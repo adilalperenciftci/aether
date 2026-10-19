@@ -1780,10 +1780,10 @@ For the full design rationale, edge cases, and worked examples, see [hide-and-se
 ## Memory Management
 
 Aether has no garbage collector. Values the program owns (strings, closures,
-string sequences, and the structs, tuples, optionals and fixed-size arrays
-built from them) are reference counted by the compiler: every place holds one
-reference, a store takes one, and leaving a scope releases what the scope held,
-so the program writes no free for them ([String ownership](#string-ownership)).
+string sequences, and the structs, tuples, optionals, sums and fixed-size
+arrays built from them) are reference counted by the compiler: every place
+holds one reference, a store takes one, and leaving a scope releases what the
+scope held, so the program writes no free for them ([String ownership](#string-ownership)).
 Handles (a list, a map, a C buffer, an open file) are `ptr`s, which own
 nothing, and the program frees them, with `defer`. [Memory Management
 Guide](memory-management.md) states the rules in full.

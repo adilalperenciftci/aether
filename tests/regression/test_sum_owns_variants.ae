@@ -1,0 +1,188 @@
+// Regression (#3005, R1): a sum whose variant owns a string or a closure
+// owns what that variant owns, as a struct, a tuple and an optional own
+// their parts. Every place that holds one (a local, a field, an element, a
+// tuple slot, an optional, a closure's capture and cell, actor state, a
+// message field, a parameter, a temporary, a return) takes a reference of
+// its own and gives it back when the place is done. The sum had no retain
+// or drop at all: every fresh sum leaked its variant's string or closure
+// environment, and a copy freed on one side was read on the other.
+//
+// The heap check runs where the count is exact (mem.heap_in_use_exact):
+// after a warm-up, some window of the same work grows by exactly 0
+// (mem.steady_growth). Strings are built from parameters, because
+// string.concat of two literals folds to a literal.
+
+import std.mem
+import std.string
+
+extern exit(code: int)
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+struct Named {
+    name: string
+}
+
+struct Act {
+    f: fn
+}
+
+struct Plain {
+    n: int
+}
+
+type Owned = Named | Plain
+
+type Acting = Act | Plain
+
+struct Box {
+    v: Owned
+}
+
+message Put {
+    v: Owned
+}
+
+message Ask {}
+
+message Got {
+    n: int
+}
+
+actor Keeper {
+    state Owned v
+    receive {
+        Put(v: x) -> {
+            v = x
+        }
+        Ask() -> {
+            reader = || {
+                return name_of(v)
+            }
+            string r = call(reader)
+            reply Got { n: string.length(r) }
+        }
+    }
+}
+
+named(w: string, t: string) -> Owned {
+    return Named { name: string.concat(w, t) }
+}
+
+acting(w: string, t: string) -> Acting {
+    c = string.concat(w, t)
+    return Act { f: || { return c } }
+}
+
+name_of(o: Owned) -> string {
+    return match o {
+        Named -> o.name
+        Plain -> ""
+    }
+}
+
+run_of(a: Acting) -> string {
+    match a {
+        Act -> {
+            string s = call(a.f)
+            return s
+        }
+        Plain -> {
+            return ""
+        }
+    }
+    return ""
+}
+
+// A variant handed back as the sum, one of two by a match.
+pick(w: string, k: int) -> Owned {
+    return match k % 2 {
+        0 -> Named { name: string.concat(w, "#even") }
+        _ -> Plain { n: k }
+    }
+}
+
+// A parameter's sum kept in a field: the field takes its own reference.
+keep(o: Owned) -> Box {
+    return Box { v: o }
+}
+
+places(w: string, k: int) {
+    // A local, rebound: the old value is dropped.
+    x = named(w, "#a")
+    x = named(w, "#b")
+    check(name_of(x) == "w#b", "a rebound local")
+    // A copy: both hold a reference of their own.
+    y = x
+    x = named(w, "#c")
+    check(name_of(y) == "w#b", "a copy, after the original was rebound")
+    // A field, overwritten.
+    b = Box { v: named(w, "#d") }
+    b.v = named(w, "#e")
+    check(name_of(b.v) == "w#e", "a field")
+    // An element, a tuple slot, an optional.
+    arr = [named(w, "#f"), named(w, "#g")]
+    check(name_of(arr[1]) == "w#g", "an element")
+    t = (named(w, "#h"), 1)
+    o1, _ = t
+    check(name_of(o1) == "w#h", "a tuple slot")
+    let opt: Owned? = named(w, "#i")
+    check(name_of(opt!) == "w#i", "an optional")
+    // A capture, then the local overwritten.
+    z = named(w, "#j")
+    f = || {
+        return name_of(z)
+    }
+    z = named(w, "#k")
+    string r1 = call(f)
+    check(r1 == "w#j", "the closure's copy")
+    // A cell, which the closure rebinds.
+    c = named(w, "#l")
+    g = || {
+        c = named(w, "#m")
+        return 1
+    }
+    check(call(g) == 1, "the closure ran")
+    check(name_of(c) == "w#m", "the cell the closure rebound")
+    // A parameter kept, a temporary passed, a value returned.
+    kept = keep(y)
+    check(name_of(kept.v) == "w#b", "a parameter kept in a field")
+    check(name_of(named(w, "#n")) == "w#n", "a temporary")
+    string p = name_of(pick(w, k))
+    if k % 2 == 0 {
+        check(p == "w#even", "a match returning a variant that owns")
+    } else {
+        check(p == "", "a match returning a plain variant")
+    }
+    // A closure-owning variant.
+    a = acting(w, "#o")
+    a = acting(w, "#p")
+    check(run_of(a) == "w#p", "a closure-owning variant")
+}
+
+round(w: string, h: ptr) {
+    k = 0
+    while k < 20 {
+        places(w, k)
+        h ! Put { v: named(w, "#q") }
+        int n = h ? Ask {}
+        check(n == 3, "the actor's state, read by a closure")
+        k = k + 1
+    }
+}
+
+main() {
+    w = "w"
+    h = spawn(Keeper())
+    round(w, h)
+    if mem.heap_in_use_exact() {
+        grown = mem.steady_growth(|| { round(w, h) }, 5)
+        check(grown == 0, "20 rounds grew the heap by ${grown} bytes in every window")
+    }
+    println("=== test_sum_owns_variants passed ===")
+}

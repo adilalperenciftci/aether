@@ -2795,3 +2795,13 @@ ASTNode* find_struct_definition_by_name(ASTNode* program, const char* name) {
     }
     return NULL;
 }
+
+/* The AST_SUM_TYPE_DEF named `name` in the program (its children name the
+ * variant structs), or NULL. */
+ASTNode* find_sum_definition_by_name(ASTNode* program, const char* name) {
+    for (int i = 0; program && name && i < program->child_count; i++) {
+        ASTNode* c = program->children[i];
+        if (c && c->type == AST_SUM_TYPE_DEF && c->value && strcmp(c->value, name) == 0) return c;
+    }
+    return NULL;
+}
