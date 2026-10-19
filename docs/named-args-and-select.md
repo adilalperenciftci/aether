@@ -61,6 +61,21 @@ The arguments are still evaluated in the order written, left to right:
   arguments; a closure or a function pointer called with one is an error
 - The colon syntax is consistent with parameter definitions: `func(name: type)`
 
+Each mistake is a compile error (E0200) at the call:
+
+```aether,fails
+box(w: int, h: int = 1, d: int = 1) -> int {
+    return w * 100 + h * 10 + d
+}
+
+main() {
+    println(box(2, w: 3))       // parameter 'w' of 'box' is given twice
+    println(box(h: 2))          // the call of 'box' gives no argument for parameter 1 'w'
+    println(box(w: 1, q: 2))    // 'box' has no parameter named 'q'
+    println(box(w: 1, 5))       // a positional argument after a named one
+}
+```
+
 ## List Literals
 
 Array literals with square bracket syntax:
@@ -131,8 +146,8 @@ separator = select(windows: "\\", other: "/")
 
 ### Missing platform is a compile error
 
-If a platform is missing and there's no `other:` fallback, the Aether
-compiler emits an error and the C compiler emits `#error`:
+If a platform is missing and there is no `other:` fallback, the Aether
+compiler reports an error and the C compiler stops at an `#error`:
 
 ```aether,fragment
 // ERROR: no value for windows or macos, no other: fallback
@@ -168,37 +183,21 @@ max_threads = select(linux: 16, windows: 8, macos: 12)
 has_io_uring = select(linux: 1, other: 0)
 ```
 
-### Printing string results
+### String results
 
-String values from `select()` store correctly as `const char*`, but type
-inference doesn't yet propagate through the call site. Both a direct
-`println(os)` and string interpolation currently print the pointer as an
-integer, because the result is treated as an `int`:
+A `select()` whose values are strings is a `string`, and binds, prints and
+interpolates as one:
 
-```aether,fragment
-os = select(linux: "Linux", windows: "Windows", macos: "macOS")
-println(os)               // BROKEN: prints a garbage integer, not the string
-println("os: ${os}")      // BROKEN: emits printf(..., %d) for the const char*
-```
+```aether,run
+import std.string
 
-Until this is fixed, either inline the `select()` directly in the
-`println()` call, or return it from a `-> string` function and print that
-result:
-
-```aether,fragment
-// Works: inline, where the string type is known at the call site
-println(select(linux: "Linux", windows: "Windows", macos: "macOS"))
-
-// Works: a -> string function fixes the type before printing
-os_name() -> string {
-    return select(linux: "Linux", windows: "Windows", macos: "macOS")
-}
 main() {
-    os = os_name()
-    println(os)               // macOS
-    println("os: ${os}")      // os: macOS
+    sep = select(windows: "\\", other: "/")
+    os = select(linux: "Linux", windows: "Windows", macos: "macOS")
+    println("${string.length(sep)} ${string.length(os) > 0}")
 }
 ```
 
-Tracked on the issue backlog as type-inference propagation through
-`select()`.
+```output
+1 true
+```
