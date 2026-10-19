@@ -85,7 +85,6 @@ main() {
 
     // Single element
     single = [42];
-    single_len = 1;
     match (single) {
         [] -> { print("  [42]: empty\n"); }
         [x] -> {
@@ -98,7 +97,6 @@ main() {
 
     // Head-tail pattern (cons)
     nums = [1, 2, 3, 4, 5];
-    nums_len = 5;
     match (nums) {
         [] -> { print("  [1,2,3,4,5]: empty\n"); }
         [h | t] -> {
@@ -110,7 +108,6 @@ main() {
 
     // Multi-element pattern
     pair = [10, 20];
-    pair_len = 2;
     match (pair) {
         [] -> { print("  [10,20]: empty\n"); }
         [x] -> { print("  [10,20]: single\n"); }
@@ -129,7 +126,6 @@ main() {
     // Practical example: process first element differently
     print("Processing list:\n");
     data = [100, 200, 300, 400];
-    data_len = 4;
     match (data) {
         [] -> { print("  No data to process\n"); }
         [first | rest] -> {

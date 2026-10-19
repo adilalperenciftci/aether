@@ -17,7 +17,6 @@ main() {
 
     // Test 2: Single element pattern [x]
     single = [42]
-    single_len = 1
 
     print("\nTest 2: Single element pattern\n")
     match (single) {
@@ -32,7 +31,6 @@ main() {
 
     // Test 3: Cons pattern [h|t] on multi-element array
     nums = [1, 2, 3, 4, 5]
-    nums_len = 5
 
     print("\nTest 3: Cons pattern [h|t] on 5 elements\n")
     match (nums) {
@@ -46,7 +44,6 @@ main() {
 
     // Test 4: Two element pattern [a, b]
     pair = [10, 20]
-    pair_len = 2
 
     print("\nTest 4: Two element pattern [a, b]\n")
     match (pair) {
@@ -63,7 +60,6 @@ main() {
 
     // Test 5: Three element pattern [a, b, c]
     triple = [100, 200, 300]
-    triple_len = 3
 
     print("\nTest 5: Three element pattern [a, b, c]\n")
     match (triple) {
@@ -83,7 +79,6 @@ main() {
     // Test 6: Cons pattern on single element array (edge case)
     // [h|t] on [99] should match with h=99, t=empty
     one = [99]
-    one_len = 1
 
     print("\nTest 6: Cons [h|t] on single element\n")
     match (one) {
@@ -97,7 +92,6 @@ main() {
 
     // Test 7: Cons pattern on two element array
     two = [7, 8]
-    two_len = 2
 
     print("\nTest 7: Cons [h|t] on two elements\n")
     match (two) {
@@ -111,7 +105,6 @@ main() {
 
     // Test 8: Wildcard fallthrough with list patterns
     big = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
-    big_len = 10
 
     print("\nTest 8: Wildcard fallthrough\n")
     match (big) {
@@ -134,7 +127,6 @@ main() {
 
     // Test 10: Single does not match pair
     one2 = [5]
-    one2_len = 1
 
     print("\nTest 10: Single does not match pair\n")
     match (one2) {

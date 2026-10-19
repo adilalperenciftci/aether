@@ -1366,31 +1366,37 @@ are unaffected.
 
 ### List Pattern Matching
 
-Arrays can be matched with list patterns. Requires a corresponding `_len` variable:
+Arrays, slices and `*StringSeq` values can be matched with list patterns. A
+fixed-size array (`T[N]`) is matched by its length `N`, known when it is
+compiled, and a slice by the length it carries. A cons pattern's tail (`t`
+in `[h|t]`) is a slice of the rest, its length `t.len`:
+
+```aether,run
+main() {
+    nums = [1, 2, 3]
+    match nums {
+        [] -> println("empty list")
+        [x] -> println("single element: ${x}")
+        [a, b] -> println("pair: ${a}, ${b}")
+        [h|t] -> println("head: ${h}, ${t.len} more")
+    }
+}
+```
+```output
+head: 1, 2 more
+```
+
+A value with no length of its own, a bare pointer, takes it from a local of
+its name and `_len`. A local bound to `[]` alone is one (the literal gives it
+no element type):
 
 ```aether,fragment
-nums = [1, 2, 3];
-nums_len = 3;
+empty = []
+empty_len = 0
 
-match (nums) {
-    [] -> { print("empty list\n"); }
-    [x] -> {
-        print("single element: ");
-        print(x);
-        print("\n");
-    }
-    [a, b] -> {
-        print("pair: ");
-        print(a);
-        print(", ");
-        print(b);
-        print("\n");
-    }
-    [h|t] -> {
-        print("head: ");
-        print(h);
-        print(", tail has rest\n");
-    }
+match empty {
+    [] -> println("empty")
+    _ -> println("not empty")
 }
 ```
 
@@ -4307,9 +4313,10 @@ nothing
 got 5
 ```
 
-List patterns take an array with its `_len` variable ([List Pattern
-Matching](#list-pattern-matching)), a slice, which carries its length, or a
-`*StringSeq`:
+List patterns take a fixed-size array, whose length is known when it is
+compiled, a slice, which carries its length, or a `*StringSeq` (a bare
+pointer takes its `_len` variable, [List Pattern
+Matching](#list-pattern-matching)):
 
 ```aether,run
 describe(xs: int[]) -> string {

@@ -10,7 +10,8 @@
 main() {
     print("=== List Pattern Matching Demo ===\n\n");
 
-    // Arrays require a corresponding _len variable for pattern matching
+    // A fixed-size array is matched by its length. `[]` alone has no
+    // element type and is a bare pointer, so its local takes a `_len`.
     nums = [1, 2, 3, 4, 5];
     nums_len = 5;
 
@@ -18,7 +19,6 @@ main() {
     empty_len = 0;
 
     single = [42];
-    single_len = 1;
 
     // Pattern match on empty array
     print("Matching empty array:\n");

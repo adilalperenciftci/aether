@@ -1,0 +1,88 @@
+// #2995: a list pattern over a fixed-size array failed in C, "'xs_len'
+// undeclared": the match read the length from a `<name>_len` local, which a
+// fixed-size array has no need of. A `T[N]` has its length N at compile
+// time and a slice carries its own, so the match reads those; only a value
+// with no length of its own, a bare pointer (a local bound to `[]`), reads
+// the documented `<name>_len`. A cons pattern's tail is a slice and gives
+// its length as `.len`. Before the fix this program did not compile.
+
+extern exit(code: int)
+
+struct Bag {
+    items: int[3]
+}
+
+var bad = 0
+
+check(what: string, got: string, want: string) {
+    if got != want {
+        println("FAIL ${what}: got ${got}, want ${want}")
+        bad = 1
+    }
+}
+
+describe(xs: int[]) -> string {
+    return match xs {
+        [] -> "empty"
+        [x] -> "one ${x}"
+        [a, b] -> "two ${a} ${b}"
+        [h | t] -> "head ${h}, ${t.len} more"
+    }
+}
+
+main() {
+    // A local fixed-size array, each pattern.
+    xs = [9, 1]
+    r = match xs {
+        [h | t] -> h * 10 + t.len
+        [] -> 0
+    }
+    check("cons", "${r}", "91")
+    pair = match xs {
+        [a, b] -> a + b
+        _ -> 0
+    }
+    check("pair", "${pair}", "10")
+    one = [42]
+    single = match one {
+        [] -> -1
+        [x] -> x
+        _ -> 0
+    }
+    check("single", "${single}", "42")
+    three = [1, 2, 3]
+    two = match three {
+        [a, b] -> a + b
+        [a, b, c] -> a + b + c
+        _ -> 0
+    }
+    check("length decides", "${two}", "6")
+
+    // A field that is a fixed-size array, and the tail it gives.
+    bag = Bag { items: [4, 5, 6] }
+    tail = match bag.items {
+        [_ | t] -> t.len * 100 + t[0] * 10 + t[1]
+        [] -> 0
+    }
+    check("field", "${tail}", "256")
+
+    // A slice carries its length; an array passed as one.
+    check("slice", describe(three[0..2]), "two 1 2")
+    check("array as a slice", describe(three), "head 1, 2 more")
+    check("empty slice", describe(three[0..0]), "empty")
+
+    // A local bound to `[]` has no element type and is a bare pointer,
+    // with no length of its own: `<name>_len` says it.
+    nothing = []
+    nothing_len = 0
+    got = match nothing {
+        [] -> "empty"
+        _ -> "other"
+    }
+    check("bare pointer", got, "empty")
+
+    if bad != 0 {
+        exit(1)
+    }
+    println("ok")
+}

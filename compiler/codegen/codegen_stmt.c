@@ -1476,14 +1476,12 @@ static void generate_list_pattern_bindings(CodeGenerator* gen, ASTNode* pattern,
         }
         if (tail && tail->type == AST_PATTERN_VARIABLE && tail->value) {
             if (expr_references_var(body, tail->value)) {
-                /* #1286: the tail is a `T[]` slice over the rest; `_len`
-                 * is kept for code that still reads the companion. */
+                /* #1286: the tail is a `T[]` slice over the rest, its
+                 * length `.len`. #2995: it has no `<name>_len` companion,
+                 * which is a raw pointer's alone; the checker never
+                 * declared one, and the C local hid a user's of that name. */
                 print_line(gen, "AetherSlice %s = aether_slice_make(&_match_arr[1], (uint64_t)(%s - 1));",
                            tail->value, len_name);
-                print_line(gen, expr_references_var(body, cg_internf("%s_len", tail->value))
-                                    ? "int %s_len = %s - 1;"
-                                    : "int %s_len = %s - 1; (void)%s_len;",
-                           tail->value, len_name, tail->value);
                 mark_pattern_binding(gen, tail->value, TYPE_ARRAY);
             }
         }
@@ -11218,7 +11216,16 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                     fprintf(gen->output, "int %s = (int)aether_slice_len(", len_name);
                     generate_expression(gen, match_expr);
                     fprintf(gen->output, ");\n");
+                } else if (uses_list_patterns && type_is_sized_array(match_expr->node_type) &&
+                           match_expr->node_type->array_size > 0) {
+                    /* #2995: a `T[N]` has its length when it is compiled.
+                     * It was read from a `<name>_len` local, which a
+                     * fixed-size array has no need of: "'xs_len'
+                     * undeclared". */
+                    print_line(gen, "int %s = %d;", len_name, match_expr->node_type->array_size);
                 } else if (uses_list_patterns) {
+                    /* A raw pointer has no length: the local `<name>_len`
+                     * the language reference documents gives it. */
                     print_indent(gen);
                     fprintf(gen->output, "int %s = ", len_name);
                     generate_expression(gen, match_expr);

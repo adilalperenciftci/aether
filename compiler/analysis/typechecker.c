@@ -4553,10 +4553,15 @@ static void collect_references(ASTNode* node, TrackedVar* vars, int var_count) {
     }
 
     // Match statements with list patterns implicitly reference <expr>_len variables
-    // (the codegen generates: int _match_len = <expr>_len;)
+    // (the codegen generates: int _match_len = <expr>_len;). #2995: only
+    // over a subject with no length of its own, a raw pointer: a fixed-size
+    // array's is its size, and a slice and a `*StringSeq` carry theirs, so
+    // a `_len` beside one of them is a local nothing reads.
     if (node->type == AST_MATCH_STATEMENT && node->child_count > 0) {
         ASTNode* match_expr = node->children[0];
-        if (match_expr && match_expr->type == AST_IDENTIFIER && match_expr->value) {
+        Type* mt = match_expr ? match_expr->node_type : NULL;
+        if (match_expr && match_expr->type == AST_IDENTIFIER && match_expr->value &&
+            !(mt && mt->kind == TYPE_ARRAY) && !is_string_seq_ptr_type(mt)) {
             char len_name[256];
             snprintf(len_name, sizeof(len_name), "%s_len", match_expr->value);
             for (int i = 0; i < var_count; i++) {

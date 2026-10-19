@@ -112,7 +112,6 @@ main() {
     // List pattern matching
     println("\n6. List patterns:")
     nums = [10, 20, 30]
-    nums_len = 3
     match (nums) {
         [] -> { println("  Empty list") }
         [x] -> {
