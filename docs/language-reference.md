@@ -2218,12 +2218,10 @@ reassigns the variable, or uses it with an optional-only operator (`== none`,
 `!= none`, `!`, `??`, or `?.`), since those need the optional form. A nested
 guard on the same variable still narrows its own innermost block.
 
-The narrowed value flows through expressions, field access, and function
-arguments. Assigning the narrowed variable *directly* to a pre-existing variable
-(`existing = x`) is one spot the inner type does not yet propagate (the outer
-variable keeps its optional type); use an expression (`existing = x + 0`) or a
-fresh binding there: a new local bound to the narrowed variable (`v = x`) is
-its inner type.
+The narrowed value flows through expressions, field access, function
+arguments and stores: `existing = x` stores the inner value into a local of
+the inner type, and a new local bound to the narrowed variable (`v = x`) has
+the inner type (#2848).
 
 ### Functions
 
@@ -3577,6 +3575,8 @@ A named Aether function bound to a typed function pointer is its address there t
 A closure cannot be stored in any of those slots, as it cannot be passed to the parameter: a closure literal, or a local bound to one, given to a struct field, an array element, a local, a module-level `var` or a function result of a typed function pointer type is a type error naming the field or variable. Store a named function there, or declare the slot a bare `fn` and call it with `call(...)`.
 
 A typed function pointer's own parameter can be a typed function pointer, `fn(fn(string) -> string, string) -> string`, and a function with that parameter fits it.
+
+A call through a typed function pointer converts a slice argument as a direct call does: `[]` and `null` become the empty slice, and an array a view of its elements (#2856). A closure whose signature the compiler knows converts its arguments the same way, an optional's bare value and `none` included.
 
 A function's result is written as any other typed function pointer, `-> fn(ptr) -> string` (the inner `-> string` is part of the type) or `-> Getter` for a `cfn Getter`, and a call to the function is that pointer: it binds to a local, a field or a parameter, and `f as ptr` gives back the pointer it holds.
 
