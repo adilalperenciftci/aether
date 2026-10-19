@@ -368,12 +368,14 @@ On Windows `aether_thread.h` implements pthreads with Win32 primitives and inclu
 - NUMA-aware placement on the local node of the assigned core
 - Falls back to standard allocation on non-NUMA systems
 
-**String Ownership (heap-string tracker):**
-- Every string variable carries a compiler-emitted `_heap_<name>` companion that flips between 0 (literal) and 1 (heap-allocated) on each reassignment
-- Trackers are emitted at function-entry scope by a dedicated codegen pre-pass (`hoist_heap_string_trackers` in `compiler/codegen/codegen_stmt.c`), making cross-block reassignment safe
-- Reassignment goes through a unified wrapper handling all four heap/literal transitions: `{ const char* _tmp_old = s; s = <rhs>; if (_heap_s) free(_tmp_old); _heap_s = <rhs_is_heap>; }`
-- Recognised heap sources: hardcoded stdlib `string.{concat,substring,to_upper,to_lower,trim}`, string interpolation `"foo ${x}"`, and user-defined `-> string` functions whose body provably returns heap (recursive structural escape analysis with cycle detection, memoised on the function-definition AST node's annotation slot)
-- Runtime cost: zero, just `if (...) free(...)` per assignment. Codegen-time cost: O(K) per call site for fn-def lookup where K is the number of top-level fn definitions; total well under a millisecond for typical programs
+**Ownership of strings, closures and composites** (the rules are in
+[memory-management.md](memory-management.md#values-the-program-owns), the
+design and its record in [design/ownership-model.md](design/ownership-model.md)):
+- Every string is an `AetherString` with a header (`std/string/aether_string_abi.h`): a magic, a `ref_count`, the length and the capacity. A literal is emitted as a static one whose count is `AETHER_STRING_PINNED_REFS`, so it is never counted or freed.
+- Every place owns one reference. A take (a store, a return) moves a fresh value, retains a counted string and copies a plain C string (`aether_uniform_heap_str` in the generated C); a store releases the value it replaces, and a scope exit releases what its locals hold. Counting a string no other thread can reach is inline in the generated code; a string stored where other threads read it is published (`AETHER_STRING_SHARED_BIT`) and counted atomically from then on.
+- Closure environments carry an atomic count. Structs, tuples, optionals and fixed-size arrays that own strings or closures get one generated retain and one drop per type (`compiler/codegen/codegen_own.c`), which every place uses.
+- No analysis reads another function's body: what a call does with its arguments and what it hands back is decided by the callee's signature, and C boundaries by the extern's annotations (`@heap`, `@retain`, `@aether`).
+- A caught panic releases what the scopes it leaves hold through the unwind journal (`runtime/actors/aether_unwind.h`), which records places, not values.
 
 ### Performance Optimizations
 
@@ -455,9 +457,9 @@ See [runtime-optimizations.md](runtime-optimizations.md) for implementation deta
 - **Mitigation:** Incremental builds, parallel compilation
 
 ### Memory Safety vs Performance
-- **Choice:** Arena-based memory management (bulk deallocation, no tracing GC)
-- **Implication:** Deterministic cleanup, no GC pauses
-- **Mitigation:** Valgrind, AddressSanitizer for leak detection during development
+- **Choice:** Compiler-managed reference counting for the values a program owns, explicit frees (with `defer`) for handles, arenas where many allocations share a lifetime; no tracing GC
+- **Implication:** Deterministic cleanup, no GC pauses; a reference cycle is not reclaimed
+- **Mitigation:** The ownership grid (`tests/ownership_grid/`) in CI on every pull request, and Valgrind and AddressSanitizer during development
 
 ### Portability vs Optimization
 - **Choice:** Portable C11 code with platform-specific branches

@@ -242,6 +242,10 @@ static bool emit_ast_mode = false;
 // (imports, capabilities, exports/entry, declarations) to stdout, then
 // exit. No codegen. Drives `ae inspect` (issue #473).
 static bool emit_inspect_mode = false;
+// --emit=short-names: the calls of the file written `ns.ns_x(...)` whose
+// `ns.x` reaches the same declaration, one `LINE:COLUMN:ns_x:x` line each,
+// then exit. No codegen. Drives `ae fmt --short-names` (#2976).
+static bool emit_short_names_mode = false;
 // --emit=effects: derived per-function effect/purity analysis as JSON to
 // stdout, then exit. No codegen. Peer of --emit=ast / inspect. Whole-program
 // transitive capability reachability (fs/net/os) + purity per function,
@@ -952,8 +956,10 @@ static void emit_ast_node_recursive(FILE* out, ASTNode* node, int* first,
                 free(resolved);
             }
 
-            // Emit args[]: one object per positional/named arg, in
-            // source order. Literal args (string/int/float/bool) get
+            // Emit args[]: one object per argument, in parameter
+            // order (the checker puts a named argument in the place
+            // of the parameter it names, #2850, and fills a default
+            // left out). Literal args (string/int/float/bool) get
             // {"literal":"<value>"}; anything else gets {"computed":
             // true}. Trailing closures / DSL bodies are NOT args and
             // are filtered out via arg_is_capturable. Per
@@ -1692,6 +1698,7 @@ int compile_source(const char* input_path, const char* output_path) {
 
     // Step 3: Type Checking
     if (verbose_mode) printf("Step 3: Type checking...\n");
+    if (emit_short_names_mode) typecheck_report_short_names(input_path);
     if (!typecheck_program(program)) {
         report_compilation_failure(input_path);
         // Cleanup
@@ -1704,6 +1711,19 @@ int compile_source(const char* input_path, const char* output_path) {
     }
     
     if (verbose_mode) printf("Type checking successful\n");
+
+    // --emit=short-names: the calls `ae fmt --short-names` may shorten
+    // (#2976), once the file has checked; no codegen.
+    if (emit_short_names_mode) {
+        typecheck_print_short_names(stdout);
+        fflush(stdout);
+        module_registry_shutdown();
+        free_ast_node(program);
+        free_tokens(tokens, token_count);
+        free_parser(parser);
+        free(source);
+        return 1;
+    }
 
     // Step 3.1: drop the imported functions marked unreachable in step
     // 2.65, now that they are checked (#2613). Before every mode below,
@@ -2271,6 +2291,7 @@ void print_help(const char* program_name) {
     printf("  --emit=inspect                   Print an operator-facing summary of what the script declares and exit (drives `ae inspect`).\n");
     printf("                                   Filter set: import_statement, extern_function, function_call.\n");
     printf("                                   Used by aeb's supply-chain veto. Compiler holds no policy.\n");
+    printf("  --emit=short-names               Print the calls written `ns.ns_x(...)` that `ns.x` reaches the same, as LINE:COLUMN:ns_x:x, and exit (drives `ae fmt --short-names`).\n");
     printf("  --help, -h                       Show this help message\n");
     printf("\n");
     printf("Examples:\n");
@@ -2519,10 +2540,14 @@ int main(int argc, char *argv[]) {
                 // --emit=effects: derived per-function effect/purity JSON on
                 // stdout (issue #889). Like --emit=ast, bypasses codegen.
                 emit_effects_mode = true;
+            } else if (strcmp(val, "short-names") == 0) {
+                // --emit=short-names: the calls `ae fmt --short-names` may
+                // shorten (#2976). Like --emit=ast, bypasses codegen.
+                emit_short_names_mode = true;
             } else if (strcmp(val, "aea") == 0) {
                 emit_aea_mode = true;
             } else {
-                fprintf(stderr, "Error: --emit must be one of: exe, lib, both, ast, inspect, effects, aea (got '%s')\n", val);
+                fprintf(stderr, "Error: --emit must be one of: exe, lib, both, ast, inspect, effects, aea, short-names (got '%s')\n", val);
                 return 1;
             }
             arg_offset++;
@@ -2733,6 +2758,14 @@ int main(int argc, char *argv[]) {
     // written; the short-circuit inside compile_source returns before
     // codegen, so the "/dev/null" output is never opened.
     if (emit_inspect_mode) {
+        if (!compile_source(argv[arg_offset], "/dev/null")) {
+            return 1;
+        }
+        return 0;
+    }
+
+    // --emit=short-names (#2976): input-only too.
+    if (emit_short_names_mode) {
         if (!compile_source(argv[arg_offset], "/dev/null")) {
             return 1;
         }

@@ -2027,6 +2027,23 @@ static ASTNode* parse_primary_expression_inner(Parser* parser) {
             // Closure expression: |params| -> expr  OR  || { block }
             return parse_closure_expression(parser);
 
+        case TOKEN_MATCH: {
+            /* #2993: a `match` is an expression wherever a value goes: an
+             * operand, an argument, a condition, an interpolation. It was
+             * no expression here, so `b = b + match i { ... }` parsed as
+             * far as `b +`, failed without a word, and the declaration was
+             * kept with no value while the `match` ran as the next
+             * statement: `b` never changed, and `c = 1 + match ...`
+             * declared `c` uninitialized. */
+            Token* t = peek_token(parser);
+            ASTNode* m = parse_match_statement(parser);
+            if (m && m->line == 0) {
+                m->line = t->line;
+                m->column = t->column;
+            }
+            return m;
+        }
+
         default:
             return NULL;
     }
@@ -3317,13 +3334,10 @@ ASTNode* parse_variable_declaration_with_semicolon(Parser* parser, bool expect_s
 
     if (match_token(parser, TOKEN_ASSIGN)) {
         /* #2790, #2803: `int k = match n { ... }` binds the match's value,
-         * as `k = match` and `let k: int = match` do. `match` is no
-         * expression to parse_expression, which returned nothing and left it
-         * to parse as the next statement, so `k` was declared with no value. */
-        Token* next_tok = peek_token(parser);
-        ASTNode* value = (next_tok && next_tok->type == TOKEN_MATCH)
-                         ? parse_match_statement(parser)
-                         : parse_expression(parser);
+         * as `k = match` and `let k: int = match` do. A `match` is an
+         * expression (#2993), so one with more after it (`int k = match n
+         * { ... } + 1`) is an operand of that. */
+        ASTNode* value = parse_expression(parser);
         if (value) {
             add_child(decl, value);
         }
@@ -3454,18 +3468,11 @@ ASTNode* parse_python_style_declaration(Parser* parser) {
     }
 
     if (match_token(parser, TOKEN_ASSIGN)) {
-        // Check for match-as-expression: x = match val { ... }
-        Token* next_tok = peek_token(parser);
-        if (next_tok && next_tok->type == TOKEN_MATCH) {
-            ASTNode* match_node = parse_match_statement(parser);
-            if (match_node) {
-                add_child(decl, match_node);
-            }
-        } else {
-            ASTNode* value = parse_expression(parser);
-            if (value) {
-                add_child(decl, value);
-            }
+        // `x = match val { ... }` binds the match's value; a `match` with
+        // more after it is an operand of that (#2993).
+        ASTNode* value = parse_expression(parser);
+        if (value) {
+            add_child(decl, value);
         }
     }
 
@@ -3940,10 +3947,15 @@ ASTNode* parse_match_statement(Parser* parser) {
     int iteration_count = 0;
     const int MAX_CASES = 1000;
     
+    /* The arms sit inside the match's braces, so a `match` that is part of
+     * a condition (#2993) does not parse them as one: a call in an arm may
+     * take a trailing block. */
+    parser->in_condition = 0;
     // Parse match arms
     while (!match_token(parser, TOKEN_RIGHT_BRACE) && !is_at_end(parser)) {
         if (++iteration_count > MAX_CASES) {
             parser_message(parser, "Error: Too many match arms (max 1000)");
+            parser->in_condition = saved_in_condition;
             return match_stmt;
         }
         
@@ -3955,6 +3967,7 @@ ASTNode* parse_match_statement(Parser* parser) {
             advance_token(parser);
         }
     }
+    parser->in_condition = saved_in_condition;
     
     return match_stmt;
 }
@@ -3977,6 +3990,13 @@ ASTNode* parse_match_case(Parser* parser) {
     } else if (current->type == TOKEN_LEFT_BRACKET) {
         // List pattern: [], [x], [x, y], [h|t]
         pattern = parse_pattern(parser);
+        if (!pattern) return NULL;
+    } else if (current->type == TOKEN_IDENTIFIER && peek_ahead(parser, 1) &&
+               peek_ahead(parser, 1)->type == TOKEN_LEFT_BRACE) {
+        // #2992: struct pattern `Pt { x: 0, y: _ }`, as a clause head takes
+        // one (#2988). Read as an expression it was a struct literal, whose
+        // `_` was an undefined variable.
+        pattern = parse_struct_pattern(parser);
         if (!pattern) return NULL;
     } else if (current->type == TOKEN_IDENTIFIER && current->value &&
                strcmp(current->value, "some") == 0 &&
@@ -4031,6 +4051,14 @@ ASTNode* parse_match_case(Parser* parser) {
     } else {
         // Expression result
         result = parse_expression(parser);
+        /* #2993: an arm that is a `match` (`0 -> match b { ... }`) is the
+         * block `{ match b { ... } }`, so every pass sees the tree a braced
+         * arm has: the inner match yields for this one. */
+        if (result && result->type == AST_MATCH_STATEMENT) {
+            ASTNode* block = create_ast_node(AST_BLOCK, NULL, result->line, result->column);
+            add_child(block, result);
+            result = block;
+        }
     }
     
     if (!result) { free_ast_node(pattern); return NULL; }
@@ -4404,15 +4432,10 @@ ASTNode* parse_return_statement(Parser* parser) {
                                            ret_tok ? ret_tok->column : 0);
 
     if (!match_token(parser, TOKEN_SEMICOLON)) {
-        // #1054: `return match x { ... }`. A `match` is statement-only in the
-        // grammar (not reachable from parse_expression), so parse it explicitly
-        // here and attach it as the return value; codegen lowers a match in
-        // return position to a value-producing form. Without this the `match`
-        // was left unconsumed, `return` took no operand, and the match parsed
-        // as a dead sibling statement (void return + garbage result).
-        ASTNode* value = (peek_token(parser) && peek_token(parser)->type == TOKEN_MATCH)
-                         ? parse_match_statement(parser)
-                         : parse_expression(parser);
+        // #1054: `return match x { ... }`; codegen lowers a match in return
+        // position to a value-producing form. A `match` is an expression
+        // (#2993), so `return match x { ... } + 1` returns the sum.
+        ASTNode* value = parse_expression(parser);
         if (value) {
             add_child(return_stmt, value);
         }

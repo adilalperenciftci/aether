@@ -1,12 +1,12 @@
-# contrib/i18n — internationalization support
+# contrib/i18n: internationalization support
 
 Phase 5 of the Aether i18n/l10n RFC ([#863](https://github.com/aether-lang-dev/aether/issues/863)).
 The earlier phases live in `std` (`std.language` BCP 47, `std.plural`,
 `std.message` ICU MessageFormat, `std.number`); this phase adds the data-heavy
-piece the RFC deliberately deferred — **locale-aware collation** — in `contrib/`
+piece the RFC deliberately deferred (**locale-aware collation**) in `contrib/`
 so its vendored Unicode data tables sit alongside it rather than in core `std`.
 
-## `collate` — Unicode collation (string sorting)
+## `collate`: Unicode collation (string sorting)
 
 `contrib.i18n.collate` orders strings by the Unicode Collation Algorithm
 (UTS #10) rather than raw byte value, so accents and case tie-break correctly:
@@ -23,11 +23,11 @@ collate.sort("en", my_string_list)        // in-place, UCA order
 key = collate.sort_key("en", s)           // stable, order-preserving key
 ```
 
-- `compare(locale, a, b) -> int` — -1 / 0 / 1.
-- `sort_key(locale, s) -> string` — a precomputed, order-preserving key;
+- `compare(locale, a, b) -> int`: -1 / 0 / 1.
+- `sort_key(locale, s) -> string`: a precomputed, order-preserving key;
   comparing two keys as ordinary strings matches `compare`. Compute once per
   element when sorting large lists repeatedly.
-- `sort(locale, items)` — sort a `list` of strings in place.
+- `sort(locale, items)`: sort a `list` of strings in place.
 
 **Scope / honesty:** this is **DUCET** (language-neutral) collation with
 canonical (NFD) normalization and full three-level weighting
@@ -44,10 +44,10 @@ contrib/i18n/
   aether_i18n.c          collation engine (UCA over DUCET + utf8proc NFD)
   collate/module.ae      the `collate` Aether module
   collate/test_collate.ae  regression test (leak-checked)
-  utf8proc/              vendored utf8proc 2.9.0 (MIT) — NFD normalization
+  utf8proc/              vendored utf8proc 2.9.0 (MIT), NFD normalization
     utf8proc.c utf8proc.h utf8proc_data.c LICENSE.md VERSION
   ducet/                 Default Unicode Collation Element Table, UCA 15.1.0
-    allkeys.txt          pinned Unicode source (Unicode license — see NOTICE)
+    allkeys.txt          pinned Unicode source (Unicode license, see NOTICE)
     gen_ducet.py         generator: allkeys.txt -> ducet_data.c
     ducet_data.c         GENERATED table (do not edit)
     ducet.h NOTICE
@@ -78,8 +78,8 @@ vendored copy to a release targeting the same Unicode version, and regenerate.
 
 ## Licensing
 
-- **utf8proc** — MIT (`utf8proc/LICENSE.md`); its bundled data is under the
+- **utf8proc**: MIT (`utf8proc/LICENSE.md`); its bundled data is under the
   Unicode license (also in that file).
-- **DUCET / `allkeys.txt`** — © Unicode, Inc., under the Unicode Terms of Use;
+- **DUCET / `allkeys.txt`**: © Unicode, Inc., under the Unicode Terms of Use;
   see `ducet/NOTICE`. `ducet_data.c` is a mechanical transformation of it and
   carries the same terms.

@@ -1,0 +1,56 @@
+// #2856: `[]` passed to a closure's `T[]` parameter through `call()` failed
+// in C ("expected expression before '{' token"): the arguments of a call
+// through a closure or a function pointer were never coerced into its
+// parameters, as a direct call's are. So `[]` and `null` reached C as an
+// initializer list and a null pointer, and a `T[N]` array as a pointer,
+// where the closure takes a slice. They are now the empty slice and a view
+// of the array, through `call()`, a closure local's name, a typed function
+// pointer, a function-pointer field, and arm by arm through an `if`.
+// Before the fix none of these compiled.
+
+total(xs: int[]) -> int {
+    s = 0
+    for (i = 0; i < xs.len; i++) {
+        s = s + xs[i]
+    }
+    return s
+}
+
+struct Ops {
+    count: fn(int[]) -> int
+}
+
+apply(f: fn(int[]) -> int) -> int {
+    arr = [4, 5]
+    return f([]) * 100 + f(null) * 10 + f(arr)
+}
+
+check(ok: bool, what: string) {
+    if !ok {
+        println("FAIL: ${what}")
+        exit(1)
+    }
+}
+
+main() {
+    c = | xs: int[] | { return xs.len }
+    arr = [1, 2, 3]
+    check(call(c, []) == 0, "[] through call()")
+    check(call(c, null) == 0, "null through call()")
+    check(call(c, arr) == 3, "an int[3] through call()")
+    check(c([]) == 0, "[] through the closure's name")
+    check(c(arr) == 3, "an int[3] through the closure's name")
+
+    d = | xs: int[], k: int | { return total(xs) * 10 + k }
+    flag = true
+    check(call(d, [], 1) == 1, "[] before another argument")
+    check(call(d, arr, 2) == 62, "an array before another argument")
+    check(call(d, if flag { arr } else { [] }, 3) == 63, "an if whose arms are an array and []")
+    check(call(| ys: int[] | { return ys.len }, []) == 0, "[] into a literal called in place")
+
+    check(apply(total) == 9, "[], null and an array through a function pointer")
+    o = Ops { count: total }
+    check(o.count([]) == 0, "[] through a function-pointer field")
+    check(o.count(arr) == 6, "an array through a function-pointer field")
+    println("closure call slice args ok")
+}

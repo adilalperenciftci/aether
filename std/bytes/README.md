@@ -3,7 +3,7 @@
 A growable byte buffer, for assembling binary data.
 
 Aether strings are length-carrying and may contain NUL, so a buffer built here
-converts to a string that survives binary content intact — which is what makes
+converts to a string that survives binary content intact, which is what makes
 `std.bytes` the right way to build a packet, an encoded frame or a file image.
 
 **`bytes.new(n)` does not zero its allocation.** Reading a slot you have not
@@ -30,7 +30,7 @@ AB
 `finish` consumes the buffer. `to_string` is the non-consuming form, for when
 the buffer is still being filled.
 
-A `bytes` handle is a struct, **not** a pointer to its payload — writing
+A `bytes` handle is a struct, **not** a pointer to its payload: writing
 through it with `std.mem`'s raw accessors overwrites the struct's own fields
 and corrupts the heap. Use `bytes.set`/`bytes.get`, or allocate through
 `std.arena` when you need raw `std.mem` access.

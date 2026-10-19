@@ -1,9 +1,9 @@
-# contrib.host.java — Java Sandbox Agent (Panama FFI)
+# contrib.host.java: Java Sandbox Agent (Panama FFI)
 
 ## Prerequisites
 
 ```bash
-# Debian/Ubuntu — OpenJDK 22+ required for Panama FFI (stable)
+# Debian/Ubuntu: OpenJDK 22+ required for Panama FFI (stable)
 # Amazon Corretto 24:
 wget https://corretto.aws/downloads/latest/amazon-corretto-24-x64-linux-jdk.deb
 sudo dpkg -i amazon-corretto-24-x64-linux-jdk.deb
@@ -56,7 +56,7 @@ main() {
 }
 ```
 
-The grant set is conservative — it permits reads the JVM performs
+The grant set is conservative: it permits reads the JVM performs
 during class loading and TLS init, and nothing more. Source paths were
 captured empirically via `strace java -version` on Corretto 24 (Debian)
 and Temurin 21 (Ubuntu).
@@ -69,8 +69,7 @@ unless the JDK is 22+, the version that stabilized Panama
 (`java.lang.foreign.*`).
 
 The end-to-end test is
-[`tests/integration/embedded_java_trading_e2e/`](../../../tests/integration/embedded_java_trading_e2e/)
-— [`test_embedded_java_trading_e2e.sh`](../../../tests/integration/embedded_java_trading_e2e/test_embedded_java_trading_e2e.sh)
+[`tests/integration/embedded_java_trading_e2e/`](../../../tests/integration/embedded_java_trading_e2e/): [`test_embedded_java_trading_e2e.sh`](../../../tests/integration/embedded_java_trading_e2e/test_embedded_java_trading_e2e.sh)
 copies `examples/embedded-java/trading/` to a temp dir, runs its `build.sh`
 (namespace build + `javac` + `java`), and asserts the full trading set-piece:
 each event fires with the right id (`OrderPlaced 100`, `OrderRejected 101`,
@@ -79,8 +78,7 @@ both the Java host's `[event]` lines and the Aether library's `[ae]` lines
 reach stdout in order.
 
 The namespace/FFI test is
-[`tests/integration/namespace_java/`](../../../tests/integration/namespace_java/)
-— [`test_namespace_java.sh`](../../../tests/integration/namespace_java/test_namespace_java.sh)
+[`tests/integration/namespace_java/`](../../../tests/integration/namespace_java/): [`test_namespace_java.sh`](../../../tests/integration/namespace_java/test_namespace_java.sh)
 runs `ae build --namespace .` on [`calc.ae`](../../../tests/integration/namespace_java/calc.ae)
 to emit both the `.so` and a generated Java SDK
 (`com/example/calc/CalcGeneratedSdk.java`), then compiles and runs
@@ -89,8 +87,7 @@ to confirm the generated SDK round-trips a call and the `[ae]` script-side
 output is visible to the host.
 
 The shared-map round-trip is
-[`tests/sandbox/test_shared_map_all.sh`](../../../tests/sandbox/test_shared_map_all.sh)
-— its Java case gates on `build/aether-sandbox.jar` (built by
+[`tests/sandbox/test_shared_map_all.sh`](../../../tests/sandbox/test_shared_map_all.sh): its Java case gates on `build/aether-sandbox.jar` (built by
 [`build.sh`](build.sh) above) plus a JDK, then spawns `java` with the
 `-javaagent` jar from a C parent that froze a shared map into shm, asserting
 the agent reads and writes it back (`result=processed Frank`, `status=ok`) and

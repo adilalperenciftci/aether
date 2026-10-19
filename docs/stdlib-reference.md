@@ -18,6 +18,7 @@ header comment is the authoritative description.
 | `std.audit` | Query the sandbox audit trail. | 9 | [guide](../std/audit/README.md) · [source](../std/audit/module.ae) |
 | `std.bignum` | Arbitrary-precision integers. | 29 | [guide](../std/bignum/README.md) · [source](../std/bignum/module.ae) |
 | `std.bits` | Unsigned bit operations: rotates, shifts, popcount, leading zeros, unsigned divide. | 34 | [guide](../std/bits/README.md) · [source](../std/bits/module.ae) |
+| `std.brotli` | Brotli compression, streaming and one-shot, for `Content-Encoding: br`. | 21 | [guide](../std/brotli/README.md) · [source](../std/brotli/module.ae) |
 | `std.bytes` | Mutable byte buffer with random access and overlap-safe copies. | 58 | [guide](../std/bytes/README.md) · [source](../std/bytes/module.ae) |
 | `std.capsicum` | FreeBSD Capsicum capability-mode bindings. | 33 | [guide](../std/capsicum/README.md) · [source](../std/capsicum/module.ae) |
 | `std.cas` | Content-addressed store keyed by the sha256 of file contents. | 7 | [guide](../std/cas/README.md) · [source](../std/cas/module.ae) |
@@ -97,8 +98,7 @@ header comment is the authoritative description.
 | `std.yaml` | YAML parsing and emitting. | 16 | [guide](../std/yaml/README.md) · [source](../std/yaml/module.ae) |
 | `std.zip` | ZIP archive reader and writer over a byte buffer: stored/deflate, ZIP64, per-entry CRC-32. | 25 | [guide](../std/zip/README.md) · [source](../std/zip/module.ae) |
 | `std.zlib` | One-shot zlib and gzip deflate and inflate. | 29 | [full section](#compression-stdzlib) |
-| `std.brotli` | Brotli compression, streaming and one-shot, for `Content-Encoding: br`. | 21 | — |
-| `std.zstd` | Zstandard compression, streaming and one-shot, for archives and internal transports. | 20 | — |
+| `std.zstd` | Zstandard compression, streaming and one-shot, for archives and internal transports. | 20 | [guide](../std/zstd/README.md) · [source](../std/zstd/module.ae) |
 
 > **Note:** The standard library follows the canonical module pattern in [stdlib-module-pattern.md](stdlib-module-pattern.md), fallible operations expose a `_raw` extern plus a Go-style `(value, err)` Aether wrapper; pure/infallible operations stay raw without a suffix. See the [error handling example](../examples/basics/error-handling.ae) for how the pattern is used from user code, and [std/fs/module.ae](../std/fs/module.ae) for the reference implementation.
 
@@ -169,96 +169,108 @@ read failed: cannot open file
 
 Dynamic array (ArrayList) implementation.
 
-```aether
+```aether,run
 import std.list
 
 main() {
     mylist = list.new()
     defer list.free(mylist)
 
-    // list.add returns an error string. Empty = success; non-empty
-    // indicates a resize/OOM failure that was previously silent.
+    // list.add returns an error string: "" is success, anything else
+    // a failure to grow the list.
     list.add(mylist, 10)
     list.add(mylist, 20)
 
-    item = list.get(mylist, 0)
-    size = list.size(mylist)
+    item, err = list.get(mylist, 0)
+    println("${item != null} [${err}] ${list.size(mylist)}")
+
+    names = list.new()
+    defer list.free(names)
+    list.add(names, "ada")
+    first, err2 = list.get_string(names, 0)
+    println("${first} [${err2}]")
 
     list.remove(mylist, 0)
     list.clear(mylist)
 }
 ```
 
+```output
+true [] 2
+ada []
+```
+
 **Functions:**
 - `list.new()` - Create new list
 - `list.add(list, item)` → `string` - Append item, return error string
-- `list.get(list, index)` - Get item at index
+- `list.get(list, index)` → `(ptr, string)` - The item at `index`: `(null, "index out of range")` or `(null, "null list")` on failure
+- `list.get_string(list, index)` → `(string, string)` - The item as a string, checked: `(null, "not a string")` when the element is some other pointer, `(null, "")` when it is null, and `get`'s errors
 - `list.set(list, index, item)` - Set item at index
 - `list.remove(list, index)` - Remove item at index
 - `list.size(list)` - Get number of elements
 - `list.clear(list)` - Remove all elements
 - `list.free(list)` - Free list memory
 
-Raw extern: `list_add_raw` (returns 1/0).
+Raw externs: `list_add_raw` (returns 1/0), `list_get_raw` (no bounds check).
 
-**String-value ownership.** `list.add(l, <heap string expr>)` is auto-routed
-by the compiler to an *adopting* add: the value is escaping into the list, the
-caller's own release is suppressed, and `list.free` releases it. That transfer
-is invisible and costs nothing.
+**String elements.** `list.add` and `list.set` of a string take a reference
+to it, released when the element leaves (`list.remove`, `list.clear`, a store
+over it, `list.free`); a fresh string (a call's result, an interpolation)
+moves in, and a literal is stored as it is. The caller's own value is
+untouched, so the same string may be in several containers. Read a string
+element back with `list.get_string`, which checks that it is one; a `string`
+local given `list.get`'s bare `ptr` is warning W1005.
 
-Calling the owned-add extern **by hand** is different, and the two entry points
-say which they are:
-
-- `list_add_string_owned(l, s)` gives the list its **own** reference. A
-  refcounted string is retained; a plain pointer (a literal, a borrowed
-  `char*`) is copied, because a non-refcounted pointer cannot be shared
-  safely. The caller keeps and independently frees theirs, so the same value
-  may live in several containers, in any free order.
-- `list_add_string_adopted(l, s)` takes over the caller's single reference
-  without retaining. This is what codegen emits. Call it by hand only when
-  ownership genuinely transfers: adopting a pointer you did not own
-  double-frees at `list.free` time.
-
-`map_put_string_owned` / `map_put_string_adopted` are the same pair for maps.
+Two C entry points do the same by hand, for C code and `ptr` values:
+`list_add_string_owned(l, s)` gives the list a reference of its own (a
+counted string is retained, a plain `char*` copied), and
+`list_add_string_adopted(l, s)` takes over the caller's single reference
+without retaining, which only a caller that owns that reference may do.
+`map_put_string_owned` and `map_put_string_adopted` are the same pair for
+maps.
 
 ### String list (`string_list_*`)
 
-Refcount-aware list for `AetherString` values. Use this instead of plain `list_*` when the list is meant to hold strings, the plain list stores items as raw `void*` and doesn't bump the refcount, so a string pushed and held while its original variable goes out of scope silently dangles.
+A list typed for strings, from `std.collections`: every entry is a copy
+the list owns, made when the string is added or set and freed when it is
+removed, cleared, overwritten or the list is freed.
 
-```aether
+```aether,run
 import std.collections
 import std.string
 
 build() -> ptr {
     L = string_list_new()
-    s = string.copy("ephemeral")   // wrapped AetherString*
-    string_list_add(L, s)          // takes a strong reference
+    s = string.copy("ephemeral")
+    string_list_add(L, s)          // the list stores a copy of its own
     return L
-    // `s` goes out of scope; the list's retain keeps the bytes alive.
+    // `s` is released here; the list's copy stays.
 }
 
 main() {
     L = build()
-    println(string_list_get(L, 0))  // "ephemeral"
-    string_list_free(L)             // releases every entry
+    println(string_list_get(L, 0))
+    string_list_free(L)             // frees every entry
 }
 ```
 
-Plain string literals pass through unchanged, `string_retain` is a no-op on values that don't bear the AetherString magic header.
+```output
+ephemeral
+```
 
 **Functions:**
 - `string_list_new()` → `ptr` - Allocate an empty list
-- `string_list_add(list, s)` → `int` - Append; takes a strong reference; returns 1 on success, 0 on OOM
-- `string_list_get(list, index)` → `string` - Borrowed read; null on OOB
-- `string_list_set(list, index, s)` - Replace at index; releases old + retains new
+- `string_list_add(list, s)` → `int` - Append a copy; returns 1 on success, 0 on OOM
+- `string_list_get(list, index)` → `string` - The entry, which a place that keeps it takes a reference to; null on OOB
+- `string_list_set(list, index, s)` - Replace at index with a copy of `s`; frees the copy it replaces
 - `string_list_size(list)` → `int` - -1 on null
-- `string_list_remove(list, index)` - Remove + release the entry
+- `string_list_remove(list, index)` - Remove the entry and free its copy
 - `string_list_clear(list)` - Drop every entry, keep the backing alloc
-- `string_list_free(list)` - Release every entry then free
+- `string_list_free(list)` - Free every entry, then the list
 - `string_list_sort_lex(list)` - Stable ascending lexicographic (byte-wise) sort, in place
 - `string_list_sort(list, cmp)` - Stable in-place sort by a comparator closure `|a: string, b: string| { ... }` returning negative / 0 / positive (like `strcmp`)
 
-Both sorts reorder the backing slots only, no element is copied or freed, so they sidestep the get/set aliasing trap of a hand-rolled swap (`string_list_get` returns the slot's internal pointer; a naive adjacent swap would free a slot another borrowed pointer still aliases).
+Both sorts reorder the backing slots only: no element is copied, retained or released.
 
 ```aether,fragment
 names = string_list_new()
@@ -273,39 +285,38 @@ string_list_sort(names, |a: string, b: string| {
 })
 ```
 
-For a similar `string_map`, file an issue, same pattern would apply.
-
 ### Map (`std.map`)
 
 Hash map implementation.
 
-```aether
+```aether,run
 import std.map
 import std.string
 
 main() {
-    mymap = map.new();
-    defer map.free(mymap);
+    mymap = map.new()
+    defer map.free(mymap)
 
-    val = string.new("Aether");
-    defer string.release(val);
+    // map.put returns an error string; the map takes a reference to a string value.
+    map.put(mymap, "name", string.concat("Aeth", "er"))
+    name, err = map.get_string(mymap, "name")
+    println("${name} [${err}] ${map.has(mymap, "name")}")
 
-    // map.put returns an error string.
-    map.put(mymap, "name", val);
-    result = map.get(mymap, "name");
-    exists = map.has(mymap, "name");
-
-    map.remove(mymap, "name");
-    size = map.size(mymap);
-
-    map.clear(mymap);
+    map.remove(mymap, "name")
+    println(map.size(mymap))
+    map.clear(mymap)
 }
+```
+
+```output
+Aether [] 1
+0
 ```
 
 **Functions:**
 - `map.new()` - Create new map
 - `map.put(map, key, value)` → `string` - Insert or update, return error string
-- `map.get(map, key)` - Get value by key (null if missing)
+- `map.get(map, key)` → `(ptr, string)` - The value: `(null, "")` if the key is absent, `(null, "null map")` if `map` is null
 - `map.get_string(map, key)` → `(string, string)` - Get a string value: `(null, "")` if missing, `(null, "not a string")` if the value is some other pointer
 - `map.has(map, key)` - Check if key exists
 - `map.remove(map, key)` - Remove key-value pair
@@ -401,7 +412,7 @@ Raw externs are the `aether_pqueue_*` entry points, which return C-style ints.
 ### Double-ended queue (`std.deque`)
 
 A fixed-capacity ring buffer of `long` values with O(1) push and pop at both
-ends — a work queue, a sliding window, an undo history. `Deque` is a *value*,
+ends: a work queue, a sliding window, an undo history. `Deque` is a *value*,
 so every mutation returns the updated deque and the result has to be rebound;
 a call whose result is dropped changes nothing. The capacity never grows:
 `push_back` on a full ring drops the value silently, while `try_push_back`
@@ -411,7 +422,7 @@ reports it.
 import std.deque
 
 main() {
-    // A fixed-capacity ring of longs. Every mutation RETURNS the deque —
+    // A fixed-capacity ring of longs. Every mutation RETURNS the deque:
     // the struct is a value, so the result must be rebound, and a call
     // whose result is dropped changes nothing.
     d = deque.new(4)
@@ -497,13 +508,13 @@ main() {
 - `intarr_get_unchecked(arr, i)` / `intarr_set_unchecked(arr, i, v)` - Undefined behaviour on OOB, for inner loops
 
 
-**Indexing with `v[i]` (#2041).** `a[i]` on the handle itself cannot work —
+**Indexing with `v[i]` (#2041).** `a[i]` on the handle itself cannot work:
 the handle is a bare `ptr`, so `[]` has no element type to dispatch on. A
 **view** is typed, and does:
 
 ```aether,fragment
-a = intarr.intarr_new_raw(n)
-v = intarr.intarr_array(a)      // a `int[]` over the same buffer
+a = intarr.new_raw(n)
+v = intarr.array(a)             // an `int[]` over the same buffer
 v[3] = 42
 total = total + v[3]
 ```
@@ -553,13 +564,13 @@ main() {
 - `floatarr_get_unchecked(arr, i)` / `floatarr_set_unchecked(arr, i, v)` - Undefined behaviour on OOB, for inner loops
 
 
-**Indexing with `v[i]` (#2041).** `a[i]` on the handle itself cannot work —
+**Indexing with `v[i]` (#2041).** `a[i]` on the handle itself cannot work:
 the handle is a bare `ptr`, so `[]` has no element type to dispatch on. A
 **view** is typed, and does:
 
 ```aether,fragment
-a = floatarr.floatarr_new_raw(n)
-v = floatarr.floatarr_array(a)      // a `float[]` over the same buffer
+a = floatarr.new_raw(n)
+v = floatarr.array(a)               // a `float[]` over the same buffer
 v[3] = 1.5
 total = total + v[3]
 ```
@@ -586,7 +597,7 @@ main() {
     // std.intarr, for values that overflow 32 bits -- nanosecond
     // timestamps, byte offsets in large files, 64-bit hashes.
     n = 4
-    a = longarr.longarr_new_raw(n)
+    a = longarr.new_raw(n)
 
     // The checked accessors return an error for an index out of range.
     serr = longarr.set(a, 0, 9000000000)
@@ -605,7 +616,7 @@ main() {
     }
     println("doubling: ${view[1]} ${view[2]} ${view[3]}")
 
-    longarr.longarr_free(a)
+    longarr.free(a)
 }
 ```
 ```output
@@ -616,11 +627,11 @@ doubling: 18000000000 36000000000 72000000000
 
 **Functions:**
 - `longarr.new(n)` / `new_filled(n, v)` → `(ptr, string)` - The error names a negative size or a failed allocation
-- `longarr.longarr_new_raw(n)` / `longarr_new_filled_raw(n, v)` → `ptr` (null on failure), `longarr_free(a)`
+- `longarr.new_raw(n)` / `longarr_new_filled_raw(n, v)` → `ptr` (null on failure), `longarr_free(a)`
 - `longarr.get(a, i)` → `(long, string)`, `longarr.set(a, i, v)` → `string` - Bounds-checked
-- `longarr.longarr_get_unchecked(a, i)` / `longarr_set_unchecked(a, i, v)` - Unchecked, inlined
+- `longarr.get_unchecked(a, i)` / `longarr_set_unchecked(a, i, v)` - Unchecked, inlined
 - `longarr.array(a)` → `long[]` - A typed view: `v[i]` reads and writes the array itself
-- `longarr.longarr_size(a)` → `int`, `longarr.longarr_fill(a, v)`
+- `longarr.size(a)` → `int`, `longarr.fill(a, v)`
 
 ### Mutable byte buffer (`std.bytes`)
 
@@ -701,11 +712,11 @@ op0_length = bytes.get_le32(b, 4)
 In-place sorting for the packed numeric arrays and for `string[]` views, plus
 the binary searches that go with them. The ordered forms take the array
 handle and read its own length; the `_by` forms take a view, a length and
-your comparator — negative when `a` sorts first, the sign convention C's
+your comparator, negative when `a` sorts first, the sign convention C's
 `qsort` uses.
 
 A search returns the index of the value when present, and otherwise the
-**insertion point** — the index where it would go to keep the array sorted —
+**insertion point** (the index where it would go to keep the array sorted)
 rather than -1, so one call answers both "is it here?" and "where would it
 go?".
 
@@ -722,7 +733,7 @@ _by_length(a: string, b: string) -> int {
 main() {
     // Every entry point takes a slice, which carries its length. A packed
     // array hands over its elements as one: `intarr.array(h)`.
-    nums = intarr.intarr_new_raw(5)
+    nums = intarr.new_raw(5)
     v = intarr.array(nums)
     for i in 0..v.len {
         v[i] = (i * 7) % 5
@@ -732,7 +743,7 @@ main() {
     // A binary search over the sorted slice. A miss returns the insertion
     // point rather than -1, so it also answers "where would this go?".
     println("3 is at ${sort.int_search(v, 3)}")
-    intarr.intarr_free(nums)
+    intarr.free(nums)
 
     // A prefix or any run sorts on its own: `xs[..n]`, `xs[lo..hi]`.
     words = ["pear", "fig", "apple", "kiwi"]
@@ -770,110 +781,57 @@ the way a naive quicksort pivot does.
 
 ## Strings (`std.string`)
 
-Reference-counted strings with comprehensive operations.
+### Strings are counted values
 
-### String Types: Plain Strings vs Managed Strings
+Every `string` is a counted `AetherString` that carries its length; a literal
+is a pinned one, never freed. A string a `std.string` function returns
+(`string.concat`, `string.trim`, `string.to_upper`, `string.substring`,
+`string.from_int`, ...) is a fresh counted string, and the place that takes
+it owns it: the compiler releases it when the place is overwritten or goes
+out of scope. No `std.string` call needs a matching free ([String
+ownership](#string-ownership), below).
 
-> **Most users don't need managed strings.** All `std.string` functions work on both plain strings
-> and managed strings transparently. `string.length("hello")` just works, no conversion needed.
-> Only create managed strings via `string.new()` when you need reference counting.
-
-Aether has two string representations:
-
-| | `string` (plain) | Managed (`ptr` via `string.new()`) |
-|---|---|---|
-| **C type** | `const char*` | `AetherString*` |
-| **Allocation** | Static (literals) or manual | Heap (reference-counted) |
-| **Memory** | None needed | `string.release()` or `defer string.free()` |
-| **Knows length?** | Computed via `strlen` | Stored in struct (`O(1)`) |
-| **std.string functions** | All work | All work |
-
-**`string`**, plain C string. String literals like `"hello"` are this type. All `std.string` functions accept these directly.
-
-**Managed strings**, heap-allocated objects returned by `string.new()`. Typed as `ptr` in Aether code. Use when you need reference counting or the result of transformation functions like `string.trim()`, `string.to_upper()`.
-
-**Converting between them:**
-
-```aether
-import std.string
-
-main() {
-    // Raw literal → managed: use string.new()
-    raw = "  hello  "
-    managed = string.new(raw)
-    trimmed = string.trim(managed)
-
-    // Managed → raw: use string.to_cstr()
-    print(string.to_cstr(trimmed))
-
-    defer string.free(managed)
-    defer string.free(trimmed)
-}
-```
-
-**Best practices:**
-- Use `string` for message fields, keeps payloads simple
-- Use managed strings when you need to manipulate text (trim, split, concat)
-- Always `defer string.free()` immediately after creating a managed string
-- Use `string.to_cstr()` when passing managed strings to `print` or message fields
+`string.new(s)`, `string.from_cstr(s)` and `string.empty()` return a counted
+string typed `ptr`, which no place owns. They exist for C-facing code that
+holds strings as `ptr`; a program that calls them gives the string back with
+`string.release`. `string.to_cstr(s)` returns the characters as C sees them.
 
 ### Usage Examples
 
-```aether
+```aether,run
 import std.string
 
 main() {
-    // Create strings
-    s = string.new("Hello");
-    s2 = string.new(" World");
+    s = "Hello"
+    combined = string.concat(s, " World")
+    println("${string.length(combined)} ${string.to_upper(s)} [${string.trim("  x  ")}]")
+    println("${string.contains(s, "ell")} ${string.index_of(s, "l")} ${string.starts_with(s, "He")} ${string.ends_with(s, "lo")}")
+    println(string.substring(s, 0, 3))
 
-    // Operations
-    len = string.length(s);
-    combined = string.concat(s, s2);
+    csv = "a,b,c"
+    // (a) AetherStringArray: O(1) random access by index; a handle, freed by hand.
+    parts = string.split(csv, ",")
+    println("${string.array_size(parts)} ${string.array_get(parts, 0)}")
+    string.array_free(parts)
 
-    // String methods
-    upper = string.to_upper(s);
-    lower = string.to_lower(s);
-    trimmed = string.trim(s);
+    // (b) *StringSeq: O(1) head, tail, cons and length; matches [h | t].
+    //     Reach for it when the result is walked recursively or sent to an
+    //     actor in a message. See docs/sequences.md.
+    parts_seq = string.split_to_seq(csv, ",")
+    println("${string.seq_length(parts_seq)} ${string.seq_head(parts_seq)}")
 
-    // Searching
-    contains = string.contains(s, "ell");
-    index = string.index_of(s, "l");
-    starts = string.starts_with(s, "He");
-    ends = string.ends_with(s, "lo");
-
-    // Substrings
-    sub = string.substring(s, 0, 3);  // "Hel"
-
-    // Splitting, pick the shape that matches your access pattern.
-    csv = string.new("a,b,c");
-
-    // (a) AetherStringArray, O(1) random access via integer index.
-    parts = string.split(csv, ",");
-    count = string.array_size(parts);   // 3
-    first = string.array_get(parts, 0);  // "a"
-    string.array_free(parts);
-
-    // (b) *StringSeq cons-cell, O(1) head/tail/cons/length, refcount-
-    //     aware, pattern-matches with [h | t]. Reach for this when the
-    //     result will be walked recursively or sent across an actor
-    //     boundary as a message field. See docs/sequences.md.
-    parts_seq = string.split_to_seq(csv, ",");
-    n = string.seq_length(parts_seq);    // 3 (O(1) cached)
-    h = string.seq_head(parts_seq);       // "a"
-    string.seq_free(parts_seq);
-
-    string.release(csv);
-
-    // Conversion
-    numstr = string.from_int(42);  // "42"
-    f = string.from_float(3.14);   // "3.14"
-    cstr = string.to_cstr(s);     // raw C string pointer
-
-    // Memory management
-    string.release(s);
-    string.release(s2);
+    n = 42
+    println("${string.from_int(n)} ${string.from_float(3.14)}")
 }
+```
+
+```output
+11 HELLO [x]
+1 2 1 1
+Hel
+3 a
+3 a
+42 3.14
 ```
 
 **Creation:**
@@ -911,7 +869,7 @@ main() {
 - `string.array_size(arr)` - Get number of parts in split result
 - `string.array_get(arr, index)` - Get string at index from split result
 - `string.array_free(arr)` - Free split result array
-- `string.array_view(arr)` → `string[]` (#2301) - A bounded, OWNED snapshot of a split result: every element is an independently copied, refcounted string, so the returned slice safely outlives `arr` — call `string.array_free(arr)` right after this returns, unlike `string.array_get`'s borrowed pointers (see the lifetime warning in `std/string/module.ae`). Prefer `split_to_seq` when you don't need array/index shape at all.
+- `string.array_view(arr)` → `string[]` (#2301) - A bounded, OWNED snapshot of a split result: every element is an independently copied, refcounted string, so the returned slice outlives `arr`: call `string.array_free(arr)` right after this returns, unlike `string.array_get`'s borrowed pointers (see the lifetime warning in `std/string/module.ae`). Prefer `split_to_seq` when you don't need array/index shape at all.
 - `string.split_to_seq(str, delimiter)` - Split into a `*StringSeq` cons-cell list (Erlang/Elixir-shaped). Same split semantics as `string.split`, but returns the result as an O(1) head/tail/cons/length linked list with refcount-aware structural sharing. Use this when the result will be pattern-matched, walked recursively, or sent across an actor boundary as a message field. See [docs/sequences.md](sequences.md) for the full surface.
 - `string.strip_prefix(s, prefix)` → `(rest, stripped)` - If `s` starts with `prefix`, returns the remainder and 1. Otherwise returns `s` and 0. Cleaner than manual `starts_with` + `substring` length arithmetic.
 
@@ -931,7 +889,7 @@ main() {
 - `string.seq_free(s)` iterative spine walk; stops at shared cells
 - `string.seq_from_array(arr, count)` → `*StringSeq` build from an `AetherStringArray*` (the shape `string.split` returns)
 - `string.seq_to_array(s)` → `ptr` materialise as `AetherStringArray*` for legacy callers; free with `string.array_free`
-- `string.seq_from_strings(items)` → `*StringSeq` (#2301) build directly from a plain `string[]` — for a runtime slice that isn't a `[...]` literal, where the compiler's own literal-to-seq lowering doesn't apply. `items` itself is untouched; each element is independently retained into the new seq.
+- `string.seq_from_strings(items)` → `*StringSeq` (#2301) build directly from a plain `string[]`, for a runtime slice that isn't a `[...]` literal, where the compiler's own literal-to-seq lowering doesn't apply. `items` itself is untouched; each element is independently retained into the new seq.
 - `string.seq_to_strings(s)` → `string[]` (#2301) the reverse: an owned `string[]` snapshot of a seq's elements (each independently copied), walking the seq directly rather than through the `AetherStringArray` handle `seq_to_array` returns.
 - `string.seq_reverse(s)` → `*StringSeq` O(n), fresh independent spine
 - `string.seq_concat(a, b)` → `*StringSeq` O(|a|), `a` copied, `b` shared via refcount bump
@@ -1037,32 +995,40 @@ Neither escape changes the semantics of the naive form; they only
 change its cost. Reach for the builder when pieces arrive one at a
 time, `join` when the elements already exist as a `*StringSeq`.
 
-### String ownership and the heap-string tracker
+### String ownership
 
-Strings reassigned to a variable are reclaimed automatically by a compiler-emitted wrapper, you do **not** write `defer string.free(s)` for in-Aether assignments. For every string variable in a function, the compiler emits a companion `_heap_<name>` tracker at function-entry scope that flips between 0 (current value is a literal) and 1 (current value is heap-allocated) as you reassign. On every reassignment, the wrapper `if (_heap_<name>) free(<old>)` decides whether to release the previous buffer.
+A place that holds a string (a local, a field, an element, a module `var`)
+owns one reference to it. A store takes the new string and releases the one
+it replaces, and leaving a scope releases what its locals hold, so you do
+**not** write `defer string.free(s)`. A function returning a string hands its
+caller one reference whatever it returns: a fresh string, a literal, or a
+parameter it borrowed. A loop that rebinds a string therefore runs in constant
+memory:
 
-Both the **stdlib** functions in the table above (`string.concat`, `string.substring`, `string.to_upper`, `string.to_lower`, `string.trim`) and **string interpolation** (`"foo ${x}"`) are recognised as heap-allocated.
+```aether,run
+import std.string
 
-A **user-defined `-> string` function** is recognised as heap-allocated iff every return statement in its body yields a heap-string-expression (recursive structural check with cycle detection):
-
-```aether,fragment
 my_concat(a: string, b: string) -> string {
-    return string.concat(a, b)        // RHS is heap → my_concat is heap-returning
+    return string.concat(a, b)        // a fresh string, moved to the caller
 }
 
-s = ""
-i = 0
-while i < 1000000 {
-    s = my_concat(s, "x")              // O(1) memory, old s is freed automatically
-    i = i + 1
+main() {
+    s = ""
+    i = 0
+    while i < 1000 {
+        s = my_concat(s, "x")         // the store releases the string it replaces
+        i = i + 1
+    }
+    println(string.length(s))
 }
 ```
 
-A function returning a string literal, or a function whose returns mix heap and literal sources, is NOT recognised, and the wrapper won't try to free its result. This is the heap-string tracker's structural escape analysis.
+```output
+1000
+```
 
-The function-entry hoist closes the cross-block visibility gap that previously kept the simpler `node_type == TYPE_STRING` recognition unsafe: the tracker is now visible at every nesting depth, so a variable first-assigned in an if-then and reassigned in an else-if (or in a deeply nested loop) sees the same `_heap_<name>` cell and follows the same free/no-free rules.
-
-For the full memory-management background, see [Memory Management](memory-management.md#string-memory-model-heap-string-tracker).
+The rules, and how C strings cross the boundary, are in
+[Memory Management](memory-management.md#strings).
 
 ---
 
@@ -1072,8 +1038,8 @@ PCRE2-backed matching: compile a pattern once, then match, capture, find
 every occurrence, or replace. A compiled pattern is a handle the caller
 frees; compiling is the expensive half, so hoist it out of a loop.
 
-`compile` returns `(handle, error)` — a malformed pattern is an ordinary
-error value, not a crash — and so do `captures`, `replace` and
+`compile` returns `(handle, error)` (a malformed pattern is an ordinary
+error value, not a crash), and so do `captures`, `replace` and
 `replace_all`. `find` returns the *span* of the first match as
 `(start, end, error)`, with `start == -1` for no match.
 
@@ -1233,12 +1199,12 @@ n, err = fs.walk(root, |path: string, kind: int, depth: int| {
     return fs.WALK_CONTINUE           // WALK_CONTINUE 0 · WALK_SKIP_SUBTREE 1 · WALK_STOP 2
 })
 
-// Collecting paths: `path` is borrowed, so copy the bytes at the boundary.
-// Adding `path` itself would store a pointer the next entry overwrites.
+// Collecting paths: `path` is borrowed for the callback, and the list
+// takes a string of its own, so it is stored as it is.
 found = list.new()
 n2, err2 = fs.walk(root, |path: string, kind: int, depth: int| {
     if kind == 1 && string.ends_with(path, ".md") == 1 {
-        list.add(found, string.copy(path))
+        list.add(found, path)
     }
     return 0
 })
@@ -1250,7 +1216,7 @@ fs.watch_close(w)
 ```
 
 **Functions:**
-- `fs.walk(path, cb)` → `(int, string)` - Visit `path` (depth 0) and every entry beneath it. Entry kinds come from readdir's `d_type`, one sweep per directory, no per-entry `stat(2)`. Symlinks are reported (kind 3) but never followed, so cycles are impossible. `path` inside the callback is **borrowed**: it points into the buffer the walk rewrites for the next entry and is valid only until the callback returns. Storing it directly (`list.add(paths, path)`) keeps the pointer, not the bytes, so the entry reads as garbage after the walk; copy at the boundary with `list.add(paths, string.copy(path))`. Traversal order within a directory is the platform's readdir order (unspecified). Returns (entries visited, `""`), or (0, error) when `path` can't be read.
+- `fs.walk(path, cb)` → `(int, string)` - Visit `path` (depth 0) and every entry beneath it. Entry kinds come from readdir's `d_type`, one sweep per directory, no per-entry `stat(2)`. Symlinks are reported (kind 3) but never followed, so cycles are impossible. `path` inside the callback is **borrowed**: it points into the buffer the walk rewrites for the next entry and is valid only until the callback returns. A place that keeps it takes a string of its own (`list.add(paths, path)`, `last = path`), so storing it needs no copy. Traversal order within a directory is the platform's readdir order (unspecified). Returns (entries visited, `""`), or (0, error) when `path` can't be read.
 - `fs.watch_open(path)` → `(ptr, string)` - Watch one directory (or file), non-recursive, over the platform primitive: kqueue `EVFILT_VNODE` (macOS/BSD), inotify (Linux), `FindFirstChangeNotification` (Windows). The handle is single-threaded.
 - `fs.watch_wait(watch, timeout_ms)` → `int` - Block up to `timeout_ms` (negative = forever): 1 = something changed (create/delete/modify/rename inside the watched directory), 0 = timeout, -1 = error. Changes made **between** `watch_open` and `watch_wait` are queued, not lost, and a burst of changes reports once (pending events are drained).
 - `fs.watch_close(watch)` - Release the handle. Safe on null.
@@ -1322,7 +1288,7 @@ main() {
 - `fs.create_dir_with_mode(path, mode)` → `string` - Like `fs.create_dir` but takes an explicit POSIX mode (0777-masked). Use this for private dirs (e.g. `0o700` for keys), sets the bits at creation time, closing the `mkdir` → `chmod` race window. Windows ignores the mode at the directory layer; the parameter is accepted for portability.
 - `fs.mtime(path)` → `(int, string)` - File's mtime as Unix epoch seconds, in the standard `(value, err)` shape. Distinguishes "stat failed" from "file's mtime is 0 (1970 epoch)", the older `file_mtime` extern collapsed both into a single 0 sentinel and is kept only for back-compat.
 - `fs.file_stat(path)` → `(kind, size, mtime, err)` - One `lstat(2)`; symlinks report kind 3, target is not followed. Kind is 1 = file, 2 = directory, 3 = symlink, 4 = other, 5 = socket, 6 = FIFO, 7 = device (char and block devices share 7). Sockets, FIFOs and devices are distinguished on POSIX only; Windows reports them as 4. Use the `fs.STAT_KIND_*` constants rather than the literals.
-- `fs.fs_is_socket(path)` → `int` - 1 if `path` is a UNIX-domain socket, 0 otherwise (including when nothing is there). Unlike `fs.fs_is_symlink` this **follows** symlinks, since a caller asking "is this a socket" wants the target. POSIX only; always 0 on Windows. Pair it with `os.user_id()` to locate a per-user runtime socket such as `/run/user/${os.user_id()}/podman/podman.sock`.
+- `fs.is_socket(path)` → `int` - 1 if `path` is a UNIX-domain socket, 0 otherwise (including when nothing is there). Unlike `fs.is_symlink` this **follows** symlinks, since a caller asking "is this a socket" wants the target. POSIX only; always 0 on Windows. Pair it with `os.user_id()` to locate a per-user runtime socket such as `/run/user/${os.user_id()}/podman/podman.sock`.
 - `fs.read_binary(path)` → `(content, length, err)` - Length-aware read preserving embedded NULs.
 
 ### Structured-error pilot
@@ -1634,7 +1600,7 @@ Coming from Go's `json.Unmarshal`, Java's Jackson, Python's `json.load` + datacl
 - **No streaming parse.** The whole document is buffered into the arena before the tree is walkable. For multi-gigabyte JSON, use a different tool. Documents into the tens of MB are fine.
 - **No JSON5 / comments / trailing commas.** Strict RFC 8259 only.
 - **No pretty-print on stringify.** Compact output only. Wrap with a separate prettier if you need one.
-- **Declarative validation is `std.schema`** — typed records, composable
+- **Declarative validation is `std.schema`**: typed records, composable
   validators, `parse -> (values, errors)`, and `to_json_schema()` to *emit* a
   draft-07 JSON Schema. It does not *consume* external JSON Schema documents;
   validate against a `std.schema` record, or build that on top.
@@ -1723,7 +1689,7 @@ keys 2
 
 ## CBOR (`std.cbor`)
 
-RFC 8949 — the binary shape JSON has, with the same value model, a compact
+RFC 8949: the binary shape JSON has, with the same value model, a compact
 encoding, and tags for types JSON cannot express. It is what COSE, WebAuthn
 and a good deal of IoT protocol traffic are built on.
 
@@ -1790,7 +1756,7 @@ outlive it.
 
 **This module needs libfyaml at build time.** Where the library is absent
 every entry point returns the error `std.yaml unavailable: this build has
-no libfyaml`, rather than failing to link — so a program that imports it
+no libfyaml`, rather than failing to link, so a program that imports it
 still builds, and says so at runtime. That is also why the example below is
 compile-checked rather than run: its output depends on how the toolchain
 was built.
@@ -2005,7 +1971,7 @@ The post-quantum KEM is `std.cryptography.mlkem` (ML-KEM, FIPS 203), with `mlkem
 Hex, Base64, Base32 and one-record CSV splitting. The encoders take an
 explicit byte length rather than reading to a NUL, so they are binary-safe:
 a buffer with embedded zeros encodes correctly. The decoders return
-`(value, error)` — malformed input is an error value, never a partial
+`(value, error)`: malformed input is an error value, never a partial
 result.
 
 Base64 output is **unpadded** by default, which is what URLs, JWTs and most
@@ -2326,7 +2292,7 @@ main() {
 - `middleware.use_rewrite(server, opts)` → `string` - Prefix-rewrite rules; build via `middleware.rewrite_add_rule(opts, from, to)`.
 
 **Response transformers (run after the route handler emits the response):**
-- `middleware.use_gzip(server, min_size, level)` → `string` - Gzip the response body when the client sends `Accept-Encoding: gzip` and the body is at least `min_size` bytes; level 1 (fastest) – 9 (best), 0 = default 6.
+- `middleware.use_gzip(server, min_size, level)` → `string` - Gzip the response body when the client sends `Accept-Encoding: gzip` and the body is at least `min_size` bytes; level 1 (fastest) to 9 (best), 0 = default 6.
 - `middleware.use_error_pages(server, opts)` → `string` - Replace error-status response bodies with operator-supplied content; build via `middleware.error_pages_register(opts, status_code, body, content_type)`.
 
 ### HTTP Reverse Proxy (`std.http.proxy`)
@@ -2514,13 +2480,13 @@ pointer and history.
 
 RFC 3986 percent-encoding and query-string parsing. Three encoders, because
 the standard keeps a different reserved set for each URL component and using
-the wrong one silently corrupts a request — or, for a signed request, breaks
+the wrong one silently corrupts a request or, for a signed request, breaks
 the signature:
 
-- `url.encode` — query component (Go's `QueryEscape`): a space becomes `+`.
-- `url.encode_path` — path segment (Go's `PathEscape`): `$&+:=@` are kept, a
+- `url.encode`: query component (Go's `QueryEscape`): a space becomes `+`.
+- `url.encode_path`: path segment (Go's `PathEscape`): `$&+:=@` are kept, a
   space is `%20`. `+` is KEPT here, because it is not a space in a path.
-- `url.encode_strict` — unreserved only, for SigV4-style canonical signing
+- `url.encode_strict`: unreserved only, for SigV4-style canonical signing
   where any deviation invalidates the signature.
 
 `url.decode` reverses any of them and reads `+` as a space. `parse_query`
@@ -2738,7 +2704,7 @@ arm.
 | Function | Returns | Description |
 |---|---|---|
 | `net.await_io(fd)` | `string` | Register `fd` with the current core's I/O poller and suspend the calling actor. Returns `""` on success, error string on failure. One-shot: the fd is automatically unregistered after the next `IoReady` delivery. |
-| `net.ae_io_cancel(fd)` |, | Abandon a pending `await_io` without waiting for the message. Rarely needed due to one-shot policy. |
+| `net.ae_io_cancel(fd)` | none | Abandon a pending `await_io` without waiting for the message. Rarely needed due to one-shot policy. |
 
 **Constraints:**
 
@@ -2905,7 +2871,7 @@ main() {
 - `os.exec(cmd)` → `(string, string)` - Run command and capture stdout, return `(output, err)`
 - `os.getenv(name)` - Get environment variable (returns string, or null if not set, infallible)
 - `os.setenv(name, value)` → `string` - Set environment variable, returns "" on success or an error string. Same C-side function as `io.setenv` use `os.setenv` when you've already imported `std.os` for `os.getenv`.
-- `os.temp_dir()` → `string` - The directory for scratch files, with no trailing separator. Windows resolves it through `GetTempPathW` (which already does the documented `TMP` → `TEMP` → `USERPROFILE` → Windows-directory cascade); POSIX reads `TMPDIR` and falls back to `/tmp`. Always returns a non-empty path, so `"${os.temp_dir()}/name"` needs no check. **Prefer this to a hardcoded `/tmp`**, which works on POSIX and under an MSYS2 shell but fails on a native Windows build — a bug that passes every local check.
+- `os.temp_dir()` → `string` - The directory for scratch files, with no trailing separator. Windows resolves it through `GetTempPathW` (which already does the documented `TMP` → `TEMP` → `USERPROFILE` → Windows-directory cascade); POSIX reads `TMPDIR` and falls back to `/tmp`. Always returns a non-empty path, so `"${os.temp_dir()}/name"` needs no check. **Prefer this to a hardcoded `/tmp`**, which works on POSIX and under an MSYS2 shell but fails on a native Windows build, a bug that passes every local check.
 - `os.unsetenv(name)` → `string` - Unset environment variable, returns "" on success or an error string. Same C-side function as `io.unsetenv`.
 - `os.getpid()` → `int` - Process identifier of the current process. POSIX `getpid(2)`; Windows `_getpid()`. Useful for tmpfile names (`/tmp/myprog.${os.getpid()}.tmp`), per-process locks, log prefixes, and stable tagging across forked children. Returns 0 on platforms compiled without filesystem support.
 - `os.memory_resident()` → `long` - The process's resident set in bytes, shared pages included (Windows working set, macOS `task_info`, Linux `/proc/self/statm`, FreeBSD `kinfo_proc`). `-1` where the platform does not report it.
@@ -3204,7 +3170,7 @@ Civil date and time over Unix epoch seconds, all UTC. The canonical value is
 the epoch second; the civil fields (`year`, `month`, `day`, `hour`, `min`,
 `sec`, plus weekday and day-of-year) are a decoded view of it, converted both
 ways by an exact proleptic-Gregorian algorithm with no dependency on libc
-timezone state. That is what makes the results deterministic and testable —
+timezone state. That is what makes the results deterministic and testable:
 the same input gives the same answer on every machine and in every
 environment.
 
@@ -3254,7 +3220,7 @@ without `--with=os`.
 Aether's `int` is signed, so `>>` propagates the sign bit and `/` rounds
 toward zero on a negative value. `std.bits` is the unsigned view of the
 same bit patterns, for code that is manipulating bits rather than counting
-with them — hashes, codecs, checksums, anything ported from a language
+with them: hashes, codecs, checksums, anything ported from a language
 with a `uint`.
 
 ```aether,run
@@ -3300,8 +3266,8 @@ names.
 ## Hashing (`std.hash`)
 
 Non-cryptographic hashes for hash tables, checksums and sharding. All are
-deterministic across runs and platforms — the same bytes give the same
-number — and all take an explicit length, so they are binary-safe.
+deterministic across runs and platforms (the same bytes give the same
+number), and all take an explicit length, so they are binary-safe.
 
 Reach for **SipHash-2-4** whenever the input is attacker-controlled. The
 others have no secret, so an attacker who knows which one you use can pick
@@ -3352,7 +3318,7 @@ None of these is a cryptographic hash: for integrity or signatures use
 
 Integers with no width limit, as a handle you allocate and free. Every
 operation returns a **new** handle rather than mutating its operands, so
-each result needs its own `free` — `defer bignum.free(x)` at the point of
+each result needs its own `free`; `defer bignum.free(x)` at the point of
 creation is the habit that keeps that straight.
 
 ```aether,run
@@ -3410,7 +3376,7 @@ compare 1 sign 1 bits 127
 
 `mod_pow`, `mod_inverse` and `is_probable_prime` are the public-key
 arithmetic set. They are correct, not hardened: they are not written to be
-constant-time, so do not build a production cryptosystem on them —
+constant-time, so do not build a production cryptosystem on them;
 `std.cryptography` is where that belongs.
 
 ## Math (`std.math`)
@@ -3493,7 +3459,7 @@ tag, so the call site does not encode one country's conventions.
 `FormatOptions` controls the fraction digits and whether grouping is applied;
 `default_options()` is grouping on, up to three fraction digits and none
 forced. The `_string` variants take and return decimal *strings* rather than
-`float`, which is what a monetary value should be carried as — a binary
+`float`, which is what a monetary value should be carried as: a binary
 float cannot represent 0.1 exactly, and rounding it at the last moment is
 how cents go missing.
 
@@ -3526,7 +3492,7 @@ $1,299.50
 ```
 
 **Functions:**
-- `number.default_options()` → `FormatOptions` - Grouping on, 0–3 fraction digits
+- `number.default_options()` → `FormatOptions` - Grouping on, 0 to 3 fraction digits
 - `number.format_decimal(locale, value, opts)` → `string` - Format a `float`
 - `number.format_percent(locale, value, opts)` → `string` - Format a ratio as a percentage
 - `number.format_currency(locale, currency, value)` → `string` - Format with an ISO 4217 code
@@ -3658,7 +3624,7 @@ after stop: playing false, at 0 ms
 - `audio.seek_ms(src, ms)` → `bool`, `position_ms(src)` / `duration_ms(src)` → `long`, `channels(src)` / `sample_rate(src)` → `int`
 - `audio.unload(src)`, `audio.last_error()` → `string`
 
-**Mixer tier (#2205)** — per-source controls a game engine needs, groups,
+**Mixer tier (#2205)**: per-source controls a game engine needs, groups,
 a queue source, and a headless engine that holds a mix to numbers:
 - `audio.pan(src, p)` → `bool` (clamped to -1..1, equal-power: the Web Audio StereoPannerNode law), `audio.get_pan(src)` → `float`
 - `audio.pitch(src, ratio)` → `bool` (ratio > 0), `audio.get_pitch(src)` → `float`
@@ -3826,7 +3792,7 @@ main() {
 - `spawn(ActorName())` - Create actor instance
 - `wait_for_idle()` - Block until all actors finish
 - `sleep(milliseconds)` - Pause execution
-- `release(s)` - Decrement an AetherString's refcount and free if it reaches zero. Sugar for `string.release(s)` argument must be `string`-typed (other heap types call their typed release, e.g. `string.string_seq_free`). Pair with `defer` to undo allocations made by stdlib functions returning ownership: `body, err = http.get(url); defer release(body)`.
+- `release(s)` - Release the reference a `string` local holds now and leave the local empty, as `string.release(s)` does; without it the local releases the string when it is overwritten or its scope ends. The argument must be `string`-typed (a `*StringSeq` has `string.seq_free`), and a function may not release a parameter it borrows (E0901).
 
 ### Blocking work off the loop (`std.worker`)
 
@@ -4163,8 +4129,8 @@ UUID v4 and v7 (RFC 9562), both returned in the canonical 36-character
 **v4** is 122 random bits: use it when the only requirements are
 unpredictability and uniqueness. **v7** puts a 48-bit millisecond timestamp
 in front of 74 random bits, so ids sort by creation time. That is the better
-default for a primary key — v4 keys arrive in random index positions and
-fragment a B-tree, while v7 keys append — unless you specifically need the
+default for a primary key (v4 keys arrive in random index positions and
+fragment a B-tree, while v7 keys append) unless you specifically need the
 creation time hidden.
 
 Both draw their entropy from `std.cryptography.random_bytes` and return
@@ -4182,7 +4148,7 @@ main() {
     if string.length(err7) > 0 { println("no entropy: ${err7}"); return }
 
     // Both are the canonical 8-4-4-4-12 form. The version nibble sits at
-    // index 14, so a stored id says which generator made it — and a v7 id
+    // index 14, so a stored id says which generator made it, and a v7 id
     // sorts by creation time where a v4 one does not.
     println("length ${string.length(id)}")
     println("v4 version nibble: ${string.substring(id, 14, 15)}")
@@ -4352,13 +4318,13 @@ import std.plural
 main() {
     // CLDR plural categories: which form of a word a number takes. English
     // has two; many languages have more, and the rules are not guessable.
-    println("en 1: ${plural.plural_category("en", 1)}")
-    println("en 2: ${plural.plural_category("en", 2)}")
-    println("ru 1: ${plural.plural_category("ru", 1)}")
-    println("ru 3: ${plural.plural_category("ru", 3)}")
-    println("ru 5: ${plural.plural_category("ru", 5)}")
-    println("ru 21: ${plural.plural_category("ru", 21)}")
-    println("ja 7: ${plural.plural_category("ja", 7)}")
+    println("en 1: ${plural.category("en", 1)}")
+    println("en 2: ${plural.category("en", 2)}")
+    println("ru 1: ${plural.category("ru", 1)}")
+    println("ru 3: ${plural.category("ru", 3)}")
+    println("ru 5: ${plural.category("ru", 5)}")
+    println("ru 21: ${plural.category("ru", 21)}")
+    println("ja 7: ${plural.category("ja", 7)}")
 }
 ```
 ```output
@@ -4372,8 +4338,8 @@ ja 7: other
 ```
 
 **Functions:**
-- `plural.plural_category(lang, n)` → `string` - `"zero"`, `"one"`, `"two"`, `"few"`, `"many"` or `"other"`
-- `plural.plural_category_decimal(lang, n, i, v, w, f, t)` → `string` - The same for a decimal, given CLDR's operands
+- `plural.category(lang, n)` → `string` - `"zero"`, `"one"`, `"two"`, `"few"`, `"many"` or `"other"`
+- `plural.category_decimal(lang, n, i, v, w, f, t)` → `string` - The same for a decimal, given CLDR's operands
 
 ### Message formatting (`std.message`)
 
@@ -4494,7 +4460,7 @@ handle_request(req: ptr, res: ptr, ud: ptr) {
 - `config.size()` → `int` - Number of keys currently registered.
 - `config.clear()` - Wipe all keys. Tests use this for isolation; production code rarely needs it.
 
-Storage: a single process-global hashmap protected by a reader/writer lock. Implementation models BEAM's `persistent_term`. Returned `get` strings are borrowed, they remain valid until the next `put` / `clear` that touches the same key, which is fine for the "set once at startup" pattern and lets reads avoid an allocation. Copy via `string.copy(value)` if you need a value that survives a later `put`.
+Storage: a single process-global hashmap protected by a reader/writer lock. Implementation models BEAM's `persistent_term`. A string `get` returns is the caller's, with a reference of its own, so it stays valid after a later `put` or `clear` of the same key.
 
 ### `std.actors` name → actor_ref registry
 

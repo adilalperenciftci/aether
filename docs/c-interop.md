@@ -374,20 +374,18 @@ t.hashFunction = my_hash        // checked against fn(ptr) -> int
 - **The field holds the function's real address**, cast to whatever type the header declared for that member, so C can call through it directly. Only a top-level function qualifies: a closure carries an environment pointer, and a C function pointer has nowhere to put it.
 - This is specific to **C-owned** structs (`extern struct`, with or without `@c_import`). A callback field on an Aether-owned struct holds a closure and keeps its captures, which is the right behaviour there and unchanged.
 
-### String fields of a header-defined struct borrow
+### String fields of a header-defined struct
 
-A `string` field of an `extern struct ... @c_import` is the header's `const char*`, and it **borrows** the string stored in it, as the C API that declares it expects. There is no hidden ownership flag beside the field, since the header's layout has none. The struct is never the owner:
+A `string` field of an `extern struct ... @c_import` is the header's `const char*`. The header's layout has no room for an ownership flag, so the struct never releases what it holds. A string stored there (`s.field = v`, or in a literal) is given a reference of its own, which nothing in the program releases: it stays valid for as long as C reads it, and it is C's from then on. The local it came from keeps and releases its own reference, as any local does.
 
 ```aether,fragment
 app = calloc(1, sizeof(VkApplicationInfo)) as *VkApplicationInfo
-app.pApplicationName = "viewer"          // a literal: static, nothing to free
-name = "viewer ${version}"
-app.pEngineName = name                   // borrowed: `name` must outlive every use
+app.pApplicationName = "viewer"          // a literal: pinned, never freed
+app.pEngineName = "viewer ${version}"    // given a reference that C keeps
 ```
 
-- A string this function made and then stored in such a struct, by `s.field = v` or in a literal, is **kept alive** rather than freed when the function returns, because the struct may outlive it (returned, stored, handed to C). The compiler prefers a leak to a dangling pointer. Free it yourself when the C side is done with it.
-- A string built directly in the store, as in `app.pEngineName = "viewer ${version}"`, belongs to nobody afterwards. Keep it in a local when you mean to free it.
-- A field of an Aether-defined struct is different: it owns its string, and the struct's destructor frees it.
+- Each string stored into such a field stays allocated until the program exits, so a program that stores many over time should store them once, or keep them in memory it frees itself.
+- A field of an Aether-defined struct is different: it owns its string, and a store over it or the struct's drop releases it.
 
 ### A header's union: `extern union ... @c_import`
 
@@ -471,13 +469,13 @@ Three intrinsics drive it, mirroring `<stdarg.h>`:
 
 **Spell the receiving parameter `va_list`, not `ptr`.** `va_start()` yields a cookie that *points at* the function's `va_list`, so it can be held in an ordinary `ptr` local; the callee needs the `va_list` itself. Declaring the parameter `va_list` is what tells the call site to pass it correctly. Declaring it `ptr` compiles without a warning and then formats garbage, because the callee reads the cookie as though it were the argument list.
 
-`va_list` typechecks as an opaque `ptr`; the difference is only the C spelling that codegen emits, the same mechanism as `size_t` and `cstring` under [Typed and qualified C pointers](#typed-and-qualified-c-pointers).
+`va_list` typechecks as an opaque `ptr`; the difference is only the C spelling that codegen emits, the same mechanism as `size_t` and `cstring` under [Typed and qualified C pointers](language-reference.md#typed-and-qualified-c-pointers).
 
 For **checking** format strings rather than forwarding them, nothing extra is needed: a call to a printf-family extern with a literal format keeps that literal in the generated C, so the C compiler's `-Wformat` sees it and the warning is attributed back to the `.ae` line.
 
 ### A module that needs a header in the TU: `@c_include`
 
-`@c_import` (above) hands prototype ownership to a header — but the header
+`@c_import` (above) hands prototype ownership to a header, but the header
 still has to be *in* the translation unit, which a consumer's
 `[build] cflags = "-include api.h"` is one way to arrange. A module can
 state it itself:
@@ -777,7 +775,7 @@ What the receiving side sees for a `string` argument:
 
 A call through a typed function pointer (`f = p as fn(uint32, string) -> int`, a `cb: fn(string) -> int` parameter, or a `fn(...)`-typed struct field) unwraps a `string` argument the same way: `f(7, name)` emits `f(7, aether_string_data(name))`. A `ptr` parameter in the pointer's type passes the value as it is, for a callee that wants the header.
 
-A `string` a typed function pointer returns is the caller's, and the caller frees it once done (#2586). A pointer may point at an Aether function or at C, so the call decides at run time: an Aether function that hands over owned strings marks the one it returns, and the call takes a marked result as it is and copies any other (a literal or borrowed string an Aether function returned, or a C function's string). C's string is never freed, however its pointer arrived: cast from a raw `ptr` (`dl.symbol_raw(h, "strerror") as fn(int) -> string`), a raw `ptr` passed for a typed parameter, an extern's result, a field of a struct laid over C memory or filled by C, an extern named as a value, or a pointer C passes to an Aether callback. An Aether function handed to C (by name, `as ptr`, through a typed local or parameter) is the function itself, so the string C gets back is an AetherString, as from any Aether function: C reads its text through `aether_string_data`. An owned `string` argument to such a call is freed after the call at each argument position where no Aether function used as a pointer keeps what it receives (see [memory-management.md](memory-management.md#closure-arguments-are-borrowed)); a C function behind the pointer takes it borrowed, as an extern's `string` parameter does.
+A `string` a typed function pointer returns is the caller's, and the caller releases it once done (#2586). A pointer may point at an Aether function or at C, so the call decides at run time: an Aether function that hands over owned strings marks the one it returns, and the call takes a marked result as it is and copies any other (a literal or borrowed string an Aether function returned, or a C function's string). C's string is never freed, however its pointer arrived: cast from a raw `ptr` (`dl.symbol_raw(h, "strerror") as fn(int) -> string`), a raw `ptr` passed for a typed parameter, an extern's result, a field of a struct laid over C memory or filled by C, an extern named as a value, or a pointer C passes to an Aether callback. An Aether function handed to C (by name, `as ptr`, through a typed local or parameter) is the function itself, so the string C gets back is an AetherString, as from any Aether function: C reads its text through `aether_string_data`. A fresh `string` argument to such a call is released after the call, as for any call: the function behind the pointer borrows it, and an Aether function that keeps it takes a reference of its own ([memory-management.md](memory-management.md#values-the-program-owns)); a C function behind the pointer takes it borrowed, as an extern's `string` parameter does.
 
 The regression range was v0.97.0 → v0.98.0 (the blanket auto-unwrap landed in v0.98.0); the `@aether` annotation restores the v0.97.0 behaviour for Aether-to-Aether crossings without re-breaking the v0.98.0 fix for naive C externs.
 
@@ -1100,7 +1098,7 @@ Access via dotted notation: `d.u.f64`, `d.u.func.length`, `d.u.getset.get_func_n
 
 - C lowering emits a real `union { ... }` (and nested `struct { ... }` where present), the same C body any hand-rolled FFI declaration would write.
 - The compiler trusts the user's offsets; it does not synthesize the C layout from anything other than the literal field declarations.
-- Heap-string ownership tracking (the `_heap_<name>` companion ints emitted for `string`-typed fields) does NOT descend into unions, use `ptr`-typed fields instead. Mixed string-and-union ownership is poorly defined in C; declining to support it keeps the boundary clean.
+- String ownership does not descend into unions: use `ptr`-typed members there. Which member of a union is live is known only to C, so no store or drop can tell whether a string is there to release.
 
 **Where it's not allowed**
 
@@ -1165,34 +1163,28 @@ Every Aether-side primitive that builds a string returns an `AetherString*` a re
 | `string_concat`, `string_concat_wrapped` |
 | `string_substring`, `string_to_upper`, `string_to_lower`, `string_trim` |
 
-These all mint their result through `string_adopt_caps_buffer`, which sets the magic header and stores the byte length. Aether's `string` type is `void*`-shaped at the C level, and the runtime helpers (`str_data`, `str_len`) dispatch on the AetherString magic header, so `string.length(value)` on any of these results reads the stored length, not `strlen()`, and does not truncate at an embedded NUL.
+These all mint their result through `string_adopt_caps_buffer`, which sets the magic header and stores the byte length. The runtime helpers (`str_data`, `str_len`) dispatch on the AetherString magic header, so `string.length(value)` on any of these results reads the stored length, not `strlen()`, and does not truncate at an embedded NUL.
 
-`string_concat_wrapped` is retained as an explicit alias for `string_concat`: both return an `AetherString*` with the same contract. The truncation hazard only appears when a value has been reduced to a bare `char*` for example a string literal, or a `string` argument whose AetherString header was stripped by the auto-unwrap at an extern call boundary (see "Aether-emitted receivers" above). On such a bare pointer, `str_len` falls through to `strlen()` and truncates at the first embedded NUL.
+`string_concat_wrapped` is retained as an explicit alias for `string_concat`: both return an `AetherString*` with the same contract. The truncation hazard only appears when a value has been reduced to a bare `char*`: a `string` argument whose AetherString header was stripped by the auto-unwrap at an extern call boundary (see "Aether-emitted receivers" above), or a string C returned. On such a bare pointer, `str_len` falls through to `strlen()` and truncates at the first embedded NUL.
 
 > **Historical note:** `string_concat` originally returned a plain `char*`, so downstream `string.length(string.concat(a, b))` patterns truncated binary content at the first NUL. `string_concat` now returns an `AetherString*` (via `string_adopt_caps_buffer`), and `string_concat_wrapped` is kept as an alias for the same contract. Existing call sites don't need to change.
 
-### Heap-string ownership across the FFI boundary
+### String ownership across the FFI boundary
 
-When an Aether function takes the result of a C extern `-> string` call and assigns it to a variable, the same heap-string-tracker machinery decides whether the buffer is freed on later reassignment:
+What a call does with a string is decided by the extern's declaration, never by reading C (R4 of the [ownership rules](memory-management.md#c-boundaries-r4)):
 
-- **Hardcoded heap-returning stdlib calls** (`string.concat`, `string.substring`, `string.{to_upper, to_lower, trim}`) and **string interpolation** are always treated as heap.
-- **A user-defined Aether `-> string` function** is heap-returning iff the codegen's recursive structural-escape-analysis pass can prove every return statement yields a heap-string-expression (chain into another heap-returning function counts).
-- **A C extern `-> string`** is NOT analysed structurally, the codegen has no body to walk. It's treated as **non-heap** by default (literal-shape contract). If your C extern returns malloc'd memory that the caller is expected to free, capture its result via `ptr` and free it explicitly:
+- **An extern `-> string`** returns C's characters, borrowed: `getenv(3)`, `dlerror(3)` and most POSIX functions return memory the caller must not free. A place that takes the result copies the characters into a counted string it owns, so the value stays valid when C reuses its buffer.
+- **An extern `-> string @heap`** returns a string the caller owns: a `malloc`'d `char*` is adopted into a counted string at the call, with no copy, and released by the place that holds it, as any string is. `-> ptr @heap` says the same of a counted string returned untyped, as `string.from_int` does, and a tuple position can carry it too (`-> (string @heap, int)`).
+- **A `string` parameter** is borrowed for the call: C must not free it or keep it. One that C keeps is declared `@retain`, and the call hands it a reference of its own.
 
 ```aether,nolink
-// Heap-returning C extern, declare result as ptr, free explicitly.
-extern my_strdup_raw(s: string) -> ptr
+extern my_strdup(s: string) -> string @heap   // malloc'd: the caller owns it
 
 main() {
-    p = my_strdup_raw("hello")
-    defer free(p)   // explicit cleanup
-    // ... use p ...
+    s = my_strdup("hello")     // adopted, no copy; released with `s`
+    println(s)
 }
 ```
-
-Why not auto-treat C externs as heap: the C side has no calling-convention discipline that distinguishes heap from literal returns. `getenv(3)`, `dlerror(3)`, and dozens of POSIX functions return *borrowed* `char*` that must NOT be freed. A blanket "C extern returning string = heap" rule would surface as silent free-of-borrowed-memory aborts. The conservative stance is correct.
-
-If your C function genuinely matches Aether's heap-returning contract (always allocates, never returns a literal or borrow), wrap it in a small `.ae` shim that returns a heap-string-expr (e.g. `string.concat("", c_result)`) and the structural-analysis pass will recognise the shim as heap-returning automatically.
 
 ## Embedding Aether in C Applications
 
@@ -1239,7 +1231,7 @@ function `bind(...)` and the compiler does the right thing. The only
 place you see the prefix is in the emitted C (useful if you're
 debugging with `nm`, `objdump`, or a stack trace).
 
-A renamed function is equally usable **as a value** — passing it across an
+A renamed function is equally usable **as a value**: passing it across an
 ABI boundary as a `ptr` handler reaches the renamed definition, not a
 same-named libc symbol:
 
@@ -1249,14 +1241,14 @@ server_get(raw, "/health", _h_health, 0)   // references ae_h_health
 ```
 
 (Before #1598 only *calls* were rewritten, so a value reference kept the
-original spelling and either failed to compile or — for an
-extern-collision rename — silently bound to the libc symbol.)
+original spelling and either failed to compile or, for an
+extern-collision rename, silently bound to the libc symbol.)
 
 One sharp edge worth knowing: a **local variable may shadow a top-level
 function's name**, and such a local is emitted verbatim rather than
 renamed. That works on its own, but a single function that *both* shadows
 the name and passes the function as a value cannot work in either
-spelling — in the emitted C the value reference would precede the local's
+spelling: in the emitted C the value reference would precede the local's
 declaration. Pick one meaning per scope; the trailing-underscore
 file-local convention (`h_health_`) is the idiomatic way to keep them
 apart.
@@ -1278,6 +1270,16 @@ to the `ae_` spelling above. Importing `std.string` puts a
 of that name is emitted as `ae_string_replace_all`. Calls follow the rename;
 `string.replace_all(...)` still reaches the standard library. It is invisible
 to Aether source.
+
+A module's functions are merged as `<module>_<name>`, the spelling C gives its
+own functions, and a module often wraps its extern of that very name:
+`std.http` declares `extern http_server_set_host(...)` and an Aether
+`server_set_host` that calls it. Such a function is merged as
+`ae_<module>_<name>` instead (#2978). `http.server_set_host(...)` reaches it,
+as does a bare call inside the module or an import of the name, while its
+body's call of `http_server_set_host` still reaches the extern. The merge used
+to drop the function and let calls reach the extern, which differed where the
+wrapper did more than forward.
 
 A top-level function of the entry file keeps external linkage, under its own
 name when nothing collides with it: a C file built into the program can call

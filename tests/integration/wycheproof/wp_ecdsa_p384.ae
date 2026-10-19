@@ -77,11 +77,11 @@ fn sha384_of(b: ptr, n: int) -> ptr {
 
 main() {
     stride = 10
-    wf = os.os_getenv("WYCHEPROOF_FULL")
+    wf = os.getenv("WYCHEPROOF_FULL")
     if wf != 0 {
         if wf == "1" { stride = 1 }
     }
-    sv = os.os_getenv("WYCHEPROOF_STRIDE")
+    sv = os.getenv("WYCHEPROOF_STRIDE")
     if sv != 0 { stride = atoi(sv) }
     if stride < 1 { stride = 1 }
 
@@ -96,7 +96,7 @@ main() {
         exit(1)
     }
 
-    groups = json.json_object_get_raw(root, "testGroups")
+    groups = json.object_get_raw(root, "testGroups")
     ngroups = json.array_size(groups)
 
     passed = 0
@@ -105,24 +105,24 @@ main() {
     gi = 0
     while gi < ngroups {
         g = json.array_get_raw(groups, gi)
-        pkobj = json.json_object_get_raw(g, "publicKey")
-        wx = json.json_get_string_raw(json.json_object_get_raw(pkobj, "wx"))
-        wy = json.json_get_string_raw(json.json_object_get_raw(pkobj, "wy"))
+        pkobj = json.object_get_raw(g, "publicKey")
+        wx = json.get_string_raw(json.object_get_raw(pkobj, "wx"))
+        wy = json.get_string_raw(json.object_get_raw(pkobj, "wy"))
         pubx = coordn(wx, 48)
         puby = coordn(wy, 48)
-        tests = json.json_object_get_raw(g, "tests")
+        tests = json.object_get_raw(g, "tests")
         nt = json.array_size(tests)
         ti = 0
         while ti < nt {
             t = json.array_get_raw(tests, ti)
-            tc_id = json.json_get_int(json.json_object_get_raw(t, "tcId"))
+            tc_id = json.get_int(json.object_get_raw(t, "tcId"))
             if (tc_id % stride) != 0 && stride > 1 {
                 ti = ti + 1
                 continue
             }
-            res = json.json_get_string_raw(json.json_object_get_raw(t, "result"))
-            msg_hex = json.json_get_string_raw(json.json_object_get_raw(t, "msg"))
-            sig_hex = json.json_get_string_raw(json.json_object_get_raw(t, "sig"))
+            res = json.get_string_raw(json.object_get_raw(t, "result"))
+            msg_hex = json.get_string_raw(json.object_get_raw(t, "msg"))
+            sig_hex = json.get_string_raw(json.object_get_raw(t, "sig"))
 
             // A well-formed P1363 sig is exactly 96 bytes (192 hex). A
             // wrong length is an automatic reject — never a valid case.

@@ -24,17 +24,17 @@ computation; the app shell, the UI, `Info.plist`, bundling and signing stay
 in Xcode.
 
 **This is a library, not an app.** iOS does not run loose executables, so
-Aether cannot own `main()` here — see *What to build* in
+Aether cannot own `main()` here: see *What to build* in
 [cross-ios.md](cross-ios.md). If you want the UI in Aether too, that needs a
 UIKit backend for aether-ui, which does not exist yet.
 
-## Step 1 — write the Aether side
+## Step 1: write the Aether side
 
 Everything you `export` becomes a C entry point. Keep the surface small and
 scalar where you can; it is the seam you have to marshal across.
 
 ```aether,nolink
-// fibcore.ae — the whole computation lives here.
+// fibcore.ae: the whole computation lives here.
 export fib(n: int) -> long {
     if n < 2 {
         return n
@@ -43,7 +43,7 @@ export fib(n: int) -> long {
 }
 ```
 
-## Step 2 — generate the bridging header
+## Step 2: generate the bridging header
 
 `--emit=lib` writes only the library. The header comes from `--emit=csrc`,
 which runs the same catalog codegen, so the two cannot drift:
@@ -57,28 +57,28 @@ ae build --emit=csrc fibcore.ae -o fibcore     # fibcore.h + fibcore.c + catalog
 int64_t aether_fib(int32_t n);
 ```
 
-Note this step needs no Xcode and no toolchain at all — it only writes
+Note this step needs no Xcode and no toolchain at all: it only writes
 source, so it works on any machine and in any CI lane.
 
-## Step 3 — build the library for iOS
+## Step 3: build the library for iOS
 
 One invocation per slice. Device and simulator are separate targets: same
 architecture is possible, but the Mach-O *platform* differs and a binary
 built for one will not load on the other.
 
 ```sh
-# Device — a static archive holding your code AND the Aether runtime/stdlib.
+# Device: a static archive holding your code AND the Aether runtime/stdlib.
 # This is what a shipping app links: iOS forbids third-party dylibs in an
 # App Store binary.
 ae build --target=aarch64-ios --emit=staticlib fibcore.ae -o libfibcore.a
 
-# Simulator — pick the slice that matches YOUR Mac, see below
+# Simulator: pick the slice that matches YOUR Mac, see below
 ae build --target=aarch64-ios-simulator --emit=staticlib fibcore.ae -o libfibcore-sim.a
 ```
 
 `--emit=lib` gives a `.dylib` instead. It is convenient for a quick
 command-line loop (and fine for Mac Catalyst), but it is **not shippable to the
-App Store** — see *What to build* in [cross-ios.md](cross-ios.md). Reach for
+App Store**: see *What to build* in [cross-ios.md](cross-ios.md). Reach for
 `--emit=staticlib` unless you have a reason not to.
 
 ### Pick the right simulator architecture
@@ -91,7 +91,7 @@ The simulator runs your Mac's architecture, not the phone's:
 | Intel | `x86_64-ios-simulator` |
 
 Getting this wrong produces a library that links but cannot load, and
-`simctl` reports it in a thoroughly unhelpful way — see *Troubleshooting*.
+`simctl` reports it in a thoroughly unhelpful way: see *Troubleshooting*.
 
 ### Deployment target
 
@@ -103,10 +103,10 @@ AETHER_IOS_MIN=17.0 ae build --target=aarch64-ios --emit=staticlib fibcore.ae -o
 ```
 
 Check it with `vtool -show-build libfibcore.a`. The library's floor only
-needs to be **at or below** the app's — a 15.0 library links fine into a 16.0
+needs to be **at or below** the app's: a 15.0 library links fine into a 16.0
 app.
 
-## Step 4 — call it from SwiftUI
+## Step 4: call it from SwiftUI
 
 Add `fibcore.h` to your target's bridging header (Xcode: *Objective-C
 Bridging Header* in build settings). The exports are then plain Swift
@@ -150,7 +150,7 @@ struct ContentView: View {
 ```
 
 Run Aether calls **off the main actor** if they are not instant, exactly as
-you would any other blocking computation — nothing about the FFI makes a slow
+you would any other blocking computation: nothing about the FFI makes a slow
 function safe to call from the UI thread.
 
 ### Types across the boundary
@@ -184,17 +184,17 @@ Prefer scalars across the boundary where you can. If you need to return
 structured data, returning a JSON string that Swift decodes is usually less
 work than hand-marshalling, and it keeps the ABI surface one function wide.
 
-## Step 5 — get it into the bundle
+## Step 5: get it into the bundle
 
 ### The Xcode way
 
 Drop `libfibcore.a` into **Link Binary With Libraries**. That is the whole
-integration — the archive already contains the Aether runtime and stdlib, so
+integration: the archive already contains the Aether runtime and stdlib, so
 there is exactly one file to add and no embed or signing phase.
 
 If you used `--emit=lib` instead, a `.dylib` additionally needs an **Embed
 Frameworks** phase with *Code Sign On Copy*. `ae` links it
-`-install_name @rpath/<leaf>`, which is what that phase expects — without it
+`-install_name @rpath/<leaf>`, which is what that phase expects, without it
 the load command would record the build machine's path and the app would fail
 to launch anywhere else.
 
@@ -207,7 +207,7 @@ also covers the Mac Catalyst slice (`--target=aarch64-ios-macabi`).
 ### Without an `.xcodeproj`
 
 A bundle is a directory, an `Info.plist` and an executable, so the whole loop
-can run from the command line — useful for CI and for a quick check:
+can run from the command line: useful for CI and for a quick check:
 
 ```sh
 SDK=$(xcrun --sdk iphonesimulator --show-sdk-path)
@@ -255,7 +255,7 @@ The full table is in [cross-ios.md](cross-ios.md#what-does-not-work-on-ios).
 | Symptom | Cause |
 |---|---|
 | `building for iOS but linking object built for macOS` | A host build got into the link. Every object must come from an `--target=…-ios` build. |
-| `simctl`: `Invalid or missing Program/ProgramArguments` | The binary's architecture does not match the simulator's. On an Intel Mac an `aarch64-ios-simulator` build fails exactly this way — and so does a plain C control binary, so it looks like a broken simulator rather than a wrong slice. Check with `file`. |
+| `simctl`: `Invalid or missing Program/ProgramArguments` | The binary's architecture does not match the simulator's. On an Intel Mac an `aarch64-ios-simulator` build fails exactly this way, and so does a plain C control binary, so it looks like a broken simulator rather than a wrong slice. Check with `file`. |
 | `Library not loaded: /path/on/build/machine/lib….dylib` | The `install_name` is absolute. `ae` sets `@rpath/<leaf>`; if you relinked by hand, pass `-install_name @rpath/<leaf>`. |
 | `'main' attribute cannot be used in a module that contains top-level code` | Add `-parse-as-library` to `swiftc`. |
 | `'NavigationStack' is only available in iOS 16.0 or newer` | The Swift target's deployment version, unrelated to Aether. `AETHER_IOS_MIN` only sets the *library's* floor. |
@@ -266,5 +266,5 @@ The full table is in [cross-ios.md](cross-ios.md#what-does-not-work-on-ios).
 
 An iOS library that links is not an iOS library that runs. `otool`, `lipo`
 and `vtool` confirm shape, not behaviour, and the two come apart in practice.
-Run the thing on a simulator before believing it — `simctl install` +
+Run the thing on a simulator before believing it: `simctl install` +
 `simctl launch` is a few seconds and catches what inspection cannot.

@@ -3,7 +3,7 @@
 A hash set of strings: membership without duplicates.
 
 Adding a value that is already present is a no-op rather than an error, which
-is what makes a set the right shape for de-duplication — feed it everything and
+is what makes a set the right shape for de-duplication: feed it everything and
 ask afterwards. Items are compared by all their bytes, embedded NULs included.
 
 ```aether,run
@@ -33,7 +33,7 @@ has go:     false
 after remove: 1
 ```
 
-`contains` returns a `bool`, so it reads directly in a condition — no
+`contains` returns a `bool`, so it reads directly in a condition: no
 comparison against 1 needed.
 
 ## Reading the members
@@ -48,7 +48,7 @@ returns `""` rather than trapping.
 
 `add` returns `false` both when the item was **already present** and when the
 insert **failed**, so a caller cannot tell "this was a duplicate" from "this
-was never stored". For a dedupe filter that is fine — a duplicate is the
+was never stored". For a dedupe filter that is fine: a duplicate is the
 expected case and there is nothing to do about it. For anything that must know
 its data landed, the two are not the same outcome.
 
@@ -79,7 +79,7 @@ duplicate: added=false err=''
 failure:   added=false err='set: insert failed'
 ```
 
-A duplicate is `(false, "")` — not an error. Only a genuine failure (a null
+A duplicate is `(false, "")`, not an error. Only a genuine failure (a null
 set, or an allocation that did not succeed) carries a message.
 
 ## Exports

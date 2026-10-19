@@ -1,0 +1,237 @@
+// #2993: a `match` used as an operand dropped the expression around it.
+// `match` was no expression to the parser, so `b = b + match i { ... }`
+// parsed as far as `b +`, failed without a word, and the declaration was
+// kept with no value while the `match` ran as the next statement: `b` never
+// changed, and `c = 1 + match b { ... }` declared `c` uninitialized. As a
+// call argument it was a syntax error. A `match` is an expression now,
+// wherever a value goes: it runs ahead of the statement it is in, its value
+// in a temporary the expression reads, which owns a string or a struct it
+// holds. Before the fix this program did not compile.
+
+import std.mem
+
+extern exit(code: int)
+
+struct Box {
+    name: string
+    n: int
+}
+
+message Get {}
+message Total { v: float }
+
+actor Counter {
+    state scale = 1.5 * match 3 { 3 -> 2.0 _ -> 0.0 }
+    receive {
+        Get() -> { reply Total { v: scale + match scale { _ -> 1.0 } } }
+    }
+}
+
+var bad = 0
+var calls = 0
+
+check(what: string, got: string, want: string) {
+    if got != want {
+        println("FAIL ${what}: got ${got}, want ${want}")
+        bad = 1
+    }
+}
+
+tick(v: int) -> int {
+    calls = calls + 1
+    return v
+}
+
+label(k: int) -> string {
+    return "k${k}"
+}
+
+twice(a: int, b: int) -> int {
+    return a * 10 + b
+}
+
+total_of(xs: int[]) -> int {
+    t = 0
+    for i in 0..xs.len {
+        t = t + xs[i]
+    }
+    return t
+}
+
+box_of(k: int) -> Box {
+    return Box { name: label(k), n: k }
+}
+
+pick(k: int) -> int {
+    return 1 + match k {
+        0 -> 10
+        _ -> 20
+    }
+}
+
+arrow(k) -> 100 + match k { 1 -> 1 _ -> 2 }
+
+// The first loop leaves after its `break` arm; the second returns from its
+// `return` arm.
+leave(b: int) -> int {
+    i = 0
+    while i < 10 {
+        i = i + match b {
+            0 -> { break }
+            1 -> { return 99 }
+            _ -> 1
+        }
+    }
+    return i
+}
+
+// A pass that leaves from an arm releases the string an earlier pass left
+// in the temporary.
+early(k: int) -> string {
+    i = 0
+    seen = ""
+    while i < 3 {
+        seen = "${match i { 2 -> { return "left ${k} after ${seen}" } _ -> label(i) }}"
+        i = i + 1
+    }
+    return "none"
+}
+
+// Strings and a struct that owns one, a literal, a call's or a local's,
+// taken by the temporary and released by it.
+strings(k: int) {
+    local = label(k + 1)
+    b = box_of(k + 2)
+    check("string arg", match k { 0 -> "zero" 1 -> label(k) 2 -> local _ -> b.name },
+        match k { 0 -> "zero" 1 -> "k1" 2 -> "k3" _ -> "k${k + 2}" })
+    check("interp", "${match k { 0 -> label(9)  _ -> "x" }}!", match k { 0 -> "k9!" _ -> "x!" })
+    n = match k { 0 -> Box { name: label(1), n: 1 } 1 -> box_of(7) _ -> b }.n
+    check("struct", "${n}", match k { 0 -> "1" 1 -> "7" _ -> "${k + 2}" })
+    i = 0
+    while match i { 3 -> label(0) _ -> "go" } == "go" {
+        i = i + 1
+    }
+    check("string loop", "${i}", "3")
+    check("early", early(k), "left ${k} after k1")
+}
+
+main() {
+    // The issue's program: the sum is stored, and `c` has its value.
+    b = 0
+    i = 0
+    while i < 3 {
+        b = b + match i {
+            _ -> 2
+        }
+        i = i + 1
+    }
+    c = 1 + match b {
+        0 -> 5
+        _ -> 7
+    }
+    check("binary", "${b} ${c}", "6 8")
+    d = (match b { 6 -> 4 _ -> 0 }) * 2 + match b { 0 -> 5 _ -> 7 }
+    check("both sides", "${d}", "15")
+
+    // Arguments, in the order written.
+    calls = 0
+    r = twice(tick(1), match tick(2) { 2 -> 3 _ -> 9 })
+    check("args", "${r} ${calls}", "13 2")
+
+    // Conditions, a loop's on every pass.
+    if match b { 6 -> false _ -> true } {
+        bad = 1
+    } else if match c { 8 -> true _ -> false } {
+        check("else if", "taken", "taken")
+    } else {
+        bad = 1
+    }
+    n = 0
+    while match n { 3 -> false _ -> true } {
+        n = n + 1
+    }
+    check("while", "${n}", "3")
+
+    // The right side of `&&` and `||` runs only when it is reached.
+    calls = 0
+    t = false && match tick(1) { _ -> true }
+    u = true || match tick(1) { _ -> true }
+    v = true && match tick(1) { 1 -> true _ -> false }
+    check("short circuit", "${t} ${u} ${v} ${calls}", "false true true 1")
+
+    // Returned, an arrow's body, and arms that leave.
+    check("return", "${pick(0)} ${pick(5)} ${arrow(1)} ${arrow(7)}", "11 21 101 102")
+    check("leave", "${leave(0)} ${leave(1)} ${leave(2)}", "0 99 10")
+
+    // Nested: an arm that is a match, a match matched, an operand in an arm.
+    w = 1 + match b {
+        6 -> match c { 8 -> 100 _ -> 200 }
+        _ -> 0
+    }
+    x = match (match b { 6 -> 1 _ -> 2 }) {
+        1 -> 2 * match c { 8 -> 3 _ -> 4 }
+        _ -> 0
+    }
+    check("nested", "${w} ${x}", "101 6")
+
+    // `+=`, a field, an if expression's branch, more after a match, a
+    // closure, a switch's subject, an optional matched.
+    total = 5
+    total += match b { 6 -> 10 _ -> 0 }
+    bx = Box { name: "b", n: 0 }
+    bx.n = match total { 15 -> 42 _ -> 0 }
+    y = if b > 0 { match b { 6 -> 60 _ -> 0 } } else { 0 }
+    z = match b { 6 -> 1 _ -> 0 } + 1
+    f = | k: int | -> 2 * match k { 1 -> 5 _ -> 6 }
+    check("more", "${total} ${bx.n} ${y} ${z} ${f(1)} ${f(2)}", "15 42 60 2 10 12")
+    sw = 0
+    switch (b + match b { 6 -> 1 _ -> 0 }) {
+        case 7: sw = 7
+        default: sw = -1
+    }
+    let o: int? = 9
+    q = 1 + match o {
+        some(val) -> val
+        none -> 0
+    }
+    check("switch, optional", "${sw} ${q}", "7 10")
+
+    // A fixed-size array, indexed and passed as a slice.
+    a3 = [1, 2, 3]
+    b3 = [10, 20, 30]
+    picked = (match b { 6 -> b3 _ -> a3 })[1]
+    check("array", "${picked} ${total_of(match b { 6 -> a3 _ -> b3 })}", "20 6")
+
+    // A panic's reason, and an actor's state and reply.
+    try {
+        panic(match b { 6 -> "boom" _ -> "no" })
+    } catch e {
+        check("panic", e, "boom")
+    }
+    counter = spawn(Counter())
+    float total_v = counter ? Get {}
+    check("actor", "${total_v}", "4")
+
+    k = 0
+    while k < 8 {
+        strings(k % 4)
+        k = k + 1
+    }
+    if mem.heap_in_use_exact() {
+        grown = mem.steady_growth(|| {
+                j = 0
+                while j < 100 {
+                    strings(j % 4)
+                    j = j + 1
+                }
+            }, 5)
+        if grown != 0 {
+            println("FAIL leak: ${grown} bytes a round")
+            bad = 1
+        }
+    }
+    if bad != 0 {
+        exit(1)
+    }
+    println("ok")
+}

@@ -637,6 +637,15 @@ typedef struct ASTNode {
      * is also what tells the program's own definitions, which shadow a glob
      * import, from merged ones (#2632). */
     char* origin_module;
+
+    /* #2850: on a call whose named arguments the checker put in parameter
+     * order, the order they are evaluated in, which is the order written:
+     * arg_order[k] is the index among `children` of the k-th argument the
+     * source gives (the defaults it leaves out after them, in parameter
+     * order). arg_order_count is child_count when it was set; NULL and 0
+     * on every other node. */
+    int* arg_order;
+    int arg_order_count;
 } ASTNode;
 
 // Type functions
@@ -657,6 +666,13 @@ Type* create_result_type(Type* inner);    // #913 fallible `T!` -> (T, string)
 Type* create_function_type(int param_count, Type** param_types, Type* return_type);
 void free_type(Type* type);
 const char* type_to_string(Type* type);
+/* #2832: `type` as the source spells it, for a diagnostic: a distinct type
+ * and a struct by their names, an erased closure as `fn` and any other
+ * function type as `fn(P) -> R`, `T?`, `(A, B)`, `T[N]`, `*T`. Interned.
+ * type_to_string spells a closure by its signature (`|| -> void`) and a
+ * distinct type by its representation, as the --emit=lib catalog and the
+ * schema tables use it; a message names the type the program wrote. */
+const char* type_spelled(Type* type);
 /* Module-scoped struct types: the merged name `<ns>_<Name>` of a module's
  * struct, mapped back to the name it was written with (`Name`) and to its
  * module-qualified spelling (`ns.Name`). Any other name maps to itself.
@@ -675,6 +691,14 @@ int types_equal(Type* a, Type* b);
  * join rule for an array literal's elements, a local bound in several
  * branches, and the early inference pass's view of such a local. */
 Type* numeric_join_type(Type* a, Type* b);
+/* #2854: the type of a value that branches, from two numeric arms (`a` is
+ * the type the arm `a_arm` yields, `b` the one `b_arm` does): an
+ * if-expression's then and else, a value match's arms in turn. They join
+ * (numeric_join_type), as C's `?:` computes the type of the two, so a `long`
+ * arm is not narrowed into an `int` one; a float literal beside an `f32`
+ * arm takes the f32, as it does beside an f32 operand (#2151). A fresh Type,
+ * or NULL when either arm is not numeric: the caller's own rule types it. */
+Type* branch_join_type(Type* a, const ASTNode* a_arm, Type* b, const ASTNode* b_arm);
 Type* clone_type(Type* type);
 
 /* True when `t` is a typed pointer to the cons-cell `StringSeq`
@@ -740,9 +764,16 @@ int ast_is_own_function(const ASTNode* n);
  * has a `_` arm, or it covers its subject's type. A match over an enum or a
  * sum covers it (the checker rejects one that misses a case), as do `none`
  * and `some(v)` over an optional, `true` and `false` over a bool, and `[]`
- * with `[h|t]` over a list. Reads the subject's type, so it is asked once
- * the subject is checked. */
+ * with `[h|t]` over a list, and a struct pattern that tests no field
+ * (#2992). Reads the subject's type, so it is asked once the subject is
+ * checked. */
 int ast_match_covers(const ASTNode* m);
+
+/* #2988, #2992: does the struct pattern `p` (a clause's parameter or a
+ * match arm) test anything: a field it matches against a literal, or a
+ * struct pattern over a field that does? One that does not takes every
+ * value of its struct. */
+int ast_struct_pattern_tests(const ASTNode* p);
 
 /* #2146: the lane index `.x` / `.y` / `.z` / `.w` names on a vector type,
  * or -1 when the name is not a lane accessor or the type has too few lanes
@@ -758,6 +789,12 @@ int lane_accessor_index(TypeKind kind, const char* field);
 // `@heap` extern would stop being variadic).
 int annotation_has_marker(const char* annotation, const char* marker);
 char* annotation_add_marker(char* annotation, const char* marker);
+
+/* #2993: is `m` a `match` that is an operand of an expression (of an
+ * operation, a call, a condition, an interpolation)? The checker marks each
+ * one it types as an expression; a bound or returned `match`, an arm's, and
+ * a statement are the statement's own. */
+int ast_match_is_operand(const ASTNode* m);
 
 /* #2496: the value a `match` arm body yields when the match is an
  * expression, or NULL when it yields none and leaves the result as it was.

@@ -117,11 +117,11 @@ main() {
     println("dimension,workers,repeat,elapsed_ns")
     repeat = 0
     while repeat < repeats {
-        floatarr.floatarr_fill(ch, 123456789.0)
+        floatarr.fill(ch, 123456789.0)
         start = os.now_monotonic_ns()
         w = 0
         while w < count {
-            worker = list.list_get_raw(workers, w)
+            worker = list.get_raw(workers, w)
             worker ! MultiplyRows {
                 a: a, bt: bt, c: c, n: n,
                 first: w * n / count, last: (w + 1) * n / count
@@ -142,10 +142,10 @@ main() {
         repeat = repeat + 1
     }
     list.free(workers)
-    floatarr.floatarr_free(rh)
-    floatarr.floatarr_free(ch)
-    floatarr.floatarr_free(th)
-    floatarr.floatarr_free(bh)
-    floatarr.floatarr_free(ah)
+    floatarr.free(rh)
+    floatarr.free(ch)
+    floatarr.free(th)
+    floatarr.free(bh)
+    floatarr.free(ah)
     println("PASS: every output cell matches the serial reference")
 }

@@ -1,6 +1,6 @@
-# contrib.host.tinygo — In-Process Go via c-shared
+# contrib.host.tinygo: In-Process Go via c-shared
 
-Run Go code inside the Aether process — no subprocess, no IPC, no
+Run Go code inside the Aether process: no subprocess, no IPC, no
 marshalling. Just `dlopen` the `.so` / `.dll` that
 `go build -buildmode=c-shared` produces and call its exported
 functions directly.
@@ -11,7 +11,7 @@ functions directly.
 > `tinygo build -buildmode=c-shared` currently only supports
 > `wasm` targets ("buildmode c-shared is only supported on wasm
 > at the moment"). For **native** linux/darwin/windows c-shared
-> libraries — what this bridge dlopens — use standard
+> libraries (what this bridge dlopens) use standard
 > `go build -buildmode=c-shared`. The bridge dlopens by symbol;
 > it doesn't care which compiler produced the `.so`. The
 > `--with=tinygo` image ships both `go` and `tinygo` so either
@@ -37,7 +37,7 @@ On native linux/darwin/windows that's standard `go` (≥1.21);
 TinyGo is fine for the wasm target only.
 
 ```bash
-# macOS / Linux / Windows — standard Go
+# macOS / Linux / Windows: standard Go
 # https://go.dev/dl/
 
 # Verify
@@ -68,10 +68,10 @@ func Greet(name *C.char) *C.char {
     return C.CString(msg)  // malloc'd by cgo: call it with call_str_str_owned
 }
 
-func main() {}  // c-shared still requires a main() — empty body is fine
+func main() {}  // c-shared still requires a main(); an empty body is fine
 ```
 
-Build (native — use standard `go`, not `tinygo`; see toolchain
+Build (native: use standard `go`, not `tinygo`; see toolchain
 note at the top):
 
 ```bash
@@ -80,7 +80,7 @@ CGO_ENABLED=1 go build -buildmode=c-shared -o libgreet.dylib greet.go  # macOS
 CGO_ENABLED=1 go build -buildmode=c-shared -o libgreet.dll   greet.go  # Windows
 ```
 
-For the wasm target — and only then — substitute
+For the wasm target (and only then) substitute
 `tinygo build -buildmode=c-shared -target=wasm …`.
 
 ## Call from Aether
@@ -194,10 +194,10 @@ existing call sites do.
 - **`tinygo build -buildmode=c-shared` is wasm-only today.**
   Native linux/darwin/windows c-shared `.so`s come from standard
   `go build` (see the toolchain note at the top of this file).
-  The Aether-side bridge is purely a `dlopen` + symbol lookup —
+  The Aether-side bridge is purely a `dlopen` + symbol lookup:
   it loads whatever c-shared the toolchain produced.
 - **Symbol export is `//export Name`.** Neither standard Go nor
-  TinyGo exports package-level `Name` automatically — you must
+  TinyGo exports package-level `Name` automatically: you must
   annotate each function you want callable from C / Aether.
 
 ## Testing
@@ -229,8 +229,8 @@ SKIP. The `contrib/host bridges (Linux)` CI job builds it and runs both.
 
 ## See also
 
-- [`contrib/host/go/`](../go/) — full Go via subprocess + LD_PRELOAD
+- [`contrib/host/go/`](../go/): full Go via subprocess + LD_PRELOAD
   sandbox.
-- [`std/dl/module.ae`](../../../std/dl/module.ae) — the
+- [`std/dl/module.ae`](../../../std/dl/module.ae): the
   cross-platform `dlopen` shim this host sits on top of.
 - [TinyGo c-shared docs](https://tinygo.org/docs/guides/cgo/)

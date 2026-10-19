@@ -3,7 +3,7 @@
 Files and directories: read, write, copy, delete, and the metadata around
 them.
 
-Every operation returns an error string — `""` on success — rather than
+Every operation returns an error string (`""` on success) rather than
 throwing, so a caller decides what a missing file means. That matters more
 here than elsewhere: "not found" is a normal outcome for a config lookup and a
 fatal one for a required input, and only the caller knows which.
@@ -53,7 +53,7 @@ Errors carry a **kind** as well as a message: `last_os_error()` pairs with the
 `KIND_PERMISSION_DENIED` rather than matching on error text.
 
 A hardcoded `/tmp` is fine on POSIX and wrong on Windows, where it may not
-exist. Resolve `TEMP`, then `TMPDIR`, then `/tmp` — see #1702 for the
+exist. Resolve `TEMP`, then `TMPDIR`, then `/tmp`: see #1702 for the
 accessor that will make that one call.
 
 ## Exports

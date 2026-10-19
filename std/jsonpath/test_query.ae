@@ -60,7 +60,7 @@ nth_json(path: string, i: int) -> string {
     if err != "" { return "ERR: ${err}" }
     out = "(none)"
     if i < query.result_size(cur) {
-        out = string.copy(json.json_stringify_raw(query.result_value(cur, i)))
+        out = string.copy(json.stringify_raw(query.result_value(cur, i)))
     }
     query.free_result(cur)
     return out
@@ -88,7 +88,7 @@ all_json(path: string) -> string {
     i = 0
     while i < n {
         if i > 0 { out = string.concat(out, "|") }
-        out = string.concat(out, json.json_stringify_raw(query.result_value(cur, i)))
+        out = string.concat(out, json.stringify_raw(query.result_value(cur, i)))
         i = i + 1
     }
     query.free_result(cur)
@@ -108,17 +108,17 @@ all_json_of(src: string, path: string) -> string {
     d, jerr = json.parse(src)
     if jerr != "" { return "JSONERR: ${jerr}" }
     cur, err = query.query(d, path)
-    if err != "" { json.json_free(d); return "ERR: ${err}" }
+    if err != "" { json.free(d); return "ERR: ${err}" }
     out = ""
     n = query.result_size(cur)
     i = 0
     while i < n {
         if i > 0 { out = string.concat(out, "|") }
-        out = string.concat(out, json.json_stringify_raw(query.result_value(cur, i)))
+        out = string.concat(out, json.stringify_raw(query.result_value(cur, i)))
         i = i + 1
     }
     query.free_result(cur)
-    json.json_free(d)
+    json.free(d)
     return out
 }
 
@@ -383,7 +383,7 @@ main() {
                 spec.assert_str_eq(query.result_path(cur, 0), "$['it\\'s']", "escaped quote")
                 spec.assert_str_eq(query.result_path(cur, 1), "$['a\\\\b']", "escaped backslash")
                 query.free_result(cur)
-                json.json_free(d2)
+                json.free(d2)
             }
             spec.it("indexes array positions numerically") callback {
                 spec.assert_str_eq(nth_path("$.store.book[*].title", 2),
@@ -393,14 +393,14 @@ main() {
 
         spec.describe("API surface") {
             spec.it("returns values only via query_values") callback {
-                vals, err = query.query_values(doc, "$.store.book[*].price")
+                vals, err = query.values(doc, "$.store.book[*].price")
                 spec.assert_str_eq(err, "", "no error")
                 spec.assert_eq(list.size(vals), 4, "four prices")
-                spec.assert_str_eq(json.json_stringify_raw(list.get_raw(vals, 0)), "8.95", "first price")
+                spec.assert_str_eq(json.stringify_raw(list.get_raw(vals, 0)), "8.95", "first price")
                 list.free(vals)
             }
             spec.it("returns paths only via query_paths") callback {
-                paths, err = query.query_paths(doc, "$.store.book[*]")
+                paths, err = query.paths(doc, "$.store.book[*]")
                 spec.assert_str_eq(err, "", "no error")
                 spec.assert_eq(list.size(paths), 4, "four paths")
                 spec.assert_str_eq(list.get_raw(paths, 0), "$['store']['book'][0]", "first path")
@@ -416,7 +416,7 @@ main() {
                 // The copied path survives the result set; the JSON pointer
                 // remains valid because `doc` is still alive.
                 spec.assert_str_eq(saved_path, "$['store']['book'][0]['title']", "copied path survives")
-                spec.assert_str_eq(json.json_stringify_raw(borrowed), "\"Sayings of the Century\"",
+                spec.assert_str_eq(json.stringify_raw(borrowed), "\"Sayings of the Century\"",
                     "borrowed value survives result cleanup")
                 string.free(saved_path)
             }
@@ -430,23 +430,23 @@ main() {
                 spec.assert_not_null(ast, "path parsed")
 
                 d1, _e1 = json.parse("[{\"n\":1},{\"n\":2}]")
-                r1 = query.query_ast(d1, ast)
+                r1 = query.ast(d1, ast)
                 spec.assert_eq(query.result_size(r1), 2, "two from the first document")
                 query.free_result(r1)
-                json.json_free(d1)
+                json.free(d1)
 
                 d2, _e2 = json.parse("[{\"n\":9}]")
-                r2 = query.query_ast(d2, ast)
+                r2 = query.ast(d2, ast)
                 spec.assert_eq(query.result_size(r2), 1, "one from the second document")
                 query.free_result(r2)
-                json.json_free(d2)
+                json.free(d2)
 
                 parser.free_query(ast)
             }
         }
     }
 
-    json.json_free(doc)
+    json.free(doc)
     doc = null
     return spec.run_summary(fw)
 }

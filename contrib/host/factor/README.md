@@ -1,9 +1,9 @@
-# contrib.host.factor — Embedded Factor
+# contrib.host.factor: Embedded Factor
 
 `import contrib.host.factor` lets an Aether program embed
-[Factor](https://factorcode.org) — a dynamically-typed, image-based
+[Factor](https://factorcode.org) (a dynamically-typed, image-based
 **concatenative (stack-based)** language in the Forth/Joy tradition, with
-first-class quotations and a CLOS-style object system — in-process, with a
+first-class quotations and a CLOS-style object system) in-process, with a
 live, persistent VM (which is why it boots a ~140 MB image and JITs; see
 [Performance](#performance)):
 
@@ -11,12 +11,12 @@ live, persistent VM (which is why it boots a ~140 MB image and JITs; see
 import contrib.host.factor
 
 // eval-with-result: fib(10) computed in the VM, value back INTO Aether.
-// Use a <<HEREDOC — no interpolation, no escaping, so Factor's own "..."
+// Use a <<HEREDOC: no interpolation, no escaping, so Factor's own "..."
 // strings pass through verbatim and the snippet reads like real Factor.
 r = factor.eval(<<FACTOR
 USING: math kernel prettyprint ;
-IN: scratchpad
-: fib ( n -- m ) dup 2 < [ ] [ dup 1 - fib swap 2 - fib + ] if ;
+IN: scratchpad:
+  fib ( n -- m ) dup 2 < [ ] [ dup 1 - fib swap 2 - fib + ] if ;
 10 fib pprint
 FACTOR
 )                                              // r = "55"
@@ -24,8 +24,8 @@ FACTOR
 // a Factor script populates the shared k-v map; Aether reads it back
 _ = factor.run(<<FACTOR
 USING: math math.parser namespaces sequences kernel ;
-IN: scratchpad
-: fib ( n -- m ) dup 2 < [ ] [ dup 1 - fib swap 2 - fib + ] if ;
+IN: scratchpad:
+  fib ( n -- m ) dup 2 < [ ] [ dup 1 - fib swap 2 - fib + ] if ;
 10 <iota> [ dup fib number>string swap number>string "fib" prepend set-global ] each
 FACTOR
 )
@@ -33,58 +33,58 @@ v = factor.get("fib9")                         // v = "34"
 ```
 
 The VM is created once and reused across calls, so `set` / `run` / `eval` /
-`get` share state — a scalar k-v map handed in and read back, same process.
+`get` share state: a scalar k-v map handed in and read back, same process.
 
 For map-shaped interop there is also a **first-class shared map**
-(`run_sandboxed_with_map`), the same mechanism the other hosts use — see
+(`run_sandboxed_with_map`), the same mechanism the other hosts use: see
 [Shared map](#shared-map-first-class-map-interop) below. Use the scalar
 `set` / `get` for a few known keys; use the shared map when the guest computes
 the keyset (e.g. a map-reduce whose keys you don't know upfront).
 
 > **Status: experimental, needs a forked Factor.** This host is unlike the
-> others — read the two caveats below before reaching for it.
+> others: read the two caveats below before reaching for it.
 
 ## API
 
 | Call | Effect |
 |------|--------|
-| `factor.eval(code) -> string` | evaluate `code` in the persistent VM; returns its **printed output** (`""` if the lib can't load; Factor's error text if the snippet errors — see below) |
+| `factor.eval(code) -> string` | evaluate `code` in the persistent VM; returns its **printed output** (`""` if the lib can't load; Factor's error text if the snippet errors: see below) |
 | `factor.run(code) -> int` | fire-and-forget; 0 on success |
 | `factor.set(key, value)` | store a string value under `key` in the VM's global namespace |
 | `factor.get(key) -> string` | read `key` back as raw text (`10`, not `"10"`); `""` if absent |
 | `factor.run_sandboxed(perms, code)` | see Caveat 2 |
-| `factor.run_sandboxed_with_map(perms, code, map_token)` | run `code` with live access to an Aether-owned shared map — see below |
+| `factor.run_sandboxed_with_map(perms, code, map_token)` | run `code` with live access to an Aether-owned shared map: see below |
 
-Like every other host, the k-v map is **string-only** — there is no int or
+Like every other host, the k-v map is **string-only**: there is no int or
 float channel. Numbers round-trip as their decimal text; `factor.get`
 renders a stored string as its own content and a number as its digits
 (Factor's `present`), matching lua/tcl/etc.
 
-Evaluated snippets run in a **bare vocabulary** — there are no default
-imports — so each snippet must name what it uses (`USING: math ; …`).
+Evaluated snippets run in a **bare vocabulary** (there are no default
+imports), so each snippet must name what it uses (`USING: math ; …`).
 
 `factor.eval` captures **printed output**, not the data stack: it runs the
 snippet under Factor's `eval>string` with effect `( -- )`, so the snippet must
 leave a clean stack and *print* whatever it wants back (`… pprint`, `… .`,
 `… present write`). A bare `2 3 +` leaves a value on the stack and is a
-stack-effect error — render it: `2 3 + pprint`. On a snippet error
+stack-effect error; render it instead: `2 3 + pprint`. On a snippet error
 (stack-effect mismatch, undefined word, …) `eval>string` recovers and writes
 the **error text** into the captured output, so `eval` returns Factor's
-diagnostic string rather than `""` — handy when debugging, but check for it if
+diagnostic string rather than `""`: handy when debugging, but check for it if
 you treat a non-empty result as success.
 
 Defining a word inline (`: name ( … ) … ;`) needs an **`IN:` vocabulary**
-declaration first (e.g. `IN: scratchpad`) — eval runs outside any vocabulary,
+declaration first (e.g. `IN: scratchpad`): eval runs outside any vocabulary,
 and a colon definition with no `IN:` fails with *"Not in a vocabulary; IN:
 form required."*
 
 ## Shared map (first-class map interop)
 
 `factor.run_sandboxed_with_map(perms, code, map_token)` gives the Factor
-script a **live view of an Aether-owned shared map** — the same
+script a **live view of an Aether-owned shared map**: the same
 `aether_shared_map` mechanism the other hosts (lua/python/…) use. Aether
 builds the map, the Factor script reads and writes it *as it runs* through two
-words the bridge injects, and Aether reads the whole map back afterwards —
+words the bridge injects, and Aether reads the whole map back afterwards,
 including keys the script **discovers at runtime**:
 
 ```factor
@@ -95,8 +95,8 @@ including keys the script **discovers at runtime**:
 ```
 
 Because Aether owns the map, key discovery is free: after the run, enumerate
-with `map.keys(m)` (`std.collections`) — no host-side "list keys" call. This
-is the right tool when the **guest computes the keyset**. Example — a
+with `map.keys(m)` (`std.collections`), no host-side "list keys" call. This
+is the right tool when the **guest computes the keyset**. Example: a
 word-frequency map-reduce over English text whose keys (the words) aren't
 known upfront:
 
@@ -108,7 +108,7 @@ IN: scratchpad
 ```
 
 Hand in `text = "the cat sat on the mat the cat"`, run the above, and the map
-comes back with `the=3 cat=2 sat=1 on=1 mat=1` — keys Aether never named.
+comes back with `the=3 cat=2 sat=1 on=1 mat=1`: keys Aether never named.
 Still string-only (counts round-trip as decimal text). The `aether-map-get` /
 `aether-map-put` words are injected automatically; you do **not** add a
 `USING:`/`FUNCTION:` prelude for them.
@@ -116,15 +116,15 @@ Still string-only (counts round-trip as decimal text). The `aether-map-get` /
 Choose by shape: scalar `set`/`get` for a few **known** keys; the shared map
 when the guest **produces** the keyset.
 
-## Caveat 1 — needs the embed-api fork of Factor
+## Caveat 1: needs the embed-api fork of Factor
 
 The modern upstream VM has no re-entrant C embedding entry point: it once
 shipped `start_embedded_factor`, since deleted. The surviving public path
-(`start_standalone_factor`) takes the process over and `exit()`s — useless
+(`start_standalone_factor`) takes the process over and `exit()`s: useless
 for a host that needs the result back. So this bridge cannot bind a stock
 distro `libfactor`.
 
-It depends on a small **fork** that restores embedded eval —
+It depends on a small **fork** that restores embedded eval:
 [`aether-lang-dev/factor-language`](https://github.com/aether-lang-dev/factor-language),
 `vm/embed_api.cpp` (one commit on top of upstream `master`):
 
@@ -135,12 +135,11 @@ void  factor_embed_eval_free(char* result);
 ```
 
 It reuses Factor's own `OBJ_EVAL_CALLBACK` / `eval>string` machinery and a
-**stock `factor.image`** baked by the normal bootstrap (no custom save-image
-— so the image is reproducible). The map-in/map-out interop is layered in
+**stock `factor.image`** baked by the normal bootstrap (no custom save-image, so the image is reproducible). The map-in/map-out interop is layered in
 *this bridge* on top of the generic eval, so the fork's API stays
 Aether-free and upstream-proposable.
 
-## Caveat 2 — the in-process sandbox does not contain Factor
+## Caveat 2: the in-process sandbox does not contain Factor
 
 The other hosts run under the LD_PRELOAD libc gate, so `*_run_sandboxed`
 checks each libc call against a grant list. Factor's VM does its own GC,
@@ -163,15 +162,15 @@ Measured on linux-x86-64 (your numbers will vary):
 
 The shape that matters: a heavy **one-time** init (image boot + JIT warm-up;
 ~a few × a CPython cold start, far heavier than Lua), then effectively-free
-steady state because the VM is persistent and JIT-native. Init is lazy — it
+steady state because the VM is persistent and JIT-native. Init is lazy: it
 happens on the first `factor.*` call, not at process start.
 
 - **Long-lived host** (server, an Aether process that evals repeatedly):
-  great — amortize the ~175 ms once.
+  great, amortize the ~175 ms once.
 - **Fire-once-and-exit:** the init dominates; embedding is the wrong tool
   there.
 - **Memory:** the image is ~140 MB on disk with a comparable resident
-  footprint — far heavier than the lightweight hosts. Embedding Factor
+  footprint, far heavier than the lightweight hosts. Embedding Factor
   commits real RAM.
 - **GC jitter:** Factor's generational GC can add occasional pause-time
   jitter under allocation-heavy loops (irrelevant for k-v/config use).
@@ -183,11 +182,11 @@ ever needed.
 
 ## How it loads libfactor
 
-The bridge `dlopen`s libfactor at the deploy host's runtime — no `-lfactor`
+The bridge `dlopen`s libfactor at the deploy host's runtime: no `-lfactor`
 on the link line. Discovery at first `factor.*` call (orchestrator-owned,
 no hardcoded version list):
 
-1. `${AETHER_FACTOR_SONAME}` — exact path/soname of the forked libfactor
+1. `${AETHER_FACTOR_SONAME}`: exact path/soname of the forked libfactor
    (e.g. `/opt/factor/libfactor.so`).
 2. `libfactor.so` (unversioned, if installed).
 
@@ -215,7 +214,7 @@ experiment:
    export AETHER_FACTOR_SONAME=/path/to/factor-language/libfactor.so
    export AETHER_FACTOR_IMAGE=/path/to/factor-language/factor.image
    ```
-3. `ae build` an Aether program with `import contrib.host.factor` — the
+3. `ae build` an Aether program with `import contrib.host.factor`: the
    bridge `.a` is auto-linked by the generic host-bridge scanner.
 
 ## Testing

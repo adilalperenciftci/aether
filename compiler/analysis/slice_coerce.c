@@ -51,8 +51,8 @@ static int slice_elements_agree(ASTNode* e, const Type* target) {
         return 1;
     }
     char want_s[64], have_s[64], msg[512];
-    snprintf(want_s, sizeof want_s, "%s", type_to_string(want));
-    snprintf(have_s, sizeof have_s, "%s", type_to_string(have));
+    snprintf(want_s, sizeof want_s, "%s", type_spelled(want));
+    snprintf(have_s, sizeof have_s, "%s", type_spelled(have));
     snprintf(msg, sizeof msg,
              "cannot view %s elements as %s[]: a slice reads the array's own memory, "
              "so its element type must be exactly %s. Build a %s array from them "

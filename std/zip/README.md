@@ -7,8 +7,8 @@ A `.zip` is a container, not a compressed blob: entries (each *stored* or
 directory record at the tail. `std.zlib` supplies the decompression; this module
 parses the container.
 
-**Buffer, not filesystem.** `open(data, len)` reads a `.zip` already in memory —
-downloaded over HTTP, unpacked from another archive, embedded in a payload —
+**Buffer, not filesystem.** `open(data, len)` reads a `.zip` already in memory
+(downloaded over HTTP, unpacked from another archive, embedded in a payload)
 with no path or file descriptor, the same posture as `std.json` / `std.cbor` /
 `std.resp`. (An extract-to-disk layer belongs on top and is a separate concern.)
 
@@ -37,7 +37,7 @@ zip.close(ar)
 ## Writing
 
 The mirror of the reader: build an archive in memory, entry by entry, and get
-back the raw `.zip` bytes — no path or fd, the same posture as `open`. Writing
+back the raw `.zip` bytes, no path or fd, the same posture as `open`. Writing
 an entry to disk is a layer on top and a separate concern.
 
 ```aether,fragment
@@ -56,7 +56,7 @@ zip.writer_free(w)
 `create(name, data, len, method, level)` is the one-shot form for a
 single-entry archive. A `METHOD_DEFLATE` entry falls back to `stored` when
 compression would not shrink it, and ZIP64 records are emitted automatically
-when a size, offset, or entry count exceeds its 32-bit field — the same
+when a size, offset, or entry count exceeds its 32-bit field: the same
 records the reader parses back, so a written archive round-trips through
 `open`.
 
@@ -135,7 +135,7 @@ rejected by `open`.
 ## Not in scope (yet)
 
 Preserving Unix modes / mtimes on extraction (a zip's external-attributes
-field could carry them), and symlink entries (rare, and an escape vector — the
+field could carry them), and symlink entries (rare, and an escape vector: the
 base reader treats every entry as a file or directory). Filed as follow-ups on
 the tracking issue.
 

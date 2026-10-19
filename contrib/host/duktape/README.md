@@ -1,4 +1,4 @@
-# contrib.host.duktape — Embedded JavaScript (Duktape ES5.1)
+# contrib.host.duktape: Embedded JavaScript (Duktape ES5.1)
 
 `import contrib.host.duktape` lets an Aether program embed the
 Duktape ES5.1 engine in-process: `duktape.run_sandboxed(perms,
@@ -10,13 +10,13 @@ controls.
 slot where the host could in principle be served by multiple
 runtimes (Duktape / QuickJS / V8-node); `--with=quickjs` etc. can
 coexist later under their own engine names. **`contrib.host.js`
-remains as a back-compat alias** — existing code with
+remains as a back-compat alias**: existing code with
 `import contrib.host.js` keeps working; new code should prefer
 `import contrib.host.duktape`.
 
 ## How it loads libduktape
 
-The bridge `dlopen`s libduktape at the **deploy host's** runtime —
+The bridge `dlopen`s libduktape at the **deploy host's** runtime:
 there is no `-lduktape` on the link line. The produced binary works
 against whatever Duktape minor version the deploy host has.
 
@@ -27,7 +27,7 @@ Discovery order at first call to `duktape.run` (strict two-step):
 2. `libduktape.so` (Debian-style unversioned symlink).
 
 If both fail, `duktape.run*` returns -1 with a clear error naming
-the env var. **There is no hardcoded version fallback list** — the
+the env var. **There is no hardcoded version fallback list**: the
 bridge stays distro-agnostic; the orchestrator owns the probe.
 
 Duktape is embedded-only (no `duktape` CLI to probe with). The
@@ -43,7 +43,7 @@ AETHER_DUKTAPE_SONAME=$(ldconfig -p | awk '/libduktape\.so/{print $1; exit}')
 When your program has `import contrib.host.duktape`, `ae build`:
 1. Links `libaether_host_duktape.a` (the in-tree bridge)
    automatically.
-2. Does NOT add any libduktape link flags — the bridge dlopens
+2. Does NOT add any libduktape link flags: the bridge dlopens
    libduktape at runtime.
 
 `ae build` errors with a clear actionable message if the bridge .a
@@ -51,7 +51,7 @@ hasn't been built: build the image with
 `aether-build --with=duktape --rebuild-image` (or the alias
 `--with=js`) or `make contrib MODULES=duktape && make install-contrib`.
 
-## `aether.toml` — usually empty for duktape
+## `aether.toml`: usually empty for duktape
 
 ```toml
 # nothing required for contrib.host.duktape
@@ -79,7 +79,7 @@ main() {
 
 ## Containment model
 
-Duktape implements ES5.1. No ambient capabilities — all functions
+Duktape implements ES5.1. No ambient capabilities: all functions
 (`env`, `readFile`, `fileExists`, `writeFile`, `exec`) are native
 bindings with sandbox checks. No LD_PRELOAD needed. Purest
 containment model of the host bridges.
@@ -87,7 +87,7 @@ containment model of the host bridges.
 ## Implementation notes
 
 - All Duktape C-API access goes through a `dlsym` function-pointer
-  table — see `aether_host_duktape.c`. The bridge .a has NO
+  table: see `aether_host_duktape.c`. The bridge .a has NO
   unresolved Duktape symbols (`nm -u` confirms).
 - Three convenience macros are re-expressed as inline helpers
   over the dlsym'd underlying functions:
@@ -103,23 +103,23 @@ containment model of the host bridges.
 There's no dedicated `host_duktape/` end-to-end test (no fib-style
 set-piece). Coverage comes from two cross-cutting tests instead:
 
-- [`tests/sandbox/test_shared_map_all.sh`](../../../tests/sandbox/test_shared_map_all.sh)
-  — the `run_sandboxed_with_map` shared-map round-trip run across
+- [`tests/sandbox/test_shared_map_all.sh`](../../../tests/sandbox/test_shared_map_all.sh):
+  the `run_sandboxed_with_map` shared-map round-trip run across
   ALL host bridges. Its JS (Duktape) case compiles
   `aether_host_duktape.c`, seeds a map (`name`=Bob, `count`=7),
   runs JS that reads those keys, writes back `doubled`, and tries to
   tamper with `name`; it asserts the read, the write (`result=14`),
   and that the frozen `name` stays `Bob`. SKIPs when Duktape's dev
   headers aren't installed.
-- [`tests/scripts/contrib_build.sh`](../../../tests/scripts/contrib_build.sh)
-  — the `make contrib` smoke test; its `duktape` catalogue entry
+- [`tests/scripts/contrib_build.sh`](../../../tests/scripts/contrib_build.sh):
+  the `make contrib` smoke test; its `duktape` catalogue entry
   verifies the bridge archive `libaether_host_duktape.a` compiles and
   archives cleanly.
 
-## Testing — co-located embedding spec
+## Testing: co-located embedding spec
 
 [`test_host_duktape.ae`](test_host_duktape.ae) sits next to this bridge and drives it
-through `import contrib.host.duktape` — the path a real user takes, so it covers
+through `import contrib.host.duktape`: the path a real user takes, so it covers
 module.ae's declarations and the contrib-link plumbing as well as the C shim.
 
 It asserts that a script evaluates; that the interpreter **genuinely runs**
@@ -130,7 +130,7 @@ and that `init` is idempotent while the VM is live.
 
 Run by `make contrib-host-check`'s `[3/3]` phase, which resolves this
 runtime's soname first. Without Duktape installed the specs report **skipped**
-(#1610's `it_when`) rather than failing — an absent runtime is a provisioning
+(#1610's `it_when`) rather than failing: an absent runtime is a provisioning
 gap, not a code defect.
 
 Assertions are on **return codes and Duktape-side state, never on the bridge's

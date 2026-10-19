@@ -87,7 +87,7 @@ Each benchmark is run **5 times** (configurable via `BENCH_RUNS`). The **median*
 | Memory (MB) | Peak resident set size via `/usr/bin/time` |
 | Relative (%) | Percentage of the fastest language's throughput |
 | CV% | Coefficient of variation (σ/μ × 100), measures run-to-run stability |
-| Range | Min–Max throughput across all runs |
+| Range | Min-Max throughput across all runs |
 | Efficiency | Throughput per MB of memory (M msg/s/MB) |
 
 **CV% interpretation.** The thresholds below are general statistical
@@ -96,7 +96,7 @@ targets. They tell you how much to trust a single run's headline
 figure, regardless of which language is being measured:
 
 - **< 5%** (green): run-to-run variance is small; reported medians are trustworthy.
-- **5–15%** (orange): moderate variance; read medians alongside Min–Max range.
+- **5-15%** (orange): moderate variance; read medians alongside Min-Max range.
 - **> 15%** (red): high variance; investigate thermal throttling, OS scheduling, or shared-host noise before citing numbers.
 
 The runner computes CV in 64-bit and refuses to publish a negative
@@ -178,7 +178,7 @@ These Aether runtime optimizations affect benchmark performance:
 | Computed goto dispatch | Message handlers use GCC computed-goto dispatch tables | `compiler/codegen/codegen_actor.c` |
 | TLS caching | `current_core_id` cached in local variables, avoiding repeated `tlv_get_addr` on macOS | `runtime/scheduler/multicore_scheduler.c` |
 | SPSC queues | Lock-free single-producer single-consumer ring buffers for cross-core messaging | `runtime/scheduler/lockfree_queue.h` |
-| Adaptive batching | Batch size adjusts dynamically (64–1024) based on queue utilization | `runtime/actors/aether_adaptive_batch.h` |
+| Adaptive batching | Batch size adjusts dynamically (64-1024) based on queue utilization | `runtime/actors/aether_adaptive_batch.h` |
 
 ## References
 

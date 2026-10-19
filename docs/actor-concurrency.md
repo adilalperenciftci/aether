@@ -202,7 +202,7 @@ Identifiers in the timeout **expression** resolve against actor state fields onl
 
 ## Panic and Stack Traces
 
-`panic("reason")` unwinds via `aether_panic`. If a `try { ... } catch e { ... }` block (or the scheduler's per-step barrier for actor handlers) is on the stack, the panic is caught and `e` binds to the reason. A reason built at run time (`panic("bad value ${n}")`, a concatenation, a string local) belongs to the catcher: `e` is freed when the handler ends unless the handler keeps it (`kept = e`), returns it, stores it or panics with it again, so catching in a loop does not accumulate messages. An actor killed by such a panic releases the reason after its death hook runs. If no frame catches, the runtime prints the reason to stderr along with a filtered stack trace, then aborts:
+`panic("reason")` unwinds via `aether_panic`. If a `try { ... } catch e { ... }` block (or the scheduler's per-step barrier for actor handlers) is on the stack, the panic is caught and `e` binds to the reason. A reason built at run time (`panic("bad value ${n}")`, a concatenation, a string local) belongs to the catcher: the handler's scope releases it when the handler ends, and whatever keeps it (`kept = e`, a return, a store, a second `panic`) takes a reference of its own, so catching in a loop does not accumulate messages. An actor killed by such a panic releases the reason after its death hook runs. If no frame catches, the runtime prints the reason to stderr along with a filtered stack trace, then aborts:
 
 ```text
 aether: panic outside any try/catch or actor: divide by zero
@@ -223,35 +223,36 @@ Available on glibc-Linux and macOS today (uses `<execinfo.h>` `backtrace()` from
 
 ### Heap cleanup on unwind
 
-A caught panic does not leak the allocations made since the `try`. While
-any panic frame is live (a `try`/`catch` block, or the scheduler's
-per-step barrier), generated code journals every heap allocation whose
-deferred scope-exit free is armed; `aether_panic()` drains the innermost
-frame's still-live entries before the jump, freeing exactly the deferred
-frees the `longjmp` would have skipped. The journal mirrors the deferred
-frees one-for-one:
+A caught panic releases what the scopes it leaves hold, as their exits
+would have. While a panic frame is live (a `try`/`catch` block, or the
+scheduler's per-step barrier for an actor handler), every place that owns
+a value (a string local or temporary, a struct local, an argument the call
+must release) is recorded in an unwind journal by its address where it is
+declared or first set, and so is every plain `defer` of those scopes.
+`aether_panic()` drains the innermost frame's entries before it jumps,
+newest first: each place releases what it holds at that moment and is left
+empty, and each `defer` runs. `defer try` and `defer catch` do not run on a
+panic.
 
-- A value freed normally (explicit `string.release`, reassignment, scope
-  exit) leaves the journal at the same moment, so the drain never
-  double-frees.
-- A value that escaped the guarded block (returned, stored in a map,
-  list, actor state, or message) is never journaled or is forgotten at
-  the handoff, so the drain never frees something another owner holds.
-- Nested `try` drains only the inner frame's entries; the outer frame's
-  allocations survive to their normal frees.
-- A value stored inside a `try` into a local declared outside it is
-  journaled for the frame the local is declared in (#2690): its free runs
-  where the local's scope ends, which a panic the `try` catches does not
-  skip, so the drain leaves it to the local.
+- Stores, moves and releases never touch the journal: the place is recorded
+  once, and the drain releases whatever it holds when the panic comes, so a
+  value moved elsewhere (returned, stored in a container, actor state or a
+  message) is released by its new holder, never by the drain.
+- A scope that ends normally forgets its places and runs its `defer`s in
+  place.
+- A nested `try` drains only the inner frame's entries; the outer frame's
+  places are released at their normal exits.
+- A place declared outside a `try` and stored inside it is journaled for
+  the frame it is declared in (#2690), so a panic the `try` catches leaves
+  it to the scope that declared it.
 
-For actor handlers this means a panicking actor's step-scoped
-allocations are reclaimed before the actor is marked dead. The journal
-is scoped to guarded regions: outside any frame the hooks are a
-TLS-load-and-return, and the no-panic hot path shows no measurable cost
-on the ping-pong messaging benchmark. Regression coverage:
-`tests/regression/test_panic_unwind_cleanup.ae` (the full matrix),
-`tests/integration/panic_unwind_no_leak/` (50000 caught panics, RSS
-flat), `tests/integration/panic_actor_step_drain/` (scheduler barrier).
+For actor handlers this means a panicking actor's step-scoped values are
+released before the actor is marked dead. Outside any frame the journal
+calls are a thread-local load and a return, and the no-panic hot path
+shows no measurable cost on the ping-pong messaging benchmark. Regression
+coverage: `tests/regression/test_panic_unwind_cleanup.ae` (the full
+matrix), `tests/integration/panic_unwind_no_leak/` (50000 caught panics,
+RSS flat), `tests/integration/panic_actor_step_drain/` (scheduler barrier).
 
 Main-thread inline mode (single-actor programs) has no step barrier by
 design, so a handler panic there still reaches the no-frame fallback
@@ -320,8 +321,8 @@ int main() {
 ```
 
 **Scheduler lifecycle functions:**
-- `scheduler_wait()` -- waits for quiescence (all pending messages processed). Non-destructive: scheduler threads keep running. Safe to call multiple times.
-- `scheduler_shutdown()` -- waits for quiescence, then stops scheduler threads and joins them. Called once at program exit.
+- `scheduler_wait()`: waits for quiescence (all pending messages processed). Non-destructive: scheduler threads keep running. Safe to call multiple times.
+- `scheduler_shutdown()`: waits for quiescence, then stops scheduler threads and joins them. Called once at program exit.
 - **Senders the scheduler does not own** (a `std.worker` job, an http pool worker, a C host's thread) must be stopped before `scheduler_shutdown()`: its quiescence wait does not end while one keeps sending. A send from such a thread while the scheduler is not running (shut down, starting again, cleaned up) is refused before it touches a core: the message is dropped, its payload released, the drop counted by `scheduler_stopped_sends()` and reported once on stderr (#2912).
 
 ### Core Assignment and Migration
@@ -353,4 +354,4 @@ See [Memory Management](memory-management.md) for details on arenas, pools, and 
 
 ## Patterns
 
-- **Per-process configuration**, Aether rejects mutable assignment to module-level identifiers, so the C `static char *g_config` shape doesn't transcribe. The canonical replacement is the actor-singleton pattern: spawn one config actor at startup, drive writes via `Set*` messages, drive reads via `Get*` messages that carry an `actor_ref` reply target. See [per-process-config.md](per-process-config.md) for the worked example, the trade-offs (when message round-trip is acceptable vs. when to plumb the value as a parameter or worker-actor cache), and a port of a real C global-state shim.
+- **Per-process configuration**: a module-level `var` holds a scalar set once at startup, but it is module-private and not atomic. State shared across actors uses the actor-singleton pattern: spawn one config actor at startup, drive writes via `Set*` messages, drive reads via `Get*` messages that carry an `actor_ref` reply target. See [per-process-config.md](per-process-config.md) for the worked example, the trade-offs (when message round-trip is acceptable vs. when to plumb the value as a parameter or worker-actor cache), and a port of a real C global-state shim.

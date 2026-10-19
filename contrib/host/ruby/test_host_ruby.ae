@@ -36,12 +36,12 @@ main() {
 
     // The dependency probe. Non-zero means libruby could not be dlopened.
     have_ruby = 0
-    if ruby.ruby_init_host() == 0 { have_ruby = 1 }
+    if ruby.init_host() == 0 { have_ruby = 1 }
     reason = "libruby not loadable (set AETHER_RUBY_SONAME)"
 
     spec.describe(fw, "contrib.host.ruby") {
         spec.it_when(have_ruby, "evaluates a script and reports success", reason) callback {
-            spec.assert_eq(ruby.ruby_run("$aether_probe = 1"), 0,
+            spec.assert_eq(ruby.run("$aether_probe = 1"), 0,
                 "a valid script returns 0")
         }
 
@@ -51,9 +51,9 @@ main() {
         // value, and a second eval asserts on it Ruby-side, raising when the
         // arithmetic did not happen.
         spec.it_when(have_ruby, "really executes — Ruby-side state persists", reason) callback {
-            spec.assert_eq(ruby.ruby_run("$aether_sum = (2 + 3) * 7"), 0,
+            spec.assert_eq(ruby.run("$aether_sum = (2 + 3) * 7"), 0,
                 "computation evaluates")
-            spec.assert_eq(ruby.ruby_run("raise 'wrong' unless $aether_sum == 35"), 0,
+            spec.assert_eq(ruby.run("raise 'wrong' unless $aether_sum == 35"), 0,
                 "Ruby sees 35 — the interpreter genuinely ran")
         }
 
@@ -61,22 +61,22 @@ main() {
         // run at all: the caller believes the script worked. Asserted
         // negatively so the bridge may change its error code freely.
         spec.it_when(have_ruby, "propagates a raised exception as failure", reason) callback {
-            spec.assert_not_eq(ruby.ruby_run("raise 'deliberate'"), 0,
+            spec.assert_not_eq(ruby.run("raise 'deliberate'"), 0,
                 "a raising script must NOT report success")
         }
 
         // A syntax error is a different path through rb_eval_string_protect
         // than a raise, and must also be reported.
         spec.it_when(have_ruby, "reports a syntax error as failure", reason) callback {
-            spec.assert_not_eq(ruby.ruby_run("def ("), 0,
+            spec.assert_not_eq(ruby.run("def ("), 0,
                 "unparseable code must NOT report success")
         }
 
         // A host that defensively calls init before each eval must not pay
         // for it or crash: while the VM is live, init is a no-op.
         spec.it_when(have_ruby, "init is idempotent while the VM is live", reason) callback {
-            spec.assert_eq(ruby.ruby_init_host(), 0, "second init returns 0")
-            spec.assert_eq(ruby.ruby_run("$aether_probe = 2"), 0,
+            spec.assert_eq(ruby.init_host(), 0, "second init returns 0")
+            spec.assert_eq(ruby.run("$aether_probe = 2"), 0,
                 "the VM still evaluates afterwards")
         }
     }
@@ -89,6 +89,6 @@ main() {
     // then segfaults on the next eval. That unsupported path is documented
     // in the README and left untested on purpose, so a future fix has a
     // baseline to change rather than a test to fight.
-    if have_ruby == 1 { ruby.ruby_finalize_host() }
+    if have_ruby == 1 { ruby.finalize_host() }
     return _rc
 }

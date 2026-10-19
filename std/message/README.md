@@ -2,7 +2,7 @@
 
 ICU-style message formatting: named placeholders filled from a map.
 
-The point is not string interpolation — Aether has `${}` for that — but
+The point is not string interpolation (Aether has `${}` for that), but
 **translatable** messages. A translator needs to reorder the parts of a
 sentence, and a positional format string will not let them. Named placeholders
 travel with the message, so `"Hello {name}"` and its German equivalent can put
@@ -32,7 +32,7 @@ The backtick form escapes the reserved word; the `(*)` makes the exports bare,
 so calls read `format(...)` rather than a namespaced spelling that the reserved
 word would block.
 
-The locale argument drives plural and select forms — pair it with
+The locale argument drives plural and select forms: pair it with
 `std.plural`, whose categories are what a message catalogue keys its variants
 on.
 

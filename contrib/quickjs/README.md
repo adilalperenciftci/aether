@@ -1,4 +1,4 @@
-# contrib.quickjs — QuickJS, embedded
+# contrib.quickjs: QuickJS, embedded
 
 Modern JavaScript (ES2023: classes with private fields, async/await and
 promises, `Map`/`Set`, `?.`, `??`, spread, modules) run inside an Aether

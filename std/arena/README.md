@@ -4,9 +4,9 @@ A bump allocator: carve many small allocations out of one block, then free
 them all at once.
 
 There is no per-allocation free. `reset` rewinds the whole arena to empty in
-constant time, and `destroy` returns the block to the system. That trade —
-give up individual frees, get allocation down to a pointer bump and
-deallocation down to nothing — is what makes an arena right for
+constant time, and `destroy` returns the block to the system. That trade
+(give up individual frees, get allocation down to a pointer bump and
+deallocation down to nothing) is what makes an arena right for
 request-scoped or frame-scoped work, where everything dies together anyway.
 
 ```aether,run
@@ -23,7 +23,7 @@ main() {
     println("value: ${mem.get_int(p, 0)}")
 
     // reset frees everything at once. Every pointer handed out
-    // before this line is now dangling — that is the deal.
+    // before this line is now dangling: that is the deal.
     arena.reset(ar)
     println("after reset: ${arena.get_used(ar)}")
 

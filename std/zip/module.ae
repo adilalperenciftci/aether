@@ -272,7 +272,7 @@ fn parse_central_dir(b: ptr, blen: int, cd_off: long, total: long) -> (ptr, stri
             return null, "zip: entry size or offset out of range"
         }
 
-        list.list_add_raw(lst, e as ptr)
+        list.add_raw(lst, e as ptr)
 
         pos = extra_at + extra_len + comment_len
         i = i + 1
@@ -719,9 +719,7 @@ fn w_add_entry(w: *ZipWriter, name: string, name_len: int,
     // Compress if asked, but never let a "compressed" entry come out larger
     // than stored — fall back to stored, as every real zip writer does. The
     // whole entry is emitted inside the arm that owns the compressed string,
-    // so that string (`cc`) is freed exactly once in its own scope and the
-    // heap-string tracker keeps it classified (a pre-declared `var c: string`
-    // reassigned across a branch loses that classification).
+    // so that string (`cc`) is released once, at the end of its own scope.
     var use_method: int = METHOD_STORED
     var comp_len: int = data_len
     lfh_off = w.pos
@@ -1146,7 +1144,7 @@ fn symlinked_parent(dest_prefix: string, rel: string) -> int {
         if string.char_at(rel, i) == 47 { // '/'
             part = string.substring(rel, 0, i)
             full = string.concat(dest_prefix, part)
-            is_link = fs.fs_is_symlink(full)
+            is_link = fs.is_symlink(full)
             string.free(full)
             string.free(part)
             if is_link == 1 { return i }
@@ -1291,7 +1289,7 @@ extract(data: byte[], dest_dir: string, options: ExtractOptions) -> string {
             // never removes a directory.
             var existing: int = 0
             if string.equals(out_err, "") == 1 {
-                if fs.exists(full) == 1 || fs.fs_is_symlink(full) == 1 { existing = 1 }
+                if fs.exists(full) == 1 || fs.is_symlink(full) == 1 { existing = 1 }
                 if existing == 1 && options.overwrite == 0 {
                     out_err = "zip: '${name}' exists and overwrite is disabled"
                 }

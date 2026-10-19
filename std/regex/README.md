@@ -2,7 +2,7 @@
 
 Regular expressions, backed by PCRE2 (vendored, so no system dependency).
 
-`compile` returns `ptr!` — a pattern is user input as often as not, and a
+`compile` returns `ptr!`: a pattern is user input as often as not, and a
 malformed one is a value to handle rather than a crash. Compile once and reuse
 the handle: compilation is the expensive half.
 

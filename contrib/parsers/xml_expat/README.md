@@ -1,4 +1,4 @@
-# contrib.parsers.xml_expat — SAX-style XML parsing via libexpat
+# contrib.parsers.xml_expat: SAX-style XML parsing via libexpat
 
 A thin Aether veneer over [libexpat](https://libexpat.github.io/),
 the C XML pull-parser. Mirrors libexpat's native SAX model: caller
@@ -7,10 +7,10 @@ data), then feeds bytes into the parser; libexpat invokes the
 registered handlers as it walks the input.
 
 The namespace exported by `import contrib.parsers.xml_expat` is `expat.*`
-(last dotted segment of the module path) — `expat.parser_new()`,
+(last dotted segment of the module path): `expat.parser_new()`,
 `expat.on_start(...)`, etc.
 
-## Two surfaces — choosing one
+## Two surfaces: choosing one
 
 The module exposes two API tiers. They sit side-by-side; pick
 whichever fits your use case:
@@ -24,7 +24,7 @@ The closure builder is a thin Aether wrapper around the raw surface
 (it allocates a libexpat parser, installs a C-side dispatcher,
 runs the parse, and tears everything down before returning). The
 two surfaces are interoperable in the sense that they touch the
-same libexpat parser type — you just can't mix them on the same
+same libexpat parser type: you just can't mix them on the same
 `XML_Parser*` in one parse.
 
 See the two example sections below for side-by-side patterns.
@@ -56,7 +56,7 @@ Fedora, `brew install expat` on macOS).
 ## Raw bare-fn surface
 
 The 1:1 binding of libexpat's C API. Use this when the closure
-builder doesn't fit — long-lived parsers, multi-chunk streaming,
+builder doesn't fit: long-lived parsers, multi-chunk streaming,
 shared handlers across parses, fine-grained error handling.
 
 ```aether
@@ -64,7 +64,7 @@ shared handlers across parses, fine-grained error handling.
 expat.parser_new()              -> ptr               // null on OOM
 expat.parser_free(p)            -> void
 
-// User-data slot — caller-allocated struct threaded through every
+// User-data slot: caller-allocated struct threaded through every
 // handler invocation as the first arg.
 expat.set_user_data(p, ud)      -> void
 expat.get_user_data(p)          -> ptr
@@ -104,12 +104,12 @@ dispatcher routes libexpat's events to the right closure.
 
 ```aether
 // One-shot builder. _ctx is the auto-injected map from the
-// trailing-block DSL — never reference it explicitly; just call
+// trailing-block DSL: never reference it explicitly; just call
 // the bind_* setters inside the block.
 expat.parse_with(input: string) { /* bind_* calls */ }    -> int
 
 // Setters used inside the parse_with trailing block.
-// Closure signatures match the SAX events 1:1 — and ONLY the
+// Closure signatures match the SAX events 1:1, and ONLY the
 // SAX-event args. No env / user-data param.
 bind_start(|name: string, atts: ptr|        { ... })
 bind_end(  |name: string|                    { ... })
@@ -130,23 +130,23 @@ and stashes the pointer into the handler set under a known key.
 After the block runs, the builder body installs three C
 trampolines on the parser (one per event); those trampolines
 unbox the appropriate closure and call its `.fn` with its own
-`.env`. libexpat itself has a single `user_data` slot — the
+`.env`. libexpat itself has a single `user_data` slot: the
 handler set fans it out to the three independent closure envs.
 Closures' env memory is owned by the enclosing Aether scope
 (heap-promoted captures), so the captured locals stay valid for
 the entire synchronous run.
 
-### Gotcha — closure params: SAX event args ONLY
+### Gotcha: closure params are the SAX event args ONLY
 
 The closure parameter lists in the `bind_*` setters MUST contain
-exactly the SAX-event parameters — and nothing else. Specifically,
+exactly the SAX-event parameters, and nothing else. Specifically,
 do NOT declare a leading `env` / `ud` / `user_data` parameter.
 
 ```aether
 // CORRECT
 bind_text(|text: string, len: int| { bytes = bytes + len })
 
-// WRONG — extra `env: ptr` parameter
+// WRONG: extra `env: ptr` parameter
 bind_text(|env: ptr, text: string, len: int| { bytes = bytes + len })
 //        ^^^^^^^^^ shifts every following param by one slot;
 //                  `len` reads uninitialised stack data, you get
@@ -160,7 +160,7 @@ args)`, where `env_ptr` lands in that implicit `_env` slot. If you
 also declare an `env` parameter, it consumes the first SAX arg
 position, and every subsequent declared param reads one slot off.
 Captured variables still work (they go through `_env`), so test 1
-above APPEARS to pass when only counting starts — but any closure
+above APPEARS to pass when only counting starts, but any closure
 that actually uses a SAX-event arg (the `len` byte count, the `text`
 pointer, the `atts` array) reads garbage.
 
@@ -175,17 +175,17 @@ Closure signatures by event:
 ### Mixing handler subsets
 
 Registering only some of `bind_start` / `bind_end` / `bind_text`
-is fine — `xml_parser_install_handlerset` only wires libexpat
+is fine: `xml_parser_install_handlerset` only wires libexpat
 callbacks for the events whose closure was set. Skip the ones you
 don't need.
 
 ### Lifetime and aliasing inside closures
 
-- `name` (string in start / end events) is **borrowed** —
-  libexpat owns the buffer. Don't store the raw string past the
-  closure call. Copy with `string.from_bytes(name, string.length(name))`
-  if you need to retain it.
-- `text` (in text events) is **uncopied and unterminated** —
+- `name` (string in start / end events) is **borrowed** for the
+  closure call: libexpat owns the buffer. A place that keeps it (a
+  local outside the closure, a field, a list) takes a string of its
+  own, copying the characters, so storing it needs no explicit copy.
+- `text` (in text events) is **uncopied and unterminated**:
   same as the raw-API contract. Use the explicit `len` parameter,
   not `string.length(text)`. Copy into a strbuilder if you need
   the full run; libexpat may chunk text content across multiple
@@ -198,7 +198,7 @@ don't need.
   declared in the enclosing scope) are heap-promoted and live for
   the entire synchronous `parse_with` call. Mutate them freely.
 
-### Example — closure builder, one handler
+### Example: closure builder, one handler
 
 ```aether
 import contrib.parsers.xml_expat
@@ -210,7 +210,7 @@ main() {
             count = count + 1
         })
     }
-    println("element count = ${count}")   // 4 — root + a + b + c
+    println("element count = ${count}")   // 4: root + a + b + c
 }
 ```
 
@@ -218,7 +218,7 @@ No `Counter` struct, no `malloc`, no `set_user_data`, no `as fn` cast,
 no top-level handler function. The closure captures `count` directly
 from `main`'s scope.
 
-### Example — closure builder, all three events
+### Example: closure builder, all three events
 
 ```aether
 import contrib.parsers.xml_expat
@@ -237,7 +237,7 @@ main() {
 }
 ```
 
-### Example — raw bare-fn surface (fallback / multi-parse use)
+### Example: raw bare-fn surface (fallback / multi-parse use)
 
 The same element-counting task using the raw SAX API. Use this when
 you need long-lived parsers, multi-chunk streaming, or want to share
@@ -298,15 +298,15 @@ directly with the same call-shape conventions as a C SAX handler:
   `fn(ud: ptr, name: string)`.
 - **Text handler**: `(void* user_data, const char* text, int len)`.
   Aether: `fn(ud: ptr, text: ptr, len: int)`. The `text` pointer is
-  an **uncopied, unterminated** slice of libexpat's internal buffer
-  — copy what you need before the next callback fires. libexpat may
+  an **uncopied, unterminated** slice of libexpat's internal buffer:
+  copy what you need before the next callback fires. libexpat may
   also chunk text content across multiple callbacks at
   internal-buffer boundaries; concatenate via a strbuilder if you
   need the full run as one string.
 
 For closure-based handlers (the `parse_with { ... }` builder
 described earlier), the closure parameter list uses the same
-SAX-event args — but **omits** the user-data parameter entirely.
+SAX-event args, but **omits** the user-data parameter entirely.
 See the "Gotcha" subsection above for details on why an explicit
 `env` parameter in a `bind_*` closure miscompiles silently.
 
@@ -349,10 +349,10 @@ expat.parse(p, "", 0, 1)                            // is_final = 1
 ## See also
 
 - libexpat documentation: <https://libexpat.github.io/>
-- `tests/integration/contrib_xml_expat/probe.ae` — full 8-case
+- `tests/integration/contrib_xml_expat/probe.ae`: full 8-case
   test matrix: the raw surface (lifecycle, handler registration,
   user-data round-trip, attribute walking, error reporting,
   multi-chunk parse, two-parser independence) plus the closure
   builder (single-handler capture, three-handler fan-out,
   missing-handler graceful path).
-- `contrib/sqlite/README.md` — same contrib-tier build pattern.
+- `contrib/sqlite/README.md`: same contrib-tier build pattern.

@@ -337,7 +337,7 @@ main() {
             json.push(tree, json.from_int(3))
             ctx = liquid.context_new()
             spec.assert_str_eq(liquid.context_put_json(ctx, "t", tree), "", "6a bound")
-            json.json_free(tree)
+            json.free(tree)
             spec.assert_str_eq(render_in("{{ t[0] }}{{ t[1] }}", ctx), "kept3", "6b read after the tree is freed")
             liquid.context_free(ctx)
         }
@@ -362,7 +362,7 @@ main() {
             ctx = liquid.context_new()
             spec.assert_not_eq(string.length(liquid.context_put_json(ctx, "deep", root)), 0,
                 "8 too deep reported")
-            json.json_free(root)
+            json.free(root)
             liquid.context_free(ctx)
         }
 

@@ -646,6 +646,8 @@ CodeGenerator* create_code_generator(FILE* output) {
     gen->last_line_num = 0;
     gen->match_result_var = NULL;
     gen->match_result_opt = NULL;
+    gen->match_result_own = NULL;
+    gen->match_result_bound = NULL;
     gen->match_result_string = 0;
     gen->match_result_struct = NULL;
     gen->match_result_replace = 0;
@@ -1746,9 +1748,10 @@ void exit_scope(CodeGenerator* gen) {
 
 // Emit ALL deferred statements (for return - unwinds entire function), in
 // LIFO order across all scopes. Nothing is held back for the returned value:
-// a closure local it returns has no env-free (a return is an escape to
-// claim_closure_local_env), and the cells and closures a returned closure
-// captured are kept alive by the references its env took (#2019, #2494).
+// the return took a reference of its own to what it hands the caller (R3), so
+// a returned closure local releases only its own reference here, and the cells
+// and closures a returned closure captured are kept alive by the references
+// its env took (#2019, #2494).
 void emit_all_defers(CodeGenerator* gen) {
     for (int i = gen->defer_count - 1; i >= 0; i--) {
         if (!gen->defer_stack[i]) continue;
@@ -4919,6 +4922,7 @@ static void emit_main_shim_for_target(CodeGenerator* gen, ASTNode* program) {
 
 // Emit a typedef for a tuple type if not already emitted
 static void emit_struct_in_order(CodeGenerator* gen, ASTNode* program, int i, char* state);
+static void emit_sum_in_order(CodeGenerator* gen, ASTNode* program, int i, char* state);
 
 /* `t name` as a C member declaration: an array's length follows the name
  * (`const char* _0[2]`); `const char*[2] _0` is not C. */
@@ -4955,6 +4959,33 @@ static void emit_value_type_deps(CodeGenerator* gen, ASTNode* program, Type* t, 
             }
         }
         return;
+    case TYPE_FUNCTION:
+        /* #3000: a typed function pointer's declarator names the types of
+         * its parameters and result, so an optional's or a tuple's typedef
+         * goes first: `int (*f)(ae_opt_int)` in a struct came before
+         * `ae_opt_int` and was not C. A struct there need not be complete. */
+        if (!t->is_fnptr) return;
+        for (int i = 0; t->param_types && i < t->param_count; i++) {
+            Type* pt = t->param_types[i];
+            if (pt && (pt->kind == TYPE_OPTIONAL || pt->kind == TYPE_TUPLE))
+                emit_value_type_deps(gen, program, pt, state);
+        }
+        if (t->return_type && (t->return_type->kind == TYPE_OPTIONAL ||
+                               t->return_type->kind == TYPE_TUPLE))
+            emit_value_type_deps(gen, program, t->return_type, state);
+        return;
+    case TYPE_SUM:
+        /* #2985: a sum held by value embeds its variants: its typedef and
+         * theirs go first. */
+        for (int i = 0; t->struct_name && i < program->child_count; i++) {
+            ASTNode* sd = program->children[i];
+            if (sd && sd->type == AST_SUM_TYPE_DEF && sd->value &&
+                strcmp(sd->value, t->struct_name) == 0) {
+                emit_sum_in_order(gen, program, i, state);
+                return;
+            }
+        }
+        return;
     default:
         return;
     }
@@ -4970,6 +5001,27 @@ static void emit_struct_in_order(CodeGenerator* gen, ASTNode* program, int i, ch
             emit_value_type_deps(gen, program, fld->node_type, state);
     }
     generate_struct_definition(gen, sd);
+}
+
+/* #2985: a sum's typedef, after the variant structs its union embeds by
+ * value, once: where a struct field first needs it, or with the rest. */
+static void emit_sum_in_order(CodeGenerator* gen, ASTNode* program, int i, char* state) {
+    if (state[i]) return;
+    state[i] = 1;
+    ASTNode* def = program->children[i];
+    for (int v = 0; v < def->child_count; v++) {
+        ASTNode* var = def->children[v];
+        if (!var || var->type != AST_IDENTIFIER || !var->value) continue;
+        for (int j = 0; j < program->child_count; j++) {
+            ASTNode* sd = program->children[j];
+            if (sd && sd->type == AST_STRUCT_DEFINITION && sd->value &&
+                strcmp(sd->value, var->value) == 0) {
+                emit_struct_in_order(gen, program, j, state);
+                break;
+            }
+        }
+    }
+    emit_sum_typedef(gen, def);
 }
 
 void ensure_tuple_typedef(CodeGenerator* gen, Type* type) {
@@ -6022,7 +6074,15 @@ static void rename_locals_shadowing_functions(ASTNode* program) {
  * each exit free reaches its own variable and flag. A uniform rename
  * inside the construct keeps its meaning: every use there is the
  * binding's (a nested binding of the name included, renamed alike), and
- * field, argument and function names are not value names. */
+ * field, argument and function names are not value names.
+ *
+ * #2994: so is every name a `match` arm's pattern binds (`some(v)` over
+ * any optional, the names of a list or a struct pattern), which is that
+ * arm's own: codegen writes the value of a bound `match` in the arm's
+ * block, and a binding named like the variable it is bound to took it
+ * there, `v = match o { some(v) -> v  none -> 0 }` leaving `v` as it was. A
+ * module variable or an actor's state of that name is no exception: the
+ * arm's binding hides it from that store as it hides a local. */
 static int scoped_binding_seq = 0;
 
 static int names_value_outside(const ASTNode* node, const ASTNode* skip, const char* name) {
@@ -6062,35 +6122,47 @@ static void rename_scoped_binding(ASTNode* scope, ASTNode* construct, const char
     free(to);
 }
 
-static void rename_scoped_string_bindings_in(ASTNode* scope, ASTNode* node, const NameSet* fixed) {
+/* #2994: each name pattern `p` of a match arm binds, renamed in `arm` when
+ * `scope` names it outside the arm: `some(v)` at the top, a name in a list
+ * or a struct pattern (whose fields are assignments named by the field,
+ * each holding its own pattern). */
+static void rename_arm_pattern_bindings(ASTNode* scope, ASTNode* arm, ASTNode* p, int top) {
+    static const NameSet none = {0};
+    if (!p) return;
+    if (p->type == AST_PATTERN_VARIABLE) {
+        if (p->value && (!top || (p->annotation && strcmp(p->annotation, "some_pattern") == 0)))
+            rename_scoped_binding(scope, arm, p->value, &none);
+        return;
+    }
+    if (p->type != AST_PATTERN_LIST && p->type != AST_PATTERN_CONS &&
+        p->type != AST_PATTERN_STRUCT && !(p->type == AST_ASSIGNMENT && !top))
+        return;
+    for (int i = 0; i < p->child_count; i++)
+        rename_arm_pattern_bindings(scope, arm, p->children[i], 0);
+}
+
+static void rename_scoped_bindings_in(ASTNode* scope, ASTNode* node, const NameSet* fixed) {
     if (!node) return;
     /* Inner constructs first, so each ends with a name apart from the one
      * around it (the outer rename no longer meets the inner name). */
     for (int i = 0; i < node->child_count; i++)
-        rename_scoped_string_bindings_in(scope, node->children[i], fixed);
+        rename_scoped_bindings_in(scope, node->children[i], fixed);
     if (node->type == AST_FOR_LOOP && node->child_count > 0 && node->children[0] &&
         node->children[0]->type == AST_VARIABLE_DECLARATION && node->children[0]->node_type &&
         node->children[0]->node_type->kind == TYPE_STRING) {
         rename_scoped_binding(scope, node, node->children[0]->value, fixed);
     } else if (node->type == AST_CATCH_CLAUSE && node->value) {
         rename_scoped_binding(scope, node, node->value, fixed);
-    } else if (node->type == AST_MATCH_STATEMENT && node->child_count > 0 && node->children[0] &&
-               node->children[0]->node_type &&
-               node->children[0]->node_type->kind == TYPE_OPTIONAL &&
-               node->children[0]->node_type->element_type &&
-               node->children[0]->node_type->element_type->kind == TYPE_STRING) {
+    } else if (node->type == AST_MATCH_STATEMENT) {
         for (int i = 1; i < node->child_count; i++) {
             ASTNode* arm = node->children[i];
-            ASTNode* pat = arm && arm->type == AST_MATCH_ARM && arm->child_count > 0
-                           ? arm->children[0] : NULL;
-            if (pat && pat->type == AST_PATTERN_VARIABLE && pat->annotation &&
-                strcmp(pat->annotation, "some_pattern") == 0)
-                rename_scoped_binding(scope, arm, pat->value, fixed);
+            if (arm && arm->type == AST_MATCH_ARM && arm->child_count > 0)
+                rename_arm_pattern_bindings(scope, arm, arm->children[0], 1);
         }
     }
 }
 
-static void rename_scoped_string_bindings(ASTNode* program) {
+static void rename_scoped_bindings(ASTNode* program) {
     if (!program) return;
     NameSet globals = {0};
     for (int i = 0; i < program->child_count; i++) {
@@ -6104,7 +6176,7 @@ static void rename_scoped_string_bindings(ASTNode* program) {
         if (!c) continue;
         if (c->type == AST_FUNCTION_DEFINITION || c->type == AST_MAIN_FUNCTION ||
             c->type == AST_BUILDER_FUNCTION) {
-            rename_scoped_string_bindings_in(c, c, &globals);
+            rename_scoped_bindings_in(c, c, &globals);
         } else if (c->type == AST_ACTOR_DEFINITION) {
             /* An actor's state is `self->name`, no local. */
             NameSet fixed = {0};
@@ -6117,7 +6189,7 @@ static void rename_scoped_string_bindings(ASTNode* program) {
             for (int k = 0; k < c->child_count; k++) {
                 ASTNode* st = c->children[k];
                 if (st && st->type != AST_STATE_DECLARATION)
-                    rename_scoped_string_bindings_in(st, st, &fixed);
+                    rename_scoped_bindings_in(st, st, &fixed);
             }
             nameset_free(&fixed);
         }
@@ -7144,8 +7216,9 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     /* #2683: after the function renames, so a call's name is the one its
      * C spelling is made from. */
     rename_locals_shadowing_functions(program);
-    /* #2746: before any pass keys an exit free off a local's name. */
-    rename_scoped_string_bindings(program);
+    /* #2746, #2994: before any pass keys an exit free or a store off a
+     * local's name. */
+    rename_scoped_bindings(program);
     /* The rename changed definition names, which are the index's keys,
        without changing the child count it is keyed on. */
     program_index_reset();
@@ -9011,17 +9084,15 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
             ASTNode* sd = program->children[i];
             if (sd && sd->type == AST_STRUCT_DEFINITION) emit_struct_in_order(gen, program, i, state);
         }
-        free(state);
-    }
-
-    // #914: sum/variant tagged-union typedefs. Emitted after all struct
-    // bodies (each union member embeds a variant struct by value) and before
-    // the function forward declarations that reference `Name` in signatures.
-    for (int i = 0; i < program->child_count; i++) {
-        ASTNode* sd = program->children[i];
-        if (sd && sd->type == AST_SUM_TYPE_DEF) {
-            emit_sum_typedef(gen, sd);
+        // #914: sum/variant tagged-union typedefs, after the variant structs
+        // their unions embed by value and before the function forward
+        // declarations that reference `Name` in signatures. A sum a struct
+        // field holds by value went out ahead of that struct (#2985).
+        for (int i = 0; i < n; i++) {
+            ASTNode* sd = program->children[i];
+            if (sd && sd->type == AST_SUM_TYPE_DEF) emit_sum_in_order(gen, program, i, state);
         }
+        free(state);
     }
 
     // #1132: bitstructs. Register the layout (so field access can lower to
@@ -9238,11 +9309,8 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
         int param_count = fn_param_count(child);
         for (int j = 0; j < param_count; j++) {
             if (j > 0) fprintf(gen->output, ", ");
-            ASTNode* param = fn_param_at(child, j);
-            if (param->type == AST_PATTERN_LIST || param->type == AST_PATTERN_CONS) {
-                fprintf(gen->output, "%s*, int", fn_list_param_elem_ctype(gen, child, j));
-                continue;
-            }
+            /* A list pattern's position is a slice, as the definition and a
+             * set's dispatcher spell it (#2898). */
             Type* pt = fn_param_type_at(gen, child, j);
             /* #750: fn-ptr param → abstract declarator `R (*)(T1,T2)`
              * so the prototype matches the definition. */

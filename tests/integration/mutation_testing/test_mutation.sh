@@ -13,7 +13,7 @@
 #   1. baseline (unmutated suite) passes,
 #   2. the exact mutation score line,
 #   3. the expected survivor is listed,
-#   4. the SUT is restored byte-identical (md5 before == after) — the
+#   4. the SUT is restored byte-identical (md5 before == after): the
 #      safety-critical property; a driver that corrupts source is worse
 #      than no driver.
 #
@@ -55,7 +55,7 @@ AETHER_CACHE_DIR="$TMPDIR/cache"
 export AETHER_CACHE_DIR
 
 fail() {
-    echo "  [FAIL] mutation_testing — $1"
+    echo "  [FAIL] mutation_testing: $1"
     [ -f "$TMPDIR/out.log" ] && tail -40 "$TMPDIR/out.log" | sed 's/^/    /'
     exit 1
 }
@@ -83,7 +83,7 @@ fi
 grep -q "baseline: suite passes" "$TMPDIR/out.log" || fail "no baseline-pass line"
 
 # Property 2: exact score.
-grep -q "1/2 mutants killed — mutation score 50%" "$TMPDIR/out.log" \
+grep -q "1/2 mutants killed, mutation score 50%" "$TMPDIR/out.log" \
     || fail "unexpected mutation score (wanted 1/2, 50%)"
 
 # Property 3: the known survivor and kill are reported, each anchored to a

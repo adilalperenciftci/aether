@@ -4,7 +4,7 @@ Arbitrary-precision integers.
 
 Values are immutable: every operation returns a new bignum rather than
 mutating its operands, which is what makes them safe to share and awkward to
-use in a tight loop. The module exists mainly to serve `std.cryptography` —
+use in a tight loop. The module exists mainly to serve `std.cryptography`:
 RSA, DSA and the elliptic-curve arithmetic all need integers far past 64 bits.
 Each value is an allocation of its own, released with `bignum.free`.
 
@@ -39,7 +39,7 @@ compare: 1
 zero?    1
 ```
 
-257 needs nine bits and is `0x101` — the example is small enough to check by
+257 needs nine bits and is `0x101`: the example is small enough to check by
 eye, which is the point of picking it.
 
 `from_bytes` and `to_bytes` are the interop pair: they read and write
@@ -59,8 +59,7 @@ so a negative value shifted right rounds toward negative infinity
 zero; `from_decimal` parses it back, returning `(value, err)`.
 
 The parse is strict: an optional leading `-` then one or more ASCII digits and
-nothing else. No `+`, no underscores, no whitespace trimming, no empty string
-— malformed input is an error rather than a silently truncated number.
+nothing else. No `+`, no underscores, no whitespace trimming, no empty string: malformed input is an error rather than a silently truncated number.
 
 ```aether,run
 import std.bignum
@@ -84,7 +83,7 @@ main() {
 25! = 15511210043330985984000000
 ```
 
-Conversion divides by 10^9 — nine digits per pass — rather than one digit at a
+Conversion divides by 10^9 (nine digits per pass) rather than one digit at a
 time, so a thousand-digit value costs about a ninth of the big-integer
 divisions the naive form would.
 

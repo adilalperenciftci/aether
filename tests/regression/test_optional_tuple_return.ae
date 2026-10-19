@@ -1,0 +1,91 @@
+// A tuple returned into an optional tuple result, `return (n, n + 1)` or
+// `return n, n + 1` from a `-> (int, int)?` function, was built as the bare
+// tuple: gcc refused returning '_tuple_int_int' where
+// 'ae_opt__tuple_int_int' was expected. An if-expression into any optional
+// slot was wrapped whole, so `if c { 3 } else { none }` became
+// `.val = (c ? 3 : {0})`, and a tuple literal arm was its elements' text
+// run together. A multi-value return into an optional tuple is now the
+// tuple literal coerced into the optional, as a binding of one is, and an
+// if-expression goes into an optional arm by arm, as a match does. This
+// test returns and binds each form and reads the values back.
+
+extern exit(code: int)
+
+fn check(ok: bool, what: string) {
+    if !ok {
+        println("FAIL: ${what}")
+        exit(1)
+    }
+}
+
+ret_paren(n: int) -> (int, int)? {
+    if n > 0 {
+        return (n, n + 1)
+    }
+    return none
+}
+
+ret_bare(n: int) -> (int, int)? {
+    if n > 0 {
+        return n, n + 1
+    }
+    return none
+}
+
+ret_deferred(n: int) -> (int, int)? {
+    defer check(n >= 0, "the defer ran")
+    if n > 0 {
+        return n, n * 2
+    }
+    return none
+}
+
+ret_if(n: int) -> (int, int)? {
+    return if n > 0 { (n, n + 1) } else { none }
+}
+
+int_if(n: int) -> int? {
+    return if n > 0 { n } else { none }
+}
+
+pass_if(o: int?, n: int) -> int? {
+    return if n > 0 { o } else { none }
+}
+
+ret_match(n: int) -> (int, int)? {
+    return match n {
+        1 -> (10, 20)
+        _ -> none
+    }
+}
+
+main() {
+    a, b = ret_paren(3)!
+    check(a == 3 && b == 4, "return (n, n + 1)")
+    check(ret_paren(0) == none, "return none beside a tuple return")
+    c, d = ret_bare(5)!
+    check(c == 5 && d == 6, "return n, n + 1")
+    e, f = ret_deferred(2)!
+    check(e == 2 && f == 4, "a tuple return through the defer path")
+    g, h = ret_if(7)!
+    check(g == 7 && h == 8, "an if-expression's tuple arm returned")
+    check(ret_if(0) == none, "an if-expression's none arm returned")
+    check((int_if(9) ?? 0) == 9 && (int_if(0) ?? 1) == 1, "an if-expression into int?")
+    let o: int? = 11
+    check((pass_if(o, 1) ?? 0) == 11 && pass_if(o, 0) == none, "an optional arm as it is")
+    i, j = ret_match(1)!
+    check(i == 10 && j == 20 && ret_match(2) == none, "a match arm's tuple")
+    n = 1
+    let t: (int, int)? = if n == 1 { (3, 4) } else { none }
+    k, l = t!
+    check(k == 3 && l == 4, "an if-expression bound to an optional tuple")
+    let u: int? = if n == 2 { 5 } else { none }
+    check(u == none, "an if-expression bound to int?")
+    let w: (int, int)? = match n {
+        1 -> (30, 40)
+        _ -> none
+    }
+    m, p = w!
+    check(m == 30 && p == 40, "a match bound to an optional tuple")
+    println("ok")
+}

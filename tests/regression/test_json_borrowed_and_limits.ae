@@ -50,16 +50,16 @@ main() {
 
     // ---- get_long clamps to the int64 range ----
     big, _ = json.parse("18446744073709551615")
-    check(json.json_get_long(big) == 9223372036854775807, "a number above int64 reads as INT64_MAX")
+    check(json.get_long(big) == 9223372036854775807, "a number above int64 reads as INT64_MAX")
     json.free(big)
     huge, _ = json.parse("1e300")
-    check(json.json_get_long(huge) == 9223372036854775807, "1e300 reads as INT64_MAX")
+    check(json.get_long(huge) == 9223372036854775807, "1e300 reads as INT64_MAX")
     json.free(huge)
     neg, _ = json.parse("-1e300")
-    check(json.json_get_long(neg) == 0 - 9223372036854775807 - 1, "-1e300 reads as INT64_MIN")
+    check(json.get_long(neg) == 0 - 9223372036854775807 - 1, "-1e300 reads as INT64_MIN")
     json.free(neg)
     exact, _ = json.parse("9007199254740993")
-    check(json.json_get_long(exact) == 9007199254740993, "an integer in range reads exactly")
+    check(json.get_long(exact) == 9007199254740993, "an integer in range reads exactly")
     json.free(exact)
 
     // ---- stringify past the nesting limit ----

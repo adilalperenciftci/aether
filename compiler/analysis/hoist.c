@@ -120,14 +120,29 @@ static int is_branching(ASTNode* stmt) {
                     stmt->type == AST_MATCH_STATEMENT);
 }
 
-/* Does the arm pattern `p` bind `name`: `some(name)`, or an element of a
- * list pattern (`[name, y]`, `[name | t]`)? A bare name in a pattern is a
+/* Does the arm pattern `p` bind `name`: `some(name)`, an element of a
+ * list pattern (`[name, y]`, `[name | t]`), or a field of a struct pattern
+ * (`Pt { x: name }`)? A bare name in a pattern is a
  * value compared with, or a sum's variant, and binds nothing. */
 static int pattern_binds_name(const ASTNode* p, const char* name) {
     if (!p || !name) return 0;
     if (p->type == AST_PATTERN_VARIABLE)
         return p->annotation && strcmp(p->annotation, "some_pattern") == 0 && p->value &&
                strcmp(p->value, name) == 0;
+    /* #2992: a struct pattern binds the names its fields take, and those of
+     * a struct pattern over a field. */
+    if (p->type == AST_PATTERN_STRUCT) {
+        for (int i = 0; i < p->child_count; i++) {
+            const ASTNode* fp = p->children[i];
+            const ASTNode* sub = (fp && fp->type == AST_ASSIGNMENT && fp->child_count > 0)
+                                 ? fp->children[0] : NULL;
+            if (!sub) continue;
+            if (sub->type == AST_PATTERN_VARIABLE && sub->value && strcmp(sub->value, name) == 0)
+                return 1;
+            if (sub->type == AST_PATTERN_STRUCT && pattern_binds_name(sub, name)) return 1;
+        }
+        return 0;
+    }
     if (p->type != AST_PATTERN_LIST && p->type != AST_PATTERN_CONS) return 0;
     for (int i = 0; i < p->child_count; i++) {
         const ASTNode* e = p->children[i];

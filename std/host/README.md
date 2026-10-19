@@ -3,8 +3,8 @@
 Primitives for Aether scripts **embedded in a host application**.
 
 The inversion is the point: normally Aether is the program. Here it is a
-script compiled with `aetherc --emit=lib` and loaded by a host — a Java, Python,
-Ruby or Go application — which calls into it and receives events back.
+script compiled with `aetherc --emit=lib` and loaded by a host (a Java, Python,
+Ruby or Go application), which calls into it and receives events back.
 
 `notify()` is the upward path, and it deliberately carries almost nothing: an
 event name and an `int64` id. That is Hohpe's **claim check** pattern. If the
@@ -35,7 +35,7 @@ than being told out of band. `input` and `event` are the downward paths;
 `bindings` reports what the host has wired up.
 
 `caller_identity`, `caller_attribute` and `caller_deadline_ms` expose who is
-calling and how long they will wait — the context a shared script needs to
+calling and how long they will wait: the context a shared script needs to
 make a policy decision, and the reason it is here rather than passed as an
 argument to every function.
 

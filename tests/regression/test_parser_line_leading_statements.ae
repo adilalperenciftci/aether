@@ -64,7 +64,7 @@ main() {
     b = 20
     // Pre-fix, this parsed as `a = 10 - b` because the newline-led
     // `-` folded into the previous assignment expression.
-    - b
+    -b
     if a != 10 {
         println("FAIL case 3: line-led unary statement folded into previous expr; got ${a}, want 10")
         return 1

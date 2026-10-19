@@ -261,7 +261,7 @@ value struct's footprint pays back across the whole parsed tree.
 
 Growth uses simple doubling with an initial capacity of
 `JSON_CONTAINER_INITIAL_CAP` (= 8). Realistic JSON objects cluster in
-the 5–15 key range, so starting at 8 skips one doubling cycle in the
+the 5-15 key range, so starting at 8 skips one doubling cycle in the
 common case; tiny objects waste a few unused pointers which round-off
 into the arena anyway. Old buffers become arena garbage until the arena
 is freed, waste is bounded by `O(final size)` per container.

@@ -23,12 +23,12 @@ main() {
     fw = spec.init()
 
     have_duktape = 0
-    if duktape.duktape_init() == 0 { have_duktape = 1 }
+    if duktape.init() == 0 { have_duktape = 1 }
     reason = "libduktape not loadable (set AETHER_DUKTAPE_SONAME)"
 
     spec.describe(fw, "contrib.host.duktape") {
         spec.it_when(have_duktape, "evaluates a script and reports success", reason) callback {
-            spec.assert_eq(duktape.duktape_run("aether_probe = 1"), 0,
+            spec.assert_eq(duktape.run("aether_probe = 1"), 0,
                 "a valid script returns 0")
         }
 
@@ -38,9 +38,9 @@ main() {
         // and a second eval asserts on it Duktape-side, erroring when the
         // arithmetic did not happen.
         spec.it_when(have_duktape, "really executes — Duktape-side state persists", reason) callback {
-            spec.assert_eq(duktape.duktape_run("aether_sum = (2 + 3) * 7"), 0,
+            spec.assert_eq(duktape.run("aether_sum = (2 + 3) * 7"), 0,
                 "computation evaluates")
-            spec.assert_eq(duktape.duktape_run("if (aether_sum !== 35) throw new Error('wrong');"), 0,
+            spec.assert_eq(duktape.run("if (aether_sum !== 35) throw new Error('wrong');"), 0,
                 "Duktape sees 35 — the interpreter genuinely ran")
         }
 
@@ -48,28 +48,28 @@ main() {
         // cannot run at all: the caller believes the script worked.
         // Asserted negatively so the bridge may change its error code.
         spec.it_when(have_duktape, "propagates a runtime error as failure", reason) callback {
-            spec.assert_not_eq(duktape.duktape_run("throw new Error('deliberate');"), 0,
+            spec.assert_not_eq(duktape.run("throw new Error('deliberate');"), 0,
                 "an erroring script must NOT report success")
         }
 
         // A syntax error takes a different path through the Duktape loader
         // than a runtime error, and must also be reported.
         spec.it_when(have_duktape, "reports a syntax error as failure", reason) callback {
-            spec.assert_not_eq(duktape.duktape_run("function ("), 0,
+            spec.assert_not_eq(duktape.run("function ("), 0,
                 "unparseable code must NOT report success")
         }
 
         // A host that defensively calls init before each eval must not
         // pay for it or crash: while the VM is live, init is a no-op.
         spec.it_when(have_duktape, "init is idempotent while the VM is live", reason) callback {
-            spec.assert_eq(duktape.duktape_init(), 0, "second init returns 0")
-            spec.assert_eq(duktape.duktape_run("aether_probe = 1"), 0,
+            spec.assert_eq(duktape.init(), 0, "second init returns 0")
+            spec.assert_eq(duktape.run("aether_probe = 1"), 0,
                 "the VM still evaluates afterwards")
         }
     }
 
     _rc = spec.run_summary(fw)
 
-    if have_duktape == 1 { duktape.duktape_finalize() }
+    if have_duktape == 1 { duktape.finalize() }
     return _rc
 }

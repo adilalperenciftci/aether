@@ -73,7 +73,7 @@ fig at 1
 ## Custom orders
 
 The `_by` forms take a comparator returning `<0`, `0`, or `>0`. It must be a
-strict weak ordering — an inconsistent comparator yields an unspecified
+strict weak ordering: an inconsistent comparator yields an unspecified
 permutation rather than a crash, but not a sorted array either.
 
 They are separate names rather than an optional argument so the default path

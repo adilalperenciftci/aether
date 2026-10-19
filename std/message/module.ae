@@ -547,7 +547,7 @@ fn decimal_category(locale: string, s: string) -> string {
         k = k + 1
     }
     n = to_float(s) or 0.0
-    return plural.plural_category_decimal(locale, n, i, v, w, f, t)
+    return plural.category_decimal(locale, n, i, v, w, f, t)
 }
 
 fn format_nodes(locale: string, nodes: ptr, args: ptr, plural_val: string) -> string {

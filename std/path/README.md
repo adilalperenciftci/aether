@@ -2,7 +2,7 @@
 
 Filesystem path manipulation: joining, splitting, and normalising.
 
-Pure string work — nothing here touches the filesystem, so `basename` on a
+Pure string work: nothing here touches the filesystem, so `basename` on a
 path that does not exist is still a `basename`. Use `std.fs` to ask whether
 something is there.
 
@@ -26,7 +26,7 @@ extension: .ae
 `extension` includes the dot, which is what makes `"${base}${ext}"`
 round-trip without a conditional.
 
-`clean` normalises `.` and `..` segments textually — it does not resolve
+`clean` normalises `.` and `..` segments textually: it does not resolve
 symlinks, because doing so would require touching the filesystem and would
 make the function fail on paths that do not exist yet.
 

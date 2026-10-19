@@ -133,12 +133,12 @@ main() {
     check(tcp_read_panics(peer, raw), "read_into refuses an unbounded slice")
 
     // The peer closes: the read reports it, terminally.
-    tcp.tcp_close(conn)
+    tcp.close(conn)
     k, rerr = tcp.read_into(peer, recv)
     check(rerr == "connection closed or receive failed" && k == 0, "a closed peer is reported, got '${rerr}'")
 
-    tcp.tcp_close(peer)
-    tcp.tcp_server_close(srv)
+    tcp.close(peer)
+    tcp.server_close(srv)
     bytes.free(rb)
     bytes.free(pb)
     println("OK")

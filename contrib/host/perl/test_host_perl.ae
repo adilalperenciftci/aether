@@ -23,12 +23,12 @@ main() {
     fw = spec.init()
 
     have_perl = 0
-    if perl.perl_init() == 0 { have_perl = 1 }
+    if perl.init() == 0 { have_perl = 1 }
     reason = "libperl not loadable (set AETHER_PERL_SONAME)"
 
     spec.describe(fw, "contrib.host.perl") {
         spec.it_when(have_perl, "evaluates a script and reports success", reason) callback {
-            spec.assert_eq(perl.perl_run("$main::aether_probe = 1;"), 0,
+            spec.assert_eq(perl.run("$main::aether_probe = 1;"), 0,
                 "a valid script returns 0")
         }
 
@@ -38,9 +38,9 @@ main() {
         // and a second eval asserts on it Perl-side, erroring when the
         // arithmetic did not happen.
         spec.it_when(have_perl, "really executes — Perl-side state persists", reason) callback {
-            spec.assert_eq(perl.perl_run("$main::aether_sum = (2 + 3) * 7;"), 0,
+            spec.assert_eq(perl.run("$main::aether_sum = (2 + 3) * 7;"), 0,
                 "computation evaluates")
-            spec.assert_eq(perl.perl_run("die 'wrong' unless $main::aether_sum == 35;"), 0,
+            spec.assert_eq(perl.run("die 'wrong' unless $main::aether_sum == 35;"), 0,
                 "Perl sees 35 — the interpreter genuinely ran")
         }
 
@@ -48,28 +48,28 @@ main() {
         // cannot run at all: the caller believes the script worked.
         // Asserted negatively so the bridge may change its error code.
         spec.it_when(have_perl, "propagates a runtime error as failure", reason) callback {
-            spec.assert_not_eq(perl.perl_run("die 'deliberate';"), 0,
+            spec.assert_not_eq(perl.run("die 'deliberate';"), 0,
                 "an erroring script must NOT report success")
         }
 
         // A syntax error takes a different path through the Perl loader
         // than a runtime error, and must also be reported.
         spec.it_when(have_perl, "reports a syntax error as failure", reason) callback {
-            spec.assert_not_eq(perl.perl_run("sub {"), 0,
+            spec.assert_not_eq(perl.run("sub {"), 0,
                 "unparseable code must NOT report success")
         }
 
         // A host that defensively calls init before each eval must not
         // pay for it or crash: while the VM is live, init is a no-op.
         spec.it_when(have_perl, "init is idempotent while the VM is live", reason) callback {
-            spec.assert_eq(perl.perl_init(), 0, "second init returns 0")
-            spec.assert_eq(perl.perl_run("$main::aether_probe = 1;"), 0,
+            spec.assert_eq(perl.init(), 0, "second init returns 0")
+            spec.assert_eq(perl.run("$main::aether_probe = 1;"), 0,
                 "the VM still evaluates afterwards")
         }
     }
 
     _rc = spec.run_summary(fw)
 
-    if have_perl == 1 { perl.perl_finalize() }
+    if have_perl == 1 { perl.finalize() }
     return _rc
 }

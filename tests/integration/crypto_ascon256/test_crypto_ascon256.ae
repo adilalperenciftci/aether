@@ -32,7 +32,7 @@ main() {
 
     // Empty message — the published NIST SP 800-232 Ascon-Hash256 reference.
     fails = fails + check("empty",
-        ascon256.ascon256_hex(string.bytes("")),
+        ascon256.hex(string.bytes("")),
         "0b3be5850f2f6b98caf29f8fdea89b64a1fa70aa249b8f839bd53baa304d92b2")
 
     // Single 0x00 byte (fed as bytes to avoid NUL string truncation).
@@ -68,7 +68,7 @@ main() {
     // several times — one-shot digest.
     fox = "The quick brown fox jumps over the lazy dog"
     fails = fails + check("fox one-shot",
-        ascon256.ascon256_hex(string.bytes(fox)[0..43]),
+        ascon256.hex(string.bytes(fox)[0..43]),
         "23414503bf4bde7ad0e85aec94c22ae2d7cd807996b537f9564fc2974053f139")
 
     // Same message split across two updates at a non-block-aligned boundary

@@ -1472,7 +1472,11 @@ static int order_operands(ASTNode* expr, ASTNode** ops, int cap) {
     switch (expr->type) {
         case AST_FUNCTION_CALL:
             if (expr->value && strcmp(expr->value, "select") == 0) return 0;
-            for (int i = 0; i < expr->child_count; i++) {
+            for (int k = 0; k < expr->child_count; k++) {
+                /* Named arguments stand in parameter order and are
+                 * evaluated in the order written (#2850). */
+                int i = expr->arg_order && expr->arg_order_count == expr->child_count
+                        ? expr->arg_order[k] : k;
                 ASTNode* a = expr->children[i];
                 if (a && a->type == AST_CLOSURE && a->value &&
                     strcmp(a->value, "trailing") == 0) continue;
@@ -1623,19 +1627,24 @@ static void order_hoist_handoff(CodeGenerator* gen, TempSeq* s, ASTNode* op, int
     order_handover_add(gen, op, call, push_handover_exit_free(gen, own, name), kind);
 }
 
-/* How operand `k` of `call`, a field read, is handed to the callee
- * (string_field_handoff_kind), or 0. Only where operands and parameters
- * line up one to one: no named argument or injected builder context. A
- * trailing block is the last child and no operand, so the arguments
- * before it line up. */
-static int order_operand_hands_off(CodeGenerator* gen, ASTNode* call, int k) {
+/* How operand `op` of `call`, a field read, is handed to the callee
+ * (string_field_handoff_kind), or 0. Only where arguments and parameters
+ * line up one to one: no named argument left (select's) or injected
+ * builder context. A trailing block is the last child and no operand, so
+ * the arguments before it line up. The operand is found by its place among
+ * the arguments, which is its parameter's: operands are listed in the
+ * order they are evaluated, which named arguments can make another
+ * (#2850). */
+static int order_operand_hands_off(CodeGenerator* gen, ASTNode* call, ASTNode* op) {
     if (!call || call->type != AST_FUNCTION_CALL || !call->value ||
         is_builder_func_reg(gen, call->value)) return 0;
+    int k = -1;
     for (int i = 0; i < call->child_count; i++) {
         ASTNode* a = call->children[i];
         if (!a || a->type == AST_NAMED_ARG) return 0;
+        if (a == op) k = i;
     }
-    if (k >= call->child_count) return 0;
+    if (k < 0) return 0;
     ASTNode* a = call->children[k];
     if (a->type == AST_CLOSURE && a->value && strcmp(a->value, "trailing") == 0) return 0;
     int kind = string_field_handoff_kind(gen, call->value, k, a);
@@ -1738,13 +1747,13 @@ static int emit_in_operand_order(CodeGenerator* gen, ASTNode* expr) {
     }
     int typed = 1;
     for (int k = 0; k < n; k++)
-        if (hoist[k] && !order_operand_hands_off(gen, expr, k) && !order_c11_type(ops[k]))
+        if (hoist[k] && !order_operand_hands_off(gen, expr, ops[k]) && !order_c11_type(ops[k]))
             typed = 0;
     TempSeq s;
     seq_open_ordered(gen, &s, typed);
     for (int k = 0; k < n; k++) {
         if (!hoist[k]) continue;
-        int kind = order_operand_hands_off(gen, expr, k);
+        int kind = order_operand_hands_off(gen, expr, ops[k]);
         if (kind) order_hoist_handoff(gen, &s, ops[k], kind, expr);
         else order_hoist_operand(gen, &s, ops[k]);
     }
@@ -1865,7 +1874,13 @@ static int is_stdlib_string_aware_extern(const char* c_func_name) {
  * an extern passes one. A heap string (interpolated, concatenated, built by
  * a string op) is an AetherString whose header would otherwise reach the
  * callee in place of the characters; aether_string_data yields the payload
- * for either shape. Every other parameter takes the expression as written. */
+ * for either shape. Every other parameter takes the argument as a call
+ * through a closure does (emit_closure_argument, #3000): a bare value or
+ * `none` into an optional, a variant into a sum, a fixed-size array for a
+ * `T[N]`. Written as it was, `h(4)` for an `fn(int?) -> int` passed an int
+ * where C wants an ae_opt_int, and `h(none)` an initializer list. */
+static void emit_closure_argument(CodeGenerator* gen, ASTNode* arg, Type* pt);
+
 static void generate_fnptr_call_args(CodeGenerator* gen, Type* sig, ASTNode* call) {
     for (int i = 0; i < call->child_count; i++) {
         ASTNode* arg = call->children[i];
@@ -1878,7 +1893,7 @@ static void generate_fnptr_call_args(CodeGenerator* gen, Type* sig, ASTNode* cal
             generate_expression(gen, arg);
             fprintf(gen->output, ")");
         } else {
-            generate_expression(gen, arg);
+            emit_closure_argument(gen, arg, param);
         }
     }
 }
@@ -6154,10 +6169,21 @@ static const char* trailing_call_c_type(CodeGenerator* gen, ASTNode* call) {
     return r ? get_c_type(r) : NULL;
 }
 
+/* The type of the value of `match` operand `m` (ast_match_is_operand): its
+ * checked type, else the first value an arm gives. */
+static Type* match_operand_type(ASTNode* m) {
+    Type* t = m->node_type;
+    if (t && t->kind != TYPE_UNKNOWN && t->kind != TYPE_VOID) return t;
+    t = match_value_type(m);
+    return t && t->kind != TYPE_UNKNOWN && t->kind != TYPE_VOID ? t : NULL;
+}
+
 /* Is `e` one of the three constructs, in the form that runs statements, and
- * one emit_control_prelude can run ahead of its statement? */
+ * one emit_control_prelude can run ahead of its statement? A `match` used
+ * as an operand (#2993) is a fourth: it is a statement whatever its form. */
 int is_control_value(CodeGenerator* gen, ASTNode* e) {
     if (!e) return 0;
+    if (e->type == AST_MATCH_STATEMENT) return ast_match_is_operand(e) && match_operand_type(e);
     if (e->type == AST_OR_ELSE) {
         if (e->child_count < 2 || !e->children[1] || e->children[1]->type != AST_BLOCK) return 0;
         Type* tup = e->children[0] ? e->children[0]->node_type : NULL;
@@ -6192,6 +6218,80 @@ int is_control_value(CodeGenerator* gen, ASTNode* e) {
 }
 
 static int emit_trailing_call_expression(CodeGenerator* gen, ASTNode* call);
+
+/* #2993: `match` operand `m` (ast_match_is_operand) runs as the statement
+ * it is, ahead of the statement it is in (emit_control_prelude), each arm
+ * storing its value into a temporary that the expression reads where the
+ * `match` stands. A temporary of an owning type owns what it holds: each
+ * arm's value is taken into it and the value it held before dropped (R2,
+ * R3), so a pass of a loop that runs it again releases the last one, and
+ * its scope's exits release it; the expression reads it as it reads a
+ * local. A fixed-size array is an array of its own, which each arm fills
+ * (emit_array_fill), since C assigns no arrays. Where nothing can be
+ * declared ahead of the statement (no statement), a statement expression
+ * holds the same, its value read as the arm gave it. */
+static int g_match_operand_seq = 0;
+
+static void emit_match_operand(CodeGenerator* gen, ASTNode* m) {
+    const char* done = ctl_lookup(m);
+    if (done) {
+        fprintf(gen->output, "%s", done);
+        return;
+    }
+    Type* vt = match_operand_type(m);
+    int arr = vt && type_is_sized_array(vt) && vt->element_type;
+    const char* ct = vt ? get_c_type(arr ? vt->element_type : vt) : "int";
+    const char* dims = arr ? cg_internf("[%d]", vt->array_size) : "";
+    int as_stmts = g_ctl_emitting == m;
+    int owns = as_stmts && vt && own_type_owns(gen, vt);
+    const char* tmp = cg_internf("_mv%d", g_match_operand_seq++);
+    if (as_stmts) {
+        /* Zeroed: an owning store drops what the temporary held, nothing
+         * the first time. Its release is armed before the arms run, so an
+         * arm that leaves (`return`, `break`) releases what an earlier pass
+         * left in it. */
+        hoist_append_text(gen, cg_internf("%s %s%s = {0}; ", ct, tmp, dims));
+        if (owns && vt->kind == TYPE_STRING) {
+            print_indent(gen);
+            fprintf(gen->output, "aether_unwind_track_str_place((const void*)&%s, NULL);\n", tmp);
+            push_scoped_temp_free(gen, tmp);
+        } else if (owns) {
+            push_own_drop(gen, tmp, vt, m->line, m->column);
+        }
+    } else {
+        fprintf(gen->output, "({\n%s %s%s = {0};\n", ct, tmp, dims);
+    }
+    const char* saved_var = gen->match_result_var;
+    int saved_string = gen->match_result_string;
+    const char* saved_struct = gen->match_result_struct;
+    int saved_replace = gen->match_result_replace;
+    Type* saved_cell = gen->match_result_cell;
+    Type* saved_opt = gen->match_result_opt;
+    Type* saved_own = gen->match_result_own;
+    ASTNode* saved_bound = gen->match_result_bound;
+    gen->match_result_bound = NULL;
+    gen->match_result_var = tmp;
+    gen->match_result_string = 0;
+    gen->match_result_struct = NULL;
+    gen->match_result_replace = 0;
+    gen->match_result_cell = NULL;
+    gen->match_result_own = owns || arr ? vt : NULL;
+    gen->match_result_opt = !owns && vt && vt->kind == TYPE_OPTIONAL ? vt : NULL;
+    generate_statement(gen, m);
+    gen->match_result_var = saved_var;
+    gen->match_result_string = saved_string;
+    gen->match_result_struct = saved_struct;
+    gen->match_result_replace = saved_replace;
+    gen->match_result_cell = saved_cell;
+    gen->match_result_opt = saved_opt;
+    gen->match_result_own = saved_own;
+    gen->match_result_bound = saved_bound;
+    if (!as_stmts) {
+        fprintf(gen->output, "%s; })", tmp);
+        return;
+    }
+    ctl_bind(m, tmp);
+}
 
 /* Run `e` (is_control_value) as statements here, ahead of its statement,
  * and bind its value: `discarded`, the statement throws the value away, so
@@ -6234,11 +6334,12 @@ int emit_control_prelude(CodeGenerator* gen, ASTNode* e, int discarded) {
  * emitters).
  *
  * ctl_contains: does `e` hold such a construct? A closure literal's body,
- * a block's and a match's statements see to their own. */
+ * a block's and a match's statements see to their own: a `match` operand is
+ * one, and one that is not an operand is its statement's. */
 int ctl_contains(CodeGenerator* gen, ASTNode* e) {
-    if (!e || e->type == AST_CLOSURE || e->type == AST_BLOCK ||
-        e->type == AST_MATCH_STATEMENT) return 0;
+    if (!e || e->type == AST_CLOSURE || e->type == AST_BLOCK) return 0;
     if (is_control_value(gen, e)) return 1;
+    if (e->type == AST_MATCH_STATEMENT) return 0;
     for (int i = 0; i < e->child_count; i++)
         if (ctl_contains(gen, e->children[i])) return 1;
     return 0;
@@ -6275,24 +6376,14 @@ static int ctl_hoist(CodeGenerator* gen, ASTNode* op) {
     return ctl_emit_hoist(gen, op);
 }
 
-/* Operand `k` of `parent` (a call, or NULL) evaluated ahead: a field read
+/* Operand `op` of `parent` (a call, or NULL) evaluated ahead: a field read
  * the call frees or keeps is handed over as it is read, as the ordering
  * wrapper hands it over (order_hoist_handoff); read into a plain temporary,
  * the field kept its tracker and its struct freed it a second time. */
-static int ctl_hoist_operand(CodeGenerator* gen, ASTNode* parent, int k, ASTNode* op) {
+static int ctl_hoist_operand(CodeGenerator* gen, ASTNode* parent, ASTNode* op) {
     /* A field the call frees or keeps: handed over to its temporary as it
      * is read (order_hoist_handoff), a statement ahead of the statement. */
-    int kind = parent ? order_operand_hands_off(gen, parent, k) : 0;
-    if (!kind && parent && parent->type == AST_FUNCTION_CALL && parent->value && op &&
-        !order_bound(op) && field_read_can_hand_off(op)) {
-        /* Where the parameter it goes to is not known here (named
-         * arguments), an owned field read is not evaluated ahead: it stays
-         * in place at the call, and the construct after it a statement
-         * expression. (The call does not hand a named argument over
-         * either, #2849.) */
-        for (int i = 0; i < parent->child_count; i++)
-            if (parent->children[i] && parent->children[i]->type == AST_NAMED_ARG) return 0;
-    }
+    int kind = parent ? order_operand_hands_off(gen, parent, op) : 0;
     if (!kind || !op || order_bound(op) || ctl_lookup(op)) return ctl_hoist(gen, op);
     const char* name = cg_internf("_eo%d", g_order_counter++);
     const char* own = emit_string_field_handover_ahead(gen, op, kind, NULL, name);
@@ -6357,11 +6448,11 @@ static int ctl_linearize(CodeGenerator* gen, ASTNode* e, int discarded);
  * construct anywhere else is not (it runs on a condition the list does not
  * have, or in a part no list covers). */
 static int ctl_unreached(CodeGenerator* gen, ASTNode* c, ASTNode** ops, int n) {
-    if (!c || c->type == AST_CLOSURE || c->type == AST_BLOCK ||
-        c->type == AST_MATCH_STATEMENT) return 0;
+    if (!c || c->type == AST_CLOSURE || c->type == AST_BLOCK) return 0;
     for (int k = 0; k < n; k++)
         if (ops[k] == c) return 0;
     if (is_control_value(gen, c)) return 1;
+    if (c->type == AST_MATCH_STATEMENT) return 0;
     for (int i = 0; i < c->child_count; i++)
         if (ctl_unreached(gen, c->children[i], ops, n)) return 1;
     return 0;
@@ -6454,7 +6545,7 @@ static int ctl_linearize_ops(CodeGenerator* gen, ASTNode* parent, ASTNode** ops,
         if (ctl_contains(gen, ops[i])) last = i;
     for (int i = 0; i < last; i++) {
         if (ctl_contains(gen, ops[i]) && !ctl_linearize(gen, ops[i], 0)) return 0;
-        if (!ctl_hoist_operand(gen, parent, i, ops[i])) return 0;
+        if (!ctl_hoist_operand(gen, parent, ops[i])) return 0;
     }
     return last < 0 || ctl_linearize(gen, ops[last], 0);
 }
@@ -6587,6 +6678,184 @@ static void emit_closure_argument(CodeGenerator* gen, ASTNode* arg, Type* pt) {
         return;
     }
     generate_sized_array_argument(gen, arg, pt);
+}
+
+/* ---- #2847: a call through an erased `fn` ------------------------------
+ *
+ * A bare `fn` carries no parameter types, so `call(f, 5)` passes the 5 as
+ * the int it is, through a function type built from the arguments. A
+ * closure whose parameter is an `int?`, a `Shape` given a Circle, or a
+ * `float` given an int, then read its argument from the wrong place: an
+ * `int?` saw 0 for 5, a sum's optional crashed. The closure value does
+ * carry its parameter types, in the function its `.fn` points at: every
+ * closure literal of the program and every function used as a value has
+ * one known here. So the call compares `.fn` with each of them whose
+ * parameters take these arguments only coerced by the assignment rules,
+ * never narrowed (wrapped into an optional or a sum, a number widened), and
+ * calls a match through its own signature with the arguments coerced, as a
+ * call to the literal is (#2840), a widening spelled as a cast. Any other
+ * closure, C's among them, is called as before. */
+
+/* A number's place in the widening order, -1 for anything else: a value
+ * converts to a number of the same or a later place without narrowing (an
+ * int to a long or a float, an f32 to a float), never back. */
+static int erased_number_rank(TypeKind k) {
+    switch (k) {
+        case TYPE_BYTE: case TYPE_UINT8: return 0;
+        case TYPE_UINT16: return 1;
+        case TYPE_INT: case TYPE_UINT32: case TYPE_ENUM: return 2;
+        case TYPE_INT64: case TYPE_UINT64: return 3;
+        case TYPE_FLOAT32: return 4;
+        case TYPE_FLOAT: return 5;
+        case TYPE_LONGDOUBLE: return 6;
+        default: return -1;
+    }
+}
+
+/* How an argument of type `a` reaches a parameter of type `p` by the
+ * assignment rules, never narrowing: 0 as it is (the same C type, or a type
+ * not known), 1 only coerced (wrapped into an optional or a sum, a number
+ * widened), -1 not at all. A closure whose parameter takes an argument
+ * only by narrowing it (a float into an int) is no target of the call. */
+static int erased_arg_fit(Type* a, Type* p) {
+    if (!a || !p || a->kind == TYPE_UNKNOWN || p->kind == TYPE_UNKNOWN) return 0;
+    if (strcmp(cg_intern(get_c_type(a)), cg_intern(get_c_type(p))) == 0) return 0;
+    if (p->kind == TYPE_OPTIONAL && a->kind != TYPE_OPTIONAL && p->element_type)
+        return erased_arg_fit(a, p->element_type) < 0 ? -1 : 1;
+    if (p->kind == TYPE_SUM && a->kind == TYPE_STRUCT && a->struct_name) {
+        for (int i = 0; p->tuple_types && i < p->tuple_count; i++)
+            if (p->tuple_types[i] && p->tuple_types[i]->struct_name &&
+                strcmp(p->tuple_types[i]->struct_name, a->struct_name) == 0)
+                return 1;
+        return -1;
+    }
+    int ra = erased_number_rank(a->kind), rp = erased_number_rank(p->kind);
+    if (ra >= 0 && rp >= ra) return 1;
+    return -1;
+}
+
+/* An argument for the parameter of type `p` it reaches only coerced
+ * (erased_arg_fit 1): a number widened by an explicit cast, also as an
+ * optional's value, so no C compiler warns of the conversion; a wrap into
+ * an optional or a sum as a call to the literal makes it. */
+static void erased_emit_arg(CodeGenerator* gen, ASTNode* arg, Type* p) {
+    Type* a = arg ? arg->node_type : NULL;
+    if (a && erased_number_rank(a->kind) >= 0 && erased_number_rank(p->kind) >= 0) {
+        fprintf(gen->output, "(%s)(", get_c_type(p));
+        generate_expression(gen, arg);
+        fprintf(gen->output, ")");
+        return;
+    }
+    Type* in = p->kind == TYPE_OPTIONAL ? p->element_type : NULL;
+    if (a && in && erased_number_rank(a->kind) >= 0 && erased_number_rank(in->kind) >= 0 &&
+        strcmp(cg_intern(get_c_type(a)), cg_intern(get_c_type(in))) != 0) {
+        fprintf(gen->output, "(%s){ .has = 1, .val = (%s)(", get_c_type(p), get_c_type(in));
+        generate_expression(gen, arg);
+        fprintf(gen->output, ") }");
+        return;
+    }
+    emit_closure_argument(gen, arg, p);
+}
+
+/* The arguments of `call(f, args...)`, the trailing DSL block left out. */
+static int erased_call_args(ASTNode* call, ASTNode** out, int cap) {
+    int n = 0;
+    for (int i = 1; i < call->child_count; i++) {
+        ASTNode* a = call->children[i];
+        if (a && a->type == AST_CLOSURE && a->value && strcmp(a->value, "trailing") == 0) continue;
+        if (n >= cap) return -1;
+        out[n++] = a;
+    }
+    return n;
+}
+
+/* One target the erased call may reach: its C function `sym`, parameter
+ * types `ps` and C result `rc`. When the call's arguments reach it only
+ * coerced, writes `((f.fn == sym) ? <its call> : ` and returns 1. A call
+ * whose value is not used (`is_void`) takes any result, each branch cast
+ * to void; one whose value is used, only the C type it reads. */
+static int erased_dispatch_branch(CodeGenerator* gen, ASTNode* call, ASTNode* f,
+                                  const char* ret, int is_void, const char* sym, Type** ps,
+                                  int np, const char* rc) {
+    ASTNode* args[16];
+    int na = erased_call_args(call, args, 16);
+    if (na < 0 || na != np || !rc) return 0;
+    if (!is_void && strcmp(rc, ret) != 0) return 0;
+    int coerced = 0;
+    for (int i = 0; i < na; i++) {
+        /* A `T[N]` parameter is declared as its own array, which no cast
+         * below spells. */
+        if (is_sized_array_param(ps[i])) return 0;
+        int fit = erased_arg_fit(args[i] ? args[i]->node_type : NULL, ps[i]);
+        if (fit < 0) return 0;
+        if (fit > 0) coerced = 1;
+    }
+    if (!coerced) return 0;
+    fprintf(gen->output, "((");   /* the second closes the test; the first, after the plain call */
+    generate_expression(gen, f);
+    fprintf(gen->output, ".fn == (void(*)(void))%s) ? %s((%s(*)(void*", sym,
+            is_void ? "(void)" : "", rc);
+    for (int i = 0; i < np; i++) fprintf(gen->output, ", %s", get_c_type(ps[i]));
+    fprintf(gen->output, "))");
+    generate_expression(gen, f);
+    fprintf(gen->output, ".fn)(");
+    generate_expression(gen, f);
+    fprintf(gen->output, ".env");
+    for (int i = 0; i < na; i++) {
+        fprintf(gen->output, ", ");
+        if (erased_arg_fit(args[i] ? args[i]->node_type : NULL, ps[i]) > 0)
+            erased_emit_arg(gen, args[i], ps[i]);
+        else
+            emit_closure_argument(gen, args[i], ps[i]);
+    }
+    fprintf(gen->output, ") : ");
+    return 1;
+}
+
+static const char* resolve_closure_return_type(CodeGenerator* gen, int ci);
+
+/* The branches of the erased call `call` for every closure literal and
+ * function value of the program it may reach only with its arguments
+ * coerced, each opening a `?:`; returns how many, which the caller closes
+ * after the plain call. `f` is read once per branch, so only a name, a
+ * field of one, or the temporary a closure the call owns was taken into
+ * (`call(make(), ...)`) is dispatched on. */
+static int emit_erased_call_dispatch(CodeGenerator* gen, ASTNode* call, ASTNode* f,
+                                     const char* ret, int is_void) {
+    ASTNode* base = f;
+    while (base && base->type == AST_MEMBER_ACCESS && base->child_count > 0) base = base->children[0];
+    if (!arg_drain_lookup(f) && (!base || base->type != AST_IDENTIFIER)) return 0;
+    int n = 0;
+    for (int cj = 0; cj < gen->closure_count; cj++) {
+        ASTNode* lit = gen->closures[cj].closure_node;
+        if (!lit || lit->type != AST_CLOSURE) continue;
+        Type* ps[16];
+        int np = 0, over = 0;
+        for (int k = 0; k < lit->child_count; k++) {
+            ASTNode* p = lit->children[k];
+            if (!p || p->type != AST_CLOSURE_PARAM) continue;
+            if (np >= 16) { over = 1; break; }
+            ps[np++] = p->node_type;
+        }
+        if (over) continue;
+        const char* sym = cg_internf("_closure_fn_%d", gen->closures[cj].id);
+        n += erased_dispatch_branch(gen, call, f, ret, is_void, sym, ps, np,
+                                    cg_intern(resolve_closure_return_type(gen, cj)));
+    }
+    for (int a = 0; gen->program && a < gen->bare_fn_adapter_declared; a++) {
+        const char* name = gen->bare_fn_adapter_names[a];
+        ASTNode* fdef = find_function_definition_by_name(gen->program, name);
+        if (!fdef) continue;
+        int np = fn_param_count(fdef);
+        if (np > 16) continue;
+        Type* ps[16];
+        for (int k = 0; k < np; k++) ps[k] = fn_param_type_at(gen, fdef, k);
+        Type* rt = fn_result_type(gen, fdef);
+        n += erased_dispatch_branch(gen, call, f, ret, is_void,
+                                    cg_internf("_aether_bare_adapter_%s", name), ps, np,
+                                    cg_intern(rt ? get_c_type(rt) : "void"));
+    }
+    return n;
 }
 
 /* The builder call emit_builder_call is emitting, and the C name of the
@@ -6940,6 +7209,10 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
     }
 
     switch (expr->type) {
+        case AST_MATCH_STATEMENT:   /* #2993: a `match` used as an operand */
+            emit_match_operand(gen, expr);
+            break;
+
         case AST_LITERAL:
             if (expr->node_type && expr->node_type->kind == TYPE_STRING) {
                 emit_string_literal_node(gen, expr);
@@ -7450,12 +7723,28 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
              * a node, and `?:` binds looser than any operator around it:
              * `y + (if c { 10 } else { 20 })` was `(y + c) ? 10 : 20`. */
             if (expr->child_count >= 3) {
+                /* #2983: a branch whose type the expression's takes (a
+                 * variant beside its sum, a T beside a T?) is coerced into
+                 * it, as a binding of the branch would be: `?:` takes two
+                 * operands of one type. */
+                Type* vt = expr->node_type;
+                if (vt && vt->kind == TYPE_OPTIONAL && needs_optional_coerce(expr, vt)) {
+                    emit_optional_coerced(gen, expr, vt);
+                    break;
+                }
+                int sum = vt && vt->kind == TYPE_SUM;
                 fprintf(gen->output, "((");
                 generate_expression(gen, expr->children[0]);
                 fprintf(gen->output, ") ? (");
-                generate_expression(gen, expr->children[1]);
+                if (sum && needs_sum_coerce(expr->children[1], vt))
+                    emit_sum_coerced(gen, expr->children[1], vt);
+                else
+                    generate_expression(gen, expr->children[1]);
                 fprintf(gen->output, ") : (");
-                generate_expression(gen, expr->children[2]);
+                if (sum && needs_sum_coerce(expr->children[2], vt))
+                    emit_sum_coerced(gen, expr->children[2], vt);
+                else
+                    generate_expression(gen, expr->children[2]);
                 fprintf(gen->output, "))");
             }
             break;
@@ -8227,6 +8516,60 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                         fprintf(gen->output, ")");
                         break;
                     }
+                    if ((l_opt && !r_none) || (r_opt && !l_none)) {
+                        /* #2829: an optional and a bare value compare as the
+                         * value wrapped into the optional would (`lo == 3` as
+                         * `lo == some(3)`): equal when present with an equal
+                         * value, a string? by its contents. Both operands are
+                         * evaluated, in source order, and a fresh string
+                         * operand (or an owned string? call's) is freed once
+                         * compared, as a string comparison frees it. */
+                        ASTNode* opt = l_opt ? L : R;
+                        ASTNode* bare = l_opt ? R : L;
+                        Type* elem = opt->node_type->element_type;
+                        int str_val = elem && elem->kind == TYPE_STRING;
+                        Type* bt = bare->node_type && bare->node_type->kind != TYPE_UNKNOWN
+                                   ? bare->node_type : elem;
+                        int drain_bare = str_val && is_fresh_heap_string_temp(gen, bare);
+                        int drain_opt = str_val && is_owned_opt_string_call(gen, opt);
+                        const char* o = NULL;
+                        const char* v = NULL;
+                        TempSeq s;
+                        fprintf(gen->output, "(");
+                        seq_open(gen, &s);
+                        for (int side = 0; side < 2; side++) {
+                            ASTNode* e = side == 0 ? L : R;
+                            if (e == opt) {
+                                o = seq_let(gen, &s, get_c_type(opt->node_type), "_ae_ol");
+                                generate_expression(gen, opt);
+                            } else {
+                                v = seq_let(gen, &s, str_val ? "const char*" : get_c_type(bt), "_ae_ov");
+                                generate_expression(gen, bare);
+                            }
+                            seq_next(gen, &s);
+                        }
+                        const char* res = seq_let(gen, &s, "int", "_ae_oe");
+                        if (str_val)
+                            fprintf(gen->output, "%s(%s.has && string_equals(%s.val, %s))",
+                                    is_eq ? "" : "!", o, o, v);
+                        else
+                            fprintf(gen->output, "%s(%s.has && %s.val == %s)",
+                                    is_eq ? "" : "!", o, o, v);
+                        if (drain_opt) {
+                            seq_next(gen, &s);
+                            fprintf(gen->output, "%s.has ? aether_heap_str_free((void*)%s.val) : (void)0",
+                                    o, o);
+                        }
+                        if (drain_bare) {
+                            seq_next(gen, &s);
+                            fprintf(gen->output, "aether_heap_str_free((void*)%s)", v);
+                        }
+                        seq_next(gen, &s);
+                        fprintf(gen->output, "%s", res);
+                        seq_close(gen, &s);
+                        fprintf(gen->output, ")");
+                        break;
+                    }
                 }
                 int skip_parens = gen->in_condition;
                 gen->in_condition = 0;
@@ -8477,6 +8820,10 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                          * value as an optional binding does, a bare value
                          * wrapped and `none` the empty one. */
                         emit_optional_coerced(gen, expr->children[1], ltype);
+                    } else if (is_assignment && ltype && ltype->kind == TYPE_SUM &&
+                               needs_sum_coerce(expr->children[1], ltype)) {
+                        /* #2985: a store into a sum place wraps a variant. */
+                        emit_sum_coerced(gen, expr->children[1], ltype);
                     } else {
                         if (wide_cast && AE_IS_NARROW_INT(rtype)) fprintf(gen->output, "%s", wide_cast);
                         generate_expression(gen, expr->children[1]);
@@ -9608,6 +9955,14 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                             ad.idx[ad.count++] = 0;
                         }
                         arg_drain_open(gen, expr, &ad);
+                        /* #2847: with no parameter types to coerce to, the
+                         * closures this call reaches only coerced are
+                         * called through their own. */
+                        int erased = !closure_sig || closure_sig->param_count == 0;
+                        int as_void = !ad.have_value || ad_call_discarded;
+                        int dispatched = erased ? emit_erased_call_dispatch(gen, expr, closure_arg,
+                                                                            ret, as_void) : 0;
+                        if (dispatched && as_void) fprintf(gen->output, "(void)");
                         fprintf(gen->output, "((%s(*)(void*", ret);
                         int sig_pi = 0;
                         for (int i = 1; i < expr->child_count; i++) {
@@ -9654,6 +10009,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                             else generate_sized_array_argument(gen, arg, arg ? arg->node_type : NULL);
                         }
                         fprintf(gen->output, ")");
+                        for (int d = 0; d < dispatched; d++) fprintf(gen->output, ")");
                         arg_drain_close(gen, expr, &ad);
                     }
                 }
@@ -10740,6 +11096,10 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                     emit_composite_take(gen, fv, fdecl);   /* #2921 */
                 } else if (fdecl && fdecl->kind == TYPE_OPTIONAL) {
                     emit_optional_coerced(gen, fv, fdecl);
+                } else if (fdecl && fdecl->kind == TYPE_SUM && needs_sum_coerce(fv, fdecl)) {
+                    /* #2985: a sum field takes a variant wrapped into the
+                     * sum, as a binding of the sum does. */
+                    emit_sum_coerced(gen, fv, fdecl);
                 } else if (fdecl && fdecl->kind == TYPE_STRING && fv && fv->node_type &&
                            fv->node_type->kind == TYPE_STRING) {
                     emit_string_take_owned(gen, fv, 0);

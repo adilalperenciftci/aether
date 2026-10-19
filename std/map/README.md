@@ -3,7 +3,7 @@
 A string-keyed map of pointers.
 
 Like `std.list`, it stores `ptr` and does not own the values. Rebinding a key
-replaces its value without growing the map, and does not free the old one —
+replaces its value without growing the map, and does not free the old one:
 that is the caller's, because the map never claimed it.
 
 A key is all of its bytes: two keys that differ only after an embedded NUL
@@ -18,16 +18,16 @@ import std.map
 import std.collections
 
 main() {
-    m = map.map_new()
+    m = map.new()
     value = collections.list_new()
 
     err = map.put(m, "key", value)
-    println("put err='${err}' size=${map.map_size(m)}")
+    println("put err='${err}' size=${map.size(m)}")
 
-    println("bound:   ${map.map_has(m, "key")}")
-    println("unbound: ${map.map_has(m, "absent")}")
+    println("bound:   ${map.has(m, "key")}")
+    println("unbound: ${map.has(m, "absent")}")
 
-    map.map_free(m)
+    map.free(m)
     collections.list_free(value)
 }
 ```

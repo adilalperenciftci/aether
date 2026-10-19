@@ -50,7 +50,7 @@ exports(
 //   aeocha.expect_exit(exit, 0, "ran cleanly")
 expect_exit(exit_code: int, want: int, msg: string) {
     if exit_code != want {
-        spec.fail("${msg} — expected exit ${want}, got ${exit_code}")
+        spec.fail("${msg}: expected exit ${want}, got ${exit_code}")
     }
 }
 
@@ -61,7 +61,7 @@ expect_exit(exit_code: int, want: int, msg: string) {
 // child actually started" before asserting on its output.
 expect_no_spawn_error(err: string, msg: string) {
     if string.equals(err, "") == 0 {
-        spec.fail("${msg} — spawn error: '${err}'")
+        spec.fail("${msg}: spawn error: '${err}'")
     }
 }
 
@@ -74,7 +74,7 @@ expect_no_spawn_error(err: string, msg: string) {
 // rationale for the other three expect_stdout_* matchers below.
 expect_stdout_contains(out: string, needle: string, msg: string) {
     if string.contains(out, needle) == 0 {
-        spec.fail("${msg} — stdout does not contain '${needle}'")
+        spec.fail("${msg}: stdout does not contain '${needle}'")
     }
 }
 
@@ -95,7 +95,7 @@ expect_stdout_contains(out: string, needle: string, msg: string) {
 // expect_stdout_contains; consumes os.run_full's 2nd slot.
 expect_stderr_contains(err: string, needle: string, msg: string) {
     if string.contains(err, needle) == 0 {
-        spec.fail("${msg} — stderr does not contain '${needle}'")
+        spec.fail("${msg}: stderr does not contain '${needle}'")
     }
 }
 
@@ -104,7 +104,7 @@ expect_stderr_contains(err: string, needle: string, msg: string) {
 // os.run_full's 2nd slot.
 expect_stderr_empty(err: string, msg: string) {
     if string.equals(err, "") == 0 {
-        spec.fail("${msg} — stderr not empty: '${err}'")
+        spec.fail("${msg}: stderr not empty: '${err}'")
     }
 }
 
@@ -125,7 +125,7 @@ expect_stdout_line_count(out: string, want: int, msg: string) {
     }
     string.array_free(arr)
     if n != want {
-        spec.fail("${msg} — expected ${want} lines, got ${n}")
+        spec.fail("${msg}: expected ${want} lines, got ${n}")
     }
 }
 
@@ -208,10 +208,10 @@ expect_stdout_line_field(out: string, prefix: string,
     }
     string.array_free(lines)
     if found == 0 {
-        spec.fail("${msg} — no line starts with '${prefix}' or field ${n} missing")
+        spec.fail("${msg}: no line starts with '${prefix}' or field ${n} missing")
     } else {
         if string.equals(actual, want) == 0 {
-            spec.fail("${msg} — expected '${want}', got '${actual}'")
+            spec.fail("${msg}: expected '${want}', got '${actual}'")
         }
     }
 }
@@ -281,10 +281,10 @@ expect_stdout_line_after(out: string, prefix: string,
     }
     string.array_free(lines)
     if found == 0 {
-        spec.fail("${msg} — no line starts with '${prefix}'")
+        spec.fail("${msg}: no line starts with '${prefix}'")
     } else {
         if string.equals(actual, want) == 0 {
-            spec.fail("${msg} — expected '${want}', got '${actual}'")
+            spec.fail("${msg}: expected '${want}', got '${actual}'")
         }
     }
 }
@@ -311,7 +311,7 @@ expect_stdout_matches(out: string, pattern: string, msg: string) {
     }
     string.array_free(lines)
     if found == 0 {
-        spec.fail("${msg} — no stdout line matches glob '${pattern}'")
+        spec.fail("${msg}: no stdout line matches glob '${pattern}'")
     }
 }
 
@@ -355,10 +355,10 @@ expect_stdout_matches_regex(out: string, pattern: string, msg: string) {
     }
     string.array_free(lines)
     if string.equals(rerr, "") == 0 {
-        spec.fail("${msg} — regex '${pattern}' error: ${rerr}")
+        spec.fail("${msg}: regex '${pattern}' error: ${rerr}")
     } else {
         if found == 0 {
-            spec.fail("${msg} — no stdout line matches regex '${pattern}'")
+            spec.fail("${msg}: no stdout line matches regex '${pattern}'")
         }
     }
 }

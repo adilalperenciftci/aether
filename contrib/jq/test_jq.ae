@@ -27,8 +27,8 @@ outcome(src: string, input_text: string) -> string {
     status, code, err = jq.run(prog, input, out)
     text = jq.render(out, 0, 0, 0)
     msg = jq.error_message(err)
-    if err != null { json.json_free(err) }
-    json.json_free(input)
+    if err != null { json.free(err) }
+    json.free(input)
     jq.free(prog)
     return "${status} ${code} ${msg}|${text}"
 }
@@ -41,26 +41,26 @@ left_after(src: string, texts: string) -> string {
     all_values = list.new()
     k = 0
     while k < list.size(queue) {
-        list.list_add_raw(all_values, list.get_raw(queue, k))
+        list.add_raw(all_values, list.get_raw(queue, k))
         k = k + 1
     }
-    input = json.json_create_null()
+    input = json.create_null()
     out = list.new()
     _s, _c, err = jq.run_with_inputs(prog, input, queue, out)
-    if err != null { json.json_free(err) }
+    if err != null { json.free(err) }
     text = jq.render(out, 0, 0, 0)
-    left = json.json_create_array()
+    left = json.create_array()
     k = 0
     while k < list.size(queue) {
-        json.json_array_add_raw(left, json.json_create_int(json.json_get_int(list.get_raw(queue, k)) as long))
+        json.array_add_raw(left, json.create_int(json.get_int(list.get_raw(queue, k)) as long))
         list.set(queue, k, null)
         k = k + 1
     }
     list.free(queue)
     result = "${string.substring_n(text, string.length(text), 0, string.length(text) - 1)}|${jq.to_json(left)}"
-    json.json_free(left)
+    json.free(left)
     jq.free_values(all_values)
-    json.json_free(input)
+    json.free(input)
     jq.free(prog)
     return result
 }
@@ -69,25 +69,25 @@ left_after(src: string, texts: string) -> string {
 stream_of(text: string) -> string {
     vals, err = jq.parse_stream(text)
     if vals == null { return "ERR: ${err}" }
-    arr = json.json_create_array()
+    arr = json.create_array()
     k = 0
     while k < list.size(vals) {
-        json.json_array_add_raw(arr, list.get_raw(vals, k))
+        json.array_add_raw(arr, list.get_raw(vals, k))
         list.set(vals, k, null)
         k = k + 1
     }
     list.free(vals)
     out = jq.to_json(arr)
-    json.json_free(arr)
+    json.free(arr)
     return out
 }
 
 // Bind $x through a name string that is released before the program runs,
 // as a command line's argument buffer would be.
 bind_from_temporary_name(prog: ptr) {
-    name = json.json_create_string("x")
-    jq.set_var(prog, json.json_get_string_raw(name), json.json_create_string("hi"))
-    json.json_free(name)
+    name = json.create_string("x")
+    jq.set_var(prog, json.get_string_raw(name), json.create_string("hi"))
+    json.free(name)
 }
 
 // jq.query's two results as "OUTPUTS|ERROR".
@@ -132,13 +132,13 @@ main() {
             prog, _ = jq.compile("[$x, $y.k]")
             bind_from_temporary_name(prog)
             jq.set_var(prog, "y", parsed("{\"k\":1}"))
-            input = json.json_create_null()
+            input = json.create_null()
             text, err = jq.run_json(prog, input)
             spec.assert_str_eq(text, "[\"hi\",1]\n", "bound")
             spec.assert_str_eq(err, "", "no error")
             text2, _ = jq.run_json(prog, input)
             spec.assert_str_eq(text2, "[\"hi\",1]\n", "still bound on a second run")
-            json.json_free(input)
+            json.free(input)
             jq.free(prog)
         }
         spec.it("input and inputs consume from the front of the given list") callback {
@@ -147,8 +147,8 @@ main() {
             b = parsed("2")
             c = parsed("3")
             rest = list.new()
-            list.list_add_raw(rest, b)
-            list.list_add_raw(rest, c)
+            list.add_raw(rest, b)
+            list.add_raw(rest, c)
             out = list.new()
             status, _code, err = jq.run_with_inputs(prog, a, rest, out)
             spec.assert_true(status == jq.RESULT_OK, "ok")
@@ -156,9 +156,9 @@ main() {
             spec.assert_str_eq(jq.render(out, 0, 0, 0), "[1,2,[3]]\n", "consumed in order")
             spec.assert_true(list.size(rest) == 0, "nothing left")
             list.free(rest)
-            json.json_free(a)
-            json.json_free(b)
-            json.json_free(c)
+            json.free(a)
+            json.free(b)
+            json.free(c)
             jq.free(prog)
         }
         spec.it("leaves unread inputs in the list") callback {
@@ -182,12 +182,12 @@ main() {
             raw, _ = jq.run_json_opts(raw_prog, input, 0, 0, 1)
             spec.assert_str_eq(raw, "x\n[1]\n", "raw strings only")
             jq.free(raw_prog)
-            json.json_free(input)
+            json.free(input)
         }
         spec.it("prints jq's escapes") callback {
             v = parsed("\"\\u0001\\u007f\\n\\\"\\\\é\"")
             spec.assert_str_eq(jq.to_json(v), "\"\\u0001\\u007f\\n\\\"\\\\é\"", "escapes")
-            json.json_free(v)
+            json.free(v)
         }
     }
 

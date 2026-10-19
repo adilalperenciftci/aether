@@ -1,0 +1,190 @@
+// #2993: a match's value reaches every place a value is stored in, on
+// every C path. A match bound to a name was stored arm by arm only for a
+// plain local; bound to an actor's state it was the match as an
+// expression, a GNU statement expression the strict C path refuses, and
+// bound to a module variable it declared a local of that name that hid the
+// variable, which kept its value. Each arm now stores its value as `x =
+// <value>` stores it, whatever `x` is, and a field or an element takes the
+// match as any operand. Each place is read where it lives: the module
+// variable from another function, the state from a message.
+
+import std.mem
+
+extern exit(code: int)
+
+struct Holder {
+    name: string
+    n: int
+}
+
+struct Circle {
+    r: int
+}
+
+struct Square {
+    side: int
+}
+
+type Shape = Circle | Square
+
+message Set {
+    k: int
+}
+
+message GetN {}
+
+message GetName {}
+
+message N {
+    v: int
+}
+
+message Name {
+    v: string
+}
+
+actor Keeper {
+    state n = 0
+    state name = ""
+    receive {
+        Set(k) -> {
+            n = match k {
+                0 -> 10
+                _ -> 20
+            }
+            name = match k {
+                0 -> label(k)
+                _ -> "many"
+            }
+        }
+        GetN() -> {
+            reply N { v: n }
+        }
+        GetName() -> {
+            reply Name { v: name }
+        }
+    }
+}
+
+var g = 0
+var gs = ""
+var bad = 0
+
+check(what: string, got: string, want: string) {
+    if got != want {
+        println("FAIL ${what}: got ${got}, want ${want}")
+        bad = 1
+    }
+}
+
+label(k: int) -> string {
+    return "k${k}"
+}
+
+module_reads() -> string {
+    return "${g} ${gs}"
+}
+
+area(s: Shape) -> int {
+    return match s {
+        Circle -> 3 * s.r * s.r
+        Square -> s.side * s.side
+    }
+}
+
+work(k: int) {
+    // A local: a string, a string-owning struct, an optional, a sum.
+    s = match k % 2 {
+        0 -> label(k)
+        _ -> "odd"
+    }
+    h = match k % 2 {
+        0 -> Holder { name: label(k), n: k }
+        _ -> Holder { name: "odd", n: 0 }
+    }
+    let o: string? = match k % 2 {
+        0 -> label(k)
+        _ -> none
+    }
+    let sh: Shape = match k % 2 {
+        0 -> Circle { r: 2 }
+        _ -> Square { side: 3 }
+    }
+    seen = match o {
+        some(v) -> v
+        none -> "none"
+    }
+    check("local", "${s} ${h.name} ${seen} ${area(sh)}",
+        match k % 2 { 0 -> "k${k} k${k} k${k} 12" _ -> "odd odd none 9" })
+
+    // A module variable, read from another function.
+    g = match k % 2 {
+        0 -> k
+        _ -> -1
+    }
+    gs = match k % 2 {
+        0 -> label(k)
+        _ -> "odd"
+    }
+    check("module var", module_reads(), match k % 2 { 0 -> "${k} k${k}" _ -> "-1 odd" })
+
+    // A field and an element.
+    h.name = match k % 2 {
+        0 -> label(k + 1)
+        _ -> "field"
+    }
+    names = ["a", "b"]
+    names[1] = match k % 2 {
+        0 -> label(k + 2)
+        _ -> "elem"
+    }
+    check("field, element", "${h.name} ${names[1]}",
+        match k % 2 { 0 -> "k${k + 1} k${k + 2}" _ -> "field elem" })
+
+    // A closure's cell.
+    c = 0
+    bump = || {
+        c = c + 1
+    }
+    bump()
+    c = match k % 2 {
+        0 -> c + 10
+        _ -> c + 20
+    }
+    bump()
+    check("cell", "${c}", match k % 2 { 0 -> "12" _ -> "22" })
+}
+
+main() {
+    keeper = spawn(Keeper())
+    keeper ! Set { k: 0 }
+    int n0 = keeper ? GetN {}
+    string s0 = keeper ? GetName {}
+    keeper ! Set { k: 1 }
+    int n1 = keeper ? GetN {}
+    string s1 = keeper ? GetName {}
+    check("actor state", "${n0} ${s0} ${n1} ${s1}", "10 k0 20 many")
+
+    k = 0
+    while k < 8 {
+        work(k)
+        k = k + 1
+    }
+    if mem.heap_in_use_exact() {
+        grown = mem.steady_growth(|| {
+                j = 0
+                while j < 100 {
+                    work(j)
+                    j = j + 1
+                }
+            }, 5)
+        if grown != 0 {
+            println("FAIL leak: ${grown} bytes a round")
+            bad = 1
+        }
+    }
+    if bad != 0 {
+        exit(1)
+    }
+    println("ok")
+}

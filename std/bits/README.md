@@ -4,7 +4,7 @@ Bit manipulation: rotates, logical shifts, population count and leading-zero
 count, in 32- and 64-bit widths.
 
 The reason this module exists is `lsr`. Aether's `>>` is an **arithmetic**
-shift — it propagates the sign bit — which is right for arithmetic and wrong
+shift (it propagates the sign bit), which is right for arithmetic and wrong
 for the bit-twiddling in a hash, a checksum or a cipher. `lsr32`/`lsr64` are
 the logical shift that fills with zeros.
 

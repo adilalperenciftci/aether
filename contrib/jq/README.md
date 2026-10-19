@@ -23,7 +23,7 @@ main() {
     text, rerr = jq.run_json(prog, doc)          // "{\"total\":5}\n"
     if rerr != "" { println(rerr) }
     print(text)
-    json.json_free(doc)
+    json.free(doc)
     jq.free(prog)
 }
 ```

@@ -54,7 +54,7 @@ main() {
     schema.values_free(values)
     schema.errors_free(errors)
     map_free(input)
-    schema.schema_free(person)
+    schema.free(person)
 }
 ```
 
@@ -119,10 +119,10 @@ main() {
         println("${schema.error_field(errors, i)}: ${schema.error_message(errors, i)}")
         i = i + 1
     }
-    json.json_free(values)
+    json.free(values)
     schema.errors_free(errors)
-    json.json_free(root)
-    schema.schema_free(order)
+    json.free(root)
+    schema.free(order)
 }
 ```
 
@@ -131,7 +131,7 @@ main() {
 - **Values are a `std.json` object** of the fields that passed, typed: an `INT`
   is a JSON integer, a `BOOL` a boolean, an `OBJECT` an object, an array an
   array. Keys the schema does not declare are left out. Free it with
-  `json.json_free`.
+  `json.free`.
 - **A JSON `null` is an absent field**, so an `optional()` field may be null.
 - **Lax mode** also takes a number or boolean for a `STR` field as its text.
   Strict mode refuses that, and refuses a string for an `INT`, `FLOAT` or
@@ -147,8 +147,8 @@ Rules are composable builder calls inside a `field(…) { … }` block:
 
 | Builder                     | Applies to        | Meaning                                             |
 |-----------------------------|-------------------|-----------------------------------------------------|
-| `min(n)`                    | INT/FLOAT / STR   | value `>= n` — or string length `>= n`              |
-| `max(n)`                    | INT/FLOAT / STR   | value `<= n` — or string length `<= n`              |
+| `min(n)`                    | INT/FLOAT / STR   | value `>= n`, or string length `>= n`              |
+| `max(n)`                    | INT/FLOAT / STR   | value `<= n`, or string length `<= n`              |
 | `len(lo, hi)`               | STR               | string length within `[lo, hi]`                     |
 | `present()`                 | any               | value must be non-empty                             |
 | `one_of("a,b,c")`           | any               | value must equal one of the comma-separated options |
@@ -167,7 +167,7 @@ it holding a dot that neither starts nor ends it. The local part may hold dots
 (`first.last@example.com`).
 
 **Transforms** rewrite the canonical value in declaration order (before the
-checks that follow them) and never fail — the "parse, don't validate" payoff of
+checks that follow them) and never fail: the "parse, don't validate" payoff of
 getting a normalized value back:
 
 | Transform     | Effect                          |
@@ -188,7 +188,7 @@ schema.field("plan", schema.STR) {
 }
 ```
 
-`refine` takes a closure — use it for any check the built-ins don't cover
+`refine` takes a closure: use it for any check the built-ins don't cover
 (the module intentionally carries no regex dependency; `pattern()` handles the
 common contains/prefix/suffix cases without one):
 
@@ -203,7 +203,7 @@ schema.field("even", schema.INT) {
 ```
 
 > Note: pass `refine` a **closure literal** (`|v: string| { … }`), not a bare
-> named function — bare-fn-into-an-imported-`fn`-param currently trips a
+> named function: bare-fn-into-an-imported-`fn`-param currently trips a
 > compiler codegen gap.
 
 Rules for a field are evaluated in order and **short-circuit on the first
@@ -237,7 +237,7 @@ s = schema.record() {
     schema.field("role", schema.STR) { schema.one_of("admin,user"); schema.optional() }
     schema.field("plan", schema.STR) { schema.default_to("free") }
 }
-js = schema.to_json_schema(s)   // owned string — free with string_free
+js = schema.to_json_schema(s)   // a string `js` owns and releases
 ```
 
 produces:
@@ -264,30 +264,30 @@ JSON Schema; it does not consume external JSON Schema documents.
 - `schema.OBJECT`, `schema.array(T) -> int`
 
 ### Builders
-- `record() -> ptr` — start a schema; the trailing block declares its fields
-- `field(name, type) -> ptr` — declare a field; the trailing block adds its rules
+- `record() -> ptr`: start a schema; the trailing block declares its fields
+- `field(name, type) -> ptr`: declare a field; the trailing block adds its rules
   (and, for an `OBJECT` or `array(OBJECT)`, the nested record's fields)
-- `items() -> ptr` — in an array field's block, the rules each item is checked against
+- `items() -> ptr`: in an array field's block, the rules each item is checked against
 - checks: `min(n)`, `max(n)`, `len(lo, hi)`, `present()`, `positive()`,
   `nonneg()`, `one_of(set)`, `email()`, `pattern("kind:needle")`, `refine(fn)`
 - transforms: `trim()`, `lowercase()`, `uppercase()`
 - field modifiers: `optional()`, `default_to("v")`
 
 ### Parse
-- `parse(schema, input) -> (values, errors)` — `input` is a `*Map` of
+- `parse(schema, input) -> (values, errors)`: `input` is a `*Map` of
   `string → string`; returns a coerced value-map and an error list (both always
   non-null, both owned by the caller)
-- `parse_json(schema, root) -> (values, errors)` — `root` is a `std.json`
-  object; returns a typed `std.json` object (free with `json.json_free`) and an
+- `parse_json(schema, root) -> (values, errors)`: `root` is a `std.json`
+  object; returns a typed `std.json` object (free with `json.free`) and an
   error list whose fields are paths
 
 ### Projection
-- `to_json_schema(schema) -> string` — emit a draft-07 JSON Schema (owned
+- `to_json_schema(schema) -> string`: emit a draft-07 JSON Schema (owned
   string; free with `string_free`). An `OBJECT` field is a nested `object`
   schema; an array is `array` with its `items` schema and `minItems`/`maxItems`.
 
 ### Result helpers
-- `ok(errors) -> int` — `1` if there are no errors
+- `ok(errors) -> int`: `1` if there are no errors
 - `error_count(errors) -> int`
 - `error_field(errors, i) -> string`
 - `error_code(errors, i) -> string`
@@ -299,9 +299,9 @@ than crashing; `error_code` is never `""` for a real error, so it tells the two
 apart (`error_field` is `""` for an error on the JSON root itself).
 
 ### Cleanup
-- `schema_free(schema)` — free a schema built with `record()`
-- `values_free(values)` — free a value-map returned by `parse`
-- `errors_free(errors)` — free an error list returned by `parse`
+- `schema_free(schema)`: free a schema built with `record()`
+- `values_free(values)`: free a value-map returned by `parse`
+- `errors_free(errors)`: free an error list returned by `parse`
 
 Every `parse` result must be released with `values_free` **and** `errors_free`.
 `std.schema` is manual-memory and leak-clean under valgrind; the regression
@@ -311,14 +311,14 @@ suite (`std/schema/test_schema.ae`) runs zero-leak.
 
 `std.schema` borrows its shape from three excellent MIT-licensed libraries:
 
-- **[Zod](https://github.com/colinhacks/zod)** (© 2025 Colin McDonnell) — the
+- **[Zod](https://github.com/colinhacks/zod)** (© 2025 Colin McDonnell), the
   `parse → (value | errors)` contract and the issue-code vocabulary.
 - **[Pydantic](https://github.com/pydantic/pydantic)** (© Pydantic Services
-  Inc.) — lax-vs-strict coercion.
-- **[io-ts](https://github.com/gcanti/io-ts)** (© 2017 Giulio Canti) — decode
+  Inc.), lax-vs-strict coercion.
+- **[io-ts](https://github.com/gcanti/io-ts)** (© 2017 Giulio Canti), decode
   as `input → success | failure`, with errors accumulated rather than thrown.
 - **[Ash Framework](https://github.com/ash-project/ash)** (© 2019 ash
-  contributors) — the declarative resource/attribute/validation block shape
+  contributors), the declarative resource/attribute/validation block shape
   (`record { field { rules } }`). We keep validation HTTP-agnostic in `std`
   rather than adopting Ash's framework-owns-the-resource model; the web
   projection lives separately in `tinyweb.schema_api`.

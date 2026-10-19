@@ -1,0 +1,44 @@
+// #2978: a module function whose C name `<ns>_<name>` equals one of its
+// module's externs was dropped by the merge, and `ns.name(...)` called the
+// extern instead. Where the wrapper does more than forward, callers got
+// something else than documented:
+//   - `http.server_set_host(s, host)` returns "" and the extern nothing,
+//     so `err = http.server_set_host(...)` failed in C (void variable);
+//   - `http.ws_send_binary(ws, data)` takes a byte[] and the extern three
+//     parameters, so the documented call was "expects 3 argument(s)";
+//   - `xml.escape(s)` copies the extern's result;
+//   - `string.join(seq, sep)` calls string_seq_join, and the extern
+//     string_join is a separate implementation.
+// Such a wrapper is now merged under a C name of its own and `ns.name`
+// reaches it, while its body's call of the extern still reaches the extern.
+// Before the fix this program did not compile.
+
+import std.http
+import std.xml
+import std.string
+
+check(ok: bool, what: string) {
+    if !ok {
+        println("FAIL: ${what}")
+        exit(1)
+    }
+}
+
+main() {
+    s = http.server_create(0)
+    err = http.server_set_host(s, "127.0.0.1")
+    check(string.equals(err, ""), "server_set_host returns its error string")
+    http.server_free(s)
+
+    data = [1 as byte, 2 as byte, 3 as byte]
+    check(http.ws_send_binary(null, data) == -1, "ws_send_binary takes a byte[], -1 on no socket")
+
+    e = xml.escape("a<b & \"c\"")
+    check(string.equals(e, "a&lt;b &amp; &quot;c&quot;"), "xml.escape")
+
+    seq = string.seq_cons("a", string.seq_cons("b", string.seq_empty()))
+    j = string.join(seq, "-")
+    check(string.equals(j, "a-b"), "string.join over a *StringSeq")
+    string.seq_free(seq)
+    println("module wrapper beside extern ok")
+}

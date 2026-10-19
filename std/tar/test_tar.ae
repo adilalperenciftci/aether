@@ -532,7 +532,7 @@ make_dir_link(target_abs: string, link: string, link_win: string) -> int {
         return 1
     }
     if os.platform() == "windows" {
-        rc = os.os_system("mklink /J \"${link_win}\" \"${target_abs}\" >NUL")
+        rc = os.system("mklink /J \"${link_win}\" \"${target_abs}\" >NUL")
         if rc == 0 && fs.exists(link) == 1 {
             return 2
         }
@@ -938,7 +938,7 @@ main() {
         string_release(p_err)
 
         if can_create_symlinks == 1 {
-            assert(fs.fs_is_symlink("${extract_dest}/dir/sym.txt") == 1, "symlink missing")
+            assert(fs.is_symlink("${extract_dest}/dir/sym.txt") == 1, "symlink missing")
         }
 
         println("PASS: safe extraction and metadata preservation")

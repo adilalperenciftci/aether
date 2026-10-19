@@ -5,7 +5,7 @@ A content-addressed store: files filed under the SHA-256 of their bytes.
 `put` hashes a file and stores it under the digest; `get` copies it back out.
 Two consequences follow from addressing by content: storing the same bytes
 twice is idempotent and costs nothing the second time, and a digest is a
-verifiable name — if `get` returns it, it hashes to what you asked for.
+verifiable name: if `get` returns it, it hashes to what you asked for.
 
 The root is `AETHER_CAS`, falling back to `$HOME/.aether/cas`.
 

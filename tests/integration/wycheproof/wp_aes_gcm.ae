@@ -77,7 +77,7 @@ main() {
         exit(1)
     }
 
-    groups = json.json_object_get_raw(root, "testGroups")
+    groups = json.object_get_raw(root, "testGroups")
     ngroups = json.array_size(groups)
 
     passed = 0
@@ -87,10 +87,10 @@ main() {
     gi = 0
     while gi < ngroups {
         g = json.array_get_raw(groups, gi)
-        iv_size = json.json_get_int(json.json_object_get_raw(g, "ivSize"))
-        tag_size = json.json_get_int(json.json_object_get_raw(g, "tagSize"))
-        key_size = json.json_get_int(json.json_object_get_raw(g, "keySize"))
-        tests = json.json_object_get_raw(g, "tests")
+        iv_size = json.get_int(json.object_get_raw(g, "ivSize"))
+        tag_size = json.get_int(json.object_get_raw(g, "tagSize"))
+        key_size = json.get_int(json.object_get_raw(g, "keySize"))
+        tests = json.object_get_raw(g, "tests")
         nt = json.array_size(tests)
         if iv_size != 96 || tag_size != 128 {
             skipped_unsupported = skipped_unsupported + nt
@@ -101,14 +101,14 @@ main() {
         ti = 0
         while ti < nt {
             t = json.array_get_raw(tests, ti)
-            tc_id = json.json_get_int(json.json_object_get_raw(t, "tcId"))
-            res = json.json_get_string_raw(json.json_object_get_raw(t, "result"))
-            key_hex = json.json_get_string_raw(json.json_object_get_raw(t, "key"))
-            iv_hex = json.json_get_string_raw(json.json_object_get_raw(t, "iv"))
-            aad_hex = json.json_get_string_raw(json.json_object_get_raw(t, "aad"))
-            msg_hex = json.json_get_string_raw(json.json_object_get_raw(t, "msg"))
-            ct_hex = json.json_get_string_raw(json.json_object_get_raw(t, "ct"))
-            tag_hex = json.json_get_string_raw(json.json_object_get_raw(t, "tag"))
+            tc_id = json.get_int(json.object_get_raw(t, "tcId"))
+            res = json.get_string_raw(json.object_get_raw(t, "result"))
+            key_hex = json.get_string_raw(json.object_get_raw(t, "key"))
+            iv_hex = json.get_string_raw(json.object_get_raw(t, "iv"))
+            aad_hex = json.get_string_raw(json.object_get_raw(t, "aad"))
+            msg_hex = json.get_string_raw(json.object_get_raw(t, "msg"))
+            ct_hex = json.get_string_raw(json.object_get_raw(t, "ct"))
+            tag_hex = json.get_string_raw(json.object_get_raw(t, "tag"))
 
             key = from_hex(key_hex)
             iv = from_hex(iv_hex)

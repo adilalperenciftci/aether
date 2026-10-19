@@ -1465,7 +1465,7 @@ dtext(neg: int, m: string, scale: int) -> string {
 // 17 significant digits, always enough to round-trip; the first shorter
 // rounding of them that reads back the same double is the shortest.
 shortest_digits(mag: float) -> (string, int) {
-    t = string.string_from_double(mag)
+    t = string.from_double(mag)
     tn = string_length(t)
     epos = string.index_of_from_n(t, tn, "e", 0)
     mant = t
@@ -1535,7 +1535,7 @@ ruby_float_text(v: float) -> string {
     mag = v
     if v < 0.0 { sign = "-"; mag = 0.0 - v }
     if mag == 0.0 {
-        z = string.string_from_double(v)
+        z = string.from_double(v)
         if string.char_at_n(z, string_length(z), 0) == 45 { return "-0.0" }
         return "0.0"
     }
@@ -5557,21 +5557,21 @@ value_identity(ctx: ptr, v: string) -> string {
 // std.json's own limit of 256 levels is an error.
 json_to_value(ctx: ptr, jv: ptr, depth: int) -> (string, string) {
     if depth > 256 { return value_nil(), "nested deeper than 256 levels" }
-    t = json.json_type(jv)
-    if t == 1 { return value_bool(json.json_get_bool(jv)), "" }
+    t = json.type(jv)
+    if t == 1 { return value_bool(json.get_bool(jv)), "" }
     if t == 2 {
-        if json.json_is_integer(jv) == 1 {
-            return string.concat("i:", string.from_long(json.json_get_long(jv))), ""
+        if json.is_integer(jv) == 1 {
+            return string.concat("i:", string.from_long(json.get_long(jv))), ""
         }
-        return value_float(json.json_get_number(jv)), ""
+        return value_float(json.get_number(jv)), ""
     }
-    if t == 3 { return string.concat("s:", json.json_get_string_raw(jv)), "" }
+    if t == 3 { return string.concat("s:", json.get_string_raw(jv)), "" }
     if t == 4 {
         av, an = node_new(ctx, LV_ARR)
-        n = json.json_array_size(jv)
+        n = json.array_size(jv)
         i = 0
         while i < n {
-            ev, eerr = json_to_value(ctx, json.json_array_get_raw(jv, i), depth + 1)
+            ev, eerr = json_to_value(ctx, json.array_get_raw(jv, i), depth + 1)
             if eerr != "" { return value_nil(), eerr }
             arr_push(an, ev)
             i = i + 1
@@ -5580,12 +5580,12 @@ json_to_value(ctx: ptr, jv: ptr, depth: int) -> (string, string) {
     }
     if t == 5 {
         ov, on = node_new(ctx, LV_OBJ)
-        n = json.json_object_size_raw(jv)
+        n = json.object_size_raw(jv)
         i = 0
         while i < n {
-            fv, ferr = json_to_value(ctx, json.json_object_value_at(jv, i), depth + 1)
+            fv, ferr = json_to_value(ctx, json.object_value_at(jv, i), depth + 1)
             if ferr != "" { return value_nil(), ferr }
-            obj_set(on, json.json_object_key_at(jv, i), fv)
+            obj_set(on, json.object_key_at(jv, i), fv)
             i = i + 1
         }
         return ov, ""
@@ -5630,6 +5630,6 @@ context_put_json_text(ctx: ptr, key: string, text: string) -> string {
     root, kind, msg = json.parse_strict(text)
     if kind != json.KIND_OK { return string.concat("context_put_json_text: ", msg) }
     err = context_put_json(ctx, key, root)
-    json.json_free(root)
+    json.free(root)
     return err
 }

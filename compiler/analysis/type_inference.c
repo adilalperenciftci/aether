@@ -548,24 +548,32 @@ void collect_expression_constraints(ASTNode* node, InferenceContext* ctx) {
     switch (node->type) {
         case AST_IF_EXPRESSION:
             /* #2745: an if-expression has the type of its branches, as the
-             * checker gives it: the then branch's, or the else branch's while
-             * the then branch's is not known. Left untyped here, a local it
-             * binds was untyped until the checker reached the binding, and
-             * the hoists that declare a loop's or a branch's local ahead of
-             * its block (hoist_decl_type) declared it so: a read of it before
-             * the binding, the value the previous pass bound, was
-             * interpolated as an int (#2741 for interpolations). */
+             * checker gives it: two numeric branches' common type (#2854),
+             * otherwise the then branch's, or the else branch's while the
+             * then branch's is not known. Left untyped here, a local it binds
+             * was untyped until the checker reached the binding, and the
+             * hoists that declare a loop's or a branch's local ahead of its
+             * block (hoist_decl_type) declared it so: a read of it before the
+             * binding, the value the previous pass bound, was interpolated
+             * as an int (#2741 for interpolations). */
             for (int i = 0; i < node->child_count; i++) {
                 collect_constraints(node->children[i], ctx);
             }
             if (node->child_count >= 3 &&
                 (!node->node_type || node->node_type->kind == TYPE_UNKNOWN)) {
-                Type* t = node->children[1] ? node->children[1]->node_type : NULL;
-                if (!t || t->kind == TYPE_UNKNOWN || t->kind == TYPE_VOID)
-                    t = node->children[2] ? node->children[2]->node_type : NULL;
-                if (t && t->kind != TYPE_UNKNOWN && t->kind != TYPE_VOID) {
+                ASTNode* th = node->children[1];
+                ASTNode* el = node->children[2];
+                Type* t = branch_join_type(th ? th->node_type : NULL, th,
+                                           el ? el->node_type : NULL, el);
+                if (!t) {
+                    Type* k = th ? th->node_type : NULL;
+                    if (!k || k->kind == TYPE_UNKNOWN || k->kind == TYPE_VOID)
+                        k = el ? el->node_type : NULL;
+                    if (k && k->kind != TYPE_UNKNOWN && k->kind != TYPE_VOID) t = clone_type(k);
+                }
+                if (t) {
                     if (node->node_type) free_type(node->node_type);
-                    node->node_type = clone_type(t);
+                    node->node_type = t;
                 }
             }
             break;
@@ -1865,14 +1873,66 @@ static int call_index_build(CallIndex* ix, ASTNode* program) {
     return 1;
 }
 
-/* Unify one call site's argument types into the definition's parameters. */
+/* The parameter at position `pos` of `def`, among its first `n` children
+ * (the parameters, with a guard or a `where` contract among them), or
+ * NULL. A clause's pattern is a parameter too (#2898). */
+static ASTNode* def_param_at_position(ASTNode* def, int n, int pos) {
+    for (int i = 0, p = 0; i < n; i++) {
+        ASTNode* c = def->children[i];
+        if (!c) continue;
+        switch (c->type) {
+            case AST_VARIABLE_DECLARATION: case AST_PATTERN_VARIABLE: case AST_PATTERN_LITERAL:
+            case AST_PATTERN_STRUCT: case AST_PATTERN_LIST: case AST_PATTERN_CONS:
+                if (p++ == pos) return c;
+                break;
+            default:
+                break;
+        }
+    }
+    return NULL;
+}
+
+/* Unify one call site's argument types into the definition's parameters. A
+ * named argument goes to the parameter of its name, wherever it is written
+ * (#2850); the checker puts it there later. A positional argument goes to
+ * the parameter at its position: the child at its index was a `where`
+ * contract after an earlier parameter, and a parameter after it took the
+ * argument before its own. */
 static int propagate_call_site(ASTNode* call, ASTNode* func_def, int param_count) {
     int changed = 0;
     int arg_count = call->child_count;
-    for (int i = 0; i < arg_count && i < param_count; i++) {
+    for (int i = 0; i < arg_count; i++) {
         ASTNode* arg = call->children[i];
-        ASTNode* param = func_def->children[i];
+        ASTNode* param = def_param_at_position(func_def, param_count, i);
+        if (arg && arg->type == AST_NAMED_ARG) {
+            param = NULL;
+            for (int p = 0; arg->value && p < param_count; p++) {
+                ASTNode* c = func_def->children[p];
+                if (c && (c->type == AST_VARIABLE_DECLARATION || c->type == AST_PATTERN_VARIABLE) &&
+                    c->value && strcmp(c->value, arg->value) == 0) {
+                    param = c;
+                    break;
+                }
+            }
+            arg = arg->child_count > 0 ? arg->children[0] : NULL;
+        }
         if (!arg || !param) continue;
+        /* #2898: a list pattern takes a slice of the elements the array or
+         * slice given to it holds. */
+        if (param->type == AST_PATTERN_LIST || param->type == AST_PATTERN_CONS) {
+            /* The parser types the pattern a slice of unknown elements. */
+            Type* pt = param->node_type;
+            int untyped = !pt || pt->kind != TYPE_ARRAY || !pt->element_type ||
+                          pt->element_type->kind == TYPE_UNKNOWN;
+            Type* at = arg->node_type;
+            if (untyped && at && at->kind == TYPE_ARRAY && at->element_type &&
+                at->element_type->kind != TYPE_UNKNOWN) {
+                if (param->node_type) free_type(param->node_type);
+                param->node_type = create_array_type(clone_type(at->element_type), -1);
+                changed++;
+            }
+            continue;
+        }
         if (param->type != AST_VARIABLE_DECLARATION && param->type != AST_PATTERN_VARIABLE) continue;
 
         if ((!param->node_type || param->node_type->kind == TYPE_UNKNOWN) &&

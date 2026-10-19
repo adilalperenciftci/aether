@@ -145,7 +145,7 @@ N  ≈  core_count × small_factor          // small_factor ∈ ~1..4
 
 - Start at roughly **core count** (`1×`). This gives one busy shard per
   core in the steady state.
-- Nudge up to **2×–4×** if handlers are short and you see imbalance, extra
+- Nudge up to **2× to 4×** if handlers are short and you see imbalance, extra
   shards smooth out uneven load and reduce the odds that two hot keys share
   a shard.
 - Going much past that is counter-productive: more mailboxes than cores

@@ -68,7 +68,7 @@ operations that are:
 - **Sentinel-returning infallibles** where the sentinel is part of the
   contract, not an error. Example: `file_mtime` returns `0` for missing
   files or stat failure, callers already handle zero as "no mtime", so
-  wrapping would just add noise.
+  wrapping would only add noise.
 - **Intentionally void fire-and-forget operations.** Example:
   [`log_write`](../std/log/module.ae) in `std.log` the module
   deliberately degrades to stderr if the log file is unopenable, so
@@ -78,6 +78,25 @@ operations that are:
   `bindings`, `java`, … are void because they structurally append to a
   global registry. They're not silent failures, they're a different
   pattern.
+
+### One name per operation, and the short one at call sites
+
+A module's extern is spelt with the module's prefix (`json_free`) because
+that is its C name, but a caller reaches it by its short name: `json.free(v)`
+resolves to the extern `json_free`, as `md5.hex` resolves to std.md5's Aether
+function `md5_hex` (a module's names are looked up as written, then in the
+prefixed form, #2976). Write calls, examples and READMEs with the short name;
+`json.json_free(v)` names the module twice for the same function, and
+`ae fmt --short-names` rewrites such calls where the compiler resolves both
+spellings to one declaration.
+
+A wrapper and its extern should not answer to one short name with different
+behaviour. When a module function `x` wraps an extern spelt `<module>_x`, the
+function is merged under a name of its own and `module.x` reaches it (#2978),
+so `module.<module>_x` is the extern and the two spellings are two
+operations. Give an extern that callers need beside a wrapper a name that
+says it is raw, as the `_raw` externs above do, rather than the wrapper's own
+name with the module prefix.
 
 ### Return shapes
 
@@ -145,11 +164,13 @@ open(path: string, mode: string) -> {
 
 ### Ownership of returned strings
 
-If the underlying C function returns a borrowed `const char*` (pointer
-into another object's memory), the wrapper **must** copy it before
-returning so the caller's string outlives the source object. The
-idiomatic copy in Aether is `string_concat(borrowed, "")` see
-[`std.fs`](../std/fs/module.ae)'s `readlink` wrapper for the pattern.
+Declare each extern's string result by what C hands over (R4 of the
+[ownership rules](memory-management.md#c-boundaries-r4)): `-> string @heap`
+when C returns a string the caller owns, which the call adopts with no
+copy, and plain `-> string` when C returns a pointer into memory it keeps.
+A wrapper that returns a borrowed result needs no copy of its own: a
+`return` hands the caller one reference, and a plain C string is copied
+into a counted one there, so the caller's string outlives the source object.
 
 ## Worked example: `std.fs`
 

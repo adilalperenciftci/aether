@@ -614,6 +614,8 @@ void emit_array_fill(CodeGenerator* gen, const char* dst, ASTNode* e, Type* at);
 void emit_array_fill_c(CodeGenerator* gen, const char* dst, const char* src, Type* at, int retain);
 void emit_array_result_value(CodeGenerator* gen, ASTNode* e, Type* at);
 void emit_owning_array_store(CodeGenerator* gen, const char* name, Type* at, ASTNode* rhs);
+/* The type a match expression's arms yield (match_arm_value), or NULL. */
+Type* match_value_type(ASTNode* m);
 int struct_param_written(ASTNode* n, const char* pname);
 void emit_string_take_owned(CodeGenerator* gen, ASTNode* e, int cell);
 void own_collect_types(CodeGenerator* gen, ASTNode* node);
@@ -813,6 +815,13 @@ void emit_fn_result_c_type(CodeGenerator* gen, ASTNode* fn);
 int fn_param_count(ASTNode* fn);
 ASTNode* fn_param_at(ASTNode* fn, int pos);
 Type* fn_param_type_at(CodeGenerator* gen, ASTNode* fn, int pos);
-const char* fn_list_param_elem_ctype(CodeGenerator* gen, ASTNode* fn, int pos);
+/* #2988, #2992: a struct pattern, a clause's parameter or a match arm, over
+ * the struct value `val` (C text). The condition it holds under, each term
+ * after the first preceded by ` && ` (*first), and the names it binds (only
+ * those `reads` mentions; `body`, when given, is where a rebinding takes a
+ * reference of its own). One pair, so the two places cannot drift. */
+void emit_struct_pattern_test(CodeGenerator* gen, const char* val, ASTNode* p, int* first);
+void emit_struct_pattern_bindings(CodeGenerator* gen, const char* val, ASTNode* p,
+                                  ASTNode* reads, ASTNode* body);
 
 #endif

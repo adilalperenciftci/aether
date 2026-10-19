@@ -3,8 +3,8 @@
 TCP sockets: connect, listen, accept, read, write.
 
 Every call returns an error string rather than throwing. On a socket that is
-the right shape — a peer closing mid-write is a normal Tuesday, not an
-exceptional condition — but it does mean the error has to be checked at every
+the right shape (a peer closing mid-write is a normal Tuesday, not an
+exceptional condition), but it does mean the error has to be checked at every
 step, because a failed connect returns a handle you must not then use.
 
 The example **compiles but is not run** in CI: it needs a peer on the network,
@@ -23,7 +23,7 @@ main() {
     _n, werr = tcp.write(conn, "GET / HTTP/1.0\r\n\r\n")
     if werr != "" {
         println("write failed: ${werr}")
-        tcp.tcp_close(conn)
+        tcp.close(conn)
         return
     }
 
@@ -34,7 +34,7 @@ main() {
         println(body)
     }
 
-    tcp.tcp_close(conn)
+    tcp.close(conn)
 }
 ```
 
@@ -86,7 +86,7 @@ process can ask it which port it got.
 `accept` blocks, and closing the listener from another thread does not wake it
 on Linux. A serving loop that has to stop polls the listener instead:
 `server_poll(srv, 50)` returns `1` when a connection is waiting (so `accept`
-will not block), `0` on timeout, `-1` on a null handle — check the stop flag
+will not block), `0` on timeout, `-1` on a null handle: check the stop flag
 between polls. `set_nodelay(sock, true)` turns on `TCP_NODELAY` for
 request/response lines (the runtime's headers already declare `setsockopt`
 with the platform's signature, so it cannot be declared from Aether).

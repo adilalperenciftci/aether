@@ -176,6 +176,13 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table);
 int typecheck_binary_expression(ASTNode* expr, SymbolTable* table);
 int typecheck_function_call(ASTNode* call, SymbolTable* table);
 
+/* #2976: `aetherc --emit=short-names`. Before typecheck_program, name the
+ * file whose calls are reported; after it, print each call written
+ * `ns.ns_x(...)` whose short form `ns.x` reaches the same declaration, one
+ * line `LINE:COLUMN:ns_x:x` per call (the position of the call's callee). */
+void typecheck_report_short_names(const char* entry_file);
+void typecheck_print_short_names(FILE* out);
+
 // Type inference functions
 Type* infer_type(ASTNode* expr, SymbolTable* table);
 Type* infer_binary_type(ASTNode* left, ASTNode* right, AeTokenType operator);

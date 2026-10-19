@@ -79,7 +79,7 @@ early_secret(algo: string) -> ptr {
     hl = hlen(algo)
     salt = zeros(hl)
     ikm = zeros(hl)
-    prk = hkdf.hkdf_extract(algo, bytes.view(salt)[0..hl], bytes.view(ikm)[0..hl])
+    prk = hkdf.extract(algo, bytes.view(salt)[0..hl], bytes.view(ikm)[0..hl])
     bytes.free(salt)
     bytes.free(ikm)
     return prk
@@ -90,7 +90,7 @@ early_secret(algo: string) -> ptr {
 early_secret_psk(algo: string, psk: byte[]) -> ptr {
     hl = hlen(algo)
     salt = zeros(hl)
-    prk = hkdf.hkdf_extract(algo, bytes.view(salt)[0..hl], psk)
+    prk = hkdf.extract(algo, bytes.view(salt)[0..hl], psk)
     bytes.free(salt)
     return prk
 }
@@ -139,7 +139,7 @@ handshake_secret(algo: string, early: ptr, ecdhe: byte[]) -> ptr {
     empty_th = empty_transcript_hash(algo)
     // salt = Derive-Secret(Early, "derived", Hash(""))
     salt = tls13_kdf.derive_secret(algo, bytes.view(early)[0..hl], "derived", bytes.view(empty_th)[0..hl])
-    prk = hkdf.hkdf_extract(algo, bytes.view(salt)[0..hl], ecdhe)
+    prk = hkdf.extract(algo, bytes.view(salt)[0..hl], ecdhe)
     bytes.free(empty_th)
     bytes.free(salt)
     return prk
@@ -152,7 +152,7 @@ master_secret(algo: string, handshake: ptr) -> ptr {
     empty_th = empty_transcript_hash(algo)
     salt = tls13_kdf.derive_secret(algo, bytes.view(handshake)[0..hl], "derived", bytes.view(empty_th)[0..hl])
     ikm = zeros(hl)
-    prk = hkdf.hkdf_extract(algo, bytes.view(salt)[0..hl], bytes.view(ikm)[0..hl])
+    prk = hkdf.extract(algo, bytes.view(salt)[0..hl], bytes.view(ikm)[0..hl])
     bytes.free(empty_th)
     bytes.free(salt)
     bytes.free(ikm)

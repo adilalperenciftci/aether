@@ -1,0 +1,27 @@
+// #2978: a module function merged under a C name of its own (its
+// `<ns>_<name>` is one of its module's externs) is reached by a selective
+// import of its name and by a glob import, as by the qualified call
+// (test_module_wrapper_beside_extern.ae). Before the fix the function was
+// dropped, so `err = server_set_host(...)` bound a void result and the C
+// did not compile.
+
+import std.http(server_set_host, server_create, server_free)
+import std.xml(*)
+import std.string
+
+check(ok: bool, what: string) {
+    if !ok {
+        println("FAIL: ${what}")
+        exit(1)
+    }
+}
+
+main() {
+    s = server_create(0)
+    err = server_set_host(s, "127.0.0.1")
+    check(string.equals(err, ""), "a selective import reaches the wrapper")
+    server_free(s)
+    e = escape("<a>")
+    check(string.equals(e, "&lt;a&gt;"), "a glob import reaches the wrapper")
+    println("module wrapper beside extern imports ok")
+}

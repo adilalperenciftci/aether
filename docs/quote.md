@@ -185,12 +185,10 @@ it, in a struct or by returning it, hands that duty on with it, and whoever
 holds it last frees it (`defer quote.free(shader.tree)`). `quote.free` also
 gives back the tree's references to its captured cells.
 
-A tree is not released at scope exit the way a heap string is. A string's
-tracking follows a local the program binds; a tree is born as an argument,
-inside a call, and whether the callee keeps it, returns it or drops it is
-the callee's code, which the call site cannot see. Tracking it would mean
-carrying the heap-string escape analysis (returns, struct fields, closure
-captures, `try` frames) over to a second kind of owned value.
+A tree is not released at scope exit the way a string is. A string carries
+its own count, and every place that holds one takes and releases a
+reference; a tree carries none, so it is owned as a handle is, by the code
+that frees it.
 
 ## Captures
 

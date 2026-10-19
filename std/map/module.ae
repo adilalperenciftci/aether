@@ -18,13 +18,13 @@ exports(
 // string, "a\0x" and "a\0y" were one key, "a".
 extern map_new() -> ptr
 extern map_put_raw(map: ptr, key: @aether string, value: @aether ptr) -> int
-// Heap-string-aware put. The map acquires its OWN reference: a
-// refcounted string is retained, a plain pointer (a literal, a
-// borrowed char*) is copied. The caller keeps and independently frees
-// theirs, so the same value can live in several containers. map_free
-// releases each owned value. Codegen auto-routes
-// `map.put(m, k, heap_string_expr)` to the adopting sibling instead,
-// where the value is escaping into the map.
+// String-aware put, for C and `ptr` callers. The map takes a
+// reference of its own: a counted string is retained, a plain C
+// pointer is copied. The caller keeps and releases its own, so the
+// same value can live in several containers. map_free releases each
+// owned value. `map.put(m, k, s)` of a `string` in Aether code is a
+// store into the map (R3): the compiler hands the map a reference,
+// moving a fresh value in.
 extern map_put_string_owned(map: ptr, key: @aether string, value: @aether ptr) -> int
 extern map_get_raw(map: ptr, key: @aether string) -> ptr
 extern map_has(map: ptr, key: @aether string) -> int

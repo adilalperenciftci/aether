@@ -156,8 +156,8 @@ main() {
     print("\n4. GET /openapi.json  (FastAPI-style aggregate):\n")
     show("GET /openapi.json", get("/openapi.json"))
 
-    schema.schema_free(user)
-    schema.schema_free(order)
+    schema.free(user)
+    schema.free(order)
     print("\n=== showcase complete ===\n")
     exit(0)
 }

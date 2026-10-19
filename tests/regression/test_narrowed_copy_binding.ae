@@ -1,0 +1,73 @@
+// A copy of a narrowed value, `t = s` in the `Circle` arm of a match on a
+// `Shape`, then `t.r`: the checker typed `t` from the narrowed `s` (a
+// Circle) and accepted `t.r`, but the declaration kept the early pass's
+// type, the scrutinee's Shape, so C declared `Shape t` (wrapping the Circle
+// back into the sum) and gcc refused `t.r` ("'Shape' has no member named
+// 'r'"). A copy of a none-checked optional (`v = o` inside `if o != none`)
+// was the same: the declaration stayed `int?`, so `v + 1` was refused. The
+// first binding of a name now takes the narrowed value's type, as its
+// reads were already checked against. This test reads each copy back.
+
+extern exit(code: int)
+
+struct Circle {
+    r: float
+}
+
+struct Rect {
+    w: float
+    h: float
+}
+
+type Shape = Circle | Rect
+
+fn check(ok: bool, what: string) {
+    if !ok {
+        println("FAIL: ${what}")
+        exit(1)
+    }
+}
+
+radius(s: Shape) -> float {
+    let a: float = match s {
+        Circle -> {
+            t = s
+            t.r
+        }
+        Rect -> {
+            q = s
+            q.w * q.h
+        }
+    }
+    return a
+}
+
+doubled(s: Shape) -> float {
+    out = 0.0
+    match s {
+        Circle -> {
+            c = s
+            out = c.r * 2.0
+        }
+        Rect -> {
+            out = 1.0
+        }
+    }
+    return out
+}
+
+next(o: int?) -> int {
+    if o != none {
+        v = o
+        return v + 1
+    }
+    return 0
+}
+
+main() {
+    check(radius(Circle { r: 2.0 }) == 2.0, "a Circle copied in its arm")
+    check(radius(Rect { w: 2.0, h: 3.0 }) == 6.0, "a Rect copied in its arm")
+    check(doubled(Circle { r: 1.5 }) == 3.0, "a copy in a statement match arm")
+    check(next(4) == 5 && next(none) == 0, "a copy of a none-checked optional")
+    println("ok")
+}

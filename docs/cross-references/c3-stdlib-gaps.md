@@ -75,7 +75,7 @@ public `std.encoding` surface.
 base64 *implementation* already exists in `cryptography/aether_cryptography.c`
 this is mostly **re-surfacing** it under the right namespace as Aether
 wrappers, plus a hex/base32 port. Small, high discoverability win. Fallible
-decode returns `bytes!` (Phase-1 `T!` convention). **Cost: ~150–250 Aether
+decode returns `bytes!` (Phase-1 `T!` convention). **Cost: ~150-250 Aether
 lines**, most of it re-export + hex.
 
 ### 2.2 `std.time`, a datetime/calendar layer over the raw clocks
@@ -91,7 +91,7 @@ lines**, most of it re-export + hex.
 epoch), `now()`, ISO-8601 format/parse, and duration math. This is a genuine
 absence that application code hits constantly (logging timestamps, HTTP
 `Date`, expiry math, some of which the http server already re-derives
-inline). **Cost: ~300–450 Aether lines.** Note: Aether already has a
+inline). **Cost: ~300-450 Aether lines.** Note: Aether already has a
 `Duration` language scalar (`TYPE_DURATION`, a signed-64-bit nanosecond
 count) used by the `os` clock APIs, build calendar arithmetic on it rather
 than introducing a second duration type.
@@ -111,7 +111,7 @@ add `sort(arr, cmp)` + `binary_search` over the concrete array types we
 already ship (`intarr`/`longarr`/`floatarr`/`list`), with a comparator
 closure (closures landed this year). The `string_list_sort` C already
 demonstrates the stable-sort-with-comparator shape to mirror. **Cost:
-~200–350 Aether lines** across the array types; a single reusable C
+~200-350 Aether lines** across the array types; a single reusable C
 merge-sort core behind them if hand-C is warranted (it is a runtime
 primitive, like the existing seq/list C, not a downstream consumer, check
 against the no-C rule before committing).
@@ -127,7 +127,7 @@ stringlist, stringseq, bits. C3 additionally has **deque**, **ringbuffer**,
 
 - **`deque` / `ringbuffer`**, genuinely useful (work queues, sliding
   windows) and not expressible cleanly today. **THIN → PORT if demand:**
-  ~150–250 Aether lines each, or one ringbuffer that backs both.
+  ~150-250 Aether lines each, or one ringbuffer that backs both.
 - **first-class `bitset`**, we have `std.bits` (bit ops) and a C
   `aether_bits.c`; a value-type bitset is a thin wrapper. **THIN**, low
   priority.

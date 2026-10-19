@@ -64,7 +64,7 @@ fn run_hmac() -> int {
         println("FAIL: hmac vector parse: ${jerr}")
         return 1
     }
-    groups = json.json_object_get_raw(root, "testGroups")
+    groups = json.object_get_raw(root, "testGroups")
     ngroups = json.array_size(groups)
     passed = 0
     rejected_invalid = 0
@@ -73,8 +73,8 @@ fn run_hmac() -> int {
     gi = 0
     while gi < ngroups {
         g = json.array_get_raw(groups, gi)
-        tag_size = json.json_get_int(json.json_object_get_raw(g, "tagSize"))
-        tests = json.json_object_get_raw(g, "tests")
+        tag_size = json.get_int(json.object_get_raw(g, "tagSize"))
+        tests = json.object_get_raw(g, "tests")
         nt = json.array_size(tests)
         // Truncated-tag groups: our API returns the full 32-byte MAC; a
         // truncated comparison would be a driver artifact, so count+skip.
@@ -86,15 +86,15 @@ fn run_hmac() -> int {
         ti = 0
         while ti < nt {
             t = json.array_get_raw(tests, ti)
-            tc_id = json.json_get_int(json.json_object_get_raw(t, "tcId"))
-            res = json.json_get_string_raw(json.json_object_get_raw(t, "result"))
-            key_hex = json.json_get_string_raw(json.json_object_get_raw(t, "key"))
-            msg_hex = json.json_get_string_raw(json.json_object_get_raw(t, "msg"))
-            tag_hex = json.json_get_string_raw(json.json_object_get_raw(t, "tag"))
+            tc_id = json.get_int(json.object_get_raw(t, "tcId"))
+            res = json.get_string_raw(json.object_get_raw(t, "result"))
+            key_hex = json.get_string_raw(json.object_get_raw(t, "key"))
+            msg_hex = json.get_string_raw(json.object_get_raw(t, "msg"))
+            tag_hex = json.get_string_raw(json.object_get_raw(t, "tag"))
 
             key = from_hex(key_hex)
             msg = from_hex(msg_hex)
-            mac = hmac.hmac_sha256(bytes.view(key)[0..string_length(key_hex) / 2], bytes.view(msg)[0..string_length(msg_hex) / 2])
+            mac = hmac.sha256(bytes.view(key)[0..string_length(key_hex) / 2], bytes.view(msg)[0..string_length(msg_hex) / 2])
             hit = bytes_eq_hex(mac, 32, tag_hex)
             if res == "valid" {
                 if hit == 1 { passed = passed + 1 } else {
@@ -129,7 +129,7 @@ fn run_hkdf() -> int {
         println("FAIL: hkdf vector parse: ${jerr}")
         return 1
     }
-    groups = json.json_object_get_raw(root, "testGroups")
+    groups = json.object_get_raw(root, "testGroups")
     ngroups = json.array_size(groups)
     passed = 0
     rejected_invalid = 0
@@ -137,18 +137,18 @@ fn run_hkdf() -> int {
     gi = 0
     while gi < ngroups {
         g = json.array_get_raw(groups, gi)
-        tests = json.json_object_get_raw(g, "tests")
+        tests = json.object_get_raw(g, "tests")
         nt = json.array_size(tests)
         ti = 0
         while ti < nt {
             t = json.array_get_raw(tests, ti)
-            tc_id = json.json_get_int(json.json_object_get_raw(t, "tcId"))
-            res = json.json_get_string_raw(json.json_object_get_raw(t, "result"))
-            ikm_hex = json.json_get_string_raw(json.json_object_get_raw(t, "ikm"))
-            salt_hex = json.json_get_string_raw(json.json_object_get_raw(t, "salt"))
-            info_hex = json.json_get_string_raw(json.json_object_get_raw(t, "info"))
-            size = json.json_get_int(json.json_object_get_raw(t, "size"))
-            okm_hex = json.json_get_string_raw(json.json_object_get_raw(t, "okm"))
+            tc_id = json.get_int(json.object_get_raw(t, "tcId"))
+            res = json.get_string_raw(json.object_get_raw(t, "result"))
+            ikm_hex = json.get_string_raw(json.object_get_raw(t, "ikm"))
+            salt_hex = json.get_string_raw(json.object_get_raw(t, "salt"))
+            info_hex = json.get_string_raw(json.object_get_raw(t, "info"))
+            size = json.get_int(json.object_get_raw(t, "size"))
+            okm_hex = json.get_string_raw(json.object_get_raw(t, "okm"))
 
             ikm = from_hex(ikm_hex)
             salt = from_hex(salt_hex)

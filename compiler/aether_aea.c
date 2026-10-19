@@ -119,7 +119,7 @@ static int encode_type(Buf* b, const Type* t, const char** err) {
 static int encode_node(Buf* b, const ASTNode* n, const char* source_file,
                        int depth, const char** err) {
     if (depth > AEA_MAX_DEPTH) { *err = "the AST is deeper than an artifact may hold"; return 0; }
-    if (n->is_imported || n->origin_module || n->warned) {
+    if (n->is_imported || n->origin_module || n->warned || n->arg_order) {
         *err = "the AST has been merged or analysed (not a fresh parse)";
         return 0;
     }

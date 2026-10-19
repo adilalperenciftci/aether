@@ -298,14 +298,15 @@ int type_to_aether_source(const Type* type, char* buf, size_t cap) {
  * never in a buffer a later call reuses. The static buffers this had cut a
  * long struct or tuple name, and a nested array or tuple was spelled into
  * the buffer its own element's spelling was read from. */
-static const char* spelled_list(const char* open, Type** items, int count,
-                                const char* sep, const char* close) {
+static const char* spelled_list_by(const char* (*spell)(Type*), const char* open,
+                                   Type** items, int count, const char* sep,
+                                   const char* close) {
     size_t cap = 64, len = 0;
     char* buf = (char*)aether_xrealloc(NULL, cap);
     buf[0] = '\0';
     for (int i = -1; i <= count; i++) {
         const char* piece = i < 0 ? open : i == count ? close
-                          : items ? type_to_string(items[i]) : "?";
+                          : items ? spell(items[i]) : "?";
         const char* lead = (i > 0 && i < count) ? sep : "";
         size_t need = len + strlen(lead) + strlen(piece) + 1;
         if (need > cap) {
@@ -317,6 +318,11 @@ static const char* spelled_list(const char* open, Type** items, int count,
     const char* r = aether_intern_n(buf, len);
     free(buf);
     return r;
+}
+
+static const char* spelled_list(const char* open, Type** items, int count,
+                                const char* sep, const char* close) {
+    return spelled_list_by(type_to_string, open, items, count, sep, close);
 }
 
 /* Module-scoped struct types: a module's struct is merged and emitted as
@@ -421,6 +427,52 @@ const char* type_to_string(Type* type) {
     }
 }
 
+const char* type_spelled(Type* type) {
+    if (!type) return "unknown";
+    if (type->distinct_name) return type->distinct_name;
+    if (type->c_alias) return type->c_alias;
+    switch (type->kind) {
+        case TYPE_STRUCT:
+            return type->struct_name ? ast_struct_display_name(type->struct_name) : "struct";
+        case TYPE_PTR:
+            if (type->element_type && type->element_type->kind != TYPE_UNKNOWN)
+                return aether_internf("*%s", type_spelled(type->element_type));
+            return "ptr";
+        case TYPE_ARRAY:
+            if (type->index_enum_name)
+                return aether_internf("[%s]%s", type->index_enum_name,
+                                      type_spelled(type->element_type));
+            if (type->array_size < 0)
+                return aether_internf("%s[]", type_spelled(type->element_type));
+            return aether_internf("%s[%d]", type_spelled(type->element_type), type->array_size);
+        case TYPE_FUNCTION: {
+            /* A closure whose signature was erased is a bare `fn`; any
+             * other function type, a closure's or a C function pointer's,
+             * is `fn(P, ...) -> R` (no arrow for no result). */
+            if (!type->is_fnptr && type->param_count == 0 && !type->return_type) return "fn";
+            const char* params = spelled_list_by(type_spelled, "fn(", type->param_types,
+                                                 type->param_count, ", ", ")");
+            if (!type->return_type || type->return_type->kind == TYPE_VOID) return params;
+            return aether_internf("%s -> %s", params, type_spelled(type->return_type));
+        }
+        case TYPE_OPTIONAL:
+            return aether_internf("%s?", type_spelled(type->element_type));
+        case TYPE_TUPLE:
+            if (type->is_result && type->tuple_count == 2 && type->tuple_types)
+                return aether_internf("%s!", type_spelled(type->tuple_types[0]));
+            return spelled_list_by(type_spelled, "(", type->tuple_types, type->tuple_count,
+                                   ", ", ")");
+        case TYPE_ISOLATED:
+            return aether_internf("Isolated[%s]", type_spelled(type->element_type));
+        case TYPE_BITSET:
+            return aether_internf("bit_set[%s]", type_spelled(type->element_type));
+        case TYPE_UNKNOWN:
+            return "unknown";
+        default:
+            return type_to_string(type);
+    }
+}
+
 int types_equal(Type* a, Type* b) {
     if (!a || !b) return a == b;
     if (a->kind != b->kind) return 0;
@@ -501,6 +553,23 @@ Type* numeric_join_type(Type* a, Type* b) {
     int ra = numeric_join_rank(a->kind), rb = numeric_join_rank(b->kind);
     if (ra < 0 || rb < 0) return NULL;
     return clone_type(rb > ra ? b : a);
+}
+
+/* A float literal, or one under a unary minus or plus. */
+static int is_float_literal_arm(const ASTNode* n) {
+    if (n && n->type == AST_UNARY_EXPRESSION && n->child_count == 1 && n->value &&
+        (strcmp(n->value, "-") == 0 || strcmp(n->value, "+") == 0))
+        n = n->children[0];
+    return n && n->type == AST_LITERAL && n->node_type && n->node_type->kind == TYPE_FLOAT;
+}
+
+Type* branch_join_type(Type* a, const ASTNode* a_arm, Type* b, const ASTNode* b_arm) {
+    if (!a || !b) return NULL;
+    if (a->kind == TYPE_FLOAT32 && b->kind == TYPE_FLOAT && is_float_literal_arm(b_arm))
+        return clone_type(a);
+    if (b->kind == TYPE_FLOAT32 && a->kind == TYPE_FLOAT && is_float_literal_arm(a_arm))
+        return clone_type(b);
+    return numeric_join_type(a, b);
 }
 
 Type* clone_type(Type* type) {
@@ -688,6 +757,8 @@ ASTNode* create_ast_node(ASTNodeType type, const char* value, int line, int colu
     node->source_name = NULL;
     node->value_len = 0;
     node->origin_module = NULL;
+    node->arg_order = NULL;
+    node->arg_order_count = 0;
     return node;
 }
 
@@ -753,6 +824,15 @@ ASTNode* clone_ast_node(ASTNode* node) {
     clone->end_column = node->end_column;
     clone->source_name = node->source_name ? strdup(node->source_name) : NULL;
     clone->origin_module = node->origin_module ? strdup(node->origin_module) : NULL;
+    if (node->arg_order && node->arg_order_count > 0) {
+        clone->arg_order = malloc(sizeof(int) * (size_t)node->arg_order_count);
+        if (!clone->arg_order) {
+            fprintf(stderr, "Fatal: out of memory cloning a call\n");
+            exit(1);
+        }
+        memcpy(clone->arg_order, node->arg_order, sizeof(int) * (size_t)node->arg_order_count);
+        clone->arg_order_count = node->arg_order_count;
+    }
     if (node->value_len > 0) ast_set_literal_bytes(clone, node->value, node->value_len);   /* #2520 */
 
     /* Slot for slot: an empty one stays where it is, as the parser left it. */
@@ -783,6 +863,7 @@ void free_ast_node(ASTNode* node) {
     }
 
     free(node->origin_module);
+    free(node->arg_order);
 
     if (node->node_type) {
         free_type(node->node_type);
@@ -814,6 +895,13 @@ const char* ast_source_name(const ASTNode* def, char* buf, size_t cap) {
     if (!def || !def->origin_module || !buf || cap == 0) return name;
     const char* ns = strrchr(def->origin_module, '.');
     ns = ns ? ns + 1 : def->origin_module;
+    /* #2978: a merged function under a C name of its own keeps the name it
+     * was written with. */
+    if (def->source_name && (def->type == AST_FUNCTION_DEFINITION ||
+                             def->type == AST_BUILDER_FUNCTION)) {
+        snprintf(buf, cap, "%s.%s", ns, def->source_name);
+        return buf;
+    }
     size_t n = strlen(ns);
     if (strncmp(name, ns, n) != 0 || name[n] != '_' || !name[n + 1]) return name;
     snprintf(buf, cap, "%s.%s", ns, name + n + 1);
@@ -842,6 +930,17 @@ static int pattern_binds_any(const ASTNode* p) {
     return p && (p->type == AST_PATTERN_VARIABLE || ast_is_wildcard_pattern(p));
 }
 
+int ast_struct_pattern_tests(const ASTNode* p) {
+    for (int k = 0; p && k < p->child_count; k++) {
+        const ASTNode* fp = p->children[k];
+        if (!fp || fp->type != AST_ASSIGNMENT || fp->child_count < 1 || !fp->children[0]) continue;
+        const ASTNode* sub = fp->children[0];
+        if (sub->type == AST_PATTERN_LITERAL && !ast_is_wildcard_pattern(sub)) return 1;
+        if (sub->type == AST_PATTERN_STRUCT && ast_struct_pattern_tests(sub)) return 1;
+    }
+    return 0;
+}
+
 int ast_match_covers(const ASTNode* m) {
     if (!m || m->type != AST_MATCH_STATEMENT) return 0;
     Type* t = (m->child_count > 0 && m->children[0]) ? m->children[0]->node_type : NULL;
@@ -853,6 +952,10 @@ int ast_match_covers(const ASTNode* m) {
         ASTNode* p = arm->children[0];
         if (!p) continue;
         if (ast_is_wildcard_pattern(p)) return 1;
+        /* #2992: a struct pattern that tests no field (each `_`, a name or
+         * such a pattern) takes every value of its struct; one with a
+         * literal takes only some. */
+        if (p->type == AST_PATTERN_STRUCT && !ast_struct_pattern_tests(p)) return 1;
         if (p->type == AST_NONE_LITERAL) has_none = 1;
         else if (p->type == AST_PATTERN_VARIABLE && p->annotation &&
                  strcmp(p->annotation, "some_pattern") == 0) has_some = 1;
@@ -871,6 +974,10 @@ int ast_match_covers(const ASTNode* m) {
         if (t->kind == TYPE_BOOL) return has_true && has_false;
     }
     return has_empty && has_cons;
+}
+
+int ast_match_is_operand(const ASTNode* m) {
+    return m && m->type == AST_MATCH_STATEMENT && annotation_has_marker(m->annotation, "operand");
 }
 
 int annotation_has_marker(const char* annotation, const char* marker) {

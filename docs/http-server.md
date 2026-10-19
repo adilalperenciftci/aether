@@ -165,7 +165,7 @@ Sizing guidance:
 |----|-------------|
 | `0` (default) | Handlers are CPU-light or already async. Sequential dispatch keeps memory + thread count low. |
 | `4`  | Most servers, handlers do a DB hit / upstream call per request. |
-| `8`–`16` | Heavy fan-out, handlers block on slow I/O. |
+| `8`-`16` | Heavy fan-out, handlers block on slow I/O. |
 | `> 16` | Diminishing returns; bound by physical cores and the connection accept queue. The setter caps at 64. |
 
 #### Why pthreads, not actors?
@@ -418,7 +418,7 @@ max=M` headers per response.
 > to *drive* them is not exposed: `unwrap_msg_http_connection` is not a released
 > `.ae` extern (it appears only in the fragment below), and the
 > `spawn_fn`/`send_fn`/`release_fn` actor primitives the entry demands are not
-> exposed either — `std.actors` gives you the registry, not the actor
+> exposed either: `std.actors` gives you the registry, not the actor
 > spawn/send/release function pointers. A program written against the fragment
 > below fails with `undefined: unwrap_msg_http_connection` and cannot construct
 > the four pointers `http_server_set_actor_handler` requires. Completing the
@@ -429,7 +429,7 @@ max=M` headers per response.
 > copyable example.
 
 ```aether,fragment
-// SHAPE ONLY — does NOT compile from a release (unwrap_msg_http_connection
+// SHAPE ONLY: does NOT compile from a release (unwrap_msg_http_connection
 // and the spawn/send/release fn-pointers are not exposed to .ae). See the
 // status note above.
 @c_callback worker_step(msg_ptr: ptr) {
@@ -473,7 +473,7 @@ one layer down in C (`std/http/proxy/aether_proxy_lb.c`: atomics +
 mutex). Correct reclamation of the displaced value uses
 [`std.sync`](../std/sync/README.md) (issue #2082): guard each published
 value with a `std.sync` refcount and free it when the count reaches zero
-after a grace period — its README has the retire-ring pattern in full.
+after a grace period; its README has the retire-ring pattern in full.
 
 ---
 
@@ -847,8 +847,8 @@ Kubernetes / Docker probe conventions.
   be PEM. SNI / ALPN advertising for HTTP/2 lands in the follow-up
   HTTP/2 PR.
 - Keep-alive: turn it on for any server fronting a chatty client
-  (browsers, internal microservices). `max_requests` of 100–1000 +
-  `idle_ms` of 30–60s is the standard tuning.
+  (browsers, internal microservices). `max_requests` of 100-1000 +
+  `idle_ms` of 30-60s is the standard tuning.
 - Per-connection actor dispatch: only matters for keep-alive
   sessions and SSE/WebSocket. Default thread-pool path is fine for
   short-lived requests.

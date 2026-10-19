@@ -1,0 +1,151 @@
+// #2994: a name an arm's pattern binds is that arm's own, and the value of
+// a bound `match` goes to the variable outside it. The binding was a C
+// local of the same name in the arm's block, where codegen also wrote the
+// match's value, so the binding took it: `v = match o { some(v) -> v
+// none -> 0 }` left `v` as it was. Each such binding is renamed in its arm
+// now, as a scoped string binding is (#2746). Before the fix every check
+// below that binds the target's name failed.
+
+extern exit(code: int)
+
+struct Pt {
+    x: int
+    y: int
+}
+
+struct Named {
+    name: string
+    n: int
+}
+
+message Get {}
+message Total { v: int }
+
+actor Holder {
+    state n = 0
+    receive {
+        Get() -> {
+            let o: int? = 6
+            n = match o {
+                some(n) -> n * 7
+                none -> 0
+            }
+            reply Total { v: n }
+        }
+    }
+}
+
+var g = 0
+var bad = 0
+
+check(what: string, got: string, want: string) {
+    if got != want {
+        println("FAIL ${what}: got ${got}, want ${want}")
+        bad = 1
+    }
+}
+
+label(k: int) -> string {
+    return "k${k}"
+}
+
+main() {
+    // The issue's program.
+    let o: int? = 9
+    v = 0
+    v = match o {
+        some(v) -> v
+        none -> 0
+    }
+    check("some", "${v}", "9")
+
+    // The binding re-bound in its arm stays the arm's.
+    w = 1
+    w = match o {
+        some(w) -> {
+            w = w + 1
+            w * 2
+        }
+        none -> 0
+    }
+    check("rebind", "${w}", "20")
+
+    // A struct pattern's name and a list pattern's.
+    x = 0
+    p = Pt { x: 4, y: 5 }
+    x = match p {
+        Pt { x: 0, y: _ } -> 0
+        Pt { x: x, y: y } -> x * 10 + y
+    }
+    check("struct", "${x}", "45")
+    h = 0
+    xs = [7, 8, 9]
+    h = match xs[0..3] {
+        [h | t] -> h + t.len
+        [] -> 0
+    }
+    check("list", "${h}", "9")
+
+    // A string, bound on every pass of a loop.
+    let os: string? = label(3)
+    s = "start"
+    for i in 0..3 {
+        s = match os {
+            some(s) -> "${s}/${i}"
+            none -> "none"
+        }
+    }
+    check("string", s, "k3/2")
+
+    // A match that gives its value to the one bound, binding the name too.
+    let ok: int? = 2
+    n = 0
+    n = match o {
+        some(n) -> {
+            match ok {
+                some(n) -> n * 100
+                none -> 0
+            }
+        }
+        none -> 1
+    }
+    check("nested", "${n}", "200")
+
+    // A variable a closure writes, which lives in a cell, and a closure in
+    // the arm reading the binding.
+    c = 0
+    bump = || { c = c + 1 }
+    bump()
+    c = match o {
+        some(c) -> {
+            f = | k: int | -> c + k
+            f(1)
+        }
+        none -> 0
+    }
+    check("cell", "${c}", "10")
+
+    // A struct that owns a string.
+    let on: Named? = Named { name: label(1), n: 1 }
+    nm = Named { name: "a", n: 0 }
+    nm = match on {
+        some(nm) -> Named { name: "${nm.name}!", n: nm.n + 1 }
+        none -> Named { name: "none", n: 0 }
+    }
+    check("owning", "${nm.name} ${nm.n}", "k1! 2")
+
+    // A module variable, and an actor's state.
+    g = match o {
+        some(g) -> g + 1
+        none -> 0
+    }
+    check("module var", "${g}", "10")
+    a = spawn(Holder())
+    int held = a ? Get {}
+    check("actor state", "${held}", "42")
+
+    if bad != 0 {
+        exit(1)
+    }
+    println("ok")
+}

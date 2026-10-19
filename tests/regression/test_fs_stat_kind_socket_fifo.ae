@@ -18,8 +18,8 @@ extern exit(code: int)
 extern system(cmd: string) -> int
 
 fn stat_kind(p: string) -> int {
-    _ = fs.fs_try_stat(p)
-    return fs.fs_get_stat_kind()
+    _ = fs.try_stat(p)
+    return fs.get_stat_kind()
 }
 
 main() {
@@ -61,7 +61,7 @@ main() {
     }
 
     // is_socket is false for a non-socket (a FIFO and a regular file).
-    if fs.fs_is_socket("${dir}/f") == 0 && fs.fs_is_socket("${dir}/reg") == 0 {
+    if fs.is_socket("${dir}/f") == 0 && fs.is_socket("${dir}/reg") == 0 {
         println("ok   fs.is_socket false for fifo + regular file")
     } else {
         println("FAIL fs.is_socket true for a non-socket"); total_ok = 0

@@ -690,7 +690,7 @@ int is_owning_array_string_element(CodeGenerator* gen, ASTNode* e) {
 
 /* The type a match expression's arms yield: the first value an arm yields
  * (match_arm_value, so a block arm's final expression counts, #2496). */
-static Type* match_value_type(ASTNode* m) {
+Type* match_value_type(ASTNode* m) {
     for (int i = 1; m && i < m->child_count; i++) {
         ASTNode* arm = m->children[i];
         if (!arm || arm->type != AST_MATCH_ARM || arm->child_count < 2) continue;
@@ -1307,6 +1307,8 @@ static const char* scrutinee_c_type(ASTNode* expr) {
     if (t->kind == TYPE_UINT8)      return "uint8_t";
     if (t->kind == TYPE_BYTE)       return "unsigned char";
     if (t->kind == TYPE_BOOL)       return "bool";
+    /* #2992: a struct a match's struct patterns read fields of. */
+    if (t->kind == TYPE_STRUCT)     return get_c_type(t);
     return "int";
 }
 
@@ -1474,14 +1476,12 @@ static void generate_list_pattern_bindings(CodeGenerator* gen, ASTNode* pattern,
         }
         if (tail && tail->type == AST_PATTERN_VARIABLE && tail->value) {
             if (expr_references_var(body, tail->value)) {
-                /* #1286: the tail is a `T[]` slice over the rest; `_len`
-                 * is kept for code that still reads the companion. */
+                /* #1286: the tail is a `T[]` slice over the rest, its
+                 * length `.len`. #2995: it has no `<name>_len` companion,
+                 * which is a raw pointer's alone; the checker never
+                 * declared one, and the C local hid a user's of that name. */
                 print_line(gen, "AetherSlice %s = aether_slice_make(&_match_arr[1], (uint64_t)(%s - 1));",
                            tail->value, len_name);
-                print_line(gen, expr_references_var(body, cg_internf("%s_len", tail->value))
-                                    ? "int %s_len = %s - 1;"
-                                    : "int %s_len = %s - 1; (void)%s_len;",
-                           tail->value, len_name, tail->value);
                 mark_pattern_binding(gen, tail->value, TYPE_ARRAY);
             }
         }
@@ -5348,13 +5348,12 @@ void push_heap_string_exit_free_defers(CodeGenerator* gen, ASTNode* body) {
     for (int i = 0; i < gen->heap_string_var_count; i++) {
         const char* name = gen->heap_string_vars[i];
         if (!name) continue;
-        /* Skip closure-env vars and promoted captures — they have
-         * their own defer-free shapes via the existing closure /
-         * promoted-cell paths (see claim_closure_local_env and
-         * emit_promoted_cell_declaration below). Adding a heap-
-         * string-exit defer on top would emit a free on a name
-         * that doesn't live as a `const char*` at function
-         * scope. */
+        /* Skip a capture the closure reads from its environment and
+         * a promoted capture: the first is released by the env's
+         * destructor, the second lives in a cell that
+         * emit_promoted_cell_declaration (above) declares and
+         * releases. A string exit release on top would release a
+         * name that is not a `const char*` at function scope. */
         int is_env_cap = 0;
         for (int e = 0; e < gen->current_env_capture_count; e++) {
             if (gen->current_env_captures[e] &&
@@ -6248,12 +6247,13 @@ static int call_may_hand_back_args(CodeGenerator* gen, ASTNode* call);
 /* The calls in an expression statement whose value is a struct, owning
  * strings, returned by value: temporaries the statement destroys once done
  * (see the expression-statement path). Not into a closure, whose body is
- * its own function. A struct literal a call borrows is one too (#2749),
- * unless the call's result may be a view into it, and it keeps what its
- * fields hold, which go with it. */
+ * its own function, nor into a `match` used as an operand (#2993), whose
+ * arms are statements with temporaries of their own. A struct literal a
+ * call borrows is one too (#2749), unless the call's result may be a view
+ * into it, and it keeps what its fields hold, which go with it. */
 void collect_stmt_struct_temps(CodeGenerator* gen, ASTNode* e,
                                ASTNode*** nodes, int* count, int* cap) {
-    if (!e || e->type == AST_CLOSURE) return;
+    if (!e || e->type == AST_CLOSURE || e->type == AST_MATCH_STATEMENT) return;
     if (e->type == AST_FUNCTION_CALL && e->node_type &&
         e->node_type->kind == TYPE_STRUCT && struct_owning_strings(gen, e->node_type)) {
         if (*count == *cap) {
@@ -6375,9 +6375,10 @@ static int call_may_hand_back_args(CodeGenerator* gen, ASTNode* call) {
 }
 
 /* #2619: is a struct a call returns, owning strings, somewhere in `e`? Or a
- * struct literal a call borrows (#2749), which is a temporary as well. */
+ * struct literal a call borrows (#2749), which is a temporary as well. Not
+ * one in the arms of a `match` (#2993): an arm is a statement of its own. */
 static int holds_struct_call(CodeGenerator* gen, ASTNode* e) {
-    if (!e || e->type == AST_CLOSURE) return 0;
+    if (!e || e->type == AST_CLOSURE || e->type == AST_MATCH_STATEMENT) return 0;
     if (e->type == AST_FUNCTION_CALL && e->node_type && e->node_type->kind == TYPE_STRUCT &&
         struct_owning_strings(gen, e->node_type)) return 1;
     for (int i = 0; i < e->child_count; i++) {
@@ -7043,6 +7044,20 @@ void emit_optional_coerced(CodeGenerator* gen, ASTNode* value, Type* target) {
         fprintf(gen->output, "(%s){0}", tc);
         return;
     }
+    /* #2845: an if-expression goes into the optional arm by arm, as a match
+     * does: each arm wrapped (a tuple literal as its compound literal),
+     * `none` the empty optional, an optional arm as it is. Wrapped whole,
+     * `if c { 3 } else { none }` was `.val = (c ? 3 : {0})`. */
+    if (value->type == AST_IF_EXPRESSION && value->child_count >= 3) {
+        fprintf(gen->output, "((");
+        generate_expression(gen, value->children[0]);
+        fprintf(gen->output, ") ? ");
+        emit_optional_coerced(gen, value->children[1], target);
+        fprintf(gen->output, " : ");
+        emit_optional_coerced(gen, value->children[2], target);
+        fprintf(gen->output, ")");
+        return;
+    }
     if (value->node_type && value->node_type->kind == TYPE_OPTIONAL) {
         generate_expression(gen, value);   // already an optional
         return;
@@ -7252,9 +7267,43 @@ static void emit_match_arm_block(CodeGenerator* gen, ASTNode* block) {
 // match's flag whether it owns it.
 static void emit_match_result_value_now(CodeGenerator* gen, ASTNode* result);
 
+/* #2993: an arm's value of a bound match, `x = match ...`, stored into the
+ * place as the statement `x = <value>` stores it: a local (its string or
+ * struct taken, the old one released), a closure's cell, a sum wrapped, a
+ * module variable, an actor's state. The bound form stored a bare `x =`
+ * for a plain local only, so a store into another place was the match as
+ * an expression, a GNU statement expression the strict C path refuses (an
+ * actor's state), or a local that hid the module variable it named. The
+ * statement is the arm's own: its value's temporaries and constructs that
+ * run statements are its. */
+static void emit_bound_match_store(CodeGenerator* gen, ASTNode* result) {
+    ASTNode* bound = gen->match_result_bound;
+    ASTNode* store = create_ast_node(AST_VARIABLE_DECLARATION, bound->value,
+                                     result->line ? result->line : bound->line,
+                                     result->line ? result->column : bound->column);
+    if (bound->node_type) store->node_type = clone_type(bound->node_type);
+    store->type_inferred = bound->type_inferred;
+    add_child(store, result);
+    const char* saved_var = gen->match_result_var;
+    ASTNode* saved_bound = gen->match_result_bound;
+    gen->match_result_var = NULL;
+    gen->match_result_bound = NULL;
+    generate_statement(gen, store);
+    gen->match_result_var = saved_var;
+    gen->match_result_bound = saved_bound;
+    /* The value is the arm's node, which the arm keeps. */
+    store->children[0] = NULL;
+    store->child_count = 0;
+    codegen_own_node(gen, store);
+}
+
 /* #2582: an arm's value, with the temporaries of the structs calls in it
  * return, destroyed once the match's result has taken what it keeps. */
 static void emit_match_result_value(CodeGenerator* gen, ASTNode* result) {
+    if (gen->match_result_var && gen->match_result_bound) {
+        emit_bound_match_store(gen, result);
+        return;
+    }
     ValueTemps vt;
     int has = value_temps_open_expr(gen, result,
                                     gen->match_result_var ? TEMP_KEPT : TEMP_FREE, &vt);
@@ -7271,6 +7320,21 @@ static void emit_match_result_value(CodeGenerator* gen, ASTNode* result) {
 
 static void emit_match_result_value_now(CodeGenerator* gen, ASTNode* result) {
     print_indent(gen);
+    if (gen->match_result_var && gen->match_result_own) {
+        /* #2993: the temporary of a `match` used as an operand owns what
+         * it holds (R2), and drops what it held (R3). A fixed-size array
+         * is filled, as C assigns no arrays. */
+        Type* ot = gen->match_result_own;
+        if (ot->kind == TYPE_ARRAY && own_type_owns(gen, ot)) {
+            emit_owning_array_store(gen, gen->match_result_var, ot, result);
+        } else if (ot->kind == TYPE_ARRAY) {
+            emit_array_fill(gen, gen->match_result_var, result, ot);
+            fprintf(gen->output, ";\n");
+        } else {
+            emit_owning_store(gen, gen->match_result_var, ot, result, 0);
+        }
+        return;
+    }
     if (gen->match_result_var && gen->match_result_cell) {
         /* #2514: a closure's variable takes the arm's value in its cell. */
         emit_cell_store(gen, gen->match_result_var, gen->match_result_cell, result);
@@ -7671,6 +7735,11 @@ static void emit_return_value(CodeGenerator* gen, ASTNode* stmt) {
 int needs_optional_coerce(ASTNode* value, Type* target) {
     if (!value || !target || target->kind != TYPE_OPTIONAL) return 0;
     if (value->type == AST_NONE_LITERAL) return 1;
+    /* #2845: an if-expression goes in arm by arm, so it needs the coercion
+     * when either arm does, whatever type the then arm gave it. */
+    if (value->type == AST_IF_EXPRESSION && value->child_count >= 3)
+        return needs_optional_coerce(value->children[1], target) ||
+               needs_optional_coerce(value->children[2], target);
     if (value->node_type && value->node_type->kind == TYPE_OPTIONAL) return 0;
     return 1;
 }
@@ -8235,6 +8304,15 @@ static void stmt_control_run(CodeGenerator* gen, ASTNode* stmt, int temps_open) 
         case AST_MATCH_STATEMENT:
             if (stmt->child_count >= 1) v = stmt->children[0];
             own_temps = 1;
+            break;
+        case AST_SWITCH_STATEMENT:
+        case AST_PANIC_STATEMENT:
+        case AST_REPLY_STATEMENT:
+            /* #2993: a `switch` subject, the reason a `panic` gives, the
+             * message a `reply` sends. Not run ahead, a `match` operand in
+             * one was a statement expression, which only GCC-compatible
+             * compilers take. */
+            if (stmt->child_count >= 1) v = stmt->children[0];
             break;
         case AST_EXPRESSION_STATEMENT:
             if (stmt->child_count < 1 || !stmt->children[0]) break;
@@ -9177,7 +9255,11 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
             // declaration / re-bind, wrapping a variant struct initializer into
             // the tagged union (a value already of the sum type passes through).
             if (stmt->value && strcmp(stmt->value, "_") != 0 &&
-                stmt->node_type && stmt->node_type->kind == TYPE_SUM) {
+                stmt->node_type && stmt->node_type->kind == TYPE_SUM &&
+                /* A match is bound arm by arm (below), each arm's value
+                 * wrapped as this wraps one (#2993). */
+                !(stmt->child_count > 0 && stmt->children[0] &&
+                  stmt->children[0]->type == AST_MATCH_STATEMENT)) {
                 print_indent(gen);
                 if (!is_var_declared(gen, stmt->value)) {
                     /* #2902: volatile where a `try` body writes it. */
@@ -9301,7 +9383,11 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                 }
             }
             
-            if (is_state_var) {
+            /* #2993: a match bound to state is bound arm by arm (below),
+             * each arm's value stored as this stores one. */
+            int bound_match = stmt->child_count > 0 && stmt->children[0] &&
+                              stmt->children[0]->type == AST_MATCH_STATEMENT;
+            if (is_state_var && !bound_match) {
                 /* Generate as assignment to self->field. */
                 if (stmt->child_count > 0 &&
                     emit_state_array_store(gen, actor_state_decl(gen, stmt->value),
@@ -9374,7 +9460,13 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                                 stmt->line, stmt->column);
                         }
                     }
-                    if (!is_var_declared(gen, stmt->value)) {
+                    /* A local of this function is declared here, before
+                     * the arms store into it; a module variable and an
+                     * actor's state are the places they are, and `_`
+                     * names none (#2993). */
+                    if (!is_var_declared(gen, stmt->value) && !is_state_var &&
+                        !is_module_global_var(gen, stmt->value) &&
+                        strcmp(stmt->value, "_") != 0) {
                         mark_var_declared(gen, stmt->value);
                         // Infer type from first match arm result
                         const char* c_type = get_c_type(stmt->node_type);
@@ -9407,46 +9499,33 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                             !is_promoted_capture(gen, stmt->value))
                             mark_heap_string_var(gen, stmt->value);
                     }
-                    /* #2461: a string local takes each arm's value as it
-                     * would take it on its own (emit_string_take_rebind)
-                     * and releases the value it held before, like the
-                     * reassignment wrapper. The arms used to store a bare
-                     * pointer: a borrow of a buffer its owner then freed,
-                     * and the old value leaked. A block or statement arm
-                     * leaves the local as it was. */
+                    /* #2993: each arm stores its value into the place as
+                     * `x = <value>` stores it (emit_bound_match_store): a
+                     * string local takes it and releases the one it held
+                     * (#2461), a string-owning struct is replaced (#2497),
+                     * an optional wraps it, a closure's cell takes it
+                     * (#2514), a sum wraps a variant, and a module variable
+                     * and an actor's state are written where they are. A
+                     * block or statement arm leaves the place as it was. */
                     const char* saved_mvar = gen->match_result_var;
                     int saved_mstring = gen->match_result_string;
                     const char* saved_mstruct = gen->match_result_struct;
                     int saved_mreplace = gen->match_result_replace;
                     Type* saved_mcell = gen->match_result_cell;
                     Type* saved_mopt = gen->match_result_opt;
-                    /* #2497: a local that owns a string-owning struct takes
-                     * each arm's struct and releases the one it held. */
-                    Type* bound = declared_var_type(gen, stmt->value);
-                    if (!bound || bound->kind != TYPE_STRUCT) bound = stmt->node_type;
-                    if (!bound || bound->kind != TYPE_STRUCT)
-                        bound = match_value_type(stmt->children[0]);
-                    const char* bound_struct =
-                        (!is_promoted_capture(gen, stmt->value) &&
-                         !is_env_capture_name(gen, stmt->value))
-                        ? struct_owning_strings(gen, bound) : NULL;
-                    int owning = is_heap_string_var(gen, stmt->value) &&
-                                 !is_promoted_capture(gen, stmt->value) &&
-                                 !is_env_capture_name(gen, stmt->value);
-                    // Generate match with result assignment
+                    Type* saved_mown = gen->match_result_own;
+                    ASTNode* saved_mbound = gen->match_result_bound;
                     gen->match_result_var = stmt->value;
-                    gen->match_result_string = owning;
-                    gen->match_result_struct = bound_struct;
-                    gen->match_result_replace = 1;
-                    gen->match_result_cell = cell_type;
-                    /* An optional local takes each arm's value wrapped. */
-                    {
-                        Type* ot = declared_var_type(gen, stmt->value);
-                        if (!ot || ot->kind != TYPE_OPTIONAL) ot = stmt->node_type;
-                        gen->match_result_opt = (ot && ot->kind == TYPE_OPTIONAL && !cell_type)
-                                                ? ot : NULL;
-                    }
+                    gen->match_result_bound = stmt;
+                    gen->match_result_string = 0;
+                    gen->match_result_struct = NULL;
+                    gen->match_result_replace = 0;
+                    gen->match_result_cell = NULL;
+                    gen->match_result_opt = NULL;
+                    gen->match_result_own = NULL;
                     generate_statement(gen, stmt->children[0]);
+                    gen->match_result_bound = saved_mbound;
+                    gen->match_result_own = saved_mown;
                     gen->match_result_opt = saved_mopt;
                     gen->match_result_var = saved_mvar;
                     gen->match_result_string = saved_mstring;
@@ -9620,8 +9699,8 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                                  "loop body of this function, and a local first bound inside a "
                                  "branch or loop body is one variable for the whole function. Use "
                                  "a new name for the %s value, or convert it to %s",
-                                 stmt->value, type_to_string(here), type_to_string(hoisted),
-                                 type_to_string(here), type_to_string(hoisted));
+                                 stmt->value, type_spelled(here), type_spelled(hoisted),
+                                 type_spelled(here), type_spelled(hoisted));
                         AetherError e = { stmt->source_file, NULL, stmt->line, stmt->column, msg,
                                           NULL, NULL, AETHER_ERR_TYPE_MISMATCH };
                         aether_error_report(&e);
@@ -11169,7 +11248,16 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                     fprintf(gen->output, "int %s = (int)aether_slice_len(", len_name);
                     generate_expression(gen, match_expr);
                     fprintf(gen->output, ");\n");
+                } else if (uses_list_patterns && type_is_sized_array(match_expr->node_type) &&
+                           match_expr->node_type->array_size > 0) {
+                    /* #2995: a `T[N]` has its length when it is compiled.
+                     * It was read from a `<name>_len` local, which a
+                     * fixed-size array has no need of: "'xs_len'
+                     * undeclared". */
+                    print_line(gen, "int %s = %d;", len_name, match_expr->node_type->array_size);
                 } else if (uses_list_patterns) {
+                    /* A raw pointer has no length: the local `<name>_len`
+                     * the language reference documents gives it. */
                     print_indent(gen);
                     fprintf(gen->output, "int %s = ", len_name);
                     generate_expression(gen, match_expr);
@@ -11180,8 +11268,16 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                     const char* match_c_type = scrutinee_c_type(match_expr);
                     /* #2582: a struct a call in the subject returns lives
                      * until the match is done, since the subject (a string
-                     * field of it, say) is read by every arm. */
-                    has_subject_temps = value_temps_open_expr(gen, match_expr, TEMP_KEPT,
+                     * field of it, say) is read by every arm. #2992: so does
+                     * one the subject is, which struct patterns read the
+                     * fields of: nothing keeps it, so the match drops it at
+                     * its end. */
+                    int subject_is_struct_call = match_expr->type == AST_FUNCTION_CALL &&
+                                                 match_expr->node_type &&
+                                                 match_expr->node_type->kind == TYPE_STRUCT;
+                    has_subject_temps = value_temps_open_expr(gen, match_expr,
+                                                              subject_is_struct_call ? TEMP_FREE
+                                                                                     : TEMP_KEPT,
                                                               &subject_temps);
                     stmt_control_prelude_deferred(gen, stmt);   /* #2798 */
                     print_indent(gen);
@@ -11198,6 +11294,9 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                         int wild = mp && ((mp->type == AST_IDENTIFIER && mp->value &&
                                            strcmp(mp->value, "_") == 0) ||
                                           (mp->node_type && mp->node_type->kind == TYPE_WILDCARD));
+                        /* A struct pattern reads the value only for a field
+                         * it tests or a name its arm reads. */
+                        if (mp && mp->type == AST_PATTERN_STRUCT) wild = 1;
                         if (!wild) compares = 1;
                     }
                     if (!compares) fprintf(gen->output, " (void)_match_val;");
@@ -11223,8 +11322,19 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                     // Check if list pattern
                     int is_list_pattern = (pattern->type == AST_PATTERN_LIST ||
                                           pattern->type == AST_PATTERN_CONS);
+                    int is_struct_pattern = pattern->type == AST_PATTERN_STRUCT;   /* #2992 */
 
-                    if (is_wildcard) {
+                    if (is_struct_pattern) {
+                        /* Its fields tested as a clause head's are
+                         * (emit_struct_pattern_test); one that tests none
+                         * takes every value. */
+                        print_indent(gen);
+                        fprintf(gen->output, i > 1 ? "else if (" : "if (");
+                        int first = 1;
+                        emit_struct_pattern_test(gen, "_match_val", pattern, &first);
+                        if (first) fprintf(gen->output, "1");
+                        fprintf(gen->output, ") {\n");
+                    } else if (is_wildcard) {
                         // else clause
                         if (i > 1) {
                             print_indent(gen);
@@ -11276,6 +11386,9 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                     if (is_list_pattern) {
                         enter_scope(gen);
                         generate_list_pattern_bindings(gen, pattern, match_expr, len_name, result, is_seq_match);
+                    } else if (is_struct_pattern) {
+                        enter_scope(gen);
+                        emit_struct_pattern_bindings(gen, "_match_val", pattern, result, result);
                     }
 
                     if (result->type == AST_BLOCK) {
@@ -11290,7 +11403,7 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                         // Single expression — assign to result var or emit as statement
                         emit_match_result_value(gen, result);
                     }
-                    if (is_list_pattern) exit_scope(gen);
+                    if (is_list_pattern || is_struct_pattern) exit_scope(gen);
                     truncate_declared_vars(gen, saved_arm_vars);
                     unindent(gen);
                     print_line(gen, "}");
@@ -11501,6 +11614,28 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
         }
             
         case AST_RETURN_STATEMENT: {
+            /* #2845: `return a, b` (or `return (a, b)`) from a function whose
+             * result is an optional tuple is the tuple wrapped into it, as
+             * a binding of the tuple literal is (#2833): re-dispatched as
+             * the return of one tuple literal, which emit_return_value
+             * coerces into the optional. The multi-value paths below build
+             * the result tuple itself, which an optional is not. */
+            if (stmt->child_count > 1 && !gen->in_main_function &&
+                gen->current_func_return_type &&
+                gen->current_func_return_type->kind == TYPE_OPTIONAL &&
+                gen->current_func_return_type->element_type &&
+                gen->current_func_return_type->element_type->kind == TYPE_TUPLE &&
+                gen->current_func_return_type->element_type->tuple_count == stmt->child_count) {
+                ASTNode* lit = create_ast_node(AST_TUPLE_LITERAL, NULL, stmt->line, stmt->column);
+                for (int j = 0; j < stmt->child_count; j++) add_child(lit, stmt->children[j]);
+                lit->node_type = clone_type(gen->current_func_return_type->element_type);
+                ASTNode* rstmt = create_ast_node(AST_RETURN_STATEMENT, NULL, stmt->line, stmt->column);
+                add_child(rstmt, lit);
+                generate_statement(gen, rstmt);
+                lit->child_count = 0;   /* the elements are this return's */
+                free_ast_node(rstmt);
+                break;
+            }
             // #1054: `return match x { ... }`, a match in return position, is a
             // value-producing expression, not a statement. Lower it via the same
             // result-variable mechanism the working `v = match x { ... }` form
@@ -11537,7 +11672,11 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                 int saved_replace = gen->match_result_replace;
                 Type* saved_cell = gen->match_result_cell;
                 Type* saved_opt = gen->match_result_opt;
+                Type* saved_own = gen->match_result_own;
+                ASTNode* saved_bound = gen->match_result_bound;
+                gen->match_result_bound = NULL;
                 gen->match_result_cell = NULL;
+                gen->match_result_own = NULL;
                 /* A match returned from an optional result: each arm's
                  * value wrapped into it. */
                 gen->match_result_opt = (rt && rt->kind == TYPE_OPTIONAL &&
@@ -11549,6 +11688,8 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                 gen->match_result_struct = struct_owning_strings(gen, rt);
                 gen->match_result_replace = 0;
                 generate_statement(gen, m);
+                gen->match_result_own = saved_own;
+                gen->match_result_bound = saved_bound;
                 gen->match_result_opt = saved_opt;
                 gen->match_result_var = saved;
                 gen->match_result_string = saved_string;
@@ -11786,12 +11927,13 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                      * emit_uniform_heap_return_expr. */
                     emit_return_value(gen, stmt);   // #340: coerces into `T?`
                     fprintf(gen->output, ";\n");
-                    /* Every env-free here is sound to run: a closure local
-                     * the value returns has none (claim_closure_local_env
-                     * counts a return as an escape), and a closure that the
-                     * returned one captured is kept by the reference the
-                     * capture took (#2494). Holding those frees back, as
-                     * this return used to, only leaked the captured env. */
+                    /* Every env release the exit runs is sound: the
+                     * return value above took a reference of its own (R3),
+                     * so a returned closure local releases only its own,
+                     * and a closure the returned one captured is kept by
+                     * the reference the capture took (#2494). Holding those
+                     * releases back, as this return used to, only leaked
+                     * the captured env. */
                     /* #1140: a single-value `return v` is a SUCCESS exit — in a
                      * `T!` function it is wrapped as `{._0 = v, ._1 = ""}`, and
                      * in an ordinary function there is no error channel at all.
@@ -12816,8 +12958,9 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
 // owning local at its last use, and takes (retains) anything else; a
 // literal is pinned and costs no count; a release happens where a place is
 // overwritten and where it goes away; a function hands its caller one
-// reference from every return. A local still handed to C where C may keep
-// it (R4) is kept alive instead of released, and says so.
+// reference from every return. A string handed to C is borrowed for the
+// call, and an extern that keeps one declares the parameter `@retain` (R4);
+// the closing note says so.
 // =====================================================================
 
 static const char* diag_store_shape(CodeGenerator* gen, ASTNode* rhs, const char** how) {
@@ -12829,7 +12972,7 @@ static const char* diag_store_shape(CodeGenerator* gen, ASTNode* rhs, const char
     }
     if (is_heap_string_expr(gen, rhs)) { *how = "move"; return "fresh: a call's result"; }
     *how = "take";
-    return "borrowed: retained";
+    return "borrowed: retained, or copied if C's";
 }
 
 static void diag_walk_assignments(CodeGenerator* gen, ASTNode* node,
@@ -12863,11 +13006,9 @@ void codegen_diagnose_ownership(ASTNode* program, FILE* out) {
     if (!program || !out) return;
 
     /* Build a minimal CodeGenerator. The predicates below read
-     * `gen->program` (for the user-fn structural-escape lookup) and
-     * `gen->extern_registry` (for the type-based escape param lookup
-     * `lookup_callee_param_kind` does to keep `string.length(s)` from
-     * over-marking `s` as escaped). The rest of the struct stays
-     * zeroed. */
+     * `gen->program` (a called function's declared result) and
+     * `gen->extern_registry` (an extern's declared result, `@heap` or
+     * not). The rest of the struct stays zeroed. */
     CodeGenerator gen;
     memset(&gen, 0, sizeof(gen));
     gen.program = program;
@@ -12973,10 +13114,11 @@ void codegen_diagnose_ownership(ASTNode* program, FILE* out) {
     }
 
     fprintf(out,
-            "\nA line marked KEPT ALIVE names a local passed where C may keep\n"
-            "the pointer (a `ptr` or `@retain` parameter of an extern): it is\n"
-            "not released, so C's copy stays good. Declare the extern's\n"
-            "parameter `@noescape` if C only reads it during the call.\n"
+            "\nA store marked `move` hands the place the value's own reference;\n"
+            "`take` adds one: a counted string is retained, C's characters are\n"
+            "copied, and a pinned literal is used as it is. A string passed to C\n"
+            "is borrowed for the call; an extern that keeps it declares the\n"
+            "parameter `@retain`, and the call hands it a reference of its own.\n"
             "\n=== end diagnosis ===\n");
     code_generator_release(&gen);
 }

@@ -191,23 +191,23 @@ check_sizes() -> int {
         ct = 768
         if k == 3 { ct = 1088 }
         if k == 4 { ct = 1568 }
-        if mlkem.mlkem_ek_bytes(k) != 384 * k + 32 { println("FAIL mlkem_ek_bytes(${k}) = ${mlkem.mlkem_ek_bytes(k)}") fails = fails + 1 }
-        if mlkem.mlkem_dk_bytes(k) != 768 * k + 96 { println("FAIL mlkem_dk_bytes(${k}) = ${mlkem.mlkem_dk_bytes(k)}") fails = fails + 1 }
-        if mlkem.mlkem_ct_bytes(k) != ct { println("FAIL mlkem_ct_bytes(${k}) = ${mlkem.mlkem_ct_bytes(k)}") fails = fails + 1 }
+        if mlkem.ek_bytes(k) != 384 * k + 32 { println("FAIL mlkem_ek_bytes(${k}) = ${mlkem.ek_bytes(k)}") fails = fails + 1 }
+        if mlkem.dk_bytes(k) != 768 * k + 96 { println("FAIL mlkem_dk_bytes(${k}) = ${mlkem.dk_bytes(k)}") fails = fails + 1 }
+        if mlkem.ct_bytes(k) != ct { println("FAIL mlkem_ct_bytes(${k}) = ${mlkem.ct_bytes(k)}") fails = fails + 1 }
         k = k + 1
     }
     bad = 0 - 1
     while bad <= 6 {
         if bad < 2 || bad > 4 {
-            if mlkem.mlkem_ek_bytes(bad) != 0 || mlkem.mlkem_dk_bytes(bad) != 0 || mlkem.mlkem_ct_bytes(bad) != 0 {
-                println("FAIL mlkem sizes for unsupported k=${bad}: ${mlkem.mlkem_ek_bytes(bad)} ${mlkem.mlkem_dk_bytes(bad)} ${mlkem.mlkem_ct_bytes(bad)}, want 0")
+            if mlkem.ek_bytes(bad) != 0 || mlkem.dk_bytes(bad) != 0 || mlkem.ct_bytes(bad) != 0 {
+                println("FAIL mlkem sizes for unsupported k=${bad}: ${mlkem.ek_bytes(bad)} ${mlkem.dk_bytes(bad)} ${mlkem.ct_bytes(bad)}, want 0")
                 fails = fails + 1
             }
         }
         bad = bad + 1
     }
-    if mlkem.mlkem_ek_bytes(1000000) != 0 { println("FAIL mlkem_ek_bytes(1000000)") fails = fails + 1 }
-    if mlkem.mlkem_ss_bytes() != 32 { println("FAIL mlkem_ss_bytes") fails = fails + 1 }
+    if mlkem.ek_bytes(1000000) != 0 { println("FAIL mlkem_ek_bytes(1000000)") fails = fails + 1 }
+    if mlkem.ss_bytes() != 32 { println("FAIL mlkem_ss_bytes") fails = fails + 1 }
     if fails == 0 { println("ok   mlkem size helpers (k = 2, 3, 4; 0 otherwise)") }
     return fails
 }
@@ -246,9 +246,9 @@ main() {
     // ML-KEM-768 round-trip with fixed seeds.
     d = seed(1); z = seed(100); m = seed(200)
     ek, dk, _kerr = mlkem.mlkem768_keygen_derand(d, z)
-    if bytes.length(ek) != mlkem.mlkem_ek_bytes(3) { println("FAIL 768 ek size ${bytes.length(ek)}"); fails = fails + 1 }
+    if bytes.length(ek) != mlkem.ek_bytes(3) { println("FAIL 768 ek size ${bytes.length(ek)}"); fails = fails + 1 }
     ct, k1, _eerr = mlkem.mlkem768_encaps_derand(ek, m)
-    if bytes.length(ct) != mlkem.mlkem_ct_bytes(3) { println("FAIL 768 ct size"); fails = fails + 1 }
+    if bytes.length(ct) != mlkem.ct_bytes(3) { println("FAIL 768 ct size"); fails = fails + 1 }
     k2, _derr = mlkem.mlkem768_decaps(dk, ct)
     if bh(k1) == bh(k2) { println("ok   mlkem768 round-trip (K=${bytes.length(k1)} bytes)") } else { println("FAIL mlkem768 K mismatch"); println("  enc ${bh(k1)}"); println("  dec ${bh(k2)}"); fails = fails + 1 }
 

@@ -70,7 +70,7 @@ derive_block(algo: string, password: byte[], salt: byte[], iterations: int, i: i
     bytes.set(sin, salt_len + 2, (i >> 8) & 0xFF)
     bytes.set(sin, salt_len + 3, i & 0xFF)
 
-    u = hmac.hmac_bytes(algo, password, bytes.view(sin)[0..sin_len])
+    u = hmac.bytes(algo, password, bytes.view(sin)[0..sin_len])
     bytes.free(sin)
     if u == null {
         return 0
@@ -83,7 +83,7 @@ derive_block(algo: string, password: byte[], salt: byte[], iterations: int, i: i
     // U(j) = HMAC(P, U(j-1)); XOR each into the accumulator.
     j = 1
     while j < iterations {
-        next = hmac.hmac_bytes(algo, password, bytes.view(u)[0..hl])
+        next = hmac.bytes(algo, password, bytes.view(u)[0..hl])
         bytes.free(u)
         if next == null {
             bytes.free(acc)

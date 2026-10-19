@@ -73,7 +73,7 @@ main() {
 
     // ---- dstu7564-256 (DSTU 7564:2014 / BC Dstu7564Test vectors) ----
     fails = fails + check("dstu7564-256 empty",
-        dstu7564.dstu7564_hex("dstu7564-256", string.bytes("")),
+        dstu7564.hex("dstu7564-256", string.bytes("")),
         "cd5101d1ccdf0d1d1f4ada56e888cd724ca1a0838a3521e7131d4fb78d0f5eb6")
 
     fails = fails + check("dstu7564-256 ff",
@@ -104,7 +104,7 @@ main() {
 
     // ---- dstu7564-512 ----
     fails = fails + check("dstu7564-512 empty",
-        dstu7564.dstu7564_hex("dstu7564-512", string.bytes("")),
+        dstu7564.hex("dstu7564-512", string.bytes("")),
         "656b2f4cd71462388b64a37043ea55dbe445d452aecd46c3298343314ef04019bcfa3f04265a9857f91be91fce197096187ceda78c9c1c021c294a0689198538")
 
     fails = fails + check("dstu7564-512 ff",

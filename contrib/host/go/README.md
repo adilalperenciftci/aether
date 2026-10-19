@@ -1,4 +1,4 @@
-# contrib.host.go — Go via Separate Subprocess
+# contrib.host.go: Go via Separate Subprocess
 
 ## Prerequisites
 
@@ -16,7 +16,7 @@ go version
 ## Build flags
 
 Unlike the in-process hosts (Lua, Python, Perl, Ruby, Tcl, JS) the Go
-host has no library to embed — the bridge shells out to the `go`
+host has no library to embed: the bridge shells out to the `go`
 toolchain. No headers or `-l` flags are needed beyond the standard
 Aether runtime:
 
@@ -46,7 +46,7 @@ go.run_sandboxed(perms, "/path/to/built_binary")
 
 Go can't share a process with another runtime, so the host runs Go
 code as a **separate subprocess under LD_PRELOAD sandbox
-interception** — same pattern as `contrib/host/aether`. Grants apply
+interception**: same pattern as `contrib/host/aether`. Grants apply
 to libc calls the Go binary makes (open, connect, execve, getenv)
 exactly the same way they apply to any other process.
 
@@ -77,17 +77,17 @@ contain *the script's* effects, not the toolchain's.
 This host has no dedicated integration test of its own. The closest
 end-to-end coverage of the Go path lives at
 [`tests/integration/host_tinygo/`](../../../tests/integration/host_tinygo/),
-the sibling [`tinygo`](../tinygo/) host — which is built with the same
+the sibling [`tinygo`](../tinygo/) host, which is built with the same
 Go toolchain (`CGO_ENABLED=1 go build -buildmode=c-shared`, despite
 the "tinygo" brand on the bridge).
 [`uses_tinygo.ae`](../../../tests/integration/host_tinygo/uses_tinygo.ae)
 is the driver (it `dlopen`s the c-shared `.so` and exercises five
-wrapper signatures — `Answer`, `Add`, `Negate`, `Greet`), and
+wrapper signatures: `Answer`, `Add`, `Negate`, `Greet`), and
 [`test_host_tinygo.sh`](../../../tests/integration/host_tinygo/test_host_tinygo.sh)
 is the runner.
 
 Like this host, that test **SKIPs** (never fails) when `go` is not on
-`$PATH` — so it no-ops on CI machines without the Go toolchain. With
+`$PATH`, so it no-ops on CI machines without the Go toolchain. With
 `go` available it builds the `.so` from a tmpdir copy of the example
 source, runs the driver, and asserts each expected output line.
 

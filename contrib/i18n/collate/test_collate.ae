@@ -13,8 +13,8 @@
 //
 // LEAK-GATED. contrib_check.sh runs this entry under the leak checker
 // ("i18n/collate was written leak-clean by design"), which constrains how
-// it may exit: the process must return from main normally so the
-// heap-string tracker performs its scope-end cleanup. Calling exit() would
+// it may exit: the process must return from main normally so every
+// scope's releases run at its exit. Calling exit() would
 // bypass that and the still-live sort keys would be reported as leaks.
 // std.spec's run_summary returns normally when everything passes and only
 // calls exit(1) on failure, so that property survives this conversion —

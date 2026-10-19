@@ -53,7 +53,7 @@ main() {
 
     // ISAP Hash test vectors from LWC_HASH_KAT_256.txt
     fails = fails + check("empty",
-        isap.isap_hex(string.bytes("")),
+        isap.hex(string.bytes("")),
         "7346bc14f036e87ae03d0997913088f5f68411434b3cf8b54fa796a80d251f91")
 
     // Msg = 00

@@ -304,8 +304,7 @@ main() {
     words = string.seq_cons("hello", words)
     words = string.seq_cons("hey", words)
     println(total_length(words))  // 10
-    string.seq_free(words)
-}
+}                                 // words is released here
 ```
 
 The functional style reads like a definition: "The total length of an empty list is 0; the total length of a list is the length of the head plus the total length of the tail."
@@ -371,7 +370,6 @@ main() {
     words = string.seq_cons("elephant", words)
     words = string.seq_cons("cat", words)
     println(longest(words))  // elephant
-    string.seq_free(words)
 }
 ```
 

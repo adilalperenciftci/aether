@@ -38,7 +38,7 @@ exports(
 // managed string (empty on error).
 extern aether_collate_compare(locale: string, a: string, b: string) -> int
 // `@heap`: the C side returns a FRESH AetherString the caller owns; the
-// heap-string tracker frees it at scope end (no manual free — leak-clean).
+// place that takes it releases it, with no manual free (leak-clean).
 extern aether_collate_sort_key_hex(locale: string, input: string) -> string @heap
 
 // Compare two strings under `locale`. Returns -1 if a < b, 0 if equal, 1 if

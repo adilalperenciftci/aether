@@ -47,17 +47,17 @@ fail(code: int, msg: string) {
 
 // -s: the texts as one array (a single text in the stream).
 slurped(texts: ptr) -> ptr {
-    arr = json.json_create_array()
+    arr = json.create_array()
     n = list.size(texts)
     i = 0
     while i < n {
-        json.json_array_add_raw(arr, list.get_raw(texts, i))
+        json.array_add_raw(arr, list.get_raw(texts, i))
         list.set(texts, i, null)
         i = i + 1
     }
     list.free(texts)
     one = list.new()
-    list.list_add_raw(one, arr)
+    list.add_raw(one, arr)
     return one
 }
 
@@ -103,13 +103,13 @@ main() {
         }
         else if string.equals(a, "--arg") == 1 || string.equals(a, "--argjson") == 1 {
             if i + 2 >= argc { usage() }
-            list.list_add_raw(var_names, json.json_create_string(os.args_get(i + 1)))
+            list.add_raw(var_names, json.create_string(os.args_get(i + 1)))
             if string.equals(a, "--arg") == 1 {
-                list.list_add_raw(var_values, json.json_create_string(os.args_get(i + 2)))
+                list.add_raw(var_values, json.create_string(os.args_get(i + 2)))
             } else {
                 v, verr = json.parse(os.args_get(i + 2))
                 if v == null { fail(2, "example_jq: invalid JSON text passed to --argjson: ${verr}") }
-                list.list_add_raw(var_values, v)
+                list.add_raw(var_values, v)
             }
             i = i + 2
         }
@@ -127,7 +127,7 @@ main() {
     prog = compiled
     k = 0
     while k < list.size(var_names) {
-        jq.set_var(prog, json.json_get_string_raw(list.get_raw(var_names, k)), list.get_raw(var_values, k))
+        jq.set_var(prog, json.get_string_raw(list.get_raw(var_names, k)), list.get_raw(var_values, k))
         list.set(var_values, k, null) // donated to the program
         k = k + 1
     }
@@ -143,7 +143,7 @@ main() {
     queue = list.new()
     k = 0
     while k < list.size(texts) {
-        list.list_add_raw(queue, list.get_raw(texts, k))
+        list.add_raw(queue, list.get_raw(texts, k))
         k = k + 1
     }
     code = 0
@@ -152,7 +152,7 @@ main() {
     runs = 0
     while (null_input == 1 && runs == 0) || (null_input == 0 && list.size(queue) > 0) {
         runs = runs + 1
-        nothing = json.json_create_null()
+        nothing = json.create_null()
         input = nothing
         if null_input == 0 {
             input = list.get_raw(queue, 0)
@@ -161,7 +161,7 @@ main() {
         }
         out = list.new()
         status, hcode, err = jq.run_with_inputs(prog, input, queue, out)
-        json.json_free(nothing)
+        json.free(nothing)
         n = list.size(out)
         if n > 0 { last_truthy = truthy(list.get_raw(out, n - 1)) }
         outputs = outputs + n
@@ -175,17 +175,17 @@ main() {
         if status == jq.RESULT_HALT {
             // halt_error prints a string message as is, anything else as JSON
             if err != null {
-                if json.json_type(err) == 3 {
-                    io.stderr_write(json.json_get_string_raw(err))
+                if json.type(err) == 3 {
+                    io.stderr_write(json.get_string_raw(err))
                 } else {
                     io.stderr_write("${jq.to_json(err)}\n")
                 }
-                json.json_free(err)
+                json.free(err)
             }
             finish(queue, texts, prog)
             os.exit(hcode)
         }
-        if err != null { json.json_free(err) }
+        if err != null { json.free(err) }
     }
     finish(queue, texts, prog)
     if code == 0 && exit_status == 1 {
@@ -196,9 +196,9 @@ main() {
 
 // jq truth: everything but null and false.
 truthy(v: ptr) -> int {
-    t = json.json_type(v)
+    t = json.type(v)
     if t == 0 { return 0 }
-    if t == 1 { return json.json_get_bool(v) }
+    if t == 1 { return json.get_bool(v) }
     return 1
 }
 

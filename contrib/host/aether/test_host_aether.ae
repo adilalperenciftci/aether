@@ -35,7 +35,7 @@ import std.string
 // Capture from a binary that is not there; the "" result dies with this call.
 fn capture_missing(path: string) -> int {
     // This ownership probe deliberately runs without a grant list/preload.
-    out = aether.aether_host_capture_sandboxed(null as sandbox.Grants, path)
+    out = aether.host_capture_sandboxed(null as sandbox.Grants, path)
     return string.length(out)
 }
 
@@ -74,7 +74,7 @@ main() {
         // and get its exit status back. A bridge that resolved its symbols
         // but never actually invoked the compiler would fail here.
         spec.it_when(have_ae, "compiles and runs a child script", reason) callback {
-            spec.assert_eq(aether.aether_host_run_script(child), 0,
+            spec.assert_eq(aether.host_run_script(child), 0,
                 "run_script returns the child's exit code 0")
         }
 
@@ -84,7 +84,7 @@ main() {
         spec.it_when(have_ae, "propagates a non-zero child exit code", reason) callback {
             bad = string.concat(dir, "/child_fails.ae")
             fs.write(bad, "extern exit(code: int)\nmain() {\n    exit(3)\n}\n")
-            spec.assert_not_eq(aether.aether_host_run_script(bad), 0,
+            spec.assert_not_eq(aether.host_run_script(bad), 0,
                 "a child exiting 3 must NOT report success")
         }
 
@@ -93,7 +93,7 @@ main() {
         spec.it_when(have_ae, "reports a child that fails to compile", reason) callback {
             broken = string.concat(dir, "/child_broken.ae")
             fs.write(broken, "main() { this is not aether ((( }\n")
-            spec.assert_not_eq(aether.aether_host_run_script(broken), 0,
+            spec.assert_not_eq(aether.host_run_script(broken), 0,
                 "an uncompilable child must NOT report success")
         }
 
@@ -101,7 +101,7 @@ main() {
         // than silently succeed on nothing.
         spec.it_when(have_ae, "reports a missing script path", reason) callback {
             spec.assert_not_eq(
-                aether.aether_host_run_script("/nonexistent-aether-child-zzz.ae"), 0,
+                aether.host_run_script("/nonexistent-aether-child-zzz.ae"), 0,
                 "a missing script must NOT report success")
         }
 

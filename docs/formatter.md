@@ -45,7 +45,16 @@ It normalizes:
   `[Dir]string`; an index keeps its space before a word (`a[0] as int`). An
   index is written tight to the value it indexes (`xs[0]`, `f()[1]`), and an
   array type's size to its element type (`fn[2]`), while an array literal after
-  a keyword keeps its space (`return []`, `for x in [1, 2]`).
+  a keyword keeps its space (`return []`, `for x in [1, 2]`). A prefix
+  operator is written tight to its operand (`-x`, `*p`), and an operator that
+  begins a line is always a prefix one, since an expression never continues
+  with an operator on a new line (`-2` as a block's last value). A postfix `!`
+  ends a value (`f()! + g()!`), and `or` after a value keeps its space before
+  a parenthesis (`x or (y or { 1 })`), which is its handler, not a call.
+  What follows a type's optional suffix is spaced as it would be after the
+  type, so a closure's parameters read `| o: int? |` as they read
+  `| s: Shape |`; elsewhere the spacing around a `?` (an actor ask) and a `!`
+  is the author's.
 - **Blank lines**: runs of blank lines collapse to at most one, and a blank line
   is never left immediately after `{` or before `}`.
 - **Trailing whitespace** is stripped; the file ends in exactly one newline.
@@ -60,6 +69,28 @@ It preserves, byte for byte:
   (`<<MARKER ... MARKER`, whose body indentation is significant), and **backtick
   raw identifiers** (`` `reply` ``).
 
+## Short names: `--short-names`
+
+```bash
+ae fmt --short-names src tests   # json.json_free(v) -> json.free(v), where both are one function
+```
+
+A call that names its module twice, `json.json_free(v)`, reaches the same
+function as `json.free(v)`. With `--short-names`, `ae fmt` rewrites such calls
+to the short form, and changes nothing else: not the layout, and not a call
+whose short form is another declaration. Which calls qualify is the
+compiler's answer, not a pattern: `aetherc --emit=short-names` checks the file
+and lists each call written `ns.ns_x(...)` whose `ns.x` resolves to the same
+declaration. So std.string's `string.string_join`, an extern beside the
+different `string.join`, is left as written, and so is a name whose short
+form would start with a digit (`sha3.sha3_256_hex`). A file that does not
+compile is reported and left as it is. With `--check`, it lists the files it
+would rewrite and exits 1 if there are any.
+
+The rewrite does not change what a program compiles to: the C it generates is
+byte-identical before and after (modulo `#line` directives), which is how the
+tree's own calls were rewritten (#2976).
+
 ## Safety guarantee
 
 `ae fmt` cannot change what your program does. It works on the token stream: the
@@ -69,11 +100,11 @@ and `a - b` identically, re-spacing between separated tokens cannot change how
 the source parses; the one hazard, gluing two tokens that would re-lex as one
 (`a b` becoming `ab`, or `<` `<` becoming `<<`), is explicitly prevented.
 
-This is verified, not just asserted: formatting every program in `examples/` and
+This is verified, not only asserted: formatting every program in `examples/` and
 `tests/` produces byte-identical generated C (modulo `#line` directives), and
 formatting is idempotent (`fmt(fmt(x)) == fmt(x)`) across the whole corpus.
 
-Both properties are enforced in CI, not just described:
+Both properties are enforced in CI:
 `tests/integration/fmt_gate/test_fmt_gate.sh` fails the build if any
 checked-in `.ae` file under `std/`, `examples/`, or `tests/` is not
 canonically formatted (`ae fmt --check`), if formatting stops being

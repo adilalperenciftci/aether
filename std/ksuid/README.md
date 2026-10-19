@@ -4,7 +4,7 @@ KSUID: a 27-character, time-sortable identifier in base62.
 
 A 4-byte second-resolution timestamp (offset from a 2014 epoch) followed by
 16 random bytes, rendered in `0-9A-Za-z`. Base62 means no hyphens,
-underscores or case-ambiguity concerns — it is alphanumeric throughout, which
+underscores or case-ambiguity concerns: it is alphanumeric throughout, which
 is what makes it safe in a path segment or a double-click selection.
 
 ```aether,run

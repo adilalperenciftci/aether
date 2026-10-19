@@ -4,7 +4,7 @@ A packed, fixed-size array of `int`.
 
 Packed means the values sit contiguously with no per-element boxing, so a
 million ints cost four megabytes and iterate at memory speed. Fixed-size means
-the length is set at construction and carried with the array — which is why
+the length is set at construction and carried with the array, which is why
 `std.sort` takes no separate count.
 
 Accessors return `(value, err)`: an out-of-range index is an error you can
@@ -36,18 +36,18 @@ a[99] err='index out of range'
 ```
 
 `get_unchecked`/`set_unchecked` skip the bounds test for hot loops. They must
-behave identically in range — the only difference is what happens when you are
+behave identically in range: the only difference is what happens when you are
 wrong, which is undefined rather than reported.
 
 `std.longarr` and `std.floatarr` are the same shape for `long` and `float`.
 
-**Indexing with `v[i]` (#2041).** `a[i]` on the handle itself cannot work —
+**Indexing with `v[i]` (#2041).** `a[i]` on the handle itself cannot work:
 the handle is a bare `ptr`, so `[]` has no element type to dispatch on. A
 **view** is typed, and does:
 
 ```aether,fragment
-a = intarr.intarr_new_raw(n)
-v = intarr.intarr_array(a)      // a `int[]` over the same buffer
+a = intarr.new_raw(n)
+v = intarr.array(a)             // an `int[]` over the same buffer
 v[3] = 42
 total = total + v[3]
 ```

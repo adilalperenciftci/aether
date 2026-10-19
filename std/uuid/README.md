@@ -3,7 +3,7 @@
 UUID v4 and v7 (RFC 9562), both in the canonical 36-character
 `8-4-4-4-12` hex form.
 
-**v4** is 122 random bits — the classic opaque identifier. **v7** puts a
+**v4** is 122 random bits: the classic opaque identifier. **v7** puts a
 48-bit millisecond timestamp in the leading bytes, so v7 values sort by
 creation time as plain strings. For a database primary key that matters:
 v4 keys scatter across a B-tree and fragment it, v7 keys append.
@@ -22,7 +22,7 @@ main() {
     println("v4 length: ${string.length(v4)} err='${err4}'")
     println("v7 length: ${string.length(v7)} err='${err7}'")
 
-    // Position 14 carries the version nibble — the one visible
+    // Position 14 carries the version nibble, the one visible
     // difference between the two forms.
     println("v4 version: ${string.substring(v4, 14, 15)}")
     println("v7 version: ${string.substring(v7, 14, 15)}")

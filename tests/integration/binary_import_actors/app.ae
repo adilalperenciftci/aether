@@ -2,7 +2,7 @@
 import relay
 
 main() {
-    v = relay.relay_count(100)
+    v = relay.count(100)
     if v == 300 { println("OK") } else { println("FAIL count ${v}") }
-    relay.relay_announce(7)
+    relay.announce(7)
 }

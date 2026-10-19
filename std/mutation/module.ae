@@ -652,9 +652,9 @@ run(sut_path: string, test_path: string, lib_dir: string) -> int {
         return 0
     }
     score = (k * 100) / scored
-    println("  ${k}/${scored} mutants killed — mutation score ${score}%")
+    println("  ${k}/${scored} mutants killed, mutation score ${score}%")
     if nc > 0 {
-        println("  (${nc} excluded — did not compile)")
+        println("  (${nc} excluded: did not compile)")
     }
     if s > 0 {
         println("  ${s} survived (test gaps):")

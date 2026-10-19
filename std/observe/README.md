@@ -93,7 +93,7 @@ struct Health @observable {
 main() {
     h = heap.new(Health)
     dirty = 0
-    observe.observe_fields(h, |obj: ptr, field: int| {
+    observe.fields(h, |obj: ptr, field: int| {
         if field == observe.ANY_FIELD {
             dirty = 7                 // unknown: resend all three fields
         } else {

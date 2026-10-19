@@ -2,7 +2,7 @@
 
 CBOR (RFC 8949): a binary format with JSON's data model, plus tags.
 
-Same shapes as JSON — but self-describing, compact, and with a **tag**
+Same shapes as JSON, but self-describing, compact, and with a **tag**
 mechanism that lets a value carry its semantic type. That is what makes CBOR
 the encoding under COSE, WebAuthn and much of the constrained-device world:
 a timestamp can be tagged as a timestamp rather than agreed by convention.
@@ -46,7 +46,7 @@ diagnostic: 42 err=''
 ```
 
 Values are built with `from_int`, `num`, `str`, `arr`, `obj`, `boolean` and
-`null_value`, and every constructed value is freed with `cbor.free` — freeing
+`null_value`, and every constructed value is freed with `cbor.free`: freeing
 a container frees what it holds.
 
 `set` (`object_set`) on a key the map already has replaces its value and

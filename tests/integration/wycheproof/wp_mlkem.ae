@@ -108,7 +108,7 @@ fn decaps_k(k: int, dk: ptr, c: ptr) -> (ptr, string) {
 }
 
 fn field(t: ptr, name: string) -> ptr {
-    return from_hex(json.json_get_string_raw(json.json_object_get_raw(t, name)))
+    return from_hex(json.get_string_raw(json.object_get_raw(t, name)))
 }
 
 // Run one case. Returns (ct, key, err); ct is null except for encaps. The
@@ -164,7 +164,7 @@ fn run_file(path: string, kind: int, k: int, stride: int) -> (int, int, int) {
         return 0, 0, 1
     }
 
-    groups = json.json_object_get_raw(root, "testGroups")
+    groups = json.object_get_raw(root, "testGroups")
     ngroups = json.array_size(groups)
 
     passed = 0
@@ -173,17 +173,17 @@ fn run_file(path: string, kind: int, k: int, stride: int) -> (int, int, int) {
     gi = 0
     while gi < ngroups {
         g = json.array_get_raw(groups, gi)
-        tests = json.json_object_get_raw(g, "tests")
+        tests = json.object_get_raw(g, "tests")
         nt = json.array_size(tests)
         ti = 0
         while ti < nt {
             t = json.array_get_raw(tests, ti)
-            tc_id = json.json_get_int(json.json_object_get_raw(t, "tcId"))
+            tc_id = json.get_int(json.object_get_raw(t, "tcId"))
             if (tc_id % stride) != 0 && stride > 1 {
                 ti = ti + 1
                 continue
             }
-            res = json.json_get_string_raw(json.json_object_get_raw(t, "result"))
+            res = json.get_string_raw(json.object_get_raw(t, "result"))
             ct, key, err = run_case(kind, k, t)
 
             if res == "valid" {
@@ -230,7 +230,7 @@ fn run_set(dir: string, name: string, kind: int, k: int, stride: int) -> int {
 
 main() {
     stride = 1
-    sv = os.os_getenv("WYCHEPROOF_STRIDE")
+    sv = os.getenv("WYCHEPROOF_STRIDE")
     if sv != 0 { stride = atoi(sv) }
     if stride < 1 { stride = 1 }
 

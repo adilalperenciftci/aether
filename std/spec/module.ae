@@ -457,7 +457,7 @@ _it_end(_ctx: @keep ptr, description: string, it_rec: ptr, old_failed: int, t_st
         if elapsed_ns >= budget_ns {
             elapsed_ms = elapsed_ns / 1000000
             budget_ms = budget_ns / 1000000
-            fail("${description} — exceeded time budget: ${elapsed_ms}ms >= ${budget_ms}ms")
+            fail("${description}: exceeded time budget: ${elapsed_ms}ms >= ${budget_ms}ms")
         }
     }
 
@@ -529,19 +529,19 @@ fail(msg: string) {
 
 assert_true(condition: int, msg: string) {
     if condition == 0 {
-        fail("${msg} — expected true")
+        fail("${msg}: expected true")
     }
 }
 
 assert_false(condition: int, msg: string) {
     if condition != 0 {
-        fail("${msg} — expected false")
+        fail("${msg}: expected false")
     }
 }
 
 assert_eq(actual: int, expected: int, msg: string) {
     if actual != expected {
-        fail("${msg} — expected ${expected}, got ${actual}")
+        fail("${msg}: expected ${expected}, got ${actual}")
     }
 }
 
@@ -553,13 +553,13 @@ assert_eq(actual: int, expected: int, msg: string) {
 // mem.get_long, a u64 accessor, an IEEE 754 bit pattern — needs this.
 assert_eq_long(actual: long, expected: long, msg: string) {
     if actual != expected {
-        fail("${msg} — expected ${expected}, got ${actual}")
+        fail("${msg}: expected ${expected}, got ${actual}")
     }
 }
 
 assert_str_eq(actual: string, expected: string, msg: string) {
     if string.equals(actual, expected) == 0 {
-        fail("${msg} — expected '${expected}', got '${actual}'")
+        fail("${msg}: expected '${expected}', got '${actual}'")
     }
 }
 
@@ -600,25 +600,25 @@ assert_str_eq_diff(actual: string, expected: string, msg: string) {
     if string.equals(actual, expected) == 0 {
         d = _first_diff(actual, expected)
         caret = string.pad_start("^", 19 + d + 1, 32)
-        fail("${msg} — strings differ at index ${d}\n        expected: \"${expected}\"\n        actual:   \"${actual}\"\n${caret}")
+        fail("${msg}: strings differ at index ${d}\n        expected: \"${expected}\"\n        actual:   \"${actual}\"\n${caret}")
     }
 }
 
 assert_not_eq(actual: int, expected: int, msg: string) {
     if actual == expected {
-        fail("${msg} — expected not ${expected}")
+        fail("${msg}: expected not ${expected}")
     }
 }
 
 assert_gt(actual: int, expected: int, msg: string) {
     if actual <= expected {
-        fail("${msg} — expected > ${expected}, got ${actual}")
+        fail("${msg}: expected > ${expected}, got ${actual}")
     }
 }
 
 assert_contains(haystack: string, needle: string, msg: string) {
     if string.contains(haystack, needle) == 0 {
-        fail("${msg} — '${haystack}' does not contain '${needle}'")
+        fail("${msg}: '${haystack}' does not contain '${needle}'")
     }
 }
 
@@ -642,7 +642,7 @@ assert_contains(haystack: string, needle: string, msg: string) {
 // The call was expected to fail: `err` must be non-empty.
 assert_err(err: string, msg: string) {
     if string.length(err) == 0 {
-        fail("${msg} — expected an error, got success (err was empty)")
+        fail("${msg}: expected an error, got success (err was empty)")
     }
 }
 
@@ -652,11 +652,11 @@ assert_err(err: string, msg: string) {
 // not break every spec that asserts on it.
 assert_err_contains(err: string, needle: string, msg: string) {
     if string.length(err) == 0 {
-        fail("${msg} — expected an error containing '${needle}', got success")
+        fail("${msg}: expected an error containing '${needle}', got success")
         return
     }
     if string.contains(err, needle) == 0 {
-        fail("${msg} — expected the error to contain '${needle}', got '${err}'")
+        fail("${msg}: expected the error to contain '${needle}', got '${err}'")
     }
 }
 
@@ -665,19 +665,19 @@ assert_err_contains(err: string, needle: string, msg: string) {
 // that should have worked did not.
 assert_ok(err: string, msg: string) {
     if string.length(err) != 0 {
-        fail("${msg} — expected success, got error '${err}'")
+        fail("${msg}: expected success, got error '${err}'")
     }
 }
 
 assert_null(value: ptr, msg: string) {
     if value != 0 {
-        fail("${msg} — expected null")
+        fail("${msg}: expected null")
     }
 }
 
 assert_not_null(value: ptr, msg: string) {
     if value == 0 {
-        fail("${msg} — expected non-null")
+        fail("${msg}: expected non-null")
     }
 }
 
@@ -708,7 +708,7 @@ expect_elapsed_under(elapsed_ns: long, budget: Duration, msg: string) {
         // under budget — pass (no-op)
     } else {
         elapsed_ms = elapsed_ns / 1000000
-        fail("${msg} — took ${elapsed_ms}ms, budget ${budget}")
+        fail("${msg}: took ${elapsed_ms}ms, budget ${budget}")
     }
 }
 
@@ -762,7 +762,7 @@ expect_str(v: string) -> StrSubject {
     c = string.copy(v)
     if current_fw != null {
         sc = map.get_raw(current_fw, "str_copies")
-        if sc != null { list.list_add_raw(sc, c) }
+        if sc != null { list.add_raw(sc, c) }
     }
     return StrSubject { value: c, negated: 0 }
 }
@@ -787,7 +787,7 @@ not_(s: IntSubject) -> IntSubject {
 // sweep nor the doubled matcher surface is necessary.
 _why(msg: string) -> string {
     if string.equals(msg, "") == 1 { return "" }
-    return "${msg} — "
+    return "${msg}: "
 }
 
 // _verdict_int(ok) — shared verdict: given whether the positive
@@ -917,7 +917,7 @@ satisfies_str(s: StrSubject, pred: fn, msg: string) -> StrSubject {
 expect_list_size(xs: ptr, want: int, msg: string) {
     n = list.size(xs)
     if n != want {
-        fail("${msg} — expected ${want} items, got ${n}")
+        fail("${msg}: expected ${want} items, got ${n}")
     }
 }
 
@@ -925,7 +925,7 @@ expect_list_size(xs: ptr, want: int, msg: string) {
 expect_list_empty(xs: ptr, msg: string) {
     n = list.size(xs)
     if n != 0 {
-        fail("${msg} — expected empty list, got ${n} items")
+        fail("${msg}: expected empty list, got ${n} items")
     }
 }
 
@@ -948,7 +948,7 @@ _list_has_str(xs: ptr, needle: string) -> int {
 // (exact string match).
 expect_list_has_str(xs: ptr, needle: string, msg: string) {
     if _list_has_str(xs, needle) == 0 {
-        fail("${msg} — list has no element equal to '${needle}'")
+        fail("${msg}: list has no element equal to '${needle}'")
     }
 }
 
@@ -962,7 +962,7 @@ expect_list_contains_all(xs: ptr, needles: ptr, msg: string) {
     while i < m {
         want = list.get_raw(needles, i)
         if _list_has_str(xs, want) == 0 {
-            fail("${msg} — list is missing '${want}'")
+            fail("${msg}: list is missing '${want}'")
             i = m
         } else {
             i = i + 1
@@ -979,7 +979,7 @@ expect_list_every(xs: ptr, pred: fn, msg: string) {
     while i < n {
         item = list.get_raw(xs, i)
         if call(pred, item) == 0 {
-            fail("${msg} — element ${i} ('${item}') failed the predicate")
+            fail("${msg}: element ${i} ('${item}') failed the predicate")
             i = n
         } else {
             i = i + 1

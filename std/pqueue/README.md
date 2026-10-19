@@ -3,7 +3,7 @@
 A priority queue over `(priority, item)` pairs, backed by a binary heap.
 
 Push and pop are O(log n); peek and size are O(1). **The lowest priority
-value comes out first** — it is a min-heap. For largest-first, negate the
+value comes out first**: it is a min-heap. For largest-first, negate the
 priority on the way in.
 
 Items are stored as `ptr`, so the queue holds whatever the caller points at
@@ -24,7 +24,7 @@ main() {
 
     println("size: ${pqueue.size(q)}")
 
-    // Priority 1 first, then 3 — not insertion order.
+    // Priority 1 first, then 3: not insertion order.
     println("first:  ${mem.ptr_to_long(pqueue.pop(q))}")
     println("second: ${mem.ptr_to_long(pqueue.pop(q))}")
     println("left:   ${pqueue.size(q)}")
@@ -39,7 +39,7 @@ second: 300
 left:   1
 ```
 
-Equal priorities have no defined order relative to each other — a binary heap
+Equal priorities have no defined order relative to each other: a binary heap
 is not stable. Where insertion order must break ties, fold a monotonic counter
 into the priority.
 

@@ -51,7 +51,7 @@ const T_OBJECT = 5
 
 type_of(v: ptr) -> int {
     if v == null { return T_NULL }
-    return json.json_type(v)
+    return json.type(v)
 }
 
 // The name `type` reports.
@@ -69,7 +69,7 @@ type_name(v: ptr) -> string {
 truthy(v: ptr) -> int {
     t = type_of(v)
     if t == T_NULL { return 0 }
-    if t == T_BOOL { return json.json_get_bool(v) }
+    if t == T_BOOL { return json.get_bool(v) }
     return 1
 }
 
@@ -83,58 +83,58 @@ is_integral(d: float) -> int {
 // an integral result within int64 is stored that way and prints as jq
 // prints it (3, not 3.0). Anything else keeps its double.
 make_number(d: float) -> ptr {
-    if d != d { return json.json_create_number(d) } // NaN
+    if d != d { return json.create_number(d) } // NaN
     if d == 0.0 {
         // -0 stays a double so it still prints as -0, as jq prints it.
-        if (1.0 / d) < 0.0 { return json.json_create_number(d) }
+        if (1.0 / d) < 0.0 { return json.create_number(d) }
     }
     if is_integral(d) == 1 {
         if math.abs_float(d) < 9.0e18 {
-            return json.json_create_int(d as long)
+            return json.create_int(d as long)
         }
     }
-    return json.json_create_number(d)
+    return json.create_number(d)
 }
 
 make_int(n: long) -> ptr {
-    return json.json_create_int(n)
+    return json.create_int(n)
 }
 
 number_of(v: ptr) -> float {
-    return json.json_get_number(v)
+    return json.get_number(v)
 }
 
 new_string(s: string) -> ptr {
-    return json.json_create_string(s)
+    return json.create_string(s)
 }
 
 // The bytes of a JSON string, borrowed from the value.
 string_value(v: ptr) -> string {
-    return json.json_get_string_raw(v)
+    return json.get_string_raw(v)
 }
 
 // Deep copy. Owned by the caller; free with json.json_free.
 copy(v: ptr) -> ptr {
     t = type_of(v)
-    if t == T_NULL { return json.json_create_null() }
-    if t == T_BOOL { return json.json_create_bool(json.json_get_bool(v)) }
-    if t == T_NUMBER { return make_number(json.json_get_number(v)) }
-    if t == T_STRING { return json.json_create_string(json.json_get_string_raw(v)) }
+    if t == T_NULL { return json.create_null() }
+    if t == T_BOOL { return json.create_bool(json.get_bool(v)) }
+    if t == T_NUMBER { return make_number(json.get_number(v)) }
+    if t == T_STRING { return json.create_string(json.get_string_raw(v)) }
     if t == T_ARRAY {
-        a = json.json_create_array()
-        n = json.json_array_size(v)
+        a = json.create_array()
+        n = json.array_size(v)
         i = 0
         while i < n {
-            json.json_array_add_raw(a, copy(json.json_array_get_raw(v, i)))
+            json.array_add_raw(a, copy(json.array_get_raw(v, i)))
             i = i + 1
         }
         return a
     }
-    o = json.json_create_object()
-    n = json.json_object_size_raw(v)
+    o = json.create_object()
+    n = json.object_size_raw(v)
     i = 0
     while i < n {
-        json.json_object_set_raw(o, json.json_object_key_at(v, i), copy(json.json_object_value_at(v, i)))
+        json.object_set_raw(o, json.object_key_at(v, i), copy(json.object_value_at(v, i)))
         i = i + 1
     }
     return o
@@ -152,18 +152,18 @@ deeper_than(v: ptr, limit: int) -> int {
     if t != T_ARRAY && t != T_OBJECT { return 0 }
     if limit <= 0 { return 1 }
     if t == T_ARRAY {
-        n = json.json_array_size(v)
+        n = json.array_size(v)
         i = 0
         while i < n {
-            if deeper_than(json.json_array_get_raw(v, i), limit - 1) == 1 { return 1 }
+            if deeper_than(json.array_get_raw(v, i), limit - 1) == 1 { return 1 }
             i = i + 1
         }
         return 0
     }
-    n = json.json_object_size_raw(v)
+    n = json.object_size_raw(v)
     i = 0
     while i < n {
-        if deeper_than(json.json_object_value_at(v, i), limit - 1) == 1 { return 1 }
+        if deeper_than(json.object_value_at(v, i), limit - 1) == 1 { return 1 }
         i = i + 1
     }
     return 0
@@ -195,7 +195,7 @@ parse_json(text: string) -> ptr! {
     // copy() writes each key once, keeping the last value in the first
     // key's position, which is what jq does.
     fixed = copy(v)
-    json.json_free(v)
+    json.free(v)
     return fixed, ""
 }
 
@@ -225,22 +225,22 @@ _has_nul_escape(text: string) -> int {
 _has_repeated_key(v: ptr) -> int {
     t = type_of(v)
     if t == T_ARRAY {
-        n = json.json_array_size(v)
+        n = json.array_size(v)
         i = 0
         while i < n {
-            if _has_repeated_key(json.json_array_get_raw(v, i)) == 1 { return 1 }
+            if _has_repeated_key(json.array_get_raw(v, i)) == 1 { return 1 }
             i = i + 1
         }
         return 0
     }
     if t != T_OBJECT { return 0 }
-    n = json.json_object_size_raw(v)
+    n = json.object_size_raw(v)
     if n <= 8 {
         i = 1
         while i < n {
             j = 0
             while j < i {
-                if string.equals(json.json_object_key_at(v, i), json.json_object_key_at(v, j)) == 1 { return 1 }
+                if string.equals(json.object_key_at(v, i), json.object_key_at(v, j)) == 1 { return 1 }
                 j = j + 1
             }
             i = i + 1
@@ -249,7 +249,7 @@ _has_repeated_key(v: ptr) -> int {
         seen = set.new()
         i = 0
         while i < n {
-            if set.add(seen, json.json_object_key_at(v, i)) == false {
+            if set.add(seen, json.object_key_at(v, i)) == false {
                 set.free(seen)
                 return 1
             }
@@ -259,7 +259,7 @@ _has_repeated_key(v: ptr) -> int {
     }
     i = 0
     while i < n {
-        if _has_repeated_key(json.json_object_value_at(v, i)) == 1 { return 1 }
+        if _has_repeated_key(json.object_value_at(v, i)) == 1 { return 1 }
         i = i + 1
     }
     return 0
@@ -279,14 +279,14 @@ cmp(a: ptr, b: ptr) -> int {
     tb = type_of(b)
     if ta == T_BOOL {
         if tb == T_BOOL {
-            return _cmp_int(json.json_get_bool(a), json.json_get_bool(b))
+            return _cmp_int(json.get_bool(a), json.get_bool(b))
         }
     }
     if ta != tb { return _cmp_int(ta, tb) }
     if ta == T_NULL { return 0 }
     if ta == T_NUMBER {
-        x = json.json_get_number(a)
-        y = json.json_get_number(b)
+        x = json.get_number(a)
+        y = json.get_number(b)
         // NaN sorts below every number, and equal to itself, so sort is total.
         if x != x {
             if y != y { return 0 }
@@ -298,16 +298,16 @@ cmp(a: ptr, b: ptr) -> int {
         return 0
     }
     if ta == T_STRING {
-        return _sign(string.compare(json.json_get_string_raw(a), json.json_get_string_raw(b)))
+        return _sign(string.compare(json.get_string_raw(a), json.get_string_raw(b)))
     }
     if ta == T_ARRAY {
-        na = json.json_array_size(a)
-        nb = json.json_array_size(b)
+        na = json.array_size(a)
+        nb = json.array_size(b)
         n = na
         if nb < n { n = nb }
         i = 0
         while i < n {
-            c = cmp(json.json_array_get_raw(a, i), json.json_array_get_raw(b, i))
+            c = cmp(json.array_get_raw(a, i), json.array_get_raw(b, i))
             if c != 0 { return c }
             i = i + 1
         }
@@ -318,18 +318,18 @@ cmp(a: ptr, b: ptr) -> int {
     kb = sorted_keys(b)
     c = cmp(ka, kb)
     if c == 0 {
-        n = json.json_array_size(ka)
+        n = json.array_size(ka)
         i = 0
         while i < n {
             if c == 0 {
-                k = json.json_get_string_raw(json.json_array_get_raw(ka, i))
-                c = cmp(json.json_object_get_raw(a, k), json.json_object_get_raw(b, k))
+                k = json.get_string_raw(json.array_get_raw(ka, i))
+                c = cmp(json.object_get_raw(a, k), json.object_get_raw(b, k))
             }
             i = i + 1
         }
     }
-    json.json_free(ka)
-    json.json_free(kb)
+    json.free(ka)
+    json.free(kb)
     return c
 }
 
@@ -350,17 +350,17 @@ _sign(d: int) -> int {
 // returns and what object comparison and sorted output use.
 sorted_keys(obj: ptr) -> ptr {
     l = list.new()
-    n = json.json_object_size_raw(obj)
+    n = json.object_size_raw(obj)
     i = 0
     while i < n {
-        list.list_add_raw(l, json.json_create_string(json.json_object_key_at(obj, i)))
+        list.add_raw(l, json.create_string(json.object_key_at(obj, i)))
         i = i + 1
     }
     sort_list(l, null)
-    out = json.json_create_array()
+    out = json.create_array()
     i = 0
     while i < n {
-        json.json_array_add_raw(out, list.get_raw(l, i))
+        json.array_add_raw(out, list.get_raw(l, i))
         list.set(l, i, null)
         i = i + 1
     }
@@ -379,8 +379,8 @@ sort_list(vals: ptr, keys: ptr) {
     tmp_k = list.new()
     i = 0
     while i < n {
-        list.list_add_raw(tmp_v, null)
-        if keys != null { list.list_add_raw(tmp_k, null) }
+        list.add_raw(tmp_v, null)
+        if keys != null { list.add_raw(tmp_k, null) }
         i = i + 1
     }
     width = 1
@@ -486,7 +486,7 @@ _emit(sb: ptr, v: ptr, indent: int, sort_keys: int, level: int) {
         return
     }
     if t == T_BOOL {
-        if json.json_get_bool(v) == 1 {
+        if json.get_bool(v) == 1 {
             strbuilder.append(sb, "true")
         } else {
             strbuilder.append(sb, "false")
@@ -494,16 +494,16 @@ _emit(sb: ptr, v: ptr, indent: int, sort_keys: int, level: int) {
         return
     }
     if t == T_NUMBER {
-        s = num_to_string(json.json_get_number(v))
+        s = num_to_string(json.get_number(v))
         strbuilder.append(sb, s)
         return
     }
     if t == T_STRING {
-        _emit_string(sb, json.json_get_string_raw(v))
+        _emit_string(sb, json.get_string_raw(v))
         return
     }
     if t == T_ARRAY {
-        n = json.json_array_size(v)
+        n = json.array_size(v)
         strbuilder.append_byte(sb, 91)
         if n == 0 {
             strbuilder.append_byte(sb, 93)
@@ -513,14 +513,14 @@ _emit(sb: ptr, v: ptr, indent: int, sort_keys: int, level: int) {
         while i < n {
             if i > 0 { strbuilder.append_byte(sb, 44) }
             if indent > 0 { _newline_indent(sb, indent, level + 1) }
-            _emit(sb, json.json_array_get_raw(v, i), indent, sort_keys, level + 1)
+            _emit(sb, json.array_get_raw(v, i), indent, sort_keys, level + 1)
             i = i + 1
         }
         if indent > 0 { _newline_indent(sb, indent, level) }
         strbuilder.append_byte(sb, 93)
         return
     }
-    n = json.json_object_size_raw(v)
+    n = json.object_size_raw(v)
     strbuilder.append_byte(sb, 123)
     if n == 0 {
         strbuilder.append_byte(sb, 125)
@@ -532,11 +532,11 @@ _emit(sb: ptr, v: ptr, indent: int, sort_keys: int, level: int) {
     while i < n {
         if i > 0 { strbuilder.append_byte(sb, 44) }
         if indent > 0 { _newline_indent(sb, indent, level + 1) }
-        k = json.json_object_key_at(v, i)
-        val = json.json_object_value_at(v, i)
+        k = json.object_key_at(v, i)
+        val = json.object_value_at(v, i)
         if keys != null {
-            k = json.json_get_string_raw(json.json_array_get_raw(keys, i))
-            val = json.json_object_get_raw(v, k)
+            k = json.get_string_raw(json.array_get_raw(keys, i))
+            val = json.object_get_raw(v, k)
         }
         _emit_string(sb, k)
         strbuilder.append_byte(sb, 58)
@@ -544,7 +544,7 @@ _emit(sb: ptr, v: ptr, indent: int, sort_keys: int, level: int) {
         _emit(sb, val, indent, sort_keys, level + 1)
         i = i + 1
     }
-    if keys != null { json.json_free(keys) }
+    if keys != null { json.free(keys) }
     if indent > 0 { _newline_indent(sb, indent, level) }
     strbuilder.append_byte(sb, 125)
 }
@@ -671,12 +671,12 @@ _decode(s: string, n: int, i: int) -> (int, int) {
 
 // `explode`: the string's codepoints as a JSON array of numbers.
 explode(s: string) -> ptr {
-    out = json.json_create_array()
+    out = json.create_array()
     n = string.length(s)
     i = 0
     while i < n {
         cp, next = _decode(s, n, i)
-        json.json_array_add_raw(out, json.json_create_int(cp as long))
+        json.array_add_raw(out, json.create_int(cp as long))
         i = next
     }
     return out
@@ -689,15 +689,15 @@ implode(arr: ptr) -> string! {
         return "", "implode input must be an array"
     }
     sb = strbuilder.new(16)
-    n = json.json_array_size(arr)
+    n = json.array_size(arr)
     i = 0
     while i < n {
-        e = json.json_array_get_raw(arr, i)
+        e = json.array_get_raw(arr, i)
         if type_of(e) != T_NUMBER {
             strbuilder.free(sb)
             return "", "Unicode codepoint must be numeric"
         }
-        cp = json.json_get_int(e)
+        cp = json.get_int(e)
         if cp == 0 {
             strbuilder.free(sb)
             return "", "\\u0000 is not supported in strings"
@@ -716,13 +716,13 @@ implode(arr: ptr) -> string! {
 // ---------------------------------------------------------------------------
 
 without_key(obj: ptr, key: string) -> ptr {
-    o = json.json_create_object()
-    n = json.json_object_size_raw(obj)
+    o = json.create_object()
+    n = json.object_size_raw(obj)
     i = 0
     while i < n {
-        k = json.json_object_key_at(obj, i)
+        k = json.object_key_at(obj, i)
         if string.equals(k, key) == 0 {
-            json.json_object_set_raw(o, k, copy(json.json_object_value_at(obj, i)))
+            json.object_set_raw(o, k, copy(json.object_value_at(obj, i)))
         }
         i = i + 1
     }
@@ -732,10 +732,10 @@ without_key(obj: ptr, key: string) -> ptr {
 // Elements from..to (exclusive) of an array, as a fresh array. Indices are
 // already clamped by the caller.
 array_slice(arr: ptr, from: int, to: int) -> ptr {
-    out = json.json_create_array()
+    out = json.create_array()
     i = from
     while i < to {
-        json.json_array_add_raw(out, copy(json.json_array_get_raw(arr, i)))
+        json.array_add_raw(out, copy(json.array_get_raw(arr, i)))
         i = i + 1
     }
     return out

@@ -50,7 +50,7 @@ divide(a: int, b: int where b != 0) -> int { return a / b }
 x = divide(10, 0)     // Tier 2: compile error, today a runtime panic
 ```
 
-Total estimated cost: **~700–950 lines all-in** (compiler + tests + docs),
+Total estimated cost: **~700-950 lines all-in** (compiler + tests + docs),
 one PR. Smaller than `bitstruct` (~1,050 staged) and comparable to
 `defer catch` (~620). Details in §7.
 
@@ -70,8 +70,8 @@ part. The inventory:
 | Compile-time bool evaluator (narrow: `target.os/arch`, string/bool/num literals) | `when_eval_condition`, `optimizer.c:407` | ✅ shipped, `when`-specific |
 | Call-argument boundary walk (where the distinct-type and bitstruct checks live) | `typechecker.c:7622` area | ✅ shipped, **this is Tier 2's hook** |
 | Enum member values known at compile time | `resolve_enum_types` rewrites `E.M` to a constant identifier before typecheck (`typechecker.c` enum machinery) | ✅ shipped |
-| **Const evaluator with an environment** (param → argument, const idents) |, | ❌ **the missing piece** |
-| **Any compile-time contract *diagnostic*** (vs elision) |, | ❌ missing |
+| **Const evaluator with an environment** (param → argument, const idents) | none | ❌ **the missing piece** |
+| **Any compile-time contract *diagnostic*** (vs elision) | none | ❌ missing |
 
 The genuinely-missing part is one evaluator and its wiring. Everything else is
 reuse.
@@ -100,8 +100,7 @@ this ordering, call-site erroring would be unshippable.
 constant false is a compile error at the function definition:
 
 ```
-error: `requires` predicate is always false — this function can never be
-called legally: N > 10 (N is the constant 5) in resize
+error[E0200]: `requires` predicate is always false, no call to 'resize' can ever satisfy it: N > 10
 ```
 
 **Why reverse the documented decision?** The `codegen_stmt.c:3129` rationale
@@ -120,7 +119,7 @@ function's `AST_REQUIRES_CLAUSE` / `AST_ENSURES_CLAUSE`, run the evaluator
 with an **empty environment**; error on decided-false. Codegen's true-elision
 is untouched.
 
-**Cost:** ~40–60 lines + reject tests. No new machinery (uses Tier 2's
+**Cost:** ~40-60 lines + reject tests. No new machinery (uses Tier 2's
 evaluator with an empty env; if Tier 1 shipped alone it could call a lifted
 `try_fold_predicate`).
 
@@ -274,7 +273,7 @@ After this ships the tree has three const evaluators with distinct jobs:
 | --- | --- | --- | --- |
 | `when_eval_condition` (optimizer) | bool/string + `target.*` | prune `when` arms pre-typecheck | none, different input language |
 | `try_fold_predicate` (codegen) | double, literal-only | elide constant-true runtime checks | **benign but real**, see below |
-| `contract_eval` (analysis, new) | int64/double/bool, env-carrying | compile-time diagnosis |, |
+| `contract_eval` (analysis, new) | int64/double/bool, env-carrying | compile-time diagnosis | none |
 
 `try_fold_predicate` and `contract_eval` evaluate the *same* predicates at
 definition sites. Divergence is benign in both directions (typechecker
@@ -288,14 +287,14 @@ it also fixes the double-precision wobble in the elision path for free.
 
 | Piece | Est. lines | Risk | Notes |
 | --- | --- | --- | --- |
-| `contract_eval` + env + int64/double value | 250–320 | **the risk concentrate**: precision, short-circuit, const-ident recursion (depth cap) | pure function; property-testable in isolation |
-| Tier 2 hook in the call-arg walk | 80–120 | low, pattern established by the distinct/bitstruct checks at `typechecker.c:7622` | env built during the existing iteration |
-| Tier 1 definition-site walk | 40–60 | low | empty-env reuse of the same evaluator |
-| Move `sprint_expr_text` to shared TU + diagnostics | 60–100 | low | message format mirrors the runtime panic text, so the two read as the same violation |
+| `contract_eval` + env + int64/double value | 250-320 | **the risk concentrate**: precision, short-circuit, const-ident recursion (depth cap) | pure function; property-testable in isolation |
+| Tier 2 hook in the call-arg walk | 80-120 | low, pattern established by the distinct/bitstruct checks at `typechecker.c:7622` | env built during the existing iteration |
+| Tier 1 definition-site walk | 40-60 | low | empty-env reuse of the same evaluator |
+| Move `sprint_expr_text` to shared TU + diagnostics | 60-100 | low | message format mirrors the runtime panic text, so the two read as the same violation |
 | Unify `emit_contract_check` onto the shared evaluator, delete `try_fold_predicate` | −60 net | low | keeps `test_contract_const_fold.ae` green as the guard |
-| Tests: positive folding, reject suite (`tests/integration/contract_fold_reject/`, ~6–8 cases modelled on `bitstruct_reject`), **silence suite** (runtime args, partial env, call operands, member access must NOT error), Makefile prune entry | 250–350 |, | the silence suite is the important one: false positives are this feature's only way to fail badly |
-| Docs (`language-reference.md` contracts section, `AGENTS.md` bullet, CHANGELOG + upgrade note) | 100–150 |, | |
-| **Total** | **~700–950** | | one PR; no new tokens, no parser changes, no ABI impact |
+| Tests: positive folding, reject suite (`tests/integration/contract_fold_reject/`, ~6-8 cases modelled on `bitstruct_reject`), **silence suite** (runtime args, partial env, call operands, member access must NOT error), Makefile prune entry | 250-350 | none | the silence suite is the important one: false positives are this feature's only way to fail badly |
+| Docs (`language-reference.md` contracts section, `AGENTS.md` bullet, CHANGELOG + upgrade note) | 100-150 | none | |
+| **Total** | **~700-950** | | one PR; no new tokens, no parser changes, no ABI impact |
 
 Prior calibration from this repo: `bitstruct` ~1,050 staged lines (parser +
 types + codegen), `defer catch/try` ~620 (parser + typechecker + codegen).

@@ -23,7 +23,7 @@ main() {
     while i < 200 {
         prev = h.s
         h.s = string.to_lower("VALUE ${i}")
-        string.string_release(prev)
+        string.release(prev)
         i = i + 1
     }
     println("done: ${h.s}")

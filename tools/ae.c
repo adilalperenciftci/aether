@@ -12258,11 +12258,154 @@ static int fmt_write_all(const char* path, const char* content) {
     return 0;
 }
 
+/* ---- #2976: `ae fmt --short-names` ---------------------------------------
+ *
+ * A call that names its module twice, `json.json_free(v)`, is written
+ * `json.free(v)` where the compiler resolves the two to the same
+ * declaration. Only the compiler knows that (a long name whose short twin is
+ * another function, as std.mem's raw externs beside its wrappers, must stay),
+ * so `aetherc --emit=short-names` lists the calls, as `LINE:COLUMN:long:short`
+ * at each call's callee, and this rewrites the name after the `.` there. A
+ * file the compiler rejects keeps its names. */
+static int g_fmt_short_names = 0;
+
+typedef struct { int line; int col; char long_name[256]; char short_name[256]; } FmtRename;
+
+/* The renames aetherc reports for `path` into a heap array; returns how
+ * many, or -1 when the file does not check. */
+static int fmt_short_name_renames(const char* path, FmtRename** out) {
+    *out = NULL;
+    char* lib_flags = tc_lib_flags();
+    char* cmd = ae_strdup_printf("\"%s\"%s%s --emit=short-names \"%s\"", tc.compiler,
+                                 defines_flags(), lib_flags, path);
+    free(lib_flags);
+    if (!cmd) return -1;
+    char capture[1024];
+    compile_log_path(capture, sizeof(capture));
+    int rc = run_cmd_capture_stdout(cmd, capture);
+    free(cmd);
+    FILE* f = fopen(capture, "r");
+    if (rc != 0 || !f) {
+        if (f) fclose(f);
+        remove(capture);
+        return -1;
+    }
+    int n = 0, cap = 0;
+    char line[1024];
+    while (fgets(line, sizeof(line), f)) {
+        FmtRename r;
+        char longn[256], shortn[256];
+        if (sscanf(line, "%d:%d:%255[^:]:%255[^:\r\n]", &r.line, &r.col, longn, shortn) != 4)
+            continue;
+        snprintf(r.long_name, sizeof(r.long_name), "%s", longn);
+        snprintf(r.short_name, sizeof(r.short_name), "%s", shortn);
+        if (n == cap) {
+            cap = cap ? cap * 2 : 16;
+            FmtRename* grown = (FmtRename*)realloc(*out, sizeof(FmtRename) * (size_t)cap);
+            if (!grown) break;
+            *out = grown;
+        }
+        (*out)[n++] = r;
+    }
+    fclose(f);
+    remove(capture);
+    return n;
+}
+
+static int fmt_is_ident_char(char c) {
+    return isalnum((unsigned char)c) || c == '_';
+}
+
+/* Applies the renames to `src`: at each call's position, the `.long` that
+ * follows on its line, before the call's `(`, becomes `.short`. Returns a
+ * new heap string; *applied counts the renames made. */
+static char* fmt_apply_renames(const char* src, const FmtRename* r, int n, int* applied) {
+    *applied = 0;
+    size_t len = strlen(src);
+    char* out = (char*)malloc(len + 1);
+    if (!out) return NULL;
+    memcpy(out, src, len + 1);
+    /* Offsets of the edits, made from the last one back so earlier offsets
+     * hold. */
+    size_t* at = (size_t*)malloc(sizeof(size_t) * (size_t)(n > 0 ? n : 1));
+    int* which = (int*)malloc(sizeof(int) * (size_t)(n > 0 ? n : 1));
+    if (!at || !which) { free(at); free(which); free(out); return NULL; }
+    int m = 0;
+    for (int k = 0; k < n; k++) {
+        /* The start of line r[k].line. */
+        size_t p = 0;
+        int line = 1;
+        while (line < r[k].line && p < len) { if (src[p] == '\n') line++; p++; }
+        if (line != r[k].line) continue;
+        size_t q = p + (size_t)(r[k].col > 0 ? r[k].col - 1 : 0);
+        size_t ll = strlen(r[k].long_name);
+        for (; q < len && src[q] != '\n'; q++) {
+            if (src[q] != '.' || strncmp(src + q + 1, r[k].long_name, ll) != 0) continue;
+            if (q == 0 || !fmt_is_ident_char(src[q - 1])) continue;
+            size_t e = q + 1 + ll;
+            if (e < len && fmt_is_ident_char(src[e])) continue;
+            while (e < len && (src[e] == ' ' || src[e] == '\t')) e++;
+            if (e >= len || src[e] != '(') continue;
+            int dup = 0;
+            for (int j = 0; j < m; j++) if (at[j] == q + 1) dup = 1;
+            if (!dup) { at[m] = q + 1; which[m] = k; m++; }
+            break;
+        }
+    }
+    /* Last offset first. */
+    for (int i = 1; i < m; i++) {
+        size_t a = at[i]; int w = which[i]; int j = i - 1;
+        while (j >= 0 && at[j] < a) { at[j + 1] = at[j]; which[j + 1] = which[j]; j--; }
+        at[j + 1] = a; which[j + 1] = w;
+    }
+    for (int i = 0; i < m; i++) {
+        const FmtRename* e = &r[which[i]];
+        size_t ll = strlen(e->long_name), sl = strlen(e->short_name);
+        size_t cur = strlen(out);
+        memmove(out + at[i] + sl, out + at[i] + ll, cur - at[i] - ll + 1);
+        memcpy(out + at[i], e->short_name, sl);
+        (*applied)++;
+    }
+    free(at); free(which);
+    return out;
+}
+
 // Format one file. check_mode: detect only, don't write. Returns 1 if changed
 // (or would change), 0 if already formatted, -1 on error.
 static int fmt_one_file(const char* path, int check_mode) {
     char* src = fmt_read_all(path);
     if (!src) { fprintf(stderr, "ae fmt: cannot read %s\n", path); return -1; }
+    if (g_fmt_short_names) {
+        /* Only the names change; the layout is the file's own, so a file
+         * that was canonical stays so and one that was not changes in no
+         * other place. */
+        FmtRename* renames = NULL;
+        int n = fmt_short_name_renames(path, &renames);
+        int rc = 0;
+        if (n < 0) {
+            fprintf(stderr, "ae fmt: %s does not compile; its names are left as written\n", path);
+        } else if (n > 0) {
+            int applied = 0;
+            char* renamed = fmt_apply_renames(src, renames, n, &applied);
+            if (!renamed) {
+                fprintf(stderr, "ae fmt: out of memory\n");
+                rc = -1;
+            } else {
+                if (applied < n)
+                    fprintf(stderr, "ae fmt: %s: %d of %d calls found where the compiler placed them\n",
+                            path, applied, n);
+                if (strcmp(renamed, src) != 0) {
+                    if (check_mode) { printf("%s\n", path); rc = 1; }
+                    else if (fmt_write_all(path, renamed) != 0) { fprintf(stderr, "ae fmt: cannot write %s\n", path); rc = -1; }
+                    else { printf("%s\n", path); rc = 1; }
+                }
+                free(renamed);
+            }
+        }
+        free(renames);
+        free(src);
+        return rc;
+    }
     int changed = 0; const char* err = NULL;
     char* out = ae_format_source_changed(src, &changed, &err);
     if (!out) {
@@ -12337,10 +12480,14 @@ static char* fmt_read_stdin(void) {
 //   Paths:   format each .ae file (recursing directories) in place.
 //   --check: do not write; list files that would change, exit 1 if any do.
 static void fmt_usage(void) {
-    printf("Usage: ae fmt [--check] [path...]\n"
+    printf("Usage: ae fmt [--check] [--short-names] [path...]\n"
            "  Format Aether source. With no path, reads stdin and writes stdout.\n"
            "  With paths, formats each .ae file (recursing into directories) in place.\n"
-           "  --check  Do not write; list files that would change, exit 1 if any do.\n");
+           "  --check        Do not write; list files that would change, exit 1 if any do.\n"
+           "  --short-names  Instead of the layout, rewrite each call that names its module\n"
+           "                 twice (`json.json_free(v)`) in the short form (`json.free(v)`),\n"
+           "                 where the compiler resolves both to the same declaration. A\n"
+           "                 file that does not compile keeps its names.\n");
 }
 
 static int cmd_fmt(int argc, char** argv) {
@@ -12351,6 +12498,8 @@ static int cmd_fmt(int argc, char** argv) {
     for (int i = 0; i < argc; i++) {
         if (strcmp(argv[i], "--check") == 0 || strcmp(argv[i], "-c") == 0) {
             check_mode = 1;
+        } else if (strcmp(argv[i], "--short-names") == 0) {
+            g_fmt_short_names = 1;
         } else if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
             fmt_usage();
             free(paths);
@@ -12358,6 +12507,16 @@ static int cmd_fmt(int argc, char** argv) {
         } else {
             paths[npaths++] = argv[i];
         }
+    }
+
+    if (g_fmt_short_names) {
+        /* The compiler decides which names are one declaration. */
+        if (npaths == 0) {
+            fprintf(stderr, "ae fmt --short-names: name the files or directories to rewrite\n");
+            free(paths);
+            return 2;
+        }
+        discover_toolchain();
     }
 
     if (npaths == 0) {

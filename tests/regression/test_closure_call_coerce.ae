@@ -19,7 +19,7 @@ struct Rect {
 type Shape = Circle | Rect
 
 main() {
-    f = | o: Shape?| {
+    f = | o: Shape? | {
         return o == none
     }
     g = | s: Shape | {
@@ -29,7 +29,7 @@ main() {
         }
         return a
     }
-    h = | o: int?| {
+    h = | o: int? | {
         return o ?? 7
     }
     absent = call(f, Circle { r: 1.0 })

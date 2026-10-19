@@ -59,7 +59,7 @@ main() {
     // variable-length + streaming-split checks below guard the squeeze/absorb
     // paths independently of the pinned constants.
     fails = fails + check("empty",
-        ascon_xof128.ascon_xof128_hex(string.bytes(""), 64),
+        ascon_xof128.hex(string.bytes(""), 64),
         "473d5e6164f58b39dfd84aacdb8ae42ec2d91fed33388ee0d960d9b3993295c6ad77855a5d3b13fe6ad9e6098988373af7d0956d05a8f1665d2c67d1a3ad10ff")
 
     // Msg = 00
@@ -97,9 +97,9 @@ main() {
     // Variable-length XOF property: a 32-byte squeeze must be the exact prefix
     // of a 64-byte squeeze of the same input. This validates the squeeze path
     // for a non-32 length independently of any pinned KAT.
-    x32 = ascon_xof128.ascon_xof128_hex(string.bytes(""), 32)
+    x32 = ascon_xof128.hex(string.bytes(""), 32)
     x64prefix = string.substring(
-        ascon_xof128.ascon_xof128_hex(string.bytes(""), 64), 0, 64)
+        ascon_xof128.hex(string.bytes(""), 64), 0, 64)
     fails = fails + check("XOF 32B is prefix of 64B", x32, x64prefix)
 
     // Multi-part streaming: input 00010203 fed as {00} then {01,02,03} must

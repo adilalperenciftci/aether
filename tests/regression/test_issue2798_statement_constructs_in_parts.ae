@@ -135,8 +135,8 @@ main() {
 
     // An `or` handler that is an expression.
     calls = 0
-    e = num(true) or(num(true) or { tick() + 50 })
-    f = num(false) or(num(true) or { tick() + 60 })
+    e = num(true) or (num(true) or { tick() + 50 })
+    f = num(false) or (num(true) or { tick() + 60 })
     check(e == 51 && f == 7 && calls == 1, "an or handler that is an expression")
 
     // A compound assignment.

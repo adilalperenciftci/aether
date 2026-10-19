@@ -215,7 +215,7 @@ of the five pieces above is misbehaving.
 | Test | What it proves |
 |---|---|
 | `tests/integration/tuple_destructure_cross_module/` | Bug 1: two modules with same-named locals don't collide. |
-| `tests/integration/multi_return_destructure_chain/` | Bugs 2–4 in combination: empty-string literal in tuple slot, nested return in if-body, destructured local across the boundary. |
+| `tests/integration/multi_return_destructure_chain/` | Bugs 2-4 in combination: empty-string literal in tuple slot, nested return in if-body, destructured local across the boundary. |
 | `tests/integration/tuple_return_params/` | Bug 5: parameters of three types in later tuple slots, directly and through an import, plus a `std.cryptography.des3` program, all with no int fallback. |
 
 Run individually:

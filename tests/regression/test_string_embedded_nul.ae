@@ -71,7 +71,7 @@ test_map() -> int {
     gy, _ = map.get(m, ky)
     f = f + check(gy == null, "map: k<NUL>y found after putting k<NUL>x")
     map.put(m, ky, "y-value")
-    f = f + check(map.map_size(m) == 2, "map: two keys, size ${map.map_size(m)}")
+    f = f + check(map.size(m) == 2, "map: two keys, size ${map.size(m)}")
     // A heap value takes the adopting route the compiler emits for
     // map.put; its key is passed whole too.
     kz = with_nul("k", "z")

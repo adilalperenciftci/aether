@@ -20,16 +20,16 @@ extern http_server_port(server: ptr) -> int
     q = http.request_query(req)
 
     if q == "bad" {
-        http.http_response_set_status(res, 400)
-        http.http_response_set_body(res, "malformed")
+        http.response_set_status(res, 400)
+        http.response_set_body(res, "malformed")
         return
     }
 
     if q == "hasbody" {
-        http.http_response_set_body(res, "already answered")
+        http.response_set_body(res, "already answered")
         sse2, err2 = http.response_upgrade_sse(res)
         if sse2 != null {
-            http.http_response_set_body(res, "BUG-upgraded-over-body")
+            http.response_set_body(res, "BUG-upgraded-over-body")
         }
         return
     }
@@ -60,7 +60,7 @@ main() {
     raw = http.server_create(0)
     if raw == 0 { println("FAIL: server_create") exit(1) }
     http.server_set_host(raw, "127.0.0.1")
-    http.http_server_get(raw, "/stream", stream_handler, null)
+    http.server_get(raw, "/stream", stream_handler, null)
     // #1920: bind on port 0 so the kernel picks a free one, and report it.
     // server_start reuses a socket the caller already bound, so this also
     // means READY is printed AFTER the listen socket exists rather than

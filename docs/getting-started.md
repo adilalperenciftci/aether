@@ -179,7 +179,7 @@ https://<package>/releases/download/<tag>/<repo>-<tag>-<os>-<arch>.tar.gz
 ```
 
 (`.zip` is tried too; `<os>-<arch>` is `linux-x86_64`, `macos-arm64`, and
-so on.) A sibling `<asset>.sha256` is verified when present — a
+so on.) A sibling `<asset>.sha256` is verified when present: a
 **mismatch is fatal and installs nothing**, and there is no silent
 fall-back to git, which would defeat the check. An artifact with no
 published checksum installs with a warning.
@@ -336,7 +336,7 @@ println(body)
 
 | Import | Namespace | Example |
 |--------|-----------|---------|
-| `import std.string` | `string` | `string.new("hello")`, `n, err = string.to_int("42")` |
+| `import std.string` | `string` | `string.length(s)`, `n, err = string.to_int("42")` |
 | `import std.file` | `file` | `content, err = file.read("f")`, `file.exists("f")` |
 | `import std.dir` | `dir` | `err = dir.create("d")`, `dir.exists("d")` |
 | `import std.path` | `path` | `path.join("a", "b")`, `path.basename("a/b")` |
@@ -414,14 +414,15 @@ Aether includes a standard library with the following modules:
 See the [Standard Library Reference](stdlib-reference.md) for every module and its API.
 
 > When you read a file or get data from stdlib functions, the result is a
-> regular string, you can `print()` it, use it in `"${interpolation}"`, or pass it in messages
+> regular string: you can `print()` it, use it in `"${interpolation}"`, or pass it in messages
 > directly. No conversion needed.
 
 ### Error Handling and Memory
 
 Stdlib functions that can fail return a `(value, err)` tuple.
-Check the error string first, then use the value. The wrappers auto-free
-any heap allocations, so you don't need `defer free()` for stdlib returns:
+Check the error string first, then use the value. A string a stdlib
+function returns is a counted value that the local holding it owns, so
+there is nothing to free:
 
 ```aether
 import std.io
@@ -429,7 +430,7 @@ import std.io
 main() {
     // io.getenv is infallible; returns null if unset
     home = io.getenv("HOME")
-    if home != 0 {
+    if home != null {
         println(home)
     }
 
@@ -443,13 +444,14 @@ main() {
 }
 ```
 
-`free()` is still a language builtin for manually-allocated memory
-(e.g. `make`, `list.new`, `map.new`). `defer free(...)` or `defer
-list.free(...)` ensure cleanup on scope exit.
-
 A string needs no cleanup: the local, field or element holding it releases
 it when it is overwritten or goes out of scope. `free(s)` or `release(s)` on
 a string releases it early and leaves the place empty.
+
+A handle is different: a list, a map or a C buffer is a `ptr` the program
+frees itself, through its module (`list.free`, `map.free`), or with the
+`free()` builtin for memory from `make` or `malloc`. `defer` keeps the free
+next to the allocation. See [Memory Management](memory-management.md).
 
 ## Pattern Matching
 
@@ -497,19 +499,28 @@ match (value) {
 
 ### List Patterns
 
-Match on arrays (requires corresponding `_len` variable):
+A slice (`int[]`) matches list patterns: `[]` for empty, `[x]` for one
+element, and `[h | t]` for a head and the rest, itself a slice. An array
+passes to a slice parameter with its length:
 
-```aether,fragment
-nums = [1, 2, 3]
-nums_len = 3
-
-match (nums) {
-    [] -> { println("empty") }
-    [x] -> { println("one element") }
-    [h|t] -> {
-        println("head: ${h}")
+```aether,run
+describe(nums: int[]) -> string {
+    return match nums {
+        [] -> "empty"
+        [x] -> "one: ${x}"
+        [h | t] -> "head ${h}, ${t.len} more"
     }
 }
+
+main() {
+    println(describe([1, 2, 3]))
+    println(describe([]))
+}
+```
+
+```output
+head 1, 2 more
+empty
 ```
 
 ## Project Configuration
@@ -520,6 +531,8 @@ Projects use `aether.toml` for configuration. Created automatically by `ae init`
 [package]
 name = "myproject"
 version = "0.1.0"
+description = "A new Aether project"
+license = "MIT"
 
 [[bin]]
 name = "myproject"
@@ -545,16 +558,15 @@ This allows Aether programs to use libraries like SQLite, libcurl, OpenSSL, etc.
 
 ### Command-Line Arguments
 
-Access command-line arguments using the runtime's argument functions:
+Read command-line arguments through `std.os`:
 
 ```aether
-extern aether_args_count() -> int
-extern aether_args_get(index: int) -> string
+import std.os
 
 main() {
-    count = aether_args_count()
+    count = os.args_count()
     for (i = 0; i < count; i = i + 1) {
-        println(aether_args_get(i))
+        println(os.args_get(i))
     }
 }
 ```
@@ -575,7 +587,7 @@ import std.os
 
 main() {
     home = os.getenv("HOME")
-    if home != 0 {
+    if home != null {
         println("Home directory: ${home}")
     }
 }
@@ -631,8 +643,8 @@ Install, upgrade, and switch between Aether releases without reinstalling:
 
 ```bash
 ae upgrade              # Install the latest release and switch to it
-ae install v0.25.0      # Install a specific release (latest if omitted)
-ae use v0.25.0          # Switch to an installed version
+ae install v0.830.0     # Install a specific release (latest if omitted)
+ae use v0.830.0         # Switch to an installed version
 ae version              # Show current version
 ae version list         # List all available releases (marks installed/active)
 ae version installed    # List only what is installed locally
@@ -665,16 +677,16 @@ Each release occupies its full size, so a store of several releases gets large.
 Two commands prune it:
 
 ```bash
-ae version remove v0.25.0        # Remove one or more installed releases
+ae version remove v0.829.0       # Remove one or more installed releases
 ae version gc --dry-run          # Show what gc would remove
 ae version gc --keep 3           # Keep the newest 3, remove the rest
 ae version gc --keep 3 --dedupe  # ...and share identical files afterwards
 ae version dedupe                # Share identical files, remove nothing
 ```
 
-Both `remove` and `gc` refuse to delete the release you are actually using —
-whether that is the one `current` points at or the one `~/.aether/active_version`
-pins — so the worst case is that they decline. Versions are ordered numerically,
+Both `remove` and `gc` refuse to delete the release you are using, whether
+that is the one `current` points at or the one `~/.aether/active_version`
+pins, so the worst case is that they decline. Versions are ordered numerically,
 not alphabetically, so `--keep 2` on a store containing v0.9.0 and v0.10.0 keeps
 v0.10.0.
 
@@ -683,8 +695,8 @@ at the same storage. Roughly 70% of a multi-version store is byte-identical, and
 about 20% of a *single* version is duplicated between `include/aether/` and
 `share/aether/`, so it is worth running even with one release installed. It
 prefers copy-on-write reflinks (btrfs, XFS with `reflink=1`, APFS) and falls
-back to hardlinks; where the filesystem supports neither — FAT, some network
-mounts, a Windows account without Developer Mode — it reports that and changes
+back to hardlinks; where the filesystem supports neither (FAT, some network
+mounts, a Windows account without Developer Mode), it reports that and changes
 nothing. It never alters file contents, and it is safe to re-run: a second pass
 finds nothing left to share.
 

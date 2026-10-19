@@ -522,7 +522,7 @@ plainly:
 
 - Running Windows binaries under Wine does **not** exercise containment.
   Preloading into the *wine* process intercepts wine's own libc calls, not
-  the guest program's — a green run there would be actively misleading.
+  the guest program's, so a green run there would be actively misleading.
   Should a Wine-based test lane ever land, the sandbox suites must stay
   excluded from it; `tests/ae_sweep_prune_wine.txt` records that.
 - README's "enforced from compile time down to libc" is therefore a

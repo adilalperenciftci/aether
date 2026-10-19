@@ -43,7 +43,7 @@ main() {
     // resolver there normalises with _fullpath without following links, so
     // the symlink cases run only where links exist and are followed.
     have_links = 0
-    if os.platform() != "windows" && fs.fs_is_symlink("${box}/link") == 1 && fs.fs_is_symlink("${tmp}/boxlink") == 1 {
+    if os.platform() != "windows" && fs.is_symlink("${box}/link") == 1 && fs.is_symlink("${tmp}/boxlink") == 1 {
         have_links = 1
     }
     no_links = "symlinks not created or not followed on this platform"
@@ -116,12 +116,12 @@ main() {
 
     spec.describe(fw, "std.sandbox enforce leaves nothing behind") {
         spec.it_when(have_links, "after a block, a dangling symlink is one again, and resolves as before", no_links) callback {
-            before = fs.fs_is_symlink("${box}/dangling")
+            before = fs.is_symlink("${box}/dangling")
             sandbox.enforce(in_box) callback {
                 _e = fs.exists("${box}/sub")
             }
             spec.assert_eq(before, 1, "a symlink before the block")
-            spec.assert_eq(fs.fs_is_symlink("${box}/dangling"), 1, "and after it: nothing is checked once the block returns")
+            spec.assert_eq(fs.is_symlink("${box}/dangling"), 1, "and after it: nothing is checked once the block returns")
             _rp, _k, rerr = fs.realpath("${box}/dangling")
             spec.assert_true(string.contains(rerr, "sandbox") == 0, "realpath's answer is not the sandbox's")
         }

@@ -180,7 +180,7 @@ new_program(src: string) -> ptr! {
         f = _new_frame(E_FUNC, ast.name_of(n), list.size(nn.list), prog.root)
         f.node = n
         prog.root = f
-        list.list_add_raw(prog.frames, f)
+        list.add_raw(prog.frames, f)
         n = nn.b
     }
     // Prelude definitions see each other regardless of order (jq's own
@@ -200,8 +200,8 @@ free_program(p: ptr) {
     i = 0
     while i < n {
         f = list.get_raw(prog.frames, i) as *Env
-        if f.val != null { json.json_free(f.val) }
-        if f.owned_name != null { json.json_free(f.owned_name) }
+        if f.val != null { json.free(f.val) }
+        if f.owned_name != null { json.free(f.owned_name) }
         heap.free(f)
         list.set(prog.frames, i, null)
         i = i + 1
@@ -217,12 +217,12 @@ free_program(p: ptr) {
 program_set_var(p: ptr, name: string, v: @keep ptr) {
     prog = p as *Program
     // The caller's name may not outlive this call: keep a copy.
-    owned = json.json_create_string(name)
-    f = _new_frame(E_VAR, json.json_get_string_raw(owned), 0, prog.root)
+    owned = json.create_string(name)
+    f = _new_frame(E_VAR, json.get_string_raw(owned), 0, prog.root)
     f.owned_name = owned
     f.val = v
     prog.root = f
-    list.list_add_raw(prog.frames, f)
+    list.add_raw(prog.frames, f)
 }
 
 _new_frame(kind: int, name: string, arity: int, parent: @keep ptr) -> *Env {
@@ -262,8 +262,8 @@ new_ctx(prog: @keep ptr, inputs: @keep ptr) -> *Ctx {
 
 free_ctx(c: ptr) {
     ctx = c as *Ctx
-    if ctx.err != null { json.json_free(ctx.err) }
-    if ctx.env_obj != null { json.json_free(ctx.env_obj) }
+    if ctx.err != null { json.free(ctx.err) }
+    if ctx.env_obj != null { json.free(ctx.env_obj) }
     heap.free(c)
 }
 
@@ -319,7 +319,7 @@ run_each_to_json(c: ptr, input: @keep ptr, indent: int, sort_keys: int) -> strin
         v = list.get_raw(out, i)
         strbuilder.append(sb, value.to_json_indent(v, indent, sort_keys))
         strbuilder.append_byte(sb, 10)
-        json.json_free(v)
+        json.free(v)
         list.set(out, i, null)
         i = i + 1
     }
@@ -332,14 +332,14 @@ run_each_to_json(c: ptr, input: @keep ptr, indent: int, sort_keys: int) -> strin
 // ---------------------------------------------------------------------------
 
 _fail(ctx: *Ctx, msg: string) {
-    _fail_val(ctx, json.json_create_string(msg))
+    _fail_val(ctx, json.create_string(msg))
 }
 
 // Raise `v` (owned) as the error value. A raise while already unwinding
 // keeps the first one.
 _fail_val(ctx: *Ctx, v: @keep ptr) {
     if ctx.status != ST_OK {
-        json.json_free(v)
+        json.free(v)
         return
     }
     ctx.status = ST_ERROR
@@ -374,12 +374,12 @@ _new_sink(kind: int, next: @keep ptr) -> *Sink {
 }
 
 _free_val(v: ptr) {
-    if v != null { json.json_free(v) }
+    if v != null { json.free(v) }
 }
 
 // Extend an owned path with an owned key. Returns the (new) owned path.
 _path_add(p: @keep ptr, key: ptr) -> ptr {
-    json.json_array_add_raw(p, key)
+    json.array_add_raw(p, key)
     return p
 }
 
@@ -413,9 +413,9 @@ emit(ctx: *Ctx, s: *Sink, v: @keep ptr, p: @keep ptr) {
     }
     k = s.kind
     if k == SK_COLLECT {
-        list.list_add_raw(s.list, v)
+        list.add_raw(s.list, v)
         if s.plist != null {
-            list.list_add_raw(s.plist, p)
+            list.add_raw(s.plist, p)
         } else {
             _free_val(p)
         }
@@ -423,7 +423,7 @@ emit(ctx: *Ctx, s: *Sink, v: @keep ptr, p: @keep ptr) {
     }
     if k == SK_PIPE {
         ev(ctx, s.node, v, s.env, s.next as *Sink, p)
-        json.json_free(v)
+        json.free(v)
         _free_val(p)
         return
     }
@@ -451,7 +451,7 @@ emit(ctx: *Ctx, s: *Sink, v: @keep ptr, p: @keep ptr) {
             emit(ctx, s.next as *Sink, v, p)
             if ctx.status != ST_OK { s.flag = 1 }
         } else {
-            json.json_free(v)
+            json.free(v)
             _free_val(p)
         }
         return
@@ -465,7 +465,7 @@ emit(ctx: *Ctx, s: *Sink, v: @keep ptr, p: @keep ptr) {
         return
     }
     if k == SK_ISEMPTY {
-        json.json_free(v)
+        json.free(v)
         _free_val(p)
         s.flag = 1
         ctx.status = ST_BREAK
@@ -473,12 +473,12 @@ emit(ctx: *Ctx, s: *Sink, v: @keep ptr, p: @keep ptr) {
         return
     }
     if k == SK_PATHS_OF {
-        json.json_free(v)
+        json.free(v)
         if p == null {
             _fail(ctx, "Invalid path expression")
             return
         }
-        list.list_add_raw(s.list, p)
+        list.add_raw(s.list, p)
         return
     }
     if k == SK_BIND { _emit_bind(ctx, s, v, p); return }
@@ -497,7 +497,7 @@ emit(ctx: *Ctx, s: *Sink, v: @keep ptr, p: @keep ptr) {
     if k == SK_ASSIGN_RHS { _emit_assign_rhs(ctx, s, v, p); return }
     if k == SK_GETPATH { _emit_getpath(ctx, s, v, p); return }
     if k == SK_PATH_OUT {
-        json.json_free(v)
+        json.free(v)
         if p == null {
             _fail(ctx, "Invalid path expression")
             return
@@ -505,7 +505,7 @@ emit(ctx: *Ctx, s: *Sink, v: @keep ptr, p: @keep ptr) {
         emit(ctx, s.next as *Sink, p, null)
         return
     }
-    json.json_free(v)
+    json.free(v)
     _free_val(p)
     _fail(ctx, "internal error: unknown sink kind ${k}")
 }
@@ -569,11 +569,11 @@ _ev_node(ctx: *Ctx, node: @keep ptr, input: @keep ptr, env: @keep ptr, sink: *Si
         s = _new_sink(SK_COLLECT, null)
         s.list = list.new()
         if n.a != null { ev(ctx, n.a, input, env, s, null) }
-        arr = json.json_create_array()
+        arr = json.create_array()
         _drain_into_array(s.list, arr)
         heap.free(s)
         if ctx.status != ST_OK || _check_depth(ctx, arr) == 0 {
-            json.json_free(arr)
+            json.free(arr)
             return
         }
         emit(ctx, sink, arr, null)
@@ -674,7 +674,7 @@ _drain_into_array(l: ptr, arr: ptr) {
     n = list.size(l)
     i = 0
     while i < n {
-        json.json_array_add_raw(arr, list.get_raw(l, i))
+        json.array_add_raw(arr, list.get_raw(l, i))
         list.set(l, i, null)
         i = i + 1
     }
@@ -749,16 +749,16 @@ _emit_index_key(ctx: *Ctx, s: *Sink, key: ptr, kp: ptr) {
     _free_val(kp)
     out, err = _index(s.val, key)
     if out == null {
-        json.json_free(key)
+        json.free(key)
         _fail(ctx, err)
         return
     }
     np = null
     if s.path != null {
         np = value.copy(s.path)
-        json.json_array_add_raw(np, key)
+        json.array_add_raw(np, key)
     } else {
-        json.json_free(key)
+        json.free(key)
     }
     emit(ctx, s.next as *Sink, out, np)
 }
@@ -769,30 +769,30 @@ _index(v: ptr, key: ptr) -> ptr! {
     tk = value.type_of(key)
     if tv == value.T_NULL {
         if tk == value.T_STRING || tk == value.T_NUMBER || tk == value.T_OBJECT {
-            return json.json_create_null(), ""
+            return json.create_null(), ""
         }
-        if tk == value.T_NULL { return json.json_create_null(), "" }
+        if tk == value.T_NULL { return json.create_null(), "" }
     }
     if tv == value.T_OBJECT && tk == value.T_STRING {
-        got = json.json_object_get_raw(v, value.string_value(key))
-        if got == null { return json.json_create_null(), "" }
+        got = json.object_get_raw(v, value.string_value(key))
+        if got == null { return json.create_null(), "" }
         return value.copy(got), ""
     }
     if tv == value.T_ARRAY && tk == value.T_NUMBER {
         d = value.number_of(key)
-        if d != d { return json.json_create_null(), "" }
-        len = json.json_array_size(v)
+        if d != d { return json.create_null(), "" }
+        len = json.array_size(v)
         idx = value.clamp_int(math.floor(d))
         if idx < 0 { idx = idx + len }
-        if idx < 0 || idx >= len { return json.json_create_null(), "" }
-        return value.copy(json.json_array_get_raw(v, idx)), ""
+        if idx < 0 || idx >= len { return json.create_null(), "" }
+        return value.copy(json.array_get_raw(v, idx)), ""
     }
     if tv == value.T_ARRAY && tk == value.T_ARRAY {
         return _indices_of(v, key), ""
     }
     if tk == value.T_OBJECT {
         if tv == value.T_ARRAY || tv == value.T_STRING || tv == value.T_NULL {
-            res1, rerr1 = _slice(v, json.json_object_get_raw(key, "start"), json.json_object_get_raw(key, "end"))
+            res1, rerr1 = _slice(v, json.object_get_raw(key, "start"), json.object_get_raw(key, "end"))
             if res1 == null { return null, "${rerr1}" }
             return res1, ""
         }
@@ -818,22 +818,22 @@ _tname(t: int) -> string {
 
 // `[1,2,1,2] | .[[1,2]]` → [0, 2]: the start positions of the sub-array.
 _indices_of(v: ptr, sub: ptr) -> ptr {
-    out = json.json_create_array()
-    n = json.json_array_size(v)
-    m = json.json_array_size(sub)
+    out = json.create_array()
+    n = json.array_size(v)
+    m = json.array_size(sub)
     if m == 0 { return out }
     i = 0
     while i + m <= n {
         j = 0
         ok = 1
         while j < m {
-            if value.eq(json.json_array_get_raw(v, i + j), json.json_array_get_raw(sub, j)) == 0 {
+            if value.eq(json.array_get_raw(v, i + j), json.array_get_raw(sub, j)) == 0 {
                 ok = 0
                 j = m
             }
             j = j + 1
         }
-        if ok == 1 { json.json_array_add_raw(out, json.json_create_int(i as long)) }
+        if ok == 1 { json.array_add_raw(out, json.create_int(i as long)) }
         i = i + 1
     }
     return out
@@ -875,15 +875,15 @@ _slice(v: ptr, from: ptr, to: ptr) -> ptr! {
         tt = value.type_of(to)
         if tt != value.T_NULL && tt != value.T_NUMBER { return null, "Start and end indices of an array slice must be numbers" }
     }
-    if tv == value.T_NULL { return json.json_create_null(), "" }
+    if tv == value.T_NULL { return json.create_null(), "" }
     if tv == value.T_ARRAY {
-        a, b = _slice_bounds(json.json_array_size(v), from, to)
+        a, b = _slice_bounds(json.array_size(v), from, to)
         return value.array_slice(v, a, b), ""
     }
     if tv == value.T_STRING {
         s = value.string_value(v)
         a, b = _slice_bounds(value.codepoint_count(s), from, to)
-        return json.json_create_string(value.codepoint_slice(s, a, b)), ""
+        return json.create_string(value.codepoint_slice(s, a, b)), ""
     }
     return null, "Cannot index ${_tname(tv)} with object"
 }
@@ -906,7 +906,7 @@ _ev_slice(ctx: *Ctx, n: *Node, input: @keep ptr, env: @keep ptr, sink: *Sink, p:
             t.input = input
             // jq evaluates the upper bound as the outer loop.
             if n.c == null {
-                _emit_slice_to(ctx, t, json.json_create_null(), null)
+                _emit_slice_to(ctx, t, json.create_null(), null)
             } else {
                 ev(ctx, n.c, input, env, t, null)
             }
@@ -927,12 +927,12 @@ _emit_slice_to(ctx: *Ctx, s: *Sink, to: @keep ptr, tp: ptr) {
     f.path = s.path
     f.node2 = to // borrowed while the from-values flow
     if s.node == null {
-        _emit_slice_from(ctx, f, json.json_create_null(), null)
+        _emit_slice_from(ctx, f, json.create_null(), null)
     } else {
         ev(ctx, s.node, s.input, s.env, f, null)
     }
     heap.free(f)
-    json.json_free(to)
+    json.free(to)
 }
 
 _emit_slice_from(ctx: *Ctx, s: *Sink, from: ptr, fp: ptr) {
@@ -940,19 +940,19 @@ _emit_slice_from(ctx: *Ctx, s: *Sink, from: ptr, fp: ptr) {
     to = s.node2
     out, err = _slice(s.val, from, to)
     if out == null {
-        json.json_free(from)
+        json.free(from)
         _fail(ctx, err)
         return
     }
     np = null
     if s.path != null {
         np = value.copy(s.path)
-        key = json.json_create_object()
-        json.json_object_set_raw(key, "start", from)
-        json.json_object_set_raw(key, "end", value.copy(to))
-        json.json_array_add_raw(np, key)
+        key = json.create_object()
+        json.object_set_raw(key, "start", from)
+        json.object_set_raw(key, "end", value.copy(to))
+        json.array_add_raw(np, key)
     } else {
-        json.json_free(from)
+        json.free(from)
     }
     emit(ctx, s.next as *Sink, out, np)
 }
@@ -981,31 +981,31 @@ _ev_iterate(ctx: *Ctx, n: *Node, input: @keep ptr, env: @keep ptr, sink: *Sink, 
 _iterate(ctx: *Ctx, v: ptr, vp: ptr, sink: *Sink) {
     t = value.type_of(v)
     if t == value.T_ARRAY {
-        n = json.json_array_size(v)
+        n = json.array_size(v)
         i = 0
         while i < n {
             if ctx.status != ST_OK { return }
             np = null
             if vp != null {
                 np = value.copy(vp)
-                json.json_array_add_raw(np, json.json_create_int(i as long))
+                json.array_add_raw(np, json.create_int(i as long))
             }
-            emit(ctx, sink, value.copy(json.json_array_get_raw(v, i)), np)
+            emit(ctx, sink, value.copy(json.array_get_raw(v, i)), np)
             i = i + 1
         }
         return
     }
     if t == value.T_OBJECT {
-        n = json.json_object_size_raw(v)
+        n = json.object_size_raw(v)
         i = 0
         while i < n {
             if ctx.status != ST_OK { return }
             np = null
             if vp != null {
                 np = value.copy(vp)
-                json.json_array_add_raw(np, json.json_create_string(json.json_object_key_at(v, i)))
+                json.array_add_raw(np, json.create_string(json.object_key_at(v, i)))
             }
-            emit(ctx, sink, value.copy(json.json_object_value_at(v, i)), np)
+            emit(ctx, sink, value.copy(json.object_value_at(v, i)), np)
             i = i + 1
         }
         return
@@ -1023,28 +1023,28 @@ _recurse_all(ctx: *Ctx, v: ptr, p: ptr, sink: *Sink) {
     emit(ctx, sink, value.copy(v), _copy_path(p))
     t = value.type_of(v)
     if t == value.T_ARRAY {
-        n = json.json_array_size(v)
+        n = json.array_size(v)
         i = 0
         while i < n {
             np = null
             if p != null {
                 np = value.copy(p)
-                json.json_array_add_raw(np, json.json_create_int(i as long))
+                json.array_add_raw(np, json.create_int(i as long))
             }
-            _recurse_all(ctx, json.json_array_get_raw(v, i), np, sink)
+            _recurse_all(ctx, json.array_get_raw(v, i), np, sink)
             _free_val(np)
             i = i + 1
         }
     } else if t == value.T_OBJECT {
-        n = json.json_object_size_raw(v)
+        n = json.object_size_raw(v)
         i = 0
         while i < n {
             np = null
             if p != null {
                 np = value.copy(p)
-                json.json_array_add_raw(np, json.json_create_string(json.json_object_key_at(v, i)))
+                json.array_add_raw(np, json.create_string(json.object_key_at(v, i)))
             }
-            _recurse_all(ctx, json.json_object_value_at(v, i), np, sink)
+            _recurse_all(ctx, json.object_value_at(v, i), np, sink)
             _free_val(np)
             i = i + 1
         }
@@ -1059,12 +1059,12 @@ _emit_neg(ctx: *Ctx, s: *Sink, v: ptr, p: ptr) {
     _free_val(p)
     if value.type_of(v) != value.T_NUMBER {
         msg = "${_tname(value.type_of(v))} (${value.to_json(v)}) cannot be negated"
-        json.json_free(v)
+        json.free(v)
         _fail(ctx, msg)
         return
     }
     d = value.number_of(v)
-    json.json_free(v)
+    json.free(v)
     emit(ctx, s.next as *Sink, value.make_number(0.0 - d), null)
 }
 
@@ -1099,13 +1099,13 @@ _emit_binop_r(ctx: *Ctx, s: *Sink, rv: @keep ptr, rp: ptr) {
     l.id = s.id
     ev(ctx, s.node, s.input, s.env, l, null)
     heap.free(l)
-    json.json_free(rv)
+    json.free(rv)
 }
 
 _emit_binop_l(ctx: *Ctx, s: *Sink, lv: ptr, lp: ptr) {
     _free_val(lp)
     out, err = _binop(s.id, lv, s.val)
-    json.json_free(lv)
+    json.free(lv)
     if out == null {
         _fail(ctx, err)
         return
@@ -1116,12 +1116,12 @@ _emit_binop_l(ctx: *Ctx, s: *Sink, lv: ptr, lp: ptr) {
 // a op b for the arithmetic and comparison operators. Both borrowed;
 // returns an owned result or (null, message).
 _binop(op: int, a: ptr, b: ptr) -> ptr! {
-    if op == ast.OP_EQ { return json.json_create_bool(value.eq(a, b)), "" }
-    if op == ast.OP_NE { return json.json_create_bool(1 - value.eq(a, b)), "" }
-    if op == ast.OP_LT { return json.json_create_bool(_b(value.cmp(a, b) < 0)), "" }
-    if op == ast.OP_LE { return json.json_create_bool(_b(value.cmp(a, b) <= 0)), "" }
-    if op == ast.OP_GT { return json.json_create_bool(_b(value.cmp(a, b) > 0)), "" }
-    if op == ast.OP_GE { return json.json_create_bool(_b(value.cmp(a, b) >= 0)), "" }
+    if op == ast.OP_EQ { return json.create_bool(value.eq(a, b)), "" }
+    if op == ast.OP_NE { return json.create_bool(1 - value.eq(a, b)), "" }
+    if op == ast.OP_LT { return json.create_bool(_b(value.cmp(a, b) < 0)), "" }
+    if op == ast.OP_LE { return json.create_bool(_b(value.cmp(a, b) <= 0)), "" }
+    if op == ast.OP_GT { return json.create_bool(_b(value.cmp(a, b) > 0)), "" }
+    if op == ast.OP_GE { return json.create_bool(_b(value.cmp(a, b) >= 0)), "" }
     ta = value.type_of(a)
     tb = value.type_of(b)
     if op == ast.OP_ADD {
@@ -1131,14 +1131,14 @@ _binop(op: int, a: ptr, b: ptr) -> ptr! {
             return value.make_number(value.number_of(a) + value.number_of(b)), ""
         }
         if ta == value.T_STRING && tb == value.T_STRING {
-            return json.json_create_string("${value.string_value(a)}${value.string_value(b)}"), ""
+            return json.create_string("${value.string_value(a)}${value.string_value(b)}"), ""
         }
         if ta == value.T_ARRAY && tb == value.T_ARRAY {
             out = value.copy(a)
-            n = json.json_array_size(b)
+            n = json.array_size(b)
             i = 0
             while i < n {
-                json.json_array_add_raw(out, value.copy(json.json_array_get_raw(b, i)))
+                json.array_add_raw(out, value.copy(json.array_get_raw(b, i)))
                 i = i + 1
             }
             return out, ""
@@ -1153,12 +1153,12 @@ _binop(op: int, a: ptr, b: ptr) -> ptr! {
             return value.make_number(value.number_of(a) - value.number_of(b)), ""
         }
         if ta == value.T_ARRAY && tb == value.T_ARRAY {
-            out = json.json_create_array()
-            n = json.json_array_size(a)
+            out = json.create_array()
+            n = json.array_size(a)
             i = 0
             while i < n {
-                e = json.json_array_get_raw(a, i)
-                if _array_contains_eq(b, e) == 0 { json.json_array_add_raw(out, value.copy(e)) }
+                e = json.array_get_raw(a, i)
+                if _array_contains_eq(b, e) == 0 { json.array_add_raw(out, value.copy(e)) }
                 i = i + 1
             }
             return out, ""
@@ -1206,7 +1206,7 @@ _binop(op: int, a: ptr, b: ptr) -> ptr! {
             }
             if yi < 0 { yi = 0 - yi }
             r = xi % yi
-            return json.json_create_int(r), ""
+            return json.create_int(r), ""
         }
         return null, _arith_error(a, b, "divided")
     }
@@ -1232,10 +1232,10 @@ _arith_error(a: ptr, b: ptr, verb: string) -> string {
 }
 
 _array_contains_eq(arr: ptr, e: ptr) -> int {
-    n = json.json_array_size(arr)
+    n = json.array_size(arr)
     i = 0
     while i < n {
-        if value.eq(json.json_array_get_raw(arr, i), e) == 1 { return 1 }
+        if value.eq(json.array_get_raw(arr, i), e) == 1 { return 1 }
         i = i + 1
     }
     return 0
@@ -1244,10 +1244,10 @@ _array_contains_eq(arr: ptr, e: ptr) -> int {
 // {a} + {b}: b's members win, in a's key order first.
 _merge_shallow(a: ptr, b: ptr) -> ptr {
     out = value.copy(a)
-    n = json.json_object_size_raw(b)
+    n = json.object_size_raw(b)
     i = 0
     while i < n {
-        json.json_object_set_raw(out, json.json_object_key_at(b, i), value.copy(json.json_object_value_at(b, i)))
+        json.object_set_raw(out, json.object_key_at(b, i), value.copy(json.object_value_at(b, i)))
         i = i + 1
     }
     return out
@@ -1256,16 +1256,16 @@ _merge_shallow(a: ptr, b: ptr) -> ptr {
 // {a} * {b}: recursive merge where both sides are objects.
 _merge_deep(a: ptr, b: ptr) -> ptr {
     out = value.copy(a)
-    n = json.json_object_size_raw(b)
+    n = json.object_size_raw(b)
     i = 0
     while i < n {
-        k = json.json_object_key_at(b, i)
-        bv = json.json_object_value_at(b, i)
-        av = json.json_object_get_raw(a, k)
+        k = json.object_key_at(b, i)
+        bv = json.object_value_at(b, i)
+        av = json.object_get_raw(a, k)
         if av != null && value.type_of(av) == value.T_OBJECT && value.type_of(bv) == value.T_OBJECT {
-            json.json_object_set_raw(out, k, _merge_deep(av, bv))
+            json.object_set_raw(out, k, _merge_deep(av, bv))
         } else {
-            json.json_object_set_raw(out, k, value.copy(bv))
+            json.object_set_raw(out, k, value.copy(bv))
         }
         i = i + 1
     }
@@ -1280,10 +1280,10 @@ const MAX_REPEAT_BYTES = 2147483647.0
 
 _repeat_string(s: ptr, n: ptr) -> ptr! {
     d = value.number_of(n)
-    if d <= 0.0 || d != d { return json.json_create_null(), "" }
+    if d <= 0.0 || d != d { return json.create_null(), "" }
     text = value.string_value(s)
     len = string.length(text)
-    if len == 0 { return json.json_create_string(""), "" }
+    if len == 0 { return json.create_string(""), "" }
     times = math.ceil(d)
     if d < 1.0 { times = 1.0 }
     if times * (len as float) > MAX_REPEAT_BYTES { return null, "Repeat string result too long" }
@@ -1294,41 +1294,41 @@ _repeat_string(s: ptr, n: ptr) -> ptr! {
         strbuilder.append(sb, text)
         i = i + 1
     }
-    return json.json_create_string(strbuilder.finish(sb)), ""
+    return json.create_string(strbuilder.finish(sb)), ""
 }
 
 // "a,b" / "," → ["a","b"]; an empty separator splits into codepoints... no:
 // jq splits "abc" / "" into [] for the empty string and per-character
 // otherwise? jq: "abc" / "" → ["a","b","c"]; "" / "," → [].
 _split_string(s: string, sep: string) -> ptr {
-    out = json.json_create_array()
+    out = json.create_array()
     n = string.length(s)
     if n == 0 { return out }
     m = string.length(sep)
     if m == 0 {
         // one element per codepoint
         cps = value.explode(s)
-        count = json.json_array_size(cps)
+        count = json.array_size(cps)
         i = 0
         while i < count {
-            single = json.json_create_array()
-            json.json_array_add_raw(single, value.copy(json.json_array_get_raw(cps, i)))
+            single = json.create_array()
+            json.array_add_raw(single, value.copy(json.array_get_raw(cps, i)))
             piece, _e = value.implode(single)
-            json.json_array_add_raw(out, json.json_create_string(piece))
-            json.json_free(single)
+            json.array_add_raw(out, json.create_string(piece))
+            json.free(single)
             i = i + 1
         }
-        json.json_free(cps)
+        json.free(cps)
         return out
     }
     start = 0
     while start <= n {
         idx = string.index_of_from(s, sep, start)
         if idx < 0 {
-            json.json_array_add_raw(out, json.json_create_string(string.substring_n(s, n, start, n)))
+            json.array_add_raw(out, json.create_string(string.substring_n(s, n, start, n)))
             return out
         }
-        json.json_array_add_raw(out, json.json_create_string(string.substring_n(s, n, start, idx)))
+        json.array_add_raw(out, json.create_string(string.substring_n(s, n, start, idx)))
         start = idx + m
     }
     return out
@@ -1345,9 +1345,9 @@ _ev_logical(ctx: *Ctx, n: *Node, input: @keep ptr, env: @keep ptr, sink: *Sink) 
         if ctx.status == ST_OK {
             lt = value.truthy(list.get_raw(left.list, i))
             if n.op == ast.OP_AND && lt == 0 {
-                emit(ctx, sink, json.json_create_bool(0), null)
+                emit(ctx, sink, json.create_bool(0), null)
             } else if n.op == ast.OP_OR && lt == 1 {
-                emit(ctx, sink, json.json_create_bool(1), null)
+                emit(ctx, sink, json.create_bool(1), null)
             } else {
                 right = _new_sink(SK_COLLECT, null)
                 right.list = list.new()
@@ -1356,7 +1356,7 @@ _ev_logical(ctx: *Ctx, n: *Node, input: @keep ptr, env: @keep ptr, sink: *Sink) 
                 j = 0
                 while j < rc {
                     if ctx.status == ST_OK {
-                        emit(ctx, sink, json.json_create_bool(value.truthy(list.get_raw(right.list, j))), null)
+                        emit(ctx, sink, json.create_bool(value.truthy(list.get_raw(right.list, j))), null)
                     }
                     j = j + 1
                 }
@@ -1378,7 +1378,7 @@ _ev_alt(ctx: *Ctx, n: *Node, input: @keep ptr, env: @keep ptr, sink: *Sink, p: @
     if ctx.status == ST_ERROR && s.flag == 0 {
         // the error was a's, not downstream's
         ctx.status = ST_OK
-        json.json_free(ctx.err)
+        json.free(ctx.err)
         ctx.err = null
     }
     count = s.count
@@ -1390,7 +1390,7 @@ _ev_alt(ctx: *Ctx, n: *Node, input: @keep ptr, env: @keep ptr, sink: *Sink, p: @
 _emit_if(ctx: *Ctx, s: *Sink, cond: ptr, cp: ptr) {
     _free_val(cp)
     t = value.truthy(cond)
-    json.json_free(cond)
+    json.free(cond)
     if t == 1 {
         ev(ctx, s.node, s.input, s.env, s.next as *Sink, s.ipath)
     } else if s.node2 != null {
@@ -1412,18 +1412,18 @@ _ev_object(ctx: *Ctx, n: *Node, input: @keep ptr, env: @keep ptr, sink: *Sink, p
         _fail(ctx, "Invalid path expression with result {...}")
         return
     }
-    _object_entry(ctx, n.list, 0, json.json_create_object(), input, env, sink)
+    _object_entry(ctx, n.list, 0, json.create_object(), input, env, sink)
 }
 
 // Continue building `partial` (owned) from entry `i` onwards.
 _object_entry(ctx: *Ctx, entries: @keep ptr, i: int, partial: @keep ptr, input: @keep ptr, env: @keep ptr, sink: *Sink) {
     if ctx.status != ST_OK {
-        json.json_free(partial)
+        json.free(partial)
         return
     }
     if i >= list.size(entries) {
         if _check_depth(ctx, partial) == 0 {
-            json.json_free(partial)
+            json.free(partial)
             return
         }
         emit(ctx, sink, partial, null)
@@ -1439,7 +1439,7 @@ _object_entry(ctx: *Ctx, entries: @keep ptr, i: int, partial: @keep ptr, input: 
     s.input = input
     ev(ctx, e.a, input, env, s, null)
     heap.free(s)
-    json.json_free(partial)
+    json.free(partial)
 }
 
 _emit_objkey(ctx: *Ctx, s: *Sink, key: @keep ptr, kp: ptr) {
@@ -1449,7 +1449,7 @@ _emit_objkey(ctx: *Ctx, s: *Sink, key: @keep ptr, kp: ptr) {
         if value.type_of(key) != value.T_NULL {
             msg = "Object keys must be strings"
         }
-        json.json_free(key)
+        json.free(key)
         _fail(ctx, msg)
         return
     }
@@ -1462,13 +1462,13 @@ _emit_objkey(ctx: *Ctx, s: *Sink, key: @keep ptr, kp: ptr) {
     v.input = s.input
     ev(ctx, s.node, s.input, s.env, v, null)
     heap.free(v)
-    json.json_free(key)
+    json.free(key)
 }
 
 _emit_objval(ctx: *Ctx, s: *Sink, val: ptr, vp: ptr) {
     _free_val(vp)
     next_partial = value.copy(s.val)
-    json.json_object_set_raw(next_partial, value.string_value(s.path), val)
+    json.object_set_raw(next_partial, value.string_value(s.path), val)
     _object_entry(ctx, s.list, s.count + 1, next_partial, s.input, s.env, s.next as *Sink)
 }
 
@@ -1479,12 +1479,12 @@ _ev_string(ctx: *Ctx, n: *Node, input: @keep ptr, env: @keep ptr, sink: *Sink, p
         _fail(ctx, "Invalid path expression")
         return
     }
-    _string_part(ctx, n.list, 0, ast.name_of(n as ptr), json.json_create_string(""), input, env, sink)
+    _string_part(ctx, n.list, 0, ast.name_of(n as ptr), json.create_string(""), input, env, sink)
 }
 
 _string_part(ctx: *Ctx, parts: @keep ptr, i: int, fmt: string, sofar: @keep ptr, input: @keep ptr, env: @keep ptr, sink: *Sink) {
     if ctx.status != ST_OK {
-        json.json_free(sofar)
+        json.free(sofar)
         return
     }
     if i >= list.size(parts) {
@@ -1493,8 +1493,8 @@ _string_part(ctx: *Ctx, parts: @keep ptr, i: int, fmt: string, sofar: @keep ptr,
     }
     part = list.get_raw(parts, i) as *Node
     if part.val != null {
-        next = json.json_create_string("${value.string_value(sofar)}${value.string_value(part.val)}")
-        json.json_free(sofar)
+        next = json.create_string("${value.string_value(sofar)}${value.string_value(part.val)}")
+        json.free(sofar)
         _string_part(ctx, parts, i + 1, fmt, next, input, env, sink)
         return
     }
@@ -1507,7 +1507,7 @@ _string_part(ctx: *Ctx, parts: @keep ptr, i: int, fmt: string, sofar: @keep ptr,
     s.input = input
     ev(ctx, part.a, input, env, s, null)
     heap.free(s)
-    json.json_free(sofar)
+    json.free(sofar)
 }
 
 _emit_strpart(ctx: *Ctx, s: *Sink, v: ptr, vp: ptr) {
@@ -1518,22 +1518,22 @@ _emit_strpart(ctx: *Ctx, s: *Sink, v: ptr, vp: ptr) {
     } else {
         f, err = _format(s.name, v)
         if f == null {
-            json.json_free(v)
+            json.free(v)
             _fail(ctx, err)
             return
         }
         text = f
     }
-    json.json_free(v)
-    next = json.json_create_string("${value.string_value(s.val)}${value.string_value(text)}")
-    json.json_free(text)
+    json.free(v)
+    next = json.create_string("${value.string_value(s.val)}${value.string_value(text)}")
+    json.free(text)
     _string_part(ctx, s.list, s.count + 1, s.name, next, s.input, s.env, s.next as *Sink)
 }
 
 // `tostring`: strings as they are, everything else as JSON. Owned result.
 _tostring(v: ptr) -> ptr {
     if value.type_of(v) == value.T_STRING { return value.copy(v) }
-    return json.json_create_string(value.to_json(v))
+    return json.create_string(value.to_json(v))
 }
 
 // ---------------------------------------------------------------------------
@@ -1552,7 +1552,7 @@ _ev_try(ctx: *Ctx, n: *Node, input: @keep ptr, env: @keep ptr, sink: *Sink, p: @
         // A bare `try` / `?` swallows the error; a handler sees the error
         // value as its input.
         if n.b != null { ev(ctx, n.b, err, env, sink, null) }
-        json.json_free(err)
+        json.free(err)
     }
 }
 
@@ -1600,7 +1600,7 @@ _emit_reduce(ctx: *Ctx, s: *Sink, v: @keep ptr, vp: ptr) {
     // Bind the pattern (possibly generating several environments), and for
     // each environment run one fold step.
     _bind_alternatives(ctx, s.list, v, s.env, s, 1)
-    json.json_free(v)
+    json.free(v)
 }
 
 // One fold step in environment `env`: state = last(update(state)).
@@ -1618,7 +1618,7 @@ _fold_step(ctx: *Ctx, s: *Sink, env: @keep ptr) {
             // `reduce` with an update yielding empty: the state becomes null
             _free_val(s.val)
             _free_val(s.path)
-            s.val = json.json_create_null()
+            s.val = json.create_null()
             s.path = null
         }
         heap.free(last)
@@ -1659,7 +1659,7 @@ _fold_step(ctx: *Ctx, s: *Sink, env: @keep ptr) {
 _emit_bind(ctx: *Ctx, s: *Sink, v: @keep ptr, vp: ptr) {
     _free_val(vp)
     _bind_alternatives(ctx, s.list, v, s.env, s, 0)
-    json.json_free(v)
+    json.free(v)
 }
 
 // Destructuring alternatives `p1 ?// p2 ?// p3`: try each pattern in turn;
@@ -1684,8 +1684,8 @@ _bind_alternatives(ctx: *Ctx, patterns: ptr, v: @keep ptr, env: @keep ptr, s: *S
     i = 0
     while i < list.size(names) {
         f = _new_frame(E_VAR, ast.name_of(list.get_raw(names, i)), 0, base)
-        f.val = json.json_create_null()
-        list.list_add_raw(frames, f)
+        f.val = json.create_null()
+        list.add_raw(frames, f)
         base = f
         i = i + 1
     }
@@ -1693,7 +1693,7 @@ _bind_alternatives(ctx: *Ctx, patterns: ptr, v: @keep ptr, env: @keep ptr, s: *S
     while i < n {
         _bind_patterns(ctx, list.get_raw(patterns, i), v, base, s, fold)
         if ctx.status == ST_ERROR && i + 1 < n {
-            json.json_free(ctx.err)
+            json.free(ctx.err)
             ctx.err = null
             ctx.status = ST_OK
         } else {
@@ -1704,7 +1704,7 @@ _bind_alternatives(ctx: *Ctx, patterns: ptr, v: @keep ptr, env: @keep ptr, s: *S
     i = 0
     while i < list.size(frames) {
         f = list.get_raw(frames, i) as *Env
-        json.json_free(f.val)
+        json.free(f.val)
         heap.free(f)
         list.set(frames, i, null)
         i = i + 1
@@ -1717,7 +1717,7 @@ _bind_alternatives(ctx: *Ctx, patterns: ptr, v: @keep ptr, env: @keep ptr, s: *S
 _collect_pattern_vars(pat: ptr, names: ptr) {
     pn = pat as *Node
     if pn.kind == ast.P_VAR {
-        list.list_add_raw(names, pat)
+        list.add_raw(names, pat)
         return
     }
     if pn.kind == ast.P_ARRAY {
@@ -1734,7 +1734,7 @@ _collect_pattern_vars(pat: ptr, names: ptr) {
         i = 0
         while i < n {
             e = list.get_raw(pn.list, i) as *Node
-            if e.name != null { list.list_add_raw(names, e as ptr) }
+            if e.name != null { list.add_raw(names, e as ptr) }
             if e.b != null { _collect_pattern_vars(e.b, names) }
             i = i + 1
         }
@@ -1752,7 +1752,7 @@ _bind_patterns(ctx: *Ctx, pat: ptr, v: @keep ptr, env: @keep ptr, s: *Sink, fold
         f = _new_frame(E_VAR, ast.name_of(pat), 0, env)
         f.val = value.copy(v)
         _bind_continue(ctx, s, f, fold)
-        json.json_free(f.val)
+        json.free(f.val)
         heap.free(f)
         return
     }
@@ -1777,11 +1777,11 @@ _bind_array_elems(ctx: *Ctx, elems: @keep ptr, i: int, v: @keep ptr, env: @keep 
         _bind_continue(ctx, s, env, fold)
         return
     }
-    elem = json.json_create_null()
+    elem = json.create_null()
     if value.type_of(v) == value.T_ARRAY {
-        if i < json.json_array_size(v) {
-            json.json_free(elem)
-            elem = value.copy(json.json_array_get_raw(v, i))
+        if i < json.array_size(v) {
+            json.free(elem)
+            elem = value.copy(json.array_get_raw(v, i))
         }
     }
     // Bind this element's sub-pattern, continuing with the remaining elements.
@@ -1793,7 +1793,7 @@ _bind_array_elems(ctx: *Ctx, elems: @keep ptr, i: int, v: @keep ptr, env: @keep 
     c.id = fold
     _bind_sub(ctx, list.get_raw(elems, i), elem, env, c, 2)
     heap.free(c)
-    json.json_free(elem)
+    json.free(elem)
 }
 
 _bind_object_entries(ctx: *Ctx, entries: @keep ptr, i: int, v: @keep ptr, env: @keep ptr, s: *Sink, fold: int) {
@@ -1825,7 +1825,7 @@ _bind_object_entries(ctx: *Ctx, entries: @keep ptr, i: int, v: @keep ptr, env: @
         } else {
             _bind_object_entries(ctx, entries, i + 1, v, f, s, fold)
         }
-        json.json_free(f.val)
+        json.free(f.val)
         heap.free(f)
         return
     }
@@ -1855,7 +1855,7 @@ _bind_object_entries(ctx: *Ctx, entries: @keep ptr, i: int, v: @keep ptr, env: @
                     c.id = fold
                     _bind_sub(ctx, e.b, got, env, c, 3)
                     heap.free(c)
-                    json.json_free(got)
+                    json.free(got)
                 }
             }
         }
@@ -1868,10 +1868,10 @@ _bind_object_entries(ctx: *Ctx, entries: @keep ptr, i: int, v: @keep ptr, env: @
 // `.key` for destructuring: null → null, object → member or null, else error.
 _index_by_string(v: ptr, key: string) -> ptr! {
     t = value.type_of(v)
-    if t == value.T_NULL { return json.json_create_null(), "" }
+    if t == value.T_NULL { return json.create_null(), "" }
     if t == value.T_OBJECT {
-        got = json.json_object_get_raw(v, key)
-        if got == null { return json.json_create_null(), "" }
+        got = json.object_get_raw(v, key)
+        if got == null { return json.create_null(), "" }
         return value.copy(got), ""
     }
     return null, "Cannot index ${_tname(t)} with \"${key}\""
@@ -1886,7 +1886,7 @@ _bind_sub(ctx: *Ctx, pat: ptr, v: @keep ptr, env: @keep ptr, c: *Sink, which: in
         f = _new_frame(E_VAR, ast.name_of(pat), 0, env)
         f.val = value.copy(v)
         _bind_resume(ctx, c, f, which)
-        json.json_free(f.val)
+        json.free(f.val)
         heap.free(f)
         return
     }
@@ -1960,7 +1960,7 @@ _ev_var(ctx: *Ctx, node: ptr, input: ptr, env: @keep ptr, sink: *Sink, p: ptr) {
 // $ENV, built once per run from the process environment.
 _env_object(ctx: *Ctx) -> ptr {
     if ctx.env_obj != null { return ctx.env_obj }
-    o = json.json_create_object()
+    o = json.create_object()
     n = value.environ_count()
     i = 0
     while i < n {
@@ -1968,7 +1968,7 @@ _env_object(ctx: *Ctx) -> ptr {
         eq = string.index_of(entry, "=")
         if eq > 0 {
             len = string.length(entry)
-            json.json_object_set_raw(o, string.substring_n(entry, len, 0, eq), json.json_create_string(string.substring_n(entry, len, eq + 1, len)))
+            json.object_set_raw(o, string.substring_n(entry, len, 0, eq), json.create_string(string.substring_n(entry, len, eq + 1, len)))
         }
         i = i + 1
     }
@@ -2085,27 +2085,27 @@ _call_bind(ctx: *Ctx, def: *Node, i: int, callee: @keep ptr, caller: @keep ptr, 
 // made getpath quadratic in the depth, and `tostream`, which calls it for
 // every path, cubic.
 _getpath(v: ptr, path: ptr, i: int) -> ptr! {
-    n = json.json_array_size(path)
+    n = json.array_size(path)
     cur = v
     while i < n {
-        key = json.json_array_get_raw(path, i)
+        key = json.array_get_raw(path, i)
         tv = value.type_of(cur)
         tk = value.type_of(key)
         if tv == value.T_NULL && (tk == value.T_STRING || tk == value.T_NUMBER || tk == value.T_OBJECT || tk == value.T_NULL) {
-            return json.json_create_null(), ""
+            return json.create_null(), ""
         }
         if tv == value.T_OBJECT && tk == value.T_STRING {
-            got = json.json_object_get_raw(cur, value.string_value(key))
-            if got == null { return json.json_create_null(), "" }
+            got = json.object_get_raw(cur, value.string_value(key))
+            if got == null { return json.create_null(), "" }
             cur = got
         } else if tv == value.T_ARRAY && tk == value.T_NUMBER {
             d = value.number_of(key)
-            if d != d { return json.json_create_null(), "" }
-            len = json.json_array_size(cur)
+            if d != d { return json.create_null(), "" }
+            len = json.array_size(cur)
             idx = value.clamp_int(math.floor(d))
             if idx < 0 { idx = idx + len }
-            if idx < 0 || idx >= len { return json.json_create_null(), "" }
-            cur = json.json_array_get_raw(cur, idx)
+            if idx < 0 || idx >= len { return json.create_null(), "" }
+            cur = json.array_get_raw(cur, idx)
         } else {
             // A slice, an indices lookup, or an error: _index materialises
             // the step, and the rest of the path is taken from that. One
@@ -2114,7 +2114,7 @@ _getpath(v: ptr, path: ptr, i: int) -> ptr! {
             child, err = _index(cur, key)
             if child == null { return null, "${err}" }
             out, err2 = _getpath(child, path, i + 1)
-            json.json_free(child)
+            json.free(child)
             return out, "${err2}"
         }
         i = i + 1
@@ -2149,10 +2149,10 @@ _setpath(v: ptr, path: ptr, newv: @keep ptr) -> ptr! {
 // quadratic: 76 s for a 100000-step path wherever the stack let the walk
 // get that far (#2277).
 _setpath_at(v: ptr, path: ptr, i: int, above: int, newv: @keep ptr) -> ptr! {
-    n = json.json_array_size(path)
+    n = json.array_size(path)
     if i >= n {
         if value.deeper_than(newv, value.MAX_DEPTH - above) == 1 {
-            json.json_free(newv)
+            json.free(newv)
             return null, "value nesting depth exceeds limit of ${value.MAX_DEPTH}"
         }
         return newv, ""
@@ -2160,66 +2160,66 @@ _setpath_at(v: ptr, path: ptr, i: int, above: int, newv: @keep ptr) -> ptr! {
     // One frame per path element. The depth cap bounds field and index
     // steps, but not slices, which add no depth.
     if guard.too_deep(i, NEST_RESERVE, FALLBACK_MAX_NEST) != 0 {
-        json.json_free(newv)
+        json.free(newv)
         return null, "path nested too deeply"
     }
-    key = json.json_array_get_raw(path, i)
+    key = json.array_get_raw(path, i)
     tv = value.type_of(v)
     tk = value.type_of(key)
     if tk == value.T_STRING {
         if tv != value.T_NULL && tv != value.T_OBJECT {
-            json.json_free(newv)
+            json.free(newv)
             return null, _index_error(tv, key, tk)
         }
         if above >= value.MAX_DEPTH {
-            json.json_free(newv)
+            json.free(newv)
             return null, "value nesting depth exceeds limit of ${value.MAX_DEPTH}"
         }
         k = value.string_value(key)
         child = null
-        if tv == value.T_OBJECT { child = json.json_object_get_raw(v, k) }
+        if tv == value.T_OBJECT { child = json.object_get_raw(v, k) }
         sub, err = _setpath_at(child, path, i + 1, above + 1, newv)
         if sub == null { return null, "${err}" }
-        out = json.json_create_object()
-        if tv == value.T_OBJECT { json.json_free(out); out = value.copy(v) }
-        json.json_object_set_raw(out, k, sub)
+        out = json.create_object()
+        if tv == value.T_OBJECT { json.free(out); out = value.copy(v) }
+        json.object_set_raw(out, k, sub)
         return out, ""
     }
     if tk == value.T_NUMBER {
         if tv != value.T_NULL && tv != value.T_ARRAY {
-            json.json_free(newv)
+            json.free(newv)
             return null, _index_error(tv, key, tk)
         }
         len = 0
-        if tv == value.T_ARRAY { len = json.json_array_size(v) }
+        if tv == value.T_ARRAY { len = json.array_size(v) }
         d = value.number_of(key)
         idx = value.clamp_int(math.floor(d))
         if idx < 0 { idx = idx + len }
         if idx < 0 || d != d {
-            json.json_free(newv)
+            json.free(newv)
             return null, "Out of bounds negative array index"
         }
         if idx > MAX_ARRAY_INDEX {
-            json.json_free(newv)
+            json.free(newv)
             return null, "Array index too large"
         }
         if above >= value.MAX_DEPTH {
-            json.json_free(newv)
+            json.free(newv)
             return null, "value nesting depth exceeds limit of ${value.MAX_DEPTH}"
         }
         child = null
-        if idx < len { child = json.json_array_get_raw(v, idx) }
+        if idx < len { child = json.array_get_raw(v, idx) }
         sub, err = _setpath_at(child, path, i + 1, above + 1, newv)
         if sub == null { return null, "${err}" }
-        out = json.json_create_array()
+        out = json.create_array()
         j = 0
         while j < len || j <= idx {
             if j == idx {
-                json.json_array_add_raw(out, sub)
+                json.array_add_raw(out, sub)
             } else if j < len {
-                json.json_array_add_raw(out, value.copy(json.json_array_get_raw(v, j)))
+                json.array_add_raw(out, value.copy(json.array_get_raw(v, j)))
             } else {
-                json.json_array_add_raw(out, json.json_create_null())
+                json.array_add_raw(out, json.create_null())
             }
             j = j + 1
         }
@@ -2227,44 +2227,44 @@ _setpath_at(v: ptr, path: ptr, i: int, above: int, newv: @keep ptr) -> ptr! {
     }
     if tk == value.T_OBJECT {
         if tv != value.T_NULL && tv != value.T_ARRAY {
-            json.json_free(newv)
+            json.free(newv)
             return null, "Cannot update field at object index of ${_tname(tv)}"
         }
         len = 0
-        if tv == value.T_ARRAY { len = json.json_array_size(v) }
-        a, b = _slice_bounds(len, json.json_object_get_raw(key, "start"), json.json_object_get_raw(key, "end"))
-        child = json.json_create_array()
-        if tv == value.T_ARRAY { json.json_free(child); child = value.array_slice(v, a, b) }
+        if tv == value.T_ARRAY { len = json.array_size(v) }
+        a, b = _slice_bounds(len, json.object_get_raw(key, "start"), json.object_get_raw(key, "end"))
+        child = json.create_array()
+        if tv == value.T_ARRAY { json.free(child); child = value.array_slice(v, a, b) }
         // `sub` stands where `out` does: its members are spliced into
         // `out`, so the rest of the path starts at this same depth.
         sub, err = _setpath_at(child, path, i + 1, above, newv)
-        json.json_free(child)
+        json.free(child)
         if sub == null { return null, "${err}" }
         if value.type_of(sub) != value.T_ARRAY {
-            json.json_free(sub)
+            json.free(sub)
             return null, "A slice of an array can only be assigned another array"
         }
-        out = json.json_create_array()
+        out = json.create_array()
         j = 0
         while j < a {
-            json.json_array_add_raw(out, value.copy(json.json_array_get_raw(v, j)))
+            json.array_add_raw(out, value.copy(json.array_get_raw(v, j)))
             j = j + 1
         }
-        m = json.json_array_size(sub)
+        m = json.array_size(sub)
         j = 0
         while j < m {
-            json.json_array_add_raw(out, value.copy(json.json_array_get_raw(sub, j)))
+            json.array_add_raw(out, value.copy(json.array_get_raw(sub, j)))
             j = j + 1
         }
-        json.json_free(sub)
+        json.free(sub)
         j = b
         while j < len {
-            json.json_array_add_raw(out, value.copy(json.json_array_get_raw(v, j)))
+            json.array_add_raw(out, value.copy(json.array_get_raw(v, j)))
             j = j + 1
         }
         return out, ""
     }
-    json.json_free(newv)
+    json.free(newv)
     return null, "Invalid path component of type ${_tname(tk)}"
 }
 
@@ -2272,26 +2272,26 @@ _setpath_at(v: ptr, path: ptr, i: int, above: int, newv: @keep ptr) -> ptr! {
 // missing member is a no-op; deleting the root gives null.
 _delpath(v: ptr, path: ptr, i: int) -> ptr! {
     if guard.too_deep(i, NEST_RESERVE, FALLBACK_MAX_NEST) != 0 { return null, "path nested too deeply" }
-    n = json.json_array_size(path)
-    if n == 0 { return json.json_create_null(), "" }
+    n = json.array_size(path)
+    if n == 0 { return json.create_null(), "" }
     tv = value.type_of(v)
-    if tv == value.T_NULL { return json.json_create_null(), "" }
-    key = json.json_array_get_raw(path, i)
+    if tv == value.T_NULL { return json.create_null(), "" }
+    key = json.array_get_raw(path, i)
     tk = value.type_of(key)
     if i < n - 1 {
         child, err = _index(v, key)
         if child == null { return null, "${err}" }
         if value.type_of(child) == value.T_NULL {
-            json.json_free(child)
+            json.free(child)
             return value.copy(v), ""
         }
         sub, err2 = _delpath(child, path, i + 1)
-        json.json_free(child)
+        json.free(child)
         if sub == null { return null, "${err2}" }
-        one = json.json_create_array()
-        json.json_array_add_raw(one, value.copy(key))
+        one = json.create_array()
+        json.array_add_raw(one, value.copy(key))
         out, err3 = _setpath(v, one, sub)
-        json.json_free(one)
+        json.free(one)
         return out, "${err3}"
     }
     if tv == value.T_OBJECT {
@@ -2299,26 +2299,26 @@ _delpath(v: ptr, path: ptr, i: int) -> ptr! {
         return value.without_key(v, value.string_value(key)), ""
     }
     if tv == value.T_ARRAY {
-        len = json.json_array_size(v)
+        len = json.array_size(v)
         if tk == value.T_NUMBER {
             idx = value.clamp_int(math.floor(value.number_of(key)))
             if idx < 0 { idx = idx + len }
             if idx < 0 { return null, "Out of bounds negative array index" }
             if idx >= len { return value.copy(v), "" }
-            out = json.json_create_array()
+            out = json.create_array()
             j = 0
             while j < len {
-                if j != idx { json.json_array_add_raw(out, value.copy(json.json_array_get_raw(v, j))) }
+                if j != idx { json.array_add_raw(out, value.copy(json.array_get_raw(v, j))) }
                 j = j + 1
             }
             return out, ""
         }
         if tk == value.T_OBJECT {
-            a, b = _slice_bounds(len, json.json_object_get_raw(key, "start"), json.json_object_get_raw(key, "end"))
-            out = json.json_create_array()
+            a, b = _slice_bounds(len, json.object_get_raw(key, "start"), json.object_get_raw(key, "end"))
+            out = json.create_array()
             j = 0
             while j < len {
-                if j < a || j >= b { json.json_array_add_raw(out, value.copy(json.json_array_get_raw(v, j))) }
+                if j < a || j >= b { json.array_add_raw(out, value.copy(json.array_get_raw(v, j))) }
                 j = j + 1
             }
             return out, ""
@@ -2333,15 +2333,15 @@ _delpath(v: ptr, path: ptr, i: int) -> ptr! {
 _delpaths(v: ptr, paths: ptr) -> ptr! {
     if value.type_of(paths) != value.T_ARRAY { return null, "Paths must be specified as an array" }
     l = list.new()
-    n = json.json_array_size(paths)
+    n = json.array_size(paths)
     i = 0
     while i < n {
-        pth = json.json_array_get_raw(paths, i)
+        pth = json.array_get_raw(paths, i)
         if value.type_of(pth) != value.T_ARRAY {
             list.free(l)
             return null, "Path must be specified as an array"
         }
-        list.list_add_raw(l, pth)
+        list.add_raw(l, pth)
         i = i + 1
     }
     value.sort_list(l, null)
@@ -2349,7 +2349,7 @@ _delpaths(v: ptr, paths: ptr) -> ptr! {
     i = n - 1
     while i >= 0 {
         next, err = _delpath(out, list.get_raw(l, i), 0)
-        json.json_free(out)
+        json.free(out)
         if next == null {
             _clear_aliases(l)
             return null, "${err}"
@@ -2376,9 +2376,9 @@ _clear_aliases(l: ptr) {
 _paths_of(ctx: *Ctx, f: @keep ptr, input: @keep ptr, env: @keep ptr) -> ptr {
     s = _new_sink(SK_PATHS_OF, null)
     s.list = list.new()
-    root = json.json_create_array()
+    root = json.create_array()
     ev(ctx, f, input, env, s, root)
-    json.json_free(root)
+    json.free(root)
     l = s.list
     heap.free(s)
     return l
@@ -2423,8 +2423,8 @@ _emit_assign_rhs(ctx: *Ctx, s: *Sink, rhs: ptr, rp: ptr) {
         } else {
             cur, err = _getpath(result, pth, 0)
             if cur == null {
-                json.json_free(result)
-                json.json_free(rhs)
+                json.free(result)
+                json.free(rhs)
                 _fail(ctx, err)
                 return
             }
@@ -2432,7 +2432,7 @@ _emit_assign_rhs(ctx: *Ctx, s: *Sink, rhs: ptr, rp: ptr) {
                 if value.truthy(cur) == 1 {
                     newv = cur
                 } else {
-                    json.json_free(cur)
+                    json.free(cur)
                     newv = value.copy(rhs)
                 }
             } else {
@@ -2442,10 +2442,10 @@ _emit_assign_rhs(ctx: *Ctx, s: *Sink, rhs: ptr, rp: ptr) {
                 if s.id == ast.OP_DIV_ASSIGN { op = ast.OP_DIV }
                 if s.id == ast.OP_MOD_ASSIGN { op = ast.OP_MOD }
                 combined, berr = _binop(op, cur, rhs)
-                json.json_free(cur)
+                json.free(cur)
                 if combined == null {
-                    json.json_free(result)
-                    json.json_free(rhs)
+                    json.free(result)
+                    json.free(rhs)
                     _fail(ctx, berr)
                     return
                 }
@@ -2453,16 +2453,16 @@ _emit_assign_rhs(ctx: *Ctx, s: *Sink, rhs: ptr, rp: ptr) {
             }
         }
         next, serr = _setpath(result, pth, newv)
-        json.json_free(result)
+        json.free(result)
         if next == null {
-            json.json_free(rhs)
+            json.free(rhs)
             _fail(ctx, serr)
             return
         }
         result = next
         i = i + 1
     }
-    json.json_free(rhs)
+    json.free(rhs)
     emit(ctx, s.next as *Sink, result, null)
 }
 
@@ -2471,7 +2471,7 @@ _emit_assign_rhs(ctx: *Ctx, s: *Sink, rhs: ptr, rp: ptr) {
 // ones do not shift later array indices).
 _update_paths(ctx: *Ctx, paths: ptr, f: @keep ptr, input: ptr, env: @keep ptr, sink: *Sink) {
     result = value.copy(input)
-    dels = json.json_create_array()
+    dels = json.create_array()
     n = list.size(paths)
     i = 0
     while i < n {
@@ -2489,20 +2489,20 @@ _update_paths(ctx: *Ctx, paths: ptr, f: @keep ptr, input: ptr, env: @keep ptr, s
                 last = _new_sink(SK_LAST, null)
                 lim.next = last as ptr
                 ev(ctx, f, cur, env, lim, null)
-                json.json_free(cur)
+                json.free(cur)
                 if ctx.status == ST_BREAK && ctx.break_id == id { ctx.status = ST_OK }
                 if ctx.status == ST_OK {
                     if last.flag == 1 {
                         next, serr = _setpath(result, pth, last.val)
                         last.val = null
-                        json.json_free(result)
+                        json.free(result)
                         result = next
                         if next == null {
-                            result = json.json_create_null()
+                            result = json.create_null()
                             _fail(ctx, serr)
                         }
                     } else {
-                        json.json_array_add_raw(dels, value.copy(pth))
+                        json.array_add_raw(dels, value.copy(pth))
                     }
                 }
                 _free_val(last.val)
@@ -2513,20 +2513,20 @@ _update_paths(ctx: *Ctx, paths: ptr, f: @keep ptr, input: ptr, env: @keep ptr, s
         }
         i = i + 1
     }
-    if ctx.status == ST_OK && json.json_array_size(dels) > 0 {
+    if ctx.status == ST_OK && json.array_size(dels) > 0 {
         next, derr = _delpaths(result, dels)
-        json.json_free(result)
+        json.free(result)
         result = next
         if next == null {
-            result = json.json_create_null()
+            result = json.create_null()
             _fail(ctx, derr)
         }
     }
-    json.json_free(dels)
+    json.free(dels)
     if ctx.status == ST_OK {
         emit(ctx, sink, result, null)
     } else {
-        json.json_free(result)
+        json.free(result)
     }
 }
 
@@ -2534,27 +2534,27 @@ _update_paths(ctx: *Ctx, paths: ptr, f: @keep ptr, input: ptr, env: @keep ptr, s
 _emit_getpath(ctx: *Ctx, s: *Sink, pth: ptr, pp: ptr) {
     _free_val(pp)
     if value.type_of(pth) != value.T_ARRAY {
-        json.json_free(pth)
+        json.free(pth)
         _fail(ctx, "Path must be specified as an array")
         return
     }
     out, err = _getpath(s.input, pth, 0)
     if out == null {
-        json.json_free(pth)
+        json.free(pth)
         _fail(ctx, err)
         return
     }
     np = null
     if s.ipath != null {
         np = value.copy(s.ipath)
-        m = json.json_array_size(pth)
+        m = json.array_size(pth)
         j = 0
         while j < m {
-            json.json_array_add_raw(np, value.copy(json.json_array_get_raw(pth, j)))
+            json.array_add_raw(np, value.copy(json.array_get_raw(pth, j)))
             j = j + 1
         }
     }
-    json.json_free(pth)
+    json.free(pth)
     emit(ctx, s.next as *Sink, out, np)
 }
 
@@ -2610,9 +2610,9 @@ _native(ctx: *Ctx, name: string, arity: int, args: ptr, input: @keep ptr, env: @
         if string.equals(name, "path") == 1 {
             if p != null { _fail(ctx, "Invalid path expression"); return }
             s = _new_sink(SK_PATH_OUT, sink)
-            root = json.json_create_array()
+            root = json.create_array()
             ev(ctx, f, input, env, s, root)
-            json.json_free(root)
+            json.free(root)
             heap.free(s)
             return
         }
@@ -2629,7 +2629,7 @@ _native(ctx: *Ctx, name: string, arity: int, args: ptr, input: @keep ptr, env: @
             empty = 1 - s.flag
             heap.free(s)
             if ctx.status != ST_OK { return }
-            emit(ctx, sink, json.json_create_bool(empty), null)
+            emit(ctx, sink, json.create_bool(empty), null)
             return
         }
         if string.equals(name, "repeat") == 1 {
@@ -2726,8 +2726,8 @@ _loop(ctx: *Ctx, mode: int, cond: @keep ptr, update: @keep ptr, input: ptr, env:
     }
     work = list.new()
     conds = list.new() // parallel: null = "evaluate the condition", else the cond value
-    list.list_add_raw(work, value.copy(input))
-    list.list_add_raw(conds, null)
+    list.add_raw(work, value.copy(input))
+    list.add_raw(conds, null)
     while list.size(work) > 0 {
         if ctx.status != ST_OK { break }
         top = list.size(work) - 1
@@ -2746,8 +2746,8 @@ _loop(ctx: *Ctx, mode: int, cond: @keep ptr, update: @keep ptr, input: ptr, env:
             ev(ctx, cond, v, env, cs, null)
             k = list.size(cs.list) - 1
             while k >= 0 {
-                list.list_add_raw(work, value.copy(v))
-                list.list_add_raw(conds, list.get_raw(cs.list, k))
+                list.add_raw(work, value.copy(v))
+                list.add_raw(conds, list.get_raw(cs.list, k))
                 list.set(cs.list, k, null)
                 k = k - 1
             }
@@ -2755,7 +2755,7 @@ _loop(ctx: *Ctx, mode: int, cond: @keep ptr, update: @keep ptr, input: ptr, env:
             heap.free(cs)
         } else {
             t = value.truthy(c)
-            json.json_free(c)
+            json.free(c)
             if mode == 0 {
                 if t == 1 {
                     emit(ctx, sink, value.copy(v), null)
@@ -2769,7 +2769,7 @@ _loop(ctx: *Ctx, mode: int, cond: @keep ptr, update: @keep ptr, input: ptr, env:
                 }
             }
         }
-        json.json_free(v)
+        json.free(v)
     }
     _free_list(work)
     _free_list(conds)
@@ -2781,8 +2781,8 @@ _push_updates(ctx: *Ctx, update: @keep ptr, v: @keep ptr, env: @keep ptr, work: 
     ev(ctx, update, v, env, us, null)
     k = list.size(us.list) - 1
     while k >= 0 {
-        list.list_add_raw(work, list.get_raw(us.list, k))
-        list.list_add_raw(conds, null)
+        list.add_raw(work, list.get_raw(us.list, k))
+        list.add_raw(conds, null)
         list.set(us.list, k, null)
         k = k - 1
     }
@@ -2797,21 +2797,21 @@ _by(ctx: *Ctx, name: string, f: @keep ptr, input: ptr, env: @keep ptr, sink: *Si
         _fail(ctx, "Cannot index ${_tname(value.type_of(input))} with number")
         return
     }
-    n = json.json_array_size(input)
+    n = json.array_size(input)
     vals = list.new()
     keys = list.new()
     i = 0
     while i < n {
         if ctx.status == ST_OK {
-            e = json.json_array_get_raw(input, i)
+            e = json.array_get_raw(input, i)
             ks = _new_sink(SK_COLLECT, null)
             ks.list = list.new()
             ev(ctx, f, e, env, ks, null)
-            key = json.json_create_array()
+            key = json.create_array()
             _drain_into_array(ks.list, key)
             heap.free(ks)
-            list.list_add_raw(vals, value.copy(e))
-            list.list_add_raw(keys, key)
+            list.add_raw(vals, value.copy(e))
+            list.add_raw(keys, key)
         }
         i = i + 1
     }
@@ -2837,9 +2837,9 @@ _by(ctx: *Ctx, name: string, f: @keep ptr, input: ptr, env: @keep ptr, sink: *Si
             }
             i = i + 1
         }
-        out = json.json_create_null()
+        out = json.create_null()
         if best >= 0 {
-            json.json_free(out)
+            json.free(out)
             out = list.get_raw(vals, best)
             list.set(vals, best, null)
         }
@@ -2849,7 +2849,7 @@ _by(ctx: *Ctx, name: string, f: @keep ptr, input: ptr, env: @keep ptr, sink: *Si
         return
     }
     value.sort_list(vals, keys)
-    out = json.json_create_array()
+    out = json.create_array()
     if string.equals(name, "sort_by") == 1 {
         _drain_into_array(vals, out)
         _free_list(keys)
@@ -2857,26 +2857,26 @@ _by(ctx: *Ctx, name: string, f: @keep ptr, input: ptr, env: @keep ptr, sink: *Si
         return
     }
     // group_by: runs of equal keys, each run its own array
-    group = json.json_create_array()
+    group = json.create_array()
     i = 0
     while i < n {
         if i > 0 && value.eq(list.get_raw(keys, i), list.get_raw(keys, i - 1)) == 0 {
-            json.json_array_add_raw(out, group)
-            group = json.json_create_array()
+            json.array_add_raw(out, group)
+            group = json.create_array()
         }
-        json.json_array_add_raw(group, list.get_raw(vals, i))
+        json.array_add_raw(group, list.get_raw(vals, i))
         list.set(vals, i, null)
         i = i + 1
     }
     if n > 0 {
-        json.json_array_add_raw(out, group)
+        json.array_add_raw(out, group)
     } else {
-        json.json_free(group)
+        json.free(group)
     }
     _free_list(vals)
     _free_list(keys)
     if _check_depth(ctx, out) == 0 {
-        json.json_free(out)
+        json.free(out)
         return
     }
     emit(ctx, sink, out, null)
@@ -2897,7 +2897,7 @@ _args_step(ctx: *Ctx, name: string, arity: int, args: ptr, i: int, vals: ptr, in
     while j < cnt {
         if ctx.status == ST_OK {
             if list.size(vals) <= i {
-                list.list_add_raw(vals, list.get_raw(coll.list, j))
+                list.add_raw(vals, list.get_raw(coll.list, j))
             } else {
                 list.set(vals, i, list.get_raw(coll.list, j))
             }
@@ -3115,53 +3115,53 @@ _apply0(ctx: *Ctx, name: string, v: ptr) -> ptr! {
         return value.make_number(aether_jq_math1(op, value.number_of(v))), ""
     }
     if string.equals(name, "length") == 1 {
-        if t == value.T_NULL { return json.json_create_int(0), "" }
+        if t == value.T_NULL { return json.create_int(0), "" }
         if t == value.T_BOOL { return null, "boolean (${value.to_json(v)}) has no length" }
         if t == value.T_NUMBER { return value.make_number(math.abs_float(value.number_of(v))), "" }
-        if t == value.T_STRING { return json.json_create_int(value.codepoint_count(value.string_value(v)) as long), "" }
-        if t == value.T_ARRAY { return json.json_create_int(json.json_array_size(v) as long), "" }
-        return json.json_create_int(json.json_object_size_raw(v) as long), ""
+        if t == value.T_STRING { return json.create_int(value.codepoint_count(value.string_value(v)) as long), "" }
+        if t == value.T_ARRAY { return json.create_int(json.array_size(v) as long), "" }
+        return json.create_int(json.object_size_raw(v) as long), ""
     }
     if string.equals(name, "utf8bytelength") == 1 {
         if t != value.T_STRING { return null, "${_tname(t)} (${value.to_json(v)}) only strings have UTF-8 byte length" }
-        return json.json_create_int(string.length(value.string_value(v)) as long), ""
+        return json.create_int(string.length(value.string_value(v)) as long), ""
     }
-    if string.equals(name, "type") == 1 { return json.json_create_string(_tname(t)), "" }
+    if string.equals(name, "type") == 1 { return json.create_string(_tname(t)), "" }
     if string.equals(name, "keys") == 1 || string.equals(name, "keys_unsorted") == 1 {
         if t == value.T_OBJECT {
             if string.equals(name, "keys") == 1 { return value.sorted_keys(v), "" }
-            out = json.json_create_array()
-            n = json.json_object_size_raw(v)
+            out = json.create_array()
+            n = json.object_size_raw(v)
             i = 0
             while i < n {
-                json.json_array_add_raw(out, json.json_create_string(json.json_object_key_at(v, i)))
+                json.array_add_raw(out, json.create_string(json.object_key_at(v, i)))
                 i = i + 1
             }
             return out, ""
         }
         if t == value.T_ARRAY {
-            out = json.json_create_array()
-            n = json.json_array_size(v)
+            out = json.create_array()
+            n = json.array_size(v)
             i = 0
             while i < n {
-                json.json_array_add_raw(out, json.json_create_int(i as long))
+                json.array_add_raw(out, json.create_int(i as long))
                 i = i + 1
             }
             return out, ""
         }
         return null, "${_tname(t)} (${value.to_json(v)}) has no keys"
     }
-    if string.equals(name, "infinite") == 1 { return json.json_create_number(1.0 / 0.0), "" }
-    if string.equals(name, "nan") == 1 { return json.json_create_number(0.0 / 0.0), "" }
+    if string.equals(name, "infinite") == 1 { return json.create_number(1.0 / 0.0), "" }
+    if string.equals(name, "nan") == 1 { return json.create_number(0.0 / 0.0), "" }
     if string.equals(name, "isinfinite") == 1 {
         if t != value.T_NUMBER { return null, _num_required(name, v) }
         d = value.number_of(v)
-        return json.json_create_bool(_b(d == 1.0 / 0.0 || d == -1.0 / 0.0)), ""
+        return json.create_bool(_b(d == 1.0 / 0.0 || d == -1.0 / 0.0)), ""
     }
     if string.equals(name, "isnan") == 1 {
         if t != value.T_NUMBER { return null, _num_required(name, v) }
         d = value.number_of(v)
-        return json.json_create_bool(_b(d != d)), ""
+        return json.create_bool(_b(d != d)), ""
     }
     if string.equals(name, "isnormal") == 1 {
         if t != value.T_NUMBER { return null, _num_required(name, v) }
@@ -3169,13 +3169,13 @@ _apply0(ctx: *Ctx, name: string, v: ptr) -> ptr! {
         normal = 1
         if d != d || d == 0.0 || d == 1.0 / 0.0 || d == -1.0 / 0.0 { normal = 0 }
         if math.abs_float(d) < 2.2250738585072014e-308 { normal = 0 }
-        return json.json_create_bool(normal), ""
+        return json.create_bool(normal), ""
     }
     if string.equals(name, "sort") == 1 {
         if t != value.T_ARRAY { return null, "${_tname(t)} (${value.to_json(v)}) cannot be sorted, as it is not an array" }
         l = _array_to_list(v)
         value.sort_list(l, null)
-        out = json.json_create_array()
+        out = json.create_array()
         _drain_into_array(l, out)
         return out, ""
     }
@@ -3183,15 +3183,15 @@ _apply0(ctx: *Ctx, name: string, v: ptr) -> ptr! {
         if t != value.T_ARRAY { return null, "${_tname(t)} (${value.to_json(v)}) cannot be sorted, as it is not an array" }
         l = _array_to_list(v)
         value.sort_list(l, null)
-        out = json.json_create_array()
+        out = json.create_array()
         n = list.size(l)
         i = 0
         while i < n {
             e = list.get_raw(l, i)
-            if i > 0 && value.eq(e, json.json_array_get_raw(out, json.json_array_size(out) - 1)) == 1 {
-                json.json_free(e)
+            if i > 0 && value.eq(e, json.array_get_raw(out, json.array_size(out) - 1)) == 1 {
+                json.free(e)
             } else {
-                json.json_array_add_raw(out, e)
+                json.array_add_raw(out, e)
             }
             list.set(l, i, null)
             i = i + 1
@@ -3201,12 +3201,12 @@ _apply0(ctx: *Ctx, name: string, v: ptr) -> ptr! {
     }
     if string.equals(name, "min") == 1 || string.equals(name, "max") == 1 {
         if t != value.T_ARRAY { return null, "Cannot index ${_tname(t)} with number" }
-        n = json.json_array_size(v)
-        if n == 0 { return json.json_create_null(), "" }
+        n = json.array_size(v)
+        if n == 0 { return json.create_null(), "" }
         best = 0
         i = 1
         while i < n {
-            c = value.cmp(json.json_array_get_raw(v, i), json.json_array_get_raw(v, best))
+            c = value.cmp(json.array_get_raw(v, i), json.array_get_raw(v, best))
             if string.equals(name, "min") == 1 {
                 if c < 0 { best = i }
             } else {
@@ -3214,33 +3214,33 @@ _apply0(ctx: *Ctx, name: string, v: ptr) -> ptr! {
             }
             i = i + 1
         }
-        return value.copy(json.json_array_get_raw(v, best)), ""
+        return value.copy(json.array_get_raw(v, best)), ""
     }
     if string.equals(name, "reverse") == 1 {
-        if t == value.T_NULL { return json.json_create_array(), "" }
+        if t == value.T_NULL { return json.create_array(), "" }
         if t == value.T_STRING {
             cps = value.explode(value.string_value(v))
-            rev = json.json_create_array()
-            i = json.json_array_size(cps) - 1
+            rev = json.create_array()
+            i = json.array_size(cps) - 1
             while i >= 0 {
-                json.json_array_add_raw(rev, value.copy(json.json_array_get_raw(cps, i)))
+                json.array_add_raw(rev, value.copy(json.array_get_raw(cps, i)))
                 i = i - 1
             }
-            json.json_free(cps)
+            json.free(cps)
             s, _e = value.implode(rev)
-            json.json_free(rev)
-            return json.json_create_string(s), ""
+            json.free(rev)
+            return json.create_string(s), ""
         }
         if t != value.T_ARRAY { return null, "Cannot reverse ${_tname(t)}" }
-        out = json.json_create_array()
-        i = json.json_array_size(v) - 1
+        out = json.create_array()
+        i = json.array_size(v) - 1
         while i >= 0 {
-            json.json_array_add_raw(out, value.copy(json.json_array_get_raw(v, i)))
+            json.array_add_raw(out, value.copy(json.array_get_raw(v, i)))
             i = i - 1
         }
         return out, ""
     }
-    if string.equals(name, "tojson") == 1 { return json.json_create_string(value.to_json(v)), "" }
+    if string.equals(name, "tojson") == 1 { return json.create_string(value.to_json(v)), "" }
     if string.equals(name, "tostring") == 1 { return _tostring(v), "" }
     if string.equals(name, "fromjson") == 1 {
         if t != value.T_STRING { return null, "${_tname(t)} (${value.to_json(v)}) cannot be parsed as JSON" }
@@ -3263,14 +3263,14 @@ _apply0(ctx: *Ctx, name: string, v: ptr) -> ptr! {
     if string.equals(name, "implode") == 1 {
         s, err = value.implode(v)
         if err != "" { return null, "${err}" }
-        return json.json_create_string(s), ""
+        return json.create_string(s), ""
     }
     if string.equals(name, "trim") == 1 || string.equals(name, "ltrim") == 1 || string.equals(name, "rtrim") == 1 {
         if t != value.T_STRING { return null, "${_tname(t)} (${value.to_json(v)}) cannot be trimmed" }
-        return json.json_create_string(_trim(value.string_value(v), name)), ""
+        return json.create_string(_trim(value.string_value(v), name)), ""
     }
     if string.equals(name, "now") == 1 {
-        return json.json_create_number((os.wall_seconds() as float) + (os.wall_micros() as float) / 1000000.0), ""
+        return json.create_number((os.wall_seconds() as float) + (os.wall_micros() as float) / 1000000.0), ""
     }
     if string.equals(name, "mktime") == 1 {
         secs, merr = _mktime(v)
@@ -3281,23 +3281,23 @@ _apply0(ctx: *Ctx, name: string, v: ptr) -> ptr! {
         if t != value.T_NUMBER { return null, "${name}() requires a number" }
         return _gmtime(value.number_of(v)), ""
     }
-    if string.equals(name, "input_filename") == 1 { return json.json_create_null(), "" }
+    if string.equals(name, "input_filename") == 1 { return json.create_null(), "" }
     if string.equals(name, "builtins") == 1 { return _builtins(), "" }
     if string.equals(name, "frexp") == 1 {
         if t != value.T_NUMBER { return null, _num_required(name, v) }
         d = value.number_of(v)
-        out = json.json_create_array()
-        json.json_array_add_raw(out, value.make_number(aether_jq_math1(33, d)))
-        json.json_array_add_raw(out, json.json_create_int(aether_jq_frexp_exp(d) as long))
+        out = json.create_array()
+        json.array_add_raw(out, value.make_number(aether_jq_math1(33, d)))
+        json.array_add_raw(out, json.create_int(aether_jq_frexp_exp(d) as long))
         return out, ""
     }
     if string.equals(name, "modf") == 1 {
         if t != value.T_NUMBER { return null, _num_required(name, v) }
         d = value.number_of(v)
         ip = aether_jq_modf_int(d)
-        out = json.json_create_array()
-        json.json_array_add_raw(out, value.make_number(d - ip))
-        json.json_array_add_raw(out, value.make_number(ip))
+        out = json.create_array()
+        json.array_add_raw(out, value.make_number(d - ip))
+        json.array_add_raw(out, value.make_number(ip))
         return out, ""
     }
     return null, "${name}/0 is not defined"
@@ -3305,10 +3305,10 @@ _apply0(ctx: *Ctx, name: string, v: ptr) -> ptr! {
 
 _array_to_list(arr: ptr) -> ptr {
     l = list.new()
-    n = json.json_array_size(arr)
+    n = json.array_size(arr)
     i = 0
     while i < n {
-        list.list_add_raw(l, value.copy(json.json_array_get_raw(arr, i)))
+        list.add_raw(l, value.copy(json.array_get_raw(arr, i)))
         i = i + 1
     }
     return l
@@ -3329,7 +3329,7 @@ _fromjson(s: string) -> ptr! {
 // prints both alike, but re-copy through make_number so 1.0 prints as 1.
 _normalise_numbers(v: ptr) -> ptr {
     out = value.copy(v)
-    json.json_free(v)
+    json.free(v)
     return out
 }
 
@@ -3390,7 +3390,7 @@ _trim(s: string, which: string) -> string {
 
 // `builtins`: every native and prelude definition as "name/arity".
 _builtins() -> ptr {
-    out = json.json_create_array()
+    out = json.create_array()
     _add_words(out, NATIVES0, 0)
     _add_words(out, NATIVES1, 1)
     _add_words(out, NATIVES2, 2)
@@ -3426,7 +3426,7 @@ _builtins() -> ptr {
                 }
             }
             if string.length(fname) > 0 && string.char_at_n(fname, string.length(fname), 0) != 95 {
-                json.json_array_add_raw(out, json.json_create_string("${fname}/${arity}"))
+                json.array_add_raw(out, json.create_string("${fname}/${arity}"))
             }
             pos = j
         }
@@ -3443,7 +3443,7 @@ _add_words(out: ptr, table: string, arity: int) {
             if i > start {
                 w = string.substring_n(table, n, start, i)
                 if string.char_at_n(w, string.length(w), 0) != 95 {
-                    json.json_array_add_raw(out, json.json_create_string("${w}/${arity}"))
+                    json.array_add_raw(out, json.create_string("${w}/${arity}"))
                 }
             }
             start = i + 1
@@ -3461,11 +3461,11 @@ _apply1(name: string, v: ptr, a: ptr) -> ptr! {
     ta = value.type_of(a)
     if string.equals(name, "has") == 1 {
         if t == value.T_OBJECT && ta == value.T_STRING {
-            return json.json_create_bool(json.json_object_has(v, value.string_value(a))), ""
+            return json.create_bool(json.object_has(v, value.string_value(a))), ""
         }
         if t == value.T_ARRAY && ta == value.T_NUMBER {
             d = value.number_of(a)
-            return json.json_create_bool(_b(d >= 0.0 && d < (json.json_array_size(v) as float))), ""
+            return json.create_bool(_b(d >= 0.0 && d < (json.array_size(v) as float))), ""
         }
         return null, "Cannot check whether ${_tname(t)} has a ${_tname(ta)} key"
     }
@@ -3473,17 +3473,17 @@ _apply1(name: string, v: ptr, a: ptr) -> ptr! {
         if t != ta {
             return null, "${_tname(t)} (${value.to_json(v)}) and ${_tname(ta)} (${value.to_json(a)}) cannot have their containment checked"
         }
-        return json.json_create_bool(_contains(v, a)), ""
+        return json.create_bool(_contains(v, a)), ""
     }
     if string.equals(name, "indices") == 1 {
-        if t == value.T_NULL || ta == value.T_NULL { return json.json_create_null(), "" }
+        if t == value.T_NULL || ta == value.T_NULL { return json.create_null(), "" }
         if t == value.T_STRING && ta == value.T_STRING { return _str_indices(value.string_value(v), value.string_value(a)), "" }
         if t == value.T_ARRAY && ta == value.T_ARRAY { return _indices_of(v, a), "" }
         if t == value.T_ARRAY {
-            one = json.json_create_array()
-            json.json_array_add_raw(one, value.copy(a))
+            one = json.create_array()
+            json.array_add_raw(one, value.copy(a))
             out = _indices_of(v, one)
-            json.json_free(one)
+            json.free(one)
             return out, ""
         }
         return null, "Cannot determine indices of ${_tname(ta)} in ${_tname(t)}"
@@ -3492,17 +3492,17 @@ _apply1(name: string, v: ptr, a: ptr) -> ptr! {
         if ta != value.T_NUMBER { return null, "flatten depth must not be negative" }
         if value.number_of(a) < 0.0 { return null, "flatten depth must not be negative" }
         if t != value.T_ARRAY { return null, "Cannot iterate over ${_tname(t)}" }
-        out = json.json_create_array()
+        out = json.create_array()
         _flatten_into(out, v, value.clamp_int(value.number_of(a)))
         return out, ""
     }
     if string.equals(name, "startswith") == 1 {
         if t != value.T_STRING || ta != value.T_STRING { return null, "startswith() requires string inputs" }
-        return json.json_create_bool(string.starts_with(value.string_value(v), value.string_value(a))), ""
+        return json.create_bool(string.starts_with(value.string_value(v), value.string_value(a))), ""
     }
     if string.equals(name, "endswith") == 1 {
         if t != value.T_STRING || ta != value.T_STRING { return null, "endswith() requires string inputs" }
-        return json.json_create_bool(string.ends_with(value.string_value(v), value.string_value(a))), ""
+        return json.create_bool(string.ends_with(value.string_value(v), value.string_value(a))), ""
     }
     if string.equals(name, "ltrimstr") == 1 || string.equals(name, "rtrimstr") == 1 || string.equals(name, "trimstr") == 1 {
         if t != value.T_STRING || ta != value.T_STRING { return value.copy(v), "" }
@@ -3518,7 +3518,7 @@ _apply1(name: string, v: ptr, a: ptr) -> ptr! {
         if string.equals(name, "ltrimstr") == 0 {
             if string.ends_with(s, pre) == 1 && n - m >= from { to = n - m }
         }
-        return json.json_create_string(string.substring_n(s, n, from, to)), ""
+        return json.create_string(string.substring_n(s, n, from, to)), ""
     }
     if string.equals(name, "split") == 1 {
         if t != value.T_STRING || ta != value.T_STRING { return null, "split input and separator must be strings" }
@@ -3544,14 +3544,14 @@ _apply1(name: string, v: ptr, a: ptr) -> ptr! {
     if string.equals(name, "bsearch") == 1 {
         if t != value.T_ARRAY { return null, "${_tname(t)} (${value.to_json(v)}) cannot be searched from" }
         lo = 0
-        hi = json.json_array_size(v) - 1
+        hi = json.array_size(v) - 1
         while lo <= hi {
             mid = (lo + hi) / 2
-            c = value.cmp(json.json_array_get_raw(v, mid), a)
-            if c == 0 { return json.json_create_int(mid as long), "" }
+            c = value.cmp(json.array_get_raw(v, mid), a)
+            if c == 0 { return json.create_int(mid as long), "" }
             if c < 0 { lo = mid + 1 } else { hi = mid - 1 }
         }
-        return json.json_create_int((0 - 1 - lo) as long), ""
+        return json.create_int((0 - 1 - lo) as long), ""
     }
     return null, "${name}/1 is not defined"
 }
@@ -3570,7 +3570,7 @@ _apply2(name: string, v: ptr, a: ptr, b: ptr) -> ptr! {
         return res5, ""
     }
     if string.equals(name, "_match_impl") == 1 {
-        res6, rerr6 = _match_impl(v, a, b, json.json_create_bool(0), 1)
+        res6, rerr6 = _match_impl(v, a, b, json.create_bool(0), 1)
         if res6 == null { return null, "${rerr6}" }
         return res6, ""
     }
@@ -3599,26 +3599,26 @@ _contains(a: ptr, b: ptr) -> int {
     tb = value.type_of(b)
     if ta != tb { return 0 }
     if ta == value.T_OBJECT {
-        n = json.json_object_size_raw(b)
+        n = json.object_size_raw(b)
         i = 0
         while i < n {
-            av = json.json_object_get_raw(a, json.json_object_key_at(b, i))
+            av = json.object_get_raw(a, json.object_key_at(b, i))
             if av == null { return 0 }
-            if _contains(av, json.json_object_value_at(b, i)) == 0 { return 0 }
+            if _contains(av, json.object_value_at(b, i)) == 0 { return 0 }
             i = i + 1
         }
         return 1
     }
     if ta == value.T_ARRAY {
-        n = json.json_array_size(b)
+        n = json.array_size(b)
         i = 0
         while i < n {
-            be = json.json_array_get_raw(b, i)
-            m = json.json_array_size(a)
+            be = json.array_get_raw(b, i)
+            m = json.array_size(a)
             j = 0
             found = 0
             while j < m {
-                if _contains(json.json_array_get_raw(a, j), be) == 1 {
+                if _contains(json.array_get_raw(a, j), be) == 1 {
                     found = 1
                     j = m
                 }
@@ -3637,28 +3637,28 @@ _contains(a: ptr, b: ptr) -> int {
 
 // Codepoint offsets of every occurrence of `sub` in `s` (overlapping).
 _str_indices(s: string, sub: string) -> ptr {
-    out = json.json_create_array()
+    out = json.create_array()
     m = string.length(sub)
-    if m == 0 { return json.json_create_null() }
+    if m == 0 { return json.create_null() }
     start = 0
     while 1 == 1 {
         idx = string.index_of_from(s, sub, start)
         if idx < 0 { return out }
-        json.json_array_add_raw(out, json.json_create_int(value.codepoint_of_byte(s, idx) as long))
+        json.array_add_raw(out, json.create_int(value.codepoint_of_byte(s, idx) as long))
         start = idx + 1
     }
     return out
 }
 
 _flatten_into(out: ptr, arr: ptr, depth: int) {
-    n = json.json_array_size(arr)
+    n = json.array_size(arr)
     i = 0
     while i < n {
-        e = json.json_array_get_raw(arr, i)
+        e = json.array_get_raw(arr, i)
         if value.type_of(e) == value.T_ARRAY && depth > 0 {
             _flatten_into(out, e, depth - 1)
         } else {
-            json.json_array_add_raw(out, value.copy(e))
+            json.array_add_raw(out, value.copy(e))
         }
         i = i + 1
     }
@@ -3707,23 +3707,23 @@ _match_impl(v: ptr, re: ptr, flags: ptr, test: ptr, two_arg: int) -> ptr! {
     }
     s = value.string_value(v)
     slen = string.length(s)
-    out = json.json_create_array()
+    out = json.create_array()
     is_test = value.truthy(test)
     if global == 0 {
         caps, _e = regex.captures(compiled, s)
         if caps != null {
             if is_test == 1 {
-                json.json_free(out)
-                out = json.json_create_bool(1)
+                json.free(out)
+                out = json.create_bool(1)
             } else {
                 names1 = _group_names(pattern)
-                json.json_array_add_raw(out, _match_object(s, 0, 0, caps, names1))
-                json.json_free(names1)
+                json.array_add_raw(out, _match_object(s, 0, 0, caps, names1))
+                json.free(names1)
             }
             regex.captures_free(caps)
         } else if is_test == 1 {
-            json.json_free(out)
-            out = json.json_create_bool(0)
+            json.free(out)
+            out = json.create_bool(0)
         }
         regex.free(compiled)
         return out, ""
@@ -3733,7 +3733,7 @@ _match_impl(v: ptr, re: ptr, flags: ptr, test: ptr, two_arg: int) -> ptr! {
     // counted from the previous match, not from the start, so a subject
     // with many matches costs time linear in its length.
     names = _group_names(pattern)
-    has_groups = json.json_array_size(names) > 0
+    has_groups = json.array_size(names) > 0
     fa, _ferr = regex.find_all(compiled, s)
     if fa != null {
         count = regex.find_all_count(fa)
@@ -3752,23 +3752,23 @@ _match_impl(v: ptr, re: ptr, flags: ptr, test: ptr, two_arg: int) -> ptr! {
                     suffix = string.substring_n(s, slen, st, slen)
                     caps, _e2 = regex.captures(compiled, suffix)
                     if caps != null {
-                        json.json_array_add_raw(out, _match_object(s, st, cp_pos, caps, names))
+                        json.array_add_raw(out, _match_object(s, st, cp_pos, caps, names))
                         regex.captures_free(caps)
                     }
                 } else {
-                    json.json_array_add_raw(out, _match_span(s, st, en, cp_pos))
+                    json.array_add_raw(out, _match_span(s, st, en, cp_pos))
                 }
                 i = i + 1
             }
         }
         regex.find_all_free(fa)
     }
-    json.json_free(names)
+    json.free(names)
     regex.free(compiled)
     if is_test == 1 {
-        found = _b(json.json_array_size(out) > 0)
-        json.json_free(out)
-        return json.json_create_bool(found), ""
+        found = _b(json.array_size(out) > 0)
+        json.free(out)
+        return json.create_bool(found), ""
     }
     return out, ""
 }
@@ -3784,12 +3784,12 @@ _match_object(s: string, base: int, base_cp: int, caps: ptr, names: ptr) -> ptr 
     m = _match_head(s, st, en, st_cp)
     // The group count comes from the pattern: PCRE2 leaves unset trailing
     // groups out of its count, but jq reports every group.
-    arr = json.json_create_array()
-    n = json.json_array_size(names) + 1
+    arr = json.create_array()
+    n = json.array_size(names) + 1
     have = regex.capture_count(caps)
     g = 1
     while g < n {
-        c = json.json_create_object()
+        c = json.create_object()
         gs = -1
         ge = -1
         if g < have {
@@ -3797,30 +3797,30 @@ _match_object(s: string, base: int, base_cp: int, caps: ptr, names: ptr) -> ptr 
             ge = regex.capture_end(caps, g)
         }
         if gs < 0 {
-            json.json_object_set_raw(c, "offset", json.json_create_int(-1))
-            json.json_object_set_raw(c, "length", json.json_create_int(0))
-            json.json_object_set_raw(c, "string", json.json_create_null())
+            json.object_set_raw(c, "offset", json.create_int(-1))
+            json.object_set_raw(c, "length", json.create_int(0))
+            json.object_set_raw(c, "string", json.create_null())
         } else {
             gs = gs + base
             ge = ge + base
             gs_cp = base_cp + value.codepoints_between(s, base, gs)
-            json.json_object_set_raw(c, "offset", json.json_create_int(gs_cp as long))
-            json.json_object_set_raw(c, "length", json.json_create_int(value.codepoints_between(s, gs, ge) as long))
-            json.json_object_set_raw(c, "string", json.json_create_string(string.substring_n(s, slen, gs, ge)))
+            json.object_set_raw(c, "offset", json.create_int(gs_cp as long))
+            json.object_set_raw(c, "length", json.create_int(value.codepoints_between(s, gs, ge) as long))
+            json.object_set_raw(c, "string", json.create_string(string.substring_n(s, slen, gs, ge)))
         }
-        nm = json.json_create_null()
-        if g - 1 < json.json_array_size(names) {
-            given = json.json_array_get_raw(names, g - 1)
+        nm = json.create_null()
+        if g - 1 < json.array_size(names) {
+            given = json.array_get_raw(names, g - 1)
             if value.type_of(given) == value.T_STRING {
-                json.json_free(nm)
+                json.free(nm)
                 nm = value.copy(given)
             }
         }
-        json.json_object_set_raw(c, "name", nm)
-        json.json_array_add_raw(arr, c)
+        json.object_set_raw(c, "name", nm)
+        json.array_add_raw(arr, c)
         g = g + 1
     }
-    json.json_object_set_raw(m, "captures", arr)
+    json.object_set_raw(m, "captures", arr)
     return m
 }
 
@@ -3828,16 +3828,16 @@ _match_object(s: string, base: int, base_cp: int, caps: ptr, names: ptr) -> ptr 
 // match is needed, so global matching stays linear.
 _match_span(s: string, st: int, en: int, st_cp: int) -> ptr {
     m = _match_head(s, st, en, st_cp)
-    json.json_object_set_raw(m, "captures", json.json_create_array())
+    json.object_set_raw(m, "captures", json.create_array())
     return m
 }
 
 // offset, length (in codepoints) and string of the match at bytes [st, en).
 _match_head(s: string, st: int, en: int, st_cp: int) -> ptr {
-    m = json.json_create_object()
-    json.json_object_set_raw(m, "offset", json.json_create_int(st_cp as long))
-    json.json_object_set_raw(m, "length", json.json_create_int(value.codepoints_between(s, st, en) as long))
-    json.json_object_set_raw(m, "string", json.json_create_string(string.substring_n(s, string.length(s), st, en)))
+    m = json.create_object()
+    json.object_set_raw(m, "offset", json.create_int(st_cp as long))
+    json.object_set_raw(m, "length", json.create_int(value.codepoints_between(s, st, en) as long))
+    json.object_set_raw(m, "string", json.create_string(string.substring_n(s, string.length(s), st, en)))
     return m
 }
 
@@ -3846,7 +3846,7 @@ _match_head(s: string, st: int, en: int, st_cp: int) -> ptr {
 // `(?'name'`; `(?:` and the other `(?` forms do not capture; `\(` and
 // parens inside [...] are literal.
 _group_names(pattern: string) -> ptr {
-    out = json.json_create_array()
+    out = json.create_array()
     n = string.length(pattern)
     i = 0
     in_class = 0
@@ -3875,14 +3875,14 @@ _group_names(pattern: string) -> ptr {
                         i = i + 1
                     } else {
                         while k < n && string.char_at_n(pattern, n, k) != close { k = k + 1 }
-                        json.json_array_add_raw(out, json.json_create_string(string.substring_n(pattern, n, j + 1, k)))
+                        json.array_add_raw(out, json.create_string(string.substring_n(pattern, n, j + 1, k)))
                         i = k + 1
                     }
                 } else {
                     i = i + 1
                 }
             } else {
-                json.json_array_add_raw(out, json.json_create_null())
+                json.array_add_raw(out, json.create_null())
                 i = i + 1
             }
         } else {
@@ -3900,18 +3900,18 @@ _group_names(pattern: string) -> ptr {
 _format(name: string, v: ptr) -> ptr! {
     t = value.type_of(v)
     if string.equals(name, "text") == 1 { return _tostring(v), "" }
-    if string.equals(name, "json") == 1 { return json.json_create_string(value.to_json(v)), "" }
+    if string.equals(name, "json") == 1 { return json.create_string(value.to_json(v)), "" }
     if string.equals(name, "html") == 1 {
         s = _tostring(v)
         out = _escape_html(value.string_value(s))
-        json.json_free(s)
-        return json.json_create_string(out), ""
+        json.free(s)
+        return json.create_string(out), ""
     }
     if string.equals(name, "uri") == 1 {
         s = _tostring(v)
         out = _escape_uri(value.string_value(s))
-        json.json_free(s)
-        return json.json_create_string(out), ""
+        json.free(s)
+        return json.create_string(out), ""
     }
     if string.equals(name, "csv") == 1 || string.equals(name, "tsv") == 1 {
         if t != value.T_ARRAY { return null, "${_tname(t)} (${value.to_json(v)}) cannot be ${name}-formatted, only an array can be" }
@@ -3928,39 +3928,39 @@ _format(name: string, v: ptr) -> ptr! {
         s = _tostring(v)
         text = value.string_value(s)
         out = encoding.base64_encode_padded(string.bytes(text))
-        json.json_free(s)
-        return json.json_create_string(out), ""
+        json.free(s)
+        return json.create_string(out), ""
     }
     if string.equals(name, "base64d") == 1 {
         s = _tostring(v)
         out, err = encoding.base64_decode(value.string_value(s))
         if err != "" {
             msg = "${value.to_json(s)} is not valid base64 data"
-            json.json_free(s)
+            json.free(s)
             return null, msg
         }
-        json.json_free(s)
+        json.free(s)
         if _has_nul_byte(out) == 1 { return null, "\\u0000 is not supported in strings" }
-        return json.json_create_string(out), ""
+        return json.create_string(out), ""
     }
     if string.equals(name, "base32") == 1 {
         s = _tostring(v)
         text = value.string_value(s)
         out = encoding.base32_encode(string.bytes(text))
-        json.json_free(s)
-        return json.json_create_string(out), ""
+        json.free(s)
+        return json.create_string(out), ""
     }
     if string.equals(name, "base32d") == 1 {
         s = _tostring(v)
         out, err = encoding.base32_decode(value.string_value(s))
         if err != "" {
             msg = "${value.to_json(s)} is not valid base32 data"
-            json.json_free(s)
+            json.free(s)
             return null, msg
         }
-        json.json_free(s)
+        json.free(s)
         if _has_nul_byte(out) == 1 { return null, "\\u0000 is not supported in strings" }
-        return json.json_create_string(out), ""
+        return json.create_string(out), ""
     }
     return null, "${name} is not a valid format"
 }
@@ -4025,13 +4025,13 @@ _hex_upper(nibble: int) -> int {
 
 _format_row(v: ptr, kind: string) -> ptr! {
     sb = strbuilder.new(32)
-    n = json.json_array_size(v)
+    n = json.array_size(v)
     i = 0
     while i < n {
         if i > 0 {
             if string.equals(kind, "csv") == 1 { strbuilder.append_byte(sb, 44) } else { strbuilder.append_byte(sb, 9) }
         }
-        e = json.json_array_get_raw(v, i)
+        e = json.array_get_raw(v, i)
         t = value.type_of(e)
         if t == value.T_NUMBER {
             strbuilder.append(sb, value.num_to_string(value.number_of(e)))
@@ -4068,31 +4068,31 @@ _format_row(v: ptr, kind: string) -> ptr! {
         }
         i = i + 1
     }
-    return json.json_create_string(strbuilder.finish(sb)), ""
+    return json.create_string(strbuilder.finish(sb)), ""
 }
 
 _format_sh(v: ptr) -> ptr! {
     sb = strbuilder.new(32)
     if value.type_of(v) == value.T_ARRAY {
-        n = json.json_array_size(v)
+        n = json.array_size(v)
         i = 0
         while i < n {
             if i > 0 { strbuilder.append_byte(sb, 32) }
-            err = _sh_quote(sb, json.json_array_get_raw(v, i))
+            err = _sh_quote(sb, json.array_get_raw(v, i))
             if err != "" {
                 strbuilder.free(sb)
                 return null, "${err}"
             }
             i = i + 1
         }
-        return json.json_create_string(strbuilder.finish(sb)), ""
+        return json.create_string(strbuilder.finish(sb)), ""
     }
     err = _sh_quote(sb, v)
     if err != "" {
         strbuilder.free(sb)
         return null, "${err}"
     }
-    return json.json_create_string(strbuilder.finish(sb)), ""
+    return json.create_string(strbuilder.finish(sb)), ""
 }
 
 _sh_quote(sb: ptr, e: ptr) -> string {
@@ -4166,58 +4166,58 @@ _gmtime(secs: float) -> ptr {
     days = _floor_div(whole, 86400)
     rem = whole - days * 86400
     y, m, d = _civil_from_days(days)
-    out = json.json_create_array()
-    json.json_array_add_raw(out, json.json_create_int(y))
-    json.json_array_add_raw(out, json.json_create_int(m - 1))
-    json.json_array_add_raw(out, json.json_create_int(d))
-    json.json_array_add_raw(out, json.json_create_int(rem / 3600))
-    json.json_array_add_raw(out, json.json_create_int((rem % 3600) / 60))
-    json.json_array_add_raw(out, value.make_number(((rem % 60) as float) + frac))
+    out = json.create_array()
+    json.array_add_raw(out, json.create_int(y))
+    json.array_add_raw(out, json.create_int(m - 1))
+    json.array_add_raw(out, json.create_int(d))
+    json.array_add_raw(out, json.create_int(rem / 3600))
+    json.array_add_raw(out, json.create_int((rem % 3600) / 60))
+    json.array_add_raw(out, value.make_number(((rem % 60) as float) + frac))
     wday = (days + 4) % 7
     if wday < 0 { wday = wday + 7 }
-    json.json_array_add_raw(out, json.json_create_int(wday))
-    json.json_array_add_raw(out, json.json_create_int(days - _days_from_civil(y, 1, 1)))
+    json.array_add_raw(out, json.create_int(wday))
+    json.array_add_raw(out, json.create_int(days - _days_from_civil(y, 1, 1)))
     return out
 }
 
 // Broken-down time → seconds since the epoch.
 _mktime(v: ptr) -> ptr! {
     if value.type_of(v) != value.T_ARRAY { return null, "mktime requires array of 6 numbers" }
-    if json.json_array_size(v) < 6 { return null, "mktime requires array of 6 numbers" }
+    if json.array_size(v) < 6 { return null, "mktime requires array of 6 numbers" }
     i = 0
     while i < 6 {
-        if value.type_of(json.json_array_get_raw(v, i)) != value.T_NUMBER { return null, "mktime requires parsed datetime inputs" }
+        if value.type_of(json.array_get_raw(v, i)) != value.T_NUMBER { return null, "mktime requires parsed datetime inputs" }
         i = i + 1
     }
-    y = _to_int_trunc(value.number_of(json.json_array_get_raw(v, 0)))
-    mo = _to_int_trunc(value.number_of(json.json_array_get_raw(v, 1)))
-    d = _to_int_trunc(value.number_of(json.json_array_get_raw(v, 2)))
-    h = _to_int_trunc(value.number_of(json.json_array_get_raw(v, 3)))
-    mi = _to_int_trunc(value.number_of(json.json_array_get_raw(v, 4)))
-    s = _to_int_trunc(value.number_of(json.json_array_get_raw(v, 5)))
+    y = _to_int_trunc(value.number_of(json.array_get_raw(v, 0)))
+    mo = _to_int_trunc(value.number_of(json.array_get_raw(v, 1)))
+    d = _to_int_trunc(value.number_of(json.array_get_raw(v, 2)))
+    h = _to_int_trunc(value.number_of(json.array_get_raw(v, 3)))
+    mi = _to_int_trunc(value.number_of(json.array_get_raw(v, 4)))
+    s = _to_int_trunc(value.number_of(json.array_get_raw(v, 5)))
     // normalise the month into 0..11, carrying into the year
     y = y + _floor_div(mo, 12)
     mo = mo - _floor_div(mo, 12) * 12
     days = _days_from_civil(y, mo + 1, 1) + d - 1
-    return json.json_create_int(days * 86400 + h * 3600 + mi * 60 + s), ""
+    return json.create_int(days * 86400 + h * 3600 + mi * 60 + s), ""
 }
 
 // A broken-down time (or a number, converted first) as its fields.
 _broken_down(v: ptr, what: string) -> ptr! {
     if value.type_of(v) == value.T_NUMBER { return _gmtime(value.number_of(v)), "" }
     if value.type_of(v) != value.T_ARRAY { return null, "${what} requires parsed datetime inputs" }
-    if json.json_array_size(v) < 6 { return null, "${what} requires parsed datetime inputs" }
+    if json.array_size(v) < 6 { return null, "${what} requires parsed datetime inputs" }
     i = 0
-    while i < json.json_array_size(v) {
-        if value.type_of(json.json_array_get_raw(v, i)) != value.T_NUMBER { return null, "${what} requires parsed datetime inputs" }
+    while i < json.array_size(v) {
+        if value.type_of(json.array_get_raw(v, i)) != value.T_NUMBER { return null, "${what} requires parsed datetime inputs" }
         i = i + 1
     }
     return value.copy(v), ""
 }
 
 _bd_field(bd: ptr, i: int) -> long {
-    if i >= json.json_array_size(bd) { return 0 }
-    return _to_int_trunc(value.number_of(json.json_array_get_raw(bd, i)))
+    if i >= json.array_size(bd) { return 0 }
+    return _to_int_trunc(value.number_of(json.array_get_raw(bd, i)))
 }
 
 const DAY_NAMES = "Sunday Monday Tuesday Wednesday Thursday Friday Saturday"
@@ -4255,7 +4255,7 @@ _strftime(v: ptr, fmt: string, what: string) -> ptr! {
     sec = _bd_field(bd, 5)
     wday = _bd_field(bd, 6)
     yday = _bd_field(bd, 7)
-    json.json_free(bd)
+    json.free(bd)
     // the epoch seconds, for %s
     days = _days_from_civil(year, mon + 1, 1) + mday - 1
     epoch = days * 86400 + hour * 3600 + minute * 60 + sec
@@ -4342,7 +4342,7 @@ _strftime(v: ptr, fmt: string, what: string) -> ptr! {
             }
         }
     }
-    return json.json_create_string(strbuilder.finish(sb)), ""
+    return json.create_string(strbuilder.finish(sb)), ""
 }
 
 // Parse `s` against `fmt` into a broken-down time. Supports the numeric

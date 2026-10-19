@@ -55,24 +55,17 @@ extern string_empty() -> ptr
 
 // Reference counting.
 //
-// `str` is `@retain` on every refcount call: each one takes
-// ownership of the lifetime decision (release decrements + frees
-// at refcount 0; retain bumps the refcount; free drops the
-// allocation immediately). The escape walker marks any heap-
-// string variable passed at this slot as escaped, so the
-// function-exit defer-free does not also call free() on the
-// same buffer, without `@retain` here, a `defer string.release(s)`
-// paired with the auto-cleanup would double-free the underlying
-// allocation. After the call the caller's `_heap_<name>` tracker
-// is conservatively kept at its previous value; the var is
-// treated as dead from the reclamation system's perspective.
+// `str` is `@retain` on every refcount call (R4 of
+// docs/design/ownership-model.md): the call is handed a reference
+// of its own, so string.retain adds one, and string.release and
+// string.free give one back (freeing the string at zero). A local
+// given to string.free or release is left empty, so its own scope
+// exit releases nothing more; a parameter may not be freed (E0901).
 //
-// These free what the runtime can SEE is heap: a value carrying
-// the AetherString magic header. A plain malloc'd payload is
-// indistinguishable from a literal here and is left alone, so
-// producing one and handing it to a caller to free would leak it.
-// That is why the uniform-heap return wrap mints the refcounted
-// shape rather than a bare buffer.
+// These act on a counted string, one carrying the AetherString
+// magic header: every string the program holds is one (R1), and a
+// pinned literal is never counted or freed. A plain C pointer is
+// left alone.
 extern string_retain(str: @retain string)
 extern string_release(str: @retain string)
 extern string_free(str: @retain string)

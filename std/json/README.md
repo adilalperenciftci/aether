@@ -3,8 +3,8 @@
 JSON parsing, building and serialisation.
 
 `parse` returns `(value, err)`; the value is a tree you navigate with typed
-accessors. Errors carry a position — `last_error_line` and `last_error_col`,
-and the message itself names it — so a malformed config points at the line
+accessors. Errors carry a position (`last_error_line` and `last_error_col`,
+and the message itself names it), so a malformed config points at the line
 rather than just failing.
 
 ```aether,run
@@ -19,12 +19,12 @@ main() {
     println("name: ${text}")
 
     age, aerr = json.object_get(doc, "age")
-    println("age: ${json.json_get_int(age)}")
+    println("age: ${json.get_int(age)}")
 
     tags, gerr = json.object_get(doc, "tags")
     println("tags: ${json.array_size(tags)}")
 
-    json.json_free(doc)
+    json.free(doc)
 
     // A parse error names where it gave up.
     _, bad = json.parse("{oops")
@@ -42,7 +42,7 @@ bad: expected string key in object at 1:2
 `json_free` on the root frees the whole tree; children must not be freed
 separately.
 
-Accessors that can fail return `(value, err)` — `get_string` above — while
+Accessors that can fail return `(value, err)` (`get_string` above), while
 `json_get_int` and friends return the value directly and rely on the caller
 having checked `json_type` first. Check the type when the input is
 untrusted.
@@ -73,15 +73,15 @@ main() {
     node = json.num(value)
     text, _ = json.stringify(node)
     back, _ = json.parse(text)
-    same = json.json_get_number(back) == value
+    same = json.get_number(back) == value
     println("${text} reads back as the same double: ${same}")
-    json.json_free(node)
-    json.json_free(back)
+    json.free(node)
+    json.free(back)
 
     tenth = json.num(0.1)
     short, _ = json.stringify(tenth)
     println(short)
-    json.json_free(tenth)
+    json.free(tenth)
 }
 ```
 ```output

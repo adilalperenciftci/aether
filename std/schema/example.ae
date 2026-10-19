@@ -135,6 +135,6 @@ main() {
     signup(s, partial)
     map_free(partial)
 
-    schema.schema_free(s)
+    schema.free(s)
     print("\ndone.\n")
 }

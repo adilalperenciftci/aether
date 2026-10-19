@@ -2,7 +2,7 @@
 
 URL-safe random identifiers, 21 characters by default.
 
-The alphabet is 64 symbols — `A-Za-z0-9_-` — so a NanoID drops into a URL,
+The alphabet is 64 symbols (`A-Za-z0-9_-`), so a NanoID drops into a URL,
 a filename or a header without escaping. 21 characters of it is ~126 bits of
 randomness, comparable to a UUID v4 in 15 fewer characters and with no
 hyphens.

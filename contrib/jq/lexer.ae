@@ -62,7 +62,7 @@ const SCAN_RESERVE = 262144
 const SCAN_FALLBACK_MAX = 500
 
 _dispose(lx: *Lexer) {
-    if lx.err != null { json.json_free(lx.err) }
+    if lx.err != null { json.free(lx.err) }
     heap.free(lx)
 }
 
@@ -82,7 +82,7 @@ tokenize(src: string) -> ptr! {
     lx.depth = 0
     ok = _run(lx)
     if ok == 0 {
-        msg = "${json.json_get_string_raw(lx.err)} at position ${lx.err_pos}"
+        msg = "${json.get_string_raw(lx.err)} at position ${lx.err_pos}"
         free_tokens(lx.tokens)
         _dispose(lx)
         return null, msg
@@ -99,8 +99,8 @@ free_tokens(toks: ptr) {
     i = 0
     while i < n {
         t = list.get_raw(toks, i) as *Token
-        if t.text != null { json.json_free(t.text) }
-        if t.parts != null { json.json_free(t.parts) }
+        if t.text != null { json.free(t.text) }
+        if t.parts != null { json.free(t.parts) }
         heap.free(list.get_raw(toks, i))
         list.set(toks, i, null)
         i = i + 1
@@ -117,7 +117,7 @@ token_parts(t: ptr) -> ptr { return (t as *Token).parts }
 token_text(t: ptr) -> string {
     p = t as *Token
     if p.text == null { return "" }
-    return json.json_get_string_raw(p.text)
+    return json.get_string_raw(p.text)
 }
 
 is_keyword(s: string) -> int {
@@ -185,8 +185,8 @@ _peek_at(lx: *Lexer, off: int) -> int {
 }
 
 _fail(lx: *Lexer, msg: string, pos: int) -> int {
-    if lx.err != null { json.json_free(lx.err) }
-    lx.err = json.json_create_string(msg)
+    if lx.err != null { json.free(lx.err) }
+    lx.err = json.create_string(msg)
     lx.err_pos = pos
     return 0
 }
@@ -198,11 +198,11 @@ _push(lx: *Lexer, kind: int, text: @keep ptr, num: float, pos: int) {
     t.parts = null
     t.num = num
     t.pos = pos
-    list.list_add_raw(lx.tokens, t)
+    list.add_raw(lx.tokens, t)
 }
 
 _push_text(lx: *Lexer, kind: int, text: string, pos: int) {
-    _push(lx, kind, json.json_create_string(text), 0.0, pos)
+    _push(lx, kind, json.create_string(text), 0.0, pos)
 }
 
 // Consume `op` if the source has it here. Returns 1 on consume.
@@ -396,7 +396,7 @@ _read_hex4(lx: *Lexer) -> int {
 _flush_literal(sb: @keep ptr, parts: ptr) -> ptr {
     if strbuilder.length(sb) > 0 {
         s = strbuilder.finish(sb)
-        json.json_array_add_raw(parts, json.json_create_string(s))
+        json.array_add_raw(parts, json.create_string(s))
         return strbuilder.new(16)
     }
     return sb
@@ -406,7 +406,7 @@ _flush_literal(sb: @keep ptr, parts: ptr) -> ptr {
 _lex_string(lx: *Lexer) -> int {
     start = lx.pos
     lx.pos = lx.pos + 1
-    parts = json.json_create_array()
+    parts = json.create_array()
     sb = strbuilder.new(16)
     closed = 0
     while lx.pos < lx.len {
@@ -433,12 +433,12 @@ _lex_string(lx: *Lexer) -> int {
                 cp = _read_hex4(lx)
                 if cp == 0 {
                     strbuilder.free(sb)
-                    json.json_free(parts)
+                    json.free(parts)
                     return _fail(lx, "\\u0000 is not supported in strings", lx.pos - 6)
                 }
                 if cp < 0 {
                     strbuilder.free(sb)
-                    json.json_free(parts)
+                    json.free(parts)
                     return _fail(lx, "invalid \\u escape in string", lx.pos)
                 }
                 if cp >= 55296 && cp <= 56319 && _peek(lx) == 92 && _peek_at(lx, 1) == 117 {
@@ -461,19 +461,19 @@ _lex_string(lx: *Lexer) -> int {
                 skipped = _skip_interpolation(lx)
                 if skipped <= 0 {
                     strbuilder.free(sb)
-                    json.json_free(parts)
+                    json.free(parts)
                     if skipped < 0 {
                         return _fail(lx, "string interpolation nested too deeply", expr_start)
                     }
                     return _fail(lx, "unterminated string interpolation", expr_start)
                 }
                 src = string.substring_n(_src(lx), lx.len, expr_start, lx.pos - 1)
-                holder = json.json_create_array()
-                json.json_array_add_raw(holder, json.json_create_string(src))
-                json.json_array_add_raw(parts, holder)
+                holder = json.create_array()
+                json.array_add_raw(holder, json.create_string(src))
+                json.array_add_raw(parts, holder)
             } else {
                 strbuilder.free(sb)
-                json.json_free(parts)
+                json.free(parts)
                 return _fail(lx, "invalid escape in string", lx.pos - 2)
             }
         } else {
@@ -483,7 +483,7 @@ _lex_string(lx: *Lexer) -> int {
     }
     if closed == 0 {
         strbuilder.free(sb)
-        json.json_free(parts)
+        json.free(parts)
         return _fail(lx, "unterminated string", start)
     }
     sb = _flush_literal(sb, parts)
@@ -494,7 +494,7 @@ _lex_string(lx: *Lexer) -> int {
     t.parts = parts
     t.num = 0.0
     t.pos = start
-    list.list_add_raw(lx.tokens, t)
+    list.add_raw(lx.tokens, t)
     return 1
 }
 

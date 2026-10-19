@@ -35,10 +35,10 @@ main() {
     if r % 10 != 5 { println("  FAIL wrapper: length read ${r % 10}, want 5"); fails = fails + 1 }
     strbuilder.free(b)
 
-    m = map.map_new()
-    s = pair(map.map_put_raw(m, "k", m), map.map_size(m))
+    m = map.new()
+    s = pair(map.put_raw(m, "k", m), map.size(m))
     if s % 10 != 1 { println("  FAIL map: size read ${s % 10}, want 1"); fails = fails + 1 }
-    map.map_free(m)
+    map.free(m)
 
     if fails > 0 {
         println("FAIL: ${fails} checks failed")
