@@ -408,7 +408,14 @@ TEST_CATEGORY(aea_codec_covers_every_ast_field, TEST_CATEGORY_COMPILER) {
      * ASTNode grew to 128 with `end_line` / `end_column` (#2684): where a
      * block's closing brace is, which the missing-return check reports. That
      * is parse state, so the codec carries both and AEA_FORMAT_VERSION went
-     * to 3. */
+     * to 3.
+     *
+     * ASTNode grew to 144 with `arg_order` / `arg_order_count` (#2850): the
+     * written order of a call's named arguments, recorded when the type
+     * checker binds them to their parameters. It is set only by the checker
+     * (NULL after a parse), so like `origin_module` the codec does not carry
+     * it and refuses an AST that has it; neither the wire format nor
+     * AEA_FORMAT_VERSION changed. */
     /* Type grew to 136 with `closure_literal` (#2460), a type-checker
      * back-pointer like compound_node: NULL after a parse and refused by
      * encode_type, so the wire format and AEA_FORMAT_VERSION are unchanged
@@ -418,7 +425,7 @@ TEST_CATEGORY(aea_codec_covers_every_ast_field, TEST_CATEGORY_COMPILER) {
      * That is parse state, so the codec carries it and AEA_FORMAT_VERSION
      * went to 4. */
     if (sizeof(void*) == 8 && sizeof(int) == 4) {
-        ASSERT_EQ(128, (int)sizeof(ASTNode));
+        ASSERT_EQ(144, (int)sizeof(ASTNode));
         ASSERT_EQ(144, (int)sizeof(Type));
     }
 }
