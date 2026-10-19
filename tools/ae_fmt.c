@@ -261,6 +261,10 @@ static const char* STMT_KW_BEFORE_PAREN[] = { "if","while","for","switch","match
 static const char* CALL_KW_BEFORE_PAREN[] = { "spawn","make","isolate","consume", NULL };
 
 static int is_keyword(const char* t){ return in_set(t, KEYWORDS); }
+/* An operator that is a prefix one where no value comes before it. */
+static int is_prefix_capable(const char* t){
+    return eq(t,"-") || eq(t,"+") || eq(t,"~") || eq(t,"*") || eq(t,"&");
+}
 static int is_value_end(const char* t){
     if (is_close(t)) return 1;
     if (in_set(t, VALUE_KEYWORDS)) return 1;
@@ -276,8 +280,14 @@ static int bracket_follows_operand(const char* prev){
     return is_value_end(prev) || eq(prev,"fn");
 }
 
+/* What layout knows of the tokens before `cur` beyond their text: whether
+ * the one before `prev` ends a value (is_value_end, or a postfix `!`
+ * written tight to a value, `f()!`, #2818). */
+typedef struct { int prevprev_value; } FmtCtx;
+
 // Desired spaces (0/1) before `cur`, given the previous two emitted tokens.
-static int spaces_before(const char* prev, const char* prevprev, const char* cur, int cur_had_space){
+static int spaces_before(const char* prev, const char* prevprev, const char* cur, int cur_had_space,
+                         const FmtCtx* cx){
     if (eq(cur,",") || eq(cur,";")) return 0;
     if (eq(cur,".") || eq(cur,"?.")) return 0;
     if (eq(prev,".") || eq(prev,"?.")) return 0;
@@ -312,12 +322,18 @@ static int spaces_before(const char* prev, const char* prevprev, const char* cur
         return 1;
     }
     // No space after a unary +/-/~/*/& (prev token was the operator and the
-    // token before it does not end a value, so it is prefix, not infix).
-    if ((eq(prev,"-")||eq(prev,"+")||eq(prev,"~")||eq(prev,"*")||eq(prev,"&")) &&
-        (prevprev==NULL || !is_value_end(prevprev)))
+    // token before it does not end a value, so it is prefix, not infix). A
+    // postfix `!` ends a value: `f()! + g()!` adds (#2818).
+    if (is_prefix_capable(prev) &&
+        (prevprev==NULL || !(cx ? cx->prevprev_value : is_value_end(prevprev))))
         return 0;
     if (eq(cur,"(")){
         if (in_set(prev, CALL_KW_BEFORE_PAREN)) return 0;
+        /* `or` after a value is the error handler's keyword, and what
+         * follows it is the handler, an expression: `x or (y or { 1 })`.
+         * Written tight it read as a call of a function `or` (#2818). */
+        if (eq(prev,"or") && prevprev && (cx ? cx->prevprev_value : is_value_end(prevprev)))
+            return 1;
         if (in_set(prev, STMT_KW_BEFORE_PAREN)) return 1;
         if (is_word_tok(prev) || is_close(prev)) return 0;   // call foo( / chain )(
         return 1;
@@ -375,6 +391,7 @@ static char* layout(Lexeme* lex, size_t n){
     int nbrackets=0;
     int type_prefix=TP_NONE;                  // where the last tokens stand in `[]*T`
     int prev_began_line=0;                    // the previous token was its line's first
+    int prev_value=0, prevprev_value=0;       // the previous two tokens end a value
 
     for (size_t k=0;k<n;k++){
         Lexeme* L=&lex[k];
@@ -393,6 +410,7 @@ static char* layout(Lexeme* lex, size_t n){
             if (L->kind==LX_TOKEN && (eq(L->text,")")||eq(L->text,"]"))) emit_nl=1;
         }
 
+        int tight = 0;   /* this token is written with nothing before it on its line */
         if (emit_nl>0){
             for (int q=0;q<emit_nl;q++) buf_putc(&out,'\n');
             int ind=depth - (is_closer?1:0); if(ind<0) ind=0;
@@ -405,20 +423,25 @@ static char* layout(Lexeme* lex, size_t n){
             } else if (after_inline_comment){
                 sp = 1;                                     // token after inline block comment
             } else if (prev){
-                sp = spaces_before(prev, prevprev, L->text, L->space_before);
+                FmtCtx cx = { prevprev_value };
+                sp = spaces_before(prev, prevprev, L->text, L->space_before, &cx);
                 if (type_prefix==TP_CLOSED && (is_type_name(L->text) || eq(L->text,"*")))
                     sp = 0;                             // `[]int`, `[Dir]string`, `[]*Node`
                 if (type_prefix==TP_STAR && is_type_name(L->text))
                     sp = 0;                             // the `Node` of `[]*Node`
-                /* A `*` that begins a line begins a statement, so it is a
-                 * prefix whatever ended the line before: the pointer type
-                 * of `*Node n = ...` / `*mod.Node n`, or a deref `*p = v`.
-                 * Read as infix after the previous line's `)`, it came out
-                 * as `* Node n`. */
-                if (prev_began_line && eq(prev,"*")) sp = 0;
+                /* An operator that begins a line is a prefix one: the
+                 * parser never continues an expression with an operator on
+                 * a new line (operator_starts_newline), so it starts a
+                 * statement, whatever ended the line before. The pointer
+                 * type of `*Node n = ...`, a deref `*p = v`, and a negative
+                 * value `-2` a block ends with (#2818). Read as infix after
+                 * the previous line's `)` or value, they came out as
+                 * `* Node n` and `- 2`. */
+                if (prev_began_line && is_prefix_capable(prev)) sp = 0;
                 if (sp==0 && would_merge(prev, L->text)) sp=1;
             } else sp=0;
             buf_spaces(&out, sp);
+            tight = (L->kind==LX_TOKEN && sp==0 && line_started);
         }
 
         int began_line = !line_started;
@@ -452,6 +475,11 @@ static char* layout(Lexeme* lex, size_t n){
             }
             type_prefix = next_prefix;
 
+            /* A `!` written tight after a value is its postfix unwrap
+             * (`f()!`) and ends a value; after anything else it is a
+             * prefix `!` or a send. */
+            int value = is_value_end(L->text) || (eq(L->text,"!") && tight && prev_value);
+            prevprev_value = prev_value; prev_value = value;
             prevprev=prev; prev=L->text;
             after_inline_comment=0;
         } else {

@@ -69,7 +69,7 @@ round(w: string) -> int {
         a = word(true, w) or { "d" }
         b = word(false, w) or { "d" }
         n = num(true, w) or { 3 }
-        m = num(true, w) or(5)
+        m = num(true, w) or (5)
         x, e = word(true, w)
         _, _ = num(true, w)
         _, _ = word(false, w)

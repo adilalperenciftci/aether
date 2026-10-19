@@ -45,7 +45,12 @@ It normalizes:
   `[Dir]string`; an index keeps its space before a word (`a[0] as int`). An
   index is written tight to the value it indexes (`xs[0]`, `f()[1]`), and an
   array type's size to its element type (`fn[2]`), while an array literal after
-  a keyword keeps its space (`return []`, `for x in [1, 2]`).
+  a keyword keeps its space (`return []`, `for x in [1, 2]`). A prefix
+  operator is written tight to its operand (`-x`, `*p`), and an operator that
+  begins a line is always a prefix one, since an expression never continues
+  with an operator on a new line (`-2` as a block's last value). A postfix `!`
+  ends a value (`f()! + g()!`), and `or` after a value keeps its space before
+  a parenthesis (`x or (y or { 1 })`), which is its handler, not a call.
 - **Blank lines**: runs of blank lines collapse to at most one, and a blank line
   is never left immediately after `{` or before `}`.
 - **Trailing whitespace** is stripped; the file ends in exactly one newline.
