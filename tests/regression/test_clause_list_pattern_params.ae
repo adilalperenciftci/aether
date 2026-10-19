@@ -1,0 +1,128 @@
+// #2898: a list pattern in a clause head, `lp([h | t], b: *Box)`, failed
+// with "Undefined variable 'h'" and "expects 1 argument(s)", and so did
+// one alone, `sum([h | t])` ("expects 0"): the checker counted no list
+// pattern as a parameter and bound none of its names, and codegen passed
+// it as a pointer and a length no call site gave. A list pattern
+// parameter now takes a slice, as the language's `T[]`: an array is
+// viewed as one and `[]` is the empty one, the clause runs when the
+// length fits (`[]`, `[a, b]`, `[h | t]` for one or more), and its names
+// are bound, the elements as values and a cons pattern's tail as a
+// slice of the rest. A literal element is tested (`[0 | t]`), and the
+// element type comes from the calls (a `string[]` here) or from another
+// clause's typed parameter. Before the fix this program did not compile.
+
+import std.string
+
+struct Box {
+    n: int
+}
+
+sum([]) -> int {
+    return 0
+}
+
+sum([h | t]) -> int {
+    return h + sum(t)
+}
+
+lp([], b: *Box) -> int {
+    return b.n
+}
+
+lp([h | t], b: *Box) -> int {
+    b.n = b.n + h
+    return lp(t, b)
+}
+
+// Fixed lengths, a guard, and a list pattern after another parameter.
+shape(k: int, []) -> int {
+    return k
+}
+
+shape(k: int, [x]) -> int {
+    return k + x * 10
+}
+
+shape(k: int, [x, y]) when x > y -> int {
+    return k + 100
+}
+
+shape(k: int, [h | t]) -> int {
+    return k + 1000 + t.len
+}
+
+// Strings, typed by the call.
+join_all([]) -> string {
+    return ""
+}
+
+join_all([w | rest]) -> string {
+    tail = join_all(rest)
+    return string.concat(w, tail)
+}
+
+// A literal element, and another clause's typed parameter.
+zeros([0 | t]) -> int {
+    return 1 + zeros(t)
+}
+
+zeros(xs: int[]) -> int {
+    return 0
+}
+
+// A wildcard element, and a guard reading the tail.
+firsts([_, b]) when b > 2 -> int {
+    return b
+}
+
+firsts([a | t]) when t.len > 1 -> int {
+    return a * 100 + t.len
+}
+
+firsts(other: int[]) -> int {
+    return -1
+}
+
+// A single definition: a call it does not match gets the default.
+head_of([h | t]) -> int {
+    return h
+}
+
+check(ok: bool, what: string) {
+    if !ok {
+        println("FAIL: ${what}")
+        exit(1)
+    }
+}
+
+main() {
+    xs = [1, 2, 3]
+    check(sum(xs) == 6, "a cons pattern alone")
+    check(sum([]) == 0, "[] into a list pattern")
+    b = Box { n: 0 }
+    check(lp(xs, &b) == 6, "a cons pattern before another parameter")
+    check(b.n == 6, "the other parameter is the caller's box")
+    check(shape(5, []) == 5, "the empty list")
+    one = [7]
+    check(shape(5, one) == 75, "a one-element list")
+    two = [9, 4]
+    check(shape(5, two) == 105, "a two-element list, the guard true")
+    low = [1, 4]
+    check(shape(5, low) == 1006, "a two-element list, the guard false")
+    check(shape(5, xs) == 1007, "a longer list")
+
+    words = ["ab", "cd", "e"]
+    j = join_all(words)
+    check(string.equals(j, "abcde"), "a list of strings")
+    string.free(j)
+    z = [0, 0, 5, 0]
+    check(zeros(z) == 2, "a literal head")
+    p = [1, 3]
+    q = [7, 8, 9]
+    check(firsts(p) == 3, "a wildcard element and a guard")
+    check(firsts(q) == 702, "a guard on the tail")
+    check(firsts(one) == -1, "no list clause matching")
+    check(head_of(q) == 7, "a single definition matching")
+    check(head_of([]) == 0, "a single definition not matching")
+    println("clause list pattern params ok")
+}

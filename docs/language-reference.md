@@ -933,10 +933,37 @@ grade(score) when score >= 60 -> "D"
 grade(score) when score < 60 -> "F"
 ```
 
+### List Patterns
+
+A parameter can be a list pattern, as a `match` arm can: `[]`, `[x, y]`, or
+`[h | t]` for one element or more. It takes a slice (an array is viewed as
+one, `[]` is the empty one), and binds its names: each element named, and a
+cons pattern's tail, a slice of the rest. A literal element (`[0 | t]`) must
+be equal. The element type is the one the calls pass, or another clause's
+typed parameter at that position, else `int`.
+
+```aether,run
+sum([]) -> int {
+    return 0
+}
+
+sum([h | t]) -> int {
+    return h + sum(t)
+}
+
+main() {
+    xs = [1, 2, 3]
+    println(sum(xs))
+}
+```
+```output
+6
+```
+
 ### How a Clause Set Runs
 
 The clauses are tried in order. A call runs the first clause whose literal
-patterns all equal its arguments and whose guard, if it has one, is true, and
+and list patterns all match its arguments and whose guard, if it has one, is true, and
 returns what that clause returns. Each guard is evaluated once, for the call
 that reaches its clause, and no clause after one that matches every call (no
 literal pattern, no guard) is ever tried. When no clause matches, a set that

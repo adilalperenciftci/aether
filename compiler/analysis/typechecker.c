@@ -1620,21 +1620,41 @@ static void propagate_int_width_64(ASTNode* node, TypeKind wide) {
     }
 }
 
+/* A child of a function definition that declares one of its parameters: a
+ * name, or a clause's pattern (a literal, a struct, a list or a cons), in
+ * the order the call's arguments bind them. Guards and contracts sit among
+ * them and are not. The list patterns were left out of the count, so a
+ * clause `f([h|t])` took no argument and `f([h|t], b)` one (#2898); codegen
+ * counts the same nodes (fn_param_count). */
+static int is_param_node(const ASTNode* p) {
+    if (!p) return 0;
+    switch (p->type) {
+        case AST_VARIABLE_DECLARATION: case AST_PATTERN_VARIABLE: case AST_PATTERN_LITERAL:
+        case AST_PATTERN_STRUCT: case AST_PATTERN_LIST: case AST_PATTERN_CONS:
+            return 1;
+        default:
+            return 0;
+    }
+}
+
+static int is_list_param_node(const ASTNode* p) {
+    return p && (p->type == AST_PATTERN_LIST || p->type == AST_PATTERN_CONS);
+}
+
+/* A parameter of `fn`, a definition or an extern (whose parameters are
+ * identifiers, and which has no body after them). */
+static int is_call_param(const ASTNode* fn, const ASTNode* p) {
+    if (!fn || !p) return 0;
+    return fn->type == AST_EXTERN_FUNCTION ? p->type == AST_IDENTIFIER : is_param_node(p);
+}
+
 // Count the number of formal parameters of a function definition node
-// Skips _ctx parameters (auto-injected by builder context)
 static int count_function_params(ASTNode* func) {
     if (!func || func->child_count == 0) return 0;
     int count = 0;
     // Last child is the function body; everything before it may be params or a guard
-    for (int i = 0; i < func->child_count - 1; i++) {
-        ASTNode* child = func->children[i];
-        if (child->type == AST_VARIABLE_DECLARATION ||
-            child->type == AST_PATTERN_VARIABLE ||
-            child->type == AST_PATTERN_LITERAL) {
-            count++;
-        }
-        // AST_GUARD_CLAUSE is skipped (not a parameter)
-    }
+    for (int i = 0; i < func->child_count - 1; i++)
+        if (is_param_node(func->children[i])) count++;
     return count;
 }
 
@@ -1685,10 +1705,7 @@ static int count_required_params(ASTNode* func) {
     int count = 0;
     for (int i = 0; i < func->child_count - 1; i++) {
         ASTNode* child = func->children[i];
-        if (child->type == AST_GUARD_CLAUSE) continue;
-        if (child->type != AST_VARIABLE_DECLARATION &&
-            child->type != AST_PATTERN_VARIABLE &&
-            child->type != AST_PATTERN_LITERAL) continue;
+        if (!is_param_node(child)) continue;
         if (param_has_default(child)) {
             return count;  // first defaulted param ends the required prefix
         }
@@ -1711,14 +1728,8 @@ static int count_required_params(ASTNode* func) {
 static int last_param_is_fn(ASTNode* func) {
     if (!func || func->child_count < 2) return 0;
     ASTNode* last_param = NULL;
-    for (int i = 0; i < func->child_count - 1; i++) {
-        ASTNode* child = func->children[i];
-        if (child && (child->type == AST_VARIABLE_DECLARATION ||
-                      child->type == AST_PATTERN_VARIABLE ||
-                      child->type == AST_PATTERN_LITERAL)) {
-            last_param = child;
-        }
-    }
+    for (int i = 0; i < func->child_count - 1; i++)
+        if (is_param_node(func->children[i])) last_param = func->children[i];
     return last_param && last_param->node_type &&
            last_param->node_type->kind == TYPE_FUNCTION;
 }
@@ -1727,14 +1738,8 @@ static int last_param_is_fn(ASTNode* func) {
 static Type* last_param_type(ASTNode* func) {
     if (!func) return NULL;
     ASTNode* last_param = NULL;
-    for (int i = 0; i < func->child_count - 1; i++) {
-        ASTNode* child = func->children[i];
-        if (child && (child->type == AST_VARIABLE_DECLARATION ||
-                      child->type == AST_PATTERN_VARIABLE ||
-                      child->type == AST_PATTERN_LITERAL)) {
-            last_param = child;
-        }
-    }
+    for (int i = 0; i < func->child_count - 1; i++)
+        if (is_param_node(func->children[i])) last_param = func->children[i];
     return last_param ? last_param->node_type : NULL;
 }
 
@@ -1779,10 +1784,10 @@ static int has_ctx_first_param(ASTNode* func) {
     if (!func || func->child_count == 0) return 0;
     for (int i = 0; i < func->child_count - 1; i++) {
         ASTNode* child = func->children[i];
-        if (child->type == AST_VARIABLE_DECLARATION ||
-            child->type == AST_PATTERN_VARIABLE ||
-            child->type == AST_PATTERN_LITERAL) {
-            return child->value && strcmp(child->value, "_ctx") == 0 &&
+        if (is_param_node(child)) {
+            return (child->type == AST_VARIABLE_DECLARATION ||
+                    child->type == AST_PATTERN_VARIABLE) &&
+                   child->value && strcmp(child->value, "_ctx") == 0 &&
                    child->node_type && child->node_type->kind == TYPE_PTR;
         }
     }
@@ -3015,10 +3020,7 @@ static int fn_name_matches_signature(SymbolTable* table, ASTNode* rhs, Type* tar
     int declared = 0;
     for (int i = 0; i < fs->node->child_count; i++) {
         ASTNode* p = fs->node->children[i];
-        if (!p) continue;
-        if (p->type != AST_VARIABLE_DECLARATION &&
-            p->type != AST_PATTERN_VARIABLE &&
-            p->type != AST_PATTERN_LITERAL) continue;
+        if (!is_param_node(p)) continue;
         if (declared < target->param_count) {
             Type* want = target->param_types ? target->param_types[declared] : NULL;
             if (want && p->node_type &&
@@ -5453,6 +5455,62 @@ static void refuse_array_result(const char* subject, Type* result, Type* arr, in
                                 int column);
 static void refuse_fn_type_array_result(const char* subject, Type* t, int line, int column);
 
+/* The parameter at position `pos` of definition `fn`, or NULL. */
+static ASTNode* def_param_at(ASTNode* fn, int pos) {
+    for (int i = 0, p = 0; fn && i < fn->child_count - 1; i++)
+        if (is_param_node(fn->children[i]) && p++ == pos) return fn->children[i];
+    return NULL;
+}
+
+static int is_definition(const ASTNode* n) {
+    return n && (n->type == AST_FUNCTION_DEFINITION || n->type == AST_BUILDER_FUNCTION);
+}
+
+/* #2898: a list pattern parameter (`[]`, `[x, y]`, `[h|t]`) takes a slice,
+ * whose element type is the one its position has across the clause set: a
+ * clause naming that parameter with an array or slice type gives it, else
+ * a list pattern there already typed (from a call, propagate_call_site),
+ * else int, which a `match` list pattern over an untyped array reads too.
+ * Each list pattern there takes the slice type, and the names it binds
+ * theirs: an element the element type, a cons pattern's tail the slice of
+ * the rest. Settled before any call or body is checked, so a call checks
+ * its argument against the slice (an array viewed, `[]` the empty one). */
+static void settle_list_param_types(ASTNode* program) {
+    for (int i = 0; i < program->child_count; i++) {
+        ASTNode* fn = program->children[i];
+        if (!is_definition(fn) || !fn->value) continue;
+        for (int pos = 0;; pos++) {
+            ASTNode* p = def_param_at(fn, pos);
+            if (!p) break;
+            if (!is_list_param_node(p)) continue;
+            Type* elem = NULL;
+            for (int j = 0; j < program->child_count; j++) {
+                ASTNode* c = program->children[j];
+                if (!is_definition(c) || !c->value || strcmp(c->value, fn->value) != 0) continue;
+                ASTNode* q = def_param_at(c, pos);
+                Type* qt = q ? q->node_type : NULL;
+                Type* e = (qt && qt->kind == TYPE_ARRAY) ? qt->element_type : NULL;
+                if (!e || e->kind == TYPE_UNKNOWN) continue;
+                if (q->type == AST_VARIABLE_DECLARATION || q->type == AST_PATTERN_VARIABLE) {
+                    elem = e;
+                    break;
+                }
+                if (!elem && is_list_param_node(q)) elem = e;
+            }
+            Type* slice = create_array_type(elem ? clone_type(elem) : create_type(TYPE_INT), -1);
+            for (int k = 0; k < p->child_count; k++) {
+                ASTNode* name = p->children[k];
+                if (!name || name->type != AST_PATTERN_VARIABLE) continue;
+                int is_tail = p->type == AST_PATTERN_CONS && k == 1;
+                if (name->node_type) free_type(name->node_type);
+                name->node_type = clone_type(is_tail ? slice : slice->element_type);
+            }
+            if (p->node_type) free_type(p->node_type);
+            p->node_type = slice;
+        }
+    }
+}
+
 int typecheck_program(ASTNode* program) {
     note_program_globals(program);
     if (!program || program->type != AST_PROGRAM) return 0;
@@ -6233,7 +6291,8 @@ int typecheck_program(ASTNode* program) {
         user_explicit_namespace_count = 0;
         return 0;
     }
-    
+    settle_list_param_types(program);   /* #2898 */
+
     // Update symbol table with inferred types
     for (int i = 0; i < program->child_count; i++) {
         ASTNode* child = program->children[i];
@@ -8654,6 +8713,17 @@ int typecheck_function_definition(ASTNode* func, SymbolTable* table) {
                 refuse_fn_type_array_result(who, param->node_type, param->line, param->column);
                 refuse_unknown_type("the parameter", param->value, param->node_type, table,
                                     param->line, param->column);   /* #2896 */
+            }
+        } else if (is_list_param_node(param)) {
+            /* #2898: the names a list pattern binds, typed when its slice
+             * was (settle_list_param_types). */
+            for (int k = 0; k < param->child_count; k++) {
+                ASTNode* name = param->children[k];
+                if (!name || name->type != AST_PATTERN_VARIABLE || !name->value ||
+                    strcmp(name->value, "_") == 0) continue;
+                add_symbol(func_table, name->value,
+                           name->node_type ? clone_type(name->node_type) : create_type(TYPE_UNKNOWN),
+                           0, 0, 0);
             }
         }
     }
@@ -13727,14 +13797,8 @@ static Type* resolve_fnptr_struct_field(SymbolTable* table, const char* recv_nam
  * guard clauses skipped). */
 static ASTNode* ufcs_first_param(ASTNode* func) {
     if (!func || func->child_count == 0) return NULL;
-    for (int i = 0; i < func->child_count - 1; i++) {
-        ASTNode* child = func->children[i];
-        if (child->type == AST_VARIABLE_DECLARATION ||
-            child->type == AST_PATTERN_VARIABLE ||
-            child->type == AST_PATTERN_LITERAL) {
-            return child;
-        }
-    }
+    for (int i = 0; i < func->child_count - 1; i++)
+        if (is_param_node(func->children[i])) return func->children[i];
     return NULL;
 }
 
@@ -14721,19 +14785,6 @@ static int reject_named_arguments(ASTNode* call, const char* what) {
     return 0;
 }
 
-/* A node that declares a parameter of a function definition: a name, or a
- * pattern of a clause (a literal, a struct, a list, a cons). */
-static int is_param_node(const ASTNode* p) {
-    if (!p) return 0;
-    switch (p->type) {
-        case AST_VARIABLE_DECLARATION: case AST_PATTERN_VARIABLE: case AST_PATTERN_LITERAL:
-        case AST_PATTERN_STRUCT: case AST_PATTERN_LIST: case AST_PATTERN_CONS:
-            return 1;
-        default:
-            return 0;
-    }
-}
-
 /* #2850: a named argument is passed to the parameter it names, not in the
  * place it is written. `sub(b: 1, a: 10)` passed 1 as `a`, and with
  * parameters of two types the C did not compile. The arguments are put in
@@ -15461,11 +15512,7 @@ int typecheck_function_call(ASTNode* call, SymbolTable* table) {
             for (int i = 0; i < symbol->node->child_count - 1 &&
                             call->child_count < expected; i++) {
                 ASTNode* p = symbol->node->children[i];
-                if (!p) continue;
-                if (p->type == AST_GUARD_CLAUSE) continue;
-                if (p->type != AST_VARIABLE_DECLARATION &&
-                    p->type != AST_PATTERN_VARIABLE &&
-                    p->type != AST_PATTERN_LITERAL) continue;
+                if (!is_param_node(p)) continue;
                 // Skip param indexes the caller already supplied.
                 if (param_idx < got) {
                     param_idx++;
@@ -15730,13 +15777,12 @@ int typecheck_function_call(ASTNode* call, SymbolTable* table) {
         int c_pidx = 0;
         for (int i = 0; i < c_scan_limit; i++) {
             ASTNode* p = symbol->node->children[i];
-            if (!p || p->type == AST_GUARD_CLAUSE) continue;
-            if (p->type != AST_VARIABLE_DECLARATION &&
-                p->type != AST_PATTERN_VARIABLE &&
-                p->type != AST_IDENTIFIER) continue;
+            if (!is_call_param(symbol->node, p)) continue;
             int aslot = c_pidx + c_arg_offset;
             c_pidx++;
             if (aslot < 0 || aslot >= call->child_count) continue;
+            if (p->type != AST_VARIABLE_DECLARATION && p->type != AST_PATTERN_VARIABLE &&
+                p->type != AST_IDENTIFIER) continue;   /* a pattern: no declared type */
             if (p->node_type && p->node_type->kind == TYPE_ENUM)
                 coerce_bare_enum_member(call->children[aslot], p->node_type, table);
         }
@@ -15791,20 +15837,28 @@ int typecheck_function_call(ASTNode* call, SymbolTable* table) {
                 : symbol->node->child_count - 1;
         for (int i = 0; i < param_scan_limit; i++) {
             ASTNode* param = symbol->node->children[i];
-            if (!param) continue;
-            if (param->type == AST_GUARD_CLAUSE) continue;
             /* Param-decl shapes:
-             *   - User-defined fn:  AST_VARIABLE_DECLARATION or AST_PATTERN_VARIABLE
+             *   - User-defined fn:  AST_VARIABLE_DECLARATION or AST_PATTERN_VARIABLE,
+             *                       or a clause's pattern (is_param_node)
              *   - Extern fn:        AST_IDENTIFIER (parser builds them this way;
              *                       see parse_extern_declaration in parser.c)
-             * Skip anything that isn't one of these param shapes. */
-            if (param->type != AST_VARIABLE_DECLARATION &&
-                param->type != AST_PATTERN_VARIABLE &&
-                param->type != AST_IDENTIFIER) continue;
+             * A pattern takes an argument too, so it counts for the positions
+             * after it (#2898). */
+            if (!is_call_param(symbol->node, param)) continue;
 
             int arg_slot = param_idx + arg_offset;
             param_idx++;
             if (arg_slot < 0 || arg_slot >= call->child_count) continue;
+            /* A list pattern takes a slice: an array is viewed as one, `[]`
+             * is the empty one (#2898). Another pattern has no declared type
+             * to check the argument against. */
+            if (is_list_param_node(param)) {
+                if (param->node_type)
+                    slice_coerce_slot(&call->children[arg_slot], param->node_type, 0);
+                continue;
+            }
+            if (param->type != AST_VARIABLE_DECLARATION && param->type != AST_PATTERN_VARIABLE &&
+                param->type != AST_IDENTIFIER) continue;
 
             if (cf_env.count < CONTRACT_ENV_MAX_PARAMS && param->value) {
                 cf_env.names[cf_env.count] = param->value;

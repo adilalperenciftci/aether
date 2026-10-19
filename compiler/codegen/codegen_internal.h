@@ -813,6 +813,5 @@ void emit_fn_result_c_type(CodeGenerator* gen, ASTNode* fn);
 int fn_param_count(ASTNode* fn);
 ASTNode* fn_param_at(ASTNode* fn, int pos);
 Type* fn_param_type_at(CodeGenerator* gen, ASTNode* fn, int pos);
-const char* fn_list_param_elem_ctype(CodeGenerator* gen, ASTNode* fn, int pos);
 
 #endif

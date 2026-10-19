@@ -9270,11 +9270,8 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
         int param_count = fn_param_count(child);
         for (int j = 0; j < param_count; j++) {
             if (j > 0) fprintf(gen->output, ", ");
-            ASTNode* param = fn_param_at(child, j);
-            if (param->type == AST_PATTERN_LIST || param->type == AST_PATTERN_CONS) {
-                fprintf(gen->output, "%s*, int", fn_list_param_elem_ctype(gen, child, j));
-                continue;
-            }
+            /* A list pattern's position is a slice, as the definition and a
+             * set's dispatcher spell it (#2898). */
             Type* pt = fn_param_type_at(gen, child, j);
             /* #750: fn-ptr param → abstract declarator `R (*)(T1,T2)`
              * so the prototype matches the definition. */

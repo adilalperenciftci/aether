@@ -1508,15 +1508,17 @@ Type* fn_param_type_at(CodeGenerator* gen, ASTNode* fn, int pos) {
     return own ? own->node_type : NULL;
 }
 
-/* The element C type of list parameter position `pos`: the first clause
- * whose pattern there binds an element of a known type gives it, else int. */
-const char* fn_list_param_elem_ctype(CodeGenerator* gen, ASTNode* fn, int pos) {
+/* The element C type of list parameter position `pos`: the element type of
+ * the slice the checker gave a list pattern there (settle_list_param_types,
+ * the same for every clause of a set), else int. */
+static const char* fn_list_param_elem_ctype(CodeGenerator* gen, ASTNode* fn, int pos) {
     const DefClauses* dc = gen ? fn_def_clause_set(gen->program, fn) : NULL;
     int n = dc ? dc->count : 1;
     for (int c = 0; c < n; c++) {
         ASTNode* p = fn_param_at(dc ? dc->nodes[c] : fn, pos);
-        if (!is_list_param_node(p) || p->child_count == 0 || !p->children[0]) continue;
-        Type* et = p->children[0]->node_type;
+        if (!is_list_param_node(p)) continue;
+        Type* et = p->node_type && p->node_type->kind == TYPE_ARRAY ? p->node_type->element_type
+                                                                    : NULL;
         if (et && et->kind != TYPE_UNKNOWN) return get_c_type(et);
     }
     return "int";
@@ -1532,6 +1534,59 @@ static void emit_pattern_literal_test(CodeGenerator* gen, const char* arg, ASTNo
         fprintf(gen->output, "))");
     } else {
         fprintf(gen->output, "%s == %s", arg, c->value);
+    }
+}
+
+/* #2898: element `j` of the slice `slice` (C text), of element C type `et`. */
+static const char* list_elem_ref(const char* slice, const char* et, int j) {
+    return cg_internf("((%s*)%s.ptr)[%d]", et, slice, j);
+}
+
+/* #2898: the condition under which list pattern `p` matches the slice
+ * `slice`: its length (`[]` none, `[x, y]` two, `[h|t]` one or more) and
+ * each literal element it names (`[0, x]`, `[1|t]`). */
+static void emit_list_pattern_test(CodeGenerator* gen, const char* slice, const char* et,
+                                   ASTNode* p) {
+    int named = p->type == AST_PATTERN_LIST ? p->child_count : (p->child_count > 0 ? 1 : 0);
+    if (p->type == AST_PATTERN_LIST)
+        fprintf(gen->output, "%s.len == %d", slice, p->child_count);
+    else
+        fprintf(gen->output, "%s.len >= 1", slice);
+    for (int j = 0; j < named; j++) {
+        ASTNode* e = p->children[j];
+        if (!e || e->type != AST_PATTERN_LITERAL || !e->value || strcmp(e->value, "_") == 0) continue;
+        fprintf(gen->output, " && ");
+        emit_pattern_literal_test(gen, list_elem_ref(slice, et, j), e);
+    }
+}
+
+/* #2898: the names list pattern `p` binds from the slice `slice`, each
+ * typed as the checker typed it: an element its value, a cons pattern's
+ * tail the slice of the rest. Only those `reads` mentions (a body, a
+ * guard). They are borrowed, as a parameter is; one `body` rebinds takes a
+ * reference of its own first (R3, own_rebound_binding_take). */
+static int expr_mentions(ASTNode* expr, const char* name);
+
+static void emit_list_pattern_bindings(CodeGenerator* gen, const char* slice, const char* et,
+                                       ASTNode* p, ASTNode* reads, ASTNode* body) {
+    for (int j = 0; j < p->child_count; j++) {
+        ASTNode* e = p->children[j];
+        if (!e || e->type != AST_PATTERN_VARIABLE || !e->value || strcmp(e->value, "_") == 0 ||
+            !expr_mentions(reads, e->value)) continue;
+        int tail = p->type == AST_PATTERN_CONS && j == 1;
+        print_indent(gen);
+        if (tail)
+            fprintf(gen->output, "%s %s = aether_slice_make((%s*)%s.ptr + 1, %s.len - 1);\n",
+                    volatile_decl_type(try_volatile_qual_for(gen, e->value), "AetherSlice"),
+                    e->value, et, slice, slice);
+        else
+            fprintf(gen->output, "%s %s = %s;\n",
+                    volatile_decl_type(try_volatile_qual_for(gen, e->value), et), e->value,
+                    list_elem_ref(slice, et, j));
+        if (e->node_type) mark_var_declared_typed(gen, e->value, e->node_type);
+        else mark_var_declared(gen, e->value);
+        if (body && e->node_type)
+            own_rebound_binding_take(gen, e->value, e->node_type, body, e->line, e->column);
     }
 }
 
@@ -1692,7 +1747,7 @@ static void emit_function(CodeGenerator* gen, ASTNode* func, const char* clause_
 
     // Generate parameters - handle pattern matching. A parameter's C name
     // carries its position: `_pattern_<pos>` for a literal or struct
-    // pattern, `_list_<pos>` / `_len_<pos>` for a list pattern.
+    // pattern, `_list_<pos>` (a slice) for a list pattern.
     int param_count = 0;
     ASTNode* body = NULL;
     // Track the C name of the last emitted named parameter — needed as
@@ -1787,12 +1842,12 @@ static void emit_function(CodeGenerator* gen, ASTNode* func, const char* clause_
             last_param_cname = cg_internf("_pattern_%d", param_count);
             param_count++;
         } else if (child->type == AST_PATTERN_LIST || child->type == AST_PATTERN_CONS) {
-            // List pattern becomes array pointer, its element type the one
-            // the prototype gives the position.
+            /* #2898: a list pattern takes a slice, as a `T[]` parameter
+             * does, so a call passes it the slice the checker made of its
+             * argument. It was a pointer and a length no call site gave. */
             if (param_count > 0) fprintf(gen->output, ", ");
-            fprintf(gen->output, "%s* _list_%d, int _len_%d",
-                    fn_list_param_elem_ctype(gen, func, param_count), param_count, param_count);
-            // has_list_patterns = 1;  // Reserved for future optimization
+            fprintf(gen->output, "AetherSlice _list_%d", param_count);
+            last_param_cname = cg_internf("_list_%d", param_count);
             param_count++;
         }
     }
@@ -1982,65 +2037,20 @@ static void emit_function(CodeGenerator* gen, ASTNode* func, const char* clause_
             fprintf(gen->output, ";\n");
         }
 
-        // Generate list pattern checks
-        if (child->type == AST_PATTERN_LIST) {
+        /* A list pattern (#2898): a single definition tests its slice here,
+         * a clause's dispatcher did; either binds the names its body reads. */
+        if (is_list_param_node(child)) {
+            const char* slice = cg_internf("_list_%d", pos);
+            const char* et = fn_list_param_elem_ctype(gen, func, pos);
             if (!as_clause) {
-                // Empty or fixed-size list check
                 print_indent(gen);
-                fprintf(gen->output, "if (_len_%d != %d) return ", pos, child->child_count);
+                fprintf(gen->output, "if (!(");
+                emit_list_pattern_test(gen, slice, et, child);
+                fprintf(gen->output, ")) return ");
                 emit_no_match_value(gen, func);
                 fprintf(gen->output, ";\n");
             }
-            // Bind pattern variables to list elements
-            for (int j = 0; j < child->child_count; j++) {
-                ASTNode* elem = child->children[j];
-                if (elem->type == AST_PATTERN_VARIABLE) {
-                    print_indent(gen);
-                    const char* etype = "int";
-                    if (elem->node_type && elem->node_type->kind != TYPE_UNKNOWN)
-                        etype = get_c_type(elem->node_type);
-                    fprintf(gen->output, "%s %s = _list_%d[%d];\n",
-                            volatile_decl_type(try_volatile_qual_for(gen, elem->value), etype),
-                            elem->value, pos, j);
-                }
-            }
-        } else if (child->type == AST_PATTERN_CONS) {
-            if (!as_clause) {
-                // [H|T] pattern - check non-empty
-                print_indent(gen);
-                fprintf(gen->output, "if (_len_%d < 1) return ", pos);
-                emit_no_match_value(gen, func);
-                fprintf(gen->output, ";\n");
-            }
-
-            // Bind head and tail
-            if (child->child_count >= 1 && child->children[0]->type == AST_PATTERN_VARIABLE) {
-                print_indent(gen);
-                const char* htype = "int";
-                if (child->children[0]->node_type && child->children[0]->node_type->kind != TYPE_UNKNOWN)
-                    htype = get_c_type(child->children[0]->node_type);
-                fprintf(gen->output, "%s %s = _list_%d[0];\n",
-                        volatile_decl_type(try_volatile_qual_for(gen, child->children[0]->value),
-                                           htype),
-                        child->children[0]->value, pos);
-            }
-            if (child->child_count >= 2 && child->children[1]->type == AST_PATTERN_VARIABLE) {
-                print_indent(gen);
-                const char* ttype = "int";
-                if (child->children[1]->node_type && child->children[1]->node_type->kind != TYPE_UNKNOWN)
-                    ttype = get_c_type(child->children[1]->node_type);
-                fprintf(gen->output, "%s %s = &_list_%d[1];\n",
-                        volatile_decl_type(try_volatile_qual_for(gen, child->children[1]->value),
-                                           cg_internf("%s*", ttype)),
-                        child->children[1]->value, pos);
-                print_indent(gen);
-                fprintf(gen->output, "int %s_len = _len_%d - 1;",
-                        child->children[1]->value, pos);
-                const char* len_name = cg_internf("%s_len", child->children[1]->value);
-                if (codegen_local_unread(gen, len_name))
-                    fprintf(gen->output, " (void)%s;", len_name);
-                fprintf(gen->output, "\n");
-            }
+            emit_list_pattern_bindings(gen, slice, et, child, body, body);
         }
 
         if (is_param_node(child)) pos++;
@@ -2185,10 +2195,7 @@ static void emit_clause_call(CodeGenerator* gen, ASTNode* clause, int returns_va
     int npos = fn_param_count(clause);
     for (int p = 0; p < npos; p++) {
         if (p > 0) fprintf(gen->output, ", ");
-        if (is_list_param_node(fn_param_at(clause, p)))
-            fprintf(gen->output, "_list%d, _len%d", p, p);
-        else
-            fprintf(gen->output, "_arg%d", p);
+        fprintf(gen->output, "_arg%d", p);
     }
     if (clause->type == AST_BUILDER_FUNCTION)
         fprintf(gen->output, "%s_builder", npos > 0 ? ", " : "");
@@ -2229,13 +2236,12 @@ static int emit_clause_dispatch(CodeGenerator* gen, ASTNode* clause, int returns
                 snprintf(arg, sizeof(arg), "_arg%d", p);
                 emit_pattern_literal_test(gen, arg, c);
                 first_cond = 0;
-            } else if (c->type == AST_PATTERN_LIST) {
+            } else if (is_list_param_node(c)) {
                 if (!first_cond) fprintf(gen->output, " && ");
-                fprintf(gen->output, "_len%d == %d", p, c->child_count);
-                first_cond = 0;
-            } else if (c->type == AST_PATTERN_CONS) {
-                if (!first_cond) fprintf(gen->output, " && ");
-                fprintf(gen->output, "_len%d >= 1", p);
+                fprintf(gen->output, "(");
+                emit_list_pattern_test(gen, cg_internf("_arg%d", p),
+                                       fn_list_param_elem_ctype(gen, clause, p), c);
+                fprintf(gen->output, ")");
                 first_cond = 0;
             }
         }
@@ -2258,23 +2264,10 @@ static int emit_clause_dispatch(CodeGenerator* gen, ASTNode* clause, int returns
                 emit_guard_binding(gen, fn_param_type_at(gen, clause, p), c->value,
                                    cg_internf("_arg%d", p));
                 if (is_fnptr_type(c->node_type)) register_fnptr_local(gen, c->value, c->node_type);
-            } else if (c->type == AST_PATTERN_LIST) {
-                for (int j = 0; j < c->child_count; j++) {
-                    ASTNode* e = c->children[j];
-                    if (e && e->type == AST_PATTERN_VARIABLE && e->value && expr_mentions(guard, e->value))
-                        emit_guard_binding(gen, e->node_type, e->value, cg_internf("_list%d[%d]", p, j));
-                }
-            } else if (c->type == AST_PATTERN_CONS) {
-                ASTNode* h = c->child_count >= 1 ? c->children[0] : NULL;
-                ASTNode* t = c->child_count >= 2 ? c->children[1] : NULL;
-                if (h && h->type == AST_PATTERN_VARIABLE && h->value && expr_mentions(guard, h->value))
-                    emit_guard_binding(gen, h->node_type, h->value, cg_internf("_list%d[0]", p));
-                if (t && t->type == AST_PATTERN_VARIABLE && t->value && expr_mentions(guard, t->value)) {
-                    print_line(gen, "%s* %s = &_list%d[1]; int %s_len = _len%d - 1; (void)%s; (void)%s_len;",
-                               fn_list_param_elem_ctype(gen, clause, p), t->value, p, t->value, p,
-                               t->value, t->value);
-                    mark_var_declared(gen, t->value);
-                }
+            } else if (is_list_param_node(c)) {
+                /* Plain copies, as the guard's other names are. */
+                emit_list_pattern_bindings(gen, cg_internf("_arg%d", p),
+                                           fn_list_param_elem_ctype(gen, clause, p), c, guard, NULL);
             }
         }
         print_indent(gen);
@@ -2338,11 +2331,8 @@ void generate_combined_function(CodeGenerator* gen, ASTNode** clauses, int claus
     int npos = fn_param_count(first);
     for (int p = 0; p < npos; p++) {
         if (p > 0) fprintf(gen->output, ", ");
-        if (is_list_param_node(fn_param_at(first, p))) {
-            fprintf(gen->output, "%s* _list%d, int _len%d",
-                    fn_list_param_elem_ctype(gen, first, p), p, p);
-            continue;
-        }
+        /* A list pattern's position is a slice, typed by the checker
+         * (settle_list_param_types, #2898). */
         Type* t = fn_param_type_at(gen, first, p);
         if (is_fnptr_type(t)) {
             emit_fnptr_decl(gen, t, cg_internf("_arg%d", p));
