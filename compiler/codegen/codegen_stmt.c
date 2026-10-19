@@ -9620,8 +9620,8 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                                  "loop body of this function, and a local first bound inside a "
                                  "branch or loop body is one variable for the whole function. Use "
                                  "a new name for the %s value, or convert it to %s",
-                                 stmt->value, type_to_string(here), type_to_string(hoisted),
-                                 type_to_string(here), type_to_string(hoisted));
+                                 stmt->value, type_spelled(here), type_spelled(hoisted),
+                                 type_spelled(here), type_spelled(hoisted));
                         AetherError e = { stmt->source_file, NULL, stmt->line, stmt->column, msg,
                                           NULL, NULL, AETHER_ERR_TYPE_MISMATCH };
                         aether_error_report(&e);

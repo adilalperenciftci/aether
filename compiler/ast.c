@@ -298,14 +298,15 @@ int type_to_aether_source(const Type* type, char* buf, size_t cap) {
  * never in a buffer a later call reuses. The static buffers this had cut a
  * long struct or tuple name, and a nested array or tuple was spelled into
  * the buffer its own element's spelling was read from. */
-static const char* spelled_list(const char* open, Type** items, int count,
-                                const char* sep, const char* close) {
+static const char* spelled_list_by(const char* (*spell)(Type*), const char* open,
+                                   Type** items, int count, const char* sep,
+                                   const char* close) {
     size_t cap = 64, len = 0;
     char* buf = (char*)aether_xrealloc(NULL, cap);
     buf[0] = '\0';
     for (int i = -1; i <= count; i++) {
         const char* piece = i < 0 ? open : i == count ? close
-                          : items ? type_to_string(items[i]) : "?";
+                          : items ? spell(items[i]) : "?";
         const char* lead = (i > 0 && i < count) ? sep : "";
         size_t need = len + strlen(lead) + strlen(piece) + 1;
         if (need > cap) {
@@ -317,6 +318,11 @@ static const char* spelled_list(const char* open, Type** items, int count,
     const char* r = aether_intern_n(buf, len);
     free(buf);
     return r;
+}
+
+static const char* spelled_list(const char* open, Type** items, int count,
+                                const char* sep, const char* close) {
+    return spelled_list_by(type_to_string, open, items, count, sep, close);
 }
 
 /* Module-scoped struct types: a module's struct is merged and emitted as
@@ -418,6 +424,52 @@ const char* type_to_string(Type* type) {
             return aether_internf("bit_set[%s]",
                                   type->element_type ? type_to_string(type->element_type) : "?");
         default: return "UNKNOWN";
+    }
+}
+
+const char* type_spelled(Type* type) {
+    if (!type) return "unknown";
+    if (type->distinct_name) return type->distinct_name;
+    if (type->c_alias) return type->c_alias;
+    switch (type->kind) {
+        case TYPE_STRUCT:
+            return type->struct_name ? ast_struct_display_name(type->struct_name) : "struct";
+        case TYPE_PTR:
+            if (type->element_type && type->element_type->kind != TYPE_UNKNOWN)
+                return aether_internf("*%s", type_spelled(type->element_type));
+            return "ptr";
+        case TYPE_ARRAY:
+            if (type->index_enum_name)
+                return aether_internf("[%s]%s", type->index_enum_name,
+                                      type_spelled(type->element_type));
+            if (type->array_size < 0)
+                return aether_internf("%s[]", type_spelled(type->element_type));
+            return aether_internf("%s[%d]", type_spelled(type->element_type), type->array_size);
+        case TYPE_FUNCTION: {
+            /* A closure whose signature was erased is a bare `fn`; any
+             * other function type, a closure's or a C function pointer's,
+             * is `fn(P, ...) -> R` (no arrow for no result). */
+            if (!type->is_fnptr && type->param_count == 0 && !type->return_type) return "fn";
+            const char* params = spelled_list_by(type_spelled, "fn(", type->param_types,
+                                                 type->param_count, ", ", ")");
+            if (!type->return_type || type->return_type->kind == TYPE_VOID) return params;
+            return aether_internf("%s -> %s", params, type_spelled(type->return_type));
+        }
+        case TYPE_OPTIONAL:
+            return aether_internf("%s?", type_spelled(type->element_type));
+        case TYPE_TUPLE:
+            if (type->is_result && type->tuple_count == 2 && type->tuple_types)
+                return aether_internf("%s!", type_spelled(type->tuple_types[0]));
+            return spelled_list_by(type_spelled, "(", type->tuple_types, type->tuple_count,
+                                   ", ", ")");
+        case TYPE_ISOLATED:
+            return aether_internf("Isolated[%s]", type_spelled(type->element_type));
+        case TYPE_BITSET:
+            return aether_internf("bit_set[%s]", type_spelled(type->element_type));
+        case TYPE_UNKNOWN:
+            return "unknown";
+        default:
+            return type_to_string(type);
     }
 }
 

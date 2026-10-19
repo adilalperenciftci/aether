@@ -657,6 +657,13 @@ Type* create_result_type(Type* inner);    // #913 fallible `T!` -> (T, string)
 Type* create_function_type(int param_count, Type** param_types, Type* return_type);
 void free_type(Type* type);
 const char* type_to_string(Type* type);
+/* #2832: `type` as the source spells it, for a diagnostic: a distinct type
+ * and a struct by their names, an erased closure as `fn` and any other
+ * function type as `fn(P) -> R`, `T?`, `(A, B)`, `T[N]`, `*T`. Interned.
+ * type_to_string spells a closure by its signature (`|| -> void`) and a
+ * distinct type by its representation, as the --emit=lib catalog and the
+ * schema tables use it; a message names the type the program wrote. */
+const char* type_spelled(Type* type);
 /* Module-scoped struct types: the merged name `<ns>_<Name>` of a module's
  * struct, mapped back to the name it was written with (`Name`) and to its
  * module-qualified spelling (`ns.Name`). Any other name maps to itself.

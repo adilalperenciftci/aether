@@ -561,7 +561,7 @@ static int check_definition(Flow* f, ASTNode* fn) {
     if (has_value_type(fn->node_type)) {
         snprintf(message, sizeof message,
                  "missing return: control can reach the end of %s'%s', whose result is %s",
-                 what, name, type_to_string(fn->node_type));
+                 what, name, type_spelled(fn->node_type));
     } else {
         snprintf(message, sizeof message,
                  "missing return: control can reach the end of %s'%s', which returns a "

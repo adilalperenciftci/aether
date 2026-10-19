@@ -2870,8 +2870,7 @@ static void struct_fields_summary(ASTNode* def, char* out, size_t size) {
     for (int i = 0; i < def->child_count && off + 4 < size; i++) {
         ASTNode* f = def->children[i];
         if (!f) continue;
-        const char* tn = f->node_type ? type_to_string(f->node_type) : "?";
-        if (strncmp(tn, "struct ", 7) == 0) tn += 7;
+        const char* tn = f->node_type ? type_spelled(f->node_type) : "?";
         off += (size_t)snprintf(out + off, size - off, "%s%s: %s",
                                 i ? ", " : "", f->value ? f->value : "?", tn);
     }

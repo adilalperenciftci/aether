@@ -3594,8 +3594,8 @@ Type* infer_type(ASTNode* expr, SymbolTable* table) {
                         snprintf(msg, sizeof(msg),
                                  "select() branches must all yield the same type: "
                                  "'%s' is %s but '%s' is %s",
-                                 chosen_key ? chosen_key : "?", type_to_string(chosen),
-                                 arg->value ? arg->value : "?", type_to_string(t));
+                                 chosen_key ? chosen_key : "?", type_spelled(chosen),
+                                 arg->value ? arg->value : "?", type_spelled(t));
                         type_error(msg, arg->line, arg->column);
                     }
                     free_type(t);
@@ -8246,11 +8246,7 @@ static Type* fn_type_with_array_result(Type* t, int depth) {
 
 /* `arr` as it is written in Aether (`Doc[2]`, `[Dir]int`), for the help. */
 static void array_type_spelling(Type* arr, char* out, size_t cap) {
-    Type* el = arr->element_type;
-    const char* e = el && el->kind == TYPE_STRUCT && el->struct_name ? el->struct_name
-                                                                      : type_to_string(el);
-    if (arr->index_enum_name) snprintf(out, cap, "[%s]%s", arr->index_enum_name, e);
-    else snprintf(out, cap, "%s[%d]", e, arr->array_size);
+    snprintf(out, cap, "%s", type_spelled(arr));
 }
 
 /* Refuse result type `result` (holding the array `arr`) of what `subject`
@@ -8269,7 +8265,7 @@ static void refuse_array_result(const char* subject, Type* result, Type* arr, in
     } else {
         snprintf(msg, sizeof(msg),
                  "%s %s, which holds the fixed-size array %s: only a named function returns "
-                 "one, alone or in a tuple (#2894)", subject, type_to_string(result), spelled);
+                 "one, alone or in a tuple (#2894)", subject, type_spelled(result), spelled);
     }
     snprintf(hint, sizeof(hint),
              "return it from a named function, or wrap it in a struct: struct Pair { v: %s }",
@@ -8284,7 +8280,7 @@ static void refuse_fn_type_array_result(const char* subject, Type* t, int line, 
     if (!f) return;
     char who[256];
     snprintf(who, sizeof(who), "%s holds the function type %s, which returns",
-             subject, type_to_string(f));
+             subject, type_spelled(f));
     refuse_array_result(who, f->return_type, result_array_type(f->return_type), line, column);
 }
 
@@ -9548,7 +9544,7 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                 snprintf(msg, sizeof(msg),
                     "cannot destructure, '%s' returns '%s', not a tuple",
                     rhs->value ? rhs->value : "expression",
-                    type_to_string(rhs_type));
+                    type_spelled(rhs_type));
                 /* #1778: a tuple-returning function passed through a BARE `fn`
                  * param loses its return type — a bare `fn` carries no
                  * signature, so a call through it is typed `void`, and the
@@ -13107,7 +13103,7 @@ int typecheck_binary_expression(ASTNode* expr, SymbolTable* table) {
                     snprintf(msg, sizeof(msg),
                              "'%s' compares the optional '%s' with '%s', which it cannot hold",
                              expr->value ? expr->value : "==",
-                             type_to_string(opt_t), type_to_string(other));
+                             type_spelled(opt_t), type_spelled(other));
                     type_error_hint(msg,
                         "an optional compares with `none`, with an optional of its inner type, "
                         "or with a value of its inner type (present and equal)",
