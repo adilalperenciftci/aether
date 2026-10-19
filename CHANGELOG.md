@@ -14,6 +14,34 @@ cut while your branch is open cannot fold your entry into the released section.
 
 ## [current]
 
+## [0.830.0]
+
+### Added
+
+- **Typed string accessors, and W1005 for a `ptr` given to a `string` local.**
+  A `string` local re-bound to a bare `ptr` (`s = map_get_raw(m, k)`, or a
+  tuple slot, `s, err = map.get(m, k)`) read the pointer as text whatever it
+  pointed at, a nested list or a struct included. `map.get_string`,
+  `list.get_string` and `string.from_ptr` say the value is a string and check
+  it is one, returning `(null, "not a string")` when it is not, and the
+  implicit form now warns (W1005), naming the accessor; a later release makes
+  it an error. A `ptr` result of a `string.*` function (`string.from_int`) is
+  a string already and is not warned about. The uses in std, contrib, the
+  tests and the docs are moved over.
+
+### Changed
+
+- **E0902 counts a struct or a closure only when it escapes.** A `ptr`
+  parameter put in a struct local to the function, or captured by a closure
+  that runs and is dropped inside the call, no longer has to be declared
+  `@keep`: neither outlives the call. The struct or the closure is a keep
+  only when it escapes itself, returned, stored in a field, a module-level
+  `var` or a container, or passed to a `@keep` or `@retain` parameter, and
+  each of those is still E0902. A closure that stores the pointer somewhere
+  that outlives the call keeps it too. Downstream, aephysics' query
+  functions, about a dozen of ae3d's and aeb's builder can drop their
+  `@keep` once this is released.
+
 ## [0.829.0]
 
 ### Fixed
