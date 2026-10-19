@@ -3533,6 +3533,16 @@ Type* infer_type(ASTNode* expr, SymbolTable* table) {
                 Type* th = infer_type(expr->children[1], table);
                 Type* el = infer_type(expr->children[2], table);
                 Type* t = branch_join_type(th, expr->children[1], el, expr->children[2]);
+                if (!t && th && el && th->kind != TYPE_UNKNOWN &&
+                    (el->kind == TYPE_SUM || el->kind == TYPE_OPTIONAL) &&
+                    is_assignable(th, el) && !is_assignable(el, th)) {
+                    /* #2983: the else branch's type takes the then branch's
+                     * and not the other way (a sum beside its variant, `T?`
+                     * beside a T): the expression is the wider one, each
+                     * branch coerced into it. */
+                    free_type(th);
+                    return el;
+                }
                 free_type(el);
                 if (!t) return th;
                 free_type(th);
@@ -12248,8 +12258,44 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                 } else {
                     Type* j = numeric_join_type(expr->node_type, t);
                     if (j) { free_type(expr->node_type); expr->node_type = j; }
+                    /* #2983: or the wider type a branch has, which the early
+                     * pass could not see (a sum, an optional). */
+                    else if (t && (t->kind == TYPE_SUM || t->kind == TYPE_OPTIONAL) &&
+                             is_assignable(expr->node_type, t) && !is_assignable(t, expr->node_type)) {
+                        free_type(expr->node_type);
+                        expr->node_type = clone_type(t);
+                    }
                 }
                 free_type(t);
+            }
+            /* #2983: both branches give a value of one type. Numbers join
+             * (#2854); otherwise one branch's type takes the other's, as a
+             * binding of it would (an int beside a `long?`, a variant
+             * beside its sum, `null` beside a pointer). `none` fits the
+             * optional the expression goes into, which only the slot
+             * knows. Two that do not fit either way reached C's `?:`. */
+            if (expr->child_count >= 3 && expr->children[1] && expr->children[2] &&
+                expr->children[1]->type != AST_NONE_LITERAL &&
+                expr->children[2]->type != AST_NONE_LITERAL) {
+                Type* th = infer_type(expr->children[1], table);
+                Type* el = infer_type(expr->children[2], table);
+                int known = th && el && th->kind != TYPE_UNKNOWN && el->kind != TYPE_UNKNOWN &&
+                            th->kind != TYPE_VOID && el->kind != TYPE_VOID;
+                if (known && !is_assignable(el, th) && !is_assignable(th, el)) {
+                    char msg[512];
+                    snprintf(msg, sizeof(msg),
+                             "the branches of this if expression give values of types %s and "
+                             "%s: both must give a value of one type",
+                             type_spelled(th), type_spelled(el));
+                    type_error_hint(msg,
+                        "convert one branch to the other's type, or use an `if` statement",
+                        expr->line, expr->column);
+                    free_type(th);
+                    free_type(el);
+                    return 0;
+                }
+                free_type(th);
+                free_type(el);
             }
             return 1;
 

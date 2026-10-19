@@ -7587,12 +7587,28 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
              * a node, and `?:` binds looser than any operator around it:
              * `y + (if c { 10 } else { 20 })` was `(y + c) ? 10 : 20`. */
             if (expr->child_count >= 3) {
+                /* #2983: a branch whose type the expression's takes (a
+                 * variant beside its sum, a T beside a T?) is coerced into
+                 * it, as a binding of the branch would be: `?:` takes two
+                 * operands of one type. */
+                Type* vt = expr->node_type;
+                if (vt && vt->kind == TYPE_OPTIONAL && needs_optional_coerce(expr, vt)) {
+                    emit_optional_coerced(gen, expr, vt);
+                    break;
+                }
+                int sum = vt && vt->kind == TYPE_SUM;
                 fprintf(gen->output, "((");
                 generate_expression(gen, expr->children[0]);
                 fprintf(gen->output, ") ? (");
-                generate_expression(gen, expr->children[1]);
+                if (sum && needs_sum_coerce(expr->children[1], vt))
+                    emit_sum_coerced(gen, expr->children[1], vt);
+                else
+                    generate_expression(gen, expr->children[1]);
                 fprintf(gen->output, ") : (");
-                generate_expression(gen, expr->children[2]);
+                if (sum && needs_sum_coerce(expr->children[2], vt))
+                    emit_sum_coerced(gen, expr->children[2], vt);
+                else
+                    generate_expression(gen, expr->children[2]);
                 fprintf(gen->output, "))");
             }
             break;
