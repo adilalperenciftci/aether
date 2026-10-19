@@ -72,9 +72,11 @@ if [ "$moves" != "2" ] || [ "$takes" != "2" ]; then
     exit 1
 fi
 
-# The closing note says what KEPT ALIVE means.
-if ! grep -q "A line marked KEPT ALIVE" "$out"; then
-    echo "  [FAIL] diagnose_ownership: missing the KEPT ALIVE note"
+# The closing note says what move and take mean, and that C borrows unless
+# the extern's parameter says `@retain`.
+if ! grep -q 'A store marked `move` hands the place' "$out" ||
+   ! grep -q 'an extern that keeps it declares the' "$out"; then
+    echo "  [FAIL] diagnose_ownership: missing the closing note on move, take and @retain"
     cat "$out"
     exit 1
 fi

@@ -12884,8 +12884,9 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
 // owning local at its last use, and takes (retains) anything else; a
 // literal is pinned and costs no count; a release happens where a place is
 // overwritten and where it goes away; a function hands its caller one
-// reference from every return. A local still handed to C where C may keep
-// it (R4) is kept alive instead of released, and says so.
+// reference from every return. A string handed to C is borrowed for the
+// call, and an extern that keeps one declares the parameter `@retain` (R4);
+// the closing note says so.
 // =====================================================================
 
 static const char* diag_store_shape(CodeGenerator* gen, ASTNode* rhs, const char** how) {
@@ -12897,7 +12898,7 @@ static const char* diag_store_shape(CodeGenerator* gen, ASTNode* rhs, const char
     }
     if (is_heap_string_expr(gen, rhs)) { *how = "move"; return "fresh: a call's result"; }
     *how = "take";
-    return "borrowed: retained";
+    return "borrowed: retained, or copied if C's";
 }
 
 static void diag_walk_assignments(CodeGenerator* gen, ASTNode* node,
@@ -12931,11 +12932,9 @@ void codegen_diagnose_ownership(ASTNode* program, FILE* out) {
     if (!program || !out) return;
 
     /* Build a minimal CodeGenerator. The predicates below read
-     * `gen->program` (for the user-fn structural-escape lookup) and
-     * `gen->extern_registry` (for the type-based escape param lookup
-     * `lookup_callee_param_kind` does to keep `string.length(s)` from
-     * over-marking `s` as escaped). The rest of the struct stays
-     * zeroed. */
+     * `gen->program` (a called function's declared result) and
+     * `gen->extern_registry` (an extern's declared result, `@heap` or
+     * not). The rest of the struct stays zeroed. */
     CodeGenerator gen;
     memset(&gen, 0, sizeof(gen));
     gen.program = program;
@@ -13041,10 +13040,11 @@ void codegen_diagnose_ownership(ASTNode* program, FILE* out) {
     }
 
     fprintf(out,
-            "\nA line marked KEPT ALIVE names a local passed where C may keep\n"
-            "the pointer (a `ptr` or `@retain` parameter of an extern): it is\n"
-            "not released, so C's copy stays good. Declare the extern's\n"
-            "parameter `@noescape` if C only reads it during the call.\n"
+            "\nA store marked `move` hands the place the value's own reference;\n"
+            "`take` adds one: a counted string is retained, C's characters are\n"
+            "copied, and a pinned literal is used as it is. A string passed to C\n"
+            "is borrowed for the call; an extern that keeps it declares the\n"
+            "parameter `@retain`, and the call hands it a reference of its own.\n"
             "\n=== end diagnosis ===\n");
     code_generator_release(&gen);
 }
