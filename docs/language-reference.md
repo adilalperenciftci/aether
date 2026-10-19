@@ -2097,7 +2097,8 @@ The narrowed value flows through expressions, field access, and function
 arguments. Assigning the narrowed variable *directly* to a pre-existing variable
 (`existing = x`) is one spot the inner type does not yet propagate (the outer
 variable keeps its optional type); use an expression (`existing = x + 0`) or a
-fresh `let` binding there.
+fresh binding there: a new local bound to the narrowed variable (`v = x`) is
+its inner type.
 
 ### Functions
 
@@ -2416,7 +2417,9 @@ The match must be **exhaustive**: every variant must be handled, or a `_`
 wildcard arm must catch the rest. Omitting a variant is a compile error, the
 payoff that tells you, when you add a variant, exactly which matches to update.
 An arm naming something that isn't a variant is also rejected. Narrowing applies
-when the scrutinee is a plain variable (`match s { … }`).
+when the scrutinee is a plain variable (`match s { … }`). A new local bound to
+the narrowed scrutinee in an arm (`t = s` in the `Circle` arm) is a copy of
+that variant, so `t.r` reads its field.
 
 ### Recursive sums
 

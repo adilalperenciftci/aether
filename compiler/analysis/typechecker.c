@@ -10303,7 +10303,19 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                     int wider_fix = first_binding && have->kind != TYPE_UNKNOWN &&
                                     (want->kind == TYPE_OPTIONAL || want->kind == TYPE_SUM) &&
                                     !is_assignable(want, have) && is_assignable(have, want);
-                    if (scalar_fix || array_fix || wider_fix) {
+                    /* #2848: and the other way, a copy of a value a match
+                     * arm or a none-check narrowed (`t = s` in the `Circle`
+                     * arm of a `Shape` match): the early pass gave it the
+                     * scrutinee's type, the value is the narrowed one, and
+                     * the reads of the new local are checked as that. As
+                     * the early pass had it, C declared a Shape, and `t.r`
+                     * read no member of it. */
+                    int narrow_fix = first_binding &&
+                                     (have->kind == TYPE_OPTIONAL || have->kind == TYPE_SUM) &&
+                                     want->kind != TYPE_OPTIONAL && want->kind != TYPE_SUM &&
+                                     want->kind != TYPE_UNKNOWN &&
+                                     is_assignable(want, have) && !is_assignable(have, want);
+                    if (scalar_fix || array_fix || wider_fix || narrow_fix) {
                         free_type(stmt->node_type);
                         stmt->node_type = clone_type(init_type);
                     }
