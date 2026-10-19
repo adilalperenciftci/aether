@@ -1459,7 +1459,10 @@ own: `v = v + 1` in the arm rebinds the pattern's value, and no rule declares
 the name ahead of the `match`, from that arm or any other. So
 `some(v) -> { v = v + 1 }  none -> { v = 0 }` followed by `return v` is
 `Undefined variable`: there are two variables named `v`, and neither outlives
-its arm. Use another name for the one the `match` should leave behind.
+its arm. Use another name for the one the `match` should leave behind. The
+value of a bound `match` goes to the variable it is bound to, whatever its
+arms bind: `v = match o { some(v) -> v  none -> 0 }` sets the `v` outside to
+the value the arm's `v` holds.
 
 ```aether,run
 pick(x: int) -> int {

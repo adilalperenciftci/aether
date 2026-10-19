@@ -6058,7 +6058,15 @@ static void rename_locals_shadowing_functions(ASTNode* program) {
  * each exit free reaches its own variable and flag. A uniform rename
  * inside the construct keeps its meaning: every use there is the
  * binding's (a nested binding of the name included, renamed alike), and
- * field, argument and function names are not value names. */
+ * field, argument and function names are not value names.
+ *
+ * #2994: so is every name a `match` arm's pattern binds (`some(v)` over
+ * any optional, the names of a list or a struct pattern), which is that
+ * arm's own: codegen writes the value of a bound `match` in the arm's
+ * block, and a binding named like the variable it is bound to took it
+ * there, `v = match o { some(v) -> v  none -> 0 }` leaving `v` as it was. A
+ * module variable or an actor's state of that name is no exception: the
+ * arm's binding hides it from that store as it hides a local. */
 static int scoped_binding_seq = 0;
 
 static int names_value_outside(const ASTNode* node, const ASTNode* skip, const char* name) {
@@ -6098,35 +6106,47 @@ static void rename_scoped_binding(ASTNode* scope, ASTNode* construct, const char
     free(to);
 }
 
-static void rename_scoped_string_bindings_in(ASTNode* scope, ASTNode* node, const NameSet* fixed) {
+/* #2994: each name pattern `p` of a match arm binds, renamed in `arm` when
+ * `scope` names it outside the arm: `some(v)` at the top, a name in a list
+ * or a struct pattern (whose fields are assignments named by the field,
+ * each holding its own pattern). */
+static void rename_arm_pattern_bindings(ASTNode* scope, ASTNode* arm, ASTNode* p, int top) {
+    static const NameSet none = {0};
+    if (!p) return;
+    if (p->type == AST_PATTERN_VARIABLE) {
+        if (p->value && (!top || (p->annotation && strcmp(p->annotation, "some_pattern") == 0)))
+            rename_scoped_binding(scope, arm, p->value, &none);
+        return;
+    }
+    if (p->type != AST_PATTERN_LIST && p->type != AST_PATTERN_CONS &&
+        p->type != AST_PATTERN_STRUCT && !(p->type == AST_ASSIGNMENT && !top))
+        return;
+    for (int i = 0; i < p->child_count; i++)
+        rename_arm_pattern_bindings(scope, arm, p->children[i], 0);
+}
+
+static void rename_scoped_bindings_in(ASTNode* scope, ASTNode* node, const NameSet* fixed) {
     if (!node) return;
     /* Inner constructs first, so each ends with a name apart from the one
      * around it (the outer rename no longer meets the inner name). */
     for (int i = 0; i < node->child_count; i++)
-        rename_scoped_string_bindings_in(scope, node->children[i], fixed);
+        rename_scoped_bindings_in(scope, node->children[i], fixed);
     if (node->type == AST_FOR_LOOP && node->child_count > 0 && node->children[0] &&
         node->children[0]->type == AST_VARIABLE_DECLARATION && node->children[0]->node_type &&
         node->children[0]->node_type->kind == TYPE_STRING) {
         rename_scoped_binding(scope, node, node->children[0]->value, fixed);
     } else if (node->type == AST_CATCH_CLAUSE && node->value) {
         rename_scoped_binding(scope, node, node->value, fixed);
-    } else if (node->type == AST_MATCH_STATEMENT && node->child_count > 0 && node->children[0] &&
-               node->children[0]->node_type &&
-               node->children[0]->node_type->kind == TYPE_OPTIONAL &&
-               node->children[0]->node_type->element_type &&
-               node->children[0]->node_type->element_type->kind == TYPE_STRING) {
+    } else if (node->type == AST_MATCH_STATEMENT) {
         for (int i = 1; i < node->child_count; i++) {
             ASTNode* arm = node->children[i];
-            ASTNode* pat = arm && arm->type == AST_MATCH_ARM && arm->child_count > 0
-                           ? arm->children[0] : NULL;
-            if (pat && pat->type == AST_PATTERN_VARIABLE && pat->annotation &&
-                strcmp(pat->annotation, "some_pattern") == 0)
-                rename_scoped_binding(scope, arm, pat->value, fixed);
+            if (arm && arm->type == AST_MATCH_ARM && arm->child_count > 0)
+                rename_arm_pattern_bindings(scope, arm, arm->children[0], 1);
         }
     }
 }
 
-static void rename_scoped_string_bindings(ASTNode* program) {
+static void rename_scoped_bindings(ASTNode* program) {
     if (!program) return;
     NameSet globals = {0};
     for (int i = 0; i < program->child_count; i++) {
@@ -6140,7 +6160,7 @@ static void rename_scoped_string_bindings(ASTNode* program) {
         if (!c) continue;
         if (c->type == AST_FUNCTION_DEFINITION || c->type == AST_MAIN_FUNCTION ||
             c->type == AST_BUILDER_FUNCTION) {
-            rename_scoped_string_bindings_in(c, c, &globals);
+            rename_scoped_bindings_in(c, c, &globals);
         } else if (c->type == AST_ACTOR_DEFINITION) {
             /* An actor's state is `self->name`, no local. */
             NameSet fixed = {0};
@@ -6153,7 +6173,7 @@ static void rename_scoped_string_bindings(ASTNode* program) {
             for (int k = 0; k < c->child_count; k++) {
                 ASTNode* st = c->children[k];
                 if (st && st->type != AST_STATE_DECLARATION)
-                    rename_scoped_string_bindings_in(st, st, &fixed);
+                    rename_scoped_bindings_in(st, st, &fixed);
             }
             nameset_free(&fixed);
         }
@@ -7180,8 +7200,9 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     /* #2683: after the function renames, so a call's name is the one its
      * C spelling is made from. */
     rename_locals_shadowing_functions(program);
-    /* #2746: before any pass keys an exit free off a local's name. */
-    rename_scoped_string_bindings(program);
+    /* #2746, #2994: before any pass keys an exit free or a store off a
+     * local's name. */
+    rename_scoped_bindings(program);
     /* The rename changed definition names, which are the index's keys,
        without changing the child count it is keyed on. */
     program_index_reset();
