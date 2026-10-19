@@ -688,9 +688,14 @@ int is_owning_array_string_element(CodeGenerator* gen, ASTNode* e) {
     return strmap_get(&str_arrs(gen)->views, key) == (void*)2;
 }
 
-/* The type a match expression's arms yield: the first value an arm yields
- * (match_arm_value, so a block arm's final expression counts, #2496). */
+/* The type a match expression's arms yield: the type the checker joined
+ * them to (branch_join_type: a sum two variants belong to, #2996), else the
+ * first value an arm yields (match_arm_value, so a block arm's final
+ * expression counts, #2496). */
 Type* match_value_type(ASTNode* m) {
+    if (m && m->node_type && m->node_type->kind != TYPE_UNKNOWN &&
+        m->node_type->kind != TYPE_VOID)
+        return m->node_type;
     for (int i = 1; m && i < m->child_count; i++) {
         ASTNode* arm = m->children[i];
         if (!arm || arm->type != AST_MATCH_ARM || arm->child_count < 2) continue;
@@ -1386,6 +1391,21 @@ static void mark_pattern_binding(CodeGenerator* gen, const char* name, TypeKind 
     free_type(t);
 }
 
+/* #2997: a list pattern's string binding is a view of the string the list
+ * holds. One the arm re-binds takes a reference of its own first, and is
+ * then a string local of the arm's scope: each re-binding releases the
+ * value it held and the arm's exits the last. The reference it took was
+ * released by nothing, so `[h | t] -> { h = "${h}."  ... }` leaked one
+ * string a match, over a `*StringSeq` and an array alike. */
+static void own_rebound_string_binding(CodeGenerator* gen, const char* name, ASTNode* body,
+                                       int line, int column) {
+    if (!struct_param_written(body, name)) return;
+    print_line(gen, "%s = aether_uniform_heap_str(%s, 0);", name, name);
+    ScopedStringLocal sl;
+    scoped_string_local_begin(gen, &sl, name, body, 1);
+    push_scoped_string_local_free(gen, &sl, line, column);
+}
+
 static void generate_list_pattern_bindings(CodeGenerator* gen, ASTNode* pattern,
                                            ASTNode* match_expr, const char* len_name,
                                            ASTNode* body, int is_seq_match) {
@@ -1408,10 +1428,9 @@ static void generate_list_pattern_bindings(CodeGenerator* gen, ASTNode* pattern,
                                head->value, len_name);
                     mark_pattern_binding(gen, head->value, TYPE_STRING);
                     /* A view of the cell's string: one the arm rebinds
-                     * takes a reference of its own first. */
-                    if (struct_param_written(body, head->value))
-                        print_line(gen, "%s = aether_uniform_heap_str(%s, 0);",
-                                   head->value, head->value);
+                     * takes a reference of its own first (#2997). */
+                    own_rebound_string_binding(gen, head->value, body, head->line,
+                                               head->column);
                 }
             }
             if (tail && tail->type == AST_PATTERN_VARIABLE && tail->value) {
@@ -1439,29 +1458,46 @@ static void generate_list_pattern_bindings(CodeGenerator* gen, ASTNode* pattern,
                     for (int j = 0; j < i; j++) fprintf(gen->output, "->tail");
                     fprintf(gen->output, "->head;\n");
                     mark_pattern_binding(gen, elem->value, TYPE_STRING);
+                    own_rebound_string_binding(gen, elem->value, body, elem->line,
+                                               elem->column);
                 }
             }
         }
         return;
     }
 
+    /* #2997: the elements are of the subject's element type, as the
+     * checker types the names an arm binds: an `int` only where the subject
+     * says nothing. They were all `int`, so a match over a `float[]` or a
+     * `string[]` did not compile. */
+    Type* st = match_expr ? match_expr->node_type : NULL;
+    Type* et = (st && st->kind == TYPE_ARRAY && st->element_type &&
+                st->element_type->kind != TYPE_UNKNOWN) ? st->element_type : NULL;
+    Type* int_t = et ? NULL : create_type(TYPE_INT);
+    Type* elem_t = et ? et : int_t;
+    const char* ect = get_c_type(elem_t);
+
     // Only declare the array pointer if this arm actually uses element bindings
     int needs_arr = pattern_needs_array(pattern, body);
     if (needs_arr) {
         print_indent(gen);
-        fprintf(gen->output, "int* _match_arr = ");
+        fprintf(gen->output, "%s* _match_arr = (%s*)(", ect, ect);
         generate_expression_as_elem_ptr(gen, match_expr);   /* #1286 */
-        fprintf(gen->output, ";\n");
+        fprintf(gen->output, ");\n");
     }
 
     if (pattern->type == AST_PATTERN_LIST && pattern->child_count > 0) {
         for (int i = 0; i < pattern->child_count; i++) {
             ASTNode* elem = pattern->children[i];
-            if (elem && elem->type == AST_PATTERN_VARIABLE && elem->value) {
-                if (expr_references_var(body, elem->value)) {
-                    print_line(gen, "int %s = _match_arr[%d];", elem->value, i);
-                    mark_pattern_binding(gen, elem->value, TYPE_INT);
-                }
+            if (elem && elem->type == AST_PATTERN_VARIABLE && elem->value &&
+                expr_references_var(body, elem->value)) {
+                print_line(gen, "%s %s = _match_arr[%d];", ect, elem->value, i);
+                mark_var_declared_typed(gen, elem->value, elem_t);
+                /* A view of the array's string: one the arm re-binds takes
+                 * a reference of its own first, as a list's head does. */
+                if (elem_t->kind == TYPE_STRING)
+                    own_rebound_string_binding(gen, elem->value, body, elem->line,
+                                               elem->column);
             }
         }
     } else if (pattern->type == AST_PATTERN_CONS && pattern->child_count >= 2) {
@@ -1470,8 +1506,11 @@ static void generate_list_pattern_bindings(CodeGenerator* gen, ASTNode* pattern,
 
         if (head && head->type == AST_PATTERN_VARIABLE && head->value) {
             if (expr_references_var(body, head->value)) {
-                print_line(gen, "int %s = _match_arr[0];", head->value);
-                mark_pattern_binding(gen, head->value, TYPE_INT);
+                print_line(gen, "%s %s = _match_arr[0];", ect, head->value);
+                mark_var_declared_typed(gen, head->value, elem_t);
+                if (elem_t->kind == TYPE_STRING)
+                    own_rebound_string_binding(gen, head->value, body, head->line,
+                                               head->column);
             }
         }
         if (tail && tail->type == AST_PATTERN_VARIABLE && tail->value) {
@@ -1482,10 +1521,13 @@ static void generate_list_pattern_bindings(CodeGenerator* gen, ASTNode* pattern,
                  * declared one, and the C local hid a user's of that name. */
                 print_line(gen, "AetherSlice %s = aether_slice_make(&_match_arr[1], (uint64_t)(%s - 1));",
                            tail->value, len_name);
-                mark_pattern_binding(gen, tail->value, TYPE_ARRAY);
+                Type* tt = create_array_type(clone_type(elem_t), -1);
+                mark_var_declared_typed(gen, tail->value, tt);
+                free_type(tt);
             }
         }
     }
+    if (int_t) free_type(int_t);
 }
 
 static int has_list_patterns(ASTNode* match_stmt) {
@@ -3458,6 +3500,20 @@ void emit_composite_take(CodeGenerator* gen, ASTNode* e, Type* t) {
         fprintf(gen->output, "(%s){ .has = 1, .val = ", get_c_type(t));
         emit_value_take(gen, e, t->element_type);
         fprintf(gen->output, " }");
+        return;
+    }
+    /* #3003: a value that branches is taken branch by branch, each as the
+     * value it gives is (a tuple literal's parts taken, a call's result
+     * moved in). Copied whole, a fresh string in a branch's tuple was
+     * retained and its own reference leaked. */
+    if (e->type == AST_IF_EXPRESSION && e->child_count >= 3) {
+        fprintf(gen->output, "((");
+        generate_expression(gen, e->children[0]);
+        fprintf(gen->output, ") ? ");
+        emit_composite_take(gen, e->children[1], t);
+        fprintf(gen->output, " : ");
+        emit_composite_take(gen, e->children[2], t);
+        fprintf(gen->output, ")");
         return;
     }
     /* A tuple literal is a fresh value, its compound literal with each
@@ -7373,7 +7429,12 @@ static void emit_match_result_value_now(CodeGenerator* gen, ASTNode* result) {
     }
     if (gen->match_result_var) {
         fprintf(gen->output, "%s = ", gen->match_result_var);
-        generate_expression(gen, result);
+        /* #2996: a variant into the sum the arms join to is wrapped. */
+        Type* rt = gen->match_result_type;
+        if (rt && rt->kind == TYPE_SUM && needs_sum_coerce(result, rt))
+            emit_sum_coerced(gen, result, rt);
+        else
+            generate_expression(gen, result);
         fprintf(gen->output, ";\n");
         return;
     }
@@ -9467,7 +9528,6 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                     if (!is_var_declared(gen, stmt->value) && !is_state_var &&
                         !is_module_global_var(gen, stmt->value) &&
                         strcmp(stmt->value, "_") != 0) {
-                        mark_var_declared(gen, stmt->value);
                         // Infer type from first match arm result
                         const char* c_type = get_c_type(stmt->node_type);
                         ASTNode* match_node = stmt->children[0];
@@ -9484,14 +9544,30 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                         const char* msname = struct_owning_strings(gen, mt);
                         int opt_result = mt && mt->kind == TYPE_OPTIONAL;
                         int str_result = c_type && strcmp(c_type, "const char*") == 0;
+                        /* #3003, #3004: a fixed-size array is declared with
+                         * its length after the name, and it and a tuple
+                         * that owns its parts start empty and are dropped
+                         * on every exit of the scope, as any such local. */
+                        int arr_result = type_is_sized_array(mt) && !cell_type;
+                        int composite = arr_result || (mt && mt->kind == TYPE_TUPLE && !cell_type);
+                        /* An array's type is recorded with it: each arm's
+                         * store, `v = <array>`, fills it by that. */
+                        mark_var_declared_typed(gen, stmt->value, arr_result ? mt : NULL);
                         print_indent(gen);
-                        fprintf(gen->output, (msname || opt_result) ? "%s %s = {0};\n"
-                                             : str_result ? "%s %s = NULL;\n" : "%s %s;\n",
-                                volatile_decl_type(try_volatile_qual_for(gen, stmt->value), c_type),
-                                stmt->value);   /* #2690 */
+                        if (arr_result) {
+                            fprintf(gen->output, "%s = {0};\n",
+                                    c_member_decl(mt, stmt->value));
+                        } else {
+                            fprintf(gen->output, (msname || opt_result || composite) ? "%s %s = {0};\n"
+                                                 : str_result ? "%s %s = NULL;\n" : "%s %s;\n",
+                                    volatile_decl_type(try_volatile_qual_for(gen, stmt->value), c_type),
+                                    stmt->value);   /* #2690 */
+                        }
                         if (msname) {
                             push_struct_destroy_defer(gen, stmt->value, mt,
                                                       stmt->line, stmt->column);
+                        } else if (composite && own_type_owns(gen, mt)) {
+                            push_own_drop(gen, stmt->value, mt, stmt->line, stmt->column);
                         }
                         /* #2461: a string local a match binds owns what its
                          * arms hand it, as every other string local does. */
@@ -11663,9 +11739,28 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                  * moved out, a field read retained) into a local the
                  * return then moves out. */
                 int str_ret = strcmp(ct, "const char*") == 0;
+                /* #3004: a fixed-size array is declared with its length
+                 * after the name, and each arm fills it. */
+                Type* rtt = (rt && rt->kind != TYPE_VOID && rt->kind != TYPE_UNKNOWN)
+                            ? rt : match_value_type(m);
+                int arr_ret = type_is_sized_array(rtt);
+                /* #3003: a tuple that owns its parts is a local of its own,
+                 * as an array is: each arm's value taken into it, and its
+                 * scope's exits drop it once the return has taken its copy. */
+                int tup_ret = !arr_ret && rtt && rtt->kind == TYPE_TUPLE &&
+                              own_type_owns(gen, rtt);
                 print_indent(gen);
-                fprintf(gen->output, str_ret ? "%s %s = NULL;\n" : "%s %s;\n", ct, tmp);
+                if (arr_ret)
+                    fprintf(gen->output, "%s = {0};\n", c_member_decl(rtt, tmp));
+                else if (tup_ret)
+                    fprintf(gen->output, "%s %s = {0};\n", ct, tmp);
+                else
+                    fprintf(gen->output, str_ret ? "%s %s = NULL;\n" : "%s %s;\n", ct, tmp);
                 if (str_ret) mark_heap_string_var(gen, tmp);
+                if ((arr_ret || tup_ret) && own_type_owns(gen, rtt)) {
+                    mark_var_declared_typed(gen, tmp, rtt);
+                    push_own_drop(gen, tmp, rtt, stmt->line, stmt->column);
+                }
                 const char* saved = gen->match_result_var;
                 int saved_string = gen->match_result_string;
                 const char* saved_struct = gen->match_result_struct;
@@ -11675,8 +11770,11 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                 Type* saved_own = gen->match_result_own;
                 ASTNode* saved_bound = gen->match_result_bound;
                 gen->match_result_bound = NULL;
+                Type* saved_type = gen->match_result_type;
                 gen->match_result_cell = NULL;
-                gen->match_result_own = NULL;
+                gen->match_result_own = (arr_ret || tup_ret) ? rtt : NULL;
+                /* #2996: a variant arm is wrapped into a sum result. */
+                gen->match_result_type = rtt;
                 /* A match returned from an optional result: each arm's
                  * value wrapped into it. */
                 gen->match_result_opt = (rt && rt->kind == TYPE_OPTIONAL &&
@@ -11688,6 +11786,7 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                 gen->match_result_struct = struct_owning_strings(gen, rt);
                 gen->match_result_replace = 0;
                 generate_statement(gen, m);
+                gen->match_result_type = saved_type;
                 gen->match_result_own = saved_own;
                 gen->match_result_bound = saved_bound;
                 gen->match_result_opt = saved_opt;

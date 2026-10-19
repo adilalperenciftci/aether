@@ -1,12 +1,13 @@
 #!/bin/sh
 # An if expression whose branches give values of types neither of which
-# takes the other (#2983), an int and a string or two variants of a sum,
-# passed the checker and failed in C's `?:` ("pointer/integer type mismatch
-# in conditional expression"). The language reference says both branches
-# give a value of one type. It is refused, naming both types. Numbers keep
-# joining to their common type (#2854), and a branch another one's type
-# takes (an int beside a `long?`, a variant beside its sum, `none` beside
-# anything an optional slot wraps) still builds.
+# takes the other (#2983), an int and a string or two structs no sum holds
+# both of, passed the checker and failed in C's `?:` ("pointer/integer type
+# mismatch in conditional expression"). The language reference says both
+# branches give a value of one type. It is refused, naming both types.
+# Numbers keep joining to their common type (#2854), a branch another one's
+# type takes (an int beside a `long?`, a variant beside its sum, `none`
+# beside anything an optional slot wraps) still builds, and two variants of
+# one sum are the sum (#2996).
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
@@ -31,19 +32,23 @@ struct Rect {
     w: float
 }
 
+struct Tri {
+    a: float
+}
+
 type Shape = Circle | Rect
 
 main() {
     c = 1
     a = if c == 1 { 1 } else { "s" }
-    u = if c == 1 { Circle { r: 1.0 } } else { Rect { w: 1.0 } }
+    u = if c == 1 { Circle { r: 1.0 } } else { Tri { a: 1.0 } }
     println("${a}")
 }
 AE
 out="$(AETHER_HOME="$ROOT" "$AETHERC" --check "$tmp/bad.ae" 2>&1)"
 for want in \
-    "bad.ae:13:[0-9]* .*the branches of this if expression give values of types int and string" \
-    "bad.ae:14:[0-9]* .*the branches of this if expression give values of types Circle and Rect"; do
+    "bad.ae:17:[0-9]* .*the branches of this if expression give values of types int and string" \
+    "bad.ae:18:[0-9]* .*the branches of this if expression give values of types Circle and Tri"; do
     if ! printf '%s\n' "$out" | awk '/^error/ { m = $0; next } /-->/ && m != "" { print $2 " " m; m = "" }' | grep -q "$want"; then
         echo "  [FAIL] if_expression_branch_types: no diagnostic matching: $want"
         fail=1
@@ -82,15 +87,20 @@ main() {
         Rect -> v.w + 1.0
     }
     z = if c == 2 { 5 } else { k }
-    println("${b} ${f} ${o ?? 0} ${q ?? 0} ${w} ${x} ${z ?? 0}")
+    y = if c == 2 { Circle { r: 1.0 } } else { Rect { w: 7.0 } }
+    let yw: float = match y {
+        Circle -> y.r
+        Rect -> y.w
+    }
+    println("${b} ${f} ${o ?? 0} ${q ?? 0} ${w} ${x} ${z ?? 0} ${yw}")
 }
 AE
 out="$(AETHER_HOME="$ROOT" "$AE" run "$tmp/good.ae" 2>&1)"
-if [ "$out" != "6000000000 2.5 3 4 2 3 4" ]; then
+if [ "$out" != "6000000000 2.5 3 4 2 3 4 7" ]; then
     echo "  [FAIL] if_expression_branch_types: the branches of one type should build and run"
     printf '%s\n' "$out" | head -10 | sed 's/^/        |/'
     fail=1
 fi
 
-[ $fail -eq 0 ] && echo "  [PASS] if_expression_branch_types: branches of no common type are refused; numbers, optionals and sums still build"
+[ $fail -eq 0 ] && echo "  [PASS] if_expression_branch_types: branches of no common type are refused; numbers, optionals, sums and two variants of one sum build"
 exit $fail

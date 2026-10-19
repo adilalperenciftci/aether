@@ -1154,7 +1154,15 @@ println(if x > 0 { x } else { 0 - x })
 grade = if score >= 90 { 4 } else { if score >= 80 { 3 } else { 2 } }
 ```
 
-The `else` branch is required, and the expression has the type its branches have in common. Two numeric branches have their common type, as C's `?:` computes it: `if c { 1 } else { big }` with a `long big` is a `long`, and an `int` beside a `float` is a `float`, so neither branch is narrowed into the other's type. A float literal beside an `f32` branch takes the `f32`, as it does beside an `f32` operand. A value `match` types its arms the same way. A branch whose type the other branch's takes (a variant beside its sum, a `T` beside a `T?`) is converted into it, and the expression has the wider type. Two branches neither of which takes the other (an `int` and a `string`, two variants of a sum) are a compile error naming both types.
+The `else` branch is required, and the expression has the type its branches have in common. A value `match` types its arms the same way, one rule for every kind of value:
+
+- Two numeric branches have their common type, as C's `?:` computes it: `if c { 1 } else { big }` with a `long big` is a `long`, and an `int` beside a `float` is a `float`, so neither branch is narrowed into the other's type. A float literal beside an `f32` branch takes the `f32`, as it does beside an `f32` operand.
+- A `T` beside a `T?`, or beside `none`, is a `T?`.
+- A variant beside its sum, and two variants of one sum, are the sum: `if c { Circle { r: 1 } } else { Square { side: 2 } }` is a `Shape`, each branch wrapped into it. Where the two variants belong to more than one sum, the local's annotation or the function's result type says which (`let s: Shape = ...`).
+- Fixed-size arrays of one element type and length are that type (`int[3]`).
+- Tuples of one length have each position's common type: `(1, "a")` beside `(2, "b")` is an `(int, string)`. A tuple literal is the tuple of its elements' types wherever it stands, so `t = (5, "z")` binds a tuple a later `n, s = t` destructures.
+
+A branch whose type the other branch's takes as a binding would (`null` beside a pointer) is converted into it, and the expression has the wider type. Two branches of no one type (an `int` and a `string`, arrays of another length or element type, tuples of another length) are a compile error naming both types.
 
 ### While Loops
 
@@ -1368,8 +1376,10 @@ are unaffected.
 
 Arrays, slices and `*StringSeq` values can be matched with list patterns. A
 fixed-size array (`T[N]`) is matched by its length `N`, known when it is
-compiled, and a slice by the length it carries. A cons pattern's tail (`t`
-in `[h|t]`) is a slice of the rest, its length `t.len`:
+compiled, and a slice by the length it carries. Each name a list pattern
+binds has the element type of the value matched: a `float` over a `float[]`,
+a `string` over a `string[]`, a struct over a struct array. A cons pattern's
+tail (`t` in `[h|t]`) is a slice of the rest, its length `t.len`:
 
 ```aether,run
 main() {

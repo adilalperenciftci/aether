@@ -563,13 +563,113 @@ static int is_float_literal_arm(const ASTNode* n) {
     return n && n->type == AST_LITERAL && n->node_type && n->node_type->kind == TYPE_FLOAT;
 }
 
+/* #2996: the program's sum types, each with its variants, so two variants of
+ * one sum join to it. The checker registers them as it resolves them
+ * (resolve_sum_types). */
+static Type** g_sums = NULL;
+static int g_sum_count = 0;
+static int g_sum_cap = 0;
+
+void ast_sums_reset(void) {
+    for (int i = 0; i < g_sum_count; i++) free_type(g_sums[i]);
+    free(g_sums);
+    g_sums = NULL;
+    g_sum_count = g_sum_cap = 0;
+}
+
+void ast_sum_register(const Type* sum) {
+    if (!sum || sum->kind != TYPE_SUM || !sum->struct_name) return;
+    for (int i = 0; i < g_sum_count; i++)
+        if (strcmp(g_sums[i]->struct_name, sum->struct_name) == 0) return;
+    if (g_sum_count == g_sum_cap) {
+        g_sum_cap = g_sum_cap ? g_sum_cap * 2 : 16;
+        g_sums = aether_xrealloc(g_sums, (size_t)g_sum_cap * sizeof(Type*));
+    }
+    g_sums[g_sum_count++] = clone_type((Type*)sum);
+}
+
+static int sum_has_variant(const Type* sum, const char* name) {
+    for (int i = 0; name && sum->tuple_types && i < sum->tuple_count; i++)
+        if (sum->tuple_types[i] && sum->tuple_types[i]->struct_name &&
+            strcmp(sum->tuple_types[i]->struct_name, name) == 0) return 1;
+    return 0;
+}
+
+/* The one registered sum both variants belong to; NULL for none, or for more
+ * than one (which sum is meant is then the binding's to say). */
+static const Type* sum_of_variants(const char* a, const char* b) {
+    const Type* found = NULL;
+    for (int i = 0; i < g_sum_count; i++) {
+        if (!sum_has_variant(g_sums[i], a) || !sum_has_variant(g_sums[i], b)) continue;
+        if (found) return NULL;
+        found = g_sums[i];
+    }
+    return found;
+}
+
+static int type_known(const Type* t) {
+    return t && t->kind != TYPE_UNKNOWN && t->kind != TYPE_VOID;
+}
+
+/* The arm a tuple literal arm gives at position `i`, for the joins of its
+ * elements (a float literal's rule); NULL for any other arm. */
+static const ASTNode* tuple_arm_part(const ASTNode* arm, int i) {
+    return arm && arm->type == AST_TUPLE_LITERAL && i < arm->child_count ? arm->children[i] : NULL;
+}
+
 Type* branch_join_type(Type* a, const ASTNode* a_arm, Type* b, const ASTNode* b_arm) {
     if (!a || !b) return NULL;
     if (a->kind == TYPE_FLOAT32 && b->kind == TYPE_FLOAT && is_float_literal_arm(b_arm))
         return clone_type(a);
     if (b->kind == TYPE_FLOAT32 && a->kind == TYPE_FLOAT && is_float_literal_arm(a_arm))
         return clone_type(b);
-    return numeric_join_type(a, b);
+    Type* num = numeric_join_type(a, b);
+    if (num || !type_known(a) || !type_known(b)) return num;
+    /* #3003: tuples of one length join position by position. A tuple's
+     * elements are not compared by types_equal, so this comes first. */
+    if (a->kind == TYPE_TUPLE || b->kind == TYPE_TUPLE) {
+        if (a->kind != b->kind || a->tuple_count != b->tuple_count || a->tuple_count <= 0 ||
+            !a->tuple_types || !b->tuple_types || a->is_result != b->is_result) return NULL;
+        Type* t = create_type(TYPE_TUPLE);
+        t->tuple_count = a->tuple_count;
+        t->tuple_types = (Type**)aether_xrealloc(NULL, (size_t)a->tuple_count * sizeof(Type*));
+        t->is_result = a->is_result;
+        for (int i = 0; i < a->tuple_count; i++) t->tuple_types[i] = NULL;
+        for (int i = 0; i < a->tuple_count; i++) {
+            t->tuple_types[i] = branch_join_type(a->tuple_types[i], tuple_arm_part(a_arm, i),
+                                                 b->tuple_types[i], tuple_arm_part(b_arm, i));
+            if (!t->tuple_types[i]) {
+                free_type(t);
+                return NULL;
+            }
+        }
+        return t;
+    }
+    if (types_equal(a, b)) return clone_type(a);
+    /* #2983: an optional beside a value its element joins with, or beside
+     * `none` (an optional of nothing known yet), is that optional. */
+    if (a->kind == TYPE_OPTIONAL || b->kind == TYPE_OPTIONAL) {
+        Type* ea = a->kind == TYPE_OPTIONAL ? a->element_type : a;
+        Type* eb = b->kind == TYPE_OPTIONAL ? b->element_type : b;
+        if (!type_known(ea)) return type_known(eb) ? create_optional_type(clone_type(eb)) : NULL;
+        if (!type_known(eb)) return create_optional_type(clone_type(ea));
+        Type* e = branch_join_type(ea, a->kind == TYPE_OPTIONAL ? NULL : a_arm,
+                                   eb, b->kind == TYPE_OPTIONAL ? NULL : b_arm);
+        return e ? create_optional_type(e) : NULL;
+    }
+    /* #2983, #2996: a sum beside one of its variants is the sum, and two
+     * variants of one sum are it. */
+    if (a->kind == TYPE_SUM && b->kind == TYPE_STRUCT && sum_has_variant(a, b->struct_name))
+        return clone_type(a);
+    if (b->kind == TYPE_SUM && a->kind == TYPE_STRUCT && sum_has_variant(b, a->struct_name))
+        return clone_type(b);
+    if (a->kind == TYPE_STRUCT && b->kind == TYPE_STRUCT && a->struct_name && b->struct_name) {
+        const Type* s = sum_of_variants(a->struct_name, b->struct_name);
+        return s ? clone_type((Type*)s) : NULL;
+    }
+    /* #3004: fixed-size arrays of one element type and length (types_equal
+     * above); any other two arrays do not join. */
+    return NULL;
 }
 
 Type* clone_type(Type* type) {

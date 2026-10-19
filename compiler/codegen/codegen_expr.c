@@ -6270,6 +6270,8 @@ static void emit_match_operand(CodeGenerator* gen, ASTNode* m) {
     Type* saved_own = gen->match_result_own;
     ASTNode* saved_bound = gen->match_result_bound;
     gen->match_result_bound = NULL;
+    Type* saved_type = gen->match_result_type;
+    gen->match_result_type = vt;   /* #2996: a variant arm wrapped into a sum */
     gen->match_result_var = tmp;
     gen->match_result_string = 0;
     gen->match_result_struct = NULL;
@@ -6286,6 +6288,7 @@ static void emit_match_operand(CodeGenerator* gen, ASTNode* m) {
     gen->match_result_opt = saved_opt;
     gen->match_result_own = saved_own;
     gen->match_result_bound = saved_bound;
+    gen->match_result_type = saved_type;
     if (!as_stmts) {
         fprintf(gen->output, "%s; })", tmp);
         return;
@@ -6664,11 +6667,24 @@ void ctl_builder_args(CodeGenerator* gen, ASTNode* call) {
  * it can be (emit_control_prelude, #2765, #2798).
  * Returns 0 when there is no such block. */
 static int g_trailing_tmp = 0;
+static Type* fresh_composite_arg_type(CodeGenerator* gen, ASTNode* arg, Type* t);
+static void emit_composite_arg_temp(CodeGenerator* gen, ASTNode* arg, Type* t);
+static int array_literal_arg_temp(CodeGenerator* gen, ASTNode* arg);
+
 /* An argument of `call(f, ...)` for the closure's parameter of type `pt`,
  * coerced as a direct call's argument is: a bare value or `none` into an
  * optional parameter, a variant into a sum parameter (#2840); else as it is,
- * a fixed-size array copied for a `T[N]` parameter (#2723). */
+ * a fixed-size array copied for a `T[N]` parameter (#2723). #3003: a fresh
+ * owning optional, tuple or array literal is a temporary of the statement,
+ * dropped when it is done, as a direct call's argument is (R3: the callee
+ * borrows it): a tuple literal holding a fresh string leaked it. */
 static void emit_closure_argument(CodeGenerator* gen, ASTNode* arg, Type* pt) {
+    Type* fresh_t = fresh_composite_arg_type(gen, arg, pt);
+    if (fresh_t) {
+        emit_composite_arg_temp(gen, arg, fresh_t);
+        return;
+    }
+    if (array_literal_arg_temp(gen, arg)) return;
     if (pt && pt->kind == TYPE_OPTIONAL && needs_optional_coerce(arg, pt)) {
         emit_optional_coerced(gen, arg, pt);
         return;
@@ -7212,6 +7228,37 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
         case AST_MATCH_STATEMENT:   /* #2993: a `match` used as an operand */
             emit_match_operand(gen, expr);
             break;
+
+        case AST_TUPLE_LITERAL: {
+            /* #3003: a tuple literal is its tuple type's compound literal,
+             * each element as its slot takes it (wrapped into an optional
+             * or a sum slot). It was its elements' text run together,
+             * `(5, "z")` as `5("z")`. */
+            Type* tt = expr->node_type;
+            if (!tt || tt->kind != TYPE_TUPLE || !tt->tuple_types) {
+                fprintf(gen->output, "(");
+                for (int i = 0; i < expr->child_count; i++) {
+                    if (i) fprintf(gen->output, ", ");
+                    generate_expression(gen, expr->children[i]);
+                }
+                fprintf(gen->output, ")");
+                break;
+            }
+            fprintf(gen->output, "(%s){ ", get_c_type(tt));
+            for (int i = 0; i < expr->child_count; i++) {
+                ASTNode* el = expr->children[i];
+                Type* et = i < tt->tuple_count ? tt->tuple_types[i] : NULL;
+                if (i) fprintf(gen->output, ", ");
+                if (et && et->kind == TYPE_OPTIONAL && needs_optional_coerce(el, et))
+                    emit_optional_coerced(gen, el, et);
+                else if (et && et->kind == TYPE_SUM && needs_sum_coerce(el, et))
+                    emit_sum_coerced(gen, el, et);
+                else
+                    generate_expression(gen, el);
+            }
+            fprintf(gen->output, " }");
+            break;
+        }
 
         case AST_LITERAL:
             if (expr->node_type && expr->node_type->kind == TYPE_STRING) {
@@ -10428,8 +10475,12 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                                 tuple_param = ext_name ? lookup_extern_param_type(gen, ext_name, arg_printed)
                                                        : NULL;
                             }
+                            /* The literal's own tuple type, where the
+                             * parameter takes the tuple itself: one going
+                             * into a `(T, U)?` is wrapped below (#3003, a
+                             * tuple literal has its type wherever it is). */
                             if ((!tuple_param || tuple_param->kind != TYPE_TUPLE) &&
-                                arg->node_type &&
+                                expected != TYPE_OPTIONAL && arg->node_type &&
                                 arg->node_type->kind == TYPE_TUPLE) {
                                 tuple_param = arg->node_type;
                             }

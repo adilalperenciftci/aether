@@ -357,6 +357,11 @@ typedef struct {
     // stores it (emit_bound_match_store), whatever the place is: a local, a
     // closure's cell, a module variable, an actor's state.
     struct ASTNode* match_result_bound;
+    // #2996: when non-NULL, the type of the place a returned or operand
+    // `match` stores into (the result returned, the operand's temporary):
+    // an arm giving a variant of a sum that place is takes it wrapped into
+    // the sum.
+    Type* match_result_type;
 
     // #2054: set while the body of a string-returning closure is emitted.
     // A closure is called through a value its caller cannot classify, so
