@@ -61,7 +61,7 @@ through_field(h: Holder) -> int {
 }
 
 shaper() -> fn {
-    return | o: Shape?| {
+    return | o: Shape? | {
         if o == none {
             return 0
         }
@@ -79,7 +79,7 @@ passes_optional(f: fn) -> int {
 }
 
 main() {
-    g = | o: int?| {
+    g = | o: int? | {
         return o ?? 7
     }
     fl = | x: float | {

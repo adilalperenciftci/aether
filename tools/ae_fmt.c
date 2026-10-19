@@ -282,8 +282,9 @@ static int bracket_follows_operand(const char* prev){
 
 /* What layout knows of the tokens before `cur` beyond their text: whether
  * the one before `prev` ends a value (is_value_end, or a postfix `!`
- * written tight to a value, `f()!`, #2818). */
-typedef struct { int prevprev_value; } FmtCtx;
+ * written tight to a value, `f()!`, #2818), and whether `prev` was written
+ * tight to the token before it on its line (#2842). */
+typedef struct { int prevprev_value; int prev_tight; } FmtCtx;
 
 // Desired spaces (0/1) before `cur`, given the previous two emitted tokens.
 static int spaces_before(const char* prev, const char* prevprev, const char* cur, int cur_had_space,
@@ -299,8 +300,15 @@ static int spaces_before(const char* prev, const char* prevprev, const char* cur
     if (eq(cur,"}")) return 1;
     if (eq(prev,",") || eq(prev,";")) return 1;
     if (eq(prev,"@")) return 0;
-    // `!` (send / not / unwrap) and `?` (optional) are context-ambiguous but
-    // purely cosmetic; preserve the author's spacing so we never guess wrong.
+    /* A `?` written tight after a name or a `)` / `]` is a type's optional
+     * suffix (`int?`, `Shape?`, `fn(int)?`): what follows it is spaced as
+     * it would be after the type, so a closure's parameters close as
+     * `| o: int? |` as they do as `| s: Shape |` (#2842). */
+    if (eq(prev,"?") && cx && cx->prev_tight && prevprev && is_value_end(prevprev))
+        return spaces_before(prevprev, NULL, cur, cur_had_space, NULL);
+    // `!` (send / not / unwrap) and `?` (optional, ask) are context-ambiguous
+    // but purely cosmetic; preserve the author's spacing so we never guess
+    // wrong.
     if (eq(cur,"!") || eq(prev,"!")) return cur_had_space ? 1 : 0;
     if (eq(cur,"?") || eq(prev,"?")) return cur_had_space ? 1 : 0;
     // datastar#5: `++`/`--` bind tight to their operand. A POSTFIX increment
@@ -392,6 +400,7 @@ static char* layout(Lexeme* lex, size_t n){
     int type_prefix=TP_NONE;                  // where the last tokens stand in `[]*T`
     int prev_began_line=0;                    // the previous token was its line's first
     int prev_value=0, prevprev_value=0;       // the previous two tokens end a value
+    int prev_tight=0;                         // the previous token was written tight
 
     for (size_t k=0;k<n;k++){
         Lexeme* L=&lex[k];
@@ -423,7 +432,7 @@ static char* layout(Lexeme* lex, size_t n){
             } else if (after_inline_comment){
                 sp = 1;                                     // token after inline block comment
             } else if (prev){
-                FmtCtx cx = { prevprev_value };
+                FmtCtx cx = { prevprev_value, prev_tight };
                 sp = spaces_before(prev, prevprev, L->text, L->space_before, &cx);
                 if (type_prefix==TP_CLOSED && (is_type_name(L->text) || eq(L->text,"*")))
                     sp = 0;                             // `[]int`, `[Dir]string`, `[]*Node`
@@ -480,6 +489,7 @@ static char* layout(Lexeme* lex, size_t n){
              * prefix `!` or a send. */
             int value = is_value_end(L->text) || (eq(L->text,"!") && tight && prev_value);
             prevprev_value = prev_value; prev_value = value;
+            prev_tight = tight;
             prevprev=prev; prev=L->text;
             after_inline_comment=0;
         } else {

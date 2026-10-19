@@ -51,6 +51,10 @@ It normalizes:
   with an operator on a new line (`-2` as a block's last value). A postfix `!`
   ends a value (`f()! + g()!`), and `or` after a value keeps its space before
   a parenthesis (`x or (y or { 1 })`), which is its handler, not a call.
+  What follows a type's optional suffix is spaced as it would be after the
+  type, so a closure's parameters read `| o: int? |` as they read
+  `| s: Shape |`; elsewhere the spacing around a `?` (an actor ask) and a `!`
+  is the author's.
 - **Blank lines**: runs of blank lines collapse to at most one, and a blank line
   is never left immediately after `{` or before `}`.
 - **Trailing whitespace** is stripped; the file ends in exactly one newline.
