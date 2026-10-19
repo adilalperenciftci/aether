@@ -1590,24 +1590,18 @@ static void emit_list_pattern_bindings(CodeGenerator* gen, const char* slice, co
     }
 }
 
-/* #2988: does struct pattern `p` test anything, a literal field of its own
- * or of a struct pattern over one of its fields? */
-static int struct_pattern_tests(const ASTNode* p) {
-    for (int k = 0; p && k < p->child_count; k++) {
-        const ASTNode* fp = p->children[k];
-        if (!fp || fp->type != AST_ASSIGNMENT || fp->child_count < 1) continue;
-        const ASTNode* sub = fp->children[0];
-        if (sub->type == AST_PATTERN_LITERAL && sub->value && strcmp(sub->value, "_") != 0) return 1;
-        if (sub->type == AST_PATTERN_STRUCT && struct_pattern_tests(sub)) return 1;
-    }
-    return 0;
+/* A field of a struct pattern matched against a literal (`_`, typed a
+ * wildcard, takes any value; the string "_" is a string). */
+static int struct_field_literal(const ASTNode* sub) {
+    return sub && sub->type == AST_PATTERN_LITERAL &&
+           !(sub->node_type && sub->node_type->kind == TYPE_WILDCARD);
 }
 
 /* #2988: the condition under which struct pattern `p` matches the struct
  * value `val` (C text): each literal field equal, a string by content
  * (emit_pattern_literal_test), and a struct pattern over a field matching
  * that field. Writes ` && ` before each term but the first (*first). */
-static void emit_struct_pattern_test(CodeGenerator* gen, const char* val, ASTNode* p, int* first) {
+void emit_struct_pattern_test(CodeGenerator* gen, const char* val, ASTNode* p, int* first) {
     for (int k = 0; k < p->child_count; k++) {
         ASTNode* fp = p->children[k];
         if (!fp || fp->type != AST_ASSIGNMENT || !fp->value || fp->child_count < 1) continue;
@@ -1615,7 +1609,7 @@ static void emit_struct_pattern_test(CodeGenerator* gen, const char* val, ASTNod
         const char* field = cg_internf("%s.%s", val, fp->value);
         if (sub->type == AST_PATTERN_STRUCT) {
             emit_struct_pattern_test(gen, field, sub, first);
-        } else if (sub->type == AST_PATTERN_LITERAL && sub->value && strcmp(sub->value, "_") != 0) {
+        } else if (struct_field_literal(sub)) {
             if (!*first) fprintf(gen->output, " && ");
             fprintf(gen->output, "(");
             emit_pattern_literal_test(gen, field, sub);
@@ -1629,8 +1623,8 @@ static void emit_struct_pattern_test(CodeGenerator* gen, const char* val, ASTNod
  * each to its field, typed as the field; only those `reads` mentions. They
  * are borrowed, as a parameter is; one `body` rebinds takes a reference of
  * its own first (R3, own_rebound_binding_take). */
-static void emit_struct_pattern_bindings(CodeGenerator* gen, const char* val, ASTNode* p,
-                                         ASTNode* reads, ASTNode* body) {
+void emit_struct_pattern_bindings(CodeGenerator* gen, const char* val, ASTNode* p,
+                                  ASTNode* reads, ASTNode* body) {
     for (int k = 0; k < p->child_count; k++) {
         ASTNode* fp = p->children[k];
         if (!fp || fp->type != AST_ASSIGNMENT || !fp->value || fp->child_count < 1) continue;
@@ -2131,7 +2125,7 @@ static void emit_function(CodeGenerator* gen, ASTNode* func, const char* clause_
          * here or by the dispatcher, its names bound. */
         if (child->type == AST_PATTERN_STRUCT) {
             const char* val = cg_internf("_pattern_%d", pos);
-            if (!as_clause && struct_pattern_tests(child)) {
+            if (!as_clause && ast_struct_pattern_tests(child)) {
                 int first = 1;
                 print_indent(gen);
                 fprintf(gen->output, "if (!(");
@@ -2308,7 +2302,7 @@ static int emit_clause_dispatch(CodeGenerator* gen, ASTNode* clause, int returns
     for (int p = 0; p < npos; p++) {
         ASTNode* c = fn_param_at(clause, p);
         if (is_list_param_node(c) ||
-            (c->type == AST_PATTERN_STRUCT && struct_pattern_tests(c)) ||
+            (c->type == AST_PATTERN_STRUCT && ast_struct_pattern_tests(c)) ||
             (c->type == AST_PATTERN_LITERAL && strcmp(c->value, "_") != 0)) has_cond = 1;
     }
     print_indent(gen);

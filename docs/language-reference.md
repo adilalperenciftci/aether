@@ -967,6 +967,8 @@ value of the struct `Name`, and each field it lists is matched by a pattern of
 its own. A literal must equal the field (a string by content), `_` takes any
 value, a name is bound to the field's value, and a struct pattern over a field
 of a struct type matches that field. Fields it does not list take any value.
+A `match` arm takes the same pattern ([Struct Pattern
+Matching](#struct-pattern-matching)).
 
 ```aether,run
 struct Pt {
@@ -1382,6 +1384,42 @@ match (nums) {
 | `[x, y, z]` | Three-element array | `x`, `y`, `z` = elements |
 | `[h\|t]` | Non-empty array | `h` = first, `t` = rest |
 
+### Struct Pattern Matching
+
+A struct is matched by its fields with the struct pattern a clause head takes
+([Struct Patterns](#struct-patterns)): `Name { field: pattern, ... }`, where a
+literal must equal its field (a string by content), `_` takes any value, a name
+is bound to the field's value, and a struct pattern over a field matches that
+field. The value matched must be that struct. A pattern with a literal field
+takes only some values, so a `match` of such arms runs no arm for the rest
+unless it has a `_` arm or ends with a pattern that tests no field.
+
+```aether,run
+struct Pt {
+    x: int
+    y: int
+}
+
+where_is(p: Pt) -> string {
+    return match p {
+        Pt { x: 0, y: 0 } -> "origin"
+        Pt { x: 0, y: _ } -> "on the y axis"
+        Pt { x: a, y: b } -> "at ${a},${b}"
+    }
+}
+
+main() {
+    println(where_is(Pt { x: 0, y: 0 }))
+    println(where_is(Pt { x: 0, y: 3 }))
+    println(where_is(Pt { x: 2, y: 5 }))
+}
+```
+```output
+origin
+on the y axis
+at 2,5
+```
+
 ### Names an arm binds
 
 Each arm's block is a scope of its own, as an `if` branch is: a `defer` in it
@@ -1391,11 +1429,12 @@ binds would be ([Variables](#variables)): read after a `match` at the top of
 the function body, bound in a `while` body, or bound by every arm of a `match`
 that runs an arm for every value, one with a `_` arm or whose arms cover its
 type (every member of an enum, every variant of a sum, `none` and `some(v)`,
-`true` and `false`, `[]` and `[h|t]`). Elsewhere a read after the `match` is
-`Undefined variable`. A `match` whose value is used (bound, returned, or the
-value of another's arm) keeps its arms' names in the arms.
+`true` and `false`, `[]` and `[h|t]`, a struct pattern that tests no field).
+Elsewhere a read after the `match` is `Undefined variable`. A `match` whose
+value is used (bound, returned, or the value of another's arm) keeps its arms'
+names in the arms.
 
-A name an arm's pattern binds (`some(v)`, `[h | t]`, `[x, y]`) is that arm's
+A name an arm's pattern binds (`some(v)`, `[h | t]`, `[x, y]`, `Pt { x: a }`) is that arm's
 own: `v = v + 1` in the arm rebinds the pattern's value, and no rule declares
 the name ahead of the `match`, from that arm or any other. So
 `some(v) -> { v = v + 1 }  none -> { v = 0 }` followed by `return v` is
@@ -4027,10 +4066,10 @@ at the limit
 
 Over an enum a bare identifier names a member (`Red` for `Color.Red`)
 and over a sum type a variant; a variable is not accepted there. The arms
-that bind a name are `some(v)` over an optional and the list patterns
-(`[h|t]`, `[x, y]`). An identifier that names no variable binds nothing
-either, and is an error at the arm. To act on every other value, write
-`_` and use the value matched on:
+that bind a name are `some(v)` over an optional, the list patterns
+(`[h|t]`, `[x, y]`) and the struct patterns (`Pt { x: a }`). An identifier that
+names no variable binds nothing either, and is an error at the arm. To act
+on every other value, write `_` and use the value matched on:
 
 ```aether,fails
 main() {

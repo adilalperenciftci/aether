@@ -5589,7 +5589,7 @@ static int settle_struct_pattern(ASTNode* p, SymbolTable* table) {
             if (sub->node_type) free_type(sub->node_type);
             sub->node_type = clone_type(ft);
         } else if (sub->type == AST_PATTERN_LITERAL) {
-            if (sub->value && strcmp(sub->value, "_") == 0) continue;
+            if (sub->node_type && sub->node_type->kind == TYPE_WILDCARD) continue;   /* `_` */
             if (sub->node_type && !is_type_compatible(sub->node_type, ft)) {
                 char msg[400];
                 snprintf(msg, sizeof(msg), "field '%s' of '%s' is %s, and the pattern gives it %s",
@@ -11592,6 +11592,29 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                     }
                 }
 
+                /* #2992: a struct pattern is typed and checked as a clause
+                 * head's is (settle_struct_pattern, #2988), over the value
+                 * matched, which must be that struct, and binds its names in
+                 * the arm. */
+                if (pattern->type == AST_PATTERN_STRUCT && !sum_match &&
+                    settle_struct_pattern(pattern, table)) {
+                    if (match_expr_type && match_expr_type->kind != TYPE_UNKNOWN &&
+                        !(match_expr_type->kind == TYPE_STRUCT && match_expr_type->struct_name &&
+                          strcmp(match_expr_type->struct_name,
+                                 pattern->node_type->struct_name) == 0)) {
+                        char msg[400];
+                        snprintf(msg, sizeof(msg),
+                                 "a struct pattern of '%s' matches a '%s', and the value "
+                                 "matched is %s",
+                                 pattern->value, pattern->value,
+                                 with_article(type_spelled(match_expr_type)));
+                        type_error_code_hint(msg, "match a value of the struct the pattern names",
+                                             pattern->line, pattern->column,
+                                             AETHER_ERR_TYPE_MISMATCH);
+                    }
+                    bind_struct_pattern_names(pattern, arm_table);
+                }
+
                 /* #2727: what an arm names must be something the value
                  * matched can be. A `some(name)` arm binds; every other arm
                  * compares the value with what it names. */
@@ -11630,6 +11653,8 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                     if (match_expr_type && match_expr_type->kind != TYPE_UNKNOWN &&
                         match_expr_type->kind != TYPE_ARRAY && !is_seq_match)
                         check_selector_value(pattern, match_expr_type, table, "match arm");
+                } else if (pattern->type == AST_PATTERN_STRUCT) {
+                    /* checked above (#2992) */
                 } else if (!(enum_match && enum_def)) {
                     check_selector(pattern, match_expr_type, table, "match arm");
                     /* Its name is not bound here: say so once, at the arm. */

@@ -3978,6 +3978,13 @@ ASTNode* parse_match_case(Parser* parser) {
         // List pattern: [], [x], [x, y], [h|t]
         pattern = parse_pattern(parser);
         if (!pattern) return NULL;
+    } else if (current->type == TOKEN_IDENTIFIER && peek_ahead(parser, 1) &&
+               peek_ahead(parser, 1)->type == TOKEN_LEFT_BRACE) {
+        // #2992: struct pattern `Pt { x: 0, y: _ }`, as a clause head takes
+        // one (#2988). Read as an expression it was a struct literal, whose
+        // `_` was an undefined variable.
+        pattern = parse_struct_pattern(parser);
+        if (!pattern) return NULL;
     } else if (current->type == TOKEN_IDENTIFIER && current->value &&
                strcmp(current->value, "some") == 0 &&
                peek_ahead(parser, 1) &&

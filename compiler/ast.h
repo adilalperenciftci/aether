@@ -764,9 +764,16 @@ int ast_is_own_function(const ASTNode* n);
  * has a `_` arm, or it covers its subject's type. A match over an enum or a
  * sum covers it (the checker rejects one that misses a case), as do `none`
  * and `some(v)` over an optional, `true` and `false` over a bool, and `[]`
- * with `[h|t]` over a list. Reads the subject's type, so it is asked once
- * the subject is checked. */
+ * with `[h|t]` over a list, and a struct pattern that tests no field
+ * (#2992). Reads the subject's type, so it is asked once the subject is
+ * checked. */
 int ast_match_covers(const ASTNode* m);
+
+/* #2988, #2992: does the struct pattern `p` (a clause's parameter or a
+ * match arm) test anything: a field it matches against a literal, or a
+ * struct pattern over a field that does? One that does not takes every
+ * value of its struct. */
+int ast_struct_pattern_tests(const ASTNode* p);
 
 /* #2146: the lane index `.x` / `.y` / `.z` / `.w` names on a vector type,
  * or -1 when the name is not a lane accessor or the type has too few lanes

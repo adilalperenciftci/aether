@@ -930,6 +930,17 @@ static int pattern_binds_any(const ASTNode* p) {
     return p && (p->type == AST_PATTERN_VARIABLE || ast_is_wildcard_pattern(p));
 }
 
+int ast_struct_pattern_tests(const ASTNode* p) {
+    for (int k = 0; p && k < p->child_count; k++) {
+        const ASTNode* fp = p->children[k];
+        if (!fp || fp->type != AST_ASSIGNMENT || fp->child_count < 1 || !fp->children[0]) continue;
+        const ASTNode* sub = fp->children[0];
+        if (sub->type == AST_PATTERN_LITERAL && !ast_is_wildcard_pattern(sub)) return 1;
+        if (sub->type == AST_PATTERN_STRUCT && ast_struct_pattern_tests(sub)) return 1;
+    }
+    return 0;
+}
+
 int ast_match_covers(const ASTNode* m) {
     if (!m || m->type != AST_MATCH_STATEMENT) return 0;
     Type* t = (m->child_count > 0 && m->children[0]) ? m->children[0]->node_type : NULL;
@@ -941,6 +952,10 @@ int ast_match_covers(const ASTNode* m) {
         ASTNode* p = arm->children[0];
         if (!p) continue;
         if (ast_is_wildcard_pattern(p)) return 1;
+        /* #2992: a struct pattern that tests no field (each `_`, a name or
+         * such a pattern) takes every value of its struct; one with a
+         * literal takes only some. */
+        if (p->type == AST_PATTERN_STRUCT && !ast_struct_pattern_tests(p)) return 1;
         if (p->type == AST_NONE_LITERAL) has_none = 1;
         else if (p->type == AST_PATTERN_VARIABLE && p->annotation &&
                  strcmp(p->annotation, "some_pattern") == 0) has_some = 1;

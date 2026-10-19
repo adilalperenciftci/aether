@@ -1307,6 +1307,8 @@ static const char* scrutinee_c_type(ASTNode* expr) {
     if (t->kind == TYPE_UINT8)      return "uint8_t";
     if (t->kind == TYPE_BYTE)       return "unsigned char";
     if (t->kind == TYPE_BOOL)       return "bool";
+    /* #2992: a struct a match's struct patterns read fields of. */
+    if (t->kind == TYPE_STRUCT)     return get_c_type(t);
     return "int";
 }
 
@@ -11199,8 +11201,16 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                     const char* match_c_type = scrutinee_c_type(match_expr);
                     /* #2582: a struct a call in the subject returns lives
                      * until the match is done, since the subject (a string
-                     * field of it, say) is read by every arm. */
-                    has_subject_temps = value_temps_open_expr(gen, match_expr, TEMP_KEPT,
+                     * field of it, say) is read by every arm. #2992: so does
+                     * one the subject is, which struct patterns read the
+                     * fields of: nothing keeps it, so the match drops it at
+                     * its end. */
+                    int subject_is_struct_call = match_expr->type == AST_FUNCTION_CALL &&
+                                                 match_expr->node_type &&
+                                                 match_expr->node_type->kind == TYPE_STRUCT;
+                    has_subject_temps = value_temps_open_expr(gen, match_expr,
+                                                              subject_is_struct_call ? TEMP_FREE
+                                                                                     : TEMP_KEPT,
                                                               &subject_temps);
                     stmt_control_prelude_deferred(gen, stmt);   /* #2798 */
                     print_indent(gen);
@@ -11217,6 +11227,9 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                         int wild = mp && ((mp->type == AST_IDENTIFIER && mp->value &&
                                            strcmp(mp->value, "_") == 0) ||
                                           (mp->node_type && mp->node_type->kind == TYPE_WILDCARD));
+                        /* A struct pattern reads the value only for a field
+                         * it tests or a name its arm reads. */
+                        if (mp && mp->type == AST_PATTERN_STRUCT) wild = 1;
                         if (!wild) compares = 1;
                     }
                     if (!compares) fprintf(gen->output, " (void)_match_val;");
@@ -11242,8 +11255,19 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                     // Check if list pattern
                     int is_list_pattern = (pattern->type == AST_PATTERN_LIST ||
                                           pattern->type == AST_PATTERN_CONS);
+                    int is_struct_pattern = pattern->type == AST_PATTERN_STRUCT;   /* #2992 */
 
-                    if (is_wildcard) {
+                    if (is_struct_pattern) {
+                        /* Its fields tested as a clause head's are
+                         * (emit_struct_pattern_test); one that tests none
+                         * takes every value. */
+                        print_indent(gen);
+                        fprintf(gen->output, i > 1 ? "else if (" : "if (");
+                        int first = 1;
+                        emit_struct_pattern_test(gen, "_match_val", pattern, &first);
+                        if (first) fprintf(gen->output, "1");
+                        fprintf(gen->output, ") {\n");
+                    } else if (is_wildcard) {
                         // else clause
                         if (i > 1) {
                             print_indent(gen);
@@ -11295,6 +11319,9 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                     if (is_list_pattern) {
                         enter_scope(gen);
                         generate_list_pattern_bindings(gen, pattern, match_expr, len_name, result, is_seq_match);
+                    } else if (is_struct_pattern) {
+                        enter_scope(gen);
+                        emit_struct_pattern_bindings(gen, "_match_val", pattern, result, result);
                     }
 
                     if (result->type == AST_BLOCK) {
@@ -11309,7 +11336,7 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                         // Single expression — assign to result var or emit as statement
                         emit_match_result_value(gen, result);
                     }
-                    if (is_list_pattern) exit_scope(gen);
+                    if (is_list_pattern || is_struct_pattern) exit_scope(gen);
                     truncate_declared_vars(gen, saved_arm_vars);
                     unindent(gen);
                     print_line(gen, "}");

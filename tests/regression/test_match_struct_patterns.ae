@@ -1,0 +1,108 @@
+// #2992: a match arm could not match a struct by its fields. The arm
+// `Pt { x: 0, y: _ } -> 1` was read as a struct literal, so its `_` was
+// "Undefined variable '_'" and a name in it bound nothing. An arm now takes
+// the struct pattern a clause head takes (#2988), through the same checks,
+// test and bindings: a literal field must be equal (a string by content),
+// `_` takes any value, a name is bound to its field, and a struct pattern
+// over a field matches that field. One that tests no field takes every
+// value, so a match whose arms end with one covers its struct. Before the
+// fix this program did not compile.
+
+import std.string
+
+struct Pt {
+    x: int
+    y: int
+}
+
+struct Named {
+    name: string
+    at: Pt
+}
+
+describe(p: Pt) -> string {
+    x = "a local named like a field"
+    r = match p {
+        Pt { x: 0, y: _ } -> "y axis"
+        Pt { x: a, y: 0 } -> "x axis at ${a}"
+        Pt { x: a, y: b } -> "at ${a},${b} ${string.length(x)}"
+    }
+    return r
+}
+
+// A string field by content, a nested pattern, and `_`.
+who(n: Named) -> int {
+    match n {
+        Named { name: "origin", at: _ } -> {
+            return 1
+        }
+        Named { name: s, at: Pt { x: 0, y: y } } -> {
+            return string.length(s) * 100 + y
+        }
+        _ -> {
+            return -1
+        }
+    }
+}
+
+// No `_`: the last arm tests no field, so the match covers the struct and
+// control cannot reach the end.
+quadrant(p: Pt) -> int {
+    match p {
+        Pt { x: 0, y: 0 } -> {
+            return 0
+        }
+        Pt { x: a, y: _ } -> {
+            return a
+        }
+    }
+}
+
+make_named(i: int) -> Named {
+    return Named { name: string.concat("n", "${i}"), at: Pt { x: 0, y: i } }
+}
+
+check(ok: bool, what: string) {
+    if !ok {
+        println("FAIL: ${what}")
+        exit(1)
+    }
+}
+
+main() {
+    d1 = describe(Pt { x: 0, y: 5 })
+    d2 = describe(Pt { x: 3, y: 0 })
+    d3 = describe(Pt { x: 3, y: 4 })
+    check(string.equals(d1, "y axis"), "a literal field")
+    check(string.equals(d2, "x axis at 3"), "a literal field and a name")
+    check(string.equals(d3, "at 3,4 26"), "names beside a local named like a field")
+    check(who(Named { name: "origin", at: Pt { x: 1, y: 1 } }) == 1, "a string field")
+    check(who(Named { name: "abc", at: Pt { x: 0, y: 7 } }) == 307, "a nested pattern")
+    check(who(Named { name: "abc", at: Pt { x: 2, y: 7 } }) == -1, "the `_` arm")
+    check(quadrant(Pt { x: 0, y: 0 }) == 0, "the first arm of a covering match")
+    check(quadrant(Pt { x: 4, y: 9 }) == 4, "the arm that tests no field")
+
+    // A struct a call returns, matched and dropped each time round.
+    total = 0
+    i = 0
+    while i < 100 {
+        v = match make_named(i) {
+            Named { name: s, at: _ } -> string.length(s)
+        }
+        total = total + v
+        i = i + 1
+    }
+    check(total == 290, "a struct a call returns")
+
+    // In a closure.
+    f = || {
+        q = Pt { x: 0, y: 9 }
+        got = match q {
+            Pt { x: 0, y: w } -> w
+            _ -> 0
+        }
+        return got
+    }
+    check(call(f) == 9, "a binding in a closure's match")
+    println("match struct patterns ok")
+}
