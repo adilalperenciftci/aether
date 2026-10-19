@@ -18,9 +18,10 @@
 // reason; run.ae reads them through the accessors below (and prints them with
 // --list, --skips and --show). The axes are the stage-1 grid's (kinds K1-K8,
 // places P1-P13, transfers T1-T11), extended with the shapes the comments on
-// PR #2883 found by hand, and a producer axis (the S* kinds: one real std
+// PR #2883 found by hand, a producer axis (the S* kinds: one real std
 // function per class of docs/design/ownership-r1-inventory.md) crossed with
-// the main places and transfers. See README.md.
+// the main places and transfers, and the sum kinds (KS, KSF) crossed with
+// the places a sum is bound in. See README.md.
 //
 // A list of statements is one string, its lines joined by "\n", and "" is the
 // empty list: lines_cat joins two lists, lines_block indents one. Strings
@@ -240,11 +241,30 @@ need_doc(g: *GridGen) {
     gen_decl(g, "struct Doc", "struct Doc {\n    name: string\n    n: int\n}")
 }
 
+// KS: a sum one of whose variants owns a string, made by a function and
+// read through one that narrows it (a field of a sum is read by its arm).
+need_owned(g: *GridGen) {
+    gen_decl(g, "struct Named", "struct Named {\n    name: string\n}")
+    gen_decl(g, "struct Plain", "struct Plain {\n    n: int\n}")
+    gen_decl(g, "type Owned", "type Owned = Named | Plain")
+    gen_decl(g, "fn owned", "// A fresh sum: its Named variant owns a fresh string.\nowned(w: string, t: string) -> Owned {\n    return Named { name: string.concat(w, t) }\n}")
+    gen_decl(g, "fn owned_name", "// The string the value's Named variant holds.\nowned_name(o: Owned) -> string {\n    return match o {\n        Named -> o.name\n        Plain -> \"\"\n    }\n}")
+}
+
+// KSF: a sum one of whose variants owns a closure capturing a fresh string.
+need_acting(g: *GridGen) {
+    gen_decl(g, "struct Act", "struct Act {\n    f: fn\n}")
+    gen_decl(g, "struct Plain", "struct Plain {\n    n: int\n}")
+    gen_decl(g, "type Acting", "type Acting = Act | Plain")
+    gen_decl(g, "fn acting", "// A fresh sum: its Act variant owns a closure capturing a fresh string.\nacting(w: string, t: string) -> Acting {\n    c = string.concat(w, t)\n    return Act { f: || { return c } }\n}")
+    gen_decl(g, "fn acting_run", "// The string the value's closure returns.\nacting_run(a: Acting) -> string {\n    match a {\n        Act -> {\n            string s = call(a.f)\n            return s\n        }\n        Plain -> {\n            return \"\"\n        }\n    }\n    return \"\"\n}")
+}
+
 // ---------------------------------------------------------------------------
 // Kinds.
 
 kind_count() -> int {
-    return 20
+    return 22
 }
 
 kind_at(i: int) -> string {
@@ -268,7 +288,9 @@ kind_at(i: int) -> string {
         16 -> "SD1"
         17 -> "SD2"
         18 -> "ST1"
-        _ -> "ST2"
+        19 -> "ST2"
+        20 -> "KS"
+        _ -> "KSF"
     }
 }
 
@@ -295,6 +317,8 @@ kind_title(kid: string) -> string {
         "ST1" -> "string in the data slot of `fs.read_binary` (a tuple: A data, C error)"
         "ST2" -> "string in the path slot of `fs.realpath` (a tuple: B path, D or C error)"
         "KE" -> "fresh error string in the error slot of an `int!` result"
+        "KS" -> "sum whose variant owns a string (`Owned = Named | Plain`)"
+        "KSF" -> "sum whose variant owns a closure capturing a fresh string (`Acting = Act | Plain`)"
         _ -> ""
     }
 }
@@ -328,6 +352,24 @@ producer_places() -> string {
 
 producer_transfers() -> string {
     return "T1 T2 T5 T7 T9 T12"
+}
+
+// The sum kinds (#3005): a sum whose variant owns a string (KS) or a closure
+// (KSF), made by a function and read through one that narrows it, crossed
+// with the places a sum value can be held in (a module `var` cannot: its
+// initializer is no constant; a container or a `ptr` slot holds strings and
+// closures only) and the transfers of those places. A sum is a composite under R1: it owns what its variants
+// own.
+is_sum_kind(kid: string) -> bool {
+    return kid == "KS" || kid == "KSF"
+}
+
+sum_places() -> string {
+    return "P1 P2 P3 P3B P3E P4 P5 P5L P6 P7 P9 P9W P11 P12K P12D P14 P15 P16 P17"
+}
+
+sum_transfers() -> string {
+    return "T1 T2 T3 T4 T5 T6 T6I T6M T9 T10 T11 T11R T12 T16"
 }
 
 producer_class(kid: string) -> string {
@@ -396,6 +438,8 @@ kind_ty(kid: string) -> string {
         "K7" -> "string[2]"
         "K8" -> "Doc[2]"
         "K9" -> "fn"
+        "KS" -> "Owned"
+        "KSF" -> "Acting"
         _ -> "string"
     }
 }
@@ -412,6 +456,8 @@ kind_zero(kid: string) -> string {
         "K7" -> ""
         "K8" -> ""
         "K9" -> "null"
+        "KS" -> ""
+        "KSF" -> ""
         _ -> "\"\""
     }
 }
@@ -436,6 +482,8 @@ state_decl(kid: string) -> string {
         "K5" -> "state v = Doc { name: \"\", n: 0 }"
         "K6" -> "state (string, int) v"
         "K7" -> "state string[2] v"
+        "KS" -> "state Owned v"
+        "KSF" -> "state Acting v"
         _ -> "state Doc[2] v"
     }
 }
@@ -515,6 +563,14 @@ fresh(g: *GridGen, kid: string, tag: string) -> (string, string) {
     if kid == "K9" {
         gen_decl(g, "fn named_${tag}", "named_${tag}() -> int {\n    return ${string.length(text_of(tag))}\n}")
         return "", "named_${tag}"
+    }
+    if kid == "KS" {
+        need_owned(g)
+        return "", "owned(w, \"${sx}\")"
+    }
+    if kid == "KSF" {
+        need_acting(g)
+        return "", "acting(w, \"${sx}\")"
     }
     if kid == "SA1" {
         return "", "string.replace(w, \"w\", \"${text_of(tag)}\")"
@@ -603,6 +659,16 @@ kind_check(g: *GridGen, kid: string, expr: string, tag: string, what: string) ->
         r = gen_name(g, "r")
         return "int ${r} = call(${expr})\ncheck(${r} == ${string.length(t)}, \"${what}\")"
     }
+    if kid == "KS" {
+        need_owned(g)
+        r = gen_name(g, "r")
+        return "string ${r} = owned_name(${expr})\ncheck(${r} == \"${t}\", \"${what}\")"
+    }
+    if kid == "KSF" {
+        need_acting(g)
+        r = gen_name(g, "r")
+        return "string ${r} = acting_run(${expr})\ncheck(${r} == \"${t}\", \"${what}\")"
+    }
     if kid == "SD1" {
         // One character, '/' (47) or '\' (92), whichever the platform uses.
         return "check(string.length(${expr}) == 1 && (string.char_at(${expr}, 0) == 47 || string.char_at(${expr}, 0) == 92), \"${what}\")"
@@ -631,16 +697,17 @@ k9_elsewhere() -> string {
 }
 
 // ---------------------------------------------------------------------------
-// Transfers (the column titles): T1 to T16, then the two only the KE cells
+// Transfers (the column titles): T1 to T16, T6I and T6M (a branching value
+// passed as an argument, #3006), then the two only the KE cells
 // (an `int!` error slot) take.
 
 column_count() -> int {
-    return 21
+    return 23
 }
 
-// The transfers every kind is crossed with: the first 19 columns.
+// The transfers every kind is crossed with: the first 21 columns.
 transfer_count() -> int {
-    return 19
+    return 21
 }
 
 column_at(i: int) -> string {
@@ -664,7 +731,9 @@ column_at(i: int) -> string {
         16 -> "T14"
         17 -> "T15"
         18 -> "T16"
-        19 -> "T9M"
+        19 -> "T6I"
+        20 -> "T6M"
+        21 -> "T9M"
         _ -> "T10M"
     }
 }
@@ -677,6 +746,8 @@ transfer_title(t: string) -> string {
         "T4" -> "leave by an early `return` (every other call)"
         "T5" -> "leave by a panic caught by `try`"
         "T6" -> "pass to a function that only reads it"
+        "T6I" -> "pass an `if` expression whose branches make fresh values to a function that only reads it"
+        "T6M" -> "pass a value `match` whose arms make fresh values to a function that only reads it"
         "T7" -> "pass to a function that keeps it in a module `var`; read after the scope ended"
         "T7S" -> "pass to a function that keeps it on some paths only"
         "T8" -> "pass to a function that frees it"
@@ -2132,7 +2203,7 @@ temp_cell(kid: string, t: string) -> string {
     if (t == "T8" || t == "T8S") && kid != "K1" {
         return "only a string has a free a callee can call"
     }
-    if !in_words("T1 T5 T6 T7 T7S T8 T8S T9 T10", t) {
+    if !in_words("T1 T5 T6 T6I T6M T7 T7S T8 T8S T9 T10", t) {
         return ""
     }
     g = gen_new("${kid}-P17-${t}")
@@ -2154,6 +2225,16 @@ temp_cell_in(g: *GridGen, kid: string, t: string) -> string {
     } else if t == "T6" {
         helper_reads(g, kid)
         body = lines_cat(pa, "n = reads(${ea})\ncheck(n == 1, \"the reader ran\")")
+    } else if t == "T6I" || t == "T6M" {
+        // #3006: a value that branches, each branch a fresh value (the same
+        // one, so the reader's check holds on both paths), passed as it is.
+        helper_reads(g, kid)
+        pb, eb = fresh(g, kid, "a")
+        arg = "if k % 2 == 0 { ${ea} } else { ${eb} }"
+        if t == "T6M" {
+            arg = "match k % 2 { 0 -> ${ea} _ -> ${eb} }"
+        }
+        body = lines_cat3(pa, pb, "n = reads(${arg})\ncheck(n == 1, \"the reader ran\")")
     } else if t == "T7" || t == "T7S" {
         some_paths = t == "T7S"
         helper_keep(g, kid, some_paths)
@@ -2298,7 +2379,7 @@ cell_or_reason(kid: string, pid: string, t: string) -> string {
         }
         res = param_cell(kid, pid, t)
     } else if pid == "P17" {
-        if !in_words("T1 T5 T6 T7 T7S T8 T8S T9 T10", t) {
+        if !in_words("T1 T5 T6 T6I T6M T7 T7S T8 T8S T9 T10", t) {
             return "a temporary is never stored, overwritten or aliased"
         }
         res = temp_cell(kid, t)
@@ -2332,7 +2413,11 @@ build() {
             ti = 0
             while ti < transfer_count() {
                 t = column_at(ti)
-                if is_producer(kid) && (!in_words(producer_places(), pid) || !in_words(producer_transfers(), t)) {
+                crossed = is_producer(kid) && (!in_words(producer_places(), pid) || !in_words(producer_transfers(), t))
+                if is_sum_kind(kid) && (!in_words(sum_places(), pid) || !in_words(sum_transfers(), t)) {
+                    crossed = true
+                }
+                if crossed {
                     crossed_out = crossed_out + 1
                 } else {
                     res = cell_or_reason(kid, pid, t)
@@ -2401,8 +2486,8 @@ skip_reason(i: int) -> string {
     return string.copy(collections.string_list_get(skips_reasons, i))
 }
 
-// The combinations of a producer kind with a place or transfer outside its
-// axis, which are not generated.
+// The combinations of a producer or a sum kind with a place or transfer
+// outside its axis, which are not generated.
 not_crossed() -> int {
     return crossed_out
 }
