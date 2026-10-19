@@ -31,7 +31,7 @@ set_opt(_ctx: ptr, key: string, value: string) {
 
 builder mkpair(text: string): Pair {
     a = ""
-    if _builder != null && map_has(_builder, "a") == 1 { a, _ = map.get(_builder, "a") }
+    if _builder != null && map_has(_builder, "a") == 1 { a, _ = map.get_string(_builder, "a") }
     p = Pair { a: string.concat(text, a), b: string.concat(text, "b") }
     if _builder != null { map_free(_builder) }
     return p

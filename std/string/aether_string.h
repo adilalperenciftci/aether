@@ -259,6 +259,10 @@ const char* aether_string_capture_owned(const char* s);
 /* std.string's keep and release_kept (#2926): a reference for a `@keep ptr`
  * slot, as capture_owned gives a closure environment one. */
 void* aether_string_keep(const void* s);
+/* Is `p` an Aether string (a counted or a pinned AetherString)? For the
+ * typed accessors (`string.from_ptr`, `map.get_string`, `list.get_string`),
+ * which hand back a pointer as a string only when it is one. */
+int aether_string_is_string(const void* p);
 void aether_string_release_kept(void* p);
 void        aether_string_release_captured(const char* s);
 

@@ -1941,7 +1941,7 @@ Every place that holds a string (a local, a struct field, an element, a module-l
 - **A function may not free a parameter** (E0901): `string.free(p)` or `release(p)` on a `string` parameter, or `string.seq_free(p)` on a `*StringSeq` one, would release a reference the function does not own. Store it to keep it; a parameter the body re-binds holds a string of its own and may be freed.
 - **`string.free(x)` releases the reference `x` holds and leaves `x` empty**, for a local, a field or a module-level `var`. Nothing frees it again.
 
-- **A `ptr` parameter is borrowed for the call unless it is declared `@keep`** (E0902). A `ptr` owns nothing, so a pointer a function keeps (stores where it outlives the call, returns, captures in a closure, puts in a struct or a message, or passes to another `@keep` parameter) is declared `p: @keep ptr`. The checker verifies each function against its own body, and a call against the callee's signature. A `string` reaches a `@keep ptr` only through `string.keep(s)`, which hands over a reference of its own (`string.release_kept(p)` gives it back), or as a literal, which is pinned, and a `*StringSeq` only through `string.seq_retain(s)` (`string.seq_free` gives it back). A closure's `ptr` parameter is always borrowed, and a function with a `@keep` parameter is called by name, not used as a value. A typed pointer (`*Node`) and a `distinct` type over `ptr` are not checked: a string converts to neither.
+- **A `ptr` parameter is borrowed for the call unless it is declared `@keep`** (E0902). A `ptr` owns nothing, so a pointer a function keeps (stores where it outlives the call, returns, sends in a message, or passes to another `@keep` parameter) is declared `p: @keep ptr`. A struct local to the function, and a closure that runs and is dropped inside the call, do not outlive it: putting the pointer in one (`s = Pair { a: p }`, `s.a = p`, `run(|| { use(p) })`) keeps nothing, and the struct or the closure is a keep only when it escapes itself, returned, stored in a field, a module-level `var` or a container, or passed to a `@keep` or `@retain` parameter. A closure that captured the pointer and stores it somewhere that outlives the call keeps it too. The checker verifies each function against its own body, and a call against the callee's signature. A `string` reaches a `@keep ptr` only through `string.keep(s)`, which hands over a reference of its own (`string.release_kept(p)` gives it back), or as a literal, which is pinned, and a `*StringSeq` only through `string.seq_retain(s)` (`string.seq_free` gives it back). A closure's `ptr` parameter is always borrowed, and a function with a `@keep` parameter is called by name, not used as a value. A typed pointer (`*Node`) and a `distinct` type over `ptr` are not checked: a string converts to neither.
 
 ```aether,fragment
 my_concat(a: string, b: string) -> string {
@@ -3990,6 +3990,28 @@ partially-handled enum is doing real work and is never reported.
 This pairs with the exhaustiveness check, which reports the opposite
 direction, a `match` over a sum type or enum that is missing a case.
 
+### Pointer Given to a String Local [W1005]
+
+A `ptr` is untyped, so a `string` local re-bound to one (`s = map_get_raw(m, k)`,
+or a tuple slot, `name, err = map.get(m, k)`) reads it as text whatever it points
+at: a list, a struct, or bytes with no end. Say the value is a string with the
+typed accessor, which also checks it is one:
+
+```aether,fragment
+name = ""
+name, _ = map.get(m, "name")        // warning[W1005]: 'name' is a `string`, and a
+                                    // `ptr` given to it is read as text ...
+                                    // help: say it is a string with `map.get_string(m, key)`
+name, _ = map.get_string(m, "name") // (null, "not a string") if it is not one
+```
+
+`map.get_string`, `list.get_string` and `string.from_ptr` each return
+`(string, string)`: the string, or `null` with `"not a string"` when the pointer
+is something else. C text (a `char*` with no Aether header) is copied with
+`bytes.string_from_ptr(p, n)`. A `ptr` result of a `string.*` function
+(`string.from_int`) is a string already and is not warned about. This is a
+warning now and becomes an error in a later release.
+
 ## Match Expressions
 
 `match` can be used as a statement or as an expression:
@@ -4220,6 +4242,7 @@ main() { let byte = 7  println("${byte}") }  // keyword-spelled local
 Two members of that family stay reserved in value position: `match` (it heads a match expression, so `match` as a bare value is genuinely ambiguous) and `union` (a C keyword, a value named `union` could not be emitted as valid C). For those, rename or use the backtick escape below. As a type keyword, `byte`/`ptr` still works in type position too: `byte b` declares `b` of type `byte` (the `<type> <name>` C-style form), while `byte: int` / `byte` in name position is the name.
 
 Note: `void` is **not** a reserved word, there is no `void` token. It is a plain identifier used by convention to *spell* the absence of a return value (e.g. `extern free(p: ptr) -> void`); a function that omits its `-> Type` annotation is the canonical void declaration. See [Functions](#functions).
+
 
 ### Raw identifiers, using a keyword as a name
 

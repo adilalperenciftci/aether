@@ -42,7 +42,8 @@ exports(
     string_format_list, format,
     string_glob_match_raw, glob_match, glob_match_pathname,
     version_compare,
-    aether_string_raw_ptr, bytes, array_view, seq_from_strings, seq_to_strings, keep, release_kept
+    aether_string_raw_ptr, bytes, array_view, seq_from_strings, seq_to_strings, keep, release_kept,
+    aether_string_is_string, from_ptr
 )
 
 // String creation
@@ -797,6 +798,28 @@ keep(s: string) -> ptr {
 // Give back a reference `keep` handed over.
 release_kept(p: ptr) {
     aether_string_release_kept(p)
+}
+
+// Is `p` an Aether string: a counted one, or a literal (pinned)? A `ptr` is
+// untyped, so a pointer to a list, a struct or a buffer is not one.
+extern aether_string_is_string(p: @aether ptr) -> int
+
+// The string a `ptr` holds, typed as one. A `ptr` given to a `string` local
+// as it is (`s = p`) is read as text whatever it points at (W1005, an error
+// in a later release); this says it is a string, and checks:
+// - (s, "")                : `p` is an Aether string
+// - (null, "")             : `p` is null
+// - (null, "not a string") : `p` points at something else
+// C text (a `char*` with no header) is not an Aether string: copy it with
+// `bytes.string_from_ptr(p, n)`.
+from_ptr(p: ptr) -> (string, string) {
+    if p == null {
+        return null, ""
+    }
+    if aether_string_is_string(p) == 0 {
+        return null, "not a string"
+    }
+    return p, ""
 }
 
 // A bounded, READ-ONLY byte[] view of s's own bytes, for binary/ASCII

@@ -9,7 +9,7 @@
 exports(
     list_new, list_new_in, list_add_raw, list_add_string_owned, list_get_raw, list_set, list_size,
     list_remove, list_clear, list_free,
-    add, get
+    add, get, get_string
 )
 
 extern list_new() -> ptr
@@ -30,6 +30,7 @@ extern list_size(list: ptr) -> int
 extern list_remove(list: ptr, index: int)
 extern list_clear(list: ptr)
 extern list_free(list: ptr)
+extern aether_string_is_string(p: @aether ptr) -> int
 
 // Append an item to a list. Returns "" on success, error on failure.
 add(list: ptr, item: ptr) -> {
@@ -55,4 +56,29 @@ get(list: ptr, index: int) -> {
         return null, "index out of range"
     }
     return list_get_raw(list, index), ""
+}
+
+// Index into a list whose element is a string. `get` hands back a `ptr`,
+// which a `string` local reads as text whatever it points at (W1005); this
+// says the element is a string, and checks it is one:
+// - (item, "")                     : index in range, the element a string
+// - (null, "")                     : the element is null
+// - (null, "not a string")         : the element is some other pointer
+// - (null, "index out of range")   : index < 0 or index >= size
+// - (null, "null list")            : `list` is null
+get_string(list: ptr, index: int) -> (string, string) {
+    if list == null {
+        return null, "null list"
+    }
+    if index < 0 || index >= list_size(list) {
+        return null, "index out of range"
+    }
+    v = list_get_raw(list, index)
+    if v == null {
+        return null, ""
+    }
+    if aether_string_is_string(v) == 0 {
+        return null, "not a string"
+    }
+    return v, ""
 }

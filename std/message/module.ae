@@ -565,13 +565,15 @@ fn format_nodes(locale: string, nodes: ptr, args: ptr, plural_val: string) -> st
             } else if n.kind == 1 {
                 val = ""
                 if map_has(args, n.text) == 1 {
-                    val = map_get_raw(args, n.text)
+                    val_s, val_err = map.get_string(args, n.text)
+                    if val_err == "" { val = val_s }
                 }
                 strbuilder.append(sb, val)
             } else if n.kind == 2 {
                 count_str = "0"
                 if map_has(args, n.text) == 1 {
-                    count_str = map_get_raw(args, n.text)
+                    count_str_s, count_str_err = map.get_string(args, n.text)
+                    if count_str_err == "" { count_str = count_str_s }
                 }
                 // The value selects by its number, as ICU does: any decimal
                 // numeral (not only a 32-bit integer), whitespace-trimmed as
@@ -640,7 +642,8 @@ fn format_nodes(locale: string, nodes: ptr, args: ptr, plural_val: string) -> st
             } else if n.kind == 3 {
                 sel_val = ""
                 if map_has(args, n.text) == 1 {
-                    sel_val = map_get_raw(args, n.text)
+                    sel_val_s, sel_val_err = map.get_string(args, n.text)
+                    if sel_val_err == "" { sel_val = sel_val_s }
                 }
 
                 chosen_branch = null as *Branch

@@ -4631,7 +4631,7 @@ render_block_from(chain_kinds: ptr, chain_contents: ptr, chain_blocks: ptr, leve
     hi, _ = string.to_int(string.substring_n(packed, pn, comma + 1, pn))
     had_prior = map_has(ctx, KEY_BLOCK_SUPER)
     prior = ""
-    if had_prior == 1 { prior = map_get_raw(ctx, KEY_BLOCK_SUPER) }
+    if had_prior == 1 { prior, _ = map.get_string(ctx, KEY_BLOCK_SUPER) }
     map_put(ctx, KEY_BLOCK_SUPER, super_text)
     inner, rerr = render_range(list_get_raw(chain_kinds, lv), list_get_raw(chain_contents, lv),
         lo, hi, ctx)

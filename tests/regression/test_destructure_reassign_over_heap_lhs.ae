@@ -29,6 +29,10 @@
 // heap flag to 0 when the destructure position is non-string
 // (borrow assumption — the buffer is opaque from the heap-string-
 // tracker's perspective, so don't claim ownership of it).
+//
+// A `ptr` slot re-binding a string local is W1005 now (an error in a later
+// release; `map.get_string` is the typed form). This file keeps the implicit
+// form on purpose: the `ptr` position is the path under test.
 
 import std.string
 import std.map

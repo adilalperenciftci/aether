@@ -88,13 +88,35 @@ TEST_CATEGORY(thread_epoch_moves_when_a_thread_starts_and_ends, TEST_CATEGORY_RU
     ASSERT_TRUE(before >= 0);
 #endif
     if (before < 0) return;
-    ASSERT_TRUE(aether_thread_epoch() == before);
+    /* On macOS the epoch is the thread count, and a thread an earlier test
+     * joined can still be listed while its Mach thread finishes
+     * terminating. If it drops out after `before` is read, the count falls
+     * by one as the waiter's start raises it by one, and the two cancel:
+     * running == before with a thread started. So `before` is taken only
+     * once the epoch has held still, 30 reads 1 ms apart, in a bounded
+     * wait. */
+    {
+        int stable = 0;
+        for (int i = 0; stable < 30 && i < 5000; i++) {
+            sleep_ms(1);
+            int64_t now = aether_thread_epoch();
+            if (now == before) stable++;
+            else { before = now; stable = 0; }
+        }
+        ASSERT_TRUE(stable >= 30);
+    }
     g_release_waiter = 0;
     g_waiter_running = 0;
     pthread_t t;
     ASSERT_TRUE(pthread_create(&t, NULL, epoch_waiter, NULL) == 0);
     while (!g_waiter_running) sched_yield();
+    /* The start is counted by the time the thread runs on most platforms,
+     * but wait for it a bounded while, as the end is waited for below. */
     int64_t running = aether_thread_epoch();
+    for (int i = 0; running == before && i < 2000; i++) {
+        sleep_ms(1);
+        running = aether_thread_epoch();
+    }
     ASSERT_TRUE(running != before);
     g_release_waiter = 1;
     pthread_join(t, NULL);

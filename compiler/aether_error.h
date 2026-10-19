@@ -33,6 +33,7 @@ typedef enum {
     AETHER_WARN_UNREACHABLE = 1002,
     AETHER_WARN_CONST_OVERFLOW = 1003,   // int constant expression exceeds 32 bits
     AETHER_WARN_UNREACHABLE_ARM = 1004,  // match arm shadowed by an earlier arm
+    AETHER_WARN_PTR_INTO_STRING = 1005,  // a bare `ptr` re-binds a `string` local (an error in a later release)
 } AetherErrorCode;
 
 // Error reporting with source context
