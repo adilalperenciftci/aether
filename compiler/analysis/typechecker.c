@@ -14794,6 +14794,100 @@ static int call_yields_no_value(ASTNode* call, SymbolTable* table) {
     return fn_yields_no_value(sym->node);
 }
 
+/* ---- #2976: calls that name their module twice --------------------------
+ *
+ * `json.json_free(v)` names its module twice, and `json.free(v)` reaches
+ * the same declaration. `aetherc --emit=short-names` lists each call of the
+ * file being compiled written in the long form whose short form, the
+ * suffix without its `<ns>_`, resolves to the same declaration, for
+ * `ae fmt --short-names` to rewrite. Only where the compiler knows the two
+ * are one: a long name whose short twin is another function (std.mem's
+ * raw externs beside its wrappers) is left as written, and so is one whose
+ * short form would not be a plain identifier (`sha3.sha3_256_hex`). */
+typedef struct { int line; int column; char* long_name; char* short_name; } ShortNameEdit;
+static ShortNameEdit* g_sn_edits = NULL;
+static int g_sn_count = 0, g_sn_cap = 0;
+static char* g_sn_entry = NULL;
+
+void typecheck_report_short_names(const char* entry_file) {
+    free(g_sn_entry);
+    g_sn_entry = entry_file ? strdup(entry_file) : NULL;
+}
+
+void typecheck_print_short_names(FILE* out) {
+    for (int i = 0; i < g_sn_count; i++)
+        fprintf(out, "%d:%d:%s:%s\n", g_sn_edits[i].line, g_sn_edits[i].column,
+                g_sn_edits[i].long_name, g_sn_edits[i].short_name);
+}
+
+/* Does `s` lex as one identifier, no keyword? */
+static int lexes_as_identifier(const char* s) {
+    if (!s || !*s) return 0;
+    LexerState saved;
+    lexer_save(&saved);
+    lexer_init(s);
+    Token* t = next_token();
+    int ok = t && t->type == TOKEN_IDENTIFIER && t->value && strcmp(t->value, s) == 0;
+    if (t) free_token(t);
+    if (ok) {
+        Token* e = next_token();
+        ok = e && e->type == TOKEN_EOF;
+        if (e) free_token(e);
+    }
+    lexer_restore(&saved);
+    return ok;
+}
+
+static int same_declaration(const Symbol* a, const Symbol* b) {
+    if (!a || !b || !a->is_function || !b->is_function) return 0;
+    if (a == b) return 1;
+    if (a->node && a->node == b->node) return 1;
+    return a->name && b->name && strcmp(a->name, b->name) == 0;
+}
+
+static void note_short_name(ASTNode* call, SymbolTable* table) {
+    if (!g_sn_entry || !call->value || !call->source_file || table->merged_from ||
+        strcmp(call->source_file, g_sn_entry) != 0) return;
+    if (call->annotation && strcmp(call->annotation, "ufcs") == 0) return;
+    const char* dot = strchr(call->value, '.');
+    if (!dot || dot != strrchr(call->value, '.')) return;
+    char prefix[256];
+    snprintf(prefix, sizeof(prefix), "%.*s", (int)(dot - call->value), call->value);
+    const char* suffix = dot + 1;
+    /* The module's namespace as the call carries it, or the last segment
+     * of its name, which a source writes when two modules share it. */
+    const char* spellings[2] = { prefix, NULL };
+    AetherModule* m = global_module_registry ? module_find_by_namespace(prefix) : NULL;
+    if (m && m->name) {
+        const char* leaf = strrchr(m->name, '.');
+        spellings[1] = leaf ? leaf + 1 : m->name;
+    }
+    for (int k = 0; k < 2; k++) {
+        const char* ns = spellings[k];
+        size_t n = ns ? strlen(ns) : 0;
+        if (!n || strncmp(suffix, ns, n) != 0 || suffix[n] != '_') continue;
+        const char* short_name = suffix + n + 1;
+        if (!lexes_as_identifier(short_name)) return;
+        for (int i = 0; i < g_sn_count; i++)
+            if (g_sn_edits[i].line == call->line && g_sn_edits[i].column == call->column) return;
+        char shortq[512];
+        snprintf(shortq, sizeof(shortq), "%s.%s", prefix, short_name);
+        if (!same_declaration(lookup_qualified_symbol(table, call->value),
+                              lookup_qualified_symbol(table, shortq))) return;
+        if (g_sn_count == g_sn_cap) {
+            g_sn_cap = g_sn_cap ? g_sn_cap * 2 : 32;
+            g_sn_edits = realloc(g_sn_edits, sizeof(ShortNameEdit) * (size_t)g_sn_cap);
+            if (!g_sn_edits) { fprintf(stderr, "Fatal: out of memory\n"); exit(1); }
+        }
+        g_sn_edits[g_sn_count].line = call->line;
+        g_sn_edits[g_sn_count].column = call->column;
+        g_sn_edits[g_sn_count].long_name = strdup(suffix);
+        g_sn_edits[g_sn_count].short_name = strdup(short_name);
+        g_sn_count++;
+        return;
+    }
+}
+
 /* The first named argument of `call`, or NULL. */
 static ASTNode* first_named_argument(ASTNode* call) {
     for (int i = 0; call && i < call->child_count; i++)
@@ -15027,6 +15121,7 @@ static int bind_named_arguments(ASTNode* call, Symbol* symbol) {
 
 int typecheck_function_call(ASTNode* call, SymbolTable* table) {
     if (!call || call->type != AST_FUNCTION_CALL) return 0;
+    note_short_name(call, table);   /* #2976: as written, before any rewrite */
 
     /* #928 UFCS, shape (a): the parser tagged this as a method-call on a
      * non-identifier receiver (e.g. `expect(5).to_eq(...)`) and stashed the

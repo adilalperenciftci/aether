@@ -69,6 +69,28 @@ It preserves, byte for byte:
   (`<<MARKER ... MARKER`, whose body indentation is significant), and **backtick
   raw identifiers** (`` `reply` ``).
 
+## Short names: `--short-names`
+
+```bash
+ae fmt --short-names src tests   # json.json_free(v) -> json.free(v), where both are one function
+```
+
+A call that names its module twice, `json.json_free(v)`, reaches the same
+function as `json.free(v)`. With `--short-names`, `ae fmt` rewrites such calls
+to the short form, and changes nothing else: not the layout, and not a call
+whose short form is another declaration. Which calls qualify is the
+compiler's answer, not a pattern: `aetherc --emit=short-names` checks the file
+and lists each call written `ns.ns_x(...)` whose `ns.x` resolves to the same
+declaration. So std.string's `string.string_join`, an extern beside the
+different `string.join`, is left as written, and so is a name whose short
+form would start with a digit (`sha3.sha3_256_hex`). A file that does not
+compile is reported and left as it is. With `--check`, it lists the files it
+would rewrite and exits 1 if there are any.
+
+The rewrite does not change what a program compiles to: the C it generates is
+byte-identical before and after (modulo `#line` directives), which is how the
+tree's own calls were rewritten (#2976).
+
 ## Safety guarantee
 
 `ae fmt` cannot change what your program does. It works on the token stream: the
