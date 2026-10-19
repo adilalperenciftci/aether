@@ -2421,7 +2421,10 @@ payoff that tells you, when you add a variant, exactly which matches to update.
 An arm naming something that isn't a variant is also rejected. Narrowing applies
 when the scrutinee is a plain variable (`match s { … }`). A new local bound to
 the narrowed scrutinee in an arm (`t = s` in the `Circle` arm) is a copy of
-that variant, so `t.r` reads its field.
+that variant, so `t.r` reads its field. A variant's field read on a sum that
+is not narrowed (`s.r` outside a match, `h.sh.r` in an arm of `match h.sh`) is
+a compile error naming the sum and the field: bind the value to a local and
+match on that (`v = h.sh` then `match v { Circle -> v.r ... }`).
 
 ### Recursive sums
 

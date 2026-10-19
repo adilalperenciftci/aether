@@ -13037,6 +13037,26 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                     return 0;
                 }
 
+                /* #2986: a sum holds one of its variants, so a variant's field
+                 * is read where a `match` arm narrows the value to it, which
+                 * it does for a plain variable matched on (`match s {
+                 * Circle -> s.r }`). Read anywhere else (`s.r` outside a
+                 * match, `h.sh.r` in an arm of `match h.sh`), the field
+                 * reached C as a member of the tagged union. */
+                if (base_type && base_type->kind == TYPE_SUM && expr->value) {
+                    char error_msg[400];
+                    snprintf(error_msg, sizeof(error_msg),
+                             "the sum type '%s' has no field '%s': a variant's field is read "
+                             "where a `match` on a plain variable narrows the value to it",
+                             base_type->struct_name ? base_type->struct_name : "?", expr->value);
+                    free_type(base_type);
+                    type_error_hint(error_msg,
+                        "bind the value to a local and match on that: `v = <value>` then "
+                        "`match v { Circle -> v.r ... }`",
+                        expr->line, expr->column);
+                    return 0;
+                }
+
                 // Reject member access on primitive types — catch the error in Aether, not C
                 if (base_type && (base_type->kind == TYPE_INT || base_type->kind == TYPE_FLOAT ||
                                   base_type->kind == TYPE_BOOL || base_type->kind == TYPE_STRING)) {
