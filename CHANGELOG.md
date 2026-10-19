@@ -14,6 +14,323 @@ cut while your branch is open cannot fold your entry into the released section.
 
 ## [current]
 
+## [0.832.0]
+
+### Added
+
+- **`ae fmt --short-names` writes `json.free(v)` for `json.json_free(v)`.** A
+  call that names its module twice is rewritten to the short form where the
+  compiler resolves both to the same declaration, and nothing else changes,
+  the layout included. `aetherc --emit=short-names` lists those calls of a
+  file as `LINE:COLUMN:ns_x:x`; a long name whose short twin is another
+  function (std.string's `string.string_join` beside `string.join`) and one
+  whose short form starts with a digit (`sha3.sha3_256_hex`) are not listed,
+  and a file that does not compile keeps its names. Downstream projects run
+  the same command instead of editing by hand (#2976).
+
+### Changed
+
+- **The tree calls its modules by short names.** `ae fmt --short-names`
+  rewrote 1,744 calls in 114 files of std, contrib, tests and examples from
+  the doubled form (`json.json_free`, `string.string_length`,
+  `md5.md5_hex`) to the short one (`json.free`, `string.length`,
+  `md5.hex`), only where the compiler resolves both to the same
+  declaration. The C each of the 118 files that compile generates is
+  byte-identical before and after (modulo `#line`), and so is that of every
+  rewritten std module built as one `--lib-package=std` library (#2976).
+
+- **std.spec failure messages, std.mutation's summary and the
+  `--diagnose=ownership` note use plain punctuation and the current model.**
+  A matcher given an intent message prints `<why>: <detail>` (it printed an
+  em dash between them) in std.spec, std.os.testing and
+  std.http.client.httptest; std.mutation prints `3/3 mutants killed,
+  mutation score 100%` and `(N excluded: did not compile)`. A tool that
+  matched the old text matches these. `aetherc --diagnose=ownership` ended
+  with a note about lines "marked KEPT ALIVE", which no line ever was, and
+  advised `@noescape`; it now says what `move` and `take` do and that an
+  extern which keeps a string declares the parameter `@retain`.
+
+### Fixed
+
+- **An if expression and a value match have their branches' common type
+  (#2854).** Each took the type of its first branch, so a wider value in
+  another one was narrowed into it: `v = if c == 1 { 1 } else { big }` with
+  a `long big` declared `v` an `int` and printed 1705032704 for 6000000000,
+  and `if c { 1 } else { 2.5 }` truncated the float. Two numeric branches
+  now join as C's `?:` computes their type (a `long` over an `int`, a
+  `float` over either), and a float literal beside an `f32` branch takes the
+  `f32`, as it does beside an `f32` operand.
+
+- **An optional compares with a bare value (#2829).** `lo == 3` with `lo:
+  int?`, or `b.v == 3` with a field `v: int?`, passed the type checker and
+  failed in C ("invalid operands to binary =="). It now compares as the
+  value wrapped into the optional, as a binding wraps it: equal when the
+  optional is present with an equal value, a `string?` by its contents.
+  Both operands are evaluated, in source order. A value the optional cannot
+  hold, or an optional of another inner type (`int?` against a `string` or
+  a `string?`), is refused at the comparison.
+
+- **An optional of an enum or a distinct type binds everywhere (#2831).**
+  `let a: Color? = Color.Blue` and the store `b.c = Color.Red` were refused
+  ("Type mismatch in variable initialization") while a struct literal's
+  field took the same value; a distinct type's optional (`Meters?`) was
+  refused the same way. The checker's enum and distinct rules decided
+  before its optional rule was reached. The optional rule now comes first
+  and leaves the inner types to them, so a local, a parameter, a field, a
+  literal, a store, a return, `??` and `match` all take one.
+
+- **Diagnostics spell a type as the source does (#2832).** A `fn?` was
+  named `|| -> void?`, a distinct string's optional `Name?` was `string?`,
+  a typed function `fn(int) -> int` was `|int| -> int` and a struct was
+  `struct P`, in the messages that named a type through the display used
+  by the `--emit=lib` catalog and the schema tables. Those messages (a
+  destructure of a non-tuple, an optional compared with what it cannot
+  hold, a function type returning a fixed-size array, a slice of another
+  element type, a missing return, a local bound as two types, a struct
+  defined twice) now spell the type as it is written.
+
+- **A string stored into C memory that outlives the function is refused
+  (#2979).** `(names as string[])[i] = s` gives C the characters and no
+  reference. E0902 refused a string built in the statement and its help
+  said to bind it to a local first, which compiled and freed the string
+  when the function returned, so the array held a freed string (every
+  runtime animation name in a game went to garbage, with no warning). A
+  string that is not pinned stored into C memory that outlives the
+  function is now E0902 too: memory reached through a parameter, a
+  module-level `var`, a field or a heap box, or whose pointer is returned,
+  stored, captured, sent or passed to a `@keep` parameter. The help names
+  `(p as ptr[])[i] = string.keep(s)` and `string.release_kept` where the
+  memory is freed. Memory the function allocates and does not let escape
+  (an argv array handed to C) still takes a local, and a literal or a
+  `const` bound to one goes into either.
+
+- **A tuple returns into an optional tuple result, and an if-expression
+  goes into an optional arm by arm (#2845).** `return (n, n + 1)` and
+  `return n, n + 1` from a `-> (int, int)?` function built the bare tuple,
+  and gcc refused it. They are now the tuple wrapped into the optional, as
+  a binding of a tuple literal is. An if-expression into any optional slot
+  (a binding, a return, an argument, a field) was wrapped whole, so
+  `if c { 3 } else { none }` was `.val = (c ? 3 : {0})` and a tuple
+  literal arm its elements' text run together; each arm is now coerced on
+  its own, as a match's arms are. A match arm's tuple into an optional,
+  the issue's second case, already worked on main.
+
+- **A copy of a narrowed value has the narrowed type (#2848).** `t = s` in
+  the `Circle` arm of a match on a `Shape`, then `t.r`, passed the checker
+  and failed in C ("'Shape' has no member named 'r'"): the declaration
+  kept the scrutinee's type from the early inference pass while the
+  checker read `t` as the Circle. A copy of a none-checked optional
+  (`v = o` inside `if o != none`) was refused for `v + 1` the same way. The
+  first binding of a name now takes the narrowed value's type: `t` is a
+  Circle, `v` an `int`.
+
+- **A call through an erased `fn` coerces its arguments (#2847).** A bare
+  `fn` has no parameter types, so `call(f, 5)` into `|o: int?|` handed the
+  closure an int where it read an optional (it saw 0), a Circle into
+  `|o: Shape?|` crashed, and an int into `|x: float|` read 0.0, through a
+  `fn` parameter, a field or a returned closure. The function a closure
+  value points at has the parameter types, so the call now compares it
+  with each closure literal and function value of the program whose
+  parameters take these arguments only coerced, and calls the one it is
+  through its own signature, the arguments wrapped or converted as a
+  direct call's are.
+
+- **A struct literal's values are checked against their fields (#2982).**
+  `Box { n: "y" }` with a field `n: int` passed the checker and the C
+  compiler refused it, while the store `b.n = "y"` was refused. Each value
+  now fits its field by the rules a store follows: a conversion, a wrap
+  into an optional or a sum, `null` or `[]` into a slice, `null` into a
+  string, a named function of the signature into a typed function pointer,
+  a byte literal in range. The error names the field and both types.
+
+- **An if expression's branches give a value of one type (#2983).** Two
+  branches neither of which takes the other's type, an `int` and a
+  `string` or two variants of a sum, passed the checker and failed in C's
+  `?:`. They are now refused, naming both types. Numbers still join to
+  their common type (#2854), and a branch the other one's type takes (a
+  variant beside its sum, an `int` beside a `long?`) is converted into it:
+  the expression has the wider type, where `if c { sh } else { Circle {
+  r: 2.0 } }` with a `Shape` was a C type mismatch.
+
+- **A named argument goes to the parameter it names.** Named arguments were
+  passed in the order written, so `sub(b: 1, a: 10)` with `sub(a, b)` gave
+  -9, and `eat(k: 1, s: w)` with a `string` and an `int` parameter failed in
+  C. The checker now puts a call's arguments in parameter order and fills a
+  default the call leaves out (`box(2, d: 4)` skips `h`), while the arguments
+  are still evaluated in the order written, through temporaries where one
+  changes what another reads. A name no parameter has, a parameter given
+  twice, a positional argument after a named one, and a parameter with no
+  default left out are errors now, as is a named argument to a closure or a
+  function pointer, whose parameters have no names (#2850).
+
+- **`[]` and an array reach a closure's slice parameter.** The arguments of
+  a call through a closure (`call(c, [])`, `c(arr)`) or a function pointer
+  (a `fn(int[]) -> int` parameter, a function-pointer field) were not
+  coerced into its parameters as a direct call's are, so `[]` and `null`
+  reached C as an initializer list and a null pointer, and an `int[3]` as a
+  pointer, where the closure takes a slice, and none of them compiled. They
+  are the empty slice and a view of the array now, and an `if` whose arms
+  are either is coerced arm by arm (#2856).
+
+- **A list pattern can be a clause's parameter.** `lp([h | t], b: *Box)`
+  failed with "Undefined variable 'h'" and "expects 1 argument(s)", and
+  `sum([h | t])` alone with "expects 0": the checker counted no list
+  pattern as a parameter and bound none of its names, and codegen took it
+  as a pointer and a length that no call passed. A list pattern parameter
+  now takes a slice (an array is viewed as one, `[]` is the empty one); a
+  clause runs when the length fits (`[]`, `[x, y]`, `[h | t]` for one or
+  more) and a literal element is equal (`[0 | t]`), and its names are
+  bound, an element as a value and a cons pattern's tail as the slice of
+  the rest, in the clause's body and its guard. The element type is the one
+  the calls pass, or another clause's typed parameter at that position,
+  else `int`. Call-site type inference also reads a parameter after a
+  `where` contract at its own position (#2898).
+
+- **`ae fmt` keeps `or (x)`, a line-leading `-2` and `f()! + g()!`.** The
+  formatter wrote `x or (y or { 1 })` as `or(y ...`, which reads as a call
+  of a function `or`; a block's last line `-2` as `- 2`, which reads as the
+  end of a subtraction from the line above; and `small(3)! + num(true)!` as
+  `small(3)! +num(true)!`. After a value `or` is the error handler's
+  keyword and keeps its space before a parenthesis; an operator that begins
+  a line is a prefix one, since the parser never continues an expression
+  with an operator on a new line (a line-leading `*` already was); and a
+  `!` written tight after a value is its postfix unwrap, which ends a value.
+  Five tests in the tree spelled with the old output are reformatted
+  (#2818).
+
+- **`ae fmt` closes a closure's parameters after an optional as after any
+  type.** `|o: int?|` came out as `| o: int?|` while `|s: Shape|` became
+  `| s: Shape |`: the formatter kept the author's spacing on both sides of
+  every `?`, which is also the actor ask. A `?` written tight after a name
+  or a `)` is a type's optional suffix, and the token after it is now spaced
+  as it would be after the type, so the closing `|` takes its space. Two
+  tests in the tree are reformatted (#2842).
+
+- **A module function named like one of its module's externs is kept.**
+  The merge dropped a module function whose C name `<ns>_<name>` was one of
+  the module's own externs, and `ns.name(...)` called the extern. Std had 64
+  such pairs, and four wrappers did more than forward:
+  `http.server_set_host(s, host)` returns `""` where the extern returns
+  nothing (`err = http.server_set_host(...)` failed in C),
+  `http.ws_send_binary(ws, data)` takes a `byte[]` where the extern takes a
+  pointer and a length (the documented call was "expects 3 argument(s)"),
+  `xml.escape` copies the extern's result, and `string.join` joins with
+  `string_seq_join`. Such a function is merged as `ae_<ns>_<name>` now, a
+  bare call in its module, a qualified `ns.name` and an import of the name
+  reach it, and its own call of the extern still reaches the extern
+  (#2978).
+
+- **A struct field can hold a sum type (#2985).** `struct Holder { sh:
+  Shape }` failed in C with "unknown type name 'Shape'": every struct was
+  emitted before every sum's typedef. Type definitions now go out in
+  dependency order, a sum after the variant structs its union embeds and a
+  struct after the sums its fields hold by value (directly or as an
+  optional). A variant given to such a field, in a struct literal
+  (`Holder { sh: Circle { r: 1.0 } }`) or a store (`h.sh = Rect { ... }`),
+  is wrapped into the sum as a binding of the sum wraps it.
+
+- **`m.x` reaches a module's function written `m_x`.** A qualified name was
+  resolved by joining it into the C name `m_x`, which reached an extern of
+  that name and a function `x`, but not an Aether function the module names
+  `m_x` (merged as `m_m_x`): std.md5's `md5.hex` and a module's
+  `rexxae.create` for its `rexxae_create` were `E0301 Undefined function`,
+  while `md5.md5_hex` built. Qualified names now resolve by the names the
+  module declares, the plain one first and then the prefixed form, for
+  every kind of declaration, in a call and in a selective import (#2976).
+
+- **A struct pattern in a clause head is tested and binds its names.**
+  `kind(Pt { x: 0, y: _ })` matched every call, since the pattern was
+  parsed and then never read: no field was tested, and a name in it
+  (`Pt { x: a }`) was "Undefined variable". The clause now runs when each
+  literal field is equal (a string by content), `_` takes any value, a name
+  is bound to its field (typed as the field, in the body and the guard), and
+  a struct pattern over a field matches that field. A struct or a field the
+  pattern names that does not exist, a literal of another type than its
+  field, and a name bound to a fixed-size array field are errors (#2988).
+
+- **A match arm matches a struct by its fields.** `match a { Pt { x: 0, y: _ }
+  -> 1 }` was read as a struct literal, so its `_` was "Undefined variable
+  '_'" and a name in it bound nothing. An arm takes the struct pattern a
+  clause head takes (#2988), through the same checks, test and bindings: a
+  literal field must be equal (a string by content), `_` takes any value, a
+  name is bound to its field, and a struct pattern over a field matches that
+  field; the value matched must be that struct. A pattern with a literal
+  field takes only some values, so a match of such arms without `_` may run
+  no arm (a function returning from each still reaches its end), while one
+  ending in a pattern that tests no field covers its struct. A struct a call
+  returns, matched, is dropped when the match ends (#2992).
+
+- **A variant's field is read only where a match narrows the sum
+  (#2986).** `s.r` with `s: Shape` outside a match, or `h.sh.r` in an arm
+  of `match h.sh`, passed the checker and failed in C ("'Shape' has no
+  member named 'r'"): a `match` narrows a plain variable it matches on, and
+  nothing else. Such a read is now refused, naming the sum and the field,
+  and the help says to bind the value to a local and match on that.
+
+- **A `match` is an expression wherever a value goes.** `b = b + match i {
+  ... }` never stored the sum, and `c = 1 + match b { ... }` read
+  uninitialized memory: `match` was no expression to the parser, which
+  stopped at `b +` without a word and kept the declaration with no value,
+  while the `match` ran as the next statement. As an argument it was a syntax
+  error. A `match` now works as an operand, an argument, a condition (a
+  `while` evaluates it on every pass, the right side of `&&` and `||` only
+  when it is reached), an interpolation, the subject or an arm of another
+  `match`, the value of `+=` or of a field, a `switch` subject, a `panic`
+  reason, an actor's state and a `reply`. It runs ahead of its statement,
+  in the order written, into a temporary that owns a string or a struct it
+  holds. It must give a value on every path that reaches the expression: a
+  `_` arm (or arms covering the subject's type), and arms that end in a
+  value or leave (#2993).
+
+- **A match's value reaches the variable it is bound to when an arm binds
+  that name.** `v = match o { some(v) -> v  none -> 0 }` left `v` as it
+  was: the arm's binding was a C local of the same name in the arm's block,
+  where the match's value was written, so the binding took it. A struct
+  pattern's or a list pattern's name did the same, and one named like a
+  variable a closure writes did not compile. Each name an arm's pattern binds
+  that the function names elsewhere is renamed in its arm, as a scoped
+  string binding is (#2746), so it stays the arm's own and the value goes to
+  the variable outside, a local, a closure's cell, a module variable or an
+  actor's state (#2994).
+
+- **A list pattern matches a fixed-size array by its length.** `xs = [9,
+  1]; match xs { [h | t] -> h  [] -> 0 }` failed in C ("'xs_len'
+  undeclared"): the match read the length from a `<name>_len` local for
+  every subject but a slice or a `*StringSeq`. A `T[N]` is matched by its
+  length N, a slice by the one it carries, and only a bare pointer (a local
+  bound to `[]` alone) takes the documented `<name>_len`. A cons pattern's
+  tail is a slice whose length is `t.len`, and no longer comes with a
+  `<tail>_len` local that hid one of the program's. A `_len` local beside a
+  fixed-size array is now a local nothing reads, reported unused (#2995).
+
+- **A call through a typed function pointer takes an optional argument.**
+  For `h = opt as fn(int?) -> int`, `h(4)` failed in C ("incompatible
+  type, expected ae_opt_int") and `h(none)` with "expected expression
+  before '{'": the arguments went to C as written. They are taken as a
+  call through a closure takes them, a bare value or `none` into an
+  optional, a variant into a sum, a fixed-size array copied for a `T[N]`,
+  for a local, a parameter or a struct field. A struct field of such a
+  type was declared before the optional's C type and did not compile
+  either (#3000).
+
+- **A match bound to a module variable or an actor's state stores into it.**
+  `g = match o { ... }` for a module `var g` declared a local named `g` that
+  hid the variable, which kept its value, and `n = match k { ... }` for an
+  actor's state lowered to a GNU statement expression, which the strict C
+  path (MSVC) refuses. A bound match now stores each arm's value as `x =
+  <value>` stores it, whatever `x` is: a local, a closure's cell, a sum (each
+  variant wrapped), a module variable, an actor's state (#2993).
+
+- **An erased call reaches no closure by narrowing an argument (#2847).**
+  The dispatch that coerces a call through an erased `fn` took as a target
+  any closure whose parameter converted the argument, narrowing too:
+  `call(f, 0.5)` gained a branch calling `|a: int|` with 0.5, which clang
+  warned at ("implicit conversion from 'double' to 'int' changes value"),
+  in the output of the program that built through it. A target now takes
+  each argument by the assignment rules without narrowing, and a widening
+  it needs (an int into a `long` or a `float` parameter) is an explicit
+  cast, so no C compiler warns.
+
 ## [0.831.0]
 
 ### Added
