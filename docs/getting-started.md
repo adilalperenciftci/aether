@@ -531,6 +531,8 @@ Projects use `aether.toml` for configuration. Created automatically by `ae init`
 [package]
 name = "myproject"
 version = "0.1.0"
+description = "A new Aether project"
+license = "MIT"
 
 [[bin]]
 name = "myproject"
