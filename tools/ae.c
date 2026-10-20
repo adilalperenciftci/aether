@@ -3395,9 +3395,10 @@ static bool gcc_ready(const char* flags) {
     return true;
 }
 
-// Checks PATH, then ~/.aether/tools/, then downloads WinLibs on demand.
-// Returns true when gcc is usable; false means the user must intervene.
-static bool ensure_gcc_windows(void) {
+// Checks PATH, then ~/.aether/tools/, then, when may_download, downloads
+// WinLibs. Returns true when gcc is usable; false means the user must
+// intervene, or, without may_download, that no gcc is installed.
+static bool find_gcc_windows(bool may_download) {
     if (s_gcc_ready) return true;
 
     // 0. Explicit $AE_CC / $CC override wins over PATH and the WinLibs
@@ -3453,6 +3454,7 @@ static bool ensure_gcc_windows(void) {
 
     struct stat st;
     if (stat(tools_gcc, &st) == 0) goto found;
+    if (!may_download) return false;
 
     // 3. Auto-download (one-time, ~250 MB).
     printf("[ae] GCC not found. Downloading MinGW-w64 GCC (~250 MB) -- one-time setup...\n");
@@ -3510,8 +3512,10 @@ fail:
     return false;
 }
 
+static bool ensure_gcc_windows(void) { return find_gcc_windows(true); }
+
 /* #2476: the assembler flag that keeps AVX code from faulting on the Win64
- * stack, or "" when the build does not need it.
+ * stack, or "" when the assembler does not take it.
  *
  * Win64 only guarantees 16-byte stack alignment and GCC does not realign the
  * stack for 32-byte values (GCC bug 54412), yet it still spills 256-bit
@@ -3523,26 +3527,21 @@ fail:
  * data on any AVX processor and does not fault on the rest, so the fix does
  * not depend on which GCC is installed or on how a given kernel spills.
  *
- * Only a build that enables AVX gets it: the compiler is asked whether
- * __AVX__ is defined under the user's cflags (which settles -march=native,
- * -mfma, a later -mno-avx and the like), and only when those cflags carry a
- * -m option at all, so a build without one runs no probe. The assembler is
- * then asked whether it takes the option. Both answers hold for the process
- * (one compiler, one set of cflags), so each probe runs at most once. */
+ * Every build gets it, not only one whose cflags enable AVX (#3023): a
+ * module imported at @target("avx2") (#2607) is AVX code in a build with no
+ * -m flag at all, and on data that is aligned an unaligned move costs what
+ * the aligned one does, so a build with no AVX loses nothing. The assembler
+ * is asked once per process whether it takes the option. When it does not,
+ * a build whose cflags enable AVX is warned: the compiler is asked whether
+ * __AVX__ is defined under them (which settles -march=native, -mfma, a later
+ * -mno-avx and the like), only when they carry a -m option at all. */
 static const char* win_avx_stack_flags(const char* user_cflags) {
     static int done = 0;
     static const char* flags = "";
     if (done) return flags;
     done = 1;
-    int selects_isa = 0;
-    for (const char* p = user_cflags; p && *p && !selects_isa; p++) {
-        if ((p == user_cflags || p[-1] == ' ' || p[-1] == '\t') &&
-            p[0] == '-' && p[1] == 'm') selects_isa = 1;
-    }
-    if (!selects_isa) return flags;
 
     char probe_c[1100], probe_out[1100], probe_o[1100], cmd[4096];
-    char* define_cmd;
     int pid = (int)getpid();
     snprintf(probe_c, sizeof(probe_c), "%s/ae_avx_probe_%d.c", get_temp_dir(), pid);
     snprintf(probe_out, sizeof(probe_out), "%s/ae_avx_probe_%d.txt", get_temp_dir(), pid);
@@ -3550,26 +3549,33 @@ static const char* win_avx_stack_flags(const char* user_cflags) {
     FILE* f = fopen(probe_c, "w");
     if (!f) return flags;
     fclose(f);
-    int avx = 0;
-    /* The cflags are the user's, of any length (#2534). */
-    define_cmd = ae_strdup_printf("%s %s -dM -E \"%s\" -o \"%s\"",
-                                  s_gcc_cmd, user_cflags, probe_c, probe_out);
-    if (define_cmd && run_cmd_quiet(define_cmd) == 0) {
-        FILE* m = fopen(probe_out, "r");
-        char line[512];
-        while (m && !avx && fgets(line, sizeof(line), m)) {
-            avx = strncmp(line, "#define __AVX__ ", 16) == 0;
+    snprintf(cmd, sizeof(cmd),
+             "%s -Wa,-muse-unaligned-vector-move -c \"%s\" -o \"%s\"",
+             s_gcc_cmd, probe_c, probe_o);
+    if (run_cmd_quiet(cmd) == 0) {
+        flags = " -Wa,-muse-unaligned-vector-move";
+    } else {
+        int selects_isa = 0;
+        for (const char* p = user_cflags; p && *p && !selects_isa; p++) {
+            if ((p == user_cflags || p[-1] == ' ' || p[-1] == '\t') &&
+                p[0] == '-' && p[1] == 'm') selects_isa = 1;
         }
-        if (m) fclose(m);
-    }
-    free(define_cmd);
-    if (avx) {
-        snprintf(cmd, sizeof(cmd),
-                 "%s -Wa,-muse-unaligned-vector-move -c \"%s\" -o \"%s\"",
-                 s_gcc_cmd, probe_c, probe_o);
-        if (run_cmd_quiet(cmd) == 0) {
-            flags = " -Wa,-muse-unaligned-vector-move";
-        } else {
+        int avx = 0;
+        /* The cflags are the user's, of any length (#2534). */
+        char* define_cmd = selects_isa
+            ? ae_strdup_printf("%s %s -dM -E \"%s\" -o \"%s\"",
+                               s_gcc_cmd, user_cflags, probe_c, probe_out)
+            : NULL;
+        if (define_cmd && run_cmd_quiet(define_cmd) == 0) {
+            FILE* m = fopen(probe_out, "r");
+            char line[512];
+            while (m && !avx && fgets(line, sizeof(line), m)) {
+                avx = strncmp(line, "#define __AVX__ ", 16) == 0;
+            }
+            if (m) fclose(m);
+        }
+        free(define_cmd);
+        if (avx) {
             fprintf(stderr,
                     "warning: AVX is enabled, but this assembler does not take "
                     "-muse-unaligned-vector-move (binutils 2.38 or later).\n"
@@ -4679,8 +4685,9 @@ void build_gcc_cmd(char* cmd, size_t size,
                                harden_cflags(optimize), harden_ldflags(), user_cflags,
                                win_avx_stack_flags(user_cflags), trace_def);
     else
-        opt = ae_strdup_printf("-static %s%s%s%s%s", emit_lib_flags, opt_flags(optimize),
-                               harden_cflags(optimize), harden_ldflags(), trace_def);
+        opt = ae_strdup_printf("-static %s%s%s%s%s%s", emit_lib_flags, opt_flags(optimize),
+                               harden_cflags(optimize), harden_ldflags(),
+                               win_avx_stack_flags(""), trace_def);
     if (!opt) {
         fprintf(stderr, "Error: out of memory building the compiler command.\n");
         set_failing_cmd(cmd, size);
@@ -11805,6 +11812,14 @@ static int cmd_cflags(int argc, char** argv) {
             fputc(' ', stdout);
             fputs(tc.include_flags, stdout);
         }
+#if defined(_WIN32)
+        /* #3023: the assembler flag every `ae` build on Windows passes
+         * (win_avx_stack_flags), for a build that compiles aetherc output
+         * itself: a @target("avx2") region is AVX code whatever its flags.
+         * Asked of a gcc already installed; a flags query never downloads
+         * one. */
+        if (find_gcc_windows(false)) fputs(win_avx_stack_flags(get_cflags()), stdout);
+#endif
     }
 
     if (want_libs) {

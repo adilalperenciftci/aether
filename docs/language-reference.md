@@ -240,9 +240,12 @@ is one 256-bit register and each operation one instruction; without AVX2 it
 is two four-lane halves, which costs what two `f32x4` operations cost. The
 same source runs either way, and gives the same results, so a kernel written
 eight-wide is never slower than the four-lane one and runs twice as wide
-where AVX2 is on. On Windows an AVX build is assembled with
-`-Wa,-muse-unaligned-vector-move`, because GCC there can spill a 256-bit
-value with an aligned move to a stack that is only 16-byte aligned (#2476).
+where AVX2 is on. On Windows every build is assembled with
+`-Wa,-muse-unaligned-vector-move`, and `ae cflags --cflags` carries it,
+because GCC there can spill a 256-bit value with an aligned move to a stack
+that is only 16-byte aligned (#2476, #3023). GCC on Windows cannot compile
+an `f32x8` local without optimization at all, so a `-O0` build there takes
+the two-halves form even with `-mavx2` (#3023).
 
 See [`std/lanes/README.md`](../std/lanes/README.md) for the full surface and
 the measured speedup.
@@ -3392,9 +3395,9 @@ solve(constraints: ptr, n: int) {
 - A closure inside the copy is a compile error: its body would be compiled
   outside the copy.
 - `"avx2"` is the one target, the one that changes an `f32x8`'s width. With
-  a compiler other than GCC or Clang on x86, and on the
-  `AETHER_GCC_COMPAT=0` path, the copy is plain code with no target
-  attribute.
+  a compiler other than GCC or Clang on x86, on the `AETHER_GCC_COMPAT=0`
+  path, and with GCC on Windows at `-O0` (which cannot compile a 256-bit
+  local there, #3023), the copy is plain code with no target attribute.
 
 `std/lanes/README.md` ("One binary, two widths") has the rest.
 

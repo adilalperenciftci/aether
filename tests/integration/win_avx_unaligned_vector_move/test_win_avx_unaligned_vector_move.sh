@@ -6,8 +6,8 @@
 # stack for 32-byte values (GCC bug 54412), yet GCC 15 spilled 256-bit
 # temporaries with vmovaps / vmovdqa: an f32x8 solver built with -mavx2
 # segfaulted on `vmovdqa %ymm0,0x20(%rsp)`. `ae` now passes
-# -Wa,-muse-unaligned-vector-move when the cflags enable AVX, so the
-# assembler encodes every aligned vector move as its unaligned twin.
+# -Wa,-muse-unaligned-vector-move, so the assembler encodes every aligned
+# vector move as its unaligned twin.
 #
 # Which moves GCC picks for a given kernel depends on its version, so the
 # check goes through the assembler directly: a C file built into the program
@@ -15,8 +15,11 @@
 # but not 32 aligned, exactly the faulting store. With the flag it is
 # assembled as vmovups and the program runs; without it, it faults.
 #
-# Also checked: a build without AVX (no -m option, or -mavx2 undone by a
-# later -mno-avx) does not get the flag, and no other platform gets it.
+# #3023: every Windows build gets it, not only one whose cflags enable AVX,
+# since a module imported at @target("avx2") is AVX code in a build with no
+# -m option; so does `ae cflags --cflags`, for a build that calls gcc
+# itself. Also checked: a build without AVX (no -m option, or -mavx2 undone
+# by a later -mno-avx) gets it on Windows, and no other platform gets it.
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
@@ -119,10 +122,29 @@ for cf in "-O2" "-O2 -mavx2 -mno-avx"; do
     d="$TMP/noavx_$(printf '%s' "$cf" | tr -c 'a-z0-9' '_')"
     project "$d" "$cf"
     build "$d"
-    if has_flag "$d"; then
-        echo "  [FAIL] win_avx_unaligned_vector_move: $FLAG reached a build without AVX (cflags '$cf')"
+    if [ "$WIN" = 1 ] && ! has_flag "$d"; then
+        echo "  [FAIL] win_avx_unaligned_vector_move: a Windows build without AVX in its cflags (cflags '$cf') did not pass $FLAG"
+        exit 1
+    fi
+    if [ "$WIN" = 0 ] && has_flag "$d"; then
+        echo "  [FAIL] win_avx_unaligned_vector_move: $FLAG reached a build outside Windows (cflags '$cf')"
         exit 1
     fi
 done
 
-echo "  [PASS] win_avx_unaligned_vector_move: AVX builds on Windows assemble aligned vector moves unaligned; other builds are unchanged"
+cflags_out="$("$AE" cflags --cflags 2>/dev/null)"
+case "$cflags_out" in
+    *"$FLAG"*) in_cflags=1 ;;
+    *) in_cflags=0 ;;
+esac
+if [ "$WIN" = 1 ] && [ "$in_cflags" = 0 ]; then
+    echo "  [FAIL] win_avx_unaligned_vector_move: ae cflags --cflags on Windows does not carry $FLAG"
+    echo "         got: $cflags_out" | cut -c1-200
+    exit 1
+fi
+if [ "$WIN" = 0 ] && [ "$in_cflags" = 1 ]; then
+    echo "  [FAIL] win_avx_unaligned_vector_move: ae cflags --cflags carries $FLAG outside Windows"
+    exit 1
+fi
+
+echo "  [PASS] win_avx_unaligned_vector_move: every Windows build, and ae cflags there, assembles aligned vector moves unaligned; other platforms are unchanged"

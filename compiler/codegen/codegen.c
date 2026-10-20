@@ -3127,14 +3127,17 @@ static void emit_lib_alias_stubs(CodeGenerator* gen, ASTNode* program) {
                 /* #2146: a lane type in an exported signature names a
                  * vector typedef; the header must define it, or the
                  * consumer cannot compile the prototypes it was handed.
-                 * The same spelling the generated C uses. */
+                 * The same spelling the generated C uses, eight lanes in
+                 * the same form under the same flags (#3023: two halves
+                 * for GCC on Win64 without optimization). */
                 "#if defined(__GNUC__) || defined(__clang__)\n"
                 "typedef float  AeF32x4 __attribute__((vector_size(16)));\n"
                 "typedef double AeF64x2 __attribute__((vector_size(16)));\n"
                 "typedef int32_t AeI32x4 __attribute__((vector_size(16)));\n"
                 "typedef int64_t AeI64x2 __attribute__((vector_size(16)));\n"
                 "typedef int16_t AeI16x8 __attribute__((vector_size(16)));\n"
-                "#if defined(__AVX2__)\n"
+                "#if defined(__AVX2__) && !(defined(_WIN32) && defined(__GNUC__) && \\\n"
+                "    !defined(__clang__) && !defined(__OPTIMIZE__))\n"
                 "typedef float   AeF32x8 __attribute__((vector_size(32), aligned(16)));\n"
                 "typedef int32_t AeI32x8 __attribute__((vector_size(32), aligned(16)));\n"
                 "#else\n"
@@ -7820,7 +7823,7 @@ static void lane_region_open(CodeGenerator* gen, ASTNode* program, const char* t
     print_line(gen, "#pragma push_macro(\"_AE_LANE8_LOW\")");
     print_line(gen, "#undef AETHER_LANES8_NATIVE");
     print_line(gen, "#undef _AE_LANE8_LOW");
-    print_line(gen, "#if AETHER_LANE_TARGET_AVX2 || defined(__AVX2__)");
+    print_line(gen, "#if (AETHER_LANE_TARGET_AVX2 || defined(__AVX2__)) && !AETHER_AVX_STACK_UNSAFE");
     print_line(gen, "#  define AETHER_LANES8_NATIVE 1");
     print_line(gen, "#else");
     print_line(gen, "#  define AETHER_LANES8_NATIVE 0");
@@ -8098,6 +8101,24 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     print_line(gen, "#    define AETHER_LIB_LOCAL");
     print_line(gen, "#  endif");
     print_line(gen, "#endif");
+    /* #3023: where the native eight-lane type cannot be compiled at all.
+       It is a 32-byte vector declared 16-byte aligned (for heap storage, see
+       AETHER_LANES8_NATIVE below), and GCC on Win64, which cannot realign
+       the stack for it (GCC bug 54412), stops with an internal compiler
+       error (expand_one_stack_var_1) on such a local when it is not
+       optimizing and every local lives on the stack. That is any f32x8
+       local in an AVX function, whether AVX comes from -mavx2 or from a
+       @target("avx2") region. Optimized, GCC keeps the value in registers or
+       addresses it unaligned; a naturally aligned 32-byte vector compiles
+       either way, and Clang realigns the stack. There the eight-lane types
+       take the two-halves form, whose 16-byte halves are naturally aligned,
+       and a @target region is plain code: a debug build, so the speed is not
+       the point. */
+    print_line(gen, "#if defined(_WIN32) && defined(__GNUC__) && !defined(__clang__) && !defined(__OPTIMIZE__)");
+    print_line(gen, "#  define AETHER_AVX_STACK_UNSAFE 1");
+    print_line(gen, "#else");
+    print_line(gen, "#  define AETHER_AVX_STACK_UNSAFE 0");
+    print_line(gen, "#endif");
     /* #2146: vector lanes. The GCC/Clang vector extensions are the whole
        implementation — lane-wise `+ - * /`, `v[i]`, a comparison yielding an
        all-ones/zero mask per lane, and a vector `?:` that selects per lane.
@@ -8131,8 +8152,9 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
        The native type is declared 16-byte aligned, the alignment heap
        storage guarantees: at its natural 32, GCC moved through calloc'd
        slices and malloc'd closure environments with vmovaps, which faults
-       when the block is only 16-aligned (glibc, macOS). */
-    print_line(gen, "#if defined(__AVX2__)");
+       when the block is only 16-aligned (glibc, macOS). Not where a 256-bit
+       local cannot be compiled (AETHER_AVX_STACK_UNSAFE, #3023). */
+    print_line(gen, "#if defined(__AVX2__) && !AETHER_AVX_STACK_UNSAFE");
     print_line(gen, "#  define AETHER_LANES8_NATIVE 1");
     print_line(gen, "#else");
     print_line(gen, "#  define AETHER_LANES8_NATIVE 0");
@@ -8343,10 +8365,11 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     print_line(gen, "#endif");
     /* #2607: whether a module imported at @target("avx2") is compiled for
        AVX2: GCC or Clang building for x86. Anywhere else (another compiler,
-       the AETHER_GCC_COMPAT=0 path, ARM) its region is plain code with no
-       target attribute, the copy computes what the build's copy does, and
-       lanes.native8() inside it says so. */
-    print_line(gen, "#if AETHER_GCC_COMPAT && (defined(__x86_64__) || defined(__i386__))");
+       the AETHER_GCC_COMPAT=0 path, ARM, and GCC on Win64 without
+       optimization, which cannot compile a 256-bit local, #3023) its region
+       is plain code with no target attribute, the copy computes what the
+       build's copy does, and lanes.native8() inside it says so. */
+    print_line(gen, "#if AETHER_GCC_COMPAT && (defined(__x86_64__) || defined(__i386__)) && !AETHER_AVX_STACK_UNSAFE");
     print_line(gen, "#  define AETHER_LANE_TARGET_AVX2 1");
     print_line(gen, "#else");
     print_line(gen, "#  define AETHER_LANE_TARGET_AVX2 0");

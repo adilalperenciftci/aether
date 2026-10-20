@@ -113,15 +113,26 @@ kernel written eight-wide is never slower than its four-lane version, and is
 twice as wide where AVX2 is on. Sums add lanes 0..7 in order, as a scalar
 loop would, so `sum8` is the same bits in either form.
 
-**On Windows, AVX builds assemble every vector move unaligned.** The Win64
+**On Windows, builds assemble every vector move unaligned.** The Win64
 stack is only 16-byte aligned and GCC does not realign it for 256-bit values
 (GCC bug 54412), yet it can spill them with the aligned `vmovaps` / `vmovdqa`,
 which fault when the slot is not 32-byte aligned (#2476: an `f32x8` solver
-built with `-mavx2` crashed under MinGW GCC 15). When the cflags enable AVX,
-`ae build` and `ae run` pass `-Wa,-muse-unaligned-vector-move` (binutils 2.38
-or later), so the assembler encodes those moves as `vmovups` / `vmovdqu`:
-the same speed on aligned data, no fault on the rest. An older assembler gets
-a warning instead. Other platforms and builds without AVX are unchanged.
+built with `-mavx2` crashed under MinGW GCC 15). `ae build` and `ae run` pass
+`-Wa,-muse-unaligned-vector-move` (binutils 2.38 or later) to every Windows
+build, since an `@target("avx2")` import is AVX code whatever the cflags,
+and `ae cflags --cflags` carries it for a build that calls gcc itself
+(#3023). The assembler encodes those moves as `vmovups` / `vmovdqu`: the
+same speed on aligned data, no fault on the rest. An older assembler is
+used without it, with a warning when the cflags enable AVX. Other platforms
+are unchanged.
+
+**On Windows, GCC at `-O0` uses the two halves.** An `f32x8` is declared
+16-byte aligned (heap storage guarantees no more), and GCC on Win64 stops
+with an internal compiler error (`expand_one_stack_var_1`) on such a local
+when it is not optimizing. So without optimization there, `-mavx2` gives
+the two-halves form and an `@target("avx2")` copy is plain code (#3023): a
+debug build, so the width does not matter. From `-O1` up, and with Clang,
+nothing changes.
 
 Measured on an eight-term polynomial with a clamp, per element, over 64 Ki
 floats (`-O2`, Windows/MinGW, i7-13700K):
@@ -314,9 +325,9 @@ that passes an `f32x8`, an `i32x8`, or a struct or pointer holding one, is a
 compile error. Pass scalars and pointers to the data across, as Box3D's
 `wide4.c` / `wide8.c` entry points do. A closure inside the copy is also an
 error: its body would be compiled outside the copy. With a compiler other
-than GCC or Clang on x86, and on the `AETHER_GCC_COMPAT=0` path, the copy is
-plain code with no target attribute: it still runs and agrees, and
-`native8()` is false there.
+than GCC or Clang on x86, on the `AETHER_GCC_COMPAT=0` path, and with GCC on
+Windows at `-O0` (#3023), the copy is plain code with no target attribute:
+it still runs and agrees, and `native8()` is false there.
 
 ## Requirements
 
