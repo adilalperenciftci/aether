@@ -192,8 +192,9 @@ TESTS=(
   "vulkan/raw|$VK/test_vulkan_raw.ae||lsan||vulkan"
   # Ray queries through contrib.vulkan.vk (#2203): builds a BLAS and a TLAS
   # and traces through them. Skips where the device has no ray query
-  # (lavapipe before Mesa 24.1, MoltenVK), so the Linux leg's skip assertion
-  # leaves it out; Ubuntu 24.04's lavapipe and the discrete GPUs run it.
+  # (lavapipe before Mesa 24.1, MoltenVK), so the Ubuntu 22.04 leg's skip
+  # assertion leaves it out. It must pass on the Ubuntu 24.04 legs (x86_64
+  # and arm64, ci-vulkan-lavapipe-2404) and on Windows' lavapipe.
   "vulkan/ray-query|$VK/test_vulkan_ray_query.ae||lsan||vulkan"
   # Mesh shaders through contrib.vulkan.vk (#2556): draws one meshlet
   # directly, indirectly and with an indirect count. Skips where the device
