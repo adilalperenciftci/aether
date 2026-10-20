@@ -396,7 +396,7 @@ main() {
 - **`s[i]` is bounds-checked.** An index outside `0 ..< s.len` is a runtime panic naming the source line, the index and the length (`slice index 5 out of range for length 3`). It is an ordinary panic: `try` catches it, and an actor step that trips it dies cleanly. A negative index is out of range, never a read before the buffer.
 - **`s[lo..hi]`** is the half-open sub-slice `[lo, hi)`, checked the same way (`lo <= hi <= s.len`). `s[lo..]` runs to the end, `s[..hi]` from the start, `s[..]` is the whole thing. The base may be a slice or a `T[N]` array; the result is always a `T[]` over the *same* elements, so a write through it is visible through the original.
 - **A `T[N]` array converts to `T[]` implicitly** wherever a slice is expected: a parameter, a `T[]`-typed binding or field, a `return` from a `-> T[]` function. The length travels with it. `null`, and the empty literal `[]`, convert to the empty slice: `.len` is `0`, it views no storage, and it compares equal to `null`. So `s == []` is `s == null` (it asks whether `s` views any storage; test `s.len == 0` for emptiness), a C function's `T[]` parameter takes `[]` as the null pointer, and an if-expression or a `match` given to a `T[]` converts each arm on its own. A module-level `var` or `const` of type `T[]` takes either as its initial value.
-- **A string is not a slice.** Passing one where a `T[]` is expected (a parameter, a binding, a `return`) is a type error; `string.bytes(s)` is the bounded, read-only `byte[]` view of a string's bytes, and it decays to their pointer at a C extern like any slice.
+- **A string is not a slice.** Passing one where a `T[]` is expected (a parameter, a binding, a `return`) is a type error; `string.bytes(s)` is the bounded, read-only `byte[]` view of a string's bytes, and it decays to their pointer at a C extern like any slice. A string's own bytes are read-only too: `s[i]` reads one, and a write (`s[i] = v`, `s[i] += v`, `s[i]++`) is a compile error (E0200). Build the new text as a new string, or work on the bytes in a `byte[N]` array of your own.
 - **A slice decays to its pointer** wherever a `ptr` is expected, exactly as a `T[N]` array does: a `ptr` parameter, a C extern's parameter (including one declared `T[]`), `free(s)`, a comparison against `null`, and pointer arithmetic (`s + n` is a `ptr` to element `n`). `s as ptr` spells the same conversion explicitly, for a `ptr` return or binding. The length is dropped at that boundary; nothing else about the extern ABI changes.
 - **`make([]T, n)`** allocates `n` zeroed elements and returns them as a bounded slice; `free(s)` releases them.
 - A slice does not own the storage it views. It is valid for exactly as long as that storage: an array in an enclosing scope, a `make` buffer until its `free`, a C buffer until C reclaims it. The elements are the storage's: a string read out of a `string[]` slice (`t = s[i]`, a return, a field) takes a reference of its own, and a store into an element (`s[i] = v`) takes the new string and releases the one it replaces, as a store into the array itself does. Memory C owns, viewed as `p as string[]`, owns nothing: a store there gives C the characters and takes no reference ([memory-management.md](memory-management.md#ptr-slots)).
@@ -3052,12 +3052,30 @@ The words `and` and `not` are no operators (`or` is the handler of a `T!` result
 | `<<=` | Left shift assign | `x <<= 4` |
 | `>>=` | Right shift assign | `x >>= 2` |
 
-### Postfix Operators
+### Increment and Decrement
 
 | Operator | Description | Example |
 |----------|-------------|---------|
-| `++` | Post-increment | `i++` |
-| `--` | Post-decrement | `i--` |
+| `++` | Increment, postfix or prefix | `i++`, `++i` |
+| `--` | Decrement, postfix or prefix | `i--`, `--i` |
+
+A postfix step gives the value from before it (`j = i++`), a prefix one the
+value after. The operand, in either position, is storage holding a number: a
+local, a parameter, a module-level `var` or actor state that is not a
+`const`, a field (`p.x++`) or an element (`a[i]++`), of an integer type
+(`int`, `long`, `uint64`, `uint32`, `uint16`, `uint8`, `byte`) or a float
+type (`float`, `f32`, `longdouble`). Any other operand is a compile error
+(E0200) naming what it is and the fix:
+
+- a literal (`++5`), a call's result (`f()--`: bind it to a local and step
+  that) or any other expression (`(y + 1)++`: assign the variable instead,
+  `y += 1`);
+- a `const`, an enum member or a field or element of a call's result;
+- a value that is not an integer or a float: a `bool` (`b = !b`), a
+  `string` (`++` would move where its text starts, not change it), a
+  pointer, a `Duration` (`d = d + 1ms`), an array, a struct, an optional, a
+  tuple, and a distinct type, which steps through its base as `x += 1` must
+  (`p = (p as int + 1) as Port`).
 
 ### Actor Operators
 

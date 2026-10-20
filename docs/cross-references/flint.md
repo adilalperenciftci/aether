@@ -777,9 +777,10 @@ These are worth being aware of but aren't standalone sections.
   Aether has `let`/`var`; `:=` is shorter still and harmonizes with Go-ish
   surface.
 
-- **`++`/`--` post-increment**: present in Flint (`n--`, `i++`). Aether
-  doesn't have these. Tradeoff: they introduce expression/statement
-  ambiguity, and Aether has gotten by without them.
+- **`++`/`--` post-increment**: present in Flint (`n--`, `i++`). Aether has
+  them too, postfix and prefix, on a number held in storage (a local, a
+  field, an element; see the language reference's "Increment and
+  Decrement").
 
 - **Annotations as `#name`**: `#test_performance`, `#test_should_fail`. Cheap
   hashtag-syntax for parser-recognized markers. Could also drive

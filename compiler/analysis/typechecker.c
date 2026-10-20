@@ -1598,6 +1598,31 @@ static int reject_const_element_write(ASTNode* target, SymbolTable* table, ASTNo
     return 1;
 }
 
+/* #3022: a write to a character of a string: `s[i] = v`, `s[i] += v`,
+ * `s[i]++`. A string's bytes are read-only (a literal's live in read-only
+ * memory, and a string may be shared), so the C compiler refused the write
+ * against generated code ("assignment of read-only location"). Returns 1
+ * when it reported. */
+static int reject_string_char_write(ASTNode* target, SymbolTable* table, ASTNode* at) {
+    if (!target || target->type != AST_ARRAY_ACCESS || target->child_count < 1) return 0;
+    Type* bt = infer_type(target->children[0], table);
+    int is_string = bt && bt->kind == TYPE_STRING;
+    if (bt) free_type(bt);
+    if (!is_string) return 0;
+    ASTNode* base = target->children[0];
+    char msg[300];
+    if (base->type == AST_IDENTIFIER && base->value)
+        snprintf(msg, sizeof(msg),
+                 "cannot write to a character of '%s': a string's bytes are read-only",
+                 base->value);
+    else
+        snprintf(msg, sizeof(msg), "cannot write to a character of a string: its bytes are read-only");
+    type_error_hint(msg, "build the new text as a new string (interpolation, string.concat, "
+                    "string.substring), or work on the bytes in a `byte[N]` array of your own",
+                    at->line, at->column);
+    return 1;
+}
+
 static int is_integer_scalar(TypeKind kind) {
     return kind == TYPE_INT || kind == TYPE_INT64 || kind == TYPE_UINT64 ||
            kind == TYPE_UINT32 || kind == TYPE_UINT16 || kind == TYPE_UINT8;
@@ -6144,6 +6169,9 @@ int typecheck_program(ASTNode* program) {
                     Type* mt = create_type(TYPE_ENUM);
                     mt->struct_name = strdup(child->value);
                     add_symbol(global_table, qname, mt, 0, 0, 0);
+                    /* #3022: a member is a constant (`Color.Red++` is refused). */
+                    Symbol* ms = lookup_symbol_local(global_table, qname);
+                    if (ms) ms->is_const = 1;
                 }
                 break;
             }
@@ -10994,7 +11022,9 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
             if (stmt->child_count >= 2) {
                 ASTNode* left = stmt->children[0];
                 ASTNode* right = stmt->children[1];
-                if (reject_const_element_write(left, table, stmt)) return 0;   /* #2516 */
+                if (reject_const_element_write(left, table, stmt) ||   /* #2516 */
+                    reject_string_char_write(left, table, stmt))       /* #3022 */
+                    return 0;
 
                 Symbol* symbol = lookup_symbol(table, left->value);
                 if (!symbol) {
@@ -12232,19 +12262,43 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
     }
 }
 
+/* `++x`, `x++`, `--x` or `x--`. */
+static int is_step_operator(ASTNode* n) {
+    return n && n->type == AST_UNARY_EXPRESSION && n->value && n->child_count > 0 &&
+           (strcmp(n->value, "++") == 0 || strcmp(n->value, "--") == 0);
+}
+
+static int reject_step_operand(ASTNode* expr, SymbolTable* table,
+                               const char* written);   /* defined below */
+
 int typecheck_expression(ASTNode* expr, SymbolTable* table) {
     if (!expr) return 0;
-    
+
     switch (expr->type) {
         case AST_BINARY_EXPRESSION:
             return typecheck_binary_expression(expr, table);
             
         case AST_UNARY_EXPRESSION: {
             if (expr->child_count > 0) {
-                typecheck_expression(expr->children[0], table);
-                if (expr->value && (strcmp(expr->value, "++") == 0 ||
-                                    strcmp(expr->value, "--") == 0) &&
-                    reject_const_element_write(expr->children[0], table, expr))   /* #2516 */
+                /* #3022: a qualified operand as written (`Color.Red`,
+                 * `mod.K`), which checking rewrites to its C name. */
+                char written[256];
+                written[0] = '\0';
+                ASTNode* c0 = expr->children[0];
+                if (is_step_operator(expr) && c0 && c0->type == AST_MEMBER_ACCESS && c0->value &&
+                    c0->child_count > 0 && c0->children[0] &&
+                    c0->children[0]->type == AST_IDENTIFIER && c0->children[0]->value)
+                    snprintf(written, sizeof(written), "%s.%s", c0->children[0]->value, c0->value);
+                int operand_ok = typecheck_expression(expr->children[0], table);
+                /* #3022: what `++` / `--` change, in either position. An
+                 * operand that is itself a refused step (`-- --5`) has
+                 * been reported; it is not reported again as an
+                 * expression. */
+                if (is_step_operator(expr) &&
+                    !(is_step_operator(expr->children[0]) && !operand_ok) &&
+                    reject_step_operand(expr, table,
+                                        written[0] && expr->children[0]->type == AST_IDENTIFIER
+                                            ? written : NULL))
                     return 0;
                 /* `~` flips bits, which a float lane does not have in any
                  * sense C accepts: it reached the C compiler as an invalid
@@ -13778,6 +13832,173 @@ static ASTNode* assign_target_temporary(ASTNode* target, SymbolTable* table, int
     return through_value ? assign_target_temporary(base, table, 0) : NULL;
 }
 
+/* #3022: the operand of `++` / `--`, prefix or postfix, is storage holding a
+ * number: a local, a parameter, a module `var` or actor state that is not a
+ * `const`, a field or an element, whose type is an integer or a float. A
+ * distinct type is not one (it steps through `as`, as `x += 1` must), nor is
+ * a Duration. Until this rule every other operand passed the checker: a
+ * literal, a call, an expression, a `const`, an array and a struct stopped
+ * at the C compiler ("lvalue required"); a bool stepped as C's _Bool; and a
+ * string moved its pointer, so it printed from the wrong place and a heap
+ * string was then released through an address it was never allocated at.
+ * `written` is the operand as the source spells it when checking rewrote a
+ * qualified name (`Color.Red`, `mod.K`) into its C one, else NULL.
+ * Returns 1 when it reported. */
+static int reject_step_operand(ASTNode* expr, SymbolTable* table, const char* written) {
+    ASTNode* t = expr->children[0];
+    const char* op = expr->value;
+    if (!t) return 0;
+    if (reject_const_element_write(t, table, expr) ||   /* #2516 */
+        reject_string_char_write(t, table, expr))
+        return 1;
+    char msg[512];
+    char hint[640];
+    msg[0] = '\0';
+    hint[0] = '\0';
+    const char* head = "needs a number stored in a variable, a field or an element";
+    switch (t->type) {
+        case AST_IDENTIFIER: {
+            Symbol* s = t->value ? lookup_symbol(table, t->value) : NULL;
+            if (!s) return 0;   /* undefined: the name reports itself */
+            const char* nm = written ? written : t->value;
+            /* The type's own name (`P`, `Color`), not a value of it. */
+            int names_type = s->type && s->type->struct_name &&
+                             (s->type->kind == TYPE_STRUCT || s->type->kind == TYPE_ENUM ||
+                              s->type->kind == TYPE_SUM || s->type->kind == TYPE_BITSTRUCT) &&
+                             strcmp(s->type->struct_name, t->value) == 0;
+            if (s->is_const && !names_type && s->type && s->type->kind == TYPE_ENUM &&
+                s->type->struct_name) {
+                /* Enum resolution rewrote `Color.Red` to its C constant
+                 * `Color_Red` before this check. */
+                const char* en = s->type->struct_name;
+                size_t el = strlen(en);
+                const char* member = strncmp(t->value, en, el) == 0 && t->value[el] == '_'
+                                         ? t->value + el + 1 : t->value;
+                snprintf(msg, sizeof(msg), "`%s` %s, and '%s.%s' is an enum member, a constant",
+                         op, head, en, member);
+                snprintf(hint, sizeof(hint), "an enum value is a name, not a count; assign the member "
+                         "you mean to a variable (`c = %s.<member>`)", en);
+            } else if (s->is_const) {
+                snprintf(msg, sizeof(msg), "`%s` %s, and '%s' is a constant", op, head, nm);
+                snprintf(hint, sizeof(hint), "copy it into a local and step that (`n = %s`, then `n%s`)",
+                         nm, op);
+            } else if (names_type) {
+                snprintf(msg, sizeof(msg), "`%s` %s, and '%s' is a type", op, head, nm);
+                snprintf(hint, sizeof(hint), "step a variable that holds a number");
+            } else if (s->is_function) {
+                snprintf(msg, sizeof(msg), "`%s` %s, and '%s' is a function", op, head, nm);
+                snprintf(hint, sizeof(hint),
+                         "bind its result to a local and step that (`v = %s(...)`, then `v%s`)", nm, op);
+            } else if (s->is_actor || s->is_module_alias) {
+                snprintf(msg, sizeof(msg), "`%s` %s, and '%s' is %s", op, head, nm,
+                         s->is_actor ? "an actor" : "a module");
+                snprintf(hint, sizeof(hint), "step a variable that holds a number");
+            }
+            break;
+        }
+        case AST_MEMBER_ACCESS:
+        case AST_ARRAY_ACCESS: {
+            ASTNode* temp = assign_target_temporary(t, table, 1);
+            if (temp) {
+                const char* fn = temp->value ? temp->value : "f";
+                snprintf(msg, sizeof(msg),
+                         "`%s` %s, and this is a part of the result of '%s(...)', a temporary",
+                         op, head, fn);
+                snprintf(hint, sizeof(hint),
+                         "bind the result to a local and step it there (`v = %s(...)`, then the "
+                         "field or element of `v`)", fn);
+            }
+            break;
+        }
+        case AST_FUNCTION_CALL: {
+            const char* fn = t->value ? t->value : "f";
+            snprintf(msg, sizeof(msg), "`%s` %s, and the result of '%s(...)' is a value, not storage",
+                     op, head, fn);
+            if (strcmp(fn, "ref_get") == 0)
+                snprintf(hint, sizeof(hint), "write the cell with ref_set (`ref_set(r, ref_get(r) %s 1)`)",
+                         op[0] == '+' ? "+" : "-");
+            else
+                snprintf(hint, sizeof(hint),
+                         "bind the result to a local and step that (`v = %s(...)`, then `v%s`)", fn, op);
+            break;
+        }
+        case AST_LITERAL: case AST_ARRAY_LITERAL: case AST_TUPLE_LITERAL:
+        case AST_STRUCT_LITERAL: case AST_STRING_INTERP: case AST_NULL_LITERAL:
+        case AST_NONE_LITERAL: case AST_BITSET_LITERAL: case AST_PATTERN_LITERAL:
+            snprintf(msg, sizeof(msg), "`%s` %s, and the operand is a literal", op, head);
+            snprintf(hint, sizeof(hint),
+                     "write the value you mean, or put it in a local and step that "
+                     "(`n = 5`, then `n%s`)", op);
+            break;
+        default:
+            snprintf(msg, sizeof(msg), "`%s` %s, and the operand is an expression, not storage",
+                     op, head);
+            snprintf(hint, sizeof(hint),
+                     "to change a variable, assign it (`y = y + 1`, or `y += 1`); for the value, "
+                     "write the arithmetic (`(y + 1) + 1`)");
+            break;
+    }
+    if (!msg[0]) {
+        /* Storage: what it holds must be a number. */
+        Type* ty = infer_type(t, table);
+        TypeKind k = ty ? ty->kind : TYPE_UNKNOWN;
+        int number = (is_numeric_scalar(k) || k == TYPE_BYTE) && !ty->distinct_name;
+        if (k != TYPE_UNKNOWN && k != TYPE_WILDCARD && !number) {
+            char what[160];
+            char field[64];
+            const char* nm = "x";
+            if (t->type == AST_IDENTIFIER && t->value) {
+                nm = written ? written : t->value;
+                snprintf(what, sizeof(what), "'%s'", nm);
+            } else if (t->type == AST_MEMBER_ACCESS && t->value) {
+                snprintf(what, sizeof(what), "the field '%s'", t->value);
+                ASTNode* b = t->child_count > 0 ? t->children[0] : NULL;
+                if (b && b->type == AST_IDENTIFIER && b->value) {
+                    snprintf(field, sizeof(field), "%s.%s", b->value, t->value);
+                    nm = field;
+                }
+            } else {
+                snprintf(what, sizeof(what), "the element");
+            }
+            snprintf(msg, sizeof(msg), "`%s` steps an integer or a float, and %s has type %s",
+                     op, what, type_spelled(ty));
+            if (ty->distinct_name)
+                snprintf(hint, sizeof(hint),
+                         "a distinct type steps through its base, as `%s += 1` would have to: "
+                         "`%s = (%s as %s %s 1) as %s`",
+                         nm, nm, nm, base_type_name(ty), op[0] == '+' ? "+" : "-", ty->distinct_name);
+            else if (k == TYPE_STRING)
+                snprintf(hint, sizeof(hint),
+                         "on a string it would move where the text starts, not change it; keep an "
+                         "index and step that (`i%s`, then `%s[i]`)", op, nm);
+            else if (k == TYPE_BOOL)
+                snprintf(hint, sizeof(hint), "flip it with `%s = !%s`, or count in an int", nm, nm);
+            else if (k == TYPE_DURATION)
+                snprintf(hint, sizeof(hint), "add a Duration to it (`%s = %s %s 1ms`)",
+                         nm, nm, op[0] == '+' ? "+" : "-");
+            else if (k == TYPE_ENUM)
+                snprintf(hint, sizeof(hint), "an enum value is a name, not a count; assign the member "
+                         "you mean (`%s = %s.<member>`)", nm, type_spelled(ty));
+            else if (k == TYPE_ARRAY)
+                snprintf(hint, sizeof(hint), "step one of its elements (`%s[i]%s`)", nm, op);
+            else if (k == TYPE_STRUCT)
+                snprintf(hint, sizeof(hint), "step one of its fields (`%s.<field>%s`)", nm, op);
+            else if (k == TYPE_PTR)
+                snprintf(hint, sizeof(hint), "a pointer is not a count; keep an index or an offset "
+                         "in an int and step that");
+            else if (k == TYPE_OPTIONAL)
+                snprintf(hint, sizeof(hint), "step the value it holds in a local, then store it back "
+                         "(`n = %s ?? 0`, `n%s`, `%s = n`)", nm, op, nm);
+            else
+                snprintf(hint, sizeof(hint), "give it a new value with an assignment");
+        }
+        if (ty) free_type(ty);
+    }
+    if (!msg[0]) return 0;
+    type_error_hint(msg, hint, expr->line, expr->column);
+    return 1;
+}
+
 int typecheck_binary_expression(ASTNode* expr, SymbolTable* table) {
     if (!expr || expr->type != AST_BINARY_EXPRESSION || expr->child_count < 2) return 0;
     
@@ -13937,7 +14158,8 @@ int typecheck_binary_expression(ASTNode* expr, SymbolTable* table) {
     }
 
     if (operator == TOKEN_ASSIGN) {
-        if (reject_const_element_write(left, table, expr)) {   /* #2516 */
+        if (reject_const_element_write(left, table, expr) ||   /* #2516 */
+            reject_string_char_write(left, table, expr)) {     /* #3022 */
             free_type(left_type);
             free_type(right_type);
             return 0;
