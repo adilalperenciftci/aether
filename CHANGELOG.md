@@ -14,6 +14,180 @@ cut while your branch is open cannot fold your entry into the released section.
 
 ## [current]
 
+## [0.837.0]
+
+### Fixed
+
+- **E0902 follows a borrowed `ptr` into a loop's next pass.** In a loop,
+  `kept = q` placed before `q = p` (or `kept = s.a` before `s.a = p`) keeps
+  `p` from the second pass on, but the check walked the body once, in
+  order, and let it through. A loop's body is now checked with what every
+  pass through it binds, nested loops, `break` and `continue` included, so
+  such a store is E0902; a loop that only reads what it stored in the same
+  pass stays accepted, and so does one that binds the local anew before
+  reading it (`q = list.new()`, `kept = q`, `q = p`) (#3047).
+
+- **A `string!` function may return a `ptr` as its string.** `return p`
+  with `p` a `ptr` parameter is accepted in a `-> string` function, which
+  hands the caller a reference of its own, but in a `-> string!` function it
+  was E0902 ("a borrowed `ptr` parameter, returned"), though the generated
+  C makes the same reference. The one value a `T!` function returns is now
+  checked as its `T` there too (#3050).
+
+- **An optional constant may name another.** `const O: int? = none` then
+  `const O2 = O`, or `var v = O2`, failed in the C compiler ("incompatible
+  types when initializing type 'int' using type 'ae_opt_int'"): the named
+  constant, an optional already, was wrapped in another. It is written as
+  that constant's own value now, `{0}` or `{ .has = 1, .val = ... }`, which
+  every C compiler takes for a static (#3049).
+
+- **An array literal of fields read through a pointer has their type.**
+  `arr = [b.inner, b.inner]` with `b = heap.new(Outer)` was taken for an
+  int array, and the C compiler refused `int arr[2] = {b->inner, ...}`;
+  so were literals of string and pointer fields read that way. A literal
+  whose elements agree on a type is an array of that type once they are
+  checked, where the early guess had defaulted it to int; a type the
+  place gives the literal still stands (#3051).
+
+- **A typed pointer moved by an integer keeps its type.** With `nodes` a
+  `*Node`, `nodes + 2` (or `nodes - n`, `n + nodes`) was typed a bare
+  `ptr`, so `(nodes + 2).w` passed the checker and failed in the C
+  compiler ("request for member 'w' in something not a structure or
+  union"). It is a `*Node` now, and its fields read and write; with
+  `nodes = base as *Node` and a `long` offset it was E0200, and is
+  accepted too. A field read or stored through a bare `ptr`, which has no
+  fields, is the checker's error now: view it as the struct it points at
+  first, `(p as *Node).w` (#3048).
+
+- **A function with no written result type returns what it returns.** One
+  whose `return` value the early inference pass could not type (a field
+  read through a pointer, among others) was given an int result: `return
+  ps.n + big` with a long `big` came back truncated with no word, and a
+  string field read that way failed in the C compiler. Such a function now
+  takes the checked type of its first value `return`, and is checked
+  before its callers, so each call has that type wherever it is written;
+  an erased call's int (`call(f)`) is still a default, not a result type
+  (#3056).
+
+- **E0902's check of a loop's next pass takes a local bound anew in every
+  arm.** A loop body's if/else, or a `match` whose arms cover its subject,
+  that binds a local whole in every arm before reading it leaves the local
+  holding, in that pass, only what the pass binds, as a statement of the
+  body binding it does: `kept = q` after it no longer counts the `p` the
+  pass before stored (#3047).
+
+- **E0902's check of a loop's next pass reads a local through its address
+  as by name.** A field the loop's body binds anew, read back through the
+  struct's address (`pb = (&b) as *Box`, `kept = pb.item`) after the
+  store, holds what the pass stored, as it does read by name; read through
+  the address before the store, it still carries the pass before's value
+  (#3047).
+
+- **E0902 checks a `defer` where it runs.** A `defer` reads what its
+  block's locals hold when the block is left, but its statement was
+  checked where it is written, so `q = list.new()`, `defer kept = q`,
+  `q = p` stored the borrowed `p` unrefused. A defer is now checked at the
+  end of its block, and in a loop's body at the end of each pass (#3057).
+
+- **E0902 follows a closure that reads a borrowed `ptr` stored after it
+  was written.** `pb = (&b) as *Box`, `g = || { kept = pb.item }`, then
+  `b.item = p` and `call(g)` was accepted, though `g` stores `p` when it
+  runs; the same in a straight line was refused. A closure is checked where
+  it is written, and it reads its captures as they stood there, except
+  through an address of a local or a local it shares with the function
+  (one a closure assigns): those it reads as they are when it runs. Such a
+  closure is now checked again where it is called or passed (directly, by
+  another name, to a function, in a loop), and holds what it reads there
+  wherever it goes, returned or stored. A closure that copies what it
+  captures, or runs before the store, stays accepted (#3058).
+
+- **A keeping function cast to a C function pointer is one error, wherever
+  it is written.** `keep_it as fn(ptr, ptr)`, with `keep_it` keeping a
+  `@keep ptr` parameter, was E0902 twice as a struct literal's field and
+  three times as an if-expression's arm, and not at all as an array
+  literal's element or a match arm's value, which compiled. Each such cast
+  is now refused once; a cast that names a mode itself, `as fn(@keep ptr)`,
+  is refused for that alone (#3060).
+
+- **Migrating from 0.835: E0902's two new refusals, and their one-line
+  fixes.** 0.836.0 refuses two shapes that 0.835.0 compiled, both intended
+  (#2990, #3033, #2980). A pointer into a borrowed argument, returned: since
+  #3033 `p + n` carries what `p` carries, and the parameter is declared
+  `@into`, so the function's result holds it.
+
+  ```aether
+  slice(bytes: ptr, offset: int) -> ptr { return bytes + offset }      // E0902 on 0.836.0
+  slice(bytes: @into ptr, offset: int) -> ptr { return bytes + offset } // the result holds it: @into
+  ```
+
+  A function that keeps its argument, stored as a plain function pointer: a
+  plain `fn` type borrows every `ptr`, so the slot is given the function's
+  modes, and the function goes there with no cast.
+
+  ```aether
+  struct Table { set: fn(ptr, ptr) }
+  t = Table { set: keep_it as fn(ptr, ptr) }       // E0902: a plain fn type borrows every ptr
+  struct Table { set: fn(ptr, @keep ptr) }         // the slot says what it keeps
+  t = Table { set: keep_it }
+  ```
+
+  The E0902 help now names the fix: the parameter's declaration
+  (`bytes: @into ptr`) for the first, the slot's type with the function's
+  modes (`fn(ptr, @keep ptr)`) for the second. The 0.836.0 entry carries
+  the same section, and so does the language reference under String
+  ownership (#3059).
+
+- **An inferred result read through a pointer can be an optional.** A
+  function with no written result type that returns an optional read
+  through a pointer after a none-check (`o = p.opt`, `if o != none { return
+  o }`, `return none`, or `if o == none { return none } else { return o }`)
+  returns that optional, `T?`, as it does when the early pass can type `o`;
+  0.836.0 took its result for an int, so a `??` on it was refused (#3056).
+
+- **Mutually recursive functions with inferred results keep their type.**
+  `a` returning `p.n` (a long read through a pointer) or `b(...)`, and `b`
+  returning `a(...)`, gave `b` the int default, so a long that went through
+  it was cut to 32 bits (705032704 for 5000000000, as in 0.836.0). The
+  functions of such a cycle are checked in an order that types each from
+  the one whose `return` gives the type, whichever the program reaches
+  first (#3056).
+
+- **A clause set returns the join of its clauses' results.** A function
+  written as several clauses took the result of its first clause with a
+  known type, so a later clause's wider value was cut to it with no word:
+  `pick(0, s: int, b: long) -> s` with `pick(k, s: int, b: long) -> b`
+  returned 705032704 for 5000000000. Its result is now the join of every
+  clause's, as an if-expression's arms join (a long, a float, an f32 or a
+  uint32 beside an int is that type). A type written on a clause is the
+  set's and an inferred clause must fit it, and two results that do not
+  join (an int and a string) are E0200 naming both (#3061).
+
+- **A closure compares with `null` and takes it.** A closure value (a
+  moded `fn(@keep ptr, int) -> int` slot, a bare `fn`, a closure local or
+  parameter) compared with `null` passed the checker and failed in C
+  ("invalid operands to binary != (have '_AeClosure' and 'void *')"), and
+  `c = null` or `Slot { build: null }` failed there too. `c == null` and
+  `c != null` now ask whether it holds a function, which a field a struct
+  literal leaves out does not, and `null` stores the empty closure, giving
+  back the one the place held. A plain `fn(int) -> int` slot, a C function
+  pointer, compares as before (#3062).
+
+- **A condition's own error no longer hides its body's errors.** In 0.836.0
+  a condition that reported its own error was not also called not boolean,
+  but the whole `if`, `while` or `for` was then skipped, so an error in its
+  body went unreported. The body is checked now; "For loop condition must
+  be boolean" is reported at the condition rather than at 0:0; and an
+  optional used bare as a condition gives one error, with the hint
+  `o != none`, and its `if` branch is checked narrowed (#3042).
+
+- **`os.system` and `os.exec` start their shell through the runtime's
+  locked fork.** In 0.836.0 they still used `system()` and `popen()`, which
+  fork outside the fork lock, so on macOS a shell they started could
+  inherit another thread's pipe between its `pipe()` and `fcntl()`. The
+  exit status, signal handling and captured output are system()'s and
+  popen()'s; a command that starts with `-` is run as a command, as glibc
+  runs it (#3046).
+
 ## [0.836.0]
 
 ### Migrating from 0.835
