@@ -4473,18 +4473,22 @@ void hoist_opt_string_locals(CodeGenerator* gen, ASTNode* body) {
  * named `func_name` (in either dotted source-form or underscored
  * extern-form). Returns the param's TypeKind, or TYPE_UNKNOWN if the
  * callee can't be resolved. */
-/* Does the parameter at `idx` of the callee keep what it is given past the
- * call: an Aether function's `@keep` one, an extern's `@retain` one (R4)?
- * Any other borrows it for the call. */
+/* Does the parameter at `idx` of the callee hold what it is given past the
+ * call: an Aether function's `@keep` one, an extern's `@retain` one (R4),
+ * or either's `@into` one, whose result holds it (#2990)? Any other borrows
+ * it for the call. */
 int call_param_keeps(CodeGenerator* gen, const char* func_name, int idx) {
     if (!gen || !func_name || idx < 0) return 0;
-    if (is_retain_extern_param(gen, func_name, idx)) return 1;
+    if (is_retain_extern_param(gen, func_name, idx) || is_into_extern_param(gen, func_name, idx))
+        return 1;
     ASTNode* def = callee_def(gen, func_name);
     for (int i = 0, pi = 0; def && i < def->child_count; i++) {
         ASTNode* p = def->children[i];
         if (!p || p->type == AST_GUARD_CLAUSE || p->type == AST_BLOCK ||
             p->type == AST_REQUIRES_CLAUSE || p->type == AST_ENSURES_CLAUSE) continue;
-        if (pi++ == idx) return p->annotation && strstr(p->annotation, "keep_param") != NULL;
+        if (pi++ == idx)
+            return annotation_has_marker(p->annotation, "keep_param") ||
+                   annotation_has_marker(p->annotation, "into_param");
     }
     return 0;
 }

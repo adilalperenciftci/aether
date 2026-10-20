@@ -973,6 +973,7 @@ void code_generator_release(CodeGenerator* gen) {
                 free(gen->extern_registry[i].params_aether);
                 free(gen->extern_registry[i].params_retain);
                 free(gen->extern_registry[i].params_noescape);
+                free(gen->extern_registry[i].params_holds);
                 /* param_full's entries alias AST-owned Types; only the
                  * array is ours to free. */
                 free(gen->extern_registry[i].param_full);

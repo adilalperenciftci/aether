@@ -1130,6 +1130,24 @@ static void arrow_block_return_tail(ASTNode* body) {
     body->children[body->child_count - 1] = arrow_value_return(value, value->line, value->column);
 }
 
+/* What a function does with a `ptr` parameter, written before its type:
+ * `@keep` (keeps it past the call, #2926), `@into` (it may reach only the
+ * function's result, #2990). Each is a marker on the parameter; the type
+ * checker refuses a combination, or either one where it does not apply. */
+static void parse_param_modes(Parser* parser, char** annotation) {
+    while (peek_token(parser) && peek_token(parser)->type == TOKEN_AT &&
+           peek_ahead(parser, 1) && peek_ahead(parser, 1)->type == TOKEN_IDENTIFIER &&
+           peek_ahead(parser, 1)->value &&
+           (strcmp(peek_ahead(parser, 1)->value, "keep") == 0 ||
+            strcmp(peek_ahead(parser, 1)->value, "into") == 0)) {
+        const char* marker = strcmp(peek_ahead(parser, 1)->value, "keep") == 0 ? "keep_param"
+                                                                               : "into_param";
+        advance_token(parser);
+        advance_token(parser);
+        *annotation = annotation_add_marker(*annotation, marker);
+    }
+}
+
 // Parse closure expression: |params| -> expr  OR  |params| { block }
 // Also handles: || { block } (no params, double-pipe)
 ASTNode* parse_closure_expression(Parser* parser) {
@@ -1162,8 +1180,10 @@ ASTNode* parse_closure_expression(Parser* parser) {
                 }
                 ASTNode* param = create_ast_node(AST_CLOSURE_PARAM, param_name->value,
                                                   param_name->line, param_name->column);
-                // Optional type annotation: |x: int|
+                // Optional type annotation: |x: int|, and a parameter mode
+                // (`|el: @keep ptr|`) the type checker rules on.
                 if (match_token(parser, TOKEN_COLON)) {
+                    parse_param_modes(parser, &param->annotation);
                     Type* ptype = parse_type(parser);
                     if (ptype) {
                         param->node_type = ptype;
@@ -5301,6 +5321,11 @@ ASTNode* parse_extern_struct_field(Parser* parser) {
  *             and a `ptr` slot gets a box on the caller's stack instead of
  *             a heap one (#2523). Only meaningful on `ptr` and `fn`.
  *
+ *   @into     the C function's result points into or holds the `ptr`
+ *             argument, which may go nowhere else (#2990). Trusted, as
+ *             `@retain` is; a call is checked as one to an Aether
+ *             function's `@into` parameter.
+ *
  * Multiple annotations stack: `name: @aether @retain string` is legal.
  * Order is irrelevant; storage is a comma-separated set on
  * `param->annotation`, tested by substring. */
@@ -5316,11 +5341,14 @@ static void parse_extern_param_attrs_and_type(Parser* parser, ASTNode* param) {
                 tag = "retain_param";
             } else if (strcmp(attr->value, "noescape") == 0) {
                 tag = "noescape_param";
+            } else if (strcmp(attr->value, "into") == 0) {
+                tag = "into_param";
             }
             if (tag) advance_token(parser);
         }
         if (!tag) {
-            parser_error(parser, "unknown extern-param attribute (expected @aether, @retain or @noescape)");
+            parser_error(parser, "unknown extern-param attribute (expected @aether, @retain, "
+                                 "@noescape or @into)");
             break;
         }
         /* Append to the comma-separated set, deduping. */
@@ -6153,15 +6181,10 @@ ASTNode* parse_pattern(Parser* parser) {
                                               token->line, token->column);
 
             // Optional type annotation: param: type, `param: @keep ptr` for a
-            // pointer the function keeps past the call (#2926).
+            // pointer the function keeps past the call (#2926), `param:
+            // @into ptr` for one that may reach only its result (#2990).
             if (match_token(parser, TOKEN_COLON)) {
-                if (peek_token(parser) && peek_token(parser)->type == TOKEN_AT &&
-                    peek_ahead(parser, 1) && peek_ahead(parser, 1)->type == TOKEN_IDENTIFIER &&
-                    peek_ahead(parser, 1)->value && strcmp(peek_ahead(parser, 1)->value, "keep") == 0) {
-                    advance_token(parser);
-                    advance_token(parser);
-                    pattern->annotation = annotation_add_marker(pattern->annotation, "keep_param");
-                }
+                parse_param_modes(parser, &pattern->annotation);
                 Type* param_type = parse_type(parser);
                 if (param_type) {
                     pattern->node_type = param_type;

@@ -205,9 +205,20 @@ call, returns it, or passes it to another keeping parameter) declares it
 function, or a closure that runs and is dropped inside the call, does not
 outlive it: putting the parameter in one keeps nothing unless the struct or
 the closure escapes itself. A `ptr` parameter that only borrows is given a
-closure in a box on the caller's stack, so nothing is allocated. The full
-rule, with what counts as escaping, is in the language reference's
-[String ownership](language-reference.md#string-ownership).
+closure in a box on the caller's stack, so nothing is allocated.
+
+A function that only hands a `ptr` parameter to its result (a constructor
+that builds a recorder, an iterator or a view around it) declares it
+`@into` instead: it may return it, alone or in a struct, a tuple, an
+optional or a closure, and nothing else. The caller holds the result as it
+holds a struct local that holds its argument: in a local, read, lent to
+borrowing parameters, and E0902 only where the result escapes with a
+borrowed parameter of the caller. So `@into` does not spread up the call
+chain as `@keep` does; a function that returns such a result made from its
+own parameter declares that one `@into` too. A string goes to an `@into ptr`
+through `string.keep(s)`, and a closure goes in a heap box with its own
+reference. The full rule, with what counts as escaping, is in the language
+reference's [String ownership](language-reference.md#string-ownership).
 
 ### Panics
 

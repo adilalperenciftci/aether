@@ -195,7 +195,8 @@ place by place:
   net server route handlers and the QuickJS binding do. A closure passed to
   a `ptr` parameter is boxed: on the caller's stack for a parameter that
   only borrows, on the heap, with its own reference, for one declared
-  `@keep` or `@retain`.
+  `@keep` or `@retain`, and for one declared `@into`, whose result holds it
+  past the call (#2990); `release_closure` gives that reference back.
 
 - **Stored in a list or a map.** A closure value stored into a list or a
   map is heap-boxed (the `fn -> ptr` coercion, or an explicit

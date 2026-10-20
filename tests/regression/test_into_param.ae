@@ -1,0 +1,133 @@
+// #2990: a `ptr` parameter declared `@into` may reach the function's result
+// and nowhere else. The caller holds the result the way it holds a struct
+// local, so a constructor that builds a value around its argument no longer
+// makes every caller up the chain declare `@keep`. This is aephysics' query
+// recorder (docs/design/ownership-model.md): the recorder holds the
+// caller's context, lives in a local, and is lent to borrowing parameters.
+// Also an `@into` result that is a pointer, a tuple or an optional, a
+// closure literal given to an `@into ptr` (boxed on the heap, since the
+// result holds it past the call), a string through `string.keep`, several
+// `@into` parameters, and a C function's `@into` parameter.
+
+import std.string
+
+extern exit(code: int)
+extern calloc(n: int, size: int) -> ptr
+extern free(p: ptr)
+extern memchr(s: @into ptr, c: int, n: int) -> ptr
+
+struct Counter {
+    hits: int
+}
+
+struct QueryRecorder {
+    context: ptr
+    count: int
+    has_overlap: bool
+}
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+query_recorder(context: @into ptr) -> QueryRecorder {
+    return QueryRecorder { context: context, count: 0, has_overlap: false }
+}
+
+// Returns what another builder makes of its parameter, so it is `@into` too.
+start_query(context: @into ptr) -> QueryRecorder {
+    return query_recorder(context)
+}
+
+record_visit(rec: ptr) -> int {
+    q = rec as *QueryRecorder
+    q.count = q.count + 1
+    (q.context as *Counter).hits = (q.context as *Counter).hits + 1
+    return q.count
+}
+
+finish_query(q: *QueryRecorder) -> int {
+    return q.count * 10
+}
+
+overlap(context: ptr) -> int {
+    q = query_recorder(context)
+    q.has_overlap = true
+    record_visit((&q) as ptr)
+    record_visit((&q) as ptr)
+    return finish_query(&q)
+}
+
+first(p: @into ptr) -> ptr {
+    return p
+}
+
+pair(a: @into ptr, b: @into ptr) -> (ptr, ptr) {
+    return a, b
+}
+
+maybe(p: @into ptr) -> ptr? {
+    if p == null { return none }
+    return p
+}
+
+struct Job {
+    cb: ptr
+    n: int
+}
+
+job(cb: @into ptr, n: int) -> Job {
+    return Job { cb: cb, n: n }
+}
+
+run_job(j: Job) -> int {
+    fn f = unbox_closure(j.cb)
+    int v = call(f, j.n)
+    return v
+}
+
+make_job(k: int) -> Job {
+    // The closure literal's box outlives this call: the result holds it.
+    return job(| x: int | { return x + k }, 5)
+}
+
+// The string `s` owns is freed when this returns; the result holds the
+// reference `string.keep` handed over. (Built from a parameter: a concat of
+// two literals folds to a literal.)
+keep_text(w: string) -> ptr {
+    s = "${w}to"
+    return first(string.keep(s))
+}
+
+main() {
+    c = heap.new(Counter)
+    check(overlap(c) == 20, "the recorder held in a local and lent")
+    check(c.hits == 2, "the visitor reached the caller's context")
+    r = start_query(c)
+    check(r.context == c, "a builder chained through @into")
+
+    p = first(c)
+    a, b = pair(c, p)
+    check(a == b, "two @into arguments held by one result")
+    m = maybe(c)
+    check(m! == c, "an optional result")
+    check(maybe(null) == none, "an optional result, none")
+
+    j = make_job(37)
+    check(run_job(j) == 42, "a closure given to an @into ptr outlives the call")
+    release_closure(j.cb)
+
+    held = keep_text("in")
+    check(string.equals(held, "into") == 1, "a string handed over with string.keep outlives its owner")
+    string.release_kept(held)
+
+    buf = calloc(8, 1)
+    (buf as byte[])[3] = 7
+    hit = memchr(buf, 7, 8)
+    check(hit != null, "a C function's @into parameter")
+    free(buf)
+    println("ok")
+}

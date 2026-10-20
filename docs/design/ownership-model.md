@@ -333,7 +333,12 @@ the signature, so no call site reads another function's body:
   container, or passed to a `@keep` or `@retain` parameter). The first
   checker counted every struct literal and every capture, which made
   downstream code (aephysics, ae3d, aeb) declare `@keep` for a struct or a
-  callback that never left the call.
+  callback that never left the call. A tuple and an optional hold it as a
+  struct does, a value read out of a holder (a field, a tuple part, an
+  optional's payload, a `match` binding) holds it unless its type cannot
+  hold a pointer, and a call through a closure that captured it may return
+  it, so its result holds it too (#2990 found the checker following none of
+  these: `t = (p, 1)` returned, `kept = o!` and `kept = call(f)` passed).
 - The checker verifies each function against its own body: a `ptr`
   parameter not declared `@keep` is not kept. A call is checked against the
   callee's signature.
@@ -344,7 +349,9 @@ the signature, so no call site reads another function's body:
   module variable or local already refuses a string by type.
 - A closure's `ptr` parameter is always borrowed, and a function with a
   `@keep` parameter is called by name: a call through a value cannot see
-  what the callee keeps. A typed pointer (`*T`) and a `distinct` type over
+  what the callee keeps. That holds for every value a function becomes: a
+  closure value, and a typed function pointer (`f as fn(ptr)`, a `fn(ptr)`
+  variable, field or argument), which #2990 found unchecked. A typed pointer (`*T`) and a `distinct` type over
   `ptr` are left alone: a string converts to neither.
 - Measured cost: 329 `@keep` annotations across 60 files of std, contrib and
   the tests, applied until the checker found no more (keeping cascades up
@@ -458,8 +465,13 @@ and result type. No rule reads another function's body.
   parameter as borrowed (#3013); both are carried together. For a C host
   the catalog states the contract: keep the argument alive while the
   result is held.
-- **Generated code.** `@into` changes none. A `ptr` owns nothing (R4); the
-  rule is a check, as E0902 is.
+- **Generated code.** A `ptr` owns nothing (R4); the rule is a check, as
+  E0902 is, with one exception found while building it: a closure given
+  to an `@into ptr` goes in a heap box holding a reference of its own, as
+  for `@keep` and `@retain`, and `release_closure` gives it back. The box a
+  borrowing `ptr` parameter gets lives on the caller's stack and the
+  closure's environment is released after the call, so a result holding
+  it would dangle.
 
 The diagnostics, all E0902:
 
@@ -474,17 +486,20 @@ The diagnostics, all E0902:
 - `@into` with `@keep`, `@retain` or `@noescape`: "'p' is declared both
   `@into` and `@keep`", help "`@keep` already lets it reach the result";
 - on a closure's parameter: "a closure's `ptr` parameter is always
-  borrowed; `@into` and `@keep` are for named functions" (today the parser
-  says "Expected PIPE, got AT");
+  borrowed; `@into` and `@keep` are for named functions" (the parser used
+  to say "Expected PIPE, got AT");
 - a function used as a value: "'f' passes its `ptr` parameter 'p' into its
   result (`@into`), so it cannot be used as a value", help "call it by
   name: a call through a function value treats every `ptr` as borrowed";
 - a result that escapes with a borrowed parameter of the caller: today's
   message with the holder named, "'context' is a borrowed `ptr` parameter
   held by the result of 'query_recorder' that is stored in a module-level
-  `var`, which outlives the call", help "declare it `@into ptr` if only this
-  function's result holds it, `@keep ptr` if the function keeps it
-  elsewhere";
+  `var`, which outlives the call", with today's help ("declare the parameter
+  `@keep ptr` if the function keeps it"); where the escape is a `return`,
+  the help is "declare it `@into ptr` if only this function's result holds
+  it, `@keep ptr` if the function keeps it elsewhere" (written for every
+  escape at first; declaring `@into` fixes only a return, and anywhere else
+  it would only move the error to the `@into` message);
 - a string given implicitly: "a `string` is given to an `@into ptr`
   parameter, and the result holds it past the call", help "hand over a
   reference of its own with `string.keep(s)`".
@@ -755,6 +770,7 @@ store leaked.
 **A literal may be kept as it is.** E0902 refuses a `string` given to a
 `@keep ptr` without `string.keep`, but a string literal is pinned and never
 released, so a slot may keep it as it stands (`pqueue.push(q, 1, "job")`).
+So may a `const` bound to one, as C memory already took it (#2990).
 
 **A permutation takes nothing.** Sorting moves the elements' pointers
 (`mem.swap_ptrs`) and compares through borrowed reads, so it neither copies

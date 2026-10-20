@@ -2423,6 +2423,49 @@ static void warn_erased_result_closures(void) {
     g_tc_erased_closure_count = 0;
 }
 
+/* #2926, #2990: a call through a function value cannot see what the callee
+ * keeps (`@keep`) or hands to its result (`@into`), so a function with
+ * either parameter is called by name. `ident` names the function `def`
+ * where it is used as a value (a closure, a typed function pointer, a cast
+ * to one). Reports each such parameter; returns 1 when there was one. */
+static int refuse_moded_fn_value(ASTNode* ident, ASTNode* def) {
+    int refused = 0;
+    for (int i = 0; ident && def && i < def->child_count; i++) {
+        ASTNode* p = def->children[i];
+        if (!p || !p->annotation) continue;
+        int keep = annotation_has_marker(p->annotation, "keep_param");
+        int into = annotation_has_marker(p->annotation, "into_param");
+        if (!keep && !into) continue;
+        char msg[256];
+        if (keep)
+            snprintf(msg, sizeof(msg),
+                     "'%s' keeps its `ptr` parameter '%s' (`@keep`), so it cannot be used as a value",
+                     ident->value, p->value ? p->value : "?");
+        else
+            snprintf(msg, sizeof(msg),
+                     "'%s' passes its `ptr` parameter '%s' into its result (`@into`), so it cannot "
+                     "be used as a value",
+                     ident->value, p->value ? p->value : "?");
+        type_error_code_hint(msg,
+            "call it by name: a call through a function value treats every `ptr` as borrowed",
+            ident->line, ident->column, AETHER_ERR_KEEPS_BORROWED);
+        refused = 1;
+    }
+    return refused;
+}
+
+/* The same for a named function bound to a typed C function pointer slot
+ * (`fn(ptr)`): an argument, a field, a variable, an element, a result. */
+static void refuse_moded_fn_in_fnptr_slot(SymbolTable* table, ASTNode* value, Type* slot_type) {
+    if (!value || value->type != AST_IDENTIFIER || !value->value || !slot_type ||
+        slot_type->kind != TYPE_FUNCTION || !slot_type->is_fnptr)
+        return;
+    Symbol* sym = lookup_symbol(table, value->value);
+    if (sym && sym->is_function && sym->node &&
+        (sym->node->type == AST_FUNCTION_DEFINITION || sym->node->type == AST_BUILDER_FUNCTION))
+        refuse_moded_fn_value(value, sym->node);
+}
+
 /* #2055: a top-level function named in value position -- `op = add_fn`,
  * a branch of `if c { add_fn } else { mul_fn }` -- is a closure value. Its
  * symbol carries only the return type (that is what a call to it yields),
@@ -2443,18 +2486,8 @@ static int function_value_annotate(ASTNode* ident, SymbolTable* table) {
         ASTNode* p = def->children[i];
         if (p && p->type != AST_GUARD_CLAUSE && p->type != AST_BLOCK &&
             p->type != AST_REQUIRES_CLAUSE && p->type != AST_ENSURES_CLAUSE) count++;
-        /* #2926: a call through a value cannot see what the callee keeps,
-         * so a function that keeps a `ptr` parameter is called by name. */
-        if (p && annotation_has_marker(p->annotation, "keep_param")) {
-            char msg[256];
-            snprintf(msg, sizeof(msg),
-                     "'%s' keeps its `ptr` parameter '%s' (`@keep`), so it cannot be used as a value",
-                     ident->value, p->value ? p->value : "?");
-            type_error_code_hint(msg,
-                "call it by name: a call through a function value treats every `ptr` as borrowed",
-                ident->line, ident->column, AETHER_ERR_KEEPS_BORROWED);
-        }
     }
+    refuse_moded_fn_value(ident, def);
     Type** params = count ? malloc(sizeof(Type*) * (size_t)count) : NULL;
     int k = 0;
     for (int i = 0; i < def->child_count && k < count; i++) {
@@ -2542,6 +2575,7 @@ static int closure_for_fnptr(SymbolTable* table, ASTNode* value, Type* value_typ
 static void reject_closure_for_fnptr(SymbolTable* table, ASTNode* call, ASTNode* arg,
                                      Type* arg_type, Type* param_type, int index,
                                      const char* param_name) {
+    refuse_moded_fn_in_fnptr_slot(table, arg, param_type);
     if (!closure_for_fnptr(table, arg, arg_type, param_type)) return;
     char emsg[512];
     snprintf(emsg, sizeof(emsg),
@@ -2566,6 +2600,7 @@ typedef enum { FNPTR_SLOT_FIELD, FNPTR_SLOT_VARIABLE, FNPTR_SLOT_ELEMENT,
 static int reject_closure_in_fnptr_slot(SymbolTable* table, ASTNode* value, Type* value_type,
                                         Type* slot_type, FnptrSlotKind kind, const char* name,
                                         int line, int column) {
+    refuse_moded_fn_in_fnptr_slot(table, value, slot_type);
     if (!closure_for_fnptr(table, value, value_type, slot_type)) return 0;
     const char* nm = name ? name : "?";
     char emsg[512] = "";
@@ -3835,6 +3870,7 @@ Type* infer_type(ASTNode* expr, SymbolTable* table) {
                         if (operand_node->annotation) free(operand_node->annotation);
                         operand_node->annotation = strdup("fn_addr");
                         operand_is_fn_addr = 1;
+                        refuse_moded_fn_value(operand_node, fsym->node);
                     }
                 }
             }
@@ -4941,6 +4977,8 @@ static ASTNode* effect_resolve_callee(ASTNode* program, const char* name);
 static int has_ctx_first_param(ASTNode* func);
 static void check_strings_into_keep(ASTNode* program, ASTNode* fn, ASTNode* body,
                                     const char** globals, int nglobals);
+static void check_param_modes(ASTNode* program, ASTNode* decl);
+static const char* with_article(const char* name);
 // #481: validate `@pure`/`@no_fs`/`@no_net`/`@no_os` effect tags.
 static void check_effect_tags(ASTNode* program);
 // #522: fold `__pure(fn)` queries to compile-time bool constants.
@@ -6680,6 +6718,7 @@ int typecheck_program(ASTNode* program) {
             scoped_check_bindings(body, body);  // #521
             iso_check_function(child, body);    // #479 Isolated[T] move check
             check_borrowed_param_frees(program, child, body);
+            check_param_modes(program, child);
             check_borrowed_ptr_params(program, child, body, global_var_names, global_var_count);
             check_closures_ptr_params(program, body, global_var_names, global_var_count);
             check_strings_into_keep(program, child, body, global_var_names, global_var_count);
@@ -6692,6 +6731,8 @@ int typecheck_program(ASTNode* program) {
             iso_check_function(child, main_body);  // #479 Isolated[T] move check
             check_closures_ptr_params(program, main_body, global_var_names, global_var_count);
             check_strings_into_keep(program, child, main_body, global_var_names, global_var_count);
+        } else if (child->type == AST_EXTERN_FUNCTION) {
+            check_param_modes(program, child);
         }
     }
     g_tc_file = NULL;
@@ -7484,19 +7525,42 @@ static void check_borrowed_param_frees(ASTNode* program, ASTNode* fn, ASTNode* b
  * parameter in one is not a keep; the struct or the closure is then tracked
  * as holding it, and is a keep only when it escapes itself: returned, stored
  * in a field, a module-level `var` or a container, sent in a message, or
- * passed to a `@keep` or `@retain` parameter. */
-#define KEEP_SET_MAX 64
-/* Each name that holds a borrowed `ptr` parameter (the parameter, a local
- * bound to it, or a local struct or closure that holds it), the parameter
- * it holds, and what holds it ("held by a struct", "captured by a closure";
- * NULL for the pointer itself). */
+ * passed to a `@keep` or `@retain` parameter.
+ *
+ * #2990: a parameter declared `@into` may reach the function's result and
+ * nowhere else. It is checked as a borrowed one, except that a `return` may
+ * hand it back (the pointer, a view of it, or a struct, tuple, optional or
+ * closure holding it). A call's result holds what its arguments to `@into`
+ * parameters carry, decided by the callee's signature, and is then tracked
+ * as a struct local is. */
+#define KEEP_SET_MAX 128
+#define CARRIED_MAX 8
 typedef struct KeepCtx KeepCtx;
+
+/* What a value carries of the borrowed parameters: each parameter, and what
+ * holds it ("held by a struct", "held by the result of 'f'"; NULL: the value
+ * is the pointer itself, or a view of it). A result built from two `@into`
+ * arguments carries both. */
+typedef struct {
+    int n;
+    const char* params[CARRIED_MAX];
+    const char* vias[CARRIED_MAX];
+} Carried;
+
+/* Each name that holds a borrowed `ptr` parameter (the parameter, a local
+ * bound to it, or a local struct, tuple, optional or closure that holds it),
+ * once per parameter it holds, and what holds it. */
 typedef struct {
     const char* names[KEEP_SET_MAX];
     const char* params[KEEP_SET_MAX];
     const char* vias[KEEP_SET_MAX];
     int count;
+    /* The function's `@into` parameters, which a `return` may hand back. */
+    const char* into[KEEP_SET_MAX];
+    int into_count;
+    ASTNode* program;
     Type* ret;   /* the function's declared result, or NULL */
+    int closure; /* the parameters are a closure's */
     /* #2979: a probe reports nothing; it records that a name escapes. Its
      * function, so a store into memory that ends with the function (a
      * field of a local allocation) is no escape. */
@@ -7519,37 +7583,64 @@ static int returns_string_at(Type* ret, int i, int n) {
     return 0;
 }
 
-/* What a value carries of a borrowed parameter: the parameter, and what
- * holds it (NULL: the value is the pointer itself, or a view of it). */
-typedef struct { const char* param; const char* via; } Carried;
+static void carried_add(Carried* c, const char* param, const char* via) {
+    for (int i = 0; i < c->n; i++)
+        if (!strcmp(c->params[i], param)) return;
+    if (c->n < CARRIED_MAX) {
+        c->params[c->n] = param;
+        c->vias[c->n++] = via;
+    }
+}
 
-static int keep_set_find(const KeepSet* s, const char* n) {
+static void carried_merge(Carried* c, Carried o) {
+    for (int i = 0; i < o.n; i++) carried_add(c, o.params[i], o.vias[i]);
+}
+
+static void carried_set_via(Carried* c, const char* via) {
+    for (int i = 0; i < c->n; i++) c->vias[i] = via;
+}
+
+/* Only what is held by something (a struct, a tuple, a result): the pointer
+ * itself has no fields or parts, and what is read through it is memory C
+ * owns, not the pointer. */
+static Carried carried_holders(Carried c) {
+    Carried h = { 0 };
+    for (int i = 0; i < c.n; i++)
+        if (c.vias[i]) carried_add(&h, c.params[i], c.vias[i]);
+    return h;
+}
+
+static Carried keep_set_lookup(const KeepSet* s, const char* n) {
+    Carried c = { 0 };
     for (int i = 0; n && i < s->count; i++)
-        if (!strcmp(s->names[i], n)) return i;
-    return -1;
+        if (!strcmp(s->names[i], n)) carried_add(&c, s->params[i], s->vias[i]);
+    return c;
 }
 
-static const char* keep_set_param(const KeepSet* s, const char* n) {
-    int i = keep_set_find(s, n);
-    return i >= 0 ? s->params[i] : NULL;
-}
-
-static void keep_set_add(KeepSet* s, const char* n, const char* param, const char* via) {
-    if (n && keep_set_find(s, n) < 0 && s->count < KEEP_SET_MAX) {
-        s->names[s->count] = n;
-        s->params[s->count] = param;
-        s->vias[s->count++] = via;
+static void keep_set_add(KeepSet* s, const char* n, Carried c) {
+    for (int k = 0; n && k < c.n; k++) {
+        int found = 0;
+        for (int i = 0; i < s->count && !found; i++)
+            found = !strcmp(s->names[i], n) && !strcmp(s->params[i], c.params[k]);
+        if (!found && s->count < KEEP_SET_MAX) {
+            s->names[s->count] = n;
+            s->params[s->count] = c.params[k];
+            s->vias[s->count++] = c.vias[k];
+        }
     }
 }
 
-static const char* mentions_name(ASTNode* n, const KeepSet* s) {
-    if (!n) return NULL;
-    if (n->type == AST_IDENTIFIER && keep_set_param(s, n->value)) return keep_set_param(s, n->value);
-    for (int i = 0; i < n->child_count; i++) {
-        const char* p = mentions_name(n->children[i], s);
-        if (p) return p;
-    }
-    return NULL;
+static int keep_set_is_into(const KeepSet* s, const char* param) {
+    for (int i = 0; param && i < s->into_count; i++)
+        if (!strcmp(s->into[i], param)) return 1;
+    return 0;
+}
+
+/* What the names `n` mentions hold (a closure capturing them). */
+static void mentioned_params(ASTNode* n, const KeepSet* s, Carried* out) {
+    if (!n) return;
+    if (n->type == AST_IDENTIFIER && n->value) carried_merge(out, keep_set_lookup(s, n->value));
+    for (int i = 0; i < n->child_count; i++) mentioned_params(n->children[i], s, out);
 }
 
 /* Can a value of type `t` hold a pointer (a field read of a scalar, a
@@ -7566,56 +7657,31 @@ static int type_may_hold_ptr(Type* t) {
     }
 }
 
-/* The borrowed parameter `e` is, is a view of, or holds (a struct literal,
- * a closure capturing it, a field of a local struct holding it). */
-static Carried carries_borrowed_ptr(ASTNode* e, const KeepSet* s) {
-    Carried none = { NULL, NULL };
-    if (!e) return none;
-    switch (e->type) {
-        case AST_IDENTIFIER: {
-            int i = keep_set_find(s, e->value);
-            if (i < 0) return none;
-            Carried c = { s->params[i], s->vias[i] };
-            return c;
-        }
-        case AST_PTR_AS_STRUCT_CAST: case AST_PTR_AS_ARRAY_CAST: case AST_PTR_AS_FN_CAST:
-        case AST_VALUE_CAST:
-            return e->child_count > 0 ? carries_borrowed_ptr(e->children[0], s) : none;
-        case AST_IF_EXPRESSION: {
-            if (e->child_count < 3) return none;
-            Carried c = carries_borrowed_ptr(e->children[1], s);
-            return c.param ? c : carries_borrowed_ptr(e->children[2], s);
-        }
-        /* A field of a struct that holds it, or its address: the pointer
-         * itself has no fields, and a field read through it is a value read
-         * from the memory it points at, not the pointer. */
-        case AST_MEMBER_ACCESS: case AST_UNARY_EXPRESSION: {
-            if (e->type == AST_UNARY_EXPRESSION && (!e->value || strcmp(e->value, "&"))) return none;
-            if (e->type == AST_MEMBER_ACCESS && !type_may_hold_ptr(e->node_type)) return none;
-            Carried c = e->child_count > 0 ? carries_borrowed_ptr(e->children[0], s) : none;
-            if (!c.via) return none;
-            /* A `ptr` field read out of the struct is the pointer itself. */
-            if (e->type == AST_MEMBER_ACCESS && is_bare_ptr_type(e->node_type)) c.via = NULL;
-            return c;
-        }
-        case AST_STRUCT_LITERAL:
-            for (int i = 0; i < e->child_count; i++) {
-                ASTNode* f = e->children[i];
-                Carried c = (f && f->child_count > 0) ? carries_borrowed_ptr(f->children[0], s) : none;
-                if (c.param) { c.via = "held by a struct"; return c; }
-            }
-            return none;
-        case AST_CLOSURE: {
-            Carried c = { mentions_name(e, s), "captured by a closure" };
-            return c.param ? c : none;
-        }
-        default: return none;
-    }
+/* A value of type `t` read out of one that carries `c` (a field, an element,
+ * a tuple part, an optional's payload, a match binding) carries it too,
+ * unless it cannot hold a pointer; a bare `ptr` read out is the pointer. */
+static Carried carried_read_out(Carried c, Type* t) {
+    Carried none = { 0 };
+    if (!c.n || !type_may_hold_ptr(t)) return none;
+    if (is_bare_ptr_type(t)) carried_set_via(&c, NULL);
+    return c;
 }
 
-static int is_keep_param(ASTNode* p) {
-    return p && annotation_has_marker(p->annotation, "keep_param");
+/* A parameter's `@keep`, `@into`, `@retain`... marker: `;`-separated on an
+ * Aether function's parameter, `,`-separated on an extern's. */
+static int param_has_mode(ASTNode* p, const char* tag) {
+    if (!p || !p->annotation || !tag) return 0;
+    size_t n = strlen(tag);
+    for (const char* q = p->annotation; (q = strstr(q, tag)) != NULL; q += n) {
+        int left = q == p->annotation || q[-1] == ';' || q[-1] == ',';
+        int right = q[n] == '\0' || q[n] == ';' || q[n] == ',';
+        if (left && right) return 1;
+    }
+    return 0;
 }
+
+static int is_keep_param(ASTNode* p) { return param_has_mode(p, "keep_param"); }
+static int is_into_param(ASTNode* p) { return param_has_mode(p, "into_param"); }
 
 /* The parameter of the Aether function `def` that argument `i` of `call`
  * fills, or NULL. A builder's `_ctx` is filled from the enclosing block
@@ -7639,35 +7705,188 @@ static ASTNode* call_param_of(ASTNode* def, ASTNode* call, int i) {
     return NULL;
 }
 
+/* The extern a call names: by its name, or for a qualified `ns.fn` into an
+ * imported module, by the merged `ns_fn` (as effect_resolve_callee finds a
+ * function). */
+static ASTNode* call_extern_decl(ASTNode* program, const char* name) {
+    if (!program || !name) return NULL;
+    char merged[256];
+    size_t n = strlen(name);
+    int dotted = strchr(name, '.') != NULL && n < sizeof(merged);
+    if (dotted) {
+        for (size_t i = 0; i < n; i++) merged[i] = name[i] == '.' ? '_' : name[i];
+        merged[n] = '\0';
+    }
+    for (int c = 0; c < program->child_count; c++) {
+        ASTNode* e = program->children[c];
+        if (!e || e->type != AST_EXTERN_FUNCTION || !e->value) continue;
+        if (!strcmp(e->value, name)) return e;
+        if (dotted && e->is_imported && !strcmp(e->value, merged)) return e;
+    }
+    return NULL;
+}
+
+/* The declaration a call is checked against: an Aether function, or an
+ * extern. NULL for a call through a value or a builtin. */
+static ASTNode* call_callee_decl(ASTNode* program, ASTNode* call) {
+    if (!program || !call || !call->value) return NULL;
+    ASTNode* def = effect_resolve_callee(program, call->value);
+    return def ? def : call_extern_decl(program, call->value);
+}
+
+/* The parameter of `decl` that argument `i` of `call` fills, or NULL. */
+static ASTNode* call_decl_param(ASTNode* decl, ASTNode* call, int i) {
+    if (!decl) return NULL;
+    if (decl->type == AST_EXTERN_FUNCTION) return i < decl->child_count ? decl->children[i] : NULL;
+    return call_param_of(decl, call, i);
+}
+
 /* Does the call `call` keep its argument `i`: a `@keep` parameter of an
  * Aether function, a `@retain` one of an extern? */
 static int call_keeps_arg(ASTNode* program, ASTNode* call, int i) {
-    ASTNode* def = effect_resolve_callee(program, call->value);
-    if (def) return is_keep_param(call_param_of(def, call, i));
-    for (int c = 0; program && c < program->child_count; c++) {
-        ASTNode* e = program->children[c];
-        if (!e || e->type != AST_EXTERN_FUNCTION || !e->value || strcmp(e->value, call->value)) continue;
-        ASTNode* p = i < e->child_count ? e->children[i] : NULL;
-        return p && p->annotation && strstr(p->annotation, "retain_param") != NULL;
-    }
+    ASTNode* decl = call_callee_decl(program, call);
+    ASTNode* p = call_decl_param(decl, call, i);
+    if (!p) return 0;
+    if (decl->type == AST_EXTERN_FUNCTION) return param_has_mode(p, "retain_param");
+    return is_keep_param(p);
+}
+
+/* Does the `match` arm pattern `pat` bind `name`? */
+static int pattern_binds_name(ASTNode* pat, const char* name) {
+    if (!pat || !name) return 0;
+    if (pat->type == AST_PATTERN_VARIABLE && pat->value && !strcmp(pat->value, name)) return 1;
+    for (int i = 0; i < pat->child_count; i++)
+        if (pattern_binds_name(pat->children[i], name)) return 1;
     return 0;
 }
 
+/* The borrowed parameters `e` is, is a view of, or holds (a struct, tuple
+ * or array literal, a closure capturing it, a part of a local that holds
+ * it, the result of a call that takes it as `@into`). */
+static Carried carries_borrowed_ptr(ASTNode* e, const KeepSet* s) {
+    Carried none = { 0 };
+    if (!e) return none;
+    switch (e->type) {
+        case AST_IDENTIFIER:
+            return keep_set_lookup(s, e->value);
+        case AST_PTR_AS_STRUCT_CAST: case AST_PTR_AS_ARRAY_CAST: case AST_PTR_AS_FN_CAST:
+        case AST_VALUE_CAST:
+            return e->child_count > 0 ? carries_borrowed_ptr(e->children[0], s) : none;
+        case AST_IF_EXPRESSION: {
+            if (e->child_count < 3) return none;
+            Carried c = carries_borrowed_ptr(e->children[1], s);
+            carried_merge(&c, carries_borrowed_ptr(e->children[2], s));
+            return c;
+        }
+        /* A field or an element of something that holds it, or its
+         * address: the pointer itself has no fields, and a field read
+         * through it is a value read from the memory it points at, not the
+         * pointer. */
+        case AST_MEMBER_ACCESS: case AST_OPTIONAL_CHAIN: case AST_ARRAY_ACCESS: {
+            if (e->child_count == 0) return none;
+            return carried_read_out(carried_holders(carries_borrowed_ptr(e->children[0], s)),
+                                    e->node_type);
+        }
+        case AST_UNARY_EXPRESSION: {
+            if (!e->value || strcmp(e->value, "&") || e->child_count == 0) return none;
+            return carried_holders(carries_borrowed_ptr(e->children[0], s));
+        }
+        /* An optional's payload (`o!`, `o ?? d`), or a result's value. */
+        case AST_TUPLE_UNWRAP: case AST_NULL_COALESCE: {
+            Carried c = none;
+            for (int i = 0; i < e->child_count; i++)
+                carried_merge(&c, carries_borrowed_ptr(e->children[i], s));
+            return carried_read_out(c, e->node_type);
+        }
+        case AST_STRUCT_LITERAL: case AST_TUPLE_LITERAL: case AST_ARRAY_LITERAL: {
+            Carried c = none;
+            for (int i = 0; i < e->child_count; i++) {
+                ASTNode* f = e->children[i];
+                if (e->type == AST_STRUCT_LITERAL) f = (f && f->child_count > 0) ? f->children[0] : NULL;
+                carried_merge(&c, carries_borrowed_ptr(f, s));
+            }
+            carried_set_via(&c, e->type == AST_STRUCT_LITERAL ? "held by a struct"
+                                : e->type == AST_TUPLE_LITERAL ? "held by a tuple"
+                                                               : "held by an array");
+            return c;
+        }
+        case AST_CLOSURE: {
+            Carried c = none;
+            mentioned_params(e, s, &c);
+            carried_set_via(&c, "captured by a closure");
+            return c;
+        }
+        /* A value `match`: an arm's value, or what an arm binds out of the
+         * value matched. */
+        case AST_MATCH_STATEMENT: {
+            if (e->child_count == 0) return none;
+            Carried scrut = carries_borrowed_ptr(e->children[0], s);
+            Carried c = none;
+            for (int i = 1; i < e->child_count; i++) {
+                ASTNode* arm = e->children[i];
+                if (!arm || arm->type != AST_MATCH_ARM || arm->child_count < 2) continue;
+                ASTNode* v = match_arm_value(arm->children[1]);
+                if (!v) continue;
+                carried_merge(&c, carries_borrowed_ptr(v, s));
+                if (scrut.n && v->type == AST_IDENTIFIER && v->value &&
+                    pattern_binds_name(arm->children[0], v->value))
+                    carried_merge(&c, carried_read_out(scrut, v->node_type));
+            }
+            return c;
+        }
+        case AST_FUNCTION_CALL: {
+            if (!e->value) return none;
+            Carried c = none;
+            /* A closure that captured the parameter may return it: a call
+             * through one (`call(f)`, `f()`) holds what it captured. */
+            if (!strcmp(e->value, "call") && e->child_count > 0)
+                c = carried_holders(carries_borrowed_ptr(e->children[0], s));
+            else
+                c = carried_holders(keep_set_lookup(s, e->value));
+            if (c.n) {
+                carried_set_via(&c, "held by a closure's result");
+                return carried_read_out(c, e->node_type);
+            }
+            /* The result of a call holds what it is given for an `@into`
+             * parameter: the pointer itself when the result is a pointer. */
+            ASTNode* decl = call_callee_decl(s->program, e);
+            for (int i = 0; decl && i < e->child_count; i++)
+                if (is_into_param(call_decl_param(decl, e, i)))
+                    carried_merge(&c, carries_borrowed_ptr(e->children[i], s));
+            if (c.n)
+                carried_set_via(&c, decl->node_type && decl->node_type->kind == TYPE_PTR
+                                        ? NULL
+                                        : aether_internf("held by the result of '%s'", e->value));
+            return c;
+        }
+        default: return none;
+    }
+}
+
 /* A place where what `c` holds outlives the call: E0902, or for a probe
- * (#2979), a note that it escapes. */
+ * (#2979), a note that it escapes. An `@into` parameter may go nowhere but
+ * the result; `how` says where it went instead. */
 static void report_borrowed_keep(KeepSet* s, ASTNode* at, Carried c, const char* how) {
-    if (s->probe) { s->escaped = 1; return; }
-    char msg[256];
-    if (c.via)
-        snprintf(msg, sizeof(msg),
-                 "'%s' is a borrowed `ptr` parameter %s that is %s, which outlives the call",
-                 c.param, c.via, how);
-    else
-        snprintf(msg, sizeof(msg), "'%s' is a borrowed `ptr` parameter, %s, which outlives the call",
-                 c.param, how);
-    type_error_code_hint(msg,
-        "declare the parameter `@keep ptr` if the function keeps it (a closure's cannot be)",
-        at->line, at->column, AETHER_ERR_KEEPS_BORROWED);
+    for (int i = 0; i < c.n; i++) {
+        if (s->probe) { s->escaped = 1; return; }
+        int into = keep_set_is_into(s, c.params[i]);
+        const char* what = into ? "an `@into ptr` parameter" : "a borrowed `ptr` parameter";
+        char msg[320];
+        if (c.vias[i])
+            snprintf(msg, sizeof(msg), "'%s' is %s %s that is %s, which outlives the call",
+                     c.params[i], what, c.vias[i], how);
+        else
+            snprintf(msg, sizeof(msg), "'%s' is %s, %s, which outlives the call", c.params[i],
+                     what, how);
+        const char* help =
+            into ? "an `@into` parameter may reach only the result; declare it `@keep ptr` if the "
+                   "function keeps it elsewhere"
+            : (!s->closure && !strcmp(how, "returned"))
+                ? "declare it `@into ptr` if only this function's result holds it, `@keep ptr` "
+                  "if the function keeps it elsewhere"
+                : "declare the parameter `@keep ptr` if the function keeps it (a closure's cannot be)";
+        type_error_code_hint(msg, help, at->line, at->column, AETHER_ERR_KEEPS_BORROWED);
+    }
 }
 
 static int is_global_name(const char* n, const char** globals, int nglobals) {
@@ -7692,6 +7911,52 @@ static const char* local_struct_root(ASTNode* lhs, const char** globals, int ngl
     return b->value;
 }
 
+/* `name` bound to what `c` holds: a local holds it, a module-level `var`
+ * keeps it. */
+static void bind_holder(KeepSet* s, ASTNode* at, const char* name, Carried c,
+                        const char** globals, int nglobals) {
+    if (!c.n || !name || !strcmp(name, "_")) return;
+    if (is_global_name(name, globals, nglobals))
+        report_borrowed_keep(s, at, c, "stored in a module-level `var`");
+    else
+        keep_set_add(s, name, c);
+}
+
+/* The names a `match` arm's pattern binds out of a value that carries `c`
+ * (of type `t`): `some(v)`, a struct pattern's fields, a list pattern's
+ * elements and tail. */
+static void bind_pattern_holders(KeepSet* s, ASTNode* pat, Carried c, Type* t,
+                                 const char** globals, int nglobals) {
+    if (!pat || !c.n) return;
+    if (pat->type == AST_PATTERN_VARIABLE && pat->value && pat->annotation &&
+        !strcmp(pat->annotation, "some_pattern")) {
+        bind_holder(s, pat, pat->value,
+                    carried_read_out(c, t && t->kind == TYPE_OPTIONAL ? t->element_type : NULL),
+                    globals, nglobals);
+    } else if (pat->type == AST_PATTERN_STRUCT) {
+        for (int k = 0; k < pat->child_count; k++) {
+            ASTNode* fp = pat->children[k];
+            ASTNode* sub = (fp && fp->child_count > 0) ? fp->children[0] : NULL;
+            if (!sub) continue;
+            Carried part = carried_read_out(carried_holders(c), sub->node_type);
+            if (sub->type == AST_PATTERN_STRUCT)
+                bind_pattern_holders(s, sub, part, sub->node_type, globals, nglobals);
+            else if (sub->type == AST_PATTERN_VARIABLE && sub->value)
+                bind_holder(s, sub, sub->value, part, globals, nglobals);
+        }
+    } else if (pat->type == AST_PATTERN_LIST || pat->type == AST_PATTERN_CONS) {
+        Type* elem = t && t->kind == TYPE_ARRAY ? t->element_type : NULL;
+        for (int k = 0; k < pat->child_count; k++) {
+            ASTNode* v = pat->children[k];
+            if (!v || v->type != AST_PATTERN_VARIABLE || !v->value) continue;
+            int tail = pat->type == AST_PATTERN_CONS && k == 1;
+            bind_holder(s, v, v->value,
+                        tail ? carried_holders(c) : carried_read_out(carried_holders(c), elem),
+                        globals, nglobals);
+        }
+    }
+}
+
 /* `in_closure`: `n` is inside a closure that captured the parameter. A
  * `return` there hands the value to whoever calls the closure, inside the
  * function unless the closure escapes, which is checked where it goes. */
@@ -7701,28 +7966,50 @@ static void check_ptr_keeps_in(ASTNode* program, ASTNode* n, KeepSet* s,
     if (n->type == AST_FUNCTION_DEFINITION || n->type == AST_BUILDER_FUNCTION) return;
     Carried c;
     if (n->type == AST_CLOSURE) {
-        if (mentions_name(n, s))
+        Carried m = { 0 };
+        mentioned_params(n, s, &m);
+        if (m.n)
             for (int i = 0; i < n->child_count; i++)
                 check_ptr_keeps_in(program, n->children[i], s, globals, nglobals, 1);
         return;
     }
     if (n->type == AST_VARIABLE_DECLARATION && n->value && n->child_count > 0 &&
-        (c = carries_borrowed_ptr(n->children[n->child_count - 1], s)).param) {
-        if (is_global_name(n->value, globals, nglobals))
-            report_borrowed_keep(s, n, c, "stored in a module-level `var`");
-        else keep_set_add(s, n->value, c.param, c.via);
+        (c = carries_borrowed_ptr(n->children[n->child_count - 1], s)).n)
+        bind_holder(s, n, n->value, c, globals, nglobals);
+    /* `a, b = v`: each part holds what the value carries, unless its type
+     * cannot hold a pointer; a tuple literal's parts are its elements. */
+    if (n->type == AST_TUPLE_DESTRUCTURE && n->child_count >= 2) {
+        int nv = n->child_count - 1;
+        ASTNode* rhs = n->children[nv];
+        Carried whole = carries_borrowed_ptr(rhs, s);
+        for (int v = 0; v < nv; v++) {
+            ASTNode* var = n->children[v];
+            if (!var || !var->value) continue;
+            Carried part = (rhs && rhs->type == AST_TUPLE_LITERAL && rhs->child_count == nv)
+                               ? carries_borrowed_ptr(rhs->children[v], s)
+                               : carried_read_out(whole, var->node_type);
+            bind_holder(s, var, var->value, part, globals, nglobals);
+        }
+    }
+    if (n->type == AST_MATCH_STATEMENT && n->child_count > 0 &&
+        (c = carries_borrowed_ptr(n->children[0], s)).n) {
+        for (int i = 1; i < n->child_count; i++) {
+            ASTNode* arm = n->children[i];
+            if (arm && arm->type == AST_MATCH_ARM && arm->child_count > 0)
+                bind_pattern_holders(s, arm->children[0], c, n->children[0]->node_type, globals,
+                                     nglobals);
+        }
     }
     if (n->type == AST_BINARY_EXPRESSION && n->value && !strcmp(n->value, "=") &&
         n->child_count == 2 && n->children[0] &&
-        (c = carries_borrowed_ptr(n->children[1], s)).param) {
+        (c = carries_borrowed_ptr(n->children[1], s)).n) {
         ASTNode* lhs = n->children[0];
         const char* root;
         if (lhs->type == AST_IDENTIFIER) {
-            if (is_global_name(lhs->value, globals, nglobals))
-                report_borrowed_keep(s, n, c, "stored in a module-level `var`");
-            else keep_set_add(s, lhs->value, c.param, c.via);
+            bind_holder(s, n, lhs->value, c, globals, nglobals);
         } else if ((root = local_struct_root(lhs, globals, nglobals))) {
-            keep_set_add(s, root, c.param, "held by a struct");
+            carried_set_via(&c, "held by a struct");
+            keep_set_add(s, root, c);
         } else if (!(s->probe && s->ctx && !c_lvalue_outlives(s->ctx, lhs, s->depth))) {
             /* #2979: for a probe, memory that ends with the function holds
              * it no longer than the function does. */
@@ -7730,25 +8017,33 @@ static void check_ptr_keeps_in(ASTNode* program, ASTNode* n, KeepSet* s,
         }
     }
     if (n->type == AST_RETURN_STATEMENT && !in_closure) {
-        for (int i = 0; i < n->child_count; i++)
-            if ((c = carries_borrowed_ptr(n->children[i], s)).param &&
-                !(!c.via && returns_string_at(s->ret, i, n->child_count)))
-                report_borrowed_keep(s, c.via ? n->children[i] : n, c, "returned");
+        for (int i = 0; i < n->child_count; i++) {
+            c = carries_borrowed_ptr(n->children[i], s);
+            /* An `@into` parameter may be handed back; a `ptr` returned at
+             * a `string` position is taken as a string. */
+            for (int k = 0; k < c.n; k++) {
+                if (keep_set_is_into(s, c.params[k])) continue;
+                if (!c.vias[k] && returns_string_at(s->ret, i, n->child_count)) continue;
+                Carried one = { 0 };
+                carried_add(&one, c.params[k], c.vias[k]);
+                report_borrowed_keep(s, c.vias[k] ? n->children[i] : n, one, "returned");
+            }
+        }
     }
     if (n->type == AST_MESSAGE_CONSTRUCTOR) {
         for (int i = 0; i < n->child_count; i++) {
             ASTNode* f = n->children[i];
-            if (f && f->child_count > 0 && (c = carries_borrowed_ptr(f->children[0], s)).param)
+            if (f && f->child_count > 0 && (c = carries_borrowed_ptr(f->children[0], s)).n)
                 report_borrowed_keep(s, f, c, "sent in a message");
         }
     }
     if (n->type == AST_FUNCTION_CALL && n->value) {
         int container = scoped_store_call(n->value);
         for (int i = 0; i < n->child_count; i++) {
-            if (!(c = carries_borrowed_ptr(n->children[i], s)).param) continue;
+            if (!(c = carries_borrowed_ptr(n->children[i], s)).n) continue;
             if (call_keeps_arg(program, n, i))
                 report_borrowed_keep(s, n->children[i], c, "passed to a parameter that keeps it");
-            else if (container && c.via)
+            else if (container && (c = carried_holders(c)).n)
                 report_borrowed_keep(s, n->children[i], c, "stored in a container");
         }
     }
@@ -7788,12 +8083,16 @@ static int is_seq_retain_call(ASTNode* e) {
            (!strcmp(e->value, "string.seq_retain") || !strcmp(e->value, "string_seq_retain"));
 }
 
+static int is_pinned_string(ASTNode* program, ASTNode* e);
+
 /* The kind of value `e` is when a `ptr` that keeps it would hold no
- * reference of its own ("string", "*StringSeq"), or NULL. A string literal
- * is pinned, never released, so a `ptr` may keep it as it is. */
-static const char* unkept_value_kind(ASTNode* e) {
+ * reference of its own ("string", "*StringSeq"), or NULL. A string literal,
+ * or a `const` bound to one, is pinned, never released, so a `ptr` may keep
+ * it as it is. */
+static const char* unkept_value_kind(ASTNode* program, ASTNode* e) {
     if (!e || !e->node_type) return NULL;
-    if (e->node_type->kind == TYPE_STRING && e->type != AST_LITERAL && !is_string_keep_call(e))
+    if (e->node_type->kind == TYPE_STRING && !is_pinned_string(program, e) &&
+        !is_string_keep_call(e))
         return "string";
     if (is_string_seq_ptr_type(e->node_type) && !is_seq_retain_call(e)) return "*StringSeq";
     return NULL;
@@ -7835,10 +8134,20 @@ static ASTNode* strip_ptr_casts(ASTNode* e) {
 /* #2979: does the C memory the pointer `e` points at outlive the function?
  * A fresh allocation (a call's result) or `null` does not by itself; a
  * local is asked by its bindings; memory reached through a field, an
- * element or anything else is taken to. */
+ * element or anything else is taken to. A call's result that holds an
+ * argument given to an `@into` parameter is that argument's memory
+ * (#2990), so the question is asked of the argument. */
 static int c_pointer_outlives(const KeepCtx* c, ASTNode* e, int depth) {
     e = strip_ptr_casts(e);
-    if (!e || e->type == AST_NULL_LITERAL || e->type == AST_FUNCTION_CALL) return 0;
+    if (!e || e->type == AST_NULL_LITERAL) return 0;
+    if (e->type == AST_FUNCTION_CALL) {
+        ASTNode* decl = call_callee_decl(c->program, e);
+        for (int i = 0; decl && depth <= 8 && i < e->child_count; i++)
+            if (is_into_param(call_decl_param(decl, e, i)) &&
+                c_pointer_outlives(c, e->children[i], depth + 1))
+                return 1;
+        return 0;
+    }
     if (e->type == AST_IDENTIFIER && e->value) return c_name_outlives(c, e->value, depth + 1);
     return 1;
 }
@@ -7889,7 +8198,10 @@ static int c_name_outlives(const KeepCtx* c, const char* name, int depth) {
     s.probe = 1;
     s.ctx = c;
     s.depth = depth;
-    keep_set_add(&s, name, name, NULL);
+    s.program = c->program;
+    Carried self = { 0 };
+    carried_add(&self, name, NULL);
+    keep_set_add(&s, name, self);
     check_ptr_keeps_in(c->program, c->body, &s, c->globals, c->nglobals, 0);
     return s.escaped;
 }
@@ -7973,24 +8285,42 @@ static void strings_into_keep_walk(const KeepCtx* c, ASTNode* n) {
     /* A `ptr` field keeps what it is given, as a `@keep` parameter does. */
     if (n->type == AST_BINARY_EXPRESSION && n->value && !strcmp(n->value, "=") && n->child_count == 2 &&
         n->children[0] && is_bare_ptr_type(n->children[0]->node_type) &&
-        unkept_value_kind(n->children[1]))
-        report_unkept_into_ptr(n->children[1], unkept_value_kind(n->children[1]), "a `ptr` field",
-                               "statement");
+        unkept_value_kind(program, n->children[1]))
+        report_unkept_into_ptr(n->children[1], unkept_value_kind(program, n->children[1]),
+                               "a `ptr` field", "statement");
     if (n->type == AST_STRUCT_LITERAL && n->value) {
         for (int i = 0; i < n->child_count; i++) {
             ASTNode* f = n->children[i];
-            if (f && f->value && f->child_count > 0 && unkept_value_kind(f->children[0]) &&
+            if (f && f->value && f->child_count > 0 && unkept_value_kind(program, f->children[0]) &&
                 is_bare_ptr_type(struct_field_decl_type(program, n->value, f->value)))
-                report_unkept_into_ptr(f->children[0], unkept_value_kind(f->children[0]),
+                report_unkept_into_ptr(f->children[0], unkept_value_kind(program, f->children[0]),
                                        "a `ptr` field", "statement");
         }
     }
+    /* A `@keep ptr` keeps it, and an `@into ptr` (#2990) hands it to the
+     * call's result, which the caller may hold past the local that owns the
+     * string; given as it is, either would hold a string its owner frees. */
     if (n->type == AST_FUNCTION_CALL && n->value) {
-        ASTNode* def = effect_resolve_callee(program, n->value);
-        for (int i = 0; def && i < n->child_count; i++) {
+        ASTNode* decl = call_callee_decl(program, n);
+        for (int i = 0; decl && i < n->child_count; i++) {
             ASTNode* a = n->children[i];
-            if (unkept_value_kind(a) && is_keep_param(call_param_of(def, n, i)))
-                report_unkept_into_ptr(a, unkept_value_kind(a), "a `@keep ptr` parameter", "call");
+            const char* kind = unkept_value_kind(program, a);
+            if (!kind) continue;
+            ASTNode* p = call_decl_param(decl, n, i);
+            if (decl->type != AST_EXTERN_FUNCTION && is_keep_param(p)) {
+                report_unkept_into_ptr(a, kind, "a `@keep ptr` parameter", "call");
+            } else if (is_into_param(p)) {
+                char msg[200];
+                snprintf(msg, sizeof(msg),
+                         "a `%s` is given to an `@into ptr` parameter, and the result holds it "
+                         "past the call", kind);
+                type_error_code_hint(msg,
+                                     !strcmp(kind, "string")
+                                         ? "hand over a reference of its own with `string.keep(s)`"
+                                         : "hand over a reference of its own with "
+                                           "`string.seq_retain(s)`",
+                                     a->line, a->column, AETHER_ERR_KEEPS_BORROWED);
+            }
         }
     }
     for (int i = 0; i < n->child_count; i++) strings_into_keep_walk(c, n->children[i]);
@@ -8006,8 +8336,10 @@ static void check_strings_into_keep(ASTNode* program, ASTNode* fn, ASTNode* body
 static void check_closures_ptr_params(ASTNode* program, ASTNode* n,
                                       const char** globals, int nglobals) {
     if (!n) return;
-    if (n->type == AST_CLOSURE && n->child_count > 0)
+    if (n->type == AST_CLOSURE && n->child_count > 0) {
+        check_param_modes(program, n);
         check_borrowed_ptr_params(program, n, n->children[n->child_count - 1], globals, nglobals);
+    }
     for (int i = 0; i < n->child_count; i++)
         check_closures_ptr_params(program, n->children[i], globals, nglobals);
 }
@@ -8016,17 +8348,137 @@ static void check_borrowed_ptr_params(ASTNode* program, ASTNode* fn, ASTNode* bo
                                       const char** globals, int nglobals) {
     KeepSet s;
     memset(&s, 0, sizeof s);
-    s.ret = (fn && fn->type != AST_CLOSURE) ? fn->node_type : NULL;
+    s.program = program;
+    s.closure = fn && fn->type == AST_CLOSURE;
+    s.ret = (fn && !s.closure) ? fn->node_type : NULL;
     for (int i = 0; fn && body && i < fn->child_count && fn->children[i] != body; i++) {
         ASTNode* p = fn->children[i];
         if (p && (p->type == AST_PATTERN_VARIABLE || p->type == AST_VARIABLE_DECLARATION ||
                   p->type == AST_CLOSURE_PARAM) &&
-            p->value && p->node_type && p->node_type->kind == TYPE_PTR &&
-            !p->node_type->element_type && !p->node_type->distinct_name &&
-            !is_keep_param(p) && !body_rebinds(body, p->value))
-            keep_set_add(&s, p->value, p->value, NULL);
+            p->value && is_bare_ptr_type(p->node_type) &&
+            !is_keep_param(p) && !body_rebinds(body, p->value)) {
+            Carried self = { 0 };
+            carried_add(&self, p->value, NULL);
+            keep_set_add(&s, p->value, self);
+            if (is_into_param(p) && s.into_count < KEEP_SET_MAX) s.into[s.into_count++] = p->value;
+        }
     }
     if (s.count) check_ptr_keeps_in(program, body, &s, globals, nglobals, 0);
+}
+
+/* #2990: can a value of type `t` hold a pointer, by the type's
+ * declarations (a struct's fields, a sum's variants, a tuple's parts)? A
+ * pointer and a function (a closure capturing it) can; a number, a `bool`,
+ * an enum and a `string` cannot. A type it cannot see is taken to. */
+static int type_can_hold_ptr_decl(ASTNode* program, Type* t, int depth) {
+    if (!t || depth > 8) return 1;
+    switch (t->kind) {
+        case TYPE_PTR: case TYPE_FUNCTION: case TYPE_UNKNOWN: case TYPE_WILDCARD:
+            return 1;
+        case TYPE_OPTIONAL: case TYPE_ARRAY: case TYPE_ISOLATED:
+            return type_can_hold_ptr_decl(program, t->element_type, depth + 1);
+        case TYPE_TUPLE: case TYPE_SUM:
+            for (int i = 0; i < t->tuple_count; i++)
+                if (type_can_hold_ptr_decl(program, t->tuple_types[i], depth + 1)) return 1;
+            return 0;
+        case TYPE_STRUCT:
+            for (int i = 0; program && t->struct_name && i < program->child_count; i++) {
+                ASTNode* sd = program->children[i];
+                if (!sd || sd->type != AST_STRUCT_DEFINITION || !sd->value ||
+                    strcmp(sd->value, t->struct_name))
+                    continue;
+                for (int f = 0; f < sd->child_count; f++) {
+                    ASTNode* fd = sd->children[f];
+                    if (!fd) continue;
+                    if (fd->type != AST_STRUCT_FIELD) return 1;   /* a union or nested part */
+                    if (type_can_hold_ptr_decl(program, fd->node_type, depth + 1)) return 1;
+                }
+                return 0;
+            }
+            return 1;
+        default:
+            return 0;
+    }
+}
+
+/* Does a `return` in `n` (not in a closure or a nested function) give a
+ * value? */
+static int returns_a_value(ASTNode* n) {
+    if (!n || n->type == AST_CLOSURE || n->type == AST_FUNCTION_DEFINITION) return 0;
+    if (n->type == AST_RETURN_STATEMENT && n->child_count > 0) return 1;
+    for (int i = 0; i < n->child_count; i++)
+        if (returns_a_value(n->children[i])) return 1;
+    return 0;
+}
+
+/* #2926, #2990: what a parameter declares it does with a `ptr` (`@keep`,
+ * `@into`, an extern's `@retain` and `@noescape`) must be one thing, and
+ * must fit: `@into` is for a bare `ptr` of a function whose result can hold
+ * it. A closure's `ptr` parameter is always borrowed. */
+static void check_param_modes(ASTNode* program, ASTNode* decl) {
+    if (!decl) return;
+    int is_extern = decl->type == AST_EXTERN_FUNCTION;
+    int is_closure = decl->type == AST_CLOSURE;
+    const char* fname = decl->value ? decl->value : "?";
+    for (int i = 0; i < decl->child_count; i++) {
+        ASTNode* p = decl->children[i];
+        if (!p || !p->value) continue;
+        if (!is_extern && p->type != AST_PATTERN_VARIABLE && p->type != AST_VARIABLE_DECLARATION &&
+            p->type != AST_CLOSURE_PARAM)
+            continue;
+        int keep = is_keep_param(p), into = is_into_param(p);
+        if (!keep && !into) continue;
+        char msg[320];
+        if (is_closure) {
+            type_error_code_hint("a closure's `ptr` parameter is always borrowed; `@into` and "
+                                 "`@keep` are for named functions",
+                                 "take the value as a borrowed parameter, or make the closure a "
+                                 "named function that declares it",
+                                 p->line, p->column, AETHER_ERR_KEEPS_BORROWED);
+            continue;
+        }
+        const char* mode = into ? "into" : "keep";
+        const char* other = (into && keep) ? "keep"
+                            : (is_extern && param_has_mode(p, "retain_param")) ? "retain"
+                            : (is_extern && param_has_mode(p, "noescape_param")) ? "noescape"
+                                                                                 : NULL;
+        if (other) {
+            snprintf(msg, sizeof(msg), "'%s' is declared both `@%s` and `@%s`", p->value, mode,
+                     other);
+            type_error_code_hint(msg,
+                                 !strcmp(other, "keep") ? "`@keep` already lets it reach the result"
+                                 : !strcmp(other, "retain")
+                                     ? "`@retain` already lets C keep it anywhere, the result included"
+                                     : "`@noescape` keeps it out of the result as well: declare one",
+                                 p->line, p->column, AETHER_ERR_KEEPS_BORROWED);
+            continue;
+        }
+        if (!into) continue;
+        if (!is_bare_ptr_type(p->node_type)) {
+            snprintf(msg, sizeof(msg),
+                     "`@into` applies to a `ptr` parameter; '%s' is %s, which E0902 leaves alone",
+                     p->value, with_article(type_spelled(p->node_type)));
+            type_error_code_hint(msg, "drop `@into`: only a bare `ptr` parameter is borrowed or kept",
+                                 p->line, p->column, AETHER_ERR_KEEPS_BORROWED);
+            continue;
+        }
+        /* A result left to inference is void when no `return` gives a
+         * value (fn_result_type's rule). */
+        Type* ret = decl->node_type;
+        int none = !ret || ret->kind == TYPE_VOID ||
+                   (ret->kind == TYPE_UNKNOWN && !is_extern && decl->child_count > 0 &&
+                    !returns_a_value(decl->children[decl->child_count - 1]));
+        if (none || !type_can_hold_ptr_decl(program, ret, 0)) {
+            if (none)
+                snprintf(msg, sizeof(msg), "'%s' is declared `@into`, but '%s' has no result to hold it",
+                         p->value, fname);
+            else
+                snprintf(msg, sizeof(msg), "'%s' is declared `@into`, but '%s' returns %s, which "
+                         "cannot hold it", p->value, fname, type_spelled(ret));
+            type_error_code_hint(msg, "a borrowed `ptr` parameter is enough", p->line, p->column,
+                                 AETHER_ERR_KEEPS_BORROWED);
+        }
+    }
 }
 
 static void iso_check_function(ASTNode* fn, ASTNode* body) {
@@ -10328,6 +10780,7 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                 int fn_address = fnptr_slot &&
                                  fn_name_matches_signature(table, init, fnptr_slot);
                 if (fn_address) {
+                    refuse_moded_fn_in_fnptr_slot(table, init, fnptr_slot);
                     set_node_type(init, clone_type(fnptr_slot));
                     if (init->annotation) free(init->annotation);
                     init->annotation = strdup("fn_addr");

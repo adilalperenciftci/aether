@@ -245,6 +245,20 @@ main() {
 AE
 accepted declared
 
+# A `const` bound to a literal is pinned, as the literal is.
+cat > "$TMP/keep_const.ae" <<'AE'
+const LABEL = "job"
+
+var kept: ptr = null
+
+hold(p: @keep ptr) {
+    kept = p
+}
+
+main() { hold(LABEL) }
+AE
+accepted keep_const
+
 # A struct or a closure that holds a borrowed parameter keeps it only when
 # it escapes itself (Nic, 2026-10-19): each escaping form is still E0902.
 
@@ -405,6 +419,113 @@ put(p: ptr) {
 main() { put(null) }
 AE
 refused closure_stores_inside 6:14 "'p' is a borrowed \`ptr\` parameter, stored in a module-level \`var\`"
+
+# A tuple, an optional's payload, a match binding and what a closure that
+# captured the parameter returns hold it as a struct does (#2990): each
+# escaping form is E0902.
+
+cat > "$TMP/tuple_returned.ae" <<'AE'
+wrap(p: ptr) -> (ptr, int) {
+    t = (p, 1)
+    return t
+}
+
+main() {
+    a, b = wrap(null)
+    println("${a == null} ${b}")
+}
+AE
+refused tuple_returned 3:12 "'p' is a borrowed \`ptr\` parameter held by a tuple that is returned"
+
+cat > "$TMP/tuple_part_global.ae" <<'AE'
+var kept: ptr = null
+
+put(p: ptr) {
+    t = (p, 1)
+    a, b = t
+    kept = a
+    println("${b}")
+}
+
+main() { put(null) }
+AE
+refused tuple_part_global 6:5 "'p' is a borrowed \`ptr\` parameter, stored in a module-level \`var\`"
+
+cat > "$TMP/payload_returned.ae" <<'AE'
+unwrap(p: ptr) -> ptr {
+    let o: ptr? = p
+    return o!
+}
+
+main() { println("${unwrap(null) == null}") }
+AE
+refused payload_returned 3:5 "'p' is a borrowed \`ptr\` parameter, returned"
+
+cat > "$TMP/binding_returned.ae" <<'AE'
+struct Box { v: ptr, n: int }
+
+unbox(p: ptr) -> ptr {
+    b = Box { v: p, n: 1 }
+    match b {
+        Box { v: q, n: _ } -> { return q }
+    }
+    return null
+}
+
+main() { println("${unbox(null) == null}") }
+AE
+refused binding_returned 6:33 "'p' is a borrowed \`ptr\` parameter, returned"
+
+cat > "$TMP/closure_result_global.ae" <<'AE'
+var kept: ptr = null
+
+leak(p: ptr) {
+    f = || { return p }
+    let q: ptr = call(f)
+    kept = q
+}
+
+main() { leak(null) }
+AE
+refused closure_result_global 6:5 "'p' is a borrowed \`ptr\` parameter, stored in a module-level \`var\`"
+
+# A function with a `@keep` parameter is called by name: a typed function
+# pointer to it (a cast, a module-level `var`, an argument) would be called
+# as one that borrows.
+
+cat > "$TMP/keep_fn_cast.ae" <<'AE'
+var kept: ptr = null
+
+hold(q: @keep ptr) { kept = q }
+
+main() {
+    g = hold as fn(ptr)
+    g(null)
+}
+AE
+refused keep_fn_cast 6:9 "'hold' keeps its \`ptr\` parameter 'q' (\`@keep\`), so it cannot be used as a value"
+
+cat > "$TMP/keep_fn_var.ae" <<'AE'
+var kept: ptr = null
+
+hold(q: @keep ptr) { kept = q }
+
+var g: fn(ptr) = hold
+
+main() { g(null) }
+AE
+refused keep_fn_var 5:18 "'hold' keeps its \`ptr\` parameter 'q' (\`@keep\`), so it cannot be used as a value"
+
+cat > "$TMP/keep_fn_arg.ae" <<'AE'
+var kept: ptr = null
+
+hold(q: @keep ptr) { kept = q }
+
+run(cb: fn(ptr), p: ptr) { cb(p) }
+
+main() { run(hold, null) }
+AE
+refused keep_fn_arg 7:14 "'hold' keeps its \`ptr\` parameter 'q' (\`@keep\`), so it cannot be used as a value"
 
 # Need no `@keep`: the aephysics shape (a struct local to the function holds
 # the parameter, or has it stored into a field, and dies with the call) and

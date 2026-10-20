@@ -487,6 +487,7 @@ int is_vararg_call_position(CodeGenerator* gen, const char* func_name, int arg_i
    callees, missing annotations, or out-of-range index. See
    codegen_func.c. */
 int is_retain_extern_param(CodeGenerator* gen, const char* func_name, int param_idx);
+int is_into_extern_param(CodeGenerator* gen, const char* func_name, int param_idx);
 int is_noescape_extern_param(CodeGenerator* gen, const char* func_name, int param_idx);   /* #2523 */
 const char* lookup_extern_c_name(CodeGenerator* gen, const char* func_name);
 
