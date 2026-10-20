@@ -1289,5 +1289,20 @@ main() {
 AE
 accepted returned_as_string
 
+# #3050: the one value a `string!` function returns is its string, so a
+# `ptr` there is taken as a string as for `-> string`.
+cat > "$TMP/returned_as_string_result.ae" <<'AE'
+as_text(p: ptr) -> string! {
+    if p == null { return "", "no text" }
+    return p
+}
+
+main() {
+    v = as_text("a") or { "?" }
+    println(v)
+}
+AE
+accepted returned_as_string_result
+
 if [ "$fails" -ne 0 ]; then exit 1; fi
 echo "  [PASS] keeps_borrowed: a borrowed ptr parameter is never kept, alone or in a struct or closure that escapes; @keep, string.keep, string.seq_retain, a re-bound parameter, a struct local and a closure run in the call are"

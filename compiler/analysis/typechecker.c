@@ -7851,6 +7851,9 @@ static int c_lvalue_outlives(const KeepCtx* c, ASTNode* lhs, int depth);
 static int returns_string_at(Type* ret, int i, int n) {
     if (!ret) return 0;
     if (ret->kind == TYPE_STRING) return n == 1;
+    /* #3050: the one value a `T!` function returns is its `T` (#3044). */
+    if (ret->kind == TYPE_TUPLE && ret->is_result && n == 1 && i == 0 && ret->tuple_count >= 1)
+        return ret->tuple_types && ret->tuple_types[0] && ret->tuple_types[0]->kind == TYPE_STRING;
     if (ret->kind == TYPE_TUPLE && n == ret->tuple_count && i < ret->tuple_count)
         return ret->tuple_types[i] && ret->tuple_types[i]->kind == TYPE_STRING;
     return 0;
