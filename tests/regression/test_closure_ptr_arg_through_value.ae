@@ -1,0 +1,111 @@
+// #3035: a closure literal given to a `ptr` parameter through a function
+// value is boxed as a direct call boxes it. The call through `f = lend`
+// passed the `_AeClosure` itself where the parameter is a `void*`, and the C
+// compiler refused it. A borrowed parameter gets a box for the call; a
+// `@keep` or `@into` one (the value's type says which, #2980) a heap box
+// holding a reference of its own, which outlives the caller's frame and is
+// given back with release_closure.
+import std.mem
+
+extern exit(code: int)
+
+var kept: ptr = null
+
+struct Job {
+    cb: ptr
+    n: int
+}
+
+check(ok: bool, what: string) {
+    if !ok {
+        println("FAIL: ${what}")
+        exit(1)
+    }
+}
+
+lend(q: ptr) -> int {
+    fn g = unbox_closure(q)
+    int v = call(g, 5)
+    return v
+}
+
+keeper(q: @keep ptr) {
+    kept = q
+}
+
+job(cb: @into ptr, n: int) -> Job {
+    return Job { cb: cb, n: n }
+}
+
+run_job(j: Job) -> int {
+    fn f = unbox_closure(j.cb)
+    int v = call(f, j.n)
+    return v
+}
+
+hand_over(k: int) {
+    h = keeper
+    h(| x: int | { return x + k })
+}
+
+// The same through a local bound to a closure literal, whose own parameter
+// says it keeps.
+hand_over_literal(k: int) {
+    h = |q: @keep ptr| { kept = q }
+    h(| x: int | { return x + k })
+}
+
+make_job(k: int) -> Job {
+    mk = job
+    return mk(| x: int | { return x + k }, 5)
+}
+
+// Writes over the stack a frame that has returned would have used.
+scribble(d: int) -> int {
+    a = [d, d, d, d, d, d, d, d, d, d, d, d, d, d, d, d]
+    if d == 0 { return a[3] }
+    return scribble(d - 1) + a[5]
+}
+
+round(k: int) {
+    f = lend
+    check(f(| x: int | { return x + k }) == k + 5, "a closure lent through a value")
+
+    hand_over(k)
+    scribble(20)
+    fn g = unbox_closure(kept)
+    int v = call(g, 1)
+    check(v == k + 1, "a closure kept through a value outlives the call")
+    release_closure(kept)
+    kept = null
+
+    lend_literal = |q: ptr| {
+        fn g2 = unbox_closure(q)
+        int v2 = call(g2, 5)
+        return v2
+    }
+    check(lend_literal(| x: int | { return x + k }) == k + 5, "a closure lent through a closure literal")
+
+    hand_over_literal(k)
+    scribble(20)
+    fn g3 = unbox_closure(kept)
+    int v3 = call(g3, 2)
+    check(v3 == k + 2, "a closure kept through a closure literal outlives the call")
+    release_closure(kept)
+    kept = null
+
+    j = make_job(k)
+    scribble(20)
+    check(run_job(j) == k + 5, "a closure given to an @into ptr through a value outlives the call")
+    release_closure(j.cb)
+}
+
+main() {
+    round(37)
+    grown = mem.steady_growth(|| { round(40) }, 5)
+    if mem.heap_in_use_exact() && grown != 0 {
+        println("FAIL: the heap grew ${grown} bytes per round")
+        exit(1)
+    }
+    println("ok")
+}

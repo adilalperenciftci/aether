@@ -396,7 +396,16 @@ static int callee_result_shape(CodeGenerator* gen, const char* func_name, const 
  * it to the box or the builder. */
 static int owned_closure_arg_drainable(CodeGenerator* gen, ASTNode* expr, const char* func_name,
                                        int ai) {
-    if (!func_name) return 1;
+    if (!func_name) {
+        /* #3035: a call through a value, `call(f, ...)`: f's type says
+         * which `ptr` parameter keeps the box it is given or hands it to the
+         * result (#2980), and that box holds the closure's reference. */
+        ASTNode* f = expr->value && !strcmp(expr->value, "call") && expr->child_count > 0
+                         ? expr->children[0] : NULL;
+        Type* ft = f ? f->node_type : NULL;
+        return !(ft && ft->kind == TYPE_FUNCTION && ai >= 1 &&
+                 fn_type_param_mode(ft, ai - 1) != FN_MODE_BORROWED);
+    }
     for (int i = 0; i < expr->child_count; i++) {
         ASTNode* a = expr->children[i];
         if (a && (a->type == AST_NAMED_ARG ||
@@ -6707,6 +6716,41 @@ static Type* fresh_composite_arg_type(CodeGenerator* gen, ASTNode* arg, Type* t)
 static void emit_composite_arg_temp(CodeGenerator* gen, ASTNode* arg, Type* t);
 static int array_literal_arg_temp(CodeGenerator* gen, ASTNode* arg);
 
+/* A closure (an `_AeClosure` value) given to a `ptr` parameter, boxed. A
+ * parameter that holds it past the call (`keeps`: `@keep`, `@into`, an
+ * extern's `@retain`) is given a heap box holding a reference of its own;
+ * any other reads the box only during the call, so it gets one on this
+ * stack frame (a compound literal of the enclosing block, #2523) and the
+ * closure's env stays its owner's. */
+static void emit_closure_box_argument(CodeGenerator* gen, ASTNode* arg, int keeps) {
+    if (keeps) {
+        fprintf(gen->output, "_aether_box_closure(");
+        emit_closure_take(gen, arg);
+    } else {
+        fprintf(gen->output, "_aether_box_closure_in(&(_AeClosureBox){ .tag = 0 }, ");
+        generate_expression(gen, arg);
+    }
+    fprintf(gen->output, ")");
+}
+
+static void emit_closure_argument(CodeGenerator* gen, ASTNode* arg, Type* pt);
+
+/* #3035: argument `pi` of a call through a value of function type `ft` (a
+ * closure's own, or the variable's), for its parameter of type `pt`. A
+ * closure given to a `ptr` parameter is boxed as a direct call boxes it,
+ * held past the call where `ft` says the parameter keeps it or hands it to
+ * the result (#2980); it reached C as the `_AeClosure` itself. */
+static void emit_value_call_argument(CodeGenerator* gen, ASTNode* arg, Type* pt, Type* ft, int pi) {
+    if (pt && pt->kind == TYPE_PTR && arg && arg->node_type &&
+        arg->node_type->kind == TYPE_FUNCTION && !arg->node_type->is_fnptr) {
+        emit_closure_box_argument(gen, arg,
+                                  ft && ft->kind == TYPE_FUNCTION &&
+                                      fn_type_param_mode(ft, pi) != FN_MODE_BORROWED);
+        return;
+    }
+    emit_closure_argument(gen, arg, pt);
+}
+
 /* An argument of `call(f, ...)` for the closure's parameter of type `pt`,
  * coerced as a direct call's argument is: a bare value or `none` into an
  * optional parameter, a variant into a sum parameter (#2840); else as it is,
@@ -10026,7 +10070,8 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                                 if (seen++ == lit_pi) { lit_pt = p->node_type; break; }
                             }
                             lit_pi++;
-                            emit_closure_argument(gen, arg, lit_pt);
+                            emit_value_call_argument(gen, arg, lit_pt,
+                                                     literal ? literal->node_type : NULL, lit_pi - 1);
                         }
                         fprintf(gen->output, ")");
                         arg_drain_close(gen, expr, &ad);
@@ -10174,7 +10219,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                             /* Coerced only into a parameter type the signature
                              * gives: with none, the argument's own type is no
                              * slot to wrap it for (an erased `fn`, #2840). */
-                            if (sig_pt) emit_closure_argument(gen, arg, sig_pt);
+                            if (sig_pt) emit_value_call_argument(gen, arg, sig_pt, closure_sig, arg_pi - 1);
                             else generate_sized_array_argument(gen, arg, arg ? arg->node_type : NULL);
                         }
                         fprintf(gen->output, ")");
@@ -10700,14 +10745,8 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                              * the closure's env stays its owner's: a
                              * literal's is released after the call by the
                              * drain, a local's at its scope end. */
-                            if (call_param_keeps(gen, ext_name ? ext_name : func_name, arg_printed)) {
-                                fprintf(gen->output, "_aether_box_closure(");
-                                emit_closure_take(gen, arg);
-                            } else {
-                                fprintf(gen->output, "_aether_box_closure_in(&(_AeClosureBox){ .tag = 0 }, ");
-                                generate_expression(gen, arg);
-                            }
-                            fprintf(gen->output, ")");
+                            emit_closure_box_argument(
+                                gen, arg, call_param_keeps(gen, ext_name ? ext_name : func_name, arg_printed));
                         } else if (expected == TYPE_FUNCTION &&
                                    !expected_is_fnptr_form &&
                                    !(arg->node_type && arg->node_type->is_fnptr)) {

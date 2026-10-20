@@ -412,6 +412,21 @@ main() { put(null) }
 AE
 refused closure_to_retain 4:16 "'p' is a borrowed \`ptr\` parameter captured by a closure that is passed to a parameter that keeps it"
 
+# #3035: the same through a function value, by its type.
+cat > "$TMP/closure_to_keep_through_value.ae" <<'AE'
+var kept: ptr = null
+
+hold(q: @keep ptr) { kept = q }
+
+put(p: ptr) {
+    h = hold
+    h(|| { println("${p == null}") })
+}
+
+main() { put(null) }
+AE
+refused closure_to_keep_through_value 7:7 "'p' is a borrowed \`ptr\` parameter captured by a closure that is passed to a parameter that keeps it"
+
 cat > "$TMP/closure_stores_inside.ae" <<'AE'
 var kept: ptr = null
 

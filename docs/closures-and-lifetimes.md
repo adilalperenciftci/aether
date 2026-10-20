@@ -196,7 +196,10 @@ place by place:
   a `ptr` parameter is boxed: on the caller's stack for a parameter that
   only borrows, on the heap, with its own reference, for one declared
   `@keep` or `@retain`, and for one declared `@into`, whose result holds it
-  past the call (#2990); `release_closure` gives that reference back.
+  past the call (#2990); `release_closure` gives that reference back. A
+  call through a function value (`f = lend`, then `f(|x| { ... })`) boxes
+  it the same way, by what the value's type says the parameter does
+  (`fn(@keep ptr)`, #3035).
 
 - **Stored in a list or a map.** A closure value stored into a list or a
   map is heap-boxed (the `fn -> ptr` coercion, or an explicit
