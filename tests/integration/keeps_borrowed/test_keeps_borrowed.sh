@@ -1699,5 +1699,143 @@ main() {
 AE
 accepted returned_as_string_result
 
+# #3058: a closure that reads through an address of a local, or a local it
+# shares with the function (one a closure assigns), reads what was stored
+# there after the closure was written. Where it is called or passed, its
+# body is checked against what holds the parameter there.
+cat > "$TMP/closure_alias_called.ae" <<'AE'
+struct Box { item: ptr }
+var kept: ptr = null
+
+carry(p: ptr) {
+    b = Box { item: null }
+    pb = (&b) as *Box
+    g = || { kept = pb.item }
+    b.item = p
+    call(g)
+}
+
+main() { carry(null) }
+AE
+refused closure_alias_called 7:14 "'p' is a borrowed \`ptr\` parameter, stored in a module-level \`var\`"
+
+cat > "$TMP/closure_alias_passed.ae" <<'AE'
+struct Box { item: ptr }
+var kept: ptr = null
+
+run(f: fn) { call(f) }
+
+carry(p: ptr) {
+    b = Box { item: null }
+    pb = (&b) as *Box
+    g = || { kept = pb.item }
+    h = g
+    b.item = p
+    run(h)
+}
+
+main() { carry(null) }
+AE
+refused closure_alias_passed 9:14 "'p' is a borrowed \`ptr\` parameter, stored in a module-level \`var\`"
+
+# Called in a loop before the store: the next pass reads what it stored.
+cat > "$TMP/closure_alias_looped.ae" <<'AE'
+struct Box { item: ptr }
+var kept: ptr = null
+
+carry(p: ptr, n: int) {
+    b = Box { item: null }
+    pb = (&b) as *Box
+    g = || { kept = pb.item }
+    i = 0
+    while i < n {
+        call(g)
+        b.item = p
+        i = i + 1
+    }
+}
+
+main() { carry(null, 2) }
+AE
+refused closure_alias_looped 7:14 "'p' is a borrowed \`ptr\` parameter, stored in a module-level \`var\`"
+
+cat > "$TMP/closure_shared_local.ae" <<'AE'
+var kept: ptr = null
+
+carry(p: ptr) {
+    q = null
+    g = || { kept = q }
+    reset = || { q = null }
+    q = p
+    call(g)
+    call(reset)
+}
+
+main() { carry(null) }
+AE
+refused closure_shared_local 5:14 "'p' is a borrowed \`ptr\` parameter, stored in a module-level \`var\`"
+
+# What it reads through the address is what it holds, where it goes too.
+cat > "$TMP/closure_alias_returned.ae" <<'AE'
+struct Box { item: ptr }
+
+carry(p: ptr) -> fn {
+    b = Box { item: null }
+    pb = (&b) as *Box
+    g = || { println("${pb.item == null}") }
+    b.item = p
+    return g
+}
+
+main() { call(carry(null)) }
+AE
+refused closure_alias_returned 8:12 "'p' is a borrowed \`ptr\` parameter captured by a closure that is returned"
+
+# Called before the store; a capture of a local no closure assigns, which
+# is a copy made where the closure stands; a closure that only reads
+# through the address in the call; closures with no pointer at all.
+cat > "$TMP/closure_alias_guards.ae" <<'AE'
+struct Box { item: ptr }
+var kept: ptr = null
+
+before_store(p: ptr) {
+    b = Box { item: null }
+    pb = (&b) as *Box
+    g = || { kept = pb.item }
+    call(g)
+    b.item = p
+}
+
+copy_capture(p: ptr) {
+    q = null
+    g = || { kept = q }
+    q = p
+    call(g)
+}
+
+read_in_call(p: ptr) -> int {
+    b = Box { item: null }
+    pb = (&b) as *Box
+    g = || -> { if pb.item == null { return 1 } return 0 }
+    b.item = p
+    return call(g)
+}
+
+plain(p: ptr) -> int {
+    n = 0
+    g = || { n = n + 1 }
+    call(g)
+    h = |x: int| -> x * 2
+    return call(h, n)
+}
+
+main() {
+    before_store(null)
+    copy_capture(null)
+    println("${read_in_call(null) + plain(null)}")
+}
+AE
+accepted closure_alias_guards
+
 if [ "$fails" -ne 0 ]; then exit 1; fi
 echo "  [PASS] keeps_borrowed: a borrowed ptr parameter is never kept, alone or in a struct or closure that escapes; @keep, string.keep, string.seq_retain, a re-bound parameter, a struct local and a closure run in the call are"

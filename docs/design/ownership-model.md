@@ -352,6 +352,11 @@ the signature, so no call site reads another function's body:
   before `q = p` keeps `p` on the second pass. A local the body binds anew
   before anything reads it (`q = list.new()` first, or `b.item = ...` for
   that field of a local struct) holds in the pass only what the pass binds.
+  A closure reads its captures as they were where it was written, except
+  through an address of a local or a local it shares with the function (one
+  a closure assigns): those it reads as they are when it runs, so where it
+  is called or passed its body is checked against what holds the parameter
+  there, and where it goes it holds that (#3058).
 - A `string` goes implicitly to a borrowed `ptr` parameter. To a `@keep` one,
   or into a `ptr` field (a store or a struct literal), it goes only through
   `string.keep(s)`, which hands over one reference the program gives back
