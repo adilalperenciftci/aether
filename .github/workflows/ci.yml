@@ -866,10 +866,20 @@ jobs:
         sudo rm -f /etc/apt/sources.list.d/google-chrome.list; sudo apt-get update
         sudo apt-get install -y gcc make libvulkan-dev mesa-vulkan-drivers vulkan-tools gdb
 
-    - name: Report the Vulkan implementation in use
+    # The manifest's name is Mesa's to choose (22.04's is lvp_icd.x86_64.json;
+    # a guessed name on 24.04 left the loader with no driver, VkResult -9), so
+    # it is found, not spelled, and its absence fails here by name.
+    - name: Select lavapipe and report it
       run: |
-        VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.$(uname -m).json \
-          vulkaninfo --summary 2>/dev/null | head -30 || true
+        ls -l /usr/share/vulkan/icd.d/
+        icd="$(ls /usr/share/vulkan/icd.d/lvp_icd*.json 2>/dev/null | head -1)"
+        if [ -z "$icd" ]; then
+          echo "mesa-vulkan-drivers installed no lavapipe manifest in /usr/share/vulkan/icd.d"
+          exit 1
+        fi
+        echo "VK_DRIVER_FILES=$icd" >> "$GITHUB_ENV"
+        echo "VK_ICD_FILENAMES=$icd" >> "$GITHUB_ENV"
+        VK_DRIVER_FILES="$icd" VK_ICD_FILENAMES="$icd" vulkaninfo --summary 2>&1 | head -40
 
     - name: Build the toolchain
       run: make -j"$(nproc)" compiler ae stdlib
@@ -877,7 +887,6 @@ jobs:
     - name: Ray query and mesh shader specs on lavapipe
       run: |
         set +e
-        export VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.$(uname -m).json
         # Builds both specs (and runs them once); each is judged below.
         ONLY="vulkan/ray-query vulkan/mesh-shader" .github/scripts/contrib_check.sh
         rc=0
