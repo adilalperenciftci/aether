@@ -6351,6 +6351,25 @@ static void ae_pkg_collect(const char* dir, const char* modname, AePkgModules* m
 /* Write an entry that imports every module of `pkg` (sorted, so the build is
  * reproducible) to a temp file named after the package, so the library's
  * default name is lib<pkg>. Returns 0, or -1 with the reason printed. */
+/* #2899: the staging directory of `--package`, removed when ae exits. Every
+ * build ended with its ae-package-<pid> directory left in the temp directory,
+ * on success and on failure: nothing removed it. Exit is the one point every
+ * path of the build reaches (a return from main or an exit()), as for the
+ * runtime object directory (g_rt_obj_dir). ae handles no signal during a
+ * build, so an interrupted one ends without running exit handlers, here as
+ * for that directory. */
+static char g_package_dir[1024];
+
+static void ae_remove_package_dir(void) {
+    if (g_package_dir[0]) ae_remove_tree(g_package_dir);
+    g_package_dir[0] = '\0';
+}
+
+static void ae_note_package_dir(const char* dir) {
+    if (!g_package_dir[0]) atexit(ae_remove_package_dir);
+    snprintf(g_package_dir, sizeof(g_package_dir), "%s", dir);
+}
+
 static int ae_package_entry(const char* pkg, char* out, size_t outcap) {
     char rel[256];
     snprintf(rel, sizeof(rel), "%s", pkg);
@@ -6393,6 +6412,7 @@ static int ae_package_entry(const char* pkg, char* out, size_t outcap) {
     for (char* p = stem; *p; p++) if (*p == '.') *p = '_';
     char* dir = ae_path_printf("%s/ae-package-%d", get_temp_dir(), (int)getpid());
     mkdir_p(dir);
+    ae_note_package_dir(dir);
     int fits = ae_sprintf(out, outcap, "%s/%s.ae", dir, stem) == 0;
     if (!fits) {
         fprintf(stderr, "Error: the package entry's path %s/%s.ae is longer than %zu bytes\n",
