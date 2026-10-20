@@ -3580,6 +3580,18 @@ void emit_value_take(CodeGenerator* gen, ASTNode* e, Type* t) {
  * any other array (a local, a parameter, a field, an element) copied with a
  * reference taken to each owning element. One expression. */
 void emit_array_fill(CodeGenerator* gen, const char* dst, ASTNode* e, Type* at) {
+    /* #3006: an `if` fills from the branch it takes, each as it would on
+     * its own; C has no array value for it to choose. */
+    if (e->type == AST_IF_EXPRESSION && e->child_count >= 3) {
+        fprintf(gen->output, "((");
+        generate_expression(gen, e->children[0]);
+        fprintf(gen->output, ") ? (void)(");
+        emit_array_fill(gen, dst, e->children[1], at);
+        fprintf(gen->output, ") : (void)(");
+        emit_array_fill(gen, dst, e->children[2], at);
+        fprintf(gen->output, "))");
+        return;
+    }
     if (e->type == AST_ARRAY_LITERAL) {
         fprintf(gen->output, "(");
         for (int i = 0; i < e->child_count; i++) {
@@ -6249,10 +6261,14 @@ const char* struct_owning_strings(CodeGenerator* gen, Type* t) {
  * variable of the literal's struct type: an optional, a sum or a struct
  * pattern takes the value another way, and a callee the compiler cannot
  * see (an extern, a closure it cannot name) keeps the literal alive as
- * before. */
+ * before. An `if` giving a fresh struct in a branch is one too (#3006):
+ * its temporary takes each branch (emit_struct_take). */
 static int borrowed_struct_literal_arg(CodeGenerator* gen, ASTNode* call, ASTNode* arg) {
     if (!gen || !gen->program || !call || call->type != AST_FUNCTION_CALL || !call->value ||
-        !arg || arg->type != AST_STRUCT_LITERAL || !arg->node_type ||
+        !arg ||
+        (arg->type != AST_STRUCT_LITERAL &&
+         !(arg->type == AST_IF_EXPRESSION && branch_value_has_fresh(gen, arg))) ||
+        !arg->node_type ||
         arg->node_type->kind != TYPE_STRUCT || !arg->node_type->struct_name ||
         !struct_owning_strings(gen, arg->node_type)) return 0;
     const char* sname = arg->node_type->struct_name;
@@ -6969,6 +6985,40 @@ void emit_closure_take(CodeGenerator* gen, ASTNode* e) {
     fprintf(gen->output, "_aether_closure_retain(");
     generate_expression(gen, e);
     fprintf(gen->output, ")");
+}
+
+/* Is `e` a value nothing else holds, which a place takes by moving it in
+ * (what the takes above adopt as it is): a fresh string, a fresh closure, a
+ * call's result (R3; a C function lends its own), or a struct, array or
+ * tuple literal? */
+static int value_is_fresh(CodeGenerator* gen, ASTNode* e) {
+    if (!e || !e->node_type) return 0;
+    if (e->node_type->kind == TYPE_STRING)
+        return e->type != AST_IDENTIFIER && !is_string_view_read(gen, e, 1) &&
+               !is_captured_string(gen, e) && is_heap_string_expr(gen, e);
+    if (e->node_type->kind == TYPE_FUNCTION) return closure_value_is_fresh(gen, e);
+    if (e->type == AST_FUNCTION_CALL) return !call_is_extern(gen, e);
+    return e->type == AST_STRUCT_LITERAL || e->type == AST_ARRAY_LITERAL ||
+           e->type == AST_TUPLE_LITERAL;
+}
+
+/* #3006 (R3): does `e`, an `if` expression, give a fresh value in one of its
+ * branches? Then it is a fresh value where it stands: passed as an
+ * argument, it is the call's temporary, which takes each branch as a place
+ * does (a fresh value moved in, any other retained or copied) and is
+ * released once the call is done, as a call's result passed on is. */
+int branch_value_has_fresh(CodeGenerator* gen, ASTNode* e) {
+    if (!e || e->type != AST_IF_EXPRESSION || e->child_count < 3) return 0;
+    for (int i = 1; i <= 2; i++) {
+        ASTNode* b = e->children[i];
+        if (!b) continue;
+        if (b->type == AST_IF_EXPRESSION) {
+            if (branch_value_has_fresh(gen, b)) return 1;
+        } else if (value_is_fresh(gen, b)) {
+            return 1;
+        }
+    }
+    return 0;
 }
 
 

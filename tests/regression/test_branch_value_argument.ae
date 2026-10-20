@@ -1,0 +1,112 @@
+// Regression (#3006, R3): an `if` expression passed as an argument gives
+// the call the value of the branch it takes, and a fresh value there is a
+// fresh argument: the call's temporary takes each branch (a fresh value
+// moved in, any other retained or copied) and gives it back after the
+// call. The string a branch made was never released, nor the closure a
+// branch made or the struct literal; an `if` giving arrays did not
+// compile. Bound to a local first, each was released already.
+//
+// The heap check runs where the count is exact (mem.heap_in_use_exact):
+// after a warm-up, some window of the same work grows by exactly 0
+// (mem.steady_growth). Strings are built from parameters, because
+// string.concat of two literals folds to a literal.
+
+import std.mem
+import std.string
+
+extern exit(code: int)
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+struct Doc {
+    name: string
+    n: int
+}
+
+read_str(s: string) -> int {
+    return string.length(s)
+}
+
+read_fn(f: fn) -> int {
+    string r = call(f)
+    return string.length(r)
+}
+
+read_doc(d: Doc) -> int {
+    return string.length(d.name) + d.n
+}
+
+read_arr(a: string[2]) -> int {
+    return string.length(a[0]) + string.length(a[1])
+}
+
+read_ints(a: int[2]) -> int {
+    return a[0] + a[1]
+}
+
+shapes(w: string, k: int) {
+    even = k % 2 == 0
+    // Both branches fresh, then one fresh beside a local the caller keeps.
+    check(read_str(if even { string.concat(w, "#a") } else { "${w}#bb" }) == (if even { 3 } else { 4 }),
+        "an if over two fresh strings")
+    kept = string.concat(w, "#kept")
+    check(read_str(if even { kept } else { string.concat(w, "#c") }) == (if even { 6 } else { 3 }),
+        "an if over a local and a fresh string")
+    check(kept == "w#kept", "the local, after the call took its branch")
+    // Nested, and through a closure call.
+    check(read_str(if even { "lit" } else { if k > 4 { string.concat(w, "#d") } else { "${w}" } }) > 0,
+        "a nested if")
+    reader = | s: string | {
+        return string.length(s)
+    }
+    check(call(reader, if even { string.concat(w, "#e") } else { string.concat(w, "#ff") }) > 2,
+        "an if passed to a closure")
+    // A closure each branch makes.
+    c = string.concat(w, "#g")
+    check(read_fn(if even { || { return c } } else { || { return "${c}!" } }) > 2, "an if over closures")
+    // A struct literal beside a local struct.
+    d = Doc { name: string.concat(w, "#h"), n: 1 }
+    check(read_doc(if even { Doc { name: string.concat(w, "#i"), n: 2 } } else { d }) == (if even { 5 } else { 4 }),
+        "an if over a struct literal and a local")
+    check(d.name == "w#h", "the local struct, after the call")
+    // Arrays: literals, and a literal beside a local.
+    arr = [string.concat(w, "#j"), string.concat(w, "#k")]
+    check(read_arr(if even { [string.concat(w, "#l"), "m"] } else { arr }) == (if even { 4 } else { 6 }),
+        "an if over arrays")
+    check(arr[1] == "w#k", "the local array, after the call")
+    // Arrays that own nothing: C still cannot choose between them.
+    ints = [5, 6]
+    check(read_ints(if even { [1, 2] } else { ints }) == (if even { 3 } else { 11 }), "an if over int arrays")
+    // A value match of mixed arms, a temporary of its own (#2993).
+    m = read_str(match k % 3 {
+            0 -> string.concat(w, "#n")
+            1 -> kept
+            _ -> "lit"
+        })
+    check(m == 3 || m == 6, "a match over a fresh string, a local and a literal")
+}
+
+main() {
+    w = "w"
+    k = 0
+    while k < 20 {
+        shapes(w, k)
+        k = k + 1
+    }
+    if mem.heap_in_use_exact() {
+        grown = mem.steady_growth(|| {
+                j = 0
+                while j < 60 {
+                    shapes(w, j)
+                    j = j + 1
+                }
+            }, 5)
+        check(grown == 0, "60 calls grew the heap by ${grown} bytes in every window")
+    }
+    println("=== test_branch_value_argument passed ===")
+}

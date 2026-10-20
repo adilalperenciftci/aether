@@ -349,6 +349,8 @@ typedef struct ArgDrainWrap {
                          * may point into it (call_returns_view) */
     int held[16];       /* 1 = a string read from a place the callee can rewrite, taken
                          * for the call (string_arg_held) */
+    int taken[16];      /* 1 = an `if` giving a fresh string or closure, taken branch by
+                         * branch (branch_value_has_fresh, #3006) */
     int have_value;     /* the call yields a value: of C type ret_ct, or
                          * when that is NULL, of type ret_type */
     const char* ret_ct;
@@ -486,6 +488,7 @@ static void arg_drain_select(CodeGenerator* gen, ASTNode* expr, int first_arg,
     w->count = 0;
     memset(w->scoped, 0, sizeof(w->scoped));
     memset(w->held, 0, sizeof(w->held));
+    memset(w->taken, 0, sizeof(w->taken));
     if (!w->have_value && !is_void) return;
     for (int ai = first_arg; ai < expr->child_count && w->count < 16; ai++) {
         ASTNode* arg = expr->children[ai];
@@ -516,6 +519,29 @@ static void arg_drain_select(CodeGenerator* gen, ASTNode* expr, int first_arg,
                 w->scoped[w->count] = call_returns_view(expr) && hoist_ready(gen);
                 w->idx[w->count++] = ai;
             }
+            continue;
+        }
+        /* #3006 (R3): an `if` giving a fresh string or closure in one of
+         * its branches is a fresh argument, as a call's result is: its temp
+         * takes each branch (a fresh value moved in, any other retained)
+         * and is released after the call. One wrapped into an optional or a
+         * tuple parameter is that argument's temporary's
+         * (emit_composite_arg_temp). */
+        if (arg->type == AST_IF_EXPRESSION && arg->node_type && branch_value_has_fresh(gen, arg)) {
+            Type* at = arg->node_type;
+            TypeKind pk = func_name ? lookup_callee_param_kind(gen, func_name, ai) : TYPE_UNKNOWN;
+            if (arg_drain_lookup(arg) || pk == TYPE_OPTIONAL || pk == TYPE_TUPLE) continue;
+            if (at->kind == TYPE_STRING && !arg_taken_by_call(gen, func_name, ai)) {
+                w->closure[w->count] = 0;
+                w->scoped[w->count] = call_returns_view(expr) && hoist_ready(gen);
+            } else if (at->kind == TYPE_FUNCTION && !at->is_fnptr &&
+                       owned_closure_arg_drainable(gen, expr, func_name, ai)) {
+                w->closure[w->count] = 1;
+            } else {
+                continue;
+            }
+            w->taken[w->count] = 1;
+            w->idx[w->count++] = ai;
             continue;
         }
         /* #2518: a capturing closure literal, as #2507 does a handed-over
@@ -576,9 +602,13 @@ static void arg_drain_open(CodeGenerator* gen, ASTNode* expr, ArgDrainWrap* w) {
          * frees, so there is nothing const about it. */
         if (w->closure[h]) {
             seq_let_named(gen, &w->seq, "_AeClosure", names[h]);
-            if (w->closure[h] == 2) fprintf(gen->output, "_aether_closure_retain(");
-            generate_expression(gen, arg);
-            if (w->closure[h] == 2) fprintf(gen->output, ")");
+            if (w->taken[h]) {
+                emit_closure_take(gen, arg);
+            } else {
+                if (w->closure[h] == 2) fprintf(gen->output, "_aether_closure_retain(");
+                generate_expression(gen, arg);
+                if (w->closure[h] == 2) fprintf(gen->output, ")");
+            }
         } else if (w->scoped[h]) {
             /* Journaled where it is set, at the frame of the block that
              * releases it: the declaration is hoisted ahead of the whole
@@ -587,14 +617,16 @@ static void arg_drain_open(CodeGenerator* gen, ASTNode* expr, ArgDrainWrap* w) {
             fprintf(gen->output, "aether_unwind_track_str_place((const void*)&%s, NULL), "
                     "aether_heap_str_free(%s), %s = (char*)(", names[h], names[h], names[h]);
             if (w->held[h]) fprintf(gen->output, "aether_uniform_heap_str((const char*)(");
-            generate_expression(gen, arg);
+            if (w->taken[h]) emit_string_take(gen, arg, NULL);
+            else generate_expression(gen, arg);
             if (w->held[h]) fprintf(gen->output, "), 0)");
             fprintf(gen->output, ")");
             push_scoped_temp_free(gen, names[h]);
         } else {
             seq_let_named(gen, &w->seq, "char*", names[h]);
             fprintf(gen->output, w->held[h] ? "(char*)aether_uniform_heap_str((const char*)(" : "(char*)(");
-            generate_expression(gen, arg);
+            if (w->taken[h]) emit_string_take(gen, arg, NULL);
+            else generate_expression(gen, arg);
             fprintf(gen->output, w->held[h] ? "), 0)" : ")");
         }
         seq_next(gen, &w->seq);
@@ -7040,19 +7072,26 @@ static Type* fresh_composite_arg_type(CodeGenerator* gen, ASTNode* arg, Type* t)
 
 /* An array literal of owning elements passed as an argument is a temporary
  * of the statement, as a call's array result is: filled, each element
- * taken, and dropped when its block is done. */
+ * taken, and dropped when its block is done. So is an `if` giving arrays
+ * (#3006), which C cannot choose between as values: the temporary is
+ * filled from the branch taken, and dropped when it owns. */
 static int array_literal_arg_temp(CodeGenerator* gen, ASTNode* arg) {
-    if (arg->type != AST_ARRAY_LITERAL || !type_is_sized_array(arg->node_type) ||
-        !own_type_owns(gen, arg->node_type) || !hoist_ready(gen)) return 0;
-    static int alt_seq = 0;
+    int branches = arg->type == AST_IF_EXPRESSION && arg->child_count >= 3;
+    if ((arg->type != AST_ARRAY_LITERAL && !branches) || !type_is_sized_array(arg->node_type) ||
+        !hoist_ready(gen)) return 0;
     Type* at = arg->node_type;
+    int owns = own_type_owns(gen, at);
+    if (!owns && !branches) return 0;
+    static int alt_seq = 0;
     const char* t = cg_internf("_ae_alt%d", alt_seq++);
     hoist_append_text(gen, cg_internf("%s = {0}; ", c_member_decl(at, t)));
-    fprintf(gen->output, "(aether_unwind_track((const void*)%s, %s), %s(%s), ", t,
-            own_fn(gen, at, "drop_unwind"), own_fn(gen, at, "drop"), t);
+    fprintf(gen->output, "(");
+    if (owns)
+        fprintf(gen->output, "aether_unwind_track((const void*)%s, %s), %s(%s), ", t,
+                own_fn(gen, at, "drop_unwind"), own_fn(gen, at, "drop"), t);
     emit_array_fill(gen, t, arg, at);
     fprintf(gen->output, ", %s)", t);
-    push_own_drop_carrier(gen, t, at, 0, 0);
+    if (owns) push_own_drop_carrier(gen, t, at, 0, 0);
     return 1;
 }
 
@@ -7192,7 +7231,11 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
             const ASTNode* saved = g_stmt_temp_wrapping;
             g_stmt_temp_wrapping = expr;
             fprintf(gen->output, "(%s = ", g_stmt_temp_names[i]);
-            generate_expression(gen, expr);
+            /* An `if` the call borrows takes each branch (#3006). */
+            if (expr->type == AST_IF_EXPRESSION)
+                emit_struct_take(gen, expr, struct_owning_strings(gen, expr->node_type), NULL);
+            else
+                generate_expression(gen, expr);
             fprintf(gen->output, ")");
             g_stmt_temp_wrapping = saved;
             return;
@@ -7208,13 +7251,15 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
     /* A closure cell's value held for a call (#2755) is an identifier, and
      * a string held for one (string_arg_held) is a place: an identifier, a
      * field or an element, which the call reads through its hold rather
-     * than evaluating the place again. */
+     * than evaluating the place again. An `if` giving a fresh value is
+     * taken into one (#3006). */
     if (expr->type == AST_FUNCTION_CALL ||
         expr->type == AST_STRING_INTERP ||
         expr->type == AST_CLOSURE ||
         expr->type == AST_OR_ELSE ||
         expr->type == AST_TUPLE_UNWRAP ||
         expr->type == AST_NULL_COALESCE ||
+        (expr->type == AST_IF_EXPRESSION && g_arg_drain_count > 0) ||
         ((expr->type == AST_IDENTIFIER || expr->type == AST_MEMBER_ACCESS ||
           expr->type == AST_ARRAY_ACCESS) && g_arg_drain_count > 0)) {
         const char* sub = arg_drain_lookup(expr);

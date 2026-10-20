@@ -38,7 +38,8 @@ implementation record are in [design/ownership-model.md](design/ownership-model.
   locals hold, on every exit (a `return`, a `break`, a caught panic). A
   parameter is borrowed: the callee never releases it, and one it keeps it
   takes a reference to. A call borrows its arguments, so a fresh argument
-  is released after the call; a function returning a value hands its caller
+  is released after the call, an `if` or a `match` that gives a fresh value
+  in a branch among them; a function returning a value hands its caller
   one reference.
 - **R4, only C boundaries are annotated** (below).
 - **R5, moves.** Taking a fresh value (a call's result, an interpolation)

@@ -555,6 +555,7 @@ int struct_field_owned_array(ASTNode* field, int* len);
  * its own: a fresh closure (a literal, a call handing one over) is adopted,
  * anything else (a local, a field, an element, a parameter) is retained. */
 void emit_closure_take(CodeGenerator* gen, ASTNode* e);
+int branch_value_has_fresh(CodeGenerator* gen, ASTNode* e);
 /* #2890: is `v` a closure or a bare function, which a `ptr` slot takes as
  * a box (a closure, taken) or as the code address (a bare function)? Store
  * it there so; 0, emitting nothing, when it is neither. */
