@@ -1552,6 +1552,8 @@ static const char* type_name(Type* t) {
             snprintf(buf + n, sizeof(buf) - n, " -> %s", type_name(t->return_type));
         return aether_internf("%s", buf);
     }
+    /* #2980: a closure's type with a parameter's mode, as it is written. */
+    if (t && t->kind == TYPE_FUNCTION && fn_type_has_modes(t)) return type_spelled(t);
     return base_type_name(t);
 }
 
@@ -2423,11 +2425,12 @@ static void warn_erased_result_closures(void) {
     g_tc_erased_closure_count = 0;
 }
 
-/* #2926, #2990: a call through a function value cannot see what the callee
- * keeps (`@keep`) or hands to its result (`@into`), so a function with
- * either parameter is called by name. `ident` names the function `def`
- * where it is used as a value (a closure, a typed function pointer, a cast
- * to one). Reports each such parameter; returns 1 when there was one. */
+/* #2926, #2990, #2980: a typed C function pointer's parameters borrow (a
+ * call through one is checked as borrowing), so a function with a `@keep`
+ * or `@into` parameter is no C function pointer: `as fn(...)`, or a typed
+ * function pointer slot. As a value it is a closure of a type that says
+ * what it does (fn_value_type_of). `ident` names the function `def`.
+ * Reports each such parameter; returns 1 when there was one. */
 static int refuse_moded_fn_value(ASTNode* ident, ASTNode* def) {
     int refused = 0;
     for (int i = 0; ident && def && i < def->child_count; i++) {
@@ -2436,18 +2439,20 @@ static int refuse_moded_fn_value(ASTNode* ident, ASTNode* def) {
         int keep = annotation_has_marker(p->annotation, "keep_param");
         int into = annotation_has_marker(p->annotation, "into_param");
         if (!keep && !into) continue;
-        char msg[256];
+        char msg[320];
         if (keep)
             snprintf(msg, sizeof(msg),
-                     "'%s' keeps its `ptr` parameter '%s' (`@keep`), so it cannot be used as a value",
+                     "'%s' keeps its `ptr` parameter '%s' (`@keep`), so it cannot be a C function "
+                     "pointer, whose parameters borrow",
                      ident->value, p->value ? p->value : "?");
         else
             snprintf(msg, sizeof(msg),
                      "'%s' passes its `ptr` parameter '%s' into its result (`@into`), so it cannot "
-                     "be used as a value",
+                     "be a C function pointer, whose parameters borrow",
                      ident->value, p->value ? p->value : "?");
         type_error_code_hint(msg,
-            "call it by name: a call through a function value treats every `ptr` as borrowed",
+            "call it by name, or take it as a closure of a type that says so, "
+            "`fn(@keep ptr)`: a call through a C function pointer treats every `ptr` as borrowed",
             ident->line, ident->column, AETHER_ERR_KEEPS_BORROWED);
         refused = 1;
     }
@@ -2474,30 +2479,55 @@ static void refuse_moded_fn_in_fnptr_slot(SymbolTable* table, ASTNode* value, Ty
  * codegen lowers it through the bare-fn adapter instead of naming the C
  * function, which is a raw pointer and not an _AeClosure. Returns 0 when
  * the name is not a function or a local shadows it. */
-static int function_value_annotate(ASTNode* ident, SymbolTable* table) {
-    if (!ident || ident->type != AST_IDENTIFIER || !ident->value) return 0;
-    Symbol* sym = lookup_symbol(table, ident->value);
-    if (!sym || !sym->is_function || !sym->node ||
-        (sym->node->type != AST_FUNCTION_DEFINITION &&
-         sym->node->type != AST_BUILDER_FUNCTION)) return 0;
-    ASTNode* def = sym->node;
+/* The closure type a named function `def` is as a value (#2055): its
+ * parameters in order, each one's mode (#2980), and its result (`sym_type`,
+ * the function symbol's type, is its result). */
+static Type* fn_value_type_of(ASTNode* def, Type* sym_type) {
     int count = 0;
     for (int i = 0; i < def->child_count; i++) {
         ASTNode* p = def->children[i];
         if (p && p->type != AST_GUARD_CLAUSE && p->type != AST_BLOCK &&
             p->type != AST_REQUIRES_CLAUSE && p->type != AST_ENSURES_CLAUSE) count++;
     }
-    refuse_moded_fn_value(ident, def);
     Type** params = count ? malloc(sizeof(Type*) * (size_t)count) : NULL;
+    int modes[64] = { 0 };
     int k = 0;
     for (int i = 0; i < def->child_count && k < count; i++) {
         ASTNode* p = def->children[i];
         if (!p || p->type == AST_GUARD_CLAUSE || p->type == AST_BLOCK ||
             p->type == AST_REQUIRES_CLAUSE || p->type == AST_ENSURES_CLAUSE) continue;
+        if (k < 64)
+            modes[k] = annotation_has_marker(p->annotation, "keep_param")   ? FN_MODE_KEEP
+                       : annotation_has_marker(p->annotation, "into_param") ? FN_MODE_INTO
+                                                                            : FN_MODE_BORROWED;
         params[k++] = p->node_type ? clone_type(p->node_type) : create_type(TYPE_INT);
     }
-    Type* ret = (sym->type && sym->type->kind != TYPE_VOID) ? clone_type(sym->type) : NULL;
-    set_node_type(ident, create_function_type(count, params, ret));
+    Type* ret = (sym_type && sym_type->kind != TYPE_VOID) ? clone_type(sym_type) : NULL;
+    Type* t = create_function_type(count, params, ret);
+    free(params);
+    for (int i = 0; i < count && i < 64; i++) fn_type_set_param_mode(t, i, modes[i]);
+    return t;
+}
+
+/* The named function `ident` stands for, when it names one a local does
+ * not shadow, else NULL. */
+static ASTNode* named_function_value(ASTNode* ident, SymbolTable* table, Symbol** sym_out) {
+    if (!ident || ident->type != AST_IDENTIFIER || !ident->value) return NULL;
+    Symbol* sym = lookup_symbol(table, ident->value);
+    if (!sym || !sym->is_function || !sym->node ||
+        (sym->node->type != AST_FUNCTION_DEFINITION &&
+         sym->node->type != AST_BUILDER_FUNCTION)) return NULL;
+    if (sym_out) *sym_out = sym;
+    return sym->node;
+}
+
+static int function_value_annotate(ASTNode* ident, SymbolTable* table) {
+    Symbol* sym = NULL;
+    ASTNode* def = named_function_value(ident, table, &sym);
+    if (!def) return 0;
+    /* #2980: a function with a `@keep` or `@into` parameter is a value of
+     * a type that says so; where the value goes, that type is checked. */
+    set_node_type(ident, fn_value_type_of(def, sym->type));
     if (ident->annotation) free(ident->annotation);
     ident->annotation = strdup("fn_value");
     return 1;
@@ -2586,6 +2616,121 @@ static void reject_closure_for_fnptr(SymbolTable* table, ASTNode* call, ASTNode*
              index, param_name ? param_name : "?", call->value ? call->value : "?",
              param_name ? param_name : "f");
     type_error(emsg, arg->line, arg->column);
+}
+
+/* #2980: the first parameter at which a function of type `from` does more
+ * with a `ptr` than `to` allows, or -1. */
+static int fn_mode_misfit_at(const Type* from, const Type* to) {
+    for (int i = 0; from && from->param_modes && i < from->param_count; i++) {
+        int want = (to && to->kind == TYPE_FUNCTION && !to->is_fnptr) ? fn_type_param_mode(to, i)
+                                                                       : FN_MODE_BORROWED;
+        if (from->param_modes[i] > want) return i;
+    }
+    return -1;
+}
+
+/* "keeps its `ptr` parameter 1 (`@keep`)", for a message. */
+static const char* fn_mode_phrase(int mode, int i) {
+    return mode == FN_MODE_KEEP
+               ? aether_internf("keeps its `ptr` parameter %d (`@keep`)", i + 1)
+               : aether_internf("passes its `ptr` parameter %d into its result (`@into`)", i + 1);
+}
+
+/* #2980: a function value given where the parameter's type lets a call
+ * through it do less with a `ptr` than the function does: a `fn` (which
+ * borrows every parameter), a closure type with a weaker mode, or a `ptr`
+ * (the box `unbox_closure` opens is a `fn` again). A call through the
+ * parameter would be checked as borrowing, and hand the function a pointer
+ * it keeps. Returns 1 when it reported. */
+static int reject_fn_mode_argument(SymbolTable* table, ASTNode* call, ASTNode* arg,
+                                   Type* arg_type, Type* param_type, int index,
+                                   const char* param_name) {
+    if (!arg || !param_type) return 0;
+    Type* owned = NULL;
+    Type* vt = arg_type;
+    Symbol* fsym = NULL;
+    ASTNode* fdef = named_function_value(arg, table, &fsym);
+    if (fdef) vt = owned = fn_value_type_of(fdef, fsym->type);
+    else if ((!vt || vt->kind == TYPE_UNKNOWN) && arg->node_type &&
+             arg->node_type->kind == TYPE_FUNCTION)
+        vt = arg->node_type;   /* a closure literal, typed where it was checked */
+    int reported = 0;
+    if (vt && vt->kind == TYPE_FUNCTION && fn_type_has_modes(vt)) {
+        const char* what = arg->type == AST_CLOSURE ? "the closure"
+                           : (arg->type == AST_IDENTIFIER && arg->value)
+                               ? aether_internf("'%s'", arg->value)
+                               : "the function given";
+        const char* pn = param_name ? param_name : "?";
+        const char* cn = call->value ? call->value : "?";
+        int at = fn_mode_misfit_at(vt, param_type);
+        char emsg[512];
+        if (param_type->kind == TYPE_PTR) {
+            int m = 0;
+            while (m < vt->param_count && !fn_type_param_mode(vt, m)) m++;
+            snprintf(emsg, sizeof(emsg),
+                     "Argument %d '%s' of '%s': %s %s, so it cannot go into a `ptr`: "
+                     "`unbox_closure` gives back a `fn`, which borrows every parameter",
+                     index, pn, cn, what, fn_mode_phrase(fn_type_param_mode(vt, m), m));
+            type_error_code_hint(emsg, "pass it as a value of its own type",
+                                 arg->line, arg->column, AETHER_ERR_KEEPS_BORROWED);
+            reported = 1;
+        } else if (param_type->kind == TYPE_FUNCTION && !param_type->is_fnptr && at >= 0) {
+            snprintf(emsg, sizeof(emsg),
+                     "Argument %d '%s' of '%s': %s %s, where `%s` %s, so a call through '%s' "
+                     "would not be checked for it",
+                     index, pn, cn, what, fn_mode_phrase(fn_type_param_mode(vt, at), at),
+                     type_spelled(param_type),
+                     fn_type_param_mode(param_type, at) == FN_MODE_INTO
+                         ? "passes it into its result" : "borrows it",
+                     pn);
+            type_error_code_hint(emsg,
+                                 aether_internf("declare the parameter `%s`, so a call through "
+                                                "it is checked as a direct call is",
+                                                type_spelled(vt)),
+                                 arg->line, arg->column, AETHER_ERR_KEEPS_BORROWED);
+            reported = 1;
+        }
+    }
+    if (owned) free_type(owned);
+    return reported;
+}
+
+/* #2980: a value of `value_type` (a function that keeps or passes on a
+ * `ptr` parameter) bound to `name`, whose type `slot` would have a call
+ * through it borrow there, or a `ptr`, which the box makes a `fn` again.
+ * Reports E0902 at `at`; returns 1 when it did. */
+static int report_fn_mode_slot(ASTNode* at, Type* value_type, Type* slot, const char* name) {
+    if (!at || !value_type || !slot || value_type->kind != TYPE_FUNCTION ||
+        !fn_type_has_modes(value_type))
+        return 0;
+    char emsg[512];
+    const char* nm = name ? name : "the slot";
+    if (slot->kind == TYPE_PTR) {
+        int m = 0;
+        while (m < value_type->param_count && !fn_type_param_mode(value_type, m)) m++;
+        snprintf(emsg, sizeof(emsg),
+                 "'%s' is a `ptr`, and a function that %s cannot go into one: `unbox_closure` "
+                 "gives back a `fn`, which borrows every parameter",
+                 nm, fn_mode_phrase(fn_type_param_mode(value_type, m), m));
+    } else if (slot->kind == TYPE_FUNCTION) {
+        int i = fn_mode_misfit_at(value_type, slot);
+        if (i < 0) return 0;
+        snprintf(emsg, sizeof(emsg),
+                 "'%s' is `%s`, which %s at parameter %d, and the function bound to it %s, so a "
+                 "call through '%s' would not be checked for it",
+                 nm, type_spelled(slot),
+                 fn_type_param_mode(slot, i) == FN_MODE_INTO ? "passes its `ptr` into its result"
+                                                             : "borrows its `ptr`",
+                 i + 1, fn_mode_phrase(fn_type_param_mode(value_type, i), i), nm);
+    } else {
+        return 0;
+    }
+    type_error_code_hint(emsg,
+                         aether_internf("declare it `%s`, so a call through it is checked as a "
+                                        "direct call is",
+                                        type_spelled(value_type)),
+                         at->line, at->column, AETHER_ERR_KEEPS_BORROWED);
+    return 1;
 }
 
 /* #2628: the same closure stored in a typed C function pointer slot other
@@ -2877,11 +3022,52 @@ static void coerce_closure_call_args(ASTNode* call, SymbolTable* table) {
 static int g_tc_ptr_to_closure = 0;
 int typecheck_ptr_to_closure_seen(void) { return g_tc_ptr_to_closure; }
 
+/* #2980: may a function of type `from` stand where `to` is wanted? A call
+ * through `to` is checked by `to`'s modes, so each of `from`'s parameters
+ * must do no more with a `ptr` than `to` says (borrowed, then `@into`, then
+ * `@keep`). An erased `fn` and a typed C function pointer borrow at every
+ * parameter. */
+static int fn_modes_fit(const Type* from, const Type* to) {
+    if (!from || !to || from->kind != TYPE_FUNCTION || to->kind != TYPE_FUNCTION) return 1;
+    for (int i = 0; from->param_modes && i < from->param_count; i++) {
+        int want = to->is_fnptr ? FN_MODE_BORROWED : fn_type_param_mode(to, i);
+        if (from->param_modes[i] > want) return 0;
+    }
+    return 1;
+}
+
 int is_type_compatible(Type* from, Type* to) {
     if (!from || !to) return 0;
-    
+
     // Unknown types match anything (for inference)
     if (from->kind == TYPE_UNKNOWN || to->kind == TYPE_UNKNOWN) return 1;
+
+    /* #2980: a function that keeps or passes on a `ptr` parameter does not
+     * stand for a type that borrows it there, and is not boxed into a `ptr`
+     * (unbox_closure gives back a `fn` that borrows every parameter). */
+    if (from->kind == TYPE_FUNCTION && to->kind == TYPE_FUNCTION && !fn_modes_fit(from, to))
+        return 0;
+    if (from->kind == TYPE_FUNCTION && to->kind == TYPE_PTR && fn_type_has_modes(from)) return 0;
+    /* Two closure types where a parameter names a mode: the same
+     * parameters, the modes fitting (above), and the same result, where no
+     * result and `void` are one, and a closure literal's result is left to
+     * its body (#2460). */
+    if (from->kind == TYPE_FUNCTION && to->kind == TYPE_FUNCTION && !from->is_fnptr &&
+        !to->is_fnptr && (fn_type_has_modes(from) || fn_type_has_modes(to)) &&
+        from->param_count == to->param_count && from->param_count > 0) {
+        int ok = 1;
+        for (int i = 0; ok && i < from->param_count; i++) {
+            Type* a = from->param_types ? from->param_types[i] : NULL;
+            Type* b = to->param_types ? to->param_types[i] : NULL;
+            ok = !a || !b || is_type_compatible(b, a);
+        }
+        Type* fr = from->return_type;
+        Type* tr = to->return_type;
+        int fvoid = !fr || fr->kind == TYPE_VOID, tvoid = !tr || tr->kind == TYPE_VOID;
+        if (ok && ((fvoid && tvoid) || (!fr && from->closure_literal) ||
+                   (fr && tr && is_type_compatible(fr, tr))))
+            return 1;
+    }
 
     // #340 optionals. Assigning INTO a `T?`:
     //   - `none` (optional with unknown inner) fits any optional;
@@ -7741,15 +7927,44 @@ static ASTNode* call_decl_param(ASTNode* decl, ASTNode* call, int i) {
     return call_param_of(decl, call, i);
 }
 
-/* Does the call `call` keep its argument `i`: a `@keep` parameter (of an
- * Aether function, or of an extern that stands for one, as a binary
- * import's stub does, #3013), or a `@retain` one of an extern? */
-static int call_keeps_arg(ASTNode* program, ASTNode* call, int i) {
+/* The function type a call through a value (`call(f, ...)`, and `f(...)`
+ * on a local, which the checker rewrote to it) goes through, or NULL. */
+static Type* call_value_type(ASTNode* call) {
+    if (!call || !call->value || strcmp(call->value, "call") || call->child_count < 1 ||
+        !call->children[0])
+        return NULL;
+    Type* t = call->children[0]->node_type;
+    return t && t->kind == TYPE_FUNCTION ? t : NULL;
+}
+
+/* What the callee of `call` does with its argument `i` (FnParamMode): a
+ * `@keep` parameter (of an Aether function, of an extern that stands for
+ * one, as a binary import's stub does, #3013, or of a function type,
+ * #2980) and an extern's `@retain` one keep it, an `@into` one hands it to
+ * the result, any other borrows it. A call through a value is checked by
+ * the value's type, a direct call by the callee's signature. */
+static int call_arg_mode(ASTNode* program, ASTNode* call, int i) {
+    Type* vt = call_value_type(call);
+    if (vt) return i >= 1 ? fn_type_param_mode(vt, i - 1) : FN_MODE_BORROWED;
     ASTNode* decl = call_callee_decl(program, call);
     ASTNode* p = call_decl_param(decl, call, i);
-    if (!p) return 0;
-    return is_keep_param(p) ||
-           (decl->type == AST_EXTERN_FUNCTION && param_has_mode(p, "retain_param"));
+    if (!p) return FN_MODE_BORROWED;
+    if (is_keep_param(p) ||
+        (decl->type == AST_EXTERN_FUNCTION && param_has_mode(p, "retain_param")))
+        return FN_MODE_KEEP;
+    return is_into_param(p) ? FN_MODE_INTO : FN_MODE_BORROWED;
+}
+
+/* The declared result of the callee of `call`, or NULL when not known. */
+static Type* call_result_decl_type(ASTNode* program, ASTNode* call) {
+    Type* vt = call_value_type(call);
+    if (vt) return vt->return_type;
+    ASTNode* decl = call_callee_decl(program, call);
+    return decl ? decl->node_type : NULL;
+}
+
+static int call_keeps_arg(ASTNode* program, ASTNode* call, int i) {
+    return call_arg_mode(program, call, i) == FN_MODE_KEEP;
 }
 
 /* Does the `match` arm pattern `pat` bind `name`? */
@@ -7838,6 +8053,8 @@ static Carried carries_borrowed_ptr(ASTNode* e, const KeepSet* s) {
         case AST_FUNCTION_CALL: {
             if (!e->value) return none;
             Carried c = none;
+            int through_value = call_value_type(e) != NULL ||
+                                (!strcmp(e->value, "call") && e->child_count > 0);
             /* A closure that captured the parameter may return it: a call
              * through one (`call(f)`, `f()`) holds what it captured. */
             if (!strcmp(e->value, "call") && e->child_count > 0)
@@ -7846,18 +8063,27 @@ static Carried carries_borrowed_ptr(ASTNode* e, const KeepSet* s) {
                 c = carried_holders(keep_set_lookup(s, e->value));
             if (c.n) {
                 carried_set_via(&c, "held by a closure's result");
-                return carried_read_out(c, e->node_type);
+                c = carried_read_out(c, e->node_type);
             }
             /* The result of a call holds what it is given for an `@into`
-             * parameter: the pointer itself when the result is a pointer. */
-            ASTNode* decl = call_callee_decl(s->program, e);
-            for (int i = 0; decl && i < e->child_count; i++)
-                if (is_into_param(call_decl_param(decl, e, i)))
-                    carried_merge(&c, carries_borrowed_ptr(e->children[i], s));
-            if (c.n)
-                carried_set_via(&c, decl->node_type && decl->node_type->kind == TYPE_PTR
-                                        ? NULL
-                                        : aether_internf("held by the result of '%s'", e->value));
+             * parameter (of the callee's signature, or of the type of the
+             * value it is called through, #2980): the pointer itself when
+             * the result is a pointer. */
+            Carried in = none;
+            for (int i = 0; i < e->child_count; i++)
+                if (call_arg_mode(s->program, e, i) == FN_MODE_INTO)
+                    carried_merge(&in, carries_borrowed_ptr(e->children[i], s));
+            if (in.n) {
+                Type* rt = call_result_decl_type(s->program, e);
+                const char* who = !through_value ? e->value
+                                  : (e->children[0]->type == AST_IDENTIFIER && e->children[0]->value)
+                                      ? e->children[0]->value
+                                      : "a closure";
+                carried_set_via(&in, rt && rt->kind == TYPE_PTR
+                                         ? NULL
+                                         : aether_internf("held by the result of '%s'", who));
+                carried_merge(&c, in);
+            }
             return c;
         }
         default: return none;
@@ -8142,9 +8368,8 @@ static int c_pointer_outlives(const KeepCtx* c, ASTNode* e, int depth) {
     e = strip_ptr_casts(e);
     if (!e || e->type == AST_NULL_LITERAL) return 0;
     if (e->type == AST_FUNCTION_CALL) {
-        ASTNode* decl = call_callee_decl(c->program, e);
-        for (int i = 0; decl && depth <= 8 && i < e->child_count; i++)
-            if (is_into_param(call_decl_param(decl, e, i)) &&
+        for (int i = 0; depth <= 8 && i < e->child_count; i++)
+            if (call_arg_mode(c->program, e, i) == FN_MODE_INTO &&
                 c_pointer_outlives(c, e->children[i], depth + 1))
                 return 1;
         return 0;
@@ -8300,17 +8525,22 @@ static void strings_into_keep_walk(const KeepCtx* c, ASTNode* n) {
     }
     /* A `@keep ptr` keeps it, and an `@into ptr` (#2990) hands it to the
      * call's result, which the caller may hold past the local that owns the
-     * string; given as it is, either would hold a string its owner frees. */
+     * string; given as it is, either would hold a string its owner frees.
+     * The same for a call through a value whose type says so (#2980). An
+     * extern's `@retain` parameter is handed a reference of its own (R4). */
     if (n->type == AST_FUNCTION_CALL && n->value) {
-        ASTNode* decl = call_callee_decl(program, n);
-        for (int i = 0; decl && i < n->child_count; i++) {
+        ASTNode* decl = call_value_type(n) ? NULL : call_callee_decl(program, n);
+        for (int i = 0; i < n->child_count; i++) {
             ASTNode* a = n->children[i];
             const char* kind = unkept_value_kind(program, a);
             if (!kind) continue;
-            ASTNode* p = call_decl_param(decl, n, i);
-            if (is_keep_param(p)) {
+            int mode = call_arg_mode(program, n, i);
+            if (mode == FN_MODE_KEEP) {
+                if (decl && decl->type == AST_EXTERN_FUNCTION &&
+                    !is_keep_param(call_decl_param(decl, n, i)))
+                    continue;
                 report_unkept_into_ptr(a, kind, "a `@keep ptr` parameter", "call");
-            } else if (is_into_param(p)) {
+            } else if (mode == FN_MODE_INTO) {
                 char msg[200];
                 snprintf(msg, sizeof(msg),
                          "a `%s` is given to an `@into ptr` parameter, and the result holds it "
@@ -8415,12 +8645,14 @@ static int returns_a_value(ASTNode* n) {
 /* #2926, #2990: what a parameter declares it does with a `ptr` (`@keep`,
  * `@into`, an extern's `@retain` and `@noescape`) must be one thing, and
  * must fit: `@into` is for a bare `ptr` of a function whose result can hold
- * it. A closure's `ptr` parameter is always borrowed. */
+ * it. A closure's parameter may declare either (#2980): the closure's type
+ * then says so, and a call through it is checked by it. */
 static void check_param_modes(ASTNode* program, ASTNode* decl) {
     if (!decl) return;
     int is_extern = decl->type == AST_EXTERN_FUNCTION;
     int is_closure = decl->type == AST_CLOSURE;
-    const char* fname = decl->value ? decl->value : "?";
+    /* What the messages call the function: a closure has no name. */
+    const char* who = is_closure ? "the closure" : aether_internf("'%s'", decl->value ? decl->value : "?");
     for (int i = 0; i < decl->child_count; i++) {
         ASTNode* p = decl->children[i];
         if (!p || !p->value) continue;
@@ -8430,14 +8662,6 @@ static void check_param_modes(ASTNode* program, ASTNode* decl) {
         int keep = is_keep_param(p), into = is_into_param(p);
         if (!keep && !into) continue;
         char msg[320];
-        if (is_closure) {
-            type_error_code_hint("a closure's `ptr` parameter is always borrowed; `@into` and "
-                                 "`@keep` are for named functions",
-                                 "take the value as a borrowed parameter, or make the closure a "
-                                 "named function that declares it",
-                                 p->line, p->column, AETHER_ERR_KEEPS_BORROWED);
-            continue;
-        }
         const char* mode = into ? "into" : "keep";
         const char* other = (into && keep) ? "keep"
                             : (is_extern && param_has_mode(p, "retain_param")) ? "retain"
@@ -8467,18 +8691,20 @@ static void check_param_modes(ASTNode* program, ASTNode* decl) {
             continue;
         }
         /* A result left to inference is void when no `return` gives a
-         * value (fn_result_type's rule). */
-        Type* ret = decl->node_type;
-        int none = !ret || ret->kind == TYPE_VOID ||
-                   (ret->kind == TYPE_UNKNOWN && !is_extern && decl->child_count > 0 &&
-                    !returns_a_value(decl->children[decl->child_count - 1]));
+         * value (fn_result_type's rule); a closure's is its body's. */
+        Type* ret = is_closure ? (decl->node_type ? decl->node_type->return_type : NULL)
+                               : decl->node_type;
+        ASTNode* body = (!is_extern && decl->child_count > 0)
+                            ? decl->children[decl->child_count - 1] : NULL;
+        int none = (!ret && !is_closure) || (ret && ret->kind == TYPE_VOID) ||
+                   ((!ret || ret->kind == TYPE_UNKNOWN) && body && !returns_a_value(body));
         if (none || !type_can_hold_ptr_decl(program, ret, 0)) {
             if (none)
-                snprintf(msg, sizeof(msg), "'%s' is declared `@into`, but '%s' has no result to hold it",
-                         p->value, fname);
+                snprintf(msg, sizeof(msg), "'%s' is declared `@into`, but %s has no result to hold it",
+                         p->value, who);
             else
-                snprintf(msg, sizeof(msg), "'%s' is declared `@into`, but '%s' returns %s, which "
-                         "cannot hold it", p->value, fname, type_spelled(ret));
+                snprintf(msg, sizeof(msg), "'%s' is declared `@into`, but %s returns %s, which "
+                         "cannot hold it", p->value, who, type_spelled(ret));
             type_error_code_hint(msg, "a borrowed `ptr` parameter is enough", p->line, p->column,
                                  AETHER_ERR_KEEPS_BORROWED);
         }
@@ -10793,6 +11019,15 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                 }
                 Type* init_type = fn_address ? clone_type(fnptr_slot)
                                              : infer_type(init, table);
+                /* #2980: a closure literal whose parameter names a mode
+                 * gives the binding its type, `fn(@keep ptr, float)`, so a
+                 * call through the binding is checked by it. */
+                if (!fn_address && init->type == AST_CLOSURE && init->node_type &&
+                    fn_type_has_modes(init->node_type) &&
+                    (!init_type || init_type->kind == TYPE_UNKNOWN)) {
+                    if (init_type) free_type(init_type);
+                    init_type = clone_type(init->node_type);
+                }
                 /* #2628: a closure has an environment the slot has nowhere
                  * to put. Refused before the generic checks below, which
                  * pass a closure of the slot's signature and call another
@@ -11226,7 +11461,15 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                                      want->kind != TYPE_OPTIONAL && want->kind != TYPE_SUM &&
                                      want->kind != TYPE_UNKNOWN &&
                                      is_assignable(want, have) && !is_assignable(have, want);
-                    if (scalar_fix || array_fix || wider_fix || narrow_fix) {
+                    /* #2980: a closure value whose parameter names a mode
+                     * (a literal, a function with a `@keep` parameter, a
+                     * call returning one) where the early pass saw an erased
+                     * `fn`: the binding takes the type that says what it
+                     * does, so a call through it is checked by it. */
+                    int mode_fix = first_binding && have->kind == TYPE_FUNCTION &&
+                                   !have->is_fnptr && !fn_type_has_modes(have) &&
+                                   want->kind == TYPE_FUNCTION && fn_type_has_modes(want);
+                    if (scalar_fix || array_fix || wider_fix || narrow_fix || mode_fix) {
                         free_type(stmt->node_type);
                         stmt->node_type = clone_type(init_type);
                     }
@@ -11288,8 +11531,10 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                     /* #1286: `T[] s = null` is the empty slice. */
                 } else if (!array_const_int_narrow && !is_assignable(init_type, stmt->node_type)) {
                     // Has explicit type but initializer doesn't match
+                    if (!report_fn_mode_slot(init, init_type, stmt->node_type, stmt->value))
+                        type_error("Type mismatch in variable initialization", stmt->line,
+                                   stmt->column);
                     free_type(init_type);
-                    type_error("Type mismatch in variable initialization", stmt->line, stmt->column);
                     return 0;
                 }
                 /* #1286: `T[N]` / `null` into a `T[]` binding becomes a slice. */
@@ -11508,6 +11753,10 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                 if (null_into_slice || is_assignable(right_type, symbol->type))
                     slice_coerce_slot(&stmt->children[1], symbol->type, 0);
                 if (!null_into_slice && !is_assignable(right_type, symbol->type)) {
+                    if (report_fn_mode_slot(right, right_type, symbol->type, left->value)) {
+                        free_type(right_type);
+                        return 0;
+                    }
                     char error_msg[256];
                     snprintf(error_msg, sizeof(error_msg),
                              "Type mismatch in assignment to '%s': expected %s, got %s",
@@ -13414,6 +13663,17 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
             if (expr->child_count > 0) {
                 typecheck_expression(expr->children[0], table);
             }
+            /* #2980: the cast makes a C function pointer, whose parameters
+             * borrow; a parameter's mode belongs to a closure's type. */
+            if (expr->node_type && fn_type_has_modes(expr->node_type)) {
+                type_error_code_hint(
+                    "`as fn(...)` makes a C function pointer, whose parameters borrow; "
+                    "`@keep` and `@into` belong to a closure's type",
+                    "bind the function to a local or a parameter of the closure type "
+                    "instead, `f: fn(@keep ptr)`",
+                    expr->line, expr->column, AETHER_ERR_KEEPS_BORROWED);
+                return 0;
+            }
             /* Don't replace expr->node_type — the parser set it from
              * the `fn(...)` source spelling and it carries the exact
              * Type* tree we need for codegen. */
@@ -13682,6 +13942,45 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
 
             if (!expr->node_type) {
                 expr->node_type = create_type(TYPE_FUNCTION);
+            }
+            /* #2980: a literal whose parameter is `@keep` or `@into` is of a
+             * type that says so, `fn(@keep ptr, float)`, so a call through
+             * it is checked by it and it goes nowhere that would call it as
+             * borrowing. Its result is left to its body (#2460). */
+            {
+                int np = 0, moded = 0;
+                for (int i = 0; i < expr->child_count; i++) {
+                    ASTNode* cp = expr->children[i];
+                    if (!cp || cp->type != AST_CLOSURE_PARAM) continue;
+                    np++;
+                    if (annotation_has_marker(cp->annotation, "keep_param") ||
+                        annotation_has_marker(cp->annotation, "into_param"))
+                        moded = 1;
+                }
+                if (moded) {
+                    Type** pts = malloc(sizeof(Type*) * (size_t)np);
+                    int k = 0;
+                    for (int i = 0; i < expr->child_count; i++) {
+                        ASTNode* cp = expr->children[i];
+                        if (!cp || cp->type != AST_CLOSURE_PARAM) continue;
+                        pts[k++] = cp->node_type ? clone_type(cp->node_type)
+                                                 : create_type(TYPE_UNKNOWN);
+                    }
+                    Type* t = create_function_type(np, pts, NULL);
+                    free(pts);
+                    k = 0;
+                    for (int i = 0; i < expr->child_count; i++) {
+                        ASTNode* cp = expr->children[i];
+                        if (!cp || cp->type != AST_CLOSURE_PARAM) continue;
+                        fn_type_set_param_mode(
+                            t, k++,
+                            annotation_has_marker(cp->annotation, "keep_param")   ? FN_MODE_KEEP
+                            : annotation_has_marker(cp->annotation, "into_param") ? FN_MODE_INTO
+                                                                                  : FN_MODE_BORROWED);
+                    }
+                    t->closure_literal = expr;
+                    set_node_type(expr, t);
+                }
             }
             /* #2460: the literal's type stays the erased `fn` (it flows into
              * any `fn` slot), but it records which literal it is, so a call
@@ -16248,6 +16547,36 @@ static int bind_named_arguments(ASTNode* call, Symbol* symbol) {
 
 static int typecheck_function_call_inner(ASTNode* call, SymbolTable* table);
 
+/* #2980: a closure literal given for a closure type whose parameters name a
+ * mode (`tick: fn(@keep ptr, float)`) takes, for each parameter it leaves
+ * untyped (`|el, t|`), that parameter's type and mode. Its body is then
+ * checked with them, and its C function has the parameters a call through
+ * the type passes. A parameter it types itself keeps what it says: one
+ * written `el: ptr` borrows, which fits any mode. */
+static void adopt_closure_signature(ASTNode* arg, Type* slot) {
+    if (!arg || arg->type != AST_CLOSURE || !slot || slot->kind != TYPE_FUNCTION ||
+        slot->is_fnptr || !fn_type_has_modes(slot))
+        return;
+    int k = 0;
+    for (int i = 0; i < arg->child_count && k < slot->param_count; i++) {
+        ASTNode* cp = arg->children[i];
+        if (!cp || cp->type != AST_CLOSURE_PARAM) continue;
+        int pos = k++;
+        if (cp->node_type && cp->node_type->kind != TYPE_UNKNOWN) continue;
+        if (cp->annotation && (annotation_has_marker(cp->annotation, "keep_param") ||
+                               annotation_has_marker(cp->annotation, "into_param")))
+            continue;
+        Type* pt = slot->param_types ? slot->param_types[pos] : NULL;
+        if (!pt) continue;
+        if (cp->node_type) free_type(cp->node_type);
+        cp->node_type = clone_type(pt);
+        int m = fn_type_param_mode(slot, pos);
+        if (m != FN_MODE_BORROWED)
+            cp->annotation = annotation_add_marker(cp->annotation,
+                                                   m == FN_MODE_KEEP ? "keep_param" : "into_param");
+    }
+}
+
 int typecheck_function_call(ASTNode* call, SymbolTable* table) {
     int ok = typecheck_function_call_inner(call, table);
     /* #3016: `print` / `println` render each argument by the rule an
@@ -17068,6 +17397,7 @@ static int typecheck_function_call_inner(ASTNode* call, SymbolTable* table) {
                 p->type != AST_IDENTIFIER) continue;   /* a pattern: no declared type */
             if (p->node_type && p->node_type->kind == TYPE_ENUM)
                 coerce_bare_enum_member(call->children[aslot], p->node_type, table);
+            adopt_closure_signature(call->children[aslot], p->node_type);
         }
     }
 
@@ -17168,6 +17498,7 @@ static int typecheck_function_call_inner(ASTNode* call, SymbolTable* table) {
                     Type* da = infer_type(darg, table);
                     reject_tuple_argument(table, call, darg, da, param_type, arg_slot + 1, param->value);
                     reject_closure_for_fnptr(table, call, darg, da, param_type, arg_slot + 1, param->value);
+                    reject_fn_mode_argument(table, call, darg, da, param_type, arg_slot + 1, param->value);
                     reject_struct_argument(call, darg, da, param_type, arg_slot + 1, param->value);
                     reject_pointer_argument(call, darg, da, param_type, arg_slot + 1, param->value);
                     reject_sized_array_argument(call, darg, da, param_type, arg_slot + 1, param->value);
@@ -17362,8 +17693,12 @@ static int typecheck_function_call_inner(ASTNode* call, SymbolTable* table) {
                                           param_type, param_idx + 1, param->value);
                     reject_closure_for_fnptr(table, call, call->children[param_idx], arg_type,
                                              param_type, param_idx + 1, param->value);
-                    if (arg_type && arg_type->kind != TYPE_TUPLE && arg_type->kind != TYPE_UNKNOWN &&
-                        !is_type_compatible(arg_type, param_type)) {
+                    int mode_refused = reject_fn_mode_argument(table, call,
+                                                               call->children[param_idx], arg_type,
+                                                               param_type, param_idx + 1,
+                                                               param->value);
+                    if (!mode_refused && arg_type && arg_type->kind != TYPE_TUPLE &&
+                        arg_type->kind != TYPE_UNKNOWN && !is_type_compatible(arg_type, param_type)) {
                         char error_msg[256];
                         snprintf(error_msg, sizeof(error_msg),
                                  "Argument %d of '%s': expected %s, got %s",
@@ -17398,8 +17733,29 @@ static int typecheck_function_call_inner(ASTNode* call, SymbolTable* table) {
         coerce_closure_call_args(call, table);
     }
     /* box_closure(add_fn) boxes the closure value of a named function. */
-    if (call->value && strcmp(call->value, "box_closure") == 0 && call->child_count == 1)
+    if (call->value && strcmp(call->value, "box_closure") == 0 && call->child_count == 1) {
         function_value_annotate(call->children[0], table);
+        /* #2980: the box opens to a `fn`, which borrows every parameter. */
+        Type* bt = call->children[0] ? infer_type(call->children[0], table) : NULL;
+        if ((!bt || bt->kind == TYPE_UNKNOWN) && call->children[0] && call->children[0]->node_type &&
+            call->children[0]->node_type->kind == TYPE_FUNCTION) {
+            if (bt) free_type(bt);
+            bt = clone_type(call->children[0]->node_type);
+        }
+        if (bt && bt->kind == TYPE_FUNCTION && fn_type_has_modes(bt)) {
+            int m = 0;
+            while (m < bt->param_count && !fn_type_param_mode(bt, m)) m++;
+            char emsg[320];
+            snprintf(emsg, sizeof(emsg),
+                     "a closure that %s cannot be boxed: `unbox_closure` gives back a `fn`, "
+                     "which borrows every parameter",
+                     fn_mode_phrase(fn_type_param_mode(bt, m), m));
+            type_error_code_hint(emsg, "keep it as a value of its own type",
+                                 call->children[0]->line, call->children[0]->column,
+                                 AETHER_ERR_KEEPS_BORROWED);
+        }
+        if (bt) free_type(bt);
+    }
 
     // select() infers its type from the first named arg's value
     if (call->value && strcmp(call->value, "select") == 0 &&

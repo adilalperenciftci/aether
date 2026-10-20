@@ -295,6 +295,16 @@ void parser_error(Parser* parser, const char* message) {
     }
 }
 
+/* A syntax error at `token` rather than at the current one. */
+static void parser_error_at(Parser* parser, Token* token, const char* message) {
+    if (parser->suppress_errors) return;
+    if (!token) {
+        parser_error(parser, message);
+        return;
+    }
+    aether_error_with_code(message, token->line, token->column, AETHER_ERR_SYNTAX);
+}
+
 // Helper to print warnings and errors (respects suppress_errors flag)
 static void parser_message(Parser* parser, const char* message) {
     (void)parser;
@@ -302,6 +312,7 @@ static void parser_message(Parser* parser, const char* message) {
 }
 
 static Type* parse_type_unsuffixed(Parser* parser);
+static void parse_param_modes(Parser* parser, char** annotation);
 static int reject_unbound_binding(Parser* parser, ASTNode* decl, const char* kw);
 
 /* A struct's name in a type position, its first identifier `first` already
@@ -680,8 +691,29 @@ static Type* parse_type_unsuffixed(Parser* parser) {
                     advance_token(parser);  // consume '('
                     type->param_count = 0;
                     type->param_types = NULL;
+                    /* #2980: a parameter's mode, `fn(@keep ptr, float)`. A
+                     * signature that names one is a closure's type: what
+                     * a function does with a `ptr` is an Aether
+                     * function's contract, and a typed C function
+                     * pointer's parameters borrow. */
+                    int modes[64] = { 0 };
+                    int any_mode = 0;
                     if (!(peek_token(parser) && peek_token(parser)->type == TOKEN_RIGHT_PAREN)) {
                         do {
+                            char* marks = NULL;
+                            Token* mode_at = peek_token(parser);
+                            parse_param_modes(parser, &marks);
+                            int mode = FN_MODE_BORROWED;
+                            if (marks) {
+                                int keep = annotation_has_marker(marks, "keep_param");
+                                int into = annotation_has_marker(marks, "into_param");
+                                if (keep && into)
+                                    parser_error_at(parser, mode_at,
+                                                    "a parameter of a function type is "
+                                                    "`@keep` or `@into`, not both");
+                                mode = keep ? FN_MODE_KEEP : FN_MODE_INTO;
+                                free(marks);
+                            }
                             Type* p = parse_type(parser);
                             if (!p) {
                                 parser_error(parser, "Expected type in fn() signature");
@@ -692,7 +724,14 @@ static Type* parse_type_unsuffixed(Parser* parser) {
                             type->param_types = aether_xrealloc(type->param_types,
                                 (size_t)type->param_count * sizeof(Type*));
                             type->param_types[type->param_count - 1] = p;
+                            if (type->param_count <= 64) modes[type->param_count - 1] = mode;
+                            if (mode != FN_MODE_BORROWED) any_mode = 1;
                         } while (match_token(parser, TOKEN_COMMA));
+                    }
+                    if (any_mode) {
+                        type->is_fnptr = 0;
+                        for (int i = 0; i < type->param_count && i < 64; i++)
+                            fn_type_set_param_mode(type, i, modes[i]);
                     }
                     if (!expect_token(parser, TOKEN_RIGHT_PAREN)) {
                         free_type(type);
@@ -6997,6 +7036,15 @@ ASTNode* parse_top_level_decl(Parser* parser) {
                     }
                     Type* sig = parse_type(parser);
                     if (!sig) return NULL;
+                    if (fn_type_has_modes(sig)) {
+                        /* #2980: the alias is a C function pointer's. */
+                        parser_error_at(parser, name,
+                            "a function-pointer type alias is a C function pointer, whose "
+                            "parameters borrow; `@keep` and `@into` go in a closure's type, "
+                            "written where it is used");
+                        free_type(sig);
+                        return NULL;
+                    }
                     ASTNode* d = create_ast_node(AST_CFN_TYPE_DEF,
                                                  name->value, name->line, name->column);
                     d->node_type = sig;

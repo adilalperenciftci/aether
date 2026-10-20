@@ -347,11 +347,13 @@ the signature, so no call site reads another function's body:
   `string.keep(s)`, which hands over one reference the program gives back
   with `string.release_kept`; the implicit form is refused (E0902). A `ptr`
   module variable or local already refuses a string by type.
-- A closure's `ptr` parameter is always borrowed, and a function with a
-  `@keep` parameter is called by name: a call through a value cannot see
-  what the callee keeps. That holds for every value a function becomes: a
-  closure value, and a typed function pointer (`f as fn(ptr)`, a `fn(ptr)`
-  variable, field or argument), which #2990 found unchecked. A typed pointer (`*T`) and a `distinct` type over
+- A closure's `ptr` parameter borrows unless it is declared `@keep`, and a
+  function with a `@keep` parameter is a value only of a type that says so
+  (#2980, below): a call through a value is checked by the value's type,
+  and a bare `fn` or a typed C function pointer borrows every parameter.
+  #2990 found a typed function pointer (`f as fn(ptr)`, a `fn(ptr)`
+  variable, field or argument) let through unchecked; it is refused. A
+  typed pointer (`*T`) and a `distinct` type over
   `ptr` are left alone: a string converts to neither.
 - Measured cost: 329 `@keep` annotations across 60 files of std, contrib and
   the tests, applied until the checker found no more (keeping cascades up
@@ -442,20 +444,30 @@ and result type. No rule reads another function's body.
   out of the result too). `@aether` says what the callee receives (the
   counted string, not its characters) and `@into` where it may go; they
   stack, and a string still goes through `string.keep(s)`.
-- **Closures and function values.** A closure's `ptr` parameter is always
-  borrowed and cannot be `@into`: a closure is called through a value. A
-  closure that captures an `@into` parameter may be returned, as part of
-  the result. A function with an `@into` parameter is called by name and
-  cannot be used as a value: a call through a value takes its result to
-  hold nothing, so the result would escape unchecked. When #2980 puts
-  `@keep` into function types, `@into` goes in with it, as
-  `fn(@into ptr) -> R`: a call through such a value follows the call rule
-  above, and a closure literal given for that type may return its
-  parameter. The order is borrowed, `@into`, `@keep`: each lets the callee
-  do more and asks more of the caller, so a function may stand for a type
-  to its right (a borrowing function where `fn(@into ptr) -> R` is
-  expected, an `@into` one where `fn(@keep ptr) -> R` is), never to its
-  left.
+- **Closures and function values (#2980, built with #2990).** `@keep` and
+  `@into` are part of a function type, `fn(@keep ptr, float)`,
+  `fn(@into ptr) -> R`. A closure may declare either on its parameter, and
+  is then of a type that says so; one given for such a type takes, for
+  each parameter it leaves untyped, the parameter's type and mode. A
+  function with such a parameter is a value of its type. A call through a
+  value follows the call rule of its type: a `@keep` parameter is a keep,
+  an `@into` one hands the argument to the result. A closure that captures
+  an `@into` parameter may be returned, as part of the result. The order
+  is borrowed, `@into`, `@keep`: each lets the callee do more and asks more
+  of the caller, so a function may stand for a type to its right (a
+  borrowing function where `fn(@into ptr) -> R` is expected, an `@into` one
+  where `fn(@keep ptr) -> R` is), never to its left: not in a bare `fn`, a
+  closure type with a weaker mode, or a `ptr` (the box `unbox_closure`
+  opens is a bare `fn`), each E0902.
+  Decided while building it: a function type that names a mode is a
+  closure's type (an `_AeClosure`, as a bare `fn` is), not a typed C
+  function pointer, which `fn(T) -> R` written without a mode still is. The
+  issue's motivating case passes a closure (vg's tick), which a C function
+  pointer cannot hold, and a mode is an Aether function's contract; C's is
+  `@retain` on the extern. So a typed C function pointer's parameters
+  borrow: neither `as fn(...)` nor a `type Name = fn(...)` alias names a
+  mode, and a function with a `@keep` or `@into` parameter is no C function
+  pointer.
 - **Libraries (`--emit=lib`).** A binary import checks its calls against
   the extern stub built from the catalog's source signature, so the
   annotations have to cross: the source signature spells `@keep` and
@@ -490,12 +502,16 @@ The diagnostics, all E0902:
   `ptr` parameter; 'p' is a *Node, which E0902 leaves alone";
 - `@into` with `@keep`, `@retain` or `@noescape`: "'p' is declared both
   `@into` and `@keep`", help "`@keep` already lets it reach the result";
-- on a closure's parameter: "a closure's `ptr` parameter is always
-  borrowed; `@into` and `@keep` are for named functions" (the parser used
-  to say "Expected PIPE, got AT");
-- a function used as a value: "'f' passes its `ptr` parameter 'p' into its
-  result (`@into`), so it cannot be used as a value", help "call it by
-  name: a call through a function value treats every `ptr` as borrowed";
+- on a closure's parameter, refused at first ("a closure's `ptr` parameter
+  is always borrowed; `@into` and `@keep` are for named functions"), and
+  allowed since #2980 with the rules of a named function's;
+- a function where its type would be called as borrowing (#2980):
+  "Argument 1 'tick' of 'run': 'fill' keeps its `ptr` parameter 1
+  (`@keep`), where `fn` borrows it, so a call through 'tick' would not be
+  checked for it", help "declare the parameter `fn(@keep ptr, float)`, so a
+  call through it is checked as a direct call is"; as a typed C function
+  pointer: "'f' passes its `ptr` parameter 'p' into its result (`@into`),
+  so it cannot be a C function pointer, whose parameters borrow";
 - a result that escapes with a borrowed parameter of the caller: today's
   message with the holder named, "'context' is a borrowed `ptr` parameter
   held by the result of 'query_recorder' that is stored in a module-level

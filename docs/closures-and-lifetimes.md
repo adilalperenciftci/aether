@@ -389,6 +389,41 @@ know it owned. Both are ordinary shapes now: a parameter is borrowed, so
 passing it on keeps nothing, and the explicit box is the same store as
 `list.add(l, f)`, which gives the list a reference of its own.
 
+## A closure's `ptr` parameters, and what its type says
+
+A closure's `ptr` parameter borrows, as a named function's does (E0902):
+the closure may not keep it past its own call. One that keeps it declares
+it `@keep` (`|el: @keep ptr, t: float|`), and one whose result holds it
+declares it `@into`, with the same rules as a named function's
+([String ownership](language-reference.md#string-ownership)). The mode is
+part of the closure's type, `fn(@keep ptr, float)`, and so of every type a
+place that holds closures can be declared with (#2980):
+
+- **A call through the value is checked by its type.** `tick(el, t)` with
+  `tick: fn(@keep ptr, float)` hands `el` to a keeping parameter, so a
+  borrowed `el` is E0902, a string goes only through `string.keep(s)`, and
+  an `@into` result holds its argument, as for a direct call.
+- **A literal declares the mode, or takes it.** A closure given for a
+  closure type that names a mode takes, for each parameter it leaves
+  untyped (`callback |el, t| { ... }`), the parameter's type and mode. A
+  parameter it types itself keeps what it says: `|el: ptr, t: float|`
+  borrows, which fits a keeping type.
+- **A named function is a value of its type.** `fill(el: @keep ptr, t:
+  float)` passed to `tick: fn(@keep ptr, float)`, or bound to a local, is
+  a value of `fn(@keep ptr, float)`.
+- **Never the unsound direction.** Borrowed, `@into`, `@keep`: a function
+  goes where its modes or stronger ones are expected, never where a weaker
+  one is, since a call through the weaker type would hand it a pointer the
+  caller still owns. So a keeping closure does not go into a bare `fn`,
+  into a weaker closure type, into a `ptr` (`box_closure`, a list: the box
+  opens to a bare `fn`), or into a typed C function pointer, whose
+  parameters borrow. Each is E0902, naming the parameter and both types.
+
+This is what lets aether-ui's `vg.animate` hand its tick the element the
+animation manager holds: `animate(node, ..., tick: fn(@keep ptr, float))`,
+and a tick that passes the element to `vg.element_set_fill`, whose `el` is
+`@keep` because a behaviour tween registers it with the manager.
+
 ## Closure patterns and workarounds
 
 L1 to L3 are one limitation seen from three sides: a closure that has

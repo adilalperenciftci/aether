@@ -12,8 +12,8 @@
 # stored in a field, a module-level `var` or a container, or passed to a
 # `@keep` or `@retain` parameter). A call is checked against the
 # callee's signature: a `string` reaches a `@keep ptr`, or a `ptr` field,
-# only through `string.keep(s)`. A closure's `ptr` parameter is always borrowed, and a
-# function with a `@keep` parameter is called by name, never as a value.
+# only through `string.keep(s)`. A function with a `@keep` parameter is no typed C
+# function pointer, and as a value it goes only where its type says it keeps (#2980).
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
@@ -133,6 +133,9 @@ main() {
 AE
 refused string_to_keep 9:10 "a \`string\` is given to a \`@keep ptr\` parameter"
 
+# A function with a `@keep` parameter is a value of a type that says so
+# (#2980): it may not go where a call through it would be checked as one
+# that borrows, a bare `fn` here.
 cat > "$TMP/keep_as_value.ae" <<'AE'
 var kept: ptr = null
 
@@ -140,12 +143,14 @@ hold(p: @keep ptr) {
     kept = p
 }
 
+run(cb: fn) { call(cb, null) }
+
 main() {
     f = hold
-    call(f, null)
+    run(f)
 }
 AE
-refused keep_as_value 8:9 "'hold' keeps its \`ptr\` parameter 'p' (\`@keep\`), so it cannot be used as a value"
+refused keep_as_value 11:9 "'f' keeps its \`ptr\` parameter 1 (\`@keep\`), where \`fn\` borrows it"
 
 cat > "$TMP/string_field.ae" <<'AE'
 struct N { child: ptr }
@@ -503,7 +508,7 @@ main() {
     g(null)
 }
 AE
-refused keep_fn_cast 6:9 "'hold' keeps its \`ptr\` parameter 'q' (\`@keep\`), so it cannot be used as a value"
+refused keep_fn_cast 6:9 "'hold' keeps its \`ptr\` parameter 'q' (\`@keep\`), so it cannot be a C function pointer"
 
 cat > "$TMP/keep_fn_var.ae" <<'AE'
 var kept: ptr = null
@@ -514,7 +519,7 @@ var g: fn(ptr) = hold
 
 main() { g(null) }
 AE
-refused keep_fn_var 5:18 "'hold' keeps its \`ptr\` parameter 'q' (\`@keep\`), so it cannot be used as a value"
+refused keep_fn_var 5:18 "'hold' keeps its \`ptr\` parameter 'q' (\`@keep\`), so it cannot be a C function pointer"
 
 cat > "$TMP/keep_fn_arg.ae" <<'AE'
 var kept: ptr = null
@@ -525,7 +530,7 @@ run(cb: fn(ptr), p: ptr) { cb(p) }
 
 main() { run(hold, null) }
 AE
-refused keep_fn_arg 7:14 "'hold' keeps its \`ptr\` parameter 'q' (\`@keep\`), so it cannot be used as a value"
+refused keep_fn_arg 7:14 "'hold' keeps its \`ptr\` parameter 'q' (\`@keep\`), so it cannot be a C function pointer"
 
 # Need no `@keep`: the aephysics shape (a struct local to the function holds
 # the parameter, or has it stored into a field, and dies with the call) and

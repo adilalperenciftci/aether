@@ -1,0 +1,105 @@
+// #2980: `@keep` and `@into` are part of a function type, `fn(@keep ptr,
+// float)`, so a tick closure can hand its element to a keeping setter. This
+// is aether-ui's vg shape: `animate` keeps the element for the animation's
+// life and calls the tick with it; the tick passes it on to
+// `element_set_fill`, which registers it with the animation manager.
+//
+// A closure declares the mode (`|el: @keep ptr, t: float|`) or, left
+// untyped (`|el, t|`), takes the parameter's type and mode from the type it
+// is given for. A function with a `@keep` parameter is a value of that type,
+// a borrowing closure stands for it too, and a call through the type is
+// checked as a direct call is. `@into` goes the same way:
+// `fn(@into ptr) -> Recorder` builds a value that holds its argument.
+
+import std.list
+
+extern exit(code: int)
+
+var registry: ptr = null
+
+struct Recorder {
+    context: ptr
+    hits: int
+}
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+// Stands in for vg.element_set_fill: a behaviour tween registers the
+// element with the animation manager, so the parameter is kept.
+element_set_fill(el: @keep ptr, color: string) {
+    list.add(registry, el)
+}
+
+// Stands in for vg.animate: the manager holds the element for the
+// animation's life, so the tick is handed a kept reference.
+animate(el: @keep ptr, ticks: int, tick: fn(@keep ptr, float)) {
+    i = 0
+    while i < ticks {
+        tick(el, (i + 1) * 0.5)
+        i = i + 1
+    }
+}
+
+fill_tick(el: @keep ptr, t: float) {
+    if t > 0.0 { element_set_fill(el, "green") }
+}
+
+count_tick(el: ptr, t: float) {
+    if el == null { println("no element at ${t}") }
+}
+
+recorder(context: @into ptr) -> Recorder {
+    return Recorder { context: context, hits: 0 }
+}
+
+visit(rec: ptr) {
+    r = rec as *Recorder
+    r.hits = r.hits + 1
+}
+
+// Calls a builder through a value whose type says it is `@into`: the
+// result holds `context`, lives in a local and is lent, as for a direct
+// call.
+record(context: ptr, mk: fn(@into ptr) -> Recorder) -> int {
+    q = mk(context)
+    visit((&q) as ptr)
+    visit((&q) as ptr)
+    return q.hits
+}
+
+main() {
+    registry = list.new()
+    shape = list.new()
+    animate(shape, 2) callback | el: @keep ptr, t: float | {
+        element_set_fill(el, "red")
+    }
+    check(list.size(registry) == 2, "a closure declaring `@keep`")
+    animate(shape, 3) callback | el, t | {
+        element_set_fill(el, "blue")
+    }
+    check(list.size(registry) == 5, "an untyped closure takes `@keep` from the type")
+    animate(shape, 1, fill_tick)
+    check(list.size(registry) == 6, "a function with a `@keep` parameter as a value")
+    g = fill_tick
+    animate(shape, 2, g)
+    check(list.size(registry) == 8, "the value bound to a local")
+    animate(shape, 2, count_tick)
+    animate(shape, 1) callback | el: ptr, t: float | {
+        println("borrowed ${el == null}")
+    }
+    check(list.size(registry) == 8, "a borrowing function stands for a keeping type")
+    let k: fn(@keep ptr, float) = | el: @keep ptr, t: float | { element_set_fill(el, "k") }
+    animate(shape, 1, k)
+    check(list.size(registry) == 9, "a binding of the closure type")
+    x = 0
+    check(record((&x) as ptr, recorder) == 2, "a call through `fn(@into ptr) -> Recorder`")
+    mk = | c: @into ptr | { return Recorder { context: c, hits: 0 } }
+    check(record((&x) as ptr, mk) == 2,
+        "an `@into` closure literal")
+    println("ok")
+}

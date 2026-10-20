@@ -315,23 +315,31 @@ main() { println("${c_view(null) == null}") }
 AE
 refused into_and_retain 1:15 "'p' is declared both \`@into\` and \`@retain\`"
 
+# A closure's parameter may be `@into` too (#2980), and is held to the same
+# rule: here no result can hold it.
 cat > "$TMP/closure_param.ae" <<'AE'
 main() {
     f = |p: @into ptr| { println("${p == null}") }
     call(f, null)
 }
 AE
-refused closure_param 2:10 "a closure's \`ptr\` parameter is always borrowed; \`@into\` and \`@keep\` are for named functions"
+refused closure_param 2:10 "'p' is declared \`@into\`, but the closure has no result to hold it"
 
+# A function with an `@into` parameter is a value of a type that says so
+# (#2980): a call through it is checked as a direct call is.
 cat > "$TMP/as_value.ae" <<'AE'
+var kept: ptr = null
+
 same(p: @into ptr) -> ptr { return p }
 
-main() {
+relay(p: ptr) {
     f = same
-    call(f, null)
+    kept = f(p)
 }
+
+main() { relay(null) }
 AE
-refused as_value 4:9 "'same' passes its \`ptr\` parameter 'p' into its result (\`@into\`), so it cannot be used as a value"
+refused as_value 7:5 "'p' is a borrowed \`ptr\` parameter, stored in a module-level \`var\`"
 
 cat > "$TMP/as_fn_pointer.ae" <<'AE'
 same(p: @into ptr) -> ptr { return p }
@@ -341,7 +349,7 @@ main() {
     println("${g(null) == null}")
 }
 AE
-refused as_fn_pointer 4:9 "'same' passes its \`ptr\` parameter 'p' into its result (\`@into\`), so it cannot be used as a value"
+refused as_fn_pointer 4:9 "'same' passes its \`ptr\` parameter 'p' into its result (\`@into\`), so it cannot be a C function pointer"
 
 # At a call: the result holds the argument, and escapes with it.
 cat > "$TMP/result_global.ae" <<'AE'

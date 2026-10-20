@@ -483,6 +483,11 @@ typedef struct Type {
     // Function/closure type support
     struct Type** param_types;  // Parameter types (NULL if not function type)
     int param_count;            // Number of parameters (0 if not function type)
+    // #2980: per parameter, what a function of this type does with a `ptr`
+    // it is given (FnParamMode: borrowed, `@into`, `@keep`). Parallel to
+    // param_types; NULL when every parameter borrows. Only a closure's type
+    // (is_fnptr 0) carries modes: a typed C function pointer's borrow.
+    int* param_modes;
     struct Type* return_type;   // Return type (NULL if not function type)
     // 1 = this TYPE_FUNCTION represents a raw C function pointer
     // (storage = void*, call site emits typed cast).  Default 0 =
@@ -664,6 +669,18 @@ Type* create_bitset_type(Type* element_enum);  // #1046 `bit_set[E]`
 Type* create_bitstruct_type(const char* name, Type* backing);  // #1132 `bitstruct`
 Type* create_result_type(Type* inner);    // #913 fallible `T!` -> (T, string)
 Type* create_function_type(int param_count, Type** param_types, Type* return_type);
+
+/* #2980: what a function does with a `ptr` parameter, as its type says.
+ * Ordered: each lets the callee do more and asks more of the caller, so a
+ * function may stand for a type whose mode at each parameter is its own or
+ * one to its right, never to its left. */
+typedef enum { FN_MODE_BORROWED = 0, FN_MODE_INTO = 1, FN_MODE_KEEP = 2 } FnParamMode;
+/* The mode of parameter `i` of function type `t` (borrowed when none). */
+int fn_type_param_mode(const Type* t, int i);
+/* Set it, allocating the modes on the first non-borrowed one. */
+void fn_type_set_param_mode(Type* t, int i, int mode);
+/* Does any parameter of `t` keep or pass on what it is given? */
+int fn_type_has_modes(const Type* t);
 void free_type(Type* type);
 const char* type_to_string(Type* type);
 /* #2832: `type` as the source spells it, for a diagnostic: a distinct type

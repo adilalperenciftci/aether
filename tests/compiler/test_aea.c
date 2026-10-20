@@ -423,11 +423,51 @@ TEST_CATEGORY(aea_codec_covers_every_ast_field, TEST_CATEGORY_COMPILER) {
      *
      * Type grew to 144 with `qualifier`, the `mod` of `mod.T` / `*mod.T`.
      * That is parse state, so the codec carries it and AEA_FORMAT_VERSION
-     * went to 4. */
+     * went to 4.
+     *
+     * Type grew to 152 with `param_modes` (#2980), a function type's
+     * `@keep` / `@into` per parameter (`fn(@keep ptr, float)`). That is
+     * parse state, so the codec carries it and AEA_FORMAT_VERSION went to
+     * 5. */
     if (sizeof(void*) == 8 && sizeof(int) == 4) {
         ASSERT_EQ(144, (int)sizeof(ASTNode));
-        ASSERT_EQ(144, (int)sizeof(Type));
+        ASSERT_EQ(152, (int)sizeof(Type));
     }
+}
+
+TEST_CATEGORY(aea_round_trip_keeps_parameter_modes, TEST_CATEGORY_COMPILER) {
+    /* #2980: `fn(@keep ptr, float)` is a closure type whose first parameter
+     * keeps what it is given; an artifact that dropped the mode would have
+     * the importer call it as borrowing. */
+    static const char src[] =
+        "animate(el: @keep ptr, tick: fn(@keep ptr, float), mk: fn(@into ptr) -> ptr) {\n"
+        "    tick(el, 0.5)\n"
+        "}\n";
+    ASTNode* ast = parse_text(src);
+    ASSERT_NOT_NULL(ast);
+    AeaProducer p = producer_for(src);
+    size_t len = 0;
+    const char* err = NULL;
+    char* data = aea_encode(ast, &p, &len, &err);
+    ASSERT_NOT_NULL(data);
+    AeaConsumer c = consumer_for(src);
+    ASTNode* back = aea_decode(data, len, &c, NULL);
+    ASSERT_NOT_NULL(back);
+    ASTNode* fn = find_top(back, AST_FUNCTION_DEFINITION, "animate");
+    ASSERT_NOT_NULL(fn);
+    ASSERT_TRUE(fn->child_count >= 3);
+    Type* tick = fn->children[1]->node_type;
+    Type* mk = fn->children[2]->node_type;
+    ASSERT_NOT_NULL(tick);
+    ASSERT_NOT_NULL(mk);
+    ASSERT_EQ(0, tick->is_fnptr);
+    ASSERT_EQ(FN_MODE_KEEP, fn_type_param_mode(tick, 0));
+    ASSERT_EQ(FN_MODE_BORROWED, fn_type_param_mode(tick, 1));
+    ASSERT_EQ(FN_MODE_INTO, fn_type_param_mode(mk, 0));
+    ASSERT_TRUE(annotation_has_marker(fn->children[0]->annotation, "keep_param"));
+    free(data);
+    free_ast_node(back);
+    free_ast_node(ast);
 }
 
 TEST_CATEGORY(aea_round_trip_keeps_a_literal_nul, TEST_CATEGORY_COMPILER) {
