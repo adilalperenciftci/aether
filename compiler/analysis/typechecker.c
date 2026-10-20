@@ -12985,6 +12985,11 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                 // #2496: a block arm yields its final value, so its type is that
                 // value's; a statement arm yields nothing and says nothing.
                 ASTNode* yielded = match_arm_value(body);
+                /* #3037: an arm that names a function gives the function as
+                 * a value, as an if-expression's branch does: the match is
+                 * of its type, joined with the other arms' (modes too). It
+                 * was left a bare name, and the match had no type. */
+                if (value_match && yielded) function_value_annotate(yielded, arm_table);
                 if (!stmt->node_type || stmt->node_type->kind == TYPE_UNKNOWN) {
                     if (yielded && yielded->node_type &&
                         yielded->node_type->kind != TYPE_UNKNOWN) {

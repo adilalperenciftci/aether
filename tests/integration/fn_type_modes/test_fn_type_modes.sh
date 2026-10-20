@@ -189,6 +189,36 @@ AE
 } > "$TMP/if_closures.ae"
 refused if_closures 12:13 E0902 "'el' is a borrowed \`ptr\` parameter, passed to a parameter that keeps it"
 
+# #3037: a value match over named functions is their function type, joined
+# by mode; arms of two signatures give no one type.
+{ head_ae; cat <<'AE'
+relay(el: ptr, k: int) {
+    f = match k {
+        0 -> borrow
+        _ -> set_fill
+    }
+    f(el, 0.5)
+}
+
+main() { relay(null, 0) }
+AE
+} > "$TMP/match_value.ae"
+refused match_value 15:7 E0902 "'el' is a borrowed \`ptr\` parameter, passed to a parameter that keeps it"
+
+{ head_ae; cat <<'AE'
+relay(el: ptr, k: int) {
+    f = match k {
+        0 -> borrow
+        _ -> view
+    }
+    call(f, el, 0.5)
+}
+
+main() { relay(null, 0) }
+AE
+} > "$TMP/match_signatures.ae"
+refused match_signatures 13:14 E0200 "the arms of this match give values of types"
+
 { head_ae; cat <<'AE'
 relay(el: ptr, k: int) {
     f = match k {
