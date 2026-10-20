@@ -34,12 +34,13 @@ a#b#c# err=''
 ```
 
 `captures` and `find_all` return handles with their own accessors
-(`captures_get`, `find_all_start`, and so on) and their own `*_free`; each is
+(`capture`, `capture_count`, `find_all_start`, and so on) and their own `*_free`; each is
 `ptr!` for the same reason `compile` is.
 
 ## Exports
 
-`compile`, `free`, `matches`, `captures`, `captures_count`, `captures_get`,
-`captures_start`, `captures_end`, `captures_free`, `find_all`,
-`find_all_count`, `find_all_start`, `find_all_end`, `find_all_free`,
-`replace_all`.
+`compile`, `compile_flags`, `free`, `last_error`, `clear_last_error`,
+`matches`, `find`, `captures`, `capture_count`, `capture`, `capture_start`,
+`capture_end`, `captures_free`, `find_all`, `find_all_count`,
+`find_all_start`, `find_all_end`, `find_all_free`, `replace`, `replace_all`,
+`matches_lit`, `find_lit`, and the `FLAG_*` option bits for `compile_flags`.

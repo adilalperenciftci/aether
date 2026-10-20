@@ -43,4 +43,4 @@ would otherwise be impossible post-sandbox.
 ## Exports
 
 `available`, `init`, `service`, `close`, `dns_resolve`, `pwd_uid`,
-`pwd_home`, `sysctl_str`, `resolve`.
+`pwd_home`, `sysctl`.
