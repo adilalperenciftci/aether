@@ -21,7 +21,7 @@ round_trip(n: string) -> string {
     v, perr = json.parse(n)
     match (perr) {
         "" -> {
-            s, serr = json.stringify(v)
+            s, serr = json.encode(v)
             json.free(v)
             match (serr) {
                 "" -> { return s }

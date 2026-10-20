@@ -12,6 +12,10 @@ import std.string
 
 extern println(s: string)
 extern exit(code: int)
+// The C functions themselves: std.os exports the wrapper only (one name per
+// operation, #3014).
+extern aether_argv0() -> string
+extern aether_args_get(index: int) -> string
 
 main() {
     // Raw extern: should never be null in a compiled program because

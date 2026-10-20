@@ -5,7 +5,7 @@
 // is rewritten to `or` at typecheck time, so it reuses the single
 // ownership-correct `or` lowering (error-slot free, uniform-heap boxing).
 //
-// The heap-string result case (`json.stringify(j) ?? ""`) is exercised for
+// The heap-string result case (`json.encode(j) ?? ""`) is exercised for
 // leak-cleanliness under the CI leak gates; this test pins the observable
 // value-or-default behaviour.
 

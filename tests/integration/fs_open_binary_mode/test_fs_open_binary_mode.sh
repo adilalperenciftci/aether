@@ -31,7 +31,7 @@ extern file_close(file: ptr) -> int
 extern file_read_all_raw(file: ptr) -> string
 
 main() {
-    dir = aether_args_get(1)
+    dir = os.args_get(1)
     p = "${dir}/lf.bin"
     // 1. "w" + pwrite: a '\n' is one byte on disk
     f, oerr = fs.open(p, "w")

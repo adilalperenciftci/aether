@@ -1208,7 +1208,7 @@ extract(archive_path: string, destination: string, options: ExtractOptions) -> s
 
         if kind == KIND_FILE {
             // Check overwrite policy
-            if fs.fs_path_exists(target.path) == 1 || fs.fs_is_symlink(target.path) == 1 {
+            if fs.exists(target.path) == 1 || fs.fs_is_symlink(target.path) == 1 {
                 if options.overwrite == 0 {
                     heap.free(target)
                     return "file '${name}' already exists and overwrite is disabled"
@@ -1288,7 +1288,7 @@ extract(archive_path: string, destination: string, options: ExtractOptions) -> s
             // Queue directory metadata to be applied last
             list_add_raw(dir_list, target as ptr)
         } else if kind == KIND_SYMLINK {
-            if fs.fs_path_exists(target.path) == 1 || fs.fs_is_symlink(target.path) == 1 {
+            if fs.exists(target.path) == 1 || fs.fs_is_symlink(target.path) == 1 {
                 if options.overwrite == 0 {
                     heap.free(target)
                     return "symlink destination '${name}' already exists"

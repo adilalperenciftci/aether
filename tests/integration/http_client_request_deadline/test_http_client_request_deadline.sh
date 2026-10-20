@@ -40,7 +40,7 @@ main() {
     if err != "" { println("listen: ${err}"); return 1 }
     // The port goes to a file: a pipe's stdout is buffered, and the
     // driver must see the port before it can connect.
-    _ = fs.write(aether_args_get(1), "${tcp.server_port(srv)}")
+    _ = fs.write(os.args_get(1), "${tcp.server_port(srv)}")
     sock, aerr = tcp.accept(srv)
     if aerr != "" { return 1 }
     _ = tcp.read(sock, 4096)
@@ -61,7 +61,7 @@ import std.os
 import std.string
 
 main() {
-    port = aether_args_get(1)
+    port = os.args_get(1)
     req = client.request("GET", "http://127.0.0.1:${port}/")
     _ = client.set_timeout(req, 1000ms)     // one second for the whole exchange
     t0 = os.now_monotonic_ns()

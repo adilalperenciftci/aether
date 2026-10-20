@@ -945,11 +945,11 @@ Symbol* lookup_qualified_symbol(SymbolTable* table, const char* qualified_name) 
                 }
             }
             /* #1035: exports that don't carry the module-name prefix —
-             * raw externs like std.os's `aether_args_count` — have no
+             * raw externs like std.os's `aether_argv_raw` — have no
              * `<prefix>_<suffix>` symbol; their C name IS the bare
              * export name. If the module explicitly exports `suffix`,
              * resolve the bare symbol so the documented qualified form
-             * (`os.aether_args_count()`) works. Gated on a positive
+             * (`os.aether_argv_raw()`) works. Gated on a positive
              * exports-list hit, so `anything.foo` can never reach an
              * unrelated global `foo`. */
             if (!sym && global_module_registry) {
@@ -15596,10 +15596,10 @@ int typecheck_function_call(ASTNode* call, SymbolTable* table) {
     }
 
     /* #1035: a qualified call resolved to a BARE symbol — a
-     * non-prefixed export like std.os's `aether_args_count` (see the
+     * non-prefixed export like std.os's `aether_argv_raw` (see the
      * exports-gated fallback in lookup_qualified_symbol). Codegen
-     * lowers dots to underscores, so `os.aether_args_count` would
-     * otherwise emit the non-existent `os_aether_args_count`; rewrite
+     * lowers dots to underscores, so `os.aether_argv_raw` would
+     * otherwise emit the non-existent `os_aether_argv_raw`; rewrite
      * call->value to the bare name the symbol actually carries. */
     if (symbol && call->value && symbol->name) {
         char* dot = strchr(call->value, '.');

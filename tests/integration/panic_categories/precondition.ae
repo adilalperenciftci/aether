@@ -13,6 +13,6 @@ requires b != 0
 }
 
 main() {
-    zero = os.aether_args_count() - os.aether_args_count()
+    zero = os.args_count() - os.args_count()
     println("${divide(10, zero)}")
 }

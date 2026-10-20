@@ -18,17 +18,9 @@
 import std.bytes
 
 exports(
-    bytes_cursor_new,
-    bytes_cursor_read_u8,
-    bytes_cursor_read_be_u16, bytes_cursor_read_be_u32, bytes_cursor_read_be_u64,
-    bytes_cursor_read_le_u16, bytes_cursor_read_le_u32, bytes_cursor_read_le_u64,
-    bytes_cursor_read_slice,
-    bytes_cursor_remaining, bytes_cursor_peek, bytes_cursor_eof,
-    bytes_cursor_pos, bytes_cursor_seek, bytes_cursor_free,
     new, read_u8, read_be_u16, read_be_u32, read_be_u64,
     read_le_u16, read_le_u32, read_le_u64, read_slice,
     remaining, peek, eof, pos, seek, free,
-    bytes_cursor_new_from_ptr, bytes_cursor_read_view,
     from_slice, read_view
 )
 

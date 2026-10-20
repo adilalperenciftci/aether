@@ -13,9 +13,9 @@ import std.encoding
 
 exports(
     CBOR_INT, CBOR_BYTES, CBOR_TEXT, CBOR_ARRAY, CBOR_MAP, CBOR_TAG, CBOR_SIMPLE, CBOR_FLOAT,
-    parse, encode, stringify, type, is_null, is_undefined,
+    parse, encode, type, is_null, is_undefined,
     get_bool, get_int, get_long, get_float, get_string, get_bytes, get_tag_val, get_tag_child,
-    object_get, map_get, object_set, array_add, map_set, object_size, array_size, object_entry,
+    object_get, map_get, object_size, array_size, object_entry,
     obj, arr, str, bytes, num, from_int, boolean, null_value, undefined_value, tag,
     get_int64, get_uint, get_nint, from_uint, from_nint,
     set, push, map_push, free, diagnose

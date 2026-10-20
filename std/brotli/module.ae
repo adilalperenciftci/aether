@@ -18,7 +18,6 @@
 // needs to DECODE br, and a decoder is a separate piece of work.
 
 exports(
-    brotli_backend_available,
     brotli_try_stream_new, brotli_try_stream_flush,
     brotli_try_stream_finish, brotli_get_stream_bytes, brotli_get_stream_length,
     brotli_release_stream,

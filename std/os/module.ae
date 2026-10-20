@@ -6,8 +6,8 @@ exports(
     os_run_pipe_raw, os_wait_pid_raw, os_run_pipe_drain_and_wait_raw,
     os_spawn_raw, os_wait_raw, os_wait_any_raw, os_wait_any_timeout_raw,
     os_getenv, os_which,
-    aether_args_count, aether_args_get, aether_argv0, aether_argv_raw,
-    aether_args_seal, aether_args_sealed, args_seal, args_sealed,
+    aether_argv_raw,
+    args_seal, args_sealed,
     args_count, args_get,
     os_execv, os_now_utc_iso8601_raw, os_getpid_raw, os_user_id_raw, exit,
     os_wall_seconds_raw, os_wall_micros_raw,
@@ -217,10 +217,10 @@ extern aether_argv0() -> string
 extern aether_argv_raw() -> ptr
 
 // One-shot runtime seal of the argv accessors. After this returns,
-// `os.aether_args_count()` reports 0, `os.aether_args_get(i)` returns
-// null, `os.argv0()` returns "", and `os.aether_argv_raw()` returns
-// null — as if argv had never been initialised. Idempotent (calling
-// twice is a no-op); there is no unseal.
+// `os.args_count()` reports 0, `os.args_get(i)` and `os.argv0()` return
+// "", and `os.aether_argv_raw()` returns null (the C accessors under
+// them read 0 and null), as if argv had never been initialised. Idempotent
+// (calling twice is a no-op); there is no unseal.
 //
 // Intended use: once `main()` has parsed command-line flags into its
 // own config state, call `os.args_seal()` to prevent any later code
@@ -249,9 +249,9 @@ args_sealed() -> int {
     return aether_args_sealed()
 }
 
-// Ergonomic argv accessors (#1035): short qualified spellings
-// (`os.args_count()`, `os.args_get(i)`) alongside the raw
-// `aether_args_*` externs, mirroring args_seal / args_sealed above.
+// The argv accessors (#1035): `os.args_count()`, `os.args_get(i)`, the
+// one name each (the `aether_args_*` externs are not exported beside
+// them, #3014), as args_seal / args_sealed above.
 args_count() -> int {
     return aether_args_count()
 }
@@ -547,9 +547,7 @@ getcwd() -> string {
 }
 
 // argv[0] — path the OS launched the current process with. Returns "" if
-// aether_args_init has not been called or argv[0] is NULL. The raw form
-// is also accessible as `aether_argv0()` for callers that want explicit
-// null handling (e.g. to distinguish "not initialised" from "empty").
+// aether_args_init has not been called or argv[0] is NULL.
 argv0() -> {
     raw = aether_argv0()
     if raw == null {

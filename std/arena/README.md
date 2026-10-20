@@ -19,13 +19,13 @@ main() {
     p = arena.alloc(ar, 64)
     mem.set_int(p, 0, 42)
 
-    println("used: ${arena.get_used(ar)} of ${arena.get_size(ar)}")
+    println("used: ${arena.used(ar)} of ${arena.size(ar)}")
     println("value: ${mem.get_int(p, 0)}")
 
     // reset frees everything at once. Every pointer handed out
     // before this line is now dangling: that is the deal.
     arena.reset(ar)
-    println("after reset: ${arena.get_used(ar)}")
+    println("after reset: ${arena.used(ar)}")
 
     arena.destroy(ar)
 }
@@ -47,5 +47,4 @@ behind it is arena-backed.
 
 ## Exports
 
-`create`, `alloc`, `alloc_aligned`, `reset`, `destroy`, `get_used`,
-`get_size`, plus the `arena_*` raw forms.
+`create`, `alloc`, `alloc_aligned`, `reset`, `destroy`, `used`, `size`.

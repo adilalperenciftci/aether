@@ -24,7 +24,6 @@
 // rather than crashing.
 
 exports(
-    zlib_backend_available,
     zlib_get_deflate_bytes, zlib_get_deflate_length,
     zlib_release_deflate,
     zlib_get_inflate_bytes, zlib_get_inflate_length,

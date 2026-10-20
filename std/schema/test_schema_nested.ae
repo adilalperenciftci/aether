@@ -76,7 +76,7 @@ fn test_valid(s: ptr) -> int {
     fails = 0
     values, errors = run(s, "{\"id\": \"7\", \"customer\": {\"name\": \"Ada\", \"email\": \"ada@example.com\", \"address\": {\"city\": \"Paris\", \"zip\": \"75001\"}}, \"lines\": [{\"sku\": \" ab-1 \", \"qty\": 2}, {\"sku\": \"cd-2\", \"qty\": 1, \"gift\": true}], \"tags\": [\"red\", \"new\"], \"grid\": [[1, 2], [3]], \"extra\": 99}")
     if schema.ok(errors) != 1 { println("FAIL: a valid order fails:"); dump(errors); return 1 }
-    out, _ = json.stringify(values)
+    out, _ = json.encode(values)
     // Coerced and typed: "7" became 7, the sku was trimmed and uppercased,
     // the missing gift took its default as a boolean, undeclared "extra" is gone.
     want = "{\"id\":7,\"customer\":{\"name\":\"Ada\",\"email\":\"ada@example.com\",\"address\":{\"city\":\"Paris\",\"zip\":\"75001\"}},\"lines\":[{\"sku\":\"AB-1\",\"qty\":2,\"gift\":false},{\"sku\":\"CD-2\",\"qty\":1,\"gift\":true}],\"tags\":[\"red\",\"new\"],\"grid\":[[1,2],[3]]}"
@@ -101,7 +101,7 @@ fn test_paths(s: ptr) -> int {
     fails = fails + ck(schema.error_count(errors) == 9, "nine errors (got ${schema.error_count(errors)})")
     if fails > 0 { dump(errors) }
     // What passed is still returned: id, and nothing of the failed subtrees.
-    out, _ = json.stringify(values)
+    out, _ = json.encode(values)
     fails = fails + ck(string_equals(out, "{\"id\":3}") == 1, "only the passing fields remain (${out})")
     json.free(values)
     schema.errors_free(errors)
@@ -145,7 +145,7 @@ fn test_strict_and_flat() -> int {
     }
     // Lax (the default): "5" is an int, 12 is the text "12".
     v, e = run(strict_s, "{\"n\": \"5\", \"s\": 12}")
-    out, _ = json.stringify(v)
+    out, _ = json.encode(v)
     fails = fails + ck(schema.ok(e) == 1 && string_equals(out, "{\"n\":5,\"s\":\"12\"}") == 1, "lax coercion (${out})")
     json.free(v)
     schema.errors_free(e)
@@ -189,7 +189,7 @@ fn test_int_range() -> int {
 
     v2, e2 = run(s, "{\"big\": 5000000000, \"xs\": [9223372036854775807, \"-4\"]}")
     fails = fails + ck(has_error(e2, "xs[1]", "too_small"), "lax \"-4\" is an int and negative")
-    out2, _ = json.stringify(v2)
+    out2, _ = json.encode(v2)
     fails = fails + ck(string_equals(out2, "{\"big\":5000000000}") == 1, "a 64-bit int is kept (${out2})")
     json.free(v2)
     schema.errors_free(e2)
@@ -197,7 +197,7 @@ fn test_int_range() -> int {
     v3, e3 = run(s, "{\"big\": 99999999999999999999, \"xs\": [1, 18446744073709551616]}")
     fails = fails + ck(has_error(e3, "big", "invalid_type"), "big is past int64")
     fails = fails + ck(has_error(e3, "xs[1]", "invalid_type"), "xs[1] is past int64")
-    out3, _ = json.stringify(v3)
+    out3, _ = json.encode(v3)
     fails = fails + ck(string_equals(out3, "{}") == 1, "nothing past int64 is kept (${out3})")
     json.free(v3)
     schema.errors_free(e3)

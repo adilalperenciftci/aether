@@ -5,11 +5,11 @@
 import std.os
 
 main() {
-    n = aether_args_count()
+    n = os.args_count()
     println("argc=${n}")
     i = 1
     while i < n {
-        println("ARG:${aether_args_get(i)}")
+        println("ARG:${os.args_get(i)}")
         i = i + 1
     }
 }

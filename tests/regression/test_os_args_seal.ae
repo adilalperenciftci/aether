@@ -22,9 +22,13 @@
 import std.os
 
 extern exit(code: int)
+// The C accessors under the wrappers, which say null where the wrappers say
+// "": std.os exports the wrappers only (one name per operation, #3014).
+extern aether_args_count() -> int
+extern aether_args_get(index: int) -> string
 
 // Simulates a later in-process caller trying to peek at argv after
-// main has sealed it. Reads through the os.aether_* accessors;
+// main has sealed it. Reads through the C accessors and the wrappers;
 // post-seal these all return their empty-state values.
 late_callback() {
     if aether_args_count() != 0 {
@@ -33,6 +37,10 @@ late_callback() {
     }
     if aether_args_get(0) != null {
         println("FAIL: late_callback sees non-null argv[0]")
+        exit(1)
+    }
+    if os.args_count() != 0 || os.args_get(0) != "" || os.argv0() != "" {
+        println("FAIL: late_callback sees argv through the wrappers")
         exit(1)
     }
 }

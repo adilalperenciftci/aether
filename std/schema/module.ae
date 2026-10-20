@@ -776,7 +776,7 @@ parse_json(schema_ptr: ptr, root: ptr) -> (ptr, ptr) {
     errors = list_new()
     if root == null || json.type(root) != JSON_OBJECT {
         push_error(errors, "", "invalid_type", "the input is not a JSON object")
-        return json.create_object(), errors
+        return json.obj(), errors
     }
     return check_object(s, root, "", s.strict, errors), errors
 }
@@ -793,7 +793,7 @@ fn join_path(prefix: string, name: string) -> string {
 
 // A JSON object's declared fields, checked; the passing ones as a new object.
 fn check_object(s: *Schema, obj: ptr, prefix: string, strict: int, errors: ptr) -> ptr {
-    out = json.create_object()
+    out = json.obj()
     fsz = list_size(s.fields)
     i = 0
     while i < fsz {
@@ -851,7 +851,7 @@ fn check_value(f: *Field, v: ptr, path: string, strict: int, errors: ptr) -> ptr
             return null
         }
         item = f.item as *Field
-        arr = json.create_array()
+        arr = json.arr()
         failed = 0
         k = 0
         while k < n {
@@ -946,7 +946,7 @@ fn scalar_text(ty: int, v: ptr, strict: int) -> (string, string) {
             return string_concat("${json.get_long(v)}", ""), ""
         }
         if ty == FLOAT || ty == STR {
-            text, _ = json.stringify(v)
+            text, _ = json.encode(v)
             return text, ""
         }
         return "", "invalid_type"
@@ -971,25 +971,25 @@ fn typed_json(ty: int, text: string) -> ptr {
         if err != "" {
             return null
         }
-        return json.create_int(n)
+        return json.from_int(n)
     }
     if ty == FLOAT {
         x, ferr = to_float(text)
         if ferr != "" {
             return null
         }
-        return json.create_number(x)
+        return json.num(x)
     }
     if ty == BOOL {
         low = string_to_lower(text)
         yes = string_equals(low, "true") == 1 || string_equals(low, "1") == 1
         string_free(low)
         if yes {
-            return json.create_bool(1)
+            return json.boolean(1)
         }
-        return json.create_bool(0)
+        return json.boolean(0)
     }
-    return json.create_string(text)
+    return json.str(text)
 }
 
 fn type_name(ty: int) -> string {

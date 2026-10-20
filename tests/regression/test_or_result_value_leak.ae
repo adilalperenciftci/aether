@@ -28,7 +28,7 @@ extern exit(code: int)
 // slot is uniform-heap), so the caller must free it. Exercises the
 // single-value return-heap classifier's AST_OR_ELSE path.
 forward(j: ptr) -> string {
-    return json.stringify(j) or { "none" }
+    return json.encode(j) or { "none" }
 }
 
 main() {
@@ -39,7 +39,7 @@ main() {
         j, _ = json.parse("{\"k\":${n}}")
 
         // Success value heap, handler default a LITERAL. Was leaked.
-        s1 = json.stringify(j) or { "" }
+        s1 = json.encode(j) or { "" }
         if string.length(s1) < 3 { println("FAIL: stringify or-literal too short"); fails = fails + 1 }
 
         // Error path taken (get_string on a non-string errors), handler
@@ -61,7 +61,7 @@ main() {
         // `or`-result passed DIRECTLY as a call argument (no bound local):
         // the heap temporary must be drained by the argument-lifetime wrap,
         // and the fallible must be evaluated exactly once.
-        if string.length(json.stringify(j) or { "" }) < 3 {
+        if string.length(json.encode(j) or { "" }) < 3 {
             println("FAIL: or-result-as-arg too short"); fails = fails + 1
         }
 

@@ -13,17 +13,17 @@ header comment is the authoritative description.
 |---|---|---:|---|
 | `std.actors` | Process-global registry mapping names to actor references. | 6 | [guide](../std/actors/README.md) · [source](../std/actors/module.ae) |
 | `std.alloc` | Allocator handles the containers accept, so a structure can allocate from an arena instead of the system. | 6 | [guide](../std/alloc/README.md) · [source](../std/alloc/module.ae) |
-| `std.arena` | Bulk allocator: many allocations, released in one shot. | 9 | [guide](../std/arena/README.md) · [source](../std/arena/module.ae) |
+| `std.arena` | Bulk allocator: many allocations, released in one shot. | 7 | [guide](../std/arena/README.md) · [source](../std/arena/module.ae) |
 | `std.audio` | Audio playback: WAV and PCM loading, device control, volume; pan, pitch, looping, groups, a queue source and a headless engine for the game-engine mixer. | 46 | [guide](../std/audio/README.md) · [source](../std/audio/module.ae) |
 | `std.audit` | Query the sandbox audit trail. | 4 | [guide](../std/audit/README.md) · [source](../std/audit/module.ae) |
 | `std.bignum` | Arbitrary-precision integers. | 29 | [guide](../std/bignum/README.md) · [source](../std/bignum/module.ae) |
 | `std.bits` | Unsigned bit operations: rotates, shifts, popcount, leading zeros, unsigned divide. | 17 | [guide](../std/bits/README.md) · [source](../std/bits/module.ae) |
-| `std.brotli` | Brotli compression, streaming and one-shot, for `Content-Encoding: br`. | 21 | [guide](../std/brotli/README.md) · [source](../std/brotli/module.ae) |
+| `std.brotli` | Brotli compression, streaming and one-shot, for `Content-Encoding: br`. | 20 | [guide](../std/brotli/README.md) · [source](../std/brotli/module.ae) |
 | `std.bytes` | Mutable byte buffer with random access and overlap-safe copies. | 32 | [guide](../std/bytes/README.md) · [source](../std/bytes/module.ae) |
 | `std.capsicum` | FreeBSD Capsicum capability-mode bindings. | 28 | [guide](../std/capsicum/README.md) · [source](../std/capsicum/module.ae) |
 | `std.cas` | Content-addressed store keyed by the sha256 of file contents. | 7 | [guide](../std/cas/README.md) · [source](../std/cas/module.ae) |
 | `std.casper` | FreeBSD Casper service delegation. | 8 | [guide](../std/casper/README.md) · [source](../std/casper/module.ae) |
-| `std.cbor` | CBOR encoding and decoding (RFC 8949). | 50 | [guide](../std/cbor/README.md) · [source](../std/cbor/module.ae) |
+| `std.cbor` | CBOR encoding and decoding (RFC 8949). | 46 | [guide](../std/cbor/README.md) · [source](../std/cbor/module.ae) |
 | `std.clapae` | Command-line argument parser, modelled on clap. | 32 | [guide](../std/clapae/README.md) · [source](../std/clapae/module.ae) |
 | `std.collections` | Dynamic list, hash map and packed int array, with the raw externs the alias modules re-export. | 44 | [guide](../std/collections/README.md) · [source](../std/collections/module.ae) |
 | `std.config` | Process-global immutable string to string store. | 6 | [guide](../std/config/README.md) · [source](../std/config/module.ae) |
@@ -35,16 +35,16 @@ header comment is the authoritative description.
 | `std.encoding` | Hex, Base64, Base32 and CSV field codecs. | 11 | [guide](../std/encoding/README.md) · [source](../std/encoding/module.ae) |
 | `std.file` | File operations, re-exported from `std.fs`. | 14 | [guide](../std/file/README.md) · [source](../std/file/module.ae) |
 | `std.floatarr` | Fixed-size packed-double buffer. | 15 | [guide](../std/floatarr/README.md) · [source](../std/floatarr/module.ae) |
-| `std.fs` | Files, directories, metadata, recursive walk, and change watching. | 156 | [guide](../std/fs/README.md) · [source](../std/fs/module.ae) |
+| `std.fs` | Files, directories, metadata, recursive walk, and change watching. | 148 | [guide](../std/fs/README.md) · [source](../std/fs/module.ae) |
 | `std.hash` | Fast non-cryptographic hashes and checksums: FNV, MurmurHash3, SipHash, CRC-32. | 6 | [guide](../std/hash/README.md) · [source](../std/hash/module.ae) |
 | `std.host` | Primitives for Aether scripts embedded in a host application. | 14 | [guide](../std/host/README.md) · [source](../std/host/module.ae) |
-| `std.http` | HTTP client and server: the `std.net` surface plus Go-style wrappers. | 134 | [guide](../std/http/README.md) · [source](../std/http/module.ae) |
+| `std.http` | HTTP client and server: the `std.net` surface plus Go-style wrappers. | 127 | [guide](../std/http/README.md) · [source](../std/http/module.ae) |
 | `std.http1` | Pure-Aether HTTP/1.1 response reader (RFC 9112). | 14 | [guide](../std/http1/README.md) · [source](../std/http1/module.ae) |
 | `std.intarr` | Fixed-size packed-int buffer. | 15 | [guide](../std/intarr/README.md) · [source](../std/intarr/module.ae) |
 | `std.intmap` | Hash map from `long` keys to `long` values, for integer-keyed counting and lookup. | 12 | [guide](../std/intmap/README.md) · [source](../std/intmap/module.ae) |
 | `std.io` | Console output, whole-file reads and writes, file descriptors, environment variables. | 44 | [full section](#io-stdio) |
 | `std.ipc` | Child-to-parent back-channel for processes started by `std.os`. | 4 | [guide](../std/ipc/README.md) · [source](../std/ipc/module.ae) |
-| `std.json` | JSON parsing, building and serialisation. | 55 | [full section](#json-stdjson) |
+| `std.json` | JSON parsing, building and serialisation. | 45 | [full section](#json-stdjson) |
 | `std.jsonpath` | RFC 9535 JSONPath queries over parsed JSON, with a reusable compiled path. | 10 | [guide](../std/jsonpath/README.md) · [source](../std/jsonpath/module.ae) |
 | `std.ksuid` | KSUID: 160-bit lexicographically sortable identifier. | 1 | [guide](../std/ksuid/README.md) · [source](../std/ksuid/module.ae) |
 | `std.language` | BCP 47 language tags and matching (RFC 5646, RFC 4647). | 11 | [guide](../std/language/README.md) · [source](../std/language/module.ae) |
@@ -60,10 +60,10 @@ header comment is the authoritative description.
 | `std.msgpack` | MessagePack serialisation and deserialisation. | 39 | [guide](../std/msgpack/README.md) · [source](../std/msgpack/module.ae) |
 | `std.mutation` | Text-based mutation-testing driver for `std.spec` suites. | 1 | [guide](../std/mutation/README.md) · [source](../std/mutation/module.ae) |
 | `std.nanoid` | NanoID: 21-character URL-safe identifier. | 2 | [guide](../std/nanoid/README.md) · [source](../std/nanoid/module.ae) |
-| `std.net` | TCP sockets and the HTTP client and server externs. | 69 | [guide](../std/net/README.md) · [source](../std/net/module.ae) |
+| `std.net` | TCP sockets and the HTTP client and server externs. | 64 | [guide](../std/net/README.md) · [source](../std/net/module.ae) |
 | `std.number` | Locale-aware number, percent and currency formatting. | 15 | [guide](../std/number/README.md) · [source](../std/number/module.ae) |
 | `std.observe` | Observable struct models: run closures after every field store on a `struct T @observable` value. | 9 | [guide](../std/observe/README.md) · [source](../std/observe/module.ae) |
-| `std.os` | Shell and process execution: run, capture, spawn, pipes, wait. | 85 | [full section](#os-stdos) |
+| `std.os` | Shell and process execution: run, capture, spawn, pipes, wait. | 80 | [full section](#os-stdos) |
 | `std.path` | Lexical path manipulation, with no filesystem access. | 10 | [guide](../std/path/README.md) · [source](../std/path/module.ae) |
 | `std.plural` | CLDR plural-rule categories. | 2 | [guide](../std/plural/README.md) · [source](../std/plural/module.ae) |
 | `std.pqueue` | Priority queue over (priority, item) pairs, backed by a binary heap. | 9 | [guide](../std/pqueue/README.md) · [source](../std/pqueue/module.ae) |
@@ -94,11 +94,11 @@ header comment is the authoritative description.
 | `std.url` | Percent-encoding and query-string parsing (RFC 3986). | 8 | [guide](../std/url/README.md) · [source](../std/url/module.ae) |
 | `std.uuid` | UUID v4 and v7 (RFC 9562). | 2 | [guide](../std/uuid/README.md) · [source](../std/uuid/module.ae) |
 | `std.worker` | Run blocking work off the loop thread, deliver the result back on it. | 10 | [guide](../std/worker/README.md) · [source](../std/worker/module.ae) |
-| `std.xml` | XML pull parsing and document writing. | 43 | [full section](#xml-stdxml) |
+| `std.xml` | XML pull parsing and document writing. | 25 | [full section](#xml-stdxml) |
 | `std.yaml` | YAML parsing and emitting. | 16 | [guide](../std/yaml/README.md) · [source](../std/yaml/module.ae) |
 | `std.zip` | ZIP archive reader and writer over a byte buffer: stored/deflate, ZIP64, per-entry CRC-32. | 25 | [guide](../std/zip/README.md) · [source](../std/zip/module.ae) |
-| `std.zlib` | One-shot zlib and gzip deflate and inflate. | 29 | [full section](#compression-stdzlib) |
-| `std.zstd` | Zstandard compression, streaming and one-shot, for archives and internal transports. | 20 | [guide](../std/zstd/README.md) · [source](../std/zstd/module.ae) |
+| `std.zlib` | One-shot zlib and gzip deflate and inflate. | 28 | [full section](#compression-stdzlib) |
+| `std.zstd` | Zstandard compression, streaming and one-shot, for archives and internal transports. | 19 | [guide](../std/zstd/README.md) · [source](../std/zstd/module.ae) |
 
 > **Note:** The standard library follows the canonical module pattern in [stdlib-module-pattern.md](stdlib-module-pattern.md), fallible operations expose a `_raw` extern plus a Go-style `(value, err)` Aether wrapper; pure/infallible operations stay raw without a suffix. See the [error handling example](../examples/basics/error-handling.ae) for how the pattern is used from user code, and [std/fs/module.ae](../std/fs/module.ae) for the reference implementation.
 
@@ -1467,22 +1467,22 @@ main() {
     println(text)  // "Aether"
 
     // Create values
-    obj = json.create_object()
-    json.object_set(obj, "key", json.create_string("value"))
-    json.object_set(obj, "count", json.create_number(42.0))
+    obj = json.obj()
+    json.set(obj, "key", json.str("value"))
+    json.set(obj, "count", json.num(42.0))
 
     // Arrays
-    arr = json.create_array()
-    json.array_add(arr, json.create_number(1.0))
-    json.array_add(arr, json.create_number(2.0))
+    arr = json.arr()
+    json.push(arr, json.num(1.0))
+    json.push(arr, json.num(2.0))
     size = json.array_size(arr)
 
     // Serialize to string, Go-style (output, err) tuple
-    output, _ = json.stringify(obj)
+    output, _ = json.encode(obj)
     println("JSON: ${output}")
 
     // Type checking
-    type = json.type(json.create_number(3.0))  // 2 = JSON_NUMBER
+    type = json.type(json.num(3.0))  // 2 = JSON_NUMBER
 
     // Cleanup
     json.free(data)
@@ -1498,7 +1498,7 @@ main() {
 - `json.parse(json_str)` → `(ptr, string)` - Parse JSON, returns `(value, err)` tuple
 - `json.parse_strict(json_str)` → `(ptr, int, string)` - Structured-error variant of `parse`: returns `(value, KIND_OK, "")` on success or `(null, KIND_*, "<reason> at <line>:<col>")` on failure. `kind` discriminates between syntax errors (`KIND_PARSE_ERROR`), out-of-memory (`KIND_OUT_OF_MEMORY`), and invalid input (`KIND_INVALID_INPUT`) without parsing the human message. KIND values match `std.fs`'s pilot so callers can mix the two surfaces in a single switch.
 - `json.last_error_kind()` / `last_error_line()` / `last_error_col()` → `int` - Programmatic accessors for the most recent parse failure on this thread. Read AFTER a `parse` / `parse_strict` returned a failure; undefined after a successful parse. Line/column are 1-based and match the values embedded in the error message.
-- `json.stringify(value)` → `(string, string)` - Serialize to JSON string; `(output, err)` tuple (`("", "stringify failed")` on failure)
+- `json.encode(value)` → `(string, string)` - Serialize to JSON string; `(output, err)` tuple (`("", "stringify failed")` on failure)
 - `json.free(value)` - Free a JSON value tree
 
 Raw extern: `json_parse_raw`.
@@ -1548,7 +1548,7 @@ The `parse_strict` shape is the std.fs structured-error pilot extended to a seco
 
 **Object Operations:**
 - `json.object_get(obj, key)` → `(ptr, string)` - Get value by key; `(child, err)` tuple. Absent key returns `(null, "")`, distinct from the error case `(null, "not an object")`
-- `json.object_set(obj, key, value)` - Set key-value pair
+- `json.set(obj, key, value)` - Set key-value pair
 - `json.object_has(obj, key)` - Check if key exists (returns 1/0)
 - `json.object_size(obj)` - Number of entries (`0` for empty, `-1` if not an object)
 - `json.object_entry(obj, i)` - `(key, value, err)` for the i-th entry; keys
@@ -1557,12 +1557,12 @@ The `parse_strict` shape is the std.fs structured-error pilot extended to a seco
 
 **Array Operations:**
 - `json.array_get(arr, index)` → `(ptr, string)` - Get value at index; `(value, err)` tuple. Out-of-range returns `(null, "index out of range")`, distinct from `(null, "not an array")`
-- `json.array_add(arr, value)` - Append value
+- `json.push(arr, value)` - Append value
 - `json.array_size(arr)` - Get array length
 
 **Value Creation:**
-- `json.create_null()`, `json.create_bool(value)`, `json.create_number(value)`
-- `json.create_string(value)`, `json.create_array()`, `json.create_object()`
+- `json.null_value()`, `json.boolean(value)`, `json.num(value)`
+- `json.str(value)`, `json.arr()`, `json.obj()`
 
 **Terse builder / encoder**, thin aliases over the above for
 assembling a value tree and serializing it without hand-concatenating
@@ -2882,11 +2882,10 @@ main() {
 - `os.wall_micros()` → `int` - Sub-second microsecond fraction (0..999999) from the same `struct timeval` as `wall_seconds`.
 - `os.now_monotonic_ms()` → `long` - Monotonic clock, milliseconds since boot / process-start / arbitrary epoch. Value-domain is opaque; only *deltas* are meaningful. POSIX `clock_gettime(CLOCK_MONOTONIC)`; Windows `QueryPerformanceCounter`. Use for animation tick loops, frame-time budgets, microbenchmarks, anything that must survive a wall-clock jump.
 - `os.now_monotonic_ns()` → `long` - Same source as `now_monotonic_ms`, nanosecond precision. Useful for sub-millisecond timing.
-- `aether_args_count()` → `int` - Number of command-line arguments
-- `aether_args_get(index)` → `string` - Get the i-th argument; null if out of range
-- `aether_argv0()` → `string` - Path the OS launched the current process with (argv[0]); null before `aether_args_init` runs
-- `os.argv0()` → `string` - Convenience wrapper around `aether_argv0()` that returns `""` instead of null and hands back a fresh copy
-- `os.args_seal()` - **One-shot runtime seal** of the argv accessors. After this returns, `aether_args_count()` reports `0`, `aether_args_get(i)` returns null, `os.argv0()` returns `""`, and `aether_argv_raw()` returns null, as if argv had never been initialised. Idempotent (calling twice is a no-op); there is no unseal. Intended use: once `main()` has parsed its CLI flags into config state, call `os.args_seal()` to prevent any later code (imported libraries, plugin callbacks, untrusted Aether modules) from reading the original argv. Complements the compile-time `hide` / `seal except` scope directives, those deny *lexical* access, this denies *runtime* access. Caveat: this is a co-operative Aether-side gate, not a kernel boundary; the OS still has the original argv in process memory (Linux `/proc/self/cmdline`, macOS sysctl) and code that goes around the Aether accessors can still read it. Pair with the LD_PRELOAD libc sandbox if the threat model demands true inaccessibility.
+- `os.args_count()` → `int` - Number of command-line arguments
+- `os.args_get(index)` → `string` - The i-th argument, a copy of its own; `""` when out of range, sealed or not initialised
+- `os.argv0()` → `string` - Path the OS launched the current process with (argv[0]), a copy of its own; `""` before argv is initialised
+- `os.args_seal()` - **One-shot runtime seal** of the argv accessors. After this returns, `os.args_count()` reports `0`, `os.args_get(i)` and `os.argv0()` return `""`, and `os.aether_argv_raw()` returns null, as if argv had never been initialised. Idempotent (calling twice is a no-op); there is no unseal. Intended use: once `main()` has parsed its CLI flags into config state, call `os.args_seal()` to prevent any later code (imported libraries, plugin callbacks, untrusted Aether modules) from reading the original argv. Complements the compile-time `hide` / `seal except` scope directives, those deny *lexical* access, this denies *runtime* access. Caveat: this is a co-operative Aether-side gate, not a kernel boundary; the OS still has the original argv in process memory (Linux `/proc/self/cmdline`, macOS sysctl) and code that goes around the Aether accessors can still read it. Pair with the LD_PRELOAD libc sandbox if the threat model demands true inaccessibility.
 - `os.args_sealed()` → `int` - Returns `1` if `args_seal()` has been called in this process, `0` otherwise. Cheap; useful for cooperative callers that want to check before they call.
 - `os_execv(prog, argv_list)` → `int` - Replace the current process image with `prog`, passing an explicit `list<ptr>` argv. Uses POSIX `execvp(3)` so `prog` is looked up on `PATH` when it does not contain a slash. Flushes stdio before the exec so pre-exec output is not lost. On success this call **never returns**; on failure returns `-1` and the current process continues. Windows cannot replace a running process, so there it runs `prog`, waits for it and exits with its status, which is what a caller of exec observes.
 

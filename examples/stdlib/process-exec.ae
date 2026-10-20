@@ -3,7 +3,7 @@
 //
 // Shows two related features from std.os:
 //
-//   • `os.argv0()` / `aether_argv0()` — read argv[0]. Useful when a tool
+//   • `os.argv0()` — read argv[0]. Useful when a tool
 //     needs to find its own binary (to re-exec with different flags,
 //     locate sibling helpers next to itself, or print a self-path in a
 //     diagnostic).
@@ -33,7 +33,7 @@ main() {
     println("process-exec: I am ${me}")
 
     // Forward any extra args the user passed so the demo is visible.
-    n = aether_args_count()
+    n = os.args_count()
     if n > 1 {
         println("process-exec: forwarding ${n - 1} extra arg(s)")
     }
@@ -48,7 +48,7 @@ main() {
     _e4 = list.add(argv, me)
     i = 1
     while i < n {
-        _e5 = list.add(argv, aether_args_get(i))
+        _e5 = list.add(argv, os.args_get(i))
         i = i + 1
     }
 

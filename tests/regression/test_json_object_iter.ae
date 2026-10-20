@@ -80,10 +80,10 @@ main() {
     // ---- Test 4: insertion order preserved through builder -------
 
     print("\nTest 4: built object preserves key order\n")
-    j_built = json.create_object()
-    json.object_set(j_built, "x", json.create_number(1.0))
-    json.object_set(j_built, "y", json.create_number(2.0))
-    json.object_set(j_built, "z", json.create_number(3.0))
+    j_built = json.obj()
+    json.set(j_built, "x", json.num(1.0))
+    json.set(j_built, "y", json.num(2.0))
+    json.set(j_built, "z", json.num(3.0))
     keys_built = ""
     i2 = 0
     while i2 < json.object_size(j_built) {
@@ -168,12 +168,12 @@ main() {
     // ---- Test 9: stress — 32 keys through builder + iterate ------
 
     print("\nTest 9: 32-key stress (builder path, exercises obj_reserve growth)\n")
-    j_big = json.create_object()
+    j_big = json.obj()
     i3 = 0
     while i3 < 32 {
         // Key is "k${i3}" — string interpolation builds the owned string.
         k = "k${i3}"
-        json.object_set(j_big, k, json.create_number(i3))
+        json.set(j_big, k, json.num(i3))
         i3 = i3 + 1
     }
     if json.object_size(j_big) != 32 {
@@ -196,7 +196,7 @@ main() {
     }
     print("  PASS: 32 keys iterated, insertion-order preserved, values intact\n")
 
-    // Reclaim the parsed/built JSON values — json.parse / json.create_object
+    // Reclaim the parsed/built JSON values — json.parse / json.obj
     // hand the caller an owned value to free with json.free (the value
     // owns its keys, numbers, and nested objects).
     json.free(j_empty)

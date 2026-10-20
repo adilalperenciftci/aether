@@ -681,16 +681,16 @@ There is no `void` keyword in the return-type position, a missing return-type an
 import std.os
 
 main() {
-    n = os.aether_args_count()
+    n = os.args_count()
     i = 0
     while i < n {
-        println("argv[${i}] = ${os.aether_args_get(i)}")
+        println("argv[${i}] = ${os.args_get(i)}")
         i = i + 1
     }
 }
 ```
 
-`os.argv0()` returns argv[0] as a string (empty if uninitialised). `os.aether_argv_raw()` exposes the original `char**` for C-interop callers that need to forward it unchanged. Shorter ergonomic spellings exist: `os.args_count()` and `os.args_get(i)` (the latter returns an owned copy, `""` when out of range). See [Standard Library Reference § `std.os`](stdlib-reference.md) for the full surface.
+`os.args_get(i)` returns an owned copy of argv[i], `""` when out of range, and `os.argv0()` argv[0] the same way. `os.aether_argv_raw()` exposes the original `char**` for C-interop callers that need to forward it unchanged. See [Standard Library Reference § `std.os`](stdlib-reference.md) for the full surface.
 
 ### Returning on every path [E0700]
 

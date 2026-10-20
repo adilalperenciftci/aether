@@ -20,7 +20,7 @@ handle_static(req: ptr, res: ptr, ud: ptr) {
     // Resolve path: /static/<filename> → <root>/<filename>.
     p = http.request_path(req)
     if p == null { p = "/" }
-    root = aether_args_get(2)
+    root = os.args_get(2)
     if string.starts_with(p, "/static/") == 1 {
         // Slice off "/static/" prefix manually because the wildcard
         // route surface here is plain — no path params.
@@ -47,7 +47,7 @@ actor SchedHelper {
 }
 
 main() {
-    n = aether_args_count()
+    n = os.args_count()
     if n < 3 {
         println("usage: server <port> <root>")
         exit(1)

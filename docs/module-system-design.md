@@ -85,7 +85,7 @@ cached ASTs, each module file is read and parsed exactly once.
 | `import std.dir` | `dir` | `dir.exists()`, `dir.create()`, `dir.delete()`, `dir.list()` |
 | `import std.path` | `path` | `path.join()`, `path.dirname()`, `path.basename()`, `path.extension()`, `path.is_absolute()` |
 | `import std.fs` | `fs` | Monolithic file/dir/path module, call under the `fs` namespace, e.g. `fs.read()`, `fs.exists()`, `fs.list_dir()`, `fs.clean()` (not `file.*`/`dir.*`/`path.*`) |
-| `import std.json` | `json` | `json.parse()`, `json.create_object()`, `json.free()` |
+| `import std.json` | `json` | `json.parse()`, `json.obj()`, `json.free()` |
 | `import std.http` | `http` | `http.get()`, `http.server_create()`, `http.server_start()` |
 | `import std.tcp` | `tcp` | `tcp.connect()`, `tcp.write()`, `tcp.listen()` |
 | `import std.net` | `net` | Monolithic networking module under the `net` namespace; redeclares the same TCP/HTTP externs over shared C symbols. Does not re-export the `tcp`/`http` namespaces, so `http.get()` fails after `import std.net` import `std.http`/`std.tcp` for those |
