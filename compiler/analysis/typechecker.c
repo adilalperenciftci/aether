@@ -10575,6 +10575,33 @@ static int tc_loop_label_in_scope(const char* label) {
 // optional variable's identifier node (borrowed) and sets *narrow_then; else
 // NULL. The condition is already typechecked, so the identifier carries its
 // TYPE_OPTIONAL node_type.
+/* #3042 review: a condition of type `t` that is not a bool. An optional is
+ * tested with `!= none`, and the hint says so, naming the variable. */
+static void condition_not_boolean(const char* msg, ASTNode* cond, Type* t, int line,
+                                  int column) {
+    if (!t || t->kind != TYPE_OPTIONAL) {
+        type_error(msg, line, column);
+        return;
+    }
+    char hint[256];
+    if (cond && cond->type == AST_IDENTIFIER && cond->value)
+        snprintf(hint, sizeof(hint), "an optional is not a bool: test it with `%s != none`",
+                 cond->value);
+    else
+        snprintf(hint, sizeof(hint), "an optional is not a bool: test it with `!= none`");
+    type_error_hint(msg, hint, line, column);
+}
+
+/* #3042 review: the variable of a condition that is a bare optional
+ * (`if o`), which `o != none` would narrow, or NULL. */
+static ASTNode* bare_optional_condition(ASTNode* cond) {
+    if (!cond || cond->type != AST_IDENTIFIER || !cond->value) return NULL;
+    if (!cond->node_type || cond->node_type->kind != TYPE_OPTIONAL ||
+        !cond->node_type->element_type || cond->node_type->element_type->kind == TYPE_UNKNOWN)
+        return NULL;
+    return cond;
+}
+
 static ASTNode* optional_narrow_target(ASTNode* cond, int* narrow_then) {
     if (!cond || cond->type != AST_BINARY_EXPRESSION || !cond->value ||
         cond->child_count < 2) return NULL;
@@ -12592,9 +12619,16 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                 } else {
                     Type* cond_type = infer_type(condition, table);
                     if (cond_type && cond_type->kind != TYPE_BOOL) {
-                        type_error("If condition must be boolean", condition->line,
-                                   condition->column);
+                        condition_not_boolean("If condition must be boolean", condition,
+                                              cond_type, condition->line, condition->column);
                         cond_ok = 0;
+                        /* #3042 review: `if o`, with `o` an optional, is
+                         * `if o != none` written wrong. Its then-branch is
+                         * checked as that would narrow it, so the one
+                         * mistake is one error, not also every `o.x` in
+                         * the branch. */
+                        narrow_var = bare_optional_condition(condition);
+                        narrow_then = 1;
                     }
                     free_type(cond_type);
                 }
@@ -12650,7 +12684,8 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                     if (cond_type && cond_type->kind != TYPE_BOOL) {
                         int line = condition->line ? condition->line : stmt->line;
                         int column = condition->line ? condition->column : stmt->column;
-                        type_error("For loop condition must be boolean", line, column);
+                        condition_not_boolean("For loop condition must be boolean", condition,
+                                              cond_type, line, column);
                         cond_ok = 0;
                     }
                     free_type(cond_type);
@@ -12697,8 +12732,10 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                 } else {
                     Type* cond_type = infer_type(condition, table);
                     if (cond_type && cond_type->kind != TYPE_BOOL) {
-                        type_error("Loop condition must be boolean", condition->line,
-                                   condition->column);
+                        /* The body is checked as `while o != none` would
+                         * check it, which narrows nothing in a loop. */
+                        condition_not_boolean("Loop condition must be boolean", condition,
+                                              cond_type, condition->line, condition->column);
                         cond_ok = 0;
                     }
                     free_type(cond_type);

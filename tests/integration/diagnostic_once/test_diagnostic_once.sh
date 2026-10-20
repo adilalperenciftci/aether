@@ -151,7 +151,67 @@ if [ "$total" -ne 3 ]; then
     fail=1
 fi
 
+# A bare optional as a condition is `o != none` written wrong: one error,
+# whose hint says so, and the branch checked as that would narrow it (a
+# loop's body is not narrowed by `while o != none` either, so it reads `o`
+# only in ways that check unnarrowed). A condition that is no optional and
+# no bool still leaves its body checked.
+cat > "$TMP/optional.ae" <<'AE'
+struct Shape { x: int }
+
+in_if(o: Shape?) -> int {
+    if o {
+        return o.x
+    }
+    return 0
+}
+
+in_while(o: Shape?) -> int {
+    n = 0
+    while o {
+        n = n + 1
+        o = none
+    }
+    return n
+}
+
+not_optional(n: int) {
+    if n + 1 {
+        println("${undefined_four}")
+    }
+}
+
+main() {
+    not_optional(in_if(none) + in_while(none))
+}
+AE
+out=$(cd "$TMP" && "$AE" check optional.ae 2>&1)
+pairs=$(printf '%s\n' "$out" | awk '/^error/ { msg = $0; next } /-->/ && msg != "" { print $2 " " msg; msg = "" }')
+for want in "optional.ae:4:8 error[E0200]: If condition must be boolean" \
+            "optional.ae:12:11 error[E0200]: Loop condition must be boolean" \
+            "optional.ae:20:10 error[E0200]: If condition must be boolean" \
+            "Undefined variable 'undefined_four'"; do
+    n=$(printf '%s\n' "$pairs" | grep -cF "$want")
+    if [ "$n" -ne 1 ]; then
+        echo "  [FAIL] diagnostic_once: optional.ae reports \"$want\" $n time(s), want 1"
+        fail=1
+    fi
+done
+for want in "test it with \`o != none\`"; do
+    n=$(printf '%s\n' "$out" | grep -cF "$want")
+    if [ "$n" -ne 2 ]; then
+        echo "  [FAIL] diagnostic_once: optional.ae gives the hint \"$want\" $n time(s), want 2"
+        fail=1
+    fi
+done
+total=$(printf '%s\n' "$out" | grep -c "^error")
+if [ "$total" -ne 4 ]; then
+    echo "  [FAIL] diagnostic_once: optional.ae has $total errors, want 4:"
+    printf '%s\n' "$out" | grep -A1 "^error" | sed 's/^/        /'
+    fail=1
+fi
+
 if [ "$fail" -eq 0 ]; then
-    echo "  [PASS] diagnostic_once: a wrong lane and an unknown bitstruct field are each reported once, in every place, and a condition's error leaves its body checked"
+    echo "  [PASS] diagnostic_once: a wrong lane and an unknown bitstruct field are each reported once, in every place, a condition's error leaves its body checked, and a bare optional condition is one error"
 fi
 exit $fail
