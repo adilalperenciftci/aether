@@ -31,6 +31,10 @@ Line endings are LF in the output: a CRLF file (a Windows checkout with
 this repository's `.gitattributes` pins for `*.ae` anyway. The compiler
 accepts either.
 
+A UTF-8 byte order mark starting the file is kept where it is: it is no part
+of the program's text (see [Source Files](language-reference.md#source-files)),
+and the formatter changes whitespace only.
+
 ## What it does, and does not, change
 
 The formatter is deliberately conservative: it changes **only whitespace**.

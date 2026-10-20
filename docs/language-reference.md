@@ -75,7 +75,7 @@ Aether is not, and has no plans to be, a pure FP language (no Hindley-Milner inf
 21. [Compiler Errors](#compiler-errors) and [Warnings](#compiler-warnings)
 22. [Match Expressions](#match-expressions)
 23. [Keywords](#keywords)
-24. [Comments](#comments)
+24. [Source Files](#source-files) and [Comments](#comments)
 25. [Conditional Compilation](#conditional-compilation)
 26. [Compilation](#compilation)
 27. [Type System](#type-system)
@@ -4776,6 +4776,12 @@ import std.message as msg                  // msg.format(...)
 ```
 
 ---
+
+## Source Files
+
+A source file is UTF-8 text. A file may start with the UTF-8 byte order mark (the bytes `EF BB BF`, U+FEFF), as some Windows editors save one: it is no part of the program, and the compiler, `ae check`, `ae fmt` (which keeps it where it found it), the language server and every import read the file as starting after it. Anywhere else U+FEFF is a character like any other, allowed only in a string or a comment.
+
+Outside strings and comments, a character that begins no token is E0100, naming it: `unexpected character '“' (U+201C) outside a string or a comment` for a typographic quote pasted in place of `"`, a byte order mark inside the file, or bytes that are not UTF-8.
 
 ## Comments
 

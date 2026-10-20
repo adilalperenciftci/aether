@@ -6,6 +6,7 @@
 #include <limits.h>
 #include "tokens.h"
 #include "lexer.h"
+#include "../aether_source_text.h"
 
 #define MAX_IDENTIFIER_LENGTH 256
 
@@ -27,7 +28,10 @@ static int token_start_column = 1;
 void lexer_init(const char* src) {
     source = src;
     source_length = strlen(src);
-    current_pos = 0;
+    /* #2999: a byte order mark starting the file is no part of its text;
+     * it was lexed as three unknown characters and reported as E0100 with
+     * its first byte for a message. Columns count from after it. */
+    current_pos = (int)aether_source_bom_length(src);
     current_line = 1;
     current_column = 1;
     token_start_line = 1;
@@ -993,9 +997,48 @@ Token* next_token(void) {
             return create_token(TOKEN_QUESTION, "?", token_start_line, token_start_column);
         case '@': advance(); return create_token(TOKEN_AT, "@", token_start_line, token_start_column);
         default: {
+            /* A character no token starts with. The message was its first
+             * byte alone, which for anything past ASCII (a byte order mark,
+             * a typographic quote) printed as garbage (#2999). Its whole
+             * UTF-8 sequence is consumed and named. */
+            unsigned char lead = (unsigned char)c;
+            int extra = lead >= 0xF0 && lead <= 0xF4 ? 3
+                      : lead >= 0xE0 && lead < 0xF0 ? 2
+                      : lead >= 0xC2 && lead < 0xE0 ? 1 : 0;
+            unsigned int cp = extra == 3 ? (lead & 0x07u)
+                            : extra == 2 ? (lead & 0x0Fu)
+                            : extra == 1 ? (lead & 0x1Fu) : lead;
+            char text[5];
+            int n = 0;
+            text[n++] = c;
             advance();
-            char err_ch[2] = { c, '\0' };
-            return create_token(TOKEN_ERROR, err_ch, token_start_line, token_start_column);
+            int got = 0;
+            while (got < extra && ((unsigned char)peek() & 0xC0) == 0x80) {
+                char b = advance();
+                text[n++] = b;
+                cp = (cp << 6) | ((unsigned char)b & 0x3Fu);
+                got++;
+            }
+            text[n] = '\0';
+            char msg[160];
+            if (lead >= 0x80 && (extra == 0 || got < extra)) {
+                snprintf(msg, sizeof(msg),
+                         "invalid UTF-8 in the source (byte 0x%02X): save the file as UTF-8",
+                         lead);
+            } else if (cp == 0xFEFF) {
+                snprintf(msg, sizeof(msg),
+                         "a byte order mark (U+FEFF) is allowed only at the start of the "
+                         "file; this one is inside it");
+            } else if (lead >= 0x80) {
+                snprintf(msg, sizeof(msg),
+                         "unexpected character '%s' (U+%04X) outside a string or a comment",
+                         text, cp);
+            } else if (isprint(lead)) {
+                snprintf(msg, sizeof(msg), "unexpected character '%c'", c);
+            } else {
+                snprintf(msg, sizeof(msg), "unexpected control character (byte 0x%02X)", lead);
+            }
+            return create_token(TOKEN_ERROR, msg, token_start_line, token_start_column);
         }
     }
 }

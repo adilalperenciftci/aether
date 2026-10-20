@@ -69,6 +69,7 @@ extern char** environ;
  * `compiler/aether_lib_path.h` (a tiny no-AST-deps header) so this
  * include is light. Issue #413. */
 #include "../compiler/aether_lib_path.h"
+#include "../compiler/aether_source_text.h"
 
 #include "apkg/toml_parser.h"
 #include "ae_help.h"
@@ -6045,7 +6046,11 @@ static void ae_scan_binary_imports(const char* file, char* stubdir,
     size_t line_cap = 0;
     char* names = NULL;
     size_t names_cap = 0;
+    int first_line = 1;
     while (ae_read_line(f, &line, &line_cap) > 0) {
+        /* #2999: a byte order mark starting the file is no part of it. */
+        size_t bom = first_line ? aether_source_bom_length(line) : 0;
+        first_line = 0;
         size_t span = strlen(line) + 1;
         if (4 * span > names_cap) {
             char* grown = (char*)realloc(names, 4 * span);
@@ -6060,7 +6065,7 @@ static void ae_scan_binary_imports(const char* file, char* stubdir,
         char* slashed = names + span;
         char* pkgname = names + 2 * span;
         char* libname = names + 3 * span;
-        const char* p = line;
+        const char* p = line + bom;
         while (*p == ' ' || *p == '\t') p++;
         if (strncmp(p, "import", 6) != 0 || (p[6] != ' ' && p[6] != '\t')) continue;
         p += 6;
@@ -6535,8 +6540,11 @@ static void prepare_host_bridge_imports(const char* main_file) {
     char seen[256] = "";
 
     char line[1024];
+    int first_line = 1;
     while (fgets(line, sizeof(line), f)) {
-        const char* p = line;
+        /* #2999: a byte order mark starting the file is no part of it. */
+        const char* p = line + (first_line ? aether_source_bom_length(line) : 0);
+        first_line = 0;
         while (*p == ' ' || *p == '\t') p++;
         if (strncmp(p, "import", 6) != 0 || (p[6] != ' ' && p[6] != '\t')) continue;
         p += 6;
@@ -8995,9 +9003,15 @@ static int build_namespace_with(const char* tmpdir, const char* dir, const char*
             break;
         }
         fprintf(concat, "// === from %s ===\n", siblings[i]);
+        int first_line = 1;
         while (ae_read_line(in, &line, &line_cap) > 0) {
+            /* #2999: a byte order mark starting a sibling is no part of its
+             * text, and inside the concatenation it would be in the middle
+             * of the file. */
+            const char* text = line + (first_line ? aether_source_bom_length(line) : 0);
+            first_line = 0;
             /* Detect duplicate import lines. */
-            const char* p = line;
+            const char* p = text;
             while (*p == ' ' || *p == '\t') p++;
             if (strncmp(p, "import ", 7) == 0) {
                 int dup = 0;
@@ -9034,7 +9048,7 @@ static int build_namespace_with(const char* tmpdir, const char* dir, const char*
                 }
                 has_main = 1;
             }
-            fputs(line, concat);
+            fputs(text, concat);
         }
         fputs("\n", concat);
         fclose(in);
