@@ -24,6 +24,13 @@ typedef struct {
     // are compiled under that prefix and cannot move (#2190). Assigned by
     // module_assign_namespaces once every module is loaded; NULL before.
     char* ns;
+    // #2607: the instruction set this copy of a module is compiled for
+    // ("avx2"), when an `@target("avx2") import m as alias` loaded it. Such
+    // a copy is registered under its own name (`m__avx2`), so it has its own
+    // namespace and functions beside the plain `m`; codegen emits its
+    // functions inside a region compiled for the target. NULL for every
+    // ordinary module.
+    char* lane_target;
 } AetherModule;
 
 // Module registry

@@ -344,15 +344,17 @@ AetherModule* module_create(const char* name, const char* file_path) {
     module->imports = NULL;
     module->import_count = 0;
     module->ns = NULL;
+    module->lane_target = NULL;
     return module;
 }
 
 void module_free(AetherModule* module) {
     if (!module) return;
-    
+
     free(module->name);
     free(module->file_path);
     free(module->ns);
+    free(module->lane_target);
     
     if (module->ast) {
         free_ast_node(module->ast);
@@ -1961,6 +1963,56 @@ static char* module_package_prefix(const char* name, const char* file_path) {
  *    `value` directly while contrib.jq loads it as contrib.jq.value). Only
  *    when both names end the same way: the scope's written prefix is that
  *    last segment, and must not change under it. */
+/* #2607: the instruction set an `@target("avx2") import` names (the parser's
+ * `lane_target:` marker), or NULL for an ordinary import. */
+static const char* import_lane_target(const ASTNode* imp) {
+    if (!imp || !imp->annotation || strncmp(imp->annotation, "lane_target:", 12) != 0) return NULL;
+    return imp->annotation + 12;
+}
+
+/* #2607: `@target("avx2") import m as alias` is a module of its own: the same
+ * file loaded a second time and registered as `m__avx2`, so it gets its own
+ * namespace and its own functions beside a plain `import m`, and codegen can
+ * emit its functions compiled for the target (lane_region_open). The import
+ * is renamed to that module before it is looked up or loaded; the alias is
+ * how the importer names it. Returns 0 after reporting an import that cannot
+ * be one: without an alias the copy has no name of its own to be called by,
+ * and a selection would leave the copy's own functions half merged. */
+static int module_bind_target_import(ASTNode* imp, const char* importer_file) {
+    const char* target = import_lane_target(imp);
+    int alias = 0, selection = 0;
+    for (int k = 0; k < imp->child_count; k++) {
+        ASTNode* c = imp->children[k];
+        if (!c || c->type != AST_IDENTIFIER) continue;
+        if (c->annotation && strcmp(c->annotation, "module_alias") == 0) alias = 1;
+        else selection = 1;
+    }
+    if (!alias || selection) {
+        char msg[512];
+        snprintf(msg, sizeof(msg), "@target(\"%s\") import %s %s", target, imp->value,
+                 !alias ? "has no `as` name" : "selects names");
+        AetherError e = { importer_file, NULL, imp->line, imp->column, msg,
+                          !alias ? "a module imported at a target is a second copy of it, called through its own name: `@target(\"avx2\") import m as m_avx2`"
+                                 : "a module imported at a target is copied whole: drop the (names) list and call it through its `as` name",
+                          NULL, AETHER_ERR_SYNTAX };
+        aether_error_report(&e);
+        return 0;
+    }
+    size_t n = strlen(imp->value) + 2 + strlen(target) + 1;
+    char* instance = malloc(n);
+    snprintf(instance, n, "%s__%s", imp->value, target);
+    free(imp->value);
+    imp->value = instance;
+    return 1;
+}
+
+/* #2607: once the copy is registered, it carries its target. */
+static void module_note_lane_target(const ASTNode* imp) {
+    const char* target = import_lane_target(imp);
+    AetherModule* m = target ? module_find(imp->value) : NULL;
+    if (m && !m->lane_target) m->lane_target = strdup(target);
+}
+
 static void module_bind_import_identity(ASTNode* imp, const char* resolved,
                                         const char* importer,
                                         const char* importer_file) {
@@ -2125,7 +2177,15 @@ static int orchestrate_module(const char* module_name, const char* file_path,
         if (child->type != AST_IMPORT_STATEMENT || !child->value) continue;
 
         char* sub_file = resolve_import_path(child);
-        module_bind_import_identity(child, sub_file, module_name, file_path);  /* #2255 */
+        if (import_lane_target(child)) {
+            if (!module_bind_target_import(child, file_path)) {   /* #2607 */
+                free(sub_file);
+                module_restore_source_dir(saved_source_dir);
+                return 0;
+            }
+        } else {
+            module_bind_import_identity(child, sub_file, module_name, file_path);  /* #2255 */
+        }
         const char* sub_path = child->value;
 
         warn_self_shadowing_import(module_name, child);   /* #1780 */
@@ -2139,6 +2199,7 @@ static int orchestrate_module(const char* module_name, const char* file_path,
                 return 0;
             }
             free(sub_file);
+            module_note_lane_target(child);   /* #2607 */
             if (!check_selective_import_exports(child, file_path)) {
                 module_restore_source_dir(saved_source_dir);
                 return 0;
@@ -2189,7 +2250,15 @@ int module_orchestrate(ASTNode* program) {
         if (child->type != AST_IMPORT_STATEMENT || !child->value) continue;
 
         char* file_path = resolve_import_path(child);
-        module_bind_import_identity(child, file_path, NULL, NULL);  /* #2255 */
+        if (import_lane_target(child)) {
+            if (!module_bind_target_import(child, NULL)) {   /* #2607 */
+                free(file_path);
+                dependency_graph_free(graph);
+                return 0;
+            }
+        } else {
+            module_bind_import_identity(child, file_path, NULL, NULL);  /* #2255 */
+        }
         const char* module_path = child->value;
 
         dependency_graph_add_edge(graph, "__main__", module_path);
@@ -2201,6 +2270,7 @@ int module_orchestrate(ASTNode* program) {
                 return 0;
             }
             free(file_path);
+            module_note_lane_target(child);   /* #2607 */
             if (!check_selective_import_exports(child, NULL)) {
                 dependency_graph_free(graph);
                 return 0;

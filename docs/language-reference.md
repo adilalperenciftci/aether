@@ -3352,6 +3352,46 @@ An alias is resolved in the file that writes it, a library module's file
 included (#2209), and an alias-only import of a local package merges the
 package's functions as a plain import does.
 
+### `@target("avx2") import m as alias` a second copy compiled for AVX2
+
+An `f32x8` is one 256-bit register in a build with `-mavx2` and two
+four-lane halves in any other, and a `-mavx2` binary faults on a CPU without
+AVX2. A program that ships one executable for every CPU imports the module
+holding its lane code a second time, at the target, and chooses at run time
+(#2607):
+
+```aether,fragment
+import std.lanes
+import physics.wide
+@target("avx2") import physics.wide as wide8
+
+solve(constraints: ptr, n: int) {
+    if lanes.cpu_has_avx2() { wide8.solve(constraints, n) } else { wide.solve(constraints, n) }
+}
+```
+
+- The import is a copy of the module of its own (its own functions and
+  module variables), compiled for AVX2 while the rest of the program keeps
+  the build's flags. It is named by its alias, which is required, and
+  imported whole: no `(names)` list, no glob.
+- Both copies compute the same bits; only their width differs.
+  `lanes.native8()` is true in the copy, and `lanes.cpu_has_avx2()` says
+  whether this CPU can run it (false off x86).
+- Two files importing the same module at the target share one copy.
+- An eight-lane value (`f32x8`, `i32x8`, or a struct, pointer, array, tuple
+  or optional holding one) cannot cross between the copies, or from the copy
+  into C compiled apart: the two copies spell it as different C types, so
+  the call is a compile error (E0200). The entry points take scalars and
+  pointers to the data.
+- A closure inside the copy is a compile error: its body would be compiled
+  outside the copy.
+- `"avx2"` is the one target, the one that changes an `f32x8`'s width. With
+  a compiler other than GCC or Clang on x86, and on the
+  `AETHER_GCC_COMPAT=0` path, the copy is plain code with no target
+  attribute.
+
+`std/lanes/README.md` ("One binary, two widths") has the rest.
+
 ### Local Module Imports
 
 ```aether,fragment

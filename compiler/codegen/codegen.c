@@ -7194,242 +7194,22 @@ static void emit_windows_macro_undefs(CodeGenerator* gen) {
     print_line(gen, "#endif");
 }
 
-void generate_program(CodeGenerator* gen, ASTNode* program) {
-    if (!program || program->type != AST_PROGRAM) return;
-    gen->program = program;
-
-    /* Link requirements from the resolved import graph — the very first line
-     * of the TU (a // comment is inert to the preprocessor, so it may precede
-     * the MinGW #if below). */
-    emit_link_requirements(gen, program);
-    emit_source_requirements(gen, program);
-    emit_c_include_dirs(gen, program);
-    emit_entry_point(gen, program);
-    // #2292: the entry program's constants get a reserved C name, before any
-    // other pass reads or rewrites the names.
-    rename_entry_constants(program);
-    // #976: rewrite C-keyword value identifiers to a valid C spelling before
-    // any codegen pass reads their names (must run before escape analysis and
-    // emission, which both key off the identifier names).
-    mangle_keyword_value_idents(program);
-    rename_leading_underscore_functions(program);
-    rename_extern_colliding_functions(program);
-    /* #2683: after the function renames, so a call's name is the one its
-     * C spelling is made from. */
-    rename_locals_shadowing_functions(program);
-    /* #2746, #2994: before any pass keys an exit free or a store off a
-     * local's name. */
-    rename_scoped_bindings(program);
-    /* The rename changed definition names, which are the index's keys,
-       without changing the child count it is keyed on. */
-    program_index_reset();
-    erase_string_retype_casts(program);
-    /* #2586: the functions used as fn-pointer values, by name, before any
-     * pass classifies a function or emits a return of one. */
-    discover_fn_values(gen);
-    // Note: `gen->program` is the source of truth for the
-    // structural-escape-analysis lookup (issue #405). Setting it
-    // here means every per-fn codegen pass beyond this point can
-    // recognise user-defined `-> string` functions as heap-returning.
-
-    // If emitting header, write prologue
-    if (gen->emit_header && gen->header_file) {
-        emit_header_prologue(gen, NULL);
-    }
-
-    // MinGW (native Windows): bind printf / vsnprintf / snprintf to the
-    // C99-conformant __mingw_* family instead of the legacy MSVCRT ones.
-    // Without this, on MINGW64 the MSVCRT implementations mishandle the
-    // C99 conversions Aether emits (%lld / %llu / %zu / %g) AND
-    // vsnprintf(NULL, 0, ...) returns -1 rather than the would-be length.
-    // The latter breaks the two-pass sizing in _aether_interp below
-    // (malloc(-1+1) → a 0-byte buffer, then nothing written) — i.e. empty
-    // string interpolation, which is exactly issue #681. This must be set
-    // before any system header is pulled in, so it is the first thing in
-    // the generated translation unit. Compiles to nothing off MinGW.
-    print_line(gen, "#if defined(__MINGW32__) && !defined(__USE_MINGW_ANSI_STDIO)");
-    print_line(gen, "#define __USE_MINGW_ANSI_STDIO 1");
-    print_line(gen, "#endif");
-
-    // Generate includes for runtime libraries
-    print_line(gen, "#include <stdio.h>");
-    print_line(gen, "#include <stdlib.h>");
-    print_line(gen, "#include <string.h>");
-    print_line(gen, "#include <stdbool.h>");
-    print_line(gen, "#include <stdatomic.h>");
-    print_line(gen, "#include <stdint.h>");
-    print_line(gen, "#include <time.h>");
-    print_line(gen, "#include <setjmp.h>");
-    emit_libc_extern_headers(gen, program);
-    print_line(gen, "#include \"aether_panic.h\"");
-    print_line(gen, "#include \"aether_slice.h\"");   /* #1286 `T[]` fat pointer */
-    /* Cons-cell sequence type — std.collections.string_seq.
-     *
-     * We include the header unconditionally rather than gating on
-     * "program uses *StringSeq" because:
-     *   1. Detecting use requires walking every type annotation in
-     *      the AST, including transitively-imported externs.
-     *   2. The header is small (one struct + 10 prototypes, only
-     *      <stddef.h> transitively) so the cost of including it
-     *      always is negligible.
-     *   3. The full struct definition is required at the call site
-     *      whenever a `match` arm pattern-matches `[h|t]` against a
-     *      *StringSeq, because the lowered C reads `s->head` /
-     *      `s->tail` directly. A forward decl wouldn't be enough.
-     *   4. The runtime header path is wired via tools/ae.c's -I
-     *      flags (-I.../std/collections), and libaether.a (or the
-     *      from-source fallback build) provides the symbols.
-     */
-    print_line(gen, "#include \"aether_stringseq.h\"");
-    /* #1986: the headers modules in the closure asked for, before anything
-     * this file declares, so a `static inline` they carry is what the calls
-     * to it resolve to. */
-    emit_c_include_directives(gen, program);
-    /* Issue #343 codegen tripwire: when --emit=lib is set, the loop
-     * codegen emits a check at every loop head that calls
-     * aether_caps_deadline_tripped() / __aether_abort_call(). The
-     * symbols live in runtime/aether_resource_caps.{h,c}, which the
-     * --emit=lib build links via libaether.a; declare the prototypes
-     * inline so the emitted .c compiles cleanly without pulling
-     * runtime headers into user-program path. Zero cost on
-     * --emit=exe builds — the gate elides both the extern decls and
-     * the per-loop checks. */
-    if (gen->emit_lib) {
-        /* aether_caps_armed is a plain global, nonzero once any thread has
-         * armed (or tripped) a deadline. Testing it first keeps the loop-head
-         * check to one load when no deadline is in use: the call and its two
-         * thread-local reads were ~22% of mquickjs-ae's run time on macOS,
-         * where each TLS read goes through _tlv_get_addr. */
-        print_line(gen, "extern int  aether_caps_armed;");
-        print_line(gen, "extern int  aether_caps_deadline_tripped(void);");
-        print_line(gen, "extern void __aether_abort_call(void);");
-    }
-    print_line(gen, "#ifdef _WIN32");
-    /* The program TU does not include <windows.h> (#2673): mingw-w64's
-     * winnt.h brings <x86intrin.h> and every AVX-512 and AVX10 header with
-     * it, some 80,000 lines that were most of the time a build spent
-     * compiling the program. The few Windows services it needs (console
-     * setup, the monotonic clock, the preemption yield, an actor's own
-     * thread) are runtime functions, and the actor runtime's headers give it
-     * the thread types alone (AETHER_THREAD_TYPES_ONLY). A header a module
-     * asks for with @c_include, emitted above, can still bring windows.h in,
-     * so these limit what it declares: nothing from USER or GDI. That drops
-     * winuser.h and wingdi.h, a third of the names windows.h puts in the TU,
-     * among them ACCEL, MSG and every CreateWindow / SendMessage / GetObject
-     * A-or-W macro, which a program's own function could otherwise be
-     * renamed into (#2292). The words it still defines as macros are
-     * undefined after the last include; see emit_windows_macro_undefs. */
-    print_line(gen, "#define AETHER_THREAD_TYPES_ONLY 1");
-    print_line(gen, "#ifndef WIN32_LEAN_AND_MEAN");
-    print_line(gen, "#define WIN32_LEAN_AND_MEAN");
-    print_line(gen, "#endif");
-    print_line(gen, "#define NOUSER");
-    print_line(gen, "#define NOGDI");
-    print_line(gen, "#define NOMINMAX");
-    print_line(gen, "#elif defined(__EMSCRIPTEN__)");
-    print_line(gen, "#include <emscripten.h>");
-    print_line(gen, "#else");
-    print_line(gen, "#include <unistd.h>");
-    print_line(gen, "#include <sched.h>");
-    print_line(gen, "#endif");
-    print_line(gen, "#ifndef likely");
-    print_line(gen, "#  if defined(__GNUC__) || defined(__clang__)");
-    print_line(gen, "#    define likely(x)   __builtin_expect(!!(x), 1)");
-    print_line(gen, "#    define unlikely(x) __builtin_expect(!!(x), 0)");
-    print_line(gen, "#  else");
-    print_line(gen, "#    define likely(x)   (x)");
-    print_line(gen, "#    define unlikely(x) (x)");
-    print_line(gen, "#  endif");
-    print_line(gen, "#endif");
-    // Cooperative preemption: reduction counter for loop yield points
-    if (gen->preempt_loops) {
-        print_line(gen, "static int _aether_reductions = 10000;");
-        print_line(gen, "#ifdef _WIN32");
-        print_line(gen, "void aether_thread_yield(void);   /* SwitchToThread, in the runtime (#2673) */");
-        print_line(gen, "#define sched_yield() aether_thread_yield()");
-        print_line(gen, "#elif defined(__EMSCRIPTEN__)");
-        print_line(gen, "#define sched_yield() ((void)0)");
-        print_line(gen, "#endif");
-    }
-    /* GCC/Clang vs MSVC: guards for statement expressions ({...}) and computed goto */
-    /* Imported wrappers and trailing-underscore privates are emitted with
-       internal linkage, so a translation unit that imports a module and calls
-       only part of it has unused statics left over. Downstream builds with
-       -Wall -Werror would fail on generated code they did not write, so the
-       storage class carries the attribute rather than the consumer carrying a
-       -Wno flag. */
-    print_line(gen, "#ifndef AETHER_MAYBE_UNUSED");
-    print_line(gen, "#  if defined(__GNUC__) || defined(__clang__)");
-    print_line(gen, "#    define AETHER_MAYBE_UNUSED __attribute__((unused))");
-    print_line(gen, "#  else");
-    print_line(gen, "#    define AETHER_MAYBE_UNUSED");
-    print_line(gen, "#  endif");
-    print_line(gen, "#endif");
-    /* Weak linkage for a @c_callback DEFINITION: the symbol stays external (a C
-       caller binds it by name), but if the module carrying it lands in more than
-       one translation unit, the duplicate definitions dedupe at link instead of
-       colliding with "multiple definition". No-op where weak is unsupported —
-       there a single-TU build still links, and the multi-TU case was already
-       impossible on that toolchain. PE cannot export a weak definition, so a
-       Windows DLL `ae` links (one TU) is compiled with -DAETHER_WEAK_DEF=
-       (empty: strong) for its @c_callbacks to be found by name (#2547). */
-    print_line(gen, "#ifndef AETHER_WEAK_DEF");
-    print_line(gen, "#  if defined(__GNUC__) || defined(__clang__)");
-    print_line(gen, "#    define AETHER_WEAK_DEF __attribute__((weak))");
-    print_line(gen, "#  else");
-    print_line(gen, "#    define AETHER_WEAK_DEF");
-    print_line(gen, "#  endif");
-    print_line(gen, "#endif");
-    /* #2937: a library function exported through its aether_<name> alias,
-       out of the library's exported names (lib_fn_is_local). A DLL exports
-       what it names, so PE needs nothing. */
-    print_line(gen, "#ifndef AETHER_LIB_LOCAL");
-    print_line(gen, "#  if (defined(__GNUC__) || defined(__clang__)) && !defined(_WIN32)");
-    print_line(gen, "#    define AETHER_LIB_LOCAL __attribute__((visibility(\"hidden\")))");
-    print_line(gen, "#  else");
-    print_line(gen, "#    define AETHER_LIB_LOCAL");
-    print_line(gen, "#  endif");
-    print_line(gen, "#endif");
-    /* #2146: vector lanes. The GCC/Clang vector extensions are the whole
-       implementation — lane-wise `+ - * /`, `v[i]`, a comparison yielding an
-       all-ones/zero mask per lane, and a vector `?:` that selects per lane.
-       A compiler without them cannot express the type at all, so the header
-       says so rather than silently compiling something slower or wrong.
-       The helpers are `static inline` in this TU, so `lanes.min(a, b)` is a
-       single instruction after inlining, not a call. */
-    print_line(gen, "#if defined(__GNUC__) || defined(__clang__)");
-    print_line(gen, "#  define AETHER_HAS_LANES 1");
-    print_line(gen, "typedef float  AeF32x4 __attribute__((vector_size(16)));");
-    print_line(gen, "typedef double AeF64x2 __attribute__((vector_size(16)));");
-    print_line(gen, "typedef int32_t AeI32x4 __attribute__((vector_size(16)));");
-    print_line(gen, "typedef int64_t AeI64x2 __attribute__((vector_size(16)));");
-    print_line(gen, "typedef int16_t AeI16x8 __attribute__((vector_size(16)));");
-    print_line(gen, "typedef uint32_t AeU32x4 __attribute__((vector_size(16)));");
-    /* #2428: eight lanes, 32 bytes. With AVX2 an f32x8 is one 256-bit
-       register and each operation one instruction. Without it the type is
-       a struct of two four-lane halves. A plain 32-byte vector would compile
-       there too, but a target with no 32-byte registers (SSE, NEON) has no
-       machine mode for it: GCC keeps every such value in memory and splits
-       only the arithmetic, so a loop paid a load and a store per value per
-       iteration and ran 25% behind the same loop on f32x4, and a 32-byte
-       comparison it did not split at all (a comiss and cmov per lane, 9x
-       behind). Two halves live in two registers and cost exactly two f32x4
-       operations. Every f32x8 / i32x8 operation goes through an _ae_f32x8_*
-       / _ae_i32x8_* helper, codegen routes the operators there, so the
-       source is the same either way and the build flag picks the form:
-       `-mavx2` or `-march=native` through aether.toml's [build] cflags.
-       The two forms are different C types, so C compiled separately that
-       exchanges these by value must use the same -m flags as the program.
-       The native type is declared 16-byte aligned, the alignment heap
-       storage guarantees: at its natural 32, GCC moved through calloc'd
-       slices and malloc'd closure environments with vmovaps, which faults
-       when the block is only 16-aligned (glibc, macOS). */
-    print_line(gen, "#if defined(__AVX2__)");
-    print_line(gen, "#  define AETHER_LANES8_NATIVE 1");
+/* #2428: the eight-lane types and every helper they are built from, one
+   block. generate_program emits it once in the prelude, where
+   AETHER_LANES8_NATIVE says what the build's flags give (AVX2: one 256-bit
+   register; anything else: two four-lane halves). A module imported at a
+   target (#2607, `@target("avx2") import m as alias`) is emitted a second
+   time inside a region compiled for that target, and the region emits this
+   block again under its own names (lane_region_open), so the copy's lanes are
+   native while the rest of the program keeps the build's form. Everything an
+   f32x8 or i32x8 operation lowers to must be in here, and named in
+   LANES8_NAMES below, or the region's copy would collide with the prelude's
+   or miss its own. */
+static void emit_lanes8_block(CodeGenerator* gen) {
+    print_line(gen, "#if AETHER_LANES8_NATIVE");
     print_line(gen, "typedef float   AeF32x8 __attribute__((vector_size(32), aligned(16)));");
     print_line(gen, "typedef int32_t AeI32x8 __attribute__((vector_size(32), aligned(16)));");
     print_line(gen, "#else");
-    print_line(gen, "#  define AETHER_LANES8_NATIVE 0");
     print_line(gen, "typedef struct { AeF32x4 lo, hi; } AeF32x8;");
     print_line(gen, "typedef struct { AeI32x4 lo, hi; } AeI32x8;");
     print_line(gen, "#endif");
@@ -7441,164 +7221,6 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     print_line(gen, "#else");
     print_line(gen, "#  define _AE_LANE8_LOW(v, i) ((v).lo[i])");
     print_line(gen, "#endif");
-    /* SSE2 intrinsics for the saturating packs (_mm_packs_epi32 /
-       _mm_packus_epi16). Only needed on x86 with SSE2; elsewhere the packs use
-       a scalar fallback and this header is not referenced. */
-    print_line(gen, "#if defined(__SSE2__)");
-    print_line(gen, "#  include <emmintrin.h>");
-    print_line(gen, "#endif");
-    print_line(gen, "#else");
-    print_line(gen, "#  define AETHER_HAS_LANES 0");
-    print_line(gen, "#endif");
-    print_line(gen, "#if AETHER_HAS_LANES");
-    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeF32x4 _ae_f32x4_splat(float v) { return (AeF32x4){v, v, v, v}; }");
-    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeF32x4 _ae_f32x4_set(float a, float b, float c, float d) { return (AeF32x4){a, b, c, d}; }");
-    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeF32x4 _ae_f32x4_load(void* p, int64_t i) { AeF32x4 v; memcpy(&v, (char*)p + (size_t)i * 4u, 16); return v; }");
-    print_line(gen, "static inline AETHER_MAYBE_UNUSED void _ae_f32x4_store(void* p, int64_t i, AeF32x4 v) { memcpy((char*)p + (size_t)i * 4u, &v, 16); }");
-    print_line(gen, "static inline AETHER_MAYBE_UNUSED float _ae_f32x4_lane(AeF32x4 v, int64_t i) { return v[i & 3]; }");
-    print_line(gen, "static inline AETHER_MAYBE_UNUSED float _ae_f32x4_sum(AeF32x4 v) { return v[0] + v[1] + v[2] + v[3]; }");
-    /* select is the bit-blend, not a vector `?:`: GCC accepts the ternary on
-       vectors in C++ only, so in C the mask does the work — the lane is
-       all-ones where the comparison held, so (m & a) | (~m & b) is the lane
-       from a or from b, and -O2 folds it back to a blend instruction. The
-       union is the documented GCC/Clang way to view the same register as
-       floats and as integers. */
-    print_line(gen, "typedef union { AeF32x4 f; AeI32x4 i; } _AeF32x4Bits;");
-    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeF32x4 _ae_f32x4_select(AeI32x4 m, AeF32x4 a, AeF32x4 b) { _AeF32x4Bits av, bv, rv; av.f = a; bv.f = b; rv.i = (m & av.i) | (~m & bv.i); return rv.f; }");
-    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeF32x4 _ae_f32x4_min(AeF32x4 a, AeF32x4 b) { return _ae_f32x4_select(a < b, a, b); }");
-    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeF32x4 _ae_f32x4_max(AeF32x4 a, AeF32x4 b) { return _ae_f32x4_select(a > b, a, b); }");
-    /* #2158: a lane square root and absolute value. Both are EXACT — IEEE
-       square root is correctly rounded, and clearing the sign bit is not an
-       approximation — so the lane form changes no result. It replaces four
-       extracts, four scalar calls and a rebuild with the one instruction the
-       hardware has had since SSE2 (sqrtps / andps; vsqrt / bic on NEON).
-
-       Three spellings, because there is no one portable one. Clang has the
-       elementwise builtin. GCC does not, and its four-element loop only
-       becomes sqrtps under -fno-math-errno — a flag that changes what the
-       rest of the program's libm calls promise, so it is not ours to assume;
-       on x86 it takes the SSE2 builtin directly instead. Anywhere else the
-       loop stands: still correct, just scalar. */
-    print_line(gen, "#if defined(__clang__) && defined(__has_builtin)");
-    print_line(gen, "#  if __has_builtin(__builtin_elementwise_sqrt)");
-    print_line(gen, "#    define AETHER_LANE_ELEMENTWISE 1");
-    print_line(gen, "#  endif");
-    print_line(gen, "#endif");
-    print_line(gen, "#ifndef AETHER_LANE_ELEMENTWISE");
-    print_line(gen, "#  define AETHER_LANE_ELEMENTWISE 0");
-    print_line(gen, "#endif");
-    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeF32x4 _ae_f32x4_sqrt(AeF32x4 v) {");
-    print_line(gen, "#if AETHER_LANE_ELEMENTWISE");
-    print_line(gen, "    return __builtin_elementwise_sqrt(v);");
-    print_line(gen, "#elif defined(__SSE2__)");
-    print_line(gen, "    return (AeF32x4)__builtin_ia32_sqrtps(v);");
-    print_line(gen, "#else");
-    print_line(gen, "    AeF32x4 r; for (int i = 0; i < 4; i++) r[i] = __builtin_sqrtf(v[i]); return r;");
-    print_line(gen, "#endif");
-    print_line(gen, "}");
-    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeF32x4 _ae_f32x4_abs(AeF32x4 v) { _AeF32x4Bits b, r; b.f = v; AeI32x4 m = {0x7fffffff, 0x7fffffff, 0x7fffffff, 0x7fffffff}; r.i = b.i & m; return r.f; }");
-    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI32x4 _ae_f32x4_lt(AeF32x4 a, AeF32x4 b) { return a < b; }");
-    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI32x4 _ae_f32x4_le(AeF32x4 a, AeF32x4 b) { return a <= b; }");
-    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI32x4 _ae_f32x4_gt(AeF32x4 a, AeF32x4 b) { return a > b; }");
-    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI32x4 _ae_f32x4_ge(AeF32x4 a, AeF32x4 b) { return a >= b; }");
-    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI32x4 _ae_f32x4_eq(AeF32x4 a, AeF32x4 b) { return a == b; }");
-    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI32x4 _ae_i32x4_and(AeI32x4 a, AeI32x4 b) { return a & b; }");
-    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI32x4 _ae_i32x4_or(AeI32x4 a, AeI32x4 b) { return a | b; }");
-    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI32x4 _ae_i32x4_not(AeI32x4 a) { return ~a; }");
-    print_line(gen, "static inline AETHER_MAYBE_UNUSED int _ae_i32x4_any(AeI32x4 m) { return (m[0] | m[1] | m[2] | m[3]) != 0; }");
-    print_line(gen, "static inline AETHER_MAYBE_UNUSED int _ae_i32x4_all(AeI32x4 m) { return m[0] != 0 && m[1] != 0 && m[2] != 0 && m[3] != 0; }");
-    print_line(gen, "static inline AETHER_MAYBE_UNUSED int64_t _ae_i32x4_lane(AeI32x4 v, int64_t i) { return v[i & 3]; }");
-    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeF64x2 _ae_f64x2_splat(double v) { return (AeF64x2){v, v}; }");
-    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeF64x2 _ae_f64x2_set(double a, double b) { return (AeF64x2){a, b}; }");
-    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeF64x2 _ae_f64x2_load(void* p, int64_t i) { AeF64x2 v; memcpy(&v, (char*)p + (size_t)i * 8u, 16); return v; }");
-    print_line(gen, "static inline AETHER_MAYBE_UNUSED void _ae_f64x2_store(void* p, int64_t i, AeF64x2 v) { memcpy((char*)p + (size_t)i * 8u, &v, 16); }");
-    print_line(gen, "static inline AETHER_MAYBE_UNUSED double _ae_f64x2_lane(AeF64x2 v, int64_t i) { return v[i & 1]; }");
-    print_line(gen, "static inline AETHER_MAYBE_UNUSED double _ae_f64x2_sum(AeF64x2 v) { return v[0] + v[1]; }");
-    print_line(gen, "typedef union { AeF64x2 f; AeI64x2 i; } _AeF64x2Bits;");
-    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeF64x2 _ae_f64x2_blend(AeI64x2 m, AeF64x2 a, AeF64x2 b) { _AeF64x2Bits av, bv, rv; av.f = a; bv.f = b; rv.i = (m & av.i) | (~m & bv.i); return rv.f; }");
-    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeF64x2 _ae_f64x2_min(AeF64x2 a, AeF64x2 b) { return _ae_f64x2_blend(a < b, a, b); }");
-    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeF64x2 _ae_f64x2_max(AeF64x2 a, AeF64x2 b) { return _ae_f64x2_blend(a > b, a, b); }");
-    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeF64x2 _ae_f64x2_select(AeI64x2 m, AeF64x2 a, AeF64x2 b) { return _ae_f64x2_blend(m, a, b); }");
-    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeF64x2 _ae_f64x2_sqrt(AeF64x2 v) {");
-    print_line(gen, "#if AETHER_LANE_ELEMENTWISE");
-    print_line(gen, "    return __builtin_elementwise_sqrt(v);");
-    print_line(gen, "#elif defined(__SSE2__)");
-    print_line(gen, "    return (AeF64x2)__builtin_ia32_sqrtpd(v);");
-    print_line(gen, "#else");
-    print_line(gen, "    AeF64x2 r; for (int i = 0; i < 2; i++) r[i] = __builtin_sqrt(v[i]); return r;");
-    print_line(gen, "#endif");
-    print_line(gen, "}");
-    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeF64x2 _ae_f64x2_abs(AeF64x2 v) { _AeF64x2Bits b, r; b.f = v; AeI64x2 m = {0x7fffffffffffffffLL, 0x7fffffffffffffffLL}; r.i = b.i & m; return r.f; }");
-    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI64x2 _ae_f64x2_lt(AeF64x2 a, AeF64x2 b) { return a < b; }");
-    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI64x2 _ae_f64x2_le(AeF64x2 a, AeF64x2 b) { return a <= b; }");
-    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI64x2 _ae_f64x2_gt(AeF64x2 a, AeF64x2 b) { return a > b; }");
-    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI64x2 _ae_f64x2_ge(AeF64x2 a, AeF64x2 b) { return a >= b; }");
-    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI64x2 _ae_f64x2_eq(AeF64x2 a, AeF64x2 b) { return a == b; }");
-    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI64x2 _ae_i64x2_and(AeI64x2 a, AeI64x2 b) { return a & b; }");
-    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI64x2 _ae_i64x2_or(AeI64x2 a, AeI64x2 b) { return a | b; }");
-    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI64x2 _ae_i64x2_not(AeI64x2 a) { return ~a; }");
-    print_line(gen, "static inline AETHER_MAYBE_UNUSED int _ae_i64x2_any(AeI64x2 m) { return (m[0] | m[1]) != 0; }");
-    print_line(gen, "static inline AETHER_MAYBE_UNUSED int _ae_i64x2_all(AeI64x2 m) { return m[0] != 0 && m[1] != 0; }");
-    print_line(gen, "static inline AETHER_MAYBE_UNUSED int64_t _ae_i64x2_lane(AeI64x2 v, int64_t i) { return v[i & 1]; }");
-    /* #2212: integer lanes for image/audio kernels (JPEG IDCT, YCbCr->RGB,
-       PNG filters, mixing). vector_size arithmetic lowers to SSE2/NEON at
-       -O2; the only ops without a portable operator are the two saturating
-       packs, which take the hardware instruction where there is one and a
-       clamped scalar loop otherwise. Lanes are read/written as int (a 16-bit
-       lane widens to int in Aether). */
-    /* i32x4: four 32-bit lanes, in their own right (not just a mask). */
-    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI32x4 _ae_i32x4_splat(int v) { return (AeI32x4){v, v, v, v}; }");
-    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI32x4 _ae_i32x4_set(int a, int b, int c, int d) { return (AeI32x4){a, b, c, d}; }");
-    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI32x4 _ae_i32x4_load(void* p, int64_t i) { AeI32x4 v; memcpy(&v, (char*)p + (size_t)i * 4u, 16); return v; }");
-    print_line(gen, "static inline AETHER_MAYBE_UNUSED void _ae_i32x4_store(void* p, int64_t i, AeI32x4 v) { memcpy((char*)p + (size_t)i * 4u, &v, 16); }");
-    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI32x4 _ae_i32x4_add(AeI32x4 a, AeI32x4 b) { return a + b; }");
-    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI32x4 _ae_i32x4_sub(AeI32x4 a, AeI32x4 b) { return a - b; }");
-    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI32x4 _ae_i32x4_mul(AeI32x4 a, AeI32x4 b) { return a * b; }");
-    /* Shifts by a compile-time-or-runtime constant count; the count is the
-       same for every lane (a vector-scalar shift), which is what the hardware
-       shift-immediate/GPR-count forms provide. */
-    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI32x4 _ae_i32x4_shl(AeI32x4 a, int64_t n) { return a << (int32_t)n; }");
-    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI32x4 _ae_i32x4_shr(AeI32x4 a, int64_t n) { return a >> (int32_t)n; }");
-    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI32x4 _ae_i32x4_shr_u(AeI32x4 a, int64_t n) { AeU32x4 u; memcpy(&u, &a, 16); u = u >> (uint32_t)n; AeI32x4 r; memcpy(&r, &u, 16); return r; }");
-    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI32x4 _ae_i32x4_min(AeI32x4 a, AeI32x4 b) { AeI32x4 m = a < b; return (m & a) | (~m & b); }");
-    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI32x4 _ae_i32x4_max(AeI32x4 a, AeI32x4 b) { AeI32x4 m = a > b; return (m & a) | (~m & b); }");
-    print_line(gen, "static inline AETHER_MAYBE_UNUSED int64_t _ae_i32x4_sum(AeI32x4 v) { return (int64_t)v[0] + v[1] + v[2] + v[3]; }");
-    /* i16x8: eight 16-bit lanes. */
-    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI16x8 _ae_i16x8_splat(int v) { return (AeI16x8){(int16_t)v, (int16_t)v, (int16_t)v, (int16_t)v, (int16_t)v, (int16_t)v, (int16_t)v, (int16_t)v}; }");
-    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI16x8 _ae_i16x8_set(int a, int b, int c, int d, int e, int f, int g, int h) { return (AeI16x8){(int16_t)a, (int16_t)b, (int16_t)c, (int16_t)d, (int16_t)e, (int16_t)f, (int16_t)g, (int16_t)h}; }");
-    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI16x8 _ae_i16x8_load(void* p, int64_t i) { AeI16x8 v; memcpy(&v, (char*)p + (size_t)i * 2u, 16); return v; }");
-    print_line(gen, "static inline AETHER_MAYBE_UNUSED void _ae_i16x8_store(void* p, int64_t i, AeI16x8 v) { memcpy((char*)p + (size_t)i * 2u, &v, 16); }");
-    print_line(gen, "static inline AETHER_MAYBE_UNUSED int64_t _ae_i16x8_lane(AeI16x8 v, int64_t i) { return v[i & 7]; }");
-    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI16x8 _ae_i16x8_add(AeI16x8 a, AeI16x8 b) { return a + b; }");
-    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI16x8 _ae_i16x8_sub(AeI16x8 a, AeI16x8 b) { return a - b; }");
-    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI16x8 _ae_i16x8_mul(AeI16x8 a, AeI16x8 b) { return a * b; }");
-    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI16x8 _ae_i16x8_shl(AeI16x8 a, int64_t n) { return a << (int16_t)n; }");
-    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI16x8 _ae_i16x8_shr(AeI16x8 a, int64_t n) { return a >> (int16_t)n; }");
-    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI16x8 _ae_i16x8_min(AeI16x8 a, AeI16x8 b) { AeI16x8 m = a < b; return (m & a) | (~m & b); }");
-    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI16x8 _ae_i16x8_max(AeI16x8 a, AeI16x8 b) { AeI16x8 m = a > b; return (m & a) | (~m & b); }");
-    /* Saturating packs. i32x4 -> i16x8 packs two i32x4 vectors (a in the low
-       four lanes, b in the high four) with signed saturation; i16x8 -> u8x16
-       packs two i16x8 with unsigned saturation to bytes. These are the JPEG
-       decoder's hot exit. SSE2 has the exact instruction; elsewhere a clamped
-       scalar loop is correct, just not one instruction. u8x16 is returned in
-       an AeI16x8-shaped 16-byte register the caller stores as bytes. */
-    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI16x8 _ae_i32x4_packs_i16x8(AeI32x4 a, AeI32x4 b) {");
-    print_line(gen, "#if defined(__SSE2__)");
-    print_line(gen, "    AeI16x8 r; __m128i p = _mm_packs_epi32((__m128i)a, (__m128i)b); memcpy(&r, &p, 16); return r;");
-    print_line(gen, "#else");
-    print_line(gen, "    AeI16x8 r; for (int i = 0; i < 4; i++) { int32_t x = a[i]; r[i] = (int16_t)(x < -32768 ? -32768 : x > 32767 ? 32767 : x); }");
-    print_line(gen, "    for (int i = 0; i < 4; i++) { int32_t x = b[i]; r[i + 4] = (int16_t)(x < -32768 ? -32768 : x > 32767 ? 32767 : x); } return r;");
-    print_line(gen, "#endif");
-    print_line(gen, "}");
-    print_line(gen, "static inline AETHER_MAYBE_UNUSED void _ae_i16x8_packus_u8x16(AeI16x8 a, AeI16x8 b, void* out) {");
-    print_line(gen, "#if defined(__SSE2__)");
-    print_line(gen, "    __m128i p = _mm_packus_epi16((__m128i)a, (__m128i)b); memcpy(out, &p, 16);");
-    print_line(gen, "#else");
-    print_line(gen, "    unsigned char* o = (unsigned char*)out;");
-    print_line(gen, "    for (int i = 0; i < 8; i++) { int16_t x = a[i]; o[i] = (unsigned char)(x < 0 ? 0 : x > 255 ? 255 : x); }");
-    print_line(gen, "    for (int i = 0; i < 8; i++) { int16_t x = b[i]; o[i + 8] = (unsigned char)(x < 0 ? 0 : x > 255 ? 255 : x); }");
-    print_line(gen, "#endif");
-    print_line(gen, "}");
     /* #2428: f32x8 and its i32x8 mask, the f32x4 surface at twice the
        width, each with a native body (AVX2) and a two-halves body (see the
        typedefs). Sums add lanes 0..7 in order, as a scalar loop would, so a
@@ -7869,6 +7491,848 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     print_line(gen, "    return _ae_i32x4_all(m.lo) && _ae_i32x4_all(m.hi);");
     print_line(gen, "#endif");
     print_line(gen, "}");
+    /* #2550: moves between lanes, the six patterns an 8x8 transpose is made
+       of (Box3D's b3TransposeW8: unpacklo/unpackhi, shuffle 0x44/0xEE,
+       permute2f128 0x20/0x31). The first four work within each 128-bit
+       half, as AVX's own do, so each is one instruction natively and one
+       per half in the halves form; the last two pick whole halves, a
+       register move there. Fixed patterns rather than an immediate the
+       language cannot promise is constant. */
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeF32x8 _ae_f32x8_unpacklo(AeF32x8 a, AeF32x8 b) {");
+    print_line(gen, "#if AETHER_LANES8_NATIVE");
+    print_line(gen, "    return _AE_SHUFFLE8(a, b, 0, 8, 1, 9, 4, 12, 5, 13);");
+    print_line(gen, "#else");
+    print_line(gen, "    return (AeF32x8){_ae_f32x4_unpacklo(a.lo, b.lo), _ae_f32x4_unpacklo(a.hi, b.hi)};");
+    print_line(gen, "#endif");
+    print_line(gen, "}");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeF32x8 _ae_f32x8_unpackhi(AeF32x8 a, AeF32x8 b) {");
+    print_line(gen, "#if AETHER_LANES8_NATIVE");
+    print_line(gen, "    return _AE_SHUFFLE8(a, b, 2, 10, 3, 11, 6, 14, 7, 15);");
+    print_line(gen, "#else");
+    print_line(gen, "    return (AeF32x8){_ae_f32x4_unpackhi(a.lo, b.lo), _ae_f32x4_unpackhi(a.hi, b.hi)};");
+    print_line(gen, "#endif");
+    print_line(gen, "}");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeF32x8 _ae_f32x8_pairs_lo(AeF32x8 a, AeF32x8 b) {");
+    print_line(gen, "#if AETHER_LANES8_NATIVE");
+    print_line(gen, "    return _AE_SHUFFLE8(a, b, 0, 1, 8, 9, 4, 5, 12, 13);");
+    print_line(gen, "#else");
+    print_line(gen, "    return (AeF32x8){_ae_f32x4_pairs_lo(a.lo, b.lo), _ae_f32x4_pairs_lo(a.hi, b.hi)};");
+    print_line(gen, "#endif");
+    print_line(gen, "}");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeF32x8 _ae_f32x8_pairs_hi(AeF32x8 a, AeF32x8 b) {");
+    print_line(gen, "#if AETHER_LANES8_NATIVE");
+    print_line(gen, "    return _AE_SHUFFLE8(a, b, 2, 3, 10, 11, 6, 7, 14, 15);");
+    print_line(gen, "#else");
+    print_line(gen, "    return (AeF32x8){_ae_f32x4_pairs_hi(a.lo, b.lo), _ae_f32x4_pairs_hi(a.hi, b.hi)};");
+    print_line(gen, "#endif");
+    print_line(gen, "}");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeF32x8 _ae_f32x8_halves_lo(AeF32x8 a, AeF32x8 b) {");
+    print_line(gen, "#if AETHER_LANES8_NATIVE");
+    print_line(gen, "    return _AE_SHUFFLE8(a, b, 0, 1, 2, 3, 8, 9, 10, 11);");
+    print_line(gen, "#else");
+    print_line(gen, "    return (AeF32x8){a.lo, b.lo};");
+    print_line(gen, "#endif");
+    print_line(gen, "}");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeF32x8 _ae_f32x8_halves_hi(AeF32x8 a, AeF32x8 b) {");
+    print_line(gen, "#if AETHER_LANES8_NATIVE");
+    print_line(gen, "    return _AE_SHUFFLE8(a, b, 4, 5, 6, 7, 12, 13, 14, 15);");
+    print_line(gen, "#else");
+    print_line(gen, "    return (AeF32x8){a.hi, b.hi};");
+    print_line(gen, "#endif");
+    print_line(gen, "}");
+    /* #2603: the same 256 bits read as integers and back (a vector cast of
+       the same size is a reinterpretation, not a conversion), the integer
+       lanes built from eight values, and the smallest and largest lane in a
+       fixed order: lane i against lane i + 4, then as reduce_min4 does, so
+       the answer is the same bits in both forms and for any NaN. */
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI32x8 _ae_f32x8_bits(AeF32x8 v) {");
+    print_line(gen, "#if AETHER_LANES8_NATIVE");
+    print_line(gen, "    return (AeI32x8)v;");
+    print_line(gen, "#else");
+    print_line(gen, "    return (AeI32x8){_ae_f32x4_bits(v.lo), _ae_f32x4_bits(v.hi)};");
+    print_line(gen, "#endif");
+    print_line(gen, "}");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeF32x8 _ae_f32x8_from_bits(AeI32x8 v) {");
+    print_line(gen, "#if AETHER_LANES8_NATIVE");
+    print_line(gen, "    return (AeF32x8)v;");
+    print_line(gen, "#else");
+    print_line(gen, "    return (AeF32x8){_ae_f32x4_from_bits(v.lo), _ae_f32x4_from_bits(v.hi)};");
+    print_line(gen, "#endif");
+    print_line(gen, "}");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI32x8 _ae_i32x8_set(int a, int b, int c, int d, int e, int f, int g, int h) {");
+    print_line(gen, "#if AETHER_LANES8_NATIVE");
+    print_line(gen, "    return (AeI32x8){a, b, c, d, e, f, g, h};");
+    print_line(gen, "#else");
+    print_line(gen, "    return (AeI32x8){_ae_i32x4_set(a, b, c, d), _ae_i32x4_set(e, f, g, h)};");
+    print_line(gen, "#endif");
+    print_line(gen, "}");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED float _ae_f32x8_reduce_min(AeF32x8 v) {");
+    print_line(gen, "#if AETHER_LANES8_NATIVE");
+    print_line(gen, "    AeF32x4 lo, hi; memcpy(&lo, &v, 16); memcpy(&hi, (char*)&v + 16, 16); return _ae_f32x4_reduce_min(_ae_f32x4_min(lo, hi));");
+    print_line(gen, "#else");
+    print_line(gen, "    return _ae_f32x4_reduce_min(_ae_f32x4_min(v.lo, v.hi));");
+    print_line(gen, "#endif");
+    print_line(gen, "}");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED float _ae_f32x8_reduce_max(AeF32x8 v) {");
+    print_line(gen, "#if AETHER_LANES8_NATIVE");
+    print_line(gen, "    AeF32x4 lo, hi; memcpy(&lo, &v, 16); memcpy(&hi, (char*)&v + 16, 16); return _ae_f32x4_reduce_max(_ae_f32x4_max(lo, hi));");
+    print_line(gen, "#else");
+    print_line(gen, "    return _ae_f32x4_reduce_max(_ae_f32x4_max(v.lo, v.hi));");
+    print_line(gen, "#endif");
+    print_line(gen, "}");
+    /* #2607: whether the code calling it holds an f32x8 in one register:
+       the build's answer in the prelude, and 1 in the copy a target region
+       emits, which is how a test tells the two copies apart. */
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED int _ae_lanes8_native(void) { return AETHER_LANES8_NATIVE; }");
+}
+
+/* Every name emit_lanes8_block defines. A target region (#2607) maps each to
+   a copy of its own with a `#define`, then emits the block again; a name
+   missing here would be defined twice and fail the C compile, which the
+   target import tests would show at once. */
+static const char* const LANES8_NAMES[] = {
+    "AeF32x8", "AeI32x8", "_AeF32x8Bits",
+    "_ae_f32x8_splat", "_ae_f32x8_set", "_ae_i32x8_splat", "_ae_i32x8_set",
+    "_ae_f32x8_load", "_ae_f32x8_store", "_ae_f32x8_lane", "_ae_i32x8_lane", "_ae_f32x8_sum",
+    "_ae_f32x8_add", "_ae_f32x8_sub", "_ae_f32x8_mul", "_ae_f32x8_div",
+    "_ae_i32x8_add", "_ae_i32x8_sub", "_ae_i32x8_mul", "_ae_i32x8_div", "_ae_i32x8_mod",
+    "_ae_i32x8_and", "_ae_i32x8_or", "_ae_f32x8_neg", "_ae_i32x8_neg", "_ae_i32x8_not",
+    "_ae_f32x8_lt", "_ae_i32x8_lt", "_ae_f32x8_le", "_ae_i32x8_le", "_ae_f32x8_gt", "_ae_i32x8_gt",
+    "_ae_f32x8_ge", "_ae_i32x8_ge", "_ae_f32x8_eq", "_ae_i32x8_eq", "_ae_f32x8_ne", "_ae_i32x8_ne",
+    "_ae_f32x8_select", "_ae_f32x8_min", "_ae_f32x8_max", "_ae_f32x8_sqrt", "_ae_f32x8_abs",
+    "_ae_i32x8_any", "_ae_i32x8_all",
+    "_ae_f32x8_unpacklo", "_ae_f32x8_unpackhi", "_ae_f32x8_pairs_lo", "_ae_f32x8_pairs_hi",
+    "_ae_f32x8_halves_lo", "_ae_f32x8_halves_hi",
+    "_ae_f32x8_bits", "_ae_f32x8_from_bits", "_ae_f32x8_reduce_min", "_ae_f32x8_reduce_max",
+    "_ae_lanes8_native",
+};
+
+/* #2607: a module imported at a target, `@target("avx2") import m as m8`, is
+ * a second copy of `m` (module `m__avx2`, its own namespace) whose functions
+ * the program emits inside a region compiled for AVX2: a GCC `#pragma GCC
+ * target`, a Clang `#pragma clang attribute`. An f32x8 is a different C type
+ * in the two copies (one register there, two halves in a default build), so
+ * the region maps the eight-lane names (LANES8_NAMES) and the lane structs
+ * the copy's functions use to names of their own with `#define`, and the
+ * first region emits the lane block and those structs again under them. The
+ * copy's code then reads exactly as the plain copy's does, and only its
+ * types differ. Where AETHER_LANE_TARGET_AVX2 is 0 (not GCC or Clang on x86,
+ * or the AETHER_GCC_COMPAT=0 path) the region is plain code with no target
+ * attribute: the copy is a second ordinary copy, and off x86 it is never
+ * chosen (lanes.cpu_has_avx2() is false). */
+#define LANE_REGION_MAX_STRUCTS 512
+typedef struct {
+    const char* structs[LANE_REGION_MAX_STRUCTS];  /* the copies' structs holding lanes */
+    int struct_count;
+    int any;        /* a module was imported at a target */
+    int defined;    /* the block and the structs went out in a region */
+    int open;
+} LaneRegions;
+static LaneRegions g_lane_regions;
+
+/* The target of the module a merged declaration came from, or NULL. */
+static const char* decl_lane_target(const ASTNode* decl) {
+    if (!decl || !decl->origin_module) return NULL;
+    AetherModule* m = module_find(decl->origin_module);
+    return m ? m->lane_target : NULL;
+}
+
+/* Does a value of this type hold an f32x8 or i32x8, directly, in a struct
+ * field, through a pointer, in an array, a tuple or an optional? Such a
+ * value has a different C type in the two copies. */
+static int type_holds_lanes8(ASTNode* program, Type* t, int depth) {
+    if (!t || depth > 24) return 0;
+    switch (t->kind) {
+        case TYPE_F32X8: case TYPE_I32X8: return 1;
+        case TYPE_ARRAY: case TYPE_PTR: case TYPE_OPTIONAL: case TYPE_ISOLATED:
+            return type_holds_lanes8(program, t->element_type, depth + 1);
+        case TYPE_TUPLE:
+            for (int i = 0; i < t->tuple_count; i++)
+                if (type_holds_lanes8(program, t->tuple_types[i], depth + 1)) return 1;
+            return 0;
+        case TYPE_STRUCT: {
+            ASTNode* sd = t->struct_name ? find_struct_definition_by_name(program, t->struct_name) : NULL;
+            if (!sd) return 0;
+            for (int f = 0; f < sd->child_count; f++) {
+                ASTNode* fld = sd->children[f];
+                if (fld && fld->type == AST_STRUCT_FIELD &&
+                    type_holds_lanes8(program, fld->node_type, depth + 1)) return 1;
+            }
+            return 0;
+        }
+        default: return 0;
+    }
+}
+
+static int lane_region_struct_listed(const char* name) {
+    for (int i = 0; i < g_lane_regions.struct_count; i++)
+        if (strcmp(g_lane_regions.structs[i], name) == 0) return 1;
+    return 0;
+}
+
+static void lane_region_error(ASTNode* at, const char* msg, const char* hint) {
+    AetherError e = { at ? at->source_file : NULL, NULL, at ? at->line : 0, at ? at->column : 0,
+                      msg, hint, NULL, AETHER_ERR_TYPE_MISMATCH };
+    aether_error_report(&e);
+}
+
+/* Does this signature (a definition's or an extern's) take or give lanes? */
+static int sig_holds_lanes8(CodeGenerator* gen, ASTNode* program, ASTNode* fn) {
+    if (fn->type == AST_EXTERN_FUNCTION) {
+        if (type_holds_lanes8(program, fn->node_type, 0)) return 1;
+        for (int i = 0; i < fn->child_count; i++)
+            if (fn->children[i] && type_holds_lanes8(program, fn->children[i]->node_type, 0)) return 1;
+        return 0;
+    }
+    if (type_holds_lanes8(program, fn_result_type(gen, fn), 0)) return 1;
+    int n = fn_param_count(fn);
+    for (int j = 0; j < n; j++)
+        if (type_holds_lanes8(program, fn_param_type_at(gen, fn, j), 0)) return 1;
+    return 0;
+}
+
+/* Is the C function an extern names one of the lane helpers the region maps? */
+static int extern_is_lanes8_helper(ASTNode* ext) {
+    const char* sym = ext->value;
+    if (ext->annotation && strncmp(ext->annotation, "c_symbol:", 9) == 0) sym = ext->annotation + 9;
+    for (size_t i = 0; i < sizeof(LANES8_NAMES) / sizeof(LANES8_NAMES[0]); i++)
+        if (strcmp(LANES8_NAMES[i], sym) == 0) return 1;
+    return 0;
+}
+
+/* The checks a call or a closure inside `fn` must pass: lanes cannot cross
+ * between the two copies, since each spells them as a different C type. */
+static void lane_region_check_body(CodeGenerator* gen, ASTNode* program, ASTNode* fn,
+                                   const char* target, ASTNode* node) {
+    if (!node) return;
+    if (node->type == AST_CLOSURE && target) {
+        lane_region_error(node, "a closure inside a module imported at @target",
+                          "a closure's body is emitted apart from its function, outside the target's region: make it a function of the module");
+        return;
+    }
+    if (node->type == AST_FUNCTION_CALL && node->value) {
+        /* The entry program's qualified calls still read `ns.fn` here (the
+         * merged modules' are already `ns_fn`): the definition is `ns_fn`. */
+        char cname[512];
+        snprintf(cname, sizeof(cname), "%s", node->value);
+        for (char* p = cname; *p; p++) if (*p == '.') *p = '_';
+        ASTNode* callee = find_function_definition_by_name(program, cname);
+        if (callee) {
+            const char* ct = decl_lane_target(callee);
+            int same = (!ct && !target) || (ct && target && strcmp(ct, target) == 0);
+            if (!same && sig_holds_lanes8(gen, program, callee)) {
+                char msg[512];
+                snprintf(msg, sizeof(msg), "'%s' passes eight-lane values between a module imported at @target(\"%s\") and the build's own code",
+                         node->value, ct ? ct : target);
+                lane_region_error(node, msg,
+                                  "an f32x8 is one register in the @target copy and two halves outside it: call across with scalars, pointers or the plain copy's own functions");
+            }
+        } else if (target) {
+            ASTNode* ext = find_extern_declaration_by_name(program, cname);
+            if (ext && !extern_is_lanes8_helper(ext) && sig_holds_lanes8(gen, program, ext)) {
+                char msg[512];
+                snprintf(msg, sizeof(msg), "'%s' passes eight-lane values to C from a module imported at @target(\"%s\")",
+                         node->value, target);
+                lane_region_error(node, msg, "C compiled apart takes the build's form of an f32x8, not the target copy's");
+            }
+        }
+    }
+    for (int i = 0; i < node->child_count; i++)
+        lane_region_check_body(gen, program, fn, target, node->children[i]);
+}
+
+/* Every struct holding lanes that a value of type `t` reaches: the region
+ * remaps each one by its merged name. Two modules' identical structs share
+ * one name (#2129's scoping), so the copy's functions name the plain copy's
+ * struct, and the remap gives them their own. */
+static void lane_region_note_type(CodeGenerator* gen, ASTNode* program, Type* t, int depth) {
+    if (!t || depth > 24) return;
+    switch (t->kind) {
+        case TYPE_ARRAY: case TYPE_PTR: case TYPE_OPTIONAL: case TYPE_ISOLATED:
+            lane_region_note_type(gen, program, t->element_type, depth + 1);
+            return;
+        case TYPE_TUPLE:
+            for (int i = 0; i < t->tuple_count; i++)
+                lane_region_note_type(gen, program, t->tuple_types[i], depth + 1);
+            return;
+        case TYPE_STRUCT: {
+            ASTNode* sd = t->struct_name ? find_struct_definition_by_name(program, t->struct_name) : NULL;
+            if (!sd || lane_region_struct_listed(sd->value) || !type_holds_lanes8(program, t, 0)) return;
+            if (struct_owns_heap_strings(gen, sd)) {
+                lane_region_error(sd, "a struct holding eight-lane values and owned strings or closures, used by a module imported at @target",
+                                  "the @target copy redefines the lane structs it uses, not their generated retain and drop");
+                return;
+            }
+            if (g_lane_regions.struct_count < LANE_REGION_MAX_STRUCTS)
+                g_lane_regions.structs[g_lane_regions.struct_count++] = sd->value;
+            for (int f = 0; f < sd->child_count; f++) {
+                ASTNode* fld = sd->children[f];
+                if (fld && fld->type == AST_STRUCT_FIELD)
+                    lane_region_note_type(gen, program, fld->node_type, depth + 1);
+            }
+            return;
+        }
+        default: return;
+    }
+}
+
+static void lane_region_note_node(CodeGenerator* gen, ASTNode* program, ASTNode* n) {
+    if (!n) return;
+    lane_region_note_type(gen, program, n->node_type, 0);
+    for (int i = 0; i < n->child_count; i++) lane_region_note_node(gen, program, n->children[i]);
+}
+
+/* Before any emission: the structs the copies' functions remap, and whether
+ * the program keeps lanes on their side of the boundary. */
+static void lane_region_prepare(CodeGenerator* gen, ASTNode* program) {
+    memset(&g_lane_regions, 0, sizeof(g_lane_regions));
+    if (!global_module_registry) return;
+    for (int m = 0; m < global_module_registry->module_count; m++) {
+        AetherModule* mod = global_module_registry->modules[m];
+        if (mod && mod->lane_target) g_lane_regions.any = 1;
+    }
+    if (!g_lane_regions.any) return;
+    /* Every top-level body is checked (main, actors, constants' initialisers
+     * as well as functions): a call into a copy from any of them crosses. */
+    for (int i = 0; i < program->child_count; i++) {
+        ASTNode* top = program->children[i];
+        if (!top || top->type == AST_IMPORT_STATEMENT || top->type == AST_EXTERN_FUNCTION) continue;
+        int is_fn = top->type == AST_FUNCTION_DEFINITION || top->type == AST_BUILDER_FUNCTION;
+        const char* target = is_fn ? decl_lane_target(top) : NULL;
+        if (target) lane_region_note_node(gen, program, top);
+        for (int c = 0; c < top->child_count; c++)
+            lane_region_check_body(gen, program, top, target, top->children[c]);
+    }
+}
+
+static void lane_region_open(CodeGenerator* gen, ASTNode* program, const char* target) {
+    (void)target;   /* "avx2", the one the parser accepts */
+    print_line(gen, "/* #2607: a module imported at @target(\"avx2\"), compiled for AVX2 */");
+    print_line(gen, "#if AETHER_LANE_TARGET_AVX2");
+    print_line(gen, "#  if defined(__clang__)");
+    print_line(gen, "#    pragma clang attribute push (__attribute__((target(\"avx2\"))), apply_to = function)");
+    print_line(gen, "#  else");
+    print_line(gen, "#    pragma GCC push_options");
+    print_line(gen, "#    pragma GCC target(\"avx2\")");
+    print_line(gen, "#  endif");
+    print_line(gen, "#endif");
+    print_line(gen, "#pragma push_macro(\"AETHER_LANES8_NATIVE\")");
+    print_line(gen, "#pragma push_macro(\"_AE_LANE8_LOW\")");
+    print_line(gen, "#undef AETHER_LANES8_NATIVE");
+    print_line(gen, "#undef _AE_LANE8_LOW");
+    print_line(gen, "#if AETHER_LANE_TARGET_AVX2 || defined(__AVX2__)");
+    print_line(gen, "#  define AETHER_LANES8_NATIVE 1");
+    print_line(gen, "#else");
+    print_line(gen, "#  define AETHER_LANES8_NATIVE 0");
+    print_line(gen, "#endif");
+    print_line(gen, "#if AETHER_LANES8_NATIVE");
+    print_line(gen, "#  define _AE_LANE8_LOW(v, i) ((v)[i])");
+    print_line(gen, "#else");
+    print_line(gen, "#  define _AE_LANE8_LOW(v, i) ((v).lo[i])");
+    print_line(gen, "#endif");
+    for (size_t i = 0; i < sizeof(LANES8_NAMES) / sizeof(LANES8_NAMES[0]); i++)
+        print_line(gen, "#define %s %s__avx2", LANES8_NAMES[i], LANES8_NAMES[i]);
+    for (int i = 0; i < g_lane_regions.struct_count; i++)
+        print_line(gen, "#define %s %s__avx2", g_lane_regions.structs[i], g_lane_regions.structs[i]);
+    if (!g_lane_regions.defined) {
+        g_lane_regions.defined = 1;
+        print_line(gen, "#if AETHER_HAS_LANES");
+        emit_lanes8_block(gen);
+        print_line(gen, "#endif");
+        /* The copy's lane structs, in program order with each one's
+         * by-value lane structs ahead of it (emit_value_type_deps' rule). */
+        char* state = calloc((size_t)program->child_count + 1, 1);
+        int progress = 1;
+        while (progress) {
+            progress = 0;
+            for (int i = 0; i < program->child_count; i++) {
+                ASTNode* sd = program->children[i];
+                if (state[i] || !sd || sd->type != AST_STRUCT_DEFINITION || !sd->value ||
+                    !lane_region_struct_listed(sd->value)) continue;
+                int ready = 1;
+                for (int f = 0; f < sd->child_count && ready; f++) {
+                    ASTNode* fld = sd->children[f];
+                    Type* t = fld && fld->type == AST_STRUCT_FIELD ? fld->node_type : NULL;
+                    while (t && t->kind == TYPE_ARRAY && t->element_type) t = t->element_type;
+                    if (!t || t->kind != TYPE_STRUCT || !t->struct_name ||
+                        !lane_region_struct_listed(t->struct_name)) continue;
+                    for (int k = 0; k < program->child_count; k++) {
+                        ASTNode* dep = program->children[k];
+                        if (dep && dep->type == AST_STRUCT_DEFINITION && dep->value &&
+                            strcmp(dep->value, t->struct_name) == 0 && !state[k]) ready = 0;
+                    }
+                }
+                if (!ready) continue;
+                generate_struct_definition(gen, sd);
+                state[i] = 1;
+                progress = 1;
+            }
+        }
+        free(state);
+    }
+    g_lane_regions.open = 1;
+}
+
+static void lane_region_close(CodeGenerator* gen) {
+    if (!g_lane_regions.open) return;
+    for (size_t i = 0; i < sizeof(LANES8_NAMES) / sizeof(LANES8_NAMES[0]); i++)
+        print_line(gen, "#undef %s", LANES8_NAMES[i]);
+    for (int i = 0; i < g_lane_regions.struct_count; i++)
+        print_line(gen, "#undef %s", g_lane_regions.structs[i]);
+    print_line(gen, "#pragma pop_macro(\"_AE_LANE8_LOW\")");
+    print_line(gen, "#pragma pop_macro(\"AETHER_LANES8_NATIVE\")");
+    print_line(gen, "#if AETHER_LANE_TARGET_AVX2");
+    print_line(gen, "#  if defined(__clang__)");
+    print_line(gen, "#    pragma clang attribute pop");
+    print_line(gen, "#  else");
+    print_line(gen, "#    pragma GCC pop_options");
+    print_line(gen, "#  endif");
+    print_line(gen, "#endif");
+    g_lane_regions.open = 0;
+}
+
+/* Open the region before a declaration of a target copy, close it before
+ * anything else, so the region holds the copy's functions and nothing more. */
+static void lane_region_at(CodeGenerator* gen, ASTNode* program, ASTNode* decl) {
+    if (!g_lane_regions.any) return;
+    const char* target = (decl && (decl->type == AST_FUNCTION_DEFINITION ||
+                                   decl->type == AST_BUILDER_FUNCTION))
+                             ? decl_lane_target(decl) : NULL;
+    if (target && !g_lane_regions.open) lane_region_open(gen, program, target);
+    else if (!target && g_lane_regions.open) lane_region_close(gen);
+}
+
+void generate_program(CodeGenerator* gen, ASTNode* program) {
+    if (!program || program->type != AST_PROGRAM) return;
+    gen->program = program;
+
+    /* Link requirements from the resolved import graph — the very first line
+     * of the TU (a // comment is inert to the preprocessor, so it may precede
+     * the MinGW #if below). */
+    emit_link_requirements(gen, program);
+    emit_source_requirements(gen, program);
+    emit_c_include_dirs(gen, program);
+    emit_entry_point(gen, program);
+    // #2292: the entry program's constants get a reserved C name, before any
+    // other pass reads or rewrites the names.
+    rename_entry_constants(program);
+    // #976: rewrite C-keyword value identifiers to a valid C spelling before
+    // any codegen pass reads their names (must run before escape analysis and
+    // emission, which both key off the identifier names).
+    mangle_keyword_value_idents(program);
+    rename_leading_underscore_functions(program);
+    rename_extern_colliding_functions(program);
+    /* #2683: after the function renames, so a call's name is the one its
+     * C spelling is made from. */
+    rename_locals_shadowing_functions(program);
+    /* #2746, #2994: before any pass keys an exit free or a store off a
+     * local's name. */
+    rename_scoped_bindings(program);
+    /* The rename changed definition names, which are the index's keys,
+       without changing the child count it is keyed on. */
+    program_index_reset();
+    erase_string_retype_casts(program);
+    /* #2586: the functions used as fn-pointer values, by name, before any
+     * pass classifies a function or emits a return of one. */
+    discover_fn_values(gen);
+    // Note: `gen->program` is the source of truth for the
+    // structural-escape-analysis lookup (issue #405). Setting it
+    // here means every per-fn codegen pass beyond this point can
+    // recognise user-defined `-> string` functions as heap-returning.
+
+    // If emitting header, write prologue
+    if (gen->emit_header && gen->header_file) {
+        emit_header_prologue(gen, NULL);
+    }
+
+    // MinGW (native Windows): bind printf / vsnprintf / snprintf to the
+    // C99-conformant __mingw_* family instead of the legacy MSVCRT ones.
+    // Without this, on MINGW64 the MSVCRT implementations mishandle the
+    // C99 conversions Aether emits (%lld / %llu / %zu / %g) AND
+    // vsnprintf(NULL, 0, ...) returns -1 rather than the would-be length.
+    // The latter breaks the two-pass sizing in _aether_interp below
+    // (malloc(-1+1) → a 0-byte buffer, then nothing written) — i.e. empty
+    // string interpolation, which is exactly issue #681. This must be set
+    // before any system header is pulled in, so it is the first thing in
+    // the generated translation unit. Compiles to nothing off MinGW.
+    print_line(gen, "#if defined(__MINGW32__) && !defined(__USE_MINGW_ANSI_STDIO)");
+    print_line(gen, "#define __USE_MINGW_ANSI_STDIO 1");
+    print_line(gen, "#endif");
+
+    // Generate includes for runtime libraries
+    print_line(gen, "#include <stdio.h>");
+    print_line(gen, "#include <stdlib.h>");
+    print_line(gen, "#include <string.h>");
+    print_line(gen, "#include <stdbool.h>");
+    print_line(gen, "#include <stdatomic.h>");
+    print_line(gen, "#include <stdint.h>");
+    print_line(gen, "#include <time.h>");
+    print_line(gen, "#include <setjmp.h>");
+    emit_libc_extern_headers(gen, program);
+    print_line(gen, "#include \"aether_panic.h\"");
+    print_line(gen, "#include \"aether_slice.h\"");   /* #1286 `T[]` fat pointer */
+    /* Cons-cell sequence type — std.collections.string_seq.
+     *
+     * We include the header unconditionally rather than gating on
+     * "program uses *StringSeq" because:
+     *   1. Detecting use requires walking every type annotation in
+     *      the AST, including transitively-imported externs.
+     *   2. The header is small (one struct + 10 prototypes, only
+     *      <stddef.h> transitively) so the cost of including it
+     *      always is negligible.
+     *   3. The full struct definition is required at the call site
+     *      whenever a `match` arm pattern-matches `[h|t]` against a
+     *      *StringSeq, because the lowered C reads `s->head` /
+     *      `s->tail` directly. A forward decl wouldn't be enough.
+     *   4. The runtime header path is wired via tools/ae.c's -I
+     *      flags (-I.../std/collections), and libaether.a (or the
+     *      from-source fallback build) provides the symbols.
+     */
+    print_line(gen, "#include \"aether_stringseq.h\"");
+    /* #1986: the headers modules in the closure asked for, before anything
+     * this file declares, so a `static inline` they carry is what the calls
+     * to it resolve to. */
+    emit_c_include_directives(gen, program);
+    /* Issue #343 codegen tripwire: when --emit=lib is set, the loop
+     * codegen emits a check at every loop head that calls
+     * aether_caps_deadline_tripped() / __aether_abort_call(). The
+     * symbols live in runtime/aether_resource_caps.{h,c}, which the
+     * --emit=lib build links via libaether.a; declare the prototypes
+     * inline so the emitted .c compiles cleanly without pulling
+     * runtime headers into user-program path. Zero cost on
+     * --emit=exe builds — the gate elides both the extern decls and
+     * the per-loop checks. */
+    if (gen->emit_lib) {
+        /* aether_caps_armed is a plain global, nonzero once any thread has
+         * armed (or tripped) a deadline. Testing it first keeps the loop-head
+         * check to one load when no deadline is in use: the call and its two
+         * thread-local reads were ~22% of mquickjs-ae's run time on macOS,
+         * where each TLS read goes through _tlv_get_addr. */
+        print_line(gen, "extern int  aether_caps_armed;");
+        print_line(gen, "extern int  aether_caps_deadline_tripped(void);");
+        print_line(gen, "extern void __aether_abort_call(void);");
+    }
+    print_line(gen, "#ifdef _WIN32");
+    /* The program TU does not include <windows.h> (#2673): mingw-w64's
+     * winnt.h brings <x86intrin.h> and every AVX-512 and AVX10 header with
+     * it, some 80,000 lines that were most of the time a build spent
+     * compiling the program. The few Windows services it needs (console
+     * setup, the monotonic clock, the preemption yield, an actor's own
+     * thread) are runtime functions, and the actor runtime's headers give it
+     * the thread types alone (AETHER_THREAD_TYPES_ONLY). A header a module
+     * asks for with @c_include, emitted above, can still bring windows.h in,
+     * so these limit what it declares: nothing from USER or GDI. That drops
+     * winuser.h and wingdi.h, a third of the names windows.h puts in the TU,
+     * among them ACCEL, MSG and every CreateWindow / SendMessage / GetObject
+     * A-or-W macro, which a program's own function could otherwise be
+     * renamed into (#2292). The words it still defines as macros are
+     * undefined after the last include; see emit_windows_macro_undefs. */
+    print_line(gen, "#define AETHER_THREAD_TYPES_ONLY 1");
+    print_line(gen, "#ifndef WIN32_LEAN_AND_MEAN");
+    print_line(gen, "#define WIN32_LEAN_AND_MEAN");
+    print_line(gen, "#endif");
+    print_line(gen, "#define NOUSER");
+    print_line(gen, "#define NOGDI");
+    print_line(gen, "#define NOMINMAX");
+    print_line(gen, "#elif defined(__EMSCRIPTEN__)");
+    print_line(gen, "#include <emscripten.h>");
+    print_line(gen, "#else");
+    print_line(gen, "#include <unistd.h>");
+    print_line(gen, "#include <sched.h>");
+    print_line(gen, "#endif");
+    print_line(gen, "#ifndef likely");
+    print_line(gen, "#  if defined(__GNUC__) || defined(__clang__)");
+    print_line(gen, "#    define likely(x)   __builtin_expect(!!(x), 1)");
+    print_line(gen, "#    define unlikely(x) __builtin_expect(!!(x), 0)");
+    print_line(gen, "#  else");
+    print_line(gen, "#    define likely(x)   (x)");
+    print_line(gen, "#    define unlikely(x) (x)");
+    print_line(gen, "#  endif");
+    print_line(gen, "#endif");
+    // Cooperative preemption: reduction counter for loop yield points
+    if (gen->preempt_loops) {
+        print_line(gen, "static int _aether_reductions = 10000;");
+        print_line(gen, "#ifdef _WIN32");
+        print_line(gen, "void aether_thread_yield(void);   /* SwitchToThread, in the runtime (#2673) */");
+        print_line(gen, "#define sched_yield() aether_thread_yield()");
+        print_line(gen, "#elif defined(__EMSCRIPTEN__)");
+        print_line(gen, "#define sched_yield() ((void)0)");
+        print_line(gen, "#endif");
+    }
+    /* GCC/Clang vs MSVC: guards for statement expressions ({...}) and computed goto */
+    /* Imported wrappers and trailing-underscore privates are emitted with
+       internal linkage, so a translation unit that imports a module and calls
+       only part of it has unused statics left over. Downstream builds with
+       -Wall -Werror would fail on generated code they did not write, so the
+       storage class carries the attribute rather than the consumer carrying a
+       -Wno flag. */
+    print_line(gen, "#ifndef AETHER_MAYBE_UNUSED");
+    print_line(gen, "#  if defined(__GNUC__) || defined(__clang__)");
+    print_line(gen, "#    define AETHER_MAYBE_UNUSED __attribute__((unused))");
+    print_line(gen, "#  else");
+    print_line(gen, "#    define AETHER_MAYBE_UNUSED");
+    print_line(gen, "#  endif");
+    print_line(gen, "#endif");
+    /* Weak linkage for a @c_callback DEFINITION: the symbol stays external (a C
+       caller binds it by name), but if the module carrying it lands in more than
+       one translation unit, the duplicate definitions dedupe at link instead of
+       colliding with "multiple definition". No-op where weak is unsupported —
+       there a single-TU build still links, and the multi-TU case was already
+       impossible on that toolchain. PE cannot export a weak definition, so a
+       Windows DLL `ae` links (one TU) is compiled with -DAETHER_WEAK_DEF=
+       (empty: strong) for its @c_callbacks to be found by name (#2547). */
+    print_line(gen, "#ifndef AETHER_WEAK_DEF");
+    print_line(gen, "#  if defined(__GNUC__) || defined(__clang__)");
+    print_line(gen, "#    define AETHER_WEAK_DEF __attribute__((weak))");
+    print_line(gen, "#  else");
+    print_line(gen, "#    define AETHER_WEAK_DEF");
+    print_line(gen, "#  endif");
+    print_line(gen, "#endif");
+    /* #2937: a library function exported through its aether_<name> alias,
+       out of the library's exported names (lib_fn_is_local). A DLL exports
+       what it names, so PE needs nothing. */
+    print_line(gen, "#ifndef AETHER_LIB_LOCAL");
+    print_line(gen, "#  if (defined(__GNUC__) || defined(__clang__)) && !defined(_WIN32)");
+    print_line(gen, "#    define AETHER_LIB_LOCAL __attribute__((visibility(\"hidden\")))");
+    print_line(gen, "#  else");
+    print_line(gen, "#    define AETHER_LIB_LOCAL");
+    print_line(gen, "#  endif");
+    print_line(gen, "#endif");
+    /* #2146: vector lanes. The GCC/Clang vector extensions are the whole
+       implementation — lane-wise `+ - * /`, `v[i]`, a comparison yielding an
+       all-ones/zero mask per lane, and a vector `?:` that selects per lane.
+       A compiler without them cannot express the type at all, so the header
+       says so rather than silently compiling something slower or wrong.
+       The helpers are `static inline` in this TU, so `lanes.min(a, b)` is a
+       single instruction after inlining, not a call. */
+    print_line(gen, "#if defined(__GNUC__) || defined(__clang__)");
+    print_line(gen, "#  define AETHER_HAS_LANES 1");
+    print_line(gen, "typedef float  AeF32x4 __attribute__((vector_size(16)));");
+    print_line(gen, "typedef double AeF64x2 __attribute__((vector_size(16)));");
+    print_line(gen, "typedef int32_t AeI32x4 __attribute__((vector_size(16)));");
+    print_line(gen, "typedef int64_t AeI64x2 __attribute__((vector_size(16)));");
+    print_line(gen, "typedef int16_t AeI16x8 __attribute__((vector_size(16)));");
+    print_line(gen, "typedef uint32_t AeU32x4 __attribute__((vector_size(16)));");
+    /* #2428: eight lanes, 32 bytes. With AVX2 an f32x8 is one 256-bit
+       register and each operation one instruction. Without it the type is
+       a struct of two four-lane halves. A plain 32-byte vector would compile
+       there too, but a target with no 32-byte registers (SSE, NEON) has no
+       machine mode for it: GCC keeps every such value in memory and splits
+       only the arithmetic, so a loop paid a load and a store per value per
+       iteration and ran 25% behind the same loop on f32x4, and a 32-byte
+       comparison it did not split at all (a comiss and cmov per lane, 9x
+       behind). Two halves live in two registers and cost exactly two f32x4
+       operations. Every f32x8 / i32x8 operation goes through an _ae_f32x8_*
+       / _ae_i32x8_* helper, codegen routes the operators there, so the
+       source is the same either way and the build flag picks the form:
+       `-mavx2` or `-march=native` through aether.toml's [build] cflags.
+       The two forms are different C types, so C compiled separately that
+       exchanges these by value must use the same -m flags as the program.
+       The native type is declared 16-byte aligned, the alignment heap
+       storage guarantees: at its natural 32, GCC moved through calloc'd
+       slices and malloc'd closure environments with vmovaps, which faults
+       when the block is only 16-aligned (glibc, macOS). */
+    print_line(gen, "#if defined(__AVX2__)");
+    print_line(gen, "#  define AETHER_LANES8_NATIVE 1");
+    print_line(gen, "#else");
+    print_line(gen, "#  define AETHER_LANES8_NATIVE 0");
+    print_line(gen, "#endif");
+    /* SSE2 intrinsics for the saturating packs (_mm_packs_epi32 /
+       _mm_packus_epi16). Only needed on x86 with SSE2; elsewhere the packs use
+       a scalar fallback and this header is not referenced. */
+    print_line(gen, "#if defined(__SSE2__)");
+    print_line(gen, "#  include <emmintrin.h>");
+    print_line(gen, "#endif");
+    print_line(gen, "#else");
+    print_line(gen, "#  define AETHER_HAS_LANES 0");
+    print_line(gen, "#endif");
+    print_line(gen, "#if AETHER_HAS_LANES");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeF32x4 _ae_f32x4_splat(float v) { return (AeF32x4){v, v, v, v}; }");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeF32x4 _ae_f32x4_set(float a, float b, float c, float d) { return (AeF32x4){a, b, c, d}; }");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeF32x4 _ae_f32x4_load(void* p, int64_t i) { AeF32x4 v; memcpy(&v, (char*)p + (size_t)i * 4u, 16); return v; }");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED void _ae_f32x4_store(void* p, int64_t i, AeF32x4 v) { memcpy((char*)p + (size_t)i * 4u, &v, 16); }");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED float _ae_f32x4_lane(AeF32x4 v, int64_t i) { return v[i & 3]; }");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED float _ae_f32x4_sum(AeF32x4 v) { return v[0] + v[1] + v[2] + v[3]; }");
+    /* select is the bit-blend, not a vector `?:`: GCC accepts the ternary on
+       vectors in C++ only, so in C the mask does the work — the lane is
+       all-ones where the comparison held, so (m & a) | (~m & b) is the lane
+       from a or from b, and -O2 folds it back to a blend instruction. The
+       union is the documented GCC/Clang way to view the same register as
+       floats and as integers. */
+    print_line(gen, "typedef union { AeF32x4 f; AeI32x4 i; } _AeF32x4Bits;");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeF32x4 _ae_f32x4_select(AeI32x4 m, AeF32x4 a, AeF32x4 b) { _AeF32x4Bits av, bv, rv; av.f = a; bv.f = b; rv.i = (m & av.i) | (~m & bv.i); return rv.f; }");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeF32x4 _ae_f32x4_min(AeF32x4 a, AeF32x4 b) { return _ae_f32x4_select(a < b, a, b); }");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeF32x4 _ae_f32x4_max(AeF32x4 a, AeF32x4 b) { return _ae_f32x4_select(a > b, a, b); }");
+    /* #2158: a lane square root and absolute value. Both are EXACT — IEEE
+       square root is correctly rounded, and clearing the sign bit is not an
+       approximation — so the lane form changes no result. It replaces four
+       extracts, four scalar calls and a rebuild with the one instruction the
+       hardware has had since SSE2 (sqrtps / andps; vsqrt / bic on NEON).
+
+       Three spellings, because there is no one portable one. Clang has the
+       elementwise builtin. GCC does not, and its four-element loop only
+       becomes sqrtps under -fno-math-errno — a flag that changes what the
+       rest of the program's libm calls promise, so it is not ours to assume;
+       on x86 it takes the SSE2 builtin directly instead. Anywhere else the
+       loop stands: still correct, just scalar. */
+    print_line(gen, "#if defined(__clang__) && defined(__has_builtin)");
+    print_line(gen, "#  if __has_builtin(__builtin_elementwise_sqrt)");
+    print_line(gen, "#    define AETHER_LANE_ELEMENTWISE 1");
+    print_line(gen, "#  endif");
+    print_line(gen, "#endif");
+    print_line(gen, "#ifndef AETHER_LANE_ELEMENTWISE");
+    print_line(gen, "#  define AETHER_LANE_ELEMENTWISE 0");
+    print_line(gen, "#endif");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeF32x4 _ae_f32x4_sqrt(AeF32x4 v) {");
+    print_line(gen, "#if AETHER_LANE_ELEMENTWISE");
+    print_line(gen, "    return __builtin_elementwise_sqrt(v);");
+    print_line(gen, "#elif defined(__SSE2__)");
+    print_line(gen, "    return (AeF32x4)__builtin_ia32_sqrtps(v);");
+    print_line(gen, "#else");
+    print_line(gen, "    AeF32x4 r; for (int i = 0; i < 4; i++) r[i] = __builtin_sqrtf(v[i]); return r;");
+    print_line(gen, "#endif");
+    print_line(gen, "}");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeF32x4 _ae_f32x4_abs(AeF32x4 v) { _AeF32x4Bits b, r; b.f = v; AeI32x4 m = {0x7fffffff, 0x7fffffff, 0x7fffffff, 0x7fffffff}; r.i = b.i & m; return r.f; }");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI32x4 _ae_f32x4_lt(AeF32x4 a, AeF32x4 b) { return a < b; }");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI32x4 _ae_f32x4_le(AeF32x4 a, AeF32x4 b) { return a <= b; }");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI32x4 _ae_f32x4_gt(AeF32x4 a, AeF32x4 b) { return a > b; }");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI32x4 _ae_f32x4_ge(AeF32x4 a, AeF32x4 b) { return a >= b; }");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI32x4 _ae_f32x4_eq(AeF32x4 a, AeF32x4 b) { return a == b; }");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI32x4 _ae_i32x4_and(AeI32x4 a, AeI32x4 b) { return a & b; }");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI32x4 _ae_i32x4_or(AeI32x4 a, AeI32x4 b) { return a | b; }");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI32x4 _ae_i32x4_not(AeI32x4 a) { return ~a; }");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED int _ae_i32x4_any(AeI32x4 m) { return (m[0] | m[1] | m[2] | m[3]) != 0; }");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED int _ae_i32x4_all(AeI32x4 m) { return m[0] != 0 && m[1] != 0 && m[2] != 0 && m[3] != 0; }");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED int64_t _ae_i32x4_lane(AeI32x4 v, int64_t i) { return v[i & 3]; }");
+    /* #2550: moves between lanes. A shuffle with constant lane numbers is
+       one instruction on every target (unpcklps / movlhps / shufps on SSE,
+       zip / ext on NEON); GCC spells it __builtin_shuffle with a mask
+       vector, Clang __builtin_shufflevector with the numbers. Lanes 0-3 are
+       `a`'s and 4-7 `b`'s. _AE_SHUFFLE8 serves the native eight-lane forms
+       in emit_lanes8_block. */
+    print_line(gen, "#if defined(__clang__)");
+    print_line(gen, "#  define _AE_SHUFFLE4(a, b, i, j, k, l) __builtin_shufflevector((a), (b), i, j, k, l)");
+    print_line(gen, "#  define _AE_SHUFFLE8(a, b, i0, i1, i2, i3, i4, i5, i6, i7) __builtin_shufflevector((a), (b), i0, i1, i2, i3, i4, i5, i6, i7)");
+    print_line(gen, "#else");
+    print_line(gen, "#  define _AE_SHUFFLE4(a, b, i, j, k, l) __builtin_shuffle((a), (b), (AeI32x4){i, j, k, l})");
+    print_line(gen, "#  define _AE_SHUFFLE8(a, b, i0, i1, i2, i3, i4, i5, i6, i7) __builtin_shuffle((a), (b), (AeI32x8){i0, i1, i2, i3, i4, i5, i6, i7})");
+    print_line(gen, "#endif");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeF32x4 _ae_f32x4_unpacklo(AeF32x4 a, AeF32x4 b) { return _AE_SHUFFLE4(a, b, 0, 4, 1, 5); }");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeF32x4 _ae_f32x4_unpackhi(AeF32x4 a, AeF32x4 b) { return _AE_SHUFFLE4(a, b, 2, 6, 3, 7); }");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeF32x4 _ae_f32x4_pairs_lo(AeF32x4 a, AeF32x4 b) { return _AE_SHUFFLE4(a, b, 0, 1, 4, 5); }");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeF32x4 _ae_f32x4_pairs_hi(AeF32x4 a, AeF32x4 b) { return _AE_SHUFFLE4(a, b, 2, 3, 6, 7); }");
+    /* #2603: the four lanes' bits as integers and back. A vector cast between
+       two types of one size reinterprets the register (no conversion), the
+       documented GCC/Clang spelling of _mm_castps_si128. */
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI32x4 _ae_f32x4_bits(AeF32x4 v) { return (AeI32x4)v; }");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeF32x4 _ae_f32x4_from_bits(AeI32x4 v) { return (AeF32x4)v; }");
+    /* #2603: the smallest / largest lane, compared in one fixed order (lanes
+       0 and 2, 1 and 3, then the two winners) with min4's rule, `a < b ? a :
+       b`, so a NaN or a tie gives the same lane on every instruction set. */
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED float _ae_f32x4_reduce_min(AeF32x4 v) { float a = v[0] < v[2] ? v[0] : v[2]; float b = v[1] < v[3] ? v[1] : v[3]; return a < b ? a : b; }");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED float _ae_f32x4_reduce_max(AeF32x4 v) { float a = v[0] > v[2] ? v[0] : v[2]; float b = v[1] > v[3] ? v[1] : v[3]; return a > b ? a : b; }");
+    /* #2607: whether this CPU runs AVX2 code (and its OS saves the 256-bit
+       registers), for choosing a module imported at `@target("avx2")`.
+       0 off x86, where no such copy can run. */
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED int _ae_cpu_avx2(void) {");
+    print_line(gen, "#if defined(__x86_64__) || defined(__i386__)");
+    print_line(gen, "    __builtin_cpu_init(); return __builtin_cpu_supports(\"avx2\") ? 1 : 0;");
+    print_line(gen, "#else");
+    print_line(gen, "    return 0;");
+    print_line(gen, "#endif");
+    print_line(gen, "}");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeF64x2 _ae_f64x2_splat(double v) { return (AeF64x2){v, v}; }");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeF64x2 _ae_f64x2_set(double a, double b) { return (AeF64x2){a, b}; }");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeF64x2 _ae_f64x2_load(void* p, int64_t i) { AeF64x2 v; memcpy(&v, (char*)p + (size_t)i * 8u, 16); return v; }");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED void _ae_f64x2_store(void* p, int64_t i, AeF64x2 v) { memcpy((char*)p + (size_t)i * 8u, &v, 16); }");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED double _ae_f64x2_lane(AeF64x2 v, int64_t i) { return v[i & 1]; }");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED double _ae_f64x2_sum(AeF64x2 v) { return v[0] + v[1]; }");
+    print_line(gen, "typedef union { AeF64x2 f; AeI64x2 i; } _AeF64x2Bits;");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeF64x2 _ae_f64x2_blend(AeI64x2 m, AeF64x2 a, AeF64x2 b) { _AeF64x2Bits av, bv, rv; av.f = a; bv.f = b; rv.i = (m & av.i) | (~m & bv.i); return rv.f; }");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeF64x2 _ae_f64x2_min(AeF64x2 a, AeF64x2 b) { return _ae_f64x2_blend(a < b, a, b); }");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeF64x2 _ae_f64x2_max(AeF64x2 a, AeF64x2 b) { return _ae_f64x2_blend(a > b, a, b); }");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeF64x2 _ae_f64x2_select(AeI64x2 m, AeF64x2 a, AeF64x2 b) { return _ae_f64x2_blend(m, a, b); }");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeF64x2 _ae_f64x2_sqrt(AeF64x2 v) {");
+    print_line(gen, "#if AETHER_LANE_ELEMENTWISE");
+    print_line(gen, "    return __builtin_elementwise_sqrt(v);");
+    print_line(gen, "#elif defined(__SSE2__)");
+    print_line(gen, "    return (AeF64x2)__builtin_ia32_sqrtpd(v);");
+    print_line(gen, "#else");
+    print_line(gen, "    AeF64x2 r; for (int i = 0; i < 2; i++) r[i] = __builtin_sqrt(v[i]); return r;");
+    print_line(gen, "#endif");
+    print_line(gen, "}");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeF64x2 _ae_f64x2_abs(AeF64x2 v) { _AeF64x2Bits b, r; b.f = v; AeI64x2 m = {0x7fffffffffffffffLL, 0x7fffffffffffffffLL}; r.i = b.i & m; return r.f; }");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI64x2 _ae_f64x2_lt(AeF64x2 a, AeF64x2 b) { return a < b; }");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI64x2 _ae_f64x2_le(AeF64x2 a, AeF64x2 b) { return a <= b; }");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI64x2 _ae_f64x2_gt(AeF64x2 a, AeF64x2 b) { return a > b; }");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI64x2 _ae_f64x2_ge(AeF64x2 a, AeF64x2 b) { return a >= b; }");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI64x2 _ae_f64x2_eq(AeF64x2 a, AeF64x2 b) { return a == b; }");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI64x2 _ae_i64x2_and(AeI64x2 a, AeI64x2 b) { return a & b; }");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI64x2 _ae_i64x2_or(AeI64x2 a, AeI64x2 b) { return a | b; }");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI64x2 _ae_i64x2_not(AeI64x2 a) { return ~a; }");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED int _ae_i64x2_any(AeI64x2 m) { return (m[0] | m[1]) != 0; }");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED int _ae_i64x2_all(AeI64x2 m) { return m[0] != 0 && m[1] != 0; }");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED int64_t _ae_i64x2_lane(AeI64x2 v, int64_t i) { return v[i & 1]; }");
+    /* #2212: integer lanes for image/audio kernels (JPEG IDCT, YCbCr->RGB,
+       PNG filters, mixing). vector_size arithmetic lowers to SSE2/NEON at
+       -O2; the only ops without a portable operator are the two saturating
+       packs, which take the hardware instruction where there is one and a
+       clamped scalar loop otherwise. Lanes are read/written as int (a 16-bit
+       lane widens to int in Aether). */
+    /* i32x4: four 32-bit lanes, in their own right (not just a mask). */
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI32x4 _ae_i32x4_splat(int v) { return (AeI32x4){v, v, v, v}; }");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI32x4 _ae_i32x4_set(int a, int b, int c, int d) { return (AeI32x4){a, b, c, d}; }");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI32x4 _ae_i32x4_load(void* p, int64_t i) { AeI32x4 v; memcpy(&v, (char*)p + (size_t)i * 4u, 16); return v; }");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED void _ae_i32x4_store(void* p, int64_t i, AeI32x4 v) { memcpy((char*)p + (size_t)i * 4u, &v, 16); }");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI32x4 _ae_i32x4_add(AeI32x4 a, AeI32x4 b) { return a + b; }");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI32x4 _ae_i32x4_sub(AeI32x4 a, AeI32x4 b) { return a - b; }");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI32x4 _ae_i32x4_mul(AeI32x4 a, AeI32x4 b) { return a * b; }");
+    /* Shifts by a compile-time-or-runtime constant count; the count is the
+       same for every lane (a vector-scalar shift), which is what the hardware
+       shift-immediate/GPR-count forms provide. */
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI32x4 _ae_i32x4_shl(AeI32x4 a, int64_t n) { return a << (int32_t)n; }");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI32x4 _ae_i32x4_shr(AeI32x4 a, int64_t n) { return a >> (int32_t)n; }");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI32x4 _ae_i32x4_shr_u(AeI32x4 a, int64_t n) { AeU32x4 u; memcpy(&u, &a, 16); u = u >> (uint32_t)n; AeI32x4 r; memcpy(&r, &u, 16); return r; }");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI32x4 _ae_i32x4_min(AeI32x4 a, AeI32x4 b) { AeI32x4 m = a < b; return (m & a) | (~m & b); }");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI32x4 _ae_i32x4_max(AeI32x4 a, AeI32x4 b) { AeI32x4 m = a > b; return (m & a) | (~m & b); }");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED int64_t _ae_i32x4_sum(AeI32x4 v) { return (int64_t)v[0] + v[1] + v[2] + v[3]; }");
+    /* i16x8: eight 16-bit lanes. */
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI16x8 _ae_i16x8_splat(int v) { return (AeI16x8){(int16_t)v, (int16_t)v, (int16_t)v, (int16_t)v, (int16_t)v, (int16_t)v, (int16_t)v, (int16_t)v}; }");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI16x8 _ae_i16x8_set(int a, int b, int c, int d, int e, int f, int g, int h) { return (AeI16x8){(int16_t)a, (int16_t)b, (int16_t)c, (int16_t)d, (int16_t)e, (int16_t)f, (int16_t)g, (int16_t)h}; }");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI16x8 _ae_i16x8_load(void* p, int64_t i) { AeI16x8 v; memcpy(&v, (char*)p + (size_t)i * 2u, 16); return v; }");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED void _ae_i16x8_store(void* p, int64_t i, AeI16x8 v) { memcpy((char*)p + (size_t)i * 2u, &v, 16); }");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED int64_t _ae_i16x8_lane(AeI16x8 v, int64_t i) { return v[i & 7]; }");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI16x8 _ae_i16x8_add(AeI16x8 a, AeI16x8 b) { return a + b; }");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI16x8 _ae_i16x8_sub(AeI16x8 a, AeI16x8 b) { return a - b; }");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI16x8 _ae_i16x8_mul(AeI16x8 a, AeI16x8 b) { return a * b; }");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI16x8 _ae_i16x8_shl(AeI16x8 a, int64_t n) { return a << (int16_t)n; }");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI16x8 _ae_i16x8_shr(AeI16x8 a, int64_t n) { return a >> (int16_t)n; }");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI16x8 _ae_i16x8_min(AeI16x8 a, AeI16x8 b) { AeI16x8 m = a < b; return (m & a) | (~m & b); }");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI16x8 _ae_i16x8_max(AeI16x8 a, AeI16x8 b) { AeI16x8 m = a > b; return (m & a) | (~m & b); }");
+    /* Saturating packs. i32x4 -> i16x8 packs two i32x4 vectors (a in the low
+       four lanes, b in the high four) with signed saturation; i16x8 -> u8x16
+       packs two i16x8 with unsigned saturation to bytes. These are the JPEG
+       decoder's hot exit. SSE2 has the exact instruction; elsewhere a clamped
+       scalar loop is correct, just not one instruction. u8x16 is returned in
+       an AeI16x8-shaped 16-byte register the caller stores as bytes. */
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI16x8 _ae_i32x4_packs_i16x8(AeI32x4 a, AeI32x4 b) {");
+    print_line(gen, "#if defined(__SSE2__)");
+    print_line(gen, "    AeI16x8 r; __m128i p = _mm_packs_epi32((__m128i)a, (__m128i)b); memcpy(&r, &p, 16); return r;");
+    print_line(gen, "#else");
+    print_line(gen, "    AeI16x8 r; for (int i = 0; i < 4; i++) { int32_t x = a[i]; r[i] = (int16_t)(x < -32768 ? -32768 : x > 32767 ? 32767 : x); }");
+    print_line(gen, "    for (int i = 0; i < 4; i++) { int32_t x = b[i]; r[i + 4] = (int16_t)(x < -32768 ? -32768 : x > 32767 ? 32767 : x); } return r;");
+    print_line(gen, "#endif");
+    print_line(gen, "}");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED void _ae_i16x8_packus_u8x16(AeI16x8 a, AeI16x8 b, void* out) {");
+    print_line(gen, "#if defined(__SSE2__)");
+    print_line(gen, "    __m128i p = _mm_packus_epi16((__m128i)a, (__m128i)b); memcpy(out, &p, 16);");
+    print_line(gen, "#else");
+    print_line(gen, "    unsigned char* o = (unsigned char*)out;");
+    print_line(gen, "    for (int i = 0; i < 8; i++) { int16_t x = a[i]; o[i] = (unsigned char)(x < 0 ? 0 : x > 255 ? 255 : x); }");
+    print_line(gen, "    for (int i = 0; i < 8; i++) { int16_t x = b[i]; o[i + 8] = (unsigned char)(x < 0 ? 0 : x > 255 ? 255 : x); }");
+    print_line(gen, "#endif");
+    print_line(gen, "}");
+    emit_lanes8_block(gen);
     print_line(gen, "#endif /* AETHER_HAS_LANES */");
     print_line(gen, "#ifndef AETHER_GCC_COMPAT");
     print_line(gen, "#  if (defined(__GNUC__) || defined(__clang__)) && !defined(__EMSCRIPTEN__)");
@@ -7876,6 +8340,16 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     print_line(gen, "#  else");
     print_line(gen, "#    define AETHER_GCC_COMPAT 0");
     print_line(gen, "#  endif");
+    print_line(gen, "#endif");
+    /* #2607: whether a module imported at @target("avx2") is compiled for
+       AVX2: GCC or Clang building for x86. Anywhere else (another compiler,
+       the AETHER_GCC_COMPAT=0 path, ARM) its region is plain code with no
+       target attribute, the copy computes what the build's copy does, and
+       lanes.native8() inside it says so. */
+    print_line(gen, "#if AETHER_GCC_COMPAT && (defined(__x86_64__) || defined(__i386__))");
+    print_line(gen, "#  define AETHER_LANE_TARGET_AVX2 1");
+    print_line(gen, "#else");
+    print_line(gen, "#  define AETHER_LANE_TARGET_AVX2 0");
     print_line(gen, "#endif");
     /* #2765: an operand evaluated ahead of the rest of its operation (#2478)
      * is held in a temporary of the type C gives it: inferred where the
@@ -9266,6 +9740,7 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     // Generate forward declarations for all functions FIRST so that
     // hoisted closure functions can call them without implicit declarations.
     report_actor_spawn_collisions(program);
+    lane_region_prepare(gen, program);   /* #2607 */
     print_line(gen, "// Forward declarations");
     for (int i = 0; i < program->child_count; i++) {
         ASTNode* child = program->children[i];
@@ -9279,6 +9754,7 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
         // program index (#2007); scanning the earlier children for each
         // function made this loop quadratic.
         if (find_function_definition_by_name(program, child->value) != child) continue;
+        lane_region_at(gen, program, child);   /* #2607 */
 
         // Imported functions are emitted as `static` in their definitions
         // (see generate_function_definition / generate_combined_function),
@@ -9337,6 +9813,7 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
         }
         fprintf(gen->output, ");\n");
     }
+    lane_region_close(gen);   /* #2607 */
 
     emit_sandbox_trust_wrappers(gen, program);
 
@@ -9499,6 +9976,7 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     for (int i = 0; i < program->child_count; i++) {
         ASTNode* child = program->children[i];
         if (!child) continue;
+        lane_region_at(gen, program, child);   /* #2607 */
 
         switch (child->type) {
             case AST_MODULE_DECLARATION:
@@ -9741,6 +10219,7 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
                 break;
         }
     }
+    lane_region_close(gen);   /* #2607 */
 
     /* Closure BODIES, after the loop above has emitted the message
      * definitions (and so registered them with gen->message_registry).
