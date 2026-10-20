@@ -1304,6 +1304,52 @@ main() { carry(null, 2) }
 AE
 refused loop_rebind_alias_in_store 12:9 "'p' is a borrowed \`ptr\` parameter, stored in a module-level \`var\`"
 
+# #3057: a `defer` runs when its block is left and reads what is bound
+# there, so it is checked at the end of its block, a loop's body at the end
+# of each pass, not where it is written: the `q = p` after it reaches it.
+cat > "$TMP/defer_later_binding.ae" <<'AE'
+import std.list
+var kept: ptr = null
+
+f(p: ptr) {
+    q = list.new()
+    defer kept = q
+    q = p
+}
+
+g(p: ptr, n: int) {
+    i = 0
+    while i < n {
+        r = list.new()
+        defer kept = r
+        r = p
+        i = i + 1
+    }
+}
+
+main() { f(null)  g(null, 2) }
+AE
+refused defer_later_binding 6:11 "'p' is a borrowed \`ptr\` parameter, stored in a module-level \`var\`"
+refused defer_later_binding 14:15 "'p' is a borrowed \`ptr\` parameter, stored in a module-level \`var\`"
+
+# A defer in an inner block runs when that block is left, before what the
+# outer block binds after it.
+cat > "$TMP/defer_inner_block.ae" <<'AE'
+import std.list
+var kept: ptr = null
+
+f(p: ptr, c: bool) {
+    q = list.new()
+    if c {
+        defer kept = q
+    }
+    q = p
+}
+
+main() { f(null, true) }
+AE
+accepted defer_inner_block
+
 # chain_cell <name> <links>: `kept = l<links>`, then `l<k> = l<k-1>` down to
 # `l0 = p`, in a loop: `kept` holds `p` after <links> + 1 passes.
 chain_cell() {

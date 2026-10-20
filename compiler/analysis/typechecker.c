@@ -8966,6 +8966,24 @@ static void check_ptr_keeps_in(ASTNode* program, ASTNode* n, KeepSet* s,
                 check_ptr_keeps_in(program, n->children[i], s, globals, nglobals, 1);
         return;
     }
+    /* #3057: a `defer` runs when its block is left and reads what is bound
+     * then, so its statement is walked at the end of the block, the last
+     * one written first as they run, not where it is written: `defer kept =
+     * q` before `q = p` stores the `p`. The holders only grow along the
+     * walk, so those at the end cover those of any earlier way out (a
+     * `return`, a `break`, a panic); a loop's body is a block, so each pass
+     * ends with its defers. Walked where it is written as well, what a
+     * defer binds would reach the statements after it, which run before
+     * it. */
+    if (n->type == AST_BLOCK) {
+        for (int i = 0; i < n->child_count; i++)
+            if (n->children[i] && n->children[i]->type != AST_DEFER_STATEMENT)
+                check_ptr_keeps_in(program, n->children[i], s, globals, nglobals, in_closure);
+        for (int i = n->child_count - 1; i >= 0; i--)
+            if (n->children[i] && n->children[i]->type == AST_DEFER_STATEMENT)
+                check_ptr_keeps_in(program, n->children[i], s, globals, nglobals, in_closure);
+        return;
+    }
     /* #3047: a loop's body runs again with what it bound, so a read placed
      * before a store sees the stored value on the next pass (`kept = q`,
      * then `q = p`). The body is walked binding only, reporting nothing,
