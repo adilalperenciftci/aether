@@ -3837,6 +3837,12 @@ through it is checked as a call to the one that keeps. A typed C function
 pointer's parameters borrow, so neither `as fn(...)` nor a `type Name =
 fn(...)` alias names a mode.
 
+A closure value, of such a type or a bare `fn`, may hold no function: a
+field a struct literal leaves out, or one given `null`. `c == null` and `c
+!= null` ask whether it holds one (a `bool`), and `c = null` empties it,
+giving back the closure it held, so an optional callback slot is written
+`if s.build != null { s.build(ctx, 1) }`.
+
 ```aether,run
 import std.list
 

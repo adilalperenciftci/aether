@@ -9127,6 +9127,9 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
      * struct or message field, a global, an actor's state): retained and
      * passed through, so a store can take a view in one expression. */
     print_line(gen, "static inline _AeClosure _aether_closure_retain(_AeClosure c) { _aether_closure_env_retain(c.env); return c; }");
+    /* #3062: `f() != null` with a closure made there: whether it holds a
+     * function, its reference given back once that is read. */
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED int _aether_closure_holds_take(_AeClosure c) { int h = c.fn != 0; _aether_closure_env_release(c.env); return h; }");
     /* #2921: the journal's drop of a closure place a panic leaves. */
     print_line(gen, "static AETHER_MAYBE_UNUSED void _aether_closure_drop_unwind(const void* p) { _AeClosure* c = (_AeClosure*)p; _aether_closure_env_release(c->env); c->env = (void*)0; }");
     print_line(gen, "static AETHER_MAYBE_UNUSED void _aether_seq_drop_unwind(const void* p) { StringSeq** s = (StringSeq**)p; string_seq_free(*s); *s = (StringSeq*)0; }");
