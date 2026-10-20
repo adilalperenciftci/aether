@@ -9,6 +9,16 @@
 # without crashing, or a device that is not lavapipe, is a broken setup and
 # fails the step.
 #
+# Each run is judged by what the program printed, not by its exit code
+# alone, since a shell does not report every crash as a signal: MSYS2's sh
+# gives a Windows access violation as 139, but heap corruption
+# (0xC0000374) as 127 and abort() as 3, which is also the program's code for
+# a format it cannot use. So a format is unsupported only when the program
+# printed its line saying so, a setup failure is the program's own exit 2
+# (each such exit prints why), any other failing exit is a crash, and the
+# device is checked to be lavapipe only on a run that printed its device
+# line (a crash may come before it).
+#
 #   lavapipe_d32s8_report.sh <exe> [runs=20] [frames=10]
 exe="$1"
 runs="${2:-20}"
@@ -23,19 +33,24 @@ for fmt in d32s8 d24s8; do
         k=$((k + 1))
         [ "$k" -eq 1 ] && printf '%s\n' "$out" | head -1
         case "$out" in
-            *llvmpipe*) ;;
-            *) echo "$fmt: the device is not lavapipe, a broken setup:"; printf '%s\n' "$out"; exit 1 ;;
+            *"device: "*)
+                case "$out" in
+                    *llvmpipe*) ;;
+                    *) echo "$fmt: the device is not lavapipe, a broken setup:"
+                       printf '%s\n' "$out"; exit 1 ;;
+                esac ;;
         esac
         if [ "$code" -eq 0 ]; then
             ok=$((ok + 1))
-        elif [ "$code" -ge 128 ]; then
-            crash=$((crash + 1)); codes="$codes $code"
-        elif [ "$code" -eq 3 ]; then
+        elif [ "$code" -eq 3 ] &&
+             printf '%s\n' "$out" | grep -q "no optimal-tiling depth-stencil attachment"; then
             unsupported=1; break
-        else
-            echo "$fmt: run $k failed without crashing (exit $code), a broken setup:"
+        elif [ "$code" -eq 2 ]; then
+            echo "$fmt: run $k failed without crashing (exit 2), a broken setup:"
             printf '%s\n' "$out"
             exit 1
+        else
+            crash=$((crash + 1)); codes="$codes $code"
         fi
     done
     if [ "$unsupported" -eq 1 ]; then

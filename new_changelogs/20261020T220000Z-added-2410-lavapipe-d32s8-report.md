@@ -3,7 +3,10 @@
   `D32_SFLOAT_S8_UINT` depth-stencil attachment with no Aether code, and
   the Ubuntu 24.04 lavapipe job and the Windows contrib leg run it 20 times
   in that format and 20 in `D24_UNORM_S8_UINT`, reporting how many runs
-  crashed in each without failing on them. Mesa 26.1.8's llvmpipe dies in
+  crashed in each without failing on them. A run counts as a crash by any
+  failing exit but the program's own (MSYS2's sh gives heap corruption as
+  127 and abort as 3), and as an unsupported format or a broken setup only
+  by what it printed. Mesa 26.1.8's llvmpipe dies in
   about half the D32S8 runs where it runs 8 lanes wide: an aligned 32-byte
   load from depth storage that is only 16-byte aligned. D24S8 and 4-lane
   llvmpipe never crash. The counts say when a Mesa release fixes it
