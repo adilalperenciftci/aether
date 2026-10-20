@@ -46,6 +46,23 @@ case "$out" in
        fails=$((fails + 1)) ;;
 esac
 
+# #3061 review: a clause that returns only `null` takes a pointer, string or
+# closure type beside it (tests/regression/test_issue3061_clause_null_beside_pointer.ae),
+# and no other: beside an int it is refused, naming both.
+cat > "$TMP/null_beside_int.ae" <<'AE'
+count(0) -> null
+count(k) -> k
+
+main() { println("${count(1)}") }
+AE
+out=$(cd "$TMP" && "$AE" check null_beside_int.ae 2>&1)
+case "$out" in
+    *"error[E0200]: the clauses of 'count' return int (line 2) and \`null\`, which int does not take"*"null_beside_int.ae:1:"*) ;;
+    *) echo "  [FAIL] null_beside_int: not refused naming int and \`null\` at line 1"
+       echo "$out" | sed 's/^/        /'
+       fails=$((fails + 1)) ;;
+esac
+
 # #3063: a clause that returns only `none` joins the others as `T?`; a set
 # of only such clauses says no `T`, and one beside a written `T` that is no
 # optional does not fit it. Both name what is missing.

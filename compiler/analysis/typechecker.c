@@ -11855,6 +11855,8 @@ static int is_bare_fn_call(ASTNode* v, SymbolTable* table) {
            !s->type->is_fnptr && !s->type->closure_literal && fn_type_is_erased(s->type);
 }
 
+static int null_fits_type(Type* t);
+
 /* #2782: check one value a `return` gives against the result type `rt`.
  * A value that branches (an if-expression, a `match` whose value is used)
  * gives each arm's value, checked on its own. Returns 1 when it fits. */
@@ -11891,6 +11893,11 @@ static int check_return_value(ASTNode* v, Type* rt, const ReturnOwner* own,
         Symbol* s = lookup_symbol(table, v->value);
         if (s && s->is_function) return 1;
     }
+    /* #3061 review, #3062: `null` returned where the result takes it, the
+     * empty closure or a null pointer, string or slice, fits as a binding or
+     * a field of that type takes it (slice_coerce_slot gave it the type);
+     * checked as the `ptr` it infers as, a closure result refused it. */
+    if (v->type == AST_NULL_LITERAL && null_fits_type(rt)) return 1;
     Type* vt = infer_type(v, table);
     /* A closure literal is a closure: inference leaves it unknown, and
      * its check just stamped it. */
@@ -16912,24 +16919,46 @@ static void type_take(Type* t, Type* want) {
 }
 
 /* #3063: count the `return`s of a value in `node` (tc_has_return_value's)
- * that give `none` and those that give anything else. */
-static void tc_count_none_returns(ASTNode* node, int* none, int* other) {
+ * that give a literal of AST kind `lit` and those that give anything else. */
+static void tc_count_literal_returns(ASTNode* node, ASTNodeType lit, int* hits, int* other) {
     if (!node || ast_is_own_function(node)) return;
     if (node->type == AST_RETURN_STATEMENT && node->child_count > 0 && node->children[0]) {
         if (node->children[0]->type == AST_PRINT_STATEMENT) return;
-        if (node->children[0]->type == AST_NONE_LITERAL) (*none)++;
+        if (node->children[0]->type == lit) (*hits)++;
         else (*other)++;
         return;
     }
     for (int i = 0; i < node->child_count; i++)
-        tc_count_none_returns(node->children[i], none, other);
+        tc_count_literal_returns(node->children[i], lit, hits, other);
 }
 
-/* Does every `return` of a value in `node` give `none`, and is there one? */
+/* Does every `return` of a value in `node` give a literal of kind `lit`
+ * (`none`, `null`), and is there one? */
+static int tc_returns_only_literal(ASTNode* node, ASTNodeType lit) {
+    int hits = 0, other = 0;
+    tc_count_literal_returns(node, lit, &hits, &other);
+    return hits > 0 && other == 0;
+}
+
 static int tc_returns_only_none(ASTNode* node) {
-    int none = 0, other = 0;
-    tc_count_none_returns(node, &none, &other);
-    return none > 0 && other == 0;
+    return tc_returns_only_literal(node, AST_NONE_LITERAL);
+}
+
+/* #3061 review: a clause whose result is inferred and every one of whose
+ * value `return`s gives `null`: its result is whatever `null` goes into
+ * beside it. On 0.835 such a set took its first clause's type, and
+ * `node_or_null(0, p: *Node) -> null` beside `node_or_null(k, p: *Node) ->
+ * p` compiled; a join that knew only branch_join_type refused it. */
+static int clause_gives_only_null(ASTNode* cl) {
+    return cl->type_inferred && tc_returns_only_literal(cl, AST_NULL_LITERAL);
+}
+
+/* Does a slot of type `t` take `null`: a pointer (typed or not), a string
+ * (a nullable C string), a closure or a C function pointer (#3062), or a
+ * slice (the empty one)? */
+static int null_fits_type(Type* t) {
+    return t && (t->kind == TYPE_PTR || t->kind == TYPE_STRING || t->kind == TYPE_FUNCTION ||
+                 type_is_slice(t));
 }
 
 /* #3061: a function written as several clauses is one C function, whose
@@ -16954,6 +16983,7 @@ static void clause_set_settle(ASTNode* fn, SymbolTable* table) {
     /* A written result type, if a clause has one, is the set's. */
     ASTNode* written = NULL;
     ASTNode* none_at = NULL;   /* the first clause that returns only `none` */
+    ASTNode* null_at = NULL;   /* the first inferred clause that returns only `null` */
     for (int c = 0; c < set->count; c++) {
         ASTNode* cl = set->nodes[c];
         Type* t = cl->node_type;
@@ -16965,6 +16995,10 @@ static void clause_set_settle(ASTNode* fn, SymbolTable* table) {
             if (tc_has_return_value(cl)) return;   /* still to be inferred */
             continue;
         }
+        if (clause_gives_only_null(cl)) {
+            if (!null_at) null_at = cl;
+            continue;
+        }
         if (!written && !cl->type_inferred && t->kind != TYPE_VOID) written = cl;
     }
     Type* join = written ? clone_type(written->node_type) : NULL;
@@ -16973,6 +17007,7 @@ static void clause_set_settle(ASTNode* fn, SymbolTable* table) {
         ASTNode* cl = set->nodes[c];
         Type* t = cl->node_type;
         if (!t || t->kind == TYPE_UNKNOWN || t->kind == TYPE_VOID || cl == written) continue;
+        if (clause_gives_only_null(cl)) continue;   /* below */
         if (!join) {
             join = clone_type(t);
             join_at = cl;
@@ -17011,6 +17046,31 @@ static void clause_set_settle(ASTNode* fn, SymbolTable* table) {
         if (!types_equal(k, join)) join_at = cl;
         free_type(join);
         join = k;
+    }
+    /* #3061 review: an inferred clause that gives only `null` takes the
+     * pointer, string or closure type beside it, as a slot of that type
+     * takes `null`; alone, it is the `ptr` it is. */
+    if (null_at) {
+        if (!join) {
+            join = clone_type(null_at->node_type);
+            join_at = null_at;
+        } else if (!null_fits_type(join)) {
+            char a[160], msg[480];
+            const char* js = ret_type_spell(join, a, sizeof(a));
+            snprintf(msg, sizeof(msg),
+                     written ? "the clauses of '%s' are written to return %s (line %d), and this "
+                               "clause returns `null`, which %s does not take: a clause set is "
+                               "one function with one result"
+                             : "the clauses of '%s' return %s (line %d) and `null`, which %s "
+                               "does not take: a clause set is one function with one result",
+                     fn->value, js, join_at ? join_at->line : 0, js);
+            type_error_hint(msg,
+                            "`null` is a pointer, a string or a closure; an optional has "
+                            "`none` for no value",
+                            null_at->line, null_at->column);
+            free_type(join);
+            return;
+        }
     }
     /* #3063: the clauses that give only `none` join the rest as `T?`. */
     if (none_at) {
