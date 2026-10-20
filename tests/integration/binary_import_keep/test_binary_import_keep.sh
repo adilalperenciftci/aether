@@ -43,6 +43,54 @@ count() -> int {
     if kept == null { return 0 }
     return 1
 }
+
+animate(el: @keep ptr, ticks: int, tick: fn(@keep ptr, float)) {
+    i = 0
+    while i < ticks {
+        tick(el, 0.5)
+        i = i + 1
+    }
+}
+AE
+
+# A function-typed parameter carries its modes across the catalog too
+# (`tick: fn(@keep ptr, float)`, which it spelled `tick: fn`): an importer
+# passing a keeping function is accepted, as from the source. Checked, not
+# built: a named function given to a binary import's closure parameter
+# does not build whatever its modes (its adapter is never emitted).
+cat > fn_keep.ae <<'AE'
+import keeper
+import std.list
+
+var registry: ptr = null
+
+fill(el: @keep ptr, t: float) {
+    list.add(registry, el)
+}
+
+main() {
+    registry = list.new()
+    shape = list.new()
+    keeper.animate(shape, 3, fill)
+    println("${list.size(registry)}")
+}
+AE
+
+# So is a closure that declares `@keep`, and an untyped one, whose `e`
+# takes `@keep ptr` from the type; both keep what they are given.
+cat > fn_closure.ae <<'AE'
+import keeper
+import std.list
+
+var registry: ptr = null
+
+main() {
+    registry = list.new()
+    shape = list.new()
+    keeper.animate(shape, 2) callback | e: @keep ptr, t: float | { list.add(registry, e) }
+    keeper.animate(shape, 1) callback | e, t | { list.add(registry, e) }
+    println("${list.size(registry)}")
+}
 AE
 
 cat > string_to_keep.ae <<'AE'
@@ -117,7 +165,7 @@ verdict() {
     printf '%s\n' "$out" | grep -E "^error|-->" | sed 's/^ *//'
 }
 
-for app in string_to_keep borrowed_to_keep into_escapes string_to_into accepted; do
+for app in string_to_keep borrowed_to_keep into_escapes string_to_into accepted fn_keep fn_closure; do
     verdict "$app.ae" > "$app.source"
 done
 
@@ -126,7 +174,8 @@ AETHER_HOME="$ROOT" "$AE" build --emit=lib keeper.ae -o "libkeeper$SO_EXT" >lib.
 mv keeper.ae keeper.src   # every importer resolves `keeper` to the library from here on
 
 INFO="$(AETHER_HOME="$ROOT" "$AE" lib-info "./libkeeper$SO_EXT" 2>&1)"
-for want in "as: hold(p: @keep ptr) -> void" "as: wrap(p: @into ptr) -> ptr"; do
+for want in "as: hold(p: @keep ptr) -> void" "as: wrap(p: @into ptr) -> ptr" \
+            "as: animate(el: @keep ptr, ticks: int, tick: fn(@keep ptr, float)) -> void"; do
     case "$INFO" in
         *"$want"*) ;;
         *) echo "  [FAIL] binary_import_keep: the catalog lacks \"$want\""
@@ -134,7 +183,7 @@ for want in "as: hold(p: @keep ptr) -> void" "as: wrap(p: @into ptr) -> ptr"; do
     esac
 done
 
-for app in string_to_keep borrowed_to_keep into_escapes string_to_into accepted; do
+for app in string_to_keep borrowed_to_keep into_escapes string_to_into accepted fn_keep fn_closure; do
     verdict "$app.ae" > "$app.binary"
     if [ "$(cat "$app.source")" != "$(cat "$app.binary")" ]; then
         echo "  [FAIL] binary_import_keep: $app is checked differently as a binary import"
@@ -155,11 +204,20 @@ expect borrowed_to_keep "'p' is a borrowed \`ptr\` parameter, passed to a parame
 expect into_escapes "'p' is a borrowed \`ptr\` parameter, stored in a module-level \`var\`"
 expect string_to_into "a \`string\` is given to an \`@into ptr\` parameter"
 expect accepted "ok"
+expect fn_keep "ok"
+expect fn_closure "ok"
 
-AETHER_HOME="$ROOT" "$AE" build accepted.ae -o accepted >accepted.log 2>&1 || {
-    echo "  [FAIL] binary_import_keep: ae build accepted.ae"; sed 's/^/    /' accepted.log; exit 1; }
-OUT="$("./accepted$EXE" 2>&1)"
-[ "$OUT" = "1 1" ] || { echo "  [FAIL] binary_import_keep: accepted printed \"$OUT\", want \"1 1\""; fails=$((fails + 1)); }
+# run_app <name> <want>: built against the library, it prints <want>.
+run_app() {
+    AETHER_HOME="$ROOT" "$AE" build "$1.ae" -o "$1" >"$1.log" 2>&1 || {
+        echo "  [FAIL] binary_import_keep: ae build $1.ae"; sed 's/^/    /' "$1.log"
+        fails=$((fails + 1)); return; }
+    OUT="$("./$1$EXE" 2>&1)"
+    [ "$OUT" = "$2" ] || {
+        echo "  [FAIL] binary_import_keep: $1 printed \"$OUT\", want \"$2\""; fails=$((fails + 1)); }
+}
+run_app accepted "1 1"
+run_app fn_closure "3"
 
 if [ "$fails" -ne 0 ]; then exit 1; fi
-echo "  [PASS] binary_import_keep: @keep and @into cross the catalog; a binary import is checked as the source import is"
+echo "  [PASS] binary_import_keep: @keep and @into cross the catalog, in a function type too; a binary import is checked as the source import is"

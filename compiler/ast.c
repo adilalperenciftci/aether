@@ -272,12 +272,18 @@ static int type_src_write(const Type* t, char* buf, size_t cap, size_t* pos) {
             return type_src_put(buf, cap, pos, n);
         }
         case TYPE_FUNCTION:
-            /* A closure value is spelled bare `fn`; only a C function
-             * pointer carries its signature in source. */
-            if (!t->is_fnptr) return type_src_put(buf, cap, pos, "fn");
+            /* A closure value is spelled bare `fn`, unless a parameter names
+             * a mode (#2980): `fn(@keep ptr, float)` is a closure's type
+             * whose signature is part of it, and a binary import's stub
+             * read as `fn` checked a keeping function as borrowing (#3013).
+             * A C function pointer carries its signature in source. */
+            if (!t->is_fnptr && !fn_type_has_modes(t)) return type_src_put(buf, cap, pos, "fn");
             if (!type_src_put(buf, cap, pos, "fn(")) return 0;
             for (int i = 0; i < t->param_count; i++) {
                 if (i > 0 && !type_src_put(buf, cap, pos, ", ")) return 0;
+                int mode = fn_type_param_mode(t, i);
+                if (mode == FN_MODE_KEEP && !type_src_put(buf, cap, pos, "@keep ")) return 0;
+                if (mode == FN_MODE_INTO && !type_src_put(buf, cap, pos, "@into ")) return 0;
                 if (!type_src_write(t->param_types ? t->param_types[i] : NULL, buf, cap, pos))
                     return 0;
             }
