@@ -16911,6 +16911,27 @@ static void type_take(Type* t, Type* want) {
     free_type(c);
 }
 
+/* #3063: count the `return`s of a value in `node` (tc_has_return_value's)
+ * that give `none` and those that give anything else. */
+static void tc_count_none_returns(ASTNode* node, int* none, int* other) {
+    if (!node || ast_is_own_function(node)) return;
+    if (node->type == AST_RETURN_STATEMENT && node->child_count > 0 && node->children[0]) {
+        if (node->children[0]->type == AST_PRINT_STATEMENT) return;
+        if (node->children[0]->type == AST_NONE_LITERAL) (*none)++;
+        else (*other)++;
+        return;
+    }
+    for (int i = 0; i < node->child_count; i++)
+        tc_count_none_returns(node->children[i], none, other);
+}
+
+/* Does every `return` of a value in `node` give `none`, and is there one? */
+static int tc_returns_only_none(ASTNode* node) {
+    int none = 0, other = 0;
+    tc_count_none_returns(node, &none, &other);
+    return none > 0 && other == 0;
+}
+
 /* #3061: a function written as several clauses is one C function, whose
  * result codegen took from its first clause with a known type
  * (fn_result_type), so a later clause's wider value was cut to it with no
@@ -16922,16 +16943,25 @@ static void type_take(Type* t, Type* want) {
  * symbols take; two results that do not join are E0200, naming both. A
  * written result type is the set's, and an inferred clause must fit it. A
  * set with a clause whose result is still to be inferred waits for it
- * (#3056). */
+ * (#3056). #3063: a clause that returns only `none` has no type of its own
+ * (refine_inferred_result waits past `none`) and is no clause still to be
+ * inferred: it joins the others' `T` as `T?`, as an if-expression's `none`
+ * arm does, and takes that result; a set whose every clause gives only
+ * `none` says no `T` at all, and is E0200. */
 static void clause_set_settle(ASTNode* fn, SymbolTable* table) {
     const TcClauses* set = tc_clauses_of(fn);
     if (!set) return;
     /* A written result type, if a clause has one, is the set's. */
     ASTNode* written = NULL;
+    ASTNode* none_at = NULL;   /* the first clause that returns only `none` */
     for (int c = 0; c < set->count; c++) {
         ASTNode* cl = set->nodes[c];
         Type* t = cl->node_type;
         if (!t || t->kind == TYPE_UNKNOWN) {
+            if (tc_returns_only_none(cl)) {
+                if (!none_at) none_at = cl;
+                continue;
+            }
             if (tc_has_return_value(cl)) return;   /* still to be inferred */
             continue;
         }
@@ -16981,21 +17011,69 @@ static void clause_set_settle(ASTNode* fn, SymbolTable* table) {
         free_type(join);
         join = k;
     }
+    /* #3063: the clauses that give only `none` join the rest as `T?`. */
+    if (none_at) {
+        char a[160], msg[480], hint[200];
+        Type* none_t = join ? create_optional_type(create_type(TYPE_UNKNOWN)) : NULL;
+        Type* k = join ? branch_join_type(join, NULL, none_t, NULL) : NULL;
+        if (none_t) free_type(none_t);
+        int unfit = written && k && !types_equal(k, join);
+        if (!k || unfit) {
+            const char* js = join ? ret_type_spell(join, a, sizeof(a)) : "";
+            if (!join) {
+                snprintf(msg, sizeof(msg),
+                         "every clause of '%s' that returns a value returns `none`, an optional "
+                         "of no type: the set's result `T?` needs its `T`",
+                         fn->value);
+                snprintf(hint, sizeof(hint),
+                         "write the result type on a clause, `-> int?` for an optional int");
+            } else if (unfit) {
+                snprintf(msg, sizeof(msg),
+                         "the clauses of '%s' are written to return %s (line %d), and this "
+                         "clause returns `none`, which that does not hold: a clause set is one "
+                         "function with one result",
+                         fn->value, js, join_at->line);
+                snprintf(hint, sizeof(hint), "write the result type as an optional, `-> %s?`",
+                         js);
+            } else {
+                snprintf(msg, sizeof(msg),
+                         "the clauses of '%s' return %s (line %d) and `none`, which no one type "
+                         "holds: a clause set is one function with one result",
+                         fn->value, js, join_at ? join_at->line : 0);
+                snprintf(hint, sizeof(hint),
+                         "return a value an optional can hold, or `none` from no clause");
+            }
+            type_error_hint(msg, hint, none_at->line, none_at->column);
+            if (k) free_type(k);
+            if (join) free_type(join);
+            return;
+        }
+        free_type(join);
+        join = k;
+    }
     if (!join) return;
     for (int c = 0; c < set->count; c++) {
-        Type* t = set->nodes[c]->node_type;
-        if (t && t->kind != TYPE_VOID && t->kind != TYPE_UNKNOWN && !types_equal(t, join))
-            type_take(t, join);
+        ASTNode* cl = set->nodes[c];
+        Type* t = cl->node_type;
+        if (!t || t->kind == TYPE_UNKNOWN) {
+            /* #3063: a clause that gives only `none` takes the result too. */
+            if (!none_at || !tc_returns_only_none(cl)) continue;
+            if (t) type_take(t, join);
+            else cl->node_type = clone_type(join);
+            continue;
+        }
+        if (t->kind != TYPE_VOID && !types_equal(t, join)) type_take(t, join);
     }
     SymbolTable* root = table;
     while (root && root->parent) root = root->parent;
     for (Symbol* fs = root ? root->symbols : NULL; fs; fs = fs->next) {
-        if (!fs->is_function || !fs->type || fs->type->kind == TYPE_VOID) continue;
-        for (int c = 0; c < set->count; c++)
-            if (fs->node == set->nodes[c] && !types_equal(fs->type, join)) {
-                type_take(fs->type, join);
-                break;
-            }
+        if (!fs->is_function || (fs->type && fs->type->kind == TYPE_VOID)) continue;
+        for (int c = 0; c < set->count; c++) {
+            if (fs->node != set->nodes[c]) continue;
+            if (!fs->type) fs->type = clone_type(join);
+            else if (!types_equal(fs->type, join)) type_take(fs->type, join);
+            break;
+        }
     }
     free_type(join);
 }

@@ -1,0 +1,49 @@
+// #3063: a clause that returns only `none` has no type of its own, so a set
+// with one never settled its result (#3061) and took another clause's `T`:
+// `none` reached C as that T and the C compiler refused it. Such a clause
+// joins the others' `T` as `T?`, as an if-expression's `none` arm does,
+// before or after them, beside a `T` the checker infers through a pointer
+// too (tests/integration/clause_set_result_join checks a set of only
+// `none` is refused).
+
+extern exit(code: int)
+
+struct P {
+    big: long
+}
+
+find(0, n: int) -> none
+find(k, n: int) -> n + k
+
+label(0) -> none
+label(k) -> "k${k}"
+
+// The `none` clause after the one that gives the `T`.
+small(1, n: int) -> n
+small(k, n: int) -> none
+
+// Beside a long read through a pointer, which the checker infers (#3056).
+through(p: *P, 0) -> none
+through(p: *P, k) -> p.big
+
+check(ok: bool, what: string) {
+    if !ok {
+        println("FAIL: ${what}")
+        exit(1)
+    }
+}
+
+main() {
+    check((find(0, 5) ?? -1) == -1, "the none clause of an int set")
+    check((find(2, 5) ?? -1) == 7, "the int clause, as an int?")
+    check((label(0) ?? "none") == "none", "the none clause of a string set")
+    check((label(3) ?? "none") == "k3", "the string clause, as a string?")
+    check((small(1, 9) ?? -1) == 9, "the int clause before a none clause")
+    check((small(2, 9) ?? -1) == -1, "a none clause after the int one")
+    x = heap.new(P)
+    x.big = 5000000000
+    check((through(x, 1) ?? 0) == 5000000000, "a long through a pointer, as a long?")
+    check((through(x, 0) ?? -1) == -1, "the none clause beside it")
+    println("${find(2, 5) ?? -1} ${label(3) ?? "none"} ${through(x, 1) ?? -1}")
+    heap.free(x)
+}
