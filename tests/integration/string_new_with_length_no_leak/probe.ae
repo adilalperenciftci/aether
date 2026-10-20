@@ -30,7 +30,7 @@
 
 import std.string
 
-extern string_new_with_length(data: string, length: int) -> ptr @heap
+extern string_new_with_length(data: string, length: int) -> string @heap
 extern getrusage_max_rss_kb() -> int
 extern exit(code: int)
 
