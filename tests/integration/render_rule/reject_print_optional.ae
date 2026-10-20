@@ -1,0 +1,5 @@
+// An optional may hold no value, so it has no rendering of its own (#3016).
+main() {
+    let o: int? = 5
+    println(o)
+}

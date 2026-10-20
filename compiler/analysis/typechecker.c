@@ -1183,24 +1183,23 @@ void type_warning(const char* message, int line, int column);
  * a blocklist lets the next type added to the language silently join the
  * garbage list, which is how this shipped in the first place.
  *
- * TYPE_TUPLE is admitted because the type is often simply WRONG rather than
- * the value being un-renderable. `x = f()` where f returns `(int, string)`
- * binds the FIRST element -- verified: it prints 42, not a tuple -- but the
- * slot keeps the tuple type. Rejecting it flagged a working example in
- * std/tcp/README.md. Fixing that inference is a separate change; until then a
- * tuple operand is far more likely to be a correctly-bound scalar than a real
- * attempt to render a tuple.
+ * It is the one rule for every place that renders a value (#3016): an
+ * interpolation, and each argument of `print` / `println`, whose codegen
+ * picks a printf conversion from the type and fell back to `%d` for any
+ * kind it did not know, so `println(p)` with a struct, a sum or a tuple
+ * printed garbage too.
  *
- * TYPE_PTR is admitted despite being the `${bytes_handle}` case above, and
- * that is a deliberate scope decision rather than an oversight. Interpolating
- * a `ptr` is an established idiom here: 21 sites across std/, contrib/,
- * examples/ and tests/ do it -- including std/spec and every std.map consumer
- * -- because map/pqueue/schema return `ptr` for values that really are
- * `char*`, and those render correctly today. Rejecting them would break
- * working code, and there is no sanctioned replacement to migrate to (a
- * `ptr`-to-string binding does not currently compile). Narrowing this is its
- * own change: it needs a conversion for callers to move to, and a sweep of
- * those 21 sites. Filed rather than smuggled in behind a bug fix.
+ * A tuple has no rendering. It was once admitted because `x = f()`, with f
+ * returning `(int, string)`, bound the first element while the name kept the
+ * tuple type; a single name now binds the whole tuple (the C local is the
+ * tuple struct), so a tuple operand is a tuple, and it rendered as `%d`.
+ *
+ * A `ptr` is still rendered as a C string, which for a handle (a list, a
+ * buffer, a struct) reads garbage. It cannot be refused while std types
+ * strings as `ptr` (`string.from_int`, `pad_start`, ...): #3018 retypes
+ * those and then takes TYPE_PTR off this list, so the TYPE_PTR message
+ * below (`string.from_ptr(p)`, the conversion E0202 names) is the one a
+ * `ptr` operand gets.
  */
 static int interp_kind_is_renderable(TypeKind k) {
     switch (k) {
@@ -1212,8 +1211,7 @@ static int interp_kind_is_renderable(TypeKind k) {
         case TYPE_STRING:
         case TYPE_ENUM:      /* integer-backed; renders as its numeric value */
         case TYPE_UNKNOWN:   /* inference already failed and reported */
-        case TYPE_PTR:       /* see below -- deliberately admitted */
-        case TYPE_TUPLE:     /* see below -- deliberately admitted */
+        case TYPE_PTR:       /* until #3018, see above */
             return 1;
         default:
             return 0;
@@ -1228,26 +1226,58 @@ static int interp_kind_is_renderable(TypeKind k) {
  * identifier inside `${...}` carries the position of the DECLARATION it
  * resolves to, so reporting the child's own line sent the reader to where the
  * function was defined rather than to the string that misuses it. */
+/* `inner` written where the operand stands: `${inner}` in an interpolation,
+ * `println(inner)` as a print argument. */
+static const char* render_form(int printing, const char* inner, char* buf, size_t cap) {
+    snprintf(buf, cap, printing ? "`println(%s)`" : "`${%s}`", inner);
+    return buf;
+}
+
+static void check_render_operand(ASTNode* child, SymbolTable* table,
+                                 int fb_line, int fb_col, int printing);
+
 static void check_interp_operand(ASTNode* child, SymbolTable* table,
                                  int fb_line, int fb_col) {
+    check_render_operand(child, table, fb_line, fb_col, 0);
+}
+
+/* `print` / `println`: each argument is rendered by the same rule (#3016).
+ * An interpolation argument checked its own operands; a literal is text. */
+static void check_print_operands(ASTNode* call, SymbolTable* table) {
+    for (int i = 0; i < call->child_count; i++) {
+        ASTNode* a = call->children[i];
+        if (!a || a->type == AST_STRING_INTERP) continue;
+        check_render_operand(a, table, 0, 0, 1);
+    }
+}
+
+/* `printing`: the operand is a `print` / `println` argument, and the
+ * messages say so; otherwise it is inside `${...}`. */
+static void check_render_operand(ASTNode* child, SymbolTable* table,
+                                 int fb_line, int fb_col, int printing) {
     if (!child) return;
     if (child->type == AST_LITERAL) return;   /* the literal text segments */
 
     int line = fb_line > 0 ? fb_line : child->line;
     int col  = fb_line > 0 ? fb_col  : child->column;
+    const char* verb = printing ? "print" : "interpolate";
 
     /* A bare reference to a function. Caught by NAME before consulting the
      * inferred type, because a bare function identifier infers as its RETURN
      * type -- so `${cmd}` looks like a perfectly good string here -- and
      * "did you mean cmd()?" is the whole value of the diagnostic. */
+    char form[160], form2[160];
     if (child->type == AST_IDENTIFIER && child->value) {
         Symbol* sym = lookup_symbol(table, child->value);
         if (sym && sym->is_function) {
-            char msg[320];
+            char msg[640];
+            char call[96];
+            snprintf(call, sizeof(call), "%s()", child->value);
             snprintf(msg, sizeof(msg),
-                "cannot interpolate '%s': it is a function, so `${%s}` renders "
-                "its ADDRESS, not a value. Did you mean `${%s()}`?",
-                child->value, child->value, child->value);
+                "cannot %s '%s': it is a function, so %s renders "
+                "its ADDRESS, not a value. Did you mean %s?",
+                verb, child->value, render_form(printing, child->value, form, sizeof form),
+                render_form(printing, call, form2, sizeof form2));
             type_error(msg, line, col);
             return;
         }
@@ -1263,47 +1293,70 @@ static void check_interp_operand(ASTNode* child, SymbolTable* table,
     if (error_count > 0) return;
 
     Type* t = child->node_type;
-    /* A tuple-typed operand is admitted above because a BOUND name often
-     * carries a tuple type it does not hold. A call is not a binding: the
-     * whole (value, err) struct went to printf and rendered as garbage. */
-    if (t && t->kind == TYPE_TUPLE && child->type == AST_FUNCTION_CALL) {
-        char msg[320];
-        snprintf(msg, sizeof(msg),
-            "cannot interpolate a call that returns %d values: destructure it "
-            "first, e.g. `v, err = %s(...)` then `${v}`",
-            t->tuple_count, child->value ? child->value : "f");
-        type_error(msg, line, col);
-        return;
-    }
     if (!t || interp_kind_is_renderable(t->kind)) return;
 
-    char msg[320];
+    char msg[640];
     switch (t->kind) {
+        case TYPE_TUPLE:
+            if (child->type == AST_FUNCTION_CALL) {
+                snprintf(msg, sizeof(msg),
+                    "cannot %s a call that returns %d values: destructure it "
+                    "first, e.g. `v, err = %s(...)` then %s",
+                    verb, t->tuple_count, child->value ? child->value : "f",
+                    render_form(printing, "v", form, sizeof form));
+            } else {
+                snprintf(msg, sizeof(msg),
+                    "cannot %s a tuple: it has no string rendering; destructure "
+                    "it first, e.g. `a, b = t` then %s",
+                    verb, render_form(printing, "a", form, sizeof form));
+            }
+            break;
         case TYPE_STRUCT:
             snprintf(msg, sizeof(msg),
-                "cannot interpolate a struct%s%s: interpolate a field instead, "
-                "e.g. `${value.field}`",
-                t->struct_name ? " " : "", t->struct_name ? ast_struct_display_name(t->struct_name) : "");
+                "cannot %s a struct%s%s: %s a field instead, e.g. %s",
+                verb, t->struct_name ? " " : "",
+                t->struct_name ? ast_struct_display_name(t->struct_name) : "",
+                verb, render_form(printing, "value.field", form, sizeof form));
             break;
         case TYPE_ARRAY:
             snprintf(msg, sizeof(msg),
-                "cannot interpolate an array: interpolate an element, "
-                "e.g. `${a[0]}`");
+                "cannot %s an array: %s an element, e.g. %s",
+                verb, verb, render_form(printing, "a[0]", form, sizeof form));
             break;
         case TYPE_FUNCTION:
             snprintf(msg, sizeof(msg),
-                "cannot interpolate a function value: `${f}` renders its "
-                "address. Call it (`${f()}`) to interpolate its result");
+                "cannot %s a function value: %s renders its address. Call it "
+                "(%s) to %s its result",
+                verb, render_form(printing, "f", form, sizeof form),
+                render_form(printing, "f()", form2, sizeof form2), verb);
+            break;
+        case TYPE_PTR:
+            snprintf(msg, sizeof(msg),
+                "cannot %s a `ptr`: it has no string rendering. A `ptr` that "
+                "holds a C string is read as one with `string.from_ptr(p)`, and "
+                "a container's string with its typed getter (`map.get_string`, "
+                "`list.get_string`)", verb);
+            break;
+        case TYPE_OPTIONAL:
+            snprintf(msg, sizeof(msg),
+                "cannot %s an optional: it may hold no value; give it one "
+                "first, e.g. %s",
+                verb, render_form(printing, "v ?? fallback", form, sizeof form));
+            break;
+        case TYPE_SUM:
+            snprintf(msg, sizeof(msg),
+                "cannot %s a sum value: `match` on it and %s what each "
+                "variant holds", verb, verb);
             break;
         case TYPE_VOID:
             snprintf(msg, sizeof(msg),
-                "cannot interpolate a void value: this expression returns "
-                "nothing to render");
+                "cannot %s a void value: this expression returns "
+                "nothing to render", verb);
             break;
         default:
             snprintf(msg, sizeof(msg),
-                "cannot interpolate this value: its type has no string "
-                "rendering");
+                "cannot %s this value: its type has no string "
+                "rendering", verb);
             break;
     }
     type_error(msg, line, col);
@@ -11409,6 +11462,7 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
             for (int i = 0; i < stmt->child_count; i++) {
                 typecheck_expression(stmt->children[i], table);
             }
+            check_print_operands(stmt, table);   /* #3016 */
             /* print's literal is a printf format: a conversion with no
              * argument read whatever the C stack held, so print("100% done")
              * printed garbage and print("a %s") crashed. Each conversion
@@ -15500,7 +15554,19 @@ static int bind_named_arguments(ASTNode* call, Symbol* symbol) {
     return 1;
 }
 
+static int typecheck_function_call_inner(ASTNode* call, SymbolTable* table);
+
 int typecheck_function_call(ASTNode* call, SymbolTable* table) {
+    int ok = typecheck_function_call_inner(call, table);
+    /* #3016: `print` / `println` render each argument by the rule an
+     * interpolation does; no user function can take either name (#2073). */
+    if (call && call->type == AST_FUNCTION_CALL && call->value &&
+        (strcmp(call->value, "print") == 0 || strcmp(call->value, "println") == 0))
+        check_print_operands(call, table);
+    return ok;
+}
+
+static int typecheck_function_call_inner(ASTNode* call, SymbolTable* table) {
     if (!call || call->type != AST_FUNCTION_CALL) return 0;
     note_short_name(call, table);   /* #2976: as written, before any rewrite */
 

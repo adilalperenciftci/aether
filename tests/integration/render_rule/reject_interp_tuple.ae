@@ -1,0 +1,6 @@
+// A tuple has no string rendering (#3016): `${t}` printed a number that
+// changed from run to run, with no diagnostic.
+main() {
+    t = (1, "x")
+    println("t=${t}")
+}

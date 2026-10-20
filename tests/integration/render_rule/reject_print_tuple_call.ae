@@ -1,0 +1,8 @@
+// println of a call returning a tuple reached C as a `%d` of it (#3016).
+pair() -> (int, string) {
+    return (4, "")
+}
+
+main() {
+    println(pair())
+}

@@ -3853,6 +3853,8 @@ age = 30
 println("Hello, ${name}! You are ${age} years old.")
 ```
 
+**What renders.** A value has a string rendering when it is a number (every width, signed or not, and `float`), a `bool`, a `string`, a `duration` or an enum member (its numeric value). One rule decides it for every place that renders a value: a `${...}` segment, each argument of `println` and `print`, and the arguments of `print`'s format form. Anything else is error E0200 before C, with the spelling that renders it: a struct (render a field, `${p.x}`), a tuple (destructure it first, `a, b = t`), a call returning several values, a sum (`match` on it), an optional (give it a value, `${v ?? 0}`), an array (an element), a function (call it). A `ptr` still renders as the C string it points to; the explicit reading is in [A pointer given to a string local](#a-pointer-given-to-a-string-local-e0202).
+
 The text around the `${expr}` parts takes the same escapes as a plain string literal, with the same meaning wherever they sit: `"a\\0b ${n}"` holds a backslash followed by `0b`, `"a\0b ${n}"` holds a NUL byte that the result keeps, and `\${` writes a literal `${` rather than starting an interpolation. A `${s}` segment writes the string `s` by its length, so a value holding a NUL goes in whole; `print` and `println` write a string value the same way.
 
 An interpolated string used as a value is a fresh, counted `string`, which the place it is stored in owns ([String ownership](#string-ownership)):

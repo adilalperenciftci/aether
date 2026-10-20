@@ -1,0 +1,8 @@
+// print's format form picks each argument's conversion from its type, and a
+// struct got `%d` there too (#3016).
+struct P { x: int, y: int }
+
+main() {
+    p = P { x: 1, y: 2 }
+    print("p=%d\n", p)
+}
