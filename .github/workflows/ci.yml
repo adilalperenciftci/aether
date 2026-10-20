@@ -902,7 +902,14 @@ jobs:
             echo "contrib/vulkan ${name} did not pass on lavapipe: exit ${code}, passing=${passing:-none} failing=${failing:-0} skipped=${skipped:-0}"
             echo "$out"
             if [ "$code" -ge 128 ]; then
-              (cd "$dir" && gdb -q -batch -ex run -ex bt -ex 'info sharedlibrary' --args ../vulkan_${name}) 2>&1 | tail -120
+              # Where the fault is: the faulting thread's frames, every
+              # thread's (what the program was doing), the instructions at
+              # the PC and the mapping that holds it (a library's file, or
+              # anonymous executable memory, which is JIT-compiled code).
+              (cd "$dir" && gdb -q -batch -ex run -ex bt -ex 'x/12i $pc-24' \
+                 -ex 'info registers' -ex 'thread apply all bt 12' \
+                 -ex 'info proc mappings' -ex 'info sharedlibrary' \
+                 --args ../vulkan_${name}) 2>&1 | tail -400
             fi
             rc=1
           fi
