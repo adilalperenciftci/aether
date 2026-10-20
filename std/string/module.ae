@@ -50,7 +50,12 @@ exports(
 extern string_new(cstr: string) -> string @heap
 extern string_from_cstr(cstr: string) -> string @heap
 extern string_from_literal(cstr: string) -> string @heap
-extern string_new_with_length(data: string, length: int) -> string @heap
+// `length` bytes from `data` as a new string. A `ptr` (a buffer C filled) is
+// copied as given, never read as a string, so a binary payload that begins
+// like a string's header is copied, not followed (#2301, #3030); a `string`
+// is passed as its characters, so `length` must not exceed its length
+// (string.substring(s, 0, n) stops at the end).
+extern string_new_with_length(data: ptr, length: int) -> string @heap
 extern string_empty() -> string @heap
 
 // Reference counting.

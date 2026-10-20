@@ -1905,6 +1905,11 @@ static int is_stdlib_string_aware_extern(const char* c_func_name) {
      * downstream wrapper turns out to need the unwrapped form, the
      * fix is to add it here; if a user-defined function happens to
      * match a prefix and wants the raw form, it can be renamed. */
+    /* #3030: string_new_with_length copies a raw buffer as given (the
+     * modules hand it C's bytes, which may begin like a string's header),
+     * so a `string` argument goes to it as its characters, and a `ptr` one
+     * as it is. */
+    if (strcmp(c_func_name, "string_new_with_length") == 0) return 0;
     if (strncmp(c_func_name, "string_", 7) == 0) return 1;
     if (strncmp(c_func_name, "aether_string_", 14) == 0) return 1;
     return 0;
@@ -5331,7 +5336,7 @@ void emit_message_string_copy(CodeGenerator* gen, const char* lv, ASTNode* init)
         is_heap_string_expr(gen, init);
     fprintf(gen->output,
             "if (%s) { const char* _mt = %s; size_t _ml = aether_string_length(_mt); "
-            "%s = (const char*)string_new_with_length(aether_string_data(_mt), (int)_ml); ",
+            "%s = (const char*)string_new_with_length((void*)aether_string_data(_mt), (int)_ml); ",
             lv, lv, lv);
     if (owned_temp) fprintf(gen->output, "aether_heap_str_free(_mt); ");
     fprintf(gen->output, "} ");

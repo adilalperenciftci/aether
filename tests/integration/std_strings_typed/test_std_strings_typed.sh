@@ -11,8 +11,8 @@
 # included. Now each result is a `string` the place that takes it owns (no
 # heap growth over rounds of calls), array_get's value is copied by the local
 # that keeps it, and rendering a `ptr` is refused before C. The typed
-# new_with_length lines rest on #3030 (it copies an Aether string's
-# characters, no more than the string holds). Each program runs on the
+# new_with_length lines rest on #3030 (a string goes to it as its
+# characters). Each program runs on the
 # default C path and the strict C11 one.
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
@@ -96,7 +96,6 @@ main() {
     string a = string.from_int(42)
     string b = string.pad_start(a, 5, 48)
     string c = string.new_with_length("abcdef", 3)
-    string c2 = string.new_with_length("ab", 10)
     string e = string.from_int_radix(255, 16)
     string f = string.from_char(65)
     string h = string.pad_end("ab", 4, 46)
@@ -105,7 +104,7 @@ main() {
     list.add(l, f)
     string m = string.format("{}-{}", l)
     list.free(l)
-    println("${a} ${b} ${c} ${c2}:${string.length(c2)} ${string.from_long(9000000000)} ${e} ${f}")
+    println("${a} ${b} ${c} ${string.from_long(9000000000)} ${e} ${f}")
     println("${h} ${string.new("copy")} [${string.empty()}] ${m} ${piece("alpha,beta", 1)}")
     round()
     grown = mem.steady_growth(|| { round() }, 5)
@@ -116,7 +115,7 @@ main() {
     }
 }
 AE
-want="42 00042 abc ab:2 9000000000 ff A
+want="42 00042 abc 9000000000 ff A
 ab.. copy [] 42-A beta
 no growth"
 for path in default nogcc; do
