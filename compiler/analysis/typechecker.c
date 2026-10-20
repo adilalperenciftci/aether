@@ -7760,10 +7760,11 @@ typedef struct KeepCtx KeepCtx;
 /* What a value carries of the borrowed parameters: each parameter, and what
  * holds it ("held by a struct", "held by the result of 'f'"; NULL: the value
  * is the pointer itself, or a view of it). A result built from two `@into`
- * arguments carries both. A holder built from a tuple literal says which
- * part holds the parameter (`parts`, a path such as "1" or "0.1"; NULL: the
- * whole value), so a part read out of it carries only what that part holds
- * (#2990). */
+ * arguments carries both. A holder built from a tuple or struct literal, or
+ * by a store into a local struct's field, says which part holds the
+ * parameter (`parts`, a path such as "1", "a" or "0.in.b"; NULL: the whole
+ * value), so a part read out of it carries only what that part holds
+ * (#2990, #3036). */
 typedef struct {
     int n;
     const char* params[CARRIED_MAX];
@@ -8101,8 +8102,10 @@ static Carried carries_borrowed_ptr(ASTNode* e, const KeepSet* s) {
          * pointer. */
         case AST_MEMBER_ACCESS: case AST_OPTIONAL_CHAIN: case AST_ARRAY_ACCESS: {
             if (e->child_count == 0) return none;
-            return carried_read_out(carried_holders(carries_borrowed_ptr(e->children[0], s)),
-                                    e->node_type);
+            Carried c = carried_holders(carries_borrowed_ptr(e->children[0], s));
+            /* #3036: a field holds what went into it, not its siblings. */
+            if (e->type != AST_ARRAY_ACCESS && e->value) c = carried_part(c, e->value);
+            return carried_read_out(c, e->node_type);
         }
         case AST_UNARY_EXPRESSION: {
             if (!e->value || strcmp(e->value, "&") || e->child_count == 0) return none;
@@ -8119,13 +8122,19 @@ static Carried carries_borrowed_ptr(ASTNode* e, const KeepSet* s) {
             Carried c = none;
             for (int i = 0; i < e->child_count; i++) {
                 ASTNode* f = e->children[i];
-                if (e->type == AST_STRUCT_LITERAL) f = (f && f->child_count > 0) ? f->children[0] : NULL;
+                const char* field = NULL;
+                if (e->type == AST_STRUCT_LITERAL) {
+                    field = f ? f->value : NULL;
+                    f = (f && f->child_count > 0) ? f->children[0] : NULL;
+                }
                 Carried fc = carries_borrowed_ptr(f, s);
-                /* #2990: a tuple part says where it is; an element is read
-                 * at an index the checker does not follow. */
+                /* #2990, #3036: a tuple part or a field says where it is;
+                 * an element is read at an index the checker does not
+                 * follow. */
                 carried_merge(&c, e->type == AST_TUPLE_LITERAL
                                       ? carried_prefix(fc, aether_internf("%d", i))
-                                      : carried_whole(fc));
+                                  : field ? carried_prefix(fc, field)
+                                          : carried_whole(fc));
             }
             carried_set_via(&c, e->type == AST_STRUCT_LITERAL ? "held by a struct"
                                 : e->type == AST_TUPLE_LITERAL ? "held by a tuple"
@@ -8248,6 +8257,15 @@ static const char* local_struct_root(ASTNode* lhs, const char** globals, int ngl
     return b->value;
 }
 
+/* #3036: the field path of a store into a local struct, from its root
+ * (`s.in.b` is "in.b"), as Carried's parts spell it. */
+static const char* struct_store_path(ASTNode* lhs) {
+    if (!lhs || lhs->type != AST_MEMBER_ACCESS || !lhs->value) return NULL;
+    ASTNode* b = lhs->child_count > 0 ? lhs->children[0] : NULL;
+    const char* outer = b && b->type == AST_MEMBER_ACCESS ? struct_store_path(b) : NULL;
+    return outer ? aether_internf("%s.%s", outer, lhs->value) : lhs->value;
+}
+
 /* `name` bound to what `c` holds: a local holds it, a module-level `var`
  * keeps it. */
 static void bind_holder(KeepSet* s, ASTNode* at, const char* name, Carried c,
@@ -8275,7 +8293,9 @@ static void bind_pattern_holders(KeepSet* s, ASTNode* pat, Carried c, Type* t,
             ASTNode* fp = pat->children[k];
             ASTNode* sub = (fp && fp->child_count > 0) ? fp->children[0] : NULL;
             if (!sub) continue;
-            Carried part = carried_read_out(carried_holders(c), sub->node_type);
+            Carried held = carried_holders(c);
+            if (fp->value) held = carried_part(held, fp->value);   /* #3036 */
+            Carried part = carried_read_out(held, sub->node_type);
             if (sub->type == AST_PATTERN_STRUCT)
                 bind_pattern_holders(s, sub, part, sub->node_type, globals, nglobals);
             else if (sub->type == AST_PATTERN_VARIABLE && sub->value)
@@ -8347,7 +8367,8 @@ static void check_ptr_keeps_in(ASTNode* program, ASTNode* n, KeepSet* s,
         if (lhs->type == AST_IDENTIFIER) {
             bind_holder(s, n, lhs->value, c, globals, nglobals);
         } else if ((root = local_struct_root(lhs, globals, nglobals))) {
-            c = carried_whole(c);
+            const char* path = struct_store_path(lhs);   /* #3036 */
+            c = path ? carried_prefix(c, path) : carried_whole(c);
             carried_set_via(&c, "held by a struct");
             keep_set_add(s, root, c);
         } else if (!(s->probe && s->ctx && !c_lvalue_outlives(s->ctx, lhs, s->depth))) {

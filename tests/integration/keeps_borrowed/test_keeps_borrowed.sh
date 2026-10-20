@@ -510,6 +510,67 @@ main() { free(second(null)) }
 AE
 accepted tuple_nested_other
 
+# #3036: a field read out of a struct local holds what went into that field,
+# by the literal, by a store into it, nested, or bound by a struct pattern.
+cat > "$TMP/struct_other_field.ae" <<'AE'
+extern malloc(n: int) -> ptr
+extern free(p: ptr)
+
+struct Pair { a: ptr, b: ptr }
+struct Outer { inner: Pair, n: int }
+
+by_literal(p: ptr) -> ptr {
+    s = Pair { a: p, b: malloc(8) }
+    if s.a == null { return s.b }
+    return s.b
+}
+
+by_store(p: ptr) -> ptr {
+    s = Pair { a: null, b: null }
+    s.a = p
+    s.b = malloc(8)
+    return s.b
+}
+
+nested(p: ptr) -> ptr {
+    o = Outer { inner: Pair { a: p, b: malloc(8) }, n: 1 }
+    o.inner.a = p
+    return o.inner.b
+}
+
+by_pattern(p: ptr) -> ptr {
+    s = Pair { a: p, b: malloc(8) }
+    match s {
+        Pair { a: _, b: q } -> { return q }
+    }
+    return null
+}
+
+main() {
+    free(by_literal(null))
+    free(by_store(null))
+    free(nested(null))
+    free(by_pattern(null))
+}
+AE
+accepted struct_other_field
+
+cat > "$TMP/struct_nested_field.ae" <<'AE'
+struct Pair { a: ptr, b: ptr }
+struct Outer { inner: Pair, n: int }
+
+var kept: ptr = null
+
+put(p: ptr) {
+    o = Outer { inner: Pair { a: null, b: null }, n: 1 }
+    o.inner.b = p
+    kept = o.inner.b
+}
+
+main() { put(null) }
+AE
+refused struct_nested_field 9:5 "'p' is a borrowed \`ptr\` parameter, stored in a module-level \`var\`"
+
 cat > "$TMP/payload_returned.ae" <<'AE'
 unwrap(p: ptr) -> ptr {
     let o: ptr? = p
