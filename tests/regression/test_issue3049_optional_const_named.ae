@@ -1,0 +1,36 @@
+// #3049: an optional constant named in another constant's or a module
+// `var`'s initializer. It is an optional already, and it was wrapped again,
+// `{ .has = 1, .val = ae_const_O }`, an `ae_opt_int` given for the `int`
+// inside, which the C compiler refused. It is written as that constant's own
+// initializer now, a constant expression under every C compiler.
+
+extern exit(code: int)
+
+const NONE_YET: int? = none
+const STILL_NONE = NONE_YET
+const FIVE: int? = 5
+const FIVE_AGAIN = FIVE
+const FIVE_TYPED: int? = FIVE_AGAIN
+const SEVEN = 7
+const SEVEN_OPT: int? = SEVEN
+var held_none = STILL_NONE
+var held_five = FIVE_TYPED
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+main() {
+    check((STILL_NONE ?? 1) == 1, "a none constant named in a constant")
+    check((FIVE_AGAIN ?? 0) == 5, "a constant's value named in a constant")
+    check((FIVE_TYPED ?? 0) == 5, "through two constants, the type written")
+    check((SEVEN_OPT ?? 0) == 7, "an int constant into an optional one")
+    check((held_none ?? 2) == 2, "a none constant in a module var")
+    check((held_five ?? 0) == 5, "a value constant in a module var")
+    held_five = none
+    check((held_five ?? 3) == 3, "the module var takes a new value")
+    println("ok")
+}

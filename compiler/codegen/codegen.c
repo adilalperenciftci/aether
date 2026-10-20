@@ -7142,6 +7142,43 @@ static int emit_static_fn_value_init(CodeGenerator* gen, ASTNode* v) {
     return 1;
 }
 
+/* #3049: the file-scope `const` named `name` whose value is an optional, or
+ * NULL. */
+static ASTNode* file_scope_optional_const(ASTNode* program, const char* name) {
+    for (int i = 0; program && name && i < program->child_count; i++) {
+        ASTNode* cd = program->children[i];
+        if (cd && cd->type == AST_EXPORT_STATEMENT && cd->child_count > 0) cd = cd->children[0];
+        if (!cd || cd->type != AST_CONST_DECLARATION || !cd->value || cd->child_count == 0 ||
+            strcmp(cd->value, name) != 0) continue;
+        if (cd->annotation && strcmp(cd->annotation, "global_var") == 0) return NULL;
+        return cd->node_type && cd->node_type->kind == TYPE_OPTIONAL ? cd : NULL;
+    }
+    return NULL;
+}
+
+/* An optional constant's or module `var`'s initializer, as an initializer
+ * list (#2800, #2807): `none` is `{0}`, a value of the payload's type is
+ * wrapped, `{ .has = 1, .val = ... }`. #3049: an optional constant named
+ * there is already an optional: it was wrapped again, an `ae_opt_int` given
+ * for the `int` inside. It is written as that constant's own initializer, a
+ * constant expression where its static object is not (#2799). */
+static void emit_static_optional_init(CodeGenerator* gen, ASTNode* v, int depth) {
+    if (v->type == AST_NONE_LITERAL) {
+        fprintf(gen->output, "{0}");
+        return;
+    }
+    ASTNode* named = (v->type == AST_IDENTIFIER && depth < 64)
+                         ? file_scope_optional_const(gen->program, v->value) : NULL;
+    if (named) {
+        emit_static_optional_init(gen, named->children[0], depth + 1);
+        return;
+    }
+    fprintf(gen->output, "{ .has = 1, .val = ");
+    if (v->type == AST_STRUCT_LITERAL) emit_static_struct_init(gen, v);
+    else generate_expression(gen, v);
+    fprintf(gen->output, " }");
+}
+
 static void emit_module_global_vars_inner(CodeGenerator* gen, ASTNode* program);
 
 static void emit_module_global_vars(CodeGenerator* gen, ASTNode* program) {
@@ -7179,15 +7216,7 @@ static void emit_module_global_vars_inner(CodeGenerator* gen, ASTNode* program) 
              * (or no initialiser) is `{0}`, a value `{ .has = 1, .val =
              * ... }`, a struct literal's as its initializer list. The
              * value was given bare, which C does not take for the struct. */
-            ASTNode* v = cd->children[0];
-            if (v->type == AST_NONE_LITERAL) {
-                fprintf(gen->output, "{0}");
-            } else {
-                fprintf(gen->output, "{ .has = 1, .val = ");
-                if (v->type == AST_STRUCT_LITERAL) emit_static_struct_init(gen, v);
-                else generate_expression(gen, v);
-                fprintf(gen->output, " }");
-            }
+            emit_static_optional_init(gen, cd->children[0], 0);
         } else if (cd->children[0]->type == AST_NULL_LITERAL &&
             strcmp(ctype, "_AeClosure") == 0) {
             /* #2525: a `var name: fn = null` global starts as the
@@ -9903,13 +9932,7 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
                      * a module `var`'s is (#2800): `{0}` for `none`, a
                      * value wrapped. Given bare, C refused it. */
                     fprintf(gen->output, "static const %s %s = ", ctype, cd->value);
-                    if (cd->children[0]->type == AST_NONE_LITERAL) {
-                        fprintf(gen->output, "{0}");
-                    } else {
-                        fprintf(gen->output, "{ .has = 1, .val = ");
-                        generate_expression(gen, cd->children[0]);
-                        fprintf(gen->output, " }");
-                    }
+                    emit_static_optional_init(gen, cd->children[0], 0);
                     fprintf(gen->output, ";\n");
                     continue;
                 }
