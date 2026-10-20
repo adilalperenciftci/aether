@@ -1235,6 +1235,7 @@ static const char* render_form(int printing, const char* inner, char* buf, size_
 
 static void check_render_operand(ASTNode* child, SymbolTable* table,
                                  int fb_line, int fb_col, int printing);
+static int refuse_valueless(ASTNode* v, SymbolTable* table, const char* what);
 
 static void check_interp_operand(ASTNode* child, SymbolTable* table,
                                  int fb_line, int fb_col) {
@@ -1291,6 +1292,10 @@ static void check_render_operand(ASTNode* child, SymbolTable* table,
      * destructured string `e2` there was reported as a function value --
      * true of its (bogus) inferred type, misleading about the code. */
     if (error_count > 0) return;
+
+    /* A call that gives no value has nothing to render: `${g()}` reached C
+     * as an invalid use of a void expression. */
+    if (refuse_valueless(child, table, verb)) return;
 
     Type* t = child->node_type;
     if (!t || interp_kind_is_renderable(t->kind)) return;
@@ -2169,7 +2174,7 @@ static int is_const_struct_literal(ASTNode* e, SymbolTable* table) {
 
 /* Defined below, beside typecheck_function_call — used by the
  * variable-declaration arm, which appears earlier in this file. */
-static int call_yields_no_value(ASTNode* call, SymbolTable* table);
+static int refuse_valueless(ASTNode* v, SymbolTable* table, const char* what);
 static int fn_yields_no_value(ASTNode* fn);
 /* #2697, #2733, #2736: which `return`s have a value; defined beside
  * fn_yields_no_value. */
@@ -10989,17 +10994,13 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                 /* Reading the value of a call that yields none. The callee
                  * lowers to C `void`, so this reads the return register:
                  * stack residue, different every run, and silent today. See
-                 * call_yields_no_value for the full shape. */
-                if (call_yields_no_value(init, table)) {
-                    char vmsg[320];
-                    snprintf(vmsg, sizeof(vmsg),
-                             "'%s' returns no value, so there is nothing to "
-                             "assign here. Give it a return type (e.g. "
-                             "`%s(...) -> int`) and a `return`, or call it as a "
-                             "statement on its own line",
-                             init->value ? init->value : "function",
-                             init->value ? init->value : "f");
-                    type_error(vmsg, init->line, init->column);
+                 * refuse_valueless for the full shape. */
+                if (refuse_valueless(init, table, "assign")) {
+                    /* Still bind the name, untyped, so its uses do not
+                     * cascade into "Undefined variable" (as the tuple
+                     * destructure does, #1778). */
+                    if (stmt->value && !lookup_symbol(table, stmt->value))
+                        add_symbol(table, stmt->value, create_type(TYPE_UNKNOWN), 0, 0, 0);
                     return 0;
                 }
                 // #1044 implicit enum selector: resolve a bare enum member on
@@ -11869,6 +11870,7 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                 }
                 ASTNode* rhs = stmt->children[1];
                 typecheck_expression(rhs, table);
+                if (refuse_valueless(rhs, table, "use")) return 0;
                 Type* rhs_type = infer_type(rhs, table);
                 /* The target's type, for codegen (#2428: `v op= x` on an
                  * eight-lane value is a helper call). Always the symbol this
@@ -13043,6 +13045,9 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                     c0->children[0]->type == AST_IDENTIFIER && c0->children[0]->value)
                     snprintf(written, sizeof(written), "%s.%s", c0->children[0]->value, c0->value);
                 int operand_ok = typecheck_expression(expr->children[0], table);
+                /* An operand of what gives no value, `-g()` with g
+                 * returning nothing (refuse_valueless). */
+                if (refuse_valueless(expr->children[0], table, "use")) return 0;
                 /* #3022: what `++` / `--` change, in either position. An
                  * operand that is itself a refused step (`-- --5`) has
                  * been reported; it is not reported again as an
@@ -13745,6 +13750,7 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
             // Type check all array elements
             for (int i = 0; i < expr->child_count; i++) {
                 typecheck_expression(expr->children[i], table);
+                if (refuse_valueless(expr->children[i], table, "store")) return 0;
             }
             /* The element type was chosen by the early inference pass from
              * the first element's type BEFORE this pass could resolve
@@ -13791,6 +13797,7 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
              * local nothing could destructure. */
             for (int i = 0; i < expr->child_count; i++) {
                 typecheck_expression(expr->children[i], table);
+                if (refuse_valueless(expr->children[i], table, "store")) return 0;
             }
             if (!expr->node_type || expr->node_type->kind != TYPE_TUPLE) {
                 Type* t = infer_type(expr, table);
@@ -14064,6 +14071,7 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
             if (expr->child_count >= 2) {
                 typecheck_expression(expr->children[0], table);
                 typecheck_expression(expr->children[1], table);
+                if (refuse_valueless(expr->children[1], table, "index with")) return 0;
                 Type* arr_type = expr->children[0]->node_type;
                 Type* idx_type = infer_type(expr->children[1], table);
                 if (arr_type && arr_type->kind == TYPE_ARRAY && arr_type->index_enum_name) {
@@ -14144,6 +14152,10 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                 ASTNode* field_init = expr->children[i];
                 if (field_init && field_init->type == AST_ASSIGNMENT && field_init->child_count > 0) {
                     typecheck_expression(field_init->children[0], table);
+                    if (refuse_valueless(field_init->children[0], table, "store")) {
+                        fields_ok = 0;
+                        continue;
+                    }
                     /* #1286: an array into a `T[]` field becomes a slice; an
                      * `extern struct` field is C's `T*`, so a slice decays. */
                     if (sdef && field_init->value) {
@@ -14834,6 +14846,15 @@ int typecheck_binary_expression(ASTNode* expr, SymbolTable* table) {
 
     typecheck_expression(left, table);
     typecheck_expression(right, table);
+
+    /* A store or an operand of what gives no value (`p.x = g()`, `n + g()`
+     * with g returning nothing, `x = print(1)`) reached C as an invalid use
+     * of a void expression, or for `print` compiled. */
+    {
+        int store = expr->value && strcmp(expr->value, "=") == 0;
+        if (refuse_valueless(right, table, store ? "assign" : "use")) return 0;
+        if (!store && refuse_valueless(left, table, "use")) return 0;
+    }
 
     Type* left_type = infer_type(left, table);
     Type* right_type = infer_type(right, table);
@@ -16234,11 +16255,30 @@ static int fold_clause_set_requires(ASTNode* call, ASTNode* fn) {
     return 1;
 }
 
-static int call_yields_no_value(ASTNode* call, SymbolTable* table) {
-    if (!call || call->type != AST_FUNCTION_CALL || !call->value) return 0;
-    Symbol* sym = lookup_symbol(table, call->value);
-    if (!sym || !sym->node) return 0;
-    return fn_yields_no_value(sym->node);
+/* A value taken from what gives none: a call of a function that returns
+ * nothing, or `print`, assigned (a local, a field, an element), passed as an
+ * argument or used as an operand. The callee lowers to C `void`: C refuses
+ * the use ("invalid use of void expression"), and `x = print(1)` compiled
+ * and read whatever the generated code left. Only a local's initializer was
+ * checked, and only for a call by an unqualified name. Reports and returns 1
+ * when `v` gives nothing; `what` is the verb for the place ("assign",
+ * "pass", "use"). */
+static int refuse_valueless(ASTNode* v, SymbolTable* table, const char* what) {
+    if (!v || (v->type != AST_FUNCTION_CALL && v->type != AST_PRINT_STATEMENT)) return 0;
+    if (tc_value_yields(v, table, NULL, 0)) return 0;
+    char msg[400];
+    if (v->type == AST_PRINT_STATEMENT || !v->value) {
+        snprintf(msg, sizeof(msg),
+                 "'%s' returns no value, so there is nothing to %s here; call it as a "
+                 "statement on its own line", v->value ? v->value : "print", what);
+    } else {
+        snprintf(msg, sizeof(msg),
+                 "'%s' returns no value, so there is nothing to %s here. Give it a "
+                 "return type (e.g. `%s(...) -> int`) and a `return`, or call it as a "
+                 "statement on its own line", v->value, what, v->value);
+    }
+    type_error(msg, v->line, v->column);
+    return 1;
 }
 
 /* ---- #2976: calls that name their module twice --------------------------
@@ -16626,6 +16666,17 @@ static void adopt_closure_signature(ASTNode* arg, Type* slot) {
 
 int typecheck_function_call(ASTNode* call, SymbolTable* table) {
     int ok = typecheck_function_call_inner(call, table);
+    /* An argument of what gives no value, `h(g())` with g returning
+     * nothing, reached C as an invalid use of a void expression. A print
+     * argument is checked by the rendering rule below. */
+    int printing = call && call->type == AST_FUNCTION_CALL && call->value &&
+                   (strcmp(call->value, "print") == 0 || strcmp(call->value, "println") == 0);
+    for (int i = 0; ok && !printing && call && call->type == AST_FUNCTION_CALL &&
+                    i < call->child_count; i++) {
+        ASTNode* a = call->children[i];
+        if (a && a->type == AST_NAMED_ARG && a->child_count > 0) a = a->children[0];
+        if (refuse_valueless(a, table, "pass")) ok = 0;
+    }
     /* #3016: `print` / `println` render each argument by the rule an
      * interpolation does; no user function can take either name (#2073). */
     if (call && call->type == AST_FUNCTION_CALL && call->value &&
