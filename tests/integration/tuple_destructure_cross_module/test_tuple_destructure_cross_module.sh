@@ -56,11 +56,14 @@ AE
 
 cat > "$WORK/lib/container/module.ae" <<'AE'
 import std.map
+import std.string
 
 builder image(ctx: ptr) {
     z, _ = map.get(ctx, "module")
     y = z
-    println(y)
+    // y is a `ptr`, which has no rendering (#3018): read as the string it holds
+    s, _ = string.from_ptr(y)
+    println(s)
 }
 AE
 

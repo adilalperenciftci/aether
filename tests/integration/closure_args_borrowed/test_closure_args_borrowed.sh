@@ -106,11 +106,11 @@ for shape in list map field cell branch; do
     case $shape in
         list)     keeper='kept = list.new()
     keep = | s: string | { list.add(kept, s) }'
-                  reader='v, _ = list.get(kept, 0)
+                  reader='v, _ = list.get_string(kept, 0)
     println(v)' ;;
         map)      keeper='kept = map.new()
     keep = | s: string | { map.put(kept, "k", s) }'
-                  reader='v, _ = map.get(kept, "k")
+                  reader='v, _ = map.get_string(kept, "k")
     println(v)' ;;
         field)    keeper='hb = heap.new(Holder)
     keep = | s: string | { hb.name = s }'
@@ -124,7 +124,7 @@ for shape in list map field cell branch; do
             list.add(kept, s)
         }
     }'
-                  reader='v, _ = list.get(kept, 0)
+                  reader='v, _ = list.get_string(kept, 0)
     println(v)' ;;
     esac
     cat > "$tmp/kept_$shape.ae" <<AE
