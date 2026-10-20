@@ -193,7 +193,8 @@ void register_extern_func(CodeGenerator* gen, ASTNode* ext) {
             if (strstr(param->annotation, "aether_param")) any_aether = 1;
             if (strstr(param->annotation, "retain_param")) any_retain = 1;
             if (strstr(param->annotation, "noescape_param")) any_noescape = 1;
-            if (strstr(param->annotation, "into_param")) any_holds = 1;
+            if (strstr(param->annotation, "into_param") ||
+                strstr(param->annotation, "keep_param")) any_holds = 1;
         }
         if (any_aether) {
             gen->extern_registry[idx].params_aether =
@@ -237,7 +238,8 @@ void register_extern_func(CodeGenerator* gen, ASTNode* ext) {
                     gen->extern_registry[idx].params_noescape[i] = 1;
                 }
                 if (gen->extern_registry[idx].params_holds &&
-                    strstr(param->annotation, "into_param")) {
+                    (strstr(param->annotation, "into_param") ||
+                     strstr(param->annotation, "keep_param"))) {
                     gen->extern_registry[idx].params_holds[i] = 1;
                 }
             }
@@ -775,10 +777,12 @@ int is_noescape_extern_param(CodeGenerator* gen, const char* func_name, int para
     return gen->extern_registry[idx].params_noescape[param_idx];
 }
 
-/* #2990: was extern `func_name`'s parameter at `param_idx` declared `@into`,
- * so the call's result holds the argument past the call? A closure passed
- * there is given a heap box with a reference of its own, as for `@retain`. */
-int is_into_extern_param(CodeGenerator* gen, const char* func_name, int param_idx) {
+/* Was extern `func_name`'s parameter at `param_idx` declared `@into` (the
+ * call's result holds the argument past the call, #2990) or `@keep` (a
+ * binary import's stub for an Aether function that keeps it, #3013)? A
+ * closure passed there is given a heap box with a reference of its own, as
+ * for `@retain`. */
+int is_holding_extern_param(CodeGenerator* gen, const char* func_name, int param_idx) {
     int idx = find_extern_registry_index(gen, func_name);
     if (idx < 0) return 0;
     if (!gen->extern_registry[idx].params_holds) return 0;

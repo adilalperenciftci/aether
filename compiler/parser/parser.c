@@ -5326,6 +5326,13 @@ ASTNode* parse_extern_struct_field(Parser* parser) {
  *             `@retain` is; a call is checked as one to an Aether
  *             function's `@into` parameter.
  *
+ *   @keep     an Aether function's `@keep ptr` behind a C symbol: the stub
+ *             `ae` writes for a binary import (#3013). A call is checked as
+ *             one to that function (a borrowed `ptr` is E0902, a string goes
+ *             only through `string.keep(s)`), which `@retain` is not: R4
+ *             hands `@retain` a string's characters with a reference of its
+ *             own, right for C and not what the Aether function expects.
+ *
  * Multiple annotations stack: `name: @aether @retain string` is legal.
  * Order is irrelevant; storage is a comma-separated set on
  * `param->annotation`, tested by substring. */
@@ -5343,12 +5350,14 @@ static void parse_extern_param_attrs_and_type(Parser* parser, ASTNode* param) {
                 tag = "noescape_param";
             } else if (strcmp(attr->value, "into") == 0) {
                 tag = "into_param";
+            } else if (strcmp(attr->value, "keep") == 0) {
+                tag = "keep_param";
             }
             if (tag) advance_token(parser);
         }
         if (!tag) {
             parser_error(parser, "unknown extern-param attribute (expected @aether, @retain, "
-                                 "@noescape or @into)");
+                                 "@noescape, @into or @keep)");
             break;
         }
         /* Append to the comma-separated set, deduping. */

@@ -7721,7 +7721,7 @@ static ASTNode* call_extern_decl(ASTNode* program, const char* name) {
         ASTNode* e = program->children[c];
         if (!e || e->type != AST_EXTERN_FUNCTION || !e->value) continue;
         if (!strcmp(e->value, name)) return e;
-        if (dotted && e->is_imported && !strcmp(e->value, merged)) return e;
+        if (dotted && (e->is_imported || e->origin_module) && !strcmp(e->value, merged)) return e;
     }
     return NULL;
 }
@@ -7741,14 +7741,15 @@ static ASTNode* call_decl_param(ASTNode* decl, ASTNode* call, int i) {
     return call_param_of(decl, call, i);
 }
 
-/* Does the call `call` keep its argument `i`: a `@keep` parameter of an
- * Aether function, a `@retain` one of an extern? */
+/* Does the call `call` keep its argument `i`: a `@keep` parameter (of an
+ * Aether function, or of an extern that stands for one, as a binary
+ * import's stub does, #3013), or a `@retain` one of an extern? */
 static int call_keeps_arg(ASTNode* program, ASTNode* call, int i) {
     ASTNode* decl = call_callee_decl(program, call);
     ASTNode* p = call_decl_param(decl, call, i);
     if (!p) return 0;
-    if (decl->type == AST_EXTERN_FUNCTION) return param_has_mode(p, "retain_param");
-    return is_keep_param(p);
+    return is_keep_param(p) ||
+           (decl->type == AST_EXTERN_FUNCTION && param_has_mode(p, "retain_param"));
 }
 
 /* Does the `match` arm pattern `pat` bind `name`? */
@@ -8307,7 +8308,7 @@ static void strings_into_keep_walk(const KeepCtx* c, ASTNode* n) {
             const char* kind = unkept_value_kind(program, a);
             if (!kind) continue;
             ASTNode* p = call_decl_param(decl, n, i);
-            if (decl->type != AST_EXTERN_FUNCTION && is_keep_param(p)) {
+            if (is_keep_param(p)) {
                 report_unkept_into_ptr(a, kind, "a `@keep ptr` parameter", "call");
             } else if (is_into_param(p)) {
                 char msg[200];
@@ -8445,12 +8446,15 @@ static void check_param_modes(ASTNode* program, ASTNode* decl) {
         if (other) {
             snprintf(msg, sizeof(msg), "'%s' is declared both `@%s` and `@%s`", p->value, mode,
                      other);
-            type_error_code_hint(msg,
-                                 !strcmp(other, "keep") ? "`@keep` already lets it reach the result"
-                                 : !strcmp(other, "retain")
-                                     ? "`@retain` already lets C keep it anywhere, the result included"
-                                     : "`@noescape` keeps it out of the result as well: declare one",
-                                 p->line, p->column, AETHER_ERR_KEEPS_BORROWED);
+            const char* help =
+                !strcmp(other, "keep") ? "`@keep` already lets it reach the result"
+                : !strcmp(other, "noescape")
+                    ? (into ? "`@noescape` keeps it out of the result as well: declare one"
+                            : "`@noescape` says the function keeps nothing: declare one")
+                : into ? "`@retain` already lets C keep it anywhere, the result included"
+                       : "`@retain` is a C function's keep, `@keep` an Aether function's: "
+                         "declare one";
+            type_error_code_hint(msg, help, p->line, p->column, AETHER_ERR_KEEPS_BORROWED);
             continue;
         }
         if (!into) continue;

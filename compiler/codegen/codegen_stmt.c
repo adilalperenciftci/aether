@@ -4474,12 +4474,13 @@ void hoist_opt_string_locals(CodeGenerator* gen, ASTNode* body) {
  * extern-form). Returns the param's TypeKind, or TYPE_UNKNOWN if the
  * callee can't be resolved. */
 /* Does the parameter at `idx` of the callee hold what it is given past the
- * call: an Aether function's `@keep` one, an extern's `@retain` one (R4),
- * or either's `@into` one, whose result holds it (#2990)? Any other borrows
- * it for the call. */
+ * call: an Aether function's `@keep` one (or an extern's standing for one,
+ * #3013), an extern's `@retain` one (R4), or either's `@into` one, whose
+ * result holds it (#2990)? Any other borrows it for the call. */
 int call_param_keeps(CodeGenerator* gen, const char* func_name, int idx) {
     if (!gen || !func_name || idx < 0) return 0;
-    if (is_retain_extern_param(gen, func_name, idx) || is_into_extern_param(gen, func_name, idx))
+    if (is_retain_extern_param(gen, func_name, idx) ||
+        is_holding_extern_param(gen, func_name, idx))
         return 1;
     ASTNode* def = callee_def(gen, func_name);
     for (int i = 0, pi = 0; def && i < def->child_count; i++) {

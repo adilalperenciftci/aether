@@ -3830,11 +3830,28 @@ static void lib_struct_collect(ASTNode* program, const char* name,
 
 /* `(name: T, ...) -> R` in Aether source, or NULL when a type has no
  * spelling. Malloc'd; the caller frees. */
+/* #3013: what the export at parameter position `pos` does with a `ptr`
+ * (`@keep `, `@into `, as the source spells it before the type), or "".
+ * Any clause of a set that declares it declares it for the set. */
+static const char* fn_param_mode_at(CodeGenerator* gen, ASTNode* fn, int pos) {
+    const DefClauses* dc = gen ? fn_def_clause_set(gen->program, fn) : NULL;
+    int n = dc ? dc->count : 1;
+    for (int c = 0; c < n; c++) {
+        ASTNode* p = fn_param_at(dc ? dc->nodes[c] : fn, pos);
+        if (!p) continue;
+        if (annotation_has_marker(p->annotation, "keep_param")) return "@keep ";
+        if (annotation_has_marker(p->annotation, "into_param")) return "@into ";
+    }
+    return "";
+}
+
 static char* fn_source_signature_string(CodeGenerator* gen, ASTNode* fn) {
     CgText b = {NULL, 0, 0};
     cg_text_put(&b, "(");
     /* The export's signature (lib_fn_signature): its set's, for a function
-     * written as several clauses (#2665). */
+     * written as several clauses (#2665). A parameter's `@keep` or `@into`
+     * is part of it (#3013): the stub a binary import is checked against
+     * declares it, so the importer is checked as a source import is. */
     LibSig sig;
     const char* why = NULL;
     lib_fn_signature(gen, fn, &sig, &why);
@@ -3845,6 +3862,7 @@ static char* fn_source_signature_string(CodeGenerator* gen, ASTNode* fn) {
         if (pos > 0) cg_text_put(&b, ", ");
         cg_text_put(&b, pos < LIB_SIG_MAX ? sig.names[pos] : cg_internf("arg%d", pos));
         cg_text_put(&b, ": ");
+        cg_text_put(&b, fn_param_mode_at(gen, fn, pos));
         cg_text_put(&b, ts);
     }
     Type* result = fn_result_type(gen, fn);
@@ -4012,8 +4030,9 @@ static void emit_lib_metadata(CodeGenerator* gen, ASTNode* program) {
     free(st_all);
     /* Source signatures, parallel to fns[]. Emitted only when the artifact
      * has struct records or some export's source spelling differs from its
-     * display signature (a typed pointer, a struct, a function pointer), so
-     * an artifact with neither stays byte-identical to schema 1.2. */
+     * display signature (a typed pointer, a struct, a function pointer, a
+     * parameter's `@keep` or `@into`, #3013), so an artifact with none of
+     * them stays byte-identical to schema 1.2. */
     char** src_sigs = (char**)calloc((size_t)(fn_count > 0 ? fn_count : 1), sizeof(char*));
     int src_sig_needed = struct_count > 0;
     for (int i = 0; i < fn_count; i++) {
@@ -4028,6 +4047,7 @@ static void emit_lib_metadata(CodeGenerator* gen, ASTNode* program) {
                 if (t && ((t->kind == TYPE_PTR && t->element_type) ||
                           t->kind == TYPE_STRUCT || t->kind == TYPE_FUNCTION))
                     src_sig_needed = 1;
+                if (fn_param_mode_at(gen, fn, pos)[0]) src_sig_needed = 1;
             }
         }
     }

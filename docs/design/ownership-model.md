@@ -460,11 +460,16 @@ and result type. No rule reads another function's body.
   the extern stub built from the catalog's source signature, so the
   annotations have to cross: the source signature spells `@keep` and
   `@into` on the parameter (and is written whenever a parameter has one),
-  and the stub declares `@retain` for `@keep` and `@into` for `@into`.
-  Today the catalog leaves `@keep` out and an importer treats that
-  parameter as borrowed (#3013); both are carried together. For a C host
-  the catalog states the contract: keep the argument alive while the
-  result is held.
+  and the stub declares them as they are: an extern's parameter takes
+  `@keep` as well as `@into`, and a call is checked as one to the Aether
+  function behind it (#3013). The stub does not declare `@retain` for
+  `@keep`, as first written here: R4 hands a string given to a `@retain`
+  parameter over as its characters with a reference of its own, which is
+  right for C, while the Aether function behind the stub expects what
+  `string.keep(s)` gives, and a source import refuses the implicit string
+  (E0902), so a binary import must too. For a C host the catalog states
+  the contract: keep the argument alive while the library holds it
+  (`@keep`), or while the result is held (`@into`).
 - **Generated code.** A `ptr` owns nothing (R4); the rule is a check, as
   E0902 is, with one exception found while building it: a closure given
   to an `@into ptr` goes in a heap box holding a reference of its own, as

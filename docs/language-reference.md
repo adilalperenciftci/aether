@@ -3570,6 +3570,13 @@ carry a borrowed `ptr` parameter out of the caller. `@into` does not combine
 with `@retain` (C may keep the argument anywhere) or `@noescape` (the
 argument stays out of the result too).
 
+An extern's parameter may also be `@keep`: that is how `ae` declares a
+binary import's export whose Aether parameter is `@keep ptr` (#3013), and a
+call is checked as one to that Aether function: a borrowed `ptr` given to
+it is E0902, and a string goes only through `string.keep(s)`. `@retain`
+would be wrong there, since it hands C a string's characters with a
+reference of its own, not the counted string the Aether function keeps.
+
 ### `@extern("c_name")` bind to a renamed C symbol
 
 When the Aether-side name should differ from the C symbol (for example, to expose a clean module surface without trailing `_raw` suffixes), prefix the declaration with `@extern("c_symbol")`:

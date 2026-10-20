@@ -310,8 +310,10 @@ typedef struct {
                              //   callee that keeps nothing (#2523). NULL when
                              //   no param carries the annotation.
         int* params_holds;   // 1 per index when the param was declared
-                             //   `name: @into ptr`: the call's result holds the
-                             //   argument past the call (#2990), so a closure
+                             //   `name: @into ptr` (the call's result holds the
+                             //   argument past the call, #2990) or `name: @keep
+                             //   ptr` (a binary import's stub for an Aether
+                             //   function that keeps it, #3013), so a closure
                              //   passed there is given a heap box with a
                              //   reference of its own, as for `@retain`. NULL
                              //   when no param carries the annotation.

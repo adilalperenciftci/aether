@@ -863,12 +863,19 @@ typedef struct {
   both export a struct of one name still clash, as every same-named pair
   did before struct types were module-scoped.
 - `source_signatures[i]` is `functions[i]`'s signature as Aether source,
-  with parameter names: `"(m: *Model, p: Vec3) -> void"`. An entry is `""`
-  when an export has no source spelling.
+  with parameter names: `"(m: *Model, p: Vec3) -> void"`. A parameter's
+  `@keep` or `@into` is part of it (`"(p: @keep ptr) -> void"`, #3013): the
+  extern `ae` declares for an importer carries it, so the importer is
+  checked as a source import is (a borrowed `ptr` given to a `@keep`
+  parameter, or a string given to one without `string.keep`, is E0902),
+  and a C host reads the contract: keep the argument alive while the
+  library holds it (`@keep`) or while the result is held (`@into`). An
+  entry is `""` when an export has no source spelling.
 
 Both are emitted only when an artifact has struct records or a signature
-the display form flattens, so a library with neither stays byte-identical
-to schema 1.2.
+the display form flattens (a typed pointer, a struct, a function pointer, a
+`@keep` or `@into` parameter), so a library with none of them stays
+byte-identical to schema 1.2.
 
 #### Consuming a published library from Aether (`import`)
 
@@ -888,11 +895,12 @@ main() {
 }
 ```
 
-When `ae run` / `ae build` sees an `import foo` that has no `foo` source
-module but a `libfoo.so` / `foo.so` on the search path, it reads that
-artifact's `aether_lib_meta()` catalog and synthesizes a small Aether
-interface stub: an `@extern("<c_symbol>") name(...) -> R` for each
-function export (typed by its source signature from schema 1.3), a
+When `ae run` / `ae build` / `ae check` sees an `import foo` that has no
+`foo` source module but a `libfoo.so` / `foo.so` on the search path, it
+reads that artifact's `aether_lib_meta()` catalog and synthesizes a small
+Aether interface stub: an `@extern("<c_symbol>") name(...) -> R` for each
+function export (typed by its source signature from schema 1.3, a
+parameter's `@keep` and `@into` included), a
 `struct` declaration for each struct record, and a trailing-block `builder`
 wrapper for each `builder` record (forwarding the block's config map to the library
 function's `(..., _builder)` entry point). The stub is dropped onto the
@@ -1130,6 +1138,7 @@ The integration suite under `tests/integration/` covers:
 | `binary_import_package/` | `--package` builds two modules into one library: stable `aether_<module>__<name>` symbols, schema 1.4 module records, export-list and `_`-suffix privacy, a host importing both modules by name from the binary (#2297) |
 | `binary_import_structs/` | Schema 1.3 struct records and source signatures: a struct by value, `*Struct` field access, a function-pointer field, closures both ways with their captures, one module state shared by a host and a second binary library; static runtime on Linux/FreeBSD (a library panic caught; elsewhere the import is refused, since `*Model` holds a string) and `--shared-runtime` (caught everywhere, schema 1.5), Windows included (#2297) |
 | `binary_import_ownership/` | Strings an export or a builder returns are given back to the library's runtime: 0 growth and no leaks(1) findings for a binary import (static and shared runtime) and a C host releasing through the catalog's `string_release`; a struct holding a string and a builder freeing its config run on one runtime and are refused across two (#2931, #2861) |
+| `binary_import_keep/` | A `@keep ptr` and an `@into ptr` export cross the catalog's source signature, and each importer gets the same E0902 verdict from `ae check` against the library as against its source (a string or a borrowed `ptr` to the `@keep` parameter, an `@into` result that escapes); the accepted one runs (#3013) |
 | `binary_import_actors/` | A library's actors in a program with none of its own: the first spawn starts the scheduler, schema 1.7 `actors` passes through a second library, and the program's exit drains a fire-and-forget message (shared runtime everywhere, static on Linux/FreeBSD; elsewhere a warning) (#2297) |
 | `emit_lib_keeps_main/` | A program's `main()` as `aether_main` / `aether_main_exit`: a C host runs it (args, an ask/reply, its return value), the actors outlive `aether_main` and `aether_main_exit` drains them, a second `aether_main` is rejected, a rerun works without leaking scheduler tables (macOS `leaks`), the executable prints the same lines, no pair without `main()`, the reserved `main_exit`, the `--emit=csrc` header, and aarch64-linux / Android cross builds |
 | `emit_lib_kind_safe/` | Kind-discriminator predicates + deep-free safety, adversarial low-address probe (`(AetherValue*)42`) survives, kind correctly classifies map/list/scalar slots, deep-free walks nested map+list+scalars, magic-clear-on-free defends UAF probes |

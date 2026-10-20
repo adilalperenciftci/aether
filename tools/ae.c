@@ -5392,6 +5392,13 @@ static int ae_lib_provides_module(const char* so_path, const char* module) {
  * itself or in a field of a struct the catalog records (by value or through
  * a typed pointer). A function pointer holds none. */
 static int ae_type_holds_string(const _AeLibInfoMeta* m, int minor, const char* type, int depth) {
+    /* A parameter's `@keep` or `@into` (#3013) is not part of its type. */
+    while (*type == ' ' || *type == '@') {
+        if (*type == '@')
+            while (*type && *type != ' ') type++;
+        else
+            type++;
+    }
     while (*type == ' ' || *type == '*') type++;
     if (strncmp(type, "struct ", 7) == 0) type += 7;
     if (strncmp(type, "fn", 2) == 0 && !(isalnum((unsigned char)type[2]) || type[2] == '_'))
@@ -5597,7 +5604,10 @@ static int ae_generate_binimport_stub(const char* so_path, const char* module, F
                         strcmp(m->function_modules[i], module) == 0)) continue;
         /* The source signature (schema >= 1.3) keeps typed pointers,
          * structs and function pointers that the display signature
-         * flattens to `ptr`; it is already `(name: T, ...) -> R`. */
+         * flattens to `ptr`; it is already `(name: T, ...) -> R`. It
+         * spells a parameter's `@keep` and `@into` too (#3013), which an
+         * extern takes as they are, so the importer is checked against
+         * them as a source import is. */
         const char* ssig = (minor >= 3 && m->source_signatures)
                            ? m->source_signatures[i] : NULL;
         if (ssig && ssig[0] == '(') {
@@ -7214,6 +7224,11 @@ static int cmd_check(int argc, char** argv) {
         fprintf(stderr, "Error: File not found: %s\n", file);
         return 1;
     }
+
+    /* A binary import resolves to the stub its library's catalog gives, as
+     * for `ae build` and `ae run` (#3013): without it the check refused the
+     * import as unresolved. */
+    prepare_binary_imports(file);
 
     /* Build the same `--lib X --lib Y …` flag sequence the compile
      * path uses (cc_command_build); one flag per entry sidesteps
