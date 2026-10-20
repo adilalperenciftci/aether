@@ -8481,12 +8481,14 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     print_line(gen, "#endif");
     /* A number literal divided by a zero literal, `1.0 / 0.0`, is IEEE
        infinity or NaN. GCC computes it; cl.exe refuses a constant division
-       by zero (C2124), so another compiler gets the value by name. */
+       by zero (C2124), so another compiler gets the value by name. `s` is
+       the zero's sign, 1 or -1: `1.0 / -0.0` is -infinity (#2799 review;
+       the sign was dropped). Still a constant expression, for a static. */
     print_line(gen, "#if AETHER_GCC_COMPAT");
-    print_line(gen, "#  define _AE_FDIV0(a) ((a) / 0.0)");
+    print_line(gen, "#  define _AE_FDIV0(a, s) ((a) / ((s) * 0.0))");
     print_line(gen, "#else");
     print_line(gen, "#  include <math.h>");
-    print_line(gen, "#  define _AE_FDIV0(a) ((a) > 0 ? (double)INFINITY : (a) < 0 ? -(double)INFINITY : (double)NAN)");
+    print_line(gen, "#  define _AE_FDIV0(a, s) ((a) * (s) > 0 ? (double)INFINITY : (a) * (s) < 0 ? -(double)INFINITY : (double)NAN)");
     print_line(gen, "#endif");
     print_line(gen, "#if AETHER_GCC_COMPAT");
     print_line(gen, "#  define _AE_MEMCPY(d, s, n) __builtin_memcpy((d), (s), (n))");

@@ -1,0 +1,42 @@
+// #2799 review: a number literal divided by a zero literal is written
+// _AE_FDIV0, IEEE infinity or NaN by name, since cl.exe refuses a constant
+// division by zero. It dropped the zero's sign: `1.0 / -0.0` was +inf and
+// `-1.0 / -0.0` was -inf, on the GCC path and off it. A negative float zero
+// gives the infinity of the other sign; an int `-0` is 0. In a function, a
+// constant and a module `var` (a static's initializer, a constant
+// expression on every compiler).
+
+extern exit(code: int)
+
+const NEG = 1.0 / -0.0
+var pos = -1.0 / -0.0
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+// Infinite: a number (equal to itself) that times zero is NaN.
+fn infinite(x: float) -> bool {
+    return x == x && x * 0.0 != x * 0.0
+}
+
+main() {
+    a = 1.0 / -0.0
+    b = -1.0 / -0.0
+    c = 1.0 / 0.0
+    d = -1.0 / 0.0
+    e = 1.0 / -0
+    n = 0.0 / -0.0
+    check(infinite(a) && a < 0.0, "1.0 / -0.0 is -inf: ${a}")
+    check(infinite(b) && b > 0.0, "-1.0 / -0.0 is inf: ${b}")
+    check(infinite(c) && c > 0.0, "1.0 / 0.0 is inf: ${c}")
+    check(infinite(d) && d < 0.0, "-1.0 / 0.0 is -inf: ${d}")
+    check(infinite(e) && e > 0.0, "1.0 / -0 is inf, an int's zero has no sign: ${e}")
+    check(n != n, "0.0 / -0.0 is NaN: ${n}")
+    check(infinite(NEG) && NEG < 0.0, "a constant 1.0 / -0.0 is -inf: ${NEG}")
+    check(infinite(pos) && pos > 0.0, "a module var -1.0 / -0.0 is inf: ${pos}")
+    println("ok")
+}

@@ -8908,10 +8908,15 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                 } else if (is_literal_float_div_by_zero(expr)) {
                     /* #2799: `1.0 / 0.0`, a constant division by zero cl.exe
                      * refuses (C2124); _AE_FDIV0 is the same value under every
-                     * compiler. */
+                     * compiler, given the zero's sign: `-0.0` is a negative
+                     * zero, `-0` an int's 0 (#2799 review). */
+                    const ASTNode* z = expr->children[1];
+                    int neg = z->type == AST_UNARY_EXPRESSION && z->child_count == 1 &&
+                              z->children[0]->node_type &&
+                              z->children[0]->node_type->kind == TYPE_FLOAT;
                     fprintf(gen->output, "_AE_FDIV0(");
                     generate_expression(gen, expr->children[0]);
-                    fprintf(gen->output, ")");
+                    fprintf(gen->output, ", %d)", neg ? -1 : 1);
                 } else {
                     if (!skip_parens) fprintf(gen->output, "(");
 
