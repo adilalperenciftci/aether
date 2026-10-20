@@ -14405,8 +14405,13 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                      * lane read, and a local bound from a unary expression
                      * (`inv = ~m`, `n = -v`) is not typed by the early
                      * inference pass, so `inv.x` reached the C as a member
-                     * access on a vector. */
+                     * access on a vector. #3041: and check the object, a
+                     * value of a lane type (no namespace), as every other
+                     * member access's is: left unchecked, the nodes under it
+                     * kept no types, and `b.inner.v.z` with `b` a pointer
+                     * reached the C as `b.inner`, where `->` is needed. */
                     ASTNode* obj = expr->children[0];
+                    if (!typecheck_expression(obj, table)) return 0;
                     if (!obj->node_type || obj->node_type->kind == TYPE_UNKNOWN)
                         set_node_type(obj, create_type(objk));
                     set_node_type(expr, create_type(elem));
