@@ -6035,6 +6035,95 @@ static void bind_struct_pattern_names(ASTNode* p, SymbolTable* table) {
     }
 }
 
+/* #3056: the program's functions whose result type is still to be inferred
+ * from what they return: no written result type, none the early inference
+ * pass found, and a `return` of a value. Each takes the checked type of its
+ * first value `return` (refine_inferred_result), so each is checked before
+ * the first top-level declaration that calls it, its callees of the kind
+ * before it: checked after a caller, the call's result was unknown there,
+ * and codegen gave it int. Every other declaration is checked in program
+ * order, as before. */
+typedef struct {
+    ASTNode** tops;   /* the top-level node (an `export` wraps its function) */
+    ASTNode** fns;
+    int* state;       /* 0 to check, 1 being checked, 2 checked */
+    int count;
+    int cap;
+} PendingResults;
+
+static int returns_value_in(ASTNode* n) {
+    if (!n || n->type == AST_CLOSURE || n->type == AST_FUNCTION_DEFINITION ||
+        n->type == AST_BUILDER_FUNCTION)
+        return 0;
+    if (n->type == AST_RETURN_STATEMENT && n->child_count > 0) return 1;
+    for (int i = 0; i < n->child_count; i++)
+        if (returns_value_in(n->children[i])) return 1;
+    return 0;
+}
+
+static void pending_results_find(ASTNode* program, PendingResults* p) {
+    for (int i = 0; i < program->child_count; i++) {
+        ASTNode* top = program->children[i];
+        ASTNode* fn = top;
+        if (fn && fn->type == AST_EXPORT_STATEMENT && fn->child_count > 0) fn = fn->children[0];
+        if (!fn || (fn->type != AST_FUNCTION_DEFINITION && fn->type != AST_BUILDER_FUNCTION) ||
+            !fn->value || !fn->type_inferred || fn->child_count == 0 ||
+            (fn->node_type && fn->node_type->kind != TYPE_UNKNOWN) ||
+            !returns_value_in(fn->children[fn->child_count - 1]))
+            continue;
+        if (p->count == p->cap) {
+            p->cap = p->cap ? p->cap * 2 : 8;
+            p->tops = aether_xrealloc(p->tops, (size_t)p->cap * sizeof(ASTNode*));
+            p->fns = aether_xrealloc(p->fns, (size_t)p->cap * sizeof(ASTNode*));
+            p->state = aether_xrealloc(p->state, (size_t)p->cap * sizeof(int));
+        }
+        p->tops[p->count] = top;
+        p->fns[p->count] = fn;
+        p->state[p->count++] = 0;
+    }
+}
+
+static int pending_result_of_top(const PendingResults* p, ASTNode* top) {
+    for (int j = 0; j < p->count; j++)
+        if (p->tops[j] == top) return j;
+    return -1;
+}
+
+/* One top-level declaration through the second pass. */
+static void typecheck_top(ASTNode* top, SymbolTable* global_table) {
+    g_tc_file = top ? top->source_file : NULL;
+    /* #2614: a merged declaration (a module's function, actor or
+     * constant) resolves qualified names against its own module's
+     * imports, whatever kind of node it is. */
+    global_table->merged_from = top ? top->origin_module : NULL;
+    typecheck_node(top, global_table);
+    global_table->merged_from = NULL;
+    warn_erased_result_closures();   /* #2484 */
+}
+
+static void typecheck_pending_callees(ASTNode* n, PendingResults* p, SymbolTable* global_table);
+
+/* Check pending function `j`, the pending functions it calls first. */
+static void typecheck_pending(int j, PendingResults* p, SymbolTable* global_table) {
+    p->state[j] = 1;
+    typecheck_pending_callees(p->fns[j], p, global_table);
+    typecheck_top(p->tops[j], global_table);
+    p->state[j] = 2;
+}
+
+/* Check the pending functions `n` calls that are not checked yet. One
+ * being checked (a recursion) is left as it is. */
+static void typecheck_pending_callees(ASTNode* n, PendingResults* p, SymbolTable* global_table) {
+    if (!n) return;
+    if (n->type == AST_FUNCTION_CALL && n->value) {
+        for (int j = 0; j < p->count; j++)
+            if (p->state[j] == 0 && !strcmp(p->fns[j]->value, n->value))
+                typecheck_pending(j, p, global_table);
+    }
+    for (int i = 0; i < n->child_count; i++)
+        typecheck_pending_callees(n->children[i], p, global_table);
+}
+
 int typecheck_program(ASTNode* program) {
     note_program_globals(program);
     if (!program || program->type != AST_PROGRAM) return 0;
@@ -6891,18 +6980,23 @@ int typecheck_program(ASTNode* program) {
             quote_register_helper(top);
     }
 
-    // Second pass: type check all nodes
+    // Second pass: type check all nodes. #3056: a function whose result is
+    // inferred from its checked `return` before the first one that calls it.
+    PendingResults pending = { 0 };
+    pending_results_find(program, &pending);
     for (int i = 0; i < program->child_count; i++) {
         ASTNode* top = program->children[i];
-        g_tc_file = top ? top->source_file : NULL;
-        /* #2614: a merged declaration (a module's function, actor or
-         * constant) resolves qualified names against its own module's
-         * imports, whatever kind of node it is. */
-        global_table->merged_from = top ? top->origin_module : NULL;
-        typecheck_node(top, global_table);
-        global_table->merged_from = NULL;
-        warn_erased_result_closures();   /* #2484 */
+        int j = pending.count ? pending_result_of_top(&pending, top) : -1;
+        if (j >= 0) {
+            if (pending.state[j] == 0) typecheck_pending(j, &pending, global_table);
+            continue;
+        }
+        if (pending.count) typecheck_pending_callees(top, &pending, global_table);
+        typecheck_top(top, global_table);
     }
+    free(pending.tops);
+    free(pending.fns);
+    free(pending.state);
     g_tc_file = NULL;
 
     /* Each @quotable function, now type-checked, lowered to its tree (its
@@ -11277,6 +11371,15 @@ typedef struct {
     Type* result;          /* #3044: the `T!` whose success value this is, or NULL */
 } ReturnOwner;
 
+/* `f(...)` through a bare `fn` value: its signature is gone, so its result
+ * is the erased default, as `call(f, ...)`'s is (#2054). */
+static int is_bare_fn_call(ASTNode* v, SymbolTable* table) {
+    if (!v || v->type != AST_FUNCTION_CALL || !v->value) return 0;
+    Symbol* s = lookup_symbol(table, v->value);
+    return s && !s->is_function && s->type && s->type->kind == TYPE_FUNCTION &&
+           !s->type->is_fnptr && !s->type->closure_literal && fn_type_is_erased(s->type);
+}
+
 /* #2782: check one value a `return` gives against the result type `rt`.
  * A value that branches (an if-expression, a `match` whose value is used)
  * gives each arm's value, checked on its own. Returns 1 when it fits. */
@@ -11306,12 +11409,7 @@ static int check_return_value(ASTNode* v, Type* rt, const ReturnOwner* own,
         return 1;
     /* So does `f(...)` through a bare `fn` value, the same call spelled
      * directly: its signature is gone, and the result type restores it. */
-    if (v->type == AST_FUNCTION_CALL && v->value) {
-        Symbol* s = lookup_symbol(table, v->value);
-        if (s && !s->is_function && s->type && s->type->kind == TYPE_FUNCTION &&
-            !s->type->is_fnptr && !s->type->closure_literal && fn_type_is_erased(s->type))
-            return 1;
-    }
+    if (is_bare_fn_call(v, table)) return 1;
     /* A function named as a value is its address, which no slot checks by
      * its result type. */
     if (v->type == AST_IDENTIFIER && v->value) {
@@ -11460,6 +11558,52 @@ static int check_return_values(ASTNode* ret, Type* rt, const ReturnOwner* own,
     return check_return_value(v, rt, own, table);
 }
 
+/* #3056: a function whose result type is inferred, and that the early
+ * inference pass left unknown (it cannot type a field read through a
+ * pointer, among others), takes the checked type of its first value
+ * `return`. Left unknown, codegen gave it int, the legacy default, and a
+ * long returned that way was truncated with no word. Later returns are
+ * checked against it, as against any result inferred from the first
+ * `return`, and so are the calls checked after this one (the function's
+ * symbols take it too; typecheck_program checks such a function before
+ * its callers, PendingResults). An unknown result Type already there keeps its
+ * identity and takes the new contents, since a closure checked before the
+ * `return` saved it to restore after its body. Returns the type, or NULL
+ * when there is nothing to refine. */
+static Type* refine_inferred_result(ASTNode* o, ASTNode* ret, SymbolTable* table) {
+    if (!o || (o->type != AST_FUNCTION_DEFINITION && o->type != AST_BUILDER_FUNCTION) ||
+        !o->type_inferred || !o->value)
+        return NULL;
+    if (o->node_type && o->node_type->kind != TYPE_UNKNOWN) return NULL;
+    if (ret->child_count != 1 || !ret->children[0]) return NULL;
+    /* An erased call's int is a default, not a result: the function is
+     * left unknown, as it was. */
+    if (is_erased_call(ret->children[0]) || is_bare_fn_call(ret->children[0], table)) return NULL;
+    Type* vt = infer_type(ret->children[0], table);
+    if (!vt || vt->kind == TYPE_UNKNOWN || vt->kind == TYPE_VOID) {
+        if (vt) free_type(vt);
+        return NULL;
+    }
+    if (o->node_type) {
+        Type swap = *o->node_type;
+        *o->node_type = *vt;
+        *vt = swap;
+        free_type(vt);
+    } else {
+        o->node_type = vt;
+    }
+    /* Each name the function has (an import alias is one more). */
+    SymbolTable* root = table;
+    while (root && root->parent) root = root->parent;
+    for (Symbol* fs = root ? root->symbols : NULL; fs; fs = fs->next) {
+        if (!fs->is_function || fs->node != o || (fs->type && fs->type->kind != TYPE_UNKNOWN))
+            continue;
+        if (fs->type) free_type(fs->type);
+        fs->type = clone_type(o->node_type);
+    }
+    return o->node_type;
+}
+
 /* #2782: check the `return` statement `ret` against what it returns from
  * (g_tc_return_owner): a function's result type, written or inferred, or,
  * for a closure, the result its first value `return` gives it, as codegen's
@@ -11471,6 +11615,10 @@ static int check_return_statement(ASTNode* ret, SymbolTable* table) {
     ReturnOwner own = { o ? o->value : NULL, o ? o->type_inferred : 0, 0, NULL, NULL };
     Type* rt = g_tc_return_type;
     Type* made = NULL;
+    if (!rt || rt->kind == TYPE_UNKNOWN) {
+        Type* refined = refine_inferred_result(o, ret, table);   /* #3056 */
+        if (refined) rt = g_tc_return_type = refined;
+    }
     /* #2998: a bare `return` in a function whose written result is a value
      * gave its caller whatever the result register held: C takes `return;`
      * in a non-void function with a warning (GCC 14 refuses it). */
