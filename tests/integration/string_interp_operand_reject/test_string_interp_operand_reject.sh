@@ -157,11 +157,12 @@ else
     fail=$((fail + 1))
 fi
 
-# --- ACCEPT: a single-bound tuple -------------------------------------------
-# `x = f()` where f returns (int, string) binds the FIRST element -- verified,
-# it yields 42 rather than a tuple -- but the slot keeps the tuple type.
-# Rejecting that flagged a working example in std/tcp/README.md, so the type
-# being wrong is not evidence the value is un-renderable.
+# --- REJECT: a name holding a tuple (#3016) ------------------------------------
+# `x = f()` where f returns (int, string) once bound the first element while
+# the name kept the tuple type, so a tuple-typed name was admitted. A single
+# name now binds the whole tuple (the C local is the tuple struct), and
+# `${single}` printed that struct as `%d`: a different number each run. A
+# tuple has no rendering; destructure it first.
 cat > "$TMP/tup.ae" << 'EOF'
 pair() -> (int, string) { return 42, "err" }
 main() {
@@ -169,17 +170,18 @@ main() {
     println("first element ${single}")
 }
 EOF
-if "$AE" build "$TMP/tup.ae" -o "$TMP/tup.bin" >"$TMP/tup.log" 2>&1; then
-    echo "  [PASS] single-bound tuple still accepted"
+out=$("$AE" build "$TMP/tup.ae" -o "$TMP/tup.bin" 2>&1)
+if echo "$out" | grep -q "cannot interpolate a tuple"; then
+    echo "  [PASS] a name holding a tuple rejected"
     pass=$((pass + 1))
 else
-    echo "  [FAIL] single-bound tuple rejected; that breaks std/tcp's README:"
-    grep -E "^error" "$TMP/tup.log" | head -3 | sed 's/^/    /'
+    echo "  [FAIL] expected the tuple diagnostic for a name holding a tuple; got:"
+    echo "$out" | head -6 | sed 's/^/    /'
     fail=$((fail + 1))
 fi
 
-# A multi-value CALL interpolated directly is never a bound scalar: the whole
-# (value, err) struct went to printf. The bound-name case above stays admitted.
+# A multi-value CALL interpolated directly: the whole (value, err) struct
+# went to printf; the diagnostic names the destructuring.
 cat > "$TMP/tupcall.ae" << 'EOF'
 pair() -> (int, string) { return 1, "" }
 main() {
