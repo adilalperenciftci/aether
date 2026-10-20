@@ -136,8 +136,10 @@ bounded() {
                 echo "    $line"
                 [ "$p" = "$bpid" ] || stuck="$stuck $(ps -o comm= -p "$p" 2>/dev/null)"
             done
+            # kill-ok: macOS-only (a bounded step runs xcrun), never on Windows; the tree was just read from ps
             for p in $tree; do kill -TERM "$p" 2>/dev/null || true; done
             sleep 2
+            # kill-ok: macOS-only, as above; what survived TERM
             for p in $tree; do kill -KILL "$p" 2>/dev/null || true; done
             wait "$bpid" 2>/dev/null || true
             echo "  output so far:"
