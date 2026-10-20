@@ -1968,7 +1968,8 @@ error (`` `or { }` handler must end with a value … or leave ``), previously
 that shape compiled and read an **uninitialized** result on the error path.
 Whether a statement leaves is decided by one rule everywhere it matters: the
 `or` handler, a value `match` arm, a function's missing return and W1002's
-unreachable code all agree.
+unreachable code all agree, except that W1002 does not fold an `if` on a
+constant ([Unreachable Code](#unreachable-code-w1002)).
 
 **`expr!` propagate the error.** Inside a function that itself returns `T!`,
 `!` returns `(zero, err)` to the caller when the error slot is non-empty, so an

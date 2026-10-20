@@ -101,4 +101,16 @@ else
     fail=1
 fi
 
+# A bare select() with no function of that name is the builtin with no
+# branches: E0701 before C, not an undeclared ae_select in the C compiler.
+printf 'main() {\n    n = select()\n    println(n)\n}\n' > "$TMP/bare.ae"
+out="$("$AE" check "$TMP/bare.ae" 2>&1)"
+if printf '%s\n' "$out" | grep -q "error\[E0701\]"; then
+    echo "  [PASS] bare_select: a select() with no branches and no function of that name is E0701"
+else
+    echo "  [FAIL] bare_select: expected E0701, got:"
+    printf '%s\n' "$out" | head -4 | sed 's/^/        /'
+    fail=1
+fi
+
 exit $fail

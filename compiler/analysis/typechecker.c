@@ -16872,12 +16872,18 @@ static int check_select_platforms(ASTNode* call) {
 
 int typecheck_function_call(ASTNode* call, SymbolTable* table) {
     int ok = typecheck_function_call_inner(call, table);
-    /* The platform select is a call with arguments, as codegen and the
-     * branch-type inference read it: a program may define its own `select()`
-     * with no parameters (c_symbol_namespace), and a call to it is not a
-     * select with no branches. */
+    /* A program may define its own `select()` with no parameters (only one
+     * with parameters is refused as redefining the builtin), and a call to
+     * it is not a platform select (c_symbol_namespace). Any other call named
+     * `select` is the builtin, a bare `select()` included: with no branches
+     * it is E0701 here rather than an undeclared `ae_select` in C. A user
+     * function has a definition node; the builtin's symbol has none. */
+    Symbol* sel = (call && call->type == AST_FUNCTION_CALL && call->value &&
+                   strcmp(call->value, "select") == 0)
+                      ? lookup_symbol(table, "select") : NULL;
+    int own_select = sel && sel->node && sel->node->type == AST_FUNCTION_DEFINITION;
     if (ok && call && call->type == AST_FUNCTION_CALL && call->value &&
-        strcmp(call->value, "select") == 0 && call->child_count >= 1 &&
+        strcmp(call->value, "select") == 0 && !own_select &&
         !check_select_platforms(call))
         ok = 0;
     /* An argument of what gives no value, `h(g())` with g returning
