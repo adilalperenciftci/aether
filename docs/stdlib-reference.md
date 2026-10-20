@@ -2203,7 +2203,7 @@ All wrappers auto-free the underlying response and return an error string for tr
 - `http.server_stop(server)` - Stop server
 - `http.server_free(server)` - Free server
 
-Raw externs: `http_server_bind_raw`, `http_server_start_raw`, `http_server_set_host`.
+Raw externs: `http_server_bind_raw`, `http_server_start_raw`.
 
 **Static file serving:**
 - `http.serve_file(res, filepath)` - Serve a single file. Zero-copy: under HTTP/1.1 cleartext on Linux/macOS, takes the `sendfile(2)` fast path (zero heap allocation for the body); falls back to a buffered read for TLS / HTTP/2 / Range requests / Windows. `Content-Type` resolved via `http.mime_type(filepath)`.

@@ -60,9 +60,6 @@
 //     cell's reads touch nothing shared but the pointer.
 
 exports(
-    // Raw externs (over std/snapshot/aether_snapshot.c).
-    aether_snapshot_new, aether_snapshot_load, aether_snapshot_store,
-    aether_snapshot_cas, aether_snapshot_free,
     // Ergonomic wrappers — call as snapshot.new / .load / .store /
     // .cas / .free.
     new, load, store, cas, free

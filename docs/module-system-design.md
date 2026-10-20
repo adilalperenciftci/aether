@@ -164,6 +164,17 @@ main() {
   `rexxae.create`. A module function whose C name would be one of the
   module's own externs is merged under a name of its own and `m.x` reaches
   it (#2978).
+- One name per operation: a module may not export two names that answer to
+  one short name, the short name being the export's name without its C
+  prefix, a leading `aether_<module>_` or `<module>_` (when what is left
+  starts with a letter). `add` beside `aether_set_add`, or `join` beside
+  `string_join`, is `E0305`, naming both, at the later one in the list. A
+  module with no `exports (…)` list is held to the same rule over its
+  top-level functions, builders, externs and constants. A wrapper's extern
+  is declared for the wrapper to call and left out of the list; an extern
+  callers need beside a wrapper gets a name of its own that says it is raw,
+  `@extern("aether_set_add") add_raw(set: ptr, item: string) -> int`
+  (#2976).
 
 ### Legacy `export <fn>` form (deprecated)
 

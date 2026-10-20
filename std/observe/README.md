@@ -148,9 +148,10 @@ the tool for that).
 
 `ANY_FIELD` (`-1`) is the field a notification carries when it names none.
 
-The raw externs (`aether_observe`, `aether_observe_fields`, `aether_unobserve`,
-`aether_unobserve_all`, `aether_observer_count`, `aether_observe_is_notifying`,
-`aether_observe_notify`, `aether_observe_notify_field`) are the same calls
-with C return conventions, for a host that registers observers from C:
-`runtime/aether_observe.h` declares them, with the `{fn, env}` closure layout
-the callback is stored in.
+The C functions under these (`aether_observe`, `aether_observe_fields`,
+`aether_unobserve`, `aether_unobserve_all`, `aether_observer_count`,
+`aether_observe_is_notifying`, `aether_observe_notify`,
+`aether_observe_notify_field`) are the same calls with C return conventions,
+for a host that registers observers from C: `runtime/aether_observe.h` declares
+them, with the `{fn, env}` closure layout the callback is stored in. The module
+exports the wrappers only, one name per operation (#2976).

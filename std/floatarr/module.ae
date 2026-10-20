@@ -18,7 +18,7 @@ exports(
     floatarr_new_raw, floatarr_new_filled_raw,
     floatarr_size, floatarr_get_raw, floatarr_set_raw,
     floatarr_get_unchecked, floatarr_set_unchecked,
-    floatarr_data, floatarr_array, array,
+    floatarr_data, array,
     floatarr_fill, floatarr_free
 )
 

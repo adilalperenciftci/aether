@@ -27,12 +27,6 @@
 // Channels are opaque `ptr` handles.
 
 exports(
-    // Raw externs
-    aether_casper_init, aether_casper_service_open, aether_casper_close,
-    aether_casper_available, aether_casper_resolve,
-    aether_casper_pwd_uid, aether_casper_pwd_home,
-    aether_casper_sysctl_str,
-    // Ergonomic wrappers
     available, init, service, close,
     dns_resolve, pwd_uid, pwd_home, sysctl
 )

@@ -28,13 +28,12 @@
 import std.string
 
 exports(
-    arena_create, arena_alloc, arena_alloc_aligned,
-    arena_reset, arena_destroy,
     arena_get_used, arena_get_size,
     create, alloc, alloc_aligned, reset, destroy, used, size
 )
 
-// C-style externs (the escape hatch).
+// C-style externs, which the wrappers below call (the module exports one
+// name per operation, #2976).
 extern arena_create(size: int) -> ptr
 extern arena_alloc(arena: ptr, bytes: int) -> ptr
 extern arena_alloc_aligned(arena: ptr, bytes: int, alignment: int) -> ptr

@@ -17,24 +17,11 @@
 // (RLE expansion is the canonical case).
 
 exports(
-    aether_bytes_new, aether_bytes_set, aether_bytes_get,
-    aether_bytes_length,
-    aether_bytes_set_le16, aether_bytes_get_le16,
-    aether_bytes_set_le32, aether_bytes_get_le32,
-    aether_bytes_set_le64, aether_bytes_get_le64,
-    aether_bytes_set_be16, aether_bytes_get_be16,
-    aether_bytes_set_be32, aether_bytes_get_be32,
-    aether_bytes_set_be64, aether_bytes_get_be64,
-    aether_bytes_copy_from_string, aether_bytes_copy_from_bytes,
-    aether_bytes_copy_within,
-    aether_bytes_finish, aether_bytes_to_string, aether_bytes_free,
-    aether_bytes_data, aether_bytes_capacity, aether_bytes_set_length,
     new, set, get, length,
     set_le16, get_le16, set_le32, get_le32, set_le64, get_le64,
     set_be16, get_be16, set_be32, get_be32, set_be64, get_be64,
     copy_from_string, copy_from_bytes, copy_within, finish, to_string, free,
     data, capacity, set_length, from_ptr, string_from_ptr,
-    aether_bytes_copy_from_ptr,
     view, capacity_view, from_slice, copy_from_slice, string_from_slice
 )
 

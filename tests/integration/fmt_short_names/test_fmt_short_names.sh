@@ -9,10 +9,10 @@
 # compiler says is one declaration: an extern reached by its short name
 # (`string.string_length`), an Aether function written in the prefixed form
 # (`md5.md5_hex`, reachable as `md5.hex` since #2976), a call inside an
-# interpolation, two on one line. It leaves a long name whose short twin is
-# another function (std.string's extern `string.string_join` beside its
-# `string.join`, #2978), one whose short form would start with a digit
-# (`sha3.sha3_256_hex`), and the layout. The rewritten program prints the
+# interpolation, two on one line. It leaves a name whose short form would
+# start with a digit (`sha3.sha3_256_hex`), and the layout. (A long name
+# whose short twin is another function no longer exists: a module may not
+# export both, E0305.) The rewritten program prints the
 # same and compiles to the same C. A file that does not compile keeps its
 # names.
 
@@ -46,7 +46,7 @@ main() {
     h = md5.md5_hex(string.bytes("a"))
     k = string.string_length(h) + string.string_length("x")
     seq = string.seq_cons("a", string.seq_cons("b", string.seq_empty()))
-    j = string.string_join(seq, "-")
+    j = string.join(seq, "-")
     string.seq_free(seq)
     d = sha3.sha3_256_hex(string.bytes("a"))
     println("${h} ${k} ${j} ${string.string_length(d)}")
@@ -68,7 +68,7 @@ main() {
     h = md5.hex(string.bytes("a"))
     k = string.length(h) + string.length("x")
     seq = string.seq_cons("a", string.seq_cons("b", string.seq_empty()))
-    j = string.string_join(seq, "-")
+    j = string.join(seq, "-")
     string.seq_free(seq)
     d = sha3.sha3_256_hex(string.bytes("a"))
     println("${h} ${k} ${j} ${string.length(d)}")

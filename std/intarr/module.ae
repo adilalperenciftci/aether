@@ -18,7 +18,7 @@ exports(
     intarr_new_raw, intarr_new_filled_raw,
     intarr_size, intarr_get_raw, intarr_set_raw,
     intarr_get_unchecked, intarr_set_unchecked,
-    intarr_data, intarr_array, array,
+    intarr_data, array,
     intarr_fill, intarr_free
 )
 

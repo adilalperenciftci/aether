@@ -69,10 +69,6 @@
 import std.list
 
 exports(
-    aether_worker_run, aether_worker_run_detached,
-    aether_worker_set_main_poster, aether_worker_deliver,
-    aether_worker_drain, aether_worker_pending, aether_worker_wait,
-    aether_worker_pool_configure, aether_worker_pool_shutdown,
     run, run_detached, set_main_poster, deliver, drain, pending, wait,
     map, pool_size, pool_shutdown
 )

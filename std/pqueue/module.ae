@@ -24,12 +24,12 @@
 //
 // API shape:
 //   - Raw externs mirror the C entry points and use C-style int returns.
+//     The wrappers call them; the module exports the wrappers only, one
+//     name per operation (#2976).
 //   - Aether-native wrappers (below) return bools and Go-style
 //     `(value, err)` tuples.
 
 exports(
-    aether_pqueue_new, aether_pqueue_push, aether_pqueue_pop, aether_pqueue_peek, aether_pqueue_peek_priority,
-    aether_pqueue_size, aether_pqueue_is_empty, aether_pqueue_clear, aether_pqueue_free,
     new, push, pop, peek, peek_priority, size, is_empty, clear, free
 )
 

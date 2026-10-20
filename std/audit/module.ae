@@ -32,11 +32,6 @@
 //   }
 
 exports(
-    // Raw externs
-    aether_audit_count, aether_audit_entry_category,
-    aether_audit_entry_resource, aether_audit_entry_allowed,
-    aether_audit_clear,
-    // Ergonomic wrappers
     count, entry, clear, denied_count
 )
 

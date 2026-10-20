@@ -63,5 +63,5 @@ the load with no check, for a hot loop that has proved its own bounds.
 
 ## Exports
 
-`new`, `new_filled`, `size`, `get`, `set`, `get_unchecked`, `set_unchecked`, `intarr_data`, `intarr_array`,
+`new`, `new_filled`, `size`, `get`, `set`, `get_unchecked`, `set_unchecked`, `data`, `array`,
 `fill`, `free`.

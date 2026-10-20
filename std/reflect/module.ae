@@ -37,13 +37,6 @@
 // program; nothing is allocated or freed.
 
 exports(
-    aether_schema_name, aether_schema_size, aether_schema_field_count,
-    aether_schema_field_index, aether_schema_field_name, aether_schema_field_type,
-    aether_schema_field_kind, aether_schema_field_elem_kind, aether_schema_field_len,
-    aether_schema_field_offset, aether_schema_field_size,
-    aether_schema_field_schema, aether_schema_attr_count, aether_schema_attr_index,
-    aether_schema_attr_name, aether_schema_attr_arg_count, aether_schema_attr_arg_kind,
-    aether_schema_attr_int, aether_schema_attr_float, aether_schema_attr_text,
     KIND_OTHER, KIND_BOOL, KIND_BYTE, KIND_INT, KIND_LONG, KIND_UINT8, KIND_UINT16,
     KIND_UINT32, KIND_ULONG, KIND_FLOAT, KIND_F32, KIND_LONGDOUBLE, KIND_DURATION,
     KIND_STRING, KIND_PTR, KIND_STRUCT, KIND_ARRAY, KIND_SLICE, KIND_ENUM, KIND_FN,

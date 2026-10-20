@@ -15,6 +15,7 @@ typedef enum {
     AETHER_ERR_UNDEFINED_TYPE = 302,
     AETHER_ERR_NOT_EXPORTED = 303,
     AETHER_ERR_HIDDEN_NAME = 304,        // identifier blocked by `hide` or `seal except` in an enclosing scope
+    AETHER_ERR_EXPORT_SHORT_NAME = 305,  // a module exports two names that answer to one short name (#2976)
     AETHER_ERR_REDEFINITION = 400,
     AETHER_ERR_INVALID_OPERAND = 500,
     AETHER_ERR_ACTOR_ERROR = 600,

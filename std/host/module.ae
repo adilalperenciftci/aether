@@ -14,7 +14,6 @@ exports(
     notify, describe, input, event, bindings,
     java, python, ruby, go,
     manifest_get, manifest_clear,
-    aether_caller_identity, aether_caller_attribute, aether_caller_deadline_ms,
     caller_identity, caller_attribute, caller_deadline_ms
 )
 

@@ -74,7 +74,7 @@ exports(
     KIND_CROSS_DEVICE, KIND_IO, KIND_INVALID, KIND_LOOP,
     KIND_NAME_TOO_LONG, KIND_NO_SPACE, KIND_IS_DIR, KIND_NOT_DIR,
     KIND_UNAVAILABLE,
-    fs_last_os_error, last_os_error, fs_error_message
+    last_os_error, fs_error_message
 )
 
 // ---- Structured-error kinds (pilot — issue #392) ----

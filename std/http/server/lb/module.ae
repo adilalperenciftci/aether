@@ -90,7 +90,7 @@
 // Harness: benchmarks/http/run_lb_reuse.sh (committed). Re-run on a dedicated
 // (non-co-located) box for absolute numbers.
 
-import std.http(http_server_create, http_server_set_host, http_server_start_raw,
+import std.http(http_server_create, server_set_host, http_server_start_raw,
     http_server_use_middleware, request_path, request_body,
     http_response_set_status, http_response_set_body, http_server_set_tls_raw)
 import std.http.proxy(upstream_pool_new, upstream_add, health_checks_enable,
@@ -207,7 +207,7 @@ _serve(host: string, port: int, algo: string, backends: string, prefix: string,
     if server == 0 {
         return "lb: server_create failed on ${port}"
     }
-    http_server_set_host(server, host)
+    server_set_host(server, host)
     if string_length(cert_path) > 0 {
         terr = http_server_set_tls_raw(server, cert_path, key_path)
         if string_length(terr) > 0 {

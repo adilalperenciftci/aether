@@ -20,7 +20,7 @@ exports(
     longarr_new_raw, longarr_new_filled_raw,
     longarr_size, longarr_get_raw, longarr_set_raw,
     longarr_get_unchecked, longarr_set_unchecked,
-    longarr_data, longarr_array, array,
+    longarr_data, array,
     longarr_fill, longarr_free
 )
 

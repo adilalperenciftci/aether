@@ -11,7 +11,7 @@
 #
 # It is not needed. A VIEW is typed, so `[]` already works on one:
 #
-#     v = intarr.intarr_array(a)
+#     v = intarr.array(a)
 #     v[3] = 42
 #
 # `std.strarr` has had exactly this shape since it was written
@@ -42,7 +42,7 @@ import std.longarr
 
 main() {
     a = intarr.intarr_new_raw(8)
-    v = intarr.intarr_array(a)
+    v = intarr.array(a)
 
     // Written through the view ...
     v[3] = 42
@@ -56,13 +56,13 @@ main() {
     intarr.intarr_free(a)
 
     f = floatarr.floatarr_new_raw(4)
-    fv = floatarr.floatarr_array(f)
+    fv = floatarr.array(f)
     fv[1] = 1.5
     println("float ${fv[1] + 0.5} ${floatarr.floatarr_get_unchecked(f, 1)}")
     floatarr.floatarr_free(f)
 
     l = longarr.longarr_new_raw(4)
-    lv = longarr.longarr_array(l)
+    lv = longarr.array(l)
     lv[2] = 9000000000
     println("long ${lv[2]} ${longarr.longarr_get_unchecked(l, 2)}")
     longarr.longarr_free(l)

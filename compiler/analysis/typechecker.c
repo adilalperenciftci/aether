@@ -13190,10 +13190,10 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                     type_error("`[]` indexing is not defined for `ptr`; a bare "
                                "pointer has no element type. For std.intarr / "
                                "floatarr / longarr take a typed view and index "
-                               "that: `v = intarr.intarr_array(a)` then `v[i]`. "
+                               "that: `v = intarr.array(a)` then `v[i]`. "
                                "For a single access the accessor is simpler: "
-                               "`intarr.intarr_get_unchecked(a, i)` / "
-                               "`intarr.intarr_set_unchecked(a, i, v)`",
+                               "`intarr.get_unchecked(a, i)` / "
+                               "`intarr.set_unchecked(a, i, v)`",
                                expr->line, expr->column);
                 }
             }

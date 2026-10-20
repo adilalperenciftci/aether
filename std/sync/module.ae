@@ -53,11 +53,6 @@
 // C-style seam actors do not cover.
 
 exports(
-    // Raw externs (over std/sync/aether_sync.c).
-    aether_sync_atomic_new, aether_sync_atomic_load,
-    aether_sync_atomic_store, aether_sync_atomic_add,
-    aether_sync_atomic_sub, aether_sync_atomic_cas,
-    aether_sync_atomic_free,
     // Ergonomic wrappers — call as sync.atomic_new / .atomic_load / etc.
     atomic_new, atomic_load, atomic_store, atomic_add, atomic_sub,
     atomic_cas, atomic_free

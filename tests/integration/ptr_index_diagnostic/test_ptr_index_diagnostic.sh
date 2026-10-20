@@ -29,7 +29,7 @@ elif grep -qi "void value not ignored" "$log"; then
     echo "  [FAIL] bare-ptr index: the raw C 'void value not ignored' error still leaks"
     sed 's/^/          /' "$log" | head -6
     fail=1
-elif ! grep -qi "indexing is not defined for .ptr." "$log" || ! grep -q "intarr_get_unchecked" "$log"      || ! grep -q "intarr_array" "$log"; then
+elif ! grep -qi "indexing is not defined for .ptr." "$log" || ! grep -q "intarr.get_unchecked" "$log"      || ! grep -q "intarr.array" "$log"; then
     # The advice must name the VIEW as well as the accessor (#2041): `[]`
     # cannot work on the handle, but it works on a typed view over the same
     # buffer, so the reader who wrote `a[i]` can have nearly what they wrote.
