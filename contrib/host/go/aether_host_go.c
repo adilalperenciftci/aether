@@ -29,6 +29,8 @@
 
 #include "../../../runtime/aether_sandbox.h"
 #include "../../../runtime/aether_shared_map.h"
+/* std.os's spawn discipline (#3040): its close-on-exec pipe and its fork. */
+#include "../../../std/os/aether_os.h"
 
 #include <unistd.h>
 #include <sys/wait.h>
@@ -176,7 +178,7 @@ static int spawn_go_sandboxed(void* perms,
         }
     }
 
-    pid_t pid = fork();
+    pid_t pid = aether_os_fork();
     if (pid < 0) {
         if (grants_shm) { shm_unlink(grants_shm); free(grants_shm); }
         if (map_shm) {
