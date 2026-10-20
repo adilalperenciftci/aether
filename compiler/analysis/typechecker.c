@@ -4074,7 +4074,6 @@ Type* infer_type(ASTNode* expr, SymbolTable* table) {
                         if (operand_node->annotation) free(operand_node->annotation);
                         operand_node->annotation = strdup("fn_addr");
                         operand_is_fn_addr = 1;
-                        refuse_moded_fn_value(operand_node, fsym->node);
                     }
                 }
             }
@@ -14681,6 +14680,22 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                     "instead, `f: fn(@keep ptr)`",
                     expr->line, expr->column, AETHER_ERR_KEEPS_BORROWED);
                 return 0;
+            }
+            /* #2926, #2980: a function with a `@keep` or `@into` parameter
+             * is no C function pointer. #3060: refused here, where each
+             * cast is checked once, not by infer_type, which answers for
+             * it wherever its type is asked: a struct field's value was
+             * refused twice, an if-expression's arms three times each, and
+             * an array literal's element or a match arm's value not at
+             * all. A cast that names a mode is refused for that, above. */
+            if (expr->child_count > 0 && expr->children[0] &&
+                expr->children[0]->type == AST_IDENTIFIER && expr->children[0]->value) {
+                Symbol* fsym = lookup_symbol(table, expr->children[0]->value);
+                if (fsym && fsym->is_function && fsym->node &&
+                    (fsym->node->type == AST_FUNCTION_DEFINITION ||
+                     fsym->node->type == AST_BUILDER_FUNCTION) &&
+                    refuse_moded_fn_value(expr->children[0], fsym->node))
+                    return 0;
             }
             /* Don't replace expr->node_type — the parser set it from
              * the `fn(...)` source spelling and it carries the exact

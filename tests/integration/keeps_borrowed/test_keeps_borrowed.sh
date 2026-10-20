@@ -1456,6 +1456,50 @@ main() { run(hold, null) }
 AE
 refused keep_fn_arg 7:14 "'hold' keeps its \`ptr\` parameter 'q' (\`@keep\`), so it cannot be a C function pointer"
 
+# refused_each <name> <count> <line:col>...: `ae check` refuses <name>.ae
+# with exactly <count> E0902 errors, one at each position given.
+refused_each() {
+    name="$1"; count="$2"; shift 2
+    out=$(cd "$TMP" && "$AE" check "$name.ae" 2>&1)
+    n=$(printf '%s\n' "$out" | grep -c 'error\[E0902\]')
+    bad=""
+    [ "$n" -eq "$count" ] || bad="$n E0902 errors, not $count"
+    for at in "$@"; do
+        k=$(printf '%s\n' "$out" | grep -c -- "--> $name.ae:$at\$")
+        [ "$k" -eq 1 ] || bad="$bad; $k at $at, not 1"
+    done
+    if [ -n "$bad" ]; then
+        echo "  [FAIL] $name: $bad"
+        echo "$out" | sed 's/^/        /'
+        fails=$((fails + 1))
+    fi
+}
+
+# #3060: each cast of a keeping function to a C function pointer is one
+# error, wherever it is written. A struct literal's field was reported
+# twice, an if-expression's arms three times each, and an array literal's
+# element or a match arm's value not at all.
+cat > "$TMP/keep_fn_cast_once.ae" <<'AE'
+struct Holder { kept: ptr }
+keep_it(state: ptr, item: @keep ptr) { (state as *Holder).kept = item }
+struct Table { set: fn(ptr, ptr) }
+
+pick(n: int) -> fn(ptr, ptr) {
+    return keep_it as fn(ptr, ptr)
+}
+
+main() {
+    h = Holder { kept: null }
+    t = Table { set: keep_it as fn(ptr, ptr) }
+    arr = [keep_it as fn(ptr, ptr)]
+    c = if h.kept == null { keep_it as fn(ptr, ptr) } else { pick(1) }
+    m = match 1 { 1 -> keep_it as fn(ptr, ptr)  _ -> pick(2) }
+    println("${t.set == null} ${arr[0] == null} ${c == null} ${m == null}")
+}
+AE
+refused keep_fn_cast_once 11:22 "'keep_it' keeps its \`ptr\` parameter 'item' (\`@keep\`), so it cannot be a C function pointer"
+refused_each keep_fn_cast_once 5 6:12 11:22 12:12 13:29 14:24
+
 # Need no `@keep`: the aephysics shape (a struct local to the function holds
 # the parameter, or has it stored into a field, and dies with the call) and
 # the aeb shape (a closure that captures it runs inside the call and is
