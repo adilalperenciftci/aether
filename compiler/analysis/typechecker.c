@@ -6115,27 +6115,88 @@ static void typecheck_top(ASTNode* top, SymbolTable* global_table) {
     warn_erased_result_closures();   /* #2484 */
 }
 
-static void typecheck_pending_callees(ASTNode* n, PendingResults* p, SymbolTable* global_table);
+static void typecheck_pending_calls(ASTNode* n, PendingResults* p, SymbolTable* global_table,
+                                    int postpone);
 
-/* Check pending function `j`, the pending functions it calls first. */
+/* #3056 review: the first `return` of a value in `n`, in source order (not
+ * one of a closure or a nested function), or NULL. */
+static ASTNode* first_value_return(ASTNode* n) {
+    if (!n || n->type == AST_CLOSURE || n->type == AST_FUNCTION_DEFINITION ||
+        n->type == AST_BUILDER_FUNCTION)
+        return NULL;
+    if (n->type == AST_RETURN_STATEMENT && n->child_count > 0) return n;
+    for (int i = 0; i < n->child_count; i++) {
+        ASTNode* r = first_value_return(n->children[i]);
+        if (r) return r;
+    }
+    return NULL;
+}
+
+/* #3056 review: does `n` call a pending function being checked (state 1),
+ * itself or through the pending functions it calls that are not checked
+ * yet? `seen` marks those followed. */
+static int pending_reaches_busy(ASTNode* n, PendingResults* p, char* seen) {
+    if (!n) return 0;
+    if (n->type == AST_FUNCTION_CALL && n->value) {
+        for (int j = 0; j < p->count; j++) {
+            if (strcmp(p->fns[j]->value, n->value)) continue;
+            if (p->state[j] == 1) return 1;
+            if (p->state[j] == 0 && !seen[j]) {
+                seen[j] = 1;
+                if (pending_reaches_busy(p->fns[j], p, seen)) return 1;
+            }
+        }
+    }
+    for (int i = 0; i < n->child_count; i++)
+        if (pending_reaches_busy(n->children[i], p, seen)) return 1;
+    return 0;
+}
+
+/* Check pending function `j`, the pending functions it calls first. Those
+ * its first value `return` calls come first of all: that `return` gives
+ * `j` its type, from theirs. #3056 review: any other that calls back into
+ * a function being checked waits until after `j` (and is checked by the
+ * walk after it, or later): checked first, it met that function unknown
+ * and stayed unknown itself, so `a`, whose `return p.n` types it, and `b`,
+ * which returns `a(...)`, left `b` the int default when `a` was entered
+ * first. */
 static void typecheck_pending(int j, PendingResults* p, SymbolTable* global_table) {
     p->state[j] = 1;
-    typecheck_pending_callees(p->fns[j], p, global_table);
+    ASTNode* body = p->fns[j]->child_count > 0 ? p->fns[j]->children[p->fns[j]->child_count - 1]
+                                               : NULL;
+    typecheck_pending_calls(first_value_return(body), p, global_table, 0);
+    typecheck_pending_calls(p->fns[j], p, global_table, 1);
     typecheck_top(p->tops[j], global_table);
     p->state[j] = 2;
+    typecheck_pending_calls(p->fns[j], p, global_table, 1);
 }
 
 /* Check the pending functions `n` calls that are not checked yet. One
- * being checked (a recursion) is left as it is. */
-static void typecheck_pending_callees(ASTNode* n, PendingResults* p, SymbolTable* global_table) {
+ * being checked (a recursion) is left as it is; with `postpone`, so is one
+ * that calls back into one being checked. */
+static void typecheck_pending_calls(ASTNode* n, PendingResults* p, SymbolTable* global_table,
+                                    int postpone) {
     if (!n) return;
     if (n->type == AST_FUNCTION_CALL && n->value) {
-        for (int j = 0; j < p->count; j++)
-            if (p->state[j] == 0 && !strcmp(p->fns[j]->value, n->value))
-                typecheck_pending(j, p, global_table);
+        for (int j = 0; j < p->count; j++) {
+            if (p->state[j] != 0 || strcmp(p->fns[j]->value, n->value)) continue;
+            if (postpone) {
+                char* seen = aether_xrealloc(NULL, (size_t)p->count);
+                memset(seen, 0, (size_t)p->count);
+                seen[j] = 1;
+                int busy = pending_reaches_busy(p->fns[j], p, seen);
+                free(seen);
+                if (busy) continue;
+            }
+            typecheck_pending(j, p, global_table);
+        }
     }
     for (int i = 0; i < n->child_count; i++)
-        typecheck_pending_callees(n->children[i], p, global_table);
+        typecheck_pending_calls(n->children[i], p, global_table, postpone);
+}
+
+static void typecheck_pending_callees(ASTNode* n, PendingResults* p, SymbolTable* global_table) {
+    typecheck_pending_calls(n, p, global_table, 1);
 }
 
 int typecheck_program(ASTNode* program) {
