@@ -48,7 +48,9 @@ Type* hoist_decl_type(ASTNode* decl);
 
 /* The numeric join of `seed` with every inferred binding of `name` in
  * `scope_body` (closures excluded): a fresh Type when some binding widens
- * `seed`, NULL when nothing does or `seed` is not numeric. */
+ * `seed`, NULL when nothing does or `seed` is not numeric. A `null` binding
+ * has no type of its own: when every binding is `null` or a string, the
+ * join is `string` (#3032). */
 Type* hoist_join_type(ASTNode* scope_body, const char* name, Type* seed);
 
 /* The names hoist_if_branch_vars declares at the top of function body

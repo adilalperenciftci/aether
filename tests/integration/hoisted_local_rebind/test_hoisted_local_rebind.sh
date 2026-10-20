@@ -90,7 +90,9 @@ main() {
     if 2 > 0 { s = null }
     if 1 > 0 { t = null }
     if 2 > 0 { t = "b" }
-    println("${pick(1)} ${pick(0)} ${pick(2)} ${f} ${m} ${x} ${g} ${s == null} ${t}")
+    // #3032: null in one branch and a string in another join to a string
+    string tt = t
+    println("${pick(1)} ${pick(0)} ${pick(2)} ${f} ${m} ${x} ${g} ${s == null} ${tt}")
 }
 AE
 got="$(AETHER_HOME="$ROOT" "$AE" run "$tmp/join.ae" 2>&1 | tail -1)"
@@ -105,6 +107,13 @@ for decl in 'int64_t n = 0;' 'double f = 0;' 'int64_t m = 0;' 'uint32_t x = 0;' 
         fail=1
     fi
 done
+# #3032: `t` is bound `null` in one branch and a string in another, so it is
+# a string, as in one block; joined as the `ptr` of its first binding it was
+# declared `void*` and a `string` local could not take it (E0202).
+if ! grep -qF 'const char* t = NULL;' "$tmp/join.c"; then
+    echo "  [FAIL] hoisted_local_rebind: a local bound null and a string is not declared a string"
+    fail=1
+fi
 
 # Not hoisted (used only inside its branches): one variable per branch,
 # each with its own numeric type (std.cbor's read_value shape).
