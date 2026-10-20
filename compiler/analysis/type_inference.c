@@ -1,9 +1,11 @@
 #include "type_inference.h"
 #include "../aether_error.h"
+#include "../aether_strmap.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdbool.h>
+#include <stdint.h>
 #include <ctype.h>
 #include <limits.h>
 #include <errno.h>
@@ -2275,10 +2277,132 @@ static void widen_ptr_assigned_locals(ASTNode* program, SymbolTable* symbols) {
     }
 }
 
+/* #3061 review: the program's clause sets, as top-level function names
+ * defined more than once, each with its count of clauses. */
+static void clause_set_names(ASTNode* program, StrMap* counts) {
+    strmap_init(counts);
+    for (int i = 0; i < program->child_count; i++) {
+        ASTNode* c = program->children[i];
+        if (!c || !c->value ||
+            (c->type != AST_FUNCTION_DEFINITION && c->type != AST_BUILDER_FUNCTION))
+            continue;
+        intptr_t k = (intptr_t)strmap_get(counts, c->value);
+        strmap_put(counts, c->value, (void*)(k + 1));
+    }
+}
+
+static int is_clause_set_name(const StrMap* counts, const char* name) {
+    return name && (intptr_t)strmap_get(counts, name) >= 2;
+}
+
+/* Does `n` call a clause set, its own or another (`is_even(n) ->
+ * is_odd(n - 1)`)? */
+static int calls_clause_set(const ASTNode* n, const StrMap* counts) {
+    if (!n) return 0;
+    if (n->type == AST_FUNCTION_CALL && is_clause_set_name(counts, n->value)) return 1;
+    for (int i = 0; i < n->child_count; i++)
+        if (calls_clause_set(n->children[i], counts)) return 1;
+    return 0;
+}
+
+/* Does every clause of a set whose result is still unknown (one that gives
+ * a value, not only `none`) call a clause set, its own or one it recurses
+ * through, so it waits on what the sets' symbols say? */
+static int recursion_waits(ASTNode* const* nodes, int n, const StrMap* counts) {
+    int waiting = 0;
+    for (int c = 0; c < n; c++) {
+        ASTNode* cl = nodes[c];
+        if (cl->node_type && cl->node_type->kind != TYPE_UNKNOWN) continue;
+        if (!ast_has_value_return(cl) || ast_returns_only_literal(cl, AST_NONE_LITERAL)) continue;
+        if (!calls_clause_set(cl, counts)) return 0;
+        waiting++;
+    }
+    return waiting > 0;
+}
+
+/* #3061 review: a function written as several clauses is one function with
+ * one result, the join of its clauses' (clause_set_join, which the checker
+ * settles a set by as well). Settled here, as soon as every clause's result
+ * is known and before a call of the set is typed: the set's symbol took the
+ * first clause's result, a call took that, and a local bound from the call
+ * kept it, so `x = f32mix(1, 1.5)` was an int while the call gave an f32,
+ * and `w = narrow(1, -1, u)` cut a uint32 to an int. A set still waiting
+ * leaves its symbol unknown (the sync below does not give it one clause's
+ * result), unless what it waits on is its own result, and one the join
+ * refuses is left to the checker, which says why. */
+static void settle_clause_sets(ASTNode* program, SymbolTable* table, const StrMap* counts) {
+    ASTNode** nodes = NULL;
+    int cap = 0;
+    for (int m = 0; m < strmap_count(counts); m++) {
+        int k = (int)(intptr_t)strmap_value_at(counts, m);
+        if (k < 2) continue;
+        const char* name = strmap_key_at(counts, m);
+        if (k > cap) {
+            cap = k;
+            nodes = aether_xrealloc(nodes, (size_t)cap * sizeof(ASTNode*));
+        }
+        int n = 0;
+        for (int i = 0; i < program->child_count && n < k; i++) {
+            ASTNode* c = program->children[i];
+            if (c && c->value && !strcmp(c->value, name) &&
+                (c->type == AST_FUNCTION_DEFINITION || c->type == AST_BUILDER_FUNCTION))
+                nodes[n++] = c;
+        }
+        ClauseJoin cj;
+        clause_set_join(nodes, n, &cj);
+        if (cj.status == CLAUSE_JOIN_WAIT && recursion_waits(nodes, n, counts)) {
+            /* A clause that waits only on a call of a clause set, its own
+             * (`big(n) -> big(n - 1)`) or another it recurses through
+             * (`is_even` and `is_odd`), is typed through the sets' symbols:
+             * give the symbol the join of the clauses known so far, as the
+             * first clause's result once was, and the set is settled on a
+             * later pass. A clause waiting on anything else leaves the
+             * symbol unknown, so no call is typed by a narrower result. */
+            ASTNode** known = aether_xrealloc(NULL, (size_t)n * sizeof(ASTNode*));
+            int nk = 0;
+            for (int c = 0; c < n; c++)
+                if (nodes[c]->node_type && nodes[c]->node_type->kind != TYPE_UNKNOWN)
+                    known[nk++] = nodes[c];
+            ClauseJoin pj;
+            clause_set_join(known, nk, &pj);
+            free(known);
+            Symbol* fs = lookup_symbol(table, name);
+            if (pj.status == CLAUSE_JOIN_OK && fs && fs->is_function &&
+                (!fs->type || fs->type->kind == TYPE_UNKNOWN)) {
+                if (fs->type) free_type(fs->type);
+                fs->type = clone_type(pj.join);
+            }
+            if (pj.join) free_type(pj.join);
+            continue;
+        }
+        if (cj.status != CLAUSE_JOIN_OK) {
+            if (cj.join) free_type(cj.join);
+            continue;
+        }
+        for (int c = 0; c < n; c++) {
+            if (!clause_takes_set_result(nodes[c]) ||
+                (nodes[c]->node_type && types_equal(nodes[c]->node_type, cj.join)))
+                continue;
+            if (nodes[c]->node_type) free_type(nodes[c]->node_type);
+            nodes[c]->node_type = clone_type(cj.join);
+        }
+        Symbol* fs = lookup_symbol(table, name);
+        if (fs && fs->is_function && (!fs->type || !types_equal(fs->type, cj.join))) {
+            if (fs->type) free_type(fs->type);
+            fs->type = clone_type(cj.join);
+        }
+        free_type(cj.join);
+    }
+    free(nodes);
+}
+
 // Main inference function
 int infer_all_types(ASTNode* program, SymbolTable* table) {
     if (!program) return 0;
-    
+
+    StrMap clause_sets;
+    clause_set_names(program, &clause_sets);
+
     InferenceContext* ctx = create_inference_context(table);
     
     // Phase 1: Collect constraints from the entire program
@@ -2314,11 +2438,13 @@ int infer_all_types(ASTNode* program, SymbolTable* table) {
         // function whose body genuinely returns void would loop forever
         // re-syncing the same VOID.
         infer_function_return_types(program, table);
+        settle_clause_sets(program, table, &clause_sets);   /* #3061 review */
         for (int i = 0; i < program->child_count; i++) {
             ASTNode* child = program->children[i];
             if (!child || !child->value || !child->node_type) continue;
             if (child->type != AST_FUNCTION_DEFINITION &&
                 child->type != AST_BUILDER_FUNCTION) continue;
+            if (is_clause_set_name(&clause_sets, child->value)) continue;   /* settled above */
             if (child->node_type->kind == TYPE_UNKNOWN ||
                 child->node_type->kind == TYPE_VOID) continue;
             Symbol* func_sym = lookup_symbol(table, child->value);
@@ -2361,6 +2487,7 @@ int infer_all_types(ASTNode* program, SymbolTable* table) {
 
     // Phase 6: Infer function return types (now that return expressions have types)
     infer_function_return_types(program, table);
+    settle_clause_sets(program, table, &clause_sets);   /* #3061 review */
 
     // Phase 7: Widen `out = 0` locals to ptr when a later assignment in
     // the same ptr-returning function is ptr-typed. See
@@ -2369,6 +2496,7 @@ int infer_all_types(ASTNode* program, SymbolTable* table) {
     widen_ptr_assigned_locals(program, table);
 
     free_inference_context(ctx);
+    strmap_free(&clause_sets);
 
     return success;
 }

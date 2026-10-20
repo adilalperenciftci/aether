@@ -11855,8 +11855,6 @@ static int is_bare_fn_call(ASTNode* v, SymbolTable* table) {
            !s->type->is_fnptr && !s->type->closure_literal && fn_type_is_erased(s->type);
 }
 
-static int null_fits_type(Type* t);
-
 /* #2782: check one value a `return` gives against the result type `rt`.
  * A value that branches (an if-expression, a `match` whose value is used)
  * gives each arm's value, checked on its own. Returns 1 when it fits. */
@@ -11897,7 +11895,7 @@ static int check_return_value(ASTNode* v, Type* rt, const ReturnOwner* own,
      * empty closure or a null pointer, string or slice, fits as a binding or
      * a field of that type takes it (slice_coerce_slot gave it the type);
      * checked as the `ptr` it infers as, a closure result refused it. */
-    if (v->type == AST_NULL_LITERAL && null_fits_type(rt)) return 1;
+    if (v->type == AST_NULL_LITERAL && ast_type_takes_null(rt)) return 1;
     Type* vt = infer_type(v, table);
     /* A closure literal is a closure: inference leaves it unknown, and
      * its check just stamped it. */
@@ -16808,16 +16806,7 @@ static int try_ufcs_rewrite(ASTNode* call, SymbolTable* table) {
  * from the outside, by asserting the diagnostic on exactly the shapes codegen
  * makes void. */
 static int tc_has_return_value(ASTNode* node) {
-    if (!node) return 0;
-    if (ast_is_own_function(node)) return 0;   /* a trailing block's are ours (#2766) */
-    if (node->type == AST_RETURN_STATEMENT && node->child_count > 0 && node->children[0]) {
-        if (node->children[0]->type == AST_PRINT_STATEMENT) return 0;
-        return 1;
-    }
-    for (int i = 0; i < node->child_count; i++) {
-        if (tc_has_return_value(node->children[i])) return 1;
-    }
-    return 0;
+    return ast_has_value_return(node);   /* a trailing block's are ours (#2766) */
 }
 
 /* Does calling `call` yield no value?
@@ -16918,212 +16907,99 @@ static void type_take(Type* t, Type* want) {
     free_type(c);
 }
 
-/* #3063: count the `return`s of a value in `node` (tc_has_return_value's)
- * that give a literal of AST kind `lit` and those that give anything else. */
-static void tc_count_literal_returns(ASTNode* node, ASTNodeType lit, int* hits, int* other) {
-    if (!node || ast_is_own_function(node)) return;
-    if (node->type == AST_RETURN_STATEMENT && node->child_count > 0 && node->children[0]) {
-        if (node->children[0]->type == AST_PRINT_STATEMENT) return;
-        if (node->children[0]->type == lit) (*hits)++;
-        else (*other)++;
-        return;
-    }
-    for (int i = 0; i < node->child_count; i++)
-        tc_count_literal_returns(node->children[i], lit, hits, other);
-}
-
-/* Does every `return` of a value in `node` give a literal of kind `lit`
- * (`none`, `null`), and is there one? */
-static int tc_returns_only_literal(ASTNode* node, ASTNodeType lit) {
-    int hits = 0, other = 0;
-    tc_count_literal_returns(node, lit, &hits, &other);
-    return hits > 0 && other == 0;
-}
-
-static int tc_returns_only_none(ASTNode* node) {
-    return tc_returns_only_literal(node, AST_NONE_LITERAL);
-}
-
-/* #3061 review: a clause whose result is inferred and every one of whose
- * value `return`s gives `null`: its result is whatever `null` goes into
- * beside it. On 0.835 such a set took its first clause's type, and
- * `node_or_null(0, p: *Node) -> null` beside `node_or_null(k, p: *Node) ->
- * p` compiled; a join that knew only branch_join_type refused it. */
-static int clause_gives_only_null(ASTNode* cl) {
-    return cl->type_inferred && tc_returns_only_literal(cl, AST_NULL_LITERAL);
-}
-
-/* Does a slot of type `t` take `null`: a pointer (typed or not), a string
- * (a nullable C string), a closure or a C function pointer (#3062), or a
- * slice (the empty one)? */
-static int null_fits_type(Type* t) {
-    return t && (t->kind == TYPE_PTR || t->kind == TYPE_STRING || t->kind == TYPE_FUNCTION ||
-                 type_is_slice(t));
-}
-
 /* #3061: a function written as several clauses is one C function, whose
  * result codegen took from its first clause with a known type
  * (fn_result_type), so a later clause's wider value was cut to it with no
  * word: `pick(0, s: int, b: long) -> s` then `pick(k, s: int, b: long) ->
  * b` returned the long as an int. Once every clause's result is known, the
- * set's is their join, as the arms of an if-expression or a value `match`
- * join (branch_join_type: the wider number, an optional beside its value or
- * `none`, a sum beside its variants), which each clause and the set's
- * symbols take; two results that do not join are E0200, naming both. A
- * written result type is the set's, and an inferred clause must fit it. A
- * set with a clause whose result is still to be inferred waits for it
- * (#3056). #3063: a clause that returns only `none` has no type of its own
- * (refine_inferred_result waits past `none`) and is no clause still to be
- * inferred: it joins the others' `T` as `T?`, as an if-expression's `none`
- * arm does, and takes that result; a set whose every clause gives only
- * `none` says no `T` at all, and is E0200. */
+ * set's is their join (clause_set_join, which the early inference pass
+ * settles a set by too, so a call of one is typed by it): as an
+ * if-expression's arms join, a written result type holding every inferred
+ * clause, a clause that returns only `null` taking the pointer, string or
+ * closure type beside it, and one that returns only `none` (#3063) joining
+ * the others' `T` as `T?`. Each clause that gives a value, and the set's
+ * symbols, take it; a set the join refuses is E0200, naming both results,
+ * and a set with a clause whose result is still to be inferred waits for it
+ * (#3056). */
 static void clause_set_settle(ASTNode* fn, SymbolTable* table) {
     const TcClauses* set = tc_clauses_of(fn);
     if (!set) return;
-    /* A written result type, if a clause has one, is the set's. */
-    ASTNode* written = NULL;
-    ASTNode* none_at = NULL;   /* the first clause that returns only `none` */
-    ASTNode* null_at = NULL;   /* the first inferred clause that returns only `null` */
-    for (int c = 0; c < set->count; c++) {
-        ASTNode* cl = set->nodes[c];
-        Type* t = cl->node_type;
-        if (!t || t->kind == TYPE_UNKNOWN) {
-            if (tc_returns_only_none(cl)) {
-                if (!none_at) none_at = cl;
-                continue;
-            }
-            if (tc_has_return_value(cl)) return;   /* still to be inferred */
-            continue;
-        }
-        if (clause_gives_only_null(cl)) {
-            if (!null_at) null_at = cl;
-            continue;
-        }
-        if (!written && !cl->type_inferred && t->kind != TYPE_VOID) written = cl;
-    }
-    Type* join = written ? clone_type(written->node_type) : NULL;
-    ASTNode* join_at = written;
-    for (int c = 0; c < set->count; c++) {
-        ASTNode* cl = set->nodes[c];
-        Type* t = cl->node_type;
-        if (!t || t->kind == TYPE_UNKNOWN || t->kind == TYPE_VOID || cl == written) continue;
-        if (clause_gives_only_null(cl)) continue;   /* below */
-        if (!join) {
-            join = clone_type(t);
-            join_at = cl;
-            continue;
-        }
-        Type* k = branch_join_type(join, NULL, t, NULL);
-        /* Beside a written type, an inferred clause fits it (their join is
-         * it); a second written type is the same one or none. */
-        int unfit = written && k &&
-                    (!types_equal(k, join) || (!cl->type_inferred && !types_equal(t, join)));
-        if (!k || unfit) {
-            char a[160], b[160], msg[480];
-            if (unfit) {
-                const char* ws = ret_type_spell(join, a, sizeof(a));
+    ClauseJoin cj;
+    clause_set_join(set->nodes, set->count, &cj);
+    if (cj.status == CLAUSE_JOIN_WAIT || cj.status == CLAUSE_JOIN_NO_VALUE) return;
+    if (cj.status != CLAUSE_JOIN_OK) {
+        char a[160], b[160], msg[480], hint[200];
+        const char* js = cj.join ? ret_type_spell(cj.join, a, sizeof(a)) : "";
+        int line = cj.join_at ? cj.join_at->line : 0;
+        const char* name = fn->value;
+        hint[0] = '\0';
+        switch (cj.status) {
+            case CLAUSE_JOIN_UNFIT:
                 snprintf(msg, sizeof(msg),
                          "the clauses of '%s' are written to return %s (line %d), and this "
                          "clause returns %s, which %s does not hold: a clause set is one "
                          "function with one result",
-                         fn->value, ws, join_at->line, ret_type_spell(t, b, sizeof(b)), ws);
-            } else {
+                         name, js, line, ret_type_spell(cj.other, b, sizeof(b)), js);
+                snprintf(hint, sizeof(hint), "write the wider type on the clause that names "
+                         "one, or convert the value (`x as T`)");
+                break;
+            case CLAUSE_JOIN_NULL_UNFIT:
+            case CLAUSE_JOIN_NULL_APART:
                 snprintf(msg, sizeof(msg),
-                         "the clauses of '%s' return %s (line %d) and %s, which no one type "
-                         "holds: a clause set is one function with one result",
-                         fn->value, ret_type_spell(join, a, sizeof(a)),
-                         join_at ? join_at->line : 0, ret_type_spell(t, b, sizeof(b)));
-            }
-            type_error_hint(msg, unfit ? "write the wider type on the clause that names one, "
-                                         "or convert the value (`x as T`)"
-                                       : "return the same type from every clause, or convert "
-                                         "the value (`x as T`)",
-                            cl->line, cl->column);
-            if (k) free_type(k);
-            free_type(join);
-            return;
-        }
-        if (!types_equal(k, join)) join_at = cl;
-        free_type(join);
-        join = k;
-    }
-    /* #3061 review: an inferred clause that gives only `null` takes the
-     * pointer, string or closure type beside it, as a slot of that type
-     * takes `null`; alone, it is the `ptr` it is. */
-    if (null_at) {
-        if (!join) {
-            join = clone_type(null_at->node_type);
-            join_at = null_at;
-        } else if (!null_fits_type(join)) {
-            char a[160], msg[480];
-            const char* js = ret_type_spell(join, a, sizeof(a));
-            snprintf(msg, sizeof(msg),
-                     written ? "the clauses of '%s' are written to return %s (line %d), and this "
+                         cj.status == CLAUSE_JOIN_NULL_UNFIT
+                             ? "the clauses of '%s' are written to return %s (line %d), and this "
                                "clause returns `null`, which %s does not take: a clause set is "
                                "one function with one result"
                              : "the clauses of '%s' return %s (line %d) and `null`, which %s "
                                "does not take: a clause set is one function with one result",
-                     fn->value, js, join_at ? join_at->line : 0, js);
-            type_error_hint(msg,
-                            "`null` is a pointer, a string or a closure; an optional has "
-                            "`none` for no value",
-                            null_at->line, null_at->column);
-            free_type(join);
-            return;
-        }
-    }
-    /* #3063: the clauses that give only `none` join the rest as `T?`. */
-    if (none_at) {
-        char a[160], msg[480], hint[200];
-        Type* none_t = join ? create_optional_type(create_type(TYPE_UNKNOWN)) : NULL;
-        Type* k = join ? branch_join_type(join, NULL, none_t, NULL) : NULL;
-        if (none_t) free_type(none_t);
-        int unfit = written && k && !types_equal(k, join);
-        if (!k || unfit) {
-            const char* js = join ? ret_type_spell(join, a, sizeof(a)) : "";
-            if (!join) {
+                         name, js, line, js);
+                snprintf(hint, sizeof(hint), "`null` is a pointer, a string or a closure; an "
+                         "optional has `none` for no value");
+                break;
+            case CLAUSE_JOIN_NONE_ONLY:
                 snprintf(msg, sizeof(msg),
                          "every clause of '%s' that returns a value returns `none`, an optional "
                          "of no type: the set's result `T?` needs its `T`",
-                         fn->value);
+                         name);
                 snprintf(hint, sizeof(hint),
                          "write the result type on a clause, `-> int?` for an optional int");
-            } else if (unfit) {
+                break;
+            case CLAUSE_JOIN_NONE_UNFIT:
                 snprintf(msg, sizeof(msg),
                          "the clauses of '%s' are written to return %s (line %d), and this "
                          "clause returns `none`, which %s does not hold: a clause set is one "
                          "function with one result",
-                         fn->value, js, join_at->line, js);
+                         name, js, line, js);
                 snprintf(hint, sizeof(hint), "write the result type as an optional, `-> %s?`",
                          js);
-            } else {
+                break;
+            case CLAUSE_JOIN_NONE_APART:
                 snprintf(msg, sizeof(msg),
                          "the clauses of '%s' return %s (line %d) and `none`, which no one type "
                          "holds: a clause set is one function with one result",
-                         fn->value, js, join_at ? join_at->line : 0);
+                         name, js, line);
                 snprintf(hint, sizeof(hint),
                          "return a value an optional can hold, or `none` from no clause");
-            }
-            type_error_hint(msg, hint, none_at->line, none_at->column);
-            if (k) free_type(k);
-            if (join) free_type(join);
-            return;
+                break;
+            default:   /* CLAUSE_JOIN_APART */
+                snprintf(msg, sizeof(msg),
+                         "the clauses of '%s' return %s (line %d) and %s, which no one type "
+                         "holds: a clause set is one function with one result",
+                         name, js, line, ret_type_spell(cj.other, b, sizeof(b)));
+                snprintf(hint, sizeof(hint), "return the same type from every clause, or "
+                         "convert the value (`x as T`)");
+                break;
         }
-        free_type(join);
-        join = k;
+        type_error_hint(msg, hint, cj.at->line, cj.at->column);
+        if (cj.join) free_type(cj.join);
+        return;
     }
-    if (!join) return;
+    Type* join = cj.join;
     for (int c = 0; c < set->count; c++) {
         ASTNode* cl = set->nodes[c];
-        Type* t = cl->node_type;
-        if (!t || t->kind == TYPE_UNKNOWN) {
-            /* #3063: a clause that gives only `none` takes the result too. */
-            if (!none_at || !tc_returns_only_none(cl)) continue;
-            if (t) type_take(t, join);
-            else cl->node_type = clone_type(join);
-            continue;
-        }
-        if (t->kind != TYPE_VOID && !types_equal(t, join)) type_take(t, join);
+        if (!clause_takes_set_result(cl)) continue;
+        if (!cl->node_type) cl->node_type = clone_type(join);
+        else if (!types_equal(cl->node_type, join)) type_take(cl->node_type, join);
     }
     SymbolTable* root = table;
     while (root && root->parent) root = root->parent;

@@ -1130,6 +1130,167 @@ int ast_is_own_function(const ASTNode* n) {
     return n && n->type == AST_CLOSURE && !ast_is_trailing_block(n);
 }
 
+int ast_has_value_return(const ASTNode* node) {
+    if (!node || ast_is_own_function(node)) return 0;   /* a trailing block's are ours (#2766) */
+    if (node->type == AST_RETURN_STATEMENT && node->child_count > 0 && node->children[0])
+        return node->children[0]->type != AST_PRINT_STATEMENT;
+    for (int i = 0; i < node->child_count; i++)
+        if (ast_has_value_return(node->children[i])) return 1;
+    return 0;
+}
+
+/* The `return`s of a value in `node` that give a literal of kind `lit`, and
+ * those that give anything else. */
+static void count_literal_returns(const ASTNode* node, ASTNodeType lit, int* hits, int* other) {
+    if (!node || ast_is_own_function(node)) return;
+    if (node->type == AST_RETURN_STATEMENT && node->child_count > 0 && node->children[0]) {
+        if (node->children[0]->type == AST_PRINT_STATEMENT) return;
+        if (node->children[0]->type == lit) (*hits)++;
+        else (*other)++;
+        return;
+    }
+    for (int i = 0; i < node->child_count; i++)
+        count_literal_returns(node->children[i], lit, hits, other);
+}
+
+int ast_returns_only_literal(const ASTNode* node, ASTNodeType lit) {
+    int hits = 0, other = 0;
+    count_literal_returns(node, lit, &hits, &other);
+    return hits > 0 && other == 0;
+}
+
+int ast_type_takes_null(const Type* t) {
+    return t && (t->kind == TYPE_PTR || t->kind == TYPE_STRING || t->kind == TYPE_FUNCTION ||
+                 type_is_slice(t));
+}
+
+/* A clause whose result is inferred and every one of whose value `return`s
+ * gives `null`: its result is whatever `null` goes into beside it. On 0.835
+ * such a set took its first clause's type, and `node_or_null(0, p: *Node)
+ * -> null` beside `node_or_null(k, p: *Node) -> p` compiled (#3061 review). */
+static int clause_gives_only_null(const ASTNode* cl) {
+    return cl->type_inferred && cl->node_type && cl->node_type->kind != TYPE_UNKNOWN &&
+           ast_returns_only_literal(cl, AST_NULL_LITERAL);
+}
+
+/* #3063: a clause still unknown whose every value `return` gives `none`
+ * (the checker's refine_inferred_result waits past `none`, an optional of
+ * no type yet). */
+static int clause_gives_only_none(const ASTNode* cl) {
+    return (!cl->node_type || cl->node_type->kind == TYPE_UNKNOWN) &&
+           ast_returns_only_literal(cl, AST_NONE_LITERAL);
+}
+
+int clause_takes_set_result(const ASTNode* cl) {
+    if (clause_gives_only_none(cl)) return 1;
+    return cl->node_type && cl->node_type->kind != TYPE_UNKNOWN &&
+           cl->node_type->kind != TYPE_VOID;
+}
+
+static void clause_join_fail(ClauseJoin* out, ClauseJoinStatus st, ASTNode* at, Type* other) {
+    out->status = st;
+    out->at = at;
+    out->other = other;
+}
+
+void clause_set_join(ASTNode* const* nodes, int count, ClauseJoin* out) {
+    memset(out, 0, sizeof(*out));
+    ASTNode* none_at = NULL;
+    ASTNode* null_at = NULL;
+    for (int c = 0; c < count; c++) {
+        ASTNode* cl = nodes[c];
+        Type* t = cl->node_type;
+        if (!t || t->kind == TYPE_UNKNOWN) {
+            if (clause_gives_only_none(cl)) {
+                if (!none_at) none_at = cl;
+                continue;
+            }
+            if (ast_has_value_return(cl)) {   /* still to be inferred (#3056) */
+                out->status = CLAUSE_JOIN_WAIT;
+                return;
+            }
+            continue;
+        }
+        if (clause_gives_only_null(cl)) {
+            if (!null_at) null_at = cl;
+            continue;
+        }
+        if (!out->written && !cl->type_inferred && t->kind != TYPE_VOID) out->written = cl;
+    }
+    ASTNode* written = out->written;
+    Type* join = written ? clone_type(written->node_type) : NULL;
+    ASTNode* join_at = written;
+    for (int c = 0; c < count; c++) {
+        ASTNode* cl = nodes[c];
+        Type* t = cl->node_type;
+        if (!t || t->kind == TYPE_UNKNOWN || t->kind == TYPE_VOID || cl == written ||
+            clause_gives_only_null(cl))
+            continue;
+        if (!join) {
+            join = clone_type(t);
+            join_at = cl;
+            continue;
+        }
+        Type* k = branch_join_type(join, NULL, t, NULL);
+        /* Beside a written type, an inferred clause fits it (their join is
+         * it); a second written type is the same one or none. */
+        int unfit = written && k &&
+                    (!types_equal(k, join) || (!cl->type_inferred && !types_equal(t, join)));
+        if (!k || unfit) {
+            if (k) free_type(k);
+            out->join = join;
+            out->join_at = join_at;
+            clause_join_fail(out, unfit ? CLAUSE_JOIN_UNFIT : CLAUSE_JOIN_APART, cl, t);
+            return;
+        }
+        if (!types_equal(k, join)) join_at = cl;
+        free_type(join);
+        join = k;
+    }
+    /* `null` takes the pointer, string or closure type beside it, as a slot
+     * of that type takes `null`; alone, it is the `ptr` it is. */
+    if (null_at) {
+        if (!join) {
+            join = clone_type(null_at->node_type);
+            join_at = null_at;
+        } else if (!ast_type_takes_null(join)) {
+            out->join = join;
+            out->join_at = join_at;
+            clause_join_fail(out, written ? CLAUSE_JOIN_NULL_UNFIT : CLAUSE_JOIN_NULL_APART,
+                             null_at, NULL);
+            return;
+        }
+    }
+    /* `none` joins the rest as `T?`, as an if-expression's `none` arm does. */
+    if (none_at) {
+        if (!join) {
+            clause_join_fail(out, CLAUSE_JOIN_NONE_ONLY, none_at, NULL);
+            return;
+        }
+        Type* none_t = create_optional_type(create_type(TYPE_UNKNOWN));
+        Type* k = branch_join_type(join, NULL, none_t, NULL);
+        free_type(none_t);
+        int unfit = written && k && !types_equal(k, join);
+        if (!k || unfit) {
+            if (k) free_type(k);
+            out->join = join;
+            out->join_at = join_at;
+            clause_join_fail(out, unfit ? CLAUSE_JOIN_NONE_UNFIT : CLAUSE_JOIN_NONE_APART,
+                             none_at, NULL);
+            return;
+        }
+        free_type(join);
+        join = k;
+    }
+    if (!join) {
+        out->status = CLAUSE_JOIN_NO_VALUE;
+        return;
+    }
+    out->status = CLAUSE_JOIN_OK;
+    out->join = join;
+    out->join_at = join_at;
+}
+
 /* The arm codegen lowers to an unconditional `else`. The string literal "_"
  * is a string it compares with, not the wildcard. */
 static int ast_is_wildcard_pattern(const ASTNode* p) {

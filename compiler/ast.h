@@ -806,6 +806,51 @@ int ast_is_trailing_block(const ASTNode* n);
  * counts as the function's everywhere the others do. */
 int ast_is_own_function(const ASTNode* n);
 
+/* Does `node` hold a `return` of a value (not one of a function of its own,
+ * not a `return print...`)? */
+int ast_has_value_return(const ASTNode* node);
+/* Does every `return` of a value in `node` give a literal of AST kind `lit`
+ * (`none`, `null`), and is there one? */
+int ast_returns_only_literal(const ASTNode* node, ASTNodeType lit);
+/* Does a slot of type `t` take `null`: a pointer, a string, a closure or a
+ * C function pointer, a slice? */
+int ast_type_takes_null(const Type* t);
+
+/* #3061, #3063: the one result of a clause set, from its clauses' (`nodes`,
+ * in program order), as an if-expression's arms join (branch_join_type). A
+ * type a clause writes is the set's, and an inferred clause must fit it. An
+ * inferred clause that gives only `null` takes the pointer, string or
+ * closure type beside it; one still unknown that gives only `none` joins
+ * the others' `T` as `T?`. The checker settles a set by it and reports a
+ * failure; the early inference pass settles a set by it before calls are
+ * typed, and leaves a failure to the checker. */
+typedef enum {
+    CLAUSE_JOIN_OK,
+    CLAUSE_JOIN_WAIT,        /* a clause's result is still to be inferred */
+    CLAUSE_JOIN_NO_VALUE,    /* no clause gives a value */
+    CLAUSE_JOIN_APART,       /* two results no one type holds */
+    CLAUSE_JOIN_UNFIT,       /* a result the written type does not hold */
+    CLAUSE_JOIN_NULL_APART,  /* `null` beside a type that does not take it */
+    CLAUSE_JOIN_NULL_UNFIT,  /* `null` beside a written type that does not take it */
+    CLAUSE_JOIN_NONE_ONLY,   /* every clause that gives a value gives `none` */
+    CLAUSE_JOIN_NONE_APART,  /* `none` beside a type no optional holds */
+    CLAUSE_JOIN_NONE_UNFIT   /* `none` beside a written type that is no optional */
+} ClauseJoinStatus;
+
+typedef struct {
+    ClauseJoinStatus status;
+    Type* join;        /* OK: the set's result; a failure: the join so far. Fresh. */
+    ASTNode* join_at;  /* the clause that gave the join so far */
+    ASTNode* at;       /* a failure: the clause it is reported at */
+    Type* other;       /* APART, UNFIT: that clause's result (borrowed) */
+    ASTNode* written;  /* the clause that writes the result type, or NULL */
+} ClauseJoin;
+
+void clause_set_join(ASTNode* const* nodes, int count, ClauseJoin* out);
+/* Is clause `cl` one clause_set_join gives the set's result to: one that
+ * gives a value, the `none` and `null` ones included? */
+int clause_takes_set_result(const ASTNode* cl);
+
 /* Whether some arm of the `match` `m` runs for every value it can match: it
  * has a `_` arm, or it covers its subject's type. A match over an enum or a
  * sum covers it (the checker rejects one that misses a case), as do `none`
