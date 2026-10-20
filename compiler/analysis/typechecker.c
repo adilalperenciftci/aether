@@ -8111,6 +8111,20 @@ static Carried carries_borrowed_ptr(ASTNode* e, const KeepSet* s) {
             if (!e->value || strcmp(e->value, "&") || e->child_count == 0) return none;
             return carried_holders(carries_borrowed_ptr(e->children[0], s));
         }
+        /* #3033: `p + n` and `p - n` point into the memory `p` does, a view
+         * of it as a cast is; a difference of two pointers is a number. */
+        case AST_BINARY_EXPRESSION: {
+            if (!e->value || e->child_count != 2 || (strcmp(e->value, "+") && strcmp(e->value, "-")) ||
+                (e->node_type && e->node_type->kind != TYPE_PTR))
+                return none;
+            Carried c = none;
+            for (int i = 0; i < 2; i++) {
+                Type* ot = e->children[i] ? e->children[i]->node_type : NULL;
+                if (ot && (ot->kind == TYPE_PTR || ot->kind == TYPE_ARRAY))
+                    carried_merge(&c, carries_borrowed_ptr(e->children[i], s));
+            }
+            return c;
+        }
         /* An optional's payload (`o!`, `o ?? d`), or a result's value. */
         case AST_TUPLE_UNWRAP: case AST_NULL_COALESCE: {
             Carried c = none;

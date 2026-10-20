@@ -379,7 +379,8 @@ and result type. No rule reads another function's body.
 
 - **In the function.** An `@into` parameter is checked as a borrowed one
   (the facts above), with one difference: a `return` may hand it back, as
-  the pointer itself or a view of it (a cast), in a struct, a tuple part or
+  the pointer itself or a view of it (a cast, or `p + n`: a pointer
+  computed from it is the same memory, #3033), in a struct, a tuple part or
   an optional, in a closure that captures it, or in the result of another
   call that takes it as `@into`. Every other escape is still E0902: a store
   into a module variable, into a field or an element reached through a

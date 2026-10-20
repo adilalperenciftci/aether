@@ -571,6 +571,40 @@ main() { put(null) }
 AE
 refused struct_nested_field 9:5 "'p' is a borrowed \`ptr\` parameter, stored in a module-level \`var\`"
 
+# #3033: `p + n` and `p - n` point into the memory `p` does: stored,
+# returned or kept, each is the parameter kept.
+cat > "$TMP/arith_global.ae" <<'AE'
+var kept: ptr = null
+
+put(p: ptr) {
+    kept = p + 8
+}
+
+main() { put(null) }
+AE
+refused arith_global 4:5 "'p' is a borrowed \`ptr\` parameter, stored in a module-level \`var\`"
+
+cat > "$TMP/arith_returned.ae" <<'AE'
+next(p: ptr) -> ptr {
+    q = p - 1
+    return q + 2
+}
+
+main() { println("${next(null) == null}") }
+AE
+refused arith_returned 3:5 "'p' is a borrowed \`ptr\` parameter, returned"
+
+cat > "$TMP/arith_field.ae" <<'AE'
+struct Node { child: ptr }
+
+attach(n: *Node, c: ptr) {
+    n.child = c + 16
+}
+
+main() { attach(heap.new(Node), null) }
+AE
+refused arith_field 4:13 "'c' is a borrowed \`ptr\` parameter, stored in a field or an element"
+
 cat > "$TMP/payload_returned.ae" <<'AE'
 unwrap(p: ptr) -> ptr {
     let o: ptr? = p

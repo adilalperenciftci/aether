@@ -213,6 +213,51 @@ main() { println("${same(null) == null}") }
 AE
 refused into_global 4:5 "'p' is an \`@into ptr\` parameter, stored in a module-level \`var\`"
 
+# #3033: a pointer computed from the parameter (`p + n`) is a view of it:
+# the result may hold it, nothing else may, and at a call the result plus
+# an offset still holds the argument.
+cat > "$TMP/into_arith_global.ae" <<'AE'
+var kept: ptr = null
+
+skip(p: @into ptr) -> ptr {
+    kept = p + 4
+    return p + 8
+}
+
+main() { println("${skip(null) == null}") }
+AE
+refused into_arith_global 4:5 "'p' is an \`@into ptr\` parameter, stored in a module-level \`var\`"
+
+cat > "$TMP/into_arith_result.ae" <<'AE'
+var kept: ptr = null
+
+skip(p: @into ptr) -> ptr { return p + 8 }
+
+put(p: ptr) {
+    q = skip(p) - 2
+    kept = q
+}
+
+main() { put(null) }
+AE
+refused into_arith_result 7:5 "'p' is a borrowed \`ptr\` parameter, stored in a module-level \`var\`"
+
+cat > "$TMP/into_arith_view.ae" <<'AE'
+skip(p: @into ptr) -> ptr { return p + 8 }
+
+look(p: ptr) -> int {
+    q = skip(p) - 8
+    if q == p { return 1 }
+    return 0
+}
+
+main() {
+    x = 0
+    println("${look((&x) as ptr)}")
+}
+AE
+accepted into_arith_view
+
 cat > "$TMP/into_field.ae" <<'AE'
 struct Holder { h: ptr }
 
