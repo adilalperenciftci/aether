@@ -254,6 +254,17 @@ static int is_offset_kind(TypeKind k) {
            k == TYPE_UINT16 || k == TYPE_UINT8 || k == TYPE_BYTE;
 }
 
+/* #3048: the pointer `p + n` is, element type and all; a distinct
+ * pointer's is its base (typechecker.c's moved_pointer_type). */
+static Type* moved_pointer_type(Type* p) {
+    Type* t = clone_type(p);
+    if (t && t->distinct_name) {
+        free(t->distinct_name);
+        t->distinct_name = NULL;
+    }
+    return t;
+}
+
 static Type* infer_from_binary_op_by_kind(Type* left, Type* right, const char* operator) {
     if (!left || !right) return create_type(TYPE_UNKNOWN);
     
@@ -328,14 +339,21 @@ static Type* infer_from_binary_op_by_kind(Type* left, Type* right, const char* o
         /* #3045: a pointer moved by an integer of any width is a pointer:
          * `p + n` and `p - n`, `n + p`. Ahead of the long promotion below,
          * which made `p - n` with a `long` n a long, and then refused the
-         * pointer the checker gives it (E0200). */
+         * pointer the checker gives it (E0200). The pointer keeps its
+         * element type: `nodes + 2` with `nodes: *Node` is a `*Node`, whose
+         * fields read (#3048). */
         if ((strcmp(operator, "+") == 0 || strcmp(operator, "-") == 0) &&
             left->kind == TYPE_PTR && is_offset_kind(right->kind))
-            return create_type(TYPE_PTR);
+            return moved_pointer_type(left);
         if (strcmp(operator, "+") == 0 && is_offset_kind(left->kind) && right->kind == TYPE_PTR)
-            return create_type(TYPE_PTR);
-        // If either is int64 (long), promote to int64
-        if (left->kind == TYPE_INT64 || right->kind == TYPE_INT64) {
+            return moved_pointer_type(right);
+        /* If either is int64 (long), promote to int64. Not past an operand
+         * this pass has no type for yet: `nodes + n`, with `nodes = base as
+         * *Node` (a cast this pass leaves to the checker) and a long `n`,
+         * was called a long, and the `*Node` the checker gives it did not
+         * fit (E0200, #3048). The checker types such a value. */
+        if ((left->kind == TYPE_INT64 || right->kind == TYPE_INT64) &&
+            left->kind != TYPE_UNKNOWN && right->kind != TYPE_UNKNOWN) {
             return create_type(TYPE_INT64);
         }
         // ptr arithmetic for + and -: result is ptr (real pointer

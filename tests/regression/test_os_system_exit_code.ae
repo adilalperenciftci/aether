@@ -50,5 +50,25 @@ main() {
     }
     println("  PASS 4: explicit exit 42 returns 42")
 
+    // 5. A shell killed by a signal is 128 + its number, as a shell says
+    // it (#3046 review: os.system starts its shell through std.os's own
+    // fork now, and keeps system()'s status word). POSIX only: Windows
+    // has no signals to end a process with.
+    if os.platform() != "windows" {
+        rc_sig = os.system("kill -TERM $$")
+        if rc_sig != 143 {
+            println("FAIL 5: os.system('kill -TERM $$') = ${rc_sig}, expected 143")
+            exit(1)
+        }
+        println("  PASS 5: a shell ended by SIGTERM returns 143")
+        // 6. A command that is not there: the shell's 127.
+        rc_none = os.system("aether_no_such_command_3046")
+        if rc_none != 127 {
+            println("FAIL 6: a missing command = ${rc_none}, expected 127")
+            exit(1)
+        }
+        println("  PASS 6: a missing command returns 127")
+    }
+
     println("=== All cases passed ===")
 }

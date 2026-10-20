@@ -1,0 +1,39 @@
+// #3050: a `string!` function may return a `ptr` as its string, as a
+// `-> string` function may: the return hands the caller a reference of its
+// own (R3), so the caller's string is not the borrowed pointer. E0902 called
+// it the borrowed parameter returned, because the check of a string position
+// did not look inside a `T!` result. Values right, no heap growth.
+import std.string
+import std.mem
+
+extern exit(code: int)
+
+as_text(p: ptr) -> string! {
+    if p == null { return "", "no text" }
+    return p
+}
+
+check(ok: bool, what: string) {
+    if !ok {
+        println("FAIL: ${what}")
+        exit(1)
+    }
+}
+
+round(n: int) {
+    s = string.concat("ab", string.from_int(n))
+    v = as_text(s) or { "?" }
+    check(string.equals(v, string.concat("ab", string.from_int(n))) == 1, "the text came back")
+    w = as_text(null) or { "none" }
+    check(string.equals(w, "none") == 1, "the error path")
+}
+
+main() {
+    round(1)
+    grown = mem.steady_growth(|| { round(2) }, 5)
+    if mem.heap_in_use_exact() && grown != 0 {
+        println("FAIL: the heap grew ${grown} bytes per round")
+        exit(1)
+    }
+    println("ok")
+}

@@ -858,6 +858,528 @@ main() { attach(heap.new(Node), null) }
 AE
 refused arith_field 4:13 "'c' is a borrowed \`ptr\` parameter, stored in a field or an element"
 
+# #3047: what a loop's body binds holds on the next pass through it, so a
+# read placed before the store sees it: the body is walked until nothing new
+# is bound, then checked.
+cat > "$TMP/loop_struct_field.ae" <<'AE'
+struct Pair { a: ptr, b: ptr }
+var kept: ptr = null
+
+carry(p: ptr) {
+    s = Pair { a: null, b: null }
+    i = 0
+    while i < 2 {
+        kept = s.a
+        s.a = p
+        i = i + 1
+    }
+}
+
+main() { carry(null) }
+AE
+refused loop_struct_field 8:9 "'p' is a borrowed \`ptr\` parameter, stored in a module-level \`var\`"
+
+cat > "$TMP/loop_local.ae" <<'AE'
+var kept: ptr = null
+
+carry(p: ptr) {
+    q = null
+    for i in 0..2 {
+        kept = q
+        q = p
+    }
+}
+
+main() { carry(null) }
+AE
+refused loop_local 6:9 "'p' is a borrowed \`ptr\` parameter, stored in a module-level \`var\`"
+
+# Three passes before `kept` holds it: walking the body twice is not enough.
+cat > "$TMP/loop_chain.ae" <<'AE'
+var kept: ptr = null
+
+carry(p: ptr) {
+    a = null
+    b = null
+    c = null
+    i = 0
+    while i < 4 {
+        kept = c
+        c = b
+        b = a
+        a = p
+        i = i + 1
+    }
+}
+
+main() { carry(null) }
+AE
+refused loop_chain 9:9 "'p' is a borrowed \`ptr\` parameter, stored in a module-level \`var\`"
+
+# Nested loops: the outer loop carries what the inner one binds.
+cat > "$TMP/loop_nested.ae" <<'AE'
+struct Pair { a: ptr, b: ptr }
+var kept: ptr = null
+
+carry(p: ptr) {
+    s = Pair { a: null, b: null }
+    q = null
+    i = 0
+    while i < 2 {
+        kept = s.b
+        for j in 0..2 {
+            s.b = q
+            q = p
+        }
+        i = i + 1
+    }
+}
+
+main() { carry(null) }
+AE
+refused loop_nested 9:9 "'p' is a borrowed \`ptr\` parameter, stored in a module-level \`var\`"
+
+# `continue` and `break` leave the loop's other passes in place.
+cat > "$TMP/loop_continue_break.ae" <<'AE'
+var kept: ptr = null
+
+carry(p: ptr, n: int) {
+    q = null
+    i = 0
+    while true {
+        i = i + 1
+        if i == 1 { continue }
+        kept = q
+        q = p
+        if i > n { break }
+    }
+}
+
+main() { carry(null, 3) }
+AE
+refused loop_continue_break 9:9 "'p' is a borrowed \`ptr\` parameter, stored in a module-level \`var\`"
+
+# A loop that stores the parameter in a local and reads it there, after the
+# store, keeps nothing.
+cat > "$TMP/loop_store_then_read.ae" <<'AE'
+struct Pair { a: ptr, b: ptr }
+
+count(p: ptr) -> int {
+    s = Pair { a: null, b: null }
+    q = null
+    n = 0
+    while n < 4 {
+        s.a = p
+        q = s.a
+        if q == null { n = n + 10 }
+        n = n + 1
+    }
+    return n
+}
+
+main() { println("${count(null)}") }
+AE
+accepted loop_store_then_read
+
+# A local the body binds anew before reading it holds, in the pass, only what
+# the pass binds: the `p` of the pass before is gone by `kept = q`. The same
+# for a field of a local struct, inside another loop too.
+cat > "$TMP/loop_rebind_local.ae" <<'AE'
+import std.list
+var kept: ptr = null
+
+carry(p: ptr, n: int) {
+    i = 0
+    while i < n {
+        q = list.new()
+        kept = q
+        q = p
+        i = i + 1
+    }
+}
+
+nested(p: ptr, n: int) {
+    j = 0
+    while j < n {
+        for i in 0..n {
+            q = list.new()
+            kept = q
+            q = p
+        }
+        j = j + 1
+    }
+}
+
+main() { carry(null, 2)  nested(null, 2) }
+AE
+accepted loop_rebind_local
+
+cat > "$TMP/loop_rebind_field.ae" <<'AE'
+import std.list
+struct Box { item: ptr, other: ptr }
+var kept: ptr = null
+
+carry(p: ptr, n: int) {
+    b = Box { item: null, other: null }
+    i = 0
+    while i < n {
+        b.item = list.new()
+        kept = b.item
+        b.item = p
+        i = i + 1
+    }
+}
+
+main() { carry(null, 2) }
+AE
+accepted loop_rebind_field
+
+# The store binds that field anew, and nothing else of the struct: another
+# field still holds the pass before's `p`.
+cat > "$TMP/loop_rebind_other_field.ae" <<'AE'
+import std.list
+struct Box { item: ptr, other: ptr }
+var kept: ptr = null
+
+carry(p: ptr, n: int) {
+    b = Box { item: null, other: null }
+    i = 0
+    while i < n {
+        b.item = list.new()
+        kept = b.other
+        b.other = p
+        i = i + 1
+    }
+}
+
+main() { carry(null, 2) }
+AE
+refused loop_rebind_other_field 10:9 "'p' is a borrowed \`ptr\` parameter, stored in a module-level \`var\`"
+
+# What the last pass bound holds after the loop.
+cat > "$TMP/loop_rebind_after.ae" <<'AE'
+import std.list
+var kept: ptr = null
+
+carry(p: ptr, n: int) {
+    q = null
+    i = 0
+    while i < n {
+        q = list.new()
+        q = p
+        i = i + 1
+    }
+    kept = q
+}
+
+main() { carry(null, 2) }
+AE
+refused loop_rebind_after 12:5 "'p' is a borrowed \`ptr\` parameter, stored in a module-level \`var\`"
+
+# An if/else, or a match that covers its subject, every arm of which binds
+# the local anew before reading it, binds it as a statement of the body
+# would, when the condition or the subject does not read it: the `p` of the
+# pass before is gone by `kept = q` on every path.
+cat > "$TMP/loop_rebind_arms.ae" <<'AE'
+import std.list
+var kept: ptr = null
+
+by_if(p: ptr, n: int) {
+    i = 0
+    while i < n {
+        if i % 2 == 0 {
+            q = list.new()
+        } else {
+            q = list.new()
+        }
+        kept = q
+        q = p
+        i = i + 1
+    }
+}
+
+by_else_if(p: ptr, n: int) {
+    for i in 0..n {
+        if i == 0 {
+            q = list.new()
+        } else if i == 1 {
+            kept = null
+            q = list.new()
+        } else {
+            q = list.new()
+        }
+        kept = q
+        q = p
+    }
+}
+
+by_match(p: ptr, n: int) {
+    i = 0
+    while i < n {
+        match i % 3 {
+            0 -> { q = list.new() }
+            1 -> { q = list.new() }
+            _ -> { q = list.new() }
+        }
+        kept = q
+        q = p
+        i = i + 1
+    }
+}
+
+main() { by_if(null, 2)  by_else_if(null, 3)  by_match(null, 3) }
+AE
+accepted loop_rebind_arms
+
+# An arm that binds nothing, a read in an arm before its binding, a
+# condition that reads the local, or a match whose arms do not cover its
+# subject leave a path on which the pass before's `p` reaches `kept`.
+cat > "$TMP/loop_rebind_arm_missing.ae" <<'AE'
+import std.list
+var kept: ptr = null
+
+carry(p: ptr, n: int) {
+    q = list.new()
+    i = 0
+    while i < n {
+        if i % 2 == 0 {
+            q = list.new()
+        }
+        kept = q
+        q = p
+        i = i + 1
+    }
+}
+
+main() { carry(null, 2) }
+AE
+refused loop_rebind_arm_missing 11:9 "'p' is a borrowed \`ptr\` parameter, stored in a module-level \`var\`"
+
+cat > "$TMP/loop_rebind_arm_reads_first.ae" <<'AE'
+import std.list
+var kept: ptr = null
+
+carry(p: ptr, n: int) {
+    q = list.new()
+    i = 0
+    while i < n {
+        if i % 2 == 0 {
+            kept = q
+            q = list.new()
+        } else {
+            q = list.new()
+        }
+        q = p
+        i = i + 1
+    }
+}
+
+main() { carry(null, 2) }
+AE
+refused loop_rebind_arm_reads_first 9:13 "'p' is a borrowed \`ptr\` parameter, stored in a module-level \`var\`"
+
+cat > "$TMP/loop_rebind_arm_condition.ae" <<'AE'
+import std.list
+var kept: ptr = null
+
+carry(p: ptr, n: int) {
+    q = list.new()
+    i = 0
+    while i < n {
+        if q == null {
+            q = list.new()
+        } else {
+            q = list.new()
+        }
+        kept = q
+        q = p
+        i = i + 1
+    }
+}
+
+main() { carry(null, 2) }
+AE
+refused loop_rebind_arm_condition 13:9 "'p' is a borrowed \`ptr\` parameter, stored in a module-level \`var\`"
+
+cat > "$TMP/loop_rebind_match_uncovered.ae" <<'AE'
+import std.list
+var kept: ptr = null
+
+carry(p: ptr, n: int) {
+    q = list.new()
+    i = 0
+    while i < n {
+        match i % 3 {
+            0 -> { q = list.new() }
+            1 -> { q = list.new() }
+        }
+        kept = q
+        q = p
+        i = i + 1
+    }
+}
+
+main() { carry(null, 3) }
+AE
+refused loop_rebind_match_uncovered 12:9 "'p' is a borrowed \`ptr\` parameter, stored in a module-level \`var\`"
+
+# A field the body binds anew, read through an address of the struct after
+# the store, holds what the pass stored, as read through the struct: the
+# address taken in the pass or before the loop. Read through an address, or
+# a copy of one, before the store, it holds the pass before's `p`.
+cat > "$TMP/loop_rebind_alias.ae" <<'AE'
+import std.list
+struct Box { item: ptr, other: ptr }
+var kept: ptr = null
+
+in_pass(p: ptr, n: int) {
+    b = Box { item: null, other: null }
+    i = 0
+    while i < n {
+        b.item = list.new()
+        pb = (&b) as *Box
+        kept = pb.item
+        b.item = p
+        i = i + 1
+    }
+}
+
+before_loop(p: ptr, n: int) {
+    b = Box { item: null, other: null }
+    pb = (&b) as *Box
+    i = 0
+    while i < n {
+        b.item = list.new()
+        kept = pb.item
+        b.item = p
+        i = i + 1
+    }
+}
+
+main() { in_pass(null, 2)  before_loop(null, 2) }
+AE
+accepted loop_rebind_alias
+
+cat > "$TMP/loop_rebind_alias_read_first.ae" <<'AE'
+import std.list
+struct Box { item: ptr, other: ptr }
+var kept: ptr = null
+
+carry(p: ptr, n: int) {
+    b = Box { item: null, other: null }
+    pb = (&b) as *Box
+    qb = pb
+    i = 0
+    while i < n {
+        kept = qb.item
+        b.item = list.new()
+        b.item = p
+        i = i + 1
+    }
+}
+
+main() { carry(null, 2) }
+AE
+refused loop_rebind_alias_read_first 11:9 "'p' is a borrowed \`ptr\` parameter, stored in a module-level \`var\`"
+
+cat > "$TMP/loop_rebind_alias_in_store.ae" <<'AE'
+import std.list
+struct Box { item: ptr, other: ptr }
+var kept: ptr = null
+
+carry(p: ptr, n: int) {
+    b = Box { item: null, other: null }
+    pb = (&b) as *Box
+    i = 0
+    while i < n {
+        b.other = pb.item
+        b.item = list.new()
+        kept = b.other
+        b.item = p
+        i = i + 1
+    }
+}
+
+main() { carry(null, 2) }
+AE
+refused loop_rebind_alias_in_store 12:9 "'p' is a borrowed \`ptr\` parameter, stored in a module-level \`var\`"
+
+# #3057: a `defer` runs when its block is left and reads what is bound
+# there, so it is checked at the end of its block, a loop's body at the end
+# of each pass, not where it is written: the `q = p` after it reaches it.
+cat > "$TMP/defer_later_binding.ae" <<'AE'
+import std.list
+var kept: ptr = null
+
+f(p: ptr) {
+    q = list.new()
+    defer kept = q
+    q = p
+}
+
+g(p: ptr, n: int) {
+    i = 0
+    while i < n {
+        r = list.new()
+        defer kept = r
+        r = p
+        i = i + 1
+    }
+}
+
+main() { f(null)  g(null, 2) }
+AE
+refused defer_later_binding 6:11 "'p' is a borrowed \`ptr\` parameter, stored in a module-level \`var\`"
+refused defer_later_binding 14:15 "'p' is a borrowed \`ptr\` parameter, stored in a module-level \`var\`"
+
+# A defer in an inner block runs when that block is left, before what the
+# outer block binds after it.
+cat > "$TMP/defer_inner_block.ae" <<'AE'
+import std.list
+var kept: ptr = null
+
+f(p: ptr, c: bool) {
+    q = list.new()
+    if c {
+        defer kept = q
+    }
+    q = p
+}
+
+main() { f(null, true) }
+AE
+accepted defer_inner_block
+
+# chain_cell <name> <links>: `kept = l<links>`, then `l<k> = l<k-1>` down to
+# `l0 = p`, in a loop: `kept` holds `p` after <links> + 1 passes.
+chain_cell() {
+    {
+        echo 'var kept: ptr = null'
+        echo 'carry(p: ptr) {'
+        k=0
+        while [ "$k" -le "$2" ]; do echo "    l$k = null"; k=$((k + 1)); done
+        echo '    i = 0'
+        echo '    while i < 1000 {'
+        echo "        kept = l$2"
+        k=$2
+        while [ "$k" -ge 1 ]; do echo "        l$k = l$((k - 1))"; k=$((k - 1)); done
+        echo '        l0 = p'
+        echo '        i = i + 1'
+        echo '    }'
+        echo '}'
+        echo 'main() { carry(null) }'
+    } > "$TMP/$1.ae"
+}
+
+# Seventy links: more passes than the 64 the walk once stopped at.
+chain_cell loop_chain_70 70
+refused loop_chain_70 76:9 "'p' is a borrowed \`ptr\` parameter, stored in a module-level \`var\`"
+
+# Past KEEP_LOOP_PASSES_MAX (256) the loop's locals are taken to hold every
+# parameter, so the chain is refused still, if less precisely.
+chain_cell loop_chain_past_guard 300
+refused loop_chain_past_guard 306:9 "'p' is a borrowed \`ptr\` parameter held by a local the loop binds that is stored in a module-level \`var\`"
+
 cat > "$TMP/payload_returned.ae" <<'AE'
 unwrap(p: ptr) -> ptr {
     let o: ptr? = p
@@ -933,6 +1455,127 @@ run(cb: fn(ptr), p: ptr) { cb(p) }
 main() { run(hold, null) }
 AE
 refused keep_fn_arg 7:14 "'hold' keeps its \`ptr\` parameter 'q' (\`@keep\`), so it cannot be a C function pointer"
+
+# refused_each <name> <count> <line:col>...: `ae check` refuses <name>.ae
+# with exactly <count> E0902 errors, one at each position given.
+refused_each() {
+    name="$1"; count="$2"; shift 2
+    out=$(cd "$TMP" && "$AE" check "$name.ae" 2>&1)
+    n=$(printf '%s\n' "$out" | grep -c 'error\[E0902\]')
+    bad=""
+    [ "$n" -eq "$count" ] || bad="$n E0902 errors, not $count"
+    for at in "$@"; do
+        k=$(printf '%s\n' "$out" | grep -c -- "--> $name.ae:$at\$")
+        [ "$k" -eq 1 ] || bad="$bad; $k at $at, not 1"
+    done
+    if [ -n "$bad" ]; then
+        echo "  [FAIL] $name: $bad"
+        echo "$out" | sed 's/^/        /'
+        fails=$((fails + 1))
+    fi
+}
+
+# #3060: each cast of a keeping function to a C function pointer is one
+# error, wherever it is written. A struct literal's field was reported
+# twice, an if-expression's arms three times each, and an array literal's
+# element or a match arm's value not at all.
+cat > "$TMP/keep_fn_cast_once.ae" <<'AE'
+struct Holder { kept: ptr }
+keep_it(state: ptr, item: @keep ptr) { (state as *Holder).kept = item }
+struct Table { set: fn(ptr, ptr) }
+
+pick(n: int) -> fn(ptr, ptr) {
+    return keep_it as fn(ptr, ptr)
+}
+
+main() {
+    h = Holder { kept: null }
+    t = Table { set: keep_it as fn(ptr, ptr) }
+    arr = [keep_it as fn(ptr, ptr)]
+    c = if h.kept == null { keep_it as fn(ptr, ptr) } else { pick(1) }
+    m = match 1 { 1 -> keep_it as fn(ptr, ptr)  _ -> pick(2) }
+    println("${t.set == null} ${arr[0] == null} ${c == null} ${m == null}")
+}
+AE
+refused keep_fn_cast_once 11:22 "'keep_it' keeps its \`ptr\` parameter 'item' (\`@keep\`), so it cannot be a C function pointer"
+refused_each keep_fn_cast_once 5 6:12 11:22 12:12 13:29 14:24
+
+# helped <name> <text>: `ae check` refuses <name>.ae with E0902 and a help
+# containing <text>, the fix it names.
+helped() {
+    name="$1"; text="$2"
+    out=$(cd "$TMP" && "$AE" check "$name.ae" 2>&1)
+    case "$out" in
+        *"error[E0902]"*"help: "*"$text"*) ;;
+        *) echo "  [FAIL] $name: no E0902 help naming \"$text\":"
+           echo "$out" | sed 's/^/        /'
+           fails=$((fails + 1)) ;;
+    esac
+}
+
+# #3059: the two shapes 0.836.0 refuses that 0.835.0 compiled, each help
+# naming its one-line fix, and each fix accepted (the CHANGELOG's and the
+# language reference's "Migrating from 0.835").
+cat > "$TMP/migrate_into.ae" <<'AE'
+slice(bytes: ptr, offset: int) -> ptr { return bytes + offset }
+
+main() {
+    x = 0
+    println("${slice((&x) as ptr, 0) != null}")
+}
+AE
+refused migrate_into 1:41 "'bytes' is a borrowed \`ptr\` parameter, returned"
+helped migrate_into "declare \`bytes: @into ptr\` if only this function's result holds it"
+
+cat > "$TMP/migrate_into_fixed.ae" <<'AE'
+slice(bytes: @into ptr, offset: int) -> ptr { return bytes + offset }
+
+main() {
+    x = 0
+    println("${slice((&x) as ptr, 0) != null}")
+}
+AE
+accepted migrate_into_fixed
+
+cat > "$TMP/migrate_slot_cast.ae" <<'AE'
+struct Holder { kept: ptr }
+keep_it(state: ptr, item: @keep ptr) { (state as *Holder).kept = item }
+struct Table { set: fn(ptr, ptr) }
+
+main() {
+    h = Holder { kept: null }
+    t = Table { set: keep_it as fn(ptr, ptr) }
+    println("${t.set == null} ${h.kept == null}")
+}
+AE
+helped migrate_slot_cast "drop the cast and give the slot the function's modes, \`fn(ptr, @keep ptr)\`"
+
+cat > "$TMP/migrate_slot.ae" <<'AE'
+struct Holder { kept: ptr }
+keep_it(state: ptr, item: @keep ptr) { (state as *Holder).kept = item }
+struct Table { set: fn(ptr, ptr) }
+
+main() {
+    h = Holder { kept: null }
+    t = Table { set: keep_it }
+    println("${t.set == null} ${h.kept == null}")
+}
+AE
+helped migrate_slot "give the slot the function's modes, \`fn(ptr, @keep ptr)\`"
+
+cat > "$TMP/migrate_slot_fixed.ae" <<'AE'
+struct Holder { kept: ptr }
+keep_it(state: ptr, item: @keep ptr) { (state as *Holder).kept = item }
+struct Table { set: fn(ptr, @keep ptr) }
+
+main() {
+    h = Holder { kept: null }
+    t = Table { set: keep_it }
+    call(t.set, (&h) as ptr, (&h) as ptr)
+    println("${h.kept != null}")
+}
+AE
+accepted migrate_slot_fixed
 
 # Need no `@keep`: the aephysics shape (a struct local to the function holds
 # the parameter, or has it stored into a field, and dies with the call) and
@@ -1040,6 +1683,159 @@ main() {
 }
 AE
 accepted returned_as_string
+
+# #3050: the one value a `string!` function returns is its string, so a
+# `ptr` there is taken as a string as for `-> string`.
+cat > "$TMP/returned_as_string_result.ae" <<'AE'
+as_text(p: ptr) -> string! {
+    if p == null { return "", "no text" }
+    return p
+}
+
+main() {
+    v = as_text("a") or { "?" }
+    println(v)
+}
+AE
+accepted returned_as_string_result
+
+# #3058: a closure that reads through an address of a local, or a local it
+# shares with the function (one a closure assigns), reads what was stored
+# there after the closure was written. Where it is called or passed, its
+# body is checked against what holds the parameter there.
+cat > "$TMP/closure_alias_called.ae" <<'AE'
+struct Box { item: ptr }
+var kept: ptr = null
+
+carry(p: ptr) {
+    b = Box { item: null }
+    pb = (&b) as *Box
+    g = || { kept = pb.item }
+    b.item = p
+    call(g)
+}
+
+main() { carry(null) }
+AE
+refused closure_alias_called 7:14 "'p' is a borrowed \`ptr\` parameter, stored in a module-level \`var\`"
+
+cat > "$TMP/closure_alias_passed.ae" <<'AE'
+struct Box { item: ptr }
+var kept: ptr = null
+
+run(f: fn) { call(f) }
+
+carry(p: ptr) {
+    b = Box { item: null }
+    pb = (&b) as *Box
+    g = || { kept = pb.item }
+    h = g
+    b.item = p
+    run(h)
+}
+
+main() { carry(null) }
+AE
+refused closure_alias_passed 9:14 "'p' is a borrowed \`ptr\` parameter, stored in a module-level \`var\`"
+
+# Called in a loop before the store: the next pass reads what it stored.
+cat > "$TMP/closure_alias_looped.ae" <<'AE'
+struct Box { item: ptr }
+var kept: ptr = null
+
+carry(p: ptr, n: int) {
+    b = Box { item: null }
+    pb = (&b) as *Box
+    g = || { kept = pb.item }
+    i = 0
+    while i < n {
+        call(g)
+        b.item = p
+        i = i + 1
+    }
+}
+
+main() { carry(null, 2) }
+AE
+refused closure_alias_looped 7:14 "'p' is a borrowed \`ptr\` parameter, stored in a module-level \`var\`"
+
+cat > "$TMP/closure_shared_local.ae" <<'AE'
+var kept: ptr = null
+
+carry(p: ptr) {
+    q = null
+    g = || { kept = q }
+    reset = || { q = null }
+    q = p
+    call(g)
+    call(reset)
+}
+
+main() { carry(null) }
+AE
+refused closure_shared_local 5:14 "'p' is a borrowed \`ptr\` parameter, stored in a module-level \`var\`"
+
+# What it reads through the address is what it holds, where it goes too.
+cat > "$TMP/closure_alias_returned.ae" <<'AE'
+struct Box { item: ptr }
+
+carry(p: ptr) -> fn {
+    b = Box { item: null }
+    pb = (&b) as *Box
+    g = || { println("${pb.item == null}") }
+    b.item = p
+    return g
+}
+
+main() { call(carry(null)) }
+AE
+refused closure_alias_returned 8:12 "'p' is a borrowed \`ptr\` parameter captured by a closure that is returned"
+
+# Called before the store; a capture of a local no closure assigns, which
+# is a copy made where the closure stands; a closure that only reads
+# through the address in the call; closures with no pointer at all.
+cat > "$TMP/closure_alias_guards.ae" <<'AE'
+struct Box { item: ptr }
+var kept: ptr = null
+
+before_store(p: ptr) {
+    b = Box { item: null }
+    pb = (&b) as *Box
+    g = || { kept = pb.item }
+    call(g)
+    b.item = p
+}
+
+copy_capture(p: ptr) {
+    q = null
+    g = || { kept = q }
+    q = p
+    call(g)
+}
+
+read_in_call(p: ptr) -> int {
+    b = Box { item: null }
+    pb = (&b) as *Box
+    g = || -> { if pb.item == null { return 1 } return 0 }
+    b.item = p
+    return call(g)
+}
+
+plain(p: ptr) -> int {
+    n = 0
+    g = || { n = n + 1 }
+    call(g)
+    h = |x: int| -> x * 2
+    return call(h, n)
+}
+
+main() {
+    before_store(null)
+    copy_capture(null)
+    println("${read_in_call(null) + plain(null)}")
+}
+AE
+accepted closure_alias_guards
 
 if [ "$fails" -ne 0 ]; then exit 1; fi
 echo "  [PASS] keeps_borrowed: a borrowed ptr parameter is never kept, alone or in a struct or closure that escapes; @keep, string.keep, string.seq_retain, a re-bound parameter, a struct local and a closure run in the call are"

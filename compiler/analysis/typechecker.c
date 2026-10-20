@@ -2431,14 +2431,21 @@ static void warn_erased_result_closures(void) {
     g_tc_erased_closure_count = 0;
 }
 
+static Type* fn_value_type_of(ASTNode* def, Type* sym_type);
+
 /* #2926, #2990, #2980: a typed C function pointer's parameters borrow (a
  * call through one is checked as borrowing), so a function with a `@keep`
- * or `@into` parameter is no C function pointer: `as fn(...)`, or a typed
- * function pointer slot. As a value it is a closure of a type that says
- * what it does (fn_value_type_of). `ident` names the function `def`.
- * Reports each such parameter; returns 1 when there was one. */
-static int refuse_moded_fn_value(ASTNode* ident, ASTNode* def) {
+ * or `@into` parameter is no C function pointer: `as fn(...)` (`cast`), or
+ * a typed function pointer slot. As a value it is a closure of a type that
+ * says what it does (fn_value_type_of). `ident` names the function `def`,
+ * whose result is `sym_type`. Reports each such parameter; returns 1 when
+ * there was one. #3059: the help names the fix, the slot's type with the
+ * function's modes (`fn(ptr, @keep ptr)`), into which the function goes as
+ * it is. */
+static int refuse_moded_fn_value(ASTNode* ident, ASTNode* def, Type* sym_type, int cast) {
     int refused = 0;
+    char help[400];
+    help[0] = '\0';
     for (int i = 0; ident && def && i < def->child_count; i++) {
         ASTNode* p = def->children[i];
         if (!p || !p->annotation) continue;
@@ -2456,10 +2463,18 @@ static int refuse_moded_fn_value(ASTNode* ident, ASTNode* def) {
                      "'%s' passes its `ptr` parameter '%s' into its result (`@into`), so it cannot "
                      "be a C function pointer, whose parameters borrow",
                      ident->value, p->value ? p->value : "?");
-        type_error_code_hint(msg,
-            "call it by name, or take it as a closure of a type that says so, "
-            "`fn(@keep ptr)`: a call through a C function pointer treats every `ptr` as borrowed",
-            ident->line, ident->column, AETHER_ERR_KEEPS_BORROWED);
+        if (!help[0]) {
+            Type* vt = fn_value_type_of(def, sym_type);
+            snprintf(help, sizeof(help),
+                     cast ? "drop the cast and give the slot the function's modes, `%s`: '%s' "
+                            "goes there as it is, and a call through it is checked as a call "
+                            "of '%s' is"
+                          : "give the slot the function's modes, `%s`: '%s' goes there as it "
+                            "is, and a call through it is checked as a call of '%s' is",
+                     type_spelled(vt), ident->value, ident->value);
+            free_type(vt);
+        }
+        type_error_code_hint(msg, help, ident->line, ident->column, AETHER_ERR_KEEPS_BORROWED);
         refused = 1;
     }
     return refused;
@@ -2474,7 +2489,7 @@ static void refuse_moded_fn_in_fnptr_slot(SymbolTable* table, ASTNode* value, Ty
     Symbol* sym = lookup_symbol(table, value->value);
     if (sym && sym->is_function && sym->node &&
         (sym->node->type == AST_FUNCTION_DEFINITION || sym->node->type == AST_BUILDER_FUNCTION))
-        refuse_moded_fn_value(value, sym->node);
+        refuse_moded_fn_value(value, sym->node, sym->type, 0);
 }
 
 /* #2055: a top-level function named in value position -- `op = add_fn`,
@@ -4074,7 +4089,6 @@ Type* infer_type(ASTNode* expr, SymbolTable* table) {
                         if (operand_node->annotation) free(operand_node->annotation);
                         operand_node->annotation = strdup("fn_addr");
                         operand_is_fn_addr = 1;
-                        refuse_moded_fn_value(operand_node, fsym->node);
                     }
                 }
             }
@@ -4487,6 +4501,18 @@ Type* infer_binary_type(ASTNode* left, ASTNode* right, AeTokenType operator) {
     return result;
 }
 
+/* #3048: the type of `p + n`, `p - n` and `n + p`: the pointer `p` is, its
+ * element type and all (a `*Node` moved on is a `*Node`). A distinct
+ * pointer's is its base, as a distinct number's is beside a plain one. */
+static Type* moved_pointer_type(Type* p) {
+    Type* t = clone_type(p);
+    if (t && t->distinct_name) {
+        free(t->distinct_name);
+        t->distinct_name = NULL;
+    }
+    return t;
+}
+
 static Type* infer_binary_type_by_kind(ASTNode* left, ASTNode* right, AeTokenType operator) {
     Type* left_type = left ? left->node_type : NULL;
     Type* right_type = right ? right->node_type : NULL;
@@ -4713,9 +4739,11 @@ static Type* infer_binary_type_by_kind(ASTNode* left, ASTNode* right, AeTokenTyp
                  * checker refuses it, typecheck_binary_expression). */
                 int off_r = is_integer_scalar(right_type->kind) || right_type->kind == TYPE_BYTE;
                 int off_l = is_integer_scalar(left_type->kind) || left_type->kind == TYPE_BYTE;
-                if (left_type->kind == TYPE_PTR && off_r) return create_type(TYPE_PTR);
+                /* #3048: keeping the element type, so a `*Node` moved
+                 * on is a `*Node` still and its fields read. */
+                if (left_type->kind == TYPE_PTR && off_r) return moved_pointer_type(left_type);
                 if (off_l && right_type->kind == TYPE_PTR && operator == TOKEN_PLUS)
-                    return create_type(TYPE_PTR);
+                    return moved_pointer_type(right_type);
                 if (left_type->kind == TYPE_PTR && right_type->kind == TYPE_PTR &&
                     operator == TOKEN_MINUS) {
                     return create_type(TYPE_INT64);
@@ -6021,6 +6049,159 @@ static void bind_struct_pattern_names(ASTNode* p, SymbolTable* table) {
     }
 }
 
+/* #3056: the program's functions whose result type is still to be inferred
+ * from what they return: no written result type, none the early inference
+ * pass found, and a `return` of a value. Each takes the checked type of its
+ * first value `return` (refine_inferred_result), so each is checked before
+ * the first top-level declaration that calls it, its callees of the kind
+ * before it: checked after a caller, the call's result was unknown there,
+ * and codegen gave it int. Every other declaration is checked in program
+ * order, as before. */
+typedef struct {
+    ASTNode** tops;   /* the top-level node (an `export` wraps its function) */
+    ASTNode** fns;
+    int* state;       /* 0 to check, 1 being checked, 2 checked */
+    int count;
+    int cap;
+} PendingResults;
+
+static int returns_value_in(ASTNode* n) {
+    if (!n || n->type == AST_CLOSURE || n->type == AST_FUNCTION_DEFINITION ||
+        n->type == AST_BUILDER_FUNCTION)
+        return 0;
+    if (n->type == AST_RETURN_STATEMENT && n->child_count > 0) return 1;
+    for (int i = 0; i < n->child_count; i++)
+        if (returns_value_in(n->children[i])) return 1;
+    return 0;
+}
+
+static void pending_results_find(ASTNode* program, PendingResults* p) {
+    for (int i = 0; i < program->child_count; i++) {
+        ASTNode* top = program->children[i];
+        ASTNode* fn = top;
+        if (fn && fn->type == AST_EXPORT_STATEMENT && fn->child_count > 0) fn = fn->children[0];
+        if (!fn || (fn->type != AST_FUNCTION_DEFINITION && fn->type != AST_BUILDER_FUNCTION) ||
+            !fn->value || !fn->type_inferred || fn->child_count == 0 ||
+            (fn->node_type && fn->node_type->kind != TYPE_UNKNOWN) ||
+            !returns_value_in(fn->children[fn->child_count - 1]))
+            continue;
+        if (p->count == p->cap) {
+            p->cap = p->cap ? p->cap * 2 : 8;
+            p->tops = aether_xrealloc(p->tops, (size_t)p->cap * sizeof(ASTNode*));
+            p->fns = aether_xrealloc(p->fns, (size_t)p->cap * sizeof(ASTNode*));
+            p->state = aether_xrealloc(p->state, (size_t)p->cap * sizeof(int));
+        }
+        p->tops[p->count] = top;
+        p->fns[p->count] = fn;
+        p->state[p->count++] = 0;
+    }
+}
+
+static int pending_result_of_top(const PendingResults* p, ASTNode* top) {
+    for (int j = 0; j < p->count; j++)
+        if (p->tops[j] == top) return j;
+    return -1;
+}
+
+/* One top-level declaration through the second pass. */
+static void typecheck_top(ASTNode* top, SymbolTable* global_table) {
+    g_tc_file = top ? top->source_file : NULL;
+    /* #2614: a merged declaration (a module's function, actor or
+     * constant) resolves qualified names against its own module's
+     * imports, whatever kind of node it is. */
+    global_table->merged_from = top ? top->origin_module : NULL;
+    typecheck_node(top, global_table);
+    global_table->merged_from = NULL;
+    warn_erased_result_closures();   /* #2484 */
+}
+
+static void typecheck_pending_calls(ASTNode* n, PendingResults* p, SymbolTable* global_table,
+                                    int postpone);
+static void clause_set_settle(ASTNode* fn, SymbolTable* table);
+static int clause_set_first(ASTNode* fn);
+
+/* #3056 review: the first `return` of a value in `n`, in source order (not
+ * one of a closure or a nested function), or NULL. */
+static ASTNode* first_value_return(ASTNode* n) {
+    if (!n || n->type == AST_CLOSURE || n->type == AST_FUNCTION_DEFINITION ||
+        n->type == AST_BUILDER_FUNCTION)
+        return NULL;
+    if (n->type == AST_RETURN_STATEMENT && n->child_count > 0) return n;
+    for (int i = 0; i < n->child_count; i++) {
+        ASTNode* r = first_value_return(n->children[i]);
+        if (r) return r;
+    }
+    return NULL;
+}
+
+/* #3056 review: does `n` call a pending function being checked (state 1),
+ * itself or through the pending functions it calls that are not checked
+ * yet? `seen` marks those followed. */
+static int pending_reaches_busy(ASTNode* n, PendingResults* p, char* seen) {
+    if (!n) return 0;
+    if (n->type == AST_FUNCTION_CALL && n->value) {
+        for (int j = 0; j < p->count; j++) {
+            if (strcmp(p->fns[j]->value, n->value)) continue;
+            if (p->state[j] == 1) return 1;
+            if (p->state[j] == 0 && !seen[j]) {
+                seen[j] = 1;
+                if (pending_reaches_busy(p->fns[j], p, seen)) return 1;
+            }
+        }
+    }
+    for (int i = 0; i < n->child_count; i++)
+        if (pending_reaches_busy(n->children[i], p, seen)) return 1;
+    return 0;
+}
+
+/* Check pending function `j`, the pending functions it calls first. Those
+ * its first value `return` calls come first of all: that `return` gives
+ * `j` its type, from theirs. #3056 review: any other that calls back into
+ * a function being checked waits until after `j` (and is checked by the
+ * walk after it, or later): checked first, it met that function unknown
+ * and stayed unknown itself, so `a`, whose `return p.n` types it, and `b`,
+ * which returns `a(...)`, left `b` the int default when `a` was entered
+ * first. */
+static void typecheck_pending(int j, PendingResults* p, SymbolTable* global_table) {
+    p->state[j] = 1;
+    ASTNode* body = p->fns[j]->child_count > 0 ? p->fns[j]->children[p->fns[j]->child_count - 1]
+                                               : NULL;
+    typecheck_pending_calls(first_value_return(body), p, global_table, 0);
+    typecheck_pending_calls(p->fns[j], p, global_table, 1);
+    typecheck_top(p->tops[j], global_table);
+    p->state[j] = 2;
+    clause_set_settle(p->fns[j], global_table);   /* #3061 */
+    typecheck_pending_calls(p->fns[j], p, global_table, 1);
+}
+
+/* Check the pending functions `n` calls that are not checked yet. One
+ * being checked (a recursion) is left as it is; with `postpone`, so is one
+ * that calls back into one being checked. */
+static void typecheck_pending_calls(ASTNode* n, PendingResults* p, SymbolTable* global_table,
+                                    int postpone) {
+    if (!n) return;
+    if (n->type == AST_FUNCTION_CALL && n->value) {
+        for (int j = 0; j < p->count; j++) {
+            if (p->state[j] != 0 || strcmp(p->fns[j]->value, n->value)) continue;
+            if (postpone) {
+                char* seen = aether_xrealloc(NULL, (size_t)p->count);
+                memset(seen, 0, (size_t)p->count);
+                seen[j] = 1;
+                int busy = pending_reaches_busy(p->fns[j], p, seen);
+                free(seen);
+                if (busy) continue;
+            }
+            typecheck_pending(j, p, global_table);
+        }
+    }
+    for (int i = 0; i < n->child_count; i++)
+        typecheck_pending_calls(n->children[i], p, global_table, postpone);
+}
+
+static void typecheck_pending_callees(ASTNode* n, PendingResults* p, SymbolTable* global_table) {
+    typecheck_pending_calls(n, p, global_table, 1);
+}
+
 int typecheck_program(ASTNode* program) {
     note_program_globals(program);
     if (!program || program->type != AST_PROGRAM) return 0;
@@ -6877,18 +7058,28 @@ int typecheck_program(ASTNode* program) {
             quote_register_helper(top);
     }
 
-    // Second pass: type check all nodes
+    // Second pass: type check all nodes. #3056: a function whose result is
+    // inferred from its checked `return` before the first one that calls it.
+    /* #3061: a clause set whose every clause's result is known by now is
+     * one function of their join, before any body or call is checked. */
+    for (int i = 0; i < program->child_count; i++)
+        if (clause_set_first(program->children[i]))
+            clause_set_settle(program->children[i], global_table);
+    PendingResults pending = { 0 };
+    pending_results_find(program, &pending);
     for (int i = 0; i < program->child_count; i++) {
         ASTNode* top = program->children[i];
-        g_tc_file = top ? top->source_file : NULL;
-        /* #2614: a merged declaration (a module's function, actor or
-         * constant) resolves qualified names against its own module's
-         * imports, whatever kind of node it is. */
-        global_table->merged_from = top ? top->origin_module : NULL;
-        typecheck_node(top, global_table);
-        global_table->merged_from = NULL;
-        warn_erased_result_closures();   /* #2484 */
+        int j = pending.count ? pending_result_of_top(&pending, top) : -1;
+        if (j >= 0) {
+            if (pending.state[j] == 0) typecheck_pending(j, &pending, global_table);
+            continue;
+        }
+        if (pending.count) typecheck_pending_callees(top, &pending, global_table);
+        typecheck_top(top, global_table);
     }
+    free(pending.tops);
+    free(pending.fns);
+    free(pending.state);
     g_tc_file = NULL;
 
     /* Each @quotable function, now type-checked, lowered to its tree (its
@@ -7778,6 +7969,11 @@ static void check_borrowed_param_frees(ASTNode* program, ASTNode* fn, ASTNode* b
  * as a struct local is. */
 #define KEEP_SET_MAX 128   /* the `@into` parameters a KeepSet lists */
 #define CARRIED_MAX 8
+/* #3047: a bound on a loop body's binding passes. Each pass that does not
+ * stop the loop binds a new holder, so a body needs no more passes than it
+ * has holders to find. A loop still unsettled past it is widened
+ * (keep_loop_widen), never reported from a partial walk. */
+#define KEEP_LOOP_PASSES_MAX 256
 /* #2990 review: a Carried entry for every borrowed parameter of the function
  * at once, which a full Carried folds into rather than drop a parameter. */
 #define CARRIED_ANY "*"
@@ -7833,6 +8029,34 @@ typedef struct {
     int escaped;
     const KeepCtx* ctx;
     int depth;
+    /* #3047: a loop body's passes that only bind (check_ptr_keeps_loop):
+     * nothing is reported until what the loop carries is known. */
+    int silent;
+    /* #3058: each closure literal a name was bound to here (`g = || { ...
+     * }`), every one, as the holders only grow: a call through the name,
+     * or the name passed, may run any of them. */
+    const char** clo_names;
+    ASTNode** clo_nodes;
+    int clo_count;
+    int clo_cap;
+    /* #3058: the locals a closure of this body assigns, or stores a field
+     * or an element of, which the body and its closures share in one cell
+     * (docs/closures-and-builder-dsl.md, "Ref Cells"). */
+    const char** shared;
+    int shared_count;
+    int shared_cap;
+    /* #3058: the closures being walked where they are used, so one that
+     * runs itself is walked once. */
+    ASTNode** using_clo;
+    int using_count;
+    int using_cap;
+    /* #3058: what was reported, so a closure walked where it is written
+     * and again where it is used reports a store once. */
+    ASTNode** rep_at;
+    const char** rep_param;
+    const char** rep_how;
+    int rep_count;
+    int rep_cap;
 } KeepSet;
 
 static int c_lvalue_outlives(const KeepCtx* c, ASTNode* lhs, int depth);
@@ -7843,6 +8067,9 @@ static int c_lvalue_outlives(const KeepCtx* c, ASTNode* lhs, int depth);
 static int returns_string_at(Type* ret, int i, int n) {
     if (!ret) return 0;
     if (ret->kind == TYPE_STRING) return n == 1;
+    /* #3050: the one value a `T!` function returns is its `T` (#3044). */
+    if (ret->kind == TYPE_TUPLE && ret->is_result && n == 1 && i == 0 && ret->tuple_count >= 1)
+        return ret->tuple_types && ret->tuple_types[0] && ret->tuple_types[0]->kind == TYPE_STRING;
     if (ret->kind == TYPE_TUPLE && n == ret->tuple_count && i < ret->tuple_count)
         return ret->tuple_types[i] && ret->tuple_types[i]->kind == TYPE_STRING;
     return 0;
@@ -7998,6 +8225,20 @@ static Carried carried_holders(Carried c) {
     return h;
 }
 
+static int ast_names(ASTNode* n, const char* name);
+static void mentioned_params_at(ASTNode* n, const KeepSet* s, Carried* out, int depth);
+
+/* #3058: does the closure literal `clo` read what is stored after it is
+ * written: through an address of a local (#3043), or a local it shares
+ * with the body? Every other capture is a copy made where it stands. */
+static int closure_shares_state(const KeepSet* s, ASTNode* clo) {
+    for (int i = 0; i < s->alias_count; i++)
+        if (ast_names(clo, s->alias_names[i])) return 1;
+    for (int i = 0; i < s->shared_count; i++)
+        if (ast_names(clo, s->shared[i])) return 1;
+    return 0;
+}
+
 static Carried keep_set_lookup_at(const KeepSet* s, const char* n, int depth) {
     Carried c = { 0 };
     for (int i = 0; n && i < s->count; i++)
@@ -8009,6 +8250,17 @@ static Carried keep_set_lookup_at(const KeepSet* s, const char* n, int depth) {
         Carried t = carried_holders(keep_set_lookup_at(s, s->alias_targets[i], depth + 1));
         if (s->alias_parts[i]) t = carried_part(t, s->alias_parts[i]);
         carried_merge(&c, t);
+    }
+    /* #3058: so does a closure bound to `n` that reads through an address
+     * or a shared local: it holds what they hold now, not only what they
+     * held where it was written. */
+    for (int i = 0; n && depth < 4 && i < s->clo_count; i++) {
+        if (strcmp(s->clo_names[i], n) || !closure_shares_state(s, s->clo_nodes[i])) continue;
+        Carried m = { 0 };
+        mentioned_params_at(s->clo_nodes[i], s, &m, depth + 1);
+        m = carried_whole(m);
+        carried_set_via(&m, "captured by a closure");
+        carried_merge(&c, m);
     }
     return c;
 }
@@ -8054,6 +8306,23 @@ static void keep_set_free(KeepSet* s) {
     free(s->alias_parts);
     s->alias_names = s->alias_targets = s->alias_parts = NULL;
     s->alias_count = s->alias_cap = 0;
+    free(s->clo_names);
+    free(s->clo_nodes);
+    s->clo_names = NULL;
+    s->clo_nodes = NULL;
+    s->clo_count = s->clo_cap = 0;
+    free(s->shared);
+    s->shared = NULL;
+    s->shared_count = s->shared_cap = 0;
+    free(s->using_clo);
+    s->using_clo = NULL;
+    s->using_count = s->using_cap = 0;
+    free(s->rep_at);
+    free(s->rep_param);
+    free(s->rep_how);
+    s->rep_at = NULL;
+    s->rep_param = s->rep_how = NULL;
+    s->rep_count = s->rep_cap = 0;
 }
 
 static ASTNode* strip_ptr_casts(ASTNode* e);
@@ -8089,6 +8358,12 @@ static void keep_set_note_alias(KeepSet* s, const char* name, ASTNode* init) {
         part = (!element && x->type == AST_MEMBER_ACCESS) ? struct_store_path(x) : NULL;
     }
     if (!target || !strcmp(target, name)) return;
+    /* Noted once: a loop's body is walked more than once (#3047). */
+    for (int i = 0; i < s->alias_count; i++)
+        if (!strcmp(s->alias_names[i], name) && !strcmp(s->alias_targets[i], target) &&
+            (s->alias_parts[i] == part ||
+             (s->alias_parts[i] && part && !strcmp(s->alias_parts[i], part))))
+            return;
     if (s->alias_count == s->alias_cap) {
         s->alias_cap = s->alias_cap ? s->alias_cap * 2 : 8;
         s->alias_names = aether_xrealloc(s->alias_names, (size_t)s->alias_cap * sizeof(char*));
@@ -8107,10 +8382,15 @@ static int keep_set_is_into(const KeepSet* s, const char* param) {
 }
 
 /* What the names `n` mentions hold (a closure capturing them). */
-static void mentioned_params(ASTNode* n, const KeepSet* s, Carried* out) {
+static void mentioned_params_at(ASTNode* n, const KeepSet* s, Carried* out, int depth) {
     if (!n) return;
-    if (n->type == AST_IDENTIFIER && n->value) carried_merge(out, keep_set_lookup(s, n->value));
-    for (int i = 0; i < n->child_count; i++) mentioned_params(n->children[i], s, out);
+    if (n->type == AST_IDENTIFIER && n->value)
+        carried_merge(out, keep_set_lookup_at(s, n->value, depth));
+    for (int i = 0; i < n->child_count; i++) mentioned_params_at(n->children[i], s, out, depth);
+}
+
+static void mentioned_params(ASTNode* n, const KeepSet* s, Carried* out) {
+    mentioned_params_at(n, s, out, 0);
 }
 
 /* Can a value of type `t` hold a pointer (a field read of a scalar, a
@@ -8411,6 +8691,20 @@ static Carried carries_borrowed_ptr(ASTNode* e, const KeepSet* s) {
  * `how` says. */
 static void report_borrowed_keep_one(KeepSet* s, ASTNode* at, const char* param,
                                      const char* via, const char* how) {
+    /* #3058: once per place: a closure is walked where it is written and
+     * where it is used. */
+    for (int i = 0; i < s->rep_count; i++)
+        if (s->rep_at[i] == at && !strcmp(s->rep_param[i], param) && !strcmp(s->rep_how[i], how))
+            return;
+    if (s->rep_count == s->rep_cap) {
+        s->rep_cap = s->rep_cap ? s->rep_cap * 2 : 8;
+        s->rep_at = aether_xrealloc(s->rep_at, (size_t)s->rep_cap * sizeof(ASTNode*));
+        s->rep_param = aether_xrealloc(s->rep_param, (size_t)s->rep_cap * sizeof(char*));
+        s->rep_how = aether_xrealloc(s->rep_how, (size_t)s->rep_cap * sizeof(char*));
+    }
+    s->rep_at[s->rep_count] = at;
+    s->rep_param[s->rep_count] = param;
+    s->rep_how[s->rep_count++] = how;
     int into = keep_set_is_into(s, param);
     const char* what = into ? "an `@into ptr` parameter" : "a borrowed `ptr` parameter";
     char msg[320];
@@ -8420,12 +8714,19 @@ static void report_borrowed_keep_one(KeepSet* s, ASTNode* at, const char* param,
     else
         snprintf(msg, sizeof(msg), "'%s' is %s, %s, which outlives the call", param,
                  what, how);
+    /* #3059: a returned parameter, or a pointer into it (`p + n`, #3033),
+     * is fixed by naming the parameter `@into`: the help says so with its
+     * name, as the declaration is written. */
+    char returned[320];
+    snprintf(returned, sizeof(returned),
+             "declare `%s: @into ptr` if only this function's result holds it (a pointer into "
+             "it, `%s + n`, included), or `%s: @keep ptr` if the function keeps it elsewhere",
+             param, param, param);
     const char* help =
         into ? "an `@into` parameter may reach only the result; declare it `@keep ptr` if the "
                "function keeps it elsewhere"
         : (!s->closure && !strcmp(how, "returned"))
-            ? "declare it `@into ptr` if only this function's result holds it, `@keep ptr` "
-              "if the function keeps it elsewhere"
+            ? returned
             : "declare the parameter `@keep ptr` if the function keeps it (a closure's cannot be)";
     type_error_code_hint(msg, help, at->line, at->column, AETHER_ERR_KEEPS_BORROWED);
 }
@@ -8437,6 +8738,7 @@ static void report_borrowed_keep(KeepSet* s, ASTNode* at, Carried c, const char*
     c = carried_whole(c);   /* once per parameter, whatever parts hold it */
     for (int i = 0; i < c.n; i++) {
         if (s->probe) { s->escaped = 1; return; }
+        if (s->silent) return;   /* #3047: reported by the loop's last pass */
         if (!carried_is_any(c.params[i])) {
             report_borrowed_keep_one(s, at, c.params[i], c.vias[i], how);
             continue;
@@ -8532,9 +8834,455 @@ static void bind_pattern_holders(KeepSet* s, ASTNode* pat, Carried c, Type* t,
     }
 }
 
+static void check_ptr_keeps_in(ASTNode* program, ASTNode* n, KeepSet* s,
+                               const char** globals, int nglobals, int in_closure);
+
+/* #3047 review: the names a loop's body binds anew before anything reads
+ * them, each with what is bound: the whole value (`paths[i]` NULL) or a
+ * field of a local struct, at that path, and the body statement that
+ * binds it (`at[i]`). */
+typedef struct {
+    const char** names;
+    const char** paths;
+    int* at;
+    int count;
+    int cap;
+} LoopKills;
+
+/* Does any node of `n` carry `name`: a read, a binding, a capture, an
+ * address taken, or a field of that name, which counts too? */
+static int ast_names(ASTNode* n, const char* name) {
+    if (!n) return 0;
+    if (n->value && !strcmp(n->value, name)) return 1;
+    for (int i = 0; i < n->child_count; i++)
+        if (ast_names(n->children[i], name)) return 1;
+    return 0;
+}
+
+/* The local the statement `st` binds anew from a value that does not name
+ * it: `q = e` or a declaration binds the whole of `q`, `b.f = e` with `b` a
+ * local struct held by value binds `b` at `f` (`*path`). NULL for any other
+ * statement, and for a module-level `var`. */
+static const char* loop_stmt_rebinds(ASTNode* st, const char** path, const char** globals,
+                                     int nglobals) {
+    if (st && st->type == AST_EXPRESSION_STATEMENT && st->child_count == 1) st = st->children[0];
+    if (!st) return NULL;
+    const char* name = NULL;
+    *path = NULL;
+    if (st->type == AST_VARIABLE_DECLARATION && st->value && st->child_count > 0) {
+        name = st->value;
+        for (int i = 0; i < st->child_count; i++)
+            if (ast_names(st->children[i], name)) return NULL;
+    } else if (st->type == AST_BINARY_EXPRESSION && st->value && !strcmp(st->value, "=") &&
+               st->child_count == 2 && st->children[0]) {
+        ASTNode* lhs = st->children[0];
+        if (lhs->type == AST_IDENTIFIER) {
+            name = lhs->value;
+        } else if ((name = local_struct_root(lhs, globals, nglobals)) != NULL &&
+                   !(*path = struct_store_path(lhs))) {
+            return NULL;
+        }
+        if (!name || ast_names(st->children[1], name)) return NULL;
+    }
+    if (!name || is_global_name(name, globals, nglobals)) return NULL;
+    return name;
+}
+
+/* #3047 review, a follow-up to b87005bc: does `st` bind the local `name`
+ * anew, whole, on every path through it, before anything in it names it?
+ * A statement loop_stmt_rebinds says binds all of it does; so does an if
+ * with an else, or a match whose arms cover its subject (ast_match_covers),
+ * whose condition, or subject and patterns, do not name it and each arm of
+ * which does; an arm, a block, does when the first of its statements to
+ * name it does. */
+static int loop_rebinds_whole(ASTNode* st, const char* name, const char** globals,
+                              int nglobals) {
+    if (st && st->type == AST_EXPRESSION_STATEMENT && st->child_count == 1) st = st->children[0];
+    if (!st) return 0;
+    if (st->type == AST_BLOCK) {
+        for (int i = 0; i < st->child_count; i++)
+            if (ast_names(st->children[i], name))
+                return loop_rebinds_whole(st->children[i], name, globals, nglobals);
+        return 0;
+    }
+    if (st->type == AST_IF_STATEMENT)
+        return st->child_count == 3 && !ast_names(st->children[0], name) &&
+               loop_rebinds_whole(st->children[1], name, globals, nglobals) &&
+               loop_rebinds_whole(st->children[2], name, globals, nglobals);
+    if (st->type == AST_MATCH_STATEMENT) {
+        if (st->child_count < 2 || !ast_match_covers(st) || ast_names(st->children[0], name))
+            return 0;
+        for (int i = 1; i < st->child_count; i++) {
+            ASTNode* arm = st->children[i];
+            if (!arm || arm->type != AST_MATCH_ARM || arm->child_count < 2 ||
+                ast_names(arm->children[0], name) ||
+                !loop_rebinds_whole(arm->children[1], name, globals, nglobals))
+                return 0;
+        }
+        return 1;
+    }
+    const char* path;
+    const char* got = loop_stmt_rebinds(st, &path, globals, nglobals);
+    return got && !path && !strcmp(got, name);
+}
+
+/* `name` (at `path`) bound by body statement `i` of `loop` joins `k`
+ * unless the loop's header, or a statement before `i`, names it. */
+static void loop_kill_note(ASTNode* loop, ASTNode* body, int i, LoopKills* k, const char* name,
+                           const char* path) {
+    int named = 0;
+    for (int h = 0; h + 1 < loop->child_count && !named; h++)
+        named = ast_names(loop->children[h], name);
+    for (int j = 0; body->type == AST_BLOCK && j < i && !named; j++)
+        named = ast_names(body->children[j], name);
+    for (int j = 0; j < k->count && !named; j++)
+        named = !strcmp(k->names[j], name) && !k->paths[j] && !path;
+    if (named) return;
+    if (k->count == k->cap) {
+        k->cap = k->cap ? k->cap * 2 : 8;
+        k->names = aether_xrealloc(k->names, (size_t)k->cap * sizeof(char*));
+        k->paths = aether_xrealloc(k->paths, (size_t)k->cap * sizeof(char*));
+        k->at = aether_xrealloc(k->at, (size_t)k->cap * sizeof(int));
+    }
+    k->names[k->count] = name;
+    k->at[k->count] = i;
+    k->paths[k->count++] = path;
+}
+
+/* Each local the branch statement `st` (body statement `i`) binds whole on
+ * every path: a name some binding in it takes, `n` its subtree. */
+static void loop_branch_kills(ASTNode* loop, ASTNode* body, int i, ASTNode* st, ASTNode* n,
+                              LoopKills* k, const char** globals, int nglobals) {
+    if (!n) return;
+    const char* name = NULL;
+    if (n->type == AST_VARIABLE_DECLARATION && n->value)
+        name = n->value;
+    else if (n->type == AST_BINARY_EXPRESSION && n->value && !strcmp(n->value, "=") &&
+             n->child_count == 2 && n->children[0] && n->children[0]->type == AST_IDENTIFIER)
+        name = n->children[0]->value;
+    if (name && loop_rebinds_whole(st, name, globals, nglobals))
+        loop_kill_note(loop, body, i, k, name, NULL);
+    for (int c = 0; c < n->child_count; c++)
+        loop_branch_kills(loop, body, i, st, n->children[c], k, globals, nglobals);
+}
+
+/* #3047 review: what a pass through the loop `loop` binds before it reads.
+ * A local is rebound whole, or a field of a local struct stored, by a
+ * top-level statement of the body (so on every pass, before the statements
+ * after it) that is the first to name it, with nothing in the loop's
+ * header naming it: what it held when the pass began is read by nothing in
+ * the pass. So is a local an if/else or a covering match among those
+ * statements binds whole in every arm (loop_rebinds_whole). Any other
+ * statement, a store under an `if` with no `else`, a name the header
+ * reads, kills nothing. */
+static void loop_kills_find(ASTNode* loop, LoopKills* k, const char** globals, int nglobals) {
+    ASTNode* body = loop->child_count > 0 ? loop->children[loop->child_count - 1] : NULL;
+    if (!body) return;
+    int block = body->type == AST_BLOCK;
+    int nst = block ? body->child_count : 1;
+    for (int i = 0; i < nst; i++) {
+        ASTNode* st = block ? body->children[i] : body;
+        const char* path;
+        const char* name = loop_stmt_rebinds(st, &path, globals, nglobals);
+        if (name) {
+            loop_kill_note(loop, body, i, k, name, path);
+            continue;
+        }
+        ASTNode* b = st;
+        if (b && b->type == AST_EXPRESSION_STATEMENT && b->child_count == 1) b = b->children[0];
+        if (b && (b->type == AST_IF_STATEMENT || b->type == AST_MATCH_STATEMENT))
+            loop_branch_kills(loop, body, i, st, b, k, globals, nglobals);
+    }
+}
+
+static void keep_set_add_one(KeepSet* s, const char* name, const char* param, const char* via,
+                             const char* part) {
+    Carried one = { 0 };
+    carried_add_at(&one, param, via, part);
+    keep_set_add(s, name, one);
+}
+
+/* Does the alias `name` (#3043) lead to the local `target`, itself or
+ * through the aliases it copies? Past the depth keep_set_lookup_at follows,
+ * it is taken to. */
+static int alias_reaches(const KeepSet* s, const char* name, const char* target, int depth) {
+    if (depth >= 8) return 1;
+    for (int a = 0; a < s->alias_count; a++) {
+        if (strcmp(s->alias_names[a], name)) continue;
+        if (!strcmp(s->alias_targets[a], target) ||
+            alias_reaches(s, s->alias_targets[a], target, depth + 1))
+            return 1;
+    }
+    return 0;
+}
+
+/* #3047 review, finding 2: is kill `j` of the loop `loop` read through an
+ * address of its local before the statement that binds it, so read
+ * without being named: is an alias that leads to it named in the loop's
+ * header, or in a body statement up to that one (its own value
+ * included)? */
+static int loop_kill_read_through_alias(ASTNode* loop, const KeepSet* s, const LoopKills* k,
+                                        int j) {
+    ASTNode* body = loop->child_count > 0 ? loop->children[loop->child_count - 1] : NULL;
+    for (int a = 0; a < s->alias_count; a++) {
+        const char* x = s->alias_names[a];
+        if (!alias_reaches(s, x, k->names[j], 0)) continue;
+        for (int h = 0; h + 1 < loop->child_count; h++)
+            if (ast_names(loop->children[h], x)) return 1;
+        if (body && body->type != AST_BLOCK && ast_names(body, x)) return 1;
+        for (int i = 0; body && body->type == AST_BLOCK && i <= k->at[j] &&
+                        i < body->child_count; i++)
+            if (ast_names(body->children[i], x)) return 1;
+    }
+    return 0;
+}
+
+/* #3058: does the closure literal `clo` read `name`: by name, or through an
+ * address that leads to it? */
+static int closure_reads(const KeepSet* s, ASTNode* clo, const char* name) {
+    if (ast_names(clo, name)) return 1;
+    for (int a = 0; a < s->alias_count; a++)
+        if (alias_reaches(s, s->alias_names[a], name, 0) && ast_names(clo, s->alias_names[a]))
+            return 1;
+    return 0;
+}
+
+/* #3058: the same for a closure: is kill `j` read, before the statement
+ * that binds it, by a closure the loop's header or a body statement up to
+ * that one calls or passes by a name it is bound to? It runs there, and
+ * reads the local as the pass before left it. */
+static int loop_kill_read_through_closure(ASTNode* loop, const KeepSet* s, const LoopKills* k,
+                                          int j) {
+    ASTNode* body = loop->child_count > 0 ? loop->children[loop->child_count - 1] : NULL;
+    for (int c = 0; c < s->clo_count; c++) {
+        const char* x = s->clo_names[c];
+        if (!closure_reads(s, s->clo_nodes[c], k->names[j])) continue;
+        for (int h = 0; h + 1 < loop->child_count; h++)
+            if (ast_names(loop->children[h], x)) return 1;
+        if (body && body->type != AST_BLOCK && ast_names(body, x)) return 1;
+        for (int i = 0; body && body->type == AST_BLOCK && i <= k->at[j] &&
+                        i < body->child_count; i++)
+            if (ast_names(body->children[i], x)) return 1;
+    }
+    return 0;
+}
+
+/* One pass through the loop `n`: the holders `k` names leave the pass,
+ * which binds them again in order, and come back after it, since the loop
+ * may run no pass at all, or end in one that binds nothing. A local whose
+ * address (#3043) the pass reads before it binds the local stays: a read
+ * through the address does not name it. One whose address it reads only
+ * after leaves, as when it is read by name: the address reads it as the
+ * pass bound it. */
+static void keep_loop_walk(ASTNode* program, ASTNode* n, KeepSet* s, const LoopKills* k,
+                           const char** globals, int nglobals, int in_closure) {
+    KeepSet held = { 0 };
+    for (int j = 0; j < k->count; j++) {
+        if (loop_kill_read_through_alias(n, s, k, j) ||
+            loop_kill_read_through_closure(n, s, k, j))
+            continue;
+        int w = 0;
+        for (int i = 0; i < s->count; i++) {
+            if (!strcmp(s->names[i], k->names[j]) && part_within(s->parts[i], k->paths[j])) {
+                keep_set_add_one(&held, s->names[i], s->params[i], s->vias[i], s->parts[i]);
+                continue;
+            }
+            s->names[w] = s->names[i];
+            s->params[w] = s->params[i];
+            s->vias[w] = s->vias[i];
+            s->parts[w++] = s->parts[i];
+        }
+        s->count = w;
+    }
+    for (int i = 0; i < n->child_count; i++)
+        check_ptr_keeps_in(program, n->children[i], s, globals, nglobals, in_closure);
+    for (int i = 0; i < held.count; i++)
+        keep_set_add_one(s, held.names[i], held.params[i], held.vias[i], held.parts[i]);
+    keep_set_free(&held);
+}
+
+/* Is every holder `s` lists one `before` lists already, or covers? The
+ * holders only grow from pass to pass, so this is the fixed point. */
+static int keep_set_within(const KeepSet* s, const KeepSet* before) {
+    for (int i = 0; i < s->count; i++) {
+        int found = 0;
+        for (int j = 0; j < before->count && !found; j++)
+            found = !strcmp(before->names[j], s->names[i]) &&
+                    (!strcmp(before->params[j], s->params[i]) ||
+                     carried_is_any(before->params[j])) &&
+                    part_within(s->parts[i], before->parts[j]);
+        if (!found) return 0;
+    }
+    return 1;
+}
+
+static void keep_set_copy_holders(KeepSet* to, const KeepSet* from) {
+    if (to->cap < from->count) {
+        to->cap = from->count;
+        to->names = aether_xrealloc(to->names, (size_t)to->cap * sizeof(char*));
+        to->params = aether_xrealloc(to->params, (size_t)to->cap * sizeof(char*));
+        to->vias = aether_xrealloc(to->vias, (size_t)to->cap * sizeof(char*));
+        to->parts = aether_xrealloc(to->parts, (size_t)to->cap * sizeof(char*));
+    }
+    for (int i = 0; i < from->count; i++) {
+        to->names[i] = from->names[i];
+        to->params[i] = from->params[i];
+        to->vias[i] = from->vias[i];
+        to->parts[i] = from->parts[i];
+    }
+    to->count = from->count;
+}
+
+/* #3047 review: a loop whose passes did not settle within
+ * KEEP_LOOP_PASSES_MAX. Each local the loop binds is taken to hold every
+ * parameter the function tracks, held by a holder, so the reporting pass
+ * refuses what the passes left unfound rather than miss it. */
+static void keep_loop_widen(KeepSet* s, ASTNode* n, const char** globals, int nglobals) {
+    if (!n) return;
+    const char* name = NULL;
+    if (n->type == AST_VARIABLE_DECLARATION || n->type == AST_PATTERN_VARIABLE) {
+        name = n->value;
+    } else if (n->type == AST_BINARY_EXPRESSION && n->value && !strcmp(n->value, "=") &&
+               n->child_count == 2 && n->children[0]) {
+        ASTNode* lhs = n->children[0];
+        name = lhs->type == AST_IDENTIFIER ? lhs->value : local_struct_root(lhs, globals, nglobals);
+    } else if (n->type == AST_TUPLE_DESTRUCTURE) {
+        for (int v = 0; v + 1 < n->child_count; v++)
+            if (n->children[v] && n->children[v]->value &&
+                !is_global_name(n->children[v]->value, globals, nglobals))
+                keep_set_add_one(s, n->children[v]->value, CARRIED_ANY,
+                                 "held by a local the loop binds", NULL);
+    }
+    if (name && strcmp(name, "_") && !is_global_name(name, globals, nglobals))
+        keep_set_add_one(s, name, CARRIED_ANY, "held by a local the loop binds", NULL);
+    for (int i = 0; i < n->child_count; i++) keep_loop_widen(s, n->children[i], globals, nglobals);
+}
+
+/* #3058: `name` bound to the closure literal `clo`, kept with every one
+ * bound to it before. */
+static void keep_set_bind_closure(KeepSet* s, const char* name, ASTNode* clo) {
+    if (!name || !clo) return;
+    for (int i = 0; i < s->clo_count; i++)
+        if (s->clo_nodes[i] == clo && !strcmp(s->clo_names[i], name)) return;
+    if (s->clo_count == s->clo_cap) {
+        s->clo_cap = s->clo_cap ? s->clo_cap * 2 : 8;
+        s->clo_names = aether_xrealloc(s->clo_names, (size_t)s->clo_cap * sizeof(char*));
+        s->clo_nodes = aether_xrealloc(s->clo_nodes, (size_t)s->clo_cap * sizeof(ASTNode*));
+    }
+    s->clo_names[s->clo_count] = name;
+    s->clo_nodes[s->clo_count++] = clo;
+}
+
+/* #3058: `name` bound to `init`: a closure literal, or a name bound to
+ * closures (`h = g`), whose closures it then runs. */
+static void keep_set_note_closure(KeepSet* s, const char* name, ASTNode* init) {
+    if (!name || !init) return;
+    if (init->type == AST_CLOSURE) {
+        keep_set_bind_closure(s, name, init);
+    } else if (init->type == AST_IDENTIFIER && init->value && strcmp(init->value, name)) {
+        int n = s->clo_count;
+        for (int i = 0; i < n; i++)
+            if (!strcmp(s->clo_names[i], init->value))
+                keep_set_bind_closure(s, name, s->clo_nodes[i]);
+    }
+}
+
+static void name_list_add(const char*** v, int* count, int* cap, const char* name) {
+    if (!name || !strcmp(name, "_")) return;
+    for (int i = 0; i < *count; i++)
+        if (!strcmp((*v)[i], name)) return;
+    if (*count == *cap) {
+        *cap = *cap ? *cap * 2 : 8;
+        *v = aether_xrealloc(*v, (size_t)*cap * sizeof(char*));
+    }
+    (*v)[(*count)++] = name;
+}
+
+/* The root local of a store target (`b.item`, `xs[i]`, `b.in.c`), or NULL. */
+static const char* store_root_name(ASTNode* lhs) {
+    while (lhs && (lhs->type == AST_MEMBER_ACCESS || lhs->type == AST_ARRAY_ACCESS) &&
+           lhs->child_count > 0)
+        lhs = lhs->children[0];
+    return lhs && lhs->type == AST_IDENTIFIER ? lhs->value : NULL;
+}
+
+/* #3058: the names `n` binds (`in_clo`: inside a closure), or stores a field
+ * or an element of, into `bound` (outside any closure) or `assigned`
+ * (inside one). Codegen gives a capture a closure assigns, or stores into
+ * when it is held by value, one cell the function and its closures share
+ * (compute_promoted_captures); taken here for every store into one. */
+static void scan_closure_shared(ASTNode* n, int in_clo, const char*** bound, int* nb, int* cb,
+                                const char*** assigned, int* na, int* ca) {
+    if (!n) return;
+    if (n->type == AST_FUNCTION_DEFINITION || n->type == AST_BUILDER_FUNCTION) return;
+    const char*** v = in_clo ? assigned : bound;
+    int* cnt = in_clo ? na : nb;
+    int* cap = in_clo ? ca : cb;
+    if ((n->type == AST_VARIABLE_DECLARATION || n->type == AST_COMPOUND_ASSIGNMENT) && n->value)
+        name_list_add(v, cnt, cap, n->value);
+    if (n->type == AST_BINARY_EXPRESSION && n->value && !strcmp(n->value, "=") &&
+        n->child_count == 2)
+        name_list_add(v, cnt, cap, store_root_name(n->children[0]));
+    if (n->type == AST_UNARY_EXPRESSION && n->value && n->child_count == 1 &&
+        (!strcmp(n->value, "++") || !strcmp(n->value, "--")))
+        name_list_add(v, cnt, cap, store_root_name(n->children[0]));
+    if (n->type == AST_TUPLE_DESTRUCTURE)
+        for (int i = 0; i + 1 < n->child_count; i++)
+            if (n->children[i]) name_list_add(v, cnt, cap, n->children[i]->value);
+    int inner = in_clo || n->type == AST_CLOSURE;
+    for (int i = 0; i < n->child_count; i++)
+        scan_closure_shared(n->children[i], inner, bound, nb, cb, assigned, na, ca);
+}
+
+/* #3058: s->shared, for the body `body` of `fn`: the locals and parameters
+ * of the body that a closure in it assigns or stores into. */
+static void keep_set_find_shared(KeepSet* s, ASTNode* fn, ASTNode* body) {
+    const char** bound = NULL;
+    const char** assigned = NULL;
+    int nb = 0, cb = 0, na = 0, ca = 0;
+    for (int i = 0; fn && i < fn->child_count && fn->children[i] != body; i++)
+        if (fn->children[i]) name_list_add(&bound, &nb, &cb, fn->children[i]->value);
+    scan_closure_shared(body, 0, &bound, &nb, &cb, &assigned, &na, &ca);
+    for (int i = 0; i < na; i++)
+        for (int j = 0; j < nb; j++)
+            if (!strcmp(assigned[i], bound[j]))
+                name_list_add(&s->shared, &s->shared_count, &s->shared_cap, assigned[i]);
+    free(bound);
+    free(assigned);
+}
+
 /* `in_closure`: `n` is inside a closure that captured the parameter. A
  * `return` there hands the value to whoever calls the closure, inside the
  * function unless the closure escapes, which is checked where it goes. */
+static void check_ptr_keeps_in(ASTNode* program, ASTNode* n, KeepSet* s,
+                               const char** globals, int nglobals, int in_closure);
+
+/* #3058: the closures bound to `name` run here: called through the name
+ * or passed by it. A closure reads what it captured where it was written,
+ * which its walk there checked, except through an address or a shared
+ * local: what was stored there since is what it reads now, so such a
+ * closure's body is walked here as well, against the holders as they are
+ * here. Still this function's own body (R3). */
+static void keep_walk_closure_uses(ASTNode* program, const char* name, KeepSet* s,
+                                   const char** globals, int nglobals) {
+    if (!name) return;
+    for (int c = 0; c < s->clo_count; c++) {
+        if (strcmp(s->clo_names[c], name)) continue;
+        ASTNode* clo = s->clo_nodes[c];
+        int busy = 0;
+        for (int u = 0; u < s->using_count && !busy; u++) busy = s->using_clo[u] == clo;
+        if (busy || !closure_shares_state(s, clo)) continue;
+        if (s->using_count == s->using_cap) {
+            s->using_cap = s->using_cap ? s->using_cap * 2 : 8;
+            s->using_clo = aether_xrealloc(s->using_clo, (size_t)s->using_cap * sizeof(ASTNode*));
+        }
+        s->using_clo[s->using_count++] = clo;
+        for (int i = 0; i < clo->child_count; i++)
+            check_ptr_keeps_in(program, clo->children[i], s, globals, nglobals, 1);
+        s->using_count--;
+    }
+}
+
 static void check_ptr_keeps_in(ASTNode* program, ASTNode* n, KeepSet* s,
                                const char** globals, int nglobals, int in_closure) {
     if (!n || (s->probe && s->escaped)) return;
@@ -8548,11 +9296,76 @@ static void check_ptr_keeps_in(ASTNode* program, ASTNode* n, KeepSet* s,
                 check_ptr_keeps_in(program, n->children[i], s, globals, nglobals, 1);
         return;
     }
-    if (n->type == AST_VARIABLE_DECLARATION && n->value && n->child_count > 0)
+    /* #3057: a `defer` runs when its block is left and reads what is bound
+     * then, so its statement is walked at the end of the block, the last
+     * one written first as they run, not where it is written: `defer kept =
+     * q` before `q = p` stores the `p`. The holders only grow along the
+     * walk, so those at the end cover those of any earlier way out (a
+     * `return`, a `break`, a panic); a loop's body is a block, so each pass
+     * ends with its defers. Walked where it is written as well, what a
+     * defer binds would reach the statements after it, which run before
+     * it. */
+    if (n->type == AST_BLOCK) {
+        for (int i = 0; i < n->child_count; i++)
+            if (n->children[i] && n->children[i]->type != AST_DEFER_STATEMENT)
+                check_ptr_keeps_in(program, n->children[i], s, globals, nglobals, in_closure);
+        for (int i = n->child_count - 1; i >= 0; i--)
+            if (n->children[i] && n->children[i]->type == AST_DEFER_STATEMENT)
+                check_ptr_keeps_in(program, n->children[i], s, globals, nglobals, in_closure);
+        return;
+    }
+    /* #3047: a loop's body runs again with what it bound, so a read placed
+     * before a store sees the stored value on the next pass (`kept = q`,
+     * then `q = p`). The body is walked binding only, reporting nothing,
+     * until a pass binds nothing new (the holders and aliases only grow,
+     * and are finite), then walked once more below, reporting. A loop met
+     * inside such a pass is walked once there: the outer loop repeats its
+     * passes until the two are stable together. The walk ignores order
+     * within a pass, so `break` and `continue` need nothing of their own.
+     * #3047 review: a local the body binds anew before reading it holds,
+     * in the pass, only what the pass binds (loop_kills_find), else
+     * `q = list.new()`, `kept = q`, `q = p` was refused for the `p` of the
+     * pass before. Past KEEP_LOOP_PASSES_MAX the loop is widened. */
+    if (n->type == AST_WHILE_LOOP || n->type == AST_FOR_LOOP) {
+        LoopKills k = { 0 };
+        loop_kills_find(n, &k, globals, nglobals);
+        if (!s->silent) {
+            KeepSet before = { 0 };
+            int stable = 0;
+            s->silent = 1;
+            for (int pass = 0; pass < KEEP_LOOP_PASSES_MAX && !stable; pass++) {
+                int aliases = s->alias_count;
+                keep_set_copy_holders(&before, s);
+                keep_loop_walk(program, n, s, &k, globals, nglobals, in_closure);
+                stable = (s->probe && s->escaped) ||
+                         (s->alias_count == aliases && keep_set_within(s, &before));
+            }
+            keep_set_free(&before);
+            if (!stable) keep_loop_widen(s, n, globals, nglobals);
+            s->silent = 0;
+        }
+        keep_loop_walk(program, n, s, &k, globals, nglobals, in_closure);
+        free(k.names);
+        free(k.paths);
+        free(k.at);
+        return;
+    }
+    if (n->type == AST_VARIABLE_DECLARATION && n->value && n->child_count > 0) {
         keep_set_note_alias(s, n->value, n->children[n->child_count - 1]);   /* #3043 */
+        keep_set_note_closure(s, n->value, n->children[n->child_count - 1]);   /* #3058 */
+    }
     if (n->type == AST_BINARY_EXPRESSION && n->value && !strcmp(n->value, "=") &&
-        n->child_count == 2 && n->children[0] && n->children[0]->type == AST_IDENTIFIER)
+        n->child_count == 2 && n->children[0] && n->children[0]->type == AST_IDENTIFIER) {
         keep_set_note_alias(s, n->children[0]->value, n->children[1]);
+        keep_set_note_closure(s, n->children[0]->value, n->children[1]);
+    }
+    /* #3058: a closure called through a name, or a name passed, runs here. */
+    if (n->type == AST_FUNCTION_CALL && n->value) {
+        keep_walk_closure_uses(program, n->value, s, globals, nglobals);
+        for (int i = 0; i < n->child_count; i++)
+            if (n->children[i] && n->children[i]->type == AST_IDENTIFIER)
+                keep_walk_closure_uses(program, n->children[i]->value, s, globals, nglobals);
+    }
     if (n->type == AST_VARIABLE_DECLARATION && n->value && n->child_count > 0 &&
         (c = carries_borrowed_ptr(n->children[n->child_count - 1], s)).n)
         bind_holder(s, n, n->value, c, globals, nglobals);
@@ -8785,6 +9598,7 @@ static int c_name_outlives(const KeepCtx* c, const char* name, int depth) {
     Carried self = { 0 };
     carried_add(&self, name, NULL);
     keep_set_add(&s, name, self);
+    keep_set_find_shared(&s, c->fn, c->body);   /* #3058 */
     check_ptr_keeps_in(c->program, c->body, &s, c->globals, c->nglobals, 0);
     keep_set_free(&s);
     return s.escaped;
@@ -8958,7 +9772,10 @@ static void check_borrowed_ptr_params(ASTNode* program, ASTNode* fn, ASTNode* bo
             if (is_into_param(p) && s.into_count < KEEP_SET_MAX) s.into[s.into_count++] = p->value;
         }
     }
-    if (s.count) check_ptr_keeps_in(program, body, &s, globals, nglobals, 0);
+    if (s.count) {
+        keep_set_find_shared(&s, fn, body);   /* #3058 */
+        check_ptr_keeps_in(program, body, &s, globals, nglobals, 0);
+    }
     keep_set_free(&s);
 }
 
@@ -10327,6 +11144,33 @@ static int tc_loop_label_in_scope(const char* label) {
 // optional variable's identifier node (borrowed) and sets *narrow_then; else
 // NULL. The condition is already typechecked, so the identifier carries its
 // TYPE_OPTIONAL node_type.
+/* #3042 review: a condition of type `t` that is not a bool. An optional is
+ * tested with `!= none`, and the hint says so, naming the variable. */
+static void condition_not_boolean(const char* msg, ASTNode* cond, Type* t, int line,
+                                  int column) {
+    if (!t || t->kind != TYPE_OPTIONAL) {
+        type_error(msg, line, column);
+        return;
+    }
+    char hint[256];
+    if (cond && cond->type == AST_IDENTIFIER && cond->value)
+        snprintf(hint, sizeof(hint), "an optional is not a bool: test it with `%s != none`",
+                 cond->value);
+    else
+        snprintf(hint, sizeof(hint), "an optional is not a bool: test it with `!= none`");
+    type_error_hint(msg, hint, line, column);
+}
+
+/* #3042 review: the variable of a condition that is a bare optional
+ * (`if o`), which `o != none` would narrow, or NULL. */
+static ASTNode* bare_optional_condition(ASTNode* cond) {
+    if (!cond || cond->type != AST_IDENTIFIER || !cond->value) return NULL;
+    if (!cond->node_type || cond->node_type->kind != TYPE_OPTIONAL ||
+        !cond->node_type->element_type || cond->node_type->element_type->kind == TYPE_UNKNOWN)
+        return NULL;
+    return cond;
+}
+
 static ASTNode* optional_narrow_target(ASTNode* cond, int* narrow_then) {
     if (!cond || cond->type != AST_BINARY_EXPRESSION || !cond->value ||
         cond->child_count < 2) return NULL;
@@ -11002,6 +11846,15 @@ typedef struct {
     Type* result;          /* #3044: the `T!` whose success value this is, or NULL */
 } ReturnOwner;
 
+/* `f(...)` through a bare `fn` value: its signature is gone, so its result
+ * is the erased default, as `call(f, ...)`'s is (#2054). */
+static int is_bare_fn_call(ASTNode* v, SymbolTable* table) {
+    if (!v || v->type != AST_FUNCTION_CALL || !v->value) return 0;
+    Symbol* s = lookup_symbol(table, v->value);
+    return s && !s->is_function && s->type && s->type->kind == TYPE_FUNCTION &&
+           !s->type->is_fnptr && !s->type->closure_literal && fn_type_is_erased(s->type);
+}
+
 /* #2782: check one value a `return` gives against the result type `rt`.
  * A value that branches (an if-expression, a `match` whose value is used)
  * gives each arm's value, checked on its own. Returns 1 when it fits. */
@@ -11031,12 +11884,7 @@ static int check_return_value(ASTNode* v, Type* rt, const ReturnOwner* own,
         return 1;
     /* So does `f(...)` through a bare `fn` value, the same call spelled
      * directly: its signature is gone, and the result type restores it. */
-    if (v->type == AST_FUNCTION_CALL && v->value) {
-        Symbol* s = lookup_symbol(table, v->value);
-        if (s && !s->is_function && s->type && s->type->kind == TYPE_FUNCTION &&
-            !s->type->is_fnptr && !s->type->closure_literal && fn_type_is_erased(s->type))
-            return 1;
-    }
+    if (is_bare_fn_call(v, table)) return 1;
     /* A function named as a value is its address, which no slot checks by
      * its result type. */
     if (v->type == AST_IDENTIFIER && v->value) {
@@ -11185,6 +12033,82 @@ static int check_return_values(ASTNode* ret, Type* rt, const ReturnOwner* own,
     return check_return_value(v, rt, own, table);
 }
 
+/* #3056: a function whose result type is inferred, and that the early
+ * inference pass left unknown (it cannot type a field read through a
+ * pointer, among others), takes the checked type of its first value
+ * `return`. Left unknown, codegen gave it int, the legacy default, and a
+ * long returned that way was truncated with no word. Later returns are
+ * checked against it, as against any result inferred from the first
+ * `return`, and so are the calls checked after this one (the function's
+ * symbols take it too; typecheck_program checks such a function before
+ * its callers, PendingResults). An unknown result Type already there keeps its
+ * identity and takes the new contents, since a closure checked before the
+ * `return` saved it to restore after its body. Returns the type, or NULL
+ * when there is nothing to refine. */
+/* #3056 review: does `t` have a part whose type is not known (an optional's
+ * payload, an element, a tuple part)? */
+static int type_has_unknown_part(Type* t) {
+    if (!t) return 1;
+    if (t->kind == TYPE_UNKNOWN) return 1;
+    if ((t->kind == TYPE_OPTIONAL || t->kind == TYPE_ARRAY) && t->element_type &&
+        type_has_unknown_part(t->element_type))
+        return 1;
+    if (t->kind == TYPE_OPTIONAL && !t->element_type) return 1;
+    for (int i = 0; t->kind == TYPE_TUPLE && t->tuple_types && i < t->tuple_count; i++)
+        if (type_has_unknown_part(t->tuple_types[i])) return 1;
+    return 0;
+}
+
+static Type* refine_inferred_result(ASTNode* o, ASTNode* ret, SymbolTable* table) {
+    if (!o || (o->type != AST_FUNCTION_DEFINITION && o->type != AST_BUILDER_FUNCTION) ||
+        !o->type_inferred || !o->value)
+        return NULL;
+    if (o->node_type && o->node_type->kind != TYPE_UNKNOWN) return NULL;
+    if (ret->child_count != 1 || !ret->children[0]) return NULL;
+    /* An erased call's int is a default, not a result: the function is
+     * left unknown, as it was. */
+    if (is_erased_call(ret->children[0]) || is_bare_fn_call(ret->children[0], table)) return NULL;
+    Type* vt = infer_type(ret->children[0], table);
+    if (!vt || vt->kind == TYPE_UNKNOWN || vt->kind == TYPE_VOID) {
+        if (vt) free_type(vt);
+        return NULL;
+    }
+    /* #3056 review: an optional a none-check narrowed (`if o != none {
+     * return o }`) reads as its `T` in the branch, but the variable is a
+     * `T?`, which is what the early pass types `return o` as: the result is
+     * the optional, so a later `return none` fits it. */
+    ASTNode* rv = ret->children[0];
+    if (rv->type == AST_IDENTIFIER && rv->annotation && !strcmp(rv->annotation, "__opt_narrowed") &&
+        vt->kind != TYPE_OPTIONAL)
+        vt = create_optional_type(vt);
+    /* A value with a part still unknown (`return none`, an optional of
+     * nothing yet) is no result to take: a later `return` gives it, as
+     * one that names the optional's type (codegen took `unknown?` for
+     * `ae_opt_int`, and a `string?` result failed in C). */
+    if (type_has_unknown_part(vt)) {
+        free_type(vt);
+        return NULL;
+    }
+    if (o->node_type) {
+        Type swap = *o->node_type;
+        *o->node_type = *vt;
+        *vt = swap;
+        free_type(vt);
+    } else {
+        o->node_type = vt;
+    }
+    /* Each name the function has (an import alias is one more). */
+    SymbolTable* root = table;
+    while (root && root->parent) root = root->parent;
+    for (Symbol* fs = root ? root->symbols : NULL; fs; fs = fs->next) {
+        if (!fs->is_function || fs->node != o || (fs->type && fs->type->kind != TYPE_UNKNOWN))
+            continue;
+        if (fs->type) free_type(fs->type);
+        fs->type = clone_type(o->node_type);
+    }
+    return o->node_type;
+}
+
 /* #2782: check the `return` statement `ret` against what it returns from
  * (g_tc_return_owner): a function's result type, written or inferred, or,
  * for a closure, the result its first value `return` gives it, as codegen's
@@ -11196,6 +12120,10 @@ static int check_return_statement(ASTNode* ret, SymbolTable* table) {
     ReturnOwner own = { o ? o->value : NULL, o ? o->type_inferred : 0, 0, NULL, NULL };
     Type* rt = g_tc_return_type;
     Type* made = NULL;
+    if (!rt || rt->kind == TYPE_UNKNOWN) {
+        Type* refined = refine_inferred_result(o, ret, table);   /* #3056 */
+        if (refined) rt = g_tc_return_type = refined;
+    }
     /* #2998: a bare `return` in a function whose written result is a value
      * gave its caller whatever the result register held: C takes `return;`
      * in a non-void function with a warning (GCC 14 refuses it). */
@@ -12330,23 +13258,35 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
             declare_common_hoists(stmt, table);
             ASTNode* narrow_var = NULL;
             int narrow_then = 1;
+            int cond_ok = 1;
             if (stmt->child_count >= 1) {
                 ASTNode* condition = stmt->children[0];
                 /* #3042: a condition that reported its own error (`h.nope`)
-                 * is not also "not boolean", the type it failed to have. */
+                 * is not also "not boolean", the type it failed to have.
+                 * Either way the branches are still checked (#3042 review):
+                 * returning here left an error in them unreported. */
                 int errors_before = error_count;
                 typecheck_expression(condition, table);
-                if (error_count > errors_before) return 0;
-                Type* cond_type = infer_type(condition, table);
-
-                if (cond_type && cond_type->kind != TYPE_BOOL) {
+                if (error_count > errors_before) {
+                    cond_ok = 0;
+                } else {
+                    Type* cond_type = infer_type(condition, table);
+                    if (cond_type && cond_type->kind != TYPE_BOOL) {
+                        condition_not_boolean("If condition must be boolean", condition,
+                                              cond_type, condition->line, condition->column);
+                        cond_ok = 0;
+                        /* #3042 review: `if o`, with `o` an optional, is
+                         * `if o != none` written wrong. Its then-branch is
+                         * checked as that would narrow it, so the one
+                         * mistake is one error, not also every `o.x` in
+                         * the branch. */
+                        narrow_var = bare_optional_condition(condition);
+                        narrow_then = 1;
+                    }
                     free_type(cond_type);
-                    type_error("If condition must be boolean", condition->line, condition->column);
-                    return 0;
                 }
-                free_type(cond_type);
                 // #1068 detect an optional none-check to narrow one branch.
-                narrow_var = optional_narrow_target(condition, &narrow_then);
+                if (cond_ok) narrow_var = optional_narrow_target(condition, &narrow_then);
             }
 
             // Type check then (child 1) and else (child 2) branches. The branch
@@ -12370,9 +13310,9 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                     typecheck_statement(branch, table);
                 }
             }
-            return 1;
+            return cond_ok;
         }
-        
+
         case AST_FOR_LOOP: {
             SymbolTable* loop_table = create_symbol_table(table);
             
@@ -12381,17 +13321,28 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                 typecheck_statement(stmt->children[0], loop_table);
             }
             
-            // Type check condition (child 1)
+            // Type check condition (child 1). #3042 review: as for `if` and
+            // `while`, a condition that reported its own error is not also
+            // "not boolean", and the step and body are checked either way.
+            // The message is at the condition: the loop node has no position.
+            int cond_ok = 1;
             if (stmt->child_count > 1 && stmt->children[1]) {
-                typecheck_expression(stmt->children[1], loop_table);
-                Type* cond_type = infer_type(stmt->children[1], loop_table);
-                if (cond_type && cond_type->kind != TYPE_BOOL) {
+                ASTNode* condition = stmt->children[1];
+                int errors_before = error_count;
+                typecheck_expression(condition, loop_table);
+                if (error_count > errors_before) {
+                    cond_ok = 0;
+                } else {
+                    Type* cond_type = infer_type(condition, loop_table);
+                    if (cond_type && cond_type->kind != TYPE_BOOL) {
+                        int line = condition->line ? condition->line : stmt->line;
+                        int column = condition->line ? condition->column : stmt->column;
+                        condition_not_boolean("For loop condition must be boolean", condition,
+                                              cond_type, line, column);
+                        cond_ok = 0;
+                    }
                     free_type(cond_type);
-                    type_error("For loop condition must be boolean", stmt->line, stmt->column);
-                    free_symbol_table(loop_table);
-                    return 0;
                 }
-                free_type(cond_type);
             }
             
             // Type check increment (child 2). #2742: a binding increment
@@ -12415,26 +13366,33 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
             }
 
             free_symbol_table(loop_table);
-            return 1;
+            return cond_ok;
         }
         
         case AST_WHILE_LOOP: {
             /* #2186: the body's locals are declared before the loop, where
              * codegen declares them (hoist_loop_vars). */
             if (stmt->child_count > 1) hoist_loop_decls(stmt->children[1], declare_loop_hoist, table);
+            int cond_ok = 1;
             if (stmt->child_count >= 1) {
                 ASTNode* condition = stmt->children[0];
-                int errors_before = error_count;   /* #3042, as for `if` */
+                /* #3042, as for `if`: one error for the condition, and the
+                 * body still checked (#3042 review). */
+                int errors_before = error_count;
                 typecheck_expression(condition, table);
-                if (error_count > errors_before) return 0;
-                Type* cond_type = infer_type(condition, table);
-
-                if (cond_type && cond_type->kind != TYPE_BOOL) {
+                if (error_count > errors_before) {
+                    cond_ok = 0;
+                } else {
+                    Type* cond_type = infer_type(condition, table);
+                    if (cond_type && cond_type->kind != TYPE_BOOL) {
+                        /* The body is checked as `while o != none` would
+                         * check it, which narrows nothing in a loop. */
+                        condition_not_boolean("Loop condition must be boolean", condition,
+                                              cond_type, condition->line, condition->column);
+                        cond_ok = 0;
+                    }
                     free_type(cond_type);
-                    type_error("Loop condition must be boolean", condition->line, condition->column);
-                    return 0;
                 }
-                free_type(cond_type);
             }
 
             // Type check loop body (#893: with this loop's label in scope so
@@ -12444,7 +13402,7 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                 typecheck_statement(stmt->children[i], table);
             }
             tc_pop_loop_label();
-            return 1;
+            return cond_ok;
         }
 
         case AST_BREAK_STATEMENT:
@@ -14099,6 +15057,22 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                     expr->line, expr->column, AETHER_ERR_KEEPS_BORROWED);
                 return 0;
             }
+            /* #2926, #2980: a function with a `@keep` or `@into` parameter
+             * is no C function pointer. #3060: refused here, where each
+             * cast is checked once, not by infer_type, which answers for
+             * it wherever its type is asked: a struct field's value was
+             * refused twice, an if-expression's arms three times each, and
+             * an array literal's element or a match arm's value not at
+             * all. A cast that names a mode is refused for that, above. */
+            if (expr->child_count > 0 && expr->children[0] &&
+                expr->children[0]->type == AST_IDENTIFIER && expr->children[0]->value) {
+                Symbol* fsym = lookup_symbol(table, expr->children[0]->value);
+                if (fsym && fsym->is_function && fsym->node &&
+                    (fsym->node->type == AST_FUNCTION_DEFINITION ||
+                     fsym->node->type == AST_BUILDER_FUNCTION) &&
+                    refuse_moded_fn_value(expr->children[0], fsym->node, fsym->type, 1))
+                    return 0;
+            }
             /* Don't replace expr->node_type — the parser set it from
              * the `fn(...)` source spelling and it carries the exact
              * Type* tree we need for codegen. */
@@ -14156,6 +15130,29 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                     have->element_type->kind != join->kind) {
                     set_node_type(expr, create_array_type(clone_type(join), expr->child_count));
                 }
+            } else if (expr->child_count > 0) {
+                /* #3051: so is a literal of one non-numeric type. The early
+                 * pass could not type a field read through a pointer
+                 * (`[b.inner, b.inner]` with `b = heap.new(Outer)`), and
+                 * took the literal for an int array: C was `int arr[2] =
+                 * {b->inner, ...}`. Its elements are typed now; when they
+                 * agree, the literal is an array of that type. Only in
+                 * place of that default: a type the place gave the literal
+                 * (`let s: Shape[] = [c1, c2]`) stands. */
+                Type* first = expr->children[0] ? expr->children[0]->node_type : NULL;
+                int agree = first && first->kind != TYPE_UNKNOWN && first->kind != TYPE_VOID &&
+                            !is_numeric_scalar(first->kind);
+                for (int i = 1; agree && i < expr->child_count; i++) {
+                    Type* et = expr->children[i] ? expr->children[i]->node_type : NULL;
+                    agree = et && types_equal(et, first);
+                }
+                Type* have = expr->node_type;
+                int defaulted = !have || have->kind == TYPE_UNKNOWN ||
+                                (have->kind == TYPE_ARRAY &&
+                                 (!have->element_type || have->element_type->kind == TYPE_UNKNOWN ||
+                                  have->element_type->kind == TYPE_INT));
+                if (agree && defaulted)
+                    set_node_type(expr, create_array_type(clone_type(first), expr->child_count));
             }
             return 1;
         }
@@ -14808,6 +15805,27 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                              type_name(base_type), expr->value ? expr->value : "?");
                     free_type(base_type);
                     type_error(error_msg, expr->line, expr->column);
+                    return 0;
+                }
+
+                /* #3048: a bare `ptr` points at nothing the checker knows,
+                 * so it has no fields. A field read or stored through one
+                 * passed the checker untyped and reached C as a member of a
+                 * `void*` ("request for member in something not a
+                 * structure or union"). */
+                if (base_type && base_type->kind == TYPE_PTR && !base_type->element_type &&
+                    !base_type->distinct_name && expr->value) {
+                    char error_msg[320];
+                    char hint[320];
+                    snprintf(error_msg, sizeof(error_msg),
+                             "Type 'ptr' has no field '%s': a bare `ptr` points at nothing "
+                             "the checker knows",
+                             expr->value);
+                    snprintf(hint, sizeof(hint),
+                             "view it as the struct it points at first: `(p as *Node).%s`",
+                             expr->value);
+                    free_type(base_type);
+                    type_error_hint(error_msg, hint, expr->line, expr->column);
                     return 0;
                 }
 
@@ -15875,6 +16893,111 @@ static const TcClauses* tc_clauses_of(ASTNode* fn) {
     for (int i = 0; i < tc->count; i++)
         if (tc->nodes[i] == fn) return tc;
     return NULL;
+}
+
+/* Is `fn` the first clause of a clause set? */
+static int clause_set_first(ASTNode* fn) {
+    const TcClauses* set = tc_clauses_of(fn);
+    return set && set->nodes[0] == fn;
+}
+
+/* `t` given the contents of a copy of `want`, keeping its identity (a
+ * check in progress may hold it, as refine_inferred_result's does). */
+static void type_take(Type* t, Type* want) {
+    Type* c = clone_type(want);
+    Type swap = *t;
+    *t = *c;
+    *c = swap;
+    free_type(c);
+}
+
+/* #3061: a function written as several clauses is one C function, whose
+ * result codegen took from its first clause with a known type
+ * (fn_result_type), so a later clause's wider value was cut to it with no
+ * word: `pick(0, s: int, b: long) -> s` then `pick(k, s: int, b: long) ->
+ * b` returned the long as an int. Once every clause's result is known, the
+ * set's is their join, as the arms of an if-expression or a value `match`
+ * join (branch_join_type: the wider number, an optional beside its value or
+ * `none`, a sum beside its variants), which each clause and the set's
+ * symbols take; two results that do not join are E0200, naming both. A
+ * written result type is the set's, and an inferred clause must fit it. A
+ * set with a clause whose result is still to be inferred waits for it
+ * (#3056). */
+static void clause_set_settle(ASTNode* fn, SymbolTable* table) {
+    const TcClauses* set = tc_clauses_of(fn);
+    if (!set) return;
+    /* A written result type, if a clause has one, is the set's. */
+    ASTNode* written = NULL;
+    for (int c = 0; c < set->count; c++) {
+        ASTNode* cl = set->nodes[c];
+        Type* t = cl->node_type;
+        if (!t || t->kind == TYPE_UNKNOWN) {
+            if (tc_has_return_value(cl)) return;   /* still to be inferred */
+            continue;
+        }
+        if (!written && !cl->type_inferred && t->kind != TYPE_VOID) written = cl;
+    }
+    Type* join = written ? clone_type(written->node_type) : NULL;
+    ASTNode* join_at = written;
+    for (int c = 0; c < set->count; c++) {
+        ASTNode* cl = set->nodes[c];
+        Type* t = cl->node_type;
+        if (!t || t->kind == TYPE_UNKNOWN || t->kind == TYPE_VOID || cl == written) continue;
+        if (!join) {
+            join = clone_type(t);
+            join_at = cl;
+            continue;
+        }
+        Type* k = branch_join_type(join, NULL, t, NULL);
+        /* Beside a written type, an inferred clause fits it (their join is
+         * it); a second written type is the same one or none. */
+        int unfit = written && k &&
+                    (!types_equal(k, join) || (!cl->type_inferred && !types_equal(t, join)));
+        if (!k || unfit) {
+            char a[160], b[160], msg[480];
+            if (unfit)
+                snprintf(msg, sizeof(msg),
+                         "the clauses of '%s' are written to return %s (line %d), and this "
+                         "clause returns %s, which that does not hold: a clause set is one "
+                         "function with one result",
+                         fn->value, ret_type_spell(join, a, sizeof(a)), join_at->line,
+                         ret_type_spell(t, b, sizeof(b)));
+            else
+                snprintf(msg, sizeof(msg),
+                         "the clauses of '%s' return %s (line %d) and %s, which no one type "
+                         "holds: a clause set is one function with one result",
+                         fn->value, ret_type_spell(join, a, sizeof(a)),
+                         join_at ? join_at->line : 0, ret_type_spell(t, b, sizeof(b)));
+            type_error_hint(msg, unfit ? "write the wider type on the clause that names one, "
+                                         "or convert the value (`x as T`)"
+                                       : "return the same type from every clause, or convert "
+                                         "the value (`x as T`)",
+                            cl->line, cl->column);
+            if (k) free_type(k);
+            free_type(join);
+            return;
+        }
+        if (!types_equal(k, join)) join_at = cl;
+        free_type(join);
+        join = k;
+    }
+    if (!join) return;
+    for (int c = 0; c < set->count; c++) {
+        Type* t = set->nodes[c]->node_type;
+        if (t && t->kind != TYPE_VOID && t->kind != TYPE_UNKNOWN && !types_equal(t, join))
+            type_take(t, join);
+    }
+    SymbolTable* root = table;
+    while (root && root->parent) root = root->parent;
+    for (Symbol* fs = root ? root->symbols : NULL; fs; fs = fs->next) {
+        if (!fs->is_function || !fs->type || fs->type->kind == TYPE_VOID) continue;
+        for (int c = 0; c < set->count; c++)
+            if (fs->node == set->nodes[c] && !types_equal(fs->type, join)) {
+                type_take(fs->type, join);
+                break;
+            }
+    }
+    free_type(join);
 }
 
 /* ---- Which `return`s have a value (#2697, #2733, #2735, #2736) ----------

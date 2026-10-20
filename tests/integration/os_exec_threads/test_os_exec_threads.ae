@@ -1,0 +1,128 @@
+// os.exec from one thread while others start children (#3046 review). On
+// POSIX os.exec ran popen() and os.system ran system(), which fork inside
+// libc, outside std.os's fork lock: where pipe2 is missing (macOS) the shell
+// could be forked between another thread's pipe() and its fcntl() and keep
+// that pipe across exec, and a capture whose pipe a long child inherits
+// waits for EOF until that child exits. Both now start their shell through
+// aether_fork, os.exec's pipe close-on-exec, as os.run_full's are
+// (os_run_full_threads is the same shape for os.run_full).
+//
+// Five threads run long children (each sleeps 4 s) back to back; one thread
+// runs short shell captures through os.exec, and os.system runs, the whole
+// time and times every call. Neither ever takes as long as a long child:
+// the bound is 2.5 s, against tens of milliseconds without the stall. The
+// children are this program, re-run with a flag.
+import std.os
+import std.list
+import std.mem
+import std.string
+import std.worker
+
+var longest_short: long = 0
+var shorts_run = 0
+var shorts_wrong = 0
+
+child(mode: string) -> int {
+    if mode == "--long" {
+        sleep(4000)
+        println("long")
+        return 0
+    }
+    if mode == "--short" {
+        println("short")
+        return 0
+    }
+    // os.system's child writes to this program's own stdout, so it says
+    // nothing: how many runs fit in the window depends on the machine, and
+    // the output must not (test-ae-opt-diff compares -O0 with -O2).
+    if mode == "--quiet" {
+        return 0
+    }
+    return 3
+}
+
+// Two long children, one after the other.
+long_loop() -> int {
+    argv = list.new()
+    _a = list.add(argv, "--long")
+    i = 0
+    bad = 0
+    while i < 2 {
+        _out, _err_out, status, err = os.run_full(os.argv0(), argv, null, "")
+        if status != 0 || err != "" {
+            bad = bad + 1
+        }
+        i = i + 1
+    }
+    list.free(argv)
+    return bad
+}
+
+// Short shell runs for 8 s, a capture and a system() each round; the
+// longest single call, in milliseconds.
+short_loop() -> long {
+    cmd = "\"${os.argv0()}\" --short"
+    quiet = "\"${os.argv0()}\" --quiet"
+    start = os.now_monotonic_ms()
+    longest = 0 as long
+    n = 0
+    while os.now_monotonic_ms() - start < 8000 {
+        t0 = os.now_monotonic_ms()
+        out, err = os.exec(cmd)
+        took = os.now_monotonic_ms() - t0
+        if took > longest {
+            longest = took
+        }
+        if err != "" || string.starts_with(out, "short") != 1 {
+            shorts_wrong = shorts_wrong + 1
+        }
+        t1 = os.now_monotonic_ms()
+        rc = os.system(quiet)
+        took2 = os.now_monotonic_ms() - t1
+        if took2 > longest {
+            longest = took2
+        }
+        if rc != 0 {
+            shorts_wrong = shorts_wrong + 1
+        }
+        n = n + 1
+    }
+    shorts_run = n
+    return longest
+}
+
+main() {
+    if os.args_count() > 1 {
+        exit(child(os.args_get(1)))
+    }
+    worker.pool_size(6)
+    i = 0
+    while i < 5 {
+        _ok = worker.run(|| {
+                long_loop()
+                return null
+            }, | r: ptr | {
+            })
+        i = i + 1
+    }
+    _ok2 = worker.run(|| {
+            return mem.long_to_ptr(short_loop())
+        }, | r: ptr | {
+            longest_short = mem.ptr_to_long(r)
+        })
+    worker.wait()
+    // Counts and times only on failure: they vary from run to run.
+    if longest_short > 2500 {
+        println("FAIL: a short shell run waited ${longest_short} ms, for a long child it does not own (${shorts_run} runs)")
+        exit(1)
+    }
+    if shorts_run < 5 {
+        println("FAIL: too few short shell runs (${shorts_run}, the longest ${longest_short} ms)")
+        exit(1)
+    }
+    if shorts_wrong != 0 {
+        println("FAIL: ${shorts_wrong} of ${shorts_run} short shell runs gave the wrong output or status")
+        exit(1)
+    }
+    println("ALL PASS")
+}

@@ -308,7 +308,14 @@ main() {
 }
 AE
 } > "$TMP/cast.ae"
-refused cast 11:9 E0902 "\`as fn(...)\` makes a C function pointer, whose parameters borrow"
+refused cast 11:18 E0902 "\`as fn(...)\` makes a C function pointer, whose parameters borrow"
+# #3060: that is the cast's one error; the function it names, which keeps
+# its parameter, is not refused again for the same cast.
+n=$(cd "$TMP" && "$AE" check cast.ae 2>&1 | grep -c 'error\[E0902\]')
+if [ "$n" -ne 1 ]; then
+    echo "  [FAIL] cast: $n E0902 errors, not 1"
+    fails=$((fails + 1))
+fi
 
 cat > "$TMP/alias.ae" <<'AE'
 type Tick = fn(@keep ptr, float)

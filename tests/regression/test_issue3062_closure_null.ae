@@ -1,0 +1,65 @@
+// #3062: a closure value compared with `null` passed the checker and failed
+// in C ("invalid operands to binary != (have '_AeClosure' and 'void *')"),
+// and `null` stored into one failed too: a closure is a struct of a
+// function pointer and an env, which C's `==` does not take and `NULL` does
+// not initialize. `c == null` and `c != null` ask whether it holds a
+// function (its function pointer, NULL in a zero-initialized slot), and
+// `c = null` stores the empty closure, giving back the env it held. A
+// moded `fn` slot (#2980) is such a closure; a plain `fn(int) -> int` slot
+// is a C function pointer and compared as one already.
+
+extern exit(code: int)
+
+struct Box {
+    kept: ptr
+}
+
+struct Slot {
+    build: fn(@keep ptr, int) -> int
+}
+
+maker(context: @keep ptr, id: int) -> int {
+    (context as *Box).kept = context
+    return id
+}
+
+adder(n: int) -> fn {
+    return | x: int | -> x + n
+}
+
+holds(cb: fn) -> bool {
+    return cb != null
+}
+
+check(ok: bool, what: string) {
+    if !ok {
+        println("FAIL: ${what}")
+        exit(1)
+    }
+}
+
+main() {
+    b = Box { kept: null }
+    set = Slot { build: maker }
+    check(set.build != null, "a set moded slot holds a function")
+    check(set.build((&b) as ptr, 3) == 3, "and runs it")
+    unset = Slot {}
+    check(unset.build == null, "an unset moded slot holds none")
+    given_null = Slot { build: null }
+    check(given_null.build == null, "a struct literal's null is the empty closure")
+    set.build = null
+    check(set.build == null, "a null stored into a slot empties it")
+
+    n = 5
+    f = | x: int | -> x + n
+    check(f != null, "a closure local holds a function")
+    check(holds(f), "so does a closure parameter given it")
+    check(!holds(null), "and none given null")
+    f = null
+    check(f == null, "a null stored into a local empties it")
+    check(adder(2) != null, "a closure a call makes, compared and given back")
+
+    seen = unset.build == null
+    println("${seen} ${set.build != null}")
+    println("ok")
+}

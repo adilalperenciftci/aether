@@ -1,0 +1,76 @@
+// #3056: a function with no declared result type whose `return` value the
+// early inference pass could not type (a field read through a pointer) kept
+// an unknown result, and codegen gave it int: a long or a float returned
+// that way was truncated with no word. The result takes the checked type of
+// what the function returns, for callers defined before it or after it.
+
+extern exit(code: int)
+
+struct S {
+    n: int
+    big: long
+    x: float
+}
+
+check(ok: bool, what: string) {
+    if !ok {
+        println("FAIL: ${what}")
+        exit(1)
+    }
+}
+
+// Defined before its caller.
+sum_through_ptr(big: long) {
+    ps = heap.new(S)
+    ps.n = 1
+    r = ps.n + big
+    heap.free(ps)
+    return r
+}
+
+main() {
+    long big = 5000000000
+    check(sum_through_ptr(big) == 5000000001, "a long sum through a pointer, callee first")
+    check(sum_after(big) == 5000000002, "a long sum through a pointer, caller first")
+    got = long_field(big)
+    check(got == 5000000000, "a long field read through a pointer")
+    check(half(5.0) == 2.5, "a float field read through a pointer")
+    check(via_other(big) == 5000000003, "a result returned from another such function")
+    line = "${sum_through_ptr(big)} ${sum_after(big)} ${got} ${half(5.0)} ${via_other(big)}"
+    check(line == "5000000001 5000000002 5000000000 2.5 5000000003", "the results interpolated")
+    println(line)
+}
+
+// Defined after their caller.
+sum_after(big: long) {
+    ps = heap.new(S)
+    ps.n = 2
+    defer heap.free(ps)
+    return ps.n + big
+}
+
+long_field(v: long) {
+    ps = heap.new(S)
+    ps.big = v
+    if v < 0 {
+        r = ps.big
+        heap.free(ps)
+        return r
+    }
+    r = ps.big
+    heap.free(ps)
+    return r
+}
+
+half(v: float) {
+    ps = heap.new(S)
+    ps.x = v
+    r = ps.x / 2.0
+    heap.free(ps)
+    return r
+}
+
+via_other(big: long) {
+    r = sum_through_ptr(big)
+    return r + 2
+}

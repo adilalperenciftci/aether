@@ -1,0 +1,91 @@
+// #3056 review: functions whose results are inferred from their checked
+// first `return` are checked before the functions that call them, callees
+// first. In a cycle, `a` (whose `return p.n` types it) called `b`, which
+// returns `a(...)`: entered at `a`, `b` was checked first, met `a`
+// unknown, and kept the int default, so a long through it was cut to 32
+// bits (705032704 for 5000000000). A callee that calls back into a
+// function being checked now waits until after it, and the functions a
+// first `return` calls come first, so either way into a cycle types it.
+// Each cycle below is entered where it is declared first, or, after
+// `main`, where `main` calls it first.
+
+extern exit(code: int)
+
+struct P {
+    n: long
+}
+
+// Entered at the member whose first `return` types it.
+a(p: *P, k: int) {
+    if k == 0 { return p.n }
+    return b(p, k - 1)
+}
+
+b(p: *P, k: int) { return a(p, k) }
+
+// Entered at the other one.
+d(p: *P, k: int) { return c(p, k) }
+
+c(p: *P, k: int) {
+    if k == 0 { return p.n }
+    return d(p, k - 1)
+}
+
+// Three functions, entered at each of them.
+e1(p: *P, k: int) {
+    if k == 0 { return p.n }
+    return f1(p, k - 1)
+}
+
+f1(p: *P, k: int) { return g1(p, k) }
+
+g1(p: *P, k: int) { return e1(p, k) }
+
+f2(p: *P, k: int) { return g2(p, k) }
+
+e2(p: *P, k: int) {
+    if k == 0 { return p.n }
+    return f2(p, k - 1)
+}
+
+g2(p: *P, k: int) { return e2(p, k) }
+
+g3(p: *P, k: int) { return e3(p, k) }
+
+f3(p: *P, k: int) { return g3(p, k) }
+
+e3(p: *P, k: int) {
+    if k == 0 { return p.n }
+    return f3(p, k - 1)
+}
+
+check(ok: bool, what: string) {
+    if !ok {
+        println("FAIL: ${what}")
+        exit(1)
+    }
+}
+
+main() {
+    x = heap.new(P)
+    x.n = 5000000000
+    check(a(x, 3) == 5000000000, "a pair entered at the typed member")
+    check(b(x, 3) == 5000000000, "its other member")
+    check(d(x, 3) == 5000000000, "a pair entered at the other member")
+    check(e1(x, 2) == 5000000000 && f1(x, 2) == 5000000000 && g1(x, 2) == 5000000000,
+        "three entered at the typed one")
+    check(e2(x, 2) == 5000000000 && f2(x, 2) == 5000000000 && g2(x, 2) == 5000000000,
+        "three entered at the one after it")
+    check(e3(x, 2) == 5000000000 && f3(x, 2) == 5000000000 && g3(x, 2) == 5000000000,
+        "three entered at the one before it")
+    check(late_i(x, 3) == 5000000000, "a pair after main, entered at main's first call")
+    println("${a(x, 1)} ${late_h(x, 1)}")
+    heap.free(x)
+}
+
+late_h(p: *P, k: int) {
+    if k == 0 { return p.n }
+    return late_i(p, k - 1)
+}
+
+late_i(p: *P, k: int) { return late_h(p, k) }

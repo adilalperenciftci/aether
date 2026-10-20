@@ -6943,7 +6943,7 @@ void emit_struct_take(CodeGenerator* gen, ASTNode* e, const char* sname,
 /* #2525: is `e` a closure value nobody else holds: a closure literal, or a
  * call that hands one over (call_returns_owned_closure)? An `if` over two
  * such is one too. */
-static int closure_value_is_fresh(CodeGenerator* gen, ASTNode* e) {
+int closure_value_is_fresh(CodeGenerator* gen, ASTNode* e) {
     if (!e) return 0;
     if (env_scan_is_real_closure(e)) return 1;
     /* #2528: a reply's closure was taken for the asker. */

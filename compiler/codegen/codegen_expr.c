@@ -7414,7 +7414,13 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
             break;
 
         case AST_NULL_LITERAL:
-            fprintf(gen->output, "NULL");
+            /* #3062: `null` in a closure slot (slice_coerce_slot gives it
+             * the slot's type) is the empty closure: no function, no env. */
+            if (expr->node_type && expr->node_type->kind == TYPE_FUNCTION &&
+                !expr->node_type->is_fnptr)
+                fprintf(gen->output, "((_AeClosure){ 0 })");
+            else
+                fprintf(gen->output, "NULL");
             break;
 
         case AST_HEAP_NEW: {
@@ -8639,6 +8645,34 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                                     strcmp(expr->value, "!=") == 0)) {
                     ASTNode* L = expr->children[0];
                     ASTNode* R = expr->children[1];
+                    /* #3062: a closure against `null` asks whether it holds
+                     * a function: its function pointer, NULL in a zero slot
+                     * and in the empty closure `c = null` stores. A closure
+                     * is a struct, which C's `==` does not take. One the
+                     * operand makes (a call's result, a literal) holds a
+                     * reference the comparison releases once it is read. */
+                    ASTNode* clo = NULL;
+                    Type* lct = L->node_type;
+                    Type* rct = R->node_type;
+                    if (R->type == AST_NULL_LITERAL && lct && lct->kind == TYPE_FUNCTION &&
+                        !lct->is_fnptr)
+                        clo = L;
+                    else if (L->type == AST_NULL_LITERAL && rct && rct->kind == TYPE_FUNCTION &&
+                             !rct->is_fnptr)
+                        clo = R;
+                    if (clo) {
+                        int eq = strcmp(expr->value, "==") == 0;
+                        if (closure_value_is_fresh(gen, clo)) {
+                            fprintf(gen->output, "(%s_aether_closure_holds_take(", eq ? "!" : "");
+                            generate_expression(gen, clo);
+                            fprintf(gen->output, "))");
+                        } else {
+                            fprintf(gen->output, "((");
+                            generate_expression(gen, clo);
+                            fprintf(gen->output, ").fn %s 0)", eq ? "==" : "!=");
+                        }
+                        break;
+                    }
                     int l_none = L->type == AST_NONE_LITERAL;
                     int r_none = R->type == AST_NONE_LITERAL;
                     int l_opt  = L->node_type && L->node_type->kind == TYPE_OPTIONAL;

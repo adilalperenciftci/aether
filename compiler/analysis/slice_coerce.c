@@ -131,10 +131,40 @@ static int coerce_arms(ASTNode* e, const Type* target, int target_is_c_view) {
     return changed;
 }
 
+/* #3062: `null` into a closure slot is the empty closure, whose function
+ * pointer is NULL (what `c == null` tests): it takes the slot's type, which
+ * codegen writes as that closure. An `if` or a `match` gives it arm by
+ * arm. */
+static int closure_null_slot(ASTNode** slot, const Type* target) {
+    ASTNode* e = *slot;
+    if (e->type == AST_NULL_LITERAL) {
+        if (e->node_type) free_type(e->node_type);
+        e->node_type = clone_type((Type*)target);
+        return 1;
+    }
+    int changed = 0;
+    if (e->type == AST_IF_EXPRESSION) {
+        for (int i = 1; i < e->child_count && i < 3; i++)
+            if (e->children[i]) changed |= closure_null_slot(&e->children[i], target);
+    } else if (e->type == AST_MATCH_STATEMENT) {
+        for (int i = 1; i < e->child_count; i++) {
+            ASTNode* nested = NULL;
+            ASTNode** vs = arm_value_slot(e->children[i], &nested);
+            if (vs && *vs) changed |= closure_null_slot(vs, target);
+            else if (nested) {
+                ASTNode* n = nested;
+                changed |= closure_null_slot(&n, target);
+            }
+        }
+    }
+    return changed;
+}
+
 int slice_coerce_slot(ASTNode** slot, const Type* target, int target_is_c_view) {
     if (!slot || !*slot || !target) return 0;
     ASTNode* e = *slot;
     if (slice_is_coercion_node(e)) return 0;
+    if (target->kind == TYPE_FUNCTION && !target->is_fnptr) return closure_null_slot(slot, target);
 
     int slot_is_slice = type_is_slice(target) && !target_is_c_view;
     int slot_is_raw_ptr = target->kind == TYPE_PTR ||

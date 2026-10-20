@@ -205,6 +205,120 @@ static int win_launch(const char* prog, void* argv_list, void* env_list,
                       int* out_exit_code, char** out_capture);
 #endif
 
+#ifndef _WIN32
+/* #3046 review: os.system and os.exec start their shell as every other
+ * child here is started, through aether_fork, and os.exec's pipe is made
+ * with aether_pipe_cloexec. system() and popen() fork inside libc, outside
+ * the fork lock, so where pipe2 is missing (macOS) their shell could take
+ * another thread's pipe between its pipe() and its fcntl() and keep it
+ * across exec: that capture then waited for the shell (#2917, #3028). What
+ * system() and popen() do is kept: `/bin/sh -c` (with `--`, so a command
+ * that starts with `-` is no option, as glibc passes it), the wait-status
+ * word, the signal handling and the waits retried on EINTR. */
+#define AETHER_OS_SHELL "/bin/sh"
+
+static int aether_child_fd(int fd, int target);   /* below */
+
+/* Wait for `pid`, retried on EINTR; its wait-status word, or -1. */
+static int aether_os_shell_wait(pid_t pid) {
+    int status = 0;
+    while (waitpid(pid, &status, 0) < 0) {
+        if (errno != EINTR) return -1;
+    }
+    return status;
+}
+
+/* popen(cmd, "r"): the shell's stdout is a close-on-exec pipe's write
+ * end, made its stdout as every capture here makes it; its stdin, stderr,
+ * signal dispositions and mask are this process's, as popen leaves them.
+ * NULL where popen fails (no pipe, no fork). */
+static FILE* aether_os_shell_open(const char* cmd, pid_t* out_pid) {
+    int pipefd[2];
+    if (aether_pipe_cloexec(pipefd) != 0) return NULL;
+    pid_t pid = aether_fork();
+    if (pid < 0) {
+        close(pipefd[0]);
+        close(pipefd[1]);
+        return NULL;
+    }
+    if (pid == 0) {
+        if (aether_child_fd(pipefd[1], 1) < 0) _exit(127);
+        execl(AETHER_OS_SHELL, "sh", "-c", "--", cmd, (char*)NULL);
+        _exit(127);
+    }
+    close(pipefd[1]);
+    FILE* f = fdopen(pipefd[0], "r");
+    if (!f) {
+        close(pipefd[0]);
+        (void)aether_os_shell_wait(pid);
+        return NULL;
+    }
+    *out_pid = pid;
+    return f;
+}
+
+/* pclose(): close the stream, then reap the shell. */
+static void aether_os_shell_close(FILE* f, pid_t pid) {
+    fclose(f);
+    (void)aether_os_shell_wait(pid);
+}
+
+#if AETHER_HAS_SHELL
+#include "../../runtime/utils/aether_thread.h"
+/* system(), as POSIX has it and glibc counts it for threads: while any
+ * os.system waits, SIGINT and SIGQUIT are ignored in this process (saved
+ * by the first caller, restored by the last) and SIGCHLD is blocked in
+ * the waiting thread. The shell gets SIGINT and SIGQUIT back as they were
+ * (the default, unless they were ignored before) and the caller's mask. */
+static pthread_mutex_t aether_system_lock = PTHREAD_MUTEX_INITIALIZER;
+static int aether_system_waiting = 0;
+static struct sigaction aether_system_intr, aether_system_quit;
+
+static int aether_os_system_posix(const char* cmd) {
+    struct sigaction ign;
+    memset(&ign, 0, sizeof ign);
+    ign.sa_handler = SIG_IGN;
+    sigemptyset(&ign.sa_mask);
+    pthread_mutex_lock(&aether_system_lock);
+    if (aether_system_waiting++ == 0) {
+        sigaction(SIGINT, &ign, &aether_system_intr);
+        sigaction(SIGQUIT, &ign, &aether_system_quit);
+    }
+    int intr_ignored = aether_system_intr.sa_handler == SIG_IGN;
+    int quit_ignored = aether_system_quit.sa_handler == SIG_IGN;
+    pthread_mutex_unlock(&aether_system_lock);
+
+    sigset_t chld, omask;
+    sigemptyset(&chld);
+    sigaddset(&chld, SIGCHLD);
+    sigprocmask(SIG_BLOCK, &chld, &omask);
+
+    pid_t pid = aether_fork();
+    if (pid == 0) {
+        struct sigaction dfl;
+        memset(&dfl, 0, sizeof dfl);
+        dfl.sa_handler = SIG_DFL;
+        sigemptyset(&dfl.sa_mask);
+        if (!intr_ignored) sigaction(SIGINT, &dfl, NULL);
+        if (!quit_ignored) sigaction(SIGQUIT, &dfl, NULL);
+        sigprocmask(SIG_SETMASK, &omask, NULL);
+        execl(AETHER_OS_SHELL, "sh", "-c", "--", cmd, (char*)NULL);
+        _exit(127);
+    }
+    int status = pid > 0 ? aether_os_shell_wait(pid) : -1;
+
+    pthread_mutex_lock(&aether_system_lock);
+    if (--aether_system_waiting == 0) {
+        sigaction(SIGINT, &aether_system_intr, NULL);
+        sigaction(SIGQUIT, &aether_system_quit, NULL);
+    }
+    pthread_mutex_unlock(&aether_system_lock);
+    sigprocmask(SIG_SETMASK, &omask, NULL);
+    return status;
+}
+#endif
+#endif
+
 int os_system(const char* cmd) {
     if (!cmd) return -1;
     if (!aether_sandbox_check("exec", cmd)) return -1;
@@ -217,12 +331,15 @@ int os_system(const char* cmd) {
      * spawn a child; system() was always the legacy shell-out. */
     return -1;
 #else
+#ifdef _WIN32
     int status = system(cmd);
     if (status == -1) return -1;
-#ifdef _WIN32
     /* Windows's system() already returns the exit code directly. */
     return status;
 #else
+    /* system()'s wait-status word, through aether_fork (#3046 review). */
+    int status = aether_os_system_posix(cmd);
+    if (status == -1) return -1;
     /* POSIX system() returns a wait-status word: low byte = signal,
      * high byte = exit code on normal exit. Aether's contract (per
      * docs/stdlib-reference.md) is "returns exit code" — match the
@@ -245,7 +362,8 @@ char* os_exec_raw(const char* cmd) {
 #ifdef _WIN32
     FILE* pipe = _popen(cmd, "r");
 #else
-    FILE* pipe = popen(cmd, "r");
+    pid_t pid = -1;
+    FILE* pipe = aether_os_shell_open(cmd, &pid);   /* popen(), #3046 review */
 #endif
     if (!pipe) return NULL;
 
@@ -259,7 +377,7 @@ char* os_exec_raw(const char* cmd) {
 #ifdef _WIN32
         _pclose(pipe);
 #else
-        pclose(pipe);
+        aether_os_shell_close(pipe, pid);
 #endif
         return NULL;
     }
@@ -279,7 +397,7 @@ char* os_exec_raw(const char* cmd) {
 #ifdef _WIN32
                 _pclose(pipe);
 #else
-                pclose(pipe);
+                aether_os_shell_close(pipe, pid);
 #endif
                 return NULL;
             }
@@ -295,7 +413,7 @@ char* os_exec_raw(const char* cmd) {
 #ifdef _WIN32
     _pclose(pipe);
 #else
-    pclose(pipe);
+    aether_os_shell_close(pipe, pid);
 #endif
     return (char*)string_adopt_caps_buffer(result, len, capacity);
 }

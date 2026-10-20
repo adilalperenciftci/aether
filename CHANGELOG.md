@@ -16,6 +16,40 @@ cut while your branch is open cannot fold your entry into the released section.
 
 ## [0.836.0]
 
+### Migrating from 0.835
+
+0.836.0's E0902 rules refuse two shapes that 0.835.0 compiled. Both refusals
+are intended (#2990, #3033, #2980), each has a one-line fix, and the E0902
+help names it.
+
+**1. A pointer into a borrowed argument, returned.** Since #3033, `p + n`
+carries what `p` carries, and a borrowed `ptr` parameter may not be returned.
+Declare the parameter `@into`: the function's result holds it, and a caller
+holds the result as it holds the argument (#2990).
+
+```aether
+slice(bytes: ptr, offset: int) -> ptr { return bytes + offset }      // E0902 on 0.836.0
+slice(bytes: @into ptr, offset: int) -> ptr { return bytes + offset } // the result holds it: @into
+```
+
+The common real case is an indexed accessor into an array the caller owns,
+`body_at(bodies: @into ptr, i: int) -> *Body { return (bodies as *Body) + i }`:
+thirteen of those were the whole of aephysics' migration.
+
+**2. A function that keeps its argument, stored as a plain function
+pointer.** A plain `fn` type is a C function pointer, which borrows every
+`ptr`, so a function with a `@keep` (or `@into`) parameter is refused there,
+cast or not. Give the slot the function's modes: the function goes there as
+it is, with no cast, and a call through the slot is checked as a call of the
+function is (#2980).
+
+```aether
+struct Table { set: fn(ptr, ptr) }
+t = Table { set: keep_it as fn(ptr, ptr) }       // E0902: a plain fn type borrows every ptr
+struct Table { set: fn(ptr, @keep ptr) }         // the slot says what it keeps
+t = Table { set: keep_it }
+```
+
 ### Added
 
 - **`@into ptr`: a parameter that may reach only the function's result.** A
