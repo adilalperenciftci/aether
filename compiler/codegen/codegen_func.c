@@ -906,6 +906,24 @@ const char* libc_extern_header(const char* name) {
     return e ? e->header : NULL;
 }
 
+/* #2799: the header of cl.exe's C library that declares, under its POSIX
+ * name, a function the table above finds in <unistd.h>, which MSVC does not
+ * have: getpid and isatty were undeclared (C4013). NULL for a name MSVC does
+ * not provide, or whose header the table already names. */
+const char* libc_extern_msvc_header(const char* name) {
+    static const LibcExtern msvc[] = {
+        { "getpid", "process.h" }, { "_exit", "process.h" }, { "execv", "process.h" },
+        { "execvp", "process.h" }, { "execve", "process.h" },
+        { "close", "io.h" }, { "read", "io.h" }, { "write", "io.h" }, { "lseek", "io.h" },
+        { "dup", "io.h" }, { "dup2", "io.h" }, { "access", "io.h" }, { "isatty", "io.h" },
+        { "unlink", "io.h" }, { "rmdir", "direct.h" },
+        { NULL, NULL }
+    };
+    for (int i = 0; name && msvc[i].name; i++)
+        if (strcmp(name, msvc[i].name) == 0) return msvc[i].header;
+    return NULL;
+}
+
 // Generate extern C function declaration
 // extern printf(format: string) -> int  =>  extern int printf(const char*);
 void generate_extern_declaration(CodeGenerator* gen, ASTNode* ext) {
@@ -1233,7 +1251,10 @@ void propagate_tuple_types_to_calls(ASTNode* program) {
  *
  * Returns 1 if `func` is one of them and a body was emitted; 0 otherwise.
  *
- * Each entry is copied VERBATIM from std/mem/aether_mem.c. The null returns
+ * Each entry is copied VERBATIM from std/mem/aether_mem.c, but for its GCC
+ * builtins, spelled _AE_MEMCPY / _AE_CLZ32 / _AE_CLZ64 here: the builtins
+ * under GCC and Clang, and memcpy and plain C under another compiler, which
+ * has none of them (#2799; the prelude defines the three). The null returns
  * are deliberately asymmetric and must stay that way:
  *   - get_byte / get_byte_sz -> -1;  every other getter -> 0 / 0.0;
  *     every setter -> 0.
@@ -1283,21 +1304,21 @@ static const MemAccessorBody MEM_ACCESSOR_BODIES[] = {
     { "mem_get_float32",
       "    if (!p) return 0.0;\n"
       "    float _v;\n"
-      "    __builtin_memcpy(&_v, (char*)p + offset, sizeof(_v));\n"
+      "    _AE_MEMCPY(&_v, (char*)p + offset, sizeof(_v));\n"
       "    return (double)_v;\n" },
     { "mem_set_float32",
       "    if (!p) return 0;\n"
       "    float _v = (float)value;\n"
-      "    __builtin_memcpy((char*)p + offset, &_v, sizeof(_v));\n"
+      "    _AE_MEMCPY((char*)p + offset, &_v, sizeof(_v));\n"
       "    return 1;\n" },
     { "mem_get_float64",
       "    if (!p) return 0.0;\n"
       "    double _v;\n"
-      "    __builtin_memcpy(&_v, (char*)p + offset, sizeof(_v));\n"
+      "    _AE_MEMCPY(&_v, (char*)p + offset, sizeof(_v));\n"
       "    return _v;\n" },
     { "mem_set_float64",
       "    if (!p) return 0;\n"
-      "    __builtin_memcpy((char*)p + offset, &value, sizeof(value));\n"
+      "    _AE_MEMCPY((char*)p + offset, &value, sizeof(value));\n"
       "    return 1;\n" },
     /* The rest were added when a profile of mquickjs-ae (a C engine ported
      * to Aether, whose VM reads its heap through std.mem) put about 30% of
@@ -1315,11 +1336,11 @@ static const MemAccessorBody MEM_ACCESSOR_BODIES[] = {
     { "mem_get_ptr",
       "    if (!p) return NULL;\n"
       "    void* _v;\n"
-      "    __builtin_memcpy(&_v, (char*)p + offset, sizeof(_v));\n"
+      "    _AE_MEMCPY(&_v, (char*)p + offset, sizeof(_v));\n"
       "    return _v;\n" },
     { "mem_set_ptr",
       "    if (!p) return 0;\n"
-      "    __builtin_memcpy((char*)p + offset, &value, sizeof(value));\n"
+      "    _AE_MEMCPY((char*)p + offset, &value, sizeof(value));\n"
       "    return 1;\n" },
     { "mem_get_int8",
       "    if (!p) return 0;\n"
@@ -1338,41 +1359,41 @@ static const MemAccessorBody MEM_ACCESSOR_BODIES[] = {
     { "mem_get_int16",
       "    if (!p) return 0;\n"
       "    int16_t _v;\n"
-      "    __builtin_memcpy(&_v, (char*)p + offset, sizeof(_v));\n"
+      "    _AE_MEMCPY(&_v, (char*)p + offset, sizeof(_v));\n"
       "    return (int)_v;\n" },
     { "mem_set_int16",
       "    if (!p) return 0;\n"
       "    int16_t _v = (int16_t)(value & 0xffff);\n"
-      "    __builtin_memcpy((char*)p + offset, &_v, sizeof(_v));\n"
+      "    _AE_MEMCPY((char*)p + offset, &_v, sizeof(_v));\n"
       "    return 1;\n" },
     { "mem_get_uint16",
       "    if (!p) return 0;\n"
       "    uint16_t _v;\n"
-      "    __builtin_memcpy(&_v, (char*)p + offset, sizeof(_v));\n"
+      "    _AE_MEMCPY(&_v, (char*)p + offset, sizeof(_v));\n"
       "    return (int)_v;\n" },
     { "mem_set_uint16",
       "    if (!p) return 0;\n"
       "    uint16_t _v = (uint16_t)(value & 0xffff);\n"
-      "    __builtin_memcpy((char*)p + offset, &_v, sizeof(_v));\n"
+      "    _AE_MEMCPY((char*)p + offset, &_v, sizeof(_v));\n"
       "    return 1;\n" },
     { "mem_get_uint32",
       "    if (!p) return 0;\n"
       "    uint32_t _v;\n"
-      "    __builtin_memcpy(&_v, (char*)p + offset, sizeof(_v));\n"
+      "    _AE_MEMCPY(&_v, (char*)p + offset, sizeof(_v));\n"
       "    return (int64_t)_v;\n" },
     { "mem_set_uint32",
       "    if (!p) return 0;\n"
       "    uint32_t _v = (uint32_t)(value & 0xFFFFFFFF);\n"
-      "    __builtin_memcpy((char*)p + offset, &_v, sizeof(_v));\n"
+      "    _AE_MEMCPY((char*)p + offset, &_v, sizeof(_v));\n"
       "    return 1;\n" },
     { "mem_bits_of_float",
-      "    int64_t _b; __builtin_memcpy(&_b, &value, sizeof(_b)); return _b;\n" },
+      "    int64_t _b; _AE_MEMCPY(&_b, &value, sizeof(_b)); return _b;\n" },
     { "mem_float_from_bits",
-      "    double _d; __builtin_memcpy(&_d, &bits, sizeof(_d)); return _d;\n" },
+      "    double _d; _AE_MEMCPY(&_d, &bits, sizeof(_d)); return _d;\n" },
     { "mem_clz32",
-      "    return __builtin_clz((unsigned int)value);\n" },
+      "    return _AE_CLZ32((unsigned int)value);\n" },
     { "mem_clz64",
-      "    return __builtin_clzll((unsigned long long)value);\n" },
+      "    return _AE_CLZ64((unsigned long long)value);\n" },
 };
 
 static int emit_mem_accessor_body(CodeGenerator* gen, ASTNode* func) {
@@ -2709,14 +2730,22 @@ void generate_struct_definition(CodeGenerator* gen, ASTNode* struct_def) {
             ensure_optional_typedef(gen, field->node_type);
     }
 
-    // Generate C struct
+    /* Generate C struct. #2799: a compiler without GNU attributes (cl.exe
+     * refused `__attribute__`, C2054) packs the same layout with `#pragma
+     * pack`, which every one of them has. */
     if (is_packed) {
+        print_line(gen, "#if AETHER_GCC_COMPAT");
         print_line(gen, "typedef struct __attribute__((packed)) %s {", struct_def->value);
+        print_line(gen, "#else");
+        print_line(gen, "#pragma pack(push, 1)");
+        print_line(gen, "typedef struct %s {", struct_def->value);
+        print_line(gen, "#endif");
     } else {
         print_line(gen, "typedef struct %s {", struct_def->value);
     }
     indent(gen);
 
+    int fields = 0;
     for (int i = 0; i < struct_def->child_count; i++) {
         ASTNode* field = struct_def->children[i];
         int is_last = (i == struct_def->child_count - 1);
@@ -2724,11 +2753,24 @@ void generate_struct_definition(CodeGenerator* gen, ASTNode* struct_def) {
             field->type == AST_STRUCT_FIELD_UNION ||
             field->type == AST_STRUCT_FIELD_NESTED) {
             generate_extern_struct_field(gen, field, is_extern, is_last);
+            fields++;
         }
+    }
+    /* #2799: a struct with no fields is GNU C; ISO C requires a member
+     * (cl.exe, C2016), so another compiler gets a byte (see _AE_ZERO_INIT). */
+    if (fields == 0) {
+        print_line(gen, "#if !AETHER_GCC_COMPAT");
+        print_line(gen, "char _ae_no_fields;");
+        print_line(gen, "#endif");
     }
 
     unindent(gen);
     print_line(gen, "} %s;", struct_def->value);
+    if (is_packed) {
+        print_line(gen, "#if !AETHER_GCC_COMPAT");
+        print_line(gen, "#pragma pack(pop)");
+        print_line(gen, "#endif");
+    }
 
     if (struct_owns_heap_strings(gen, struct_def)) emit_struct_ops(gen, struct_def);
     print_line(gen, "");

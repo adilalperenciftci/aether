@@ -6791,9 +6791,18 @@ static void emit_libc_extern_headers(CodeGenerator* gen, ASTNode* program) {
             if (!c || c->type != AST_EXTERN_FUNCTION || !c->value) continue;
             const char* sym = extern_c_symbol(c);
             const char* h = libc_extern_header(sym ? sym : c->value);
-            if (!h || !cg_strset_add(&seen, h, strlen(h))) continue;
+            if (!h) continue;
+            /* #2799: cl.exe's library declares the POSIX names of
+             * <unistd.h> (which it does not have) in <io.h> and
+             * <process.h>. */
+            const char* mh = libc_extern_msvc_header(sym ? sym : c->value);
+            char key[96];
+            snprintf(key, sizeof(key), "%s|%s", h, mh ? mh : "");
+            if (!cg_strset_add(&seen, key, strlen(key))) continue;
+            if (mh) fprintf(gen->output, "#if defined(_MSC_VER)\n#  include <%s>\n#elif", mh);
+            else fprintf(gen->output, "#if");
             fprintf(gen->output,
-                    "#if defined(__has_include)\n"
+                    " defined(__has_include)\n"
                     "#  if __has_include(<%s>)\n"
                     "#    include <%s>\n"
                     "#  endif\n"
@@ -7120,7 +7129,51 @@ static void emit_static_struct_init(CodeGenerator* gen, ASTNode* lit) {
  * undeclared where the static was defined. Still before every function body
  * and closure, which read and write these statics. A function-valued `const`
  * is emitted here too, for the same reason (#2648). */
+/* #2799: the program's file-scope constant `name` whose C is `static const T
+ * name = (value)`: a scalar or a string, not an array, an optional, a module
+ * `var`, a function or a header's constant. NULL for anything else. */
+ASTNode* file_scope_value_const(ASTNode* program, const char* name) {
+    for (int i = 0; program && name && i < program->child_count; i++) {
+        ASTNode* cd = program->children[i];
+        if (cd && cd->type == AST_EXPORT_STATEMENT && cd->child_count > 0) cd = cd->children[0];
+        if (!cd || cd->type != AST_CONST_DECLARATION || !cd->value || cd->child_count == 0 ||
+            strcmp(cd->value, name) != 0) continue;
+        if (cd->annotation && (strcmp(cd->annotation, "array_const") == 0 ||
+                               strcmp(cd->annotation, "global_var") == 0 ||
+                               strcmp(cd->annotation, "c_import_const") == 0)) return NULL;
+        if (fn_const_decl(cd)) return NULL;
+        if (cd->node_type && (cd->node_type->kind == TYPE_OPTIONAL ||
+                              cd->node_type->kind == TYPE_STRUCT ||
+                              cd->node_type->kind == TYPE_ARRAY)) return NULL;
+        return cd;
+    }
+    return NULL;
+}
+
+/* #2799: a function named as a closure value, as a static's initializer: the
+ * closure's fields as an initializer list. Its expression form is a compound
+ * literal, `(_AeClosure){ ... }`, which ISO C does not count as a constant
+ * (cl.exe, C2099; GCC takes it). Returns 0 for any other value. */
+static int emit_static_fn_value_init(CodeGenerator* gen, ASTNode* v) {
+    if (!v || v->type != AST_IDENTIFIER || !v->value || !v->annotation ||
+        strcmp(v->annotation, "fn_value") != 0 ||
+        !find_function_definition_by_name(gen->program, v->value)) return 0;
+    register_bare_fn_adapter(gen, v->value);
+    fprintf(gen->output, "{ .fn = (void(*)(void))_aether_bare_adapter_%s, .env = NULL }",
+            v->value);
+    return 1;
+}
+
+static void emit_module_global_vars_inner(CodeGenerator* gen, ASTNode* program);
+
 static void emit_module_global_vars(CodeGenerator* gen, ASTNode* program) {
+    /* A static's initializer is a constant expression (#2799). */
+    gen->in_const_init = 1;
+    emit_module_global_vars_inner(gen, program);
+    gen->in_const_init = 0;
+}
+
+static void emit_module_global_vars_inner(CodeGenerator* gen, ASTNode* program) {
     for (int i = 0; i < program->child_count; i++) {
         ASTNode* cd = program->children[i];
         if (!cd || cd->type != AST_CONST_DECLARATION || !cd->value ||
@@ -7136,7 +7189,8 @@ static void emit_module_global_vars(CodeGenerator* gen, ASTNode* program) {
                 fprintf(gen->output, "static void* const %s = ", cd->value);
             else
                 fprintf(gen->output, "static const %s %s = ", get_c_type(cd->node_type), cd->value);
-            generate_expression(gen, cd->children[0]);
+            if (!emit_static_fn_value_init(gen, cd->children[0]))
+                generate_expression(gen, cd->children[0]);
             fprintf(gen->output, ";\n");
             continue;
         }
@@ -7170,7 +7224,7 @@ static void emit_module_global_vars(CodeGenerator* gen, ASTNode* program) {
             /* #2767: `null` or `[]` into a `T[]` global: the empty slice,
              * as a constant; aether_slice_make is a call C refuses here. */
             fprintf(gen->output, "{0}");
-        } else {
+        } else if (!emit_static_fn_value_init(gen, cd->children[0])) {
             generate_expression(gen, cd->children[0]);
         }
         fprintf(gen->output, ";\n");
@@ -7215,6 +7269,13 @@ static void emit_windows_macro_undefs(CodeGenerator* gen) {
      * to nothing now (#2292). */
     print_line(gen, "#undef NEAR");
     print_line(gen, "#undef FAR");
+    print_line(gen, "#endif");
+    /* #2799: MSVC's <stdlib.h> defines `min` and `max` as function-like
+     * macros whatever NOMINMAX says (that is windows.h's), so a program's
+     * own `max(a, b)` was rewritten into C2059 at its parameter list. */
+    print_line(gen, "#ifdef _MSC_VER");
+    print_line(gen, "#undef min");
+    print_line(gen, "#undef max");
     print_line(gen, "#endif");
 }
 
@@ -7926,6 +7987,25 @@ static void lane_region_at(CodeGenerator* gen, ASTNode* program, ASTNode* decl) 
     else if (!target && g_lane_regions.open) lane_region_close(gen);
 }
 
+/* #2799: does a type in `t` hold a lane type (f32x4 and the rest)? */
+static int type_has_lane(const Type* t, int depth) {
+    if (!t || depth > 16) return 0;
+    if (t->kind >= TYPE_F32X4 && t->kind <= TYPE_I32X8) return 1;
+    if (type_has_lane(t->element_type, depth + 1)) return 1;
+    for (int i = 0; t->kind == TYPE_TUPLE && i < t->tuple_count; i++)
+        if (type_has_lane(t->tuple_types[i], depth + 1)) return 1;
+    return 0;
+}
+
+/* #2799: does anything in the program have a lane type? */
+static int program_uses_lanes(const ASTNode* n) {
+    if (!n) return 0;
+    if (type_has_lane(n->node_type, 0)) return 1;
+    for (int i = 0; i < n->child_count; i++)
+        if (program_uses_lanes(n->children[i])) return 1;
+    return 0;
+}
+
 void generate_program(CodeGenerator* gen, ASTNode* program) {
     if (!program || program->type != AST_PROGRAM) return;
     gen->program = program;
@@ -7992,6 +8072,21 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     print_line(gen, "#include <stdint.h>");
     print_line(gen, "#include <time.h>");
     print_line(gen, "#include <setjmp.h>");
+    /* #2799: the POSIX scalar types an Aether type may be spelled as
+       (`ssize_t`, `pid_t`, `mode_t`, c_abi_alias_kind) are no part of
+       cl.exe's C library: `ssize_t neg(void);` was C2061. Its own spellings,
+       for the values its functions take (getpid gives an int). */
+    print_line(gen, "#if defined(_MSC_VER)");
+    print_line(gen, "#  ifndef _SSIZE_T_DEFINED");
+    print_line(gen, "#    define _SSIZE_T_DEFINED");
+    print_line(gen, "typedef intptr_t ssize_t;");
+    print_line(gen, "#  endif");
+    print_line(gen, "#  ifndef _AE_PID_T_DEFINED");
+    print_line(gen, "#    define _AE_PID_T_DEFINED");
+    print_line(gen, "typedef int pid_t;");
+    print_line(gen, "typedef unsigned short mode_t;");
+    print_line(gen, "#  endif");
+    print_line(gen, "#endif");
     emit_libc_extern_headers(gen, program);
     print_line(gen, "#include \"aether_panic.h\"");
     print_line(gen, "#include \"aether_slice.h\"");   /* #1286 `T[]` fat pointer */
@@ -8189,6 +8284,15 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     print_line(gen, "#else");
     print_line(gen, "#  define AETHER_HAS_LANES 0");
     print_line(gen, "#endif");
+    /* #2799: a program that uses a lane type, compiled by a C compiler
+       without the vector extensions (cl.exe), says so in one line rather
+       than in a cascade of syntax errors at the first AeF32x4. */
+    if (program_uses_lanes(program)) {
+        print_line(gen, "#if !AETHER_HAS_LANES");
+        print_line(gen, "#error \"this program uses lane types (std.lanes: f32x4 and the rest), "
+                        "which are the vector extensions of GCC and Clang; build it with one of them\"");
+        print_line(gen, "#endif");
+    }
     print_line(gen, "#if AETHER_HAS_LANES");
     print_line(gen, "static inline AETHER_MAYBE_UNUSED AeF32x4 _ae_f32x4_splat(float v) { return (AeF32x4){v, v, v, v}; }");
     print_line(gen, "static inline AETHER_MAYBE_UNUSED AeF32x4 _ae_f32x4_set(float a, float b, float c, float d) { return (AeF32x4){a, b, c, d}; }");
@@ -8383,6 +8487,56 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     print_line(gen, "#  else");
     print_line(gen, "#    define AETHER_GCC_COMPAT 0");
     print_line(gen, "#  endif");
+    print_line(gen, "#endif");
+    /* #2799: the bit counts and the byte copy generated code uses. GCC and
+       Clang get their builtins as before; another compiler (cl.exe has none
+       of them, and reported each as an undeclared function, C4013) gets
+       memcpy and plain C that counts the same bits. A count of leading
+       zeros of 0 is undefined for the builtins and 32 / 64 here. */
+    /* A zeroed struct literal is `{}` for GCC and Clang and `{0}` in ISO C,
+       and a struct with no fields gets one byte of its own there (ISO C has
+       no struct without a member; cl.exe C2016). */
+    print_line(gen, "#if AETHER_GCC_COMPAT");
+    print_line(gen, "#  define _AE_ZERO_INIT");
+    print_line(gen, "#else");
+    print_line(gen, "#  define _AE_ZERO_INIT 0");
+    print_line(gen, "#endif");
+    /* A number literal divided by a zero literal, `1.0 / 0.0`, is IEEE
+       infinity or NaN. GCC computes it; cl.exe refuses a constant division
+       by zero (C2124), so another compiler gets the value by name. */
+    print_line(gen, "#if AETHER_GCC_COMPAT");
+    print_line(gen, "#  define _AE_FDIV0(a) ((a) / 0.0)");
+    print_line(gen, "#else");
+    print_line(gen, "#  include <math.h>");
+    print_line(gen, "#  define _AE_FDIV0(a) ((a) > 0 ? (double)INFINITY : (a) < 0 ? -(double)INFINITY : (double)NAN)");
+    print_line(gen, "#endif");
+    print_line(gen, "#if AETHER_GCC_COMPAT");
+    print_line(gen, "#  define _AE_MEMCPY(d, s, n) __builtin_memcpy((d), (s), (n))");
+    print_line(gen, "#  define _AE_CLZ32(x) __builtin_clz(x)");
+    print_line(gen, "#  define _AE_CLZ64(x) __builtin_clzll(x)");
+    print_line(gen, "#  define _AE_POPCOUNT64(x) __builtin_popcountll(x)");
+    print_line(gen, "#else");
+    print_line(gen, "#  define _AE_MEMCPY(d, s, n) memcpy((d), (s), (n))");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED int _ae_clz64(unsigned long long x) {");
+    print_line(gen, "    int n = 0;");
+    print_line(gen, "    if (!x) return 64;");
+    print_line(gen, "    if (!(x >> 32)) { n += 32; x <<= 32; }");
+    print_line(gen, "    if (!(x >> 48)) { n += 16; x <<= 16; }");
+    print_line(gen, "    if (!(x >> 56)) { n += 8; x <<= 8; }");
+    print_line(gen, "    if (!(x >> 60)) { n += 4; x <<= 4; }");
+    print_line(gen, "    if (!(x >> 62)) { n += 2; x <<= 2; }");
+    print_line(gen, "    if (!(x >> 63)) { n += 1; }");
+    print_line(gen, "    return n;");
+    print_line(gen, "}");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED int _ae_popcount64(unsigned long long x) {");
+    print_line(gen, "    x = x - ((x >> 1) & 0x5555555555555555ULL);");
+    print_line(gen, "    x = (x & 0x3333333333333333ULL) + ((x >> 2) & 0x3333333333333333ULL);");
+    print_line(gen, "    x = (x + (x >> 4)) & 0x0F0F0F0F0F0F0F0FULL;");
+    print_line(gen, "    return (int)((x * 0x0101010101010101ULL) >> 56);");
+    print_line(gen, "}");
+    print_line(gen, "#  define _AE_CLZ32(x) (_ae_clz64((unsigned long long)(unsigned int)(x)) - 32)");
+    print_line(gen, "#  define _AE_CLZ64(x) _ae_clz64((unsigned long long)(x))");
+    print_line(gen, "#  define _AE_POPCOUNT64(x) _ae_popcount64((unsigned long long)(x))");
     print_line(gen, "#endif");
     /* #2607: whether a module imported at @target("avx2") is compiled for
        AVX2: GCC or Clang building for x86. Anywhere else (another compiler,
@@ -9713,7 +9867,10 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     // JSOBJ_U_OFFSET = 24` in an imported module would appear too
     // late and the consumer's `(p + mqtypes.JSOBJ_U_OFFSET)`
     // expression would fail with `undeclared identifier`.  Same fix
-    // shape as the struct hoist above.
+    // shape as the struct hoist above. #2799: their initializers are
+    // constant expressions, so a constant they name is written as its value
+    // (in_const_init, the identifier case in codegen_expr.c).
+    gen->in_const_init = 1;
     for (int i = 0; i < program->child_count; i++) {
         ASTNode* cd = program->children[i];
         if (cd && cd->type == AST_CONST_DECLARATION &&
@@ -9780,6 +9937,7 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
             }
         }
     }
+    gen->in_const_init = 0;
 
     // Generate forward declarations for all functions FIRST so that
     // hoisted closure functions can call them without implicit declarations.

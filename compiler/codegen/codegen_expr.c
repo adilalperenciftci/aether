@@ -6,6 +6,7 @@
 #include "../aether_defines.h"
 #include "../aether_error.h"
 #include "../../std/string/aether_string_abi.h"
+#include <ctype.h>
 #include <errno.h>
 #include <limits.h>
 
@@ -6030,7 +6031,9 @@ void generate_sized_array_argument(CodeGenerator* gen, ASTNode* arg, Type* param
         return;
     }
     const char* et = get_c_type(param_type->element_type);
-    fprintf(gen->output, "((%s*)_aether_array_arg_copy((%s[%d]){0}, ", et, et,
+    /* (void*): cl.exe reads a `const char*` element's `const` as the
+     * array's (C4090, #2799). */
+    fprintf(gen->output, "((%s*)_aether_array_arg_copy((void*)(%s[%d]){0}, ", et, et,
             param_type->array_size);
     generate_expression(gen, arg);
     fprintf(gen->output, ", sizeof(%s[%d])))", et, param_type->array_size);
@@ -7114,6 +7117,34 @@ static void emit_composite_arg_temp(CodeGenerator* gen, ASTNode* arg, Type* t) {
     push_own_drop_carrier(gen, tv, t, 0, 0);
 }
 
+/* #2799: a number literal, or one negated (`-1.0`); `*zero` says whether it
+ * is zero. */
+static int number_literal(const ASTNode* n, int* zero) {
+    if (n && n->type == AST_UNARY_EXPRESSION && n->value && strcmp(n->value, "-") == 0 &&
+        n->child_count == 1)
+        n = n->children[0];
+    if (!n || n->type != AST_LITERAL || !n->value || !n->node_type ||
+        (n->node_type->kind != TYPE_INT && n->node_type->kind != TYPE_FLOAT &&
+         n->node_type->kind != TYPE_INT64) ||
+        !(isdigit((unsigned char)n->value[0]) || n->value[0] == '.'))
+        return 0;
+    if (zero) *zero = strtod(n->value, NULL) == 0.0;
+    return 1;
+}
+
+/* `1.0 / 0.0`: a float division of a number literal by a zero one, which is
+ * IEEE infinity or NaN (see _AE_FDIV0 in the prelude). */
+static int is_literal_float_div_by_zero(const ASTNode* e) {
+    if (!e || e->type != AST_BINARY_EXPRESSION || !e->value || strcmp(e->value, "/") != 0 ||
+        e->child_count < 2) return 0;
+    int lz = 0, rz = 0;
+    if (!number_literal(e->children[0], &lz) || !number_literal(e->children[1], &rz) || !rz)
+        return 0;
+    const Type* lt = e->children[0]->node_type;
+    const Type* rt = e->children[1]->node_type;
+    return (lt && lt->kind == TYPE_FLOAT) || (rt && rt->kind == TYPE_FLOAT);
+}
+
 void generate_expression(CodeGenerator* gen, ASTNode* expr) {
     if (!expr) return;
 
@@ -7890,7 +7921,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
         case AST_BITSET_CARD:
             // #1046 `card(s)` → popcount of the backing word.
             if (expr->child_count >= 1) {
-                fprintf(gen->output, "((int)__builtin_popcountll((unsigned long long)(");
+                fprintf(gen->output, "((int)_AE_POPCOUNT64((unsigned long long)(");  /* #2799 */
                 generate_expression(gen, expr->children[0]);
                 fprintf(gen->output, ")))");
             } else {
@@ -7931,6 +7962,22 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
 
         case AST_IDENTIFIER:
             if (!expr->value) { fprintf(gen->output, "/* NULL identifier */0"); break; }
+            /* #2799: in a file-scope constant's initializer, a constant it
+             * names is written as that constant's own initializer. C's
+             * `static const` initializer must be a constant expression, and
+             * another `static const` object is not one: GCC folded it, ISO C
+             * and cl.exe (C2099) do not. */
+            if (gen->in_const_init && gen->in_const_init < 64) {
+                ASTNode* cd = file_scope_value_const(gen->program, expr->value);
+                if (cd) {
+                    gen->in_const_init++;
+                    fprintf(gen->output, "(");
+                    generate_expression(gen, cd->children[0]);
+                    fprintf(gen->output, ")");
+                    gen->in_const_init--;
+                    break;
+                }
+            }
             /* #error-unification P3: a fault member is its qualified name
              * (`"<ns>.<name>"`), so it prints and compares through the value
              * itself, across `.so`s too. Under R1 that is the name's pinned
@@ -8798,6 +8845,13 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                                 bname, macc->value);
                     }
                     if (!skip_parens) fprintf(gen->output, ")");
+                } else if (is_literal_float_div_by_zero(expr)) {
+                    /* #2799: `1.0 / 0.0`, a constant division by zero cl.exe
+                     * refuses (C2124); _AE_FDIV0 is the same value under every
+                     * compiler. */
+                    fprintf(gen->output, "_AE_FDIV0(");
+                    generate_expression(gen, expr->children[0]);
+                    fprintf(gen->output, ")");
                 } else {
                     if (!skip_parens) fprintf(gen->output, "(");
 
@@ -8840,8 +8894,29 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                     #define AE_IS_NARROW_INT(t) ((t) && ((t)->kind == TYPE_INT || \
                         (t)->kind == TYPE_BYTE || (t)->kind == TYPE_UINT32 || \
                         (t)->kind == TYPE_UINT16 || (t)->kind == TYPE_UINT8))
+                    /* #2799: `p + n` / `p - n` / `p - q` on a bare `ptr`
+                     * (C's `void*`) counts bytes. That is GNU C, arithmetic
+                     * on `void*`, which cl.exe refuses (C2036); through
+                     * `char*` it is standard C and the same bytes. A typed
+                     * `*T` keeps C's scaling and is not touched. */
+                    #define AE_IS_OFFSET(t) ((t) && ((t)->kind == TYPE_INT || \
+                        (t)->kind == TYPE_INT64 || (t)->kind == TYPE_UINT64 || \
+                        (t)->kind == TYPE_UINT32 || (t)->kind == TYPE_UINT16 || \
+                        (t)->kind == TYPE_UINT8 || (t)->kind == TYPE_BYTE))
+                    int arith_op = !is_assignment && expr->value &&
+                        (strcmp(expr->value, "+") == 0 || strcmp(expr->value, "-") == 0);
+                    int lhs_void = arith_op && lhs_is_ptr && !ltype->element_type;
+                    int rhs_void = arith_op && rhs_is_ptr && !rtype->element_type;
+                    int void_arith = (lhs_void && (AE_IS_OFFSET(rtype) || rhs_void)) ||
+                                     (rhs_void && AE_IS_OFFSET(ltype) &&
+                                      strcmp(expr->value, "+") == 0);
+                    #undef AE_IS_OFFSET
+                    int void_result = void_arith && !(lhs_void && rhs_void);
+                    if (void_result) fprintf(gen->output, "(void*)(");
                     int left_prefixed = duration_ratio || (ptr_int_cmp && lhs_is_ptr) ||
-                                        (wide_cast && AE_IS_NARROW_INT(ltype));
+                                        (wide_cast && AE_IS_NARROW_INT(ltype)) ||
+                                        (void_arith && lhs_void);
+                    if (void_arith && lhs_void) fprintf(gen->output, "(char*)(");
                     if (duration_ratio) fprintf(gen->output, "(double)");
                     if (ptr_int_cmp && lhs_is_ptr) fprintf(gen->output, "(intptr_t)");
                     if (wide_cast && AE_IS_NARROW_INT(ltype)) fprintf(gen->output, "%s", wide_cast);
@@ -8854,6 +8929,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                     }
                     generate_expression(gen, expr->children[0]);
                     gen->in_condition = 0;
+                    if (void_arith && lhs_void) fprintf(gen->output, ")");
                     if (is_assignment) {
                         gen->generating_lvalue = 0;
                     }
@@ -8922,9 +8998,12 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                         emit_sum_coerced(gen, expr->children[1], ltype);
                     } else {
                         if (wide_cast && AE_IS_NARROW_INT(rtype)) fprintf(gen->output, "%s", wide_cast);
+                        if (void_arith && rhs_void) fprintf(gen->output, "(char*)(");
                         generate_expression(gen, expr->children[1]);
+                        if (void_arith && rhs_void) fprintf(gen->output, ")");
                     }
                     #undef AE_IS_NARROW_INT
+                    if (void_result) fprintf(gen->output, ")");
                     if (!skip_parens) fprintf(gen->output, ")");
                 }
             }
@@ -11226,6 +11305,10 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                     generate_expression(gen, fv);
                 }
             }
+            /* #2799: `T {}` is a zeroed T. `{}` is GNU C (C23 at last); ISO
+             * C's spelling is `{0}`, which GCC would warn about for a
+             * struct with no fields, so each compiler gets its own. */
+            if (emitted == 0) fprintf(gen->output, "_AE_ZERO_INIT");
             fprintf(gen->output, "}");
             if (any_array_field) {
                 for (int i = 0; i < expr->child_count; i++) {

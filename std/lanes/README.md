@@ -335,8 +335,9 @@ The types lower to the GCC/Clang vector extensions
 (`__attribute__((vector_size(16)))`, and `(32)` for an AVX2 `f32x8`), which
 every compiler the toolchain drives has: gcc, clang and `zig cc` on every target. A compiler without them
 defines `AETHER_HAS_LANES` as 0 and the generated file simply carries no lane
-types; a program that uses one will not compile there, and one that does not
-is unaffected. Each entry point here is a `static inline`
+types; a program that uses one stops there at one `#error` that says so
+(MSVC's cl.exe is such a compiler), and one that does not is unaffected.
+Each entry point here is a `static inline`
 helper in the generated translation unit, so a lane operation is the
 instruction it names, not a call.
 

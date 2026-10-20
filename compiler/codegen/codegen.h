@@ -84,6 +84,8 @@ typedef struct {
     const char* current_origin_module;
     int module_global_var_count;
     int generating_lvalue;  // Track if we're generating an assignment target (lvalue)
+    int in_const_init;  // #2799: depth inside a file-scope constant's initializer, where a
+                        // constant named is written as its own initializer (ISO C)
     int in_condition;  // Track if we're in a condition (if/while) to avoid double parens
     int in_main_loop;  // Track if we're in main's loop for batch send optimization
     int in_main_function;  // Track if we're in main() so return -> goto main_exit
