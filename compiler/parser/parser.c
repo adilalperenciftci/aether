@@ -305,6 +305,49 @@ static void parser_error_at(Parser* parser, Token* token, const char* message) {
     aether_error_with_code(message, token->line, token->column, AETHER_ERR_SYNTAX);
 }
 
+/* #2998: what had to follow the token `after` (an `=`, an operator, a `(` or
+ * a `,`, already consumed) is missing. The expression parser returns NULL
+ * without a word at a token that cannot begin an expression (`}`, `;`, `)`,
+ * the end of the file), and every place that had consumed such a token took
+ * the NULL as "no value": `x = }` declared `x` with nothing in it, `y = x +`
+ * dropped the `+`, `int x =` and `x = f(` compiled. So each of them parses
+ * what it requires and, when that fails, calls this with the error count from
+ * before the attempt: it reports at `after`, naming `what` was expected and
+ * what was found instead, unless something below already said why. */
+static void missing_operand(Parser* parser, Token* after, int errors_before,
+                            const char* what) {
+    if (parser->suppress_errors || parser->depth_exceeded) return;
+    if (aether_error_count() != errors_before) return;
+    Token* found = peek_token(parser);
+    if (found && found->value && token_is_reserved_keyword(found) &&
+        !token_is_value_ident(found)) {
+        /* `rc = send()`: the operand is there, named by a keyword. */
+        char kmsg[256], khint[160];
+        snprintf(kmsg, sizeof(kmsg),
+                 "'%s' is a reserved keyword and cannot be used as an identifier; "
+                 "rename it (e.g. '%s_'), or escape it as `%s` to use the name verbatim",
+                 found->value, found->value, found->value);
+        snprintf(khint, sizeof(khint), "rename to '%s_', or write `%s` to keep the name",
+                 found->value, found->value);
+        aether_error_full(kmsg, found->line, found->column, khint, NULL, AETHER_ERR_SYNTAX);
+        return;
+    }
+    char seen[96];
+    if (!found || found->type == TOKEN_EOF)
+        snprintf(seen, sizeof(seen), "the end of the file");
+    else if (found->value)
+        snprintf(seen, sizeof(seen), "`%.60s`", found->value);
+    else
+        snprintf(seen, sizeof(seen), "%s", token_type_to_string(found->type));
+    const char* op = (after && after->value) ? after->value : "?";
+    char msg[256], help[256];
+    snprintf(msg, sizeof(msg), "expected %s after `%s`, found %s", what, op, seen);
+    snprintf(help, sizeof(help), "write %s after `%s`", what, op);
+    int line = after ? after->line : (found ? found->line : 0);
+    int column = after ? after->column : (found ? found->column : 0);
+    aether_error_full(msg, line, column, help, NULL, AETHER_ERR_SYNTAX);
+}
+
 // Helper to print warnings and errors (respects suppress_errors flag)
 static void parser_message(Parser* parser, const char* message) {
     (void)parser;
@@ -1774,9 +1817,15 @@ static ASTNode* parse_primary_expression_inner(Parser* parser) {
                                     field_name = expect_token(parser, TOKEN_IDENTIFIER);
                                     if (!field_name) { free_ast_node(struct_lit); return NULL; }
                                 }
-                                if (!expect_token(parser, TOKEN_COLON)) { free_ast_node(struct_lit); return NULL; }
+                                Token* colon = expect_token(parser, TOKEN_COLON);
+                                if (!colon) { free_ast_node(struct_lit); return NULL; }
+                                int errors_before = aether_error_count();
                                 ASTNode* value_expr = parse_expression(parser);
-                                if (!value_expr) { free_ast_node(struct_lit); return NULL; }
+                                if (!value_expr) {
+                                    missing_operand(parser, colon, errors_before, "a value");
+                                    free_ast_node(struct_lit);
+                                    return NULL;
+                                }
                                 ASTNode* field_init = create_ast_node(AST_ASSIGNMENT, field_name->value,
                                                                        field_name->line, field_name->column);
                                 add_child(field_init, value_expr);
@@ -1849,14 +1898,17 @@ static ASTNode* parse_primary_expression_inner(Parser* parser) {
                         }
 
                         // Expect colon
-                        if (!expect_token(parser, TOKEN_COLON)) {
+                        Token* colon = expect_token(parser, TOKEN_COLON);
+                        if (!colon) {
                             free_ast_node(struct_lit);
                             return NULL;
                         }
 
                         // Parse field value
+                        int errors_before = aether_error_count();
                         ASTNode* value_expr = parse_expression(parser);
                         if (!value_expr) {
+                            missing_operand(parser, colon, errors_before, "a value");
                             free_ast_node(struct_lit);
                             return NULL;
                         }
@@ -1886,8 +1938,12 @@ static ASTNode* parse_primary_expression_inner(Parser* parser) {
             int line = token->line;
             int column = token->column;
             advance_token(parser);
+            int errors_before = aether_error_count();
             ASTNode* expr = parse_expression(parser);
-            if (!expr) return NULL;
+            if (!expr) {
+                missing_operand(parser, token, errors_before, "an expression");
+                return NULL;
+            }
             /* #1033: `(a, b, ...)` — a comma after the first expression
              * upgrades the grouping to a tuple literal. Only meaningful
              * as an argument to a tuple-typed extern parameter (the
@@ -1897,8 +1953,11 @@ static ASTNode* parse_primary_expression_inner(Parser* parser) {
                 ASTNode* tup = create_ast_node(AST_TUPLE_LITERAL, NULL, line, column);
                 add_child(tup, expr);
                 while (match_token(parser, TOKEN_COMMA)) {
+                    Token* comma = peek_ahead(parser, -1);
+                    errors_before = aether_error_count();
                     ASTNode* elem = parse_expression(parser);
                     if (!elem) {
+                        missing_operand(parser, comma, errors_before, "an element");
                         free_ast_node(tup);
                         return NULL;
                     }
@@ -1925,10 +1984,23 @@ static ASTNode* parse_primary_expression_inner(Parser* parser) {
             // Parse array elements
             if (!match_token(parser, TOKEN_RIGHT_BRACKET)) {
                 do {
+                    /* A trailing comma, `[1, 2,]`, ends the list. Anywhere
+                     * else an element has to follow its `,`: `[1, , 2]` was
+                     * `[1, 2]` (#2998). */
+                    Token* sep = peek_ahead(parser, -1);
+                    if (array_lit->child_count > 0 && peek_token(parser) &&
+                        peek_token(parser)->type == TOKEN_RIGHT_BRACKET)
+                        break;
+                    int errors_before = aether_error_count();
                     ASTNode* element = parse_expression(parser);
-                    if (element) {
-                        add_child(array_lit, element);
+                    if (!element) {
+                        missing_operand(parser, sep, errors_before,
+                                        array_lit->child_count == 0
+                                            ? "an element or `]`" : "an element");
+                        free_ast_node(array_lit);
+                        return NULL;
                     }
+                    add_child(array_lit, element);
                 } while (match_token(parser, TOKEN_COMMA));
                 
                 if (!expect_token(parser, TOKEN_RIGHT_BRACKET)) {
@@ -2148,6 +2220,7 @@ static ASTNode* parse_expression_inner(Parser* parser) {
     Token* t = peek_token(parser);
     if (t && t->type == TOKEN_IDENTIFIER && t->value &&
         strcmp(t->value, "or") == 0 && !operator_starts_newline(parser, t)) {
+        int errors_before = aether_error_count();
         advance_token(parser);  // consume contextual 'or'
         ASTNode* handler;
         Token* nx = peek_token(parser);
@@ -2156,7 +2229,11 @@ static ASTNode* parse_expression_inner(Parser* parser) {
         } else {
             handler = parse_expression(parser);   // bare default value
         }
-        if (!handler) return NULL;
+        if (!handler) {
+            missing_operand(parser, t, errors_before, "a default value or a block");
+            free_ast_node(expr);
+            return NULL;
+        }
         ASTNode* oe = create_ast_node(AST_OR_ELSE, NULL, expr->line, expr->column);
         add_child(oe, expr);
         add_child(oe, handler);
@@ -2190,8 +2267,11 @@ ASTNode* parse_binary_expression(Parser* parser, int precedence) {
         }
 
         advance_token(parser);
+        int errors_before = aether_error_count();
         ASTNode* right = parse_binary_expression(parser, op_precedence + 1);  // Left-associative
         if (!right) {
+            missing_operand(parser, operator, errors_before,
+                            operator->type == TOKEN_ASSIGN ? "a value" : "an operand");
             /* The half-built left operand is owned here alone; dropping it
              * on the error path leaked once per failed expression, which in
              * the long-lived lsp mode grows per keystroke. */
@@ -2536,7 +2616,11 @@ static ASTNode* parse_postfix_expression(Parser* parser) {
 
             // Parse arguments
             if (!match_token(parser, TOKEN_RIGHT_PAREN)) {
+                /* #2998: the `(` or `,` an argument has to follow, for the
+                 * error when it is missing: `x = f(` used to compile. */
+                Token* before_arg = peek_ahead(parser, -1);
                 do {
+                    int errors_before = aether_error_count();
                     // Check for named argument: IDENTIFIER : expr
                     Token* maybe_name = peek_token(parser);
                     Token* maybe_colon = peek_ahead(parser, 1);
@@ -2544,9 +2628,10 @@ static ASTNode* parse_postfix_expression(Parser* parser) {
                         maybe_colon && maybe_colon->type == TOKEN_COLON) {
                         // Named argument
                         Token* name_tok = advance_token(parser); // consume name
-                        advance_token(parser); // consume ':'
+                        Token* colon = advance_token(parser); // consume ':'
                         ASTNode* value = parse_expression(parser);
                         if (!value) {
+                            missing_operand(parser, colon, errors_before, "a value");
                             free_ast_node(func_call);
                             return NULL;
                         }
@@ -2558,11 +2643,15 @@ static ASTNode* parse_postfix_expression(Parser* parser) {
                         // Positional argument
                         ASTNode* arg = parse_expression(parser);
                         if (!arg) {
+                            missing_operand(parser, before_arg, errors_before,
+                                            before_arg && before_arg->type == TOKEN_LEFT_PAREN
+                                                ? "an argument or `)`" : "an argument");
                             free_ast_node(func_call);
                             return NULL;
                         }
                         add_child(func_call, arg);
                     }
+                    before_arg = peek_token(parser);
                 } while (match_token(parser, TOKEN_COMMA));
 
                 if (!expect_token(parser, TOKEN_RIGHT_PAREN)) {
@@ -2777,8 +2866,12 @@ static ASTNode* parse_unary_expression_inner(Parser* parser) {
         operator->type == TOKEN_TILDE ||
         operator->type == TOKEN_INCREMENT || operator->type == TOKEN_DECREMENT) {
         advance_token(parser);
+        int errors_before = aether_error_count();
         ASTNode* operand = parse_unary_expression(parser);
-        if (!operand) return NULL;
+        if (!operand) {
+            missing_operand(parser, operator, errors_before, "an operand");
+            return NULL;
+        }
         return create_unary_expression(operand, operator);
     }
 
@@ -2793,8 +2886,12 @@ static ASTNode* parse_unary_expression_inner(Parser* parser) {
     // `&(p.b)`).
     if (operator->type == TOKEN_AMPERSAND) {
         advance_token(parser);
+        int errors_before = aether_error_count();
         ASTNode* operand = parse_unary_expression(parser);
-        if (!operand) return NULL;
+        if (!operand) {
+            missing_operand(parser, operator, errors_before, "an operand");
+            return NULL;
+        }
         return create_unary_expression(operand, operator);
     }
 
@@ -2958,9 +3055,14 @@ static ASTNode* parse_statement_inner(Parser* parser) {
                 is_array = 1;
             }
 
-            if (!expect_token(parser, TOKEN_ASSIGN)) return NULL;
+            Token* ceq = expect_token(parser, TOKEN_ASSIGN);
+            if (!ceq) return NULL;
+            int cerrors = aether_error_count();
             ASTNode* cval = parse_expression(parser);
-            if (!cval) return NULL;
+            if (!cval) {
+                missing_operand(parser, ceq, cerrors, "a value");
+                return NULL;
+            }
             match_token(parser, TOKEN_SEMICOLON);
             ASTNode* node = create_ast_node(AST_CONST_DECLARATION, cname->value, cline, ccol);
             add_child(node, cval);
@@ -3293,8 +3395,12 @@ static ASTNode* parse_statement_inner(Parser* parser) {
                 // Consume the compound assignment operator
                 Token* op = advance_token(parser);
                 // Parse RHS expression
+                int errors_before = aether_error_count();
                 ASTNode* rhs = parse_expression(parser);
-                if (!rhs) return NULL;
+                if (!rhs) {
+                    missing_operand(parser, op, errors_before, "a value");
+                    return NULL;
+                }
                 // Create AST_COMPOUND_ASSIGNMENT: value = operator string, child[0] = RHS
                 ASTNode* node = create_ast_node(AST_COMPOUND_ASSIGNMENT, name->value, name->line, name->column);
                 node->node_type = create_type(TYPE_UNKNOWN);
@@ -3341,8 +3447,13 @@ static ASTNode* parse_statement_inner(Parser* parser) {
                         return NULL;
                     }
                     advance_token(parser);
+                    int errors_before = aether_error_count();
                     ASTNode* rhs = parse_expression(parser);
-                    if (!rhs) { free_ast_node(expr); return NULL; }
+                    if (!rhs) {
+                        missing_operand(parser, cop, errors_before, "a value");
+                        free_ast_node(expr);
+                        return NULL;
+                    }
                     char base[8];
                     snprintf(base, sizeof(base), "%.*s", (int)strlen(cop->value) - 1, cop->value);
                     ASTNode* op_node = create_ast_node(AST_BINARY_EXPRESSION, base, cop->line, cop->column);
@@ -3391,15 +3502,21 @@ ASTNode* parse_variable_declaration_with_semicolon(Parser* parser, bool expect_s
     ASTNode* decl = create_ast_node(AST_VARIABLE_DECLARATION, name->value, name->line, name->column);
     decl->node_type = type;
 
+    Token* eq = peek_token(parser);
     if (match_token(parser, TOKEN_ASSIGN)) {
         /* #2790, #2803: `int k = match n { ... }` binds the match's value,
          * as `k = match` and `let k: int = match` do. A `match` is an
          * expression (#2993), so one with more after it (`int k = match n
          * { ... } + 1`) is an operand of that. */
+        int errors_before = aether_error_count();
         ASTNode* value = parse_expression(parser);
-        if (value) {
-            add_child(decl, value);
+        if (!value) {
+            /* #2998: `int x =` with nothing after the `=`. */
+            missing_operand(parser, eq, errors_before, "a value");
+            free_ast_node(decl);
+            return NULL;
         }
+        add_child(decl, value);
     }
     
     if (expect_semicolon) {
@@ -3492,16 +3609,22 @@ ASTNode* parse_python_style_declaration(Parser* parser) {
             }
         }
 
-        if (!expect_token(parser, TOKEN_ASSIGN)) {
+        Token* eq = expect_token(parser, TOKEN_ASSIGN);
+        if (!eq) {
             free_ast_node(destructure);
             return NULL;
         }
 
         // Parse RHS expression
+        int errors_before = aether_error_count();
         ASTNode* rhs = parse_expression(parser);
-        if (rhs) {
-            add_child(destructure, rhs);  // Last child is the RHS
+        if (!rhs) {
+            /* #2998: `a, b =` with nothing after the `=`. */
+            missing_operand(parser, eq, errors_before, "a value");
+            free_ast_node(destructure);
+            return NULL;
         }
+        add_child(destructure, rhs);  // Last child is the RHS
 
         match_token(parser, TOKEN_SEMICOLON);
         return destructure;
@@ -3526,13 +3649,19 @@ ASTNode* parse_python_style_declaration(Parser* parser) {
         }
     }
 
+    Token* eq = peek_token(parser);
     if (match_token(parser, TOKEN_ASSIGN)) {
         // `x = match val { ... }` binds the match's value; a `match` with
         // more after it is an operand of that (#2993).
+        int errors_before = aether_error_count();
         ASTNode* value = parse_expression(parser);
-        if (value) {
-            add_child(decl, value);
+        if (!value) {
+            /* #2998: `x = }` declared `x` with no value and compiled. */
+            missing_operand(parser, eq, errors_before, "a value");
+            free_ast_node(decl);
+            return NULL;
         }
+        add_child(decl, value);
     }
 
     match_token(parser, TOKEN_SEMICOLON);
@@ -3748,11 +3877,16 @@ ASTNode* parse_for_loop(Parser* parser) {
             if (!name) return NULL;
             init = create_ast_node(AST_VARIABLE_DECLARATION, name->value, name->line, name->column);
             init->node_type = create_type(TYPE_UNKNOWN);
+            Token* eq = peek_token(parser);
             if (match_token(parser, TOKEN_ASSIGN)) {
+                int errors_before = aether_error_count();
                 ASTNode* value = parse_expression(parser);
-                if (value) {
-                    add_child(init, value);
+                if (!value) {
+                    missing_operand(parser, eq, errors_before, "a value");
+                    free_ast_node(init);
+                    return NULL;
                 }
+                add_child(init, value);
             }
         } else {
             init = parse_expression(parser);
@@ -4500,12 +4634,17 @@ ASTNode* parse_return_statement(Parser* parser) {
         }
 
         // Multiple return values: return a, b
-        while (peek_token(parser) && peek_token(parser)->type == TOKEN_COMMA) {
-            advance_token(parser);  // consume comma
+        while (value && peek_token(parser) && peek_token(parser)->type == TOKEN_COMMA) {
+            Token* comma = advance_token(parser);  // consume comma
+            int errors_before = aether_error_count();
             ASTNode* next_val = parse_expression(parser);
-            if (next_val) {
-                add_child(return_stmt, next_val);
+            if (!next_val) {
+                /* #2998: `return a,` returned `a` alone. */
+                missing_operand(parser, comma, errors_before, "a value");
+                free_ast_node(return_stmt);
+                return NULL;
             }
+            add_child(return_stmt, next_val);
         }
 
         /* #1421: `return (a, b)` means the same thing as `return a, b`.
@@ -4765,13 +4904,14 @@ ASTNode* parse_reply_statement(Parser* parser) {
     Token* brace = peek_ahead(parser, 1);
     if (!(head && head->type == TOKEN_IDENTIFIER &&
           brace && brace->type == TOKEN_LEFT_BRACE)) {
-        ASTNode* reply_stmt = create_ast_node(AST_REPLY_STATEMENT, NULL,
-                                              reply_token->line, reply_token->column);
+        int errors_before = aether_error_count();
         ASTNode* value_expr = parse_expression(parser);
         if (!value_expr) {
-            parser_message(parser, "Error: expected expression after 'reply'");
+            missing_operand(parser, reply_token, errors_before, "a value or a message");
             return NULL;
         }
+        ASTNode* reply_stmt = create_ast_node(AST_REPLY_STATEMENT, NULL,
+                                              reply_token->line, reply_token->column);
         add_child(reply_stmt, value_expr);
         match_token(parser, TOKEN_SEMICOLON);
         return reply_stmt;
@@ -4796,10 +4936,15 @@ ASTNode* parse_reply_statement(Parser* parser) {
             Token* field_name = expect_token(parser, TOKEN_IDENTIFIER);
             if (!field_name) break;
 
-            if (!expect_token(parser, TOKEN_COLON)) break;
+            Token* colon = expect_token(parser, TOKEN_COLON);
+            if (!colon) break;
 
+            int errors_before = aether_error_count();
             ASTNode* field_expr = parse_expression(parser);
-            if (!field_expr) break;
+            if (!field_expr) {
+                missing_operand(parser, colon, errors_before, "a value");
+                break;
+            }
 
             ASTNode* field_init = create_ast_node(AST_FIELD_INIT, field_name->value, field_name->line, field_name->column);
             add_child(field_init, field_expr);
@@ -4837,10 +4982,15 @@ ASTNode* parse_message_constructor(Parser* parser) {
             Token* field_name = expect_token(parser, TOKEN_IDENTIFIER);
             if (!field_name) break;
 
-            if (!expect_token(parser, TOKEN_COLON)) break;
+            Token* colon = expect_token(parser, TOKEN_COLON);
+            if (!colon) break;
 
+            int errors_before = aether_error_count();
             ASTNode* field_expr = parse_expression(parser);
-            if (!field_expr) break;
+            if (!field_expr) {
+                missing_operand(parser, colon, errors_before, "a value");
+                break;
+            }
 
             ASTNode* field_init = create_ast_node(AST_FIELD_INIT, field_name->value, field_name->line, field_name->column);
             add_child(field_init, field_expr);
@@ -4990,7 +5140,20 @@ ASTNode* parse_block(Parser* parser) {
                    parser->current_token > start_token) {
             /* The statement parser already said what was wrong and consumed
              * its input; a generic "expected statement" on the remains points
-             * at the next good line and reads as a second, phantom defect. */
+             * at the next good line and reads as a second, phantom defect.
+             * The rest of the line it stopped on is its remains too (`[1, ,
+             * 2]` stops at the second `,`, and `, 2]` read as statements
+             * gave two more errors), up to a `}` that closes this block. */
+            Token* last = parser->tokens[parser->current_token - 1];
+            int line = last ? last->line : -1;
+            int braces = 0;
+            while (!is_at_end(parser)) {
+                Token* rest = peek_token(parser);
+                if (!rest || rest->line != line) break;
+                if (rest->type == TOKEN_LEFT_BRACE) braces++;
+                if (rest->type == TOKEN_RIGHT_BRACE && braces-- == 0) break;
+                advance_token(parser);
+            }
         } else {
             // Prevent infinite loops on unexpected tokens inside blocks.
             // If the block-head token is a reserved keyword being used as
@@ -5090,11 +5253,18 @@ ASTNode* parse_actor_definition(Parser* parser) {
                 if (name) {
                     state_decl = create_ast_node(AST_VARIABLE_DECLARATION, name->value, name->line, name->column);
                     state_decl->node_type = create_type(TYPE_UNKNOWN);
-                    
+
+                    Token* eq = peek_token(parser);
                     if (match_token(parser, TOKEN_ASSIGN)) {
+                        int errors_before = aether_error_count();
                         ASTNode* value = parse_expression(parser);
                         if (value) {
                             add_child(state_decl, value);
+                        } else {
+                            /* #2998: `state n =` with nothing after the `=`. */
+                            missing_operand(parser, eq, errors_before, "a value");
+                            free_ast_node(state_decl);
+                            state_decl = NULL;
                         }
                     }
                 }
@@ -6160,6 +6330,25 @@ ASTNode* parse_function_definition(Parser* parser) {
     return func;
 }
 
+/* A parameter's optional default value, `= expr` (issue #265 / Phase A2.1,
+ * default function arguments). The expression is stored as the pattern's
+ * first child, with annotation="has_default" so consumers (typechecker,
+ * codegen) can distinguish it from the pattern-children struct and list
+ * patterns use. An `=` with nothing after it is an error (#2998); it was a
+ * parameter with no default. */
+static void parse_param_default(Parser* parser, ASTNode* pattern) {
+    Token* eq = peek_token(parser);
+    if (!match_token(parser, TOKEN_ASSIGN)) return;
+    int errors_before = aether_error_count();
+    ASTNode* default_expr = parse_expression(parser);
+    if (!default_expr) {
+        missing_operand(parser, eq, errors_before, "a default value");
+        return;
+    }
+    add_child(pattern, default_expr);
+    pattern->annotation = annotation_add_marker(pattern->annotation, "has_default");
+}
+
 // Parse pattern for function parameters and match expressions
 // Supports: literals (0, "foo"), variables (n), wildcards (_), structs
 ASTNode* parse_pattern(Parser* parser) {
@@ -6243,23 +6432,12 @@ ASTNode* parse_pattern(Parser* parser) {
                 pattern->node_type = create_type(TYPE_UNKNOWN);
             }
 
-            // Optional default value: param: type = expr  (issue #265
-            // / Phase A2.1 — default function arguments). The default
-            // expression is stored as the first child of the
-            // pattern, with annotation="has_default" so consumers
-            // (typechecker, codegen) can distinguish it from
-            // pattern-children used by struct/list patterns elsewhere.
-            // A default expression is evaluated in the enclosing scope, with
+            // Optional default value: param: type = expr. A default
+            // expression is evaluated in the enclosing scope, with
             // the other parameters NOT in scope, so a default that names
             // another parameter resolves as an undefined variable (a clear
             // E0300 at type-check) rather than that parameter's value.
-            if (match_token(parser, TOKEN_ASSIGN)) {
-                ASTNode* default_expr = parse_expression(parser);
-                if (default_expr) {
-                    add_child(pattern, default_expr);
-                    pattern->annotation = annotation_add_marker(pattern->annotation, "has_default");
-                }
-            }
+            parse_param_default(parser, pattern);
 
             return pattern;
         }
@@ -6290,13 +6468,7 @@ ASTNode* parse_pattern(Parser* parser) {
                 pattern->node_type = param_type ? param_type : create_type(TYPE_UNKNOWN);
                 // Default value (Phase A2.1) — same shape as the
                 // identifier-with-type-annotation branch above.
-                if (match_token(parser, TOKEN_ASSIGN)) {
-                    ASTNode* default_expr = parse_expression(parser);
-                    if (default_expr) {
-                        add_child(pattern, default_expr);
-                        pattern->annotation = annotation_add_marker(pattern->annotation, "has_default");
-                    }
-                }
+                parse_param_default(parser, pattern);
                 return pattern;
             }
             // #880: `byte`/`ptr` are type keywords that double as natural value
@@ -6316,13 +6488,7 @@ ASTNode* parse_pattern(Parser* parser) {
                 } else {
                     pattern->node_type = create_type(TYPE_UNKNOWN);
                 }
-                if (match_token(parser, TOKEN_ASSIGN)) {
-                    ASTNode* default_expr = parse_expression(parser);
-                    if (default_expr) {
-                        add_child(pattern, default_expr);
-                        pattern->annotation = annotation_add_marker(pattern->annotation, "has_default");
-                    }
-                }
+                parse_param_default(parser, pattern);
                 return pattern;
             }
             // Fall through to expression parsing
@@ -7595,8 +7761,11 @@ ASTNode* parse_top_level_decl(Parser* parser) {
                      * `none`, as a local `let a: int?` does. */
                     vval = create_ast_node(AST_NONE_LITERAL, NULL, vline, vcol);
                 } else {
-                    if (!expect_token(parser, TOKEN_ASSIGN)) { advance_token(parser); return NULL; }
+                    Token* veq = expect_token(parser, TOKEN_ASSIGN);
+                    if (!veq) { advance_token(parser); return NULL; }
+                    int verrors = aether_error_count();
                     vval = parse_expression(parser);
+                    if (!vval) missing_operand(parser, veq, verrors, "a value");
                 }
                 if (!vval) { advance_token(parser); return NULL; }
                 node = create_ast_node(AST_CONST_DECLARATION, vname->value, vline, vcol);
@@ -7656,12 +7825,18 @@ ASTNode* parse_top_level_decl(Parser* parser) {
                     is_array = 1;
                 }
 
-                if (!expect_token(parser, TOKEN_ASSIGN)) {
+                Token* ceq = expect_token(parser, TOKEN_ASSIGN);
+                if (!ceq) {
                     if (annotated_type) free_type(annotated_type);
                     advance_token(parser); return NULL;
                 }
+                int cerrors = aether_error_count();
                 ASTNode* cval = parse_expression(parser);
-                if (!cval) { if (annotated_type) free_type(annotated_type); advance_token(parser); return NULL; }
+                if (!cval) {
+                    missing_operand(parser, ceq, cerrors, "a value");
+                    if (annotated_type) free_type(annotated_type);
+                    advance_token(parser); return NULL;
+                }
                 node = create_ast_node(AST_CONST_DECLARATION, cname->value, cline, ccol);
                 add_child(node, cval);
 

@@ -10527,6 +10527,12 @@ static const char* ret_type_spell(Type* t, char* buf, size_t n) {
         return buf;
     }
     if (t->kind == TYPE_ARRAY) return array_type_spell(t, buf, n);
+    /* A `T!` is the tuple `(T, string)` inside; it is written `T!`. */
+    if (t->kind == TYPE_TUPLE && t->is_result && t->tuple_count == 2) {
+        char inner[160];
+        snprintf(buf, n, "%s!", ret_type_spell(t->tuple_types[0], inner, sizeof(inner)));
+        return buf;
+    }
     if (t->kind == TYPE_TUPLE) {
         tuple_type_spell(t, buf, n);
         return buf;
@@ -10800,6 +10806,19 @@ static int check_return_statement(ASTNode* ret, SymbolTable* table) {
     ReturnOwner own = { o ? o->value : NULL, o ? o->type_inferred : 0, 0, NULL };
     Type* rt = g_tc_return_type;
     Type* made = NULL;
+    /* #2998: a bare `return` in a function whose written result is a value
+     * gave its caller whatever the result register held: C takes `return;`
+     * in a non-void function with a warning (GCC 14 refuses it). */
+    if (ret->child_count == 0 && o && o->type != AST_CLOSURE && !o->type_inferred &&
+        rt && rt->kind != TYPE_VOID && rt->kind != TYPE_UNKNOWN) {
+        char want[200], msg[400], shown[160];
+        snprintf(msg, sizeof(msg),
+                 "Type mismatch in return: '%s' returns %s, but this `return` gives no value",
+                 ast_source_name(o, shown, sizeof(shown)), ret_type_spell(rt, want, sizeof(want)));
+        type_error_hint(msg, "return a value of the result type, or change the result type",
+                        ret->line, ret->column);
+        return 0;
+    }
     if (!rt && o && o->type == AST_CLOSURE) {
         made = closure_literal_result_type(o);
         rt = made;
