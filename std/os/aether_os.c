@@ -3,6 +3,7 @@
 #include "../../runtime/config/aether_optimization_config.h"
 #include "../../runtime/aether_sandbox.h"
 #include "../../runtime/aether_resource_caps.h"
+#include "../../runtime/utils/aether_spawn.h"
 #include "../string/aether_string.h"
 #include <stdlib.h>
 
@@ -1138,61 +1139,11 @@ static void aether_child_reset_signals(void) {
     }
 }
 
-#if defined(__linux__) || defined(__FreeBSD__) || defined(__NetBSD__) || defined(__OpenBSD__) || \
-    defined(__DragonFly__)
-/* Declared here as well: glibc declares it only under _GNU_SOURCE. */
-int pipe2(int pipefd[2], int flags);
-#define AETHER_HAVE_PIPE2 1
-#endif
-
-#ifndef AETHER_HAVE_PIPE2
-#include "../../runtime/utils/aether_thread.h"
-/* #3028: where pipe2 is missing (macOS), a pipe is made close-on-exec in two
- * steps, pipe() then fcntl(), and a fork from another thread between them
- * copied both ends into its child (os_run_full_threads caught one on CI).
- * Pipe creation holds this lock shared and every fork here holds it
- * exclusively, as the Go runtime's ForkLock does, so no fork sees a pipe
- * that is not yet close-on-exec. */
-static pthread_rwlock_t aether_fork_lock = PTHREAD_RWLOCK_INITIALIZER;
-#endif
-
-/* A pipe whose two ends close on exec (#2917). A plain pipe() is copied into
- * every child that another thread forks while it is open, and that child keeps
- * the write end across its exec, so a capture reading the pipe waits for EOF
- * until the unrelated child exits as well. The ends a child keeps are moved
- * onto its stdio (or fd 3) with aether_child_fd, which clears the flag on the
- * copy. Where pipe2 is missing the two steps run under aether_fork_lock.
- * Exported (aether_os.h, #3040): every pipe a child process is made through,
- * contrib/host's bridges' included, is one of these. */
-int aether_os_pipe_cloexec(int fds[2]) {
-#ifdef AETHER_HAVE_PIPE2
-    return pipe2(fds, O_CLOEXEC);
-#else
-    pthread_rwlock_rdlock(&aether_fork_lock);
-    int rc = pipe(fds);
-    if (rc == 0) {
-        fcntl(fds[0], F_SETFD, FD_CLOEXEC);
-        fcntl(fds[1], F_SETFD, FD_CLOEXEC);
-    }
-    pthread_rwlock_unlock(&aether_fork_lock);
-    return rc == 0 ? 0 : -1;
-#endif
-}
-
-/* fork(), never between another thread's pipe() and its fcntl() (#3028).
- * The child inherits the lock held and never touches it: it execs or
- * _exits. Exported (aether_os.h, #3040): every fork in the process goes
- * through it, contrib/host's bridges' included. */
-pid_t aether_os_fork(void) {
-#ifdef AETHER_HAVE_PIPE2
-    return fork();
-#else
-    pthread_rwlock_wrlock(&aether_fork_lock);
-    pid_t pid = fork();
-    if (pid != 0) pthread_rwlock_unlock(&aether_fork_lock);
-    return pid;
-#endif
-}
+/* Every pipe here is made with aether_pipe_cloexec and every fork is
+ * aether_fork (runtime/utils/aether_spawn.h, #2917, #3028, #3046): a pipe
+ * closes on exec in every child, the ends a child keeps are moved onto its
+ * stdio (or fd 3) with aether_child_fd, which clears the flag on the copy,
+ * and where pipe2 is missing no fork runs between a pipe() and its fcntl(). */
 
 int os_run(const char* prog, void* argv_list, void* env_list) {
     if (!prog) return -1;
@@ -1202,7 +1153,7 @@ int os_run(const char* prog, void* argv_list, void* env_list) {
     if (!av) return -1;
     char** envp = build_envp_array(env_list);
 
-    pid_t pid = aether_os_fork();
+    pid_t pid = aether_fork();
     if (pid < 0) {
         free(av);
         free(envp);
@@ -1246,7 +1197,7 @@ char* os_run_capture_raw(const char* prog, void* argv_list, void* env_list) {
     if (!aether_sandbox_check("exec", prog)) return NULL;
 
     int pipefd[2];
-    if (aether_os_pipe_cloexec(pipefd) != 0) return NULL;
+    if (aether_pipe_cloexec(pipefd) != 0) return NULL;
 
     char** av = build_argv_array(prog, argv_list);
     if (!av) {
@@ -1256,7 +1207,7 @@ char* os_run_capture_raw(const char* prog, void* argv_list, void* env_list) {
     }
     char** envp = build_envp_array(env_list);
 
-    pid_t pid = aether_os_fork();
+    pid_t pid = aether_fork();
     if (pid < 0) {
         close(pipefd[0]);
         close(pipefd[1]);
@@ -1361,7 +1312,7 @@ _tuple_string_int_string os_run_capture_status_raw(const char* prog, void* argv_
     }
 
     int pipefd[2];
-    if (aether_os_pipe_cloexec(pipefd) != 0) {
+    if (aether_pipe_cloexec(pipefd) != 0) {
         out._2 = "pipe failed";
         return out;
     }
@@ -1375,7 +1326,7 @@ _tuple_string_int_string os_run_capture_status_raw(const char* prog, void* argv_
     }
     char** envp = build_envp_array(env_list);
 
-    pid_t pid = aether_os_fork();
+    pid_t pid = aether_fork();
     if (pid < 0) {
         close(pipefd[0]);
         close(pipefd[1]);
@@ -1526,7 +1477,7 @@ _tuple_int_int_string os_run_pipe_raw(const char* prog, void* argv_list, void* e
     }
 
     int pipefd[2];
-    if (aether_os_pipe_cloexec(pipefd) != 0) {
+    if (aether_pipe_cloexec(pipefd) != 0) {
         out._2 = "pipe failed";
         return out;
     }
@@ -1540,7 +1491,7 @@ _tuple_int_int_string os_run_pipe_raw(const char* prog, void* argv_list, void* e
     }
     char** envp = build_envp_array(env_list);
 
-    pid_t pid = aether_os_fork();
+    pid_t pid = aether_fork();
     if (pid < 0) {
         close(pipefd[0]);
         close(pipefd[1]);
@@ -1653,7 +1604,7 @@ _tuple_int_string os_spawn_raw(const char* prog, void* argv_list, void* env_list
     if (!av) { out._1 = "argv build failed"; return out; }
     char** envp = build_envp_array(env_list);
 
-    pid_t pid = aether_os_fork();
+    pid_t pid = aether_fork();
     if (pid < 0) {
         free(av); free(envp);
         out._1 = "fork failed";
@@ -1745,7 +1696,7 @@ _tuple_int_string os_spawn_to_raw(const char* prog, void* argv_list, void* env_l
     if (!av) { close(fd); out._1 = "argv build failed"; return out; }
     char** envp = build_envp_array(env_list);
 
-    pid_t pid = aether_os_fork();
+    pid_t pid = aether_fork();
     if (pid < 0) {
         close(fd);
         free(av);
@@ -2066,7 +2017,7 @@ _tuple_int_string os_run_supervised_raw(const char* prog, void* argv_list, void*
     if (!av) { out._1 = "argv build failed"; return out; }
     char** envp = build_envp_array(env_list);
 
-    pid_t pid = aether_os_fork();
+    pid_t pid = aether_fork();
     if (pid < 0) {
         free(av); free(envp);
         out._1 = "fork failed";
@@ -2243,12 +2194,12 @@ _tuple_string_string_int_string os_run_full_raw(const char* prog, void* argv_lis
     int in_pipe[2]  = { -1, -1 };
     int out_pipe[2] = { -1, -1 };
     int err_pipe[2] = { -1, -1 };
-    if (aether_os_pipe_cloexec(in_pipe) != 0) { out._3 = "pipe failed"; return out; }
-    if (aether_os_pipe_cloexec(out_pipe) != 0) {
+    if (aether_pipe_cloexec(in_pipe) != 0) { out._3 = "pipe failed"; return out; }
+    if (aether_pipe_cloexec(out_pipe) != 0) {
         close(in_pipe[0]); close(in_pipe[1]);
         out._3 = "pipe failed"; return out;
     }
-    if (aether_os_pipe_cloexec(err_pipe) != 0) {
+    if (aether_pipe_cloexec(err_pipe) != 0) {
         close(in_pipe[0]); close(in_pipe[1]);
         close(out_pipe[0]); close(out_pipe[1]);
         out._3 = "pipe failed"; return out;
@@ -2263,7 +2214,7 @@ _tuple_string_string_int_string os_run_full_raw(const char* prog, void* argv_lis
     }
     char** envp = build_envp_array(env_list);
 
-    pid_t pid = aether_os_fork();
+    pid_t pid = aether_fork();
     if (pid < 0) {
         close(in_pipe[0]); close(in_pipe[1]);
         close(out_pipe[0]); close(out_pipe[1]);

@@ -203,19 +203,4 @@ int64_t os_now_monotonic_ns_raw(void);
 // equivalent via clock_gettime(CLOCK_REALTIME).
 int64_t os_now_unix_ms_raw(void);
 
-#ifndef _WIN32
-#include <sys/types.h>
-// One spawn discipline for the process (#2917, #3028, #3040), for C code
-// that starts children itself (contrib/host's bridges). A pipe made with
-// aether_os_pipe_cloexec closes on exec in every child, so a child another
-// thread starts never holds a capture's write end open; a child that keeps
-// an end moves it onto its stdio with dup2, which clears the flag on the
-// copy. aether_os_fork never runs between another thread's pipe() and its
-// fcntl() where pipe2 is missing (macOS); its child must exec or _exit.
-// Defined where std.os runs processes (POSIX with a filesystem).
-// aether_os_pipe_cloexec returns 0, or -1 with errno set.
-int aether_os_pipe_cloexec(int fds[2]);
-pid_t aether_os_fork(void);
-#endif
-
 #endif

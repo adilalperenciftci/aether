@@ -13,6 +13,7 @@
 
 #include "../../runtime/scheduler/multicore_scheduler.h"
 #include "../../runtime/scheduler/aether_io_poller.h"
+#include "../../runtime/utils/aether_spawn.h"
 #include <unistd.h>
 #include <errno.h>
 #include <string.h>
@@ -103,7 +104,8 @@ int ae_pipe_open(void) {
     return -1;
 #else
     int fds[2];
-    if (pipe(fds) != 0) return -1;
+    /* #3046: close-on-exec, so a child the program starts never holds it. */
+    if (aether_pipe_cloexec(fds) != 0) return -1;
     _ae_pipe_read_fd = fds[0];
     _ae_pipe_write_fd = fds[1];
     return _ae_pipe_read_fd;

@@ -19,6 +19,7 @@
 #endif
 #include "../../runtime/config/aether_optimization_config.h"
 #include "../../runtime/aether_resource_caps.h"
+#include "../../runtime/utils/aether_spawn.h"
 
 /* HTTP/2 (#260 Tier 2). Pull in the wrapper header up front so
  * handle_one_request's h2c-upgrade dispatch (RFC 7540 §3.2) can
@@ -946,11 +947,12 @@ HttpServer* http_server_create(int port) {
     atomic_init(&server->stopping, 0);
     server->wake_fds[0] = server->wake_fds[1] = -1;
 #if !defined(_WIN32) && !defined(__wasi__)
-    if (pipe(server->wake_fds) == 0) {
+    /* #3046: close-on-exec as it is made, with no fork in between where
+     * pipe2 is missing (it was set by fcntl after pipe(), unlocked). */
+    if (aether_pipe_cloexec(server->wake_fds) == 0) {
         for (int i = 0; i < 2; i++) {
             int fl = fcntl(server->wake_fds[i], F_GETFL, 0);
             if (fl >= 0) fcntl(server->wake_fds[i], F_SETFL, fl | O_NONBLOCK);
-            fcntl(server->wake_fds[i], F_SETFD, FD_CLOEXEC);
         }
     } else {
         server->wake_fds[0] = server->wake_fds[1] = -1;

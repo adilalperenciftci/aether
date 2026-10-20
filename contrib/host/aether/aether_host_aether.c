@@ -25,8 +25,8 @@ static const char* get_ae_path(void) {
 
 #include "../../../runtime/aether_sandbox.h"
 #include "../../../runtime/aether_shared_map.h"
-/* std.os's spawn discipline (#3040): its close-on-exec pipe and its fork. */
-#include "../../../std/os/aether_os.h"
+/* The process's spawn discipline (#3040, #3046): its close-on-exec pipe and its fork. */
+#include "../../../runtime/utils/aether_spawn.h"
 
 #include <unistd.h>
 #include <sys/wait.h>
@@ -180,7 +180,7 @@ static int spawn_sandboxed_full(
   //    or the read below waits for that child too. Ours keeps it through
   //    dup2 onto stdout, which clears the flag on the copy.
   int pipefd[2] = {-1, -1};
-  if (capture && aether_os_pipe_cloexec(pipefd) != 0) {
+  if (capture && aether_pipe_cloexec(pipefd) != 0) {
     if (grants_shm) {
       shm_unlink(grants_shm); free(grants_shm);
     }
@@ -191,7 +191,7 @@ static int spawn_sandboxed_full(
   }
 
   // 5. Fork
-  pid_t pid = aether_os_fork();
+  pid_t pid = aether_fork();
   if (pid < 0) {
     if (capture) { close(pipefd[0]); close(pipefd[1]); }
     if (grants_shm) {
