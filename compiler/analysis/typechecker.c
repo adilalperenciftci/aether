@@ -12386,17 +12386,27 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                 typecheck_statement(stmt->children[0], loop_table);
             }
             
-            // Type check condition (child 1)
+            // Type check condition (child 1). #3042 review: as for `if` and
+            // `while`, a condition that reported its own error is not also
+            // "not boolean", and the step and body are checked either way.
+            // The message is at the condition: the loop node has no position.
+            int cond_ok = 1;
             if (stmt->child_count > 1 && stmt->children[1]) {
-                typecheck_expression(stmt->children[1], loop_table);
-                Type* cond_type = infer_type(stmt->children[1], loop_table);
-                if (cond_type && cond_type->kind != TYPE_BOOL) {
+                ASTNode* condition = stmt->children[1];
+                int errors_before = error_count;
+                typecheck_expression(condition, loop_table);
+                if (error_count > errors_before) {
+                    cond_ok = 0;
+                } else {
+                    Type* cond_type = infer_type(condition, loop_table);
+                    if (cond_type && cond_type->kind != TYPE_BOOL) {
+                        int line = condition->line ? condition->line : stmt->line;
+                        int column = condition->line ? condition->column : stmt->column;
+                        type_error("For loop condition must be boolean", line, column);
+                        cond_ok = 0;
+                    }
                     free_type(cond_type);
-                    type_error("For loop condition must be boolean", stmt->line, stmt->column);
-                    free_symbol_table(loop_table);
-                    return 0;
                 }
-                free_type(cond_type);
             }
             
             // Type check increment (child 2). #2742: a binding increment
@@ -12420,7 +12430,7 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
             }
 
             free_symbol_table(loop_table);
-            return 1;
+            return cond_ok;
         }
         
         case AST_WHILE_LOOP: {

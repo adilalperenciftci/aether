@@ -115,6 +115,42 @@ if [ "$total" -ne 4 ]; then
     fail=1
 fi
 
+# The same for a `for` loop's condition, which still added "For loop
+# condition must be boolean" after the field's error; and that message, for
+# a condition that is not boolean, is at the condition (it was at 0:0).
+cat > "$TMP/forloop.ae" <<'AE'
+bitstruct Hdr : uint16_t {
+    qr: bool 15
+}
+
+main() {
+    h = 0 as Hdr
+    for (i = 0; h.nope; i = i + 1) {
+        println("${undefined_three}")
+    }
+    for (j = 0; j + 1; j = j + 1) {
+        println("${j}")
+    }
+}
+AE
+out=$(cd "$TMP" && "$AE" check forloop.ae 2>&1)
+pairs=$(printf '%s\n' "$out" | awk '/^error/ { msg = $0; next } /-->/ && msg != "" { print $2 " " msg; msg = "" }')
+for want in "forloop.ae:7:18 error[E0200]: 'nope' is not a field of bitstruct 'Hdr'" \
+            "Undefined variable 'undefined_three'" \
+            "forloop.ae:10:19 error[E0200]: For loop condition must be boolean"; do
+    n=$(printf '%s\n' "$pairs" | grep -cF "$want")
+    if [ "$n" -ne 1 ]; then
+        echo "  [FAIL] diagnostic_once: forloop.ae reports \"$want\" $n time(s), want 1"
+        fail=1
+    fi
+done
+total=$(printf '%s\n' "$out" | grep -c "^error")
+if [ "$total" -ne 3 ]; then
+    echo "  [FAIL] diagnostic_once: forloop.ae has $total errors, want 3:"
+    printf '%s\n' "$out" | grep -A1 "^error" | sed 's/^/        /'
+    fail=1
+fi
+
 if [ "$fail" -eq 0 ]; then
     echo "  [PASS] diagnostic_once: a wrong lane and an unknown bitstruct field are each reported once, in every place, and a condition's error leaves its body checked"
 fi
