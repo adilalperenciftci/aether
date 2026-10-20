@@ -752,6 +752,78 @@ refused limit_params 8:5 "'p9' is a borrowed \`ptr\` parameter"
 } > "$TMP/limit_holders.ae"
 refused limit_holders 23:5 "'p' is a borrowed \`ptr\` parameter, stored in a module-level \`var\`"
 
+# #3043: an address of a local reads the local as it is when read, a store
+# made after the address was taken included. It read what the local held
+# when the address was taken, so the parameter stored after went out
+# unchecked through the alias.
+cat > "$TMP/alias_before_store.ae" <<'AE'
+struct Pair { a: ptr, b: ptr }
+
+var kept: ptr = null
+
+put(p: ptr) {
+    s = Pair { a: null, b: null }
+    ps = (&s) as *Pair
+    s.a = p
+    kept = ps.a
+}
+
+main() { put(null) }
+AE
+refused alias_before_store 9:5 "'p' is a borrowed \`ptr\` parameter, stored in a module-level \`var\`"
+
+cat > "$TMP/alias_copy_before_store.ae" <<'AE'
+struct Pair { a: ptr, b: ptr }
+
+var kept: ptr = null
+
+put(p: ptr) {
+    s = Pair { a: null, b: null }
+    ps = (&s) as *Pair
+    qs = ps
+    s.a = p
+    kept = qs.a
+}
+
+main() { put(null) }
+AE
+refused alias_copy_before_store 10:5 "'p' is a borrowed \`ptr\` parameter, stored in a module-level \`var\`"
+
+cat > "$TMP/alias_field_before_store.ae" <<'AE'
+struct Pair { a: ptr, b: ptr }
+struct Outer { inner: Pair, n: int }
+
+var kept: ptr = null
+
+put(p: ptr) {
+    o = Outer { inner: Pair { a: null, b: null }, n: 1 }
+    pi = (&o.inner) as *Pair
+    o.inner.a = p
+    kept = pi.a
+}
+
+main() { put(null) }
+AE
+refused alias_field_before_store 10:5 "'p' is a borrowed \`ptr\` parameter, stored in a module-level \`var\`"
+
+# The field the parameter did not go into holds nothing, through the alias
+# as through the local.
+cat > "$TMP/alias_other_field.ae" <<'AE'
+struct Pair { a: ptr, b: ptr }
+
+var kept: ptr = null
+
+put(p: ptr) {
+    s = Pair { a: null, b: null }
+    ps = (&s) as *Pair
+    s.a = p
+    kept = ps.b
+}
+
+main() { put(null) }
+AE
+accepted alias_other_field
+
 # #3033: `p + n` and `p - n` point into the memory `p` does: stored,
 # returned or kept, each is the parameter kept.
 cat > "$TMP/arith_global.ae" <<'AE'

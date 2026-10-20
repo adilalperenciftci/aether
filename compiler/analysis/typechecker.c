@@ -7807,6 +7807,15 @@ typedef struct {
     const char** parts;   /* as Carried's */
     int count;
     int cap;
+    /* #3043: names bound to the address of a local (`ps = &s`, `(&s) as
+     * *Pair`, `&s.inner` at the part "inner"): a read through one reads
+     * what the local holds then, a store into the local after the address
+     * was taken included. */
+    const char** alias_names;
+    const char** alias_targets;
+    const char** alias_parts;
+    int alias_count;
+    int alias_cap;
     /* The function's `@into` parameters, which a `return` may hand back. */
     const char* into[KEEP_SET_MAX];
     int into_count;
@@ -7985,11 +7994,23 @@ static Carried carried_holders(Carried c) {
     return h;
 }
 
-static Carried keep_set_lookup(const KeepSet* s, const char* n) {
+static Carried keep_set_lookup_at(const KeepSet* s, const char* n, int depth) {
     Carried c = { 0 };
     for (int i = 0; n && i < s->count; i++)
         if (!strcmp(s->names[i], n)) carried_add_at(&c, s->params[i], s->vias[i], s->parts[i]);
+    /* #3043: an address of a local reads the local as it is now: what its
+     * holders hold, not the pointer it may itself be. */
+    for (int i = 0; n && depth < 8 && i < s->alias_count; i++) {
+        if (strcmp(s->alias_names[i], n)) continue;
+        Carried t = carried_holders(keep_set_lookup_at(s, s->alias_targets[i], depth + 1));
+        if (s->alias_parts[i]) t = carried_part(t, s->alias_parts[i]);
+        carried_merge(&c, t);
+    }
     return c;
+}
+
+static Carried keep_set_lookup(const KeepSet* s, const char* n) {
+    return keep_set_lookup_at(s, n, 0);
 }
 
 /* #2990 review: the tables grow as they fill. Past a fixed 128 entries a
@@ -8024,6 +8045,55 @@ static void keep_set_free(KeepSet* s) {
     free(s->parts);
     s->names = s->params = s->vias = s->parts = NULL;
     s->count = s->cap = 0;
+    free(s->alias_names);
+    free(s->alias_targets);
+    free(s->alias_parts);
+    s->alias_names = s->alias_targets = s->alias_parts = NULL;
+    s->alias_count = s->alias_cap = 0;
+}
+
+static ASTNode* strip_ptr_casts(ASTNode* e);
+static const char* struct_store_path(ASTNode* lhs);
+
+/* #3043: `name` bound to `init`, the address of a local or of a field of
+ * one (through casts): reads through `name` from here on read the local.
+ * Taken by the value at the binding, a store into the local after it went
+ * unseen: `ps = (&s) as *Pair`, `s.a = p`, `kept = ps.a`. */
+static void keep_set_note_alias(KeepSet* s, const char* name, ASTNode* init) {
+    ASTNode* e = strip_ptr_casts(init);
+    if (!name || !e) return;
+    const char* target = NULL;
+    const char* part = NULL;
+    if (e->type == AST_IDENTIFIER && e->value) {
+        /* A copy of an address is the same address: `qs = ps`. */
+        for (int i = 0; i < s->alias_count && !target; i++)
+            if (!strcmp(s->alias_names[i], e->value)) target = e->value;
+    } else if (e->type == AST_UNARY_EXPRESSION && e->value && !strcmp(e->value, "&") &&
+               e->child_count > 0 && e->children[0]) {
+        ASTNode* x = e->children[0];
+        ASTNode* root = x;
+        int element = 0;
+        while (root && (root->type == AST_MEMBER_ACCESS || root->type == AST_ARRAY_ACCESS) &&
+               root->child_count > 0) {
+            if (root->type == AST_ARRAY_ACCESS) element = 1;
+            root = root->children[0];
+        }
+        if (!root || root->type != AST_IDENTIFIER || !root->value) return;
+        target = root->value;
+        /* A field's address reads that field; an element's, the whole
+         * local (an index the checker does not follow). */
+        part = (!element && x->type == AST_MEMBER_ACCESS) ? struct_store_path(x) : NULL;
+    }
+    if (!target || !strcmp(target, name)) return;
+    if (s->alias_count == s->alias_cap) {
+        s->alias_cap = s->alias_cap ? s->alias_cap * 2 : 8;
+        s->alias_names = aether_xrealloc(s->alias_names, (size_t)s->alias_cap * sizeof(char*));
+        s->alias_targets = aether_xrealloc(s->alias_targets, (size_t)s->alias_cap * sizeof(char*));
+        s->alias_parts = aether_xrealloc(s->alias_parts, (size_t)s->alias_cap * sizeof(char*));
+    }
+    s->alias_names[s->alias_count] = name;
+    s->alias_targets[s->alias_count] = target;
+    s->alias_parts[s->alias_count++] = part;
 }
 
 static int keep_set_is_into(const KeepSet* s, const char* param) {
@@ -8474,6 +8544,11 @@ static void check_ptr_keeps_in(ASTNode* program, ASTNode* n, KeepSet* s,
                 check_ptr_keeps_in(program, n->children[i], s, globals, nglobals, 1);
         return;
     }
+    if (n->type == AST_VARIABLE_DECLARATION && n->value && n->child_count > 0)
+        keep_set_note_alias(s, n->value, n->children[n->child_count - 1]);   /* #3043 */
+    if (n->type == AST_BINARY_EXPRESSION && n->value && !strcmp(n->value, "=") &&
+        n->child_count == 2 && n->children[0] && n->children[0]->type == AST_IDENTIFIER)
+        keep_set_note_alias(s, n->children[0]->value, n->children[1]);
     if (n->type == AST_VARIABLE_DECLARATION && n->value && n->child_count > 0 &&
         (c = carries_borrowed_ptr(n->children[n->child_count - 1], s)).n)
         bind_holder(s, n, n->value, c, globals, nglobals);
