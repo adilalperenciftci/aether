@@ -12330,23 +12330,28 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
             declare_common_hoists(stmt, table);
             ASTNode* narrow_var = NULL;
             int narrow_then = 1;
+            int cond_ok = 1;
             if (stmt->child_count >= 1) {
                 ASTNode* condition = stmt->children[0];
                 /* #3042: a condition that reported its own error (`h.nope`)
-                 * is not also "not boolean", the type it failed to have. */
+                 * is not also "not boolean", the type it failed to have.
+                 * Either way the branches are still checked (#3042 review):
+                 * returning here left an error in them unreported. */
                 int errors_before = error_count;
                 typecheck_expression(condition, table);
-                if (error_count > errors_before) return 0;
-                Type* cond_type = infer_type(condition, table);
-
-                if (cond_type && cond_type->kind != TYPE_BOOL) {
+                if (error_count > errors_before) {
+                    cond_ok = 0;
+                } else {
+                    Type* cond_type = infer_type(condition, table);
+                    if (cond_type && cond_type->kind != TYPE_BOOL) {
+                        type_error("If condition must be boolean", condition->line,
+                                   condition->column);
+                        cond_ok = 0;
+                    }
                     free_type(cond_type);
-                    type_error("If condition must be boolean", condition->line, condition->column);
-                    return 0;
                 }
-                free_type(cond_type);
                 // #1068 detect an optional none-check to narrow one branch.
-                narrow_var = optional_narrow_target(condition, &narrow_then);
+                if (cond_ok) narrow_var = optional_narrow_target(condition, &narrow_then);
             }
 
             // Type check then (child 1) and else (child 2) branches. The branch
@@ -12370,9 +12375,9 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                     typecheck_statement(branch, table);
                 }
             }
-            return 1;
+            return cond_ok;
         }
-        
+
         case AST_FOR_LOOP: {
             SymbolTable* loop_table = create_symbol_table(table);
             
@@ -12422,19 +12427,24 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
             /* #2186: the body's locals are declared before the loop, where
              * codegen declares them (hoist_loop_vars). */
             if (stmt->child_count > 1) hoist_loop_decls(stmt->children[1], declare_loop_hoist, table);
+            int cond_ok = 1;
             if (stmt->child_count >= 1) {
                 ASTNode* condition = stmt->children[0];
-                int errors_before = error_count;   /* #3042, as for `if` */
+                /* #3042, as for `if`: one error for the condition, and the
+                 * body still checked (#3042 review). */
+                int errors_before = error_count;
                 typecheck_expression(condition, table);
-                if (error_count > errors_before) return 0;
-                Type* cond_type = infer_type(condition, table);
-
-                if (cond_type && cond_type->kind != TYPE_BOOL) {
+                if (error_count > errors_before) {
+                    cond_ok = 0;
+                } else {
+                    Type* cond_type = infer_type(condition, table);
+                    if (cond_type && cond_type->kind != TYPE_BOOL) {
+                        type_error("Loop condition must be boolean", condition->line,
+                                   condition->column);
+                        cond_ok = 0;
+                    }
                     free_type(cond_type);
-                    type_error("Loop condition must be boolean", condition->line, condition->column);
-                    return 0;
                 }
-                free_type(cond_type);
             }
 
             // Type check loop body (#893: with this loop's label in scope so
@@ -12444,7 +12454,7 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                 typecheck_statement(stmt->children[i], table);
             }
             tc_pop_loop_label();
-            return 1;
+            return cond_ok;
         }
 
         case AST_BREAK_STATEMENT:

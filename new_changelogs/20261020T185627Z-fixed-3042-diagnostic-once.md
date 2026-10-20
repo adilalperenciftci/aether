@@ -3,4 +3,6 @@
   three times, depending on where they stood, and in an `if` or `while`
   condition a "condition must be boolean" error followed. Each is reported
   once now, by the check of the member access, and a condition that
-  reported its own error is not also called not boolean (#3042).
+  reported its own error is not also called not boolean; the body of the
+  `if` or `while` is still checked, so an error there is reported with it
+  (#3042).

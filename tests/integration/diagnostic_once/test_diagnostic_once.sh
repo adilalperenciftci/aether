@@ -77,7 +77,45 @@ if [ "$total" -ne 10 ]; then
     fail=1
 fi
 
+# #3042 review: a condition that reported its own error is not also "not
+# boolean", and the branches are still checked: an undefined name in the
+# body of an `if` and a `while` on a typo is reported too (the check
+# returned at the condition, and the body was never read).
+cat > "$TMP/bodies.ae" <<'AE'
+import std.lanes
+
+bitstruct Hdr : uint16_t {
+    qr: bool 15
+}
+
+main() {
+    v = lanes.f32x4(1.0, 2.0, 3.0, 4.0)
+    h = 0 as Hdr
+    if v.q > 0.0 {
+        println("${undefined_one}")
+    }
+    while h.gone {
+        println("${undefined_two}")
+    }
+}
+AE
+out=$(cd "$TMP" && "$AE" check bodies.ae 2>&1)
+for want in "'q' is not a lane of f32x4" "'gone' is not a field of bitstruct 'Hdr'" \
+            "Undefined variable 'undefined_one'" "Undefined variable 'undefined_two'"; do
+    n=$(printf '%s\n' "$out" | grep "^error" | grep -cF "$want")
+    if [ "$n" -ne 1 ]; then
+        echo "  [FAIL] diagnostic_once: bodies.ae reports \"$want\" $n time(s), want 1"
+        fail=1
+    fi
+done
+total=$(printf '%s\n' "$out" | grep -c "^error")
+if [ "$total" -ne 4 ]; then
+    echo "  [FAIL] diagnostic_once: bodies.ae has $total errors, want 4:"
+    printf '%s\n' "$out" | grep -A1 "^error" | sed 's/^/        /'
+    fail=1
+fi
+
 if [ "$fail" -eq 0 ]; then
-    echo "  [PASS] diagnostic_once: a wrong lane and an unknown bitstruct field are each reported once, in every place"
+    echo "  [PASS] diagnostic_once: a wrong lane and an unknown bitstruct field are each reported once, in every place, and a condition's error leaves its body checked"
 fi
 exit $fail
