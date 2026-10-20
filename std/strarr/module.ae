@@ -31,7 +31,7 @@ import std.sort
 exports(
     new, new_hint, push, push_copy, get, set, size, array, free,
     strarr_new_raw, strarr_push_raw, strarr_push_copy_raw, strarr_get_raw,
-    strarr_set_raw, strarr_size, strarr_data, strarr_free
+    strarr_set_raw, strarr_data
 )
 
 // ---- Raw externs (also the hot-path API) ----

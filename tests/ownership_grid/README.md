@@ -11,13 +11,15 @@ becomes a cell, and the stages of the design close cells.
 A cell is one value **kind** (a fresh string, a `string?`, a closure that
 captures a fresh string, an `fn[2]`, a struct owning a string, a
 `(string, int)` tuple, a `string[2]`, a `Doc[2]`, a named function used as a
-closure, the error slot of an `int!`) held in one **place** (a local, a local
-rebound in a loop, a struct field, an array element, a tuple slot, an
-optional, a module `var`, a closure's capture or cell, a list or map, actor
-state, a message field, a `ptr` slot, a part of a parameter, a temporary)
+closure, the error slot of an `int!`, a sum whose variant owns a string or a
+closure) held in one **place** (a local, a local rebound in a loop, a struct
+field, an array element, a tuple slot, an optional, a module `var`, a
+closure's capture or cell, a list or map, actor state, a message field, a
+`ptr` slot, a part of a parameter, a temporary)
 and moved by one **transfer** (store and leave, overwrite, `break`/`continue`,
 early `return`, a caught panic, a reader, a keeper, a freer, return, hand
-back, `defer`, alias, store into a global, capture). Its id is
+back, `defer`, alias, store into a global, capture, an `if` expression or a
+value `match` of fresh values passed as an argument). Its id is
 `<kind>-<place>-<transfer>`, `K1-P5-T7` for instance, and the tables in
 `gen.ae` (`kind_title`, `place_title`, `transfer_title`) say what each code is.
 
@@ -34,6 +36,12 @@ where the class is large or mixed: `string.replace`, `string.concat_wrapped`,
 capture, list, message) and transfers (scope exit, overwrite, caught panic,
 keep, return, alias), so a change to how the producers return their strings
 shows in the grid.
+
+The sum kinds `KS` and `KSF` (`Owned = Named | Plain`, whose `Named` owns a
+string, and `Acting = Act | Plain`, whose `Act` owns a closure) cross the
+places a sum can be held in, a module `var` aside (its initializer is no
+constant) and the containers and `ptr` slots (strings and closures only):
+a sum is a composite that owns what its variants own (R1).
 
 Each cell is a standalone program, written by `gen.ae` into
 `build/ownership_grid/cells/<id>.ae`. It runs the shape in a function called

@@ -2,7 +2,7 @@
  *
  * A value of an owning type holds counted parts: strings, closure
  * environments, and composites (structs, tuples, optionals, fixed-size
- * arrays) of those. Every place that holds one does
+ * arrays, sums) of those. Every place that holds one does
  * the same things with it, through functions generated for its type:
  *
  *   _ae_retain_<M>(T* p)        take a reference to every part of *p in
@@ -15,10 +15,12 @@
  *
  * A fixed-size array's take the address of its first element. A struct's
  * are its _aether_copy_<Name> / _aether_drop_<Name> (codegen_func.c), which this file
- * calls for a struct part. Every type that reaches a place is registered by
- * the walk over the program (own_collect_types) and the functions are
- * emitted once all types are complete (emit_own_ops), prototypes first, so
- * nested composites call each other in any order. */
+ * calls for a struct part. A sum's apply its variant struct's to the variant
+ * the tag names (#3005): a sum owns what its variants own (R1). Every type
+ * that reaches a place is registered by the walk over the program
+ * (own_collect_types) and the functions are emitted once all types are
+ * complete (emit_own_ops), prototypes first, so nested composites call each
+ * other in any order. */
 
 #include "codegen_internal.h"
 
@@ -54,6 +56,28 @@ static const char* own_mangle(Type* t) {
     return sanitize(get_c_type(t));
 }
 
+/* A sum's variants (#3005), as its definition names them, wherever the Type
+ * came from (one the type checker did not fill has no variant list):
+ * own_sum_arity counts them, own_sum_variant gives the i-th one's name when
+ * that variant struct owns, NULL when it does not. */
+static ASTNode* own_sum_def(CodeGenerator* gen, Type* t) {
+    if (!gen || !gen->program || !t || t->kind != TYPE_SUM || !t->struct_name) return NULL;
+    return find_sum_definition_by_name(gen->program, t->struct_name);
+}
+
+static int own_sum_arity(CodeGenerator* gen, Type* t) {
+    ASTNode* def = own_sum_def(gen, t);
+    return def ? def->child_count : 0;
+}
+
+static const char* own_sum_variant(CodeGenerator* gen, Type* t, int i) {
+    ASTNode* def = own_sum_def(gen, t);
+    ASTNode* v = def && i < def->child_count ? def->children[i] : NULL;
+    if (!v || v->type != AST_IDENTIFIER || !v->value) return NULL;
+    ASTNode* sd = find_struct_definition_by_name(gen->program, v->value);
+    return sd && struct_owns_heap_strings(gen, sd) ? v->value : NULL;
+}
+
 int own_type_owns(CodeGenerator* gen, Type* t) {
     if (!t) return 0;
     switch (t->kind) {
@@ -73,6 +97,10 @@ int own_type_owns(CodeGenerator* gen, Type* t) {
         return t->array_size > 0 && own_type_owns(gen, t->element_type);
     case TYPE_PTR:
         return is_string_seq_ptr_type(t);
+    case TYPE_SUM:
+        for (int i = 0; i < own_sum_arity(gen, t); i++)
+            if (own_sum_variant(gen, t, i)) return 1;
+        return 0;
     default:
         return 0;
     }
@@ -80,8 +108,16 @@ int own_type_owns(CodeGenerator* gen, Type* t) {
 
 /* A composite whose functions this file emits (a struct has its own). */
 static int own_is_composite(Type* t) {
-    return t->kind == TYPE_TUPLE || t->kind == TYPE_OPTIONAL ||
+    return t->kind == TYPE_TUPLE || t->kind == TYPE_OPTIONAL || t->kind == TYPE_SUM ||
            (t->kind == TYPE_ARRAY && t->array_size > 0);
+}
+
+/* An owning composite C holds as a value (a tuple, an optional, a sum):
+ * every place takes, copies and drops one by the functions this file
+ * emits for its type, whichever of those kinds it is (#3005). */
+int own_value_composite(CodeGenerator* gen, Type* t) {
+    return t && (t->kind == TYPE_TUPLE || t->kind == TYPE_OPTIONAL || t->kind == TYPE_SUM) &&
+           own_type_owns(gen, t);
 }
 
 static void own_register(CodeGenerator* gen, Type* t) {
@@ -99,7 +135,7 @@ static void own_register(CodeGenerator* gen, Type* t) {
     if (t->kind == TYPE_TUPLE) {
         for (int i = 0; t->tuple_types && i < t->tuple_count; i++)
             own_register(gen, t->tuple_types[i]);
-    } else {
+    } else if (t->kind != TYPE_SUM) {   /* a sum's parts are structs */
         own_register(gen, t->element_type);
     }
     if (g_own_count == g_own_cap) {
@@ -228,6 +264,21 @@ static void own_emit_body(CodeGenerator* gen, Type* t, OwnOp op) {
         fprintf(o, "  for (int _i = 0; _i < %d; _i++) {\n", t->array_size);
         own_emit_part(gen, t->element_type, "p[_i]", op);
         fprintf(o, "  }\n");
+        return;
+    case TYPE_SUM:
+        /* The variant the tag names, by its struct's functions (#3005). */
+        fprintf(o, "  switch (p->tag) {\n");
+        for (int i = 0; i < own_sum_arity(gen, t); i++) {
+            const char* v = own_sum_variant(gen, t, i);
+            if (!v) continue;
+            Type* vt = create_type(TYPE_STRUCT);
+            vt->struct_name = strdup(v);
+            fprintf(o, "  case %s__%s: {\n", t->struct_name, v);
+            own_emit_part(gen, vt, cg_internf("p->data.%s_", v), op);
+            fprintf(o, "    break;\n  }\n");
+            free_type(vt);
+        }
+        fprintf(o, "  default: break;\n  }\n");
         return;
     default:
         return;

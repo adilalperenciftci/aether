@@ -7092,6 +7092,46 @@ ASTNode* parse_top_level_decl(Parser* parser) {
                                            at_tok->line, at_tok->column);
                 }
                 if (attr && attr->type == TOKEN_IDENTIFIER && attr->value &&
+                    strcmp(attr->value, "target") == 0) {
+                    /* #2607: @target("avx2") import m as alias: a second
+                     * copy of module `m`, compiled for that instruction set
+                     * beside the build's own, so one program can carry both
+                     * widths of its lane code and choose at run time. The
+                     * target rides on the import as a `lane_target:` marker
+                     * until orchestration registers the copy as a module of
+                     * its own (module_bind_target_import). AVX2 is the one
+                     * target: it is what changes an f32x8's width. */
+                    advance_token(parser);  // consume 'target'
+                    if (!expect_token(parser, TOKEN_LEFT_PAREN)) return NULL;
+                    Token* isa = peek_token(parser);
+                    if (!isa || isa->type != TOKEN_STRING_LITERAL || !isa->value) {
+                        parser_error(parser, "@target expects the instruction set a module is compiled for again: @target(\"avx2\")");
+                        return NULL;
+                    }
+                    int known = strcmp(isa->value, "avx2") == 0;
+                    advance_token(parser);
+                    if (!expect_token(parser, TOKEN_RIGHT_PAREN)) return NULL;
+                    if (!peek_token(parser) || peek_token(parser)->type != TOKEN_IMPORT) {
+                        parser_error(parser, "@target(\"avx2\") must precede an `import m as alias`");
+                        return NULL;
+                    }
+                    /* The import is parsed either way, so an error here does
+                     * not leave the parser inside it. */
+                    ASTNode* imp = parse_import_statement(parser);
+                    if (!imp) return NULL;
+                    if (!known) {
+                        parser_error(parser, "@target expects the instruction set a module is compiled for again: \"avx2\", the one that changes an f32x8's width");
+                        return imp;
+                    }
+                    if (imp->annotation) {
+                        parser_error(parser, "@target(\"avx2\") imports a module whole, under its `as` name: not as a glob import");
+                        return imp;
+                    }
+                    imp->annotation = strdup("lane_target:avx2");
+                    node = imp;
+                    break;
+                }
+                if (attr && attr->type == TOKEN_IDENTIFIER && attr->value &&
                     strcmp(attr->value, "c_include") == 0) {
                     /* #1986: @c_include("aether_collections.h") — a header
                      * the generated C includes whenever this module is in

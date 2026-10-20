@@ -182,6 +182,8 @@ int typecheck_function_call(ASTNode* call, SymbolTable* table);
  * line `LINE:COLUMN:ns_x:x` per call (the position of the call's callee). */
 void typecheck_report_short_names(const char* entry_file);
 void typecheck_print_short_names(FILE* out);
+/* `aetherc --check` (`ae check`): warn on each such call instead (W1006). */
+void typecheck_warn_short_names(void);
 
 // Type inference functions
 Type* infer_type(ASTNode* expr, SymbolTable* table);

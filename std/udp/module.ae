@@ -17,9 +17,9 @@
 // Free it with `addr_free`.
 
 exports(
-    udp_bind_raw, udp_local_port_raw, udp_close, udp_fd_raw, udp_poll_raw,
+    udp_bind_raw, udp_local_port_raw, udp_fd_raw, udp_poll_raw,
     udp_set_buffer_sizes_raw, udp_set_broadcast_raw,
-    udp_resolve_raw, udp_addr_new, udp_addr_clone_raw, udp_addr_free,
+    udp_resolve_raw, udp_addr_clone_raw,
     udp_addr_host_raw, udp_addr_port_raw, udp_addr_equal_raw, udp_addr_hash_raw,
     udp_send_to_raw, udp_send_to_addr_raw,
     udp_recv_from_into_raw, udp_recv_from_raw,

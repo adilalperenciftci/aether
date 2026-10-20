@@ -72,7 +72,8 @@ no exceptions listed per shape.
   not counted itself. It is a composite whose copy, destroy and move are its
   parts' copy, destroy and move, generated per type (the `=copy`, `=destroy`
   and `=sink` hooks of #484, which the generated `_dup` and `_destroy` of
-  structs already are in all but name).
+  structs already are in all but name). A sum is one too, whose parts are
+  its variants: the variant its tag names (#3005).
 
 Consequence: `release` is always correct on any string value, and the
 `_heap_<name>` flags, the "is this expression heap" classifier and the

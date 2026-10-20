@@ -4,8 +4,8 @@ Aether has no garbage collector. Every allocation is released at a point the
 source shows, in one of two ways:
 
 - **Values the program owns are counted by the compiler.** Strings, closures,
-  string sequences, and the structs, tuples, optionals and fixed-size arrays
-  built from them carry a reference count. Every place that holds one owns a
+  string sequences, and the structs, tuples, optionals, sums and fixed-size
+  arrays built from them carry a reference count. Every place that holds one owns a
   reference, a store takes one, and leaving a scope releases what the scope
   held. The program writes no free for them.
 - **Handles are freed by the program.** A container (`list.new()`,
@@ -38,7 +38,8 @@ implementation record are in [design/ownership-model.md](design/ownership-model.
   locals hold, on every exit (a `return`, a `break`, a caught panic). A
   parameter is borrowed: the callee never releases it, and one it keeps it
   takes a reference to. A call borrows its arguments, so a fresh argument
-  is released after the call; a function returning a value hands its caller
+  is released after the call, an `if` or a `match` that gives a fresh value
+  in a branch among them; a function returning a value hands its caller
   one reference.
 - **R4, only C boundaries are annotated** (below).
 - **R5, moves.** Taking a fresh value (a call's result, an interpolation)
@@ -114,8 +115,9 @@ true [not a string]
 ```
 
 A `string` local re-bound to a bare `ptr` (`name, _ = map.get(m, "name")`)
-is warning W1005, which names the accessor to use; a later release makes it
-an error ([W1005](language-reference.md#pointer-given-to-a-string-local-w1005)).
+is error E0202, which names the accessor to use
+([E0202](language-reference.md#a-pointer-given-to-a-string-local-e0202); it was
+the warning W1005 in 0.830.0 and 0.831.0).
 
 ### Closures
 
@@ -134,10 +136,12 @@ function's result, a `string.seq_*` producer's) moves in, any other is
 retained, and `string.seq_tail` lends. The counts are atomic, so a sequence
 crosses actors by reference. See [sequences.md](sequences.md).
 
-### Structs, tuples, optionals and fixed-size arrays
+### Structs, tuples, optionals, sums and fixed-size arrays
 
 Each owning type has one generated retain and one drop, which every place
-uses: a copy retains every part, a drop releases every part. A struct
+uses: a copy retains every part, a drop releases every part. A sum's parts
+are its variants: a sum owns when one of its variant structs does, and its
+retain and drop are that variant's, for the variant its tag names. A struct
 parameter is borrowed; one its body writes into is copied on entry. A
 struct boxed with `heap.new(T)` owns its fields as a local struct does, and
 `heap.free(p)` releases them before it frees the box. A

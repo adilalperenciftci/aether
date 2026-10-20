@@ -11,22 +11,22 @@ header comment is the authoritative description.
 
 | Module | Purpose | Exports | Detail |
 |---|---|---:|---|
-| `std.actors` | Process-global registry mapping names to actor references. | 12 | [guide](../std/actors/README.md) · [source](../std/actors/module.ae) |
+| `std.actors` | Process-global registry mapping names to actor references. | 6 | [guide](../std/actors/README.md) · [source](../std/actors/module.ae) |
 | `std.alloc` | Allocator handles the containers accept, so a structure can allocate from an arena instead of the system. | 6 | [guide](../std/alloc/README.md) · [source](../std/alloc/module.ae) |
-| `std.arena` | Bulk allocator: many allocations, released in one shot. | 14 | [guide](../std/arena/README.md) · [source](../std/arena/module.ae) |
+| `std.arena` | Bulk allocator: many allocations, released in one shot. | 9 | [guide](../std/arena/README.md) · [source](../std/arena/module.ae) |
 | `std.audio` | Audio playback: WAV and PCM loading, device control, volume; pan, pitch, looping, groups, a queue source and a headless engine for the game-engine mixer. | 46 | [guide](../std/audio/README.md) · [source](../std/audio/module.ae) |
-| `std.audit` | Query the sandbox audit trail. | 9 | [guide](../std/audit/README.md) · [source](../std/audit/module.ae) |
+| `std.audit` | Query the sandbox audit trail. | 4 | [guide](../std/audit/README.md) · [source](../std/audit/module.ae) |
 | `std.bignum` | Arbitrary-precision integers. | 29 | [guide](../std/bignum/README.md) · [source](../std/bignum/module.ae) |
-| `std.bits` | Unsigned bit operations: rotates, shifts, popcount, leading zeros, unsigned divide. | 34 | [guide](../std/bits/README.md) · [source](../std/bits/module.ae) |
+| `std.bits` | Unsigned bit operations: rotates, shifts, popcount, leading zeros, unsigned divide. | 17 | [guide](../std/bits/README.md) · [source](../std/bits/module.ae) |
 | `std.brotli` | Brotli compression, streaming and one-shot, for `Content-Encoding: br`. | 21 | [guide](../std/brotli/README.md) · [source](../std/brotli/module.ae) |
-| `std.bytes` | Mutable byte buffer with random access and overlap-safe copies. | 58 | [guide](../std/bytes/README.md) · [source](../std/bytes/module.ae) |
-| `std.capsicum` | FreeBSD Capsicum capability-mode bindings. | 33 | [guide](../std/capsicum/README.md) · [source](../std/capsicum/module.ae) |
+| `std.bytes` | Mutable byte buffer with random access and overlap-safe copies. | 32 | [guide](../std/bytes/README.md) · [source](../std/bytes/module.ae) |
+| `std.capsicum` | FreeBSD Capsicum capability-mode bindings. | 28 | [guide](../std/capsicum/README.md) · [source](../std/capsicum/module.ae) |
 | `std.cas` | Content-addressed store keyed by the sha256 of file contents. | 7 | [guide](../std/cas/README.md) · [source](../std/cas/module.ae) |
-| `std.casper` | FreeBSD Casper service delegation. | 16 | [guide](../std/casper/README.md) · [source](../std/casper/module.ae) |
+| `std.casper` | FreeBSD Casper service delegation. | 8 | [guide](../std/casper/README.md) · [source](../std/casper/module.ae) |
 | `std.cbor` | CBOR encoding and decoding (RFC 8949). | 50 | [guide](../std/cbor/README.md) · [source](../std/cbor/module.ae) |
 | `std.clapae` | Command-line argument parser, modelled on clap. | 32 | [guide](../std/clapae/README.md) · [source](../std/clapae/module.ae) |
 | `std.collections` | Dynamic list, hash map and packed int array, with the raw externs the alias modules re-export. | 44 | [guide](../std/collections/README.md) · [source](../std/collections/module.ae) |
-| `std.config` | Process-global immutable string to string store. | 12 | [guide](../std/config/README.md) · [source](../std/config/module.ae) |
+| `std.config` | Process-global immutable string to string store. | 6 | [guide](../std/config/README.md) · [source](../std/config/module.ae) |
 | `std.cryptography` | Cryptographic hashes, HMAC, and the Base64 codec. | 34 | [full section](#cryptography-stdcryptography) |
 | `std.decimal` | Arbitrary-precision decimal fixed-point arithmetic with explicit rounding modes, for money math. | 43 | [guide](../std/decimal/README.md) · [source](../std/decimal/module.ae) |
 | `std.deque` | Fixed-capacity double-ended queue over `long` values. | 16 | [guide](../std/deque/README.md) · [source](../std/deque/module.ae) |
@@ -34,57 +34,57 @@ header comment is the authoritative description.
 | `std.dl` | Dynamic library loader over dlopen and LoadLibrary. | 8 | [guide](../std/dl/README.md) · [source](../std/dl/module.ae) |
 | `std.encoding` | Hex, Base64, Base32 and CSV field codecs. | 11 | [guide](../std/encoding/README.md) · [source](../std/encoding/module.ae) |
 | `std.file` | File operations, re-exported from `std.fs`. | 14 | [guide](../std/file/README.md) · [source](../std/file/module.ae) |
-| `std.floatarr` | Fixed-size packed-double buffer. | 16 | [guide](../std/floatarr/README.md) · [source](../std/floatarr/module.ae) |
-| `std.fs` | Files, directories, metadata, recursive walk, and change watching. | 157 | [guide](../std/fs/README.md) · [source](../std/fs/module.ae) |
+| `std.floatarr` | Fixed-size packed-double buffer. | 15 | [guide](../std/floatarr/README.md) · [source](../std/floatarr/module.ae) |
+| `std.fs` | Files, directories, metadata, recursive walk, and change watching. | 156 | [guide](../std/fs/README.md) · [source](../std/fs/module.ae) |
 | `std.hash` | Fast non-cryptographic hashes and checksums: FNV, MurmurHash3, SipHash, CRC-32. | 6 | [guide](../std/hash/README.md) · [source](../std/hash/module.ae) |
-| `std.host` | Primitives for Aether scripts embedded in a host application. | 17 | [guide](../std/host/README.md) · [source](../std/host/module.ae) |
-| `std.http` | HTTP client and server: the `std.net` surface plus Go-style wrappers. | 166 | [guide](../std/http/README.md) · [source](../std/http/module.ae) |
+| `std.host` | Primitives for Aether scripts embedded in a host application. | 14 | [guide](../std/host/README.md) · [source](../std/host/module.ae) |
+| `std.http` | HTTP client and server: the `std.net` surface plus Go-style wrappers. | 134 | [guide](../std/http/README.md) · [source](../std/http/module.ae) |
 | `std.http1` | Pure-Aether HTTP/1.1 response reader (RFC 9112). | 14 | [guide](../std/http1/README.md) · [source](../std/http1/module.ae) |
-| `std.intarr` | Fixed-size packed-int buffer. | 16 | [guide](../std/intarr/README.md) · [source](../std/intarr/module.ae) |
-| `std.intmap` | Hash map from `long` keys to `long` values, for integer-keyed counting and lookup. | 25 | [guide](../std/intmap/README.md) · [source](../std/intmap/module.ae) |
+| `std.intarr` | Fixed-size packed-int buffer. | 15 | [guide](../std/intarr/README.md) · [source](../std/intarr/module.ae) |
+| `std.intmap` | Hash map from `long` keys to `long` values, for integer-keyed counting and lookup. | 12 | [guide](../std/intmap/README.md) · [source](../std/intmap/module.ae) |
 | `std.io` | Console output, whole-file reads and writes, file descriptors, environment variables. | 44 | [full section](#io-stdio) |
 | `std.ipc` | Child-to-parent back-channel for processes started by `std.os`. | 4 | [guide](../std/ipc/README.md) · [source](../std/ipc/module.ae) |
 | `std.json` | JSON parsing, building and serialisation. | 55 | [full section](#json-stdjson) |
 | `std.jsonpath` | RFC 9535 JSONPath queries over parsed JSON, with a reusable compiled path. | 10 | [guide](../std/jsonpath/README.md) · [source](../std/jsonpath/module.ae) |
 | `std.ksuid` | KSUID: 160-bit lexicographically sortable identifier. | 1 | [guide](../std/ksuid/README.md) · [source](../std/ksuid/module.ae) |
 | `std.language` | BCP 47 language tags and matching (RFC 5646, RFC 4647). | 11 | [guide](../std/language/README.md) · [source](../std/language/module.ae) |
-| `std.lanes` | SIMD lanes: four or eight floats, or two doubles, per vector, with masks and select. | 105 | [guide](../std/lanes/README.md) · [source](../std/lanes/module.ae) |
+| `std.lanes` | SIMD lanes: four or eight floats, or two doubles, per vector, with masks and select. | 127 | [guide](../std/lanes/README.md) · [source](../std/lanes/module.ae) |
 | `std.list` | Dynamic array, re-exported from `std.collections`. | 13 | [guide](../std/list/README.md) · [source](../std/list/module.ae) |
 | `std.log` | Levelled logging with timestamps, colours and counters. | 9 | [full section](#logging-stdlog) |
-| `std.longarr` | Fixed-size packed-long buffer. | 16 | [guide](../std/longarr/README.md) · [source](../std/longarr/module.ae) |
-| `std.lzf` | One-shot LZF compression and decompression. | 10 | [guide](../std/lzf/README.md) · [source](../std/lzf/module.ae) |
+| `std.longarr` | Fixed-size packed-long buffer. | 15 | [guide](../std/longarr/README.md) · [source](../std/longarr/module.ae) |
+| `std.lzf` | One-shot LZF compression and decompression. | 9 | [guide](../std/lzf/README.md) · [source](../std/lzf/module.ae) |
 | `std.map` | Hash map, re-exported from `std.collections`, with readable key snapshots. | 19 | [guide](../std/map/README.md) · [source](../std/map/module.ae) |
 | `std.math` | Arithmetic, trigonometry, rounding and floating-point helpers. | 45 | [full section](#math-stdmath) |
-| `std.mem` | Byte-level reads and writes over caller-allocated raw pointers. | 180 | [guide](../std/mem/README.md) · [source](../std/mem/module.ae) |
+| `std.mem` | Byte-level reads and writes over caller-allocated raw pointers. | 98 | [guide](../std/mem/README.md) · [source](../std/mem/module.ae) |
 | `std.message` | ICU MessageFormat formatting and message catalogues. | 8 | [guide](../std/message/README.md) · [source](../std/message/module.ae) |
 | `std.msgpack` | MessagePack serialisation and deserialisation. | 39 | [guide](../std/msgpack/README.md) · [source](../std/msgpack/module.ae) |
 | `std.mutation` | Text-based mutation-testing driver for `std.spec` suites. | 1 | [guide](../std/mutation/README.md) · [source](../std/mutation/module.ae) |
 | `std.nanoid` | NanoID: 21-character URL-safe identifier. | 2 | [guide](../std/nanoid/README.md) · [source](../std/nanoid/module.ae) |
 | `std.net` | TCP sockets and the HTTP client and server externs. | 69 | [guide](../std/net/README.md) · [source](../std/net/module.ae) |
 | `std.number` | Locale-aware number, percent and currency formatting. | 15 | [guide](../std/number/README.md) · [source](../std/number/module.ae) |
-| `std.observe` | Observable struct models: run closures after every field store on a `struct T @observable` value. | 17 | [guide](../std/observe/README.md) · [source](../std/observe/module.ae) |
-| `std.os` | Shell and process execution: run, capture, spawn, pipes, wait. | 87 | [full section](#os-stdos) |
-| `std.path` | Lexical path manipulation, with no filesystem access. | 19 | [guide](../std/path/README.md) · [source](../std/path/module.ae) |
+| `std.observe` | Observable struct models: run closures after every field store on a `struct T @observable` value. | 9 | [guide](../std/observe/README.md) · [source](../std/observe/module.ae) |
+| `std.os` | Shell and process execution: run, capture, spawn, pipes, wait. | 85 | [full section](#os-stdos) |
+| `std.path` | Lexical path manipulation, with no filesystem access. | 10 | [guide](../std/path/README.md) · [source](../std/path/module.ae) |
 | `std.plural` | CLDR plural-rule categories. | 2 | [guide](../std/plural/README.md) · [source](../std/plural/module.ae) |
-| `std.pqueue` | Priority queue over (priority, item) pairs, backed by a binary heap. | 18 | [guide](../std/pqueue/README.md) · [source](../std/pqueue/module.ae) |
-| `std.reflect` | Read a struct's field table from `@derive(schema)`: names, types, offsets, sizes, attributes. | 66 | [guide](../std/reflect/README.md) · [source](../std/reflect/module.ae) |
+| `std.pqueue` | Priority queue over (priority, item) pairs, backed by a binary heap. | 9 | [guide](../std/pqueue/README.md) · [source](../std/pqueue/module.ae) |
+| `std.reflect` | Read a struct's field table from `@derive(schema)`: names, types, offsets, sizes, attributes. | 46 | [guide](../std/reflect/README.md) · [source](../std/reflect/module.ae) |
 | `std.quote` | The tree a `quote` trailing block hands to a function: typed nodes, captures read through their cells, and a printer. | 66 | [guide](../std/quote/README.md) · [source](../std/quote/module.ae) |
-| `std.regex` | Perl-compatible regular expressions, backed by PCRE2. | 45 | [guide](../std/regex/README.md) · [source](../std/regex/module.ae) |
+| `std.regex` | Perl-compatible regular expressions, backed by PCRE2. | 27 | [guide](../std/regex/README.md) · [source](../std/regex/module.ae) |
 | `std.resp` | RESP codec (Redis Serialization Protocol): RESP3-native, RESP2-compatible, resumable decoder. | 42 | [guide](../std/resp/README.md) · [source](../std/resp/module.ae) |
 | `std.sandbox` | Grant lists, and blocks that run with only those grants in force. | 14 | [guide](../std/sandbox/README.md) · [source](../std/sandbox/module.ae) |
 | `std.schema` | Declarative typed validation and coercion. | 35 | [guide](../std/schema/README.md) · [source](../std/schema/module.ae) |
-| `std.set` | Unordered set of unique strings. | 23 | [guide](../std/set/README.md) · [source](../std/set/module.ae) |
+| `std.set` | Unordered set of unique strings. | 14 | [guide](../std/set/README.md) · [source](../std/set/module.ae) |
 | `std.signal` | POSIX signal-number constants. | 11 | [guide](../std/signal/README.md) · [source](../std/signal/module.ae) |
-| `std.snapshot` | Copy-on-write snapshot cell for read-mostly shared data. | 10 | [guide](../std/snapshot/README.md) · [source](../std/snapshot/module.ae) |
+| `std.snapshot` | Copy-on-write snapshot cell for read-mostly shared data. | 5 | [guide](../std/snapshot/README.md) · [source](../std/snapshot/module.ae) |
 | `std.sort` | In-place sort and binary search over packed numeric arrays and string arrays, with optional comparators. | 12 | [guide](../std/sort/README.md) · [source](../std/sort/module.ae) |
 | `std.spec` | BDD test framework: describe and it, hooks, assertions, structured reports. | 46 | [guide](../std/spec/README.md) · [source](../std/spec/module.ae) |
-| `std.strarr` | Growable string array whose backing is a `string[]`, for sorting runtime-built lists. | 17 | [guide](../std/strarr/README.md) · [source](../std/strarr/module.ae) |
-| `std.strbuilder` | Amortised-O(1) string building. | 35 | [guide](../std/strbuilder/README.md) · [source](../std/strbuilder/module.ae) |
-| `std.string` | Managed strings: construction, search, slicing, case, split and join. | 103 | [full section](#strings-stdstring) |
-| `std.sync` | Atomic 64-bit integer cell (load, store, add, sub, compare-and-swap) for refcounts and lock-free reclamation. | 14 | [guide](../std/sync/README.md) · [source](../std/sync/module.ae) |
+| `std.strarr` | Growable string array whose backing is a `string[]`, for sorting runtime-built lists. | 15 | [guide](../std/strarr/README.md) · [source](../std/strarr/module.ae) |
+| `std.strbuilder` | Amortised-O(1) string building. | 18 | [guide](../std/strbuilder/README.md) · [source](../std/strbuilder/module.ae) |
+| `std.string` | Managed strings: construction, search, slicing, case, split and join. | 100 | [full section](#strings-stdstring) |
+| `std.sync` | Atomic 64-bit integer cell (load, store, add, sub, compare-and-swap) for refcounts and lock-free reclamation. | 7 | [guide](../std/sync/README.md) · [source](../std/sync/module.ae) |
 | `std.tar` | Streaming POSIX ustar archives: reader and writer. | 24 | [full section](#posix-ustar-archives-stdtar) |
 | `std.tcp` | TCP sockets, re-exported from `std.net`. | 35 | [guide](../std/tcp/README.md) · [source](../std/tcp/module.ae) |
-| `std.udp` | Datagram sockets for game networking: non-blocking bind, send_to, recv_from, poll, and address values. | 43 | [guide](../std/udp/README.md) · [source](../std/udp/module.ae) |
+| `std.udp` | Datagram sockets for game networking: non-blocking bind, send_to, recv_from, poll, and address values. | 40 | [guide](../std/udp/README.md) · [source](../std/udp/module.ae) |
 | `std.time` | Civil date and time over Unix epoch seconds (UTC). | 22 | [guide](../std/time/README.md) · [source](../std/time/module.ae) |
 | `std.tracking` | Leak-detecting allocator wrapper. | 5 | [guide](../std/tracking/README.md) · [source](../std/tracking/module.ae) |
 | `std.truetype` | TrueType fonts read from their bytes: glyph lookup, metrics, kerning, contours and flattened outlines. | 24 | [guide](../std/truetype/README.md) · [source](../std/truetype/module.ae) |
@@ -93,8 +93,8 @@ header comment is the authoritative description.
 | `std.unicode` | Unicode normalization, case/accent folding and grapheme-aware length/substring (utf8proc). | 8 | [guide](../std/unicode/README.md) · [source](../std/unicode/module.ae) |
 | `std.url` | Percent-encoding and query-string parsing (RFC 3986). | 8 | [guide](../std/url/README.md) · [source](../std/url/module.ae) |
 | `std.uuid` | UUID v4 and v7 (RFC 9562). | 2 | [guide](../std/uuid/README.md) · [source](../std/uuid/module.ae) |
-| `std.worker` | Run blocking work off the loop thread, deliver the result back on it. | 19 | [guide](../std/worker/README.md) · [source](../std/worker/module.ae) |
-| `std.xml` | XML pull parsing and document writing. | 45 | [full section](#xml-stdxml) |
+| `std.worker` | Run blocking work off the loop thread, deliver the result back on it. | 10 | [guide](../std/worker/README.md) · [source](../std/worker/module.ae) |
+| `std.xml` | XML pull parsing and document writing. | 43 | [full section](#xml-stdxml) |
 | `std.yaml` | YAML parsing and emitting. | 16 | [guide](../std/yaml/README.md) · [source](../std/yaml/module.ae) |
 | `std.zip` | ZIP archive reader and writer over a byte buffer: stored/deflate, ZIP64, per-entry CRC-32. | 25 | [guide](../std/zip/README.md) · [source](../std/zip/module.ae) |
 | `std.zlib` | One-shot zlib and gzip deflate and inflate. | 29 | [full section](#compression-stdzlib) |
@@ -219,7 +219,7 @@ over it, `list.free`); a fresh string (a call's result, an interpolation)
 moves in, and a literal is stored as it is. The caller's own value is
 untouched, so the same string may be in several containers. Read a string
 element back with `list.get_string`, which checks that it is one; a `string`
-local given `list.get`'s bare `ptr` is warning W1005.
+local given `list.get`'s bare `ptr` is error E0202.
 
 Two C entry points do the same by hand, for C code and `ptr` values:
 `list_add_string_owned(l, s)` gives the list a reference of its own (a
@@ -2203,7 +2203,7 @@ All wrappers auto-free the underlying response and return an error string for tr
 - `http.server_stop(server)` - Stop server
 - `http.server_free(server)` - Free server
 
-Raw externs: `http_server_bind_raw`, `http_server_start_raw`, `http_server_set_host`.
+Raw externs: `http_server_bind_raw`, `http_server_start_raw`.
 
 **Static file serving:**
 - `http.serve_file(res, filepath)` - Serve a single file. Zero-copy: under HTTP/1.1 cleartext on Linux/macOS, takes the `sendfile(2)` fast path (zero heap allocation for the body); falls back to a buffered read for TLS / HTTP/2 / Range requests / Windows. `Content-Type` resolved via `http.mime_type(filepath)`.

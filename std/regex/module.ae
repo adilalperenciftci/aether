@@ -31,15 +31,6 @@
 // AetherString refcounts — Aether's auto-cleanup reclaims them.
 
 exports(
-    // raw externs (callable, but the wrappers below are the Go-style API)
-    aether_regex_compile, aether_regex_free, aether_regex_matches,
-    aether_regex_captures, aether_regex_captures_count, aether_regex_captures_get,
-    aether_regex_captures_start, aether_regex_captures_end, aether_regex_captures_free,
-    aether_regex_find_all, aether_regex_find_all_count,
-    aether_regex_find_all_start, aether_regex_find_all_end, aether_regex_find_all_free,
-    aether_regex_replace, aether_regex_replace_all,
-    aether_regex_last_error, aether_regex_clear_last_error,
-
     // Aether-side wrappers
     compile, compile_flags, free, last_error, clear_last_error,
     matches, find,

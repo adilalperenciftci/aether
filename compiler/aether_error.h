@@ -15,6 +15,7 @@ typedef enum {
     AETHER_ERR_UNDEFINED_TYPE = 302,
     AETHER_ERR_NOT_EXPORTED = 303,
     AETHER_ERR_HIDDEN_NAME = 304,        // identifier blocked by `hide` or `seal except` in an enclosing scope
+    AETHER_ERR_EXPORT_SHORT_NAME = 305,  // a module exports two names that answer to one short name (#2976)
     AETHER_ERR_REDEFINITION = 400,
     AETHER_ERR_INVALID_OPERAND = 500,
     AETHER_ERR_ACTOR_ERROR = 600,
@@ -34,6 +35,7 @@ typedef enum {
     AETHER_WARN_UNREACHABLE = 1002,
     AETHER_WARN_CONST_OVERFLOW = 1003,   // int constant expression exceeds 32 bits
     AETHER_WARN_UNREACHABLE_ARM = 1004,  // match arm shadowed by an earlier arm
+    AETHER_WARN_DOUBLED_MODULE_NAME = 1006,  // `ns.ns_x(...)` where `ns.x` is the same declaration (#2976)
 } AetherErrorCode;
 
 // Error reporting with source context

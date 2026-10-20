@@ -24,16 +24,7 @@ exports(
     clz32, clz64,
     udiv32, urem32, udiv64, urem64,
     ucmp64,
-    wrapping_add64, wrapping_mul64,
-    aether_bits_lsr32, aether_bits_lsr64,
-    aether_bits_rotr32, aether_bits_rotl32,
-    aether_bits_rotr64, aether_bits_rotl64,
-    aether_bits_popcount32, aether_bits_popcount64,
-    aether_bits_clz32, aether_bits_clz64,
-    aether_bits_udiv32, aether_bits_urem32,
-    aether_bits_udiv64, aether_bits_urem64,
-    aether_bits_ucmp64,
-    aether_bits_wrapping_add64, aether_bits_wrapping_mul64
+    wrapping_add64, wrapping_mul64
 )
 
 // ---- Raw externs ----

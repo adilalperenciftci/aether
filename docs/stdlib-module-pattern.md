@@ -61,10 +61,9 @@ Keep raw externs with **no** `_raw` suffix and **no** wrapper for
 operations that are:
 
 - Pure total functions that can't fail for any well-typed input
-  (`path_join`, `path_basename`, `math_sqrt`, `math_sin`,
-  `string_length`, `list_size`), and infallible boolean queries
-  (`file_exists`, `path_is_absolute`, `fs_is_symlink`, `json_is_null`,
-  `map_has`).
+  (`math_sqrt`, `math_sin`, `string_length`, `list_size`), and
+  infallible boolean queries (`file_exists`, `fs_is_symlink`,
+  `json_is_null`, `map_has`).
 - **Sentinel-returning infallibles** where the sentinel is part of the
   contract, not an error. Example: `file_mtime` returns `0` for missing
   files or stat failure, callers already handle zero as "no mtime", so
@@ -86,17 +85,27 @@ that is its C name, but a caller reaches it by its short name: `json.free(v)`
 resolves to the extern `json_free`, as `md5.hex` resolves to std.md5's Aether
 function `md5_hex` (a module's names are looked up as written, then in the
 prefixed form, #2976). Write calls, examples and READMEs with the short name;
-`json.json_free(v)` names the module twice for the same function, and
-`ae fmt --short-names` rewrites such calls where the compiler resolves both
-spellings to one declaration.
+`json.json_free(v)` names the module twice for the same function, `ae check`
+warns on it (W1006), and `ae fmt --short-names` rewrites such calls where the
+compiler resolves both spellings to one declaration.
 
-A wrapper and its extern should not answer to one short name with different
-behaviour. When a module function `x` wraps an extern spelt `<module>_x`, the
-function is merged under a name of its own and `module.x` reaches it (#2978),
-so `module.<module>_x` is the extern and the two spellings are two
-operations. Give an extern that callers need beside a wrapper a name that
-says it is raw, as the `_raw` externs above do, rather than the wrapper's own
-name with the module prefix.
+A module exports one name per operation. Two exports that answer to one
+short name, a wrapper `x` beside its extern `<module>_x` or
+`aether_<module>_x`, are an error (E0305, naming both): `module.x` would
+reach one and `module.<module>_x` the other, the same operation twice, or,
+worse, a different one that reads as the same. A wrapper's extern is
+declared for the wrapper to call and left out of `exports(...)`. An extern
+that callers need beside a wrapper, because it does something the wrapper
+does not, gets a name that says it is raw, as the `_raw` externs above do:
+
+```
+exports(add, add_raw)
+@extern("aether_set_add") add_raw(set: ptr, item: string) -> int
+add(set: ptr, item: string) -> bool { return add_raw(set, item) == 1 }
+```
+
+std dropped 336 such duplicate exports from its lists (#2976); the
+changelog names each one.
 
 ### Return shapes
 

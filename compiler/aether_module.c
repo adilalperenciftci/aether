@@ -11,6 +11,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <ctype.h>
 #include <stdio.h>
 
 #ifdef _WIN32
@@ -343,15 +344,17 @@ AetherModule* module_create(const char* name, const char* file_path) {
     module->imports = NULL;
     module->import_count = 0;
     module->ns = NULL;
+    module->lane_target = NULL;
     return module;
 }
 
 void module_free(AetherModule* module) {
     if (!module) return;
-    
+
     free(module->name);
     free(module->file_path);
     free(module->ns);
+    free(module->lane_target);
     
     if (module->ast) {
         free_ast_node(module->ast);
@@ -1745,6 +1748,94 @@ static const char* module_last_segment(const char* path) {
     return dot ? dot + 1 : path;
 }
 
+/* #2976: the short name an export of the module whose last segment is
+ * `leaf` answers to, `<leaf>.<short>`: the name without its C prefix, a
+ * leading `aether_<leaf>_` or `<leaf>_`, when what is left starts a name
+ * (`sha3_256_hex` keeps its own). Points into `name`. */
+static const char* export_short_name(const char* leaf, const char* name) {
+    size_t ln = strlen(leaf);
+    const char* rest = name;
+    if (ln > 0 && strncmp(rest, "aether_", 7) == 0 && strncmp(rest + 7, leaf, ln) == 0 &&
+        rest[7 + ln] == '_')
+        rest += 7 + ln + 1;
+    else if (ln > 0 && strncmp(rest, leaf, ln) == 0 && rest[ln] == '_')
+        rest += ln + 1;
+    return isalpha((unsigned char)*rest) ? rest : name;
+}
+
+/* #2976: one name per operation. A module may not export two names that
+ * answer to one short name, `add` beside `aether_set_add` or `json_free`
+ * beside `free`: a caller writing `set.add` reaches one of them, the other
+ * is the same operation under a second name (or, worse, a different one
+ * that reads as the same). Every such pair is reported, at the later name
+ * of the module's export list; returns 0 when there is one. `leaf` is the
+ * module's last segment, `path` its file. With `implicit`, a module that
+ * lists no exports exports every top-level function, builder, extern and
+ * constant, and those are its names. */
+static void export_names_add(ASTNode*** names, int* n, int* cap, ASTNode* nm) {
+    if (!nm || !nm->value) return;
+    if (*n == *cap) {
+        *cap = *cap ? *cap * 2 : 32;
+        *names = (ASTNode**)aether_xrealloc(*names, (size_t)*cap * sizeof(ASTNode*));
+    }
+    (*names)[(*n)++] = nm;
+}
+
+static int check_export_short_names(ASTNode* ast, const char* leaf, const char* module_name,
+                                    const char* path, int implicit) {
+    if (!ast || !leaf || !leaf[0]) return 1;
+    ASTNode** names = NULL;
+    int n = 0, cap = 0;
+    int listed = 0;
+    for (int i = 0; i < ast->child_count; i++) {
+        ASTNode* child = ast->children[i];
+        if (!child) continue;
+        if (child->type == AST_EXPORT_STATEMENT && child->child_count > 0) {
+            listed = 1;
+            export_names_add(&names, &n, &cap, child->children[0]);
+        } else if (child->type == AST_EXPORTS_LIST) {
+            listed = 1;
+            for (int k = 0; k < child->child_count; k++)
+                export_names_add(&names, &n, &cap, child->children[k]);
+        }
+    }
+    for (int i = 0; !listed && implicit && i < ast->child_count; i++) {
+        ASTNode* child = ast->children[i];
+        if (child && (child->type == AST_FUNCTION_DEFINITION ||
+                      child->type == AST_BUILDER_FUNCTION ||
+                      child->type == AST_EXTERN_FUNCTION ||
+                      child->type == AST_CONST_DECLARATION))
+            export_names_add(&names, &n, &cap, child);
+    }
+    int ok = 1;
+    for (int i = 1; i < n; i++) {
+        int repeat = 0;   /* a name listed twice is one name */
+        for (int j = 0; j < i && !repeat; j++)
+            repeat = strcmp(names[i]->value, names[j]->value) == 0;
+        if (repeat) continue;
+        const char* si = export_short_name(leaf, names[i]->value);
+        for (int j = 0; j < i; j++) {
+            if (strcmp(si, export_short_name(leaf, names[j]->value)) != 0) continue;
+            char msg[1024], hint[1024];
+            snprintf(msg, sizeof(msg),
+                     "module '%s' exports '%s' and '%s', two names that answer to "
+                     "one short name, '%s.%s'",
+                     module_name, names[j]->value, names[i]->value, leaf, si);
+            snprintf(hint, sizeof(hint),
+                     "export one name per operation: drop the duplicate from exports(...), "
+                     "or give a raw extern a name of its own, `@extern(\"<c name>\") %s_raw(...)`",
+                     si);
+            AetherError e = { path, NULL, names[i]->line, names[i]->column, msg, hint, NULL,
+                              AETHER_ERR_EXPORT_SHORT_NAME };
+            aether_error_report(&e);
+            ok = 0;
+            break;
+        }
+    }
+    free(names);
+    return ok;
+}
+
 /* #1780: a module named `X` that does `import std.X` (no alias) self-shadows —
  * a qualified `X.name(...)` call resolves to the CURRENT module first, so a
  * wrapper forwarding to the stdlib function of the same name calls itself, and
@@ -1872,6 +1963,56 @@ static char* module_package_prefix(const char* name, const char* file_path) {
  *    `value` directly while contrib.jq loads it as contrib.jq.value). Only
  *    when both names end the same way: the scope's written prefix is that
  *    last segment, and must not change under it. */
+/* #2607: the instruction set an `@target("avx2") import` names (the parser's
+ * `lane_target:` marker), or NULL for an ordinary import. */
+static const char* import_lane_target(const ASTNode* imp) {
+    if (!imp || !imp->annotation || strncmp(imp->annotation, "lane_target:", 12) != 0) return NULL;
+    return imp->annotation + 12;
+}
+
+/* #2607: `@target("avx2") import m as alias` is a module of its own: the same
+ * file loaded a second time and registered as `m__avx2`, so it gets its own
+ * namespace and its own functions beside a plain `import m`, and codegen can
+ * emit its functions compiled for the target (lane_region_open). The import
+ * is renamed to that module before it is looked up or loaded; the alias is
+ * how the importer names it. Returns 0 after reporting an import that cannot
+ * be one: without an alias the copy has no name of its own to be called by,
+ * and a selection would leave the copy's own functions half merged. */
+static int module_bind_target_import(ASTNode* imp, const char* importer_file) {
+    const char* target = import_lane_target(imp);
+    int alias = 0, selection = 0;
+    for (int k = 0; k < imp->child_count; k++) {
+        ASTNode* c = imp->children[k];
+        if (!c || c->type != AST_IDENTIFIER) continue;
+        if (c->annotation && strcmp(c->annotation, "module_alias") == 0) alias = 1;
+        else selection = 1;
+    }
+    if (!alias || selection) {
+        char msg[512];
+        snprintf(msg, sizeof(msg), "@target(\"%s\") import %s %s", target, imp->value,
+                 !alias ? "has no `as` name" : "selects names");
+        AetherError e = { importer_file, NULL, imp->line, imp->column, msg,
+                          !alias ? "a module imported at a target is a second copy of it, called through its own name: `@target(\"avx2\") import m as m_avx2`"
+                                 : "a module imported at a target is copied whole: drop the (names) list and call it through its `as` name",
+                          NULL, AETHER_ERR_SYNTAX };
+        aether_error_report(&e);
+        return 0;
+    }
+    size_t n = strlen(imp->value) + 2 + strlen(target) + 1;
+    char* instance = malloc(n);
+    snprintf(instance, n, "%s__%s", imp->value, target);
+    free(imp->value);
+    imp->value = instance;
+    return 1;
+}
+
+/* #2607: once the copy is registered, it carries its target. */
+static void module_note_lane_target(const ASTNode* imp) {
+    const char* target = import_lane_target(imp);
+    AetherModule* m = target ? module_find(imp->value) : NULL;
+    if (m && !m->lane_target) m->lane_target = strdup(target);
+}
+
 static void module_bind_import_identity(ASTNode* imp, const char* resolved,
                                         const char* importer,
                                         const char* importer_file) {
@@ -2006,6 +2147,8 @@ static int orchestrate_module(const char* module_name, const char* file_path,
     char ctx[300];
     snprintf(ctx, sizeof(ctx), "module '%s'", module_name);
     if (!check_selective_import_shadow(ast, ctx, file_path)) return 0;
+    if (!check_export_short_names(ast, module_last_segment(module_name), module_name, file_path, 1))
+        return 0;
     /* #2125: the C files this module ships must exist, and they are
      * dependencies of the build. */
     if (!module_check_source_directives(ast)) return 0;
@@ -2034,7 +2177,15 @@ static int orchestrate_module(const char* module_name, const char* file_path,
         if (child->type != AST_IMPORT_STATEMENT || !child->value) continue;
 
         char* sub_file = resolve_import_path(child);
-        module_bind_import_identity(child, sub_file, module_name, file_path);  /* #2255 */
+        if (import_lane_target(child)) {
+            if (!module_bind_target_import(child, file_path)) {   /* #2607 */
+                free(sub_file);
+                module_restore_source_dir(saved_source_dir);
+                return 0;
+            }
+        } else {
+            module_bind_import_identity(child, sub_file, module_name, file_path);  /* #2255 */
+        }
         const char* sub_path = child->value;
 
         warn_self_shadowing_import(module_name, child);   /* #1780 */
@@ -2048,6 +2199,7 @@ static int orchestrate_module(const char* module_name, const char* file_path,
                 return 0;
             }
             free(sub_file);
+            module_note_lane_target(child);   /* #2607 */
             if (!check_selective_import_exports(child, file_path)) {
                 module_restore_source_dir(saved_source_dir);
                 return 0;
@@ -2079,6 +2231,15 @@ int module_orchestrate(ASTNode* program) {
      * in main.ae itself is caught with the same diagnostic. */
     if (!check_selective_import_shadow(program, "main program", NULL)) return 0;
     if (!module_check_source_directives(program)) return 0;   /* #2125 */
+    /* #2976: a module file built or checked on its own (`ae check
+     * lib/m/module.ae`, `--emit=lib`) is held to the rule its importers
+     * hold it to, under the namespace a build gives it. */
+    {
+        char leaf[256];
+        if (program && module_leaf_of_file(program->source_file, leaf, sizeof(leaf))[0] &&
+            !check_export_short_names(program, leaf, leaf, program->source_file, 0))
+            return 0;
+    }
 
     DependencyGraph* graph = dependency_graph_create();
     dependency_graph_add_node(graph, "__main__");
@@ -2089,7 +2250,15 @@ int module_orchestrate(ASTNode* program) {
         if (child->type != AST_IMPORT_STATEMENT || !child->value) continue;
 
         char* file_path = resolve_import_path(child);
-        module_bind_import_identity(child, file_path, NULL, NULL);  /* #2255 */
+        if (import_lane_target(child)) {
+            if (!module_bind_target_import(child, NULL)) {   /* #2607 */
+                free(file_path);
+                dependency_graph_free(graph);
+                return 0;
+            }
+        } else {
+            module_bind_import_identity(child, file_path, NULL, NULL);  /* #2255 */
+        }
         const char* module_path = child->value;
 
         dependency_graph_add_edge(graph, "__main__", module_path);
@@ -2101,6 +2270,7 @@ int module_orchestrate(ASTNode* program) {
                 return 0;
             }
             free(file_path);
+            module_note_lane_target(child);   /* #2607 */
             if (!check_selective_import_exports(child, NULL)) {
                 dependency_graph_free(graph);
                 return 0;

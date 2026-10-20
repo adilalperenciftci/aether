@@ -53,7 +53,15 @@ exports(
     f32x8, splat8, load8, store8, lane8, sum8, min8, max8, select8, sqrt8, abs8,
     lt8, le8, gt8, ge8, eq8,
     mask8_and, mask8_or, mask8_not, any8, all8, mask8_lane,
-    load8_slice, store8_slice
+    load8_slice, store8_slice,
+    // ---- moves between lanes (#2550) ----
+    unpacklo4, unpackhi4, pairs_lo4, pairs_hi4,
+    unpacklo8, unpackhi8, pairs_lo8, pairs_hi8, halves_lo8, halves_hi8,
+    // ---- bits, integer lanes of eight, reductions (#2603) ----
+    bits4, from_bits4, bits8, from_bits8, i32x8, i32splat8,
+    reduce_min4, reduce_max4, reduce_min8, reduce_max8,
+    // ---- the width a module imported at a target runs at (#2607) ----
+    native8, cpu_has_avx2
 )
 
 // ---- f32x4: four single-precision lanes ---------------------------------
@@ -235,6 +243,79 @@ exports(
 @extern("_ae_i32x8_all") all8(mask: i32x8) -> bool
 // Lane `index` of a mask: 0 or -1 for a comparison result.
 @extern("_ae_i32x8_lane") mask8_lane(v: i32x8, index: long) -> long
+
+// ---- moves between lanes (#2550) ----------------------------------------
+//
+// The patterns a transpose is made of, each one instruction (unpcklps,
+// movlhps, shufps, vperm2f128 on x86; zip and ext on NEON). A structure-of-
+// arrays gather loads eight records as eight rows and transposes them into
+// one f32x8 per field, as Box3D's b3TransposeW8 does:
+//
+//     t0 = unpacklo8(r0, r1)  ...  t7 = unpackhi8(r6, r7)
+//     u0 = pairs_lo8(t0, t2)  ...  u7 = pairs_hi8(t5, t7)
+//     c0 = halves_lo8(u0, u4) ...  c7 = halves_hi8(u3, u7)
+//
+// Lanes are numbered from 0 as `lane4` / `lane8` read them.
+
+// [a0 b0 a1 b1] and [a2 b2 a3 b3]: the two vectors' lanes interleaved.
+@extern("_ae_f32x4_unpacklo") unpacklo4(a: f32x4, b: f32x4) -> f32x4
+@extern("_ae_f32x4_unpackhi") unpackhi4(a: f32x4, b: f32x4) -> f32x4
+// [a0 a1 b0 b1] and [a2 a3 b2 b3]: a pair from each.
+@extern("_ae_f32x4_pairs_lo") pairs_lo4(a: f32x4, b: f32x4) -> f32x4
+@extern("_ae_f32x4_pairs_hi") pairs_hi4(a: f32x4, b: f32x4) -> f32x4
+// The four-lane patterns applied to lanes 0-3 and to lanes 4-7 of each,
+// as AVX's own work within each 128-bit half:
+// unpacklo8 is [a0 b0 a1 b1 a4 b4 a5 b5], unpackhi8 [a2 b2 a3 b3 a6 b6 a7 b7],
+// pairs_lo8 [a0 a1 b0 b1 a4 a5 b4 b5], pairs_hi8 [a2 a3 b2 b3 a6 a7 b6 b7].
+@extern("_ae_f32x8_unpacklo") unpacklo8(a: f32x8, b: f32x8) -> f32x8
+@extern("_ae_f32x8_unpackhi") unpackhi8(a: f32x8, b: f32x8) -> f32x8
+@extern("_ae_f32x8_pairs_lo") pairs_lo8(a: f32x8, b: f32x8) -> f32x8
+@extern("_ae_f32x8_pairs_hi") pairs_hi8(a: f32x8, b: f32x8) -> f32x8
+// Whole halves: [a0 a1 a2 a3 b0 b1 b2 b3] and [a4 a5 a6 a7 b4 b5 b6 b7].
+@extern("_ae_f32x8_halves_lo") halves_lo8(a: f32x8, b: f32x8) -> f32x8
+@extern("_ae_f32x8_halves_hi") halves_hi8(a: f32x8, b: f32x8) -> f32x8
+
+// ---- bits, integer lanes of eight, reductions (#2603) -------------------
+
+// The same bits read as integer lanes, and back: a reinterpretation, not a
+// conversion (`bits4(splat4(1.0))` is 0x3f800000 in every lane). With
+// `mask_and` / `mask_or` (`mask8_and` / `mask8_or`), which are bitwise on any
+// integer lanes, this edits a float's bits in place, as an index embedded
+// in the low mantissa bits of a value is:
+//
+//     tagged = from_bits8(mask8_or(mask8_and(bits8(v), i32splat8(0 - 128)), index))
+@extern("_ae_f32x4_bits") bits4(v: f32x4) -> i32x4
+@extern("_ae_f32x4_from_bits") from_bits4(v: i32x4) -> f32x4
+@extern("_ae_f32x8_bits") bits8(v: f32x8) -> i32x8
+@extern("_ae_f32x8_from_bits") from_bits8(v: i32x8) -> f32x8
+// Eight integer lanes from eight values, or one value in every lane. The
+// arithmetic operators and comparisons work on i32x8 as on f32x8.
+@extern("_ae_i32x8_set") i32x8(a: int, b: int, c: int, d: int, e: int, f: int, g: int, h: int) -> i32x8
+@extern("_ae_i32x8_splat") i32splat8(v: int) -> i32x8
+// The smallest / largest lane. The lanes are compared in one fixed order
+// with min4's rule (`a < b ? a : b`): for eight, lane i against lane i + 4
+// first, then as for four, lanes 0 and 2, 1 and 3, then the two winners. A
+// tie or a NaN therefore gives the same answer on every instruction set and
+// in either form of f32x8.
+@extern("_ae_f32x4_reduce_min") reduce_min4(v: f32x4) -> f32
+@extern("_ae_f32x4_reduce_max") reduce_max4(v: f32x4) -> f32
+@extern("_ae_f32x8_reduce_min") reduce_min8(v: f32x8) -> f32
+@extern("_ae_f32x8_reduce_max") reduce_max8(v: f32x8) -> f32
+
+// ---- the width a module imported at a target runs at (#2607) ------------
+//
+// `@target("avx2") import m as m_avx2` compiles a second copy of module `m`
+// for AVX2, beside the build's own copy (see README "One binary, two
+// widths"). The program picks one at run time.
+
+// Whether an f32x8 is one 256-bit register in the code that calls this: the
+// build's answer (true under `-mavx2`), and true in a copy imported at
+// `@target("avx2")` on x86.
+@extern("_ae_lanes8_native") native8() -> bool
+// Whether this CPU runs AVX2 code, and its system saves the 256-bit
+// registers: the check to make before calling into an `@target("avx2")`
+// copy. False off x86.
+@extern("_ae_cpu_avx2") cpu_has_avx2() -> bool
 
 // ---- slice-checked wrappers (#2301) -------------------------------------
 //

@@ -555,6 +555,7 @@ int struct_field_owned_array(ASTNode* field, int* len);
  * its own: a fresh closure (a literal, a call handing one over) is adopted,
  * anything else (a local, a field, an element, a parameter) is retained. */
 void emit_closure_take(CodeGenerator* gen, ASTNode* e);
+int branch_value_has_fresh(CodeGenerator* gen, ASTNode* e);
 /* #2890: is `v` a closure or a bare function, which a `ptr` slot takes as
  * a box (a closure, taken) or as the code address (a bare function)? Store
  * it there so; 0, emitting nothing, when it is neither. */
@@ -596,10 +597,12 @@ void emit_struct_take(CodeGenerator* gen, ASTNode* e, const char* sname,
                       const char* target);
 const char* struct_owning_strings(CodeGenerator* gen, Type* t);
 ASTNode* find_struct_definition_by_name(ASTNode* program, const char* name);
+ASTNode* find_sum_definition_by_name(ASTNode* program, const char* name);
 
 /* #2921: R2/R3 for composite types (codegen_own.c). */
 typedef enum { OWN_RETAIN, OWN_DROP, OWN_ZERO, OWN_PUBLISH } OwnOp;
 int own_type_owns(CodeGenerator* gen, Type* t);
+int own_value_composite(CodeGenerator* gen, Type* t);
 void own_emit_part(CodeGenerator* gen, Type* pt, const char* lv, OwnOp op);
 void own_emit_prototypes(CodeGenerator* gen, Type* t);
 void emit_composite_take(CodeGenerator* gen, ASTNode* e, Type* t);

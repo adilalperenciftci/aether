@@ -22,10 +22,6 @@
 // The map owns nothing a value points at.
 
 exports(
-    aether_intmap_new, aether_intmap_free, aether_intmap_put, aether_intmap_get,
-    aether_intmap_has, aether_intmap_add, aether_intmap_add_failed,
-    aether_intmap_remove, aether_intmap_size,
-    aether_intmap_clear, aether_intmap_next, aether_intmap_key_at, aether_intmap_value_at,
     new, free, put, get, has, add, remove, size, clear, next, key_at, value_at
 )
 

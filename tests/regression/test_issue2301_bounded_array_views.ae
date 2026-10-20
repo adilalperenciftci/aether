@@ -48,7 +48,6 @@ main() {
     check(got == 3, "a write through the view lands in the array")
     check(panics_int(v, 4), "intarr view index past the end panics")
     check(panics_int(v, -1), "a negative index panics")
-    check(intarr.intarr_array(a).len == 4, "the long name is bounded too")
     intarr.free(a)
     check(intarr.array(null).len == 0, "a null intarr handle is the empty slice")
 

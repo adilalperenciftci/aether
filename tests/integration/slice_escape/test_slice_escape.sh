@@ -293,13 +293,18 @@ case "$out" in
        fails=$((fails + 1)) ;;
 esac
 
-# A re-bind made by a closure call is not counted: a name that holds a view
-# before `reset()` still holds one after it, whatever the closure does. That
-# refuses a closure that does re-bind the name to a `make` buffer (a rare
-# false positive), so that no closure that re-binds it back to a view, or
-# may not re-bind it at all, is accepted. Following a closure call soundly
-# is future work (#2837).
-cat > "$TMP/closure_rebind.ae" <<'AE'
+# A call of a closure the function binds counts what the closure re-binds
+# for sure (#2837): a name it binds on every way through its body, before
+# any `return`, holds what the closure gave it after the call. Its stores of
+# a view already taint the name from where it is written on, so the call
+# only ever takes views away. The name is the function's own when the
+# function binds it ahead of the closure, in a block around it, and the
+# closure does not declare one of its own first.
+cat > "$TMP/closure_rebinds.ae" <<'AE'
+struct Holder {
+    data: int[]
+}
+
 pick() -> int[] {
     arr = [1, 2, 3]
     let v: int[] = arr
@@ -310,18 +315,7 @@ pick() -> int[] {
     return v
 }
 
-main() {
-    println("${pick().len}")
-}
-AE
-refused closure_rebind 8:12 "'pick' returns a slice of its own storage (\`v\`, which holds a slice of it)"
-
-cat > "$TMP/closure_rebind_field.ae" <<'AE'
-struct Holder {
-    data: int[]
-}
-
-pick() -> Holder {
+field() -> Holder {
     arr = [1, 2, 3]
     h = Holder { data: arr }
     reset = || {
@@ -331,12 +325,253 @@ pick() -> Holder {
     return h
 }
 
+both(n: int) -> int[] {
+    arr = [1, 2, 3]
+    let v: int[] = arr
+    reset = || {
+        if n > 0 {
+            v = make([]int, 5)
+        } else {
+            v = make([]int, 7)
+        }
+    }
+    reset()
+    return v
+}
+
+arms(n: int) -> int[] {
+    arr = [1, 2, 3]
+    let v: int[] = arr
+    reset = || {
+        match n {
+            0 -> { v = make([]int, 8) }
+            _ -> { v = make([]int, 9) }
+        }
+    }
+    reset()
+    return v
+}
+
 main() {
-    println("${pick().data.len}")
+    a = pick()
+    h = field()
+    b = both(1)
+    c = arms(0)
+    println("closure rebinds ${a.len} ${h.data.len} ${b.len} ${c.len}")
+    free(a)
+    free(h.data)
+    free(b)
+    free(c)
 }
 AE
-refused closure_rebind_field 12:12 "'pick' returns a slice of its own storage (\`h\`, which holds a slice of it)"
+out=$(cd "$TMP" && AETHER_HOME="$ROOT" "$AE" run closure_rebinds.ae 2>&1)
+case "$out" in
+    *"closure rebinds 4 6 5 8"*) ;;
+    *) echo "  [FAIL] closure_rebinds: not \"closure rebinds 4 6 5 8\":"
+       echo "$out" | sed 's/^/        /'
+       fails=$((fails + 1)) ;;
+esac
 
+# Re-bound back to a view, whether at the end, under a loop, in a match arm
+# or by a nested closure the body calls: the store taints the name, and the
+# call clears nothing that counts.
+cat > "$TMP/closure_rebind_loop.ae" <<'AE'
+pick(n: int) -> int[] {
+    arr = [1, 2, 3]
+    let v: int[] = arr
+    reset = || {
+        v = make([]int, 4)
+        i = 0
+        while i < n {
+            v = arr
+            i = i + 1
+        }
+    }
+    reset()
+    return v
+}
+
+main() {
+    println("${pick(1).len}")
+}
+AE
+refused closure_rebind_loop 13:12 "'pick' returns a slice of its own storage (\`v\`, which holds a slice of it)"
+
+cat > "$TMP/closure_rebind_arm.ae" <<'AE'
+pick(n: int) -> int[] {
+    arr = [1, 2, 3]
+    let v: int[] = arr
+    reset = || {
+        v = make([]int, 4)
+        match n {
+            0 -> { v = arr }
+            _ -> { }
+        }
+    }
+    reset()
+    return v
+}
+
+main() {
+    println("${pick(0).len}")
+}
+AE
+refused closure_rebind_arm 12:12 "'pick' returns a slice of its own storage (\`v\`, which holds a slice of it)"
+
+cat > "$TMP/closure_nested_back.ae" <<'AE'
+pick() -> int[] {
+    arr = [1, 2, 3]
+    let v: int[] = arr
+    reset = || {
+        v = make([]int, 4)
+        inner = || {
+            v = arr
+        }
+        inner()
+    }
+    reset()
+    return v
+}
+
+main() {
+    println("${pick().len}")
+}
+AE
+refused closure_nested_back 12:12 "'pick' returns a slice of its own storage (\`v\`, which holds a slice of it)"
+
+# A closure written before `let v` binds a `v` of its own: the call leaves
+# the function's `v` as it was.
+cat > "$TMP/closure_own_v.ae" <<'AE'
+pick() -> int[] {
+    arr = [1, 2, 3]
+    reset = || {
+        v = make([]int, 4)
+        println("${v.len}")
+    }
+    let v: int[] = arr
+    reset()
+    return v
+}
+
+main() {
+    println("${pick().len}")
+}
+AE
+refused closure_own_v 9:12 "'pick' returns a slice of its own storage (\`v\`, which holds a slice of it)"
+
+# The callee is the closure the name holds at the call: one bound in a
+# branch the call is not in is not followed, and neither is a body that
+# may return before its re-bind.
+cat > "$TMP/closure_branch_bound.ae" <<'AE'
+pick(n: int) -> int[] {
+    arr = [1, 2, 3]
+    let v: int[] = arr
+    reset = || { }
+    if n > 0 {
+        reset = || {
+            v = make([]int, 4)
+        }
+    }
+    reset()
+    return v
+}
+
+main() {
+    println("${pick(1).len}")
+}
+AE
+refused closure_branch_bound 11:12 "'pick' returns a slice of its own storage (\`v\`, which holds a slice of it)"
+
+cat > "$TMP/closure_module_fn.ae" <<'AE'
+reset() {
+    println("the module's reset")
+}
+
+pick(n: int) -> int[] {
+    arr = [1, 2, 3]
+    let v: int[] = arr
+    if n > 0 {
+        reset = || {
+            v = make([]int, 4)
+        }
+    }
+    reset()
+    return v
+}
+
+main() {
+    println("${pick(1).len}")
+}
+AE
+refused closure_module_fn 14:12 "'pick' returns a slice of its own storage (\`v\`, which holds a slice of it)"
+
+cat > "$TMP/closure_returns_first.ae" <<'AE'
+pick(n: int) -> int[] {
+    arr = [1, 2, 3]
+    let v: int[] = arr
+    reset = || {
+        if n > 0 {
+            return
+        }
+        v = make([]int, 4)
+    }
+    reset()
+    return v
+}
+
+main() {
+    println("${pick(1).len}")
+}
+AE
+refused closure_returns_first 11:12 "'pick' returns a slice of its own storage (\`v\`, which holds a slice of it)"
+
+# A `try` handler starts from the state after any statement of its body:
+# the panic may come after `v = arr` and before the re-bind, a statement's
+# own (the `make` may panic) or a closure call's. Joined with the body's end
+# only, both were accepted and returned a slice of the frame.
+cat > "$TMP/try_rebind.ae" <<'AE'
+pick(n: int) -> int[] {
+    arr = [1, 2, 3]
+    let v: int[] = make([]int, 2)
+    try {
+        v = arr
+        v = make([]int, n)
+    } catch e {
+        println(e)
+    }
+    return v
+}
+
+main() {
+    println("${pick(4).len}")
+}
+AE
+refused try_rebind 10:12 "'pick' returns a slice of its own storage (\`v\`, which holds a slice of it)"
+
+cat > "$TMP/closure_try.ae" <<'AE'
+pick() -> int[] {
+    arr = [1, 2, 3]
+    let v: int[] = make([]int, 2)
+    reset = || {
+        v = make([]int, 4)
+    }
+    try {
+        v = arr
+        reset()
+    } catch e {
+        println(e)
+    }
+    return v
+}
+
+main() {
+    println("${pick().len}")
+}
+AE
+refused closure_try 13:12 "'pick' returns a slice of its own storage (\`v\`, which holds a slice of it)"
+
+# Re-bound back to a view after the `make`, re-bound on one branch only, or
+# called on one path only: a view may stand after the call.
 cat > "$TMP/closure_rebind_back.ae" <<'AE'
 pick() -> int[] {
     arr = [1, 2, 3]

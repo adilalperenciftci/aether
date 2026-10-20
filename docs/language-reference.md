@@ -397,7 +397,7 @@ main() {
 - **A slice decays to its pointer** wherever a `ptr` is expected, exactly as a `T[N]` array does: a `ptr` parameter, a C extern's parameter (including one declared `T[]`), `free(s)`, a comparison against `null`, and pointer arithmetic (`s + n` is a `ptr` to element `n`). `s as ptr` spells the same conversion explicitly, for a `ptr` return or binding. The length is dropped at that boundary; nothing else about the extern ABI changes.
 - **`make([]T, n)`** allocates `n` zeroed elements and returns them as a bounded slice; `free(s)` releases them.
 - A slice does not own the storage it views. It is valid for exactly as long as that storage: an array in an enclosing scope, a `make` buffer until its `free`, a C buffer until C reclaims it. The elements are the storage's: a string read out of a `string[]` slice (`t = s[i]`, a return, a field) takes a reference of its own, and a store into an element (`s[i] = v`) takes the new string and releases the one it replaces, as a store into the array itself does. Memory C owns, viewed as `p as string[]`, owns nothing: a store there gives C the characters and takes no reference ([memory-management.md](memory-management.md#ptr-slots)).
-- **A slice of a function's own storage stays in the function** (E0900). An array literal in a slice slot, and a function's own fixed-size array, live in its frame, which ends when the function returns. A slice of either may be used while the function runs and passed down to the functions it calls, but it may not leave the function: returned (alone, in a struct or tuple, or in a closure that captured it), stored in a module-level `var`, or stored in a field of something that may outlive the function: a struct behind a pointer, or a global (a struct value of the function's own may take it, and is then itself such a slice). Each of those is refused at the value that leaves, `'lit' returns a slice of its own storage (an array literal)`. Keep such a slice in storage that lives as long as it: a `make([]T, n)` buffer, a slice the caller passed in, or a module-level array. A slice parameter (`xs: int[]`) views the caller's storage and may be returned; a fixed-size array parameter (`a: int[3]`) is the function's own copy of the caller's array, so a slice of it is a slice of the function's storage. What a name holds where it leaves is what counts, path by path: a local or a field of a local struct re-bound to a `make` buffer before the `return` holds no slice of the frame any more, but one that still holds it on any path to the `return` (an `if` that re-binds it in one branch only, a loop that may `break` before the re-bind) is refused. A re-bind made by calling a closure is not counted: a name that holds a slice of the frame before `reset()` still holds one after it, even when the closure re-binds it to a `make` buffer (following a closure call soundly is future work, #2837). The other way is counted, conservatively: a closure that may store a slice of the function's storage into one of its names (`setview = || { v = arr }`) gives that name a slice from where the closure is written on, whether and whenever it is called, and a store a closure makes through a pointer or into a module-level `var` is judged as the same store written in the function. What the closure stores is judged as the function's own stores are: a fixed-size array of the function or an array literal, a name that holds such a slice at some point of the function, a local of the closure bound to one, or a parameter of the closure it is called with one for (any parameter that can hold a slice, when the closure is passed on or stored). A slice parameter of the function, a `make` buffer, a module-level `var` or `[]` stored by a closure leaves the name as it was. A call's result is taken to be no view of the caller, so a function that hands back the slice it was given is not seen through, in a closure (`v = same(arr)`) or not.
+- **A slice of a function's own storage stays in the function** (E0900). An array literal in a slice slot, and a function's own fixed-size array, live in its frame, which ends when the function returns. A slice of either may be used while the function runs and passed down to the functions it calls, but it may not leave the function: returned (alone, in a struct or tuple, or in a closure that captured it), stored in a module-level `var`, or stored in a field of something that may outlive the function: a struct behind a pointer, or a global (a struct value of the function's own may take it, and is then itself such a slice). Each of those is refused at the value that leaves, `'lit' returns a slice of its own storage (an array literal)`. Keep such a slice in storage that lives as long as it: a `make([]T, n)` buffer, a slice the caller passed in, or a module-level array. A slice parameter (`xs: int[]`) views the caller's storage and may be returned; a fixed-size array parameter (`a: int[3]`) is the function's own copy of the caller's array, so a slice of it is a slice of the function's storage. What a name holds where it leaves is what counts, path by path: a local or a field of a local struct re-bound to a `make` buffer before the `return` holds no slice of the frame any more, but one that still holds it on any path to the `return` (an `if` that re-binds it in one branch only, a loop that may `break` before the re-bind) is refused. A call of a closure the function binds (`reset()` after `reset = || { v = make([]int, 4) }`) counts what the closure re-binds for sure: a name of the function it binds on every way through its body before any `return` (both branches of an `if`, every arm of a `match` that covers its value, not a loop's body) holds what the closure gave it after the call. The name is the function's own when the function binds it ahead of the closure, in a block around it, and the closure does not declare one of its own first; a closure bound more than once, or called before it is bound, re-binds nothing that counts. A `try` around such a call starts its handler from what held a slice before any statement of its body ran, or after any. The other way is counted, conservatively: a closure that may store a slice of the function's storage into one of its names (`setview = || { v = arr }`) gives that name a slice from where the closure is written on, whether and whenever it is called, and a store a closure makes through a pointer or into a module-level `var` is judged as the same store written in the function. What the closure stores is judged as the function's own stores are: a fixed-size array of the function or an array literal, a name that holds such a slice at some point of the function, a local of the closure bound to one, or a parameter of the closure it is called with one for (any parameter that can hold a slice, when the closure is passed on or stored). A slice parameter of the function, a `make` buffer, a module-level `var` or `[]` stored by a closure leaves the name as it was. A call's result is taken to be no view of the caller, so a function that hands back the slice it was given is not seen through, in a closure (`v = same(arr)`) or not.
 
 **Views over a raw pointer are unbounded.** `p as T[]` (the typed-array cast) and a `T[]` handed back by a C extern have no length the compiler can know. Such a view indexes without a check, as it always did, and its `.len` is `-1`. Bound it with an explicit end to get checking back:
 
@@ -1780,10 +1780,10 @@ For the full design rationale, edge cases, and worked examples, see [hide-and-se
 ## Memory Management
 
 Aether has no garbage collector. Values the program owns (strings, closures,
-string sequences, and the structs, tuples, optionals and fixed-size arrays
-built from them) are reference counted by the compiler: every place holds one
-reference, a store takes one, and leaving a scope releases what the scope held,
-so the program writes no free for them ([String ownership](#string-ownership)).
+string sequences, and the structs, tuples, optionals, sums and fixed-size
+arrays built from them) are reference counted by the compiler: every place
+holds one reference, a store takes one, and leaving a scope releases what the
+scope held, so the program writes no free for them ([String ownership](#string-ownership)).
 Handles (a list, a map, a C buffer, an open file) are `ptr`s, which own
 nothing, and the program frees them, with `defer`. [Memory Management
 Guide](memory-management.md) states the rules in full.
@@ -3352,6 +3352,46 @@ An alias is resolved in the file that writes it, a library module's file
 included (#2209), and an alias-only import of a local package merges the
 package's functions as a plain import does.
 
+### `@target("avx2") import m as alias` a second copy compiled for AVX2
+
+An `f32x8` is one 256-bit register in a build with `-mavx2` and two
+four-lane halves in any other, and a `-mavx2` binary faults on a CPU without
+AVX2. A program that ships one executable for every CPU imports the module
+holding its lane code a second time, at the target, and chooses at run time
+(#2607):
+
+```aether,fragment
+import std.lanes
+import physics.wide
+@target("avx2") import physics.wide as wide8
+
+solve(constraints: ptr, n: int) {
+    if lanes.cpu_has_avx2() { wide8.solve(constraints, n) } else { wide.solve(constraints, n) }
+}
+```
+
+- The import is a copy of the module of its own (its own functions and
+  module variables), compiled for AVX2 while the rest of the program keeps
+  the build's flags. It is named by its alias, which is required, and
+  imported whole: no `(names)` list, no glob.
+- Both copies compute the same bits; only their width differs.
+  `lanes.native8()` is true in the copy, and `lanes.cpu_has_avx2()` says
+  whether this CPU can run it (false off x86).
+- Two files importing the same module at the target share one copy.
+- An eight-lane value (`f32x8`, `i32x8`, or a struct, pointer, array, tuple
+  or optional holding one) cannot cross between the copies, or from the copy
+  into C compiled apart: the two copies spell it as different C types, so
+  the call is a compile error (E0200). The entry points take scalars and
+  pointers to the data.
+- A closure inside the copy is a compile error: its body would be compiled
+  outside the copy.
+- `"avx2"` is the one target, the one that changes an `f32x8`'s width. With
+  a compiler other than GCC or Clang on x86, and on the
+  `AETHER_GCC_COMPAT=0` path, the copy is plain code with no target
+  attribute.
+
+`std/lanes/README.md` ("One binary, two widths") has the rest.
+
 ### Local Module Imports
 
 ```aether,fragment
@@ -3997,6 +4037,7 @@ An error stops the build and prints its code, `error[E0301]: ...`, with the sour
 | `E0302` | A type name that names no type of the program, as a local's, a parameter's or a field's type (`Shape s` with no `Shape`; `x and y`, where AND is `&&`) |
 | `E0303` | A name the module does not export |
 | `E0304` | A name hidden in this scope by `hide` or `seal except` ([hide and seal](hide-and-seal.md)) |
+| `E0305` | A module exports two names that answer to one short name, `add` beside `aether_set_add` or `join` beside `string_join`: one name per operation ([module-system-design.md](module-system-design.md)) |
 | `E0600` | An actor rule, such as a closure in a handler writing the actor's state |
 | `E0700` | Missing return: control can reach the end of a function whose result is not void ([Returning on every path](#returning-on-every-path-e0700)) |
 | `E0800` | A construct a quote cannot hold: a closure, `callback` or block inside one, `defer`, `try`, `panic`, an actor operation, `match`, string interpolation, `new`, an array literal ([quote.md](quote.md#what-a-quote-may-contain-and-the-errors)) |
@@ -4236,6 +4277,32 @@ partially-handled enum is doing real work and is never reported.
 
 This pairs with the exhaustiveness check, which reports the opposite
 direction, a `match` over a sum type or enum that is missing a case.
+
+### A Module Named Twice [W1006]
+
+`ae check` warns on a call that names its module twice where the short form
+reaches the same function. A module's extern is spelt with the module's
+prefix, `json_free`, and `json.free(v)` reaches it; `json.json_free(v)` says
+the module twice. A module exports one name per operation (E0305), so the
+short form is always the same function:
+
+```aether,fragment
+import std.json
+
+main() {
+    v, _ = json.parse("[1]")
+    json.json_free(v)
+    // warning[W1006]: `json.json_free` names its module twice: `json.free`
+    // is the same function
+    // help: write `json.free`, or run `ae fmt --short-names main.ae` to
+    // rewrite every such call
+}
+```
+
+`ae fmt --short-names` rewrites every such call of the files it is given,
+and only those ([formatter.md](formatter.md)). A long name whose short form
+would start with a digit (`sha3.sha3_256_hex`) has no short form and is not
+reported. `ae build` and `ae run` do not report it.
 
 ## Match Expressions
 

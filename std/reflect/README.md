@@ -143,7 +143,8 @@ Kinds: `KIND_OTHER` (0: optional, tuple, sum, bitset, SIMD), `KIND_BOOL`,
 `KIND_ARRAY`, `KIND_SLICE`, `KIND_ENUM`, `KIND_FN`. Argument kinds:
 `ARG_INT`, `ARG_FLOAT`, `ARG_STRING`, `ARG_BOOL`.
 
-The raw externs (`aether_schema_name`, `aether_schema_field_count`, ...) are
-the same calls with C conventions (a missing name is `NULL`), for a host that
-reads tables from C: `runtime/aether_schema.h` declares them with the table
-layout.
+The C functions under these (`aether_schema_name`, `aether_schema_field_count`,
+...) are the same calls with C conventions (a missing name is `NULL`), for a
+host that reads tables from C: `runtime/aether_schema.h` declares them with the
+table layout. The module exports the wrappers only, one name per operation
+(#2976).

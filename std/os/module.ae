@@ -30,7 +30,6 @@ exports(
     kill, wait_pid_timeout, run_supervised,
     os_run_full_raw, run_full,
     os_chdir_raw, os_getcwd_raw, chdir, getcwd,
-    aether_process_resident, aether_process_private,
     memory_resident, memory_private
 )
 

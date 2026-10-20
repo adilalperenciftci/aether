@@ -15,8 +15,6 @@
 // normalize a path couldn't find them. They are surfaced here now.
 
 exports(
-    path_join, path_dirname, path_basename, path_extension, path_is_absolute,
-    path_clean, path_rel, path_is_within_base, path_separator,
     // Short aliases (the std.fs surface uses these bare names too).
     join, dirname, basename, extension, is_absolute,
     clean, rel, is_within_base, separator, join_clean

@@ -9,7 +9,6 @@
 // decompress requires the caller to provide `output_length`.
 
 exports(
-    lzf_max_compressed_size,
     lzf_get_compress_bytes, lzf_get_compress_length,
     lzf_release_compress,
     lzf_get_decompress_bytes, lzf_get_decompress_length,

@@ -41,13 +41,12 @@
 
 exports(
     EVENT_START, EVENT_END, EVENT_TEXT, EVENT_EOF, EVENT_ERROR,
-    xml_parser_new_str, xml_next, xml_event_name, xml_event_text,
+    xml_parser_new_str, xml_event_name, xml_event_text,
     xml_event_attr_count, xml_event_attr_name, xml_event_attr_value,
     xml_event_attr_str, xml_parser_error, xml_parser_free,
     xml_builder_new, xml_builder_declaration, xml_builder_start,
     xml_builder_attr, xml_builder_text, xml_builder_end,
     xml_builder_element, xml_builder_finish, xml_builder_free,
-    xml_escape,
     parser, next, name, text, attr, attr_count, attr_name, attr_value,
     error, free, writer, declaration, start, attribute, text_node,
     end, element, finish, free_builder, escape

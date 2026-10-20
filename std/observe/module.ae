@@ -52,9 +52,6 @@
 // notify_field(obj, field): the same pass a compiler-emitted store runs.
 
 exports(
-    aether_observe, aether_observe_fields, aether_unobserve, aether_unobserve_all,
-    aether_observer_count, aether_observe_is_notifying,
-    aether_observe_notify, aether_observe_notify_field,
     ANY_FIELD,
     observe, observe_fields, unobserve, unobserve_all, observer_count, is_notifying,
     notify, notify_field

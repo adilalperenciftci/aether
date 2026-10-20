@@ -31,16 +31,7 @@
 import std.string
 
 exports(
-    aether_strbuilder_new, aether_strbuilder_append, aether_strbuilder_append_n,
-    aether_strbuilder_append_bytes, append_slice,
-    aether_strbuilder_append_byte, aether_strbuilder_append_int,
-    aether_strbuilder_append_long, aether_strbuilder_append_hex,
-    aether_strbuilder_append_codepoint,
-    aether_strbuilder_length, aether_strbuilder_capacity,
-    aether_strbuilder_reserve, aether_strbuilder_truncate,
-    aether_strbuilder_clear,
-    aether_strbuilder_finish, aether_strbuilder_finish_with_length,
-    aether_strbuilder_free,
+    append_slice,
     new, append, append_n, append_byte, append_int,
     append_long, append_hex, append_codepoint, append_format,
     length, capacity, reserve, truncate, clear,

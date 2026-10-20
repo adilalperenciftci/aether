@@ -54,10 +54,6 @@
 exports(
     // Return codes
     CAP_OK, CAP_ERR, CAP_UNSUPPORTED,
-    // Raw externs
-    aether_capsicum_available, aether_capsicum_enter,
-    aether_capsicum_in_mode, aether_capsicum_rights_limit,
-    aether_capsicum_fcntls_limit,
     // Ergonomic wrappers
     available, enter, in_mode, rights_limit, fcntls_limit,
     // cap_rights bits (R_*) and fcntl-command bits (F_*)
