@@ -22,6 +22,7 @@
     <li><a href="#parse_query">parse_query</a></li>
     <li><a href="#query_get">query_get</a></li>
     <li><a href="#query_get_all">query_get_all</a></li>
+    <li><a href="#query_free">query_free</a></li>
   </ul>
   <hr>
   <h2>Modules</h2>
@@ -82,6 +83,7 @@
     <li><a href="path.html">path</a></li>
     <li><a href="plural.html">plural</a></li>
     <li><a href="pqueue.html">pqueue</a></li>
+    <li><a href="quote.html">quote</a></li>
     <li><a href="reflect.html">reflect</a></li>
     <li><a href="regex.html">regex</a></li>
     <li><a href="resp.html">resp</a></li>
@@ -150,19 +152,25 @@
       <h3 class="function-name">parse_query <span class="kind">fn</span></h3>
       <pre class="usage"><code>parse_query(s) <span class="arrow">-&gt;</span> (_0, string)</code></pre>
       <p class="signature"><span class="sig-params">s: string</span></p>
-      <p class="doc">Parse a query string. Returns (list, &quot;&quot;), where list is a std.collections.string_list of decoded &quot;key=value&quot; entries. Returns (&quot;&quot;, error) on a malformed percent-encoding inside any key or value. Leading '?' is tolerated (stripped before parsing) so callers can pass the raw `request.query_string` or a string they hand-built with `?` retained.</p>
+      <p class="doc">Parse a query string. Returns (list, &quot;&quot;), where list is a std.collections.string_list of decoded &quot;key=value&quot; entries, the caller's to release with query_free. Within the key part, a `%` or `=` the key decoded to stays encoded (`%25`, `%3D`), so the first `=` always ends the key: an `a%3Db=1` entry for key &quot;a=b&quot; is &quot;a%3Db=1&quot;, and cannot be read as key &quot;a&quot; with value &quot;b=1&quot;. Returns (null, error) on a malformed percent-encoding inside any key or value: the entries parsed so far are freed here, since a caller checking the error never sees them (they leaked when the partial list came back). query_get, query_get_all and query_free take null as an empty query. Leading '?' is tolerated (stripped before parsing) so callers can pass the raw `request.query_string` or a string they hand-built with `?` retained.</p>
     </div>
     <div class="function" id="query_get" data-name="query_get">
       <h3 class="function-name">query_get <span class="kind">fn</span></h3>
       <pre class="usage"><code>query_get(list, name) <span class="arrow">-&gt;</span> string</code></pre>
       <p class="signature"><span class="sig-params">list: ptr, name: string</span></p>
-      <p class="doc">Get the first value for `name` from a parsed query list. Returns &quot;&quot; if the key is absent.</p>
+      <p class="doc">Get the first value for `name` from a parsed query list. Returns &quot;&quot; if the key is absent. The key matches exactly: a key that decoded to contain `=` (`a%3Db`) no longer passes for a prefix of another (`a`).</p>
     </div>
     <div class="function" id="query_get_all" data-name="query_get_all">
       <h3 class="function-name">query_get_all <span class="kind">fn</span></h3>
       <pre class="usage"><code>query_get_all(list, name) <span class="arrow">-&gt;</span> ptr</code></pre>
       <p class="signature"><span class="sig-params">list: ptr, name: string</span></p>
-      <p class="doc">Get every value for `name` (for repeated-key queries like `?a=1&amp;a=2`). Returns a fresh string_list. Empty list if absent.</p>
+      <p class="doc">Get every value for `name` (for repeated-key queries like `?a=1&amp;a=2`). Returns a fresh string_list, released with query_free. Empty list if absent.</p>
+    </div>
+    <div class="function" id="query_free" data-name="query_free">
+      <h3 class="function-name">query_free <span class="kind">fn</span></h3>
+      <pre class="usage"><code>query_free(list)</code></pre>
+      <p class="signature"><span class="sig-params">list: ptr</span></p>
+      <p class="doc">Release a list parse_query or query_get_all returned, with its entries. Null (a failed parse) is a no-op.</p>
     </div>
   </div>
 </main>

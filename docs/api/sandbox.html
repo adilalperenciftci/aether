@@ -15,6 +15,7 @@
   <input type="text" id="search" placeholder="Search sandbox..." onkeyup="searchModule()">
   <h2>Exports</h2>
   <ul class="function-nav">
+    <li><a href="#Grants">Grants</a></li>
     <li><a href="#new">new</a></li>
     <li><a href="#enforce">enforce</a></li>
     <li><a href="#free">free</a></li>
@@ -88,6 +89,7 @@
     <li><a href="path.html">path</a></li>
     <li><a href="plural.html">plural</a></li>
     <li><a href="pqueue.html">pqueue</a></li>
+    <li><a href="quote.html">quote</a></li>
     <li><a href="reflect.html">reflect</a></li>
     <li><a href="regex.html">regex</a></li>
     <li><a href="resp.html">resp</a></li>
@@ -128,82 +130,86 @@
     <p class="import-line"><code>import std.sandbox</code></p>
   </div>
   <div class="functions" id="functions">
+    <div class="function" id="Grants" data-name="Grants">
+      <h3 class="function-name">Grants <span class="kind">fn</span></h3>
+      <pre class="usage"><code>Grants()</code></pre>
+    </div>
     <div class="function" id="new" data-name="new">
       <h3 class="function-name">new <span class="kind">fn</span></h3>
-      <pre class="usage"><code>new(name) <span class="arrow">-&gt;</span> ptr</code></pre>
+      <pre class="usage"><code>new(name) <span class="arrow">-&gt;</span> Grants</code></pre>
       <p class="signature"><span class="sig-params">name: string</span></p>
       <p class="doc">A new, empty grant list named `name` (the name is for the reader and for denial logs; it does not change what is allowed). Give it grants in the trailing block; with none it denies everything. Release with free().</p>
     </div>
     <div class="function" id="enforce" data-name="enforce">
       <h3 class="function-name">enforce <span class="kind">fn</span></h3>
       <pre class="usage"><code>enforce(perms, code)</code></pre>
-      <p class="signature"><span class="sig-params">perms: ptr, code: fn</span></p>
-      <p class="doc">Run `code` with `perms` in force: every sandbox-checked operation inside it, and in anything it calls, must match one of the grants. The grants stop applying when `code` returns. Trusted names: `sandbox.enforce(perms, audit_log, db) callback { ... }`. A call written in the block to a named function (`audit_log(...)`), or into a named module (`db.query(...)`), runs with the authority of the code that wrote the enforce instead of the block's grants. The compiler handles the extra names (compiler/analysis/sandbox_trust.c): it checks them, routes those calls through wrappers, and leaves this two-argument function to do the rest. Trust is lexical and narrow on purpose: - a trusted call's arguments are still evaluated inside the sandbox; - a function called from somewhere else, even one that calls a trusted name, stays sandboxed; - the names cannot be used as values in the block; - only Aether functions can be trusted, not C externs; - an enforce written by contained code records the sandboxed authority it runs under, so trusting a name there gains nothing.</p>
+      <p class="signature"><span class="sig-params">perms: Grants, code: fn</span></p>
+      <p class="doc">Run `code` with `perms` in force: every sandbox-checked operation inside it, and in anything it calls, must match one of the grants. The grants stop applying when `code` returns. Trusted names: `sandbox.enforce(perms, audit_log, db) callback { ... }`. A call written in the block to a named function (`audit_log(...)`), or into a named module (`db.query(...)`), runs with the authority of the code that wrote the enforce instead of the block's grants. The compiler handles the extra names (compiler/analysis/sandbox_trust.c): it checks them, routes those calls through wrappers, and leaves this two-argument function to do the rest. Trust is lexical and narrow on purpose: - a trusted call's arguments are still evaluated inside the sandbox; - a function called from somewhere else, even one that calls a trusted name, stays sandboxed; - the names cannot be used as values in the block; - only Aether functions can be trusted, not C externs; - an enforce written by contained code records the sandboxed authority it runs under, so trusting a name there gains nothing. The grants are frozen when the block starts: enforce checks against its own copy, which nothing else can reach, so changing `perms` afterwards (or a grant_* call made with it from inside the block, by code it was passed to) does not widen what the running block may do. For the same reason the block is not given the list: its parameter is null.</p>
     </div>
     <div class="function" id="free" data-name="free">
       <h3 class="function-name">free <span class="kind">fn</span></h3>
       <pre class="usage"><code>free(perms)</code></pre>
-      <p class="signature"><span class="sig-params">perms: ptr</span></p>
+      <p class="signature"><span class="sig-params">perms: Grants</span></p>
       <p class="doc">Release a grant list made by new(), and the grant strings it owns.</p>
     </div>
     <div class="function" id="grant_all" data-name="grant_all">
       <h3 class="function-name">grant_all <span class="kind">fn</span></h3>
       <pre class="usage"><code>grant_all(_ctx)</code></pre>
-      <p class="signature"><span class="sig-params">_ctx: ptr</span></p>
+      <p class="signature"><span class="sig-params">_ctx: Grants</span></p>
       <p class="doc">Everything: the equivalent of no sandbox.</p>
     </div>
     <div class="function" id="grant_fs_read" data-name="grant_fs_read">
       <h3 class="function-name">grant_fs_read <span class="kind">fn</span></h3>
       <pre class="usage"><code>grant_fs_read(_ctx, path)</code></pre>
-      <p class="signature"><span class="sig-params">_ctx: ptr, path: string</span></p>
+      <p class="signature"><span class="sig-params">_ctx: Grants, path: string</span></p>
       <p class="doc">Opening files for reading whose resolved path matches `path`.</p>
     </div>
     <div class="function" id="grant_fs_write" data-name="grant_fs_write">
       <h3 class="function-name">grant_fs_write <span class="kind">fn</span></h3>
       <pre class="usage"><code>grant_fs_write(_ctx, path)</code></pre>
-      <p class="signature"><span class="sig-params">_ctx: ptr, path: string</span></p>
+      <p class="signature"><span class="sig-params">_ctx: Grants, path: string</span></p>
       <p class="doc">Opening, creating or writing files whose resolved path matches `path`.</p>
     </div>
     <div class="function" id="grant_fs" data-name="grant_fs">
       <h3 class="function-name">grant_fs <span class="kind">fn</span></h3>
       <pre class="usage"><code>grant_fs(_ctx, path)</code></pre>
-      <p class="signature"><span class="sig-params">_ctx: ptr, path: string</span></p>
+      <p class="signature"><span class="sig-params">_ctx: Grants, path: string</span></p>
       <p class="doc">Reading and writing under `path`, plus directory operations on it (such as os.chdir, which std checks under its own &quot;fs&quot; category).</p>
     </div>
     <div class="function" id="grant_exec" data-name="grant_exec">
       <h3 class="function-name">grant_exec <span class="kind">fn</span></h3>
       <pre class="usage"><code>grant_exec(_ctx, cmd)</code></pre>
-      <p class="signature"><span class="sig-params">_ctx: ptr, cmd: string</span></p>
+      <p class="signature"><span class="sig-params">_ctx: Grants, cmd: string</span></p>
       <p class="doc">Running commands whose command line matches `cmd` (&quot;echo *&quot;).</p>
     </div>
     <div class="function" id="grant_env" data-name="grant_env">
       <h3 class="function-name">grant_env <span class="kind">fn</span></h3>
       <pre class="usage"><code>grant_env(_ctx, name)</code></pre>
-      <p class="signature"><span class="sig-params">_ctx: ptr, name: string</span></p>
+      <p class="signature"><span class="sig-params">_ctx: Grants, name: string</span></p>
       <p class="doc">Reading the environment variables whose names match `name`.</p>
     </div>
     <div class="function" id="grant_tcp" data-name="grant_tcp">
       <h3 class="function-name">grant_tcp <span class="kind">fn</span></h3>
-      <pre class="usage"><code>grant_tcp(_ctx, host)</code></pre>
-      <p class="signature"><span class="sig-params">_ctx: ptr, host: string</span></p>
-      <p class="doc">Outbound TCP to hosts matching `host` (&quot;db.internal&quot;, &quot;*.corp&quot;). The LD_PRELOAD layer sees only the resolved address, so grant the IP too for code that connects outside std.net. Ports are not checked.</p>
+      <pre class="usage"><code>grant_tcp(_ctx, host, port)</code></pre>
+      <p class="signature"><span class="sig-params">_ctx: Grants, host: string, port: int</span></p>
+      <p class="doc">Outbound TCP to hosts matching `host` (&quot;db.internal&quot;, &quot;*.corp&quot;) on `port`, or on any port when `port` is 0. The LD_PRELOAD layer sees only the resolved address, so grant the IP too for code that connects outside std.net.</p>
     </div>
     <div class="function" id="grant_tcp_listen" data-name="grant_tcp_listen">
       <h3 class="function-name">grant_tcp_listen <span class="kind">fn</span></h3>
       <pre class="usage"><code>grant_tcp_listen(_ctx)</code></pre>
-      <p class="signature"><span class="sig-params">_ctx: ptr</span></p>
+      <p class="signature"><span class="sig-params">_ctx: Grants</span></p>
       <p class="doc">Listening for and accepting inbound TCP connections, on any port.</p>
     </div>
     <div class="function" id="grant_udp" data-name="grant_udp">
       <h3 class="function-name">grant_udp <span class="kind">fn</span></h3>
-      <pre class="usage"><code>grant_udp(_ctx, host)</code></pre>
-      <p class="signature"><span class="sig-params">_ctx: ptr, host: string</span></p>
-      <p class="doc">UDP to and from hosts matching `host`.</p>
+      <pre class="usage"><code>grant_udp(_ctx, host, port)</code></pre>
+      <p class="signature"><span class="sig-params">_ctx: Grants, host: string, port: int</span></p>
+      <p class="doc">UDP to and from hosts matching `host` on `port`, or any port when 0.</p>
     </div>
     <div class="function" id="grant_native" data-name="grant_native">
       <h3 class="function-name">grant_native <span class="kind">fn</span></h3>
       <pre class="usage"><code>grant_native(_ctx, path)</code></pre>
-      <p class="signature"><span class="sig-params">_ctx: ptr, path: string</span></p>
+      <p class="signature"><span class="sig-params">_ctx: Grants, path: string</span></p>
       <p class="doc">Loading native code (dlopen) from paths matching `path`.</p>
     </div>
   </div>

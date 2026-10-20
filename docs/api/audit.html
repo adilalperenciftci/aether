@@ -15,11 +15,6 @@
   <input type="text" id="search" placeholder="Search audit..." onkeyup="searchModule()">
   <h2>Exports</h2>
   <ul class="function-nav">
-    <li><a href="#aether_audit_count">aether_audit_count</a></li>
-    <li><a href="#aether_audit_entry_category">aether_audit_entry_category</a></li>
-    <li><a href="#aether_audit_entry_resource">aether_audit_entry_resource</a></li>
-    <li><a href="#aether_audit_entry_allowed">aether_audit_entry_allowed</a></li>
-    <li><a href="#aether_audit_clear">aether_audit_clear</a></li>
     <li><a href="#count">count</a></li>
     <li><a href="#entry">entry</a></li>
     <li><a href="#clear">clear</a></li>
@@ -84,6 +79,7 @@
     <li><a href="path.html">path</a></li>
     <li><a href="plural.html">plural</a></li>
     <li><a href="pqueue.html">pqueue</a></li>
+    <li><a href="quote.html">quote</a></li>
     <li><a href="reflect.html">reflect</a></li>
     <li><a href="regex.html">regex</a></li>
     <li><a href="resp.html">resp</a></li>
@@ -124,32 +120,6 @@
     <p class="import-line"><code>import std.audit</code></p>
   </div>
   <div class="functions" id="functions">
-    <div class="function" id="aether_audit_count" data-name="aether_audit_count">
-      <h3 class="function-name">aether_audit_count <span class="kind">extern</span></h3>
-      <pre class="usage"><code>aether_audit_count() <span class="arrow">-&gt;</span> int</code></pre>
-      <p class="doc">Number of checks currently in the ring buffer.</p>
-    </div>
-    <div class="function" id="aether_audit_entry_category" data-name="aether_audit_entry_category">
-      <h3 class="function-name">aether_audit_entry_category <span class="kind">extern</span></h3>
-      <pre class="usage"><code>aether_audit_entry_category(i) <span class="arrow">-&gt;</span> string</code></pre>
-      <p class="signature"><span class="sig-params">i: int</span></p>
-      <p class="doc">Field accessors for buffered entry `i` (0-based, oldest first). The category/resource strings are borrowed — copy before the slot is overwritten. The `entry()` wrapper below does that for you.</p>
-    </div>
-    <div class="function" id="aether_audit_entry_resource" data-name="aether_audit_entry_resource">
-      <h3 class="function-name">aether_audit_entry_resource <span class="kind">extern</span></h3>
-      <pre class="usage"><code>aether_audit_entry_resource(i) <span class="arrow">-&gt;</span> string</code></pre>
-      <p class="signature"><span class="sig-params">i: int</span></p>
-    </div>
-    <div class="function" id="aether_audit_entry_allowed" data-name="aether_audit_entry_allowed">
-      <h3 class="function-name">aether_audit_entry_allowed <span class="kind">extern</span></h3>
-      <pre class="usage"><code>aether_audit_entry_allowed(i) <span class="arrow">-&gt;</span> int // 1 allowed, 0 denied, -1 out of range</code></pre>
-      <p class="signature"><span class="sig-params">i: int</span></p>
-    </div>
-    <div class="function" id="aether_audit_clear" data-name="aether_audit_clear">
-      <h3 class="function-name">aether_audit_clear <span class="kind">extern</span></h3>
-      <pre class="usage"><code>aether_audit_clear()</code></pre>
-      <p class="doc">Drop all buffered entries.</p>
-    </div>
     <div class="function" id="count" data-name="count">
       <h3 class="function-name">count <span class="kind">fn</span></h3>
       <pre class="usage"><code>count() <span class="arrow">-&gt;</span> int</code></pre>

@@ -15,14 +15,6 @@
   <input type="text" id="search" placeholder="Search observe..." onkeyup="searchModule()">
   <h2>Exports</h2>
   <ul class="function-nav">
-    <li><a href="#aether_observe">aether_observe</a></li>
-    <li><a href="#aether_observe_fields">aether_observe_fields</a></li>
-    <li><a href="#aether_unobserve">aether_unobserve</a></li>
-    <li><a href="#aether_unobserve_all">aether_unobserve_all</a></li>
-    <li><a href="#aether_observer_count">aether_observer_count</a></li>
-    <li><a href="#aether_observe_is_notifying">aether_observe_is_notifying</a></li>
-    <li><a href="#aether_observe_notify">aether_observe_notify</a></li>
-    <li><a href="#aether_observe_notify_field">aether_observe_notify_field</a></li>
     <li><a href="#ANY_FIELD">ANY_FIELD</a></li>
     <li><a href="#observe">observe</a></li>
     <li><a href="#fields">fields</a></li>
@@ -92,6 +84,7 @@
     <li><a href="path.html">path</a></li>
     <li><a href="plural.html">plural</a></li>
     <li><a href="pqueue.html">pqueue</a></li>
+    <li><a href="quote.html">quote</a></li>
     <li><a href="reflect.html">reflect</a></li>
     <li><a href="regex.html">regex</a></li>
     <li><a href="resp.html">resp</a></li>
@@ -132,47 +125,6 @@
     <p class="import-line"><code>import std.observe</code></p>
   </div>
   <div class="functions" id="functions">
-    <div class="function" id="aether_observe" data-name="aether_observe">
-      <h3 class="function-name">aether_observe <span class="kind">extern</span></h3>
-      <pre class="usage"><code>aether_observe(obj, on_change) <span class="arrow">-&gt;</span> long</code></pre>
-      <p class="signature"><span class="sig-params">obj: ptr, on_change: fn</span></p>
-      <p class="doc">---- raw externs (runtime/aether_observe.c) ---- `fn` lowers to the compiler's _AeClosure ({fn, env}); the runtime stores it and invokes it as fn(env, obj) after each store on `obj` (fn(env, obj, field) when registered through aether_observe_fields).</p>
-    </div>
-    <div class="function" id="aether_observe_fields" data-name="aether_observe_fields">
-      <h3 class="function-name">aether_observe_fields <span class="kind">extern</span></h3>
-      <pre class="usage"><code>aether_observe_fields(obj, on_change) <span class="arrow">-&gt;</span> long</code></pre>
-      <p class="signature"><span class="sig-params">obj: ptr, on_change: fn</span></p>
-    </div>
-    <div class="function" id="aether_unobserve" data-name="aether_unobserve">
-      <h3 class="function-name">aether_unobserve <span class="kind">extern</span></h3>
-      <pre class="usage"><code>aether_unobserve(obj, token) <span class="arrow">-&gt;</span> int</code></pre>
-      <p class="signature"><span class="sig-params">obj: ptr, token: long</span></p>
-    </div>
-    <div class="function" id="aether_unobserve_all" data-name="aether_unobserve_all">
-      <h3 class="function-name">aether_unobserve_all <span class="kind">extern</span></h3>
-      <pre class="usage"><code>aether_unobserve_all(obj) <span class="arrow">-&gt;</span> int</code></pre>
-      <p class="signature"><span class="sig-params">obj: ptr</span></p>
-    </div>
-    <div class="function" id="aether_observer_count" data-name="aether_observer_count">
-      <h3 class="function-name">aether_observer_count <span class="kind">extern</span></h3>
-      <pre class="usage"><code>aether_observer_count(obj) <span class="arrow">-&gt;</span> int</code></pre>
-      <p class="signature"><span class="sig-params">obj: ptr</span></p>
-    </div>
-    <div class="function" id="aether_observe_is_notifying" data-name="aether_observe_is_notifying">
-      <h3 class="function-name">aether_observe_is_notifying <span class="kind">extern</span></h3>
-      <pre class="usage"><code>aether_observe_is_notifying(obj) <span class="arrow">-&gt;</span> int</code></pre>
-      <p class="signature"><span class="sig-params">obj: ptr</span></p>
-    </div>
-    <div class="function" id="aether_observe_notify" data-name="aether_observe_notify">
-      <h3 class="function-name">aether_observe_notify <span class="kind">extern</span></h3>
-      <pre class="usage"><code>aether_observe_notify(obj)</code></pre>
-      <p class="signature"><span class="sig-params">obj: ptr</span></p>
-    </div>
-    <div class="function" id="aether_observe_notify_field" data-name="aether_observe_notify_field">
-      <h3 class="function-name">aether_observe_notify_field <span class="kind">extern</span></h3>
-      <pre class="usage"><code>aether_observe_notify_field(obj, field)</code></pre>
-      <p class="signature"><span class="sig-params">obj: ptr, field: int</span></p>
-    </div>
     <div class="function" id="ANY_FIELD" data-name="ANY_FIELD">
       <h3 class="function-name">ANY_FIELD <span class="kind">const</span></h3>
       <pre class="usage"><code>ANY_FIELD = -1</code></pre>

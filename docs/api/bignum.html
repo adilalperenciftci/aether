@@ -104,6 +104,7 @@
     <li><a href="path.html">path</a></li>
     <li><a href="plural.html">plural</a></li>
     <li><a href="pqueue.html">pqueue</a></li>
+    <li><a href="quote.html">quote</a></li>
     <li><a href="reflect.html">reflect</a></li>
     <li><a href="regex.html">regex</a></li>
     <li><a href="resp.html">resp</a></li>
@@ -263,6 +264,7 @@
       <h3 class="function-name">shift_left <span class="kind">fn</span></h3>
       <pre class="usage"><code>shift_left(n, bits_to) <span class="arrow">-&gt;</span> ptr</code></pre>
       <p class="signature"><span class="sig-params">n: ptr, bits_to: int</span></p>
+      <p class="doc">A negative count shifts the other way. Negating it overflows int at INT_MIN, so each direction handles that count without negating it.</p>
     </div>
     <div class="function" id="shift_right" data-name="shift_right">
       <h3 class="function-name">shift_right <span class="kind">fn</span></h3>

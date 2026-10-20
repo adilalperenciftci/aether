@@ -86,6 +86,7 @@
     <li><a href="path.html">path</a></li>
     <li><a href="plural.html">plural</a></li>
     <li><a href="pqueue.html">pqueue</a></li>
+    <li><a href="quote.html">quote</a></li>
     <li><a href="reflect.html">reflect</a></li>
     <li><a href="regex.html">regex</a></li>
     <li><a href="resp.html">resp</a></li>
@@ -166,7 +167,7 @@
       <h3 class="function-name">base32_decode <span class="kind">fn</span></h3>
       <pre class="usage"><code>base32_decode(s) <span class="arrow">-&gt;</span> string!</code></pre>
       <p class="signature"><span class="sig-params">s: string</span></p>
-      <p class="doc">Decode a standard-alphabet base32 string (with or without `=` padding) to its bytes. Returns the decoded bytes, or a non-empty error on a character outside the alphabet.</p>
+      <p class="doc">Decode a standard-alphabet base32 string (with or without `=` padding, case-insensitive) to its bytes. Returns the decoded bytes, or a non-empty error on malformed input: a character outside the alphabet, a length no encoder produces, wrong padding, or non-zero bits after the last byte.</p>
     </div>
     <div class="function" id="csv_split" data-name="csv_split">
       <h3 class="function-name">csv_split <span class="kind">fn</span></h3>

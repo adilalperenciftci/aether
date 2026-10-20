@@ -90,6 +90,7 @@
     <li><a href="path.html">path</a></li>
     <li><a href="plural.html">plural</a></li>
     <li><a href="pqueue.html">pqueue</a></li>
+    <li><a href="quote.html">quote</a></li>
     <li><a href="reflect.html">reflect</a></li>
     <li><a href="regex.html">regex</a></li>
     <li><a href="resp.html">resp</a></li>
@@ -166,10 +167,10 @@
       <p class="doc">Overwrite element at `i`.</p>
     </div>
     <div class="function" id="size" data-name="size">
-      <h3 class="function-name">size <span class="kind">extern</span></h3>
+      <h3 class="function-name">size <span class="kind">fn</span></h3>
       <pre class="usage"><code>size(arr) <span class="arrow">-&gt;</span> int</code></pre>
       <p class="signature"><span class="sig-params">arr: ptr</span></p>
-      <p class="doc">Number of elements. -1 if null.</p>
+      <p class="doc">Element count.</p>
     </div>
     <div class="function" id="array" data-name="array">
       <h3 class="function-name">array <span class="kind">fn</span></h3>
@@ -178,10 +179,10 @@
       <p class="doc">The elements as a `string[]` bounded by the size (#2301), for std.sort (`sort.strings_by(strarr.array(sa), cmp)` sorts them in place) or any `string[]` parameter. `v[i]` outside it is the slice bounds panic. Valid until the next push (which may reallocate) or free. A null handle is the empty slice.</p>
     </div>
     <div class="function" id="free" data-name="free">
-      <h3 class="function-name">free <span class="kind">extern</span></h3>
+      <h3 class="function-name">free <span class="kind">fn</span></h3>
       <pre class="usage"><code>free(arr)</code></pre>
       <p class="signature"><span class="sig-params">arr: ptr</span></p>
-      <p class="doc">Free the spine only; borrowed elements are the caller's.</p>
+      <p class="doc">Free the spine.</p>
     </div>
     <div class="function" id="new_raw" data-name="new_raw">
       <h3 class="function-name">new_raw <span class="kind">extern</span></h3>

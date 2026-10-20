@@ -1,0 +1,514 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>quote - Aether</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+<nav class="sidebar">
+  <div class="sidebar-header">
+    <h1><a href="index.html">Aether</a></h1>
+    <p class="tagline">Standard Library</p>
+  </div>
+  <input type="text" id="search" placeholder="Search quote..." onkeyup="searchModule()">
+  <h2>Exports</h2>
+  <ul class="function-nav">
+    <li><a href="#Tree">Tree</a></li>
+    <li><a href="#Node">Node</a></li>
+    <li><a href="#Capture">Capture</a></li>
+    <li><a href="#VERSION">VERSION</a></li>
+    <li><a href="#BLOCK">BLOCK</a></li>
+    <li><a href="#LET">LET</a></li>
+    <li><a href="#ASSIGN">ASSIGN</a></li>
+    <li><a href="#RETURN">RETURN</a></li>
+    <li><a href="#IF">IF</a></li>
+    <li><a href="#WHILE">WHILE</a></li>
+    <li><a href="#FOR">FOR</a></li>
+    <li><a href="#BREAK">BREAK</a></li>
+    <li><a href="#CONTINUE">CONTINUE</a></li>
+    <li><a href="#EXPR">EXPR</a></li>
+    <li><a href="#LIT">LIT</a></li>
+    <li><a href="#LOCAL">LOCAL</a></li>
+    <li><a href="#CAPTURE">CAPTURE</a></li>
+    <li><a href="#UNARY">UNARY</a></li>
+    <li><a href="#BINARY">BINARY</a></li>
+    <li><a href="#CHOOSE">CHOOSE</a></li>
+    <li><a href="#CALL">CALL</a></li>
+    <li><a href="#FIELD">FIELD</a></li>
+    <li><a href="#INDEX">INDEX</a></li>
+    <li><a href="#MAKE">MAKE</a></li>
+    <li><a href="#FIELD_VALUE">FIELD_VALUE</a></li>
+    <li><a href="#HELPER_CALL">HELPER_CALL</a></li>
+    <li><a href="#kind_name">kind_name</a></li>
+    <li><a href="#version">version</a></li>
+    <li><a href="#body">body</a></li>
+    <li><a href="#source">source</a></li>
+    <li><a href="#hash">hash</a></li>
+    <li><a href="#param_count">param_count</a></li>
+    <li><a href="#param_name">param_name</a></li>
+    <li><a href="#param_type">param_type</a></li>
+    <li><a href="#capture_count">capture_count</a></li>
+    <li><a href="#capture">capture</a></li>
+    <li><a href="#capture_named">capture_named</a></li>
+    <li><a href="#helper_count">helper_count</a></li>
+    <li><a href="#helper">helper</a></li>
+    <li><a href="#helper_named">helper_named</a></li>
+    <li><a href="#function_name">function_name</a></li>
+    <li><a href="#return_type">return_type</a></li>
+    <li><a href="#kind">kind</a></li>
+    <li><a href="#type_of">type_of</a></li>
+    <li><a href="#name">name</a></li>
+    <li><a href="#op">op</a></li>
+    <li><a href="#lit">lit</a></li>
+    <li><a href="#line">line</a></li>
+    <li><a href="#child_count">child_count</a></li>
+    <li><a href="#child">child</a></li>
+    <li><a href="#children">children</a></li>
+    <li><a href="#walk">walk</a></li>
+    <li><a href="#capture_name">capture_name</a></li>
+    <li><a href="#capture_type">capture_type</a></li>
+    <li><a href="#cell">cell</a></li>
+    <li><a href="#get_float">get_float</a></li>
+    <li><a href="#get_f32">get_f32</a></li>
+    <li><a href="#get_int">get_int</a></li>
+    <li><a href="#get_long">get_long</a></li>
+    <li><a href="#get_bool">get_bool</a></li>
+    <li><a href="#get_string">get_string</a></li>
+    <li><a href="#get_ptr">get_ptr</a></li>
+    <li><a href="#get_f32x4">get_f32x4</a></li>
+    <li><a href="#to_source">to_source</a></li>
+    <li><a href="#dump">dump</a></li>
+    <li><a href="#free">free</a></li>
+  </ul>
+  <hr>
+  <h2>Modules</h2>
+  <ul class="module-list">
+    <li><a href="actors.html">actors</a></li>
+    <li><a href="alloc.html">alloc</a></li>
+    <li><a href="arena.html">arena</a></li>
+    <li><a href="audio.html">audio</a></li>
+    <li><a href="audit.html">audit</a></li>
+    <li><a href="bignum.html">bignum</a></li>
+    <li><a href="bits.html">bits</a></li>
+    <li><a href="brotli.html">brotli</a></li>
+    <li><a href="bytes.html">bytes</a></li>
+    <li><a href="capsicum.html">capsicum</a></li>
+    <li><a href="cas.html">cas</a></li>
+    <li><a href="casper.html">casper</a></li>
+    <li><a href="cbor.html">cbor</a></li>
+    <li><a href="clapae.html">clapae</a></li>
+    <li><a href="collections.html">collections</a></li>
+    <li><a href="config.html">config</a></li>
+    <li><a href="cryptography.html">cryptography</a></li>
+    <li><a href="decimal.html">decimal</a></li>
+    <li><a href="deque.html">deque</a></li>
+    <li><a href="dir.html">dir</a></li>
+    <li><a href="dl.html">dl</a></li>
+    <li><a href="encoding.html">encoding</a></li>
+    <li><a href="file.html">file</a></li>
+    <li><a href="floatarr.html">floatarr</a></li>
+    <li><a href="fs.html">fs</a></li>
+    <li><a href="hash.html">hash</a></li>
+    <li><a href="host.html">host</a></li>
+    <li><a href="http.html">http</a></li>
+    <li><a href="http1.html">http1</a></li>
+    <li><a href="intarr.html">intarr</a></li>
+    <li><a href="intmap.html">intmap</a></li>
+    <li><a href="io.html">io</a></li>
+    <li><a href="ipc.html">ipc</a></li>
+    <li><a href="json.html">json</a></li>
+    <li><a href="jsonpath.html">jsonpath</a></li>
+    <li><a href="ksuid.html">ksuid</a></li>
+    <li><a href="lanes.html">lanes</a></li>
+    <li><a href="language.html">language</a></li>
+    <li><a href="list.html">list</a></li>
+    <li><a href="log.html">log</a></li>
+    <li><a href="longarr.html">longarr</a></li>
+    <li><a href="lzf.html">lzf</a></li>
+    <li><a href="map.html">map</a></li>
+    <li><a href="math.html">math</a></li>
+    <li><a href="mem.html">mem</a></li>
+    <li><a href="message.html">message</a></li>
+    <li><a href="msgpack.html">msgpack</a></li>
+    <li><a href="mutation.html">mutation</a></li>
+    <li><a href="nanoid.html">nanoid</a></li>
+    <li><a href="net.html">net</a></li>
+    <li><a href="number.html">number</a></li>
+    <li><a href="observe.html">observe</a></li>
+    <li><a href="os.html">os</a></li>
+    <li><a href="path.html">path</a></li>
+    <li><a href="plural.html">plural</a></li>
+    <li><a href="pqueue.html">pqueue</a></li>
+    <li class="active"><a href="quote.html">quote</a></li>
+    <li><a href="reflect.html">reflect</a></li>
+    <li><a href="regex.html">regex</a></li>
+    <li><a href="resp.html">resp</a></li>
+    <li><a href="sandbox.html">sandbox</a></li>
+    <li><a href="schema.html">schema</a></li>
+    <li><a href="set.html">set</a></li>
+    <li><a href="signal.html">signal</a></li>
+    <li><a href="snapshot.html">snapshot</a></li>
+    <li><a href="sort.html">sort</a></li>
+    <li><a href="spec.html">spec</a></li>
+    <li><a href="strarr.html">strarr</a></li>
+    <li><a href="strbuilder.html">strbuilder</a></li>
+    <li><a href="string.html">string</a></li>
+    <li><a href="sync.html">sync</a></li>
+    <li><a href="tar.html">tar</a></li>
+    <li><a href="tcp.html">tcp</a></li>
+    <li><a href="time.html">time</a></li>
+    <li><a href="tracking.html">tracking</a></li>
+    <li><a href="truetype.html">truetype</a></li>
+    <li><a href="tsid.html">tsid</a></li>
+    <li><a href="udp.html">udp</a></li>
+    <li><a href="ulid.html">ulid</a></li>
+    <li><a href="unicode.html">unicode</a></li>
+    <li><a href="url.html">url</a></li>
+    <li><a href="uuid.html">uuid</a></li>
+    <li><a href="worker.html">worker</a></li>
+    <li><a href="xml.html">xml</a></li>
+    <li><a href="yaml.html">yaml</a></li>
+    <li><a href="zip.html">zip</a></li>
+    <li><a href="zlib.html">zlib</a></li>
+    <li><a href="zstd.html">zstd</a></li>
+  </ul>
+</nav>
+<main class="content">
+  <div class="module-header">
+    <h1>quote</h1>
+    <p class="module-desc">std.quote — the tree a `quote` trailing block hands to a function (docs/quote.md).</p>
+    <p class="import-line"><code>import std.quote</code></p>
+  </div>
+  <div class="functions" id="functions">
+    <div class="function" id="Tree" data-name="Tree">
+      <h3 class="function-name">Tree <span class="kind">fn</span></h3>
+      <pre class="usage"><code>Tree()</code></pre>
+    </div>
+    <div class="function" id="Node" data-name="Node">
+      <h3 class="function-name">Node <span class="kind">fn</span></h3>
+      <pre class="usage"><code>Node()</code></pre>
+    </div>
+    <div class="function" id="Capture" data-name="Capture">
+      <h3 class="function-name">Capture <span class="kind">fn</span></h3>
+      <pre class="usage"><code>Capture()</code></pre>
+    </div>
+    <div class="function" id="VERSION" data-name="VERSION">
+      <h3 class="function-name">VERSION <span class="kind">const</span></h3>
+      <pre class="usage"><code>VERSION = 2</code></pre>
+      <p class="doc">The tree format's version. Goes up by one each time a kind is added.</p>
+    </div>
+    <div class="function" id="BLOCK" data-name="BLOCK">
+      <h3 class="function-name">BLOCK <span class="kind">const</span></h3>
+      <pre class="usage"><code>BLOCK = 1</code></pre>
+      <p class="doc">Node kinds, version 1. Children are listed after each.</p>
+    </div>
+    <div class="function" id="LET" data-name="LET">
+      <h3 class="function-name">LET <span class="kind">const</span></h3>
+      <pre class="usage"><code>LET = 2</code></pre>
+    </div>
+    <div class="function" id="ASSIGN" data-name="ASSIGN">
+      <h3 class="function-name">ASSIGN <span class="kind">const</span></h3>
+      <pre class="usage"><code>ASSIGN = 3</code></pre>
+    </div>
+    <div class="function" id="RETURN" data-name="RETURN">
+      <h3 class="function-name">RETURN <span class="kind">const</span></h3>
+      <pre class="usage"><code>RETURN = 4</code></pre>
+    </div>
+    <div class="function" id="IF" data-name="IF">
+      <h3 class="function-name">IF <span class="kind">const</span></h3>
+      <pre class="usage"><code>IF = 5</code></pre>
+    </div>
+    <div class="function" id="WHILE" data-name="WHILE">
+      <h3 class="function-name">WHILE <span class="kind">const</span></h3>
+      <pre class="usage"><code>WHILE = 6</code></pre>
+    </div>
+    <div class="function" id="FOR" data-name="FOR">
+      <h3 class="function-name">FOR <span class="kind">const</span></h3>
+      <pre class="usage"><code>FOR = 7</code></pre>
+    </div>
+    <div class="function" id="BREAK" data-name="BREAK">
+      <h3 class="function-name">BREAK <span class="kind">const</span></h3>
+      <pre class="usage"><code>BREAK = 8</code></pre>
+    </div>
+    <div class="function" id="CONTINUE" data-name="CONTINUE">
+      <h3 class="function-name">CONTINUE <span class="kind">const</span></h3>
+      <pre class="usage"><code>CONTINUE = 9</code></pre>
+    </div>
+    <div class="function" id="EXPR" data-name="EXPR">
+      <h3 class="function-name">EXPR <span class="kind">const</span></h3>
+      <pre class="usage"><code>EXPR = 10</code></pre>
+    </div>
+    <div class="function" id="LIT" data-name="LIT">
+      <h3 class="function-name">LIT <span class="kind">const</span></h3>
+      <pre class="usage"><code>LIT = 11</code></pre>
+    </div>
+    <div class="function" id="LOCAL" data-name="LOCAL">
+      <h3 class="function-name">LOCAL <span class="kind">const</span></h3>
+      <pre class="usage"><code>LOCAL = 12</code></pre>
+    </div>
+    <div class="function" id="CAPTURE" data-name="CAPTURE">
+      <h3 class="function-name">CAPTURE <span class="kind">const</span></h3>
+      <pre class="usage"><code>CAPTURE = 13</code></pre>
+    </div>
+    <div class="function" id="UNARY" data-name="UNARY">
+      <h3 class="function-name">UNARY <span class="kind">const</span></h3>
+      <pre class="usage"><code>UNARY = 14</code></pre>
+    </div>
+    <div class="function" id="BINARY" data-name="BINARY">
+      <h3 class="function-name">BINARY <span class="kind">const</span></h3>
+      <pre class="usage"><code>BINARY = 15</code></pre>
+    </div>
+    <div class="function" id="CHOOSE" data-name="CHOOSE">
+      <h3 class="function-name">CHOOSE <span class="kind">const</span></h3>
+      <pre class="usage"><code>CHOOSE = 16</code></pre>
+    </div>
+    <div class="function" id="CALL" data-name="CALL">
+      <h3 class="function-name">CALL <span class="kind">const</span></h3>
+      <pre class="usage"><code>CALL = 17</code></pre>
+    </div>
+    <div class="function" id="FIELD" data-name="FIELD">
+      <h3 class="function-name">FIELD <span class="kind">const</span></h3>
+      <pre class="usage"><code>FIELD = 18</code></pre>
+    </div>
+    <div class="function" id="INDEX" data-name="INDEX">
+      <h3 class="function-name">INDEX <span class="kind">const</span></h3>
+      <pre class="usage"><code>INDEX = 19</code></pre>
+    </div>
+    <div class="function" id="MAKE" data-name="MAKE">
+      <h3 class="function-name">MAKE <span class="kind">const</span></h3>
+      <pre class="usage"><code>MAKE = 20</code></pre>
+    </div>
+    <div class="function" id="FIELD_VALUE" data-name="FIELD_VALUE">
+      <h3 class="function-name">FIELD_VALUE <span class="kind">const</span></h3>
+      <pre class="usage"><code>FIELD_VALUE = 21</code></pre>
+    </div>
+    <div class="function" id="HELPER_CALL" data-name="HELPER_CALL">
+      <h3 class="function-name">HELPER_CALL <span class="kind">const</span></h3>
+      <pre class="usage"><code>HELPER_CALL = 22</code></pre>
+      <p class="doc">Version 2.</p>
+    </div>
+    <div class="function" id="kind_name" data-name="kind_name">
+      <h3 class="function-name">kind_name <span class="kind">fn</span></h3>
+      <pre class="usage"><code>kind_name(k) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">k: int</span></p>
+      <p class="doc">The kind's name, &quot;BINARY&quot; for BINARY; &quot;?&quot; for a kind this version does not know.</p>
+    </div>
+    <div class="function" id="version" data-name="version">
+      <h3 class="function-name">version <span class="kind">fn</span></h3>
+      <pre class="usage"><code>version(t) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">t: Tree</span></p>
+      <p class="doc">The format version the tree was built with (VERSION when it was built).</p>
+    </div>
+    <div class="function" id="body" data-name="body">
+      <h3 class="function-name">body <span class="kind">fn</span></h3>
+      <pre class="usage"><code>body(t) <span class="arrow">-&gt;</span> Node</code></pre>
+      <p class="signature"><span class="sig-params">t: Tree</span></p>
+      <p class="doc">The quote's body, a BLOCK.</p>
+    </div>
+    <div class="function" id="source" data-name="source">
+      <h3 class="function-name">source <span class="kind">fn</span></h3>
+      <pre class="usage"><code>source(t) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">t: Tree</span></p>
+      <p class="doc">&quot;file:line&quot; of the quote, for a back end's errors.</p>
+    </div>
+    <div class="function" id="hash" data-name="hash">
+      <h3 class="function-name">hash <span class="kind">fn</span></h3>
+      <pre class="usage"><code>hash(t) <span class="arrow">-&gt;</span> long</code></pre>
+      <p class="signature"><span class="sig-params">t: Tree</span></p>
+      <p class="doc">A hash of the tree's shape (kinds, types, names, operators, literals and parameters, not line numbers), the same in every build of the same quote, to cache what a back end makes from it.</p>
+    </div>
+    <div class="function" id="param_count" data-name="param_count">
+      <h3 class="function-name">param_count <span class="kind">fn</span></h3>
+      <pre class="usage"><code>param_count(t) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">t: Tree</span></p>
+    </div>
+    <div class="function" id="param_name" data-name="param_name">
+      <h3 class="function-name">param_name <span class="kind">fn</span></h3>
+      <pre class="usage"><code>param_name(t, i) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">t: Tree, i: int</span></p>
+    </div>
+    <div class="function" id="param_type" data-name="param_type">
+      <h3 class="function-name">param_type <span class="kind">fn</span></h3>
+      <pre class="usage"><code>param_type(t, i) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">t: Tree, i: int</span></p>
+    </div>
+    <div class="function" id="capture_count" data-name="capture_count">
+      <h3 class="function-name">capture_count <span class="kind">fn</span></h3>
+      <pre class="usage"><code>capture_count(t) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">t: Tree</span></p>
+    </div>
+    <div class="function" id="capture" data-name="capture">
+      <h3 class="function-name">capture <span class="kind">fn</span></h3>
+      <pre class="usage"><code>capture(t, i) <span class="arrow">-&gt;</span> Capture</code></pre>
+      <p class="signature"><span class="sig-params">t: Tree, i: int</span></p>
+    </div>
+    <div class="function" id="capture_named" data-name="capture_named">
+      <h3 class="function-name">capture_named <span class="kind">fn</span></h3>
+      <pre class="usage"><code>capture_named(t, n) <span class="arrow">-&gt;</span> Capture</code></pre>
+      <p class="signature"><span class="sig-params">t: Tree, n: string</span></p>
+      <p class="doc">The capture called `n`, or a null Capture when the quote has none.</p>
+    </div>
+    <div class="function" id="helper_count" data-name="helper_count">
+      <h3 class="function-name">helper_count <span class="kind">fn</span></h3>
+      <pre class="usage"><code>helper_count(t) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">t: Tree</span></p>
+      <p class="doc">---- @quotable functions (version 2) ---- Every @quotable function a quote's body reaches, through its own calls or a helper's, callees before their callers: the order a back end that wants each declared before its use (GLSL) writes them in. Each is a Tree with a name, a return type, its parameters and its body, and no captures; a HELPER_CALL names one. They are freed with the quote's tree.</p>
+    </div>
+    <div class="function" id="helper" data-name="helper">
+      <h3 class="function-name">helper <span class="kind">fn</span></h3>
+      <pre class="usage"><code>helper(t, i) <span class="arrow">-&gt;</span> Tree</code></pre>
+      <p class="signature"><span class="sig-params">t: Tree, i: int</span></p>
+    </div>
+    <div class="function" id="helper_named" data-name="helper_named">
+      <h3 class="function-name">helper_named <span class="kind">fn</span></h3>
+      <pre class="usage"><code>helper_named(t, n) <span class="arrow">-&gt;</span> Tree</code></pre>
+      <p class="signature"><span class="sig-params">t: Tree, n: string</span></p>
+      <p class="doc">The helper a HELPER_CALL's `name` names; a null Tree when there is none.</p>
+    </div>
+    <div class="function" id="function_name" data-name="function_name">
+      <h3 class="function-name">function_name <span class="kind">fn</span></h3>
+      <pre class="usage"><code>function_name(t) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">t: Tree</span></p>
+      <p class="doc">A helper's name and return type (&quot;&quot; for a quote's own tree).</p>
+    </div>
+    <div class="function" id="return_type" data-name="return_type">
+      <h3 class="function-name">return_type <span class="kind">fn</span></h3>
+      <pre class="usage"><code>return_type(t) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">t: Tree</span></p>
+    </div>
+    <div class="function" id="kind" data-name="kind">
+      <h3 class="function-name">kind <span class="kind">fn</span></h3>
+      <pre class="usage"><code>kind(n) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">n: Node</span></p>
+    </div>
+    <div class="function" id="type_of" data-name="type_of">
+      <h3 class="function-name">type_of <span class="kind">fn</span></h3>
+      <pre class="usage"><code>type_of(n) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">n: Node</span></p>
+      <p class="doc">The type the checker gave the node: &quot;float&quot;, &quot;vec2&quot;, &quot;int&quot;, a struct's name; &quot;&quot; for a statement.</p>
+    </div>
+    <div class="function" id="name" data-name="name">
+      <h3 class="function-name">name <span class="kind">fn</span></h3>
+      <pre class="usage"><code>name(n) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">n: Node</span></p>
+    </div>
+    <div class="function" id="op" data-name="op">
+      <h3 class="function-name">op <span class="kind">fn</span></h3>
+      <pre class="usage"><code>op(n) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">n: Node</span></p>
+    </div>
+    <div class="function" id="lit" data-name="lit">
+      <h3 class="function-name">lit <span class="kind">fn</span></h3>
+      <pre class="usage"><code>lit(n) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">n: Node</span></p>
+    </div>
+    <div class="function" id="line" data-name="line">
+      <h3 class="function-name">line <span class="kind">fn</span></h3>
+      <pre class="usage"><code>line(n) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">n: Node</span></p>
+    </div>
+    <div class="function" id="child_count" data-name="child_count">
+      <h3 class="function-name">child_count <span class="kind">fn</span></h3>
+      <pre class="usage"><code>child_count(n) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">n: Node</span></p>
+    </div>
+    <div class="function" id="child" data-name="child">
+      <h3 class="function-name">child <span class="kind">fn</span></h3>
+      <pre class="usage"><code>child(n, i) <span class="arrow">-&gt;</span> Node</code></pre>
+      <p class="signature"><span class="sig-params">n: Node, i: int</span></p>
+    </div>
+    <div class="function" id="children" data-name="children">
+      <h3 class="function-name">children <span class="kind">fn</span></h3>
+      <pre class="usage"><code>children(n) <span class="arrow">-&gt;</span> ptr</code></pre>
+      <p class="signature"><span class="sig-params">n: Node</span></p>
+      <p class="doc">The node's children as a std.list of Node handles (`list.get(l, i)` gives one as a ptr, `as quote.Node` makes it a Node again). The caller frees the list with list.free; the nodes stay the tree's.</p>
+    </div>
+    <div class="function" id="walk" data-name="walk">
+      <h3 class="function-name">walk <span class="kind">fn</span></h3>
+      <pre class="usage"><code>walk(n, f)</code></pre>
+      <p class="signature"><span class="sig-params">n: Node, f: fn</span></p>
+      <p class="doc">Call `f` with `n` and then with every node under it, in pre-order (a node before its children, children first to last): quote.walk(quote.body(t)) callback | m: quote.Node | { if quote.kind(m) == quote.CALL { println(quote.name(m)) } }</p>
+    </div>
+    <div class="function" id="capture_name" data-name="capture_name">
+      <h3 class="function-name">capture_name <span class="kind">fn</span></h3>
+      <pre class="usage"><code>capture_name(c) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">c: Capture</span></p>
+    </div>
+    <div class="function" id="capture_type" data-name="capture_type">
+      <h3 class="function-name">capture_type <span class="kind">fn</span></h3>
+      <pre class="usage"><code>capture_type(c) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">c: Capture</span></p>
+      <p class="doc">The variable's type as written: &quot;float&quot;, &quot;vec2&quot;, ...</p>
+    </div>
+    <div class="function" id="cell" data-name="cell">
+      <h3 class="function-name">cell <span class="kind">fn</span></h3>
+      <pre class="usage"><code>cell(c) <span class="arrow">-&gt;</span> ptr</code></pre>
+      <p class="signature"><span class="sig-params">c: Capture</span></p>
+      <p class="doc">The variable's cell: the variable itself, not a copy of its value.</p>
+    </div>
+    <div class="function" id="get_float" data-name="get_float">
+      <h3 class="function-name">get_float <span class="kind">fn</span></h3>
+      <pre class="usage"><code>get_float(c) <span class="arrow">-&gt;</span> float</code></pre>
+      <p class="signature"><span class="sig-params">c: Capture</span></p>
+      <p class="doc">Read the variable's current value. Each panics, naming both types, when the capture holds something else (a distinct type reads as its base: a `vec2` over f32x4 through get_f32x4).</p>
+    </div>
+    <div class="function" id="get_f32" data-name="get_f32">
+      <h3 class="function-name">get_f32 <span class="kind">fn</span></h3>
+      <pre class="usage"><code>get_f32(c) <span class="arrow">-&gt;</span> f32</code></pre>
+      <p class="signature"><span class="sig-params">c: Capture</span></p>
+    </div>
+    <div class="function" id="get_int" data-name="get_int">
+      <h3 class="function-name">get_int <span class="kind">fn</span></h3>
+      <pre class="usage"><code>get_int(c) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">c: Capture</span></p>
+    </div>
+    <div class="function" id="get_long" data-name="get_long">
+      <h3 class="function-name">get_long <span class="kind">fn</span></h3>
+      <pre class="usage"><code>get_long(c) <span class="arrow">-&gt;</span> long</code></pre>
+      <p class="signature"><span class="sig-params">c: Capture</span></p>
+    </div>
+    <div class="function" id="get_bool" data-name="get_bool">
+      <h3 class="function-name">get_bool <span class="kind">fn</span></h3>
+      <pre class="usage"><code>get_bool(c) <span class="arrow">-&gt;</span> bool</code></pre>
+      <p class="signature"><span class="sig-params">c: Capture</span></p>
+    </div>
+    <div class="function" id="get_string" data-name="get_string">
+      <h3 class="function-name">get_string <span class="kind">fn</span></h3>
+      <pre class="usage"><code>get_string(c) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">c: Capture</span></p>
+    </div>
+    <div class="function" id="get_ptr" data-name="get_ptr">
+      <h3 class="function-name">get_ptr <span class="kind">fn</span></h3>
+      <pre class="usage"><code>get_ptr(c) <span class="arrow">-&gt;</span> ptr</code></pre>
+      <p class="signature"><span class="sig-params">c: Capture</span></p>
+    </div>
+    <div class="function" id="get_f32x4" data-name="get_f32x4">
+      <h3 class="function-name">get_f32x4 <span class="kind">fn</span></h3>
+      <pre class="usage"><code>get_f32x4(c) <span class="arrow">-&gt;</span> f32x4</code></pre>
+      <p class="signature"><span class="sig-params">c: Capture</span></p>
+    </div>
+    <div class="function" id="to_source" data-name="to_source">
+      <h3 class="function-name">to_source <span class="kind">fn</span></h3>
+      <pre class="usage"><code>to_source(t) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">t: Tree</span></p>
+      <p class="doc">The quote printed back as Aether: `| a: T, b: U | { ... }`, or the block alone when it has no parameters. A `-&gt;` body comes back as the block it stands for (`{ return expr }`).</p>
+    </div>
+    <div class="function" id="dump" data-name="dump">
+      <h3 class="function-name">dump <span class="kind">fn</span></h3>
+      <pre class="usage"><code>dump(t) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">t: Tree</span></p>
+      <p class="doc">The tree as an s-expression with every node's kind, name, operator, literal and type: `(BINARY * :float (LOCAL a :float) (LIT 2.0 :float))`. For tests and for reading what a back end will see.</p>
+    </div>
+    <div class="function" id="free" data-name="free">
+      <h3 class="function-name">free <span class="kind">fn</span></h3>
+      <pre class="usage"><code>free(t)</code></pre>
+      <p class="signature"><span class="sig-params">t: Tree</span></p>
+      <p class="doc">Release the tree and its references to the captured variables' cells.</p>
+    </div>
+  </div>
+</main>
+<script src="search.js"></script>
+</body>
+</html>

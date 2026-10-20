@@ -17,15 +17,12 @@
   <ul class="function-nav">
     <li><a href="#bind_raw">bind_raw</a></li>
     <li><a href="#local_port_raw">local_port_raw</a></li>
-    <li><a href="#close">close</a></li>
     <li><a href="#fd_raw">fd_raw</a></li>
     <li><a href="#poll_raw">poll_raw</a></li>
     <li><a href="#set_buffer_sizes_raw">set_buffer_sizes_raw</a></li>
     <li><a href="#set_broadcast_raw">set_broadcast_raw</a></li>
     <li><a href="#resolve_raw">resolve_raw</a></li>
-    <li><a href="#addr_new">addr_new</a></li>
     <li><a href="#addr_clone_raw">addr_clone_raw</a></li>
-    <li><a href="#addr_free">addr_free</a></li>
     <li><a href="#addr_host_raw">addr_host_raw</a></li>
     <li><a href="#addr_port_raw">addr_port_raw</a></li>
     <li><a href="#addr_equal_raw">addr_equal_raw</a></li>
@@ -36,12 +33,15 @@
     <li><a href="#recv_from_raw">recv_from_raw</a></li>
     <li><a href="#bind">bind</a></li>
     <li><a href="#local_port">local_port</a></li>
+    <li><a href="#close">close</a></li>
     <li><a href="#fd">fd</a></li>
     <li><a href="#poll">poll</a></li>
     <li><a href="#set_buffer_sizes">set_buffer_sizes</a></li>
     <li><a href="#set_broadcast">set_broadcast</a></li>
     <li><a href="#resolve">resolve</a></li>
+    <li><a href="#addr_new">addr_new</a></li>
     <li><a href="#addr_clone">addr_clone</a></li>
+    <li><a href="#addr_free">addr_free</a></li>
     <li><a href="#addr_host">addr_host</a></li>
     <li><a href="#addr_port">addr_port</a></li>
     <li><a href="#addr_string">addr_string</a></li>
@@ -115,6 +115,7 @@
     <li><a href="path.html">path</a></li>
     <li><a href="plural.html">plural</a></li>
     <li><a href="pqueue.html">pqueue</a></li>
+    <li><a href="quote.html">quote</a></li>
     <li><a href="reflect.html">reflect</a></li>
     <li><a href="regex.html">regex</a></li>
     <li><a href="resp.html">resp</a></li>
@@ -165,11 +166,6 @@
       <pre class="usage"><code>local_port_raw(sock) <span class="arrow">-&gt;</span> int</code></pre>
       <p class="signature"><span class="sig-params">sock: ptr</span></p>
     </div>
-    <div class="function" id="close" data-name="close">
-      <h3 class="function-name">close <span class="kind">extern</span></h3>
-      <pre class="usage"><code>close(sock) <span class="arrow">-&gt;</span> int</code></pre>
-      <p class="signature"><span class="sig-params">sock: ptr</span></p>
-    </div>
     <div class="function" id="fd_raw" data-name="fd_raw">
       <h3 class="function-name">fd_raw <span class="kind">extern</span></h3>
       <pre class="usage"><code>fd_raw(sock) <span class="arrow">-&gt;</span> int</code></pre>
@@ -195,18 +191,9 @@
       <pre class="usage"><code>resolve_raw(host, port) <span class="arrow">-&gt;</span> ptr</code></pre>
       <p class="signature"><span class="sig-params">host: string, port: int</span></p>
     </div>
-    <div class="function" id="addr_new" data-name="addr_new">
-      <h3 class="function-name">addr_new <span class="kind">extern</span></h3>
-      <pre class="usage"><code>addr_new() <span class="arrow">-&gt;</span> ptr</code></pre>
-    </div>
     <div class="function" id="addr_clone_raw" data-name="addr_clone_raw">
       <h3 class="function-name">addr_clone_raw <span class="kind">extern</span></h3>
       <pre class="usage"><code>addr_clone_raw(addr) <span class="arrow">-&gt;</span> ptr</code></pre>
-      <p class="signature"><span class="sig-params">addr: ptr</span></p>
-    </div>
-    <div class="function" id="addr_free" data-name="addr_free">
-      <h3 class="function-name">addr_free <span class="kind">extern</span></h3>
-      <pre class="usage"><code>addr_free(addr) <span class="arrow">-&gt;</span> int</code></pre>
       <p class="signature"><span class="sig-params">addr: ptr</span></p>
     </div>
     <div class="function" id="addr_host_raw" data-name="addr_host_raw">
@@ -261,6 +248,12 @@
       <p class="signature"><span class="sig-params">sock: ptr</span></p>
       <p class="doc">The port a socket is bound to (the one the OS chose for a bind on 0), or -1 for a null handle.</p>
     </div>
+    <div class="function" id="close" data-name="close">
+      <h3 class="function-name">close <span class="kind">fn</span></h3>
+      <pre class="usage"><code>close(sock) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">sock: ptr</span></p>
+      <p class="doc">Close a socket and release its handle. -1 for a null handle.</p>
+    </div>
     <div class="function" id="fd" data-name="fd">
       <h3 class="function-name">fd <span class="kind">fn</span></h3>
       <pre class="usage"><code>fd(sock) <span class="arrow">-&gt;</span> int</code></pre>
@@ -291,11 +284,22 @@
       <p class="signature"><span class="sig-params">host: string, port: int</span></p>
       <p class="doc">Resolve host:port once to an address value for `send_to_addr`. Returns (addr, &quot;&quot;) or (null, error). Caller must addr_free it.</p>
     </div>
+    <div class="function" id="addr_new" data-name="addr_new">
+      <h3 class="function-name">addr_new <span class="kind">fn</span></h3>
+      <pre class="usage"><code>addr_new() <span class="arrow">-&gt;</span> ptr</code></pre>
+      <p class="doc">An unset address for `recv_from_into` to fill, so a receive loop allocates nothing per packet. Caller must addr_free it.</p>
+    </div>
     <div class="function" id="addr_clone" data-name="addr_clone">
       <h3 class="function-name">addr_clone <span class="kind">fn</span></h3>
       <pre class="usage"><code>addr_clone(addr) <span class="arrow">-&gt;</span> ptr</code></pre>
       <p class="signature"><span class="sig-params">addr: ptr</span></p>
       <p class="doc">A copy of an address, to keep past the receive that produced it.</p>
+    </div>
+    <div class="function" id="addr_free" data-name="addr_free">
+      <h3 class="function-name">addr_free <span class="kind">fn</span></h3>
+      <pre class="usage"><code>addr_free(addr) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">addr: ptr</span></p>
+      <p class="doc">Release an address. -1 for null.</p>
     </div>
     <div class="function" id="addr_host" data-name="addr_host">
       <h3 class="function-name">addr_host <span class="kind">fn</span></h3>

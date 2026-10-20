@@ -15,24 +15,7 @@
   <input type="text" id="search" placeholder="Search strbuilder..." onkeyup="searchModule()">
   <h2>Exports</h2>
   <ul class="function-nav">
-    <li><a href="#aether_strbuilder_new">aether_strbuilder_new</a></li>
-    <li><a href="#aether_strbuilder_append">aether_strbuilder_append</a></li>
-    <li><a href="#aether_strbuilder_append_n">aether_strbuilder_append_n</a></li>
-    <li><a href="#aether_strbuilder_append_bytes">aether_strbuilder_append_bytes</a></li>
     <li><a href="#append_slice">append_slice</a></li>
-    <li><a href="#aether_strbuilder_append_byte">aether_strbuilder_append_byte</a></li>
-    <li><a href="#aether_strbuilder_append_int">aether_strbuilder_append_int</a></li>
-    <li><a href="#aether_strbuilder_append_long">aether_strbuilder_append_long</a></li>
-    <li><a href="#aether_strbuilder_append_hex">aether_strbuilder_append_hex</a></li>
-    <li><a href="#aether_strbuilder_append_codepoint">aether_strbuilder_append_codepoint</a></li>
-    <li><a href="#aether_strbuilder_length">aether_strbuilder_length</a></li>
-    <li><a href="#aether_strbuilder_capacity">aether_strbuilder_capacity</a></li>
-    <li><a href="#aether_strbuilder_reserve">aether_strbuilder_reserve</a></li>
-    <li><a href="#aether_strbuilder_truncate">aether_strbuilder_truncate</a></li>
-    <li><a href="#aether_strbuilder_clear">aether_strbuilder_clear</a></li>
-    <li><a href="#aether_strbuilder_finish">aether_strbuilder_finish</a></li>
-    <li><a href="#aether_strbuilder_finish_with_length">aether_strbuilder_finish_with_length</a></li>
-    <li><a href="#aether_strbuilder_free">aether_strbuilder_free</a></li>
     <li><a href="#new">new</a></li>
     <li><a href="#append">append</a></li>
     <li><a href="#append_n">append_n</a></li>
@@ -110,6 +93,7 @@
     <li><a href="path.html">path</a></li>
     <li><a href="plural.html">plural</a></li>
     <li><a href="pqueue.html">pqueue</a></li>
+    <li><a href="quote.html">quote</a></li>
     <li><a href="reflect.html">reflect</a></li>
     <li><a href="regex.html">regex</a></li>
     <li><a href="resp.html">resp</a></li>
@@ -150,98 +134,11 @@
     <p class="import-line"><code>import std.strbuilder</code></p>
   </div>
   <div class="functions" id="functions">
-    <div class="function" id="aether_strbuilder_new" data-name="aether_strbuilder_new">
-      <h3 class="function-name">aether_strbuilder_new <span class="kind">extern</span></h3>
-      <pre class="usage"><code>aether_strbuilder_new(cap_hint) <span class="arrow">-&gt;</span> ptr</code></pre>
-      <p class="signature"><span class="sig-params">cap_hint: int</span></p>
-      <p class="doc">---- Raw externs ----</p>
-    </div>
-    <div class="function" id="aether_strbuilder_append" data-name="aether_strbuilder_append">
-      <h3 class="function-name">aether_strbuilder_append <span class="kind">extern</span></h3>
-      <pre class="usage"><code>aether_strbuilder_append(b, s) <span class="arrow">-&gt;</span> int</code></pre>
-      <p class="signature"><span class="sig-params">b: ptr, s: string</span></p>
-      <p class="doc">`s` keeps its AetherString header across the extern boundary (#297's `@aether`), so the C side appends by the string's own length and an embedded NUL survives; a plain literal still arrives as a `char*` and is measured with strlen, as before.</p>
-    </div>
-    <div class="function" id="aether_strbuilder_append_n" data-name="aether_strbuilder_append_n">
-      <h3 class="function-name">aether_strbuilder_append_n <span class="kind">extern</span></h3>
-      <pre class="usage"><code>aether_strbuilder_append_n(b, s, n) <span class="arrow">-&gt;</span> int</code></pre>
-      <p class="signature"><span class="sig-params">b: ptr, s: string, n: int</span></p>
-    </div>
-    <div class="function" id="aether_strbuilder_append_bytes" data-name="aether_strbuilder_append_bytes">
-      <h3 class="function-name">aether_strbuilder_append_bytes <span class="kind">extern</span></h3>
-      <pre class="usage"><code>aether_strbuilder_append_bytes(b, data, n) <span class="arrow">-&gt;</span> int</code></pre>
-      <p class="signature"><span class="sig-params">b: ptr, data: ptr, n: int</span></p>
-    </div>
     <div class="function" id="append_slice" data-name="append_slice">
       <h3 class="function-name">append_slice <span class="kind">fn</span></h3>
       <pre class="usage"><code>append_slice(b, s) <span class="arrow">-&gt;</span> int</code></pre>
       <p class="signature"><span class="sig-params">b: ptr, s: byte[]</span></p>
       <p class="doc">Append a `byte[]` slice's bytes, binary-safe: the length travels with the slice (#2301). A slice with no bound panics. Returns 1, or 0 on allocation failure or a null builder.</p>
-    </div>
-    <div class="function" id="aether_strbuilder_append_byte" data-name="aether_strbuilder_append_byte">
-      <h3 class="function-name">aether_strbuilder_append_byte <span class="kind">extern</span></h3>
-      <pre class="usage"><code>aether_strbuilder_append_byte(b, c) <span class="arrow">-&gt;</span> int</code></pre>
-      <p class="signature"><span class="sig-params">b: ptr, c: int</span></p>
-    </div>
-    <div class="function" id="aether_strbuilder_append_int" data-name="aether_strbuilder_append_int">
-      <h3 class="function-name">aether_strbuilder_append_int <span class="kind">extern</span></h3>
-      <pre class="usage"><code>aether_strbuilder_append_int(b, v) <span class="arrow">-&gt;</span> int</code></pre>
-      <p class="signature"><span class="sig-params">b: ptr, v: int</span></p>
-    </div>
-    <div class="function" id="aether_strbuilder_append_long" data-name="aether_strbuilder_append_long">
-      <h3 class="function-name">aether_strbuilder_append_long <span class="kind">extern</span></h3>
-      <pre class="usage"><code>aether_strbuilder_append_long(b, v) <span class="arrow">-&gt;</span> int</code></pre>
-      <p class="signature"><span class="sig-params">b: ptr, v: long</span></p>
-    </div>
-    <div class="function" id="aether_strbuilder_append_hex" data-name="aether_strbuilder_append_hex">
-      <h3 class="function-name">aether_strbuilder_append_hex <span class="kind">extern</span></h3>
-      <pre class="usage"><code>aether_strbuilder_append_hex(b, v, width) <span class="arrow">-&gt;</span> int</code></pre>
-      <p class="signature"><span class="sig-params">b: ptr, v: long, width: int</span></p>
-    </div>
-    <div class="function" id="aether_strbuilder_append_codepoint" data-name="aether_strbuilder_append_codepoint">
-      <h3 class="function-name">aether_strbuilder_append_codepoint <span class="kind">extern</span></h3>
-      <pre class="usage"><code>aether_strbuilder_append_codepoint(b, cp) <span class="arrow">-&gt;</span> int</code></pre>
-      <p class="signature"><span class="sig-params">b: ptr, cp: int</span></p>
-    </div>
-    <div class="function" id="aether_strbuilder_length" data-name="aether_strbuilder_length">
-      <h3 class="function-name">aether_strbuilder_length <span class="kind">extern</span></h3>
-      <pre class="usage"><code>aether_strbuilder_length(b) <span class="arrow">-&gt;</span> int</code></pre>
-      <p class="signature"><span class="sig-params">b: ptr</span></p>
-    </div>
-    <div class="function" id="aether_strbuilder_capacity" data-name="aether_strbuilder_capacity">
-      <h3 class="function-name">aether_strbuilder_capacity <span class="kind">extern</span></h3>
-      <pre class="usage"><code>aether_strbuilder_capacity(b) <span class="arrow">-&gt;</span> int</code></pre>
-      <p class="signature"><span class="sig-params">b: ptr</span></p>
-    </div>
-    <div class="function" id="aether_strbuilder_reserve" data-name="aether_strbuilder_reserve">
-      <h3 class="function-name">aether_strbuilder_reserve <span class="kind">extern</span></h3>
-      <pre class="usage"><code>aether_strbuilder_reserve(b, additional) <span class="arrow">-&gt;</span> int</code></pre>
-      <p class="signature"><span class="sig-params">b: ptr, additional: int</span></p>
-    </div>
-    <div class="function" id="aether_strbuilder_truncate" data-name="aether_strbuilder_truncate">
-      <h3 class="function-name">aether_strbuilder_truncate <span class="kind">extern</span></h3>
-      <pre class="usage"><code>aether_strbuilder_truncate(b, new_length) <span class="arrow">-&gt;</span> int</code></pre>
-      <p class="signature"><span class="sig-params">b: ptr, new_length: int</span></p>
-    </div>
-    <div class="function" id="aether_strbuilder_clear" data-name="aether_strbuilder_clear">
-      <h3 class="function-name">aether_strbuilder_clear <span class="kind">extern</span></h3>
-      <pre class="usage"><code>aether_strbuilder_clear(b) <span class="arrow">-&gt;</span> int</code></pre>
-      <p class="signature"><span class="sig-params">b: ptr</span></p>
-    </div>
-    <div class="function" id="aether_strbuilder_finish" data-name="aether_strbuilder_finish">
-      <h3 class="function-name">aether_strbuilder_finish <span class="kind">extern</span></h3>
-      <pre class="usage"><code>aether_strbuilder_finish(b) <span class="arrow">-&gt;</span> string</code></pre>
-      <p class="signature"><span class="sig-params">b: ptr</span></p>
-    </div>
-    <div class="function" id="aether_strbuilder_finish_with_length" data-name="aether_strbuilder_finish_with_length">
-      <h3 class="function-name">aether_strbuilder_finish_with_length <span class="kind">extern</span></h3>
-      <pre class="usage"><code>aether_strbuilder_finish_with_length(b) <span class="arrow">-&gt;</span> (ptr, int)</code></pre>
-      <p class="signature"><span class="sig-params">b: ptr</span></p>
-    </div>
-    <div class="function" id="aether_strbuilder_free" data-name="aether_strbuilder_free">
-      <h3 class="function-name">aether_strbuilder_free <span class="kind">extern</span></h3>
-      <pre class="usage"><code>aether_strbuilder_free(b)</code></pre>
-      <p class="signature"><span class="sig-params">b: ptr</span></p>
     </div>
     <div class="function" id="new" data-name="new">
       <h3 class="function-name">new <span class="kind">fn</span></h3>

@@ -15,29 +15,7 @@
   <input type="text" id="search" placeholder="Search set..." onkeyup="searchModule()">
   <h2>Exports</h2>
   <ul class="function-nav">
-    <li><a href="#aether_set_new">aether_set_new</a></li>
-    <li><a href="#aether_set_add">aether_set_add</a></li>
-    <li><a href="#aether_set_has">aether_set_has</a></li>
-    <li><a href="#aether_set_remove">aether_set_remove</a></li>
-    <li><a href="#aether_set_size">aether_set_size</a></li>
-    <li><a href="#aether_set_clear">aether_set_clear</a></li>
-    <li><a href="#aether_set_free">aether_set_free</a></li>
-    <li><a href="#aether_set_items_raw">aether_set_items_raw</a></li>
-    <li><a href="#aether_set_items_free">aether_set_items_free</a></li>
-    <li><a href="#map_keys_size_raw">map_keys_size_raw</a></li>
-    <li><a href="#map_keys_get_raw">map_keys_get_raw</a></li>
-    <li><a href="#new">new</a></li>
-    <li><a href="#add">add</a></li>
-    <li><a href="#try_add">try_add</a></li>
-    <li><a href="#contains">contains</a></li>
-    <li><a href="#remove">remove</a></li>
-    <li><a href="#size">size</a></li>
-    <li><a href="#clear">clear</a></li>
-    <li><a href="#free">free</a></li>
-    <li><a href="#items">items</a></li>
-    <li><a href="#items_free">items_free</a></li>
-    <li><a href="#items_size">items_size</a></li>
-    <li><a href="#items_get">items_get</a></li>
+    <li><a href="#2976">2976</a></li>
   </ul>
   <hr>
   <h2>Modules</h2>
@@ -98,6 +76,7 @@
     <li><a href="path.html">path</a></li>
     <li><a href="plural.html">plural</a></li>
     <li><a href="pqueue.html">pqueue</a></li>
+    <li><a href="quote.html">quote</a></li>
     <li><a href="reflect.html">reflect</a></li>
     <li><a href="regex.html">regex</a></li>
     <li><a href="resp.html">resp</a></li>
@@ -138,131 +117,9 @@
     <p class="import-line"><code>import std.set</code></p>
   </div>
   <div class="functions" id="functions">
-    <div class="function" id="aether_set_new" data-name="aether_set_new">
-      <h3 class="function-name">aether_set_new <span class="kind">extern</span></h3>
-      <pre class="usage"><code>aether_set_new() <span class="arrow">-&gt;</span> ptr</code></pre>
-      <p class="doc">---- raw externs (std/collections/aether_set.c) ----</p>
-    </div>
-    <div class="function" id="aether_set_add" data-name="aether_set_add">
-      <h3 class="function-name">aether_set_add <span class="kind">extern</span></h3>
-      <pre class="usage"><code>aether_set_add(set, item) <span class="arrow">-&gt;</span> int</code></pre>
-      <p class="signature"><span class="sig-params">set: ptr, item: string</span></p>
-    </div>
-    <div class="function" id="aether_set_has" data-name="aether_set_has">
-      <h3 class="function-name">aether_set_has <span class="kind">extern</span></h3>
-      <pre class="usage"><code>aether_set_has(set, item) <span class="arrow">-&gt;</span> int</code></pre>
-      <p class="signature"><span class="sig-params">set: ptr, item: string</span></p>
-    </div>
-    <div class="function" id="aether_set_remove" data-name="aether_set_remove">
-      <h3 class="function-name">aether_set_remove <span class="kind">extern</span></h3>
-      <pre class="usage"><code>aether_set_remove(set, item)</code></pre>
-      <p class="signature"><span class="sig-params">set: ptr, item: string</span></p>
-    </div>
-    <div class="function" id="aether_set_size" data-name="aether_set_size">
-      <h3 class="function-name">aether_set_size <span class="kind">extern</span></h3>
-      <pre class="usage"><code>aether_set_size(set) <span class="arrow">-&gt;</span> int</code></pre>
-      <p class="signature"><span class="sig-params">set: ptr</span></p>
-    </div>
-    <div class="function" id="aether_set_clear" data-name="aether_set_clear">
-      <h3 class="function-name">aether_set_clear <span class="kind">extern</span></h3>
-      <pre class="usage"><code>aether_set_clear(set)</code></pre>
-      <p class="signature"><span class="sig-params">set: ptr</span></p>
-    </div>
-    <div class="function" id="aether_set_free" data-name="aether_set_free">
-      <h3 class="function-name">aether_set_free <span class="kind">extern</span></h3>
-      <pre class="usage"><code>aether_set_free(set)</code></pre>
-      <p class="signature"><span class="sig-params">set: ptr</span></p>
-    </div>
-    <div class="function" id="aether_set_items_raw" data-name="aether_set_items_raw">
-      <h3 class="function-name">aether_set_items_raw <span class="kind">extern</span></h3>
-      <pre class="usage"><code>aether_set_items_raw(set) <span class="arrow">-&gt;</span> ptr</code></pre>
-      <p class="signature"><span class="sig-params">set: ptr</span></p>
-    </div>
-    <div class="function" id="aether_set_items_free" data-name="aether_set_items_free">
-      <h3 class="function-name">aether_set_items_free <span class="kind">extern</span></h3>
-      <pre class="usage"><code>aether_set_items_free(items)</code></pre>
-      <p class="signature"><span class="sig-params">items: ptr</span></p>
-    </div>
-    <div class="function" id="map_keys_size_raw" data-name="map_keys_size_raw">
-      <h3 class="function-name">map_keys_size_raw <span class="kind">extern</span></h3>
-      <pre class="usage"><code>map_keys_size_raw(items) <span class="arrow">-&gt;</span> int</code></pre>
-      <p class="signature"><span class="sig-params">items: ptr</span></p>
-      <p class="doc">aether_set_items_raw returns the same MapKeys snapshot map.keys does, so the read side is literally the same two functions (#1724).</p>
-    </div>
-    <div class="function" id="map_keys_get_raw" data-name="map_keys_get_raw">
-      <h3 class="function-name">map_keys_get_raw <span class="kind">extern</span></h3>
-      <pre class="usage"><code>map_keys_get_raw(items, index) <span class="arrow">-&gt;</span> string</code></pre>
-      <p class="signature"><span class="sig-params">items: ptr, index: int</span></p>
-    </div>
-    <div class="function" id="new" data-name="new">
-      <h3 class="function-name">new <span class="kind">fn</span></h3>
-      <pre class="usage"><code>new() <span class="arrow">-&gt;</span> ptr</code></pre>
-      <p class="doc">Create an empty set. Returns null on allocation failure.</p>
-    </div>
-    <div class="function" id="add" data-name="add">
-      <h3 class="function-name">add <span class="kind">fn</span></h3>
-      <pre class="usage"><code>add(set, item) <span class="arrow">-&gt;</span> bool</code></pre>
-      <p class="signature"><span class="sig-params">set: ptr, item: string</span></p>
-      <p class="doc">Insert `item`. Returns true if it was added, false if it was already present OR the insert failed — the two are indistinguishable here, which is why try_add exists. Keep using this where duplicate suppression is the whole point and an allocation failure would take the process down anyway.</p>
-    </div>
-    <div class="function" id="try_add" data-name="try_add">
-      <h3 class="function-name">try_add <span class="kind">fn</span></h3>
-      <pre class="usage"><code>try_add(set, item) <span class="arrow">-&gt;</span> (bool, string)</code></pre>
-      <p class="signature"><span class="sig-params">set: ptr, item: string</span></p>
-      <p class="doc">Insert `item`, distinguishing the three outcomes the layer below already knows about: (true,  &quot;&quot;)            inserted (false, &quot;&quot;)            already present — normal, not an error (false, &quot;set: ...&quot;)    the insert FAILED (null set, or out of memory) `add` collapses the last two into a bare false, so a caller who checks it cannot tell &quot;this was a duplicate&quot; from &quot;this was never stored&quot;. For a dedupe filter that difference is invisible; for anything that must know its data landed, it is the difference between correct and silently lossy.</p>
-    </div>
-    <div class="function" id="contains" data-name="contains">
-      <h3 class="function-name">contains <span class="kind">fn</span></h3>
-      <pre class="usage"><code>contains(set, item) <span class="arrow">-&gt;</span> bool</code></pre>
-      <p class="signature"><span class="sig-params">set: ptr, item: string</span></p>
-      <p class="doc">True when `item` is in the set.</p>
-    </div>
-    <div class="function" id="remove" data-name="remove">
-      <h3 class="function-name">remove <span class="kind">fn</span></h3>
-      <pre class="usage"><code>remove(set, item)</code></pre>
-      <p class="signature"><span class="sig-params">set: ptr, item: string</span></p>
-      <p class="doc">Drop `item`. Absent items are ignored.</p>
-    </div>
-    <div class="function" id="size" data-name="size">
-      <h3 class="function-name">size <span class="kind">fn</span></h3>
-      <pre class="usage"><code>size(set) <span class="arrow">-&gt;</span> int</code></pre>
-      <p class="signature"><span class="sig-params">set: ptr</span></p>
-      <p class="doc">Number of items currently in the set.</p>
-    </div>
-    <div class="function" id="clear" data-name="clear">
-      <h3 class="function-name">clear <span class="kind">fn</span></h3>
-      <pre class="usage"><code>clear(set)</code></pre>
-      <p class="signature"><span class="sig-params">set: ptr</span></p>
-      <p class="doc">Drop every item, keeping the set usable.</p>
-    </div>
-    <div class="function" id="free" data-name="free">
-      <h3 class="function-name">free <span class="kind">fn</span></h3>
-      <pre class="usage"><code>free(set)</code></pre>
-      <p class="signature"><span class="sig-params">set: ptr</span></p>
-      <p class="doc">Release the set. Items were copied in, so nothing else needs freeing.</p>
-    </div>
-    <div class="function" id="items" data-name="items">
-      <h3 class="function-name">items <span class="kind">fn</span></h3>
-      <pre class="usage"><code>items(set) <span class="arrow">-&gt;</span> (ptr, string)</code></pre>
-      <p class="signature"><span class="sig-params">set: ptr</span></p>
-      <p class="doc">Snapshot the set's items, in unspecified order. Returns (MapKeys ptr, &quot;&quot;) on success, (null, error) otherwise. The snapshot is released with `set.items_free`.</p>
-    </div>
-    <div class="function" id="items_free" data-name="items_free">
-      <h3 class="function-name">items_free <span class="kind">fn</span></h3>
-      <pre class="usage"><code>items_free(items)</code></pre>
-      <p class="signature"><span class="sig-params">items: ptr</span></p>
-      <p class="doc">Release a snapshot returned by `set.items`.</p>
-    </div>
-    <div class="function" id="items_size" data-name="items_size">
-      <h3 class="function-name">items_size <span class="kind">fn</span></h3>
-      <pre class="usage"><code>items_size(items) <span class="arrow">-&gt;</span> int</code></pre>
-      <p class="signature"><span class="sig-params">items: ptr</span></p>
-    </div>
-    <div class="function" id="items_get" data-name="items_get">
-      <h3 class="function-name">items_get <span class="kind">fn</span></h3>
-      <pre class="usage"><code>items_get(items, index) <span class="arrow">-&gt;</span> string</code></pre>
-      <p class="signature"><span class="sig-params">items: ptr, index: int</span></p>
-      <p class="doc">Out of range or null returns &quot;&quot; rather than trapping. An empty string is also a legitimate item, so callers who must distinguish check items_size.</p>
+    <div class="function" id="2976" data-name="2976">
+      <h3 class="function-name">2976 <span class="kind">fn</span></h3>
+      <pre class="usage"><code>2976()</code></pre>
     </div>
   </div>
 </main>

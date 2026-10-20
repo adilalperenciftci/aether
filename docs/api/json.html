@@ -36,22 +36,12 @@
     <li><a href="#array_get_raw">array_get_raw</a></li>
     <li><a href="#array_add_raw">array_add_raw</a></li>
     <li><a href="#array_size">array_size</a></li>
-    <li><a href="#create_null">create_null</a></li>
-    <li><a href="#create_bool">create_bool</a></li>
-    <li><a href="#create_number">create_number</a></li>
-    <li><a href="#create_int">create_int</a></li>
-    <li><a href="#create_string">create_string</a></li>
-    <li><a href="#create_array">create_array</a></li>
-    <li><a href="#create_object">create_object</a></li>
     <li><a href="#parse">parse</a></li>
-    <li><a href="#stringify">stringify</a></li>
     <li><a href="#get_string">get_string</a></li>
     <li><a href="#object_get">object_get</a></li>
-    <li><a href="#object_set">object_set</a></li>
     <li><a href="#object_size">object_size</a></li>
     <li><a href="#object_entry">object_entry</a></li>
     <li><a href="#array_get">array_get</a></li>
-    <li><a href="#array_add">array_add</a></li>
     <li><a href="#obj">obj</a></li>
     <li><a href="#arr">arr</a></li>
     <li><a href="#str">str</a></li>
@@ -130,6 +120,7 @@
     <li><a href="path.html">path</a></li>
     <li><a href="plural.html">plural</a></li>
     <li><a href="pqueue.html">pqueue</a></li>
+    <li><a href="quote.html">quote</a></li>
     <li><a href="reflect.html">reflect</a></li>
     <li><a href="regex.html">regex</a></li>
     <li><a href="resp.html">resp</a></li>
@@ -174,7 +165,7 @@
       <h3 class="function-name">parse_raw <span class="kind">extern</span></h3>
       <pre class="usage"><code>parse_raw(json_str) <span class="arrow">-&gt;</span> ptr</code></pre>
       <p class="signature"><span class="sig-params">json_str: string</span></p>
-      <p class="doc">---- parsing and serialization (raw externs) ----</p>
+      <p class="doc">---- parsing and serialization (raw externs) ---- The string arguments below cross as `@aether string`, so the C side reads them to their length: a document, key or value with an embedded NUL is not cut there (#2469).</p>
     </div>
     <div class="function" id="last_error" data-name="last_error">
       <h3 class="function-name">last_error <span class="kind">extern</span></h3>
@@ -205,7 +196,7 @@
       <h3 class="function-name">is_integer <span class="kind">extern</span></h3>
       <pre class="usage"><code>is_integer(value) <span class="arrow">-&gt;</span> int</code></pre>
       <p class="signature"><span class="sig-params">value: ptr</span></p>
-      <p class="doc">1 for a number written as an integer within int64 (or built with json_create_int / from_int), 0 for one with a fraction or exponent and for anything that is not a number: whether `42` or `42.0` was written.</p>
+      <p class="doc">1 for a number written as an integer within int64 (or built with `json.from_int`), 0 for one with a fraction or exponent and for anything that is not a number: whether `42` or `42.0` was written.</p>
     </div>
     <div class="function" id="get_bool" data-name="get_bool">
       <h3 class="function-name">get_bool <span class="kind">extern</span></h3>
@@ -280,50 +271,11 @@
       <pre class="usage"><code>array_size(arr) <span class="arrow">-&gt;</span> int</code></pre>
       <p class="signature"><span class="sig-params">arr: ptr</span></p>
     </div>
-    <div class="function" id="create_null" data-name="create_null">
-      <h3 class="function-name">create_null <span class="kind">extern</span></h3>
-      <pre class="usage"><code>create_null() <span class="arrow">-&gt;</span> ptr</code></pre>
-      <p class="doc">---- value creation (infallible — OOM treated as crash) ----</p>
-    </div>
-    <div class="function" id="create_bool" data-name="create_bool">
-      <h3 class="function-name">create_bool <span class="kind">extern</span></h3>
-      <pre class="usage"><code>create_bool(value) <span class="arrow">-&gt;</span> ptr</code></pre>
-      <p class="signature"><span class="sig-params">value: int</span></p>
-    </div>
-    <div class="function" id="create_number" data-name="create_number">
-      <h3 class="function-name">create_number <span class="kind">extern</span></h3>
-      <pre class="usage"><code>create_number(value) <span class="arrow">-&gt;</span> ptr</code></pre>
-      <p class="signature"><span class="sig-params">value: float</span></p>
-    </div>
-    <div class="function" id="create_int" data-name="create_int">
-      <h3 class="function-name">create_int <span class="kind">extern</span></h3>
-      <pre class="usage"><code>create_int(value) <span class="arrow">-&gt;</span> ptr</code></pre>
-      <p class="signature"><span class="sig-params">value: long long</span></p>
-    </div>
-    <div class="function" id="create_string" data-name="create_string">
-      <h3 class="function-name">create_string <span class="kind">extern</span></h3>
-      <pre class="usage"><code>create_string(value) <span class="arrow">-&gt;</span> ptr</code></pre>
-      <p class="signature"><span class="sig-params">value: string</span></p>
-    </div>
-    <div class="function" id="create_array" data-name="create_array">
-      <h3 class="function-name">create_array <span class="kind">extern</span></h3>
-      <pre class="usage"><code>create_array() <span class="arrow">-&gt;</span> ptr</code></pre>
-    </div>
-    <div class="function" id="create_object" data-name="create_object">
-      <h3 class="function-name">create_object <span class="kind">extern</span></h3>
-      <pre class="usage"><code>create_object() <span class="arrow">-&gt;</span> ptr</code></pre>
-    </div>
     <div class="function" id="parse" data-name="parse">
       <h3 class="function-name">parse <span class="kind">fn</span></h3>
       <pre class="usage"><code>parse(json_str) <span class="arrow">-&gt;</span> ptr!</code></pre>
       <p class="signature"><span class="sig-params">json_str: string</span></p>
       <p class="doc">Parse a JSON string. Returns (value, &quot;&quot;) on success, (null, error) on failure. The error is a position-qualified message like &quot;expected ':' at 3:17&quot;. Caller owns the returned value and must free with json.free. Heap-classification shape: position 1 (the error message) is heap on both return paths so the destructure wrapper at the call site fires uniformly. The failure path uses string_concat(json_last_error(), &quot;&quot;) for an owned copy; the success path uses string_concat(&quot;&quot;, &quot;&quot;) for a (tiny) empty heap string. Without both paths returning heap, function_def_returns_heap_at's AND-fold would mark position 1 non-heap and every destructure of `_, err = json.parse(...)` would leak the success-path &quot;&quot; allocation — except the success &quot;&quot; was already a literal so there'd be nothing TO leak, only an over-free risk on the failure path. The uniform-heap shape sidesteps the classifier's mixed-path conservatism. See # further-bug-fix4 for the wider context.</p>
-    </div>
-    <div class="function" id="stringify" data-name="stringify">
-      <h3 class="function-name">stringify <span class="kind">fn</span></h3>
-      <pre class="usage"><code>stringify(value) <span class="arrow">-&gt;</span> string!</code></pre>
-      <p class="signature"><span class="sig-params">value: ptr</span></p>
-      <p class="doc">Serialize a JSON value to a compact string. Returns (string, &quot;&quot;) on success, (&quot;&quot;, error) on failure. The returned string is a refcounted Aether string — no manual free required. Uniform-heap shape on both positions: see `parse` for the rationale.</p>
     </div>
     <div class="function" id="get_string" data-name="get_string">
       <h3 class="function-name">get_string <span class="kind">fn</span></h3>
@@ -336,12 +288,6 @@
       <pre class="usage"><code>object_get(obj, key) <span class="arrow">-&gt;</span> (ptr, string)</code></pre>
       <p class="signature"><span class="sig-params">obj: ptr, key: string</span></p>
       <p class="doc">Look up `key` in a JSON object. - (value, &quot;&quot;)             : key present - (null, &quot;&quot;)              : key absent (not an error — use json.object_has to disambiguate) - (null, &quot;not an object&quot;) : `obj` is not a JSON_OBJECT The returned value is borrowed from `obj` — don't json.free it, and don't use it after `obj` is freed.</p>
-    </div>
-    <div class="function" id="object_set" data-name="object_set">
-      <h3 class="function-name">object_set <span class="kind">fn</span></h3>
-      <pre class="usage"><code>object_set(obj, key, value) <span class="arrow">-&gt;</span> string</code></pre>
-      <p class="signature"><span class="sig-params">obj: ptr, key: string, value: ptr</span></p>
-      <p class="doc">Insert or update a key-value pair on a JSON object. Returns &quot;&quot; on success, error if `obj` is not a JSON_OBJECT. The object takes ownership of `value` — don't json.free it separately.</p>
     </div>
     <div class="function" id="object_size" data-name="object_size">
       <h3 class="function-name">object_size <span class="kind">fn</span></h3>
@@ -360,12 +306,6 @@
       <pre class="usage"><code>array_get(arr, index) <span class="arrow">-&gt;</span> (ptr, string)</code></pre>
       <p class="signature"><span class="sig-params">arr: ptr, index: int</span></p>
       <p class="doc">Index into a JSON array. - (value, &quot;&quot;)                    : index in range - (null, &quot;index out of range&quot;)   : index &lt; 0 or index &gt;= array_size - (null, &quot;not an array&quot;)         : `arr` is not a JSON_ARRAY An empty error means the value is good, as everywhere else in std (#2439). The returned value is borrowed from `arr`.</p>
-    </div>
-    <div class="function" id="array_add" data-name="array_add">
-      <h3 class="function-name">array_add <span class="kind">fn</span></h3>
-      <pre class="usage"><code>array_add(arr, value) <span class="arrow">-&gt;</span> string</code></pre>
-      <p class="signature"><span class="sig-params">arr: ptr, value: ptr</span></p>
-      <p class="doc">Append a value to a JSON array. Returns &quot;&quot; on success, error if `arr` is not a JSON_ARRAY. The array takes ownership of `value`.</p>
     </div>
     <div class="function" id="obj" data-name="obj">
       <h3 class="function-name">obj <span class="kind">fn</span></h3>

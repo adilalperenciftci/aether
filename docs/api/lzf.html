@@ -15,13 +15,13 @@
   <input type="text" id="search" placeholder="Search lzf..." onkeyup="searchModule()">
   <h2>Exports</h2>
   <ul class="function-nav">
-    <li><a href="#max_compressed_size">max_compressed_size</a></li>
     <li><a href="#get_compress_bytes">get_compress_bytes</a></li>
     <li><a href="#get_compress_length">get_compress_length</a></li>
     <li><a href="#release_compress">release_compress</a></li>
     <li><a href="#get_decompress_bytes">get_decompress_bytes</a></li>
     <li><a href="#get_decompress_length">get_decompress_length</a></li>
     <li><a href="#release_decompress">release_decompress</a></li>
+    <li><a href="#max_compressed_size">max_compressed_size</a></li>
     <li><a href="#compress">compress</a></li>
     <li><a href="#decompress">decompress</a></li>
   </ul>
@@ -84,6 +84,7 @@
     <li><a href="path.html">path</a></li>
     <li><a href="plural.html">plural</a></li>
     <li><a href="pqueue.html">pqueue</a></li>
+    <li><a href="quote.html">quote</a></li>
     <li><a href="reflect.html">reflect</a></li>
     <li><a href="regex.html">regex</a></li>
     <li><a href="resp.html">resp</a></li>
@@ -124,14 +125,9 @@
     <p class="import-line"><code>import std.lzf</code></p>
   </div>
   <div class="functions" id="functions">
-    <div class="function" id="max_compressed_size" data-name="max_compressed_size">
-      <h3 class="function-name">max_compressed_size <span class="kind">extern</span></h3>
-      <pre class="usage"><code>max_compressed_size(length) <span class="arrow">-&gt;</span> int</code></pre>
-      <p class="signature"><span class="sig-params">length: int</span></p>
-    </div>
     <div class="function" id="get_compress_bytes" data-name="get_compress_bytes">
       <h3 class="function-name">get_compress_bytes <span class="kind">extern</span></h3>
-      <pre class="usage"><code>get_compress_bytes() <span class="arrow">-&gt;</span> string</code></pre>
+      <pre class="usage"><code>get_compress_bytes() <span class="arrow">-&gt;</span> ptr</code></pre>
     </div>
     <div class="function" id="get_compress_length" data-name="get_compress_length">
       <h3 class="function-name">get_compress_length <span class="kind">extern</span></h3>
@@ -143,7 +139,7 @@
     </div>
     <div class="function" id="get_decompress_bytes" data-name="get_decompress_bytes">
       <h3 class="function-name">get_decompress_bytes <span class="kind">extern</span></h3>
-      <pre class="usage"><code>get_decompress_bytes() <span class="arrow">-&gt;</span> string</code></pre>
+      <pre class="usage"><code>get_decompress_bytes() <span class="arrow">-&gt;</span> ptr</code></pre>
     </div>
     <div class="function" id="get_decompress_length" data-name="get_decompress_length">
       <h3 class="function-name">get_decompress_length <span class="kind">extern</span></h3>
@@ -152,6 +148,11 @@
     <div class="function" id="release_decompress" data-name="release_decompress">
       <h3 class="function-name">release_decompress <span class="kind">extern</span></h3>
       <pre class="usage"><code>release_decompress()</code></pre>
+    </div>
+    <div class="function" id="max_compressed_size" data-name="max_compressed_size">
+      <h3 class="function-name">max_compressed_size <span class="kind">fn</span></h3>
+      <pre class="usage"><code>max_compressed_size(length) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">length: int</span></p>
     </div>
     <div class="function" id="compress" data-name="compress">
       <h3 class="function-name">compress <span class="kind">fn</span></h3>

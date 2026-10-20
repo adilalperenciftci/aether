@@ -38,6 +38,7 @@
     <li><a href="#fd_close_raw">fd_close_raw</a></li>
     <li><a href="#fd_read_n_tuple">fd_read_n_tuple</a></li>
     <li><a href="#fd_read_line_tuple">fd_read_line_tuple</a></li>
+    <li><a href="#fd_read_line_status_tuple">fd_read_line_status_tuple</a></li>
     <li><a href="#fd_read_into_raw">fd_read_into_raw</a></li>
     <li><a href="#read_file">read_file</a></li>
     <li><a href="#write_file">write_file</a></li>
@@ -57,6 +58,7 @@
     <li><a href="#fd_read_n">fd_read_n</a></li>
     <li><a href="#fd_read_into">fd_read_into</a></li>
     <li><a href="#fd_read_line">fd_read_line</a></li>
+    <li><a href="#fd_read_line_status">fd_read_line_status</a></li>
   </ul>
   <hr>
   <h2>Modules</h2>
@@ -117,6 +119,7 @@
     <li><a href="path.html">path</a></li>
     <li><a href="plural.html">plural</a></li>
     <li><a href="pqueue.html">pqueue</a></li>
+    <li><a href="quote.html">quote</a></li>
     <li><a href="reflect.html">reflect</a></li>
     <li><a href="regex.html">regex</a></li>
     <li><a href="resp.html">resp</a></li>
@@ -279,6 +282,11 @@
       <pre class="usage"><code>fd_read_line_tuple(fd) <span class="arrow">-&gt;</span> (string, string)</code></pre>
       <p class="signature"><span class="sig-params">fd: int</span></p>
     </div>
+    <div class="function" id="fd_read_line_status_tuple" data-name="fd_read_line_status_tuple">
+      <h3 class="function-name">fd_read_line_status_tuple <span class="kind">extern</span></h3>
+      <pre class="usage"><code>fd_read_line_status_tuple(fd) <span class="arrow">-&gt;</span> (string, bool, string)</code></pre>
+      <p class="signature"><span class="sig-params">fd: int</span></p>
+    </div>
     <div class="function" id="fd_read_into_raw" data-name="fd_read_into_raw">
       <h3 class="function-name">fd_read_into_raw <span class="kind">extern</span></h3>
       <pre class="usage"><code>fd_read_into_raw(fd, buf, length) <span class="arrow">-&gt;</span> int</code></pre>
@@ -390,6 +398,12 @@
       <pre class="usage"><code>fd_read_line(fd) <span class="arrow">-&gt;</span> (string, string)</code></pre>
       <p class="signature"><span class="sig-params">fd: int</span></p>
       <p class="doc">Read one '\n'-delimited line from `fd`. The trailing '\n' is stripped (and a '\r' before it for CRLF input). Returns (line, err): - Normal line: (content, &quot;&quot;). - Clean EOF before any byte: (&quot;&quot;, &quot;&quot;). - EOF mid-line: returns the partial line and (&quot;&quot;, &quot;&quot;) — server- side dump streams sometimes end without a trailing '\n'. - Read error: (&quot;&quot;, &quot;&lt;reason&gt;&quot;).</p>
+    </div>
+    <div class="function" id="fd_read_line_status" data-name="fd_read_line_status">
+      <h3 class="function-name">fd_read_line_status <span class="kind">fn</span></h3>
+      <pre class="usage"><code>fd_read_line_status(fd) <span class="arrow">-&gt;</span> (string, bool, string)</code></pre>
+      <p class="signature"><span class="sig-params">fd: int</span></p>
+      <p class="doc">EOF-aware line input: (line, eof, err). An empty line is (&quot;&quot;, false, &quot;&quot;); clean EOF is (&quot;&quot;, true, &quot;&quot;). An unterminated final line returns its content with eof=true: process the content before exiting. Errors return (&quot;&quot;, false, error). Trailing CR/LF stripping matches fd_read_line. The line is an owned, refcounted string, released automatically at scope exit and valid across subsequent reads and fd_close (also on EOF/error).</p>
     </div>
   </div>
 </main>

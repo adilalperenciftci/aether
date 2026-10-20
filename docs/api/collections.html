@@ -119,6 +119,7 @@
     <li><a href="path.html">path</a></li>
     <li><a href="plural.html">plural</a></li>
     <li><a href="pqueue.html">pqueue</a></li>
+    <li><a href="quote.html">quote</a></li>
     <li><a href="reflect.html">reflect</a></li>
     <li><a href="regex.html">regex</a></li>
     <li><a href="resp.html">resp</a></li>
@@ -213,7 +214,7 @@
       <h3 class="function-name">map_put_raw <span class="kind">extern</span></h3>
       <pre class="usage"><code>map_put_raw(map, key, value) <span class="arrow">-&gt;</span> int</code></pre>
       <p class="signature"><span class="sig-params">map: ptr, key: string, value: ptr</span></p>
-      <p class="doc">`key` is BORROWED: map_put_raw copies the key into the map's own AetherString (string_new at put time, released at map_free), so it never holds a reference to the caller's key bytes after the call. A heap-string `key` argument is therefore the caller's to reclaim — it must NOT be @retain-marked, or the caller's key leaks (the map only ever owns its copy). The map_clear/map_free path releases the COPY, not the caller's original.</p>
+      <p class="doc">`key` is BORROWED: map_put_raw copies the key into the map's own AetherString (string_new at put time, released at map_free), so it never holds a reference to the caller's key bytes after the call. A heap-string `key` argument is therefore the caller's to reclaim — it must NOT be @retain-marked, or the caller's key leaks (the map only ever owns its copy). The map_clear/map_free path releases the COPY, not the caller's original. Keys cross as `@aether string`: the C map reads the AetherString's length, so a key with an embedded NUL is the whole key (#2469). Unwrapped to a C string, &quot;a\0x&quot; and &quot;a\0y&quot; were one key, &quot;a&quot;.</p>
     </div>
     <div class="function" id="map_get_raw" data-name="map_get_raw">
       <h3 class="function-name">map_get_raw <span class="kind">extern</span></h3>
@@ -312,13 +313,13 @@
     <div class="function" id="string_list_new" data-name="string_list_new">
       <h3 class="function-name">string_list_new <span class="kind">extern</span></h3>
       <pre class="usage"><code>string_list_new() <span class="arrow">-&gt;</span> ptr</code></pre>
-      <p class="doc">---- StringList: refcount-aware list for AetherString values ---- The plain ArrayList stores items as raw `void*` and doesn't retain on insert / release on remove. That works for caller-managed lifetimes but silently dangles when the list is asked to hold AetherString-bearing values whose refcount drops to zero before the list itself is freed (the original variable goes out of scope, the string frees, the list is left with a stale pointer). StringList wraps the same backing storage but takes a strong reference on every insert and releases on remove / clear / free. Plain `string` literals pass through unchanged — string_retain is a no-op on values that don't bear the AetherString magic header. Issue #274.</p>
+      <p class="doc">---- StringList: a list whose elements are strings it owns ---- It wraps the ArrayList's backing storage, stores its own copy of every string added or set, and frees those copies on remove, clear, an overwriting set and free. (`list.add` of a `string` gives an ordinary list a reference of its own too; StringList is the C-facing shape typed for strings.) Issue #274.</p>
     </div>
     <div class="function" id="string_list_add" data-name="string_list_add">
       <h3 class="function-name">string_list_add <span class="kind">extern</span></h3>
       <pre class="usage"><code>string_list_add(list, s) <span class="arrow">-&gt;</span> int</code></pre>
       <p class="signature"><span class="sig-params">list: ptr, s: string</span></p>
-      <p class="doc">`s` is COPIED, not retained: the list owns an independent NUL- terminated copy of the string's bytes and frees it itself (in remove / clear / free / overwriting set). The caller therefore keeps ownership of its argument — a `string`-typed param is read-only to the escape walker, so the caller's heap value is reclaimed normally at its own scope exit. This is why there is no `@retain` here: an earlier version stored the caller's pointer (needing `@retain` to suppress the caller's free and avoid a UAF), but that leaked every plain `char*` element — `string_retain`/`string_release` are no-ops on non-magic `char*`, so the list could never reclaim a `string.concat`/`split` result. Copy-on-add owns the bytes outright, fixing the leak with no UAF. (#420 / leak-tail follow-up.)</p>
+      <p class="doc">`s` is COPIED, not retained: the list owns an independent copy of all the string's bytes, embedded NULs included (#2469), and frees it itself (in remove / clear / free / overwriting set). The caller keeps its argument, borrowed for the call as every argument is, and releases it as usual. This is why there is no `@retain` here: an earlier version stored the caller's pointer and could never reclaim a plain `char*` element. Copy-on-add owns the bytes outright. (#420 / leak-tail follow-up.)</p>
     </div>
     <div class="function" id="string_list_get" data-name="string_list_get">
       <h3 class="function-name">string_list_get <span class="kind">extern</span></h3>
@@ -355,7 +356,7 @@
       <h3 class="function-name">string_list_sort <span class="kind">extern</span></h3>
       <pre class="usage"><code>string_list_sort(list, cmp)</code></pre>
       <p class="signature"><span class="sig-params">list: ptr, cmp: ptr</span></p>
-      <p class="doc">#967: stable sort. `cmp` is a comparator closure `fn(string, string) -&gt; int` (negative / 0 / positive, like strcmp), passed as a boxed closure (ptr). Reorders slots only — safe against the get/set aliasing trap. sort_lex is the closure-free ascending-lexicographic common case.</p>
+      <p class="doc">#967: stable sort. `cmp` is a comparator closure `fn(string, string) -&gt; int` (negative / 0 / positive, like strcmp), passed as a boxed closure (ptr) that the sort uses only during the call (`@noescape`, #2523: the caller releases its environment afterwards). Reorders slots only, safe against the get/set aliasing trap. sort_lex is the closure-free ascending- lexicographic common case.</p>
     </div>
     <div class="function" id="string_list_sort_lex" data-name="string_list_sort_lex">
       <h3 class="function-name">string_list_sort_lex <span class="kind">extern</span></h3>

@@ -15,12 +15,6 @@
   <input type="text" id="search" placeholder="Search config..." onkeyup="searchModule()">
   <h2>Exports</h2>
   <ul class="function-nav">
-    <li><a href="#aether_config_store_put">aether_config_store_put</a></li>
-    <li><a href="#aether_config_store_get">aether_config_store_get</a></li>
-    <li><a href="#aether_config_store_get_or">aether_config_store_get_or</a></li>
-    <li><a href="#aether_config_store_has">aether_config_store_has</a></li>
-    <li><a href="#aether_config_store_size">aether_config_store_size</a></li>
-    <li><a href="#aether_config_store_clear">aether_config_store_clear</a></li>
     <li><a href="#put">put</a></li>
     <li><a href="#get">get</a></li>
     <li><a href="#get_or">get_or</a></li>
@@ -87,6 +81,7 @@
     <li><a href="path.html">path</a></li>
     <li><a href="plural.html">plural</a></li>
     <li><a href="pqueue.html">pqueue</a></li>
+    <li><a href="quote.html">quote</a></li>
     <li><a href="reflect.html">reflect</a></li>
     <li><a href="regex.html">regex</a></li>
     <li><a href="resp.html">resp</a></li>
@@ -127,35 +122,6 @@
     <p class="import-line"><code>import std.config</code></p>
   </div>
   <div class="functions" id="functions">
-    <div class="function" id="aether_config_store_put" data-name="aether_config_store_put">
-      <h3 class="function-name">aether_config_store_put <span class="kind">extern</span></h3>
-      <pre class="usage"><code>aether_config_store_put(key, value)</code></pre>
-      <p class="signature"><span class="sig-params">key: string, value: string</span></p>
-      <p class="doc">---- Raw externs ----</p>
-    </div>
-    <div class="function" id="aether_config_store_get" data-name="aether_config_store_get">
-      <h3 class="function-name">aether_config_store_get <span class="kind">extern</span></h3>
-      <pre class="usage"><code>aether_config_store_get(key) <span class="arrow">-&gt;</span> string</code></pre>
-      <p class="signature"><span class="sig-params">key: string</span></p>
-    </div>
-    <div class="function" id="aether_config_store_get_or" data-name="aether_config_store_get_or">
-      <h3 class="function-name">aether_config_store_get_or <span class="kind">extern</span></h3>
-      <pre class="usage"><code>aether_config_store_get_or(key, default_value) <span class="arrow">-&gt;</span> string</code></pre>
-      <p class="signature"><span class="sig-params">key: string, default_value: string</span></p>
-    </div>
-    <div class="function" id="aether_config_store_has" data-name="aether_config_store_has">
-      <h3 class="function-name">aether_config_store_has <span class="kind">extern</span></h3>
-      <pre class="usage"><code>aether_config_store_has(key) <span class="arrow">-&gt;</span> int</code></pre>
-      <p class="signature"><span class="sig-params">key: string</span></p>
-    </div>
-    <div class="function" id="aether_config_store_size" data-name="aether_config_store_size">
-      <h3 class="function-name">aether_config_store_size <span class="kind">extern</span></h3>
-      <pre class="usage"><code>aether_config_store_size() <span class="arrow">-&gt;</span> int</code></pre>
-    </div>
-    <div class="function" id="aether_config_store_clear" data-name="aether_config_store_clear">
-      <h3 class="function-name">aether_config_store_clear <span class="kind">extern</span></h3>
-      <pre class="usage"><code>aether_config_store_clear()</code></pre>
-    </div>
     <div class="function" id="put" data-name="put">
       <h3 class="function-name">put <span class="kind">fn</span></h3>
       <pre class="usage"><code>put(key, value)</code></pre>

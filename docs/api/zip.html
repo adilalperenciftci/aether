@@ -100,6 +100,7 @@
     <li><a href="path.html">path</a></li>
     <li><a href="plural.html">plural</a></li>
     <li><a href="pqueue.html">pqueue</a></li>
+    <li><a href="quote.html">quote</a></li>
     <li><a href="reflect.html">reflect</a></li>
     <li><a href="regex.html">regex</a></li>
     <li><a href="resp.html">resp</a></li>
@@ -257,17 +258,18 @@
     <div class="function" id="ExtractOptions" data-name="ExtractOptions">
       <h3 class="function-name">ExtractOptions <span class="kind">struct</span></h3>
       <pre class="usage"><code>struct ExtractOptions</code></pre>
+      <p class="doc">One options struct for archive extraction, shared with std.tar: the definition is identical, field for field, to std.tar's ExtractOptions. Struct names are one namespace across modules and identical definitions share one type, so a program can import both modules and pass one module's options to the other. Keep the two definitions in lockstep. std.zip extracts every entry as a regular file or a directory, never as a symlink, so `allow_symlinks` has nothing to allow here. Restoring modes and mtimes is not implemented for zip yet, so extract refuses `preserve_mode` / `preserve_mtime` = 1 rather than ignore them.</p>
     </div>
     <div class="function" id="default_extract_options" data-name="default_extract_options">
       <h3 class="function-name">default_extract_options <span class="kind">fn</span></h3>
       <pre class="usage"><code>default_extract_options() <span class="arrow">-&gt;</span> ExtractOptions</code></pre>
-      <p class="doc">Safe defaults: 10k entries, 1 GiB per entry, 10 GiB total, no overwrite.</p>
+      <p class="doc">Safe defaults: 10k entries, 1 GiB per entry, 10 GiB total, no overwrite, no symlinks, no metadata restore. The same values std.tar defaults to.</p>
     </div>
     <div class="function" id="extract" data-name="extract">
       <h3 class="function-name">extract <span class="kind">fn</span></h3>
       <pre class="usage"><code>extract(data, dest_dir, options) <span class="arrow">-&gt;</span> string</code></pre>
       <p class="signature"><span class="sig-params">data: byte[], dest_dir: string, options: ExtractOptions</span></p>
-      <p class="doc">Extract the archive held in `data` (a byte[], #2301) under `dest_dir`, applying `options`. Returns &quot;&quot; on success, else a descriptive error; on error, files written so far are left in place (as std.tar does). The destination is created if absent.</p>
+      <p class="doc">Extract the archive held in `data` (a byte[], #2301) under `dest_dir`, applying `options`. Returns &quot;&quot; on success, else a descriptive error; on error, files written so far are left in place (as std.tar does). The destination is created if absent. An existing file (or symlink) at an entry's path is an error unless `overwrite` is 1, in which case it is unlinked before the entry is written, so the write never follows a link.</p>
     </div>
     <div class="function" id="extract_file" data-name="extract_file">
       <h3 class="function-name">extract_file <span class="kind">fn</span></h3>

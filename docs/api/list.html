@@ -27,6 +27,7 @@
     <li><a href="#free">free</a></li>
     <li><a href="#add">add</a></li>
     <li><a href="#get">get</a></li>
+    <li><a href="#get_string">get_string</a></li>
   </ul>
   <hr>
   <h2>Modules</h2>
@@ -87,6 +88,7 @@
     <li><a href="path.html">path</a></li>
     <li><a href="plural.html">plural</a></li>
     <li><a href="pqueue.html">pqueue</a></li>
+    <li><a href="quote.html">quote</a></li>
     <li><a href="reflect.html">reflect</a></li>
     <li><a href="regex.html">regex</a></li>
     <li><a href="resp.html">resp</a></li>
@@ -145,7 +147,7 @@
       <h3 class="function-name">add_string_owned <span class="kind">extern</span></h3>
       <pre class="usage"><code>add_string_owned(list, item) <span class="arrow">-&gt;</span> int</code></pre>
       <p class="signature"><span class="sig-params">list: ptr, item: ptr</span></p>
-      <p class="doc">Heap-string-aware add. The list acquires its OWN reference: a refcounted string is retained, a plain pointer (a literal, a borrowed char*) is copied. The caller keeps and independently frees theirs, so the same value can live in several containers. list_free releases each owned element before freeing the backing array. Codegen auto-routes `list.add(l, heap_string_expr)` to the adopting sibling instead, where the value is escaping into the list and the caller does not release it.</p>
+      <p class="doc">String-aware add, for C and `ptr` callers. The list takes a reference of its own: a counted string is retained, a plain C pointer is copied. The caller keeps and releases its own, so the same value can live in several containers. list_free releases each owned element before freeing the backing array. `list.add(l, s)` of a `string` in Aether code is a store into the list (R3): the compiler hands the list a reference, moving a fresh value in.</p>
     </div>
     <div class="function" id="get_raw" data-name="get_raw">
       <h3 class="function-name">get_raw <span class="kind">extern</span></h3>
@@ -188,6 +190,12 @@
       <pre class="usage"><code>get(list, index) <span class="arrow">-&gt;</span> (ptr, string)</code></pre>
       <p class="signature"><span class="sig-params">list: ptr, index: int</span></p>
       <p class="doc">Index into a list. - (item, &quot;&quot;)                     : index in range - (null, &quot;index out of range&quot;)   : index &lt; 0 or index &gt;= size - (null, &quot;null list&quot;)            : `list` is null An empty error means the value is good, as everywhere else in std (#2439). list_get_raw stays the unchecked form for callers that have already bounded the index.</p>
+    </div>
+    <div class="function" id="get_string" data-name="get_string">
+      <h3 class="function-name">get_string <span class="kind">fn</span></h3>
+      <pre class="usage"><code>get_string(list, index) <span class="arrow">-&gt;</span> (string, string)</code></pre>
+      <p class="signature"><span class="sig-params">list: ptr, index: int</span></p>
+      <p class="doc">Index into a list whose element is a string. `get` hands back a `ptr`, which a `string` local would read as text whatever it points at (refused, E0202); this says the element is a string, and checks it is one: - (item, &quot;&quot;)                     : index in range, the element a string - (null, &quot;&quot;)                     : the element is null - (null, &quot;not a string&quot;)         : the element is some other pointer - (null, &quot;index out of range&quot;)   : index &lt; 0 or index &gt;= size - (null, &quot;null list&quot;)            : `list` is null</p>
     </div>
   </div>
 </main>

@@ -15,19 +15,6 @@
   <input type="text" id="search" placeholder="Search intmap..." onkeyup="searchModule()">
   <h2>Exports</h2>
   <ul class="function-nav">
-    <li><a href="#aether_intmap_new">aether_intmap_new</a></li>
-    <li><a href="#aether_intmap_free">aether_intmap_free</a></li>
-    <li><a href="#aether_intmap_put">aether_intmap_put</a></li>
-    <li><a href="#aether_intmap_get">aether_intmap_get</a></li>
-    <li><a href="#aether_intmap_has">aether_intmap_has</a></li>
-    <li><a href="#aether_intmap_add">aether_intmap_add</a></li>
-    <li><a href="#aether_intmap_add_failed">aether_intmap_add_failed</a></li>
-    <li><a href="#aether_intmap_remove">aether_intmap_remove</a></li>
-    <li><a href="#aether_intmap_size">aether_intmap_size</a></li>
-    <li><a href="#aether_intmap_clear">aether_intmap_clear</a></li>
-    <li><a href="#aether_intmap_next">aether_intmap_next</a></li>
-    <li><a href="#aether_intmap_key_at">aether_intmap_key_at</a></li>
-    <li><a href="#aether_intmap_value_at">aether_intmap_value_at</a></li>
     <li><a href="#new">new</a></li>
     <li><a href="#free">free</a></li>
     <li><a href="#put">put</a></li>
@@ -100,6 +87,7 @@
     <li><a href="path.html">path</a></li>
     <li><a href="plural.html">plural</a></li>
     <li><a href="pqueue.html">pqueue</a></li>
+    <li><a href="quote.html">quote</a></li>
     <li><a href="reflect.html">reflect</a></li>
     <li><a href="regex.html">regex</a></li>
     <li><a href="resp.html">resp</a></li>
@@ -140,72 +128,6 @@
     <p class="import-line"><code>import std.intmap</code></p>
   </div>
   <div class="functions" id="functions">
-    <div class="function" id="aether_intmap_new" data-name="aether_intmap_new">
-      <h3 class="function-name">aether_intmap_new <span class="kind">extern</span></h3>
-      <pre class="usage"><code>aether_intmap_new(capacity_hint) <span class="arrow">-&gt;</span> ptr</code></pre>
-      <p class="signature"><span class="sig-params">capacity_hint: int</span></p>
-      <p class="doc">---- raw externs (std/intmap/aether_intmap.c) ----</p>
-    </div>
-    <div class="function" id="aether_intmap_free" data-name="aether_intmap_free">
-      <h3 class="function-name">aether_intmap_free <span class="kind">extern</span></h3>
-      <pre class="usage"><code>aether_intmap_free(m)</code></pre>
-      <p class="signature"><span class="sig-params">m: ptr</span></p>
-    </div>
-    <div class="function" id="aether_intmap_put" data-name="aether_intmap_put">
-      <h3 class="function-name">aether_intmap_put <span class="kind">extern</span></h3>
-      <pre class="usage"><code>aether_intmap_put(m, key, value) <span class="arrow">-&gt;</span> int</code></pre>
-      <p class="signature"><span class="sig-params">m: ptr, key: long, value: long</span></p>
-    </div>
-    <div class="function" id="aether_intmap_get" data-name="aether_intmap_get">
-      <h3 class="function-name">aether_intmap_get <span class="kind">extern</span></h3>
-      <pre class="usage"><code>aether_intmap_get(m, key, missing) <span class="arrow">-&gt;</span> long</code></pre>
-      <p class="signature"><span class="sig-params">m: ptr, key: long, missing: long</span></p>
-    </div>
-    <div class="function" id="aether_intmap_has" data-name="aether_intmap_has">
-      <h3 class="function-name">aether_intmap_has <span class="kind">extern</span></h3>
-      <pre class="usage"><code>aether_intmap_has(m, key) <span class="arrow">-&gt;</span> int</code></pre>
-      <p class="signature"><span class="sig-params">m: ptr, key: long</span></p>
-    </div>
-    <div class="function" id="aether_intmap_add" data-name="aether_intmap_add">
-      <h3 class="function-name">aether_intmap_add <span class="kind">extern</span></h3>
-      <pre class="usage"><code>aether_intmap_add(m, key, delta) <span class="arrow">-&gt;</span> long</code></pre>
-      <p class="signature"><span class="sig-params">m: ptr, key: long, delta: long</span></p>
-    </div>
-    <div class="function" id="aether_intmap_add_failed" data-name="aether_intmap_add_failed">
-      <h3 class="function-name">aether_intmap_add_failed <span class="kind">extern</span></h3>
-      <pre class="usage"><code>aether_intmap_add_failed(m) <span class="arrow">-&gt;</span> int</code></pre>
-      <p class="signature"><span class="sig-params">m: ptr</span></p>
-    </div>
-    <div class="function" id="aether_intmap_remove" data-name="aether_intmap_remove">
-      <h3 class="function-name">aether_intmap_remove <span class="kind">extern</span></h3>
-      <pre class="usage"><code>aether_intmap_remove(m, key) <span class="arrow">-&gt;</span> int</code></pre>
-      <p class="signature"><span class="sig-params">m: ptr, key: long</span></p>
-    </div>
-    <div class="function" id="aether_intmap_size" data-name="aether_intmap_size">
-      <h3 class="function-name">aether_intmap_size <span class="kind">extern</span></h3>
-      <pre class="usage"><code>aether_intmap_size(m) <span class="arrow">-&gt;</span> int</code></pre>
-      <p class="signature"><span class="sig-params">m: ptr</span></p>
-    </div>
-    <div class="function" id="aether_intmap_clear" data-name="aether_intmap_clear">
-      <h3 class="function-name">aether_intmap_clear <span class="kind">extern</span></h3>
-      <pre class="usage"><code>aether_intmap_clear(m)</code></pre>
-      <p class="signature"><span class="sig-params">m: ptr</span></p>
-    </div>
-    <div class="function" id="aether_intmap_next" data-name="aether_intmap_next">
-      <h3 class="function-name">aether_intmap_next <span class="kind">extern</span></h3>
-      <pre class="usage"><code>aether_intmap_next(m, slot) <span class="arrow">-&gt;</span> int</code></pre>
-      <p class="signature"><span class="sig-params">m: ptr, slot: int</span></p>
-    </div>
-    <div class="function" id="aether_intmap_key_at" data-name="aether_intmap_key_at">
-      <h3 class="function-name">aether_intmap_key_at <span class="kind">extern</span></h3>
-      <pre class="usage"><code>aether_intmap_key_at(m, slot) <span class="arrow">-&gt;</span> long</code></pre>
-      <p class="signature"><span class="sig-params">m: ptr, slot: int</span></p>
-    </div>
-    <div class="function" id="aether_intmap_value_at" data-name="aether_intmap_value_at">
-      <h3 class="function-name">aether_intmap_value_at <span class="kind">extern</span></h3>
-      <pre class="usage"><code>aether_intmap_value_at(m, slot) <span class="arrow">-&gt;</span> long</code></pre>
-      <p class="signature"><span class="sig-params">m: ptr, slot: int</span></p>
-    </div>
     <div class="function" id="new" data-name="new">
       <h3 class="function-name">new <span class="kind">fn</span></h3>
       <pre class="usage"><code>new(capacity_hint) <span class="arrow">-&gt;</span> ptr</code></pre>
