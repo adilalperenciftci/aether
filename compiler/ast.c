@@ -396,6 +396,33 @@ const char* ast_struct_display_name(const char* cname) {
     return e ? e->display : cname;
 }
 
+int ast_names_without_binding(const ASTNode* n) {
+    switch (n->type) {
+        case AST_IDENTIFIER:
+        case AST_LITERAL:
+        case AST_FUNCTION_CALL:
+        case AST_MEMBER_ACCESS:
+        case AST_FIELD_INIT:
+        case AST_NAMED_ARG:
+        case AST_MESSAGE_CONSTRUCTOR:
+        case AST_STRUCT_LITERAL:
+        case AST_BINARY_EXPRESSION:
+        case AST_UNARY_EXPRESSION:
+        case AST_STRING_INTERP:
+            return 1;
+        default:
+            return 0;
+    }
+}
+
+int ast_binds_name(const ASTNode* n, const char* name) {
+    if (!n || !name) return 0;
+    if (n->value && !ast_names_without_binding(n) && strcmp(n->value, name) == 0) return 1;
+    for (int i = 0; i < n->child_count; i++)
+        if (ast_binds_name(n->children[i], name)) return 1;
+    return 0;
+}
+
 const char* type_to_string(Type* type) {
     if (!type) return "UNKNOWN";
 

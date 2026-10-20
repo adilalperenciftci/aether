@@ -264,6 +264,83 @@ main() { hold(LABEL) }
 AE
 accepted keep_const
 
+# A module `var` that starts as a literal is not pinned: it holds whatever
+# was stored last (the review of #2990 found it taken by name for a const).
+cat > "$TMP/keep_var_literal.ae" <<'AE'
+import std.string
+
+var label: string = "start"
+var kept: ptr = null
+
+hold(p: @keep ptr) {
+    kept = p
+}
+
+main() {
+    label = string.concat("a", "b")
+    hold(label)
+}
+AE
+refused keep_var_literal 12:10 "a \`string\` is given to a \`@keep ptr\` parameter"
+
+# Nor is a local that shadows a pinned const: the name is the local there.
+cat > "$TMP/keep_const_shadowed.ae" <<'AE'
+import std.string
+
+const LABEL = "job"
+
+var kept: ptr = null
+
+hold(p: @keep ptr) {
+    kept = p
+}
+
+f() {
+    LABEL = string.concat("a", "b")
+    hold(LABEL)
+}
+
+main() { f() }
+AE
+refused keep_const_shadowed 13:10 "a \`string\` is given to a \`@keep ptr\` parameter"
+
+cat > "$TMP/keep_const_param.ae" <<'AE'
+import std.string
+
+const LABEL = "job"
+
+var kept: ptr = null
+
+hold(p: @keep ptr) {
+    kept = p
+}
+
+f(LABEL: string) {
+    hold(LABEL)
+}
+
+main() { f(string.concat("a", "b")) }
+AE
+refused keep_const_param 12:10 "a \`string\` is given to a \`@keep ptr\` parameter"
+
+# The same rule decides a string stored into C memory that outlives the
+# function (#2979): a module `var` there needs string.keep too.
+cat > "$TMP/c_memory_var_literal.ae" <<'AE'
+import std.string
+
+extern malloc(n: int) -> ptr
+
+var label: string = "start"
+var mem: ptr = null
+
+main() {
+    label = string.concat("a", "b")
+    mem = malloc(16)
+    (mem as string[])[0] = label
+}
+AE
+refused c_memory_var_literal 11:28 "a string is stored into C memory that outlives the function"
+
 # A struct or a closure that holds a borrowed parameter keeps it only when
 # it escapes itself (Nic, 2026-10-19): each escaping form is still E0902.
 

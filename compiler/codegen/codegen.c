@@ -6254,35 +6254,13 @@ typedef struct {
     int count;
 } EntryConsts;
 
-/* Node kinds that carry a name without binding one: a reference, a call, a
- * field, an operator, a literal's text. Every other kind carrying `name` is
- * taken to bind it: a parameter, a local, a pattern or closure parameter,
- * actor state, a catch or loop variable, and any kind not listed here. */
-static int node_names_without_binding(const ASTNode* n) {
-    switch (n->type) {
-        case AST_IDENTIFIER:
-        case AST_LITERAL:
-        case AST_FUNCTION_CALL:
-        case AST_MEMBER_ACCESS:
-        case AST_FIELD_INIT:
-        case AST_NAMED_ARG:
-        case AST_MESSAGE_CONSTRUCTOR:
-        case AST_STRUCT_LITERAL:
-        case AST_BINARY_EXPRESSION:
-        case AST_UNARY_EXPRESSION:
-        case AST_STRING_INTERP:
-            return 1;
-        default:
-            return 0;
-    }
-}
-
 /* Mark in `bound` (parallel to ec->names) each entry constant's name that
- * something in `node`'s subtree other than `self` may bind. */
+ * something in `node`'s subtree other than `self` may bind
+ * (ast_names_without_binding). */
 static void collect_bound_consts(const ASTNode* node, const ASTNode* self,
                                  const EntryConsts* ec, char* bound) {
     if (!node) return;
-    if (node != self && node->value && !node_names_without_binding(node)) {
+    if (node != self && node->value && !ast_names_without_binding(node)) {
         for (int i = 0; i < ec->count; i++) {
             if (!bound[i] && strcmp(ec->names[i], node->value) == 0) bound[i] = 1;
         }

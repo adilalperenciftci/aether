@@ -698,6 +698,17 @@ void ast_struct_names_reset(void);
 void ast_struct_name_register(const char* cname, const char* source, const char* display);
 const char* ast_struct_source_name(const char* cname);
 const char* ast_struct_display_name(const char* cname);
+
+/* Node kinds that carry a name without binding one: a reference, a call, a
+ * field, an operator, a literal's text. Every other kind carrying a name is
+ * taken to bind it: a parameter, a local, a pattern or closure parameter,
+ * actor state, a catch or loop variable, and any kind not listed here. */
+int ast_names_without_binding(const ASTNode* n);
+
+/* Does anything in `n`'s subtree bind `name` (ast_names_without_binding)? A
+ * program-level constant of that name is not what the subtree's references
+ * to it read, as codegen decides when it renames constants. */
+int ast_binds_name(const ASTNode* n, const char* name);
 /* #2297: `type` as Aether source that parse_type reads back to the same
  * type. Returns 0 (and an empty buf) when it has no faithful spelling. */
 int type_to_aether_source(const Type* type, char* buf, size_t cap);

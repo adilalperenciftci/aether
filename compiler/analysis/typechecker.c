@@ -5161,6 +5161,10 @@ static void check_unreachable_code(ASTNode* body) {
 static void scoped_check_bindings(ASTNode* node, ASTNode* root);
 // #479: enforce Isolated[T] move-only linearity over a function body.
 static void iso_check_function(ASTNode* fn, ASTNode* body);
+/* The top-level declaration the keep checks are walking (check_borrowed_
+ * ptr_params, check_strings_into_keep and the closures in it), or NULL:
+ * is_const_string_literal asks whether it binds a name. */
+static ASTNode* g_keep_scope = NULL;
 static void check_borrowed_param_frees(ASTNode* program, ASTNode* fn, ASTNode* body);
 static void check_borrowed_ptr_params(ASTNode* program, ASTNode* fn, ASTNode* body,
                                       const char** globals, int nglobals);
@@ -6904,6 +6908,7 @@ int typecheck_program(ASTNode* program) {
     for (int i = 0; i < program->child_count; i++) {
         ASTNode* child = program->children[i];
         g_tc_file = child->source_file;
+        g_keep_scope = child;   /* is_const_string_literal */
         if ((child->type == AST_FUNCTION_DEFINITION || child->type == AST_BUILDER_FUNCTION) && child->child_count > 0) {
             ASTNode* body = child->children[child->child_count - 1];
             check_unused_variables(body, global_var_names, global_var_count);
@@ -6929,6 +6934,7 @@ int typecheck_program(ASTNode* program) {
         }
     }
     g_tc_file = NULL;
+    g_keep_scope = NULL;
 
     free(global_var_names);
 
@@ -8596,11 +8602,17 @@ static int c_lvalue_outlives(const KeepCtx* c, ASTNode* lhs, int depth) {
 }
 
 /* A module-level `const` bound to a string literal: pinned, as the literal
- * is. */
+ * is. Not a module `var` (#2990 review): it shares the node kind, and a
+ * literal is only where it starts; `label = string.concat(...)` puts a
+ * counted string in it. And not where the declaration being checked binds
+ * the name itself (a local or a parameter): there the name is that binding,
+ * as codegen reads it (ast_binds_name). */
 static int is_const_string_literal(ASTNode* program, const char* name) {
+    if (g_keep_scope && ast_binds_name(g_keep_scope, name)) return 0;
     for (int i = 0; program && name && i < program->child_count; i++) {
         ASTNode* d = program->children[i];
         if (d && d->type == AST_CONST_DECLARATION && d->value && !strcmp(d->value, name) &&
+            !(d->annotation && strcmp(d->annotation, "global_var") == 0) &&
             d->child_count > 0 && d->children[d->child_count - 1] &&
             d->children[d->child_count - 1]->type == AST_LITERAL)
             return 1;
