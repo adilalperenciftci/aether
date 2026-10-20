@@ -2151,6 +2151,67 @@ while i < 1000000 {
 
 See [examples/basics/string-ownership.ae](../examples/basics/string-ownership.ae) for a runnable demonstration.
 
+#### Migrating from 0.835
+
+0.836.0's E0902 rules refuse two shapes that 0.835.0 compiled. Both refusals are intended, each has a one-line fix, and the E0902 help names it.
+
+**1. A pointer into a borrowed argument, returned.** `p + n` carries what `p` carries, and a borrowed `ptr` parameter may not be returned. Declare the parameter `@into`: the function's result holds it, and a caller holds the result as it holds the argument. The help names the declaration, here `bytes: @into ptr`.
+
+```aether,fails
+slice(bytes: ptr, offset: int) -> ptr { return bytes + offset }      // E0902 on 0.836.0
+
+main() {
+    x = 0
+    println("${slice((&x) as ptr, 0) != null}")
+}
+```
+
+```aether,run
+slice(bytes: @into ptr, offset: int) -> ptr { return bytes + offset } // the result holds it: @into
+
+main() {
+    x = 0
+    println("${slice((&x) as ptr, 0) != null}")
+}
+```
+
+```output
+true
+```
+
+**2. A function that keeps its argument, stored as a plain function pointer.** A plain `fn` type is a C function pointer, which borrows every `ptr`, so a function with a `@keep` (or `@into`) parameter is refused there, cast or not. Give the slot the function's modes: the function goes there as it is, with no cast, and a call through the slot is checked as a call of the function is ([Closure types that say what they keep](#closure-types-that-say-what-they-keep-fnkeep-ptr-float)). The help names the slot's type, here `fn(ptr, @keep ptr)`.
+
+```aether,fails
+struct Holder { kept: ptr }
+keep_it(state: ptr, item: @keep ptr) { (state as *Holder).kept = item }
+
+struct Table { set: fn(ptr, ptr) }
+
+main() {
+    h = Holder { kept: null }
+    t = Table { set: keep_it as fn(ptr, ptr) }       // E0902: a plain fn type borrows every ptr
+    println("${t.set == null} ${h.kept == null}")
+}
+```
+
+```aether,run
+struct Holder { kept: ptr }
+keep_it(state: ptr, item: @keep ptr) { (state as *Holder).kept = item }
+
+struct Table { set: fn(ptr, @keep ptr) }         // the slot says what it keeps
+
+main() {
+    h = Holder { kept: null }
+    t = Table { set: keep_it }
+    call(t.set, (&h) as ptr, (&h) as ptr)
+    println("${h.kept != null}")
+}
+```
+
+```output
+true
+```
+
 ---
 
 ## Optionals

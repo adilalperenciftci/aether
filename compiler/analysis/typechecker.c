@@ -2431,14 +2431,21 @@ static void warn_erased_result_closures(void) {
     g_tc_erased_closure_count = 0;
 }
 
+static Type* fn_value_type_of(ASTNode* def, Type* sym_type);
+
 /* #2926, #2990, #2980: a typed C function pointer's parameters borrow (a
  * call through one is checked as borrowing), so a function with a `@keep`
- * or `@into` parameter is no C function pointer: `as fn(...)`, or a typed
- * function pointer slot. As a value it is a closure of a type that says
- * what it does (fn_value_type_of). `ident` names the function `def`.
- * Reports each such parameter; returns 1 when there was one. */
-static int refuse_moded_fn_value(ASTNode* ident, ASTNode* def) {
+ * or `@into` parameter is no C function pointer: `as fn(...)` (`cast`), or
+ * a typed function pointer slot. As a value it is a closure of a type that
+ * says what it does (fn_value_type_of). `ident` names the function `def`,
+ * whose result is `sym_type`. Reports each such parameter; returns 1 when
+ * there was one. #3059: the help names the fix, the slot's type with the
+ * function's modes (`fn(ptr, @keep ptr)`), into which the function goes as
+ * it is. */
+static int refuse_moded_fn_value(ASTNode* ident, ASTNode* def, Type* sym_type, int cast) {
     int refused = 0;
+    char help[400];
+    help[0] = '\0';
     for (int i = 0; ident && def && i < def->child_count; i++) {
         ASTNode* p = def->children[i];
         if (!p || !p->annotation) continue;
@@ -2456,10 +2463,18 @@ static int refuse_moded_fn_value(ASTNode* ident, ASTNode* def) {
                      "'%s' passes its `ptr` parameter '%s' into its result (`@into`), so it cannot "
                      "be a C function pointer, whose parameters borrow",
                      ident->value, p->value ? p->value : "?");
-        type_error_code_hint(msg,
-            "call it by name, or take it as a closure of a type that says so, "
-            "`fn(@keep ptr)`: a call through a C function pointer treats every `ptr` as borrowed",
-            ident->line, ident->column, AETHER_ERR_KEEPS_BORROWED);
+        if (!help[0]) {
+            Type* vt = fn_value_type_of(def, sym_type);
+            snprintf(help, sizeof(help),
+                     cast ? "drop the cast and give the slot the function's modes, `%s`: '%s' "
+                            "goes there as it is, and a call through it is checked as a call "
+                            "of '%s' is"
+                          : "give the slot the function's modes, `%s`: '%s' goes there as it "
+                            "is, and a call through it is checked as a call of '%s' is",
+                     type_spelled(vt), ident->value, ident->value);
+            free_type(vt);
+        }
+        type_error_code_hint(msg, help, ident->line, ident->column, AETHER_ERR_KEEPS_BORROWED);
         refused = 1;
     }
     return refused;
@@ -2474,7 +2489,7 @@ static void refuse_moded_fn_in_fnptr_slot(SymbolTable* table, ASTNode* value, Ty
     Symbol* sym = lookup_symbol(table, value->value);
     if (sym && sym->is_function && sym->node &&
         (sym->node->type == AST_FUNCTION_DEFINITION || sym->node->type == AST_BUILDER_FUNCTION))
-        refuse_moded_fn_value(value, sym->node);
+        refuse_moded_fn_value(value, sym->node, sym->type, 0);
 }
 
 /* #2055: a top-level function named in value position -- `op = add_fn`,
@@ -8544,12 +8559,19 @@ static void report_borrowed_keep_one(KeepSet* s, ASTNode* at, const char* param,
     else
         snprintf(msg, sizeof(msg), "'%s' is %s, %s, which outlives the call", param,
                  what, how);
+    /* #3059: a returned parameter, or a pointer into it (`p + n`, #3033),
+     * is fixed by naming the parameter `@into`: the help says so with its
+     * name, as the declaration is written. */
+    char returned[320];
+    snprintf(returned, sizeof(returned),
+             "declare `%s: @into ptr` if only this function's result holds it (a pointer into "
+             "it, `%s + n`, included), or `%s: @keep ptr` if the function keeps it elsewhere",
+             param, param, param);
     const char* help =
         into ? "an `@into` parameter may reach only the result; declare it `@keep ptr` if the "
                "function keeps it elsewhere"
         : (!s->closure && !strcmp(how, "returned"))
-            ? "declare it `@into ptr` if only this function's result holds it, `@keep ptr` "
-              "if the function keeps it elsewhere"
+            ? returned
             : "declare the parameter `@keep ptr` if the function keeps it (a closure's cannot be)";
     type_error_code_hint(msg, help, at->line, at->column, AETHER_ERR_KEEPS_BORROWED);
 }
@@ -14694,7 +14716,7 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                 if (fsym && fsym->is_function && fsym->node &&
                     (fsym->node->type == AST_FUNCTION_DEFINITION ||
                      fsym->node->type == AST_BUILDER_FUNCTION) &&
-                    refuse_moded_fn_value(expr->children[0], fsym->node))
+                    refuse_moded_fn_value(expr->children[0], fsym->node, fsym->type, 1))
                     return 0;
             }
             /* Don't replace expr->node_type — the parser set it from

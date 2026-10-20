@@ -70,12 +70,20 @@ norm() { sed -e 's/[[:space:]]*$//' | cat -s; }
 # so the sed form of this extraction returns nothing on macOS and both sides
 # compare equal -- a silent false green on exactly the corruption this
 # checks for. awk behaves identically on GNU, BSD and MSYS2.
+#
+# A released section may gain a `### Migrating from X` subsection after it
+# shipped (#3059): what the release asks of code that compiled on X, written
+# once users meet it. The comparison leaves that subsection out, on both
+# sides, up to the next heading; a fold, which moves entries under the
+# released section's own headings, is caught as before.
 section() {
     awk -v v="$1" '
         BEGIN { gsub(/\./, "\\.", v); pat = "^## \\[" v "\\]" }
         $0 ~ pat { inside = 1; next }
         inside && /^## \[/ { exit }
-        inside { print }
+        inside && /^### Migrating from / { migrating = 1; next }
+        inside && /^###? / { migrating = 0 }
+        inside && !migrating { print }
     '
 }
 

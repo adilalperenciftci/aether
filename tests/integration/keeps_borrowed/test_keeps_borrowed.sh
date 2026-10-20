@@ -1500,6 +1500,83 @@ AE
 refused keep_fn_cast_once 11:22 "'keep_it' keeps its \`ptr\` parameter 'item' (\`@keep\`), so it cannot be a C function pointer"
 refused_each keep_fn_cast_once 5 6:12 11:22 12:12 13:29 14:24
 
+# helped <name> <text>: `ae check` refuses <name>.ae with E0902 and a help
+# containing <text>, the fix it names.
+helped() {
+    name="$1"; text="$2"
+    out=$(cd "$TMP" && "$AE" check "$name.ae" 2>&1)
+    case "$out" in
+        *"error[E0902]"*"help: "*"$text"*) ;;
+        *) echo "  [FAIL] $name: no E0902 help naming \"$text\":"
+           echo "$out" | sed 's/^/        /'
+           fails=$((fails + 1)) ;;
+    esac
+}
+
+# #3059: the two shapes 0.836.0 refuses that 0.835.0 compiled, each help
+# naming its one-line fix, and each fix accepted (the CHANGELOG's and the
+# language reference's "Migrating from 0.835").
+cat > "$TMP/migrate_into.ae" <<'AE'
+slice(bytes: ptr, offset: int) -> ptr { return bytes + offset }
+
+main() {
+    x = 0
+    println("${slice((&x) as ptr, 0) != null}")
+}
+AE
+refused migrate_into 1:41 "'bytes' is a borrowed \`ptr\` parameter, returned"
+helped migrate_into "declare \`bytes: @into ptr\` if only this function's result holds it"
+
+cat > "$TMP/migrate_into_fixed.ae" <<'AE'
+slice(bytes: @into ptr, offset: int) -> ptr { return bytes + offset }
+
+main() {
+    x = 0
+    println("${slice((&x) as ptr, 0) != null}")
+}
+AE
+accepted migrate_into_fixed
+
+cat > "$TMP/migrate_slot_cast.ae" <<'AE'
+struct Holder { kept: ptr }
+keep_it(state: ptr, item: @keep ptr) { (state as *Holder).kept = item }
+struct Table { set: fn(ptr, ptr) }
+
+main() {
+    h = Holder { kept: null }
+    t = Table { set: keep_it as fn(ptr, ptr) }
+    println("${t.set == null} ${h.kept == null}")
+}
+AE
+helped migrate_slot_cast "drop the cast and give the slot the function's modes, \`fn(ptr, @keep ptr)\`"
+
+cat > "$TMP/migrate_slot.ae" <<'AE'
+struct Holder { kept: ptr }
+keep_it(state: ptr, item: @keep ptr) { (state as *Holder).kept = item }
+struct Table { set: fn(ptr, ptr) }
+
+main() {
+    h = Holder { kept: null }
+    t = Table { set: keep_it }
+    println("${t.set == null} ${h.kept == null}")
+}
+AE
+helped migrate_slot "give the slot the function's modes, \`fn(ptr, @keep ptr)\`"
+
+cat > "$TMP/migrate_slot_fixed.ae" <<'AE'
+struct Holder { kept: ptr }
+keep_it(state: ptr, item: @keep ptr) { (state as *Holder).kept = item }
+struct Table { set: fn(ptr, @keep ptr) }
+
+main() {
+    h = Holder { kept: null }
+    t = Table { set: keep_it }
+    call(t.set, (&h) as ptr, (&h) as ptr)
+    println("${h.kept != null}")
+}
+AE
+accepted migrate_slot_fixed
+
 # Need no `@keep`: the aephysics shape (a struct local to the function holds
 # the parameter, or has it stored into a field, and dies with the call) and
 # the aeb shape (a closure that captures it runs inside the call and is
