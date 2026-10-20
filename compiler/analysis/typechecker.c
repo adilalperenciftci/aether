@@ -7772,8 +7772,11 @@ static void check_borrowed_param_frees(ASTNode* program, ASTNode* fn, ASTNode* b
  * closure holding it). A call's result holds what its arguments to `@into`
  * parameters carry, decided by the callee's signature, and is then tracked
  * as a struct local is. */
-#define KEEP_SET_MAX 128
+#define KEEP_SET_MAX 128   /* the `@into` parameters a KeepSet lists */
 #define CARRIED_MAX 8
+/* #2990 review: a Carried entry for every borrowed parameter of the function
+ * at once, which a full Carried folds into rather than drop a parameter. */
+#define CARRIED_ANY "*"
 typedef struct KeepCtx KeepCtx;
 
 /* What a value carries of the borrowed parameters: each parameter, and what
@@ -7783,7 +7786,9 @@ typedef struct KeepCtx KeepCtx;
  * by a store into a local struct's field, says which part holds the
  * parameter (`parts`, a path such as "1", "a" or "0.in.b"; NULL: the whole
  * value), so a part read out of it carries only what that part holds
- * (#2990, #3036). */
+ * (#2990, #3036). Nothing is ever dropped: a full Carried folds a
+ * parameter's parts into the whole value, and past that every parameter
+ * into CARRIED_ANY (carried_add_at), which only widens what it carries. */
 typedef struct {
     int n;
     const char* params[CARRIED_MAX];
@@ -7793,13 +7798,15 @@ typedef struct {
 
 /* Each name that holds a borrowed `ptr` parameter (the parameter, a local
  * bound to it, or a local struct, tuple, optional or closure that holds it),
- * once per parameter it holds, and what holds it. */
+ * once per parameter it holds, and what holds it. The tables grow as they
+ * fill (keep_set_add); keep_set_free releases them. */
 typedef struct {
-    const char* names[KEEP_SET_MAX];
-    const char* params[KEEP_SET_MAX];
-    const char* vias[KEEP_SET_MAX];
-    const char* parts[KEEP_SET_MAX];   /* as Carried's */
+    const char** names;
+    const char** params;
+    const char** vias;
+    const char** parts;   /* as Carried's */
     int count;
+    int cap;
     /* The function's `@into` parameters, which a `return` may hand back. */
     const char* into[KEEP_SET_MAX];
     int into_count;
@@ -7836,12 +7843,76 @@ static int part_within(const char* part, const char* whole) {
     return !strncmp(part, whole, n) && (part[n] == '\0' || part[n] == '.');
 }
 
+static int carried_is_any(const char* param) {
+    return !strcmp(param, CARRIED_ANY);
+}
+
+/* Is `param` at `part` already in `c`: an entry of it, or CARRIED_ANY, at
+ * that part or around it? A CARRIED_ANY entry takes a holder's `via` from
+ * what it covers, so a read out of the holder still finds it. */
+static int carried_covers(Carried* c, const char* param, const char* via, const char* part) {
+    for (int i = 0; i < c->n; i++) {
+        int any = carried_is_any(c->params[i]);
+        if ((any || !strcmp(c->params[i], param)) && part_within(part, c->parts[i])) {
+            if (any && via && !c->vias[i]) c->vias[i] = via;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* #2990 review: `q`'s entries in `c`, when there are several, as one entry
+ * for the whole value, held by a holder if any of them was. Returns whether
+ * that freed a slot. */
+static int carried_fold_param(Carried* c, const char* q) {
+    int had = 0, w = 0;
+    for (int j = 0; j < c->n; j++)
+        if (!strcmp(c->params[j], q)) had++;
+    if (had < 2) return 0;
+    const char* via = NULL;
+    for (int j = 0; j < c->n; j++) {
+        if (!strcmp(c->params[j], q)) {
+            if (c->vias[j]) via = c->vias[j];
+            continue;
+        }
+        c->params[w] = c->params[j];
+        c->vias[w] = c->vias[j];
+        c->parts[w++] = c->parts[j];
+    }
+    c->params[w] = q;
+    c->vias[w] = via;
+    c->parts[w++] = NULL;
+    c->n = w;
+    return 1;
+}
+
+/* #2990 review: room in a full `c` for `param`, never by dropping one: its
+ * own parts folded into the whole value, else every parameter's, else all
+ * of them as CARRIED_ANY, every borrowed parameter of the function held by
+ * the whole value. Each step only widens what a part carries: a read out of
+ * the value may be refused that the parts would have let through, and no
+ * read that holds a parameter goes unchecked. Silently dropping the entry
+ * past the limit let a ninth field or tuple part out with no E0902. */
+static void carried_make_room(Carried* c, const char* param) {
+    if (carried_fold_param(c, param)) return;
+    for (int i = 0; i < c->n && c->n == CARRIED_MAX; i++)
+        carried_fold_param(c, c->params[i]);
+    if (c->n < CARRIED_MAX) return;
+    const char* via = NULL;
+    for (int j = 0; j < c->n; j++)
+        if (c->vias[j]) via = c->vias[j];
+    c->n = 1;
+    c->params[0] = CARRIED_ANY;
+    c->vias[0] = via;
+    c->parts[0] = NULL;
+}
+
 /* `param`, held at `part`. A part already covered adds nothing; one that
  * covers parts already there takes their place. */
 static void carried_add_at(Carried* c, const char* param, const char* via, const char* part) {
+    if (carried_covers(c, param, via, part)) return;
     for (int i = 0; i < c->n; i++) {
         if (strcmp(c->params[i], param)) continue;
-        if (part_within(part, c->parts[i])) return;
         if (part_within(c->parts[i], part)) {
             int w = 0;
             for (int j = 0; j < c->n; j++)
@@ -7854,11 +7925,13 @@ static void carried_add_at(Carried* c, const char* param, const char* via, const
             break;
         }
     }
-    if (c->n < CARRIED_MAX) {
-        c->params[c->n] = param;
-        c->vias[c->n] = via;
-        c->parts[c->n++] = part;
+    if (c->n == CARRIED_MAX) {
+        carried_make_room(c, param);
+        if (carried_covers(c, param, via, part)) return;
     }
+    c->params[c->n] = param;
+    c->vias[c->n] = via;
+    c->parts[c->n++] = part;
 }
 
 static void carried_add(Carried* c, const char* param, const char* via) {
@@ -7919,19 +7992,38 @@ static Carried keep_set_lookup(const KeepSet* s, const char* n) {
     return c;
 }
 
+/* #2990 review: the tables grow as they fill. Past a fixed 128 entries a
+ * holder was dropped, and what it held was read out unchecked: with a part
+ * per field, 17 struct locals of 8 fields reached it. */
 static void keep_set_add(KeepSet* s, const char* n, Carried c) {
     for (int k = 0; n && k < c.n; k++) {
         int found = 0;
         for (int i = 0; i < s->count && !found; i++)
-            found = !strcmp(s->names[i], n) && !strcmp(s->params[i], c.params[k]) &&
+            found = !strcmp(s->names[i], n) &&
+                    (!strcmp(s->params[i], c.params[k]) || carried_is_any(s->params[i])) &&
                     part_within(c.parts[k], s->parts[i]);
-        if (!found && s->count < KEEP_SET_MAX) {
-            s->names[s->count] = n;
-            s->params[s->count] = c.params[k];
-            s->parts[s->count] = c.parts[k];
-            s->vias[s->count++] = c.vias[k];
+        if (found) continue;
+        if (s->count == s->cap) {
+            s->cap = s->cap ? s->cap * 2 : 32;
+            s->names = aether_xrealloc(s->names, (size_t)s->cap * sizeof(char*));
+            s->params = aether_xrealloc(s->params, (size_t)s->cap * sizeof(char*));
+            s->vias = aether_xrealloc(s->vias, (size_t)s->cap * sizeof(char*));
+            s->parts = aether_xrealloc(s->parts, (size_t)s->cap * sizeof(char*));
         }
+        s->names[s->count] = n;
+        s->params[s->count] = c.params[k];
+        s->parts[s->count] = c.parts[k];
+        s->vias[s->count++] = c.vias[k];
     }
+}
+
+static void keep_set_free(KeepSet* s) {
+    free(s->names);
+    free(s->params);
+    free(s->vias);
+    free(s->parts);
+    s->names = s->params = s->vias = s->parts = NULL;
+    s->count = s->cap = 0;
 }
 
 static int keep_set_is_into(const KeepSet* s, const char* param) {
@@ -8241,6 +8333,29 @@ static Carried carries_borrowed_ptr(ASTNode* e, const KeepSet* s) {
     }
 }
 
+/* E0902 for `param`, held by `via` (NULL: the pointer itself), gone where
+ * `how` says. */
+static void report_borrowed_keep_one(KeepSet* s, ASTNode* at, const char* param,
+                                     const char* via, const char* how) {
+    int into = keep_set_is_into(s, param);
+    const char* what = into ? "an `@into ptr` parameter" : "a borrowed `ptr` parameter";
+    char msg[320];
+    if (via)
+        snprintf(msg, sizeof(msg), "'%s' is %s %s that is %s, which outlives the call",
+                 param, what, via, how);
+    else
+        snprintf(msg, sizeof(msg), "'%s' is %s, %s, which outlives the call", param,
+                 what, how);
+    const char* help =
+        into ? "an `@into` parameter may reach only the result; declare it `@keep ptr` if the "
+               "function keeps it elsewhere"
+        : (!s->closure && !strcmp(how, "returned"))
+            ? "declare it `@into ptr` if only this function's result holds it, `@keep ptr` "
+              "if the function keeps it elsewhere"
+            : "declare the parameter `@keep ptr` if the function keeps it (a closure's cannot be)";
+    type_error_code_hint(msg, help, at->line, at->column, AETHER_ERR_KEEPS_BORROWED);
+}
+
 /* A place where what `c` holds outlives the call: E0902, or for a probe
  * (#2979), a note that it escapes. An `@into` parameter may go nowhere but
  * the result; `how` says where it went instead. */
@@ -8248,23 +8363,19 @@ static void report_borrowed_keep(KeepSet* s, ASTNode* at, Carried c, const char*
     c = carried_whole(c);   /* once per parameter, whatever parts hold it */
     for (int i = 0; i < c.n; i++) {
         if (s->probe) { s->escaped = 1; return; }
-        int into = keep_set_is_into(s, c.params[i]);
-        const char* what = into ? "an `@into ptr` parameter" : "a borrowed `ptr` parameter";
-        char msg[320];
-        if (c.vias[i])
-            snprintf(msg, sizeof(msg), "'%s' is %s %s that is %s, which outlives the call",
-                     c.params[i], what, c.vias[i], how);
-        else
-            snprintf(msg, sizeof(msg), "'%s' is %s, %s, which outlives the call", c.params[i],
-                     what, how);
-        const char* help =
-            into ? "an `@into` parameter may reach only the result; declare it `@keep ptr` if the "
-                   "function keeps it elsewhere"
-            : (!s->closure && !strcmp(how, "returned"))
-                ? "declare it `@into ptr` if only this function's result holds it, `@keep ptr` "
-                  "if the function keeps it elsewhere"
-                : "declare the parameter `@keep ptr` if the function keeps it (a closure's cannot be)";
-        type_error_code_hint(msg, help, at->line, at->column, AETHER_ERR_KEEPS_BORROWED);
+        if (!carried_is_any(c.params[i])) {
+            report_borrowed_keep_one(s, at, c.params[i], c.vias[i], how);
+            continue;
+        }
+        /* #2990 review: CARRIED_ANY is every parameter the function
+         * tracks, each named once. */
+        for (int j = 0; j < s->count; j++) {
+            const char* p = s->params[j];
+            int seen = carried_is_any(p);
+            for (int k = 0; k < j && !seen; k++) seen = !strcmp(s->params[k], p);
+            for (int k = 0; k < c.n && !seen; k++) seen = !strcmp(c.params[k], p);
+            if (!seen) report_borrowed_keep_one(s, at, p, c.vias[i], how);
+        }
     }
 }
 
@@ -8596,6 +8707,7 @@ static int c_name_outlives(const KeepCtx* c, const char* name, int depth) {
     carried_add(&self, name, NULL);
     keep_set_add(&s, name, self);
     check_ptr_keeps_in(c->program, c->body, &s, c->globals, c->nglobals, 0);
+    keep_set_free(&s);
     return s.escaped;
 }
 
@@ -8768,6 +8880,7 @@ static void check_borrowed_ptr_params(ASTNode* program, ASTNode* fn, ASTNode* bo
         }
     }
     if (s.count) check_ptr_keeps_in(program, body, &s, globals, nglobals, 0);
+    keep_set_free(&s);
 }
 
 /* #2990: can a value of type `t` hold a pointer, by the type's

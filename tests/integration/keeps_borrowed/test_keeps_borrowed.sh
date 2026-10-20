@@ -663,6 +663,95 @@ main() { put(null) }
 AE
 refused struct_nested_field 9:5 "'p' is a borrowed \`ptr\` parameter, stored in a module-level \`var\`"
 
+# #2990 review: what a value holds is never dropped past a limit. A holder
+# of more parts than the checker tracks one by one folds them into the
+# whole value, and a function with more holders than a fixed table has room
+# for grows the table. Each of these was accepted: the ninth part, the ninth
+# parameter or the seventeenth local fell off the end.
+BIG='struct Big { a: ptr, b: ptr, c: ptr, d: ptr, e: ptr, f: ptr, g: ptr, h: ptr, i: ptr }'
+
+cat > "$TMP/limit_struct_fields.ae" <<AE
+$BIG
+
+var kept: ptr = null
+
+put(p: ptr) {
+    s = Big { a: p, b: p, c: p, d: p, e: p, f: p, g: p, h: p, i: p }
+    kept = s.i
+}
+
+main() { put(null) }
+AE
+refused limit_struct_fields 7:5 "'p' is a borrowed \`ptr\` parameter, stored in a module-level \`var\`"
+
+cat > "$TMP/limit_struct_stores.ae" <<AE
+$BIG
+
+var kept: ptr = null
+
+put(p: ptr) {
+    s = Big { a: null, b: null, c: null, d: null, e: null, f: null, g: null, h: null, i: null }
+    s.a = p
+    s.b = p
+    s.c = p
+    s.d = p
+    s.e = p
+    s.f = p
+    s.g = p
+    s.h = p
+    s.i = p
+    kept = s.i
+}
+
+main() { put(null) }
+AE
+refused limit_struct_stores 16:5 "'p' is a borrowed \`ptr\` parameter, stored in a module-level \`var\`"
+
+cat > "$TMP/limit_tuple_parts.ae" <<'AE'
+var kept: ptr = null
+
+put(p: ptr) {
+    t = (p, p, p, p, p, p, p, p, p)
+    _a, _b, _c, _d, _e, _f, _g, _h, i = t
+    kept = i
+}
+
+main() { put(null) }
+AE
+refused limit_tuple_parts 6:5 "'p' is a borrowed \`ptr\` parameter, stored in a module-level \`var\`"
+
+cat > "$TMP/limit_params.ae" <<AE
+$BIG
+
+var kept: ptr = null
+
+put(p1: ptr, p2: ptr, p3: ptr, p4: ptr, p5: ptr, p6: ptr, p7: ptr, p8: ptr, p9: ptr) {
+    s = Big { a: p1, b: p2, c: p3, d: p4, e: p5, f: p6, g: p7, h: p8, i: p9 }
+    t = s
+    kept = t.i
+}
+
+main() { put(null, null, null, null, null, null, null, null, null) }
+AE
+refused limit_params 8:5 "'p9' is a borrowed \`ptr\` parameter"
+
+{ echo 'struct Big8 { a: ptr, b: ptr, c: ptr, d: ptr, e: ptr, f: ptr, g: ptr, h: ptr }'
+  echo
+  echo 'var kept: ptr = null'
+  echo
+  echo 'put(p: ptr) {'
+  i=1
+  while [ "$i" -le 17 ]; do
+      echo "    s$i = Big8 { a: p, b: p, c: p, d: p, e: p, f: p, g: p, h: p }"
+      i=$((i + 1))
+  done
+  echo '    kept = s17.h'
+  echo '}'
+  echo
+  echo 'main() { put(null) }'
+} > "$TMP/limit_holders.ae"
+refused limit_holders 23:5 "'p' is a borrowed \`ptr\` parameter, stored in a module-level \`var\`"
+
 # #3033: `p + n` and `p - n` point into the memory `p` does: stored,
 # returned or kept, each is the parameter kept.
 cat > "$TMP/arith_global.ae" <<'AE'

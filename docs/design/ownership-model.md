@@ -339,7 +339,9 @@ the signature, so no call site reads another function's body:
   hold a pointer or, for a part of a tuple or a field of a struct built
   from parts (a literal, or a store into a local struct's field), the
   pointer went into another part (`t = (p, q)` or `Pair { a: p, b: q }`:
-  the part `q` went into holds nothing borrowed), and a call through a
+  the part `q` went into holds nothing borrowed; a value whose parts hold
+  more than the checker tracks one by one is taken as holding them all as
+  a whole, which refuses more and never less), and a call through a
   closure that captured it may return
   it, so its result holds it too (#2990 found the checker following none of
   these: `t = (p, 1)` returned, `kept = o!` and `kept = call(f)` passed).
