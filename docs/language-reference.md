@@ -2179,6 +2179,8 @@ main() {
 true
 ```
 
+The common real case is an indexed accessor into an array the caller owns, `body_at(bodies: @into ptr, i: int) -> *Body { return (bodies as *Body) + i }`: thirteen of those were the whole of aephysics' migration.
+
 **2. A function that keeps its argument, stored as a plain function pointer.** A plain `fn` type is a C function pointer, which borrows every `ptr`, so a function with a `@keep` (or `@into`) parameter is refused there, cast or not. Give the slot the function's modes: the function goes there as it is, with no cast, and a call through the slot is checked as a call of the function is ([Closure types that say what they keep](#closure-types-that-say-what-they-keep-fnkeep-ptr-float)). The help names the slot's type, here `fn(ptr, @keep ptr)`.
 
 ```aether,fails

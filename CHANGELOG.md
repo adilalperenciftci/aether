@@ -32,6 +32,10 @@ slice(bytes: ptr, offset: int) -> ptr { return bytes + offset }      // E0902 on
 slice(bytes: @into ptr, offset: int) -> ptr { return bytes + offset } // the result holds it: @into
 ```
 
+The common real case is an indexed accessor into an array the caller owns,
+`body_at(bodies: @into ptr, i: int) -> *Body { return (bodies as *Body) + i }`:
+thirteen of those were the whole of aephysics' migration.
+
 **2. A function that keeps its argument, stored as a plain function
 pointer.** A plain `fn` type is a C function pointer, which borrows every
 `ptr`, so a function with a `@keep` (or `@into`) parameter is refused there,
