@@ -91,4 +91,39 @@ else
     echo "  [PASS] failure: refused, and no staging directory left"
 fi
 
+# #2899 review: the staging directory's path was kept in a 1024-byte buffer,
+# cut short when longer, and the tree removed at exit was what was left: with
+# a temp directory of exactly 1023 bytes, the temp directory itself, and
+# everything in it. The path is kept whole now. Linux only: such a path is
+# longer than Windows' MAX_PATH and macOS's PATH_MAX allow.
+case "$(uname -s)" in
+    Linux*)
+        long="$WORK/long"
+        while [ ${#long} -lt 1023 ]; do
+            room=$((1023 - ${#long}))
+            seg=$((room - 1))
+            [ "$seg" -gt 200 ] && seg=200
+            [ $((room - seg - 1)) -eq 1 ] && seg=$((seg - 1))
+            long="$long/$(head -c "$seg" /dev/zero | tr '\0' d)"
+        done
+        if [ ${#long} -ne 1023 ] || ! mkdir -p "$long" 2>/dev/null; then
+            echo "  [SKIP] long temp path: cannot make a 1023-byte directory here"
+        else
+            echo "kept" > "$long/canary"
+            (cd "$WORK/good" && TMPDIR="$long" AETHER_HOME="$ROOT" \
+                "$AE" build --emit=lib --package pk -o "liblong$SO_EXT") >"$WORK/long.log" 2>&1
+            if [ ! -f "$long/canary" ]; then
+                echo "  [FAIL] long temp path: the temp directory itself was removed"
+                fail=1
+            elif ls -d "$long"/ae-package-* >/dev/null 2>&1; then
+                echo "  [FAIL] long temp path: the staging directory is left"
+                fail=1
+            else
+                echo "  [PASS] long temp path: only the staging directory is removed"
+            fi
+        fi
+        ;;
+    *) echo "  [SKIP] long temp path: Linux only" ;;
+esac
+
 exit $fail

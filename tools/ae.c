@@ -6349,28 +6349,32 @@ static void ae_pkg_collect(const char* dir, const char* modname, AePkgModules* m
 #endif
 }
 
-/* Write an entry that imports every module of `pkg` (sorted, so the build is
- * reproducible) to a temp file named after the package, so the library's
- * default name is lib<pkg>. Returns 0, or -1 with the reason printed. */
 /* #2899: the staging directory of `--package`, removed when ae exits. Every
  * build ended with its ae-package-<pid> directory left in the temp directory,
  * on success and on failure: nothing removed it. Exit is the one point every
  * path of the build reaches (a return from main or an exit()), as for the
  * runtime object directory (g_rt_obj_dir). ae handles no signal during a
  * build, so an interrupted one ends without running exit handlers, here as
- * for that directory. */
-static char g_package_dir[1024];
+ * for that directory. The path is kept whole, however long: a fixed buffer
+ * cut a long one short, and the tree removed would have been a prefix of it
+ * (#2899 review). */
+static char* g_package_dir = NULL;
 
 static void ae_remove_package_dir(void) {
-    if (g_package_dir[0]) ae_remove_tree(g_package_dir);
-    g_package_dir[0] = '\0';
+    if (g_package_dir) ae_remove_tree(g_package_dir);
+    free(g_package_dir);
+    g_package_dir = NULL;
 }
 
 static void ae_note_package_dir(const char* dir) {
-    if (!g_package_dir[0]) atexit(ae_remove_package_dir);
-    snprintf(g_package_dir, sizeof(g_package_dir), "%s", dir);
+    if (!g_package_dir) atexit(ae_remove_package_dir);
+    free(g_package_dir);
+    g_package_dir = strdup(dir);
 }
 
+/* Write an entry that imports every module of `pkg` (sorted, so the build is
+ * reproducible) to a temp file named after the package, so the library's
+ * default name is lib<pkg>. Returns 0, or -1 with the reason printed. */
 static int ae_package_entry(const char* pkg, char* out, size_t outcap) {
     char rel[256];
     snprintf(rel, sizeof(rel), "%s", pkg);
@@ -9254,14 +9258,20 @@ done:
  * describe stub go to a temp workspace of this process's own, removed on
  * every way out of the build, failed or not: it used to be left behind every
  * time, one aether_ns_<pid> directory per build (#2773). One left by an
- * earlier process that had the same pid is cleared first. */
+ * earlier process that had the same pid is cleared first. The path is kept
+ * whole: cut short in a fixed buffer, the tree removed was a prefix of it,
+ * the temp directory itself when that was 1023 bytes long (#2899 review). */
 int cmd_build_namespace(int argc, char** argv) {
-    char tmpdir[1024];
-    snprintf(tmpdir, sizeof(tmpdir), "%s/aether_ns_%d", get_temp_dir(), (int)getpid());
+    char* tmpdir = ae_path_printf("%s/aether_ns_%d", get_temp_dir(), (int)getpid());
+    if (!tmpdir) {
+        fprintf(stderr, "Error: out of memory for the namespace build's temp directory\n");
+        return 1;
+    }
     ae_remove_tree(tmpdir);
     mkdirs(tmpdir);
     int rc = build_namespace_in(tmpdir, argc, argv);
     ae_remove_tree(tmpdir);
+    free(tmpdir);
     return rc;
 }
 
