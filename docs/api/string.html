@@ -218,28 +218,28 @@
   <div class="functions" id="functions">
     <div class="function" id="new" data-name="new">
       <h3 class="function-name">new <span class="kind">extern</span></h3>
-      <pre class="usage"><code>new(cstr) <span class="arrow">-&gt;</span> ptr</code></pre>
+      <pre class="usage"><code>new(cstr) <span class="arrow">-&gt;</span> string</code></pre>
       <p class="signature"><span class="sig-params">cstr: string</span></p>
       <p class="doc">String creation</p>
     </div>
     <div class="function" id="from_cstr" data-name="from_cstr">
       <h3 class="function-name">from_cstr <span class="kind">extern</span></h3>
-      <pre class="usage"><code>from_cstr(cstr) <span class="arrow">-&gt;</span> ptr</code></pre>
+      <pre class="usage"><code>from_cstr(cstr) <span class="arrow">-&gt;</span> string</code></pre>
       <p class="signature"><span class="sig-params">cstr: string</span></p>
     </div>
     <div class="function" id="from_literal" data-name="from_literal">
       <h3 class="function-name">from_literal <span class="kind">extern</span></h3>
-      <pre class="usage"><code>from_literal(cstr) <span class="arrow">-&gt;</span> ptr</code></pre>
+      <pre class="usage"><code>from_literal(cstr) <span class="arrow">-&gt;</span> string</code></pre>
       <p class="signature"><span class="sig-params">cstr: string</span></p>
     </div>
     <div class="function" id="new_with_length" data-name="new_with_length">
       <h3 class="function-name">new_with_length <span class="kind">extern</span></h3>
-      <pre class="usage"><code>new_with_length(data, length) <span class="arrow">-&gt;</span> ptr</code></pre>
+      <pre class="usage"><code>new_with_length(data, length) <span class="arrow">-&gt;</span> string</code></pre>
       <p class="signature"><span class="sig-params">data: string, length: int</span></p>
     </div>
     <div class="function" id="empty" data-name="empty">
       <h3 class="function-name">empty <span class="kind">extern</span></h3>
-      <pre class="usage"><code>empty() <span class="arrow">-&gt;</span> ptr</code></pre>
+      <pre class="usage"><code>empty() <span class="arrow">-&gt;</span> string</code></pre>
     </div>
     <div class="function" id="retain" data-name="retain">
       <h3 class="function-name">retain <span class="kind">extern</span></h3>
@@ -360,7 +360,7 @@
     </div>
     <div class="function" id="from_char" data-name="from_char">
       <h3 class="function-name">from_char <span class="kind">extern</span></h3>
-      <pre class="usage"><code>from_char(code) <span class="arrow">-&gt;</span> ptr</code></pre>
+      <pre class="usage"><code>from_char(code) <span class="arrow">-&gt;</span> string</code></pre>
       <p class="signature"><span class="sig-params">code: int</span></p>
       <p class="doc">Construct a 1-byte string from a byte code (0..255). Typical use is emitting known single-byte separators (\x01, \x02) into packed formats without routing through a NUL-terminated string literal. Always length 1 — code=0 returns a 1-byte NUL string, not &quot;&quot;.</p>
     </div>
@@ -383,7 +383,7 @@
       <h3 class="function-name">split <span class="kind">extern</span></h3>
       <pre class="usage"><code>split(str, delimiter) <span class="arrow">-&gt;</span> ptr</code></pre>
       <p class="signature"><span class="sig-params">str: string, delimiter: string</span></p>
-      <p class="doc">String array operations. LIFETIME WARNING — `string_array_get` returns a *borrowed* pointer into the array's internal storage, NOT an owned copy. After `string_array_free(arr)` every pointer previously handed out by `string_array_get(arr, ...)` is dangling. The natural-looking pattern below silently use-after-frees: v = string.array_get(parts, idx) string.array_free(parts) return v                 // &lt;- v dangles Symptom is garbage bytes / random crashes downstream — the array's backing storage is gone but the pointer still reads. Safe options when you need a value to outlive the array: 1. Copy first:  v = string.concat(string.array_get(parts, idx), &quot;&quot;) then string.array_free(parts) — the concat made an owned, refcounted copy. 2. Use `string_split_to_seq` (declared further down) — returns a refcounted `*StringSeq` whose cells own their data independently of any backing array, so there's no array-wide free to worry about. This is the RECOMMENDED shape: a `*StringSeq` local is reclaimed DETERMINISTICALLY by the compiler — freed automatically at scope exit via the refcount-decrementing `string_seq_free`, the same way heap strings are. No manual free, and (because the free is a decrement) structurally-shared tails stay safe. A piece you pull from a sequence and let escape transfers ownership cleanly, with no dangling-into-a-backing-array hazard. If your access pattern is &quot;build, walk once, free&quot; within a single scope, the borrowed-pointer form is fine and the cheapest. Reach for option 1/2 only when a piece needs to escape the array's lifetime.</p>
+      <p class="doc">String array operations. `string_array_get` returns the array's own characters, borrowed (a `string` with no `@heap`): a place that keeps one copies it into a counted string of its own (R4), so it outlives the array: v = string.array_get(parts, idx) string.array_free(parts) return v                 // v is the local's copy Until #3018 it was typed `ptr`, and that pattern returned a pointer into the freed array. Read in place (an interpolation, an argument), nothing is copied. `string_split_to_seq` (declared further down) is the other shape: a refcounted `*StringSeq` whose cells own their data independently of any backing array, reclaimed at scope exit like a string, with structurally shared tails.</p>
     </div>
     <div class="function" id="array_size" data-name="array_size">
       <h3 class="function-name">array_size <span class="kind">extern</span></h3>
@@ -392,7 +392,7 @@
     </div>
     <div class="function" id="array_get" data-name="array_get">
       <h3 class="function-name">array_get <span class="kind">extern</span></h3>
-      <pre class="usage"><code>array_get(arr, index) <span class="arrow">-&gt;</span> ptr</code></pre>
+      <pre class="usage"><code>array_get(arr, index) <span class="arrow">-&gt;</span> string</code></pre>
       <p class="signature"><span class="sig-params">arr: ptr, index: int</span></p>
     </div>
     <div class="function" id="array_free" data-name="array_free">
@@ -528,17 +528,17 @@
     </div>
     <div class="function" id="from_int" data-name="from_int">
       <h3 class="function-name">from_int <span class="kind">extern</span></h3>
-      <pre class="usage"><code>from_int(value) <span class="arrow">-&gt;</span> ptr</code></pre>
+      <pre class="usage"><code>from_int(value) <span class="arrow">-&gt;</span> string</code></pre>
       <p class="signature"><span class="sig-params">value: int</span></p>
     </div>
     <div class="function" id="from_long" data-name="from_long">
       <h3 class="function-name">from_long <span class="kind">extern</span></h3>
-      <pre class="usage"><code>from_long(value) <span class="arrow">-&gt;</span> ptr</code></pre>
+      <pre class="usage"><code>from_long(value) <span class="arrow">-&gt;</span> string</code></pre>
       <p class="signature"><span class="sig-params">value: long</span></p>
     </div>
     <div class="function" id="from_float" data-name="from_float">
       <h3 class="function-name">from_float <span class="kind">extern</span></h3>
-      <pre class="usage"><code>from_float(value) <span class="arrow">-&gt;</span> ptr</code></pre>
+      <pre class="usage"><code>from_float(value) <span class="arrow">-&gt;</span> string</code></pre>
       <p class="signature"><span class="sig-params">value: float</span></p>
     </div>
     <div class="function" id="from_double" data-name="from_double">
@@ -548,19 +548,19 @@
     </div>
     <div class="function" id="from_int_radix" data-name="from_int_radix">
       <h3 class="function-name">from_int_radix <span class="kind">extern</span></h3>
-      <pre class="usage"><code>from_int_radix(value, radix) <span class="arrow">-&gt;</span> ptr</code></pre>
+      <pre class="usage"><code>from_int_radix(value, radix) <span class="arrow">-&gt;</span> string</code></pre>
       <p class="signature"><span class="sig-params">value: long, radix: int</span></p>
       <p class="doc">Inverse of to_int_radix. Render `value` in base `radix` (2..36). Returns an empty string for radix outside [2, 36]; otherwise the digit string (lowercase a-z for radix 11..36), with a leading '-' for negatives. No &quot;0x&quot; / &quot;0b&quot; prefix. Headline use: hex emit for color round-trips (RGB → #rrggbb). Pair with `string.pad_start(s, 2, 48)` to get the JS `r.toString(16).padStart(2, '0')` shape.</p>
     </div>
     <div class="function" id="pad_start" data-name="pad_start">
       <h3 class="function-name">pad_start <span class="kind">extern</span></h3>
-      <pre class="usage"><code>pad_start(s, total_width, pad_char) <span class="arrow">-&gt;</span> ptr</code></pre>
+      <pre class="usage"><code>pad_start(s, total_width, pad_char) <span class="arrow">-&gt;</span> string</code></pre>
       <p class="signature"><span class="sig-params">s: string, total_width: int, pad_char: int</span></p>
       <p class="doc">Pad to a fixed width with `pad_char` (single-byte char code — `48` for '0', `32` for ' '). If `s` is already &gt;= total_width chars, returns a fresh copy (no truncation). total_width &lt;= 0 also returns a fresh copy. pad_start prepends; pad_end appends.</p>
     </div>
     <div class="function" id="pad_end" data-name="pad_end">
       <h3 class="function-name">pad_end <span class="kind">extern</span></h3>
-      <pre class="usage"><code>pad_end(s, total_width, pad_char) <span class="arrow">-&gt;</span> ptr</code></pre>
+      <pre class="usage"><code>pad_end(s, total_width, pad_char) <span class="arrow">-&gt;</span> string</code></pre>
       <p class="signature"><span class="sig-params">s: string, total_width: int, pad_char: int</span></p>
     </div>
     <div class="function" id="to_int_raw" data-name="to_int_raw">
@@ -685,7 +685,7 @@
     </div>
     <div class="function" id="format_list" data-name="format_list">
       <h3 class="function-name">format_list <span class="kind">extern</span></h3>
-      <pre class="usage"><code>format_list(fmt, args) <span class="arrow">-&gt;</span> ptr</code></pre>
+      <pre class="usage"><code>format_list(fmt, args) <span class="arrow">-&gt;</span> string</code></pre>
       <p class="signature"><span class="sig-params">fmt: string, args: ptr</span></p>
       <p class="doc">Format a string by substituting `{}` placeholders with the corresponding entries of `args` (an `std.list` of strings). `{{` and `}}` are literal braces. Returns a refcounted AetherString. Closes #272. Use this for runtime-built strings of N parts where literal `${...}` interpolation isn't usable (e.g. when the format string itself comes from a config file or message-template lookup): args = list_new() list_add(args, &quot;PUT&quot;) list_add(args, &quot;/foo/bar&quot;) list_add(args, &quot;alice&quot;) msg = string.format(&quot;{} {} by {}&quot;, args)   // &quot;PUT /foo/bar by alice&quot; Non-string values (ints, floats) need explicit conversion via `string.from_int(n)` etc. before being added to the list.</p>
     </div>
