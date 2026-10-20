@@ -1,0 +1,47 @@
+// #3031: std.tar's writer gives back its path. writer_create stored a copy
+// of the path in its field and then took an extra string_retain, which the
+// release in writer_finish and writer_abort never matched: each archive
+// written leaked its path. Rounds of create and finish, and of create and
+// abort, must not grow the heap (measured where the heap count is exact).
+import std.tar
+import std.mem
+import std.fs
+import std.os
+
+extern exit(code: int)
+
+round(dir: string) {
+    i = 0
+    while i < 20 {
+        w, err = tar.writer_create("${dir}/finished.tar")
+        if err != "" {
+            println("FAIL: create: ${err}")
+            exit(1)
+        }
+        ferr = tar.writer_finish(w)
+        if ferr != "" {
+            println("FAIL: finish: ${ferr}")
+            exit(1)
+        }
+        a, aerr = tar.writer_create("${dir}/aborted.tar")
+        if aerr != "" {
+            println("FAIL: create: ${aerr}")
+            exit(1)
+        }
+        tar.writer_abort(a)
+        i = i + 1
+    }
+}
+
+main() {
+    dir = "${os.temp_dir()}/aether_tar_writer_leak_${os.getpid()}"
+    fs.mkdir_p(dir)
+    round(dir)
+    grown = mem.steady_growth(|| { round(dir) }, 5)
+    fs.remove_tree(dir)
+    if mem.heap_in_use_exact() && grown != 0 {
+        println("FAIL: the heap grew ${grown} bytes per round of 20 archives")
+        exit(1)
+    }
+    println("ok")
+}

@@ -872,8 +872,8 @@ writer_create(path: string) -> {
     }
     writer = heap.new(TarWriter)
     writer.fd = fd
+    // The field owns its copy, and heap.free(writer) releases it (#3031).
     writer.path = string.copy(path)
-    string_retain(writer.path)
     writer.is_finished = 0
     return writer as ptr, ""
 }
@@ -1032,7 +1032,6 @@ writer_finish(writer_ptr: ptr) -> string {
     writer.fd = 0 - 1
     writer.is_finished = 1
 
-    string_release(writer.path)
     heap.free(writer)
     return ""
 }
@@ -1050,7 +1049,6 @@ writer_abort(writer_ptr: ptr) {
         // Unlink/delete incomplete output on failure where practical
         fs.unlink(writer.path)
     }
-    string_release(writer.path)
     heap.free(writer)
 }
 
