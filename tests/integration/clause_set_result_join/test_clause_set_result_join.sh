@@ -40,7 +40,7 @@ main() { println("${size(1, 5000000000)}") }
 AE
 out=$(cd "$TMP" && "$AE" check wider_than_written.ae 2>&1)
 case "$out" in
-    *"error[E0200]: the clauses of 'size' are written to return int (line 1), and this clause returns long, which that does not hold"*"wider_than_written.ae:4:"*) ;;
+    *"error[E0200]: the clauses of 'size' are written to return int (line 1), and this clause returns long, which int does not hold"*"wider_than_written.ae:4:"*) ;;
     *) echo "  [FAIL] wider_than_written: not refused naming int and long at line 4"
        echo "$out" | sed 's/^/        /'
        fails=$((fails + 1)) ;;
@@ -73,7 +73,7 @@ main() { println("${size(1, 2)}") }
 AE
 out=$(cd "$TMP" && "$AE" check none_beside_written.ae 2>&1)
 case "$out" in
-    *"error[E0200]: the clauses of 'size' are written to return int (line 1), and this clause returns \`none\`, which that does not hold"*"none_beside_written.ae:4:"*"write the result type as an optional, \`-> int?\`"*) ;;
+    *"error[E0200]: the clauses of 'size' are written to return int (line 1), and this clause returns \`none\`, which int does not hold"*"none_beside_written.ae:4:"*"write the result type as an optional, \`-> int?\`"*) ;;
     *) echo "  [FAIL] none_beside_written: not refused naming int and \`-> int?\` at line 4"
        echo "$out" | sed 's/^/        /'
        fails=$((fails + 1)) ;;

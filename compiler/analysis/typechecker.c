@@ -16985,19 +16985,20 @@ static void clause_set_settle(ASTNode* fn, SymbolTable* table) {
                     (!types_equal(k, join) || (!cl->type_inferred && !types_equal(t, join)));
         if (!k || unfit) {
             char a[160], b[160], msg[480];
-            if (unfit)
+            if (unfit) {
+                const char* ws = ret_type_spell(join, a, sizeof(a));
                 snprintf(msg, sizeof(msg),
                          "the clauses of '%s' are written to return %s (line %d), and this "
-                         "clause returns %s, which that does not hold: a clause set is one "
+                         "clause returns %s, which %s does not hold: a clause set is one "
                          "function with one result",
-                         fn->value, ret_type_spell(join, a, sizeof(a)), join_at->line,
-                         ret_type_spell(t, b, sizeof(b)));
-            else
+                         fn->value, ws, join_at->line, ret_type_spell(t, b, sizeof(b)), ws);
+            } else {
                 snprintf(msg, sizeof(msg),
                          "the clauses of '%s' return %s (line %d) and %s, which no one type "
                          "holds: a clause set is one function with one result",
                          fn->value, ret_type_spell(join, a, sizeof(a)),
                          join_at ? join_at->line : 0, ret_type_spell(t, b, sizeof(b)));
+            }
             type_error_hint(msg, unfit ? "write the wider type on the clause that names one, "
                                          "or convert the value (`x as T`)"
                                        : "return the same type from every clause, or convert "
@@ -17030,9 +17031,9 @@ static void clause_set_settle(ASTNode* fn, SymbolTable* table) {
             } else if (unfit) {
                 snprintf(msg, sizeof(msg),
                          "the clauses of '%s' are written to return %s (line %d), and this "
-                         "clause returns `none`, which that does not hold: a clause set is one "
+                         "clause returns `none`, which %s does not hold: a clause set is one "
                          "function with one result",
-                         fn->value, js, join_at->line);
+                         fn->value, js, join_at->line, js);
                 snprintf(hint, sizeof(hint), "write the result type as an optional, `-> %s?`",
                          js);
             } else {
