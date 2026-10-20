@@ -7,4 +7,8 @@
   std.os's process calls and contrib/host's bridges use, which moved from
   std/os into the runtime (`runtime/utils/aether_spawn.h`,
   `aether_pipe_cloexec` and `aether_fork`), with the one fork lock of the
-  process beside it (#3046).
+  process beside it. `os.system` and `os.exec` start their shell through
+  it too, rather than through `system()` and `popen()`, which forked
+  outside the lock: the exit status, signal handling and output are
+  system()'s and popen()'s, and a command that starts with `-` is run as
+  a command, as glibc runs it (#3046).
