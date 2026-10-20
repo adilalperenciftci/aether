@@ -5859,10 +5859,15 @@ void emit_string_literal_node(CodeGenerator* gen, const ASTNode* lit) {
 
 void emit_string_literal_chars(CodeGenerator* gen, const ASTNode* lit) {
     if (lit->value_len > 0) {
-        /* Its bytes, a NUL included, as the pinned string holds them. */
+        /* Its bytes, a NUL included, as the pinned string holds them, typed
+         * `char*` as a C string literal is (#3039): the static array is
+         * `const`, and passing it where C takes a `void*` (an extern's
+         * `ptr`) discarded the qualifier, a -Werror failure. The storage
+         * stays read-only, as a C literal's is, and the pinned string
+         * (`_ae_slit_<i>`) is untouched (R1). */
         int idx = static_string_literal_index(gen, lit->value, lit->value_len);
         gen->static_str_used[idx] |= AE_SLIT_USED_BYTES;
-        fprintf(gen->output, "_ae_slit_%d_bytes", idx);
+        fprintf(gen->output, "((char*)_ae_slit_%d_bytes)", idx);
     } else {
         emit_c_string_literal(gen, lit->value);
     }
