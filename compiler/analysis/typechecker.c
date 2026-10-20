@@ -7778,6 +7778,11 @@ static void check_borrowed_param_frees(ASTNode* program, ASTNode* fn, ASTNode* b
  * as a struct local is. */
 #define KEEP_SET_MAX 128   /* the `@into` parameters a KeepSet lists */
 #define CARRIED_MAX 8
+/* #3047: a bound on a loop body's binding passes. Each pass that does not
+ * stop the loop binds a new holder, so a body needs no more passes than it
+ * has holders to find. A loop still unsettled past it is widened
+ * (keep_loop_widen), never reported from a partial walk. */
+#define KEEP_LOOP_PASSES_MAX 256
 /* #2990 review: a Carried entry for every borrowed parameter of the function
  * at once, which a full Carried folds into rather than drop a parameter. */
 #define CARRIED_ANY "*"
@@ -7833,6 +7838,9 @@ typedef struct {
     int escaped;
     const KeepCtx* ctx;
     int depth;
+    /* #3047: a loop body's passes that only bind (check_ptr_keeps_loop):
+     * nothing is reported until what the loop carries is known. */
+    int silent;
 } KeepSet;
 
 static int c_lvalue_outlives(const KeepCtx* c, ASTNode* lhs, int depth);
@@ -8089,6 +8097,12 @@ static void keep_set_note_alias(KeepSet* s, const char* name, ASTNode* init) {
         part = (!element && x->type == AST_MEMBER_ACCESS) ? struct_store_path(x) : NULL;
     }
     if (!target || !strcmp(target, name)) return;
+    /* Noted once: a loop's body is walked more than once (#3047). */
+    for (int i = 0; i < s->alias_count; i++)
+        if (!strcmp(s->alias_names[i], name) && !strcmp(s->alias_targets[i], target) &&
+            (s->alias_parts[i] == part ||
+             (s->alias_parts[i] && part && !strcmp(s->alias_parts[i], part))))
+            return;
     if (s->alias_count == s->alias_cap) {
         s->alias_cap = s->alias_cap ? s->alias_cap * 2 : 8;
         s->alias_names = aether_xrealloc(s->alias_names, (size_t)s->alias_cap * sizeof(char*));
@@ -8437,6 +8451,7 @@ static void report_borrowed_keep(KeepSet* s, ASTNode* at, Carried c, const char*
     c = carried_whole(c);   /* once per parameter, whatever parts hold it */
     for (int i = 0; i < c.n; i++) {
         if (s->probe) { s->escaped = 1; return; }
+        if (s->silent) return;   /* #3047: reported by the loop's last pass */
         if (!carried_is_any(c.params[i])) {
             report_borrowed_keep_one(s, at, c.params[i], c.vias[i], how);
             continue;
@@ -8532,6 +8547,187 @@ static void bind_pattern_holders(KeepSet* s, ASTNode* pat, Carried c, Type* t,
     }
 }
 
+static void check_ptr_keeps_in(ASTNode* program, ASTNode* n, KeepSet* s,
+                               const char** globals, int nglobals, int in_closure);
+
+/* #3047 review: the names a loop's body binds anew before anything reads
+ * them, each with what is bound: the whole value (`paths[i]` NULL) or a
+ * field of a local struct, at that path. */
+typedef struct {
+    const char** names;
+    const char** paths;
+    int count;
+    int cap;
+} LoopKills;
+
+/* Does any node of `n` carry `name`: a read, a binding, a capture, an
+ * address taken, or a field of that name, which counts too? */
+static int ast_names(ASTNode* n, const char* name) {
+    if (!n) return 0;
+    if (n->value && !strcmp(n->value, name)) return 1;
+    for (int i = 0; i < n->child_count; i++)
+        if (ast_names(n->children[i], name)) return 1;
+    return 0;
+}
+
+/* The local the statement `st` binds anew from a value that does not name
+ * it: `q = e` or a declaration binds the whole of `q`, `b.f = e` with `b` a
+ * local struct held by value binds `b` at `f` (`*path`). NULL for any other
+ * statement, and for a module-level `var`. */
+static const char* loop_stmt_rebinds(ASTNode* st, const char** path, const char** globals,
+                                     int nglobals) {
+    if (st && st->type == AST_EXPRESSION_STATEMENT && st->child_count == 1) st = st->children[0];
+    if (!st) return NULL;
+    const char* name = NULL;
+    *path = NULL;
+    if (st->type == AST_VARIABLE_DECLARATION && st->value && st->child_count > 0) {
+        name = st->value;
+        for (int i = 0; i < st->child_count; i++)
+            if (ast_names(st->children[i], name)) return NULL;
+    } else if (st->type == AST_BINARY_EXPRESSION && st->value && !strcmp(st->value, "=") &&
+               st->child_count == 2 && st->children[0]) {
+        ASTNode* lhs = st->children[0];
+        if (lhs->type == AST_IDENTIFIER) {
+            name = lhs->value;
+        } else if ((name = local_struct_root(lhs, globals, nglobals)) != NULL &&
+                   !(*path = struct_store_path(lhs))) {
+            return NULL;
+        }
+        if (!name || ast_names(st->children[1], name)) return NULL;
+    }
+    if (!name || is_global_name(name, globals, nglobals)) return NULL;
+    return name;
+}
+
+/* #3047 review: what a pass through the loop `loop` binds before it reads.
+ * A local is rebound whole, or a field of a local struct stored, by a
+ * top-level statement of the body (so on every pass, before the statements
+ * after it) that is the first to name it, with nothing in the loop's
+ * header naming it: what it held when the pass began is read by nothing in
+ * the pass. Any other statement, a store under an `if`, a name the header
+ * reads, kills nothing. */
+static void loop_kills_find(ASTNode* loop, LoopKills* k, const char** globals, int nglobals) {
+    ASTNode* body = loop->child_count > 0 ? loop->children[loop->child_count - 1] : NULL;
+    if (!body) return;
+    int block = body->type == AST_BLOCK;
+    int nst = block ? body->child_count : 1;
+    for (int i = 0; i < nst; i++) {
+        const char* path;
+        const char* name =
+            loop_stmt_rebinds(block ? body->children[i] : body, &path, globals, nglobals);
+        if (!name) continue;
+        int named = 0;
+        for (int h = 0; h + 1 < loop->child_count && !named; h++)
+            named = ast_names(loop->children[h], name);
+        for (int j = 0; j < i && !named; j++) named = ast_names(body->children[j], name);
+        if (named) continue;
+        if (k->count == k->cap) {
+            k->cap = k->cap ? k->cap * 2 : 8;
+            k->names = aether_xrealloc(k->names, (size_t)k->cap * sizeof(char*));
+            k->paths = aether_xrealloc(k->paths, (size_t)k->cap * sizeof(char*));
+        }
+        k->names[k->count] = name;
+        k->paths[k->count++] = path;
+    }
+}
+
+static void keep_set_add_one(KeepSet* s, const char* name, const char* param, const char* via,
+                             const char* part) {
+    Carried one = { 0 };
+    carried_add_at(&one, param, via, part);
+    keep_set_add(s, name, one);
+}
+
+/* One pass through the loop `n`: the holders `k` names leave the pass,
+ * which binds them again in order, and come back after it, since the loop
+ * may run no pass at all, or end in one that binds nothing. A name the
+ * address of which is taken (#3043) stays: a read through the address
+ * does not name it. */
+static void keep_loop_walk(ASTNode* program, ASTNode* n, KeepSet* s, const LoopKills* k,
+                           const char** globals, int nglobals, int in_closure) {
+    KeepSet held = { 0 };
+    for (int j = 0; j < k->count; j++) {
+        int aliased = 0;
+        for (int a = 0; a < s->alias_count && !aliased; a++)
+            aliased = !strcmp(s->alias_targets[a], k->names[j]);
+        if (aliased) continue;
+        int w = 0;
+        for (int i = 0; i < s->count; i++) {
+            if (!strcmp(s->names[i], k->names[j]) && part_within(s->parts[i], k->paths[j])) {
+                keep_set_add_one(&held, s->names[i], s->params[i], s->vias[i], s->parts[i]);
+                continue;
+            }
+            s->names[w] = s->names[i];
+            s->params[w] = s->params[i];
+            s->vias[w] = s->vias[i];
+            s->parts[w++] = s->parts[i];
+        }
+        s->count = w;
+    }
+    for (int i = 0; i < n->child_count; i++)
+        check_ptr_keeps_in(program, n->children[i], s, globals, nglobals, in_closure);
+    for (int i = 0; i < held.count; i++)
+        keep_set_add_one(s, held.names[i], held.params[i], held.vias[i], held.parts[i]);
+    keep_set_free(&held);
+}
+
+/* Is every holder `s` lists one `before` lists already, or covers? The
+ * holders only grow from pass to pass, so this is the fixed point. */
+static int keep_set_within(const KeepSet* s, const KeepSet* before) {
+    for (int i = 0; i < s->count; i++) {
+        int found = 0;
+        for (int j = 0; j < before->count && !found; j++)
+            found = !strcmp(before->names[j], s->names[i]) &&
+                    (!strcmp(before->params[j], s->params[i]) ||
+                     carried_is_any(before->params[j])) &&
+                    part_within(s->parts[i], before->parts[j]);
+        if (!found) return 0;
+    }
+    return 1;
+}
+
+static void keep_set_copy_holders(KeepSet* to, const KeepSet* from) {
+    if (to->cap < from->count) {
+        to->cap = from->count;
+        to->names = aether_xrealloc(to->names, (size_t)to->cap * sizeof(char*));
+        to->params = aether_xrealloc(to->params, (size_t)to->cap * sizeof(char*));
+        to->vias = aether_xrealloc(to->vias, (size_t)to->cap * sizeof(char*));
+        to->parts = aether_xrealloc(to->parts, (size_t)to->cap * sizeof(char*));
+    }
+    for (int i = 0; i < from->count; i++) {
+        to->names[i] = from->names[i];
+        to->params[i] = from->params[i];
+        to->vias[i] = from->vias[i];
+        to->parts[i] = from->parts[i];
+    }
+    to->count = from->count;
+}
+
+/* #3047 review: a loop whose passes did not settle within
+ * KEEP_LOOP_PASSES_MAX. Each local the loop binds is taken to hold every
+ * parameter the function tracks, held by a holder, so the reporting pass
+ * refuses what the passes left unfound rather than miss it. */
+static void keep_loop_widen(KeepSet* s, ASTNode* n, const char** globals, int nglobals) {
+    if (!n) return;
+    const char* name = NULL;
+    if (n->type == AST_VARIABLE_DECLARATION || n->type == AST_PATTERN_VARIABLE) {
+        name = n->value;
+    } else if (n->type == AST_BINARY_EXPRESSION && n->value && !strcmp(n->value, "=") &&
+               n->child_count == 2 && n->children[0]) {
+        ASTNode* lhs = n->children[0];
+        name = lhs->type == AST_IDENTIFIER ? lhs->value : local_struct_root(lhs, globals, nglobals);
+    } else if (n->type == AST_TUPLE_DESTRUCTURE) {
+        for (int v = 0; v + 1 < n->child_count; v++)
+            if (n->children[v] && n->children[v]->value &&
+                !is_global_name(n->children[v]->value, globals, nglobals))
+                keep_set_add_one(s, n->children[v]->value, CARRIED_ANY,
+                                 "held by a local the loop binds", NULL);
+    }
+    if (name && strcmp(name, "_") && !is_global_name(name, globals, nglobals))
+        keep_set_add_one(s, name, CARRIED_ANY, "held by a local the loop binds", NULL);
+    for (int i = 0; i < n->child_count; i++) keep_loop_widen(s, n->children[i], globals, nglobals);
+}
+
 /* `in_closure`: `n` is inside a closure that captured the parameter. A
  * `return` there hands the value to whoever calls the closure, inside the
  * function unless the closure escapes, which is checked where it goes. */
@@ -8546,6 +8742,41 @@ static void check_ptr_keeps_in(ASTNode* program, ASTNode* n, KeepSet* s,
         if (m.n)
             for (int i = 0; i < n->child_count; i++)
                 check_ptr_keeps_in(program, n->children[i], s, globals, nglobals, 1);
+        return;
+    }
+    /* #3047: a loop's body runs again with what it bound, so a read placed
+     * before a store sees the stored value on the next pass (`kept = q`,
+     * then `q = p`). The body is walked binding only, reporting nothing,
+     * until a pass binds nothing new (the holders and aliases only grow,
+     * and are finite), then walked once more below, reporting. A loop met
+     * inside such a pass is walked once there: the outer loop repeats its
+     * passes until the two are stable together. The walk ignores order
+     * within a pass, so `break` and `continue` need nothing of their own.
+     * #3047 review: a local the body binds anew before reading it holds,
+     * in the pass, only what the pass binds (loop_kills_find), else
+     * `q = list.new()`, `kept = q`, `q = p` was refused for the `p` of the
+     * pass before. Past KEEP_LOOP_PASSES_MAX the loop is widened. */
+    if (n->type == AST_WHILE_LOOP || n->type == AST_FOR_LOOP) {
+        LoopKills k = { 0 };
+        loop_kills_find(n, &k, globals, nglobals);
+        if (!s->silent) {
+            KeepSet before = { 0 };
+            int stable = 0;
+            s->silent = 1;
+            for (int pass = 0; pass < KEEP_LOOP_PASSES_MAX && !stable; pass++) {
+                int aliases = s->alias_count;
+                keep_set_copy_holders(&before, s);
+                keep_loop_walk(program, n, s, &k, globals, nglobals, in_closure);
+                stable = (s->probe && s->escaped) ||
+                         (s->alias_count == aliases && keep_set_within(s, &before));
+            }
+            keep_set_free(&before);
+            if (!stable) keep_loop_widen(s, n, globals, nglobals);
+            s->silent = 0;
+        }
+        keep_loop_walk(program, n, s, &k, globals, nglobals, in_closure);
+        free(k.names);
+        free(k.paths);
         return;
     }
     if (n->type == AST_VARIABLE_DECLARATION && n->value && n->child_count > 0)

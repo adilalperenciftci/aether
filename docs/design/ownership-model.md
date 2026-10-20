@@ -347,7 +347,11 @@ the signature, so no call site reads another function's body:
   these: `t = (p, 1)` returned, `kept = o!` and `kept = call(f)` passed).
 - The checker verifies each function against its own body: a `ptr`
   parameter not declared `@keep` is not kept. A call is checked against the
-  callee's signature.
+  callee's signature. A loop's body runs again with what it bound, so it is
+  checked with what every pass through it binds (#3047): `kept = q` placed
+  before `q = p` keeps `p` on the second pass. A local the body binds anew
+  before anything reads it (`q = list.new()` first, or `b.item = ...` for
+  that field of a local struct) holds in the pass only what the pass binds.
 - A `string` goes implicitly to a borrowed `ptr` parameter. To a `@keep` one,
   or into a `ptr` field (a store or a struct literal), it goes only through
   `string.keep(s)`, which hands over one reference the program gives back

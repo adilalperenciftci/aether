@@ -858,6 +858,254 @@ main() { attach(heap.new(Node), null) }
 AE
 refused arith_field 4:13 "'c' is a borrowed \`ptr\` parameter, stored in a field or an element"
 
+# #3047: what a loop's body binds holds on the next pass through it, so a
+# read placed before the store sees it: the body is walked until nothing new
+# is bound, then checked.
+cat > "$TMP/loop_struct_field.ae" <<'AE'
+struct Pair { a: ptr, b: ptr }
+var kept: ptr = null
+
+carry(p: ptr) {
+    s = Pair { a: null, b: null }
+    i = 0
+    while i < 2 {
+        kept = s.a
+        s.a = p
+        i = i + 1
+    }
+}
+
+main() { carry(null) }
+AE
+refused loop_struct_field 8:9 "'p' is a borrowed \`ptr\` parameter, stored in a module-level \`var\`"
+
+cat > "$TMP/loop_local.ae" <<'AE'
+var kept: ptr = null
+
+carry(p: ptr) {
+    q = null
+    for i in 0..2 {
+        kept = q
+        q = p
+    }
+}
+
+main() { carry(null) }
+AE
+refused loop_local 6:9 "'p' is a borrowed \`ptr\` parameter, stored in a module-level \`var\`"
+
+# Three passes before `kept` holds it: walking the body twice is not enough.
+cat > "$TMP/loop_chain.ae" <<'AE'
+var kept: ptr = null
+
+carry(p: ptr) {
+    a = null
+    b = null
+    c = null
+    i = 0
+    while i < 4 {
+        kept = c
+        c = b
+        b = a
+        a = p
+        i = i + 1
+    }
+}
+
+main() { carry(null) }
+AE
+refused loop_chain 9:9 "'p' is a borrowed \`ptr\` parameter, stored in a module-level \`var\`"
+
+# Nested loops: the outer loop carries what the inner one binds.
+cat > "$TMP/loop_nested.ae" <<'AE'
+struct Pair { a: ptr, b: ptr }
+var kept: ptr = null
+
+carry(p: ptr) {
+    s = Pair { a: null, b: null }
+    q = null
+    i = 0
+    while i < 2 {
+        kept = s.b
+        for j in 0..2 {
+            s.b = q
+            q = p
+        }
+        i = i + 1
+    }
+}
+
+main() { carry(null) }
+AE
+refused loop_nested 9:9 "'p' is a borrowed \`ptr\` parameter, stored in a module-level \`var\`"
+
+# `continue` and `break` leave the loop's other passes in place.
+cat > "$TMP/loop_continue_break.ae" <<'AE'
+var kept: ptr = null
+
+carry(p: ptr, n: int) {
+    q = null
+    i = 0
+    while true {
+        i = i + 1
+        if i == 1 { continue }
+        kept = q
+        q = p
+        if i > n { break }
+    }
+}
+
+main() { carry(null, 3) }
+AE
+refused loop_continue_break 9:9 "'p' is a borrowed \`ptr\` parameter, stored in a module-level \`var\`"
+
+# A loop that stores the parameter in a local and reads it there, after the
+# store, keeps nothing.
+cat > "$TMP/loop_store_then_read.ae" <<'AE'
+struct Pair { a: ptr, b: ptr }
+
+count(p: ptr) -> int {
+    s = Pair { a: null, b: null }
+    q = null
+    n = 0
+    while n < 4 {
+        s.a = p
+        q = s.a
+        if q == null { n = n + 10 }
+        n = n + 1
+    }
+    return n
+}
+
+main() { println("${count(null)}") }
+AE
+accepted loop_store_then_read
+
+# A local the body binds anew before reading it holds, in the pass, only what
+# the pass binds: the `p` of the pass before is gone by `kept = q`. The same
+# for a field of a local struct, inside another loop too.
+cat > "$TMP/loop_rebind_local.ae" <<'AE'
+import std.list
+var kept: ptr = null
+
+carry(p: ptr, n: int) {
+    i = 0
+    while i < n {
+        q = list.new()
+        kept = q
+        q = p
+        i = i + 1
+    }
+}
+
+nested(p: ptr, n: int) {
+    j = 0
+    while j < n {
+        for i in 0..n {
+            q = list.new()
+            kept = q
+            q = p
+        }
+        j = j + 1
+    }
+}
+
+main() { carry(null, 2)  nested(null, 2) }
+AE
+accepted loop_rebind_local
+
+cat > "$TMP/loop_rebind_field.ae" <<'AE'
+import std.list
+struct Box { item: ptr, other: ptr }
+var kept: ptr = null
+
+carry(p: ptr, n: int) {
+    b = Box { item: null, other: null }
+    i = 0
+    while i < n {
+        b.item = list.new()
+        kept = b.item
+        b.item = p
+        i = i + 1
+    }
+}
+
+main() { carry(null, 2) }
+AE
+accepted loop_rebind_field
+
+# The store binds that field anew, and nothing else of the struct: another
+# field still holds the pass before's `p`.
+cat > "$TMP/loop_rebind_other_field.ae" <<'AE'
+import std.list
+struct Box { item: ptr, other: ptr }
+var kept: ptr = null
+
+carry(p: ptr, n: int) {
+    b = Box { item: null, other: null }
+    i = 0
+    while i < n {
+        b.item = list.new()
+        kept = b.other
+        b.other = p
+        i = i + 1
+    }
+}
+
+main() { carry(null, 2) }
+AE
+refused loop_rebind_other_field 10:9 "'p' is a borrowed \`ptr\` parameter, stored in a module-level \`var\`"
+
+# What the last pass bound holds after the loop.
+cat > "$TMP/loop_rebind_after.ae" <<'AE'
+import std.list
+var kept: ptr = null
+
+carry(p: ptr, n: int) {
+    q = null
+    i = 0
+    while i < n {
+        q = list.new()
+        q = p
+        i = i + 1
+    }
+    kept = q
+}
+
+main() { carry(null, 2) }
+AE
+refused loop_rebind_after 12:5 "'p' is a borrowed \`ptr\` parameter, stored in a module-level \`var\`"
+
+# chain_cell <name> <links>: `kept = l<links>`, then `l<k> = l<k-1>` down to
+# `l0 = p`, in a loop: `kept` holds `p` after <links> + 1 passes.
+chain_cell() {
+    {
+        echo 'var kept: ptr = null'
+        echo 'carry(p: ptr) {'
+        k=0
+        while [ "$k" -le "$2" ]; do echo "    l$k = null"; k=$((k + 1)); done
+        echo '    i = 0'
+        echo '    while i < 1000 {'
+        echo "        kept = l$2"
+        k=$2
+        while [ "$k" -ge 1 ]; do echo "        l$k = l$((k - 1))"; k=$((k - 1)); done
+        echo '        l0 = p'
+        echo '        i = i + 1'
+        echo '    }'
+        echo '}'
+        echo 'main() { carry(null) }'
+    } > "$TMP/$1.ae"
+}
+
+# Seventy links: more passes than the 64 the walk once stopped at.
+chain_cell loop_chain_70 70
+refused loop_chain_70 76:9 "'p' is a borrowed \`ptr\` parameter, stored in a module-level \`var\`"
+
+# Past KEEP_LOOP_PASSES_MAX (256) the loop's locals are taken to hold every
+# parameter, so the chain is refused still, if less precisely.
+chain_cell loop_chain_past_guard 300
+refused loop_chain_past_guard 306:9 "'p' is a borrowed \`ptr\` parameter held by a local the loop binds that is stored in a module-level \`var\`"
+
 cat > "$TMP/payload_returned.ae" <<'AE'
 unwrap(p: ptr) -> ptr {
     let o: ptr? = p
