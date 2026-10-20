@@ -83,8 +83,8 @@ fi
 # staticlib build, killed by the sweep's per-test timeout with no word on
 # which child stalled). Each runs bounded: past STEP_LIMIT seconds, well
 # under the sweep's 420 s, the processes still running under it are
-# printed (ps, walking its tree) and killed, and the test fails naming
-# them.
+# stopped (ps, walking its tree until no new one appears), printed and
+# killed, and the test fails naming them.
 STEP_LIMIT="${AE_IOS_STEP_TIMEOUT:-180}"
 
 # proc_tree <pid>: <pid> and every process descended from it.
@@ -117,8 +117,8 @@ running() {
 }
 
 # bounded <label> <command...>: runs the command with its output in
-# $TMP/log and returns its status, or, past STEP_LIMIT seconds, reports
-# what is still running under it, kills it and fails.
+# $TMP/log and returns its status, or, past STEP_LIMIT seconds, freezes
+# what is still running under it, reports it, kills it and fails.
 bounded() {
     label="$1"
     shift
@@ -127,7 +127,26 @@ bounded() {
     waited=0
     while running "$bpid"; do
         if [ "$waited" -ge "$STEP_LIMIT" ]; then
-            tree=$(proc_tree "$bpid")
+            # Frozen before it is read, so nothing under the step starts a
+            # process the kill below would miss: the step is stopped, then
+            # each process a walk finds under it, until a walk finds none
+            # new (a stopped process starts nothing).
+            # kill-ok: macOS-only (a bounded step runs xcrun), never on Windows; $bpid is this step, still running
+            kill -STOP "$bpid" 2>/dev/null || true
+            tree="$bpid"
+            while :; do
+                fresh=""
+                for p in $(proc_tree "$bpid"); do
+                    case " $tree " in
+                        *" $p "*) ;;
+                        *) fresh="$fresh $p" ;;
+                    esac
+                done
+                [ -n "$fresh" ] || break
+                # kill-ok: macOS-only, as above; each pid was just read from ps under the stopped step
+                for p in $fresh; do kill -STOP "$p" 2>/dev/null || true; done
+                tree="$tree$fresh"
+            done
             echo "  TIMEOUT: $label still running after ${STEP_LIMIT}s; its processes:"
             echo "      PID  PPID     ELAPSED COMMAND"
             stuck=""
@@ -136,8 +155,11 @@ bounded() {
                 echo "    $line"
                 [ "$p" = "$bpid" ] || stuck="$stuck $(ps -o comm= -p "$p" 2>/dev/null)"
             done
-            # kill-ok: macOS-only (a bounded step runs xcrun), never on Windows; the tree was just read from ps
+            # A stopped process takes TERM when it is continued.
+            # kill-ok: macOS-only (a bounded step runs xcrun), never on Windows; the tree is stopped, read from ps
             for p in $tree; do kill -TERM "$p" 2>/dev/null || true; done
+            # kill-ok: macOS-only, as above; the same stopped tree, continued to take its TERM
+            for p in $tree; do kill -CONT "$p" 2>/dev/null || true; done
             sleep 2
             # kill-ok: macOS-only, as above; what survived TERM
             for p in $tree; do kill -KILL "$p" 2>/dev/null || true; done
