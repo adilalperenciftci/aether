@@ -348,6 +348,20 @@ static void discover_bare_fn_adapters_walk(CodeGenerator* gen, ASTNode* node) {
                 }
                 pi++;
             }
+        } else {
+            /* #3038: an extern's `fn` parameter, a binary import's stub
+             * among them, takes a named function through its adapter as an
+             * Aether function's does. Registered only at the wrap site, the
+             * adapter came after the code that called it: `undeclared`. */
+            const char* ext = extern_name_for_call(gen, node->value);
+            for (int ai = 0; ext && ai < node->child_count; ai++) {
+                Type* pt = lookup_extern_param_type(gen, ext, ai);
+                ASTNode* arg = node->children[ai];
+                if (pt && pt->kind == TYPE_FUNCTION && !pt->is_fnptr && arg &&
+                    arg->type == AST_IDENTIFIER && arg->value &&
+                    find_user_function_by_name(gen, arg->value))
+                    register_bare_fn_adapter(gen, arg->value);
+            }
         }
     }
     /* #2055: an identifier the typechecker marked as a function value. */

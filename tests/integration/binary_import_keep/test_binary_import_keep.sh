@@ -51,13 +51,21 @@ animate(el: @keep ptr, ticks: int, tick: fn(@keep ptr, float)) {
         i = i + 1
     }
 }
+
+repeat(n: int, cb: fn) {
+    i = 0
+    while i < n {
+        call(cb, i)
+        i = i + 1
+    }
+}
 AE
 
 # A function-typed parameter carries its modes across the catalog too
 # (`tick: fn(@keep ptr, float)`, which it spelled `tick: fn`): an importer
-# passing a keeping function is accepted, as from the source. Checked, not
-# built: a named function given to a binary import's closure parameter
-# does not build whatever its modes (its adapter is never emitted).
+# passing a keeping function is accepted, as from the source, and runs:
+# a named function given to a binary import's closure parameter goes
+# through its adapter, which was never declared (#3038).
 cat > fn_keep.ae <<'AE'
 import keeper
 import std.list
@@ -90,6 +98,23 @@ main() {
     keeper.animate(shape, 2) callback | e: @keep ptr, t: float | { list.add(registry, e) }
     keeper.animate(shape, 1) callback | e, t | { list.add(registry, e) }
     println("${list.size(registry)}")
+}
+AE
+
+# A named function into a bare `fn` parameter of the library, the shape of
+# #3038: `_aether_bare_adapter_add` was undeclared.
+cat > fn_bare.ae <<'AE'
+import keeper
+
+var total: int = 0
+
+add(i: int) {
+    total = total + i
+}
+
+main() {
+    keeper.repeat(4, add)
+    println("${total}")
 }
 AE
 
@@ -165,7 +190,7 @@ verdict() {
     printf '%s\n' "$out" | grep -E "^error|-->" | sed 's/^ *//'
 }
 
-for app in string_to_keep borrowed_to_keep into_escapes string_to_into accepted fn_keep fn_closure; do
+for app in string_to_keep borrowed_to_keep into_escapes string_to_into accepted fn_keep fn_closure fn_bare; do
     verdict "$app.ae" > "$app.source"
 done
 
@@ -183,7 +208,7 @@ for want in "as: hold(p: @keep ptr) -> void" "as: wrap(p: @into ptr) -> ptr" \
     esac
 done
 
-for app in string_to_keep borrowed_to_keep into_escapes string_to_into accepted fn_keep fn_closure; do
+for app in string_to_keep borrowed_to_keep into_escapes string_to_into accepted fn_keep fn_closure fn_bare; do
     verdict "$app.ae" > "$app.binary"
     if [ "$(cat "$app.source")" != "$(cat "$app.binary")" ]; then
         echo "  [FAIL] binary_import_keep: $app is checked differently as a binary import"
@@ -218,6 +243,8 @@ run_app() {
 }
 run_app accepted "1 1"
 run_app fn_closure "3"
+run_app fn_keep "3"
+run_app fn_bare "6"
 
 if [ "$fails" -ne 0 ]; then exit 1; fi
 echo "  [PASS] binary_import_keep: @keep and @into cross the catalog, in a function type too; a binary import is checked as the source import is"
