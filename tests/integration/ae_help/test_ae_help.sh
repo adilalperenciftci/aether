@@ -121,10 +121,11 @@ expect_match "Missing-import suggestion" \
 # where readdir is alphabetical, that was std.string's tail and all of
 # std.zstd, while ext4's hash order happened to keep them (#2338). A
 # name from the last module is the earliest casualty of any such cap,
-# whatever the ordering.
+# whatever the ordering. The name must be one only std.zstd exports
+# (`available` is std.brotli's and std.zlib's too).
 cat > "$TMPDIR/missing_last.ae" <<EOF
 main() {
-    ok = zstd_backend_available()
+    ok = zstd_get_compress_length()
     println("\${ok}")
 }
 EOF

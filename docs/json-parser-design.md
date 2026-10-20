@@ -411,7 +411,7 @@ arbitrary children to parsed trees, including heap-created values from
 The path forward is **dual representation with copy-on-mutate**:
 
 - `json.parse` produces a flat tape for the parsed document.
-- `json.array_add` / `json.object_set` on a tape-backed value promotes
+- `json.push` / `json.set` on a tape-backed value promotes
   the affected subtree to the existing tree representation once (one
   deep-copy), flips a flag on the root, then mutates as today.
 - Subsequent calls on the promoted root skip the conversion.

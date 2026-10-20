@@ -44,15 +44,15 @@ left_after(src: string, texts: string) -> string {
         list.add_raw(all_values, list.get_raw(queue, k))
         k = k + 1
     }
-    input = json.create_null()
+    input = json.null_value()
     out = list.new()
     _s, _c, err = jq.run_with_inputs(prog, input, queue, out)
     if err != null { json.free(err) }
     text = jq.render(out, 0, 0, 0)
-    left = json.create_array()
+    left = json.arr()
     k = 0
     while k < list.size(queue) {
-        json.array_add_raw(left, json.create_int(json.get_int(list.get_raw(queue, k)) as long))
+        json.array_add_raw(left, json.from_int(json.get_int(list.get_raw(queue, k)) as long))
         list.set(queue, k, null)
         k = k + 1
     }
@@ -69,7 +69,7 @@ left_after(src: string, texts: string) -> string {
 stream_of(text: string) -> string {
     vals, err = jq.parse_stream(text)
     if vals == null { return "ERR: ${err}" }
-    arr = json.create_array()
+    arr = json.arr()
     k = 0
     while k < list.size(vals) {
         json.array_add_raw(arr, list.get_raw(vals, k))
@@ -85,8 +85,8 @@ stream_of(text: string) -> string {
 // Bind $x through a name string that is released before the program runs,
 // as a command line's argument buffer would be.
 bind_from_temporary_name(prog: ptr) {
-    name = json.create_string("x")
-    jq.set_var(prog, json.get_string_raw(name), json.create_string("hi"))
+    name = json.str("x")
+    jq.set_var(prog, json.get_string_raw(name), json.str("hi"))
     json.free(name)
 }
 
@@ -132,7 +132,7 @@ main() {
             prog, _ = jq.compile("[$x, $y.k]")
             bind_from_temporary_name(prog)
             jq.set_var(prog, "y", parsed("{\"k\":1}"))
-            input = json.create_null()
+            input = json.null_value()
             text, err = jq.run_json(prog, input)
             spec.assert_str_eq(text, "[\"hi\",1]\n", "bound")
             spec.assert_str_eq(err, "", "no error")

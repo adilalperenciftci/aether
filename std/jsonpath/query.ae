@@ -739,11 +739,11 @@ _eval_comparable(c: ptr, current: @keep ptr, root: @keep ptr) -> *Slot {
 // path. The caller frees it via Slot.owned.
 _literal_to_json(l: ptr) -> ptr {
     lp = l as *Literal
-    if lp.kind == model.L_INT { return json.create_int(lp.ival) }
-    if lp.kind == model.L_FLOAT { return json.create_number(lp.fval) }
-    if lp.kind == model.L_STRING { return json.create_string(lp.sval) }
-    if lp.kind == model.L_BOOL { return json.create_bool(lp.bval) }
-    return json.create_null()
+    if lp.kind == model.L_INT { return json.from_int(lp.ival) }
+    if lp.kind == model.L_FLOAT { return json.num(lp.fval) }
+    if lp.kind == model.L_STRING { return json.str(lp.sval) }
+    if lp.kind == model.L_BOOL { return json.boolean(lp.bval) }
+    return json.null_value()
 }
 
 // Walk a singular query. Returns the borrowed value, or null for
@@ -894,10 +894,10 @@ _eval_value_fn(fp: *TestFn, current: ptr, root: @keep ptr) -> ptr {
         if t == 3 {
             // Length of a string is its CODEPOINT count, not its byte
             // count (RFC 9535 §2.4.4).
-            out = json.create_int(_utf8_length(json.get_string_raw(v)) as long)
+            out = json.from_int(_utf8_length(json.get_string_raw(v)) as long)
         }
-        if t == 4 { out = json.create_int(json.array_size(v) as long) }
-        if t == 5 { out = json.create_int(json.object_size_raw(v) as long) }
+        if t == 4 { out = json.from_int(json.array_size(v) as long) }
+        if t == 5 { out = json.from_int(json.object_size_raw(v) as long) }
         _release_arg_value(arg, v)
         return out
     }
@@ -905,7 +905,7 @@ _eval_value_fn(fp: *TestFn, current: ptr, root: @keep ptr) -> ptr {
     if fp.kind == model.FN_COUNT {
         arg = list.get_raw(fp.args, 0)
         n = _arg_nodelist_size(arg, current, root)
-        return json.create_int(n as long)
+        return json.from_int(n as long)
     }
 
     if fp.kind == model.FN_VALUE {
@@ -1155,12 +1155,12 @@ _utf8_length(s: string) -> int {
 // A deep copy of a json value, so value() can hand back an owned result.
 _json_copy(v: ptr) -> ptr {
     t = json.type(v)
-    if t == 0 { return json.create_null() }
-    if t == 1 { return json.create_bool(json.get_bool(v)) }
-    if t == 2 { return json.create_number(json.get_number(v)) }
-    if t == 3 { return json.create_string(json.get_string_raw(v)) }
+    if t == 0 { return json.null_value() }
+    if t == 1 { return json.boolean(json.get_bool(v)) }
+    if t == 2 { return json.num(json.get_number(v)) }
+    if t == 3 { return json.str(json.get_string_raw(v)) }
     if t == 4 {
-        a = json.create_array()
+        a = json.arr()
         n = json.array_size(v)
         i = 0
         while i < n {
@@ -1169,7 +1169,7 @@ _json_copy(v: ptr) -> ptr {
         }
         return a
     }
-    o = json.create_object()
+    o = json.obj()
     n = json.object_size_raw(v)
     i = 0
     while i < n {

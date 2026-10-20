@@ -8,7 +8,7 @@
 // without knowing which list holds which.
 //
 // Strings the tree owns (field names, literal text, function names) are
-// held as JSON string values (std.json's json_create_string) rather than
+// held as JSON string values (std.json's `json.str`) rather than
 // Aether strings: their lifetime is then exactly the node's, released by
 // json_free in free_node, with no per-field ownership flags to keep right.
 //
@@ -134,7 +134,7 @@ new_leaf(kind: int) -> ptr {
 set_name(n: ptr, name: string) {
     p = n as *Node
     if p.name != null { json.free(p.name) }
-    p.name = json.create_string(name)
+    p.name = json.str(name)
 }
 
 // The node's name, borrowed ("" when it has none).

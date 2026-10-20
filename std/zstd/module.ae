@@ -19,7 +19,6 @@
 // Compression only, as with std.brotli: nothing in-tree needs to decode zstd.
 
 exports(
-    zstd_backend_available,
     zstd_try_stream_new, zstd_try_stream_flush,
     zstd_try_stream_finish, zstd_get_stream_bytes, zstd_get_stream_length,
     zstd_release_stream,

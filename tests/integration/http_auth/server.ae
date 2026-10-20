@@ -60,12 +60,12 @@ run_server(raw: @keep ptr) {
 }
 
 main() {
-    n = aether_args_count()
+    n = os.args_count()
     if n < 2 {
         println("FAIL: usage: server <bearer|session>")
         exit(1)
     }
-    mode = aether_args_get(1)
+    mode = os.args_get(1)
 
     if mode == "bearer" {
         raw = http.server_create(0)

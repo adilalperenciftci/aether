@@ -107,6 +107,15 @@ add(set: ptr, item: string) -> bool { return add_raw(set, item) == 1 }
 std dropped 336 such duplicate exports from its lists (#2976); the
 changelog names each one.
 
+The rule is one name per operation, which E0305 checks only where the two
+names share a short name. An alias under another name is the same
+duplicate: `json.from_int` beside the extern `json.create_int`, or
+`xml.writer` beside `xml.builder_new`. Export the Aether-side name, the
+short one a caller reads, unless the other spelling says more (std.cbor's
+`map_push` appends a pair where `map_set` would suggest a replace), and
+keep the extern for the wrapper to call. std dropped 79 such aliases
+(#3014).
+
 ### Return shapes
 
 | Operation | Success return | Failure return |

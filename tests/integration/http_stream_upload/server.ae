@@ -37,7 +37,7 @@ handle_upload(req: ptr, res: ptr, ud: ptr) {
     // read loop drains the declared length. Reported to the driver.
     pre = http.request_body_complete(req)
     total = http.request_body_length(req)
-    root = aether_args_get(1)
+    root = os.args_get(1)
     out_path = "${root}/uploaded.bin"
 
     // Stream chunks → temp file via positional writes. Peak RAM is one
@@ -121,7 +121,7 @@ actor SchedHelper {
 main() {
     // The port is no longer an argument: the server binds 0 and reports the
     // kernel's choice on the READY line, so only the root remains.
-    n = aether_args_count()
+    n = os.args_count()
     if n < 2 {
         println("usage: server <root>")
         exit(1)

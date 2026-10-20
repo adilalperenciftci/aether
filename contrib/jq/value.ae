@@ -83,21 +83,21 @@ is_integral(d: float) -> int {
 // an integral result within int64 is stored that way and prints as jq
 // prints it (3, not 3.0). Anything else keeps its double.
 make_number(d: float) -> ptr {
-    if d != d { return json.create_number(d) } // NaN
+    if d != d { return json.num(d) } // NaN
     if d == 0.0 {
         // -0 stays a double so it still prints as -0, as jq prints it.
-        if (1.0 / d) < 0.0 { return json.create_number(d) }
+        if (1.0 / d) < 0.0 { return json.num(d) }
     }
     if is_integral(d) == 1 {
         if math.abs_float(d) < 9.0e18 {
-            return json.create_int(d as long)
+            return json.from_int(d as long)
         }
     }
-    return json.create_number(d)
+    return json.num(d)
 }
 
 make_int(n: long) -> ptr {
-    return json.create_int(n)
+    return json.from_int(n)
 }
 
 number_of(v: ptr) -> float {
@@ -105,7 +105,7 @@ number_of(v: ptr) -> float {
 }
 
 new_string(s: string) -> ptr {
-    return json.create_string(s)
+    return json.str(s)
 }
 
 // The bytes of a JSON string, borrowed from the value.
@@ -116,12 +116,12 @@ string_value(v: ptr) -> string {
 // Deep copy. Owned by the caller; free with json.json_free.
 copy(v: ptr) -> ptr {
     t = type_of(v)
-    if t == T_NULL { return json.create_null() }
-    if t == T_BOOL { return json.create_bool(json.get_bool(v)) }
+    if t == T_NULL { return json.null_value() }
+    if t == T_BOOL { return json.boolean(json.get_bool(v)) }
     if t == T_NUMBER { return make_number(json.get_number(v)) }
-    if t == T_STRING { return json.create_string(json.get_string_raw(v)) }
+    if t == T_STRING { return json.str(json.get_string_raw(v)) }
     if t == T_ARRAY {
-        a = json.create_array()
+        a = json.arr()
         n = json.array_size(v)
         i = 0
         while i < n {
@@ -130,7 +130,7 @@ copy(v: ptr) -> ptr {
         }
         return a
     }
-    o = json.create_object()
+    o = json.obj()
     n = json.object_size_raw(v)
     i = 0
     while i < n {
@@ -353,11 +353,11 @@ sorted_keys(obj: ptr) -> ptr {
     n = json.object_size_raw(obj)
     i = 0
     while i < n {
-        list.add_raw(l, json.create_string(json.object_key_at(obj, i)))
+        list.add_raw(l, json.str(json.object_key_at(obj, i)))
         i = i + 1
     }
     sort_list(l, null)
-    out = json.create_array()
+    out = json.arr()
     i = 0
     while i < n {
         json.array_add_raw(out, list.get_raw(l, i))
@@ -671,12 +671,12 @@ _decode(s: string, n: int, i: int) -> (int, int) {
 
 // `explode`: the string's codepoints as a JSON array of numbers.
 explode(s: string) -> ptr {
-    out = json.create_array()
+    out = json.arr()
     n = string.length(s)
     i = 0
     while i < n {
         cp, next = _decode(s, n, i)
-        json.array_add_raw(out, json.create_int(cp as long))
+        json.array_add_raw(out, json.from_int(cp as long))
         i = next
     }
     return out
@@ -716,7 +716,7 @@ implode(arr: ptr) -> string! {
 // ---------------------------------------------------------------------------
 
 without_key(obj: ptr, key: string) -> ptr {
-    o = json.create_object()
+    o = json.obj()
     n = json.object_size_raw(obj)
     i = 0
     while i < n {
@@ -732,7 +732,7 @@ without_key(obj: ptr, key: string) -> ptr {
 // Elements from..to (exclusive) of an array, as a fresh array. Indices are
 // already clamped by the caller.
 array_slice(arr: ptr, from: int, to: int) -> ptr {
-    out = json.create_array()
+    out = json.arr()
     i = from
     while i < to {
         json.array_add_raw(out, copy(json.array_get_raw(arr, i)))

@@ -24,14 +24,14 @@ main() {
     neg, e3 = json.object_get(doc, "neg")
     if json.get_long(neg) != -9007199254740993 { fail("get_long past-2^53 ${json.get_long(neg)}") }
 
-    s, se = json.stringify(doc)
+    s, se = json.encode(doc)
     if s != "{\"id\":3563282746,\"big\":9223372036854775807,\"neg\":-9007199254740993}" {
         fail("roundtrip ${s}")
     }
     json_free(doc)
 
     built = json.obj()
-    json.object_set(built, "count", json.from_int(5000000000))
+    json.set(built, "count", json.from_int(5000000000))
     cnode, ce = json.object_get(built, "count")
     if json.get_long(cnode) != 5000000000 { fail("constructed get_long ${json.get_long(cnode)}") }
     json_free(built)

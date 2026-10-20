@@ -462,11 +462,11 @@ fn test_container_keys() -> int {
     ka = cbor.arr()
     _ = cbor.push(ka, cbor.from_int(1))
     _ = cbor.push(ka, cbor.from_int(2))
-    _ = cbor.map_set(m, ka, cbor.str("array"))
+    _ = cbor.map_push(m, ka, cbor.str("array"))
     km = cbor.obj()
-    _ = cbor.map_set(km, cbor.from_int(1), cbor.from_int(2))
-    _ = cbor.map_set(km, cbor.from_int(3), cbor.from_int(4))
-    _ = cbor.map_set(m, km, cbor.str("map"))
+    _ = cbor.map_push(km, cbor.from_int(1), cbor.from_int(2))
+    _ = cbor.map_push(km, cbor.from_int(3), cbor.from_int(4))
+    _ = cbor.map_push(m, km, cbor.str("map"))
 
     f = 0
     pa = cbor.arr()
@@ -477,8 +477,8 @@ fn test_container_keys() -> int {
     if sa != "array" { println("  FAIL map_get by array key: '${sa}'") f = f + 1 }
 
     pm = cbor.obj()
-    _ = cbor.map_set(pm, cbor.from_int(3), cbor.from_int(4))
-    _ = cbor.map_set(pm, cbor.from_int(1), cbor.from_int(2))
+    _ = cbor.map_push(pm, cbor.from_int(3), cbor.from_int(4))
+    _ = cbor.map_push(pm, cbor.from_int(1), cbor.from_int(2))
     vm, _ = cbor.map_get(m, pm)
     sm, _ = cbor.get_string(vm)
     if sm != "map" { println("  FAIL map_get by map key in another order: '${sm}'") f = f + 1 }
@@ -490,7 +490,7 @@ fn test_container_keys() -> int {
     if vo != null { println("  FAIL map_get matched [2, 1] to [1, 2]") f = f + 1 }
 
     ps = cbor.obj()
-    _ = cbor.map_set(ps, cbor.from_int(1), cbor.from_int(2))
+    _ = cbor.map_push(ps, cbor.from_int(1), cbor.from_int(2))
     vs, _ = cbor.map_get(m, ps)
     if vs != null { println("  FAIL map_get matched {1: 2} to {1: 2, 3: 4}") f = f + 1 }
 
@@ -552,8 +552,8 @@ fn test_big_integers() -> int {
 
     // As map keys, a big integer matches only itself.
     m = cbor.obj()
-    _ = cbor.map_set(m, bu, cbor.str("max"))
-    _ = cbor.map_set(m, cbor.from_int(-1), cbor.str("minus one"))
+    _ = cbor.map_push(m, bu, cbor.str("max"))
+    _ = cbor.map_push(m, cbor.from_int(-1), cbor.str("minus one"))
     probe = cbor.from_uint(-1)
     pv, _ = cbor.map_get(m, probe)
     ps, _ = cbor.get_string(pv)

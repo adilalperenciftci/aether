@@ -186,7 +186,7 @@ _peek_at(lx: *Lexer, off: int) -> int {
 
 _fail(lx: *Lexer, msg: string, pos: int) -> int {
     if lx.err != null { json.free(lx.err) }
-    lx.err = json.create_string(msg)
+    lx.err = json.str(msg)
     lx.err_pos = pos
     return 0
 }
@@ -202,7 +202,7 @@ _push(lx: *Lexer, kind: int, text: @keep ptr, num: float, pos: int) {
 }
 
 _push_text(lx: *Lexer, kind: int, text: string, pos: int) {
-    _push(lx, kind, json.create_string(text), 0.0, pos)
+    _push(lx, kind, json.str(text), 0.0, pos)
 }
 
 // Consume `op` if the source has it here. Returns 1 on consume.
@@ -396,7 +396,7 @@ _read_hex4(lx: *Lexer) -> int {
 _flush_literal(sb: @keep ptr, parts: ptr) -> ptr {
     if strbuilder.length(sb) > 0 {
         s = strbuilder.finish(sb)
-        json.array_add_raw(parts, json.create_string(s))
+        json.array_add_raw(parts, json.str(s))
         return strbuilder.new(16)
     }
     return sb
@@ -406,7 +406,7 @@ _flush_literal(sb: @keep ptr, parts: ptr) -> ptr {
 _lex_string(lx: *Lexer) -> int {
     start = lx.pos
     lx.pos = lx.pos + 1
-    parts = json.create_array()
+    parts = json.arr()
     sb = strbuilder.new(16)
     closed = 0
     while lx.pos < lx.len {
@@ -468,8 +468,8 @@ _lex_string(lx: *Lexer) -> int {
                     return _fail(lx, "unterminated string interpolation", expr_start)
                 }
                 src = string.substring_n(_src(lx), lx.len, expr_start, lx.pos - 1)
-                holder = json.create_array()
-                json.array_add_raw(holder, json.create_string(src))
+                holder = json.arr()
+                json.array_add_raw(holder, json.str(src))
                 json.array_add_raw(parts, holder)
             } else {
                 strbuilder.free(sb)

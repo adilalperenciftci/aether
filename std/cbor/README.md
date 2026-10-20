@@ -49,7 +49,7 @@ Values are built with `from_int`, `num`, `str`, `arr`, `obj`, `boolean` and
 `null_value`, and every constructed value is freed with `cbor.free`: freeing
 a container frees what it holds.
 
-`set` (`object_set`) on a key the map already has replaces its value and
+`set` on a key the map already has replaces its value and
 frees the old one, as `json.set` does. `map_get` finds a key of any type by
 content, arrays and maps included (a map's pairs in any order).
 

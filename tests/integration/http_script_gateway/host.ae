@@ -24,13 +24,13 @@ handle_static(req: ptr, res: ptr, ud: ptr) {
 }
 
 main() {
-    n = aether_args_count()
+    n = os.args_count()
     if n < 3 {
         println("FAIL: usage: host <port> <so_path>")
         exit(1)
     }
-    port_str = aether_args_get(1)
-    so_path = aether_args_get(2)
+    port_str = os.args_get(1)
+    so_path = os.args_get(2)
     port, perr = string.to_int(port_str)
     if perr != "" {
         println("FAIL: invalid port '${port_str}': ${perr}")

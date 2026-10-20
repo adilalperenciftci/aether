@@ -47,7 +47,7 @@ fail(code: int, msg: string) {
 
 // -s: the texts as one array (a single text in the stream).
 slurped(texts: ptr) -> ptr {
-    arr = json.create_array()
+    arr = json.arr()
     n = list.size(texts)
     i = 0
     while i < n {
@@ -103,9 +103,9 @@ main() {
         }
         else if string.equals(a, "--arg") == 1 || string.equals(a, "--argjson") == 1 {
             if i + 2 >= argc { usage() }
-            list.add_raw(var_names, json.create_string(os.args_get(i + 1)))
+            list.add_raw(var_names, json.str(os.args_get(i + 1)))
             if string.equals(a, "--arg") == 1 {
-                list.add_raw(var_values, json.create_string(os.args_get(i + 2)))
+                list.add_raw(var_values, json.str(os.args_get(i + 2)))
             } else {
                 v, verr = json.parse(os.args_get(i + 2))
                 if v == null { fail(2, "example_jq: invalid JSON text passed to --argjson: ${verr}") }
@@ -152,7 +152,7 @@ main() {
     runs = 0
     while (null_input == 1 && runs == 0) || (null_input == 0 && list.size(queue) > 0) {
         runs = runs + 1
-        nothing = json.create_null()
+        nothing = json.null_value()
         input = nothing
         if null_input == 0 {
             input = list.get_raw(queue, 0)

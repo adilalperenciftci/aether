@@ -88,7 +88,7 @@ _parse_at(src: string, depth: int, interp: int) -> ptr! {
     p.err = null
     p.err_pos = 0
     p.no_comma = 0
-    p.src = json.create_string(src)
+    p.src = json.str(src)
     p.depth = depth
     p.interp = interp
     node = _parse_pipe(p)
@@ -185,7 +185,7 @@ _describe(p: *JqParser) -> string {
 _fail(p: *JqParser, msg: string) -> ptr {
     if p.failed == 0 {
         p.failed = 1
-        p.err = json.create_string(msg)
+        p.err = json.str(msg)
         p.err_pos = _pos(p)
     }
     return null
@@ -478,7 +478,7 @@ _parse_bracket_suffix(p: *JqParser, t: @keep ptr) -> ptr {
 
 _string_literal(p: *JqParser, s: string) -> ptr {
     n = _mk(p, ast.N_LITERAL, null, null)
-    (n as *Node).val = json.create_string(s)
+    (n as *Node).val = json.str(s)
     return n
 }
 
@@ -531,9 +531,9 @@ _parse_term_kind(p: *JqParser) -> ptr {
         name = _text(p)
         if string.equals(name, "__loc__") == 1 {
             n = _mk(p, ast.N_LOC, null, null)
-            loc = json.create_object()
-            json.object_set_raw(loc, "file", json.create_string("<stdin>"))
-            json.object_set_raw(loc, "line", json.create_int(_line_of(json.get_string_raw(p.src), _pos(p)) as long))
+            loc = json.obj()
+            json.object_set_raw(loc, "file", json.str("<stdin>"))
+            json.object_set_raw(loc, "line", json.from_int(_line_of(json.get_string_raw(p.src), _pos(p)) as long))
             (n as *Node).val = loc
             _advance(p)
             return n
@@ -628,9 +628,9 @@ _parse_term_kind(p: *JqParser) -> ptr {
             _advance(p)
             n = _mk(p, ast.N_LITERAL, null, null)
             if string.equals(name, "null") == 1 {
-                (n as *Node).val = json.create_null()
+                (n as *Node).val = json.null_value()
             } else {
-                (n as *Node).val = json.create_bool(string.equals(name, "true"))
+                (n as *Node).val = json.boolean(string.equals(name, "true"))
             }
             return n
         }
@@ -680,7 +680,7 @@ _parse_string_token(p: *JqParser, format: string) -> ptr {
         part = json.array_get_raw(parts, i)
         pn = _mk(p, ast.N_STR_PART, null, null)
         if json.type(part) == 3 {
-            (pn as *Node).val = json.create_string(json.get_string_raw(part))
+            (pn as *Node).val = json.str(json.get_string_raw(part))
         } else {
             src = json.get_string_raw(json.array_get_raw(part, 0))
             if p.interp >= MAX_INTERPOLATION_DEPTH {

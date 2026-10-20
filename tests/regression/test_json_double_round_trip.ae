@@ -20,7 +20,7 @@ extern exit(code: int)
 rewrite(text: string) -> string {
     v, perr = json.parse(text)
     if perr != "" { return "<parse-err>" }
-    out, serr = json.stringify(v)
+    out, serr = json.encode(v)
     json.free(v)
     if serr != "" { return "<stringify-err>" }
     return out
@@ -39,7 +39,7 @@ check(input: string, want: string) -> int {
 // `x` written and read back; 1 when it is not the same double.
 round_trip_differs(x: float) -> int {
     node = json.num(x)
-    text, serr = json.stringify(node)
+    text, serr = json.encode(node)
     json.free(node)
     if serr != "" { return 1 }
     back, perr = json.parse(text)
@@ -104,7 +104,7 @@ main() {
         j = j + 1
     }
     inf_node = json.num(big)
-    inf_text, _ = json.stringify(inf_node)
+    inf_text, _ = json.encode(inf_node)
     json.free(inf_node)
     if string.equals(inf_text, "null") == 1 {
         println("  PASS infinity -> null")
@@ -113,7 +113,7 @@ main() {
         fails = fails + 1
     }
     nan_node = json.num(big - big)
-    nan_text, _ = json.stringify(nan_node)
+    nan_text, _ = json.encode(nan_node)
     json.free(nan_node)
     if string.equals(nan_text, "null") == 1 {
         println("  PASS NaN -> null")

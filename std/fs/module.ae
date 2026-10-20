@@ -30,7 +30,7 @@ import std.strbuilder
 
 exports(
     file_open_raw, file_close, file_read_all_raw, file_write_raw,
-    file_exists, fs_path_exists, file_delete_raw, file_size_raw, file_mtime,
+    file_exists, file_delete_raw, file_size_raw, file_mtime,
     dir_exists, dir_create_raw, dir_delete_raw, dir_list_raw,
     fs_mkdir_p_raw,
     fs_symlink_raw, fs_hard_link_raw, fs_readlink_raw, fs_is_symlink, fs_is_socket, fs_unlink_raw,
@@ -43,8 +43,8 @@ exports(
     fs_try_stat, fs_get_stat_kind, fs_get_stat_size, fs_get_stat_mtime,
     fs_try_statvfs, fs_get_statvfs_total, fs_get_statvfs_free, fs_get_statvfs_avail,
     statvfs,
-    fs_try_mounts, fs_get_mount_count, fs_get_mount_source, fs_get_mount_point,
-    fs_get_mount_fstype, fs_get_mount_options, fs_release_mounts,
+    fs_try_mounts, fs_get_mount_count,
+    fs_release_mounts,
     mounts, mount_source, mount_point, mount_fstype, mount_options,
     fs_try_block_info, fs_get_block_size_bytes, fs_get_block_removable,
     fs_get_block_transport, block_info,
@@ -52,7 +52,7 @@ exports(
     fs_release_read_binary, fs_read_binary_tuple,
     dir_list_count, dir_list_get, dir_list_kind, dir_list_free,
     path_join, path_dirname, path_basename, path_extension, path_is_absolute,
-    path_clean, path_is_within_base, path_rel, path_separator,
+    path_separator,
     clean, is_within_base, rel, join_clean, first_element,
     fs_pread_raw, fs_pread_into_raw, fs_get_pread, fs_get_pread_length,
     fs_release_pread, fs_ftruncate_raw, fs_fsync_raw,

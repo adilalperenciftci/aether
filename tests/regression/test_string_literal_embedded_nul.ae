@@ -120,7 +120,7 @@ main() {
 
     // A whole json value.
     sv = json.str("a\0b")
-    out, _ = json.stringify(sv)
+    out, _ = json.encode(sv)
     f = f + check(out == "\"a\\u0000b\"", "json stringify of a\\0b: ${out}")
     json.free(sv)
 

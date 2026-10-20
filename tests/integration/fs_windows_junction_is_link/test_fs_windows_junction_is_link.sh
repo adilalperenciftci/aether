@@ -53,7 +53,7 @@ main() {
     t = fs.fs_readlink_raw("${base}/link")
     println("target-ends ${string.string_ends_with(t, "target")}")
     rerr = fs.remove_tree("${base}/tree")
-    println("remove_tree [${rerr}] tree-gone ${fs.fs_path_exists("${base}/tree") == 0} keep-kept ${fs.fs_path_exists("${base}/target/keep.txt")}")
+    println("remove_tree [${rerr}] tree-gone ${fs.exists("${base}/tree") == 0} keep-kept ${fs.exists("${base}/target/keep.txt")}")
 }
 AE
 
