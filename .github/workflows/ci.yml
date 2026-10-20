@@ -838,6 +838,69 @@ jobs:
       run: xvfb-run -a -s "-screen 0 1280x1024x24 -noreset" make contrib-check-lsan
 
   # ============================================================
+  # Ray queries (#2203) and mesh shaders (#2556) on a lavapipe new enough
+  # to have both, on x86_64 and arm64. The contrib leg above runs Ubuntu
+  # 22.04, whose Mesa 23.2 has no ray query, so that spec only ever skipped
+  # on Linux, and the SIGSEGV seen on Ubuntu 24.04 arm64 (#2562) had no leg
+  # that could show it. Both specs must pass here with no skip. A spec that
+  # dies from a signal is run again under gdb, so the log carries the
+  # backtrace and the library the fault is in.
+  # ============================================================
+  ci-vulkan-lavapipe-2404:
+    name: contrib/vulkan ray query + mesh shader (Ubuntu 24.04 ${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: x86_64
+          - runner: ubuntu-24.04-arm
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install build deps, lavapipe and gdb
+      run: |
+        sudo rm -f /etc/apt/sources.list.d/google-chrome.list; sudo apt-get update
+        sudo apt-get install -y gcc make libvulkan-dev mesa-vulkan-drivers vulkan-tools gdb
+
+    - name: Report the Vulkan implementation in use
+      run: |
+        VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.$(uname -m).json \
+          vulkaninfo --summary 2>/dev/null | head -30 || true
+
+    - name: Build the toolchain
+      run: make -j"$(nproc)" compiler ae stdlib
+
+    - name: Ray query and mesh shader specs on lavapipe
+      run: |
+        set +e
+        export VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.$(uname -m).json
+        # Builds both specs (and runs them once); each is judged below.
+        ONLY="vulkan/ray-query vulkan/mesh-shader" .github/scripts/contrib_check.sh
+        rc=0
+        for name in ray-query mesh-shader; do
+          dir="build/contrib-check/vulkan_${name}.rundir"
+          out="$(cd "$dir" && ../vulkan_${name} 2>&1)"
+          code=$?
+          echo "$out" | tail -6
+          passing="$(printf '%s' "$out" | sed -n 's/.*[^0-9]\([0-9][0-9]*\) passing.*/\1/p' | head -1)"
+          skipped="$(printf '%s' "$out" | sed -n 's/.*[^0-9]\([0-9][0-9]*\) skipped.*/\1/p' | head -1)"
+          failing="$(printf '%s' "$out" | sed -n 's/.*[^0-9]\([0-9][0-9]*\) failing.*/\1/p' | head -1)"
+          if [ "$code" -ne 0 ] || [ -z "$passing" ] || [ "$passing" -eq 0 ] || [ "${failing:-0}" -gt 0 ] || [ -n "$skipped" ]; then
+            echo "contrib/vulkan ${name} did not pass on lavapipe: exit ${code}, passing=${passing:-none} failing=${failing:-0} skipped=${skipped:-0}"
+            echo "$out"
+            if [ "$code" -ge 128 ]; then
+              (cd "$dir" && gdb -q -batch -ex run -ex bt -ex 'info sharedlibrary' --args ../vulkan_${name}) 2>&1 | tail -120
+            fi
+            rc=1
+          fi
+        done
+        exit $rc
+
+  # ============================================================
   # The GPU tier on macOS: contrib.metal on the runner's Metal device, and
   # contrib.vulkan through MoltenVK, whose NSView surface is the Apple
   # presentation path. Only these entries run here; the rest of the contrib
@@ -1147,7 +1210,7 @@ jobs:
       run: |
         # lavapipe was registered in the step above; the same loader again.
         export AETHER_VULKAN_LOADER="$(cygpath -w /mingw64/bin/vulkan-1.dll)"
-        for name in offscreen formats compute raw sampling draws textures present; do
+        for name in offscreen formats compute raw sampling draws textures present ray-query mesh-shader; do
           out="$(cd build/contrib-check/vulkan_${name}.rundir && ../vulkan_${name}.exe 2>&1 || true)"
           echo "$out" | tail -4
           passing="$(printf '%s' "$out" | sed -n 's/.*[^0-9]\([0-9][0-9]*\) passing.*/\1/p' | head -1)"
