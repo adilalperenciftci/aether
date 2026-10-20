@@ -78,11 +78,95 @@ if [ "$(uname -s)" != "Darwin" ]; then
     echo "  PASS: --emit=csrc (iOS + Catalyst), staticlib guards (rest skipped)"
     exit 0
 fi
-if ! xcrun --sdk iphoneos --show-sdk-path >/dev/null 2>&1; then
+
+# #3052: every step below drives xcrun, and one hung once on CI (the
+# staticlib build, killed by the sweep's per-test timeout with no word on
+# which child stalled). Each runs bounded: past STEP_LIMIT seconds, well
+# under the sweep's 420 s, the processes still running under it are
+# printed (ps, walking its tree) and killed, and the test fails naming
+# them.
+STEP_LIMIT="${AE_IOS_STEP_TIMEOUT:-180}"
+
+# proc_tree <pid>: <pid> and every process descended from it.
+proc_tree() {
+    all=$(ps -A -o pid= -o ppid=)
+    list="$1"
+    frontier="$1"
+    while [ -n "$frontier" ]; do
+        next=""
+        for p in $frontier; do
+            next="$next $(printf '%s\n' "$all" | awk -v p="$p" '$2 == p { print $1 }')"
+        done
+        next=$(echo $next)
+        [ -n "$next" ] && list="$list $next"
+        frontier="$next"
+    done
+    echo $list
+}
+
+# running <pid>: the process is there and has not exited. A shell that has
+# not reaped its background child yet leaves it a zombie, which `kill -0`
+# would still find.
+running() {
+    st=$(ps -o stat= -p "$1" 2>/dev/null) || return 1
+    st=$(echo $st)
+    case "$st" in
+        ""|Z*) return 1 ;;
+        *) return 0 ;;
+    esac
+}
+
+# bounded <label> <command...>: runs the command with its output in
+# $TMP/log and returns its status, or, past STEP_LIMIT seconds, reports
+# what is still running under it, kills it and fails.
+bounded() {
+    label="$1"
+    shift
+    "$@" >"$TMP/log" 2>&1 &
+    bpid=$!
+    waited=0
+    while running "$bpid"; do
+        if [ "$waited" -ge "$STEP_LIMIT" ]; then
+            tree=$(proc_tree "$bpid")
+            echo "  TIMEOUT: $label still running after ${STEP_LIMIT}s; its processes:"
+            echo "      PID  PPID     ELAPSED COMMAND"
+            stuck=""
+            for p in $tree; do
+                line=$(ps -o pid=,ppid=,etime=,command= -p "$p" 2>/dev/null) || continue
+                echo "    $line"
+                [ "$p" = "$bpid" ] || stuck="$stuck $(ps -o comm= -p "$p" 2>/dev/null)"
+            done
+            for p in $tree; do kill -TERM "$p" 2>/dev/null || true; done
+            sleep 2
+            for p in $tree; do kill -KILL "$p" 2>/dev/null || true; done
+            wait "$bpid" 2>/dev/null || true
+            echo "  output so far:"
+            sed 's/^/    /' "$TMP/log"
+            fail "$label hung: killed after ${STEP_LIMIT}s; still running under it:${stuck:- nothing but the step itself}"
+        fi
+        sleep 1
+        waited=$((waited + 1))
+    done
+    rc=0
+    wait "$bpid" || rc=$?
+    return $rc
+}
+
+if ! bounded "xcrun --sdk iphoneos --show-sdk-path" xcrun --sdk iphoneos --show-sdk-path; then
     echo "  [skip] iOS cross checks: no iPhoneOS SDK (Xcode not installed)"
     echo "  PASS: --emit=csrc under an iOS target (rest skipped)"
     exit 0
 fi
+
+# Prime xcrun's lookups once, one at a time, before the builds below run
+# their compiles in parallel (#3052): each SDK the triples use (device,
+# simulator, and the macOS one Catalyst builds against) and the clang and
+# ar ae calls through `xcrun --sdk <sdk>`.
+for SDK in iphoneos iphonesimulator macosx; do
+    bounded "priming xcrun for the $SDK SDK" sh -c \
+        "xcrun --sdk $SDK --show-sdk-path && xcrun --sdk $SDK --find clang && xcrun --sdk $SDK --find ar" \
+        || { cat "$TMP/log"; fail "xcrun could not resolve the $SDK SDK's toolchain"; }
+done
 
 macho_platform() { vtool -show-build "$1" 2>/dev/null | awk '/platform/ {print $2; exit}'; }
 macho_minos()    { vtool -show-build "$1" 2>/dev/null | awk '/minos/ {print $2; exit}'; }
@@ -90,10 +174,11 @@ macho_minos()    { vtool -show-build "$1" 2>/dev/null | awk '/minos/ {print $2; 
 # --- 1. target matrix, on the cheap --emit=obj path ---
 build_obj() { # <target> <out> [env-assignment]
     if [ -n "$3" ]; then
-        env "$3" "$AE" build --target="$1" --emit=obj "$SRC" -o "$2" >"$TMP/log" 2>&1 \
+        bounded "--target=$1 --emit=obj ($3)" \
+            env "$3" "$AE" build --target="$1" --emit=obj "$SRC" -o "$2" \
             || { cat "$TMP/log"; fail "--target=$1 --emit=obj ($3) failed"; }
     else
-        "$AE" build --target="$1" --emit=obj "$SRC" -o "$2" >"$TMP/log" 2>&1 \
+        bounded "--target=$1 --emit=obj" "$AE" build --target="$1" --emit=obj "$SRC" -o "$2" \
             || { cat "$TMP/log"; fail "--target=$1 --emit=obj failed"; }
     fi
 }
@@ -121,7 +206,8 @@ file "$TMP/sim64.o" | grep -q 'Mach-O 64-bit object x86_64' \
     || fail "AETHER_IOS_MIN=17.0 gave minos '$(macho_minos "$TMP/min.o")'"
 
 # --- 2. a real executable link (full runtime compile) ---
-"$AE" build --target=aarch64-ios "$EXE_SRC" -o "$TMP/dev" >"$TMP/log" 2>&1 \
+bounded "--target=aarch64-ios executable build" \
+    "$AE" build --target=aarch64-ios "$EXE_SRC" -o "$TMP/dev" \
     || { cat "$TMP/log"; fail "--target=aarch64-ios executable build failed"; }
 file "$TMP/dev" | grep -q 'Mach-O 64-bit executable arm64' \
     || fail "device build is not a Mach-O arm64 executable: $(file "$TMP/dev")"
@@ -129,7 +215,8 @@ file "$TMP/dev" | grep -q 'Mach-O 64-bit executable arm64' \
     || fail "device exe platform is '$(macho_platform "$TMP/dev")', expected IOS"
 
 # --- 3. --emit=lib is SUPPORTED on iOS (unlike the zig cross targets) ---
-"$AE" build --target=aarch64-ios --emit=lib "$SRC" -o "$TMP/libmylib.dylib" >"$TMP/log" 2>&1 \
+bounded "--target=aarch64-ios --emit=lib" \
+    "$AE" build --target=aarch64-ios --emit=lib "$SRC" -o "$TMP/libmylib.dylib" \
     || { cat "$TMP/log"; fail "--target=aarch64-ios --emit=lib was rejected"; }
 file "$TMP/libmylib.dylib" | grep -q 'Mach-O 64-bit dynamically linked shared library arm64' \
     || fail "--emit=lib did not produce an arm64 dylib: $(file "$TMP/libmylib.dylib")"
@@ -174,7 +261,8 @@ build_obj aarch64-ios-macabi "$TMP/catmin.o" AETHER_IOS_MIN=16.0
 # ship inside an .app; the app must link Aether statically. One archive holds
 # the program's own objects AND the runtime/stdlib, so Xcode needs exactly one
 # file in "Link Binary With Libraries".
-"$AE" build --target=aarch64-ios --emit=staticlib "$SRC" -o "$TMP/libmylib.a" >"$TMP/log" 2>&1 \
+bounded "--target=aarch64-ios --emit=staticlib" \
+    "$AE" build --target=aarch64-ios --emit=staticlib "$SRC" -o "$TMP/libmylib.a" \
     || { cat "$TMP/log"; fail "--target=aarch64-ios --emit=staticlib was rejected" ; }
 file "$TMP/libmylib.a" | grep -qi 'archive' \
     || fail "--emit=staticlib did not produce an archive: $(file "$TMP/libmylib.a")"
