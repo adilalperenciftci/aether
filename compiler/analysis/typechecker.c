@@ -4708,10 +4708,14 @@ static Type* infer_binary_type_by_kind(ASTNode* left, ASTNode* right, AeTokenTyp
             // unconditional `→ int` rule silently truncated 64-bit
             // pointers when stored in inferred-type locals.
             if (operator == TOKEN_PLUS || operator == TOKEN_MINUS) {
-                if ((left_type->kind == TYPE_PTR && (right_type->kind == TYPE_INT || right_type->kind == TYPE_INT64)) ||
-                    ((left_type->kind == TYPE_INT || left_type->kind == TYPE_INT64) && right_type->kind == TYPE_PTR)) {
+                /* #3045: by an integer of any width, `int` and `long`
+                 * alike, in both directions (`n - p` is no pointer: the
+                 * checker refuses it, typecheck_binary_expression). */
+                int off_r = is_integer_scalar(right_type->kind) || right_type->kind == TYPE_BYTE;
+                int off_l = is_integer_scalar(left_type->kind) || left_type->kind == TYPE_BYTE;
+                if (left_type->kind == TYPE_PTR && off_r) return create_type(TYPE_PTR);
+                if (off_l && right_type->kind == TYPE_PTR && operator == TOKEN_PLUS)
                     return create_type(TYPE_PTR);
-                }
                 if (left_type->kind == TYPE_PTR && right_type->kind == TYPE_PTR &&
                     operator == TOKEN_MINUS) {
                     return create_type(TYPE_INT64);
@@ -15234,6 +15238,18 @@ int typecheck_binary_expression(ASTNode* expr, SymbolTable* table) {
     Type* right_type = infer_type(right, table);
 
     AeTokenType operator = get_token_type_from_string(expr->value);
+
+    /* #3045: a number less a pointer is no value: C refuses `n - p`
+     * ("invalid operands to binary -"), which it reached. */
+    if (operator == TOKEN_MINUS && left_type && right_type && right_type->kind == TYPE_PTR &&
+        (is_integer_scalar(left_type->kind) || left_type->kind == TYPE_BYTE)) {
+        type_error_hint("a pointer cannot be subtracted from a number",
+                        "subtract the number from the pointer, `p - n`", expr->line,
+                        expr->column);
+        free_type(left_type);
+        free_type(right_type);
+        return 0;
+    }
 
     /* #1286: a slice meets a raw pointer. `s == null`, `s != p`, `s + n`
      * and `s - n` all act on the slice's pointer (`s + n` scales by the

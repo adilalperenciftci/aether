@@ -1,0 +1,42 @@
+// #3045: a pointer moves by an integer of any width, `int` and `long`
+// alike, in both directions. `p - n` with a `long` n was refused (E0200
+// "Type mismatch in variable initialization"): the early inference pass
+// promoted the long first and called the result a long, which the pointer
+// the checker gives it did not fit. So were `p + n` and `n + p` with a long
+// bound to a local. A uint32 and a byte move it too, and `-=` / `+=` on a
+// pointer local. (`n - p` is no value: tests/integration/ptr_offset_arithmetic
+// checks it is refused.)
+
+import std.mem
+
+extern exit(code: int)
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+main() {
+    p = mem.long_to_ptr(4096)
+    long n = 3
+    s = p - n
+    t = p + n
+    u = n + p
+    uint32 w = 5
+    v = p - w
+    byte b = 2
+    x = p + b
+    q = p
+    q -= n
+    q += w
+    check(mem.ptr_to_long(s) == 4093, "p - a long")
+    check(mem.ptr_to_long(t) == 4099, "p + a long")
+    check(mem.ptr_to_long(u) == 4099, "a long + p")
+    check(mem.ptr_to_long(v) == 4091, "p - a uint32")
+    check(mem.ptr_to_long(x) == 4098, "p + a byte")
+    check(mem.ptr_to_long(q) == 4098, "-= a long, += a uint32")
+    check(s - p == -3, "a pointer difference is a number")
+    println("ok")
+}
