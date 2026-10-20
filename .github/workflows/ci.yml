@@ -881,22 +881,32 @@ jobs:
         echo "VK_ICD_FILENAMES=$icd" >> "$GITHUB_ENV"
         VK_DRIVER_FILES="$icd" VK_ICD_FILENAMES="$icd" vulkaninfo --summary 2>&1 | head -40
 
-    # The spec's acceleration-structure builds in plain C (no Aether code),
-    # run first: a crash here is the driver's, and says so before the spec
-    # runs (#2562). It does not stop the job, so the spec's own result and
-    # capture follow; the job still fails when the spec does.
+    # Can this driver build an acceleration structure at all? The spec's
+    # builds in plain C, with no Aether code, decide it (#2562). lavapipe
+    # dies building one when llvmpipe runs 4 lanes wide (128-bit vectors:
+    # every aarch64 host, or LP_NATIVE_VECTOR_WIDTH=128 on x86_64), from
+    # plain C as from the spec, through Mesa 26.1.8. Where the plain-C
+    # builds crash, the ray query spec cannot be judged on this driver and
+    # is not run, saying why; where they pass, it must pass. A plain-C
+    # failure that is not a crash is a broken setup and fails the job.
     - name: Acceleration-structure builds in plain C on lavapipe
       run: |
         set +e
         cc -O1 -g .github/scripts/lavapipe_as_build.c -o lavapipe_as_build -lvulkan || exit 1
         ./lavapipe_as_build
         code=$?
-        if [ "$code" -ge 128 ]; then
-          echo "the plain-C builds died with signal $((code - 128)) on this driver; gdb:"
+        echo "plain-C builds: exit $code"
+        if [ "$code" -eq 0 ]; then
+          echo "LAVAPIPE_AS_BUILD=ok" >> "$GITHUB_ENV"
+        elif [ "$code" -ge 128 ]; then
+          echo "the plain-C builds died with signal $((code - 128)): this lavapipe cannot build an acceleration structure (aether#2562); gdb:"
           gdb -q -batch -ex run -ex bt -ex 'x/12i $pc-24' -ex 'info registers' \
               -ex 'thread apply all bt 12' --args ./lavapipe_as_build 2>&1
+          echo "LAVAPIPE_AS_BUILD=crash" >> "$GITHUB_ENV"
+        else
+          echo "the plain-C builds failed without crashing: the Vulkan setup on this runner is broken"
+          exit 1
         fi
-        echo "plain-C builds: exit $code"
 
     - name: Build the toolchain
       run: make -j"$(nproc)" compiler ae stdlib
@@ -904,10 +914,16 @@ jobs:
     - name: Ray query and mesh shader specs on lavapipe
       run: |
         set +e
-        # Builds both specs (and runs them once); each is judged below.
-        ONLY="vulkan/ray-query vulkan/mesh-shader" .github/scripts/contrib_check.sh
+        # Builds the specs (and runs them once); each is judged below.
+        only="vulkan/ray-query vulkan/mesh-shader"
+        [ "$LAVAPIPE_AS_BUILD" = crash ] && only="vulkan/mesh-shader"
+        ONLY="$only" .github/scripts/contrib_check.sh
         rc=0
         for name in ray-query mesh-shader; do
+          if [ "$name" = ray-query ] && [ "$LAVAPIPE_AS_BUILD" = crash ]; then
+            echo "contrib/vulkan ray-query not judged here: this lavapipe crashes building an acceleration structure from plain C too (aether#2562); it runs on the x86_64 leg, and here once the driver is fixed"
+            continue
+          fi
           dir="build/contrib-check/vulkan_${name}.rundir"
           out="$(cd "$dir" && ../vulkan_${name} 2>&1)"
           code=$?

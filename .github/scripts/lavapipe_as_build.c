@@ -2,8 +2,12 @@
  * in plain C, with no Aether code: a one-triangle BLAS, then a TLAS over one
  * instance of it, each built on the device in host-visible memory and
  * waited on. Printed step by step, so the last line says which build died.
- * The Ubuntu 24.04 lavapipe job runs it ahead of the spec: when this crashes
- * too, the driver is at fault, not the bindings (aether#2562).
+ * The Ubuntu 24.04 lavapipe job runs it ahead of the spec, to decide whether
+ * the driver can build an acceleration structure at all (aether#2562):
+ * lavapipe dies in the BLAS build when llvmpipe runs 128-bit vectors (every
+ * aarch64 host; LP_NATIVE_VECTOR_WIDTH=128 reproduces it on x86_64), a store
+ * far outside the scratch buffer in its JIT-compiled build shader, through
+ * Mesa 26.1.8 at least.
  *
  *   cc -O1 -g lavapipe_as_build.c -o lavapipe_as_build -lvulkan
  */
