@@ -9,7 +9,9 @@
  *     cannot is unreachable, and W1002 says so).
  *   - An `if` can when it has no `else`, or when either branch can. A
  *     condition the compile-time evaluator decides (`true`, `1 == 1`, a
- *     `const`) leaves only the branch it selects, as the optimizer does.
+ *     `const`, never a module `var`) leaves only the branch it selects, as
+ *     the optimizer does; for W1002 an `if` takes either branch whatever
+ *     its condition (stmt_reaches_next, #3026).
  *   - A `match` can when one of its arms can, or when it may run no arm: it
  *     has no `_` arm and does not cover its type. A match over an enum or a
  *     sum covers it (the checker rejects one that misses a case), as do
@@ -58,6 +60,7 @@ typedef struct {
     BreakTarget targets[MR_MAX_TARGETS];
     int depth;              /* targets past MR_MAX_TARGETS are counted, not kept */
     ASTNode* program;       /* resolves a `const` in a loop condition */
+    int if_runs_either;     /* W1002: an `if` may take either branch (#3026) */
 } Flow;
 
 static int completes(Flow* f, ASTNode* n);
@@ -168,6 +171,7 @@ static int always_true(Flow* f, ASTNode* cond) {
 /* The branch of an `if` that can run: 1 for only the `then`, 2 for only the
  * `else` (or nothing, with no `else`), 3 for either. */
 static int if_branches(Flow* f, ASTNode* ifs) {
+    if (f->if_runs_either) return 3;
     ASTNode* cond = ifs->child_count > 0 ? ifs->children[0] : NULL;
     ContractTri t = cond ? decide(f, cond) : CONTRACT_UNKNOWN;
     return t == CONTRACT_TRUE ? 1 : t == CONTRACT_FALSE ? 2 : 3;
@@ -327,6 +331,14 @@ int stmt_can_complete(ASTNode* program, ASTNode* n) {
     Flow f;
     memset(&f, 0, sizeof f);
     f.program = program;
+    return completes(&f, n);
+}
+
+int stmt_reaches_next(ASTNode* program, ASTNode* n) {
+    Flow f;
+    memset(&f, 0, sizeof f);
+    f.program = program;
+    f.if_runs_either = 1;
     return completes(&f, n);
 }
 

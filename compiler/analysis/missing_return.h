@@ -28,6 +28,14 @@ int check_missing_returns(ASTNode* program);
  * `const` in a condition; with NULL only literal conditions are decided. */
 int stmt_can_complete(ASTNode* program, ASTNode* n);
 
+/* W1002's question, whether the statement after `n` can run: the rules of
+ * stmt_can_complete, except that an `if` may take either branch whatever
+ * its condition (#3026). A `const` that disables code on purpose (`if
+ * !DEBUG { return }`) does not make what follows unreachable, as Java's
+ * rule for `if` has it; a loop still folds its condition, since `while
+ * true` with no `break` never ends. */
+int stmt_reaches_next(ASTNode* program, ASTNode* n);
+
 /* A call that never returns: `exit(...)` (and `os.exit(...)`, the same
  * extern). The one list of them. */
 int ast_call_never_returns(const ASTNode* n);

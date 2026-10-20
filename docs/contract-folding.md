@@ -86,7 +86,10 @@ past the `--emit=lib` capability gate, so const evaluation is whitelist-only
 not even the pure-conversion whitelist. Predicates fold over literals,
 constants, enum members, arithmetic, comparisons and logical ops; anything
 else is UNKNOWN and stays a runtime check. (This also matches what
-`try_fold_predicate` already does.)
+`try_fold_predicate` already does.) A module `var` is not a constant: it
+shares the `const` node (#701), and folding it at its initializer dropped
+a `requires` on it from the C, or refused a correct program when it
+started false (#3026); it is UNKNOWN like any other variable.
 
 **(b) `when` arms are pruned before typecheck** (`optimizer.c:318-319`:
 *"pruned here, BEFORE typecheck runs"*). This is load-bearing for Tier 2: a

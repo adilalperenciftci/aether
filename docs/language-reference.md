@@ -4280,6 +4280,13 @@ check(x: int) -> {
 }
 ```
 
+An `if` whose condition is a constant does not make the code after it
+unreachable: a flag that disables code on purpose (`const DEBUG = false`,
+then `if !DEBUG { return }`) is not reported. A loop on a constant still
+counts, since `while true` with no `break` never ends. A module `var` is
+never a constant, whatever it starts as: the compiler does not fold it in a
+condition, a `requires` or a `case` (#3026).
+
 ### Constant-Expression Overflow [W1003]
 
 An `int` expression whose operands are all constants is folded at

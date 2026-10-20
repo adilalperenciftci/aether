@@ -5074,10 +5074,11 @@ static const char** collect_global_var_names(ASTNode* program, int* count) {
 // --- Unreachable code analysis ---
 
 /* Whether control never goes on past `node`: the missing-return analysis'
- * answer (stmt_can_complete, #3017), so W1002 agrees with every other check
- * that asks whether a statement leaves. */
+ * rules (#3017), with an `if` free to take either branch, so a constant
+ * that disables code on purpose is not reported (stmt_reaches_next,
+ * #3026). */
 static int is_terminating(ASTNode* node) {
-    return node && !stmt_can_complete(g_typecheck_program, node);
+    return node && !stmt_reaches_next(g_typecheck_program, node);
 }
 
 /* What W1002 says the unreachable code comes after. */
