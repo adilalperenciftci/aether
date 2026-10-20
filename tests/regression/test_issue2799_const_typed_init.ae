@@ -1,0 +1,42 @@
+// #2799 review: a file-scope constant or module `var` whose initializer
+// names another constant has that constant's initializer written in its
+// place (a `static const` object is no constant expression in C). Written
+// bare, it lost the constant's declared type: `const F: float = 1` went in
+// as the int 1, so `F / 2` was 0 and `H / 2` (H a float 3) was 1, and a
+// `long` constant shifted by 40 was an int shifted out to 0. It goes in as
+// a value of the constant's own type, on the GCC path and off it.
+
+extern exit(code: int)
+
+const F: float = 1
+const G = F / 2
+const H: float = 3
+var v = H / 2
+const N: long = 3
+const Q = N << 40
+const U: uint32 = 3000000000
+const W = U * 2
+const K: byte = 200
+const L = K * 2
+const D = 5ms
+const E = D * 2
+const S = "s"
+const T = S
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+main() {
+    check(G == 0.5, "a float const in a const: ${G}")
+    check(v == 1.5, "a float const in a module var: ${v}")
+    check(Q == 3298534883328, "a long const shifted: ${Q}")
+    check(W == 1705032704, "a uint32 const wraps as a uint32: ${W}")
+    check(L == 400, "a byte const promoted: ${L}")
+    check(E.ms == 10, "a duration const: ${E.ms}")
+    check(T == "s", "a string const")
+    println("ok")
+}

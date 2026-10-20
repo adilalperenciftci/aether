@@ -8020,14 +8020,20 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
              * names is written as that constant's own initializer. C's
              * `static const` initializer must be a constant expression, and
              * another `static const` object is not one: GCC folded it, ISO C
-             * and cl.exe (C2099) do not. */
+             * and cl.exe (C2099) do not. The initializer goes in as a value
+             * of the constant's own C type, as the object would have read:
+             * `const F: float = 1` is `((double)(1))`, so `F / 2` is 0.5,
+             * and a `long` constant shifts as a long (#2799 review). */
             if (gen->in_const_init && gen->in_const_init < 64) {
                 ASTNode* cd = file_scope_value_const(gen->program, expr->value);
                 if (cd) {
+                    Type* ct = cd->node_type;
+                    int typed = ct && ct->kind != TYPE_UNKNOWN && ct->kind != TYPE_VOID;
                     gen->in_const_init++;
-                    fprintf(gen->output, "(");
+                    if (typed) fprintf(gen->output, "((%s)(", get_c_type(ct));
+                    else fprintf(gen->output, "(");
                     generate_expression(gen, cd->children[0]);
-                    fprintf(gen->output, ")");
+                    fprintf(gen->output, typed ? "))" : ")");
                     gen->in_const_init--;
                     break;
                 }

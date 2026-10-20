@@ -308,11 +308,14 @@ generate closure_str
 #   closure_array_envs
 #                     an `fn[N]` local's closures released at its scope exit
 #                     (#2868)
+#   const_typed_init  a constant named in another constant's or a module
+#                     var's initializer, written there as a value of its own
+#                     type: a float, a long shifted, a uint32 (#2799)
 PROGS="2765_string_slots 2765_call_temps 2765_operand_order 2765_optionals 2765_struct_values
     2765_statement_values 2765_helper_names 2813_left_to_right 2798_statement_constructs_anywhere
     2798_statement_constructs_in_parts 2821_actor_state_initializer_type
     2798_operands_ahead 2813_call_effects 2798_handover_at_call 2863_fallible_error_slots
-    2866_builder_call_statements 2868_closure_array_envs"
+    2866_builder_call_statements 2868_closure_array_envs 2799_const_typed_init"
 for issue_prog in $PROGS; do
     prog="${issue_prog#*_}"
     cp "tests/regression/test_issue$issue_prog.ae" "$TMP/$prog.ae"
