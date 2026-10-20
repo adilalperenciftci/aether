@@ -30,6 +30,7 @@
 
 import std.string
 import std.list
+import std.mem
 
 extern exit(code: int)
 
@@ -58,9 +59,9 @@ main() {
         println("FAIL 1: list.size = ${n}, expected 3")
         exit(1)
     }
-    item0, _ = list.get(out, 0)
-    item1, _ = list.get(out, 1)
-    item2, _ = list.get(out, 2)
+    item0, _ = list.get_string(out, 0)
+    item1, _ = list.get_string(out, 1)
+    item2, _ = list.get_string(out, 2)
     if string.length(item0) != 5 || string.char_at(item0, 0) != 97 { // 'a'
         println("FAIL 1: item[0] = '${item0}', expected 'alpha'")
         exit(1)
@@ -105,10 +106,10 @@ main() {
     list.add(expected_lens, 4) // "last"
     j = 0
     while j < 5 {
-        got, _ = list.get(out2, j)
+        got, _ = list.get_string(out2, j)
         exp_len, _ = list.get(expected_lens, j)
         if string.length(got) != exp_len {
-            println("FAIL 2: item[${j}] length = ${string.length(got)}, expected ${exp_len}")
+            println("FAIL 2: item[${j}] length = ${string.length(got)}, expected ${mem.ptr_to_long(exp_len)}")
             exit(1)
         }
         j = j + 1

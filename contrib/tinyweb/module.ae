@@ -177,7 +177,7 @@ ctx_set_attribute(ctx: ptr, key: string, value: string) {
 // Get an attribute from the request context
 ctx_get_attribute(ctx: ptr, key: string) {
     if map_has(ctx, key) == 1 {
-        v, _ = map.get(ctx, key)
+        v, _ = map.get_string(ctx, key)
         return v
     }
     return ""
@@ -285,7 +285,7 @@ static_entry(base_path: string, directory: string) {
 // When inside a path() block, _ctx is the path-group map
 end_point(_ctx: ptr, method: int, pattern: string, handler: fn) {
     routes, _ = map.get(_ctx, "routes")
-    prefix, _ = map.get(_ctx, "prefix")
+    prefix, _ = map.get_string(_ctx, "prefix")
     full_path = "${prefix}${pattern}"
     list.add(routes, route_entry(method, full_path, handler))
 }
@@ -293,7 +293,7 @@ end_point(_ctx: ptr, method: int, pattern: string, handler: fn) {
 // filter(method, pattern) |req, res, ctx| { ... }
 filter(_ctx: ptr, method: int, pattern: string, handler: fn) {
     filters, _ = map.get(_ctx, "filters")
-    prefix, _ = map.get(_ctx, "prefix")
+    prefix, _ = map.get_string(_ctx, "prefix")
     full_path = "${prefix}${pattern}"
     list.add(filters, filter_entry(method, full_path, handler))
 }
@@ -303,7 +303,7 @@ filter_all(_ctx: ptr, pattern: string, handler: fn) {
     // Inlined: calling filter() directly would trip the DSL _ctx auto-injector
     // (it treats filter as a 3-arg builder, so filter(_ctx, ...) looks like 4 args).
     filters, _ = map.get(_ctx, "filters")
-    prefix, _ = map.get(_ctx, "prefix")
+    prefix, _ = map.get_string(_ctx, "prefix")
     full_path = "${prefix}${pattern}"
     list.add(filters, filter_entry(ALL, full_path, handler))
 }
@@ -311,7 +311,7 @@ filter_all(_ctx: ptr, pattern: string, handler: fn) {
 // web_socket(path) |message, sender, ctx| { ... }
 web_socket(_ctx: ptr, ws_path: string, handler: fn) {
     ws_handlers, _ = map.get(_ctx, "ws_handlers")
-    prefix, _ = map.get(_ctx, "prefix")
+    prefix, _ = map.get_string(_ctx, "prefix")
     full_path = "${prefix}${ws_path}"
     list.add(ws_handlers, ws_entry(full_path, handler))
 }
@@ -319,7 +319,7 @@ web_socket(_ctx: ptr, ws_path: string, handler: fn) {
 // serve_static("/static", "/path/to/files")
 serve_static(_ctx: ptr, base_path: string, directory: string) {
     statics, _ = map.get(_ctx, "statics")
-    prefix, _ = map.get(_ctx, "prefix")
+    prefix, _ = map.get_string(_ctx, "prefix")
     full_base = "${prefix}${base_path}"
     list.add(statics, static_entry(full_base, directory))
 }
@@ -327,7 +327,7 @@ serve_static(_ctx: ptr, base_path: string, directory: string) {
 // path(base_path) { ... nested end_points / filters / web_sockets ... }
 // Creates a sub-context with the prefix appended
 path(_ctx: ptr, base_path: string) {
-    prefix, _ = map.get(_ctx, "prefix")
+    prefix, _ = map.get_string(_ctx, "prefix")
     sub = map_new()
     map_put(sub, "prefix", "${prefix}${base_path}")
     p_routes, _ = map.get(_ctx, "routes")
@@ -767,7 +767,7 @@ sse_entry(path_pattern: string, handler: fn) {
 // The handler receives an SSE stream object and uses sse_send() to push events.
 sse_endpoint(_ctx: ptr, sse_path: string, handler: fn) {
     sse_handlers, _ = map.get(_ctx, "sse_handlers")
-    prefix, _ = map.get(_ctx, "prefix")
+    prefix, _ = map.get_string(_ctx, "prefix")
     full_path = "${prefix}${sse_path}"
     list.add(sse_handlers, sse_entry(full_path, handler))
 }
@@ -956,8 +956,9 @@ fn filter_applies(fmethod: int, fpat: string, rmethod: int, rpath: string) -> in
 // ---------------------------------------------------------------------------
 
 tw_start(srv: ptr) -> string {
-    port, _ = map.get(srv, "port")
-    host, _ = map.get(srv, "host")
+    port_v, _ = map.get(srv, "port")
+    port = mem.ptr_to_long(port_v) as int
+    host, _ = map.get_string(srv, "host")
     raw = http.server_create(port)
     map_put(srv, "raw_server", raw)
     // server_bind returns "" on success, an error message otherwise.
@@ -970,8 +971,8 @@ tw_start(srv: ptr) -> string {
     // cert fails start-up rather than after the server looks ready -- and
     // deliberately NOT silently skipped, because a server that downgrades to
     // plaintext on a port the caller believes is HTTPS is the worse outcome.
-    tls_cert, _ = map.get(srv, "tls_cert")
-    tls_key, _ = map.get(srv, "tls_key")
+    tls_cert, _ = map.get_string(srv, "tls_cert")
+    tls_key, _ = map.get_string(srv, "tls_key")
     if string.length(tls_cert) > 0 || string.length(tls_key) > 0 {
         if string.length(tls_cert) == 0 || string.length(tls_key) == 0 {
             return "with_tls needs BOTH a cert and a key"
@@ -1021,7 +1022,7 @@ tw_start(srv: ptr) -> string {
     n_static = list.size(statics)
     for (i = 0; i < n_static; i++) {
         entry, _ = list.get(statics, i)
-        base, _ = map.get(entry, "base_path")
+        base, _ = map.get_string(entry, "base_path")
         dir, _ = map.get(entry, "directory")
         // Register a wildcard GET that delegates to the C static file handler
         // The C function handles: MIME detection, directory traversal protection,
@@ -1033,7 +1034,8 @@ tw_start(srv: ptr) -> string {
     // the server's host like the HTTP port does: tcp.listen took every
     // interface whatever host was configured (#2639). std.tcp's listen_on
     // takes an IPv4 address, "127.0.0.1" or "0.0.0.0", not a name.
-    ws_port, _ = map.get(srv, "ws_port")
+    ws_port_v, _ = map.get(srv, "ws_port")
+    ws_port = mem.ptr_to_long(ws_port_v) as int
     ws_handlers, _ = map.get(srv, "ws_handlers")
     if ws_port > 0 && list.size(ws_handlers) > 0 {
         ws_tcp, ws_err = tcp.listen_on(host, ws_port)
@@ -1047,7 +1049,8 @@ tw_start(srv: ptr) -> string {
 
     // Start SSE server on separate port if configured, on the server's host
     // as the WebSocket port above.
-    sse_port, _ = map.get(srv, "sse_port")
+    sse_port_v, _ = map.get(srv, "sse_port")
+    sse_port = mem.ptr_to_long(sse_port_v) as int
     sse_handlers, _ = map.get(srv, "sse_handlers")
     if sse_port > 0 && list.size(sse_handlers) > 0 {
         sse_tcp, sse_err = tcp.listen_on(host, sse_port)

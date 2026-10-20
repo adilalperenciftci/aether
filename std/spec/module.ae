@@ -960,7 +960,7 @@ expect_list_contains_all(xs: ptr, needles: ptr, msg: string) {
     m = list.size(needles)
     i = 0
     while i < m {
-        want = list.get_raw(needles, i)
+        want, _ = list.get_string(needles, i)
         if _list_has_str(xs, want) == 0 {
             fail("${msg}: list is missing '${want}'")
             i = m
@@ -977,7 +977,7 @@ expect_list_every(xs: ptr, pred: fn, msg: string) {
     n = list.size(xs)
     i = 0
     while i < n {
-        item = list.get_raw(xs, i)
+        item, _ = list.get_string(xs, i)
         if call(pred, item) == 0 {
             fail("${msg}: element ${i} ('${item}') failed the predicate")
             i = n

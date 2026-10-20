@@ -347,8 +347,8 @@ main() {
     if schema.ok(uerr) != 1 {
         fail("values-usable: expected ok")
     }
-    got_id, _ = map.get(uval, "id")
-    got_handle, _ = map.get(uval, "handle")
+    got_id, _ = map.get_string(uval, "id")
+    got_handle, _ = map.get_string(uval, "handle")
     if string_equals(got_id, "0042") != 1 {
         fail("values-usable: id readback got ${got_id}")
     }
@@ -389,8 +389,8 @@ main() {
     if schema.ok(de) != 1 {
         fail("ext: expected ok, first=${schema.error_code(de, 0)}")
     }
-    d_email, _ = map.get(dv, "email")
-    d_plan, _ = map.get(dv, "plan")
+    d_email, _ = map.get_string(dv, "email")
+    d_plan, _ = map.get_string(dv, "plan")
     if string_equals(d_email, "ada@example.com") != 1 {
         fail("transform: email not trimmed+lowered: '${d_email}'")
     }

@@ -75,8 +75,8 @@ fn signup(s: ptr, input: ptr) {
     if schema.ok(errors) == 1 {
         // Success: `values` holds the coerced, validated fields. Read them —
         // this is the "parse, don't validate" payoff: no re-checking downstream.
-        name, _ = map.get(values, "name")
-        age, _ = map.get(values, "age")
+        name, _ = map.get_string(values, "name")
+        age, _ = map.get_string(values, "age")
         print("  accepted: ${name} (age ${age})\n")
     } else {
         // Failure: structured errors — field + machine code + human message,

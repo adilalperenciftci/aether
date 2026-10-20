@@ -53,7 +53,7 @@ extern zstd_release_compress()
 // Length-preserving string constructor from std.string — takes an explicit
 // byte count so binary payloads with embedded NULs survive the copy out of
 // the borrowed C buffer into an owned AetherString.
-extern string_new_with_length(data: string, length: int) -> ptr @heap
+extern string_new_with_length(data: string, length: int) -> string @heap
 
 // libzstd's own range. 3 is its default and a good general choice; higher
 // levels cost markedly more time for modest gains.

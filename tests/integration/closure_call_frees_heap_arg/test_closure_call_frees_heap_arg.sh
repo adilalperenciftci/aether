@@ -53,8 +53,8 @@ main() {
     }
     keep(mk("k1"))
     call(keep, mk("k2"))
-    a, _ = list.get(kept, 0)
-    b, _ = list.get(kept, 1)
+    a, _ = list.get_string(kept, 0)
+    b, _ = list.get_string(kept, 1)
     println("${a} ${b}")
 
     // Kept: a nested closure captures the parameter and is returned.

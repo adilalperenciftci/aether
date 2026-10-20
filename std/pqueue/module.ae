@@ -5,6 +5,7 @@
 // when you want highest-first.
 //
 //     import std.pqueue
+//     import std.string
 //
 //     main() {
 //         jobs = pqueue.new()
@@ -13,7 +14,8 @@
 //         pqueue.push(jobs, 3, "test")
 //
 //         while pqueue.size(jobs) > 0 {
-//             job = pqueue.pop(jobs)
+//             // An item is a `ptr`; a literal pushed is its C text
+//             job = string.from_cstr(pqueue.pop(jobs))
 //             println(job)                    // compile, test, deploy
 //         }
 //         pqueue.free(jobs)

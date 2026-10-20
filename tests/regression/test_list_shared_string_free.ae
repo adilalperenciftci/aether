@@ -32,7 +32,7 @@ main() {
     paths = list.new()
     list.add_string_owned(paths, "a.tiff")
 
-    p, perr = list.get(paths, 0)
+    p, perr = list.get_string(paths, 0)
     if string.equals(p, "a.tiff") != 1 {
         fail("element read back wrong: '${p}'")
     }
@@ -44,7 +44,7 @@ main() {
     println("PASS 1: first container freed")
 
     // The value must still be readable: `paths` holds its own reference.
-    p2, p2err = list.get(paths, 0)
+    p2, p2err = list.get_string(paths, 0)
     if string.equals(p2, "a.tiff") != 1 {
         fail("value damaged after the other owner freed: '${p2}'")
     }
@@ -56,7 +56,7 @@ main() {
     // 3: map value shared with a list.
     m = map.new()
     map.put_string_owned(m, "k", "shared-value")
-    v, verr = map.get(m, "k")
+    v, verr = map.get_string(m, "k")
     if string.equals(v, "shared-value") != 1 {
         fail("map value read back wrong: '${v}'")
     }
@@ -64,7 +64,7 @@ main() {
     l2 = list.new()
     list.add_string_owned(l2, v)
     map.free(m)
-    v2, v2err = list.get(l2, 0)
+    v2, v2err = list.get_string(l2, 0)
     if string.equals(v2, "shared-value") != 1 {
         fail("list copy damaged when the map freed: '${v2}'")
     }
@@ -74,14 +74,14 @@ main() {
     // 5: many owners of one value, freed in an arbitrary order.
     src = list.new()
     list.add_string_owned(src, "fanout")
-    s0, s0err = list.get(src, 0)
+    s0, s0err = list.get_string(src, 0)
     a = list.new()
     b = list.new()
     list.add_string_owned(a, s0)
     list.add_string_owned(b, s0)
     list.free(src)
     list.free(b)
-    last, lerr = list.get(a, 0)
+    last, lerr = list.get_string(a, 0)
     if string.equals(last, "fanout") != 1 {
         fail("value damaged with three owners: '${last}'")
     }

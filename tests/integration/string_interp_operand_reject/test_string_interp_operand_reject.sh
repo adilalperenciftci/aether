@@ -113,13 +113,11 @@ else
     fail=$((fail + 1))
 fi
 
-# --- ACCEPT: a `ptr` --------------------------------------------------------
-# Deliberately allowed. Interpolating a ptr is an established idiom here --
-# map/pqueue/schema return `ptr` for values that really are char*, and 21
-# sites across std/, contrib/, examples/ and tests/ rely on it. Rejecting it
-# broke std/pqueue and std/schema when this check first went in, and there is
-# no sanctioned conversion to migrate those callers to. Narrowing it is its
-# own change; this sentry records the decision.
+# --- REJECT: a `ptr` (#3018) -------------------------------------------------
+# A `ptr` may point at anything (a list, a buffer, a struct), and `${p}` read
+# it as a C string. It was admitted while std typed its strings as `ptr`
+# (`string.from_int`, `pad_start`, ...); those are `string` now, and the
+# callers that rendered a container's element read it with its typed getter.
 cat > "$TMP/ptr.ae" << 'EOF'
 import std.map
 main() {
@@ -129,14 +127,36 @@ main() {
     println("value ${v}")
 }
 EOF
-if "$AE" build "$TMP/ptr.ae" -o "$TMP/ptr.bin" >"$TMP/ptr.log" 2>&1; then
-    echo "  [PASS] ptr interpolation still accepted"
+out=$("$AE" build "$TMP/ptr.ae" -o "$TMP/ptr.bin" 2>&1)
+if echo "$out" | grep -q "cannot interpolate a \`ptr\`"; then
+    echo "  [PASS] ptr interpolation rejected"
     pass=$((pass + 1))
 else
-    echo "  [FAIL] ptr interpolation was rejected; that breaks 21 in-tree sites:"
-    grep -E "^error" "$TMP/ptr.log" | head -3 | sed 's/^/    /'
+    echo "  [FAIL] ptr interpolation not rejected:"
+    echo "$out" | head -3 | sed 's/^/    /'
     fail=$((fail + 1))
 fi
+
+# --- ACCEPT: the element read as a string ------------------------------------
+cat > "$TMP/ptr_ok.ae" << 'EOF'
+import std.map
+main() {
+    m = map.new()
+    map.put(m, "k", "hello")
+    v, _ = map.get_string(m, "k")
+    println("value ${v}")
+}
+EOF
+if "$AE" build "$TMP/ptr_ok.ae" -o "$TMP/ptr_ok.bin" >"$TMP/ptr_ok.log" 2>&1 &&
+   [ "$("$TMP/ptr_ok.bin" | tr -d '\r')" = "value hello" ]; then
+    echo "  [PASS] a container's string read with its typed getter renders"
+    pass=$((pass + 1))
+else
+    echo "  [FAIL] map.get_string's value did not build or render:"
+    grep -E "^error" "$TMP/ptr_ok.log" | head -3 | sed 's/^/    /'
+    fail=$((fail + 1))
+fi
+
 
 # --- ACCEPT: a bare function name as a callback argument --------------------
 # Passing a function by name is legitimate and must stay so; only rendering

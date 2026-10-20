@@ -23,7 +23,7 @@ main() {
 
     // init BEFORE entering capability mode; afterwards is too late.
     ok = casper.init()
-    println("init: ${ok}")
+    println("init: ${ok != null}")
 }
 ```
 ```output

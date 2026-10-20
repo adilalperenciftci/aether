@@ -27,7 +27,7 @@ render(g: ptr, val: int, cursor: int, op: int, prev: int) {
     println("  \x1b[44;97;1m  ${val}                \x1b[0m\n")
     n = list.size(labs)
     for (i = 0; i < n; i++) {
-        b, _ = list.get(labs, i)
+        b, _ = list.get_string(labs, i)
         col = i - (i / 4) * 4
         if col == 0 { print("  ") }
         ch = char_at(b)

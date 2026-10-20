@@ -108,7 +108,7 @@ extern cryptography_base64_decode_raw(b64: string) -> int
 extern cryptography_get_base64_decode() -> ptr
 extern cryptography_get_base64_decode_length() -> int
 extern cryptography_release_base64_decode()
-extern string_new_with_length(data: string, length: int) -> ptr @heap
+extern string_new_with_length(data: string, length: int) -> string @heap
 
 // Standard-alphabet base64 WITHOUT padding (RFC 4648 §4, the `+/` alphabet;
 // no trailing `=`). Encodes the bytes of `data`.

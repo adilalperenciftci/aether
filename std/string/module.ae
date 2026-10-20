@@ -47,11 +47,11 @@ exports(
 )
 
 // String creation
-extern string_new(cstr: string) -> ptr
-extern string_from_cstr(cstr: string) -> ptr
-extern string_from_literal(cstr: string) -> ptr
-extern string_new_with_length(data: string, length: int) -> ptr @heap
-extern string_empty() -> ptr
+extern string_new(cstr: string) -> string @heap
+extern string_from_cstr(cstr: string) -> string @heap
+extern string_from_literal(cstr: string) -> string @heap
+extern string_new_with_length(data: string, length: int) -> string @heap
+extern string_empty() -> string @heap
 
 // Reference counting.
 //
@@ -160,49 +160,32 @@ extern string_index_of_from_n(str: string, known_length: int,
 // is emitting known single-byte separators (\x01, \x02) into packed
 // formats without routing through a NUL-terminated string literal.
 // Always length 1 — code=0 returns a 1-byte NUL string, not "".
-extern string_from_char(code: int) -> ptr @heap
+extern string_from_char(code: int) -> string @heap
 extern string_to_upper(str: string) -> string @heap
 extern string_to_lower(str: string) -> string @heap
 extern string_trim(str: string) -> string @heap
 
 // String array operations.
 //
-// LIFETIME WARNING — `string_array_get` returns a *borrowed* pointer
-// into the array's internal storage, NOT an owned copy. After
-// `string_array_free(arr)` every pointer previously handed out by
-// `string_array_get(arr, ...)` is dangling. The natural-looking
-// pattern below silently use-after-frees:
+// `string_array_get` returns the array's own characters, borrowed (a
+// `string` with no `@heap`): a place that keeps one copies it into a
+// counted string of its own (R4), so it outlives the array:
 //
 //     v = string.array_get(parts, idx)
 //     string.array_free(parts)
-//     return v                 // <- v dangles
+//     return v                 // v is the local's copy
 //
-// Symptom is garbage bytes / random crashes downstream — the array's
-// backing storage is gone but the pointer still reads.
+// Until #3018 it was typed `ptr`, and that pattern returned a pointer
+// into the freed array. Read in place (an interpolation, an argument),
+// nothing is copied.
 //
-// Safe options when you need a value to outlive the array:
-//   1. Copy first:  v = string.concat(string.array_get(parts, idx), "")
-//                   then string.array_free(parts) — the concat made
-//                   an owned, refcounted copy.
-//   2. Use `string_split_to_seq` (declared further down) — returns a
-//      refcounted `*StringSeq` whose cells own their data
-//      independently of any backing array, so there's no
-//      array-wide free to worry about. This is the RECOMMENDED shape:
-//      a `*StringSeq` local is reclaimed DETERMINISTICALLY by the
-//      compiler — freed automatically at scope exit via the
-//      refcount-decrementing `string_seq_free`, the same way heap
-//      strings are. No manual free, and (because the free is a
-//      decrement) structurally-shared tails stay safe. A piece you
-//      pull from a sequence and let escape transfers ownership
-//      cleanly, with no dangling-into-a-backing-array hazard.
-//
-// If your access pattern is "build, walk once, free" within a single
-// scope, the borrowed-pointer form is fine and the cheapest. Reach
-// for option 1/2 only when a piece needs to escape the array's
-// lifetime.
+// `string_split_to_seq` (declared further down) is the other shape: a
+// refcounted `*StringSeq` whose cells own their data independently of
+// any backing array, reclaimed at scope exit like a string, with
+// structurally shared tails.
 extern string_split(str: string, delimiter: string) -> ptr
 extern string_array_size(arr: ptr) -> int
-extern string_array_get(arr: ptr, index: int) -> ptr
+extern string_array_get(arr: ptr, index: int) -> string
 extern string_array_free(arr: ptr)
 
 // ---- Cons-cell string sequence (Erlang/Elixir-shaped) --------------
@@ -342,9 +325,9 @@ extern string_seq_zip_each(a: *StringSeq, b: *StringSeq, f: @noescape ptr)
 
 // Conversion
 extern string_to_cstr(str: string) -> string
-extern string_from_int(value: int) -> ptr @heap
-extern string_from_long(value: long) -> ptr @heap
-extern string_from_float(value: float) -> ptr @heap
+extern string_from_int(value: int) -> string @heap
+extern string_from_long(value: long) -> string @heap
+extern string_from_float(value: float) -> string @heap
 extern string_from_double(value: float) -> string @heap
 
 // Inverse of to_int_radix. Render `value` in base `radix` (2..36).
@@ -355,14 +338,14 @@ extern string_from_double(value: float) -> string @heap
 // Headline use: hex emit for color round-trips (RGB → #rrggbb). Pair
 // with `string.pad_start(s, 2, 48)` to get the JS
 // `r.toString(16).padStart(2, '0')` shape.
-extern string_from_int_radix(value: long, radix: int) -> ptr @heap
+extern string_from_int_radix(value: long, radix: int) -> string @heap
 
 // Pad to a fixed width with `pad_char` (single-byte char code —
 // `48` for '0', `32` for ' '). If `s` is already >= total_width
 // chars, returns a fresh copy (no truncation). total_width <= 0
 // also returns a fresh copy. pad_start prepends; pad_end appends.
-extern string_pad_start(s: string, total_width: int, pad_char: int) -> ptr @heap
-extern string_pad_end(s: string, total_width: int, pad_char: int) -> ptr @heap
+extern string_pad_start(s: string, total_width: int, pad_char: int) -> string @heap
+extern string_pad_end(s: string, total_width: int, pad_char: int) -> string @heap
 
 // Parsing — raw externs (escape hatch)
 extern string_to_int_raw(str: string, out_value: ptr) -> int
@@ -514,7 +497,7 @@ join(s: *StringSeq, sep: string) -> string {
 //
 // Non-string values (ints, floats) need explicit conversion via
 // `string.from_int(n)` etc. before being added to the list.
-extern string_format_list(fmt: string, args: ptr) -> ptr @heap
+extern string_format_list(fmt: string, args: ptr) -> string @heap
 
 format(fmt: string, args: ptr) -> string {
     return string_format_list(fmt, args)

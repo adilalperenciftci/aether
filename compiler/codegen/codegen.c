@@ -8605,7 +8605,7 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     print_line(gen, "#include <stdlib.h>");
     print_line(gen, "#include <stddef.h>");
     print_line(gen, "extern void* aether_caps_malloc(size_t bytes);");
-    print_line(gen, "extern void* string_new_with_length(const char* data, int length);");
+    print_line(gen, "extern const char* string_new_with_length(const char* data, int length);");
     print_line(gen, "extern void string_retain(const char*);");
     print_line(gen, "extern void aether_string_publish(const void*);");
     /* The header of a counted string, as the runtime lays it out. A string
@@ -8966,8 +8966,10 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
      * pass's `const char*` signature above (next to the
      * aether_heap_str_free helper). Both that declaration and the
      * extern-registry / _aether_msg_release_<Msg> ones are identical, so
-     * the duplicates are tolerated by C — no conflicting-types error. */
-    print_line(gen, "extern void* string_new_with_length(const char* data, int length);");
+     * the duplicates are tolerated by C: no conflicting-types error.
+     * string_new_with_length is declared as the std modules' extern is
+     * (`-> string @heap`, a `const char*`, #3018) for the same reason. */
+    print_line(gen, "extern const char* string_new_with_length(const char* data, int length);");
     /* Issue #467: list / map heap-string-value owning-add helpers.
      * Prototypes emitted here so codegen can route `list.add(l,
      * heap_str)` / `map.put(m, k, heap_str)` calls to these symbols

@@ -1195,12 +1195,12 @@ void type_warning(const char* message, int line, int column);
  * tuple type; a single name now binds the whole tuple (the C local is the
  * tuple struct), so a tuple operand is a tuple, and it rendered as `%d`.
  *
- * A `ptr` is still rendered as a C string, which for a handle (a list, a
- * buffer, a struct) reads garbage. It cannot be refused while std types
- * strings as `ptr` (`string.from_int`, `pad_start`, ...): #3018 retypes
- * those and then takes TYPE_PTR off this list, so the TYPE_PTR message
- * below (`string.from_ptr(p)`, the conversion E0202 names) is the one a
- * `ptr` operand gets.
+ * A `ptr` has no rendering either (#3018). It was rendered as a C string,
+ * which for a handle (a list, a buffer, a struct) read garbage, and was
+ * admitted only while std typed strings as `ptr` (`string.from_int`,
+ * `pad_start`, ...); those are `string` now, so a `ptr` operand gets the
+ * TYPE_PTR message below (`string.from_ptr(p)`, the conversion E0202
+ * names).
  */
 static int interp_kind_is_renderable(TypeKind k) {
     switch (k) {
@@ -1212,7 +1212,6 @@ static int interp_kind_is_renderable(TypeKind k) {
         case TYPE_STRING:
         case TYPE_ENUM:      /* integer-backed; renders as its numeric value */
         case TYPE_UNKNOWN:   /* inference already failed and reported */
-        case TYPE_PTR:       /* until #3018, see above */
             return 1;
         default:
             return 0;
@@ -1339,9 +1338,10 @@ static void check_render_operand(ASTNode* child, SymbolTable* table,
         case TYPE_PTR:
             snprintf(msg, sizeof(msg),
                 "cannot %s a `ptr`: it has no string rendering. A `ptr` that "
-                "holds a C string is read as one with `string.from_ptr(p)`, and "
-                "a container's string with its typed getter (`map.get_string`, "
-                "`list.get_string`)", verb);
+                "holds an Aether string is read as one with `string.from_ptr(p)`, "
+                "one that holds C text is copied with `string.from_cstr(p)`, and "
+                "a container's string is read with its typed getter "
+                "(`map.get_string`, `list.get_string`)", verb);
             break;
         case TYPE_OPTIONAL:
             snprintf(msg, sizeof(msg),

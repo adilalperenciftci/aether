@@ -25,20 +25,20 @@ const KIND_OTHER = 4
 // C extern declarations from std/tar/aether_tar.c
 extern aether_tar_set_mtime_raw(path: string, mtime: long, is_symlink: int) -> int
 extern aether_tar_get_mode_raw(path: string) -> int
-extern aether_tar_slice_string(data: string, offset: int, len: int) -> ptr
-extern aether_tar_join_name(prefix: string, name: string) -> ptr
+extern aether_tar_slice_string(data: string, offset: int, len: int) -> string @heap
+extern aether_tar_join_name(prefix: string, name: string) -> string @heap
 
 struct TarReader {
     fd: int
     entry_offset: long
     entry_bytes_read: long
     entry_bytes_total: long
-    entry_name: ptr
+    entry_name: string
     entry_kind: int
     entry_mode: int
     entry_mtime: long
     entry_size: long
-    entry_link_name: ptr
+    entry_link_name: string
     reached_eof: int
     is_at_entry: int
 }
@@ -82,7 +82,7 @@ default_extract_options() -> ExtractOptions {
 }
 
 // Helper: decode a NUL-terminated or fixed-width string from a block
-decode_string(block: string, offset: int, max_len: int) -> ptr {
+decode_string(block: string, offset: int, max_len: int) -> string {
     var len = 0
     while len < max_len {
         c = string_char_at_n(block, 512, offset + len)
@@ -309,8 +309,8 @@ reader_open(path: string) -> {
     }
     reader = heap.new(TarReader)
     reader.fd = fd
-    reader.entry_name = null
-    reader.entry_link_name = null
+    reader.entry_name = ""
+    reader.entry_link_name = ""
     reader.entry_bytes_read = 0
     reader.entry_bytes_total = 0
     reader.reached_eof = 0
@@ -414,29 +414,23 @@ reader_next(reader_ptr: ptr) -> {
         return 0, "unsupported tar format: expected POSIX ustar header"
     }
 
-    // Decode Name and Prefix
+    // Decode Name and Prefix. Each is a string of its own (R3 releases
+    // them, and full_name, on every path out).
     name = decode_string(block, 0, 100)
     prefix = decode_string(block, 345, 155)
 
-    var full_name: ptr = name
+    full_name = name
     if string_length(prefix) > 0 {
         full_name = aether_tar_join_name(prefix, name)
     }
 
     if string_length(full_name) == 0 {
-        string_release(name)
-        string_release(prefix)
         string_release(block)
         return 0, "empty entry name"
     }
 
     // Validate UTF-8 of the name
     if !is_valid_utf8(full_name) {
-        if string_length(prefix) > 0 {
-            string_release(full_name)
-        }
-        string_release(name)
-        string_release(prefix)
         string_release(block)
         return 0, "invalid UTF-8 in entry name"
     }
@@ -444,20 +438,10 @@ reader_next(reader_ptr: ptr) -> {
     // Decode Size
     size, size_err = parse_octal(block, 124, 12)
     if size_err != "" {
-        if string_length(prefix) > 0 {
-            string_release(full_name)
-        }
-        string_release(name)
-        string_release(prefix)
         string_release(block)
         return 0, "invalid octal size: ${size_err}"
     }
     if size < 0 {
-        if string_length(prefix) > 0 {
-            string_release(full_name)
-        }
-        string_release(name)
-        string_release(prefix)
         string_release(block)
         return 0, "negative size in header"
     }
@@ -465,11 +449,6 @@ reader_next(reader_ptr: ptr) -> {
     // Decode Mode
     mode, mode_err = parse_octal(block, 100, 8)
     if mode_err != "" {
-        if string_length(prefix) > 0 {
-            string_release(full_name)
-        }
-        string_release(name)
-        string_release(prefix)
         string_release(block)
         return 0, "invalid octal mode: ${mode_err}"
     }
@@ -477,11 +456,6 @@ reader_next(reader_ptr: ptr) -> {
     // Decode Mtime
     mtime, mtime_err = parse_octal(block, 136, 12)
     if mtime_err != "" {
-        if string_length(prefix) > 0 {
-            string_release(full_name)
-        }
-        string_release(name)
-        string_release(prefix)
         string_release(block)
         return 0, "invalid octal mtime: ${mtime_err}"
     }
@@ -490,12 +464,6 @@ reader_next(reader_ptr: ptr) -> {
     linkname = decode_string(block, 157, 100)
     if string_length(linkname) > 0 {
         if !is_valid_utf8(linkname) {
-            if string_length(prefix) > 0 {
-                string_release(full_name)
-            }
-            string_release(name)
-            string_release(prefix)
-            string_release(linkname)
             string_release(block)
             return 0, "invalid UTF-8 in symlink target"
         }
@@ -514,11 +482,8 @@ reader_next(reader_ptr: ptr) -> {
         kind = KIND_OTHER
     }
 
-    // Release the previous entry's metadata before replacing it.
-    string_release(reader.entry_name)
-    string_release(reader.entry_link_name)
-
-    // Populate reader fields
+    // Populate reader fields. Each string store releases the previous
+    // entry's value.
     reader.entry_name = full_name
     reader.entry_kind = kind
     reader.entry_size = size
@@ -530,13 +495,6 @@ reader_next(reader_ptr: ptr) -> {
     reader.entry_bytes_total = size
     reader.is_at_entry = 1
 
-    // Release temporary name and prefix since full_name was duplicated if split
-    if string_length(prefix) > 0 {
-        string_release(name)
-        string_release(prefix)
-    } else {
-        string_release(prefix)
-    }
     string_release(block)
 
     return 1, ""
@@ -674,8 +632,6 @@ reader_close(reader_ptr: ptr) {
         io.fd_close(reader.fd)
         reader.fd = 0 - 1
     }
-    string_release(reader.entry_name)
-    string_release(reader.entry_link_name)
     heap.free(reader)
 }
 

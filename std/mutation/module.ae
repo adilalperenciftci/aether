@@ -661,7 +661,8 @@ run(sut_path: string, test_path: string, lib_dir: string) -> int {
         m = list.size(survivors)
         j = 0
         while j < m {
-            println("    - ${list.get_raw(survivors, j)}")
+            desc, _ = list.get_string(survivors, j)
+            println("    - ${desc}")
             j = j + 1
         }
     }

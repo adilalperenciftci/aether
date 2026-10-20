@@ -169,9 +169,9 @@ retained), for a `string` and for a closure. `@aether` passes the counted
 string itself, for C written against Aether's runtime. `@noescape` states
 what a parameter that is not `@retain` already is.
 
-An extern returning a fresh string declares it `@heap` (`-> string @heap`;
-`-> ptr @heap` for a counted string returned untyped, as `string.from_int`
-does; per position of a tuple result, `-> (string @heap, int, string)`); the
+An extern returning a fresh string declares it `@heap` (`-> string @heap`, as
+`string.from_int` does; `-> ptr @heap` for a counted string returned
+untyped; per position of a tuple result, `-> (string @heap, int, string)`); the
 string is adopted at the call, and the caller owns it. Any other string an
 extern returns is C's and is copied when a place takes it.
 

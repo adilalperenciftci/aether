@@ -40,7 +40,7 @@ builder check_config(label: string): int {
         println("check: ${label} missing required")
         return -1
     }
-    val, _ = map.get(_builder, "required")
+    val, _ = map.get_string(_builder, "required")
     println("check: ${label} required=${val}")
     return 1
 }

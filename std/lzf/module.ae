@@ -33,7 +33,7 @@ extern lzf_get_decompress_bytes() -> ptr
 extern lzf_get_decompress_length() -> int
 extern lzf_release_decompress()
 
-extern string_new_with_length(data: string, length: int) -> ptr @heap
+extern string_new_with_length(data: string, length: int) -> string @heap
 
 // A slice with no bound (`p as byte[]`, `.len` -1) has no length.
 fn unbounded(fname: string) {

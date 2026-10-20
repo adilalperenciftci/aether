@@ -65,7 +65,7 @@ main() {
     // stored borrow reads as garbage (or as the last entry) right here.
     i = 0
     while i < count {
-        p, gerr = list.get(found, i)
+        p, gerr = list.get_string(found, i)
         if gerr != "" {
             println("  FAIL list.get(${i}): ${gerr}")
             failures = failures + 1

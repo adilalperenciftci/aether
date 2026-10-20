@@ -377,6 +377,7 @@ them, so heap items you push remain yours to release.
 
 ```aether
 import std.pqueue
+import std.string
 
 main() {
     jobs = pqueue.new()
@@ -388,7 +389,8 @@ main() {
 
     while pqueue.size(jobs) > 0 {
         priority = pqueue.peek_priority(jobs)
-        job = pqueue.pop(jobs)
+        // An item is a `ptr`; a literal pushed is its C text.
+        job = string.from_cstr(pqueue.pop(jobs))
         println("[${priority}] ${job}")     // 5, 20, 30
     }
 }
@@ -791,10 +793,10 @@ it owns it: the compiler releases it when the place is overwritten or goes
 out of scope. No `std.string` call needs a matching free ([String
 ownership](#string-ownership), below).
 
-`string.new(s)`, `string.from_cstr(s)` and `string.empty()` return a counted
-string typed `ptr`, which no place owns. They exist for C-facing code that
-holds strings as `ptr`; a program that calls them gives the string back with
-`string.release`. `string.to_cstr(s)` returns the characters as C sees them.
+So do `string.new(s)`, `string.from_cstr(s)`, `string.empty()`,
+`string.new_with_length(data, n)`, the `from_*` conversions, `pad_start`,
+`pad_end` and `format`: each returns a `string`, never a `ptr` (#3018).
+`string.to_cstr(s)` returns the characters as C sees them.
 
 ### Usage Examples
 
@@ -867,9 +869,9 @@ Hel
 **Splitting:**
 - `string.split(str, delimiter)` - Split string by delimiter (returns array)
 - `string.array_size(arr)` - Get number of parts in split result
-- `string.array_get(arr, index)` - Get string at index from split result
+- `string.array_get(arr, index)` → `string` - Get string at index from split result. The array's own characters, borrowed: a place that keeps one copies it, so it outlives `string.array_free(arr)`
 - `string.array_free(arr)` - Free split result array
-- `string.array_view(arr)` → `string[]` (#2301) - A bounded, OWNED snapshot of a split result: every element is an independently copied, refcounted string, so the returned slice outlives `arr`: call `string.array_free(arr)` right after this returns, unlike `string.array_get`'s borrowed pointers (see the lifetime warning in `std/string/module.ae`). Prefer `split_to_seq` when you don't need array/index shape at all.
+- `string.array_view(arr)` → `string[]` (#2301) - A bounded, OWNED snapshot of a split result: every element is an independently copied, refcounted string, so the returned slice outlives `arr`: call `string.array_free(arr)` right after this returns. Prefer `split_to_seq` when you don't need array/index shape at all.
 - `string.split_to_seq(str, delimiter)` - Split into a `*StringSeq` cons-cell list (Erlang/Elixir-shaped). Same split semantics as `string.split`, but returns the result as an O(1) head/tail/cons/length linked list with refcount-aware structural sharing. Use this when the result will be pattern-matched, walked recursively, or sent across an actor boundary as a message field. See [docs/sequences.md](sequences.md) for the full surface.
 - `string.strip_prefix(s, prefix)` → `(rest, stripped)` - If `s` starts with `prefix`, returns the remainder and 1. Otherwise returns `s` and 0. Cleaner than manual `starts_with` + `substring` length arithmetic.
 

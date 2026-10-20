@@ -89,13 +89,13 @@ main() {
     b, berr = list.get(out, 1)
     c, cerr = list.get(out, 2)
     if string.equals(a, "A") != 1 {
-        fail("map result 0 out of order: '${a}'")
+        fail("map result 0 out of order: '${string.from_cstr(a)}'")
     }
     if string.equals(b, "B") != 1 {
-        fail("map result 1 out of order: '${b}'")
+        fail("map result 1 out of order: '${string.from_cstr(b)}'")
     }
     if string.equals(c, "G") != 1 {
-        fail("map result 2 out of order: '${c}'")
+        fail("map result 2 out of order: '${string.from_cstr(c)}'")
     }
     println("PASS 4: map is index-aligned with its input")
     list.free(out)

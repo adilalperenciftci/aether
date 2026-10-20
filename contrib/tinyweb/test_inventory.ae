@@ -31,7 +31,7 @@ end_point(_ctx: ptr, method: int, pattern: string, handler: fn) {
 }
 
 tw_path(_ctx: ptr, bp: string) {
-    prefix, _ = map.get(_ctx, "prefix")
+    prefix, _ = map.get_string(_ctx, "prefix")
     sub = map_new()
     map_put(sub, "prefix", "${prefix}${bp}")
     routes, _ = map.get(_ctx, "routes")
@@ -60,7 +60,7 @@ response_write_status(res: ptr, body: string, status: int) {
 
 request_get_query_param(req: ptr, name: string) {
     if map_has(req, name) == 1 {
-        v, _ = map.get(req, name)
+        v, _ = map.get_string(req, name)
         return v
     }
     return ""
@@ -70,7 +70,7 @@ request_get_query_param(req: ptr, name: string) {
 
 inventory_lookup(inv: ptr, sku: string) {
     if map_has(inv, sku) == 1 {
-        v, _ = map.get(inv, sku)
+        v, _ = map.get_string(inv, sku)
         return v
     }
     return ""
@@ -94,7 +94,7 @@ do_cart_list(res: ptr, cart: ptr, inventory: ptr) {
         out = "["
         for (i = 0; i < n; i ++) {
             if i > 0 { out = "${out}," }
-            item, _ = list.get(cart, i)
+            item, _ = list.get_string(cart, i)
             out = "${out}\"${item}\""
         }
         response_json(res, "${out}]")
