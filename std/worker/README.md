@@ -49,6 +49,13 @@ knows whether to keep draining.
 Under `AETHER_NO_THREADING` the pool degrades to running work inline, so a
 build without threads still executes rather than deadlocking.
 
+A pool thread starts with its creator's floating-point state, as threads do
+on Linux: the x87 control word and the MXCSR's controls (#3027). On Windows
+the main thread runs the x87 at 64-bit precision (MinGW's startup), so a pool
+thread does too, and the same libm call gives the same bits on either thread.
+(MinGW's libm `sqrt` is the x87 `fsqrt`, which rounds twice at that
+precision; `math.sqrt` is exact, so prefer it to binding libc `sqrt`.)
+
 ## Exports
 
 `run`, `run_detached`, `map`, `wait`, `drain`, `pending`, `set_main_poster`,
