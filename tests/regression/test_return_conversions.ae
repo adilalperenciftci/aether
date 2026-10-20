@@ -157,6 +157,32 @@ from_block(n: int) -> long {
     return 0
 }
 
+// #3044: one value from a `T!` function is its success value, converted as
+// into T: an int into a `long!` or a `float!`, a result forwarded as it is,
+// a value propagated by `!`, an if-expression.
+long_result(n: int) -> long! {
+    if n < 0 {
+        return 0, "negative"
+    }
+    return n
+}
+
+float_result(n: int) -> float! {
+    return n
+}
+
+forwarded(n: int) -> long! {
+    return long_result(n)
+}
+
+propagated(n: int) -> long! {
+    return long_result(n)!
+}
+
+chosen(c: bool) -> int! {
+    return if c { 1 } else { 2 }
+}
+
 main() {
     check("int into long", to_long(7), 7)
     check("int into float", twice(to_float(3)), 6)
@@ -190,6 +216,11 @@ main() {
     check("match arms", twice(arms(2)), 5)
     check("an inferred float result takes an int", twice(widening(0)), 0)
     check("a trailing block's return", from_block(12), 12)
+    check("int into long!", long_result(3) or -1, 3)
+    check("int into float!", twice(float_result(2) or 0.0), 4)
+    check("a result forwarded", forwarded(-1) or -9, -9)
+    check("a value propagated by !", propagated(5) or -1, 5)
+    check("an if-expression into int!", chosen(false) or 0, 2)
     if bad != 0 {
         exit(1)
     }

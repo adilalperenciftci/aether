@@ -263,6 +263,36 @@ main() {
 AE
 refused empty_as_int 2:12 "'size' returns int, but this value is the empty slice"
 
+# #3044: one value from a `T!` function is its success value, checked
+# against T; a `string` returned from an `int!` function reached C. An arm
+# of a branching value is checked the same way.
+cat > "$TMP/string_as_int_result.ae" <<'AE'
+f(s: string) -> int! {
+    if s == "" {
+        return s
+    }
+    return 1
+}
+
+main() {
+    v = f("") or -1
+    println("${v}")
+}
+AE
+refused string_as_int_result 3:16 "'f' returns int!, and this value is string, not int"
+
+cat > "$TMP/result_arm.ae" <<'AE'
+f(c: bool) -> int! {
+    return if c { 1 } else { "two" }
+}
+
+main() {
+    v = f(true) or -1
+    println("${v}")
+}
+AE
+refused result_arm 2:30 "'f' returns int!, and this value is string, not int"
+
 if [ "$fails" -ne 0 ]; then
     echo "  [FAIL] return_type_check: $fails case(s)"
     exit 1

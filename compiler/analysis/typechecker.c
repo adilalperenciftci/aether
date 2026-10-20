@@ -10995,6 +10995,7 @@ typedef struct {
     int inferred;          /* the result type was inferred, not written */
     int position;          /* 1-based value of a multi-value return; 0 for one value */
     Type* whole;           /* with a position: the tuple the function returns */
+    Type* result;          /* #3044: the `T!` whose success value this is, or NULL */
 } ReturnOwner;
 
 /* #2782: check one value a `return` gives against the result type `rt`.
@@ -11081,6 +11082,13 @@ static int check_return_value(ASTNode* v, Type* rt, const ReturnOwner* own,
                  own->fn_name ? "'" : "", own->fn_name ? own->fn_name : "this closure",
                  own->fn_name ? "'" : "", ret_type_spell(own->whole, whole, sizeof(whole)),
                  own->position, vs, ret_type_spell(rt, want, sizeof(want)));
+    } else if (own->result) {
+        char whole[240];
+        snprintf(msg, sizeof(msg),
+                 "Type mismatch in return: %s%s%s returns %s, and this value is %s, not %s",
+                 own->fn_name ? "'" : "", own->fn_name ? own->fn_name : "this closure",
+                 own->fn_name ? "'" : "", ret_type_spell(own->result, whole, sizeof(whole)),
+                 vs, ret_type_spell(rt, want, sizeof(want)));
     } else if (own->fn_name)
         snprintf(msg, sizeof(msg),
                  "Type mismatch in return: '%s' returns %s%s, but this value is %s",
@@ -11111,8 +11119,26 @@ static int check_return_value(ASTNode* v, Type* rt, const ReturnOwner* own,
 static int check_return_values(ASTNode* ret, Type* rt, const ReturnOwner* own,
                                SymbolTable* table) {
     if (!ret || !rt || ret->child_count == 0 || rt->kind == TYPE_VOID ||
-        rt->kind == TYPE_UNKNOWN || rt->is_result)
+        rt->kind == TYPE_UNKNOWN)
         return 1;
+    if (rt->is_result) {
+        /* #3044: one value from a `T!` function is its success value,
+         * which codegen wraps as the result's `._0`, unless it is a result
+         * already (another call's, or `error(...)`), which passes through.
+         * It went unchecked, and a `string` returned from an `int!`
+         * function reached C. Checked against T as a `-> T` return is. A
+         * multi-value return is the value and the error, as written. */
+        if (ret->child_count != 1 || rt->kind != TYPE_TUPLE || rt->tuple_count < 1 ||
+            !rt->tuple_types || !ret->children[0])
+            return 1;
+        Type* vt = infer_type(ret->children[0], table);
+        int passes = !vt || vt->kind == TYPE_TUPLE || vt->kind == TYPE_UNKNOWN;
+        if (vt) free_type(vt);
+        if (passes) return 1;
+        ReturnOwner at = *own;
+        at.result = rt;
+        return check_return_value(ret->children[0], rt->tuple_types[0], &at, table);
+    }
     if (ret->child_count > 1) {
         if (rt->kind != TYPE_TUPLE || rt->tuple_count != ret->child_count) return 1;
         int ok = 1;
@@ -11163,7 +11189,7 @@ static int check_return_values(ASTNode* ret, Type* rt, const ReturnOwner* own,
  * Returns 1 when every value fits. */
 static int check_return_statement(ASTNode* ret, SymbolTable* table) {
     ASTNode* o = g_tc_return_owner;
-    ReturnOwner own = { o ? o->value : NULL, o ? o->type_inferred : 0, 0, NULL };
+    ReturnOwner own = { o ? o->value : NULL, o ? o->type_inferred : 0, 0, NULL, NULL };
     Type* rt = g_tc_return_type;
     Type* made = NULL;
     /* #2998: a bare `return` in a function whose written result is a value
