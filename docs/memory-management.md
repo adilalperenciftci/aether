@@ -115,8 +115,9 @@ true [not a string]
 ```
 
 A `string` local re-bound to a bare `ptr` (`name, _ = map.get(m, "name")`)
-is warning W1005, which names the accessor to use; a later release makes it
-an error ([W1005](language-reference.md#pointer-given-to-a-string-local-w1005)).
+is error E0202, which names the accessor to use
+([E0202](language-reference.md#a-pointer-given-to-a-string-local-e0202); it was
+the warning W1005 in 0.830.0 and 0.831.0).
 
 ### Closures
 

@@ -219,7 +219,7 @@ over it, `list.free`); a fresh string (a call's result, an interpolation)
 moves in, and a literal is stored as it is. The caller's own value is
 untouched, so the same string may be in several containers. Read a string
 element back with `list.get_string`, which checks that it is one; a `string`
-local given `list.get`'s bare `ptr` is warning W1005.
+local given `list.get`'s bare `ptr` is error E0202.
 
 Two C entry points do the same by hand, for C code and `ptr` values:
 `list_add_string_owned(l, s)` gives the list a reference of its own (a
