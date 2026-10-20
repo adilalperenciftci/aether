@@ -1164,6 +1164,8 @@ The `else` branch is required, and the expression has the type its branches have
 
 A branch whose type the other branch's takes as a binding would (`null` beside a pointer) is converted into it, and the expression has the wider type. Two branches of no one type (an `int` and a `string`, arrays of another length or element type, tuples of another length) are a compile error naming both types.
 
+Each branch is an expression that gives a value, so a branch made of a call that returns nothing is a compile error, and so is one made of `exit(n)`, which never returns: an `if` expression chooses between two values and nothing leaves from one of its branches. To leave on one path, test it with an `if` statement first, or use a value `match`, whose arm may leave (`_ -> exit(4)`).
+
 ### While Loops
 
 ```aether,fragment
@@ -1940,8 +1942,9 @@ q = safe_divide(10, 0) or -1      // q == -1
 
 **`expr or { ... }` run a block on error, with `err` bound to the message.**
 The block's **last statement is its value**, so a handler can log, compute,
-and still yield a fallback, or the block exits (`return`, `break`,
-`continue`, `panic`) and never falls through:
+and still yield a fallback, or the block leaves and never falls through:
+`return`, `break`, `continue`, `panic`, `exit(n)` (or `os.exit(n)`), or an
+`if`/`else` or `match` every path of which leaves:
 
 ```aether,fragment
 q = safe_divide(x, y) or {
@@ -1955,9 +1958,12 @@ r = safe_divide(x, y) or {
 }
 ```
 
-A block that neither yields a value of the right type nor exits is a compile
-error (`` `or { }` handler must end with a value … or exit ``), previously
+A block that neither yields a value of the right type nor leaves is a compile
+error (`` `or { }` handler must end with a value … or leave ``), previously
 that shape compiled and read an **uninitialized** result on the error path.
+Whether a statement leaves is decided by one rule everywhere it matters: the
+`or` handler, a value `match` arm, a function's missing return and W1002's
+unreachable code all agree.
 
 **`expr!` propagate the error.** Inside a function that itself returns `T!`,
 `!` returns `(zero, err)` to the caller when the error slot is non-empty, so an
@@ -4134,7 +4140,11 @@ main() {
 
 ### Unreachable Code [W1002]
 
-Code after `return`, `exit()`, or exhaustive `if`/`else` blocks is flagged:
+Code after a statement that control never goes on from is flagged: `return`,
+`break`, `continue`, `panic`, `exit(n)`, an `if`/`else` or `match` every path
+of which leaves, or a loop nothing ends. The warning names what the code
+follows (`unreachable code after break`). The rule is the one the missing
+return check, the `or { }` handler and a value `match` arm use:
 
 ```aether,fragment
 check(x: int) -> {

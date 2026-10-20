@@ -20,4 +20,16 @@
  * end control can reach. Returns the number of errors reported. */
 int check_missing_returns(ASTNode* program);
 
+/* Whether control can go on to the statement after `n`, by the rules at the
+ * top of missing_return.c (#3017). The one answer every check that asks
+ * "does this leave?" uses: a function's missing return, an `or { }`
+ * handler that must yield a value or leave, a `match` arm, the isolation
+ * check's branches and W1002's unreachable code. `program` resolves a
+ * `const` in a condition; with NULL only literal conditions are decided. */
+int stmt_can_complete(ASTNode* program, ASTNode* n);
+
+/* A call that never returns: `exit(...)` (and `os.exit(...)`, the same
+ * extern). The one list of them. */
+int ast_call_never_returns(const ASTNode* n);
+
 #endif /* AETHER_MISSING_RETURN_H */

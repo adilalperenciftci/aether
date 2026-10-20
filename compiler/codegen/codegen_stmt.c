@@ -4,6 +4,7 @@
 #include "../analysis/contract_eval.h"
 #include "../analysis/typechecker.h"
 #include "../analysis/hoist.h"
+#include "../analysis/missing_return.h"
 #include "../aether_error.h"
 #include <limits.h>
 #include <stdint.h>
@@ -7425,6 +7426,26 @@ static void emit_bound_match_store(CodeGenerator* gen, ASTNode* result) {
 /* #2582: an arm's value, with the temporaries of the structs calls in it
  * return, destroyed once the match's result has taken what it keeps. */
 static void emit_match_result_value(CodeGenerator* gen, ASTNode* result) {
+    /* An arm whose value does not complete, a call that never returns
+     * (`exit(n)`, #3017), leaves the match: it runs as the statement it
+     * is (an `exit` drains the pending defers first) and stores nothing. */
+    if (gen->match_result_var && !stmt_can_complete(gen->program, result)) {
+        ASTNode* st = create_ast_node(AST_EXPRESSION_STATEMENT, NULL,
+                                      result->line, result->column);
+        add_child(st, result);
+        const char* saved_var = gen->match_result_var;
+        ASTNode* saved_bound = gen->match_result_bound;
+        gen->match_result_var = NULL;
+        gen->match_result_bound = NULL;
+        generate_statement(gen, st);
+        gen->match_result_var = saved_var;
+        gen->match_result_bound = saved_bound;
+        /* The value is the arm's node, which the arm keeps. */
+        st->children[0] = NULL;
+        st->child_count = 0;
+        codegen_own_node(gen, st);
+        return;
+    }
     if (gen->match_result_var && gen->match_result_bound) {
         emit_bound_match_store(gen, result);
         return;

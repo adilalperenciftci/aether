@@ -1,5 +1,6 @@
 #include "../analysis/quote.h"
 #include "../analysis/hoist.h"
+#include "../analysis/missing_return.h"
 #include "codegen_internal.h"
 #include "../analysis/sandbox_trust.h"
 #include "../aether_defines.h"
@@ -7483,10 +7484,12 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
              * Before this, the trailing expression was emitted as a
              * discarded statement and `_oer` was read UNINITIALIZED: a
              * silent miscompile whenever the block didn't exit. A block
-             * ending in an exit statement (return / panic / break /
-             * continue) never falls through, so no assignment is needed
-             * there; the typechecker rejects every other ending, so by
-             * the time we get here the last child is one or the other. */
+             * whose last statement leaves (return, panic, break, continue,
+             * `exit(n)`, or an if or match every path of which leaves:
+             * stmt_can_complete, the typechecker's own test, #3017) never
+             * falls through, so no assignment is needed there; the
+             * typechecker rejects every other ending, so by the time we
+             * get here the last child is one or the other. */
             fprintf(gen->output, "const char* err = _oe%d._%d; (void)err;\n",
                     id, err_idx);
             int last = handler->child_count - 1;
@@ -7495,7 +7498,8 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
             }
             if (last >= 0 && handler->children[last] &&
                 handler->children[last]->type == AST_EXPRESSION_STATEMENT &&
-                handler->children[last]->child_count > 0) {
+                handler->children[last]->child_count > 0 &&
+                stmt_can_complete(gen->program, handler->children[last])) {
                 ASTNode* hv = handler->children[last]->children[0];
                 /* is_heap flag = whether hv is ALREADY heap: a heap
                  * value passes through uniform_heap_str untouched

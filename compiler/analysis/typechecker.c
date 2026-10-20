@@ -3205,6 +3205,10 @@ int is_assignable(Type* from, Type* to) {
     return is_type_compatible(from, to);
 }
 
+/* The value a match arm or an if-expression branch gives (defined below). */
+static ASTNode* tc_arm_value(ASTNode* body);
+static int tc_value_yields(ASTNode* v, SymbolTable* table, StrMap* locals, int depth);
+
 /* #2983, #2996, #3003, #3004: the type a value with branches `a` and `b`
  * gives (an if-expression's two, a value match's arms in turn; `a_arm` and
  * `b_arm` the nodes that give them): their join (branch_join_type, the one
@@ -4830,36 +4834,28 @@ static const char** collect_global_var_names(ASTNode* program, int* count) {
 
 // --- Unreachable code analysis ---
 
-// Check if a statement is a return or exit() call
+/* Whether control never goes on past `node`: the missing-return analysis'
+ * answer (stmt_can_complete, #3017), so W1002 agrees with every other check
+ * that asks whether a statement leaves. */
 static int is_terminating(ASTNode* node) {
-    if (!node) return 0;
-    if (node->type == AST_RETURN_STATEMENT) return 1;
-    // Unwrap expression statement to check inner call
-    if (node->type == AST_EXPRESSION_STATEMENT && node->child_count > 0) {
-        return is_terminating(node->children[0]);
+    return node && !stmt_can_complete(g_typecheck_program, node);
+}
+
+/* What W1002 says the unreachable code comes after. */
+static const char* terminating_name(ASTNode* stmt) {
+    switch (stmt->type) {
+        case AST_RETURN_STATEMENT:   return "return";
+        case AST_BREAK_STATEMENT:    return "break";
+        case AST_CONTINUE_STATEMENT: return "continue";
+        case AST_PANIC_STATEMENT:    return "panic";
+        case AST_EXPRESSION_STATEMENT:
+            if (stmt->child_count > 0 && ast_call_never_returns(stmt->children[0]))
+                return "exit()";
+            break;
+        default:
+            break;
     }
-    if (node->type == AST_FUNCTION_CALL && node->value &&
-        strcmp(node->value, "exit") == 0) return 1;
-    // if/else where BOTH branches terminate
-    if (node->type == AST_IF_STATEMENT && node->child_count >= 3) {
-        ASTNode* then_branch = node->children[1];
-        ASTNode* else_branch = node->children[2];
-        // Check last statement of each branch
-        if (then_branch && else_branch) {
-            int then_terminates = 0;
-            int else_terminates = 0;
-            if (then_branch->child_count > 0)
-                then_terminates = is_terminating(then_branch->children[then_branch->child_count - 1]);
-            else
-                then_terminates = is_terminating(then_branch);
-            if (else_branch->child_count > 0)
-                else_terminates = is_terminating(else_branch->children[else_branch->child_count - 1]);
-            else
-                else_terminates = is_terminating(else_branch);
-            return then_terminates && else_terminates;
-        }
-    }
-    return 0;
+    return "a statement that never completes";
 }
 
 static void check_unreachable_code(ASTNode* body);
@@ -4890,8 +4886,7 @@ static void check_unreachable_code(ASTNode* body) {
             if (unreachable) {
                 char msg[256];
                 snprintf(msg, sizeof(msg), "unreachable code after %s",
-                         stmt->type == AST_RETURN_STATEMENT ? "return" :
-                         (stmt->type == AST_FUNCTION_CALL ? "exit()" : "terminating block"));
+                         terminating_name(stmt));
                 AetherError warn = {
                     .filename = g_tc_file,
                     .source_code = NULL,
@@ -7280,16 +7275,10 @@ static int iso_type_is_moveworthy(Type* t) {
     }
 }
 
-/* Does this statement definitely transfer control (no fall-through)? */
+/* Does this statement definitely transfer control (no fall-through)? The
+ * missing-return analysis' answer (#3017). */
 static int iso_diverges(ASTNode* n) {
-    if (!n) return 0;
-    if (n->type == AST_RETURN_STATEMENT || n->type == AST_BREAK_STATEMENT ||
-        n->type == AST_CONTINUE_STATEMENT) return 1;
-    if (n->type == AST_BLOCK && n->child_count > 0)
-        return iso_diverges(n->children[n->child_count - 1]);
-    if (n->type == AST_IF_STATEMENT && n->child_count > 2)
-        return iso_diverges(n->children[1]) && iso_diverges(n->children[2]);
-    return 0;
+    return n && !stmt_can_complete(g_typecheck_program, n);
 }
 
 static void iso_check(ASTNode* node, IsoSet* moved, IsoSet* iso) {
@@ -12418,24 +12407,21 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                  * must either produce one or never fall through. Its LAST
                  * statement must therefore be a value expression (assignable to
                  * the success type — codegen assigns it to the result slot) or
-                 * an exit (return / panic / break / continue). Anything else —
+                 * leave: a statement control never goes on from, decided by
+                 * stmt_can_complete as every such question is (#3017), so
+                 * `return`, `panic`, `break`, `continue`, `exit(n)` and an
+                 * if/else or match every path of which leaves. Anything else —
                  * an empty block, a trailing println, a trailing if — would
                  * fall through with the result UNINITIALIZED, which is exactly
-                 * the miscompile this check closes. Conservative on purpose:
-                 * an if/else whose branches both return is rejected too; end
-                 * the block with the return or the value instead. */
+                 * the miscompile this check closes. */
                 ASTNode* lastst = handler->child_count > 0
                                       ? handler->children[handler->child_count - 1]
                                       : NULL;
                 int ends_ok = 0;
-                if (lastst) {
+                if (lastst && !stmt_can_complete(g_typecheck_program, lastst)) {
+                    ends_ok = 1;
+                } else if (lastst) {
                     switch (lastst->type) {
-                        case AST_RETURN_STATEMENT:
-                        case AST_PANIC_STATEMENT:
-                        case AST_BREAK_STATEMENT:
-                        case AST_CONTINUE_STATEMENT:
-                            ends_ok = 1;
-                            break;
                         case AST_EXPRESSION_STATEMENT:
                             if (lastst->child_count > 0 && lastst->children[0]) {
                                 Type* vt = infer_type(lastst->children[0], h);
@@ -12463,9 +12449,9 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                     int el = handler->line ? handler->line : expr->line;
                     int ec = handler->line ? handler->column : expr->column;
                     type_error("`or { }` handler must end with a value for the "
-                               "expression to yield, or exit via return / panic / "
-                               "break / continue, otherwise the result would be "
-                               "uninitialized on the error path", el, ec);
+                               "expression to yield, or leave (return / panic / "
+                               "break / continue / exit), otherwise the result "
+                               "would be uninitialized on the error path", el, ec);
                 }
                 free_symbol_table(h);
             } else if (handler) {
@@ -12728,6 +12714,49 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                 expr->children[2]->type != AST_NONE_LITERAL) {
                 Type* th = infer_type(expr->children[1], table);
                 Type* el = infer_type(expr->children[2], table);
+                /* #3017: a branch that gives no value (a call returning
+                 * nothing, or `exit(n)`, which never returns) reached C as a
+                 * void operand of `?:`. An `if` expression chooses between
+                 * two values; nothing leaves from one of its branches (they
+                 * are expressions), so such a branch is refused here, with
+                 * the forms that can leave named. */
+                for (int b = 1; b <= 2; b++) {
+                    /* The branch's value node as checked above, judged as a
+                     * value match's arm is (check_match_value_arms):
+                     * inference gives a call returning nothing no type. */
+                    ASTNode* bv = tc_arm_value(expr->children[b]);
+                    if (!bv) bv = expr->children[b];
+                    int no_value = bv && bv->node_type && bv->node_type->kind == TYPE_VOID;
+                    if (!no_value && bv && bv->type == AST_FUNCTION_CALL)
+                        no_value = !tc_value_yields(bv, table, NULL, 0);
+                    if (!no_value) continue;
+                    const char* callee = bv->type == AST_FUNCTION_CALL && bv->value
+                                         ? bv->value : NULL;
+                    char msg[320];
+                    int line = bv->line ? bv->line : expr->line;
+                    int col = bv->line ? bv->column : expr->column;
+                    if (callee && !stmt_can_complete(g_typecheck_program, bv)) {
+                        snprintf(msg, sizeof(msg),
+                                 "'%s' never returns, so this branch of the `if` expression "
+                                 "gives no value", callee);
+                        type_error_hint(msg,
+                            "an `if` expression chooses between two values: leave with an "
+                            "`if` statement before it, or use a `match`, whose arm may leave",
+                            line, col);
+                    } else {
+                        snprintf(msg, sizeof(msg),
+                                 "%s%s%s returns no value, so this branch of the `if` "
+                                 "expression gives none", callee ? "'" : "",
+                                 callee ? callee : "this branch", callee ? "'" : "");
+                        type_error_hint(msg,
+                            "give the branch a value, or use an `if` statement",
+                            line, col);
+                    }
+                    free_type(th);
+                    free_type(el);
+                    if (slot) free_type(slot);
+                    return 0;
+                }
                 int refused = 0;
                 Type* bt = tc_branch_value_type(th, expr->children[1], el, expr->children[2],
                                                 &refused);
@@ -14933,6 +14962,9 @@ static int check_match_value_arms(ASTNode* m, SymbolTable* table) {
         }
         if (given->type != AST_FUNCTION_CALL || tc_value_yields(given, table, NULL, 0))
             continue;
+        /* A call that does not return (`exit(n)`) leaves the `match`, as a
+         * `return` arm does: it needs no value (#3017). */
+        if (!stmt_can_complete(g_typecheck_program, given)) continue;
         const char* callee = given->value ? given->value : "function";
         char msg[320];
         char help[320];
@@ -14953,18 +14985,7 @@ static int check_match_value_arms(ASTNode* m, SymbolTable* table) {
 static int tc_arm_leaves(ASTNode* body) {
     if (body && body->type == AST_BLOCK)
         body = body->child_count > 0 ? body->children[body->child_count - 1] : NULL;
-    if (!body) return 0;
-    switch (body->type) {
-        case AST_RETURN_STATEMENT: case AST_BREAK_STATEMENT:
-        case AST_CONTINUE_STATEMENT: case AST_PANIC_STATEMENT:
-            return 1;
-        case AST_EXPRESSION_STATEMENT:
-            body = body->child_count > 0 ? body->children[0] : NULL;
-            /* fall through */
-        default:
-            return body && body->type == AST_FUNCTION_CALL && body->value &&
-                   strcmp(body->value, "exit") == 0;
-    }
+    return body && !stmt_can_complete(g_typecheck_program, body);
 }
 
 /* #2993: a `match` that is an operand (of an operation, a call, a

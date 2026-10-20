@@ -1,0 +1,11 @@
+// An `if` expression chooses between two values; `exit(n)` gives none, so a
+// branch made of it is refused before C (#3017), with the forms that can
+// leave named.
+pick(n: int) -> int {
+    v = if n == 0 { 10 } else { exit(5) }
+    return v
+}
+
+main() {
+    println("${pick(0)}")
+}

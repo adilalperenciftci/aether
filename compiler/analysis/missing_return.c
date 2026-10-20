@@ -93,9 +93,15 @@ static ASTNode* closure_body(ASTNode* closure) {
     return NULL;
 }
 
-/* `exit(...)`: the C library's exit ends the process and never returns. */
+int ast_call_never_returns(const ASTNode* n) {
+    if (!n || n->type != AST_FUNCTION_CALL || !n->value) return 0;
+    /* `exit(...)`, the C library's exit (std.os's `os.exit` is the same
+     * extern), ends the process and never returns. */
+    return strcmp(n->value, "exit") == 0 || strcmp(n->value, "os.exit") == 0;
+}
+
 static int is_exit_call(ASTNode* n) {
-    return n && n->type == AST_FUNCTION_CALL && n->value && strcmp(n->value, "exit") == 0;
+    return ast_call_never_returns(n);
 }
 
 /* The first line a node or its subtree carries: several statements (a
@@ -285,8 +291,10 @@ static int completes(Flow* f, ASTNode* n) {
             }
             return any;
         }
-        case AST_EXPRESSION_STATEMENT:
-            if (n->child_count > 0 && is_exit_call(n->children[0])) return 0;
+        case AST_FUNCTION_CALL:
+            /* As a statement, an arm's value or an argument: the arguments
+             * are evaluated first, then the call does not return. */
+            if (is_exit_call(n)) return 0;
             break;
         case AST_CLOSURE:
             /* A trailing block runs inline, once, where it is written: its
@@ -313,6 +321,13 @@ static int completes(Flow* f, ASTNode* n) {
     for (int i = 0; i < n->child_count; i++)
         if (!completes(f, n->children[i])) all = 0;
     return all;
+}
+
+int stmt_can_complete(ASTNode* program, ASTNode* n) {
+    Flow f;
+    memset(&f, 0, sizeof f);
+    f.program = program;
+    return completes(&f, n);
 }
 
 /* ---- saying why ---- */

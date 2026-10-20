@@ -1,0 +1,21 @@
+// `os.exit` is the same extern as `exit`, and leaves a handler the same way
+// (#3017); a handler whose `if` leaves on both paths needs no value either.
+import std.os
+
+half(n: int) -> int! {
+    if n % 2 != 0 { return 0, "odd" }
+    return n / 2, ""
+}
+
+quarter(n: int) -> int {
+    h = half(n) or {
+        if err == "odd" { return -1 } else { panic("unexpected: ${err}") }
+    }
+    return h / 2
+}
+
+main() {
+    println("quarter(8)=${quarter(8)} quarter(3)=${quarter(3)}")
+    c = half(9) or { os.exit(3) }
+    println("not reached ${c}")
+}
