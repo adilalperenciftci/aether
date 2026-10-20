@@ -3600,39 +3600,26 @@ static Type* infer_member_access(ASTNode* expr, SymbolTable* table, Type* obj) {
     /* #2146: `v.x` / `.y` / `.z` / `.w` on a lane value is that
      * lane's scalar: an f32 from an f32x4, a float from an f64x2,
      * an int from a mask. `.z` on an f64x2 is a type error (it has
-     * two lanes), not a silent zero. */
+     * two lanes), not a silent zero: typecheck_expression's member access
+     * reports it, the one place that does (#3042: inference runs on a node
+     * from several places, and reporting here too printed it again). */
     if (expr->value && obj && is_lane_type(obj->kind)) {
         int idx = lane_accessor_index(obj->kind, expr->value);
-        if (idx >= 0) return create_type(lane_scalar_kind(obj->kind));
-        char msg[200];
-        snprintf(msg, sizeof(msg),
-                 "'%s' is not a lane of %s: its lanes are %s",
-                 expr->value, type_name_of_kind(obj->kind),
-                 obj->kind == TYPE_F64X2 ? "`.x` and `.y`"
-                                         : "`.x`, `.y`, `.z` and `.w`");
-        type_error(msg, expr->line, expr->column);
-        return create_type(TYPE_UNKNOWN);
+        return create_type(idx >= 0 ? lane_scalar_kind(obj->kind) : TYPE_UNKNOWN);
     }
     // If node_type already set, use it
     if (expr->node_type && expr->node_type->kind != TYPE_UNKNOWN)
         return clone_type(expr->node_type);
     // #1132 bitstruct field read `b.flag`: the field's declared type.
-    // An unknown field name is a hard error here; a bitstruct's fields
-    // are a closed, declared set, so a typo should not silently become
-    // an UNKNOWN that leaks downstream.
+    // An unknown field name is a hard error; a bitstruct's fields are a
+    // closed, declared set, so a typo must not become an UNKNOWN that leaks
+    // downstream. typecheck_expression's member access reports it, the one
+    // place that does (#3042), as for a lane.
     if (expr->value && obj && obj->kind == TYPE_BITSTRUCT && obj->struct_name) {
         ASTNode* f = bitstruct_field_lookup(g_bitstruct_program,
                                             obj->struct_name, expr->value);
-        if (!f) {
-            char msg[256];
-            snprintf(msg, sizeof(msg),
-                     "'%s' is not a field of bitstruct '%s'",
-                     expr->value, obj->struct_name);
-            type_error(msg, expr->line, expr->column);
-            return create_type(TYPE_UNKNOWN);
-        }
-        return f->node_type ? clone_type(f->node_type)
-                            : create_type(TYPE_UNKNOWN);
+        return f && f->node_type ? clone_type(f->node_type)
+                                 : create_type(TYPE_UNKNOWN);
     }
     // Namespace-qualified constant access: mymath.PI_APPROX -> mymath_PI_APPROX
     if (expr->child_count > 0 && expr->children[0] &&
@@ -12127,7 +12114,11 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
             int narrow_then = 1;
             if (stmt->child_count >= 1) {
                 ASTNode* condition = stmt->children[0];
+                /* #3042: a condition that reported its own error (`h.nope`)
+                 * is not also "not boolean", the type it failed to have. */
+                int errors_before = error_count;
                 typecheck_expression(condition, table);
+                if (error_count > errors_before) return 0;
                 Type* cond_type = infer_type(condition, table);
 
                 if (cond_type && cond_type->kind != TYPE_BOOL) {
@@ -12215,7 +12206,9 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
             if (stmt->child_count > 1) hoist_loop_decls(stmt->children[1], declare_loop_hoist, table);
             if (stmt->child_count >= 1) {
                 ASTNode* condition = stmt->children[0];
+                int errors_before = error_count;   /* #3042, as for `if` */
                 typecheck_expression(condition, table);
+                if (error_count > errors_before) return 0;
                 Type* cond_type = infer_type(condition, table);
 
                 if (cond_type && cond_type->kind != TYPE_BOOL) {
