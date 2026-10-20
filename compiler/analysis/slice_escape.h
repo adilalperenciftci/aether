@@ -21,12 +21,15 @@
  * A closure is no part of the walk: what it may store into the frame's
  * names (a view of the frame's storage, judged as the frame's own stores
  * are, with what any of its names holds at some point of a first walk)
- * taints them from where it is written on, whether or when it is called,
- * and a re-bind it makes is not counted (#2837). Its own stores through a pointer or into a global are
- * checked in its frame with the storage of the frames it is written in
- * counted as storage.
+ * taints them from where it is written on, whether or when it is called.
+ * A call of a closure the frame binds clears what the closure re-binds for
+ * sure, by binding, not spelling (#2837, closure_call_rebinds): with the
+ * taint, the call only ever takes views away. Its own stores through a
+ * pointer or into a global are checked in its frame with the storage of
+ * the frames it is written in counted as storage.
  * Where control joins (after the branches of an `if`, a `match` or a
- * `switch`, around a loop, after a `try`) what holds a view on any path
+ * `switch`, around a loop, after a `try`, whose handler starts from the
+ * state after any statement of its body) what holds a view on any path
  * holds one. Each place a view leaves the frame is reported at the value
  * that leaves (E0900). A slice of a slice parameter, of a `make` buffer or
  * of a module-level array is no such view; a call's result is taken to be

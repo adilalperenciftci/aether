@@ -42,6 +42,7 @@ typedef struct Frame {
     struct Frame* parent; /* the frame a closure is written in; NULL for a function */
     StrMap sticky;    /* paths a closure written here may give a view, from where it is written on */
     StrMap ever;      /* paths that held a view at some point of the walk */
+    Views* try_states; /* in a `try` body: what held a view after any statement of it */
 } Frame;
 
 /* ---- the path sets ---- */
@@ -744,7 +745,12 @@ static void flow_block(Esc* esc, Frame* f, ASTNode* n, Views* v, int rep, int ne
     }
     Views before;
     if (strmap_count(&mine) > 0) views_copy(&before, v);
-    flow_children(esc, f, n, v, rep, 0);
+    /* Inside a `try` body, a panic may leave after any statement: each
+     * statement's state is one the handler may start from (#2837). */
+    for (int i = 0; i < n->child_count; i++) {
+        flow(esc, f, n->children[i], v, rep);
+        if (f->try_states) views_join(f->try_states, v);
+    }
     if (strmap_count(&mine) > 0) {
         for (int i = 0; i < strmap_count(&mine); i++) {
             const char* name = strmap_key_at(&mine, i);
@@ -988,6 +994,278 @@ static int closure_call_view(Frame* f, const Views* v, ASTNode* call) {
     return r;
 }
 
+/* ---- #2837: what a call of a closure re-binds ----
+ *
+ * `reset()` of a closure the frame binds to `reset` runs the closure's body
+ * there, and a name of the frame the body re-binds on every way through it
+ * holds, after the call, what the body gave it last. A store of a view the
+ * body may make is already a view of that name from where the closure is
+ * written on, whenever it runs (taint_closure, `sticky`, which holds_view
+ * reads past anything cleared here). So the call only ever takes views
+ * away, and only from a name the body binds, as a whole, before any way out
+ * of it. Followed soundly:
+ * - the callee is the closure the name holds at the call: the frame binds
+ *   the name once, to that closure literal, in a statement the call runs
+ *   after (a statement of a block around the call, ahead of it);
+ * - the body's names are told apart by binding, not by spelling: one is
+ *   the frame's when the frame binds it ahead of the closure, in a block
+ *   around it (or it is a parameter), the body does not declare one of its
+ *   own first (a parameter, a written-type declaration), and the frame
+ *   declares it with a written type at most once, that same binding, so no
+ *   other variable of that name stands at the call;
+ * - a `return` in the body, or in a statement of it, ends what counts: the
+ *   statements after it may not run; an `if` binds what both of its
+ *   branches bind, a `match` that covers its subject what every arm binds,
+ *   and a loop, a `try`, a nested closure's call or anything else binds
+ *   nothing for sure;
+ * - a panic in the body leaves the frame's state as it was before the call
+ *   (or before the bind), which a `try` around the call starts its handler
+ *   from (the `try` case of flow joins every statement's state). */
+
+#define CLOSURE_PATH_MAX 256
+
+/* The chain of nodes from `n` down to `target`, `n` first, into `path`;
+ * its length, or 0 when `target` is not under `n`. */
+static int path_to(ASTNode* n, ASTNode* target, ASTNode** path, int depth) {
+    if (!n || depth >= CLOSURE_PATH_MAX) return 0;
+    path[depth] = n;
+    if (n == target) return depth + 1;
+    for (int i = 0; i < n->child_count; i++) {
+        int len = path_to(n->children[i], target, path, depth + 1);
+        if (len) return len;
+    }
+    return 0;
+}
+
+/* Is the statement `decl` one that the node `path` ends at runs after: a
+ * statement of a block on the path, ahead of the one the path goes on
+ * through? */
+static int runs_after(ASTNode** path, int len, ASTNode* decl) {
+    for (int d = 0; d + 1 < len; d++) {
+        ASTNode* b = path[d];
+        if (b->type != AST_BLOCK) continue;
+        for (int i = 0; i < b->child_count && b->children[i] != path[d + 1]; i++)
+            if (b->children[i] == decl) return 1;
+    }
+    return 0;
+}
+
+/* The declaration statement of the frame body `n` whose value is `lit`. */
+static ASTNode* binding_of(ASTNode* n, ASTNode* lit) {
+    if (!n || ast_is_own_function(n)) return NULL;
+    if (n->type == AST_VARIABLE_DECLARATION && n->child_count > 0 && n->children[0] == lit)
+        return n;
+    for (int i = 0; i < n->child_count; i++) {
+        ASTNode* r = binding_of(n->children[i], lit);
+        if (r) return r;
+    }
+    return NULL;
+}
+
+/* The names the frame binds ahead of the statement `path` ends at, in the
+ * blocks around it: name -> its binding statement (the first one). */
+static void names_in_scope(ASTNode** path, int len, StrMap* out) {
+    for (int d = 0; d + 1 < len; d++) {
+        ASTNode* b = path[d];
+        if (b->type != AST_BLOCK) continue;
+        for (int i = 0; i < b->child_count && b->children[i] != path[d + 1]; i++) {
+            ASTNode* s = b->children[i];
+            if (!s) continue;
+            if (s->type == AST_VARIABLE_DECLARATION && s->value && !strmap_has(out, s->value))
+                strmap_put(out, s->value, s);
+            if (s->type == AST_TUPLE_DESTRUCTURE)
+                for (int k = 0; k + 1 < s->child_count; k++)
+                    if (s->children[k] && s->children[k]->value &&
+                        !strmap_has(out, s->children[k]->value))
+                        strmap_put(out, s->children[k]->value, s);
+        }
+    }
+}
+
+/* The written-type declarations of `name` in `n` (closures aside): how many,
+ * and the first in `*first`. */
+static int typed_declarations(ASTNode* n, const char* name, ASTNode** first) {
+    if (!n || ast_is_own_function(n)) return 0;
+    int count = 0;
+    if (n->type == AST_VARIABLE_DECLARATION && n->value && !n->type_inferred &&
+        strcmp(n->value, name) == 0) {
+        if (!*first) *first = n;
+        count++;
+    }
+    for (int i = 0; i < n->child_count; i++) count += typed_declarations(n->children[i], name, first);
+    return count;
+}
+
+/* May `n` leave the closure body before its end: a `return` in it, not in
+ * a closure nested in it? */
+static int may_return(ASTNode* n) {
+    if (!n || ast_is_own_function(n)) return 0;
+    if (n->type == AST_RETURN_STATEMENT) return 1;
+    for (int i = 0; i < n->child_count; i++)
+        if (may_return(n->children[i])) return 1;
+    return 0;
+}
+
+static int body_must_bind(Frame* f, ASTNode* n, StrMap* scope, StrMap* own, StrMap* out);
+
+/* `out` keeps only what `other` has too. */
+static void names_intersect(StrMap* out, const StrMap* other) {
+    for (int i = 0; i < strmap_count(out); i++)
+        if (strmap_value_at(out, i) && !strmap_get(other, strmap_key_at(out, i)))
+            strmap_put(out, strmap_key_at(out, i), NULL);
+}
+
+/* What a branch (a block or a statement) binds for sure, on its own copy
+ * of the closure's names. */
+static void branch_must_bind(Frame* f, ASTNode* n, StrMap* scope, const StrMap* own,
+                             StrMap* out) {
+    StrMap mine;
+    strmap_init(&mine);
+    for (int i = 0; i < strmap_count(own); i++)
+        if (strmap_value_at(own, i)) strmap_put(&mine, strmap_key_at(own, i), LIVE);
+    body_must_bind(f, n, scope, &mine, out);
+    strmap_free(&mine);
+}
+
+/* One statement of the body, run for sure: the frame paths it binds as a
+ * whole into `out`, and a name it declares for the body into `own`. */
+static void statement_must_bind(Frame* f, ASTNode* s, StrMap* scope, StrMap* own, StrMap* out) {
+    if (s->type == AST_EXPRESSION_STATEMENT && s->child_count == 1 && s->children[0])
+        s = s->children[0];
+    if (s->type == AST_BLOCK) {
+        branch_must_bind(f, s, scope, own, out);
+        return;
+    }
+    if (s->type == AST_VARIABLE_DECLARATION && s->value) {
+        /* A bare binding of a name of the frame in scope stores into it;
+         * anything else declares one of the body's own. */
+        if (s->type_inferred && !strmap_has(own, s->value) && strmap_has(scope, s->value))
+            strmap_put(out, s->value, LIVE);
+        else
+            strmap_put(own, s->value, LIVE);
+        return;
+    }
+    ASTNode *left, *value;
+    if (store_parts(s, &left, &value)) {
+        char path[256];
+        int element = 0;
+        ASTNode* root = value_path(left, path, sizeof(path), &element);
+        if (root && !element && !strmap_has(own, root->value) && strmap_has(scope, root->value) &&
+            (strchr(path, '.') == NULL || root_is_frame_value(f, root)))
+            strmap_put(out, path, LIVE);
+        return;
+    }
+    if (s->type == AST_IF_STATEMENT && s->child_count >= 3) {
+        StrMap a, b;
+        strmap_init(&a);
+        strmap_init(&b);
+        branch_must_bind(f, s->children[1], scope, own, &a);
+        branch_must_bind(f, s->children[2], scope, own, &b);
+        names_intersect(&a, &b);
+        for (int i = 0; i < strmap_count(&a); i++)
+            if (strmap_value_at(&a, i)) strmap_put(out, strmap_key_at(&a, i), LIVE);
+        strmap_free(&a);
+        strmap_free(&b);
+        return;
+    }
+    if (s->type == AST_MATCH_STATEMENT && ast_match_covers(s)) {
+        StrMap all;
+        strmap_init(&all);
+        int arms = 0;
+        for (int i = 1; i < s->child_count; i++) {
+            ASTNode* arm = s->children[i];
+            if (!arm || arm->type != AST_MATCH_ARM || arm->child_count < 2) continue;
+            StrMap one;
+            strmap_init(&one);
+            branch_must_bind(f, arm->children[1], scope, own, &one);
+            if (arms++ == 0) {
+                for (int k = 0; k < strmap_count(&one); k++)
+                    if (strmap_value_at(&one, k)) strmap_put(&all, strmap_key_at(&one, k), LIVE);
+            } else {
+                names_intersect(&all, &one);
+            }
+            strmap_free(&one);
+        }
+        for (int i = 0; i < strmap_count(&all); i++)
+            if (strmap_value_at(&all, i)) strmap_put(out, strmap_key_at(&all, i), LIVE);
+        strmap_free(&all);
+    }
+    /* A loop may not run, a `try` may stop anywhere, a call binds nothing
+     * for sure here. */
+}
+
+/* The statements of the body `n` (a block, or one statement), in order,
+ * until one that may return. Returns 0 when one did. */
+static int body_must_bind(Frame* f, ASTNode* n, StrMap* scope, StrMap* own, StrMap* out) {
+    if (!n) return 1;
+    if (n->type != AST_BLOCK) {
+        if (may_return(n)) return 0;
+        statement_must_bind(f, n, scope, own, out);
+        return 1;
+    }
+    for (int i = 0; i < n->child_count; i++) {
+        ASTNode* s = n->children[i];
+        if (!s) continue;
+        if (may_return(s)) return 0;
+        statement_must_bind(f, s, scope, own, out);
+    }
+    return 1;
+}
+
+/* `call(name)` (what `name()` becomes), met in the frame's walk: each path
+ * the closure `name` holds re-binds for sure holds no view of the frame's
+ * storage after it but one a store of the closure may give it, which
+ * `sticky` keeps. */
+static void closure_call_rebinds(Frame* f, Views* v, ASTNode* call) {
+    if (!call->value || strcmp(call->value, "call") != 0 || call->child_count == 0 ||
+        !call->children[0] || call->children[0]->type != AST_IDENTIFIER ||
+        !call->children[0]->value || strmap_count(v) == 0)
+        return;
+    const char* name = call->children[0]->value;
+    ASTNode* body = frame_body(f->owner);
+    int seen = 0;
+    ASTNode* lit = closure_bound_once(body, name, &seen);
+    if (!lit || seen != 1) return;
+    ASTNode* decl = binding_of(body, lit);
+    ASTNode* lit_body = frame_body(lit);
+    ASTNode* cpath[CLOSURE_PATH_MAX];
+    ASTNode* dpath[CLOSURE_PATH_MAX];
+    int clen = path_to(body, call, cpath, 0);
+    int dlen = decl ? path_to(body, decl, dpath, 0) : 0;
+    if (!decl || !lit_body || !clen || !dlen || !runs_after(cpath, clen, decl)) return;
+    StrMap scope, own, bound;
+    strmap_init(&scope);
+    strmap_init(&own);
+    strmap_init(&bound);
+    names_in_scope(dpath, dlen, &scope);
+    for (int i = 0; i < strmap_count(&f->params); i++)
+        if (!strmap_has(&scope, strmap_key_at(&f->params, i)))
+            strmap_put(&scope, strmap_key_at(&f->params, i), strmap_value_at(&f->params, i));
+    for (int i = 0; i < lit->child_count; i++) {
+        ASTNode* p = lit->children[i];
+        if (p && p->type == AST_CLOSURE_PARAM && p->value) strmap_put(&own, p->value, LIVE);
+    }
+    body_must_bind(f, lit_body, &scope, &own, &bound);
+    for (int i = 0; i < strmap_count(&bound); i++) {
+        if (!strmap_value_at(&bound, i)) continue;
+        const char* path = strmap_key_at(&bound, i);
+        char root[160];
+        size_t n = strcspn(path, ".");
+        if (n >= sizeof(root)) continue;
+        memcpy(root, path, n);
+        root[n] = '\0';
+        if (!strmap_has(&f->locals, root)) continue;
+        /* No other variable of the name may stand at the call. */
+        ASTNode* typed = NULL;
+        int count = typed_declarations(body, root, &typed);
+        if (count > 1 || (count == 1 && strmap_get(&scope, root) != typed)) continue;
+        views_clear(v, path);
+    }
+    strmap_free(&bound);
+    strmap_free(&own);
+    strmap_free(&scope);
+}
+
 static void flow(Esc* esc, Frame* f, ASTNode* n, Views* v, int rep) {
     if (!n) return;
     if (n->type == AST_CLOSURE && ast_is_own_function(n)) {
@@ -1044,13 +1322,22 @@ static void flow(Esc* esc, Frame* f, ASTNode* n, Views* v, int rep) {
             return;
         case AST_TRY_STATEMENT: {
             /* The handler runs from wherever the body panicked: from what
-             * held a view before it or at any point of it. */
-            Views body;
+             * held a view before it or at any point of it, after any of its
+             * statements (flow_block joins each into `states`), not only
+             * at its end: a statement that clears a path after one that
+             * gave it a view may be the one that panics (#2837). */
+            Views body, states;
             views_copy(&body, v);
+            views_copy(&states, v);
+            Views* outer = f->try_states;
+            f->try_states = &states;
             if (n->child_count > 0) flow(esc, f, n->children[0], &body, rep);
+            f->try_states = outer;
+            if (outer) views_join(outer, &states);
             Views handler;
-            views_copy(&handler, v);
+            views_copy(&handler, &states);
             views_join(&handler, &body);
+            strmap_free(&states);
             for (int i = 1; i < n->child_count; i++) flow(esc, f, n->children[i], &handler, rep);
             views_join(&body, &handler);
             views_move(v, &body);
@@ -1065,6 +1352,12 @@ static void flow(Esc* esc, Frame* f, ASTNode* n, Views* v, int rep) {
             strmap_free(&later);
             return;
         }
+        case AST_FUNCTION_CALL:
+            /* The arguments run first, then the callee: a closure the frame
+             * binds re-binds what it does for sure (#2837). */
+            flow_children(esc, f, n, v, rep, 0);
+            closure_call_rebinds(f, v, n);
+            return;
         case AST_RETURN_STATEMENT:
             flow_children(esc, f, n, v, rep, 0);
             if (rep) {
