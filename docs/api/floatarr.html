@@ -90,6 +90,7 @@
     <li><a href="path.html">path</a></li>
     <li><a href="plural.html">plural</a></li>
     <li><a href="pqueue.html">pqueue</a></li>
+    <li><a href="quote.html">quote</a></li>
     <li><a href="reflect.html">reflect</a></li>
     <li><a href="regex.html">regex</a></li>
     <li><a href="resp.html">resp</a></li>
@@ -204,7 +205,7 @@
       <h3 class="function-name">array <span class="kind">fn</span></h3>
       <pre class="usage"><code>array(arr) <span class="arrow">-&gt;</span> float[]</code></pre>
       <p class="signature"><span class="sig-params">arr: ptr</span></p>
-      <p class="doc">array(arr) -- the buffer as a plain `float[]`, so `v[i]` works (#2041). `a[i]` on the HANDLE cannot work: the handle is a bare `ptr`, and `[]` has no element type to dispatch on. A view is typed, so it does: v = floatarr.array(a) v[3] = 1.5 total = total + v[3] and the compiler lowers `v[i]` to the same load `floatarr_get_unchecked` inlines to, so the readable spelling costs nothing. `std.strarr` has had this shape since it was written. The view is bounded by the array's size (#2301): `v.len` is `floatarr.size(a)` and `v[i]` outside it is the slice bounds panic, not a read past the buffer. Pass it to std.sort (`sort.floats(v)`), or any `float[]` parameter, whole or as a sub-slice. A null handle is the empty slice. BORROWED, not owned: valid until the handle is freed. For the unchecked load in a hot loop, `floatarr_get_unchecked` is still there.</p>
+      <p class="doc">The short name, beside new / get / set: `floatarr.array(a)`.</p>
     </div>
     <div class="function" id="fill" data-name="fill">
       <h3 class="function-name">fill <span class="kind">extern</span></h3>

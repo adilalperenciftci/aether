@@ -15,11 +15,6 @@
   <input type="text" id="search" placeholder="Search snapshot..." onkeyup="searchModule()">
   <h2>Exports</h2>
   <ul class="function-nav">
-    <li><a href="#aether_snapshot_new">aether_snapshot_new</a></li>
-    <li><a href="#aether_snapshot_load">aether_snapshot_load</a></li>
-    <li><a href="#aether_snapshot_store">aether_snapshot_store</a></li>
-    <li><a href="#aether_snapshot_cas">aether_snapshot_cas</a></li>
-    <li><a href="#aether_snapshot_free">aether_snapshot_free</a></li>
     <li><a href="#new">new</a></li>
     <li><a href="#load">load</a></li>
     <li><a href="#store">store</a></li>
@@ -85,6 +80,7 @@
     <li><a href="path.html">path</a></li>
     <li><a href="plural.html">plural</a></li>
     <li><a href="pqueue.html">pqueue</a></li>
+    <li><a href="quote.html">quote</a></li>
     <li><a href="reflect.html">reflect</a></li>
     <li><a href="regex.html">regex</a></li>
     <li><a href="resp.html">resp</a></li>
@@ -125,36 +121,6 @@
     <p class="import-line"><code>import std.snapshot</code></p>
   </div>
   <div class="functions" id="functions">
-    <div class="function" id="aether_snapshot_new" data-name="aether_snapshot_new">
-      <h3 class="function-name">aether_snapshot_new <span class="kind">extern</span></h3>
-      <pre class="usage"><code>aether_snapshot_new(initial) <span class="arrow">-&gt;</span> ptr</code></pre>
-      <p class="signature"><span class="sig-params">initial: ptr</span></p>
-      <p class="doc">Create a cell pointing at `initial` (may be null). Returns the cell handle, or null on allocation failure / memory-cap exceeded. Does NOT take ownership of `initial`.</p>
-    </div>
-    <div class="function" id="aether_snapshot_load" data-name="aether_snapshot_load">
-      <h3 class="function-name">aether_snapshot_load <span class="kind">extern</span></h3>
-      <pre class="usage"><code>aether_snapshot_load(cell) <span class="arrow">-&gt;</span> ptr</code></pre>
-      <p class="signature"><span class="sig-params">cell: ptr</span></p>
-      <p class="doc">Lock-free read: atomic acquire load of the current snapshot. Returns null for a null cell.</p>
-    </div>
-    <div class="function" id="aether_snapshot_store" data-name="aether_snapshot_store">
-      <h3 class="function-name">aether_snapshot_store <span class="kind">extern</span></h3>
-      <pre class="usage"><code>aether_snapshot_store(cell, new_value) <span class="arrow">-&gt;</span> ptr</code></pre>
-      <p class="signature"><span class="sig-params">cell: ptr, new_value: ptr</span></p>
-      <p class="doc">Publish `new_value` and return the displaced (old) snapshot. The writer now owns the returned pointer and must reclaim it only after a grace period (see the contract above). Null cell returns null.</p>
-    </div>
-    <div class="function" id="aether_snapshot_cas" data-name="aether_snapshot_cas">
-      <h3 class="function-name">aether_snapshot_cas <span class="kind">extern</span></h3>
-      <pre class="usage"><code>aether_snapshot_cas(cell, expected, new_value) <span class="arrow">-&gt;</span> int</code></pre>
-      <p class="signature"><span class="sig-params">cell: ptr, expected: ptr, new_value: ptr</span></p>
-      <p class="doc">Compare-and-swap. If the cell holds `expected`, swap in `new_value` and return 1; otherwise return 0 and leave the cell unchanged. On success the caller owns `expected` (reclaim after a grace period); on failure re-load and retry. Null cell returns 0.</p>
-    </div>
-    <div class="function" id="aether_snapshot_free" data-name="aether_snapshot_free">
-      <h3 class="function-name">aether_snapshot_free <span class="kind">extern</span></h3>
-      <pre class="usage"><code>aether_snapshot_free(cell)</code></pre>
-      <p class="signature"><span class="sig-params">cell: ptr</span></p>
-      <p class="doc">Free the cell itself. Does NOT free the snapshot it points at — that value is caller-owned. Null-safe.</p>
-    </div>
     <div class="function" id="new" data-name="new">
       <h3 class="function-name">new <span class="kind">fn</span></h3>
       <pre class="usage"><code>new(initial) <span class="arrow">-&gt;</span> ptr</code></pre>

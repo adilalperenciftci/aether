@@ -31,6 +31,9 @@
     <li><a href="#get_string">get_string</a></li>
     <li><a href="#get_bin">get_bin</a></li>
     <li><a href="#get_ext_type">get_ext_type</a></li>
+    <li><a href="#get_int64">get_int64</a></li>
+    <li><a href="#get_uint">get_uint</a></li>
+    <li><a href="#from_uint">from_uint</a></li>
     <li><a href="#array_size">array_size</a></li>
     <li><a href="#array_get">array_get</a></li>
     <li><a href="#array_add">array_add</a></li>
@@ -111,6 +114,7 @@
     <li><a href="path.html">path</a></li>
     <li><a href="plural.html">plural</a></li>
     <li><a href="pqueue.html">pqueue</a></li>
+    <li><a href="quote.html">quote</a></li>
     <li><a href="reflect.html">reflect</a></li>
     <li><a href="regex.html">regex</a></li>
     <li><a href="resp.html">resp</a></li>
@@ -207,6 +211,7 @@
       <h3 class="function-name">get_int <span class="kind">fn</span></h3>
       <pre class="usage"><code>get_int(val) <span class="arrow">-&gt;</span> long</code></pre>
       <p class="signature"><span class="sig-params">val: ptr</span></p>
+      <p class="doc">The integer, or 0 for a uint 64 of 2^63 or more (get_int64 says so; get_uint reads it).</p>
     </div>
     <div class="function" id="get_float" data-name="get_float">
       <h3 class="function-name">get_float <span class="kind">fn</span></h3>
@@ -230,6 +235,24 @@
       <pre class="usage"><code>get_ext_type(val) <span class="arrow">-&gt;</span> int</code></pre>
       <p class="signature"><span class="sig-params">val: ptr</span></p>
       <p class="doc">The application-defined type id of an extension value -- the first argument ext() was given, or what unpack() read. 0 for anything that is not TYPE_EXT, which is also a valid id, so check get_type first.</p>
+    </div>
+    <div class="function" id="get_int64" data-name="get_int64">
+      <h3 class="function-name">get_int64 <span class="kind">fn</span></h3>
+      <pre class="usage"><code>get_int64(val) <span class="arrow">-&gt;</span> long!</code></pre>
+      <p class="signature"><span class="sig-params">val: ptr</span></p>
+      <p class="doc">The integer as a signed long, or an error when `val` is not an integer or is a uint 64 of 2^63 or more (#2510).</p>
+    </div>
+    <div class="function" id="get_uint" data-name="get_uint">
+      <h3 class="function-name">get_uint <span class="kind">fn</span></h3>
+      <pre class="usage"><code>get_uint(val) <span class="arrow">-&gt;</span> long!</code></pre>
+      <p class="signature"><span class="sig-params">val: ptr</span></p>
+      <p class="doc">A non-negative integer, 0..2^64-1, as the bit pattern of a long: 2^63 and up read negative as a long, and std.bits' udiv64, urem64 and ucmp64 treat them as the unsigned values they are. An error for a negative integer or anything else.</p>
+    </div>
+    <div class="function" id="from_uint" data-name="from_uint">
+      <h3 class="function-name">from_uint <span class="kind">fn</span></h3>
+      <pre class="usage"><code>from_uint(bits) <span class="arrow">-&gt;</span> ptr</code></pre>
+      <p class="signature"><span class="sig-params">bits: long</span></p>
+      <p class="doc">The non-negative integer whose unsigned 64 bits are `bits` (0..2^64-1), the inverse of get_uint; 2^63 and up pack as a uint 64.</p>
     </div>
     <div class="function" id="array_size" data-name="array_size">
       <h3 class="function-name">array_size <span class="kind">fn</span></h3>

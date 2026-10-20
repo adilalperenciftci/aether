@@ -20,27 +20,8 @@
     <li><a href="#EVENT_TEXT">EVENT_TEXT</a></li>
     <li><a href="#EVENT_EOF">EVENT_EOF</a></li>
     <li><a href="#EVENT_ERROR">EVENT_ERROR</a></li>
-    <li><a href="#parser_new_str">parser_new_str</a></li>
-    <li><a href="#next">next</a></li>
-    <li><a href="#event_name">event_name</a></li>
-    <li><a href="#event_text">event_text</a></li>
-    <li><a href="#event_attr_count">event_attr_count</a></li>
-    <li><a href="#event_attr_name">event_attr_name</a></li>
-    <li><a href="#event_attr_value">event_attr_value</a></li>
-    <li><a href="#event_attr_str">event_attr_str</a></li>
-    <li><a href="#parser_error">parser_error</a></li>
-    <li><a href="#parser_free">parser_free</a></li>
-    <li><a href="#builder_new">builder_new</a></li>
-    <li><a href="#builder_declaration">builder_declaration</a></li>
-    <li><a href="#builder_start">builder_start</a></li>
-    <li><a href="#builder_attr">builder_attr</a></li>
-    <li><a href="#builder_text">builder_text</a></li>
-    <li><a href="#builder_end">builder_end</a></li>
-    <li><a href="#builder_element">builder_element</a></li>
-    <li><a href="#builder_finish">builder_finish</a></li>
-    <li><a href="#builder_free">builder_free</a></li>
-    <li><a href="#escape">escape</a></li>
     <li><a href="#parser">parser</a></li>
+    <li><a href="#next">next</a></li>
     <li><a href="#name">name</a></li>
     <li><a href="#text">text</a></li>
     <li><a href="#attr">attr</a></li>
@@ -58,6 +39,7 @@
     <li><a href="#element">element</a></li>
     <li><a href="#finish">finish</a></li>
     <li><a href="#free_builder">free_builder</a></li>
+    <li><a href="#escape">escape</a></li>
   </ul>
   <hr>
   <h2>Modules</h2>
@@ -118,6 +100,7 @@
     <li><a href="path.html">path</a></li>
     <li><a href="plural.html">plural</a></li>
     <li><a href="pqueue.html">pqueue</a></li>
+    <li><a href="quote.html">quote</a></li>
     <li><a href="reflect.html">reflect</a></li>
     <li><a href="regex.html">regex</a></li>
     <li><a href="resp.html">resp</a></li>
@@ -179,111 +162,17 @@
       <h3 class="function-name">EVENT_ERROR <span class="kind">const</span></h3>
       <pre class="usage"><code>EVENT_ERROR = 5</code></pre>
     </div>
-    <div class="function" id="parser_new_str" data-name="parser_new_str">
-      <h3 class="function-name">parser_new_str <span class="kind">extern</span></h3>
-      <pre class="usage"><code>parser_new_str(data) <span class="arrow">-&gt;</span> ptr</code></pre>
-      <p class="signature"><span class="sig-params">data: string</span></p>
-      <p class="doc">---- raw externs (C core) ----</p>
-    </div>
-    <div class="function" id="next" data-name="next">
-      <h3 class="function-name">next <span class="kind">extern</span></h3>
-      <pre class="usage"><code>next(p) <span class="arrow">-&gt;</span> int</code></pre>
-      <p class="signature"><span class="sig-params">p: ptr</span></p>
-    </div>
-    <div class="function" id="event_name" data-name="event_name">
-      <h3 class="function-name">event_name <span class="kind">extern</span></h3>
-      <pre class="usage"><code>event_name(p) <span class="arrow">-&gt;</span> string</code></pre>
-      <p class="signature"><span class="sig-params">p: ptr</span></p>
-    </div>
-    <div class="function" id="event_text" data-name="event_text">
-      <h3 class="function-name">event_text <span class="kind">extern</span></h3>
-      <pre class="usage"><code>event_text(p) <span class="arrow">-&gt;</span> string</code></pre>
-      <p class="signature"><span class="sig-params">p: ptr</span></p>
-    </div>
-    <div class="function" id="event_attr_count" data-name="event_attr_count">
-      <h3 class="function-name">event_attr_count <span class="kind">extern</span></h3>
-      <pre class="usage"><code>event_attr_count(p) <span class="arrow">-&gt;</span> int</code></pre>
-      <p class="signature"><span class="sig-params">p: ptr</span></p>
-    </div>
-    <div class="function" id="event_attr_name" data-name="event_attr_name">
-      <h3 class="function-name">event_attr_name <span class="kind">extern</span></h3>
-      <pre class="usage"><code>event_attr_name(p, i) <span class="arrow">-&gt;</span> string</code></pre>
-      <p class="signature"><span class="sig-params">p: ptr, i: int</span></p>
-    </div>
-    <div class="function" id="event_attr_value" data-name="event_attr_value">
-      <h3 class="function-name">event_attr_value <span class="kind">extern</span></h3>
-      <pre class="usage"><code>event_attr_value(p, i) <span class="arrow">-&gt;</span> string</code></pre>
-      <p class="signature"><span class="sig-params">p: ptr, i: int</span></p>
-    </div>
-    <div class="function" id="event_attr_str" data-name="event_attr_str">
-      <h3 class="function-name">event_attr_str <span class="kind">extern</span></h3>
-      <pre class="usage"><code>event_attr_str(p, name) <span class="arrow">-&gt;</span> string</code></pre>
-      <p class="signature"><span class="sig-params">p: ptr, name: string</span></p>
-    </div>
-    <div class="function" id="parser_error" data-name="parser_error">
-      <h3 class="function-name">parser_error <span class="kind">extern</span></h3>
-      <pre class="usage"><code>parser_error(p) <span class="arrow">-&gt;</span> string</code></pre>
-      <p class="signature"><span class="sig-params">p: ptr</span></p>
-    </div>
-    <div class="function" id="parser_free" data-name="parser_free">
-      <h3 class="function-name">parser_free <span class="kind">extern</span></h3>
-      <pre class="usage"><code>parser_free(p)</code></pre>
-      <p class="signature"><span class="sig-params">p: ptr</span></p>
-    </div>
-    <div class="function" id="builder_new" data-name="builder_new">
-      <h3 class="function-name">builder_new <span class="kind">extern</span></h3>
-      <pre class="usage"><code>builder_new() <span class="arrow">-&gt;</span> ptr</code></pre>
-    </div>
-    <div class="function" id="builder_declaration" data-name="builder_declaration">
-      <h3 class="function-name">builder_declaration <span class="kind">extern</span></h3>
-      <pre class="usage"><code>builder_declaration(b)</code></pre>
-      <p class="signature"><span class="sig-params">b: ptr</span></p>
-    </div>
-    <div class="function" id="builder_start" data-name="builder_start">
-      <h3 class="function-name">builder_start <span class="kind">extern</span></h3>
-      <pre class="usage"><code>builder_start(b, name)</code></pre>
-      <p class="signature"><span class="sig-params">b: ptr, name: string</span></p>
-    </div>
-    <div class="function" id="builder_attr" data-name="builder_attr">
-      <h3 class="function-name">builder_attr <span class="kind">extern</span></h3>
-      <pre class="usage"><code>builder_attr(b, name, value)</code></pre>
-      <p class="signature"><span class="sig-params">b: ptr, name: string, value: string</span></p>
-    </div>
-    <div class="function" id="builder_text" data-name="builder_text">
-      <h3 class="function-name">builder_text <span class="kind">extern</span></h3>
-      <pre class="usage"><code>builder_text(b, text)</code></pre>
-      <p class="signature"><span class="sig-params">b: ptr, text: string</span></p>
-    </div>
-    <div class="function" id="builder_end" data-name="builder_end">
-      <h3 class="function-name">builder_end <span class="kind">extern</span></h3>
-      <pre class="usage"><code>builder_end(b, name)</code></pre>
-      <p class="signature"><span class="sig-params">b: ptr, name: string</span></p>
-    </div>
-    <div class="function" id="builder_element" data-name="builder_element">
-      <h3 class="function-name">builder_element <span class="kind">extern</span></h3>
-      <pre class="usage"><code>builder_element(b, name, text)</code></pre>
-      <p class="signature"><span class="sig-params">b: ptr, name: string, text: string</span></p>
-    </div>
-    <div class="function" id="builder_finish" data-name="builder_finish">
-      <h3 class="function-name">builder_finish <span class="kind">extern</span></h3>
-      <pre class="usage"><code>builder_finish(b) <span class="arrow">-&gt;</span> string</code></pre>
-      <p class="signature"><span class="sig-params">b: ptr</span></p>
-    </div>
-    <div class="function" id="builder_free" data-name="builder_free">
-      <h3 class="function-name">builder_free <span class="kind">extern</span></h3>
-      <pre class="usage"><code>builder_free(b)</code></pre>
-      <p class="signature"><span class="sig-params">b: ptr</span></p>
-    </div>
-    <div class="function" id="escape" data-name="escape">
-      <h3 class="function-name">escape <span class="kind">extern</span></h3>
-      <pre class="usage"><code>escape(s) <span class="arrow">-&gt;</span> string</code></pre>
-      <p class="signature"><span class="sig-params">s: string</span></p>
-    </div>
     <div class="function" id="parser" data-name="parser">
       <h3 class="function-name">parser <span class="kind">fn</span></h3>
       <pre class="usage"><code>parser(data) <span class="arrow">-&gt;</span> ptr</code></pre>
       <p class="signature"><span class="sig-params">data: string</span></p>
       <p class="doc">Build a pull reader over an XML document. Free with `xml.free`.</p>
+    </div>
+    <div class="function" id="next" data-name="next">
+      <h3 class="function-name">next <span class="kind">fn</span></h3>
+      <pre class="usage"><code>next(p) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">p: ptr</span></p>
+      <p class="doc">Advance to the next event; returns one of the EVENT_* constants.</p>
     </div>
     <div class="function" id="name" data-name="name">
       <h3 class="function-name">name <span class="kind">fn</span></h3>
@@ -377,13 +266,19 @@
       <h3 class="function-name">finish <span class="kind">fn</span></h3>
       <pre class="usage"><code>finish(b) <span class="arrow">-&gt;</span> string</code></pre>
       <p class="signature"><span class="sig-params">b: ptr</span></p>
-      <p class="doc">Finish the document and return it as an owned string (escaping already applied throughout). The builder is still alive — call `free_builder`. The string_concat copies the C buffer into an owned Aether string and lets the codegen reclaim the malloc'd original at scope exit (the same handoff std.json's `stringify` uses).</p>
+      <p class="doc">Finish the document and return it as an owned string (escaping already applied throughout). The builder is still alive — call `free_builder`. The string_concat copies the C result into an owned Aether string and lets the codegen release the original at scope exit (the same handoff std.json's `stringify` uses).</p>
     </div>
     <div class="function" id="free_builder" data-name="free_builder">
       <h3 class="function-name">free_builder <span class="kind">fn</span></h3>
       <pre class="usage"><code>free_builder(b)</code></pre>
       <p class="signature"><span class="sig-params">b: ptr</span></p>
       <p class="doc">Release a builder.</p>
+    </div>
+    <div class="function" id="escape" data-name="escape">
+      <h3 class="function-name">escape <span class="kind">fn</span></h3>
+      <pre class="usage"><code>escape(s) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">s: string</span></p>
+      <p class="doc">Escape the five predefined entities (&amp; &lt; &gt; &quot; ') in `s`; returns an owned string. Rarely needed directly — `text` / `attribute` / `element` escape for you — but available for assembling markup by hand.</p>
     </div>
   </div>
 </main>

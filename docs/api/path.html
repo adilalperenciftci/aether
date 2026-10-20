@@ -85,6 +85,7 @@
     <li class="active"><a href="path.html">path</a></li>
     <li><a href="plural.html">plural</a></li>
     <li><a href="pqueue.html">pqueue</a></li>
+    <li><a href="quote.html">quote</a></li>
     <li><a href="reflect.html">reflect</a></li>
     <li><a href="regex.html">regex</a></li>
     <li><a href="resp.html">resp</a></li>
@@ -126,52 +127,48 @@
   </div>
   <div class="functions" id="functions">
     <div class="function" id="join" data-name="join">
-      <h3 class="function-name">join <span class="kind">extern</span></h3>
-      <pre class="usage"><code>join(path1, path2) <span class="arrow">-&gt;</span> string</code></pre>
-      <p class="signature"><span class="sig-params">path1: string, path2: string</span></p>
+      <h3 class="function-name">join <span class="kind">fn</span></h3>
+      <pre class="usage"><code>join(a, b) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">a: string, b: string</span></p>
     </div>
     <div class="function" id="dirname" data-name="dirname">
-      <h3 class="function-name">dirname <span class="kind">extern</span></h3>
-      <pre class="usage"><code>dirname(path) <span class="arrow">-&gt;</span> string</code></pre>
-      <p class="signature"><span class="sig-params">path: string</span></p>
+      <h3 class="function-name">dirname <span class="kind">fn</span></h3>
+      <pre class="usage"><code>dirname(p) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">p: string</span></p>
     </div>
     <div class="function" id="basename" data-name="basename">
-      <h3 class="function-name">basename <span class="kind">extern</span></h3>
-      <pre class="usage"><code>basename(path) <span class="arrow">-&gt;</span> string</code></pre>
-      <p class="signature"><span class="sig-params">path: string</span></p>
+      <h3 class="function-name">basename <span class="kind">fn</span></h3>
+      <pre class="usage"><code>basename(p) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">p: string</span></p>
     </div>
     <div class="function" id="extension" data-name="extension">
-      <h3 class="function-name">extension <span class="kind">extern</span></h3>
-      <pre class="usage"><code>extension(path) <span class="arrow">-&gt;</span> string</code></pre>
-      <p class="signature"><span class="sig-params">path: string</span></p>
+      <h3 class="function-name">extension <span class="kind">fn</span></h3>
+      <pre class="usage"><code>extension(p) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">p: string</span></p>
     </div>
     <div class="function" id="is_absolute" data-name="is_absolute">
-      <h3 class="function-name">is_absolute <span class="kind">extern</span></h3>
-      <pre class="usage"><code>is_absolute(path) <span class="arrow">-&gt;</span> int</code></pre>
-      <p class="signature"><span class="sig-params">path: string</span></p>
+      <h3 class="function-name">is_absolute <span class="kind">fn</span></h3>
+      <pre class="usage"><code>is_absolute(p) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">p: string</span></p>
     </div>
     <div class="function" id="clean" data-name="clean">
-      <h3 class="function-name">clean <span class="kind">extern</span></h3>
-      <pre class="usage"><code>clean(path) <span class="arrow">-&gt;</span> string</code></pre>
-      <p class="signature"><span class="sig-params">path: string</span></p>
-      <p class="doc">Lexical normalize: collapses `//`, resolves `.` and `..`, drops trailing slashes — purely on the string, never touching the filesystem. Empty input → &quot;.&quot;. POSIX-separator aware (`/`); on Windows, normalise `\` to `/` first if needed (see the module note / #1369).</p>
+      <h3 class="function-name">clean <span class="kind">fn</span></h3>
+      <pre class="usage"><code>clean(p) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">p: string</span></p>
     </div>
     <div class="function" id="rel" data-name="rel">
-      <h3 class="function-name">rel <span class="kind">extern</span></h3>
+      <h3 class="function-name">rel <span class="kind">fn</span></h3>
       <pre class="usage"><code>rel(base, target) <span class="arrow">-&gt;</span> string</code></pre>
       <p class="signature"><span class="sig-params">base: string, target: string</span></p>
-      <p class="doc">Relative path from `base` to `target`, lexically (no FS access).</p>
     </div>
     <div class="function" id="is_within_base" data-name="is_within_base">
-      <h3 class="function-name">is_within_base <span class="kind">extern</span></h3>
+      <h3 class="function-name">is_within_base <span class="kind">fn</span></h3>
       <pre class="usage"><code>is_within_base(base, target) <span class="arrow">-&gt;</span> int</code></pre>
       <p class="signature"><span class="sig-params">base: string, target: string</span></p>
-      <p class="doc">1 if `target` is lexically within `base` (no `..` escape), else 0.</p>
     </div>
     <div class="function" id="separator" data-name="separator">
-      <h3 class="function-name">separator <span class="kind">extern</span></h3>
+      <h3 class="function-name">separator <span class="kind">fn</span></h3>
       <pre class="usage"><code>separator() <span class="arrow">-&gt;</span> string</code></pre>
-      <p class="doc">The platform path separator: &quot;/&quot; on POSIX, &quot;\\&quot; on Windows. Use this instead of hardcoding &quot;/&quot; when a separator is genuinely needed. (#1369)</p>
     </div>
     <div class="function" id="join_clean" data-name="join_clean">
       <h3 class="function-name">join_clean <span class="kind">fn</span></h3>

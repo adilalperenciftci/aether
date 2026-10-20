@@ -110,6 +110,7 @@
     <li><a href="path.html">path</a></li>
     <li><a href="plural.html">plural</a></li>
     <li><a href="pqueue.html">pqueue</a></li>
+    <li><a href="quote.html">quote</a></li>
     <li><a href="reflect.html">reflect</a></li>
     <li><a href="regex.html">regex</a></li>
     <li><a href="resp.html">resp</a></li>
@@ -165,6 +166,7 @@
       <h3 class="function-name">receive_raw <span class="kind">extern</span></h3>
       <pre class="usage"><code>receive_raw(sock, max_bytes) <span class="arrow">-&gt;</span> string</code></pre>
       <p class="signature"><span class="sig-params">sock: ptr, max_bytes: int</span></p>
+      <p class="doc">A fresh buffer the caller owns, as std.net declares it; a plain `-&gt; string` here took it for borrowed and leaked one buffer per read.</p>
     </div>
     <div class="function" id="receive_n_raw" data-name="receive_n_raw">
       <h3 class="function-name">receive_n_raw <span class="kind">extern</span></h3>
@@ -269,7 +271,7 @@
       <h3 class="function-name">read <span class="kind">fn</span></h3>
       <pre class="usage"><code>read(sock, max_bytes) <span class="arrow">-&gt;</span> (string, string)</code></pre>
       <p class="signature"><span class="sig-params">sock: ptr, max_bytes: int</span></p>
-      <p class="doc">Read up to max_bytes from a socket. Returns (data, &quot;&quot;) on success, (&quot;&quot;, error) on transport failure or connection close. This text wrapper copies with string_concat and is strlen-shaped; use read_n when the payload may contain embedded NUL bytes.</p>
+      <p class="doc">Read up to max_bytes from a socket. Returns (data, &quot;&quot;) on success, (&quot;&quot;, error) on transport failure or connection close. The caller owns the data, which keeps the length received; read_n also returns it.</p>
     </div>
     <div class="function" id="read_n" data-name="read_n">
       <h3 class="function-name">read_n <span class="kind">fn</span></h3>

@@ -1933,6 +1933,9 @@ docs: docgen
 	@echo "==================================="
 	@echo "Generating API Documentation"
 	@echo "==================================="
+	@# Everything in docs/api is docgen's output, so the folder is cleared
+	@# first: a page for a module that no longer exists does not linger.
+	@rm -rf docs/api
 	@$(MKDIR) docs/api
 	./$(BUILD_DIR)/docgen$(EXE_EXT) std docs/api
 	@echo ""
@@ -3148,7 +3151,29 @@ collect-changelogs:
 	    echo "changelog fragments: no python3, skipped"; \
 	fi
 
-check-docs: compiler ae stdlib
+# docs/api is generated from std by tools/docgen and committed. Nothing
+# compared the two, so after #2976 and #3014 the reference still documented
+# hundreds of removed exports and had no page for std.quote. This
+# regenerates it into a temporary folder and compares every file by
+# checksum (coreutils only: the MSYS2 legs have no diff), naming each file
+# that differs. The fix is `make docs` and committing docs/api.
+.PHONY: check-api-docs
+check-api-docs: docgen
+	@tmp=$$(mktemp -d); \
+	./$(BUILD_DIR)/docgen$(EXE_EXT) std "$$tmp/api" >/dev/null || { rm -rf "$$tmp"; exit 1; }; \
+	(cd "$$tmp/api" && find . -type f | LC_ALL=C sort | xargs cksum) | LC_ALL=C sort > "$$tmp/want"; \
+	(cd docs/api && find . -type f | LC_ALL=C sort | xargs cksum) | LC_ALL=C sort > "$$tmp/have"; \
+	stale=$$(LC_ALL=C comm -3 "$$tmp/want" "$$tmp/have" | awk '{print $$NF}' | LC_ALL=C sort -u); \
+	rm -rf "$$tmp"; \
+	if [ -z "$$stale" ]; then \
+	    echo "  [PASS] docs/api is what docgen writes for std"; \
+	else \
+	    echo "  [FAIL] docs/api differs from docgen's output for std; run 'make docs' and commit docs/api:"; \
+	    printf '%s\n' "$$stale" | sed 's/^/           /'; \
+	    exit 1; \
+	fi
+
+check-docs: compiler ae stdlib check-api-docs
 	@echo "==================================="
 	@echo "  documentation examples"
 	@echo "==================================="

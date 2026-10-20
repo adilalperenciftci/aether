@@ -15,15 +15,6 @@
   <input type="text" id="search" placeholder="Search worker..." onkeyup="searchModule()">
   <h2>Exports</h2>
   <ul class="function-nav">
-    <li><a href="#aether_worker_run">aether_worker_run</a></li>
-    <li><a href="#aether_worker_run_detached">aether_worker_run_detached</a></li>
-    <li><a href="#aether_worker_set_main_poster">aether_worker_set_main_poster</a></li>
-    <li><a href="#aether_worker_deliver">aether_worker_deliver</a></li>
-    <li><a href="#aether_worker_drain">aether_worker_drain</a></li>
-    <li><a href="#aether_worker_pending">aether_worker_pending</a></li>
-    <li><a href="#aether_worker_wait">aether_worker_wait</a></li>
-    <li><a href="#aether_worker_pool_configure">aether_worker_pool_configure</a></li>
-    <li><a href="#aether_worker_pool_shutdown">aether_worker_pool_shutdown</a></li>
     <li><a href="#run">run</a></li>
     <li><a href="#run_detached">run_detached</a></li>
     <li><a href="#set_main_poster">set_main_poster</a></li>
@@ -94,6 +85,7 @@
     <li><a href="path.html">path</a></li>
     <li><a href="plural.html">plural</a></li>
     <li><a href="pqueue.html">pqueue</a></li>
+    <li><a href="quote.html">quote</a></li>
     <li><a href="reflect.html">reflect</a></li>
     <li><a href="regex.html">regex</a></li>
     <li><a href="resp.html">resp</a></li>
@@ -134,49 +126,6 @@
     <p class="import-line"><code>import std.worker</code></p>
   </div>
   <div class="functions" id="functions">
-    <div class="function" id="aether_worker_run" data-name="aether_worker_run">
-      <h3 class="function-name">aether_worker_run <span class="kind">extern</span></h3>
-      <pre class="usage"><code>aether_worker_run(work, done) <span class="arrow">-&gt;</span> int</code></pre>
-      <p class="signature"><span class="sig-params">work: fn, done: fn</span></p>
-      <p class="doc">---- raw externs (std/worker/aether_worker.c) ---- `fn` lowers to the compiler's _AeClosure ({fn, env}); the C side stores it and invokes it (on the worker thread for `work`, on the loop thread for `done`) with the emitted fn(env, args...) convention. `ptr` job handles are opaque WorkerJob*.</p>
-    </div>
-    <div class="function" id="aether_worker_run_detached" data-name="aether_worker_run_detached">
-      <h3 class="function-name">aether_worker_run_detached <span class="kind">extern</span></h3>
-      <pre class="usage"><code>aether_worker_run_detached(work) <span class="arrow">-&gt;</span> int</code></pre>
-      <p class="signature"><span class="sig-params">work: fn</span></p>
-    </div>
-    <div class="function" id="aether_worker_set_main_poster" data-name="aether_worker_set_main_poster">
-      <h3 class="function-name">aether_worker_set_main_poster <span class="kind">extern</span></h3>
-      <pre class="usage"><code>aether_worker_set_main_poster(poster)</code></pre>
-      <p class="signature"><span class="sig-params">poster: fn</span></p>
-    </div>
-    <div class="function" id="aether_worker_deliver" data-name="aether_worker_deliver">
-      <h3 class="function-name">aether_worker_deliver <span class="kind">extern</span></h3>
-      <pre class="usage"><code>aether_worker_deliver(job)</code></pre>
-      <p class="signature"><span class="sig-params">job: ptr</span></p>
-    </div>
-    <div class="function" id="aether_worker_drain" data-name="aether_worker_drain">
-      <h3 class="function-name">aether_worker_drain <span class="kind">extern</span></h3>
-      <pre class="usage"><code>aether_worker_drain(max) <span class="arrow">-&gt;</span> int</code></pre>
-      <p class="signature"><span class="sig-params">max: int</span></p>
-    </div>
-    <div class="function" id="aether_worker_pending" data-name="aether_worker_pending">
-      <h3 class="function-name">aether_worker_pending <span class="kind">extern</span></h3>
-      <pre class="usage"><code>aether_worker_pending() <span class="arrow">-&gt;</span> int</code></pre>
-    </div>
-    <div class="function" id="aether_worker_wait" data-name="aether_worker_wait">
-      <h3 class="function-name">aether_worker_wait <span class="kind">extern</span></h3>
-      <pre class="usage"><code>aether_worker_wait() <span class="arrow">-&gt;</span> int</code></pre>
-    </div>
-    <div class="function" id="aether_worker_pool_configure" data-name="aether_worker_pool_configure">
-      <h3 class="function-name">aether_worker_pool_configure <span class="kind">extern</span></h3>
-      <pre class="usage"><code>aether_worker_pool_configure(n)</code></pre>
-      <p class="signature"><span class="sig-params">n: int</span></p>
-    </div>
-    <div class="function" id="aether_worker_pool_shutdown" data-name="aether_worker_pool_shutdown">
-      <h3 class="function-name">aether_worker_pool_shutdown <span class="kind">extern</span></h3>
-      <pre class="usage"><code>aether_worker_pool_shutdown()</code></pre>
-    </div>
     <div class="function" id="run" data-name="run">
       <h3 class="function-name">run <span class="kind">fn</span></h3>
       <pre class="usage"><code>run(work, done) <span class="arrow">-&gt;</span> bool</code></pre>

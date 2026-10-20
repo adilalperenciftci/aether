@@ -30,6 +30,7 @@
     <li><a href="#keys_get_raw">keys_get_raw</a></li>
     <li><a href="#put">put</a></li>
     <li><a href="#get">get</a></li>
+    <li><a href="#get_string">get_string</a></li>
     <li><a href="#keys">keys</a></li>
     <li><a href="#keys_size">keys_size</a></li>
     <li><a href="#keys_get">keys_get</a></li>
@@ -93,6 +94,7 @@
     <li><a href="path.html">path</a></li>
     <li><a href="plural.html">plural</a></li>
     <li><a href="pqueue.html">pqueue</a></li>
+    <li><a href="quote.html">quote</a></li>
     <li><a href="reflect.html">reflect</a></li>
     <li><a href="regex.html">regex</a></li>
     <li><a href="resp.html">resp</a></li>
@@ -136,6 +138,7 @@
     <div class="function" id="new" data-name="new">
       <h3 class="function-name">new <span class="kind">extern</span></h3>
       <pre class="usage"><code>new() <span class="arrow">-&gt;</span> ptr</code></pre>
+      <p class="doc">Keys cross as `@aether string`: the C map reads the AetherString's length, so a key with an embedded NUL is the whole key (#2469). Unwrapped to a C string, &quot;a\0x&quot; and &quot;a\0y&quot; were one key, &quot;a&quot;.</p>
     </div>
     <div class="function" id="put_raw" data-name="put_raw">
       <h3 class="function-name">put_raw <span class="kind">extern</span></h3>
@@ -146,7 +149,7 @@
       <h3 class="function-name">put_string_owned <span class="kind">extern</span></h3>
       <pre class="usage"><code>put_string_owned(map, key, value) <span class="arrow">-&gt;</span> int</code></pre>
       <p class="signature"><span class="sig-params">map: ptr, key: string, value: ptr</span></p>
-      <p class="doc">Heap-string-aware put. The map acquires its OWN reference: a refcounted string is retained, a plain pointer (a literal, a borrowed char*) is copied. The caller keeps and independently frees theirs, so the same value can live in several containers. map_free releases each owned value. Codegen auto-routes `map.put(m, k, heap_string_expr)` to the adopting sibling instead, where the value is escaping into the map.</p>
+      <p class="doc">String-aware put, for C and `ptr` callers. The map takes a reference of its own: a counted string is retained, a plain C pointer is copied. The caller keeps and releases its own, so the same value can live in several containers. map_free releases each owned value. `map.put(m, k, s)` of a `string` in Aether code is a store into the map (R3): the compiler hands the map a reference, moving a fresh value in.</p>
     </div>
     <div class="function" id="get_raw" data-name="get_raw">
       <h3 class="function-name">get_raw <span class="kind">extern</span></h3>
@@ -209,6 +212,12 @@
       <pre class="usage"><code>get(map, key) <span class="arrow">-&gt;</span> (ptr, string)</code></pre>
       <p class="signature"><span class="sig-params">map: ptr, key: string</span></p>
       <p class="doc">Look up a key. - (value, &quot;&quot;)          : key present - (null, &quot;&quot;)           : key absent (not an error — use map.has) - (null, &quot;null map&quot;)   : `map` is null</p>
+    </div>
+    <div class="function" id="get_string" data-name="get_string">
+      <h3 class="function-name">get_string <span class="kind">fn</span></h3>
+      <pre class="usage"><code>get_string(map, key) <span class="arrow">-&gt;</span> (string, string)</code></pre>
+      <p class="signature"><span class="sig-params">map: ptr, key: string</span></p>
+      <p class="doc">Look up a key whose value is a string. `get` hands back a `ptr`, which a `string` local would read as text whatever it points at (refused, E0202); this says the value is a string, and checks it is one: - (value, &quot;&quot;)              : key present, its value a string - (null, &quot;&quot;)               : key absent (not an error — use map.has) - (null, &quot;not a string&quot;)   : the value is some other pointer - (null, &quot;null map&quot;)       : `map` is null</p>
     </div>
     <div class="function" id="keys" data-name="keys">
       <h3 class="function-name">keys <span class="kind">fn</span></h3>

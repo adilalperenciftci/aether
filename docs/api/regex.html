@@ -15,24 +15,6 @@
   <input type="text" id="search" placeholder="Search regex..." onkeyup="searchModule()">
   <h2>Exports</h2>
   <ul class="function-nav">
-    <li><a href="#aether_regex_compile">aether_regex_compile</a></li>
-    <li><a href="#aether_regex_free">aether_regex_free</a></li>
-    <li><a href="#aether_regex_matches">aether_regex_matches</a></li>
-    <li><a href="#aether_regex_captures">aether_regex_captures</a></li>
-    <li><a href="#aether_regex_captures_count">aether_regex_captures_count</a></li>
-    <li><a href="#aether_regex_captures_get">aether_regex_captures_get</a></li>
-    <li><a href="#aether_regex_captures_start">aether_regex_captures_start</a></li>
-    <li><a href="#aether_regex_captures_end">aether_regex_captures_end</a></li>
-    <li><a href="#aether_regex_captures_free">aether_regex_captures_free</a></li>
-    <li><a href="#aether_regex_find_all">aether_regex_find_all</a></li>
-    <li><a href="#aether_regex_find_all_count">aether_regex_find_all_count</a></li>
-    <li><a href="#aether_regex_find_all_start">aether_regex_find_all_start</a></li>
-    <li><a href="#aether_regex_find_all_end">aether_regex_find_all_end</a></li>
-    <li><a href="#aether_regex_find_all_free">aether_regex_find_all_free</a></li>
-    <li><a href="#aether_regex_replace">aether_regex_replace</a></li>
-    <li><a href="#aether_regex_replace_all">aether_regex_replace_all</a></li>
-    <li><a href="#aether_regex_last_error">aether_regex_last_error</a></li>
-    <li><a href="#aether_regex_clear_last_error">aether_regex_clear_last_error</a></li>
     <li><a href="#compile">compile</a></li>
     <li><a href="#compile_flags">compile_flags</a></li>
     <li><a href="#free">free</a></li>
@@ -120,6 +102,7 @@
     <li><a href="path.html">path</a></li>
     <li><a href="plural.html">plural</a></li>
     <li><a href="pqueue.html">pqueue</a></li>
+    <li><a href="quote.html">quote</a></li>
     <li><a href="reflect.html">reflect</a></li>
     <li class="active"><a href="regex.html">regex</a></li>
     <li><a href="resp.html">resp</a></li>
@@ -160,94 +143,6 @@
     <p class="import-line"><code>import std.regex</code></p>
   </div>
   <div class="functions" id="functions">
-    <div class="function" id="aether_regex_compile" data-name="aether_regex_compile">
-      <h3 class="function-name">aether_regex_compile <span class="kind">extern</span></h3>
-      <pre class="usage"><code>aether_regex_compile(pattern, flags) <span class="arrow">-&gt;</span> ptr</code></pre>
-      <p class="signature"><span class="sig-params">pattern: string, flags: int</span></p>
-    </div>
-    <div class="function" id="aether_regex_free" data-name="aether_regex_free">
-      <h3 class="function-name">aether_regex_free <span class="kind">extern</span></h3>
-      <pre class="usage"><code>aether_regex_free(re)</code></pre>
-      <p class="signature"><span class="sig-params">re: ptr</span></p>
-    </div>
-    <div class="function" id="aether_regex_matches" data-name="aether_regex_matches">
-      <h3 class="function-name">aether_regex_matches <span class="kind">extern</span></h3>
-      <pre class="usage"><code>aether_regex_matches(re, s) <span class="arrow">-&gt;</span> int</code></pre>
-      <p class="signature"><span class="sig-params">re: ptr, s: string</span></p>
-    </div>
-    <div class="function" id="aether_regex_captures" data-name="aether_regex_captures">
-      <h3 class="function-name">aether_regex_captures <span class="kind">extern</span></h3>
-      <pre class="usage"><code>aether_regex_captures(re, s) <span class="arrow">-&gt;</span> ptr</code></pre>
-      <p class="signature"><span class="sig-params">re: ptr, s: string</span></p>
-    </div>
-    <div class="function" id="aether_regex_captures_count" data-name="aether_regex_captures_count">
-      <h3 class="function-name">aether_regex_captures_count <span class="kind">extern</span></h3>
-      <pre class="usage"><code>aether_regex_captures_count(caps) <span class="arrow">-&gt;</span> int</code></pre>
-      <p class="signature"><span class="sig-params">caps: ptr</span></p>
-    </div>
-    <div class="function" id="aether_regex_captures_get" data-name="aether_regex_captures_get">
-      <h3 class="function-name">aether_regex_captures_get <span class="kind">extern</span></h3>
-      <pre class="usage"><code>aether_regex_captures_get(caps, index) <span class="arrow">-&gt;</span> string</code></pre>
-      <p class="signature"><span class="sig-params">caps: ptr, index: int</span></p>
-    </div>
-    <div class="function" id="aether_regex_captures_start" data-name="aether_regex_captures_start">
-      <h3 class="function-name">aether_regex_captures_start <span class="kind">extern</span></h3>
-      <pre class="usage"><code>aether_regex_captures_start(caps, index) <span class="arrow">-&gt;</span> int</code></pre>
-      <p class="signature"><span class="sig-params">caps: ptr, index: int</span></p>
-    </div>
-    <div class="function" id="aether_regex_captures_end" data-name="aether_regex_captures_end">
-      <h3 class="function-name">aether_regex_captures_end <span class="kind">extern</span></h3>
-      <pre class="usage"><code>aether_regex_captures_end(caps, index) <span class="arrow">-&gt;</span> int</code></pre>
-      <p class="signature"><span class="sig-params">caps: ptr, index: int</span></p>
-    </div>
-    <div class="function" id="aether_regex_captures_free" data-name="aether_regex_captures_free">
-      <h3 class="function-name">aether_regex_captures_free <span class="kind">extern</span></h3>
-      <pre class="usage"><code>aether_regex_captures_free(caps)</code></pre>
-      <p class="signature"><span class="sig-params">caps: ptr</span></p>
-    </div>
-    <div class="function" id="aether_regex_find_all" data-name="aether_regex_find_all">
-      <h3 class="function-name">aether_regex_find_all <span class="kind">extern</span></h3>
-      <pre class="usage"><code>aether_regex_find_all(re, s) <span class="arrow">-&gt;</span> ptr</code></pre>
-      <p class="signature"><span class="sig-params">re: ptr, s: string</span></p>
-    </div>
-    <div class="function" id="aether_regex_find_all_count" data-name="aether_regex_find_all_count">
-      <h3 class="function-name">aether_regex_find_all_count <span class="kind">extern</span></h3>
-      <pre class="usage"><code>aether_regex_find_all_count(fa) <span class="arrow">-&gt;</span> int</code></pre>
-      <p class="signature"><span class="sig-params">fa: ptr</span></p>
-    </div>
-    <div class="function" id="aether_regex_find_all_start" data-name="aether_regex_find_all_start">
-      <h3 class="function-name">aether_regex_find_all_start <span class="kind">extern</span></h3>
-      <pre class="usage"><code>aether_regex_find_all_start(fa, index) <span class="arrow">-&gt;</span> int</code></pre>
-      <p class="signature"><span class="sig-params">fa: ptr, index: int</span></p>
-    </div>
-    <div class="function" id="aether_regex_find_all_end" data-name="aether_regex_find_all_end">
-      <h3 class="function-name">aether_regex_find_all_end <span class="kind">extern</span></h3>
-      <pre class="usage"><code>aether_regex_find_all_end(fa, index) <span class="arrow">-&gt;</span> int</code></pre>
-      <p class="signature"><span class="sig-params">fa: ptr, index: int</span></p>
-    </div>
-    <div class="function" id="aether_regex_find_all_free" data-name="aether_regex_find_all_free">
-      <h3 class="function-name">aether_regex_find_all_free <span class="kind">extern</span></h3>
-      <pre class="usage"><code>aether_regex_find_all_free(fa)</code></pre>
-      <p class="signature"><span class="sig-params">fa: ptr</span></p>
-    </div>
-    <div class="function" id="aether_regex_replace" data-name="aether_regex_replace">
-      <h3 class="function-name">aether_regex_replace <span class="kind">extern</span></h3>
-      <pre class="usage"><code>aether_regex_replace(re, s, repl) <span class="arrow">-&gt;</span> string</code></pre>
-      <p class="signature"><span class="sig-params">re: ptr, s: string, repl: string</span></p>
-    </div>
-    <div class="function" id="aether_regex_replace_all" data-name="aether_regex_replace_all">
-      <h3 class="function-name">aether_regex_replace_all <span class="kind">extern</span></h3>
-      <pre class="usage"><code>aether_regex_replace_all(re, s, repl) <span class="arrow">-&gt;</span> string</code></pre>
-      <p class="signature"><span class="sig-params">re: ptr, s: string, repl: string</span></p>
-    </div>
-    <div class="function" id="aether_regex_last_error" data-name="aether_regex_last_error">
-      <h3 class="function-name">aether_regex_last_error <span class="kind">extern</span></h3>
-      <pre class="usage"><code>aether_regex_last_error() <span class="arrow">-&gt;</span> string</code></pre>
-    </div>
-    <div class="function" id="aether_regex_clear_last_error" data-name="aether_regex_clear_last_error">
-      <h3 class="function-name">aether_regex_clear_last_error <span class="kind">extern</span></h3>
-      <pre class="usage"><code>aether_regex_clear_last_error()</code></pre>
-    </div>
     <div class="function" id="compile" data-name="compile">
       <h3 class="function-name">compile <span class="kind">fn</span></h3>
       <pre class="usage"><code>compile(pattern) <span class="arrow">-&gt;</span> ptr!</code></pre>
