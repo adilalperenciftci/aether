@@ -1076,6 +1076,153 @@ main() { carry(null, 2) }
 AE
 refused loop_rebind_after 12:5 "'p' is a borrowed \`ptr\` parameter, stored in a module-level \`var\`"
 
+# An if/else, or a match that covers its subject, every arm of which binds
+# the local anew before reading it, binds it as a statement of the body
+# would, when the condition or the subject does not read it: the `p` of the
+# pass before is gone by `kept = q` on every path.
+cat > "$TMP/loop_rebind_arms.ae" <<'AE'
+import std.list
+var kept: ptr = null
+
+by_if(p: ptr, n: int) {
+    i = 0
+    while i < n {
+        if i % 2 == 0 {
+            q = list.new()
+        } else {
+            q = list.new()
+        }
+        kept = q
+        q = p
+        i = i + 1
+    }
+}
+
+by_else_if(p: ptr, n: int) {
+    for i in 0..n {
+        if i == 0 {
+            q = list.new()
+        } else if i == 1 {
+            kept = null
+            q = list.new()
+        } else {
+            q = list.new()
+        }
+        kept = q
+        q = p
+    }
+}
+
+by_match(p: ptr, n: int) {
+    i = 0
+    while i < n {
+        match i % 3 {
+            0 -> { q = list.new() }
+            1 -> { q = list.new() }
+            _ -> { q = list.new() }
+        }
+        kept = q
+        q = p
+        i = i + 1
+    }
+}
+
+main() { by_if(null, 2)  by_else_if(null, 3)  by_match(null, 3) }
+AE
+accepted loop_rebind_arms
+
+# An arm that binds nothing, a read in an arm before its binding, a
+# condition that reads the local, or a match whose arms do not cover its
+# subject leave a path on which the pass before's `p` reaches `kept`.
+cat > "$TMP/loop_rebind_arm_missing.ae" <<'AE'
+import std.list
+var kept: ptr = null
+
+carry(p: ptr, n: int) {
+    q = list.new()
+    i = 0
+    while i < n {
+        if i % 2 == 0 {
+            q = list.new()
+        }
+        kept = q
+        q = p
+        i = i + 1
+    }
+}
+
+main() { carry(null, 2) }
+AE
+refused loop_rebind_arm_missing 11:9 "'p' is a borrowed \`ptr\` parameter, stored in a module-level \`var\`"
+
+cat > "$TMP/loop_rebind_arm_reads_first.ae" <<'AE'
+import std.list
+var kept: ptr = null
+
+carry(p: ptr, n: int) {
+    q = list.new()
+    i = 0
+    while i < n {
+        if i % 2 == 0 {
+            kept = q
+            q = list.new()
+        } else {
+            q = list.new()
+        }
+        q = p
+        i = i + 1
+    }
+}
+
+main() { carry(null, 2) }
+AE
+refused loop_rebind_arm_reads_first 9:13 "'p' is a borrowed \`ptr\` parameter, stored in a module-level \`var\`"
+
+cat > "$TMP/loop_rebind_arm_condition.ae" <<'AE'
+import std.list
+var kept: ptr = null
+
+carry(p: ptr, n: int) {
+    q = list.new()
+    i = 0
+    while i < n {
+        if q == null {
+            q = list.new()
+        } else {
+            q = list.new()
+        }
+        kept = q
+        q = p
+        i = i + 1
+    }
+}
+
+main() { carry(null, 2) }
+AE
+refused loop_rebind_arm_condition 13:9 "'p' is a borrowed \`ptr\` parameter, stored in a module-level \`var\`"
+
+cat > "$TMP/loop_rebind_match_uncovered.ae" <<'AE'
+import std.list
+var kept: ptr = null
+
+carry(p: ptr, n: int) {
+    q = list.new()
+    i = 0
+    while i < n {
+        match i % 3 {
+            0 -> { q = list.new() }
+            1 -> { q = list.new() }
+        }
+        kept = q
+        q = p
+        i = i + 1
+    }
+}
+
+main() { carry(null, 3) }
+AE
+refused loop_rebind_match_uncovered 12:9 "'p' is a borrowed \`ptr\` parameter, stored in a module-level \`var\`"
+
 # chain_cell <name> <links>: `kept = l<links>`, then `l<k> = l<k-1>` down to
 # `l0 = p`, in a loop: `kept` holds `p` after <links> + 1 passes.
 chain_cell() {

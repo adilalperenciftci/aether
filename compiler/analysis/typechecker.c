@@ -8710,12 +8710,90 @@ static const char* loop_stmt_rebinds(ASTNode* st, const char** path, const char*
     return name;
 }
 
+/* #3047 review, a follow-up to b87005bc: does `st` bind the local `name`
+ * anew, whole, on every path through it, before anything in it names it?
+ * A statement loop_stmt_rebinds says binds all of it does; so does an if
+ * with an else, or a match whose arms cover its subject (ast_match_covers),
+ * whose condition, or subject and patterns, do not name it and each arm of
+ * which does; an arm, a block, does when the first of its statements to
+ * name it does. */
+static int loop_rebinds_whole(ASTNode* st, const char* name, const char** globals,
+                              int nglobals) {
+    if (st && st->type == AST_EXPRESSION_STATEMENT && st->child_count == 1) st = st->children[0];
+    if (!st) return 0;
+    if (st->type == AST_BLOCK) {
+        for (int i = 0; i < st->child_count; i++)
+            if (ast_names(st->children[i], name))
+                return loop_rebinds_whole(st->children[i], name, globals, nglobals);
+        return 0;
+    }
+    if (st->type == AST_IF_STATEMENT)
+        return st->child_count == 3 && !ast_names(st->children[0], name) &&
+               loop_rebinds_whole(st->children[1], name, globals, nglobals) &&
+               loop_rebinds_whole(st->children[2], name, globals, nglobals);
+    if (st->type == AST_MATCH_STATEMENT) {
+        if (st->child_count < 2 || !ast_match_covers(st) || ast_names(st->children[0], name))
+            return 0;
+        for (int i = 1; i < st->child_count; i++) {
+            ASTNode* arm = st->children[i];
+            if (!arm || arm->type != AST_MATCH_ARM || arm->child_count < 2 ||
+                ast_names(arm->children[0], name) ||
+                !loop_rebinds_whole(arm->children[1], name, globals, nglobals))
+                return 0;
+        }
+        return 1;
+    }
+    const char* path;
+    const char* got = loop_stmt_rebinds(st, &path, globals, nglobals);
+    return got && !path && !strcmp(got, name);
+}
+
+/* `name` (at `path`) bound by body statement `i` of `loop` joins `k`
+ * unless the loop's header, or a statement before `i`, names it. */
+static void loop_kill_note(ASTNode* loop, ASTNode* body, int i, LoopKills* k, const char* name,
+                           const char* path) {
+    int named = 0;
+    for (int h = 0; h + 1 < loop->child_count && !named; h++)
+        named = ast_names(loop->children[h], name);
+    for (int j = 0; body->type == AST_BLOCK && j < i && !named; j++)
+        named = ast_names(body->children[j], name);
+    for (int j = 0; j < k->count && !named; j++)
+        named = !strcmp(k->names[j], name) && !k->paths[j] && !path;
+    if (named) return;
+    if (k->count == k->cap) {
+        k->cap = k->cap ? k->cap * 2 : 8;
+        k->names = aether_xrealloc(k->names, (size_t)k->cap * sizeof(char*));
+        k->paths = aether_xrealloc(k->paths, (size_t)k->cap * sizeof(char*));
+    }
+    k->names[k->count] = name;
+    k->paths[k->count++] = path;
+}
+
+/* Each local the branch statement `st` (body statement `i`) binds whole on
+ * every path: a name some binding in it takes, `n` its subtree. */
+static void loop_branch_kills(ASTNode* loop, ASTNode* body, int i, ASTNode* st, ASTNode* n,
+                              LoopKills* k, const char** globals, int nglobals) {
+    if (!n) return;
+    const char* name = NULL;
+    if (n->type == AST_VARIABLE_DECLARATION && n->value)
+        name = n->value;
+    else if (n->type == AST_BINARY_EXPRESSION && n->value && !strcmp(n->value, "=") &&
+             n->child_count == 2 && n->children[0] && n->children[0]->type == AST_IDENTIFIER)
+        name = n->children[0]->value;
+    if (name && loop_rebinds_whole(st, name, globals, nglobals))
+        loop_kill_note(loop, body, i, k, name, NULL);
+    for (int c = 0; c < n->child_count; c++)
+        loop_branch_kills(loop, body, i, st, n->children[c], k, globals, nglobals);
+}
+
 /* #3047 review: what a pass through the loop `loop` binds before it reads.
  * A local is rebound whole, or a field of a local struct stored, by a
  * top-level statement of the body (so on every pass, before the statements
  * after it) that is the first to name it, with nothing in the loop's
  * header naming it: what it held when the pass began is read by nothing in
- * the pass. Any other statement, a store under an `if`, a name the header
+ * the pass. So is a local an if/else or a covering match among those
+ * statements binds whole in every arm (loop_rebinds_whole). Any other
+ * statement, a store under an `if` with no `else`, a name the header
  * reads, kills nothing. */
 static void loop_kills_find(ASTNode* loop, LoopKills* k, const char** globals, int nglobals) {
     ASTNode* body = loop->child_count > 0 ? loop->children[loop->child_count - 1] : NULL;
@@ -8723,22 +8801,17 @@ static void loop_kills_find(ASTNode* loop, LoopKills* k, const char** globals, i
     int block = body->type == AST_BLOCK;
     int nst = block ? body->child_count : 1;
     for (int i = 0; i < nst; i++) {
+        ASTNode* st = block ? body->children[i] : body;
         const char* path;
-        const char* name =
-            loop_stmt_rebinds(block ? body->children[i] : body, &path, globals, nglobals);
-        if (!name) continue;
-        int named = 0;
-        for (int h = 0; h + 1 < loop->child_count && !named; h++)
-            named = ast_names(loop->children[h], name);
-        for (int j = 0; j < i && !named; j++) named = ast_names(body->children[j], name);
-        if (named) continue;
-        if (k->count == k->cap) {
-            k->cap = k->cap ? k->cap * 2 : 8;
-            k->names = aether_xrealloc(k->names, (size_t)k->cap * sizeof(char*));
-            k->paths = aether_xrealloc(k->paths, (size_t)k->cap * sizeof(char*));
+        const char* name = loop_stmt_rebinds(st, &path, globals, nglobals);
+        if (name) {
+            loop_kill_note(loop, body, i, k, name, path);
+            continue;
         }
-        k->names[k->count] = name;
-        k->paths[k->count++] = path;
+        ASTNode* b = st;
+        if (b && b->type == AST_EXPRESSION_STATEMENT && b->child_count == 1) b = b->children[0];
+        if (b && (b->type == AST_IF_STATEMENT || b->type == AST_MATCH_STATEMENT))
+            loop_branch_kills(loop, body, i, st, b, k, globals, nglobals);
     }
 }
 
