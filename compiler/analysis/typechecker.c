@@ -3309,6 +3309,187 @@ static Type* try_resolve_using_field(SymbolTable* table, ASTNode* struct_def,
     return NULL;
 }
 
+/* The type of a member access `obj.name`, given the type of its object
+ * (borrowed: never freed here). infer_type infers the object once and hands
+ * it to every check below; inferring it again per check re-walked the whole
+ * chain under it each time, exponential in a chain's length (#3021). */
+static Type* infer_member_access(ASTNode* expr, SymbolTable* table, Type* obj) {
+    /* #1286: `s.len` on a slice or array is its element count, an
+     * int (-1 for a view over a bare `ptr`, whose extent the
+     * compiler cannot know). */
+    if (expr->value && strcmp(expr->value, "len") == 0 &&
+        obj && obj->kind == TYPE_ARRAY)
+        return create_type(TYPE_INT);
+    /* #2146: `v.x` / `.y` / `.z` / `.w` on a lane value is that
+     * lane's scalar: an f32 from an f32x4, a float from an f64x2,
+     * an int from a mask. `.z` on an f64x2 is a type error (it has
+     * two lanes), not a silent zero. */
+    if (expr->value && obj && is_lane_type(obj->kind)) {
+        int idx = lane_accessor_index(obj->kind, expr->value);
+        if (idx >= 0) return create_type(lane_scalar_kind(obj->kind));
+        char msg[200];
+        snprintf(msg, sizeof(msg),
+                 "'%s' is not a lane of %s: its lanes are %s",
+                 expr->value, type_name_of_kind(obj->kind),
+                 obj->kind == TYPE_F64X2 ? "`.x` and `.y`"
+                                         : "`.x`, `.y`, `.z` and `.w`");
+        type_error(msg, expr->line, expr->column);
+        return create_type(TYPE_UNKNOWN);
+    }
+    // If node_type already set, use it
+    if (expr->node_type && expr->node_type->kind != TYPE_UNKNOWN)
+        return clone_type(expr->node_type);
+    // #1132 bitstruct field read `b.flag`: the field's declared type.
+    // An unknown field name is a hard error here; a bitstruct's fields
+    // are a closed, declared set, so a typo should not silently become
+    // an UNKNOWN that leaks downstream.
+    if (expr->value && obj && obj->kind == TYPE_BITSTRUCT && obj->struct_name) {
+        ASTNode* f = bitstruct_field_lookup(g_bitstruct_program,
+                                            obj->struct_name, expr->value);
+        if (!f) {
+            char msg[256];
+            snprintf(msg, sizeof(msg),
+                     "'%s' is not a field of bitstruct '%s'",
+                     expr->value, obj->struct_name);
+            type_error(msg, expr->line, expr->column);
+            return create_type(TYPE_UNKNOWN);
+        }
+        return f->node_type ? clone_type(f->node_type)
+                            : create_type(TYPE_UNKNOWN);
+    }
+    // Namespace-qualified constant access: mymath.PI_APPROX -> mymath_PI_APPROX
+    if (expr->child_count > 0 && expr->children[0] &&
+        expr->children[0]->type == AST_IDENTIFIER && expr->children[0]->value &&
+        is_visible_namespace(expr->children[0]->value, table) && expr->value) {
+        char qualified[512];
+        snprintf(qualified, sizeof(qualified), "%s_%s",
+                 expr->children[0]->value, expr->value);
+        Symbol* sym = lookup_symbol(table, qualified);
+        /* #2631: the checked module file's own constant, which a
+         * build merges as `<ns>_<name>`: the bare one it carries. */
+        if ((!sym || !sym->type) && !(table && table->merged_from) &&
+            entry_self_reference(expr->children[0]->value, expr->value)) {
+            sym = entry_self_symbol(table, expr->value);
+            snprintf(qualified, sizeof(qualified), "%s", expr->value);
+        }
+        if (sym && sym->type) {
+            // Rewrite node in-place for codegen
+            expr->type = AST_IDENTIFIER;
+            free(expr->value);
+            expr->value = strdup(qualified);
+            set_node_type(expr, clone_type(sym->type));
+            return clone_type(sym->type);
+        }
+    }
+    // Look up the struct/actor type and find the field type
+    if (obj) {
+        /* #891 @c_struct overlay field access. base is a
+         * `*OverlayName` ptr; resolve the field's declared type so the
+         * node carries the right type (string interpolation picks
+         * %lld for a uint64 field instead of defaulting to %d). A
+         * field that is itself an overlay yields `*ThatOverlay` so a
+         * nested chain (`s.last_id.ms`) keeps resolving. */
+        if (obj->kind == TYPE_PTR &&
+            obj->element_type &&
+            obj->element_type->kind == TYPE_STRUCT &&
+            obj->element_type->struct_name &&
+            is_c_struct_name(obj->element_type->struct_name) &&
+            expr->value) {
+            Type* ft = c_struct_field_decl_type(obj->element_type->struct_name,
+                                           expr->value);
+            if (ft) {
+                Type* result;
+                if (ft->kind == TYPE_STRUCT && ft->struct_name &&
+                    is_c_struct_name(ft->struct_name)) {
+                    /* nested overlay field: pointer-to-overlay */
+                    result = create_type(TYPE_PTR);
+                    result->element_type = ft;  /* adopt */
+                } else {
+                    result = ft;
+                }
+                if (expr->node_type) free_type(expr->node_type);
+                expr->node_type = clone_type(result);
+                return result;
+            }
+        }
+        if (obj->kind == TYPE_DURATION) {
+            Type* out = NULL;
+            if (expr->value && strcmp(expr->value, "ns") == 0) {
+                out = create_type(TYPE_INT64);
+            } else if (expr->value &&
+                       (strcmp(expr->value, "us") == 0 || strcmp(expr->value, "ms") == 0 ||
+                        strcmp(expr->value, "s") == 0 || strcmp(expr->value, "m") == 0 ||
+                        strcmp(expr->value, "h") == 0 || strcmp(expr->value, "d") == 0)) {
+                out = create_type(TYPE_FLOAT);
+            }
+            if (out) return out;
+            return create_type(TYPE_UNKNOWN);
+        }
+        // Struct field lookup
+        if (obj->kind == TYPE_STRUCT && obj->struct_name) {
+            Symbol* struct_sym = lookup_symbol(table, obj->struct_name);
+            if (struct_sym && struct_sym->node) {
+                ASTNode* struct_def = struct_sym->node;
+                int direct = 0;
+                for (int fi = 0; fi < struct_def->child_count; fi++) {
+                    ASTNode* field = struct_def->children[fi];
+                    if (field && field->value && strcmp(field->value, expr->value) == 0) {
+                        direct = 1;
+                        if (field->node_type && field->node_type->kind != TYPE_UNKNOWN)
+                            return clone_type(field->node_type);
+                        break;
+                    }
+                }
+                // #1048 field injection: no direct field, so try the
+                // `using`-embedded sub-structs (rewrites base.x ->
+                // (base.embed).x and returns the field's type).
+                if (!direct) {
+                    Type* uft = try_resolve_using_field(table, struct_def, expr);
+                    if (uft) return uft;
+                }
+            }
+        }
+        // Pointer-to-struct field lookup: `*StructName` field access
+        // resolves through the underlying struct's field list, same
+        // as a value-struct. Only the codegen access mode differs
+        // (`->field` vs `.field`).
+        if (obj->kind == TYPE_PTR && obj->element_type &&
+            obj->element_type->kind == TYPE_STRUCT &&
+            obj->element_type->struct_name) {
+            Symbol* struct_sym = lookup_symbol(table, obj->element_type->struct_name);
+            if (struct_sym && struct_sym->node) {
+                ASTNode* struct_def = struct_sym->node;
+                for (int fi = 0; fi < struct_def->child_count; fi++) {
+                    ASTNode* field = struct_def->children[fi];
+                    if (field && field->value && strcmp(field->value, expr->value) == 0) {
+                        if (field->node_type && field->node_type->kind != TYPE_UNKNOWN)
+                            return clone_type(field->node_type);
+                        break;
+                    }
+                }
+            }
+        }
+        // Actor ref field lookup: look up state declarations in the actor definition
+        if (obj->kind == TYPE_ACTOR_REF && obj->element_type &&
+            obj->element_type->kind == TYPE_STRUCT && obj->element_type->struct_name) {
+            Symbol* actor_sym = lookup_symbol(table, obj->element_type->struct_name);
+            if (actor_sym && actor_sym->node) {
+                ASTNode* actor_def = actor_sym->node;
+                for (int fi = 0; fi < actor_def->child_count; fi++) {
+                    ASTNode* field = actor_def->children[fi];
+                    if (field && field->type == AST_STATE_DECLARATION &&
+                        field->value && strcmp(field->value, expr->value) == 0) {
+                        if (field->node_type && field->node_type->kind != TYPE_UNKNOWN)
+                            return clone_type(field->node_type);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    return create_type(TYPE_UNKNOWN);
+}
+
 static ASTNode* numeric_literal_operand(ASTNode* n);   /* defined below */
 
 // Type inference functions
@@ -3929,200 +4110,11 @@ Type* infer_type(ASTNode* expr, SymbolTable* table) {
                 type_error(msg, expr->line, expr->column);
                 return create_type(TYPE_UNKNOWN);
             }
-            /* #1286: `s.len` on a slice or array is its element count, an
-             * int (-1 for a view over a bare `ptr`, whose extent the
-             * compiler cannot know). */
-            if (expr->child_count > 0 && expr->children[0] && expr->value &&
-                strcmp(expr->value, "len") == 0) {
-                Type* obj = infer_type(expr->children[0], table);
-                int is_arr = obj && obj->kind == TYPE_ARRAY;
-                if (obj) free_type(obj);
-                if (is_arr) return create_type(TYPE_INT);
-            }
-            /* #2146: `v.x` / `.y` / `.z` / `.w` on a lane value is that
-             * lane's scalar — an f32 from an f32x4, a float from an f64x2,
-             * an int from a mask. `.z` on an f64x2 is a type error (it has
-             * two lanes), not a silent zero. */
-            if (expr->child_count > 0 && expr->children[0] && expr->value) {
-                Type* obj = infer_type(expr->children[0], table);
-                if (obj && is_lane_type(obj->kind)) {
-                    int idx = lane_accessor_index(obj->kind, expr->value);
-                    TypeKind elem = lane_scalar_kind(obj->kind);
-                    TypeKind objk = obj->kind;
-                    free_type(obj);
-                    if (idx >= 0) return create_type(elem);
-                    char msg[200];
-                    snprintf(msg, sizeof(msg),
-                             "'%s' is not a lane of %s: its lanes are %s",
-                             expr->value, type_name_of_kind(objk),
-                             objk == TYPE_F64X2 ? "`.x` and `.y`"
-                                                : "`.x`, `.y`, `.z` and `.w`");
-                    type_error(msg, expr->line, expr->column);
-                    return create_type(TYPE_UNKNOWN);
-                }
-                if (obj) free_type(obj);
-            }
-            // If node_type already set, use it
-            if (expr->node_type && expr->node_type->kind != TYPE_UNKNOWN)
-                return clone_type(expr->node_type);
-            // #1132 bitstruct field read `b.flag` — the field's declared type.
-            // An unknown field name is a hard error here; a bitstruct's fields
-            // are a closed, declared set, so a typo should not silently become
-            // an UNKNOWN that leaks downstream.
-            if (expr->child_count > 0 && expr->children[0] && expr->value) {
-                Type* bt = infer_type(expr->children[0], table);
-                if (bt && bt->kind == TYPE_BITSTRUCT && bt->struct_name) {
-                    ASTNode* f = bitstruct_field_lookup(g_bitstruct_program,
-                                                        bt->struct_name, expr->value);
-                    if (!f) {
-                        char msg[256];
-                        snprintf(msg, sizeof(msg),
-                                 "'%s' is not a field of bitstruct '%s'",
-                                 expr->value, bt->struct_name);
-                        type_error(msg, expr->line, expr->column);
-                        free_type(bt);
-                        return create_type(TYPE_UNKNOWN);
-                    }
-                    free_type(bt);
-                    return f->node_type ? clone_type(f->node_type)
-                                        : create_type(TYPE_UNKNOWN);
-                }
-                if (bt) free_type(bt);
-            }
-            // Namespace-qualified constant access: mymath.PI_APPROX -> mymath_PI_APPROX
-            if (expr->child_count > 0 && expr->children[0] &&
-                expr->children[0]->type == AST_IDENTIFIER && expr->children[0]->value &&
-                is_visible_namespace(expr->children[0]->value, table) && expr->value) {
-                char qualified[512];
-                snprintf(qualified, sizeof(qualified), "%s_%s",
-                         expr->children[0]->value, expr->value);
-                Symbol* sym = lookup_symbol(table, qualified);
-                /* #2631: the checked module file's own constant, which a
-                 * build merges as `<ns>_<name>`: the bare one it carries. */
-                if ((!sym || !sym->type) && !(table && table->merged_from) &&
-                    entry_self_reference(expr->children[0]->value, expr->value)) {
-                    sym = entry_self_symbol(table, expr->value);
-                    snprintf(qualified, sizeof(qualified), "%s", expr->value);
-                }
-                if (sym && sym->type) {
-                    // Rewrite node in-place for codegen
-                    expr->type = AST_IDENTIFIER;
-                    free(expr->value);
-                    expr->value = strdup(qualified);
-                    set_node_type(expr, clone_type(sym->type));
-                    return clone_type(sym->type);
-                }
-            }
-            // Look up the struct/actor type and find the field type
-            if (expr->child_count > 0 && expr->children[0]) {
-                Type* base_type = infer_type(expr->children[0], table);
-                /* #891 @c_struct overlay field access. base is a
-                 * `*OverlayName` ptr; resolve the field's declared type so the
-                 * node carries the right type (string interpolation picks
-                 * %lld for a uint64 field instead of defaulting to %d). A
-                 * field that is itself an overlay yields `*ThatOverlay` so a
-                 * nested chain (`s.last_id.ms`) keeps resolving. */
-                if (base_type && base_type->kind == TYPE_PTR &&
-                    base_type->element_type &&
-                    base_type->element_type->kind == TYPE_STRUCT &&
-                    base_type->element_type->struct_name &&
-                    is_c_struct_name(base_type->element_type->struct_name) &&
-                    expr->value) {
-                    Type* ft = c_struct_field_decl_type(base_type->element_type->struct_name,
-                                                   expr->value);
-                    if (ft) {
-                        Type* result;
-                        if (ft->kind == TYPE_STRUCT && ft->struct_name &&
-                            is_c_struct_name(ft->struct_name)) {
-                            /* nested overlay field → pointer-to-overlay */
-                            result = create_type(TYPE_PTR);
-                            result->element_type = ft;  /* adopt */
-                        } else {
-                            result = ft;
-                        }
-                        if (expr->node_type) free_type(expr->node_type);
-                        expr->node_type = clone_type(result);
-                        free_type(base_type);
-                        return result;
-                    }
-                }
-                if (base_type && base_type->kind == TYPE_DURATION) {
-                    Type* out = NULL;
-                    if (expr->value && strcmp(expr->value, "ns") == 0) {
-                        out = create_type(TYPE_INT64);
-                    } else if (expr->value &&
-                               (strcmp(expr->value, "us") == 0 || strcmp(expr->value, "ms") == 0 ||
-                                strcmp(expr->value, "s") == 0 || strcmp(expr->value, "m") == 0 ||
-                                strcmp(expr->value, "h") == 0 || strcmp(expr->value, "d") == 0)) {
-                        out = create_type(TYPE_FLOAT);
-                    }
-                    free_type(base_type);
-                    if (out) return out;
-                    return create_type(TYPE_UNKNOWN);
-                }
-                // Struct field lookup
-                if (base_type && base_type->kind == TYPE_STRUCT && base_type->struct_name) {
-                    Symbol* struct_sym = lookup_symbol(table, base_type->struct_name);
-                    if (struct_sym && struct_sym->node) {
-                        ASTNode* struct_def = struct_sym->node;
-                        int direct = 0;
-                        for (int fi = 0; fi < struct_def->child_count; fi++) {
-                            ASTNode* field = struct_def->children[fi];
-                            if (field && field->value && strcmp(field->value, expr->value) == 0) {
-                                direct = 1;
-                                if (field->node_type && field->node_type->kind != TYPE_UNKNOWN)
-                                    return clone_type(field->node_type);
-                                break;
-                            }
-                        }
-                        // #1048 field injection: no direct field, so try the
-                        // `using`-embedded sub-structs (rewrites base.x ->
-                        // (base.embed).x and returns the field's type).
-                        if (!direct) {
-                            Type* uft = try_resolve_using_field(table, struct_def, expr);
-                            if (uft) { free_type(base_type); return uft; }
-                        }
-                    }
-                }
-                // Pointer-to-struct field lookup: `*StructName` field access
-                // resolves through the underlying struct's field list, same
-                // as a value-struct. Only the codegen access mode differs
-                // (`->field` vs `.field`).
-                if (base_type && base_type->kind == TYPE_PTR && base_type->element_type &&
-                    base_type->element_type->kind == TYPE_STRUCT &&
-                    base_type->element_type->struct_name) {
-                    Symbol* struct_sym = lookup_symbol(table, base_type->element_type->struct_name);
-                    if (struct_sym && struct_sym->node) {
-                        ASTNode* struct_def = struct_sym->node;
-                        for (int fi = 0; fi < struct_def->child_count; fi++) {
-                            ASTNode* field = struct_def->children[fi];
-                            if (field && field->value && strcmp(field->value, expr->value) == 0) {
-                                if (field->node_type && field->node_type->kind != TYPE_UNKNOWN)
-                                    return clone_type(field->node_type);
-                                break;
-                            }
-                        }
-                    }
-                }
-                // Actor ref field lookup — look up state declarations in the actor definition
-                if (base_type && base_type->kind == TYPE_ACTOR_REF && base_type->element_type &&
-                    base_type->element_type->kind == TYPE_STRUCT && base_type->element_type->struct_name) {
-                    Symbol* actor_sym = lookup_symbol(table, base_type->element_type->struct_name);
-                    if (actor_sym && actor_sym->node) {
-                        ASTNode* actor_def = actor_sym->node;
-                        for (int fi = 0; fi < actor_def->child_count; fi++) {
-                            ASTNode* field = actor_def->children[fi];
-                            if (field && field->type == AST_STATE_DECLARATION &&
-                                field->value && strcmp(field->value, expr->value) == 0) {
-                                if (field->node_type && field->node_type->kind != TYPE_UNKNOWN)
-                                    return clone_type(field->node_type);
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
-            return create_type(TYPE_UNKNOWN);
+            Type* obj = (expr->child_count > 0 && expr->children[0])
+                        ? infer_type(expr->children[0], table) : NULL;
+            Type* t = infer_member_access(expr, table, obj);
+            if (obj) free_type(obj);
+            return t;
         }
 
         default:
