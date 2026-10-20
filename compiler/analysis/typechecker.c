@@ -8663,10 +8663,12 @@ static void check_ptr_keeps_in(ASTNode* program, ASTNode* n, KeepSet* s,
 
 /* #3047 review: the names a loop's body binds anew before anything reads
  * them, each with what is bound: the whole value (`paths[i]` NULL) or a
- * field of a local struct, at that path. */
+ * field of a local struct, at that path, and the body statement that
+ * binds it (`at[i]`). */
 typedef struct {
     const char** names;
     const char** paths;
+    int* at;
     int count;
     int cap;
 } LoopKills;
@@ -8764,8 +8766,10 @@ static void loop_kill_note(ASTNode* loop, ASTNode* body, int i, LoopKills* k, co
         k->cap = k->cap ? k->cap * 2 : 8;
         k->names = aether_xrealloc(k->names, (size_t)k->cap * sizeof(char*));
         k->paths = aether_xrealloc(k->paths, (size_t)k->cap * sizeof(char*));
+        k->at = aether_xrealloc(k->at, (size_t)k->cap * sizeof(int));
     }
     k->names[k->count] = name;
+    k->at[k->count] = i;
     k->paths[k->count++] = path;
 }
 
@@ -8822,19 +8826,53 @@ static void keep_set_add_one(KeepSet* s, const char* name, const char* param, co
     keep_set_add(s, name, one);
 }
 
+/* Does the alias `name` (#3043) lead to the local `target`, itself or
+ * through the aliases it copies? Past the depth keep_set_lookup_at follows,
+ * it is taken to. */
+static int alias_reaches(const KeepSet* s, const char* name, const char* target, int depth) {
+    if (depth >= 8) return 1;
+    for (int a = 0; a < s->alias_count; a++) {
+        if (strcmp(s->alias_names[a], name)) continue;
+        if (!strcmp(s->alias_targets[a], target) ||
+            alias_reaches(s, s->alias_targets[a], target, depth + 1))
+            return 1;
+    }
+    return 0;
+}
+
+/* #3047 review, finding 2: is kill `j` of the loop `loop` read through an
+ * address of its local before the statement that binds it, so read
+ * without being named: is an alias that leads to it named in the loop's
+ * header, or in a body statement up to that one (its own value
+ * included)? */
+static int loop_kill_read_through_alias(ASTNode* loop, const KeepSet* s, const LoopKills* k,
+                                        int j) {
+    ASTNode* body = loop->child_count > 0 ? loop->children[loop->child_count - 1] : NULL;
+    for (int a = 0; a < s->alias_count; a++) {
+        const char* x = s->alias_names[a];
+        if (!alias_reaches(s, x, k->names[j], 0)) continue;
+        for (int h = 0; h + 1 < loop->child_count; h++)
+            if (ast_names(loop->children[h], x)) return 1;
+        if (body && body->type != AST_BLOCK && ast_names(body, x)) return 1;
+        for (int i = 0; body && body->type == AST_BLOCK && i <= k->at[j] &&
+                        i < body->child_count; i++)
+            if (ast_names(body->children[i], x)) return 1;
+    }
+    return 0;
+}
+
 /* One pass through the loop `n`: the holders `k` names leave the pass,
  * which binds them again in order, and come back after it, since the loop
- * may run no pass at all, or end in one that binds nothing. A name the
- * address of which is taken (#3043) stays: a read through the address
- * does not name it. */
+ * may run no pass at all, or end in one that binds nothing. A local whose
+ * address (#3043) the pass reads before it binds the local stays: a read
+ * through the address does not name it. One whose address it reads only
+ * after leaves, as when it is read by name: the address reads it as the
+ * pass bound it. */
 static void keep_loop_walk(ASTNode* program, ASTNode* n, KeepSet* s, const LoopKills* k,
                            const char** globals, int nglobals, int in_closure) {
     KeepSet held = { 0 };
     for (int j = 0; j < k->count; j++) {
-        int aliased = 0;
-        for (int a = 0; a < s->alias_count && !aliased; a++)
-            aliased = !strcmp(s->alias_targets[a], k->names[j]);
-        if (aliased) continue;
+        if (loop_kill_read_through_alias(n, s, k, j)) continue;
         int w = 0;
         for (int i = 0; i < s->count; i++) {
             if (!strcmp(s->names[i], k->names[j]) && part_within(s->parts[i], k->paths[j])) {
@@ -8961,6 +8999,7 @@ static void check_ptr_keeps_in(ASTNode* program, ASTNode* n, KeepSet* s,
         keep_loop_walk(program, n, s, &k, globals, nglobals, in_closure);
         free(k.names);
         free(k.paths);
+        free(k.at);
         return;
     }
     if (n->type == AST_VARIABLE_DECLARATION && n->value && n->child_count > 0)

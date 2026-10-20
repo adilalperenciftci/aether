@@ -1223,6 +1223,87 @@ main() { carry(null, 3) }
 AE
 refused loop_rebind_match_uncovered 12:9 "'p' is a borrowed \`ptr\` parameter, stored in a module-level \`var\`"
 
+# A field the body binds anew, read through an address of the struct after
+# the store, holds what the pass stored, as read through the struct: the
+# address taken in the pass or before the loop. Read through an address, or
+# a copy of one, before the store, it holds the pass before's `p`.
+cat > "$TMP/loop_rebind_alias.ae" <<'AE'
+import std.list
+struct Box { item: ptr, other: ptr }
+var kept: ptr = null
+
+in_pass(p: ptr, n: int) {
+    b = Box { item: null, other: null }
+    i = 0
+    while i < n {
+        b.item = list.new()
+        pb = (&b) as *Box
+        kept = pb.item
+        b.item = p
+        i = i + 1
+    }
+}
+
+before_loop(p: ptr, n: int) {
+    b = Box { item: null, other: null }
+    pb = (&b) as *Box
+    i = 0
+    while i < n {
+        b.item = list.new()
+        kept = pb.item
+        b.item = p
+        i = i + 1
+    }
+}
+
+main() { in_pass(null, 2)  before_loop(null, 2) }
+AE
+accepted loop_rebind_alias
+
+cat > "$TMP/loop_rebind_alias_read_first.ae" <<'AE'
+import std.list
+struct Box { item: ptr, other: ptr }
+var kept: ptr = null
+
+carry(p: ptr, n: int) {
+    b = Box { item: null, other: null }
+    pb = (&b) as *Box
+    qb = pb
+    i = 0
+    while i < n {
+        kept = qb.item
+        b.item = list.new()
+        b.item = p
+        i = i + 1
+    }
+}
+
+main() { carry(null, 2) }
+AE
+refused loop_rebind_alias_read_first 11:9 "'p' is a borrowed \`ptr\` parameter, stored in a module-level \`var\`"
+
+cat > "$TMP/loop_rebind_alias_in_store.ae" <<'AE'
+import std.list
+struct Box { item: ptr, other: ptr }
+var kept: ptr = null
+
+carry(p: ptr, n: int) {
+    b = Box { item: null, other: null }
+    pb = (&b) as *Box
+    i = 0
+    while i < n {
+        b.other = pb.item
+        b.item = list.new()
+        kept = b.other
+        b.item = p
+        i = i + 1
+    }
+}
+
+main() { carry(null, 2) }
+AE
+refused loop_rebind_alias_in_store 12:9 "'p' is a borrowed \`ptr\` parameter, stored in a module-level \`var\`"
+
 # chain_cell <name> <links>: `kept = l<links>`, then `l<k> = l<k-1>` down to
 # `l0 = p`, in a loop: `kept` holds `p` after <links> + 1 passes.
 chain_cell() {
