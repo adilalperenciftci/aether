@@ -32,6 +32,12 @@ child(mode: string) -> int {
         println("short")
         return 0
     }
+    // os.system's child writes to this program's own stdout, so it says
+    // nothing: how many runs fit in the window depends on the machine, and
+    // the output must not (test-ae-opt-diff compares -O0 with -O2).
+    if mode == "--quiet" {
+        return 0
+    }
     return 3
 }
 
@@ -56,6 +62,7 @@ long_loop() -> int {
 // longest single call, in milliseconds.
 short_loop() -> long {
     cmd = "\"${os.argv0()}\" --short"
+    quiet = "\"${os.argv0()}\" --quiet"
     start = os.now_monotonic_ms()
     longest = 0 as long
     n = 0
@@ -70,7 +77,7 @@ short_loop() -> long {
             shorts_wrong = shorts_wrong + 1
         }
         t1 = os.now_monotonic_ms()
-        rc = os.system(cmd)
+        rc = os.system(quiet)
         took2 = os.now_monotonic_ms() - t1
         if took2 > longest {
             longest = took2
@@ -104,17 +111,17 @@ main() {
             longest_short = mem.ptr_to_long(r)
         })
     worker.wait()
-    println("short shell runs: ${shorts_run}, the longest took ${longest_short} ms")
+    // Counts and times only on failure: they vary from run to run.
     if longest_short > 2500 {
-        println("FAIL: a short shell run waited ${longest_short} ms, for a long child it does not own")
+        println("FAIL: a short shell run waited ${longest_short} ms, for a long child it does not own (${shorts_run} runs)")
         exit(1)
     }
     if shorts_run < 5 {
-        println("FAIL: too few short shell runs (${shorts_run})")
+        println("FAIL: too few short shell runs (${shorts_run}, the longest ${longest_short} ms)")
         exit(1)
     }
     if shorts_wrong != 0 {
-        println("FAIL: ${shorts_wrong} short shell runs gave the wrong output or status")
+        println("FAIL: ${shorts_wrong} of ${shorts_run} short shell runs gave the wrong output or status")
         exit(1)
     }
     println("ALL PASS")
