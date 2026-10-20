@@ -85,7 +85,9 @@ declaration. A module may not export two names that answer to one short name
 (E0305, [module-system-design.md](module-system-design.md)), so a module's
 long name and its short form are one declaration; a name whose short form
 would start with a digit (`sha3.sha3_256_hex`) is left as written. A file
-that does not compile is reported and left as it is. With `--check`, it lists the files it
+that does not compile is reported and left as it is. `ae check` warns on each
+call this would rewrite (W1006), naming this command, so the long form does
+not come back. With `--check`, it lists the files it
 would rewrite and exits 1 if there are any.
 
 The rewrite does not change what a program compiles to: the C it generates is

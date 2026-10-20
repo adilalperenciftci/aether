@@ -4238,6 +4238,32 @@ partially-handled enum is doing real work and is never reported.
 This pairs with the exhaustiveness check, which reports the opposite
 direction, a `match` over a sum type or enum that is missing a case.
 
+### A Module Named Twice [W1006]
+
+`ae check` warns on a call that names its module twice where the short form
+reaches the same function. A module's extern is spelt with the module's
+prefix, `json_free`, and `json.free(v)` reaches it; `json.json_free(v)` says
+the module twice. A module exports one name per operation (E0305), so the
+short form is always the same function:
+
+```aether,fragment
+import std.json
+
+main() {
+    v, _ = json.parse("[1]")
+    json.json_free(v)
+    // warning[W1006]: `json.json_free` names its module twice: `json.free`
+    // is the same function
+    // help: write `json.free`, or run `ae fmt --short-names main.ae` to
+    // rewrite every such call
+}
+```
+
+`ae fmt --short-names` rewrites every such call of the files it is given,
+and only those ([formatter.md](formatter.md)). A long name whose short form
+would start with a digit (`sha3.sha3_256_hex`) has no short form and is not
+reported. `ae build` and `ae run` do not report it.
+
 ## Match Expressions
 
 `match` can be used as a statement or as an expression:

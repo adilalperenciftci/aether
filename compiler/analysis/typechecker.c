@@ -15155,11 +15155,12 @@ static int call_yields_no_value(ASTNode* call, SymbolTable* table) {
  * the same declaration. `aetherc --emit=short-names` lists each call of the
  * file being compiled written in the long form whose short form, the
  * suffix without its `<ns>_`, resolves to the same declaration, for
- * `ae fmt --short-names` to rewrite. Only where the compiler knows the two
- * are one: a long name whose short twin is another function (std.mem's
- * raw externs beside its wrappers) is left as written, and so is one whose
- * short form would not be a plain identifier (`sha3.sha3_256_hex`). */
-typedef struct { int line; int column; char* long_name; char* short_name; } ShortNameEdit;
+ * `ae fmt --short-names` to rewrite, and `aetherc --check` (`ae check`)
+ * warns on each (W1006). Only where the compiler knows the two are one: a
+ * module may not export two names that answer to one short name (E0305),
+ * and a long name whose short form would not be a plain identifier
+ * (`sha3.sha3_256_hex`) is left as written. */
+typedef struct { int line; int column; char* ns; char* long_name; char* short_name; } ShortNameEdit;
 static ShortNameEdit* g_sn_edits = NULL;
 static int g_sn_count = 0, g_sn_cap = 0;
 static char* g_sn_entry = NULL;
@@ -15173,6 +15174,30 @@ void typecheck_print_short_names(FILE* out) {
     for (int i = 0; i < g_sn_count; i++)
         fprintf(out, "%d:%d:%s:%s\n", g_sn_edits[i].line, g_sn_edits[i].column,
                 g_sn_edits[i].long_name, g_sn_edits[i].short_name);
+}
+
+/* #2976 step 5: `ae check` warns on each such call (W1006), so the doubled
+ * form does not come back once the tree is short: the call names the
+ * module twice, and the short form is the same declaration. */
+void typecheck_warn_short_names(void) {
+    for (int i = 0; i < g_sn_count; i++) {
+        char msg[1024], hint[1024];
+        snprintf(msg, sizeof(msg),
+                 "`%s.%s` names its module twice: `%s.%s` is the same function",
+                 g_sn_edits[i].ns, g_sn_edits[i].long_name, g_sn_edits[i].ns,
+                 g_sn_edits[i].short_name);
+        snprintf(hint, sizeof(hint),
+                 "write `%s.%s`, or run `ae fmt --short-names %s` to rewrite every such call",
+                 g_sn_edits[i].ns, g_sn_edits[i].short_name, g_sn_entry ? g_sn_entry : "<file>");
+        AetherError w = {
+            .filename = g_sn_entry, .source_code = NULL,
+            .line = g_sn_edits[i].line, .column = g_sn_edits[i].column,
+            .message = msg, .suggestion = hint,
+            .context = NULL, .code = AETHER_WARN_DOUBLED_MODULE_NAME
+        };
+        aether_warning_report(&w);
+        warning_count++;
+    }
 }
 
 /* Does `s` lex as one identifier, no keyword? */
@@ -15236,6 +15261,7 @@ static void note_short_name(ASTNode* call, SymbolTable* table) {
         }
         g_sn_edits[g_sn_count].line = call->line;
         g_sn_edits[g_sn_count].column = call->column;
+        g_sn_edits[g_sn_count].ns = strdup(prefix);
         g_sn_edits[g_sn_count].long_name = strdup(suffix);
         g_sn_edits[g_sn_count].short_name = strdup(short_name);
         g_sn_count++;

@@ -35,6 +35,7 @@ typedef enum {
     AETHER_WARN_UNREACHABLE = 1002,
     AETHER_WARN_CONST_OVERFLOW = 1003,   // int constant expression exceeds 32 bits
     AETHER_WARN_UNREACHABLE_ARM = 1004,  // match arm shadowed by an earlier arm
+    AETHER_WARN_DOUBLED_MODULE_NAME = 1006,  // `ns.ns_x(...)` where `ns.x` is the same declaration (#2976)
 } AetherErrorCode;
 
 // Error reporting with source context

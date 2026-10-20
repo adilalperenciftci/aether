@@ -1698,7 +1698,9 @@ int compile_source(const char* input_path, const char* output_path) {
 
     // Step 3: Type Checking
     if (verbose_mode) printf("Step 3: Type checking...\n");
-    if (emit_short_names_mode) typecheck_report_short_names(input_path);
+    /* #2976: --emit=short-names lists the calls that name their module
+     * twice, and --check warns on them (W1006). */
+    if (emit_short_names_mode || check_only_mode) typecheck_report_short_names(input_path);
     if (!typecheck_program(program)) {
         report_compilation_failure(input_path);
         // Cleanup
@@ -1711,6 +1713,7 @@ int compile_source(const char* input_path, const char* output_path) {
     }
     
     if (verbose_mode) printf("Type checking successful\n");
+    if (check_only_mode && !emit_short_names_mode) typecheck_warn_short_names();
 
     // --emit=short-names: the calls `ae fmt --short-names` may shorten
     // (#2976), once the file has checked; no codegen.

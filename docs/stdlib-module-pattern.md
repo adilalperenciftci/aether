@@ -85,9 +85,9 @@ that is its C name, but a caller reaches it by its short name: `json.free(v)`
 resolves to the extern `json_free`, as `md5.hex` resolves to std.md5's Aether
 function `md5_hex` (a module's names are looked up as written, then in the
 prefixed form, #2976). Write calls, examples and READMEs with the short name;
-`json.json_free(v)` names the module twice for the same function, and
-`ae fmt --short-names` rewrites such calls where the compiler resolves both
-spellings to one declaration.
+`json.json_free(v)` names the module twice for the same function, `ae check`
+warns on it (W1006), and `ae fmt --short-names` rewrites such calls where the
+compiler resolves both spellings to one declaration.
 
 A module exports one name per operation. Two exports that answer to one
 short name, a wrapper `x` beside its extern `<module>_x` or
