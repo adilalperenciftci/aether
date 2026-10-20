@@ -444,7 +444,8 @@ The type checker refuses every way the binding's value itself could outlive
 the block: returning it, assigning or aliasing it into another binding or a
 struct field, placing it in an array, struct or message literal, capturing it
 in a closure or a quote (either can outlive the block), and inserting it into
-a container (`list.add`, `list.set`, `map.put`, `set.add`):
+a container (`list.add`, `list.set`, `map.put`, `set.add`, `string.seq_cons`,
+and their raw and owning forms):
 
 ```aether,fails
 import std.string
@@ -459,8 +460,9 @@ main() {
 }
 ```
 
-Only a value derived from the binding through a call (`string.length(buf)`)
-may leave. A function the value is passed to is governed by its own
+Only a value derived from the binding (`string.length(buf)`,
+`list.size(l)`, a slice's `v.len`) may leave, and the error's help names the one
+for the binding's type. A function the value is passed to is governed by its own
 signature; `@scoped` checks the escapes written in the binding's own scope.
 
 ## How the rules are tested

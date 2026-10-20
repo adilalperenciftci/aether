@@ -7371,9 +7371,13 @@ static int scoped_mentions(ASTNode* node, const char* name) {
  * spellings (the AST stores callees in dotted form). */
 static int scoped_store_call(const char* fn) {
     if (!fn) return 0;
+    /* The std calls that keep their argument in a container. #3001: the
+     * list named `list.push`, `map.set` and `seq.cons`, which std does not
+     * have, and missed the sequence cons and the raw and owning forms. */
     static const char* sinks[] = {
-        "list.add", "list.push", "list.set", "map.put", "map.set",
-        "set.add", "seq.cons", NULL };
+        "list.add", "list.add_raw", "list.add_string_owned", "list.set",
+        "map.put", "map.put_raw", "map.put_string_owned",
+        "set.add", "set.try_add", "string.seq_cons", NULL };
     for (int i = 0; sinks[i]; i++)
         if (strcmp(fn, sinks[i]) == 0) return 1;
     return 0;
@@ -7420,19 +7424,42 @@ static const char* scoped_escape_reason(ASTNode* node, const char* name) {
     return NULL;
 }
 
-/* Walk `node`, reporting the first escape of `name`. Does not descend into a
- * closure (handled at the capture site) or a nested function/actor scope. */
-static int scoped_check_subtree(ASTNode* node, const char* name) {
+/* #3001: a value derived from the @scoped binding `decl` through a call, in
+ * Aether for the binding's type: the help suggested `buf.len()`, which is no
+ * Aether (a string's length is `string.length(buf)`). */
+static void scoped_derived_example(ASTNode* decl, char* out, size_t cap) {
+    const char* name = decl->value;
+    Type* t = decl->node_type;
+    ASTNode* init = decl->child_count > 0 ? decl->children[0] : NULL;
+    if (t && t->kind == TYPE_STRING) {
+        snprintf(out, cap, "`string.length(%s)`", name);
+    } else if (t && type_is_slice(t)) {
+        snprintf(out, cap, "`%s.len`", name);
+    } else if (init && init->type == AST_FUNCTION_CALL && init->value &&
+               (strcmp(init->value, "list.new") == 0 || strcmp(init->value, "map.new") == 0 ||
+                strcmp(init->value, "set.new") == 0)) {
+        snprintf(out, cap, "`%.*s.size(%s)`",
+                 (int)(strchr(init->value, '.') - init->value), init->value, name);
+    } else {
+        snprintf(out, cap, "a call's result, `f(%s)`", name);
+    }
+}
+
+/* Walk `node`, reporting the first escape of the @scoped binding `decl`.
+ * Does not descend into a closure (handled at the capture site) or a nested
+ * function/actor scope. */
+static int scoped_check_subtree(ASTNode* node, ASTNode* decl) {
     if (!node) return 0;
+    const char* name = decl->value;
     const char* reason = scoped_escape_reason(node, name);
     if (reason) {
-        char msg[320];
-        snprintf(msg, sizeof(msg),
-            "`@scoped` binding '%s' escapes its block: %s. A @scoped value "
-            "must not outlive the block that introduced it, return a scalar "
-            "derived from it (e.g. `%s.len()`), or drop the `@scoped`.",
-            name, reason, name);
-        type_error(msg, node->line, node->column);
+        char msg[320], example[160], help[400];
+        snprintf(msg, sizeof(msg), "`@scoped` binding '%s' escapes its block: %s", name, reason);
+        scoped_derived_example(decl, example, sizeof(example));
+        snprintf(help, sizeof(help),
+                 "a @scoped value must not outlive the block that introduced it: let a value "
+                 "derived from it leave instead (%s), or drop the `@scoped`", example);
+        type_error_hint(msg, help, node->line, node->column);
         return 1;
     }
     if (node->type == AST_CLOSURE || node->type == AST_QUOTE || node->type == AST_FUNCTION_DEFINITION ||
@@ -7440,7 +7467,7 @@ static int scoped_check_subtree(ASTNode* node, const char* name) {
         return 0;
     int found = 0;
     for (int i = 0; i < node->child_count; i++)
-        found |= scoped_check_subtree(node->children[i], name);
+        found |= scoped_check_subtree(node->children[i], decl);
     return found;
 }
 
@@ -7449,7 +7476,7 @@ static void scoped_check_bindings(ASTNode* node, ASTNode* root) {
     if (!node) return;
     if (node->type == AST_VARIABLE_DECLARATION && node->value &&
         node->annotation && strstr(node->annotation, "scoped")) {
-        scoped_check_subtree(root, node->value);
+        scoped_check_subtree(root, node);
     }
     if (node->type == AST_FUNCTION_DEFINITION ||
         node->type == AST_BUILDER_FUNCTION ||
@@ -10968,7 +10995,7 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                     snprintf(vmsg, sizeof(vmsg),
                              "'%s' returns no value, so there is nothing to "
                              "assign here. Give it a return type (e.g. "
-                             "`%s(...): int`) and a `return`, or call it as a "
+                             "`%s(...) -> int`) and a `return`, or call it as a "
                              "statement on its own line",
                              init->value ? init->value : "function",
                              init->value ? init->value : "f");
@@ -15963,7 +15990,7 @@ static int check_match_value_arms(ASTNode* m, SymbolTable* table) {
                  "value of the `match` is used", callee);
         snprintf(help, sizeof(help),
                  "give the arm a value: a block arm can make the call and end with one, "
-                 "`{ %s(...)  0 }`", callee);
+                 "`{ %s(...); 0 }`", callee);
         type_error_hint(msg, help, given->line, given->column);
         refused++;
     }
@@ -17571,18 +17598,19 @@ static int typecheck_function_call_inner(ASTNode* call, SymbolTable* table) {
                         snprintf(aty, sizeof(aty), "%s[]",
                             param_type->element_type
                                 ? type_name(param_type->element_type) : "");
-                        /* Sized for the fixed template (~230 chars) + three
+                        /* Sized for the fixed template (~300 chars) + three
                          * `aty` (<=64 each) + the param and call names; kept
                          * comfortably above the worst case so -Werror=format-
                          * truncation is satisfied without a runtime clamp. */
-                        char emsg[768];
+                        char emsg[1024];
                         snprintf(emsg, sizeof(emsg),
                             "Argument %d '%s' of '%s': expected %s, got a bare "
                             "ptr. A ptr does not carry an array length or layout, "
                             "so indexing it as %s would read past the object and "
                             "crash. A container handle (intarr, longarr, floatarr, "
-                            "strarr) is not its buffer: pass its bounded `array()` "
-                            "view. Cast with `as %s` only if the ptr points at a "
+                            "strarr) is not its buffer: pass its bounded view, "
+                            "`intarr.array(a)` (likewise longarr.array, floatarr.array, "
+                            "strarr.array). Cast with `as %s` only if the ptr points at a "
                             "contiguous buffer of that type.",
                             arg_slot + 1, param->value ? param->value : "?",
                             call->value ? call->value : "?",

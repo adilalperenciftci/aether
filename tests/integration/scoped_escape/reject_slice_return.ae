@@ -1,0 +1,8 @@
+head(xs: int[]) -> int[] {
+    @scoped v = xs[0..1]
+    return v
+}
+main() {
+    arr = [1, 2, 3]
+    println(head(arr).len)
+}

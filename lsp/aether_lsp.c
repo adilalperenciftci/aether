@@ -423,7 +423,7 @@ void lsp_handle_completion(LSPServer* server, const char* id, const char* uri, i
 
         /* ---- std.json ---- */
         "{\"label\":\"json.parse\",\"kind\":3,\"detail\":\"-> (value, err)\"},"
-        "{\"label\":\"json.stringify\",\"kind\":3,\"detail\":\"-> string\"},"
+        "{\"label\":\"json.encode\",\"kind\":3,\"detail\":\"-> (string, err)\"},"
 
         /* ---- std.net.http ---- */
         "{\"label\":\"http.get\",\"kind\":3,\"detail\":\"-> (body, err)\"},"
@@ -441,23 +441,28 @@ void lsp_handle_completion(LSPServer* server, const char* id, const char* uri, i
         "{\"label\":\"os.getpid\",\"kind\":3,\"detail\":\"-> int\"},"
 
         /* ---- std.cryptography ---- */
-        "{\"label\":\"cryptography.sha256\",\"kind\":3,\"detail\":\"-> string (hex)\"},"
-        "{\"label\":\"cryptography.base64_encode\",\"kind\":3,\"detail\":\"-> string\"},"
-        "{\"label\":\"cryptography.base64_encode_padded\",\"kind\":3,\"detail\":\"-> string\"},"
-        "{\"label\":\"cryptography.base64_decode\",\"kind\":3,\"detail\":\"-> (data, len, err)\"},"
+        "{\"label\":\"cryptography.sha256_hex\",\"kind\":3,\"detail\":\"-> string (hex)\"},"
+
+        /* ---- std.encoding ---- (#3001: the base64 calls are std.encoding's;
+         * this list offered them as std.cryptography's, and math.abs,
+         * math.min, math.max, log.info, log.warn, log.error, json.stringify
+         * and cryptography.sha256, none of which std has) */
+        "{\"label\":\"encoding.base64_encode\",\"kind\":3,\"detail\":\"-> string\"},"
+        "{\"label\":\"encoding.base64_encode_padded\",\"kind\":3,\"detail\":\"-> string\"},"
+        "{\"label\":\"encoding.base64_decode\",\"kind\":3,\"detail\":\"-> (string, err)\"},"
 
         /* ---- std.math ---- */
-        "{\"label\":\"math.sqrt\",\"kind\":3,\"detail\":\"\"},"
-        "{\"label\":\"math.pow\",\"kind\":3,\"detail\":\"\"},"
-        "{\"label\":\"math.abs\",\"kind\":3,\"detail\":\"\"},"
-        "{\"label\":\"math.min\",\"kind\":3,\"detail\":\"\"},"
-        "{\"label\":\"math.max\",\"kind\":3,\"detail\":\"\"},"
+        "{\"label\":\"math.sqrt\",\"kind\":3,\"detail\":\"-> float\"},"
+        "{\"label\":\"math.pow\",\"kind\":3,\"detail\":\"-> float\"},"
+        "{\"label\":\"math.abs_int\",\"kind\":3,\"detail\":\"-> int\"},"
+        "{\"label\":\"math.abs_float\",\"kind\":3,\"detail\":\"-> float\"},"
+        "{\"label\":\"math.min_int\",\"kind\":3,\"detail\":\"-> int\"},"
+        "{\"label\":\"math.max_int\",\"kind\":3,\"detail\":\"-> int\"},"
 
         /* ---- std.log ---- */
+        "{\"label\":\"log.init\",\"kind\":3,\"detail\":\"-> err\"},"
         "{\"label\":\"log.write\",\"kind\":3,\"detail\":\"\"},"
-        "{\"label\":\"log.info\",\"kind\":3,\"detail\":\"\"},"
-        "{\"label\":\"log.warn\",\"kind\":3,\"detail\":\"\"},"
-        "{\"label\":\"log.error\",\"kind\":3,\"detail\":\"\"}"
+        "{\"label\":\"log.set_level\",\"kind\":3,\"detail\":\"\"}"
 
         "]"
         "}";
