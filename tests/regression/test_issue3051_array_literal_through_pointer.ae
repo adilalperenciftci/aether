@@ -1,0 +1,49 @@
+// #3051: an array literal of fields read through a pointer. The early
+// inference pass could not type `b.inner` with `b` a pointer, so the
+// literal was taken for an int array: C was `int arr[2] = {b->inner,
+// b->inner}`, which gcc refuses. Its elements are typed when the literal is
+// checked, and a literal whose elements agree is an array of their type: a
+// struct, a string and a pointer field read through a pointer.
+
+extern exit(code: int)
+
+struct Inner {
+    v: int
+}
+
+struct Outer {
+    inner: Inner
+    name: string
+    next: *Outer
+}
+
+check(ok: bool, what: string) {
+    if !ok {
+        println("FAIL: ${what}")
+        exit(1)
+    }
+}
+
+main() {
+    a = heap.new(Outer)
+    b = heap.new(Outer)
+    a.inner = Inner { v: 3 }
+    b.inner = Inner { v: 7 }
+    a.name = "first"
+    b.name = "second"
+    a.next = b
+    b.next = a
+
+    arr = [a.inner, b.inner]
+    check(arr[0].v == 3 && arr[1].v == 7, "structs read through pointers")
+    names = [a.name, b.name]
+    check(names[1] == "second", "strings read through pointers")
+    ring = [a.next, b.next]
+    check(ring[0].inner.v == 7 && ring[1].inner.v == 3, "pointers read through pointers")
+    deep = [a.next.inner, b.next.inner]
+    check(deep[0].v + deep[1].v == 10, "a struct two pointers away")
+    println("${arr[0].v} ${names[0]} ${ring[1].name}")
+
+    heap.free(a)
+    heap.free(b)
+}

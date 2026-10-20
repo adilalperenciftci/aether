@@ -14176,6 +14176,29 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                     have->element_type->kind != join->kind) {
                     set_node_type(expr, create_array_type(clone_type(join), expr->child_count));
                 }
+            } else if (expr->child_count > 0) {
+                /* #3051: so is a literal of one non-numeric type. The early
+                 * pass could not type a field read through a pointer
+                 * (`[b.inner, b.inner]` with `b = heap.new(Outer)`), and
+                 * took the literal for an int array: C was `int arr[2] =
+                 * {b->inner, ...}`. Its elements are typed now; when they
+                 * agree, the literal is an array of that type. Only in
+                 * place of that default: a type the place gave the literal
+                 * (`let s: Shape[] = [c1, c2]`) stands. */
+                Type* first = expr->children[0] ? expr->children[0]->node_type : NULL;
+                int agree = first && first->kind != TYPE_UNKNOWN && first->kind != TYPE_VOID &&
+                            !is_numeric_scalar(first->kind);
+                for (int i = 1; agree && i < expr->child_count; i++) {
+                    Type* et = expr->children[i] ? expr->children[i]->node_type : NULL;
+                    agree = et && types_equal(et, first);
+                }
+                Type* have = expr->node_type;
+                int defaulted = !have || have->kind == TYPE_UNKNOWN ||
+                                (have->kind == TYPE_ARRAY &&
+                                 (!have->element_type || have->element_type->kind == TYPE_UNKNOWN ||
+                                  have->element_type->kind == TYPE_INT));
+                if (agree && defaulted)
+                    set_node_type(expr, create_array_type(clone_type(first), expr->child_count));
             }
             return 1;
         }
