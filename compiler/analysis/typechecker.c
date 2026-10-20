@@ -6117,6 +6117,8 @@ static void typecheck_top(ASTNode* top, SymbolTable* global_table) {
 
 static void typecheck_pending_calls(ASTNode* n, PendingResults* p, SymbolTable* global_table,
                                     int postpone);
+static void clause_set_settle(ASTNode* fn, SymbolTable* table);
+static int clause_set_first(ASTNode* fn);
 
 /* #3056 review: the first `return` of a value in `n`, in source order (not
  * one of a closure or a nested function), or NULL. */
@@ -6168,6 +6170,7 @@ static void typecheck_pending(int j, PendingResults* p, SymbolTable* global_tabl
     typecheck_pending_calls(p->fns[j], p, global_table, 1);
     typecheck_top(p->tops[j], global_table);
     p->state[j] = 2;
+    clause_set_settle(p->fns[j], global_table);   /* #3061 */
     typecheck_pending_calls(p->fns[j], p, global_table, 1);
 }
 
@@ -7057,6 +7060,11 @@ int typecheck_program(ASTNode* program) {
 
     // Second pass: type check all nodes. #3056: a function whose result is
     // inferred from its checked `return` before the first one that calls it.
+    /* #3061: a clause set whose every clause's result is known by now is
+     * one function of their join, before any body or call is checked. */
+    for (int i = 0; i < program->child_count; i++)
+        if (clause_set_first(program->children[i]))
+            clause_set_settle(program->children[i], global_table);
     PendingResults pending = { 0 };
     pending_results_find(program, &pending);
     for (int i = 0; i < program->child_count; i++) {
@@ -16885,6 +16893,111 @@ static const TcClauses* tc_clauses_of(ASTNode* fn) {
     for (int i = 0; i < tc->count; i++)
         if (tc->nodes[i] == fn) return tc;
     return NULL;
+}
+
+/* Is `fn` the first clause of a clause set? */
+static int clause_set_first(ASTNode* fn) {
+    const TcClauses* set = tc_clauses_of(fn);
+    return set && set->nodes[0] == fn;
+}
+
+/* `t` given the contents of a copy of `want`, keeping its identity (a
+ * check in progress may hold it, as refine_inferred_result's does). */
+static void type_take(Type* t, Type* want) {
+    Type* c = clone_type(want);
+    Type swap = *t;
+    *t = *c;
+    *c = swap;
+    free_type(c);
+}
+
+/* #3061: a function written as several clauses is one C function, whose
+ * result codegen took from its first clause with a known type
+ * (fn_result_type), so a later clause's wider value was cut to it with no
+ * word: `pick(0, s: int, b: long) -> s` then `pick(k, s: int, b: long) ->
+ * b` returned the long as an int. Once every clause's result is known, the
+ * set's is their join, as the arms of an if-expression or a value `match`
+ * join (branch_join_type: the wider number, an optional beside its value or
+ * `none`, a sum beside its variants), which each clause and the set's
+ * symbols take; two results that do not join are E0200, naming both. A
+ * written result type is the set's, and an inferred clause must fit it. A
+ * set with a clause whose result is still to be inferred waits for it
+ * (#3056). */
+static void clause_set_settle(ASTNode* fn, SymbolTable* table) {
+    const TcClauses* set = tc_clauses_of(fn);
+    if (!set) return;
+    /* A written result type, if a clause has one, is the set's. */
+    ASTNode* written = NULL;
+    for (int c = 0; c < set->count; c++) {
+        ASTNode* cl = set->nodes[c];
+        Type* t = cl->node_type;
+        if (!t || t->kind == TYPE_UNKNOWN) {
+            if (tc_has_return_value(cl)) return;   /* still to be inferred */
+            continue;
+        }
+        if (!written && !cl->type_inferred && t->kind != TYPE_VOID) written = cl;
+    }
+    Type* join = written ? clone_type(written->node_type) : NULL;
+    ASTNode* join_at = written;
+    for (int c = 0; c < set->count; c++) {
+        ASTNode* cl = set->nodes[c];
+        Type* t = cl->node_type;
+        if (!t || t->kind == TYPE_UNKNOWN || t->kind == TYPE_VOID || cl == written) continue;
+        if (!join) {
+            join = clone_type(t);
+            join_at = cl;
+            continue;
+        }
+        Type* k = branch_join_type(join, NULL, t, NULL);
+        /* Beside a written type, an inferred clause fits it (their join is
+         * it); a second written type is the same one or none. */
+        int unfit = written && k &&
+                    (!types_equal(k, join) || (!cl->type_inferred && !types_equal(t, join)));
+        if (!k || unfit) {
+            char a[160], b[160], msg[480];
+            if (unfit)
+                snprintf(msg, sizeof(msg),
+                         "the clauses of '%s' are written to return %s (line %d), and this "
+                         "clause returns %s, which that does not hold: a clause set is one "
+                         "function with one result",
+                         fn->value, ret_type_spell(join, a, sizeof(a)), join_at->line,
+                         ret_type_spell(t, b, sizeof(b)));
+            else
+                snprintf(msg, sizeof(msg),
+                         "the clauses of '%s' return %s (line %d) and %s, which no one type "
+                         "holds: a clause set is one function with one result",
+                         fn->value, ret_type_spell(join, a, sizeof(a)),
+                         join_at ? join_at->line : 0, ret_type_spell(t, b, sizeof(b)));
+            type_error_hint(msg, unfit ? "write the wider type on the clause that names one, "
+                                         "or convert the value (`x as T`)"
+                                       : "return the same type from every clause, or convert "
+                                         "the value (`x as T`)",
+                            cl->line, cl->column);
+            if (k) free_type(k);
+            free_type(join);
+            return;
+        }
+        if (!types_equal(k, join)) join_at = cl;
+        free_type(join);
+        join = k;
+    }
+    if (!join) return;
+    for (int c = 0; c < set->count; c++) {
+        Type* t = set->nodes[c]->node_type;
+        if (t && t->kind != TYPE_VOID && t->kind != TYPE_UNKNOWN && !types_equal(t, join))
+            type_take(t, join);
+    }
+    SymbolTable* root = table;
+    while (root && root->parent) root = root->parent;
+    for (Symbol* fs = root ? root->symbols : NULL; fs; fs = fs->next) {
+        if (!fs->is_function || !fs->type || fs->type->kind == TYPE_VOID) continue;
+        for (int c = 0; c < set->count; c++)
+            if (fs->node == set->nodes[c] && !types_equal(fs->type, join)) {
+                type_take(fs->type, join);
+                break;
+            }
+    }
+    free_type(join);
 }
 
 /* ---- Which `return`s have a value (#2697, #2733, #2735, #2736) ----------
