@@ -1,0 +1,46 @@
+// #3048: a typed pointer moved by an integer keeps its element type. Both
+// inference passes typed `nodes + 2`, with `nodes` a `*Node`, a bare `ptr`,
+// so a field read through it passed the checker untyped and reached C as a
+// member of a `void*` ("request for member 'w' in something not a structure
+// or union"). It is a `*Node` now, whose fields read and write, moved by an
+// int, a long, a uint32 or a byte, either way round. (A bare `ptr` has no
+// fields: tests/integration/ptr_offset_arithmetic checks a field read
+// through one is refused.)
+
+extern calloc(n: int, size: int) -> ptr
+extern free(p: ptr)
+extern exit(code: int)
+
+struct Node { v: int, w: int }
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+main() {
+    base = calloc(8, 16)
+    nodes = base as *Node
+    third = nodes + 2
+    third.v = 7
+    third.w = 9
+    again = nodes + 2
+    check(again.v == 7 && again.w == 9, "a node written through one offset reads through another")
+    long n = 3
+    fourth = nodes + n
+    fourth.w = 11
+    uint32 u = 1
+    before = fourth - u
+    check(before.w == 9, "a `*Node` less a uint32 is the node before it")
+    first = 1 + nodes
+    first.v = 5
+    back = third - 1
+    check(back.v == 5, "an int + a `*Node`, and a `*Node` - an int, meet")
+    byte b = 3
+    check((nodes + b).w == 11, "a byte offset, read in place")
+    check(nodes.v == 0 && nodes.w == 0, "the node at the base is untouched")
+    free(base)
+    println("ok")
+}

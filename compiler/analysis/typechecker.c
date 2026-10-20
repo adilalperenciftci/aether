@@ -4487,6 +4487,18 @@ Type* infer_binary_type(ASTNode* left, ASTNode* right, AeTokenType operator) {
     return result;
 }
 
+/* #3048: the type of `p + n`, `p - n` and `n + p`: the pointer `p` is, its
+ * element type and all (a `*Node` moved on is a `*Node`). A distinct
+ * pointer's is its base, as a distinct number's is beside a plain one. */
+static Type* moved_pointer_type(Type* p) {
+    Type* t = clone_type(p);
+    if (t && t->distinct_name) {
+        free(t->distinct_name);
+        t->distinct_name = NULL;
+    }
+    return t;
+}
+
 static Type* infer_binary_type_by_kind(ASTNode* left, ASTNode* right, AeTokenType operator) {
     Type* left_type = left ? left->node_type : NULL;
     Type* right_type = right ? right->node_type : NULL;
@@ -4713,9 +4725,11 @@ static Type* infer_binary_type_by_kind(ASTNode* left, ASTNode* right, AeTokenTyp
                  * checker refuses it, typecheck_binary_expression). */
                 int off_r = is_integer_scalar(right_type->kind) || right_type->kind == TYPE_BYTE;
                 int off_l = is_integer_scalar(left_type->kind) || left_type->kind == TYPE_BYTE;
-                if (left_type->kind == TYPE_PTR && off_r) return create_type(TYPE_PTR);
+                /* #3048: keeping the element type, so a `*Node` moved
+                 * on is a `*Node` still and its fields read. */
+                if (left_type->kind == TYPE_PTR && off_r) return moved_pointer_type(left_type);
                 if (off_l && right_type->kind == TYPE_PTR && operator == TOKEN_PLUS)
-                    return create_type(TYPE_PTR);
+                    return moved_pointer_type(right_type);
                 if (left_type->kind == TYPE_PTR && right_type->kind == TYPE_PTR &&
                     operator == TOKEN_MINUS) {
                     return create_type(TYPE_INT64);
@@ -15085,6 +15099,27 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                              type_name(base_type), expr->value ? expr->value : "?");
                     free_type(base_type);
                     type_error(error_msg, expr->line, expr->column);
+                    return 0;
+                }
+
+                /* #3048: a bare `ptr` points at nothing the checker knows,
+                 * so it has no fields. A field read or stored through one
+                 * passed the checker untyped and reached C as a member of a
+                 * `void*` ("request for member in something not a
+                 * structure or union"). */
+                if (base_type && base_type->kind == TYPE_PTR && !base_type->element_type &&
+                    !base_type->distinct_name && expr->value) {
+                    char error_msg[320];
+                    char hint[320];
+                    snprintf(error_msg, sizeof(error_msg),
+                             "Type 'ptr' has no field '%s': a bare `ptr` points at nothing "
+                             "the checker knows",
+                             expr->value);
+                    snprintf(hint, sizeof(hint),
+                             "view it as the struct it points at first: `(p as *Node).%s`",
+                             expr->value);
+                    free_type(base_type);
+                    type_error_hint(error_msg, hint, expr->line, expr->column);
                     return 0;
                 }
 
