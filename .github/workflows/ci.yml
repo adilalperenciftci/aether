@@ -908,6 +908,17 @@ jobs:
           exit 1
         fi
 
+    # A draw into a D32_SFLOAT_S8_UINT depth-stencil attachment, in plain C:
+    # Mesa 26.1.8's lavapipe dies in it in about half the runs on x86_64,
+    # where llvmpipe runs 8 lanes wide, and never with D24_UNORM_S8_UINT
+    # (aether#2410). The counts in each format are reported, not judged, so
+    # the log says whether this runner's lavapipe has the bug; a failure that
+    # is not a crash is a broken setup and fails the job.
+    - name: D32S8 depth-stencil draws in plain C on lavapipe
+      run: |
+        cc -O1 -g .github/scripts/lavapipe_d32s8_draw.c -o lavapipe_d32s8_draw -lvulkan || exit 1
+        sh .github/scripts/lavapipe_d32s8_report.sh ./lavapipe_d32s8_draw 20 10
+
     - name: Build the toolchain
       run: make -j"$(nproc)" compiler ae stdlib
 
@@ -1243,6 +1254,18 @@ jobs:
         echo "contrib/vulkan on this runner:"
         grep -E '^\s+(PASS|SKIP|FAIL)\s+vulkan/' contrib-windows.log || \
           echo "  no vulkan entries reported"
+
+    # The plain-C D32S8 draw of the Ubuntu 24.04 job, on the lavapipe
+    # registered above (aether#2410): crashes reported, not judged; a failure
+    # that is not a crash fails the job. The loader MSYS2 installed with
+    # lavapipe goes next to the program, ahead of System32's in the DLL search.
+    - name: D32S8 depth-stencil draws in plain C on lavapipe
+      timeout-minutes: 10
+      run: |
+        mkdir -p build/d32s8
+        gcc -O1 -g .github/scripts/lavapipe_d32s8_draw.c -o build/d32s8/lavapipe_d32s8_draw.exe -lvulkan-1 || exit 1
+        cp /mingw64/bin/vulkan-1.dll build/d32s8/
+        sh .github/scripts/lavapipe_d32s8_report.sh build/d32s8/lavapipe_d32s8_draw.exe 20 10
 
     - name: Save SQLite amalgamation object cache (merge to main, on miss only)
       if: >-
