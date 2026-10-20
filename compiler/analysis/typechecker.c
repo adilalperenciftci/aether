@@ -7760,11 +7760,15 @@ typedef struct KeepCtx KeepCtx;
 /* What a value carries of the borrowed parameters: each parameter, and what
  * holds it ("held by a struct", "held by the result of 'f'"; NULL: the value
  * is the pointer itself, or a view of it). A result built from two `@into`
- * arguments carries both. */
+ * arguments carries both. A holder built from a tuple literal says which
+ * part holds the parameter (`parts`, a path such as "1" or "0.1"; NULL: the
+ * whole value), so a part read out of it carries only what that part holds
+ * (#2990). */
 typedef struct {
     int n;
     const char* params[CARRIED_MAX];
     const char* vias[CARRIED_MAX];
+    const char* parts[CARRIED_MAX];
 } Carried;
 
 /* Each name that holds a borrowed `ptr` parameter (the parameter, a local
@@ -7774,6 +7778,7 @@ typedef struct {
     const char* names[KEEP_SET_MAX];
     const char* params[KEEP_SET_MAX];
     const char* vias[KEEP_SET_MAX];
+    const char* parts[KEEP_SET_MAX];   /* as Carried's */
     int count;
     /* The function's `@into` parameters, which a `return` may hand back. */
     const char* into[KEEP_SET_MAX];
@@ -7803,21 +7808,78 @@ static int returns_string_at(Type* ret, int i, int n) {
     return 0;
 }
 
-static void carried_add(Carried* c, const char* param, const char* via) {
-    for (int i = 0; i < c->n; i++)
-        if (!strcmp(c->params[i], param)) return;
+/* #2990: is the part `part` inside `whole` (NULL: the whole value)? */
+static int part_within(const char* part, const char* whole) {
+    if (!whole) return 1;
+    if (!part) return 0;
+    size_t n = strlen(whole);
+    return !strncmp(part, whole, n) && (part[n] == '\0' || part[n] == '.');
+}
+
+/* `param`, held at `part`. A part already covered adds nothing; one that
+ * covers parts already there takes their place. */
+static void carried_add_at(Carried* c, const char* param, const char* via, const char* part) {
+    for (int i = 0; i < c->n; i++) {
+        if (strcmp(c->params[i], param)) continue;
+        if (part_within(part, c->parts[i])) return;
+        if (part_within(c->parts[i], part)) {
+            int w = 0;
+            for (int j = 0; j < c->n; j++)
+                if (strcmp(c->params[j], param) || !part_within(c->parts[j], part)) {
+                    c->params[w] = c->params[j];
+                    c->vias[w] = c->vias[j];
+                    c->parts[w++] = c->parts[j];
+                }
+            c->n = w;
+            break;
+        }
+    }
     if (c->n < CARRIED_MAX) {
         c->params[c->n] = param;
-        c->vias[c->n++] = via;
+        c->vias[c->n] = via;
+        c->parts[c->n++] = part;
     }
 }
 
+static void carried_add(Carried* c, const char* param, const char* via) {
+    carried_add_at(c, param, via, NULL);
+}
+
 static void carried_merge(Carried* c, Carried o) {
-    for (int i = 0; i < o.n; i++) carried_add(c, o.params[i], o.vias[i]);
+    for (int i = 0; i < o.n; i++) carried_add_at(c, o.params[i], o.vias[i], o.parts[i]);
 }
 
 static void carried_set_via(Carried* c, const char* via) {
     for (int i = 0; i < c->n; i++) c->vias[i] = via;
+}
+
+/* The same parameters, each held by the value as a whole (#2990): what a
+ * closure captures or a call's result holds is not split by part. */
+static Carried carried_whole(Carried c) {
+    Carried w = { 0 };
+    for (int i = 0; i < c.n; i++) carried_add(&w, c.params[i], c.vias[i]);
+    return w;
+}
+
+/* `c` placed at part `at` of a holder being built (#2990). */
+static Carried carried_prefix(Carried c, const char* at) {
+    for (int i = 0; i < c.n; i++)
+        c.parts[i] = c.parts[i] ? aether_internf("%s.%s", at, c.parts[i]) : at;
+    return c;
+}
+
+/* What part `at` of a value that carries `c` carries (#2990): a parameter
+ * held by the whole value, or at that part or inside it. */
+static Carried carried_part(Carried c, const char* at) {
+    Carried p = { 0 };
+    size_t n = strlen(at);
+    for (int i = 0; i < c.n; i++) {
+        if (part_within(at, c.parts[i]))
+            carried_add_at(&p, c.params[i], c.vias[i], NULL);
+        else if (part_within(c.parts[i], at))
+            carried_add_at(&p, c.params[i], c.vias[i], c.parts[i] + n + 1);
+    }
+    return p;
 }
 
 /* Only what is held by something (a struct, a tuple, a result): the pointer
@@ -7826,14 +7888,14 @@ static void carried_set_via(Carried* c, const char* via) {
 static Carried carried_holders(Carried c) {
     Carried h = { 0 };
     for (int i = 0; i < c.n; i++)
-        if (c.vias[i]) carried_add(&h, c.params[i], c.vias[i]);
+        if (c.vias[i]) carried_add_at(&h, c.params[i], c.vias[i], c.parts[i]);
     return h;
 }
 
 static Carried keep_set_lookup(const KeepSet* s, const char* n) {
     Carried c = { 0 };
     for (int i = 0; n && i < s->count; i++)
-        if (!strcmp(s->names[i], n)) carried_add(&c, s->params[i], s->vias[i]);
+        if (!strcmp(s->names[i], n)) carried_add_at(&c, s->params[i], s->vias[i], s->parts[i]);
     return c;
 }
 
@@ -7841,10 +7903,12 @@ static void keep_set_add(KeepSet* s, const char* n, Carried c) {
     for (int k = 0; n && k < c.n; k++) {
         int found = 0;
         for (int i = 0; i < s->count && !found; i++)
-            found = !strcmp(s->names[i], n) && !strcmp(s->params[i], c.params[k]);
+            found = !strcmp(s->names[i], n) && !strcmp(s->params[i], c.params[k]) &&
+                    part_within(c.parts[k], s->parts[i]);
         if (!found && s->count < KEEP_SET_MAX) {
             s->names[s->count] = n;
             s->params[s->count] = c.params[k];
+            s->parts[s->count] = c.parts[k];
             s->vias[s->count++] = c.vias[k];
         }
     }
@@ -7883,7 +7947,10 @@ static int type_may_hold_ptr(Type* t) {
 static Carried carried_read_out(Carried c, Type* t) {
     Carried none = { 0 };
     if (!c.n || !type_may_hold_ptr(t)) return none;
-    if (is_bare_ptr_type(t)) carried_set_via(&c, NULL);
+    if (is_bare_ptr_type(t)) {
+        c = carried_whole(c);
+        carried_set_via(&c, NULL);
+    }
     return c;
 }
 
@@ -8053,7 +8120,12 @@ static Carried carries_borrowed_ptr(ASTNode* e, const KeepSet* s) {
             for (int i = 0; i < e->child_count; i++) {
                 ASTNode* f = e->children[i];
                 if (e->type == AST_STRUCT_LITERAL) f = (f && f->child_count > 0) ? f->children[0] : NULL;
-                carried_merge(&c, carries_borrowed_ptr(f, s));
+                Carried fc = carries_borrowed_ptr(f, s);
+                /* #2990: a tuple part says where it is; an element is read
+                 * at an index the checker does not follow. */
+                carried_merge(&c, e->type == AST_TUPLE_LITERAL
+                                      ? carried_prefix(fc, aether_internf("%d", i))
+                                      : carried_whole(fc));
             }
             carried_set_via(&c, e->type == AST_STRUCT_LITERAL ? "held by a struct"
                                 : e->type == AST_TUPLE_LITERAL ? "held by a tuple"
@@ -8063,6 +8135,7 @@ static Carried carries_borrowed_ptr(ASTNode* e, const KeepSet* s) {
         case AST_CLOSURE: {
             Carried c = none;
             mentioned_params(e, s, &c);
+            c = carried_whole(c);
             carried_set_via(&c, "captured by a closure");
             return c;
         }
@@ -8096,6 +8169,7 @@ static Carried carries_borrowed_ptr(ASTNode* e, const KeepSet* s) {
             else
                 c = carried_holders(keep_set_lookup(s, e->value));
             if (c.n) {
+                c = carried_whole(c);
                 carried_set_via(&c, "held by a closure's result");
                 c = carried_read_out(c, e->node_type);
             }
@@ -8113,6 +8187,7 @@ static Carried carries_borrowed_ptr(ASTNode* e, const KeepSet* s) {
                                   : (e->children[0]->type == AST_IDENTIFIER && e->children[0]->value)
                                       ? e->children[0]->value
                                       : "a closure";
+                in = carried_whole(in);
                 carried_set_via(&in, rt && rt->kind == TYPE_PTR
                                          ? NULL
                                          : aether_internf("held by the result of '%s'", who));
@@ -8128,6 +8203,7 @@ static Carried carries_borrowed_ptr(ASTNode* e, const KeepSet* s) {
  * (#2979), a note that it escapes. An `@into` parameter may go nowhere but
  * the result; `how` says where it went instead. */
 static void report_borrowed_keep(KeepSet* s, ASTNode* at, Carried c, const char* how) {
+    c = carried_whole(c);   /* once per parameter, whatever parts hold it */
     for (int i = 0; i < c.n; i++) {
         if (s->probe) { s->escaped = 1; return; }
         int into = keep_set_is_into(s, c.params[i]);
@@ -8237,8 +8313,9 @@ static void check_ptr_keeps_in(ASTNode* program, ASTNode* n, KeepSet* s,
     if (n->type == AST_VARIABLE_DECLARATION && n->value && n->child_count > 0 &&
         (c = carries_borrowed_ptr(n->children[n->child_count - 1], s)).n)
         bind_holder(s, n, n->value, c, globals, nglobals);
-    /* `a, b = v`: each part holds what the value carries, unless its type
-     * cannot hold a pointer; a tuple literal's parts are its elements. */
+    /* `a, b = v`: each part holds what the value carries at that part
+     * (#2990), unless its type cannot hold a pointer; a tuple literal's
+     * parts are its elements. */
     if (n->type == AST_TUPLE_DESTRUCTURE && n->child_count >= 2) {
         int nv = n->child_count - 1;
         ASTNode* rhs = n->children[nv];
@@ -8248,7 +8325,8 @@ static void check_ptr_keeps_in(ASTNode* program, ASTNode* n, KeepSet* s,
             if (!var || !var->value) continue;
             Carried part = (rhs && rhs->type == AST_TUPLE_LITERAL && rhs->child_count == nv)
                                ? carries_borrowed_ptr(rhs->children[v], s)
-                               : carried_read_out(whole, var->node_type);
+                               : carried_read_out(carried_part(whole, aether_internf("%d", v)),
+                                                  var->node_type);
             bind_holder(s, var, var->value, part, globals, nglobals);
         }
     }
@@ -8269,6 +8347,7 @@ static void check_ptr_keeps_in(ASTNode* program, ASTNode* n, KeepSet* s,
         if (lhs->type == AST_IDENTIFIER) {
             bind_holder(s, n, lhs->value, c, globals, nglobals);
         } else if ((root = local_struct_root(lhs, globals, nglobals))) {
+            c = carried_whole(c);
             carried_set_via(&c, "held by a struct");
             keep_set_add(s, root, c);
         } else if (!(s->probe && s->ctx && !c_lvalue_outlives(s->ctx, lhs, s->depth))) {
@@ -8279,7 +8358,7 @@ static void check_ptr_keeps_in(ASTNode* program, ASTNode* n, KeepSet* s,
     }
     if (n->type == AST_RETURN_STATEMENT && !in_closure) {
         for (int i = 0; i < n->child_count; i++) {
-            c = carries_borrowed_ptr(n->children[i], s);
+            c = carried_whole(carries_borrowed_ptr(n->children[i], s));
             /* An `@into` parameter may be handed back; a `ptr` returned at
              * a `string` position is taken as a string. */
             for (int k = 0; k < c.n; k++) {

@@ -456,6 +456,60 @@ main() { put(null) }
 AE
 refused tuple_part_global 6:5 "'p' is a borrowed \`ptr\` parameter, stored in a module-level \`var\`"
 
+# #2990: a part read out of a tuple local holds what that part holds, and no
+# more: the other part here is a block of the function's own.
+cat > "$TMP/tuple_other_part.ae" <<'AE'
+extern malloc(n: int) -> ptr
+extern free(p: ptr)
+
+second(p: ptr) -> ptr {
+    t = (p, malloc(8))
+    a, b = t
+    if a == null { free(b) }
+    return b
+}
+
+main() {
+    q = malloc(4)
+    free(second(q))
+    free(q)
+}
+AE
+accepted tuple_other_part
+
+cat > "$TMP/tuple_nested_part.ae" <<'AE'
+extern malloc(n: int) -> ptr
+
+var kept: ptr = null
+
+put(p: ptr) -> ptr {
+    t = ((1, p), malloc(8))
+    x, y = t
+    n, q = x
+    kept = q
+    return y
+}
+
+main() { println("${put(null) == null}") }
+AE
+refused tuple_nested_part 9:5 "'p' is a borrowed \`ptr\` parameter, stored in a module-level \`var\`"
+
+cat > "$TMP/tuple_nested_other.ae" <<'AE'
+extern malloc(n: int) -> ptr
+extern free(p: ptr)
+
+second(p: ptr) -> ptr {
+    t = ((1, p), malloc(8))
+    x, y = t
+    n, q = x
+    if q == null { return y }
+    return y
+}
+
+main() { free(second(null)) }
+AE
+accepted tuple_nested_other
+
 cat > "$TMP/payload_returned.ae" <<'AE'
 unwrap(p: ptr) -> ptr {
     let o: ptr? = p

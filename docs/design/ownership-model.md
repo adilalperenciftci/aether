@@ -336,7 +336,9 @@ the signature, so no call site reads another function's body:
   callback that never left the call. A tuple and an optional hold it as a
   struct does, a value read out of a holder (a field, a tuple part, an
   optional's payload, a `match` binding) holds it unless its type cannot
-  hold a pointer, and a call through a closure that captured it may return
+  hold a pointer or, for a part of a tuple built from parts, the pointer
+  went into another part (`t = (p, q)`: the part `q` went into holds
+  nothing borrowed), and a call through a closure that captured it may return
   it, so its result holds it too (#2990 found the checker following none of
   these: `t = (p, 1)` returned, `kept = o!` and `kept = call(f)` passed).
 - The checker verifies each function against its own body: a `ptr`
