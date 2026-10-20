@@ -1,0 +1,51 @@
+// #3056 review: a function whose result is inferred from its checked first
+// `return` (the early pass cannot type a field read through a pointer) took
+// a narrowed optional's `T` for it. In `if o != none { return o }`, `o`
+// reads as its `T`, so `through_ptr` was an `int` and its `return none` was
+// E0200 "'through_ptr' returns int (inferred from its first `return`), but
+// this value is unknown?". The variable is an `int?`, which is what the
+// early pass types `return o` as when it can, and that optional is the
+// result now. And a first `return none` took the optional of nothing yet,
+// which codegen wrote as an `ae_opt_int`: a `string?` result failed in C.
+// A later `return` gives the type instead.
+
+extern exit(code: int)
+
+struct H {
+    opt: int?
+    name: string?
+}
+
+through_ptr(p: *H) {
+    o = p.opt
+    if o != none { return o }
+    return none
+}
+
+none_first(p: *H) {
+    o = p.name
+    if o == none { return none } else { return o }
+}
+
+check(ok: bool, what: string) {
+    if !ok {
+        println("FAIL: ${what}")
+        exit(1)
+    }
+}
+
+main() {
+    full = heap.new(H)
+    full.opt = 4
+    full.name = "bob"
+    empty = heap.new(H)
+    empty.opt = none
+    empty.name = none
+    check((through_ptr(full) ?? 0) == 4, "a value through the narrowed branch")
+    check((through_ptr(empty) ?? 9) == 9, "none past it")
+    check((none_first(full) ?? "nobody") == "bob", "a string through the narrowed else")
+    check((none_first(empty) ?? "nobody") == "nobody", "none first")
+    heap.free(full)
+    heap.free(empty)
+    println("ok")
+}

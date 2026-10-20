@@ -11976,6 +11976,20 @@ static int check_return_values(ASTNode* ret, Type* rt, const ReturnOwner* own,
  * identity and takes the new contents, since a closure checked before the
  * `return` saved it to restore after its body. Returns the type, or NULL
  * when there is nothing to refine. */
+/* #3056 review: does `t` have a part whose type is not known (an optional's
+ * payload, an element, a tuple part)? */
+static int type_has_unknown_part(Type* t) {
+    if (!t) return 1;
+    if (t->kind == TYPE_UNKNOWN) return 1;
+    if ((t->kind == TYPE_OPTIONAL || t->kind == TYPE_ARRAY) && t->element_type &&
+        type_has_unknown_part(t->element_type))
+        return 1;
+    if (t->kind == TYPE_OPTIONAL && !t->element_type) return 1;
+    for (int i = 0; t->kind == TYPE_TUPLE && t->tuple_types && i < t->tuple_count; i++)
+        if (type_has_unknown_part(t->tuple_types[i])) return 1;
+    return 0;
+}
+
 static Type* refine_inferred_result(ASTNode* o, ASTNode* ret, SymbolTable* table) {
     if (!o || (o->type != AST_FUNCTION_DEFINITION && o->type != AST_BUILDER_FUNCTION) ||
         !o->type_inferred || !o->value)
@@ -11988,6 +12002,22 @@ static Type* refine_inferred_result(ASTNode* o, ASTNode* ret, SymbolTable* table
     Type* vt = infer_type(ret->children[0], table);
     if (!vt || vt->kind == TYPE_UNKNOWN || vt->kind == TYPE_VOID) {
         if (vt) free_type(vt);
+        return NULL;
+    }
+    /* #3056 review: an optional a none-check narrowed (`if o != none {
+     * return o }`) reads as its `T` in the branch, but the variable is a
+     * `T?`, which is what the early pass types `return o` as: the result is
+     * the optional, so a later `return none` fits it. */
+    ASTNode* rv = ret->children[0];
+    if (rv->type == AST_IDENTIFIER && rv->annotation && !strcmp(rv->annotation, "__opt_narrowed") &&
+        vt->kind != TYPE_OPTIONAL)
+        vt = create_optional_type(vt);
+    /* A value with a part still unknown (`return none`, an optional of
+     * nothing yet) is no result to take: a later `return` gives it, as
+     * one that names the optional's type (codegen took `unknown?` for
+     * `ae_opt_int`, and a `string?` result failed in C). */
+    if (type_has_unknown_part(vt)) {
+        free_type(vt);
         return NULL;
     }
     if (o->node_type) {
