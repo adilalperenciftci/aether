@@ -687,6 +687,37 @@ static const ASTNode* tuple_arm_part(const ASTNode* arm, int i) {
     return arm && arm->type == AST_TUPLE_LITERAL && i < arm->child_count ? arm->children[i] : NULL;
 }
 
+Type* fn_type_mode_join(const Type* a, const Type* b) {
+    if (!a || !b || a->kind != TYPE_FUNCTION || b->kind != TYPE_FUNCTION ||
+        a->is_fnptr || b->is_fnptr)
+        return NULL;
+    if (!fn_type_has_modes(a) && !fn_type_has_modes(b)) return NULL;
+    /* An erased `fn` (a closure literal whose parameters name no mode)
+     * stands where the moded type is expected. */
+    int a_erased = a->param_count == 0 && !a->return_type;
+    int b_erased = b->param_count == 0 && !b->return_type;
+    Type* j = NULL;
+    if (a_erased != b_erased) {
+        j = clone_type((Type*)(a_erased ? b : a));
+    } else if (a->param_count == b->param_count) {
+        Type* ja = clone_type((Type*)a);
+        Type* jb = clone_type((Type*)b);
+        for (int i = 0; i < a->param_count; i++) {
+            int ma = fn_type_param_mode(a, i), mb = fn_type_param_mode(b, i);
+            int m = ma > mb ? ma : mb;
+            fn_type_set_param_mode(ja, i, m);
+            fn_type_set_param_mode(jb, i, m);
+        }
+        ja->closure_literal = jb->closure_literal = NULL;
+        if (types_equal(ja, jb)) j = ja;
+        else free_type(ja);
+        free_type(jb);
+    }
+    /* Either value's: a call result through it is no one literal's. */
+    if (j) j->closure_literal = NULL;
+    return j;
+}
+
 Type* branch_join_type(Type* a, const ASTNode* a_arm, Type* b, const ASTNode* b_arm) {
     if (!a || !b) return NULL;
     if (a->kind == TYPE_FLOAT32 && b->kind == TYPE_FLOAT && is_float_literal_arm(b_arm))
@@ -716,6 +747,10 @@ Type* branch_join_type(Type* a, const ASTNode* a_arm, Type* b, const ASTNode* b_
         return t;
     }
     if (types_equal(a, b)) return clone_type(a);
+    /* #2980 review: either of two functions is called through the stronger
+     * mode at each parameter; the then branch's type alone lost a `@keep`. */
+    Type* fj = fn_type_mode_join(a, b);
+    if (fj) return fj;
     /* #2983: an optional beside a value its element joins with, or beside
      * `none` (an optional of nothing known yet), is that optional. */
     if (a->kind == TYPE_OPTIONAL || b->kind == TYPE_OPTIONAL) {

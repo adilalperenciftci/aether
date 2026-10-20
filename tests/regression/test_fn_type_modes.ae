@@ -96,6 +96,26 @@ main() {
     let k: fn(@keep ptr, float) = | el: @keep ptr, t: float | { element_set_fill(el, "k") }
     animate(shape, 1, k)
     check(list.size(registry) == 9, "a binding of the closure type")
+    // Either of two functions is called through the stronger mode at each
+    // parameter, here `@keep`, so either may stand.
+    pick = if list.size(registry) > 100 { count_tick } else { fill_tick }
+    animate(shape, 1, pick)
+    check(list.size(registry) == 10, "an if-expression over two functions")
+    if list.size(registry) > 100 {
+        h = count_tick
+    } else {
+        h = fill_tick
+    }
+    animate(shape, 1, h)
+    h(shape, 1.0)
+    check(list.size(registry) == 12, "a local bound to a function in each branch")
+    pickc = if list.size(registry) > 100 {
+        | el: ptr, t: float | { println("never ${t}") }
+    } else {
+        | el: @keep ptr, t: float | { element_set_fill(el, "c") }
+    }
+    animate(shape, 2, pickc)
+    check(list.size(registry) == 14, "an if-expression over two closure literals")
     x = 0
     check(record((&x) as ptr, recorder) == 2, "a call through `fn(@into ptr) -> Recorder`")
     mk = | c: @into ptr | { return Recorder { context: c, hits: 0 } }

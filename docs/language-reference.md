@@ -3765,7 +3765,11 @@ borrowing closure where `fn(@keep ptr, float)` is, an `@into` function where
 weaker type would hand it a pointer the caller still owns. So a keeping
 function does not go into a bare `fn` (which borrows every parameter), a
 closure type with a weaker mode at that parameter, or a `ptr` (the box
-`unbox_closure` opens is a bare `fn`); each is E0902. A typed C function
+`unbox_closure` opens is a bare `fn`); each is E0902. A value that is one
+of several functions (an if-expression or a value `match` over them, or a
+local bound to one in each branch) takes the strongest of their modes at
+each parameter, the type every one of them may stand for, so a call
+through it is checked as a call to the one that keeps. A typed C function
 pointer's parameters borrow, so neither `as fn(...)` nor a `type Name =
 fn(...)` alias names a mode.
 

@@ -148,6 +148,73 @@ AE
 } > "$TMP/closure_into_kept.ae"
 refused closure_into_kept 12:9 E0902 "'p' is an \`@into ptr\` parameter, stored in a module-level \`var\`"
 
+# A value that is one of several functions is called through the stronger
+# mode at each parameter: an if-expression or a value match over them, a
+# local bound to one in each branch, and such a value passed on. Typed by
+# the first one alone, the `@keep` of the other was lost.
+{ head_ae; cat <<'AE'
+relay(el: ptr, c: bool) {
+    f = if c { borrow } else { set_fill }
+    f(el, 0.5)
+}
+
+main() { relay(null, true) }
+AE
+} > "$TMP/if_value.ae"
+refused if_value 12:7 E0902 "'el' is a borrowed \`ptr\` parameter, passed to a parameter that keeps it"
+
+{ head_ae; cat <<'AE'
+relay(el: ptr, c: bool) {
+    if c {
+        f = borrow
+    } else {
+        f = set_fill
+    }
+    f(el, 0.5)
+}
+
+main() { relay(null, true) }
+AE
+} > "$TMP/branch_bindings.ae"
+refused branch_bindings 16:7 E0902 "'el' is a borrowed \`ptr\` parameter, passed to a parameter that keeps it"
+
+{ head_ae; cat <<'AE'
+relay(el: ptr, c: bool) {
+    f = if c { | e: ptr, t: float | { borrow(e, t) } } else { | e: @keep ptr, t: float | { set_fill(e, t) } }
+    call(f, el, 0.5)
+}
+
+main() { relay(null, true) }
+AE
+} > "$TMP/if_closures.ae"
+refused if_closures 12:13 E0902 "'el' is a borrowed \`ptr\` parameter, passed to a parameter that keeps it"
+
+{ head_ae; cat <<'AE'
+relay(el: ptr, k: int) {
+    f = match k {
+        0 -> | e: ptr, t: float | { borrow(e, t) }
+        _ -> | e: @keep ptr, t: float | { set_fill(e, t) }
+    }
+    call(f, el, 0.5)
+}
+
+main() { relay(null, 0) }
+AE
+} > "$TMP/match_closures.ae"
+refused match_closures 15:13 E0902 "'el' is a borrowed \`ptr\` parameter, passed to a parameter that keeps it"
+
+{ head_ae; cat <<'AE'
+run(tick: fn, el: ptr) { call(tick, el, 0.5) }
+
+main() {
+    registry = list.new()
+    c = list.size(registry) == 0
+    run(if c { borrow } else { set_fill }, null)
+}
+AE
+} > "$TMP/if_passed.ae"
+refused if_passed 15:9 E0902 "keeps its \`ptr\` parameter 1 (\`@keep\`), where \`fn\` borrows it"
+
 # Never the reverse.
 { head_ae; cat <<'AE'
 run(tick: fn) { call(tick, null, 0.5) }

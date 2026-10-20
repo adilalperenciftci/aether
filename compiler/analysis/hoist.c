@@ -95,8 +95,30 @@ static void null_string_walk(ASTNode* n, const char* name, int* strings, int* ot
     for (int i = 0; i < n->child_count; i++) null_string_walk(n->children[i], name, strings, others);
 }
 
+/* #2980 review: over the inferred bindings of `name` in `n` (closures
+ * excluded), function values joined with `acc` by fn_type_mode_join. */
+static Type* fn_join_walk(ASTNode* n, const char* name, Type* acc) {
+    if (!n) return acc;
+    if (n->type == AST_CLOSURE || n->type == AST_QUOTE) return acc;
+    if (n->type == AST_VARIABLE_DECLARATION && n->value && n->type_inferred &&
+        strcmp(n->value, name) == 0) {
+        Type* j = fn_type_mode_join(acc, hoist_decl_type(n));
+        if (j) { free_type(acc); acc = j; }
+    }
+    for (int i = 0; i < n->child_count; i++) acc = fn_join_walk(n->children[i], name, acc);
+    return acc;
+}
+
 Type* hoist_join_type(ASTNode* scope_body, const char* name, Type* seed) {
     if (!scope_body || !seed) return NULL;
+    /* #2980 review: a local bound to functions in two branches is called
+     * through the stronger mode at each parameter, where either may stand;
+     * typed from the first binding alone, a `@keep` in the other was lost. */
+    if (seed->kind == TYPE_FUNCTION) {
+        Type* acc = fn_join_walk(scope_body, name, clone_type(seed));
+        if (acc && types_equal(acc, seed)) { free_type(acc); return NULL; }
+        return acc;
+    }
     /* #3032: a `null` binding names no type of its own. A local hoisted
      * from `t = null` in one branch and `t = "b"` in another is a string,
      * as the same two bindings in one block make it. Joined as the `ptr` of

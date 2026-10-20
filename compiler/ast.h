@@ -681,6 +681,12 @@ int fn_type_param_mode(const Type* t, int i);
 void fn_type_set_param_mode(Type* t, int i, int mode);
 /* Does any parameter of `t` keep or pass on what it is given? */
 int fn_type_has_modes(const Type* t);
+/* The type a value that is either `a` or `b`, two function values, is
+ * called through (#2980 review): at each parameter the stronger mode
+ * (borrowed < @into < @keep), where either function may stand. A fresh Type,
+ * or NULL unless both are closure values of one shape (modes aside) with a
+ * mode between them, or one is an erased `fn` beside a moded type. */
+Type* fn_type_mode_join(const Type* a, const Type* b);
 void free_type(Type* type);
 const char* type_to_string(Type* type);
 /* #2832: `type` as the source spells it, for a diagnostic: a distinct type

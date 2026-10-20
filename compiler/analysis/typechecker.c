@@ -3485,6 +3485,31 @@ static Type* tc_branch_value_type(Type* a, const ASTNode* a_arm, Type* b, const 
     return NULL;
 }
 
+/* The checked type of a closure literal that branch `b` gives, or NULL. */
+static Type* branch_closure_type(ASTNode* b) {
+    ASTNode* v = tc_arm_value(b);
+    if (!v) v = b;
+    return v && v->type == AST_CLOSURE && v->node_type && v->node_type->kind == TYPE_FUNCTION
+               ? v->node_type : NULL;
+}
+
+/* #2980 review: infer_type leaves a closure literal unknown, so of two
+ * branches that give closures (`*ta`, `*tb` as inferred), one declaring a
+ * mode lost it to the other's unknown. Where either branch is a function
+ * with modes, a branch's checked closure gives its own type, and the two
+ * join by mode (branch_join_type). */
+static void closure_branch_types(ASTNode* a, Type** ta, ASTNode* b, Type** tb) {
+    Type* ca = (!*ta || (*ta)->kind == TYPE_UNKNOWN) ? branch_closure_type(a) : NULL;
+    Type* cb = (!*tb || (*tb)->kind == TYPE_UNKNOWN) ? branch_closure_type(b) : NULL;
+    Type* fa = ca ? ca : *ta;
+    Type* fb = cb ? cb : *tb;
+    if (!((fa && fa->kind == TYPE_FUNCTION && fn_type_has_modes(fa)) ||
+          (fb && fb->kind == TYPE_FUNCTION && fn_type_has_modes(fb))))
+        return;
+    if (ca) { if (*ta) free_type(*ta); *ta = clone_type(ca); }
+    if (cb) { if (*tb) free_type(*tb); *tb = clone_type(cb); }
+}
+
 int is_callable(Type* type) {
     if (!type) return 0;
     switch (type->kind) {
@@ -4110,6 +4135,7 @@ Type* infer_type(ASTNode* expr, SymbolTable* table) {
             if (expr->child_count >= 3) {
                 Type* th = infer_type(expr->children[1], table);
                 Type* el = infer_type(expr->children[2], table);
+                closure_branch_types(expr->children[1], &th, expr->children[2], &el);
                 Type* t = branch_join_type(th, expr->children[1], el, expr->children[2]);
                 if (!t && th && el && th->kind != TYPE_UNKNOWN &&
                     (el->kind == TYPE_SUM || el->kind == TYPE_OPTIONAL) &&
@@ -11356,7 +11382,10 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                             free_type(bound->type);
                             bound->type = joined ? joined : clone_type(init_type);
                         } else if (bound->type && init_type) {
+                            /* #2980 review: function values join by mode,
+                             * the stronger at each parameter. */
                             Type* joined = numeric_join_type(bound->type, init_type);
+                            if (!joined) joined = fn_type_mode_join(bound->type, init_type);
                             if (joined) { free_type(bound->type); bound->type = joined; }
                         }
                         if (sibling_binding_other_type(init_type, bound->type)) {
@@ -13645,6 +13674,7 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                 expr->children[2]->type != AST_NONE_LITERAL) {
                 Type* th = infer_type(expr->children[1], table);
                 Type* el = infer_type(expr->children[2], table);
+                closure_branch_types(expr->children[1], &th, expr->children[2], &el);
                 /* #3017: a branch that gives no value (a call returning
                  * nothing, or `exit(n)`, which never returns) reached C as a
                  * void operand of `?:`. An `if` expression chooses between
