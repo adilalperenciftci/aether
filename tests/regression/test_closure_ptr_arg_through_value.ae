@@ -51,7 +51,7 @@ hand_over(k: int) {
 // The same through a local bound to a closure literal, whose own parameter
 // says it keeps.
 hand_over_literal(k: int) {
-    h = |q: @keep ptr| { kept = q }
+    h = | q: @keep ptr | { kept = q }
     h(| x: int | { return x + k })
 }
 
@@ -79,7 +79,7 @@ round(k: int) {
     release_closure(kept)
     kept = null
 
-    lend_literal = |q: ptr| {
+    lend_literal = | q: ptr | {
         fn g2 = unbox_closure(q)
         int v2 = call(g2, 5)
         return v2
