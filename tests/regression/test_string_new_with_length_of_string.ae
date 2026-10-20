@@ -1,0 +1,28 @@
+// #3030: string.new_with_length(s, n) of an Aether string copies its
+// characters. string_new_with_length copied `data` as given, so a counted or
+// pinned string's header bytes came out instead of its text (the grid's SA5
+// cells read them back wrong). It copies no more than the string holds.
+import std.string
+
+extern exit(code: int)
+
+check(ok: bool, what: string) {
+    if !ok {
+        println("FAIL: ${what}")
+        exit(1)
+    }
+}
+
+main() {
+    // A literal is a pinned string.
+    lit = string.new_with_length("abcdef", 3)
+    check(string.length(lit) == 3 && string.equals(lit, "abc") == 1, "a literal's first 3 characters")
+    // A counted string.
+    s = string.concat("xy", "zw")
+    cnt = string.new_with_length(s, 2)
+    check(string.length(cnt) == 2 && string.equals(cnt, "xy") == 1, "a counted string's first 2 characters")
+    // No more than the string holds.
+    whole = string.new_with_length("ab", 10)
+    check(string.length(whole) == 2 && string.equals(whole, "ab") == 1, "no more than the string holds")
+    println("ok")
+}

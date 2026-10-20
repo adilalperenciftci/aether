@@ -65,6 +65,16 @@ AetherString* string_new(const char* cstr) {
 }
 
 AetherString* string_new_with_length(const char* data, size_t length) {
+    /* `data` is the value as it is held, as for every string_* function:
+     * a counted or pinned string is read through its header, and no more
+     * of it than it holds. Copied as given, `string.new_with_length(s, n)`
+     * of an Aether string was the header's bytes (#3030). A plain C
+     * buffer is copied as given. */
+    if (data && is_aether_string(data)) {
+        size_t have = str_len(data);
+        if (length > have) length = have;
+        data = str_data(data);
+    }
     /* One block, the header then the payload (string_alloc_inline): one
      * allocation instead of two, and the layout string_release recognises
      * by construction. As two blocks, the payload could be the very block
