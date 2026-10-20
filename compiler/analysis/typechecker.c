@@ -16716,8 +16716,13 @@ static int check_select_platforms(ASTNode* call) {
 
 int typecheck_function_call(ASTNode* call, SymbolTable* table) {
     int ok = typecheck_function_call_inner(call, table);
+    /* The platform select is a call with arguments, as codegen and the
+     * branch-type inference read it: a program may define its own `select()`
+     * with no parameters (c_symbol_namespace), and a call to it is not a
+     * select with no branches. */
     if (ok && call && call->type == AST_FUNCTION_CALL && call->value &&
-        strcmp(call->value, "select") == 0 && !check_select_platforms(call))
+        strcmp(call->value, "select") == 0 && call->child_count >= 1 &&
+        !check_select_platforms(call))
         ok = 0;
     /* An argument of what gives no value, `h(g())` with g returning
      * nothing, reached C as an invalid use of a void expression. A print

@@ -90,4 +90,15 @@ case "$out" in
         ;;
 esac
 
+# A program's own `select()` with no parameters is not the platform select:
+# the rule asks only a call with arguments, as codegen lowers only those.
+printf 'select() -> int {\n    return 99\n}\n\nmain() {\n    n = select()\n    println(n)\n}\n' > "$TMP/own.ae"
+out="$("$AE" run "$TMP/own.ae" 2>&1 | tr -d '\r' | tail -1)"
+if [ "$out" = "99" ]; then
+    echo "  [PASS] own_select: a program's select() with no parameters runs"
+else
+    echo "  [FAIL] own_select: expected 99, got: $out"
+    fail=1
+fi
+
 exit $fail
