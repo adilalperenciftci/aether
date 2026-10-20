@@ -23,7 +23,10 @@
   and `os.memory_private` (`aether_process_*`). `intmap.add` panics on out
   of memory, so `aether_intmap_add_failed` has no counterpart. A program
   calling a removed name gets E0303 and calls the short name instead; a C
-  host still links the C functions, which are unchanged (#2976). Removed:
+  host still links the C functions, which are unchanged. contrib's bridges
+  follow the same rule: `perl.run` and the rest, not their C names (#2976).
+  Removed:
+  - contrib.host.perl (5): `aether_perl_finalize`, `aether_perl_init`, `aether_perl_run`, `aether_perl_run_sandboxed`, `aether_perl_run_sandboxed_with_map` (call `perl.finalize`, `perl.init`, `perl.run`, `perl.run_sandboxed`, `perl.run_sandboxed_with_map`)
   - std.actors (6): `aether_actor_is_registered`, `aether_actor_register`, `aether_actor_registry_clear`, `aether_actor_registry_size`, `aether_actor_unregister`, `aether_actor_whereis`
   - std.arena (5): `arena_alloc`, `arena_alloc_aligned`, `arena_create`, `arena_destroy`, `arena_reset`
   - std.audit (5): `aether_audit_clear`, `aether_audit_count`, `aether_audit_entry_allowed`, `aether_audit_entry_category`, `aether_audit_entry_resource`

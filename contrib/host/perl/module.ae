@@ -19,17 +19,14 @@
 // the dotted-call shape `perl.run(...)` resolves uniformly with
 // the other host bridges (python.run / lua.run / etc.).
 //
-// Back-compat: the previous Aether-side names `aether_perl_run`
-// etc. are still exported so old user code keeps working — but new
-// code should use the dotted `perl.run(...)` form.
+// One name per operation (#2976): the C names `aether_perl_run` and the
+// rest are not exported beside these; call `perl.run(...)`.
 import std.sandbox   // sandbox.Grants, the grant list the run_sandboxed calls take
 
 
 exports (
     perl_run_sandboxed, perl_run_sandboxed_with_map,
-    perl_run, perl_init, perl_finalize,
-    aether_perl_run_sandboxed, aether_perl_run_sandboxed_with_map,
-    aether_perl_run, aether_perl_init, aether_perl_finalize
+    perl_run, perl_init, perl_finalize
 )
 
 // Canonical `perl.*` shape (matches python.run / lua.run / etc.).
@@ -38,10 +35,3 @@ exports (
 @extern("aether_perl_run") perl_run(code: string) -> int
 @extern("aether_perl_init") perl_init() -> int
 @extern("aether_perl_finalize") perl_finalize()
-
-// Back-compat aliases — same C symbols under the historical names.
-extern aether_perl_run_sandboxed(perms: sandbox.Grants, code: string) -> int
-extern aether_perl_run_sandboxed_with_map(perms: sandbox.Grants, code: string, map_token: int) -> int
-extern aether_perl_run(code: string) -> int
-extern aether_perl_init() -> int
-extern aether_perl_finalize()

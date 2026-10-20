@@ -1,7 +1,7 @@
 # contrib.host.perl: Embedded Perl
 
 `import contrib.host.perl` lets an Aether program embed Perl
-in-process: `aether_perl_run_sandboxed(perms, "<source>")` evaluates
+in-process: `perl.run_sandboxed(perms, "<source>")` evaluates
 Perl with permission-checked access controls.
 
 ## How it loads libperl
@@ -11,7 +11,7 @@ is no `-lperl` on the link line. The produced binary works against
 whatever Perl 5.x minor version the deploy host has (5.30 - 5.40
 supported).
 
-Discovery order at first `aether_perl_*` call (strict two-step):
+Discovery order at the first `perl.*` call (strict two-step):
 
 1. `${AETHER_PERL_SONAME}` env var (orchestrator-supplied exact,
    e.g. `libperl.so.5.36`).
@@ -63,12 +63,15 @@ AETHER_PERL_SONAME=libperl.so.5.36 ae build myapp.ae
 import contrib.host.perl
 
 main() {
-    aether_perl_run("$| = 1; print \"hello from perl\\n\"")
+    perl.run("$| = 1; print \"hello from perl\\n\"")
 }
 ```
 
-Function names are prefixed `aether_perl_` to avoid collision with
-Perl's own `perl_run`/`perl_init` symbols.
+The C functions are prefixed `aether_perl_` to avoid a collision with
+Perl's own `perl_run`/`perl_init` symbols; the module binds them to
+`perl.run`, `perl.run_sandboxed`, `perl.run_sandboxed_with_map`,
+`perl.init` and `perl.finalize`, one name per operation (the C names
+are not exported beside them).
 
 ## Implementation notes
 
@@ -96,7 +99,8 @@ Perl has **no dedicated fib-style end-to-end test** like
 shared-map test plus a contrib-build smoke check:
 
 - [`tests/sandbox/test_shared_map_all.sh`](../../../tests/sandbox/test_shared_map_all.sh)
-  exercises `aether_perl_run_sandboxed_with_map` in the same
+  exercises the C function `aether_perl_run_sandboxed_with_map` (what
+  `perl.run_sandboxed_with_map` calls) in the same
   shared-map round-trip it runs across **all** hosts: it hands Perl a
   map (`name`/`score`), the script reads it (`aether_map_get`), writes
   a key back (`aether_map_put('grade', 'A')`), and tries to tamper a
