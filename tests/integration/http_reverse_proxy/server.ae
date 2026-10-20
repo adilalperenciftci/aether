@@ -189,27 +189,27 @@ run_proxy(timeout_sec: int, upstream_port: string) {
 }
 
 main() {
-    n = aether_args_count()
+    n = os.args_count()
     if n < 2 {
         println("FAIL: usage: server <upstream|proxy <port>|proxy_timeout <port>>")
         exit(1)
     }
-    role = aether_args_get(1)
+    role = os.args_get(1)
 
     if role == "upstream" {
         run_upstream()
         return
     }
     if role == "proxy" {
-        run_proxy(30, aether_args_get(2))
+        run_proxy(30, os.args_get(2))
         return
     }
     if role == "proxy_timeout" {
-        run_proxy(1, aether_args_get(2))
+        run_proxy(1, os.args_get(2))
         return
     }
     if role == "proxy_tls" {
-        run_proxy_tls(aether_args_get(2), aether_args_get(3), aether_args_get(4))
+        run_proxy_tls(os.args_get(2), os.args_get(3), os.args_get(4))
         return
     }
     println("FAIL: unknown role: ${role}")

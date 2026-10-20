@@ -15,13 +15,6 @@
   <input type="text" id="search" placeholder="Search sync..." onkeyup="searchModule()">
   <h2>Exports</h2>
   <ul class="function-nav">
-    <li><a href="#aether_sync_atomic_new">aether_sync_atomic_new</a></li>
-    <li><a href="#aether_sync_atomic_load">aether_sync_atomic_load</a></li>
-    <li><a href="#aether_sync_atomic_store">aether_sync_atomic_store</a></li>
-    <li><a href="#aether_sync_atomic_add">aether_sync_atomic_add</a></li>
-    <li><a href="#aether_sync_atomic_sub">aether_sync_atomic_sub</a></li>
-    <li><a href="#aether_sync_atomic_cas">aether_sync_atomic_cas</a></li>
-    <li><a href="#aether_sync_atomic_free">aether_sync_atomic_free</a></li>
     <li><a href="#atomic_new">atomic_new</a></li>
     <li><a href="#atomic_load">atomic_load</a></li>
     <li><a href="#atomic_store">atomic_store</a></li>
@@ -89,6 +82,7 @@
     <li><a href="path.html">path</a></li>
     <li><a href="plural.html">plural</a></li>
     <li><a href="pqueue.html">pqueue</a></li>
+    <li><a href="quote.html">quote</a></li>
     <li><a href="reflect.html">reflect</a></li>
     <li><a href="regex.html">regex</a></li>
     <li><a href="resp.html">resp</a></li>
@@ -129,48 +123,6 @@
     <p class="import-line"><code>import std.sync</code></p>
   </div>
   <div class="functions" id="functions">
-    <div class="function" id="aether_sync_atomic_new" data-name="aether_sync_atomic_new">
-      <h3 class="function-name">aether_sync_atomic_new <span class="kind">extern</span></h3>
-      <pre class="usage"><code>aether_sync_atomic_new(initial) <span class="arrow">-&gt;</span> ptr</code></pre>
-      <p class="signature"><span class="sig-params">initial: long</span></p>
-      <p class="doc">Create an atomic i64 cell initialised to `initial`. Returns the cell handle, or null on allocation failure / memory-cap exceeded. CHECK the result: every op below is fatal on a null cell (a swallowed null would let atomic_sub return 0 = &quot;reclaim&quot; and free a live value), so an unchecked alloc failure crashes at first use, not silently.</p>
-    </div>
-    <div class="function" id="aether_sync_atomic_load" data-name="aether_sync_atomic_load">
-      <h3 class="function-name">aether_sync_atomic_load <span class="kind">extern</span></h3>
-      <pre class="usage"><code>aether_sync_atomic_load(cell) <span class="arrow">-&gt;</span> long</code></pre>
-      <p class="signature"><span class="sig-params">cell: ptr</span></p>
-      <p class="doc">Acquire load of the current value. Fatal on a null cell.</p>
-    </div>
-    <div class="function" id="aether_sync_atomic_store" data-name="aether_sync_atomic_store">
-      <h3 class="function-name">aether_sync_atomic_store <span class="kind">extern</span></h3>
-      <pre class="usage"><code>aether_sync_atomic_store(cell, value)</code></pre>
-      <p class="signature"><span class="sig-params">cell: ptr, value: long</span></p>
-      <p class="doc">Release store of `value`. Fatal on a null cell.</p>
-    </div>
-    <div class="function" id="aether_sync_atomic_add" data-name="aether_sync_atomic_add">
-      <h3 class="function-name">aether_sync_atomic_add <span class="kind">extern</span></h3>
-      <pre class="usage"><code>aether_sync_atomic_add(cell, delta) <span class="arrow">-&gt;</span> long</code></pre>
-      <p class="signature"><span class="sig-params">cell: ptr, delta: long</span></p>
-      <p class="doc">Atomically add `delta`; returns the NEW (post-add) value. Fatal on a null cell.</p>
-    </div>
-    <div class="function" id="aether_sync_atomic_sub" data-name="aether_sync_atomic_sub">
-      <h3 class="function-name">aether_sync_atomic_sub <span class="kind">extern</span></h3>
-      <pre class="usage"><code>aether_sync_atomic_sub(cell, delta) <span class="arrow">-&gt;</span> long</code></pre>
-      <p class="signature"><span class="sig-params">cell: ptr, delta: long</span></p>
-      <p class="doc">Atomically subtract `delta`; returns the NEW (post-sub) value. Fatal on a null cell.</p>
-    </div>
-    <div class="function" id="aether_sync_atomic_cas" data-name="aether_sync_atomic_cas">
-      <h3 class="function-name">aether_sync_atomic_cas <span class="kind">extern</span></h3>
-      <pre class="usage"><code>aether_sync_atomic_cas(cell, expected, desired) <span class="arrow">-&gt;</span> int</code></pre>
-      <p class="signature"><span class="sig-params">cell: ptr, expected: long, desired: long</span></p>
-      <p class="doc">Compare-and-swap: if the cell holds `expected`, replace it with `desired` and return 1; else leave it and return 0. Strong (no spurious failures); success is acq_rel so a CAS winner that reads the data it guards acquires correctly. Fatal on a null cell.</p>
-    </div>
-    <div class="function" id="aether_sync_atomic_free" data-name="aether_sync_atomic_free">
-      <h3 class="function-name">aether_sync_atomic_free <span class="kind">extern</span></h3>
-      <pre class="usage"><code>aether_sync_atomic_free(cell)</code></pre>
-      <p class="signature"><span class="sig-params">cell: ptr</span></p>
-      <p class="doc">Free the cell. A null cell is a no-op (mirrors libc free).</p>
-    </div>
     <div class="function" id="atomic_new" data-name="atomic_new">
       <h3 class="function-name">atomic_new <span class="kind">fn</span></h3>
       <pre class="usage"><code>atomic_new(initial) <span class="arrow">-&gt;</span> ptr</code></pre>

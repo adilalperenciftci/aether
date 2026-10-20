@@ -26,11 +26,17 @@
 
 import contrib.host.aether
 import std.fs
+import std.list
 import std.mem
 import std.os
 import std.sandbox
 import std.spec
 import std.string
+import std.worker
+
+var longest_capture: long = 0
+var captures_run = 0
+var captures_wrong = 0
 
 // Capture from a binary that is not there; the "" result dies with this call.
 fn capture_missing(path: string) -> int {
@@ -39,7 +45,46 @@ fn capture_missing(path: string) -> int {
     return string.length(out)
 }
 
+// #3040: two long children (4 s each) one after the other, started through
+// std.os by this program re-run with `--long`.
+long_children() {
+    argv = list.new()
+    _a = list.add(argv, "--long")
+    i = 0
+    while i < 2 {
+        _out, _err_out, _status, _err = os.run_full(os.argv0(), argv, null, "")
+        i = i + 1
+    }
+    list.free(argv)
+}
+
+// Bridge captures of this program as the short child (it prints "short"),
+// for 6 s; the longest single capture in milliseconds.
+short_captures() -> long {
+    start = os.now_monotonic_ms()
+    longest = 0 as long
+    while os.now_monotonic_ms() - start < 6000 {
+        t0 = os.now_monotonic_ms()
+        out = aether.host_capture_sandboxed(null as sandbox.Grants, os.argv0())
+        took = os.now_monotonic_ms() - t0
+        if took > longest { longest = took }
+        if string.starts_with(out, "short") != 1 { captures_wrong = captures_wrong + 1 }
+        captures_run = captures_run + 1
+    }
+    return longest
+}
+
 main() {
+    // The children of the capture race below: this program, re-run.
+    if os.args_count() > 1 && string.equals(os.args_get(1), "--long") == 1 {
+        sleep(4000)
+        return 0
+    }
+    if string.equals(os.getenv("AETHER_HOST_RACE_CHILD"), "short") == 1 {
+        println("short")
+        return 0
+    }
+
     fw = spec.init()
 
     // The bridge's compile step shells out to the ae driver, reading
@@ -129,6 +174,37 @@ main() {
                 spec.assert_true(mid - before == 0 || after - mid == 0,
                     "100 captures grew the heap by ${mid - before}, then ${after - mid} bytes")
             }
+        }
+
+        // #3040: the capture pipe closes on exec. Four threads start long
+        // children through std.os while one captures short ones through the
+        // bridge; a long child started while a capture's pipe is open must
+        // not inherit its write end, or that capture waits for it to exit
+        // (4 s). The bound is 2.5 s against tens of milliseconds, as
+        // os_run_full_threads has it (#2917).
+        spec.it_when(is_posix, "captures while other threads start children", "the bridge spawns on Linux and macOS only") callback {
+            os.setenv("AETHER_HOST_RACE_CHILD", "short")
+            worker.pool_size(5)
+            k = 0
+            while k < 4 {
+                _ok = worker.run(|| {
+                        long_children()
+                        return null
+                    }, | r: ptr | {
+                    })
+                k = k + 1
+            }
+            _ok2 = worker.run(|| {
+                    return mem.long_to_ptr(short_captures())
+                }, | r: ptr | {
+                    longest_capture = mem.ptr_to_long(r)
+                })
+            worker.wait()
+            os.unsetenv("AETHER_HOST_RACE_CHILD")
+            spec.assert_true(captures_run >= 5, "only ${captures_run} captures ran")
+            spec.assert_eq(captures_wrong, 0, "a capture did not read the child's output")
+            spec.assert_true(longest_capture <= 2500,
+                "a capture waited ${longest_capture} ms, for a child another thread started")
         }
     }
 

@@ -1,66 +1,52 @@
-// Regression test for #1035: the documented qualified argv forms resolve.
+// Regression test for #1035: the qualified argv forms resolve.
 //
-// std.os exports the argv externs under their raw names
-// (aether_args_count, ...) — no `os_` prefix — so qualified resolution's
-// `<prefix>_<suffix>` join never found them and the documented
-// `os.aether_args_count()` died with E0301 while the bare spelling leaked
-// through. The resolver now falls back to the bare exported name (gated on
-// the module's exports list), and std.os grew ergonomic wrappers
-// os.args_count() / os.args_get(i) mirroring args_seal / args_sealed.
+// std.os exported the argv externs under their raw names (aether_args_count,
+// ...) with no `os_` prefix, so qualified resolution's `<prefix>_<suffix>`
+// join never found them and `os.aether_args_count()` died with E0301. The
+// resolver falls back to the bare exported name (gated on the module's
+// exports list); `os.aether_argv_raw()` is such a name, the one argv
+// accessor with no wrapper. The rest are one name each since #3014:
+// `os.args_count()`, `os.args_get(i)`, `os.argv0()`. A program that wants a
+// C function under its own name declares it, as this one does.
 
 import std.os
 import std.string
 
+extern aether_args_count() -> int
+
 main() {
-    // The documented form (language-reference.md) — was E0301.
-    n1 = os.aether_args_count()
-    // New ergonomic wrapper.
-    n2 = os.args_count()
-    // The unqualified spelling that always worked.
-    n3 = aether_args_count()
+    n = os.args_count()
+    if n != aether_args_count() {
+        print("FAIL: os.args_count (${n}) != the C aether_args_count (${aether_args_count()})\n")
+        exit(1)
+    }
+    if n < 1 {
+        print("FAIL: argv count ${n} < 1, argv[0] should always exist\n")
+        exit(1)
+    }
+    print("PASS: os.args_count agrees with the C function (${n})\n")
 
-    if n1 != n3 {
-        print("FAIL: os.aether_args_count (${n1}) != aether_args_count (${n3})\n")
+    // The bare exported name, reached qualified (#1035).
+    if os.aether_argv_raw() == null {
+        print("FAIL: os.aether_argv_raw() is null with argv initialised\n")
         exit(1)
     }
-    if n2 != n3 {
-        print("FAIL: os.args_count (${n2}) != aether_args_count (${n3})\n")
-        exit(1)
-    }
-    if n1 < 1 {
-        print("FAIL: argv count ${n1} < 1 — argv[0] should always exist\n")
-        exit(1)
-    }
-    print("PASS: all three count spellings agree (${n1})\n")
+    print("PASS: os.aether_argv_raw() resolves qualified\n")
 
-    // Qualified element access — documented as os.aether_args_get(i).
-    raw0 = os.aether_args_get(0)
-    wrapped0 = os.args_get(0)
-    if string.equals(raw0, wrapped0) != 1 {
-        print("FAIL: os.aether_args_get(0) '${raw0}' != os.args_get(0) '${wrapped0}'\n")
+    a0 = os.args_get(0)
+    if string.length(a0) < 1 || string.equals(a0, os.argv0()) != 1 {
+        print("FAIL: os.args_get(0) '${a0}' is empty or differs from os.argv0()\n")
         exit(1)
     }
-    if string.length(wrapped0) < 1 {
-        print("FAIL: argv[0] came back empty\n")
-        exit(1)
-    }
-    print("PASS: qualified argv[0] accessors agree ('${wrapped0}')\n")
+    print("PASS: os.args_get(0) and os.argv0() agree ('${a0}')\n")
 
-    // Out-of-range: wrapper contract is "" (never null).
+    // Out of range: the contract is "" (never null).
     oob = os.args_get(9999)
     if string.length(oob) != 0 {
         print("FAIL: os.args_get(9999) returned non-empty '${oob}'\n")
         exit(1)
     }
-    print("PASS: os.args_get out-of-range returns \"\"\n")
+    print("PASS: os.args_get out of range returns \"\"\n")
 
-    // argv0 qualified (pre-existing wrapper) still resolves alongside.
-    a0 = os.argv0()
-    if string.length(a0) < 1 {
-        print("FAIL: os.argv0() came back empty\n")
-        exit(1)
-    }
-    print("PASS: os.argv0() = '${a0}'\n")
-
-    print("=== #1035: all documented qualified argv forms compile and agree ===\n")
+    print("=== #1035: the qualified argv forms compile and agree ===\n")
 }

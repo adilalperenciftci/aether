@@ -255,10 +255,29 @@ _Static_assert(sizeof(pthread_key_t) == sizeof(DWORD), "pthread_key_t must be a 
 
 // ---- Threads -------------------------------------------------------------
 
+/* #3027: a thread starts with its creator's floating-point state, as a
+ * Linux thread (the kernel copies it on clone) and a winpthreads one do.
+ * CreateThread gives every thread Windows' default x87 control word,
+ * 53-bit precision (0x027f), while MinGW's startup sets the main thread to
+ * 64-bit (0x037f), so the same libm call gave different bits on a worker
+ * than on main: MinGW's sqrt is the x87 fsqrt, which rounds twice at 64-bit
+ * precision, and a `longdouble` had a 64-bit mantissa on main and 53 bits
+ * on every worker. The MXCSR's controls (exception masks, rounding,
+ * flush-to-zero, denormals-are-zero) travel too; its sticky exception
+ * flags (bits 0-5) do not, a new thread starts with none raised. MSVC
+ * programs run at 53-bit on every thread already. */
+#if (defined(__GNUC__) || defined(__clang__)) && (defined(__x86_64__) || defined(__i386__))
+#  define AETHER_THREAD_FP_INHERIT 1
+#else
+#  define AETHER_THREAD_FP_INHERIT 0
+#endif
+
 // Bridge struct: carries the pthread-style fn+arg through CreateThread
 typedef struct {
     void* (*fn)(void*);
     void*  arg;
+    unsigned short x87_cw;   /* the creator's, AETHER_THREAD_FP_INHERIT */
+    unsigned int   mxcsr;
 } _AetherThreadBridge;
 
 // Trampoline: Windows calls DWORD WINAPI fn(LPVOID), pthreads calls void* fn(void*)
@@ -266,6 +285,14 @@ static DWORD WINAPI _aether_thread_trampoline(LPVOID p) {
     _AetherThreadBridge* b = (_AetherThreadBridge*)p;
     void* (*fn)(void*) = b->fn;
     void* arg          = b->arg;
+#if AETHER_THREAD_FP_INHERIT
+    unsigned short cw = b->x87_cw;
+    __asm__ volatile ("fldcw %0" : : "m"(cw));
+#  if defined(__SSE__)
+    unsigned int mx = b->mxcsr & ~0x3fu;
+    __asm__ volatile ("ldmxcsr %0" : : "m"(mx));
+#  endif
+#endif
     free(b);
     fn(arg);
     return 0;
@@ -278,6 +305,14 @@ static inline int pthread_create(pthread_t* t, pthread_attr_t* attr,
     if (!b) return ENOMEM;
     b->fn  = fn;
     b->arg = arg;
+    b->x87_cw = 0;
+    b->mxcsr  = 0;
+#if AETHER_THREAD_FP_INHERIT
+    __asm__ volatile ("fnstcw %0" : "=m"(b->x87_cw));
+#  if defined(__SSE__)
+    __asm__ volatile ("stmxcsr %0" : "=m"(b->mxcsr));
+#  endif
+#endif
     *t = CreateThread(NULL, 0, _aether_thread_trampoline, b, 0, NULL);
     if (!*t) { free(b); return (int)GetLastError(); }
     return 0;

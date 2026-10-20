@@ -21,6 +21,8 @@
     <li><a href="#tcp_receive_n_raw">tcp_receive_n_raw</a></li>
     <li><a href="#tcp_close">tcp_close</a></li>
     <li><a href="#tcp_listen_raw">tcp_listen_raw</a></li>
+    <li><a href="#tcp_listen_on_raw">tcp_listen_on_raw</a></li>
+    <li><a href="#tcp_server_port_raw">tcp_server_port_raw</a></li>
     <li><a href="#tcp_accept_raw">tcp_accept_raw</a></li>
     <li><a href="#tcp_server_close">tcp_server_close</a></li>
     <li><a href="#tcp_fd_raw">tcp_fd_raw</a></li>
@@ -71,12 +73,7 @@
     <li><a href="#http_serve_static">http_serve_static</a></li>
     <li><a href="#http_serve_file">http_serve_file</a></li>
     <li><a href="#http_mime_type">http_mime_type</a></li>
-    <li><a href="#ae_io_await">ae_io_await</a></li>
     <li><a href="#ae_io_cancel">ae_io_cancel</a></li>
-    <li><a href="#ae_pipe_open">ae_pipe_open</a></li>
-    <li><a href="#ae_pipe_write_fd">ae_pipe_write_fd</a></li>
-    <li><a href="#ae_fd_write">ae_fd_write</a></li>
-    <li><a href="#ae_fd_close">ae_fd_close</a></li>
     <li><a href="#await_io">await_io</a></li>
     <li><a href="#pipe_open">pipe_open</a></li>
     <li><a href="#pipe_write_fd">pipe_write_fd</a></li>
@@ -142,6 +139,7 @@
     <li><a href="path.html">path</a></li>
     <li><a href="plural.html">plural</a></li>
     <li><a href="pqueue.html">pqueue</a></li>
+    <li><a href="quote.html">quote</a></li>
     <li><a href="reflect.html">reflect</a></li>
     <li><a href="regex.html">regex</a></li>
     <li><a href="resp.html">resp</a></li>
@@ -213,7 +211,18 @@
       <h3 class="function-name">tcp_listen_raw <span class="kind">extern</span></h3>
       <pre class="usage"><code>tcp_listen_raw(port) <span class="arrow">-&gt;</span> ptr</code></pre>
       <p class="signature"><span class="sig-params">port: int</span></p>
-      <p class="doc">TCP Server - raw externs</p>
+      <p class="doc">TCP Server - raw externs tcp_listen_raw takes every interface. tcp_listen_on_raw takes ONE address (#2136): &quot;127.0.0.1&quot; for a listener the network cannot reach, which is also the one that opens no firewall prompt on Windows (#2639).</p>
+    </div>
+    <div class="function" id="tcp_listen_on_raw" data-name="tcp_listen_on_raw">
+      <h3 class="function-name">tcp_listen_on_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>tcp_listen_on_raw(address, port) <span class="arrow">-&gt;</span> ptr</code></pre>
+      <p class="signature"><span class="sig-params">address: string, port: int</span></p>
+    </div>
+    <div class="function" id="tcp_server_port_raw" data-name="tcp_server_port_raw">
+      <h3 class="function-name">tcp_server_port_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>tcp_server_port_raw(server) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">server: ptr</span></p>
+      <p class="doc">The port a server is bound to: the one the OS chose for a listen on port 0.</p>
     </div>
     <div class="function" id="tcp_accept_raw" data-name="tcp_accept_raw">
       <h3 class="function-name">tcp_accept_raw <span class="kind">extern</span></h3>
@@ -478,34 +487,9 @@
       <pre class="usage"><code>http_mime_type(path) <span class="arrow">-&gt;</span> string</code></pre>
       <p class="signature"><span class="sig-params">path: string</span></p>
     </div>
-    <div class="function" id="ae_io_await" data-name="ae_io_await">
-      <h3 class="function-name">ae_io_await <span class="kind">extern</span></h3>
-      <pre class="usage"><code>ae_io_await(fd) <span class="arrow">-&gt;</span> int</code></pre>
-      <p class="signature"><span class="sig-params">fd: int</span></p>
-      <p class="doc">Reactor-pattern async I/O — suspends the current actor until the fd becomes readable, without blocking any scheduler thread. Returns 0 on success, -1 on failure (called outside an actor context, or the runtime refused the fd). When the fd becomes ready, the scheduler delivers an `IoReady { fd: int, events: int }` message to the actor's mailbox, which the actor handles in a `receive` arm. The user's program must define the message shape: message IoReady { fd: int, events: int } The message registry reserves an ID for this name so the generated dispatch table routes runtime-delivered notifications to the user-written handler.</p>
-    </div>
     <div class="function" id="ae_io_cancel" data-name="ae_io_cancel">
       <h3 class="function-name">ae_io_cancel <span class="kind">extern</span></h3>
       <pre class="usage"><code>ae_io_cancel(fd)</code></pre>
-      <p class="signature"><span class="sig-params">fd: int</span></p>
-    </div>
-    <div class="function" id="ae_pipe_open" data-name="ae_pipe_open">
-      <h3 class="function-name">ae_pipe_open <span class="kind">extern</span></h3>
-      <pre class="usage"><code>ae_pipe_open() <span class="arrow">-&gt;</span> int</code></pre>
-      <p class="doc">Minimal fd primitives used by the await_io end-to-end test and any integration code that needs to produce a plain readable fd without going through the TCP/HTTP layers. Pipe support is POSIX-only.</p>
-    </div>
-    <div class="function" id="ae_pipe_write_fd" data-name="ae_pipe_write_fd">
-      <h3 class="function-name">ae_pipe_write_fd <span class="kind">extern</span></h3>
-      <pre class="usage"><code>ae_pipe_write_fd() <span class="arrow">-&gt;</span> int</code></pre>
-    </div>
-    <div class="function" id="ae_fd_write" data-name="ae_fd_write">
-      <h3 class="function-name">ae_fd_write <span class="kind">extern</span></h3>
-      <pre class="usage"><code>ae_fd_write(fd, data) <span class="arrow">-&gt;</span> int</code></pre>
-      <p class="signature"><span class="sig-params">fd: int, data: string</span></p>
-    </div>
-    <div class="function" id="ae_fd_close" data-name="ae_fd_close">
-      <h3 class="function-name">ae_fd_close <span class="kind">extern</span></h3>
-      <pre class="usage"><code>ae_fd_close(fd)</code></pre>
       <p class="signature"><span class="sig-params">fd: int</span></p>
     </div>
     <div class="function" id="await_io" data-name="await_io">

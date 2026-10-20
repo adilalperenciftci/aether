@@ -75,7 +75,7 @@ Aether is not, and has no plans to be, a pure FP language (no Hindley-Milner inf
 21. [Compiler Errors](#compiler-errors) and [Warnings](#compiler-warnings)
 22. [Match Expressions](#match-expressions)
 23. [Keywords](#keywords)
-24. [Comments](#comments)
+24. [Source Files](#source-files) and [Comments](#comments)
 25. [Conditional Compilation](#conditional-compilation)
 26. [Compilation](#compilation)
 27. [Type System](#type-system)
@@ -240,16 +240,19 @@ is one 256-bit register and each operation one instruction; without AVX2 it
 is two four-lane halves, which costs what two `f32x4` operations cost. The
 same source runs either way, and gives the same results, so a kernel written
 eight-wide is never slower than the four-lane one and runs twice as wide
-where AVX2 is on. On Windows an AVX build is assembled with
-`-Wa,-muse-unaligned-vector-move`, because GCC there can spill a 256-bit
-value with an aligned move to a stack that is only 16-byte aligned (#2476).
+where AVX2 is on. On Windows every build is assembled with
+`-Wa,-muse-unaligned-vector-move`, and `ae cflags --cflags` carries it,
+because GCC there can spill a 256-bit value with an aligned move to a stack
+that is only 16-byte aligned (#2476, #3023). GCC on Windows cannot compile
+an `f32x8` local without optimization at all, so a `-O0` build there takes
+the two-halves form even with `-mavx2` (#3023).
 
 See [`std/lanes/README.md`](../std/lanes/README.md) for the full surface and
 the measured speedup.
 
 #### `longdouble` C `long double`
 
-The `longdouble` type maps to C `long double`, the widest floating type, for exact-decimal numeric paths a C interop layer expects it (libc `strtold`, `INCRBYFLOAT`-style score conversion). It supports arithmetic (`+ - * /`), comparison, and conversion to/from `int` and `float`; as the widest numeric it wins promotion (`longdouble op int` / `longdouble op float` → `longdouble`). It's usable in locals, function params/returns, struct fields, and `extern` signatures. There is no `longdouble` literal, values arrive from an extern (`extern powl(x: longdouble, y: longdouble) -> longdouble`) or by widening an `int`/`float`. Declare a libc function with the signature libc actually has: `strtold`'s second parameter is `char **restrict`, which `ptr` lowers to `void*`, and the C compiler rejects the redeclaration. Interpolation and `print` format it with `%Lg`/`%Lf`.
+The `longdouble` type maps to C `long double`, the widest floating type, for exact-decimal numeric paths a C interop layer expects it (libc `strtold`, `INCRBYFLOAT`-style score conversion). It supports arithmetic (`+ - * /`), comparison, and conversion to/from `int` and `float`; as the widest numeric it wins promotion (`longdouble op int` / `longdouble op float` → `longdouble`). It's usable in locals, function params/returns, struct fields, and `extern` signatures. There is no `longdouble` literal, values arrive from an extern (`extern powl(x: longdouble, y: longdouble) -> longdouble`) or by widening an `int`/`float`. Declare a libc function with the signature libc actually has: `strtold`'s second parameter is `char **restrict`, which `ptr` lowers to `void*`, and the C compiler rejects the redeclaration. Interpolation and `print` format it with `%Lg`/`%Lf`. With GCC on Windows it is the x87's 80-bit format at 64-bit precision on every thread, the main one and every thread Aether starts (#3027).
 
 ```aether
 extern powl(x: longdouble, y: longdouble) -> longdouble
@@ -393,7 +396,7 @@ main() {
 - **`s[i]` is bounds-checked.** An index outside `0 ..< s.len` is a runtime panic naming the source line, the index and the length (`slice index 5 out of range for length 3`). It is an ordinary panic: `try` catches it, and an actor step that trips it dies cleanly. A negative index is out of range, never a read before the buffer.
 - **`s[lo..hi]`** is the half-open sub-slice `[lo, hi)`, checked the same way (`lo <= hi <= s.len`). `s[lo..]` runs to the end, `s[..hi]` from the start, `s[..]` is the whole thing. The base may be a slice or a `T[N]` array; the result is always a `T[]` over the *same* elements, so a write through it is visible through the original.
 - **A `T[N]` array converts to `T[]` implicitly** wherever a slice is expected: a parameter, a `T[]`-typed binding or field, a `return` from a `-> T[]` function. The length travels with it. `null`, and the empty literal `[]`, convert to the empty slice: `.len` is `0`, it views no storage, and it compares equal to `null`. So `s == []` is `s == null` (it asks whether `s` views any storage; test `s.len == 0` for emptiness), a C function's `T[]` parameter takes `[]` as the null pointer, and an if-expression or a `match` given to a `T[]` converts each arm on its own. A module-level `var` or `const` of type `T[]` takes either as its initial value.
-- **A string is not a slice.** Passing one where a `T[]` is expected (a parameter, a binding, a `return`) is a type error; `string.bytes(s)` is the bounded, read-only `byte[]` view of a string's bytes, and it decays to their pointer at a C extern like any slice.
+- **A string is not a slice.** Passing one where a `T[]` is expected (a parameter, a binding, a `return`) is a type error; `string.bytes(s)` is the bounded, read-only `byte[]` view of a string's bytes, and it decays to their pointer at a C extern like any slice. A string's own bytes are read-only too: `s[i]` reads one, and a write (`s[i] = v`, `s[i] += v`, `s[i]++`) is a compile error (E0200). Build the new text as a new string, or work on the bytes in a `byte[N]` array of your own.
 - **A slice decays to its pointer** wherever a `ptr` is expected, exactly as a `T[N]` array does: a `ptr` parameter, a C extern's parameter (including one declared `T[]`), `free(s)`, a comparison against `null`, and pointer arithmetic (`s + n` is a `ptr` to element `n`). `s as ptr` spells the same conversion explicitly, for a `ptr` return or binding. The length is dropped at that boundary; nothing else about the extern ABI changes.
 - **`make([]T, n)`** allocates `n` zeroed elements and returns them as a bounded slice; `free(s)` releases them.
 - A slice does not own the storage it views. It is valid for exactly as long as that storage: an array in an enclosing scope, a `make` buffer until its `free`, a C buffer until C reclaims it. The elements are the storage's: a string read out of a `string[]` slice (`t = s[i]`, a return, a field) takes a reference of its own, and a store into an element (`s[i] = v`) takes the new string and releases the one it replaces, as a store into the array itself does. Memory C owns, viewed as `p as string[]`, owns nothing: a store there gives C the characters and takes no reference ([memory-management.md](memory-management.md#ptr-slots)).
@@ -681,16 +684,16 @@ There is no `void` keyword in the return-type position, a missing return-type an
 import std.os
 
 main() {
-    n = os.aether_args_count()
+    n = os.args_count()
     i = 0
     while i < n {
-        println("argv[${i}] = ${os.aether_args_get(i)}")
+        println("argv[${i}] = ${os.args_get(i)}")
         i = i + 1
     }
 }
 ```
 
-`os.argv0()` returns argv[0] as a string (empty if uninitialised). `os.aether_argv_raw()` exposes the original `char**` for C-interop callers that need to forward it unchanged. Shorter ergonomic spellings exist: `os.args_count()` and `os.args_get(i)` (the latter returns an owned copy, `""` when out of range). See [Standard Library Reference § `std.os`](stdlib-reference.md) for the full surface.
+`os.args_get(i)` returns an owned copy of argv[i], `""` when out of range, and `os.argv0()` argv[0] the same way. `os.aether_argv_raw()` exposes the original `char**` for C-interop callers that need to forward it unchanged. See [Standard Library Reference § `std.os`](stdlib-reference.md) for the full surface.
 
 ### Returning on every path [E0700]
 
@@ -742,6 +745,8 @@ main() {
     println(word(1))
 }
 ```
+
+A bare `return` gives no value, so in a function whose written result is a value it is the same error, E0200, naming the result type. It ends a void function, and a function with no written type is void until one of its returns gives a value.
 
 What a binding converts, a `return` converts, as C converts it: one numeric scalar to another (`int` to `long` or `float`; into a written `int`, a `long` or a `float` truncates, as `int k = 4.5` does), a bool to an integer and an integer to a bool (a comparison returned from `-> int` is 1 or 0, an extern's int truth value returned from `-> bool` is whether it is nonzero), a `T` to `T?` and `none` to any optional, a variant struct to its sum or to the sum's optional, an enum to an integer (`byte` included) and an integer to an enum, `null` or an `int` to a `ptr` or a `*T`, and `null` or `[]` to a slice. A `string` and a bare `ptr` are both a C `const char*`, so a C string pointer returned from `-> string` becomes a string (its characters copied into a counted string the caller owns), and a string returned from `-> ptr` is its pointer:
 
@@ -1163,6 +1168,8 @@ The `else` branch is required, and the expression has the type its branches have
 - Tuples of one length have each position's common type: `(1, "a")` beside `(2, "b")` is an `(int, string)`. A tuple literal is the tuple of its elements' types wherever it stands, so `t = (5, "z")` binds a tuple a later `n, s = t` destructures.
 
 A branch whose type the other branch's takes as a binding would (`null` beside a pointer) is converted into it, and the expression has the wider type. Two branches of no one type (an `int` and a `string`, arrays of another length or element type, tuples of another length) are a compile error naming both types.
+
+Each branch is an expression that gives a value, so a branch made of a call that returns nothing is a compile error, and so is one made of `exit(n)`, which never returns: an `if` expression chooses between two values and nothing leaves from one of its branches. To leave on one path, test it with an `if` statement first, or use a value `match`, whose arm may leave (`_ -> exit(4)`).
 
 ### While Loops
 
@@ -1940,8 +1947,9 @@ q = safe_divide(10, 0) or -1      // q == -1
 
 **`expr or { ... }` run a block on error, with `err` bound to the message.**
 The block's **last statement is its value**, so a handler can log, compute,
-and still yield a fallback, or the block exits (`return`, `break`,
-`continue`, `panic`) and never falls through:
+and still yield a fallback, or the block leaves and never falls through:
+`return`, `break`, `continue`, `panic`, `exit(n)` (or `os.exit(n)`), or an
+`if`/`else` or `match` every path of which leaves:
 
 ```aether,fragment
 q = safe_divide(x, y) or {
@@ -1955,9 +1963,13 @@ r = safe_divide(x, y) or {
 }
 ```
 
-A block that neither yields a value of the right type nor exits is a compile
-error (`` `or { }` handler must end with a value … or exit ``), previously
+A block that neither yields a value of the right type nor leaves is a compile
+error (`` `or { }` handler must end with a value … or leave ``), previously
 that shape compiled and read an **uninitialized** result on the error path.
+Whether a statement leaves is decided by one rule everywhere it matters: the
+`or` handler, a value `match` arm, a function's missing return and W1002's
+unreachable code all agree, except that W1002 does not fold an `if` on a
+constant ([Unreachable Code](#unreachable-code-w1002)).
 
 **`expr!` propagate the error.** Inside a function that itself returns `T!`,
 `!` returns `(zero, err)` to the caller when the error slot is non-empty, so an
@@ -2085,7 +2097,37 @@ Every place that holds a string (a local, a struct field, an element, a module-l
 - **A function may not free a parameter** (E0901): `string.free(p)` or `release(p)` on a `string` parameter, or `string.seq_free(p)` on a `*StringSeq` one, would release a reference the function does not own. Store it to keep it; a parameter the body re-binds holds a string of its own and may be freed.
 - **`string.free(x)` releases the reference `x` holds and leaves `x` empty**, for a local, a field or a module-level `var`. Nothing frees it again.
 
-- **A `ptr` parameter is borrowed for the call unless it is declared `@keep`** (E0902). A `ptr` owns nothing, so a pointer a function keeps (stores where it outlives the call, returns, sends in a message, or passes to another `@keep` parameter) is declared `p: @keep ptr`. A struct local to the function, and a closure that runs and is dropped inside the call, do not outlive it: putting the pointer in one (`s = Pair { a: p }`, `s.a = p`, `run(|| { use(p) })`) keeps nothing, and the struct or the closure is a keep only when it escapes itself, returned, stored in a field, a module-level `var` or a container, or passed to a `@keep` or `@retain` parameter. A closure that captured the pointer and stores it somewhere that outlives the call keeps it too. The checker verifies each function against its own body, and a call against the callee's signature. A `string` reaches a `@keep ptr` only through `string.keep(s)`, which hands over a reference of its own (`string.release_kept(p)` gives it back), or as a literal, which is pinned, and a `*StringSeq` only through `string.seq_retain(s)` (`string.seq_free` gives it back). C memory viewed as `string[]` (`(names as string[])[i] = s`) is given the string's characters and no reference, so the string must outlive C's reads: a string built in the statement never does, and a local does only when the memory ends with the function (an argv array the function allocates, hands to C and does not let escape). Memory that outlives the function (reached through a parameter, a module-level `var`, a field or a heap box, or whose pointer is returned or stored) takes `(names as ptr[])[i] = string.keep(s)`, given back with `string.release_kept` where the memory is freed, and refuses any other string but a literal or a `const` bound to one. A closure's `ptr` parameter is always borrowed, and a function with a `@keep` parameter is called by name, not used as a value. A typed pointer (`*Node`) and a `distinct` type over `ptr` are not checked: a string converts to neither.
+- **A `ptr` parameter is borrowed for the call unless it is declared `@keep`** (E0902). A `ptr` owns nothing, so a pointer a function keeps (stores where it outlives the call, returns, sends in a message, or passes to another `@keep` parameter) is declared `p: @keep ptr`; a pointer computed from it (`p + n`, `p - n`) points into the same memory and counts as `p`. A struct local to the function, and a closure that runs and is dropped inside the call, do not outlive it: putting the pointer in one (`s = Pair { a: p }`, `s.a = p`, `run(|| { use(p) })`) keeps nothing, and the struct or the closure is a keep only when it escapes itself, returned, stored in a field, a module-level `var` or a container, or passed to a `@keep` or `@retain` parameter. A tuple (`t = (p, 1)`), an optional, and anything read out of a holder (a field, a tuple part, an optional's payload `o!` or `o ?? d`, a `match` binding) hold it the same way, except that a part of a tuple or a field of a struct built from parts holds only what went into that part or field (after `t = (p, q)` and `a, b = t`, `b` holds `q` and not `p`; after `s = Pair { a: p, b: q }` or `s.b = q`, `s.b` holds `q`), and so does what a closure that captured it returns (`call(f)`). A closure that captured the pointer and stores it somewhere that outlives the call keeps it too. The checker verifies each function against its own body, and a call against the callee's signature. A `string` reaches a `@keep ptr` only through `string.keep(s)`, which hands over a reference of its own (`string.release_kept(p)` gives it back), or as a literal or a `const` bound to one, which is pinned, and a `*StringSeq` only through `string.seq_retain(s)` (`string.seq_free` gives it back). C memory viewed as `string[]` (`(names as string[])[i] = s`) is given the string's characters and no reference, so the string must outlive C's reads: a string built in the statement never does, and a local does only when the memory ends with the function (an argv array the function allocates, hands to C and does not let escape). Memory that outlives the function (reached through a parameter, a module-level `var`, a field or a heap box, or whose pointer is returned or stored) takes `(names as ptr[])[i] = string.keep(s)`, given back with `string.release_kept` where the memory is freed, and refuses any other string but a literal or a `const` bound to one. A closure's `ptr` parameter borrows unless it is declared `@keep` (`|el: @keep ptr, t: float|`), and the mode is part of a function's type, `fn(@keep ptr, float)`: a call through a value of that type is checked as a direct call is, and a function goes only where its type says what it keeps, never into a bare `fn`, a `ptr` or a typed C function pointer, whose parameters borrow ([Closure types that say what they keep](#closure-types-that-say-what-they-keep-fnkeep-ptr-float)). A typed pointer (`*Node`) and a `distinct` type over `ptr` are not checked: a string converts to neither.
+- **A `ptr` parameter declared `@into` may reach the function's result and nowhere else** (E0902). A function that builds a value around its argument (a recorder, an iterator, a view) declares `p: @into ptr` and may `return` it, as the pointer, a view of it (`p as *Node`, `p + n`), in a struct, a tuple part or an optional, in a closure that captures it, or in the result of another `@into` call; any other escape is E0902 as for a borrowed parameter. Its result type must be able to hold a pointer (a pointer, a function, or a struct, tuple, optional, array or sum with such a part), and only a bare `ptr` takes `@into`. The caller holds the result as it holds a struct local that holds its argument: the result may live in a local, be read and be lent to borrowing parameters (`(&q) as ptr`), and it escapes, with the argument, only where the argument itself would (returned, stored in a module-level `var`, a field through a pointer or a container, sent, captured by a closure that escapes, given to a `@keep` or `@retain` parameter). With several `@into` parameters the result holds every one of them. A function that returns another `@into` call's result made from its own parameter declares that parameter `@into` too, and its callers are checked the same way. A string reaches an `@into ptr` only through `string.keep(s)` (or as a literal or a `const` bound to one), a closure given to one is boxed on the heap with a reference of its own (`release_closure` gives it back), and `@into` is part of a function's type as `@keep` is (`fn(@into ptr) -> Recorder`): a call through such a value holds its result to the same rule. An extern's parameter may be `@into` too ([`@retain`, `@noescape` and `@into`](#retain-noescape-and-into-what-an-extern-does-with-a-parameter)).
+
+```aether,run
+struct Recorder { context: ptr, count: int }
+
+recorder(context: @into ptr) -> Recorder {
+    return Recorder { context: context, count: 0 }   // reaches only the result
+}
+
+record(rec: ptr) {
+    q = rec as *Recorder
+    q.count = q.count + 1
+}
+
+visit(context: ptr) -> int {
+    q = recorder(context)        // q holds `context`
+    record((&q) as ptr)          // lent to a borrowing parameter
+    record((&q) as ptr)
+    return q.count               // `last = q` into a module-level var would be E0902
+}
+
+main() {
+    x = 0
+    println("${visit((&x) as ptr)}")
+}
+```
+
+```output
+2
+```
 
 ```aether,fragment
 my_concat(a: string, b: string) -> string {
@@ -3043,12 +3085,30 @@ The words `and` and `not` are no operators (`or` is the handler of a `T!` result
 | `<<=` | Left shift assign | `x <<= 4` |
 | `>>=` | Right shift assign | `x >>= 2` |
 
-### Postfix Operators
+### Increment and Decrement
 
 | Operator | Description | Example |
 |----------|-------------|---------|
-| `++` | Post-increment | `i++` |
-| `--` | Post-decrement | `i--` |
+| `++` | Increment, postfix or prefix | `i++`, `++i` |
+| `--` | Decrement, postfix or prefix | `i--`, `--i` |
+
+A postfix step gives the value from before it (`j = i++`), a prefix one the
+value after. The operand, in either position, is storage holding a number: a
+local, a parameter, a module-level `var` or actor state that is not a
+`const`, a field (`p.x++`) or an element (`a[i]++`), of an integer type
+(`int`, `long`, `uint64`, `uint32`, `uint16`, `uint8`, `byte`) or a float
+type (`float`, `f32`, `longdouble`). Any other operand is a compile error
+(E0200) naming what it is and the fix:
+
+- a literal (`++5`), a call's result (`f()--`: bind it to a local and step
+  that) or any other expression (`(y + 1)++`: assign the variable instead,
+  `y += 1`);
+- a `const`, an enum member or a field or element of a call's result;
+- a value that is not an integer or a float: a `bool` (`b = !b`), a
+  `string` (`++` would move where its text starts, not change it), a
+  pointer, a `Duration` (`d = d + 1ms`), an array, a struct, an optional, a
+  tuple, and a distinct type, which steps through its base as `x += 1` must
+  (`p = (p as int + 1) as Port`).
 
 ### Actor Operators
 
@@ -3386,9 +3446,9 @@ solve(constraints: ptr, n: int) {
 - A closure inside the copy is a compile error: its body would be compiled
   outside the copy.
 - `"avx2"` is the one target, the one that changes an `f32x8`'s width. With
-  a compiler other than GCC or Clang on x86, and on the
-  `AETHER_GCC_COMPAT=0` path, the copy is plain code with no target
-  attribute.
+  a compiler other than GCC or Clang on x86, on the `AETHER_GCC_COMPAT=0`
+  path, and with GCC on Windows at `-O0` (which cannot compile a 256-bit
+  local there, #3023), the copy is plain code with no target attribute.
 
 `std/lanes/README.md` ("One binary, two widths") has the rest.
 
@@ -3478,7 +3538,7 @@ Passing a plain `ptr` where the C conversion is safe stays allowed at call sites
 
 A C function's body is not visible to the compiler, and its declaration does not narrow what it does: it may write through any pointer it is given and any state of its own (a reader of stdin, a random generator with no handle parameter). So a call of an extern is evaluated ahead of any later operand that calls anything or reads memory through a pointer, see **Evaluation order** under [Built-in Functions](#built-in-functions); `pair(pqueue.pop(q), pqueue.pop(q))` pops in source order, and `pair(strbuilder.append(b, "xy"), strbuilder.length(b))` reads the length after the append.
 
-### `@retain` and `@noescape`: what an extern does with a parameter
+### `@retain`, `@noescape` and `@into`: what an extern does with a parameter
 
 An extern borrows what it is given, as every call does: a fresh argument is
 released after the call, and a local's value stays the caller's. An extern
@@ -3488,12 +3548,13 @@ a reference of its own: a fresh value as it is, a place's retained. C gives a
 kept closure back through the closure's own destructor. A closure passed to a
 `ptr` parameter is boxed: on the caller's stack when the parameter only
 borrows, so nothing is allocated, and on the heap, with its own reference,
-when the parameter is `@retain`.
+when the parameter is `@retain` or `@into`.
 
 ```aether,fragment
 extern string_seq_each(s: *StringSeq, f: @noescape ptr)     // calls f per element, keeps nothing
 extern register_handler(cb: @retain fn)                      // stores the closure: it gets a reference
 extern http_server_get(server: ptr, path: string, handler: @retain ptr, user_data: ptr)
+extern memchr(s: @into ptr, c: int, n: int) -> ptr           // the result points into `s`
 ```
 
 `@noescape` states what an unmarked parameter already is: the C function uses
@@ -3502,6 +3563,22 @@ thread, nor freeing it. It is accepted on `ptr` and `fn` parameters. The std
 externs that keep a closure are declared `@retain`: `observe`, the worker
 pool's jobs and main-thread poster, and the HTTP server's route, SSE and
 WebSocket handlers.
+
+`@into` on a `ptr` parameter says the C function's result points into or
+holds the argument, and keeps it nowhere else. The compiler cannot read C,
+so it is trusted, as `@retain` is, and a call is checked as one to an Aether
+function's `@into` parameter ([String ownership](#string-ownership)): the
+caller may hold the result in a local, and E0902 refuses it where it would
+carry a borrowed `ptr` parameter out of the caller. `@into` does not combine
+with `@retain` (C may keep the argument anywhere) or `@noescape` (the
+argument stays out of the result too).
+
+An extern's parameter may also be `@keep`: that is how `ae` declares a
+binary import's export whose Aether parameter is `@keep ptr` (#3013), and a
+call is checked as one to that Aether function: a borrowed `ptr` given to
+it is E0902, and a string goes only through `string.keep(s)`. `@retain`
+would be wrong there, since it hands C a string's characters with a
+reference of its own, not the counted string the Aether function keeps.
 
 ### `@extern("c_name")` bind to a renamed C symbol
 
@@ -3627,7 +3704,7 @@ reduce(f: fn(int, int) -> int, x: int, y: int) -> int {
 }
 ```
 
-Pass an Aether function's address with the `as fn(...)` cast, `walk(my_handler as fn(ptr, ptr) -> void, p, q)` or a C function pointer obtained from an extern. A `string` argument reaches the callee as its bytes: the call wraps it in `aether_string_data(arg)`, as a call to an extern does, so a heap string (interpolated, concatenated) arrives as its characters and not as its `AetherString` header. This holds for every typed-pointer call: a `fn(...)` parameter, a cast local (`f = p as fn(uint32, string) -> int; f(7, name)`) and a function-pointer struct field. A closure cannot go there (it carries an environment, and a C function pointer has none), and the compiler says so at the call (`a closure cannot be passed as a typed function pointer`); a callback that may be a closure takes a bare `fn` parameter and is invoked with `call(cb, …)`. This is the parameter form of the same typed-fn-pointer machinery used by `as fn(...)` locals and function-pointer struct fields; the prototype matches the C signature exactly (needed for callback APIs like `qsort`, `dictScan`, signal handlers, libcurl/sqlite hooks).
+Pass an Aether function's address with the `as fn(...)` cast, `walk(my_handler as fn(ptr, ptr) -> void, p, q)` or a C function pointer obtained from an extern. A `string` argument reaches the callee as its bytes: the call wraps it in `aether_string_data(arg)`, as a call to an extern does, so a heap string (interpolated, concatenated) arrives as its characters and not as its `AetherString` header. This holds for every typed-pointer call: a `fn(...)` parameter, a cast local (`f = p as fn(uint32, string) -> int; f(7, name)`) and a function-pointer struct field. A closure cannot go there (it carries an environment, and a C function pointer has none), and the compiler says so at the call (`a closure cannot be passed as a typed function pointer`); a callback that may be a closure takes a bare `fn` parameter and is invoked with `call(cb, …)`, or, when it keeps a `ptr` it is given, a [closure type that says so](#closure-types-that-say-what-they-keep-fnkeep-ptr-float). This is the parameter form of the same typed-fn-pointer machinery used by `as fn(...)` locals and function-pointer struct fields; the prototype matches the C signature exactly (needed for callback APIs like `qsort`, `dictScan`, signal handlers, libcurl/sqlite hooks).
 
 A named Aether function bound to a typed function pointer is its address there too, without the cast: an argument to such a parameter, a struct or message field of that type, a `let` local of it, a module-level `var` (its initializer, and an assignment to it in a function body) or `const` (`const CB: fn(int) -> string = label`, called `CB(1)`), and a function's result. The signature is checked: the parameter types must match, and so must the result, where `fn(ptr, int)` and `fn(ptr, int) -> void` are the same type.
 
@@ -3663,6 +3740,68 @@ main() {
 ```output
 noop_free
 system_free
+```
+
+### Closure types that say what they keep, `fn(@keep ptr, float)`
+
+A function type whose parameter is written with a mode, `@keep` or `@into`
+([String ownership](#string-ownership)), is a closure's type that carries
+it: `fn(@keep ptr, float)` holds a closure or a named function whose first
+parameter keeps the pointer it is given, and `fn(@into ptr) -> Recorder`
+one whose result holds it. A call through such a value (`tick(el, t)` or
+`call(tick, el, t)`) is checked as a direct call is: a borrowed `ptr` given
+to the `@keep` parameter is E0902, a string goes there only through
+`string.keep(s)`, and the result of an `@into` call holds the argument. A
+closure declares the mode on its parameter (`|el: @keep ptr, t: float|`);
+one that leaves a parameter untyped (`|el, t|`) takes the parameter's type
+and mode from the closure type it is given for. A named function with a
+`@keep` or `@into` parameter is a value of its type: given, bound to a local
+(`g = fill`) or called through one.
+
+The modes are ordered, borrowed, then `@into`, then `@keep`: each lets the
+function do more with the pointer and asks more of the caller. A function
+may stand where its own modes, or ones further along, are expected (a
+borrowing closure where `fn(@keep ptr, float)` is, an `@into` function where
+`fn(@keep ptr) -> ptr` is), never the reverse, since a call through the
+weaker type would hand it a pointer the caller still owns. So a keeping
+function does not go into a bare `fn` (which borrows every parameter), a
+closure type with a weaker mode at that parameter, or a `ptr` (the box
+`unbox_closure` opens is a bare `fn`); each is E0902. A value that is one
+of several functions (an if-expression or a value `match` over them, or a
+local bound to one in each branch) takes the strongest of their modes at
+each parameter, the type every one of them may stand for, so a call
+through it is checked as a call to the one that keeps. A typed C function
+pointer's parameters borrow, so neither `as fn(...)` nor a `type Name =
+fn(...)` alias names a mode.
+
+```aether,run
+import std.list
+
+var registry: ptr = null
+
+element_set_fill(el: @keep ptr, color: string) {
+    list.add(registry, el)            // kept: the parameter is `@keep`
+}
+
+animate(el: @keep ptr, tick: fn(@keep ptr, float)) {
+    tick(el, 0.5)                     // checked as a direct call: `el` is kept
+}
+
+main() {
+    registry = list.new()
+    shape = list.new()
+    animate(shape) callback |el: @keep ptr, t: float| {
+        element_set_fill(el, "red")
+    }
+    animate(shape) callback |el, t| {     // takes `@keep ptr` and `float`
+        element_set_fill(el, "blue")
+    }
+    println("${list.size(registry)}")
+}
+```
+
+```output
+2
 ```
 
 ### Named C function-pointer types, `type Name = fn(T1, T2) -> R`
@@ -3853,6 +3992,8 @@ age = 30
 println("Hello, ${name}! You are ${age} years old.")
 ```
 
+**What renders.** A value has a string rendering when it is a number (every width, signed or not, and `float`), a `bool`, a `string`, a `duration` or an enum member (its numeric value). One rule decides it for every place that renders a value: a `${...}` segment, each argument of `println` and `print`, and the arguments of `print`'s format form. Anything else is error E0200 before C, with the spelling that renders it: a struct (render a field, `${p.x}`), a tuple (destructure it first, `a, b = t`), a call returning several values, a sum (`match` on it), an optional (give it a value, `${v ?? 0}`), an array (an element), a function (call it), and a `ptr`, which may point at anything (a list, a buffer, a struct): one that holds an Aether string is read as one with `string.from_ptr(p)`, one that holds C text is copied with `string.from_cstr(p)`, and a container's string is read with its typed getter (`list.get_string`, `map.get_string`), as in [A pointer given to a string local](#a-pointer-given-to-a-string-local-e0202). Every std function that makes a string returns a `string` (`string.from_int`, `string.pad_start`, `string.new_with_length` and the rest), so none of them needs a conversion.
+
 The text around the `${expr}` parts takes the same escapes as a plain string literal, with the same meaning wherever they sit: `"a\\0b ${n}"` holds a backslash followed by `0b`, `"a\0b ${n}"` holds a NUL byte that the result keeps, and `\${` writes a literal `${` rather than starting an interpolation. A `${s}` segment writes the string `s` by its length, so a value holding a NUL goes in whole; `print` and `println` write a string value the same way.
 
 An interpolated string used as a value is a fresh, counted `string`, which the place it is stored in owns ([String ownership](#string-ownership)):
@@ -4040,6 +4181,7 @@ An error stops the build and prints its code, `error[E0301]: ...`, with the sour
 | `E0305` | A module exports two names that answer to one short name, `add` beside `aether_set_add` or `join` beside `string_join`: one name per operation ([module-system-design.md](module-system-design.md)) |
 | `E0600` | An actor rule, such as a closure in a handler writing the actor's state |
 | `E0700` | Missing return: control can reach the end of a function whose result is not void ([Returning on every path](#returning-on-every-path-e0700)) |
+| `E0701` | A `select()` with no value for a platform (`linux:`, `windows:`, `macos:`) and no `other:` fallback ([named-args-and-select.md](named-args-and-select.md#missing-platform-is-a-compile-error)) |
 | `E0800` | A construct a quote cannot hold: a closure, `callback` or block inside one, `defer`, `try`, `panic`, an actor operation, `match`, string interpolation, `new`, an array literal ([quote.md](quote.md#what-a-quote-may-contain-and-the-errors)) |
 | `E0801` | A quote parameter without a type |
 | `E0802` | A quote given to a function whose last parameter is not a `quote.Tree`, or a closure, `callback` or block given to one that is |
@@ -4048,8 +4190,12 @@ An error stops the build and prints its code, `error[E0301]: ...`, with the sour
 | `E0805` | A `@quotable` function reading a variable outside it |
 | `E0900` | A slice of a function's own storage (an array literal, an array of its own) leaves the function: returned, stored in a module-level `var` or in a field that outlives it, or captured by a closure that does ([Slices](#slices-t)) |
 | `E0901` | A function frees a `string` or `*StringSeq` parameter it only borrows ([String ownership](#string-ownership)) |
-| `E0902` | A function keeps a `ptr` parameter not declared `@keep`, a `string` is given to a `@keep ptr` without `string.keep` (a `*StringSeq` without `string.seq_retain`), a string C memory viewed as `string[]` would read after its owner frees it (one built in the statement, or any but a pinned literal where the memory outlives the function), or a function with a `@keep` parameter is used as a value ([String ownership](#string-ownership)) |
+| `E0902` | A function keeps a `ptr` parameter not declared `@keep`, an `@into` parameter reaches anything but the function's result, a call's result that holds a borrowed `ptr` parameter (through an `@into` argument) escapes, `@into` is declared where it cannot apply (not a bare `ptr`, a result that cannot hold a pointer, beside `@keep`, `@retain` or `@noescape`), a `string` is given to a `@keep ptr` or an `@into ptr` without `string.keep` (a `*StringSeq` without `string.seq_retain`), a string C memory viewed as `string[]` would read after its owner frees it (one built in the statement, or any but a pinned literal where the memory outlives the function), or a function with a `@keep` or `@into` parameter goes where a call through it would be checked as borrowing (a bare `fn`, a closure type with a weaker mode, a `ptr`, a typed C function pointer, an `as fn(...)` cast) ([String ownership](#string-ownership)) |
 | `E1000` | A file defines a function under a name it also imports selectively (`import std.string (length)` beside its own `length`), so a bare call in the function's body would reach itself ([module-system-design.md](module-system-design.md)) |
+
+### Limits
+
+The compiler counts two things, and passing either is E0100 naming the limit: nesting, of parentheses, blocks, `else if` chains and other constructs inside one another, 512 deep; and a chain on one level, the operators of `a + b + c ...` or the postfix operations of `a.b.c ...`, `x[i][j] ...` and calls, 1000 long. Split a deeper or longer one with functions or intermediate locals. Nothing else is counted: a file holds any number of declarations, a block any number of statements, a `switch` any number of cases and a `match` any number of arms.
 
 ### A Pointer Given to a String Local [E0202]
 
@@ -4132,7 +4278,11 @@ main() {
 
 ### Unreachable Code [W1002]
 
-Code after `return`, `exit()`, or exhaustive `if`/`else` blocks is flagged:
+Code after a statement that control never goes on from is flagged: `return`,
+`break`, `continue`, `panic`, `exit(n)`, an `if`/`else` or `match` every path
+of which leaves, or a loop nothing ends. The warning names what the code
+follows (`unreachable code after break`). The rule is the one the missing
+return check, the `or { }` handler and a value `match` arm use:
 
 ```aether,fragment
 check(x: int) -> {
@@ -4141,6 +4291,13 @@ check(x: int) -> {
     println("never reached")    // warning[W1002]: unreachable code
 }
 ```
+
+An `if` whose condition is a constant does not make the code after it
+unreachable: a flag that disables code on purpose (`const DEBUG = false`,
+then `if !DEBUG { return }`) is not reported. A loop on a constant still
+counts, since `while true` with no `break` never ends. A module `var` is
+never a constant, whatever it starts as: the compiler does not fold it in a
+condition, a `requires` or a `case` (#3026).
 
 ### Constant-Expression Overflow [W1003]
 
@@ -4629,6 +4786,12 @@ import std.message as msg                  // msg.format(...)
 ```
 
 ---
+
+## Source Files
+
+A source file is UTF-8 text. A file may start with the UTF-8 byte order mark (the bytes `EF BB BF`, U+FEFF), as some Windows editors save one: it is no part of the program, and the compiler, `ae check`, `ae fmt` (which keeps it where it found it), the language server and every import read the file as starting after it. Anywhere else U+FEFF is a character like any other, allowed only in a string or a comment.
+
+Outside strings and comments, a character that begins no token is E0100, naming it: `unexpected character '“' (U+201C) outside a string or a comment` for a typographic quote pasted in place of `"`, a byte order mark inside the file, or bytes that are not UTF-8.
 
 ## Comments
 

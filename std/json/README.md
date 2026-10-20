@@ -47,11 +47,12 @@ Accessors that can fail return `(value, err)` (`get_string` above), while
 having checked `json_type` first. Check the type when the input is
 untrusted.
 
-For **building**, the `obj`/`arr`/`str`/`num` constructors compose a tree that
-`stringify` serialises. For validating an untyped map against a schema before
-you trust it, see `std/schema`.
+For **building**, the `obj`/`arr`/`str`/`num` constructors compose a tree,
+`set` and `push` put values in it, and `encode` serialises it. For
+validating an untyped map against a schema before you trust it, see
+`std/schema`.
 
-`stringify` writes a number so that parsing it gives back the same value. An
+`encode` writes a number so that parsing it gives back the same value. An
 integer built with `from_int`, or parsed as a bare integer, is written as that
 integer over the full `long` range. Any other number is written with as few
 digits as reading it back to the same double needs: 15 when those suffice,
@@ -61,7 +62,7 @@ JavaScript's `JSON.stringify` writes it.
 
 Strings keep every byte. A string or key may hold U+0000 (written
 `\u0000`): `get_string` and `object_entry` return all of it, `str` and
-`object_set` take all of an Aether string, and `stringify` writes the NUL
+`set` take all of an Aether string, and `encode` writes the NUL
 back as `\u0000`. `parse` reads the whole of its input, so bytes after a
 NUL are part of the document, not ignored.
 
@@ -71,7 +72,7 @@ import std.json
 main() {
     value = 0.061234567891
     node = json.num(value)
-    text, _ = json.stringify(node)
+    text, _ = json.encode(node)
     back, _ = json.parse(text)
     same = json.get_number(back) == value
     println("${text} reads back as the same double: ${same}")
@@ -79,7 +80,7 @@ main() {
     json.free(back)
 
     tenth = json.num(0.1)
-    short, _ = json.stringify(tenth)
+    short, _ = json.encode(tenth)
     println(short)
     json.free(tenth)
 }
@@ -91,11 +92,11 @@ main() {
 
 ## Exports
 
-`parse`, `parse_strict`, `stringify`, `json_free`, `json_type`, `json_is_null`,
+`parse`, `parse_strict`, `json_free`, `json_type`, `json_is_null`,
 `json_is_integer`, `json_get_bool`, `json_get_number`, `json_get_int`, `json_get_long`,
-`get_string`, `object_get`, `object_set`, `object_size`, `object_entry`,
+`get_string`, `object_get`, `object_size`, `object_entry`,
 `json_object_has`, `json_object_key_at`, `json_object_value_at`, `array_get`,
-`array_add`, `json_array_size`, `obj`, `arr`, `str`, `num`, `from_int`,
+`json_array_size`, `obj`, `arr`, `str`, `num`, `from_int`,
 `boolean`, `null_value`, `set`, `push`, `encode`, `last_error`,
 `last_error_kind`, `last_error_line`, `last_error_col`, and the `KIND_*`
 constants.

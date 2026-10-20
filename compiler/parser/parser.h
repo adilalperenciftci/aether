@@ -43,6 +43,16 @@ typedef struct {
 // meet the crash point.
 #define AETHER_MAX_PARSE_DEPTH 512
 
+// #2907: operators chained at one level (`a + b + c ...`) and postfix
+// operations on one operand (`a.b.c ...`, `x[i][j] ...`) are parsed by a loop,
+// not by recursion, but each one nests the tree a level deeper, and every
+// later pass walks that tree recursively: 4000 `+ 1` overflowed aetherc's
+// stack on Windows with no diagnostic. A chain longer than this is E0100,
+// naming the limit, and parsing stops as at AETHER_MAX_PARSE_DEPTH. It is
+// the old silent cap on binary operators, now reported; nothing else in the
+// parser counts (declarations, statements, cases and arms are unlimited).
+#define AETHER_MAX_EXPR_CHAIN 1000
+
 // Parser functions
 Parser* create_parser(Token** tokens, int token_count);
 void free_parser(Parser* parser);

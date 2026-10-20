@@ -1,0 +1,7 @@
+// println(p) with a struct reached C as a `%d` of the struct (#3016).
+struct P { x: int, y: int }
+
+main() {
+    p = P { x: 1, y: 2 }
+    println(p)
+}

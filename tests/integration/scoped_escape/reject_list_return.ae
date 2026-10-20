@@ -1,0 +1,9 @@
+import std.list
+fresh() -> ptr {
+    @scoped l = list.new()
+    return l
+}
+main() {
+    l = fresh()
+    println(list.size(l))
+}

@@ -62,7 +62,7 @@ main() {
         string.free(perr)
         fails = fails + check(doc != null, "parse returned null")
 
-        out, serr = json.stringify(doc)
+        out, serr = json.encode(doc)
         fails = fails + check(string.contains(out, "3.14"), "stringify lost the number")
         string.free(out)
         string.free(serr)

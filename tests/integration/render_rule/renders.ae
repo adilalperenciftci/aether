@@ -1,0 +1,18 @@
+// What has a string rendering still prints, through interpolation, print
+// and println alike (#3016): the numbers, bool, string and an enum.
+enum Color { Red, Green, Blue }
+
+main() {
+    i = 7
+    let l: long = 9000000000
+    f = 1.5
+    b = true
+    s = "text"
+    c = Color.Blue
+    println("${i} ${l} ${f} ${b} ${s} ${c}")
+    println(i)
+    println(l)
+    println(b)
+    println(s)
+    print("%d|%s\n", i, s)
+}

@@ -221,7 +221,9 @@ void own_emit_part(CodeGenerator* gen, Type* pt, const char* lv, OwnOp op) {
     }
     default: {
         if (op == OWN_ZERO) {
-            fprintf(o, "    memset(&%s, 0, sizeof(%s));\n", lv, lv);
+            /* (void*): cl.exe reads the `const` of a `const char*` array's
+             * elements as the array's (C4090, #2799). */
+            fprintf(o, "    memset((void*)&%s, 0, sizeof(%s));\n", lv, lv);
             return;
         }
         OwnType* ot = own_find(gen, pt);

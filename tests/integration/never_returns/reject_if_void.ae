@@ -1,0 +1,14 @@
+// A branch of an `if` expression that calls a function returning nothing
+// gives no value; it reached C as a void operand of `?:` (#3017).
+note(n: int) {
+    println("note ${n}")
+}
+
+pick(n: int) -> int {
+    v = if n == 0 { 10 } else { note(n) }
+    return v
+}
+
+main() {
+    println("${pick(0)}")
+}

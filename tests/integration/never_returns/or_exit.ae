@@ -1,0 +1,17 @@
+// An `or { }` handler that ends with `exit(n)` leaves, as one ending with
+// `return` or `panic` does (#3017): it needs no value. It compiled to
+// invalid C (`exit` taken as the block's value).
+half(n: int) -> int! {
+    if n % 2 != 0 { return 0, "odd" }
+    return n / 2, ""
+}
+
+main() {
+    a = half(4) or { exit(1) }
+    println("a=${a}")
+    b = half(5) or {
+        println("b failed: ${err}")
+        exit(7)
+    }
+    println("not reached ${b}")
+}

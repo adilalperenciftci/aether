@@ -1,0 +1,9 @@
+// println of a sum value reached C as a `%d` of the sum (#3016).
+struct Circle { r: float }
+struct Rect { w: float, h: float }
+type Shape = Circle | Rect
+
+main() {
+    let s: Shape = Circle { r: 2.0 }
+    println(s)
+}

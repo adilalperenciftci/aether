@@ -264,7 +264,7 @@ need_acting(g: *GridGen) {
 // Kinds.
 
 kind_count() -> int {
-    return 22
+    return 25
 }
 
 kind_at(i: int) -> string {
@@ -280,16 +280,19 @@ kind_at(i: int) -> string {
         8 -> "K9"
         9 -> "SA1"
         10 -> "SA2"
-        11 -> "SAR"
-        12 -> "SB1"
-        13 -> "SB2"
-        14 -> "SC1"
-        15 -> "SC2"
-        16 -> "SD1"
-        17 -> "SD2"
-        18 -> "ST1"
-        19 -> "ST2"
-        20 -> "KS"
+        11 -> "SA3"
+        12 -> "SA4"
+        13 -> "SA5"
+        14 -> "SAR"
+        15 -> "SB1"
+        16 -> "SB2"
+        17 -> "SC1"
+        18 -> "SC2"
+        19 -> "SD1"
+        20 -> "SD2"
+        21 -> "ST1"
+        22 -> "ST2"
+        23 -> "KS"
         _ -> "KSF"
     }
 }
@@ -307,6 +310,9 @@ kind_title(kid: string) -> string {
         "K9" -> "named function as a closure value (no environment)"
         "SA1" -> "string from `string.replace` (class A: counted, the caller owns it)"
         "SA2" -> "string from `string.concat_wrapped` (class A: counted, the caller owns it)"
+        "SA3" -> "string from `string.from_int` (class A: counted, the caller owns it)"
+        "SA4" -> "string from `string.pad_start` (class A: counted, the caller owns it)"
+        "SA5" -> "string from `string.new_with_length` (class A: counted, the caller owns it)"
         "SAR" -> "string from `string_list_get` (class A~: counted, the list holds it)"
         "SB1" -> "string from `path.join` (class B: a plain malloc'd buffer the caller owns)"
         "SB2" -> "string from `path.rel` (class B: a plain malloc'd buffer the caller owns)"
@@ -339,7 +345,7 @@ is_producer(kid: string) -> bool {
 }
 
 producer_count() -> int {
-    return 11
+    return 14
 }
 
 producer_at(i: int) -> string {
@@ -376,6 +382,9 @@ producer_class(kid: string) -> string {
     return match kid {
         "SA1" -> "A"
         "SA2" -> "A"
+        "SA3" -> "A"
+        "SA4" -> "A"
+        "SA5" -> "A"
         "SAR" -> "A~"
         "SB1" -> "B"
         "SB2" -> "B"
@@ -393,6 +402,9 @@ producer_function(kid: string) -> string {
     return match kid {
         "SA1" -> "string_replace"
         "SA2" -> "string_concat_wrapped"
+        "SA3" -> "string_from_int"
+        "SA4" -> "string_pad_start"
+        "SA5" -> "string_new_with_length"
         "SAR" -> "string_list_get"
         "SB1" -> "path_join"
         "SB2" -> "path_rel"
@@ -578,6 +590,19 @@ fresh(g: *GridGen, kid: string, tag: string) -> (string, string) {
     if kid == "SA2" {
         return "", "string.concat_wrapped(w, \"${sx}\")"
     }
+    // #3018: three of the std functions that returned their counted string
+    // as a `ptr @heap`, now a `string`. The values are made at run time from
+    // `w`, so none of them folds to a literal.
+    if kid == "SA3" {
+        return "", "string.from_int(string.length(w) * 100 + ${tag_num(tag)})"
+    }
+    if kid == "SA4" {
+        return "", "string.pad_start(w, string.length(w) + ${tag_num(tag)}, 35)"
+    }
+    if kid == "SA5" {
+        t = text_of(tag)
+        return "", "string.new_with_length(string.concat(w, \"${suffix(tag)}xyz\"), ${string.length(t)})"
+    }
     if kid == "SAR" {
         return "sl_${tag} = collections.string_list_new()\ndefer collections.string_list_free(sl_${tag})\ncollections.string_list_add(sl_${tag}, string.concat(w, \"${sx}\"))",
         "collections.string_list_get(sl_${tag}, 0)"
@@ -612,8 +637,20 @@ fresh(g: *GridGen, kid: string, tag: string) -> (string, string) {
     return "", "string.concat(w, \"${sx}\")"
 }
 
+// `w` padded on the left with '#' to one more character per tag number.
+pad_expected(tag: string) -> string {
+    return match tag {
+        "a" -> "#w"
+        "b" -> "##w"
+        "c" -> "###w"
+        _ -> "w"
+    }
+}
+
 producer_expected(kid: string, tag: string) -> string {
     return match kid {
+        "SA3" -> "10${tag_num(tag)}"
+        "SA4" -> pad_expected(tag)
         "SB1" -> "w/${tag_word(tag)}"
         "SB2" -> tag_word(tag)
         "SD2" -> "application/octet-stream"

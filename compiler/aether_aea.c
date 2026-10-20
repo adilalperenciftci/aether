@@ -109,6 +109,11 @@ static int encode_type(Buf* b, const Type* t, const char** err) {
     buf_int(b, params);
     for (int i = 0; i < params; i++)
         if (!encode_type(b, t->param_types[i], err)) return 0;
+    /* #2980: a function type's parameter modes (`fn(@keep ptr)`), parse
+     * state since format 5. */
+    buf_int(b, (params > 0 && t->param_modes) ? 1 : 0);
+    if (params > 0 && t->param_modes)
+        for (int i = 0; i < params; i++) buf_int(b, t->param_modes[i]);
     if (!encode_type(b, t->return_type, err)) return 0;
     buf_int(b, t->is_fnptr);
     buf_int(b, t->is_result);
@@ -334,6 +339,17 @@ static Type* decode_type(Cursor* c, int depth) {
         if (!t->param_types) { c->bad = 1; return t; }
         t->param_count = params;
         for (int i = 0; i < params && !c->bad; i++) t->param_types[i] = decode_type(c, depth + 1);
+    }
+    int has_modes = cur_count(c);
+    if (!c->bad && has_modes) {
+        if (params <= 0) { c->bad = 1; return t; }
+        t->param_modes = calloc((size_t)params, sizeof(int));
+        if (!t->param_modes) { c->bad = 1; return t; }
+        for (int i = 0; i < params && !c->bad; i++) {
+            long long m = cur_int(c);
+            if (m < FN_MODE_BORROWED || m > FN_MODE_KEEP) { c->bad = 1; return t; }
+            t->param_modes[i] = (int)m;
+        }
     }
     t->return_type = decode_type(c, depth + 1);
     t->is_fnptr = (int)cur_int(c);

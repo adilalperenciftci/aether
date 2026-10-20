@@ -15,31 +15,6 @@
   <input type="text" id="search" placeholder="Search bytes..." onkeyup="searchModule()">
   <h2>Exports</h2>
   <ul class="function-nav">
-    <li><a href="#aether_bytes_new">aether_bytes_new</a></li>
-    <li><a href="#aether_bytes_set">aether_bytes_set</a></li>
-    <li><a href="#aether_bytes_get">aether_bytes_get</a></li>
-    <li><a href="#aether_bytes_length">aether_bytes_length</a></li>
-    <li><a href="#aether_bytes_set_le16">aether_bytes_set_le16</a></li>
-    <li><a href="#aether_bytes_get_le16">aether_bytes_get_le16</a></li>
-    <li><a href="#aether_bytes_set_le32">aether_bytes_set_le32</a></li>
-    <li><a href="#aether_bytes_get_le32">aether_bytes_get_le32</a></li>
-    <li><a href="#aether_bytes_set_le64">aether_bytes_set_le64</a></li>
-    <li><a href="#aether_bytes_get_le64">aether_bytes_get_le64</a></li>
-    <li><a href="#aether_bytes_set_be16">aether_bytes_set_be16</a></li>
-    <li><a href="#aether_bytes_get_be16">aether_bytes_get_be16</a></li>
-    <li><a href="#aether_bytes_set_be32">aether_bytes_set_be32</a></li>
-    <li><a href="#aether_bytes_get_be32">aether_bytes_get_be32</a></li>
-    <li><a href="#aether_bytes_set_be64">aether_bytes_set_be64</a></li>
-    <li><a href="#aether_bytes_get_be64">aether_bytes_get_be64</a></li>
-    <li><a href="#aether_bytes_copy_from_string">aether_bytes_copy_from_string</a></li>
-    <li><a href="#aether_bytes_copy_from_bytes">aether_bytes_copy_from_bytes</a></li>
-    <li><a href="#aether_bytes_copy_within">aether_bytes_copy_within</a></li>
-    <li><a href="#aether_bytes_finish">aether_bytes_finish</a></li>
-    <li><a href="#aether_bytes_to_string">aether_bytes_to_string</a></li>
-    <li><a href="#aether_bytes_free">aether_bytes_free</a></li>
-    <li><a href="#aether_bytes_data">aether_bytes_data</a></li>
-    <li><a href="#aether_bytes_capacity">aether_bytes_capacity</a></li>
-    <li><a href="#aether_bytes_set_length">aether_bytes_set_length</a></li>
     <li><a href="#new">new</a></li>
     <li><a href="#set">set</a></li>
     <li><a href="#get">get</a></li>
@@ -67,7 +42,6 @@
     <li><a href="#set_length">set_length</a></li>
     <li><a href="#from_ptr">from_ptr</a></li>
     <li><a href="#string_from_ptr">string_from_ptr</a></li>
-    <li><a href="#aether_bytes_copy_from_ptr">aether_bytes_copy_from_ptr</a></li>
     <li><a href="#view">view</a></li>
     <li><a href="#capacity_view">capacity_view</a></li>
     <li><a href="#from_slice">from_slice</a></li>
@@ -133,6 +107,7 @@
     <li><a href="path.html">path</a></li>
     <li><a href="plural.html">plural</a></li>
     <li><a href="pqueue.html">pqueue</a></li>
+    <li><a href="quote.html">quote</a></li>
     <li><a href="reflect.html">reflect</a></li>
     <li><a href="regex.html">regex</a></li>
     <li><a href="resp.html">resp</a></li>
@@ -173,136 +148,6 @@
     <p class="import-line"><code>import std.bytes</code></p>
   </div>
   <div class="functions" id="functions">
-    <div class="function" id="aether_bytes_new" data-name="aether_bytes_new">
-      <h3 class="function-name">aether_bytes_new <span class="kind">extern</span></h3>
-      <pre class="usage"><code>aether_bytes_new(initial_capacity) <span class="arrow">-&gt;</span> ptr</code></pre>
-      <p class="signature"><span class="sig-params">initial_capacity: int</span></p>
-      <p class="doc">---- Raw externs ----</p>
-    </div>
-    <div class="function" id="aether_bytes_set" data-name="aether_bytes_set">
-      <h3 class="function-name">aether_bytes_set <span class="kind">extern</span></h3>
-      <pre class="usage"><code>aether_bytes_set(b, index, value) <span class="arrow">-&gt;</span> int</code></pre>
-      <p class="signature"><span class="sig-params">b: ptr, index: int, value: int</span></p>
-    </div>
-    <div class="function" id="aether_bytes_get" data-name="aether_bytes_get">
-      <h3 class="function-name">aether_bytes_get <span class="kind">extern</span></h3>
-      <pre class="usage"><code>aether_bytes_get(b, index) <span class="arrow">-&gt;</span> int</code></pre>
-      <p class="signature"><span class="sig-params">b: ptr, index: int</span></p>
-    </div>
-    <div class="function" id="aether_bytes_length" data-name="aether_bytes_length">
-      <h3 class="function-name">aether_bytes_length <span class="kind">extern</span></h3>
-      <pre class="usage"><code>aether_bytes_length(b) <span class="arrow">-&gt;</span> int</code></pre>
-      <p class="signature"><span class="sig-params">b: ptr</span></p>
-    </div>
-    <div class="function" id="aether_bytes_set_le16" data-name="aether_bytes_set_le16">
-      <h3 class="function-name">aether_bytes_set_le16 <span class="kind">extern</span></h3>
-      <pre class="usage"><code>aether_bytes_set_le16(b, index, value) <span class="arrow">-&gt;</span> int</code></pre>
-      <p class="signature"><span class="sig-params">b: ptr, index: int, value: int</span></p>
-    </div>
-    <div class="function" id="aether_bytes_get_le16" data-name="aether_bytes_get_le16">
-      <h3 class="function-name">aether_bytes_get_le16 <span class="kind">extern</span></h3>
-      <pre class="usage"><code>aether_bytes_get_le16(b, index) <span class="arrow">-&gt;</span> int</code></pre>
-      <p class="signature"><span class="sig-params">b: ptr, index: int</span></p>
-    </div>
-    <div class="function" id="aether_bytes_set_le32" data-name="aether_bytes_set_le32">
-      <h3 class="function-name">aether_bytes_set_le32 <span class="kind">extern</span></h3>
-      <pre class="usage"><code>aether_bytes_set_le32(b, index, value) <span class="arrow">-&gt;</span> int</code></pre>
-      <p class="signature"><span class="sig-params">b: ptr, index: int, value: int</span></p>
-    </div>
-    <div class="function" id="aether_bytes_get_le32" data-name="aether_bytes_get_le32">
-      <h3 class="function-name">aether_bytes_get_le32 <span class="kind">extern</span></h3>
-      <pre class="usage"><code>aether_bytes_get_le32(b, index) <span class="arrow">-&gt;</span> int</code></pre>
-      <p class="signature"><span class="sig-params">b: ptr, index: int</span></p>
-    </div>
-    <div class="function" id="aether_bytes_set_le64" data-name="aether_bytes_set_le64">
-      <h3 class="function-name">aether_bytes_set_le64 <span class="kind">extern</span></h3>
-      <pre class="usage"><code>aether_bytes_set_le64(b, index, value) <span class="arrow">-&gt;</span> int</code></pre>
-      <p class="signature"><span class="sig-params">b: ptr, index: int, value: long</span></p>
-    </div>
-    <div class="function" id="aether_bytes_get_le64" data-name="aether_bytes_get_le64">
-      <h3 class="function-name">aether_bytes_get_le64 <span class="kind">extern</span></h3>
-      <pre class="usage"><code>aether_bytes_get_le64(b, index) <span class="arrow">-&gt;</span> long</code></pre>
-      <p class="signature"><span class="sig-params">b: ptr, index: int</span></p>
-    </div>
-    <div class="function" id="aether_bytes_set_be16" data-name="aether_bytes_set_be16">
-      <h3 class="function-name">aether_bytes_set_be16 <span class="kind">extern</span></h3>
-      <pre class="usage"><code>aether_bytes_set_be16(b, index, value) <span class="arrow">-&gt;</span> int</code></pre>
-      <p class="signature"><span class="sig-params">b: ptr, index: int, value: int</span></p>
-    </div>
-    <div class="function" id="aether_bytes_get_be16" data-name="aether_bytes_get_be16">
-      <h3 class="function-name">aether_bytes_get_be16 <span class="kind">extern</span></h3>
-      <pre class="usage"><code>aether_bytes_get_be16(b, index) <span class="arrow">-&gt;</span> int</code></pre>
-      <p class="signature"><span class="sig-params">b: ptr, index: int</span></p>
-    </div>
-    <div class="function" id="aether_bytes_set_be32" data-name="aether_bytes_set_be32">
-      <h3 class="function-name">aether_bytes_set_be32 <span class="kind">extern</span></h3>
-      <pre class="usage"><code>aether_bytes_set_be32(b, index, value) <span class="arrow">-&gt;</span> int</code></pre>
-      <p class="signature"><span class="sig-params">b: ptr, index: int, value: int</span></p>
-    </div>
-    <div class="function" id="aether_bytes_get_be32" data-name="aether_bytes_get_be32">
-      <h3 class="function-name">aether_bytes_get_be32 <span class="kind">extern</span></h3>
-      <pre class="usage"><code>aether_bytes_get_be32(b, index) <span class="arrow">-&gt;</span> int</code></pre>
-      <p class="signature"><span class="sig-params">b: ptr, index: int</span></p>
-    </div>
-    <div class="function" id="aether_bytes_set_be64" data-name="aether_bytes_set_be64">
-      <h3 class="function-name">aether_bytes_set_be64 <span class="kind">extern</span></h3>
-      <pre class="usage"><code>aether_bytes_set_be64(b, index, value) <span class="arrow">-&gt;</span> int</code></pre>
-      <p class="signature"><span class="sig-params">b: ptr, index: int, value: long</span></p>
-    </div>
-    <div class="function" id="aether_bytes_get_be64" data-name="aether_bytes_get_be64">
-      <h3 class="function-name">aether_bytes_get_be64 <span class="kind">extern</span></h3>
-      <pre class="usage"><code>aether_bytes_get_be64(b, index) <span class="arrow">-&gt;</span> long</code></pre>
-      <p class="signature"><span class="sig-params">b: ptr, index: int</span></p>
-    </div>
-    <div class="function" id="aether_bytes_copy_from_string" data-name="aether_bytes_copy_from_string">
-      <h3 class="function-name">aether_bytes_copy_from_string <span class="kind">extern</span></h3>
-      <pre class="usage"><code>aether_bytes_copy_from_string(b, dst, src, src_len) <span class="arrow">-&gt;</span> int</code></pre>
-      <p class="signature"><span class="sig-params">b: ptr, dst: int, src: string, src_len: int</span></p>
-    </div>
-    <div class="function" id="aether_bytes_copy_from_bytes" data-name="aether_bytes_copy_from_bytes">
-      <h3 class="function-name">aether_bytes_copy_from_bytes <span class="kind">extern</span></h3>
-      <pre class="usage"><code>aether_bytes_copy_from_bytes(dst, dst_off, src, src_off, length) <span class="arrow">-&gt;</span> int</code></pre>
-      <p class="signature"><span class="sig-params">dst: ptr, dst_off: int, src: ptr, src_off: int, length: int</span></p>
-      <p class="doc">Two-buffer copy. `dst` and `src` are distinct AetherBytes pointers; `length` is the count of bytes to copy from `src` at offset `src_off` into `dst` at offset `dst_off`. Grows `dst` if needed. For an in-place copy (same buffer) use `copy_within` — it has the deliberate RLE forward-overlap semantics that memmove() lacks.</p>
-    </div>
-    <div class="function" id="aether_bytes_copy_within" data-name="aether_bytes_copy_within">
-      <h3 class="function-name">aether_bytes_copy_within <span class="kind">extern</span></h3>
-      <pre class="usage"><code>aether_bytes_copy_within(b, dst, src, length) <span class="arrow">-&gt;</span> int</code></pre>
-      <p class="signature"><span class="sig-params">b: ptr, dst: int, src: int, length: int</span></p>
-      <p class="doc">`length` here is the count of bytes to copy, not a buffer length.</p>
-    </div>
-    <div class="function" id="aether_bytes_finish" data-name="aether_bytes_finish">
-      <h3 class="function-name">aether_bytes_finish <span class="kind">extern</span></h3>
-      <pre class="usage"><code>aether_bytes_finish(b, length) <span class="arrow">-&gt;</span> string</code></pre>
-      <p class="signature"><span class="sig-params">b: ptr, length: int</span></p>
-      <p class="doc">`aether_bytes_finish` returns a freshly heap-owned AetherString (`string_new_with_length` — see std/bytes/aether_bytes.c). The `string @heap` return tells the heap-string tracker the caller owns the result, so `x = bytes.finish(...)` gets a `_heap_x = 1` slot and any function returning a `bytes.finish` value is itself classified heap-returning. Mirrors `aether_strbuilder_finish`.</p>
-    </div>
-    <div class="function" id="aether_bytes_to_string" data-name="aether_bytes_to_string">
-      <h3 class="function-name">aether_bytes_to_string <span class="kind">extern</span></h3>
-      <pre class="usage"><code>aether_bytes_to_string(b, length) <span class="arrow">-&gt;</span> string</code></pre>
-      <p class="signature"><span class="sig-params">b: ptr, length: int</span></p>
-      <p class="doc">Non-consuming twin of finish: mint a fresh heap AetherString from the first `length` bytes without destroying the buffer, so the buffer's owner can keep it and mint again. See to_string wrapper below.</p>
-    </div>
-    <div class="function" id="aether_bytes_free" data-name="aether_bytes_free">
-      <h3 class="function-name">aether_bytes_free <span class="kind">extern</span></h3>
-      <pre class="usage"><code>aether_bytes_free(b)</code></pre>
-      <p class="signature"><span class="sig-params">b: ptr</span></p>
-    </div>
-    <div class="function" id="aether_bytes_data" data-name="aether_bytes_data">
-      <h3 class="function-name">aether_bytes_data <span class="kind">extern</span></h3>
-      <pre class="usage"><code>aether_bytes_data(b) <span class="arrow">-&gt;</span> ptr</code></pre>
-      <p class="signature"><span class="sig-params">b: ptr</span></p>
-    </div>
-    <div class="function" id="aether_bytes_capacity" data-name="aether_bytes_capacity">
-      <h3 class="function-name">aether_bytes_capacity <span class="kind">extern</span></h3>
-      <pre class="usage"><code>aether_bytes_capacity(b) <span class="arrow">-&gt;</span> int</code></pre>
-      <p class="signature"><span class="sig-params">b: ptr</span></p>
-    </div>
-    <div class="function" id="aether_bytes_set_length" data-name="aether_bytes_set_length">
-      <h3 class="function-name">aether_bytes_set_length <span class="kind">extern</span></h3>
-      <pre class="usage"><code>aether_bytes_set_length(b, length) <span class="arrow">-&gt;</span> int</code></pre>
-      <p class="signature"><span class="sig-params">b: ptr, length: int</span></p>
-    </div>
     <div class="function" id="new" data-name="new">
       <h3 class="function-name">new <span class="kind">fn</span></h3>
       <pre class="usage"><code>new(initial_capacity) <span class="arrow">-&gt;</span> ptr</code></pre>
@@ -463,12 +308,6 @@
       <pre class="usage"><code>string_from_ptr(src, length) <span class="arrow">-&gt;</span> string</code></pre>
       <p class="signature"><span class="sig-params">src: ptr, length: int</span></p>
       <p class="doc">One-call ptr -&gt; string crossing: a fresh refcounted binary string copying `length` bytes from a raw pointer `src`, without an intermediate bytes. The direct answer to &quot;I have a ptr + len, I want a string&quot; (issue #1782).</p>
-    </div>
-    <div class="function" id="aether_bytes_copy_from_ptr" data-name="aether_bytes_copy_from_ptr">
-      <h3 class="function-name">aether_bytes_copy_from_ptr <span class="kind">extern</span></h3>
-      <pre class="usage"><code>aether_bytes_copy_from_ptr(b, dst, src, length) <span class="arrow">-&gt;</span> int</code></pre>
-      <p class="signature"><span class="sig-params">b: ptr, dst: int, src: ptr, length: int</span></p>
-      <p class="doc">Copy `length` bytes from raw memory into the buffer at `dst`, growing it.</p>
     </div>
     <div class="function" id="view" data-name="view">
       <h3 class="function-name">view <span class="kind">fn</span></h3>

@@ -248,6 +248,12 @@ Type* infer_from_binary_op(Type* left, Type* right, const char* operator) {
     return result;
 }
 
+/* #3045: an integer of any width, which moves a pointer by that much. */
+static int is_offset_kind(TypeKind k) {
+    return k == TYPE_INT || k == TYPE_INT64 || k == TYPE_UINT64 || k == TYPE_UINT32 ||
+           k == TYPE_UINT16 || k == TYPE_UINT8 || k == TYPE_BYTE;
+}
+
 static Type* infer_from_binary_op_by_kind(Type* left, Type* right, const char* operator) {
     if (!left || !right) return create_type(TYPE_UNKNOWN);
     
@@ -319,6 +325,15 @@ static Type* infer_from_binary_op_by_kind(Type* left, Type* right, const char* o
         if (left->kind == TYPE_FLOAT || right->kind == TYPE_FLOAT) {
             return create_type(TYPE_FLOAT);
         }
+        /* #3045: a pointer moved by an integer of any width is a pointer:
+         * `p + n` and `p - n`, `n + p`. Ahead of the long promotion below,
+         * which made `p - n` with a `long` n a long, and then refused the
+         * pointer the checker gives it (E0200). */
+        if ((strcmp(operator, "+") == 0 || strcmp(operator, "-") == 0) &&
+            left->kind == TYPE_PTR && is_offset_kind(right->kind))
+            return create_type(TYPE_PTR);
+        if (strcmp(operator, "+") == 0 && is_offset_kind(left->kind) && right->kind == TYPE_PTR)
+            return create_type(TYPE_PTR);
         // If either is int64 (long), promote to int64
         if (left->kind == TYPE_INT64 || right->kind == TYPE_INT64) {
             return create_type(TYPE_INT64);
@@ -331,14 +346,8 @@ static Type* infer_from_binary_op_by_kind(Type* left, Type* right, const char* o
         // local variable; high-address heap allocations on Linux x86_64
         // (typically ~0x55_5555_5555_0000+) would get clobbered. Real
         // C ptr arithmetic — used by mquickjs port — needs ptr-result.
+        /* (`p + n`, `p - n` and `n + p` are taken above, #3045.) */
         if (strcmp(operator, "+") == 0 || strcmp(operator, "-") == 0) {
-            if ((left->kind == TYPE_PTR && right->kind == TYPE_INT) ||
-                (left->kind == TYPE_PTR && right->kind == TYPE_INT64)) {
-                return create_type(TYPE_PTR);
-            }
-            if (left->kind == TYPE_INT && right->kind == TYPE_PTR) {
-                return create_type(TYPE_PTR);
-            }
             // ptr - ptr: caller doing pointer-difference arithmetic
             if (left->kind == TYPE_PTR && right->kind == TYPE_PTR &&
                 strcmp(operator, "-") == 0) {

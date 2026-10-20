@@ -25,7 +25,6 @@
     <li><a href="#CBOR_FLOAT">CBOR_FLOAT</a></li>
     <li><a href="#parse">parse</a></li>
     <li><a href="#encode">encode</a></li>
-    <li><a href="#stringify">stringify</a></li>
     <li><a href="#type">type</a></li>
     <li><a href="#is_null">is_null</a></li>
     <li><a href="#is_undefined">is_undefined</a></li>
@@ -39,9 +38,6 @@
     <li><a href="#get_tag_child">get_tag_child</a></li>
     <li><a href="#object_get">object_get</a></li>
     <li><a href="#map_get">map_get</a></li>
-    <li><a href="#object_set">object_set</a></li>
-    <li><a href="#array_add">array_add</a></li>
-    <li><a href="#map_set">map_set</a></li>
     <li><a href="#object_size">object_size</a></li>
     <li><a href="#array_size">array_size</a></li>
     <li><a href="#object_entry">object_entry</a></li>
@@ -55,6 +51,11 @@
     <li><a href="#null_value">null_value</a></li>
     <li><a href="#undefined_value">undefined_value</a></li>
     <li><a href="#tag">tag</a></li>
+    <li><a href="#get_int64">get_int64</a></li>
+    <li><a href="#get_uint">get_uint</a></li>
+    <li><a href="#get_nint">get_nint</a></li>
+    <li><a href="#from_uint">from_uint</a></li>
+    <li><a href="#from_nint">from_nint</a></li>
     <li><a href="#set">set</a></li>
     <li><a href="#push">push</a></li>
     <li><a href="#map_push">map_push</a></li>
@@ -120,6 +121,7 @@
     <li><a href="path.html">path</a></li>
     <li><a href="plural.html">plural</a></li>
     <li><a href="pqueue.html">pqueue</a></li>
+    <li><a href="quote.html">quote</a></li>
     <li><a href="reflect.html">reflect</a></li>
     <li><a href="regex.html">regex</a></li>
     <li><a href="resp.html">resp</a></li>
@@ -196,19 +198,13 @@
       <h3 class="function-name">parse <span class="kind">fn</span></h3>
       <pre class="usage"><code>parse(cbor_data) <span class="arrow">-&gt;</span> ptr!</code></pre>
       <p class="signature"><span class="sig-params">cbor_data: string</span></p>
-      <p class="doc">Parse a CBOR binary string. Returns (value_ptr, &quot;&quot;) on success, (null, error) on failure. Caller owns the returned value and must free with cbor.free.</p>
+      <p class="doc">Parse one CBOR data item that is the whole of `cbor_data`. Returns (value_ptr, &quot;&quot;) on success, (null, error) on failure. Caller owns the returned value and must free with cbor.free. Bytes left after the item are an error (#2470): `0102` used to parse as 1.</p>
     </div>
     <div class="function" id="encode" data-name="encode">
       <h3 class="function-name">encode <span class="kind">fn</span></h3>
       <pre class="usage"><code>encode(value) <span class="arrow">-&gt;</span> string!</code></pre>
       <p class="signature"><span class="sig-params">value: ptr</span></p>
       <p class="doc">Serialize a CBOR value tree to a binary string. Returns (encoded_bytes, &quot;&quot;) on success, (&quot;&quot;, error) on failure.</p>
-    </div>
-    <div class="function" id="stringify" data-name="stringify">
-      <h3 class="function-name">stringify <span class="kind">fn</span></h3>
-      <pre class="usage"><code>stringify(value) <span class="arrow">-&gt;</span> string!</code></pre>
-      <p class="signature"><span class="sig-params">value: ptr</span></p>
-      <p class="doc">Alias of encode for JSON symmetry.</p>
     </div>
     <div class="function" id="type" data-name="type">
       <h3 class="function-name">type <span class="kind">fn</span></h3>
@@ -239,6 +235,7 @@
       <h3 class="function-name">get_long <span class="kind">fn</span></h3>
       <pre class="usage"><code>get_long(value) <span class="arrow">-&gt;</span> long</code></pre>
       <p class="signature"><span class="sig-params">value: ptr</span></p>
+      <p class="doc">The integer, or 0 when `value` is not an integer or is one outside the signed long range (get_int64 says which; get_uint / get_nint read those).</p>
     </div>
     <div class="function" id="get_float" data-name="get_float">
       <h3 class="function-name">get_float <span class="kind">fn</span></h3>
@@ -259,6 +256,7 @@
       <h3 class="function-name">get_tag_val <span class="kind">fn</span></h3>
       <pre class="usage"><code>get_tag_val(value) <span class="arrow">-&gt;</span> long</code></pre>
       <p class="signature"><span class="sig-params">value: ptr</span></p>
+      <p class="doc">The tag number; one of 2^63 or more as the bit pattern of a long, as for get_uint.</p>
     </div>
     <div class="function" id="get_tag_child" data-name="get_tag_child">
       <h3 class="function-name">get_tag_child <span class="kind">fn</span></h3>
@@ -274,21 +272,6 @@
       <h3 class="function-name">map_get <span class="kind">fn</span></h3>
       <pre class="usage"><code>map_get(obj_ptr, key_ptr) <span class="arrow">-&gt;</span> ptr!</code></pre>
       <p class="signature"><span class="sig-params">obj_ptr: ptr, key_ptr: ptr</span></p>
-    </div>
-    <div class="function" id="object_set" data-name="object_set">
-      <h3 class="function-name">object_set <span class="kind">fn</span></h3>
-      <pre class="usage"><code>object_set(obj_ptr, key, value) <span class="arrow">-&gt;</span> string</code></pre>
-      <p class="signature"><span class="sig-params">obj_ptr: ptr, key: string, value: ptr</span></p>
-    </div>
-    <div class="function" id="array_add" data-name="array_add">
-      <h3 class="function-name">array_add <span class="kind">fn</span></h3>
-      <pre class="usage"><code>array_add(arr_ptr, value) <span class="arrow">-&gt;</span> string</code></pre>
-      <p class="signature"><span class="sig-params">arr_ptr: ptr, value: ptr</span></p>
-    </div>
-    <div class="function" id="map_set" data-name="map_set">
-      <h3 class="function-name">map_set <span class="kind">fn</span></h3>
-      <pre class="usage"><code>map_set(obj_ptr, key_ptr, value_ptr) <span class="arrow">-&gt;</span> string</code></pre>
-      <p class="signature"><span class="sig-params">obj_ptr: ptr, key_ptr: ptr, value_ptr: ptr</span></p>
     </div>
     <div class="function" id="object_size" data-name="object_size">
       <h3 class="function-name">object_size <span class="kind">fn</span></h3>
@@ -350,6 +333,36 @@
       <h3 class="function-name">tag <span class="kind">fn</span></h3>
       <pre class="usage"><code>tag(tag_num, child) <span class="arrow">-&gt;</span> ptr</code></pre>
       <p class="signature"><span class="sig-params">tag_num: long, child: ptr</span></p>
+    </div>
+    <div class="function" id="get_int64" data-name="get_int64">
+      <h3 class="function-name">get_int64 <span class="kind">fn</span></h3>
+      <pre class="usage"><code>get_int64(value) <span class="arrow">-&gt;</span> long!</code></pre>
+      <p class="signature"><span class="sig-params">value: ptr</span></p>
+      <p class="doc">The integer as a signed long, or an error when `value` is not an integer or is one outside -2^63..2^63-1 (#2510).</p>
+    </div>
+    <div class="function" id="get_uint" data-name="get_uint">
+      <h3 class="function-name">get_uint <span class="kind">fn</span></h3>
+      <pre class="usage"><code>get_uint(value) <span class="arrow">-&gt;</span> long!</code></pre>
+      <p class="signature"><span class="sig-params">value: ptr</span></p>
+      <p class="doc">A non-negative integer (major type 0), 0..2^64-1, as the bit pattern of a long: 2^63 and up read negative as a long, and std.bits' udiv64, urem64 and ucmp64 treat them as the unsigned values they are. An error for a negative integer or anything else.</p>
+    </div>
+    <div class="function" id="get_nint" data-name="get_nint">
+      <h3 class="function-name">get_nint <span class="kind">fn</span></h3>
+      <pre class="usage"><code>get_nint(value) <span class="arrow">-&gt;</span> long!</code></pre>
+      <p class="signature"><span class="sig-params">value: ptr</span></p>
+      <p class="doc">A negative integer (major type 1) as its CBOR argument n, the value being -1 - n: n is 0..2^64-1, the bit pattern of a long as for get_uint, so the whole range down to -2^64 is reachable. An error for anything else.</p>
+    </div>
+    <div class="function" id="from_uint" data-name="from_uint">
+      <h3 class="function-name">from_uint <span class="kind">fn</span></h3>
+      <pre class="usage"><code>from_uint(bits) <span class="arrow">-&gt;</span> ptr</code></pre>
+      <p class="signature"><span class="sig-params">bits: long</span></p>
+      <p class="doc">The non-negative integer whose unsigned 64 bits are `bits` (0..2^64-1), the inverse of get_uint.</p>
+    </div>
+    <div class="function" id="from_nint" data-name="from_nint">
+      <h3 class="function-name">from_nint <span class="kind">fn</span></h3>
+      <pre class="usage"><code>from_nint(bits) <span class="arrow">-&gt;</span> ptr</code></pre>
+      <p class="signature"><span class="sig-params">bits: long</span></p>
+      <p class="doc">The negative integer -1 - n for the unsigned 64-bit argument n in `bits` (-2^64..-1), the inverse of get_nint.</p>
     </div>
     <div class="function" id="set" data-name="set">
       <h3 class="function-name">set <span class="kind">fn</span></h3>

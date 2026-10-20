@@ -16,6 +16,7 @@
 // The formatter therefore preserves program semantics by construction.
 
 #include "ae_fmt.h"
+#include "../compiler/aether_source_text.h"
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
@@ -504,11 +505,23 @@ static char* layout(Lexeme* lex, size_t n){
 char* ae_format_source(const char* src, const char** err){
     if (err) *err=NULL;
     if (!src){ if(err)*err="null source"; return NULL; }
+    /* #2999: a byte order mark starting the file is no part of its text, so
+     * it is not scanned (its bytes fused with the first token) and the
+     * formatted text keeps it where it was: formatting changes whitespace
+     * only. */
+    size_t bom = aether_source_bom_length(src);
     size_t n=0;
-    Lexeme* lex=scan(src,&n,err);
+    Lexeme* lex=scan(src+bom,&n,err);
     if (!lex && n==0 && err && *err) return NULL;   // scan error
     char* out = layout(lex ? lex : (Lexeme*)"", lex? n : 0);
     if (lex){ for(size_t i=0;i<n;i++) free(lex[i].text); free(lex); }
+    if (out && bom){
+        size_t len=strlen(out);
+        char* with=(char*)malloc(bom+len+1);
+        if (with){ memcpy(with,src,bom); memcpy(with+bom,out,len+1); }
+        free(out);
+        out=with;
+    }
     if (!out && err && !*err) *err="out of memory";
     return out;
 }

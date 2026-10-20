@@ -430,16 +430,13 @@ main() {
     // ---- Test 8: post_json round-trip (issue #240) ----
     // Build a small JSON object, POST it to /json-echo, parse the
     // response, assert the server received Content-Type: application/json
-    // and the body we sent. json_* externs are flat-namespaced (no
-    // wrapper for create_object / object_set_raw etc. yet); call them
-    // directly. The error legs of object_get / get_string come back
-    // as (value, err) tuples per std.json's idiom.
+    // and the body we sent. The error legs of object_get / get_string
+    // come back as (value, err) tuples per std.json's idiom.
     print("\nTest 8: post_json round-trip\n")
-    name_val = json_create_string("alice")
-    age_val = json_create_number(30.0)
-    payload = json_create_object()
-    json_object_set_raw(payload, "name", name_val)
-    json_object_set_raw(payload, "age", age_val)
+    payload = json.obj()
+    set_err = json.set(payload, "name", json.str("alice"))
+    if set_err == "" { set_err = json.set(payload, "age", json.num(30.0)) }
+    if set_err != "" { println("  FAIL building the payload: ${set_err}"); exit(1) }
     resp8, err8 = client.post_json("${base_url()}/json-echo", payload)
     if err8 != "" { println("  FAIL post_json: ${err8}"); exit(1) }
     if client.response_status(resp8) != 200 {
@@ -473,7 +470,7 @@ main() {
     // Use post_json with a trivial payload to drive a JSON response,
     // then verify response_body_json parses it cleanly.
     print("\nTest 9: response_body_json happy path\n")
-    p9 = json_create_object()
+    p9 = json.obj()
     resp9, err9 = client.post_json("${base_url()}/json-echo", p9)
     if err9 != "" { println("  FAIL: ${err9}"); exit(1) }
     parsed9, perr9 = client.response_body_json(resp9)

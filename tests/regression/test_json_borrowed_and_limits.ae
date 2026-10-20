@@ -33,16 +33,16 @@ main() {
     arr = json.arr()
     b, _ = json.object_get(doc, "b")
     json.push(arr, b)
-    out, serr = json.stringify(dst)
+    out, serr = json.encode(dst)
     check(serr == "" && out == "{\"copy\":{\"x\":1}}", "set copies a borrowed node (${out})")
-    aout, aerr = json.stringify(arr)
+    aout, aerr = json.encode(arr)
     check(aerr == "" && aout == "[[2,3]]", "push copies a borrowed node (${aout})")
     // The document still has its node, untouched.
-    dout, derr = json.stringify(doc)
+    dout, derr = json.encode(doc)
     check(derr == "" && dout == "{\"a\":{\"x\":1},\"b\":[2,3]}", "the document keeps its nodes (${dout})")
     // json.free on a borrowed node is a no-op, not a free of arena memory.
     json.free(child)
-    dout2, _ = json.stringify(doc)
+    dout2, _ = json.encode(doc)
     check(dout2 == dout, "json.free of a borrowed node leaves the document whole")
     json.free(dst)
     json.free(arr)
@@ -72,7 +72,7 @@ main() {
         inner = o
         i = i + 1
     }
-    deep_out, deep_err = json.stringify(inner)
+    deep_out, deep_err = json.encode(inner)
     check(deep_err != "" && string.length(deep_out) == 0, "stringify past 256 levels is an error (${deep_err})")
     json.free(inner)
     // 256 levels is within the limit, and parses back.
@@ -84,7 +84,7 @@ main() {
         ok = o
         i = i + 1
     }
-    ok_out, ok_err = json.stringify(ok)
+    ok_out, ok_err = json.encode(ok)
     check(ok_err == "", "stringify at the limit succeeds")
     back, back_err = json.parse(ok_out)
     check(back_err == "", "and parses back")

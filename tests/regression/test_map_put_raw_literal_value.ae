@@ -33,7 +33,7 @@ main() {
     sentinel = "1" // string-typed, _heap == 0
     map.put_raw(m1, "k", sentinel)
     map.put_raw(m1, "k2", sentinel) // same literal, second key
-    got1, _ = map.get(m1, "k")
+    got1, _ = map.get_string(m1, "k")
     if got1 != "1" {
         println("  FAIL: raw+literal readback got '${got1}'")
         exit(1)
@@ -44,7 +44,7 @@ main() {
     m2 = map.new()
     heap_val = string.concat("pre", "fix") // _heap == 1
     map.put_raw(m2, "k", heap_val)
-    got2, _ = map.get(m2, "k")
+    got2, _ = map.get_string(m2, "k")
     if got2 != "prefix" {
         println("  FAIL: raw+heap readback got '${got2}'")
         exit(1)
@@ -55,7 +55,7 @@ main() {
     m3 = map.new()
     flag = "y" // string-typed, _heap == 0
     map.put(m3, "k", flag)
-    got3, _ = map.get(m3, "k")
+    got3, _ = map.get_string(m3, "k")
     if got3 != "y" {
         println("  FAIL: wrapper+literal readback got '${got3}'")
         exit(1)
@@ -66,7 +66,7 @@ main() {
     m4 = map.new()
     heap_val2 = string.concat("on", "e") // _heap == 1
     map.put(m4, "k", heap_val2)
-    got4, _ = map.get(m4, "k")
+    got4, _ = map.get_string(m4, "k")
     if got4 != "one" {
         println("  FAIL: wrapper+heap readback got '${got4}'")
         exit(1)

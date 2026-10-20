@@ -60,8 +60,8 @@ main() {
 
     // An export that carries NO module prefix resolves to its own C symbol,
     // not <module>_<name>. Same fallback, opposite direction.
-    n = os.aether_args_count()
-    if n < 1 { fail("os.aether_args_count returned ${n}") }
+    argv = os.aether_argv_raw()
+    if argv == null { fail("os.aether_argv_raw returned null") }
     println("PASS 4: a bare-named export still resolves")
 
     println("=== All cases passed ===")

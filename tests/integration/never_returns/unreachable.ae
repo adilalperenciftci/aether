@@ -1,0 +1,20 @@
+// W1002 asks the same question as every other check (#3017): code after a
+// `break`, a `continue` and an `exit(n)` is unreachable, and the warning
+// names the statement.
+main() {
+    i = 0
+    while i < 3 {
+        i = i + 1
+        if i == 2 {
+            continue
+            println("after continue")
+        }
+        if i == 3 {
+            break
+            println("after break")
+        }
+    }
+    println("i=${i}")
+    exit(0)
+    println("after exit")
+}

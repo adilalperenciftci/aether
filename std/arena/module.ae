@@ -28,7 +28,6 @@
 import std.string
 
 exports(
-    arena_get_used, arena_get_size,
     create, alloc, alloc_aligned, reset, destroy, used, size
 )
 

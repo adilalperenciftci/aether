@@ -9,7 +9,9 @@
 # over its top-level declarations, and so is a module file checked on its
 # own. A name whose short form would start with a digit keeps its own. In
 # std, each duplicate is gone from the export lists: the long names are
-# E0303, the wrappers answer.
+# E0303, the wrappers answer. So are the aliases E0305 cannot see, two
+# names whose short forms differ (#3014): `json.create_int` beside
+# `json.from_int`, `xml.builder_new` beside `xml.writer`, and the rest.
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
@@ -131,6 +133,7 @@ cat > "$tmp/std_short.ae" <<'AE'
 import std.set
 import std.intarr
 import std.string
+import std.json
 
 main() {
     s = set.new()
@@ -144,16 +147,24 @@ main() {
     seq = string.seq_cons("a", string.seq_cons("b", string.seq_empty()))
     println(string.join(seq, "-"))
     string.seq_free(seq)
+    root = json.obj()
+    _ = json.set(root, "n", json.from_int(7))
+    text, _ = json.encode(root)
+    println(text)
+    json.free(root)
 }
 AE
-out="$(cd "$tmp" && "$AE" run std_short.ae 2>&1 | tr -d '\r' | tail -3 | tr '\n' ' ')"
-if [ "$out" != "true true 1 3 a-b " ]; then
+out="$(cd "$tmp" && "$AE" run std_short.ae 2>&1 | tr -d '\r' | tail -4 | tr '\n' ' ')"
+if [ "$out" != 'true true 1 3 a-b {"n":7} ' ]; then
     echo "  [FAIL] export_short_names: std's short names printed: $out"
     fail=1
 fi
 for long in "set.aether_set_add(null, \"a\")" "mem.aether_mem_get_byte(null, 0)" \
             "http.http_server_set_host(null, \"h\")" "intarr.intarr_array(null)" \
-            "string.string_join(null, \"-\")"; do
+            "string.string_join(null, \"-\")" "json.create_int(1)" "json.stringify(null)" \
+            "cbor.map_set(null, null, null)" "xml.builder_new()" "arena.get_size(null)" \
+            "fs.path_clean(\"a\")" "net.ae_fd_close(0)" "zlib.backend_available()" \
+            "os.aether_args_count()"; do
     module="${long%%.*}"
     name="${long#*.}"
     name="${name%%(*}"

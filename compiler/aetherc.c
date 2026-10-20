@@ -29,6 +29,7 @@
 #include "aether_defines.h"
 #include "aether_error.h"
 #include "aether_module.h"
+#include "aether_source_text.h"
 
 /* #2297: --shared-runtime (with --emit=lib): recorded in the catalog. */
 static int g_lib_shared_runtime = 0;
@@ -2083,7 +2084,9 @@ static int do_concat_ae(char** inputs, int input_count, const char* output_path)
         }
         size_t pos = 0;
 
-        char* p = source;
+        /* #2999: a byte order mark starting an input is no part of its
+         * text; copied, it would sit in the middle of the concatenation. */
+        char* p = source + aether_source_bom_length(source);
         while (*p) {
             char* line_start = p;
             while (*p && *p != '\n') p++;

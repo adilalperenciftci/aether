@@ -5,7 +5,7 @@
 // the trailing error slot on EITHER path. Stdlib fallibles build that
 // slot with `string_concat(...)` (a heap AetherString), so every
 // `json.parse(bad) or { … }` leaked its error message, and every
-// successful `json.stringify(v) or { … }` leaked its heap `""` success
+// successful `json.encode(v) or { … }` leaked its heap `""` success
 // sentinel.
 //
 // Fixed by releasing the error slot before yielding, on both paths, via

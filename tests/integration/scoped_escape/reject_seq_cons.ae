@@ -1,0 +1,7 @@
+import std.string
+f() -> int {
+    @scoped s = string.concat("a", "b")
+    q = string.seq_cons(s, null)
+    return string.seq_length(q)
+}
+main() { println(f()) }

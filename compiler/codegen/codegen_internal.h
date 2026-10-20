@@ -232,6 +232,7 @@ const char* extern_c_symbol(const ASTNode* ext);
 /* The system header that declares a libc function whose `extern`
  * declaration codegen skips, or NULL when the prelude includes it (#2676). */
 const char* libc_extern_header(const char* name);
+const char* libc_extern_msvc_header(const char* name);   /* #2799 */
 /* The runtime free a call to `fn` is ("string_free", "string_release",
  * "release"), under its own name or an `@extern` alias, or NULL. */
 const char* consuming_free_symbol(CodeGenerator* gen, const char* fn);
@@ -454,6 +455,7 @@ Type* lookup_fnptr_local(CodeGenerator* gen, const char* name);
 Type* lookup_fnptr_global(CodeGenerator* gen, const char* name);   /* #2200 */
 int is_fnptr_const_decl(const ASTNode* cd);                        /* #2648 */
 int fn_const_decl(const ASTNode* cd);                              /* #2648 */
+ASTNode* file_scope_value_const(ASTNode* program, const char* name);   /* #2799 */
 TypeKind lookup_extern_param_kind(CodeGenerator* gen, const char* func_name, int param_idx);
 /* Full Type* for an extern's parameter (borrowed from the extern's AST),
  * or NULL. The kind alone can't drive tuple-param emission — packing the
@@ -487,6 +489,7 @@ int is_vararg_call_position(CodeGenerator* gen, const char* func_name, int arg_i
    callees, missing annotations, or out-of-range index. See
    codegen_func.c. */
 int is_retain_extern_param(CodeGenerator* gen, const char* func_name, int param_idx);
+int is_holding_extern_param(CodeGenerator* gen, const char* func_name, int param_idx);
 int is_noescape_extern_param(CodeGenerator* gen, const char* func_name, int param_idx);   /* #2523 */
 const char* lookup_extern_c_name(CodeGenerator* gen, const char* func_name);
 

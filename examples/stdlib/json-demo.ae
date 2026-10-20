@@ -1,7 +1,7 @@
 // JSON Demo — creation, type dispatch via match, parsing, serialisation.
 // Run with: ae run examples/stdlib/json-demo.ae
 //
-// The demo uses std.json's Go-style wrappers (json.parse, json.stringify,
+// The demo uses std.json's Go-style wrappers (json.parse, json.encode,
 // json.object_get, json.array_get, ...) which return `(value, err)`
 // tuples, and `match` expressions for dispatch on JsonType — which reads
 // more cleanly than chained if-elses.
@@ -24,10 +24,10 @@ render(v: ptr) -> string {
             }
         }
         2 -> {
-            // json.stringify renders the number correctly (handles ints
+            // json.encode renders the number correctly (handles ints
             // and floats via the parser's own formatter); call it and
             // forward the string.
-            num_s, num_err = json.stringify(v)
+            num_s, num_err = json.encode(v)
             match (num_err) {
                 "" -> { return num_s }
                 _ -> { return "<number?>" }
@@ -54,24 +54,24 @@ main() {
 
     // ---- Creation — infallible typed readers (sentinel 0 on wrong type).
 
-    num = json.create_number(42.5)
+    num = json.num(42.5)
     println("number ${json.get_number(num)} → render: ${render(num)}")
 
-    str = json.create_string("hello")
+    str = json.str("hello")
     println("string render: ${render(str)}")
 
-    bool_val = json.create_bool(1)
+    bool_val = json.boolean(1)
     println("bool render: ${render(bool_val)}")
 
-    null_val = json.create_null()
+    null_val = json.null_value()
     println("null render: ${render(null_val)}")
 
     // ---- Building an object and serialising it.
 
-    obj = json.create_object()
-    _ = json.object_set(obj, "name", json.create_string("Aether"))
-    _ = json.object_set(obj, "version", json.create_number(0.21))
-    _ = json.object_set(obj, "ready", json.create_bool(1))
+    obj = json.obj()
+    _ = json.set(obj, "name", json.str("Aether"))
+    _ = json.set(obj, "version", json.num(0.21))
+    _ = json.set(obj, "ready", json.boolean(1))
 
     has_name = json.object_has(obj, "name")
     println("\nBuilt object, has 'name': ${has_name}")

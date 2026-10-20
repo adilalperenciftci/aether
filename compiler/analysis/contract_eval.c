@@ -101,6 +101,12 @@ static int resolve_identifier(const char* name, ContractEnv* env,
         ASTNode* c = program->children[i];
         if (c && c->type == AST_CONST_DECLARATION && c->value &&
             strcmp(c->value, name) == 0 && c->child_count > 0) {
+            /* #3026: a module `var` is this node too (#701, annotated
+             * `global_var`), and its initializer is only where it starts:
+             * folding it dropped a `requires` on it, refused a correct
+             * call, and made the code after `if !flag { return }` look
+             * unreachable. A variable is never a compile-time value. */
+            if (c->annotation && strcmp(c->annotation, "global_var") == 0) return 0;
             return eval_value(c->children[0], &paramless, out, depth + 1);
         }
     }

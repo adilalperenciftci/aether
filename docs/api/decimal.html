@@ -118,6 +118,7 @@
     <li><a href="path.html">path</a></li>
     <li><a href="plural.html">plural</a></li>
     <li><a href="pqueue.html">pqueue</a></li>
+    <li><a href="quote.html">quote</a></li>
     <li><a href="reflect.html">reflect</a></li>
     <li><a href="regex.html">regex</a></li>
     <li><a href="resp.html">resp</a></li>
@@ -233,8 +234,9 @@
     </div>
     <div class="function" id="multiply" data-name="multiply">
       <h3 class="function-name">multiply <span class="kind">fn</span></h3>
-      <pre class="usage"><code>multiply(a, b) <span class="arrow">-&gt;</span> ptr</code></pre>
+      <pre class="usage"><code>multiply(a, b) <span class="arrow">-&gt;</span> (ptr, string)</code></pre>
       <p class="signature"><span class="sig-params">a: ptr, b: ptr</span></p>
+      <p class="doc">Exact: the coefficients multiply and the exponents add. Fails only when that sum leaves the int range.</p>
     </div>
     <div class="function" id="negate" data-name="negate">
       <h3 class="function-name">negate <span class="kind">fn</span></h3>
@@ -248,15 +250,15 @@
     </div>
     <div class="function" id="shift" data-name="shift">
       <h3 class="function-name">shift <span class="kind">fn</span></h3>
-      <pre class="usage"><code>shift(d, n) <span class="arrow">-&gt;</span> ptr</code></pre>
+      <pre class="usage"><code>shift(d, n) <span class="arrow">-&gt;</span> (ptr, string)</code></pre>
       <p class="signature"><span class="sig-params">d: ptr, n: int</span></p>
-      <p class="doc">d * 10^n, exactly: only the exponent moves.</p>
+      <p class="doc">d * 10^n, exactly: only the exponent moves. Fails only when it moves out of the int range.</p>
     </div>
     <div class="function" id="pow" data-name="pow">
       <h3 class="function-name">pow <span class="kind">fn</span></h3>
       <pre class="usage"><code>pow(d, n) <span class="arrow">-&gt;</span> (ptr, string)</code></pre>
       <p class="signature"><span class="sig-params">d: ptr, n: int</span></p>
-      <p class="doc">d^n by square-and-multiply. A negative n is 1 / d^(-n) rounded to division_precision(), which is the one way this can fail: d == 0.</p>
+      <p class="doc">d^n by square-and-multiply. A negative n is 1 / d^(-n) rounded to division_precision(). It fails for d == 0 with n &lt; 0, and when an exponent of the result leaves the int range.</p>
     </div>
     <div class="function" id="divide" data-name="divide">
       <h3 class="function-name">divide <span class="kind">fn</span></h3>

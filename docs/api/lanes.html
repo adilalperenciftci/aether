@@ -120,6 +120,28 @@
     <li><a href="#mask8_lane">mask8_lane</a></li>
     <li><a href="#load8_slice">load8_slice</a></li>
     <li><a href="#store8_slice">store8_slice</a></li>
+    <li><a href="#unpacklo4">unpacklo4</a></li>
+    <li><a href="#unpackhi4">unpackhi4</a></li>
+    <li><a href="#pairs_lo4">pairs_lo4</a></li>
+    <li><a href="#pairs_hi4">pairs_hi4</a></li>
+    <li><a href="#unpacklo8">unpacklo8</a></li>
+    <li><a href="#unpackhi8">unpackhi8</a></li>
+    <li><a href="#pairs_lo8">pairs_lo8</a></li>
+    <li><a href="#pairs_hi8">pairs_hi8</a></li>
+    <li><a href="#halves_lo8">halves_lo8</a></li>
+    <li><a href="#halves_hi8">halves_hi8</a></li>
+    <li><a href="#bits4">bits4</a></li>
+    <li><a href="#from_bits4">from_bits4</a></li>
+    <li><a href="#bits8">bits8</a></li>
+    <li><a href="#from_bits8">from_bits8</a></li>
+    <li><a href="#i32x8">i32x8</a></li>
+    <li><a href="#i32splat8">i32splat8</a></li>
+    <li><a href="#reduce_min4">reduce_min4</a></li>
+    <li><a href="#reduce_max4">reduce_max4</a></li>
+    <li><a href="#reduce_min8">reduce_min8</a></li>
+    <li><a href="#reduce_max8">reduce_max8</a></li>
+    <li><a href="#native8">native8</a></li>
+    <li><a href="#cpu_has_avx2">cpu_has_avx2</a></li>
   </ul>
   <hr>
   <h2>Modules</h2>
@@ -180,6 +202,7 @@
     <li><a href="path.html">path</a></li>
     <li><a href="plural.html">plural</a></li>
     <li><a href="pqueue.html">pqueue</a></li>
+    <li><a href="quote.html">quote</a></li>
     <li><a href="reflect.html">reflect</a></li>
     <li><a href="regex.html">regex</a></li>
     <li><a href="resp.html">resp</a></li>
@@ -658,6 +681,94 @@
       <h3 class="function-name">store8_slice <span class="kind">fn</span></h3>
       <pre class="usage"><code>store8_slice(buf, index, v)</code></pre>
       <p class="signature"><span class="sig-params">buf: f32[], index: long, v: f32x8</span></p>
+    </div>
+    <div class="function" id="unpacklo4" data-name="unpacklo4">
+      <h3 class="function-name">unpacklo4 <span class="kind">fn</span></h3>
+      <pre class="usage"><code>unpacklo4()</code></pre>
+    </div>
+    <div class="function" id="unpackhi4" data-name="unpackhi4">
+      <h3 class="function-name">unpackhi4 <span class="kind">fn</span></h3>
+      <pre class="usage"><code>unpackhi4()</code></pre>
+    </div>
+    <div class="function" id="pairs_lo4" data-name="pairs_lo4">
+      <h3 class="function-name">pairs_lo4 <span class="kind">fn</span></h3>
+      <pre class="usage"><code>pairs_lo4()</code></pre>
+    </div>
+    <div class="function" id="pairs_hi4" data-name="pairs_hi4">
+      <h3 class="function-name">pairs_hi4 <span class="kind">fn</span></h3>
+      <pre class="usage"><code>pairs_hi4()</code></pre>
+    </div>
+    <div class="function" id="unpacklo8" data-name="unpacklo8">
+      <h3 class="function-name">unpacklo8 <span class="kind">fn</span></h3>
+      <pre class="usage"><code>unpacklo8()</code></pre>
+    </div>
+    <div class="function" id="unpackhi8" data-name="unpackhi8">
+      <h3 class="function-name">unpackhi8 <span class="kind">fn</span></h3>
+      <pre class="usage"><code>unpackhi8()</code></pre>
+    </div>
+    <div class="function" id="pairs_lo8" data-name="pairs_lo8">
+      <h3 class="function-name">pairs_lo8 <span class="kind">fn</span></h3>
+      <pre class="usage"><code>pairs_lo8()</code></pre>
+    </div>
+    <div class="function" id="pairs_hi8" data-name="pairs_hi8">
+      <h3 class="function-name">pairs_hi8 <span class="kind">fn</span></h3>
+      <pre class="usage"><code>pairs_hi8()</code></pre>
+    </div>
+    <div class="function" id="halves_lo8" data-name="halves_lo8">
+      <h3 class="function-name">halves_lo8 <span class="kind">fn</span></h3>
+      <pre class="usage"><code>halves_lo8()</code></pre>
+    </div>
+    <div class="function" id="halves_hi8" data-name="halves_hi8">
+      <h3 class="function-name">halves_hi8 <span class="kind">fn</span></h3>
+      <pre class="usage"><code>halves_hi8()</code></pre>
+    </div>
+    <div class="function" id="bits4" data-name="bits4">
+      <h3 class="function-name">bits4 <span class="kind">fn</span></h3>
+      <pre class="usage"><code>bits4()</code></pre>
+    </div>
+    <div class="function" id="from_bits4" data-name="from_bits4">
+      <h3 class="function-name">from_bits4 <span class="kind">fn</span></h3>
+      <pre class="usage"><code>from_bits4()</code></pre>
+    </div>
+    <div class="function" id="bits8" data-name="bits8">
+      <h3 class="function-name">bits8 <span class="kind">fn</span></h3>
+      <pre class="usage"><code>bits8()</code></pre>
+    </div>
+    <div class="function" id="from_bits8" data-name="from_bits8">
+      <h3 class="function-name">from_bits8 <span class="kind">fn</span></h3>
+      <pre class="usage"><code>from_bits8()</code></pre>
+    </div>
+    <div class="function" id="i32x8" data-name="i32x8">
+      <h3 class="function-name">i32x8 <span class="kind">fn</span></h3>
+      <pre class="usage"><code>i32x8()</code></pre>
+    </div>
+    <div class="function" id="i32splat8" data-name="i32splat8">
+      <h3 class="function-name">i32splat8 <span class="kind">fn</span></h3>
+      <pre class="usage"><code>i32splat8()</code></pre>
+    </div>
+    <div class="function" id="reduce_min4" data-name="reduce_min4">
+      <h3 class="function-name">reduce_min4 <span class="kind">fn</span></h3>
+      <pre class="usage"><code>reduce_min4()</code></pre>
+    </div>
+    <div class="function" id="reduce_max4" data-name="reduce_max4">
+      <h3 class="function-name">reduce_max4 <span class="kind">fn</span></h3>
+      <pre class="usage"><code>reduce_max4()</code></pre>
+    </div>
+    <div class="function" id="reduce_min8" data-name="reduce_min8">
+      <h3 class="function-name">reduce_min8 <span class="kind">fn</span></h3>
+      <pre class="usage"><code>reduce_min8()</code></pre>
+    </div>
+    <div class="function" id="reduce_max8" data-name="reduce_max8">
+      <h3 class="function-name">reduce_max8 <span class="kind">fn</span></h3>
+      <pre class="usage"><code>reduce_max8()</code></pre>
+    </div>
+    <div class="function" id="native8" data-name="native8">
+      <h3 class="function-name">native8 <span class="kind">fn</span></h3>
+      <pre class="usage"><code>native8()</code></pre>
+    </div>
+    <div class="function" id="cpu_has_avx2" data-name="cpu_has_avx2">
+      <h3 class="function-name">cpu_has_avx2 <span class="kind">fn</span></h3>
+      <pre class="usage"><code>cpu_has_avx2()</code></pre>
     </div>
   </div>
 </main>

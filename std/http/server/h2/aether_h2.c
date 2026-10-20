@@ -47,6 +47,7 @@
  * pthread_create is a stub, so its real typedefs collided with the
  * threadless shim's in the same TU. */
 #include "../../../../runtime/utils/aether_thread.h"
+#include "../../../../runtime/utils/aether_spawn.h"
 #include <unistd.h>
 #include <fcntl.h>
 #include <errno.h>
@@ -635,7 +636,8 @@ static void task_free(H2DispatchTask* t) {
  * mutex/condvar. Returns 0 on success, -1 on failure. */
 static int session_dispatch_init(AetherH2Session* sess) {
     int pipefd[2];
-    if (pipe(pipefd) < 0) return -1;
+    /* #3046: close-on-exec, so a child the server starts never holds it. */
+    if (aether_pipe_cloexec(pipefd) != 0) return -1;
 
     int fl = fcntl(pipefd[1], F_GETFL, 0);
     if (fl >= 0) fcntl(pipefd[1], F_SETFL, fl | O_NONBLOCK);

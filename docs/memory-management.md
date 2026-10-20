@@ -169,9 +169,9 @@ retained), for a `string` and for a closure. `@aether` passes the counted
 string itself, for C written against Aether's runtime. `@noescape` states
 what a parameter that is not `@retain` already is.
 
-An extern returning a fresh string declares it `@heap` (`-> string @heap`;
-`-> ptr @heap` for a counted string returned untyped, as `string.from_int`
-does; per position of a tuple result, `-> (string @heap, int, string)`); the
+An extern returning a fresh string declares it `@heap` (`-> string @heap`, as
+`string.from_int` does; `-> ptr @heap` for a counted string returned
+untyped; per position of a tuple result, `-> (string @heap, int, string)`); the
 string is adopted at the call, and the caller owns it. Any other string an
 extern returns is C's and is copied when a place takes it.
 
@@ -205,9 +205,20 @@ call, returns it, or passes it to another keeping parameter) declares it
 function, or a closure that runs and is dropped inside the call, does not
 outlive it: putting the parameter in one keeps nothing unless the struct or
 the closure escapes itself. A `ptr` parameter that only borrows is given a
-closure in a box on the caller's stack, so nothing is allocated. The full
-rule, with what counts as escaping, is in the language reference's
-[String ownership](language-reference.md#string-ownership).
+closure in a box on the caller's stack, so nothing is allocated.
+
+A function that only hands a `ptr` parameter to its result (a constructor
+that builds a recorder, an iterator or a view around it) declares it
+`@into` instead: it may return it, alone or in a struct, a tuple, an
+optional or a closure, and nothing else. The caller holds the result as it
+holds a struct local that holds its argument: in a local, read, lent to
+borrowing parameters, and E0902 only where the result escapes with a
+borrowed parameter of the caller. So `@into` does not spread up the call
+chain as `@keep` does; a function that returns such a result made from its
+own parameter declares that one `@into` too. A string goes to an `@into ptr`
+through `string.keep(s)`, and a closure goes in a heap box with its own
+reference. The full rule, with what counts as escaping, is in the language
+reference's [String ownership](language-reference.md#string-ownership).
 
 ### Panics
 
@@ -433,7 +444,8 @@ The type checker refuses every way the binding's value itself could outlive
 the block: returning it, assigning or aliasing it into another binding or a
 struct field, placing it in an array, struct or message literal, capturing it
 in a closure or a quote (either can outlive the block), and inserting it into
-a container (`list.add`, `list.set`, `map.put`, `set.add`):
+a container (`list.add`, `list.set`, `map.put`, `set.add`, `string.seq_cons`,
+and their raw and owning forms):
 
 ```aether,fails
 import std.string
@@ -448,8 +460,9 @@ main() {
 }
 ```
 
-Only a value derived from the binding through a call (`string.length(buf)`)
-may leave. A function the value is passed to is governed by its own
+Only a value derived from the binding (`string.length(buf)`,
+`list.size(l)`, a slice's `v.len`) may leave, and the error's help names the one
+for the binding's type. A function the value is passed to is governed by its own
 signature; `@scoped` checks the escapes written in the binding's own scope.
 
 ## How the rules are tested

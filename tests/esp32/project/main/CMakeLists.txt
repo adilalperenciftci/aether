@@ -7,6 +7,7 @@ set(AE_RUNTIME
     runtime/config/aether_optimization_config.c runtime/memory/aether_arena.c
     runtime/memory/aether_pool.c runtime/memory/aether_memory_stats.c
     runtime/utils/aether_bounds_check.c runtime/utils/aether_test.c runtime/memory/aether_arena_optimized.c
+    runtime/utils/aether_spawn.c
     runtime/aether_runtime_types.c runtime/aether_locale_num.c runtime/utils/aether_cpu_detect.c
     runtime/utils/aether_simd_vectorized.c runtime/aether_runtime.c runtime/aether_numa.c
     runtime/aether_host.c

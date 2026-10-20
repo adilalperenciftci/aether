@@ -23,3 +23,8 @@ tests/**/*.txt text eol=lf
 # Vendored dependencies (if any)
 # vendor/* linguist-vendored
 
+
+# docs/api is tools/docgen output, written LF on every platform and compared
+# byte for byte with a fresh run by `make check-api-docs`; a CRLF checkout
+# would fail that check on Windows.
+docs/api/** text eol=lf

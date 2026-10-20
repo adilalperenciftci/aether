@@ -193,7 +193,9 @@ tests/integration/mutation_testing/
 tests/integration/namespace_
 tests/integration/offsetof_module_field_name/
 tests/integration/optional_reject/
+tests/integration/never_returns/
 tests/integration/or_block_reject/
+tests/integration/render_rule/
 tests/integration/panic_actor_step_drain/
 tests/integration/panic_categories/
 tests/integration/panic_stack_trace/

@@ -39,14 +39,14 @@ main() {
 
     // Assemble the command to supervise: either the user's (everything
     // after `--`) or a built-in demo that prints, sleeps briefly, exits 0.
-    n = aether_args_count()
+    n = os.args_count()
     argv = list.new()
     prog = ""
     if n > 1 {
-        prog = aether_args_get(1)
+        prog = os.args_get(1)
         i = 2
         while i < n {
-            list.add(argv, aether_args_get(i))
+            list.add(argv, os.args_get(i))
             i = i + 1
         }
     } else {

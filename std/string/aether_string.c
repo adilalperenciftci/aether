@@ -64,6 +64,13 @@ AetherString* string_new(const char* cstr) {
     return string_new_with_length(str_data(cstr), str_len(cstr));
 }
 
+/* `length` bytes of the buffer `data`, copied as given. It never reads
+ * `data` as a string (#3030): the compression, crypto and I/O modules and the
+ * runtime hand it what C produced, and a binary payload may begin with a
+ * string header's magic followed by a forged length and data pointer
+ * (#2301). A `string` argument reaches it as its characters: codegen passes
+ * it through aether_string_data, since this is no string-aware function
+ * (is_stdlib_string_aware_extern). */
 AetherString* string_new_with_length(const char* data, size_t length) {
     /* One block, the header then the payload (string_alloc_inline): one
      * allocation instead of two, and the layout string_release recognises

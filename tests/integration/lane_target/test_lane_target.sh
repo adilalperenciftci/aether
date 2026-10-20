@@ -212,6 +212,51 @@ if [ "$x86" -eq 1 ] && command -v gcc >/dev/null 2>&1 &&
         head -5 "$tmp/s0.err" | sed 's/^/        /'
         fail=1
     fi
+
+    # 3b. #3023: every optimization level builds, the way a build that
+    # calls gcc itself does it (`ae cflags`), with and without -mavx2. GCC on
+    # Win64 cannot compile an f32x8 local without optimization (an internal
+    # compiler error in expand_one_stack_var_1), so there the copy is plain
+    # code and an -mavx2 build's own lanes are two halves; everywhere else,
+    # and from -O1 up, they are AVX2 as before.
+    win_gcc=0
+    case "$(uname -s 2>/dev/null)" in
+        MINGW*|MSYS*|CYGWIN*)
+            gcc -dM -E - </dev/null 2>/dev/null | grep -q __clang__ || win_gcc=1 ;;
+    esac
+    for cf in "-O0" "-O1" "-O2" "-O0 -mavx2" "-O2 -mavx2"; do
+        unsafe=0
+        case "$cf" in -O0*) [ "$win_gcc" -eq 1 ] && unsafe=1 ;; esac
+        copy_native=true; own_native=false
+        [ "$unsafe" -eq 1 ] && copy_native=false
+        case "$cf" in *-mavx2*) [ "$unsafe" -eq 0 ] && own_native=true ;; esac
+        rm -f "$tmp/lvl" "$tmp/lvl.exe"
+        if ! gcc $cf -fwrapv -o "$tmp/lvl" $("$AE" cflags --cflags 2>/dev/null) "$tmp/out.c" \
+                $("$AE" cflags --libs 2>/dev/null) >"$tmp/lvl.err" 2>&1; then
+            echo "  [FAIL] lane_target: the generated C did not build at $cf:"
+            grep -m3 -E "error|internal compiler" "$tmp/lvl.err" | sed 's/^/        /'
+            fail=1
+            continue
+        fi
+        case "$cf" in *-mavx2*) [ "$has_avx2" -eq 1 ] || continue ;; esac
+        out="$("$tmp/lvl" 2>&1 | tr -d '\r' | sed 's/^plain [0-9.]* /plain /')"
+        if [ "$has_avx2" -eq 1 ]; then
+            want="plain native $own_native
+copy same true native $copy_native
+engine same true
+calls 2 2"
+        else
+            want="plain native false
+copy not run: no AVX2
+engine same true
+calls 3 0"
+        fi
+        if [ "$out" != "$want" ]; then
+            echo "  [FAIL] lane_target: wrong answers at $cf"
+            printf 'got:\n%s\nwant:\n%s\n' "$out" "$want" | sed 's/^/        /'
+            fail=1
+        fi
+    done
 fi
 
 # 4. The compile errors.

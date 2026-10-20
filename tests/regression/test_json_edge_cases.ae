@@ -180,7 +180,7 @@ main() {
     // Test 12: stringify round-trip
     print("\nTest 12: stringify round-trip\n")
     j12, _ = json.parse("{\"x\":1,\"y\":\"hello\"}")
-    s12, _ = json.stringify(j12)
+    s12, _ = json.encode(j12)
     j12b, _ = json.parse(s12)
     xv, _ = json.object_get(j12b, "x")
     yv, _ = json.object_get(j12b, "y")
@@ -256,8 +256,8 @@ main() {
 
     // Test 16: create and stringify empty object
     print("\nTest 16: create + stringify empty object\n")
-    obj16 = json.create_object()
-    s16, _ = json.stringify(obj16)
+    obj16 = json.obj()
+    s16, _ = json.encode(obj16)
     if s16 == "{}" {
         print("  PASS: empty object stringifies to {}\n")
     } else {
@@ -268,8 +268,8 @@ main() {
 
     // Test 17: create and stringify empty array
     print("\nTest 17: create + stringify empty array\n")
-    arr17 = json.create_array()
-    s17, _ = json.stringify(arr17)
+    arr17 = json.arr()
+    s17, _ = json.encode(arr17)
     if s17 == "[]" {
         print("  PASS: empty array stringifies to []\n")
     } else {
@@ -305,7 +305,7 @@ main() {
     // Test 20: object_set on non-object returns error
     print("\nTest 20: object_set on non-object returns error\n")
     j20, _ = json.parse("[1,2,3]")
-    os_err = json.object_set(j20, "k", json.create_null())
+    os_err = json.set(j20, "k", json.null_value())
     if os_err == "" {
         print("  FAIL: expected error\n")
         exit(1)

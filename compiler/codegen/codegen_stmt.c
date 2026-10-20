@@ -4,6 +4,7 @@
 #include "../analysis/contract_eval.h"
 #include "../analysis/typechecker.h"
 #include "../analysis/hoist.h"
+#include "../analysis/missing_return.h"
 #include "../aether_error.h"
 #include <limits.h>
 #include <stdint.h>
@@ -3134,7 +3135,7 @@ void emit_struct_literal_array_field(CodeGenerator* gen, const char* sname, ASTN
     if (kind == AF_STRING) fprintf(gen->output, "_aether_str_elems_take(%s, ", into);
     else if (kind == AF_CLOSURE) fprintf(gen->output, "_aether_closure_elems_take(%s, ", into);
     else if (kind == AF_STRUCT) fprintf(gen->output, "_aether_dup_each_%s(%s, ", es, into);
-    else fprintf(gen->output, "(void)_aether_array_arg_copy(%s, ", into);
+    else fprintf(gen->output, "(void)_aether_array_arg_copy((void*)%s, ", into);  /* C4090, #2799 */
     fprintf(gen->output, "(");
     generate_expression(gen, src);
     if (kind == AF_PLAIN) fprintf(gen->output, "), sizeof(%s))", into);
@@ -4472,18 +4473,23 @@ void hoist_opt_string_locals(CodeGenerator* gen, ASTNode* body) {
  * named `func_name` (in either dotted source-form or underscored
  * extern-form). Returns the param's TypeKind, or TYPE_UNKNOWN if the
  * callee can't be resolved. */
-/* Does the parameter at `idx` of the callee keep what it is given past the
- * call: an Aether function's `@keep` one, an extern's `@retain` one (R4)?
- * Any other borrows it for the call. */
+/* Does the parameter at `idx` of the callee hold what it is given past the
+ * call: an Aether function's `@keep` one (or an extern's standing for one,
+ * #3013), an extern's `@retain` one (R4), or either's `@into` one, whose
+ * result holds it (#2990)? Any other borrows it for the call. */
 int call_param_keeps(CodeGenerator* gen, const char* func_name, int idx) {
     if (!gen || !func_name || idx < 0) return 0;
-    if (is_retain_extern_param(gen, func_name, idx)) return 1;
+    if (is_retain_extern_param(gen, func_name, idx) ||
+        is_holding_extern_param(gen, func_name, idx))
+        return 1;
     ASTNode* def = callee_def(gen, func_name);
     for (int i = 0, pi = 0; def && i < def->child_count; i++) {
         ASTNode* p = def->children[i];
         if (!p || p->type == AST_GUARD_CLAUSE || p->type == AST_BLOCK ||
             p->type == AST_REQUIRES_CLAUSE || p->type == AST_ENSURES_CLAUSE) continue;
-        if (pi++ == idx) return p->annotation && strstr(p->annotation, "keep_param") != NULL;
+        if (pi++ == idx)
+            return annotation_has_marker(p->annotation, "keep_param") ||
+                   annotation_has_marker(p->annotation, "into_param");
     }
     return 0;
 }
@@ -5227,7 +5233,9 @@ void emit_sized_array_param_declarator(CodeGenerator* gen, Type* t, const char* 
  * caller's, so a store gives back its own and never the caller's, and its
  * exit gives them all back. */
 void emit_sized_array_param_copy(CodeGenerator* gen, Type* t, const char* name, ASTNode* scope) {
-    /* A parameter array a `try` body writes is volatile, as a local one is
+    /* The casts of the memcpy: cl.exe reads the `const` of a `string[N]`'s
+     * `const char*` elements as the array's (C4090, #2799).
+     * A parameter array a `try` body writes is volatile, as a local one is
      * (#2690), and is copied element by element: memcpy takes no volatile
      * destination. */
     const char* vq = try_volatile_qual_for(gen, name);
@@ -5236,7 +5244,7 @@ void emit_sized_array_param_copy(CodeGenerator* gen, Type* t, const char* name, 
                 volatile_decl_type(vq, get_c_type(t->element_type)), name, t->array_size,
                 t->array_size, name, name);
     } else {
-        fprintf(gen->output, "%s %s[%d]; memcpy(%s, _param_%s, sizeof(%s));",
+        fprintf(gen->output, "%s %s[%d]; memcpy((void*)%s, (const void*)_param_%s, sizeof(%s));",
                 get_c_type(t->element_type), name, t->array_size, name, name, name);
     }
     if (str_arr_type(t) && string_array_owns(gen, scope, name)) {
@@ -7425,6 +7433,26 @@ static void emit_bound_match_store(CodeGenerator* gen, ASTNode* result) {
 /* #2582: an arm's value, with the temporaries of the structs calls in it
  * return, destroyed once the match's result has taken what it keeps. */
 static void emit_match_result_value(CodeGenerator* gen, ASTNode* result) {
+    /* An arm whose value does not complete, a call that never returns
+     * (`exit(n)`, #3017), leaves the match: it runs as the statement it
+     * is (an `exit` drains the pending defers first) and stores nothing. */
+    if (gen->match_result_var && !stmt_can_complete(gen->program, result)) {
+        ASTNode* st = create_ast_node(AST_EXPRESSION_STATEMENT, NULL,
+                                      result->line, result->column);
+        add_child(st, result);
+        const char* saved_var = gen->match_result_var;
+        ASTNode* saved_bound = gen->match_result_bound;
+        gen->match_result_var = NULL;
+        gen->match_result_bound = NULL;
+        generate_statement(gen, st);
+        gen->match_result_var = saved_var;
+        gen->match_result_bound = saved_bound;
+        /* The value is the arm's node, which the arm keeps. */
+        st->children[0] = NULL;
+        st->child_count = 0;
+        codegen_own_node(gen, st);
+        return;
+    }
     if (gen->match_result_var && gen->match_result_bound) {
         emit_bound_match_store(gen, result);
         return;
@@ -10751,6 +10779,17 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                 const char* elem4 = lane_element_c_type(tk8);
                 if (elem4 && rt4 && is_scalar_splat_kind(rt4->kind)) {
                     fprintf(gen->output, "%s %s ((%s)(", target, op, elem4);
+                    generate_expression(gen, stmt->children[1]);
+                    fprintf(gen->output, "));\n");
+                    break;
+                }
+                /* #2799: `p += n` on a bare `ptr` (C's `void*`) moves it by
+                 * bytes, GNU C arithmetic on `void*`; through `char*` it is
+                 * standard C, the same bytes (codegen_expr.c, the binary
+                 * operator). */
+                if (tk8 == TYPE_PTR && !stmt->node_type->element_type &&
+                    (strcmp(op, "+=") == 0 || strcmp(op, "-=") == 0)) {
+                    fprintf(gen->output, "%s = (void*)((char*)%s %c (", target, target, op[0]);
                     generate_expression(gen, stmt->children[1]);
                     fprintf(gen->output, "));\n");
                     break;

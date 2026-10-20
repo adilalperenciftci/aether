@@ -3,6 +3,7 @@
 import std.tcp
 import std.string
 import std.map
+import std.mem
 
 // ---------------------------------------------------------------------------
 // WebSocket Client
@@ -25,10 +26,11 @@ ws_client_connect(host: string, port: int, ws_path: string, origin: string) {
 // Perform the WebSocket upgrade handshake. Returns 0 on success, -1 on failure.
 ws_client_handshake(client: ptr) -> int {
     sock, _ = map.get(client, "sock")
-    host, _ = map.get(client, "host")
-    port, _ = map.get(client, "port")
-    ws_path, _ = map.get(client, "path")
-    origin, _ = map.get(client, "origin")
+    host, _ = map.get_string(client, "host")
+    port_v, _ = map.get(client, "port")
+    port = mem.ptr_to_long(port_v)
+    ws_path, _ = map.get_string(client, "path")
+    origin, _ = map.get_string(client, "origin")
 
     // Build HTTP upgrade request.
     // Fixed Sec-WebSocket-Key (the accept key is only validated by the client).

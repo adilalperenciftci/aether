@@ -1397,6 +1397,18 @@ static ASTNode* module_parse_source(const char* file_path, char* source) {
         lexer_restore(&saved);
         return NULL;
     }
+    /* A character the lexer stops at is reported as the entry file's is
+     * (compile_source): its message names it. Parsed on, the module's
+     * tokens ended at it and the parser reported "Expected statement in
+     * block" there instead. */
+    Token* last = tokens[token_count - 1];
+    if (last->type == TOKEN_ERROR) {
+        aether_error_with_code(last->value, last->line, last->column, AETHER_ERR_SYNTAX);
+        aether_error_set_source(saved_err_filename, saved_err_source);
+        free_tokens(tokens, token_count);
+        lexer_restore(&saved);
+        return NULL;
+    }
 
     Parser* parser = create_parser(tokens, token_count);
     ASTNode* ast = parse_program(parser);

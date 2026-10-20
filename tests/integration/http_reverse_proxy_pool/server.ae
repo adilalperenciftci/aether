@@ -424,9 +424,9 @@ build_proxy_methods() {
 }
 
 main() {
-    n = aether_args_count()
+    n = os.args_count()
     if n < 2 { println("FAIL: usage: server <role>"); exit(1) }
-    role = aether_args_get(1)
+    role = os.args_get(1)
 
     if role == "upstream_a" { build_upstream_a(); return }
     if role == "upstream_b" { build_upstream_b(); return }

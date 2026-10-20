@@ -1,0 +1,6 @@
+// The `print` statement form renders its argument by the same rule (#3016).
+main() {
+    t = (2, 3)
+    print(t)
+    println("")
+}

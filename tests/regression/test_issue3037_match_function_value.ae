@@ -1,0 +1,47 @@
+// #3037: a value match whose arms name functions gives the function as a
+// value, as an if-expression does. The arms were left bare names, so the
+// match had no type: `f = match k { 0 -> a  _ -> b }` then `f(3)` was
+// E0301 "Undefined function 'f'", and `call(f, 3)` passed the checker and
+// failed in C. Bound to a local, yielded by a block arm, and passed as an
+// argument.
+
+extern exit(code: int)
+
+a(x: int) -> int { return x + 1 }
+b(x: int) -> int { return x * 2 }
+neg(x: int) -> int { return 0 - x }
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+apply(f: fn, x: int) -> int { return call(f, x) }
+
+pick(k: int, x: int) -> int {
+    f = match k {
+        0 -> a
+        1 -> {
+            println("a block arm gives b")
+            b
+        }
+        _ -> neg
+    }
+    return f(x)
+}
+
+main() {
+    check(pick(0, 3) == 4, "the first arm's function")
+    check(pick(1, 3) == 6, "a block arm's function")
+    check(pick(7, 3) == -3, "the `_` arm's function")
+    k = 1
+    g = match k {
+        0 -> a
+        _ -> b
+    }
+    check(call(g, 4) == 8, "call() through the match's value")
+    check(apply(match k { 0 -> a _ -> neg }, 5) == -5, "a match given as an argument")
+    println("ok")
+}

@@ -5,6 +5,7 @@
  */
 
 #include "aether_error.h"
+#include "aether_source_text.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -145,10 +146,12 @@ static const char* snippet_source_for(const char* file, const char* explicit_src
 // Get a specific line from source code
 static const char* get_line(const char* source, int line_num, int* line_length) {
     if (!source) return NULL;
-    
+
     int current_line = 1;
-    const char* line_start = source;
-    const char* p = source;
+    /* #2999: a byte order mark starting the file is no part of its first
+     * line, whose columns the lexer counts from after it. */
+    const char* line_start = source + aether_source_bom_length(source);
+    const char* p = line_start;
     
     while (*p && current_line < line_num) {
         if (*p == '\n') {

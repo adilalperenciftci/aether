@@ -113,13 +113,11 @@ else
     fail=$((fail + 1))
 fi
 
-# --- ACCEPT: a `ptr` --------------------------------------------------------
-# Deliberately allowed. Interpolating a ptr is an established idiom here --
-# map/pqueue/schema return `ptr` for values that really are char*, and 21
-# sites across std/, contrib/, examples/ and tests/ rely on it. Rejecting it
-# broke std/pqueue and std/schema when this check first went in, and there is
-# no sanctioned conversion to migrate those callers to. Narrowing it is its
-# own change; this sentry records the decision.
+# --- REJECT: a `ptr` (#3018) -------------------------------------------------
+# A `ptr` may point at anything (a list, a buffer, a struct), and `${p}` read
+# it as a C string. It was admitted while std typed its strings as `ptr`
+# (`string.from_int`, `pad_start`, ...); those are `string` now, and the
+# callers that rendered a container's element read it with its typed getter.
 cat > "$TMP/ptr.ae" << 'EOF'
 import std.map
 main() {
@@ -129,14 +127,36 @@ main() {
     println("value ${v}")
 }
 EOF
-if "$AE" build "$TMP/ptr.ae" -o "$TMP/ptr.bin" >"$TMP/ptr.log" 2>&1; then
-    echo "  [PASS] ptr interpolation still accepted"
+out=$("$AE" build "$TMP/ptr.ae" -o "$TMP/ptr.bin" 2>&1)
+if echo "$out" | grep -q "cannot interpolate a \`ptr\`"; then
+    echo "  [PASS] ptr interpolation rejected"
     pass=$((pass + 1))
 else
-    echo "  [FAIL] ptr interpolation was rejected; that breaks 21 in-tree sites:"
-    grep -E "^error" "$TMP/ptr.log" | head -3 | sed 's/^/    /'
+    echo "  [FAIL] ptr interpolation not rejected:"
+    echo "$out" | head -3 | sed 's/^/    /'
     fail=$((fail + 1))
 fi
+
+# --- ACCEPT: the element read as a string ------------------------------------
+cat > "$TMP/ptr_ok.ae" << 'EOF'
+import std.map
+main() {
+    m = map.new()
+    map.put(m, "k", "hello")
+    v, _ = map.get_string(m, "k")
+    println("value ${v}")
+}
+EOF
+if "$AE" build "$TMP/ptr_ok.ae" -o "$TMP/ptr_ok.bin" >"$TMP/ptr_ok.log" 2>&1 &&
+   [ "$("$TMP/ptr_ok.bin" | tr -d '\r')" = "value hello" ]; then
+    echo "  [PASS] a container's string read with its typed getter renders"
+    pass=$((pass + 1))
+else
+    echo "  [FAIL] map.get_string's value did not build or render:"
+    grep -E "^error" "$TMP/ptr_ok.log" | head -3 | sed 's/^/    /'
+    fail=$((fail + 1))
+fi
+
 
 # --- ACCEPT: a bare function name as a callback argument --------------------
 # Passing a function by name is legitimate and must stay so; only rendering
@@ -157,11 +177,12 @@ else
     fail=$((fail + 1))
 fi
 
-# --- ACCEPT: a single-bound tuple -------------------------------------------
-# `x = f()` where f returns (int, string) binds the FIRST element -- verified,
-# it yields 42 rather than a tuple -- but the slot keeps the tuple type.
-# Rejecting that flagged a working example in std/tcp/README.md, so the type
-# being wrong is not evidence the value is un-renderable.
+# --- REJECT: a name holding a tuple (#3016) ------------------------------------
+# `x = f()` where f returns (int, string) once bound the first element while
+# the name kept the tuple type, so a tuple-typed name was admitted. A single
+# name now binds the whole tuple (the C local is the tuple struct), and
+# `${single}` printed that struct as `%d`: a different number each run. A
+# tuple has no rendering; destructure it first.
 cat > "$TMP/tup.ae" << 'EOF'
 pair() -> (int, string) { return 42, "err" }
 main() {
@@ -169,17 +190,18 @@ main() {
     println("first element ${single}")
 }
 EOF
-if "$AE" build "$TMP/tup.ae" -o "$TMP/tup.bin" >"$TMP/tup.log" 2>&1; then
-    echo "  [PASS] single-bound tuple still accepted"
+out=$("$AE" build "$TMP/tup.ae" -o "$TMP/tup.bin" 2>&1)
+if echo "$out" | grep -q "cannot interpolate a tuple"; then
+    echo "  [PASS] a name holding a tuple rejected"
     pass=$((pass + 1))
 else
-    echo "  [FAIL] single-bound tuple rejected; that breaks std/tcp's README:"
-    grep -E "^error" "$TMP/tup.log" | head -3 | sed 's/^/    /'
+    echo "  [FAIL] expected the tuple diagnostic for a name holding a tuple; got:"
+    echo "$out" | head -6 | sed 's/^/    /'
     fail=$((fail + 1))
 fi
 
-# A multi-value CALL interpolated directly is never a bound scalar: the whole
-# (value, err) struct went to printf. The bound-name case above stays admitted.
+# A multi-value CALL interpolated directly: the whole (value, err) struct
+# went to printf; the diagnostic names the destructuring.
 cat > "$TMP/tupcall.ae" << 'EOF'
 pair() -> (int, string) { return 1, "" }
 main() {

@@ -20,6 +20,7 @@ typedef enum {
     AETHER_ERR_INVALID_OPERAND = 500,
     AETHER_ERR_ACTOR_ERROR = 600,
     AETHER_ERR_MISSING_RETURN = 700,     // control can reach the end of a function whose result is not void (#2684)
+    AETHER_ERR_SELECT_PLATFORM = 701,    // a select() with no value for a platform and no other: (#3002)
     // `quote` (docs/quote.md)
     AETHER_ERR_QUOTE_SUBSET = 800,       // a construct a quote's tree has no node for (the v1 subset)
     AETHER_ERR_QUOTE_PARAM = 801,        // a quote parameter without a type

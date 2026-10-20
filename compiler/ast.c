@@ -21,6 +21,7 @@ Type* create_type(TypeKind kind) {
     type->tuple_heap_flags = NULL;
     type->param_types = NULL;
     type->param_count = 0;
+    type->param_modes = NULL;   /* #2980: every parameter borrows */
     type->return_type = NULL;
     /* Default to closure (`_AeClosure`-shaped). The fnptr-cast parser
      * path (`expr as fn(...)`) flips this on a freshly-created
@@ -131,6 +132,28 @@ Type* create_function_type(int param_count, Type** param_types, Type* return_typ
     return type;
 }
 
+int fn_type_param_mode(const Type* t, int i) {
+    if (!t || t->kind != TYPE_FUNCTION || !t->param_modes || i < 0 || i >= t->param_count)
+        return FN_MODE_BORROWED;
+    return t->param_modes[i];
+}
+
+void fn_type_set_param_mode(Type* t, int i, int mode) {
+    if (!t || i < 0 || i >= t->param_count) return;
+    if (!t->param_modes) {
+        if (mode == FN_MODE_BORROWED) return;
+        t->param_modes = calloc((size_t)t->param_count, sizeof(int));
+        if (!t->param_modes) return;
+    }
+    t->param_modes[i] = mode;
+}
+
+int fn_type_has_modes(const Type* t) {
+    for (int i = 0; t && t->param_modes && i < t->param_count; i++)
+        if (t->param_modes[i] != FN_MODE_BORROWED) return 1;
+    return 0;
+}
+
 void free_type(Type* type) {
     if (type) {
         if (type->element_type) {
@@ -166,6 +189,7 @@ void free_type(Type* type) {
             }
             free(type->param_types);
         }
+        free(type->param_modes);
         if (type->return_type) {
             free_type(type->return_type);
         }
@@ -248,12 +272,18 @@ static int type_src_write(const Type* t, char* buf, size_t cap, size_t* pos) {
             return type_src_put(buf, cap, pos, n);
         }
         case TYPE_FUNCTION:
-            /* A closure value is spelled bare `fn`; only a C function
-             * pointer carries its signature in source. */
-            if (!t->is_fnptr) return type_src_put(buf, cap, pos, "fn");
+            /* A closure value is spelled bare `fn`, unless a parameter names
+             * a mode (#2980): `fn(@keep ptr, float)` is a closure's type
+             * whose signature is part of it, and a binary import's stub
+             * read as `fn` checked a keeping function as borrowing (#3013).
+             * A C function pointer carries its signature in source. */
+            if (!t->is_fnptr && !fn_type_has_modes(t)) return type_src_put(buf, cap, pos, "fn");
             if (!type_src_put(buf, cap, pos, "fn(")) return 0;
             for (int i = 0; i < t->param_count; i++) {
                 if (i > 0 && !type_src_put(buf, cap, pos, ", ")) return 0;
+                int mode = fn_type_param_mode(t, i);
+                if (mode == FN_MODE_KEEP && !type_src_put(buf, cap, pos, "@keep ")) return 0;
+                if (mode == FN_MODE_INTO && !type_src_put(buf, cap, pos, "@into ")) return 0;
                 if (!type_src_write(t->param_types ? t->param_types[i] : NULL, buf, cap, pos))
                     return 0;
             }
@@ -372,6 +402,33 @@ const char* ast_struct_display_name(const char* cname) {
     return e ? e->display : cname;
 }
 
+int ast_names_without_binding(const ASTNode* n) {
+    switch (n->type) {
+        case AST_IDENTIFIER:
+        case AST_LITERAL:
+        case AST_FUNCTION_CALL:
+        case AST_MEMBER_ACCESS:
+        case AST_FIELD_INIT:
+        case AST_NAMED_ARG:
+        case AST_MESSAGE_CONSTRUCTOR:
+        case AST_STRUCT_LITERAL:
+        case AST_BINARY_EXPRESSION:
+        case AST_UNARY_EXPRESSION:
+        case AST_STRING_INTERP:
+            return 1;
+        default:
+            return 0;
+    }
+}
+
+int ast_binds_name(const ASTNode* n, const char* name) {
+    if (!n || !name) return 0;
+    if (n->value && !ast_names_without_binding(n) && strcmp(n->value, name) == 0) return 1;
+    for (int i = 0; i < n->child_count; i++)
+        if (ast_binds_name(n->children[i], name)) return 1;
+    return 0;
+}
+
 const char* type_to_string(Type* type) {
     if (!type) return "UNKNOWN";
 
@@ -452,7 +509,25 @@ const char* type_spelled(Type* type) {
             if (!type->is_fnptr && type->param_count == 0 && !type->return_type) return "fn";
             const char* params = spelled_list_by(type_spelled, "fn(", type->param_types,
                                                  type->param_count, ", ", ")");
-            if (!type->return_type || type->return_type->kind == TYPE_VOID) return params;
+            /* #2980: a parameter's mode is part of the type. */
+            if (fn_type_has_modes(type)) {
+                params = "fn(";
+                for (int i = 0; i < type->param_count; i++) {
+                    int m = fn_type_param_mode(type, i);
+                    params = aether_internf("%s%s%s%s", params, i ? ", " : "",
+                                            m == FN_MODE_KEEP   ? "@keep "
+                                            : m == FN_MODE_INTO ? "@into "
+                                                                : "",
+                                            type_spelled(type->param_types ? type->param_types[i]
+                                                                           : NULL));
+                }
+                params = aether_internf("%s)", params);
+            }
+            /* A result not known yet (a function value whose result is left
+             * to inference) is not spelled, as none is. */
+            if (!type->return_type || type->return_type->kind == TYPE_VOID ||
+                (fn_type_has_modes(type) && type->return_type->kind == TYPE_UNKNOWN))
+                return params;
             return aether_internf("%s -> %s", params, type_spelled(type->return_type));
         }
         case TYPE_OPTIONAL:
@@ -520,6 +595,7 @@ int types_equal(Type* a, Type* b) {
         if (a->param_count != b->param_count) return 0;
         for (int i = 0; i < a->param_count; i++) {
             if (!types_equal(a->param_types[i], b->param_types[i])) return 0;
+            if (fn_type_param_mode(a, i) != fn_type_param_mode(b, i)) return 0;   /* #2980 */
         }
         return types_equal(a->return_type, b->return_type);
     }
@@ -617,6 +693,37 @@ static const ASTNode* tuple_arm_part(const ASTNode* arm, int i) {
     return arm && arm->type == AST_TUPLE_LITERAL && i < arm->child_count ? arm->children[i] : NULL;
 }
 
+Type* fn_type_mode_join(const Type* a, const Type* b) {
+    if (!a || !b || a->kind != TYPE_FUNCTION || b->kind != TYPE_FUNCTION ||
+        a->is_fnptr || b->is_fnptr)
+        return NULL;
+    if (!fn_type_has_modes(a) && !fn_type_has_modes(b)) return NULL;
+    /* An erased `fn` (a closure literal whose parameters name no mode)
+     * stands where the moded type is expected. */
+    int a_erased = a->param_count == 0 && !a->return_type;
+    int b_erased = b->param_count == 0 && !b->return_type;
+    Type* j = NULL;
+    if (a_erased != b_erased) {
+        j = clone_type((Type*)(a_erased ? b : a));
+    } else if (a->param_count == b->param_count) {
+        Type* ja = clone_type((Type*)a);
+        Type* jb = clone_type((Type*)b);
+        for (int i = 0; i < a->param_count; i++) {
+            int ma = fn_type_param_mode(a, i), mb = fn_type_param_mode(b, i);
+            int m = ma > mb ? ma : mb;
+            fn_type_set_param_mode(ja, i, m);
+            fn_type_set_param_mode(jb, i, m);
+        }
+        ja->closure_literal = jb->closure_literal = NULL;
+        if (types_equal(ja, jb)) j = ja;
+        else free_type(ja);
+        free_type(jb);
+    }
+    /* Either value's: a call result through it is no one literal's. */
+    if (j) j->closure_literal = NULL;
+    return j;
+}
+
 Type* branch_join_type(Type* a, const ASTNode* a_arm, Type* b, const ASTNode* b_arm) {
     if (!a || !b) return NULL;
     if (a->kind == TYPE_FLOAT32 && b->kind == TYPE_FLOAT && is_float_literal_arm(b_arm))
@@ -646,6 +753,10 @@ Type* branch_join_type(Type* a, const ASTNode* a_arm, Type* b, const ASTNode* b_
         return t;
     }
     if (types_equal(a, b)) return clone_type(a);
+    /* #2980 review: either of two functions is called through the stronger
+     * mode at each parameter; the then branch's type alone lost a `@keep`. */
+    Type* fj = fn_type_mode_join(a, b);
+    if (fj) return fj;
     /* #2983: an optional beside a value its element joins with, or beside
      * `none` (an optional of nothing known yet), is that optional. */
     if (a->kind == TYPE_OPTIONAL || b->kind == TYPE_OPTIONAL) {
@@ -720,6 +831,8 @@ Type* clone_type(Type* type) {
         for (int i = 0; i < type->param_count; i++) {
             new_type->param_types[i] = clone_type(type->param_types[i]);
         }
+        for (int i = 0; type->param_modes && i < type->param_count; i++)
+            fn_type_set_param_mode(new_type, i, type->param_modes[i]);
     }
     if (type->return_type) {
         new_type->return_type = clone_type(type->return_type);

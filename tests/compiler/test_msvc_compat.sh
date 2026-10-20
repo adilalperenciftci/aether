@@ -308,11 +308,18 @@ generate closure_str
 #   closure_array_envs
 #                     an `fn[N]` local's closures released at its scope exit
 #                     (#2868)
+#   const_typed_init  a constant named in another constant's or a module
+#                     var's initializer, written there as a value of its own
+#                     type: a float, a long shifted, a uint32 (#2799)
+#   fdiv_negative_zero
+#                     a number over a zero literal, the zero's sign kept:
+#                     `1.0 / -0.0` is -infinity (#2799)
 PROGS="2765_string_slots 2765_call_temps 2765_operand_order 2765_optionals 2765_struct_values
     2765_statement_values 2765_helper_names 2813_left_to_right 2798_statement_constructs_anywhere
     2798_statement_constructs_in_parts 2821_actor_state_initializer_type
     2798_operands_ahead 2813_call_effects 2798_handover_at_call 2863_fallible_error_slots
-    2866_builder_call_statements 2868_closure_array_envs"
+    2866_builder_call_statements 2868_closure_array_envs 2799_const_typed_init
+    2799_fdiv_negative_zero"
 for issue_prog in $PROGS; do
     prog="${issue_prog#*_}"
     cp "tests/regression/test_issue$issue_prog.ae" "$TMP/$prog.ae"
@@ -320,6 +327,88 @@ for issue_prog in $PROGS; do
     [ -z "$use_gcc" ] || strict_c11 "$prog" "Temporaries: $prog"
     [ -z "$use_cl" ] || cl_compile "$prog" "Temporaries: $prog"
 done
+
+# Test 22 (#2799): the sweep programs whose C cl.exe refused for anything
+# but a statement expression, one or more per cause: the GCC builtins of the
+# inline std.mem accessors and of `card` (memcpy and plain C off GCC),
+# arithmetic on a bare `ptr` (through `char*`), `@packed` (`#pragma pack`),
+# a struct with no fields and `T {}` (a byte and `{0}`), a constant made
+# from another (written as its value), a function's closure as a module
+# constant (an initializer list), `1.0 / 0.0` (INFINITY and NAN), an array
+# of strings handed to `void*` (C4090), functions named `min` and `max`
+# (MSVC's macros), `ssize_t`, and getpid and isatty (io.h, process.h). Each
+# compiles under cl; under gcc as strict C11, with arithmetic on `void*` an
+# error, so a regression in that shows on any platform. Generated from the
+# program's own directory when it has a lib/ beside it.
+AETHERC_ABS="$(cd "$(dirname "$AETHERC")" && pwd)/$(basename "$AETHERC")"
+generate_prog() {
+    dir="$(dirname "$1")"
+    if [ -d "$dir/lib" ]; then
+        (cd "$dir" && "$AETHERC_ABS" "$(basename "$1")" "$TMP/$2.c")
+    else
+        "$AETHERC_ABS" "$1" "$TMP/$2.c"
+    fi
+    { echo "#define AETHER_GCC_COMPAT 0"; cat "$TMP/$2.c"; } > "$TMP/$2_nogcc.c"
+}
+MSVC_PROGS="std/mem/test_mem_accessors.ae std/message/test_message.ae
+    std/cbor/test_cbor.ae std/msgpack/test_msgpack.ae
+    tests/regression/test_string_double_roundtrip.ae tests/regression/test_string_parse_hex_float.ae
+    tests/regression/test_string_parse_inf_nan.ae tests/regression/test_issue2310_heap_in_use.ae
+    tests/regression/test_extern_libc_whitelist.ae tests/integration/mem_inline_accessors/mem_inline.ae
+    tests/integration/crypto_bouncy_castle/test_crypto.ae
+    tests/regression/test_cbor_roundtrip_no_leak.ae tests/regression/test_message.ae
+    tests/regression/test_bit_set.ae tests/integration/aether_inline_cast_lhs/test_aether_inline_cast_lhs.ae
+    tests/regression/test_for_loop_c_style.ae tests/regression/test_std_mem_bulk_endian.ae
+    tests/regression/test_packed_struct.ae tests/regression/test_issue747_sds_floor.ae
+    tests/regression/test_issue914_sum_types.ae tests/regression/test_issue2298_derive_schema.ae
+    tests/regression/test_const_shadowing.ae tests/regression/test_const_header_names.ae
+    tests/regression/test_fnptr_const.ae tests/integration/pure_module/test_pure_module.ae
+    std/number/test_number.ae tests/regression/test_issue2301_format_slices.ae std/resp/test_resp.ae
+    tests/regression/test_local_string_array_owns_elements.ae tests/regression/test_opt_string_return_owned.ae
+    tests/regression/test_try_written_array_argument.ae tests/regression/test_actor_state_destroy.ae
+    tests/regression/test_array_field_bound_from_array.ae tests/regression/test_string_seq_literal.ae
+    tests/syntax/test_message_array_fields.ae tests/syntax/test_nested_functions.ae
+    tests/syntax/test_functions_advanced.ae tests/regression/test_c_abi_scalar_aliases.ae
+    tests/regression/test_extern_libc_headers.ae"
+for path in $MSVC_PROGS; do
+    prog="msvc_$(basename "$path" .ae)"
+    generate_prog "$path" "$prog"
+    if [ -n "$use_gcc" ]; then
+        # shellcheck disable=SC2086
+        if ! gcc -fsyntax-only "$TMP/${prog}_nogcc.c" $INC $STRICT_POSIX -std=c11 -pedantic \
+                -Wno-unused-label -Werror=implicit-function-declaration \
+                -Werror=incompatible-pointer-types -Werror=pointer-arith >"$TMP/$prog.log" 2>&1; then
+            grep "error" "$TMP/$prog.log" | sed 's/^/    /' | head -10
+            echo "  [FAIL] $path does not compile as C11 without GCC extensions"
+            exit 1
+        fi
+        echo "  [PASS] $path compiles as strict C11"
+    fi
+    [ -z "$use_cl" ] || cl_compile "$prog" "$path"
+done
+
+# The lane types (std.lanes) are GCC's and Clang's vector extensions, which
+# cl.exe does not have: a program using them stops at one #error that says
+# so, not at a cascade of syntax errors from the first AeF32x4.
+if [ -n "$use_cl" ]; then
+    for path in std/lanes/test_lanes.ae tests/regression/test_distinct_operators.ae; do
+        prog="msvc_$(basename "$path" .ae)"
+        generate_prog "$path" "$prog"
+        src=$(cygpath -m "$TMP/$prog.c")
+        obj=$(cygpath -m "$TMP/$prog.obj")
+        # shellcheck disable=SC2086
+        MSYS2_ARG_CONV_EXCL='*' MSYS_NO_PATHCONV=1 cl -nologo -std:c11 \
+            -experimental:c11atomics -Zc:preprocessor -W3 $INC -c "$src" -Fo"$obj" \
+            >"$TMP/cl.log" 2>&1 && { echo "  [FAIL] $path compiled under cl.exe"; exit 1; }
+        if ! grep -q "this program uses lane types" "$TMP/cl.log" ||
+           [ "$(grep -c "error" "$TMP/cl.log")" -ne 1 ]; then
+            sed 's/^/    /' "$TMP/cl.log" | head -10
+            echo "  [FAIL] $path under cl.exe: not the one lanes #error"
+            exit 1
+        fi
+        echo "  [PASS] $path stops under cl.exe at the lanes #error alone"
+    done
+fi
 
 # The same programs built and run on this path, AETHER_GCC_COMPAT forced to 0
 # by the C compiler's command line, so what the comma expressions compute is

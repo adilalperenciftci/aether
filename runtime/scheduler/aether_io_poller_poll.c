@@ -32,6 +32,7 @@
 #endif
 #include "aether_io_poller.h"
 #include "../utils/aether_thread.h"
+#include "../utils/aether_spawn.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -113,7 +114,9 @@ static void wake_open(PollBackend* pb) {
     pb->wake = s;
 #else
     int p[2];
-    if (pipe(p) != 0) return;
+    /* #3046: close-on-exec, so a child the program starts never holds the
+     * wake pipe open. */
+    if (aether_pipe_cloexec(p) != 0) return;
     for (int i = 0; i < 2; i++) {
         int fl = fcntl(p[i], F_GETFL, 0);
         if (fl < 0 || fcntl(p[i], F_SETFL, fl | O_NONBLOCK) != 0) {

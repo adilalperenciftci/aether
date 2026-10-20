@@ -18,11 +18,6 @@
     <li><a href="#CAP_OK">CAP_OK</a></li>
     <li><a href="#CAP_ERR">CAP_ERR</a></li>
     <li><a href="#CAP_UNSUPPORTED">CAP_UNSUPPORTED</a></li>
-    <li><a href="#aether_capsicum_available">aether_capsicum_available</a></li>
-    <li><a href="#aether_capsicum_enter">aether_capsicum_enter</a></li>
-    <li><a href="#aether_capsicum_in_mode">aether_capsicum_in_mode</a></li>
-    <li><a href="#aether_capsicum_rights_limit">aether_capsicum_rights_limit</a></li>
-    <li><a href="#aether_capsicum_fcntls_limit">aether_capsicum_fcntls_limit</a></li>
     <li><a href="#available">available</a></li>
     <li><a href="#enter">enter</a></li>
     <li><a href="#in_mode">in_mode</a></li>
@@ -108,6 +103,7 @@
     <li><a href="path.html">path</a></li>
     <li><a href="plural.html">plural</a></li>
     <li><a href="pqueue.html">pqueue</a></li>
+    <li><a href="quote.html">quote</a></li>
     <li><a href="reflect.html">reflect</a></li>
     <li><a href="regex.html">regex</a></li>
     <li><a href="resp.html">resp</a></li>
@@ -159,33 +155,6 @@
     <div class="function" id="CAP_UNSUPPORTED" data-name="CAP_UNSUPPORTED">
       <h3 class="function-name">CAP_UNSUPPORTED <span class="kind">const</span></h3>
       <pre class="usage"><code>CAP_UNSUPPORTED = -2</code></pre>
-    </div>
-    <div class="function" id="aether_capsicum_available" data-name="aether_capsicum_available">
-      <h3 class="function-name">aether_capsicum_available <span class="kind">extern</span></h3>
-      <pre class="usage"><code>aether_capsicum_available() <span class="arrow">-&gt;</span> int</code></pre>
-      <p class="doc">1 if Capsicum is usable in this process, 0 otherwise.</p>
-    </div>
-    <div class="function" id="aether_capsicum_enter" data-name="aether_capsicum_enter">
-      <h3 class="function-name">aether_capsicum_enter <span class="kind">extern</span></h3>
-      <pre class="usage"><code>aether_capsicum_enter() <span class="arrow">-&gt;</span> int</code></pre>
-      <p class="doc">Enter capability mode. Irreversible. Returns CAP_OK / CAP_ERR / CAP_UNSUPPORTED.</p>
-    </div>
-    <div class="function" id="aether_capsicum_in_mode" data-name="aether_capsicum_in_mode">
-      <h3 class="function-name">aether_capsicum_in_mode <span class="kind">extern</span></h3>
-      <pre class="usage"><code>aether_capsicum_in_mode() <span class="arrow">-&gt;</span> int</code></pre>
-      <p class="doc">1 if already in capability mode, 0 if not, CAP_UNSUPPORTED off FreeBSD.</p>
-    </div>
-    <div class="function" id="aether_capsicum_rights_limit" data-name="aether_capsicum_rights_limit">
-      <h3 class="function-name">aether_capsicum_rights_limit <span class="kind">extern</span></h3>
-      <pre class="usage"><code>aether_capsicum_rights_limit(fd, rights_mask) <span class="arrow">-&gt;</span> int</code></pre>
-      <p class="signature"><span class="sig-params">fd: int, rights_mask: int</span></p>
-      <p class="doc">Limit `fd` to the rights in `rights_mask` (OR of R_* values). Rights only ever narrow. Returns CAP_OK / CAP_ERR / CAP_UNSUPPORTED.</p>
-    </div>
-    <div class="function" id="aether_capsicum_fcntls_limit" data-name="aether_capsicum_fcntls_limit">
-      <h3 class="function-name">aether_capsicum_fcntls_limit <span class="kind">extern</span></h3>
-      <pre class="usage"><code>aether_capsicum_fcntls_limit(fd, fcntl_mask) <span class="arrow">-&gt;</span> int</code></pre>
-      <p class="signature"><span class="sig-params">fd: int, fcntl_mask: int</span></p>
-      <p class="doc">Limit which fcntl(2) commands `fd` permits (OR of F_* values).</p>
     </div>
     <div class="function" id="available" data-name="available">
       <h3 class="function-name">available <span class="kind">fn</span></h3>

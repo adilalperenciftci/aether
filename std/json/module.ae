@@ -22,11 +22,9 @@ exports(
     json_object_get_raw, json_object_set_raw, json_object_has,
     json_object_size_raw, json_object_key_at, json_object_value_at,
     json_array_get_raw, json_array_add_raw, json_array_size,
-    json_create_null, json_create_bool, json_create_number, json_create_int,
-    json_create_string, json_create_array, json_create_object,
-    parse, stringify, get_string,
-    object_get, object_set, object_size, object_entry,
-    array_get, array_add,
+    parse, get_string,
+    object_get, object_size, object_entry,
+    array_get,
     obj, arr, str, num, from_int, boolean, null_value, set, push, encode,
     parse_strict, last_error_kind, last_error_line, last_error_col,
     KIND_OK, KIND_PARSE_ERROR, KIND_OUT_OF_MEMORY, KIND_INVALID_INPUT
@@ -62,7 +60,7 @@ extern json_free(value: ptr)
 extern json_type(value: ptr) -> int
 extern json_is_null(value: ptr) -> int
 // 1 for a number written as an integer within int64 (or built with
-// json_create_int / from_int), 0 for one with a fraction or exponent and
+// `json.from_int`), 0 for one with a fraction or exponent and
 // for anything that is not a number: whether `42` or `42.0` was written.
 extern json_is_integer(value: ptr) -> int
 
@@ -221,7 +219,7 @@ object_set(obj: ptr, key: string, value: ptr) -> {
     if ok == 0 {
         // `obj` was not a JSON_OBJECT, so the raw call did NOT take
         // ownership of `value`. Reclaim it here — the caller built it
-        // inline (json.create_*) and has no other reference, so it would
+        // inline (json.str, json.obj, ...) and has no other reference, so it would
         // otherwise leak. On success the object owns it (don't free).
         json_free(value)
         return "not an object"

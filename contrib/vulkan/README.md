@@ -358,7 +358,8 @@ and back, so levels already uploaded keep their pixels.
 A `DEPTH_STENCIL` target's depth format is `D24_UNORM_S8_UINT` where the
 device can attach it, and `D32_SFLOAT_S8_UINT` otherwise. AMD and Apple
 GPUs have only the second. D24S8 comes first because it is half the size,
-and because lavapipe crashes drawing into D32S8 (#2410). The attachment's
+and because lavapipe crashes drawing into D32S8 where llvmpipe runs 8 lanes
+wide, as CI reports from a draw in plain C (#2410). The attachment's
 view has both aspects and its stencil loads with a clear; a sampled depth
 gets a second view of the depth aspect alone. Every pipeline declares
 `VK_DYNAMIC_STATE_STENCIL_REFERENCE`, and each draw sets the reference with

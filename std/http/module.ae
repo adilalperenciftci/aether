@@ -45,19 +45,17 @@ exports(
     http_server_set_h2_concurrent_dispatch_raw, server_set_h2_concurrent_dispatch,
     http_server_drain_connection,
     http_server_shutdown_graceful_raw, server_shutdown_graceful,
-    http_server_set_on_start, http_server_set_on_stop,
     server_on_start, server_on_stop,
     http_server_set_health_probes_raw, server_set_health_probes,
     http_server_set_access_log_raw, server_set_access_log,
     http_server_set_metrics_raw, server_set_metrics,
     server_sse,
-    http_sse_send_event, http_sse_send_event_id,
-    http_sse_send_event_full, http_response_sse_upgrade_raw,
+    http_response_sse_upgrade_raw,
     sse_send, sse_send_id, sse_send_full, sse_close,
     response_upgrade_sse,
     server_websocket,
     ws_connect, ws_client_free,
-    http_ws_message_data, http_ws_message_length,
+    http_ws_message_length,
     ws_send_text, ws_send_binary, ws_recv,
     ws_recv_timeout, ws_poll, ws_fd,
     ws_message, ws_message_bytes, ws_close,
@@ -85,7 +83,7 @@ exports(
     request_local_addr, request_local_port,
     request_scheme, request_is_tls, request_http_version,
     request_header_count, request_header_name, request_header_value,
-    ae_io_await, ae_io_cancel, await_io
+    ae_io_cancel, await_io
 )
 
 // HTTP Client — raw ptr-returning externs.
@@ -872,7 +870,7 @@ extern http_request_body_complete(req: ptr) -> int
 extern http_get_request_body_read() -> ptr
 extern http_get_request_body_read_length() -> int
 extern http_release_request_body_read()
-extern string_new_with_length(data: string, length: int) -> ptr @heap
+extern string_new_with_length(data: ptr, length: int) -> string @heap
 extern http_request_query(req: ptr) -> string
 
 // Trusted TCP peer address — the IP `getpeername(2)` reports for the

@@ -84,6 +84,8 @@ typedef struct {
     const char* current_origin_module;
     int module_global_var_count;
     int generating_lvalue;  // Track if we're generating an assignment target (lvalue)
+    int in_const_init;  // #2799: depth inside a file-scope constant's initializer, where a
+                        // constant named is written as its own initializer (ISO C)
     int in_condition;  // Track if we're in a condition (if/while) to avoid double parens
     int in_main_loop;  // Track if we're in main's loop for batch send optimization
     int in_main_function;  // Track if we're in main() so return -> goto main_exit
@@ -309,6 +311,14 @@ typedef struct {
                              //   once the call returns, as after an Aether
                              //   callee that keeps nothing (#2523). NULL when
                              //   no param carries the annotation.
+        int* params_holds;   // 1 per index when the param was declared
+                             //   `name: @into ptr` (the call's result holds the
+                             //   argument past the call, #2990) or `name: @keep
+                             //   ptr` (a binary import's stub for an Aether
+                             //   function that keeps it, #3013), so a closure
+                             //   passed there is given a heap box with a
+                             //   reference of its own, as for `@retain`. NULL
+                             //   when no param carries the annotation.
         int param_count;
         int is_variadic;     // declared with a trailing `...`: an argument
                              //   past param_count is a C vararg (#2914)

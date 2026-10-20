@@ -39,9 +39,13 @@ typedef struct AetherSlice {
 
 #define AETHER_SLICE_UNBOUNDED UINT64_MAX
 
-static inline AetherSlice aether_slice_make(void* ptr, uint64_t len) {
+/* `const void*`: a view is made over an array of strings too, `const char*
+ * xs[N]`. Taken as `void*`, cl.exe read the elements' `const` as the array's
+ * and refused the call (C4090, an error under the MSVC check, #2799); the
+ * view itself is untyped either way. */
+static inline AetherSlice aether_slice_make(const void* ptr, uint64_t len) {
     AetherSlice s;
-    s.ptr = ptr;
+    s.ptr = (void*)ptr;
     s.len = len;
     return s;
 }

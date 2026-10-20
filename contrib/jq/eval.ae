@@ -217,7 +217,7 @@ free_program(p: ptr) {
 program_set_var(p: ptr, name: string, v: @keep ptr) {
     prog = p as *Program
     // The caller's name may not outlive this call: keep a copy.
-    owned = json.create_string(name)
+    owned = json.str(name)
     f = _new_frame(E_VAR, json.get_string_raw(owned), 0, prog.root)
     f.owned_name = owned
     f.val = v
@@ -332,7 +332,7 @@ run_each_to_json(c: ptr, input: @keep ptr, indent: int, sort_keys: int) -> strin
 // ---------------------------------------------------------------------------
 
 _fail(ctx: *Ctx, msg: string) {
-    _fail_val(ctx, json.create_string(msg))
+    _fail_val(ctx, json.str(msg))
 }
 
 // Raise `v` (owned) as the error value. A raise while already unwinding
@@ -569,7 +569,7 @@ _ev_node(ctx: *Ctx, node: @keep ptr, input: @keep ptr, env: @keep ptr, sink: *Si
         s = _new_sink(SK_COLLECT, null)
         s.list = list.new()
         if n.a != null { ev(ctx, n.a, input, env, s, null) }
-        arr = json.create_array()
+        arr = json.arr()
         _drain_into_array(s.list, arr)
         heap.free(s)
         if ctx.status != ST_OK || _check_depth(ctx, arr) == 0 {
@@ -769,22 +769,22 @@ _index(v: ptr, key: ptr) -> ptr! {
     tk = value.type_of(key)
     if tv == value.T_NULL {
         if tk == value.T_STRING || tk == value.T_NUMBER || tk == value.T_OBJECT {
-            return json.create_null(), ""
+            return json.null_value(), ""
         }
-        if tk == value.T_NULL { return json.create_null(), "" }
+        if tk == value.T_NULL { return json.null_value(), "" }
     }
     if tv == value.T_OBJECT && tk == value.T_STRING {
         got = json.object_get_raw(v, value.string_value(key))
-        if got == null { return json.create_null(), "" }
+        if got == null { return json.null_value(), "" }
         return value.copy(got), ""
     }
     if tv == value.T_ARRAY && tk == value.T_NUMBER {
         d = value.number_of(key)
-        if d != d { return json.create_null(), "" }
+        if d != d { return json.null_value(), "" }
         len = json.array_size(v)
         idx = value.clamp_int(math.floor(d))
         if idx < 0 { idx = idx + len }
-        if idx < 0 || idx >= len { return json.create_null(), "" }
+        if idx < 0 || idx >= len { return json.null_value(), "" }
         return value.copy(json.array_get_raw(v, idx)), ""
     }
     if tv == value.T_ARRAY && tk == value.T_ARRAY {
@@ -818,7 +818,7 @@ _tname(t: int) -> string {
 
 // `[1,2,1,2] | .[[1,2]]` → [0, 2]: the start positions of the sub-array.
 _indices_of(v: ptr, sub: ptr) -> ptr {
-    out = json.create_array()
+    out = json.arr()
     n = json.array_size(v)
     m = json.array_size(sub)
     if m == 0 { return out }
@@ -833,7 +833,7 @@ _indices_of(v: ptr, sub: ptr) -> ptr {
             }
             j = j + 1
         }
-        if ok == 1 { json.array_add_raw(out, json.create_int(i as long)) }
+        if ok == 1 { json.array_add_raw(out, json.from_int(i as long)) }
         i = i + 1
     }
     return out
@@ -875,7 +875,7 @@ _slice(v: ptr, from: ptr, to: ptr) -> ptr! {
         tt = value.type_of(to)
         if tt != value.T_NULL && tt != value.T_NUMBER { return null, "Start and end indices of an array slice must be numbers" }
     }
-    if tv == value.T_NULL { return json.create_null(), "" }
+    if tv == value.T_NULL { return json.null_value(), "" }
     if tv == value.T_ARRAY {
         a, b = _slice_bounds(json.array_size(v), from, to)
         return value.array_slice(v, a, b), ""
@@ -883,7 +883,7 @@ _slice(v: ptr, from: ptr, to: ptr) -> ptr! {
     if tv == value.T_STRING {
         s = value.string_value(v)
         a, b = _slice_bounds(value.codepoint_count(s), from, to)
-        return json.create_string(value.codepoint_slice(s, a, b)), ""
+        return json.str(value.codepoint_slice(s, a, b)), ""
     }
     return null, "Cannot index ${_tname(tv)} with object"
 }
@@ -906,7 +906,7 @@ _ev_slice(ctx: *Ctx, n: *Node, input: @keep ptr, env: @keep ptr, sink: *Sink, p:
             t.input = input
             // jq evaluates the upper bound as the outer loop.
             if n.c == null {
-                _emit_slice_to(ctx, t, json.create_null(), null)
+                _emit_slice_to(ctx, t, json.null_value(), null)
             } else {
                 ev(ctx, n.c, input, env, t, null)
             }
@@ -927,7 +927,7 @@ _emit_slice_to(ctx: *Ctx, s: *Sink, to: @keep ptr, tp: ptr) {
     f.path = s.path
     f.node2 = to // borrowed while the from-values flow
     if s.node == null {
-        _emit_slice_from(ctx, f, json.create_null(), null)
+        _emit_slice_from(ctx, f, json.null_value(), null)
     } else {
         ev(ctx, s.node, s.input, s.env, f, null)
     }
@@ -947,7 +947,7 @@ _emit_slice_from(ctx: *Ctx, s: *Sink, from: ptr, fp: ptr) {
     np = null
     if s.path != null {
         np = value.copy(s.path)
-        key = json.create_object()
+        key = json.obj()
         json.object_set_raw(key, "start", from)
         json.object_set_raw(key, "end", value.copy(to))
         json.array_add_raw(np, key)
@@ -988,7 +988,7 @@ _iterate(ctx: *Ctx, v: ptr, vp: ptr, sink: *Sink) {
             np = null
             if vp != null {
                 np = value.copy(vp)
-                json.array_add_raw(np, json.create_int(i as long))
+                json.array_add_raw(np, json.from_int(i as long))
             }
             emit(ctx, sink, value.copy(json.array_get_raw(v, i)), np)
             i = i + 1
@@ -1003,7 +1003,7 @@ _iterate(ctx: *Ctx, v: ptr, vp: ptr, sink: *Sink) {
             np = null
             if vp != null {
                 np = value.copy(vp)
-                json.array_add_raw(np, json.create_string(json.object_key_at(v, i)))
+                json.array_add_raw(np, json.str(json.object_key_at(v, i)))
             }
             emit(ctx, sink, value.copy(json.object_value_at(v, i)), np)
             i = i + 1
@@ -1029,7 +1029,7 @@ _recurse_all(ctx: *Ctx, v: ptr, p: ptr, sink: *Sink) {
             np = null
             if p != null {
                 np = value.copy(p)
-                json.array_add_raw(np, json.create_int(i as long))
+                json.array_add_raw(np, json.from_int(i as long))
             }
             _recurse_all(ctx, json.array_get_raw(v, i), np, sink)
             _free_val(np)
@@ -1042,7 +1042,7 @@ _recurse_all(ctx: *Ctx, v: ptr, p: ptr, sink: *Sink) {
             np = null
             if p != null {
                 np = value.copy(p)
-                json.array_add_raw(np, json.create_string(json.object_key_at(v, i)))
+                json.array_add_raw(np, json.str(json.object_key_at(v, i)))
             }
             _recurse_all(ctx, json.object_value_at(v, i), np, sink)
             _free_val(np)
@@ -1116,12 +1116,12 @@ _emit_binop_l(ctx: *Ctx, s: *Sink, lv: ptr, lp: ptr) {
 // a op b for the arithmetic and comparison operators. Both borrowed;
 // returns an owned result or (null, message).
 _binop(op: int, a: ptr, b: ptr) -> ptr! {
-    if op == ast.OP_EQ { return json.create_bool(value.eq(a, b)), "" }
-    if op == ast.OP_NE { return json.create_bool(1 - value.eq(a, b)), "" }
-    if op == ast.OP_LT { return json.create_bool(_b(value.cmp(a, b) < 0)), "" }
-    if op == ast.OP_LE { return json.create_bool(_b(value.cmp(a, b) <= 0)), "" }
-    if op == ast.OP_GT { return json.create_bool(_b(value.cmp(a, b) > 0)), "" }
-    if op == ast.OP_GE { return json.create_bool(_b(value.cmp(a, b) >= 0)), "" }
+    if op == ast.OP_EQ { return json.boolean(value.eq(a, b)), "" }
+    if op == ast.OP_NE { return json.boolean(1 - value.eq(a, b)), "" }
+    if op == ast.OP_LT { return json.boolean(_b(value.cmp(a, b) < 0)), "" }
+    if op == ast.OP_LE { return json.boolean(_b(value.cmp(a, b) <= 0)), "" }
+    if op == ast.OP_GT { return json.boolean(_b(value.cmp(a, b) > 0)), "" }
+    if op == ast.OP_GE { return json.boolean(_b(value.cmp(a, b) >= 0)), "" }
     ta = value.type_of(a)
     tb = value.type_of(b)
     if op == ast.OP_ADD {
@@ -1131,7 +1131,7 @@ _binop(op: int, a: ptr, b: ptr) -> ptr! {
             return value.make_number(value.number_of(a) + value.number_of(b)), ""
         }
         if ta == value.T_STRING && tb == value.T_STRING {
-            return json.create_string("${value.string_value(a)}${value.string_value(b)}"), ""
+            return json.str("${value.string_value(a)}${value.string_value(b)}"), ""
         }
         if ta == value.T_ARRAY && tb == value.T_ARRAY {
             out = value.copy(a)
@@ -1153,7 +1153,7 @@ _binop(op: int, a: ptr, b: ptr) -> ptr! {
             return value.make_number(value.number_of(a) - value.number_of(b)), ""
         }
         if ta == value.T_ARRAY && tb == value.T_ARRAY {
-            out = json.create_array()
+            out = json.arr()
             n = json.array_size(a)
             i = 0
             while i < n {
@@ -1206,7 +1206,7 @@ _binop(op: int, a: ptr, b: ptr) -> ptr! {
             }
             if yi < 0 { yi = 0 - yi }
             r = xi % yi
-            return json.create_int(r), ""
+            return json.from_int(r), ""
         }
         return null, _arith_error(a, b, "divided")
     }
@@ -1280,10 +1280,10 @@ const MAX_REPEAT_BYTES = 2147483647.0
 
 _repeat_string(s: ptr, n: ptr) -> ptr! {
     d = value.number_of(n)
-    if d <= 0.0 || d != d { return json.create_null(), "" }
+    if d <= 0.0 || d != d { return json.null_value(), "" }
     text = value.string_value(s)
     len = string.length(text)
-    if len == 0 { return json.create_string(""), "" }
+    if len == 0 { return json.str(""), "" }
     times = math.ceil(d)
     if d < 1.0 { times = 1.0 }
     if times * (len as float) > MAX_REPEAT_BYTES { return null, "Repeat string result too long" }
@@ -1294,14 +1294,14 @@ _repeat_string(s: ptr, n: ptr) -> ptr! {
         strbuilder.append(sb, text)
         i = i + 1
     }
-    return json.create_string(strbuilder.finish(sb)), ""
+    return json.str(strbuilder.finish(sb)), ""
 }
 
 // "a,b" / "," → ["a","b"]; an empty separator splits into codepoints... no:
 // jq splits "abc" / "" into [] for the empty string and per-character
 // otherwise? jq: "abc" / "" → ["a","b","c"]; "" / "," → [].
 _split_string(s: string, sep: string) -> ptr {
-    out = json.create_array()
+    out = json.arr()
     n = string.length(s)
     if n == 0 { return out }
     m = string.length(sep)
@@ -1311,10 +1311,10 @@ _split_string(s: string, sep: string) -> ptr {
         count = json.array_size(cps)
         i = 0
         while i < count {
-            single = json.create_array()
+            single = json.arr()
             json.array_add_raw(single, value.copy(json.array_get_raw(cps, i)))
             piece, _e = value.implode(single)
-            json.array_add_raw(out, json.create_string(piece))
+            json.array_add_raw(out, json.str(piece))
             json.free(single)
             i = i + 1
         }
@@ -1325,10 +1325,10 @@ _split_string(s: string, sep: string) -> ptr {
     while start <= n {
         idx = string.index_of_from(s, sep, start)
         if idx < 0 {
-            json.array_add_raw(out, json.create_string(string.substring_n(s, n, start, n)))
+            json.array_add_raw(out, json.str(string.substring_n(s, n, start, n)))
             return out
         }
-        json.array_add_raw(out, json.create_string(string.substring_n(s, n, start, idx)))
+        json.array_add_raw(out, json.str(string.substring_n(s, n, start, idx)))
         start = idx + m
     }
     return out
@@ -1345,9 +1345,9 @@ _ev_logical(ctx: *Ctx, n: *Node, input: @keep ptr, env: @keep ptr, sink: *Sink) 
         if ctx.status == ST_OK {
             lt = value.truthy(list.get_raw(left.list, i))
             if n.op == ast.OP_AND && lt == 0 {
-                emit(ctx, sink, json.create_bool(0), null)
+                emit(ctx, sink, json.boolean(0), null)
             } else if n.op == ast.OP_OR && lt == 1 {
-                emit(ctx, sink, json.create_bool(1), null)
+                emit(ctx, sink, json.boolean(1), null)
             } else {
                 right = _new_sink(SK_COLLECT, null)
                 right.list = list.new()
@@ -1356,7 +1356,7 @@ _ev_logical(ctx: *Ctx, n: *Node, input: @keep ptr, env: @keep ptr, sink: *Sink) 
                 j = 0
                 while j < rc {
                     if ctx.status == ST_OK {
-                        emit(ctx, sink, json.create_bool(value.truthy(list.get_raw(right.list, j))), null)
+                        emit(ctx, sink, json.boolean(value.truthy(list.get_raw(right.list, j))), null)
                     }
                     j = j + 1
                 }
@@ -1412,7 +1412,7 @@ _ev_object(ctx: *Ctx, n: *Node, input: @keep ptr, env: @keep ptr, sink: *Sink, p
         _fail(ctx, "Invalid path expression with result {...}")
         return
     }
-    _object_entry(ctx, n.list, 0, json.create_object(), input, env, sink)
+    _object_entry(ctx, n.list, 0, json.obj(), input, env, sink)
 }
 
 // Continue building `partial` (owned) from entry `i` onwards.
@@ -1479,7 +1479,7 @@ _ev_string(ctx: *Ctx, n: *Node, input: @keep ptr, env: @keep ptr, sink: *Sink, p
         _fail(ctx, "Invalid path expression")
         return
     }
-    _string_part(ctx, n.list, 0, ast.name_of(n as ptr), json.create_string(""), input, env, sink)
+    _string_part(ctx, n.list, 0, ast.name_of(n as ptr), json.str(""), input, env, sink)
 }
 
 _string_part(ctx: *Ctx, parts: @keep ptr, i: int, fmt: string, sofar: @keep ptr, input: @keep ptr, env: @keep ptr, sink: *Sink) {
@@ -1493,7 +1493,7 @@ _string_part(ctx: *Ctx, parts: @keep ptr, i: int, fmt: string, sofar: @keep ptr,
     }
     part = list.get_raw(parts, i) as *Node
     if part.val != null {
-        next = json.create_string("${value.string_value(sofar)}${value.string_value(part.val)}")
+        next = json.str("${value.string_value(sofar)}${value.string_value(part.val)}")
         json.free(sofar)
         _string_part(ctx, parts, i + 1, fmt, next, input, env, sink)
         return
@@ -1525,7 +1525,7 @@ _emit_strpart(ctx: *Ctx, s: *Sink, v: ptr, vp: ptr) {
         text = f
     }
     json.free(v)
-    next = json.create_string("${value.string_value(s.val)}${value.string_value(text)}")
+    next = json.str("${value.string_value(s.val)}${value.string_value(text)}")
     json.free(text)
     _string_part(ctx, s.list, s.count + 1, s.name, next, s.input, s.env, s.next as *Sink)
 }
@@ -1533,7 +1533,7 @@ _emit_strpart(ctx: *Ctx, s: *Sink, v: ptr, vp: ptr) {
 // `tostring`: strings as they are, everything else as JSON. Owned result.
 _tostring(v: ptr) -> ptr {
     if value.type_of(v) == value.T_STRING { return value.copy(v) }
-    return json.create_string(value.to_json(v))
+    return json.str(value.to_json(v))
 }
 
 // ---------------------------------------------------------------------------
@@ -1618,7 +1618,7 @@ _fold_step(ctx: *Ctx, s: *Sink, env: @keep ptr) {
             // `reduce` with an update yielding empty: the state becomes null
             _free_val(s.val)
             _free_val(s.path)
-            s.val = json.create_null()
+            s.val = json.null_value()
             s.path = null
         }
         heap.free(last)
@@ -1684,7 +1684,7 @@ _bind_alternatives(ctx: *Ctx, patterns: ptr, v: @keep ptr, env: @keep ptr, s: *S
     i = 0
     while i < list.size(names) {
         f = _new_frame(E_VAR, ast.name_of(list.get_raw(names, i)), 0, base)
-        f.val = json.create_null()
+        f.val = json.null_value()
         list.add_raw(frames, f)
         base = f
         i = i + 1
@@ -1777,7 +1777,7 @@ _bind_array_elems(ctx: *Ctx, elems: @keep ptr, i: int, v: @keep ptr, env: @keep 
         _bind_continue(ctx, s, env, fold)
         return
     }
-    elem = json.create_null()
+    elem = json.null_value()
     if value.type_of(v) == value.T_ARRAY {
         if i < json.array_size(v) {
             json.free(elem)
@@ -1868,10 +1868,10 @@ _bind_object_entries(ctx: *Ctx, entries: @keep ptr, i: int, v: @keep ptr, env: @
 // `.key` for destructuring: null → null, object → member or null, else error.
 _index_by_string(v: ptr, key: string) -> ptr! {
     t = value.type_of(v)
-    if t == value.T_NULL { return json.create_null(), "" }
+    if t == value.T_NULL { return json.null_value(), "" }
     if t == value.T_OBJECT {
         got = json.object_get_raw(v, key)
-        if got == null { return json.create_null(), "" }
+        if got == null { return json.null_value(), "" }
         return value.copy(got), ""
     }
     return null, "Cannot index ${_tname(t)} with \"${key}\""
@@ -1960,7 +1960,7 @@ _ev_var(ctx: *Ctx, node: ptr, input: ptr, env: @keep ptr, sink: *Sink, p: ptr) {
 // $ENV, built once per run from the process environment.
 _env_object(ctx: *Ctx) -> ptr {
     if ctx.env_obj != null { return ctx.env_obj }
-    o = json.create_object()
+    o = json.obj()
     n = value.environ_count()
     i = 0
     while i < n {
@@ -1968,7 +1968,7 @@ _env_object(ctx: *Ctx) -> ptr {
         eq = string.index_of(entry, "=")
         if eq > 0 {
             len = string.length(entry)
-            json.object_set_raw(o, string.substring_n(entry, len, 0, eq), json.create_string(string.substring_n(entry, len, eq + 1, len)))
+            json.object_set_raw(o, string.substring_n(entry, len, 0, eq), json.str(string.substring_n(entry, len, eq + 1, len)))
         }
         i = i + 1
     }
@@ -2092,19 +2092,19 @@ _getpath(v: ptr, path: ptr, i: int) -> ptr! {
         tv = value.type_of(cur)
         tk = value.type_of(key)
         if tv == value.T_NULL && (tk == value.T_STRING || tk == value.T_NUMBER || tk == value.T_OBJECT || tk == value.T_NULL) {
-            return json.create_null(), ""
+            return json.null_value(), ""
         }
         if tv == value.T_OBJECT && tk == value.T_STRING {
             got = json.object_get_raw(cur, value.string_value(key))
-            if got == null { return json.create_null(), "" }
+            if got == null { return json.null_value(), "" }
             cur = got
         } else if tv == value.T_ARRAY && tk == value.T_NUMBER {
             d = value.number_of(key)
-            if d != d { return json.create_null(), "" }
+            if d != d { return json.null_value(), "" }
             len = json.array_size(cur)
             idx = value.clamp_int(math.floor(d))
             if idx < 0 { idx = idx + len }
-            if idx < 0 || idx >= len { return json.create_null(), "" }
+            if idx < 0 || idx >= len { return json.null_value(), "" }
             cur = json.array_get_raw(cur, idx)
         } else {
             // A slice, an indices lookup, or an error: _index materialises
@@ -2180,7 +2180,7 @@ _setpath_at(v: ptr, path: ptr, i: int, above: int, newv: @keep ptr) -> ptr! {
         if tv == value.T_OBJECT { child = json.object_get_raw(v, k) }
         sub, err = _setpath_at(child, path, i + 1, above + 1, newv)
         if sub == null { return null, "${err}" }
-        out = json.create_object()
+        out = json.obj()
         if tv == value.T_OBJECT { json.free(out); out = value.copy(v) }
         json.object_set_raw(out, k, sub)
         return out, ""
@@ -2211,7 +2211,7 @@ _setpath_at(v: ptr, path: ptr, i: int, above: int, newv: @keep ptr) -> ptr! {
         if idx < len { child = json.array_get_raw(v, idx) }
         sub, err = _setpath_at(child, path, i + 1, above + 1, newv)
         if sub == null { return null, "${err}" }
-        out = json.create_array()
+        out = json.arr()
         j = 0
         while j < len || j <= idx {
             if j == idx {
@@ -2219,7 +2219,7 @@ _setpath_at(v: ptr, path: ptr, i: int, above: int, newv: @keep ptr) -> ptr! {
             } else if j < len {
                 json.array_add_raw(out, value.copy(json.array_get_raw(v, j)))
             } else {
-                json.array_add_raw(out, json.create_null())
+                json.array_add_raw(out, json.null_value())
             }
             j = j + 1
         }
@@ -2233,7 +2233,7 @@ _setpath_at(v: ptr, path: ptr, i: int, above: int, newv: @keep ptr) -> ptr! {
         len = 0
         if tv == value.T_ARRAY { len = json.array_size(v) }
         a, b = _slice_bounds(len, json.object_get_raw(key, "start"), json.object_get_raw(key, "end"))
-        child = json.create_array()
+        child = json.arr()
         if tv == value.T_ARRAY { json.free(child); child = value.array_slice(v, a, b) }
         // `sub` stands where `out` does: its members are spliced into
         // `out`, so the rest of the path starts at this same depth.
@@ -2244,7 +2244,7 @@ _setpath_at(v: ptr, path: ptr, i: int, above: int, newv: @keep ptr) -> ptr! {
             json.free(sub)
             return null, "A slice of an array can only be assigned another array"
         }
-        out = json.create_array()
+        out = json.arr()
         j = 0
         while j < a {
             json.array_add_raw(out, value.copy(json.array_get_raw(v, j)))
@@ -2273,9 +2273,9 @@ _setpath_at(v: ptr, path: ptr, i: int, above: int, newv: @keep ptr) -> ptr! {
 _delpath(v: ptr, path: ptr, i: int) -> ptr! {
     if guard.too_deep(i, NEST_RESERVE, FALLBACK_MAX_NEST) != 0 { return null, "path nested too deeply" }
     n = json.array_size(path)
-    if n == 0 { return json.create_null(), "" }
+    if n == 0 { return json.null_value(), "" }
     tv = value.type_of(v)
-    if tv == value.T_NULL { return json.create_null(), "" }
+    if tv == value.T_NULL { return json.null_value(), "" }
     key = json.array_get_raw(path, i)
     tk = value.type_of(key)
     if i < n - 1 {
@@ -2288,7 +2288,7 @@ _delpath(v: ptr, path: ptr, i: int) -> ptr! {
         sub, err2 = _delpath(child, path, i + 1)
         json.free(child)
         if sub == null { return null, "${err2}" }
-        one = json.create_array()
+        one = json.arr()
         json.array_add_raw(one, value.copy(key))
         out, err3 = _setpath(v, one, sub)
         json.free(one)
@@ -2305,7 +2305,7 @@ _delpath(v: ptr, path: ptr, i: int) -> ptr! {
             if idx < 0 { idx = idx + len }
             if idx < 0 { return null, "Out of bounds negative array index" }
             if idx >= len { return value.copy(v), "" }
-            out = json.create_array()
+            out = json.arr()
             j = 0
             while j < len {
                 if j != idx { json.array_add_raw(out, value.copy(json.array_get_raw(v, j))) }
@@ -2315,7 +2315,7 @@ _delpath(v: ptr, path: ptr, i: int) -> ptr! {
         }
         if tk == value.T_OBJECT {
             a, b = _slice_bounds(len, json.object_get_raw(key, "start"), json.object_get_raw(key, "end"))
-            out = json.create_array()
+            out = json.arr()
             j = 0
             while j < len {
                 if j < a || j >= b { json.array_add_raw(out, value.copy(json.array_get_raw(v, j))) }
@@ -2376,7 +2376,7 @@ _clear_aliases(l: ptr) {
 _paths_of(ctx: *Ctx, f: @keep ptr, input: @keep ptr, env: @keep ptr) -> ptr {
     s = _new_sink(SK_PATHS_OF, null)
     s.list = list.new()
-    root = json.create_array()
+    root = json.arr()
     ev(ctx, f, input, env, s, root)
     json.free(root)
     l = s.list
@@ -2471,7 +2471,7 @@ _emit_assign_rhs(ctx: *Ctx, s: *Sink, rhs: ptr, rp: ptr) {
 // ones do not shift later array indices).
 _update_paths(ctx: *Ctx, paths: ptr, f: @keep ptr, input: ptr, env: @keep ptr, sink: *Sink) {
     result = value.copy(input)
-    dels = json.create_array()
+    dels = json.arr()
     n = list.size(paths)
     i = 0
     while i < n {
@@ -2498,7 +2498,7 @@ _update_paths(ctx: *Ctx, paths: ptr, f: @keep ptr, input: ptr, env: @keep ptr, s
                         json.free(result)
                         result = next
                         if next == null {
-                            result = json.create_null()
+                            result = json.null_value()
                             _fail(ctx, serr)
                         }
                     } else {
@@ -2518,7 +2518,7 @@ _update_paths(ctx: *Ctx, paths: ptr, f: @keep ptr, input: ptr, env: @keep ptr, s
         json.free(result)
         result = next
         if next == null {
-            result = json.create_null()
+            result = json.null_value()
             _fail(ctx, derr)
         }
     }
@@ -2610,7 +2610,7 @@ _native(ctx: *Ctx, name: string, arity: int, args: ptr, input: @keep ptr, env: @
         if string.equals(name, "path") == 1 {
             if p != null { _fail(ctx, "Invalid path expression"); return }
             s = _new_sink(SK_PATH_OUT, sink)
-            root = json.create_array()
+            root = json.arr()
             ev(ctx, f, input, env, s, root)
             json.free(root)
             heap.free(s)
@@ -2629,7 +2629,7 @@ _native(ctx: *Ctx, name: string, arity: int, args: ptr, input: @keep ptr, env: @
             empty = 1 - s.flag
             heap.free(s)
             if ctx.status != ST_OK { return }
-            emit(ctx, sink, json.create_bool(empty), null)
+            emit(ctx, sink, json.boolean(empty), null)
             return
         }
         if string.equals(name, "repeat") == 1 {
@@ -2807,7 +2807,7 @@ _by(ctx: *Ctx, name: string, f: @keep ptr, input: ptr, env: @keep ptr, sink: *Si
             ks = _new_sink(SK_COLLECT, null)
             ks.list = list.new()
             ev(ctx, f, e, env, ks, null)
-            key = json.create_array()
+            key = json.arr()
             _drain_into_array(ks.list, key)
             heap.free(ks)
             list.add_raw(vals, value.copy(e))
@@ -2837,7 +2837,7 @@ _by(ctx: *Ctx, name: string, f: @keep ptr, input: ptr, env: @keep ptr, sink: *Si
             }
             i = i + 1
         }
-        out = json.create_null()
+        out = json.null_value()
         if best >= 0 {
             json.free(out)
             out = list.get_raw(vals, best)
@@ -2849,7 +2849,7 @@ _by(ctx: *Ctx, name: string, f: @keep ptr, input: ptr, env: @keep ptr, sink: *Si
         return
     }
     value.sort_list(vals, keys)
-    out = json.create_array()
+    out = json.arr()
     if string.equals(name, "sort_by") == 1 {
         _drain_into_array(vals, out)
         _free_list(keys)
@@ -2857,12 +2857,12 @@ _by(ctx: *Ctx, name: string, f: @keep ptr, input: ptr, env: @keep ptr, sink: *Si
         return
     }
     // group_by: runs of equal keys, each run its own array
-    group = json.create_array()
+    group = json.arr()
     i = 0
     while i < n {
         if i > 0 && value.eq(list.get_raw(keys, i), list.get_raw(keys, i - 1)) == 0 {
             json.array_add_raw(out, group)
-            group = json.create_array()
+            group = json.arr()
         }
         json.array_add_raw(group, list.get_raw(vals, i))
         list.set(vals, i, null)
@@ -3115,53 +3115,53 @@ _apply0(ctx: *Ctx, name: string, v: ptr) -> ptr! {
         return value.make_number(aether_jq_math1(op, value.number_of(v))), ""
     }
     if string.equals(name, "length") == 1 {
-        if t == value.T_NULL { return json.create_int(0), "" }
+        if t == value.T_NULL { return json.from_int(0), "" }
         if t == value.T_BOOL { return null, "boolean (${value.to_json(v)}) has no length" }
         if t == value.T_NUMBER { return value.make_number(math.abs_float(value.number_of(v))), "" }
-        if t == value.T_STRING { return json.create_int(value.codepoint_count(value.string_value(v)) as long), "" }
-        if t == value.T_ARRAY { return json.create_int(json.array_size(v) as long), "" }
-        return json.create_int(json.object_size_raw(v) as long), ""
+        if t == value.T_STRING { return json.from_int(value.codepoint_count(value.string_value(v)) as long), "" }
+        if t == value.T_ARRAY { return json.from_int(json.array_size(v) as long), "" }
+        return json.from_int(json.object_size_raw(v) as long), ""
     }
     if string.equals(name, "utf8bytelength") == 1 {
         if t != value.T_STRING { return null, "${_tname(t)} (${value.to_json(v)}) only strings have UTF-8 byte length" }
-        return json.create_int(string.length(value.string_value(v)) as long), ""
+        return json.from_int(string.length(value.string_value(v)) as long), ""
     }
-    if string.equals(name, "type") == 1 { return json.create_string(_tname(t)), "" }
+    if string.equals(name, "type") == 1 { return json.str(_tname(t)), "" }
     if string.equals(name, "keys") == 1 || string.equals(name, "keys_unsorted") == 1 {
         if t == value.T_OBJECT {
             if string.equals(name, "keys") == 1 { return value.sorted_keys(v), "" }
-            out = json.create_array()
+            out = json.arr()
             n = json.object_size_raw(v)
             i = 0
             while i < n {
-                json.array_add_raw(out, json.create_string(json.object_key_at(v, i)))
+                json.array_add_raw(out, json.str(json.object_key_at(v, i)))
                 i = i + 1
             }
             return out, ""
         }
         if t == value.T_ARRAY {
-            out = json.create_array()
+            out = json.arr()
             n = json.array_size(v)
             i = 0
             while i < n {
-                json.array_add_raw(out, json.create_int(i as long))
+                json.array_add_raw(out, json.from_int(i as long))
                 i = i + 1
             }
             return out, ""
         }
         return null, "${_tname(t)} (${value.to_json(v)}) has no keys"
     }
-    if string.equals(name, "infinite") == 1 { return json.create_number(1.0 / 0.0), "" }
-    if string.equals(name, "nan") == 1 { return json.create_number(0.0 / 0.0), "" }
+    if string.equals(name, "infinite") == 1 { return json.num(1.0 / 0.0), "" }
+    if string.equals(name, "nan") == 1 { return json.num(0.0 / 0.0), "" }
     if string.equals(name, "isinfinite") == 1 {
         if t != value.T_NUMBER { return null, _num_required(name, v) }
         d = value.number_of(v)
-        return json.create_bool(_b(d == 1.0 / 0.0 || d == -1.0 / 0.0)), ""
+        return json.boolean(_b(d == 1.0 / 0.0 || d == -1.0 / 0.0)), ""
     }
     if string.equals(name, "isnan") == 1 {
         if t != value.T_NUMBER { return null, _num_required(name, v) }
         d = value.number_of(v)
-        return json.create_bool(_b(d != d)), ""
+        return json.boolean(_b(d != d)), ""
     }
     if string.equals(name, "isnormal") == 1 {
         if t != value.T_NUMBER { return null, _num_required(name, v) }
@@ -3169,13 +3169,13 @@ _apply0(ctx: *Ctx, name: string, v: ptr) -> ptr! {
         normal = 1
         if d != d || d == 0.0 || d == 1.0 / 0.0 || d == -1.0 / 0.0 { normal = 0 }
         if math.abs_float(d) < 2.2250738585072014e-308 { normal = 0 }
-        return json.create_bool(normal), ""
+        return json.boolean(normal), ""
     }
     if string.equals(name, "sort") == 1 {
         if t != value.T_ARRAY { return null, "${_tname(t)} (${value.to_json(v)}) cannot be sorted, as it is not an array" }
         l = _array_to_list(v)
         value.sort_list(l, null)
-        out = json.create_array()
+        out = json.arr()
         _drain_into_array(l, out)
         return out, ""
     }
@@ -3183,7 +3183,7 @@ _apply0(ctx: *Ctx, name: string, v: ptr) -> ptr! {
         if t != value.T_ARRAY { return null, "${_tname(t)} (${value.to_json(v)}) cannot be sorted, as it is not an array" }
         l = _array_to_list(v)
         value.sort_list(l, null)
-        out = json.create_array()
+        out = json.arr()
         n = list.size(l)
         i = 0
         while i < n {
@@ -3202,7 +3202,7 @@ _apply0(ctx: *Ctx, name: string, v: ptr) -> ptr! {
     if string.equals(name, "min") == 1 || string.equals(name, "max") == 1 {
         if t != value.T_ARRAY { return null, "Cannot index ${_tname(t)} with number" }
         n = json.array_size(v)
-        if n == 0 { return json.create_null(), "" }
+        if n == 0 { return json.null_value(), "" }
         best = 0
         i = 1
         while i < n {
@@ -3217,10 +3217,10 @@ _apply0(ctx: *Ctx, name: string, v: ptr) -> ptr! {
         return value.copy(json.array_get_raw(v, best)), ""
     }
     if string.equals(name, "reverse") == 1 {
-        if t == value.T_NULL { return json.create_array(), "" }
+        if t == value.T_NULL { return json.arr(), "" }
         if t == value.T_STRING {
             cps = value.explode(value.string_value(v))
-            rev = json.create_array()
+            rev = json.arr()
             i = json.array_size(cps) - 1
             while i >= 0 {
                 json.array_add_raw(rev, value.copy(json.array_get_raw(cps, i)))
@@ -3229,10 +3229,10 @@ _apply0(ctx: *Ctx, name: string, v: ptr) -> ptr! {
             json.free(cps)
             s, _e = value.implode(rev)
             json.free(rev)
-            return json.create_string(s), ""
+            return json.str(s), ""
         }
         if t != value.T_ARRAY { return null, "Cannot reverse ${_tname(t)}" }
-        out = json.create_array()
+        out = json.arr()
         i = json.array_size(v) - 1
         while i >= 0 {
             json.array_add_raw(out, value.copy(json.array_get_raw(v, i)))
@@ -3240,7 +3240,7 @@ _apply0(ctx: *Ctx, name: string, v: ptr) -> ptr! {
         }
         return out, ""
     }
-    if string.equals(name, "tojson") == 1 { return json.create_string(value.to_json(v)), "" }
+    if string.equals(name, "tojson") == 1 { return json.str(value.to_json(v)), "" }
     if string.equals(name, "tostring") == 1 { return _tostring(v), "" }
     if string.equals(name, "fromjson") == 1 {
         if t != value.T_STRING { return null, "${_tname(t)} (${value.to_json(v)}) cannot be parsed as JSON" }
@@ -3263,14 +3263,14 @@ _apply0(ctx: *Ctx, name: string, v: ptr) -> ptr! {
     if string.equals(name, "implode") == 1 {
         s, err = value.implode(v)
         if err != "" { return null, "${err}" }
-        return json.create_string(s), ""
+        return json.str(s), ""
     }
     if string.equals(name, "trim") == 1 || string.equals(name, "ltrim") == 1 || string.equals(name, "rtrim") == 1 {
         if t != value.T_STRING { return null, "${_tname(t)} (${value.to_json(v)}) cannot be trimmed" }
-        return json.create_string(_trim(value.string_value(v), name)), ""
+        return json.str(_trim(value.string_value(v), name)), ""
     }
     if string.equals(name, "now") == 1 {
-        return json.create_number((os.wall_seconds() as float) + (os.wall_micros() as float) / 1000000.0), ""
+        return json.num((os.wall_seconds() as float) + (os.wall_micros() as float) / 1000000.0), ""
     }
     if string.equals(name, "mktime") == 1 {
         secs, merr = _mktime(v)
@@ -3281,21 +3281,21 @@ _apply0(ctx: *Ctx, name: string, v: ptr) -> ptr! {
         if t != value.T_NUMBER { return null, "${name}() requires a number" }
         return _gmtime(value.number_of(v)), ""
     }
-    if string.equals(name, "input_filename") == 1 { return json.create_null(), "" }
+    if string.equals(name, "input_filename") == 1 { return json.null_value(), "" }
     if string.equals(name, "builtins") == 1 { return _builtins(), "" }
     if string.equals(name, "frexp") == 1 {
         if t != value.T_NUMBER { return null, _num_required(name, v) }
         d = value.number_of(v)
-        out = json.create_array()
+        out = json.arr()
         json.array_add_raw(out, value.make_number(aether_jq_math1(33, d)))
-        json.array_add_raw(out, json.create_int(aether_jq_frexp_exp(d) as long))
+        json.array_add_raw(out, json.from_int(aether_jq_frexp_exp(d) as long))
         return out, ""
     }
     if string.equals(name, "modf") == 1 {
         if t != value.T_NUMBER { return null, _num_required(name, v) }
         d = value.number_of(v)
         ip = aether_jq_modf_int(d)
-        out = json.create_array()
+        out = json.arr()
         json.array_add_raw(out, value.make_number(d - ip))
         json.array_add_raw(out, value.make_number(ip))
         return out, ""
@@ -3390,7 +3390,7 @@ _trim(s: string, which: string) -> string {
 
 // `builtins`: every native and prelude definition as "name/arity".
 _builtins() -> ptr {
-    out = json.create_array()
+    out = json.arr()
     _add_words(out, NATIVES0, 0)
     _add_words(out, NATIVES1, 1)
     _add_words(out, NATIVES2, 2)
@@ -3426,7 +3426,7 @@ _builtins() -> ptr {
                 }
             }
             if string.length(fname) > 0 && string.char_at_n(fname, string.length(fname), 0) != 95 {
-                json.array_add_raw(out, json.create_string("${fname}/${arity}"))
+                json.array_add_raw(out, json.str("${fname}/${arity}"))
             }
             pos = j
         }
@@ -3443,7 +3443,7 @@ _add_words(out: ptr, table: string, arity: int) {
             if i > start {
                 w = string.substring_n(table, n, start, i)
                 if string.char_at_n(w, string.length(w), 0) != 95 {
-                    json.array_add_raw(out, json.create_string("${w}/${arity}"))
+                    json.array_add_raw(out, json.str("${w}/${arity}"))
                 }
             }
             start = i + 1
@@ -3461,11 +3461,11 @@ _apply1(name: string, v: ptr, a: ptr) -> ptr! {
     ta = value.type_of(a)
     if string.equals(name, "has") == 1 {
         if t == value.T_OBJECT && ta == value.T_STRING {
-            return json.create_bool(json.object_has(v, value.string_value(a))), ""
+            return json.boolean(json.object_has(v, value.string_value(a))), ""
         }
         if t == value.T_ARRAY && ta == value.T_NUMBER {
             d = value.number_of(a)
-            return json.create_bool(_b(d >= 0.0 && d < (json.array_size(v) as float))), ""
+            return json.boolean(_b(d >= 0.0 && d < (json.array_size(v) as float))), ""
         }
         return null, "Cannot check whether ${_tname(t)} has a ${_tname(ta)} key"
     }
@@ -3473,14 +3473,14 @@ _apply1(name: string, v: ptr, a: ptr) -> ptr! {
         if t != ta {
             return null, "${_tname(t)} (${value.to_json(v)}) and ${_tname(ta)} (${value.to_json(a)}) cannot have their containment checked"
         }
-        return json.create_bool(_contains(v, a)), ""
+        return json.boolean(_contains(v, a)), ""
     }
     if string.equals(name, "indices") == 1 {
-        if t == value.T_NULL || ta == value.T_NULL { return json.create_null(), "" }
+        if t == value.T_NULL || ta == value.T_NULL { return json.null_value(), "" }
         if t == value.T_STRING && ta == value.T_STRING { return _str_indices(value.string_value(v), value.string_value(a)), "" }
         if t == value.T_ARRAY && ta == value.T_ARRAY { return _indices_of(v, a), "" }
         if t == value.T_ARRAY {
-            one = json.create_array()
+            one = json.arr()
             json.array_add_raw(one, value.copy(a))
             out = _indices_of(v, one)
             json.free(one)
@@ -3492,17 +3492,17 @@ _apply1(name: string, v: ptr, a: ptr) -> ptr! {
         if ta != value.T_NUMBER { return null, "flatten depth must not be negative" }
         if value.number_of(a) < 0.0 { return null, "flatten depth must not be negative" }
         if t != value.T_ARRAY { return null, "Cannot iterate over ${_tname(t)}" }
-        out = json.create_array()
+        out = json.arr()
         _flatten_into(out, v, value.clamp_int(value.number_of(a)))
         return out, ""
     }
     if string.equals(name, "startswith") == 1 {
         if t != value.T_STRING || ta != value.T_STRING { return null, "startswith() requires string inputs" }
-        return json.create_bool(string.starts_with(value.string_value(v), value.string_value(a))), ""
+        return json.boolean(string.starts_with(value.string_value(v), value.string_value(a))), ""
     }
     if string.equals(name, "endswith") == 1 {
         if t != value.T_STRING || ta != value.T_STRING { return null, "endswith() requires string inputs" }
-        return json.create_bool(string.ends_with(value.string_value(v), value.string_value(a))), ""
+        return json.boolean(string.ends_with(value.string_value(v), value.string_value(a))), ""
     }
     if string.equals(name, "ltrimstr") == 1 || string.equals(name, "rtrimstr") == 1 || string.equals(name, "trimstr") == 1 {
         if t != value.T_STRING || ta != value.T_STRING { return value.copy(v), "" }
@@ -3518,7 +3518,7 @@ _apply1(name: string, v: ptr, a: ptr) -> ptr! {
         if string.equals(name, "ltrimstr") == 0 {
             if string.ends_with(s, pre) == 1 && n - m >= from { to = n - m }
         }
-        return json.create_string(string.substring_n(s, n, from, to)), ""
+        return json.str(string.substring_n(s, n, from, to)), ""
     }
     if string.equals(name, "split") == 1 {
         if t != value.T_STRING || ta != value.T_STRING { return null, "split input and separator must be strings" }
@@ -3548,10 +3548,10 @@ _apply1(name: string, v: ptr, a: ptr) -> ptr! {
         while lo <= hi {
             mid = (lo + hi) / 2
             c = value.cmp(json.array_get_raw(v, mid), a)
-            if c == 0 { return json.create_int(mid as long), "" }
+            if c == 0 { return json.from_int(mid as long), "" }
             if c < 0 { lo = mid + 1 } else { hi = mid - 1 }
         }
-        return json.create_int((0 - 1 - lo) as long), ""
+        return json.from_int((0 - 1 - lo) as long), ""
     }
     return null, "${name}/1 is not defined"
 }
@@ -3570,7 +3570,7 @@ _apply2(name: string, v: ptr, a: ptr, b: ptr) -> ptr! {
         return res5, ""
     }
     if string.equals(name, "_match_impl") == 1 {
-        res6, rerr6 = _match_impl(v, a, b, json.create_bool(0), 1)
+        res6, rerr6 = _match_impl(v, a, b, json.boolean(0), 1)
         if res6 == null { return null, "${rerr6}" }
         return res6, ""
     }
@@ -3637,14 +3637,14 @@ _contains(a: ptr, b: ptr) -> int {
 
 // Codepoint offsets of every occurrence of `sub` in `s` (overlapping).
 _str_indices(s: string, sub: string) -> ptr {
-    out = json.create_array()
+    out = json.arr()
     m = string.length(sub)
-    if m == 0 { return json.create_null() }
+    if m == 0 { return json.null_value() }
     start = 0
     while 1 == 1 {
         idx = string.index_of_from(s, sub, start)
         if idx < 0 { return out }
-        json.array_add_raw(out, json.create_int(value.codepoint_of_byte(s, idx) as long))
+        json.array_add_raw(out, json.from_int(value.codepoint_of_byte(s, idx) as long))
         start = idx + 1
     }
     return out
@@ -3707,14 +3707,14 @@ _match_impl(v: ptr, re: ptr, flags: ptr, test: ptr, two_arg: int) -> ptr! {
     }
     s = value.string_value(v)
     slen = string.length(s)
-    out = json.create_array()
+    out = json.arr()
     is_test = value.truthy(test)
     if global == 0 {
         caps, _e = regex.captures(compiled, s)
         if caps != null {
             if is_test == 1 {
                 json.free(out)
-                out = json.create_bool(1)
+                out = json.boolean(1)
             } else {
                 names1 = _group_names(pattern)
                 json.array_add_raw(out, _match_object(s, 0, 0, caps, names1))
@@ -3723,7 +3723,7 @@ _match_impl(v: ptr, re: ptr, flags: ptr, test: ptr, two_arg: int) -> ptr! {
             regex.captures_free(caps)
         } else if is_test == 1 {
             json.free(out)
-            out = json.create_bool(0)
+            out = json.boolean(0)
         }
         regex.free(compiled)
         return out, ""
@@ -3768,7 +3768,7 @@ _match_impl(v: ptr, re: ptr, flags: ptr, test: ptr, two_arg: int) -> ptr! {
     if is_test == 1 {
         found = _b(json.array_size(out) > 0)
         json.free(out)
-        return json.create_bool(found), ""
+        return json.boolean(found), ""
     }
     return out, ""
 }
@@ -3784,12 +3784,12 @@ _match_object(s: string, base: int, base_cp: int, caps: ptr, names: ptr) -> ptr 
     m = _match_head(s, st, en, st_cp)
     // The group count comes from the pattern: PCRE2 leaves unset trailing
     // groups out of its count, but jq reports every group.
-    arr = json.create_array()
+    arr = json.arr()
     n = json.array_size(names) + 1
     have = regex.capture_count(caps)
     g = 1
     while g < n {
-        c = json.create_object()
+        c = json.obj()
         gs = -1
         ge = -1
         if g < have {
@@ -3797,18 +3797,18 @@ _match_object(s: string, base: int, base_cp: int, caps: ptr, names: ptr) -> ptr 
             ge = regex.capture_end(caps, g)
         }
         if gs < 0 {
-            json.object_set_raw(c, "offset", json.create_int(-1))
-            json.object_set_raw(c, "length", json.create_int(0))
-            json.object_set_raw(c, "string", json.create_null())
+            json.object_set_raw(c, "offset", json.from_int(-1))
+            json.object_set_raw(c, "length", json.from_int(0))
+            json.object_set_raw(c, "string", json.null_value())
         } else {
             gs = gs + base
             ge = ge + base
             gs_cp = base_cp + value.codepoints_between(s, base, gs)
-            json.object_set_raw(c, "offset", json.create_int(gs_cp as long))
-            json.object_set_raw(c, "length", json.create_int(value.codepoints_between(s, gs, ge) as long))
-            json.object_set_raw(c, "string", json.create_string(string.substring_n(s, slen, gs, ge)))
+            json.object_set_raw(c, "offset", json.from_int(gs_cp as long))
+            json.object_set_raw(c, "length", json.from_int(value.codepoints_between(s, gs, ge) as long))
+            json.object_set_raw(c, "string", json.str(string.substring_n(s, slen, gs, ge)))
         }
-        nm = json.create_null()
+        nm = json.null_value()
         if g - 1 < json.array_size(names) {
             given = json.array_get_raw(names, g - 1)
             if value.type_of(given) == value.T_STRING {
@@ -3828,16 +3828,16 @@ _match_object(s: string, base: int, base_cp: int, caps: ptr, names: ptr) -> ptr 
 // match is needed, so global matching stays linear.
 _match_span(s: string, st: int, en: int, st_cp: int) -> ptr {
     m = _match_head(s, st, en, st_cp)
-    json.object_set_raw(m, "captures", json.create_array())
+    json.object_set_raw(m, "captures", json.arr())
     return m
 }
 
 // offset, length (in codepoints) and string of the match at bytes [st, en).
 _match_head(s: string, st: int, en: int, st_cp: int) -> ptr {
-    m = json.create_object()
-    json.object_set_raw(m, "offset", json.create_int(st_cp as long))
-    json.object_set_raw(m, "length", json.create_int(value.codepoints_between(s, st, en) as long))
-    json.object_set_raw(m, "string", json.create_string(string.substring_n(s, string.length(s), st, en)))
+    m = json.obj()
+    json.object_set_raw(m, "offset", json.from_int(st_cp as long))
+    json.object_set_raw(m, "length", json.from_int(value.codepoints_between(s, st, en) as long))
+    json.object_set_raw(m, "string", json.str(string.substring_n(s, string.length(s), st, en)))
     return m
 }
 
@@ -3846,7 +3846,7 @@ _match_head(s: string, st: int, en: int, st_cp: int) -> ptr {
 // `(?'name'`; `(?:` and the other `(?` forms do not capture; `\(` and
 // parens inside [...] are literal.
 _group_names(pattern: string) -> ptr {
-    out = json.create_array()
+    out = json.arr()
     n = string.length(pattern)
     i = 0
     in_class = 0
@@ -3875,14 +3875,14 @@ _group_names(pattern: string) -> ptr {
                         i = i + 1
                     } else {
                         while k < n && string.char_at_n(pattern, n, k) != close { k = k + 1 }
-                        json.array_add_raw(out, json.create_string(string.substring_n(pattern, n, j + 1, k)))
+                        json.array_add_raw(out, json.str(string.substring_n(pattern, n, j + 1, k)))
                         i = k + 1
                     }
                 } else {
                     i = i + 1
                 }
             } else {
-                json.array_add_raw(out, json.create_null())
+                json.array_add_raw(out, json.null_value())
                 i = i + 1
             }
         } else {
@@ -3900,18 +3900,18 @@ _group_names(pattern: string) -> ptr {
 _format(name: string, v: ptr) -> ptr! {
     t = value.type_of(v)
     if string.equals(name, "text") == 1 { return _tostring(v), "" }
-    if string.equals(name, "json") == 1 { return json.create_string(value.to_json(v)), "" }
+    if string.equals(name, "json") == 1 { return json.str(value.to_json(v)), "" }
     if string.equals(name, "html") == 1 {
         s = _tostring(v)
         out = _escape_html(value.string_value(s))
         json.free(s)
-        return json.create_string(out), ""
+        return json.str(out), ""
     }
     if string.equals(name, "uri") == 1 {
         s = _tostring(v)
         out = _escape_uri(value.string_value(s))
         json.free(s)
-        return json.create_string(out), ""
+        return json.str(out), ""
     }
     if string.equals(name, "csv") == 1 || string.equals(name, "tsv") == 1 {
         if t != value.T_ARRAY { return null, "${_tname(t)} (${value.to_json(v)}) cannot be ${name}-formatted, only an array can be" }
@@ -3929,7 +3929,7 @@ _format(name: string, v: ptr) -> ptr! {
         text = value.string_value(s)
         out = encoding.base64_encode_padded(string.bytes(text))
         json.free(s)
-        return json.create_string(out), ""
+        return json.str(out), ""
     }
     if string.equals(name, "base64d") == 1 {
         s = _tostring(v)
@@ -3941,14 +3941,14 @@ _format(name: string, v: ptr) -> ptr! {
         }
         json.free(s)
         if _has_nul_byte(out) == 1 { return null, "\\u0000 is not supported in strings" }
-        return json.create_string(out), ""
+        return json.str(out), ""
     }
     if string.equals(name, "base32") == 1 {
         s = _tostring(v)
         text = value.string_value(s)
         out = encoding.base32_encode(string.bytes(text))
         json.free(s)
-        return json.create_string(out), ""
+        return json.str(out), ""
     }
     if string.equals(name, "base32d") == 1 {
         s = _tostring(v)
@@ -3960,7 +3960,7 @@ _format(name: string, v: ptr) -> ptr! {
         }
         json.free(s)
         if _has_nul_byte(out) == 1 { return null, "\\u0000 is not supported in strings" }
-        return json.create_string(out), ""
+        return json.str(out), ""
     }
     return null, "${name} is not a valid format"
 }
@@ -4068,7 +4068,7 @@ _format_row(v: ptr, kind: string) -> ptr! {
         }
         i = i + 1
     }
-    return json.create_string(strbuilder.finish(sb)), ""
+    return json.str(strbuilder.finish(sb)), ""
 }
 
 _format_sh(v: ptr) -> ptr! {
@@ -4085,14 +4085,14 @@ _format_sh(v: ptr) -> ptr! {
             }
             i = i + 1
         }
-        return json.create_string(strbuilder.finish(sb)), ""
+        return json.str(strbuilder.finish(sb)), ""
     }
     err = _sh_quote(sb, v)
     if err != "" {
         strbuilder.free(sb)
         return null, "${err}"
     }
-    return json.create_string(strbuilder.finish(sb)), ""
+    return json.str(strbuilder.finish(sb)), ""
 }
 
 _sh_quote(sb: ptr, e: ptr) -> string {
@@ -4166,17 +4166,17 @@ _gmtime(secs: float) -> ptr {
     days = _floor_div(whole, 86400)
     rem = whole - days * 86400
     y, m, d = _civil_from_days(days)
-    out = json.create_array()
-    json.array_add_raw(out, json.create_int(y))
-    json.array_add_raw(out, json.create_int(m - 1))
-    json.array_add_raw(out, json.create_int(d))
-    json.array_add_raw(out, json.create_int(rem / 3600))
-    json.array_add_raw(out, json.create_int((rem % 3600) / 60))
+    out = json.arr()
+    json.array_add_raw(out, json.from_int(y))
+    json.array_add_raw(out, json.from_int(m - 1))
+    json.array_add_raw(out, json.from_int(d))
+    json.array_add_raw(out, json.from_int(rem / 3600))
+    json.array_add_raw(out, json.from_int((rem % 3600) / 60))
     json.array_add_raw(out, value.make_number(((rem % 60) as float) + frac))
     wday = (days + 4) % 7
     if wday < 0 { wday = wday + 7 }
-    json.array_add_raw(out, json.create_int(wday))
-    json.array_add_raw(out, json.create_int(days - _days_from_civil(y, 1, 1)))
+    json.array_add_raw(out, json.from_int(wday))
+    json.array_add_raw(out, json.from_int(days - _days_from_civil(y, 1, 1)))
     return out
 }
 
@@ -4199,7 +4199,7 @@ _mktime(v: ptr) -> ptr! {
     y = y + _floor_div(mo, 12)
     mo = mo - _floor_div(mo, 12) * 12
     days = _days_from_civil(y, mo + 1, 1) + d - 1
-    return json.create_int(days * 86400 + h * 3600 + mi * 60 + s), ""
+    return json.from_int(days * 86400 + h * 3600 + mi * 60 + s), ""
 }
 
 // A broken-down time (or a number, converted first) as its fields.
@@ -4342,7 +4342,7 @@ _strftime(v: ptr, fmt: string, what: string) -> ptr! {
             }
         }
     }
-    return json.create_string(strbuilder.finish(sb)), ""
+    return json.str(strbuilder.finish(sb)), ""
 }
 
 // Parse `s` against `fmt` into a broken-down time. Supports the numeric

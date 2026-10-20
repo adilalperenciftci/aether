@@ -35,7 +35,9 @@ where the class is large or mixed: `string.replace`, `string.concat_wrapped`,
 `fs.realpath`) through the main places (local, field, element, module `var`,
 capture, list, message) and transfers (scope exit, overwrite, caught panic,
 keep, return, alias), so a change to how the producers return their strings
-shows in the grid.
+shows in the grid. `SA3` to `SA5` (`string.from_int`, `string.pad_start`,
+`string.new_with_length`) are three of the functions std declared as
+returning a `ptr` until #3018 typed them `string`.
 
 The sum kinds `KS` and `KSF` (`Owned = Named | Plain`, whose `Named` owns a
 string, and `Acting = Act | Plain`, whose `Act` owns a closure) cross the

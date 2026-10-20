@@ -12,8 +12,8 @@
 # stored in a field, a module-level `var` or a container, or passed to a
 # `@keep` or `@retain` parameter). A call is checked against the
 # callee's signature: a `string` reaches a `@keep ptr`, or a `ptr` field,
-# only through `string.keep(s)`. A closure's `ptr` parameter is always borrowed, and a
-# function with a `@keep` parameter is called by name, never as a value.
+# only through `string.keep(s)`. A function with a `@keep` parameter is no typed C
+# function pointer, and as a value it goes only where its type says it keeps (#2980).
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
@@ -133,6 +133,9 @@ main() {
 AE
 refused string_to_keep 9:10 "a \`string\` is given to a \`@keep ptr\` parameter"
 
+# A function with a `@keep` parameter is a value of a type that says so
+# (#2980): it may not go where a call through it would be checked as one
+# that borrows, a bare `fn` here.
 cat > "$TMP/keep_as_value.ae" <<'AE'
 var kept: ptr = null
 
@@ -140,12 +143,14 @@ hold(p: @keep ptr) {
     kept = p
 }
 
+run(cb: fn) { call(cb, null) }
+
 main() {
     f = hold
-    call(f, null)
+    run(f)
 }
 AE
-refused keep_as_value 8:9 "'hold' keeps its \`ptr\` parameter 'p' (\`@keep\`), so it cannot be used as a value"
+refused keep_as_value 11:9 "'f' keeps its \`ptr\` parameter 1 (\`@keep\`), where \`fn\` borrows it"
 
 cat > "$TMP/string_field.ae" <<'AE'
 struct N { child: ptr }
@@ -244,6 +249,97 @@ main() {
 }
 AE
 accepted declared
+
+# A `const` bound to a literal is pinned, as the literal is.
+cat > "$TMP/keep_const.ae" <<'AE'
+const LABEL = "job"
+
+var kept: ptr = null
+
+hold(p: @keep ptr) {
+    kept = p
+}
+
+main() { hold(LABEL) }
+AE
+accepted keep_const
+
+# A module `var` that starts as a literal is not pinned: it holds whatever
+# was stored last (the review of #2990 found it taken by name for a const).
+cat > "$TMP/keep_var_literal.ae" <<'AE'
+import std.string
+
+var label: string = "start"
+var kept: ptr = null
+
+hold(p: @keep ptr) {
+    kept = p
+}
+
+main() {
+    label = string.concat("a", "b")
+    hold(label)
+}
+AE
+refused keep_var_literal 12:10 "a \`string\` is given to a \`@keep ptr\` parameter"
+
+# Nor is a local that shadows a pinned const: the name is the local there.
+cat > "$TMP/keep_const_shadowed.ae" <<'AE'
+import std.string
+
+const LABEL = "job"
+
+var kept: ptr = null
+
+hold(p: @keep ptr) {
+    kept = p
+}
+
+f() {
+    LABEL = string.concat("a", "b")
+    hold(LABEL)
+}
+
+main() { f() }
+AE
+refused keep_const_shadowed 13:10 "a \`string\` is given to a \`@keep ptr\` parameter"
+
+cat > "$TMP/keep_const_param.ae" <<'AE'
+import std.string
+
+const LABEL = "job"
+
+var kept: ptr = null
+
+hold(p: @keep ptr) {
+    kept = p
+}
+
+f(LABEL: string) {
+    hold(LABEL)
+}
+
+main() { f(string.concat("a", "b")) }
+AE
+refused keep_const_param 12:10 "a \`string\` is given to a \`@keep ptr\` parameter"
+
+# The same rule decides a string stored into C memory that outlives the
+# function (#2979): a module `var` there needs string.keep too.
+cat > "$TMP/c_memory_var_literal.ae" <<'AE'
+import std.string
+
+extern malloc(n: int) -> ptr
+
+var label: string = "start"
+var mem: ptr = null
+
+main() {
+    label = string.concat("a", "b")
+    mem = malloc(16)
+    (mem as string[])[0] = label
+}
+AE
+refused c_memory_var_literal 11:28 "a string is stored into C memory that outlives the function"
 
 # A struct or a closure that holds a borrowed parameter keeps it only when
 # it escapes itself (Nic, 2026-10-19): each escaping form is still E0902.
@@ -393,6 +489,21 @@ main() { put(null) }
 AE
 refused closure_to_retain 4:16 "'p' is a borrowed \`ptr\` parameter captured by a closure that is passed to a parameter that keeps it"
 
+# #3035: the same through a function value, by its type.
+cat > "$TMP/closure_to_keep_through_value.ae" <<'AE'
+var kept: ptr = null
+
+hold(q: @keep ptr) { kept = q }
+
+put(p: ptr) {
+    h = hold
+    h(|| { println("${p == null}") })
+}
+
+main() { put(null) }
+AE
+refused closure_to_keep_through_value 7:7 "'p' is a borrowed \`ptr\` parameter captured by a closure that is passed to a parameter that keeps it"
+
 cat > "$TMP/closure_stores_inside.ae" <<'AE'
 var kept: ptr = null
 
@@ -405,6 +516,423 @@ put(p: ptr) {
 main() { put(null) }
 AE
 refused closure_stores_inside 6:14 "'p' is a borrowed \`ptr\` parameter, stored in a module-level \`var\`"
+
+# A tuple, an optional's payload, a match binding and what a closure that
+# captured the parameter returns hold it as a struct does (#2990): each
+# escaping form is E0902.
+
+cat > "$TMP/tuple_returned.ae" <<'AE'
+wrap(p: ptr) -> (ptr, int) {
+    t = (p, 1)
+    return t
+}
+
+main() {
+    a, b = wrap(null)
+    println("${a == null} ${b}")
+}
+AE
+refused tuple_returned 3:12 "'p' is a borrowed \`ptr\` parameter held by a tuple that is returned"
+
+cat > "$TMP/tuple_part_global.ae" <<'AE'
+var kept: ptr = null
+
+put(p: ptr) {
+    t = (p, 1)
+    a, b = t
+    kept = a
+    println("${b}")
+}
+
+main() { put(null) }
+AE
+refused tuple_part_global 6:5 "'p' is a borrowed \`ptr\` parameter, stored in a module-level \`var\`"
+
+# #2990: a part read out of a tuple local holds what that part holds, and no
+# more: the other part here is a block of the function's own.
+cat > "$TMP/tuple_other_part.ae" <<'AE'
+extern malloc(n: int) -> ptr
+extern free(p: ptr)
+
+second(p: ptr) -> ptr {
+    t = (p, malloc(8))
+    a, b = t
+    if a == null { free(b) }
+    return b
+}
+
+main() {
+    q = malloc(4)
+    free(second(q))
+    free(q)
+}
+AE
+accepted tuple_other_part
+
+cat > "$TMP/tuple_nested_part.ae" <<'AE'
+extern malloc(n: int) -> ptr
+
+var kept: ptr = null
+
+put(p: ptr) -> ptr {
+    t = ((1, p), malloc(8))
+    x, y = t
+    n, q = x
+    kept = q
+    return y
+}
+
+main() { println("${put(null) == null}") }
+AE
+refused tuple_nested_part 9:5 "'p' is a borrowed \`ptr\` parameter, stored in a module-level \`var\`"
+
+cat > "$TMP/tuple_nested_other.ae" <<'AE'
+extern malloc(n: int) -> ptr
+extern free(p: ptr)
+
+second(p: ptr) -> ptr {
+    t = ((1, p), malloc(8))
+    x, y = t
+    n, q = x
+    if q == null { return y }
+    return y
+}
+
+main() { free(second(null)) }
+AE
+accepted tuple_nested_other
+
+# #3036: a field read out of a struct local holds what went into that field,
+# by the literal, by a store into it, nested, or bound by a struct pattern.
+cat > "$TMP/struct_other_field.ae" <<'AE'
+extern malloc(n: int) -> ptr
+extern free(p: ptr)
+
+struct Pair { a: ptr, b: ptr }
+struct Outer { inner: Pair, n: int }
+
+by_literal(p: ptr) -> ptr {
+    s = Pair { a: p, b: malloc(8) }
+    if s.a == null { return s.b }
+    return s.b
+}
+
+by_store(p: ptr) -> ptr {
+    s = Pair { a: null, b: null }
+    s.a = p
+    s.b = malloc(8)
+    return s.b
+}
+
+nested(p: ptr) -> ptr {
+    o = Outer { inner: Pair { a: p, b: malloc(8) }, n: 1 }
+    o.inner.a = p
+    return o.inner.b
+}
+
+by_pattern(p: ptr) -> ptr {
+    s = Pair { a: p, b: malloc(8) }
+    match s {
+        Pair { a: _, b: q } -> { return q }
+    }
+    return null
+}
+
+main() {
+    free(by_literal(null))
+    free(by_store(null))
+    free(nested(null))
+    free(by_pattern(null))
+}
+AE
+accepted struct_other_field
+
+cat > "$TMP/struct_nested_field.ae" <<'AE'
+struct Pair { a: ptr, b: ptr }
+struct Outer { inner: Pair, n: int }
+
+var kept: ptr = null
+
+put(p: ptr) {
+    o = Outer { inner: Pair { a: null, b: null }, n: 1 }
+    o.inner.b = p
+    kept = o.inner.b
+}
+
+main() { put(null) }
+AE
+refused struct_nested_field 9:5 "'p' is a borrowed \`ptr\` parameter, stored in a module-level \`var\`"
+
+# #2990 review: what a value holds is never dropped past a limit. A holder
+# of more parts than the checker tracks one by one folds them into the
+# whole value, and a function with more holders than a fixed table has room
+# for grows the table. Each of these was accepted: the ninth part, the ninth
+# parameter or the seventeenth local fell off the end.
+BIG='struct Big { a: ptr, b: ptr, c: ptr, d: ptr, e: ptr, f: ptr, g: ptr, h: ptr, i: ptr }'
+
+cat > "$TMP/limit_struct_fields.ae" <<AE
+$BIG
+
+var kept: ptr = null
+
+put(p: ptr) {
+    s = Big { a: p, b: p, c: p, d: p, e: p, f: p, g: p, h: p, i: p }
+    kept = s.i
+}
+
+main() { put(null) }
+AE
+refused limit_struct_fields 7:5 "'p' is a borrowed \`ptr\` parameter, stored in a module-level \`var\`"
+
+cat > "$TMP/limit_struct_stores.ae" <<AE
+$BIG
+
+var kept: ptr = null
+
+put(p: ptr) {
+    s = Big { a: null, b: null, c: null, d: null, e: null, f: null, g: null, h: null, i: null }
+    s.a = p
+    s.b = p
+    s.c = p
+    s.d = p
+    s.e = p
+    s.f = p
+    s.g = p
+    s.h = p
+    s.i = p
+    kept = s.i
+}
+
+main() { put(null) }
+AE
+refused limit_struct_stores 16:5 "'p' is a borrowed \`ptr\` parameter, stored in a module-level \`var\`"
+
+cat > "$TMP/limit_tuple_parts.ae" <<'AE'
+var kept: ptr = null
+
+put(p: ptr) {
+    t = (p, p, p, p, p, p, p, p, p)
+    _a, _b, _c, _d, _e, _f, _g, _h, i = t
+    kept = i
+}
+
+main() { put(null) }
+AE
+refused limit_tuple_parts 6:5 "'p' is a borrowed \`ptr\` parameter, stored in a module-level \`var\`"
+
+cat > "$TMP/limit_params.ae" <<AE
+$BIG
+
+var kept: ptr = null
+
+put(p1: ptr, p2: ptr, p3: ptr, p4: ptr, p5: ptr, p6: ptr, p7: ptr, p8: ptr, p9: ptr) {
+    s = Big { a: p1, b: p2, c: p3, d: p4, e: p5, f: p6, g: p7, h: p8, i: p9 }
+    t = s
+    kept = t.i
+}
+
+main() { put(null, null, null, null, null, null, null, null, null) }
+AE
+refused limit_params 8:5 "'p9' is a borrowed \`ptr\` parameter"
+
+{ echo 'struct Big8 { a: ptr, b: ptr, c: ptr, d: ptr, e: ptr, f: ptr, g: ptr, h: ptr }'
+  echo
+  echo 'var kept: ptr = null'
+  echo
+  echo 'put(p: ptr) {'
+  i=1
+  while [ "$i" -le 17 ]; do
+      echo "    s$i = Big8 { a: p, b: p, c: p, d: p, e: p, f: p, g: p, h: p }"
+      i=$((i + 1))
+  done
+  echo '    kept = s17.h'
+  echo '}'
+  echo
+  echo 'main() { put(null) }'
+} > "$TMP/limit_holders.ae"
+refused limit_holders 23:5 "'p' is a borrowed \`ptr\` parameter, stored in a module-level \`var\`"
+
+# #3043: an address of a local reads the local as it is when read, a store
+# made after the address was taken included. It read what the local held
+# when the address was taken, so the parameter stored after went out
+# unchecked through the alias.
+cat > "$TMP/alias_before_store.ae" <<'AE'
+struct Pair { a: ptr, b: ptr }
+
+var kept: ptr = null
+
+put(p: ptr) {
+    s = Pair { a: null, b: null }
+    ps = (&s) as *Pair
+    s.a = p
+    kept = ps.a
+}
+
+main() { put(null) }
+AE
+refused alias_before_store 9:5 "'p' is a borrowed \`ptr\` parameter, stored in a module-level \`var\`"
+
+cat > "$TMP/alias_copy_before_store.ae" <<'AE'
+struct Pair { a: ptr, b: ptr }
+
+var kept: ptr = null
+
+put(p: ptr) {
+    s = Pair { a: null, b: null }
+    ps = (&s) as *Pair
+    qs = ps
+    s.a = p
+    kept = qs.a
+}
+
+main() { put(null) }
+AE
+refused alias_copy_before_store 10:5 "'p' is a borrowed \`ptr\` parameter, stored in a module-level \`var\`"
+
+cat > "$TMP/alias_field_before_store.ae" <<'AE'
+struct Pair { a: ptr, b: ptr }
+struct Outer { inner: Pair, n: int }
+
+var kept: ptr = null
+
+put(p: ptr) {
+    o = Outer { inner: Pair { a: null, b: null }, n: 1 }
+    pi = (&o.inner) as *Pair
+    o.inner.a = p
+    kept = pi.a
+}
+
+main() { put(null) }
+AE
+refused alias_field_before_store 10:5 "'p' is a borrowed \`ptr\` parameter, stored in a module-level \`var\`"
+
+# The field the parameter did not go into holds nothing, through the alias
+# as through the local.
+cat > "$TMP/alias_other_field.ae" <<'AE'
+struct Pair { a: ptr, b: ptr }
+
+var kept: ptr = null
+
+put(p: ptr) {
+    s = Pair { a: null, b: null }
+    ps = (&s) as *Pair
+    s.a = p
+    kept = ps.b
+}
+
+main() { put(null) }
+AE
+accepted alias_other_field
+
+# #3033: `p + n` and `p - n` point into the memory `p` does: stored,
+# returned or kept, each is the parameter kept.
+cat > "$TMP/arith_global.ae" <<'AE'
+var kept: ptr = null
+
+put(p: ptr) {
+    kept = p + 8
+}
+
+main() { put(null) }
+AE
+refused arith_global 4:5 "'p' is a borrowed \`ptr\` parameter, stored in a module-level \`var\`"
+
+cat > "$TMP/arith_returned.ae" <<'AE'
+next(p: ptr) -> ptr {
+    q = p - 1
+    return q + 2
+}
+
+main() { println("${next(null) == null}") }
+AE
+refused arith_returned 3:5 "'p' is a borrowed \`ptr\` parameter, returned"
+
+cat > "$TMP/arith_field.ae" <<'AE'
+struct Node { child: ptr }
+
+attach(n: *Node, c: ptr) {
+    n.child = c + 16
+}
+
+main() { attach(heap.new(Node), null) }
+AE
+refused arith_field 4:13 "'c' is a borrowed \`ptr\` parameter, stored in a field or an element"
+
+cat > "$TMP/payload_returned.ae" <<'AE'
+unwrap(p: ptr) -> ptr {
+    let o: ptr? = p
+    return o!
+}
+
+main() { println("${unwrap(null) == null}") }
+AE
+refused payload_returned 3:5 "'p' is a borrowed \`ptr\` parameter, returned"
+
+cat > "$TMP/binding_returned.ae" <<'AE'
+struct Box { v: ptr, n: int }
+
+unbox(p: ptr) -> ptr {
+    b = Box { v: p, n: 1 }
+    match b {
+        Box { v: q, n: _ } -> { return q }
+    }
+    return null
+}
+
+main() { println("${unbox(null) == null}") }
+AE
+refused binding_returned 6:33 "'p' is a borrowed \`ptr\` parameter, returned"
+
+cat > "$TMP/closure_result_global.ae" <<'AE'
+var kept: ptr = null
+
+leak(p: ptr) {
+    f = || { return p }
+    let q: ptr = call(f)
+    kept = q
+}
+
+main() { leak(null) }
+AE
+refused closure_result_global 6:5 "'p' is a borrowed \`ptr\` parameter, stored in a module-level \`var\`"
+
+# A function with a `@keep` parameter is called by name: a typed function
+# pointer to it (a cast, a module-level `var`, an argument) would be called
+# as one that borrows.
+
+cat > "$TMP/keep_fn_cast.ae" <<'AE'
+var kept: ptr = null
+
+hold(q: @keep ptr) { kept = q }
+
+main() {
+    g = hold as fn(ptr)
+    g(null)
+}
+AE
+refused keep_fn_cast 6:9 "'hold' keeps its \`ptr\` parameter 'q' (\`@keep\`), so it cannot be a C function pointer"
+
+cat > "$TMP/keep_fn_var.ae" <<'AE'
+var kept: ptr = null
+
+hold(q: @keep ptr) { kept = q }
+
+var g: fn(ptr) = hold
+
+main() { g(null) }
+AE
+refused keep_fn_var 5:18 "'hold' keeps its \`ptr\` parameter 'q' (\`@keep\`), so it cannot be a C function pointer"
+
+cat > "$TMP/keep_fn_arg.ae" <<'AE'
+var kept: ptr = null
+
+hold(q: @keep ptr) { kept = q }
+
+run(cb: fn(ptr), p: ptr) { cb(p) }
+
+main() { run(hold, null) }
+AE
+refused keep_fn_arg 7:14 "'hold' keeps its \`ptr\` parameter 'q' (\`@keep\`), so it cannot be a C function pointer"
 
 # Need no `@keep`: the aephysics shape (a struct local to the function holds
 # the parameter, or has it stored into a field, and dies with the call) and

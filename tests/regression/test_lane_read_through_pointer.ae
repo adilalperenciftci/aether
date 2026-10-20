@@ -1,0 +1,50 @@
+// #3041: a lane read whose object is reached through a pointer. The lane
+// accessor's object was never checked, so the member accesses under it kept
+// no types and codegen wrote `b.inner.v` where `b` is a pointer: the C
+// compiler stopped at "'b' is a pointer; did you mean to use '->'?". Chains
+// through heap.new, through a pointer field, a ring of them, an eight-lane
+// vector, a lane write, and interpolation must all lower `->` where the
+// object is a pointer.
+import std.lanes
+
+extern exit(code: int)
+
+struct Inner {
+    v: f32x4
+    w: f32x8
+    d: f64x2
+}
+
+struct Outer {
+    inner: Inner
+    next: *Outer
+}
+
+check(ok: bool, what: string) {
+    if !ok {
+        println("FAIL: ${what}")
+        exit(1)
+    }
+}
+
+main() {
+    a = heap.new(Outer)
+    b = heap.new(Outer)
+    a.next = b
+    b.next = a
+    b.inner = Inner { v: lanes.f32x4(1.0, 2.0, 3.0, 4.0), w: lanes.splat8(7.0), d: lanes.f64x2(5.0, 6.0) }
+    a.inner = b.inner
+
+    check(b.inner.v.z == 3.0, "a lane through heap.new")
+    check(a.next.inner.v.w == 4.0, "a lane through a pointer field")
+    check(a.next.next.next.inner.v.x == 1.0, "a lane through a ring of pointers")
+    check(b.next.inner.d.y == 6.0, "a two-lane vector through a pointer")
+    check(b.inner.w.y == 7.0, "an eight-lane vector through heap.new")
+
+    b.inner.v.x = 9.0
+    check(a.next.inner.v.x == 9.0, "a lane written through a pointer")
+
+    println("${b.inner.v.z} ${a.next.inner.d.x} ${a.next.inner.w.w}")
+    heap.free(a)
+    heap.free(b)
+}

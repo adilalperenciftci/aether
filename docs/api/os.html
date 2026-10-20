@@ -29,12 +29,7 @@
     <li><a href="#wait_any_timeout_raw">wait_any_timeout_raw</a></li>
     <li><a href="#getenv">getenv</a></li>
     <li><a href="#which">which</a></li>
-    <li><a href="#aether_args_count">aether_args_count</a></li>
-    <li><a href="#aether_args_get">aether_args_get</a></li>
-    <li><a href="#aether_argv0">aether_argv0</a></li>
     <li><a href="#aether_argv_raw">aether_argv_raw</a></li>
-    <li><a href="#aether_args_seal">aether_args_seal</a></li>
-    <li><a href="#aether_args_sealed">aether_args_sealed</a></li>
     <li><a href="#args_seal">args_seal</a></li>
     <li><a href="#args_sealed">args_sealed</a></li>
     <li><a href="#args_count">args_count</a></li>
@@ -84,6 +79,8 @@
     <li><a href="#wait">wait</a></li>
     <li><a href="#wait_any">wait_any</a></li>
     <li><a href="#wait_any_timeout">wait_any_timeout</a></li>
+    <li><a href="#spawn_to_raw">spawn_to_raw</a></li>
+    <li><a href="#spawn_proc_to">spawn_proc_to</a></li>
     <li><a href="#kill_raw">kill_raw</a></li>
     <li><a href="#wait_pid_timeout_raw">wait_pid_timeout_raw</a></li>
     <li><a href="#run_supervised_raw">run_supervised_raw</a></li>
@@ -96,8 +93,6 @@
     <li><a href="#getcwd_raw">getcwd_raw</a></li>
     <li><a href="#chdir">chdir</a></li>
     <li><a href="#getcwd">getcwd</a></li>
-    <li><a href="#aether_process_resident">aether_process_resident</a></li>
-    <li><a href="#aether_process_private">aether_process_private</a></li>
     <li><a href="#memory_resident">memory_resident</a></li>
     <li><a href="#memory_private">memory_private</a></li>
   </ul>
@@ -160,6 +155,7 @@
     <li><a href="path.html">path</a></li>
     <li><a href="plural.html">plural</a></li>
     <li><a href="pqueue.html">pqueue</a></li>
+    <li><a href="quote.html">quote</a></li>
     <li><a href="reflect.html">reflect</a></li>
     <li><a href="regex.html">regex</a></li>
     <li><a href="resp.html">resp</a></li>
@@ -228,7 +224,7 @@
       <h3 class="function-name">run_capture_status_raw <span class="kind">extern</span></h3>
       <pre class="usage"><code>run_capture_status_raw(prog, argv, env) <span class="arrow">-&gt;</span> (string, int, string)</code></pre>
       <p class="signature"><span class="sig-params">prog: string, argv: ptr, env: ptr</span></p>
-      <p class="doc">Tuple sibling that exposes the child's exit code. Returns (stdout, status, err) — see the Aether-side `run_capture` wrapper for the per-slot semantics. Issue #289. Position 0 (stdout) is `@heap`: the C side accumulates the child's output into a malloc'd buffer that grows via realloc as bytes arrive. The destructured LHS owns it; the heap-string-tracker frees it on reassignment / at function exit. Position 2 (err) stays default-borrow — error messages are static string literals in aether_os.c. Audited callers: only the Aether wrapper `run_capture` at line ~150 passes the tuple through; no manual string.release on the captured stdout anywhere in stdlib, tests/, examples/, tools/, or contrib/. See #420 follow-up.</p>
+      <p class="doc">Tuple sibling that exposes the child's exit code. Returns (stdout, status, err) — see the Aether-side `run_capture` wrapper for the per-slot semantics. Issue #289. Position 0 (stdout) is `@heap`: the C side accumulates the child's output into a buffer that grows as bytes arrive and hands it over as a counted string. The destructured LHS owns it; the heap-string-tracker frees it on reassignment / at function exit. Position 2 (err) stays default-borrow — error messages are static string literals in aether_os.c. Audited callers: only the Aether wrapper `run_capture` at line ~150 passes the tuple through; no manual string.release on the captured stdout anywhere in stdlib, tests/, examples/, tools/, or contrib/. See #420 follow-up.</p>
     </div>
     <div class="function" id="run_pipe_raw" data-name="run_pipe_raw">
       <h3 class="function-name">run_pipe_raw <span class="kind">extern</span></h3>
@@ -246,7 +242,7 @@
       <h3 class="function-name">run_pipe_drain_and_wait_raw <span class="kind">extern</span></h3>
       <pre class="usage"><code>run_pipe_drain_and_wait_raw(prog, argv, env) <span class="arrow">-&gt;</span> (string, int, string)</code></pre>
       <p class="signature"><span class="sig-params">prog: string, argv: ptr, env: ptr</span></p>
-      <p class="doc">Convenience: spawn child with back-channel pipe, drain pipe to EOF concurrently with the child running, wait for child, reap. Returns (channel_payload, exit_code, err). No deadlock regardless of payload size — the read loop drains continuously so the pipe buffer never fills. This is the recommended entry point for the common case &quot;child writes a structured report at exit, parent reads it after.&quot; Streaming consumers (parent reading mid-run) should use the lower-level os_run_pipe_raw + os_wait_pid_raw pair instead. On Windows, returns (&quot;&quot;, -1, &quot;unsupported on Windows&quot;). Position 0 (channel_payload) is `@heap`: the C side accumulates the drained pipe contents into a malloc'd buffer that grows via realloc. The destructured LHS owns it; the heap-string-tracker frees it on reassignment / at function exit. Position 2 (err) stays default-borrow — every error path returns a static string literal. Audited callers: no manual string.release on the channel payload anywhere in stdlib, tests/, examples/, tools/, or contrib/. See #420 follow-up.</p>
+      <p class="doc">Convenience: spawn child with back-channel pipe, drain pipe to EOF concurrently with the child running, wait for child, reap. Returns (channel_payload, exit_code, err). No deadlock regardless of payload size — the read loop drains continuously so the pipe buffer never fills. This is the recommended entry point for the common case &quot;child writes a structured report at exit, parent reads it after.&quot; Streaming consumers (parent reading mid-run) should use the lower-level os_run_pipe_raw + os_wait_pid_raw pair instead. On Windows, returns (&quot;&quot;, -1, &quot;unsupported on Windows&quot;). Position 0 (channel_payload) is `@heap`: the C side accumulates the drained pipe contents into a buffer that grows as it reads and hands it over as a counted string. The destructured LHS owns it; the heap-string-tracker frees it on reassignment / at function exit. Position 2 (err) stays default-borrow — every error path returns a static string literal. Audited callers: no manual string.release on the channel payload anywhere in stdlib, tests/, examples/, tools/, or contrib/. See #420 follow-up.</p>
     </div>
     <div class="function" id="spawn_raw" data-name="spawn_raw">
       <h3 class="function-name">spawn_raw <span class="kind">extern</span></h3>
@@ -284,34 +280,10 @@
       <p class="signature"><span class="sig-params">name: string</span></p>
       <p class="doc">Search PATH for an executable. Returns the absolute path to the first hit, or &quot;&quot; if not found. If `name` already contains '/', it's returned as-is when it's executable.</p>
     </div>
-    <div class="function" id="aether_args_count" data-name="aether_args_count">
-      <h3 class="function-name">aether_args_count <span class="kind">extern</span></h3>
-      <pre class="usage"><code>aether_args_count() <span class="arrow">-&gt;</span> int</code></pre>
-      <p class="doc">Command-line arguments</p>
-    </div>
-    <div class="function" id="aether_args_get" data-name="aether_args_get">
-      <h3 class="function-name">aether_args_get <span class="kind">extern</span></h3>
-      <pre class="usage"><code>aether_args_get(index) <span class="arrow">-&gt;</span> string</code></pre>
-      <p class="signature"><span class="sig-params">index: int</span></p>
-    </div>
-    <div class="function" id="aether_argv0" data-name="aether_argv0">
-      <h3 class="function-name">aether_argv0 <span class="kind">extern</span></h3>
-      <pre class="usage"><code>aether_argv0() <span class="arrow">-&gt;</span> string</code></pre>
-      <p class="doc">argv[0] — the path the OS launched the current process with. Returns null when aether_args_init has not been called (e.g. unit tests that bypass `main`). The return value is a borrowed pointer into the OS argv storage; do not free. Idiomatic Aether callers should use `os.argv0()` which returns &quot;&quot; instead of null for convenience.</p>
-    </div>
     <div class="function" id="aether_argv_raw" data-name="aether_argv_raw">
       <h3 class="function-name">aether_argv_raw <span class="kind">extern</span></h3>
       <pre class="usage"><code>aether_argv_raw() <span class="arrow">-&gt;</span> ptr</code></pre>
       <p class="doc">Raw argv vector captured by the generated process entrypoint. This is for C interop with APIs that need argc/argv exactly as the OS supplied them. Borrowed pointer; do not free.</p>
-    </div>
-    <div class="function" id="aether_args_seal" data-name="aether_args_seal">
-      <h3 class="function-name">aether_args_seal <span class="kind">extern</span></h3>
-      <pre class="usage"><code>aether_args_seal()</code></pre>
-      <p class="doc">One-shot runtime seal of the argv accessors. After this returns, `os.aether_args_count()` reports 0, `os.aether_args_get(i)` returns null, `os.argv0()` returns &quot;&quot;, and `os.aether_argv_raw()` returns null — as if argv had never been initialised. Idempotent (calling twice is a no-op); there is no unseal. Intended use: once `main()` has parsed command-line flags into its own config state, call `os.args_seal()` to prevent any later code in the process (imported libraries, plugin callbacks, untrusted Aether modules) from reading the original argv. Complements the compile-time `hide` / `seal except` scope directives: those deny LEXICAL access; this denies RUNTIME access. Caveat: this is a co-operative Aether-side gate, not a kernel boundary. The OS still has the original argv in process memory (Linux /proc/self/cmdline, macOS sysctl) and code that goes around the Aether accessors can still read it. The seal defends against accidental late-stage Aether code touching argv, not against an attacker with arbitrary execution. Pair with the LD_PRELOAD libc sandbox if the threat model demands true inaccessibility.</p>
-    </div>
-    <div class="function" id="aether_args_sealed" data-name="aether_args_sealed">
-      <h3 class="function-name">aether_args_sealed <span class="kind">extern</span></h3>
-      <pre class="usage"><code>aether_args_sealed() <span class="arrow">-&gt;</span> int</code></pre>
     </div>
     <div class="function" id="args_seal" data-name="args_seal">
       <h3 class="function-name">args_seal <span class="kind">fn</span></h3>
@@ -325,7 +297,7 @@
     <div class="function" id="args_count" data-name="args_count">
       <h3 class="function-name">args_count <span class="kind">fn</span></h3>
       <pre class="usage"><code>args_count() <span class="arrow">-&gt;</span> int</code></pre>
-      <p class="doc">Ergonomic argv accessors (#1035): short qualified spellings (`os.args_count()`, `os.args_get(i)`) alongside the raw `aether_args_*` externs, mirroring args_seal / args_sealed above.</p>
+      <p class="doc">The argv accessors (#1035): `os.args_count()`, `os.args_get(i)`, the one name each (the `aether_args_*` externs are not exported beside them, #3014), as args_seal / args_sealed above.</p>
     </div>
     <div class="function" id="args_get" data-name="args_get">
       <h3 class="function-name">args_get <span class="kind">fn</span></h3>
@@ -393,7 +365,7 @@
     <div class="function" id="platform_raw" data-name="platform_raw">
       <h3 class="function-name">platform_raw <span class="kind">extern</span></h3>
       <pre class="usage"><code>platform_raw() <span class="arrow">-&gt;</span> string</code></pre>
-      <p class="doc">Current OS platform as a flat lowercase string. Picked at compile time from the toolchain's predefined macros. Matches Go's runtime.GOOS and Rust's std::env::consts::OS: &quot;linux&quot;      Linux kernel (any libc) &quot;darwin&quot;     macOS / iOS / any Darwin kernel &quot;windows&quot;    Windows (any toolchain) &quot;freebsd&quot;    FreeBSD &quot;openbsd&quot;    OpenBSD &quot;netbsd&quot;     NetBSD &quot;dragonfly&quot;  DragonFly BSD &quot;solaris&quot;    Solaris / illumos &quot;wasm&quot;       WebAssembly (Emscripten or wasi) &quot;unknown&quot;    None of the above matched at compile time Typical use: if os.platform() == &quot;windows&quot; { // Windows-specific path } For &quot;do I have POSIX features?&quot; the rule of thumb is `os.platform() != &quot;windows&quot; &amp;&amp; os.platform() != &quot;wasm&quot;` — but usually probing the specific capability (e.g. net.pipe_open() &lt; 0) gives a sharper answer than the platform name alone. See CONTRIBUTING.md &quot;Coding for portability&quot; for the broader pattern. Both strdup a fresh char* (or null); `@heap` so the heap-tracker frees it. Without it the string_concat below leaked the original (the macOS leaks gate caught this via a test that calls temp_dir()).</p>
+      <p class="doc">Current OS platform as a flat lowercase string. Picked at compile time from the toolchain's predefined macros. Matches Go's runtime.GOOS and Rust's std::env::consts::OS: &quot;linux&quot;      Linux kernel (any libc) &quot;darwin&quot;     macOS / iOS / any Darwin kernel &quot;windows&quot;    Windows (any toolchain) &quot;freebsd&quot;    FreeBSD &quot;openbsd&quot;    OpenBSD &quot;netbsd&quot;     NetBSD &quot;dragonfly&quot;  DragonFly BSD &quot;solaris&quot;    Solaris / illumos &quot;wasm&quot;       WebAssembly (Emscripten or wasi) &quot;unknown&quot;    None of the above matched at compile time Typical use: if os.platform() == &quot;windows&quot; { // Windows-specific path } For &quot;do I have POSIX features?&quot; the rule of thumb is `os.platform() != &quot;windows&quot; &amp;&amp; os.platform() != &quot;wasm&quot;` — but usually probing the specific capability (e.g. net.pipe_open() &lt; 0) gives a sharper answer than the platform name alone. See CONTRIBUTING.md &quot;Coding for portability&quot; for the broader pattern. Each returns a fresh counted string (or null); `@heap` so the heap-tracker frees it. Without it the string_concat below leaked the original (the macOS leaks gate caught this via a test that calls temp_dir()).</p>
     </div>
     <div class="function" id="arch_raw" data-name="arch_raw">
       <h3 class="function-name">arch_raw <span class="kind">extern</span></h3>
@@ -433,7 +405,7 @@
     <div class="function" id="argv0" data-name="argv0">
       <h3 class="function-name">argv0 <span class="kind">fn</span></h3>
       <pre class="usage"><code>argv0() <span class="arrow">-&gt;</span> string</code></pre>
-      <p class="doc">argv[0] — path the OS launched the current process with. Returns &quot;&quot; if aether_args_init has not been called or argv[0] is NULL. The raw form is also accessible as `aether_argv0()` for callers that want explicit null handling (e.g. to distinguish &quot;not initialised&quot; from &quot;empty&quot;).</p>
+      <p class="doc">argv[0] — path the OS launched the current process with. Returns &quot;&quot; if aether_args_init has not been called or argv[0] is NULL.</p>
     </div>
     <div class="function" id="now_utc_iso8601" data-name="now_utc_iso8601">
       <h3 class="function-name">now_utc_iso8601 <span class="kind">fn</span></h3>
@@ -490,7 +462,7 @@
     <div class="function" id="arch" data-name="arch">
       <h3 class="function-name">arch <span class="kind">fn</span></h3>
       <pre class="usage"><code>arch() <span class="arrow">-&gt;</span> string</code></pre>
-      <p class="doc">arch() — the CPU architecture of the build target, the companion to platform(). Returns a normalized token from the ecosystem vocabulary the release assets, aeb, and aeo already use: &quot;x86_64&quot; (never &quot;amd64&quot;), &quot;arm64&quot; (never &quot;aarch64&quot;), &quot;i386&quot;, &quot;arm&quot;, &quot;riscv64&quot;, &quot;ppc64le&quot;, &quot;s390x&quot;, &quot;wasm32&quot;, &quot;wasm64&quot;, or &quot;unknown&quot;. So platform() + arch() reconstruct the &quot;&lt;os&gt;-&lt;arch&gt;&quot; release-asset token (e.g. &quot;linux-x86_64&quot;, &quot;macos-arm64&quot;) with no shell — the thing a fetch-a- prebuilt node needs to pick the right download. Decided at COMPILE time from the toolchain's arch predefines, deliberately not `uname -m`: it needs no process spawn (works with no shell, in a sandbox) AND it reports the TARGET arch under a cross-compile (`ae build --target=aarch64-linux` yields &quot;arm64&quot;), where `uname -m` would report the build host's. Never fails.</p>
+      <p class="doc">arch() — the CPU architecture of the build target, the companion to platform(). Returns a normalized token from the ecosystem vocabulary the release assets, aeb, and aeo already use: &quot;x86_64&quot; (never &quot;amd64&quot;), &quot;arm64&quot; (never &quot;aarch64&quot;), &quot;i386&quot;, &quot;arm&quot;, &quot;riscv64&quot;, &quot;loongarch64&quot;, &quot;ppc64le&quot;, &quot;s390x&quot;, &quot;wasm32&quot;, &quot;wasm64&quot;, or &quot;unknown&quot;. So platform() + arch() reconstruct the &quot;&lt;os&gt;-&lt;arch&gt;&quot; release-asset token (e.g. &quot;linux-x86_64&quot;, &quot;macos-arm64&quot;) with no shell — the thing a fetch-a- prebuilt node needs to pick the right download. Decided at COMPILE time from the toolchain's arch predefines, deliberately not `uname -m`: it needs no process spawn (works with no shell, in a sandbox) AND it reports the TARGET arch under a cross-compile (`ae build --target=aarch64-linux` yields &quot;arm64&quot;), where `uname -m` would report the build host's. Never fails.</p>
     </div>
     <div class="function" id="temp_dir" data-name="temp_dir">
       <h3 class="function-name">temp_dir <span class="kind">fn</span></h3>
@@ -556,6 +528,18 @@
       <p class="signature"><span class="sig-params">tokens: ptr, secs: int</span></p>
       <p class="doc">Bounded wait-any — (token, exit_code, timed_out, err). Reaps whichever token finishes first, or reports timed_out == 1 after `secs` with the live children left running (a per-call deadline, so a scheduler can bound each node). secs &lt;= 0 blocks indefinitely. See os_wait_any_timeout_raw.</p>
     </div>
+    <div class="function" id="spawn_to_raw" data-name="spawn_to_raw">
+      <h3 class="function-name">spawn_to_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>spawn_to_raw(prog, argv, env, out_path) <span class="arrow">-&gt;</span> (int, string)</code></pre>
+      <p class="signature"><span class="sig-params">prog: string, argv: ptr, env: ptr, out_path: string</span></p>
+      <p class="doc">Spawn a child without blocking, its stdout and stderr written to the file `out_path` (created or truncated) and its stdin empty. Returns (token, err), a token the wait calls reap like os_spawn_raw's. The child runs in a Job Object of its own on Windows and leads a process group of its own on POSIX, so os_kill_raw(token, sig) ends its whole tree: a build tool's compilers too. The file and the null device are the only handles it inherits. Anything the child leaves running when it exits on its own is not ended.</p>
+    </div>
+    <div class="function" id="spawn_proc_to" data-name="spawn_proc_to">
+      <h3 class="function-name">spawn_proc_to <span class="kind">fn</span></h3>
+      <pre class="usage"><code>spawn_proc_to(prog, argv, env, out_path) <span class="arrow">-&gt;</span> (int, string)</code></pre>
+      <p class="signature"><span class="sig-params">prog: string, argv: ptr, env: ptr, out_path: string</span></p>
+      <p class="doc">Start a child without waiting, its stdout and stderr written to the file `out_path` (created or truncated). Returns (token, err) like spawn_proc; the token works with wait, wait_any and wait_any_timeout, and kill(token, sig) ends the child's whole tree (a Job Object on Windows, a process group on POSIX). See os_spawn_to_raw.</p>
+    </div>
     <div class="function" id="kill_raw" data-name="kill_raw">
       <h3 class="function-name">kill_raw <span class="kind">extern</span></h3>
       <pre class="usage"><code>kill_raw(pid, sig) <span class="arrow">-&gt;</span> int</code></pre>
@@ -596,7 +580,7 @@
       <h3 class="function-name">run_full_raw <span class="kind">extern</span></h3>
       <pre class="usage"><code>run_full_raw(prog, argv, env, stdin_data, stdin_len) <span class="arrow">-&gt;</span> (string, string, int, string)</code></pre>
       <p class="signature"><span class="sig-params">prog: string, argv: ptr, env: ptr, stdin_data: string, stdin_len: int</span></p>
-      <p class="doc">Full three-way child stdio — the gap os.run_capture leaves open. Feeds `stdin_data` to the child's stdin (binary-safe: exactly its stored length is written, embedded NULs included) and captures stdout and stderr SEPARATELY. Returns (stdout, stderr, exit_code, err): - stdout / stderr: the child's two streams, captured independently (the `2&gt;&amp;1`-merged shape is not this call). &quot;&quot; when empty. Like os.run_capture they are NUL-terminated, so a capture holding an embedded NUL reads as truncated through the string ops — the stdin direction has no such limit. - exit_code: WEXITSTATUS on normal exit, 128+signo if signalled, 127 on exec failure, -1 on spawn/IO error. - err: &quot;&quot; on a successful spawn (regardless of exit code); non-empty only when the fork/exec/pipe itself failed. No pipe-buffer deadlock regardless of stream sizes: POSIX pumps all three fds in one poll(2) loop; Windows drains stdout/stderr on reader threads while the main thread writes stdin (Win32 anonymous pipes aren't pollable). An empty `stdin_data` gives the child an immediately-closed stdin (it can't block on the terminal).</p>
+      <p class="doc">Full three-way child stdio — the gap os.run_capture leaves open. Feeds `stdin_data` to the child's stdin (binary-safe: exactly its stored length is written, embedded NULs included) and captures stdout and stderr SEPARATELY. Returns (stdout, stderr, exit_code, err): - stdout / stderr: the child's two streams, captured independently (the `2&gt;&amp;1`-merged shape is not this call). &quot;&quot; when empty. Like os.run_capture they are counted strings carrying their length, so an embedded NUL is kept. - exit_code: WEXITSTATUS on normal exit, 128+signo if signalled, 127 on exec failure, -1 on spawn/IO error. - err: &quot;&quot; on a successful spawn (regardless of exit code); non-empty only when the fork/exec/pipe itself failed. No pipe-buffer deadlock regardless of stream sizes: POSIX pumps all three fds in one poll(2) loop; Windows drains stdout/stderr on reader threads while the main thread writes stdin (Win32 anonymous pipes aren't pollable). An empty `stdin_data` gives the child an immediately-closed stdin (it can't block on the terminal).</p>
     </div>
     <div class="function" id="run_full" data-name="run_full">
       <h3 class="function-name">run_full <span class="kind">fn</span></h3>
@@ -622,16 +606,7 @@
     <div class="function" id="getcwd" data-name="getcwd">
       <h3 class="function-name">getcwd <span class="kind">fn</span></h3>
       <pre class="usage"><code>getcwd() <span class="arrow">-&gt;</span> string</code></pre>
-      <p class="doc">Current working directory, or &quot;&quot; on failure. Returns a fresh refcounted string the caller owns (the raw strdup is reclaimed by the heap-string tracker — os_getcwd_raw is classified owned-heap in codegen).</p>
-    </div>
-    <div class="function" id="aether_process_resident" data-name="aether_process_resident">
-      <h3 class="function-name">aether_process_resident <span class="kind">extern</span></h3>
-      <pre class="usage"><code>aether_process_resident() <span class="arrow">-&gt;</span> long</code></pre>
-      <p class="doc">---- the process's memory, as the OS charges it (#2310) ---- runtime/aether_process_mem.c. For the bytes the program itself holds on the heap, exact to the allocation, see std.mem's heap_in_use().</p>
-    </div>
-    <div class="function" id="aether_process_private" data-name="aether_process_private">
-      <h3 class="function-name">aether_process_private <span class="kind">extern</span></h3>
-      <pre class="usage"><code>aether_process_private() <span class="arrow">-&gt;</span> long</code></pre>
+      <p class="doc">Current working directory, or &quot;&quot; on failure. Returns a fresh counted string the caller owns (the raw result is `@heap`, adopted at the call and released by the place that holds it).</p>
     </div>
     <div class="function" id="memory_resident" data-name="memory_resident">
       <h3 class="function-name">memory_resident <span class="kind">fn</span></h3>

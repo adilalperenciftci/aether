@@ -74,8 +74,61 @@ static Type* join_walk(ASTNode* n, const char* name, Type* acc) {
     return acc;
 }
 
+/* Over the inferred bindings of `name` in `n` (closures excluded): sets
+ * `*strings` when one is a string, `*others` when one is neither a string
+ * nor `null`. */
+static void null_string_walk(ASTNode* n, const char* name, int* strings, int* others) {
+    if (!n) return;
+    if (n->type == AST_CLOSURE || n->type == AST_QUOTE) return;
+    if (n->type == AST_VARIABLE_DECLARATION && n->value && n->type_inferred &&
+        strcmp(n->value, name) == 0) {
+        ASTNode* init = n->child_count > 0 ? n->children[0] : NULL;
+        Type* t = hoist_decl_type(n);
+        if (init && init->type == AST_NULL_LITERAL) {
+            /* `null` fits any pointer kind, a string included */
+        } else if (t && t->kind == TYPE_STRING) {
+            *strings = 1;
+        } else {
+            *others = 1;
+        }
+    }
+    for (int i = 0; i < n->child_count; i++) null_string_walk(n->children[i], name, strings, others);
+}
+
+/* #2980 review: over the inferred bindings of `name` in `n` (closures
+ * excluded), function values joined with `acc` by fn_type_mode_join. */
+static Type* fn_join_walk(ASTNode* n, const char* name, Type* acc) {
+    if (!n) return acc;
+    if (n->type == AST_CLOSURE || n->type == AST_QUOTE) return acc;
+    if (n->type == AST_VARIABLE_DECLARATION && n->value && n->type_inferred &&
+        strcmp(n->value, name) == 0) {
+        Type* j = fn_type_mode_join(acc, hoist_decl_type(n));
+        if (j) { free_type(acc); acc = j; }
+    }
+    for (int i = 0; i < n->child_count; i++) acc = fn_join_walk(n->children[i], name, acc);
+    return acc;
+}
+
 Type* hoist_join_type(ASTNode* scope_body, const char* name, Type* seed) {
     if (!scope_body || !seed) return NULL;
+    /* #2980 review: a local bound to functions in two branches is called
+     * through the stronger mode at each parameter, where either may stand;
+     * typed from the first binding alone, a `@keep` in the other was lost. */
+    if (seed->kind == TYPE_FUNCTION) {
+        Type* acc = fn_join_walk(scope_body, name, clone_type(seed));
+        if (acc && types_equal(acc, seed)) { free_type(acc); return NULL; }
+        return acc;
+    }
+    /* #3032: a `null` binding names no type of its own. A local hoisted
+     * from `t = null` in one branch and `t = "b"` in another is a string,
+     * as the same two bindings in one block make it. Joined as the `ptr` of
+     * its first binding, it was a `ptr` that codegen managed as a string,
+     * which a `string` local could not take (E0202). */
+    if (seed->kind == TYPE_PTR && !seed->element_type) {
+        int strings = 0, others = 0;
+        null_string_walk(scope_body, name, &strings, &others);
+        if (strings && !others) return create_type(TYPE_STRING);
+    }
     Type* probe = numeric_join_type(seed, seed);
     if (!probe) return NULL;          /* not a numeric kind: nothing to join */
     free_type(probe);

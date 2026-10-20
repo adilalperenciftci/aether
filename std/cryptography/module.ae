@@ -97,7 +97,7 @@ extern cryptography_digest_free_raw(handle: ptr)
 extern malloc(size: int) -> ptr
 extern free(p: ptr)
 
-extern string_new_with_length(data: string, length: int) -> ptr @heap
+extern string_new_with_length(data: ptr, length: int) -> string @heap
 
 // Compute the SHA-1 hex digest of the first `length` bytes of `data`.
 // Returns (digest, "") on success, ("", error) when OpenSSL is

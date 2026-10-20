@@ -30,6 +30,7 @@
 #include "../../runtime/scheduler/aether_io_poller.h"
 #include "../../runtime/aether_resource_caps.h"
 #include "../../runtime/utils/aether_thread.h"
+#include "../../runtime/utils/aether_spawn.h"
 #include <sys/uio.h>
 
 /* Linux names this on the call; the BSDs and macOS have SO_NOSIGPIPE on the
@@ -1330,7 +1331,8 @@ static int ev_driver_init(HttpEvLoop* loop, EvDriver* d, int index) {
     d->edge_triggered = aether_io_poller_edge_capable();
 
     int pipefd[2];
-    if (pipe(pipefd) != 0) {
+    /* #3046: close-on-exec, so a child the server starts never holds it. */
+    if (aether_pipe_cloexec(pipefd) != 0) {
         aether_io_poller_destroy(&d->poller);
         return -1;
     }

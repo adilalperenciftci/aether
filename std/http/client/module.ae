@@ -440,7 +440,7 @@ post_with_status(url: string, body: string, content_type: string) -> {
 //   import std.http.client
 //   import std.json
 //
-//   value = json.create_object()
+//   value = json.obj()
 //   json.object_set_string(value, "name", "alice")
 //   resp, err = client.post_json("https://api.example.com/users", value)
 //   if err == "" {
@@ -459,7 +459,7 @@ post_with_status(url: string, body: string, content_type: string) -> {
 // failures (the response was received fine but the body wasn't valid
 // JSON).
 
-// POST a JSON value to `url`. Marshals via json.stringify, sets
+// POST a JSON value to `url`. Marshals via json.encode, sets
 // Content-Type + Accept to application/json, fires the request.
 // Same (resp, err) shape as send_request. Caller frees resp via
 // response_free, and json.free's the value they passed in (we
@@ -469,7 +469,7 @@ post_with_status(url: string, body: string, content_type: string) -> {
 // it on entry and `defer request_free` it so the cleanup pairs
 // visually with the allocation and survives every return path.
 post_json(url: string, value: ptr) -> {
-    body_str, sferr = json.stringify(value)
+    body_str, sferr = json.encode(value)
     if sferr != "" { return null, sferr }
 
     req = request("POST", url)

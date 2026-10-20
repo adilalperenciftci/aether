@@ -36,7 +36,7 @@
 
 #include "ast.h"
 
-#define AEA_FORMAT_VERSION 4
+#define AEA_FORMAT_VERSION 5
 
 /* One `defined(NAME)` answer the module's parse depended on. */
 typedef struct {

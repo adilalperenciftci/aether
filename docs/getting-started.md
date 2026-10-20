@@ -342,7 +342,7 @@ println(body)
 | `import std.path` | `path` | `path.join("a", "b")`, `path.basename("a/b")` |
 | `import std.list` | `list` | `list.new()`, `err = list.add(l, item)` |
 | `import std.map` | `map` | `map.new()`, `err = map.put(m, k, v)` |
-| `import std.json` | `json` | `v, err = json.parse(str)`, `json.create_object()` |
+| `import std.json` | `json` | `v, err = json.parse(str)`, `json.obj()` |
 | `import std.math` | `math` | `math.abs_int(x)`, `math.sqrt(x)` |
 | `import std.http` | `http` | `body, err = http.get(url)`, `http.server_create(port)` |
 | `import std.tcp` | `tcp` | `sock, err = tcp.connect(host, port)`, `tcp.write(sock, data)` |

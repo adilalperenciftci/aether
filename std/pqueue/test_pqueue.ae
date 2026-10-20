@@ -22,7 +22,7 @@ fail(msg: string) {
 }
 
 expect_pop(q: ptr, want: string) {
-    got = pqueue.pop(q)
+    got = string.from_cstr(pqueue.pop(q))
     if got != want {
         fail("expected ${want}, got ${got}")
     }

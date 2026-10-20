@@ -30,8 +30,7 @@ exports(
     http_request_method, http_request_path, http_request_body,
     http_request_body_length, http_request_query,
     http_serve_static, http_serve_file, http_mime_type,
-    ae_io_await, ae_io_cancel,
-    ae_pipe_open, ae_pipe_write_fd, ae_fd_write, ae_fd_close,
+    ae_io_cancel,
     await_io, pipe_open, pipe_write_fd, fd_write, fd_close
 )
 

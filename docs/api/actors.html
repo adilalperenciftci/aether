@@ -15,12 +15,6 @@
   <input type="text" id="search" placeholder="Search actors..." onkeyup="searchModule()">
   <h2>Exports</h2>
   <ul class="function-nav">
-    <li><a href="#aether_actor_register">aether_actor_register</a></li>
-    <li><a href="#aether_actor_whereis">aether_actor_whereis</a></li>
-    <li><a href="#aether_actor_unregister">aether_actor_unregister</a></li>
-    <li><a href="#aether_actor_is_registered">aether_actor_is_registered</a></li>
-    <li><a href="#aether_actor_registry_size">aether_actor_registry_size</a></li>
-    <li><a href="#aether_actor_registry_clear">aether_actor_registry_clear</a></li>
     <li><a href="#register">register</a></li>
     <li><a href="#whereis">whereis</a></li>
     <li><a href="#unregister">unregister</a></li>
@@ -87,6 +81,7 @@
     <li><a href="path.html">path</a></li>
     <li><a href="plural.html">plural</a></li>
     <li><a href="pqueue.html">pqueue</a></li>
+    <li><a href="quote.html">quote</a></li>
     <li><a href="reflect.html">reflect</a></li>
     <li><a href="regex.html">regex</a></li>
     <li><a href="resp.html">resp</a></li>
@@ -127,35 +122,6 @@
     <p class="import-line"><code>import std.actors</code></p>
   </div>
   <div class="functions" id="functions">
-    <div class="function" id="aether_actor_register" data-name="aether_actor_register">
-      <h3 class="function-name">aether_actor_register <span class="kind">extern</span></h3>
-      <pre class="usage"><code>aether_actor_register(name, ref)</code></pre>
-      <p class="signature"><span class="sig-params">name: string, ref: actor_ref</span></p>
-      <p class="doc">---- Raw externs ---- `actor_ref` lowers to `void*` at the C level, so the registry's `void* ref` slot accepts and returns the same shape Aether code passes / receives.</p>
-    </div>
-    <div class="function" id="aether_actor_whereis" data-name="aether_actor_whereis">
-      <h3 class="function-name">aether_actor_whereis <span class="kind">extern</span></h3>
-      <pre class="usage"><code>aether_actor_whereis(name) <span class="arrow">-&gt;</span> actor_ref</code></pre>
-      <p class="signature"><span class="sig-params">name: string</span></p>
-    </div>
-    <div class="function" id="aether_actor_unregister" data-name="aether_actor_unregister">
-      <h3 class="function-name">aether_actor_unregister <span class="kind">extern</span></h3>
-      <pre class="usage"><code>aether_actor_unregister(name) <span class="arrow">-&gt;</span> int</code></pre>
-      <p class="signature"><span class="sig-params">name: string</span></p>
-    </div>
-    <div class="function" id="aether_actor_is_registered" data-name="aether_actor_is_registered">
-      <h3 class="function-name">aether_actor_is_registered <span class="kind">extern</span></h3>
-      <pre class="usage"><code>aether_actor_is_registered(name) <span class="arrow">-&gt;</span> int</code></pre>
-      <p class="signature"><span class="sig-params">name: string</span></p>
-    </div>
-    <div class="function" id="aether_actor_registry_size" data-name="aether_actor_registry_size">
-      <h3 class="function-name">aether_actor_registry_size <span class="kind">extern</span></h3>
-      <pre class="usage"><code>aether_actor_registry_size() <span class="arrow">-&gt;</span> int</code></pre>
-    </div>
-    <div class="function" id="aether_actor_registry_clear" data-name="aether_actor_registry_clear">
-      <h3 class="function-name">aether_actor_registry_clear <span class="kind">extern</span></h3>
-      <pre class="usage"><code>aether_actor_registry_clear()</code></pre>
-    </div>
     <div class="function" id="register" data-name="register">
       <h3 class="function-name">register <span class="kind">fn</span></h3>
       <pre class="usage"><code>register(name, ref)</code></pre>

@@ -30,10 +30,33 @@ check_rejected() {
     fi
 }
 
+# #3001: the help names a value derived from the binding in Aether for its
+# type. It suggested `s.len()`, which Aether does not have.
+check_help() {
+    name="$1"; want="$2"
+    if ! grep -qF "$want" "$TMPDIR/$name.log"; then
+        echo "  [FAIL] scoped_escape: $name.ae help does not suggest $want:"
+        grep -F "help:" "$TMPDIR/$name.log" | sed 's/^/    /' | head -3
+        exit 1
+    fi
+    if grep -qF ".len()" "$TMPDIR/$name.log"; then
+        echo "  [FAIL] scoped_escape: $name.ae help suggests .len(), which is not Aether"
+        exit 1
+    fi
+}
+
 check_rejected reject_return
+check_help reject_return '`string.length(s)`'
 check_rejected reject_alias
 check_rejected reject_closure
 check_rejected reject_container
+# #3001: the sequence cons is a container insert too; the list named
+# `seq.cons`, which std does not have.
+check_rejected reject_seq_cons
+check_rejected reject_list_return
+check_help reject_list_return '`list.size(l)`'
+check_rejected reject_slice_return
+check_help reject_slice_return '`v.len`'
 
-echo "  [PASS] scoped_escape: return / alias / closure-capture / container-insert all rejected"
+echo "  [PASS] scoped_escape: return / alias / closure-capture / container-insert / seq-cons all rejected, with Aether in the help"
 exit 0

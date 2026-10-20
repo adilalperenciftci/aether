@@ -1111,8 +1111,10 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
             if (type_is_sized_array(child->node_type) && child->node_type->array_size > 0 &&
                 !state_field_is_ptr(gen, actor, child->value)) {
                 /* #2464: an array field does not assign. Zeroed, then
-                 * filled from its initializer, each element taken. */
-                print_line(gen, "memset(actor->%s, 0, sizeof(actor->%s));",
+                 * filled from its initializer, each element taken. (void*):
+                 * cl.exe reads a `string[N]` element's `const` as the
+                 * array's (C4090, #2799). */
+                print_line(gen, "memset((void*)actor->%s, 0, sizeof(actor->%s));",
                            child->value, child->value);
                 if (child->child_count > 0)
                     generate_value_statement(gen, cg_internf("actor->%s", child->value),
@@ -1125,7 +1127,7 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
             } else if (state_zero_is_aggregate(child->node_type)) {
                 /* #2904: a closure, a struct, an optional, a tuple or a sum
                  * has no `0` to take; its zero value is all bytes zero. */
-                print_line(gen, "memset(&actor->%s, 0, sizeof(actor->%s));",
+                print_line(gen, "memset((void*)&actor->%s, 0, sizeof(actor->%s));",
                            child->value, child->value);
             } else {
                 print_line(gen, "actor->%s = 0;", child->value);

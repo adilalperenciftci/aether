@@ -33,6 +33,7 @@
  */
 
 #include "ae_help.h"
+#include "../compiler/aether_source_text.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -554,6 +555,13 @@ static int load_source(const char* path, SourceFile* sf) {
     fclose(f);
     sf->text[sf->size] = '\0';
 
+    /* #2999: a byte order mark starting the file is no part of its text. */
+    size_t bom = aether_source_bom_length(sf->text);
+    if (bom) {
+        memmove(sf->text, sf->text + bom, sf->size - bom + 1);
+        sf->size -= bom;
+    }
+
     /* Split lines in-place by replacing `\n` with `\0`. Line index
      * array points into `text`. CRLF → LF normalised on the fly. */
     sf->line_count = 0;
@@ -692,7 +700,12 @@ static void parse_module_exports(const char* module_path,
     char line[AE_HELP_MAX_LINE_LEN];
     int in_exports = 0;
     int oom = 0;
+    int first_line = 1;
     while (!oom && fgets(line, sizeof(line), f)) {
+        /* #2999: a byte order mark starting the file is no part of it. */
+        size_t bom = first_line ? aether_source_bom_length(line) : 0;
+        first_line = 0;
+        if (bom) memmove(line, line + bom, strlen(line + bom) + 1);
         /* Strip line comments. */
         char* c = strstr(line, "//");
         if (c) *c = '\0';

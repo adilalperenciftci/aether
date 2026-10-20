@@ -23,14 +23,14 @@ extern exit(code: int)
 
 main() {
     // Case 1
-    v1, _ = json.stringify(json.from_int(42))
+    v1, _ = json.encode(json.from_int(42))
     if string.equals(v1, "42") != 1 {
         println("FAIL case 1: got '${v1}', want '42'")
         exit(1)
     }
 
     // Case 2 — the motivating bug
-    v2, _ = json.stringify(json.from_int(53248000))
+    v2, _ = json.encode(json.from_int(53248000))
     if string.equals(v2, "53248000") != 1 {
         println("FAIL case 2: got '${v2}', want '53248000'")
         exit(1)
@@ -38,21 +38,21 @@ main() {
 
     // Case 3 — 2^53 exactly (still in double's exact-int range, but
     // not all encoders get this right)
-    v3, _ = json.stringify(json.from_int(9007199254740992))
+    v3, _ = json.encode(json.from_int(9007199254740992))
     if string.equals(v3, "9007199254740992") != 1 {
         println("FAIL case 3: got '${v3}', want '9007199254740992'")
         exit(1)
     }
 
     // Case 4 — int64 max
-    v4, _ = json.stringify(json.from_int(9223372036854775807))
+    v4, _ = json.encode(json.from_int(9223372036854775807))
     if string.equals(v4, "9223372036854775807") != 1 {
         println("FAIL case 4: got '${v4}', want '9223372036854775807'")
         exit(1)
     }
 
     // Case 5 — negative
-    v5, _ = json.stringify(json.from_int(-100))
+    v5, _ = json.encode(json.from_int(-100))
     if string.equals(v5, "-100") != 1 {
         println("FAIL case 5: got '${v5}', want '-100'")
         exit(1)

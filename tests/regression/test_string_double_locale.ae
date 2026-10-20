@@ -119,7 +119,7 @@ check_json_roundtrip() -> int {
     }
     string.free(perr)
 
-    out, serr = json.stringify(doc)
+    out, serr = json.encode(doc)
     ok = 1
     // RFC 8259 fixes '.' as the decimal separator. A comma here would be
     // non-conforming JSON that other parsers reject.

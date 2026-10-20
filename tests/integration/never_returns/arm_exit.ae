@@ -1,0 +1,19 @@
+// A value `match` arm that calls `exit(n)` leaves the match (#3017): the
+// checker refused it as an arm with no value, and with a block arm the call
+// was stored as the match's value in C.
+pick(n: int) -> int {
+    return match n {
+        0 -> 10
+        1 -> {
+            label = "one"
+            println("leaving from ${label}")
+            exit(6)
+        }
+        _ -> exit(4)
+    }
+}
+
+main() {
+    println("pick(0)=${pick(0)}")
+    println("pick(1)=${pick(1)}")
+}

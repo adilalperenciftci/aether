@@ -15,7 +15,6 @@
   <input type="text" id="search" placeholder="Search zstd..." onkeyup="searchModule()">
   <h2>Exports</h2>
   <ul class="function-nav">
-    <li><a href="#backend_available">backend_available</a></li>
     <li><a href="#try_stream_new">try_stream_new</a></li>
     <li><a href="#try_stream_flush">try_stream_flush</a></li>
     <li><a href="#try_stream_finish">try_stream_finish</a></li>
@@ -95,6 +94,7 @@
     <li><a href="path.html">path</a></li>
     <li><a href="plural.html">plural</a></li>
     <li><a href="pqueue.html">pqueue</a></li>
+    <li><a href="quote.html">quote</a></li>
     <li><a href="reflect.html">reflect</a></li>
     <li><a href="regex.html">regex</a></li>
     <li><a href="resp.html">resp</a></li>
@@ -135,10 +135,6 @@
     <p class="import-line"><code>import std.zstd</code></p>
   </div>
   <div class="functions" id="functions">
-    <div class="function" id="backend_available" data-name="backend_available">
-      <h3 class="function-name">backend_available <span class="kind">extern</span></h3>
-      <pre class="usage"><code>backend_available() <span class="arrow">-&gt;</span> int</code></pre>
-    </div>
     <div class="function" id="try_stream_new" data-name="try_stream_new">
       <h3 class="function-name">try_stream_new <span class="kind">extern</span></h3>
       <pre class="usage"><code>try_stream_new(level) <span class="arrow">-&gt;</span> ptr</code></pre>
@@ -156,7 +152,7 @@
     </div>
     <div class="function" id="get_stream_bytes" data-name="get_stream_bytes">
       <h3 class="function-name">get_stream_bytes <span class="kind">extern</span></h3>
-      <pre class="usage"><code>get_stream_bytes(handle) <span class="arrow">-&gt;</span> string</code></pre>
+      <pre class="usage"><code>get_stream_bytes(handle) <span class="arrow">-&gt;</span> ptr</code></pre>
       <p class="signature"><span class="sig-params">handle: ptr</span></p>
     </div>
     <div class="function" id="get_stream_length" data-name="get_stream_length">
@@ -171,7 +167,7 @@
     </div>
     <div class="function" id="get_compress_bytes" data-name="get_compress_bytes">
       <h3 class="function-name">get_compress_bytes <span class="kind">extern</span></h3>
-      <pre class="usage"><code>get_compress_bytes() <span class="arrow">-&gt;</span> string</code></pre>
+      <pre class="usage"><code>get_compress_bytes() <span class="arrow">-&gt;</span> ptr</code></pre>
     </div>
     <div class="function" id="get_compress_length" data-name="get_compress_length">
       <h3 class="function-name">get_compress_length <span class="kind">extern</span></h3>

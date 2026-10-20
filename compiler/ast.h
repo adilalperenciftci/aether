@@ -483,6 +483,11 @@ typedef struct Type {
     // Function/closure type support
     struct Type** param_types;  // Parameter types (NULL if not function type)
     int param_count;            // Number of parameters (0 if not function type)
+    // #2980: per parameter, what a function of this type does with a `ptr`
+    // it is given (FnParamMode: borrowed, `@into`, `@keep`). Parallel to
+    // param_types; NULL when every parameter borrows. Only a closure's type
+    // (is_fnptr 0) carries modes: a typed C function pointer's borrow.
+    int* param_modes;
     struct Type* return_type;   // Return type (NULL if not function type)
     // 1 = this TYPE_FUNCTION represents a raw C function pointer
     // (storage = void*, call site emits typed cast).  Default 0 =
@@ -664,6 +669,24 @@ Type* create_bitset_type(Type* element_enum);  // #1046 `bit_set[E]`
 Type* create_bitstruct_type(const char* name, Type* backing);  // #1132 `bitstruct`
 Type* create_result_type(Type* inner);    // #913 fallible `T!` -> (T, string)
 Type* create_function_type(int param_count, Type** param_types, Type* return_type);
+
+/* #2980: what a function does with a `ptr` parameter, as its type says.
+ * Ordered: each lets the callee do more and asks more of the caller, so a
+ * function may stand for a type whose mode at each parameter is its own or
+ * one to its right, never to its left. */
+typedef enum { FN_MODE_BORROWED = 0, FN_MODE_INTO = 1, FN_MODE_KEEP = 2 } FnParamMode;
+/* The mode of parameter `i` of function type `t` (borrowed when none). */
+int fn_type_param_mode(const Type* t, int i);
+/* Set it, allocating the modes on the first non-borrowed one. */
+void fn_type_set_param_mode(Type* t, int i, int mode);
+/* Does any parameter of `t` keep or pass on what it is given? */
+int fn_type_has_modes(const Type* t);
+/* The type a value that is either `a` or `b`, two function values, is
+ * called through (#2980 review): at each parameter the stronger mode
+ * (borrowed < @into < @keep), where either function may stand. A fresh Type,
+ * or NULL unless both are closure values of one shape (modes aside) with a
+ * mode between them, or one is an erased `fn` beside a moded type. */
+Type* fn_type_mode_join(const Type* a, const Type* b);
 void free_type(Type* type);
 const char* type_to_string(Type* type);
 /* #2832: `type` as the source spells it, for a diagnostic: a distinct type
@@ -681,6 +704,17 @@ void ast_struct_names_reset(void);
 void ast_struct_name_register(const char* cname, const char* source, const char* display);
 const char* ast_struct_source_name(const char* cname);
 const char* ast_struct_display_name(const char* cname);
+
+/* Node kinds that carry a name without binding one: a reference, a call, a
+ * field, an operator, a literal's text. Every other kind carrying a name is
+ * taken to bind it: a parameter, a local, a pattern or closure parameter,
+ * actor state, a catch or loop variable, and any kind not listed here. */
+int ast_names_without_binding(const ASTNode* n);
+
+/* Does anything in `n`'s subtree bind `name` (ast_names_without_binding)? A
+ * program-level constant of that name is not what the subtree's references
+ * to it read, as codegen decides when it renames constants. */
+int ast_binds_name(const ASTNode* n, const char* name);
 /* #2297: `type` as Aether source that parse_type reads back to the same
  * type. Returns 0 (and an empty buf) when it has no faithful spelling. */
 int type_to_aether_source(const Type* type, char* buf, size_t cap);

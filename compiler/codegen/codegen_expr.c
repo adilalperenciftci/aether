@@ -1,10 +1,12 @@
 #include "../analysis/quote.h"
 #include "../analysis/hoist.h"
+#include "../analysis/missing_return.h"
 #include "codegen_internal.h"
 #include "../analysis/sandbox_trust.h"
 #include "../aether_defines.h"
 #include "../aether_error.h"
 #include "../../std/string/aether_string_abi.h"
+#include <ctype.h>
 #include <errno.h>
 #include <limits.h>
 
@@ -394,7 +396,16 @@ static int callee_result_shape(CodeGenerator* gen, const char* func_name, const 
  * it to the box or the builder. */
 static int owned_closure_arg_drainable(CodeGenerator* gen, ASTNode* expr, const char* func_name,
                                        int ai) {
-    if (!func_name) return 1;
+    if (!func_name) {
+        /* #3035: a call through a value, `call(f, ...)`: f's type says
+         * which `ptr` parameter keeps the box it is given or hands it to the
+         * result (#2980), and that box holds the closure's reference. */
+        ASTNode* f = expr->value && !strcmp(expr->value, "call") && expr->child_count > 0
+                         ? expr->children[0] : NULL;
+        Type* ft = f ? f->node_type : NULL;
+        return !(ft && ft->kind == TYPE_FUNCTION && ai >= 1 &&
+                 fn_type_param_mode(ft, ai - 1) != FN_MODE_BORROWED);
+    }
     for (int i = 0; i < expr->child_count; i++) {
         ASTNode* a = expr->children[i];
         if (a && (a->type == AST_NAMED_ARG ||
@@ -1894,6 +1905,11 @@ static int is_stdlib_string_aware_extern(const char* c_func_name) {
      * downstream wrapper turns out to need the unwrapped form, the
      * fix is to add it here; if a user-defined function happens to
      * match a prefix and wants the raw form, it can be renamed. */
+    /* #3030: string_new_with_length copies a raw buffer as given (the
+     * modules hand it C's bytes, which may begin like a string's header),
+     * so a `string` argument goes to it as its characters, and a `ptr` one
+     * as it is. */
+    if (strcmp(c_func_name, "string_new_with_length") == 0) return 0;
     if (strncmp(c_func_name, "string_", 7) == 0) return 1;
     if (strncmp(c_func_name, "aether_string_", 14) == 0) return 1;
     return 0;
@@ -5320,7 +5336,7 @@ void emit_message_string_copy(CodeGenerator* gen, const char* lv, ASTNode* init)
         is_heap_string_expr(gen, init);
     fprintf(gen->output,
             "if (%s) { const char* _mt = %s; size_t _ml = aether_string_length(_mt); "
-            "%s = (const char*)string_new_with_length(aether_string_data(_mt), (int)_ml); ",
+            "%s = (const char*)string_new_with_length((void*)aether_string_data(_mt), (int)_ml); ",
             lv, lv, lv);
     if (owned_temp) fprintf(gen->output, "aether_heap_str_free(_mt); ");
     fprintf(gen->output, "} ");
@@ -5843,10 +5859,15 @@ void emit_string_literal_node(CodeGenerator* gen, const ASTNode* lit) {
 
 void emit_string_literal_chars(CodeGenerator* gen, const ASTNode* lit) {
     if (lit->value_len > 0) {
-        /* Its bytes, a NUL included, as the pinned string holds them. */
+        /* Its bytes, a NUL included, as the pinned string holds them, typed
+         * `char*` as a C string literal is (#3039): the static array is
+         * `const`, and passing it where C takes a `void*` (an extern's
+         * `ptr`) discarded the qualifier, a -Werror failure. The storage
+         * stays read-only, as a C literal's is, and the pinned string
+         * (`_ae_slit_<i>`) is untouched (R1). */
         int idx = static_string_literal_index(gen, lit->value, lit->value_len);
         gen->static_str_used[idx] |= AE_SLIT_USED_BYTES;
-        fprintf(gen->output, "_ae_slit_%d_bytes", idx);
+        fprintf(gen->output, "((char*)_ae_slit_%d_bytes)", idx);
     } else {
         emit_c_string_literal(gen, lit->value);
     }
@@ -6029,7 +6050,9 @@ void generate_sized_array_argument(CodeGenerator* gen, ASTNode* arg, Type* param
         return;
     }
     const char* et = get_c_type(param_type->element_type);
-    fprintf(gen->output, "((%s*)_aether_array_arg_copy((%s[%d]){0}, ", et, et,
+    /* (void*): cl.exe reads a `const char*` element's `const` as the
+     * array's (C4090, #2799). */
+    fprintf(gen->output, "((%s*)_aether_array_arg_copy((void*)(%s[%d]){0}, ", et, et,
             param_type->array_size);
     generate_expression(gen, arg);
     fprintf(gen->output, ", sizeof(%s[%d])))", et, param_type->array_size);
@@ -6703,6 +6726,41 @@ static Type* fresh_composite_arg_type(CodeGenerator* gen, ASTNode* arg, Type* t)
 static void emit_composite_arg_temp(CodeGenerator* gen, ASTNode* arg, Type* t);
 static int array_literal_arg_temp(CodeGenerator* gen, ASTNode* arg);
 
+/* A closure (an `_AeClosure` value) given to a `ptr` parameter, boxed. A
+ * parameter that holds it past the call (`keeps`: `@keep`, `@into`, an
+ * extern's `@retain`) is given a heap box holding a reference of its own;
+ * any other reads the box only during the call, so it gets one on this
+ * stack frame (a compound literal of the enclosing block, #2523) and the
+ * closure's env stays its owner's. */
+static void emit_closure_box_argument(CodeGenerator* gen, ASTNode* arg, int keeps) {
+    if (keeps) {
+        fprintf(gen->output, "_aether_box_closure(");
+        emit_closure_take(gen, arg);
+    } else {
+        fprintf(gen->output, "_aether_box_closure_in(&(_AeClosureBox){ .tag = 0 }, ");
+        generate_expression(gen, arg);
+    }
+    fprintf(gen->output, ")");
+}
+
+static void emit_closure_argument(CodeGenerator* gen, ASTNode* arg, Type* pt);
+
+/* #3035: argument `pi` of a call through a value of function type `ft` (a
+ * closure's own, or the variable's), for its parameter of type `pt`. A
+ * closure given to a `ptr` parameter is boxed as a direct call boxes it,
+ * held past the call where `ft` says the parameter keeps it or hands it to
+ * the result (#2980); it reached C as the `_AeClosure` itself. */
+static void emit_value_call_argument(CodeGenerator* gen, ASTNode* arg, Type* pt, Type* ft, int pi) {
+    if (pt && pt->kind == TYPE_PTR && arg && arg->node_type &&
+        arg->node_type->kind == TYPE_FUNCTION && !arg->node_type->is_fnptr) {
+        emit_closure_box_argument(gen, arg,
+                                  ft && ft->kind == TYPE_FUNCTION &&
+                                      fn_type_param_mode(ft, pi) != FN_MODE_BORROWED);
+        return;
+    }
+    emit_closure_argument(gen, arg, pt);
+}
+
 /* An argument of `call(f, ...)` for the closure's parameter of type `pt`,
  * coerced as a direct call's argument is: a bare value or `none` into an
  * optional parameter, a variant into a sum parameter (#2840); else as it is,
@@ -7113,6 +7171,34 @@ static void emit_composite_arg_temp(CodeGenerator* gen, ASTNode* arg, Type* t) {
     push_own_drop_carrier(gen, tv, t, 0, 0);
 }
 
+/* #2799: a number literal, or one negated (`-1.0`); `*zero` says whether it
+ * is zero. */
+static int number_literal(const ASTNode* n, int* zero) {
+    if (n && n->type == AST_UNARY_EXPRESSION && n->value && strcmp(n->value, "-") == 0 &&
+        n->child_count == 1)
+        n = n->children[0];
+    if (!n || n->type != AST_LITERAL || !n->value || !n->node_type ||
+        (n->node_type->kind != TYPE_INT && n->node_type->kind != TYPE_FLOAT &&
+         n->node_type->kind != TYPE_INT64) ||
+        !(isdigit((unsigned char)n->value[0]) || n->value[0] == '.'))
+        return 0;
+    if (zero) *zero = strtod(n->value, NULL) == 0.0;
+    return 1;
+}
+
+/* `1.0 / 0.0`: a float division of a number literal by a zero one, which is
+ * IEEE infinity or NaN (see _AE_FDIV0 in the prelude). */
+static int is_literal_float_div_by_zero(const ASTNode* e) {
+    if (!e || e->type != AST_BINARY_EXPRESSION || !e->value || strcmp(e->value, "/") != 0 ||
+        e->child_count < 2) return 0;
+    int lz = 0, rz = 0;
+    if (!number_literal(e->children[0], &lz) || !number_literal(e->children[1], &rz) || !rz)
+        return 0;
+    const Type* lt = e->children[0]->node_type;
+    const Type* rt = e->children[1]->node_type;
+    return (lt && lt->kind == TYPE_FLOAT) || (rt && rt->kind == TYPE_FLOAT);
+}
+
 void generate_expression(CodeGenerator* gen, ASTNode* expr) {
     if (!expr) return;
 
@@ -7483,10 +7569,12 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
              * Before this, the trailing expression was emitted as a
              * discarded statement and `_oer` was read UNINITIALIZED: a
              * silent miscompile whenever the block didn't exit. A block
-             * ending in an exit statement (return / panic / break /
-             * continue) never falls through, so no assignment is needed
-             * there; the typechecker rejects every other ending, so by
-             * the time we get here the last child is one or the other. */
+             * whose last statement leaves (return, panic, break, continue,
+             * `exit(n)`, or an if or match every path of which leaves:
+             * stmt_can_complete, the typechecker's own test, #3017) never
+             * falls through, so no assignment is needed there; the
+             * typechecker rejects every other ending, so by the time we
+             * get here the last child is one or the other. */
             fprintf(gen->output, "const char* err = _oe%d._%d; (void)err;\n",
                     id, err_idx);
             int last = handler->child_count - 1;
@@ -7495,7 +7583,8 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
             }
             if (last >= 0 && handler->children[last] &&
                 handler->children[last]->type == AST_EXPRESSION_STATEMENT &&
-                handler->children[last]->child_count > 0) {
+                handler->children[last]->child_count > 0 &&
+                stmt_can_complete(gen->program, handler->children[last])) {
                 ASTNode* hv = handler->children[last]->children[0];
                 /* is_heap flag = whether hv is ALREADY heap: a heap
                  * value passes through uniform_heap_str untouched
@@ -7886,7 +7975,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
         case AST_BITSET_CARD:
             // #1046 `card(s)` → popcount of the backing word.
             if (expr->child_count >= 1) {
-                fprintf(gen->output, "((int)__builtin_popcountll((unsigned long long)(");
+                fprintf(gen->output, "((int)_AE_POPCOUNT64((unsigned long long)(");  /* #2799 */
                 generate_expression(gen, expr->children[0]);
                 fprintf(gen->output, ")))");
             } else {
@@ -7927,6 +8016,28 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
 
         case AST_IDENTIFIER:
             if (!expr->value) { fprintf(gen->output, "/* NULL identifier */0"); break; }
+            /* #2799: in a file-scope constant's initializer, a constant it
+             * names is written as that constant's own initializer. C's
+             * `static const` initializer must be a constant expression, and
+             * another `static const` object is not one: GCC folded it, ISO C
+             * and cl.exe (C2099) do not. The initializer goes in as a value
+             * of the constant's own C type, as the object would have read:
+             * `const F: float = 1` is `((double)(1))`, so `F / 2` is 0.5,
+             * and a `long` constant shifts as a long (#2799 review). */
+            if (gen->in_const_init && gen->in_const_init < 64) {
+                ASTNode* cd = file_scope_value_const(gen->program, expr->value);
+                if (cd) {
+                    Type* ct = cd->node_type;
+                    int typed = ct && ct->kind != TYPE_UNKNOWN && ct->kind != TYPE_VOID;
+                    gen->in_const_init++;
+                    if (typed) fprintf(gen->output, "((%s)(", get_c_type(ct));
+                    else fprintf(gen->output, "(");
+                    generate_expression(gen, cd->children[0]);
+                    fprintf(gen->output, typed ? "))" : ")");
+                    gen->in_const_init--;
+                    break;
+                }
+            }
             /* #error-unification P3: a fault member is its qualified name
              * (`"<ns>.<name>"`), so it prints and compares through the value
              * itself, across `.so`s too. Under R1 that is the name's pinned
@@ -8794,6 +8905,18 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                                 bname, macc->value);
                     }
                     if (!skip_parens) fprintf(gen->output, ")");
+                } else if (is_literal_float_div_by_zero(expr)) {
+                    /* #2799: `1.0 / 0.0`, a constant division by zero cl.exe
+                     * refuses (C2124); _AE_FDIV0 is the same value under every
+                     * compiler, given the zero's sign: `-0.0` is a negative
+                     * zero, `-0` an int's 0 (#2799 review). */
+                    const ASTNode* z = expr->children[1];
+                    int neg = z->type == AST_UNARY_EXPRESSION && z->child_count == 1 &&
+                              z->children[0]->node_type &&
+                              z->children[0]->node_type->kind == TYPE_FLOAT;
+                    fprintf(gen->output, "_AE_FDIV0(");
+                    generate_expression(gen, expr->children[0]);
+                    fprintf(gen->output, ", %d)", neg ? -1 : 1);
                 } else {
                     if (!skip_parens) fprintf(gen->output, "(");
 
@@ -8836,8 +8959,29 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                     #define AE_IS_NARROW_INT(t) ((t) && ((t)->kind == TYPE_INT || \
                         (t)->kind == TYPE_BYTE || (t)->kind == TYPE_UINT32 || \
                         (t)->kind == TYPE_UINT16 || (t)->kind == TYPE_UINT8))
+                    /* #2799: `p + n` / `p - n` / `p - q` on a bare `ptr`
+                     * (C's `void*`) counts bytes. That is GNU C, arithmetic
+                     * on `void*`, which cl.exe refuses (C2036); through
+                     * `char*` it is standard C and the same bytes. A typed
+                     * `*T` keeps C's scaling and is not touched. */
+                    #define AE_IS_OFFSET(t) ((t) && ((t)->kind == TYPE_INT || \
+                        (t)->kind == TYPE_INT64 || (t)->kind == TYPE_UINT64 || \
+                        (t)->kind == TYPE_UINT32 || (t)->kind == TYPE_UINT16 || \
+                        (t)->kind == TYPE_UINT8 || (t)->kind == TYPE_BYTE))
+                    int arith_op = !is_assignment && expr->value &&
+                        (strcmp(expr->value, "+") == 0 || strcmp(expr->value, "-") == 0);
+                    int lhs_void = arith_op && lhs_is_ptr && !ltype->element_type;
+                    int rhs_void = arith_op && rhs_is_ptr && !rtype->element_type;
+                    int void_arith = (lhs_void && (AE_IS_OFFSET(rtype) || rhs_void)) ||
+                                     (rhs_void && AE_IS_OFFSET(ltype) &&
+                                      strcmp(expr->value, "+") == 0);
+                    #undef AE_IS_OFFSET
+                    int void_result = void_arith && !(lhs_void && rhs_void);
+                    if (void_result) fprintf(gen->output, "(void*)(");
                     int left_prefixed = duration_ratio || (ptr_int_cmp && lhs_is_ptr) ||
-                                        (wide_cast && AE_IS_NARROW_INT(ltype));
+                                        (wide_cast && AE_IS_NARROW_INT(ltype)) ||
+                                        (void_arith && lhs_void);
+                    if (void_arith && lhs_void) fprintf(gen->output, "(char*)(");
                     if (duration_ratio) fprintf(gen->output, "(double)");
                     if (ptr_int_cmp && lhs_is_ptr) fprintf(gen->output, "(intptr_t)");
                     if (wide_cast && AE_IS_NARROW_INT(ltype)) fprintf(gen->output, "%s", wide_cast);
@@ -8850,6 +8994,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                     }
                     generate_expression(gen, expr->children[0]);
                     gen->in_condition = 0;
+                    if (void_arith && lhs_void) fprintf(gen->output, ")");
                     if (is_assignment) {
                         gen->generating_lvalue = 0;
                     }
@@ -8918,9 +9063,12 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                         emit_sum_coerced(gen, expr->children[1], ltype);
                     } else {
                         if (wide_cast && AE_IS_NARROW_INT(rtype)) fprintf(gen->output, "%s", wide_cast);
+                        if (void_arith && rhs_void) fprintf(gen->output, "(char*)(");
                         generate_expression(gen, expr->children[1]);
+                        if (void_arith && rhs_void) fprintf(gen->output, ")");
                     }
                     #undef AE_IS_NARROW_INT
+                    if (void_result) fprintf(gen->output, ")");
                     if (!skip_parens) fprintf(gen->output, ")");
                 }
             }
@@ -9738,16 +9886,10 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                         generate_expression(gen, defined_val);
                         break;
                     }
-                    // Validate: every platform must have a value or other: must be set
-                    if (!default_val) {
-                        if (!linux_val || !windows_val || !macos_val) {
-                            fprintf(stderr,
-                                "error: select() at line %d: missing platform without 'other:' fallback.\n"
-                                "  Provide all platforms (linux:, windows:, macos:) or add other: for the default.\n",
-                                expr->line);
-                            // Still emit code so compilation continues and shows all errors
-                        }
-                    }
+                    /* A platform with no value and no `other:` is E0701 in
+                     * the typechecker (#3002, check_select_platforms), so
+                     * each `#error` below is reached only by a tree it did
+                     * not check. */
                     // Emit #ifdef chain
                     fprintf(gen->output, "\n#ifdef _WIN32\n");
                     if (windows_val) {
@@ -9949,7 +10091,8 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                                 if (seen++ == lit_pi) { lit_pt = p->node_type; break; }
                             }
                             lit_pi++;
-                            emit_closure_argument(gen, arg, lit_pt);
+                            emit_value_call_argument(gen, arg, lit_pt,
+                                                     literal ? literal->node_type : NULL, lit_pi - 1);
                         }
                         fprintf(gen->output, ")");
                         arg_drain_close(gen, expr, &ad);
@@ -10097,7 +10240,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                             /* Coerced only into a parameter type the signature
                              * gives: with none, the argument's own type is no
                              * slot to wrap it for (an erased `fn`, #2840). */
-                            if (sig_pt) emit_closure_argument(gen, arg, sig_pt);
+                            if (sig_pt) emit_value_call_argument(gen, arg, sig_pt, closure_sig, arg_pi - 1);
                             else generate_sized_array_argument(gen, arg, arg ? arg->node_type : NULL);
                         }
                         fprintf(gen->output, ")");
@@ -10623,14 +10766,8 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                              * the closure's env stays its owner's: a
                              * literal's is released after the call by the
                              * drain, a local's at its scope end. */
-                            if (call_param_keeps(gen, ext_name ? ext_name : func_name, arg_printed)) {
-                                fprintf(gen->output, "_aether_box_closure(");
-                                emit_closure_take(gen, arg);
-                            } else {
-                                fprintf(gen->output, "_aether_box_closure_in(&(_AeClosureBox){ .tag = 0 }, ");
-                                generate_expression(gen, arg);
-                            }
-                            fprintf(gen->output, ")");
+                            emit_closure_box_argument(
+                                gen, arg, call_param_keeps(gen, ext_name ? ext_name : func_name, arg_printed));
                         } else if (expected == TYPE_FUNCTION &&
                                    !expected_is_fnptr_form &&
                                    !(arg->node_type && arg->node_type->is_fnptr)) {
@@ -11228,6 +11365,10 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                     generate_expression(gen, fv);
                 }
             }
+            /* #2799: `T {}` is a zeroed T. `{}` is GNU C (C23 at last); ISO
+             * C's spelling is `{0}`, which GCC would warn about for a
+             * struct with no fields, so each compiler gets its own. */
+            if (emitted == 0) fprintf(gen->output, "_AE_ZERO_INIT");
             fprintf(gen->output, "}");
             if (any_array_field) {
                 for (int i = 0; i < expr->child_count; i++) {
