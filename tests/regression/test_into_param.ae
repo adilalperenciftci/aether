@@ -129,5 +129,6 @@ main() {
     hit = memchr(buf, 7, 8)
     check(hit != null, "a C function's @into parameter")
     free(buf)
+    heap.free(c)
     println("ok")
 }

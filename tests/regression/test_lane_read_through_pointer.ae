@@ -45,4 +45,6 @@ main() {
     check(a.next.inner.v.x == 9.0, "a lane written through a pointer")
 
     println("${b.inner.v.z} ${a.next.inner.d.x} ${a.next.inner.w.w}")
+    heap.free(a)
+    heap.free(b)
 }
