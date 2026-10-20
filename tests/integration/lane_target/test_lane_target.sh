@@ -178,7 +178,14 @@ run_path "AETHER_GCC_COMPAT=0" false "$CC_BIN -DAETHER_GCC_COMPAT=0"
 if [ "$x86" -eq 1 ] && command -v gcc >/dev/null 2>&1 &&
    (cd "$tmp/ok" && "$AETHERC" main.ae "$tmp/out.c" >/dev/null 2>&1); then
     if gcc -O2 -fwrapv -S -o "$tmp/out.s" $("$AE" cflags --cflags 2>/dev/null) "$tmp/out.c" 2>"$tmp/s.err"; then
-        counts="$(awk '/^[A-Za-z_][A-Za-z0-9_.]*:/ { fn = $0 } /ymm/ { if (fn ~ /^wide__avx2_/) copy++; else rest++ }
+        # Each ymm instruction is charged to the function whose label it
+        # follows. A local label is not a function: `.L...` on ELF and COFF,
+        # `L` + letters + a number (LBB0_1, Ltmp0, LCPI0_2) on Mach-O, whose
+        # function labels carry a leading `_`. The copy's functions, and any
+        # lane helper of its region left out of line, have `__avx2` in their
+        # names.
+        counts="$(awk '/^[A-Za-z_][A-Za-z0-9_.]*:/ && !/^L[A-Za-z_]*[0-9]/ { fn = $0 }
+                       /ymm/ { if (fn ~ /__avx2/) copy++; else rest++ }
                        END { printf "%d %d", copy + 0, rest + 0 }' "$tmp/out.s")"
         copy_ymm=${counts% *}
         rest_ymm=${counts#* }

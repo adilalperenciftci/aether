@@ -13,9 +13,10 @@
 #      reductions pick the same lane for a tie and a NaN in the fixed order
 #      the module documents.
 #   2. On x86-64 with -mavx2, the 8x8 transpose is register shuffles on ymm
-#      (vunpcklps, vshufps, vperm2f128 or vinsertf128), not eight scalar
-#      inserts per field, which would pass every numeric check above and
-#      lose the reason the moves exist.
+#      (the unpack, shuffle and 128-bit permute family, whichever of them
+#      the C compiler picks), not eight scalar inserts per field, which
+#      would pass every numeric check above and lose the reason the moves
+#      exist.
 #   3. Where the CPU has AVX2, the [build] cflags = "-mavx2" build prints the
 #      same as the default (two-halves) build.
 
@@ -179,15 +180,24 @@ case "$(uname -m 2>/dev/null)" in
     x86_64|amd64)
         if "$AETHERC" "$tmp/main.ae" "$tmp/out.c" >/dev/null 2>&1 && command -v gcc >/dev/null 2>&1; then
             if gcc -O2 -mavx2 -fwrapv -S -o "$tmp/out.s" $("$AE" cflags --cflags 2>/dev/null) "$tmp/out.c" 2>"$tmp/s.err"; then
-                body="$(awk '/^transpose8[.a-z0-9]*:/{p=1;next} p&&/^[A-Za-z_][A-Za-z0-9_.]*:/{p=0} p' "$tmp/out.s")"
-                for want in vunpcklps vunpckhps vshufps; do
-                    if ! printf '%s\n' "$body" | grep -q "$want.*ymm"; then
-                        echo "  [FAIL] lane_moves: with -mavx2 the 8x8 transpose has no '$want' on ymm"
-                        fail=1
-                    fi
-                done
-                if ! printf '%s\n' "$body" | grep -qE "vperm2f128|vinsertf128"; then
-                    echo "  [FAIL] lane_moves: with -mavx2 the 8x8 transpose does not pick halves with vperm2f128/vinsertf128"
+                # The function, from its label (Mach-O spells it `_transpose8`)
+                # to its end of frame, which every object format marks:
+                # .cfi_endproc (ELF, Mach-O) or .seh_endproc (COFF). Mach-O's
+                # local labels (LBB0_1) have no leading dot, so the next label
+                # is not where a function ends.
+                body="$(awk '/^_?transpose8[.a-z0-9]*:/{p=1;next} p&&/^[ \t]*\.(cfi|seh)_endproc/{p=0} p' "$tmp/out.s")"
+                if [ -z "$body" ]; then
+                    echo "  [FAIL] lane_moves: transpose8 is not in the -mavx2 assembly (the check found no function to read)"
+                    fail=1
+                fi
+                # What must hold, whichever moves a compiler picks for each
+                # pattern (GCC writes the pairs as vshufps, Clang as
+                # vunpcklpd / vunpckhpd): the 24 moves are register shuffles
+                # on ymm, a load may absorb a few of them, and no lane is
+                # inserted on its own.
+                moves="$(printf '%s\n' "$body" | grep -cE "v(unpck|shuf|perm|blend|insertf128|extractf128|movlh|movhl)[a-z0-9]*[^#]*ymm")"
+                if [ "$moves" -lt 16 ]; then
+                    echo "  [FAIL] lane_moves: with -mavx2 the 8x8 transpose has $moves register shuffles on ymm, want at least 16"
                     fail=1
                 fi
                 if printf '%s\n' "$body" | grep -qE "insertps"; then
