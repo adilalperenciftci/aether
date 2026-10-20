@@ -852,14 +852,25 @@ OBJ_DIR = $(BUILD_DIR)/obj
 # aren't auto-linked — we add the import libs explicitly so std.net TLS
 # and std.cryptography work in Windows release binaries.
 WIN_LINK_LIBS = -static -lws2_32 -lcrypt32 -lgdi32 -luser32 -ladvapi32 -lbcrypt -ldbghelp
+# The compiler's passes walk the tree recursively, and a chain of operators
+# (`a + b + ...`) is as deep as it is long. A Windows executable reserves a
+# 2 MB stack where Linux and macOS give the main thread 8 MB, so aetherc
+# overflowed on Windows at about 600 chained operators, inside the limit the
+# parser enforces everywhere (AETHER_MAX_EXPR_CHAIN, #2907). The compiler gets
+# the main-thread stack it has on the other platforms.
+AETHERC_STACK_LDFLAGS =
 ifdef WINDOWS_NATIVE
     AETHER_REQUIRED_LDFLAGS += $(WIN_LINK_LIBS)
+    AETHERC_STACK_LDFLAGS = -Wl,--stack,8388608
 else ifneq ($(findstring MINGW,$(DETECTED_OS)),)
     AETHER_REQUIRED_LDFLAGS += $(WIN_LINK_LIBS)
+    AETHERC_STACK_LDFLAGS = -Wl,--stack,8388608
 else ifneq ($(findstring MSYS,$(DETECTED_OS)),)
     AETHER_REQUIRED_LDFLAGS += $(WIN_LINK_LIBS)
+    AETHERC_STACK_LDFLAGS = -Wl,--stack,8388608
 else ifneq ($(findstring CYGWIN,$(DETECTED_OS)),)
     AETHER_REQUIRED_LDFLAGS += $(WIN_LINK_LIBS)
+    AETHERC_STACK_LDFLAGS = -Wl,--stack,8388608
 endif
 
 COMPILER_SRC = compiler/aetherc.c compiler/parser/lexer.c compiler/parser/parser.c compiler/ast.c compiler/analysis/typechecker.c compiler/analysis/contract_eval.c compiler/analysis/derive.c compiler/analysis/actor_reply.c compiler/analysis/missing_return.c compiler/analysis/slice_escape.c compiler/analysis/hoist.c compiler/analysis/slice_coerce.c compiler/analysis/sandbox_trust.c compiler/analysis/quote.c compiler/aether_defines.c compiler/codegen/codegen.c compiler/codegen/codegen_expr.c compiler/codegen/codegen_stmt.c compiler/codegen/codegen_actor.c compiler/codegen/codegen_func.c compiler/codegen/codegen_schema.c compiler/codegen/codegen_own.c compiler/aether_error.c compiler/aether_module.c compiler/aether_aea.c compiler/analysis/type_inference.c compiler/codegen/optimizer.c compiler/aether_diagnostics.c compiler/aether_strmap.c runtime/actors/aether_message_registry.c lsp/aether_lsp.c
@@ -1194,7 +1205,7 @@ compiler: $(BUILD_DIR)/aetherc$(EXE_EXT) $(BUILD_TARGET_STAMP)
 # went near the build system.
 $(BUILD_DIR)/aetherc$(EXE_EXT): $(COMPILER_OBJS) $(STD_OBJS) $(COLLECTIONS_OBJS) $(OBJ_DIR)/runtime/aether_sandbox.o $(OBJ_DIR)/runtime/aether_resource_caps.o $(OBJ_DIR)/runtime/aether_locale_num.o $(OBJ_DIR)/runtime/aether_callbacks.o $(IO_POLLER_OBJS) $(MANIFEST_OBJ) | $(VERSION_HEADER) $(STDLIB_SYMS_HEADER) $(FRONTEND_ID_HEADER)
 	@echo "Linking compiler..."
-	@$(CC) $(COMPILER_OBJS) $(STD_OBJS) $(COLLECTIONS_OBJS) $(OBJ_DIR)/runtime/aether_sandbox.o $(OBJ_DIR)/runtime/aether_resource_caps.o $(OBJ_DIR)/runtime/aether_locale_num.o $(OBJ_DIR)/runtime/aether_callbacks.o $(IO_POLLER_OBJS) $(MANIFEST_OBJ) -o $(BUILD_DIR)/aetherc$(EXE_EXT) $(AETHER_REQUIRED_LDFLAGS) $(LDFLAGS)
+	@$(CC) $(COMPILER_OBJS) $(STD_OBJS) $(COLLECTIONS_OBJS) $(OBJ_DIR)/runtime/aether_sandbox.o $(OBJ_DIR)/runtime/aether_resource_caps.o $(OBJ_DIR)/runtime/aether_locale_num.o $(OBJ_DIR)/runtime/aether_callbacks.o $(IO_POLLER_OBJS) $(MANIFEST_OBJ) -o $(BUILD_DIR)/aetherc$(EXE_EXT) $(AETHER_REQUIRED_LDFLAGS) $(LDFLAGS) $(AETHERC_STACK_LDFLAGS)
 	@echo "Compiler built successfully"
 
 # Fast compiler target (monolithic, for clean builds)
@@ -1204,7 +1215,7 @@ ifdef WINDOWS_NATIVE
 else
 	@$(MKDIR) $(BUILD_DIR)
 endif
-	$(CC) $(AETHER_REQUIRED_CFLAGS) $(CFLAGS) $(COMPILER_SRC) $(STD_SRC) $(COLLECTIONS_SRC) $(IO_POLLER_SRC) runtime/aether_resource_caps.c runtime/aether_locale_num.c runtime/aether_callbacks.c -o $(BUILD_DIR)/aetherc$(EXE_EXT) $(AETHER_REQUIRED_LDFLAGS) $(LDFLAGS)
+	$(CC) $(AETHER_REQUIRED_CFLAGS) $(CFLAGS) $(COMPILER_SRC) $(STD_SRC) $(COLLECTIONS_SRC) $(IO_POLLER_SRC) runtime/aether_resource_caps.c runtime/aether_locale_num.c runtime/aether_callbacks.c -o $(BUILD_DIR)/aetherc$(EXE_EXT) $(AETHER_REQUIRED_LDFLAGS) $(LDFLAGS) $(AETHERC_STACK_LDFLAGS)
 
 test: $(TEST_OBJS) $(COMPILER_LIB_OBJS) $(RUNTIME_OBJS) $(STD_OBJS) $(STD_REACTOR_OBJS) $(COLLECTIONS_OBJS)
 	@echo "==================================="

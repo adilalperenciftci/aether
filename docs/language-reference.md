@@ -4187,6 +4187,10 @@ An error stops the build and prints its code, `error[E0301]: ...`, with the sour
 | `E0902` | A function keeps a `ptr` parameter not declared `@keep`, an `@into` parameter reaches anything but the function's result, a call's result that holds a borrowed `ptr` parameter (through an `@into` argument) escapes, `@into` is declared where it cannot apply (not a bare `ptr`, a result that cannot hold a pointer, beside `@keep`, `@retain` or `@noescape`), a `string` is given to a `@keep ptr` or an `@into ptr` without `string.keep` (a `*StringSeq` without `string.seq_retain`), a string C memory viewed as `string[]` would read after its owner frees it (one built in the statement, or any but a pinned literal where the memory outlives the function), or a function with a `@keep` or `@into` parameter goes where a call through it would be checked as borrowing (a bare `fn`, a closure type with a weaker mode, a `ptr`, a typed C function pointer, an `as fn(...)` cast) ([String ownership](#string-ownership)) |
 | `E1000` | A file defines a function under a name it also imports selectively (`import std.string (length)` beside its own `length`), so a bare call in the function's body would reach itself ([module-system-design.md](module-system-design.md)) |
 
+### Limits
+
+The compiler counts two things, and passing either is E0100 naming the limit: nesting, of parentheses, blocks, `else if` chains and other constructs inside one another, 512 deep; and a chain on one level, the operators of `a + b + c ...` or the postfix operations of `a.b.c ...`, `x[i][j] ...` and calls, 1000 long. Split a deeper or longer one with functions or intermediate locals. Nothing else is counted: a file holds any number of declarations, a block any number of statements, a `switch` any number of cases and a `match` any number of arms.
+
 ### A Pointer Given to a String Local [E0202]
 
 A `ptr` is untyped, so a `string` local re-bound to one (`s = map_get_raw(m, k)`,

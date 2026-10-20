@@ -348,12 +348,6 @@ static void missing_operand(Parser* parser, Token* after, int errors_before,
     aether_error_full(msg, line, column, help, NULL, AETHER_ERR_SYNTAX);
 }
 
-// Helper to print warnings and errors (respects suppress_errors flag)
-static void parser_message(Parser* parser, const char* message) {
-    (void)parser;
-    (void)message;
-}
-
 static Type* parse_type_unsuffixed(Parser* parser);
 static void parse_param_modes(Parser* parser, char** annotation);
 static int reject_unbound_binding(Parser* parser, ASTNode* decl, const char* kw);
@@ -2242,19 +2236,34 @@ static ASTNode* parse_expression_inner(Parser* parser) {
     return expr;
 }
 
+/* #2907: one more link of an operator chain parsed by a loop, `links` so far.
+ * Past AETHER_MAX_EXPR_CHAIN it reports, once, at `at`, naming the limit, and
+ * stops the parse as the depth guard does: the tree is as deep as the chain
+ * is long, and every later pass walks it recursively. Returns 1 then. */
+static int expr_chain_too_long(Parser* parser, int links, Token* at, const char* what) {
+    if (links <= AETHER_MAX_EXPR_CHAIN) return 0;
+    if (!parser->depth_exceeded) {
+        parser->depth_exceeded = 1;
+        if (!parser->suppress_errors && at) {
+            char msg[256];
+            snprintf(msg, sizeof(msg), "%s chains more than %d operations, the limit",
+                     what, AETHER_MAX_EXPR_CHAIN);
+            aether_error_full(msg, at->line, at->column,
+                              "split it with intermediate locals", NULL, AETHER_ERR_SYNTAX);
+        }
+    }
+    return 1;
+}
+
 ASTNode* parse_binary_expression(Parser* parser, int precedence) {
     ASTNode* left = parse_unary_expression(parser);
     if (!left) return NULL;
-    
-    int iteration_count = 0;
-    const int MAX_BINARY_OPS = 1000;
-    
+
+    /* Each pass consumes its operator, so the loop ends. It stopped after
+     * 1000 operators at one level with nothing said, and the rest of the
+     * expression was read as statements (#2907); the limit is reported now. */
+    int links = 0;
     while (1) {
-        if (++iteration_count > MAX_BINARY_OPS) {
-            parser_message(parser, "Error: Expression too complex (max 1000 binary operators)");
-            break;
-        }
-        
         Token* operator = peek_token(parser);
         if (!operator) break;
 
@@ -2264,6 +2273,10 @@ ASTNode* parse_binary_expression(Parser* parser, int precedence) {
 
         if (operator_starts_newline(parser, operator)) {
             break;
+        }
+        if (expr_chain_too_long(parser, ++links, operator, "this expression")) {
+            free_ast_node(left);
+            return NULL;
         }
 
         advance_token(parser);
@@ -2299,16 +2312,22 @@ ASTNode* parse_binary_expression(Parser* parser, int precedence) {
 static ASTNode* parse_postfix_expression(Parser* parser) {
     ASTNode* expr = parse_primary_expression(parser);
     if (!expr) return NULL;
-    
-    int iteration_count = 0;
-    const int MAX_POSTFIX_OPS = 100;
-    
+
+    /* A pass that consumed nothing ends the loop (each one that continues
+     * has consumed its operator). It stopped after 100 postfix operations,
+     * `a.b.c...` or `x[i][j]...`, with nothing said (#2907); a chain is
+     * limited as a binary one is, and the limit is reported. */
+    int last = -1;
+    int links = 0;
     while (1) {
-        if (++iteration_count > MAX_POSTFIX_OPS) {
-            parser_message(parser, "Error: Too many postfix operations (max 100)");
-            break;
+        if (parser->current_token == last) break;
+        if (last >= 0 && expr_chain_too_long(parser, ++links, peek_token(parser),
+                                             "this operand")) {
+            free_ast_node(expr);
+            return NULL;
         }
-        
+        last = parser->current_token;
+
         Token* op = peek_token(parser);
         if (!op) break;
         
@@ -3968,21 +3987,19 @@ ASTNode* parse_switch_statement(Parser* parser) {
     ASTNode* switch_stmt = create_ast_node(AST_SWITCH_STATEMENT, NULL, 0, 0);
     add_child(switch_stmt, expression);
     
-    int iteration_count = 0;
-    const int MAX_CASES = 1000;
-    
+    /* No cap on the cases: each pass consumes a case or a token. It stopped
+     * after 1000 cases (saying "max 100", through a message that printed
+     * nothing), and the rest of the switch was read as statements (#2907). */
     while (!match_token(parser, TOKEN_RIGHT_BRACE) && !is_at_end(parser)) {
-        if (++iteration_count > MAX_CASES) {
-            parser_message(parser, "Error: Too many cases in switch statement (max 100)");
-            return switch_stmt;
-        }
-        
+        int start = parser->current_token;
+        int errors_before = aether_error_count();
         ASTNode* case_stmt = parse_case_statement(parser);
         if (case_stmt) {
             add_child(switch_stmt, case_stmt);
         } else {
-            parser_error(parser, "Expected 'case' or 'default' in switch statement");
-            advance_token(parser);
+            if (aether_error_count() == errors_before)
+                parser_error(parser, "Expected 'case' or 'default' in switch statement");
+            if (parser->current_token == start) advance_token(parser);
         }
     }
     
@@ -4053,24 +4070,24 @@ ASTNode* parse_case_statement(Parser* parser) {
 
         ASTNode* case_stmt = create_ast_node(AST_CASE_STATEMENT, "default", 0, 0);
         
-        int iteration_count = 0;
-        const int MAX_CASE_STMTS = 1000;
-        
+        /* No cap on the statements: each pass consumes a statement or a
+         * token. It stopped after 1000 with nothing said (#2907). */
         while (!is_at_end(parser)) {
-            if (++iteration_count > MAX_CASE_STMTS) {
-                parser_message(parser, "Error: Too many statements in case block (max 1000)");
-                break;
-            }
-            
             Token* next = peek_token(parser);
             if (!next || next->type == TOKEN_CASE || next->type == TOKEN_DEFAULT || next->type == TOKEN_RIGHT_BRACE) {
                 break;
             }
+            int start = parser->current_token;
+            int errors_before = aether_error_count();
             ASTNode* stmt = parse_statement(parser);
             if (stmt) {
                 add_child(case_stmt, stmt);
             } else {
-                advance_token(parser);
+                /* A token no statement starts with was skipped without a
+                 * word. */
+                if (aether_error_count() == errors_before)
+                    parser_error(parser, "Expected statement in case block");
+                if (parser->current_token == start) advance_token(parser);
             }
         }
         return case_stmt;
@@ -4084,24 +4101,24 @@ ASTNode* parse_case_statement(Parser* parser) {
         ASTNode* case_stmt = create_ast_node(AST_CASE_STATEMENT, NULL, 0, 0);
         add_child(case_stmt, value);
         
-        int iteration_count = 0;
-        const int MAX_CASE_STMTS = 1000;
-        
+        /* No cap on the statements: each pass consumes a statement or a
+         * token. It stopped after 1000 with nothing said (#2907). */
         while (!is_at_end(parser)) {
-            if (++iteration_count > MAX_CASE_STMTS) {
-                parser_message(parser, "Error: Too many statements in case block (max 1000)");
-                break;
-            }
-            
             Token* next = peek_token(parser);
             if (!next || next->type == TOKEN_CASE || next->type == TOKEN_DEFAULT || next->type == TOKEN_RIGHT_BRACE) {
                 break;
             }
+            int start = parser->current_token;
+            int errors_before = aether_error_count();
             ASTNode* stmt = parse_statement(parser);
             if (stmt) {
                 add_child(case_stmt, stmt);
             } else {
-                advance_token(parser);
+                /* A token no statement starts with was skipped without a
+                 * word. */
+                if (aether_error_count() == errors_before)
+                    parser_error(parser, "Expected statement in case block");
+                if (parser->current_token == start) advance_token(parser);
             }
         }
         return case_stmt;
@@ -4137,27 +4154,23 @@ ASTNode* parse_match_statement(Parser* parser) {
     ASTNode* match_stmt = create_ast_node(AST_MATCH_STATEMENT, NULL, 0, 0);
     add_child(match_stmt, expression);
     
-    int iteration_count = 0;
-    const int MAX_CASES = 1000;
-    
     /* The arms sit inside the match's braces, so a `match` that is part of
      * a condition (#2993) does not parse them as one: a call in an arm may
-     * take a trailing block. */
+     * take a trailing block. No cap on the arms: each pass consumes an arm
+     * or a token. It stopped after 1000 arms, and a token no arm starts with
+     * was skipped, both through a message that printed nothing (#2907). */
     parser->in_condition = 0;
     // Parse match arms
     while (!match_token(parser, TOKEN_RIGHT_BRACE) && !is_at_end(parser)) {
-        if (++iteration_count > MAX_CASES) {
-            parser_message(parser, "Error: Too many match arms (max 1000)");
-            parser->in_condition = saved_in_condition;
-            return match_stmt;
-        }
-        
+        int start = parser->current_token;
+        int errors_before = aether_error_count();
         ASTNode* match_arm = parse_match_case(parser);
         if (match_arm) {
             add_child(match_stmt, match_arm);
         } else {
-            parser_message(parser, "Parse error: Expected match arm in match statement");
-            advance_token(parser);
+            if (aether_error_count() == errors_before)
+                parser_error(parser, "Expected a match arm, `pattern -> value`");
+            if (parser->current_token == start) advance_token(parser);
         }
     }
     parser->in_condition = saved_in_condition;
@@ -4217,11 +4230,13 @@ ASTNode* parse_match_case(Parser* parser) {
     
     // Expect -> arrow. The pattern is this function's until it is attached to
     // the arm below, so an error here has to release it.
-    if (!expect_token(parser, TOKEN_ARROW)) { free_ast_node(pattern); return NULL; }
+    Token* arrow = expect_token(parser, TOKEN_ARROW);
+    if (!arrow) { free_ast_node(pattern); return NULL; }
 
     // Parse the result (expression, statement, or block)
     ASTNode* result = NULL;
     Token* next = peek_token(parser);
+    int errors_before = aether_error_count();
 
     if (next && next->type == TOKEN_LEFT_BRACE) {
         // Block result
@@ -4254,7 +4269,12 @@ ASTNode* parse_match_case(Parser* parser) {
         }
     }
     
-    if (!result) { free_ast_node(pattern); return NULL; }
+    if (!result) {
+        /* `1 -> }`: the arm has nothing after its `->`. */
+        missing_operand(parser, arrow, errors_before, "a value or a block");
+        free_ast_node(pattern);
+        return NULL;
+    }
 
     // Optional comma or newline
     Token* separator = peek_token(parser);
@@ -4816,7 +4836,7 @@ ASTNode* parse_message_definition(Parser* parser) {
     // Parse fields: name: type
     while (!match_token(parser, TOKEN_RIGHT_BRACE)) {
         if (is_at_end(parser)) {
-            parser_message(parser, "Error: Unexpected end of file in message definition");
+            parser_error(parser, "Unexpected end of file in message definition");
             return NULL;
         }
         
@@ -4827,7 +4847,7 @@ ASTNode* parse_message_definition(Parser* parser) {
 
         Type* field_type = parse_type(parser);
         if (!field_type) {
-            parser_message(parser, "Error: Expected type for message field");
+            parser_error(parser, "Expected type for message field");
             break;
         }
         
@@ -4857,7 +4877,7 @@ ASTNode* parse_message_pattern(Parser* parser) {
         // Parse pattern fields
         while (!match_token(parser, TOKEN_RIGHT_PAREN)) {
             if (is_at_end(parser)) {
-                parser_message(parser, "Error: Unexpected end in message pattern");
+                parser_error(parser, "Unexpected end in message pattern");
                 return NULL;
             }
             
@@ -4929,7 +4949,7 @@ ASTNode* parse_reply_statement(Parser* parser) {
     if (match_token(parser, TOKEN_LEFT_BRACE)) {
         while (!match_token(parser, TOKEN_RIGHT_BRACE)) {
             if (is_at_end(parser)) {
-                parser_message(parser, "Error: Unexpected end in reply statement");
+                parser_error(parser, "Unexpected end in reply statement");
                 return NULL;
             }
 
@@ -4975,7 +4995,7 @@ ASTNode* parse_message_constructor(Parser* parser) {
     if (match_token(parser, TOKEN_LEFT_BRACE)) {
         while (!match_token(parser, TOKEN_RIGHT_BRACE)) {
             if (is_at_end(parser)) {
-                parser_message(parser, "Error: Unexpected end in message constructor");
+                parser_error(parser, "Unexpected end in message constructor");
                 return NULL;
             }
             
@@ -5197,20 +5217,17 @@ ASTNode* parse_actor_definition(Parser* parser) {
     
     ASTNode* actor = create_ast_node(AST_ACTOR_DEFINITION, name->value, name->line, name->column);
     
-    int iteration_count = 0;
-    const int MAX_ACTOR_BODY = 1000;
-    
+    /* No cap on the body: each pass consumes a declaration or a token. It
+     * stopped after 1000 with nothing said, and an actor left open at the
+     * end of the file was not reported either (#2907). */
     while (!match_token(parser, TOKEN_RIGHT_BRACE)) {
-        if (++iteration_count > MAX_ACTOR_BODY) {
-            parser_message(parser, "Error: Too many statements in actor definition (max 1000)");
-            break;
-        }
-        
         if (is_at_end(parser)) {
-            parser_message(parser, "Error: Unexpected end of file in actor definition");
+            parser_error(parser, "Unexpected end of file in actor definition: its `}` is missing");
             break;
         }
-        
+        int body_start = parser->current_token;
+        int body_errors = aether_error_count();
+
         if (match_token(parser, TOKEN_STATE)) {
             // Check if there's an explicit type or Python-style
             Token* next_tok = peek_token(parser);
@@ -5286,19 +5303,19 @@ ASTNode* parse_actor_definition(Parser* parser) {
             if (stmt) {
                 add_child(actor, stmt);
             } else {
-                // If we can't parse a statement, advance to avoid infinite loop
                 Token* tok = peek_token(parser);
-                if (tok) {
+                if (tok && aether_error_count() == body_errors) {
                     char msg[128];
-                    snprintf(msg, sizeof(msg), "Unexpected token in actor body: '%s'",
+                    snprintf(msg, sizeof(msg), "Unexpected token in actor body: '%.60s'",
                              tok->value ? tok->value : "?");
-                    aether_error_simple(msg, tok->line, tok->column);
+                    parser_error(parser, msg);
                 }
-                advance_token(parser);
             }
         }
+        /* Forward progress, whatever the pass did. */
+        if (parser->current_token == body_start) advance_token(parser);
     }
-    
+
     return actor;
 }
 
@@ -5337,7 +5354,7 @@ ASTNode* parse_receive_statement(Parser* parser) {
     // Parse receive arms (pattern matching)
     while (!match_token(parser, TOKEN_RIGHT_BRACE)) {
         if (is_at_end(parser)) {
-            parser_message(parser, "Error: Unexpected end in receive statement");
+            parser_error(parser, "Unexpected end in receive statement");
             return NULL;
         }
         
@@ -6152,8 +6169,8 @@ ASTNode* parse_function_definition(Parser* parser) {
                     // generally, not just bit_set.)
                     if (peek_ahead(parser, 1) &&
                         peek_ahead(parser, 1)->type == TOKEN_LEFT_BRACKET) {
-                        int off = 1, depth = 0, guard = 0;
-                        while (peek_ahead(parser, off) && guard++ < 256) {
+                        int off = 1, depth = 0;
+                        while (peek_ahead(parser, off)) {
                             AeTokenType tt = peek_ahead(parser, off)->type;
                             if (tt == TOKEN_LEFT_BRACKET) depth++;
                             else if (tt == TOKEN_RIGHT_BRACKET) {
@@ -8045,20 +8062,24 @@ ASTNode* parse_top_level_decl(Parser* parser) {
 
 static void parse_region_stmts_into(Parser* parser, ASTNode* block) {
     if (!match_token(parser, TOKEN_LEFT_BRACE)) {
-        parser_message(parser, "Error: expected '{' to open a `when` region");
+        parser_error(parser, "expected '{' to open a `when` region");
         return;
     }
-    int guard = 0;
-    while (!is_at_end(parser) && guard++ < 10000) {
+    /* #2907: no cap on the statements (it was 10000, then silence); each
+     * pass consumes at least one token. */
+    while (!is_at_end(parser)) {
         Token* t = peek_token(parser);
         if (!t || t->type == TOKEN_RIGHT_BRACE) break;
         int start = parser->current_token;
+        int errors_before = aether_error_count();
         ASTNode* stmt = parse_statement(parser);
         if (stmt) add_child(block, stmt);
-        else if (parser->current_token == start) advance_token(parser);
+        else if (aether_error_count() == errors_before)
+            parser_error(parser, "Expected statement in a `when` region");
+        if (parser->current_token == start) advance_token(parser);
     }
     if (!match_token(parser, TOKEN_RIGHT_BRACE)) {
-        parser_message(parser, "Error: unterminated `when` region");
+        parser_error(parser, "unterminated `when` region");
     }
 }
 
@@ -8100,7 +8121,7 @@ static int parse_define_primary(Parser* parser, int* ok) {
         advance_token(parser);
         int v = parse_define_cond(parser, ok);
         if (!match_token(parser, TOKEN_RIGHT_PAREN)) {
-            parser_message(parser, "Error: expected ')' in a `when` condition");
+            parser_error(parser, "expected ')' in a `when` condition");
             *ok = 0;
         }
         return v;
@@ -8109,26 +8130,26 @@ static int parse_define_primary(Parser* parser, int* ok) {
     if (t->type == TOKEN_IDENTIFIER && t->value && strcmp(t->value, "defined") == 0) {
         advance_token(parser);
         if (!match_token(parser, TOKEN_LEFT_PAREN)) {
-            parser_message(parser, "Error: expected '(' after `defined`");
+            parser_error(parser, "expected '(' after `defined`");
             *ok = 0;
             return 0;
         }
         Token* name = peek_token(parser);
         if (!name || name->type != TOKEN_IDENTIFIER || !name->value) {
-            parser_message(parser, "Error: expected a symbol name inside `defined(...)`");
+            parser_error(parser, "expected a symbol name inside `defined(...)`");
             *ok = 0;
             return 0;
         }
         int v = aether_define_is_set(name->value);
         advance_token(parser);
         if (!match_token(parser, TOKEN_RIGHT_PAREN)) {
-            parser_message(parser, "Error: expected ')' after the symbol name");
+            parser_error(parser, "expected ')' after the symbol name");
             *ok = 0;
         }
         return v;
     }
 
-    parser_message(parser, "Error: a `when` region condition is defined(NAME), "
+    parser_error(parser, "a `when` region condition is defined(NAME), "
                            "optionally combined with !, && and ||");
     *ok = 0;
     return 0;
@@ -8177,20 +8198,21 @@ static void skip_braced_region(Parser* parser) {
  * from having been written at top level. */
 static void parse_region_into(Parser* parser, ASTNode* program) {
     if (!match_token(parser, TOKEN_LEFT_BRACE)) {
-        parser_message(parser, "Error: expected '{' to open a `when` region");
+        parser_error(parser, "expected '{' to open a `when` region");
         return;
     }
-    int guard = 0;
-    while (!is_at_end(parser) && guard++ < 10000) {
+    /* #2907: no cap on the declarations (it was 10000, then silence);
+     * each pass consumes at least one token. */
+    while (!is_at_end(parser)) {
         Token* t = peek_token(parser);
         if (!t || t->type == TOKEN_RIGHT_BRACE) break;
         int start = parser->current_token;
         ASTNode* node = parse_top_level_decl(parser);
         if (node) add_child(program, node);
-        else if (parser->current_token == start) advance_token(parser);
+        if (parser->current_token == start) advance_token(parser);
     }
     if (!match_token(parser, TOKEN_RIGHT_BRACE)) {
-        parser_message(parser, "Error: unterminated `when` region");
+        parser_error(parser, "unterminated `when` region");
     }
 }
 
@@ -8225,34 +8247,23 @@ static void parse_when_region(Parser* parser, ASTNode* program) {
 ASTNode* parse_program(Parser* parser) {
     ASTNode* program = create_ast_node(AST_PROGRAM, NULL, 0, 0);
 
-    int safety_counter = 0;
-    // Safety limit to prevent infinite loops on malformed input
-    const int MAX_ITERATIONS = 10000;
-
-    while (!is_at_end(parser) && safety_counter < MAX_ITERATIONS) {
+    /* #2907: no count of the declarations. A program of 10000 or more
+     * stopped at a "safety limit" whose message printed nothing, and aetherc
+     * exited 1 without a word. What the limit guarded against, a pass that
+     * consumes nothing and so repeats forever, is guarded directly: every
+     * pass consumes at least one token. */
+    while (!is_at_end(parser)) {
         if (parser->depth_exceeded) break;
-        safety_counter++;
+        int start_token = parser->current_token;
 
         if (at_when_region(parser)) {
             parse_when_region(parser, program);
-            continue;
+        } else {
+            ASTNode* node = parse_top_level_decl(parser);
+            if (node) add_child(program, node);
         }
-
-        int start_token = parser->current_token;
-        ASTNode* node = parse_top_level_decl(parser);
-        if (node) {
-            add_child(program, node);
-        } else if (parser->current_token == start_token) {
-            // Error recovery in parse_top_level_decl did not consume a token
-            // (e.g. NULL produced without advancing); step over to guarantee
-            // forward progress and avoid spinning the safety counter.
-            advance_token(parser);
-        }
-    }
-
-    if (safety_counter >= MAX_ITERATIONS) {
-        parser_message(parser, "Error: Parser safety limit reached - possible infinite loop");
-        return NULL;
+        // Error recovery that consumed nothing: step over the token.
+        if (parser->current_token == start_token) advance_token(parser);
     }
 
     return program;
