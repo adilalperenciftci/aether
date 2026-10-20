@@ -881,6 +881,23 @@ jobs:
         echo "VK_ICD_FILENAMES=$icd" >> "$GITHUB_ENV"
         VK_DRIVER_FILES="$icd" VK_ICD_FILENAMES="$icd" vulkaninfo --summary 2>&1 | head -40
 
+    # The spec's acceleration-structure builds in plain C (no Aether code),
+    # run first: a crash here is the driver's, and says so before the spec
+    # runs (#2562). It does not stop the job, so the spec's own result and
+    # capture follow; the job still fails when the spec does.
+    - name: Acceleration-structure builds in plain C on lavapipe
+      run: |
+        set +e
+        cc -O1 -g .github/scripts/lavapipe_as_build.c -o lavapipe_as_build -lvulkan || exit 1
+        ./lavapipe_as_build
+        code=$?
+        if [ "$code" -ge 128 ]; then
+          echo "the plain-C builds died with signal $((code - 128)) on this driver; gdb:"
+          gdb -q -batch -ex run -ex bt -ex 'x/12i $pc-24' -ex 'info registers' \
+              -ex 'thread apply all bt 12' --args ./lavapipe_as_build 2>&1
+        fi
+        echo "plain-C builds: exit $code"
+
     - name: Build the toolchain
       run: make -j"$(nproc)" compiler ae stdlib
 
