@@ -14,6 +14,486 @@ cut while your branch is open cannot fold your entry into the released section.
 
 ## [current]
 
+## [0.836.0]
+
+### Added
+
+- **`@into ptr`: a parameter that may reach only the function's result.** A
+  function that builds a value around its `ptr` argument (aephysics'
+  `query_recorder(context: @into ptr) -> QueryRecorder`, an iterator, a
+  view) declares the parameter `@into` instead of `@keep`, and may return
+  it as the pointer, a view, in a struct, a tuple part or an optional, or in
+  a closure that captures it; any other escape is E0902. The caller holds
+  the result as it holds a struct local: in a local, read, lent to
+  borrowing parameters, and refused (E0902, naming the result that holds the
+  parameter) only where the result escapes with a borrowed `ptr` parameter
+  of the caller, so `@keep` no longer spreads up every caller of a
+  constructor. It is decided from signatures, an extern's parameter may be
+  `@into` (`extern memchr(s: @into ptr, c: int, n: int) -> ptr`), a string
+  goes there through `string.keep(s)`, and a closure goes in a heap box with
+  its own reference. E0902 also refuses `@into` where it cannot apply: a
+  result that cannot hold a pointer, a parameter that is not a bare `ptr`,
+  and beside `@keep`, `@retain` or `@noescape` (#2990).
+
+- **`@keep` and `@into` in a function type: `fn(@keep ptr, float)`.** A
+  closure may declare `|el: @keep ptr, t: float|` (or `@into`), a function
+  with such a parameter is a value of the matching type, and a call through
+  a value of that type is checked as a direct call is: a borrowed `ptr`
+  given to its `@keep` parameter, or a string without `string.keep`, is
+  E0902, and an `@into` call's result holds its argument. A closure left
+  untyped (`callback |el, t| { ... }`) takes the types and modes of the
+  closure type it is given for, so aether-ui's `vg.animate` can declare
+  `tick: fn(@keep ptr, float)` and its documented tick pass the element on
+  to `vg.element_set_fill`. A function goes only where its modes or
+  stronger ones are expected (borrowed, then `@into`, then `@keep`): a
+  keeping function given to a bare `fn`, a weaker closure type, a `ptr` or
+  `box_closure` is E0902, naming the parameter and both types. A function
+  type that names a mode is a closure's type; a typed C function pointer's
+  parameters borrow, so `as fn(@keep ptr)` and `type T = fn(@keep ptr)` are
+  refused, as is a function with a `@keep` or `@into` parameter used as a C
+  function pointer. A value that is one of several functions (an
+  if-expression or a value `match` over them, a local bound to one in each
+  branch) is called through the strongest of their modes at each parameter.
+  Compiled module artifacts (`.aea`) carry the modes
+  (format 5) (#2980).
+
+- **CI reports lavapipe's D32S8 crash from a draw in plain C.**
+  `.github/scripts/lavapipe_d32s8_draw.c` draws a quad into a
+  `D32_SFLOAT_S8_UINT` depth-stencil attachment with no Aether code, and
+  the Ubuntu 24.04 lavapipe job and the Windows contrib leg run it 20 times
+  in that format and 20 in `D24_UNORM_S8_UINT`, reporting how many runs
+  crashed in each without failing on them. A run counts as a crash by any
+  failing exit but the program's own (MSYS2's sh gives heap corruption as
+  127 and abort as 3), and as an unsupported format or a broken setup only
+  by what it printed. Mesa 26.1.8's llvmpipe dies in
+  about half the D32S8 runs where it runs 8 lanes wide: an aligned 32-byte
+  load from depth storage that is only 16-byte aligned. D24S8 and 4-lane
+  llvmpipe never crash. The counts say when a Mesa release fixes it
+  (#2410).
+
+### Changed
+
+- **Breaking: every std function that returns a string is typed `string`,
+  and a `ptr` no longer renders.** These returned their counted string as a
+  `ptr` and now return `string` (owned, `@heap`), with the same C ABI:
+  `string.new`, `string.from_cstr`, `string.from_literal`, `string.empty`,
+  `string.new_with_length` (also as declared in std.brotli,
+  std.cryptography, std.encoding, std.fs, std.http, std.lzf, std.zlib,
+  std.zstd and contrib's avcodec and sqlite), `string.from_char`,
+  `string.from_int`, `string.from_long`, `string.from_float`,
+  `string.from_int_radix`, `string.pad_start`, `string.pad_end` and
+  `string.format_list`; std.tar's name helpers too. `string.array_get`
+  returns the array's characters as a borrowed `string`, so a local that
+  keeps one copies it and it outlives `string.array_free`. As a `ptr`
+  nothing released these results, so each call leaked its string; as a
+  `string` the place that takes it owns it. A program that stored one in a
+  `ptr` local or field is now refused (E0200, E0902): keep it in a
+  `string`. Interpolating or printing a `ptr` is error E0200 (#3018): it was
+  rendered as a C string whatever it pointed at, a list or a buffer
+  included. A `ptr` that holds a C string is read with
+  `string.from_ptr(p)`, and a container's string with `list.get_string` or
+  `map.get_string`.
+
+### Removed
+
+- **std exports one name for each operation it aliased.** **Breaking:**
+  some modules exported an operation under two names whose short forms
+  differ, an Aether alias beside the extern or function it forwards to,
+  which E0305 (one short name, #2976) cannot see: `json.from_int` beside
+  `json.create_int`, `xml.writer` beside `xml.builder_new`. The Aether-side
+  name stays (std.cbor's `map_push`, which appends a pair, over `map_set`);
+  the other leaves the export list, and calling it is E0303. Removed, with
+  the name to call instead (#3014):
+  - std.json (10): `create_object` (`obj`), `create_array` (`arr`), `create_string` (`str`), `create_number` (`num`), `create_int` (`from_int`), `create_bool` (`boolean`), `create_null` (`null_value`), `object_set` (`set`), `array_add` (`push`), `stringify` (`encode`)
+  - std.cbor (4): `object_set` (`set`), `array_add` (`push`), `map_set` (`map_push`), `stringify` (`encode`)
+  - std.xml (18): `parser_new_str` (`parser`), `event_name` (`name`), `event_text` (`text`), `event_attr_count` (`attr_count`), `event_attr_name` (`attr_name`), `event_attr_value` (`attr_value`), `event_attr_str` (`attr`), `parser_error` (`error`), `parser_free` (`free`), `builder_new` (`writer`), `builder_declaration` (`declaration`), `builder_start` (`start`), `builder_attr` (`attribute`), `builder_text` (`text_node`), `builder_end` (`end`), `builder_element` (`element`), `builder_finish` (`finish`), `builder_free` (`free_builder`), each also as `xml_<name>`
+  - std.bytes.cursor (17): every `bytes_cursor_<x>` (`cursor.<x>`), and `bytes_cursor_new_from_ptr` (`cursor.from_slice`)
+  - std.arena (2): `get_size` (`size`), `get_used` (`used`)
+  - std.fs (8): `path_exists` (`exists`), `path_clean` (`clean`), `path_rel` (`rel`), `path_is_within_base` (`is_within_base`), `get_mount_point`, `get_mount_source`, `get_mount_fstype`, `get_mount_options` (`mount_point`, `mount_source`, `mount_fstype`, `mount_options`)
+  - std.http (7): `server_set_on_start` (`server_on_start`), `server_set_on_stop` (`server_on_stop`), `sse_send_event` (`sse_send`), `sse_send_event_id` (`sse_send_id`), `sse_send_event_full` (`sse_send_full`), `ws_message_data` (`ws_message`), `ae_io_await` (`await_io`)
+  - std.net (5): `ae_io_await` (`await_io`), `ae_pipe_open` (`pipe_open`), `ae_pipe_write_fd` (`pipe_write_fd`), `ae_fd_write` (`fd_write`), `ae_fd_close` (`fd_close`)
+  - std.brotli, std.zlib, std.zstd (1 each): `backend_available` (`available`)
+  - std.os (5): `aether_args_count` (`os.args_count`), `aether_args_get` (`os.args_get`, an owned copy, `""` out of range), `aether_argv0` (`os.argv0`, `""` before argv is set), `aether_args_seal` (`os.args_seal`), `aether_args_sealed` (`os.args_sealed`); a bare `aether_args_count()` reached the export too. `os.aether_argv_raw` has no wrapper and stays.
+
+### Fixed
+
+- **The API reference matches std again, and CI keeps it that way.**
+  `docs/api` is generated from std by `tools/docgen` and committed, but
+  nothing regenerated it when std's exports changed: it still documented
+  the hundreds of names one name per operation removed (#2976, #3014) and
+  had no page for std.quote. It is regenerated, `make docs` now clears the
+  folder first so a removed module's page cannot linger, and the new
+  `make check-api-docs` (run by `make check-docs` on every CI leg)
+  regenerates the reference into a temporary folder and names each page
+  that differs from the committed one.
+
+- **A statement that ends before its value no longer compiles.** `main() { x
+  = }` compiled, with W1001 and "unresolved type in codegen, defaulting to
+  int", and so did `int x =`, `x = ;`, `y = x +`, `x = -`, `x = f(`,
+  `return 1 +`, `return a,` and `[1, , 2]`: the expression parser gave up
+  without a word at a token that cannot begin an expression, and the `=` or
+  operator before it was taken as having no value. Each is now E0100 at the
+  `=` or operator, naming what was expected and what was found
+  (expected a value after `=`, found `}`), and the rest of the line is not
+  reported again. A bare `return` in a function whose written result is a
+  value, which reached C as `return;` (GCC 14 refuses it), is E0200 (#2998).
+
+- **One rule for what can be printed.** Interpolation refused a value with
+  no string rendering, but a tuple got through (`"${t}"` printed a number
+  that changed from run to run), and `print` / `println` checked nothing:
+  a struct, a sum or a tuple argument reached C as a `%d` and printed
+  garbage, in the call, in the `print` statement and in print's format
+  arguments. Every place that renders a value now applies one rule, and a
+  tuple, a struct, a sum, an optional, an array, a function value or a call
+  returning several values is error E0200, with the spelling that renders
+  it (#3016). A `ptr` still renders as a C string until std stops typing
+  strings as `ptr` (#3018).
+
+- **E0902 follows a borrowed `ptr` through tuples, optionals, closure
+  results and function pointers.** A borrowed `ptr` parameter put in a
+  tuple (`t = (p, 1)`, then `return t`), unwrapped from an optional
+  (`kept = o!`, `o ?? d`), bound by a `match` arm (`some(v)`, a struct
+  pattern's field), destructured (`a, b = t`) or returned by a closure that
+  captured it (`kept = call(f)`) escaped unchecked; each holds the parameter
+  now as a struct local does. A function with a `@keep` parameter could
+  also become a typed C function pointer (`hold as fn(ptr)`, a `fn(ptr)`
+  variable or argument) and be called as if it borrowed: that is refused,
+  since a C function pointer's parameters borrow. A `const` bound to a
+  string literal goes to a `@keep ptr` or a `ptr` field as the literal does;
+  a module-level `var` that starts as one does not, nor a local or a
+  parameter of the constant's name (#2990).
+
+- **`exit(n)` leaves wherever a statement may leave.** An `or { }` handler
+  ending with `exit(n)` compiled to invalid C (`exit` was taken as the
+  block's value), a value `match` arm calling it was refused as an arm with
+  no value, and an `if` expression branch made of it, or of any call that
+  returns nothing, reached C as a void operand of `?:`. Whether a statement
+  leaves is now decided by one rule, the missing-return analysis, for the
+  `or` handler, a value `match` arm, the isolation check and W1002: a
+  handler or arm ending in `exit(n)` or `os.exit(n)`, or in an `if`/`else`
+  or `match` every path of which leaves, needs no value; an `if` expression
+  branch with no value is error E0200 naming the forms that can leave; and
+  W1002 now also flags code after `break`, `continue`, `panic` and a loop
+  nothing ends, naming the statement (#3017).
+
+- **A source file may start with a UTF-8 byte order mark.** A file saved
+  with one (EF BB BF), as Windows editors write it, failed with E0100 and
+  the mark's first byte for a message, printed as garbage. The mark is no
+  part of the program's text: the lexer (so the compiler, `ae check`,
+  imported modules and the language server), `ae fmt` (which keeps it where
+  it was), `aetherc --concat-ae` and `ae`'s own scans of a file's imports all
+  read the file as starting after it. A character that begins no token is
+  now E0100 naming it, `unexpected character '“' (U+201C) outside a string
+  or a comment`, a byte order mark inside the file says so, and bytes that
+  are not UTF-8 are named by value; a character the lexer stops at inside an
+  imported module is reported with that message rather than as "Expected
+  statement in block". The rule is in the language reference, under Source
+  Files (#2999).
+
+- **A binary import is checked as a source import is.** An `--emit=lib`
+  library's catalog wrote each export's source signature without its
+  parameters' `@keep`, so a program importing the library as a binary
+  passed a borrowed `ptr`, or a string without `string.keep`, to a
+  parameter the library keeps, and nothing refused it; the library then
+  held a pointer its owner freed. The signature now spells `@keep` and
+  `@into` (and is written whenever a parameter has one), a function-typed
+  parameter's too (`tick: fn(@keep ptr, float)`, which it wrote `fn`),
+  the extern `ae` declares from it takes them as they are, and such calls
+  are E0902 as in a source import. An extern's parameter accepts `@keep`
+  for this. `ae check` resolves a binary import too: it refused one as
+  unresolved, where `ae build` and `ae run` found the library. A call
+  through a module's qualified name (`mod.f(...)`) to that module's
+  `@extern` is checked against its `@retain`, `@keep` and `@into`
+  parameters, which only an unqualified call was (#3013).
+
+- **What a diagnostic suggests is Aether.** The `@scoped` escape error
+  suggested `buf.len()`, which Aether does not have; its help now names a
+  value derived from the binding for its type (`string.length(buf)` for a
+  string, `list.size(l)` for a list, `v.len` for a slice). A sweep of the
+  other help texts fixed three more: a function that returns nothing,
+  assigned, suggested the return type `g(...): int` (it is `-> int`); an
+  arm with no value suggested `{ g(...)  0 }` (now `{ g(...); 0 }`); a bare
+  ptr given to a slice parameter pointed at an `array()` view (it is
+  `intarr.array(a)`). The `@scoped` container check listed `list.push`,
+  `map.set` and `seq.cons`, which std does not have, and missed
+  `string.seq_cons` and the raw and owning inserts; and the language server
+  completed nine std calls that do not exist (`math.abs`, `log.info`,
+  `json.stringify`, `cryptography.sha256`, the base64 calls under
+  std.cryptography rather than std.encoding, ...) (#3001).
+
+- **Type checking a chain of field reads is linear again.** `infer_type`
+  inferred a member access's object once per check it made (`.len`, lanes,
+  bitstructs, the field lookup), each of which re-inferred the whole chain
+  under it, and leaked the object's type whenever the field was found. A
+  chain through pointers, `n.next.next ... .v`, took about 4x more memory
+  per link: 1.7 GB at 14 links, and a 150-link chain exhausted a 32 GB
+  machine. The object is now inferred once per access and freed once; 99
+  links check in a fraction of a second (#3021).
+
+- **`@target("avx2")` no longer breaks `-O0` builds on Windows.** Since
+  0.835.0 the region of a module imported at the target is AVX2 code, and
+  GCC on Win64 stops with an internal compiler error
+  (`expand_one_stack_var_1`) on an `f32x8` local when it is not optimizing:
+  the type is a 32-byte vector declared 16-byte aligned, and GCC cannot
+  realign the Win64 stack for it (GCC bug 54412). Every `-O0` Windows build
+  of a program using such an import failed, as did `-O0 -mavx2` with any
+  `f32x8`. There the eight-lane types now take the two-halves form and the
+  region is plain code; from `-O1` up, and with Clang, nothing changes.
+  Also, every Windows build is now assembled with
+  `-Wa,-muse-unaligned-vector-move`, not only one whose cflags enable AVX,
+  since a region is AVX code whatever the cflags, and `ae cflags --cflags`
+  carries it for builds that call gcc themselves (#3023).
+
+- **A call that returns nothing gives no value anywhere.** Only a local's
+  initializer was checked (`x = g()` with g returning nothing is E0200), and
+  only for a callee named without its module. A field or element store, an
+  argument, an operand, an interpolation, an array, tuple or struct literal,
+  an index and a compound assignment all reached C, which refused them as an
+  "invalid use of void expression", and `x = print(1)` compiled. Each is
+  E0200 at the call, naming it and the place ("'g' returns no value, so
+  there is nothing to pass here"), and a local refused that way is still
+  bound, so its uses report nothing more.
+
+- **`++` and `--` change only a number held in storage.** Their operand,
+  prefix or postfix, was checked only against a `const` table's element, so
+  `++5`, `f()--`, `(y + 1)++`, `K++` on a `const`, an array and a struct
+  passed `ae check` and stopped at the C compiler ("lvalue required"), `b++`
+  on a bool ran as C's `_Bool` arithmetic, and `s++` on a string moved its
+  pointer: it printed from the wrong place, and a heap string was then
+  released through an address it was never allocated at. The operand must
+  now be a local, parameter, module `var` or actor state that is not a
+  `const`, a field or an element, of an integer or float type; anything else
+  (an enum member, a pointer, a `Duration`, a distinct type, `ref_get(r)`, a
+  field of a call's result too) is error E0200 naming what it is and the
+  fix. A write to a string's character (`s[i] = v`, `s[i] += v`, `s[i]++`)
+  reached C as an assignment to read-only memory and is E0200 as well
+  (#3022).
+
+- **A part read out of a tuple holds only what went into that part.** Since
+  E0902 began following a borrowed `ptr` parameter into tuples, a tuple
+  local counted as holding it in every part, so `t = (p, malloc(8))`, then
+  `a, b = t` and `return b`, was refused though `b` is the function's own
+  block. A tuple built from parts now records which part holds the
+  parameter, nested ones included, and a destructured part carries only
+  that; a tuple that comes whole from elsewhere (a call's result) still
+  holds it in every part (#2990).
+
+- **A field read out of a struct local holds only what went into that
+  field.** A struct local holding a borrowed `ptr` parameter in one field
+  counted as holding it in every field, so `s = Pair { a: p, b:
+  malloc(8) }` then `return s.b` was E0902. A struct built from fields, by
+  its literal or by stores into its fields (`s.b = q`, `s.in.b = q`), now
+  records which field holds the parameter, nested ones included, and a
+  field read (`s.b`, `s.in.b`) or a struct pattern's binding carries only
+  what that field holds. A value whose parts hold more than eight
+  parameter entries is taken as holding them as a whole, refusing more
+  and never less (#3036).
+
+- **A pointer computed from a borrowed `ptr` parameter is the parameter.**
+  `kept = p + 8`, `return p - 1` and `n.child = p + 16` kept a borrowed
+  `ptr` parameter, or let an `@into` one reach somewhere other than the
+  result, with no E0902, since the check followed the pointer through casts
+  but not through arithmetic. `p + n` and `p - n` now carry what `p`
+  carries: an `@into` function may return `p + 8`, and at a call the result
+  plus an offset still holds the argument (#3033).
+
+- **A program of 10000 or more declarations compiles.** parse_program
+  stopped at a 10000-pass "safety limit" whose message printed nothing, so
+  aetherc exited 1 without a word. The two `when` region loops had the same
+  cap, a switch stopped at 1000 cases, a match at 1000 arms, a case block
+  and an actor body at 1000 statements and a postfix chain at 100, all
+  silently. Every loop guarantees forward progress instead, every parser
+  message is a diagnostic (an actor left open at the end of the file, a bad
+  `when` condition, a stray token in a case block or a `when` region), and
+  `1 -> }` in a match is E0100 at its `->`. One limit stays and is reported:
+  a chain of more than 1000 operators or postfix operations on one level is
+  E0100 naming it, since every pass walks such a chain recursively. aetherc
+  overflowed its 2 MB Windows stack at about 600 chained `+ 1`; it now
+  reserves the 8 MB a main thread has on Linux and macOS. The limits are in
+  the language reference, under Compiler Errors (#2907).
+
+- **A closure given to a `ptr` parameter through a function value is
+  boxed.** `f = lend` then `f(|x: int| { ... })` passed the closure itself
+  where the parameter is a pointer, and the C compiler refused the
+  generated call; the same through a local bound to a closure literal. The
+  closure is now boxed as a direct call boxes it: on the caller's stack for
+  a parameter that borrows, and on the heap with a reference of its own
+  where the value's type says the parameter keeps it or hands it to the
+  result (`fn(@keep ptr)`, `fn(@into ptr) -> Job`); `release_closure` gives
+  that reference back (#3035).
+
+- **contrib/host's bridges spawn children by std.os's rules.**
+  `contrib.host.aether` made its capture pipe with a plain `pipe()`, so a
+  child another thread started while a capture was open inherited the
+  write end and the capture waited for that child to exit, the #2917 stall
+  in a second place; it and `contrib.host.go` also forked outside the fork
+  lock that keeps a fork away from a half-made pipe where `pipe2` is
+  missing (macOS, #3028). std.os now exports its close-on-exec pipe and
+  its fork as `aether_os_pipe_cloexec` and `aether_os_fork`
+  (`std/os/aether_os.h`), and both bridges use them (#3040).
+
+- **A lane read through a pointer compiles.** `b.inner.v.z`, with `b`
+  from `heap.new` (or any pointer to a struct on the way), reached the C
+  compiler as `b.inner.v` and stopped at "'b' is a pointer; did you mean to
+  use '->'?"; through a value struct it worked. The checker now checks a
+  lane read's object as it does any other member access's, so every access
+  under it lowers with `->` where its object is a pointer, for reads and
+  writes of four-, two- and eight-lane values (#3041).
+
+- **A wrong lane name or an unknown bitstruct field is reported once.**
+  `v.q` on an `f32x4` and `h.nope` on a bitstruct printed their E0200 two or
+  three times, depending on where they stood, and in an `if` or `while`
+  condition a "condition must be boolean" error followed. Each is reported
+  once now, by the check of the member access, and a condition that
+  reported its own error is not also called not boolean (#3042).
+
+- **A string literal holding a NUL goes to a C `ptr` without a warning.**
+  `probe_len("a\0bc")` with `extern probe_len(p: ptr) -> int` made gcc warn
+  that the call discarded `const` (the literal's bytes are a `static const`
+  array beside its pinned string), which failed `-Werror` builds. The
+  bytes now go to C typed `char*`, as a C string literal is, every byte
+  still there; the pinned string the program holds is unchanged (#3039).
+
+- **`ae build --emit=lib --package` removes its staging directory.** Each
+  run left an `ae-package-<pid>` directory in the temp directory (`%TEMP%`
+  on Windows), built or failed. It is removed when ae exits, on every path
+  a build ends by (#2899).
+
+- **A module `var` is never folded as the constant it starts as.** A `var`
+  shares the `const` node, and the compile-time evaluator read it at its
+  initializer: a `requires` on a `var` that started true was dropped from
+  the C and never checked, one on a `var` that started false refused a
+  correct program, a function whose only `return` sat behind `if !flag`
+  passed the missing-return check, and W1002 called the code after
+  `if !flag { return }` unreachable. Also, an `if` on a `const` no longer
+  makes the code after it unreachable for W1002, so a flag that disables
+  code on purpose (`if !DEBUG { return }`) is not reported; a loop on a true
+  constant with no `break` still is (#3026).
+
+- **Every pipe the runtime makes closes on exec.** The scheduler's I/O
+  poller (the poll() backend), std.net's event loop, HTTP server and
+  `net.pipe_open`, and std.http's HTTP/2 sessions made their wake pipes with
+  a plain `pipe()`, so every child a program started kept them open across
+  exec (the HTTP server set the flag afterwards, outside the fork lock
+  macOS needs). They are made close-on-exec now, by the same helper
+  std.os's process calls and contrib/host's bridges use, which moved from
+  std/os into the runtime (`runtime/utils/aether_spawn.h`,
+  `aether_pipe_cloexec` and `aether_fork`), with the one fork lock of the
+  process beside it (#3046).
+
+- **A value `match` over named functions is a function value.** `f =
+  match k { 0 -> a  _ -> b }` left the arms bare names, so the match had
+  no type: `f(3)` was E0301 "Undefined function 'f'" and `call(f, 3)`
+  passed the checker and failed in the C compiler. An arm that names a
+  function now gives the function as a value, as an if-expression's branch
+  does: the match is of the function's type, joined with the other arms'
+  (their `@keep` and `@into` modes included), and arms of two signatures
+  are refused as any arms of two types are (#3037).
+
+- **A named function goes to a binary import's closure parameter.** A
+  library exporting `run(cb: fn, n: int)`, imported as a binary, then
+  `run(my_fn, 3)` with `my_fn` a named function, stopped in the C
+  compiler on `_aether_bare_adapter_my_fn` undeclared, whatever the
+  parameter's modes; a closure literal worked, and so did a source import.
+  The adapter a named function goes through is now declared ahead of the
+  code for an extern's `fn` parameter, a binary import's stub among them,
+  as for an Aether function's (#3038).
+
+- **E0902 sees a borrowed `ptr` stored after a local's address was taken.**
+  `ps = (&s) as *Pair`, then `s.a = p`, then `kept = ps.a` kept the
+  borrowed parameter `p` with no error: a pointer to a local carried what
+  the local held when the address was taken. It now reads the local as it
+  is when read, through copies of the address (`qs = ps`) and an address
+  of a field (`&o.inner`, which reads that field) (#3043).
+
+- **A value returned from a `T!` function is checked against `T`.** One
+  value from a `-> int!` function is its success value, which the result
+  wraps, and it went unchecked: `return s` with `s` a string passed the
+  checker and failed in the C compiler. It is now checked as a `-> int`
+  return is, arm by arm in a branching value, with the same conversions (an
+  int into a `long!` or a `float!`); a result forwarded whole and a value
+  propagated by `!` pass as before, and `return value, err` is unchanged
+  (#3044).
+
+- **A pointer moves by an integer of any width.** `p - n` with a `long`
+  n was refused (E0200 "Type mismatch in variable initialization"), as
+  were `p + n` and `n + p` with a `long` bound to a local, while an `int`
+  n passed. A pointer plus or minus an `int`, a `long`, a `uint32` or a
+  `byte` is a pointer now, and `-=` / `+=` on a pointer local take any of
+  them. A number less a pointer, `n - p`, which reached the C compiler as
+  "invalid operands to binary -", is the checker's error (#3045).
+
+- **A `select()` with no value for a platform is error E0701.** With no
+  `other:` fallback, `select(linux: 8080)` printed an `error:` line with no
+  code from codegen and the build went on into C, which stopped at the
+  `#error` written in the missing value's place. The type checker now
+  refuses it, naming the platforms with no value and the branches given,
+  and no C is written. The generated C serves every platform, so the rule
+  is the same whatever the build targets; a defined build-symbol key still
+  decides a select outright (#3002).
+
+- **Threads Aether starts on Windows have their creator's floating-point
+  state.** The `pthread_create` shim over `CreateThread` gave every thread
+  Windows' default x87 precision (53-bit) while MinGW runs the main thread
+  at 64-bit, so the same libm call gave different bits on a std.worker or
+  scheduler thread than on main (MinGW's `sqrt` rounds twice at 64-bit:
+  253 of a million inputs), and a `longdouble` lost 11 bits of mantissa on
+  every worker. aephysics' four-worker runs at `-O0` changed from run to
+  run. A thread now starts with its creator's x87 control word and MXCSR
+  controls, as on Linux (#3027).
+
+- **`string.new_with_length(s, n)` of an Aether string copies its
+  characters, and a buffer is copied as given.** Its `data` is a `ptr`: a
+  buffer C filled is copied byte for byte and never read as a string, and a
+  `string` argument is passed as its characters, so `n` must not exceed its
+  length (`string.substring(s, 0, n)` stops at the end). It copied a counted
+  or pinned string's header bytes instead of its text, and the first fix,
+  which read any argument that began with a string header's magic as a
+  string, followed a forged header in a binary payload (#3030).
+
+- **std.tar's writer no longer leaks its path.** `tar.writer_create` stored
+  a copy of the archive path and then retained it once more, which neither
+  `writer_finish` nor `writer_abort` gave back, so every archive written
+  leaked its path. The writer's field owns its copy and `heap.free` releases
+  it (#3031).
+
+- **A local bound `null` in one branch and a string in another is a
+  string.** Hoisted out of the branches, it took the type of its first
+  binding, a `ptr`, though the same two bindings in one block make a string:
+  codegen declared it `void*` and managed it as a string, and a `string`
+  local could not take it (E0202). A `null` binding has no type of its own,
+  so a hoisted local whose bindings are `null` and strings is a `string`
+  (#3032).
+
+- **On macOS, a capture's pipe no longer leaks into a child another thread
+  starts.** #2917 made std.os pipes close-on-exec, atomically with `pipe2`
+  where it exists; macOS has none, so a pipe was made close-on-exec in two
+  steps, and a `fork` from another thread between them copied both ends into
+  its child, so a short `os.run_full` capture waited for an unrelated long
+  child to exit (`os_run_full_threads` caught one on CI). Without `pipe2`,
+  pipe creation and `fork` now exclude each other through a read-write lock,
+  as the Go runtime's ForkLock does (#3028).
+
+- **cl.exe compiles the C of 39 more programs.** With the GNU statement
+  expressions gone (#2765), MSVC still refused the C of 42 of the sweep's
+  programs. Off GCC and Clang the generated C now uses `memcpy` and plain C
+  for the builtins of the inline `std.mem` accessors and `card`, `char*` for
+  arithmetic on a bare `ptr`, `#pragma pack` for `@packed`, a byte for a
+  struct with no fields and `{0}` for `T {}`, a constant's value, as a
+  value of its own type, where another constant's or a module `var`'s
+  initializer names it, an initializer list for a
+  function's closure as a module constant, `INFINITY` and `NAN` for
+  `1.0 / 0.0` (with the zero's sign: `1.0 / -0.0` is -infinity), `void*` casts where an array of strings meets `memcpy`,
+  `memset` and `aether_slice_make` (C4090), `#undef min` / `max` after MSVC's
+  macros, `ssize_t`, `pid_t` and `mode_t`, and `<io.h>` / `<process.h>` for
+  getpid, isatty and the other POSIX names of `<unistd.h>`. GCC and Clang
+  keep their builtins and attributes; the pointer arithmetic, the constants
+  and the casts are standard C for every compiler and compute the same
+  values. The three that remain use the lane types, which are
+  GCC's and Clang's vector extensions: under cl.exe they stop at one
+  `#error` saying so. tests/compiler/test_msvc_compat.sh compiles all of
+  them under cl and as strict C11 under gcc (#2799).
+
 ## [0.835.0]
 
 ### Added
