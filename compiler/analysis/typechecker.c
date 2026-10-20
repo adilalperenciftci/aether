@@ -19,6 +19,7 @@ static ASTNode* aether_typecheck_program_node(void);
 #include "../parser/parser.h"
 #include "../aether_error.h"
 #include "../aether_module.h"
+#include "../aether_defines.h"
 #include <errno.h>
 #include "contract_eval.h"
 
@@ -16664,8 +16665,60 @@ static void adopt_closure_signature(ASTNode* arg, Type* slot) {
     }
 }
 
+/* #3002: a `select()` has a value for every platform the C it becomes can be
+ * compiled for: `linux:`, `windows:` and `macos:`, or `other:` for the ones
+ * it does not name. Codegen printed a line with no code to stderr and went
+ * on, and the C compiler stopped at the `#error` it emitted in place of the
+ * missing value. A key that is no platform is a build symbol (#1527): one
+ * that is defined decides the select outright, so the platforms are not
+ * asked. Returns 0 after reporting. */
+static int check_select_platforms(ASTNode* call) {
+    static const char* const platforms[] = { "linux", "windows", "macos" };
+    int have[3] = { 0, 0, 0 };
+    int other = 0;
+    char given[256];
+    size_t off = 0;
+    given[0] = '\0';
+    for (int i = 0; i < call->child_count; i++) {
+        ASTNode* arg = call->children[i];
+        if (!arg || arg->type != AST_NAMED_ARG || !arg->value) continue;
+        if (off < sizeof(given))
+            off += (size_t)snprintf(given + off, sizeof(given) - off, "%s`%s:`",
+                                    off ? ", " : "", arg->value);
+        if (strcmp(arg->value, "other") == 0) { other = 1; continue; }
+        int platform = 0;
+        for (int p = 0; p < 3; p++)
+            if (strcmp(arg->value, platforms[p]) == 0) { have[p] = 1; platform = 1; }
+        if (!platform && aether_define_is_set(arg->value)) return 1;
+    }
+    if (other || (have[0] && have[1] && have[2])) return 1;
+    char missing[64], keys[96];
+    size_t m = 0, k = 0;
+    missing[0] = keys[0] = '\0';
+    int nmissing = 0, done = 0;
+    for (int p = 0; p < 3; p++) nmissing += !have[p];
+    for (int p = 0; p < 3; p++) {
+        if (have[p]) continue;
+        const char* sep = done == 0 ? "" : done == nmissing - 1 ? " and " : ", ";
+        m += (size_t)snprintf(missing + m, sizeof(missing) - m, "%s%s", sep, platforms[p]);
+        k += (size_t)snprintf(keys + k, sizeof(keys) - k, "%s`%s:`", sep, platforms[p]);
+        done++;
+    }
+    char msg[512], help[320];
+    snprintf(msg, sizeof(msg),
+             "select() has no value for %s and no `other:` fallback; its branches are %s",
+             missing, given[0] ? given : "none");
+    snprintf(help, sizeof(help),
+             "add %s, or `other:` for every platform it does not name", keys);
+    type_error_code_hint(msg, help, call->line, call->column, AETHER_ERR_SELECT_PLATFORM);
+    return 0;
+}
+
 int typecheck_function_call(ASTNode* call, SymbolTable* table) {
     int ok = typecheck_function_call_inner(call, table);
+    if (ok && call && call->type == AST_FUNCTION_CALL && call->value &&
+        strcmp(call->value, "select") == 0 && !check_select_platforms(call))
+        ok = 0;
     /* An argument of what gives no value, `h(g())` with g returning
      * nothing, reached C as an invalid use of a void expression. A print
      * argument is checked by the rendering rule below. */

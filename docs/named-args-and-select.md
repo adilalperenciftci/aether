@@ -147,15 +147,24 @@ separator = select(windows: "\\", other: "/")
 ### Missing platform is a compile error
 
 If a platform is missing and there is no `other:` fallback, the Aether
-compiler reports an error and the C compiler stops at an `#error`:
+compiler refuses the program with E0701, whatever platform it builds for:
+the generated C is the same for every platform, so a value missing for one
+of them is missing for the program.
 
-```aether,fragment
-// ERROR: no value for windows or macos, no other: fallback
-port = select(linux: 8080)
+```aether,fails
+main() {
+    port = select(linux: 8080)
+    println(port)
+}
+// error[E0701]: select() has no value for windows and macos and no `other:`
+// fallback; its branches are `linux:`
+// help: add `windows:` and `macos:`, or `other:` for every platform it does not name
 ```
 
 This prevents silent bugs where a platform gets `0` or empty string.
-Either list all platforms or provide `other:`.
+Either list all platforms or provide `other:`. A key that is not a platform
+is a build symbol: when the build defines it, its value is the select's and
+the platforms are not consulted.
 
 ### Use cases
 

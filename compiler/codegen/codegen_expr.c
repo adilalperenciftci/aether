@@ -9742,16 +9742,10 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                         generate_expression(gen, defined_val);
                         break;
                     }
-                    // Validate: every platform must have a value or other: must be set
-                    if (!default_val) {
-                        if (!linux_val || !windows_val || !macos_val) {
-                            fprintf(stderr,
-                                "error: select() at line %d: missing platform without 'other:' fallback.\n"
-                                "  Provide all platforms (linux:, windows:, macos:) or add other: for the default.\n",
-                                expr->line);
-                            // Still emit code so compilation continues and shows all errors
-                        }
-                    }
+                    /* A platform with no value and no `other:` is E0701 in
+                     * the typechecker (#3002, check_select_platforms), so
+                     * each `#error` below is reached only by a tree it did
+                     * not check. */
                     // Emit #ifdef chain
                     fprintf(gen->output, "\n#ifdef _WIN32\n");
                     if (windows_val) {

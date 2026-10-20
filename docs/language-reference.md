@@ -4176,6 +4176,7 @@ An error stops the build and prints its code, `error[E0301]: ...`, with the sour
 | `E0305` | A module exports two names that answer to one short name, `add` beside `aether_set_add` or `join` beside `string_join`: one name per operation ([module-system-design.md](module-system-design.md)) |
 | `E0600` | An actor rule, such as a closure in a handler writing the actor's state |
 | `E0700` | Missing return: control can reach the end of a function whose result is not void ([Returning on every path](#returning-on-every-path-e0700)) |
+| `E0701` | A `select()` with no value for a platform (`linux:`, `windows:`, `macos:`) and no `other:` fallback ([named-args-and-select.md](named-args-and-select.md#missing-platform-is-a-compile-error)) |
 | `E0800` | A construct a quote cannot hold: a closure, `callback` or block inside one, `defer`, `try`, `panic`, an actor operation, `match`, string interpolation, `new`, an array literal ([quote.md](quote.md#what-a-quote-may-contain-and-the-errors)) |
 | `E0801` | A quote parameter without a type |
 | `E0802` | A quote given to a function whose last parameter is not a `quote.Tree`, or a closure, `callback` or block given to one that is |
