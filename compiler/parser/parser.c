@@ -2651,6 +2651,9 @@ static ASTNode* parse_postfix_expression(Parser* parser) {
                         ASTNode* value = parse_expression(parser);
                         if (!value) {
                             missing_operand(parser, colon, errors_before, "a value");
+                            if (peek_token(parser) &&
+                                peek_token(parser)->type == TOKEN_RIGHT_PAREN)
+                                advance_token(parser);   /* as below */
                             free_ast_node(func_call);
                             return NULL;
                         }
@@ -2665,6 +2668,13 @@ static ASTNode* parse_postfix_expression(Parser* parser) {
                             missing_operand(parser, before_arg, errors_before,
                                             before_arg && before_arg->type == TOKEN_LEFT_PAREN
                                                 ? "an argument or `)`" : "an argument");
+                            /* #2998 review: the `)` that came instead closes
+                             * this call; left for the block, a `)` on a line
+                             * of its own was a second error, "Expected
+                             * statement in block". */
+                            if (peek_token(parser) &&
+                                peek_token(parser)->type == TOKEN_RIGHT_PAREN)
+                                advance_token(parser);
                             free_ast_node(func_call);
                             return NULL;
                         }

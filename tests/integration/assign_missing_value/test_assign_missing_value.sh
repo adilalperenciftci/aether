@@ -111,6 +111,14 @@ refuse return_comma 2:13 E0100 'expected a value after `,`'
 printf 'g(a: int) -> int {\n    return a\n}\nmain() {\n    x = g(\n}\n' > "$TMP/call_open.ae"
 refuse call_open 5:10 E0100 'expected an argument or `)` after `(`'
 
+# The `)` that comes instead of an argument closes the call: on a line of its
+# own it was a second error, "Expected statement in block" (#2998 review).
+printf 'f(a: int, b: int) -> int {\n    return a + b\n}\nmain() {\n    x = f(\n        1,\n        2,\n    )\n    println(x)\n}\n' > "$TMP/call_trailing_comma.ae"
+refuse call_trailing_comma 7:10 E0100 'expected an argument after `,`, found `)`'
+
+printf 'f(a: int, b: int) -> int {\n    return a + b\n}\nmain() {\n    x = f(\n        a: 1,\n        b:\n    )\n    println(x)\n}\n' > "$TMP/call_named_missing.ae"
+refuse call_named_missing 7:10 E0100 'expected a value after `:`, found `)`'
+
 printf 'main() {\n    xs = [1, , 2]\n    println(xs[0])\n}\n' > "$TMP/array_hole.ae"
 refuse array_hole 2:12 E0100 'expected an element after `,`'
 
