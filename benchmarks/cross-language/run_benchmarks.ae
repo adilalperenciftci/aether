@@ -274,6 +274,12 @@ run_lang(i: int, pattern: string, cfg: Settings) -> string {
                 runs_json = "${runs_json},"
             }
             runs_json = "${runs_json}${benchstats.fixed2(tput[r])}"
+        } else {
+            // What the failed run printed goes beside the build logs, which
+            // CI uploads: the reason says that the run failed, not why.
+            rlog = "build/${dir}_${pattern}_run.log"
+            io_write_file(rlog, out)
+            failure = "${failure} (${rlog})"
         }
         r = r + 1
     }
