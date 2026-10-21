@@ -3,12 +3,13 @@
 #define AETHER_TRACKING_H
 
 #include "../alloc/aether_alloc.h"
+#include <stdint.h>
 
 /* std.tracking (#1049): a leak-detecting allocator wrapper. */
 
 AetherAllocator* aether_tracking_wrap(AetherAllocator* inner);
 int  aether_tracking_count(AetherAllocator* t);
-long aether_tracking_bytes(AetherAllocator* t);
+int64_t aether_tracking_bytes(AetherAllocator* t);
 int  aether_tracking_report(AetherAllocator* t);
 void aether_tracking_destroy(AetherAllocator* t);
 

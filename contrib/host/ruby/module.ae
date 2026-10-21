@@ -21,7 +21,7 @@ exports (
 )
 
 extern ruby_run_sandboxed(perms: sandbox.Grants, code: string) -> int
-extern ruby_run_sandboxed_with_map(perms: sandbox.Grants, code: string, map_token: int) -> int
+extern ruby_run_sandboxed_with_map(perms: sandbox.Grants, code: string, map_token: long) -> int
 extern ruby_run(code: string) -> int
 extern ruby_init_host() -> int
 extern ruby_finalize_host()

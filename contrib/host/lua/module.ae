@@ -69,7 +69,7 @@ const LUA_TOTHER = 6
 
 // --- Tier 1: fire-and-forget -----------------------------------------------
 extern lua_run_sandboxed(perms: sandbox.Grants, code: string) -> int
-extern lua_run_sandboxed_with_map(perms: sandbox.Grants, code: string, map_token: int) -> int
+extern lua_run_sandboxed_with_map(perms: sandbox.Grants, code: string, map_token: long) -> int
 extern lua_run(code: string) -> int
 extern lua_init() -> int
 extern lua_finalize()

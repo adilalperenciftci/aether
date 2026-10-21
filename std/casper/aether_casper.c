@@ -99,11 +99,11 @@ char* aether_casper_resolve(void* netchan, const char* hostname) {
     return (char*)string_new(buf);
 }
 
-long aether_casper_pwd_uid(void* pwdchan, const char* username) {
+int aether_casper_pwd_uid(void* pwdchan, const char* username) {
     if (!pwdchan || !username) return -1;
     struct passwd* pw = cap_getpwnam((cap_channel_t*)pwdchan, username);
     if (!pw) return -1;
-    return (long)pw->pw_uid;
+    return (int)pw->pw_uid;
 }
 
 char* aether_casper_pwd_home(void* pwdchan, const char* username) {
@@ -141,7 +141,7 @@ int aether_casper_available(void) { return 0; }
 char* aether_casper_resolve(void* n, const char* h) {
     (void)n; (void)h; return 0;
 }
-long aether_casper_pwd_uid(void* p, const char* u) {
+int aether_casper_pwd_uid(void* p, const char* u) {
     (void)p; (void)u; return -1;
 }
 char* aether_casper_pwd_home(void* p, const char* u) {

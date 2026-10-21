@@ -16,7 +16,7 @@ typedef struct {
     int* hits;
     void* last_obj;
     void* target;   /* for observers that act on the table from inside a pass */
-    long  token;
+    int64_t token;
 } Env;
 
 static void env_dtor(void* p) {
@@ -70,8 +70,8 @@ TEST_CATEGORY(observe_notifies_in_registration_order, TEST_CATEGORY_RUNTIME) {
     int obj = 0;
     Env* a = make_env(&freed, &hits_a);
     Env* b = make_env(&freed, &hits_b);
-    long ta = aether_observe(&obj, closure_of(on_change, a));
-    long tb = aether_observe(&obj, closure_of(on_change, b));
+    int64_t ta = aether_observe(&obj, closure_of(on_change, a));
+    int64_t tb = aether_observe(&obj, closure_of(on_change, b));
     ASSERT_TRUE(ta > 0);
     ASSERT_TRUE(tb > ta);
     ASSERT_EQ(2, aether_observer_count(&obj));
@@ -104,8 +104,8 @@ TEST_CATEGORY(observe_notifies_in_registration_order, TEST_CATEGORY_RUNTIME) {
 TEST_CATEGORY(observe_is_per_object, TEST_CATEGORY_RUNTIME) {
     int freed = 0, hits_x = 0, hits_y = 0;
     int x = 0, y = 0;
-    long tx = aether_observe(&x, closure_of(on_change, make_env(&freed, &hits_x)));
-    long ty = aether_observe(&y, closure_of(on_change, make_env(&freed, &hits_y)));
+    int64_t tx = aether_observe(&x, closure_of(on_change, make_env(&freed, &hits_x)));
+    int64_t ty = aether_observe(&y, closure_of(on_change, make_env(&freed, &hits_y)));
 
     aether_observe_notify(&x);
     ASSERT_EQ(1, hits_x);
@@ -123,7 +123,7 @@ TEST_CATEGORY(observe_table_grows_past_initial_capacity, TEST_CATEGORY_RUNTIME) 
     int freed = 0;
     int hits[N];
     int objs[N];
-    long tokens[N];
+    int64_t tokens[N];
     for (int i = 0; i < N; i++) {
         hits[i] = 0;
         tokens[i] = aether_observe(&objs[i], closure_of(on_change, make_env(&freed, &hits[i])));
@@ -171,7 +171,7 @@ static void reentrant_observer(void* env, void* obj) {
 TEST_CATEGORY(observe_guards_reentrant_notify, TEST_CATEGORY_RUNTIME) {
     int freed = 0, hits = 0;
     int obj = 0;
-    long t = aether_observe(&obj, closure_of(reentrant_observer, make_env(&freed, &hits)));
+    int64_t t = aether_observe(&obj, closure_of(reentrant_observer, make_env(&freed, &hits)));
     ASSERT_EQ(0, aether_observe_is_notifying(&obj));
     aether_observe_notify(&obj);
     ASSERT_EQ(1, hits);
@@ -196,8 +196,8 @@ TEST_CATEGORY(observe_reentrancy_guard_is_per_object, TEST_CATEGORY_RUNTIME) {
     int a = 0, b = 0;
     Env* ea = make_env(&freed, &hits_a);
     ea->target = &b;
-    long ta = aether_observe(&a, closure_of(cross_observer, ea));
-    long tb = aether_observe(&b, closure_of(on_change, make_env(&freed, &hits_b)));
+    int64_t ta = aether_observe(&a, closure_of(cross_observer, ea));
+    int64_t tb = aether_observe(&b, closure_of(on_change, make_env(&freed, &hits_b)));
     aether_observe_notify(&a);
     ASSERT_EQ(1, hits_a);
     ASSERT_EQ(1, hits_b);
@@ -223,7 +223,7 @@ TEST_CATEGORY(observe_unobserve_from_inside_observer_is_deferred, TEST_CATEGORY_
     e->token = aether_observe(&obj, closure_of(self_removing_observer, e));
     /* A second observer registered after the self-remover still runs in the
      * same pass: removal never skips a neighbour. */
-    long t2 = aether_observe(&obj, closure_of(on_change, make_env(&freed, &later_hits)));
+    int64_t t2 = aether_observe(&obj, closure_of(on_change, make_env(&freed, &later_hits)));
 
     aether_observe_notify(&obj);
     ASSERT_EQ(1, hits);
@@ -250,8 +250,8 @@ TEST_CATEGORY(observe_removed_neighbour_does_not_run, TEST_CATEGORY_RUNTIME) {
     int freed = 0, hits_first = 0, hits_second = 0;
     int obj = 0;
     Env* first = make_env(&freed, &hits_first);
-    long t1 = aether_observe(&obj, closure_of(remove_neighbour_observer, first));
-    long t2 = aether_observe(&obj, closure_of(on_change, make_env(&freed, &hits_second)));
+    int64_t t1 = aether_observe(&obj, closure_of(remove_neighbour_observer, first));
+    int64_t t2 = aether_observe(&obj, closure_of(on_change, make_env(&freed, &hits_second)));
     first->token = t2;
 
     aether_observe_notify(&obj);
@@ -303,7 +303,7 @@ TEST_CATEGORY(observe_added_during_pass_runs_next_pass, TEST_CATEGORY_RUNTIME) {
     int obj = 0;
     Env* e = make_env(&freed, &hits);
     e->target = &added_hits;
-    long t = aether_observe(&obj, closure_of(adding_observer, e));
+    int64_t t = aether_observe(&obj, closure_of(adding_observer, e));
     aether_observe_notify(&obj);
     ASSERT_EQ(1, hits);
     ASSERT_EQ(0, added_hits);
@@ -311,7 +311,7 @@ TEST_CATEGORY(observe_added_during_pass_runs_next_pass, TEST_CATEGORY_RUNTIME) {
     aether_observe_notify(&obj);
     ASSERT_EQ(2, hits);
     ASSERT_EQ(1, added_hits);
-    long added_token = e->token;
+    int64_t added_token = e->token;
     ASSERT_EQ(1, aether_unobserve(&obj, t));   /* releases e */
     ASSERT_EQ(1, aether_unobserve(&obj, added_token));
     ASSERT_EQ(2, freed);
@@ -337,8 +337,8 @@ TEST_CATEGORY(observe_fields_receives_the_field, TEST_CATEGORY_RUNTIME) {
     AetherObserverClosure fc;
     fc.fn = (void (*)(void))on_field;
     fc.env = f;
-    long tf = aether_observe_fields(&obj, fc);
-    long tp = aether_observe(&obj, closure_of(on_change, p));
+    int64_t tf = aether_observe_fields(&obj, fc);
+    int64_t tp = aether_observe(&obj, closure_of(on_change, p));
     ASSERT_TRUE(tf > 0);
     ASSERT_TRUE(tp > tf);
 

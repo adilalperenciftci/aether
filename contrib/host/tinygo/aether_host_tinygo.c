@@ -215,7 +215,7 @@ static ffi_type* kind_to_ffi(char k) {
 }
 
 int tinygo_call_dynamic(void* handle, const char* sym,
-                        char return_kind, const char* arg_kinds,
+                        int return_kind, const char* arg_kinds,
                         void** args, void* result_out) {
     void* fn = tg_resolve(handle, sym);
     if (!fn) return 0;
@@ -264,7 +264,7 @@ int tinygo_call_dynamic(void* handle, const char* sym,
 #else  /* !AETHER_HAS_LIBFFI */
 
 int tinygo_call_dynamic(void* handle, const char* sym,
-                        char return_kind, const char* arg_kinds,
+                        int return_kind, const char* arg_kinds,
                         void** args, void* result_out) {
     (void)handle; (void)sym; (void)return_kind;
     (void)arg_kinds; (void)args; (void)result_out;

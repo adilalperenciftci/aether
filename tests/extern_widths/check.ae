@@ -1,0 +1,917 @@
+// Every extern an Aether module declares for a C function of this tree must
+// agree with that function's C definition on the width of each argument and
+// of its result (#3097).
+//
+// An extern without @c_import gets a prototype the compiler writes from its
+// Aether types (`long` is int64_t, `int` is int, `float` is double), and the
+// C file that defines the function is compiled on its own, so no C compiler
+// ever sees the two side by side. Where they disagree the call is still
+// made, with the wrong width: a C function declared with a plain `long`
+// takes and returns 32 bits on Windows and 64 elsewhere, while the extern
+// that calls it a `long` passes and reads 64. The Lua host's integers,
+// std.tracking's byte count and std.observe's tokens were cut to 32 bits on
+// Windows this way.
+//
+// This reads the tree, pairs each extern with the C definitions of the
+// symbol it names, and fails on any slot whose widths differ, and on a C
+// `long` in a bound signature at all, since no Aether type has its width on
+// every platform. An extern is paired with the C in its own directory when
+// that defines the symbol, and otherwise with the shared runtime, std and
+// contrib. An extern with no C definition here (libc, a system or vendored
+// library) is not checked, nor one marked @c_import: the C compiler checks
+// that call against the real prototype.
+//
+//     check [--exclude DIR]... [--expect N] DIR...
+//
+// Exits 1 on a mismatch; with --expect, unless exactly N were found (the
+// self-test over tests/extern_widths/fixture). `make check-extern-widths`
+// runs both.
+
+import std.fs
+import std.os
+import std.io
+import std.string
+import std.strbuilder
+import std.collections
+
+extern exit(code: int)
+
+say(s: string) {
+    _w = io.stdout_write("${s}\n")
+}
+
+// ---------------------------------------------------------------------------
+// Text helpers.
+
+is_space(c: int) -> int {
+    if c == 32 || c == 9 || c == 13 || c == 10 {
+        return 1
+    }
+    return 0
+}
+
+is_ident_char(c: int) -> int {
+    if (c >= 97 && c <= 122) || (c >= 65 && c <= 90) || (c >= 48 && c <= 57) || c == 95 {
+        return 1
+    }
+    return 0
+}
+
+// The lines of a text, without their line breaks.
+split_lines(text: string) -> ptr {
+    out = collections.string_list_new()
+    n = string.length(text)
+    start = 0
+    while start < n {
+        cut = string.index_of_from(text, "\n", start)
+        stop = cut
+        if cut < 0 {
+            stop = n
+        }
+        line_end = stop
+        if line_end > start && string.char_at_n(text, n, line_end - 1) == 13 {
+            line_end = line_end - 1
+        }
+        collections.string_list_add(out, string.substring(text, start, line_end))
+        start = stop + 1
+    }
+    return out
+}
+
+// The identifiers of a text, in order, and each `*` as a word of its own.
+word_list(text: string) -> ptr {
+    out = collections.string_list_new()
+    n = string.length(text)
+    i = 0
+    while i < n {
+        c = string.char_at_n(text, n, i)
+        if is_ident_char(c) == 1 {
+            j = i
+            while j < n && is_ident_char(string.char_at_n(text, n, j)) == 1 {
+                j = j + 1
+            }
+            collections.string_list_add(out, string.substring(text, i, j))
+            i = j
+        } else {
+            if c == 42 {
+                collections.string_list_add(out, "*")
+            }
+            i = i + 1
+        }
+    }
+    return out
+}
+
+// The words of a list from `from` up to `to`, joined by single spaces.
+join_words(words: ptr, from: int, to: int) -> string {
+    b = strbuilder.new(64)
+    i = from
+    while i < to {
+        if i > from {
+            strbuilder.append(b, " ")
+        }
+        strbuilder.append(b, collections.string_list_get(words, i))
+        i = i + 1
+    }
+    return strbuilder.finish(b)
+}
+
+// A text's words joined by single spaces.
+words_of(text: string) -> string {
+    words = word_list(text)
+    out = join_words(words, 0, collections.string_list_size(words))
+    collections.string_list_free(words)
+    return out
+}
+
+// The index of the `)` closing the `(` at `open`, or -1.
+close_paren(text: string, open: int) -> int {
+    n = string.length(text)
+    depth = 0
+    i = open
+    while i < n {
+        c = string.char_at_n(text, n, i)
+        if c == 40 {
+            depth = depth + 1
+        } else if c == 41 {
+            depth = depth - 1
+            if depth == 0 {
+                return i
+            }
+        }
+        i = i + 1
+    }
+    return -1
+}
+
+// The last index of `c` in `s`, or -1.
+last_index_of_char(s: string, c: int) -> int {
+    n = string.length(s)
+    i = n - 1
+    while i >= 0 {
+        if string.char_at_n(s, n, i) == c {
+            return i
+        }
+        i = i - 1
+    }
+    return -1
+}
+
+// The parts of a list split at the commas outside brackets, trimmed. An
+// empty list gives no part.
+split_top(text: string) -> ptr {
+    out = collections.string_list_new()
+    n = string.length(text)
+    depth = 0
+    start = 0
+    i = 0
+    while i < n {
+        c = string.char_at_n(text, n, i)
+        if c == 40 || c == 91 {
+            depth = depth + 1
+        } else if c == 41 || c == 93 {
+            depth = depth - 1
+        } else if c == 44 && depth == 0 {
+            collections.string_list_add(out, string.trim(string.substring(text, start, i)))
+            start = i + 1
+        }
+        i = i + 1
+    }
+    last = string.trim(string.substring(text, start, n))
+    if string.length(last) > 0 || collections.string_list_size(out) > 0 {
+        collections.string_list_add(out, last)
+    }
+    return out
+}
+
+// `text` without its `__attribute__((...))` and `__declspec(...)` groups.
+strip_attributes(text: string) -> string {
+    out = string.copy(text)
+    k = 0
+    while k < 2 {
+        key = "__attribute__"
+        if k == 1 {
+            key = "__declspec"
+        }
+        at = string.index_of(out, key)
+        while at >= 0 {
+            open = string.index_of_from(out, "(", at)
+            close = -1
+            if open >= 0 {
+                close = close_paren(out, open)
+            }
+            if close < 0 {
+                at = -1
+            } else {
+                out = "${string.substring(out, 0, at)} ${string.substring(out, close + 1, string.length(out))}"
+                at = string.index_of(out, key)
+            }
+        }
+        k = k + 1
+    }
+    return out
+}
+
+// ---------------------------------------------------------------------------
+// Width classes: void, ptr, i8, i16, i32, i64, iptr (pointer-sized), long
+// (C's own: 32 bits on Windows, 64 elsewhere), f32, f64, f80; byval for a
+// struct passed by value, and ? for a type this cannot size. A slot with
+// byval or ? on either side is not compared.
+
+// A C word that is no part of a type's width: a qualifier, or a calling-
+// convention or export macro (AETHER_HOT, AE_EXPORT, __cdecl).
+c_qualifier(w: string) -> int {
+    if w == "const" || w == "volatile" || w == "restrict" || w == "register" || w == "extern" ||
+    w == "inline" {
+        return 1
+    }
+    if string.starts_with(w, "AETHER_") == 1 || string.starts_with(w, "AE_") == 1 ||
+    (string.starts_with(w, "__") == 1 && w != "__int64") {
+        return 1
+    }
+    return 0
+}
+
+// A C word that can end a type, so a parameter ending in it has no name.
+c_type_word(w: string) -> int {
+    if w == "int" || w == "long" || w == "short" || w == "char" || w == "double" || w == "float" ||
+    w == "unsigned" || w == "signed" || w == "void" || w == "_Bool" || w == "bool" || w == "__int64" {
+        return 1
+    }
+    return string.ends_with(w, "_t")
+}
+
+// The width class of C type words (no pointer among them).
+c_words_class(words: ptr, from: int, to: int) -> string {
+    kept = strbuilder.new(32)
+    any_sign = 0
+    i = from
+    while i < to {
+        w = collections.string_list_get(words, i)
+        if w == "unsigned" || w == "signed" {
+            any_sign = 1
+        } else if w == "__int64" {
+            if strbuilder.length(kept) > 0 {
+                strbuilder.append(kept, " ")
+            }
+            strbuilder.append(kept, "long long")
+        } else if c_qualifier(w) == 0 {
+            if strbuilder.length(kept) > 0 {
+                strbuilder.append(kept, " ")
+            }
+            strbuilder.append(kept, w)
+        }
+        i = i + 1
+    }
+    k = strbuilder.finish(kept)
+    if k == "" && any_sign == 1 {
+        k = "int"
+    }
+    // "short int", "long int", "long long int": the int adds nothing.
+    if string.ends_with(k, " int") == 1 {
+        k = string.substring(k, 0, string.length(k) - 4)
+    }
+    if string.starts_with(k, "enum ") == 1 {
+        return "i32"
+    }
+    if string.starts_with(k, "struct ") == 1 || string.starts_with(k, "union ") == 1 {
+        return "byval"
+    }
+    return match k {
+        "void" -> "void"
+        "char" -> "i8"
+        "_Bool" -> "i8"
+        "bool" -> "i8"
+        "int8_t" -> "i8"
+        "uint8_t" -> "i8"
+        "short" -> "i16"
+        "int16_t" -> "i16"
+        "uint16_t" -> "i16"
+        "int" -> "i32"
+        "int32_t" -> "i32"
+        "uint32_t" -> "i32"
+        "long" -> "long"
+        "long long" -> "i64"
+        "int64_t" -> "i64"
+        "uint64_t" -> "i64"
+        "size_t" -> "iptr"
+        "ssize_t" -> "iptr"
+        "intptr_t" -> "iptr"
+        "uintptr_t" -> "iptr"
+        "ptrdiff_t" -> "iptr"
+        "float" -> "f32"
+        "double" -> "f64"
+        "long double" -> "f80"
+        _ -> "?"
+    }
+}
+
+// The width class of a C type (`named` 1: a parameter, whose last word is
+// its name unless that word is part of the type).
+c_class(text: string, named: int) -> string {
+    t = strip_attributes(text)
+    if string.contains(t, "*") == 1 || string.contains(t, "[") == 1 || string.contains(t, "(") == 1 {
+        return "ptr"
+    }
+    words = word_list(t)
+    nw = collections.string_list_size(words)
+    to = nw
+    if named == 1 && nw >= 2 && c_type_word(collections.string_list_get(words, nw - 1)) == 0 {
+        typed = 0
+        i = 0
+        while i < nw - 1 {
+            if c_qualifier(collections.string_list_get(words, i)) == 0 {
+                typed = typed + 1
+            }
+            i = i + 1
+        }
+        if typed >= 1 {
+            to = nw - 1
+        }
+    }
+    out = c_words_class(words, 0, to)
+    collections.string_list_free(words)
+    return out
+}
+
+// The C definitions found: each one's symbol, its classes ("ret|p1|p2",
+// "..." last for variadic), its text, where it is, and its directory.
+struct CDefs {
+    names: ptr
+    sigs: ptr
+    texts: ptr
+    locs: ptr
+    dirs: ptr
+}
+
+// The function defined by the text before a `{` at file scope, if any.
+c_header(defs: CDefs, header: string, path: string, dir: string, line: int) {
+    h = string.trim(strip_attributes(header))
+    hn = string.length(h)
+    if hn == 0 || string.char_at_n(h, hn, hn - 1) != 41 {
+        return
+    }
+    // The `(` matching the final `)`.
+    depth = 0
+    open = -1
+    i = hn - 1
+    while i >= 0 && open < 0 {
+        c = string.char_at_n(h, hn, i)
+        if c == 41 {
+            depth = depth + 1
+        } else if c == 40 {
+            depth = depth - 1
+            if depth == 0 {
+                open = i
+            }
+        }
+        i = i - 1
+    }
+    if open <= 0 {
+        return
+    }
+    before = string.trim(string.substring(h, 0, open))
+    bn = string.length(before)
+    s = bn
+    while s > 0 && is_ident_char(string.char_at_n(before, bn, s - 1)) == 1 {
+        s = s - 1
+    }
+    name = string.substring(before, s, bn)
+    ret = string.trim(string.substring(before, 0, s))
+    // Macro calls at file scope, which end in no `;`, run on into the next
+    // header: the type starts after the last of them.
+    rp = last_index_of_char(ret, 41)
+    if rp >= 0 {
+        ret = string.trim(string.substring(ret, rp + 1, string.length(ret)))
+    }
+    if name == "" || ret == "" {
+        return
+    }
+    rw = " ${words_of(ret)} "
+    if string.contains(rw, " static ") == 1 || string.contains(rw, " typedef ") == 1 {
+        return
+    }
+    sig = strbuilder.new(64)
+    strbuilder.append(sig, c_class(ret, 0))
+    params = split_top(string.substring(h, open + 1, hn - 1))
+    np = collections.string_list_size(params)
+    if !(np == 1 && words_of(collections.string_list_get(params, 0)) == "void") {
+        j = 0
+        while j < np {
+            p = collections.string_list_get(params, j)
+            strbuilder.append(sig, "|")
+            if p == "..." {
+                strbuilder.append(sig, "...")
+            } else {
+                strbuilder.append(sig, c_class(p, 1))
+            }
+            j = j + 1
+        }
+    }
+    collections.string_list_free(params)
+    collections.string_list_add(defs.names, name)
+    collections.string_list_add(defs.sigs, strbuilder.finish(sig))
+    collections.string_list_add(defs.texts, h)
+    collections.string_list_add(defs.locs, "${path}:${line}")
+    collections.string_list_add(defs.dirs, dir)
+}
+
+// Every function a C file defines at file scope. Comments, literals and
+// preprocessor lines are skipped and braces counted, so what a body's `{`
+// at file scope follows, since the last `;` or `}` there, is its header.
+scan_c(defs: CDefs, path: string, dir: string) {
+    text, err = fs.read(path)
+    if err != "" {
+        return
+    }
+    n = string.length(text)
+    hb = strbuilder.new(256)
+    hset = 0
+    hline = 1
+    depth = 0
+    line = 1
+    line_start = 1
+    i = 0
+    while i < n {
+        c = string.char_at_n(text, n, i)
+        if c == 10 {
+            line = line + 1
+            line_start = 1
+            if depth == 0 {
+                strbuilder.append(hb, " ")
+            }
+            i = i + 1
+        } else if line_start == 1 && c == 35 {
+            // A preprocessor line, with its continuations.
+            stop = 0
+            while i < n && stop == 0 {
+                d = string.char_at_n(text, n, i)
+                if d == 92 && i + 1 < n && string.char_at_n(text, n, i + 1) == 10 {
+                    line = line + 1
+                    i = i + 2
+                } else if d == 10 {
+                    stop = 1
+                } else {
+                    i = i + 1
+                }
+            }
+        } else if c == 47 && i + 1 < n && string.char_at_n(text, n, i + 1) == 47 {
+            while i < n && string.char_at_n(text, n, i) != 10 {
+                i = i + 1
+            }
+        } else if c == 47 && i + 1 < n && string.char_at_n(text, n, i + 1) == 42 {
+            i = i + 2
+            while i + 1 < n && !(string.char_at_n(text, n, i) == 42 && string.char_at_n(text, n, i + 1) == 47) {
+                if string.char_at_n(text, n, i) == 10 {
+                    line = line + 1
+                }
+                i = i + 1
+            }
+            i = i + 2
+            if depth == 0 {
+                strbuilder.append(hb, " ")
+            }
+        } else if c == 34 || c == 39 {
+            q = c
+            i = i + 1
+            stop = 0
+            while i < n && stop == 0 {
+                d = string.char_at_n(text, n, i)
+                if d == 92 {
+                    i = i + 2
+                } else if d == q {
+                    stop = 1
+                } else {
+                    if d == 10 {
+                        line = line + 1
+                    }
+                    i = i + 1
+                }
+            }
+            i = i + 1
+            line_start = 0
+            if depth == 0 {
+                strbuilder.append(hb, "0")
+            }
+        } else {
+            if is_space(c) == 0 {
+                line_start = 0
+            }
+            if c == 123 {
+                if depth == 0 {
+                    c_header(defs, strbuilder.finish(hb), path, dir, hline)
+                    hb = strbuilder.new(256)
+                    hset = 0
+                }
+                depth = depth + 1
+            } else if c == 125 {
+                if depth > 0 {
+                    depth = depth - 1
+                }
+                if depth == 0 {
+                    strbuilder.clear(hb)
+                    hset = 0
+                }
+            } else if depth == 0 {
+                if c == 59 {
+                    strbuilder.clear(hb)
+                    hset = 0
+                } else {
+                    if hset == 0 && is_space(c) == 0 {
+                        hline = line
+                        hset = 1
+                    }
+                    strbuilder.append_byte(hb, c)
+                }
+            }
+            i = i + 1
+        }
+    }
+    strbuilder.free(hb)
+}
+
+// ---------------------------------------------------------------------------
+// Aether side.
+
+// The width class of an Aether type. Annotations (@retain, @into, @aether,
+// @noescape, @heap) say nothing of width.
+ae_class(text: string) -> string {
+    parts = split_top(string.replace_all(string.trim(text), " ", ","))
+    np = collections.string_list_size(parts)
+    kept = strbuilder.new(32)
+    i = 0
+    while i < np {
+        w = collections.string_list_get(parts, i)
+        if w != "" && string.starts_with(w, "@") == 0 {
+            if strbuilder.length(kept) > 0 {
+                strbuilder.append(kept, " ")
+            }
+            strbuilder.append(kept, w)
+        }
+        i = i + 1
+    }
+    collections.string_list_free(parts)
+    k = strbuilder.finish(kept)
+    if string.starts_with(k, "*") == 1 || k == "fn" || string.starts_with(k, "fn(") == 1 {
+        return "ptr"
+    }
+    return match k {
+        "int" -> "i32"
+        "uint32" -> "i32"
+        "long" -> "i64"
+        "uint64" -> "i64"
+        "long long" -> "i64"
+        "Duration" -> "i64"
+        "uint16" -> "i16"
+        "uint8" -> "i8"
+        "byte" -> "i8"
+        // An extern's prototype spells bool `int` (codegen_func.c).
+        "bool" -> "i32"
+        "float" -> "f64"
+        "f32" -> "f32"
+        "float32" -> "f32"
+        "size_t" -> "iptr"
+        "string" -> "ptr"
+        "ptr" -> "ptr"
+        "sandbox" -> "ptr"
+        "actor_ref" -> "ptr"
+        _ -> "?"
+    }
+}
+
+// Whether C in `dir` serves externs anywhere: the runtime, std and contrib.
+shared_dir(dir: string) -> int {
+    if string.starts_with(dir, "std") == 1 || string.starts_with(dir, "contrib") == 1 ||
+    string.starts_with(dir, "runtime") == 1 {
+        return 1
+    }
+    return 0
+}
+
+// Two width classes that disagree. A slot this cannot size is not compared.
+// A pointer-sized C integer is taken as 64 bits: every target that builds
+// the bound C is 64-bit.
+mismatch(a: string, c: string) -> int {
+    if a == "?" || c == "?" || a == "byval" || c == "byval" {
+        return 0
+    }
+    if c == "long" {
+        return 1
+    }
+    if c == "iptr" && a == "i64" {
+        return 0
+    }
+    if a == c {
+        return 0
+    }
+    return 1
+}
+
+// A class as the report names it.
+class_text(c: string) -> string {
+    return match c {
+        "long" -> "long (32 bits on Windows, 64 elsewhere)"
+        "i8" -> "8 bits"
+        "i16" -> "16 bits"
+        "i32" -> "32 bits"
+        "i64" -> "64 bits"
+        "iptr" -> "pointer-sized"
+        "f32" -> "float"
+        "f64" -> "double"
+        "f80" -> "long double"
+        "ptr" -> "a pointer"
+        _ -> c
+    }
+}
+
+// One extern against one C definition; returns 1 on a mismatch, reported.
+compare_one(defs: CDefs, d: int, apath: string, aline: int, name: string, params: ptr, ret: string) -> int {
+    sig = split_top(string.replace_all(collections.string_list_get(defs.sigs, d), "|", ","))
+    ns = collections.string_list_size(sig)
+    cret = collections.string_list_get(sig, 0)
+    what = strbuilder.new(128)
+    // No result in Aether ignores whatever C returns.
+    if ret != "" {
+        if cret == "void" {
+            strbuilder.append(what, "; returns ${ret} in Aether, nothing in C")
+        } else if mismatch(ae_class(ret), cret) == 1 {
+            strbuilder.append(what, "; returns ${ret} (${class_text(ae_class(ret))}) in Aether, ${class_text(cret)} in C")
+        }
+    }
+    na = collections.string_list_size(params)
+    nc = ns - 1
+    variadic = 0
+    if nc > 0 && collections.string_list_get(sig, ns - 1) == "..." {
+        variadic = 1
+        nc = nc - 1
+    }
+    if na != nc && !(variadic == 1 && na >= nc) {
+        strbuilder.append(what, "; takes ${na} argument(s) in Aether, ${nc} in C")
+    } else {
+        k = 0
+        while k < nc {
+            at = collections.string_list_get(params, k)
+            ct = collections.string_list_get(sig, k + 1)
+            if mismatch(ae_class(at), ct) == 1 {
+                strbuilder.append(what, "; argument ${k + 1} is ${at} (${class_text(ae_class(at))}) in Aether, ${class_text(ct)} in C")
+            }
+            k = k + 1
+        }
+    }
+    collections.string_list_free(sig)
+    report = strbuilder.finish(what)
+    if report == "" {
+        return 0
+    }
+    say("${apath}:${aline}: extern ${name}: ${string.substring(report, 2, string.length(report))}")
+    say("    C: ${collections.string_list_get(defs.texts, d)}  (${collections.string_list_get(defs.locs, d)})")
+    return 1
+}
+
+// One extern against every C definition of its symbol: those in its own
+// directory, or else the shared ones. Returns the mismatches reported.
+check_extern(defs: CDefs, apath: string, aline: int, adir: string, name: string, csym: string,
+    params: ptr, ret: string) -> int {
+    total = collections.string_list_size(defs.names)
+    local_n = 0
+    i = 0
+    while i < total {
+        if collections.string_list_get(defs.dirs, i) == adir && collections.string_list_get(defs.names, i) == csym {
+            local_n = local_n + 1
+        }
+        i = i + 1
+    }
+    found = 0
+    i = 0
+    while i < total {
+        if collections.string_list_get(defs.names, i) == csym {
+            dd = collections.string_list_get(defs.dirs, i)
+            if (local_n > 0 && dd == adir) || (local_n == 0 && shared_dir(dd) == 1) {
+                found = found + compare_one(defs, i, apath, aline, name, params, ret)
+            }
+        }
+        i = i + 1
+    }
+    return found
+}
+
+is_plain_name(s: string) -> int {
+    n = string.length(s)
+    if n == 0 {
+        return 0
+    }
+    i = 0
+    while i < n {
+        if is_ident_char(string.char_at_n(s, n, i)) == 0 {
+            return 0
+        }
+        i = i + 1
+    }
+    return 1
+}
+
+// Every extern of an Aether file, checked: (mismatches, externs checked).
+scan_ae(defs: CDefs, path: string, dir: string) -> (int, int) {
+    text, err = fs.read(path)
+    if err != "" {
+        return 0, 0
+    }
+    lines = split_lines(text)
+    nl = collections.string_list_size(lines)
+    found = 0
+    checked = 0
+    k = 0
+    while k < nl {
+        ln = string.trim(collections.string_list_get(lines, k))
+        rest = ""
+        csym = ""
+        if string.starts_with(ln, "extern ") == 1 {
+            rest = string.substring(ln, 7, string.length(ln))
+        } else if string.starts_with(ln, "export extern ") == 1 {
+            rest = string.substring(ln, 14, string.length(ln))
+        } else if string.starts_with(ln, "@extern(\"") == 1 {
+            q = string.index_of_from(ln, "\"", 9)
+            close = string.index_of_from(ln, ")", 9)
+            if q > 9 && close > q {
+                csym = string.substring(ln, 9, q)
+                rest = string.trim(string.substring(ln, close + 1, string.length(ln)))
+            }
+        }
+        aline = k + 1
+        open = string.index_of(rest, "(")
+        if open > 0 {
+            // The declaration, over as many lines as its parentheses take.
+            decl = string.copy(rest)
+            while close_paren(decl, open) < 0 && k + 1 < nl {
+                k = k + 1
+                decl = "${decl} ${string.trim(collections.string_list_get(lines, k))}"
+            }
+            close = close_paren(decl, open)
+            name = string.trim(string.substring(decl, 0, open))
+            if close > open && is_plain_name(name) == 1 {
+                tail = string.substring(decl, close + 1, string.length(decl))
+                cmt = string.index_of(tail, "//")
+                if cmt >= 0 {
+                    tail = string.substring(tail, 0, cmt)
+                }
+                if string.contains(tail, "@c_import") == 0 {
+                    ret = ""
+                    arrow = string.index_of(tail, "->")
+                    if arrow >= 0 {
+                        ret = string.trim(string.substring(tail, arrow + 2, string.length(tail)))
+                        // A tuple result is not one C value.
+                        if string.starts_with(ret, "(") == 1 {
+                            ret = "?"
+                        }
+                    }
+                    params = collections.string_list_new()
+                    raw = split_top(string.substring(decl, open + 1, close))
+                    nr = collections.string_list_size(raw)
+                    j = 0
+                    while j < nr {
+                        p = collections.string_list_get(raw, j)
+                        colon = string.index_of(p, ":")
+                        if colon >= 0 {
+                            collections.string_list_add(params, string.trim(string.substring(p, colon + 1, string.length(p))))
+                        } else {
+                            collections.string_list_add(params, p)
+                        }
+                        j = j + 1
+                    }
+                    collections.string_list_free(raw)
+                    if csym == "" {
+                        csym = string.copy(name)
+                    }
+                    checked = checked + 1
+                    found = found + check_extern(defs, path, aline, dir, name, csym, params, ret)
+                    collections.string_list_free(params)
+                }
+            }
+        }
+        k = k + 1
+    }
+    collections.string_list_free(lines)
+    return found, checked
+}
+
+// ---------------------------------------------------------------------------
+
+excluded(excludes: ptr, p: string) -> int {
+    n = collections.string_list_size(excludes)
+    i = 0
+    while i < n {
+        if p == collections.string_list_get(excludes, i) {
+            return 1
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+dir_of(p: string) -> string {
+    slash = last_index_of_char(p, 47)
+    if slash < 0 {
+        return "."
+    }
+    return string.substring(p, 0, slash)
+}
+
+main() {
+    dirs = collections.string_list_new()
+    excludes = collections.string_list_new()
+    expect = -1
+    argc = os.args_count()
+    i = 1
+    while i < argc {
+        a = os.args_get(i)
+        if a == "--exclude" && i + 1 < argc {
+            i = i + 1
+            collections.string_list_add(excludes, string.replace_all(os.args_get(i), "\\", "/"))
+        } else if a == "--expect" && i + 1 < argc {
+            i = i + 1
+            expect = string.get_int(os.args_get(i))
+        } else {
+            collections.string_list_add(dirs, string.replace_all(a, "\\", "/"))
+        }
+        i = i + 1
+    }
+    if collections.string_list_size(dirs) == 0 {
+        say("usage: check [--exclude DIR]... [--expect N] DIR...")
+        exit(2)
+    }
+
+    cfiles = collections.string_list_new()
+    aefiles = collections.string_list_new()
+    nd = collections.string_list_size(dirs)
+    i = 0
+    while i < nd {
+        root = collections.string_list_get(dirs, i)
+        _n, werr = fs.walk(root) | path: string, kind: int, depth: int | {
+            p = string.replace_all(path, "\\", "/")
+            verdict = 0
+            if kind == 2 {
+                base = p
+                slash = last_index_of_char(p, 47)
+                if slash >= 0 {
+                    base = string.substring(p, slash + 1, string.length(p))
+                }
+                if base == "build" || base == ".git" || base == "target" || base == "zig-out" ||
+                base == "node_modules" || excluded(excludes, p) == 1 {
+                    verdict = 1
+                }
+            } else if kind == 1 {
+                if string.ends_with(p, ".c") == 1 {
+                    collections.string_list_add(cfiles, p)
+                } else if string.ends_with(p, ".ae") == 1 {
+                    collections.string_list_add(aefiles, p)
+                }
+            }
+            return verdict
+        }
+        if werr != "" {
+            say("extern widths: cannot walk ${root}: ${werr}")
+            exit(2)
+        }
+        i = i + 1
+    }
+
+    defs = CDefs {
+        names: collections.string_list_new(),
+        sigs: collections.string_list_new(),
+        texts: collections.string_list_new(),
+        locs: collections.string_list_new(),
+        dirs: collections.string_list_new()
+    }
+    nc = collections.string_list_size(cfiles)
+    i = 0
+    while i < nc {
+        p = collections.string_list_get(cfiles, i)
+        scan_c(defs, p, dir_of(p))
+        i = i + 1
+    }
+
+    found = 0
+    checked = 0
+    na = collections.string_list_size(aefiles)
+    i = 0
+    while i < na {
+        p = collections.string_list_get(aefiles, i)
+        f, c = scan_ae(defs, p, dir_of(p))
+        found = found + f
+        checked = checked + c
+        i = i + 1
+    }
+
+    ndefs = collections.string_list_size(defs.names)
+    say("extern widths: ${checked} externs in ${na} Aether files against ${ndefs} C definitions in ${nc} C files: ${found} mismatch(es)")
+    if expect >= 0 {
+        if found != expect {
+            say("extern widths: the self-test expected ${expect} mismatch(es)")
+            exit(1)
+        }
+        exit(0)
+    }
+    if found > 0 {
+        exit(1)
+    }
+}

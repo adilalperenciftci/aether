@@ -2800,6 +2800,7 @@ help:
 	@echo "  make check-standalone - Compile every standalone C main (benches, demos)"
 	@echo "  make check-docs       - Compile the documentation's complete examples"
 	@echo "  make check-tests      - The test suite can fail: verdicts reach the exit code, prune list is consistent, every std module has tests, listeners bind loopback, shell tests end background programs through server_jobs.sh, test programs write temp files under names of their own"
+	@echo "  make check-extern-widths - Every extern bound to C in this tree agrees with the C definition on each width; no plain C long in a bound signature"
 	@echo "  make check-contrib-modules - Type-check every non-host contrib module"
 	@echo "  make check-changelog  - Validate changelog fragments, catch a release-fold"
 	@echo "  make add-changelog    - Write a new_changelogs/ fragment (SECTION=, SLUG=)"
@@ -2990,6 +2991,7 @@ ci: clean
 	@$(CI_STAGE) 900 check-standalone $(MAKE) check-standalone
 	@$(CI_STAGE) 900 check-docs $(MAKE) check-docs
 	@$(CI_STAGE) 900 check-tests $(MAKE) check-tests
+	@$(CI_STAGE) 900 check-extern-widths $(MAKE) check-extern-widths
 	@echo ""
 	@echo "[5/11] Running .ae integration tests..."
 	@$(MAKE) test-ae
@@ -3050,6 +3052,27 @@ ownership-grid ownership-grid-check: compiler ae stdlib
 	    -o $(OWNERSHIP_GRID_RUNNER)
 	NPROC=$(NPROC) ./$(OWNERSHIP_GRID_RUNNER) \
 	    $(if $(filter ownership-grid-check,$@),--check) $(OWNERSHIP_GRID_ARGS)
+
+# -----------------------------------------------------------------
+# Extern widths (#3097): every extern bound to a C function of this tree
+# agrees with the C definition on the width of each argument and of the
+# result, and no bound C signature uses a plain `long` (32 bits on Windows,
+# 64 elsewhere). No C compiler sees an extern's prototype beside the C
+# definition, so nothing else catches a disagreement: the call is made with
+# the wrong width. The checker is Aether (tests/extern_widths/check.ae). Its
+# self-test first: the fixture holds exactly 11 mismatches, one of each
+# kind, among definitions that agree.
+# -----------------------------------------------------------------
+EXTERN_WIDTHS_CHECKER := $(BUILD_DIR)/extern_widths/check$(EXE_EXT)
+EXTERN_WIDTHS_DIRS := std contrib runtime tests examples tools lsp benchmarks
+.PHONY: check-extern-widths
+check-extern-widths: compiler ae stdlib
+	@mkdir -p $(BUILD_DIR)/extern_widths
+	@./$(BUILD_DIR)/ae$(EXE_EXT) build tests/extern_widths/check.ae -o $(EXTERN_WIDTHS_CHECKER)
+	@./$(EXTERN_WIDTHS_CHECKER) --expect 11 tests/extern_widths/fixture \
+	    > $(BUILD_DIR)/extern_widths/self_test.log 2>&1 || \
+	    { cat $(BUILD_DIR)/extern_widths/self_test.log; exit 1; }
+	@./$(EXTERN_WIDTHS_CHECKER) --exclude tests/extern_widths/fixture $(EXTERN_WIDTHS_DIRS)
 
 # The C a program gets when the C compiler is not GCC-compatible
 # (AETHER_GCC_COMPAT 0, which is what MSVC compiles): strict C11 under gcc,

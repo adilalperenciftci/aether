@@ -26,7 +26,7 @@
 #define OBS_TOMB  ((void*)1)
 
 typedef struct {
-    long token;
+    int64_t token;
     AetherObserverClosure cb;
     int with_field;      /* registered through aether_observe_fields (#2299) */
     int dead;            /* unobserved while a pass on this object was running */
@@ -45,7 +45,7 @@ static Slot*  g_slots;
 static size_t g_cap;
 static size_t g_used;     /* live + tombstones */
 static size_t g_live;
-static long   g_next_token = 1;
+static int64_t g_next_token = 1;
 static int    g_total_observers;   /* fast-path gate for notify */
 
 /* PTHREAD_MUTEX_INITIALIZER is POSIX-only: the Win32 shim maps
@@ -166,7 +166,7 @@ static void obs_sweep_dead(Slot* s) {
     if (s->count == 0) obs_release_slot(s);
 }
 
-static long obs_register(void* obj, AetherObserverClosure cb, int with_field) {
+static int64_t obs_register(void* obj, AetherObserverClosure cb, int with_field) {
     if (!obj || !cb.fn) {
         /* The environment is ours from the call on, rejected or not: the
          * caller crossed an extern boundary and will not release it. */
@@ -175,7 +175,7 @@ static long obs_register(void* obj, AetherObserverClosure cb, int with_field) {
     }
     pthread_mutex_lock(obs_lock());
     Slot* s = obs_slot_for(obj);
-    long token = 0;
+    int64_t token = 0;
     if (s) {
         if (s->count == s->cap) {
             int new_cap = s->cap ? s->cap * 2 : 4;
@@ -199,11 +199,11 @@ static long obs_register(void* obj, AetherObserverClosure cb, int with_field) {
     return token;
 }
 
-long aether_observe(void* obj, AetherObserverClosure cb) {
+int64_t aether_observe(void* obj, AetherObserverClosure cb) {
     return obs_register(obj, cb, 0);
 }
 
-long aether_observe_fields(void* obj, AetherObserverClosure cb) {
+int64_t aether_observe_fields(void* obj, AetherObserverClosure cb) {
     return obs_register(obj, cb, 1);
 }
 
@@ -224,7 +224,7 @@ static int obs_retire(Slot* s, int idx) {
     return 1;
 }
 
-int aether_unobserve(void* obj, long token) {
+int aether_unobserve(void* obj, int64_t token) {
     if (!obj || token <= 0) return 0;
     int found = 0;
     pthread_mutex_lock(obs_lock());

@@ -40,7 +40,7 @@ extern racket_run_sandboxed(perms: sandbox.Grants, code: string) -> int
 // First-class shared map: the Racket script reads/writes the Aether-owned
 // shared map live via aether-map-get / aether-map-put, so keys it discovers
 // at runtime come back too. Enumerate with map.keys(map).
-extern racket_run_sandboxed_with_map(perms: sandbox.Grants, code: string, map_token: int) -> int
+extern racket_run_sandboxed_with_map(perms: sandbox.Grants, code: string, map_token: long) -> int
 extern racket_run(code: string) -> int
 // Evaluate `code` in the persistent VM; returns its captured stdout as a
 // string ("" on failure). State persists across calls. The string is a

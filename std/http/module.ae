@@ -870,7 +870,7 @@ extern http_request_body_complete(req: ptr) -> int
 extern http_get_request_body_read() -> ptr
 extern http_get_request_body_read_length() -> int
 extern http_release_request_body_read()
-extern string_new_with_length(data: ptr, length: int) -> string @heap
+extern string_new_with_length(data: ptr, length: long) -> string @heap
 extern http_request_query(req: ptr) -> string
 
 // Trusted TCP peer address — the IP `getpeername(2)` reports for the
