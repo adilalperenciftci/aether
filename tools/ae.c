@@ -77,6 +77,7 @@ extern char** environ;
 #include "ae_sha256.h"
 #include "ae_bindgen.h"
 #include "ae_line.h"
+#include "ae_release_platform.h"
 
 // Version is set by Makefile from VERSION file
 #ifndef AETHER_VERSION
@@ -10982,47 +10983,6 @@ static int cmd_test(int argc, char** argv) {
  * package that publishes no artifacts behaves exactly as before.
  */
 
-/* Host triple as the release convention spells it ("linux-x86_64",
- * "macos-arm64"). Returns NULL when the host is one we do not publish
- * artifacts for, which forces the git-clone path. */
-static const char* ae_host_triple(void) {
-#if defined(__linux__)
-#  if defined(__x86_64__)
-    return "linux-x86_64";
-#  elif defined(__aarch64__)
-    return "linux-arm64";
-#  else
-    return NULL;
-#  endif
-#elif defined(__APPLE__)
-#  if defined(__aarch64__)
-    return "macos-arm64";
-#  elif defined(__x86_64__)
-    return "macos-x86_64";
-#  else
-    return NULL;
-#  endif
-#elif defined(_WIN32)
-#  if defined(__x86_64__) || defined(_M_X64)
-    return "windows-x86_64";
-#  elif defined(_M_ARM64) || defined(__aarch64__)
-    return "windows-arm64";
-#  else
-    return NULL;
-#  endif
-#elif defined(__FreeBSD__)
-#  if defined(__x86_64__)
-    return "freebsd-x86_64";
-#  elif defined(__aarch64__)
-    return "freebsd-arm64";
-#  else
-    return NULL;
-#  endif
-#else
-    return NULL;
-#endif
-}
-
 /* The host's shared-library file extension, for the bare-lib binary-package
  * path. Compile-time like ae_host_triple(): a Linux/FreeBSD host wants `.so`,
  * macOS `.dylib`, Windows `.dll`. */
@@ -11203,9 +11163,10 @@ static int ae_try_binary_package(const char* package, const char* tag,
      * the `<mod><ext>` probe, and the `lib<mod><ext>` probe when the stem carries
      * the `lib` prefix). The aether.toml's modules="." puts pkg_dir on the path. */
     mkdirs(pkg_dir);
-    char lib_dest[2048], toml_dest[2048];
+    char lib_dest[2048], toml_dest[2048], target_dest[2048];
     if (ae_sprintf(lib_dest, sizeof(lib_dest), "%s/%s%s", pkg_dir, stem, ext) != 0 ||
-        ae_sprintf(toml_dest, sizeof(toml_dest), "%s/aether.toml", pkg_dir) != 0) {
+        ae_sprintf(toml_dest, sizeof(toml_dest), "%s/aether.toml", pkg_dir) != 0 ||
+        ae_sprintf(target_dest, sizeof(target_dest), "%s/.aether-binary-target", pkg_dir) != 0) {
         remove(lib_path); remove(toml_tmp);
         return -1;
     }
@@ -11218,9 +11179,57 @@ static int ae_try_binary_package(const char* package, const char* tag,
         remove(lib_dest); remove(toml_dest);   /* leave nothing half-installed */
         return -1;
     }
+    /* A cache hit must not turn --target musl into success with previously
+     * installed glibc bytes (or let a native add reuse a foreign package). */
+    FILE* target_file = fopen(target_dest, "w");
+    int recorded = 0;
+    if (target_file) {
+        recorded = fprintf(target_file, "%s\n", triple) > 0;
+        if (fclose(target_file) != 0) recorded = 0;
+    }
+    if (!recorded) {
+        fprintf(stderr, "Error: could not record binary target in %s.\n", pkg_dir);
+        remove(lib_path); remove(toml_tmp);
+        remove(lib_dest); remove(toml_dest); remove(target_dest);
+        return -1;
+    }
     remove(lib_path); remove(toml_tmp);
     printf("Installed %s@%s as a binary package.\n", package, tag);
     return 1;
+}
+
+/* The package cache has one installed target per package. Preserve those
+ * bytes on an incompatible request instead of silently reusing or replacing
+ * them. Pre-#3073 binary caches have no target record and must be refetched. */
+static int ae_check_cached_binary_target(const char* pkg_dir, const char* target) {
+    char manifest[2048], marker[2048], git_dir[2048];
+    snprintf(git_dir, sizeof(git_dir), "%s/.git", pkg_dir);
+    snprintf(manifest, sizeof(manifest), "%s/aether.toml", pkg_dir);
+    snprintf(marker, sizeof(marker), "%s/.aether-binary-target", pkg_dir);
+    TomlDocument* doc = toml_parse_file(manifest);
+    const char* binary = doc ? toml_get_value(doc, "package", "binary") : NULL;
+    /* --source clones may themselves declare a release binary in their
+     * manifest. Their .git identifies them as source caches. */
+    int is_binary = binary && *binary && !dir_exists(git_dir) && !path_exists(git_dir);
+    if (doc) toml_free_document(doc);
+    if (!is_binary && !target) return 0;  /* ordinary source cache */
+
+    const char* wanted = target ? target : ae_host_triple();
+    char installed[256] = "";
+    FILE* f = is_binary ? fopen(marker, "r") : NULL;
+    if (f) {
+        if (!fgets(installed, sizeof(installed), f)) installed[0] = '\0';
+        fclose(f);
+        installed[strcspn(installed, "\r\n")] = '\0';
+    }
+    if (is_binary && wanted && *installed && strcmp(installed, wanted) == 0) return 0;
+    fprintf(stderr,
+        "Error: cached package %s has target %s; requested %s.\n"
+        "       Use a separate HOME for each target, or remove this cached package\n"
+        "       and run ae add again to fetch and verify the requested binary.\n",
+        pkg_dir, is_binary ? (*installed ? installed : "unknown (legacy binary cache)") : "source",
+        wanted ? wanted : "unsupported host");
+    return -1;
 }
 
 /* Try to install <package>@<version> from a published release asset.
@@ -11407,6 +11416,8 @@ static int cmd_add(int argc, char** argv) {
 
     char pkg_dir[1024];
     snprintf(pkg_dir, sizeof(pkg_dir), "%.511s/%.511s", cache_dir, package);
+
+    if (dir_exists(pkg_dir) && ae_check_cached_binary_target(pkg_dir, target) != 0) return 1;
 
     if (!dir_exists(pkg_dir)) {
         /* Prefer a published release artifact when one matches this host

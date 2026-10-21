@@ -190,6 +190,42 @@ released library needs no toolchain to consume. Set
 `AE_RELEASE_BASE_URL` to point at an internal mirror serving the same
 layout.
 
+For a **binary package**, publish `aether.toml` with a `[package]` section
+containing `binary = "<stem>"` and `modules = "."`, plus
+`<stem>-<tag>-<triple>.<ext>` and its
+`.sha256` sidecar. Unlike the archive path, a binary package requires the
+checksum: a missing or mismatched checksum is fatal. If the declared binary
+is missing for the selected target, `ae add` fails without trying another
+libc, a source archive, or a git clone.
+
+Publish Linux binary packages under distinct glibc and musl identities:
+
+| Build target | Release triple |
+| --- | --- |
+| `x86_64-linux` (glibc) | `linux-x86_64` |
+| `aarch64-linux` (glibc) | `linux-arm64` |
+| `x86_64-linux-musl` | `linux-x86_64-musl` |
+| `aarch64-linux-musl` | `linux-arm64-musl` |
+
+Automatic selection uses the CPU and libc that `ae` was built for, retaining
+the existing unsuffixed glibc names. To fetch a foreign binary, give its
+**release triple** explicitly (rather than the compiler's build-target spelling):
+
+```bash
+ae add github.com/user/repo@v1.0.0 --target linux-arm64-musl
+```
+
+The explicit target is preserved in the asset name; it does not fall back to
+the host's libc. The package cache holds one target per package. Use a separate
+`HOME` per target when assembling a multi-target release. `ae add` refuses to
+reuse an installed binary for a different target and preserves its bytes.
+Older binary caches without a target record must be removed and fetched again
+so the selected asset and its checksum are verified.
+
+For example, a stem of `libfoo` yields
+`libfoo-v1.0.0-linux-arm64-musl.so` and
+`libfoo-v1.0.0-linux-arm64-musl.so.sha256`.
+
 ## Error Handling
 
 Functions that can fail return `(value, error)` tuples. Check the error first, handle it, then continue, no `else` needed:

@@ -82,6 +82,10 @@ case "$(uname -m)" in
     aarch64|arm64) ARCH_PART="arm64" ;;
 esac
 TRIPLE="$OS_PART-$ARCH_PART"
+# musl and glibc assets have distinct names (#3073).
+if [ "$OS_PART" = linux ] && ldd --version 2>&1 | grep -qi musl; then
+    TRIPLE="$TRIPLE-musl"
+fi
 
 # ---- fake forge -----------------------------------------------------------
 FORGE="$TMP/forge"
@@ -200,8 +204,8 @@ grep -qi "refusing to install an" "$TMP/nosum.log" \
 # `--target <triple>` names another platform's lib (for cross-platform bundling),
 # using the triple's OS extension, not the host's. It installs it; and --target
 # on a package that isn't a binary package is an error, not a host fall-through.
-case "$(uname -s)-$(uname -m)" in
-    Linux-x86_64) FT="macos-arm64" ; FE=".dylib" ;;
+case "$TRIPLE" in
+    linux-x86_64) FT="macos-arm64" ; FE=".dylib" ;;
     *)            FT="linux-x86_64"; FE=".so" ;;
 esac
 P="$(new_proj target)"

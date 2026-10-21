@@ -68,6 +68,10 @@ case "$(uname -m)" in
     aarch64|arm64)   ARCH_PART="arm64" ;;
 esac
 TRIPLE="$OS_PART-$ARCH_PART"
+# musl and glibc assets have distinct names (#3073).
+if [ "$OS_PART" = linux ] && ldd --version 2>&1 | grep -qi musl; then
+    TRIPLE="$TRIPLE-musl"
+fi
 
 # ---- fake forge ----------------------------------------------------------
 FORGE="$TMP/forge"
