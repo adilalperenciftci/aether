@@ -1635,8 +1635,10 @@ static void emit_list_pattern_bindings(CodeGenerator* gen, const char* slice, co
             !expr_mentions(reads, e->value)) continue;
         int tail = p->type == AST_PATTERN_CONS && j == 1;
         print_indent(gen);
-        if (tail)   /* #3025: the tail keeps a read-only view's mark */
-            fprintf(gen->output, "%s %s = aether_slice_derive(%s, (%s*)%s.ptr + 1, %s.len - 1);\n",
+        if (tail)   /* #3025: the tail keeps a read-only view's mark; #3072: it owns nothing */
+            fprintf(gen->output,
+                    "%s %s = aether_slice_borrowed(aether_slice_derive(%s, (%s*)%s.ptr + 1, "
+                    "%s.len - 1));\n",
                     volatile_decl_type(try_volatile_qual_for(gen, e->value), "AetherSlice"),
                     e->value, slice, et, slice, slice);
         else

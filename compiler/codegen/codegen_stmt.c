@@ -1520,7 +1520,9 @@ static void generate_list_pattern_bindings(CodeGenerator* gen, ASTNode* pattern,
                  * length `.len`. #2995: it has no `<name>_len` companion,
                  * which is a raw pointer's alone; the checker never
                  * declared one, and the C local hid a user's of that name. */
-                print_line(gen, "AetherSlice %s = aether_slice_make(&_match_arr[1], (uint64_t)(%s - 1));",
+                print_line(gen,
+                           "AetherSlice %s = aether_slice_borrowed(aether_slice_make("
+                           "&_match_arr[1], (uint64_t)(%s - 1)));",   /* #3072: owns nothing */
                            tail->value, len_name);
                 Type* tt = create_array_type(clone_type(elem_t), -1);
                 mark_var_declared_typed(gen, tail->value, tt);
@@ -10380,7 +10382,9 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                             if (slice_lit_len == 0) {
                                 fprintf(gen->output, "aether_slice_make((void*)0, 0)");
                             } else if (slice_lit_len > 0) {
-                                fprintf(gen->output, "aether_slice_make(_ae_slit_%s, %d)",
+                                /* #3072: a view of the literal's array */
+                                fprintf(gen->output,
+                                        "aether_slice_borrowed(aether_slice_make(_ae_slit_%s, %d))",
                                         stmt->value, slice_lit_len);
                             } else if (copy_alias) {
                                 fprintf(gen->output, "aether_uniform_heap_str(");

@@ -5361,11 +5361,11 @@ static int is_readonly_view_source(const ASTNode* e, int depth) {
     return 0;
 }
 
-/* #3025: the initializer of `name` when it is a local of the function being
- * checked bound once, to a read-only view of a string's bytes, and no
- * parameter of it; NULL otherwise (a local bound again may hold another
- * slice by the time it is written, and the run-time check has it). */
-static const ASTNode* readonly_view_local_init(const char* name, int depth) {
+/* The initializer of `name` when it is a local of the function being checked
+ * bound once, and no parameter of it; NULL otherwise (a local bound again
+ * may hold another value by the time it is used, and the run-time checks
+ * have it). */
+static const ASTNode* local_single_init(const char* name) {
     ASTNode* body = g_tc_fn_body;
     ASTNode* fn = g_tc_return_owner;
     if (!body || !name || count_bindings_of(body, name) != 1) return NULL;
@@ -5386,7 +5386,70 @@ static const ASTNode* readonly_view_local_init(const char* name, int depth) {
             found = n->children[n->child_count - 1];
         for (int i = 0; i < n->child_count && top < 256; i++) stack[top++] = n->children[i];
     }
+    return found;
+}
+
+/* #3025: the initializer of `name` when it is a local bound once
+ * (local_single_init) to a read-only view of a string's bytes. */
+static const ASTNode* readonly_view_local_init(const char* name, int depth) {
+    const ASTNode* found = local_single_init(name);
     return found && is_readonly_view_source(found, depth) ? found : NULL;
+}
+
+/* #3072: is `e` a view of elements something else holds, and so owns
+ * nothing: a sub-slice (`b[2..4]`, `b[1..]`) of anything but a raw pointer
+ * cast, `(p as T[])[0..n]` being how a program holds a buffer it owns, or an
+ * array viewed as a slice? */
+static int is_borrowed_view_source(const ASTNode* e) {
+    if (!e) return 0;
+    if (e->type == AST_SLICE_FROM_ARRAY)
+        return e->child_count > 0 && e->children[0] &&
+               e->children[0]->type != AST_NULL_LITERAL &&
+               !(e->children[0]->type == AST_ARRAY_LITERAL && e->children[0]->child_count == 0);
+    return e->type == AST_SLICE_EXPR && e->child_count > 0 && e->children[0] &&
+           e->children[0]->type != AST_PTR_AS_ARRAY_CAST;
+}
+
+/* #3072: `free` of what the checker can see owns nothing (R1, R2): a
+ * read-only view of a string's bytes, a view of another slice's or an
+ * array's elements, a local bound once to either, or an array `T[N]`, which
+ * lives in its function or its struct. The allocator was given a pointer it
+ * never handed out (heap corruption) or one the owner still holds (a double
+ * free). A view the checker cannot see is the run-time check's
+ * (aether_slice_free). Returns 1 when it reported. */
+static int reject_free_of_view(ASTNode* arg, ASTNode* at) {
+    if (!arg) return 0;
+    int local = arg->type == AST_IDENTIFIER && arg->value;
+    const ASTNode* src = local ? local_single_init(arg->value) : arg;
+    char what[160];
+    snprintf(what, sizeof(what), "%s%s%s", local ? "'" : "", local ? arg->value : "this value",
+             local ? "'" : "");
+    char msg[400];
+    const char* hint = NULL;
+    Type* t = arg->node_type;
+    if (t && type_is_sized_array(t) && t->array_size > 0) {
+        snprintf(msg, sizeof(msg),
+                 "cannot free %s: an array `%s` lives in its function or its struct, not in "
+                 "an allocation",
+                 what, type_spelled(t));
+        hint = "`free` takes a buffer `make([]T, n)` gave; an array needs no freeing";
+    } else if (src && is_readonly_view_source(src, 0)) {
+        snprintf(msg, sizeof(msg),
+                 "cannot free %s: it is a read-only view of a string's bytes (string.bytes), "
+                 "which owns nothing",
+                 what);
+        hint = "the string owns its bytes: release the string when it is done, not the view";
+    } else if (src && is_borrowed_view_source(src)) {
+        snprintf(msg, sizeof(msg),
+                 "cannot free %s: it is a view of elements another slice or an array holds, "
+                 "which owns nothing",
+                 what);
+        hint = "free the buffer `make` gave, once, through the slice that holds it";
+    } else {
+        return 0;
+    }
+    type_error_hint(msg, hint, at->line, at->column);
+    return 1;
 }
 
 /* #3025: a store through a local bound from `string.bytes`: `v[i] = x`,
@@ -18692,6 +18755,13 @@ int typecheck_function_call(ASTNode* call, SymbolTable* table) {
         strcmp(call->value, "select") == 0 && !own_select &&
         !check_select_platforms(call))
         ok = 0;
+    /* #3072: the builtin `free` of a view, which owns nothing. */
+    if (ok && call && call->type == AST_FUNCTION_CALL && call->value &&
+        strcmp(call->value, "free") == 0 && call->child_count == 1) {
+        Symbol* fs = lookup_symbol(table, "free");
+        int own_free = fs && fs->node && fs->node->type == AST_FUNCTION_DEFINITION;
+        if (!own_free && reject_free_of_view(call->children[0], call)) ok = 0;
+    }
     /* An argument of what gives no value, `h(g())` with g returning
      * nothing, reached C as an invalid use of a void expression. A print
      * argument is checked by the rendering rule below. */

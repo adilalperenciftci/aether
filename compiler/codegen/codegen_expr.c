@@ -5582,8 +5582,9 @@ void emit_message_field_init(CodeGenerator* gen, MessageFieldDef* fdef, ASTNode*
         int as_slice = fdef->c_type && strcmp(fdef->c_type, "AetherSlice") == 0;
         int id = lookup_msg_arr_id(fdef->name);
         if (id >= 0) {
-            if (as_slice)
-                fprintf(gen->output, "aether_slice_make(_aether_arr_%d, %d)", id, rhs->child_count);
+            if (as_slice)   /* #3072: a view of the array, owning nothing */
+                fprintf(gen->output, "aether_slice_borrowed(aether_slice_make(_aether_arr_%d, %d))",
+                        id, rhs->child_count);
             else
                 fprintf(gen->output, "_aether_arr_%d", id);
             return;
@@ -5592,9 +5593,10 @@ void emit_message_field_init(CodeGenerator* gen, MessageFieldDef* fdef, ASTNode*
         // compound literal — still wrong for cross-thread sends, but
         // fine for synchronous ask/reply where the sender stays alive.
         if (as_slice) {
-            fprintf(gen->output, "aether_slice_make((%s[])", fdef->element_c_type);
+            fprintf(gen->output, "aether_slice_borrowed(aether_slice_make((%s[])",
+                    fdef->element_c_type);
             generate_expression(gen, rhs);
-            fprintf(gen->output, ", %d)", rhs->child_count);
+            fprintf(gen->output, ", %d))", rhs->child_count);
             return;
         }
         fprintf(gen->output, "(%s[])", fdef->element_c_type);
@@ -6122,9 +6124,9 @@ int is_empty_slice_value(const ASTNode* e) {
 
 void generate_expression_as_slice(CodeGenerator* gen, ASTNode* expr) {
     if (expr && type_is_sized_array(expr->node_type) && expr->node_type->array_size > 0) {
-        fprintf(gen->output, "aether_slice_make((void*)(");
+        fprintf(gen->output, "aether_slice_borrowed(aether_slice_make((void*)(");
         generate_expression(gen, expr);
-        fprintf(gen->output, "), %d)", expr->node_type->array_size);
+        fprintf(gen->output, "), %d))", expr->node_type->array_size);
         return;
     }
     generate_expression(gen, expr);
@@ -8471,11 +8473,13 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                     fprintf(gen->output, "aether_slice_make((void*)0, 0)");
                     break;
                 }
-                fprintf(gen->output, "aether_slice_make((void*)(");
+                /* #3072: a view of an array's elements owns nothing:
+                 * `free` of it panics (aether_slice_free). */
+                fprintf(gen->output, "aether_slice_borrowed(aether_slice_make((void*)(");
                 if (src->type == AST_ARRAY_LITERAL && src->child_count > 0)
                     fprintf(gen->output, "(%s[])", slice_elem_c_type(expr->node_type));
                 generate_expression(gen, src);
-                fprintf(gen->output, "), %s)", expr->value ? expr->value : "0");
+                fprintf(gen->output, "), %s))", expr->value ? expr->value : "0");
             }
             break;
 
@@ -9744,6 +9748,16 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                 }
                 /* A string is released as `release` releases it (below): the
                  * place it is read from owns a counted string (R2). */
+                else if (strcmp(func_name, "free") == 0 && expr->child_count == 1 &&
+                         type_is_slice(expr->children[0]->node_type)) {
+                    /* #3072: a slice is freed by aether_slice_free, which
+                     * refuses a view (it owns nothing) by name. */
+                    fprintf(gen->output, "aether_slice_free(");
+                    generate_expression(gen, expr->children[0]);
+                    fprintf(gen->output, ", ");
+                    emit_slice_diag_file(gen, expr);
+                    fprintf(gen->output, ", %d)", expr->line);
+                }
                 else if (strcmp(func_name, "free") == 0 && expr->child_count == 1 &&
                          !(expr->children[0]->node_type &&
                            expr->children[0]->node_type->kind == TYPE_STRING)) {
