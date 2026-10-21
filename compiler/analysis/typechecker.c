@@ -7811,6 +7811,14 @@ int typecheck_actor_definition(ASTNode* actor, SymbolTable* table) {
         ASTNode* child = actor->children[i];
         
         if (child->type == AST_STATE_DECLARATION) {
+            /* The generated actor keeps the runtime's actor fields in a
+             * member of this name, beside the states (#3094): a state may be
+             * named like any of those fields, but not like the member. */
+            if (child->value && strcmp(child->value, "_aether_base") == 0) {
+                type_error_hint("a state cannot be named '_aether_base'",
+                                "the generated actor keeps the runtime's actor fields under that name; rename the state",
+                                child->line, child->column);
+            }
             int checked = 0;
             if ((!child->node_type || child->node_type->kind == TYPE_UNKNOWN)
                 && child->child_count > 0 && child->children[0]) {
