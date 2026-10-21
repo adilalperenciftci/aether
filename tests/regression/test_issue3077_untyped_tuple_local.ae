@@ -1,0 +1,44 @@
+// #3077 follow-up: a tuple local whose type no signature names and that
+// owns nothing failed in the C compiler, "unknown type name
+// '_tuple_ptr_int'": its typedef was emitted where its destructure was
+// generated, after the declaration that names it. `t = (null, 1)`, the
+// issue's own example, has no type around its `null`, which is the `ptr`
+// it is alone; `(p, 1)` with p a `ptr`, and `(1.5, true)`, failed the same
+// way. Every tuple type the program uses is declared ahead of its
+// functions now, as an optional type is.
+
+extern exit(code: int)
+
+struct Cell {
+    n: int
+}
+
+check(ok: bool, what: string) {
+    if !ok {
+        println("FAIL: ${what}")
+        exit(1)
+    }
+}
+
+mk(c: *Cell) -> ptr {
+    return c as ptr
+}
+
+main() {
+    t = (null, 1)
+    a, b = t
+    check(a == null && b == 1, "a null and an int")
+
+    c = heap.new(Cell)
+    c.n = 7
+    p = mk(c)
+    u = (p, 2)
+    q, k = u
+    check((q as *Cell).n == 7 && k == 2, "a pointer and an int")
+    heap.free(c)
+
+    w = (1.5, true)
+    f, y = w
+    check(f == 1.5 && y, "a float and a bool")
+    println("ok")
+}

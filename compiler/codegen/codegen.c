@@ -5152,6 +5152,31 @@ void ensure_optional_typedef(CodeGenerator* gen, Type* type) {
     gen->opt_type_names[gen->opt_type_count++] = strdup(opt_name);
 }
 
+/* Is every part of the tuple `t` a type C can spell (nothing left unknown)? */
+static int tuple_parts_known(const Type* t) {
+    for (int i = 0; t && i < t->tuple_count; i++) {
+        const Type* p = t->tuple_types ? t->tuple_types[i] : NULL;
+        if (!p || p->kind == TYPE_UNKNOWN || p->kind == TYPE_VOID) return 0;
+        if (p->kind == TYPE_TUPLE && !tuple_parts_known(p)) return 0;
+    }
+    return t != NULL;
+}
+
+/* #3077: the typedef of every tuple type a node of the program has, ahead
+ * of the functions, as collect_optional_typedefs does for optionals. A
+ * tuple local whose type no signature names and that owns nothing (`t =
+ * (null, 1)`, `(p, 1)` with p a `ptr`) had its typedef emitted where its
+ * destructure was generated, after the declaration that names it ("unknown
+ * type name '_tuple_ptr_int'"); one that owns a string got its own from
+ * the composite pass (emit_own_ops). */
+void collect_tuple_typedefs(CodeGenerator* gen, ASTNode* node) {
+    if (!node) return;
+    if (node->node_type && node->node_type->kind == TYPE_TUPLE &&
+        tuple_parts_known(node->node_type))
+        ensure_tuple_typedef(gen, node->node_type);
+    for (int i = 0; i < node->child_count; i++) collect_tuple_typedefs(gen, node->children[i]);
+}
+
 // #340: walk the whole program AST, emitting an optional typedef for every
 // concrete `T?` that appears as a node's type (var/param/field/return/expr).
 // Optional typedefs must precede the function bodies that use them, so this
@@ -9859,6 +9884,8 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
             }
         }
     }
+    // #3077: and every tuple type a body uses (a local's of no signature).
+    collect_tuple_typedefs(gen, program);
     // #340: emit optional typedefs (after struct bodies, before fn fwd-decls).
     collect_optional_typedefs(gen, program);
 
