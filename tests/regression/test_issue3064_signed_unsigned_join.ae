@@ -4,8 +4,9 @@
 // and a uint64: `if c { -1 } else { u }` with a uint32 `u` was 4294967295.
 // It is the smallest type that holds both now: an int beside a byte, a
 // uint8 or a uint16, a long beside a uint32 (and beside any of those), and
-// a literal that fits a uint32 or a uint64 beside it is that type. (A
-// signed value beside a uint64 has no such type: the checker refuses it,
+// a literal that fits a uint32 or a uint64 beside it is that type, a
+// clause that returns one as well as a branch. (A signed value beside a
+// uint64 has no such type: the checker refuses it,
 // tests/integration/signed_unsigned_join.)
 
 extern exit(code: int)
@@ -36,6 +37,15 @@ zero32(0, u: uint32) -> 0
 zero32(k, u: uint32) -> u
 neg32(0, u: uint32) -> -1
 neg32(k, u: uint32) -> u
+// A literal clause beside a uint64 one, and beside a written uint64: a
+// uint64, as `if c { 0 } else { u }` is (they were refused, the literal
+// read as an int beside a uint64).
+zero64(0, u: uint64) -> 0
+zero64(k, u: uint64) -> u
+wzero64(0, u: uint64) -> 0
+wzero64(k, u: uint64) -> uint64 {
+    return u
+}
 
 main() {
     neg = -1
@@ -55,18 +65,18 @@ main() {
     check((if yes { neg } else { u8 }) == -1 && (if no { neg } else { u8 }) == 255, "int, uint8")
     check((if yes { neg } else { u16 }) == -1 && (if no { neg } else { u16 }) == 65535, "int, uint16")
     check((if yes { neg } else { u32 }) == -1 && (if no { neg } else { u32 }) == 4294967295,
-          "int, uint32: a long")
+        "int, uint32: a long")
     check((if yes { u32 } else { neg }) == 4294967295 && (if no { u32 } else { neg }) == -1,
-          "uint32, int: a long")
+        "uint32, int: a long")
     check((if yes { lneg } else { b }) == -1 && (if no { lneg } else { b }) == 255, "long, byte")
     check((if yes { lneg } else { u16 }) == -1 && (if no { lneg } else { u16 }) == 65535,
-          "long, uint16")
+        "long, uint16")
     check((if yes { lneg } else { u32 }) == -1 && (if no { lneg } else { u32 }) == 4294967295,
-          "long, uint32")
+        "long, uint32")
     check((if yes { 0 } else { u32 }) == 0 && (if no { 0 } else { u32 }) == 4294967295,
-          "a literal beside a uint32 is one")
+        "a literal beside a uint32 is one")
     check((if yes { 0 } else { u64 }) == 0 && (if no { 0 } else { u64 }) == u64,
-          "a literal beside a uint64 is one")
+        "a literal beside a uint64 is one")
     check((if yes { -1 } else { u32 }) == -1, "a negative literal beside a uint32: a long")
     bound = if yes { neg } else { u32 }
     check(bound == -1, "the long bound to a local")
@@ -91,6 +101,12 @@ main() {
     check(l32(0, lneg, u32) == -1 && l32(1, lneg, u32) == 4294967295, "clauses: long, uint32")
     check(zero32(0, u32) == 0 && zero32(1, u32) == 4294967295, "clauses: a literal, uint32")
     check(neg32(0, u32) == -1 && neg32(1, u32) == 4294967295, "clauses: -1, uint32")
+    // A uint32 wraps where a long goes below zero: the literal clause's set
+    // is the uint32 the if-expression is, not a long.
+    check((if yes { 0 } else { u32 }) - 1 == 4294967295, "a literal beside a uint32 wraps as one")
+    check(zero32(0, u32) - 1 == 4294967295, "clauses: a literal beside a uint32 is one")
+    check(zero64(0, u64) == 0 && zero64(1, u64) == u64, "clauses: a literal, uint64")
+    check(wzero64(0, u64) == 0 && wzero64(1, u64) == u64, "clauses: a literal, written uint64")
 
     println("${if yes { neg } else { u32 }} ${m2} ${i32(0, -1, u32)}")
     println("ok")

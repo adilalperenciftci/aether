@@ -5,6 +5,8 @@
   the first of the two. They take the smallest type that holds both now: an
   int beside a byte, a uint8 or a uint16, a long beside a uint32; a literal
   that fits a uint32 or a uint64 beside it is that type (`if c { 0 } else {
-  u }` stays a uint32). A signed value beside a uint64, which no integer type
-  holds, is E0200 naming both. A byte beside a uint16 is a uint16 (it was
-  whichever came first) (#3064).
+  u }` stays a uint32), a clause that returns one as well (`h(0, u: uint64)
+  -> 0` beside `h(k, u: uint64) -> u` is a uint64). A signed value beside a
+  uint64, which no integer type holds, is E0200 naming both, and beside a
+  written uint64 result the error names the written type. A byte beside a
+  uint16 is a uint16 (it was whichever came first) (#3064).

@@ -81,5 +81,17 @@ main() { println("${pick(1, -1, 5)}") }
 AE
 refused clauses_int_u64 "the clauses of 'pick' return int (line 1) and uint64" 2:1
 
+# Beside a written uint64, an int clause is one the written type does not
+# hold (a literal one is: the regression test's wzero64).
+cat > "$TMP/clauses_int_written_u64.ae" <<'AE'
+pick(0, s: int, u: uint64) -> s
+pick(k, s: int, u: uint64) -> uint64 {
+    return u
+}
+
+main() { println("${pick(1, -1, 5)}") }
+AE
+refused clauses_int_written_u64 "the clauses of 'pick' are written to return uint64 (line 2), and this clause returns int, which uint64 does not hold" 1:1
+
 if [ "$fails" -ne 0 ]; then exit 1; fi
 echo "  [PASS] signed_unsigned_join: a signed integer beside a uint64 is refused in a branch, an arm and a clause"

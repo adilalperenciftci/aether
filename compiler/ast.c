@@ -1275,6 +1275,35 @@ int clause_takes_set_result(const ASTNode* cl) {
            cl->node_type->kind != TYPE_VOID;
 }
 
+/* The value of the one value `return` under `node`, counting them in `*n`. */
+static void find_value_returns(const ASTNode* node, const ASTNode** only, int* n) {
+    if (!node || ast_is_own_function(node)) return;
+    if (node->type == AST_RETURN_STATEMENT && node->child_count > 0 && node->children[0]) {
+        if (node->children[0]->type == AST_PRINT_STATEMENT) return;
+        if ((*n)++ == 0) *only = node->children[0];
+        return;
+    }
+    for (int i = 0; i < node->child_count; i++)
+        find_value_returns(node->children[i], only, n);
+}
+
+/* #3064: what clause `cl` gives, when it has one value `return` (`f(0) ->
+ * 0` has): the arm a join reads a literal from, as an if-expression's
+ * branch is. NULL for a clause with several. */
+static const ASTNode* clause_value_arm(const ASTNode* cl) {
+    const ASTNode* only = NULL;
+    int n = 0;
+    find_value_returns(cl, &only, &n);
+    return n == 1 ? only : NULL;
+}
+
+/* A number literal, or one under a unary minus or plus. */
+static int numeric_literal_arm(const ASTNode* n) {
+    int neg;
+    unsigned long long mag;
+    return integer_literal_arm(n, &neg, &mag) || is_float_literal_arm(n);
+}
+
 static void clause_join_fail(ClauseJoin* out, ClauseJoinStatus st, ASTNode* at, Type* other) {
     out->status = st;
     out->at = at;
@@ -1308,22 +1337,32 @@ void clause_set_join(ASTNode* const* nodes, int count, ClauseJoin* out) {
     ASTNode* written = out->written;
     Type* join = written ? clone_type(written->node_type) : NULL;
     ASTNode* join_at = written;
+    /* #3064: each clause's value is its arm, as an if-expression's branches
+     * are, so a literal clause beside a uint64 one is a uint64, as `if c { 0
+     * } else { u }` is: the value the join so far came from, while every
+     * clause after it gives a literal, as a value match's first arm is. A
+     * written type has none. */
+    const ASTNode* join_arm = NULL;
     for (int c = 0; c < count; c++) {
         ASTNode* cl = nodes[c];
         Type* t = cl->node_type;
         if (!t || t->kind == TYPE_UNKNOWN || t->kind == TYPE_VOID || cl == written ||
             clause_gives_only_null(cl))
             continue;
+        const ASTNode* arm = clause_value_arm(cl);
         if (!join) {
             join = clone_type(t);
             join_at = cl;
+            join_arm = arm;
             continue;
         }
-        Type* k = branch_join_type(join, NULL, t, NULL);
+        Type* k = branch_join_type(join, join_arm, t, arm);
+        if (!numeric_literal_arm(arm)) join_arm = NULL;
         /* Beside a written type, an inferred clause fits it (their join is
-         * it); a second written type is the same one or none. */
-        int unfit = written && k &&
-                    (!types_equal(k, join) || (!cl->type_inferred && !types_equal(t, join)));
+         * it, and one with no join does not); a second written type is the
+         * same one or none. */
+        int unfit = written &&
+                    (!k || !types_equal(k, join) || (!cl->type_inferred && !types_equal(t, join)));
         if (!k || unfit) {
             if (k) free_type(k);
             out->join = join;

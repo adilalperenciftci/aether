@@ -1058,11 +1058,19 @@ zero
 n7
 ```
 
-The set's return type is decided over every clause: the first clause that
-declares one gives it; with none declared, the set returns `int` when any
-clause returns a value (a clause that returns nothing then gives `0`), and
-nothing otherwise. A clause set exported from a module is imported with all
-its clauses.
+A clause set is one function with one result, decided over every clause. A
+clause that writes a type gives it, and what every other clause returns must
+fit it. With none written, the result is the join of what the clauses return,
+as an [if-expression](#if-expressions)'s branches join:
+`pick(0, s: int, b: long) -> s` beside `pick(k, s: int, b: long) -> b`
+returns a `long`, a clause that returns `0` beside one that returns a
+`uint32` is a `uint32`, a clause that returns only `null` takes the pointer,
+string or closure type beside it, and one that returns only `none` makes the
+result an optional of the others' type. Results no one type holds are a
+compile error naming both. A clause that returns nothing gives the result
+type's zero value, and a set none of whose clauses returns a value returns
+nothing. A clause set exported from a module is imported with all its
+clauses.
 
 ### Multi-Statement Arrow Bodies
 
