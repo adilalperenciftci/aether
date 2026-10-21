@@ -7,6 +7,7 @@
 
 import std.os
 import std.io
+import std.list
 import std.string
 
 extern exit(code: int)
@@ -14,6 +15,46 @@ extern exit(code: int)
 // ============================================================================
 // Helpers (defined before main so they're available)
 // ============================================================================
+
+// Every command here is POSIX sh: `cd aether && make ping_pong >/dev/null
+// 2>&1`, `/usr/bin/time -v ./ping_pong`, pipes. os_system and os_exec_raw
+// hand a command to cmd.exe on Windows, which reads none of that (every
+// language was "[SKIP] Build failed"), so there each one runs through the
+// MSYS sh the suite is started from, argv-style through os.run_full, with
+// no second layer of quoting. Set once, first thing in main.
+var on_windows = 0
+
+// Run `cmd` in a POSIX shell, its output shown; its exit status, -1 when
+// the shell could not be started.
+int sh_system(string cmd) {
+    if on_windows == 0 {
+        return os_system(cmd)
+    }
+    argv = list.new()
+    _a = list.add(argv, "-c")
+    _b = list.add(argv, cmd)
+    out, err_out, status, err = os.run_full("sh", argv, null, "")
+    list.free(argv)
+    print(out)
+    print(err_out)
+    if err != "" {
+        return -1
+    }
+    return status
+}
+
+// Run `cmd` in a POSIX shell; what it writes to stdout.
+string sh_exec(string cmd) {
+    if on_windows == 0 {
+        return os_exec_raw(cmd)
+    }
+    argv = list.new()
+    _a = list.add(argv, "-c")
+    _b = list.add(argv, cmd)
+    out, _err_out, _status, _err = os.run_full("sh", argv, null, "")
+    list.free(argv)
+    return out
+}
 
 string java_class(string pattern) {
     if string_equals(pattern, "ping_pong") == 1 { return "PingPong" }
@@ -137,14 +178,17 @@ int parse_mps(string output) {
     return 0
 }
 
-// Parse peak RSS from /usr/bin/time output (returns MB as int)
+// Parse peak RSS from /usr/bin/time output (returns MB as int). macOS's
+// `time -l` writes "maximum resident set size", GNU's `time -v` (Linux,
+// MSYS) "Maximum resident set size (kbytes): N": the line is matched past
+// its first letter, or every Linux run read 0 MB.
 int parse_mem(string output, int is_mac) {
     lines = string_split(output, "\n")
     count = string_array_size(lines)
     i = 0
     while i < count {
         line = string_array_get(lines, i)
-        if string_contains(line, "maximum resident set size") == 1 {
+        if string_contains(line, "aximum resident set size") == 1 {
             tl = string_trim(line)
             parts = string_split(tl, " ")
             pc = string_array_size(parts)
@@ -182,7 +226,7 @@ string run_lang(string name, string build_cmd, string run_cmd, int num_runs, int
 
     // Build
     if string_length(build_cmd) > 0 {
-        ret = os_system(build_cmd)
+        ret = sh_system(build_cmd)
         if ret != 0 {
             println("[SKIP] Build failed")
             return ""
@@ -195,7 +239,7 @@ string run_lang(string name, string build_cmd, string run_cmd, int num_runs, int
         // Warmup: the exit status is deliberately ignored (a failing
         // warmup shows up in the timed runs), but bind it so the
         // generated C does not discard a value and warn.
-        warm_rc = os_system(string_concat(run_cmd, " >/dev/null 2>&1"))
+        warm_rc = sh_system(string_concat(run_cmd, " >/dev/null 2>&1"))
         if warm_rc < 0 {
             println("[WARN] warmup command could not be launched")
         }
@@ -215,7 +259,7 @@ string run_lang(string name, string build_cmd, string run_cmd, int num_runs, int
 
     r = 0
     while r < num_runs {
-        output = os_exec_raw(string_concat(run_cmd, " 2>&1"))
+        output = sh_exec(string_concat(run_cmd, " 2>&1"))
         ns = parse_ns(output)
         mps = parse_mps(output)
         m = parse_mem(output, is_mac)
@@ -315,34 +359,41 @@ main() {
     env_m = getenv("BENCHMARK_MESSAGES")
     if env_m != 0 { msgs = atoi(env_m) }
 
+    on_windows = select(windows: 1, other: 0)
+
     // system() uses /bin/sh which has a minimal PATH.
     // Add common tool locations so cargo, erlc, ponyc etc. are found.
-    home = getenv("HOME")
-    cur_path = getenv("PATH")
-    tool_paths = string_concat("/opt/homebrew/bin:/opt/homebrew/opt/erlang/bin:/opt/homebrew/opt/elixir/bin:/usr/local/bin:/usr/local/go/bin:/snap/bin:", cur_path)
-    if home != 0 {
-        tool_paths = string_concat(string_concat(home, "/.cargo/bin:"), string_concat(string_concat(home, "/go/bin:"), string_concat(string_concat(home, "/.local/bin:"), tool_paths)))
+    // Not on Windows: its PATH is `;`-separated Windows paths, which a `:`
+    // prefix would corrupt, and the MSYS shell the suite runs from has them.
+    if on_windows == 0 {
+        home = getenv("HOME")
+        cur_path = getenv("PATH")
+        tool_paths = string_concat("/opt/homebrew/bin:/opt/homebrew/opt/erlang/bin:/opt/homebrew/opt/elixir/bin:/usr/local/bin:/usr/local/go/bin:/snap/bin:", cur_path)
+        if home != 0 {
+            tool_paths = string_concat(string_concat(home, "/.cargo/bin:"), string_concat(string_concat(home, "/go/bin:"), string_concat(string_concat(home, "/.local/bin:"), tool_paths)))
+        }
+        io_setenv("PATH", tool_paths)
     }
-    io_setenv("PATH", tool_paths)
 
-    uname = os_exec_raw("uname -s")
+    uname = sh_exec("uname -s")
     is_mac = string_contains(uname, "Darwin")
     tc = "/usr/bin/time -v"
     if is_mac == 1 { tc = "/usr/bin/time -l" }
 
     cpu = ""
     if is_mac == 1 {
-        cpu = string_trim(os_exec_raw("sysctl -n machdep.cpu.brand_string"))
+        cpu = string_trim(sh_exec("sysctl -n machdep.cpu.brand_string"))
     } else {
-        cpu = string_trim(os_exec_raw("lscpu | grep 'Model name' | cut -d: -f2 | xargs"))
+        // /proc/cpuinfo, which Linux and MSYS both have (lscpu MSYS has not).
+        cpu = string_trim(sh_exec("grep -m1 'model name' /proc/cpuinfo | cut -d: -f2 | xargs"))
     }
     cores = "8"
     if is_mac == 1 {
-        cores = string_trim(os_exec_raw("sysctl -n hw.ncpu"))
+        cores = string_trim(sh_exec("sysctl -n hw.ncpu"))
     } else {
-        cores = string_trim(os_exec_raw("nproc"))
+        cores = string_trim(sh_exec("nproc"))
     }
-    arch = string_trim(os_exec_raw("uname -m"))
+    arch = string_trim(sh_exec("uname -m"))
 
     println("============================================")
     println("  Aether Cross-Language Benchmark Suite")
@@ -374,7 +425,7 @@ main() {
         println("============================================")
 
         // JSON header
-        ts = string_trim(os_exec_raw("date -u +\"%Y-%m-%dT%H:%M:%SZ\""))
+        ts = string_trim(sh_exec("date -u +\"%Y-%m-%dT%H:%M:%SZ\""))
         json = string_concat("{\n  \"timestamp\": \"", ts)
         json = string_concat(json, "\",\n  \"pattern\": \"")
         json = string_concat(json, pattern)

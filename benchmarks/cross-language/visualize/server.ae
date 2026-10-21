@@ -29,7 +29,11 @@ main() {
     println("Press Ctrl+C to stop")
     println("")
 
-    base_dir = string_trim(os_exec_raw("pwd"))
+    // The files are served from the directory the server runs in (`make
+    // benchmark` starts it in visualize/). It took that from `pwd`, which on
+    // Windows is an MSYS path (/d/...) no file read opens, so every page was
+    // 404 and every result "No results yet".
+    base_dir = "."
 
     // Accept loop
     while 1 == 1 {
