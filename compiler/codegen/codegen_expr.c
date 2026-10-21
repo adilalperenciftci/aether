@@ -7928,6 +7928,13 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                 fprintf(gen->output, "aether_uniform_heap_str((const char*)(");
                 generate_expression(gen, dflt);
                 fprintf(gen->output, "), %d)", is_fresh_heap_string_temp(gen, dflt) ? 1 : 0);
+            } else if (is_owned_closure_unwrap(gen, expr)) {
+                /* #3078: over an owned `fn?` call the value is the call's
+                 * closure, a fresh one, so the default is taken as one of
+                 * its own too (a fresh one adopted, any other retained):
+                 * the expression is uniformly a closure its consumer gives
+                 * back (closure_value_is_fresh). */
+                emit_closure_take(gen, expr->children[1]);
             } else if (ot->element_type && ot->element_type->kind == TYPE_SUM &&
                        needs_sum_coerce(expr->children[1], ot->element_type)) {
                 /* A variant default of a sum's optional is the sum's, as
@@ -8754,9 +8761,11 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                     if ((l_opt && r_none) || (r_opt && l_none)) {
                         // `x == none` -> !x.has ;  `x != none` -> x.has
                         ASTNode* opt = l_opt ? L : R;
-                        if (is_owned_opt_string_call(gen, opt)) {
+                        int opt_closure = call_returns_owned_opt_closure(gen, opt);
+                        if (is_owned_opt_string_call(gen, opt) || opt_closure) {
                             /* #2750: the call's string is the comparison's
-                             * to free once the flag is read. */
+                             * to free once the flag is read. #3078: so is a
+                             * `fn?` call's closure, its environment. */
                             TempSeq s;
                             seq_open(gen, &s);
                             const char* on = seq_let(gen, &s, get_c_type(opt->node_type), "_ae_on");
@@ -8765,7 +8774,10 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                             const char* onv = seq_let(gen, &s, "int", "_ae_onv");
                             fprintf(gen->output, "%s%s.has", is_eq ? "!" : "", on);
                             seq_next(gen, &s);
-                            fprintf(gen->output, "%s.has ? aether_heap_str_free((void*)%s.val) : (void)0",
+                            fprintf(gen->output,
+                                    opt_closure
+                                        ? "%s.has ? _aether_closure_env_release(%s.val.env) : (void)0"
+                                        : "%s.has ? aether_heap_str_free((void*)%s.val) : (void)0",
                                     on, on);
                             seq_next(gen, &s);
                             fprintf(gen->output, "%s", onv);
@@ -8849,8 +8861,22 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                             const char* o = seq_let(gen, &s, get_c_type(opt->node_type), "_ae_ol");
                             generate_expression(gen, opt);
                             seq_next(gen, &s);
-                            fprintf(gen->output, "%s(%s.has && %s.val.fn == 0)",
-                                    is_eq ? "" : "!", o, o);
+                            if (call_returns_owned_opt_closure(gen, opt)) {
+                                /* #3078: a call's closure is the comparison's
+                                 * to give back once it is read. */
+                                const char* v = seq_let(gen, &s, "int", "_ae_olv");
+                                fprintf(gen->output, "%s(%s.has && %s.val.fn == 0)",
+                                        is_eq ? "" : "!", o, o);
+                                seq_next(gen, &s);
+                                fprintf(gen->output,
+                                        "%s.has ? _aether_closure_env_release(%s.val.env) : (void)0",
+                                        o, o);
+                                seq_next(gen, &s);
+                                fprintf(gen->output, "%s", v);
+                            } else {
+                                fprintf(gen->output, "%s(%s.has && %s.val.fn == 0)",
+                                        is_eq ? "" : "!", o, o);
+                            }
                             seq_close(gen, &s);
                             fprintf(gen->output, ")");
                             break;

@@ -1,0 +1,94 @@
+// #3078: a function returning `fn?` hands its caller the closure in it
+// (R3). Bound to a local, the local owned it and gave it back; anywhere
+// nothing bound the optional, nothing did, and the closure's environment
+// leaked at every call: `maybe(k) != none`, `maybe(k) == null`, a `match`
+// on the call, `maybe(k)!`, `maybe(k) ?? d`, and the call as a statement.
+// The expression that reads it gives it back now: a comparison once the
+// flag is read, a `match` at every exit of the arm that binds it, `!` and
+// `??` as a fresh closure their place adopts (a default that is not fresh
+// is taken as one of its own), a statement at once.
+//
+// The leak check runs where the heap count is exact (mem.heap_in_use_exact):
+// after a warm-up, some window of the same work grows by exactly 0
+// (mem.steady_growth). Each closure captures its argument, so it has an
+// environment to give back.
+
+import std.mem
+
+extern exit(code: int)
+
+adder(n: int) -> fn {
+    return | x: int | -> x + n
+}
+
+maybe(k: int) -> fn? {
+    if k == 0 {
+        return none
+    }
+    return adder(k)
+}
+
+check(ok: bool, what: string) {
+    if !ok {
+        println("FAIL: ${what}")
+        exit(1)
+    }
+}
+
+// A `match` whose arm returns from the function, through its binding.
+first_value(k: int) -> int {
+    match maybe(k) {
+        some(c) -> {
+            return call(c, 1)
+        }
+        none -> {
+            return -1
+        }
+    }
+}
+
+round(base: int) -> int {
+    f = adder(base)
+    n = 0
+    for i in 0..20 {
+        k = i + base
+        if maybe(k) != none {
+            n = n + 1
+        }
+        if maybe(k) == null {
+            n = n + 100
+        }
+        match maybe(k) {
+            some(c) -> {
+                n = n + call(c, 0) - k
+            }
+            none -> {
+                n = n + 1000
+            }
+        }
+        g = maybe(k)!
+        n = n + call(g, 0) - k
+        h = maybe(k) ?? null
+        if h != null {
+            n = n + 1
+        }
+        d = maybe(0) ?? f
+        n = n + call(d, 0) - base
+        maybe(k)
+        n = n + first_value(k) - k - 1
+    }
+    return n
+}
+
+main() {
+    check(round(1) == 40, "the values the calls give (${round(1)})")
+    check(maybe(0) == none && first_value(0) == -1, "none")
+    if mem.heap_in_use_exact() {
+        round(1)
+        grown = mem.steady_growth(|| {
+                round(1)
+            }, 5)
+        check(grown == 0, "the closures of fn? temporaries grew the heap by ${grown} bytes in every run")
+    }
+    println("ok")
+}
