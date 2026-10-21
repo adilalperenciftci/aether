@@ -27,6 +27,9 @@ typedef struct StrArray StrArray;
 ArrayList* list_new(void);
 ArrayList* list_new_in(AetherAllocator* alloc);
 int list_add_raw(ArrayList* list, void* item);
+/* std.list's `add` and std.collections' `list_add` (#3086): list_add_raw's
+ * store, its int turned into the "" | error string the Aether API returns. */
+const char* list_add(ArrayList* list, void* item);
 
 /* Heap-string-aware add (#467). Retains the value (AetherString
  * refcount bump), tags the list as owning string elements, then
@@ -70,6 +73,8 @@ void list_free(ArrayList* list);
 
 HashMap* map_new(void);
 int map_put_raw(HashMap* map, const char* key, void* value);
+/* std.map's `put` and std.collections' `map_put` (#3086), as list_add. */
+const char* map_put(HashMap* map, const char* key, void* value);
 
 /* Heap-string-aware put (#467). Retains the value and tags the
  * map so map_free / map_clear release each string value before

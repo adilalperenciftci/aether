@@ -285,7 +285,7 @@ array_get(val: ptr, index: int) -> ptr {
     return list.get_raw(m.arr_val, index)
 }
 
-array_add(val: ptr, item: ptr) -> int {
+array_add(val: ptr, item: @keep ptr) -> int {
     if val == null || item == null { return 0 }
     let m = val as *MsgValue
     if m.type_id != TYPE_ARRAY { return 0 }
@@ -345,7 +345,7 @@ map_get(val: ptr, key: string) -> ptr {
     return null
 }
 
-map_set(val: ptr, key: string, value: ptr) -> int {
+map_set(val: ptr, key: string, value: @keep ptr) -> int {
     if val == null || value == null { return 0 }
     let m = val as *MsgValue
     if m.type_id != TYPE_MAP { return 0 }

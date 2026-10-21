@@ -17,6 +17,7 @@
   <ul class="function-nav">
     <li><a href="#new">new</a></li>
     <li><a href="#new_in">new_in</a></li>
+    <li><a href="#add">add</a></li>
     <li><a href="#add_raw">add_raw</a></li>
     <li><a href="#add_string_owned">add_string_owned</a></li>
     <li><a href="#get_raw">get_raw</a></li>
@@ -25,7 +26,6 @@
     <li><a href="#remove">remove</a></li>
     <li><a href="#clear">clear</a></li>
     <li><a href="#free">free</a></li>
-    <li><a href="#add">add</a></li>
     <li><a href="#get">get</a></li>
     <li><a href="#get_string">get_string</a></li>
   </ul>
@@ -138,10 +138,17 @@
       <pre class="usage"><code>new_in(alloc) <span class="arrow">-&gt;</span> ptr</code></pre>
       <p class="signature"><span class="sig-params">alloc: ptr</span></p>
     </div>
+    <div class="function" id="add" data-name="add">
+      <h3 class="function-name">add <span class="kind">extern</span></h3>
+      <pre class="usage"><code>add(list, item) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">list: ptr, item: ptr</span></p>
+      <p class="doc">Append an item to a list. Returns &quot;&quot; on success, error on failure.</p>
+    </div>
     <div class="function" id="add_raw" data-name="add_raw">
       <h3 class="function-name">add_raw <span class="kind">extern</span></h3>
       <pre class="usage"><code>add_raw(list, item) <span class="arrow">-&gt;</span> int</code></pre>
       <p class="signature"><span class="sig-params">list: ptr, item: ptr</span></p>
+      <p class="doc">The stores keep their item past the call (#3086): a `ptr` stays the list's, so a function that adds a borrowed `ptr` parameter declares it `@keep`, and a string or a closure is handed a reference of its own (`@retain`, R4).</p>
     </div>
     <div class="function" id="add_string_owned" data-name="add_string_owned">
       <h3 class="function-name">add_string_owned <span class="kind">extern</span></h3>
@@ -178,12 +185,6 @@
       <h3 class="function-name">free <span class="kind">extern</span></h3>
       <pre class="usage"><code>free(list)</code></pre>
       <p class="signature"><span class="sig-params">list: ptr</span></p>
-    </div>
-    <div class="function" id="add" data-name="add">
-      <h3 class="function-name">add <span class="kind">fn</span></h3>
-      <pre class="usage"><code>add(list, item) <span class="arrow">-&gt;</span> string</code></pre>
-      <p class="signature"><span class="sig-params">list: ptr, item: ptr</span></p>
-      <p class="doc">Append an item to a list. Returns &quot;&quot; on success, error on failure.</p>
     </div>
     <div class="function" id="get" data-name="get">
       <h3 class="function-name">get <span class="kind">fn</span></h3>

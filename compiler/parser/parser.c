@@ -5569,6 +5569,14 @@ ASTNode* parse_extern_struct_field(Parser* parser) {
  *             hands `@retain` a string's characters with a reference of its
  *             own, right for C and not what the Aether function expects.
  *
+ *   @holds    the `ptr` argument is where the function keeps what its
+ *             `@retain` parameters are given (#3086): std's list and map
+ *             stores declare their container so. A keep through such a
+ *             call outlives the caller only when that argument's memory
+ *             does: a container the caller makes with an `@fresh` extern
+ *             and lets go nowhere keeps nothing past it. Only meaningful
+ *             on `ptr`.
+ *
  * Multiple annotations stack: `name: @aether @retain string` is legal.
  * Order is irrelevant; storage is a comma-separated set on
  * `param->annotation`, tested by substring. */
@@ -5588,12 +5596,14 @@ static void parse_extern_param_attrs_and_type(Parser* parser, ASTNode* param) {
                 tag = "into_param";
             } else if (strcmp(attr->value, "keep") == 0) {
                 tag = "keep_param";
+            } else if (strcmp(attr->value, "holds") == 0) {
+                tag = "holder_param";
             }
             if (tag) advance_token(parser);
         }
         if (!tag) {
             parser_error(parser, "unknown extern-param attribute (expected @aether, @retain, "
-                                 "@noescape, @into or @keep)");
+                                 "@noescape, @into, @keep or @holds)");
             break;
         }
         /* Append to the comma-separated set, deduping. */
@@ -5625,6 +5635,10 @@ static void parse_extern_param_attrs_and_type(Parser* parser, ASTNode* param) {
         param->node_type->kind != TYPE_PTR && param->node_type->kind != TYPE_FUNCTION) {
         parser_error(parser, "@noescape on an extern parameter is only valid on `ptr` or `fn`");
     }
+    if (param->annotation && strstr(param->annotation, "holder_param") &&
+        param->node_type->kind != TYPE_PTR) {
+        parser_error(parser, "@holds on an extern parameter is only valid on `ptr`");
+    }
 }
 
 /* Trailing `@`-attributes on an extern signature, shared by the bare
@@ -5635,6 +5649,10 @@ static void parse_extern_param_attrs_and_type(Parser* parser, ASTNode* param) {
  *             codegen_stmt.c. Only meaningful on `-> string`; anything else
  *             is a parse error since integers and pointers aren't heap-
  *             tracked and void has nothing to own.
+ *   @fresh    the `-> ptr` result is memory the call allocates, which nothing
+ *             else holds (#3086): std's list and map constructors. A
+ *             container bound from one is a holder (`@holds`) that keeps
+ *             nothing past its function unless it escapes.
  *   @borrow   the unannotated default. A no-op, accepted so callers can be
  *             explicit and symmetric with the tuple form.
  *   @c_import a C header owns the prototype, so codegen emits no declaration
@@ -5674,6 +5692,14 @@ static void parse_extern_trailing_attrs(Parser* parser, ASTNode* ext) {
                     annotation_add_marker(ext->annotation, "heap_return");
             }
             advance_token(parser);  /* consume 'heap' */
+        } else if (strcmp(tag->value, "fresh") == 0) {
+            advance_token(parser);  /* consume '@' */
+            if (!ext->node_type || ext->node_type->kind != TYPE_PTR) {
+                parser_error(parser, "@fresh on extern return is only valid on `-> ptr`");
+            } else {
+                ext->annotation = annotation_add_marker(ext->annotation, "fresh_return");
+            }
+            advance_token(parser);  /* consume 'fresh' */
         } else if (strcmp(tag->value, "borrow") == 0) {
             advance_token(parser);  /* consume '@' */
             advance_token(parser);  /* consume 'borrow' */

@@ -7,14 +7,20 @@
 //     returns.
 
 exports(
-    list_new, list_new_in, list_add_raw, list_add_string_owned, list_get_raw, list_set, list_size,
-    list_remove, list_clear, list_free,
-    add, get, get_string
+    list_new, list_new_in, list_add, list_add_raw, list_add_string_owned, list_get_raw, list_set,
+    list_size, list_remove, list_clear, list_free,
+    get, get_string
 )
 
-extern list_new() -> ptr
-extern list_new_in(alloc: ptr) -> ptr
-extern list_add_raw(list: ptr, item: @aether ptr) -> int
+extern list_new() -> ptr @fresh
+extern list_new_in(alloc: ptr) -> ptr @fresh
+// The stores keep their item past the call (#3086): a `ptr` stays the
+// list's, so a function that adds a borrowed `ptr` parameter declares it
+// `@keep`, and a string or a closure is handed a reference of its own
+// (`@retain`, R4).
+extern list_add_raw(list: @holds ptr, item: @aether @retain ptr) -> int
+// Append an item to a list. Returns "" on success, error on failure.
+extern list_add(list: @holds ptr, item: @aether @retain ptr) -> string
 // String-aware add, for C and `ptr` callers. The list takes a
 // reference of its own: a counted string is retained, a plain C
 // pointer is copied. The caller keeps and releases its own, so the
@@ -22,23 +28,14 @@ extern list_add_raw(list: ptr, item: @aether ptr) -> int
 // owned element before freeing the backing array. `list.add(l, s)` of
 // a `string` in Aether code is a store into the list (R3): the
 // compiler hands the list a reference, moving a fresh value in.
-extern list_add_string_owned(list: ptr, item: @aether ptr) -> int
+extern list_add_string_owned(list: @holds ptr, item: @aether ptr) -> int
 extern list_get_raw(list: ptr, index: int) -> ptr
-extern list_set(list: ptr, index: int, item: @aether ptr)
+extern list_set(list: @holds ptr, index: int, item: @aether @retain ptr)
 extern list_size(list: ptr) -> int
 extern list_remove(list: ptr, index: int)
 extern list_clear(list: ptr)
 extern list_free(list: ptr)
 extern aether_string_is_string(p: @aether ptr) -> int
-
-// Append an item to a list. Returns "" on success, error on failure.
-add(list: ptr, item: ptr) -> {
-    ok = list_add_raw(list, item)
-    if ok == 0 {
-        return "list.add failed"
-    }
-    return ""
-}
 
 // Index into a list.
 // - (item, "")                     : index in range

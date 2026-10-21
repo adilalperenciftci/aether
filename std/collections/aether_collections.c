@@ -128,6 +128,14 @@ int list_add_raw(ArrayList* list, void* item) {
     return 1;
 }
 
+/* std.list's `add` and std.collections' `list_add` (#3086): the store,
+ * with list_add_raw's int turned into the "" | error string the Aether
+ * API returns. A C function, so the `item` it keeps is declared at the C
+ * boundary (`@aether @retain ptr`), as every std store's is. */
+const char* list_add(ArrayList* list, void* item) {
+    return list_add_raw(list, item) ? "" : "list.add failed";
+}
+
 /* Heap-string-aware add (#467). Retains the AetherString so the
  * sender's reassign-wrapper / function-exit defer doesn't dangle
  * the list's reference, and tags this specific element as owned
@@ -591,6 +599,11 @@ int map_put_raw(HashMap* map, const char* key, void* value) {
     map->buckets[index] = new_entry;
     map->size++;
     return 1;
+}
+
+/* std.map's `put` and std.collections' `map_put` (#3086), as list_add. */
+const char* map_put(HashMap* map, const char* key, void* value) {
+    return map_put_raw(map, key, value) ? "" : "map.put failed";
 }
 
 /* Heap-string-aware put (#467). Mirrors list_add_string_owned for

@@ -10867,6 +10867,15 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                         if (fresh_t) {
                             emit_composite_arg_temp(gen, arg, fresh_t);
                         } else if (array_literal_arg_temp(gen, arg)) {
+                        } else if (ext_name && arg->node_type &&
+                                   is_string_seq_ptr_type(arg->node_type) &&
+                                   is_retain_extern_param(gen, ext_name, arg_printed)) {
+                            /* #3086: an `@retain` extern keeps the sequence
+                             * (std's `string.seq_cons` its tail), so the call
+                             * hands it a reference of its own, as it does a
+                             * string or a closure (R4): a fresh one as it
+                             * is, a place's retained. */
+                            emit_seq_take(gen, arg);
                         } else
                         if (extern_param_t && extern_param_t->c_alias &&
                             strcmp(extern_param_t->c_alias, "va_list") == 0) {

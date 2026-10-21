@@ -129,8 +129,8 @@
     <div class="function" id="run" data-name="run">
       <h3 class="function-name">run <span class="kind">fn</span></h3>
       <pre class="usage"><code>run(work, done) <span class="arrow">-&gt;</span> bool</code></pre>
-      <p class="signature"><span class="sig-params">work: fn, done: fn</span></p>
-      <p class="doc">Run `work` on a background thread; when it returns a `ptr` result, deliver that result to `done` on the loop thread (through the installed poster, or the drain queue if none). Returns true if the worker launched, false on failure (no threads / out of memory) — on false neither closure runs.</p>
+      <p class="signature"><span class="sig-params">work: fn, done: fn(ptr)</span></p>
+      <p class="doc">Run `work` on a background thread; when it returns a `ptr` result, deliver that result to `done` on the loop thread (through the installed poster, or the drain queue if none). Returns true if the worker launched, false on failure (no threads / out of memory) — on false neither closure runs. The result is the completion's: `done` takes it `@keep` (#3086), so it may store it (in a list, as `map` does), and a completion that only reads it fits as well.</p>
     </div>
     <div class="function" id="run_detached" data-name="run_detached">
       <h3 class="function-name">run_detached <span class="kind">fn</span></h3>

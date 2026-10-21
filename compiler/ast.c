@@ -1060,6 +1060,7 @@ ASTNode* create_ast_node(ASTNodeType type, const char* value, int line, int colu
     node->origin_module = NULL;
     node->arg_order = NULL;
     node->arg_order_count = 0;
+    node->callee_extern = NULL;
     return node;
 }
 
@@ -1134,6 +1135,7 @@ ASTNode* clone_ast_node(ASTNode* node) {
         memcpy(clone->arg_order, node->arg_order, sizeof(int) * (size_t)node->arg_order_count);
         clone->arg_order_count = node->arg_order_count;
     }
+    clone->callee_extern = node->callee_extern;
     if (node->value_len > 0) ast_set_literal_bytes(clone, node->value, node->value_len);   /* #2520 */
 
     /* Slot for slot: an empty one stays where it is, as the parser left it. */

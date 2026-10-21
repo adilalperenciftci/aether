@@ -488,7 +488,12 @@ static char* layout(Lexeme* lex, size_t n){
             /* A `!` written tight after a value is its postfix unwrap
              * (`f()!`) and ends a value; after anything else it is a
              * prefix `!` or a send. */
-            int value = is_value_end(L->text) || (eq(L->text,"!") && tight && prev_value);
+            /* #3086: a name written after `@` is an attribute (`@retain`,
+             * `@keep`), which ends no value: the `*` after it begins a type,
+             * `tail: @retain *StringSeq`, which was written `@retain *
+             * StringSeq`. */
+            int value = (is_value_end(L->text) && !(prev && eq(prev,"@"))) ||
+                        (eq(L->text,"!") && tight && prev_value);
             prevprev_value = prev_value; prev_value = value;
             prev_tight = tight;
             prevprev=prev; prev=L->text;

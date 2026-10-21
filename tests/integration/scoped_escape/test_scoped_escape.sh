@@ -51,8 +51,10 @@ check_rejected reject_alias
 check_rejected reject_closure
 check_rejected reject_container
 # #3001: the sequence cons is a container insert too; the list named
-# `seq.cons`, which std does not have.
+# `seq.cons`, which std does not have. #3086: decided by its declaration,
+# whose head and tail are both `@retain`, so a @scoped tail escapes too.
 check_rejected reject_seq_cons
+check_rejected reject_seq_cons_tail
 check_rejected reject_list_return
 check_help reject_list_return '`list.size(l)`'
 check_rejected reject_slice_return

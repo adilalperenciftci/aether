@@ -165,7 +165,7 @@ init() -> ptr {
 //   "parent"   — the enclosing suite, or null for a top-level describe
 // ---------------------------------------------------------------------------
 
-_suite_new(name: string, fw: ptr, parent: ptr) -> ptr {
+_suite_new(name: string, fw: @keep ptr, parent: @keep ptr) -> ptr {
     s = map.new()
     map.put_raw(s, "name", name)
     map.put_raw(s, "befores", list.new())
@@ -441,7 +441,7 @@ _it_begin(_ctx: @keep ptr, description: string) -> (ptr, int, long) {
 }
 
 // Second half: everything after the test body ran.
-_it_end(_ctx: @keep ptr, description: string, it_rec: ptr, old_failed: int, t_start_ns: long, budget_ns: long) {
+_it_end(_ctx: @keep ptr, description: string, it_rec: @keep ptr, old_failed: int, t_start_ns: long, budget_ns: long) {
     fw = _fw_of(_ctx)
     passed_ref = map.get_raw(fw, "passed")
     failed_ref = map.get_raw(fw, "failed")

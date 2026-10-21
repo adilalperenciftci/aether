@@ -7,7 +7,9 @@
 # `[Dir] string`. A `]` that closes a prefix group (a `[` not following a
 # value, holding nothing or one name) followed by a type name or `*` is now
 # written tight. An index before a word (`a[0] as long`) and an array literal
-# before a keyword (`[y] as ptr`) keep their space.
+# before a keyword (`[y] as ptr`) keep their space. #3086: so is the `*` of a
+# pointer type after an attribute, `n: @retain *Node`, which was written
+# `@retain * Node` as if the attribute's name were a value.
 #
 # The input and the expected output are here rather than as .ae files, so
 # the fmt gate and the .ae sweep do not pick them up.
@@ -27,6 +29,7 @@ trap 'rm -rf "$TMPDIR"' EXIT
 cat >"$TMPDIR/in.ae" <<'EOF'
 enum Dir { N, S }
 struct Node { v: int }
+extern keep_node(n: @retain *Node, m: @keep *Node) -> int
 labels_of(n: int) -> [Dir] string {
     labels: [Dir] string = ["n", "s"]
     return labels
@@ -47,6 +50,7 @@ EOF
 cat >"$TMPDIR/want.ae" <<'EOF'
 enum Dir { N, S }
 struct Node { v: int }
+extern keep_node(n: @retain *Node, m: @keep *Node) -> int
 labels_of(n: int) -> [Dir]string {
     labels: [Dir]string = ["n", "s"]
     return labels
@@ -84,5 +88,5 @@ if [ "$(cat "$TMPDIR/got.ae")" != "$(cat "$TMPDIR/again.ae")" ]; then
     exit 1
 fi
 
-echo "  [PASS] fmt_type_prefix: []T, []*T and [E]T tight; index and literal spacing kept"
+echo "  [PASS] fmt_type_prefix: []T, []*T, [E]T and @retain *T tight; index and literal spacing kept"
 exit 0

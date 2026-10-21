@@ -70,6 +70,10 @@ StringSeq* string_seq_empty(void);
  * the local ref — the new cell holds its own. */
 StringSeq* string_seq_cons(const char* head, StringSeq* tail);
 
+/* `string.seq_cons` from Aether (#3086): the same cell, taking over the
+ * references the call hands it to `head` and `tail` (both `@retain`). */
+StringSeq* string_seq_cons_adopt(const char* head, StringSeq* tail);
+
 /* Borrowed reference to the head element. Returns "" on the empty
  * list (matches the existing `string.length("")` shape — caller can
  * treat the empty case identically). The returned pointer is

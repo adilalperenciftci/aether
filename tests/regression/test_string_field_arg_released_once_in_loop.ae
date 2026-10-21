@@ -31,7 +31,7 @@ named(n: string) -> *Named {
     return p
 }
 
-add_named(into: ptr, n: string, v: @keep * Named) {
+add_named(into: ptr, n: string, v: @keep *Named) {
     q = named(n)
     q.next = v
     list.add_raw(into, q as ptr)

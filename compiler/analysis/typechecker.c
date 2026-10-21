@@ -7435,7 +7435,14 @@ int typecheck_program(ASTNode* program) {
 
         Symbol* full_sym = lookup_symbol(global_table, full_name);
         Symbol* short_sym = lookup_symbol_local(global_table, short_name);
-        if (full_sym && short_sym && short_sym->is_function && full_sym->type) {
+        /* #3086: only a symbol the import bound. One it left alone (the
+         * builtin `free`, which std.string's glob names too) was given the
+         * import's type and declaration here, so a module's body, where a
+         * bare `free` is the builtin, was checked against `string.free`. A
+         * program's call of the name is resolved through the alias
+         * (typecheck_function_call_inner). */
+        if (full_sym && short_sym && short_sym->import_bound && short_sym->is_function &&
+            full_sym->type) {
             if (short_sym->type) free_type(short_sym->type);
             short_sym->type = clone_type(full_sym->type);
             short_sym->node = full_sym->node;
@@ -7994,25 +8001,7 @@ static int scoped_mentions(ASTNode* node, const char* name) {
     return 0;
 }
 
-/* Curated container-insert builtins: handing a @scoped value to one of these
- * stores it beyond the block. Same curation posture as codegen's
- * is_nonstoring_builtin allowlist. Names are the as-written qualified
- * spellings (the AST stores callees in dotted form). */
-static int scoped_store_call(const char* fn) {
-    if (!fn) return 0;
-    /* The std calls that keep their argument in a container. #3001: the
-     * list named `list.push`, `map.set` and `seq.cons`, which std does not
-     * have, and missed the sequence cons and the raw and owning forms. */
-    /* #3034: and std.collections' unqualified `list_add` and `map_put`,
-     * which tinyweb stores its route handlers through. */
-    static const char* sinks[] = {
-        "list.add", "list.add_raw", "list.add_string_owned", "list.set",
-        "map.put", "map.put_raw", "map.put_string_owned",
-        "set.add", "set.try_add", "string.seq_cons", "list_add", "map_put", NULL };
-    for (int i = 0; sinks[i]; i++)
-        if (strcmp(fn, sinks[i]) == 0) return 1;
-    return 0;
-}
+static int call_arg_mode(ASTNode* program, ASTNode* call, int i);   /* defined below */
 
 /* Reason string if `node` escapes `name` AT THIS NODE, else NULL. */
 static const char* scoped_escape_reason(ASTNode* node, const char* name) {
@@ -8042,14 +8031,18 @@ static const char* scoped_escape_reason(ASTNode* node, const char* name) {
         return "it is captured by a closure that can outlive the block";
     if (node->type == AST_QUOTE && scoped_mentions(node, name))
         return "it is captured by a quote, whose tree can outlive the block";
-    if (node->type == AST_FUNCTION_CALL && node->value &&
-        scoped_store_call(node->value)) {
-        int first = strcmp(node->value, "call") == 0 ? 1 : 0;
-        for (int i = first; i < node->child_count; i++) {
+    /* #3086: given to a parameter that keeps it, as its callee declares:
+     * an Aether function's `@keep` one, an extern's `@retain` one (std's
+     * list and map stores), or one of a closure type that says so. #3001
+     * named the stores instead, and #3079 knew them by the function a call
+     * reaches; a parameter that copies its argument (a set's item, a map's
+     * key) keeps nothing. */
+    if (node->type == AST_FUNCTION_CALL && node->value) {
+        for (int i = 0; i < node->child_count; i++) {
             ASTNode* a = node->children[i];
-            if (a && a->type == AST_IDENTIFIER && a->value &&
-                strcmp(a->value, name) == 0)
-                return "it is inserted into a container";
+            if (a && a->type == AST_IDENTIFIER && a->value && strcmp(a->value, name) == 0 &&
+                call_arg_mode(g_typecheck_program, node, i) == FN_MODE_KEEP)
+                return "it is passed to a parameter that keeps it";
         }
     }
     return NULL;
@@ -8813,6 +8806,8 @@ static int keep_set_other_param(const KeepSet* s, const char* param) {
 
 static int is_bare_ptr_type(Type* t);
 
+static int type_holds_borrowable(ASTNode* program, Type* t, int depth);
+
 /* #3034: does the struct `name` hold, by value, a bare `ptr` or a closure
  * (in a field, or in a struct field held by value)? */
 static int struct_holds_borrowable(ASTNode* program, const char* name, int depth) {
@@ -8824,13 +8819,26 @@ static int struct_holds_borrowable(ASTNode* program, const char* name, int depth
         for (int f = 0; f < sd->child_count; f++) {
             ASTNode* fd = sd->children[f];
             Type* ft = fd && fd->type == AST_STRUCT_FIELD ? fd->node_type : NULL;
-            if (!ft) continue;
-            if (is_bare_ptr_type(ft) || (ft->kind == TYPE_FUNCTION && !ft->is_fnptr)) return 1;
-            if (ft->kind == TYPE_STRUCT && ft->struct_name &&
-                struct_holds_borrowable(program, ft->struct_name, depth + 1))
-                return 1;
+            if (ft && type_holds_borrowable(program, ft, depth + 1)) return 1;
         }
         return 0;
+    }
+    return 0;
+}
+
+/* #3034: does a value of type `t` hold, by value, a bare `ptr` or a
+ * closure: it is one, or a struct with one in a field (or in a struct
+ * field held by value). #3079: or an optional of one (a `fn?` field), or
+ * a sum one of whose variants holds one. */
+static int type_holds_borrowable(ASTNode* program, Type* t, int depth) {
+    if (!t || depth > 8) return 0;
+    if (is_bare_ptr_type(t) || (t->kind == TYPE_FUNCTION && !t->is_fnptr)) return 1;
+    if (t->kind == TYPE_OPTIONAL) return type_holds_borrowable(program, t->element_type, depth + 1);
+    if (t->kind == TYPE_STRUCT && t->struct_name)
+        return struct_holds_borrowable(program, t->struct_name, depth + 1);
+    if (t->kind == TYPE_SUM) {
+        for (int i = 0; t->tuple_types && i < t->tuple_count; i++)
+            if (type_holds_borrowable(program, t->tuple_types[i], depth + 1)) return 1;
     }
     return 0;
 }
@@ -8842,12 +8850,16 @@ static int struct_holds_borrowable(ASTNode* program, const char* name, int depth
 static const char* borrowed_param_kind(ASTNode* program, Type* t, int* is_fn) {
     *is_fn = 0;
     if (!t) return NULL;
-    if (t->kind == TYPE_FUNCTION && !t->is_fnptr) {
+    /* #3079: a `fn?` is borrowed as the closure it may hold. */
+    Type* inner = t->kind == TYPE_OPTIONAL ? t->element_type : t;
+    if (inner && inner->kind == TYPE_FUNCTION && !inner->is_fnptr) {
         *is_fn = 1;
         return aether_intern(type_spelled(t));
     }
-    if (t->kind == TYPE_STRUCT && t->struct_name && !t->distinct_name &&
-        struct_holds_borrowable(program, t->struct_name, 0))
+    /* A struct taken by value that holds a pointer or a closure, and #3079
+     * a sum one of whose variants does (or an optional of either). */
+    if (inner && (inner->kind == TYPE_STRUCT || inner->kind == TYPE_SUM) &&
+        !inner->distinct_name && type_holds_borrowable(program, inner, 0))
         return aether_intern(type_spelled(t));
     return NULL;
 }
@@ -8951,11 +8963,15 @@ static ASTNode* call_extern_decl(ASTNode* program, const char* name) {
 }
 
 /* The declaration a call is checked against: an Aether function, or an
- * extern. NULL for a call through a value or a builtin. */
+ * extern. NULL for a call through a value or a builtin. #3086: an extern a
+ * module keeps to itself (std.list's `list_add_raw`, a bare `extern`) is
+ * not merged into the program, so it is the declaration the call was typed
+ * against (callee_extern), the module's own. */
 static ASTNode* call_callee_decl(ASTNode* program, ASTNode* call) {
     if (!program || !call || !call->value) return NULL;
     ASTNode* def = effect_resolve_callee(program, call->value);
-    return def ? def : call_extern_decl(program, call->value);
+    if (def) return def;
+    return call->callee_extern ? call->callee_extern : call_extern_decl(program, call->value);
 }
 
 /* The parameter of `decl` that argument `i` of `call` fills, or NULL. */
@@ -9336,6 +9352,7 @@ static void bind_pattern_holders(KeepSet* s, ASTNode* pat, Carried c, Type* t,
     }
 }
 
+static int call_keeps_in_local_holder(ASTNode* program, ASTNode* call, int i, const KeepSet* s);
 static void check_ptr_keeps_in(ASTNode* program, ASTNode* n, KeepSet* s,
                                const char** globals, int nglobals, int in_closure);
 
@@ -9941,21 +9958,16 @@ static void check_ptr_keeps_in(ASTNode* program, ASTNode* n, KeepSet* s,
                 report_borrowed_keep(s, f, c, "sent in a message");
         }
     }
+    /* #3086: a parameter that keeps what it is given, as its callee
+     * declares it (call_arg_mode): std's list and map stores declare theirs
+     * `@retain` at the C boundary, so a borrowed `ptr` put in a container is
+     * E0902 as one stored in a module `var` is, not only a closure or a
+     * struct that holds one (#3001's holders-only rule). */
     if (n->type == AST_FUNCTION_CALL && n->value) {
-        int container = scoped_store_call(n->value);
         for (int i = 0; i < n->child_count; i++) {
             if (!(c = carries_borrowed_ptr(n->children[i], s)).n) continue;
-            if (call_keeps_arg(program, n, i)) {
+            if (call_keeps_arg(program, n, i) && !call_keeps_in_local_holder(program, n, i, s))
                 report_borrowed_keep(s, n->children[i], c, "passed to a parameter that keeps it");
-            } else if (container) {
-                /* What holds a parameter, and #3034 a `fn` or struct
-                 * parameter itself (a closure is boxed into the slot). */
-                Carried kept = { 0 };
-                for (int k = 0; k < c.n; k++)
-                    if (c.vias[k] || keep_set_other_param(s, c.params[k]) >= 0)
-                        carried_add_at(&kept, c.params[k], c.vias[k], c.parts[k]);
-                if (kept.n) report_borrowed_keep(s, n->children[i], kept, "stored in a container");
-            }
         }
     }
     for (int i = 0; i < n->child_count; i++)
@@ -10116,6 +10128,70 @@ static int c_name_outlives(const KeepCtx* c, const char* name, int depth) {
     check_ptr_keeps_in(c->program, c->body, &s, c->globals, c->nglobals, 0);
     keep_set_free(&s);
     return s.escaped;
+}
+
+/* #3086: is `e` a holder (`@holds`) whose memory ends with the function: a
+ * local bound only from calls to `@fresh` externs (a container the function
+ * makes, std's list and map constructors) or `null`, and that goes nowhere
+ * a borrowed `ptr` parameter would escape to (the E0902 facts, asked as
+ * c_name_outlives asks them). Decided by those declarations alone: a
+ * parameter, a module `var`, a field or anything else is taken to outlive
+ * it. */
+typedef struct { int found; int other; } HolderBindings;
+
+static void scan_holder_bindings(ASTNode* program, ASTNode* n, const char* name,
+                                 HolderBindings* b) {
+    if (!n || b->other) return;
+    if (n->type == AST_FUNCTION_DEFINITION || n->type == AST_BUILDER_FUNCTION) return;
+    ASTNode* v = NULL;
+    if (n->type == AST_VARIABLE_DECLARATION && n->value && !strcmp(n->value, name) &&
+        n->child_count > 0)
+        v = n->children[n->child_count - 1];
+    else if (n->type == AST_BINARY_EXPRESSION && n->value && !strcmp(n->value, "=") &&
+             n->child_count == 2 && n->children[0] && n->children[0]->type == AST_IDENTIFIER &&
+             n->children[0]->value && !strcmp(n->children[0]->value, name))
+        v = n->children[1];
+    if (v) {
+        b->found = 1;
+        v = strip_ptr_casts(v);
+        ASTNode* decl = v && v->type == AST_FUNCTION_CALL ? call_callee_decl(program, v) : NULL;
+        int fresh = v && (v->type == AST_NULL_LITERAL ||
+                          (decl && decl->type == AST_EXTERN_FUNCTION &&
+                           annotation_has_marker(decl->annotation, "fresh_return")));
+        if (!fresh) b->other = 1;
+    }
+    for (int i = 0; i < n->child_count; i++) scan_holder_bindings(program, n->children[i], name, b);
+}
+
+static int holder_outlives(const KeepCtx* c, ASTNode* e, int depth) {
+    e = strip_ptr_casts(e);
+    if (!c || depth > 8 || !e || e->type != AST_IDENTIFIER || !e->value) return 1;
+    const char* name = e->value;
+    for (int g = 0; g < c->nglobals; g++)
+        if (!strcmp(c->globals[g], name)) return 1;
+    for (int i = 0; c->fn && i < c->fn->child_count && c->fn->children[i] != c->body; i++) {
+        ASTNode* p = c->fn->children[i];
+        if (p && p->value && !strcmp(p->value, name)) return 1;
+    }
+    HolderBindings b = { 0, 0 };
+    scan_holder_bindings(c->program, c->body, name, &b);
+    if (!b.found || b.other) return 1;
+    return c_name_outlives(c, name, depth);
+}
+
+/* #3086: does `call` keep argument `i` only in a holder that ends with the
+ * function? An extern names the argument that holds what its `@retain`
+ * parameters are given with `@holds` (std's list and map stores); without
+ * one, a keep is taken to outlive the call. */
+static int call_keeps_in_local_holder(ASTNode* program, ASTNode* call, int i, const KeepSet* s) {
+    if (!s || !s->ctx || call_value_type(call)) return 0;
+    ASTNode* decl = call_callee_decl(program, call);
+    if (!decl || decl->type != AST_EXTERN_FUNCTION) return 0;
+    for (int h = 0; h < decl->child_count && h < call->child_count; h++) {
+        if (h == i || !param_has_mode(decl->children[h], "holder_param")) continue;
+        return !holder_outlives(s->ctx, call->children[h], s->depth + 1);
+    }
+    return 0;
 }
 
 /* Does the memory the store target `lhs` writes (`p.f`, `p[i]`, `(p as
@@ -19140,6 +19216,16 @@ static int typecheck_function_call_inner(ASTNode* call, SymbolTable* table) {
 
     // Use qualified lookup to handle namespaced calls like string.new -> string_new
     Symbol* symbol = lookup_qualified_symbol(table, call->value);
+    /* #3086: a bare name the program's import binds is the import's in the
+     * program (the alias below rewrites the call to it), also where the
+     * import left a builtin of the name in place (std.string's glob and
+     * `free`): it is checked against the import's declaration. Not in a
+     * module's merged body, whose bare names are its own. */
+    if (symbol && call->value && !strchr(call->value, '.') && !table->merged_from &&
+        !symbol->import_bound && find_import_alias(call->value)) {
+        Symbol* aliased = lookup_qualified_symbol(table, find_import_alias(call->value));
+        if (aliased && aliased->is_function) symbol = aliased;
+    }
 
     /* #924 re-export: a `hub.fn(...)` call where hub re-exports fn from
      * another module resolves (via lookup_qualified_symbol) to the defining
@@ -19448,6 +19534,10 @@ static int typecheck_function_call_inner(ASTNode* call, SymbolTable* table) {
         type_error(error_msg, call->line, call->column);
         return 0;
     }
+
+    /* #3086: the extern the call resolves to, for call_callee_decl. */
+    if (symbol->node && symbol->node->type == AST_EXTERN_FUNCTION)
+        call->callee_extern = symbol->node;
 
     if (!check_quote_callee(call, symbol)) return 0;
     if (!bind_named_arguments(call, symbol)) return 0;

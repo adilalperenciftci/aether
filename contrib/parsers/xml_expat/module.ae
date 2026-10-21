@@ -259,17 +259,17 @@ extern xml_parser_install_handlerset(p: ptr, hs: ptr)
 // The first `env: ptr` parameter is required by the dispatcher's
 // ABI but is unused in the user's body (the closure already has
 // captured-variable access via its own env).
-bind_start(_ctx: ptr, cb: fn) {
+bind_start(_ctx: ptr, cb: @keep fn) {
     boxed = box_closure(cb)
     map_put_raw(_ctx, "start", boxed)
 }
 
-bind_end(_ctx: ptr, cb: fn) {
+bind_end(_ctx: ptr, cb: @keep fn) {
     boxed = box_closure(cb)
     map_put_raw(_ctx, "end", boxed)
 }
 
-bind_text(_ctx: ptr, cb: fn) {
+bind_text(_ctx: ptr, cb: @keep fn) {
     boxed = box_closure(cb)
     map_put_raw(_ctx, "text", boxed)
 }

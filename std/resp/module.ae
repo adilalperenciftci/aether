@@ -203,12 +203,12 @@ new_map() -> ptr {
 }
 
 // Append a child to an array/set/push (ownership moves into the aggregate).
-array_add(agg: ptr, child: ptr) {
+array_add(agg: ptr, child: @keep ptr) {
     a = agg as *RespValue
     if a.items != null { list.add_raw(a.items, child) }
 }
 // Append a key/value pair to a map (ownership of both moves into the map).
-map_add(m: ptr, key: ptr, val: ptr) {
+map_add(m: ptr, key: @keep ptr, val: @keep ptr) {
     mv = m as *RespValue
     if mv.map_keys != null { list.add_raw(mv.map_keys, key) }
     if mv.map_vals != null { list.add_raw(mv.map_vals, val) }

@@ -7,17 +7,24 @@
 //     returns.
 
 exports(
-    map_new, map_put_raw, map_put_string_owned, map_get_raw, map_has, map_remove,
+    map_new, map_put, map_put_raw, map_put_string_owned, map_get_raw, map_has, map_remove,
     map_size, map_clear, map_free, map_keys_raw, map_keys_free,
     map_keys_size_raw, map_keys_get_raw,
-    put, get, get_string, keys, keys_size, keys_get
+    get, get_string, keys, keys_size, keys_get
 )
 
 // Keys cross as `@aether string`: the C map reads the AetherString's length,
 // so a key with an embedded NUL is the whole key (#2469). Unwrapped to a C
 // string, "a\0x" and "a\0y" were one key, "a".
-extern map_new() -> ptr
-extern map_put_raw(map: ptr, key: @aether string, value: @aether ptr) -> int
+extern map_new() -> ptr @fresh
+// The stores keep their value past the call (#3086): a `ptr` stays the
+// map's, so a function that puts a borrowed `ptr` parameter declares it
+// `@keep`, and a string or a closure is handed a reference of its own
+// (`@retain`, R4). The key is copied.
+extern map_put_raw(map: @holds ptr, key: @aether string, value: @aether @retain ptr) -> int
+// Insert or update a key-value pair. Returns "" on success, error on
+// failure (null map/key or OOM).
+extern map_put(map: @holds ptr, key: @aether string, value: @aether @retain ptr) -> string
 // String-aware put, for C and `ptr` callers. The map takes a
 // reference of its own: a counted string is retained, a plain C
 // pointer is copied. The caller keeps and releases its own, so the
@@ -25,7 +32,7 @@ extern map_put_raw(map: ptr, key: @aether string, value: @aether ptr) -> int
 // owned value. `map.put(m, k, s)` of a `string` in Aether code is a
 // store into the map (R3): the compiler hands the map a reference,
 // moving a fresh value in.
-extern map_put_string_owned(map: ptr, key: @aether string, value: @aether ptr) -> int
+extern map_put_string_owned(map: @holds ptr, key: @aether string, value: @aether ptr) -> int
 extern map_get_raw(map: ptr, key: @aether string) -> ptr
 extern map_has(map: ptr, key: @aether string) -> int
 extern map_remove(map: ptr, key: @aether string)
@@ -37,16 +44,6 @@ extern map_keys_free(keys: ptr)
 extern map_keys_size_raw(keys: ptr) -> int
 extern map_keys_get_raw(keys: ptr, index: int) -> string
 extern aether_string_is_string(p: @aether ptr) -> int
-
-// Insert or update a key-value pair. Returns "" on success, error on
-// failure (null map/key or OOM).
-put(map: ptr, key: string, value: ptr) -> {
-    ok = map_put_raw(map, key, value)
-    if ok == 0 {
-        return "map.put failed"
-    }
-    return ""
-}
 
 // Look up a key.
 // - (value, "")          : key present

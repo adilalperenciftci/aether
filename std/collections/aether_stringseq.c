@@ -48,6 +48,20 @@ StringSeq* string_seq_cons(const char* head, StringSeq* tail) {
     return cell;
 }
 
+/* `string.seq_cons` from Aether (#3086). Its `head` and `tail` are declared
+ * `@retain`, so the cell keeps both by its declaration, and the call hands
+ * it a reference to each, which it takes over: a string handed here is
+ * released once the cell holds its own, and the tail's reference is the
+ * cell's. string_seq_cons takes references of its own instead, for C and
+ * for the compiler's sequence literals. When the cell cannot be made, the
+ * handed references are released, as the cell would have released them. */
+StringSeq* string_seq_cons_adopt(const char* head, StringSeq* tail) {
+    StringSeq* cell = seq_cell(head, tail);
+    string_release(head);
+    if (!cell) string_seq_free(tail);
+    return cell;
+}
+
 const char* string_seq_head(StringSeq* s) {
     /* Cast through `const char*` is safe: the head is one of an
      * AetherString* (recognised via the magic-byte check) or a

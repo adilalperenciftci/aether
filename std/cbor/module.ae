@@ -1303,7 +1303,7 @@ map_get(obj_ptr: ptr, key_ptr: ptr) -> ptr! {
 
 // Insert or update the text key `key` on a map. The map takes ownership of
 // `value`; a value it replaces is freed.
-object_set(obj_ptr: ptr, key: string, value: ptr) -> string {
+object_set(obj_ptr: ptr, key: string, value: @keep ptr) -> string {
     if obj_ptr == null { return "null map" }
     cv = obj_ptr as *CborValue
     if cv.type != CBOR_MAP {
@@ -1332,11 +1332,11 @@ object_set(obj_ptr: ptr, key: string, value: ptr) -> string {
 }
 
 // Terse helper alias for object_set (similar to json.set)
-set(obj_ptr: ptr, key: string, value: ptr) -> string {
+set(obj_ptr: ptr, key: string, value: @keep ptr) -> string {
     return object_set(obj_ptr, key, value)
 }
 
-array_add(arr_ptr: ptr, value: ptr) -> string {
+array_add(arr_ptr: ptr, value: @keep ptr) -> string {
     if arr_ptr == null { return "null array" }
     cv = arr_ptr as *CborValue
     if cv.type != CBOR_ARRAY {
@@ -1348,11 +1348,11 @@ array_add(arr_ptr: ptr, value: ptr) -> string {
 }
 
 // Terse helper alias for array_add (similar to json.push)
-push(arr_ptr: ptr, value: ptr) -> string {
+push(arr_ptr: ptr, value: @keep ptr) -> string {
     return array_add(arr_ptr, value)
 }
 
-map_set(obj_ptr: ptr, key_ptr: ptr, value_ptr: ptr) -> string {
+map_set(obj_ptr: ptr, key_ptr: @keep ptr, value_ptr: @keep ptr) -> string {
     if obj_ptr == null { return "null map" }
     cv = obj_ptr as *CborValue
     if cv.type != CBOR_MAP {
@@ -1366,7 +1366,7 @@ map_set(obj_ptr: ptr, key_ptr: ptr, value_ptr: ptr) -> string {
 }
 
 // Terse helper alias for map_set
-map_push(obj_ptr: ptr, key_ptr: ptr, value_ptr: ptr) -> string {
+map_push(obj_ptr: ptr, key_ptr: @keep ptr, value_ptr: @keep ptr) -> string {
     return map_set(obj_ptr, key_ptr, value_ptr)
 }
 

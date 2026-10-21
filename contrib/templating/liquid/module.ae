@@ -2679,7 +2679,7 @@ partial_cache_key() -> string {
 // Render with `cache`: every include, render and layout parent the context
 // reaches is parsed once and reused, including through `{% render %}`'s
 // fresh contexts.
-context_set_partial_cache(ctx: ptr, cache: ptr) {
+context_set_partial_cache(ctx: ptr, cache: @keep ptr) {
     map_put(ctx, partial_cache_key(), cache)
 }
 

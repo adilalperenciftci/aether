@@ -273,7 +273,9 @@ extern string_join(seq: *StringSeq, sep: string) -> string @heap
 // A `@heap` result hands the caller a reference of its own; `seq_tail`
 // lends the sequence's own tail.
 extern string_seq_empty() -> *StringSeq @heap
-extern string_seq_cons(head: string, tail: *StringSeq) -> *StringSeq @heap
+// The cell keeps its head and its tail (#3086), so both are `@retain`: the
+// call hands it a reference to each, which string_seq_cons_adopt takes over.
+@extern("string_seq_cons_adopt") string_seq_cons(head: @retain string, tail: @retain *StringSeq) -> *StringSeq @heap
 extern string_seq_head(s: *StringSeq) -> string
 extern string_seq_tail(s: *StringSeq) -> *StringSeq
 extern string_seq_is_empty(s: *StringSeq) -> int
