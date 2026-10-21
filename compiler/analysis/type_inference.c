@@ -1582,10 +1582,19 @@ void collect_constraints(ASTNode* node, InferenceContext* ctx) {
             break;
 
         case AST_ARRAY_LITERAL:
-            // Infer array type from first element
+            /* Infer the array type from the first element. #3067: `null`
+             * and `none` have no type of their own (each takes its slot's),
+             * so the first element that is neither decides: `[null, f]` is
+             * an array of f's type, not of pointers, and `[none, x]` of x's
+             * optional. All `null` is an array of pointers, as before. */
             if (node->child_count > 0) {
-                collect_constraints(node->children[0], ctx);
-                Type* elem_type = node->children[0]->node_type;
+                int lead = 0;
+                while (lead + 1 < node->child_count &&
+                       (node->children[lead]->type == AST_NULL_LITERAL ||
+                        node->children[lead]->type == AST_NONE_LITERAL))
+                    lead++;
+                for (int i = 0; i <= lead; i++) collect_constraints(node->children[i], ctx);
+                Type* elem_type = node->children[lead]->node_type;
                 if (elem_type && elem_type->kind != TYPE_UNKNOWN) {
                     // Create array type with dynamic size (-1)
                     Type* array_type = create_array_type(clone_type(elem_type), node->child_count);
@@ -1595,8 +1604,8 @@ void collect_constraints(ASTNode* node, InferenceContext* ctx) {
                     node->node_type = array_type;
                     add_constraint(ctx, node, array_type, "array literal type inference");
                 }
-                // Collect constraints for all elements
-                for (int i = 1; i < node->child_count; i++) {
+                // Collect constraints for the other elements
+                for (int i = lead + 1; i < node->child_count; i++) {
                     collect_constraints(node->children[i], ctx);
                 }
             }

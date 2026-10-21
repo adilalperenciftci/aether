@@ -324,7 +324,7 @@ main() {
 7 0
 ```
 
-**An array literal's element type is the join of its elements.** `[1, 2.5, 3]` and `[0.18 * math.PI, 0.25 * math.PI]` are `float` arrays; an all-integer literal is `int`, widening to `long` if any element needs it. The type is decided after every element is typed, so a module constant or a call in any position counts. Arrays are one-dimensional: an array literal cannot contain an array literal (use a flat `T[rows * cols]` indexed as `row * cols + col`, or a list of arrays).
+**An array literal's element type is the join of its elements.** `[1, 2.5, 3]` and `[0.18 * math.PI, 0.25 * math.PI]` are `float` arrays; an all-integer literal is `int`, widening to `long` if any element needs it. The type is decided after every element is typed, so a module constant or a call in any position counts. A literal of another type is an array of its first element's type, and `null` and `none` have no type of their own: `[null, s]` is an array of `s`'s type, its `null` the null string, pointer or empty closure as in any slot of that type, and `[none, x]` an array of `x`'s optional type. Every element must fit the element type: `[1, "x"]`, or `[p, null]` with `p` a struct, is a compile error naming the element. Arrays are one-dimensional: an array literal cannot contain an array literal (use a flat `T[rows * cols]` indexed as `row * cols + col`, or a list of arrays).
 
 ```aether,run
 import std.math (math_pi)
@@ -3878,7 +3878,13 @@ A closure value, of such a type or a bare `fn`, may hold no function: a
 field a struct literal leaves out, or one given `null`. `c == null` and `c
 != null` ask whether it holds one (a `bool`), and `c = null` empties it,
 giving back the closure it held, so an optional callback slot is written
-`if s.build != null { s.build(ctx, 1) }`.
+`if s.build != null { s.build(ctx, 1) }`. `null` in an array literal of
+closures is the empty closure too (`[f, null]`, `[null, f]`). A closure
+compares only with `null`: `f == g` between two closures, or a closure and
+a pointer, is a compile error (Go's rule for function values). The same
+function over another environment is another closure, so there is no
+equality worth giving; to tell closures apart, keep a handle of your own
+beside each.
 
 ```aether,run
 import std.list

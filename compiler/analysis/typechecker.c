@@ -14708,6 +14708,12 @@ static int is_step_operator(ASTNode* n) {
 static int reject_step_operand(ASTNode* expr, SymbolTable* table,
                                const char* written);   /* defined below */
 
+/* #3067: `null` and `none`, which have no type of their own: each takes the
+ * type of the slot it goes into. */
+static int untyped_literal(const ASTNode* n) {
+    return n && (n->type == AST_NULL_LITERAL || n->type == AST_NONE_LITERAL);
+}
+
 int typecheck_expression(ASTNode* expr, SymbolTable* table) {
     if (!expr) return 0;
 
@@ -15490,12 +15496,22 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                  * {b->inner, ...}`. Its elements are typed now; when they
                  * agree, the literal is an array of that type. Only in
                  * place of that default: a type the place gave the literal
-                 * (`let s: Shape[] = [c1, c2]`) stands. */
-                Type* first = expr->children[0] ? expr->children[0]->node_type : NULL;
+                 * (`let s: Shape[] = [c1, c2]`) stands.
+                 * #3067: `null` and `none` have no type of their own, each
+                 * takes its slot's, so neither has a vote while another
+                 * element has one: `[null, f]` is an array of f's type. */
+                ASTNode* lead = NULL;
+                for (int i = 0; i < expr->child_count && !lead; i++)
+                    if (expr->children[i] && !untyped_literal(expr->children[i]))
+                        lead = expr->children[i];
+                if (!lead) lead = expr->children[0];
+                Type* first = lead ? lead->node_type : NULL;
                 int agree = first && first->kind != TYPE_UNKNOWN && first->kind != TYPE_VOID &&
                             !is_numeric_scalar(first->kind);
-                for (int i = 1; agree && i < expr->child_count; i++) {
-                    Type* et = expr->children[i] ? expr->children[i]->node_type : NULL;
+                for (int i = 0; agree && i < expr->child_count; i++) {
+                    ASTNode* el = expr->children[i];
+                    if (el == lead || untyped_literal(el)) continue;
+                    Type* et = el ? el->node_type : NULL;
                     agree = et && types_equal(et, first);
                 }
                 Type* have = expr->node_type;
@@ -15505,6 +15521,43 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                                   have->element_type->kind == TYPE_INT));
                 if (agree && defaulted)
                     set_node_type(expr, create_array_type(clone_type(first), expr->child_count));
+            }
+            /* #3067: each element goes into a slot of the element type, as a
+             * value does into a local, a parameter or a field: `null` there
+             * is the empty closure (or slice), and a value the element type
+             * cannot hold is refused here. Both reached C: `[f, null]` as
+             * `_aether_closure_retain(NULL)`, `[p, null]` with p a struct as
+             * a struct field set from a pointer. Numbers convert among
+             * themselves as the join above has it. */
+            Type* at = expr->node_type;
+            Type* elem = (at && at->kind == TYPE_ARRAY) ? at->element_type : NULL;
+            for (int i = 0; elem && elem->kind != TYPE_UNKNOWN && i < expr->child_count; i++) {
+                if (!expr->children[i]) continue;
+                slice_coerce_slot(&expr->children[i], elem, 0);
+                ASTNode* el = expr->children[i];
+                Type* et = el->node_type;
+                int is_null = el->type == AST_NULL_LITERAL;
+                int is_none = el->type == AST_NONE_LITERAL;
+                if (is_null ? ast_type_takes_null(elem)
+                    : is_none ? elem->kind == TYPE_OPTIONAL
+                              : (!et || et->kind == TYPE_UNKNOWN ||
+                                 (is_numeric_scalar(et->kind) && is_numeric_scalar(elem->kind)) ||
+                                 is_assignable(et, elem)))
+                    continue;
+                char msg[512];
+                if (is_null || is_none)
+                    snprintf(msg, sizeof(msg),
+                             "array literal element %d is `%s`, which an array of '%s' cannot "
+                             "hold", i + 1, is_null ? "null" : "none", type_spelled(elem));
+                else
+                    snprintf(msg, sizeof(msg),
+                             "array literal element %d is '%s', which an array of '%s' cannot "
+                             "hold", i + 1, type_spelled(et), type_spelled(elem));
+                type_error_hint(msg,
+                    "an array literal's elements are of one type: the type its place gives "
+                    "it, or else its first element's (`null` and `none` take the others')",
+                    el->line, el->column);
+                return 0;
             }
             return 1;
         }
@@ -16670,6 +16723,39 @@ int typecheck_binary_expression(ASTNode* expr, SymbolTable* table) {
             free_type(right_type);
             left_type = infer_type(left, table);
             right_type = infer_type(right, table);
+        }
+    }
+
+    /* #3067: a closure compares only with `null` (Go's rule for function
+     * values). Two closures have no equality worth giving: the same
+     * function over another environment is another closure. Codegen gives
+     * the comparison a meaning only against `null`, and C refused the rest
+     * (`invalid operands to binary ==`). */
+    if (operator == TOKEN_EQUALS || operator == TOKEN_NOT_EQUALS) {
+        int l_clo = left_type && left_type->kind == TYPE_FUNCTION && !left_type->is_fnptr;
+        int r_clo = right_type && right_type->kind == TYPE_FUNCTION && !right_type->is_fnptr;
+        if ((l_clo && right->type != AST_NULL_LITERAL) ||
+            (r_clo && left->type != AST_NULL_LITERAL)) {
+            Type* other = l_clo ? right_type : left_type;
+            const char* op = expr->value ? expr->value : "==";
+            char msg[512];
+            if (l_clo && r_clo)
+                snprintf(msg, sizeof(msg), "'%s' compares two closures: a closure compares only "
+                         "with `null`", op);
+            else if (other && other->kind != TYPE_UNKNOWN)
+                snprintf(msg, sizeof(msg), "'%s' compares a closure with '%s': a closure compares "
+                         "only with `null`", op, type_spelled(other));
+            else
+                snprintf(msg, sizeof(msg), "'%s' compares a closure: a closure compares only with "
+                         "`null`", op);
+            type_error_hint(msg,
+                "`f != null` asks whether f holds a function; to tell two closures apart, "
+                "keep a handle of your own beside each (a name, an id)",
+                expr->line, expr->column);
+            free_type(left_type);
+            free_type(right_type);
+            set_node_type(expr, create_type(TYPE_BOOL));
+            return 0;
         }
     }
 
