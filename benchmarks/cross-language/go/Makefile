@@ -3,7 +3,9 @@
 # The Go benchmarks build with the go command's defaults, which are its
 # release build: the compiler optimises and inlines by default and links the
 # whole program, so there is no -O or LTO switch to add (FAIRNESS.md, build
-# parity).
+# parity). GOAMD64, the instruction-set level and so the nearest thing Go
+# has to -march=native, stays at the toolchain default; FAIRNESS.md records
+# what raising it measured.
 GO = go
 ifeq ($(OS),Windows_NT)
 EXE = .exe
