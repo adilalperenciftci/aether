@@ -17581,10 +17581,18 @@ static void clause_set_settle(ASTNode* fn, SymbolTable* table) {
                          "optional has `none` for no value");
                 break;
             case CLAUSE_JOIN_NONE_ONLY:
-                snprintf(msg, sizeof(msg),
-                         "every clause of '%s' that returns a value returns `none`, an optional "
-                         "of no type: the set's result `T?` needs its `T`",
-                         name);
+                if (cj.recurse_at)
+                    /* #3063: one that only calls the set gives no type. */
+                    snprintf(msg, sizeof(msg),
+                             "every clause of '%s' that returns a value returns `none`, an "
+                             "optional of no type, or calls '%s' again (line %d): the set's "
+                             "result `T?` needs its `T`",
+                             name, name, cj.recurse_at->line);
+                else
+                    snprintf(msg, sizeof(msg),
+                             "every clause of '%s' that returns a value returns `none`, an "
+                             "optional of no type: the set's result `T?` needs its `T`",
+                             name);
                 snprintf(hint, sizeof(hint),
                          "write the result type on a clause, `-> int?` for an optional int");
                 break;

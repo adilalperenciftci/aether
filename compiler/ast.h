@@ -866,11 +866,13 @@ typedef struct {
     ASTNode* at;       /* a failure: the clause it is reported at */
     Type* other;       /* APART, UNFIT: that clause's result (borrowed) */
     ASTNode* written;  /* the clause that writes the result type, or NULL */
+    ASTNode* recurse_at; /* NONE_ONLY: a clause that only calls the set, or NULL */
 } ClauseJoin;
 
 void clause_set_join(ASTNode* const* nodes, int count, ClauseJoin* out);
 /* Is clause `cl` one clause_set_join gives the set's result to: one that
- * gives a value, the `none` and `null` ones included? */
+ * gives a value, the `none` and `null` ones and one that only calls the set
+ * included? */
 int clause_takes_set_result(const ASTNode* cl);
 
 /* Whether some arm of the `match` `m` runs for every value it can match: it

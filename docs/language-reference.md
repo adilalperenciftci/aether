@@ -1068,7 +1068,10 @@ returns a `long`, a clause that returns `0` beside one that returns a
 string or closure type beside it, and one that returns only `none` makes the
 result an optional of the others' type. The two go together: `f(0) -> none`,
 `f(1) -> null` and `f(k) -> "s"` return a `string?`, `f(1)` the string `null`
-is, as `return null` from a `-> string?` function gives. Results no one type holds are a
+is, as `return null` from a `-> string?` function gives. A clause that only
+calls the set again (`last(k) -> last(k - 1)`) gives the set's result and no
+type of its own, so beside only `none` clauses the set has no `T`, the compile
+error a set of only `none` clauses is. Results no one type holds are a
 compile error naming both. A clause that returns nothing gives the result
 type's zero value, and a set none of whose clauses returns a value returns
 nothing. A clause set exported from a module is imported with all its

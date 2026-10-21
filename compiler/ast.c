@@ -1278,8 +1278,34 @@ static int clause_gives_only_none(const ASTNode* cl) {
     return cl->type_inferred && ast_returns_only_literal(cl, AST_NONE_LITERAL);
 }
 
+/* The value `return`s in `node` that give a call of `name`, and the others. */
+static void count_call_returns(const ASTNode* node, const char* name, int* hits, int* other) {
+    if (!node || ast_is_own_function(node)) return;
+    if (node->type == AST_RETURN_STATEMENT && node->child_count > 0 && node->children[0]) {
+        const ASTNode* v = node->children[0];
+        if (v->type == AST_PRINT_STATEMENT) return;
+        if (v->type == AST_FUNCTION_CALL && v->value && !strcmp(v->value, name)) (*hits)++;
+        else (*other)++;
+        return;
+    }
+    for (int i = 0; i < node->child_count; i++) count_call_returns(node->children[i], name, hits, other);
+}
+
+/* #3063: a clause whose result is inferred and every one of whose value
+ * `return`s calls its own set (`last(k) -> last(k - 1)`): it gives the
+ * set's result, and no type of its own. Waited for as a clause still to
+ * be inferred, it held the set unsettled for good when no other clause
+ * gave a type: `last(0) -> none` beside it left `last(3) ?? -1` refused as
+ * no optional. */
+static int clause_only_recurses(const ASTNode* cl) {
+    if (!cl->type_inferred || !cl->value) return 0;
+    int hits = 0, other = 0;
+    count_call_returns(cl, cl->value, &hits, &other);
+    return hits > 0 && other == 0;
+}
+
 int clause_takes_set_result(const ASTNode* cl) {
-    if (clause_gives_only_none(cl)) return 1;
+    if (clause_gives_only_none(cl) || clause_only_recurses(cl)) return 1;
     return cl->node_type && cl->node_type->kind != TYPE_UNKNOWN &&
            cl->node_type->kind != TYPE_VOID;
 }
@@ -1350,11 +1376,16 @@ void clause_set_join(ASTNode* const* nodes, int count, ClauseJoin* out) {
     memset(out, 0, sizeof(*out));
     ASTNode* none_at = NULL;
     ASTNode* null_at = NULL;
+    ASTNode* recurse_at = NULL;
     for (int c = 0; c < count; c++) {
         ASTNode* cl = nodes[c];
         Type* t = cl->node_type;
         if (clause_gives_only_none(cl)) {
             if (!none_at) none_at = cl;
+            continue;
+        }
+        if (clause_only_recurses(cl)) {   /* gives the set's result, no type of its own */
+            if (!recurse_at) recurse_at = cl;
             continue;
         }
         if (!t || t->kind == TYPE_UNKNOWN) {
@@ -1384,7 +1415,7 @@ void clause_set_join(ASTNode* const* nodes, int count, ClauseJoin* out) {
         ASTNode* cl = nodes[c];
         Type* t = cl->node_type;
         if (!t || t->kind == TYPE_UNKNOWN || t->kind == TYPE_VOID || cl == written ||
-            clause_gives_only_null(cl) || clause_gives_only_none(cl))
+            clause_gives_only_null(cl) || clause_gives_only_none(cl) || clause_only_recurses(cl))
             continue;
         const ASTNode* arm = clause_value_arm(cl);
         if (!join) {
@@ -1434,6 +1465,7 @@ void clause_set_join(ASTNode* const* nodes, int count, ClauseJoin* out) {
     /* `none` joins the rest as `T?`, as an if-expression's `none` arm does. */
     if (none_at) {
         if (!join) {
+            out->recurse_at = recurse_at;
             clause_join_fail(out, CLAUSE_JOIN_NONE_ONLY, none_at, NULL);
             return;
         }

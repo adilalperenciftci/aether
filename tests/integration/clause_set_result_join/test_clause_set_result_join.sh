@@ -121,5 +121,38 @@ if [ "$(printf '%s\n' "$out" | grep -c "the clauses of 'num'")" != 1 ]; then
     fails=$((fails + 1))
 fi
 
+# #3063 follow-up: a clause that only calls the set gives no type either, so
+# beside a `none` clause the set still has no `T`. It waited as a clause
+# still to be inferred, for good, and only the `??` on a call was refused.
+cat > "$TMP/none_and_recursion.ae" <<'AE'
+last(0) -> none
+last(k) -> last(k - 1)
+
+main() { println("${last(3) == none}") }
+AE
+out=$(cd "$TMP" && "$AE" check none_and_recursion.ae 2>&1)
+case "$out" in
+    *"error[E0200]: every clause of 'last' that returns a value returns \`none\`, an optional of no type, or calls 'last' again (line 2): the set's result \`T?\` needs its \`T\`"*"none_and_recursion.ae:1:"*) ;;
+    *) echo "  [FAIL] none_and_recursion: not refused naming the missing T at line 1"
+       echo "$out" | sed 's/^/        /'
+       fails=$((fails + 1)) ;;
+esac
+
+# Beside a clause that gives a type, the recursion takes the set's result.
+cat > "$TMP/value_and_recursion.ae" <<'AE'
+count(0) -> none
+count(1) -> 7
+count(k) -> count(k - 1)
+
+main() { println("${count(3) ?? -1} ${count(0) ?? -1}") }
+AE
+out=$(cd "$TMP" && "$AE" run value_and_recursion.ae 2>&1 | tr -d '\r')
+case "$out" in
+    *"7 -1"*) ;;
+    *) echo "  [FAIL] value_and_recursion: did not run to 7 -1"
+       echo "$out" | sed 's/^/        /'
+       fails=$((fails + 1)) ;;
+esac
+
 if [ "$fails" -ne 0 ]; then exit 1; fi
 echo "  [PASS] clause_set_result_join: clause results no one type holds are refused, naming both, once, and a set of only \`none\` names its missing T"
