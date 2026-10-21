@@ -14,6 +14,179 @@ cut while your branch is open cannot fold your entry into the released section.
 
 ## [current]
 
+## [0.838.0]
+
+### Fixed
+
+- **A clause that returns only `none` joins its set's result as `T?`.** In
+  `find(0, n: int) -> none` with `find(k, n: int) -> n + k`, the `none`
+  clause had no type of its own, so the set never settled and took the
+  other clause's `int`, and the C compiler refused the `none`. Such a
+  clause now joins the others' `T` as `T?`, as an if-expression's `none`
+  arm does; a set whose every clause returns `none` is E0200 asking for the
+  `T`, and one beside a written `T` that is no optional is E0200 naming
+  `-> T?` (#3063).
+
+- **A clause that returns only `null` takes the pointer, string or closure
+  type beside it.** In a clause set, `node_or_null(0, p: *Node) -> null`
+  beside `node_or_null(k, p: *Node) -> p`, or `label(0) -> null` beside
+  `label(k) -> "many"`, the `null` clause is a slot of the other clause's
+  type, as a binding of that type takes `null`; beside an int it is E0200
+  naming both. A `null` returned from a function whose result is a closure
+  is the empty closure, as one stored or passed is (#3061, #3062).
+
+- **A signed and an unsigned integer as one value hold both.** An
+  if-expression's branches, a value match's arms and a clause set's results
+  that were an int and a uint32 took the uint32, so `if c { -1 } else { u
+  }` was 4294967295, and an int or a long beside a uint64 took the uint64 or
+  the first of the two. They take the smallest type that holds both now: an
+  int beside a byte, a uint8 or a uint16, a long beside a uint32; a literal
+  that fits a uint32 or a uint64 beside it is that type (`if c { 0 } else {
+  u }` stays a uint32), a clause that returns one as well (`h(0, u: uint64)
+  -> 0` beside `h(k, u: uint64) -> u` is a uint64). A signed value beside a
+  uint64, which no integer type holds, is E0200 naming both, and beside a
+  written uint64 result the error names the written type. A byte beside a
+  uint16 is a uint16 (it was whichever came first) (#3064).
+
+- **A local bound from a call of a clause set has the set's result.** The
+  set's result is the join of its clauses' (#3061), but a call was typed
+  by the first clause's before the set was settled, and a local bound from
+  it kept that: `x = f32mix(1, h)` printed 1 while the call printed 1.5.
+  The set is settled before its calls are typed, so the local, and one made
+  from it, has the joined type (#3061).
+
+- **A write through `string.bytes(s)` is a named panic, not a crash.** The
+  view of a string's bytes is read-only (a literal's are in read-only
+  memory, a counted string's are shared), and nothing enforced it: `v =
+  string.bytes("abc")` then `v[0] = 66` passed `ae check` and crashed
+  (0xC0000005 on Windows), and on a heap string it changed text others
+  hold. The view now carries a read-only mark beside its length, and a
+  store through it (an element store, `+=`, `++`), or through any view made
+  from it, in the function or one it is given to, panics with "a write
+  through a read-only view of a string"; a store the checker can see
+  through a local bound to it is E0200. Reads are zero-copy and cost what
+  they did, a read of the view where a store target reads it (`out[v[0] as
+  int] = 1`) included; the checker takes std.string's bytes() for the view,
+  not a function of the program's own of that name (#3025).
+
+- **Migrating from 0.837: a function that keeps a closure declares it
+  `@keep fn`.** E0902 now checks a `fn` parameter, and a struct parameter
+  taken by value that holds a `ptr` or a closure, as it checks a `ptr` one,
+  against the function's own body. A closure given to a function that kept
+  it went unchecked, so one that captured a borrowed `ptr` outlived the
+  call holding it.
+
+  ```aether
+  on_event(cb: fn) { handlers = box_closure(cb) }        // E0902: the function keeps `cb`
+  on_event(cb: @keep fn) { handlers = box_closure(cb) }  // the parameter says it is kept
+  ```
+
+  A function keeps a parameter when it stores it where it outlives the
+  call, boxes it there, puts it in a container (a `list_add` or `map_put`
+  included), or passes it to a parameter that keeps it; calling it, handing
+  it to a borrowing parameter or returning it keeps nothing, and neither
+  does a store into memory the function allocates and frees, for any
+  parameter. A caller is checked against the declaration: a closure that
+  captures a borrowed `ptr`, given to a `@keep fn` parameter, is E0902
+  there. The declaration changes no count (the call borrows the closure, the
+  callee's store takes its own reference). `box_closure(f)` now holds what
+  `f` captured, so a boxed closure stored where it outlives the call is
+  checked too. std and contrib declare what they keep: `worker.run`,
+  `run_detached`, `set_main_poster` and `map`, `observe.observe` and
+  `observe_fields`, `schema.refine`, `spec.before_each` and `after_each`,
+  `quickjs.function`, and tinyweb's route, filter, websocket, SSE and
+  `on_*` registrations. The language reference's string ownership section
+  carries the same entry (#3034).
+
+- **Several literal arms beside an unsigned value are read together.** A
+  value match's arms and a clause set's clauses join to a type that holds
+  each, and a literal that fits a `uint32` or `uint64` beside it takes that
+  type; with several literals only the first was read, so `0`, `-1` and a
+  `uint32` (`neg(0, u) -> 0`, `neg(1, u) -> -1`, `neg(k, u) -> u`, or the
+  same arms in a `match`) were a `uint32`, and -1 came back as 4294967295.
+  The join now reads the literal it must hold most, a negative one, else
+  the largest: that set is a `long` (#3064).
+
+- **A local bound in several branches joins as an if-expression does.** A
+  name bound in two branches is one variable of the join of its bindings,
+  and that join took C's usual conversions while an if-expression's
+  branches take a type that holds both: `x = -1` in one branch and `x = u`
+  (a `uint32`) in the other made `x` a `uint32`, and -1 printed as
+  4294967295. The local is now a `long`, `x = 0` beside the `uint32` keeps
+  it a `uint32`, and a signed value beside a `uint64` is the compile error a
+  binding of another type in another branch is (#3064).
+
+- **A function that returns `none` and a value returns an optional.** With
+  no result type written, `g(p: *H, k) { if k == 0 { return none }; return
+  p.n }` was typed `int` by its later value: the `return none` failed in
+  the C compiler, and `g(h, 1) ?? 0` was refused. It returns `int?` now, as
+  a clause set with a `none` clause and an if-expression with a `none` arm
+  do, wherever the `none` stands, and whether or not the early inference
+  pass could type the value (#3068).
+
+- **A closure compares only with `null`, and `null` in an array literal of
+  closures is the empty closure.** Since 0.837.0 a closure compares with
+  `null` and takes it (#3062); `f == g` between two closures, or `f == p`
+  with a pointer, still passed the checker and C refused it (`invalid
+  operands to binary ==`). It is E0200 now, `a closure compares only with
+  null` (Go's rule for function values: the same function over another
+  environment is another closure); a typed C function pointer still
+  compares as C's pointers do. `[f, null]` reached C as
+  `_aether_closure_retain(NULL)`, and `[null, f]` was an array of pointers:
+  `null` and `none` have no type of their own in an array literal now (the
+  first element that is neither decides, so `[none, x]` is an array of x's
+  optional, where it was refused), and each element goes into a slot of the
+  element type, so `null` is the empty closure, the null string or the null
+  pointer there. An element the type cannot hold, `[1, "x"]` or `[p, null]`
+  with `p` a struct, is E0200 at the element; it reached C as an
+  initializer of the wrong type (#3067).
+
+- **A local bound from a call in a cycle of inferred results has its
+  type.** In `x(p, k) { if k > 0 { r = y(p, k - 1); println("${r}") };
+  return p.big }` with `y(p, k) { return x(p, k) }`, `y` was checked after
+  `x`, so `r` was typed while `y`'s result was unknown and printed
+  5000000000 as 705032704. A function whose first value `return` reads
+  only its parameters, or calls of functions already typed, has its result
+  before its body is checked, so the callee is checked first (#3069).
+
+- **`free` of a view is refused, or a named panic, instead of corrupting
+  the heap.** A view owns nothing, and `free` gave the allocator a pointer
+  it never handed out: `free(string.bytes(s))` crashed with heap corruption
+  (0xC0000374 on Windows), and so did `free` of a sub-slice of a `make`
+  buffer at an offset (`free(b[2..4])`); one at the buffer's start freed it
+  under the slice that holds it, for a double free later, and `free` of an
+  array freed frame memory. `free` of what the checker can see is a view (a
+  read-only view of a string's bytes, a sub-slice, an array viewed as a
+  slice, an array `T[N]`, or a local bound once to one) is E0200, and of one
+  it cannot see (a view given to a function, held in a field, a list
+  pattern's tail) a panic: "free of a view of elements another slice or an
+  array holds, which owns nothing", or "of a read-only view of a string".
+  The slice that holds a `make` buffer, and a view of a raw pointer the
+  program owns from its start, `(p as T[])[0..n]`, are freed as before
+  (#3072).
+
+- **An array literal in an array of a sum holds its variants.** `let xs:
+  Shape[2] = [c, q]` (a `Circle` and a `Square`) failed in the C compiler
+  on 0.837.0 (the elements were not wrapped as `Shape`), and since the
+  array-literal element check it was refused naming the wrong type: the
+  place's type never reached the literal, which was an array of its first
+  element's. The literal now takes the array-of-sum type of its place (a
+  typed declaration, an argument, a written result, a struct field, a store
+  into such an array) before it is checked, and each variant is wrapped as
+  the sum (taken, when it owns a string) wherever the literal is generated.
+  An array literal passed to a sized-array parameter of plain elements,
+  `f([3, 4])` for `f(xs: int[2])`, which C refused as a bare `{3, 4}`, is a
+  temporary of the statement too (#3071).
+
+- **`ae add` distinguishes glibc and musl Linux binary packages.** Automatic
+  selection uses `linux-x86_64-musl` / `linux-arm64-musl` for musl builds of
+  `ae`, preserving `linux-x86_64` / `linux-arm64` for glibc. Explicit release
+  targets retain their libc identity, and missing assets or checksums do not
+  fall back to the other libc. Binary caches record their installed target;
+  incompatible or legacy targetless caches are refused without changing their
+  bytes. Use a separate `HOME` per target or remove an old binary cache and
+  fetch it again (#3073).
+
 ## [0.837.0]
 
 ### Fixed
