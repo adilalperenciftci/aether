@@ -4179,7 +4179,9 @@ Type* infer_type(ASTNode* expr, SymbolTable* table) {
             {
                 Type* acc = NULL;
                 /* The first arm, while every arm after it is a literal: a
-                 * float literal's type is then what the join says it is. */
+                 * float literal's type is then what the join says it is;
+                 * of integer literals, the one the join must hold most
+                 * (#3064, join_arm_after). */
                 ASTNode* acc_arm = NULL;
                 for (int i = 1; i < expr->child_count; i++) {
                     ASTNode* arm = expr->children[i];
@@ -4196,7 +4198,7 @@ Type* infer_type(ASTNode* expr, SymbolTable* table) {
                     if (!j) continue;   /* not numeric, or not known yet */
                     free_type(acc);
                     acc = j;
-                    if (!numeric_literal_operand(v)) acc_arm = NULL;
+                    acc_arm = (ASTNode*)join_arm_after(acc_arm, v);   /* #3064 */
                 }
                 return acc ? acc : create_type(TYPE_UNKNOWN);
             }
@@ -13869,7 +13871,9 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
 
             int opt_match = (match_expr_type && match_expr_type->kind == TYPE_OPTIONAL);
             /* #2854: the first arm yielding a value, while every one after it
-             * is a literal (branch_join_type's float literal rule). */
+             * is a literal (branch_join_type's float literal rule); of integer
+             * literals, the one the join must hold most (#3064,
+             * join_arm_after). */
             ASTNode* first_value_arm = NULL;
             int value_arm_seen = 0;
 
@@ -14191,7 +14195,7 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                 }
                 if (yielded) {
                     if (!value_arm_seen) first_value_arm = yielded;
-                    else if (!numeric_literal_operand(yielded)) first_value_arm = NULL;
+                    else first_value_arm = (ASTNode*)join_arm_after(first_value_arm, yielded);   /* #3064 */
                     value_arm_seen = 1;
                 }
 

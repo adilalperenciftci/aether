@@ -1297,11 +1297,22 @@ static const ASTNode* clause_value_arm(const ASTNode* cl) {
     return n == 1 ? only : NULL;
 }
 
-/* A number literal, or one under a unary minus or plus. */
-static int numeric_literal_arm(const ASTNode* n) {
-    int neg;
-    unsigned long long mag;
-    return integer_literal_arm(n, &neg, &mag) || is_float_literal_arm(n);
+/* A literal, or one under a unary minus or plus. */
+static int literal_arm(const ASTNode* n) {
+    if (n && n->type == AST_UNARY_EXPRESSION && n->child_count == 1 && n->value &&
+        (strcmp(n->value, "-") == 0 || strcmp(n->value, "+") == 0))
+        n = n->children[0];
+    return n && n->type == AST_LITERAL;
+}
+
+const ASTNode* join_arm_after(const ASTNode* kept, const ASTNode* next) {
+    if (!literal_arm(next)) return NULL;
+    int kneg, nneg;
+    unsigned long long kmag, nmag;
+    if (!integer_literal_arm(kept, &kneg, &kmag) || !integer_literal_arm(next, &nneg, &nmag))
+        return kept;
+    if (kneg != nneg) return kneg ? kept : next;
+    return nmag > kmag ? next : kept;
 }
 
 static void clause_join_fail(ClauseJoin* out, ClauseJoinStatus st, ASTNode* at, Type* other) {
@@ -1339,9 +1350,10 @@ void clause_set_join(ASTNode* const* nodes, int count, ClauseJoin* out) {
     ASTNode* join_at = written;
     /* #3064: each clause's value is its arm, as an if-expression's branches
      * are, so a literal clause beside a uint64 one is a uint64, as `if c { 0
-     * } else { u }` is: the value the join so far came from, while every
-     * clause after it gives a literal, as a value match's first arm is. A
-     * written type has none. */
+     * } else { u }` is: the value the join so far came from, and while every
+     * clause after it gives a literal, the literal the join must hold most
+     * (join_arm_after), as a value match's arms are read. A written type has
+     * none. */
     const ASTNode* join_arm = NULL;
     for (int c = 0; c < count; c++) {
         ASTNode* cl = nodes[c];
@@ -1357,7 +1369,7 @@ void clause_set_join(ASTNode* const* nodes, int count, ClauseJoin* out) {
             continue;
         }
         Type* k = branch_join_type(join, join_arm, t, arm);
-        if (!numeric_literal_arm(arm)) join_arm = NULL;
+        join_arm = join_arm_after(join_arm, arm);
         /* Beside a written type, an inferred clause fits it (their join is
          * it, and one with no join does not); a second written type is the
          * same one or none. */

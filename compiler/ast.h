@@ -746,6 +746,14 @@ Type* numeric_join_type(Type* a, Type* b);
  * A fresh Type, or NULL when the two do not join: the caller refuses the
  * value or types it by its own rule. */
 Type* branch_join_type(Type* a, const ASTNode* a_arm, Type* b, const ASTNode* b_arm);
+/* #3064: the arm a join of several values (a value match's arms, a clause
+ * set's clauses) is read by after the value `next` joins it, `kept` the arm
+ * it was read by before: none once a value that is no literal joins, and
+ * while every later value is a literal the one of them that a type must
+ * hold most (a negative integer over a non-negative one, else the larger),
+ * since the join holds each. On the first literal alone, `0`, `-1` and a
+ * uint32 joined to a uint32, and -1 came back as 4294967295. */
+const ASTNode* join_arm_after(const ASTNode* kept, const ASTNode* next);
 /* #2996: the program's sum types, for branch_join_type: registered by the
  * checker as it resolves them, reset before each program. */
 void ast_sums_reset(void);
