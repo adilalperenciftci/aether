@@ -1,0 +1,139 @@
+name: Cross-language benchmarks
+
+# benchmarks/cross-language compares Aether with ten other languages, and its
+# FAIRNESS.md rules hold only while every implementation builds and prints a
+# correct result. Nothing checked that: in October 2026 the Zig column had not
+# built for a Zig release (0.16 removed std.Thread.Mutex), and locally only
+# the toolchains a developer happens to have get exercised (#3076).
+#
+# Kept cheap:
+#
+# - smoke, on a change under benchmarks/cross-language/ (or to this file),
+#   and once a week: installs the eleven toolchains, builds every
+#   implementation through its own build file, and runs each pattern once
+#   with a tiny message count. The runner checks every checksum and skynet's
+#   unit count, and with BENCH_STRICT=1 a language that does not build, or
+#   prints a wrong result, fails the job; the job summary names the language
+#   and the pattern. A tiny count measures nothing; it proves the code.
+#   The weekly run is for breaks from outside this directory, which no path
+#   filter catches: a compiler or runtime change once stopped every Aether
+#   entry from linking while the other ten languages kept reporting.
+#
+# - full, by hand (workflow_dispatch): the whole suite at the default count,
+#   five runs per language and pattern, the results JSON uploaded as an
+#   artifact. A hosted runner shares its machine, so read its spread (CV and
+#   range) before any ranking.
+on:
+  pull_request:
+    paths: [ 'benchmarks/cross-language/**', '.github/workflows/benchmarks.yml' ]
+  push:
+    branches: [ main ]
+    paths: [ 'benchmarks/cross-language/**', '.github/workflows/benchmarks.yml' ]
+  schedule:
+    - cron: '17 6 * * 1'   # Mondays, 06:17 UTC
+  workflow_dispatch:
+    inputs:
+      messages:
+        description: Messages per run (BENCHMARK_MESSAGES)
+        default: '1000000'
+      runs:
+        description: Timed runs per language and pattern (BENCH_RUNS)
+        default: '5'
+
+# It reads the tree and uploads an artifact; it writes nothing to the repo.
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  suite:
+    name: ${{ github.event_name == 'workflow_dispatch' && 'Full run' || 'Smoke' }}
+    runs-on: ubuntu-24.04
+    # Toolchains take about 5 minutes and the smoke run 2 to 3 more. The full
+    # run spends most of its time in the thread rings of the languages with
+    # an OS thread per unit, a few seconds per run each.
+    timeout-minutes: ${{ github.event_name == 'workflow_dispatch' && 120 || 30 }}
+
+    steps:
+    - uses: actions/checkout@v4
+
+    # gcc and g++ for C, C++ and Aether; GNU time for CPU time and memory.
+    - name: Install C, C++ and GNU time
+      run: |
+        sudo rm -f /etc/apt/sources.list.d/google-chrome.list; sudo apt-get update
+        sudo apt-get install -y gcc g++ make time
+
+    - uses: actions/setup-go@v5
+      with:
+        go-version: stable
+        cache: false
+
+    - uses: actions/setup-java@v4
+      with:
+        distribution: temurin
+        java-version: '21'
+
+    - uses: sbt/setup-sbt@v1
+
+    - uses: erlef/setup-beam@v1
+      with:
+        otp-version: '27'
+        elixir-version: '1.18'
+
+    - uses: mlugg/setup-zig@v2
+      with:
+        version: 0.16.0
+
+    # Rust is on the runner image; Pony comes from ponyup, its installer,
+    # both pinned (a moving `latest-release` script piped to sh would run
+    # whatever that branch holds that day). ponyup takes the channel and the
+    # version as two words: `release-0.77.0` reads as a channel of that name,
+    # and the package "ponyc-release-0.77.0-latest-..." is not found.
+    - name: Install Pony
+      run: |
+        curl --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/ponylang/ponyup/0.16.3/ponyup-init.sh | sh
+        echo "$HOME/.local/share/ponyup/bin" >> "$GITHUB_PATH"
+        "$HOME/.local/share/ponyup/bin/ponyup" update ponyc release 0.77.0
+
+    - name: Toolchain versions
+      run: |
+        gcc --version | head -1; g++ --version | head -1; go version; rustc --version
+        java -version 2>&1 | head -1; sbt --script-version; erl -noshell -eval 'io:format("OTP ~s~n", [erlang:system_info(otp_release)]), halt().'
+        elixir --version | tail -1; zig version; ponyc --version | head -1
+
+    - name: Build Aether
+      run: make -j"$(nproc)" compiler ae stdlib
+
+    - name: Smoke run (every language, every pattern, results checked)
+      if: github.event_name != 'workflow_dispatch'
+      run: BENCHMARK_MESSAGES=10000 BENCH_RUNS=1 BENCH_WARMUP=0 BENCH_STRICT=1 make benchmark-results
+
+    - name: Full run
+      if: github.event_name == 'workflow_dispatch'
+      run: BENCHMARK_MESSAGES=${{ inputs.messages }} BENCH_RUNS=${{ inputs.runs }} BENCH_STRICT=1 make benchmark-results
+
+    # The runner writes what broke, one "<language> <pattern>: <reason>" per
+    # line, to build/problems.txt (benchmarks/cross-language/).
+    - name: Name what broke in the job summary
+      if: failure()
+      run: |
+        f=benchmarks/cross-language/build/problems.txt
+        {
+          echo "## Cross-language benchmarks: what broke"
+          echo
+          if [ -s "$f" ]; then sed 's/^ */- /' "$f"; else echo "- the run stopped before any language was checked (see the log)"; fi
+        } >> "$GITHUB_STEP_SUMMARY"
+
+    - name: Upload results
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: benchmark-results
+        path: |
+          benchmarks/cross-language/visualize/results_*.json
+          benchmarks/cross-language/build/*.log
+          benchmarks/cross-language/build/problems.txt
+        if-no-files-found: ignore

@@ -277,8 +277,9 @@ of sequence-numbered slots: 54.62 in counting in the second, 58.56 in the
 third).
 
 Erlang, Elixir, Pony and Scala are not installed on this machine. Their
-changes were reviewed by reading, and Scala's choices follow Java's measured
-ones.
+changes were reviewed by reading, Scala's choices follow Java's measured
+ones, and the CI job (`.github/workflows/benchmarks.yml`) builds and checks
+all eleven languages.
 
 ### The runner
 
@@ -495,8 +496,13 @@ threads, and Aether when it is in its fast mode.
 ## Checking a change against these rules
 
 - **Results.** The runner checks every run's `Checksum:` and skynet's
-  `concurrency units:` (rule 8). Skynet's sum for 1,000,000 leaves is
-  `499999500000` in every language, and each prints 1,111 units.
+  `concurrency units:` (rule 8), and `BENCH_STRICT=1` fails the run when any
+  selected language does not build or is wrong. Skynet's sum for 1,000,000
+  leaves is `499999500000` in every language, and each prints 1,111 units.
+- **Every language, every pattern.** The CI job
+  (`.github/workflows/benchmarks.yml`) builds all eleven and runs each
+  pattern with a small count on a change here and once a week; its summary
+  names any language and pattern that broke.
 - **Technique.** A change to how a language waits or queues follows its rule
   above for every pattern, with the alternatives it measured added here.
 - **Dependencies.** `rust/Cargo.toml` and `scala/build.sbt` declare none, and

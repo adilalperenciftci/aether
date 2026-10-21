@@ -5,6 +5,8 @@
 // Usage: ae run run_benchmarks.ae
 //        BENCH_RUNS=10 BENCH_WARMUP=2 BENCHMARK_MESSAGES=1000 ae run run_benchmarks.ae
 //        BENCH_LANGS=c,rust BENCH_PATTERNS=ping_pong ae run run_benchmarks.ae
+//        BENCH_STRICT=1 ae run run_benchmarks.ae   (exit 1 if any selected
+//                                                   language skips or fails)
 //
 // Each language is built only through its own build file (`make <pattern>`
 // in its directory, which calls cargo, zig build, sbt, javac or erlc as that
@@ -385,6 +387,12 @@ main() {
     only_patterns = ""
     env_p = getenv("BENCH_PATTERNS")
     if env_p != 0 { only_patterns = env_p }
+    // BENCH_STRICT=1 (the CI job): every selected language must build and
+    // pass, so a skip is an error there, not a missing toolchain.
+    strict = 0
+    env_s = getenv("BENCH_STRICT")
+    if env_s != 0 { strict = atoi(env_s) }
+    problems = ""
 
     on_windows = select(windows: 1, other: 0)
 
@@ -432,6 +440,7 @@ main() {
     cfg = Settings { runs: runs, warmup: warmup, msgs: msgs, time_cmd: time_cmd, is_mac: is_mac }
 
     _mk, _mks = sh_run("mkdir -p build")
+    io_write_file("build/problems.txt", "")
 
     println("============================================")
     println("  Aether Cross-Language Benchmark Suite")
@@ -483,15 +492,23 @@ main() {
                 println("")
                 println("ERROR: Aether did not build or did not run correctly, so there is nothing to compare against.")
                 println("       Reproduce with: cd benchmarks/cross-language/aether && make ${pattern}")
+                why = "did not build (build/aether_${pattern}.log)"
+                if string.length(res) > 0 {
+                    why = string.substring(res, 6, string.length(res))
+                }
+                io_write_file("build/problems.txt", "${problems}  Aether ${pattern}: ${why}\n")
                 exit(1)
             }
-            if string.starts_with(res, "FAIL: ") == 1 {
+            if string.length(res) == 0 {
+                problems = "${problems}  ${name} ${pattern}: did not build (build/${lang_dir(li)}_${pattern}.log)\n"
+            } else if string.starts_with(res, "FAIL: ") == 1 {
                 if string.length(failed) > 0 {
                     failed = "${failed},\n"
                 }
                 reason = string.substring(res, 6, string.length(res))
                 failed = "${failed}    \"${name}\": \"${json_escape(reason)}\""
-            } else if string.length(res) > 0 {
+                problems = "${problems}  ${name} ${pattern}: ${reason}\n"
+            } else {
                 if first == 0 {
                     json = "${json},\n"
                 }
@@ -511,4 +528,13 @@ main() {
     println("============================================")
     println("  All benchmarks complete!")
     println("============================================")
+    // What broke, one "<language> <pattern>: <reason>" per line, for the CI
+    // job's summary; empty when nothing did.
+    io_write_file("build/problems.txt", problems)
+    if strict != 0 && string.length(problems) > 0 {
+        println("")
+        println("BENCH_STRICT: every selected language must build and pass:")
+        print(problems)
+        exit(1)
+    }
 }

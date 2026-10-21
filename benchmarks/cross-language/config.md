@@ -4,8 +4,9 @@
 
 `make benchmark` (from the repository root) builds Aether, builds the runner
 (`run_benchmarks.ae`, in Aether) and runs every language whose toolchain it
-finds. A language whose build fails is reported as skipped; Aether is
-required.
+finds, then serves the results page. `make benchmark-results` does the same
+without the page. A language whose build fails is reported as skipped;
+Aether is required.
 
 | Language | Toolchain | Builds with |
 |---|---|---|
@@ -37,6 +38,7 @@ The runner reads its settings from the environment:
 | `BENCH_WARMUP` | 1 | Discarded runs before them, the same for every language |
 | `BENCH_LANGS` | all | Languages to run, comma-separated (`aether,c,rust`) |
 | `BENCH_PATTERNS` | all | Patterns to run, comma-separated (`ping_pong,skynet`) |
+| `BENCH_STRICT` | 0 | 1: exit 1 if any selected language does not build or is wrong (the CI job) |
 
 ```bash
 BENCHMARK_MESSAGES=100000 BENCH_RUNS=3 make benchmark
