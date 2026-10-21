@@ -825,6 +825,9 @@ int ast_has_value_return(const ASTNode* node);
 /* Does every `return` of a value in `node` give a literal of AST kind `lit`
  * (`none`, `null`), and is there one? */
 int ast_returns_only_literal(const ASTNode* node, ASTNodeType lit);
+/* #3068: does some `return` of a value in `node` give a literal of kind
+ * `lit`? */
+int ast_returns_literal(const ASTNode* node, ASTNodeType lit);
 /* Does a slot of type `t` take `null`: a pointer, a string, a closure or a
  * C function pointer, a slice? */
 int ast_type_takes_null(const Type* t);

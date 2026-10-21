@@ -12205,6 +12205,14 @@ static Type* refine_inferred_result(ASTNode* o, ASTNode* ret, SymbolTable* table
         free_type(vt);
         return NULL;
     }
+    /* #3068: a function that also returns `none` returns `T?`, as a clause
+     * set with a `none` clause (#3063) and an if-expression with a `none`
+     * arm do, wherever the `none` stands: taken as the `T`, an earlier
+     * `return none` had been checked while the result was unknown and
+     * reached C as a `T`. */
+    if (vt->kind != TYPE_OPTIONAL && vt->kind != TYPE_TUPLE && o->child_count > 0 &&
+        ast_returns_literal(o->children[o->child_count - 1], AST_NONE_LITERAL))
+        vt = create_optional_type(vt);
     if (o->node_type) {
         Type swap = *o->node_type;
         *o->node_type = *vt;

@@ -2119,6 +2119,16 @@ void infer_function_return_types(ASTNode* program, SymbolTable* table) {
                 node->node_type->kind == TYPE_VOID ||
                 has_unknown_tuple_slot) {
                 Type* return_type = infer_return_type_from_body(node->children[body_index], table);
+                /* #3068: a function that returns `none` on one path and a
+                 * `T` on another returns `T?`, as a clause set with a
+                 * `none` clause (#3063) and an if-expression with a `none`
+                 * arm do. The `none` names no type, and the `T` alone made
+                 * the result a `T` the `none` reached C as. */
+                if (return_type && return_type->kind != TYPE_OPTIONAL &&
+                    return_type->kind != TYPE_TUPLE && return_type->kind != TYPE_VOID &&
+                    return_type->kind != TYPE_UNKNOWN &&
+                    ast_returns_literal(node->children[body_index], AST_NONE_LITERAL))
+                    return_type = create_optional_type(return_type);
                 if (return_type) {
                     if (node->node_type) free_type(node->node_type);
                     node->node_type = return_type;

@@ -1,0 +1,60 @@
+// #3068: a function with no written result type that returns `none` on one
+// path and a `T` on another returns `T?`, as a clause set with a `none`
+// clause (#3063) and an if-expression with a `none` arm do. Typed by its
+// later value, `g` below was an `int`: the C compiler failed at the `return
+// none`, and `g(h, 1) ?? 0` was refused. The same when the early pass can
+// type the value (`return k`), where the `return none` was refused.
+
+extern exit(code: int)
+
+struct H {
+    n: int
+    label: string
+}
+
+// The value read through a pointer, which the checker types (#3056).
+g(p: *H, k: int) {
+    if k == 0 { return none }
+    return p.n
+}
+
+name(p: *H, k: int) {
+    if k == 0 { return none }
+    return p.label
+}
+
+// The value the early inference pass types.
+plain(k: int) {
+    if k == 0 { return none }
+    return k * 2
+}
+
+// `none` after the value.
+last(p: *H, k: int) {
+    if k > 0 { return p.n }
+    return none
+}
+
+check(ok: bool, what: string) {
+    if !ok {
+        println("FAIL: ${what}")
+        exit(1)
+    }
+}
+
+main() {
+    h = heap.new(H)
+    h.n = 5
+    h.label = "five"
+    check((g(h, 1) ?? 0) == 5, "an int read through a pointer, as an int?")
+    check((g(h, 0) ?? -1) == -1, "the none path of it")
+    check((name(h, 1) ?? "none") == "five", "a string, as a string?")
+    check((name(h, 0) ?? "none") == "none", "the none path of it")
+    check((plain(3) ?? 0) == 6, "a value the early pass types, as an int?")
+    check((plain(0) ?? -1) == -1, "the none path of it")
+    check((last(h, 1) ?? 0) == 5 && (last(h, 0) ?? -1) == -1, "none after the value")
+    v = g(h, 1)
+    check((v ?? 0) == 5, "a local bound from the call")
+    println("${g(h, 1) ?? 0} ${name(h, 1) ?? "none"} ${plain(3) ?? 0}")
+    heap.free(h)
+}

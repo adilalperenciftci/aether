@@ -1247,6 +1247,12 @@ int ast_returns_only_literal(const ASTNode* node, ASTNodeType lit) {
     return hits > 0 && other == 0;
 }
 
+int ast_returns_literal(const ASTNode* node, ASTNodeType lit) {
+    int hits = 0, other = 0;
+    count_literal_returns(node, lit, &hits, &other);
+    return hits > 0;
+}
+
 int ast_type_takes_null(const Type* t) {
     return t && (t->kind == TYPE_PTR || t->kind == TYPE_STRING || t->kind == TYPE_FUNCTION ||
                  type_is_slice(t));
