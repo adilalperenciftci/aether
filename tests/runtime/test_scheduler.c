@@ -1327,6 +1327,62 @@ void test_scheduler_actor_thread_parks_when_idle(void) {
     scheduler_cleanup();
 }
 
+// #3087: a batch of sends wakes the cores it lands on. A loop of sends in
+// main() goes through the batch path (scheduler_send_batch_*), which put each
+// core's share on that core's queue and told no core: a parked core slept on
+// the batch until its timed wait ran out, up to 32 ms. Here the cores' timed
+// wait is a minute, so a wake that never came is a stall of a minute, which
+// the waits below give up on after 10 s: a bound no slow machine comes near,
+// where one of milliseconds could not tell a missed wake from a busy CI
+// runner. Each round waits until both cores are parked, then sends one
+// message to each of four actors, two on each core.
+static int wait_core_parked(int core) {
+    long long deadline = (long long)get_time_ms() + 10000;
+    while (!atomic_load(&schedulers[core].parked)) {
+        if ((long long)get_time_ms() > deadline) return 0;
+        sleep_ms(1);
+    }
+    return 1;
+}
+
+void test_scheduler_batch_wakes_parked_cores(void) {
+    scheduler_init(2);
+    CounterActor* actors[4];
+    for (int i = 0; i < 4; i++) {
+        actors[i] = (CounterActor*)scheduler_spawn_actor(i % 2, (void (*)(void*))counter_step,
+                                                         sizeof(CounterActor));
+        ASSERT_NOT_NULL(actors[i]);
+        atomic_store(&actors[i]->count, 0);
+    }
+    scheduler_set_core_park_ms(60000);
+    scheduler_start();
+
+    // Checked after the teardown, so a failure leaves no core parked for a
+    // minute under the tests that follow.
+    int parked = 1, rounds_done = 0, unstepped = -1;
+    for (int round = 1; round <= 3; round++) {
+        parked = wait_core_parked(0) && wait_core_parked(1);
+        if (!parked) break;
+        scheduler_send_batch_start();
+        for (int i = 0; i < 4; i++) {
+            scheduler_send_batch_add((ActorBase*)actors[i], message_create_simple(1, 0, round));
+        }
+        scheduler_send_batch_flush();
+        for (int i = 0; i < 4 && unstepped < 0; i++) {
+            if (wait_count(&actors[i]->count, round) != round) unstepped = i;
+        }
+        if (unstepped >= 0) break;
+        rounds_done = round;
+    }
+
+    scheduler_set_core_park_ms(0);   // back to the default
+    scheduler_shutdown();
+    scheduler_cleanup();
+    ASSERT_TRUE(parked);
+    ASSERT_EQ(-1, unstepped);   // no actor waited on a core left asleep
+    ASSERT_EQ(3, rounds_done);
+}
+
 // #2598: an actor thread's inbox takes any number of senders at once and
 // keeps each one's order. The actor's first step holds it at a gate while
 // three threads send the first half of their 400 messages: the inbox's ring
@@ -1475,6 +1531,7 @@ void register_scheduler_tests(void) {
     register_test_with_category("Scheduler teardown with a live actor thread", test_scheduler_teardown_with_live_actor_thread, TEST_CATEGORY_RUNTIME);
     register_test_with_category("Scheduler actor thread holds a released actor it stepped", test_scheduler_actor_thread_holds_released_actor, TEST_CATEGORY_RUNTIME);
     register_test_with_category("Scheduler actor thread parks when idle", test_scheduler_actor_thread_parks_when_idle, TEST_CATEGORY_RUNTIME);
+    register_test_with_category("Scheduler batch send wakes parked cores", test_scheduler_batch_wakes_parked_cores, TEST_CATEGORY_RUNTIME);
     register_test_with_category("Scheduler actor thread inbox keeps every sender's order", test_scheduler_actor_thread_inbox_keeps_order, TEST_CATEGORY_RUNTIME);
     register_test_with_category("Scheduler drops a send to a released actor", test_scheduler_late_send_after_release, TEST_CATEGORY_RUNTIME);
     register_test_with_category("Scheduler basic messaging", test_scheduler_basic_messaging, TEST_CATEGORY_RUNTIME);

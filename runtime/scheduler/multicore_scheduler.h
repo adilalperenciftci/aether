@@ -380,6 +380,10 @@ void scheduler_actor_thread_deliver(ActorBase* actor, Message msg);
  * default). For tests: set long, a wake that never comes shows as a stall
  * rather than as a 32 ms delay. */
 void scheduler_set_actor_park_ms(int ms);
+/* The timed wait behind a core's park, in milliseconds; 0, the default,
+ * steps it from 1 to 32 ms the longer the core is idle. For tests, as the
+ * one above: set long, a core that is never woken stalls (#3087). */
+void scheduler_set_core_park_ms(int ms);
 /* Called by the inline (main-thread-mode) send once the step it ran has
  * returned and it no longer touches the actor: an actor that released itself
  * in that step is released now (#2509). */

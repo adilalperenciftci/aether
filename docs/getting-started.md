@@ -819,5 +819,5 @@ builds a few programs (hello-world, a stateful actor, an actor pipeline, ping-po
 - Pre-built binaries work in any terminal (PowerShell, CMD, Windows Terminal)
 - GCC is auto-downloaded on first `ae run` no MSYS2 or manual setup required
 - The runtime uses Win32 threads natively, no pthreads library required
-- Full thread affinity support via `SetThreadAffinityMask`
+- Each scheduler thread gets an ideal processor (`SetThreadIdealProcessor`), a hint: Windows keeps it there and moves it when another program is using that CPU
 - **Building from source:** Use MSYS2 MinGW 64-bit shell with `make ae`

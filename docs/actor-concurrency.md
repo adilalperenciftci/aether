@@ -276,7 +276,7 @@ In single-core mode, actors run cooperatively. The scheduler processes actors in
 The multi-core scheduler uses core partitioning with locality-aware placement:
 
 - N cores = N independent scheduler threads
-- Each scheduler runs in a pthread pinned to a core
+- Each scheduler runs in a thread kept on its core: bound to it on Linux, a hint on macOS and Windows
 - Actors placed on the caller's core at spawn time (main thread defaults to core 0; scheduler threads use their own core). This keeps parent-child actor groups co-located for efficient local messaging.
 - Cross-core messages use lock-free queues with batch dequeue/enqueue
 - Message-driven migration converges communicating actors onto the same core
