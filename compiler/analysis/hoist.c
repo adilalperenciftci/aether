@@ -70,82 +70,128 @@ static int is_number_type(Type* t) {
 }
 
 /* #3064: what binding `n` of a name gives a join: its type when that is a
- * number (a declaration that writes its type is that type, and its value
- * no literal arm; an inferred one is its value's type until it has its
- * own), NULL otherwise. `*arm` is the value a literal is read from. */
-static Type* join_part(const ASTNode* n, const ASTNode** arm) {
+ * number, NULL otherwise. A declaration that writes its type is that type
+ * (`*written`), and its value no literal arm; an inferred one is its
+ * value's type until it has its own. `*arm` is the value a literal is read
+ * from. */
+static Type* join_part(const ASTNode* n, const ASTNode** arm, int* written) {
     Type* t = n->node_type;
     const ASTNode* v = n->type_inferred && n->child_count > 0 ? n->children[0] : NULL;
     if ((!t || t->kind == TYPE_UNKNOWN) && v) t = v->node_type;
     *arm = v;
+    *written = !n->type_inferred;
     return is_number_type(t) ? t : NULL;
 }
 
-/* One part `t` (arm `v`) into the join of the parts before it (`*acc`,
- * `*arm`), as an if-expression's branches join (branch_join_type), each
- * part's value the arm a literal is read from (join_arm_after): `x = -1` in
- * one branch and `x = u` (a uint32) in another is a long, `x = 0` beside it
- * a uint32. Two that no type holds (a signed one beside a uint64) set
- * `*apart`. No part (NULL) leaves the join as it is. */
-static void join_add(Type** acc, const ASTNode** arm, int* apart, Type* t, const ASTNode* v) {
-    if (*apart || !t) return;
-    if (!*acc) {
-        *acc = clone_type(t);
-        *arm = v;
+/* The join of a name's bindings, part by part. */
+typedef struct {
+    Type* acc;           /* the inferred parts' join */
+    const ASTNode* arm;  /* the arm it is read by (join_arm_after) */
+    int apart;           /* two inferred parts no type holds */
+    Type* written;       /* #3070: the first written part */
+} JoinFold;
+
+/* One part `t` (arm `v`) into the fold. Inferred parts join as an
+ * if-expression's branches do (branch_join_type), each part's value the
+ * arm a literal is read from (join_arm_after): `x = -1` in one branch and
+ * `x = u` (a uint32) in another is a long, `x = 0` beside it a uint32. Two
+ * that no type holds (a signed one beside a uint64) are apart. #3070: a
+ * written type is the variable's type, whatever the inferred parts are:
+ * one the written type does not hold is the checker's to refuse
+ * (ast_number_holds). No part (NULL) leaves the fold as it is. */
+static void fold_add(JoinFold* f, Type* t, const ASTNode* v, int written) {
+    if (!t) return;
+    if (written) {
+        if (!f->written) f->written = clone_type(t);
         return;
     }
-    Type* j = branch_join_type(*acc, *arm, t, v);
+    if (f->apart) return;
+    if (!f->acc) {
+        f->acc = clone_type(t);
+        f->arm = v;
+        return;
+    }
+    Type* j = branch_join_type(f->acc, f->arm, t, v);
     if (!j) {
-        *apart = 1;
+        f->apart = 1;
         return;
     }
-    free_type(*acc);
-    *acc = j;
-    *arm = join_arm_after(*arm, v);
+    free_type(f->acc);
+    f->acc = j;
+    f->arm = join_arm_after(f->arm, v);
+}
+
+/* What the fold joins to, a fresh Type: the written type, else the
+ * inferred parts' join; NULL for none, or two apart. */
+static Type* fold_result(const JoinFold* f) {
+    if (f->written) return clone_type(f->written);
+    return f->apart || !f->acc ? NULL : clone_type(f->acc);
+}
+
+static void fold_copy(JoinFold* to, const JoinFold* from) {
+    to->acc = from->acc ? clone_type(from->acc) : NULL;
+    to->arm = from->arm;
+    to->apart = from->apart;
+    to->written = from->written ? clone_type(from->written) : NULL;
+}
+
+static void fold_free(JoinFold* f) {
+    if (f->acc) free_type(f->acc);
+    if (f->written) free_type(f->written);
+    memset(f, 0, sizeof(*f));
+}
+
+static void fold_bind(JoinFold* f, const ASTNode* n) {
+    const ASTNode* v = NULL;
+    int written = 0;
+    Type* t = join_part(n, &v, &written);
+    fold_add(f, t, v, written);
 }
 
 /* The bindings of `name` under `n` (closures excluded, each its own
  * function), joined in the order they are written. */
-static void join_walk(ASTNode* n, const char* name, Type** acc, const ASTNode** arm,
-                      int* apart) {
-    if (!n || *apart) return;
+static void join_walk(ASTNode* n, const char* name, JoinFold* f) {
+    if (!n) return;
     if (n->type == AST_CLOSURE || n->type == AST_QUOTE) return;   /* its own function */
-    if (n->type == AST_VARIABLE_DECLARATION && n->value && strcmp(n->value, name) == 0) {
-        const ASTNode* v = NULL;
-        Type* t = join_part(n, &v);
-        join_add(acc, arm, apart, t, v);
-    }
-    for (int i = 0; i < n->child_count; i++) join_walk(n->children[i], name, acc, arm, apart);
+    if (n->type == AST_VARIABLE_DECLARATION && n->value && strcmp(n->value, name) == 0)
+        fold_bind(f, n);
+    for (int i = 0; i < n->child_count; i++) join_walk(n->children[i], name, f);
 }
 
-/* The join join_add leaves: NULL when there is none, or two apart. */
-static Type* join_result(Type* acc, int apart) {
-    if (apart && acc) {
-        free_type(acc);
-        return NULL;
-    }
-    return acc;
+static JoinFold fold_of(ASTNode* root, const char* name) {
+    JoinFold f;
+    memset(&f, 0, sizeof(f));
+    for (int i = 0; root && name && i < root->child_count; i++)
+        join_walk(root->children[i], name, &f);
+    return f;
 }
 
 Type* hoist_numeric_join(ASTNode* root, const char* name) {
-    if (!root || !name) return NULL;
-    Type* acc = NULL;
-    const ASTNode* arm = NULL;
-    int apart = 0;
-    for (int i = 0; i < root->child_count; i++) join_walk(root->children[i], name, &acc, &arm, &apart);
-    return join_result(acc, apart);
+    JoinFold f = fold_of(root, name);
+    Type* r = fold_result(&f);
+    fold_free(&f);
+    return r;
+}
+
+Type* hoist_numeric_written(ASTNode* root, const char* name) {
+    JoinFold f = fold_of(root, name);
+    Type* written = f.written;
+    f.written = NULL;
+    fold_free(&f);
+    return written;
 }
 
 /* #3064: the bindings of one name under a HoistJoins' root, in the order
  * join_walk meets them, and what the walk typing them has made of them.
  * The walk types binds[0..typed) in that order; their parts are final for
- * it, joined in `head`. A binding not typed yet changes only when the walk
+ * it, folded in `head`. A binding not typed yet changes only when the walk
  * types it, so the parts of binds[typed..count) that `join` read (`rest`,
  * those that are numbers) stand until then, and `join` with them. */
 typedef struct {
     const ASTNode* bind;
     const ASTNode* arm;
     Type* part;
+    int written;
 } JoinRest;
 
 typedef struct {
@@ -155,9 +201,7 @@ typedef struct {
     int typed;
     int unordered;        /* typed out of order, or twice: each ask joins them all */
     int started;          /* `head` and `rest` are kept from the first ask on */
-    Type* head;
-    const ASTNode* head_arm;
-    int head_apart;
+    JoinFold head;
     JoinRest* rest;
     int rest_count;
     int rest_next;        /* rest[0..rest_next) are typed now, and in `head` */
@@ -198,8 +242,7 @@ HoistJoins* hoist_joins_new(ASTNode* root) {
 }
 
 static void name_join_forget(HoistNameJoin* nj) {
-    if (nj->head) free_type(nj->head);
-    nj->head = NULL;
+    fold_free(&nj->head);
     for (int i = 0; i < nj->rest_count; i++) free_type(nj->rest[i].part);
     free(nj->rest);
     nj->rest = NULL;
@@ -223,8 +266,9 @@ void hoist_joins_typed(HoistJoins* j, const ASTNode* decl) {
     nj->typed++;
     if (!nj->started) return;
     const ASTNode* v = NULL;
-    Type* t = join_part(decl, &v);
-    join_add(&nj->head, &nj->head_arm, &nj->head_apart, t, v);
+    int written = 0;
+    Type* t = join_part(decl, &v, &written);
+    fold_add(&nj->head, t, v, written);
     /* Its part as `join` read it: none, or the one `rest` holds. */
     JoinRest* r = nj->rest_next < nj->rest_count && nj->rest[nj->rest_next].bind == decl
                   ? &nj->rest[nj->rest_next] : NULL;
@@ -235,16 +279,13 @@ void hoist_joins_typed(HoistJoins* j, const ASTNode* decl) {
 Type* hoist_joins_get(HoistJoins* j, const char* name) {
     HoistNameJoin* nj = j && name ? (HoistNameJoin*)strmap_get(&j->names, name) : NULL;
     if (!nj) return NULL;
-    Type* acc = NULL;
-    const ASTNode* arm = NULL;
-    int apart = 0;
+    JoinFold f;
+    memset(&f, 0, sizeof(f));
     if (nj->unordered) {
-        for (int i = 0; i < nj->count && !apart; i++) {
-            const ASTNode* v = NULL;
-            Type* t = join_part(nj->binds[i], &v);
-            join_add(&acc, &arm, &apart, t, v);
-        }
-        return join_result(acc, apart);
+        for (int i = 0; i < nj->count; i++) fold_bind(&f, nj->binds[i]);
+        Type* r = fold_result(&f);
+        fold_free(&f);
+        return r;
     }
     if (!nj->started) {
         nj->started = 1;
@@ -253,25 +294,26 @@ Type* hoist_joins_get(HoistJoins* j, const char* name) {
                                                             sizeof(JoinRest));
         for (int i = 0; i < nj->count; i++) {
             const ASTNode* v = NULL;
-            Type* t = join_part(nj->binds[i], &v);
+            int written = 0;
+            Type* t = join_part(nj->binds[i], &v, &written);
             if (i < nj->typed) {
-                join_add(&nj->head, &nj->head_arm, &nj->head_apart, t, v);
+                fold_add(&nj->head, t, v, written);
             } else if (t) {
                 JoinRest* r = &nj->rest[nj->rest_count++];
                 r->bind = nj->binds[i];
                 r->arm = v;
                 r->part = clone_type(t);
+                r->written = written;
             }
         }
     }
     if (!nj->fresh) {
-        acc = nj->head ? clone_type(nj->head) : NULL;
-        arm = nj->head_arm;
-        apart = nj->head_apart;
-        for (int i = nj->rest_next; i < nj->rest_count && !apart; i++)
-            join_add(&acc, &arm, &apart, nj->rest[i].part, nj->rest[i].arm);
+        fold_copy(&f, &nj->head);
+        for (int i = nj->rest_next; i < nj->rest_count; i++)
+            fold_add(&f, nj->rest[i].part, nj->rest[i].arm, nj->rest[i].written);
         if (nj->join) free_type(nj->join);
-        nj->join = join_result(acc, apart);
+        nj->join = fold_result(&f);
+        fold_free(&f);
         nj->fresh = 1;
     }
     return nj->join ? clone_type(nj->join) : NULL;
@@ -348,7 +390,8 @@ Type* hoist_join_type(ASTNode* scope_body, const char* name, Type* seed) {
     if (!is_number_type(seed)) return NULL;   /* not a numeric kind: nothing to join */
     /* #3064: the bindings' own join, as an if-expression's; with two that
      * no type holds, the seed stands and the checker refuses the other
-     * (sibling_binding_other_type). */
+     * (sibling_binding_other_type). #3070: a written type is the join, and
+     * the checker refuses a binding it does not hold. */
     Type* acc = hoist_numeric_join(scope_body, name);
     if (acc && types_equal(acc, seed)) { free_type(acc); return NULL; }
     return acc;

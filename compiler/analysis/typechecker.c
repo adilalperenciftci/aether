@@ -305,6 +305,7 @@ void add_symbol(SymbolTable* table, const char* name, Type* type, int is_actor, 
     symbol->inferred_in = NULL;
     symbol->walk_id = 0;
     symbol->branch_hoisted = 0;
+    symbol->hoist_written = 0;
     symbol->hoist_pending = 0;
     symbol->is_const = 0;
     symbol->inferred_closure = NULL;
@@ -547,6 +548,7 @@ void add_module_alias(SymbolTable* table, const char* alias, const char* module_
     symbol->inferred_in = NULL;
     symbol->walk_id = 0;
     symbol->branch_hoisted = 0;
+    symbol->hoist_written = 0;
     symbol->hoist_pending = 0;
     symbol->is_const = 0;
     symbol->inferred_closure = NULL;
@@ -11409,6 +11411,10 @@ static void declare_hoisted_local(SymbolTable* table, const char* name, Type* t)
     Symbol* s = lookup_symbol_local(table, name);
     if (s) {
         s->branch_hoisted = 1;
+        /* #3070: its written type is its type (the join gave it). */
+        Type* w = hoist_numeric_written(g_tc_fn_body, name);
+        s->hoist_written = w && s->type && types_equal(w, s->type);
+        if (w) free_type(w);
         /* #2683: declared ahead of its first binding, it must not hide a
          * function of its name before that binding (its own initializer
          * included): `if c { label = label() } else { ... }`. */
@@ -11459,6 +11465,30 @@ static int sibling_binding_other_type(Type* here, Type* hoisted, ASTNode* init) 
     if ((a->kind == TYPE_STRUCT && is_c_struct_name(a->struct_name)) ||
         (b->kind == TYPE_STRUCT && is_c_struct_name(b->struct_name))) return 0;
     return !is_type_compatible(here, hoisted);
+}
+
+/* #3070: `stmt` binds a hoisted local written as `w` in another branch or
+ * loop body to `init`, a value of type `t`. A type written for the local is
+ * its type, and a value it does not hold (ast_number_holds) is refused, in
+ * whichever order the two are written. Joined with the others, the written
+ * type was dropped: `x = -1` beside `uint64 x = 7` printed -1, `x = 1.5`
+ * beside `int x = 0` made a float, and in the other order the first was
+ * refused. Reports that and returns 1. */
+static int report_unheld_binding(ASTNode* stmt, Type* w, Type* t, ASTNode* init) {
+    if (!w || !t || !(is_numeric_scalar(t->kind) || t->kind == TYPE_BYTE) ||
+        ast_number_holds(w, t, init))
+        return 0;
+    char rmsg[512];
+    snprintf(rmsg, sizeof(rmsg),
+             "cannot bind '%s' to this %s value: it is written as %s in another branch or loop "
+             "body of this function, which does not hold the value, and a local first bound "
+             "inside a branch or loop body is one variable for the whole function",
+             stmt->value, type_name(t), type_name(w));
+    type_error_hint(rmsg,
+                    "use a new name for this value, or write a type that holds every value the "
+                    "local is bound to",
+                    stmt->line, stmt->column);
+    return 1;
 }
 
 /* Function (or main) entry: hoist_if_branch_vars's names. */
@@ -12943,11 +12973,27 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                          * checked; so does the first binding checked here,
                          * joined over the body as declare_hoisted_local
                          * joins (#2611). */
-                        if (bound->type && bound->type->kind == TYPE_UNKNOWN && init_type &&
+                        if (bound->hoist_written) {
+                            /* #3070: the type written for it is its type, and
+                             * is not joined away. */
+                            if (report_unheld_binding(stmt, bound->type, init_type, init)) {
+                                free_type(init_type);
+                                return 0;
+                            }
+                        } else if (bound->type && bound->type->kind == TYPE_UNKNOWN && init_type &&
                             init_type->kind != TYPE_UNKNOWN && init_type->kind != TYPE_VOID) {
                             Type* joined = hoist_join_type(g_tc_fn_body, stmt->value, init_type);
                             free_type(bound->type);
                             bound->type = joined ? joined : clone_type(init_type);
+                            /* #3070: as declare_hoisted_local marks it. */
+                            Type* w = hoist_numeric_written(g_tc_fn_body, stmt->value);
+                            bound->hoist_written = w && types_equal(w, bound->type);
+                            if (w) free_type(w);
+                            if (bound->hoist_written &&
+                                report_unheld_binding(stmt, bound->type, init_type, init)) {
+                                free_type(init_type);
+                                return 0;
+                            }
                         } else if (bound->type && init_type) {
                             /* #2980 review: function values join by mode,
                              * the stronger at each parameter. #3064: numbers
@@ -12982,6 +13028,31 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                      * outside the branches), and `std.cbor` binds the
                      * same name as int in one branch and long in
                      * another. */
+                } else if (stmt->value && stmt->node_type) {
+                    /* #3070: a hoisted local is written as one type; a
+                     * binding that writes another, in another branch or
+                     * loop body, is refused. */
+                    Symbol* hoisted = NULL;
+                    SymbolTable* hoisted_in = NULL;
+                    for (SymbolTable* t = table; t && t->parent && !hoisted; t = t->parent) {
+                        hoisted = lookup_symbol_local(t, stmt->value);
+                        if (hoisted) hoisted_in = t;
+                    }
+                    if (hoisted && hoisted->branch_hoisted && hoisted->hoist_written &&
+                        hoisted_in != table && hoisted->type &&
+                        !types_equal(stmt->node_type, hoisted->type)) {
+                        char rmsg[512];
+                        snprintf(rmsg, sizeof(rmsg),
+                            "cannot write '%s' as %s: it is written as %s in another branch or "
+                            "loop body of this function, and a local first bound inside a branch "
+                            "or loop body is one variable for the whole function, of one type",
+                            stmt->value, type_name(stmt->node_type), type_name(hoisted->type));
+                        type_error_hint(rmsg,
+                            "write the same type in both, or use a new name for this value",
+                            stmt->line, stmt->column);
+                        free_type(init_type);
+                        return 0;
+                    }
                 }
                 /* Actor state is not a local: `state ref = 0` then
                  * `ref = <ptr>` is the documented wiring pattern and is

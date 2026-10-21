@@ -1321,6 +1321,22 @@ const ASTNode* join_arm_after(const ASTNode* kept, const ASTNode* next) {
     return nmag > kmag ? next : kept;
 }
 
+int ast_number_holds(Type* w, Type* t, const ASTNode* v) {
+    if (!w || !t) return 1;
+    int is_signed, neg;
+    unsigned long long mag;
+    int bits = integer_kind_bits(w, &is_signed);
+    if (bits && integer_literal_arm(v, &neg, &mag)) {
+        if (!is_signed) return !neg && (bits == 64 || mag <= (1ull << bits) - 1);
+        unsigned long long top = 1ull << (bits - 1);
+        return neg ? mag <= top : mag < top;
+    }
+    Type* j = branch_join_type(w, NULL, t, v);
+    int holds = j && types_equal(j, w);
+    if (j) free_type(j);
+    return holds;
+}
+
 static void clause_join_fail(ClauseJoin* out, ClauseJoinStatus st, ASTNode* at, Type* other) {
     out->status = st;
     out->at = at;

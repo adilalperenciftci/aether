@@ -43,6 +43,10 @@ typedef struct Symbol {
     // which knows the joined type; this only makes the name readable after
     // the block.
     int branch_hoisted;
+    // #3070: a hoisted local one of whose bindings writes its number type
+    // (`uint64 x = 7`): that is its type, and a binding of a value it does
+    // not hold, in another branch or loop body, is refused.
+    int hoist_written;
     // #2683: a hoisted local named after a function, not yet bound in source
     // order. A local's scope starts after its initializer, so until the
     // checker reaches its first binding the name is still the function's:

@@ -754,6 +754,12 @@ Type* branch_join_type(Type* a, const ASTNode* a_arm, Type* b, const ASTNode* b_
  * since the join holds each. On the first literal alone, `0`, `-1` and a
  * uint32 joined to a uint32, and -1 came back as 4294967295. */
 const ASTNode* join_arm_after(const ASTNode* kept, const ASTNode* next);
+/* #3070: does the written number type `w` hold `v`, a value of type `t`? An
+ * integer literal (`7`, `-1`) is held when it is in w's range; any other
+ * value when it joins w to w (branch_join_type): an int in a long, a uint32
+ * in a uint64, not a signed value in a uint64, a long in an int, or a float
+ * in an int. */
+int ast_number_holds(Type* w, Type* t, const ASTNode* v);
 /* #2996: the program's sum types, for branch_join_type: registered by the
  * checker as it resolves them, reset before each program. */
 void ast_sums_reset(void);
