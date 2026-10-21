@@ -33,6 +33,15 @@ step(b: byte[]) {
     b[0]++
 }
 
+struct Cell {
+    n: int
+}
+
+// The cell a store goes through, given an index it does not use.
+at(c: @into ptr, k: int) -> *Cell {
+    return c as *Cell
+}
+
 // A reader, as the 458 in the tree are.
 sum(b: byte[]) -> int {
     total = 0
@@ -79,6 +88,20 @@ main() {
     tail = hv[1..]
     check(tail.len == 2 && tail[0] == 98, "a sub-slice's length and bytes")
     check(sum(hv[0..2]) == 195, "a reader given a sub-slice")
+
+    // A read of the view inside a store target is a read: in the index of
+    // a slice of the program's own, and as an argument of a call the store
+    // goes through (they went through the store's check and panicked).
+    out = make([]int, 128)
+    out[lit[0] as int] = 1
+    out[lit[1] - 97] += 5
+    out[lit[2] as int]++
+    check(out[97] == 1 && out[1] == 5 && out[99] == 1, "the view read in a store's index")
+    free(out)
+    cell = heap.new(Cell)
+    at(cell, lit[0] as int).n = 7
+    check(cell.n == 7, "the view read in a call's argument inside a store target")
+    heap.free(cell)
 
     // A writable slice is still writable.
     w = make([]byte, 3)

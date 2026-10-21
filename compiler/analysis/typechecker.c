@@ -5324,14 +5324,35 @@ static int count_bindings_of(const ASTNode* n, const char* name) {
 
 static const ASTNode* readonly_view_local_init(const char* name, int depth);
 
-/* #3025: is `e` a read-only view of a string's bytes: a call of
- * `string.bytes`, the intrinsic that marks it, or a sub-slice of a local
- * bound only to one? */
+/* Is `e` the intrinsic that marks a view read-only, `__slice_readonly(v)`? */
+static int is_readonly_mark(const ASTNode* e) {
+    return e && e->type == AST_FUNCTION_CALL && e->value && !strcmp(e->value, "__slice_readonly");
+}
+
+/* Does a value `return` under `n` (its own, not a closure's) give a view the
+ * intrinsic marks read-only, as std.string's bytes() does? */
+static int returns_readonly_mark(const ASTNode* n) {
+    if (!n || ast_is_own_function(n)) return 0;
+    if (n->type == AST_RETURN_STATEMENT && n->child_count > 0)
+        return is_readonly_mark(n->children[0]);
+    for (int i = 0; i < n->child_count; i++)
+        if (returns_readonly_mark(n->children[i])) return 1;
+    return 0;
+}
+
+/* #3025: is `e` a read-only view of a string's bytes: the intrinsic that
+ * marks it, a call of a function that returns one (std.string's bytes(),
+ * resolved as the call is, not by its name: a program's own `string_bytes`
+ * returning a buffer of its own is written as any slice), or a sub-slice of
+ * a local bound only to one? */
 static int is_readonly_view_source(const ASTNode* e, int depth) {
     if (!e || depth > 8) return 0;
-    if (e->type == AST_FUNCTION_CALL && e->value)
-        return !strcmp(e->value, "string.bytes") || !strcmp(e->value, "string_bytes") ||
-               !strcmp(e->value, "__slice_readonly");
+    if (e->type == AST_FUNCTION_CALL && e->value) {
+        if (is_readonly_mark(e)) return 1;
+        ASTNode* def = effect_resolve_callee(g_typecheck_program, e->value);
+        return def && def->child_count > 0 &&
+               returns_readonly_mark(def->children[def->child_count - 1]);
+    }
     if (e->type == AST_SLICE_EXPR && e->child_count > 0 && e->children[0]) {
         const ASTNode* b = e->children[0];
         if (b->type == AST_IDENTIFIER && b->value) return readonly_view_local_init(b->value, depth + 1) != NULL;

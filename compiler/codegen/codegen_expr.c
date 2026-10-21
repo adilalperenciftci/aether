@@ -6017,6 +6017,19 @@ static int signed_join_of_unsigned(Type* vt, Type* bt) {
            (bt->kind == TYPE_UINT32 || bt->kind == TYPE_UINT64);
 }
 
+/* `e` as a value that is read, whatever it is part of. An index, and a
+ * call (its arguments and its result), inside a store target are read:
+ * `out[v[0] as int] = 1` and `at(p, v[0] as int).x = 1` store into `out`
+ * and `*at(...)`, and read `v`. Generated as part of the target, a read of
+ * a read-only view there went through aether_slice_at_w and panicked as a
+ * write (#3025 review). */
+static void generate_read(CodeGenerator* gen, ASTNode* e) {
+    int saved = gen->generating_lvalue;
+    gen->generating_lvalue = 0;
+    generate_expression(gen, e);
+    gen->generating_lvalue = saved;
+}
+
 /* The operand of the unary `expr`. `++` and `--` store into it, so an
  * element of a slice there is a store target (#3025: aether_slice_at_w,
  * which refuses a read-only view), as `s[i] = v`'s is. */
@@ -7223,6 +7236,13 @@ static int is_literal_float_div_by_zero(const ASTNode* e) {
 
 void generate_expression(CodeGenerator* gen, ASTNode* expr) {
     if (!expr) return;
+
+    /* A call is no place a store writes into: inside a store target it is
+     * read (generate_read). */
+    if (gen->generating_lvalue && expr->type == AST_FUNCTION_CALL) {
+        generate_read(gen, expr);
+        return;
+    }
 
     codegen_note_diag_pos(expr);
 
@@ -11478,7 +11498,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                     generate_expression(gen, base);
                     gen->generating_lvalue = saved_lvalue;
                     fprintf(gen->output, ", (int64_t)(");
-                    generate_expression(gen, expr->children[1]);
+                    generate_read(gen, expr->children[1]);
                     fprintf(gen->output, "), sizeof(%s), ", elem);
                     emit_slice_diag_file(gen, expr);
                     fprintf(gen->output, ", %d))", expr->line);
@@ -11490,7 +11510,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                 generate_expression(gen, base);
                 if (str_base) fprintf(gen->output, ")");
                 fprintf(gen->output, "[");
-                generate_expression(gen, expr->children[1]);
+                generate_read(gen, expr->children[1]);
                 fprintf(gen->output, "]");
             }
             break;

@@ -138,5 +138,21 @@ main() {
 }
 AE
 
+# A function of the program's own that happens to be named as the merged
+# std one is, returning a buffer of its own, is no read-only view: the
+# checker resolves the call, it does not read its name.
+accepted own_string_bytes <<'AE'
+string_bytes(n: int) -> byte[] {
+    return make([]byte, n)
+}
+
+main() {
+    w = string_bytes(4)
+    w[0] = 9
+    println("${w[0]}")
+    free(w)
+}
+AE
+
 if [ "$fail" -ne 0 ]; then exit 1; fi
 echo "  [PASS] readonly_string_view: a store the checker can see through string.bytes is refused; reads and other slices compile"

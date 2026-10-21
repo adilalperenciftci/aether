@@ -8,4 +8,6 @@
   from it, in the function or one it is given to, panics with "a write
   through a read-only view of a string"; a store the checker can see
   through a local bound to it is E0200. Reads are zero-copy and cost what
-  they did (#3025).
+  they did, a read of the view where a store target reads it (`out[v[0] as
+  int] = 1`) included; the checker takes std.string's bytes() for the view,
+  not a function of the program's own of that name (#3025).
