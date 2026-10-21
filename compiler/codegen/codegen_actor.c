@@ -432,12 +432,16 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
     print_line(gen, "%s {", actor->value);
     indent(gen);
     
-    /* The prefix of a generated actor IS an ActorBase: the scheduler is handed
-     * a pointer to it and casts. The fields come from the runtime's one
-     * definition (AETHER_ACTOR_BASE_FIELDS), so a field added there is here
-     * too; a hand-written copy that missed one put the first state field at
-     * its offset, and the scheduler wrote through it. */
-    print_line(gen, "AETHER_ACTOR_BASE_FIELDS");
+    /* The first member of a generated actor IS an ActorBase: the scheduler is
+     * handed a pointer to it and casts. It is the runtime's one definition,
+     * so a field added there is here too; a hand-written copy that missed one
+     * put the first state field at its offset, and the scheduler wrote
+     * through it. A member of its own, not the base's fields spliced in: a
+     * state named like one of them (`state id`, `state active`) was a second
+     * member of that name and did not compile (#3094). The generated code
+     * reaches the base's fields through it, and the state fields keep the
+     * names the program gave them. */
+    print_line(gen, "ActorBase _aether_base;");
     print_line(gen, "");
 
     // State fields (user-defined)
@@ -478,13 +482,11 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
     unindent(gen);
     print_line(gen, "} %s;", actor->value);
     emit_actor_destroy_state(gen, actor);
-    /* The scheduler casts this to ActorBase*, so every field it touches has to
-     * sit at the ActorBase offset. Checking the last one pins the whole
-     * prefix. */
+    /* The scheduler casts this to ActorBase*, so the base has to be the first
+     * member, at offset 0. */
     print_line(gen, "#if defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L");
-    print_line(gen, "_Static_assert(offsetof(%s, scheduler_owned) == offsetof(ActorBase, scheduler_owned),",
-               actor->value);
-    print_line(gen, "               \"%s prefix must match ActorBase\");", actor->value);
+    print_line(gen, "_Static_assert(offsetof(%s, _aether_base) == 0,", actor->value);
+    print_line(gen, "               \"%s's ActorBase must be its first member\");", actor->value);
     print_line(gen, "#endif");
     print_line(gen, "");
     
@@ -820,13 +822,13 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
     // Timeout check — fires if idle longer than timeout_ns
     if (timeout_arm) {
         print_line(gen, "// Timeout check");
-        print_line(gen, "if (self->timeout_ns > 0 && self->last_activity_ns > 0) {");
+        print_line(gen, "if (self->_aether_base.timeout_ns > 0 && self->_aether_base.last_activity_ns > 0) {");
         indent(gen);
         print_line(gen, "uint64_t _now = (uint64_t)_aether_clock_ns();");
-        print_line(gen, "if ((_now - self->last_activity_ns) >= self->timeout_ns) {");
+        print_line(gen, "if ((_now - self->_aether_base.last_activity_ns) >= self->_aether_base.timeout_ns) {");
         indent(gen);
-        print_line(gen, "self->timeout_ns = 0;  // one-shot");
-        print_line(gen, "self->last_activity_ns = 0;");
+        print_line(gen, "self->_aether_base.timeout_ns = 0;  // one-shot");
+        print_line(gen, "self->_aether_base.last_activity_ns = 0;");
         // Generate the timeout body
         if (timeout_arm->child_count >= 2 && timeout_arm->children[1]) {
             ASTNode* tbody = timeout_arm->children[1];
@@ -867,24 +869,24 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
 
     print_line(gen, "Message msg;");
     print_line(gen, "");
-    print_line(gen, "if (unlikely(!mailbox_receive(&self->mailbox, &msg))) {");
+    print_line(gen, "if (unlikely(!mailbox_receive(&self->_aether_base.mailbox, &msg))) {");
     indent(gen);
     if (timeout_arm) {
         // Start timeout countdown when mailbox is empty
-        print_line(gen, "if (self->timeout_ns > 0 && self->last_activity_ns == 0) {");
+        print_line(gen, "if (self->_aether_base.timeout_ns > 0 && self->_aether_base.last_activity_ns == 0) {");
         indent(gen);
-        print_line(gen, "self->last_activity_ns = (uint64_t)_aether_clock_ns();");
+        print_line(gen, "self->_aether_base.last_activity_ns = (uint64_t)_aether_clock_ns();");
         unindent(gen);
         print_line(gen, "}");
     }
-    print_line(gen, "atomic_store_explicit(&self->active, 0, memory_order_relaxed);");
+    print_line(gen, "atomic_store_explicit(&self->_aether_base.active, 0, memory_order_relaxed);");
     print_line(gen, "return;");
     unindent(gen);
     print_line(gen, "}");
     if (timeout_arm) {
         // Message received — cancel timeout (one-shot: fire only if no messages ever arrive)
-        print_line(gen, "self->timeout_ns = 0;");
-        print_line(gen, "self->last_activity_ns = 0;");
+        print_line(gen, "self->_aether_base.timeout_ns = 0;");
+        print_line(gen, "self->_aether_base.last_activity_ns = 0;");
     }
     print_line(gen, "aether_reply_slot_set(msg._reply_slot);");
     print_line(gen, "");
@@ -1099,10 +1101,10 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
      * its block came from an allocator that scheduler_release_actor's free
      * does not match (#2485). */
     print_line(gen, "if (!actor) return NULL;");
-    print_line(gen, "atomic_init(&actor->active, 0);  // inactive until first message send");
-    print_line(gen, "atomic_init(&actor->migrate_to, -1);");
-    print_line(gen, "atomic_init(&actor->dead, 0);");
-    print_line(gen, "actor->auto_process = 0;");
+    print_line(gen, "atomic_init(&actor->_aether_base.active, 0);  // inactive until first message send");
+    print_line(gen, "atomic_init(&actor->_aether_base.migrate_to, -1);");
+    print_line(gen, "atomic_init(&actor->_aether_base.dead, 0);");
+    print_line(gen, "actor->_aether_base.auto_process = 0;");
     print_line(gen, "");
     
     for (int i = 0; i < actor->child_count; i++) {
@@ -1143,7 +1145,7 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
             }
         }
     }
-    print_line(gen, "actor->destroy_state = _aether_state_drop_%s;   /* #2528 */", actor->value);
+    print_line(gen, "actor->_aether_base.destroy_state = _aether_state_drop_%s;   /* #2528 */", actor->value);
 
     // Auto-initialize "my_ref" to the actor's own pointer so it is valid
     // immediately after spawn — no Setup message needed.  This eliminates
@@ -1162,16 +1164,16 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
 
     print_line(gen, "");
     print_line(gen, "#if AETHER_HAS_THREADS");
-    print_line(gen, "if (actor->auto_process) {");
+    print_line(gen, "if (actor->_aether_base.auto_process) {");
     indent(gen);
     // Without its thread the actor is an ordinary one, stepped by its core
     // and ended by its release (#2517). The runtime starts the thread: the
     // program's C has the thread types but not the platform calls behind
     // them, which on Windows would mean <windows.h> (#2673).
-    print_line(gen, "if (aether_actor_thread_start(&actor->thread, actor) != 0) {");
+    print_line(gen, "if (aether_actor_thread_start(&actor->_aether_base.thread, actor) != 0) {");
     indent(gen);
-    print_line(gen, "actor->thread = 0;");
-    print_line(gen, "actor->auto_process = 0;");
+    print_line(gen, "actor->_aether_base.thread = 0;");
+    print_line(gen, "actor->_aether_base.auto_process = 0;");
     unindent(gen);
     print_line(gen, "}");
     unindent(gen);
@@ -1194,14 +1196,14 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
     if (timeout_arm && timeout_arm->child_count >= 1) {
         print_line(gen, "// Receive timeout (milliseconds -> nanoseconds)");
         print_indent(gen);
-        fprintf(gen->output, "actor->timeout_ns = (uint64_t)(");
+        fprintf(gen->output, "actor->_aether_base.timeout_ns = (uint64_t)(");
         const char* prev_alias = gen->state_self_alias;
         gen->state_self_alias = "actor";
         generate_expression(gen, timeout_arm->children[0]);
         gen->state_self_alias = prev_alias;
         fprintf(gen->output, ") * 1000000ULL;\n");
-        print_line(gen, "actor->last_activity_ns = (uint64_t)_aether_clock_ns();  // Start timeout countdown at spawn");
-        print_line(gen, "atomic_store_explicit(&actor->active, 1, memory_order_release);  // Activate for timeout polling");
+        print_line(gen, "actor->_aether_base.last_activity_ns = (uint64_t)_aether_clock_ns();  // Start timeout countdown at spawn");
+        print_line(gen, "atomic_store_explicit(&actor->_aether_base.active, 1, memory_order_release);  // Activate for timeout polling");
     }
 
     print_line(gen, "");
@@ -1213,7 +1215,7 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
     print_line(gen, "void _aether_send_%s(%s* actor, int type, int payload) {", actor->value, actor->value);
     indent(gen);
     print_line(gen, "Message msg = {type, 0, payload, NULL};");
-    print_line(gen, "if (atomic_load_explicit(&actor->assigned_core, memory_order_relaxed) == aether_core_id_get()) {");
+    print_line(gen, "if (atomic_load_explicit(&actor->_aether_base.assigned_core, memory_order_relaxed) == aether_core_id_get()) {");
     indent(gen);
     print_line(gen, "scheduler_send_local((ActorBase*)actor, msg);");
     unindent(gen);

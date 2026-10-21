@@ -1,0 +1,22 @@
+// A state named like the member the generated actor keeps the runtime's
+// actor fields in (#3094): refused by the checker, not left to the C
+// compiler. Any other base field name is a normal state
+// (tests/regression/test_actor_state_base_field_names.ae).
+
+message Hi { n: int }
+
+actor A {
+    state _aether_base = 0
+
+    receive {
+        Hi(n) -> {
+            _aether_base = n
+        }
+    }
+}
+
+main() {
+    a = spawn(A())
+    a ! Hi { n: 1 }
+    wait_for_idle()
+}

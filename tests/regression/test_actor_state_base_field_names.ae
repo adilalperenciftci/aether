@@ -1,0 +1,118 @@
+// #3094: an actor state may be named like any of the runtime's own actor
+// fields. The generated actor struct spliced those fields in
+// (AETHER_ACTOR_BASE_FIELDS), so `state id` was a second member named `id`
+// and the C compiler refused it ("duplicate member"). The base is a member
+// of its own now; each state here shadows a base field by name, is written
+// by the handlers and read back from main, while the actor still receives,
+// replies and arms its receive timeout through the base fields underneath.
+
+message Bump { n: int }
+message Get {}
+message Value { v: int }
+
+actor Shadow {
+    state id = 0
+    state active = 0
+    state mailbox = 0
+    state step = 0
+    state thread = 0
+    state dead = 0
+    state inbox = 0
+    state reply_slot = 0
+    state step_lock = 0
+    state assigned_core = 0
+    state migrate_to = 0
+    state timeout_ns = 0
+    state last_activity_ns = 0
+
+    receive {
+        Bump(n) -> {
+            id = id + n
+            active = active + 1
+            mailbox = mailbox + 2 * n
+            step = step + 1
+            thread = n
+            dead = dead + 1
+            inbox = inbox + 3
+            reply_slot = 7
+            step_lock = 8
+            assigned_core = 9
+            migrate_to = 10
+            timeout_ns = timeout_ns + n
+            last_activity_ns = 11
+        }
+        Get() -> {
+            reply Value { v: id }
+        }
+    }
+}
+
+// A receive timeout is armed in the base's timeout fields, not in these.
+message Ping {}
+
+actor Waiter {
+    state timeout_ns = 5
+    state last_activity_ns = 6
+    state fired = 0
+
+    receive {
+        Ping() -> {
+            fired = fired + 0
+        }
+    } after 50 -> {
+        fired = 1
+    }
+}
+
+main() {
+    println("=== actor states named like the base's fields (#3094) ===")
+    failures = 0
+
+    s = spawn(Shadow())
+    i = 1
+    while i <= 4 {
+        s ! Bump { n: i }
+        i = i + 1
+    }
+    wait_for_idle()
+
+    int v = s ? Get {}
+    if s.id != 10 || v != 10 {
+        println("  FAIL id ${s.id}, replied ${v}, expected 10")
+        failures = failures + 1
+    }
+    if s.active != 4 || s.mailbox != 20 || s.step != 4 || s.thread != 4 || s.dead != 4 {
+        println("  FAIL active ${s.active} mailbox ${s.mailbox} step ${s.step} thread ${s.thread} dead ${s.dead}")
+        failures = failures + 1
+    }
+    if s.inbox != 12 || s.reply_slot != 7 || s.step_lock != 8 || s.assigned_core != 9 || s.migrate_to != 10 {
+        println("  FAIL inbox ${s.inbox} reply_slot ${s.reply_slot} step_lock ${s.step_lock} assigned_core ${s.assigned_core} migrate_to ${s.migrate_to}")
+        failures = failures + 1
+    }
+    if s.timeout_ns != 10 || s.last_activity_ns != 11 {
+        println("  FAIL timeout_ns ${s.timeout_ns} last_activity_ns ${s.last_activity_ns}")
+        failures = failures + 1
+    }
+
+    // The spawn arms the receive timeout in the base's fields; the states of
+    // the same names keep their own values.
+    w = spawn(Waiter())
+    w ! Ping {}
+    wait_for_idle()
+    if w.timeout_ns != 5 || w.last_activity_ns != 6 {
+        println("  FAIL timeout_ns ${w.timeout_ns}, last_activity_ns ${w.last_activity_ns}, expected 5 and 6")
+        failures = failures + 1
+    }
+
+    if failures == 0 {
+        println("  PASS every state kept its own value beside the base's fields")
+        println("")
+        println("All PASS")
+    } else {
+        println("")
+        println("${failures} FAILURE(S)")
+        exit(1)
+    }
+}
+
+extern exit(code: int)
