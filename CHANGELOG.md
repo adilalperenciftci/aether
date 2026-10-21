@@ -14,6 +14,136 @@ cut while your branch is open cannot fold your entry into the released section.
 
 ## [current]
 
+## [0.839.0]
+
+### Fixed
+
+- **A type written for a local bound in several branches is its type.**
+  `uint64 x = 7` in one branch and `x = n` (an int) in another was refused
+  in that order and compiled as an int in the other; `x = -1` beside it
+  printed -1, and `int x = 0` beside `x = 1.5` made `x` a float. The
+  written type is the local's type now, in either order: a binding of a
+  value it holds binds (`x = 5` beside `uint8 x = 7`), and one it does not
+  hold, or one that writes another type, is a compile error at that
+  binding (#3070).
+
+- **A clause set with a `none` clause, a `null` clause and a string or
+  pointer clause returns its optional.** `f(0) -> none`, `f(1) -> null`
+  and `f(k) -> "s"` was refused ("return string? and `null`, which
+  string? does not take"); it returns a `string?` now, `f(1)` the string
+  `null` is, as `return null` from a `-> string?` function gives, in any
+  order of the clauses. A clause set whose clauses no one type holds is
+  reported once; the error was printed twice (#3063).
+
+- **A clause set of `none` and a clause that only calls the set again says
+  it has no type.** `last(0) -> none` beside `last(k) -> last(k - 1)` was
+  never settled, and only `last(3) ?? -1` was refused, as no optional. A
+  clause that only calls its set gives the set's result and no type of its
+  own now, so this set is the error a set of only `none` clauses is,
+  naming the missing `T`; beside a clause that gives one, the set is its
+  optional, as before (#3063).
+
+- **A module's constant reads through its namespace beside a function of
+  that name.** Since 0.837.0, a program with a function `frame() -> ptr`
+  that imports a module which itself imports `frame` failed in that
+  module: `frame.SETS` was read as a field of the function's `ptr` result,
+  "Type 'ptr' has no field 'SETS'", and so did the program's own
+  `frame.SETS`. A function has no fields, so it no longer hides a
+  namespace of its name; a value of the name (a local, a parameter, a
+  global) still does (#3084).
+
+- **`null` is the empty closure in every closure slot, `fn?` ones
+  included.** `let o: fn? = null`, a `fn?` field, parameter or re-bind
+  given `null`, a tuple literal's `null` part (`(null, 1)`), a module
+  `fn?` var re-bound to `null`, `o ?? null`, an all-`null` literal in a
+  `fn[2]` slot and `o == null` on a `fn?` failed in the C compiler; `return
+  null` from `-> fn?` and `[held, null]` beside a `fn?` were refused. Each
+  takes the empty closure now: a `fn?` given `null` holds it, as a `ptr?`
+  given `null` holds a null pointer, so it is not `none`, and `o == null`
+  is true. `==` between two `fn?`, or a `fn?` and a closure, which also
+  failed in C, is a compile error, as between two closures (#3077).
+
+- **A `fn?` a call returns is given back when nothing binds it.** A
+  function returning `fn?` hands its caller the closure in it; bound to a
+  local the local gave it back, but `maybe(k) != none`, `maybe(k) ==
+  null`, a `match` on the call, `maybe(k)!`, `maybe(k) ?? d` and the call
+  as a statement leaked the closure's environment at every call (16 bytes
+  per call for a closure capturing one int). The expression that reads
+  the optional gives the closure back now: a comparison once it is read, a
+  `match` at every exit of the arm that binds it, `!` and `??` as a fresh
+  closure their place adopts (#3078).
+
+- **A parked core is woken for every message, and Windows no longer binds
+  scheduler threads to one CPU.** Sends from a loop in `main()` (the batch
+  path) and a core's deferred sends to another core enqueued without
+  waking a core that had parked, and the park and the wake had no full
+  fence between them, so either side could miss the other: a core slept on
+  its messages until its timed wait ran out, at least a 15.6 ms tick on
+  Windows. A fork-join of 8 workers ran from 1.05 to 21.81 M msg/s run to
+  run; it runs at 24.83 to 31.89. On Windows a scheduler thread now gets an
+  ideal processor, a hint, instead of a hard binding to one logical CPU,
+  which it could not leave while another program's thread ran there
+  (#3087).
+
+- **A module's body sees its own declarations and imports, not the
+  program's.** A module's code resolved names the program declared: its
+  `helper()` called a program's `helper()` it never imported, and a
+  program's `struct frame` took the place of the module's own import in
+  `frame.SETS`. A module's call of a function it does not see is refused
+  now, and its `frame.SETS` is its import's constant beside any function
+  or type of that name, the program's or its own: a module's own `frame()`
+  no longer turns it into `user_frame.SETS` (#3088).
+
+- **A written type of any kind is the type of a local bound in several
+  branches.** `x = "s"` in one branch beside `int x = 1` in the other made
+  `x` a string, and the int branch stored 1 into it: the program crashed
+  when that branch ran (the other order was refused). The written type is
+  the local's type in either order now, and a binding of a value it does
+  not hold, the string here, is a compile error at that binding (#3070).
+
+- **A tuple local that owns nothing compiles.** `t = (null, 1)`, `(p, 1)`
+  with p a `ptr`, and `(1.5, true)`, bound to a local and destructured,
+  failed in the C compiler with "unknown type name '_tuple_ptr_int'": the
+  tuple's C type was declared after the line that used it. Every tuple
+  type a program uses is declared ahead of its functions now (#3077).
+
+- **A scheduler park longer than 2.1 seconds now waits as long as it was
+  set to on Windows.** The deadline of a park's timed wait was computed in
+  a `long`, which is 32 bits on Windows and on 32-bit targets, so a wait
+  past 2147 ms (only the test settings `scheduler_set_actor_park_ms` and
+  `scheduler_set_core_park_ms` ask for one) returned at once or slept for
+  weeks. The default parks, 1 to 32 ms, were not affected (#3095).
+
+- **The HTTP server, middleware and proxy keep time in 64 bits on Windows.**
+  A `long` is 32 bits there, and clock readings, stored times and sums were
+  kept in one:
+  - The server's metrics overflowed their request-duration sum after 35.8
+    minutes of summed request time. The proxy's latency sum overflowed
+    after 24.8 days of summed latency (hours on a busy proxy). Their
+    counters overflowed after 2^31.
+  - A single request longer than 35.8 minutes logged a wrapped duration.
+  - The proxy's clock went negative after 24.8 days of uptime and stayed
+    negative for as long again. While it was negative, proxy request
+    deadlines read as none, so upstream timeouts stopped firing, and cache
+    expiry compared across the wrap.
+  - A proxy cache TTL past 24.8 days expired the entry as it was stored.
+  - A rate-limiter bucket idle for more than 24.8 days did not refill.
+
+  The clocks' products also overflowed: undefined behaviour that only
+  happened to wrap. The event loop parsed `Content-Length` into a `long`,
+  so a length past 2 GiB read short. `HttpRequestHook`, the C-only request
+  hook, now takes `int64_t duration_us` (#3096).
+
+### Performance
+
+- **A function that binds a local many times compiles in linear time
+  again.** 0.838.0 joined a local's bindings as an if-expression's
+  branches join by walking the whole function body at every binding of
+  it, so a body bound n times cost n walks: a `main` with `x = x + i`
+  6000 times took 4.9 s to compile, 12000 times 24.7 s. The join is kept
+  as the bindings are typed now, with the same answers: 0.12 s and 0.31 s
+  (#3064).
+
 ## [0.838.0]
 
 ### Fixed
