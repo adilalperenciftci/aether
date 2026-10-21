@@ -6240,7 +6240,14 @@ static int pending_reaches_busy(ASTNode* n, PendingResults* p, char* seen) {
     if (n->type == AST_FUNCTION_CALL && n->value) {
         for (int j = 0; j < p->count; j++) {
             if (strcmp(p->fns[j]->value, n->value)) continue;
-            if (p->state[j] == 1) return 1;
+            /* One being checked whose result is known already (from its
+             * parameters, pending_result_from_parameters) holds nothing
+             * up. */
+            if (p->state[j] == 1) {
+                Type* r = p->fns[j]->node_type;
+                if (!r || r->kind == TYPE_UNKNOWN) return 1;
+                continue;
+            }
             if (p->state[j] == 0 && !seen[j]) {
                 seen[j] = 1;
                 if (pending_reaches_busy(p->fns[j], p, seen)) return 1;
@@ -6260,10 +6267,78 @@ static int pending_reaches_busy(ASTNode* n, PendingResults* p, char* seen) {
  * and stayed unknown itself, so `a`, whose `return p.n` types it, and `b`,
  * which returns `a(...)`, left `b` the int default when `a` was entered
  * first. */
+static Type* refine_inferred_result(ASTNode* o, ASTNode* ret, SymbolTable* table);
+
+/* Does `v` read nothing but the parameters of `fn`: names of them, their
+ * fields and elements, literals and arithmetic over them, and calls of
+ * functions whose results are known (in `table`) given such arguments? */
+static int reads_only_parameters(const ASTNode* v, const ASTNode* fn, SymbolTable* table) {
+    if (!v) return 1;
+    switch (v->type) {
+        case AST_LITERAL: break;
+        case AST_FUNCTION_CALL: {
+            Symbol* s = v->value ? lookup_symbol(table, v->value) : NULL;
+            if (!s || !s->is_function || !s->type || s->type->kind == TYPE_UNKNOWN ||
+                s->type->kind == TYPE_VOID)
+                return 0;
+            break;
+        }
+        case AST_IDENTIFIER: {
+            int param = 0;
+            for (int i = 0; !param && v->value && i + 1 < fn->child_count; i++) {
+                const ASTNode* p = fn->children[i];
+                param = p && p->type != AST_GUARD_CLAUSE && p->type != AST_BLOCK &&
+                        p->value && !strcmp(p->value, v->value);
+            }
+            if (!param) return 0;
+            break;
+        }
+        case AST_MEMBER_ACCESS: case AST_ARRAY_ACCESS: case AST_BINARY_EXPRESSION:
+        case AST_UNARY_EXPRESSION: case AST_VALUE_CAST: case AST_PTR_AS_STRUCT_CAST:
+            break;
+        default:
+            return 0;
+    }
+    for (int i = 0; i < v->child_count; i++)
+        if (!reads_only_parameters(v->children[i], fn, table)) return 0;
+    return 1;
+}
+
+/* #3056 review: the result of pending function `fn` before its body is
+ * checked, when its first value `return` reads only its parameters
+ * (`return p.big`): taken from a scope of the parameters alone, as
+ * refine_inferred_result takes it from the `return` once it is checked. A
+ * callee that calls back into `fn` (`y(p, k) { return x(p, k) }`) then
+ * has its result before `fn`'s body is checked, and a local of `fn` bound
+ * from it (`r = y(p, k - 1)`) is typed by it; checked after `fn`, it left
+ * the local the int default, which printed a long cut through `%d`. */
+static void pending_result_from_parameters(ASTNode* fn, SymbolTable* global_table) {
+    if (!fn->type_inferred || (fn->node_type && fn->node_type->kind != TYPE_UNKNOWN) ||
+        fn->child_count < 1)
+        return;
+    ASTNode* ret = first_value_return(fn->children[fn->child_count - 1]);
+    if (!ret || ret->child_count != 1 || !reads_only_parameters(ret->children[0], fn, global_table))
+        return;
+    SymbolTable* scope = create_symbol_table(global_table);
+    for (int i = 0; i + 1 < fn->child_count; i++) {
+        ASTNode* p = fn->children[i];
+        if (p && p->type != AST_GUARD_CLAUSE && p->type != AST_BLOCK && p->value && p->node_type)
+            add_symbol(scope, p->value, clone_type(p->node_type), 0, 0, 0);
+    }
+    refine_inferred_result(fn, ret, scope);
+    free_symbol_table(scope);
+}
+
 static void typecheck_pending(int j, PendingResults* p, SymbolTable* global_table) {
     p->state[j] = 1;
     ASTNode* body = p->fns[j]->child_count > 0 ? p->fns[j]->children[p->fns[j]->child_count - 1]
                                                : NULL;
+    /* #3056 review: `j`'s result from its parameters, then, with it, that
+     * of each function being checked that waits on it (`w(p, k) { return
+     * v(p, k) }`, entered before `v`), so neither holds `j`'s locals up. */
+    pending_result_from_parameters(p->fns[j], global_table);
+    for (int b = 0; b < p->count; b++)
+        if (b != j && p->state[b] == 1) pending_result_from_parameters(p->fns[b], global_table);
     typecheck_pending_calls(first_value_return(body), p, global_table, 0);
     typecheck_pending_calls(p->fns[j], p, global_table, 1);
     typecheck_top(p->tops[j], global_table);
