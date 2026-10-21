@@ -789,6 +789,19 @@ int is_visible_namespace(const char* name, SymbolTable* table) {
     return is_user_explicit_namespace(name);
 }
 
+/* Does `name` in `name.member` name a value (a local, a parameter, a
+ * global) that hides an imported namespace of that name, so the access is
+ * a field of the value? A function does not: it has no fields, so
+ * `frame.SETS` is the module's constant beside a `frame()` function. A
+ * module's code sees the program's functions too, and since 0.837, where a
+ * bare `ptr` has no fields (#3048), pkg/user's `frame.SETS` beside a
+ * program's `frame() -> ptr` was read as a field of that function's
+ * result and refused, its own import of pkg.frame passed over (#3084). */
+static int value_hides_namespace(SymbolTable* table, const char* name) {
+    Symbol* s = lookup_symbol(table, name);
+    return s && !s->is_function && !s->is_module_alias;
+}
+
 // #878: a module's qualified `X.fn()` surface is available whenever the
 // namespace is imported in ANY form (bare, selective, or qualified) — like
 // Java's fully-qualified name, which is always legal regardless of imports.
@@ -4395,7 +4408,7 @@ Type* infer_type(ASTNode* expr, SymbolTable* table) {
             // const-lookup path in typecheck_expression applies.
             if (expr->child_count > 0 && expr->children[0] &&
                 expr->children[0]->type == AST_IDENTIFIER && expr->children[0]->value &&
-                !lookup_symbol(table, expr->children[0]->value) &&
+                !value_hides_namespace(table, expr->children[0]->value) &&
                 is_visible_namespace(expr->children[0]->value, table) && expr->value &&
                 is_export_blocked(expr->children[0]->value, expr->value)) {
                 char msg[256];
@@ -5729,7 +5742,7 @@ static Type* const_initializer_type(ASTNode* e, SymbolTable* table) {
         case AST_MEMBER_ACCESS: {
             ASTNode* ns = e->child_count > 0 ? e->children[0] : NULL;
             if (!ns || ns->type != AST_IDENTIFIER || !ns->value || !e->value ||
-                lookup_symbol(table, ns->value) || !is_visible_namespace(ns->value, table))
+                value_hides_namespace(table, ns->value) || !is_visible_namespace(ns->value, table))
                 return create_type(TYPE_UNKNOWN);
             char qualified[512];
             snprintf(qualified, sizeof(qualified), "%s_%s", ns->value, e->value);
@@ -16241,10 +16254,11 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
             // has its `flags.field` mis-resolved as `flags_field` const lookup ->
             // spurious "module 'flags' has no export 'field'". Skip the namespace
             // branch when the base resolves to a value symbol so struct-field
-            // resolution below takes precedence.
+            // resolution below takes precedence. #3084: a function is no
+            // value (value_hides_namespace).
             if (expr->child_count > 0 && expr->children[0] &&
                 expr->children[0]->type == AST_IDENTIFIER && expr->children[0]->value &&
-                !lookup_symbol(table, expr->children[0]->value) &&
+                !value_hides_namespace(table, expr->children[0]->value) &&
                 is_visible_namespace(expr->children[0]->value, table) && expr->value) {
                 // Enforce export visibility for constants
                 if (is_export_blocked(expr->children[0]->value, expr->value)) {

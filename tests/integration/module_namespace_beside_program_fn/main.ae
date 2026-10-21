@@ -1,0 +1,12 @@
+import pkg.user
+import pkg.frame
+
+// The program's own function, named as the module both import.
+frame() -> ptr {
+    return null
+}
+
+main() {
+    e = frame.make_eye(2)
+    println("sets ${user.sets()} ${user.measure()} ${frame.SETS} ${frame.width(&e)} ${frame() == null}")
+}

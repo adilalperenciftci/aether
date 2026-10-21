@@ -3572,6 +3572,12 @@ import helpers;         // Loads lib/helpers/module.ae
 result = utils.double_value(21);
 ```
 
+In `utils.name`, `utils` is the imported module unless a value of that name
+(a local, a parameter, a global) is in scope, whose field it then reads. A
+function of that name is no value and hides nothing: a program's `frame()`
+leaves `frame.SETS` the constant of an imported `frame` module, in the
+program and in a module that imports `frame` itself.
+
 ### Available Standard Library Modules
 
 | Module | Namespace | Description |
