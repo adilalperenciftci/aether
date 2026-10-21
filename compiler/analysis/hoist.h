@@ -61,6 +61,20 @@ Type* hoist_join_type(ASTNode* scope_body, const char* name, Type* seed);
  * uint64). */
 Type* hoist_numeric_join(ASTNode* root, const char* name);
 
+/* #3064: hoist_numeric_join for every name bound under `root`, for a walk
+ * that types its bindings in the order they are written (the early
+ * inference pass) and asks for a name's join as it goes: one walk of
+ * `root` gathers the bindings, and each answer is kept until a binding it
+ * read is typed differently, so a body bound n times costs about n steps,
+ * not n walks of the body. */
+typedef struct HoistJoins HoistJoins;
+HoistJoins* hoist_joins_new(ASTNode* root);
+/* The walk has typed `decl`, a declaration under the root. */
+void hoist_joins_typed(HoistJoins* j, const ASTNode* decl);
+/* What hoist_numeric_join(root, name) gives now: a fresh Type, or NULL. */
+Type* hoist_joins_get(HoistJoins* j, const char* name);
+void hoist_joins_free(HoistJoins* j);
+
 /* The names hoist_if_branch_vars declares at the top of function body
  * `body` (before the caller's already-declared / module-global checks).
  * Returns the count written to `out` (at most `cap`). */

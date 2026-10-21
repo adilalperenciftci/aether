@@ -4,7 +4,9 @@
  * typechecker. */
 
 #include "hoist.h"
+#include "../aether_strmap.h"
 
+#include <stdlib.h>
 #include <string.h>
 
 int hoist_direct_decl_names(ASTNode* block, const char** out, int count, int cap) {
@@ -67,39 +69,62 @@ static int is_number_type(Type* t) {
     return 1;
 }
 
-/* #3064: the numeric bindings of `name` under `n` (closures excluded),
- * joined as an if-expression's branches are (branch_join_type), each
- * binding's value the arm a literal is read from (join_arm_after): `x = -1`
- * in one branch and `x = u` (a uint32) in another is a long, `x = 0` beside
- * it a uint32. Two that no type holds (a signed one beside a uint64) set
- * `*apart`. */
+/* #3064: what binding `n` of a name gives a join: its type when that is a
+ * number (a declaration that writes its type is that type, and its value
+ * no literal arm; an inferred one is its value's type until it has its
+ * own), NULL otherwise. `*arm` is the value a literal is read from. */
+static Type* join_part(const ASTNode* n, const ASTNode** arm) {
+    Type* t = n->node_type;
+    const ASTNode* v = n->type_inferred && n->child_count > 0 ? n->children[0] : NULL;
+    if ((!t || t->kind == TYPE_UNKNOWN) && v) t = v->node_type;
+    *arm = v;
+    return is_number_type(t) ? t : NULL;
+}
+
+/* One part `t` (arm `v`) into the join of the parts before it (`*acc`,
+ * `*arm`), as an if-expression's branches join (branch_join_type), each
+ * part's value the arm a literal is read from (join_arm_after): `x = -1` in
+ * one branch and `x = u` (a uint32) in another is a long, `x = 0` beside it
+ * a uint32. Two that no type holds (a signed one beside a uint64) set
+ * `*apart`. No part (NULL) leaves the join as it is. */
+static void join_add(Type** acc, const ASTNode** arm, int* apart, Type* t, const ASTNode* v) {
+    if (*apart || !t) return;
+    if (!*acc) {
+        *acc = clone_type(t);
+        *arm = v;
+        return;
+    }
+    Type* j = branch_join_type(*acc, *arm, t, v);
+    if (!j) {
+        *apart = 1;
+        return;
+    }
+    free_type(*acc);
+    *acc = j;
+    *arm = join_arm_after(*arm, v);
+}
+
+/* The bindings of `name` under `n` (closures excluded, each its own
+ * function), joined in the order they are written. */
 static void join_walk(ASTNode* n, const char* name, Type** acc, const ASTNode** arm,
                       int* apart) {
     if (!n || *apart) return;
     if (n->type == AST_CLOSURE || n->type == AST_QUOTE) return;   /* its own function */
     if (n->type == AST_VARIABLE_DECLARATION && n->value && strcmp(n->value, name) == 0) {
-        Type* t = n->node_type;
-        /* A declaration that writes its type is that type, its value no
-         * literal arm. */
-        const ASTNode* v = n->type_inferred && n->child_count > 0 ? n->children[0] : NULL;
-        if ((!t || t->kind == TYPE_UNKNOWN) && v) t = v->node_type;
-        if (is_number_type(t)) {
-            if (!*acc) {
-                *acc = clone_type(t);
-                *arm = v;
-            } else {
-                Type* j = branch_join_type(*acc, *arm, t, v);
-                if (!j) {
-                    *apart = 1;
-                    return;
-                }
-                free_type(*acc);
-                *acc = j;
-                *arm = join_arm_after(*arm, v);
-            }
-        }
+        const ASTNode* v = NULL;
+        Type* t = join_part(n, &v);
+        join_add(acc, arm, apart, t, v);
     }
     for (int i = 0; i < n->child_count; i++) join_walk(n->children[i], name, acc, arm, apart);
+}
+
+/* The join join_add leaves: NULL when there is none, or two apart. */
+static Type* join_result(Type* acc, int apart) {
+    if (apart && acc) {
+        free_type(acc);
+        return NULL;
+    }
+    return acc;
 }
 
 Type* hoist_numeric_join(ASTNode* root, const char* name) {
@@ -108,11 +133,161 @@ Type* hoist_numeric_join(ASTNode* root, const char* name) {
     const ASTNode* arm = NULL;
     int apart = 0;
     for (int i = 0; i < root->child_count; i++) join_walk(root->children[i], name, &acc, &arm, &apart);
-    if (apart && acc) {
-        free_type(acc);
-        return NULL;
+    return join_result(acc, apart);
+}
+
+/* #3064: the bindings of one name under a HoistJoins' root, in the order
+ * join_walk meets them, and what the walk typing them has made of them.
+ * The walk types binds[0..typed) in that order; their parts are final for
+ * it, joined in `head`. A binding not typed yet changes only when the walk
+ * types it, so the parts of binds[typed..count) that `join` read (`rest`,
+ * those that are numbers) stand until then, and `join` with them. */
+typedef struct {
+    const ASTNode* bind;
+    const ASTNode* arm;
+    Type* part;
+} JoinRest;
+
+typedef struct {
+    const ASTNode** binds;
+    int count;
+    int cap;
+    int typed;
+    int unordered;        /* typed out of order, or twice: each ask joins them all */
+    int started;          /* `head` and `rest` are kept from the first ask on */
+    Type* head;
+    const ASTNode* head_arm;
+    int head_apart;
+    JoinRest* rest;
+    int rest_count;
+    int rest_next;        /* rest[0..rest_next) are typed now, and in `head` */
+    int fresh;            /* `join` is the join of `head` and the rest */
+    Type* join;
+} HoistNameJoin;
+
+struct HoistJoins {
+    StrMap names;   /* name -> HoistNameJoin* */
+};
+
+static void joins_collect(ASTNode* n, HoistJoins* j) {
+    if (!n) return;
+    if (n->type == AST_CLOSURE || n->type == AST_QUOTE) return;   /* its own function */
+    if (n->type == AST_VARIABLE_DECLARATION && n->value) {
+        HoistNameJoin* nj = (HoistNameJoin*)strmap_get(&j->names, n->value);
+        if (!nj) {
+            nj = (HoistNameJoin*)calloc(1, sizeof(HoistNameJoin));
+            if (!nj) return;
+            strmap_put(&j->names, n->value, nj);
+        }
+        if (nj->count == nj->cap) {
+            nj->cap = nj->cap ? nj->cap * 2 : 4;
+            nj->binds = (const ASTNode**)aether_xrealloc((void*)nj->binds,
+                                                         (size_t)nj->cap * sizeof(ASTNode*));
+        }
+        nj->binds[nj->count++] = n;
     }
-    return acc;
+    for (int i = 0; i < n->child_count; i++) joins_collect(n->children[i], j);
+}
+
+HoistJoins* hoist_joins_new(ASTNode* root) {
+    HoistJoins* j = (HoistJoins*)calloc(1, sizeof(HoistJoins));
+    if (!j) return NULL;
+    strmap_init(&j->names);
+    for (int i = 0; root && i < root->child_count; i++) joins_collect(root->children[i], j);
+    return j;
+}
+
+static void name_join_forget(HoistNameJoin* nj) {
+    if (nj->head) free_type(nj->head);
+    nj->head = NULL;
+    for (int i = 0; i < nj->rest_count; i++) free_type(nj->rest[i].part);
+    free(nj->rest);
+    nj->rest = NULL;
+    nj->rest_count = nj->rest_next = 0;
+    if (nj->join) free_type(nj->join);
+    nj->join = NULL;
+    nj->fresh = 0;
+}
+
+void hoist_joins_typed(HoistJoins* j, const ASTNode* decl) {
+    HoistNameJoin* nj = j && decl && decl->value
+                        ? (HoistNameJoin*)strmap_get(&j->names, decl->value) : NULL;
+    if (!nj || nj->unordered) return;
+    if (nj->typed >= nj->count || nj->binds[nj->typed] != decl) {
+        /* Typed again, or before a binding written ahead of it (one in
+         * another's value): every ask joins them all from here on. */
+        nj->unordered = 1;
+        name_join_forget(nj);
+        return;
+    }
+    nj->typed++;
+    if (!nj->started) return;
+    const ASTNode* v = NULL;
+    Type* t = join_part(decl, &v);
+    join_add(&nj->head, &nj->head_arm, &nj->head_apart, t, v);
+    /* Its part as `join` read it: none, or the one `rest` holds. */
+    JoinRest* r = nj->rest_next < nj->rest_count && nj->rest[nj->rest_next].bind == decl
+                  ? &nj->rest[nj->rest_next] : NULL;
+    if (r) nj->rest_next++;
+    if (nj->fresh && (r ? !t || !types_equal(t, r->part) : t != NULL)) nj->fresh = 0;
+}
+
+Type* hoist_joins_get(HoistJoins* j, const char* name) {
+    HoistNameJoin* nj = j && name ? (HoistNameJoin*)strmap_get(&j->names, name) : NULL;
+    if (!nj) return NULL;
+    Type* acc = NULL;
+    const ASTNode* arm = NULL;
+    int apart = 0;
+    if (nj->unordered) {
+        for (int i = 0; i < nj->count && !apart; i++) {
+            const ASTNode* v = NULL;
+            Type* t = join_part(nj->binds[i], &v);
+            join_add(&acc, &arm, &apart, t, v);
+        }
+        return join_result(acc, apart);
+    }
+    if (!nj->started) {
+        nj->started = 1;
+        if (nj->count > nj->typed)
+            nj->rest = (JoinRest*)aether_xrealloc(NULL, (size_t)(nj->count - nj->typed) *
+                                                            sizeof(JoinRest));
+        for (int i = 0; i < nj->count; i++) {
+            const ASTNode* v = NULL;
+            Type* t = join_part(nj->binds[i], &v);
+            if (i < nj->typed) {
+                join_add(&nj->head, &nj->head_arm, &nj->head_apart, t, v);
+            } else if (t) {
+                JoinRest* r = &nj->rest[nj->rest_count++];
+                r->bind = nj->binds[i];
+                r->arm = v;
+                r->part = clone_type(t);
+            }
+        }
+    }
+    if (!nj->fresh) {
+        acc = nj->head ? clone_type(nj->head) : NULL;
+        arm = nj->head_arm;
+        apart = nj->head_apart;
+        for (int i = nj->rest_next; i < nj->rest_count && !apart; i++)
+            join_add(&acc, &arm, &apart, nj->rest[i].part, nj->rest[i].arm);
+        if (nj->join) free_type(nj->join);
+        nj->join = join_result(acc, apart);
+        nj->fresh = 1;
+    }
+    return nj->join ? clone_type(nj->join) : NULL;
+}
+
+void hoist_joins_free(HoistJoins* j) {
+    if (!j) return;
+    for (int i = 0; i < strmap_count(&j->names); i++) {
+        HoistNameJoin* nj = (HoistNameJoin*)strmap_value_at(&j->names, i);
+        if (!nj) continue;
+        name_join_forget(nj);
+        free((void*)nj->binds);
+        free(nj);
+    }
+    strmap_free(&j->names);
+    free(j);
 }
 
 /* Over the inferred bindings of `name` in `n` (closures excluded): sets

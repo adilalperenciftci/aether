@@ -2,6 +2,7 @@
 #define TYPE_INFERENCE_H
 
 #include "../ast.h"
+#include "../aether_strmap.h"
 #include "typechecker.h"
 
 // Type constraint: "node N must have type T"
@@ -34,6 +35,10 @@ typedef struct InferenceContext {
     char* dsl_receivers[INFER_MAX_DSL_BLOCKS];
     Symbol* dsl_heads[INFER_MAX_DSL_BLOCKS];
     int dsl_depth;
+    /* #3064: the joins of the names bound again in each body walked, one
+     * HoistJoins per function, main or closure (by its node), built on the
+     * first name bound again there and kept for the walk. */
+    StrMap hoist_joins;
 } InferenceContext;
 
 // Main API

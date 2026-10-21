@@ -1,0 +1,42 @@
+// #3064: a local bound in several branches has the join of all its
+// bindings, as an if-expression's branches join, and the early inference
+// pass gives a read after them that type. It asked for the join at every
+// binding again with a walk of the whole body, so a body bound n times
+// cost n walks of it (6000 re-bindings: 4.9 s). It keeps the join as it
+// types the bindings now, and the answer is the one the walk gave at each:
+// a binding typed after the join was first asked for (here the second
+// `if`'s, `-1` beside a uint32, a long) still widens it, so `return x` and
+// a local bound from it are a long, and a value past an int's range
+// arrives whole.
+
+extern exit(code: int)
+
+check(ok: bool, what: string) {
+    if !ok {
+        println("FAIL: ${what}")
+        exit(1)
+    }
+}
+
+widened(c: int, u: uint32) {
+    if c > 1 { x = 0 } else { x = 1 }
+    if c > 0 { x = -1 } else { x = u }
+    return x
+}
+
+through_local(c: int, u: uint32) {
+    if c > 2 { x = 0 } else { x = 1 }
+    if c > 1 { x = x + 1 } else { x = x + 2 }
+    if c > 0 { x = -1 } else { x = u }
+    y = x
+    return y
+}
+
+main() {
+    check(widened(1, 5) == -1, "the signed branch")
+    check(widened(0, 4000000000) == 4000000000, "the uint32 branch, past an int")
+    check(through_local(1, 5) == -1, "a local bound from it, the signed branch")
+    check(through_local(0, 4000000000) == 4000000000, "and the uint32 branch")
+    big = widened(0, 4000000000)
+    println("${widened(1, 5)} ${big}")
+}
