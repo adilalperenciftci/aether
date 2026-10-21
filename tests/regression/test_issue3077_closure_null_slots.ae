@@ -1,0 +1,109 @@
+// #3077: `null` is the empty closure wherever a closure goes (#3062,
+// #3067), but some slots never gave it the closure's type, so it reached C
+// as `NULL` and failed there ("incompatible type for argument 1 of
+// '_aether_closure_retain'", "invalid operands to binary =="), or the
+// checker refused it: a `fn?` slot (a local, a re-bind, a field, a store,
+// a parameter, `return null` from `-> fn?`), a `null` element of an array
+// of `fn?`, an all-`null` literal in a `fn[2]` slot, a tuple literal's
+// parts, a module-level `fn?` var a function re-binds, the default of
+// `??`, and `o == null` on a `fn?`. Each takes it now. In a `fn?` slot,
+// `null` is the optional holding the empty closure, as `null` in a `ptr?`
+// slot holds a null pointer: `o != none`, and `o == null`.
+
+extern exit(code: int)
+
+struct Slot {
+    cb: fn?
+}
+
+var hook: fn? = none
+var plain: fn = null
+
+adder(n: int) -> fn {
+    return | x: int | -> x + n
+}
+
+nothing() -> fn? {
+    return null
+}
+
+pair(k: int) -> (fn, int) {
+    if k == 0 {
+        return null, 0
+    }
+    return adder(k), k
+}
+
+first_empty(t: (fn, int)) -> bool {
+    c, _k = t
+    return c == null
+}
+
+count(xs: fn[]) -> int {
+    n = 0
+    for i in 0..xs.len {
+        if xs[i] != null {
+            n = n + 1
+        }
+    }
+    return n
+}
+
+// 1: some function, 0: some empty closure, -1: none.
+holds(o: fn?) -> int {
+    return match o {
+        some(c) -> if c == null { 0 } else { 1 }
+        none -> -1
+    }
+}
+
+check(ok: bool, what: string) {
+    if !ok {
+        println("FAIL: ${what}")
+        exit(1)
+    }
+}
+
+main() {
+    f = adder(1)
+
+    let two: fn[2] = [null, null]
+    check(two[0] == null && two[1] == null, "a typed literal of nulls")
+    check(count([f, null, f]) == 2, "a literal given to a fn[] parameter")
+
+    let o: fn? = null
+    check(o != none && holds(o) == 0 && o == null, "a fn? local holds the empty closure")
+    o = f
+    check(holds(o) == 1 && o != null, "re-bound to a closure")
+    o = null
+    check(holds(o) == 0, "and to null")
+    let held: fn? = f
+    opts = [held, null]
+    check(holds(opts[0]) == 1 && holds(opts[1]) == 0, "a literal of fn? values")
+    check(holds(nothing()) == 0, "a fn? result")
+    check(holds(null) == 0, "a fn? argument")
+    s = Slot { cb: null }
+    check(holds(s.cb) == 0, "a fn? field")
+    s.cb = f
+    s.cb = null
+    check(holds(s.cb) == 0, "a fn? field store")
+    let gone: fn? = none
+    g = gone ?? null
+    check(g == null, "the default of ??")
+
+    let t: (fn, int) = (null, 1)
+    tc, tk = t
+    check(tc == null && tk == 1, "a tuple literal's part")
+    check(first_empty((null, 2)), "a tuple literal argument")
+    pc, pk = pair(0)
+    check(pc == null && pk == 0, "a multi-value return")
+
+    check(plain == null, "a module var's null initializer")
+    plain = f
+    plain = null
+    check(plain == null, "a module var re-bound to null")
+    hook = null
+    check(holds(hook) == 0, "a fn? module var re-bound to null")
+
+    println("ok")
+}

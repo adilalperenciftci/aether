@@ -748,7 +748,7 @@ main() {
 
 A bare `return` gives no value, so in a function whose written result is a value it is the same error, E0200, naming the result type. It ends a void function, and a function with no written type is void until one of its returns gives a value.
 
-What a binding converts, a `return` converts, as C converts it: one numeric scalar to another (`int` to `long` or `float`; into a written `int`, a `long` or a `float` truncates, as `int k = 4.5` does), a bool to an integer and an integer to a bool (a comparison returned from `-> int` is 1 or 0, an extern's int truth value returned from `-> bool` is whether it is nonzero), a `T` to `T?` and `none` to any optional, a variant struct to its sum or to the sum's optional, an enum to an integer (`byte` included) and an integer to an enum, `null` or an `int` to a `ptr` or a `*T`, and `null` or `[]` to a slice. A `string` and a bare `ptr` are both a C `const char*`, so a C string pointer returned from `-> string` becomes a string (its characters copied into a counted string the caller owns), and a string returned from `-> ptr` is its pointer:
+What a binding converts, a `return` converts, as C converts it: one numeric scalar to another (`int` to `long` or `float`; into a written `int`, a `long` or a `float` truncates, as `int k = 4.5` does), a bool to an integer and an integer to a bool (a comparison returned from `-> int` is 1 or 0, an extern's int truth value returned from `-> bool` is whether it is nonzero), a `T` to `T?` and `none` to any optional, a variant struct to its sum or to the sum's optional, an enum to an integer (`byte` included) and an integer to an enum, `null` or an `int` to a `ptr` or a `*T`, `null` to a closure or a `fn?` (the empty closure), and `null` or `[]` to a slice. A `string` and a bare `ptr` are both a C `const char*`, so a C string pointer returned from `-> string` becomes a string (its characters copied into a counted string the caller owns), and a string returned from `-> ptr` is its pointer:
 
 ```aether
 extern getenv(name: string) -> ptr
@@ -3895,10 +3895,15 @@ A closure value, of such a type or a bare `fn`, may hold no function: a
 field a struct literal leaves out, or one given `null`. `c == null` and `c
 != null` ask whether it holds one (a `bool`), and `c = null` empties it,
 giving back the closure it held, so an optional callback slot is written
-`if s.build != null { s.build(ctx, 1) }`. `null` in an array literal of
-closures is the empty closure too (`[f, null]`, `[null, f]`). A closure
-compares only with `null`: `f == g` between two closures, or a closure and
-a pointer, is a compile error (Go's rule for function values). The same
+`if s.build != null { s.build(ctx, 1) }`. `null` is that empty closure
+wherever a closure goes: a binding, a field, an argument, a result, an
+element of an array literal (`[f, null]`, `[null, f]`), a part of a tuple
+literal, a module-level `var`, the default of `??`. A `fn?` given `null`
+holds the empty closure, as a `ptr?` given `null` holds a null pointer: it
+is not `none`, and `o == null` is true. A closure compares only with
+`null`: `f == g` between two closures, or a closure and a pointer, is a
+compile error, and so is one between two `fn?` or a `fn?` and a closure
+(Go's rule for function values). The same
 function over another environment is another closure, so there is no
 equality worth giving; to tell closures apart, keep a handle of your own
 beside each.

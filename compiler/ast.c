@@ -1254,6 +1254,10 @@ int ast_returns_literal(const ASTNode* node, ASTNodeType lit) {
 }
 
 int ast_type_takes_null(const Type* t) {
+    /* #3077: a `fn?` takes it as the empty closure, as a closure does. */
+    if (t && t->kind == TYPE_OPTIONAL && t->element_type &&
+        t->element_type->kind == TYPE_FUNCTION && !t->element_type->is_fnptr)
+        return 1;
     return t && (t->kind == TYPE_PTR || t->kind == TYPE_STRING || t->kind == TYPE_FUNCTION ||
                  type_is_slice(t));
 }

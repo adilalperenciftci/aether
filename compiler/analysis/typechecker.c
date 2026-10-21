@@ -802,6 +802,13 @@ static int value_hides_namespace(SymbolTable* table, const char* name) {
     return s && !s->is_function && !s->is_module_alias;
 }
 
+/* #3077: does a slot of type `t` hold a closure: a closure (no C function
+ * pointer), or a `fn?`? */
+static int holds_closure_type(const Type* t) {
+    if (t && t->kind == TYPE_OPTIONAL) t = t->element_type;
+    return t && t->kind == TYPE_FUNCTION && !t->is_fnptr;
+}
+
 // #878: a module's qualified `X.fn()` surface is available whenever the
 // namespace is imported in ANY form (bare, selective, or qualified) — like
 // Java's fully-qualified name, which is always legal regardless of imports.
@@ -13422,6 +13429,12 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                         slice_coerce_slot(&stmt->children[0], gv->node_type, 0);
                         if (stmt->node_type) free_type(stmt->node_type);
                         stmt->node_type = clone_type(gv->node_type);
+                    } else if (gv && holds_closure_type(gv->node_type) &&
+                               slice_coerce_slot(&stmt->children[0], gv->node_type, 0)) {
+                        /* #3077: so does `null` into a module-level closure
+                         * or `fn?` var: the empty closure, as into a local. */
+                        if (stmt->node_type) free_type(stmt->node_type);
+                        stmt->node_type = clone_type(gv->node_type);
                     } else if (gv && gv->node_type && gv->node_type->kind == TYPE_PTR &&
                                init_type && init_type->kind == TYPE_FUNCTION) {
                         /* #2890: so does a closure into a `ptr` global,
@@ -15011,6 +15024,11 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                     "`??` default type %s is not assignable to the value type %s",
                     type_name(d), type_name(value_t));
                 type_error(msg, expr->line, expr->column);
+            } else if (value_t->kind != TYPE_UNKNOWN) {
+                /* #3077: the default is a slot of the value type, so it goes
+                 * in as into any other: `o ?? null` beside a `fn?` is the
+                 * empty closure. */
+                slice_coerce_slot(&expr->children[1], value_t, 0);
             }
             if (d) free_type(d);
             if (expr->node_type) free_type(expr->node_type);
@@ -16927,10 +16945,20 @@ int typecheck_binary_expression(ASTNode* expr, SymbolTable* table) {
      * the comparison a meaning only against `null`, and C refused the rest
      * (`invalid operands to binary ==`). */
     if (operator == TOKEN_EQUALS || operator == TOKEN_NOT_EQUALS) {
-        int l_clo = left_type && left_type->kind == TYPE_FUNCTION && !left_type->is_fnptr;
-        int r_clo = right_type && right_type->kind == TYPE_FUNCTION && !right_type->is_fnptr;
-        if ((l_clo && right->type != AST_NULL_LITERAL) ||
-            (r_clo && left->type != AST_NULL_LITERAL)) {
+        /* #3077: and a `fn?` beside a closure or another `fn?`, which
+         * reached C as `==` on the closures they hold. A `fn?` beside
+         * anything else is an optional compared with a value: `null` asks
+         * for the empty closure (`o == some(null)`), `none` for no value,
+         * and one its closure cannot be is the optional rule's to refuse
+         * ("compares the optional 'fn?' with 'int'"). */
+        int l_opt = left_type && left_type->kind == TYPE_OPTIONAL;
+        int r_opt = right_type && right_type->kind == TYPE_OPTIONAL;
+        int l_clo = holds_closure_type(left_type);
+        int r_clo = holds_closure_type(right_type);
+        int refused = (l_opt || r_opt)
+            ? l_clo && r_clo
+            : (l_clo && right->type != AST_NULL_LITERAL) || (r_clo && left->type != AST_NULL_LITERAL);
+        if (refused) {
             Type* other = l_clo ? right_type : left_type;
             const char* op = expr->value ? expr->value : "==";
             char msg[512];

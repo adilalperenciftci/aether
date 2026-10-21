@@ -835,7 +835,7 @@ int ast_returns_only_literal(const ASTNode* node, ASTNodeType lit);
  * `lit`? */
 int ast_returns_literal(const ASTNode* node, ASTNodeType lit);
 /* Does a slot of type `t` take `null`: a pointer, a string, a closure or a
- * C function pointer, a slice? */
+ * C function pointer, a slice, or a `fn?` (#3077)? */
 int ast_type_takes_null(const Type* t);
 
 /* #3061, #3063: the one result of a clause set, from its clauses' (`nodes`,

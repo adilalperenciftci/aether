@@ -8837,6 +8837,24 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                         ASTNode* opt = l_opt ? L : R;
                         ASTNode* bare = l_opt ? R : L;
                         Type* elem = opt->node_type->element_type;
+                        if (elem && elem->kind == TYPE_FUNCTION && !elem->is_fnptr &&
+                            bare->type == AST_NULL_LITERAL) {
+                            /* #3077: `o == null` on a `fn?` is `o == some(null)`:
+                             * present, holding the empty closure, whose function
+                             * pointer is compared as #3062 compares a closure's
+                             * (a closure meets nothing else, the checker says). */
+                            TempSeq s;
+                            fprintf(gen->output, "(");
+                            seq_open(gen, &s);
+                            const char* o = seq_let(gen, &s, get_c_type(opt->node_type), "_ae_ol");
+                            generate_expression(gen, opt);
+                            seq_next(gen, &s);
+                            fprintf(gen->output, "%s(%s.has && %s.val.fn == 0)",
+                                    is_eq ? "" : "!", o, o);
+                            seq_close(gen, &s);
+                            fprintf(gen->output, ")");
+                            break;
+                        }
                         int str_val = elem && elem->kind == TYPE_STRING;
                         Type* bt = bare->node_type && bare->node_type->kind != TYPE_UNKNOWN
                                    ? bare->node_type : elem;
