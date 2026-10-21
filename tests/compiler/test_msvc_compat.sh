@@ -320,12 +320,17 @@ generate closure_str
 #                     initializer list (#3049)
 #   closure_null      a closure compared with `null` and given `null`: its
 #                     function pointer read, the empty closure stored (#3062)
+#   signed_unsigned_join
+#                     a signed and an unsigned integer as one value: a
+#                     long for an int and a uint32, each branch converted
+#                     before `?:` (#3064)
 PROGS="2765_string_slots 2765_call_temps 2765_operand_order 2765_optionals 2765_struct_values
     2765_statement_values 2765_helper_names 2813_left_to_right 2798_statement_constructs_anywhere
     2798_statement_constructs_in_parts 2821_actor_state_initializer_type
     2798_operands_ahead 2813_call_effects 2798_handover_at_call 2863_fallible_error_slots
     2866_builder_call_statements 2868_closure_array_envs 2799_const_typed_init
-    2799_fdiv_negative_zero 3049_optional_const_named 3062_closure_null"
+    2799_fdiv_negative_zero 3049_optional_const_named 3062_closure_null
+    3064_signed_unsigned_join"
 for issue_prog in $PROGS; do
     prog="${issue_prog#*_}"
     cp "tests/regression/test_issue$issue_prog.ae" "$TMP/$prog.ae"

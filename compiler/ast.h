@@ -731,6 +731,11 @@ Type* numeric_join_type(Type* a, Type* b);
  * - numbers join (numeric_join_type), as C's `?:` computes the type of the
  *   two, so a `long` arm is not narrowed into an `int` one; a float literal
  *   beside an `f32` arm takes the f32, as beside an f32 operand (#2151);
+ *   but two integers join to a type that holds both (#3064): a signed one
+ *   beside an unsigned one is the smallest signed kind wider than it (a
+ *   long for an int and a uint32), a signed one beside a uint64 joins with
+ *   nothing, and a literal that fits a uint32 or a uint64 beside it takes
+ *   that type;
  * - equal types are that type: a struct, a string, a fixed-size array of one
  *   element type and length (#3004);
  * - an optional beside a value its element joins with, or beside `none`, is

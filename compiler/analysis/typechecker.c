@@ -3490,6 +3490,13 @@ static Type* tc_branch_value_type(Type* a, const ASTNode* a_arm, Type* b, const 
         a->kind == TYPE_VOID || b->kind == TYPE_VOID) return NULL;
     Type* j = branch_join_type(a, a_arm, b, b_arm);
     if (j) return j;
+    /* #3064: two integers that no integer type holds (a signed one beside
+     * a uint64) give no one value, however a binding would take one. */
+    if (is_integer_scalar(a->kind) && is_integer_scalar(b->kind) && !a->distinct_name &&
+        !b->distinct_name) {
+        if (refused) *refused = 1;
+        return NULL;
+    }
     /* Fixed-size arrays of another length or element type, and tuples of
      * another shape, give no one value, however a binding would take them. */
     int arrays = type_is_sized_array(a) && type_is_sized_array(b);

@@ -2,7 +2,8 @@
 // result was its first clause's with a known type, so a later clause's
 // wider value was cut to it with no word: `pick(1, 7, 5000000000)` gave
 // 705032704. The set's result is the join of every clause's now: a long
-// with an int, a float or an f32 with an int, a uint32 with an int
+// with an int, a float or an f32 with an int, a uint32 with an int (a long,
+// which holds both, #3064)
 // (tests/integration/clause_set_result_join checks two results no one type
 // holds are refused).
 
@@ -24,7 +25,7 @@ mean(0, n: int, f: float) -> n
 mean(k, n: int, f: float) -> f
 
 // The join an if-expression's arms take: an f32 beside an int is an f32, a
-// uint32 beside an int a uint32.
+// uint32 beside an int a long, which holds both (#3064).
 mean32(0, n: int, f: f32) -> n
 mean32(k, n: int, f: f32) -> f
 
@@ -53,6 +54,6 @@ main() {
     check(mean32(1, 2, h) == 2.5, "a later clause's f32")
     uint32 u = 4000000000
     check("${unsigned(1, 2, u)}" == "4000000000", "a later clause's uint32")
-    check(unsigned(0, 5, u) == 5, "the first clause's int, as a uint32")
+    check(unsigned(0, 5, u) == 5, "the first clause's int, as a long")
     println("${pick(1, 7, 5000000000)} ${mean(1, 2, 2.5)}")
 }

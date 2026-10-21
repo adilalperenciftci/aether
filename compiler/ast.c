@@ -631,6 +631,91 @@ Type* numeric_join_type(Type* a, Type* b) {
     return clone_type(rb > ra ? b : a);
 }
 
+/* #3064: an integer type's width in bits, and whether it is signed; 0 for
+ * any other type. A `byte` is unsigned. A C ABI alias is its C type's
+ * width: `int8_t` and `int16_t` are an int's kind and narrower. */
+static int integer_kind_bits(const Type* t, int* is_signed) {
+    *is_signed = 0;
+    if (t->c_alias && t->kind == TYPE_INT) {
+        *is_signed = 1;
+        if (strcmp(t->c_alias, "int8_t") == 0) return 8;
+        if (strcmp(t->c_alias, "int16_t") == 0) return 16;
+        return 32;
+    }
+    switch (t->kind) {
+        case TYPE_BYTE: case TYPE_UINT8: return 8;
+        case TYPE_UINT16: return 16;
+        case TYPE_UINT32: return 32;
+        case TYPE_UINT64: return 64;
+        case TYPE_INT: *is_signed = 1; return 32;
+        case TYPE_INT64: *is_signed = 1; return 64;
+        default: return 0;
+    }
+}
+
+/* #3064: is `n` an integer literal (`5`, `0x10`, `1_000`, `-1`)? Its sign
+ * in `*neg`, its magnitude in `*mag`. */
+static int integer_literal_arm(const ASTNode* n, int* neg, unsigned long long* mag) {
+    *neg = 0;
+    if (n && n->type == AST_UNARY_EXPRESSION && n->child_count == 1 && n->value &&
+        (strcmp(n->value, "-") == 0 || strcmp(n->value, "+") == 0)) {
+        *neg = n->value[0] == '-';
+        n = n->children[0];
+    }
+    if (!n || n->type != AST_LITERAL || !n->value || !n->node_type ||
+        (n->node_type->kind != TYPE_INT && n->node_type->kind != TYPE_INT64))
+        return 0;
+    char digits[72];
+    size_t k = 0;
+    for (const char* c = n->value; *c && k + 1 < sizeof digits; c++)
+        if (*c != '_') digits[k++] = *c;
+    digits[k] = '\0';
+    int base = 0;
+    const char* s = digits;
+    if (s[0] == '0' && (s[1] == 'b' || s[1] == 'B')) { base = 2; s += 2; }
+    else if (s[0] == '0' && (s[1] == 'o' || s[1] == 'O')) { base = 8; s += 2; }
+    char* end = NULL;
+    unsigned long long v = strtoull(s, &end, base);
+    if (!end || *end || end == s) return 0;
+    *mag = v;
+    if (v == 0) *neg = 0;
+    return 1;
+}
+
+/* #3064: two integer types as one, of a value that is either (an
+ * if-expression's branches, a value match's arms, a clause set's results).
+ * Of one sign, the wider. A signed one beside an unsigned one is the
+ * smallest signed kind that holds both: an int holds a byte or a uint16, a
+ * long a uint32, and nothing signed holds a uint64. C's usual conversions
+ * (numeric_join_type) take the unsigned kind instead, so `-1` beside a
+ * uint32 came out 4294967295. A literal beside a uint32 or a uint64 that it
+ * fits is that type, as `n == 0` reads the 0 for a uint32 `n`: `if c { 0 }
+ * else { n }` stays a uint32. Sets `*handled` for two integer kinds, and
+ * returns NULL for two that no integer type holds. */
+static Type* integer_branch_join(Type* a, const ASTNode* a_arm, Type* b, const ASTNode* b_arm,
+                                 int* handled) {
+    *handled = 0;
+    if (a->distinct_name || b->distinct_name) return NULL;
+    int sa, sb;
+    int wa = integer_kind_bits(a, &sa), wb = integer_kind_bits(b, &sb);
+    if (!wa || !wb) return NULL;
+    *handled = 1;
+    if (sa == sb) return clone_type(wb > wa ? b : a);
+    Type* s = sa ? a : b;
+    Type* u = sa ? b : a;
+    const ASTNode* s_arm = sa ? a_arm : b_arm;
+    int ws = sa ? wa : wb, wu = sa ? wb : wa;
+    int neg;
+    unsigned long long mag;
+    if ((u->kind == TYPE_UINT32 || u->kind == TYPE_UINT64) && integer_literal_arm(s_arm, &neg, &mag) &&
+        !neg && (u->kind == TYPE_UINT64 || mag <= 0xFFFFFFFFull))
+        return clone_type(u);
+    if (ws > wu) return clone_type(s);
+    if (wu < 32) return create_type(TYPE_INT);
+    if (wu < 64) return create_type(TYPE_INT64);
+    return NULL;
+}
+
 /* A float literal, or one under a unary minus or plus. */
 static int is_float_literal_arm(const ASTNode* n) {
     if (n && n->type == AST_UNARY_EXPRESSION && n->child_count == 1 && n->value &&
@@ -730,6 +815,9 @@ Type* branch_join_type(Type* a, const ASTNode* a_arm, Type* b, const ASTNode* b_
         return clone_type(a);
     if (b->kind == TYPE_FLOAT32 && a->kind == TYPE_FLOAT && is_float_literal_arm(a_arm))
         return clone_type(b);
+    int integers = 0;
+    Type* ij = integer_branch_join(a, a_arm, b, b_arm, &integers);   /* #3064 */
+    if (integers) return ij;
     Type* num = numeric_join_type(a, b);
     if (num || !type_known(a) || !type_known(b)) return num;
     /* #3003: tuples of one length join position by position. A tuple's

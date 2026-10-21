@@ -6009,6 +6009,14 @@ static void emit_slice_diag_file(CodeGenerator* gen, const ASTNode* n) {
     fputc('"', gen->output);
 }
 
+/* #3064: is `bt` a uint32 or a uint64 branch of a value whose type `vt` is
+ * signed (an int beside a uint32 joins to a long)? C's `?:` would make the
+ * pair unsigned. */
+static int signed_join_of_unsigned(Type* vt, Type* bt) {
+    return vt && bt && !vt->distinct_name && (vt->kind == TYPE_INT || vt->kind == TYPE_INT64) &&
+           (bt->kind == TYPE_UINT32 || bt->kind == TYPE_UINT64);
+}
+
 void generate_expression_as_elem_ptr(CodeGenerator* gen, ASTNode* expr) {
     if (expr && type_is_slice(expr->node_type)) {
         fprintf(gen->output, "((%s*)(", slice_elem_c_type(expr->node_type));
@@ -7923,15 +7931,23 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                 fprintf(gen->output, "((");
                 generate_expression(gen, expr->children[0]);
                 fprintf(gen->output, ") ? (");
-                if (sum && needs_sum_coerce(expr->children[1], vt))
-                    emit_sum_coerced(gen, expr->children[1], vt);
-                else
-                    generate_expression(gen, expr->children[1]);
-                fprintf(gen->output, ") : (");
-                if (sum && needs_sum_coerce(expr->children[2], vt))
-                    emit_sum_coerced(gen, expr->children[2], vt);
-                else
-                    generate_expression(gen, expr->children[2]);
+                for (int k = 1; k <= 2; k++) {
+                    ASTNode* br = expr->children[k];
+                    if (k == 2) fprintf(gen->output, ") : (");
+                    if (sum && needs_sum_coerce(br, vt)) {
+                        emit_sum_coerced(gen, br, vt);
+                    } else if (signed_join_of_unsigned(vt, br->node_type)) {
+                        /* #3064: an unsigned branch of a signed join (`-1`
+                         * beside a uint32 is a long) is converted first:
+                         * C's `?:` makes an int beside an unsigned int
+                         * unsigned, and -1 was 4294967295. */
+                        fprintf(gen->output, "(%s)(", get_c_type(vt));
+                        generate_expression(gen, br);
+                        fprintf(gen->output, ")");
+                    } else {
+                        generate_expression(gen, br);
+                    }
+                }
                 fprintf(gen->output, "))");
             }
             break;
