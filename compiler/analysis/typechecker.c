@@ -11507,7 +11507,7 @@ static void declare_hoisted_local(SymbolTable* table, const char* name, Type* t)
     if (s) {
         s->branch_hoisted = 1;
         /* #3070: its written type is its type (the join gave it). */
-        Type* w = hoist_numeric_written(g_tc_fn_body, name);
+        Type* w = hoist_written_type(g_tc_fn_body, name);
         s->hoist_written = w && s->type && types_equal(w, s->type);
         if (w) free_type(w);
         /* #2683: declared ahead of its first binding, it must not hide a
@@ -11568,11 +11568,14 @@ static int sibling_binding_other_type(Type* here, Type* hoisted, ASTNode* init) 
  * whichever order the two are written. Joined with the others, the written
  * type was dropped: `x = -1` beside `uint64 x = 7` printed -1, `x = 1.5`
  * beside `int x = 0` made a float, and in the other order the first was
- * refused. Reports that and returns 1. */
+ * refused. A value of another kind is held when it is assignable: `x =
+ * "s"` beside `int x = 1` was stored into the int as a pointer. Reports
+ * that and returns 1. */
 static int report_unheld_binding(ASTNode* stmt, Type* w, Type* t, ASTNode* init) {
-    if (!w || !t || !(is_numeric_scalar(t->kind) || t->kind == TYPE_BYTE) ||
-        ast_number_holds(w, t, init))
-        return 0;
+    if (!w || !t || t->kind == TYPE_UNKNOWN || t->kind == TYPE_VOID) return 0;
+    int number = (is_numeric_scalar(t->kind) || t->kind == TYPE_BYTE) &&
+                 (is_numeric_scalar(w->kind) || w->kind == TYPE_BYTE);
+    if (number ? ast_number_holds(w, t, init) : is_assignable(t, w)) return 0;
     char rmsg[512];
     snprintf(rmsg, sizeof(rmsg),
              "cannot bind '%s' to this %s value: it is written as %s in another branch or loop "
@@ -13081,7 +13084,7 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                             free_type(bound->type);
                             bound->type = joined ? joined : clone_type(init_type);
                             /* #3070: as declare_hoisted_local marks it. */
-                            Type* w = hoist_numeric_written(g_tc_fn_body, stmt->value);
+                            Type* w = hoist_written_type(g_tc_fn_body, stmt->value);
                             bound->hoist_written = w && types_equal(w, bound->type);
                             if (w) free_type(w);
                             if (bound->hoist_written &&

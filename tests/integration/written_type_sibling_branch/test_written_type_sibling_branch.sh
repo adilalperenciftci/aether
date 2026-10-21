@@ -77,6 +77,16 @@ expect_reject literal_past_uint8 "cannot bind 'x' to this int value: it is writt
 program 'if k > 0 { int x = 0 } else { long x = 1 }'
 expect_reject two_written "cannot write 'x' as long: it is written as int in another branch" "2:40"
 
+# A written type of another kind than the other binding's is the local's
+# type too: `x = "s"` beside `int x = 1` made `x` a `const char*`, and the
+# int branch stored 1 into it, a crash when it ran. Refused at the string,
+# in either order.
+program 'if k > 0 { x = "s" } else { int x = 1 }'
+expect_reject string_beside_int "cannot bind 'x' to this string value: it is written as int" "2:16"
+
+program 'if k > 0 { int x = 1 } else { x = "s" }'
+expect_reject int_beside_string "cannot bind 'x' to this string value: it is written as int" "2:35"
+
 program 'match k { 0 -> { x = -1 } _ -> { uint64 x = 7 } }'
 expect_reject match_arms "cannot bind 'x' to this int value: $HELD" "2:22"
 

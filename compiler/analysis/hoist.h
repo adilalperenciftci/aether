@@ -63,9 +63,10 @@ Type* hoist_join_type(ASTNode* scope_body, const char* name, Type* seed);
  * not hold. */
 Type* hoist_numeric_join(ASTNode* root, const char* name);
 
-/* #3070: the number type the first binding of `name` under `root` that
- * writes one writes, a fresh Type, or NULL. */
-Type* hoist_numeric_written(ASTNode* root, const char* name);
+/* #3070: the type the first binding of `name` under `root` (closures
+ * excluded) that writes its type writes, of any kind: a fresh Type, or
+ * NULL. It is the local's type (hoist_join_type). */
+Type* hoist_written_type(ASTNode* root, const char* name);
 
 /* #3064: hoist_numeric_join for every name bound under `root`, for a walk
  * that types its bindings in the order they are written (the early

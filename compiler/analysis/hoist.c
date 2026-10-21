@@ -173,12 +173,27 @@ Type* hoist_numeric_join(ASTNode* root, const char* name) {
     return r;
 }
 
-Type* hoist_numeric_written(ASTNode* root, const char* name) {
-    JoinFold f = fold_of(root, name);
-    Type* written = f.written;
-    f.written = NULL;
-    fold_free(&f);
-    return written;
+/* The first binding of `name` under `n` (closures excluded) that writes
+ * its type, of any kind. */
+static const ASTNode* first_written_decl(const ASTNode* n, const char* name) {
+    if (!n || n->type == AST_CLOSURE || n->type == AST_QUOTE) return NULL;
+    if (n->type == AST_VARIABLE_DECLARATION && n->value && !n->type_inferred && n->node_type &&
+        n->node_type->kind != TYPE_UNKNOWN && n->node_type->kind != TYPE_VOID &&
+        strcmp(n->value, name) == 0)
+        return n;
+    for (int i = 0; i < n->child_count; i++) {
+        const ASTNode* d = first_written_decl(n->children[i], name);
+        if (d) return d;
+    }
+    return NULL;
+}
+
+Type* hoist_written_type(ASTNode* root, const char* name) {
+    for (int i = 0; root && name && i < root->child_count; i++) {
+        const ASTNode* d = first_written_decl(root->children[i], name);
+        if (d) return clone_type(d->node_type);
+    }
+    return NULL;
 }
 
 /* #3064: the bindings of one name under a HoistJoins' root, in the order
@@ -369,6 +384,17 @@ static Type* fn_join_walk(ASTNode* n, const char* name, Type* acc) {
 
 Type* hoist_join_type(ASTNode* scope_body, const char* name, Type* seed) {
     if (!scope_body || !seed) return NULL;
+    /* #3070: a type written for one binding is the local's type, whatever
+     * the others are: `x = "s"` in one branch beside `int x = 1` in the
+     * other made `x` the string's `const char*`, and the int was stored
+     * into it. The checker refuses a binding the written type does not
+     * hold (report_unheld_binding). */
+    Type* written = hoist_written_type(scope_body, name);
+    if (written) {
+        if (!types_equal(written, seed)) return written;
+        free_type(written);
+        return NULL;
+    }
     /* #2980 review: a local bound to functions in two branches is called
      * through the stronger mode at each parameter, where either may stand;
      * typed from the first binding alone, a `@keep` in the other was lost. */
