@@ -46,12 +46,20 @@ int hoist_has_identifier_ref(ASTNode* node, const char* name);
  * its initializer's. Borrowed; NULL when neither is known. */
 Type* hoist_decl_type(ASTNode* decl);
 
-/* The numeric join of `seed` with every inferred binding of `name` in
- * `scope_body` (closures excluded): a fresh Type when some binding widens
- * `seed`, NULL when nothing does or `seed` is not numeric. A `null` binding
- * has no type of its own: when every binding is `null` or a string, the
- * join is `string` (#3032). */
+/* The type a local bound in several places of `scope_body` (closures
+ * excluded) has, for a numeric `seed`: its bindings joined as an
+ * if-expression's branches are (hoist_numeric_join), a fresh Type when that
+ * is not `seed`, NULL when it is, when two bindings join to no type, or
+ * when `seed` is not numeric. A `null` binding has no type of its own: when
+ * every binding is `null` or a string, the join is `string` (#3032). */
 Type* hoist_join_type(ASTNode* scope_body, const char* name, Type* seed);
+
+/* #3064: the numeric bindings of `name` under `root` (closures excluded),
+ * joined as an if-expression's branches are (branch_join_type, each
+ * binding's value the arm a literal is read from): a fresh Type, NULL when
+ * there is none or two that no type holds (a signed value beside a
+ * uint64). */
+Type* hoist_numeric_join(ASTNode* root, const char* name);
 
 /* The names hoist_if_branch_vars declares at the top of function body
  * `body` (before the caller's already-declared / module-global checks).

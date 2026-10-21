@@ -1,6 +1,7 @@
 #include "type_inference.h"
 #include "../aether_error.h"
 #include "../aether_strmap.h"
+#include "hoist.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -751,9 +752,20 @@ void collect_expression_constraints(ASTNode* node, InferenceContext* ctx) {
                      * branch's int printed through %d; #2124). A binding
                      * from another function replaces it, as it always did
                      * — `src` is an int in one function and a `ptr`
-                     * parameter in the next, and the walk is sequential. */
-                    Type* joined = (existing->inferred_in == ctx->scope_owner)
-                                   ? numeric_join_type(existing->type, node->node_type) : NULL;
+                     * parameter in the next, and the walk is sequential.
+                     * #3064: numbers join as an if-expression's branches
+                     * do, each binding's value the arm a literal is read
+                     * from, as codegen's hoisted declaration does
+                     * (hoist_numeric_join): `x = -1` beside `x = u` (a
+                     * uint32) is a long, `x = 0` beside it a uint32. */
+                    Type* joined = NULL;
+                    if (existing->inferred_in == ctx->scope_owner) {
+                        Type* num = numeric_join_type(existing->type, node->node_type);
+                        if (num) {
+                            free_type(num);
+                            joined = hoist_numeric_join(ctx->scope_owner, node->value);
+                        }
+                    }
                     if (existing->type) free_type(existing->type);
                     existing->type = joined ? joined : clone_type(node->node_type);
                     existing->inferred_in = ctx->scope_owner;

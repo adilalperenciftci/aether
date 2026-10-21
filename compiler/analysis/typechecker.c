@@ -11141,7 +11141,16 @@ static void activate_hoisted_local(SymbolTable* table, const char* name) {
  * `view = block as *Apple` in another reached the C compiler as an
  * assignment to the `Apple*` both share. A bare `ptr`, and a pointer to a
  * @c_struct overlay (a `void*` in C), take any pointer. */
-static int sibling_binding_other_type(Type* here, Type* hoisted) {
+static int sibling_binding_other_type(Type* here, Type* hoisted, ASTNode* init) {
+    /* #3064: two integers no type holds (a signed value, `init`, beside a
+     * uint64), as an if-expression's two branches would be refused. */
+    if (here && hoisted && is_integer_scalar(here->kind) && is_integer_scalar(hoisted->kind) &&
+        !here->distinct_name && !hoisted->distinct_name) {
+        Type* j = branch_join_type(here, init, hoisted, NULL);
+        int apart = j == NULL;
+        if (j) free_type(j);
+        return apart;
+    }
     if (!here || !hoisted || here->kind != hoisted->kind) return 0;
     if (here->kind == TYPE_STRUCT || here->kind == TYPE_SUM)
         return here->struct_name && hoisted->struct_name &&
@@ -12623,12 +12632,18 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                             bound->type = joined ? joined : clone_type(init_type);
                         } else if (bound->type && init_type) {
                             /* #2980 review: function values join by mode,
-                             * the stronger at each parameter. */
-                            Type* joined = numeric_join_type(bound->type, init_type);
+                             * the stronger at each parameter. #3064: numbers
+                             * as an if-expression's branches do, this
+                             * binding's value the arm (a literal beside a
+                             * uint32 is the uint32, `-1` a long). */
+                            Type* num = numeric_join_type(bound->type, init_type);
+                            Type* joined = num ? branch_join_type(bound->type, NULL, init_type, init)
+                                               : NULL;
+                            if (num) free_type(num);
                             if (!joined) joined = fn_type_mode_join(bound->type, init_type);
                             if (joined) { free_type(bound->type); bound->type = joined; }
                         }
-                        if (sibling_binding_other_type(init_type, bound->type)) {
+                        if (sibling_binding_other_type(init_type, bound->type, init)) {
                             char rmsg[512];
                             snprintf(rmsg, sizeof(rmsg),
                                 "cannot bind '%s' as %s: it is bound as %s in another branch "

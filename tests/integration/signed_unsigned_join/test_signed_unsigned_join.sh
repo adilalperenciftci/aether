@@ -93,5 +93,21 @@ main() { println("${pick(1, -1, 5)}") }
 AE
 refused clauses_int_written_u64 "the clauses of 'pick' are written to return uint64 (line 2), and this clause returns int, which uint64 does not hold" 1:1
 
+# A local bound in two branches is one variable of their join, as the
+# if-expression's: -1 in one and a uint64 in the other has none (#3064).
+cat > "$TMP/local_int_u64.ae" <<'AE'
+main() {
+    uint64 m = 18000000000000000000
+    k = 1
+    if k > 0 {
+        x = -1
+    } else {
+        x = m
+    }
+    println("${x}")
+}
+AE
+refused local_int_u64 "cannot bind 'x' as uint64: it is bound as int in another branch" 7:9
+
 if [ "$fails" -ne 0 ]; then exit 1; fi
-echo "  [PASS] signed_unsigned_join: a signed integer beside a uint64 is refused in a branch, an arm and a clause"
+echo "  [PASS] signed_unsigned_join: a signed integer beside a uint64 is refused in a branch, an arm, a clause and a local bound in two branches"

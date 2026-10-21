@@ -1,0 +1,45 @@
+// #3064: a local bound in several branches is one variable, of the join of
+// its bindings, and that join is the one an if-expression's branches take:
+// two integers join to a type that holds both, and a literal that fits a
+// uint32 beside it takes the uint32. The local joined as C's usual
+// conversions do instead, so `x = -1` in one branch and `x = u` (a uint32)
+// in the other made `x` a uint32, and -1 printed as 4294967295, while
+// `if c { -1 } else { u }` gave -1 (tests/integration/signed_unsigned_join
+// checks a signed value beside a uint64 is refused, as there).
+
+extern exit(code: int)
+
+check(ok: bool, what: string) {
+    if !ok {
+        println("FAIL: ${what}")
+        exit(1)
+    }
+}
+
+main() {
+    uint32 u = 4000000000
+    seen = ""
+    k = 0
+    while k < 2 {
+        if k == 0 {
+            x = -1
+        } else {
+            x = u
+        }
+        if k == 0 {
+            y = 0
+        } else {
+            y = u
+        }
+        match k {
+            0 -> { m = -2 }
+            _ -> { m = u }
+        }
+        e = if k == 0 { -1 } else { u }
+        seen = "${seen} ${x} ${y} ${m} ${e}"
+        k = k + 1
+    }
+    check(seen == " -1 0 -2 -1 4000000000 4000000000 4000000000 4000000000",
+        "locals bound in branches, as the if-expression beside them (${seen})")
+    println(seen)
+}
