@@ -96,5 +96,30 @@ case "$out" in
        fails=$((fails + 1)) ;;
 esac
 
+# #3063 follow-up: a `none` clause and a `null` one beside an int: refused
+# as `null` beside the int is, naming the int's clause, and once (the set is
+# settled again after a clause is checked, and said it twice). Beside a
+# string they join to a `string?`
+# (tests/regression/test_issue3063_clause_none_null.ae).
+cat > "$TMP/none_null_int.ae" <<'AE'
+num(0) -> none
+num(1) -> null
+num(k) -> 5
+
+main() { println("${num(2) == none}") }
+AE
+out=$(cd "$TMP" && "$AE" check none_null_int.ae 2>&1)
+case "$out" in
+    *"error[E0200]: the clauses of 'num' return int (line 3) and \`null\`, which int does not take"*"none_null_int.ae:2:"*) ;;
+    *) echo "  [FAIL] none_null_int: not refused naming int and \`null\` at line 2"
+       echo "$out" | sed 's/^/        /'
+       fails=$((fails + 1)) ;;
+esac
+if [ "$(printf '%s\n' "$out" | grep -c "the clauses of 'num'")" != 1 ]; then
+    echo "  [FAIL] none_null_int: not reported once"
+    echo "$out" | sed 's/^/        /'
+    fails=$((fails + 1))
+fi
+
 if [ "$fails" -ne 0 ]; then exit 1; fi
-echo "  [PASS] clause_set_result_join: clause results no one type holds are refused, naming both, and a set of only \`none\` names its missing T"
+echo "  [PASS] clause_set_result_join: clause results no one type holds are refused, naming both, once, and a set of only \`none\` names its missing T"

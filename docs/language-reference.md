@@ -1066,7 +1066,9 @@ as an [if-expression](#if-expressions)'s branches join:
 returns a `long`, a clause that returns `0` beside one that returns a
 `uint32` is a `uint32`, a clause that returns only `null` takes the pointer,
 string or closure type beside it, and one that returns only `none` makes the
-result an optional of the others' type. Results no one type holds are a
+result an optional of the others' type. The two go together: `f(0) -> none`,
+`f(1) -> null` and `f(k) -> "s"` return a `string?`, `f(1)` the string `null`
+is, as `return null` from a `-> string?` function gives. Results no one type holds are a
 compile error naming both. A clause that returns nothing gives the result
 type's zero value, and a set none of whose clauses returns a value returns
 nothing. A clause set exported from a module is imported with all its

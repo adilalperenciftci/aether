@@ -1,0 +1,57 @@
+// #3063 follow-up: a clause set with a clause that returns only `none`, one
+// that returns only `null` and one that returns a string or a pointer was
+// refused: "the clauses of 'label' return string? (line 3) and `null`,
+// which string? does not take". The early inference pass joins `null` with
+// the string and `none` with that, and gives every clause the set's result,
+// `string?`; the checker then joined the same clauses again from those
+// types, the `none` clause as a `string?` clause, and met `null` beside a
+// `string?`. A `none` clause is known by its returns now, as a `null`
+// clause is, and `null` beside an optional of a pointer, string or closure
+// type is that type's `null`, as `return null` from `-> string?` gives, so
+// the two joins agree, in any order of the clauses.
+
+extern exit(code: int)
+
+struct Cell {
+    n: int
+}
+
+var shared: ptr = null
+
+label(0) -> none
+label(1) -> null
+label(k) -> "k${k}"
+
+// The `null` clause first, the `none` clause last, as the catch-all.
+first(1) -> null
+first(2) -> "two"
+first(k) -> none
+
+// A pointer.
+cell(0) -> none
+cell(1) -> null
+cell(k) -> shared
+
+check(ok: bool, what: string) {
+    if !ok {
+        println("FAIL: ${what}")
+        exit(1)
+    }
+}
+
+main() {
+    check(label(0) == none, "the none clause")
+    check(label(1) != none, "the null clause gives the string null is")
+    check((label(2) ?? "x") == "k2", "the string clause")
+    check(first(0) == none, "the none clause, last")
+    check(first(1) != none, "the null clause, first")
+    check((first(2) ?? "x") == "two", "the string clause between them")
+    c = heap.new(Cell)
+    c.n = 7
+    shared = c as ptr
+    check(cell(0) == none, "the none clause of a pointer set")
+    check(cell(1) != none, "its null clause")
+    check(((cell(2) ?? null) as *Cell).n == 7, "its pointer clause")
+    heap.free(c)
+    println("${label(2) ?? "x"} ${first(2) ?? "x"}")
+}

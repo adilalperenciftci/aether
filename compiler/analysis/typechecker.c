@@ -17456,6 +17456,9 @@ typedef struct {
     ASTNode** nodes;
     int count;
     int cap;
+    /* #3063: the set's join was refused, and said so. It is settled again
+     * after a clause is checked (typecheck_pending), and was said twice. */
+    int refused;
 } TcClauses;
 
 static StrMap g_tc_clauses;
@@ -17538,12 +17541,17 @@ static void type_take(Type* t, Type* want) {
  * and a set with a clause whose result is still to be inferred waits for it
  * (#3056). */
 static void clause_set_settle(ASTNode* fn, SymbolTable* table) {
-    const TcClauses* set = tc_clauses_of(fn);
+    TcClauses* set = (TcClauses*)tc_clauses_of(fn);
     if (!set) return;
     ClauseJoin cj;
     clause_set_join(set->nodes, set->count, &cj);
     if (cj.status == CLAUSE_JOIN_WAIT || cj.status == CLAUSE_JOIN_NO_VALUE) return;
+    if (cj.status != CLAUSE_JOIN_OK && set->refused) {
+        if (cj.join) free_type(cj.join);
+        return;
+    }
     if (cj.status != CLAUSE_JOIN_OK) {
+        set->refused = 1;
         char a[160], b[160], msg[480], hint[200];
         const char* js = cj.join ? ret_type_spell(cj.join, a, sizeof(a)) : "";
         int line = cj.join_at ? cj.join_at->line : 0;
