@@ -15,10 +15,10 @@
 #else
 #include <unistd.h>
 #define sleep_ms(ms) usleep((ms) * 1000)
-static long get_time_ms(void) {
+static long long get_time_ms(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
-    return ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+    return (long long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
 }
 #endif
 

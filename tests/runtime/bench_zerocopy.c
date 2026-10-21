@@ -16,10 +16,10 @@
 #else
 #include <sys/time.h>
 #include <unistd.h>          /* usleep */
-static long get_time_us(void) {
+static long long get_time_us(void) {
     struct timeval tv;
     gettimeofday(&tv, NULL);
-    return tv.tv_sec * 1000000 + tv.tv_usec;
+    return (long long)tv.tv_sec * 1000000 + tv.tv_usec;
 }
 #endif
 
@@ -60,7 +60,7 @@ void benchmark_small_messages(void) {
     scheduler_start();
     
     const int COUNT = 10000;
-    long start = get_time_us();
+    long long start = get_time_us();
     
     for (int i = 0; i < COUNT; i++) {
         Message msg = message_create_simple(1, 0, i);
@@ -74,7 +74,7 @@ void benchmark_small_messages(void) {
     usleep(200000);
     #endif
     
-    long duration = get_time_us() - start;
+    long long duration = get_time_us() - start;
     
     scheduler_shutdown();
     
@@ -104,7 +104,7 @@ void benchmark_large_messages(void) {
 
     const int COUNT = 5000;
     const int SIZE = 1024;
-    long start = get_time_us();
+    long long start = get_time_us();
     
     for (int i = 0; i < COUNT; i++) {
         void* data = malloc(SIZE);
@@ -122,7 +122,7 @@ void benchmark_large_messages(void) {
     usleep(200000);
     #endif
     
-    long duration = get_time_us() - start;
+    long long duration = get_time_us() - start;
     
     scheduler_shutdown();
     
@@ -155,7 +155,7 @@ void benchmark_mixed_messages(void) {
 
     const int COUNT = 10000;
     const int SIZE = 512;
-    long start = get_time_us();
+    long long start = get_time_us();
     
     for (int i = 0; i < COUNT; i++) {
         if (i % 3 == 0) {
@@ -178,7 +178,7 @@ void benchmark_mixed_messages(void) {
     usleep(200000);
     #endif
     
-    long duration = get_time_us() - start;
+    long long duration = get_time_us() - start;
     
     scheduler_shutdown();
     

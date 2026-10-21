@@ -1132,7 +1132,7 @@ void http_format_clf_time(char* out, size_t out_size, const struct tm* tmv) {
 }
 
 static void access_log_hook(HttpRequest* req, HttpServerResponse* res,
-                            long duration_us, void* user_data) {
+                            int64_t duration_us, void* user_data) {
     AccessLogState* st = (AccessLogState*)user_data;
     if (!st || !st->fp) return;
 
@@ -1144,7 +1144,7 @@ static void access_log_hook(HttpRequest* req, HttpServerResponse* res,
     const char* user_agent = req ? http_get_header(req, "User-Agent") : NULL;
     const char* referer    = req ? http_get_header(req, "Referer")    : NULL;
     int  status = res ? res->status_code : 0;
-    long body_len = res ? (long)res->body_length : 0;
+    long long body_len = res ? (long long)res->body_length : 0;
 
     /* RFC 1123 date for combined; ISO-8601 for json. Both via the
      * same struct tm pull. */
@@ -1164,9 +1164,9 @@ static void access_log_hook(HttpRequest* req, HttpServerResponse* res,
         strftime(ts, sizeof(ts), "%Y-%m-%dT%H:%M:%SZ", &tmv);
         fprintf(st->fp,
                 "{\"ts\":\"%s\",\"method\":\"%s\",\"path\":\"%s\","
-                "\"status\":%d,\"bytes\":%ld,\"dur_us\":%ld,"
+                "\"status\":%d,\"bytes\":%lld,\"dur_us\":%lld,"
                 "\"ua\":\"%s\",\"ref\":\"%s\"}\n",
-                ts, method, path, status, body_len, duration_us,
+                ts, method, path, status, body_len, (long long)duration_us,
                 user_agent ? user_agent : "",
                 referer    ? referer    : "");
     } else {
@@ -1176,7 +1176,7 @@ static void access_log_hook(HttpRequest* req, HttpServerResponse* res,
         const char* ip = req ? http_get_header(req, "X-Forwarded-For") : NULL;
         if (!ip) ip = "-";
         fprintf(st->fp,
-                "%s - - [%s] \"%s %s %s\" %d %ld \"%s\" \"%s\"\n",
+                "%s - - [%s] \"%s %s %s\" %d %lld \"%s\" \"%s\"\n",
                 ip, ts, method, path, version, status, body_len,
                 referer    ? referer    : "-",
                 user_agent ? user_agent : "-");
@@ -1219,21 +1219,24 @@ const char* http_server_set_access_log_raw(HttpServer* server,
 // #260 Tier 3 / F2: per-route metrics + Prometheus exposition
 // =================================================================
 
+/* 64-bit counters: a `long` is 32 bits on Windows, where the duration sum
+ * overflowed after 35.8 minutes of summed request time (minutes of traffic
+ * on a busy server) and a count after 2^31 requests (#3096). */
 typedef struct MetricsRoute {
     char* method;
     char* path_pattern;
-    _Atomic long total_requests;
-    _Atomic long total_errors;     /* status >= 500 */
-    _Atomic long total_4xx;
-    _Atomic long sum_duration_us;
-    _Atomic long max_duration_us;
+    _Atomic int64_t total_requests;
+    _Atomic int64_t total_errors;     /* status >= 500 */
+    _Atomic int64_t total_4xx;
+    _Atomic int64_t sum_duration_us;
+    _Atomic int64_t max_duration_us;
     /* Histogram buckets in microseconds. */
-    _Atomic long bucket_le_5ms;
-    _Atomic long bucket_le_25ms;
-    _Atomic long bucket_le_100ms;
-    _Atomic long bucket_le_500ms;
-    _Atomic long bucket_le_2s;
-    _Atomic long bucket_le_10s;
+    _Atomic int64_t bucket_le_5ms;
+    _Atomic int64_t bucket_le_25ms;
+    _Atomic int64_t bucket_le_100ms;
+    _Atomic int64_t bucket_le_500ms;
+    _Atomic int64_t bucket_le_2s;
+    _Atomic int64_t bucket_le_10s;
     struct MetricsRoute* next;
 } MetricsRoute;
 
@@ -1272,7 +1275,7 @@ static MetricsRoute* metrics_route_for(MetricsState* st,
 }
 
 static void metrics_hook(HttpRequest* req, HttpServerResponse* res,
-                         long duration_us, void* user_data) {
+                         int64_t duration_us, void* user_data) {
     MetricsState* st = (MetricsState*)user_data;
     if (!st || !req || !res) return;
 
@@ -1303,7 +1306,7 @@ static void metrics_hook(HttpRequest* req, HttpServerResponse* res,
     atomic_fetch_add(&r->sum_duration_us, duration_us);
 
     /* Update max via CAS. */
-    long prev = atomic_load(&r->max_duration_us);
+    int64_t prev = atomic_load(&r->max_duration_us);
     while (duration_us > prev &&
            !atomic_compare_exchange_weak(&r->max_duration_us, &prev, duration_us)) {
         /* prev is updated by CAS on failure; re-test loop condition. */
@@ -1383,29 +1386,29 @@ static void metrics_handler(HttpRequest* req, HttpServerResponse* res, void* use
         char m[64], p[256];
         metrics_escape(m, sizeof(m), r->method);
         metrics_escape(p, sizeof(p), r->path_pattern);
-        long total = atomic_load(&r->total_requests);
-        long errs  = atomic_load(&r->total_errors);
-        long c4xx  = atomic_load(&r->total_4xx);
-        long sum   = atomic_load(&r->sum_duration_us);
-        long b5    = atomic_load(&r->bucket_le_5ms);
-        long b25   = atomic_load(&r->bucket_le_25ms);
-        long b100  = atomic_load(&r->bucket_le_100ms);
-        long b500  = atomic_load(&r->bucket_le_500ms);
-        long b2    = atomic_load(&r->bucket_le_2s);
-        long b10   = atomic_load(&r->bucket_le_10s);
+        long long total = atomic_load(&r->total_requests);
+        long long errs  = atomic_load(&r->total_errors);
+        long long c4xx  = atomic_load(&r->total_4xx);
+        long long sum   = atomic_load(&r->sum_duration_us);
+        long long b5    = atomic_load(&r->bucket_le_5ms);
+        long long b25   = atomic_load(&r->bucket_le_25ms);
+        long long b100  = atomic_load(&r->bucket_le_100ms);
+        long long b500  = atomic_load(&r->bucket_le_500ms);
+        long long b2    = atomic_load(&r->bucket_le_2s);
+        long long b10   = atomic_load(&r->bucket_le_10s);
         int wrote = snprintf(buf + off, cap - off,
-            "aether_http_requests_total{method=\"%s\",path=\"%s\"} %ld\n"
-            "aether_http_errors_total{method=\"%s\",path=\"%s\"} %ld\n"
-            "aether_http_4xx_total{method=\"%s\",path=\"%s\"} %ld\n"
-            "aether_http_request_duration_seconds_bucket{method=\"%s\",path=\"%s\",le=\"0.005\"} %ld\n"
-            "aether_http_request_duration_seconds_bucket{method=\"%s\",path=\"%s\",le=\"0.025\"} %ld\n"
-            "aether_http_request_duration_seconds_bucket{method=\"%s\",path=\"%s\",le=\"0.1\"} %ld\n"
-            "aether_http_request_duration_seconds_bucket{method=\"%s\",path=\"%s\",le=\"0.5\"} %ld\n"
-            "aether_http_request_duration_seconds_bucket{method=\"%s\",path=\"%s\",le=\"2\"} %ld\n"
-            "aether_http_request_duration_seconds_bucket{method=\"%s\",path=\"%s\",le=\"10\"} %ld\n"
-            "aether_http_request_duration_seconds_bucket{method=\"%s\",path=\"%s\",le=\"+Inf\"} %ld\n"
+            "aether_http_requests_total{method=\"%s\",path=\"%s\"} %lld\n"
+            "aether_http_errors_total{method=\"%s\",path=\"%s\"} %lld\n"
+            "aether_http_4xx_total{method=\"%s\",path=\"%s\"} %lld\n"
+            "aether_http_request_duration_seconds_bucket{method=\"%s\",path=\"%s\",le=\"0.005\"} %lld\n"
+            "aether_http_request_duration_seconds_bucket{method=\"%s\",path=\"%s\",le=\"0.025\"} %lld\n"
+            "aether_http_request_duration_seconds_bucket{method=\"%s\",path=\"%s\",le=\"0.1\"} %lld\n"
+            "aether_http_request_duration_seconds_bucket{method=\"%s\",path=\"%s\",le=\"0.5\"} %lld\n"
+            "aether_http_request_duration_seconds_bucket{method=\"%s\",path=\"%s\",le=\"2\"} %lld\n"
+            "aether_http_request_duration_seconds_bucket{method=\"%s\",path=\"%s\",le=\"10\"} %lld\n"
+            "aether_http_request_duration_seconds_bucket{method=\"%s\",path=\"%s\",le=\"+Inf\"} %lld\n"
             "aether_http_request_duration_seconds_sum{method=\"%s\",path=\"%s\"} %.6f\n"
-            "aether_http_request_duration_seconds_count{method=\"%s\",path=\"%s\"} %ld\n",
+            "aether_http_request_duration_seconds_count{method=\"%s\",path=\"%s\"} %lld\n",
             m, p, total,
             m, p, errs,
             m, p, c4xx,
@@ -3941,11 +3944,15 @@ int http_route_matches(const char* pattern, const char* path, HttpRequest* req) 
 // Handle a single client connection
 #include <time.h>
 
-/* Monotonic microsecond clock for per-request latency measurement. */
-static long http_now_us(void) {
+/* Monotonic microsecond clock for per-request latency measurement, in 64
+ * bits. In a `long`, 32 bits on Windows, the product overflowed once the
+ * clock (time since boot there) passed 35.8 minutes, undefined behaviour
+ * that only happened to wrap, and a duration past 35.8 minutes (a long
+ * stream) wrapped with it (#3096). */
+static int64_t http_now_us(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (long)ts.tv_sec * 1000000L + ts.tv_nsec / 1000L;
+    return (int64_t)ts.tv_sec * 1000000 + ts.tv_nsec / 1000;
 }
 
 /* HTTP/1.1 Connection-header inspection. Returns 1 if the client
@@ -4336,7 +4343,7 @@ static void conn_send_bad_request_line(HttpConn* conn) {
 
 static int handle_one_request(HttpServer* server, HttpConn* conn,
                               int requests_served, int max_requests) {
-    long t_start = http_now_us();
+    int64_t t_start = http_now_us();
     /* Lazy-allocate the read buffer on first use. */
     if (!conn->buf) {
         if (conn_buf_ensure(conn, HTTP_CONN_BUF_CAP) != 0) return 0;
@@ -4899,8 +4906,8 @@ static int handle_one_request(HttpServer* server, HttpConn* conn,
      * write — the hooks are about server-side cost, not client-
      * perceived round trip. Hooks may not mutate; they observe. */
     if (server->request_hook_chain) {
-        long t_end = http_now_us();
-        long duration_us = t_end - t_start;
+        int64_t t_end = http_now_us();
+        int64_t duration_us = t_end - t_start;
         struct HttpRequestHookNode* h = server->request_hook_chain;
         while (h) {
             h->hook(req, res, duration_us, h->user_data);
@@ -4971,7 +4978,7 @@ void http_server_dispatch_for_h2(HttpServer* server,
                                  HttpRequest* req,
                                  HttpServerResponse* res) {
     if (!server || !req || !res) return;
-    long t_start = http_now_us();
+    int64_t t_start = http_now_us();
 
     /* Middleware chain — same shape as the HTTP/1.1 path. */
     HttpMiddlewareNode* middleware = server->middleware_chain;
@@ -5003,7 +5010,7 @@ void http_server_dispatch_for_h2(HttpServer* server,
 
     /* Per-request observation hooks (#260 Tier 3). */
     if (server->request_hook_chain) {
-        long duration_us = http_now_us() - t_start;
+        int64_t duration_us = http_now_us() - t_start;
         struct HttpRequestHookNode* h = server->request_hook_chain;
         while (h) {
             h->hook(req, res, duration_us, h->user_data);

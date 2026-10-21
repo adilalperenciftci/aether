@@ -114,7 +114,11 @@ typedef struct EvConn {
     char*            head;       /* serialised upstream request */
     size_t           head_len, head_cap;
 
-    long     deadline_ms;        /* when the upstream call gives up, 0 = none */
+    int64_t  deadline_ms;        /* when the upstream call gives up, 0 = none;
+                                  * a `long` before, 32 bits on Windows, where
+                                  * the clock went negative after 24.8 days of
+                                  * uptime and every deadline read as none
+                                  * (#3096) */
     int      up_writable_watched; /* write interest on the upstream, which is
                                    * only wanted while a write is blocked */
     int      up_watched;         /* registered with the poller at all */
@@ -179,7 +183,7 @@ struct HttpEvLoop {
     atomic_int  next_driver;     /* round-robin placement of new connections */
 };
 
-static int ev_timer_set(EvDriver* d, EvConn* c, long deadline_ms);
+static int ev_timer_set(EvDriver* d, EvConn* c, int64_t deadline_ms);
 
 /* Nagle holds a small write back until the peer acknowledges what is already
  * in flight. On a proxied connection the response is one such write, and the
@@ -364,8 +368,12 @@ static int ev_request_complete(EvConn* c, size_t* out_total) {
     if (count == 0) { *out_total = header_bytes; return 1; }
     if (differing) return -1;
     char* endp = NULL;
-    long declared = strtol(cl, &endp, 10);
-    if (!endp || *endp != '\0' || endp == cl || declared < 0) return -1;
+    /* strtoll, as the client side's parse: strtol into a `long`, 32 bits on
+     * Windows, turned a length past 2 GiB into 2147483647 and read the body
+     * short of what the client declared (#3096). */
+    errno = 0;
+    long long declared = strtoll(cl, &endp, 10);
+    if (!endp || *endp != '\0' || endp == cl || declared < 0 || errno == ERANGE) return -1;
     if (c->in_len < header_bytes + (size_t)declared) return 0;
     *out_total = header_bytes + (size_t)declared;
     return 1;
@@ -417,7 +425,7 @@ static void ev_timer_remove(EvDriver* d, EvConn* c) {
     if (i < d->timer_count) { ev_timer_up(d, i); ev_timer_down(d, i); }
 }
 
-static int ev_timer_set(EvDriver* d, EvConn* c, long deadline_ms) {
+static int ev_timer_set(EvDriver* d, EvConn* c, int64_t deadline_ms) {
     ev_timer_remove(d, c);
     c->deadline_ms = deadline_ms;
     if (deadline_ms <= 0) return 0;
@@ -438,7 +446,7 @@ static int ev_timer_set(EvDriver* d, EvConn* c, long deadline_ms) {
 /* How long the loop may wait, given the next deadline. */
 static int ev_next_timeout_ms(EvDriver* d, int cap_ms) {
     if (d->timer_count == 0) return cap_ms;
-    long wait = d->timers[0]->deadline_ms - aether_proxy_now_ms();
+    int64_t wait = d->timers[0]->deadline_ms - aether_proxy_now_ms();
     if (wait < 0) wait = 0;
     return wait < cap_ms ? (int)wait : cap_ms;
 }
@@ -890,7 +898,7 @@ static void ev_arm_deadline(EvDriver* d, EvConn* c) {
     AetherProxyOpts* opts = (AetherProxyOpts*)http_server_proxy_opts(d->loop->server);
     int secs = (opts && opts->pool) ? opts->pool->request_timeout_sec : 0;
     if (secs <= 0) { ev_timer_set(d, c, 0); return; }
-    ev_timer_set(d, c, aether_proxy_now_ms() + (long)secs * 1000);
+    ev_timer_set(d, c, aether_proxy_now_ms() + (int64_t)secs * 1000);
 }
 
 /* The upstream did not answer in time. The client is owed an answer anyway,
@@ -1284,7 +1292,7 @@ static void* ev_driver_main(void* arg) {
         }
 
         /* Everything whose deadline has passed, answered rather than dropped. */
-        long now = aether_proxy_now_ms();
+        int64_t now = aether_proxy_now_ms();
         while (d->timer_count > 0 && d->timers[0]->deadline_ms <= now) {
             EvConn* c = d->timers[0];
             int r = ev_expire(d, c);

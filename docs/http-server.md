@@ -745,8 +745,10 @@ Custom hooks: `http_server_use_request_hook(server, hook, ud)` is a
 C-level extension point (declared in `std/net/aether_http_server.c`,
 not exported from `std.http`) used internally by the access-log and
 metrics hooks. Multiple hooks may register; they fire in registration
-order after the response transformer chain. It is not currently
-callable from Aether code.
+order after the response transformer chain. A hook is
+`void hook(HttpRequest* req, HttpServerResponse* res, int64_t duration_us, void* user_data)`;
+the duration was a `long` before, 32 bits on Windows. It is not
+currently callable from Aether code.
 
 ---
 

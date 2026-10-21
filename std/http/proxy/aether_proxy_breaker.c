@@ -38,7 +38,7 @@ const char* aether_proxy_breaker_configure(AetherProxyPool* pool,
 
 int aether_proxy_breaker_admit(AetherProxyPool* pool,
                                AetherUpstream* u,
-                               long now_ms) {
+                               int64_t now_ms) {
     if (!pool || !u) return 0;
     if (pool->br_failure_threshold == 0) return 1;  /* disabled */
 
@@ -46,8 +46,8 @@ int aether_proxy_breaker_admit(AetherProxyPool* pool,
     if (s == AETHER_PROXY_CB_CLOSED) return 1;
 
     if (s == AETHER_PROXY_CB_OPEN) {
-        long opened = atomic_load_explicit(&u->cb_opened_at_ms,
-                                           memory_order_acquire);
+        int64_t opened = atomic_load_explicit(&u->cb_opened_at_ms,
+                                              memory_order_acquire);
         if (now_ms - opened < pool->br_open_duration_ms) return 0;
 
         /* Try to transition to HALF_OPEN. The CAS winner gets to

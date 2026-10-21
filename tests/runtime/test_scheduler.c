@@ -20,10 +20,10 @@
 #include <unistd.h>
 #include <sched.h>
 #define sleep_ms(ms) usleep((ms) * 1000)
-static long get_time_ms(void) {
+static long long get_time_ms(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
-    return ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+    return (long long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
 }
 #endif
 
@@ -812,7 +812,7 @@ void test_scheduler_high_throughput(void) {
     
     // Send many messages (reduced from 10000 to avoid overwhelming queue)
     const int TOTAL = 1000;
-    long start = get_time_ms();
+    long long start = get_time_ms();
     
     for (int i = 0; i < TOTAL; i++) {
         Message msg = {1, 0, i, NULL, {NULL, 0, 0}, NULL};
@@ -824,7 +824,7 @@ void test_scheduler_high_throughput(void) {
         sleep_ms(10);
     }
     
-    long end = get_time_ms();
+    long long end = get_time_ms();
     double elapsed = (end - start) / 1000.0;
     
     int final_count = atomic_load(&actor->count);
@@ -961,13 +961,13 @@ void test_scheduler_exit_clean(void) {
     sleep_ms(50);
     
     // Should exit cleanly without hanging
-    long start = get_time_ms();
+    long long start = get_time_ms();
     
     scheduler_shutdown();
     scheduler_cleanup();
     
-    long end = get_time_ms();
-    long elapsed = end - start;
+    long long end = get_time_ms();
+    long long elapsed = end - start;
     
     // Should exit within 2000ms (generous for Valgrind which runs ~10x slower)
     ASSERT_TRUE(elapsed < 2000);

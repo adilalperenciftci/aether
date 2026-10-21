@@ -5,6 +5,7 @@
 #include "../../runtime/scheduler/multicore_scheduler.h"
 #include <stdatomic.h>
 #include <stddef.h>  // size_t
+#include <stdint.h>  // int64_t (HttpRequestHook)
 #include <time.h>    // struct tm (http_format_clf_time)
 
 // HTTP Request
@@ -156,10 +157,11 @@ typedef int  (*HttpReadyCheck)(void* user_data);
 // microseconds. The hook may not mutate either argument; it's an
 // observation point. Used by the built-in access logger and the
 // per-route metrics collector. Multiple hooks may register; they
-// run in registration order.
+// run in registration order. The duration is 64-bit: a `long` is
+// 32 bits on Windows, where it held only 35.8 minutes of microseconds.
 typedef void (*HttpRequestHook)(HttpRequest* req,
                                 HttpServerResponse* res,
-                                long duration_us,
+                                int64_t duration_us,
                                 void* user_data);
 
 // HTTP Server

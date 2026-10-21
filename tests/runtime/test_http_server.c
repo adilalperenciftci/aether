@@ -13,6 +13,8 @@
 #include <arpa/inet.h>
 #endif
 #include "../../std/net/aether_http_server.h"
+#include "../../std/http/proxy/aether_proxy.h"
+#include "../../std/http/proxy/aether_proxy_internal.h"
 #if !defined(_WIN32)
 #include "../../std/net/aether_http_internal.h"
 #endif
@@ -632,3 +634,25 @@ TEST(http_request_parse_arena) {
     http_arena_free(&arena);
 }
 #endif  /* !_WIN32 */
+
+/* A cached response lives as long as its TTL, however long that is. The
+ * expiry was stored_at_ms + (long)ttl_sec * 1000L: on Windows, where a `long`
+ * is 32 bits, a TTL past 24.8 days overflowed, the entry expired before it
+ * was stored, and every lookup missed. A 30-day default TTL is stored here
+ * and must be found, with its full 30 days ahead of it. */
+TEST(http_proxy_cache_keeps_a_long_ttl) {
+    AetherProxyCache* cache = aether_proxy_cache_new(4, 65536, 30 * 24 * 3600,
+                                                     AETHER_PROXY_CACHE_KEY_METHOD_URL);
+    ASSERT_NOT_NULL(cache);
+    HttpRequest* req = http_parse_request("GET /long HTTP/1.1\r\n\r\n");
+    ASSERT_NOT_NULL(req);
+    aether_proxy_cache_store(cache, "GET", "/long", req, 200,
+                             "Content-Type: text/plain\r\n", "hello", 5);
+    AetherProxyCacheEntry* e = aether_proxy_cache_lookup(cache, "GET", "/long", req);
+    int found = e != NULL;
+    long long ttl_ms = e ? (long long)(e->expires_at_ms - e->stored_at_ms) : -1;
+    http_request_free(req);
+    aether_proxy_cache_free(cache);
+    ASSERT_TRUE(found);
+    ASSERT_TRUE(ttl_ms == 30LL * 24 * 3600 * 1000);
+}

@@ -414,7 +414,7 @@ static void inject_traceparent_if_absent(HttpRequest* inbound,
  */
 
 static int px_build(AetherProxyExchange* px);
-static int px_classify(AetherProxyExchange* px, long elapsed_ms);
+static int px_classify(AetherProxyExchange* px, int64_t elapsed_ms);
 static int px_copy(AetherProxyExchange* px);
 
 int aether_proxy_exchange_begin(AetherProxyExchange* px,
@@ -669,11 +669,11 @@ static int px_build(AetherProxyExchange* px) {
     return PX_NEED_SEND;
 }
 
-int aether_proxy_exchange_resume(AetherProxyExchange* px, long elapsed_ms) {
+int aether_proxy_exchange_resume(AetherProxyExchange* px, int64_t elapsed_ms) {
     return px_classify(px, elapsed_ms);
 }
 
-static int px_classify(AetherProxyExchange* px, long elapsed_ms) {
+static int px_classify(AetherProxyExchange* px, int64_t elapsed_ms) {
     AetherProxyOpts* opts = px->opts;
     HttpRequest* req = px->req;
     HttpServerResponse* res = px->res;
@@ -920,7 +920,7 @@ int aether_proxy_direct_ok(const AetherProxyExchange* px) {
     return 1;
 }
 
-int aether_proxy_direct_take(AetherProxyExchange* px, long elapsed_ms,
+int aether_proxy_direct_take(AetherProxyExchange* px, int64_t elapsed_ms,
                              const char* raw, size_t raw_len,
                              size_t header_bytes, AetherProxyDirect* out) {
     if (!px || !px->opts || !raw || !out) return -1;
@@ -940,7 +940,7 @@ int aether_proxy_direct_take(AetherProxyExchange* px, long elapsed_ms,
     if (status >= 500 && (px->attempt + 1) < px->max_attempts) return -1;
 
     size_t body_len = raw_len - header_bytes;
-    if ((long)body_len > (long)px->opts->max_body_bytes) return -1;
+    if ((long long)body_len > (long long)px->opts->max_body_bytes) return -1;
 
     /* The same bookkeeping the copying path does for a response that arrived,
      * in the same order, so the two cannot report differently. */
@@ -1109,9 +1109,9 @@ int aether_middleware_reverse_proxy(HttpRequest* req,
     AetherProxyExchange px;
     int r = aether_proxy_exchange_begin(&px, req, res, user_data, NULL);
     while (r == PX_NEED_SEND) {
-        long t0 = aether_proxy_now_ms();
+        int64_t t0 = aether_proxy_now_ms();
         px.resp = http_send_raw(px.outbound);
-        long elapsed = aether_proxy_now_ms() - t0;
+        int64_t elapsed = aether_proxy_now_ms() - t0;
         http_request_free_raw(px.outbound);
         free(px.upstream_url);
         px.outbound = NULL;
