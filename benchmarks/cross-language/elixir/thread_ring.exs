@@ -13,34 +13,34 @@ defmodule ThreadRing do
 
     parent = self()
 
+    # The clock starts before the ring exists, as in every language here
+    # (FAIRNESS.md, rule 5).
+    start_time = :erlang.monotonic_time(:nanosecond)
+
     # Create ring of processes
     first = spawn(fn -> ring_node(nil, parent, 0) end)
-    last = create_ring(first, @ring_size - 1, parent)
+    {last, nodes} = create_ring(first, @ring_size - 1, parent, [first])
 
     # Close the ring: last -> first (not first -> last!)
     send(last, {:set_next, first})
-
-    start_time = :erlang.monotonic_time(:nanosecond)
 
     # Send initial token
     send(first, {:token, @num_hops})
 
     # Wait for completion
     receive do
-      {:done, total_received} ->
+      :done ->
         end_time = :erlang.monotonic_time(:nanosecond)
         elapsed_ns = end_time - start_time
         elapsed_sec = elapsed_ns / 1_000_000_000.0
 
-        # Each node receives ~(num_hops + 1) / ring_size messages
-        expected_per_node = div(@num_hops + 1, @ring_size) + 1
-        if total_received < expected_per_node - 10 or total_received > expected_per_node + 10 do
-          IO.puts("VALIDATION WARNING: expected ~#{expected_per_node} per node, got #{total_received}")
-        end
+        # The receipts summed over the ring, the checksum.
+        receipts = collect_receipts(nodes, 0)
 
         throughput = (@num_hops + 1) / elapsed_sec / 1_000_000
         ns_per_msg = elapsed_ns / (@num_hops + 1)
 
+        IO.puts("Checksum: #{receipts}")
         IO.puts("ns/msg:         #{:io_lib.format("~.2f", [ns_per_msg])}")
         IO.puts("Throughput:     #{:io_lib.format("~.2f", [throughput])} M msg/sec")
     after
@@ -50,11 +50,19 @@ defmodule ThreadRing do
     end
   end
 
-  defp create_ring(prev, 0, _parent), do: prev
-  defp create_ring(prev, n, parent) do
+  defp create_ring(prev, 0, _parent, nodes), do: {prev, nodes}
+  defp create_ring(prev, n, parent, nodes) do
     next = spawn(fn -> ring_node(prev, parent, 0) end)
     send(prev, {:set_next, next})
-    create_ring(next, n - 1, parent)
+    create_ring(next, n - 1, parent, [next | nodes])
+  end
+
+  defp collect_receipts([], acc), do: acc
+  defp collect_receipts([node | rest], acc) do
+    send(node, {:report, self()})
+    receive do
+      {:count, count} -> collect_receipts(rest, acc + count)
+    end
   end
 
   defp ring_node(next, parent, received) do
@@ -62,10 +70,14 @@ defmodule ThreadRing do
       {:set_next, new_next} ->
         ring_node(new_next, parent, received)
       {:token, 0} ->
-        send(parent, {:done, received + 1})
+        # Token exhausted: tell the parent, and stay to report the count
+        send(parent, :done)
+        ring_node(next, parent, received + 1)
       {:token, hops} ->
         send(next, {:token, hops - 1})
         ring_node(next, parent, received + 1)
+      {:report, from} ->
+        send(from, {:count, received})
     end
   end
 end

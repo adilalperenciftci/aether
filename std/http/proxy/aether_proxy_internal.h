@@ -82,7 +82,7 @@ typedef struct AetherUpstream {
      * read; updates only on response classification. */
     _Atomic int    cb_state;          /* AetherProxyBreakerState */
     _Atomic int    cb_consecutive_failures;
-    _Atomic long   cb_opened_at_ms;   /* monotonic clock ms */
+    _Atomic int64_t cb_opened_at_ms;  /* monotonic clock ms */
     _Atomic int    cb_half_open_inflight;
 
     /* Per-upstream token-bucket rate limit. Disabled when
@@ -96,19 +96,23 @@ typedef struct AetherUpstream {
     int             rl_max_rps;       /* 0 = disabled */
     int             rl_burst;
     double          rl_tokens;        /* current token count */
-    long            rl_last_refill_ms;
+    int64_t         rl_last_refill_ms;
 
     /* Per-upstream metrics counters. _Atomic so the metrics
-     * scraper reads them without taking any pool lock. */
-    _Atomic long    metric_requests_2xx;
-    _Atomic long    metric_requests_3xx;
-    _Atomic long    metric_requests_4xx;
-    _Atomic long    metric_requests_5xx;
-    _Atomic long    metric_transport_errors;
-    _Atomic long    metric_timeouts;
-    _Atomic long    metric_retries;
-    _Atomic long    metric_latency_sum_ms;
-    _Atomic long    metric_latency_count;
+     * scraper reads them without taking any pool lock. 64-bit, as
+     * every clock reading and time stored here: a `long` is 32 bits
+     * on Windows, where the latency sum overflowed after 24.8 days
+     * of summed latency (hours on a busy proxy) and the clock, time
+     * since boot there, after 24.8 days of uptime (#3096). */
+    _Atomic int64_t metric_requests_2xx;
+    _Atomic int64_t metric_requests_3xx;
+    _Atomic int64_t metric_requests_4xx;
+    _Atomic int64_t metric_requests_5xx;
+    _Atomic int64_t metric_transport_errors;
+    _Atomic int64_t metric_timeouts;
+    _Atomic int64_t metric_retries;
+    _Atomic int64_t metric_latency_sum_ms;
+    _Atomic int64_t metric_latency_count;
 } AetherUpstream;
 
 struct AetherProxyPool {
@@ -123,10 +127,10 @@ struct AetherProxyPool {
 
     /* Pool-level cache metric counters (cache itself doesn't know
      * which pool it serves; the middleware records into these). */
-    _Atomic long  metric_cache_hits;
-    _Atomic long  metric_cache_misses;
-    _Atomic long  metric_cache_revalidations;
-    _Atomic long  metric_503_no_upstream;
+    _Atomic int64_t metric_cache_hits;
+    _Atomic int64_t metric_cache_misses;
+    _Atomic int64_t metric_cache_revalidations;
+    _Atomic int64_t metric_503_no_upstream;
 
     /* Upstream array. Fixed-grow; modest N (handful of upstreams) so
      * realloc-on-add is fine. */
@@ -178,8 +182,8 @@ typedef struct AetherProxyCacheEntry {
     char*  body;
     int    body_length;
 
-    long   stored_at_ms;
-    long   expires_at_ms;
+    int64_t stored_at_ms;
+    int64_t expires_at_ms;
     char*  etag;                      /* ETag value (without quotes) for IMS revalidation */
     char*  last_modified;             /* Last-Modified header value */
 
@@ -247,7 +251,7 @@ struct AetherProxyOpts {
 
 /* Monotonic milliseconds since some fixed epoch. clock_gettime(MONOTONIC)
  * on POSIX, QueryPerformanceCounter on Windows. */
-long aether_proxy_now_ms(void);
+int64_t aether_proxy_now_ms(void);
 
 /* Hold/release a pool refcount. */
 void aether_proxy_pool_retain(AetherProxyPool* pool);
@@ -263,7 +267,7 @@ void aether_proxy_inflight_dec(AetherUpstream* u);
 /* Breaker — defined in aether_proxy_breaker.c. */
 int  aether_proxy_breaker_admit(AetherProxyPool* pool,
                                 AetherUpstream* u,
-                                long now_ms);
+                                int64_t now_ms);
 void aether_proxy_breaker_record(AetherProxyPool* pool,
                                  AetherUpstream* u,
                                  int ok);
@@ -326,7 +330,7 @@ int aether_proxy_exchange_begin(AetherProxyExchange* px,
                                 HttpServerResponse* res,
                                 void* user_data,
                                 struct HttpArena* arena);
-int aether_proxy_exchange_resume(AetherProxyExchange* px, long elapsed_ms);
+int aether_proxy_exchange_resume(AetherProxyExchange* px, int64_t elapsed_ms);
 
 /* ---- answering without copying the response (#1758) ---------------------
  *
@@ -356,7 +360,7 @@ int aether_proxy_direct_ok(const AetherProxyExchange* px);
  * bytes. Returns 0 when `out` is filled and the head should be written,
  * or -1 when this response is not one to pass through and the caller should
  * take the copying path instead. */
-int aether_proxy_direct_take(AetherProxyExchange* px, long elapsed_ms,
+int aether_proxy_direct_take(AetherProxyExchange* px, int64_t elapsed_ms,
                              const char* raw, size_t raw_len,
                              size_t header_bytes, AetherProxyDirect* out);
 

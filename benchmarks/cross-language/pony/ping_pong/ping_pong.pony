@@ -20,6 +20,8 @@ actor PingActor
   let _target: U64
   var _received: U64 = 0
   var _errors: U64 = 0
+  // The sum of the values ping got back, which the runner checks.
+  var _checksum: U64 = 0
 
   new create(main: Main, pong_actor: PongActor, target: U64) =>
     _main = main
@@ -33,11 +35,12 @@ actor PingActor
     if value != _received then
       _errors = _errors + 1
     end
+    _checksum = _checksum + value
     _received = _received + 1
     if _received < _target then
       _pong.ping(_received)
     else
-      _main.done(_received, _errors)
+      _main.done(_received, _errors, _checksum)
     end
 
 actor Main
@@ -67,7 +70,7 @@ actor Main
     pong.set_ping(ping)
     ping.start()
 
-  be done(received: U64, errors: U64) =>
+  be done(received: U64, errors: U64, checksum: U64) =>
     let finish = Time.nanos()
     if errors > 0 then
       _env.out.print("VALIDATION FAILED: " + errors.string() + " errors")
@@ -76,5 +79,6 @@ actor Main
     let ns_per_msg = elapsed_ns.f64() / received.f64()
     let throughput = 1_000_000_000.0 / ns_per_msg
 
+    _env.out.print("Checksum: " + checksum.string())
     _env.out.print("ns/msg:         " + ns_per_msg.string())
     _env.out.print("Throughput:     " + (throughput / 1_000_000.0).string() + " M msg/sec")

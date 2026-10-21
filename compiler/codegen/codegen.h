@@ -711,6 +711,7 @@ void ensure_tuple_typedef(CodeGenerator* gen, Type* type);
 void ensure_optional_typedef(CodeGenerator* gen, Type* type);   // #340
 const char* c_result_type(Type* t);   // #2894
 void collect_optional_typedefs(CodeGenerator* gen, ASTNode* node);   // #340
+void collect_tuple_typedefs(CodeGenerator* gen, ASTNode* node);      // #3077
 void emit_sum_typedef(CodeGenerator* gen, ASTNode* def);   // #914
 void emit_enum_typedef(CodeGenerator* gen, ASTNode* def);  // #1044
 void emit_optional_coerced(CodeGenerator* gen, ASTNode* value, Type* target);   // #340

@@ -24,12 +24,17 @@ InferenceContext* create_inference_context(SymbolTable* table) {
     ctx->scope_owner = NULL;
     ctx->walk_id = 0;
     ctx->dsl_depth = 0;
+    strmap_init(&ctx->hoist_joins);
     return ctx;
 }
 
 void free_inference_context(InferenceContext* ctx) {
     if (!ctx) return;
-    
+
+    for (int i = 0; i < strmap_count(&ctx->hoist_joins); i++)
+        hoist_joins_free((HoistJoins*)strmap_value_at(&ctx->hoist_joins, i));
+    strmap_free(&ctx->hoist_joins);
+
     for (int i = 0; i < ctx->constraint_count; i++) {
         if (ctx->constraints[i].required_type) {
             free_type(ctx->constraints[i].required_type);
@@ -571,6 +576,21 @@ static Symbol* dsl_block_callee(InferenceContext* ctx, const char* name) {
     return NULL;
 }
 
+/* #3064: the bindings of the body `owner` (a function, main or closure) as
+ * this walk types them, gathered by one walk of the body the first time
+ * one is typed (HoistJoins). */
+static HoistJoins* body_joins(InferenceContext* ctx, ASTNode* owner) {
+    if (!owner) return NULL;
+    char key[32];
+    snprintf(key, sizeof(key), "%p", (void*)owner);
+    HoistJoins* j = (HoistJoins*)strmap_get(&ctx->hoist_joins, key);
+    if (!j) {
+        j = hoist_joins_new(owner);
+        if (j) strmap_put(&ctx->hoist_joins, key, j);
+    }
+    return j;
+}
+
 // Collect constraints from expressions
 void collect_expression_constraints(ASTNode* node, InferenceContext* ctx) {
     if (!node) return;
@@ -737,6 +757,9 @@ void collect_expression_constraints(ASTNode* node, InferenceContext* ctx) {
                     }
                 }
             }
+            /* #3064: the body's join of this name (below) reads it typed. */
+            if (node->type == AST_VARIABLE_DECLARATION && node->value && ctx->scope_owner)
+                hoist_joins_typed(body_joins(ctx, ctx->scope_owner), node);
 
             // Add variable to symbol table for later lookups (member access, etc.)
             if (node->value && node->node_type && node->node_type->kind != TYPE_UNKNOWN && ctx->symbols) {
@@ -757,13 +780,16 @@ void collect_expression_constraints(ASTNode* node, InferenceContext* ctx) {
                      * do, each binding's value the arm a literal is read
                      * from, as codegen's hoisted declaration does
                      * (hoist_numeric_join): `x = -1` beside `x = u` (a
-                     * uint32) is a long, `x = 0` beside it a uint32. */
+                     * uint32) is a long, `x = 0` beside it a uint32. Kept
+                     * as the walk types the bindings (body_joins), not by
+                     * a walk of the body at every one. */
                     Type* joined = NULL;
                     if (existing->inferred_in == ctx->scope_owner) {
                         Type* num = numeric_join_type(existing->type, node->node_type);
                         if (num) {
                             free_type(num);
-                            joined = hoist_numeric_join(ctx->scope_owner, node->value);
+                            joined = hoist_joins_get(body_joins(ctx, ctx->scope_owner),
+                                                     node->value);
                         }
                     }
                     if (existing->type) free_type(existing->type);

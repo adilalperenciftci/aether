@@ -50,7 +50,7 @@ typedef struct {
     int        stream_idx;
     int        out_w, out_h;
     int        fps_num, fps_den;
-    long       pts_ms;
+    int64_t    pts_ms;     /* 64-bit: a `long` is 32 bits on Windows */
     char       err[256];
 } Decoder;
 
@@ -168,7 +168,7 @@ static int decode_one(Decoder* d) {
             AVStream* st = d->fmt->streams[d->stream_idx];
             int64_t pts = d->frame->best_effort_timestamp;
             if (pts == AV_NOPTS_VALUE) pts = 0;
-            d->pts_ms = (long)(pts * av_q2d(st->time_base) * 1000.0);
+            d->pts_ms = (int64_t)(pts * av_q2d(st->time_base) * 1000.0);
             return 1;
         }
         if (rc != AVERROR(EAGAIN) && rc != AVERROR_EOF) {

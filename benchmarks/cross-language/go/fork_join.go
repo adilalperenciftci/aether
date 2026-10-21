@@ -22,13 +22,16 @@ const numWorkers = 8
 
 var messagesPerWorker = getMessages() / numWorkers
 
-func worker(id int, inbox chan int, wg *sync.WaitGroup, result *int) {
+func worker(id int, inbox chan int, wg *sync.WaitGroup, result *int, sum *int64) {
 	defer wg.Done()
 	count := 0
-	for range inbox {
+	var s int64 // the values this worker received
+	for v := range inbox {
+		s += int64(v)
 		count++
 	}
 	*result = count
+	*sum = s
 }
 
 func main() {
@@ -36,18 +39,21 @@ func main() {
 	fmt.Println("=== Go Fork-Join Throughput Benchmark ===")
 	fmt.Printf("Workers: %d, Messages: %d\n\n", numWorkers, total)
 
+	// The clock starts before the workers exist, as in every language here
+	// (FAIRNESS.md, rule 5).
+	start := time.Now()
+
 	// Create worker channels
 	channels := make([]chan int, numWorkers)
 	results := make([]int, numWorkers)
+	sums := make([]int64, numWorkers)
 	var wg sync.WaitGroup
 
 	for i := 0; i < numWorkers; i++ {
 		channels[i] = make(chan int, 1024)
 		wg.Add(1)
-		go worker(i, channels[i], &wg, &results[i])
+		go worker(i, channels[i], &wg, &results[i], &sums[i])
 	}
-
-	start := time.Now()
 
 	// Send messages round-robin
 	for i := 0; i < total; i++ {
@@ -66,8 +72,10 @@ func main() {
 
 	// Collect results
 	totalProcessed := 0
+	var checksum int64
 	for i := 0; i < numWorkers; i++ {
 		totalProcessed += results[i]
+		checksum += sums[i]
 	}
 
 	if totalProcessed != total {
@@ -78,6 +86,7 @@ func main() {
 	throughput := float64(total) / elapsedSec / 1e6
 	nsPerMsg := elapsedSec * 1e9 / float64(total)
 
+	fmt.Printf("Checksum: %d\n", checksum)
 	fmt.Printf("ns/msg:         %.2f\n", nsPerMsg)
 	fmt.Printf("Throughput:     %.2f M msg/sec\n", throughput)
 }

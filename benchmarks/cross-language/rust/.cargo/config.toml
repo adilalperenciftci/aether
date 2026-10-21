@@ -1,0 +1,6 @@
+# Build parity with the C, C++ and Aether benchmarks, which compile with
+# -march=native: rustc generates code for the CPU it runs on. The release
+# profile in Cargo.toml gives the rest (fat LTO, one codegen unit), the
+# equivalent of their -O3 -flto (FAIRNESS.md, build parity).
+[build]
+rustflags = ["-C", "target-cpu=native"]

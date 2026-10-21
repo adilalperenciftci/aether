@@ -1,6 +1,14 @@
-// Java ping-pong benchmark using threads and BlockingQueue
-import java.util.concurrent.*;
-import java.util.concurrent.atomic.AtomicLong;
+// Java ping-pong benchmark: two platform threads, each with a
+// LinkedTransferQueue mailbox. Ping sends 0, 1, 2, ...; pong echoes each
+// value back; ping checks it.
+//
+// Two units fit the cores, so platform threads, and LinkedTransferQueue,
+// which spins briefly before it parks, as the C, C++, Rust and Zig mailboxes
+// do (FAIRNESS.md, techniques). ArrayBlockingQueue parks at once and
+// measured 18 times slower here.
+import java.util.Locale;
+import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.LinkedTransferQueue;
 
 public class PingPong {
     private static int getMessages() {
@@ -9,86 +17,61 @@ public class PingPong {
     }
     private static final int MESSAGES = getMessages();
 
-    static class PingThread extends Thread {
-        private final BlockingQueue<Integer> sendQueue;
-        private final BlockingQueue<Integer> recvQueue;
+    public static void main(String[] args) throws InterruptedException {
+        System.out.println("=== Java Ping-Pong Benchmark ===");
+        System.out.println("Messages: " + MESSAGES);
+        System.out.println("Using platform threads with LinkedTransferQueue mailboxes");
+        System.out.println();
 
-        public PingThread(BlockingQueue<Integer> send, BlockingQueue<Integer> recv) {
-            this.sendQueue = send;
-            this.recvQueue = recv;
-        }
+        // The sum of the values ping got back, which the runner checks.
+        long[] checksum = {0};
 
-        @Override
-        public void run() {
+        long start = System.nanoTime();
+
+        BlockingQueue<Integer> toPong = new LinkedTransferQueue<>();
+        BlockingQueue<Integer> toPing = new LinkedTransferQueue<>();
+
+        Thread ping = new Thread(() -> {
             try {
+                long sum = 0;
                 for (int i = 0; i < MESSAGES; i++) {
-                    sendQueue.put(i);
-                    int received = recvQueue.take();
-                    // VALIDATE: Must receive echo of what we sent
+                    toPong.put(i);
+                    int received = toPing.take();
+                    sum += received;
                     if (received != i) {
                         System.err.println("ERROR: Ping sent " + i + " but got back " + received);
                     }
                 }
+                checksum[0] = sum;
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
             }
-        }
-    }
-
-    static class PongThread extends Thread {
-        private final BlockingQueue<Integer> sendQueue;
-        private final BlockingQueue<Integer> recvQueue;
-
-        public PongThread(BlockingQueue<Integer> send, BlockingQueue<Integer> recv) {
-            this.sendQueue = send;
-            this.recvQueue = recv;
-        }
-
-        @Override
-        public void run() {
+        });
+        Thread pong = new Thread(() -> {
             try {
                 for (int i = 0; i < MESSAGES; i++) {
-                    int received = recvQueue.take();
-                    // VALIDATE: Must receive expected sequence
+                    int received = toPong.take();
                     if (received != i) {
                         System.err.println("ERROR: Pong expected " + i + " but got " + received);
                     }
-                    // Echo back what we received
-                    sendQueue.put(received);
+                    toPing.put(received);
                 }
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
             }
-        }
-    }
-
-    public static void main(String[] args) throws InterruptedException {
-        System.out.println("=== Java Ping-Pong Benchmark ===");
-        System.out.println("Messages: " + MESSAGES);
-        System.out.println("Using Java threads with ArrayBlockingQueue");
-        System.out.println();
-
-        BlockingQueue<Integer> queueA = new ArrayBlockingQueue<>(1);
-        BlockingQueue<Integer> queueB = new ArrayBlockingQueue<>(1);
-
-        PingThread ping = new PingThread(queueA, queueB);
-        PongThread pong = new PongThread(queueB, queueA);
-
-        long start = System.nanoTime();
+        });
 
         ping.start();
         pong.start();
-
         ping.join();
         pong.join();
 
-        long end = System.nanoTime();
-        long totalNs = end - start;
+        long totalNs = Math.max(System.nanoTime() - start, 1);
 
-        double nsPerMsg = (double) totalNs / MESSAGES;
-        double throughput = 1e9 / nsPerMsg;
-
-        System.out.printf("ns/msg:         %.2f\n", nsPerMsg);
-        System.out.printf("Throughput:     %.2f M msg/sec\n", throughput / 1e6);
+        System.out.println("Checksum: " + checksum[0]);
+        // Locale.ROOT: the default locale prints "2,38" where it uses a
+        // decimal comma, and the runner reads no rate from that.
+        System.out.printf(Locale.ROOT, "ns/msg:         %.2f%n", (double) totalNs / MESSAGES);
+        System.out.printf(Locale.ROOT, "Throughput:     %.2f M msg/sec%n", MESSAGES * 1000.0 / totalNs);
     }
 }

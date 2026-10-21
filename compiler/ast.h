@@ -754,6 +754,12 @@ Type* branch_join_type(Type* a, const ASTNode* a_arm, Type* b, const ASTNode* b_
  * since the join holds each. On the first literal alone, `0`, `-1` and a
  * uint32 joined to a uint32, and -1 came back as 4294967295. */
 const ASTNode* join_arm_after(const ASTNode* kept, const ASTNode* next);
+/* #3070: does the written number type `w` hold `v`, a value of type `t`? An
+ * integer literal (`7`, `-1`) is held when it is in w's range; any other
+ * value when it joins w to w (branch_join_type): an int in a long, a uint32
+ * in a uint64, not a signed value in a uint64, a long in an int, or a float
+ * in an int. */
+int ast_number_holds(Type* w, Type* t, const ASTNode* v);
 /* #2996: the program's sum types, for branch_join_type: registered by the
  * checker as it resolves them, reset before each program. */
 void ast_sums_reset(void);
@@ -829,7 +835,7 @@ int ast_returns_only_literal(const ASTNode* node, ASTNodeType lit);
  * `lit`? */
 int ast_returns_literal(const ASTNode* node, ASTNodeType lit);
 /* Does a slot of type `t` take `null`: a pointer, a string, a closure or a
- * C function pointer, a slice? */
+ * C function pointer, a slice, or a `fn?` (#3077)? */
 int ast_type_takes_null(const Type* t);
 
 /* #3061, #3063: the one result of a clause set, from its clauses' (`nodes`,
@@ -860,11 +866,13 @@ typedef struct {
     ASTNode* at;       /* a failure: the clause it is reported at */
     Type* other;       /* APART, UNFIT: that clause's result (borrowed) */
     ASTNode* written;  /* the clause that writes the result type, or NULL */
+    ASTNode* recurse_at; /* NONE_ONLY: a clause that only calls the set, or NULL */
 } ClauseJoin;
 
 void clause_set_join(ASTNode* const* nodes, int count, ClauseJoin* out);
 /* Is clause `cl` one clause_set_join gives the set's result to: one that
- * gives a value, the `none` and `null` ones included? */
+ * gives a value, the `none` and `null` ones and one that only calls the set
+ * included? */
 int clause_takes_set_result(const ASTNode* cl);
 
 /* Whether some arm of the `match` `m` runs for every value it can match: it

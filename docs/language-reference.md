@@ -494,7 +494,7 @@ Variables are inferred from their initialization or usage context.
 
 **Keywords are not names.** A statement keyword used as a variable (`when = 0.0`, `message = "hi"`) is refused at the keyword: `'when' is a reserved keyword and cannot be used as an identifier; rename it`.
 
-**A local has one type: the one its first binding gave it.** A later bare assignment is an assignment, not a new variable, so `x = 5` then `x = "s"` (or `x = true`, `x = null`) is a compile error, *cannot re-bind 'x' as string: it was bound as int by its first assignment*, rather than a C error about `const char*`. Use a new name for the other value. A name first bound inside a branch or loop body and **used after it** is one variable for the whole function: it takes the join of every binding, the one an if-expression's branches take (`if a { n = 1 } else { n = 4000000000 }` makes `n` a `long`; `f = 1.5` in one branch and `f = 2` in the other keeps `f` a `float`; `x = -1` beside a `uint32` makes `x` a `long`, and a signed value beside a `uint64` is the error below, as it is in an if-expression), and a binding of another kind anywhere in the function, or of another struct or pointer type, is the same compile error: *cannot bind 'v' as int: it is bound as string in another branch or loop body of this function*. A `switch` case is a branch here as an `if` arm is, and so is the body of a `match` arm ([Match Statements](#match-statements)). A local of a `while` body is declared before the loop, and a name both arms of an `if`/`else` (or every case of a `switch` with a `default`, or every arm of a `match` that runs an arm for every value) bind is declared before the `if` (or `switch`, or `match`), so each is one variable whether or not it is used after them: `view = p as *Apple` in one `while` and `view = p as *Pear` in the next is that error, where a bare `ptr` or `null` binding would fit either. A read of such a local in the body before its binding, which sees the value the previous pass bound, has the binding's type (`out = "${out}${prev}"` ahead of `prev = "p${i}"` reads a string). A name bound in the bodies of separate `if`s or `for` loops and used only inside them is a separate variable per body, except a `string` local, which is always one variable for the whole function. The conversions the [table below](#casting-between-types) permits still apply at a re-bind, and the local keeps its first type: after `f = 1.5`, `f = 2` stores `2.0` and `f` stays a `float`; after `int x = 0`, `x = 2.5` stores `2`. A `string` accepts `null` (it is a nullable `const char*`), and a value that would not fit an *inferred* `int` (a 64-bit integer, a `uint32`, a float) is the narrowing error described there. Each slot of a tuple destructure that names a bound local re-binds it the same way, whether the local is in the same scope or is an outer one a closure writes (`a, b = two()` in a closure after `a, b = names()`): a slot of another kind is the same error, reported at the slot, a slot C converts is stored as the local's type, and an `int` slot binds an inferred `int`, as `x = 5` does (#2762).
+**A local has one type: the one its first binding gave it.** A later bare assignment is an assignment, not a new variable, so `x = 5` then `x = "s"` (or `x = true`, `x = null`) is a compile error, *cannot re-bind 'x' as string: it was bound as int by its first assignment*, rather than a C error about `const char*`. Use a new name for the other value. A name first bound inside a branch or loop body and **used after it** is one variable for the whole function: it takes the join of every binding, the one an if-expression's branches take (`if a { n = 1 } else { n = 4000000000 }` makes `n` a `long`; `f = 1.5` in one branch and `f = 2` in the other keeps `f` a `float`; `x = -1` beside a `uint32` makes `x` a `long`, and a signed value beside a `uint64` is the error below, as it is in an if-expression), unless a binding writes its type: `uint64 x = 7` in one branch makes `x` a `uint64` wherever the others are, and a binding of a value it does not hold (`x = -1` or an `int` beside it, `x = 1.5` beside `int x = 0`, `x = 300` beside `uint8 x = 7`, `x = "s"` beside `int x = 1`), or one that writes another type, is a compile error in either order: *cannot bind 'x' to this int value: it is written as uint64 in another branch or loop body of this function, which does not hold the value*. A binding of another kind anywhere in the function, or of another struct or pointer type, is the same kind of error: *cannot bind 'v' as int: it is bound as string in another branch or loop body of this function*. A `switch` case is a branch here as an `if` arm is, and so is the body of a `match` arm ([Match Statements](#match-statements)). A local of a `while` body is declared before the loop, and a name both arms of an `if`/`else` (or every case of a `switch` with a `default`, or every arm of a `match` that runs an arm for every value) bind is declared before the `if` (or `switch`, or `match`), so each is one variable whether or not it is used after them: `view = p as *Apple` in one `while` and `view = p as *Pear` in the next is that error, where a bare `ptr` or `null` binding would fit either. A read of such a local in the body before its binding, which sees the value the previous pass bound, has the binding's type (`out = "${out}${prev}"` ahead of `prev = "p${i}"` reads a string). A name bound in the bodies of separate `if`s or `for` loops and used only inside them is a separate variable per body, except a `string` local, which is always one variable for the whole function. The conversions the [table below](#casting-between-types) permits still apply at a re-bind, and the local keeps its first type: after `f = 1.5`, `f = 2` stores `2.0` and `f` stays a `float`; after `int x = 0`, `x = 2.5` stores `2`. A `string` accepts `null` (it is a nullable `const char*`), and a value that would not fit an *inferred* `int` (a 64-bit integer, a `uint32`, a float) is the narrowing error described there. Each slot of a tuple destructure that names a bound local re-binds it the same way, whether the local is in the same scope or is an outer one a closure writes (`a, b = two()` in a closure after `a, b = names()`): a slot of another kind is the same error, reported at the slot, a slot C converts is stored as the local's type, and an `int` slot binds an inferred `int`, as `x = 5` does (#2762).
 
 **A local's scope starts after its initializer.** In `count = count() + 1` the call is the function `count`, and from that binding on, to the end of the function, `count` is the local. So is a local declared ahead of its binding because both arms of an `if` bind it: until the checker reaches the first binding in source order, the name is still the function's. A reference that comes before the binding, such as the function passed as a value, is the function too:
 
@@ -748,7 +748,7 @@ main() {
 
 A bare `return` gives no value, so in a function whose written result is a value it is the same error, E0200, naming the result type. It ends a void function, and a function with no written type is void until one of its returns gives a value.
 
-What a binding converts, a `return` converts, as C converts it: one numeric scalar to another (`int` to `long` or `float`; into a written `int`, a `long` or a `float` truncates, as `int k = 4.5` does), a bool to an integer and an integer to a bool (a comparison returned from `-> int` is 1 or 0, an extern's int truth value returned from `-> bool` is whether it is nonzero), a `T` to `T?` and `none` to any optional, a variant struct to its sum or to the sum's optional, an enum to an integer (`byte` included) and an integer to an enum, `null` or an `int` to a `ptr` or a `*T`, and `null` or `[]` to a slice. A `string` and a bare `ptr` are both a C `const char*`, so a C string pointer returned from `-> string` becomes a string (its characters copied into a counted string the caller owns), and a string returned from `-> ptr` is its pointer:
+What a binding converts, a `return` converts, as C converts it: one numeric scalar to another (`int` to `long` or `float`; into a written `int`, a `long` or a `float` truncates, as `int k = 4.5` does), a bool to an integer and an integer to a bool (a comparison returned from `-> int` is 1 or 0, an extern's int truth value returned from `-> bool` is whether it is nonzero), a `T` to `T?` and `none` to any optional, a variant struct to its sum or to the sum's optional, an enum to an integer (`byte` included) and an integer to an enum, `null` or an `int` to a `ptr` or a `*T`, `null` to a closure or a `fn?` (the empty closure), and `null` or `[]` to a slice. A `string` and a bare `ptr` are both a C `const char*`, so a C string pointer returned from `-> string` becomes a string (its characters copied into a counted string the caller owns), and a string returned from `-> ptr` is its pointer:
 
 ```aether
 extern getenv(name: string) -> ptr
@@ -1066,7 +1066,12 @@ as an [if-expression](#if-expressions)'s branches join:
 returns a `long`, a clause that returns `0` beside one that returns a
 `uint32` is a `uint32`, a clause that returns only `null` takes the pointer,
 string or closure type beside it, and one that returns only `none` makes the
-result an optional of the others' type. Results no one type holds are a
+result an optional of the others' type. The two go together: `f(0) -> none`,
+`f(1) -> null` and `f(k) -> "s"` return a `string?`, `f(1)` the string `null`
+is, as `return null` from a `-> string?` function gives. A clause that only
+calls the set again (`last(k) -> last(k - 1)`) gives the set's result and no
+type of its own, so beside only `none` clauses the set has no `T`, the compile
+error a set of only `none` clauses is. Results no one type holds are a
 compile error naming both. A clause that returns nothing gives the result
 type's zero value, and a set none of whose clauses returns a value returns
 nothing. A clause set exported from a module is imported with all its
@@ -3567,6 +3572,16 @@ import helpers;         // Loads lib/helpers/module.ae
 result = utils.double_value(21);
 ```
 
+In `utils.name`, `utils` is the imported module unless a value of that name
+(a local, a parameter, a global) is in scope, whose field it then reads. A
+function of that name is no value and hides nothing: a program's `frame()`
+leaves `frame.SETS` the constant of an imported `frame` module, in the
+program and in a module that imports `frame` itself, beside a function of
+the module's own named `frame` too. A module's code sees its own
+declarations, what it imports and the builtins, never the program's: a
+module that calls a program's `helper()` without importing it is refused,
+and a program's `struct frame` is no `frame` in the module.
+
 ### Available Standard Library Modules
 
 | Module | Namespace | Description |
@@ -3884,10 +3899,15 @@ A closure value, of such a type or a bare `fn`, may hold no function: a
 field a struct literal leaves out, or one given `null`. `c == null` and `c
 != null` ask whether it holds one (a `bool`), and `c = null` empties it,
 giving back the closure it held, so an optional callback slot is written
-`if s.build != null { s.build(ctx, 1) }`. `null` in an array literal of
-closures is the empty closure too (`[f, null]`, `[null, f]`). A closure
-compares only with `null`: `f == g` between two closures, or a closure and
-a pointer, is a compile error (Go's rule for function values). The same
+`if s.build != null { s.build(ctx, 1) }`. `null` is that empty closure
+wherever a closure goes: a binding, a field, an argument, a result, an
+element of an array literal (`[f, null]`, `[null, f]`), a part of a tuple
+literal, a module-level `var`, the default of `??`. A `fn?` given `null`
+holds the empty closure, as a `ptr?` given `null` holds a null pointer: it
+is not `none`, and `o == null` is true. A closure compares only with
+`null`: `f == g` between two closures, or a closure and a pointer, is a
+compile error, and so is one between two `fn?` or a `fn?` and a closure
+(Go's rule for function values). The same
 function over another environment is another closure, so there is no
 equality worth giving; to tell closures apart, keep a handle of your own
 beside each.

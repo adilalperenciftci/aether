@@ -8,6 +8,7 @@ actor Worker
   let _id: USize
   let _main: Main
   var _processed: U64 = 0
+  var _sum: U64 = 0   // the values this worker received
   let _expected: U64
 
   new create(id: USize, main: Main, expected: U64) =>
@@ -16,9 +17,10 @@ actor Worker
     _expected = expected
 
   be work(value: U64) =>
+    _sum = _sum + value
     _processed = _processed + 1
     if _processed >= _expected then
-      _main.worker_done(_id, _processed)
+      _main.worker_done(_id, _processed, _sum)
     end
 
 actor Main
@@ -28,6 +30,7 @@ actor Main
   var _total_messages: U64 = 100_000
   var _workers_done: USize = 0
   var _total_processed: U64 = 0
+  var _checksum: U64 = 0
 
   new create(env: Env) =>
     _env = env
@@ -43,10 +46,16 @@ actor Main
       end
     end
 
+    // An equal share for each worker, as in every other language here.
     let messages_per_worker = _total_messages / _num_workers.u64()
+    _total_messages = messages_per_worker * _num_workers.u64()
 
     _env.out.print("=== Pony Fork-Join Throughput Benchmark ===")
     _env.out.print("Workers: " + _num_workers.string() + ", Messages: " + _total_messages.string() + "\n")
+
+    // The clock starts before the workers exist, as in every language here
+    // (FAIRNESS.md, rule 5).
+    _start = Time.nanos()
 
     // Create workers
     let workers = Array[Worker](_num_workers)
@@ -55,8 +64,6 @@ actor Main
       workers.push(Worker(i, this, messages_per_worker))
       i = i + 1
     end
-
-    _start = Time.nanos()
 
     // Send messages round-robin
     var msg: U64 = 0
@@ -68,9 +75,10 @@ actor Main
       msg = msg + 1
     end
 
-  be worker_done(id: USize, processed: U64) =>
+  be worker_done(id: USize, processed: U64, sum: U64) =>
     _workers_done = _workers_done + 1
     _total_processed = _total_processed + processed
+    _checksum = _checksum + sum
 
     if _workers_done >= _num_workers then
       let finish = Time.nanos()
@@ -78,6 +86,7 @@ actor Main
       let ns_per_msg = elapsed_ns.f64() / _total_messages.f64()
       let throughput = 1_000_000_000.0 / ns_per_msg
 
+      _env.out.print("Checksum: " + _checksum.string())
       _env.out.print("ns/msg:         " + ns_per_msg.string())
       _env.out.print("Throughput:     " + (throughput / 1_000_000.0).string() + " M msg/sec")
     end

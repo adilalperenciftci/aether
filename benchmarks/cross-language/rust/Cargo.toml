@@ -29,6 +29,7 @@ path = "src/skynet.rs"
 # cross-language comparison reflects each compiler's release-grade
 # codegen. Without these overrides Cargo's default release profile
 # leaves `lto = false`, which puts Rust at an unfair disadvantage.
+# .cargo/config.toml adds `-C target-cpu=native`, their -march=native.
 [profile.release]
 lto = "fat"
 codegen-units = 1

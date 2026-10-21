@@ -22,10 +22,10 @@ main() {
         total_messages = atoi(env_val);
     }
 
-    counter = spawn(Counter());
-
-    // Get start time
+    // The clock starts before the counter exists, as in every language here
+    // (FAIRNESS.md, rule 5).
     start_time = clock_ns();
+    counter = spawn(Counter());
 
     // Send all messages
     i = 0;
@@ -50,27 +50,31 @@ main() {
         print("\n");
     }
 
-    // Calculate throughput: messages / elapsed_us = M msg/sec
-    elapsed_ns = end_time - start_time;
-    elapsed_us = elapsed_ns / 1000;
+    print("Checksum: ");
+    print(actual);
+    print("\n");
 
-    if (elapsed_us > 0) {
-        ns_per_msg = elapsed_ns / actual;
-        print("ns/msg:         ");
-        print(ns_per_msg);
-        print("\n");
-
-        throughput_m = actual / elapsed_us;
-        leftover = actual - (throughput_m * elapsed_us);
-        throughput_frac = (leftover * 100) / elapsed_us;
-
-        print("Throughput:     ");
-        print(throughput_m);
-        print(".");
-        if (throughput_frac < 10) {
-            print("0");
-        }
-        print(throughput_frac);
-        print(" M msg/sec\n");
+    // Always printed: a run shorter than a microsecond printed no rate,
+    // which the runner reads as a broken run.
+    long elapsed_ns = end_time - start_time;
+    if (elapsed_ns < 1) {
+        elapsed_ns = 1;
     }
+    print("ns/msg:         ");
+    print(elapsed_ns / actual);
+    print("\n");
+
+    // Millions per second, in hundredths: count * 1e9 / ns / 1e6 * 100.
+    long hundredths = actual;
+    hundredths = hundredths * 100000 / elapsed_ns;
+    throughput_m = hundredths / 100;
+    throughput_frac = hundredths - throughput_m * 100;
+    print("Throughput:     ");
+    print(throughput_m);
+    print(".");
+    if (throughput_frac < 10) {
+        print("0");
+    }
+    print(throughput_frac);
+    print(" M msg/sec\n");
 }

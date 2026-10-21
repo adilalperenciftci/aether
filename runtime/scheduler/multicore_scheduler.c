@@ -397,6 +397,16 @@ static atomic_int g_overflow_total = 0;
 #define PARK_MS_MIN 1
 #define PARK_MS_MAX 32
 
+// A core's park waits this long instead, when a test sets it (0: the
+// PARK_MS_MIN..PARK_MS_MAX steps above). Set to a minute, a wake that never
+// came shows as a stall of a minute rather than as a delay of up to 32 ms,
+// which no bound on wall time tells apart from a slow machine (#3087).
+static atomic_int g_core_park_ms = 0;
+
+void scheduler_set_core_park_ms(int ms) {
+    atomic_store_explicit(&g_core_park_ms, ms > 0 ? ms : 0, memory_order_relaxed);
+}
+
 static inline void aether_park_deadline(struct timespec* ts, int ms) {
 #if defined(CLOCK_REALTIME)
     clock_gettime(CLOCK_REALTIME, ts);
@@ -406,19 +416,31 @@ static inline void aether_park_deadline(struct timespec* ts, int ms) {
     ts->tv_sec = tv.tv_sec;
     ts->tv_nsec = tv.tv_usec * 1000L;
 #endif
-    ts->tv_nsec += (long)ms * 1000000L;
-    ts->tv_sec  += ts->tv_nsec / 1000000000L;
-    ts->tv_nsec %= 1000000000L;
+    // In 64 bits: `long` is 32 on Windows (and on 32-bit targets), where
+    // ms * 1000000 overflowed past 2147 ms and set the deadline in the past,
+    // or, with a negative tv_nsec, weeks ahead. A test's minute-long park
+    // returned at once, or did not return (#3095).
+    long long nsec = (long long)ts->tv_nsec + (long long)ms * 1000000LL;
+    ts->tv_sec += (time_t)(nsec / 1000000000LL);
+    ts->tv_nsec = (long)(nsec % 1000000000LL);
 }
 
-// Tell `target` it has work (#1517). Costs one acquire load on a line the
-// caller just wrote anyway; the mutex is touched only when someone is actually
-// asleep. The load-versus-park race is closed on the sleeper's side, which
-// sets `parked` and then re-checks its queues before waiting, so a producer
-// that sees parked==0 here has necessarily already made its message visible to
-// that re-check.
+// Tell `target` it has work (#1517); every enqueue onto another core's queues
+// calls it. The mutex is touched only when someone is actually asleep.
+//
+// The sleeper stores `parked` and then looks at its queues; the caller has
+// stored its message and then loads `parked`. Each is a store followed by a
+// load of the other side's location, which a CPU may reorder (x86 does, from
+// its store buffer): with only release and acquire, both sides could read the
+// old value, the caller skip the signal and the core sleep on the message
+// until its timed wait ran out (#3087), up to PARK_MS_MAX, and on Windows,
+// whose timed waits end on its 15.6 ms timer tick, at least that. With a
+// sequentially consistent fence on each side, here and in the park, at least
+// one sees the other's store, as the actor-thread park below does with
+// thread_parked.
 static inline void sched_wake(Scheduler* target) {
-    if (atomic_load_explicit(&target->parked, memory_order_acquire)) {
+    atomic_thread_fence(memory_order_seq_cst);
+    if (atomic_load_explicit(&target->parked, memory_order_relaxed)) {
         pthread_mutex_lock(&target->park_mutex);
         pthread_cond_signal(&target->park_cond);
         pthread_mutex_unlock(&target->park_mutex);
@@ -725,6 +747,9 @@ static void overflow_flush(int from_core) {
             b->head += drained;
             b->count -= drained;
             if (b->count > 0) any = 1;
+            // Another core is told, as every other enqueue tells it
+            // (#3087): asleep, it would sleep on these until a timeout.
+            if (drained > 0 && t != from_core) sched_wake(&schedulers[t]);
         }
     }
     if (flushed > 0) {
@@ -736,8 +761,8 @@ static void overflow_flush(int from_core) {
     tls_overflow_any = any;
 }
 
-// Pin thread to specific CPU core (NUMA awareness)
-// Full support on Linux, macOS, and Windows
+// Keep a scheduler thread on its CPU (NUMA awareness): bound to it on Linux,
+// a hint on macOS and Windows.
 static void pin_to_core(int core_id) {
 #ifdef __linux__
     cpu_set_t cpuset;
@@ -763,8 +788,15 @@ static void pin_to_core(int core_id) {
     // QOS_CLASS_USER_INTERACTIVE has highest priority and prefers performance cores
     pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
 #elif defined(_WIN32)
-    DWORD_PTR mask = (DWORD_PTR)1 << core_id;
-    SetThreadAffinityMask(GetCurrentThread(), mask);
+    // The ideal processor, a hint, not SetThreadAffinityMask's hard binding
+    // (#3087). Bound to one logical CPU, a scheduler thread could not leave
+    // it when another program's thread ran there (an editor's indexer, a
+    // browser), and shared it a time slice at a time: a thread ring whose
+    // path crossed such a CPU ran at a quarter of its speed, so runs fell
+    // into a fast or a slow mode by where the other load landed. With the
+    // hint Windows keeps the thread on its CPU and moves it when that CPU is
+    // busy, as macOS's affinity tag above lets it.
+    SetThreadIdealProcessor(GetCurrentThread(), (DWORD)core_id);
 #endif
 }
 
@@ -1993,15 +2025,17 @@ void* AETHER_HOT scheduler_thread(void* arg) {
                     if (park_ms < PARK_MS_MAX) park_ms *= 2;
                 } else {
                     pthread_mutex_lock(&sched->park_mutex);
-                    atomic_store_explicit(&sched->parked, 1, memory_order_release);
-                    // Publish `parked` BEFORE the last look at the queues. A
-                    // producer either sees parked==1 and signals, or its
-                    // enqueue happened before this check and is seen here.
-                    // Neither order sleeps on pending work.
+                    atomic_store_explicit(&sched->parked, 1, memory_order_relaxed);
+                    // Publish `parked` BEFORE the last look at the queues,
+                    // with the fence that pairs with sched_wake's: a producer
+                    // either sees parked==1 and signals, or its enqueue is
+                    // seen here. Neither order sleeps on pending work.
+                    atomic_thread_fence(memory_order_seq_cst);
                     if (atomic_load_explicit(&sched->running, memory_order_acquire) &&
                         !has_pending_cross_core(sched)) {
                         struct timespec deadline;
-                        aether_park_deadline(&deadline, park_ms);
+                        int wait_ms = atomic_load_explicit(&g_core_park_ms, memory_order_relaxed);
+                        aether_park_deadline(&deadline, wait_ms > 0 ? wait_ms : park_ms);
                         pthread_cond_timedwait(&sched->park_cond,
                                                &sched->park_mutex, &deadline);
                     }
@@ -3149,6 +3183,12 @@ void scheduler_send_batch_flush(void) {
         // Only count batch-enqueued messages here (fallback already counted by send_remote)
         total_sent += enqueued;
         atomic_fetch_add_explicit(&schedulers[c].work_count, enqueued, memory_order_relaxed);
+        // A core that went idle and parked between two batches is told, as
+        // every other enqueue tells it (#3087). It was not: it slept on the
+        // batch until its timed wait ran out, so a fan-out from main (a
+        // fork-join's workers) stalled for a park timeout at every gap longer
+        // than the idle spin, and on Windows for at least a 15.6 ms tick.
+        if (enqueued > 0) sched_wake(&schedulers[c]);
     }
 
     // Single atomic update for batch-sent messages

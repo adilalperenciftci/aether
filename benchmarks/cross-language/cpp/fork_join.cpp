@@ -1,52 +1,39 @@
 // C++ Fork-Join Benchmark (Savina-style)
-#include <iostream>
-#include <iomanip>
-#include <thread>
-#include <mutex>
-#include <condition_variable>
+// 8 worker std::threads, each with a mailbox (mailbox.hpp); main sends the
+// messages round-robin, then a -1 to each, and joins them.
 #include <chrono>
-#include <vector>
-#include <queue>
 #include <cstdlib>
+#include <iomanip>
+#include <iostream>
+#include <memory>
+#include <thread>
+#include <vector>
+
+#include "mailbox.hpp"
 
 constexpr int NUM_WORKERS = 8;
 static int MESSAGES_PER_WORKER = 12500;  // Default for "low" preset (100000 / 8)
 
-class Worker {
-    std::mutex mtx;
-    std::condition_variable cv;
-    std::queue<int> inbox;
-    bool done = false;
-    int processed = 0;
+// 1024 messages, the mailbox size of every language here that bounds one
+// (FAIRNESS.md, techniques).
+constexpr std::uint32_t CAPACITY = 1024;
 
-public:
-    void send(int value) {
-        std::unique_lock<std::mutex> lock(mtx);
-        inbox.push(value);
-        cv.notify_one();
-    }
-
-    void finish() {
-        std::unique_lock<std::mutex> lock(mtx);
-        done = true;
-        cv.notify_one();
-    }
+struct Worker {
+    Mailbox inbox{CAPACITY};
+    long long processed = 0;
+    long long sum = 0;   // the values this worker received
 
     void run() {
-        while (true) {
-            std::unique_lock<std::mutex> lock(mtx);
-            cv.wait(lock, [this] { return !inbox.empty() || done; });
-
-            while (!inbox.empty()) {
-                inbox.pop();
-                processed++;
-            }
-
-            if (done && inbox.empty()) break;
+        long long n = 0, s = 0;
+        for (;;) {
+            std::int64_t value = inbox.receive();
+            if (value < 0) break;
+            s += value;
+            n++;
         }
+        processed = n;
+        sum = s;
     }
-
-    int getProcessed() const { return processed; }
 };
 
 int main() {
@@ -57,38 +44,36 @@ int main() {
     std::cout << "=== C++ Fork-Join Throughput Benchmark ===" << std::endl;
     std::cout << "Workers: " << NUM_WORKERS << ", Messages: " << total << "\n" << std::endl;
 
-    std::vector<Worker> workers(NUM_WORKERS);
+    std::vector<std::unique_ptr<Worker>> workers;
     std::vector<std::thread> threads;
 
-    // Start workers
-    for (int i = 0; i < NUM_WORKERS; i++) {
-        threads.emplace_back([&workers, i] { workers[i].run(); });
-    }
+    auto start = std::chrono::steady_clock::now();
 
-    auto start = std::chrono::high_resolution_clock::now();
+    for (int i = 0; i < NUM_WORKERS; i++) {
+        workers.push_back(std::make_unique<Worker>());
+        threads.emplace_back(&Worker::run, workers[i].get());
+    }
 
     // Send messages round-robin
     for (int i = 0; i < total; i++) {
-        workers[i % NUM_WORKERS].send(i);
+        workers[i % NUM_WORKERS]->inbox.send(i);
     }
-
-    // Signal workers to finish
     for (int i = 0; i < NUM_WORKERS; i++) {
-        workers[i].finish();
+        workers[i]->inbox.send(-1);
     }
-
-    // Wait for all workers
     for (auto& t : threads) {
         t.join();
     }
 
-    auto end = std::chrono::high_resolution_clock::now();
+    auto end = std::chrono::steady_clock::now();
     double elapsed = std::chrono::duration<double>(end - start).count();
+    if (elapsed <= 0) elapsed = 1e-9;
 
-    // Collect results
-    int total_processed = 0;
+    long long total_processed = 0;
+    long long checksum = 0;
     for (int i = 0; i < NUM_WORKERS; i++) {
-        total_processed += workers[i].getProcessed();
+        total_processed += workers[i]->processed;
+        checksum += workers[i]->sum;
     }
 
     if (total_processed != total) {
@@ -99,6 +84,7 @@ int main() {
     double throughput = total / elapsed / 1e6;
     double ns_per_msg = elapsed * 1e9 / total;
 
+    std::cout << "Checksum: " << checksum << std::endl;
     std::cout << "ns/msg:         " << std::fixed << std::setprecision(2) << ns_per_msg << std::endl;
     std::cout << "Throughput:     " << std::setprecision(2) << throughput << " M msg/sec" << std::endl;
 

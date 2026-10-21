@@ -1,0 +1,111 @@
+// Tests for lib/benchstats, the statistics and parsing run_benchmarks.ae
+// relies on. Run from this directory: `ae run test_benchstats.ae` (the
+// integration test tests/integration/bench_runner_stats does).
+
+import benchstats
+
+extern exit(code: int)
+
+check(ok: bool, what: string) {
+    if !ok {
+        println("FAIL: ${what}")
+        exit(1)
+    }
+}
+
+close(a: float, b: float) -> bool {
+    d = a - b
+    if d < 0.0 {
+        d = 0.0 - d
+    }
+    return d < 0.000001
+}
+
+main() {
+    // The median is the middle of the sorted runs, not the middle run: the
+    // runs Aether ping-pong gave in #3076, in the order they happened.
+    runs = make([]float, 5)
+    runs[0] = 12.34
+    runs[1] = 12.29
+    runs[2] = 12.58
+    runs[3] = 12.09
+    runs[4] = 12.62
+    check(close(benchstats.median(runs), 12.34), "the median of five runs")
+    check(runs[2] == 12.58, "the median leaves the runs in their order")
+    check(close(benchstats.minimum(runs), 12.09), "the minimum")
+    check(close(benchstats.maximum(runs), 12.62), "the maximum")
+    check(close(benchstats.mean(runs), 12.384), "the mean")
+    free(runs)
+
+    even = make([]float, 4)
+    even[0] = 4.0
+    even[1] = 1.0
+    even[2] = 3.0
+    even[3] = 2.0
+    check(close(benchstats.median(even), 2.5), "the median of an even count")
+    // Sample standard deviation of 1, 2, 3, 4: sqrt(5/3).
+    check(close(benchstats.stddev(even), 1.2909944487358056), "the sample standard deviation")
+    check(close(benchstats.cv_pct(even), 51.63977794943222), "the coefficient of variation")
+    free(even)
+
+    one = make([]float, 1)
+    one[0] = 7.0
+    check(close(benchstats.median(one), 7.0), "the median of one run")
+    check(close(benchstats.cv_pct(one), 0.0), "one run has no spread")
+    free(one)
+
+    // A fast pattern's spread is not arithmetic damage: the overflow that
+    // made cv negative in int32 (test_bench_cv_overflow before it).
+    fast = make([]float, 2)
+    fast[0] = 250000000.0
+    fast[1] = 200000000.0
+    check(benchstats.cv_pct(fast) > 0.0, "a fast pattern's cv is positive")
+    free(fast)
+
+    check(benchstats.fixed2(12.345) == "12.35", "fixed2 rounds half up")
+    check(benchstats.fixed2(0.5) == "0.50", "fixed2 pads the cents")
+    check(benchstats.fixed2(3.0) == "3.00", "fixed2 of a whole number")
+    check(benchstats.fixed2(-1.25) == "-1.25", "fixed2 of a negative")
+
+    // A run's output, as the implementations print it, with GNU time -v.
+    out = "=== C Ping-Pong Benchmark ===\nMessages: 1000\nChecksum: 499500\nns/msg:         81.04\nThroughput:     12.34 M msg/sec\n\tCommand being timed: \"./ping_pong\"\n\tUser time (seconds): 0.50\n\tSystem time (seconds): 0.25\n\tMaximum resident set size (kbytes): 2048\n"
+    check(close(benchstats.parse_throughput(out), 12.34), "the throughput")
+    check(close(benchstats.parse_ns(out), 81.04), "ns per message")
+    check(benchstats.long_after(out, "Checksum:") == 499500, "the checksum")
+    check(close(benchstats.parse_cpu_seconds(out, 0), 0.75), "GNU time's user + system time")
+    check(close(benchstats.parse_peak_mb(out, 0), 2.0), "GNU time's peak resident set")
+
+    // macOS's time -l.
+    mac = "Throughput:     3.10 M msg/sec\n        1.23 real         0.40 user         0.20 sys\n           3145728  maximum resident set size\n"
+    check(close(benchstats.parse_cpu_seconds(mac, 1), 0.6), "BSD time's user + sys")
+    check(close(benchstats.parse_peak_mb(mac, 1), 3.0), "BSD time's peak resident set")
+
+    // Missing values are -1, never 0: a missing number must not read as a
+    // measurement.
+    bare = "Throughput:     n/a\n"
+    check(benchstats.parse_throughput(bare) < 0.0, "a throughput that is no number")
+    check(benchstats.parse_cpu_seconds(bare, 0) < 0.0, "no time report: no CPU time")
+    check(benchstats.parse_peak_mb(bare, 0) < 0.0, "no time report: no memory")
+    check(benchstats.long_after(bare, "Checksum:") == -1, "no checksum line")
+
+    // Skynet prints its units on the Leaves line.
+    sky = "Leaves: 1000000, concurrency units: 1111 (sequential below 1000)\nChecksum: 499999500000\n"
+    check(benchstats.long_after(sky, "concurrency units:") == 1111, "skynet's units")
+    check(benchstats.long_after(sky, "Checksum:") == 499999500000, "skynet's sum")
+
+    // What a correct run reports.
+    check(benchstats.expected_checksum("ping_pong", 1000) == 499500, "ping-pong checksum")
+    check(benchstats.expected_checksum("counting", 1000) == 1000, "counting checksum")
+    check(benchstats.expected_checksum("thread_ring", 1000) == 1001, "thread-ring checksum")
+    // 1003 messages over 8 workers: 125 each, 1000 in all.
+    check(benchstats.expected_checksum("fork_join", 1003) == 499500, "fork-join checksum")
+    check(benchstats.expected_checksum("skynet", 1000000) == 499999500000, "skynet checksum")
+    check(benchstats.expected_units("skynet", 1000000) == 1111, "skynet units for a million leaves")
+    check(benchstats.expected_units("skynet", 1000) == 1, "skynet below the threshold is one unit")
+    check(benchstats.work_units("thread_ring", 1000) == 1001, "thread-ring work")
+    check(benchstats.work_units("fork_join", 1003) == 1000, "fork-join work")
+    check(benchstats.work_units("skynet", 1000000) == 1111, "skynet work")
+    check(benchstats.work_units("ping_pong", 1000) == 1000, "ping-pong work")
+
+    println("ok")
+}

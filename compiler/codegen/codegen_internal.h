@@ -353,6 +353,8 @@ int  emit_contract_postconditions(CodeGenerator* gen, ASTNode* func);
 void hoist_heap_string_trackers(CodeGenerator* gen, ASTNode* body);
 
 int call_returns_owned_closure(CodeGenerator* gen, ASTNode* call);   /* #2506 */
+int call_returns_owned_opt_closure(CodeGenerator* gen, ASTNode* call);   /* #3078 */
+int is_owned_closure_unwrap(CodeGenerator* gen, ASTNode* e);              /* #3078 */
 const char* call_c_name(CodeGenerator* gen, const char* func_name);
 /* #2915: the extern table's name for the extern a call to `func_name`
  * reaches, resolved as call_c_name resolves its C symbol, or NULL. */

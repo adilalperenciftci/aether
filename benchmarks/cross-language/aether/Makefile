@@ -13,8 +13,15 @@ CC = gcc
 # `ae cflags` is the toolchain's own answer to "what -I do I need", so this
 # cannot drift again.
 AETHER_INCLUDES := $(shell $(AETHER_CLI) cflags --cflags 2>/dev/null)
-CFLAGS = -O3 -march=native -flto -fno-plt $(AETHER_INCLUDES)
-LDFLAGS = -flto -pthread -lm
+OPT = -O3 -march=native -flto -fno-plt
+CFLAGS = $(OPT) $(AETHER_INCLUDES)
+# The generated C calls std as well as the runtime (string_retain and
+# string_release for string values, aether_write_bytes for println), so the
+# link takes the rest from libaether, by the toolchain's own `ae cflags
+# --libs`, as the include set above does. The runtime compiled below defines
+# its symbols first, so only std members come from the archive.
+AETHER_LIBS := $(shell $(AETHER_CLI) cflags --libs 2>/dev/null)
+LDFLAGS = -flto -pthread -lm $(AETHER_LIBS)
 # Runtime sources, taken from the build MANIFEST (regenerated on every
 # `make stdlib`, the same set linked into libaether.a) so this list never
 # drifts as the runtime grows. A hand-maintained subset went stale and the
@@ -26,7 +33,7 @@ LDFLAGS = -flto -pthread -lm
 MANIFEST := ../../../build/MANIFEST
 RUNTIME_SRCS := $(addprefix ../../../,$(shell grep '^runtime/' $(MANIFEST) 2>/dev/null))
 
-.PHONY: all clean ping_pong counting thread_ring fork_join skynet
+.PHONY: all clean flags ping_pong counting thread_ring fork_join skynet
 
 all: ping_pong counting thread_ring fork_join skynet
 
@@ -62,3 +69,7 @@ skynet: skynet.ae
 
 clean:
 	rm -f ping_pong counting thread_ring fork_join skynet /tmp/*_aether.c*
+
+# What the runner records with the results (run_benchmarks.ae).
+flags:
+	@echo "$(CC) $(OPT) / -flto (includes and libraries from ae cflags)"

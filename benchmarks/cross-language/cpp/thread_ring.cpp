@@ -1,72 +1,41 @@
 // C++ Thread Ring Benchmark (Savina-style)
-#include <iostream>
-#include <iomanip>
-#include <thread>
-#include <mutex>
-#include <condition_variable>
+// 100 std::threads in a ring, each with a mailbox (mailbox.hpp), pass a
+// token that counts down from the hop count; the node that receives 0 tells
+// main.
 #include <chrono>
-#include <vector>
-#include <atomic>
 #include <cstdlib>
+#include <iomanip>
+#include <iostream>
+#include <thread>
+#include <vector>
+
+// No spinning: a node waits about 99 hops for the token, and 100 spinning
+// threads on fewer cores take the CPU from the one thread that holds it
+// (FAIRNESS.md, wait strategies).
+#define MAILBOX_SPIN 0
+#include "mailbox.hpp"
 
 constexpr int RING_SIZE = 100;
 static int NUM_HOPS = 100000;  // Default for "low" preset
 
-class RingNode {
-    std::mutex mtx;
-    std::condition_variable cv;
-    int token = -1;
-    bool has_token = false;
-    bool done = false;
-    RingNode* next = nullptr;
-    int received = 0;
-    std::atomic<bool>* completion;
-    std::atomic<int>* final_received;
+// One token in the ring, so a mailbox of one slot (the default).
+static Mailbox inbox[RING_SIZE];
+static Mailbox done_box;            // main's: the node that gets 0 writes here
+static long long received[RING_SIZE];
 
-public:
-    void setNext(RingNode* n) { next = n; }
-    void setCompletion(std::atomic<bool>* c, std::atomic<int>* fr) {
-        completion = c;
-        final_received = fr;
-    }
-
-    void send(int t) {
-        std::unique_lock<std::mutex> lock(mtx);
-        token = t;
-        has_token = true;
-        cv.notify_one();
-    }
-
-    void stop() {
-        std::unique_lock<std::mutex> lock(mtx);
-        done = true;
-        cv.notify_one();
-    }
-
-    void run() {
-        while (true) {
-            std::unique_lock<std::mutex> lock(mtx);
-            cv.wait(lock, [this] { return has_token || done; });
-
-            if (done) break;
-
-            int t = token;
-            has_token = false;
-            received++;
-            lock.unlock();
-
-            if (t == 0) {
-                final_received->store(received);
-                completion->store(true);
-                return;
-            }
-
-            next->send(t - 1);
+static void node(int id) {
+    Mailbox& next = inbox[(id + 1) % RING_SIZE];
+    for (;;) {
+        std::int64_t token = inbox[id].receive();
+        if (token < 0) break;           // main's stop, after the run
+        received[id]++;
+        if (token == 0) {
+            done_box.send(0);
+        } else {
+            next.send(token - 1);
         }
     }
-
-    int getReceived() const { return received; }
-};
+}
 
 int main() {
     const char* env = getenv("BENCHMARK_MESSAGES");
@@ -75,49 +44,35 @@ int main() {
     std::cout << "=== C++ Thread Ring Benchmark ===" << std::endl;
     std::cout << "Ring size: " << RING_SIZE << ", Hops: " << NUM_HOPS << "\n" << std::endl;
 
-    std::vector<RingNode> nodes(RING_SIZE);
     std::vector<std::thread> threads;
-    std::atomic<bool> completion{false};
-    std::atomic<int> final_received{0};
+    threads.reserve(RING_SIZE);
 
-    // Setup ring
+    auto start = std::chrono::steady_clock::now();
+
     for (int i = 0; i < RING_SIZE; i++) {
-        nodes[i].setNext(&nodes[(i + 1) % RING_SIZE]);
-        nodes[i].setCompletion(&completion, &final_received);
+        threads.emplace_back(node, i);
     }
 
-    // Start threads
-    for (int i = 0; i < RING_SIZE; i++) {
-        threads.emplace_back([&nodes, i] { nodes[i].run(); });
-    }
+    inbox[0].send(NUM_HOPS);
+    done_box.receive();
 
-    auto start = std::chrono::high_resolution_clock::now();
+    auto end = std::chrono::steady_clock::now();
 
-    // Inject token
-    nodes[0].send(NUM_HOPS);
-
-    // Wait for completion
-    while (!completion.load()) {
-        std::this_thread::yield();
-    }
-
-    auto end = std::chrono::high_resolution_clock::now();
-
-    // Stop all threads
-    for (int i = 0; i < RING_SIZE; i++) {
-        nodes[i].stop();
-    }
-
-    for (auto& t : threads) {
-        t.join();
-    }
+    // The token is spent and nothing sends any more: stop every node.
+    for (int i = 0; i < RING_SIZE; i++) inbox[i].send(-1);
+    for (auto& t : threads) t.join();
 
     double elapsed = std::chrono::duration<double>(end - start).count();
+    if (elapsed <= 0) elapsed = 1e-9;
     int total_messages = NUM_HOPS + 1;
 
     double throughput = total_messages / elapsed / 1e6;
     double ns_per_msg = elapsed * 1e9 / total_messages;
 
+    // The receipts summed over the ring, the checksum.
+    long long receipts = 0;
+    for (int i = 0; i < RING_SIZE; i++) receipts += received[i];
+    std::cout << "Checksum: " << receipts << std::endl;
     std::cout << "ns/msg:         " << std::fixed << std::setprecision(2) << ns_per_msg << std::endl;
     std::cout << "Throughput:     " << std::setprecision(2) << throughput << " M msg/sec" << std::endl;
 

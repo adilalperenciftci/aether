@@ -316,6 +316,16 @@ static ASTNode* synth_schema(ASTNode* struct_def) {
     return func;
 }
 
+/* #3088: a function derived from a struct is declared where the struct
+ * is: in its module when it is a module's (the module's body resolves its
+ * own declarations and imports, never the program's), in the program
+ * otherwise. */
+static void derive_add(ASTNode* program, ASTNode* struct_def, ASTNode* fn) {
+    if (struct_def->origin_module && !fn->origin_module)
+        fn->origin_module = strdup(struct_def->origin_module);
+    add_child(program, fn);
+}
+
 int derive_synthesize_pass(ASTNode* program) {
     if (!program || program->type != AST_PROGRAM) return 0;
     int errors = 0;
@@ -412,7 +422,7 @@ int derive_synthesize_pass(ASTNode* program) {
                 errors++;
                 continue;
             }
-            add_child(program, fn);
+            derive_add(program, t.sd, fn);
         }
         if (t.flags & DERIVE_SCHEMA) {
             ASTNode* fn = synth_schema(t.sd);
@@ -420,7 +430,7 @@ int derive_synthesize_pass(ASTNode* program) {
                 errors++;
                 continue;
             }
-            add_child(program, fn);
+            derive_add(program, t.sd, fn);
         }
         /* Drop the `derive:` marker so re-running the pass is a no-op. The
          * markers after it (`observable`, #2220) belong to later passes and

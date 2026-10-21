@@ -240,7 +240,7 @@ AetherProxyCacheEntry* aether_proxy_cache_lookup(AetherProxyCache* cache,
      *
      * For URL-only and METHOD_URL strategies we still hash the
      * canonical key so the bucket lookup is direct. */
-    long now = aether_proxy_now_ms();
+    int64_t now = aether_proxy_now_ms();
 
     pthread_mutex_lock(&cache->lock);
 
@@ -463,7 +463,10 @@ void aether_proxy_cache_store(AetherProxyCache* cache,
     e->vary_header  = vary;     /* ownership transferred; may be NULL */
     e->status_code  = status_code;
     e->stored_at_ms  = aether_proxy_now_ms();
-    e->expires_at_ms = e->stored_at_ms + (long)ttl_sec * 1000L;
+    /* In 64 bits: (long)ttl_sec * 1000L overflowed on Windows, where a
+     * `long` is 32 bits, for a TTL past 24.8 days, and the entry expired
+     * before it was stored (#3096). */
+    e->expires_at_ms = e->stored_at_ms + (int64_t)ttl_sec * 1000;
     e->etag          = extract_header(response_headers, "ETag");
     e->last_modified = extract_header(response_headers, "Last-Modified");
 

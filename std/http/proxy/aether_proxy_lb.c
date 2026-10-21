@@ -34,9 +34,9 @@
  * refill, capped at rl_burst, then deducts one token. Returns 1
  * if admitted, 0 if the bucket is empty. Disabled when
  * rl_max_rps == 0. */
-static int rate_limit_admit_locked(AetherUpstream* u, long now_ms) {
+static int rate_limit_admit_locked(AetherUpstream* u, int64_t now_ms) {
     if (u->rl_max_rps == 0) return 1;
-    long elapsed = now_ms - u->rl_last_refill_ms;
+    int64_t elapsed = now_ms - u->rl_last_refill_ms;
     if (elapsed > 0) {
         double refill = (double)elapsed * (double)u->rl_max_rps / 1000.0;
         u->rl_tokens += refill;
@@ -50,7 +50,7 @@ static int rate_limit_admit_locked(AetherUpstream* u, long now_ms) {
     return 0;
 }
 
-static int upstream_eligible(AetherProxyPool* pool, AetherUpstream* u, long now_ms) {
+static int upstream_eligible(AetherProxyPool* pool, AetherUpstream* u, int64_t now_ms) {
     if (atomic_load(&u->draining)) return 0;
     if (!atomic_load(&u->healthy)) return 0;
     if (pool->max_inflight_per_up > 0 &&
@@ -150,7 +150,7 @@ static const char* client_identity(HttpRequest* req) {
 
 /* ----- per-algorithm pickers ----- */
 
-static AetherUpstream* pick_round_robin(AetherProxyPool* pool, long now_ms) {
+static AetherUpstream* pick_round_robin(AetherProxyPool* pool, int64_t now_ms) {
     int n = pool->upstream_count;
     if (n == 0) return NULL;
     for (int tries = 0; tries < n; tries++) {
@@ -161,7 +161,7 @@ static AetherUpstream* pick_round_robin(AetherProxyPool* pool, long now_ms) {
     return NULL;
 }
 
-static AetherUpstream* pick_least_conn(AetherProxyPool* pool, long now_ms) {
+static AetherUpstream* pick_least_conn(AetherProxyPool* pool, int64_t now_ms) {
     int n = pool->upstream_count;
     if (n == 0) return NULL;
     AetherUpstream* best = NULL;
@@ -178,7 +178,7 @@ static AetherUpstream* pick_least_conn(AetherProxyPool* pool, long now_ms) {
     return best ? claim(best) : NULL;
 }
 
-static AetherUpstream* pick_ip_hash(AetherProxyPool* pool, HttpRequest* req, long now_ms) {
+static AetherUpstream* pick_ip_hash(AetherProxyPool* pool, HttpRequest* req, int64_t now_ms) {
     int n = pool->upstream_count;
     if (n == 0) return NULL;
     uint64_t h = fnv1a_64(client_identity(req));
@@ -200,7 +200,7 @@ static AetherUpstream* pick_ip_hash(AetherProxyPool* pool, HttpRequest* req, lon
  * is absent OR when the natural pick is ineligible (mirrors the
  * IP_HASH soft-sticky semantics so requests still go somewhere
  * during partial outages). */
-static AetherUpstream* pick_cookie_hash(AetherProxyPool* pool, HttpRequest* req, long now_ms) {
+static AetherUpstream* pick_cookie_hash(AetherProxyPool* pool, HttpRequest* req, int64_t now_ms) {
     int n = pool->upstream_count;
     if (n == 0) return NULL;
     if (!pool->cookie_name) {
@@ -226,7 +226,7 @@ static AetherUpstream* pick_cookie_hash(AetherProxyPool* pool, HttpRequest* req,
     return NULL;
 }
 
-static AetherUpstream* pick_weighted_rr(AetherProxyPool* pool, long now_ms) {
+static AetherUpstream* pick_weighted_rr(AetherProxyPool* pool, int64_t now_ms) {
     /* Smooth weighted RR (nginx's algorithm).
      *
      * For each upstream:    current_weight += effective_weight
@@ -264,7 +264,7 @@ static AetherUpstream* pick_weighted_rr(AetherProxyPool* pool, long now_ms) {
 
 AetherUpstream* aether_proxy_lb_pick(AetherProxyPool* pool, HttpRequest* req) {
     if (!pool) return NULL;
-    long now_ms = aether_proxy_now_ms();
+    int64_t now_ms = aether_proxy_now_ms();
 
     pthread_mutex_lock(&pool->lock);
     AetherUpstream* u = NULL;

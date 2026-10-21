@@ -13,9 +13,11 @@ start() ->
     io:format("Messages: ~p~n~n", [Messages]),
 
     Parent = self(),
-    Counter = spawn(fun() -> counter(0, Parent) end),
 
+    % The clock starts before the counter exists, as in every language here
+    % (FAIRNESS.md, rule 5).
     Start = erlang:monotonic_time(nanosecond),
+    Counter = spawn(fun() -> counter(0, Parent) end),
 
     % Send all messages
     send_messages(Counter, Messages),
@@ -36,6 +38,7 @@ start() ->
 
             NsPerMsg = ElapsedNs / Messages,
             MsgPerSec = Messages / ElapsedSec,
+            io:format("Checksum: ~p~n", [Count]),
             io:format("ns/msg:         ~.2f~n", [NsPerMsg]),
             io:format("Throughput:     ~.2f M msg/sec~n", [MsgPerSec / 1000000])
     after 60000 ->

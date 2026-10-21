@@ -1,0 +1,17 @@
+exports(
+    SETS, Eye, width, make_eye,
+)
+
+const SETS = 3
+
+struct Eye {
+    width: int
+}
+
+width(e: *Eye) -> int {
+    return e.width
+}
+
+make_eye(w: int) -> Eye {
+    return Eye { width: w }
+}

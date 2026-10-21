@@ -24,11 +24,17 @@
 
 /* ----- helpers exposed to other proxy .c files ----- */
 
-long aether_proxy_now_ms(void) {
+int64_t aether_proxy_now_ms(void) {
     /* Only differences matter here (health-check and breaker timings).
      * Delegates to the shared monotonic clock so Windows uses the
-     * overflow-free QueryPerformanceCounter split in one place. */
-    return (long)http_clock_ms();
+     * overflow-free QueryPerformanceCounter split in one place. Kept in
+     * 64 bits: cast to a `long`, 32 bits on Windows, the reading (time
+     * since boot there) went negative after 24.8 days of uptime and
+     * stayed so for as long again. Differences of two readings survived
+     * that; comparisons did not: an event-loop deadline at or below 0
+     * means none, so upstream timeouts stopped firing, and cache expiry
+     * compared across the wrap (#3096). */
+    return (int64_t)http_clock_ms();
 }
 
 /* ----- LB algo string mapping ----- */
@@ -223,7 +229,7 @@ const char* aether_proxy_rate_limit_set(AetherProxyPool* pool, int max_rps, int 
     if (burst  < 0) return "burst must be >= 0";
 
     pthread_mutex_lock(&pool->lock);
-    long now = aether_proxy_now_ms();
+    int64_t now = aether_proxy_now_ms();
     for (int i = 0; i < pool->upstream_count; i++) {
         AetherUpstream* u = pool->upstreams[i];
         pthread_mutex_lock(&u->rl_lock);

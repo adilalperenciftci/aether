@@ -56,5 +56,6 @@ actor Main
     let ns_per_msg = elapsed_ns.f64() / _messages.f64()
     let throughput = 1_000_000_000.0 / ns_per_msg
 
+    _env.out.print("Checksum: " + count.string())
     _env.out.print("ns/msg:         " + ns_per_msg.string())
     _env.out.print("Throughput:     " + (throughput / 1_000_000.0).string() + " M msg/sec")

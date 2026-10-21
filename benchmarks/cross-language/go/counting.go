@@ -31,12 +31,16 @@ func main() {
 	fmt.Println("=== Go Counting Actor Benchmark ===")
 	fmt.Printf("Messages: %d\n\n", messages)
 
+	// The clock starts before the counter exists, as in every language here
+	// (FAIRNESS.md, rule 5).
+	start := time.Now()
+
+	// 1024 messages, the mailbox size of every language here that bounds one
+	// (FAIRNESS.md, techniques).
 	inbox := make(chan struct{}, 1024)
 	done := make(chan int)
 
 	go counter(inbox, done)
-
-	start := time.Now()
 
 	// Send all messages
 	for i := 0; i < messages; i++ {
@@ -57,6 +61,7 @@ func main() {
 	throughput := float64(messages) / elapsedSec / 1e6
 	nsPerMsg := elapsedSec * 1e9 / float64(messages)
 
+	fmt.Printf("Checksum: %d\n", count)
 	fmt.Printf("ns/msg:         %.2f\n", nsPerMsg)
 	fmt.Printf("Throughput:     %.2f M msg/sec\n", throughput)
 }

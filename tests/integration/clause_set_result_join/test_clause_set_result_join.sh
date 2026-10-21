@@ -96,5 +96,63 @@ case "$out" in
        fails=$((fails + 1)) ;;
 esac
 
+# #3063 follow-up: a `none` clause and a `null` one beside an int: refused
+# as `null` beside the int is, naming the int's clause, and once (the set is
+# settled again after a clause is checked, and said it twice). Beside a
+# string they join to a `string?`
+# (tests/regression/test_issue3063_clause_none_null.ae).
+cat > "$TMP/none_null_int.ae" <<'AE'
+num(0) -> none
+num(1) -> null
+num(k) -> 5
+
+main() { println("${num(2) == none}") }
+AE
+out=$(cd "$TMP" && "$AE" check none_null_int.ae 2>&1)
+case "$out" in
+    *"error[E0200]: the clauses of 'num' return int (line 3) and \`null\`, which int does not take"*"none_null_int.ae:2:"*) ;;
+    *) echo "  [FAIL] none_null_int: not refused naming int and \`null\` at line 2"
+       echo "$out" | sed 's/^/        /'
+       fails=$((fails + 1)) ;;
+esac
+if [ "$(printf '%s\n' "$out" | grep -c "the clauses of 'num'")" != 1 ]; then
+    echo "  [FAIL] none_null_int: not reported once"
+    echo "$out" | sed 's/^/        /'
+    fails=$((fails + 1))
+fi
+
+# #3063 follow-up: a clause that only calls the set gives no type either, so
+# beside a `none` clause the set still has no `T`. It waited as a clause
+# still to be inferred, for good, and only the `??` on a call was refused.
+cat > "$TMP/none_and_recursion.ae" <<'AE'
+last(0) -> none
+last(k) -> last(k - 1)
+
+main() { println("${last(3) == none}") }
+AE
+out=$(cd "$TMP" && "$AE" check none_and_recursion.ae 2>&1)
+case "$out" in
+    *"error[E0200]: every clause of 'last' that returns a value returns \`none\`, an optional of no type, or calls 'last' again (line 2): the set's result \`T?\` needs its \`T\`"*"none_and_recursion.ae:1:"*) ;;
+    *) echo "  [FAIL] none_and_recursion: not refused naming the missing T at line 1"
+       echo "$out" | sed 's/^/        /'
+       fails=$((fails + 1)) ;;
+esac
+
+# Beside a clause that gives a type, the recursion takes the set's result.
+cat > "$TMP/value_and_recursion.ae" <<'AE'
+count(0) -> none
+count(1) -> 7
+count(k) -> count(k - 1)
+
+main() { println("${count(3) ?? -1} ${count(0) ?? -1}") }
+AE
+out=$(cd "$TMP" && "$AE" run value_and_recursion.ae 2>&1 | tr -d '\r')
+case "$out" in
+    *"7 -1"*) ;;
+    *) echo "  [FAIL] value_and_recursion: did not run to 7 -1"
+       echo "$out" | sed 's/^/        /'
+       fails=$((fails + 1)) ;;
+esac
+
 if [ "$fails" -ne 0 ]; then exit 1; fi
-echo "  [PASS] clause_set_result_join: clause results no one type holds are refused, naming both, and a set of only \`none\` names its missing T"
+echo "  [PASS] clause_set_result_join: clause results no one type holds are refused, naming both, once, and a set of only \`none\` names its missing T"

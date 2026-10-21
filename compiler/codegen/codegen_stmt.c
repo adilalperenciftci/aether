@@ -4866,6 +4866,30 @@ int call_returns_owned_closure(CodeGenerator* gen, ASTNode* call) {
            !call_is_extern(gen, call);
 }
 
+/* #3078: does `call` hand its caller a `fn?` of its own, the closure in it
+ * (R3, as call_returns_owned_closure says of a closure)? Bound to a local,
+ * the local owns it; anywhere nothing binds the optional (a comparison, a
+ * `match` on the call, `!`, `??`, a statement), the expression that reads
+ * it gives the closure back. Nothing did: `maybe(k) != none` leaked the
+ * closure's environment at every call. */
+int call_returns_owned_opt_closure(CodeGenerator* gen, ASTNode* call) {
+    Type* t = call ? call->node_type : NULL;
+    return call && call->type == AST_FUNCTION_CALL && t && t->kind == TYPE_OPTIONAL &&
+           t->element_type && t->element_type->kind == TYPE_FUNCTION &&
+           !t->element_type->is_fnptr && !call_is_extern(gen, call);
+}
+
+/* #3078: `call!` or `call ?? d` over such a call, giving the closure: one of
+ * its own, as fresh as the call's (the `??` default is taken where it is not
+ * fresh itself, AST_NULL_COALESCE), so a place adopts it and a temporary
+ * gives it back. */
+int is_owned_closure_unwrap(CodeGenerator* gen, ASTNode* e) {
+    if (!e || e->child_count < 1 ||
+        (e->type != AST_TUPLE_UNWRAP && e->type != AST_NULL_COALESCE))
+        return 0;
+    return call_returns_owned_opt_closure(gen, e->children[0]);
+}
+
 /* ------------------------------------------------------------------
  * Closure-capture cell lifetime (#2019)
  *
@@ -6959,6 +6983,8 @@ int closure_value_is_fresh(CodeGenerator* gen, ASTNode* e) {
         return closure_value_is_fresh(gen, e->children[1]) &&
                closure_value_is_fresh(gen, e->children[2]);
     }
+    /* #3078: `call!` and `call ?? d` over a call handing over a `fn?`. */
+    if (is_owned_closure_unwrap(gen, e)) return 1;
     return 0;
 }
 
@@ -11320,6 +11346,36 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                         print_line(gen, "}");
                         break;
                     }
+                    if (call_returns_owned_opt_closure(gen, match_expr)) {
+                        /* #3078: the closure of a `fn?` an Aether function
+                         * handed over is the match's, and nothing else gives
+                         * it back: the `some` binding (or, with none, a
+                         * hidden one) owns it for the arm, as a local bound
+                         * to a fresh closure does, released at every exit of
+                         * the arm unless the arm hands it on. */
+                        ASTNode* arm_body = some_body ? some_body : wild_body;
+                        const char* own = some_bind ? some_bind : cg_internf("_om%d_c", id);
+                        int saved_var_count = gen->declared_var_count;
+                        print_indent(gen);
+                        fprintf(gen->output, "%s %s = _om%d.val;\n",
+                                volatile_decl_type(try_volatile_qual_for(gen, own), inner_c), own,
+                                id);
+                        mark_var_declared_typed(gen, own, inner);
+                        print_line(gen, "{");
+                        indent(gen);
+                        enter_scope(gen);
+                        push_own_drop(gen, own, inner, stmt->line, stmt->column);
+                        emit_opt_match_arm(gen, arm_body);
+                        exit_scope(gen);
+                        unindent(gen);
+                        print_line(gen, "}");
+                        truncate_declared_vars(gen, saved_var_count);
+                        unindent(gen);
+                        print_line(gen, "}");
+                        unindent(gen);
+                        print_line(gen, "}");
+                        break;
+                    }
                     int saved_some_vars = gen->declared_var_count;
                     if (some_bind) {
                         print_indent(gen);
@@ -12680,6 +12736,13 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                         fprintf(gen->output, "{ _AeClosure _ae_dc = ");
                         generate_expression(gen, inner);
                         fprintf(gen->output, "; _aether_closure_env_release(_ae_dc.env); }\n");
+                    } else if (inner && call_returns_owned_opt_closure(gen, inner)) {
+                        /* #3078: so is the closure of a `fn?` it hands over. */
+                        gen->discard_call_node = NULL;
+                        fprintf(gen->output, "{ %s _ae_dc = ", get_c_type(inner->node_type));
+                        generate_expression(gen, inner);
+                        fprintf(gen->output, "; if (_ae_dc.has) "
+                                             "_aether_closure_env_release(_ae_dc.val.env); }\n");
                     } else {
                         /* A statement whose value is thrown away is
                          * -Wunused-value in the user's own build: a

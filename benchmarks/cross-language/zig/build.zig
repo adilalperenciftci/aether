@@ -1,5 +1,9 @@
 const std = @import("std");
 
+// Build parity with the C, C++ and Aether benchmarks (-O3 -march=native
+// -flto): the target defaults to the host's native CPU, and the Makefile
+// builds with -Doptimize=ReleaseFast. Zig compiles each program as a single
+// unit, so whole-program optimisation needs no LTO switch.
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});

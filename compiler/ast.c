@@ -1254,6 +1254,10 @@ int ast_returns_literal(const ASTNode* node, ASTNodeType lit) {
 }
 
 int ast_type_takes_null(const Type* t) {
+    /* #3077: a `fn?` takes it as the empty closure, as a closure does. */
+    if (t && t->kind == TYPE_OPTIONAL && t->element_type &&
+        t->element_type->kind == TYPE_FUNCTION && !t->element_type->is_fnptr)
+        return 1;
     return t && (t->kind == TYPE_PTR || t->kind == TYPE_STRING || t->kind == TYPE_FUNCTION ||
                  type_is_slice(t));
 }
@@ -1267,16 +1271,45 @@ static int clause_gives_only_null(const ASTNode* cl) {
            ast_returns_only_literal(cl, AST_NULL_LITERAL);
 }
 
-/* #3063: a clause still unknown whose every value `return` gives `none`
- * (the checker's refine_inferred_result waits past `none`, an optional of
- * no type yet). */
+/* #3063: a clause whose result is inferred and every one of whose value
+ * `return`s gives `none`: it has no type of its own (the checker's
+ * refine_inferred_result waits past `none`, an optional of no type yet),
+ * and joins the others' as their optional. Known by its returns, as a
+ * `null` clause is, since the early pass gives every clause the set's
+ * result once it is settled: a `none` clause typed `string?` was then a
+ * `string?` clause, beside which a `null` clause was refused. */
 static int clause_gives_only_none(const ASTNode* cl) {
-    return (!cl->node_type || cl->node_type->kind == TYPE_UNKNOWN) &&
-           ast_returns_only_literal(cl, AST_NONE_LITERAL);
+    return cl->type_inferred && ast_returns_only_literal(cl, AST_NONE_LITERAL);
+}
+
+/* The value `return`s in `node` that give a call of `name`, and the others. */
+static void count_call_returns(const ASTNode* node, const char* name, int* hits, int* other) {
+    if (!node || ast_is_own_function(node)) return;
+    if (node->type == AST_RETURN_STATEMENT && node->child_count > 0 && node->children[0]) {
+        const ASTNode* v = node->children[0];
+        if (v->type == AST_PRINT_STATEMENT) return;
+        if (v->type == AST_FUNCTION_CALL && v->value && !strcmp(v->value, name)) (*hits)++;
+        else (*other)++;
+        return;
+    }
+    for (int i = 0; i < node->child_count; i++) count_call_returns(node->children[i], name, hits, other);
+}
+
+/* #3063: a clause whose result is inferred and every one of whose value
+ * `return`s calls its own set (`last(k) -> last(k - 1)`): it gives the
+ * set's result, and no type of its own. Waited for as a clause still to
+ * be inferred, it held the set unsettled for good when no other clause
+ * gave a type: `last(0) -> none` beside it left `last(3) ?? -1` refused as
+ * no optional. */
+static int clause_only_recurses(const ASTNode* cl) {
+    if (!cl->type_inferred || !cl->value) return 0;
+    int hits = 0, other = 0;
+    count_call_returns(cl, cl->value, &hits, &other);
+    return hits > 0 && other == 0;
 }
 
 int clause_takes_set_result(const ASTNode* cl) {
-    if (clause_gives_only_none(cl)) return 1;
+    if (clause_gives_only_none(cl) || clause_only_recurses(cl)) return 1;
     return cl->node_type && cl->node_type->kind != TYPE_UNKNOWN &&
            cl->node_type->kind != TYPE_VOID;
 }
@@ -1321,6 +1354,22 @@ const ASTNode* join_arm_after(const ASTNode* kept, const ASTNode* next) {
     return nmag > kmag ? next : kept;
 }
 
+int ast_number_holds(Type* w, Type* t, const ASTNode* v) {
+    if (!w || !t) return 1;
+    int is_signed, neg;
+    unsigned long long mag;
+    int bits = integer_kind_bits(w, &is_signed);
+    if (bits && integer_literal_arm(v, &neg, &mag)) {
+        if (!is_signed) return !neg && (bits == 64 || mag <= (1ull << bits) - 1);
+        unsigned long long top = 1ull << (bits - 1);
+        return neg ? mag <= top : mag < top;
+    }
+    Type* j = branch_join_type(w, NULL, t, v);
+    int holds = j && types_equal(j, w);
+    if (j) free_type(j);
+    return holds;
+}
+
 static void clause_join_fail(ClauseJoin* out, ClauseJoinStatus st, ASTNode* at, Type* other) {
     out->status = st;
     out->at = at;
@@ -1331,14 +1380,19 @@ void clause_set_join(ASTNode* const* nodes, int count, ClauseJoin* out) {
     memset(out, 0, sizeof(*out));
     ASTNode* none_at = NULL;
     ASTNode* null_at = NULL;
+    ASTNode* recurse_at = NULL;
     for (int c = 0; c < count; c++) {
         ASTNode* cl = nodes[c];
         Type* t = cl->node_type;
+        if (clause_gives_only_none(cl)) {
+            if (!none_at) none_at = cl;
+            continue;
+        }
+        if (clause_only_recurses(cl)) {   /* gives the set's result, no type of its own */
+            if (!recurse_at) recurse_at = cl;
+            continue;
+        }
         if (!t || t->kind == TYPE_UNKNOWN) {
-            if (clause_gives_only_none(cl)) {
-                if (!none_at) none_at = cl;
-                continue;
-            }
             if (ast_has_value_return(cl)) {   /* still to be inferred (#3056) */
                 out->status = CLAUSE_JOIN_WAIT;
                 return;
@@ -1365,7 +1419,7 @@ void clause_set_join(ASTNode* const* nodes, int count, ClauseJoin* out) {
         ASTNode* cl = nodes[c];
         Type* t = cl->node_type;
         if (!t || t->kind == TYPE_UNKNOWN || t->kind == TYPE_VOID || cl == written ||
-            clause_gives_only_null(cl))
+            clause_gives_only_null(cl) || clause_gives_only_none(cl) || clause_only_recurses(cl))
             continue;
         const ASTNode* arm = clause_value_arm(cl);
         if (!join) {
@@ -1393,12 +1447,18 @@ void clause_set_join(ASTNode* const* nodes, int count, ClauseJoin* out) {
         join = k;
     }
     /* `null` takes the pointer, string or closure type beside it, as a slot
-     * of that type takes `null`; alone, it is the `ptr` it is. */
+     * of that type takes `null`; alone, it is the `ptr` it is. #3063: and
+     * the optional of one, as `return null` from `-> string?` gives the
+     * string: the early pass joins `null` with `"s"` and then `none`, and
+     * gives every clause that `string?`, so the checker's join of the
+     * same clauses meets `null` beside a `string?` clause. */
     if (null_at) {
+        int takes = join && (ast_type_takes_null(join) ||
+                             (join->kind == TYPE_OPTIONAL && ast_type_takes_null(join->element_type)));
         if (!join) {
             join = clone_type(null_at->node_type);
             join_at = null_at;
-        } else if (!ast_type_takes_null(join)) {
+        } else if (!takes) {
             out->join = join;
             out->join_at = join_at;
             clause_join_fail(out, written ? CLAUSE_JOIN_NULL_UNFIT : CLAUSE_JOIN_NULL_APART,
@@ -1409,6 +1469,7 @@ void clause_set_join(ASTNode* const* nodes, int count, ClauseJoin* out) {
     /* `none` joins the rest as `T?`, as an if-expression's `none` arm does. */
     if (none_at) {
         if (!join) {
+            out->recurse_at = recurse_at;
             clause_join_fail(out, CLAUSE_JOIN_NONE_ONLY, none_at, NULL);
             return;
         }

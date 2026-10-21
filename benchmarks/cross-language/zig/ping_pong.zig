@@ -1,107 +1,56 @@
-// Zig ping-pong benchmark using std.Thread and Mutex
+// Zig ping-pong benchmark: two std.Thread threads, each with a mailbox
+// (mailbox.zig). Ping sends 0, 1, 2, ...; pong echoes each value back;
+// ping checks it.
 const std = @import("std");
-const Thread = std.Thread;
-const Mutex = std.Thread.Mutex;
-const Condition = std.Thread.Condition;
-const print = std.debug.print;
+const bench = @import("bench.zig");
+const Io = std.Io;
+const Mailbox = @import("mailbox.zig").Mailbox;
+const Slot = @import("mailbox.zig").Slot;
 
-fn getMessages() usize {
-    if (std.posix.getenv("BENCHMARK_MESSAGES")) |val| {
-        return std.fmt.parseInt(usize, val, 10) catch 100_000;
+var to_ping_buf: [1]Slot = undefined;
+var to_pong_buf: [1]Slot = undefined;
+// One message in flight each way, so a mailbox of one slot.
+var to_ping: Mailbox = undefined;
+var to_pong: Mailbox = undefined;
+// The sum of the values ping got back, which the runner checks.
+var checksum: i64 = 0;
+
+fn ping(io: Io, messages: i64) void {
+    var sum: i64 = 0;
+    var i: i64 = 0;
+    while (i < messages) : (i += 1) {
+        to_pong.send(io, i);
+        const received = to_ping.receive(io);
+        sum += received;
+        if (received != i) std.debug.print("ERROR: Ping sent {d} but got back {d}\n", .{ i, received });
     }
-    return 100_000;
+    checksum = sum;
 }
 
-var MESSAGES: usize = 0;
-
-const Channel = struct {
-    mutex: Mutex = .{},
-    cond: Condition = .{},
-    ready: bool = false,
-    value: i32 = 0,
-};
-
-var chan_a: Channel = .{};
-var chan_b: Channel = .{};
-
-fn pingThread(_: *anyopaque) void {
-    var i: i32 = 0;
-    while (i < MESSAGES) : (i += 1) {
-        // Send to A
-        chan_a.mutex.lock();
-        chan_a.value = i;
-        chan_a.ready = true;
-        chan_a.cond.signal();
-        chan_a.mutex.unlock();
-
-        // Wait for B
-        chan_b.mutex.lock();
-        while (!chan_b.ready) {
-            chan_b.cond.wait(&chan_b.mutex);
-        }
-        const received = chan_b.value;
-        chan_b.ready = false;
-        chan_b.mutex.unlock();
-
-        // Validate received value matches what was sent
-        if (received != i) {
-            print("Ping validation error: expected {}, got {}\n", .{ i, received });
-        }
+fn pong(io: Io, messages: i64) void {
+    var i: i64 = 0;
+    while (i < messages) : (i += 1) {
+        const received = to_pong.receive(io);
+        if (received != i) std.debug.print("ERROR: Pong expected {d} but got {d}\n", .{ i, received });
+        to_ping.send(io, received);
     }
 }
 
-fn pongThread(_: *anyopaque) void {
-    var expected: i32 = 0;
-    while (expected < MESSAGES) : (expected += 1) {
-        // Wait for A
-        chan_a.mutex.lock();
-        while (!chan_a.ready) {
-            chan_a.cond.wait(&chan_a.mutex);
-        }
-        const received = chan_a.value;
-        chan_a.ready = false;
-        chan_a.mutex.unlock();
+pub fn main(init: std.process.Init) !void {
+    const io = init.io;
+    const messages = bench.envCount(init, "BENCHMARK_MESSAGES", 100_000);
 
-        // Validate received value matches expected sequence
-        if (received != expected) {
-            print("Pong validation error: expected {}, got {}\n", .{ expected, received });
-        }
+    try bench.print(io, "=== Zig Ping-Pong Benchmark ===\nMessages: {d}\nUsing std.Thread with atomic mailboxes (spin, then sleep)\n\n", .{messages});
 
-        // Send back the EXACT value received to B
-        chan_b.mutex.lock();
-        chan_b.value = received;
-        chan_b.ready = true;
-        chan_b.cond.signal();
-        chan_b.mutex.unlock();
-    }
-}
+    const start = bench.nowNs(io);
 
-fn getTimeNs() u64 {
-    const ts = std.posix.clock_gettime(std.posix.CLOCK.MONOTONIC) catch return 0;
-    return @as(u64, @intCast(ts.sec)) * 1_000_000_000 + @as(u64, @intCast(ts.nsec));
-}
+    to_ping = .init(&to_ping_buf, 1000);
+    to_pong = .init(&to_pong_buf, 1000);
+    const t1 = try std.Thread.spawn(.{}, ping, .{ io, messages });
+    const t2 = try std.Thread.spawn(.{}, pong, .{ io, messages });
+    t1.join();
+    t2.join();
 
-pub fn main() !void {
-    MESSAGES = getMessages();
-
-    print("=== Zig Ping-Pong Benchmark ===\n", .{});
-    print("Messages: {}\n", .{MESSAGES});
-    print("Using std.Thread with Mutex and Condition\n\n", .{});
-
-    const start = getTimeNs();
-
-    const thread1 = try Thread.spawn(.{}, pingThread, .{@as(*anyopaque, undefined)});
-    const thread2 = try Thread.spawn(.{}, pongThread, .{@as(*anyopaque, undefined)});
-
-    thread1.join();
-    thread2.join();
-
-    const end = getTimeNs();
-    const elapsed_ns = end - start;
-    const elapsed_sec = @as(f64, @floatFromInt(elapsed_ns)) / 1e9;
-    const ns_per_msg = @as(f64, @floatFromInt(elapsed_ns)) / @as(f64, @floatFromInt(MESSAGES));
-    const throughput = @as(f64, @floatFromInt(MESSAGES)) / elapsed_sec / 1e6;
-
-    print("ns/msg:         {d:.2}\n", .{ns_per_msg});
-    print("Throughput:     {d:.2} M msg/sec\n", .{throughput});
+    const end = bench.nowNs(io);
+    try bench.report(io, checksum, messages, end - start);
 }

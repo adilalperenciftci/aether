@@ -1,312 +1,381 @@
 // Aether Cross-Language Benchmark Runner
-// Compiles and runs all 11 languages across 5 Savina benchmark patterns.
-// Writes JSON results to visualize/ directory.
+// Builds and runs 11 languages across 5 Savina benchmark patterns and writes
+// JSON results to visualize/. FAIRNESS.md is the rule book it implements.
 //
 // Usage: ae run run_benchmarks.ae
-//        BENCH_RUNS=10 ae run run_benchmarks.ae
+//        BENCH_RUNS=10 BENCH_WARMUP=2 BENCHMARK_MESSAGES=1000 ae run run_benchmarks.ae
+//        BENCH_LANGS=c,rust BENCH_PATTERNS=ping_pong ae run run_benchmarks.ae
+//        BENCH_STRICT=1 ae run run_benchmarks.ae   (exit 1 if any selected
+//                                                   language skips or fails)
+//
+// Each language is built only through its own build file (`make <pattern>`
+// in its directory, which calls cargo, zig build, sbt, javac or erlc as that
+// language does); this file passes no compiler flags. Every run's checksum is
+// compared with what a correct run prints, and a language whose run is wrong
+// is reported as [FAIL] rather than measured.
 
 import std.os
 import std.io
+import std.list
 import std.string
+import benchstats
 
 extern exit(code: int)
 
-// ============================================================================
-// Helpers (defined before main so they're available)
-// ============================================================================
-
-string java_class(string pattern) {
-    if string_equals(pattern, "ping_pong") == 1 { return "PingPong" }
-    if string_equals(pattern, "counting") == 1 { return "Counting" }
-    if string_equals(pattern, "thread_ring") == 1 { return "ThreadRing" }
-    if string_equals(pattern, "fork_join") == 1 { return "ForkJoin" }
-    if string_equals(pattern, "skynet") == 1 { return "Skynet" }
-    return pattern
+// Every command here is POSIX sh: `cd c && make ping_pong`, `/usr/bin/time -v
+// ./ping_pong`, `2>&1`. os.run_full runs it through `sh -c` on every
+// platform: os_system and os_exec_raw hand a command to cmd.exe on Windows,
+// which reads none of that, and they report no exit status.
+// (output, exit status); the status is -1 when the shell could not be started.
+sh_run(cmd: string) -> (string, int) {
+    argv = list.new()
+    _a = list.add(argv, "-c")
+    _b = list.add(argv, cmd)
+    out, err_out, status, err = os.run_full("sh", argv, null, "")
+    list.free(argv)
+    if err != "" {
+        return "${out}${err_out}", -1
+    }
+    return "${out}${err_out}", status
 }
 
-string scala_class(string pattern) {
-    if string_equals(pattern, "ping_pong") == 1 { return "bench.ping_pong.PingPongBenchmark" }
-    if string_equals(pattern, "counting") == 1 { return "bench.counting.CountingBenchmark" }
-    if string_equals(pattern, "thread_ring") == 1 { return "bench.thread_ring.ThreadRingBenchmark" }
-    if string_equals(pattern, "fork_join") == 1 { return "bench.fork_join.ForkJoinBenchmark" }
-    if string_equals(pattern, "skynet") == 1 { return "bench.skynet.SkynetBenchmark" }
-    return pattern
+sh_text(cmd: string) -> string {
+    out, _status = sh_run(cmd)
+    return string.trim(out)
 }
 
-string get_runtime(string name) {
-    if string_equals(name, "Aether") == 1 { return "Native (Aether runtime)" }
-    if string_equals(name, "C (pthread)") == 1 { return "Native (pthread)" }
-    if string_equals(name, "C++") == 1 { return "Native (std::thread)" }
-    if string_equals(name, "Go") == 1 { return "Go runtime" }
-    if string_equals(name, "Rust") == 1 { return "Native (std::sync)" }
-    if string_equals(name, "Java") == 1 { return "JVM" }
-    if string_equals(name, "Zig") == 1 { return "Native" }
-    if string_equals(name, "Elixir") == 1 { return "BEAM VM" }
-    if string_equals(name, "Erlang") == 1 { return "BEAM VM" }
-    if string_equals(name, "Pony") == 1 { return "Native (Pony runtime)" }
-    if string_equals(name, "Scala") == 1 { return "JVM (Akka actors)" }
-    return "Unknown"
+// ---- the languages ---------------------------------------------------------
+
+const LANG_COUNT = 11
+
+lang_name(i: int) -> string {
+    return match i {
+        0 -> "Aether"
+        1 -> "C"
+        2 -> "C++"
+        3 -> "Go"
+        4 -> "Rust"
+        5 -> "Java"
+        6 -> "Zig"
+        7 -> "Elixir"
+        8 -> "Erlang"
+        9 -> "Pony"
+        _ -> "Scala"
+    }
 }
 
-string get_notes(string name) {
-    if string_equals(name, "Aether") == 1 { return "SPSC queues, work inlining, direct send" }
-    if string_equals(name, "C (pthread)") == 1 { return "pthread mutex + condvar (baseline)" }
-    if string_equals(name, "C++") == 1 { return "std::mutex + std::condition_variable" }
-    if string_equals(name, "Go") == 1 { return "Goroutines with channels" }
-    if string_equals(name, "Rust") == 1 { return "sync_channel (bounded MPSC)" }
-    if string_equals(name, "Java") == 1 { return "BlockingQueue (bounded)" }
-    if string_equals(name, "Zig") == 1 { return "Mutex + Condition variable" }
-    if string_equals(name, "Elixir") == 1 { return "BEAM lightweight processes" }
-    if string_equals(name, "Erlang") == 1 { return "BEAM lightweight processes" }
-    if string_equals(name, "Pony") == 1 { return "GC-free actors, ref capabilities" }
-    if string_equals(name, "Scala") == 1 { return "Akka actor system" }
-    return ""
+lang_dir(i: int) -> string {
+    return match i {
+        0 -> "aether"
+        1 -> "c"
+        2 -> "cpp"
+        3 -> "go"
+        4 -> "rust"
+        5 -> "java"
+        6 -> "zig"
+        7 -> "elixir"
+        8 -> "erlang"
+        9 -> "pony"
+        _ -> "scala"
+    }
 }
 
-// Parse "ns/msg:   NNN" from benchmark output
-int parse_ns(string output) {
-    lines = string_split(output, "\n")
-    count = string_array_size(lines)
+java_class(pattern: string) -> string {
+    return match pattern {
+        "ping_pong" -> "PingPong"
+        "counting" -> "Counting"
+        "thread_ring" -> "ThreadRing"
+        "fork_join" -> "ForkJoin"
+        _ -> "Skynet"
+    }
+}
+
+scala_class(pattern: string) -> string {
+    return match pattern {
+        "ping_pong" -> "bench.ping_pong.PingPongBenchmark"
+        "counting" -> "bench.counting.CountingBenchmark"
+        "thread_ring" -> "bench.thread_ring.ThreadRingBenchmark"
+        "fork_join" -> "bench.fork_join.ForkJoinBenchmark"
+        _ -> "bench.skynet.SkynetBenchmark"
+    }
+}
+
+// How to start the program `make <pattern>` built, from the language's
+// directory. An invocation only: no tuning flags (FAIRNESS.md, rule 7).
+lang_run(i: int, pattern: string) -> string {
+    return match i {
+        4 -> "./target/release/${pattern}"
+        5 -> "java -cp classes ${java_class(pattern)}"
+        6 -> "./zig-out/bin/${pattern}"
+        7 -> "elixir ${pattern}.exs"
+        8 -> "erl -noshell -s ${pattern} start"
+        9 -> "./${pattern}/${pattern}"
+        10 -> "java -cp \"$(cat classpath.txt)\" ${scala_class(pattern)}"
+        _ -> "./${pattern}"
+    }
+}
+
+lang_runtime(i: int) -> string {
+    return match i {
+        0 -> "Native (Aether runtime)"
+        1 -> "Native (pthread)"
+        2 -> "Native (std::thread)"
+        3 -> "Go runtime"
+        4 -> "Native (std::thread)"
+        5 -> "JVM"
+        6 -> "Native (std.Thread)"
+        7 -> "BEAM VM"
+        8 -> "BEAM VM"
+        9 -> "Native (Pony runtime)"
+        _ -> "JVM"
+    }
+}
+
+// The toolchain's version, recorded with the results.
+lang_version(i: int) -> string {
+    cmd = match i {
+        0 -> "../../build/ae version 2>&1 | head -1"
+        1 -> "gcc --version 2>&1 | head -1"
+        2 -> "g++ --version 2>&1 | head -1"
+        3 -> "go version 2>&1 | head -1"
+        4 -> "rustc --version 2>&1 | head -1"
+        5 -> "java -version 2>&1 | head -1"
+        6 -> "zig version 2>&1 | head -1"
+        7 -> "elixir --version 2>&1 | tail -1"
+        8 -> "erl -noshell -eval 'io:format(\"OTP ~s\", [erlang:system_info(otp_release)]), halt().' 2>&1 | head -1"
+        9 -> "ponyc --version 2>&1 | head -1"
+        _ -> "grep scalaVersion scala/build.sbt 2>&1 | head -1"
+    }
+    return json_escape(sh_text(cmd))
+}
+
+// ---- JSON ------------------------------------------------------------------
+
+// `s` as the inside of a JSON string: quotes, backslashes and control
+// characters escaped (a Windows path or a compiler banner carries them).
+json_escape(s: string) -> string {
+    out = ""
+    n = string.length(s)
     i = 0
-    while i < count {
-        line = string_array_get(lines, i)
-        if string_contains(line, "ns/msg:") == 1 {
-            parts = string_split(line, " ")
-            pc = string_array_size(parts)
-            j = 0
-            while j < pc {
-                part = string_array_get(parts, j)
-                v = atoi(part)
-                if v > 0 {
-                    string_array_free(parts)
-                    string_array_free(lines)
-                    return v
-                }
-                j = j + 1
-            }
-            string_array_free(parts)
+    while i < n {
+        c = string.char_at(s, i)
+        if c == 34 {
+            out = "${out}\\\""
+        } else if c == 92 {
+            out = "${out}\\\\"
+        } else if c == 10 || c == 13 || c == 9 {
+            out = "${out} "
+        } else if c >= 32 {
+            out = "${out}${string.from_char(c)}"
         }
         i = i + 1
     }
-    string_array_free(lines)
-    return 0
+    return out
 }
 
-// Parse "Throughput:   N.NN M msg/sec" -> integer msg/sec
-int parse_mps(string output) {
-    lines = string_split(output, "\n")
-    count = string_array_size(lines)
-    i = 0
-    while i < count {
-        line = string_array_get(lines, i)
-        if string_contains(line, "Throughput:") == 1 {
-            parts = string_split(line, " ")
-            pc = string_array_size(parts)
-            j = 0
-            while j < pc {
-                part = string_array_get(parts, j)
-                if string_contains(part, ".") == 1 {
-                    dp = string_split(part, ".")
-                    if string_array_size(dp) == 2 {
-                        whole = atoi(string_array_get(dp, 0))
-                        frac_str = string_array_get(dp, 1)
-                        frac = atoi(frac_str)
-                        // Scale frac based on digit count: 2 digits -> *10000, 6 digits -> *1
-                        frac_len = string_length(frac_str)
-                        scale = 1000000
-                        fl = 0
-                        while fl < frac_len {
-                            scale = scale / 10
-                            fl = fl + 1
-                        }
-                        mps = whole * 1000000 + frac * scale
-                        string_array_free(dp)
-                        string_array_free(parts)
-                        string_array_free(lines)
-                        return mps
-                    }
-                    string_array_free(dp)
-                }
-                j = j + 1
-            }
-            string_array_free(parts)
-        }
-        i = i + 1
+// A measurement that may be missing: its value, or null.
+json_num(v: float) -> string {
+    if v < 0.0 {
+        return "null"
     }
-    string_array_free(lines)
-    return 0
+    return benchstats.fixed2(v)
 }
 
-// Parse peak RSS from /usr/bin/time output (returns MB as int)
-int parse_mem(string output, int is_mac) {
-    lines = string_split(output, "\n")
-    count = string_array_size(lines)
-    i = 0
-    while i < count {
-        line = string_array_get(lines, i)
-        if string_contains(line, "maximum resident set size") == 1 {
-            tl = string_trim(line)
-            parts = string_split(tl, " ")
-            pc = string_array_size(parts)
-            if is_mac == 1 {
-                if pc > 0 {
-                    bytes = atoi(string_array_get(parts, 0))
-                    string_array_free(parts)
-                    string_array_free(lines)
-                    return bytes / 1048576
-                }
-            } else {
-                if pc > 0 {
-                    kb = atoi(string_array_get(parts, pc - 1))
-                    string_array_free(parts)
-                    string_array_free(lines)
-                    return kb / 1024
-                }
-            }
-            string_array_free(parts)
-        }
-        i = i + 1
-    }
-    string_array_free(lines)
-    return 0
+// ---- one language, one pattern ---------------------------------------------
+
+// The settings every language runs with.
+struct Settings {
+    runs: int
+    warmup: int
+    msgs: long
+    time_cmd: string // "" where /usr/bin/time cannot see the program
+    is_mac: int
 }
 
-// ============================================================================
-// Run a single language: build, warmup, timed runs, return JSON block
-// ============================================================================
+// Build, warm up and time language `i` on `pattern`. Returns the JSON entry
+// for the results, "" for a skipped language, or "FAIL: <reason>".
+run_lang(i: int, pattern: string, cfg: Settings) -> string {
+    name = lang_name(i)
+    dir = lang_dir(i)
+    print("  ${name}... ")
 
-string run_lang(string name, string build_cmd, string run_cmd, int num_runs, int warmup, int is_mac) {
-    print("  ")
-    print(name)
-    print("... ")
-
-    // Build
-    if string_length(build_cmd) > 0 {
-        ret = os_system(build_cmd)
-        if ret != 0 {
-            println("[SKIP] Build failed")
-            return ""
-        }
+    blog = "build/${dir}_${pattern}.log"
+    _bout, bstatus = sh_run("cd ${dir} && make ${pattern} > ../${blog} 2>&1")
+    if bstatus != 0 {
+        println("[SKIP] build failed (${blog})")
+        return ""
     }
 
-    // Warmup (discarded)
+    env = "BENCHMARK_MESSAGES=${cfg.msgs}"
+    if pattern == "skynet" {
+        env = "BENCHMARK_MESSAGES=${cfg.msgs} SKYNET_LEAVES=${cfg.msgs}"
+    }
+    run = lang_run(i, pattern)
+    cmd = "cd ${dir} && ${env} ${cfg.time_cmd} ${run} 2>&1"
+
+    // The same warmup for every language: a JIT gets its warmup, and so
+    // does a cache or a page fault a native runtime would otherwise pay in
+    // its first timed run.
     w = 0
-    while w < warmup {
-        // Warmup: the exit status is deliberately ignored (a failing
-        // warmup shows up in the timed runs), but bind it so the
-        // generated C does not discard a value and warn.
-        warm_rc = os_system(string_concat(run_cmd, " >/dev/null 2>&1"))
-        if warm_rc < 0 {
-            println("[WARN] warmup command could not be launched")
-        }
+    while w < cfg.warmup {
+        _wout, _wstatus = sh_run(cmd)
         w = w + 1
     }
 
-    // Timed runs
-    best = 0
-    worst = 999999999
-    median_mps = 0
-    median_ns = 0
-    // 64-bit: msg/sec runs into the hundreds of millions, so five runs
-    // already approach the int32 ceiling and BENCH_RUNS is user-settable.
-    long total = 0
-    mem = 0
+    long want = benchstats.expected_checksum(pattern, cfg.msgs)
+    long want_units = benchstats.expected_units(pattern, cfg.msgs)
+    long work = benchstats.work_units(pattern, cfg.msgs)
+
+    tput = make([]float, cfg.runs)
+    nsm = make([]float, cfg.runs)
+    cpu = make([]float, cfg.runs)
+    per_cpu = make([]float, cfg.runs)
+    mem = make([]float, cfg.runs)
+    cpu_ok = 1
+    mem_ok = 1
+    failure = ""
     runs_json = ""
 
     r = 0
-    while r < num_runs {
-        output = os_exec_raw(string_concat(run_cmd, " 2>&1"))
-        ns = parse_ns(output)
-        mps = parse_mps(output)
-        m = parse_mem(output, is_mac)
-        if m > 0 { mem = m }
-        total = total + mps
-        if mps > best { best = mps }
-        if mps < worst { worst = mps }
-        if r > 0 { runs_json = string_concat(runs_json, ",") }
-        runs_json = string_concat(runs_json, string_from_int(mps))
-        if r == num_runs / 2 {
-            median_mps = mps
-            median_ns = ns
+    while r < cfg.runs && failure == "" {
+        out, status = sh_run(cmd)
+        mps = benchstats.parse_throughput(out)
+        long got = benchstats.long_after(out, "Checksum:")
+        if status != 0 {
+            failure = "run ${r + 1} exited with status ${status}"
+        } else if got != want {
+            failure = "run ${r + 1}: checksum ${got}, expected ${want}"
+        } else if pattern == "skynet" && benchstats.long_after(out, "concurrency units:") != want_units {
+            failure = "run ${r + 1}: concurrency units ${benchstats.long_after(out, "concurrency units:")}, expected ${want_units}"
+        } else if mps < 0.0 {
+            failure = "run ${r + 1}: no throughput in its output"
+        }
+        if failure == "" {
+            tput[r] = mps * 1000000.0
+            nsm[r] = benchstats.parse_ns(out)
+            c = -1.0
+            m = -1.0
+            if string.length(cfg.time_cmd) > 0 {
+                c = benchstats.parse_cpu_seconds(out, cfg.is_mac)
+                m = benchstats.parse_peak_mb(out, cfg.is_mac)
+            }
+            if c <= 0.0 {
+                cpu_ok = 0
+            } else {
+                cpu[r] = c
+                per_cpu[r] = work / c
+            }
+            if m <= 0.0 {
+                mem_ok = 0
+            } else {
+                mem[r] = m
+            }
+            if r > 0 {
+                runs_json = "${runs_json},"
+            }
+            runs_json = "${runs_json}${benchstats.fixed2(tput[r])}"
+        } else {
+            // What the failed run printed goes beside the build logs, which
+            // CI uploads: the reason says that the run failed, not why.
+            rlog = "build/${dir}_${pattern}_run.log"
+            io_write_file(rlog, out)
+            failure = "${failure} (${rlog})"
         }
         r = r + 1
     }
 
-    if median_mps == 0 {
-        println("[SKIP] No output")
-        return ""
+    if failure != "" {
+        println("[FAIL] ${failure}")
+        free(tput)
+        free(nsm)
+        free(cpu)
+        free(per_cpu)
+        free(mem)
+        return "FAIL: ${failure}"
     }
 
-    // CV% approximation: range / mean * 50.
-    //
-    // 64-bit throughout. In int32 the multiply overflowed before the
-    // divide for the fastest patterns (skynet, counting): a 50,000,000
-    // range gives 50,000,000 * 50 = 2.5e9, past the 2,147,483,647
-    // ceiling, so cv came out NEGATIVE for exactly the results most
-    // likely to be quoted. Doing the divide first would dodge the
-    // overflow but throw away precision on small ranges, so widen
-    // instead.
-    long mean = total / num_runs
-    long span = best - worst
-    long cv = 0
-    if mean > 0 {
-        cv = span * 50 / mean
+    med = benchstats.median(tput)
+    lo = benchstats.minimum(tput)
+    hi = benchstats.maximum(tput)
+    cv = benchstats.cv_pct(tput)
+    med_ns = benchstats.median(nsm)
+    med_cpu = -1.0
+    med_per_cpu = -1.0
+    if cpu_ok == 1 {
+        med_cpu = benchstats.median(cpu)
+        med_per_cpu = benchstats.median(per_cpu)
     }
-    // A coefficient of variation is non-negative by definition. If one
-    // ever appears, that is arithmetic damage, not a measurement:
-    // refuse to publish it rather than let a consumer treat it as a
-    // stability signal (docs/performance-benchmarks.md gates citability
-    // on this number).
-    if cv < 0 {
-        println("[WARN] discarding negative cv_pct for this run")
-        cv = 0
+    med_mem = -1.0
+    if mem_ok == 1 {
+        med_mem = benchstats.median(mem)
     }
+    free(tput)
+    free(nsm)
+    free(cpu)
+    free(per_cpu)
+    free(mem)
 
-    // Print
-    tm = median_mps / 1000000
-    tf = (median_mps - tm * 1000000) / 10000
-    print("[OK] ")
-    print(tm)
-    print(".")
-    if tf < 10 { print("0") }
-    print(tf)
-    print("M msg/sec (")
-    print(mem)
-    println("MB)")
+    cpu_text = "CPU n/a"
+    if med_per_cpu > 0.0 {
+        cpu_text = "${benchstats.fixed2(med_per_cpu / 1000000.0)}M per CPU-s"
+    }
+    mem_text = "memory n/a"
+    if med_mem > 0.0 {
+        mem_text = "${benchstats.fixed2(med_mem)} MB"
+    }
+    println("[OK] ${benchstats.fixed2(med / 1000000.0)}M msg/sec (${benchstats.fixed2(lo / 1000000.0)}-${benchstats.fixed2(hi / 1000000.0)}, cv ${benchstats.fixed2(cv)}%), ${cpu_text}, ${mem_text}")
 
-    // JSON
-    j = string_concat("    \"", name)
-    j = string_concat(j, "\": {\n")
-    j = string_concat(j, "      \"runtime\": \"")
-    j = string_concat(j, get_runtime(name))
-    j = string_concat(j, "\",\n      \"msg_per_sec\": ")
-    j = string_concat(j, string_from_int(median_mps))
-    j = string_concat(j, ",\n      \"ns_per_msg\": ")
-    j = string_concat(j, string_from_int(median_ns))
-    j = string_concat(j, ",\n      \"memory_mb\": ")
-    j = string_concat(j, string_from_int(mem))
-    j = string_concat(j, ",\n      \"runs\": [")
-    j = string_concat(j, runs_json)
-    j = string_concat(j, "],\n      \"min_mps\": ")
-    j = string_concat(j, string_from_int(worst))
-    j = string_concat(j, ",\n      \"max_mps\": ")
-    j = string_concat(j, string_from_int(best))
-    j = string_concat(j, ",\n      \"cv_pct\": ")
-    j = string_concat(j, string_from_long(cv))
-    j = string_concat(j, ",\n      \"notes\": \"")
-    j = string_concat(j, get_notes(name))
-    j = string_concat(j, "\"\n    }")
+    flags = json_escape(sh_text("cd ${dir} && make -s flags 2>/dev/null"))
+    j = "    \"${name}\": {\n"
+    j = "${j}      \"runtime\": \"${lang_runtime(i)}\",\n"
+    j = "${j}      \"toolchain\": \"${lang_version(i)}\",\n"
+    j = "${j}      \"build_flags\": \"${flags}\",\n"
+    j = "${j}      \"msg_per_sec\": ${benchstats.fixed2(med)},\n"
+    j = "${j}      \"ns_per_msg\": ${benchstats.fixed2(med_ns)},\n"
+    j = "${j}      \"runs\": [${runs_json}],\n"
+    j = "${j}      \"min_mps\": ${benchstats.fixed2(lo)},\n"
+    j = "${j}      \"max_mps\": ${benchstats.fixed2(hi)},\n"
+    j = "${j}      \"cv_pct\": ${benchstats.fixed2(cv)},\n"
+    j = "${j}      \"cpu_seconds\": ${json_num(med_cpu)},\n"
+    j = "${j}      \"msg_per_cpu_sec\": ${json_num(med_per_cpu)},\n"
+    j = "${j}      \"memory_mb\": ${json_num(med_mem)},\n"
+    j = "${j}      \"checksum\": ${want}\n"
+    j = "${j}    }"
     return j
 }
 
-// ============================================================================
-// Main
-// ============================================================================
+// Is `name` selected by a comma-separated list (empty: every one)?
+selected(list_text: string, name: string) -> bool {
+    if string.length(list_text) == 0 {
+        return true
+    }
+    return string.contains(",${list_text},", ",${name},") == 1
+}
+
+pattern_at(pi: int) -> string {
+    return match pi {
+        0 -> "ping_pong"
+        1 -> "counting"
+        2 -> "thread_ring"
+        3 -> "fork_join"
+        _ -> "skynet"
+    }
+}
+
+pattern_description(pattern: string) -> string {
+    return match pattern {
+        "ping_pong" -> "Two actors exchange messages back and forth"
+        "counting" -> "Single actor counts incoming messages"
+        "thread_ring" -> "Token passed through a ring of 100 actors"
+        "fork_join" -> "Messages distributed round-robin across 8 workers"
+        _ -> "Recursive actor tree summing the leaves, 1,111 units for a million"
+    }
+}
 
 main() {
     runs = 5
     warmup = 1
-    msgs = 1000000
+    long msgs = 1000000
 
     env_r = getenv("BENCH_RUNS")
     if env_r != 0 { runs = atoi(env_r) }
@@ -314,276 +383,164 @@ main() {
     if env_w != 0 { warmup = atoi(env_w) }
     env_m = getenv("BENCHMARK_MESSAGES")
     if env_m != 0 { msgs = atoi(env_m) }
-
-    // system() uses /bin/sh which has a minimal PATH.
-    // Add common tool locations so cargo, erlc, ponyc etc. are found.
-    home = getenv("HOME")
-    cur_path = getenv("PATH")
-    tool_paths = string_concat("/opt/homebrew/bin:/opt/homebrew/opt/erlang/bin:/opt/homebrew/opt/elixir/bin:/usr/local/bin:/usr/local/go/bin:/snap/bin:", cur_path)
-    if home != 0 {
-        tool_paths = string_concat(string_concat(home, "/.cargo/bin:"), string_concat(string_concat(home, "/go/bin:"), string_concat(string_concat(home, "/.local/bin:"), tool_paths)))
+    if runs < 1 {
+        println("ERROR: BENCH_RUNS must be at least 1")
+        exit(1)
     }
-    io_setenv("PATH", tool_paths)
+    only_langs = ""
+    env_l = getenv("BENCH_LANGS")
+    if env_l != 0 { only_langs = string.to_lower(env_l) }
+    only_patterns = ""
+    env_p = getenv("BENCH_PATTERNS")
+    if env_p != 0 { only_patterns = env_p }
+    // BENCH_STRICT=1 (the CI job): every selected language must build and
+    // pass, so a skip is an error there, not a missing toolchain.
+    strict = 0
+    env_s = getenv("BENCH_STRICT")
+    if env_s != 0 { strict = atoi(env_s) }
+    problems = ""
 
-    uname = os_exec_raw("uname -s")
-    is_mac = string_contains(uname, "Darwin")
-    tc = "/usr/bin/time -v"
-    if is_mac == 1 { tc = "/usr/bin/time -l" }
+    on_windows = select(windows: 1, other: 0)
 
-    cpu = ""
+    // A non-interactive sh has a minimal PATH: add the usual tool locations
+    // so cargo, erlc, ponyc and the rest are found. Not on Windows, whose
+    // PATH is `;`-separated and which the MSYS shell already has.
+    if on_windows == 0 {
+        home = getenv("HOME")
+        cur_path = getenv("PATH")
+        tool_paths = "/opt/homebrew/bin:/opt/homebrew/opt/erlang/bin:/opt/homebrew/opt/elixir/bin:/usr/local/bin:/usr/local/go/bin:/snap/bin:${cur_path}"
+        if home != 0 {
+            tool_paths = "${home}/.cargo/bin:${home}/go/bin:${home}/.local/bin:${tool_paths}"
+        }
+        io_setenv("PATH", tool_paths)
+    }
+
+    uname = sh_text("uname -s")
+    is_mac = string.contains(uname, "Darwin")
+    // CPU time and peak memory come from /usr/bin/time, which on Windows
+    // (MSYS) sees only itself: it reads 0 s and about 5 MB for any native
+    // program. There they are n/a rather than a number that means nothing.
+    time_cmd = ""
+    measure_note = "CPU time and peak memory are not measured on this platform"
+    if on_windows == 0 {
+        _tout, tstatus = sh_run("test -x /usr/bin/time")
+        if tstatus == 0 {
+            time_cmd = "/usr/bin/time -v"
+            if is_mac == 1 { time_cmd = "/usr/bin/time -l" }
+            measure_note = "CPU time (user + system) and peak memory of the whole process, from ${time_cmd}"
+        }
+    }
+
+    cpu_name = ""
+    cores = ""
     if is_mac == 1 {
-        cpu = string_trim(os_exec_raw("sysctl -n machdep.cpu.brand_string"))
+        cpu_name = sh_text("sysctl -n machdep.cpu.brand_string")
+        cores = sh_text("sysctl -n hw.ncpu")
     } else {
-        cpu = string_trim(os_exec_raw("lscpu | grep 'Model name' | cut -d: -f2 | xargs"))
+        // /proc/cpuinfo, which Linux and MSYS both have (lscpu MSYS has not).
+        cpu_name = sh_text("grep -m1 'model name' /proc/cpuinfo | cut -d: -f2 | xargs")
+        cores = sh_text("nproc")
     }
-    cores = "8"
-    if is_mac == 1 {
-        cores = string_trim(os_exec_raw("sysctl -n hw.ncpu"))
-    } else {
-        cores = string_trim(os_exec_raw("nproc"))
-    }
-    arch = string_trim(os_exec_raw("uname -m"))
+    arch = sh_text("uname -m")
+
+    cfg = Settings { runs: runs, warmup: warmup, msgs: msgs, time_cmd: time_cmd, is_mac: is_mac }
+
+    _mk, _mks = sh_run("mkdir -p build")
+    io_write_file("build/problems.txt", "")
 
     println("============================================")
     println("  Aether Cross-Language Benchmark Suite")
-    println("  Written in Aether")
     println("============================================")
-    print("  Messages: ")
-    println(msgs)
-    print("  Runs: ")
-    print(runs)
-    println(" (median)")
+    println("  Messages: ${msgs}")
+    println("  Runs: ${runs} (median), warmup: ${warmup} for every language")
+    println("  ${measure_note}")
     println("")
 
-    ms = string_from_int(msgs)
-
-    // 5 patterns
     pi = 0
     while pi < 5 {
-        pattern = ""
-        desc = ""
-        if pi == 0 { pattern = "ping_pong"; desc = "Two actors exchange messages back and forth" }
-        if pi == 1 { pattern = "counting"; desc = "Single actor counts incoming messages" }
-        if pi == 2 { pattern = "thread_ring"; desc = "Token passed through a ring of actors" }
-        if pi == 3 { pattern = "fork_join"; desc = "Messages distributed round-robin across workers" }
-        if pi == 4 { pattern = "skynet"; desc = "Recursive actor tree summing 1M leaves" }
+        pattern = pattern_at(pi)
+        pi = pi + 1
+        if !selected(only_patterns, pattern) {
+            continue
+        }
 
         println("============================================")
-        print("  Running: ")
-        println(pattern)
+        println("  Running: ${pattern}")
         println("============================================")
 
-        // JSON header
-        ts = string_trim(os_exec_raw("date -u +\"%Y-%m-%dT%H:%M:%SZ\""))
-        json = string_concat("{\n  \"timestamp\": \"", ts)
-        json = string_concat(json, "\",\n  \"pattern\": \"")
-        json = string_concat(json, pattern)
-        json = string_concat(json, "\",\n  \"messages\": ")
-        json = string_concat(json, ms)
-        json = string_concat(json, ",\n  \"runs_per_benchmark\": ")
-        json = string_concat(json, string_from_int(runs))
-        json = string_concat(json, ",\n  \"warmup_runs\": ")
-        json = string_concat(json, string_from_int(warmup))
-        json = string_concat(json, ",\n  \"description\": \"")
-        json = string_concat(json, desc)
-        json = string_concat(json, "\",\n  \"hardware\": {\n    \"cpu\": \"")
-        json = string_concat(json, cpu)
-        json = string_concat(json, "\",\n    \"cores\": ")
-        json = string_concat(json, cores)
-        json = string_concat(json, ",\n    \"os\": \"")
-        json = string_concat(json, string_trim(uname))
-        json = string_concat(json, "\",\n    \"arch\": \"")
-        json = string_concat(json, arch)
-        json = string_concat(json, "\"\n  },\n  \"benchmarks\": {\n")
+        ts = sh_text("date -u +\"%Y-%m-%dT%H:%M:%SZ\"")
+        json = "{\n  \"timestamp\": \"${ts}\",\n"
+        json = "${json}  \"pattern\": \"${pattern}\",\n"
+        json = "${json}  \"messages\": ${msgs},\n"
+        json = "${json}  \"runs_per_benchmark\": ${runs},\n"
+        json = "${json}  \"warmup_runs\": ${warmup},\n"
+        json = "${json}  \"description\": \"${pattern_description(pattern)}\",\n"
+        json = "${json}  \"measurement\": \"${json_escape(measure_note)}\",\n"
+        json = "${json}  \"hardware\": {\n    \"cpu\": \"${json_escape(cpu_name)}\",\n"
+        json = "${json}    \"cores\": \"${cores}\",\n"
+        json = "${json}    \"os\": \"${json_escape(uname)}\",\n"
+        json = "${json}    \"arch\": \"${arch}\"\n  },\n  \"benchmarks\": {\n"
+        failed = ""
 
         first = 1
-        env_prefix = string_concat("BENCHMARK_MESSAGES=", ms)
-        if string_equals(pattern, "skynet") == 1 {
-            env_prefix = string_concat("SKYNET_LEAVES=", ms)
-        }
-
-        // ---- Aether ----
-        res = run_lang("Aether",
-            string_concat("cd aether && make clean >/dev/null 2>&1 && make ", string_concat(pattern, " >/dev/null 2>&1")),
-            string_concat("cd aether && ", string_concat(env_prefix, string_concat(" ", string_concat(tc, string_concat(" ./", pattern))))),
-            runs, 0, is_mac)
-        // A missing third-party toolchain is a fair skip; a missing Aether is
-        // not. This is Aether's own suite, and a results file that omits
-        // Aether while listing ten other languages reads as a complete
-        // comparison. That is exactly how a broken include path went unnoticed:
-        // every run printed "Aether... [SKIP] Build failed" and published
-        // numbers anyway.
-        if string_length(res) == 0 {
-            println("")
-            println("ERROR: the Aether build failed, so there is nothing to compare against.")
-            println("       Reproduce with: cd benchmarks/cross-language/aether && make clean && make <bench>")
-            exit(1)
-        }
-        if string_length(res) > 0 {
-            if first == 0 {
-                json = string_concat(json, ",\n")
+        li = 0
+        while li < LANG_COUNT {
+            name = lang_name(li)
+            if !selected(only_langs, string.to_lower(name)) && !selected(only_langs, lang_dir(li)) {
+                li = li + 1
+                continue
             }
-            json = string_concat(json, res)
-            first = 0
-        }
-
-        // ---- C ----
-        res = run_lang("C (pthread)",
-            string_concat("cd c && make clean >/dev/null 2>&1 && make ", string_concat(pattern, " >/dev/null 2>&1")),
-            string_concat("cd c && BENCHMARK_MESSAGES=", string_concat(ms, string_concat(" ", string_concat(tc, string_concat(" ./", pattern))))),
-            runs, 0, is_mac)
-        if string_length(res) > 0 {
-            if first == 0 {
-                json = string_concat(json, ",\n")
+            res = run_lang(li, pattern, cfg)
+            // A missing third-party toolchain is a fair skip; a missing or
+            // wrong Aether is not. A results file that omits Aether while
+            // listing ten other languages reads as a complete comparison.
+            if li == 0 && (string.length(res) == 0 || string.starts_with(res, "FAIL: ") == 1) {
+                println("")
+                println("ERROR: Aether did not build or did not run correctly, so there is nothing to compare against.")
+                println("       Reproduce with: cd benchmarks/cross-language/aether && make ${pattern}")
+                why = "did not build (build/aether_${pattern}.log)"
+                if string.length(res) > 0 {
+                    why = string.substring(res, 6, string.length(res))
+                }
+                io_write_file("build/problems.txt", "${problems}  Aether ${pattern}: ${why}\n")
+                exit(1)
             }
-            json = string_concat(json, res)
-            first = 0
-        }
-
-        // ---- C++ ----
-        res = run_lang("C++",
-            string_concat("cd cpp && g++ -O3 -std=c++17 -march=native ", string_concat(pattern, string_concat(".cpp -o ", string_concat(pattern, " -pthread >/dev/null 2>&1")))),
-            string_concat("cd cpp && BENCHMARK_MESSAGES=", string_concat(ms, string_concat(" ", string_concat(tc, string_concat(" ./", pattern))))),
-            runs, 0, is_mac)
-        if string_length(res) > 0 {
-            if first == 0 {
-                json = string_concat(json, ",\n")
+            if string.length(res) == 0 {
+                problems = "${problems}  ${name} ${pattern}: did not build (build/${lang_dir(li)}_${pattern}.log)\n"
+            } else if string.starts_with(res, "FAIL: ") == 1 {
+                if string.length(failed) > 0 {
+                    failed = "${failed},\n"
+                }
+                reason = string.substring(res, 6, string.length(res))
+                failed = "${failed}    \"${name}\": \"${json_escape(reason)}\""
+                problems = "${problems}  ${name} ${pattern}: ${reason}\n"
+            } else {
+                if first == 0 {
+                    json = "${json},\n"
+                }
+                json = "${json}${res}"
+                first = 0
             }
-            json = string_concat(json, res)
-            first = 0
+            li = li + 1
         }
 
-        // ---- Go ----
-        // `unset GOROOT` before go build: a stale GOROOT pointing
-        // at a different Go install than the `go` binary on PATH
-        // causes the classic 'compile: version "go1.X" does not
-        // match go tool version "go1.Y"' failure. Multi-version
-        // setups (gvm, asdf, brew + system Go) commonly leave
-        // GOROOT pointing at a stale version. Clearing it forces
-        // `go` to use its compile-time default GOROOT, which
-        // matches the binary on PATH.
-        res = run_lang("Go",
-            string_concat("cd go && unset GOROOT && go build -o ", string_concat(pattern, string_concat(" ", string_concat(pattern, ".go >/dev/null 2>&1")))),
-            string_concat("cd go && unset GOROOT && BENCHMARK_MESSAGES=", string_concat(ms, string_concat(" ", string_concat(tc, string_concat(" ./", pattern))))),
-            runs, 0, is_mac)
-        if string_length(res) > 0 {
-            if first == 0 {
-                json = string_concat(json, ",\n")
-            }
-            json = string_concat(json, res)
-            first = 0
-        }
-
-        // ---- Rust ----
-        res = run_lang("Rust",
-            string_concat("cd rust && cargo build --release --bin ", string_concat(pattern, " >/dev/null 2>&1")),
-            string_concat("cd rust && BENCHMARK_MESSAGES=", string_concat(ms, string_concat(" ", string_concat(tc, string_concat(" ./target/release/", pattern))))),
-            runs, 0, is_mac)
-        if string_length(res) > 0 {
-            if first == 0 {
-                json = string_concat(json, ",\n")
-            }
-            json = string_concat(json, res)
-            first = 0
-        }
-
-        // ---- Java ----
-        jc = java_class(pattern)
-        res = run_lang("Java",
-            string_concat("cd java && javac ", string_concat(jc, ".java >/dev/null 2>&1")),
-            string_concat("cd java && BENCHMARK_MESSAGES=", string_concat(ms, string_concat(" ", string_concat(tc, string_concat(" java ", jc))))),
-            runs, warmup, is_mac)
-        if string_length(res) > 0 {
-            if first == 0 {
-                json = string_concat(json, ",\n")
-            }
-            json = string_concat(json, res)
-            first = 0
-        }
-
-        // ---- Zig ----
-        res = run_lang("Zig",
-            string_concat("cd zig && make ", string_concat(pattern, " >/dev/null 2>&1")),
-            string_concat("cd zig && BENCHMARK_MESSAGES=", string_concat(ms, string_concat(" ", string_concat(tc, string_concat(" ./", pattern))))),
-            runs, 0, is_mac)
-        if string_length(res) > 0 {
-            if first == 0 {
-                json = string_concat(json, ",\n")
-            }
-            json = string_concat(json, res)
-            first = 0
-        }
-
-        // ---- Elixir ----
-        res = run_lang("Elixir", "",
-            string_concat("cd elixir && BENCHMARK_MESSAGES=", string_concat(ms, string_concat(" ", string_concat(tc, string_concat(" elixir ", string_concat(pattern, ".exs")))))),
-            runs, warmup, is_mac)
-        if string_length(res) > 0 {
-            if first == 0 {
-                json = string_concat(json, ",\n")
-            }
-            json = string_concat(json, res)
-            first = 0
-        }
-
-        // ---- Erlang ----
-        erl_extra = ""
-        erl_env = string_concat("BENCHMARK_MESSAGES=", ms)
-        if string_equals(pattern, "skynet") == 1 {
-            erl_extra = "+P 2000000 "
-            erl_env = string_concat("SKYNET_LEAVES=", ms)
-        }
-        res = run_lang("Erlang",
-            string_concat("cd erlang && erlc ", string_concat(pattern, ".erl >/dev/null 2>&1")),
-            string_concat("cd erlang && ", string_concat(erl_env, string_concat(" ", string_concat(tc, string_concat(" erl ", string_concat(erl_extra, string_concat("-noshell -s ", string_concat(pattern, " start")))))))),
-            runs, warmup, is_mac)
-        if string_length(res) > 0 {
-            if first == 0 {
-                json = string_concat(json, ",\n")
-            }
-            json = string_concat(json, res)
-            first = 0
-        }
-
-        // ---- Pony ----
-        res = run_lang("Pony",
-            string_concat("cd pony/", string_concat(pattern, " && ponyc . -o . >/dev/null 2>&1")),
-            string_concat("cd pony/", string_concat(pattern, string_concat(" && BENCHMARK_MESSAGES=", string_concat(ms, string_concat(" ", string_concat(tc, string_concat(" ./", pattern))))))),
-            runs, 0, is_mac)
-        if string_length(res) > 0 {
-            if first == 0 {
-                json = string_concat(json, ",\n")
-            }
-            json = string_concat(json, res)
-            first = 0
-        }
-
-        // ---- Scala ----
-        sc = scala_class(pattern)
-        res = run_lang("Scala", "",
-            string_concat("cd scala && BENCHMARK_MESSAGES=", string_concat(ms, string_concat(" ", string_concat(tc, string_concat(" sbt -batch -error \"runMain ", string_concat(sc, "\"")))))),
-            runs, warmup, is_mac)
-        if string_length(res) > 0 {
-            if first == 0 {
-                json = string_concat(json, ",\n")
-            }
-            json = string_concat(json, res)
-            first = 0
-        }
-
-        // Close JSON
-        json = string_concat(json, "\n  }\n}\n")
-
-        path = string_concat("visualize/results_", string_concat(pattern, ".json"))
+        json = "${json}\n  },\n  \"failed\": {\n${failed}\n  }\n}\n"
+        path = "visualize/results_${pattern}.json"
         io_write_file(path, json)
-        print("Results: ")
-        println(path)
+        println("Results: ${path}")
         println("")
-
-        pi = pi + 1
     }
 
     println("============================================")
     println("  All benchmarks complete!")
     println("============================================")
+    // What broke, one "<language> <pattern>: <reason>" per line, for the CI
+    // job's summary; empty when nothing did.
+    io_write_file("build/problems.txt", problems)
+    if strict != 0 && string.length(problems) > 0 {
+        println("")
+        println("BENCH_STRICT: every selected language must build and pass:")
+        print(problems)
+        exit(1)
+    }
 }

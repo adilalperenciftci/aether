@@ -1,5 +1,5 @@
 -module(ping_pong).
--export([start/0, ping/3, pong/2]).
+-export([start/0, ping/4, pong/2]).
 
 get_messages() ->
     case os:getenv("BENCHMARK_MESSAGES") of
@@ -7,10 +7,11 @@ get_messages() ->
         Val -> list_to_integer(Val)
     end.
 
-ping(Pong, N, _I) when N =< 0 ->
+%% Returns the sum of the values ping got back, which the runner checks.
+ping(Pong, N, _I, Sum) when N =< 0 ->
     Pong ! done,
-    done;
-ping(Pong, N, I) ->
+    Sum;
+ping(Pong, N, I, Sum) ->
     Pong ! {ping, self(), I},
     receive
         {pong, Value} ->
@@ -20,7 +21,7 @@ ping(Pong, N, I) ->
                     io:format(standard_error, "Ping validation error: expected ~p, got ~p~n", [I, Value]);
                 true -> ok
             end,
-            ping(Pong, N - 1, I + 1)
+            ping(Pong, N - 1, I + 1, Sum + Value)
     end.
 
 pong(Expected, Messages) when Expected >= Messages ->
@@ -56,13 +57,13 @@ start() ->
 
     % Run ping-pong - spawn returns the PID, we need to link it to receive done
     spawn_link(fun() ->
-        ping(Pong, Messages, 0),
-        Parent ! done
+        Sum = ping(Pong, Messages, 0, 0),
+        Parent ! {done, Sum}
     end),
 
     % Wait for completion
-    receive
-        done -> ok
+    Checksum = receive
+        {done, S} -> S
     after 60000 ->
         io:format("Timeout!~n"),
         halt(1)
@@ -76,6 +77,7 @@ start() ->
     NsPerMsg = ElapsedNs / Messages,
     MsgPerSec = Messages / ElapsedSec,
 
+    io:format("Checksum: ~p~n", [Checksum]),
     io:format("ns/msg:         ~.2f~n", [NsPerMsg]),
     io:format("Throughput:     ~.2f M msg/sec~n", [MsgPerSec / 1000000]),
 

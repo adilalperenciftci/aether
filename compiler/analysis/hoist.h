@@ -48,9 +48,9 @@ Type* hoist_decl_type(ASTNode* decl);
 
 /* The type a local bound in several places of `scope_body` (closures
  * excluded) has, for a numeric `seed`: its bindings joined as an
- * if-expression's branches are (hoist_numeric_join), a fresh Type when that
- * is not `seed`, NULL when it is, when two bindings join to no type, or
- * when `seed` is not numeric. A `null` binding has no type of its own: when
+ * if-expression's branches are (hoist_numeric_join; a written type, when
+ * one writes it, #3070), a fresh Type when that is not `seed`, NULL when it
+ * is, when two bindings join to no type, or when `seed` is not numeric. A `null` binding has no type of its own: when
  * every binding is `null` or a string, the join is `string` (#3032). */
 Type* hoist_join_type(ASTNode* scope_body, const char* name, Type* seed);
 
@@ -58,8 +58,29 @@ Type* hoist_join_type(ASTNode* scope_body, const char* name, Type* seed);
  * joined as an if-expression's branches are (branch_join_type, each
  * binding's value the arm a literal is read from): a fresh Type, NULL when
  * there is none or two that no type holds (a signed value beside a
- * uint64). */
+ * uint64). #3070: a binding that writes its type (`uint64 x = 7`) makes
+ * that the join, whatever the others are; the checker refuses one it does
+ * not hold. */
 Type* hoist_numeric_join(ASTNode* root, const char* name);
+
+/* #3070: the type the first binding of `name` under `root` (closures
+ * excluded) that writes its type writes, of any kind: a fresh Type, or
+ * NULL. It is the local's type (hoist_join_type). */
+Type* hoist_written_type(ASTNode* root, const char* name);
+
+/* #3064: hoist_numeric_join for every name bound under `root`, for a walk
+ * that types its bindings in the order they are written (the early
+ * inference pass) and asks for a name's join as it goes: one walk of
+ * `root` gathers the bindings, and each answer is kept until a binding it
+ * read is typed differently, so a body bound n times costs about n steps,
+ * not n walks of the body. */
+typedef struct HoistJoins HoistJoins;
+HoistJoins* hoist_joins_new(ASTNode* root);
+/* The walk has typed `decl`, a declaration under the root. */
+void hoist_joins_typed(HoistJoins* j, const ASTNode* decl);
+/* What hoist_numeric_join(root, name) gives now: a fresh Type, or NULL. */
+Type* hoist_joins_get(HoistJoins* j, const char* name);
+void hoist_joins_free(HoistJoins* j);
 
 /* The names hoist_if_branch_vars declares at the top of function body
  * `body` (before the caller's already-declared / module-global checks).

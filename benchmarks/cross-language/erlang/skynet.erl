@@ -60,21 +60,12 @@ start() ->
     Sum = receive V -> V after 120000 -> timeout end,
     End = erlang:monotonic_time(nanosecond),
 
-    ElapsedNs = End - Start,
-    ElapsedUs = ElapsedNs div 1000,
+    ElapsedNs = max(End - Start, 1),
 
     io:format("Sum: ~p~n", [Sum]),
-    if
-        ElapsedUs > 0 ->
-            NsPerMsg = ElapsedNs div TotalActors,
-            ThroughputM = TotalActors div ElapsedUs,
-            Leftover = TotalActors - (ThroughputM * ElapsedUs),
-            ThroughputFrac = (Leftover * 100) div ElapsedUs,
-            io:format("ns/msg:         ~p~n", [NsPerMsg]),
-            FracStr = if ThroughputFrac < 10 -> io_lib:format("0~p", [ThroughputFrac]);
-                         true -> io_lib:format("~p", [ThroughputFrac])
-                      end,
-            io:format("Throughput:     ~p.~s M msg/sec~n", [ThroughputM, FracStr]);
-        true -> ok
-    end,
+    io:format("Checksum: ~p~n", [Sum]),
+    %% Always printed: a tree small enough to finish within a microsecond
+    %% printed no rate at all, which the runner reads as a broken run.
+    io:format("ns/msg:         ~p~n", [ElapsedNs div TotalActors]),
+    io:format("Throughput:     ~.2f M msg/sec~n", [TotalActors * 1000.0 / ElapsedNs]),
     halt(0).

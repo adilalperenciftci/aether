@@ -2,8 +2,12 @@
 // Based on https://github.com/atemerev/skynet
 // Uses std::thread while the subtree is larger than SEQ_THRESHOLD.
 // Spawning 1M OS threads is not feasible; this limits concurrent threads to ~1000.
+//
+// Each node joins its ten children and sums what they return, as C, C++ and
+// Zig do: 1,111 threads on fewer cores are oversubscribed, and a join blocks
+// at once (FAIRNESS.md, techniques). It used to gather the sums over an mpsc
+// channel, whose receive spins and yields before it sleeps.
 
-use std::sync::mpsc::{channel, Sender};
 use std::thread;
 use std::time::Instant;
 
@@ -33,25 +37,15 @@ fn skynet_seq(offset: i64, size: i64) -> i64 {
     sum
 }
 
-fn skynet(tx: Sender<i64>, offset: i64, size: i64, depth: usize) {
+fn skynet(offset: i64, size: i64) -> i64 {
     if size <= SEQ_THRESHOLD {
-        tx.send(skynet_seq(offset, size)).unwrap();
-        return;
+        return skynet_seq(offset, size);
     }
     let child_size = size / 10;
-    let (child_tx, child_rx) = channel::<i64>();
-    for i in 0..10i64 {
-        let child_offset = offset + i * child_size;
-        let child_tx = child_tx.clone();
-        thread::spawn(move || {
-            skynet(child_tx, child_offset, child_size, depth + 1);
-        });
-    }
-    let mut sum = 0i64;
-    for _ in 0..10 {
-        sum += child_rx.recv().unwrap();
-    }
-    tx.send(sum).unwrap();
+    let children: Vec<_> = (0..10i64)
+        .map(|i| thread::spawn(move || skynet(offset + i * child_size, child_size)))
+        .collect();
+    children.into_iter().map(|h| h.join().unwrap()).sum()
 }
 
 fn main() {
@@ -68,26 +62,16 @@ fn main() {
     println!("=== Rust Skynet Benchmark ===");
     println!("Leaves: {}, concurrency units: {} (sequential below {})\n", num_leaves, total_actors, SEQ_THRESHOLD);
 
-    let (tx, rx) = channel::<i64>();
     let start = Instant::now();
-    thread::spawn(move || skynet(tx, 0, num_leaves, 0));
-    let sum = rx.recv().unwrap();
+    let sum = thread::spawn(move || skynet(0, num_leaves)).join().unwrap();
     let elapsed = start.elapsed();
 
-    let elapsed_ns = elapsed.as_nanos() as i64;
-    let elapsed_us = elapsed_ns / 1000;
+    let elapsed_ns = (elapsed.as_nanos() as i64).max(1);
 
     println!("Sum: {}", sum);
-    if elapsed_us > 0 {
-        let ns_per_msg = elapsed_ns / total_actors;
-        let throughput_m = total_actors / elapsed_us;
-        let leftover = total_actors - (throughput_m * elapsed_us);
-        let throughput_frac = (leftover * 100) / elapsed_us;
-        print!("ns/msg:         {}\n", ns_per_msg);
-        print!("Throughput:     {}.", throughput_m);
-        if throughput_frac < 10 {
-            print!("0");
-        }
-        println!("{} M msg/sec", throughput_frac);
-    }
+    println!("Checksum: {}", sum);
+    // Always printed: a tree small enough to finish within a microsecond
+    // printed no rate at all, which the runner reads as a broken run.
+    println!("ns/msg:         {}", elapsed_ns / total_actors);
+    println!("Throughput:     {:.2} M msg/sec", total_actors as f64 * 1000.0 / elapsed_ns as f64);
 }

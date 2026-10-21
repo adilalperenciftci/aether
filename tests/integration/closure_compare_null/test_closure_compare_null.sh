@@ -90,6 +90,46 @@ main() {
 AE
 refused field_closure "'==' compares two closures" 7:24
 
+# #3077: a `fn?` holds a closure, so two of them, or one beside a closure,
+# are refused as two closures are; they reached C as `==` on the closures.
+cat > "$TMP/two_optionals.ae" <<'AE'
+adder(n: int) -> fn { return | x: int | -> x + n }
+main() {
+    let o: fn? = adder(1)
+    let q: fn? = adder(2)
+    println("${o == q}")
+}
+AE
+refused two_optionals "'==' compares two closures" 5:18
+
+cat > "$TMP/optional_closure.ae" <<'AE'
+adder(n: int) -> fn { return | x: int | -> x + n }
+main() {
+    f = adder(1)
+    let o: fn? = f
+    println("${o != f}")
+}
+AE
+refused optional_closure "'!=' compares two closures" 5:18
+
+# A `fn?` against `none` asks whether it holds one, and against `null`
+# whether it holds the empty closure (`o == some(null)`), as a `ptr?`
+# against `null` is.
+cat > "$TMP/optional_null.ae" <<'AE'
+adder(n: int) -> fn { return | x: int | -> x + n }
+main() {
+    let a: fn? = none
+    let b: fn? = null
+    let c: fn? = adder(1)
+    println("${a == none} ${b == none} ${c == none} ${a == null} ${b == null} ${c == null} ${null != b}")
+}
+AE
+got=$(cd "$TMP" && AETHER_HOME="$ROOT" "$AE" run optional_null.ae 2>&1)
+if [ "$got" != "true false false false true false false" ]; then
+    echo "  [FAIL] optional_null: a fn? against none and null printed '$got'"
+    fails=$((fails + 1))
+fi
+
 # Against `null` it is what #3062 made it: it compiles and runs.
 cat > "$TMP/with_null.ae" <<'AE'
 main() {

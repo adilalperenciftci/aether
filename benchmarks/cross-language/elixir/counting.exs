@@ -11,12 +11,15 @@ defmodule Counting do
     IO.puts("Messages: #{@messages}\n")
 
     parent = self()
+
+    # The clock starts before the counter exists, as in every language here
+    # (FAIRNESS.md, rule 5).
+    start_time = :erlang.monotonic_time(:nanosecond)
     counter = spawn(fn -> counter_loop(0, parent) end)
 
-    start_time = :erlang.monotonic_time(:nanosecond)
-
-    # Send all messages
-    Enum.each(1..@messages, fn _ -> send(counter, :increment) end)
+    # Send all messages: a recursive loop, as in Erlang and in fork_join.exs,
+    # not Enum.each, which adds an anonymous function call per message.
+    send_messages(counter, @messages)
 
     # Signal done
     send(counter, {:done, self()})
@@ -35,6 +38,7 @@ defmodule Counting do
         throughput = @messages / elapsed_sec / 1_000_000
         ns_per_msg = elapsed_ns / @messages
 
+        IO.puts("Checksum: #{count}")
         IO.puts("ns/msg:         #{:io_lib.format("~.2f", [ns_per_msg])}")
         IO.puts("Throughput:     #{:io_lib.format("~.2f", [throughput])} M msg/sec")
     after
@@ -42,6 +46,13 @@ defmodule Counting do
         IO.puts("Timeout!")
         System.halt(1)
     end
+  end
+
+  defp send_messages(_counter, 0), do: :ok
+
+  defp send_messages(counter, n) do
+    send(counter, :increment)
+    send_messages(counter, n - 1)
   end
 
   defp counter_loop(count, parent) do

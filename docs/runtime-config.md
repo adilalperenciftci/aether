@@ -292,7 +292,7 @@ static inline Message* message_pool_alloc(void) {
 | **Apple Silicon** (M1/M2/M3) | Yes | No (WFE) | NEON | Advisory | P-cores only |
 | **Old x86** (pre-2013) | Yes | No | SSE4.2 | Hard | Partial |
 | **ARM Linux** | Yes | No (WFE) | NEON | Hard | Full support |
-| **Windows** | Yes | Yes | AVX2 | Hard | Full support |
+| **Windows** | Yes | Yes | AVX2 | Advisory | Full support |
 | **WebAssembly** (Emscripten) | N/A | No | No | No | Cooperative scheduler |
 | **Embedded** (ARM bare-metal) | N/A | No | No | No | Cooperative scheduler |
 

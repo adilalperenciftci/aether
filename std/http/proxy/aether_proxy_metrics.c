@@ -130,10 +130,10 @@ char* aether_proxy_pool_metrics_text(AetherProxyPool* pool) {
         AetherUpstream* u = snap[i];
         esc = prom_label_escape(u->base_url);
         if (!esc) goto oom;
-        EMIT("aether_proxy_upstream_requests_total{upstream=\"%s\",class=\"2xx\"} %ld\n", esc, atomic_load(&u->metric_requests_2xx));
-        EMIT("aether_proxy_upstream_requests_total{upstream=\"%s\",class=\"3xx\"} %ld\n", esc, atomic_load(&u->metric_requests_3xx));
-        EMIT("aether_proxy_upstream_requests_total{upstream=\"%s\",class=\"4xx\"} %ld\n", esc, atomic_load(&u->metric_requests_4xx));
-        EMIT("aether_proxy_upstream_requests_total{upstream=\"%s\",class=\"5xx\"} %ld\n", esc, atomic_load(&u->metric_requests_5xx));
+        EMIT("aether_proxy_upstream_requests_total{upstream=\"%s\",class=\"2xx\"} %lld\n", esc, (long long)atomic_load(&u->metric_requests_2xx));
+        EMIT("aether_proxy_upstream_requests_total{upstream=\"%s\",class=\"3xx\"} %lld\n", esc, (long long)atomic_load(&u->metric_requests_3xx));
+        EMIT("aether_proxy_upstream_requests_total{upstream=\"%s\",class=\"4xx\"} %lld\n", esc, (long long)atomic_load(&u->metric_requests_4xx));
+        EMIT("aether_proxy_upstream_requests_total{upstream=\"%s\",class=\"5xx\"} %lld\n", esc, (long long)atomic_load(&u->metric_requests_5xx));
         free(esc); esc = NULL;
     }
 
@@ -142,7 +142,7 @@ char* aether_proxy_pool_metrics_text(AetherProxyPool* pool) {
     for (int i = 0; i < n; i++) {
         esc = prom_label_escape(snap[i]->base_url);
         if (!esc) goto oom;
-        EMIT("aether_proxy_upstream_transport_errors_total{upstream=\"%s\"} %ld\n", esc, atomic_load(&snap[i]->metric_transport_errors));
+        EMIT("aether_proxy_upstream_transport_errors_total{upstream=\"%s\"} %lld\n", esc, (long long)atomic_load(&snap[i]->metric_transport_errors));
         free(esc); esc = NULL;
     }
 
@@ -151,7 +151,7 @@ char* aether_proxy_pool_metrics_text(AetherProxyPool* pool) {
     for (int i = 0; i < n; i++) {
         esc = prom_label_escape(snap[i]->base_url);
         if (!esc) goto oom;
-        EMIT("aether_proxy_upstream_timeouts_total{upstream=\"%s\"} %ld\n", esc, atomic_load(&snap[i]->metric_timeouts));
+        EMIT("aether_proxy_upstream_timeouts_total{upstream=\"%s\"} %lld\n", esc, (long long)atomic_load(&snap[i]->metric_timeouts));
         free(esc); esc = NULL;
     }
 
@@ -160,7 +160,7 @@ char* aether_proxy_pool_metrics_text(AetherProxyPool* pool) {
     for (int i = 0; i < n; i++) {
         esc = prom_label_escape(snap[i]->base_url);
         if (!esc) goto oom;
-        EMIT("aether_proxy_upstream_retries_total{upstream=\"%s\"} %ld\n", esc, atomic_load(&snap[i]->metric_retries));
+        EMIT("aether_proxy_upstream_retries_total{upstream=\"%s\"} %lld\n", esc, (long long)atomic_load(&snap[i]->metric_retries));
         free(esc); esc = NULL;
     }
 
@@ -172,7 +172,7 @@ char* aether_proxy_pool_metrics_text(AetherProxyPool* pool) {
     for (int i = 0; i < n; i++) {
         esc = prom_label_escape(snap[i]->base_url);
         if (!esc) goto oom;
-        EMIT("aether_proxy_upstream_latency_ms_sum{upstream=\"%s\"} %ld\n", esc, atomic_load(&snap[i]->metric_latency_sum_ms));
+        EMIT("aether_proxy_upstream_latency_ms_sum{upstream=\"%s\"} %lld\n", esc, (long long)atomic_load(&snap[i]->metric_latency_sum_ms));
         free(esc); esc = NULL;
     }
     EMIT("# HELP aether_proxy_upstream_latency_ms_count Count of upstream calls observed.\n");
@@ -180,7 +180,7 @@ char* aether_proxy_pool_metrics_text(AetherProxyPool* pool) {
     for (int i = 0; i < n; i++) {
         esc = prom_label_escape(snap[i]->base_url);
         if (!esc) goto oom;
-        EMIT("aether_proxy_upstream_latency_ms_count{upstream=\"%s\"} %ld\n", esc, atomic_load(&snap[i]->metric_latency_count));
+        EMIT("aether_proxy_upstream_latency_ms_count{upstream=\"%s\"} %lld\n", esc, (long long)atomic_load(&snap[i]->metric_latency_count));
         free(esc); esc = NULL;
     }
 
@@ -224,16 +224,16 @@ char* aether_proxy_pool_metrics_text(AetherProxyPool* pool) {
     /* Pool-level counters. */
     EMIT("# HELP aether_proxy_cache_hits_total Cache hits served from the proxy LRU.\n");
     EMIT("# TYPE aether_proxy_cache_hits_total counter\n");
-    EMIT("aether_proxy_cache_hits_total %ld\n", atomic_load(&pool->metric_cache_hits));
+    EMIT("aether_proxy_cache_hits_total %lld\n", (long long)atomic_load(&pool->metric_cache_hits));
     EMIT("# HELP aether_proxy_cache_misses_total Cache misses; an upstream call was made.\n");
     EMIT("# TYPE aether_proxy_cache_misses_total counter\n");
-    EMIT("aether_proxy_cache_misses_total %ld\n", atomic_load(&pool->metric_cache_misses));
+    EMIT("aether_proxy_cache_misses_total %lld\n", (long long)atomic_load(&pool->metric_cache_misses));
     EMIT("# HELP aether_proxy_cache_revalidations_total Conditional GET revalidations against upstream.\n");
     EMIT("# TYPE aether_proxy_cache_revalidations_total counter\n");
-    EMIT("aether_proxy_cache_revalidations_total %ld\n", atomic_load(&pool->metric_cache_revalidations));
+    EMIT("aether_proxy_cache_revalidations_total %lld\n", (long long)atomic_load(&pool->metric_cache_revalidations));
     EMIT("# HELP aether_proxy_503_no_upstream_total 503 responses emitted because no upstream was eligible.\n");
     EMIT("# TYPE aether_proxy_503_no_upstream_total counter\n");
-    EMIT("aether_proxy_503_no_upstream_total %ld\n", atomic_load(&pool->metric_503_no_upstream));
+    EMIT("aether_proxy_503_no_upstream_total %lld\n", (long long)atomic_load(&pool->metric_503_no_upstream));
 
     free(snap);
     if (buf.data == NULL) {

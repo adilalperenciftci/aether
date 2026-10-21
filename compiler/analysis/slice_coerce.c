@@ -160,12 +160,50 @@ static int closure_null_slot(ASTNode** slot, const Type* target) {
     return changed;
 }
 
+static int slice_coerce_value(ASTNode** slot, const Type* target, int target_is_c_view);
+
+/* Is `t` a closure type (not a C function pointer)? */
+static int is_closure_type(const Type* t) {
+    return t && t->kind == TYPE_FUNCTION && !t->is_fnptr;
+}
+
+/* #3077: does a slot of type `t` hold a closure: a closure, or a `fn?`? */
+static int holds_closure(const Type* t) {
+    if (t && t->kind == TYPE_OPTIONAL) t = t->element_type;
+    return is_closure_type(t);
+}
+
 int slice_coerce_slot(ASTNode** slot, const Type* target, int target_is_c_view) {
     if (!slot || !*slot || !target) return 0;
     ASTNode* e = *slot;
     if (slice_is_coercion_node(e)) return 0;
-    if (target->kind == TYPE_FUNCTION && !target->is_fnptr) return closure_null_slot(slot, target);
+    if (is_closure_type(target)) return closure_null_slot(slot, target);
+    /* #3077: and in every slot that holds a closure. An optional's value
+     * (`let o: fn? = null`, `-> fn?`, a `fn?` field, parameter or store) is
+     * the empty closure, as a `ptr?` given `null` holds a null pointer; the
+     * elements of an array literal in an array of closures, and each part
+     * of a tuple literal, go in by the rule of their own slot. */
+    if (target->kind == TYPE_OPTIONAL && is_closure_type(target->element_type))
+        return closure_null_slot(slot, target->element_type);
+    if (e->type == AST_TUPLE_LITERAL && target->kind == TYPE_TUPLE && target->tuple_types &&
+        target->tuple_count == e->child_count) {
+        int changed = 0;
+        for (int i = 0; i < e->child_count; i++)
+            changed |= slice_coerce_slot(&e->children[i], target->tuple_types[i],
+                                         target_is_c_view);
+        return changed;
+    }
+    int elements = 0;
+    if (e->type == AST_ARRAY_LITERAL && target->kind == TYPE_ARRAY &&
+        holds_closure(target->element_type)) {
+        for (int i = 0; i < e->child_count; i++)
+            elements |= slice_coerce_slot(&e->children[i], target->element_type, 0);
+    }
+    return elements | slice_coerce_value(slot, target, target_is_c_view);
+}
 
+static int slice_coerce_value(ASTNode** slot, const Type* target, int target_is_c_view) {
+    ASTNode* e = *slot;
     int slot_is_slice = type_is_slice(target) && !target_is_c_view;
     int slot_is_raw_ptr = target->kind == TYPE_PTR ||
                           (target->kind == TYPE_ARRAY && target_is_c_view);

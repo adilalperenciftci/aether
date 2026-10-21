@@ -19,6 +19,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
+#include <stdint.h>
 #include <time.h>
 // pthread types (pthread_mutex_t / lock / unlock / init / destroy) come
 // in transitively via aether_middleware.h -> aether_http_server.h ->
@@ -402,7 +403,7 @@ int aether_middleware_session_auth(HttpRequest* req, HttpServerResponse* res, vo
 typedef struct RateBucket {
     char* key;          /* X-Forwarded-For value or fallback */
     double tokens;      /* current bucket level */
-    long   last_refill; /* monotonic ms */
+    int64_t last_refill; /* monotonic ms */
     struct RateBucket* next;
 } RateBucket;
 
@@ -415,10 +416,14 @@ struct AetherRateLimitOpts {
     RateBucket* table[RATE_TABLE_SIZE];
 };
 
-static long monotonic_ms(void) {
+/* In 64 bits. In a `long`, 32 bits on Windows, the product overflowed after
+ * 24.8 days of uptime (time since boot there), undefined behaviour that only
+ * happened to wrap, and a bucket left idle longer than that read a negative
+ * elapsed time and did not refill until as long again had passed (#3096). */
+static int64_t monotonic_ms(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (long)ts.tv_sec * 1000L + ts.tv_nsec / 1000000L;
+    return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
 }
 
 static unsigned int rate_hash(const char* s) {
@@ -475,7 +480,7 @@ int aether_middleware_rate_limit(HttpRequest* req, HttpServerResponse* res, void
     keybuf[klen] = '\0';
 
     unsigned int slot = rate_hash(keybuf) % RATE_TABLE_SIZE;
-    long now = monotonic_ms();
+    int64_t now = monotonic_ms();
 
     pthread_mutex_lock(&o->lock);
     RateBucket* bucket = o->table[slot];
@@ -505,7 +510,7 @@ int aether_middleware_rate_limit(HttpRequest* req, HttpServerResponse* res, void
     }
 
     /* Continuous refill: rate = max_requests / window_ms tokens per ms. */
-    long elapsed = now - bucket->last_refill;
+    int64_t elapsed = now - bucket->last_refill;
     if (elapsed > 0) {
         double refill = (double)elapsed * (double)o->max_requests / (double)o->window_ms;
         bucket->tokens += refill;

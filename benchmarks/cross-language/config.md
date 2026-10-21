@@ -1,190 +1,76 @@
 # Benchmark Configuration Guide
 
-## System Requirements
+## What the suite needs
 
-The benchmark suite automatically detects available compilers and tools. Benchmarks that can't run are skipped.
+`make benchmark` (from the repository root) builds Aether, builds the runner
+(`run_benchmarks.ae`, in Aether) and runs every language whose toolchain it
+finds, then serves the results page. `make benchmark-results` does the same
+without the page. A language whose build fails is reported as skipped;
+Aether is required.
 
-### Minimum Requirements
-- **Python 3** - For JSON config parsing
-- **GCC or Clang** - For C/C++ benchmarks
-- **GNU sed** or **BSD sed** - For config application
+| Language | Toolchain | Builds with |
+|---|---|---|
+| Aether | this repository (`make compiler ae stdlib`) and GCC or Clang | `aether/Makefile` |
+| C, C++ | GCC or Clang | `c/Makefile`, `cpp/Makefile` |
+| Go | `go` | `go/Makefile` (`go build`) |
+| Rust | `cargo` | `rust/Makefile` (Cargo's release profile, `rust/.cargo/config.toml`) |
+| Zig | `zig` 0.16 | `zig/Makefile` (`build.zig`, `ReleaseFast`) |
+| Java | JDK 21 or later (virtual threads) | `java/Makefile` (`javac`) |
+| Scala | `sbt` and JDK 21 or later | `scala/Makefile` (`sbt compile`) |
+| Erlang | Erlang/OTP (`erlc`, `erl`) | `erlang/Makefile` |
+| Elixir | `elixir` | `elixir/Makefile` (scripts, compiled as they load) |
+| Pony | `ponyc` | `pony/Makefile` |
 
-### Optional Language Support
-- **Java 17+** - For Scala/Java benchmarks (auto-detected in standard locations)
-- **Go** - For Go benchmark
-- **Rust** - For Rust benchmark
-- **Zig** - For Zig benchmark
-- **Erlang/Elixir** - For BEAM benchmarks
-- **Pony** - For Pony benchmark
-- **sbt** - For Scala compilation
+CPU time and peak memory need GNU `time` at `/usr/bin/time` on Linux (the
+`time` package) or the system one on macOS. On Windows they read n/a.
 
-The script automatically searches common installation paths on both macOS and Linux:
-- macOS: `/opt/homebrew`, `/Library/Java/JavaVirtualMachines`
-- Linux: `/usr/lib/jvm`, system PATH
-- Custom: `$JAVA_HOME` environment variable
+`make flags` in a language's directory prints how it builds; the results
+record it, with the toolchain's version.
 
-## Quick Start
+## Settings
 
-All benchmark parameters are configured in a single JSON file: **`benchmark_config.json`**
+The runner reads its settings from the environment:
 
-```json
-{
-  "messages": 1000000,
-  "timeout_seconds": 60
-}
-```
+| Variable | Default | Meaning |
+|---|---|---|
+| `BENCHMARK_MESSAGES` | 1000000 | Messages per run (skynet: leaves) |
+| `BENCH_RUNS` | 5 | Timed runs per language and pattern; the median is reported |
+| `BENCH_WARMUP` | 1 | Discarded runs before them, the same for every language |
+| `BENCH_LANGS` | all | Languages to run, comma-separated (`aether,c,rust`) |
+| `BENCH_PATTERNS` | all | Patterns to run, comma-separated (`ping_pong,skynet`) |
+| `BENCH_STRICT` | 0 | 1: exit 1 if any selected language does not build or is wrong (the CI job) |
 
-Just edit the values and run `make benchmark` - the configuration is applied automatically.
-
-## Configuration Options
-
-### messages
-Number of messages to exchange (default: 1,000,000)
-
-- **Higher values**: More accurate results, longer runtime
-- **Lower values**: Faster benchmarks, suitable for low-spec systems
-
-### timeout_seconds
-Maximum time to wait for each benchmark (default: 60)
-
-## Presets
-
-The config file includes presets for common scenarios:
-
-### Full
-```json
-"messages": 10000000
-```
-Full benchmark - 10M messages. Takes 5-30 seconds per language.
-
-### Medium (Default)
-```json
-"messages": 1000000
-```
-Default benchmark - 1M messages. Good balance of accuracy and speed.
-
-### Low Spec
-```json
-"messages": 100000
-```
-Minimal load - 100K messages. For systems with <4GB RAM or slower CPUs.
-
-### Stress Test
-```json
-"messages": 100000000
-```
-Heavy load - 100M messages. May take several minutes per language.
-
-## System Recommendations
-
-| System RAM | CPU Cores | Recommended Messages | Expected Runtime |
-|-----------|-----------|---------------------|------------------|
-| <4 GB     | 1-2       | 100,000            | ~5 minutes total |
-| 4-8 GB    | 2-4       | 1,000,000 (default) | ~10 minutes total |
-| 8-16 GB   | 4-8       | 10,000,000         | ~15 minutes total |
-| >16 GB    | 8+        | 100,000,000        | ~30+ minutes total |
-
-## Usage Examples
-
-### Use a preset
-Edit `benchmark_config.json` to use a preset value:
-```json
-{
-  "messages": 1000000,
-  "timeout_seconds": 60
-}
-```
-
-### Custom configuration
-Set any value you want:
-```json
-{
-  "messages": 5000000,
-  "timeout_seconds": 120
-}
-```
-
-### Run benchmarks
 ```bash
-cd benchmarks/cross-language
-make benchmark
+BENCHMARK_MESSAGES=100000 BENCH_RUNS=3 make benchmark
+BENCH_LANGS=aether,go BENCH_PATTERNS=thread_ring make benchmark
 ```
 
-The script automatically:
-1. Reads `benchmark_config.json`
-2. Updates all language implementations
-3. Compiles and runs benchmarks
-4. Generates results
+Around 100,000 messages suits a small machine; ten million gives longer,
+steadier runs. A rate is only worth quoting with its range: see
+[FAIRNESS.md](FAIRNESS.md).
 
-## Installing Missing Dependencies
+## Installing toolchains
 
-### macOS
+macOS:
+
 ```bash
-# Java 17+
-brew install openjdk@17
-
-# Other languages
-brew install go rust zig erlang elixir ponyc sbt
+brew install go rust zig erlang elixir ponyc sbt openjdk@21
 ```
 
-### Ubuntu/Debian
+Ubuntu or Debian:
+
 ```bash
-# Java 17+
-sudo apt install openjdk-17-jdk
-
-# Other languages
-sudo apt install golang rustc erlang elixir
+sudo apt install golang rustc cargo erlang elixir openjdk-21-jdk time
 ```
 
-### Arch Linux
-```bash
-# Java 17+
-sudo pacman -S jdk17-openjdk
-
-# Other languages
-sudo pacman -S go rust zig erlang elixir
-```
+Zig 0.16 comes from ziglang.org, Pony from `ponyup`, and sbt from its own
+package repository; a distribution's packages may be older than the suite
+needs.
 
 ## Troubleshooting
 
-### Benchmark times out
-- Reduce `messages` (try 1,000,000 or 100,000)
-- Increase `timeout_seconds` (try 120 or 300)
-
-### Out of memory errors
-- Reduce `messages` significantly (try 100,000)
-- Close other applications
-- Some languages (Java, Scala) use more memory
-
-### Build failures
-- Install missing compilers (see main README)
-- Check system has required dependencies
-- Builds are skipped automatically if tools unavailable
-
-## Architecture Notes
-
-The configuration system works by:
-1. `run_benchmarks.ae` reads `BENCHMARK_MESSAGES` from environment
-2. Each language is compiled with highest optimization flags
-3. The Aether runner parses output and writes JSON results
-4. Results are normalized and compared fairly
-
-All languages use the exact same message count for fair comparison.
-
-## Manual Configuration (Not Recommended)
-
-If you need to configure languages individually, you can edit the source files directly:
-
-- **Aether**: `aether/ping_pong.ae` - `total_messages = N`
-- **C**: `c/ping_pong.c` - `#define MESSAGES N`
-- **C++**: `cpp/ping_pong.cpp` - `constexpr size_t MESSAGES = N`
-- **Go**: `go/ping_pong.go` - `const messages = N`
-- **Rust**: `rust/src/main.rs` - `const MESSAGES: usize = N`
-- **Java**: `java/PingPong.java` - `private static final int MESSAGES = N`
-- **Zig**: `zig/ping_pong.zig` - `const messages = N`
-- **Elixir**: `elixir/ping_pong.exs` - `@messages N`
-- **Erlang**: `erlang/ping_pong.erl` - `-define(MESSAGES, N).`
-- **Pony**: `pony/ping_pong.pony` - `if _count < N then`
-- **Scala**: `scala/ping_pong.scala` - `val maxCount = NL`
-
-However, this is error-prone and not recommended. Use `benchmark_config.json` instead.
+- **A language is skipped.** Its build log is in `build/<language>_<pattern>.log`;
+  `cd <language> && make <pattern>` reproduces it.
+- **A language is `[FAIL]`.** Its result was wrong, it exited with an error,
+  or it printed no rate; the reason is in the results and on the page.
+- **Out of memory.** Lower `BENCHMARK_MESSAGES`.

@@ -305,6 +305,7 @@ void add_symbol(SymbolTable* table, const char* name, Type* type, int is_actor, 
     symbol->inferred_in = NULL;
     symbol->walk_id = 0;
     symbol->branch_hoisted = 0;
+    symbol->hoist_written = 0;
     symbol->hoist_pending = 0;
     symbol->is_const = 0;
     symbol->inferred_closure = NULL;
@@ -396,24 +397,81 @@ typedef struct { ASTNode* decl; SymbolTable* table; } OwnExtern;
 static OwnExtern* g_own_externs = NULL;
 static int g_own_extern_count = 0;
 
-static Symbol* own_extern_symbol(Symbol* found, const char* merged_from, const char* name) {
-    if (!found || !found->node || found->node->type != AST_EXTERN_FUNCTION) return found;
-    ASTNode* own = own_extern_decl(merged_from, name);
-    if (!own || own == found->node) return found;
+/* The symbol of the extern `own` a file declares itself, kept in a table
+ * of its own; NULL when it cannot be made. */
+static Symbol* own_extern_decl_symbol(ASTNode* own, const char* name) {
     for (int i = 0; i < g_own_extern_count; i++)
         if (g_own_externs[i].decl == own) return lookup_symbol_local(g_own_externs[i].table, name);
     OwnExtern* grown = realloc(g_own_externs, sizeof(OwnExtern) * (size_t)(g_own_extern_count + 1));
-    if (!grown) return found;
+    if (!grown) return NULL;
     g_own_externs = grown;
     SymbolTable* t = create_symbol_table(NULL);
     add_symbol(t, name, clone_type(own->node_type), 0, 1, 0);
     Symbol* s = lookup_symbol_local(t, name);
-    if (!s) return found;
+    if (!s) return NULL;
     s->node = own;
     g_own_externs[g_own_extern_count].decl = own;
     g_own_externs[g_own_extern_count].table = t;
     g_own_extern_count++;
     return s;
+}
+
+static Symbol* own_extern_symbol(Symbol* found, const char* merged_from, const char* name) {
+    if (!found || !found->node || found->node->type != AST_EXTERN_FUNCTION) return found;
+    ASTNode* own = own_extern_decl(merged_from, name);
+    if (!own || own == found->node) return found;
+    Symbol* s = own_extern_decl_symbol(own, name);
+    return s ? s : found;
+}
+
+/* #3088: is `s` a top-level declaration of the program itself, written in
+ * its own files rather than merged from a module: a function, a type, an
+ * actor, a message, a constant? An extern is each file's own already
+ * (own_extern_symbol), and a builtin has no declaration. */
+static int is_program_own_decl(const Symbol* s) {
+    const ASTNode* n = s ? s->node : NULL;
+    if (!n || n->origin_module || n->is_imported) return 0;
+    switch (n->type) {
+        case AST_FUNCTION_DEFINITION: case AST_BUILDER_FUNCTION:
+        case AST_STRUCT_DEFINITION: case AST_SUM_TYPE_DEF: case AST_ENUM_DEFINITION:
+        case AST_BITSTRUCT_DEFINITION: case AST_ACTOR_DEFINITION:
+        case AST_MESSAGE_DEFINITION: case AST_CONST_DECLARATION:
+            return 1;
+        default:
+            return 0;
+    }
+}
+
+/* #3088: does the module `module_name` declare `name` itself, at its top
+ * level? A struct it declares identical to the program's is merged as the
+ * program's one type (#2129), so its body names that type by its own
+ * name. */
+static int module_declares(const char* module_name, const char* name) {
+    AetherModule* m = module_name ? module_find(module_name) : NULL;
+    for (int i = 0; m && m->ast && i < m->ast->child_count; i++) {
+        const ASTNode* d = m->ast->children[i];
+        if (d && d->type == AST_EXPORT_STATEMENT && d->child_count > 0) d = d->children[0];
+        if (d && d->value && strcmp(d->value, name) == 0 && d->type != AST_IMPORT_STATEMENT)
+            return 1;
+    }
+    return 0;
+}
+
+/* #3088: the newest symbol of `name` in the file scope `table` that is no
+ * declaration of the program's own: what a module's body finds beneath a
+ * program's function or type of that name (an extern, a builtin). */
+static Symbol* lookup_file_symbol_for_module(SymbolTable* table, const char* name) {
+    if (table->buckets) {
+        unsigned b = symtab_hash(name) & (unsigned)(table->bucket_count - 1);
+        for (Symbol* s = table->buckets[b]; s; s = s->hash_next)
+            if (strcmp(s->name, name) == 0 && !(s->walk_id == 0 && is_program_own_decl(s)))
+                return s;
+        return NULL;
+    }
+    for (Symbol* s = table->symbols; s; s = s->next)
+        if (strcmp(s->name, name) == 0 && !(s->walk_id == 0 && is_program_own_decl(s)))
+            return s;
+    return NULL;
 }
 
 /* `merged_from` is the scope the lookup STARTED in: a merged body's, even
@@ -428,6 +486,24 @@ static Symbol* lookup_symbol_in(SymbolTable* table, const char* name, const char
      * the function of its name (see Symbol.hoist_pending); the walk goes on
      * outward to it. */
     if (symbol && symbol->hoist_pending) symbol = NULL;
+    /* #3088: nor the program's own functions, types, actors, messages and
+     * constants. A module's body resolves in its own scope: its own
+     * declarations (merged under its prefix), what it imports, and std's
+     * builtins. pkg.user's `helper()` called a program's `helper()` it
+     * never imported, and a program's `frame()` or `struct frame` took the
+     * place of pkg.user's own import of pkg.frame in `frame.SETS`. What it
+     * finds beneath one is its own: an extern it declares (std.io's
+     * `string_concat` beside a program's function of that name), or a
+     * builtin. A name the module declares itself is its own, though: its
+     * struct identical to the program's is merged as that one (#2129). */
+    if (symbol && merged_from && !table->parent && symbol->walk_id == 0 &&
+        is_program_own_decl(symbol) && !module_declares(merged_from, name)) {
+        symbol = lookup_file_symbol_for_module(table, name);
+        if (!symbol) {
+            ASTNode* own = own_extern_decl(merged_from, name);
+            return own ? own_extern_decl_symbol(own, name) : NULL;
+        }
+    }
     /* The program's own top-level `var`s are the program's: a module's code
      * (a merged body, table->merged_from) never resolves to one. A module's
      * own globals are merged under `<ns>_name`, so a bare name there that
@@ -547,6 +623,7 @@ void add_module_alias(SymbolTable* table, const char* alias, const char* module_
     symbol->inferred_in = NULL;
     symbol->walk_id = 0;
     symbol->branch_hoisted = 0;
+    symbol->hoist_written = 0;
     symbol->hoist_pending = 0;
     symbol->is_const = 0;
     symbol->inferred_closure = NULL;
@@ -785,6 +862,26 @@ int is_visible_namespace(const char* name, SymbolTable* table) {
      * functions do in a build (module_sees_namespace); nothing more. */
     if (g_entry_self_ns && name && strcmp(name, g_entry_self_ns) == 0) return 1;
     return is_user_explicit_namespace(name);
+}
+
+/* Does `name` in `name.member` name a value (a local, a parameter, a
+ * global) that hides an imported namespace of that name, so the access is
+ * a field of the value? A function does not: it has no fields, so
+ * `frame.SETS` is the module's constant beside a `frame()` function. A
+ * module's code sees the program's functions too, and since 0.837, where a
+ * bare `ptr` has no fields (#3048), pkg/user's `frame.SETS` beside a
+ * program's `frame() -> ptr` was read as a field of that function's
+ * result and refused, its own import of pkg.frame passed over (#3084). */
+static int value_hides_namespace(SymbolTable* table, const char* name) {
+    Symbol* s = lookup_symbol(table, name);
+    return s && !s->is_function && !s->is_module_alias;
+}
+
+/* #3077: does a slot of type `t` hold a closure: a closure (no C function
+ * pointer), or a `fn?`? */
+static int holds_closure_type(const Type* t) {
+    if (t && t->kind == TYPE_OPTIONAL) t = t->element_type;
+    return t && t->kind == TYPE_FUNCTION && !t->is_fnptr;
 }
 
 // #878: a module's qualified `X.fn()` surface is available whenever the
@@ -4393,7 +4490,7 @@ Type* infer_type(ASTNode* expr, SymbolTable* table) {
             // const-lookup path in typecheck_expression applies.
             if (expr->child_count > 0 && expr->children[0] &&
                 expr->children[0]->type == AST_IDENTIFIER && expr->children[0]->value &&
-                !lookup_symbol(table, expr->children[0]->value) &&
+                !value_hides_namespace(table, expr->children[0]->value) &&
                 is_visible_namespace(expr->children[0]->value, table) && expr->value &&
                 is_export_blocked(expr->children[0]->value, expr->value)) {
                 char msg[256];
@@ -5727,7 +5824,7 @@ static Type* const_initializer_type(ASTNode* e, SymbolTable* table) {
         case AST_MEMBER_ACCESS: {
             ASTNode* ns = e->child_count > 0 ? e->children[0] : NULL;
             if (!ns || ns->type != AST_IDENTIFIER || !ns->value || !e->value ||
-                lookup_symbol(table, ns->value) || !is_visible_namespace(ns->value, table))
+                value_hides_namespace(table, ns->value) || !is_visible_namespace(ns->value, table))
                 return create_type(TYPE_UNKNOWN);
             char qualified[512];
             snprintf(qualified, sizeof(qualified), "%s_%s", ns->value, e->value);
@@ -11409,6 +11506,10 @@ static void declare_hoisted_local(SymbolTable* table, const char* name, Type* t)
     Symbol* s = lookup_symbol_local(table, name);
     if (s) {
         s->branch_hoisted = 1;
+        /* #3070: its written type is its type (the join gave it). */
+        Type* w = hoist_written_type(g_tc_fn_body, name);
+        s->hoist_written = w && s->type && types_equal(w, s->type);
+        if (w) free_type(w);
         /* #2683: declared ahead of its first binding, it must not hide a
          * function of its name before that binding (its own initializer
          * included): `if c { label = label() } else { ... }`. */
@@ -11459,6 +11560,33 @@ static int sibling_binding_other_type(Type* here, Type* hoisted, ASTNode* init) 
     if ((a->kind == TYPE_STRUCT && is_c_struct_name(a->struct_name)) ||
         (b->kind == TYPE_STRUCT && is_c_struct_name(b->struct_name))) return 0;
     return !is_type_compatible(here, hoisted);
+}
+
+/* #3070: `stmt` binds a hoisted local written as `w` in another branch or
+ * loop body to `init`, a value of type `t`. A type written for the local is
+ * its type, and a value it does not hold (ast_number_holds) is refused, in
+ * whichever order the two are written. Joined with the others, the written
+ * type was dropped: `x = -1` beside `uint64 x = 7` printed -1, `x = 1.5`
+ * beside `int x = 0` made a float, and in the other order the first was
+ * refused. A value of another kind is held when it is assignable: `x =
+ * "s"` beside `int x = 1` was stored into the int as a pointer. Reports
+ * that and returns 1. */
+static int report_unheld_binding(ASTNode* stmt, Type* w, Type* t, ASTNode* init) {
+    if (!w || !t || t->kind == TYPE_UNKNOWN || t->kind == TYPE_VOID) return 0;
+    int number = (is_numeric_scalar(t->kind) || t->kind == TYPE_BYTE) &&
+                 (is_numeric_scalar(w->kind) || w->kind == TYPE_BYTE);
+    if (number ? ast_number_holds(w, t, init) : is_assignable(t, w)) return 0;
+    char rmsg[512];
+    snprintf(rmsg, sizeof(rmsg),
+             "cannot bind '%s' to this %s value: it is written as %s in another branch or loop "
+             "body of this function, which does not hold the value, and a local first bound "
+             "inside a branch or loop body is one variable for the whole function",
+             stmt->value, type_name(t), type_name(w));
+    type_error_hint(rmsg,
+                    "use a new name for this value, or write a type that holds every value the "
+                    "local is bound to",
+                    stmt->line, stmt->column);
+    return 1;
 }
 
 /* Function (or main) entry: hoist_if_branch_vars's names. */
@@ -12943,11 +13071,27 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                          * checked; so does the first binding checked here,
                          * joined over the body as declare_hoisted_local
                          * joins (#2611). */
-                        if (bound->type && bound->type->kind == TYPE_UNKNOWN && init_type &&
+                        if (bound->hoist_written) {
+                            /* #3070: the type written for it is its type, and
+                             * is not joined away. */
+                            if (report_unheld_binding(stmt, bound->type, init_type, init)) {
+                                free_type(init_type);
+                                return 0;
+                            }
+                        } else if (bound->type && bound->type->kind == TYPE_UNKNOWN && init_type &&
                             init_type->kind != TYPE_UNKNOWN && init_type->kind != TYPE_VOID) {
                             Type* joined = hoist_join_type(g_tc_fn_body, stmt->value, init_type);
                             free_type(bound->type);
                             bound->type = joined ? joined : clone_type(init_type);
+                            /* #3070: as declare_hoisted_local marks it. */
+                            Type* w = hoist_written_type(g_tc_fn_body, stmt->value);
+                            bound->hoist_written = w && types_equal(w, bound->type);
+                            if (w) free_type(w);
+                            if (bound->hoist_written &&
+                                report_unheld_binding(stmt, bound->type, init_type, init)) {
+                                free_type(init_type);
+                                return 0;
+                            }
                         } else if (bound->type && init_type) {
                             /* #2980 review: function values join by mode,
                              * the stronger at each parameter. #3064: numbers
@@ -12982,6 +13126,31 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                      * outside the branches), and `std.cbor` binds the
                      * same name as int in one branch and long in
                      * another. */
+                } else if (stmt->value && stmt->node_type) {
+                    /* #3070: a hoisted local is written as one type; a
+                     * binding that writes another, in another branch or
+                     * loop body, is refused. */
+                    Symbol* hoisted = NULL;
+                    SymbolTable* hoisted_in = NULL;
+                    for (SymbolTable* t = table; t && t->parent && !hoisted; t = t->parent) {
+                        hoisted = lookup_symbol_local(t, stmt->value);
+                        if (hoisted) hoisted_in = t;
+                    }
+                    if (hoisted && hoisted->branch_hoisted && hoisted->hoist_written &&
+                        hoisted_in != table && hoisted->type &&
+                        !types_equal(stmt->node_type, hoisted->type)) {
+                        char rmsg[512];
+                        snprintf(rmsg, sizeof(rmsg),
+                            "cannot write '%s' as %s: it is written as %s in another branch or "
+                            "loop body of this function, and a local first bound inside a branch "
+                            "or loop body is one variable for the whole function, of one type",
+                            stmt->value, type_name(stmt->node_type), type_name(hoisted->type));
+                        type_error_hint(rmsg,
+                            "write the same type in both, or use a new name for this value",
+                            stmt->line, stmt->column);
+                        free_type(init_type);
+                        return 0;
+                    }
                 }
                 /* Actor state is not a local: `state ref = 0` then
                  * `ref = <ptr>` is the documented wiring pattern and is
@@ -13336,6 +13505,12 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                             return 0;
                         }
                         slice_coerce_slot(&stmt->children[0], gv->node_type, 0);
+                        if (stmt->node_type) free_type(stmt->node_type);
+                        stmt->node_type = clone_type(gv->node_type);
+                    } else if (gv && holds_closure_type(gv->node_type) &&
+                               slice_coerce_slot(&stmt->children[0], gv->node_type, 0)) {
+                        /* #3077: so does `null` into a module-level closure
+                         * or `fn?` var: the empty closure, as into a local. */
                         if (stmt->node_type) free_type(stmt->node_type);
                         stmt->node_type = clone_type(gv->node_type);
                     } else if (gv && gv->node_type && gv->node_type->kind == TYPE_PTR &&
@@ -14927,6 +15102,11 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                     "`??` default type %s is not assignable to the value type %s",
                     type_name(d), type_name(value_t));
                 type_error(msg, expr->line, expr->column);
+            } else if (value_t->kind != TYPE_UNKNOWN) {
+                /* #3077: the default is a slot of the value type, so it goes
+                 * in as into any other: `o ?? null` beside a `fn?` is the
+                 * empty closure. */
+                slice_coerce_slot(&expr->children[1], value_t, 0);
             }
             if (d) free_type(d);
             if (expr->node_type) free_type(expr->node_type);
@@ -16170,10 +16350,11 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
             // has its `flags.field` mis-resolved as `flags_field` const lookup ->
             // spurious "module 'flags' has no export 'field'". Skip the namespace
             // branch when the base resolves to a value symbol so struct-field
-            // resolution below takes precedence.
+            // resolution below takes precedence. #3084: a function is no
+            // value (value_hides_namespace).
             if (expr->child_count > 0 && expr->children[0] &&
                 expr->children[0]->type == AST_IDENTIFIER && expr->children[0]->value &&
-                !lookup_symbol(table, expr->children[0]->value) &&
+                !value_hides_namespace(table, expr->children[0]->value) &&
                 is_visible_namespace(expr->children[0]->value, table) && expr->value) {
                 // Enforce export visibility for constants
                 if (is_export_blocked(expr->children[0]->value, expr->value)) {
@@ -16842,10 +17023,20 @@ int typecheck_binary_expression(ASTNode* expr, SymbolTable* table) {
      * the comparison a meaning only against `null`, and C refused the rest
      * (`invalid operands to binary ==`). */
     if (operator == TOKEN_EQUALS || operator == TOKEN_NOT_EQUALS) {
-        int l_clo = left_type && left_type->kind == TYPE_FUNCTION && !left_type->is_fnptr;
-        int r_clo = right_type && right_type->kind == TYPE_FUNCTION && !right_type->is_fnptr;
-        if ((l_clo && right->type != AST_NULL_LITERAL) ||
-            (r_clo && left->type != AST_NULL_LITERAL)) {
+        /* #3077: and a `fn?` beside a closure or another `fn?`, which
+         * reached C as `==` on the closures they hold. A `fn?` beside
+         * anything else is an optional compared with a value: `null` asks
+         * for the empty closure (`o == some(null)`), `none` for no value,
+         * and one its closure cannot be is the optional rule's to refuse
+         * ("compares the optional 'fn?' with 'int'"). */
+        int l_opt = left_type && left_type->kind == TYPE_OPTIONAL;
+        int r_opt = right_type && right_type->kind == TYPE_OPTIONAL;
+        int l_clo = holds_closure_type(left_type);
+        int r_clo = holds_closure_type(right_type);
+        int refused = (l_opt || r_opt)
+            ? l_clo && r_clo
+            : (l_clo && right->type != AST_NULL_LITERAL) || (r_clo && left->type != AST_NULL_LITERAL);
+        if (refused) {
             Type* other = l_clo ? right_type : left_type;
             const char* op = expr->value ? expr->value : "==";
             char msg[512];
@@ -17385,6 +17576,9 @@ typedef struct {
     ASTNode** nodes;
     int count;
     int cap;
+    /* #3063: the set's join was refused, and said so. It is settled again
+     * after a clause is checked (typecheck_pending), and was said twice. */
+    int refused;
 } TcClauses;
 
 static StrMap g_tc_clauses;
@@ -17467,12 +17661,17 @@ static void type_take(Type* t, Type* want) {
  * and a set with a clause whose result is still to be inferred waits for it
  * (#3056). */
 static void clause_set_settle(ASTNode* fn, SymbolTable* table) {
-    const TcClauses* set = tc_clauses_of(fn);
+    TcClauses* set = (TcClauses*)tc_clauses_of(fn);
     if (!set) return;
     ClauseJoin cj;
     clause_set_join(set->nodes, set->count, &cj);
     if (cj.status == CLAUSE_JOIN_WAIT || cj.status == CLAUSE_JOIN_NO_VALUE) return;
+    if (cj.status != CLAUSE_JOIN_OK && set->refused) {
+        if (cj.join) free_type(cj.join);
+        return;
+    }
     if (cj.status != CLAUSE_JOIN_OK) {
+        set->refused = 1;
         char a[160], b[160], msg[480], hint[200];
         const char* js = cj.join ? ret_type_spell(cj.join, a, sizeof(a)) : "";
         int line = cj.join_at ? cj.join_at->line : 0;
@@ -17502,10 +17701,18 @@ static void clause_set_settle(ASTNode* fn, SymbolTable* table) {
                          "optional has `none` for no value");
                 break;
             case CLAUSE_JOIN_NONE_ONLY:
-                snprintf(msg, sizeof(msg),
-                         "every clause of '%s' that returns a value returns `none`, an optional "
-                         "of no type: the set's result `T?` needs its `T`",
-                         name);
+                if (cj.recurse_at)
+                    /* #3063: one that only calls the set gives no type. */
+                    snprintf(msg, sizeof(msg),
+                             "every clause of '%s' that returns a value returns `none`, an "
+                             "optional of no type, or calls '%s' again (line %d): the set's "
+                             "result `T?` needs its `T`",
+                             name, name, cj.recurse_at->line);
+                else
+                    snprintf(msg, sizeof(msg),
+                             "every clause of '%s' that returns a value returns `none`, an "
+                             "optional of no type: the set's result `T?` needs its `T`",
+                             name);
                 snprintf(hint, sizeof(hint),
                          "write the result type on a clause, `-> int?` for an optional int");
                 break;

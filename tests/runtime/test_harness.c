@@ -59,13 +59,15 @@ void register_test_with_category(const char* name, TestFunction func, TestCatego
     test_count++;
 }
 
-static long get_time_ms(void) {
+/* 64-bit: returned as a `long`, 32 bits on Windows, GetTickCount64 was
+ * truncated after 24.8 days of uptime (#3096). */
+static long long get_time_ms(void) {
 #ifdef _WIN32
     return GetTickCount64();
 #else
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
-    return ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+    return (long long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
 #endif
 }
 
@@ -76,7 +78,7 @@ static long get_time_ms(void) {
  * the limit in seconds (0 turns the watchdog off); the slowest test takes
  * about a second. */
 static _Atomic(const char*) watch_name = NULL;
-static atomic_long watch_start_ms = 0;     /* 0: no test is running */
+static atomic_llong watch_start_ms = 0;    /* 0: no test is running */
 static atomic_int watch_stop = 0;
 static long watch_limit_ms = 0;
 static pthread_t watch_thread;
@@ -94,7 +96,7 @@ static void* test_watchdog(void* arg) {
     (void)arg;
     while (!atomic_load(&watch_stop)) {
         watch_nap();
-        long start = atomic_load(&watch_start_ms);
+        long long start = atomic_load(&watch_start_ms);
         if (start != 0 && get_time_ms() - start > watch_limit_ms) {
             const char* name = atomic_load(&watch_name);
             fflush(stdout);
@@ -124,7 +126,7 @@ static void watchdog_stop(void) {
     watch_running = 0;
 }
 
-static void watch_begin(const char* name, long start) {
+static void watch_begin(const char* name, long long start) {
     atomic_store(&watch_name, name);
     atomic_store(&watch_start_ms, start);
 }
@@ -134,7 +136,7 @@ static void watch_end(void) {
 }
 
 void run_all_tests(void) {
-    long total_start = get_time_ms();
+    long long total_start = get_time_ms();
     watchdog_start();
     
     printf("%s=== Aether Test Suite ===%s\n\n", COLOR_CYAN, COLOR_RESET);
@@ -160,7 +162,7 @@ void run_all_tests(void) {
             test_failure_flag = 0;
             
             // Time the test
-            long start = get_time_ms();
+            long long start = get_time_ms();
             watch_begin(tests[i].name, start);
             
             // Set up jump point for test failures
@@ -172,7 +174,7 @@ void run_all_tests(void) {
                 if (!test_failure_flag) {
                     tests[i].passed = true;
                     passed_count++;
-                    long duration = get_time_ms() - start;
+                    long duration = (long)(get_time_ms() - start);
                     tests[i].duration_ms = duration;
                     printf("  %s[PASS]%s %s (%ldms)\n", COLOR_GREEN, COLOR_RESET, tests[i].name, duration);
                 }
@@ -180,7 +182,7 @@ void run_all_tests(void) {
                 // We jumped here from a failed assertion
                 tests[i].passed = false;
                 failed_count++;
-                long duration = get_time_ms() - start;
+                long duration = (long)(get_time_ms() - start);
                 tests[i].duration_ms = duration;
                 printf("  %s[FAIL]%s %s (%ldms)\n", COLOR_RED, COLOR_RESET, tests[i].name, duration);
             }
@@ -191,7 +193,7 @@ void run_all_tests(void) {
     }
     watchdog_stop();
     
-    long total_duration = get_time_ms() - total_start;
+    long total_duration = (long)(get_time_ms() - total_start);
     
     // Summary
     printf("%s========================================%s\n", COLOR_CYAN, COLOR_RESET);
@@ -261,7 +263,7 @@ void run_tests_by_category(TestCategory category) {
     printf("Running %d %s test(s)...\n\n", cat_test_count, get_category_name(category));
     fflush(stdout);
     
-    long total_start = get_time_ms();
+    long long total_start = get_time_ms();
     watchdog_start();
     
     for (int i = 0; i < test_count; i++) {
@@ -271,7 +273,7 @@ void run_tests_by_category(TestCategory category) {
         test_failure_flag = 0;
         
         // Time the test
-        long start = get_time_ms();
+        long long start = get_time_ms();
         watch_begin(tests[i].name, start);
         
         // Set up jump point for test failures
@@ -283,7 +285,7 @@ void run_tests_by_category(TestCategory category) {
             if (!test_failure_flag) {
                 tests[i].passed = true;
                 passed_count++;
-                long duration = get_time_ms() - start;
+                long duration = (long)(get_time_ms() - start);
                 tests[i].duration_ms = duration;
                 printf("  %s✓%s %s (%ldms)\n", COLOR_GREEN, COLOR_RESET, tests[i].name, duration);
             }
@@ -291,7 +293,7 @@ void run_tests_by_category(TestCategory category) {
             // We jumped here from a failed assertion
             tests[i].passed = false;
             failed_count++;
-            long duration = get_time_ms() - start;
+            long duration = (long)(get_time_ms() - start);
             tests[i].duration_ms = duration;
             printf("  %s✗%s %s (%ldms)\n", COLOR_RED, COLOR_RESET, tests[i].name, duration);
         }
@@ -300,7 +302,7 @@ void run_tests_by_category(TestCategory category) {
     }
     watchdog_stop();
     
-    long total_duration = get_time_ms() - total_start;
+    long total_duration = (long)(get_time_ms() - total_start);
     
     printf("\n%s========================================%s\n", COLOR_CYAN, COLOR_RESET);
     printf("Summary: %d passed, %d failed (%ld.%03lds)\n", 

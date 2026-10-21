@@ -1,4 +1,4 @@
-.PHONY: all clean ping_pong counting thread_ring fork_join skynet
+.PHONY: all clean flags ping_pong counting thread_ring fork_join skynet
 
 CC = gcc
 # -flto / -fno-plt match the Aether and C++ release flag set so the
@@ -12,16 +12,16 @@ LDFLAGS = -flto -pthread
 
 all: ping_pong counting thread_ring fork_join skynet
 
-ping_pong: ping_pong.c
+ping_pong: ping_pong.c mailbox.h
 	$(CC) $(CFLAGS) ping_pong.c -o ping_pong $(LDFLAGS)
 
-counting: counting.c
+counting: counting.c mailbox.h
 	$(CC) $(CFLAGS) counting.c -o counting $(LDFLAGS)
 
-thread_ring: thread_ring.c
+thread_ring: thread_ring.c mailbox.h
 	$(CC) $(CFLAGS) thread_ring.c -o thread_ring $(LDFLAGS)
 
-fork_join: fork_join.c
+fork_join: fork_join.c mailbox.h
 	$(CC) $(CFLAGS) fork_join.c -o fork_join $(LDFLAGS)
 
 skynet: skynet.c
@@ -29,3 +29,7 @@ skynet: skynet.c
 
 clean:
 	rm -f ping_pong counting thread_ring fork_join skynet
+
+# What the runner records with the results (run_benchmarks.ae).
+flags:
+	@echo "$(CC) $(CFLAGS) / $(LDFLAGS)"

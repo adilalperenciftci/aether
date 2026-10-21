@@ -352,9 +352,9 @@ Detection uses `sysctlbyname("hw.perflevel0.physicalcpu")` to query the P-core c
 |----------|-----------|---------|
 | Linux | `pthread_setaffinity_np` | Hard binding |
 | macOS | `thread_policy_set` + QoS | Hint only |
-| Windows | `SetThreadAffinityMask` | Hard binding |
+| Windows | `SetThreadIdealProcessor` | Hint only |
 
-Note: macOS does not support hard core pinning by design. Thread placement is advisory, which may cause occasional variance in microbenchmarks.
+Note: macOS does not support hard core pinning by design, and Windows uses a hint by choice: bound to one logical CPU, a scheduler thread could not leave it when another program ran there, and shared it a time slice at a time (#3087). The OS keeps a thread on its CPU and moves it when that CPU is busy.
 
 ### Per-Core Message Counters
 

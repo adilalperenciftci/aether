@@ -14,13 +14,15 @@ defmodule ForkJoin do
 
     parent = self()
 
+    # The clock starts before the workers exist, as in every language here
+    # (FAIRNESS.md, rule 5).
+    start_time = :erlang.monotonic_time(:nanosecond)
+
     # Create workers
     workers = Enum.map(1..@num_workers, fn _ ->
-      spawn(fn -> worker_loop(0, parent) end)
+      spawn(fn -> worker_loop(0, 0, parent) end)
     end)
     worker_tuple = List.to_tuple(workers)
-
-    start_time = :erlang.monotonic_time(:nanosecond)
 
     # Send messages round-robin
     send_work(worker_tuple, 0, total)
@@ -28,8 +30,8 @@ defmodule ForkJoin do
     # Signal workers to report
     Enum.each(workers, fn w -> send(w, {:done, self()}) end)
 
-    # Collect results
-    total_processed = collect_results(@num_workers, 0)
+    # Collect results: the messages and the sum of their values
+    {total_processed, checksum} = collect_results(@num_workers, 0, 0)
 
     end_time = :erlang.monotonic_time(:nanosecond)
     elapsed_ns = end_time - start_time
@@ -42,6 +44,7 @@ defmodule ForkJoin do
     throughput = total / elapsed_sec / 1_000_000
     ns_per_msg = elapsed_ns / total
 
+    IO.puts("Checksum: #{checksum}")
     IO.puts("ns/msg:         #{:io_lib.format("~.2f", [ns_per_msg])}")
     IO.puts("Throughput:     #{:io_lib.format("~.2f", [throughput])} M msg/sec")
   end
@@ -53,20 +56,20 @@ defmodule ForkJoin do
     send_work(workers, i + 1, total)
   end
 
-  defp worker_loop(processed, parent) do
+  defp worker_loop(processed, sum, parent) do
     receive do
-      {:work, _value} ->
-        worker_loop(processed + 1, parent)
+      {:work, value} ->
+        worker_loop(processed + 1, sum + value, parent)
       {:done, from} ->
-        send(from, {:result, processed})
+        send(from, {:result, processed, sum})
     end
   end
 
-  defp collect_results(0, acc), do: acc
-  defp collect_results(n, acc) do
+  defp collect_results(0, acc, sum_acc), do: {acc, sum_acc}
+  defp collect_results(n, acc, sum_acc) do
     receive do
-      {:result, count} ->
-        collect_results(n - 1, acc + count)
+      {:result, count, sum} ->
+        collect_results(n - 1, acc + count, sum_acc + sum)
     end
   end
 end
