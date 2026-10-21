@@ -12,16 +12,20 @@ fn get_messages() -> usize {
         .unwrap_or(100_000)
 }
 
-fn worker(rx: Receiver<i32>) -> usize {
+// Returns the messages this worker took and the sum of their values.
+fn worker(rx: Receiver<i32>) -> (usize, i64) {
     let mut count = 0;
-    while rx.recv().is_ok() {
+    let mut sum = 0i64;
+    while let Ok(v) = rx.recv() {
+        sum += v as i64;
         count += 1;
     }
-    count
+    (count, sum)
 }
 
 fn main() {
-    let total = get_messages();
+    // An equal share for each worker, as in every other language here.
+    let total = get_messages() / NUM_WORKERS * NUM_WORKERS;
     println!("=== Rust Fork-Join Throughput Benchmark ===");
     println!("Workers: {}, Messages: {}\n", NUM_WORKERS, total);
 
@@ -47,8 +51,11 @@ fn main() {
 
     // Collect results
     let mut total_processed = 0;
+    let mut checksum = 0i64;
     for h in handles {
-        total_processed += h.join().unwrap();
+        let (count, sum) = h.join().unwrap();
+        total_processed += count;
+        checksum += sum;
     }
 
     let elapsed = start.elapsed().as_secs_f64();
@@ -60,6 +67,7 @@ fn main() {
     let throughput = total as f64 / elapsed / 1e6;
     let ns_per_msg = elapsed * 1e9 / total as f64;
 
+    println!("Checksum: {}", checksum);
     println!("ns/msg:         {:.2}", ns_per_msg);
     println!("Throughput:     {:.2} M msg/sec", throughput);
 }

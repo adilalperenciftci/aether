@@ -17,7 +17,7 @@ start() ->
     % Create ring of processes
     Parent = self(),
     First = spawn(fun() -> ring_node(undefined, Parent, 0) end),
-    Last = create_ring(First, ?RING_SIZE - 1, Parent),
+    {Last, Nodes} = create_ring(First, ?RING_SIZE - 1, Parent, [First]),
 
     % Close the ring: Last -> First (not First -> Last!)
     Last ! {set_next, First},
@@ -30,21 +30,17 @@ start() ->
 
     % Wait for completion
     receive
-        {done, TotalReceived} ->
+        done ->
             End = erlang:monotonic_time(nanosecond),
             ElapsedNs = End - Start,
             ElapsedSec = ElapsedNs / 1000000000.0,
 
-            % Each node receives ~(NumHops + 1) / RING_SIZE messages
-            ExpectedPerNode = (NumHops + 1) div ?RING_SIZE + 1,
-            if
-                TotalReceived < ExpectedPerNode - 10; TotalReceived > ExpectedPerNode + 10 ->
-                    io:format("VALIDATION WARNING: expected ~p per node, got ~p~n", [ExpectedPerNode, TotalReceived]);
-                true -> ok
-            end,
+            % The receipts summed over the ring, the checksum.
+            Receipts = collect_receipts(Nodes, 0),
 
             NsPerMsg = ElapsedNs / (NumHops + 1),
             MsgPerSec = (NumHops + 1) / ElapsedSec,
+            io:format("Checksum: ~p~n", [Receipts]),
             io:format("ns/msg:         ~.2f~n", [NsPerMsg]),
             io:format("Throughput:     ~.2f M msg/sec~n", [MsgPerSec / 1000000])
     after 60000 ->
@@ -54,21 +50,31 @@ start() ->
 
     halt(0).
 
-create_ring(Prev, 0, _Parent) ->
-    Prev;
-create_ring(Prev, N, Parent) ->
+create_ring(Prev, 0, _Parent, Nodes) ->
+    {Prev, Nodes};
+create_ring(Prev, N, Parent, Nodes) ->
     Next = spawn(fun() -> ring_node(Prev, Parent, 0) end),
     Prev ! {set_next, Next},
-    create_ring(Next, N - 1, Parent).
+    create_ring(Next, N - 1, Parent, [Next | Nodes]).
+
+collect_receipts([], Acc) -> Acc;
+collect_receipts([Node | Rest], Acc) ->
+    Node ! {report, self()},
+    receive
+        {count, Count} -> collect_receipts(Rest, Acc + Count)
+    end.
 
 ring_node(Next, Parent, Received) ->
     receive
         {set_next, NewNext} ->
             ring_node(NewNext, Parent, Received);
         {token, 0} ->
-            % Token exhausted, report to parent
-            Parent ! {done, Received + 1};
+            % Token exhausted: tell the parent, and stay to report the count
+            Parent ! done,
+            ring_node(Next, Parent, Received + 1);
         {token, Hops} ->
             Next ! {token, Hops - 1},
-            ring_node(Next, Parent, Received + 1)
+            ring_node(Next, Parent, Received + 1);
+        {report, From} ->
+            From ! {count, Received}
     end.

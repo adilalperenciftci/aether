@@ -94,6 +94,7 @@ actor Main
     end
 
     _env.out.print("Sum: " + total.string())
+    _env.out.print("Checksum: " + total.string())
     let elapsed_ns = finish - _start
     let ns_per_msg = elapsed_ns.f64() / units.f64()
     let throughput = (units.f64() / (elapsed_ns.f64() / 1_000_000_000.0)) / 1_000_000.0

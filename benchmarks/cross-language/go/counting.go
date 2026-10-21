@@ -57,6 +57,7 @@ func main() {
 	throughput := float64(messages) / elapsedSec / 1e6
 	nsPerMsg := elapsedSec * 1e9 / float64(messages)
 
+	fmt.Printf("Checksum: %d\n", count)
 	fmt.Printf("ns/msg:         %.2f\n", nsPerMsg)
 	fmt.Printf("Throughput:     %.2f M msg/sec\n", throughput)
 }

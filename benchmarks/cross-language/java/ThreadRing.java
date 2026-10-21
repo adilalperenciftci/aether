@@ -92,6 +92,12 @@ public class ThreadRing {
         double throughput = totalMessages / elapsedSec / 1e6;
         double nsPerMsg = elapsedSec * 1e9 / totalMessages;
 
+        // The receipts summed over the ring, the checksum. Each node's count
+        // was written before it passed the token on, so the queues order
+        // every one of them before the countDown this thread waited for.
+        long receipts = 0;
+        for (RingNode n : nodes) receipts += n.getReceived();
+        System.out.println("Checksum: " + receipts);
         System.out.printf("ns/msg:         %.2f%n", nsPerMsg);
         System.out.printf("Throughput:     %.2f M msg/sec%n", throughput);
 

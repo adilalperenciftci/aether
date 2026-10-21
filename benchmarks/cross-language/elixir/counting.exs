@@ -35,6 +35,7 @@ defmodule Counting do
         throughput = @messages / elapsed_sec / 1_000_000
         ns_per_msg = elapsed_ns / @messages
 
+        IO.puts("Checksum: #{count}")
         IO.puts("ns/msg:         #{:io_lib.format("~.2f", [ns_per_msg])}")
         IO.puts("Throughput:     #{:io_lib.format("~.2f", [throughput])} M msg/sec")
     after

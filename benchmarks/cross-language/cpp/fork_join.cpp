@@ -18,6 +18,7 @@ class Worker {
     std::queue<int> inbox;
     bool done = false;
     int processed = 0;
+    long long sum = 0;   // the values this worker received
 
 public:
     void send(int value) {
@@ -38,6 +39,7 @@ public:
             cv.wait(lock, [this] { return !inbox.empty() || done; });
 
             while (!inbox.empty()) {
+                sum += inbox.front();
                 inbox.pop();
                 processed++;
             }
@@ -47,6 +49,7 @@ public:
     }
 
     int getProcessed() const { return processed; }
+    long long getSum() const { return sum; }
 };
 
 int main() {
@@ -87,8 +90,10 @@ int main() {
 
     // Collect results
     int total_processed = 0;
+    long long checksum = 0;
     for (int i = 0; i < NUM_WORKERS; i++) {
         total_processed += workers[i].getProcessed();
+        checksum += workers[i].getSum();
     }
 
     if (total_processed != total) {
@@ -99,6 +104,7 @@ int main() {
     double throughput = total / elapsed / 1e6;
     double ns_per_msg = elapsed * 1e9 / total;
 
+    std::cout << "Checksum: " << checksum << std::endl;
     std::cout << "ns/msg:         " << std::fixed << std::setprecision(2) << ns_per_msg << std::endl;
     std::cout << "Throughput:     " << std::setprecision(2) << throughput << " M msg/sec" << std::endl;
 

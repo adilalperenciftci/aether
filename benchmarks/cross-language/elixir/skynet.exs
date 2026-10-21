@@ -69,19 +69,14 @@ defmodule Skynet do
     end
     finish = :erlang.monotonic_time(:nanosecond)
 
-    elapsed_ns = finish - start
-    elapsed_us = div(elapsed_ns, 1000)
+    elapsed_ns = max(finish - start, 1)
 
     IO.puts("Sum: #{sum}")
-    if elapsed_us > 0 do
-      ns_per_msg   = div(elapsed_ns, total)
-      throughput_m = div(total, elapsed_us)
-      leftover     = total - (throughput_m * elapsed_us)
-      frac         = div(leftover * 100, elapsed_us)
-      frac_str     = if frac < 10, do: "0#{frac}", else: "#{frac}"
-      IO.puts("ns/msg:         #{ns_per_msg}")
-      IO.puts("Throughput:     #{throughput_m}.#{frac_str} M msg/sec")
-    end
+    IO.puts("Checksum: #{sum}")
+    # Always printed: a tree small enough to finish within a microsecond
+    # printed no rate at all, which the runner reads as a broken run.
+    IO.puts("ns/msg:         #{div(elapsed_ns, total)}")
+    IO.puts("Throughput:     #{:io_lib.format("~.2f", [total * 1000.0 / elapsed_ns])} M msg/sec")
   end
 end
 

@@ -99,16 +99,13 @@ int main(void) {
 
     long long elapsed_ns = (long long)(ts_end.tv_sec - ts_start.tv_sec) * 1000000000LL
                          + (ts_end.tv_nsec - ts_start.tv_nsec);
-    long long elapsed_us = elapsed_ns / 1000;
+    if (elapsed_ns < 1) elapsed_ns = 1;
 
     printf("Sum: %lld\n", root.result);
-    if (elapsed_us > 0) {
-        long long ns_per_msg   = elapsed_ns / rate_base;
-        long long throughput_m = rate_base / elapsed_us;
-        long long leftover     = rate_base - (throughput_m * elapsed_us);
-        long long frac         = (leftover * 100) / elapsed_us;
-        printf("ns/msg:         %lld\n", ns_per_msg);
-        printf("Throughput:     %lld.%02lld M msg/sec\n", throughput_m, frac);
-    }
+    printf("Checksum: %lld\n", root.result);
+    /* Always printed: a tree small enough to finish within a microsecond
+     * printed no rate at all, which the runner reads as a broken run. */
+    printf("ns/msg:         %lld\n", elapsed_ns / rate_base);
+    printf("Throughput:     %.2f M msg/sec\n", rate_base * 1000.0 / elapsed_ns);
     return 0;
 }

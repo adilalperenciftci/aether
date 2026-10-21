@@ -14,6 +14,7 @@ typedef struct {
     pthread_cond_t cond;
     int count;
     int done;
+    long long processed;   /* the messages the counter took, the checksum */
 } Counter;
 
 static Counter counter;
@@ -30,6 +31,7 @@ void* counter_thread(void* arg) {
             break;
         }
         counter.count--;
+        counter.processed++;
         pthread_mutex_unlock(&counter.mutex);
     }
     return NULL;
@@ -75,6 +77,7 @@ int main(void) {
     double throughput = MESSAGES / elapsed / 1e6;
     double ns_per_msg = elapsed * 1e9 / MESSAGES;
 
+    printf("Checksum: %lld\n", counter.processed);
     printf("ns/msg:         %.2f\n", ns_per_msg);
     printf("Throughput:     %.2f M msg/sec\n", throughput);
 

@@ -77,6 +77,7 @@ int main() {
     double throughput = MESSAGES / elapsed / 1e6;
     double ns_per_msg = elapsed * 1e9 / MESSAGES;
 
+    std::cout << "Checksum: " << counter.getProcessed() << std::endl;
     std::cout << "ns/msg:         " << std::fixed << std::setprecision(2) << ns_per_msg << std::endl;
     std::cout << "Throughput:     " << std::setprecision(2) << throughput << " M msg/sec" << std::endl;
 

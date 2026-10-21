@@ -1,0 +1,354 @@
+// The cross-language suite's statistics, output parsing and expected
+// results, kept apart from run_benchmarks.ae so that tests can exercise them
+// (test_benchstats.ae). See FAIRNESS.md for the rules they implement.
+
+import std.math
+import std.sort
+import std.string
+
+exports(
+    median, minimum, maximum, mean, stddev, cv_pct, fixed2,
+    number_after, long_after, parse_throughput, parse_ns, parse_cpu_seconds, parse_peak_mb,
+    expected_checksum, expected_units, work_units
+)
+
+// ---- statistics ------------------------------------------------------------
+
+// The median of the values in `xs`: the middle value of a sorted copy, or
+// the mean of the two middle values for an even count. -1 for none. The runs
+// are kept in the order they happened, so the middle run is not the median.
+median(xs: float[]) -> float {
+    n = xs.len
+    if n <= 0 {
+        return -1.0
+    }
+    s = make([]float, n)
+    i = 0
+    while i < n {
+        s[i] = xs[i]
+        i = i + 1
+    }
+    sort.floats(s)
+    m = s[n / 2]
+    if n % 2 == 0 {
+        m = (s[n / 2 - 1] + s[n / 2]) / 2.0
+    }
+    free(s)
+    return m
+}
+
+minimum(xs: float[]) -> float {
+    if xs.len <= 0 {
+        return -1.0
+    }
+    m = xs[0]
+    i = 1
+    while i < xs.len {
+        if xs[i] < m {
+            m = xs[i]
+        }
+        i = i + 1
+    }
+    return m
+}
+
+maximum(xs: float[]) -> float {
+    if xs.len <= 0 {
+        return -1.0
+    }
+    m = xs[0]
+    i = 1
+    while i < xs.len {
+        if xs[i] > m {
+            m = xs[i]
+        }
+        i = i + 1
+    }
+    return m
+}
+
+mean(xs: float[]) -> float {
+    if xs.len <= 0 {
+        return -1.0
+    }
+    total = 0.0
+    i = 0
+    while i < xs.len {
+        total = total + xs[i]
+        i = i + 1
+    }
+    return total / xs.len
+}
+
+// The sample standard deviation (divided by n - 1); 0 for fewer than two
+// values.
+stddev(xs: float[]) -> float {
+    n = xs.len
+    if n < 2 {
+        return 0.0
+    }
+    mu = mean(xs)
+    acc = 0.0
+    i = 0
+    while i < n {
+        d = xs[i] - mu
+        acc = acc + d * d
+        i = i + 1
+    }
+    return math.sqrt(acc / (n - 1))
+}
+
+// The coefficient of variation in percent: the sample standard deviation
+// over the mean. It was range / mean * 50, an approximation that grew with
+// the run count and overflowed int32 for the fastest patterns.
+cv_pct(xs: float[]) -> float {
+    mu = mean(xs)
+    if mu <= 0.0 {
+        return 0.0
+    }
+    return stddev(xs) / mu * 100.0
+}
+
+// `x` with two decimals, rounded half away from zero: "12.35", "-0.50".
+fixed2(x: float) -> string {
+    neg = x < 0.0
+    v = x
+    if neg {
+        v = 0.0 - x
+    }
+    long cents = (v * 100.0 + 0.5) as long
+    long whole = cents / 100
+    long frac = cents - whole * 100
+    sign = ""
+    if neg && cents > 0 {
+        sign = "-"
+    }
+    if frac < 10 {
+        return "${sign}${whole}.0${frac}"
+    }
+    return "${sign}${whole}.${frac}"
+}
+
+// ---- parsing a run's output ------------------------------------------------
+
+// The first whitespace-separated token after `label` on the first line that
+// holds it, as a number; -1 when there is no such line or no number there.
+number_after(output: string, label: string) -> float {
+    lines = string.split(output, "\n")
+    count = string.array_size(lines)
+    result = -1.0
+    i = 0
+    while i < count {
+        line = string.array_get(lines, i)
+        at = string.index_of(line, label)
+        if at >= 0 {
+            rest = string.trim(string.substring(line, at + string.length(label), string.length(line)))
+            words = string.split(rest, " ")
+            if string.array_size(words) > 0 {
+                v, err = string.to_double(string.array_get(words, 0))
+                if err == "" {
+                    result = v
+                }
+            }
+            string.array_free(words)
+            i = count
+        }
+        i = i + 1
+    }
+    string.array_free(lines)
+    return result
+}
+
+// The first token after `label` as a whole number, or -1. A checksum is
+// compared exactly: 499999500000 is past what a double holds without loss
+// once it is multiplied, and an integer is what every implementation prints.
+long_after(output: string, label: string) -> long {
+    lines = string.split(output, "\n")
+    count = string.array_size(lines)
+    long result = -1
+    i = 0
+    while i < count {
+        line = string.array_get(lines, i)
+        at = string.index_of(line, label)
+        if at >= 0 {
+            rest = string.trim(string.substring(line, at + string.length(label), string.length(line)))
+            words = string.split(rest, " ")
+            if string.array_size(words) > 0 {
+                v, err = string.to_long(string.array_get(words, 0))
+                if err == "" {
+                    result = v
+                }
+            }
+            string.array_free(words)
+            i = count
+        }
+        i = i + 1
+    }
+    string.array_free(lines)
+    return result
+}
+
+// "Throughput:     12.34 M msg/sec": millions of messages per second.
+parse_throughput(output: string) -> float {
+    return number_after(output, "Throughput:")
+}
+
+// "ns/msg:         81.04"
+parse_ns(output: string) -> float {
+    return number_after(output, "ns/msg:")
+}
+
+// The CPU time (user + system) /usr/bin/time reports for the whole process,
+// in seconds; -1 when its report is not in `output`. GNU time -v writes
+// "User time (seconds): 0.50" and "System time (seconds): 0.10"; the BSD
+// time -l of macOS writes "        1.23 real         0.50 user         0.10 sys".
+parse_cpu_seconds(output: string, is_mac: int) -> float {
+    if is_mac == 0 {
+        user = number_after(output, "User time (seconds):")
+        sys = number_after(output, "System time (seconds):")
+        if user < 0.0 || sys < 0.0 {
+            return -1.0
+        }
+        return user + sys
+    }
+    lines = string.split(output, "\n")
+    count = string.array_size(lines)
+    result = -1.0
+    i = 0
+    while i < count {
+        line = string.array_get(lines, i)
+        if string.contains(line, " real ") == 1 && string.contains(line, " user ") == 1 &&
+        string.contains(line, " sys") == 1 {
+            words = string.split(string.trim(line), " ")
+            n = string.array_size(words)
+            user = -1.0
+            sys = -1.0
+            prev = ""
+            k = 0
+            while k < n {
+                w = string.array_get(words, k)
+                if string.length(w) > 0 {
+                    if w == "user" {
+                        u, e1 = string.to_double(prev)
+                        if e1 == "" { user = u }
+                    }
+                    if w == "sys" {
+                        s, e2 = string.to_double(prev)
+                        if e2 == "" { sys = s }
+                    }
+                    prev = w
+                }
+                k = k + 1
+            }
+            string.array_free(words)
+            if user >= 0.0 && sys >= 0.0 {
+                result = user + sys
+            }
+            i = count
+        }
+        i = i + 1
+    }
+    string.array_free(lines)
+    return result
+}
+
+// The peak resident set in MB from /usr/bin/time, -1 when it is not there:
+// GNU's "Maximum resident set size (kbytes): N", macOS's "N  maximum
+// resident set size" in bytes.
+parse_peak_mb(output: string, is_mac: int) -> float {
+    if is_mac == 0 {
+        kb = number_after(output, "Maximum resident set size (kbytes):")
+        if kb < 0.0 {
+            return -1.0
+        }
+        return kb / 1024.0
+    }
+    lines = string.split(output, "\n")
+    count = string.array_size(lines)
+    result = -1.0
+    i = 0
+    while i < count {
+        line = string.array_get(lines, i)
+        if string.contains(line, "maximum resident set size") == 1 {
+            words = string.split(string.trim(line), " ")
+            if string.array_size(words) > 0 {
+                b, err = string.to_double(string.array_get(words, 0))
+                if err == "" {
+                    result = b / 1048576.0
+                }
+            }
+            string.array_free(words)
+            i = count
+        }
+        i = i + 1
+    }
+    string.array_free(lines)
+    return result
+}
+
+// ---- what a correct run reports --------------------------------------------
+
+// The fork-join message count: the messages split evenly over 8 workers.
+fork_join_total(n: long) -> long {
+    return (n / 8) * 8
+}
+
+// The concurrency units skynet creates for `leaves`: one per subtree larger
+// than the sequential threshold of 1000, plus the root.
+expected_units(pattern: string, n: long) -> long {
+    if pattern == "ping_pong" {
+        return 2
+    }
+    if pattern == "counting" {
+        return 1
+    }
+    if pattern == "thread_ring" {
+        return 100
+    }
+    if pattern == "fork_join" {
+        return 8
+    }
+    long units = 1
+    long m = n
+    while m > 1000 {
+        units = units + m / 1000
+        m = m / 10
+    }
+    return units
+}
+
+// What a correct run prints as `Checksum:` for `n` messages (leaves for
+// skynet):
+//   ping_pong    the sum of the values the ping side got back, 0..n-1
+//   counting     the count the counter holds at the end, n
+//   thread_ring  the receipts summed over the 100 nodes, n + 1
+//   fork_join    the sum of the values the 8 workers received, 0..t-1
+//   skynet       the sum of the leaves, 0..n-1
+expected_checksum(pattern: string, n: long) -> long {
+    if pattern == "counting" {
+        return n
+    }
+    if pattern == "thread_ring" {
+        return n + 1
+    }
+    if pattern == "fork_join" {
+        long t = fork_join_total(n)
+        return t * (t - 1) / 2
+    }
+    return n * (n - 1) / 2
+}
+
+// The units of work each pattern's rate divides by, for the throughput per
+// CPU-second: round trips, messages, hops + 1, messages, concurrency units.
+work_units(pattern: string, n: long) -> long {
+    if pattern == "thread_ring" {
+        return n + 1
+    }
+    if pattern == "fork_join" {
+        return fork_join_total(n)
+    }
+    if pattern == "skynet" {
+        return expected_units(pattern, n)
+    }
+    return n
+}

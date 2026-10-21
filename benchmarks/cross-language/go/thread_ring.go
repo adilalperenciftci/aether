@@ -23,16 +23,20 @@ const ringSize = 100
 
 var numHops = getMessages()
 
-func ringNode(id int, inbox <-chan int, next chan<- int, done chan<- int) {
+// ringNode passes the token on until it reaches 0, then signals done and
+// keeps its inbox open; when main closes the inboxes it reports how many
+// tokens it received, so the receipts summed over the ring are the checksum.
+func ringNode(inbox <-chan int, next chan<- int, done chan<- struct{}, counts chan<- int) {
 	received := 0
 	for token := range inbox {
 		received++
 		if token == 0 {
-			done <- received
-			return
+			done <- struct{}{}
+			continue
 		}
 		next <- token - 1
 	}
+	counts <- received
 }
 
 func main() {
@@ -46,12 +50,13 @@ func main() {
 		channels[i] = make(chan int, 1)
 	}
 
-	done := make(chan int)
+	done := make(chan struct{})
+	counts := make(chan int, ringSize)
 
 	// Start goroutines
 	for i := 0; i < ringSize; i++ {
 		next := channels[(i+1)%ringSize]
-		go ringNode(i, channels[i], next, done)
+		go ringNode(channels[i], next, done, counts)
 	}
 
 	start := time.Now()
@@ -60,21 +65,26 @@ func main() {
 	channels[0] <- numHops
 
 	// Wait for completion
-	received := <-done
+	<-done
 
 	elapsed := time.Since(start)
 
-	totalMessages := numHops + 1
-	// Each node receives totalMessages/ringSize messages
-	expectedPerNode := totalMessages/ringSize + 1
-	if received < expectedPerNode-10 || received > expectedPerNode+10 {
-		fmt.Printf("VALIDATION WARNING: expected ~%d per node, got %d\n", expectedPerNode, received)
+	// The token is spent, so nothing sends any more: close the inboxes and
+	// sum what every node received.
+	for i := 0; i < ringSize; i++ {
+		close(channels[i])
+	}
+	receipts := 0
+	for i := 0; i < ringSize; i++ {
+		receipts += <-counts
 	}
 
+	totalMessages := numHops + 1
 	elapsedSec := elapsed.Seconds()
 	throughput := float64(totalMessages) / elapsedSec / 1e6
 	nsPerMsg := elapsedSec * 1e9 / float64(totalMessages)
 
+	fmt.Printf("Checksum: %d\n", receipts)
 	fmt.Printf("ns/msg:         %.2f\n", nsPerMsg)
 	fmt.Printf("Throughput:     %.2f M msg/sec\n", throughput)
 }

@@ -18,6 +18,7 @@ typedef struct {
     int queue_size;
     int queue_capacity;
     int processed;
+    long long sum;   /* the values this worker received */
     int done;
 } Worker;
 
@@ -50,7 +51,8 @@ void* worker_thread(void* arg) {
             break;
         }
 
-        // Dequeue
+        // Dequeue, adding the value to the sum (the checksum)
+        self->sum += self->queue[self->queue_head];
         self->queue_head = (self->queue_head + 1) % self->queue_capacity;
         self->queue_size--;
         self->processed++;
@@ -80,6 +82,7 @@ int main(void) {
         workers[i].queue_tail = 0;
         workers[i].queue_size = 0;
         workers[i].processed = 0;
+        workers[i].sum = 0;
         workers[i].done = 0;
     }
 
@@ -113,8 +116,10 @@ int main(void) {
 
     // Collect results
     int total_processed = 0;
+    long long checksum = 0;
     for (int i = 0; i < NUM_WORKERS; i++) {
         total_processed += workers[i].processed;
+        checksum += workers[i].sum;
     }
 
     if (total_processed != total) {
@@ -125,6 +130,7 @@ int main(void) {
     double throughput = total / elapsed / 1e6;
     double ns_per_msg = elapsed * 1e9 / total;
 
+    printf("Checksum: %lld\n", checksum);
     printf("ns/msg:         %.2f\n", ns_per_msg);
     printf("Throughput:     %.2f M msg/sec\n", throughput);
 

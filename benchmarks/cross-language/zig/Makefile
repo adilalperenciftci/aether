@@ -1,26 +1,17 @@
-.PHONY: all clean ping_pong counting thread_ring fork_join skynet
+.PHONY: all clean flags ping_pong counting thread_ring fork_join skynet
+
+# The build is build.zig's; the runner starts zig-out/bin/<pattern>
+# (run_benchmarks.ae runs `make <pattern>` in every language's directory).
+ZIG = zig
 
 all: ping_pong counting thread_ring fork_join skynet
 
-ping_pong: ping_pong.zig
-	zig build -Doptimize=ReleaseFast
-	cp zig-out/bin/ping_pong .
+ping_pong counting thread_ring fork_join skynet:
+	$(ZIG) build -Doptimize=ReleaseFast
 
-counting: counting.zig
-	zig build -Doptimize=ReleaseFast
-	cp zig-out/bin/counting .
-
-thread_ring: thread_ring.zig
-	zig build -Doptimize=ReleaseFast
-	cp zig-out/bin/thread_ring .
-
-fork_join: fork_join.zig
-	zig build -Doptimize=ReleaseFast
-	cp zig-out/bin/fork_join .
-
-skynet: skynet.zig
-	zig build -Doptimize=ReleaseFast
-	cp zig-out/bin/skynet .
+# What the runner records with the results (run_benchmarks.ae).
+flags:
+	@echo "$(ZIG) build -Doptimize=ReleaseFast"
 
 clean:
-	rm -rf .zig-cache zig-out ping_pong counting thread_ring fork_join skynet *.o
+	rm -rf .zig-cache zig-out

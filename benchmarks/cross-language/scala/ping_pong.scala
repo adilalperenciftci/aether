@@ -15,6 +15,8 @@ object PingPongBenchmark {
     val toPong = new ArrayBlockingQueue[java.lang.Long](1)
     val toPing = new ArrayBlockingQueue[java.lang.Long](1)
     @volatile var errors = 0L
+    // The sum of the values ping got back, which the runner checks.
+    var checksum = 0L
 
     val start = System.nanoTime()
 
@@ -32,6 +34,7 @@ object PingPongBenchmark {
     while (i < messages) {
       toPong.put(java.lang.Long.valueOf(i))
       val back = toPing.take()
+      checksum += back.longValue()
       if (back.longValue() != i) errors += 1
       i += 1
     }
@@ -43,6 +46,7 @@ object PingPongBenchmark {
     val nsPerMsg = elapsed / messages
     val throughput = messages.toDouble / elapsed * 1e9
 
+    println(s"Checksum: $checksum")
     println(s"ns/msg:         $nsPerMsg")
     println(f"Throughput:     ${throughput / 1e6}%.2f M msg/sec")
   }

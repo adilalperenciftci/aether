@@ -13,7 +13,8 @@ object CountingBenchmark {
     println("Using java.util.concurrent.ArrayBlockingQueue\n")
 
     val queue = new ArrayBlockingQueue[java.lang.Long](1024)
-    var received = 0L
+    // The count the consumer reaches, the checksum; read after join().
+    val counted = new Array[Long](1)
 
     val start = System.nanoTime()
 
@@ -23,6 +24,7 @@ object CountingBenchmark {
         queue.take()
         seen += 1
       }
+      counted(0) = seen
     })
     consumer.start()
 
@@ -32,12 +34,13 @@ object CountingBenchmark {
       i += 1
     }
     consumer.join()
-    received = messages
+    val received = counted(0)
 
     val elapsed = System.nanoTime() - start
     val nsPerMsg = elapsed / received
     val throughput = received.toDouble / elapsed * 1e9
 
+    println(s"Checksum: $received")
     println(s"ns/msg:         $nsPerMsg")
     println(f"Throughput:     ${throughput / 1e6}%.2f M msg/sec")
   }

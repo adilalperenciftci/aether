@@ -36,6 +36,7 @@ start() ->
 
             NsPerMsg = ElapsedNs / Messages,
             MsgPerSec = Messages / ElapsedSec,
+            io:format("Checksum: ~p~n", [Count]),
             io:format("ns/msg:         ~.2f~n", [NsPerMsg]),
             io:format("Throughput:     ~.2f M msg/sec~n", [MsgPerSec / 1000000])
     after 60000 ->

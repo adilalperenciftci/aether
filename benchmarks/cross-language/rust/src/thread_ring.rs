@@ -12,16 +12,21 @@ fn get_messages() -> usize {
         .unwrap_or(100_000)
 }
 
-fn ring_node(rx: Receiver<usize>, next_tx: Sender<usize>, done_tx: Sender<usize>) {
+// Passes the token on until it reaches 0, then signals done. Returns how many
+// tokens it received: the receipts summed over the ring are the checksum.
+// The node that saw 0 returns at once, dropping its sender to the next node,
+// whose inbox then closes, and so on round the ring.
+fn ring_node(rx: Receiver<usize>, next_tx: Sender<usize>, done_tx: Sender<()>) -> usize {
     let mut received = 0;
     while let Ok(token) = rx.recv() {
         received += 1;
         if token == 0 {
-            done_tx.send(received).unwrap();
-            return;
+            done_tx.send(()).unwrap();
+            return received;
         }
         next_tx.send(token - 1).unwrap();
     }
+    received
 }
 
 fn main() {
@@ -57,26 +62,22 @@ fn main() {
     senders[0].send(num_hops).unwrap();
 
     // Wait for completion
-    let received = done_rx.recv().unwrap();
+    done_rx.recv().unwrap();
 
     let elapsed = start.elapsed().as_secs_f64();
 
-    // Cleanup - drop senders to unblock threads
+    // Cleanup - drop senders to unblock threads, and sum their receipts
     drop(senders);
+    let mut receipts = 0usize;
     for h in handles {
-        let _ = h.join();
+        receipts += h.join().unwrap();
     }
 
     let total_messages = num_hops + 1;
-    // Each node receives total_messages / ring_size messages
-    let expected_per_node = total_messages / RING_SIZE + 1;
-    if received < expected_per_node - 10 || received > expected_per_node + 10 {
-        println!("VALIDATION WARNING: expected ~{} per node, got {}", expected_per_node, received);
-    }
-
     let throughput = total_messages as f64 / elapsed / 1e6;
     let ns_per_msg = elapsed * 1e9 / total_messages as f64;
 
+    println!("Checksum: {}", receipts);
     println!("ns/msg:         {:.2}", ns_per_msg);
     println!("Throughput:     {:.2} M msg/sec", throughput);
 }

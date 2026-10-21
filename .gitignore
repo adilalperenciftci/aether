@@ -46,6 +46,7 @@ benchmarks/cross-language/pony/*/*
 benchmarks/cross-language/*/*.exe
 benchmarks/cross-language/*/*.beam
 benchmarks/cross-language/*/*.class
+benchmarks/cross-language/java/classes/
 erl_crash.dump
 benchmarks/cross-language/*/erl_crash.dump
 benchmarks/cross-language/**/*.dSYM/
@@ -69,6 +70,7 @@ benchmarks/cross-language/rust/Cargo.lock
 benchmarks/cross-language/scala/target/
 benchmarks/cross-language/scala/project/target/
 benchmarks/cross-language/scala/project/project/
+benchmarks/cross-language/scala/classpath.txt
 
 # Pony build artifacts
 benchmarks/cross-language/pony/pony

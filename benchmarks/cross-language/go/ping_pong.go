@@ -34,6 +34,7 @@ func main() {
 	chanB := make(chan int, 1)
 
 	var wg sync.WaitGroup
+	var checksum int64 // the sum of the values ping got back
 	wg.Add(2)
 
 	start := time.Now()
@@ -44,6 +45,7 @@ func main() {
 		for i := 0; i < MESSAGES; i++ {
 			chanA <- i
 			received := <-chanB
+			checksum += int64(received)
 			if received != i {
 				fmt.Fprintf(os.Stderr, "ERROR: Ping sent %d but got back %d\n", i, received)
 			}
@@ -69,6 +71,7 @@ func main() {
 	nsPerMsg := totalNs / float64(MESSAGES)
 	throughput := 1e9 / nsPerMsg
 
+	fmt.Printf("Checksum: %d\n", checksum)
 	fmt.Printf("ns/msg:         %.2f\n", nsPerMsg)
 	fmt.Printf("Throughput:     %.2f M msg/sec\n", throughput/1e6)
 }

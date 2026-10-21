@@ -30,8 +30,8 @@ start() ->
     % Signal workers to report
     [W ! {done, self()} || W <- Workers],
 
-    % Collect results
-    TotalProcessed = collect_results(?NUM_WORKERS, 0),
+    % Collect results: the messages and the sum of their values
+    {TotalProcessed, Checksum} = collect_results(?NUM_WORKERS, 0, 0),
 
     End = erlang:monotonic_time(nanosecond),
     ElapsedNs = End - Start,
@@ -45,6 +45,7 @@ start() ->
 
     NsPerMsg = ElapsedNs / Total,
     MsgPerSec = Total / ElapsedSec,
+    io:format("Checksum: ~p~n", [Checksum]),
     io:format("ns/msg:         ~.2f~n", [NsPerMsg]),
     io:format("Throughput:     ~.2f M msg/sec~n", [MsgPerSec / 1000000]),
 
@@ -61,12 +62,12 @@ worker(Processed, Sum, Parent) ->
         {work, Value} ->
             worker(Processed + 1, Sum + Value, Parent);
         {done, From} ->
-            From ! {result, Processed}
+            From ! {result, Processed, Sum}
     end.
 
-collect_results(0, Acc) -> Acc;
-collect_results(N, Acc) ->
+collect_results(0, Acc, SumAcc) -> {Acc, SumAcc};
+collect_results(N, Acc, SumAcc) ->
     receive
-        {result, Count} ->
-            collect_results(N - 1, Acc + Count)
+        {result, Count, Sum} ->
+            collect_results(N - 1, Acc + Count, SumAcc + Sum)
     end.

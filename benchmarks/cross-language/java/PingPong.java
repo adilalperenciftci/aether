@@ -12,6 +12,8 @@ public class PingPong {
     static class PingThread extends Thread {
         private final BlockingQueue<Integer> sendQueue;
         private final BlockingQueue<Integer> recvQueue;
+        // The sum of the values ping got back, which the runner checks.
+        long checksum = 0;
 
         public PingThread(BlockingQueue<Integer> send, BlockingQueue<Integer> recv) {
             this.sendQueue = send;
@@ -24,6 +26,7 @@ public class PingPong {
                 for (int i = 0; i < MESSAGES; i++) {
                     sendQueue.put(i);
                     int received = recvQueue.take();
+                    checksum += received;
                     // VALIDATE: Must receive echo of what we sent
                     if (received != i) {
                         System.err.println("ERROR: Ping sent " + i + " but got back " + received);
@@ -88,6 +91,7 @@ public class PingPong {
         double nsPerMsg = (double) totalNs / MESSAGES;
         double throughput = 1e9 / nsPerMsg;
 
+        System.out.println("Checksum: " + ping.checksum);
         System.out.printf("ns/msg:         %.2f\n", nsPerMsg);
         System.out.printf("Throughput:     %.2f M msg/sec\n", throughput / 1e6);
     }

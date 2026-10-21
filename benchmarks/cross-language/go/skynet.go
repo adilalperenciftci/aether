@@ -77,19 +77,14 @@ func main() {
 	elapsed := time.Since(start)
 
 	elapsedNs := elapsed.Nanoseconds()
-	elapsedUs := elapsedNs / 1000
+	if elapsedNs < 1 {
+		elapsedNs = 1
+	}
 
 	fmt.Printf("Sum: %d\n", sum)
-	if elapsedUs > 0 {
-		nsPerMsg := elapsedNs / rateBase
-		throughputM := rateBase / elapsedUs
-		leftover := rateBase - (throughputM * elapsedUs)
-		throughputFrac := (leftover * 100) / elapsedUs
-		fmt.Printf("ns/msg:         %d\n", nsPerMsg)
-		fmt.Printf("Throughput:     %d.", throughputM)
-		if throughputFrac < 10 {
-			fmt.Printf("0")
-		}
-		fmt.Printf("%d M msg/sec\n", throughputFrac)
-	}
+	fmt.Printf("Checksum: %d\n", sum)
+	// Always printed: a tree small enough to finish within a microsecond
+	// printed no rate at all, which the runner reads as a broken run.
+	fmt.Printf("ns/msg:         %d\n", elapsedNs/rateBase)
+	fmt.Printf("Throughput:     %.2f M msg/sec\n", float64(rateBase)*1000.0/float64(elapsedNs))
 }

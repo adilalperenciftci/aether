@@ -118,6 +118,10 @@ int main() {
     double throughput = total_messages / elapsed / 1e6;
     double ns_per_msg = elapsed * 1e9 / total_messages;
 
+    // The receipts summed over the ring, the checksum.
+    long long receipts = 0;
+    for (int i = 0; i < RING_SIZE; i++) receipts += nodes[i].getReceived();
+    std::cout << "Checksum: " << receipts << std::endl;
     std::cout << "ns/msg:         " << std::fixed << std::setprecision(2) << ns_per_msg << std::endl;
     std::cout << "Throughput:     " << std::setprecision(2) << throughput << " M msg/sec" << std::endl;
 

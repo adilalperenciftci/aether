@@ -127,6 +127,10 @@ int main(void) {
     double throughput = total_messages / elapsed / 1e6;
     double ns_per_msg = elapsed * 1e9 / total_messages;
 
+    /* The receipts summed over the ring, the checksum. */
+    long long receipts = 0;
+    for (int i = 0; i < RING_SIZE; i++) receipts += nodes[i].received;
+    printf("Checksum: %lld\n", receipts);
     printf("ns/msg:         %.2f\n", ns_per_msg);
     printf("Throughput:     %.2f M msg/sec\n", throughput);
 

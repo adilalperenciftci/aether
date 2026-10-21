@@ -74,20 +74,12 @@ fn main() {
     let sum = rx.recv().unwrap();
     let elapsed = start.elapsed();
 
-    let elapsed_ns = elapsed.as_nanos() as i64;
-    let elapsed_us = elapsed_ns / 1000;
+    let elapsed_ns = (elapsed.as_nanos() as i64).max(1);
 
     println!("Sum: {}", sum);
-    if elapsed_us > 0 {
-        let ns_per_msg = elapsed_ns / total_actors;
-        let throughput_m = total_actors / elapsed_us;
-        let leftover = total_actors - (throughput_m * elapsed_us);
-        let throughput_frac = (leftover * 100) / elapsed_us;
-        print!("ns/msg:         {}\n", ns_per_msg);
-        print!("Throughput:     {}.", throughput_m);
-        if throughput_frac < 10 {
-            print!("0");
-        }
-        println!("{} M msg/sec", throughput_frac);
-    }
+    println!("Checksum: {}", sum);
+    // Always printed: a tree small enough to finish within a microsecond
+    // printed no rate at all, which the runner reads as a broken run.
+    println!("ns/msg:         {}", elapsed_ns / total_actors);
+    println!("Throughput:     {:.2} M msg/sec", total_actors as f64 * 1000.0 / elapsed_ns as f64);
 }

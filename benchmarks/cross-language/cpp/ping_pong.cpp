@@ -35,6 +35,9 @@ struct Channel {
 
 Channel chan_a, chan_b;
 
+// The sum of the values ping got back, which the runner checks.
+static long long checksum = 0;
+
 void ping_thread() {
     for (int i = 0; i < MESSAGES; i++) {
         // Send to A
@@ -53,6 +56,7 @@ void ping_thread() {
             received_value = chan_b.value;
             chan_b.ready = false;
         }
+        checksum += received_value;
 
         // VALIDATE: Must receive echo of what we sent
         if (received_value != i) {
@@ -143,6 +147,7 @@ int main() {
     double throughput = MESSAGES / elapsed / 1e6;
     double ns_per_msg = elapsed * 1e9 / MESSAGES;
 
+    std::cout << "Checksum: " << checksum << std::endl;
     std::cout << "ns/msg:         " << std::fixed << std::setprecision(2) << ns_per_msg << std::endl;
     std::cout << "Throughput:     " << std::fixed << std::setprecision(2) << throughput << " M msg/sec" << std::endl;
 

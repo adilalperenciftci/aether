@@ -8,6 +8,7 @@
  */
 
 #include <iostream>
+#include <iomanip>
 #include <thread>
 #include <mutex>
 #include <condition_variable>
@@ -97,18 +98,14 @@ int main() {
     auto end = std::chrono::high_resolution_clock::now();
 
     long long elapsed_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(end - start).count();
-    long long elapsed_us = elapsed_ns / 1000;
+    if (elapsed_ns < 1) elapsed_ns = 1;
 
     std::cout << "Sum: " << root.value << std::endl;
-    if (elapsed_us > 0) {
-        long long ns_per_msg = elapsed_ns / total_actors;
-        long long throughput_m = total_actors / elapsed_us;
-        long long leftover = total_actors - (throughput_m * elapsed_us);
-        long long throughput_frac = (leftover * 100) / elapsed_us;
-        std::cout << "ns/msg:         " << ns_per_msg << std::endl;
-        std::cout << "Throughput:     " << throughput_m << ".";
-        if (throughput_frac < 10) std::cout << "0";
-        std::cout << throughput_frac << " M msg/sec" << std::endl;
-    }
+    std::cout << "Checksum: " << root.value << std::endl;
+    // Always printed: a tree small enough to finish within a microsecond
+    // printed no rate at all, which the runner reads as a broken run.
+    std::cout << "ns/msg:         " << elapsed_ns / total_actors << std::endl;
+    std::cout << "Throughput:     " << std::fixed << std::setprecision(2)
+              << total_actors * 1000.0 / elapsed_ns << " M msg/sec" << std::endl;
     return 0;
 }

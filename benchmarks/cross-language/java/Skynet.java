@@ -68,6 +68,7 @@ public class Skynet {
         System.out.println("Leaves: " + numLeaves + ", concurrency units: " + totalNodes
                 + " (sequential below " + SEQ_THRESHOLD + ")");
         System.out.println("Sum: " + result);
+        System.out.println("Checksum: " + result);
 
         if (elapsed > 0) {
             long nsPerMsg = elapsed / totalNodes;

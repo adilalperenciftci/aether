@@ -16,6 +16,7 @@ public class ForkJoin {
         private final BlockingQueue<Integer> inbox;
         private final CountDownLatch done;
         private int processed = 0;
+        private long sum = 0;   // the values this worker received
 
         Worker(CountDownLatch done) {
             this.inbox = new ArrayBlockingQueue<>(1024);
@@ -35,11 +36,16 @@ public class ForkJoin {
                         done.countDown();
                         return;
                     }
+                    sum += msg;
                     processed++;
                 }
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
             }
+        }
+
+        long getSum() {
+            return sum;
         }
 
         int getProcessed() {
@@ -83,8 +89,10 @@ public class ForkJoin {
 
         // Collect results
         int totalProcessed = 0;
+        long checksum = 0;
         for (int i = 0; i < NUM_WORKERS; i++) {
             totalProcessed += workers[i].getProcessed();
+            checksum += workers[i].getSum();
         }
 
         if (totalProcessed != total) {
@@ -94,6 +102,7 @@ public class ForkJoin {
         double throughput = total / elapsedSec / 1e6;
         double nsPerMsg = elapsedSec * 1e9 / total;
 
+        System.out.println("Checksum: " + checksum);
         System.out.printf("ns/msg:         %.2f%n", nsPerMsg);
         System.out.printf("Throughput:     %.2f M msg/sec%n", throughput);
     }

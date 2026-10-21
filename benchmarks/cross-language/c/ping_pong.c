@@ -19,6 +19,9 @@ typedef struct {
 
 Channel *chan_a, *chan_b;
 
+/* The sum of the values ping got back, which the runner checks. */
+static long long checksum = 0;
+
 void* ping_thread(void* arg) {
     for (int i = 0; i < MESSAGES; i++) {
         // Send to A
@@ -36,6 +39,7 @@ void* ping_thread(void* arg) {
         int received_value = chan_b->value;
         chan_b->ready = 0;
         pthread_mutex_unlock(&chan_b->mutex);
+        checksum += received_value;
 
         // VALIDATE: Must receive echo of what we sent
         if (received_value != i) {
@@ -108,6 +112,7 @@ int main(void) {
     double throughput = MESSAGES / elapsed_sec;
     double ns_per_msg = elapsed_sec * 1e9 / MESSAGES;
 
+    printf("Checksum: %lld\n", checksum);
     printf("ns/msg:         %.2f\n", ns_per_msg);
     printf("Throughput:     %.2f M msg/sec\n", throughput / 1e6);
 

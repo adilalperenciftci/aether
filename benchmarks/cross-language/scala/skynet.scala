@@ -51,6 +51,7 @@ object SkynetBenchmark {
     val elapsed = System.nanoTime() - start
 
     println(s"Sum: $result")
+    println(s"Checksum: $result")
     val nsPerMsg = elapsed / units
     val throughput = units.toDouble / elapsed * 1e9
 
