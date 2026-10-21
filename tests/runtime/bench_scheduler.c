@@ -48,26 +48,15 @@ typedef struct {
     long total_latency_us;
 } BenchActor;
 
+// One message per call, the step contract (docs/c-embedding.md): the
+// scheduler counts every call as one message processed.
 void bench_actor_step(BenchActor* self) {
     Message msg;
-    int batch_count = 0;
-    
-    while (mailbox_receive(&self->mailbox, &msg)) {
+    if (mailbox_receive(&self->mailbox, &msg)) {
         self->count_local++;  // Plain increment — avoids the atomic-RMW cost on the hot path
-        batch_count++;
-        
-        // Publish every 64 messages for cross-thread visibility
-        if (batch_count >= 64) {
-            atomic_store(&self->count_visible, self->count_local);
-            batch_count = 0;
-        }
+        // Published with a plain store, not a read-modify-write.
+        atomic_store_explicit(&self->count_visible, self->count_local, memory_order_release);
     }
-    
-    // Final publish
-    if (batch_count > 0) {
-        atomic_store(&self->count_visible, self->count_local);
-    }
-    
     atomic_store_explicit(&self->active, (self->mailbox.count > 0), memory_order_relaxed);
 }
 

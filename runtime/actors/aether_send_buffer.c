@@ -60,7 +60,11 @@ void send_buffer_flush(void) {
     }
     
     // Slow path: cross-core batch enqueue (KEY OPTIMIZATION)
-    // Batch all messages to same actor in ONE atomic operation
+    // Batch all messages to same actor in ONE atomic operation. Counted in
+    // flight before the actor's core is read again (#3090, #3093), so it
+    // stays on the core they are routed to until they reach its mailbox.
+    inflight_enter(actor, g_send_buffer.count);
+    target_core = atomic_load_explicit(&actor->assigned_core, memory_order_acquire);
     void* actors[SEND_BUFFER_SIZE];
     for (int i = 0; i < g_send_buffer.count; i++) {
         actors[i] = actor;  // All messages to same actor
@@ -75,7 +79,9 @@ void send_buffer_flush(void) {
         atomic_fetch_add(&schedulers[target_core].work_count, g_send_buffer.count);
         g_send_buffer.count = 0;
     } else {
-        // Queue full - fall back to individual sends with backoff
+        // Queue full - fall back to individual sends with backoff, which
+        // count each message themselves
+        inflight_leave(actor, g_send_buffer.count);
         for (int i = 0; i < g_send_buffer.count; i++) {
             scheduler_send_remote(actor, g_send_buffer.buffer[i], g_send_buffer.core_id);
         }

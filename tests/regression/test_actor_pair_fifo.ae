@@ -1,0 +1,111 @@
+// #3090: the messages one actor sends another arrive in the order it sent
+// them (tutorial.md: "Message ordering is guaranteed within a single
+// actor"), while the target moves between cores.
+//
+// Eight senders, spread over the cores, each stream numbered messages to
+// four targets at once. A target busy with messages when a send from
+// another core reaches it is moved to that core (message-driven
+// migration), and its messages still queued on the old core are forwarded
+// after it; a sender's later message, sent to the new core directly, could
+// overtake an earlier one still on its way. Each target checks that every
+// sender's numbers arrive one after another.
+
+message Go { rounds: int }
+message Msg { from: int, seq: int }
+
+actor Target {
+    state int[8] next
+    state long out_of_order = 0
+    state long received = 0
+
+    receive {
+        Msg(from, seq) -> {
+            if seq != next[from] {
+                out_of_order = out_of_order + 1
+            }
+            next[from] = seq + 1
+            received = received + 1
+        }
+    }
+}
+
+actor Sender {
+    state who = 0
+    state t0 = 0
+    state t1 = 0
+    state t2 = 0
+    state t3 = 0
+    state seq = 0
+
+    receive {
+        Go(rounds) -> {
+            i = 0
+            while i < rounds {
+                t0 ! Msg { from: who, seq: seq }
+                t1 ! Msg { from: who, seq: seq }
+                t2 ! Msg { from: who, seq: seq }
+                t3 ! Msg { from: who, seq: seq }
+                seq = seq + 1
+                i = i + 1
+            }
+        }
+    }
+}
+
+main() {
+    println("=== per-pair message order under migration (#3090) ===")
+
+    t0 = spawn(Target())
+    t1 = spawn(Target())
+    t2 = spawn(Target())
+    t3 = spawn(Target())
+    s0 = spawn(Sender())
+    s1 = spawn(Sender())
+    s2 = spawn(Sender())
+    s3 = spawn(Sender())
+    s4 = spawn(Sender())
+    s5 = spawn(Sender())
+    s6 = spawn(Sender())
+    s7 = spawn(Sender())
+    senders = [s0, s1, s2, s3, s4, s5, s6, s7]
+
+    i = 0
+    while i < 8 {
+        s = senders[i]
+        s.who = i
+        s.t0 = t0
+        s.t1 = t1
+        s.t2 = t2
+        s.t3 = t3
+        i = i + 1
+    }
+
+    // Waves, so the targets idle, move and fill up again more than once.
+    rounds = 20000
+    waves = 5
+    w = 0
+    while w < waves {
+        // Each wave continues every stream from where the last one ended.
+        i = 0
+        while i < 8 {
+            senders[i] ! Go { rounds: rounds }
+            i = i + 1
+        }
+        wait_for_idle()
+        w = w + 1
+    }
+
+    long received = t0.received + t1.received + t2.received + t3.received
+    long out_of_order = t0.out_of_order + t1.out_of_order + t2.out_of_order + t3.out_of_order
+    long expected = 8 * 4 * rounds * waves
+    println("received ${received} of ${expected}, out of order ${out_of_order}")
+    if received != expected || out_of_order != 0 {
+        println("  FAIL messages were lost or arrived out of order")
+        println("")
+        println("1 FAILURE(S)")
+        return 1
+    }
+    println("  PASS every sender's messages arrived in order")
+    println("")
+    println("All PASS")
+}

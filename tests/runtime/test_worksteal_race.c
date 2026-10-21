@@ -28,7 +28,7 @@ typedef struct {
 
 static void wsteal_step(WStealActor* self) {
     Message msg;
-    while (mailbox_receive(&self->mailbox, &msg)) {
+    if (mailbox_receive(&self->mailbox, &msg)) {  // one per call (c-embedding.md)
         atomic_fetch_add(&self->count, 1);
     }
     atomic_store_explicit(&self->active, (self->mailbox.count > 0), memory_order_relaxed);
