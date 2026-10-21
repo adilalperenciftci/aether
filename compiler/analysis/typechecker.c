@@ -5410,6 +5410,21 @@ static int is_borrowed_view_source(const ASTNode* e) {
            e->children[0]->type != AST_PTR_AS_ARRAY_CAST;
 }
 
+/* #3071: an array literal going into a place whose elements are a sum (a
+ * typed declaration `let xs: Shape[2] = [c, q]`, an argument, a written
+ * result, a struct field, a store) takes the place's element type before it
+ * is checked: each element is then checked as a value of the sum (one of its
+ * variants), and codegen wraps each variant as the sum. Left to its own
+ * elements, the literal was an array of its first one's type, `Circle`, and
+ * a `Square` beside it was refused. */
+static void sum_place_to_array_literal(ASTNode* value, Type* place) {
+    if (!value || value->type != AST_ARRAY_LITERAL || value->child_count == 0 || !place ||
+        place->kind != TYPE_ARRAY || !place->element_type ||
+        place->element_type->kind != TYPE_SUM)
+        return;
+    set_node_type(value, create_array_type(clone_type(place->element_type), value->child_count));
+}
+
 /* #3072: `free` of what the checker can see owns nothing (R1, R2): a
  * read-only view of a string's bytes, a view of another slice's or an
  * array's elements, a local bound once to either, or an array `T[N]`, which
@@ -12725,6 +12740,19 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                     }
                     if (slot && slot->kind == TYPE_SUM) set_node_type(init, clone_type(slot));
                 }
+                /* #3071: so does an array literal into an array of a sum, the
+                 * local's annotation or an existing local's own type. */
+                if (init->type == AST_ARRAY_LITERAL) {
+                    Type* slot = (!stmt->type_inferred && stmt->node_type &&
+                                  stmt->node_type->kind != TYPE_UNKNOWN) ? stmt->node_type : NULL;
+                    if (!slot && stmt->value) {
+                        Symbol* ex = lookup_symbol(table, stmt->value);
+                        if (ex && !ex->is_function && !ex->hoist_pending && ex->type &&
+                            ex->type->kind != TYPE_UNKNOWN)
+                            slot = ex->type;
+                    }
+                    sum_place_to_array_literal(init, slot);
+                }
                 // Match-as-expression: typecheck as statement, then use its type
                 if (init->type == AST_MATCH_STATEMENT) {
                     tc_push_value_match(init);   /* #2768 */
@@ -13495,6 +13523,7 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                 // #1044 implicit enum selector: `d = Blue` where `d` has an enum
                 // type resolves the bare member against that enum.
                 coerce_bare_enum_member(right, symbol->type, table);
+                sum_place_to_array_literal(right, symbol->type);   /* #3071 */
 
                 Type* right_type = infer_type(right, table);
                 /* #1286: a `T[N]` array or `null` into a `T[]` binding. */
@@ -14689,6 +14718,10 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                     (stmt->children[i]->type == AST_MATCH_STATEMENT ||
                      stmt->children[i]->type == AST_IF_EXPRESSION))
                     set_node_type(stmt->children[i], clone_type(g_tc_return_type));
+                /* #3071: an array literal into a written array-of-sum result. */
+                if (stmt->child_count == 1 && g_tc_return_owner &&
+                    g_tc_return_owner->type != AST_CLOSURE && !g_tc_return_owner->type_inferred)
+                    sum_place_to_array_literal(stmt->children[i], g_tc_return_type);
                 if (stmt->children[i] && stmt->children[i]->type == AST_MATCH_STATEMENT) {
                     tc_push_value_match(stmt->children[i]);   /* #2768 */
                     typecheck_node(stmt->children[i], table);
@@ -15989,6 +16022,13 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
             for (int i = 0; i < expr->child_count; i++) {
                 ASTNode* field_init = expr->children[i];
                 if (field_init && field_init->type == AST_ASSIGNMENT && field_init->child_count > 0) {
+                    /* #3071: an array literal into an array-of-sum field. */
+                    for (int f = 0; sdef && field_init->value && f < sdef->child_count; f++) {
+                        ASTNode* fd = sdef->children[f];
+                        if (fd && fd->type == AST_STRUCT_FIELD && fd->value &&
+                            strcmp(fd->value, field_init->value) == 0)
+                            sum_place_to_array_literal(field_init->children[0], fd->node_type);
+                    }
                     typecheck_expression(field_init->children[0], table);
                     if (refuse_valueless(field_init->children[0], table, "store")) {
                         fields_ok = 0;
@@ -16710,6 +16750,13 @@ int typecheck_binary_expression(ASTNode* expr, SymbolTable* table) {
     }
 
     typecheck_expression(left, table);
+    /* #3071: an array literal stored into an array of a sum (`s.shapes =
+     * [c, q]`) takes the place's type before it is checked. */
+    if (expr->value && strcmp(expr->value, "=") == 0 && right->type == AST_ARRAY_LITERAL) {
+        Type* lt = infer_type(left, table);
+        sum_place_to_array_literal(right, lt);
+        if (lt) free_type(lt);
+    }
     typecheck_expression(right, table);
 
     /* A store or an operand of what gives no value (`p.x = g()`, `n + g()`
@@ -19592,6 +19639,7 @@ static int typecheck_function_call_inner(ASTNode* call, SymbolTable* table) {
             if (p->node_type && p->node_type->kind == TYPE_ENUM)
                 coerce_bare_enum_member(call->children[aslot], p->node_type, table);
             adopt_closure_signature(call->children[aslot], p->node_type);
+            sum_place_to_array_literal(call->children[aslot], p->node_type);   /* #3071 */
         }
     }
 

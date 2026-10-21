@@ -7184,18 +7184,18 @@ static Type* fresh_composite_arg_type(CodeGenerator* gen, ASTNode* arg, Type* t)
     return t;
 }
 
-/* An array literal of owning elements passed as an argument is a temporary
- * of the statement, as a call's array result is: filled, each element
- * taken, and dropped when its block is done. So is an `if` giving arrays
- * (#3006), which C cannot choose between as values: the temporary is
- * filled from the branch taken, and dropped when it owns. */
+/* An array literal passed as an argument is a temporary of the statement,
+ * as a call's array result is: filled, each element taken (a variant
+ * wrapped as its sum, #3071), and dropped when its block is done if it
+ * owns. C has no array value to pass otherwise: one of plain elements was
+ * emitted as a bare `{3, 4}`, which C refused (#3071). So is an `if` giving
+ * arrays (#3006): the temporary is filled from the branch taken. */
 static int array_literal_arg_temp(CodeGenerator* gen, ASTNode* arg) {
     int branches = arg->type == AST_IF_EXPRESSION && arg->child_count >= 3;
     if ((arg->type != AST_ARRAY_LITERAL && !branches) || !type_is_sized_array(arg->node_type) ||
         !hoist_ready(gen)) return 0;
     Type* at = arg->node_type;
     int owns = own_type_owns(gen, at);
-    if (!owns && !branches) return 0;
     static int alt_seq = 0;
     const char* t = cg_internf("_ae_alt%d", alt_seq++);
     hoist_append_text(gen, cg_internf("%s = {0}; ", c_member_decl(at, t)));
@@ -11381,6 +11381,10 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                  * as a struct field init is, so the array's elements are
                  * values of their own. */
                 ASTNode* el = expr->children[i];
+                /* #3071: in an array of a sum, a variant is wrapped as it. */
+                Type* at = expr->node_type;
+                if (at && at->kind == TYPE_ARRAY && emit_sum_element(gen, el, at->element_type))
+                    continue;
                 const char* el_struct = struct_owning_strings(gen, el ? el->node_type : NULL);
                 if (el_struct && struct_take_shape(el)) emit_struct_take(gen, el, el_struct, NULL);
                 else generate_expression(gen, el);

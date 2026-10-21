@@ -324,7 +324,7 @@ main() {
 7 0
 ```
 
-**An array literal's element type is the join of its elements.** `[1, 2.5, 3]` and `[0.18 * math.PI, 0.25 * math.PI]` are `float` arrays; an all-integer literal is `int`, widening to `long` if any element needs it. The type is decided after every element is typed, so a module constant or a call in any position counts. A literal of another type is an array of its first element's type, and `null` and `none` have no type of their own: `[null, s]` is an array of `s`'s type, its `null` the null string, pointer or empty closure as in any slot of that type, and `[none, x]` an array of `x`'s optional type. Every element must fit the element type: `[1, "x"]`, or `[p, null]` with `p` a struct, is a compile error naming the element. Arrays are one-dimensional: an array literal cannot contain an array literal (use a flat `T[rows * cols]` indexed as `row * cols + col`, or a list of arrays).
+**An array literal's element type is the join of its elements.** `[1, 2.5, 3]` and `[0.18 * math.PI, 0.25 * math.PI]` are `float` arrays; an all-integer literal is `int`, widening to `long` if any element needs it. The type is decided after every element is typed, so a module constant or a call in any position counts. A literal of another type is an array of its first element's type, or, in a place that is an array of a sum, of that sum, each variant wrapped ([Constructing, implicit wrap](#constructing-implicit-wrap)); `null` and `none` have no type of their own: `[null, s]` is an array of `s`'s type, its `null` the null string, pointer or empty closure as in any slot of that type, and `[none, x]` an array of `x`'s optional type. Every element must fit the element type: `[1, "x"]`, or `[p, null]` with `p` a struct, is a compile error naming the element. Arrays are one-dimensional: an array literal cannot contain an array literal (use a flat `T[rows * cols]` indexed as `row * cols + col`, or a list of arrays).
 
 ```aether,run
 import std.math (math_pi)
@@ -2675,12 +2675,18 @@ parameters, return values, and call arguments (a closure's too, `call(f,
 Circle { ... })`), a struct field of the sum's type (`Holder { sh: Circle {
 r: 1.0 } }`, `h.sh = Rect { ... }`), a branch of an if expression beside a
 `Shape`, and as the default of `??` over a `Shape?`; into the sum's optional
-(`Shape?`) the variant is wrapped into the sum first:
+(`Shape?`) the variant is wrapped into the sum first. So is each element of
+an array literal whose place is an array of the sum: a `let` with that type,
+an argument, a written result, a struct field, or a store into such an array
+(`let xs: Shape[2] = [c, r]`, `draw_all([c, r])`). Without such a place the
+literal is an array of its first element's type, and a second variant beside
+it is refused:
 
 ```aether,fragment
 let s: Shape = Circle { r: 2.0 }      // Circle wraps into Shape
 draw(Rect { w: 3.0, h: 4.0 })         // wraps at the argument
 make() -> Shape { return Empty {} }   // wraps at the return
+let all: Shape[2] = [Circle { r: 1.0 }, Empty {}]   // each element wraps
 ```
 
 ### Matching, narrowing + exhaustiveness

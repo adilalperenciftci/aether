@@ -222,6 +222,23 @@ main() {
 AE
 expect_error "$tmp/elem_none_int.ae" "array literal element 2 is \`none\`, which an array of 'int' cannot hold" "none in an int array literal was not refused"
 
+# #3071: a place's array of a sum reaches the literal before it is checked,
+# so a struct that is no variant of it is refused naming the sum (it named
+# the first element's type, which the place did not say).
+cat > "$tmp/elem_not_variant.ae" <<'AE'
+struct Circle { r: int }
+struct Square { side: int }
+struct Other { z: int }
+type Shape = Circle | Square
+main() {
+    c = Circle { r: 1 }
+    o = Other { z: 1 }
+    let xs: Shape[2] = [ c, o ]
+    println("${xs.len}")
+}
+AE
+expect_error "$tmp/elem_not_variant.ae" "array literal element 2 is 'Other', which an array of 'Shape' cannot hold" "a struct that is no variant in an array of a sum was not refused naming the sum"
+
 # The explicit forms stay legal: an annotated int slot narrows on purpose.
 cat > "$tmp/explicit.ae" <<'AE'
 main() {
