@@ -20,11 +20,11 @@
  * ru_maxrss; Valgrind/ASan-LSan are its precise gate. macOS also has
  * the deterministic `leaks(1)` gate — see tests/run_macos_leaks.sh.) */
 #if defined(_WIN32) || defined(__MINGW32__) || defined(__MINGW64__)
-long getrusage_max_rss_kb(void) { return -1; }
+int getrusage_max_rss_kb(void) { return -1; }
 #elif defined(__APPLE__) || defined(__MACH__)
 #include <mach/mach.h>
 #include <malloc/malloc.h>
-long getrusage_max_rss_kb(void) {
+int getrusage_max_rss_kb(void) {
     /* Return malloc-zone-cached free pages to the OS so resident_size
      * measures the live set, not the allocator's high-water cache. */
     malloc_zone_pressure_relief(malloc_default_zone(), 0);
@@ -34,13 +34,13 @@ long getrusage_max_rss_kb(void) {
                   (task_info_t)&info, &count) != KERN_SUCCESS) {
         return -1;
     }
-    return (long)(info.resident_size / 1024);  /* bytes → KB */
+    return (int)(info.resident_size / 1024);  /* bytes → KB */
 }
 #else
 #include <sys/resource.h>
-long getrusage_max_rss_kb(void) {
+int getrusage_max_rss_kb(void) {
     struct rusage r;
     if (getrusage(RUSAGE_SELF, &r) != 0) return -1;
-    return r.ru_maxrss;  /* already KB on Linux/BSD */
+    return (int)r.ru_maxrss;  /* already KB on Linux/BSD */
 }
 #endif

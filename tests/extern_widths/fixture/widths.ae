@@ -1,0 +1,41 @@
+// The Aether side of the extern-width self-test (tests/extern_widths/check.ae,
+// #3097). Never built: the check only reads it. widths.c defines these;
+// `make check-extern-widths` expects exactly 11 mismatches here.
+
+// Agree with their C definitions.
+extern ew_ok_long(v: long) -> long
+extern ew_ok_size(n: long) -> long
+extern ew_ok_bool(flag: bool) -> bool
+extern ew_ok_double(x: float) -> float
+extern ew_ok_string(s: string) -> string
+extern ew_ok_ptr(p: ptr) -> ptr
+extern ew_ok_ignored_result(v: int)
+extern ew_ok_variadic(fmt: string, a: int, b: long) -> int
+extern ew_ok_multiline(a: ptr,
+    b: long,
+    c: string) -> int
+extern ew_ok_from_macro() -> int
+extern ew_ok_after_macro(v: int) -> int
+
+// Disagree with their C definitions, one mismatch each.
+extern ew_bad_long_result() -> long
+extern ew_bad_long_param(v: long)
+extern ew_bad_int_to_int64(v: int)
+extern ew_bad_int_to_size(n: int)
+extern ew_bad_float(x: float) -> float
+extern ew_bad_pointer_as_int() -> int
+extern ew_bad_arity(a: int) -> int
+extern ew_bad_void_result(v: int) -> int
+extern ew_bad_unsigned_long() -> long
+@extern("ew_bad_aliased") ew_alias(v: int) -> int
+
+// Two C definitions, the second disagreeing: one mismatch.
+extern ew_bad_second_branch(v: int) -> int
+
+// The header owns the prototype: not checked.
+extern ew_skipped_c_import(v: long) -> long @c_import
+
+// No C definition here (libc): not checked.
+extern strlen(s: string) -> long
+
+// extern ew_bad_in_a_comment(v: long) -> long

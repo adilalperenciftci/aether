@@ -60,7 +60,7 @@ char* aether_casper_resolve(void* netchan, const char* hostname);
 
 // Look up `username` via the pwd service channel. Returns the numeric
 // uid, or -1 if the user is not found / on error.
-long aether_casper_pwd_uid(void* pwdchan, const char* username);
+int aether_casper_pwd_uid(void* pwdchan, const char* username);
 
 // Look up `username`'s home directory via the pwd service channel.
 // Returns a heap string, or NULL on failure.

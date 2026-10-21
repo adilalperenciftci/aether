@@ -24,7 +24,7 @@
 
 #if defined(_WIN32) || defined(__MINGW32__) || defined(__MINGW64__)
 
-long getrusage_max_rss_kb(void) {
+int getrusage_max_rss_kb(void) {
     /* Sentinel: probe will skip the bench-growth assertion. */
     return -1;
 }
@@ -33,14 +33,14 @@ long getrusage_max_rss_kb(void) {
 
 #include <mach/mach.h>
 
-long getrusage_max_rss_kb(void) {
+int getrusage_max_rss_kb(void) {
     mach_task_basic_info_data_t info;
     mach_msg_type_number_t count = MACH_TASK_BASIC_INFO_COUNT;
     if (task_info(mach_task_self(), MACH_TASK_BASIC_INFO,
                   (task_info_t)&info, &count) != KERN_SUCCESS) {
         return -1;
     }
-    return (long)(info.resident_size / 1024);  /* bytes -> KB */
+    return (int)(info.resident_size / 1024);  /* bytes -> KB */
 }
 
 #else  /* Linux / other POSIX with /proc */
@@ -48,7 +48,7 @@ long getrusage_max_rss_kb(void) {
 #include <stdio.h>
 #include <unistd.h>
 
-long getrusage_max_rss_kb(void) {
+int getrusage_max_rss_kb(void) {
     FILE* f = fopen("/proc/self/statm", "r");
     if (!f) return -1;
     long total_pages = 0, resident_pages = 0;
@@ -58,7 +58,7 @@ long getrusage_max_rss_kb(void) {
     }
     fclose(f);
     long page_kb = sysconf(_SC_PAGESIZE) / 1024;
-    return resident_pages * page_kb;
+    return (int)(resident_pages * page_kb);
 }
 
 #endif

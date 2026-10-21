@@ -25,7 +25,7 @@ exports (
 )
 
 @extern("duktape_run_sandboxed") js_run_sandboxed(perms: sandbox.Grants, code: string) -> int
-@extern("duktape_run_sandboxed_with_map") js_run_sandboxed_with_map(perms: sandbox.Grants, code: string, map_token: int) -> int
+@extern("duktape_run_sandboxed_with_map") js_run_sandboxed_with_map(perms: sandbox.Grants, code: string, map_token: long) -> int
 @extern("duktape_run") js_run(code: string) -> int
 @extern("duktape_init") js_init() -> int
 @extern("duktape_finalize") js_finalize()

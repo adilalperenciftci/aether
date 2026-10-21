@@ -15,6 +15,8 @@
 #ifndef AETHER_OBSERVE_H
 #define AETHER_OBSERVE_H
 
+#include <stdint.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -33,18 +35,18 @@ typedef struct { void (*fn)(void); void* env; } AetherObserverClosure;
  * memory ran out. The closure environment is owned by the runtime from this
  * call on: released by aether_unobserve / aether_unobserve_all, or at once
  * when the registration is refused. */
-long aether_observe(void* obj, AetherObserverClosure cb);
+int64_t aether_observe(void* obj, AetherObserverClosure cb);
 
 /* As aether_observe, for an observer that also takes the changed field: it
  * is invoked as `fn(env, obj, field)`, with `field` the stored field's index
  * in declaration order (0 for the first), or AETHER_OBSERVE_ANY_FIELD when
  * the notification did not name one (#2299). */
-long aether_observe_fields(void* obj, AetherObserverClosure cb);
+int64_t aether_observe_fields(void* obj, AetherObserverClosure cb);
 
 /* Remove the registration `token` made on `obj`. Returns 1 when it was
  * found and removed, 0 otherwise. Safe to call from inside the observer
  * being removed: the environment is released once the current pass ends. */
-int aether_unobserve(void* obj, long token);
+int aether_unobserve(void* obj, int64_t token);
 
 /* Remove every observer of `obj` (for an object about to be freed). Returns
  * the number removed. */

@@ -24,7 +24,7 @@ exports (
 // Run Python code string within a sandbox
 // Returns: 0 on success, -1 on error
 extern python_run_sandboxed(perms: sandbox.Grants, code: string) -> int
-extern python_run_sandboxed_with_map(perms: sandbox.Grants, code: string, map_token: int) -> int
+extern python_run_sandboxed_with_map(perms: sandbox.Grants, code: string, map_token: long) -> int
 
 // Run Python code string without sandbox (full access)
 // Returns: 0 on success, -1 on error

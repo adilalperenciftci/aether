@@ -54,5 +54,5 @@ extern go_run(binary_path: string) -> int
 extern go_run_script(script_path: string) -> int
 
 // Shared-map variants for typed input/output exchange.
-extern go_run_sandboxed_with_map(perms: sandbox.Grants, binary_path: string, map_token: int) -> int
-extern go_run_script_sandboxed_with_map(perms: sandbox.Grants, script_path: string, map_token: int) -> int
+extern go_run_sandboxed_with_map(perms: sandbox.Grants, binary_path: string, map_token: long) -> int
+extern go_run_script_sandboxed_with_map(perms: sandbox.Grants, script_path: string, map_token: long) -> int

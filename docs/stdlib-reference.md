@@ -3866,8 +3866,8 @@ main() {
 - `arena.alloc_aligned(arena, bytes, alignment)` → `ptr` - Same as `alloc` with explicit alignment (must be a power of 2).
 - `arena.reset(arena)` - Free every allocation in one shot. Pointers become invalid.
 - `arena.destroy(arena)` - Free the arena and its memory.
-- `arena.used(arena)` → `int` - Bytes currently allocated (sum across overflow blocks).
-- `arena.size(arena)` → `int` - Total capacity (sum across overflow blocks).
+- `arena.used(arena)` → `long` - Bytes currently allocated (sum across overflow blocks).
+- `arena.size(arena)` → `long` - Total capacity (sum across overflow blocks).
 
 Arenas don't track AetherString refcounts, strings allocated through the regular stdlib still need `release()` (or `defer release(...)`); the arena is for bulk raw allocations that the user controls themselves. Avoid handing arena-allocated pointers to functions that retain them past the next `arena.reset()` or `arena.destroy()`.
 

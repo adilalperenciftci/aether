@@ -25,7 +25,7 @@ exports (
 )
 
 extern duktape_run_sandboxed(perms: sandbox.Grants, code: string) -> int
-extern duktape_run_sandboxed_with_map(perms: sandbox.Grants, code: string, map_token: int) -> int
+extern duktape_run_sandboxed_with_map(perms: sandbox.Grants, code: string, map_token: long) -> int
 extern duktape_run(code: string) -> int
 extern duktape_init() -> int
 extern duktape_finalize()
