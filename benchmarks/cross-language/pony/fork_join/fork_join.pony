@@ -53,6 +53,10 @@ actor Main
     _env.out.print("=== Pony Fork-Join Throughput Benchmark ===")
     _env.out.print("Workers: " + _num_workers.string() + ", Messages: " + _total_messages.string() + "\n")
 
+    // The clock starts before the workers exist, as in every language here
+    // (FAIRNESS.md, rule 5).
+    _start = Time.nanos()
+
     // Create workers
     let workers = Array[Worker](_num_workers)
     var i: USize = 0
@@ -60,8 +64,6 @@ actor Main
       workers.push(Worker(i, this, messages_per_worker))
       i = i + 1
     end
-
-    _start = Time.nanos()
 
     // Send messages round-robin
     var msg: U64 = 0

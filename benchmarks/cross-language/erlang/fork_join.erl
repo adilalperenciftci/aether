@@ -18,11 +18,13 @@ start() ->
 
     Parent = self(),
 
+    % The clock starts before the workers exist, as in every language here
+    % (FAIRNESS.md, rule 5).
+    Start = erlang:monotonic_time(nanosecond),
+
     % Create workers
     Workers = [spawn(fun() -> worker(0, 0, Parent) end) || _ <- lists:seq(1, ?NUM_WORKERS)],
     WorkerArray = list_to_tuple(Workers),
-
-    Start = erlang:monotonic_time(nanosecond),
 
     % Send messages round-robin
     send_work(WorkerArray, 0, Total),

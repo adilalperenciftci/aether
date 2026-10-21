@@ -60,6 +60,10 @@ actor Main
     _env.out.print("=== Pony Thread Ring Benchmark ===")
     _env.out.print("Ring size: " + _ring_size.string() + ", Hops: " + _num_hops.string() + "\n")
 
+    // The clock starts before the ring exists, as in every language here
+    // (FAIRNESS.md, rule 5).
+    _start = Time.nanos()
+
     // Create ring of actors
     var i: USize = 0
     while i < _ring_size do
@@ -78,8 +82,6 @@ actor Main
       end
       i = i + 1
     end
-
-    _start = Time.nanos()
 
     // Start the token passing
     try

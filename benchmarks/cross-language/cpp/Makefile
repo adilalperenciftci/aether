@@ -8,16 +8,16 @@ LDFLAGS = -flto -pthread
 
 all: ping_pong counting thread_ring fork_join skynet
 
-ping_pong: ping_pong.cpp
+ping_pong: ping_pong.cpp mailbox.hpp
 	$(CXX) $(CXXFLAGS) ping_pong.cpp -o ping_pong $(LDFLAGS)
 
-counting: counting.cpp
+counting: counting.cpp mailbox.hpp
 	$(CXX) $(CXXFLAGS) counting.cpp -o counting $(LDFLAGS)
 
-thread_ring: thread_ring.cpp
+thread_ring: thread_ring.cpp mailbox.hpp
 	$(CXX) $(CXXFLAGS) thread_ring.cpp -o thread_ring $(LDFLAGS)
 
-fork_join: fork_join.cpp
+fork_join: fork_join.cpp mailbox.hpp
 	$(CXX) $(CXXFLAGS) fork_join.cpp -o fork_join $(LDFLAGS)
 
 skynet: skynet.cpp

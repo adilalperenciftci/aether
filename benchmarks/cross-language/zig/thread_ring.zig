@@ -1,126 +1,63 @@
 // Zig Thread Ring Benchmark (Savina-style)
+// 100 std.Thread threads in a ring, each with a mailbox (mailbox.zig), pass
+// a token that counts down from the hop count; the node that receives 0
+// tells main.
 const std = @import("std");
-const Thread = std.Thread;
-const Mutex = std.Thread.Mutex;
-const Condition = std.Thread.Condition;
-const Atomic = std.atomic.Value;
-const print = std.debug.print;
+const bench = @import("bench.zig");
+const Io = std.Io;
+const Mailbox = @import("mailbox.zig").Mailbox;
+const Slot = @import("mailbox.zig").Slot;
 
-const RING_SIZE: usize = 100;
-fn getMessages() usize {
-    if (std.posix.getenv("BENCHMARK_MESSAGES")) |val| {
-        return std.fmt.parseInt(usize, val, 10) catch 100_000;
-    }
-    return 100_000;
-}
+const RING_SIZE = 100;
 
-var NUM_HOPS: usize = 0;
+// One token in the ring, so a mailbox of one slot.
+var bufs: [RING_SIZE][1]Slot = undefined;
+var inbox: [RING_SIZE]Mailbox = undefined;
+var done_buf: [1]Slot = undefined;
+var done_box: Mailbox = undefined; // main's: the node that gets 0 writes here
+var received: [RING_SIZE]i64 = [_]i64{0} ** RING_SIZE;
 
-const Node = struct {
-    mutex: Mutex = .{},
-    cond: Condition = .{},
-    token: i32 = -1,
-    has_token: bool = false,
-    done: bool = false,
-    received: usize = 0,
-};
-
-var nodes: [RING_SIZE]Node = undefined;
-var completion: Atomic(bool) = Atomic(bool).init(false);
-var final_received: Atomic(usize) = Atomic(usize).init(0);
-
-fn nodeThread(ctx: *anyopaque) void {
-    const id = @intFromPtr(ctx);
-    const next_id = (id + 1) % RING_SIZE;
-    var node = &nodes[id];
-    var next = &nodes[next_id];
-
+fn node(io: Io, id: usize) void {
+    const next = &inbox[(id + 1) % RING_SIZE];
     while (true) {
-        node.mutex.lock();
-        while (!node.has_token and !node.done) {
-            node.cond.wait(&node.mutex);
+        const token = inbox[id].receive(io);
+        if (token < 0) break; // main's stop, after the run
+        received[id] += 1;
+        if (token == 0) {
+            done_box.send(io, 0);
+        } else {
+            next.send(io, token - 1);
         }
-
-        if (node.done) {
-            node.mutex.unlock();
-            break;
-        }
-
-        const t = node.token;
-        node.has_token = false;
-        node.received += 1;
-        node.mutex.unlock();
-
-        if (t == 0) {
-            final_received.store(node.received, .seq_cst);
-            completion.store(true, .seq_cst);
-            return;
-        }
-
-        next.mutex.lock();
-        next.token = t - 1;
-        next.has_token = true;
-        next.cond.signal();
-        next.mutex.unlock();
     }
 }
 
-fn getTimeNs() u64 {
-    const ts = std.posix.clock_gettime(std.posix.CLOCK.MONOTONIC) catch return 0;
-    return @as(u64, @intCast(ts.sec)) * 1_000_000_000 + @as(u64, @intCast(ts.nsec));
-}
+pub fn main(init: std.process.Init) !void {
+    const io = init.io;
+    const hops = bench.envCount(init, "BENCHMARK_MESSAGES", 100_000);
 
-pub fn main() !void {
-    NUM_HOPS = getMessages();
+    try bench.print(io, "=== Zig Thread Ring Benchmark ===\nRing size: {d}, Hops: {d}\n\n", .{ RING_SIZE, hops });
 
-    print("=== Zig Thread Ring Benchmark ===\n", .{});
-    print("Ring size: {}, Hops: {}\n\n", .{ RING_SIZE, NUM_HOPS });
+    const start = bench.nowNs(io);
 
-    // Initialize nodes
-    for (0..RING_SIZE) |i| {
-        nodes[i] = Node{};
-    }
+    // No spinning: a node waits about 99 hops for the token, and 100
+    // spinning threads on fewer cores take the CPU from the one thread that
+    // holds it (FAIRNESS.md, wait strategies).
+    done_box = .init(&done_buf, 0);
+    for (&inbox, &bufs) |*m, *b| m.* = .init(b, 0);
+    var threads: [RING_SIZE]std.Thread = undefined;
+    for (&threads, 0..) |*t, i| t.* = try std.Thread.spawn(.{}, node, .{ io, i });
 
-    // Start threads
-    var threads: [RING_SIZE]Thread = undefined;
-    for (0..RING_SIZE) |i| {
-        threads[i] = try Thread.spawn(.{}, nodeThread, .{@as(*anyopaque, @ptrFromInt(i))});
-    }
+    inbox[0].send(io, hops);
+    _ = done_box.receive(io);
 
-    const start = getTimeNs();
+    const end = bench.nowNs(io);
 
-    // Inject token
-    nodes[0].mutex.lock();
-    nodes[0].token = @intCast(NUM_HOPS);
-    nodes[0].has_token = true;
-    nodes[0].cond.signal();
-    nodes[0].mutex.unlock();
+    // The token is spent and nothing sends any more: stop every node.
+    for (&inbox) |*m| m.send(io, -1);
+    for (threads) |t| t.join();
 
-    // Wait for completion
-    while (!completion.load(.seq_cst)) {
-        std.Thread.yield() catch {};
-    }
-
-    const end = getTimeNs();
-
-    // Stop all threads
-    for (0..RING_SIZE) |i| {
-        nodes[i].mutex.lock();
-        nodes[i].done = true;
-        nodes[i].cond.signal();
-        nodes[i].mutex.unlock();
-    }
-
-    for (threads) |t| {
-        t.join();
-    }
-
-    const total_messages = NUM_HOPS + 1;
-    const elapsed_ns = end - start;
-    const elapsed_sec = @as(f64, @floatFromInt(elapsed_ns)) / 1e9;
-    const throughput = @as(f64, @floatFromInt(total_messages)) / elapsed_sec / 1e6;
-    const ns_per_msg = @as(f64, @floatFromInt(elapsed_ns)) / @as(f64, @floatFromInt(total_messages));
-
-    print("ns/msg:         {d:.2}\n", .{ns_per_msg});
-    print("Throughput:     {d:.2} M msg/sec\n", .{throughput});
+    // The receipts summed over the ring, the checksum.
+    var receipts: i64 = 0;
+    for (received) |r| receipts += r;
+    try bench.report(io, receipts, hops + 1, end - start);
 }

@@ -1,138 +1,61 @@
 // Zig Fork-Join Benchmark (Savina-style)
-// K worker threads, M messages distributed round-robin
+// 8 worker threads, each with a mailbox (mailbox.zig); main sends the
+// messages round-robin, then a -1 to each, and joins them.
 const std = @import("std");
-const Thread = std.Thread;
-const Mutex = std.Thread.Mutex;
-const Condition = std.Thread.Condition;
-const Allocator = std.mem.Allocator;
-const print = std.debug.print;
+const bench = @import("bench.zig");
+const Io = std.Io;
+const Mailbox = @import("mailbox.zig").Mailbox;
+const Slot = @import("mailbox.zig").Slot;
 
-const NUM_WORKERS: usize = 8;
+const NUM_WORKERS = 8;
 
-fn getMessages() usize {
-    if (std.posix.getenv("BENCHMARK_MESSAGES")) |val| {
-        return std.fmt.parseInt(usize, val, 10) catch 100_000;
-    }
-    return 100_000;
-}
+// 1024 messages, the mailbox size of every language here that bounds one
+// (FAIRNESS.md, techniques).
+var bufs: [NUM_WORKERS][1024]Slot = undefined;
+var inbox: [NUM_WORKERS]Mailbox = undefined;
+var processed: [NUM_WORKERS]i64 = [_]i64{0} ** NUM_WORKERS;
+var sums: [NUM_WORKERS]i64 = [_]i64{0} ** NUM_WORKERS; // the values each worker received
 
-var TOTAL_MESSAGES: usize = 0;
-
-const Worker = struct {
-    mutex: Mutex = .{},
-    cond: Condition = .{},
-    queue: std.ArrayListUnmanaged(i32) = .{},
-    processed: usize = 0,
-    done: bool = false,
-
-    fn deinit(self: *Worker, allocator: Allocator) void {
-        self.queue.deinit(allocator);
-    }
-
-    fn enqueue(self: *Worker, allocator: Allocator, value: i32) void {
-        self.mutex.lock();
-        self.queue.append(allocator, value) catch {};
-        self.cond.signal();
-        self.mutex.unlock();
-    }
-};
-
-var workers: [NUM_WORKERS]Worker = undefined;
-var global_allocator: Allocator = undefined;
-
-fn workerThread(ctx: *anyopaque) void {
-    const id = @intFromPtr(ctx);
-    var self = &workers[id];
-
+fn worker(io: Io, id: usize) void {
+    var n: i64 = 0;
+    var s: i64 = 0;
     while (true) {
-        self.mutex.lock();
-        while (self.queue.items.len == 0 and !self.done) {
-            self.cond.wait(&self.mutex);
-        }
-
-        if (self.done and self.queue.items.len == 0) {
-            self.mutex.unlock();
-            break;
-        }
-
-        // Process all available items
-        while (self.queue.items.len > 0) {
-            _ = self.queue.orderedRemove(0);
-            self.processed += 1;
-        }
-        self.mutex.unlock();
+        const value = inbox[id].receive(io);
+        if (value < 0) break;
+        s += value;
+        n += 1;
     }
+    processed[id] = n;
+    sums[id] = s;
 }
 
-fn getTimeNs() u64 {
-    const ts = std.posix.clock_gettime(std.posix.CLOCK.MONOTONIC) catch return 0;
-    return @as(u64, @intCast(ts.sec)) * 1_000_000_000 + @as(u64, @intCast(ts.nsec));
-}
+pub fn main(init: std.process.Init) !void {
+    const io = init.io;
+    const per_worker = @divTrunc(bench.envCount(init, "BENCHMARK_MESSAGES", 100_000), NUM_WORKERS);
+    const total = per_worker * NUM_WORKERS;
 
-pub fn main() !void {
-    TOTAL_MESSAGES = getMessages();
+    try bench.print(io, "=== Zig Fork-Join Throughput Benchmark ===\nWorkers: {d}, Messages: {d}\n\n", .{ NUM_WORKERS, total });
 
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
-    global_allocator = allocator;
+    const start = bench.nowNs(io);
 
-    print("=== Zig Fork-Join Throughput Benchmark ===\n", .{});
-    print("Workers: {}, Messages: {}\n\n", .{ NUM_WORKERS, TOTAL_MESSAGES });
-
-    // Initialize workers
-    for (0..NUM_WORKERS) |i| {
-        workers[i] = Worker{};
+    var threads: [NUM_WORKERS]std.Thread = undefined;
+    for (&threads, 0..) |*t, i| {
+        inbox[i] = .init(&bufs[i], 1000);
+        t.* = try std.Thread.spawn(.{}, worker, .{ io, i });
     }
-    defer {
-        for (0..NUM_WORKERS) |i| {
-            workers[i].deinit(allocator);
-        }
+    var i: i64 = 0;
+    while (i < total) : (i += 1) inbox[@intCast(@mod(i, NUM_WORKERS))].send(io, i);
+    for (&inbox) |*m| m.send(io, -1);
+    for (threads) |t| t.join();
+
+    const end = bench.nowNs(io);
+
+    var total_processed: i64 = 0;
+    var checksum: i64 = 0;
+    for (processed, sums) |n, s| {
+        total_processed += n;
+        checksum += s;
     }
-
-    // Start worker threads
-    var threads: [NUM_WORKERS]Thread = undefined;
-    for (0..NUM_WORKERS) |i| {
-        threads[i] = try Thread.spawn(.{}, workerThread, .{@as(*anyopaque, @ptrFromInt(i))});
-    }
-
-    const start = getTimeNs();
-
-    // Send messages round-robin
-    for (0..TOTAL_MESSAGES) |i| {
-        workers[i % NUM_WORKERS].enqueue(allocator, @intCast(i));
-    }
-
-    // Signal workers to finish
-    for (0..NUM_WORKERS) |i| {
-        workers[i].mutex.lock();
-        workers[i].done = true;
-        workers[i].cond.signal();
-        workers[i].mutex.unlock();
-    }
-
-    // Wait for all workers
-    for (threads) |t| {
-        t.join();
-    }
-
-    const end = getTimeNs();
-
-    // Collect results
-    var total_processed: usize = 0;
-    for (0..NUM_WORKERS) |i| {
-        total_processed += workers[i].processed;
-    }
-
-    if (total_processed != TOTAL_MESSAGES) {
-        print("VALIDATION FAILED: expected {}, got {}\n", .{ TOTAL_MESSAGES, total_processed });
-    }
-
-    const elapsed_ns = end - start;
-    const elapsed_sec = @as(f64, @floatFromInt(elapsed_ns)) / 1e9;
-    const throughput = @as(f64, @floatFromInt(TOTAL_MESSAGES)) / elapsed_sec / 1e6;
-    const ns_per_msg = @as(f64, @floatFromInt(elapsed_ns)) / @as(f64, @floatFromInt(TOTAL_MESSAGES));
-
-    print("ns/msg:         {d:.2}\n", .{ns_per_msg});
-    print("Throughput:     {d:.2} M msg/sec\n", .{throughput});
+    if (total_processed != total) std.debug.print("VALIDATION FAILED: expected {d}, got {d}\n", .{ total, total_processed });
+    try bench.report(io, checksum, total, end - start);
 }

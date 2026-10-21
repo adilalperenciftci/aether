@@ -9,9 +9,6 @@
 //
 // Default: 1,000,000 leaves, threshold 1000 -> 1,111 actors. See FAIRNESS.md.
 
-// Setup tells a node its own actor ref so it can pass itself as parent to children.
-message Setup { self_ref: ptr }
-
 // Spawn starts tree construction.
 // parent=0 for the root (it has no parent to report to).
 message Spawn { offset: long, size: long, parent: ptr }
@@ -21,15 +18,11 @@ message Spawn { offset: long, size: long, parent: ptr }
 message Result { value: long }
 
 actor SkynetNode {
-    state my_ref = 0;
     state parent_ref = 0;
     state pending = 0;
     state long total = 0;
 
     receive {
-        Setup(self_ref) -> {
-            my_ref = self_ref;
-        }
         Spawn(offset, size, parent) -> {
             parent_ref = parent;
             if (size <= 1000) {
@@ -59,8 +52,10 @@ actor SkynetNode {
                         cs = cs + 1;
                     }
                     child = spawn(SkynetNode());
-                    child ! Setup { self_ref: child };
-                    child ! Spawn { offset: child_offset, size: cs, parent: my_ref };
+                    // The node passes itself as the parent: one message per
+                    // child, as in every language here. (A Setup message
+                    // telling each child its own ref doubled that.)
+                    child ! Spawn { offset: child_offset, size: cs, parent: self };
                     child_offset = child_offset + cs;
                     i = i + 1;
                 }
@@ -99,7 +94,6 @@ main() {
     start_time = clock_ns();
 
     root = spawn(SkynetNode());
-    root ! Setup { self_ref: root };
     // parent=0 signals this is the root (no parent to report to)
     root ! Spawn { offset: 0, size: num_leaves, parent: 0 };
 

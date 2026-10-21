@@ -22,10 +22,10 @@ main() {
         total_messages = atoi(env_val);
     }
 
-    counter = spawn(Counter());
-
-    // Get start time
+    // The clock starts before the counter exists, as in every language here
+    // (FAIRNESS.md, rule 5).
     start_time = clock_ns();
+    counter = spawn(Counter());
 
     // Send all messages
     i = 0;

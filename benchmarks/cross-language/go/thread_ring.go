@@ -43,8 +43,12 @@ func main() {
 	fmt.Println("=== Go Thread Ring Benchmark ===")
 	fmt.Printf("Ring size: %d, Hops: %d\n\n", ringSize, numHops)
 
-	// Buffered channels model actor mailboxes
-	// Size 1 maintains ordering while allowing async message passing
+	// The clock starts before the nodes exist, as in every language here
+	// (FAIRNESS.md, rule 5).
+	start := time.Now()
+
+	// Buffered channels model actor mailboxes: a send does not wait for the
+	// receiver. One token is in the ring, so one slot is enough.
 	channels := make([]chan int, ringSize)
 	for i := 0; i < ringSize; i++ {
 		channels[i] = make(chan int, 1)
@@ -58,8 +62,6 @@ func main() {
 		next := channels[(i+1)%ringSize]
 		go ringNode(channels[i], next, done, counts)
 	}
-
-	start := time.Now()
 
 	// Inject initial token
 	channels[0] <- numHops

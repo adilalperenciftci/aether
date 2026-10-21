@@ -14,13 +14,15 @@ defmodule ForkJoin do
 
     parent = self()
 
+    # The clock starts before the workers exist, as in every language here
+    # (FAIRNESS.md, rule 5).
+    start_time = :erlang.monotonic_time(:nanosecond)
+
     # Create workers
     workers = Enum.map(1..@num_workers, fn _ ->
       spawn(fn -> worker_loop(0, 0, parent) end)
     end)
     worker_tuple = List.to_tuple(workers)
-
-    start_time = :erlang.monotonic_time(:nanosecond)
 
     # Send messages round-robin
     send_work(worker_tuple, 0, total)

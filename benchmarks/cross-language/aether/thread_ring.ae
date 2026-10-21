@@ -24,7 +24,10 @@ main() {
     if (env_val != 0) {
         num_hops = atoi(env_val);
     }
-    ring_size = 100;
+
+    // The clock starts before the ring exists, as in every language here
+    // (FAIRNESS.md, rule 5).
+    start_time = clock_ns();
 
     // Create ring of 100 actors (matches C/C++/Go/Rust/Java/Zig/Erlang/Elixir/Pony/Scala)
     n0 = spawn(RingNode()); n1 = spawn(RingNode()); n2 = spawn(RingNode()); n3 = spawn(RingNode()); n4 = spawn(RingNode());
@@ -75,7 +78,6 @@ main() {
     n92.next_ref = n93; n93.next_ref = n94; n94.next_ref = n95; n95.next_ref = n96;
     n96.next_ref = n97; n97.next_ref = n98; n98.next_ref = n99; n99.next_ref = n0;
 
-    start_time = clock_ns();
     n0 ! Token { hops: num_hops };
     wait_for_idle();
     end_time = clock_ns();

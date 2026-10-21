@@ -24,6 +24,10 @@ main() {
         messages_per_worker = atoi(env_val) / num_workers;
     }
 
+    // The clock starts before the workers exist, as in every language here
+    // (FAIRNESS.md, rule 5).
+    start_time = clock_ns();
+
     // Create workers
     w0 = spawn(Worker());
     w1 = spawn(Worker());
@@ -33,22 +37,15 @@ main() {
     w5 = spawn(Worker());
     w6 = spawn(Worker());
     w7 = spawn(Worker());
+    workers = [w0, w1, w2, w3, w4, w5, w6, w7];
 
-    start_time = clock_ns();
-
-    // Send messages round-robin to workers
+    // Send messages round-robin to workers: message i to worker i % 8, as in
+    // every language here. (A division and eight comparisons per message
+    // picked the worker before, sequential work no other language did.)
     total = num_workers * messages_per_worker;
     i = 0;
     while (i < total) {
-        worker_idx = i - (i / num_workers) * num_workers;
-        if (worker_idx == 0) { w0 ! Work { value: i }; }
-        if (worker_idx == 1) { w1 ! Work { value: i }; }
-        if (worker_idx == 2) { w2 ! Work { value: i }; }
-        if (worker_idx == 3) { w3 ! Work { value: i }; }
-        if (worker_idx == 4) { w4 ! Work { value: i }; }
-        if (worker_idx == 5) { w5 ! Work { value: i }; }
-        if (worker_idx == 6) { w6 ! Work { value: i }; }
-        if (worker_idx == 7) { w7 ! Work { value: i }; }
+        workers[i % num_workers] ! Work { value: i };
         i = i + 1;
     }
 

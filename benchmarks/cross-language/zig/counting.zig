@@ -1,89 +1,41 @@
 // Zig Counting Actor Benchmark (Savina-style)
+// One counter thread receives N messages through its mailbox (mailbox.zig)
+// and counts them; a final -1 tells it to stop.
 const std = @import("std");
-const Thread = std.Thread;
-const Mutex = std.Thread.Mutex;
-const Condition = std.Thread.Condition;
-const print = std.debug.print;
+const bench = @import("bench.zig");
+const Io = std.Io;
+const Mailbox = @import("mailbox.zig").Mailbox;
+const Slot = @import("mailbox.zig").Slot;
 
-fn getMessages() usize {
-    if (std.posix.getenv("BENCHMARK_MESSAGES")) |val| {
-        return std.fmt.parseInt(usize, val, 10) catch 100_000;
-    }
-    return 100_000;
+// 1024 messages, the mailbox size of every language here that bounds one
+// (FAIRNESS.md, techniques).
+var inbox_buf: [1024]Slot = undefined;
+var inbox: Mailbox = undefined;
+// The messages the counter took, the checksum.
+var processed: i64 = 0;
+
+fn counter(io: Io) void {
+    var count: i64 = 0;
+    while (inbox.receive(io) >= 0) count += 1;
+    processed = count;
 }
 
-var MESSAGES: usize = 0;
+pub fn main(init: std.process.Init) !void {
+    const io = init.io;
+    const messages = bench.envCount(init, "BENCHMARK_MESSAGES", 100_000);
 
-const Counter = struct {
-    mutex: Mutex = .{},
-    cond: Condition = .{},
-    pending: usize = 0,
-    done: bool = false,
-    processed: usize = 0,
-};
+    try bench.print(io, "=== Zig Counting Actor Benchmark ===\nMessages: {d}\n\n", .{messages});
 
-var counter: Counter = .{};
+    const start = bench.nowNs(io);
 
-fn counterThread(_: *anyopaque) void {
-    while (true) {
-        counter.mutex.lock();
-        while (counter.pending == 0 and !counter.done) {
-            counter.cond.wait(&counter.mutex);
-        }
-        if (counter.done and counter.pending == 0) {
-            counter.mutex.unlock();
-            break;
-        }
-        while (counter.pending > 0) {
-            counter.pending -= 1;
-            counter.processed += 1;
-        }
-        counter.mutex.unlock();
-    }
-}
-
-fn getTimeNs() u64 {
-    const ts = std.posix.clock_gettime(std.posix.CLOCK.MONOTONIC) catch return 0;
-    return @as(u64, @intCast(ts.sec)) * 1_000_000_000 + @as(u64, @intCast(ts.nsec));
-}
-
-pub fn main() !void {
-    MESSAGES = getMessages();
-
-    print("=== Zig Counting Actor Benchmark ===\n", .{});
-    print("Messages: {}\n\n", .{MESSAGES});
-
-    const thread = try Thread.spawn(.{}, counterThread, .{@as(*anyopaque, undefined)});
-
-    const start = getTimeNs();
-
-    // Send all messages
-    for (0..MESSAGES) |_| {
-        counter.mutex.lock();
-        counter.pending += 1;
-        counter.cond.signal();
-        counter.mutex.unlock();
-    }
-
-    // Signal done
-    counter.mutex.lock();
-    counter.done = true;
-    counter.cond.signal();
-    counter.mutex.unlock();
-
+    inbox = .init(&inbox_buf, 1000);
+    const thread = try std.Thread.spawn(.{}, counter, .{io});
+    var i: i64 = 0;
+    while (i < messages) : (i += 1) inbox.send(io, i);
+    inbox.send(io, -1);
     thread.join();
 
-    const end = getTimeNs();
-
-    if (counter.processed != MESSAGES) {
-        print("VALIDATION FAILED: expected {}, got {}\n", .{ MESSAGES, counter.processed });
-    }
-
-    const elapsed_ns = end - start;
-    const elapsed_sec = @as(f64, @floatFromInt(elapsed_ns)) / 1e9;
-    const throughput = @as(f64, @floatFromInt(MESSAGES)) / elapsed_sec / 1e6;
-    const ns_per_msg = @as(f64, @floatFromInt(elapsed_ns)) / @as(f64, @floatFromInt(MESSAGES));
-
-    print("ns/msg:         {d:.2}\n", .{ns_per_msg});
-    print("Throughput:     {d:.2} M msg/sec\n", .{throughput});
+    const end = bench.nowNs(io);
+    if (processed != messages) std.debug.print("VALIDATION FAILED: expected {d}, got {d}\n", .{ messages, processed });
+    try bench.report(io, processed, messages, end - start);
 }

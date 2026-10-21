@@ -1,68 +1,38 @@
 // C Thread Ring Benchmark (Savina-style)
-// N threads in a ring pass a token M times
+// 100 threads in a ring, each with a mailbox (mailbox.h), pass a token that
+// counts down from the hop count; the node that receives 0 tells main.
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <pthread.h>
 #include <time.h>
 
+/* No spinning: a node waits about 99 hops for the token, and 100 spinning
+ * threads on fewer cores take the CPU from the one thread that holds it
+ * (FAIRNESS.md, wait strategies). */
+#define MAILBOX_SPIN 0
+#include "mailbox.h"
+
 #define RING_SIZE 100
 static int NUM_HOPS = 100000;  // Default for "low" preset
 
-typedef struct Node {
-    pthread_mutex_t mutex;
-    pthread_cond_t cond;
-    int token;
-    int has_token;
-    struct Node* next;
-    int received;
-    int done;
-} Node;
+static mailbox_t inbox[RING_SIZE];
+static mailbox_t done_box;          /* main's: the node that gets 0 writes here */
+static long long received[RING_SIZE];
 
-static Node nodes[RING_SIZE];
-static int final_received = 0;
-static pthread_mutex_t done_mutex = PTHREAD_MUTEX_INITIALIZER;
-static pthread_cond_t done_cond = PTHREAD_COND_INITIALIZER;
-static int all_done = 0;
-
-void* node_thread(void* arg) {
-    Node* self = (Node*)arg;
-
-    while (1) {
-        pthread_mutex_lock(&self->mutex);
-        while (!self->has_token && !self->done) {
-            pthread_cond_wait(&self->cond, &self->mutex);
-        }
-
-        if (self->done) {
-            pthread_mutex_unlock(&self->mutex);
-            break;
-        }
-
-        int token = self->token;
-        self->has_token = 0;
-        self->received++;
-        pthread_mutex_unlock(&self->mutex);
-
+static void* node_thread(void* arg) {
+    int id = (int)(intptr_t)arg;
+    mailbox_t* next = &inbox[(id + 1) % RING_SIZE];
+    for (;;) {
+        int64_t token = mailbox_receive(&inbox[id]);
+        if (token < 0) break;            /* main's stop, after the run */
+        received[id]++;
         if (token == 0) {
-            // Token exhausted, signal completion
-            pthread_mutex_lock(&done_mutex);
-            final_received = self->received;
-            all_done = 1;
-            pthread_cond_signal(&done_cond);
-            pthread_mutex_unlock(&done_mutex);
-            break;
+            mailbox_send(&done_box, 0);
+        } else {
+            mailbox_send(next, token - 1);
         }
-
-        // Pass token to next node
-        Node* next = self->next;
-        pthread_mutex_lock(&next->mutex);
-        next->token = token - 1;
-        next->has_token = 1;
-        pthread_cond_signal(&next->cond);
-        pthread_mutex_unlock(&next->mutex);
     }
-
     return NULL;
 }
 
@@ -75,70 +45,39 @@ int main(void) {
 
     pthread_t threads[RING_SIZE];
 
-    // Initialize nodes
-    for (int i = 0; i < RING_SIZE; i++) {
-        pthread_mutex_init(&nodes[i].mutex, NULL);
-        pthread_cond_init(&nodes[i].cond, NULL);
-        nodes[i].token = 0;
-        nodes[i].has_token = 0;
-        nodes[i].next = &nodes[(i + 1) % RING_SIZE];
-        nodes[i].received = 0;
-        nodes[i].done = 0;
-    }
-
-    // Start threads
-    for (int i = 0; i < RING_SIZE; i++) {
-        pthread_create(&threads[i], NULL, node_thread, &nodes[i]);
-    }
-
     struct timespec start, end;
     clock_gettime(CLOCK_MONOTONIC, &start);
 
-    // Inject initial token
-    pthread_mutex_lock(&nodes[0].mutex);
-    nodes[0].token = NUM_HOPS;
-    nodes[0].has_token = 1;
-    pthread_cond_signal(&nodes[0].cond);
-    pthread_mutex_unlock(&nodes[0].mutex);
-
-    // Wait for completion
-    pthread_mutex_lock(&done_mutex);
-    while (!all_done) {
-        pthread_cond_wait(&done_cond, &done_mutex);
+    // One token in the ring, so a mailbox of one slot.
+    mailbox_init(&done_box, 1);
+    for (int i = 0; i < RING_SIZE; i++) mailbox_init(&inbox[i], 1);
+    for (int i = 0; i < RING_SIZE; i++) {
+        pthread_create(&threads[i], NULL, node_thread, (void*)(intptr_t)i);
     }
-    pthread_mutex_unlock(&done_mutex);
+
+    mailbox_send(&inbox[0], NUM_HOPS);
+    mailbox_receive(&done_box);
 
     clock_gettime(CLOCK_MONOTONIC, &end);
 
-    // Signal all threads to exit
-    for (int i = 0; i < RING_SIZE; i++) {
-        pthread_mutex_lock(&nodes[i].mutex);
-        nodes[i].done = 1;
-        pthread_cond_signal(&nodes[i].cond);
-        pthread_mutex_unlock(&nodes[i].mutex);
-    }
-
-    for (int i = 0; i < RING_SIZE; i++) {
-        pthread_join(threads[i], NULL);
-    }
+    // The token is spent and nothing sends any more: stop every node.
+    for (int i = 0; i < RING_SIZE; i++) mailbox_send(&inbox[i], -1);
+    for (int i = 0; i < RING_SIZE; i++) pthread_join(threads[i], NULL);
 
     double elapsed = (end.tv_sec - start.tv_sec) + (end.tv_nsec - start.tv_nsec) / 1e9;
+    if (elapsed <= 0) elapsed = 1e-9;
     int total_messages = NUM_HOPS + 1;
     double throughput = total_messages / elapsed / 1e6;
     double ns_per_msg = elapsed * 1e9 / total_messages;
 
     /* The receipts summed over the ring, the checksum. */
     long long receipts = 0;
-    for (int i = 0; i < RING_SIZE; i++) receipts += nodes[i].received;
+    for (int i = 0; i < RING_SIZE; i++) receipts += received[i];
     printf("Checksum: %lld\n", receipts);
     printf("ns/msg:         %.2f\n", ns_per_msg);
     printf("Throughput:     %.2f M msg/sec\n", throughput);
 
-    // Cleanup
-    for (int i = 0; i < RING_SIZE; i++) {
-        pthread_mutex_destroy(&nodes[i].mutex);
-        pthread_cond_destroy(&nodes[i].cond);
-    }
-
+    for (int i = 0; i < RING_SIZE; i++) mailbox_destroy(&inbox[i]);
+    mailbox_destroy(&done_box);
     return 0;
 }

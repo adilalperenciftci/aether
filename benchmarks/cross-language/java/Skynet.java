@@ -3,6 +3,7 @@
 // Uses ForkJoinPool for recursive parallel decomposition.
 // Below the sequential threshold, subtree sums are computed without forking.
 
+import java.util.Locale;
 import java.util.concurrent.ForkJoinPool;
 import java.util.concurrent.RecursiveTask;
 
@@ -59,23 +60,22 @@ public class Skynet {
         long totalNodes = 1;
         for (long n = numLeaves; n > SEQ_THRESHOLD; n /= 10) totalNodes += n / SEQ_THRESHOLD;
 
-        ForkJoinPool pool = new ForkJoinPool();
-
+        // The clock starts before the pool exists, as in every language here
+        // (FAIRNESS.md, rule 5).
         long start = System.nanoTime();
+        ForkJoinPool pool = new ForkJoinPool();
         long result = pool.invoke(new SkynetTask(0, numLeaves));
-        long elapsed = System.nanoTime() - start;
+        long elapsed = Math.max(System.nanoTime() - start, 1);
 
         System.out.println("Leaves: " + numLeaves + ", concurrency units: " + totalNodes
                 + " (sequential below " + SEQ_THRESHOLD + ")");
         System.out.println("Sum: " + result);
         System.out.println("Checksum: " + result);
 
-        if (elapsed > 0) {
-            long nsPerMsg = elapsed / totalNodes;
-            double throughput = (double) totalNodes / elapsed * 1_000_000_000.0;
-            System.out.println("ns/msg:         " + nsPerMsg);
-            System.out.printf("Throughput:     %.2f M msg/sec%n", throughput / 1_000_000.0);
-        }
+        // Always printed, as in every language here: a tree small enough to
+        // finish within a microsecond printed no rate at all.
+        System.out.println("ns/msg:         " + elapsed / totalNodes);
+        System.out.printf(Locale.ROOT, "Throughput:     %.2f M msg/sec%n", totalNodes * 1000.0 / elapsed);
 
         pool.shutdown();
     }

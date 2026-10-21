@@ -13,14 +13,16 @@ defmodule ThreadRing do
 
     parent = self()
 
+    # The clock starts before the ring exists, as in every language here
+    # (FAIRNESS.md, rule 5).
+    start_time = :erlang.monotonic_time(:nanosecond)
+
     # Create ring of processes
     first = spawn(fn -> ring_node(nil, parent, 0) end)
     {last, nodes} = create_ring(first, @ring_size - 1, parent, [first])
 
     # Close the ring: last -> first (not first -> last!)
     send(last, {:set_next, first})
-
-    start_time = :erlang.monotonic_time(:nanosecond)
 
     # Send initial token
     send(first, {:token, @num_hops})

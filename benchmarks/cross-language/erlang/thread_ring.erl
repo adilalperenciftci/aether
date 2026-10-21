@@ -14,6 +14,10 @@ start() ->
     io:format("=== Erlang Thread Ring Benchmark ===~n"),
     io:format("Ring size: ~p, Hops: ~p~n~n", [?RING_SIZE, NumHops]),
 
+    % The clock starts before the ring exists, as in every language here
+    % (FAIRNESS.md, rule 5); monotonic_time is the clock for benchmarks.
+    Start = erlang:monotonic_time(nanosecond),
+
     % Create ring of processes
     Parent = self(),
     First = spawn(fun() -> ring_node(undefined, Parent, 0) end),
@@ -21,9 +25,6 @@ start() ->
 
     % Close the ring: Last -> First (not First -> Last!)
     Last ! {set_next, First},
-
-    % Start timer (monotonic_time is correct for benchmarks)
-    Start = erlang:monotonic_time(nanosecond),
 
     % Send initial token
     First ! {token, NumHops},

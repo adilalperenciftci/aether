@@ -1,6 +1,12 @@
 // Java Counting Actor Benchmark (Savina-style)
-import java.util.concurrent.ArrayBlockingQueue;
+// One counter thread receives N messages through its LinkedTransferQueue
+// mailbox and counts them; a final -1 tells it to stop.
+//
+// One unit fits the cores: a platform thread, and LinkedTransferQueue, which
+// spins briefly before it parks (FAIRNESS.md, techniques).
+import java.util.Locale;
 import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.LinkedTransferQueue;
 
 public class Counting {
     private static int getMessages() {
@@ -13,45 +19,38 @@ public class Counting {
         System.out.println("=== Java Counting Actor Benchmark ===");
         System.out.println("Messages: " + MESSAGES + "\n");
 
-        BlockingQueue<Integer> queue = new ArrayBlockingQueue<>(1024);
-        int[] count = {0};
-        boolean[] done = {false};
+        // The messages the counter took, the checksum; read after join().
+        long[] count = {0};
 
+        long start = System.nanoTime();
+
+        BlockingQueue<Integer> queue = new LinkedTransferQueue<>();
         Thread counter = new Thread(() -> {
             try {
-                while (true) {
-                    Integer msg = queue.take();
-                    if (msg == -1) break;
-                    count[0]++;
-                }
+                long n = 0;
+                while (queue.take() >= 0) n++;
+                count[0] = n;
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
             }
         });
         counter.start();
 
-        long start = System.nanoTime();
-
-        // Send all messages
         for (int i = 0; i < MESSAGES; i++) {
             queue.put(i);
         }
-        queue.put(-1); // Signal done
+        queue.put(-1);
 
         counter.join();
 
-        long end = System.nanoTime();
-        double elapsedSec = (end - start) / 1e9;
+        long totalNs = Math.max(System.nanoTime() - start, 1);
 
         if (count[0] != MESSAGES) {
             System.out.println("VALIDATION FAILED: expected " + MESSAGES + ", got " + count[0]);
         }
 
-        double throughput = MESSAGES / elapsedSec / 1e6;
-        double nsPerMsg = elapsedSec * 1e9 / MESSAGES;
-
         System.out.println("Checksum: " + count[0]);
-        System.out.printf("ns/msg:         %.2f%n", nsPerMsg);
-        System.out.printf("Throughput:     %.2f M msg/sec%n", throughput);
+        System.out.printf(Locale.ROOT, "ns/msg:         %.2f%n", (double) totalNs / MESSAGES);
+        System.out.printf(Locale.ROOT, "Throughput:     %.2f M msg/sec%n", MESSAGES * 1000.0 / totalNs);
     }
 }

@@ -39,6 +39,10 @@ func main() {
 	fmt.Println("=== Go Fork-Join Throughput Benchmark ===")
 	fmt.Printf("Workers: %d, Messages: %d\n\n", numWorkers, total)
 
+	// The clock starts before the workers exist, as in every language here
+	// (FAIRNESS.md, rule 5).
+	start := time.Now()
+
 	// Create worker channels
 	channels := make([]chan int, numWorkers)
 	results := make([]int, numWorkers)
@@ -50,8 +54,6 @@ func main() {
 		wg.Add(1)
 		go worker(i, channels[i], &wg, &results[i], &sums[i])
 	}
-
-	start := time.Now()
 
 	// Send messages round-robin
 	for i := 0; i < total; i++ {

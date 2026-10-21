@@ -1,5 +1,6 @@
 package bench.skynet
 
+import java.util.Locale
 import java.util.concurrent.{ForkJoinPool, RecursiveTask}
 
 // Same threshold as every other language here; see FAIRNESS.md.
@@ -48,7 +49,7 @@ object SkynetBenchmark {
     val start = System.nanoTime()
     val pool = new ForkJoinPool()
     val result = pool.invoke(new SkynetTask(0, numLeaves))
-    val elapsed = System.nanoTime() - start
+    val elapsed = math.max(System.nanoTime() - start, 1L)
 
     println(s"Sum: $result")
     println(s"Checksum: $result")
@@ -56,6 +57,6 @@ object SkynetBenchmark {
     val throughput = units.toDouble / elapsed * 1e9
 
     println(s"ns/msg:         $nsPerMsg")
-    println(f"Throughput:     ${throughput / 1e6}%.2f M msg/sec")
+    println("Throughput:     %.2f M msg/sec".formatLocal(Locale.ROOT, throughput / 1e6))
   }
 }

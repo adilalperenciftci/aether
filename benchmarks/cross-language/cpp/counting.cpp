@@ -1,51 +1,19 @@
 // C++ Counting Actor Benchmark (Savina-style)
-#include <iostream>
-#include <iomanip>
-#include <thread>
-#include <mutex>
-#include <condition_variable>
+// One counter thread receives N messages through its mailbox (mailbox.hpp)
+// and counts them; a final -1 tells it to stop.
 #include <chrono>
-#include <atomic>
 #include <cstdlib>
+#include <iomanip>
+#include <iostream>
+#include <thread>
+
+#include "mailbox.hpp"
 
 static int MESSAGES = 100000;  // Default for "low" preset
 
-class Counter {
-    std::mutex mtx;
-    std::condition_variable cv;
-    int pending = 0;
-    bool done = false;
-    int processed = 0;
-
-public:
-    void increment() {
-        std::unique_lock<std::mutex> lock(mtx);
-        pending++;
-        cv.notify_one();
-    }
-
-    void finish() {
-        std::unique_lock<std::mutex> lock(mtx);
-        done = true;
-        cv.notify_one();
-    }
-
-    void run() {
-        while (true) {
-            std::unique_lock<std::mutex> lock(mtx);
-            cv.wait(lock, [this] { return pending > 0 || done; });
-
-            if (done && pending == 0) break;
-
-            while (pending > 0) {
-                pending--;
-                processed++;
-            }
-        }
-    }
-
-    int getProcessed() const { return processed; }
-};
+// 1024 messages, the mailbox size of every language here that bounds one
+// (FAIRNESS.md, techniques).
+constexpr std::uint32_t CAPACITY = 1024;
 
 int main() {
     const char* env = getenv("BENCHMARK_MESSAGES");
@@ -54,30 +22,37 @@ int main() {
     std::cout << "=== C++ Counting Actor Benchmark ===" << std::endl;
     std::cout << "Messages: " << MESSAGES << "\n" << std::endl;
 
-    Counter counter;
-    std::thread worker([&counter] { counter.run(); });
+    long long processed = 0;   // the messages the counter took, the checksum
 
-    auto start = std::chrono::high_resolution_clock::now();
+    auto start = std::chrono::steady_clock::now();
+
+    Mailbox inbox(CAPACITY);
+    std::thread counter([&] {
+        long long count = 0;
+        while (inbox.receive() >= 0) count++;
+        processed = count;
+    });
 
     for (int i = 0; i < MESSAGES; i++) {
-        counter.increment();
+        inbox.send(i);
     }
-    counter.finish();
+    inbox.send(-1);
 
-    worker.join();
+    counter.join();
 
-    auto end = std::chrono::high_resolution_clock::now();
+    auto end = std::chrono::steady_clock::now();
     double elapsed = std::chrono::duration<double>(end - start).count();
+    if (elapsed <= 0) elapsed = 1e-9;
 
-    if (counter.getProcessed() != MESSAGES) {
+    if (processed != MESSAGES) {
         std::cout << "VALIDATION FAILED: expected " << MESSAGES
-                  << ", got " << counter.getProcessed() << std::endl;
+                  << ", got " << processed << std::endl;
     }
 
     double throughput = MESSAGES / elapsed / 1e6;
     double ns_per_msg = elapsed * 1e9 / MESSAGES;
 
-    std::cout << "Checksum: " << counter.getProcessed() << std::endl;
+    std::cout << "Checksum: " << processed << std::endl;
     std::cout << "ns/msg:         " << std::fixed << std::setprecision(2) << ns_per_msg << std::endl;
     std::cout << "Throughput:     " << std::setprecision(2) << throughput << " M msg/sec" << std::endl;
 
