@@ -1,0 +1,58 @@
+// #3069 (found reviewing #3056): in a cycle of functions whose results are
+// inferred, one that calls back into the function being checked (`y`
+// below) waits until after it (feb687c9). A local of that function bound from the waiting
+// callee (`r = y(p, k - 1)`) was then typed while the callee's result was
+// unknown: codegen declared it a long, and its interpolation printed it
+// through `%d`, 705032704 for 5000000000. A function whose first value
+// `return` reads only its parameters (`return p.big`) has its result
+// before its body is checked, so the callee is checked first and the local
+// is typed by it.
+
+extern exit(code: int)
+
+struct P {
+    big: long
+}
+
+check(ok: bool, what: string) {
+    if !ok {
+        println("FAIL: ${what}")
+        exit(1)
+    }
+}
+
+// The callee after the function that is entered.
+x(p: *P, k: int) {
+    if k > 0 {
+        r = y(p, k - 1)
+        check("${r}" == "5000000000", "a local bound from a callee checked after x (${r})")
+    }
+    return p.big
+}
+
+y(p: *P, k: int) {
+    return x(p, k)
+}
+
+// And before it.
+w(p: *P, k: int) {
+    return v(p, k)
+}
+
+v(p: *P, k: int) {
+    if k > 0 {
+        r = w(p, k - 1)
+        check("${r}" == "5000000000", "a local bound from a callee defined before v (${r})")
+    }
+    return p.big
+}
+
+main() {
+    a = heap.new(P)
+    a.big = 5000000000
+    check(x(a, 1) == 5000000000, "x enters the cycle")
+    check(y(a, 2) == 5000000000, "y enters it")
+    check(v(a, 1) == 5000000000 && w(a, 2) == 5000000000, "v and w")
+    println("${x(a, 1)} ${w(a, 1)}")
+    heap.free(a)
+}

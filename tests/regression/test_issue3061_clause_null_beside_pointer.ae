@@ -1,0 +1,52 @@
+// #3061 review: a clause set's result is the join of its clauses' (#3061),
+// and a clause that returns only `null` is a `ptr` beside a typed pointer,
+// a string or a closure, which branch_join_type does not join: the set was
+// refused, where 0.835 took its first clause's type and compiled it. Such a
+// clause takes the type beside it, as a slot of that type takes `null`
+// (tests/integration/clause_set_result_join checks `null` beside an int is
+// refused).
+
+extern exit(code: int)
+
+struct Node {
+    v: int
+}
+
+node_or_null(0, p: *Node) -> null
+node_or_null(k, p: *Node) -> p
+
+label(0) -> null
+label(k) -> "many"
+
+adder(n: int) -> fn {
+    return | x: int | -> x + n
+}
+
+cb_or_null(0) -> null
+cb_or_null(k) -> adder(k)
+
+// The `null` clause after the one that gives the type.
+second(1, p: *Node) -> p
+second(k, p: *Node) -> null
+
+check(ok: bool, what: string) {
+    if !ok {
+        println("FAIL: ${what}")
+        exit(1)
+    }
+}
+
+main() {
+    n = heap.new(Node)
+    n.v = 4
+    check(node_or_null(0, n) == null, "the null clause of a pointer set")
+    check(node_or_null(1, n).v == 4, "the pointer clause, as its *Node")
+    check(label(0) == null, "the null clause of a string set")
+    check(label(2) == "many", "the string clause")
+    check(cb_or_null(0) == null, "the null clause of a closure set, the empty closure")
+    check(call(cb_or_null(3), 1) == 4, "the closure clause")
+    check(second(1, n).v == 4, "a pointer clause before a null clause")
+    check(second(2, n) == null, "and the null clause after it")
+    println("${node_or_null(1, n).v} ${label(2)} ${call(cb_or_null(3), 1)}")
+    heap.free(n)
+}

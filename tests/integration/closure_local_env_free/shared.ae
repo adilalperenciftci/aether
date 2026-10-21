@@ -22,11 +22,11 @@ check(label: string, got: int, want: int) {
     }
 }
 
-stash(l: ptr, cb: fn) {
+stash(l: ptr, cb: @keep fn) {
     _ = list.add(l, cb)
 }
 
-stash_ok(l: ptr, cb: fn) -> bool {
+stash_ok(l: ptr, cb: @keep fn) -> bool {
     _ = list.add(l, cb)
     return true
 }

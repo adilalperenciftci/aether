@@ -1,0 +1,50 @@
+// #3064: a value that is one of several, an if-expression's branches, a
+// value match's arms or a clause set's clauses, joins its integers to a type
+// that holds every one; a literal that fits an unsigned type beside it
+// takes that type (`if c { 0 } else { u }` is a uint32). With several
+// literal arms the join read only the first, so `0`, `-1` and a uint32
+// joined to a uint32 and -1 came back as 4294967295. It reads the literal
+// the join must hold most: a negative one, else the largest.
+
+extern exit(code: int)
+
+check(ok: bool, what: string) {
+    if !ok {
+        println("FAIL: ${what}")
+        exit(1)
+    }
+}
+
+// Literal clauses before the unsigned one.
+neg(0, u: uint32) -> 0
+neg(1, u: uint32) -> -1
+neg(k, u: uint32) -> u
+
+// A literal no uint32 holds, after one that fits.
+wide(0, u: uint32) -> 7
+wide(1, u: uint32) -> 5000000000
+wide(k, u: uint32) -> u
+
+// Literals that all fit stay the unsigned type.
+fits(0, u: uint32) -> 0
+fits(1, u: uint32) -> 7
+fits(k, u: uint32) -> u
+
+main() {
+    uint32 u = 4000000000
+    check("${neg(1, u)}" == "-1", "a -1 clause after a 0 clause beside a uint32")
+    check("${neg(2, u)}" == "4000000000", "the uint32 clause beside them")
+    check("${wide(1, u)}" == "5000000000", "a literal no uint32 holds")
+    check("${fits(1, u)}" == "7" && "${fits(2, u)}" == "4000000000", "literals a uint32 holds")
+    x = neg(1, u)
+    check("${x}" == "-1", "a local bound from the set")
+    i = 0
+    seen = ""
+    while i < 3 {
+        mv = match i { 0 -> 0 1 -> -1 _ -> u }
+        seen = "${seen} ${mv}"
+        i = i + 1
+    }
+    check(seen == " 0 -1 4000000000", "a value match's literal arms (${seen})")
+    println("${neg(1, u)} ${wide(1, u)} ${fits(2, u)}${seen}")
+}

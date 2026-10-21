@@ -143,6 +143,102 @@ main() {
 AE
 expect_error "$tmp/nested.ae" "an array literal cannot hold an array literal" "a nested array literal was not refused"
 
+# #3067: every element goes into a slot of the element type. One the type
+# cannot hold is refused at the element; it reached C as an initializer of
+# the wrong type (`int` from `const char*`, a struct field from `void*`).
+# `null` has no type of its own: it takes the others', and is refused only
+# where that type takes no null.
+cat > "$tmp/elem_string.ae" <<'AE'
+main() {
+    xs = [ 1, "x" ]
+    println("${xs.len}")
+}
+AE
+expect_error "$tmp/elem_string.ae" "array literal element 2 is 'string', which an array of 'int' cannot hold" "a string in an int array literal was not refused"
+
+cat > "$tmp/elem_null_struct.ae" <<'AE'
+struct P { x: int }
+main() {
+    p = P { x: 1 }
+    ps = [ null, p ]
+    println("${ps.len}")
+}
+AE
+expect_error "$tmp/elem_null_struct.ae" "array literal element 1 is \`null\`, which an array of 'P' cannot hold" "null in a struct array literal was not refused"
+
+cat > "$tmp/elem_closure_int.ae" <<'AE'
+main() {
+    k = 2
+    f = | x: int | -> x + k
+    fs = [ f, 3 ]
+    println("${fs.len}")
+}
+AE
+expect_error "$tmp/elem_closure_int.ae" "array literal element 2 is 'int', which an array of 'fn' cannot hold" "an int in a closure array literal was not refused"
+
+cat > "$tmp/elem_null_string.ae" <<'AE'
+main() {
+    s = "hi"
+    a = [ s, null ]
+    b = [ null, s ]
+    n = 0
+    if a[1] == null { n = n + 1 }
+    if b[0] == null { n = n + 1 }
+    println("${a.len} ${b.len} ${n} ${b[1]}")
+}
+AE
+got="$(AETHER_HOME="$ROOT" "$AE" run "$tmp/elem_null_string.ae" 2>&1 | tail -1)"
+if [ "$got" != "2 2 2 hi" ]; then
+    echo "  [FAIL] array_literal_element_type: null beside a string, either side, gave '$got'"
+    fail=1
+fi
+
+# `none` has no type of its own either: `[none, x]` is an array of x's
+# optional (it was an array of the optional of no type, and `??` on an
+# element was refused), and a `none` beside an int is refused.
+cat > "$tmp/elem_none_first.ae" <<'AE'
+pick(k: int) -> int? {
+    if k > 0 { return k }
+    return none
+}
+main() {
+    x = pick(3)
+    a = [ x, none ]
+    b = [ none, x ]
+    println("${a[0] ?? -1} ${a[1] ?? -1} ${b[0] ?? -1} ${b[1] ?? -1}")
+}
+AE
+got="$(AETHER_HOME="$ROOT" "$AE" run "$tmp/elem_none_first.ae" 2>&1 | tail -1)"
+if [ "$got" != "3 -1 -1 3" ]; then
+    echo "  [FAIL] array_literal_element_type: none beside an optional, either side, gave '$got'"
+    fail=1
+fi
+
+cat > "$tmp/elem_none_int.ae" <<'AE'
+main() {
+    xs = [ 1, none ]
+    println("${xs.len}")
+}
+AE
+expect_error "$tmp/elem_none_int.ae" "array literal element 2 is \`none\`, which an array of 'int' cannot hold" "none in an int array literal was not refused"
+
+# #3071: a place's array of a sum reaches the literal before it is checked,
+# so a struct that is no variant of it is refused naming the sum (it named
+# the first element's type, which the place did not say).
+cat > "$tmp/elem_not_variant.ae" <<'AE'
+struct Circle { r: int }
+struct Square { side: int }
+struct Other { z: int }
+type Shape = Circle | Square
+main() {
+    c = Circle { r: 1 }
+    o = Other { z: 1 }
+    let xs: Shape[2] = [ c, o ]
+    println("${xs.len}")
+}
+AE
+expect_error "$tmp/elem_not_variant.ae" "array literal element 2 is 'Other', which an array of 'Shape' cannot hold" "a struct that is no variant in an array of a sum was not refused naming the sum"
+
 # The explicit forms stay legal: an annotated int slot narrows on purpose.
 cat > "$tmp/explicit.ae" <<'AE'
 main() {
@@ -159,6 +255,6 @@ if [ "$got" != "4 7" ]; then
 fi
 
 if [ "$fail" = 0 ]; then
-    echo "  [PASS] array_literal_element_type: literals join their element types; inferred-int narrowing and nested literals are refused"
+    echo "  [PASS] array_literal_element_type: literals join their element types; inferred-int narrowing, nested literals and elements the type cannot hold are refused"
 fi
 exit $fail

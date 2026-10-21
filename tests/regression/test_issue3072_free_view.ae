@@ -1,0 +1,115 @@
+// #3072: a view owns nothing (R1, R2), so `free` of one gave the allocator a
+// pointer it never handed out: `free(string.bytes(s))` corrupted the heap
+// (0xC0000374 on Windows), and so did `free` of a sub-slice of a `make`
+// buffer at an offset; one at the start freed the buffer under the slice
+// that holds it, for a double free later. A view the checker cannot see
+// (here, each given to a function) is now a named panic at run time; the
+// ones it can see are refused (tests/integration/free_view). The slice that
+// holds a `make` buffer, and a view of a raw pointer the program owns from
+// its start, are freed as before, and the rounds must not grow the heap.
+
+import std.mem
+import std.string
+
+extern exit(code: int)
+
+struct Holder {
+    buf: byte[]
+}
+
+check(ok: bool, what: string) {
+    if !ok {
+        println("FAIL: ${what}")
+        exit(1)
+    }
+}
+
+drop(b: byte[]) {
+    free(b)
+}
+
+drop_ints(xs: int[]) {
+    free(xs)
+}
+
+// The tail of a clause's list pattern, and of a match's.
+drop_tail([h | t]) -> int {
+    free(t)
+    return h
+}
+
+drop_match_tail(xs: int[]) -> int {
+    match xs {
+        [h | t] -> {
+            free(t)
+            return h
+        }
+        _ -> {
+            return 0
+        }
+    }
+}
+
+nothing() -> int[] {
+    return null
+}
+
+// Does `free` of the view panic with the message for its kind?
+refused(what: string, how: int, b: byte[], xs: int[], want: string) {
+    try {
+        if how == 0 { drop(b) }
+        if how == 1 { drop_ints(xs) }
+        if how == 2 { drop_tail(xs) }
+        if how == 3 { drop_match_tail(xs) }
+        println("FAIL: ${what}: no panic")
+        exit(1)
+    } catch e {
+        check(string.ends_with(e, want) != 0, "${what}: the panic says why (${e})")
+    }
+}
+
+// The owners, freed: a `make` buffer, and a raw pointer's view from its start.
+round() -> int {
+    b = make([]byte, 16)
+    b[3] = 9
+    total = b[3]
+    drop(b)
+    c = make([]byte, 8)
+    p = c as ptr
+    owned = (p as byte[])[0..8]
+    owned[1] = 4
+    total = total + owned[1]
+    free(owned)
+    free(nothing())
+    return total
+}
+
+main() {
+    view = "a view of elements another slice or an array holds, which owns nothing"
+    ro = "a read-only view of a string, which owns nothing"
+    b = make([]byte, 8)
+    xs = make([]int, 3)
+    refused("a sub-slice from an offset", 0, b[1..], xs, view)
+    refused("a sub-slice from the start", 0, b[0..4], xs, view)
+    refused("a sub-slice of a sub-slice", 0, b[2..6][0..2], xs, view)
+    refused("a string's bytes", 0, string.bytes("abc"), xs, ro)
+    refused("a sub-slice of a string's bytes", 0, string.bytes("abc")[1..], xs, ro)
+    arr = [1, 2, 3]
+    refused("an array viewed as a slice", 1, b, arr, view)
+    refused("a clause's list tail", 2, b, xs, view)
+    refused("a match's list tail", 3, b, xs, view)
+    h = Holder { buf: b[2..] }
+    refused("a field holding a sub-slice", 0, h.buf, xs, view)
+    check(b[0] == 0 && xs.len == 3, "the buffers the views were made of are intact")
+    free(xs)
+    drop(b)
+
+    check(round() == 13, "the owners, used and freed")
+    if mem.heap_in_use_exact() {
+        g = mem.steady_growth(|| {
+                round()
+            }, 5)
+        check(g == 0, "the heap grew by ${g} bytes")
+    }
+    println("ok")
+}

@@ -7,7 +7,7 @@ import std.list
 // ---- Widget library (inside main to avoid top-level vars) ----
 
 // btn: adds label to ctx[0], boxed handler to ctx[1]
-btn(_ctx: ptr, label: string, action: fn) {
+btn(_ctx: ptr, label: string, action: @keep fn) {
     labs, _ = list.get(_ctx, 0)
     hdls, _ = list.get(_ctx, 1)
     list.add(labs, label)

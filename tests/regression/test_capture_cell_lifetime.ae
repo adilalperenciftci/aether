@@ -81,7 +81,7 @@ bump_twice(n: int) -> int {
 
 // (5) A closure stored into a list: list.free runs the env destructor,
 //     which releases the cell after the declaring scope already has.
-stash(l: ptr, cb: fn) {
+stash(l: ptr, cb: @keep fn) {
     _ = list.add(l, cb)
 }
 

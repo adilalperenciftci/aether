@@ -59,18 +59,59 @@ Type* hoist_decl_type(ASTNode* decl) {
     return t;
 }
 
-static Type* join_walk(ASTNode* n, const char* name, Type* acc) {
-    if (!n) return acc;
-    if (n->type == AST_CLOSURE || n->type == AST_QUOTE) return acc;   /* its own function */
-    if (n->type == AST_VARIABLE_DECLARATION && n->value && n->type_inferred &&
-        strcmp(n->value, name) == 0) {
+/* Is `t` a number kind (numeric_join_type's)? */
+static int is_number_type(Type* t) {
+    Type* probe = t ? numeric_join_type(t, t) : NULL;
+    if (!probe) return 0;
+    free_type(probe);
+    return 1;
+}
+
+/* #3064: the numeric bindings of `name` under `n` (closures excluded),
+ * joined as an if-expression's branches are (branch_join_type), each
+ * binding's value the arm a literal is read from (join_arm_after): `x = -1`
+ * in one branch and `x = u` (a uint32) in another is a long, `x = 0` beside
+ * it a uint32. Two that no type holds (a signed one beside a uint64) set
+ * `*apart`. */
+static void join_walk(ASTNode* n, const char* name, Type** acc, const ASTNode** arm,
+                      int* apart) {
+    if (!n || *apart) return;
+    if (n->type == AST_CLOSURE || n->type == AST_QUOTE) return;   /* its own function */
+    if (n->type == AST_VARIABLE_DECLARATION && n->value && strcmp(n->value, name) == 0) {
         Type* t = n->node_type;
-        if ((!t || t->kind == TYPE_UNKNOWN) && n->child_count > 0 && n->children[0])
-            t = n->children[0]->node_type;
-        Type* j = numeric_join_type(acc, t);
-        if (j) { free_type(acc); acc = j; }
+        /* A declaration that writes its type is that type, its value no
+         * literal arm. */
+        const ASTNode* v = n->type_inferred && n->child_count > 0 ? n->children[0] : NULL;
+        if ((!t || t->kind == TYPE_UNKNOWN) && v) t = v->node_type;
+        if (is_number_type(t)) {
+            if (!*acc) {
+                *acc = clone_type(t);
+                *arm = v;
+            } else {
+                Type* j = branch_join_type(*acc, *arm, t, v);
+                if (!j) {
+                    *apart = 1;
+                    return;
+                }
+                free_type(*acc);
+                *acc = j;
+                *arm = join_arm_after(*arm, v);
+            }
+        }
     }
-    for (int i = 0; i < n->child_count; i++) acc = join_walk(n->children[i], name, acc);
+    for (int i = 0; i < n->child_count; i++) join_walk(n->children[i], name, acc, arm, apart);
+}
+
+Type* hoist_numeric_join(ASTNode* root, const char* name) {
+    if (!root || !name) return NULL;
+    Type* acc = NULL;
+    const ASTNode* arm = NULL;
+    int apart = 0;
+    for (int i = 0; i < root->child_count; i++) join_walk(root->children[i], name, &acc, &arm, &apart);
+    if (apart && acc) {
+        free_type(acc);
+        return NULL;
+    }
     return acc;
 }
 
@@ -129,11 +170,12 @@ Type* hoist_join_type(ASTNode* scope_body, const char* name, Type* seed) {
         null_string_walk(scope_body, name, &strings, &others);
         if (strings && !others) return create_type(TYPE_STRING);
     }
-    Type* probe = numeric_join_type(seed, seed);
-    if (!probe) return NULL;          /* not a numeric kind: nothing to join */
-    free_type(probe);
-    Type* acc = join_walk(scope_body, name, clone_type(seed));
-    if (acc && acc->kind == seed->kind) { free_type(acc); return NULL; }
+    if (!is_number_type(seed)) return NULL;   /* not a numeric kind: nothing to join */
+    /* #3064: the bindings' own join, as an if-expression's; with two that
+     * no type holds, the seed stands and the checker refuses the other
+     * (sibling_binding_other_type). */
+    Type* acc = hoist_numeric_join(scope_body, name);
+    if (acc && types_equal(acc, seed)) { free_type(acc); return NULL; }
     return acc;
 }
 

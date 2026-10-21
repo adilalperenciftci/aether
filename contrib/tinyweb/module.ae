@@ -12,7 +12,7 @@ import std.string
 import std.bytes
 import std.mem
 
-exports (
+exports(
     ALL, GET, POST, PUT, DELETE, PATCH, HEAD, OPTIONS, CONNECT, TRACE,
     LINK, UNLINK, LOCK, UNLOCK, PROPFIND, PROPPATCH, MKCOL, COPY, MOVE,
     REPORT, SEARCH, PURGE, REBIND, UNBIND, ACL,
@@ -47,62 +47,62 @@ exports (
 // ---------------------------------------------------------------------------
 // Constants — HTTP methods
 // ---------------------------------------------------------------------------
-const ALL     = 0
-const GET     = 1
-const POST    = 2
-const PUT     = 3
-const DELETE  = 4
-const PATCH   = 5
-const HEAD    = 6
+const ALL = 0
+const GET = 1
+const POST = 2
+const PUT = 3
+const DELETE = 4
+const PATCH = 5
+const HEAD = 6
 const OPTIONS = 7
 const CONNECT = 8
-const TRACE   = 9
-const LINK    = 10
-const UNLINK  = 11
-const LOCK    = 12
-const UNLOCK  = 13
-const PROPFIND  = 14
+const TRACE = 9
+const LINK = 10
+const UNLINK = 11
+const LOCK = 12
+const UNLOCK = 13
+const PROPFIND = 14
 const PROPPATCH = 15
-const MKCOL   = 16
-const COPY    = 17
-const MOVE    = 18
-const REPORT  = 19
-const SEARCH  = 20
-const PURGE   = 21
-const REBIND  = 22
-const UNBIND  = 23
-const ACL     = 24
+const MKCOL = 16
+const COPY = 17
+const MOVE = 18
+const REPORT = 19
+const SEARCH = 20
+const PURGE = 21
+const REBIND = 22
+const UNBIND = 23
+const ACL = 24
 
 // Filter actions
 const CONTINUE = 1
-const STOP     = 0
+const STOP = 0
 
 // Convert a method constant to the HTTP method string for the C layer
 method_to_string(method: int) {
-    if method == GET     { return "GET" }
-    if method == POST    { return "POST" }
-    if method == PUT     { return "PUT" }
-    if method == DELETE  { return "DELETE" }
-    if method == PATCH   { return "PATCH" }
-    if method == HEAD    { return "HEAD" }
+    if method == GET { return "GET" }
+    if method == POST { return "POST" }
+    if method == PUT { return "PUT" }
+    if method == DELETE { return "DELETE" }
+    if method == PATCH { return "PATCH" }
+    if method == HEAD { return "HEAD" }
     if method == OPTIONS { return "OPTIONS" }
     if method == CONNECT { return "CONNECT" }
-    if method == TRACE   { return "TRACE" }
-    if method == LINK    { return "LINK" }
-    if method == UNLINK  { return "UNLINK" }
-    if method == LOCK    { return "LOCK" }
-    if method == UNLOCK  { return "UNLOCK" }
-    if method == PROPFIND  { return "PROPFIND" }
+    if method == TRACE { return "TRACE" }
+    if method == LINK { return "LINK" }
+    if method == UNLINK { return "UNLINK" }
+    if method == LOCK { return "LOCK" }
+    if method == UNLOCK { return "UNLOCK" }
+    if method == PROPFIND { return "PROPFIND" }
     if method == PROPPATCH { return "PROPPATCH" }
-    if method == MKCOL   { return "MKCOL" }
-    if method == COPY    { return "COPY" }
-    if method == MOVE    { return "MOVE" }
-    if method == REPORT  { return "REPORT" }
-    if method == SEARCH  { return "SEARCH" }
-    if method == PURGE   { return "PURGE" }
-    if method == REBIND  { return "REBIND" }
-    if method == UNBIND  { return "UNBIND" }
-    if method == ACL     { return "ACL" }
+    if method == MKCOL { return "MKCOL" }
+    if method == COPY { return "COPY" }
+    if method == MOVE { return "MOVE" }
+    if method == REPORT { return "REPORT" }
+    if method == SEARCH { return "SEARCH" }
+    if method == PURGE { return "PURGE" }
+    if method == REBIND { return "REBIND" }
+    if method == UNBIND { return "UNBIND" }
+    if method == ACL { return "ACL" }
     return "GET"
 }
 
@@ -204,11 +204,11 @@ response_json(res: ptr, json_body: string) {
 // ---------------------------------------------------------------------------
 // WebSocket frame opcodes
 // ---------------------------------------------------------------------------
-const WS_OPCODE_TEXT   = 1
+const WS_OPCODE_TEXT = 1
 const WS_OPCODE_BINARY = 2
-const WS_OPCODE_CLOSE  = 8
-const WS_OPCODE_PING   = 9
-const WS_OPCODE_PONG   = 10
+const WS_OPCODE_CLOSE = 8
+const WS_OPCODE_PING = 9
+const WS_OPCODE_PONG = 10
 
 // ---------------------------------------------------------------------------
 // WebSocket handshake helpers
@@ -232,7 +232,7 @@ extern ws_unmask(payload: string, mask_key: string, len: int) -> string @heap
 // ---------------------------------------------------------------------------
 
 // A route entry: { method, path_pattern, handler_closure }
-route_entry(method: int, path_pattern: string, handler: fn) {
+route_entry(method: int, path_pattern: string, handler: @keep fn) {
     entry = map_new()
     map_put(entry, "method", method)
     map_put(entry, "path", path_pattern)
@@ -241,7 +241,7 @@ route_entry(method: int, path_pattern: string, handler: fn) {
 }
 
 // A filter entry: { method, path_pattern, filter_closure }
-filter_entry(method: int, path_pattern: string, handler: fn) {
+filter_entry(method: int, path_pattern: string, handler: @keep fn) {
     entry = map_new()
     map_put(entry, "method", method)
     map_put(entry, "path", path_pattern)
@@ -250,7 +250,7 @@ filter_entry(method: int, path_pattern: string, handler: fn) {
 }
 
 // A websocket entry: { path, handler_closure }
-ws_entry(path_pattern: string, handler: fn) {
+ws_entry(path_pattern: string, handler: @keep fn) {
     entry = map_new()
     map_put(entry, "path", path_pattern)
     map_put(entry, "handler", box_closure(handler))
@@ -283,7 +283,7 @@ static_entry(base_path: string, directory: string) {
 
 // end_point(method, pattern) |req, res, ctx| { ... }
 // When inside a path() block, _ctx is the path-group map
-end_point(_ctx: ptr, method: int, pattern: string, handler: fn) {
+end_point(_ctx: ptr, method: int, pattern: string, handler: @keep fn) {
     routes, _ = map.get(_ctx, "routes")
     prefix, _ = map.get_string(_ctx, "prefix")
     full_path = "${prefix}${pattern}"
@@ -291,7 +291,7 @@ end_point(_ctx: ptr, method: int, pattern: string, handler: fn) {
 }
 
 // filter(method, pattern) |req, res, ctx| { ... }
-filter(_ctx: ptr, method: int, pattern: string, handler: fn) {
+filter(_ctx: ptr, method: int, pattern: string, handler: @keep fn) {
     filters, _ = map.get(_ctx, "filters")
     prefix, _ = map.get_string(_ctx, "prefix")
     full_path = "${prefix}${pattern}"
@@ -299,7 +299,7 @@ filter(_ctx: ptr, method: int, pattern: string, handler: fn) {
 }
 
 // filter(pattern) |req, res, ctx| { ... }  — applies to ALL methods
-filter_all(_ctx: ptr, pattern: string, handler: fn) {
+filter_all(_ctx: ptr, pattern: string, handler: @keep fn) {
     // Inlined: calling filter() directly would trip the DSL _ctx auto-injector
     // (it treats filter as a 3-arg builder, so filter(_ctx, ...) looks like 4 args).
     filters, _ = map.get(_ctx, "filters")
@@ -309,7 +309,7 @@ filter_all(_ctx: ptr, pattern: string, handler: fn) {
 }
 
 // web_socket(path) |message, sender, ctx| { ... }
-web_socket(_ctx: ptr, ws_path: string, handler: fn) {
+web_socket(_ctx: ptr, ws_path: string, handler: @keep fn) {
     ws_handlers, _ = map.get(_ctx, "ws_handlers")
     prefix, _ = map.get_string(_ctx, "prefix")
     full_path = "${prefix}${ws_path}"
@@ -448,22 +448,22 @@ with_keep_alive(srv: ptr, enabled: int) {
 // ---------------------------------------------------------------------------
 
 // Handler receives: (path: string, error_message: string)
-on_error(srv: ptr, handler: fn) {
+on_error(srv: ptr, handler: @keep fn) {
     map_put(srv, "on_error", box_closure(handler))
 }
 
 // Handler receives: (error_message: string)
-on_server_error(srv: ptr, handler: fn) {
+on_server_error(srv: ptr, handler: @keep fn) {
     map_put(srv, "on_server_error", box_closure(handler))
 }
 
 // Handler receives: (path: string, error_message: string)
-on_ws_timeout(srv: ptr, handler: fn) {
+on_ws_timeout(srv: ptr, handler: @keep fn) {
     map_put(srv, "on_ws_timeout", box_closure(handler))
 }
 
 // Handler receives: (path: string, error_message: string)
-on_ws_error(srv: ptr, handler: fn) {
+on_ws_error(srv: ptr, handler: @keep fn) {
     map_put(srv, "on_ws_error", box_closure(handler))
 }
 
@@ -486,7 +486,7 @@ _invoke_error_handler(srv: ptr, key: string, arg1: string, arg2: string) {
 // ---------------------------------------------------------------------------
 
 // Register a statistics callback — handler receives a stats map
-on_stats(srv: ptr, handler: fn) {
+on_stats(srv: ptr, handler: @keep fn) {
     map_put(srv, "on_stats", box_closure(handler))
 }
 
@@ -604,9 +604,9 @@ ws_read_frame(sock: ptr) {
     byte0 = string.char_at(hdr, 0)
     byte1 = string.char_at(hdr, 1)
 
-    opcode = byte0 - ((byte0 / 16) * 16)  // byte0 & 0x0F
-    masked = byte1 / 128                    // (byte1 & 0x80) != 0
-    payload_len = byte1 - (masked * 128)    // byte1 & 0x7F
+    opcode = byte0 - ((byte0 / 16) * 16) // byte0 & 0x0F
+    masked = byte1 / 128 // (byte1 & 0x80) != 0
+    payload_len = byte1 - (masked * 128) // byte1 & 0x7F
 
     // Extended payload length
     if payload_len == 126 {
@@ -756,7 +756,7 @@ ws_accept_loop(tcp_server: ptr, ws_handlers: ptr) {
 // ---------------------------------------------------------------------------
 
 // SSE endpoint entry: { path, handler_closure }
-sse_entry(path_pattern: string, handler: fn) {
+sse_entry(path_pattern: string, handler: @keep fn) {
     entry = map_new()
     map_put(entry, "path", path_pattern)
     map_put(entry, "handler", box_closure(handler))
@@ -765,7 +765,7 @@ sse_entry(path_pattern: string, handler: fn) {
 
 // DSL function: sse_endpoint("/events") |stream| { ... }
 // The handler receives an SSE stream object and uses sse_send() to push events.
-sse_endpoint(_ctx: ptr, sse_path: string, handler: fn) {
+sse_endpoint(_ctx: ptr, sse_path: string, handler: @keep fn) {
     sse_handlers, _ = map.get(_ctx, "sse_handlers")
     prefix, _ = map.get_string(_ctx, "prefix")
     full_path = "${prefix}${sse_path}"

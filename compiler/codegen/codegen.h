@@ -718,6 +718,9 @@ int needs_optional_coerce(ASTNode* value, Type* target);   // #340
 int emit_int_ptr_bridged(CodeGenerator* gen, ASTNode* expr, TypeKind target);  // #2218
 void emit_sum_coerced(CodeGenerator* gen, ASTNode* value, Type* target);   // #914
 int needs_sum_coerce(ASTNode* value, Type* target);   // #914
+/* #3071: a variant as an array literal's element in an array of a sum,
+ * wrapped as the sum (and taken, when the sum owns); 0 when it needs none. */
+int emit_sum_element(CodeGenerator* gen, ASTNode* el, Type* elem);
 
 // Utility functions
 void indent(CodeGenerator* gen);

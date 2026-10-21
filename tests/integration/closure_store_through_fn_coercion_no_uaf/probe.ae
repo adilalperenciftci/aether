@@ -19,19 +19,19 @@
 struct Holder { cb: ptr }
 
 // (1) aether-ui's vg setter: a struct field through a cast pointer.
-set_cb(p: ptr, h: fn) {
+set_cb(p: ptr, h: @keep fn) {
     e = p as *Holder
     e.cb = h
 }
 
 // (2) The same store, one level further down: the setter forwards.
-forward_cb(p: ptr, h: fn) {
+forward_cb(p: ptr, h: @keep fn) {
     set_cb(p, h)
 }
 
 // (3) A field of a struct reached through another struct.
 struct Outer { inner: ptr }
-set_cb_nested(o: ptr, h: fn) {
+set_cb_nested(o: ptr, h: @keep fn) {
     w = o as *Outer
     e = w.inner as *Holder
     e.cb = h
@@ -48,7 +48,7 @@ install_local(p: ptr, tag: string) {
 // (5) aether-ui's workaround, `kept = h; e.cb = kept`: since #2670/#2671 the
 //     alias takes a reference of its own and releases it at the setter's
 //     end, so the store has to keep one of its own too.
-set_cb_alias(p: ptr, h: fn) {
+set_cb_alias(p: ptr, h: @keep fn) {
     kept = h
     e = p as *Holder
     e.cb = kept

@@ -32,7 +32,7 @@ struct Holder {
     cb: ptr
 }
 
-set_cb(h: *Holder, c: fn) {
+set_cb(h: *Holder, c: @keep fn) {
     h.cb = c
 }
 

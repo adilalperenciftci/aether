@@ -807,13 +807,16 @@ from_ptr(p: ptr) -> (string, string) {
 // scanning (indexing, sub-slicing) without re-measuring the string on every
 // access the way string_char_at_n's separate known_length parameter does.
 // BORROWED: valid only as long as `s` itself is, exactly like any slice over
-// someone else's storage — do not free it, and do not write through it (an
-// AetherString's payload is shared via its refcount; a byte[] has no way to
-// mark that sharing const, so treat this view as read-only by convention).
+// someone else's storage; do not free it. Reads cost what any slice's do.
+// #3025: a write through it (an element store, `+=`, `++`), or through any
+// view made from it, here or in a function it is passed to, panics with "a
+// write through a read-only view of a string": a literal's bytes are in
+// read-only memory, and a counted string's are shared through its
+// refcount. Copy the bytes into a buffer of your own to change them.
 bytes(s: string) -> byte[] {
     n = string_length(s)
     if n <= 0 { return null }
-    return (aether_string_raw_ptr(s) as byte[])[0..n]
+    return __slice_readonly((aether_string_raw_ptr(s) as byte[])[0..n])
 }
 
 // A bounded, OWNED string[] snapshot of a native string-array handle's

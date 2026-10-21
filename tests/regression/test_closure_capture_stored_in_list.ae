@@ -19,7 +19,7 @@ extern exit(code: int)
 
 // Store a callback into the list without invoking it — the closure (and
 // its env) escapes into the list, which becomes its owner.
-stash(l: ptr, cb: fn) {
+stash(l: ptr, cb: @keep fn) {
     _ = list.add(l, cb)
 }
 

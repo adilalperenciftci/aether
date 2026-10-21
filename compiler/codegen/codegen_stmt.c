@@ -1520,7 +1520,9 @@ static void generate_list_pattern_bindings(CodeGenerator* gen, ASTNode* pattern,
                  * length `.len`. #2995: it has no `<name>_len` companion,
                  * which is a raw pointer's alone; the checker never
                  * declared one, and the C local hid a user's of that name. */
-                print_line(gen, "AetherSlice %s = aether_slice_make(&_match_arr[1], (uint64_t)(%s - 1));",
+                print_line(gen,
+                           "AetherSlice %s = aether_slice_borrowed(aether_slice_make("
+                           "&_match_arr[1], (uint64_t)(%s - 1)));",   /* #3072: owns nothing */
                            tail->value, len_name);
                 Type* tt = create_array_type(clone_type(elem_t), -1);
                 mark_var_declared_typed(gen, tail->value, tt);
@@ -3078,7 +3080,8 @@ static void emit_array_field_take(CodeGenerator* gen, int kind, const char* es, 
             if (kind == AF_STRING) emit_owned_string_element(gen, v);
             else if (kind == AF_CLOSURE) emit_closure_take(gen, v);
             else if (kind == AF_STRUCT) emit_struct_take(gen, v, es, NULL);
-            else generate_expression(gen, v);
+            else if (!emit_sum_element(gen, v, at->element_type))   /* #3071 */
+                generate_expression(gen, v);
             fprintf(gen->output, ";");
         }
         return;
@@ -3572,7 +3575,8 @@ void emit_value_take(CodeGenerator* gen, ASTNode* e, Type* t) {
     else if (t && t->kind == TYPE_FUNCTION && !t->is_fnptr) emit_closure_take(gen, e);
     else if (sname) emit_struct_take(gen, e, sname, NULL);
     else if (own_type_owns(gen, t)) emit_composite_take(gen, e, t);
-    else generate_expression(gen, e);
+    else if (t && t->kind == TYPE_SUM && needs_sum_coerce(e, t)) emit_sum_coerced(gen, e, t);
+    else generate_expression(gen, e);   /* #3071: a variant into a sum is wrapped above */
 }
 
 /* #2894: the array lvalue `dst`, of type `at`, filled with the array value
@@ -4922,11 +4926,11 @@ const char* promoted_cell_pointer(const char* c_type, const char* name) {
  * a closure captured was released by the closure's env and by the cell
  * (#2514). A literal is stored as it is: the cell frees only refcounted
  * strings. */
-static void emit_cell_element_value(CodeGenerator* gen, int str_elem, ASTNode* v) {
+static void emit_cell_element_value(CodeGenerator* gen, int str_elem, ASTNode* v, Type* elem) {
     if (str_elem && !(v->type == AST_LITERAL && v->node_type &&
                       v->node_type->kind == TYPE_STRING)) {
         emit_string_take_owned(gen, v, 1);
-    } else {
+    } else if (!emit_sum_element(gen, v, elem)) {   /* #3071: a variant into a sum */
         generate_expression(gen, v);
     }
 }
@@ -4986,7 +4990,7 @@ static int emit_opt_string_cell_value(CodeGenerator* gen, ASTNode* value) {
     }
     if (!(value->node_type && value->node_type->kind == TYPE_OPTIONAL)) {
         fprintf(gen->output, "(ae_opt_string){ .has = 1, .val = ");
-        emit_cell_element_value(gen, 1, value);
+        emit_cell_element_value(gen, 1, value, NULL);
         fprintf(gen->output, " }");
         return -1;
     }
@@ -5063,11 +5067,11 @@ static void emit_cell_store(CodeGenerator* gen, const char* name, Type* t, ASTNo
          * handed over as it stood was the closure's environment copy, its
          * header in place of the characters, freed with the environment. */
         fprintf(gen->output, "_aether_ptr_cell_set_str(%s, ", name);
-        emit_cell_element_value(gen, 1, value);
+        emit_cell_element_value(gen, 1, value, NULL);
         fprintf(gen->output, ");\n");
     } else if (ct && strcmp(ct, "const char*") == 0) {
         fprintf(gen->output, "_aether_str_cell_set_shared(%s, ", name);
-        emit_cell_element_value(gen, 1, value);
+        emit_cell_element_value(gen, 1, value, NULL);
         fprintf(gen->output, ");\n");
     } else if (sname) {
         /* #2497: a struct owned elsewhere is copied in. */
@@ -5107,7 +5111,7 @@ static int emit_cell_string_element_store(CodeGenerator* gen, ASTNode* lhs, ASTN
     fprintf(gen->output, "_aether_str_cell_set(&");
     generate_expression(gen, lhs);
     fprintf(gen->output, ", ");
-    emit_cell_element_value(gen, 1, rhs);
+    emit_cell_element_value(gen, 1, rhs, NULL);
     fprintf(gen->output, ");\n");
     return 1;
 }
@@ -5127,7 +5131,7 @@ static void emit_owned_str_array_store(CodeGenerator* gen, ASTNode* stmt, Type* 
         fprintf(gen->output, "{ const char* _ae_sarr[%d] = {0};", n);
         for (int k = 0; k < src->child_count && k < n; k++) {
             fprintf(gen->output, " _ae_sarr[%d] = ", k);
-            emit_cell_element_value(gen, 1, src->children[k]);
+            emit_cell_element_value(gen, 1, src->children[k], NULL);
             fprintf(gen->output, ";");
         }
     } else {
@@ -5199,7 +5203,7 @@ static int emit_cell_array_store(CodeGenerator* gen, ASTNode* stmt) {
     fprintf(gen->output, "{ %s _ae_cell_arr[%d] = {0};", elem, at->array_size);
     for (int k = 0; k < lit->child_count; k++) {
         fprintf(gen->output, " _ae_cell_arr[%d] = ", k);
-        emit_cell_element_value(gen, str_elem, lit->children[k]);
+        emit_cell_element_value(gen, str_elem, lit->children[k], at->element_type);
         fprintf(gen->output, ";");
     }
     if (str_elem) {
@@ -5337,9 +5341,10 @@ void emit_promoted_cell_declaration(CodeGenerator* gen, const char* name,
             aether_error_report(&e);
         } else if (lit && lit->type == AST_ARRAY_LITERAL) {
             int str_elem = strcmp(elem, "const char*") == 0;
+            Type* et = var_type && var_type->kind == TYPE_ARRAY ? var_type->element_type : NULL;
             for (int k = 0; k < lit->child_count; k++) {
                 fprintf(gen->output, " (*%s)[%d] = ", name, k);
-                emit_cell_element_value(gen, str_elem, lit->children[k]);
+                emit_cell_element_value(gen, str_elem, lit->children[k], et);
                 fprintf(gen->output, ";");
             }
         }
@@ -5351,7 +5356,7 @@ void emit_promoted_cell_declaration(CodeGenerator* gen, const char* name,
             emit_closure_cell_value(gen, init_expr, init_text);
         } else if (init_expr && strcmp(c_type, "const char*") == 0) {
             /* #2461, #2514: a string cell frees what it holds. */
-            emit_cell_element_value(gen, 1, init_expr);
+            emit_cell_element_value(gen, 1, init_expr, NULL);
         } else if (strcmp(c_type, "StringSeq*") == 0) {
             /* #2921: a string sequence cell holds a reference of its own. */
             if (init_expr) emit_seq_take(gen, init_expr);
@@ -7934,6 +7939,18 @@ void emit_sum_coerced(CodeGenerator* gen, ASTNode* value, Type* target) {
     fprintf(gen->output, " }");
 }
 
+/* #3071: an array literal in an array of a sum (`let xs: Shape[2] = [c,
+ * q]`) holds its variants as the sum, as a sum's other slots do: each
+ * wrapped, and taken as a place of the variant's struct takes it when the
+ * sum owns (emit_composite_take). Returns 0, emitting nothing, for an
+ * element that needs no wrap. */
+int emit_sum_element(CodeGenerator* gen, ASTNode* el, Type* elem) {
+    if (!elem || elem->kind != TYPE_SUM || !needs_sum_coerce(el, elem)) return 0;
+    if (own_type_owns(gen, elem)) emit_composite_take(gen, el, elem);
+    else emit_sum_coerced(gen, el, elem);
+    return 1;
+}
+
 // #340: optional-chain assignment `recv?.field = rhs` — a no-op when the
 // optional is `none`, else writes the field. Returns 1 if it emitted the
 // store (so the caller skips its normal assignment path), 0 otherwise.
@@ -9941,7 +9958,8 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                         for (int ei = 0; ei < lit->child_count; ei++) {
                             if (ei > 0) print_indent(gen);
                             fprintf(gen->output, "%s[%d] = ", stmt->value, ei);
-                            generate_expression(gen, lit->children[ei]);
+                            if (!emit_sum_element(gen, lit->children[ei], hoisted->element_type))
+                                generate_expression(gen, lit->children[ei]);   /* #3071 */
                             fprintf(gen->output, ";\n");
                         }
                         if (lit->child_count < hoisted->array_size) {
@@ -10380,7 +10398,9 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                             if (slice_lit_len == 0) {
                                 fprintf(gen->output, "aether_slice_make((void*)0, 0)");
                             } else if (slice_lit_len > 0) {
-                                fprintf(gen->output, "aether_slice_make(_ae_slit_%s, %d)",
+                                /* #3072: a view of the literal's array */
+                                fprintf(gen->output,
+                                        "aether_slice_borrowed(aether_slice_make(_ae_slit_%s, %d))",
                                         stmt->value, slice_lit_len);
                             } else if (copy_alias) {
                                 fprintf(gen->output, "aether_uniform_heap_str(");
@@ -10394,7 +10414,7 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                                 fprintf(gen->output, "{");
                                 for (int ei = 0; ei < init_lit->child_count; ei++) {
                                     fprintf(gen->output, ei ? ", " : " ");
-                                    emit_cell_element_value(gen, 1, init_lit->children[ei]);
+                                    emit_cell_element_value(gen, 1, init_lit->children[ei], NULL);
                                 }
                                 fprintf(gen->output, " }");
                             } else if (decl_struct_take) {

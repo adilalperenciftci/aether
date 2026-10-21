@@ -1,0 +1,153 @@
+// #3071: an array literal whose place is an array of a sum holds any of the
+// sum's variants, each wrapped as the sum, wherever the literal is
+// generated: a typed declaration, an argument (a sized array and a slice), a
+// written result, a struct field, and a store into a local and into a field.
+// The place's type never reached the literal, which was an array of its
+// first element's type: on 0.837 the C compiler refused the unwrapped
+// elements, and #3067's element check refused a second variant. Each place
+// runs twice: with variants of plain fields, and with a variant that owns a
+// string, in rounds that must not grow the heap. A literal of plain numbers
+// passed to a sized-array parameter, emitted as a bare `{3, 4}` that C
+// refused, is a temporary now too.
+
+import std.mem
+import std.string
+
+extern exit(code: int)
+
+struct Circle {
+    r: int
+}
+
+struct Square {
+    side: int
+}
+
+type Shape = Circle | Square
+
+struct Scene {
+    shapes: Shape[2]
+}
+
+struct Named {
+    name: string
+}
+
+struct Num {
+    n: int
+}
+
+type Item = Named | Num
+
+struct Box {
+    items: Item[2]
+}
+
+check(ok: bool, what: string) {
+    if !ok {
+        println("FAIL: ${what}")
+        exit(1)
+    }
+}
+
+area(s: Shape) -> int {
+    let a: int = match s {
+        Circle -> 3 * s.r * s.r
+        Square -> s.side * s.side
+    }
+    return a
+}
+
+sum2(xs: Shape[2]) -> int {
+    return area(xs[0]) + area(xs[1])
+}
+
+sum_all(xs: Shape[]) -> int {
+    total = 0
+    i = 0
+    while i < xs.len {
+        total = total + area(xs[i])
+        i = i + 1
+    }
+    return total
+}
+
+made(k: int) -> Shape[2] {
+    return [Circle { r: k }, Square { side: k }]
+}
+
+label(i: Item) -> int {
+    let k: int = match i {
+        Named -> string.length(i.name)
+        Num -> i.n
+    }
+    return k
+}
+
+total2(xs: Item[2]) -> int {
+    return label(xs[0]) + label(xs[1])
+}
+
+total(xs: Item[]) -> int {
+    t = 0
+    i = 0
+    while i < xs.len {
+        t = t + label(xs[i])
+        i = i + 1
+    }
+    return t
+}
+
+made_items(k: int) -> Item[2] {
+    return [Named { name: string.concat("ab", "c") }, Num { n: k }]
+}
+
+ints2(xs: int[2]) -> int {
+    return xs[0] * 10 + xs[1]
+}
+
+// The places with variants that own a string.
+owning_round() -> int {
+    a = Named { name: string.concat("x", "yz") }
+    b = Num { n: 4 }
+    let xs: Item[2] = [a, b]
+    t = total2(xs)
+    t = t + total2([b, Named { name: string.concat("q", "") }])
+    t = t + total([a, b, a])
+    m = made_items(5)
+    t = t + total2(m)
+    bx = Box { items: [b, a] }
+    t = t + total2(bx.items)
+    xs = [b, b]
+    t = t + total2(xs)
+    bx.items = [a, a]
+    t = t + total2(bx.items)
+    return t
+}
+
+main() {
+    c = Circle { r: 1 }
+    q = Square { side: 2 }
+    let xs: Shape[2] = [c, q]
+    check(sum2(xs) == 3 + 4, "a declaration")
+    check(sum2([q, c]) == 4 + 3, "a sized array argument")
+    check(sum_all([c, q, c]) == 3 + 4 + 3, "a slice argument")
+    m = made(2)
+    check(sum2(m) == 12 + 4, "a written result")
+    s = Scene { shapes: [q, c] }
+    check(area(s.shapes[0]) == 4 && area(s.shapes[1]) == 3, "a struct field")
+    xs = [q, q]
+    check(sum2(xs) == 8, "a store into the local")
+    s.shapes = [c, c]
+    check(sum2(s.shapes) == 6, "a store into the field")
+    check(ints2([3, 4]) == 34, "plain numbers into a sized array parameter")
+
+    check(owning_round() == 7 + 5 + 10 + 8 + 7 + 8 + 6, "the places, owning variants")
+    if mem.heap_in_use_exact() {
+        g = mem.steady_growth(|| {
+                owning_round()
+            }, 5)
+        check(g == 0, "the heap grew by ${g} bytes")
+    }
+    println("ok")
+}

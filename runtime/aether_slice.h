@@ -35,9 +35,28 @@ extern "C" {
 typedef struct AetherSlice {
     void*    ptr;
     uint64_t len;
+    /* #3025: AETHER_SLICE_READONLY, or 0. Beside `len` and read only where
+     * an element is stored, so a read costs what it did. */
+    uint32_t flags;
 } AetherSlice;
 
 #define AETHER_SLICE_UNBOUNDED UINT64_MAX
+
+/* #3025: a view of memory the program may read and not write: the bytes of
+ * a string (`string.bytes(s)`), a literal's in read-only data or a counted
+ * string's that others share. A store through it panics, by name, where an
+ * element store is bounds-checked; every view made from it (a sub-slice, a
+ * pattern's tail, a copy) carries the mark. */
+#define AETHER_SLICE_READONLY 1u
+
+/* #3072: a view of elements another slice or an array holds: a sub-slice of
+ * a bounded slice (or one at an offset of any view), a list pattern's tail,
+ * an array viewed as a slice. It owns nothing (R1, R2), so `free` of it is
+ * a named panic, as `free` of a read-only view is: the allocator would take
+ * a pointer it never handed out, or one the owner still holds. A view of a
+ * raw pointer bounded at its start, `(p as T[])[0..n]`, is how a program
+ * holds a buffer it owns, and is not marked. */
+#define AETHER_SLICE_BORROWED 2u
 
 /* `const void*`: a view is made over an array of strings too, `const char*
  * xs[N]`. Taken as `void*`, cl.exe read the elements' `const` as the array's
@@ -47,7 +66,30 @@ static inline AetherSlice aether_slice_make(const void* ptr, uint64_t len) {
     AetherSlice s;
     s.ptr = (void*)ptr;
     s.len = len;
+    s.flags = 0;
     return s;
+}
+
+/* #3025: `s` as a read-only view: the same elements, a store through it a
+ * panic. */
+static inline AetherSlice aether_slice_readonly(AetherSlice s) {
+    s.flags |= AETHER_SLICE_READONLY;
+    return s;
+}
+
+/* #3072: `s` as a view of elements something else holds (an array viewed
+ * as a slice, a list pattern's tail): `free` of it panics. */
+static inline AetherSlice aether_slice_borrowed(AetherSlice s) {
+    s.flags |= AETHER_SLICE_BORROWED;
+    return s;
+}
+
+/* A view of `s`'s memory at `ptr`, `len` long, with `s`'s marks: a
+ * sub-slice, a list pattern's tail. */
+static inline AetherSlice aether_slice_derive(AetherSlice s, const void* ptr, uint64_t len) {
+    AetherSlice d = aether_slice_make(ptr, len);
+    d.flags = s.flags;
+    return d;
 }
 
 /* A view over a raw pointer of unknown extent. */
@@ -56,7 +98,7 @@ static inline AetherSlice aether_slice_view(void* ptr) {
 }
 
 /* `make([]T, n)`: a fresh zeroed buffer of n elements, viewed as a slice.
- * The caller frees it with `free(s)` (the slice decays to its pointer). */
+ * The caller frees it with `free(s)` (aether_slice_free). */
 static inline AetherSlice aether_slice_alloc(int64_t count, size_t elem_size) {
     if (count < 0) {
         aether_panic("make([]T, n): negative element count");
@@ -115,6 +157,20 @@ static inline void* aether_slice_at(AetherSlice s, int64_t i, size_t elem_size,
     return (char*)s.ptr + (uint64_t)i * elem_size;
 }
 
+static inline void aether_slice_fail_readonly(const char* file, int line) {
+    aether_slice_panicf("%s:%d: a write through a read-only view of a string", file, line);
+}
+
+/* #3025: `s[i] = v`, `s[i] += v`, `s[i]++`: the element's address for a
+ * store, which a read-only view (`string.bytes(s)`) refuses with a named
+ * panic, checked beside the bounds. A read goes through aether_slice_at
+ * and tests nothing more than it did. */
+static inline void* aether_slice_at_w(AetherSlice s, int64_t i, size_t elem_size,
+                                      const char* file, int line) {
+    if (s.flags & AETHER_SLICE_READONLY) aether_slice_fail_readonly(file, line);
+    return aether_slice_at(s, i, elem_size, file, line);
+}
+
 /* `s[lo..hi]` — the half-open sub-slice [lo, hi), sharing the backing
  * store. `hi` past the end, `lo > hi`, or a negative bound is a panic;
  * on an unbounded view only `lo <= hi` and `lo >= 0` can be checked. */
@@ -125,8 +181,12 @@ static inline AetherSlice aether_slice_sub(AetherSlice s, int64_t lo, int64_t hi
         (s.len != AETHER_SLICE_UNBOUNDED && (uint64_t)hi > s.len)) {
         aether_slice_fail_range(lo, hi, s.len, file, line);
     }
-    return aether_slice_make((char*)s.ptr + (uint64_t)lo * elem_size,
-                             (uint64_t)(hi - lo));
+    AetherSlice d = aether_slice_derive(s, (char*)s.ptr + (uint64_t)lo * elem_size,
+                                        (uint64_t)(hi - lo));
+    /* #3072: a view of a bounded slice's elements, or of any view's from
+     * an offset, owns nothing. */
+    if (s.len != AETHER_SLICE_UNBOUNDED || lo != 0) d.flags |= AETHER_SLICE_BORROWED;
+    return d;
 }
 
 /* `s[lo..]` — from lo to the end. On an unbounded view the result stays
@@ -136,9 +196,28 @@ static inline AetherSlice aether_slice_from(AetherSlice s, int64_t lo,
                                             const char* file, int line) {
     if (s.len == AETHER_SLICE_UNBOUNDED) {
         if (lo < 0) aether_slice_fail_range(lo, lo, s.len, file, line);
-        return aether_slice_view((char*)s.ptr + (uint64_t)lo * elem_size);
+        AetherSlice d = aether_slice_derive(s, (char*)s.ptr + (uint64_t)lo * elem_size,
+                                            AETHER_SLICE_UNBOUNDED);
+        if (lo != 0) d.flags |= AETHER_SLICE_BORROWED;   /* #3072 */
+        return d;
     }
     return aether_slice_sub(s, lo, (int64_t)s.len, elem_size, file, line);
+}
+
+/* #3072: `free(s)`: the buffer `make([]T, n)` handed out, or a pointer the
+ * program owns viewed from its start. A view owns nothing (R1, R2): `free`
+ * of a read-only one (string.bytes) or of one of another slice's or an
+ * array's elements is a named panic, where the allocator was given a
+ * pointer it never handed out (heap corruption) or one its owner still
+ * holds (a double free later). */
+static inline void aether_slice_free(AetherSlice s, const char* file, int line) {
+    if (s.flags & AETHER_SLICE_READONLY)
+        aether_slice_panicf("%s:%d: free of a read-only view of a string, which owns nothing",
+                            file, line);
+    if (s.flags & AETHER_SLICE_BORROWED)
+        aether_slice_panicf("%s:%d: free of a view of elements another slice or an array "
+                            "holds, which owns nothing", file, line);
+    free(s.ptr);
 }
 
 #ifdef __cplusplus

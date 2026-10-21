@@ -26,7 +26,7 @@ check(label: string, got: int, want: int) {
     }
 }
 
-keep(l: ptr, cb: fn) {
+keep(l: ptr, cb: @keep fn) {
     _ = list.add(l, cb)
 }
 
@@ -57,7 +57,7 @@ nested_to_list(l: @keep ptr, r: int) -> int {
 // A hand-off, inside a nested closure's body, to a keeper the walk cannot
 // see through; the local is then rebound to a closure nobody keeps.
 nested_to_opaque(l: @keep ptr, r: int) -> int {
-    k = | cb: fn | { _ = list.add(l, cb) }
+    k = | cb: @keep fn | { _ = list.add(l, cb) }
     acc = r
     f = || {
         acc = acc + 10

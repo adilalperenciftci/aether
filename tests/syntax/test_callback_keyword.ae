@@ -5,7 +5,7 @@
 import std.list
 
 // A builder func that accepts a callback (fn parameter)
-register(_ctx: ptr, name: string, handler: fn) {
+register(_ctx: ptr, name: string, handler: @keep fn) {
     names_list, _ = list.get(_ctx, 0)
     handlers_list, _ = list.get(_ctx, 1)
     list.add(names_list, name)

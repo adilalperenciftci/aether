@@ -265,7 +265,7 @@ fn write_validation_errors(res: ptr, errors: ptr) {
 // ---- Leaf route builders (run inside a json_api() block; _ctx is *ApiGroup) ----
 
 // create -> POST {prefix}/
-create(_ctx: ptr, handler: fn) {
+create(_ctx: ptr, handler: @keep fn) {
     g = _ctx as *ApiGroup
     end_point(g.ctx, POST, "/", handler)
     // Covers a resource that declares no member verb at all. If a member
@@ -276,14 +276,14 @@ create(_ctx: ptr, handler: fn) {
 }
 
 // index -> GET {prefix}/  (list; not validated — no body)
-index(_ctx: ptr, handler: fn) {
+index(_ctx: ptr, handler: @keep fn) {
     g = _ctx as *ApiGroup
     end_point(g.ctx, GET, "/", handler)
     mount_schema_route(g)
 }
 
 // show -> GET {prefix}/:id
-show(_ctx: ptr, handler: fn) {
+show(_ctx: ptr, handler: @keep fn) {
     g = _ctx as *ApiGroup
     end_point(g.ctx, GET, "/:id", handler)
     // Registered AFTER the member route so it outranks it — see
@@ -292,14 +292,14 @@ show(_ctx: ptr, handler: fn) {
 }
 
 // update -> PUT {prefix}/:id  (validated)
-update(_ctx: ptr, handler: fn) {
+update(_ctx: ptr, handler: @keep fn) {
     g = _ctx as *ApiGroup
     end_point(g.ctx, PUT, "/:id", handler)
     mount_schema_route(g)
 }
 
 // destroy -> DELETE {prefix}/:id
-destroy(_ctx: ptr, handler: fn) {
+destroy(_ctx: ptr, handler: @keep fn) {
     g = _ctx as *ApiGroup
     end_point(g.ctx, DELETE, "/:id", handler)
     mount_schema_route(g)

@@ -155,7 +155,7 @@ run_jobs(q: ptr) -> (int, string) {
 // A JS function that calls cb(q, this_h, args), where args is an array of
 // its arguments. cb returns a handle (the engine takes it), 0 for undefined,
 // or quickjs.throw_error(...).
-function(q: ptr, name: string, arity: int, cb: fn) -> int { return qjs_function(q, name, arity, cb) }
+function(q: ptr, name: string, arity: int, cb: @keep fn) -> int { return qjs_function(q, name, arity, cb) }
 
 // Throw from a host function: `return quickjs.throw_error(q, "TypeError", "...")`.
 // kind: "TypeError", "RangeError", "SyntaxError", "ReferenceError" or "Error".

@@ -1,0 +1,105 @@
+// Regression (#3067): `null` in an array literal of closures is the empty
+// closure, as in every other closure slot since #3062. The literal's elements
+// never went through the slot coercion that gives `null` the closure type:
+// `[f, null]` reached C as `_aether_closure_retain(NULL)`, and `[null, f]`
+// was an array of pointers, its first element having voted. `null` has no
+// type of its own now, so the array is of the closures' type wherever the
+// `null` stands, and each `null` is the empty closure: `== null` is true of
+// it and a call of the others runs. Each shape runs in a round, and the
+// rounds must not grow the heap. (`f == g` between two closures is refused,
+// tests/integration/closure_compare_null.)
+
+import std.mem
+
+extern exit(code: int)
+
+check(ok: bool, what: string) {
+    if !ok {
+        println("FAIL: ${what}")
+        exit(1)
+    }
+}
+
+struct Hooks {
+    fs: fn[3]
+}
+
+adder(n: int) -> fn {
+    return | x: int | -> x + n
+}
+
+// What the non-empty closures of `fs` give for 10, plus 100 per empty one.
+sum3(fs: fn[3]) -> int {
+    total = 0
+    for i in 0..3 {
+        if fs[i] == null {
+            total = total + 100
+        } else {
+            int r = call(fs[i], 10)
+            total = total + r
+        }
+    }
+    return total
+}
+
+trailing(k: int) -> int {
+    f = adder(k)
+    fs = [f, f, null]
+    return sum3(fs)
+}
+
+leading(k: int) -> int {
+    f = adder(k)
+    fs = [null, null, f]
+    return sum3(fs)
+}
+
+between(k: int) -> int {
+    f = adder(k)
+    g = adder(k * 2)
+    fs = [f, null, g]
+    return sum3(fs)
+}
+
+branched(k: int) -> int {
+    f = adder(k)
+    fs = [f, if k > 2 { null } else { f }, null]
+    return sum3(fs)
+}
+
+held(k: int) -> Hooks {
+    f = adder(k)
+    fs = [null, f, null]
+    return Hooks { fs: fs }
+}
+
+round(k: int) -> int {
+    total = 0
+    i = 0
+    while i < 20 {
+        total = total + trailing(k) + leading(k) + between(k) + branched(k)
+        h = held(k)
+        total = total + sum3(h.fs)
+        i = i + 1
+    }
+    return total
+}
+
+main() {
+    check(trailing(5) == 15 + 15 + 100, "[f, f, null]")
+    check(leading(5) == 100 + 100 + 15, "[null, null, f]")
+    check(between(5) == 15 + 100 + 20, "[f, null, g]")
+    check(branched(5) == 15 + 100 + 100, "an if-expression's null arm")
+    check(branched(1) == 11 + 11 + 100, "an if-expression's closure arm")
+    h = held(5)
+    check(h.fs[0] == null && h.fs[1] != null && null == h.fs[2], "a struct given the array")
+    check(sum3(h.fs) == 100 + 15 + 100, "the struct's closures called")
+    check(round(5) == 20 * (130 + 215 + 135 + 215 + 215), "the rounds")
+    if mem.heap_in_use_exact() {
+        g = mem.steady_growth(|| {
+                round(5)
+            }, 5)
+        check(g == 0, "the heap grew by ${g} bytes")
+    }
+    println("ok")
+}

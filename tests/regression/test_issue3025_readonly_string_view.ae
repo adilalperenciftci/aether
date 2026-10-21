@@ -1,0 +1,115 @@
+// #3025: string.bytes(s) is a zero-copy view of a string's bytes, which the
+// program may read and not write: a literal's are in read-only memory, and
+// a counted string's are shared through its refcount. A write through it
+// passed the checker and crashed (0xC0000005 on Windows) or changed a
+// string others hold. The view now carries a read-only mark, and a store
+// through it, or through any view made from it, here or in a function it is
+// given to, panics with "a write through a read-only view of a string"
+// (tests/integration/readonly_string_view checks the checker refuses the
+// stores it can see). Reads, `.len`, sub-slices and passing it on are as
+// they were.
+
+import std.string
+
+extern exit(code: int)
+
+check(ok: bool, what: string) {
+    if !ok {
+        println("FAIL: ${what}")
+        exit(1)
+    }
+}
+
+// A store in a function the view is given to.
+poke(b: byte[], i: int) {
+    b[i] = 66
+}
+
+bump(b: byte[]) {
+    b[0] += 1
+}
+
+step(b: byte[]) {
+    b[0]++
+}
+
+struct Cell {
+    n: int
+}
+
+// The cell a store goes through, given an index it does not use.
+at(c: @into ptr, k: int) -> *Cell {
+    return c as *Cell
+}
+
+// A reader, as the 458 in the tree are.
+sum(b: byte[]) -> int {
+    total = 0
+    i = 0
+    while i < b.len {
+        total = total + b[i]
+        i = i + 1
+    }
+    return total
+}
+
+// Does `f` panic with the read-only view's message?
+refused(what: string, v: byte[], how: int) {
+    try {
+        if how == 0 { poke(v, 0) }
+        if how == 1 { bump(v) }
+        if how == 2 { step(v) }
+        println("FAIL: ${what}: no panic")
+        exit(1)
+    } catch e {
+        check(string.ends_with(e, "a write through a read-only view of a string") != 0,
+            "${what}: the panic names the read-only view (${e})")
+    }
+}
+
+main() {
+    // The issue's literal, and a heap string.
+    lit = string.bytes("abc")
+    refused("a store into a literal's bytes", lit, 0)
+    heap_s = string.concat("ab", "c")
+    hv = string.bytes(heap_s)
+    refused("a store into a heap string's bytes", hv, 0)
+    refused("`+=` into a heap string's bytes", hv, 1)
+    refused("`++` into a heap string's bytes", hv, 2)
+    // Through a sub-slice, which keeps the mark.
+    refused("a store through a sub-slice", hv[1..], 0)
+    refused("a store through a bounded sub-slice", hv[1..2], 0)
+    check(heap_s == "abc", "the heap string is unchanged")
+
+    // Readers are unchanged.
+    check(lit.len == 3, "a view's length")
+    check(lit[0] == 97 && lit[2] == 99, "a view's bytes")
+    check(sum(lit) == 294 && sum(hv) == 294, "a reader given the view")
+    tail = hv[1..]
+    check(tail.len == 2 && tail[0] == 98, "a sub-slice's length and bytes")
+    check(sum(hv[0..2]) == 195, "a reader given a sub-slice")
+
+    // A read of the view inside a store target is a read: in the index of
+    // a slice of the program's own, and as an argument of a call the store
+    // goes through (they went through the store's check and panicked).
+    out = make([]int, 128)
+    out[lit[0] as int] = 1
+    out[lit[1] - 97] += 5
+    out[lit[2] as int]++
+    check(out[97] == 1 && out[1] == 5 && out[99] == 1, "the view read in a store's index")
+    free(out)
+    cell = heap.new(Cell)
+    at(cell, lit[0] as int).n = 7
+    check(cell.n == 7, "the view read in a call's argument inside a store target")
+    heap.free(cell)
+
+    // A writable slice is still writable.
+    w = make([]byte, 3)
+    poke(w, 1)
+    bump(w)
+    step(w)
+    check(w[0] == 2 && w[1] == 66, "a slice of its own takes stores")
+    free(w)
+
+    println("ok ${sum(lit)}")
+}

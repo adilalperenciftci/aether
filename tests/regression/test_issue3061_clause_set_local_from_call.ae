@@ -1,0 +1,81 @@
+// #3061 review: a clause set's result is the join of its clauses' (#3061),
+// but the checker settled it after the early inference pass had typed its
+// calls by the first clause's result, so a local bound from a call kept
+// that type and the value was cut with no word: `x = f32mix(1, h)` printed
+// 1 while the call printed 1.5, and `w = narrow(1, -1, u)` printed
+// -294967296. The early pass settles a set by the same join before a call
+// of it is typed, so the local, and a local made from it, has the set's
+// result.
+
+extern exit(code: int)
+
+struct Node {
+    v: int
+}
+
+f32mix(0, f: f32) -> 2
+f32mix(k, f: f32) -> f
+
+narrow(0, n: int, u: uint32) -> n
+narrow(k, n: int, u: uint32) -> u
+
+pick(0, s: int, b: long) -> s
+pick(k, s: int, b: long) -> b
+
+node_or_null(0, p: *Node) -> null
+node_or_null(k, p: *Node) -> p
+
+adder(n: int) -> fn {
+    return | x: int | -> x + n
+}
+
+cb_or_null(0) -> null
+cb_or_null(k) -> adder(k)
+
+// A clause that waits on its own set is typed through the set's symbol,
+// which takes the join of the clauses known so far.
+big(0) -> 5000000000
+big(n) -> big(n - 1)
+
+fact(0) -> 1
+fact(n: long) -> n * fact(n - 1)
+
+// And one that waits on another set it recurses through.
+even_big(0) -> 5000000000
+even_big(n) -> odd_big(n - 1)
+odd_big(0) -> 6000000000
+odd_big(n) -> even_big(n - 1)
+
+check(ok: bool, what: string) {
+    if !ok {
+        println("FAIL: ${what}")
+        exit(1)
+    }
+}
+
+main() {
+    f32 h = 1.5
+    x = f32mix(1, h)
+    check("${x}" == "1.5", "a local bound from an f32 set")
+    uint32 u = 4000000000
+    w = narrow(1, -1, u)
+    check("${w}" == "4000000000", "a local bound from a uint32 set")
+    y = pick(1, 7, 5000000000)
+    z = y + 1
+    check(z == 5000000001, "a local made from a local bound from a long set")
+    n = heap.new(Node)
+    n.v = 4
+    b = node_or_null(1, n)
+    check(b.v == 4, "a local bound from a *Node set reads its field")
+    c = cb_or_null(0)
+    check(c == null, "a local bound from a closure set's null clause")
+    d = cb_or_null(3)
+    check(call(d, 1) == 4, "a local bound from its closure clause")
+    r = big(3)
+    check(r == 5000000000, "a local bound from a set that recurses")
+    check(fact(20) == 2432902008176640000, "a long product through the set's own result")
+    e = even_big(3)
+    check(e == 6000000000, "a local bound from sets that recurse through each other")
+    println("${x} ${w} ${z} ${b.v} ${call(d, 1)}")
+    heap.free(n)
+}

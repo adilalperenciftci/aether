@@ -17,7 +17,7 @@ const GET = 1
 const POST = 2
 const DELETE = 4
 
-route_entry(method: int, pp: string, handler: fn) {
+route_entry(method: int, pp: string, handler: @keep fn) {
     e = map_new()
     map_put(e, "method", method)
     map_put(e, "path", pp)
@@ -25,7 +25,7 @@ route_entry(method: int, pp: string, handler: fn) {
     return e
 }
 
-end_point(_ctx: ptr, method: int, pattern: string, handler: fn) {
+end_point(_ctx: ptr, method: int, pattern: string, handler: @keep fn) {
     routes, _ = map.get(_ctx, "routes")
     list.add(routes, route_entry(method, pattern, handler))
 }
@@ -92,7 +92,7 @@ do_cart_list(res: ptr, cart: ptr, inventory: ptr) {
         response_json(res, "[]")
     } else {
         out = "["
-        for (i = 0; i < n; i ++) {
+        for (i = 0; i < n; i++) {
             if i > 0 { out = "${out}," }
             item, _ = list.get_string(cart, i)
             out = "${out}\"${item}\""

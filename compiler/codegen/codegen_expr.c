@@ -394,6 +394,19 @@ static int callee_result_shape(CodeGenerator* gen, const char* func_name, const 
  * parameters then one position on); named and DSL trailing arguments
  * shift the positions in ways the call does not show, so those calls leave
  * it to the box or the builder. */
+/* #3034: is parameter `pi` of the Aether function `fdef` a closure (a `fn`
+ * type that is no C function pointer)? */
+static int param_at_is_closure(ASTNode* fdef, int pi) {
+    for (int i = 0, k = 0; fdef && i < fdef->child_count; i++) {
+        ASTNode* p = fdef->children[i];
+        if (!p || p->type == AST_GUARD_CLAUSE || p->type == AST_BLOCK ||
+            p->type == AST_REQUIRES_CLAUSE || p->type == AST_ENSURES_CLAUSE) continue;
+        if (k++ == pi)
+            return p->node_type && p->node_type->kind == TYPE_FUNCTION && !p->node_type->is_fnptr;
+    }
+    return 0;
+}
+
 static int owned_closure_arg_drainable(CodeGenerator* gen, ASTNode* expr, const char* func_name,
                                        int ai) {
     if (!func_name) {
@@ -420,6 +433,12 @@ static int owned_closure_arg_drainable(CodeGenerator* gen, ASTNode* expr, const 
         if (expr->child_count == np - 1) pi = ai + 1;
         else if (expr->child_count != np) return 0;
     }
+    /* #3034: an Aether function's `@keep fn` parameter is a closure the
+     * callee stores, which its store retains (R3): the call borrows the
+     * closure as any call does, and the caller releases a fresh one after
+     * it. Only a keeping `ptr` parameter (given a box of its own) or C's
+     * `@retain` takes the reference the closure was made with. */
+    if (fdef && param_at_is_closure(fdef, pi)) return !arg_taken_by_call(gen, func_name, pi);
     return !arg_taken_by_call(gen, func_name, pi) && !call_param_keeps(gen, func_name, pi);
 }
 
@@ -3289,7 +3308,7 @@ static int is_builtin_name(const char* name) {
     static const char* builtins[] = {
         "print", "println", "make", "spawn", "exit", "sleep", "free",
         "getenv", "atoi", "clock_ns", "typeof", "is_type", "convert_type",
-        "print_char", "wait_for_idle", "each", "map", "filter",
+        "print_char", "wait_for_idle", "each", "map", "filter", "__slice_readonly",
         NULL
     };
     for (int i = 0; builtins[i]; i++) {
@@ -5563,8 +5582,9 @@ void emit_message_field_init(CodeGenerator* gen, MessageFieldDef* fdef, ASTNode*
         int as_slice = fdef->c_type && strcmp(fdef->c_type, "AetherSlice") == 0;
         int id = lookup_msg_arr_id(fdef->name);
         if (id >= 0) {
-            if (as_slice)
-                fprintf(gen->output, "aether_slice_make(_aether_arr_%d, %d)", id, rhs->child_count);
+            if (as_slice)   /* #3072: a view of the array, owning nothing */
+                fprintf(gen->output, "aether_slice_borrowed(aether_slice_make(_aether_arr_%d, %d))",
+                        id, rhs->child_count);
             else
                 fprintf(gen->output, "_aether_arr_%d", id);
             return;
@@ -5573,9 +5593,10 @@ void emit_message_field_init(CodeGenerator* gen, MessageFieldDef* fdef, ASTNode*
         // compound literal — still wrong for cross-thread sends, but
         // fine for synchronous ask/reply where the sender stays alive.
         if (as_slice) {
-            fprintf(gen->output, "aether_slice_make((%s[])", fdef->element_c_type);
+            fprintf(gen->output, "aether_slice_borrowed(aether_slice_make((%s[])",
+                    fdef->element_c_type);
             generate_expression(gen, rhs);
-            fprintf(gen->output, ", %d)", rhs->child_count);
+            fprintf(gen->output, ", %d))", rhs->child_count);
             return;
         }
         fprintf(gen->output, "(%s[])", fdef->element_c_type);
@@ -6009,6 +6030,41 @@ static void emit_slice_diag_file(CodeGenerator* gen, const ASTNode* n) {
     fputc('"', gen->output);
 }
 
+/* #3064: is `bt` a uint32 or a uint64 branch of a value whose type `vt` is
+ * signed (an int beside a uint32 joins to a long)? C's `?:` would make the
+ * pair unsigned. */
+static int signed_join_of_unsigned(Type* vt, Type* bt) {
+    return vt && bt && !vt->distinct_name && (vt->kind == TYPE_INT || vt->kind == TYPE_INT64) &&
+           (bt->kind == TYPE_UINT32 || bt->kind == TYPE_UINT64);
+}
+
+/* `e` as a value that is read, whatever it is part of. An index, and a
+ * call (its arguments and its result), inside a store target are read:
+ * `out[v[0] as int] = 1` and `at(p, v[0] as int).x = 1` store into `out`
+ * and `*at(...)`, and read `v`. Generated as part of the target, a read of
+ * a read-only view there went through aether_slice_at_w and panicked as a
+ * write (#3025 review). */
+static void generate_read(CodeGenerator* gen, ASTNode* e) {
+    int saved = gen->generating_lvalue;
+    gen->generating_lvalue = 0;
+    generate_expression(gen, e);
+    gen->generating_lvalue = saved;
+}
+
+/* The operand of the unary `expr`. `++` and `--` store into it, so an
+ * element of a slice there is a store target (#3025: aether_slice_at_w,
+ * which refuses a read-only view), as `s[i] = v`'s is. */
+static void generate_step_operand(CodeGenerator* gen, ASTNode* expr) {
+    ASTNode* t = expr->children[0];
+    int step = expr->value && (!strcmp(expr->value, "++") || !strcmp(expr->value, "--"));
+    int store = step && t && t->type == AST_ARRAY_ACCESS && t->child_count > 0 &&
+                t->children[0] && type_is_slice(t->children[0]->node_type);
+    int saved = gen->generating_lvalue;
+    if (store) gen->generating_lvalue = 1;
+    generate_expression(gen, t);
+    gen->generating_lvalue = saved;
+}
+
 void generate_expression_as_elem_ptr(CodeGenerator* gen, ASTNode* expr) {
     if (expr && type_is_slice(expr->node_type)) {
         fprintf(gen->output, "((%s*)(", slice_elem_c_type(expr->node_type));
@@ -6068,9 +6124,9 @@ int is_empty_slice_value(const ASTNode* e) {
 
 void generate_expression_as_slice(CodeGenerator* gen, ASTNode* expr) {
     if (expr && type_is_sized_array(expr->node_type) && expr->node_type->array_size > 0) {
-        fprintf(gen->output, "aether_slice_make((void*)(");
+        fprintf(gen->output, "aether_slice_borrowed(aether_slice_make((void*)(");
         generate_expression(gen, expr);
-        fprintf(gen->output, "), %d)", expr->node_type->array_size);
+        fprintf(gen->output, "), %d))", expr->node_type->array_size);
         return;
     }
     generate_expression(gen, expr);
@@ -7128,18 +7184,18 @@ static Type* fresh_composite_arg_type(CodeGenerator* gen, ASTNode* arg, Type* t)
     return t;
 }
 
-/* An array literal of owning elements passed as an argument is a temporary
- * of the statement, as a call's array result is: filled, each element
- * taken, and dropped when its block is done. So is an `if` giving arrays
- * (#3006), which C cannot choose between as values: the temporary is
- * filled from the branch taken, and dropped when it owns. */
+/* An array literal passed as an argument is a temporary of the statement,
+ * as a call's array result is: filled, each element taken (a variant
+ * wrapped as its sum, #3071), and dropped when its block is done if it
+ * owns. C has no array value to pass otherwise: one of plain elements was
+ * emitted as a bare `{3, 4}`, which C refused (#3071). So is an `if` giving
+ * arrays (#3006): the temporary is filled from the branch taken. */
 static int array_literal_arg_temp(CodeGenerator* gen, ASTNode* arg) {
     int branches = arg->type == AST_IF_EXPRESSION && arg->child_count >= 3;
     if ((arg->type != AST_ARRAY_LITERAL && !branches) || !type_is_sized_array(arg->node_type) ||
         !hoist_ready(gen)) return 0;
     Type* at = arg->node_type;
     int owns = own_type_owns(gen, at);
-    if (!owns && !branches) return 0;
     static int alt_seq = 0;
     const char* t = cg_internf("_ae_alt%d", alt_seq++);
     hoist_append_text(gen, cg_internf("%s = {0}; ", c_member_decl(at, t)));
@@ -7201,6 +7257,13 @@ static int is_literal_float_div_by_zero(const ASTNode* e) {
 
 void generate_expression(CodeGenerator* gen, ASTNode* expr) {
     if (!expr) return;
+
+    /* A call is no place a store writes into: inside a store target it is
+     * read (generate_read). */
+    if (gen->generating_lvalue && expr->type == AST_FUNCTION_CALL) {
+        generate_read(gen, expr);
+        return;
+    }
 
     codegen_note_diag_pos(expr);
 
@@ -7923,15 +7986,23 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                 fprintf(gen->output, "((");
                 generate_expression(gen, expr->children[0]);
                 fprintf(gen->output, ") ? (");
-                if (sum && needs_sum_coerce(expr->children[1], vt))
-                    emit_sum_coerced(gen, expr->children[1], vt);
-                else
-                    generate_expression(gen, expr->children[1]);
-                fprintf(gen->output, ") : (");
-                if (sum && needs_sum_coerce(expr->children[2], vt))
-                    emit_sum_coerced(gen, expr->children[2], vt);
-                else
-                    generate_expression(gen, expr->children[2]);
+                for (int k = 1; k <= 2; k++) {
+                    ASTNode* br = expr->children[k];
+                    if (k == 2) fprintf(gen->output, ") : (");
+                    if (sum && needs_sum_coerce(br, vt)) {
+                        emit_sum_coerced(gen, br, vt);
+                    } else if (signed_join_of_unsigned(vt, br->node_type)) {
+                        /* #3064: an unsigned branch of a signed join (`-1`
+                         * beside a uint32 is a long) is converted first:
+                         * C's `?:` makes an int beside an unsigned int
+                         * unsigned, and -1 was 4294967295. */
+                        fprintf(gen->output, "(%s)(", get_c_type(vt));
+                        generate_expression(gen, br);
+                        fprintf(gen->output, ")");
+                    } else {
+                        generate_expression(gen, br);
+                    }
+                }
                 fprintf(gen->output, "))");
             }
             break;
@@ -8402,11 +8473,13 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                     fprintf(gen->output, "aether_slice_make((void*)0, 0)");
                     break;
                 }
-                fprintf(gen->output, "aether_slice_make((void*)(");
+                /* #3072: a view of an array's elements owns nothing:
+                 * `free` of it panics (aether_slice_free). */
+                fprintf(gen->output, "aether_slice_borrowed(aether_slice_make((void*)(");
                 if (src->type == AST_ARRAY_LITERAL && src->child_count > 0)
                     fprintf(gen->output, "(%s[])", slice_elem_c_type(expr->node_type));
                 generate_expression(gen, src);
-                fprintf(gen->output, "), %s)", expr->value ? expr->value : "0");
+                fprintf(gen->output, "), %s))", expr->value ? expr->value : "0");
             }
             break;
 
@@ -9125,7 +9198,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
              * reach C as postfix too, not as the prefix form. */
             if (expr->child_count >= 1 && annotation_has_marker(expr->annotation, "postfix")) {
                 fprintf(gen->output, "((");
-                generate_expression(gen, expr->children[0]);
+                generate_step_operand(gen, expr);
                 fprintf(gen->output, ")%s)", get_c_operator(expr->value));
                 break;
             }
@@ -9134,7 +9207,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                 // This prevents GCC -Wlogical-not-parentheses when the unary
                 // result is compared: (!x) != y  instead of  !x != y.
                 fprintf(gen->output, "(%s(", get_c_operator(expr->value));
-                generate_expression(gen, expr->children[0]);
+                generate_step_operand(gen, expr);
                 fprintf(gen->output, "))");
             }
             break;
@@ -9309,7 +9382,14 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                     break;
                 }
 
-                if (strcmp(func_name, "make") == 0 && expr->node_type && expr->node_type->kind == TYPE_ARRAY) {
+                if (strcmp(func_name, "__slice_readonly") == 0 && expr->child_count == 1) {
+                    /* #3025: the intrinsic std.string's bytes() marks its
+                     * view with: the same slice, read-only. */
+                    fprintf(gen->output, "aether_slice_readonly(");
+                    generate_expression(gen, expr->children[0]);
+                    fprintf(gen->output, ")");
+                }
+                else if (strcmp(func_name, "make") == 0 && expr->node_type && expr->node_type->kind == TYPE_ARRAY) {
                     /* #1286: `make([]T, n)` is a bounded slice over a fresh
                      * zeroed buffer of n elements; `free(s)` releases it. */
                     fprintf(gen->output, "aether_slice_alloc((int64_t)(");
@@ -9668,6 +9748,16 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                 }
                 /* A string is released as `release` releases it (below): the
                  * place it is read from owns a counted string (R2). */
+                else if (strcmp(func_name, "free") == 0 && expr->child_count == 1 &&
+                         type_is_slice(expr->children[0]->node_type)) {
+                    /* #3072: a slice is freed by aether_slice_free, which
+                     * refuses a view (it owns nothing) by name. */
+                    fprintf(gen->output, "aether_slice_free(");
+                    generate_expression(gen, expr->children[0]);
+                    fprintf(gen->output, ", ");
+                    emit_slice_diag_file(gen, expr);
+                    fprintf(gen->output, ", %d)", expr->line);
+                }
                 else if (strcmp(func_name, "free") == 0 && expr->child_count == 1 &&
                          !(expr->children[0]->node_type &&
                            expr->children[0]->node_type->kind == TYPE_STRING)) {
@@ -11291,6 +11381,10 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                  * as a struct field init is, so the array's elements are
                  * values of their own. */
                 ASTNode* el = expr->children[i];
+                /* #3071: in an array of a sum, a variant is wrapped as it. */
+                Type* at = expr->node_type;
+                if (at && at->kind == TYPE_ARRAY && emit_sum_element(gen, el, at->element_type))
+                    continue;
                 const char* el_struct = struct_owning_strings(gen, el ? el->node_type : NULL);
                 if (el_struct && struct_take_shape(el)) emit_struct_take(gen, el, el_struct, NULL);
                 else generate_expression(gen, el);
@@ -11427,9 +11521,13 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                 if (base && type_is_slice(base->node_type)) {
                     /* #1286: bounds-checked element access on a slice. The
                      * helper returns the element's address, so the result
-                     * stays an lvalue and the slice is evaluated once. */
+                     * stays an lvalue and the slice is evaluated once.
+                     * #3025: a store target (`s[i] = v`, `+=`, `++`) goes
+                     * through aether_slice_at_w, which refuses a read-only
+                     * view; a read is checked as it was. */
                     const char* elem = slice_elem_c_type(base->node_type);
-                    fprintf(gen->output, "(*(%s*)aether_slice_at(", elem);
+                    fprintf(gen->output, "(*(%s*)aether_slice_at%s(", elem,
+                            gen->generating_lvalue ? "_w" : "");
                     /* The base is READ even when `s[i]` is a store target,
                      * so an extern-struct field there still becomes a view. */
                     int saved_lvalue = gen->generating_lvalue;
@@ -11437,7 +11535,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                     generate_expression(gen, base);
                     gen->generating_lvalue = saved_lvalue;
                     fprintf(gen->output, ", (int64_t)(");
-                    generate_expression(gen, expr->children[1]);
+                    generate_read(gen, expr->children[1]);
                     fprintf(gen->output, "), sizeof(%s), ", elem);
                     emit_slice_diag_file(gen, expr);
                     fprintf(gen->output, ", %d))", expr->line);
@@ -11449,7 +11547,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                 generate_expression(gen, base);
                 if (str_base) fprintf(gen->output, ")");
                 fprintf(gen->output, "[");
-                generate_expression(gen, expr->children[1]);
+                generate_read(gen, expr->children[1]);
                 fprintf(gen->output, "]");
             }
             break;
