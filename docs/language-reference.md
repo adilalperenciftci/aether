@@ -3576,7 +3576,11 @@ In `utils.name`, `utils` is the imported module unless a value of that name
 (a local, a parameter, a global) is in scope, whose field it then reads. A
 function of that name is no value and hides nothing: a program's `frame()`
 leaves `frame.SETS` the constant of an imported `frame` module, in the
-program and in a module that imports `frame` itself.
+program and in a module that imports `frame` itself, beside a function of
+the module's own named `frame` too. A module's code sees its own
+declarations, what it imports and the builtins, never the program's: a
+module that calls a program's `helper()` without importing it is refused,
+and a program's `struct frame` is no `frame` in the module.
 
 ### Available Standard Library Modules
 

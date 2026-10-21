@@ -2760,6 +2760,24 @@ static void rename_intra_module_refs(ASTNode* node, const char* prefix,
      * called `f` turned it into `<prefix>_f`, a member T does not have). */
     if (node->type == AST_OFFSETOF) return;
 
+    /* #3088: in `ns.member`, a namespace the module imports is that module,
+     * whatever function of its own the module names `ns`: a function has
+     * no fields, as the checker reads it (value_hides_namespace). Renamed
+     * to the module's function, pkg.user's own `frame()` turned its
+     * `frame.SETS` into `user_frame.SETS`. A local of the name is a value,
+     * and stays one. */
+    if (node->type == AST_MEMBER_ACCESS && node->child_count > 0 && node->children[0] &&
+        node->children[0]->type == AST_IDENTIFIER && node->children[0]->value &&
+        name_in_list(node->children[0]->value, func_names, func_count) &&
+        !name_in_list(node->children[0]->value, const_names, const_count) &&
+        !name_is_module_global_var(prefix, node->children[0]->value) &&
+        !name_in_list(node->children[0]->value, local_names, local_count)) {
+        AetherModule* self = module_find_by_namespace(prefix);
+        if (self && self->name && module_sees_namespace(self->name, node->children[0]->value) &&
+            strcmp(module_namespace_of(self->name), node->children[0]->value) != 0)
+            return;
+    }
+
     if (node->type == AST_FUNCTION_CALL && node->value) {
         // Check if this call targets a function defined in the same module.
         /* #2637: a call through a local or parameter of that name (a

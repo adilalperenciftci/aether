@@ -397,24 +397,81 @@ typedef struct { ASTNode* decl; SymbolTable* table; } OwnExtern;
 static OwnExtern* g_own_externs = NULL;
 static int g_own_extern_count = 0;
 
-static Symbol* own_extern_symbol(Symbol* found, const char* merged_from, const char* name) {
-    if (!found || !found->node || found->node->type != AST_EXTERN_FUNCTION) return found;
-    ASTNode* own = own_extern_decl(merged_from, name);
-    if (!own || own == found->node) return found;
+/* The symbol of the extern `own` a file declares itself, kept in a table
+ * of its own; NULL when it cannot be made. */
+static Symbol* own_extern_decl_symbol(ASTNode* own, const char* name) {
     for (int i = 0; i < g_own_extern_count; i++)
         if (g_own_externs[i].decl == own) return lookup_symbol_local(g_own_externs[i].table, name);
     OwnExtern* grown = realloc(g_own_externs, sizeof(OwnExtern) * (size_t)(g_own_extern_count + 1));
-    if (!grown) return found;
+    if (!grown) return NULL;
     g_own_externs = grown;
     SymbolTable* t = create_symbol_table(NULL);
     add_symbol(t, name, clone_type(own->node_type), 0, 1, 0);
     Symbol* s = lookup_symbol_local(t, name);
-    if (!s) return found;
+    if (!s) return NULL;
     s->node = own;
     g_own_externs[g_own_extern_count].decl = own;
     g_own_externs[g_own_extern_count].table = t;
     g_own_extern_count++;
     return s;
+}
+
+static Symbol* own_extern_symbol(Symbol* found, const char* merged_from, const char* name) {
+    if (!found || !found->node || found->node->type != AST_EXTERN_FUNCTION) return found;
+    ASTNode* own = own_extern_decl(merged_from, name);
+    if (!own || own == found->node) return found;
+    Symbol* s = own_extern_decl_symbol(own, name);
+    return s ? s : found;
+}
+
+/* #3088: is `s` a top-level declaration of the program itself, written in
+ * its own files rather than merged from a module: a function, a type, an
+ * actor, a message, a constant? An extern is each file's own already
+ * (own_extern_symbol), and a builtin has no declaration. */
+static int is_program_own_decl(const Symbol* s) {
+    const ASTNode* n = s ? s->node : NULL;
+    if (!n || n->origin_module || n->is_imported) return 0;
+    switch (n->type) {
+        case AST_FUNCTION_DEFINITION: case AST_BUILDER_FUNCTION:
+        case AST_STRUCT_DEFINITION: case AST_SUM_TYPE_DEF: case AST_ENUM_DEFINITION:
+        case AST_BITSTRUCT_DEFINITION: case AST_ACTOR_DEFINITION:
+        case AST_MESSAGE_DEFINITION: case AST_CONST_DECLARATION:
+            return 1;
+        default:
+            return 0;
+    }
+}
+
+/* #3088: does the module `module_name` declare `name` itself, at its top
+ * level? A struct it declares identical to the program's is merged as the
+ * program's one type (#2129), so its body names that type by its own
+ * name. */
+static int module_declares(const char* module_name, const char* name) {
+    AetherModule* m = module_name ? module_find(module_name) : NULL;
+    for (int i = 0; m && m->ast && i < m->ast->child_count; i++) {
+        const ASTNode* d = m->ast->children[i];
+        if (d && d->type == AST_EXPORT_STATEMENT && d->child_count > 0) d = d->children[0];
+        if (d && d->value && strcmp(d->value, name) == 0 && d->type != AST_IMPORT_STATEMENT)
+            return 1;
+    }
+    return 0;
+}
+
+/* #3088: the newest symbol of `name` in the file scope `table` that is no
+ * declaration of the program's own: what a module's body finds beneath a
+ * program's function or type of that name (an extern, a builtin). */
+static Symbol* lookup_file_symbol_for_module(SymbolTable* table, const char* name) {
+    if (table->buckets) {
+        unsigned b = symtab_hash(name) & (unsigned)(table->bucket_count - 1);
+        for (Symbol* s = table->buckets[b]; s; s = s->hash_next)
+            if (strcmp(s->name, name) == 0 && !(s->walk_id == 0 && is_program_own_decl(s)))
+                return s;
+        return NULL;
+    }
+    for (Symbol* s = table->symbols; s; s = s->next)
+        if (strcmp(s->name, name) == 0 && !(s->walk_id == 0 && is_program_own_decl(s)))
+            return s;
+    return NULL;
 }
 
 /* `merged_from` is the scope the lookup STARTED in: a merged body's, even
@@ -429,6 +486,24 @@ static Symbol* lookup_symbol_in(SymbolTable* table, const char* name, const char
      * the function of its name (see Symbol.hoist_pending); the walk goes on
      * outward to it. */
     if (symbol && symbol->hoist_pending) symbol = NULL;
+    /* #3088: nor the program's own functions, types, actors, messages and
+     * constants. A module's body resolves in its own scope: its own
+     * declarations (merged under its prefix), what it imports, and std's
+     * builtins. pkg.user's `helper()` called a program's `helper()` it
+     * never imported, and a program's `frame()` or `struct frame` took the
+     * place of pkg.user's own import of pkg.frame in `frame.SETS`. What it
+     * finds beneath one is its own: an extern it declares (std.io's
+     * `string_concat` beside a program's function of that name), or a
+     * builtin. A name the module declares itself is its own, though: its
+     * struct identical to the program's is merged as that one (#2129). */
+    if (symbol && merged_from && !table->parent && symbol->walk_id == 0 &&
+        is_program_own_decl(symbol) && !module_declares(merged_from, name)) {
+        symbol = lookup_file_symbol_for_module(table, name);
+        if (!symbol) {
+            ASTNode* own = own_extern_decl(merged_from, name);
+            return own ? own_extern_decl_symbol(own, name) : NULL;
+        }
+    }
     /* The program's own top-level `var`s are the program's: a module's code
      * (a merged body, table->merged_from) never resolves to one. A module's
      * own globals are merged under `<ns>_name`, so a bare name there that
