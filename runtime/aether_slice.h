@@ -35,9 +35,19 @@ extern "C" {
 typedef struct AetherSlice {
     void*    ptr;
     uint64_t len;
+    /* #3025: AETHER_SLICE_READONLY, or 0. Beside `len` and read only where
+     * an element is stored, so a read costs what it did. */
+    uint32_t flags;
 } AetherSlice;
 
 #define AETHER_SLICE_UNBOUNDED UINT64_MAX
+
+/* #3025: a view of memory the program may read and not write: the bytes of
+ * a string (`string.bytes(s)`), a literal's in read-only data or a counted
+ * string's that others share. A store through it panics, by name, where an
+ * element store is bounds-checked; every view made from it (a sub-slice, a
+ * pattern's tail, a copy) carries the mark. */
+#define AETHER_SLICE_READONLY 1u
 
 /* `const void*`: a view is made over an array of strings too, `const char*
  * xs[N]`. Taken as `void*`, cl.exe read the elements' `const` as the array's
@@ -47,7 +57,23 @@ static inline AetherSlice aether_slice_make(const void* ptr, uint64_t len) {
     AetherSlice s;
     s.ptr = (void*)ptr;
     s.len = len;
+    s.flags = 0;
     return s;
+}
+
+/* #3025: `s` as a read-only view: the same elements, a store through it a
+ * panic. */
+static inline AetherSlice aether_slice_readonly(AetherSlice s) {
+    s.flags |= AETHER_SLICE_READONLY;
+    return s;
+}
+
+/* A view of `s`'s memory at `ptr`, `len` long, with `s`'s marks: a
+ * sub-slice, a list pattern's tail. */
+static inline AetherSlice aether_slice_derive(AetherSlice s, const void* ptr, uint64_t len) {
+    AetherSlice d = aether_slice_make(ptr, len);
+    d.flags = s.flags;
+    return d;
 }
 
 /* A view over a raw pointer of unknown extent. */
@@ -115,6 +141,20 @@ static inline void* aether_slice_at(AetherSlice s, int64_t i, size_t elem_size,
     return (char*)s.ptr + (uint64_t)i * elem_size;
 }
 
+static inline void aether_slice_fail_readonly(const char* file, int line) {
+    aether_slice_panicf("%s:%d: a write through a read-only view of a string", file, line);
+}
+
+/* #3025: `s[i] = v`, `s[i] += v`, `s[i]++`: the element's address for a
+ * store, which a read-only view (`string.bytes(s)`) refuses with a named
+ * panic, checked beside the bounds. A read goes through aether_slice_at
+ * and tests nothing more than it did. */
+static inline void* aether_slice_at_w(AetherSlice s, int64_t i, size_t elem_size,
+                                      const char* file, int line) {
+    if (s.flags & AETHER_SLICE_READONLY) aether_slice_fail_readonly(file, line);
+    return aether_slice_at(s, i, elem_size, file, line);
+}
+
 /* `s[lo..hi]` — the half-open sub-slice [lo, hi), sharing the backing
  * store. `hi` past the end, `lo > hi`, or a negative bound is a panic;
  * on an unbounded view only `lo <= hi` and `lo >= 0` can be checked. */
@@ -125,8 +165,8 @@ static inline AetherSlice aether_slice_sub(AetherSlice s, int64_t lo, int64_t hi
         (s.len != AETHER_SLICE_UNBOUNDED && (uint64_t)hi > s.len)) {
         aether_slice_fail_range(lo, hi, s.len, file, line);
     }
-    return aether_slice_make((char*)s.ptr + (uint64_t)lo * elem_size,
-                             (uint64_t)(hi - lo));
+    return aether_slice_derive(s, (char*)s.ptr + (uint64_t)lo * elem_size,
+                               (uint64_t)(hi - lo));
 }
 
 /* `s[lo..]` — from lo to the end. On an unbounded view the result stays
@@ -136,7 +176,8 @@ static inline AetherSlice aether_slice_from(AetherSlice s, int64_t lo,
                                             const char* file, int line) {
     if (s.len == AETHER_SLICE_UNBOUNDED) {
         if (lo < 0) aether_slice_fail_range(lo, lo, s.len, file, line);
-        return aether_slice_view((char*)s.ptr + (uint64_t)lo * elem_size);
+        return aether_slice_derive(s, (char*)s.ptr + (uint64_t)lo * elem_size,
+                                   AETHER_SLICE_UNBOUNDED);
     }
     return aether_slice_sub(s, lo, (int64_t)s.len, elem_size, file, line);
 }

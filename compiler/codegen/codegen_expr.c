@@ -3289,7 +3289,7 @@ static int is_builtin_name(const char* name) {
     static const char* builtins[] = {
         "print", "println", "make", "spawn", "exit", "sleep", "free",
         "getenv", "atoi", "clock_ns", "typeof", "is_type", "convert_type",
-        "print_char", "wait_for_idle", "each", "map", "filter",
+        "print_char", "wait_for_idle", "each", "map", "filter", "__slice_readonly",
         NULL
     };
     for (int i = 0; builtins[i]; i++) {
@@ -6015,6 +6015,20 @@ static void emit_slice_diag_file(CodeGenerator* gen, const ASTNode* n) {
 static int signed_join_of_unsigned(Type* vt, Type* bt) {
     return vt && bt && !vt->distinct_name && (vt->kind == TYPE_INT || vt->kind == TYPE_INT64) &&
            (bt->kind == TYPE_UINT32 || bt->kind == TYPE_UINT64);
+}
+
+/* The operand of the unary `expr`. `++` and `--` store into it, so an
+ * element of a slice there is a store target (#3025: aether_slice_at_w,
+ * which refuses a read-only view), as `s[i] = v`'s is. */
+static void generate_step_operand(CodeGenerator* gen, ASTNode* expr) {
+    ASTNode* t = expr->children[0];
+    int step = expr->value && (!strcmp(expr->value, "++") || !strcmp(expr->value, "--"));
+    int store = step && t && t->type == AST_ARRAY_ACCESS && t->child_count > 0 &&
+                t->children[0] && type_is_slice(t->children[0]->node_type);
+    int saved = gen->generating_lvalue;
+    if (store) gen->generating_lvalue = 1;
+    generate_expression(gen, t);
+    gen->generating_lvalue = saved;
 }
 
 void generate_expression_as_elem_ptr(CodeGenerator* gen, ASTNode* expr) {
@@ -9141,7 +9155,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
              * reach C as postfix too, not as the prefix form. */
             if (expr->child_count >= 1 && annotation_has_marker(expr->annotation, "postfix")) {
                 fprintf(gen->output, "((");
-                generate_expression(gen, expr->children[0]);
+                generate_step_operand(gen, expr);
                 fprintf(gen->output, ")%s)", get_c_operator(expr->value));
                 break;
             }
@@ -9150,7 +9164,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                 // This prevents GCC -Wlogical-not-parentheses when the unary
                 // result is compared: (!x) != y  instead of  !x != y.
                 fprintf(gen->output, "(%s(", get_c_operator(expr->value));
-                generate_expression(gen, expr->children[0]);
+                generate_step_operand(gen, expr);
                 fprintf(gen->output, "))");
             }
             break;
@@ -9325,7 +9339,14 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                     break;
                 }
 
-                if (strcmp(func_name, "make") == 0 && expr->node_type && expr->node_type->kind == TYPE_ARRAY) {
+                if (strcmp(func_name, "__slice_readonly") == 0 && expr->child_count == 1) {
+                    /* #3025: the intrinsic std.string's bytes() marks its
+                     * view with: the same slice, read-only. */
+                    fprintf(gen->output, "aether_slice_readonly(");
+                    generate_expression(gen, expr->children[0]);
+                    fprintf(gen->output, ")");
+                }
+                else if (strcmp(func_name, "make") == 0 && expr->node_type && expr->node_type->kind == TYPE_ARRAY) {
                     /* #1286: `make([]T, n)` is a bounded slice over a fresh
                      * zeroed buffer of n elements; `free(s)` releases it. */
                     fprintf(gen->output, "aether_slice_alloc((int64_t)(");
@@ -11443,9 +11464,13 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                 if (base && type_is_slice(base->node_type)) {
                     /* #1286: bounds-checked element access on a slice. The
                      * helper returns the element's address, so the result
-                     * stays an lvalue and the slice is evaluated once. */
+                     * stays an lvalue and the slice is evaluated once.
+                     * #3025: a store target (`s[i] = v`, `+=`, `++`) goes
+                     * through aether_slice_at_w, which refuses a read-only
+                     * view; a read is checked as it was. */
                     const char* elem = slice_elem_c_type(base->node_type);
-                    fprintf(gen->output, "(*(%s*)aether_slice_at(", elem);
+                    fprintf(gen->output, "(*(%s*)aether_slice_at%s(", elem,
+                            gen->generating_lvalue ? "_w" : "");
                     /* The base is READ even when `s[i]` is a store target,
                      * so an extern-struct field there still becomes a view. */
                     int saved_lvalue = gen->generating_lvalue;

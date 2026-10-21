@@ -721,7 +721,7 @@
       <h3 class="function-name">bytes <span class="kind">fn</span></h3>
       <pre class="usage"><code>bytes(s) <span class="arrow">-&gt;</span> byte[]</code></pre>
       <p class="signature"><span class="sig-params">s: string</span></p>
-      <p class="doc">A bounded, READ-ONLY byte[] view of s's own bytes, for binary/ASCII scanning (indexing, sub-slicing) without re-measuring the string on every access the way string_char_at_n's separate known_length parameter does. BORROWED: valid only as long as `s` itself is, exactly like any slice over someone else's storage — do not free it, and do not write through it (an AetherString's payload is shared via its refcount; a byte[] has no way to mark that sharing const, so treat this view as read-only by convention).</p>
+      <p class="doc">A bounded, READ-ONLY byte[] view of s's own bytes, for binary/ASCII scanning (indexing, sub-slicing) without re-measuring the string on every access the way string_char_at_n's separate known_length parameter does. BORROWED: valid only as long as `s` itself is, exactly like any slice over someone else's storage; do not free it. Reads cost what any slice's do. #3025: a write through it (an element store, `+=`, `++`), or through any view made from it, here or in a function it is passed to, panics with &quot;a write through a read-only view of a string&quot;: a literal's bytes are in read-only memory, and a counted string's are shared through its refcount. Copy the bytes into a buffer of your own to change them.</p>
     </div>
     <div class="function" id="array_view" data-name="array_view">
       <h3 class="function-name">array_view <span class="kind">fn</span></h3>

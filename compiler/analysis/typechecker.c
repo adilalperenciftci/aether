@@ -4255,6 +4255,9 @@ Type* infer_type(ASTNode* expr, SymbolTable* table) {
         case AST_FUNCTION_CALL: {
             /* #1286 `make([]T, n)` is a `T[]` slice of n elements; the parser
              * stamped the array type on the call. */
+            if (expr->value && strcmp(expr->value, "__slice_readonly") == 0 &&
+                expr->child_count == 1)
+                return infer_type(expr->children[0], table);   /* #3025 */
             if (expr->value && strcmp(expr->value, "make") == 0 &&
                 expr->node_type && expr->node_type->kind == TYPE_ARRAY)
                 return clone_type(expr->node_type);
@@ -5300,6 +5303,92 @@ static ASTNode* g_tc_fn_body = NULL;
 static ASTNode* g_tc_return_owner = NULL;
 static void declare_if_branch_hoists(ASTNode* body, SymbolTable* table);
 
+/* #3025: how many times `n` binds `name`: a declaration or a re-bind, a
+ * `=` to it, a pattern's name, closures' included. */
+static int count_bindings_of(const ASTNode* n, const char* name) {
+    if (!n) return 0;
+    int k = 0;
+    if ((n->type == AST_VARIABLE_DECLARATION || n->type == AST_PATTERN_VARIABLE ||
+         n->type == AST_COMPOUND_ASSIGNMENT) &&
+        n->value && !strcmp(n->value, name))
+        k++;
+    if (n->type == AST_BINARY_EXPRESSION && n->value && !strcmp(n->value, "=") &&
+        n->child_count == 2 && n->children[0] && n->children[0]->type == AST_IDENTIFIER &&
+        n->children[0]->value && !strcmp(n->children[0]->value, name))
+        k++;
+    for (int i = 0; i < n->child_count; i++) k += count_bindings_of(n->children[i], name);
+    return k;
+}
+
+static const ASTNode* readonly_view_local_init(const char* name, int depth);
+
+/* #3025: is `e` a read-only view of a string's bytes: a call of
+ * `string.bytes`, the intrinsic that marks it, or a sub-slice of a local
+ * bound only to one? */
+static int is_readonly_view_source(const ASTNode* e, int depth) {
+    if (!e || depth > 8) return 0;
+    if (e->type == AST_FUNCTION_CALL && e->value)
+        return !strcmp(e->value, "string.bytes") || !strcmp(e->value, "string_bytes") ||
+               !strcmp(e->value, "__slice_readonly");
+    if (e->type == AST_SLICE_EXPR && e->child_count > 0 && e->children[0]) {
+        const ASTNode* b = e->children[0];
+        if (b->type == AST_IDENTIFIER && b->value) return readonly_view_local_init(b->value, depth + 1) != NULL;
+        return is_readonly_view_source(b, depth + 1);
+    }
+    return 0;
+}
+
+/* #3025: the initializer of `name` when it is a local of the function being
+ * checked bound once, to a read-only view of a string's bytes, and no
+ * parameter of it; NULL otherwise (a local bound again may hold another
+ * slice by the time it is written, and the run-time check has it). */
+static const ASTNode* readonly_view_local_init(const char* name, int depth) {
+    ASTNode* body = g_tc_fn_body;
+    ASTNode* fn = g_tc_return_owner;
+    if (!body || !name || count_bindings_of(body, name) != 1) return NULL;
+    for (int i = 0; fn && i < fn->child_count; i++) {
+        ASTNode* p = fn->children[i];
+        if (p && p != body && p->type != AST_BLOCK && p->value && !strcmp(p->value, name))
+            return NULL;
+    }
+    const ASTNode* found = NULL;
+    const ASTNode* stack[256];
+    int top = 0;
+    stack[top++] = body;
+    while (top > 0 && !found) {
+        const ASTNode* n = stack[--top];
+        if (!n) continue;
+        if (n->type == AST_VARIABLE_DECLARATION && n->value && !strcmp(n->value, name) &&
+            n->child_count > 0)
+            found = n->children[n->child_count - 1];
+        for (int i = 0; i < n->child_count && top < 256; i++) stack[top++] = n->children[i];
+    }
+    return found && is_readonly_view_source(found, depth) ? found : NULL;
+}
+
+/* #3025: a store through a local bound from `string.bytes`: `v[i] = x`,
+ * `v[i] += x`, `v[i]++`. The view is read-only (a literal's bytes are in
+ * read-only memory, a counted string's are shared), and the store would
+ * panic at run time; one the checker can see is refused here. Returns 1
+ * when it reported. */
+static int reject_readonly_view_write(ASTNode* target, ASTNode* at) {
+    if (!target || target->type != AST_ARRAY_ACCESS || target->child_count < 1) return 0;
+    ASTNode* base = target->children[0];
+    int local = base && base->type == AST_IDENTIFIER && base->value;
+    if (!base || (local ? !readonly_view_local_init(base->value, 0)
+                        : !is_readonly_view_source(base, 0)))
+        return 0;
+    char msg[300];
+    snprintf(msg, sizeof(msg),
+             "cannot write to an element of %s%s%s: it is a read-only view of a string's "
+             "bytes (string.bytes)",
+             local ? "'" : "", local ? base->value : "this view", local ? "'" : "");
+    type_error_hint(msg, "copy the bytes into a buffer of your own (`make([]byte, n)`) and "
+                    "change that",
+                    at->line, at->column);
+    return 1;
+}
+
 
 static int is_enum_type_name(const char* name) {
     if (!name) return 0;
@@ -6328,6 +6417,10 @@ int typecheck_program(ASTNode* program) {
     add_symbol(global_table, "__LINE__", create_type(TYPE_INT),    0, 1, 0);
     add_symbol(global_table, "__FILE__", create_type(TYPE_STRING), 0, 1, 0);
     add_symbol(global_table, "__func__", create_type(TYPE_STRING), 0, 1, 0);
+    /* #3025: `__slice_readonly(v)`, the intrinsic std.string's bytes()
+     * marks its view of a string with: `v` itself, read-only (a store
+     * through it panics). Its type is its argument's (infer_type). */
+    add_symbol(global_table, "__slice_readonly", create_type(TYPE_UNKNOWN), 0, 1, 0);
 
     // Output builtins
     Type* println_type = create_type(TYPE_VOID);
@@ -13074,7 +13167,8 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                 ASTNode* left = stmt->children[0];
                 ASTNode* right = stmt->children[1];
                 if (reject_const_element_write(left, table, stmt) ||   /* #2516 */
-                    reject_string_char_write(left, table, stmt))       /* #3022 */
+                    reject_string_char_write(left, table, stmt) ||     /* #3022 */
+                    reject_readonly_view_write(left, stmt))            /* #3025 */
                     return 0;
 
                 Symbol* symbol = lookup_symbol(table, left->value);
@@ -16072,7 +16166,8 @@ static int reject_step_operand(ASTNode* expr, SymbolTable* table, const char* wr
     const char* op = expr->value;
     if (!t) return 0;
     if (reject_const_element_write(t, table, expr) ||   /* #2516 */
-        reject_string_char_write(t, table, expr))
+        reject_string_char_write(t, table, expr) ||
+        reject_readonly_view_write(t, expr))            /* #3025 */
         return 1;
     char msg[512];
     char hint[640];
@@ -16403,7 +16498,8 @@ int typecheck_binary_expression(ASTNode* expr, SymbolTable* table) {
 
     if (operator == TOKEN_ASSIGN) {
         if (reject_const_element_write(left, table, expr) ||   /* #2516 */
-            reject_string_char_write(left, table, expr)) {     /* #3022 */
+            reject_string_char_write(left, table, expr) ||     /* #3022 */
+            reject_readonly_view_write(left, expr)) {          /* #3025 */
             free_type(left_type);
             free_type(right_type);
             return 0;
