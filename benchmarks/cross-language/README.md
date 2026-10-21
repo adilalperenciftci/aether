@@ -5,10 +5,10 @@ Comparative benchmarking of actor/message-passing implementations across 11 prog
 ## Quick Start
 
 ```bash
-make benchmark    # From repo root — builds, runs, opens visualization
+make benchmark    # From repo root: builds, runs, opens visualization
 ```
 
-Both the benchmark runner (`run_benchmarks.ae`) and the visualization server (`visualize/server.ae`) are written in Aether using only the stdlib — no extern FFI, no C helper files. The runner compiles all 11 languages, runs each benchmark, parses output, computes statistics, and writes JSON results. The server serves the interactive dashboard over HTTP.
+Both the benchmark runner (`run_benchmarks.ae`) and the visualization server (`visualize/server.ae`) are written in Aether using only the stdlib: no extern FFI, no C helper files. The runner compiles all 11 languages, runs each benchmark, parses output, computes statistics, and writes JSON results. The server serves the interactive dashboard over HTTP.
 
 ## Patterns (5)
 
@@ -24,82 +24,99 @@ Both the benchmark runner (`run_benchmarks.ae`) and the visualization server (`v
 
 | Language | Runtime | Concurrency Model |
 |----------|---------|-------------------|
-| **Aether** | Native (Aether runtime) | Lock-free SPSC actors, computed goto dispatch |
-| **C** | Native (pthread) | pthread mutex + condvar |
-| **C++** | Native (std::thread) | std::mutex + std::condition_variable |
-| **Go** | Go runtime | Goroutines with channels |
-| **Rust** | Native (std::sync) | sync_channel (bounded MPSC) |
-| **Java** | JVM | BlockingQueue / ForkJoinPool |
-| **Zig** | Native | std.Thread + Mutex |
+| **Aether** | Native (Aether runtime) | Actors on the runtime's scheduler, one thread per core |
+| **C** | Native (pthread) | A thread per unit; single-sender mailboxes on C11 atomics |
+| **C++** | Native (std::thread) | A thread per unit; single-sender mailboxes on `std::atomic` |
+| **Go** | Go runtime | Goroutines with buffered channels |
+| **Rust** | Native (std::thread) | A thread per unit; single-sender mailboxes on `std` atomics |
+| **Java** | JVM | Platform threads and `LinkedTransferQueue`; virtual threads for the ring; `ForkJoinPool` for skynet |
+| **Zig** | Native (std.Thread) | A thread per unit; single-sender mailboxes on `std.atomic` |
 | **Elixir** | BEAM VM | Lightweight processes + mailboxes |
 | **Erlang** | BEAM VM | Lightweight processes + mailboxes |
 | **Pony** | Native (Pony runtime) | GC-free actors, ref capabilities |
-| **Scala** | JVM | `java.util.concurrent` queues and ForkJoinPool |
+| **Scala** | JVM | As Java, through the same `java.util.concurrent` |
 
 All 11 languages implement all 5 patterns, 55 in total.
 
 See [FAIRNESS.md](FAIRNESS.md) for the rules the suite holds itself to and the
-audit that produced them. In short: standard library only, the same number of
+audits that produced them. In short: standard library only, the same number of
 concurrency units and the same sequential work in every implementation, rates
-divided by work actually performed, the same region timed, and medians rather
-than single runs.
+divided by work actually performed, the same region timed, medians rather than
+single runs, every result checked, every language built by its own build file
+at its release level, the same warmup for all, and the technique an expert
+would use, fixed by the shape of the work rather than picked per pattern.
 
 ## Methodology
 
 ### Statistical approach
 
-- Each benchmark runs **5 times** (configurable: `BENCH_RUNS=N`)
-- **Median** throughput reported (robust to outliers)
-- JVM/BEAM languages get **1 warmup run** (discarded) before timed measurement (`BENCH_WARMUP=N`)
-- All individual run values stored in results JSON
+- Each benchmark runs **5 times** (`BENCH_RUNS=N`) after **1 warmup run**
+  (`BENCH_WARMUP=N`), the same for every language
+- The **median** of the timed runs is reported, with the minimum, the maximum
+  and the coefficient of variation (sample standard deviation over the mean)
+- Every run's value is stored in the results JSON
 
 ### Metrics
 
 | Metric | Description |
 |--------|-------------|
-| **Throughput** (M msg/s) | Messages per second (median of N runs) |
+| **Throughput** (M msg/s) | Messages per second, median of the runs |
+| **Per CPU-s** (M msg/CPU-s) | Messages per second of CPU time (user + system, every thread): what a message cost, which wall-clock throughput hides for a runtime that spins |
 | **Latency** (ns/msg) | Nanoseconds per message |
+| **CPU s** | CPU time of a run |
 | **Memory** (MB) | Peak resident set size (RSS) |
-| **Relative** (%) | Percentage of fastest language |
-| **CV%** | Coefficient of variation (σ/μ × 100) — run-to-run stability. Standard statistical bands drive colour coding: low / moderate / high variance, independent of which language is being measured. |
-| **Range** | Min–Max throughput across runs |
+| **Relative** (%) | Percentage of the fastest language |
+| **CV%** | Coefficient of variation, the run-to-run stability. Standard statistical bands drive the colour coding: low, moderate or high variance, whatever the language |
+| **Range** | Minimum and maximum throughput across the runs |
 | **Efficiency** | Throughput per MB of memory |
+
+CPU time and memory come from `/usr/bin/time` (`-v` on Linux, `-l` on macOS)
+and read n/a on Windows, where MSYS's `time` cannot see a native program.
 
 ### Fairness
 
-- All languages use the same message count (`BENCHMARK_MESSAGES`)
-- All compiled with highest optimization flags (`-O3`, `--release`, etc.)
-- Skynet throughput standardized: **total tree nodes / elapsed time** across all languages
-- Each language uses its idiomatic concurrency model
-- C/C++/Zig use standard thread primitives (no actor framework) — this is intentionally honest: raw thread synchronization vs purpose-built actor runtimes
+- Standard library only, no frameworks; the same message count
+  (`BENCHMARK_MESSAGES`) and the same units and messages in every language
+- Each language is built by its own build file (`make <pattern>` in its
+  directory) at its release level for the host CPU: `-O3 -march=native
+  -flto` for C, C++ and Aether, Cargo's release profile with fat LTO and
+  `target-cpu=native` for Rust, `ReleaseFast` for Zig, the defaults of
+  `go build`, `ponyc`, `javac`, `sbt`, `erlc` and `elixir`; `make flags`
+  in each directory prints what it uses, and the results record it
+- Every run's checksum (and skynet's unit count) is checked; a wrong one is
+  reported as `[FAIL]` and not measured
+- Skynet divides by the units created, 1,111 for a million leaves everywhere
+- The technique per language follows a rule set by the shape of the work:
+  the thread-per-unit languages (C, C++, Rust, Zig) share one mailbox design
+  that spins, then sleeps, where the units fit the cores and sleeps at once
+  where they do not; Java and Scala use platform threads with
+  `LinkedTransferQueue`, and virtual threads for the oversubscribed ring.
+  FAIRNESS.md has each language's rule and every alternative measured
 
 ### Measurement
 
-- Wall-clock time via `CLOCK_MONOTONIC`
-- Memory via `/usr/bin/time` (macOS: `-l`, Linux: `-v`)
-- Correctness validated (e.g., skynet sum = 499,999,500,000)
+- Wall-clock time from each language's monotonic clock, around the creation
+  of the units and all the messages
+- CPU time and peak memory via `/usr/bin/time`
+- Correctness: every result checked against the value a correct run prints
 
 ## Configuration
 
 ```bash
-# Message count
+# Message count (default 1,000,000)
 BENCHMARK_MESSAGES=10000000 make benchmark
 
-# Number of timed runs
+# Timed runs per language and pattern (default 5)
 BENCH_RUNS=10 make benchmark
 
-# Warmup runs for JIT languages
+# Warmup runs, the same for every language (default 1)
 BENCH_WARMUP=3 make benchmark
+
+# A subset
+BENCH_LANGS=aether,c,rust BENCH_PATTERNS=ping_pong,skynet make benchmark
 ```
 
-Or edit `benchmark_config.json`:
-
-```json
-{
-  "messages": 1000000,
-  "timeout_seconds": 60
-}
-```
+See [config.md](config.md) for the toolchains each language needs.
 
 ## Visualization
 
@@ -107,7 +124,7 @@ After running, open `http://localhost:8080` for an interactive dashboard:
 
 - **Summary**: Aether rank, throughput, efficiency, spread
 - **Charts**: Throughput and memory bar charts
-- **Sortable table**: Click any column header — throughput, latency, memory, CV%, efficiency
+- **Sortable table**: Click any column header: throughput, latency, memory, CV%, efficiency
 - **Pattern tabs**: Switch between all 5 patterns
 - **Methodology**: Inline explanation of metrics and color coding
 
@@ -122,7 +139,7 @@ Results stored as JSON in `visualize/results_*.json` with full metadata.
 
 ## References
 
-- [Savina — An Actor Benchmark Suite](https://dl.acm.org/doi/10.1145/2687357.2687368) (Imam & Sarkar, 2014)
+- [Savina: An Actor Benchmark Suite](https://dl.acm.org/doi/10.1145/2687357.2687368) (Imam & Sarkar, 2014)
 - [Skynet Actor Benchmark](https://github.com/atemerev/skynet) (Temerev)
 - [Computer Language Benchmarks Game](https://benchmarksgame-team.pages.debian.net/benchmarksgame/)
-- [tzcnt/runtime-benchmarks](https://github.com/tzcnt/runtime-benchmarks) — C++ tasking library comparison
+- [tzcnt/runtime-benchmarks](https://github.com/tzcnt/runtime-benchmarks), a C++ tasking library comparison

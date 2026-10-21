@@ -46,9 +46,8 @@ Round-robin fan-out to 8 worker actors. Tests parallel dispatch throughput and b
 
 Recursive 10-ary tree summing 1M leaves. Tests actor creation rate, message aggregation, and tree coordination.
 
-- Recursive tree: each node spawns 10 children, leaves compute partial sums
-- Each language uses its idiomatic concurrency model (threads, goroutines, actors, processes)
-- Throughput measured as **total tree nodes / elapsed time** for fair cross-language comparison
+- Recursive tree: each node spawns 10 children; below a subtree of 1000 leaves a node sums its range in a plain loop
+- Every language creates the same 1,111 concurrency units for a million leaves, and the rate divides by them
 
 **Location:** `benchmarks/cross-language/aether/skynet.ae`
 
@@ -56,38 +55,45 @@ Recursive 10-ary tree summing 1M leaves. Tests actor creation rate, message aggr
 
 All 11 languages implement all 5 patterns:
 
-| Language | Runtime | Concurrency Model | Optimization |
-|----------|---------|-------------------|-------------|
-| **Aether** | Native (Aether runtime) | Lock-free SPSC actors | `-O3 -march=native` |
-| **C** | Native (pthread) | pthread mutex + condvar | `-O3 -march=native` |
-| **C++** | Native (std::thread) | std::mutex + std::condition_variable | `-O3 -std=c++17 -march=native` |
-| **Go** | Go runtime | Goroutines with channels | Default (Go always optimizes) |
-| **Rust** | Native (std::sync) | sync_channel (bounded MPSC) | `--release` |
-| **Java** | JVM | BlockingQueue / ForkJoinPool | Default |
-| **Zig** | Native | Mutex + Condition variable | `ReleaseFast` |
-| **Elixir** | BEAM VM | Lightweight processes + mailboxes | Default |
-| **Erlang** | BEAM VM | Lightweight processes + mailboxes | Default |
-| **Pony** | Native (Pony runtime) | GC-free actors, ref capabilities | Default |
-| **Scala** | JVM (Akka) | Akka actor system | Default |
+| Language | Runtime | Concurrency Model | Build |
+|----------|---------|-------------------|-------|
+| **Aether** | Native (Aether runtime) | Actors on the runtime's scheduler | `-O3 -march=native -flto` |
+| **C** | Native (pthread) | A thread per unit, single-sender mailboxes on C11 atomics | `-O3 -march=native -flto` |
+| **C++** | Native (std::thread) | A thread per unit, single-sender mailboxes on `std::atomic` | `-O3 -march=native -flto` |
+| **Go** | Go runtime | Goroutines with buffered channels | `go build` |
+| **Rust** | Native (std::thread) | A thread per unit, single-sender mailboxes on `std` atomics | release profile, fat LTO, `target-cpu=native` |
+| **Java** | JVM | Platform threads and `LinkedTransferQueue`; virtual threads for the ring; `ForkJoinPool` for skynet | `javac`, the JIT |
+| **Zig** | Native (std.Thread) | A thread per unit, single-sender mailboxes on `std.atomic` | `ReleaseFast`, native CPU |
+| **Elixir** | BEAM VM | Lightweight processes + mailboxes | the JIT |
+| **Erlang** | BEAM VM | Lightweight processes + mailboxes | `erlc`, the JIT |
+| **Pony** | Native (Pony runtime) | GC-free actors, ref capabilities | `ponyc` release |
+| **Scala** | JVM | As Java, through `java.util.concurrent` | `sbt compile`, the JIT |
 
 ## Methodology
 
+[benchmarks/cross-language/FAIRNESS.md](../benchmarks/cross-language/FAIRNESS.md)
+holds the suite's rules, each language's technique and why, and the audits
+that produced them, with every alternative measured.
+
 ### Statistical Approach
 
-Each benchmark is run **5 times** (configurable via `BENCH_RUNS`). The **median** throughput is reported to reduce the impact of outliers. All individual run values are stored for transparency.
-
-**JVM/BEAM warmup:** Java, Scala, Erlang, and Elixir receive 1 warmup run (discarded, not timed) before the measured runs. This allows JIT compilation to complete before measurement, matching how these runtimes perform in production.
+Each benchmark runs **5 times** (`BENCH_RUNS`) after **1 warmup run**
+(`BENCH_WARMUP`), the same for every language. The **median** throughput is
+reported (the middle of the sorted runs), with the minimum, the maximum and
+the coefficient of variation. All individual run values are stored.
 
 **Metrics reported per language:**
 
 | Metric | Description |
 |--------|-------------|
 | Throughput (M msg/s) | Messages processed per second (median of N runs) |
+| Per CPU-s (M msg/CPU-s) | Messages per second of CPU time, user + system, every thread |
 | Latency (ns/msg) | Nanoseconds per message (median) |
+| CPU s | CPU time of a run |
 | Memory (MB) | Peak resident set size via `/usr/bin/time` |
 | Relative (%) | Percentage of the fastest language's throughput |
-| CV% | Coefficient of variation (σ/μ × 100), measures run-to-run stability |
-| Range | Min-Max throughput across all runs |
+| CV% | Coefficient of variation (sample standard deviation over the mean, times 100): run-to-run stability |
+| Range | Minimum and maximum throughput across the runs |
 | Efficiency | Throughput per MB of memory (M msg/s/MB) |
 
 **CV% interpretation.** The thresholds below are general statistical
@@ -99,28 +105,19 @@ figure, regardless of which language is being measured:
 - **5-15%** (orange): moderate variance; read medians alongside Min-Max range.
 - **> 15%** (red): high variance; investigate thermal throttling, OS scheduling, or shared-host noise before citing numbers.
 
-The runner computes CV in 64-bit and refuses to publish a negative
-value. Both matter for the fastest patterns: throughput in the hundreds
-of millions of msg/sec makes `range * 50` exceed the 32-bit ceiling
-before the divide, which used to yield a NEGATIVE CV for exactly the
-results most likely to be quoted. A negative coefficient of variation is
-arithmetically impossible, so if one ever appears the runner reports it
-and substitutes zero rather than letting a consumer read it as a
-stability signal.
-
 ### Measurement
 
-- Wall-clock time via `CLOCK_MONOTONIC` (not CPU time)
-- All compiled languages use highest optimization flags
-- Correctness validated (e.g., skynet sum = 499,999,500,000 for 1M leaves)
-- Memory measured as peak RSS via `/usr/bin/time -l` (macOS) or `/usr/bin/time -v` (Linux)
+- Wall-clock time from each language's monotonic clock, around the creation of the units and every message
+- CPU time and peak RSS via `/usr/bin/time -v` (Linux) or `-l` (macOS); n/a on Windows, where MSYS's `time` cannot see a native program
+- Every run's checksum is checked against the value a correct run prints (skynet: 499,999,500,000 for 1M leaves, and 1,111 units); a wrong one is reported as `[FAIL]`, not measured
 
 ### Fairness
 
-- All languages use the same message count (`BENCHMARK_MESSAGES` environment variable)
-- Skynet throughput standardized: all languages count **total tree nodes** (not messages or threads)
-- Each language uses its idiomatic concurrency model, the benchmark measures "how well does this language solve the problem," not "how identical is the implementation"
-- Results JSON includes full methodology metadata for reproducibility
+- Standard library only; the same message count (`BENCHMARK_MESSAGES`), units and messages in every language
+- Each language is built by its own build file at its release level for the host CPU; the runner passes no flags and records each build's
+- Skynet divides by the units created, the same 1,111 everywhere
+- Each language's technique follows a rule set by the shape of the work, not picked per pattern from the results: the thread-per-unit languages share one mailbox design that spins, then sleeps, where the units fit the cores and sleeps at once where they do not
+- Results JSON includes the methodology, the toolchain versions and the build flags
 
 ## Running Benchmarks
 
@@ -148,7 +145,7 @@ BENCHMARK_MESSAGES=10000000 make benchmark
 # Override number of timed runs
 BENCH_RUNS=10 make benchmark
 
-# Override warmup runs for JIT languages
+# Override warmup runs (every language gets the same)
 BENCH_WARMUP=3 make benchmark
 ```
 
