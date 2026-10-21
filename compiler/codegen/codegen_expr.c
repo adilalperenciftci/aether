@@ -6010,10 +6010,11 @@ static const char* slice_elem_c_type(const Type* t) {
 }
 
 /* The source path a bounds-check failure names, as a C string literal
- * (#2305). A path is written into generated C, so it is escaped like any
- * string: a Windows path's backslashes were emitted raw, and each `\G`,
- * `\s`, `\d` became an unknown-escape warning per access (a `\a` a BEL in
- * the message). Control characters are written as octal escapes. */
+ * (#2305), and the one a call through the empty closure names (#3091).
+ * A path is written into generated C, so it is escaped like any string: a
+ * Windows path's backslashes were emitted raw, and each `\G`, `\s`, `\d`
+ * became an unknown-escape warning per access (a `\a` a BEL in the
+ * message). Control characters are written as octal escapes. */
 static void emit_slice_diag_file(CodeGenerator* gen, const ASTNode* n) {
     const char* path = (n && n->source_file) ? n->source_file : "?";
     fputc('"', gen->output);
@@ -10386,9 +10387,13 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                             fprintf(gen->output, ", %s", atype);
                             sig_pi++;
                         }
-                        fprintf(gen->output, "))");
+                        /* #3091: through `_aether_closure_fn`, which
+                         * panics at this call when the closure is empty. */
+                        fprintf(gen->output, "))_aether_closure_fn(");
                         generate_expression(gen, closure_arg);
-                        fprintf(gen->output, ".fn)(");
+                        fprintf(gen->output, ".fn, \"empty_closure_call: call through an empty closure at \" ");
+                        emit_slice_diag_file(gen, expr);
+                        fprintf(gen->output, " \":%d:%d\"))(", expr->line, expr->column);
                         generate_expression(gen, closure_arg);
                         fprintf(gen->output, ".env");
                         int arg_pi = 0;

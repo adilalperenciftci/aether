@@ -2033,6 +2033,7 @@ downstream triage match on it, so it does not change with the prose after it.
 | `precondition_violation` | a `requires` clause that evaluated false |
 | `postcondition_violation` | an `ensures` clause that evaluated false |
 | `forced_unwrap_none` | `x!` on an optional holding `none` |
+| `empty_closure_call` | a call through the empty closure (a closure slot or a `fn?` holding `null`) |
 
 A failure that forwards an existing error value (`expr!` on a fallible) prints
 that error's own message rather than a category, because the message came from
@@ -3904,7 +3905,12 @@ wherever a closure goes: a binding, a field, an argument, a result, an
 element of an array literal (`[f, null]`, `[null, f]`), a part of a tuple
 literal, a module-level `var`, the default of `??`. A `fn?` given `null`
 holds the empty closure, as a `ptr?` given `null` holds a null pointer: it
-is not `none`, and `o == null` is true. A closure compares only with
+is a present value, not `none`, so `o == null` is true, a `match` runs its
+`some` arm and `o!` gives the empty closure; `none` is the absence of any
+closure. A call through the empty closure, however it was reached, panics
+at the call with the category `empty_closure_call` and the call's source
+position ([Panic categories](#panic-categories)), which a `catch`
+receives. A closure compares only with
 `null`: `f == g` between two closures, or a closure and a pointer, is a
 compile error, and so is one between two `fn?` or a `fn?` and a closure
 (Go's rule for function values). The same

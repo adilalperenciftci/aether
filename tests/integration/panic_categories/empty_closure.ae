@@ -1,0 +1,8 @@
+// A call through the empty closure must print its own category token.
+import std.io
+
+main() {
+    let c: fn = null
+    c()
+    println("after")
+}

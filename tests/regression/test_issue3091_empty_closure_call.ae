@@ -1,0 +1,151 @@
+// Regression (#3091): a call through the empty closure is a named panic at
+// the call, not a jump to address 0.
+//
+// `let c: fn = null` then `c()`, a struct field left `null`, a parameter
+// given `null` (called directly, through `call`, or as a closure type that
+// says what it keeps), an array element, and a `fn?` holding `null` (a
+// present empty closure, so its `some` arm runs and `!` takes it) each
+// crashed the program with an access violation and no message. Each call
+// now panics with the category `empty_closure_call` and the call's source
+// position, which a `catch` receives. `none` in a `fn?` is the absence of a
+// closure: no call is made.
+
+import std.string
+
+extern exit(code: int)
+
+struct Holder { cb: fn }
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL #3091: ${msg}")
+        exit(1)
+    }
+}
+
+fn check_panic(e: string, line: string, what: string) {
+    check(string.starts_with(e, "empty_closure_call: "), "${what}: category, got '${e}'")
+    check(string.contains(e, "test_issue3091_empty_closure_call.ae:${line}:"),
+        "${what}: position ${line}, got '${e}'")
+}
+
+direct(cb: fn) {
+    cb()
+}
+
+through_call(cb: fn, x: int) {
+    call(cb, x)
+}
+
+keeping(el: @keep ptr, tick: fn(@keep ptr, float)) {
+    tick(el, 0.5)
+}
+
+bare() -> string {
+    let c: fn = null
+    try {
+        c()
+    } catch e {
+        return e
+    }
+    return "no panic"
+}
+
+field() -> string {
+    h = Holder { cb: null }
+    try {
+        h.cb()
+    } catch e {
+        return e
+    }
+    return "no panic"
+}
+
+param() -> string {
+    try {
+        direct(null)
+    } catch e {
+        return e
+    }
+    return "no panic"
+}
+
+param_call() -> string {
+    try {
+        through_call(null, 3)
+    } catch e {
+        return e
+    }
+    return "no panic"
+}
+
+param_keeping() -> string {
+    try {
+        keeping(null, null)
+    } catch e {
+        return e
+    }
+    return "no panic"
+}
+
+element() -> string {
+    let fs: fn[2] = [null, null]
+    try {
+        g = fs[1]
+        g()
+    } catch e {
+        return e
+    }
+    return "no panic"
+}
+
+opt_some() -> string {
+    let o: fn? = null
+    try {
+        match o {
+            some(f) -> { f() }
+            none -> { return "none arm" }
+        }
+    } catch e {
+        return e
+    }
+    return "no panic"
+}
+
+opt_unwrap() -> string {
+    let o: fn? = null
+    try {
+        g = o!
+        g()
+    } catch e {
+        return e
+    }
+    return "no panic"
+}
+
+opt_none() -> string {
+    let o: fn? = none
+    match o {
+        some(f) -> { f() }
+        none -> { return "none arm" }
+    }
+    return "some arm"
+}
+
+main() {
+    check_panic(bare(), "47", "bare fn")
+    check_panic(field(), "57", "struct field")
+    check_panic(param(), "33", "parameter")
+    check_panic(param_call(), "37", "parameter through call")
+    check_panic(param_keeping(), "41", "closure type with a keep mode")
+    check_panic(element(), "95", "array element")
+    check_panic(opt_some(), "106", "fn? some arm")
+    check_panic(opt_unwrap(), "119", "fn? unwrap")
+    check(opt_none() == "none arm", "none in a fn? is the absence")
+    // A closure that holds a function is called as before.
+    n = 0
+    h = Holder { cb: || { n = n + 1 } }
+    h.cb()
+    check(n == 1, "a full closure is called")
+    println("ok")
+}

@@ -9131,6 +9131,15 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     print_line(gen, "#endif");
     // Closure support: generic closure struct (function pointer + captured environment)
     print_line(gen, "typedef struct { void (*fn)(void); void* env; } _AeClosure;");
+    /* #3091: the function a call through a closure jumps to. The empty
+     * closure (`null` in a closure slot, also when a `fn?` holds it) has
+     * none, and the call panics with `where`, its category and source
+     * position, instead of jumping to address 0. */
+    print_line(gen, "typedef void (*_AeFnPtr)(void);");
+    print_line(gen, "static inline _AeFnPtr _aether_closure_fn(_AeFnPtr fn, const char* where) {");
+    print_line(gen, "    if (!fn) aether_panic(where);");
+    print_line(gen, "    return fn;");
+    print_line(gen, "}");
     /* The head every closure env starts with: its destructor (#1398) and its
      * reference count (#2494). An env is held by the closure value's owner
      * and by every env that captured the closure; each holder releases

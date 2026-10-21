@@ -45,6 +45,7 @@ expect_category() {
 
 expect_category precondition precondition_violation
 expect_category forced_none  forced_unwrap_none
+expect_category empty_closure empty_closure_call
 
 if [ "$fail" -eq 0 ]; then
     echo "  [PASS] panic_categories: failures lead with their stable category token"
