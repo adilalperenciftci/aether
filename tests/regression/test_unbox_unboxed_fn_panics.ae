@@ -29,7 +29,7 @@ bump(x: int) -> int { return x + 1 }
 store_ptr(h: *Holder, f: @keep ptr) { h.cb = f }
 
 // fn-typed param: the call site boxes, so the ptr field holds a real box.
-store_fn(h: *Holder, f: fn) { h.cb = f }
+store_fn(h: *Holder, f: @keep fn) { h.cb = f }
 
 fail(msg: string) {
     println("FAIL: ${msg}")

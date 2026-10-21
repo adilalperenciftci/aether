@@ -9,19 +9,19 @@ import std.map
 struct FHolder { cb: fn }
 var gfn: fn = null
 inner_call(cb: fn, x: int) { cb(x) }
-to_list(l: ptr, h: fn) { list.add(l, h) }
-to_list_alias(l: ptr, h: fn) { kept = h
+to_list(l: ptr, h: @keep fn) { list.add(l, h) }
+to_list_alias(l: ptr, h: @keep fn) { kept = h
     list.add(l, kept) }
-to_map(m: ptr, h: fn) { map.put(m, "k", h) }
-to_map_alias(m: ptr, h: fn) { kept = h
+to_map(m: ptr, h: @keep fn) { map.put(m, "k", h) }
+to_map_alias(m: ptr, h: @keep fn) { kept = h
     map.put(m, "k2", kept) }
-to_field(p: ptr, h: fn) { e = p as *FHolder
+to_field(p: ptr, h: @keep fn) { e = p as *FHolder
     e.cb = h }
-to_field_alias(p: ptr, h: fn) { kept = h
+to_field_alias(p: ptr, h: @keep fn) { kept = h
     e = p as *FHolder
     e.cb = kept }
-to_global(h: fn) { gfn = h }
-to_global_alias(h: fn) { kept = h
+to_global(h: @keep fn) { gfn = h }
+to_global_alias(h: @keep fn) { kept = h
     gfn = kept }
 main() {
     a = "A"

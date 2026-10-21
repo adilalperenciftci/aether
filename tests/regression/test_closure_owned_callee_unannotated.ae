@@ -27,7 +27,7 @@ check(label: string, got: int, want: int) {
     }
 }
 
-keep(l: ptr, cb: fn) {
+keep(l: ptr, cb: @keep fn) {
     _ = list.add(l, cb)
 }
 

@@ -94,20 +94,20 @@ extern aether_worker_pool_shutdown()
 // that result to `done` on the loop thread (through the installed poster, or
 // the drain queue if none). Returns true if the worker launched, false on
 // failure (no threads / out of memory) — on false neither closure runs.
-run(work: fn, done: fn) -> bool {
+run(work: @keep fn, done: @keep fn) -> bool {
     return aether_worker_run(work, done) == 1
 }
 
 // Fire-and-forget: run `work` off-thread and discard its result. No post-back,
 // nothing to drain. Returns true if launched.
-run_detached(work: fn) -> bool {
+run_detached(work: @keep fn) -> bool {
     return aether_worker_run_detached(work) == 1
 }
 
 // Install the host's "post to the loop thread" trampoline. `poster` is invoked
 // (on the worker thread) with an opaque job `ptr`; the host must marshal that
 // ptr onto its loop thread and there call `deliver(job)`. Call once at startup.
-set_main_poster(poster: fn) {
+set_main_poster(poster: @keep fn) {
     aether_worker_set_main_poster(poster)
 }
 
@@ -166,7 +166,7 @@ wait() -> int {
 // Returns an empty list when a main-thread poster is installed: completions
 // go to the host loop there, so this helper cannot join them (wait() reports
 // the same condition on stderr).
-map(items: ptr, f: fn) -> ptr {
+map(items: ptr, f: @keep fn) -> ptr {
     n = list.size(items)
     out = list.new()
     i = 0

@@ -47,7 +47,7 @@ take(f: fn) -> int {
     return a
 }
 
-stash_ok(l: ptr, f: fn) -> bool {
+stash_ok(l: ptr, f: @keep fn) -> bool {
     _ = list.add(l, f)
     return true
 }

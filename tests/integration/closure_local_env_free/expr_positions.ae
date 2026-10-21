@@ -35,7 +35,7 @@ take(f: fn) -> int {
 }
 
 // Stores the closure; says whether it did.
-stash_ok(l: ptr, f: fn) -> bool {
+stash_ok(l: ptr, f: @keep fn) -> bool {
     _ = list.add(l, f)
     return true
 }
@@ -43,7 +43,7 @@ stash_ok(l: ptr, f: fn) -> bool {
 // Stores the closure into an empty list only, so the loop below stores
 // it once (a list slot holds a reference of its own since #2518; this
 // keeps the loop's hand-off count at one).
-stash_first(l: ptr, f: fn) -> bool {
+stash_first(l: ptr, f: @keep fn) -> bool {
     if list.size(l) == 0 {
         _ = list.add(l, f)
     }

@@ -14,11 +14,11 @@ import std.string
 
 // ---- TinyWeb DSL subset (inline, same as test_spec.ae) ----
 
-const GET     = 1
-const POST    = 2
-const DELETE  = 4
+const GET = 1
+const POST = 2
+const DELETE = 4
 
-route_entry(method: int, pp: string, handler: fn) {
+route_entry(method: int, pp: string, handler: @keep fn) {
     e = map_new()
     map_put(e, "method", method)
     map_put(e, "path", pp)
@@ -26,7 +26,7 @@ route_entry(method: int, pp: string, handler: fn) {
     return e
 }
 
-end_point(_ctx: ptr, method: int, pattern: string, handler: fn) {
+end_point(_ctx: ptr, method: int, pattern: string, handler: @keep fn) {
     routes, _ = map.get(_ctx, "routes")
     list.add(routes, route_entry(method, pattern, handler))
 }
@@ -130,7 +130,7 @@ do_inv_list(res: ptr, inventory: ptr) {
 
 do_inv_lookup(req: ptr, res: ptr, inventory: ptr) {
     seal except req, res, inventory, response_json, response_write_status,
-                request_get_query_param, inventory_lookup, str_eq
+    request_get_query_param, inventory_lookup, str_eq
     sku = request_get_query_param(req, "sku")
     info = inventory_lookup(inventory, sku)
     if str_eq(info, "") == 1 {
@@ -157,20 +157,19 @@ main() {
     cart = list.new()
 
     server = web_server(8080) {
-
         // Inventory endpoints — read-only, see the catalog directly
         tw_path("/api/inventory") {
-            end_point(GET, "/list") |req: ptr, res: ptr, ctx: ptr| {
+            end_point(GET, "/list") | req: ptr, res: ptr, ctx: ptr | {
                 do_inv_list(res, inventory)
             }
-            end_point(GET, "/lookup") |req: ptr, res: ptr, ctx: ptr| {
+            end_point(GET, "/lookup") | req: ptr, res: ptr, ctx: ptr | {
                 do_inv_lookup(req, res, inventory)
             }
         }
 
         // Cart endpoints — actions hide inventory from their bodies
         tw_path("/api/cart") {
-            end_point(POST, "/add") |req: ptr, res: ptr, ctx: ptr| {
+            end_point(POST, "/add") | req: ptr, res: ptr, ctx: ptr | {
                 // Validate SKU here (where inventory IS visible)…
                 sku = request_get_query_param(req, "sku")
                 info = inventory_lookup(inventory, sku)
@@ -181,10 +180,10 @@ main() {
                     do_cart_add(req, res, cart, inventory)
                 }
             }
-            end_point(GET, "/list") |req: ptr, res: ptr, ctx: ptr| {
+            end_point(GET, "/list") | req: ptr, res: ptr, ctx: ptr | {
                 do_cart_list(res, cart, inventory)
             }
-            end_point(DELETE, "/remove") |req: ptr, res: ptr, ctx: ptr| {
+            end_point(DELETE, "/remove") | req: ptr, res: ptr, ctx: ptr | {
                 do_cart_remove(req, res, cart, inventory)
             }
         }

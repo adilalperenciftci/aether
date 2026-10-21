@@ -19,7 +19,7 @@ row(_ctx: @keep ptr) {
     return _ctx
 }
 
-btn_do(_ctx: ptr, action: fn) {
+btn_do(_ctx: ptr, action: @keep fn) {
     list.add(_ctx, box_closure(action))
 }
 

@@ -39,7 +39,7 @@ method_to_string(method: int) {
     return "GET"
 }
 
-route_entry(method: int, pp: string, handler: fn) {
+route_entry(method: int, pp: string, handler: @keep fn) {
     e = map_new()
     map_put(e, "method", method)
     map_put(e, "path", pp)
@@ -47,7 +47,7 @@ route_entry(method: int, pp: string, handler: fn) {
     return e
 }
 
-filter_entry(method: int, pp: string, handler: fn) {
+filter_entry(method: int, pp: string, handler: @keep fn) {
     e = map_new()
     map_put(e, "method", method)
     map_put(e, "path", pp)
@@ -55,7 +55,7 @@ filter_entry(method: int, pp: string, handler: fn) {
     return e
 }
 
-ws_entry(pp: string, handler: fn) {
+ws_entry(pp: string, handler: @keep fn) {
     e = map_new()
     map_put(e, "path", pp)
     map_put(e, "handler", box_closure(handler))
@@ -69,24 +69,24 @@ static_entry(bp: string, dir: string) {
     return e
 }
 
-sse_entry(pp: string, handler: fn) {
+sse_entry(pp: string, handler: @keep fn) {
     e = map_new()
     map_put(e, "path", pp)
     map_put(e, "handler", box_closure(handler))
     return e
 }
 
-end_point(_ctx: ptr, method: int, pattern: string, handler: fn) {
+end_point(_ctx: ptr, method: int, pattern: string, handler: @keep fn) {
     routes, _ = map.get(_ctx, "routes")
     list.add(routes, route_entry(method, pattern, handler))
 }
 
-web_filter(_ctx: ptr, method: int, pattern: string, handler: fn) {
+web_filter(_ctx: ptr, method: int, pattern: string, handler: @keep fn) {
     filters, _ = map.get(_ctx, "filters")
     list.add(filters, filter_entry(method, pattern, handler))
 }
 
-web_socket(_ctx: ptr, ws_path: string, handler: fn) {
+web_socket(_ctx: ptr, ws_path: string, handler: @keep fn) {
     ws_h, _ = map.get(_ctx, "ws_handlers")
     list.add(ws_h, ws_entry(ws_path, handler))
 }
@@ -96,7 +96,7 @@ serve_static(_ctx: ptr, bp: string, dir: string) {
     list.add(statics, static_entry(bp, dir))
 }
 
-sse_endpoint(_ctx: ptr, sp: string, handler: fn) {
+sse_endpoint(_ctx: ptr, sp: string, handler: @keep fn) {
     sse_h, _ = map.get(_ctx, "sse_handlers")
     list.add(sse_h, sse_entry(sp, handler))
 }

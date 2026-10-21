@@ -1837,5 +1837,146 @@ main() {
 AE
 accepted closure_alias_guards
 
+# #3034: a `fn` parameter is borrowed for the call as a `ptr` one is: a
+# function that keeps it (stores it where it outlives the call, boxes it
+# there, hands it to a keeping parameter) declares it `@keep fn`, checked
+# against its own body. A caller's closure that captures a borrowed `ptr`
+# then goes only where it is borrowed.
+cat > "$TMP/fn_param_kept.ae" <<'AE'
+var kept: fn = null
+
+on_event(cb: fn) {
+    kept = cb
+}
+
+main() { on_event(|| { println("x") }) }
+AE
+refused fn_param_kept 4:5 "'cb' is a borrowed \`fn\` parameter, stored in a module-level \`var\`"
+
+cat > "$TMP/fn_param_boxed.ae" <<'AE'
+var handlers: ptr = null
+
+on_event(cb: fn) {
+    handlers = box_closure(cb)
+}
+
+main() { on_event(|| { println("x") }) }
+AE
+refused fn_param_boxed 4:5 "'cb' is a borrowed \`fn\` parameter, held by a boxed closure that is stored in a module-level \`var\`"
+
+cat > "$TMP/fn_param_to_keep.ae" <<'AE'
+var kept: fn = null
+
+keep_it(cb: @keep fn) {
+    kept = cb
+}
+
+pass_on(cb: fn) {
+    keep_it(cb)
+}
+
+main() { pass_on(|| { println("x") }) }
+AE
+refused fn_param_to_keep 8:13 "'cb' is a borrowed \`fn\` parameter, passed to a parameter that keeps it"
+
+# Declared `@keep fn`, it is kept; a closure capturing a borrowed `ptr`
+# given to it is the caller's E0902. Called in the call, or handed to a
+# borrowing parameter, a closure keeps nothing.
+cat > "$TMP/fn_param_keep_declared.ae" <<'AE'
+var kept: fn = null
+
+on_event(cb: @keep fn) {
+    kept = cb
+}
+
+run(f: fn) {
+    call(f)
+}
+
+relay(p: ptr) {
+    run(|| { println("${p == null}") })
+}
+
+main() {
+    on_event(|| { println("x") })
+    relay(null)
+}
+AE
+accepted fn_param_keep_declared
+
+cat > "$TMP/fn_param_keep_caller.ae" <<'AE'
+var kept: fn = null
+
+on_event(cb: @keep fn) {
+    kept = cb
+}
+
+relay(p: ptr) {
+    on_event(|| { println("${p == null}") })
+}
+
+main() { relay(null) }
+AE
+refused fn_param_keep_caller 8:14 "'p' is a borrowed \`ptr\` parameter captured by a closure that is passed to a parameter that keeps it"
+
+# A struct taken by value holds the caller's pointer: kept, it is
+# declared `@keep`, as a `ptr` parameter is.
+cat > "$TMP/struct_param_kept.ae" <<'AE'
+struct Handler {
+    ctx: ptr
+    id: int
+}
+
+var registry: Handler = Handler { ctx: null, id: 0 }
+var last_ctx: ptr = null
+var last_id: int = 0
+
+register(h: Handler) {
+    registry = h
+}
+
+remember(h: Handler) {
+    last_ctx = h.ctx
+    last_id = h.id
+}
+
+main() {
+    register(Handler { ctx: null, id: 1 })
+    remember(Handler { ctx: null, id: 2 })
+}
+AE
+refused struct_param_kept 11:5 "'h' is a borrowed \`Handler\` parameter, which holds a pointer, stored in a module-level \`var\`"
+out=$(cd "$TMP" && "$AE" check struct_param_kept.ae 2>&1)
+case "$out" in
+    *"struct_param_kept.ae:15:"*) ;;
+    *) echo "  [FAIL] struct_param_kept: the pointer field read out and stored is not refused"
+       fails=$((fails + 1)) ;;
+esac
+case "$out" in
+    *"struct_param_kept.ae:16:"*)
+       echo "  [FAIL] struct_param_kept: an int field read out is refused"
+       fails=$((fails + 1)) ;;
+esac
+
+cat > "$TMP/struct_param_keep_declared.ae" <<'AE'
+struct Handler {
+    ctx: ptr
+    id: int
+}
+
+var registry: Handler = Handler { ctx: null, id: 0 }
+
+register(h: @keep Handler) {
+    registry = h
+}
+
+relay(p: ptr) {
+    register(Handler { ctx: p, id: 1 })
+}
+
+main() { relay(null) }
+AE
+refused struct_param_keep_declared 13:14 "'p' is a borrowed \`ptr\` parameter held by a struct that is passed to a parameter that keeps it"
+
 if [ "$fails" -ne 0 ]; then exit 1; fi
 echo "  [PASS] keeps_borrowed: a borrowed ptr parameter is never kept, alone or in a struct or closure that escapes; @keep, string.keep, string.seq_retain, a re-bound parameter, a struct local and a closure run in the call are"

@@ -2106,6 +2106,7 @@ Every place that holds a string (a local, a struct field, an element, a module-l
 - **`string.free(x)` releases the reference `x` holds and leaves `x` empty**, for a local, a field or a module-level `var`. Nothing frees it again.
 
 - **A `ptr` parameter is borrowed for the call unless it is declared `@keep`** (E0902). A `ptr` owns nothing, so a pointer a function keeps (stores where it outlives the call, returns, sends in a message, or passes to another `@keep` parameter) is declared `p: @keep ptr`; a pointer computed from it (`p + n`, `p - n`) points into the same memory and counts as `p`. A struct local to the function, and a closure that runs and is dropped inside the call, do not outlive it: putting the pointer in one (`s = Pair { a: p }`, `s.a = p`, `run(|| { use(p) })`) keeps nothing, and the struct or the closure is a keep only when it escapes itself, returned, stored in a field, a module-level `var` or a container, or passed to a `@keep` or `@retain` parameter. A tuple (`t = (p, 1)`), an optional, and anything read out of a holder (a field, a tuple part, an optional's payload `o!` or `o ?? d`, a `match` binding) hold it the same way, except that a part of a tuple or a field of a struct built from parts holds only what went into that part or field (after `t = (p, q)` and `a, b = t`, `b` holds `q` and not `p`; after `s = Pair { a: p, b: q }` or `s.b = q`, `s.b` holds `q`), and so does what a closure that captured it returns (`call(f)`). A closure that captured the pointer and stores it somewhere that outlives the call keeps it too, and so does one that reads it through an address of a local, or a local a closure assigns, stored there after the closure was written: it is checked where it is called or passed (`g = || { kept = pb.item }`, `b.item = p`, `call(g)`). The checker verifies each function against its own body, and a call against the callee's signature; a loop's body is checked with what every pass through it binds, so `kept = q` placed before `q = p` in a loop keeps `p`, unless the body first binds `q` anew (`q = list.new()`). A `string` reaches a `@keep ptr` only through `string.keep(s)`, which hands over a reference of its own (`string.release_kept(p)` gives it back), or as a literal or a `const` bound to one, which is pinned, and a `*StringSeq` only through `string.seq_retain(s)` (`string.seq_free` gives it back). C memory viewed as `string[]` (`(names as string[])[i] = s`) is given the string's characters and no reference, so the string must outlive C's reads: a string built in the statement never does, and a local does only when the memory ends with the function (an argv array the function allocates, hands to C and does not let escape). Memory that outlives the function (reached through a parameter, a module-level `var`, a field or a heap box, or whose pointer is returned or stored) takes `(names as ptr[])[i] = string.keep(s)`, given back with `string.release_kept` where the memory is freed, and refuses any other string but a literal or a `const` bound to one. A closure's `ptr` parameter borrows unless it is declared `@keep` (`|el: @keep ptr, t: float|`), and the mode is part of a function's type, `fn(@keep ptr, float)`: a call through a value of that type is checked as a direct call is, and a function goes only where its type says what it keeps, never into a bare `fn`, a `ptr` or a typed C function pointer, whose parameters borrow ([Closure types that say what they keep](#closure-types-that-say-what-they-keep-fnkeep-ptr-float)). A typed pointer (`*Node`) and a `distinct` type over `ptr` are not checked: a string converts to neither.
+- **A `fn` parameter, and a struct parameter taken by value that holds a `ptr` or a closure, are borrowed the same way** (E0902). A closure may capture a borrowed `ptr` of its caller, and a struct's `ptr` field points at the caller's memory, so a function that keeps such a parameter (stores it where it outlives the call, boxes it there with `box_closure`, puts it in a container, or passes it to a parameter that keeps it) declares it `@keep`: `on_event(cb: @keep fn)`, `register(h: @keep Handler)`. The function's own body is checked, as for a `ptr` parameter, and a caller is then checked against the declaration: a closure that captures a borrowed `ptr`, given to a `@keep fn` parameter, is E0902 at the caller. A closure the function only calls, or hands to a borrowing parameter (`run(|| { use(p) })`), keeps nothing, and neither does handing the parameter back with `return`. A store into memory the function allocates and frees (an array it hands to C) keeps nothing either, for any parameter. The declaration changes no count: the call borrows the closure as every call does, and the callee's store takes its own reference.
 - **A `ptr` parameter declared `@into` may reach the function's result and nowhere else** (E0902). A function that builds a value around its argument (a recorder, an iterator, a view) declares `p: @into ptr` and may `return` it, as the pointer, a view of it (`p as *Node`, `p + n`), in a struct, a tuple part or an optional, in a closure that captures it, or in the result of another `@into` call; any other escape is E0902 as for a borrowed parameter. Its result type must be able to hold a pointer (a pointer, a function, or a struct, tuple, optional, array or sum with such a part), and only a bare `ptr` takes `@into`. The caller holds the result as it holds a struct local that holds its argument: the result may live in a local, be read and be lent to borrowing parameters (`(&q) as ptr`), and it escapes, with the argument, only where the argument itself would (returned, stored in a module-level `var`, a field through a pointer or a container, sent, captured by a closure that escapes, given to a `@keep` or `@retain` parameter). With several `@into` parameters the result holds every one of them. A function that returns another `@into` call's result made from its own parameter declares that parameter `@into` too, and its callers are checked the same way. A string reaches an `@into ptr` only through `string.keep(s)` (or as a literal or a `const` bound to one), a closure given to one is boxed on the heap with a reference of its own (`release_closure` gives it back), and `@into` is part of a function's type as `@keep` is (`fn(@into ptr) -> Recorder`): a call through such a value holds its result to the same rule. An extern's parameter may be `@into` too ([`@retain`, `@noescape` and `@into`](#retain-noescape-and-into-what-an-extern-does-with-a-parameter)).
 
 ```aether,run
@@ -2221,6 +2222,34 @@ main() {
 ```output
 true
 ```
+
+#### Migrating from 0.837
+
+E0902 checks a `fn` parameter, and a struct parameter taken by value that holds a `ptr` or a closure, as it checks a `ptr` one: a function that keeps it declares it `@keep`. On 0.837.0 a closure given to a function that kept it went unchecked, and one that captured a borrowed `ptr` outlived the call holding it. The help names the declaration, here `cb: @keep fn`.
+
+```aether,fails
+var handlers: ptr = null
+on_event(cb: fn) { handlers = box_closure(cb) }        // E0902: the function keeps `cb`
+
+main() { on_event(|| { println("hi") }) }
+```
+
+```aether,run
+var handlers: ptr = null
+on_event(cb: @keep fn) { handlers = box_closure(cb) }  // the parameter says it is kept
+
+main() {
+    on_event(|| { println("hi") })
+    call(unbox_closure(handlers))
+    release_closure(handlers)
+}
+```
+
+```output
+hi
+```
+
+std and contrib declare the parameters they keep: `worker.run`, `run_detached`, `set_main_poster` and `map`, `observe.observe` and `observe_fields`, `schema.refine`, `spec.before_each` and `after_each`, `quickjs.function`, and tinyweb's route, filter, websocket, SSE and `on_*` registrations. A closure that captures a borrowed `ptr`, given to one of them, is E0902 where it is given: copy what it needs, or declare the `ptr` `@keep` too.
 
 ---
 

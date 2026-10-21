@@ -394,6 +394,19 @@ static int callee_result_shape(CodeGenerator* gen, const char* func_name, const 
  * parameters then one position on); named and DSL trailing arguments
  * shift the positions in ways the call does not show, so those calls leave
  * it to the box or the builder. */
+/* #3034: is parameter `pi` of the Aether function `fdef` a closure (a `fn`
+ * type that is no C function pointer)? */
+static int param_at_is_closure(ASTNode* fdef, int pi) {
+    for (int i = 0, k = 0; fdef && i < fdef->child_count; i++) {
+        ASTNode* p = fdef->children[i];
+        if (!p || p->type == AST_GUARD_CLAUSE || p->type == AST_BLOCK ||
+            p->type == AST_REQUIRES_CLAUSE || p->type == AST_ENSURES_CLAUSE) continue;
+        if (k++ == pi)
+            return p->node_type && p->node_type->kind == TYPE_FUNCTION && !p->node_type->is_fnptr;
+    }
+    return 0;
+}
+
 static int owned_closure_arg_drainable(CodeGenerator* gen, ASTNode* expr, const char* func_name,
                                        int ai) {
     if (!func_name) {
@@ -420,6 +433,12 @@ static int owned_closure_arg_drainable(CodeGenerator* gen, ASTNode* expr, const 
         if (expr->child_count == np - 1) pi = ai + 1;
         else if (expr->child_count != np) return 0;
     }
+    /* #3034: an Aether function's `@keep fn` parameter is a closure the
+     * callee stores, which its store retains (R3): the call borrows the
+     * closure as any call does, and the caller releases a fresh one after
+     * it. Only a keeping `ptr` parameter (given a box of its own) or C's
+     * `@retain` takes the reference the closure was made with. */
+    if (fdef && param_at_is_closure(fdef, pi)) return !arg_taken_by_call(gen, func_name, pi);
     return !arg_taken_by_call(gen, func_name, pi) && !call_param_keeps(gen, func_name, pi);
 }
 

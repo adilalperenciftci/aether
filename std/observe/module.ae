@@ -78,14 +78,14 @@ extern aether_observe_is_notifying(obj: ptr) -> int
 
 // Register `on_change` to run after every field store on `obj`. Returns a
 // token for unobserve, or 0 when `obj` is null.
-observe(obj: ptr, on_change: fn) -> long {
+observe(obj: ptr, on_change: @keep fn) -> long {
     return aether_observe(obj, on_change)
 }
 
 // As observe, for an observer that also takes the changed field's index:
 // `|obj: ptr, field: int|`. `field` is the stored field's position in the
 // struct's declaration order, or ANY_FIELD for a notify(obj) that named none.
-observe_fields(obj: ptr, on_change: fn) -> long {
+observe_fields(obj: ptr, on_change: @keep fn) -> long {
     return aether_observe_fields(obj, on_change)
 }
 

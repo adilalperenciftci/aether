@@ -815,10 +815,15 @@ helper_reads(g: *GridGen, kid: string) {
 helper_keep(g: *GridGen, kid: string, some_paths: bool) {
     ty = kind_ty(kid)
     gen_decl(g, "var kept", "var kept: ${ty} = ${kind_zero(kid)}")
+    // A function that keeps a closure parameter says so (#3034).
+    pty = ty
+    if ty == "fn" {
+        pty = "@keep fn"
+    }
     if some_paths {
-        gen_decl(g, "fn keep_some", "// Keeps its parameter in a module var on even calls only.\nkeep_some(v: ${ty}, k: int) {\n    if k % 2 == 0 {\n        kept = v\n    }\n}")
+        gen_decl(g, "fn keep_some", "// Keeps its parameter in a module var on even calls only.\nkeep_some(v: ${pty}, k: int) {\n    if k % 2 == 0 {\n        kept = v\n    }\n}")
     } else {
-        gen_decl(g, "fn keep", "// Keeps its parameter in a module var.\nkeep(v: ${ty}) {\n    kept = v\n}")
+        gen_decl(g, "fn keep", "// Keeps its parameter in a module var.\nkeep(v: ${pty}) {\n    kept = v\n}")
     }
 }
 
@@ -1845,7 +1850,7 @@ captured_cell_in(g: *GridGen, kid: string, pid: string, t: string) -> string {
         body = lines_cat3(bound, "n = runs(f)\ncheck(n == 1, \"the closure ran\")", after_call)
     } else if t == "T7" {
         gen_decl(g, "var kept", "var kept: fn = null")
-        gen_decl(g, "fn keep", "// Keeps the closure in a module var.\nkeep(h: fn) {\n    kept = h\n}")
+        gen_decl(g, "fn keep", "// Keeps the closure in a module var.\nkeep(h: @keep fn) {\n    kept = h\n}")
         body = lines_cat(bound, "keep(f)")
         round_lines = "shape(w, k)\nint n = call(kept)\ncheck(n == 1, \"the kept closure, after the scope ended\")"
     } else if t == "T9" || t == "T10" {
@@ -2210,7 +2215,12 @@ param_cell_in(g: *GridGen, kid: string, pid: string, t: string) -> string {
         pb, eb = fresh(g, kid, "b")
         ops = lines_cat3("f = || { return reads(${place}) }", pb, "${place} = ${eb}\nint n = call(f)\ncheck(n == 1, \"the closure read its copy\")\nreturn n")
     }
-    gen_decl(g, "fn use", "// The callee: ${transfer_title(t)}, on its parameter's part.\nuse(p: ${ptype}, w: string, k: int) -> ${callee_ret} {\n${lines_block(ops, 1)}\n}")
+    // A struct parameter whose closure the callee keeps says so (#3034).
+    pdecl = ptype
+    if pid == "P14" && in_words("T7 T7S T14", t) && kind_ty(kid) == "fn" {
+        pdecl = "@keep ${ptype}"
+    }
+    gen_decl(g, "fn use", "// The callee: ${transfer_title(t)}, on its parameter's part.\nuse(p: ${pdecl}, w: string, k: int) -> ${callee_ret} {\n${lines_block(ops, 1)}\n}")
     body = ""
     if t == "T9" || t == "T10" {
         st = param_caller_store(g, kid, pid, "b")

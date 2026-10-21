@@ -330,7 +330,7 @@ email(_ctx: ptr) {
 }
 
 // custom predicate: fn(value: string) -> int (1 = ok, 0 = fail)
-refine(_ctx: ptr, predicate: fn) {
+refine(_ctx: ptr, predicate: @keep fn) {
     add_rule(_ctx, RULE_REFINE, 0, 0, "", box_closure(predicate))
 }
 

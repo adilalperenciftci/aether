@@ -35,7 +35,7 @@ wrap(cb: fn) -> int {
 }
 
 // #2670: aliases its parameter and stores the alias in a list.
-keep_in(l: ptr, cb: fn) {
+keep_in(l: ptr, cb: @keep fn) {
     a = cb
     list.add(l, a)
 }

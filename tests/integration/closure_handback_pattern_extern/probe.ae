@@ -14,12 +14,12 @@ counter(p: string) -> fn {
     return || { return string.length(p) }
 }
 
-sel(0, a: fn, b: fn) -> fn {
+sel(0, a: @keep fn, b: fn) -> fn {
     stash(a)
     return b
 }
 
-sel(_, a: fn, b: fn) -> fn {
+sel(_, a: @keep fn, b: fn) -> fn {
     stash(a)
     return b
 }

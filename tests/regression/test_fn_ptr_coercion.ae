@@ -28,7 +28,7 @@ import std.list
 // Forwarder: takes a callback through fn, stores it via the ptr
 // slot of list.add. Pre-fix this failed at gcc with
 // "expected void* but argument is of type _AeClosure".
-add_callback(l: ptr, cb: fn) {
+add_callback(l: ptr, cb: @keep fn) {
     _ = list.add(l, cb)
 }
 
