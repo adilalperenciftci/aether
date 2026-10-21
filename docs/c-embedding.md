@@ -296,6 +296,8 @@ The `ActorBase` contains:
 - `alloc_size`, `destroy_state`, `scheduler_owned`: How the scheduler frees it
 - `inbox`, `thread_parked`: For an actor with its own thread (`auto_process`),
   where every sender puts its messages and whether the thread sleeps idle
+- `inflight`: Messages for the actor on their way through a core's queues;
+  it moves to another core only while this is 0
 
 Embedding `ActorBase` as the first member, as above, keeps the layout right
 whatever fields it gains. The full list, in order, with a comment for each, is

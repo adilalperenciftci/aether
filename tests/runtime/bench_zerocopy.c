@@ -33,7 +33,7 @@ typedef struct {
 
 void bench_actor_step(BenchActor* self) {
     Message msg;
-    while (mailbox_receive(&self->mailbox, &msg)) {
+    if (mailbox_receive(&self->mailbox, &msg)) {
         self->received_count++;
         if (msg.zerocopy.owned && msg.zerocopy.data) {
             self->total_bytes += msg.zerocopy.size;

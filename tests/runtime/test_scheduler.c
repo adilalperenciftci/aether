@@ -53,9 +53,15 @@ typedef struct {
 // Actor Step Functions
 // ============================================================================
 
+// Each takes one message per call, the step contract (docs/c-embedding.md):
+// the scheduler counts every call as one message processed, so a step that
+// drained its mailbox left scheduler_wait() counting messages as never
+// processed. These did, and passed only while every step found one message
+// waiting; delivered a run at a time (#3090), a mailbox holds several.
+
 void counter_step(CounterActor* self) {
     Message msg;
-    while (mailbox_receive(&self->mailbox, &msg)) {
+    if (mailbox_receive(&self->mailbox, &msg)) {
         atomic_fetch_add(&self->count, 1);
         atomic_store(&self->last_value, msg.payload_int);
     }
@@ -64,7 +70,7 @@ void counter_step(CounterActor* self) {
 
 void order_step(OrderActor* self) {
     Message msg;
-    while (mailbox_receive(&self->mailbox, &msg)) {
+    if (mailbox_receive(&self->mailbox, &msg)) {
         int idx = atomic_load(&self->count);
         if (idx < 1000) {
             atomic_store(&self->received[idx], msg.payload_int);
@@ -89,7 +95,7 @@ typedef struct {
 
 void pingpong_step(PingPongActor* self) {
     Message msg;
-    while (mailbox_receive(&self->mailbox, &msg)) {
+    if (mailbox_receive(&self->mailbox, &msg)) {
         if (msg.type == PINGPONG_PING) {
             atomic_fetch_add(&self->pings_received, 1);
             PingPongActor* sender = (PingPongActor*)msg.payload_ptr;
@@ -551,7 +557,7 @@ typedef struct {
 static void echo_step(void* self) {
     EchoActor* a = (EchoActor*)self;
     Message msg;
-    while (mailbox_receive(&a->mailbox, &msg)) {
+    if (mailbox_receive(&a->mailbox, &msg)) {
         if (a->victim) scheduler_release_actor(a->victim);
         atomic_fetch_add(&a->count, 1);
     }
@@ -749,6 +755,52 @@ void test_scheduler_late_send_after_release(void) {
     scheduler_release_actor((ActorBase*)b);
     for (int i = 0; i < 2; i++) scheduler_release_actor(keep[i]);
     scheduler_cleanup();
+}
+
+// #3090: a released actor's block is not handed to a new actor while a
+// message sent to it before the release is still in a core's queue. The
+// scheduler is initialised but not started, so the messages wait there,
+// counted in the actor's `inflight`; the actor is released and reclaimed,
+// and an actor of the same size is spawned. Given the old block, it took
+// those messages as its own once the cores ran, and their uncounts took its
+// count below zero, which reads as a move in progress.
+void test_scheduler_reuse_waits_for_messages_in_flight(void) {
+    scheduler_init(2);
+    // No main-thread mode, which would run the sends below on this thread,
+    // and with it no spawn that starts the cores: they start when asked.
+    int inline_was = atomic_load(&g_aether_config.inline_mode_disabled);
+    atomic_store(&g_aether_config.inline_mode_disabled, 1);
+    CounterActor* a = (CounterActor*)scheduler_spawn_actor(1, (void (*)(void*))counter_step,
+                                                           sizeof(CounterActor));
+    ASSERT_NOT_NULL(a);
+    atomic_init(&a->count, 0);
+    for (int i = 0; i < 10; i++) {
+        scheduler_send_remote((ActorBase*)a, message_create_simple(1, 0, i), -1);
+    }
+    int counted = atomic_load(&a->inflight);
+    scheduler_release_actor((ActorBase*)a);
+    int pending = scheduler_reclaim_released();
+
+    CounterActor* b = (CounterActor*)scheduler_spawn_actor(1, (void (*)(void*))counter_step,
+                                                           sizeof(CounterActor));
+    int fresh = b != NULL && b != a;
+    if (b) atomic_init(&b->count, 0);
+    scheduler_start();
+    scheduler_wait();   // returns: the ten were dropped and credited
+    int stolen = b ? atomic_load(&b->count) : -1;
+    int b_inflight = b ? atomic_load(&b->inflight) : -1;
+    int a_inflight = atomic_load(&a->inflight);
+
+    scheduler_shutdown();
+    if (b) scheduler_release_actor((ActorBase*)b);
+    atomic_store(&g_aether_config.inline_mode_disabled, inline_was);
+    scheduler_cleanup();
+    ASSERT_EQ(10, counted);
+    ASSERT_EQ(0, pending);
+    ASSERT_TRUE(fresh);        // the old block still had messages on their way
+    ASSERT_EQ(0, stolen);      // none of them reached the new actor
+    ASSERT_EQ(0, b_inflight);
+    ASSERT_EQ(0, a_inflight);  // dropped against the released block, uncounted
 }
 
 void test_scheduler_basic_messaging(void) {
@@ -1441,7 +1493,7 @@ static void ordered_step(void* self) {
 static void burst_step(void* self) {
     BurstActor* b = (BurstActor*)self;
     Message msg;
-    while (mailbox_receive(&b->mailbox, &msg)) {
+    if (mailbox_receive(&b->mailbox, &msg)) {
         // On the core thread, to an actor of the same core.
         for (int i = 0; i < ORDER_EACH; i++) {
             scheduler_send_local(b->target, message_create_simple(2, 3, i));
@@ -1534,6 +1586,7 @@ void register_scheduler_tests(void) {
     register_test_with_category("Scheduler batch send wakes parked cores", test_scheduler_batch_wakes_parked_cores, TEST_CATEGORY_RUNTIME);
     register_test_with_category("Scheduler actor thread inbox keeps every sender's order", test_scheduler_actor_thread_inbox_keeps_order, TEST_CATEGORY_RUNTIME);
     register_test_with_category("Scheduler drops a send to a released actor", test_scheduler_late_send_after_release, TEST_CATEGORY_RUNTIME);
+    register_test_with_category("Scheduler reuses no block with messages on their way", test_scheduler_reuse_waits_for_messages_in_flight, TEST_CATEGORY_RUNTIME);
     register_test_with_category("Scheduler basic messaging", test_scheduler_basic_messaging, TEST_CATEGORY_RUNTIME);
     register_test_with_category("Scheduler message ordering", test_scheduler_message_ordering, TEST_CATEGORY_RUNTIME);
     register_test_with_category("Scheduler cross-core messaging", test_scheduler_cross_core, TEST_CATEGORY_RUNTIME);

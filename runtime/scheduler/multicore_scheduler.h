@@ -173,7 +173,14 @@ struct ActorInbox;   /* runtime/actors/aether_actor_inbox.h */
     /* 1 while the actor's own thread sleeps in its idle park (#2592): a \
      * sender that has just put a message in the inbox and reads 1 wakes \
      * the thread. */ \
-    atomic_int thread_parked;
+    atomic_int thread_parked; \
+    /* Messages for this actor on their way through a core's queues or a \
+     * sender's overflow buffer: counted before the sender reads \
+     * assigned_core, uncounted when the message reaches the mailbox \
+     * (#3090, #3093). The actor moves to another core only while this is \
+     * 0, with AETHER_INFLIGHT_MOVING set for the move, so no message is \
+     * left behind on the core it leaves. */ \
+    atomic_int inflight;
 
 typedef struct {
     AETHER_ACTOR_BASE_FIELDS
@@ -183,6 +190,27 @@ typedef struct {
 #define AETHER_ACTOR_PANICKED 1
 #define AETHER_ACTOR_RELEASED 2
 #define AETHER_ACTOR_THREAD_GONE 4
+
+/* ActorBase.inflight (#3090, #3093): set while the actor's core moves it to
+ * another; the counts of messages in flight sit below it. */
+#define AETHER_INFLIGHT_MOVING (1 << 30)
+
+/* A sender about to route `n` messages for `actor` through a core's queues
+ * counts them first, then reads assigned_core: while the count is not 0 the
+ * actor stays on its core, so the messages reach it there. During a move it
+ * waits for the move to end, and then reads the new core. */
+static inline void inflight_enter(ActorBase* actor, int n) {
+    int v = atomic_fetch_add_explicit(&actor->inflight, n, memory_order_acq_rel);
+    while (unlikely(v & AETHER_INFLIGHT_MOVING)) {
+        AETHER_CPU_PAUSE();
+        v = atomic_load_explicit(&actor->inflight, memory_order_acquire);
+    }
+}
+
+/* `n` counted messages reached the actor's mailbox (or were dropped). */
+static inline void inflight_leave(ActorBase* actor, int n) {
+    atomic_fetch_sub_explicit(&actor->inflight, n, memory_order_release);
+}
 
 /* Generated actor structs are declared aligned(64) (codegen_actor.c), one
  * cache line, so the runtime allocates every actor on this boundary (#2485). */
@@ -295,6 +323,10 @@ void scheduler_wait(void);      // Wait for quiescence (all pending messages pro
 void scheduler_shutdown(void);  // Wait + stop + join threads. Call once at program exit.
 void scheduler_cleanup(void);
 
+/* An actor the caller allocated: zeroed before its first registration
+ * (calloc, or memset), with its mailbox initialised and its step set. It
+ * may be registered again after a shutdown; its count of messages in
+ * flight carries over (#3090). */
 int scheduler_register_actor(ActorBase* actor, int preferred_core);
 void scheduler_deregister_actor(ActorBase* actor);
 void scheduler_send_local(ActorBase* actor, Message msg);
