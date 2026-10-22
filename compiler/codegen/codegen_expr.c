@@ -2890,12 +2890,8 @@ static ASTNode* stmt_hoisted_decl(ASTNode* s, const char* var_name) {
         if (s->child_count > 1) hoist_loop_decls(s->children[1], hoist_name_hunt, &h);
         return h.decl;
     }
-    const char* names[HOIST_MAX_NAMES];
-    int n = hoist_common_decl_names(s, names, HOIST_MAX_NAMES);
-    for (int i = 0; i < n; i++)
-        if (names[i] && strcmp(names[i], var_name) == 0)
-            return hoist_common_first_decl(s, var_name);
-    return NULL;
+    const HoistNames* h = hoist_common_hoists(s);
+    return hoist_names_decl(h, hoist_names_find(h, var_name));
 }
 
 // The line of the first declaration of `var_name` that is VISIBLE from
@@ -3015,13 +3011,9 @@ static int enclosing_decl_line(ASTNode* program, const char* func_name,
                  * switch or match and read after it is declared at the top
                  * of the function (hoist_if_branch_vars): visible from its
                  * first binding on. */
-                const char* names[HOIST_MAX_NAMES];
-                int n = hoist_if_branch_candidates(body, names, HOIST_MAX_NAMES);
-                for (int c = 0; c < n; c++) {
-                    if (!names[c] || strcmp(names[c], var_name) != 0) continue;
-                    ASTNode* first = hoist_if_branch_first_decl(body, var_name);
-                    if (first && !subtree_contains(first, viewer)) return first->line;
-                }
+                const HoistNames* h = hoist_if_branch_hoists(body);
+                ASTNode* first = hoist_names_decl(h, hoist_names_find(h, var_name));
+                if (first && !subtree_contains(first, viewer)) return first->line;
                 return INT_MAX;
             }
         }
@@ -5008,9 +5000,11 @@ void emit_closure_definitions(CodeGenerator* gen) {
             char** prev_declared = gen->declared_vars;
             Type** prev_declared_types = gen->declared_var_types;
             int prev_declared_count = gen->declared_var_count;
+            StrMap prev_declared_index = gen->declared_index;
             gen->declared_vars = NULL;
             gen->declared_var_types = NULL;
             gen->declared_var_count = 0;
+            strmap_init(&gen->declared_index);
             /* #2124: the closure body is a C function of its own; its
              * hoisted locals join over ITS bindings, not the enclosing
              * function's. */
@@ -5227,6 +5221,7 @@ void emit_closure_definitions(CodeGenerator* gen) {
             gen->declared_vars = prev_declared;
             gen->declared_var_types = prev_declared_types;
             gen->declared_var_count = prev_declared_count;
+            gen->declared_index = prev_declared_index;
             gen->hoist_scope_body = prev_hoist_scope;
             // Free this closure body's heap-string set and restore the
             // enclosing scope's (see the matching reset above).

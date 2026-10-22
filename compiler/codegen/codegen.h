@@ -64,6 +64,13 @@ typedef struct {
     // cannot flow into that type is reported in the language's terms
     // instead of by the C compiler.
     Type** declared_var_types;
+    // #3083: name -> its first slot in declared_vars + 1 (NULL: not
+    // declared), so a lookup is one probe, not a scan of every local.
+    StrMap declared_index;
+    // #3083: every name `reads_root` (the function being emitted) reads, by
+    // tree_reads_name's rule, gathered by one walk of it.
+    const ASTNode* reads_root;
+    StrMap reads_index;
     // #2124: the body of the function (or main) being generated, walked
     // by the hoisters to find every binding of a name across sibling
     // branches and loop bodies, so a hoisted local is declared with the

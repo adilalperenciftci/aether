@@ -5079,41 +5079,44 @@ typedef struct {
     int used;
 } TrackedVar;
 
+/* A function's tracked locals, found by name (#3083): `first` maps a name
+ * to its first entry + 1, and `next` chains the entries of one name, which a
+ * reference marks used together. Scanning them all for each reference was
+ * quadratic in a function's locals. */
+typedef struct {
+    TrackedVar* vars;
+    int count;
+    StrMap first;
+    int* next;
+} TrackedVars;
+
+/* The entries of a name are marked together, so a marked first entry means
+ * every one is: a local rebound n times and read n times costs n, not n^2. */
+static void mark_used(TrackedVars* t, const char* name) {
+    intptr_t at = (intptr_t)strmap_get(&t->first, name);
+    if (!at || t->vars[at - 1].used) return;
+    for (; at; at = t->next[at - 1]) t->vars[at - 1].used = 1;
+}
+
 // Collect all AST_IDENTIFIER references in a subtree (excluding declarations)
-static void collect_references(ASTNode* node, TrackedVar* vars, int var_count) {
+static void collect_references(ASTNode* node, TrackedVars* t) {
     if (!node) return;
 
     // An identifier in expression position is a reference
-    if (node->type == AST_IDENTIFIER && node->value) {
-        for (int i = 0; i < var_count; i++) {
-            if (strcmp(vars[i].name, node->value) == 0) {
-                vars[i].used = 1;
-            }
-        }
-    }
+    if (node->type == AST_IDENTIFIER && node->value) mark_used(t, node->value);
 
     /* A lowered quote's body is the tree's now: each variable it captures
      * is read through the tree (docs/quote.md). */
     if (node->type == AST_QUOTE) {
         QuoteInfo* q = quote_of(node);
-        for (int k = 0; q && k < q->ncaps; k++) {
-            for (int i = 0; i < var_count; i++) {
-                if (strcmp(vars[i].name, q->caps[k].name) == 0) vars[i].used = 1;
-            }
-        }
+        for (int k = 0; q && k < q->ncaps; k++) mark_used(t, q->caps[k].name);
     }
 
     // A call through a local is a use of that local: `g(p)` where `g` was
     // assigned via `f as fn(ptr) -> int` parses as AST_FUNCTION_CALL with
     // the callee name in node->value (no AST_IDENTIFIER child), so match
     // the call name against tracked variables too.
-    if (node->type == AST_FUNCTION_CALL && node->value) {
-        for (int i = 0; i < var_count; i++) {
-            if (strcmp(vars[i].name, node->value) == 0) {
-                vars[i].used = 1;
-            }
-        }
-    }
+    if (node->type == AST_FUNCTION_CALL && node->value) mark_used(t, node->value);
 
     // A call through a local's fn-pointer field, `f.get_text(p)`, uses `f`
     // too. The parser collapsed the callee to the dotted name `f.get_text`
@@ -5123,12 +5126,10 @@ static void collect_references(ASTNode* node, TrackedVar* vars, int var_count) {
     if (node->type == AST_FUNCTION_CALL && node->value && node->annotation &&
         strncmp(node->annotation, "fnfield_", 8) == 0) {
         const char* dot = strchr(node->value, '.');
-        size_t rlen = dot ? (size_t)(dot - node->value) : 0;
-        for (int i = 0; i < var_count && rlen > 0; i++) {
-            if (strlen(vars[i].name) == rlen &&
-                strncmp(vars[i].name, node->value, rlen) == 0) {
-                vars[i].used = 1;
-            }
+        char recv[256];
+        if (dot && dot > node->value && dot - node->value < (ptrdiff_t)sizeof(recv)) {
+            snprintf(recv, sizeof(recv), "%.*s", (int)(dot - node->value), node->value);
+            mark_used(t, recv);
         }
     }
 
@@ -5144,11 +5145,7 @@ static void collect_references(ASTNode* node, TrackedVar* vars, int var_count) {
             !(mt && mt->kind == TYPE_ARRAY) && !is_string_seq_ptr_type(mt)) {
             char len_name[256];
             snprintf(len_name, sizeof(len_name), "%s_len", match_expr->value);
-            for (int i = 0; i < var_count; i++) {
-                if (strcmp(vars[i].name, len_name) == 0) {
-                    vars[i].used = 1;
-                }
-            }
+            mark_used(t, len_name);
         }
     }
 
@@ -5156,13 +5153,13 @@ static void collect_references(ASTNode* node, TrackedVar* vars, int var_count) {
     if (node->type == AST_VARIABLE_DECLARATION) {
         // Only walk children (RHS expression), not the declaration name
         for (int i = 0; i < node->child_count; i++) {
-            collect_references(node->children[i], vars, var_count);
+            collect_references(node->children[i], t);
         }
         return;
     }
 
     for (int i = 0; i < node->child_count; i++) {
-        collect_references(node->children[i], vars, var_count);
+        collect_references(node->children[i], t);
     }
 }
 
@@ -5248,9 +5245,18 @@ static void check_unused_variables(ASTNode* body, const char** global_names,
     }
 
     // Collect references
-    for (int i = 0; i < body->child_count; i++) {
-        collect_references(body->children[i], vars, var_count);
+    TrackedVars t = { vars, var_count, {0}, (int*)calloc((size_t)var_count, sizeof(int)) };
+    strmap_init(&t.first);
+    if (!t.next) { free(vars); return; }
+    for (int i = var_count - 1; i >= 0; i--) {
+        t.next[i] = (int)(intptr_t)strmap_get(&t.first, vars[i].name);
+        strmap_put(&t.first, vars[i].name, (void*)(intptr_t)(i + 1));
     }
+    for (int i = 0; i < body->child_count; i++) {
+        collect_references(body->children[i], &t);
+    }
+    strmap_free(&t.first);
+    free(t.next);
 
     // Warn about unused
     for (int i = 0; i < var_count; i++) {
@@ -6657,6 +6663,7 @@ int typecheck_program(ASTNode* program) {
     g_typecheck_program = program;
     g_tc_ptr_to_closure = 0;
     tc_clauses_reset();   /* #2647: a program's clause sets, indexed afresh */
+    hoist_cache_reset();  /* #3083: the hoisting answers, gathered afresh */
 
     /* #2631: a module file checked on its own (it has an `exports(...)`
      * list, the test `program_is_module` below makes too) knows the
@@ -11755,24 +11762,18 @@ static int report_unheld_binding(ASTNode* stmt, Type* w, Type* t, ASTNode* init)
 
 /* Function (or main) entry: hoist_if_branch_vars's names. */
 static void declare_if_branch_hoists(ASTNode* body, SymbolTable* table) {
-    const char* names[HOIST_MAX_NAMES];
-    int n = hoist_if_branch_candidates(body, names, HOIST_MAX_NAMES);
-    for (int i = 0; i < n; i++) {
-        declare_hoisted_local(table, names[i],
-                              hoist_decl_type(hoist_if_branch_first_decl(body, names[i])));
-    }
+    const HoistNames* h = hoist_if_branch_hoists(body);
+    for (int i = 0; h && i < h->count; i++)
+        declare_hoisted_local(table, h->names[i], hoist_decl_type(hoist_names_decl(h, i)));
 }
 
 /* Before an if/else, or a switch with a default (#2732): hoist_common_vars's
  * names (every arm declares them), typed from the first arm that types
  * them. */
 static void declare_common_hoists(ASTNode* stmt, SymbolTable* table) {
-    const char* names[HOIST_MAX_NAMES];
-    int n = hoist_common_decl_names(stmt, names, HOIST_MAX_NAMES);
-    for (int i = 0; i < n; i++) {
-        declare_hoisted_local(table, names[i],
-                              hoist_decl_type(hoist_common_first_decl(stmt, names[i])));
-    }
+    const HoistNames* h = hoist_common_hoists(stmt);
+    for (int i = 0; h && i < h->count; i++)
+        declare_hoisted_local(table, h->names[i], hoist_decl_type(hoist_names_decl(h, i)));
 }
 
 /* Before a while: hoist_loop_vars's names. */

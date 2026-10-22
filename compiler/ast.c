@@ -3,6 +3,7 @@
 #include <string.h>
 #include <stdarg.h>
 #include "ast.h"
+#include "analysis/hoist.h"
 #include <limits.h>
 #include "../std/mem/aether_grow.h"
 
@@ -1180,6 +1181,7 @@ void free_ast_node(ASTNode* node) {
         free(node->children);
     }
 
+    hoist_node_freed(node);
     free(node);
 }
 

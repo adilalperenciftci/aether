@@ -12,6 +12,7 @@
 #include "../aether_error.h"
 #include "../analysis/actor_reply.h"
 #include "../analysis/sandbox_trust.h"
+#include "../analysis/hoist.h"
 
 /* The AetherString header the emitted C inspects, from the definition the
  * runtime uses (std/string/aether_string_abi.h): its magic's bytes in
@@ -960,6 +961,8 @@ void code_generator_release(CodeGenerator* gen) {
             }
             free(gen->declared_vars);
         }
+        strmap_free(&gen->declared_index);
+        strmap_free(&gen->reads_index);
         if (gen->module_global_vars) {
             for (int i = 0; i < gen->module_global_var_count; i++) {
                 free(gen->module_global_vars[i]);
@@ -1009,12 +1012,7 @@ void free_code_generator(CodeGenerator* gen) {
 
 // Helper: check if variable was already declared in current function
 int is_var_declared(CodeGenerator* gen, const char* var_name) {
-    for (int i = 0; i < gen->declared_var_count; i++) {
-        if (strcmp(gen->declared_vars[i], var_name) == 0) {
-            return 1;
-        }
-    }
-    return 0;
+    return strmap_get(&gen->declared_index, var_name) != NULL;
 }
 
 // #701: is `name` a module-level `var` global (a file-scope static)?
@@ -1073,6 +1071,10 @@ void register_module_global_var(CodeGenerator* gen, const char* name, int is_pro
  * without bound. */
 void truncate_declared_vars(CodeGenerator* gen, int saved_count) {
     for (int i = saved_count; i < gen->declared_var_count; i++) {
+        /* A later slot of the name goes with this one: the slots go as a
+         * suffix. */
+        if ((intptr_t)strmap_get(&gen->declared_index, gen->declared_vars[i]) == i + 1)
+            strmap_put(&gen->declared_index, gen->declared_vars[i], NULL);
         free(gen->declared_vars[i]);
         if (gen->declared_var_types && gen->declared_var_types[i]) {
             free_type(gen->declared_var_types[i]);
@@ -1098,16 +1100,14 @@ void mark_var_declared_typed(CodeGenerator* gen, const char* var_name, Type* hoi
     gen->declared_var_types = new_types;
     gen->declared_vars[gen->declared_var_count] = strdup(var_name);
     gen->declared_var_types[gen->declared_var_count] = hoisted_type ? clone_type(hoisted_type) : NULL;
+    if (!strmap_get(&gen->declared_index, var_name))
+        strmap_put(&gen->declared_index, var_name, (void*)(intptr_t)(gen->declared_var_count + 1));
     gen->declared_var_count++;
 }
 
 Type* declared_var_type(CodeGenerator* gen, const char* var_name) {
-    for (int i = 0; i < gen->declared_var_count; i++) {
-        if (strcmp(gen->declared_vars[i], var_name) == 0) {
-            return gen->declared_var_types ? gen->declared_var_types[i] : NULL;
-        }
-    }
-    return NULL;
+    intptr_t at = (intptr_t)strmap_get(&gen->declared_index, var_name);
+    return at && gen->declared_var_types ? gen->declared_var_types[at - 1] : NULL;
 }
 
 // Helper: clear declared vars (call at function start)
@@ -1129,6 +1129,8 @@ void clear_declared_vars(CodeGenerator* gen) {
     gen->declared_var_types = NULL;
     gen->hoist_scope_body = NULL;
     gen->declared_var_count = 0;
+    strmap_free(&gen->declared_index);
+    strmap_init(&gen->declared_index);
 }
 
 // Helper: check if variable currently holds a heap-allocated string
@@ -8082,6 +8084,8 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     /* The rename changed definition names, which are the index's keys,
        without changing the child count it is keyed on. */
     program_index_reset();
+    /* So are the hoisting answers the checker kept (#3083). */
+    hoist_cache_reset();
     erase_string_retype_casts(program);
     /* #2586: the functions used as fn-pointer values, by name, before any
      * pass classifies a function or emits a return of one. */

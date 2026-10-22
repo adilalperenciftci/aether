@@ -5643,14 +5643,13 @@ static void emit_hoisted_local_decl(CodeGenerator* gen, Type* var_type,
 }
 
 /* Declare, before an if/else or a switch with a default, the names every arm
- * binds (hoist_common_decl_names, shared with the typechecker), so the
+ * binds (hoist_common_hoists, shared with the typechecker), so the
  * binding survives the arm (#2732 added the switch). */
 static void hoist_common_vars(CodeGenerator* gen, ASTNode* stmt) {
-    const char* names[HOIST_MAX_NAMES];
-    int count = hoist_common_decl_names(stmt, names, HOIST_MAX_NAMES);
+    const HoistNames* h = hoist_common_hoists(stmt);
 
-    for (int i = 0; i < count; i++) {
-        const char* n = names[i];
+    for (int i = 0; h && i < h->count; i++) {
+        const char* n = h->names[i];
 
         // Skip if already declared at outer scope.
         if (is_var_declared(gen, n)) continue;
@@ -5662,7 +5661,7 @@ static void hoist_common_vars(CodeGenerator* gen, ASTNode* stmt) {
         if (is_actor_state_var(gen, n)) continue;
 
         // Recover a usable type from the first arm that has one.
-        ASTNode* decl = hoist_common_first_decl(stmt, n);
+        ASTNode* decl = hoist_names_decl(h, i);
         Type* var_type = hoist_decl_type(decl);
         Type* joined = sibling_join_type(gen, n, var_type);
         if (joined) var_type = joined;
@@ -6235,12 +6234,11 @@ static int function_has_ensures(ASTNode* func) {
 
 void hoist_if_branch_vars(CodeGenerator* gen, ASTNode* body) {
     if (!body) return;
-    /* Which names: hoist_if_branch_candidates (shared with the typechecker,
+    /* Which names: hoist_if_branch_hoists (shared with the typechecker,
      * which must accept exactly the reads this makes compile). */
-    const char* names[HOIST_MAX_NAMES];
-    int count = hoist_if_branch_candidates(body, names, HOIST_MAX_NAMES);
-    for (int n = 0; n < count; n++) {
-        const char* name = names[n];
+    const HoistNames* h = hoist_if_branch_hoists(body);
+    for (int n = 0; h && n < h->count; n++) {
+        const char* name = h->names[n];
         if (is_var_declared(gen, name)) continue;
         /* #744: a module-level `var` global first assigned inside an
          * if-branch must NOT be hoisted as a fresh function local —
@@ -6252,7 +6250,7 @@ void hoist_if_branch_vars(CodeGenerator* gen, ASTNode* body) {
          * skip it here exactly as that path does. */
         if (is_module_global_var(gen, name)) continue;
         if (is_actor_state_var(gen, name)) continue;   /* #2505: self->name */
-        ASTNode* first_decl = hoist_if_branch_first_decl(body, name);
+        ASTNode* first_decl = hoist_names_decl(h, n);
         if (!first_decl) continue;
         Type* var_type = first_decl->node_type;
         if ((!var_type || var_type->kind == TYPE_VOID || var_type->kind == TYPE_UNKNOWN)
@@ -8837,6 +8835,30 @@ static int tree_reads_name(const ASTNode* node, const char* name, size_t len) {
     return 0;
 }
 
+/* The names `node` reads by tree_reads_name's rule, into `out`: each value,
+ * and each part of a dotted one up to a `.`. */
+static void reads_collect(const ASTNode* node, StrMap* out) {
+    if (!node) return;
+    if ((node->type == AST_IDENTIFIER || node->type == AST_FUNCTION_CALL) && node->value) {
+        strmap_put(out, node->value, (void*)1);
+        for (const char* dot = strchr(node->value, '.'); dot; dot = strchr(dot + 1, '.'))
+            strmap_put(out, cg_intern_n(node->value, (size_t)(dot - node->value)), (void*)1);
+    }
+    for (int i = 0; i < node->child_count; i++) reads_collect(node->children[i], out);
+}
+
+/* #3083: does the function being emitted read `name`? One walk of it for
+ * every local asked about, not one per local. */
+static int current_function_reads(CodeGenerator* gen, const char* name) {
+    if (gen->reads_root != gen->current_function) {
+        strmap_free(&gen->reads_index);
+        strmap_init(&gen->reads_index);
+        reads_collect(gen->current_function, &gen->reads_index);
+        gen->reads_root = gen->current_function;
+    }
+    return strmap_has(&gen->reads_index, name);
+}
+
 /* Is a local a destructure declares one the program never reads? A name
  * spelled with a leading `_` says so (the type checker does not warn about
  * it), and any other is looked for in the function being emitted. Such a
@@ -8848,8 +8870,7 @@ static int tree_reads_name(const ASTNode* node, const char* name, size_t len) {
 static int destructure_local_unread(CodeGenerator* gen, const char* name) {
     if (!name) return 0;
     if (name[0] == '_') return 1;
-    return !gen->current_function ||
-           !tree_reads_name(gen->current_function, name, strlen(name));
+    return !gen->current_function || !current_function_reads(gen, name);
 }
 
 int codegen_local_unread(CodeGenerator* gen, const char* name) {

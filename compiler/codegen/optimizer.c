@@ -1,5 +1,6 @@
 #include "optimizer.h"
 #include "../aether_error.h"
+#include "../analysis/hoist.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -845,6 +846,7 @@ ASTNode* optimize_dead_code(ASTNode* node) {
                 free(node->value);
                 free_type(node->node_type);
                 free(node->children);
+                hoist_node_freed(node);
                 free(node);
                 
                 return optimize_dead_code(then_branch);
@@ -857,6 +859,7 @@ ASTNode* optimize_dead_code(ASTNode* node) {
                 free(node->value);
                 free_type(node->node_type);
                 free(node->children);
+                hoist_node_freed(node);
                 free(node);
                 
                 return optimize_dead_code(else_branch);
