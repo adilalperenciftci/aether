@@ -668,6 +668,38 @@ static void overflow_append(int target, ActorBase* actor, Message msg) {
     atomic_fetch_add_explicit(&g_overflow_total, 1, memory_order_relaxed);
 }
 
+// The overflow buffers are this thread's own (thread-local), and they keep
+// what they grew to, so a burst is not paid for again. A scheduler thread
+// gives them back when it leaves its loop: nothing else can reach them once
+// the thread is gone, and a pair of actors trading messages at full speed
+// grew them to 15 to 28 MB per core, all of it lost at every scheduler
+// shutdown. An entry still in one when the thread leaves (its final flush
+// found the target's queue full, with the cores stopping) is dropped and
+// uncounted, as a message for a released actor is.
+static void scheduler_drop_dead_message(Scheduler* sched, Message* msg);
+
+static void overflow_release(Scheduler* sched) {
+    int dropped = 0;
+    for (int t = 0; t <= MAX_CORES; t++) {
+        OverflowBuf* b = &tls_overflow[t];
+        for (int i = b->head; i < b->head + b->count; i++) {
+            ActorBase* actor = b->actors[i];
+            if (actor && !actor->auto_process) inflight_leave(actor, 1);
+            scheduler_drop_dead_message(sched, &b->msgs[i]);
+            dropped++;
+        }
+        free(b->actors);
+        free(b->msgs);
+        b->actors = NULL;
+        b->msgs = NULL;
+        b->head = 0;
+        b->count = 0;
+        b->capacity = 0;
+    }
+    if (dropped > 0) atomic_fetch_sub_explicit(&g_overflow_total, dropped, memory_order_relaxed);
+    tls_overflow_any = 0;
+}
+
 // Queue a counted message for one of this core's own actors on this core's
 // own queue, behind whatever this core's own overflow buffer holds: an entry
 // there overflowed when the queue was full, so it is older, and a message
@@ -693,8 +725,6 @@ static void requeue_own(int core, ActorBase* actor, Message msg) {
 // Cross-core: Always uses head-pointer advancement instead of memmove.
 // This makes the cost O(drained) instead of O(total), eliminating the
 // multi-MB memmoves that caused phase-2 stalls with large overflow.
-static void scheduler_drop_dead_message(Scheduler* sched, Message* msg);
-
 static void overflow_flush(int from_core) {
     if (!tls_overflow_any) return;
     int from_idx = (from_core >= 0 && from_core < MAX_CORES) ? from_core : MAX_CORES;
@@ -2203,6 +2233,8 @@ void* AETHER_HOT scheduler_thread(void* arg) {
     // empty here.  But under extreme contention a late overflow_append could
     // slip in — flush it so no messages are lost.
     overflow_flush(sched->core_id);
+    // The buffers are this thread's: they go back with it.
+    overflow_release(sched);
 
     // Done reading: this core no longer holds back any free (#2509).
     reclaim_core_offline(sched);
