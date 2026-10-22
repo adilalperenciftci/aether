@@ -50,8 +50,10 @@ awk -v n="$N" 'BEGIN {
     print "}"
 }' > "$tmp/big.ae"
 
+# A Windows program ends its lines with CRLF; the checks below match lines.
 OUT="$(AETHER_HOME="$ROOT" "$AE" run "$tmp/big.ae" 2>&1)"
 RC=$?
+OUT="$(printf '%s\n' "$OUT" | tr -d '\r')"
 if [ $RC -ne 0 ]; then
     echo "  [FAIL] hoist_scaling: the $N-name program did not compile/run"
     echo "$OUT" | grep -E "error|rror:" | head -6
