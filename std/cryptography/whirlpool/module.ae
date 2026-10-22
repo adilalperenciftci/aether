@@ -146,7 +146,6 @@ cbyte(c: *WpCtx, k: int, w: long, shift: int) -> long {
 }
 
 process_block(c: *WpCtx) {
-
     // compute and apply K^0
     i = 0
     while i < 8 {

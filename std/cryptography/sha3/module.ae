@@ -83,7 +83,6 @@ struct Sha3Ctx {
 // ---- Keccak-f[1600] permutation ----
 
 keccak_f(c: *Sha3Ctx) {
-
     rnd = 0
     while rnd < 24 {
         // theta

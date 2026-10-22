@@ -106,7 +106,6 @@ threefish_settweak(c: *SkeinCtx) {
 
 // Encrypt c.msg under the current key schedule + tweak into c.tf_out.
 threefish_encrypt(c: *SkeinCtx) {
-
     // load plaintext
     i = 0
     while i < NW {

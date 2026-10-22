@@ -317,7 +317,6 @@ generate_working_key(new_key: int[], encrypting: int, key: byte[], key_off: int)
         i = i + 1
     }
 
-
     // Pack the processed key.
     i = 0
     while i < 32 {

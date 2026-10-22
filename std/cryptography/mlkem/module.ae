@@ -1003,7 +1003,7 @@ indcpa_keygen(p: *MlkemParams, d: ptr, kp: ptr) {
 // run: a k-poly polyvec viewing the matrix, no copy. It is a view: the
 // caller does not free it.
 mat_row(mat: int[], i: int, k: int) -> int[] {
-    return mat[i * k * N..(i * k + k) * N]
+    return mat[i * k * N.. (i * k + k) * N]
 }
 
 // ---- K-PKE encrypt ----

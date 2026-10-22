@@ -259,7 +259,6 @@ compress(c: *Blake2Ctx, last: int) {
             i = i + 1
         }
     }
-
 }
 
 // Increment the 128-bit byte counter (t1:t0) by n.
