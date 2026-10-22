@@ -7,7 +7,8 @@
 # `[Dir] string`. A `]` that closes a prefix group (a `[` not following a
 # value, holding nothing or one name) followed by a type name or `*` is now
 # written tight. An index before a word (`a[0] as long`) and an array literal
-# before a keyword (`[y] as ptr`) keep their space. #3086: so is the `*` of a
+# before a keyword (`[y] as ptr`) keep their space. #3081: so is `fn`, the one
+# type that is a keyword, in `make([]fn, 2)`. #3086: so is the `*` of a
 # pointer type after an attribute, `n: @retain *Node`, which was written
 # `@retain * Node` as if the attribute's name were a value.
 #
@@ -38,6 +39,8 @@ main() {
     m = make([] int, 2)
     p = make([] *Node, 2)
     q = make([]*Node, 1)
+    fs = make([] fn, 2)
+    gs = make([]fn, 2)
     x = [1, 2]
     y = m[0] as long
     z = [y] as ptr
@@ -59,6 +62,8 @@ main() {
     m = make([]int, 2)
     p = make([]*Node, 2)
     q = make([]*Node, 1)
+    fs = make([]fn, 2)
+    gs = make([]fn, 2)
     x = [1, 2]
     y = m[0] as long
     z = [y] as ptr

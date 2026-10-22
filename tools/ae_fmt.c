@@ -373,9 +373,10 @@ static int would_merge(const char* a, const char* b){
 }
 
 /* A name that can spell a type: an identifier that is not a keyword (a
- * number or a string literal is a word token too, and is not one). */
+ * number or a string literal is a word token too, and is not one), or
+ * `fn`, the one type that is a keyword: `make([]fn, 2)` (#3081). */
 static int is_type_name(const char* t){
-    return (isalpha((unsigned char)t[0]) || t[0]=='_') && !is_keyword(t);
+    return ((isalpha((unsigned char)t[0]) || t[0]=='_') && !is_keyword(t)) || eq(t,"fn");
 }
 
 /* #2316: the type prefixes `[]T` (make's element type) and `[E]T` (an
