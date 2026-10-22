@@ -33,7 +33,7 @@ extern exit(code: int)
 main() {
     println("=== os.run_capture status ===")
 
-    windows = os_getenv("OS") == "Windows_NT"
+    windows = os.platform() == "windows"
     shell = "/bin/sh"
     flag = "-c"
     if windows {

@@ -172,7 +172,7 @@ main() {
     // platform's documented contract.
     av5 = list.new()
     out5, err5, code5, spawn5 = os.run_full("/no/such/binary", av5, null, "")
-    if os_getenv("OS") == "Windows_NT" {
+    if os.platform() == "windows" {
         if code5 != -1 || spawn5 != "program not found" {
             println("  FAIL: missing binary exit=${code5} spawn=${spawn5}, expected -1 / program not found")
             exit(1)

@@ -2804,7 +2804,7 @@ help:
 	@echo "  make test-all       - Run both C and .ae tests"
 	@echo "  make check-standalone - Compile every standalone C main (benches, demos)"
 	@echo "  make check-docs       - Compile the documentation's complete examples"
-	@echo "  make check-tests      - The test suite can fail: verdicts reach the exit code, prune list is consistent, every std module has tests, listeners bind loopback, shell tests end background programs through server_jobs.sh, test programs write temp files under names of their own"
+	@echo "  make check-tests      - The test suite can fail: verdicts reach the exit code, prune list is consistent, every std module has tests, listeners bind loopback, shell tests end background programs through server_jobs.sh, test programs write temp files under names of their own and ask the build for the platform"
 	@echo "  make check-extern-widths - Every extern bound to C in this tree agrees with the C definition on each width; no plain C long in a bound signature"
 	@echo "  make check-raw-calls     - No std or contrib file calls a raw C binding another module declares"
 	@echo "  make check-contrib-modules - Type-check every non-host contrib module"
@@ -3322,7 +3322,7 @@ test-optional: compiler ae stdlib
 
 check-tests:
 	@echo "==================================="
-	@echo "  test suite (verdicts, prune list, loopback listeners, shell kills, temp names)"
+	@echo "  test suite (verdicts, prune list, loopback listeners, shell kills, temp names, platform)"
 	@echo "==================================="
 	@py=""; \
 	for cand in python3 python "py -3"; do \
@@ -3341,7 +3341,9 @@ check-tests:
 	    $$py tests/scripts/test_check_shell_tmp.py && \
 	    $$py tests/scripts/check_shell_tmp.py && \
 	    $$py tests/scripts/test_check_ae_tmp.py && \
-	    $$py tests/scripts/check_ae_tmp.py; \
+	    $$py tests/scripts/check_ae_tmp.py && \
+	    $$py tests/scripts/test_check_platform_env.py && \
+	    $$py tests/scripts/check_platform_env.py; \
 	else \
 	    echo "  [SKIP] test suite checks — no working Python found"; \
 	    echo "         (checked on the Linux/macOS legs, which run the same target)"; \

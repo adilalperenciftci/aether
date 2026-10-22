@@ -23,7 +23,7 @@ main() {
     // chdir to the root (no symlink indirection, stable everywhere) and
     // confirm getcwd reflects it.
     root = "/"
-    if os_getenv("OS") == "Windows_NT" {
+    if os.platform() == "windows" {
         root = "${string.substring(start, 0, 2)}\\"
     }
     err = os.chdir(root)
