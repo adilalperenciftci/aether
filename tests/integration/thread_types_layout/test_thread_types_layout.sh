@@ -14,6 +14,7 @@
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+. "$ROOT/tests/lib/same_bytes.sh"
 CC="${CC:-cc}"
 
 TMPDIR="$(mktemp -d)"
@@ -34,7 +35,7 @@ probe() {
 probe threads ""
 probe coop "-DAETHER_NO_THREADING"
 
-if ! cmp -s "$TMPDIR/threads.layout" "$TMPDIR/coop.layout"; then
+if ! same_bytes "$TMPDIR/threads.layout" "$TMPDIR/coop.layout"; then
     echo "  [FAIL] thread_types_layout: layouts differ (threads | AETHER_NO_THREADING):"
     paste "$TMPDIR/threads.layout" "$TMPDIR/coop.layout" | awk -F'\t' '$1 != $2' | sed 's/^/        /'
     exit 1
