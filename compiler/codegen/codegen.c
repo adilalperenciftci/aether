@@ -903,6 +903,18 @@ void code_generator_release(CodeGenerator* gen) {
         gen->closures = NULL;
         gen->closure_count = 0;
         gen->closure_capacity = 0;
+        /* Which closure literal a variable holds (closure_var_bind): a
+         * strdup'd scope and name per entry. Nothing freed it, so every
+         * compile of a program that binds a closure to a variable leaked
+         * the table. */
+        for (int i = 0; i < gen->closure_var_count; i++) {
+            free(gen->closure_var_map[i].scope);
+            free(gen->closure_var_map[i].var_name);
+        }
+        free(gen->closure_var_map);
+        gen->closure_var_map = NULL;
+        gen->closure_var_count = 0;
+        gen->closure_var_capacity = 0;
         for (int i = 0; i < gen->promoted_func_count; i++) {
             for (int j = 0; j < gen->promoted_funcs[i].count; j++) {
                 free(gen->promoted_funcs[i].names[j]);
