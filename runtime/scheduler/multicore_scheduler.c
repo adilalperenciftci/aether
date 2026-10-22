@@ -823,13 +823,62 @@ static void overflow_flush(int from_core) {
     tls_overflow_any = any;
 }
 
+// The CPUs this process may run on, in ascending order, read by the thread
+// that starts the scheduler before any scheduler thread places itself
+// (#3106). Scheduler thread i goes to the (i mod n)-th of them. It went to
+// CPU i, a number from 0: under `taskset -c 4-7` a thread bound itself to
+// CPU 0, outside the CPUs the program was started on (setting a thread's
+// own affinity needs no privilege), and in a cpuset cgroup a CPU outside
+// the set refused the binding, so placement depended on CPU numbers. 0
+// CPUs (the mask could not be read) leaves every thread where the OS puts
+// it.
+#define AETHER_PLACE_MAX_CPUS 1024
+static int g_place_cpus[AETHER_PLACE_MAX_CPUS];
+static int g_place_count = 0;
+
+static void read_process_cpus(void) {
+    g_place_count = 0;
+#if defined(__linux__)
+    cpu_set_t set;
+    CPU_ZERO(&set);
+    if (sched_getaffinity(0, sizeof(set), &set) == 0) {
+        for (int c = 0; c < CPU_SETSIZE && g_place_count < AETHER_PLACE_MAX_CPUS; c++)
+            if (CPU_ISSET(c, &set)) g_place_cpus[g_place_count++] = c;
+    }
+#elif defined(_WIN32)
+    // The process mask covers its processor group, numbered as
+    // SetThreadIdealProcessor numbers them.
+    DWORD_PTR proc_mask = 0, sys_mask = 0;
+    if (GetProcessAffinityMask(GetCurrentProcess(), &proc_mask, &sys_mask)) {
+        for (int c = 0; c < (int)(sizeof(DWORD_PTR) * 8); c++)
+            if (proc_mask & ((DWORD_PTR)1 << c)) g_place_cpus[g_place_count++] = c;
+    }
+#endif
+}
+
+// The CPU scheduler thread `core_id` is placed on, or -1 for none.
+int scheduler_core_cpu(int core_id) {
+    if (core_id < 0 || g_place_count <= 0) return -1;
+    return g_place_cpus[core_id % g_place_count];
+}
+
 // Keep a scheduler thread on its CPU (NUMA awareness): bound to it on Linux,
 // a hint on macOS and Windows.
+//
+// Linux keeps the hard binding (#3089). Measured on a 4-CPU CI runner
+// (kernel 6.17) against the same threads unbound, under busy loops: bound
+// won 7 of the 12 loaded cases (thread ring 10.8 against 7.4 M msg/s beside
+// two loops the kernel placed, skynet up to 2.4x), lost only where another
+// program's thread was pinned to a scheduler thread's own CPU (1.1x to
+// 1.5x), and tied on a quiet machine. Linux moves movable load off a bound
+// thread's CPU; Windows did not, which is why #3087 made it a hint there.
 static void pin_to_core(int core_id) {
 #ifdef __linux__
+    int cpu = scheduler_core_cpu(core_id);
+    if (cpu < 0) return;
     cpu_set_t cpuset;
     CPU_ZERO(&cpuset);
-    CPU_SET(core_id, &cpuset);
+    CPU_SET(cpu, &cpuset);
 #if defined(__ANDROID__)
     // bionic has no pthread_setaffinity_np; sched_setaffinity on the calling
     // thread's own id (0) is the same request.
@@ -858,7 +907,8 @@ static void pin_to_core(int core_id) {
     // into a fast or a slow mode by where the other load landed. With the
     // hint Windows keeps the thread on its CPU and moves it when that CPU is
     // busy, as macOS's affinity tag above lets it.
-    SetThreadIdealProcessor(GetCurrentThread(), (DWORD)core_id);
+    int cpu = scheduler_core_cpu(core_id);
+    if (cpu >= 0) SetThreadIdealProcessor(GetCurrentThread(), (DWORD)cpu);
 #endif
 }
 
@@ -2317,6 +2367,10 @@ void scheduler_start(void) {
 
     // Reset per this start() call in case scheduler_init was not called again.
     atomic_store_explicit(&g_threads_ready, 0, memory_order_relaxed);
+
+    // The CPUs the threads are placed among, read before any of them binds
+    // itself (#3106); pthread_create publishes them to the threads.
+    read_process_cpus();
 
     for (int i = 0; i < num_cores; i++) {
         atomic_store_explicit(&schedulers[i].running, 1, memory_order_release);

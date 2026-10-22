@@ -81,12 +81,17 @@ int main(void) {
     const int cases[][3] = {
         {1, 12, 12}, {8, 4, 4}, {64, 32, 16}, {8, -1, 8}, {0, -1, 1}
     };
+    // The machine's count is mocked; the CPUs this process may use are the
+    // host's own (#3106: the scheduler takes no more threads than those), so
+    // a case's count is capped by them.
     for (unsigned i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
         package_count = cases[i][0];
         online_count = cases[i][1];
         g_cpu_info_initialized = 0;
         memset(&g_cpu_info, 0, sizeof(g_cpu_info));
-        assert(cpu_recommend_cores() == cases[i][2]);
+        int available = aether_cpu_available();
+        int want = cases[i][2] < available ? cases[i][2] : available;
+        assert(cpu_recommend_cores() == want);
     }
 #else
     assert(cpu_recommend_cores() >= 1 && cpu_recommend_cores() <= 16);

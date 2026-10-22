@@ -298,6 +298,12 @@ void scheduler_init_with_opts(int cores, AetherOptFlags opts);
 void scheduler_start(void);
 void scheduler_ensure_threads_running(void);  // Start threads if not already started (for main-thread mode transition)
 
+// The CPU scheduler thread `core_id` is placed on: the (core_id mod n)-th
+// of the n CPUs the process may run on, read when the threads last started
+// (#3106). -1 when that set could not be read or the platform has no CPU
+// numbers to place by (macOS).
+int scheduler_core_cpu(int core_id);
+
 /* Main-thread mode is "one actor, every send from the thread running
  * main()": that thread steps the actor inline at each send. A send from
  * any other thread cannot join in — stepping the same actor from two

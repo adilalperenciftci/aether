@@ -3,12 +3,16 @@
  * Tests multicore scheduler correctness and performance
  */
 
+#if defined(__linux__) && !defined(_GNU_SOURCE)
+#define _GNU_SOURCE   // sched_getaffinity, pthread_getaffinity_np, CPU_COUNT (#3106)
+#endif
 #include "test_harness.h"
 #include "../../runtime/actors/actor_state_machine.h"
 #include "../../runtime/scheduler/multicore_scheduler.h"
 #include "../../runtime/actors/aether_actor_thread.h"
 #include "../../runtime/actors/aether_send_message.h"
 #include "../../runtime/aether_process_mem.h"
+#include "../../runtime/utils/aether_cpu_detect.h"
 #include <stdatomic.h>
 
 
@@ -1426,6 +1430,76 @@ void test_scheduler_fires_receive_timeouts(void) {
     ASSERT_TRUE(gone);
 }
 
+// #3106: scheduler threads are counted and placed by the CPUs the process
+// may run on, not by the machine's. The process is limited to its highest
+// allowed CPU: thread i went to CPU i, from 0, outside that limit, and the
+// count was the machine's. Linux checks each thread's binding, Windows its
+// ideal processor (a hint, #3087); both check the count.
+#if defined(__linux__) || defined(_WIN32)
+void test_scheduler_places_threads_among_process_cpus(void) {
+#if defined(__linux__)
+    cpu_set_t saved;
+    CPU_ZERO(&saved);
+    ASSERT_EQ(0, sched_getaffinity(0, sizeof(saved), &saved));
+    int only = -1;
+    for (int c = 0; c < CPU_SETSIZE; c++) if (CPU_ISSET(c, &saved)) only = c;
+    ASSERT_TRUE(only >= 0);
+    cpu_set_t one;
+    CPU_ZERO(&one);
+    CPU_SET(only, &one);
+    ASSERT_EQ(0, sched_setaffinity(0, sizeof(one), &one));
+#else
+    DWORD_PTR saved = 0, system_mask = 0;
+    ASSERT_TRUE(GetProcessAffinityMask(GetCurrentProcess(), &saved, &system_mask) != 0);
+    int only = -1;
+    for (int c = 0; c < (int)(sizeof(DWORD_PTR) * 8); c++)
+        if (saved & ((DWORD_PTR)1 << c)) only = c;
+    ASSERT_TRUE(only >= 0);
+    ASSERT_TRUE(SetProcessAffinityMask(GetCurrentProcess(), (DWORD_PTR)1 << only) != 0);
+#endif
+
+    int recommended = cpu_recommend_cores();
+
+    // Two actors, one per core, so the threads start (no main-thread mode).
+    scheduler_init(2);
+    CounterActor* a = (CounterActor*)scheduler_spawn_actor(0, (void (*)(void*))counter_step,
+                                                           sizeof(CounterActor));
+    CounterActor* b = (CounterActor*)scheduler_spawn_actor(1, (void (*)(void*))counter_step,
+                                                           sizeof(CounterActor));
+    scheduler_start();
+    int placed[2] = {-1, -1};
+    int bound[2] = {-1, -1};
+    for (int i = 0; i < 2; i++) {
+        placed[i] = scheduler_core_cpu(i);
+#if defined(__linux__)
+        cpu_set_t got;
+        CPU_ZERO(&got);
+        if (pthread_getaffinity_np(schedulers[i].thread, sizeof(got), &got) == 0)
+            bound[i] = (CPU_COUNT(&got) == 1 && CPU_ISSET(only, &got)) ? only : -2;
+#else
+        PROCESSOR_NUMBER pn;
+        if (GetThreadIdealProcessorEx((HANDLE)schedulers[i].thread, &pn))
+            bound[i] = (int)pn.Number;
+#endif
+    }
+    (void)a;
+    (void)b;
+    scheduler_shutdown();
+    scheduler_cleanup();
+
+#if defined(__linux__)
+    sched_setaffinity(0, sizeof(saved), &saved);
+#else
+    SetProcessAffinityMask(GetCurrentProcess(), saved);
+#endif
+    ASSERT_EQ(1, recommended);
+    for (int i = 0; i < 2; i++) {
+        ASSERT_EQ(only, placed[i]);
+        ASSERT_EQ(only, bound[i]);
+    }
+}
+#endif
+
 // #3087: a batch of sends wakes the cores it lands on. A loop of sends in
 // main() goes through the batch path (scheduler_send_batch_*), which put each
 // core's share on that core's queue and told no core: a parked core slept on
@@ -1631,6 +1705,9 @@ void register_scheduler_tests(void) {
     register_test_with_category("Scheduler actor thread holds a released actor it stepped", test_scheduler_actor_thread_holds_released_actor, TEST_CATEGORY_RUNTIME);
     register_test_with_category("Scheduler actor thread parks when idle", test_scheduler_actor_thread_parks_when_idle, TEST_CATEGORY_RUNTIME);
     register_test_with_category("Scheduler fires receive timeouts on a core and an actor thread", test_scheduler_fires_receive_timeouts, TEST_CATEGORY_RUNTIME);
+#if defined(__linux__) || defined(_WIN32)
+    register_test_with_category("Scheduler counts and places its threads by the process's CPUs", test_scheduler_places_threads_among_process_cpus, TEST_CATEGORY_RUNTIME);
+#endif
     register_test_with_category("Scheduler batch send wakes parked cores", test_scheduler_batch_wakes_parked_cores, TEST_CATEGORY_RUNTIME);
     register_test_with_category("Scheduler actor thread inbox keeps every sender's order", test_scheduler_actor_thread_inbox_keeps_order, TEST_CATEGORY_RUNTIME);
     register_test_with_category("Scheduler drops a send to a released actor", test_scheduler_late_send_after_release, TEST_CATEGORY_RUNTIME);

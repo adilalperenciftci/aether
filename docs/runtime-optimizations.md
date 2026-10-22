@@ -336,7 +336,7 @@ The benchmark build uses `-flto` for both compilation and linking, enabling cros
 
 **Implementation:** `runtime/utils/aether_cpu_detect.c`
 
-The `cpu_recommend_cores` function uses CPUID on x86 and falls back to OS-level APIs (`sysctl` on macOS, `sysconf` on Linux, `GetNativeSystemInfo` on Windows) when CPUID returns zero (ARM, virtualized environments).
+The `cpu_recommend_cores` function uses CPUID on x86 and falls back to OS-level APIs (`sysctl` on macOS, `sysconf` on Linux, `GetNativeSystemInfo` on Windows) when CPUID returns zero (ARM, virtualized environments). It then takes no more threads than the CPUs the process may use, `aether_cpu_available()`: the affinity mask (`taskset`, a cpuset cgroup, a Windows job or `start /affinity`) and, on Linux, a cgroup CPU quota (`docker --cpus`, a Kubernetes limit). The cap of 16 still applies. The machine's count started 16 scheduler threads for a 2-CPU container, which then preempted each other (#3106). `std.worker` and the HTTP server size their pools the same way.
 
 ### Apple Silicon P-Core Detection
 
@@ -355,6 +355,15 @@ Detection uses `sysctlbyname("hw.perflevel0.physicalcpu")` to query the P-core c
 | Windows | `SetThreadIdealProcessor` | Hint only |
 
 Note: macOS does not support hard core pinning by design, and Windows uses a hint by choice: bound to one logical CPU, a scheduler thread could not leave it when another program ran there, and shared it a time slice at a time (#3087). The OS keeps a thread on its CPU and moves it when that CPU is busy.
+
+Linux keeps the hard binding, measured (#3089). On a 4-CPU CI runner, bound and unbound threads were compared under busy loops:
+- bound won 7 of the 12 loaded cases (thread ring 10.8 against 7.4 M msg/s beside two loops the kernel placed, skynet up to 2.4x);
+- bound lost only where another program's thread was pinned to a scheduler thread's own CPU, by 1.1x to 1.5x;
+- on a quiet machine they tied.
+
+Linux moves movable load off a bound thread's CPU, which Windows did not.
+
+On Linux and Windows, scheduler thread i is placed on the i-th CPU the process may run on, counted from its affinity mask when the threads start, not on CPU i (#3106). Under `taskset -c 4-7` the threads stay on CPUs 4 to 7, where binding to CPU 0 escaped the mask. In a cpuset cgroup no binding is refused for a CPU outside the set.
 
 ### Per-Core Message Counters
 
