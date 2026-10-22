@@ -923,7 +923,9 @@ call written out. The callee is evaluated once, before the arguments
 (`fs[pick()](3)` calls `pick` once), and held for the length of its call,
 so a function that rebinds the element or field it was read from runs to
 its end. A callee whose value is not a function is a type error, "the value
-called here is not a function", naming its type (#3099).
+called here is not a function", naming its type (#3099). A typed function
+pointer (`fn(int) -> int`, a `cfn` type) is called the same way, from a
+local, a parameter, a field, an element or a result.
 
 ### Trailing blocks
 
@@ -2066,6 +2068,7 @@ downstream triage match on it, so it does not change with the prose after it.
 | `postcondition_violation` | an `ensures` clause that evaluated false |
 | `forced_unwrap_none` | `x!` on an optional holding `none` |
 | `empty_closure_call` | a call through the empty closure (a closure slot or a `fn?` holding `null`) |
+| `null_function_call` | a call through a typed function pointer (`fn(int) -> int`, a `cfn` type) holding `null` |
 
 A failure that forwards an existing error value (`expr!` on a fallible) prints
 that error's own message rather than a category, because the message came from
@@ -3915,6 +3918,8 @@ A named Aether function bound to a typed function pointer is its address there t
 A closure cannot be stored in any of those slots, as it cannot be passed to the parameter: a closure literal, or a local bound to one, given to a struct field, an array element, a local, a module-level `var` or a function result of a typed function pointer type is a type error naming the field or variable. Store a named function there, or declare the slot a bare `fn` and call it with `call(...)`.
 
 A typed function pointer's own parameter can be a typed function pointer, `fn(fn(string) -> string, string) -> string`, and a function with that parameter fits it.
+
+A call through a typed function pointer that holds `null` panics at the call with the category `null_function_call` and the call's source position ([Panic categories](#panic-categories)), which a `catch` receives, as a call through the empty closure does (#3098).
 
 A call through a typed function pointer converts a slice argument as a direct call does: `[]` and `null` become the empty slice, and an array a view of its elements (#2856). A closure whose signature the compiler knows converts its arguments the same way, an optional's bare value and `none` included.
 

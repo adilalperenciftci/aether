@@ -9147,9 +9147,10 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     /* #3091: the function a call through a closure jumps to. The empty
      * closure (`null` in a closure slot, also when a `fn?` holds it) has
      * none, and the call panics with `where`, its category and source
-     * position, instead of jumping to address 0. */
+     * position, instead of jumping to address 0. A call through a typed
+     * function pointer an expression yields is checked here too (#3098). */
     print_line(gen, "typedef void (*_AeFnPtr)(void);");
-    print_line(gen, "static inline _AeFnPtr _aether_closure_fn(_AeFnPtr fn, const char* where) {");
+    print_line(gen, "static inline _AeFnPtr _aether_callee_fn(_AeFnPtr fn, const char* where) {");
     print_line(gen, "    if (!fn) aether_panic(where);");
     print_line(gen, "    return fn;");
     print_line(gen, "}");

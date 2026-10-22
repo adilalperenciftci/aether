@@ -126,7 +126,7 @@ fi
 
 # The module's global is the merged `glx_gen_buffers` cell, and every call
 # through it carries the typed C cast.
-if ! grep -qE '\(\(void *\(\*\) *\(int, *void\*\)\) *\(glx_gen_buffers\)\) *\(1, *ids\)' "$tmpdir/app.gen.c"; then
+if ! grep -qE '\(void *\(\*\) *\(int, *void\*\)\) *\(glx_gen_buffers\)\) *\(1, *ids\)' "$tmpdir/app.gen.c"; then
     echo "  [FAIL] aether_cfn_proc_address: expected a typed cast on the call through the module var, got:"
     grep -E 'gen_buffers' "$tmpdir/app.gen.c" | sed 's/^/    /'
     exit 1

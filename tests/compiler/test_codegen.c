@@ -196,8 +196,8 @@ TEST(codegen_fnptr_struct_field_string_arg_passes_bytes) {
         "by_pointer(p: *Ops, s: string) -> int { return p.measure(s) }\n"
         "main() { }");
     ASSERT_NOT_NULL(buf);
-    ASSERT_TRUE(strstr(buf, "(o.measure)(aether_string_data(s))") != NULL);
-    ASSERT_TRUE(strstr(buf, "(p->measure)(aether_string_data(s))") != NULL);
+    ASSERT_TRUE(strstr(buf, ", o.measure)(aether_string_data(s))") != NULL);
+    ASSERT_TRUE(strstr(buf, ", p->measure)(aether_string_data(s))") != NULL);
     free(buf);
 }
 
@@ -697,7 +697,7 @@ TEST(codegen_fnptr_local_named_release_shadows_builtin) {
         "  release(state) }\n"
         "main() { }");
     ASSERT_NOT_NULL(buf);
-    ASSERT_TRUE(strstr(buf, "((void(*)(void*))(release))(state)") != NULL);
+    ASSERT_TRUE(strstr(buf, "(void(*)(void*))(release))(state)") != NULL);
     ASSERT_TRUE(strstr(buf, "string_release(state)") == NULL);
     ASSERT_TRUE(strstr(buf, "release() type error") == NULL);
     free(buf);
@@ -716,7 +716,7 @@ TEST(codegen_fnptr_local_named_free_shadows_builtin_and_keeps_its_spelling) {
         "main() { }");
     ASSERT_NOT_NULL(buf);
     ASSERT_TRUE(strstr(buf, "void* free = h->free;") != NULL);
-    ASSERT_TRUE(strstr(buf, "((void(*)(void*))(free))(state)") != NULL);
+    ASSERT_TRUE(strstr(buf, "(void(*)(void*))(free))(state)") != NULL);
     ASSERT_TRUE(strstr(buf, "ae_free") == NULL);
     free(buf);
 }
@@ -749,7 +749,7 @@ TEST(codegen_call_through_global_fnptr_var_emits_typed_cast) {
         "main() { }");
     ASSERT_NOT_NULL(buf);
     ASSERT_TRUE(strstr(buf, "static void* gl_gen_buffers = NULL;") != NULL);
-    ASSERT_TRUE(strstr(buf, "((void(*)(int, void*))(gl_gen_buffers))(1, ids)") != NULL);
+    ASSERT_TRUE(strstr(buf, "(void(*)(int, void*))(gl_gen_buffers))(1, ids)") != NULL);
     free(buf);
 }
 
@@ -769,7 +769,7 @@ TEST(codegen_cfn_local_param_and_field_lower_like_fn_types) {
         "  r2 = o.scale(1.0, 1.0) + apply(sc, r) }");
     ASSERT_NOT_NULL(buf);
     ASSERT_TRUE(strstr(buf, "void* sc = ((void*)(getp()))") != NULL);
-    ASSERT_TRUE(strstr(buf, "((double(*)(double, float))(sc))(1.5, 4.0)") != NULL);
+    ASSERT_TRUE(strstr(buf, "(double(*)(double, float))(sc))(1.5, 4.0)") != NULL);
     ASSERT_TRUE(strstr(buf, "double (*f)(double, float)") != NULL);
     ASSERT_TRUE(strstr(buf, "double (*scale)(double, float)") != NULL);
     ASSERT_TRUE(strstr(buf, "typedef") == NULL || strstr(buf, "Scale;") == NULL);
@@ -794,12 +794,14 @@ TEST(codegen_fnptr_bool_return_reads_low_byte_when_used) {
         "  if r(3) { println(\"a\") }\n"
         "  if d.ready(4) { println(\"b\") } }");
     ASSERT_NOT_NULL(buf);
-    ASSERT_TRUE(strstr(buf, "((_Bool)(unsigned char)(((int(*)(int))(r))(3)))") != NULL);
-    ASSERT_TRUE(strstr(buf, "((_Bool)(unsigned char)((d.ready)(4)))") != NULL);
-    ASSERT_TRUE(strstr(buf, "((_Bool)(unsigned char)(((int(*)(int))(r))(1)") == NULL);
-    ASSERT_TRUE(strstr(buf, "((_Bool)(unsigned char)((d.ready)(2)") == NULL);
-    ASSERT_TRUE(strstr(buf, "((int(*)(int))(r))(1);") != NULL);
-    ASSERT_TRUE(strstr(buf, "(d.ready)(2);") != NULL);
+    ASSERT_TRUE(strstr(buf, "((_Bool)(unsigned char)((r ? (void)0 : aether_panic(") != NULL);
+    ASSERT_TRUE(strstr(buf, "(int(*)(int))(r))(3)))") != NULL);
+    ASSERT_TRUE(strstr(buf, "((_Bool)(unsigned char)((d.ready ? (void)0 : aether_panic(") != NULL);
+    ASSERT_TRUE(strstr(buf, ", d.ready)(4)))") != NULL);
+    ASSERT_TRUE(strstr(buf, "(int(*)(int))(r))(1)))") == NULL);
+    ASSERT_TRUE(strstr(buf, ", d.ready)(2)))") == NULL);
+    ASSERT_TRUE(strstr(buf, "(int(*)(int))(r))(1);") != NULL);
+    ASSERT_TRUE(strstr(buf, ", d.ready)(2);") != NULL);
     free(buf);
 }
 

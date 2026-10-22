@@ -96,7 +96,7 @@ h!+
 i!"
 grep -q '_ad_[0-9]* = (char\*)(mk(((const char\*)&_ae_slit_[0-9]*))), aether_unwind_track_str_place((const void\*)\&_ad_[0-9]*, NULL), apply(look, _ad_[0-9]*), aether_unwind_forget((const void\*)\&_ad_[0-9]*), aether_heap_str_free' "$tmp/borrowed.c" \
     || fail "the argument to apply() is not freed" "$tmp/borrowed.c"
-n="$(grep -c '_ad_[0-9]* = (char\*)(mk(a)), .*_aether_closure_fn(f\.fn, "empty_closure_call: .*"))(f\.env, _ad_[0-9]*), aether_unwind_forget((const void\*)\&_ad_[0-9]*), aether_heap_str_free' "$tmp/borrowed.c")"
+n="$(grep -c '_ad_[0-9]* = (char\*)(mk(a)), .*_aether_callee_fn(f\.fn, "empty_closure_call: .*"))(f\.env, _ad_[0-9]*), aether_unwind_forget((const void\*)\&_ad_[0-9]*), aether_heap_str_free' "$tmp/borrowed.c")"
 [ "$n" = "3" ] || fail "an argument to a call through an fn parameter is not freed ($n of 3)" "$tmp/borrowed.c"
 
 # ---- a closure keeps its `string` parameter: the store takes its own

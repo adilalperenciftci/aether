@@ -1958,12 +1958,13 @@ static int is_stdlib_string_aware_extern(const char* c_func_name) {
  * where C wants an ae_opt_int, and `h(none)` an initializer list. */
 static void emit_closure_argument(CodeGenerator* gen, ASTNode* arg, Type* pt);
 
-static void generate_fnptr_call_args(CodeGenerator* gen, Type* sig, ASTNode* call) {
-    for (int i = 0; i < call->child_count; i++) {
+static void generate_fnptr_call_args(CodeGenerator* gen, Type* sig, ASTNode* call, int first) {
+    for (int i = first; i < call->child_count; i++) {
         ASTNode* arg = call->children[i];
-        if (i > 0) fprintf(gen->output, ", ");
-        Type* param = (sig && sig->param_types && i < sig->param_count)
-                      ? sig->param_types[i] : NULL;
+        if (i > first) fprintf(gen->output, ", ");
+        int pi = i - first;
+        Type* param = (sig && sig->param_types && pi < sig->param_count)
+                      ? sig->param_types[pi] : NULL;
         if (param && param->kind == TYPE_STRING && arg && arg->node_type &&
             (arg->node_type->kind == TYPE_STRING || arg->node_type->kind == TYPE_PTR)) {
             fprintf(gen->output, "aether_string_data(");
@@ -2013,6 +2014,19 @@ static void emit_fnptr_take_close(CodeGenerator* gen, int took) {
     if (took) fprintf(gen->output, "))");
 }
 
+static void emit_slice_diag_file(CodeGenerator* gen, const ASTNode* n);
+
+/* #3098: the check before a call through a typed function pointer, which
+ * panics at the call when `callee` is null instead of jumping to address 0.
+ * `callee` is a name or a field path, so reading it again is free. Opens a
+ * comma expression the caller ends by naming the callee. */
+static void emit_fnptr_null_check(CodeGenerator* gen, const char* callee, ASTNode* call) {
+    fprintf(gen->output, "(%s ? (void)0 : aether_panic(\"null_function_call: call through a null function pointer at \" ",
+            callee);
+    emit_slice_diag_file(gen, call);
+    fprintf(gen->output, " \":%d:%d\"), ", call->line, call->column);
+}
+
 static void generate_fnptr_local_call(CodeGenerator* gen, Type* sig,
                                       const char* local_name, ASTNode* call,
                                       int discarded) {
@@ -2029,9 +2043,38 @@ static void generate_fnptr_local_call(CodeGenerator* gen, Type* sig,
     int narrow = !discarded && fnptr_returns_bool(sig);
     if (narrow) fprintf(gen->output, "((_Bool)(unsigned char)(");
     /* #2651: spelled as the declarators spell it (fnptr_c_spelling). */
-    fprintf(gen->output, "((%s)(%s))(", fnptr_c_spelling(sig, NULL),
-            safe_value_name(local_name));
-    generate_fnptr_call_args(gen, sig, call);
+    const char* callee = safe_value_name(local_name);
+    emit_fnptr_null_check(gen, callee, call);
+    fprintf(gen->output, "(%s)(%s))(", fnptr_c_spelling(sig, NULL), callee);
+    generate_fnptr_call_args(gen, sig, call, 0);
+    fprintf(gen->output, ")");
+    if (narrow) fprintf(gen->output, "))");
+    emit_fnptr_take_close(gen, took);
+    arg_drain_close(gen, call, &ad);
+}
+
+/* #3098: `call(f, args)` where `f` is a typed function pointer an
+ * expression other than a name yields (`fs[1]`, `w.h.cb`, `pick()`):
+ * evaluated once, through the null check, and cast to its signature. */
+static void generate_fnptr_value_call(CodeGenerator* gen, ASTNode* call, int discarded) {
+    Type* sig = call->children[0]->node_type;
+    const char* ret_c = sig->return_type ? get_c_type(sig->return_type) : "void";
+    ArgDrainWrap ad;
+    ad.ret_ct = ret_c;
+    ad.ret_type = NULL;
+    ad.have_value = strcmp(ret_c, "void") != 0;
+    ad.discarded = discarded;
+    arg_drain_select(gen, call, 1, NULL, NULL, !ad.have_value || discarded, &ad);
+    arg_drain_open(gen, call, &ad);
+    int took = emit_fnptr_take_open(gen, call);
+    int narrow = !discarded && fnptr_returns_bool(sig);
+    if (narrow) fprintf(gen->output, "((_Bool)(unsigned char)(");
+    fprintf(gen->output, "((%s)_aether_callee_fn((_AeFnPtr)(", fnptr_c_spelling(sig, NULL));
+    generate_expression(gen, call->children[0]);
+    fprintf(gen->output, "), \"null_function_call: call through a null function pointer at \" ");
+    emit_slice_diag_file(gen, call);
+    fprintf(gen->output, " \":%d:%d\"))(", call->line, call->column);
+    generate_fnptr_call_args(gen, sig, call, 1);
     fprintf(gen->output, ")");
     if (narrow) fprintf(gen->output, "))");
     emit_fnptr_take_close(gen, took);
@@ -2088,6 +2131,8 @@ int typed_fnptr_call(CodeGenerator* gen, ASTNode* call) {
     if (!call || call->type != AST_FUNCTION_CALL || !call->value) return 0;
     if (call->annotation && (strcmp(call->annotation, "fnptr_local_call") == 0 ||
                              strncmp(call->annotation, "fnfield_", 8) == 0)) return 1;
+    if (strcmp(call->value, "call") == 0 && call->child_count > 0 && call->children[0] &&
+        is_fnptr_type(call->children[0]->node_type)) return 1;
     Type* sig = lookup_fnptr_global(gen, call->value);
     return sig && sig->kind == TYPE_FUNCTION && sig->is_fnptr;
 }
@@ -9397,9 +9442,10 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                     int took = emit_fnptr_take_open(gen, expr);
                     int narrow = gen->discard_call_node != expr && fnptr_returns_bool(field_sig);
                     if (narrow) fprintf(gen->output, "((_Bool)(unsigned char)(");
-                    fprintf(gen->output, "(%s%s%s)(",
-                            recv_c, is_ptr ? "->" : ".", field_c);
-                    generate_fnptr_call_args(gen, field_sig, expr);
+                    const char* callee = cg_internf("%s%s%s", recv_c, is_ptr ? "->" : ".", field_c);
+                    emit_fnptr_null_check(gen, callee, expr);
+                    fprintf(gen->output, "%s)(", callee);
+                    generate_fnptr_call_args(gen, field_sig, expr, 0);
                     fprintf(gen->output, ")");
                     if (narrow) fprintf(gen->output, "))");
                     emit_fnptr_take_close(gen, took);
@@ -10217,6 +10263,10 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                 else if (strcmp(func_name, "builder_depth") == 0) {
                     fprintf(gen->output, "_aether_ctx_depth");
                 }
+                else if (strcmp(func_name, "call") == 0 && expr->child_count >= 1 &&
+                         is_fnptr_type(expr->children[0]->node_type)) {
+                    generate_fnptr_value_call(gen, expr, ad_call_discarded);
+                }
                 // call(closure_var, args...) — invoke a closure stored in a variable
                 // Looks up the closure's hoisted function signature and calls through it
                 else if (strcmp(func_name, "call") == 0 && expr->child_count >= 1) {
@@ -10412,9 +10462,9 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                             fprintf(gen->output, ", %s", atype);
                             sig_pi++;
                         }
-                        /* #3091: through `_aether_closure_fn`, which
+                        /* #3091: through `_aether_callee_fn`, which
                          * panics at this call when the closure is empty. */
-                        fprintf(gen->output, "))_aether_closure_fn(");
+                        fprintf(gen->output, "))_aether_callee_fn(");
                         generate_expression(gen, closure_arg);
                         fprintf(gen->output, ".fn, \"empty_closure_call: call through an empty closure at \" ");
                         emit_slice_diag_file(gen, expr);

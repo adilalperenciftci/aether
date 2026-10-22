@@ -1,0 +1,8 @@
+// A call through a typed function pointer holding null must print its own
+// category token.
+import std.io
+
+main() {
+    let f: fn(int) -> int = null
+    println("${f(3)}")
+}
