@@ -16488,6 +16488,19 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                     set_node_type(expr, create_type(TYPE_INT));
                     return 1;
                 }
+                if (lt && lt->kind == TYPE_ARRAY) {
+                    /* #3092: `.len` is an array's one member (a slice's and a
+                     * fixed-size array's alike), so any other name is a
+                     * mistake to name here; left alone it reached the C as a
+                     * member of a pointer or an array (`arr.length`). */
+                    char msg[256];
+                    snprintf(msg, sizeof(msg),
+                             "'%s' is not a member of an array: an array's length is `.len`, its only member",
+                             expr->value);
+                    free_type(lt);
+                    type_error(msg, expr->line, expr->column);
+                    return 0;
+                }
                 if (lt && is_lane_type(lt->kind)) {
                     int idx = lane_accessor_index(lt->kind, expr->value);
                     TypeKind elem = lane_scalar_kind(lt->kind);
