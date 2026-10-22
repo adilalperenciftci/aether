@@ -1728,6 +1728,34 @@ static int reject_string_char_write(ASTNode* target, SymbolTable* table, ASTNode
     return 1;
 }
 
+/* #3104: a write to the length of a slice or an array: `xs.len = n`,
+ * `xs.len += n`, `xs.len++`. `.len` is a value computed from the slice
+ * (#1286): a slice's length is fixed when the slice is made, and an
+ * array's is a constant. The write reached the C compiler as a store to a
+ * non-lvalue ("lvalue required"). Returns 1 when it reported. */
+static int reject_length_write(ASTNode* target, SymbolTable* table, ASTNode* at) {
+    if (!target || target->type != AST_MEMBER_ACCESS || !target->value ||
+        strcmp(target->value, "len") != 0 || target->child_count < 1 || !target->children[0])
+        return 0;
+    Type* ot = infer_type(target->children[0], table);
+    int is_array = ot && ot->kind == TYPE_ARRAY;
+    if (ot) free_type(ot);
+    if (!is_array) return 0;
+    ASTNode* base = target->children[0];
+    int named = base->type == AST_IDENTIFIER && base->value;
+    char msg[300];
+    char hint[300];
+    snprintf(msg, sizeof(msg),
+             "cannot write to the length of %s%s%s: a slice's length is fixed when the slice "
+             "is made, and an array's is a constant",
+             named ? "'" : "", named ? base->value : "a slice or an array", named ? "'" : "");
+    snprintf(hint, sizeof(hint),
+             "for fewer elements, take a slice of the same ones: `%s[lo..hi]`",
+             named ? base->value : "xs");
+    type_error_hint(msg, hint, at->line, at->column);
+    return 1;
+}
+
 static int is_integer_scalar(TypeKind kind) {
     return kind == TYPE_INT || kind == TYPE_INT64 || kind == TYPE_UINT64 ||
            kind == TYPE_UINT32 || kind == TYPE_UINT16 || kind == TYPE_UINT8;
@@ -13686,7 +13714,8 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                 ASTNode* right = stmt->children[1];
                 if (reject_const_element_write(left, table, stmt) ||   /* #2516 */
                     reject_string_char_write(left, table, stmt) ||     /* #3022 */
-                    reject_readonly_view_write(left, stmt))            /* #3025 */
+                    reject_readonly_view_write(left, stmt) ||          /* #3025 */
+                    reject_length_write(left, table, stmt))            /* #3104 */
                     return 0;
 
                 Symbol* symbol = lookup_symbol(table, left->value);
@@ -16758,7 +16787,8 @@ static int reject_step_operand(ASTNode* expr, SymbolTable* table, const char* wr
     if (!t) return 0;
     if (reject_const_element_write(t, table, expr) ||   /* #2516 */
         reject_string_char_write(t, table, expr) ||
-        reject_readonly_view_write(t, expr))            /* #3025 */
+        reject_readonly_view_write(t, expr) ||          /* #3025 */
+        reject_length_write(t, table, expr))            /* #3104 */
         return 1;
     char msg[512];
     char hint[640];
@@ -17140,7 +17170,8 @@ int typecheck_binary_expression(ASTNode* expr, SymbolTable* table) {
     if (operator == TOKEN_ASSIGN) {
         if (reject_const_element_write(left, table, expr) ||   /* #2516 */
             reject_string_char_write(left, table, expr) ||     /* #3022 */
-            reject_readonly_view_write(left, expr)) {          /* #3025 */
+            reject_readonly_view_write(left, expr) ||          /* #3025 */
+            reject_length_write(left, table, expr)) {          /* #3104 */
             free_type(left_type);
             free_type(right_type);
             return 0;

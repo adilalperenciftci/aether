@@ -392,7 +392,7 @@ main() {
 2 2 5
 ```
 
-- **`s.len`** is the element count, an `int`.
+- **`s.len`** is the element count, an `int`. It is read, never written: a slice's length is fixed when the slice is made, and an array's is a constant, so `s.len = n` (or `+=`, `++`) is a type error that points at `s[lo..hi]` for fewer elements (#3104).
 - **`s[i]` is bounds-checked.** An index outside `0 ..< s.len` is a runtime panic naming the source line, the index and the length (`slice index 5 out of range for length 3`). It is an ordinary panic: `try` catches it, and an actor step that trips it dies cleanly. A negative index is out of range, never a read before the buffer.
 - **`s[lo..hi]`** is the half-open sub-slice `[lo, hi)`, checked the same way (`lo <= hi <= s.len`). `s[lo..]` runs to the end, `s[..hi]` from the start, `s[..]` is the whole thing. The base may be a slice or a `T[N]` array; the result is always a `T[]` over the *same* elements, so a write through it is visible through the original.
 - **A `T[N]` array converts to `T[]` implicitly** wherever a slice is expected: a parameter, a `T[]`-typed binding or field, a `return` from a `-> T[]` function. The length travels with it. `null`, and the empty literal `[]`, convert to the empty slice: `.len` is `0`, it views no storage, and it compares equal to `null`. So `s == []` is `s == null` (it asks whether `s` views any storage; test `s.len == 0` for emptiness), a C function's `T[]` parameter takes `[]` as the null pointer, and an if-expression or a `match` given to a `T[]` converts each arm on its own. A module-level `var` or `const` of type `T[]` takes either as its initial value.
