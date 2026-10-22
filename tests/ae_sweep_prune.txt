@@ -246,6 +246,7 @@ tests/integration/when_in_imported_module/
 tests/integration/where_clause/
 tests/integration/ws_client_loopback/
 tests/integration/ws_client_nonblocking/
+tests/integration/ws_idle_server/
 tests/integration/ws_client_conformance/
 tests/integration/wss_client_tls/
 tests/integration/wycheproof/

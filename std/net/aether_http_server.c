@@ -4359,6 +4359,8 @@ static void conn_send_bad_request_line(HttpConn* conn) {
     conn->linger_on_close = 1;
 }
 
+static void conn_set_recv_timeout(HttpConn* c, int ms);
+
 static int handle_one_request(HttpServer* server, HttpConn* conn,
                               int requests_served, int max_requests) {
     int64_t t_start = http_now_us();
@@ -4830,6 +4832,12 @@ static int handle_one_request(HttpServer* server, HttpConn* conn,
                         http_server_response_free(res);
                         return 0;  /* close */
                     }
+                    /* #3118: the idle timeout guards the wait for the next
+                     * request; a WebSocket at rest between messages is the
+                     * protocol working. Left on, a blocking ws_recv took
+                     * the timeout for a close and dropped any client quiet
+                     * that long. ws_recv_timeout bounds a wait of its own. */
+                    conn_set_recv_timeout(conn, 0);
                     HttpWsConn ws_handle = {
                         .conn = conn, .closed = 0,
                         .msg_buf = NULL, .msg_cap = 0,
@@ -5208,25 +5216,29 @@ static int64_t conn_now_ms(void) {
     return (int64_t)time(NULL) * 1000;
 }
 
-/* Per-recv socket timeout, applied whenever a worker is about to block on
- * this connection. Also the idle guard against a slow-loris client. */
-static void conn_apply_recv_timeout(HttpServer* server, HttpConn* c) {
-    int fd = c->fd;
-    int idle_ms = server->keep_alive_idle_ms > 0
-        ? server->keep_alive_idle_ms : 30000;
-    if (c->applied_recv_timeout_ms == idle_ms) return;
-    c->applied_recv_timeout_ms = idle_ms;
+/* The receive timeout on `c`'s socket: `ms` milliseconds, 0 for none (a
+ * recv then waits as long as the peer stays connected). */
+static void conn_set_recv_timeout(HttpConn* c, int ms) {
+    if (c->applied_recv_timeout_ms == ms) return;
+    c->applied_recv_timeout_ms = ms;
 #ifdef _WIN32
-    DWORD rcv_timeout = (DWORD)idle_ms;
-    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO,
+    DWORD rcv_timeout = (DWORD)ms;
+    setsockopt(c->fd, SOL_SOCKET, SO_RCVTIMEO,
                (const char*)&rcv_timeout, sizeof(rcv_timeout));
 #else
     struct timeval rcv_tv = {
-        .tv_sec  = idle_ms / 1000,
-        .tv_usec = (idle_ms % 1000) * 1000
+        .tv_sec  = ms / 1000,
+        .tv_usec = (ms % 1000) * 1000
     };
-    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &rcv_tv, sizeof(rcv_tv));
+    setsockopt(c->fd, SOL_SOCKET, SO_RCVTIMEO, &rcv_tv, sizeof(rcv_tv));
 #endif
+}
+
+/* Per-recv socket timeout, applied whenever a worker is about to block on
+ * this connection. Also the idle guard against a slow-loris client. */
+static void conn_apply_recv_timeout(HttpServer* server, HttpConn* c) {
+    conn_set_recv_timeout(c, server->keep_alive_idle_ms > 0
+                             ? server->keep_alive_idle_ms : 30000);
 }
 
 /* Is the next request already here, or about to be?

@@ -655,7 +655,11 @@ Same handler-owns-the-connection shape as SSE. The server runs the
 upgrade handshake first (computes
 `Sec-WebSocket-Accept = Base64(SHA-1(client_key + magic-uuid))`),
 sends `101 Switching Protocols`, then hands an `HttpWsConn*` to the
-handler. Inside the handler:
+handler. The connection's receive timeout, the keep-alive idle one that
+guards the wait for the next request, is cleared at the upgrade: a quiet
+WebSocket is the protocol at rest, so `ws_recv` waits as long as the peer
+stays connected, and `ws_recv_timeout(ws, ms)` bounds a wait when a handler
+wants one (#3118). Inside the handler:
 
 | Call | Behaviour |
 |---|---|

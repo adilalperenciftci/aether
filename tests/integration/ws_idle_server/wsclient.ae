@@ -1,0 +1,39 @@
+// The client for ws_idle_server: a message, 2.5 s of quiet (past the
+// server's 1 s idle timeout), then another, each echoed.
+import std.http
+import std.os
+import std.string
+
+extern exit(code: int)
+
+fn round_trip(w: ptr, text: string) {
+    if http.ws_send_text(w, text) < 0 {
+        println("FAIL: ws_send_text '${text}'")
+        exit(1)
+    }
+    kind = http.ws_recv(w)
+    if kind != 1 {
+        println("FAIL: the echo of '${text}': ws_recv returned ${kind}, want 1 (text)")
+        exit(1)
+    }
+    got = http.ws_message(w)
+    if string.compare(got, "echo: ${text}") != 0 {
+        println("FAIL: got [${got}] want [echo: ${text}]")
+        exit(1)
+    }
+}
+
+main() {
+    w = http.ws_connect("ws://127.0.0.1:${os.getenv("AE_TEST_PORT")}/echo")
+    if w == null {
+        println("FAIL: ws_connect returned null")
+        exit(1)
+    }
+    round_trip(w, "first")
+    sleep(2500)
+    round_trip(w, "after the quiet")
+    http.ws_close(w, 1000, "done")
+    http.ws_client_free(w)
+    println("PASS: ws idle round-trip")
+    exit(0)
+}
