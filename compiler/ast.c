@@ -1434,7 +1434,14 @@ void clause_set_join(ASTNode* const* nodes, int count, ClauseJoin* out) {
         join_arm = join_arm_after(join_arm, arm);
         /* Beside a written type, an inferred clause fits it (their join is
          * it, and one with no join does not); a second written type is the
-         * same one or none. */
+         * same one or none. #3082: a value the written type holds fits it
+         * (ast_number_holds), as a local's written type holds a binding
+         * (#3070): `g(0) -> 5` beside `-> uint8`, which the join of an int
+         * and a uint8 (an int) refused. */
+        if (written && cl->type_inferred && ast_number_holds(join, t, arm)) {
+            if (k) free_type(k);
+            k = clone_type(join);
+        }
         int unfit = written &&
                     (!k || !types_equal(k, join) || (!cl->type_inferred && !types_equal(t, join)));
         if (!k || unfit) {

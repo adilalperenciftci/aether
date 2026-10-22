@@ -154,5 +154,43 @@ case "$out" in
        fails=$((fails + 1)) ;;
 esac
 
+# #3082: a literal clause fits a written type that holds its value, as a
+# literal bound in a branch fits a local's written type (#3070): `g(0) -> 5`
+# beside `-> uint8` was refused as an int, which uint8 does not hold.
+cat > "$TMP/literal_beside_written.ae" <<'AE'
+g(0) -> 5
+g(k) -> uint8 {
+    return 7
+}
+
+main() { println("${g(0)} ${g(1)}") }
+AE
+out=$(cd "$TMP" && "$AE" run literal_beside_written.ae 2>&1 | tr -d '\r')
+case "$out" in
+    *"5 7"*) ;;
+    *) echo "  [FAIL] literal_beside_written: did not run to 5 7"
+       echo "$out" | sed 's/^/        /'
+       fails=$((fails + 1)) ;;
+esac
+
+# A literal the written type does not hold is still refused: 300 and -1
+# beside `-> uint8`.
+cat > "$TMP/literal_outside_written.ae" <<'AE'
+g(0) -> 300
+g(1) -> -1
+g(k) -> uint8 {
+    return 7
+}
+
+main() { println("${g(0)}") }
+AE
+out=$(cd "$TMP" && "$AE" check literal_outside_written.ae 2>&1)
+case "$out" in
+    *"error[E0200]: the clauses of 'g' are written to return uint8 (line 3), and this clause returns int, which uint8 does not hold"*"literal_outside_written.ae:1:"*) ;;
+    *) echo "  [FAIL] literal_outside_written: 300 beside uint8 not refused at line 1"
+       echo "$out" | sed 's/^/        /'
+       fails=$((fails + 1)) ;;
+esac
+
 if [ "$fails" -ne 0 ]; then exit 1; fi
 echo "  [PASS] clause_set_result_join: clause results no one type holds are refused, naming both, once, and a set of only \`none\` names its missing T"

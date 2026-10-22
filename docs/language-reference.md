@@ -1062,7 +1062,9 @@ n7
 
 A clause set is one function with one result, decided over every clause. A
 clause that writes a type gives it, and what every other clause returns must
-fit it. With none written, the result is the join of what the clauses return,
+fit it, as a binding fits a local's written type: a literal fits when the type
+holds its value (`g(0) -> 5` beside `g(k) -> uint8 { ... }`; `300` does not).
+With none written, the result is the join of what the clauses return,
 as an [if-expression](#if-expressions)'s branches join:
 `pick(0, s: int, b: long) -> s` beside `pick(k, s: int, b: long) -> b`
 returns a `long`, a clause that returns `0` beside one that returns a
