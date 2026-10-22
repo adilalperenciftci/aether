@@ -9,7 +9,6 @@
 
 import std.bits
 import std.bytes
-import std.longarr
 
 extern malloc(size: int) -> ptr
 extern free(p: ptr)
@@ -26,7 +25,7 @@ const RCON: long[8] = [
 ]
 
 struct SparkleCtx {
-    state: ptr // longarr(16)
+    state: long[16]
     block: ptr // std.bytes, 16 bytes
     block_len: int
     digest_bytes: int
@@ -56,19 +55,19 @@ arx_box(rc: long, s00: long, s01: long) -> (long, long) {
     return s00, s01
 }
 
-sparkle_opt12(state: ptr, steps: int) {
-    s00 = longarr_get_unchecked(state, 0)
-    s01 = longarr_get_unchecked(state, 1)
-    s02 = longarr_get_unchecked(state, 2)
-    s03 = longarr_get_unchecked(state, 3)
-    s04 = longarr_get_unchecked(state, 4)
-    s05 = longarr_get_unchecked(state, 5)
-    s06 = longarr_get_unchecked(state, 6)
-    s07 = longarr_get_unchecked(state, 7)
-    s08 = longarr_get_unchecked(state, 8)
-    s09 = longarr_get_unchecked(state, 9)
-    s10 = longarr_get_unchecked(state, 10)
-    s11 = longarr_get_unchecked(state, 11)
+sparkle_opt12(state: long[], steps: int) {
+    s00 = state[0]
+    s01 = state[1]
+    s02 = state[2]
+    s03 = state[3]
+    s04 = state[4]
+    s05 = state[5]
+    s06 = state[6]
+    s07 = state[7]
+    s08 = state[8]
+    s09 = state[9]
+    s10 = state[10]
+    s11 = state[11]
 
     step = 0
     while step < steps {
@@ -109,37 +108,37 @@ sparkle_opt12(state: ptr, steps: int) {
         step = step + 1
     }
 
-    longarr_set_unchecked(state, 0, s00)
-    longarr_set_unchecked(state, 1, s01)
-    longarr_set_unchecked(state, 2, s02)
-    longarr_set_unchecked(state, 3, s03)
-    longarr_set_unchecked(state, 4, s04)
-    longarr_set_unchecked(state, 5, s05)
-    longarr_set_unchecked(state, 6, s06)
-    longarr_set_unchecked(state, 7, s07)
-    longarr_set_unchecked(state, 8, s08)
-    longarr_set_unchecked(state, 9, s09)
-    longarr_set_unchecked(state, 10, s10)
-    longarr_set_unchecked(state, 11, s11)
+    state[0] = s00
+    state[1] = s01
+    state[2] = s02
+    state[3] = s03
+    state[4] = s04
+    state[5] = s05
+    state[6] = s06
+    state[7] = s07
+    state[8] = s08
+    state[9] = s09
+    state[10] = s10
+    state[11] = s11
 }
 
-sparkle_opt16(state: ptr, steps: int) {
-    s00 = longarr_get_unchecked(state, 0)
-    s01 = longarr_get_unchecked(state, 1)
-    s02 = longarr_get_unchecked(state, 2)
-    s03 = longarr_get_unchecked(state, 3)
-    s04 = longarr_get_unchecked(state, 4)
-    s05 = longarr_get_unchecked(state, 5)
-    s06 = longarr_get_unchecked(state, 6)
-    s07 = longarr_get_unchecked(state, 7)
-    s08 = longarr_get_unchecked(state, 8)
-    s09 = longarr_get_unchecked(state, 9)
-    s10 = longarr_get_unchecked(state, 10)
-    s11 = longarr_get_unchecked(state, 11)
-    s12 = longarr_get_unchecked(state, 12)
-    s13 = longarr_get_unchecked(state, 13)
-    s14 = longarr_get_unchecked(state, 14)
-    s15 = longarr_get_unchecked(state, 15)
+sparkle_opt16(state: long[], steps: int) {
+    s00 = state[0]
+    s01 = state[1]
+    s02 = state[2]
+    s03 = state[3]
+    s04 = state[4]
+    s05 = state[5]
+    s06 = state[6]
+    s07 = state[7]
+    s08 = state[8]
+    s09 = state[9]
+    s10 = state[10]
+    s11 = state[11]
+    s12 = state[12]
+    s13 = state[13]
+    s14 = state[14]
+    s15 = state[15]
 
     step = 0
     while step < steps {
@@ -202,22 +201,22 @@ sparkle_opt16(state: ptr, steps: int) {
         s07 = u01 ^ s09 ^ t8ACE
     }
 
-    longarr_set_unchecked(state, 0, s00)
-    longarr_set_unchecked(state, 1, s01)
-    longarr_set_unchecked(state, 2, s02)
-    longarr_set_unchecked(state, 3, s03)
-    longarr_set_unchecked(state, 4, s04)
-    longarr_set_unchecked(state, 5, s05)
-    longarr_set_unchecked(state, 6, s06)
-    longarr_set_unchecked(state, 7, s07)
-    longarr_set_unchecked(state, 8, s08)
-    longarr_set_unchecked(state, 9, s09)
-    longarr_set_unchecked(state, 10, s10)
-    longarr_set_unchecked(state, 11, s11)
-    longarr_set_unchecked(state, 12, s12)
-    longarr_set_unchecked(state, 13, s13)
-    longarr_set_unchecked(state, 14, s14)
-    longarr_set_unchecked(state, 15, s15)
+    state[0] = s00
+    state[1] = s01
+    state[2] = s02
+    state[3] = s03
+    state[4] = s04
+    state[5] = s05
+    state[6] = s06
+    state[7] = s07
+    state[8] = s08
+    state[9] = s09
+    state[10] = s10
+    state[11] = s11
+    state[12] = s12
+    state[13] = s13
+    state[14] = s14
+    state[15] = s15
 }
 
 process_block(c: *SparkleCtx, buf: ptr, off: int, steps: int) {
@@ -229,16 +228,16 @@ process_block(c: *SparkleCtx, buf: ptr, off: int, steps: int) {
     tx = ell(t0 ^ t2)
     ty = ell(t1 ^ t3)
 
-    longarr_set_unchecked(c.state, 0, longarr_get_unchecked(c.state, 0) ^ t0 ^ ty)
-    longarr_set_unchecked(c.state, 1, longarr_get_unchecked(c.state, 1) ^ t1 ^ tx)
-    longarr_set_unchecked(c.state, 2, longarr_get_unchecked(c.state, 2) ^ t2 ^ ty)
-    longarr_set_unchecked(c.state, 3, longarr_get_unchecked(c.state, 3) ^ t3 ^ tx)
-    longarr_set_unchecked(c.state, 4, longarr_get_unchecked(c.state, 4) ^ ty)
-    longarr_set_unchecked(c.state, 5, longarr_get_unchecked(c.state, 5) ^ tx)
+    c.state[0] = c.state[0] ^ t0 ^ ty
+    c.state[1] = c.state[1] ^ t1 ^ tx
+    c.state[2] = c.state[2] ^ t2 ^ ty
+    c.state[3] = c.state[3] ^ t3 ^ tx
+    c.state[4] = c.state[4] ^ ty
+    c.state[5] = c.state[5] ^ tx
 
     if c.state_words == 16 {
-        longarr_set_unchecked(c.state, 6, longarr_get_unchecked(c.state, 6) ^ ty)
-        longarr_set_unchecked(c.state, 7, longarr_get_unchecked(c.state, 7) ^ tx)
+        c.state[6] = c.state[6] ^ ty
+        c.state[7] = c.state[7] ^ tx
         sparkle_opt16(c.state, steps)
     } else {
         sparkle_opt12(c.state, steps)
@@ -266,13 +265,12 @@ new(algo: string) -> {
         return null, "unknown algorithm"
     }
 
-    ctx.state = longarr_new_raw(16)
     ctx.block = bytes.new(16)
     ctx.block_len = 0
 
     i = 0
     while i < 16 {
-        longarr_set_unchecked(ctx.state, i, 0)
+        ctx.state[i] = 0
         i = i + 1
     }
     i = 0
@@ -313,7 +311,7 @@ update(ctx: ptr, data: byte[]) {
 finalize_to_bytes(c: *SparkleCtx) -> ptr {
     idx = (c.state_words >> 1) - 1
     if c.block_len < 16 {
-        longarr_set_unchecked(c.state, idx, longarr_get_unchecked(c.state, idx) ^ (1 << 24))
+        c.state[idx] = c.state[idx] ^ (1 << 24)
         bytes.set(c.block, c.block_len, 0x80)
         c.block_len = c.block_len + 1
         while c.block_len < 16 {
@@ -321,7 +319,7 @@ finalize_to_bytes(c: *SparkleCtx) -> ptr {
             c.block_len = c.block_len + 1
         }
     } else {
-        longarr_set_unchecked(c.state, idx, longarr_get_unchecked(c.state, idx) ^ (1 << 25))
+        c.state[idx] = c.state[idx] ^ (1 << 25)
     }
 
     process_block(c, c.block, 0, c.sparkle_steps_big)
@@ -329,7 +327,7 @@ finalize_to_bytes(c: *SparkleCtx) -> ptr {
     out = bytes.new(c.digest_bytes)
     i = 0
     while i < 4 {
-        bytes.set_le32(out, i * 4, longarr_get_unchecked(c.state, i) & 0xFFFFFFFF)
+        bytes.set_le32(out, i * 4, c.state[i] & 0xFFFFFFFF)
         i = i + 1
     }
 
@@ -337,20 +335,20 @@ finalize_to_bytes(c: *SparkleCtx) -> ptr {
         sparkle_opt16(c.state, c.sparkle_steps_slim)
         i = 0
         while i < 4 {
-            bytes.set_le32(out, 16 + i * 4, longarr_get_unchecked(c.state, i) & 0xFFFFFFFF)
+            bytes.set_le32(out, 16 + i * 4, c.state[i] & 0xFFFFFFFF)
             i = i + 1
         }
         sparkle_opt16(c.state, c.sparkle_steps_slim)
         i = 0
         while i < 4 {
-            bytes.set_le32(out, 32 + i * 4, longarr_get_unchecked(c.state, i) & 0xFFFFFFFF)
+            bytes.set_le32(out, 32 + i * 4, c.state[i] & 0xFFFFFFFF)
             i = i + 1
         }
     } else {
         sparkle_opt12(c.state, c.sparkle_steps_slim)
         i = 0
         while i < 4 {
-            bytes.set_le32(out, 16 + i * 4, longarr_get_unchecked(c.state, i) & 0xFFFFFFFF)
+            bytes.set_le32(out, 16 + i * 4, c.state[i] & 0xFFFFFFFF)
             i = i + 1
         }
     }
@@ -359,7 +357,6 @@ finalize_to_bytes(c: *SparkleCtx) -> ptr {
 }
 
 free_internals(c: *SparkleCtx) {
-    if c.state != null { longarr_free(c.state); c.state = null }
     if c.block != null { bytes.free(c.block); c.block = null }
 }
 

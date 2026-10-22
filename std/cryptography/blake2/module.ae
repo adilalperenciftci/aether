@@ -37,7 +37,6 @@
 
 import std.bits
 import std.bytes
-import std.longarr
 
 extern malloc(size: int) -> ptr
 extern free(p: ptr)
@@ -83,7 +82,7 @@ const SIGMA: long[192] = [
 
 // is_b: 1 = BLAKE2b (64-bit, 128-byte block), 0 = BLAKE2s (32-bit, 64-byte).
 struct Blake2Ctx {
-    h: ptr // longarr(16): 8 chaining words (low 32 bits used for s)
+    h: long[16] // 8 chaining words (low 32 bits used for s)
     block: ptr // std.bytes input block buffer
     block_len: int // bytes currently in `block`
     t0: long // byte counter, low
@@ -98,11 +97,11 @@ m32(x: long) -> long {
 }
 
 // ---- BLAKE2b G mixing (full 64-bit, natural wrap) ----
-gb(v: ptr, a: int, b: int, c: int, d: int, x: long, y: long) {
-    va = longarr_get_unchecked(v, a)
-    vb = longarr_get_unchecked(v, b)
-    vc = longarr_get_unchecked(v, c)
-    vd = longarr_get_unchecked(v, d)
+gb(v: long[], a: int, b: int, c: int, d: int, x: long, y: long) {
+    va = v[a]
+    vb = v[b]
+    vc = v[c]
+    vd = v[d]
 
     va = va + vb + x
     vd = bits.rotr64(vd ^ va, 32)
@@ -113,18 +112,18 @@ gb(v: ptr, a: int, b: int, c: int, d: int, x: long, y: long) {
     vc = vc + vd
     vb = bits.rotr64(vb ^ vc, 63)
 
-    longarr_set_unchecked(v, a, va)
-    longarr_set_unchecked(v, b, vb)
-    longarr_set_unchecked(v, c, vc)
-    longarr_set_unchecked(v, d, vd)
+    v[a] = va
+    v[b] = vb
+    v[c] = vc
+    v[d] = vd
 }
 
 // ---- BLAKE2s G mixing (32-bit, masked) ----
-gs(v: ptr, a: int, b: int, c: int, d: int, x: long, y: long) {
-    va = longarr_get_unchecked(v, a) & 0xFFFFFFFF
-    vb = longarr_get_unchecked(v, b) & 0xFFFFFFFF
-    vc = longarr_get_unchecked(v, c) & 0xFFFFFFFF
-    vd = longarr_get_unchecked(v, d) & 0xFFFFFFFF
+gs(v: long[], a: int, b: int, c: int, d: int, x: long, y: long) {
+    va = v[a] & 0xFFFFFFFF
+    vb = v[b] & 0xFFFFFFFF
+    vc = v[c] & 0xFFFFFFFF
+    vd = v[d] & 0xFFFFFFFF
 
     va = (va + vb + x) & 0xFFFFFFFF
     vd = bits.rotr32(vd ^ va, 16) & 0xFFFFFFFF
@@ -135,10 +134,10 @@ gs(v: ptr, a: int, b: int, c: int, d: int, x: long, y: long) {
     vc = (vc + vd) & 0xFFFFFFFF
     vb = bits.rotr32(vb ^ vc, 7) & 0xFFFFFFFF
 
-    longarr_set_unchecked(v, a, va)
-    longarr_set_unchecked(v, b, vb)
-    longarr_set_unchecked(v, c, vc)
-    longarr_set_unchecked(v, d, vd)
+    v[a] = va
+    v[b] = vb
+    v[c] = vc
+    v[d] = vd
 }
 
 // Load one little-endian 64-bit word from the block at byte offset off.
@@ -148,20 +147,20 @@ load_le64(b: ptr, off: int) -> long {
 
 // last: 1 if this is the final block (set f0 = all-ones).
 compress(c: *Blake2Ctx, last: int) {
-    v = longarr_new_raw(16)
-    m = longarr_new_raw(16)
+    long[16] v
+    long[16] m
 
     // Load message words little-endian.
     if c.is_b == 1 {
         i = 0
         while i < 16 {
-            longarr_set_unchecked(m, i, load_le64(c.block, i * 8))
+            m[i] = load_le64(c.block, i * 8)
             i = i + 1
         }
     } else {
         i = 0
         while i < 16 {
-            longarr_set_unchecked(m, i, bytes.get_le32(c.block, i * 4) & 0xFFFFFFFF)
+            m[i] = bytes.get_le32(c.block, i * 4) & 0xFFFFFFFF
             i = i + 1
         }
     }
@@ -169,31 +168,31 @@ compress(c: *Blake2Ctx, last: int) {
     // v[0..7] = h, v[8..15] = IV.
     i = 0
     while i < 8 {
-        longarr_set_unchecked(v, i, longarr_get_unchecked(c.h, i))
+        v[i] = c.h[i]
         i = i + 1
     }
     if c.is_b == 1 {
         i = 0
         while i < 8 {
-            longarr_set_unchecked(v, 8 + i, IV_B[i])
+            v[8 + i] = IV_B[i]
             i = i + 1
         }
         // Mix counter and final flag.
-        longarr_set_unchecked(v, 12, IV_B[4] ^ c.t0)
-        longarr_set_unchecked(v, 13, IV_B[5] ^ c.t1)
+        v[12] = IV_B[4] ^ c.t0
+        v[13] = IV_B[5] ^ c.t1
         if last == 1 {
-            longarr_set_unchecked(v, 14, IV_B[6] ^ 0xFFFFFFFFFFFFFFFF)
+            v[14] = IV_B[6] ^ 0xFFFFFFFFFFFFFFFF
         }
     } else {
         i = 0
         while i < 8 {
-            longarr_set_unchecked(v, 8 + i, IV_S[i])
+            v[8 + i] = IV_S[i]
             i = i + 1
         }
-        longarr_set_unchecked(v, 12, (IV_S[4] ^ c.t0) & 0xFFFFFFFF)
-        longarr_set_unchecked(v, 13, (IV_S[5] ^ c.t1) & 0xFFFFFFFF)
+        v[12] = (IV_S[4] ^ c.t0) & 0xFFFFFFFF
+        v[13] = (IV_S[5] ^ c.t1) & 0xFFFFFFFF
         if last == 1 {
-            longarr_set_unchecked(v, 14, (IV_S[6] ^ 0xFFFFFFFF) & 0xFFFFFFFF)
+            v[14] = (IV_S[6] ^ 0xFFFFFFFF) & 0xFFFFFFFF
         }
     }
 
@@ -223,23 +222,23 @@ compress(c: *Blake2Ctx, last: int) {
         s15 = SIGMA[so + 15]
 
         if c.is_b == 1 {
-            gb(v, 0, 4, 8, 12, longarr_get_unchecked(m, s0), longarr_get_unchecked(m, s1))
-            gb(v, 1, 5, 9, 13, longarr_get_unchecked(m, s2), longarr_get_unchecked(m, s3))
-            gb(v, 2, 6, 10, 14, longarr_get_unchecked(m, s4), longarr_get_unchecked(m, s5))
-            gb(v, 3, 7, 11, 15, longarr_get_unchecked(m, s6), longarr_get_unchecked(m, s7))
-            gb(v, 0, 5, 10, 15, longarr_get_unchecked(m, s8), longarr_get_unchecked(m, s9))
-            gb(v, 1, 6, 11, 12, longarr_get_unchecked(m, s10), longarr_get_unchecked(m, s11))
-            gb(v, 2, 7, 8, 13, longarr_get_unchecked(m, s12), longarr_get_unchecked(m, s13))
-            gb(v, 3, 4, 9, 14, longarr_get_unchecked(m, s14), longarr_get_unchecked(m, s15))
+            gb(v, 0, 4, 8, 12, m[s0], m[s1])
+            gb(v, 1, 5, 9, 13, m[s2], m[s3])
+            gb(v, 2, 6, 10, 14, m[s4], m[s5])
+            gb(v, 3, 7, 11, 15, m[s6], m[s7])
+            gb(v, 0, 5, 10, 15, m[s8], m[s9])
+            gb(v, 1, 6, 11, 12, m[s10], m[s11])
+            gb(v, 2, 7, 8, 13, m[s12], m[s13])
+            gb(v, 3, 4, 9, 14, m[s14], m[s15])
         } else {
-            gs(v, 0, 4, 8, 12, longarr_get_unchecked(m, s0), longarr_get_unchecked(m, s1))
-            gs(v, 1, 5, 9, 13, longarr_get_unchecked(m, s2), longarr_get_unchecked(m, s3))
-            gs(v, 2, 6, 10, 14, longarr_get_unchecked(m, s4), longarr_get_unchecked(m, s5))
-            gs(v, 3, 7, 11, 15, longarr_get_unchecked(m, s6), longarr_get_unchecked(m, s7))
-            gs(v, 0, 5, 10, 15, longarr_get_unchecked(m, s8), longarr_get_unchecked(m, s9))
-            gs(v, 1, 6, 11, 12, longarr_get_unchecked(m, s10), longarr_get_unchecked(m, s11))
-            gs(v, 2, 7, 8, 13, longarr_get_unchecked(m, s12), longarr_get_unchecked(m, s13))
-            gs(v, 3, 4, 9, 14, longarr_get_unchecked(m, s14), longarr_get_unchecked(m, s15))
+            gs(v, 0, 4, 8, 12, m[s0], m[s1])
+            gs(v, 1, 5, 9, 13, m[s2], m[s3])
+            gs(v, 2, 6, 10, 14, m[s4], m[s5])
+            gs(v, 3, 7, 11, 15, m[s6], m[s7])
+            gs(v, 0, 5, 10, 15, m[s8], m[s9])
+            gs(v, 1, 6, 11, 12, m[s10], m[s11])
+            gs(v, 2, 7, 8, 13, m[s12], m[s13])
+            gs(v, 3, 4, 9, 14, m[s14], m[s15])
         }
         r = r + 1
     }
@@ -248,21 +247,19 @@ compress(c: *Blake2Ctx, last: int) {
     if c.is_b == 1 {
         i = 0
         while i < 8 {
-            nv = longarr_get_unchecked(c.h, i) ^ longarr_get_unchecked(v, i) ^ longarr_get_unchecked(v, i + 8)
-            longarr_set_unchecked(c.h, i, nv)
+            nv = c.h[i] ^ v[i] ^ v[i + 8]
+            c.h[i] = nv
             i = i + 1
         }
     } else {
         i = 0
         while i < 8 {
-            nv = (longarr_get_unchecked(c.h, i) ^ longarr_get_unchecked(v, i) ^ longarr_get_unchecked(v, i + 8)) & 0xFFFFFFFF
-            longarr_set_unchecked(c.h, i, nv)
+            nv = (c.h[i] ^ v[i] ^ v[i + 8]) & 0xFFFFFFFF
+            c.h[i] = nv
             i = i + 1
         }
     }
 
-    longarr_free(v)
-    longarr_free(m)
 }
 
 // Increment the 128-bit byte counter (t1:t0) by n.
@@ -296,7 +293,6 @@ mk_ctx(out_len: int, is_b: int) -> *Blake2Ctx {
         bytes.set(ctx.block, j, 0)
         j = j + 1
     }
-    ctx.h = longarr_new_raw(16)
     return ctx
 }
 
@@ -305,20 +301,20 @@ init_h(c: *Blake2Ctx, key_len: int) {
     if c.is_b == 1 {
         i = 0
         while i < 8 {
-            longarr_set_unchecked(c.h, i, IV_B[i])
+            c.h[i] = IV_B[i]
             i = i + 1
         }
         // digest_len | (key_len<<8) | (fanout=1<<16) | (depth=1<<24)
         param = (c.out_len & 0xFF) | ((key_len & 0xFF) << 8) | 0x01010000
-        longarr_set_unchecked(c.h, 0, IV_B[0] ^ param)
+        c.h[0] = IV_B[0] ^ param
     } else {
         i = 0
         while i < 8 {
-            longarr_set_unchecked(c.h, i, IV_S[i])
+            c.h[i] = IV_S[i]
             i = i + 1
         }
         param = (c.out_len & 0xFF) | ((key_len & 0xFF) << 8) | 0x01010000
-        longarr_set_unchecked(c.h, 0, (IV_S[0] ^ param) & 0xFFFFFFFF)
+        c.h[0] = (IV_S[0] ^ param) & 0xFFFFFFFF
     }
 }
 
@@ -434,13 +430,13 @@ finalize_to_bytes(c: *Blake2Ctx) -> ptr {
     if c.is_b == 1 {
         i = 0
         while i < 8 {
-            store_le64(full, i * 8, longarr_get_unchecked(c.h, i))
+            store_le64(full, i * 8, c.h[i])
             i = i + 1
         }
     } else {
         i = 0
         while i < 8 {
-            bytes.set_le32(full, i * 4, longarr_get_unchecked(c.h, i) & 0xFFFFFFFF)
+            bytes.set_le32(full, i * 4, c.h[i] & 0xFFFFFFFF)
             i = i + 1
         }
     }
@@ -459,10 +455,6 @@ free_internals(c: *Blake2Ctx) {
     if c.block != null {
         bytes.free(c.block)
         c.block = null
-    }
-    if c.h != null {
-        longarr_free(c.h)
-        c.h = null
     }
 }
 

@@ -3371,6 +3371,7 @@ compare 1 sign 1 bits 127
 - `bignum.add` / `subtract` / `multiply` / `divide` / `remainder` / `mod` `(a, b)` → `ptr` - Arithmetic
 - `bignum.negate(a)` / `bignum.abs(a)` → `ptr`, `bignum.shift_left(a, n)` / `shift_right(a, n)` → `ptr`
 - `bignum.compare(a, b)` → `int`, `bignum.is_zero(a)` / `bignum.sign(a)` / `bignum.bit_length(a)` → `int`
+- `bignum.test_bit(a, i)` → `int` - Bit `i` of `|a|` (0 the least significant), read in place with no allocation: what a scalar multiplication walks
 - `bignum.mod_pow(base, exp, m)` → `ptr` - Modular exponentiation, without forming `base^exp`
 - `bignum.gcd(a, b)` / `bignum.mod_inverse(a, m)` → `ptr`, `bignum.is_probable_prime(n, rounds)` → `int`
 - `bignum.free(n)` - Release a handle

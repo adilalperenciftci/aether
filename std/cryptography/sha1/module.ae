@@ -9,7 +9,6 @@
 
 import std.bits
 import std.bytes
-import std.intarr
 
 extern malloc(size: int) -> ptr
 extern free(p: ptr)
@@ -29,7 +28,7 @@ struct Sha1Ctx {
     block: ptr // std.bytes buffer, 64 bytes
     block_len: int
     count_lo: long
-    w: ptr // intarr(80) message schedule
+    w: int[80] // message schedule
 }
 
 m32(x: long) -> long {
@@ -53,24 +52,23 @@ G(u: long, v: long, w: long) -> long {
 }
 
 process_block(c: *Sha1Ctx) {
-    w = c.w
     // Load 16 big-endian words
     i = 0
     while i < 16 {
         word = bytes.get_be32(c.block, i * 4) & 0xFFFFFFFF
-        intarr_set_unchecked(w, i, word)
+        c.w[i] = word
         i = i + 1
     }
     // Expand to 80 words
     i = 16
     while i < 80 {
-        w3 = intarr_get_unchecked(w, i - 3) & 0xFFFFFFFF
-        w8 = intarr_get_unchecked(w, i - 8) & 0xFFFFFFFF
-        w14 = intarr_get_unchecked(w, i - 14) & 0xFFFFFFFF
-        w16 = intarr_get_unchecked(w, i - 16) & 0xFFFFFFFF
+        w3 = c.w[i - 3] & 0xFFFFFFFF
+        w8 = c.w[i - 8] & 0xFFFFFFFF
+        w14 = c.w[i - 14] & 0xFFFFFFFF
+        w16 = c.w[i - 16] & 0xFFFFFFFF
         t = w3 ^ w8 ^ w14 ^ w16
         rot = rl(t, 1)
-        intarr_set_unchecked(w, i, rot)
+        c.w[i] = rot
         i = i + 1
     }
 
@@ -83,92 +81,92 @@ process_block(c: *Sha1Ctx) {
     // Round 1
     idx = 0
     while idx < 20 {
-        e = m32(e + rl(a, 5) + F(b, cc, d) + (intarr_get_unchecked(w, idx) & 0xFFFFFFFF) + 0x5a827999)
+        e = m32(e + rl(a, 5) + F(b, cc, d) + (c.w[idx] & 0xFFFFFFFF) + 0x5a827999)
         b = rl(b, 30)
         idx = idx + 1
 
-        d = m32(d + rl(e, 5) + F(a, b, cc) + (intarr_get_unchecked(w, idx) & 0xFFFFFFFF) + 0x5a827999)
+        d = m32(d + rl(e, 5) + F(a, b, cc) + (c.w[idx] & 0xFFFFFFFF) + 0x5a827999)
         a = rl(a, 30)
         idx = idx + 1
 
-        cc = m32(cc + rl(d, 5) + F(e, a, b) + (intarr_get_unchecked(w, idx) & 0xFFFFFFFF) + 0x5a827999)
+        cc = m32(cc + rl(d, 5) + F(e, a, b) + (c.w[idx] & 0xFFFFFFFF) + 0x5a827999)
         e = rl(e, 30)
         idx = idx + 1
 
-        b = m32(b + rl(cc, 5) + F(d, e, a) + (intarr_get_unchecked(w, idx) & 0xFFFFFFFF) + 0x5a827999)
+        b = m32(b + rl(cc, 5) + F(d, e, a) + (c.w[idx] & 0xFFFFFFFF) + 0x5a827999)
         d = rl(d, 30)
         idx = idx + 1
 
-        a = m32(a + rl(b, 5) + F(cc, d, e) + (intarr_get_unchecked(w, idx) & 0xFFFFFFFF) + 0x5a827999)
+        a = m32(a + rl(b, 5) + F(cc, d, e) + (c.w[idx] & 0xFFFFFFFF) + 0x5a827999)
         cc = rl(cc, 30)
         idx = idx + 1
     }
 
     // Round 2
     while idx < 40 {
-        e = m32(e + rl(a, 5) + H(b, cc, d) + (intarr_get_unchecked(w, idx) & 0xFFFFFFFF) + 0x6ed9eba1)
+        e = m32(e + rl(a, 5) + H(b, cc, d) + (c.w[idx] & 0xFFFFFFFF) + 0x6ed9eba1)
         b = rl(b, 30)
         idx = idx + 1
 
-        d = m32(d + rl(e, 5) + H(a, b, cc) + (intarr_get_unchecked(w, idx) & 0xFFFFFFFF) + 0x6ed9eba1)
+        d = m32(d + rl(e, 5) + H(a, b, cc) + (c.w[idx] & 0xFFFFFFFF) + 0x6ed9eba1)
         a = rl(a, 30)
         idx = idx + 1
 
-        cc = m32(cc + rl(d, 5) + H(e, a, b) + (intarr_get_unchecked(w, idx) & 0xFFFFFFFF) + 0x6ed9eba1)
+        cc = m32(cc + rl(d, 5) + H(e, a, b) + (c.w[idx] & 0xFFFFFFFF) + 0x6ed9eba1)
         e = rl(e, 30)
         idx = idx + 1
 
-        b = m32(b + rl(cc, 5) + H(d, e, a) + (intarr_get_unchecked(w, idx) & 0xFFFFFFFF) + 0x6ed9eba1)
+        b = m32(b + rl(cc, 5) + H(d, e, a) + (c.w[idx] & 0xFFFFFFFF) + 0x6ed9eba1)
         d = rl(d, 30)
         idx = idx + 1
 
-        a = m32(a + rl(b, 5) + H(cc, d, e) + (intarr_get_unchecked(w, idx) & 0xFFFFFFFF) + 0x6ed9eba1)
+        a = m32(a + rl(b, 5) + H(cc, d, e) + (c.w[idx] & 0xFFFFFFFF) + 0x6ed9eba1)
         cc = rl(cc, 30)
         idx = idx + 1
     }
 
     // Round 3
     while idx < 60 {
-        e = m32(e + rl(a, 5) + G(b, cc, d) + (intarr_get_unchecked(w, idx) & 0xFFFFFFFF) + 0x8f1bbcdc)
+        e = m32(e + rl(a, 5) + G(b, cc, d) + (c.w[idx] & 0xFFFFFFFF) + 0x8f1bbcdc)
         b = rl(b, 30)
         idx = idx + 1
 
-        d = m32(d + rl(e, 5) + G(a, b, cc) + (intarr_get_unchecked(w, idx) & 0xFFFFFFFF) + 0x8f1bbcdc)
+        d = m32(d + rl(e, 5) + G(a, b, cc) + (c.w[idx] & 0xFFFFFFFF) + 0x8f1bbcdc)
         a = rl(a, 30)
         idx = idx + 1
 
-        cc = m32(cc + rl(d, 5) + G(e, a, b) + (intarr_get_unchecked(w, idx) & 0xFFFFFFFF) + 0x8f1bbcdc)
+        cc = m32(cc + rl(d, 5) + G(e, a, b) + (c.w[idx] & 0xFFFFFFFF) + 0x8f1bbcdc)
         e = rl(e, 30)
         idx = idx + 1
 
-        b = m32(b + rl(cc, 5) + G(d, e, a) + (intarr_get_unchecked(w, idx) & 0xFFFFFFFF) + 0x8f1bbcdc)
+        b = m32(b + rl(cc, 5) + G(d, e, a) + (c.w[idx] & 0xFFFFFFFF) + 0x8f1bbcdc)
         d = rl(d, 30)
         idx = idx + 1
 
-        a = m32(a + rl(b, 5) + G(cc, d, e) + (intarr_get_unchecked(w, idx) & 0xFFFFFFFF) + 0x8f1bbcdc)
+        a = m32(a + rl(b, 5) + G(cc, d, e) + (c.w[idx] & 0xFFFFFFFF) + 0x8f1bbcdc)
         cc = rl(cc, 30)
         idx = idx + 1
     }
 
     // Round 4
     while idx < 80 {
-        e = m32(e + rl(a, 5) + H(b, cc, d) + (intarr_get_unchecked(w, idx) & 0xFFFFFFFF) + 0xca62c1d6)
+        e = m32(e + rl(a, 5) + H(b, cc, d) + (c.w[idx] & 0xFFFFFFFF) + 0xca62c1d6)
         b = rl(b, 30)
         idx = idx + 1
 
-        d = m32(d + rl(e, 5) + H(a, b, cc) + (intarr_get_unchecked(w, idx) & 0xFFFFFFFF) + 0xca62c1d6)
+        d = m32(d + rl(e, 5) + H(a, b, cc) + (c.w[idx] & 0xFFFFFFFF) + 0xca62c1d6)
         a = rl(a, 30)
         idx = idx + 1
 
-        cc = m32(cc + rl(d, 5) + H(e, a, b) + (intarr_get_unchecked(w, idx) & 0xFFFFFFFF) + 0xca62c1d6)
+        cc = m32(cc + rl(d, 5) + H(e, a, b) + (c.w[idx] & 0xFFFFFFFF) + 0xca62c1d6)
         e = rl(e, 30)
         idx = idx + 1
 
-        b = m32(b + rl(cc, 5) + H(d, e, a) + (intarr_get_unchecked(w, idx) & 0xFFFFFFFF) + 0xca62c1d6)
+        b = m32(b + rl(cc, 5) + H(d, e, a) + (c.w[idx] & 0xFFFFFFFF) + 0xca62c1d6)
         d = rl(d, 30)
         idx = idx + 1
 
-        a = m32(a + rl(b, 5) + H(cc, d, e) + (intarr_get_unchecked(w, idx) & 0xFFFFFFFF) + 0xca62c1d6)
+        a = m32(a + rl(b, 5) + H(cc, d, e) + (c.w[idx] & 0xFFFFFFFF) + 0xca62c1d6)
         cc = rl(cc, 30)
         idx = idx + 1
     }
@@ -198,7 +196,6 @@ new() -> {
         bytes.set(ctx.block, j, 0)
         j = j + 1
     }
-    ctx.w = intarr_new_raw(80)
     return ctx, ""
 }
 
@@ -256,10 +253,6 @@ free_internals(c: *Sha1Ctx) {
     if c.block != null {
         bytes.free(c.block)
         c.block = null
-    }
-    if c.w != null {
-        intarr_free(c.w)
-        c.w = null
     }
 }
 

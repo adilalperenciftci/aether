@@ -49,7 +49,6 @@
 
 import std.bytes
 import std.bits
-import std.intarr
 
 exports(
     new_encryptor, new_decryptor, process_block, free,
@@ -247,28 +246,27 @@ const SP8: int[64] = [
     0x00001040, 0x00040040, 0x10000000, 0x10041000
 ]
 
-// Three working-key schedules; each is intarr(32) of 32-bit words.
+// Three working-key schedules of 32 words each.
 struct Des3Ctx {
-    wk1: ptr // applied first
-    wk2: ptr // applied second
-    wk3: ptr // applied third
+    wk1: int[32] // applied first
+    wk2: int[32] // applied second
+    wk3: int[32] // applied third
 }
 
 // ---- single-DES key schedule (BC GenerateWorkingKey) ----
-// Returns intarr(32). `encrypting` selects the round ordering.
-generate_working_key(encrypting: int, key: byte[], key_off: int) -> ptr {
-    new_key = intarr_new_raw(32)
-    pc1m = intarr_new_raw(56)
-    pcr = intarr_new_raw(56)
+// Fills the 32 words of `new_key`. `encrypting` selects the round ordering.
+generate_working_key(new_key: int[], encrypting: int, key: byte[], key_off: int) {
+    int[56] pc1m
+    int[56] pcr
 
     j = 0
     while j < 56 {
         l = PC1[j]
         kb = key[key_off + bits.lsr32(l, 3)] & 0xFF
         if (kb & BYTEBIT[l & 7]) != 0 {
-            intarr_set_raw(pc1m, j, 1)
+            pc1m[j] = 1
         } else {
-            intarr_set_raw(pc1m, j, 0)
+            pc1m[j] = 0
         }
         j = j + 1
     }
@@ -282,16 +280,16 @@ generate_working_key(encrypting: int, key: byte[], key_off: int) -> ptr {
             m = (15 - i) << 1
         }
         n = m + 1
-        intarr_set_raw(new_key, m, 0)
-        intarr_set_raw(new_key, n, 0)
+        new_key[m] = 0
+        new_key[n] = 0
 
         j = 0
         while j < 28 {
             l = j + TOTROT[i]
             if l < 28 {
-                intarr_set_raw(pcr, j, intarr_get_raw(pc1m, l))
+                pcr[j] = pc1m[l]
             } else {
-                intarr_set_raw(pcr, j, intarr_get_raw(pc1m, l - 28))
+                pcr[j] = pc1m[l - 28]
             }
             j = j + 1
         }
@@ -299,34 +297,32 @@ generate_working_key(encrypting: int, key: byte[], key_off: int) -> ptr {
         while j < 56 {
             l = j + TOTROT[i]
             if l < 56 {
-                intarr_set_raw(pcr, j, intarr_get_raw(pc1m, l))
+                pcr[j] = pc1m[l]
             } else {
-                intarr_set_raw(pcr, j, intarr_get_raw(pc1m, l - 28))
+                pcr[j] = pc1m[l - 28]
             }
             j = j + 1
         }
 
         j = 0
         while j < 24 {
-            if intarr_get_raw(pcr, PC2[j]) != 0 {
-                intarr_set_raw(new_key, m, intarr_get_raw(new_key, m) | BIGBYTE[j])
+            if pcr[PC2[j]] != 0 {
+                new_key[m] = new_key[m] | BIGBYTE[j]
             }
-            if intarr_get_raw(pcr, PC2[j + 24]) != 0 {
-                intarr_set_raw(new_key, n, intarr_get_raw(new_key, n) | BIGBYTE[j])
+            if pcr[PC2[j + 24]] != 0 {
+                new_key[n] = new_key[n] | BIGBYTE[j]
             }
             j = j + 1
         }
         i = i + 1
     }
 
-    intarr_free(pc1m)
-    intarr_free(pcr)
 
     // Pack the processed key.
     i = 0
     while i < 32 {
-        i1 = intarr_get_raw(new_key, i)
-        i2 = intarr_get_raw(new_key, i + 1)
+        i1 = new_key[i]
+        i2 = new_key[i + 1]
         v0 = (((i1 & 0x00fc0000) << 6) |
             ((i1 & 0x00000fc0) << 10) |
             bits.lsr32(i2 & 0x00fc0000, 10) |
@@ -335,16 +331,15 @@ generate_working_key(encrypting: int, key: byte[], key_off: int) -> ptr {
             ((i1 & 0x0000003f) << 16) |
             bits.lsr32(i2 & 0x0003f000, 4) |
             (i2 & 0x0000003f)) & 0xFFFFFFFF
-        intarr_set_raw(new_key, i, v0)
-        intarr_set_raw(new_key, i + 1, v1)
+        new_key[i] = v0
+        new_key[i + 1] = v1
         i = i + 2
     }
-    return new_key
 }
 
 // ---- single-DES core (BC DesFunc), operating on two 32-bit halves ----
 // Returns the new (hi, lo) pair.
-des_func(wk: ptr, hi: int, lo: int) -> {
+des_func(wk: int[], hi: int, lo: int) -> {
     long left = hi & 0xFFFFFFFF
     long right = lo & 0xFFFFFFFF
     long work = 0
@@ -371,12 +366,12 @@ des_func(wk: ptr, hi: int, lo: int) -> {
     round = 0
     while round < 8 {
         work = ((right << 28) | bits.lsr32(right, 4)) & 0xFFFFFFFF
-        work = (work ^ intarr_get_raw(wk, round * 4 + 0)) & 0xFFFFFFFF
+        work = (work ^ wk[round * 4 + 0]) & 0xFFFFFFFF
         fval = SP7[work & 0x3f]
         fval = fval | SP5[bits.lsr32(work, 8) & 0x3f]
         fval = fval | SP3[bits.lsr32(work, 16) & 0x3f]
         fval = fval | SP1[bits.lsr32(work, 24) & 0x3f]
-        work = (right ^ intarr_get_raw(wk, round * 4 + 1)) & 0xFFFFFFFF
+        work = (right ^ wk[round * 4 + 1]) & 0xFFFFFFFF
         fval = fval | SP8[work & 0x3f]
         fval = fval | SP6[bits.lsr32(work, 8) & 0x3f]
         fval = fval | SP4[bits.lsr32(work, 16) & 0x3f]
@@ -384,12 +379,12 @@ des_func(wk: ptr, hi: int, lo: int) -> {
         left = (left ^ fval) & 0xFFFFFFFF
 
         work = ((left << 28) | bits.lsr32(left, 4)) & 0xFFFFFFFF
-        work = (work ^ intarr_get_raw(wk, round * 4 + 2)) & 0xFFFFFFFF
+        work = (work ^ wk[round * 4 + 2]) & 0xFFFFFFFF
         fval = SP7[work & 0x3f]
         fval = fval | SP5[bits.lsr32(work, 8) & 0x3f]
         fval = fval | SP3[bits.lsr32(work, 16) & 0x3f]
         fval = fval | SP1[bits.lsr32(work, 24) & 0x3f]
-        work = (left ^ intarr_get_raw(wk, round * 4 + 3)) & 0xFFFFFFFF
+        work = (left ^ wk[round * 4 + 3]) & 0xFFFFFFFF
         fval = fval | SP8[work & 0x3f]
         fval = fval | SP6[bits.lsr32(work, 8) & 0x3f]
         fval = fval | SP4[bits.lsr32(work, 16) & 0x3f]
@@ -434,28 +429,21 @@ new_ctx(key: byte[], encrypt: int) -> ptr {
     // or = key1 when keylen==16). For encryption DesFunc runs k1,k2,k3; for
     // decryption it runs k3,k2,k1. We fold the order into wk1/wk2/wk3.
     fe = encrypt // forEncryption flag
-
-    s1 = generate_working_key(fe, key, 0)
-    s2 = generate_working_key(1 - fe, key, 8)
-    s3 = null
-    if keylen == 24 {
-        s3 = generate_working_key(fe, key, 16)
-    } else {
-        // 2-key TDEA: K3 = K1 (same key bytes, same direction).
-        s3 = generate_working_key(fe, key, 0)
-    }
+    // 2-key TDEA: K3 = K1 (same key bytes, same direction).
+    k3_off = 16
+    if keylen != 24 { k3_off = 0 }
 
     c = malloc(sizeof(Des3Ctx)) as *Des3Ctx
     if encrypt == 1 {
         // E_K1 then E(dir K2) then E_K3  → DesFunc(k1), DesFunc(k2), DesFunc(k3)
-        c.wk1 = s1
-        c.wk2 = s2
-        c.wk3 = s3
+        generate_working_key(c.wk1, fe, key, 0)
+        generate_working_key(c.wk2, 1 - fe, key, 8)
+        generate_working_key(c.wk3, fe, key, k3_off)
     } else {
         // decrypt runs DesFunc(k3), DesFunc(k2), DesFunc(k1)
-        c.wk1 = s3
-        c.wk2 = s2
-        c.wk3 = s1
+        generate_working_key(c.wk1, fe, key, k3_off)
+        generate_working_key(c.wk2, 1 - fe, key, 8)
+        generate_working_key(c.wk3, fe, key, 0)
     }
     return c
 }
@@ -468,10 +456,6 @@ new_decryptor(key: byte[]) -> ptr {
 }
 free(ctx: ptr) {
     if ctx == null { return }
-    c = ctx as *Des3Ctx
-    if c.wk1 != null { intarr_free(c.wk1) }
-    if c.wk2 != null { intarr_free(c.wk2) }
-    if c.wk3 != null { intarr_free(c.wk3) }
     libc_free(ctx)
 }
 

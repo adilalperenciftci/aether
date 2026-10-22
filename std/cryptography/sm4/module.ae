@@ -36,7 +36,6 @@
 
 import std.bytes
 import std.bits
-import std.intarr
 import std.mem
 
 exports(
@@ -92,7 +91,7 @@ MASK32() -> int { return 0xFFFFFFFF }
 
 // 32 round keys.
 struct Sm4Ctx {
-    rk: ptr // intarr(32) of 32-bit round keys
+    rk: int[32] // the 32-bit round keys, in the order this direction uses
     encrypt: int // 1 = encryptor, 0 = decryptor (only differs in rk order)
 }
 
@@ -124,7 +123,7 @@ t_key(z: int) -> int { return l_key(tau(z)) }
 
 // ---- key expansion ----
 new_ctx(key: byte[], encrypt: int) -> ptr {
-    rk = intarr_new_raw(32)
+    int[32] rk
 
     k0 = (sl_be32(key, 0) ^ FK[0]) & 0xFFFFFFFF
     k1 = (sl_be32(key, 4) ^ FK[1]) & 0xFFFFFFFF
@@ -132,15 +131,15 @@ new_ctx(key: byte[], encrypt: int) -> ptr {
     k3 = (sl_be32(key, 12) ^ FK[3]) & 0xFFFFFFFF
 
     // Generate the 32 encryption round keys into a scratch table first.
-    enc_rk = intarr_new_raw(32)
-    intarr_set_raw(enc_rk, 0, (k0 ^ t_key((k1 ^ k2 ^ k3 ^ CK[0]) & 0xFFFFFFFF)) & 0xFFFFFFFF)
-    intarr_set_raw(enc_rk, 1, (k1 ^ t_key((k2 ^ k3 ^ intarr_get_raw(enc_rk, 0) ^ CK[1]) & 0xFFFFFFFF)) & 0xFFFFFFFF)
-    intarr_set_raw(enc_rk, 2, (k2 ^ t_key((k3 ^ intarr_get_raw(enc_rk, 0) ^ intarr_get_raw(enc_rk, 1) ^ CK[2]) & 0xFFFFFFFF)) & 0xFFFFFFFF)
-    intarr_set_raw(enc_rk, 3, (k3 ^ t_key((intarr_get_raw(enc_rk, 0) ^ intarr_get_raw(enc_rk, 1) ^ intarr_get_raw(enc_rk, 2) ^ CK[3]) & 0xFFFFFFFF)) & 0xFFFFFFFF)
+    int[32] enc_rk
+    enc_rk[0] = (k0 ^ t_key((k1 ^ k2 ^ k3 ^ CK[0]) & 0xFFFFFFFF)) & 0xFFFFFFFF
+    enc_rk[1] = (k1 ^ t_key((k2 ^ k3 ^ enc_rk[0] ^ CK[1]) & 0xFFFFFFFF)) & 0xFFFFFFFF
+    enc_rk[2] = (k2 ^ t_key((k3 ^ enc_rk[0] ^ enc_rk[1] ^ CK[2]) & 0xFFFFFFFF)) & 0xFFFFFFFF
+    enc_rk[3] = (k3 ^ t_key((enc_rk[0] ^ enc_rk[1] ^ enc_rk[2] ^ CK[3]) & 0xFFFFFFFF)) & 0xFFFFFFFF
     i = 4
     while i < 32 {
-        prev = (intarr_get_raw(enc_rk, i - 3) ^ intarr_get_raw(enc_rk, i - 2) ^ intarr_get_raw(enc_rk, i - 1) ^ CK[i]) & 0xFFFFFFFF
-        intarr_set_raw(enc_rk, i, (intarr_get_raw(enc_rk, i - 4) ^ t_key(prev)) & 0xFFFFFFFF)
+        prev = (enc_rk[i - 3] ^ enc_rk[i - 2] ^ enc_rk[i - 1] ^ CK[i]) & 0xFFFFFFFF
+        enc_rk[i] = (enc_rk[i - 4] ^ t_key(prev)) & 0xFFFFFFFF
         i = i + 1
     }
 
@@ -148,13 +147,12 @@ new_ctx(key: byte[], encrypt: int) -> ptr {
     i = 0
     while i < 32 {
         if encrypt == 1 {
-            intarr_set_raw(rk, i, intarr_get_raw(enc_rk, i))
+            rk[i] = enc_rk[i]
         } else {
-            intarr_set_raw(rk, i, intarr_get_raw(enc_rk, 31 - i))
+            rk[i] = enc_rk[31 - i]
         }
         i = i + 1
     }
-    intarr_free(enc_rk)
 
     c = malloc(sizeof(Sm4Ctx)) as *Sm4Ctx
     c.rk = rk
@@ -170,8 +168,6 @@ new_decryptor(key: byte[]) -> ptr {
 }
 free(ctx: ptr) {
     if ctx == null { return }
-    c = ctx as *Sm4Ctx
-    if c.rk != null { intarr_free(c.rk) }
     libc_free(ctx)
 }
 
@@ -187,7 +183,7 @@ process_block(ctx: ptr, in16: ptr) -> ptr {
     long x3 = bytes.get_be32(in16, 12) & 0xFFFFFFFF
     i = 0
     while i < 32 {
-        long t = (x1 ^ x2 ^ x3 ^ intarr_get_raw(c.rk, i)) & 0xFFFFFFFF
+        long t = (x1 ^ x2 ^ x3 ^ c.rk[i]) & 0xFFFFFFFF
         long nx = (x0 ^ t_round(t)) & 0xFFFFFFFF
         x0 = x1
         x1 = x2

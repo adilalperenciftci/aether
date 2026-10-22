@@ -33,7 +33,6 @@
 
 import std.bits
 import std.bytes
-import std.longarr
 
 extern malloc(size: int) -> ptr
 extern free(p: ptr)
@@ -64,13 +63,13 @@ const WP_SBOX: long[256] = [
 ]
 
 struct WpCtx {
-    hash: ptr // longarr(8), chaining st
-    c0: ptr // longarr(256), diffusion table C0
-    rc: ptr // longarr(11), round constants rc[0..10]
-    kk: ptr // longarr(8), round key K
-    ll: ptr // longarr(8), scratch L
-    block: ptr // longarr(8), the mu(buffer) words
-    cst: ptr // longarr(8), cipher st
+    hash: long[8] // chaining state
+    c0: long[256] // diffusion table C0
+    rc: long[11] // round constants rc[0..10]
+    kk: long[8] // round key K
+    ll: long[8] // scratch L
+    block: long[8] // the mu(buffer) words
+    cst: long[8] // cipher state
     buf: ptr // bytes(64), byte buffer
     buf_pos: int
     bitcount: ptr // bytes(32), 256-bit big-endian length, incremented by 8
@@ -103,7 +102,7 @@ pack8(buf: ptr, b7: long, b6: long, b5: long, b4: long, b3: long, b2: long, b1: 
 
 // C_k[i] = rotr64(C0[i], 8*k).
 ctab(c: *WpCtx, k: int, i: int) -> long {
-    return bits.rotr64(longarr_get_unchecked(c.c0, i), 8 * k)
+    return bits.rotr64(c.c0[i], 8 * k)
 }
 
 build_tables(c: *WpCtx) {
@@ -118,13 +117,13 @@ build_tables(c: *WpCtx) {
         long v9 = v8 ^ v1
         // C0[i] = PackIntoUInt64(v1, v1, v4, v1, v8, v5, v2, v9)
         word = pack8(scratch, v1, v1, v4, v1, v8, v5, v2, v9)
-        longarr_set_unchecked(c.c0, i, word)
+        c.c0[i] = word
         i = i + 1
     }
     bytes.free(scratch)
 
     // rc[0] = 0; rc[r] gathers byte 8*(r-1) from each C table, masked.
-    longarr_set_unchecked(c.rc, 0, 0)
+    c.rc[0] = 0
     r = 1
     while r <= 10 {
         idx = 8 * (r - 1)
@@ -136,7 +135,7 @@ build_tables(c: *WpCtx) {
         (ctab(c, 5, idx + 5) & 0x0000000000ff0000) ^
         (ctab(c, 6, idx + 6) & 0x000000000000ff00) ^
         (ctab(c, 7, idx + 7) & 0x00000000000000ff)
-        longarr_set_unchecked(c.rc, r, v)
+        c.rc[r] = v
         r = r + 1
     }
 }
@@ -147,18 +146,13 @@ cbyte(c: *WpCtx, k: int, w: long, shift: int) -> long {
 }
 
 process_block(c: *WpCtx) {
-    hash = c.hash
-    kk = c.kk
-    ll = c.ll
-    block = c.block
-    st = c.cst
 
     // compute and apply K^0
     i = 0
     while i < 8 {
-        khv = longarr_get_unchecked(hash, i)
-        longarr_set_unchecked(kk, i, khv)
-        longarr_set_unchecked(st, i, longarr_get_unchecked(block, i) ^ khv)
+        khv = c.hash[i]
+        c.kk[i] = khv
+        c.cst[i] = c.block[i] ^ khv
         i = i + 1
     }
 
@@ -167,42 +161,42 @@ process_block(c: *WpCtx) {
         // key schedule round
         i = 0
         while i < 8 {
-            v = cbyte(c, 0, longarr_get_unchecked(kk, (i - 0) & 7), 56)
-            v = v ^ cbyte(c, 1, longarr_get_unchecked(kk, (i - 1) & 7), 48)
-            v = v ^ cbyte(c, 2, longarr_get_unchecked(kk, (i - 2) & 7), 40)
-            v = v ^ cbyte(c, 3, longarr_get_unchecked(kk, (i - 3) & 7), 32)
-            v = v ^ cbyte(c, 4, longarr_get_unchecked(kk, (i - 4) & 7), 24)
-            v = v ^ cbyte(c, 5, longarr_get_unchecked(kk, (i - 5) & 7), 16)
-            v = v ^ cbyte(c, 6, longarr_get_unchecked(kk, (i - 6) & 7), 8)
-            v = v ^ cbyte(c, 7, longarr_get_unchecked(kk, (i - 7) & 7), 0)
-            longarr_set_unchecked(ll, i, v)
+            v = cbyte(c, 0, c.kk[(i - 0) & 7], 56)
+            v = v ^ cbyte(c, 1, c.kk[(i - 1) & 7], 48)
+            v = v ^ cbyte(c, 2, c.kk[(i - 2) & 7], 40)
+            v = v ^ cbyte(c, 3, c.kk[(i - 3) & 7], 32)
+            v = v ^ cbyte(c, 4, c.kk[(i - 4) & 7], 24)
+            v = v ^ cbyte(c, 5, c.kk[(i - 5) & 7], 16)
+            v = v ^ cbyte(c, 6, c.kk[(i - 6) & 7], 8)
+            v = v ^ cbyte(c, 7, c.kk[(i - 7) & 7], 0)
+            c.ll[i] = v
             i = i + 1
         }
         i = 0
         while i < 8 {
-            longarr_set_unchecked(kk, i, longarr_get_unchecked(ll, i))
+            c.kk[i] = c.ll[i]
             i = i + 1
         }
-        longarr_set_unchecked(kk, 0, longarr_get_unchecked(kk, 0) ^ longarr_get_unchecked(c.rc, round))
+        c.kk[0] = c.kk[0] ^ c.rc[round]
 
         // round transformation on st
         i = 0
         while i < 8 {
-            v = longarr_get_unchecked(kk, i)
-            v = v ^ cbyte(c, 0, longarr_get_unchecked(st, (i - 0) & 7), 56)
-            v = v ^ cbyte(c, 1, longarr_get_unchecked(st, (i - 1) & 7), 48)
-            v = v ^ cbyte(c, 2, longarr_get_unchecked(st, (i - 2) & 7), 40)
-            v = v ^ cbyte(c, 3, longarr_get_unchecked(st, (i - 3) & 7), 32)
-            v = v ^ cbyte(c, 4, longarr_get_unchecked(st, (i - 4) & 7), 24)
-            v = v ^ cbyte(c, 5, longarr_get_unchecked(st, (i - 5) & 7), 16)
-            v = v ^ cbyte(c, 6, longarr_get_unchecked(st, (i - 6) & 7), 8)
-            v = v ^ cbyte(c, 7, longarr_get_unchecked(st, (i - 7) & 7), 0)
-            longarr_set_unchecked(ll, i, v)
+            v = c.kk[i]
+            v = v ^ cbyte(c, 0, c.cst[(i - 0) & 7], 56)
+            v = v ^ cbyte(c, 1, c.cst[(i - 1) & 7], 48)
+            v = v ^ cbyte(c, 2, c.cst[(i - 2) & 7], 40)
+            v = v ^ cbyte(c, 3, c.cst[(i - 3) & 7], 32)
+            v = v ^ cbyte(c, 4, c.cst[(i - 4) & 7], 24)
+            v = v ^ cbyte(c, 5, c.cst[(i - 5) & 7], 16)
+            v = v ^ cbyte(c, 6, c.cst[(i - 6) & 7], 8)
+            v = v ^ cbyte(c, 7, c.cst[(i - 7) & 7], 0)
+            c.ll[i] = v
             i = i + 1
         }
         i = 0
         while i < 8 {
-            longarr_set_unchecked(st, i, longarr_get_unchecked(ll, i))
+            c.cst[i] = c.ll[i]
             i = i + 1
         }
         round = round + 1
@@ -211,8 +205,8 @@ process_block(c: *WpCtx) {
     // Miyaguchi-Preneel: hash ^= st ^ block
     i = 0
     while i < 8 {
-        nv = longarr_get_unchecked(hash, i) ^ longarr_get_unchecked(st, i) ^ longarr_get_unchecked(block, i)
-        longarr_set_unchecked(hash, i, nv)
+        nv = c.hash[i] ^ c.cst[i] ^ c.block[i]
+        c.hash[i] = nv
         i = i + 1
     }
 }
@@ -221,7 +215,7 @@ process_filled_buffer(c: *WpCtx) {
     // copy 64 bytes into 8 big-endian words then process
     i = 0
     while i < 8 {
-        longarr_set_unchecked(c.block, i, bytes.get_be64(c.buf, i * 8))
+        c.block[i] = bytes.get_be64(c.buf, i * 8)
         i = i + 1
     }
     process_block(c)
@@ -259,19 +253,12 @@ new() -> {
     if ctx == null {
         return null, "allocation failed"
     }
-    ctx.hash = longarr_new_raw(8)
-    ctx.c0 = longarr_new_raw(256)
-    ctx.rc = longarr_new_raw(11)
-    ctx.kk = longarr_new_raw(8)
-    ctx.ll = longarr_new_raw(8)
-    ctx.block = longarr_new_raw(8)
-    ctx.cst = longarr_new_raw(8)
     ctx.buf = bytes.new(64)
     ctx.bitcount = bytes.new(32)
     ctx.buf_pos = 0
     i = 0
     while i < 8 {
-        longarr_set_unchecked(ctx.hash, i, 0)
+        ctx.hash[i] = 0
         i = i + 1
     }
     j = 0
@@ -352,41 +339,13 @@ finalize_to_bytes(c: *WpCtx) -> ptr {
     out = bytes.new(64)
     k = 0
     while k < 8 {
-        bytes.set_be64(out, k * 8, longarr_get_unchecked(c.hash, k))
+        bytes.set_be64(out, k * 8, c.hash[k])
         k = k + 1
     }
     return out
 }
 
 free_internals(c: *WpCtx) {
-    if c.hash != null {
-        longarr_free(c.hash)
-        c.hash = null
-    }
-    if c.c0 != null {
-        longarr_free(c.c0)
-        c.c0 = null
-    }
-    if c.rc != null {
-        longarr_free(c.rc)
-        c.rc = null
-    }
-    if c.kk != null {
-        longarr_free(c.kk)
-        c.kk = null
-    }
-    if c.ll != null {
-        longarr_free(c.ll)
-        c.ll = null
-    }
-    if c.block != null {
-        longarr_free(c.block)
-        c.block = null
-    }
-    if c.cst != null {
-        longarr_free(c.cst)
-        c.cst = null
-    }
     if c.buf != null {
         bytes.free(c.buf)
         c.buf = null
