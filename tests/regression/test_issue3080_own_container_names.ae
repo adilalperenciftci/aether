@@ -1,0 +1,49 @@
+// Regression (#3080): a program's own function named like one of std's
+// container stores is called as itself.
+//
+// Codegen rewrote a call into std's container store whenever its C name
+// was `list_add`, `map_put`, `list_set` or one of their raw forms, so a
+// program's own `list_add(xs, f: fn)` was compiled as
+// `_aether_list_add_closure(...)` and failed in the C compiler ("makes
+// integer from pointer"), and its own `map_put` given a string was
+// compiled as std's owning store. `list_add` and `map_put` are std's C
+// functions now (#3086), so a program function of either name gets a C name
+// of its own (`ae_list_add`), as one named `list_set` already did, and no
+// rewrite matches it.
+
+extern exit(code: int)
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL #3080: ${msg}")
+        exit(1)
+    }
+}
+
+var seen = 0
+
+list_add(xs: ptr, f: fn) -> int {
+    seen = seen + 1
+    return 7
+}
+
+map_put(m: ptr, k: string, v: string) -> int {
+    seen = seen + 10
+    return 8
+}
+
+list_set(xs: ptr, i: int, v: string) {
+    seen = seen + 100
+}
+
+main() {
+    ran = 0
+    r = list_add(null, || { ran = 1 })
+    check(r == 7, "own list_add returns its own value, got ${r}")
+    s = map_put(null, "k", "v")
+    check(s == 8, "own map_put returns its own value, got ${s}")
+    list_set(null, 0, "v")
+    check(seen == 111, "each own function ran once, seen ${seen}")
+    check(ran == 0, "own list_add never calls the closure")
+    println("ok")
+}
