@@ -5539,18 +5539,20 @@ void push_heap_string_exit_free_defers(CodeGenerator* gen, ASTNode* body) {
  * emits `elem name[N];`. (Hit repeatedly by the Redis port's per-loop
  * scratch buffers; the first-statement-in-block decl path already does
  * this correctly, this fixes the not-first / hoisted path.) */
-/* The zero initializer for a hoisted local. A hoisted variable is
- * declared at function scope and assigned inside the branch or loop
- * body that binds it; on a path that skips the body its value is
- * indeterminate, and reading an indeterminate value is undefined — not
+/* The zero initializer for a local that starts with no value of its own.
+ * A hoisted variable is declared at function scope and assigned inside the
+ * branch or loop body that binds it; on a path that skips the body its
+ * value is indeterminate, and reading an indeterminate value is undefined — not
  * a garbage value, undefined: gcc's interprocedural constant
  * propagation may treat it as whatever the other call sites pass (a
  * literal 0), so a parameter that "genuinely varies" arrives as a
  * constant, with no sanitizer able to say so (#2128 is the shape of that
- * report). Initialized, the variable is 0/NULL/{0} on such a path and
- * every read is defined. Spelled per kind rather than as a universal
- * `{0}`, which clang flags on scalars (-Wbraced-scalar-init). */
-static const char* hoisted_zero_init(Type* t, const char* c_type) {
+ * report). A declaration without a value (`long x`, `int[3] k`, `P p`)
+ * starts at its type's zero value the same way (#3114). Initialized, the
+ * variable is 0/NULL/{0} and every read is defined. Spelled per kind
+ * rather than as a universal `{0}`, which clang flags on scalars
+ * (-Wbraced-scalar-init). */
+static const char* local_zero_init(Type* t, const char* c_type) {
     if (t) {
         switch (t->kind) {
             case TYPE_INT: case TYPE_INT64: case TYPE_UINT64: case TYPE_UINT32:
@@ -5560,7 +5562,7 @@ static const char* hoisted_zero_init(Type* t, const char* c_type) {
             case TYPE_BITSET: case TYPE_BITSTRUCT:   /* backing integers */
                 return " = 0";
             case TYPE_ISOLATED:
-                return hoisted_zero_init(t->element_type, c_type);
+                return local_zero_init(t->element_type, c_type);
             case TYPE_F32X4: case TYPE_F64X2: case TYPE_I32X4: case TYPE_I64X2:
             case TYPE_I16X8: case TYPE_F32X8: case TYPE_I32X8:
                 return " = {0}";   /* #2146: a vector, not a scalar 0 */
@@ -5568,6 +5570,8 @@ static const char* hoisted_zero_init(Type* t, const char* c_type) {
                 return " = NULL";
             case TYPE_FUNCTION:
                 return t->is_fnptr ? " = NULL" : " = {0}";
+            case TYPE_ARRAY:
+                return " = {0}";   /* a sized array, or a slice's AetherSlice */
             default:
                 break;
         }
@@ -5627,7 +5631,7 @@ static void emit_hoisted_local_decl(CodeGenerator* gen, Type* var_type,
     }
     const char* c_type = get_c_type(var_type);
     fprintf(gen->output, "%s %s%s;", volatile_decl_type(vq, c_type), name,
-            hoisted_zero_init(var_type, c_type));
+            local_zero_init(var_type, c_type));
     /* A hoisted local nothing reads (`_ = f()` in a loop) is unused. */
     if (codegen_local_unread(gen, name)) fprintf(gen->output, " (void)%s;", name);
     fprintf(gen->output, "\n");
@@ -9943,6 +9947,25 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                         strcmp(stmt->children[0]->value, stmt->value) == 0) {
                         break;
                     }
+                    /* #3114: a declaration without a value of a variable
+                     * declared already (hoisted out of the loop or branch
+                     * it is written in) starts it at its type's zero value
+                     * again, as one with that value would: each pass of a
+                     * loop gets a fresh `long acc`. What it holds is
+                     * released first, as any rebind releases it. */
+                    if (stmt->child_count == 0) {
+                        Type* vt = hoisted ? hoisted : stmt->node_type;
+                        const char* lv = is_promoted_capture(gen, stmt->value)
+                                         ? cg_internf("(*%s)", stmt->value) : stmt->value;
+                        own_emit_part(gen, vt, lv, OWN_DROP);
+                        print_indent(gen);
+                        const char* zero = local_zero_init(vt, get_c_type(vt));
+                        if (strcmp(zero, " = {0}") == 0)
+                            fprintf(gen->output, "memset((void*)&%s, 0, sizeof(%s));\n", lv, lv);
+                        else
+                            fprintf(gen->output, "%s%s;\n", lv, zero);
+                        break;
+                    }
                     /* #2289: an array literal bound to a fixed-size array
                      * that is already declared -- hoisted out of the loop
                      * or branch it is written in, or bound earlier -- is
@@ -10471,9 +10494,12 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                         }
                     }
 
-                    /* #2618: an owning array starts empty, so its exit
-                     * frees nothing it did not take. */
-                    if (decl_str_array && stmt->child_count == 0) fprintf(gen->output, " = {0}");
+                    /* #3114: a declaration without a value starts at its
+                     * type's zero value (an owning array starts empty, so
+                     * its exit frees nothing it did not take, #2618). */
+                    if (stmt->child_count == 0)
+                        fputs(local_zero_init(stmt->node_type, get_c_type(stmt->node_type)),
+                              gen->output);
                     fprintf(gen->output, ";\n");
                     unwind_track_release(gen);
                     if (decl_array_src) {

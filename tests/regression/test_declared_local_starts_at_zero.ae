@@ -1,0 +1,135 @@
+// Regression (#3114): a local declared without a value starts at its type's
+// zero value: 0, false, null, an all-zero array, a struct with every field
+// zero.
+//
+// The generated C was `int64_t x; int k[3]; P p;`, so reading one before
+// writing it read whatever its stack slot held, with no diagnostic. Each
+// shape below is read before it is written: a scalar, an array, a struct
+// with an array field, in a function, a closure and an actor's handler. In
+// a loop body each pass declares it afresh, as a declaration with a value
+// binds it afresh, and what an owning one held is released first.
+import std.string
+
+extern exit(code: int)
+
+var handler_sum = -1
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL #3114: ${msg}")
+        exit(1)
+    }
+}
+
+struct P {
+    a: long
+    w: long[4]
+}
+
+struct Named {
+    name: string
+    n: int
+}
+
+message Go {}
+
+actor Reader {
+    receive {
+        Go() -> {
+            long hx
+            int[3] hk
+            P hp
+            handler_sum = hx + hk[2] + hp.a + hp.w[3]
+        }
+    }
+}
+
+// The issue's function: every value it reads is a declared local's.
+g() -> long {
+    long x
+    int[3] k
+    P p
+    return x + k[1] + p.a + p.w[2]
+}
+
+kinds() -> string {
+    float f
+    bool b
+    byte y
+    ptr q
+    string s
+    fn c
+    int? o
+    long[] sl
+    return "${f} ${b} ${y} ${q == null} ${s == null} ${c == null} ${o == none} ${sl.len}"
+}
+
+// A fill that misses an element leaves it zero.
+partial_fill() -> long {
+    long[8] v
+    i = 0
+    while i < 8 {
+        if i != 5 {
+            v[i] = 9
+        }
+        i = i + 1
+    }
+    return v[5]
+}
+
+per_pass() -> long {
+    long total = 0
+    n = 0
+    while n < 3 {
+        long acc
+        int[2] seen
+        P p
+        acc = acc + 5
+        seen[0] = seen[0] + 1
+        p.w[1] = p.w[1] + 2
+        total = total + acc + seen[0] + p.w[1]
+        n = n + 1
+    }
+    return total
+}
+
+owning_per_pass(piece: string) -> int {
+    fresh = 0
+    n = 0
+    while n < 3 {
+        string s
+        Named nm
+        fn c
+        string[2] a
+        if s == null && nm.name == null && nm.n == 0 && c == null && a[1] == null {
+            fresh = fresh + 1
+        }
+        s = string.concat(piece, "s")
+        nm = Named { name: string.concat(piece, "n"), n: n + 1 }
+        k = n
+        c = || { println("${k}") }
+        a[1] = string.concat(piece, "a")
+        n = n + 1
+    }
+    return fresh
+}
+
+main() {
+    check(g() == 0, "the issue's g(): ${g()}")
+    check(kinds() == "0 false 0 true true true true 0", "every kind: '${kinds()}'")
+    check(partial_fill() == 0, "an element a fill missed: ${partial_fill()}")
+    closure_sum = || {
+        long cx
+        int[2] ck
+        P cp
+        return cx + ck[1] + cp.w[0]
+    }
+    check(closure_sum() == 0, "a closure's locals: ${closure_sum()}")
+    r = spawn(Reader())
+    r ! Go {}
+    wait_for_idle()
+    check(handler_sum == 0, "an actor handler's locals: ${handler_sum}")
+    check(per_pass() == 24, "a loop body's locals each pass: ${per_pass()}, want 24")
+    check(owning_per_pass(string.concat("p", "")) == 3, "owning locals each pass")
+    println("PASS #3114: a declared local starts at zero")
+}

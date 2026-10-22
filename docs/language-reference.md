@@ -507,6 +507,32 @@ float temperature = 98.6
 
 Variables are inferred from their initialization or usage context.
 
+**A local declared without a value starts at its type's zero value**: `0` for
+a number, `false`, `null` for a string, a pointer or a closure, `none` for an
+optional, the empty slice, an array of zeros, and a struct whose every field
+is its zero. `long x`, `int[3] k` and `P p` are `x = 0`, three zeros and a
+`P` of zeros, so a read before the first write is defined, and an element a
+filling loop misses is 0. In a loop body each pass declares it afresh, as a
+declaration with a value binds it afresh: what an owning one held is released
+and it is zero again (#3114).
+
+```aether,run
+struct P {
+    a: long
+    w: long[4]
+}
+
+main() {
+    long x
+    int[3] k
+    P p
+    println("${x + k[1] + p.a + p.w[2]}")
+}
+```
+```output
+0
+```
+
 **`let` / `var` are optional keywords**, accepted but not required. Bare Python-style assignment is the canonical form and is what most stdlib code uses. `let x = 10` and `var x = 10` parse identically to `x = 10`. There is no semantic distinction between `let` and `var` Aether is not Rust; mutability is a property of the binding's later use, not its declaration. There is no `mut`: `let mut x = 0` is an error, because a `let` must bind something and `mut` is not a keyword the language has. A typed declaration is written without `let` (`int n = 0`, `Pair p`), so two names after `let` is always a mistake.
 
 **Semicolons are optional.** Aether parses end-of-line as a statement terminator. The samples above use no semicolons; older samples in this doc may show `;` for clarity. Either is fine, after any statement: `if x { a } ; b` is `if x { a }` then `b`.
