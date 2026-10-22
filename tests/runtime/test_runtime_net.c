@@ -5,8 +5,10 @@
 
 #ifndef _WIN32
 #include <sys/socket.h>
+#include <sys/time.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <pthread.h>
 #endif
 
 TEST_CATEGORY(socket_null_handling, TEST_CATEGORY_NETWORK) {
@@ -178,4 +180,89 @@ TEST_CATEGORY(tcp_poll_readiness, TEST_CATEGORY_NETWORK) {
     close(fds[0]);
     close(fds[1]);
 }
+/* #3108: a send against a peer that reads slowly can take fewer bytes than
+ * asked. With a small send buffer, a 500 ms send timeout and nobody
+ * reading, one send of 256 KiB comes back short. A reader that takes 64 KiB
+ * and then pauses 750 ms runs a send into its timeout after part of the
+ * bytes went; tcp_send_all_raw sends the rest when the reader goes on (well
+ * inside the next send's timeout), and every byte arrives in order. */
+typedef struct {
+    int fd;
+    unsigned char* buf;
+    int len;
+    int got;
+} SlowReader;
+
+static void* slow_reader(void* arg) {
+    SlowReader* r = (SlowReader*)arg;
+    int paused = 0;
+    while (r->got < r->len) {
+        int want = r->len - r->got < 4096 ? r->len - r->got : 4096;
+        int n = (int)recv(r->fd, r->buf + r->got, (size_t)want, 0);
+        if (n <= 0) break;
+        r->got += n;
+        if (!paused && r->got >= 64 * 1024) {
+            paused = 1;
+            usleep(750000);
+        }
+    }
+    return NULL;
+}
+
+static void shrink_sender(int send_fd, int recv_fd) {
+    int small = 4096;
+    struct timeval tv = { 0, 500000 };
+    setsockopt(send_fd, SOL_SOCKET, SO_SNDBUF, &small, sizeof(small));
+    setsockopt(recv_fd, SOL_SOCKET, SO_RCVBUF, &small, sizeof(small));
+    setsockopt(send_fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+}
+
+TEST_CATEGORY(tcp_send_all_delivers_through_short_sends, TEST_CATEGORY_NETWORK) {
+    enum { LEN = 256 * 1024 };
+    unsigned char* out = (unsigned char*)malloc(LEN);
+    unsigned char* in = (unsigned char*)calloc(1, LEN);
+    ASSERT_NOT_NULL(out);
+    ASSERT_NOT_NULL(in);
+    for (int i = 0; i < LEN; i++) out[i] = (unsigned char)(i * 131 + 7);
+
+    int stalled[2];
+    ASSERT_EQ(0, socketpair(AF_UNIX, SOCK_STREAM, 0, stalled));
+    shrink_sender(stalled[0], stalled[1]);
+    TcpSocket stuck = { stalled[0], 1 };
+    errno = 0;
+    int one = tcp_send_bytes_raw(&stuck, out, LEN);
+    if (one < 0 && errno == EPERM) {
+        printf("  SKIP tcp_send_all_delivers_through_short_sends: send denied by sandbox\n");
+        close(stalled[0]); close(stalled[1]); free(out); free(in);
+        return;
+    }
+    printf("  one send to a peer that is not reading: %d of %d bytes\n", one, LEN);
+    ASSERT_TRUE(one < LEN);
+    close(stalled[0]);
+    close(stalled[1]);
+
+    int fds[2];
+    ASSERT_EQ(0, socketpair(AF_UNIX, SOCK_STREAM, 0, fds));
+    shrink_sender(fds[0], fds[1]);
+    TcpSocket left = { fds[0], 1 };
+    SlowReader r = { fds[1], in, LEN, 0 };
+    pthread_t reader;
+    ASSERT_EQ(0, pthread_create(&reader, NULL, slow_reader, &r));
+    int all = tcp_send_all_raw(&left, out, LEN);
+    shutdown(fds[0], SHUT_WR);   /* the reader's EOF, if not every byte went */
+    pthread_join(reader, NULL);
+    ASSERT_EQ(LEN, all);
+    ASSERT_EQ(LEN, r.got);
+    ASSERT_EQ(0, memcmp(out, in, LEN));
+
+    /* Nothing to send is nothing sent, and no handle sends nothing. */
+    ASSERT_EQ(0, tcp_send_all_raw(&left, out, 0));
+    ASSERT_EQ(0, tcp_send_all_raw(NULL, out, 16));
+
+    close(fds[0]);
+    close(fds[1]);
+    free(out);
+    free(in);
+}
+
 #endif

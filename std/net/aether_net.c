@@ -15,6 +15,7 @@ TcpReceiveResult tcp_receive_n_raw(TcpSocket* s, int m) {
     return out;
 }
 int tcp_send_bytes_raw(TcpSocket* s, const void* d, int n) { (void)s; (void)d; (void)n; return -1; }
+int tcp_send_all_raw(TcpSocket* s, const void* d, int n) { (void)s; (void)d; (void)n; return 0; }
 int tcp_receive_into_raw(TcpSocket* s, void* b, int c) { (void)s; (void)b; (void)c; return TCP_RECV_CLOSED; }
 int tcp_close(TcpSocket* s) { (void)s; return 0; }
 TcpServer* tcp_listen_raw(int p) { (void)p; return NULL; }
@@ -259,6 +260,31 @@ int tcp_send_bytes_raw(TcpSocket* sock, const void* data, int length) {
     if (!data) return -1;
     int sent = send(sock->fd, (const char*)data, (size_t)length, 0);
     return sent < 0 ? -1 : sent;
+}
+
+/* #3108: every one of `length` bytes, as many send(2) calls as it takes:
+ * one can take fewer than asked (the send timeout expiring while the peer
+ * reads slowly, a signal). An interrupted send is retried; the first that
+ * fails, or times out having sent nothing, ends it. Returns the bytes sent:
+ * `length` once every one is out, fewer when a send failed. */
+int tcp_send_all_raw(TcpSocket* sock, const void* data, int length) {
+    if (!sock || !sock->connected || length <= 0 || !data) return 0;
+    const char* p = (const char*)data;
+    int sent = 0;
+    while (sent < length) {
+        int n = send(sock->fd, p + sent, (size_t)(length - sent), 0);
+        if (n > 0) {
+            sent += n;
+            continue;
+        }
+#ifdef _WIN32
+        if (n < 0 && WSAGetLastError() == WSAEINTR) continue;
+#else
+        if (n < 0 && errno == EINTR) continue;
+#endif
+        break;
+    }
+    return sent;
 }
 
 /* Receive into a caller-owned buffer of `cap` bytes (#2301): one recv(2)

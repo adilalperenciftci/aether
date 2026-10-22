@@ -29,6 +29,9 @@ TcpReceiveResult tcp_receive_n_raw(TcpSocket* sock, int max_bytes);
 #define TCP_RECV_CLOSED  (-1)
 #define TCP_RECV_TIMEOUT (-2)
 int tcp_send_bytes_raw(TcpSocket* sock, const void* data, int length);
+// tcp_send_all_raw: every one of `length` bytes from `data`, one send(2)
+//   after another (#3108); the bytes sent, `length` unless a send failed.
+int tcp_send_all_raw(TcpSocket* sock, const void* data, int length);
 int tcp_receive_into_raw(TcpSocket* sock, void* buf, int cap);
 int tcp_close(TcpSocket* sock);
 

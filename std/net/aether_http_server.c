@@ -379,6 +379,9 @@ static int conn_recv(HttpConn* c, void* buf, int len) {
     return (int)recv(c->fd, buf, len, 0);
 }
 
+/* Every one of `len` bytes, or -1: a plain send(2) can take fewer than asked
+ * (a signal cuts it short), and every caller here sends a whole response,
+ * frame or event (#3108). */
 static int conn_send(HttpConn* c, const void* buf, int len) {
     if (c->pure_tls) {
         return pt_server_send(c->pure_tls, buf, len);
@@ -390,7 +393,22 @@ static int conn_send(HttpConn* c, const void* buf, int len) {
         return n;
     }
 #endif
-    return (int)send(c->fd, buf, len, 0);
+    const char* p = (const char*)buf;
+    int sent = 0;
+    while (sent < len) {
+        int n = (int)send(c->fd, p + sent, (size_t)(len - sent), 0);
+        if (n > 0) {
+            sent += n;
+            continue;
+        }
+#ifdef _WIN32
+        if (n < 0 && WSAGetLastError() == WSAEINTR) continue;
+#else
+        if (n < 0 && errno == EINTR) continue;
+#endif
+        return -1;
+    }
+    return sent;
 }
 
 /* Issue #383 zero-copy helpers. */

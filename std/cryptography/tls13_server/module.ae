@@ -153,12 +153,12 @@ fn recio_next_hs(r: *RecordIO) -> (ptr, int, string) {
     return rec, rlen, err
 }
 
-// Send the first `n` bytes of the std.bytes buffer `rec` on `sock` as a
-// borrowed view of the buffer, with no string copy (#2301). Returns send(2)'s
-// count, or -1 on failure: the contract the call sites had when they copied
-// the record into a string for net.tcp_send_n_raw.
+// Send the record `rec` on `sock`, a borrowed view of its buffer with no
+// string copy (#2301), every byte of it however many sends that takes
+// (#3108): a short send left the peer holding part of a record. Returns the
+// record's length, or -1 on failure.
 fn srv_send_view(sock: ptr, rec: byte[]) -> int {
-    sent, err = tcp.write_n(sock, rec)
+    sent, err = tcp.write_all(sock, rec)
     if err != "" {
         return -1
     }
