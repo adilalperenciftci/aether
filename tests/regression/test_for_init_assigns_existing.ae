@@ -1,0 +1,122 @@
+// Regression (#2734): a C-style `for` loop's bare init (`i = 0`) is the
+// binding `i = 0` is anywhere else. It assigns a variable already bound
+// where the loop is, which keeps the value the loop ends with, and declares
+// the loop's own only for a new name.
+//
+// The header declared a new C variable every time, so `i = 5; for (i = 0;
+// i < 3; i++) {}` left `i` at 5. A typed init (`int i = 0`) and a range-for's
+// variable still declare the loop's own, shadowing a binding of the name.
+import std.string
+
+extern exit(code: int)
+
+var steps = 9
+var counted = 0
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL #2734: ${msg}")
+        exit(1)
+    }
+}
+
+message Count {}
+
+actor Counter {
+    state n = 7
+
+    receive {
+        Count() -> {
+            for (n = 0; n < 4; n++) {
+            }
+            counted = n
+        }
+    }
+}
+
+local_int() -> int {
+    i = 5
+    for (i = 0; i < 3; i++) {
+    }
+    return i
+}
+
+stepped_in_body() -> int {
+    i = 50
+    for (i = 0; i < 10;) {
+        i = i + 4
+    }
+    return i
+}
+
+broken_out() -> int {
+    i = -1
+    for (i = 0; i < 100; i++) {
+        if i == 6 {
+            break
+        }
+    }
+    return i
+}
+
+local_string() -> string {
+    s = "x"
+    for (s = "a"; string.length(s) < 3; s = string.concat(s, "b")) {
+    }
+    return s
+}
+
+module_var() -> int {
+    for (steps = 0; steps < 2; steps++) {
+    }
+    return steps
+}
+
+captured() -> int {
+    i = 1
+    bump = || { i = i + 10 }
+    for (i = 0; i < 3; i++) {
+    }
+    bump()
+    return i
+}
+
+new_name_is_the_loops() -> string {
+    total = 0
+    for (j = 0; j < 4; j++) {
+        total = total + j
+    }
+    j = "free"
+    return "${total} ${j}"
+}
+
+typed_init_shadows() -> int {
+    i = 5
+    for (int i = 0; i < 3; i++) {
+    }
+    return i
+}
+
+range_shadows() -> int {
+    i = 5
+    for i in 0..3 {
+    }
+    return i
+}
+
+main() {
+    check(local_int() == 3, "a local: ${local_int()}, want 3")
+    check(stepped_in_body() == 12, "a local stepped in the body: ${stepped_in_body()}")
+    check(broken_out() == 6, "a local after break: ${broken_out()}")
+    check(local_string() == "abb", "a string local: '${local_string()}'")
+    check(module_var() == 2, "a module-level var: ${module_var()}")
+    check(captured() == 13, "a local a closure captured: ${captured()}")
+    check(new_name_is_the_loops() == "6 free", "a new name: '${new_name_is_the_loops()}'")
+    check(typed_init_shadows() == 5, "a typed init: ${typed_init_shadows()}")
+    check(range_shadows() == 5, "a range-for: ${range_shadows()}")
+    c = spawn(Counter())
+    c ! Count {}
+    wait_for_idle()
+    check(counted == 4, "an actor's state field: ${counted}")
+    println("PASS #2734: a bare for init assigns an existing variable")
+}

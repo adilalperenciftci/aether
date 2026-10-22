@@ -4169,6 +4169,11 @@ ASTNode* parse_for_loop(Parser* parser) {
             if (!name) return NULL;
             init = create_ast_node(AST_VARIABLE_DECLARATION, name->value, name->line, name->column);
             init->node_type = create_type(TYPE_UNKNOWN);
+            /* #2734: a bare `x = expr`, as anywhere else: it assigns a
+             * variable already bound there. The checker clears the mark
+             * for a new name, which the loop declares as its own, as it
+             * does a typed init's (`int i = 0`) or a range-for's. */
+            init->type_inferred = 1;
             Token* eq = peek_token(parser);
             if (match_token(parser, TOKEN_ASSIGN)) {
                 int errors_before = aether_error_count();

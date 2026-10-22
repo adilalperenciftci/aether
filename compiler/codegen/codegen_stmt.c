@@ -10928,7 +10928,17 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
             ASTNode* for_init = stmt->child_count > 0 ? stmt->children[0] : NULL;
             const char* loop_var = for_init && for_init->type == AST_VARIABLE_DECLARATION
                                    ? for_init->value : NULL;
-            int cell_init = loop_var && is_promoted_capture(gen, loop_var);
+            int state_var = loop_var && is_actor_state_var(gen, loop_var);
+            /* #2734: a bare init (`i = 0`) of a name already bound where the
+             * loop is, a local, a module `var` or an actor's state field,
+             * assigns it, as `x = ...` does anywhere (the checker leaves
+             * `type_inferred` on exactly those): emitted as that statement
+             * ahead of the loop, it takes the ownership any binding does,
+             * and the loop leaves the variable with its last value. The
+             * header declared a new one, so `i = 5; for (i = 0; i < 3; i++)
+             * {}` left `i` at 5. */
+            int assign_init = loop_var && for_init->type_inferred;
+            int cell_init = !assign_init && loop_var && is_promoted_capture(gen, loop_var);
             /* #2742: the loop's variable is owned as the binding a while-loop
              * rewrite makes, in the same block of its own:
              *  - a string: the loop declares its own `s` and `_heap_s`,
@@ -10945,16 +10955,16 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
              * of an outer loop, frees it. Declared in the header, the
              * variable owned nothing: the value it ended with was never
              * freed. Any other loop variable keeps the header declaration:
-             * one that shadows an enclosing local or a module `var` (the
-             * statement would assign those), and an actor's state field,
-             * which a handler reads and writes as `self->name`. */
-            int state_var = loop_var && is_actor_state_var(gen, loop_var);
-            int str_init = !cell_init && loop_var && !state_var && for_init->node_type &&
-                           for_init->node_type->kind == TYPE_STRING;
-            int stmt_init = !cell_init && !str_init && loop_var && !state_var &&
+             * one a typed init or a range-for declares over an enclosing
+             * local, a module `var` or an actor's state field of its name,
+             * which it shadows. */
+            int str_init = !assign_init && !cell_init && loop_var && !state_var &&
+                           for_init->node_type && for_init->node_type->kind == TYPE_STRING;
+            int stmt_init = !assign_init && !cell_init && !str_init && loop_var && !state_var &&
                             !is_var_declared(gen, loop_var) &&
                             !is_module_global_var(gen, loop_var);
             ScopedStringLocal str_local = {0};
+            if (assign_init) generate_statement(gen, for_init);
             int own_block = cell_init || str_init || stmt_init;
             if (own_block) {
                 print_line(gen, "{");
@@ -10990,7 +11000,7 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
             int step_ctl = step && !step_stmt && hoist_ready(gen) && ctl_contains(gen, step);
             /* #2798: so are the constructs in an init the header keeps, ahead
              * of the loop: nothing in it is evaluated before the init. */
-            if (!own_block && for_init && hoist_ready(gen)) {
+            if (!own_block && !assign_init && for_init && hoist_ready(gen)) {
                 ASTNode* iv = for_init;
                 if (iv->type == AST_VARIABLE_DECLARATION) {
                     iv = iv->child_count > 0 ? iv->children[0] : NULL;
@@ -11006,7 +11016,7 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
             }
             if (own_block) print_indent(gen);
             fprintf(gen->output, "for (");
-            if (!own_block && for_init) {
+            if (!own_block && !assign_init && for_init) {
                 ASTNode* init = for_init;
                 if (init->type == AST_VARIABLE_DECLARATION) {
                     generate_type(gen, init->node_type);

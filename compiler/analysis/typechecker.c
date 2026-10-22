@@ -3590,17 +3590,33 @@ static ASTNode* global_var_decl(ASTNode* child);
 /* The module-level `var` a bare `name = value` binding assigns: the
  * program's global of that name, when no local of it is in scope (#701).
  * NULL for any other binding. */
+static ASTNode* module_var_named(const char* name) {
+    ASTNode* program = aether_typecheck_program_node();
+    for (int i = 0; program && i < program->child_count; i++) {
+        ASTNode* g = global_var_decl(program->children[i]);
+        if (g && strcmp(g->value, name) == 0) return g;
+    }
+    return NULL;
+}
+
 static ASTNode* rebound_global_var(ASTNode* stmt, SymbolTable* table) {
     if (stmt->type != AST_VARIABLE_DECLARATION || !stmt->type_inferred || !stmt->value)
         return NULL;
     for (SymbolTable* s = table; s && s->parent; s = s->parent)
         if (lookup_symbol_local(s, stmt->value)) return NULL;
-    ASTNode* program = aether_typecheck_program_node();
-    for (int i = 0; program && i < program->child_count; i++) {
-        ASTNode* g = global_var_decl(program->children[i]);
-        if (g && strcmp(g->value, stmt->value) == 0) return g;
+    return module_var_named(stmt->value);
+}
+
+/* #2734: does a C-style for loop's bare init (`i = 0`) name a variable bound
+ * where the loop is: a local bound before it (an actor's state field is
+ * one), or a module `var`? Then the init assigns it, as `i = 0` does
+ * anywhere. */
+static int for_init_names_bound(const char* name, SymbolTable* table) {
+    for (SymbolTable* t = table; t && t->parent; t = t->parent) {
+        Symbol* s = lookup_symbol_local(t, name);
+        if (s) return !s->hoist_pending;
     }
-    return NULL;
+    return module_var_named(name) != NULL;
 }
 
 static Type* fnptr_binding_slot(ASTNode* stmt, SymbolTable* table) {
@@ -14084,7 +14100,15 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
             
             // Type check init (child 0)
             if (stmt->child_count > 0 && stmt->children[0]) {
-                typecheck_statement(stmt->children[0], loop_table);
+                /* #2734: a bare init of a name not bound here declares the
+                 * loop's own variable, as a typed init or a range-for's
+                 * does; one of a bound name stays the binding that assigns
+                 * it. Codegen reads which from `type_inferred`. */
+                ASTNode* init = stmt->children[0];
+                if (init->type == AST_VARIABLE_DECLARATION && init->type_inferred &&
+                    init->value && !for_init_names_bound(init->value, table))
+                    init->type_inferred = 0;
+                typecheck_statement(init, loop_table);
             }
             
             // Type check condition (child 1). #3042 review: as for `if` and

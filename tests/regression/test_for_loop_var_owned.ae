@@ -138,8 +138,17 @@ first_of_length(piece: string, len: int) -> string {
     return ""
 }
 
-// The loop's variable shadows a local of its name, as it always did.
+// A loop variable declared with its type shadows a local of its name.
 shadowed(piece: string) -> string {
+    s = string.concat("out", piece)
+    for (string s = string.concat("a", ""); string.length(s) < 4; s = string.concat(s, piece)) {
+    }
+    return s
+}
+
+// A bare init of a local's name assigns the local (#2734): the string it
+// held, and each one the step replaces, are released.
+assigned(piece: string) -> string {
     s = string.concat("out", piece)
     for (s = string.concat("a", ""); string.length(s) < 4; s = string.concat(s, piece)) {
     }
@@ -206,6 +215,7 @@ main() {
     check("labeled continue", labeled(piece), 121212)
     check_str("returned from the loop", first_of_length(piece, 4), "abbb")
     check_str("shadowed", shadowed(piece), "outb")
+    check_str("assigned", assigned(piece), "abbb")
     check("int loops", int_loops(), 39)
     check("struct loop", struct_loop(), 78)
     check("struct that owns a string", tag_loop(piece), 2345)
@@ -218,6 +228,7 @@ main() {
     steady("labeled continue", || { labeled(piece) })
     steady("returned from the loop", || { first_of_length(piece, 4) })
     steady("shadowed", || { shadowed(piece) })
+    steady("assigned", || { assigned(piece) })
     steady("int loops", || { int_loops() })
     steady("struct loop", || { struct_loop() })
     steady("struct that owns a string", || { tag_loop(piece) })

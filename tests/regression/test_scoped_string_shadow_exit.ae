@@ -1,7 +1,8 @@
 // Regression (#2746): a `return` from inside a block whose string binding
 // shadows a function-level string frees both values.
 //
-// A C-style for loop's string variable (#2742), an owning `catch` binding
+// A C-style for loop's string variable declared with its type (#2742,
+// #2734), an owning `catch` binding
 // (#2333) and the `some(v)` binding of a match over a `string?` call
 // (#2750) each live for one C block and shadow a local of their name. The
 // block's exit free and the shadowed local's were both keyed by the name,
@@ -51,7 +52,7 @@ fresh(w: string) -> string? {
 // value is read after it.
 by_loop(w: string, stop: int) -> int {
     s = string.concat(w, "er")
-    for (s = "a"; string.length(s) < 4; s = string.concat(s, "b")) {
+    for (string s = "a"; string.length(s) < 4; s = string.concat(s, "b")) {
         if string.length(s) == stop {
             return 1
         }
@@ -64,7 +65,7 @@ by_loop(w: string, stop: int) -> int {
 // A parameter made the function's own before the loop shadows it.
 by_param(s: string) -> int {
     s = string.concat(s, "er")
-    for (s = "a"; string.length(s) < 4; s = string.concat(s, "b")) {
+    for (string s = "a"; string.length(s) < 4; s = string.concat(s, "b")) {
         if string.length(s) == 3 {
             return 1
         }
@@ -74,8 +75,8 @@ by_param(s: string) -> int {
 
 by_nested(w: string, stop: int) -> int {
     s = string.concat(w, "er")
-    for (s = "a"; string.length(s) < 4; s = string.concat(s, "b")) {
-        for (s = "c"; string.length(s) < 3; s = string.concat(s, "d")) {
+    for (string s = "a"; string.length(s) < 4; s = string.concat(s, "b")) {
+        for (string s = "c"; string.length(s) < 3; s = string.concat(s, "d")) {
             if string.length(s) == stop {
                 return 7
             }

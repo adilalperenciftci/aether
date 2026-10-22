@@ -6138,6 +6138,9 @@ static void rename_locals_shadowing_functions(ASTNode* program) {
  * binding's (a nested binding of the name included, renamed alike), and
  * field, argument and function names are not value names.
  *
+ * A for loop's init that assigns a variable already bound there (#2734)
+ * declares nothing and keeps its name.
+ *
  * #2994: so is every name a `match` arm's pattern binds (`some(v)` over
  * any optional, the names of a list or a struct pattern), which is that
  * arm's own: codegen writes the value of a bound `match` in the arm's
@@ -6210,8 +6213,8 @@ static void rename_scoped_bindings_in(ASTNode* scope, ASTNode* node, const NameS
     for (int i = 0; i < node->child_count; i++)
         rename_scoped_bindings_in(scope, node->children[i], fixed);
     if (node->type == AST_FOR_LOOP && node->child_count > 0 && node->children[0] &&
-        node->children[0]->type == AST_VARIABLE_DECLARATION && node->children[0]->node_type &&
-        node->children[0]->node_type->kind == TYPE_STRING) {
+        node->children[0]->type == AST_VARIABLE_DECLARATION && !node->children[0]->type_inferred &&
+        node->children[0]->node_type && node->children[0]->node_type->kind == TYPE_STRING) {
         rename_scoped_binding(scope, node, node->children[0]->value, fixed);
     } else if (node->type == AST_CATCH_CLAUSE && node->value) {
         rename_scoped_binding(scope, node, node->value, fixed);

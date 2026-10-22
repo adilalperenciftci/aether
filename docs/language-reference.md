@@ -1238,9 +1238,28 @@ for (i = 0; i < 10; i = i + 1) {
 }
 ```
 
-The variable the init binds is the loop's, from the condition through the body
-to the end of the loop: a binding of its name in the body assigns it, so a loop
-can step its variable there, and after the loop the name is free to bind again.
+A bare init (`i = 0`) is the binding `i = 0` is anywhere. When the name is
+already bound where the loop is (a local, a module-level `var`, an actor's
+state field), it assigns that variable, which holds the value the loop ends
+with:
+
+```aether,run
+main() {
+    i = 5
+    for (i = 0; i < 3; i++) {
+    }
+    println(i)
+}
+```
+```output
+3
+```
+
+For a new name it declares the loop's own variable, from the condition through
+the body to the end of the loop: a binding of its name in the body assigns it,
+so a loop can step its variable there, and after the loop the name is free to
+bind again. A typed init (`for (int i = 0; ...)`) and a range-for's variable
+always declare the loop's own, shadowing a binding of the name (#2734).
 
 ```aether,run
 main() {
@@ -1318,7 +1337,7 @@ for i in 1..n {
 }
 ```
 
-The range `start..end` is exclusive of `end` (like Python's `range(start, end)`). It desugars to a C-style for loop internally.
+The range `start..end` is exclusive of `end` (like Python's `range(start, end)`). It desugars to a C-style for loop internally. Its variable is the loop's own, a new one even where the name is bound outside the loop.
 
 ### Loop Control
 
