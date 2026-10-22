@@ -27,6 +27,7 @@
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+. "$ROOT/tests/lib/same_bytes.sh"
 AE="$ROOT/build/ae"
 AETHERC="$ROOT/build/aetherc"
 
@@ -233,7 +234,7 @@ while IFS= read -r f; do
                 echo "  [FAIL] fmt_gate: two compiles of UNFORMATTED $f differ (emission nondeterminism, not a formatter fault)"
                 echo "    sizes: $(wc -c < "$base.orig.c") vs $(wc -c < "$base.orig2.c") bytes"
                 fmt_gate_dump_diff "$base.orig.c" "$base.orig2.c"
-            elif cmp -s "$f" "$TMPDIR/idem/$f" 2>/dev/null; then
+            elif same_bytes "$f" "$TMPDIR/idem/$f"; then
                 echo "  [FAIL] fmt_gate: formatting left $f byte-identical yet its C differs (emission instability)"
                 fmt_gate_dump_diff "$base.orig.c" "$base.fmt.c"
             else

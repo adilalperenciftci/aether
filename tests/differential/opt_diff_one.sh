@@ -18,14 +18,11 @@
 # so a program that prints argv[0] or its own location agrees with itself.
 set -u
 
-# cmp and diff come from diffutils, which an MSYS2 install can lack; cksum is
-# in coreutils everywhere.
+# cmp comes from diffutils, which an MSYS2 install can lack: the outputs are
+# compared by the helper every test uses, which falls back to cksum.
+. "$(cd "$(dirname "$0")" && pwd)/../lib/same_bytes.sh"
 same_output() {
-    if command -v cmp >/dev/null 2>&1; then
-        cmp -s "$1" "$2"
-    else
-        [ "$(cksum < "$1")" = "$(cksum < "$2")" ]
-    fi
+    same_bytes "$1" "$2"
 }
 
 show_diff() {

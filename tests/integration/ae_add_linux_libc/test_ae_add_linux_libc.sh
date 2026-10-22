@@ -5,6 +5,7 @@
 set -eu
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+. "$ROOT/tests/lib/same_bytes.sh"
 AE="$ROOT/build/ae${EXE_EXT:-}"
 COMPILER="${CC:-cc}"
 [ -x "$AE" ] || { echo "[SKIP] ae_add_linux_libc: ae not built"; exit 0; }
@@ -95,13 +96,13 @@ for triple in linux-x86_64 linux-x86_64-musl linux-arm64 linux-arm64-musl; do
     new_proj "$triple"
     fetch --target "$triple" || { cat "$P/add.log"; fail "fetch $triple"; }
     INST="$P/home/.aether/packages/$PKG/libpkg.so"
-    cmp "$REL/libpkg-v1.0.0-$triple.so" "$INST" || fail "wrong bytes for $triple"
+    same_bytes "$REL/libpkg-v1.0.0-$triple.so" "$INST" || fail "wrong bytes for $triple"
     grep -q 'Checksum verified' "$P/add.log" || fail "unverified $triple"
     # Later fetches must not replace the already fetched glibc or musl bytes.
     # Each consumer has its own cache, as on separate hosts/build jobs.
     for prev in "$TMP"/project_linux-*; do
         expected="${prev##*/project_}"
-        cmp "$REL/libpkg-v1.0.0-$expected.so" "$prev/home/.aether/packages/$PKG/libpkg.so" \
+        same_bytes "$REL/libpkg-v1.0.0-$expected.so" "$prev/home/.aether/packages/$PKG/libpkg.so" \
             || fail "fetch $triple changed $expected"
     done
 done
@@ -111,7 +112,7 @@ fetch --target linux-x86_64 || fail 'same-target cache reuse failed'
 if fetch --target linux-x86_64-musl; then fail 'glibc cache accepted for musl'; fi
 grep -q 'has target linux-x86_64; requested linux-x86_64-musl' "$P/add.log" \
     || { cat "$P/add.log"; fail 'cache mismatch diagnostic'; }
-cmp "$REL/libpkg-v1.0.0-linux-x86_64.so" "$P/home/.aether/packages/$PKG/libpkg.so" \
+same_bytes "$REL/libpkg-v1.0.0-linux-x86_64.so" "$P/home/.aether/packages/$PKG/libpkg.so" \
     || fail 'incompatible request overwrote cached glibc bytes'
 # An old cache has no libc provenance, so it cannot safely satisfy a request.
 rm "$P/home/.aether/packages/$PKG/.aether-binary-target"
@@ -132,7 +133,7 @@ case "$HOST_TRIPLE" in
     linux-x86_64|linux-x86_64-musl|linux-arm64|linux-arm64-musl)
         new_proj automatic
         fetch || { cat "$P/add.log"; fail 'automatic host fetch'; }
-        cmp "$REL/libpkg-v1.0.0-$HOST_TRIPLE.so" "$P/home/.aether/packages/$PKG/libpkg.so" \
+        same_bytes "$REL/libpkg-v1.0.0-$HOST_TRIPLE.so" "$P/home/.aether/packages/$PKG/libpkg.so" \
             || fail 'automatic fetch selected the wrong libc'
         case "$HOST_TRIPLE" in
             *-musl) other="${HOST_TRIPLE%-musl}" ;;
@@ -140,7 +141,7 @@ case "$HOST_TRIPLE" in
         esac
         P="$TMP/project_$other"
         if fetch; then fail 'automatic selection reused the other libc from cache'; fi
-        cmp "$REL/libpkg-v1.0.0-$other.so" "$P/home/.aether/packages/$PKG/libpkg.so" \
+        same_bytes "$REL/libpkg-v1.0.0-$other.so" "$P/home/.aether/packages/$PKG/libpkg.so" \
             || fail 'automatic selection changed foreign cached bytes'
         ;;
 esac

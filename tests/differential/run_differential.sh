@@ -16,6 +16,7 @@
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+. "$ROOT/tests/lib/same_bytes.sh"
 AE="$ROOT/build/ae"
 
 if [ ! -x "$AE" ]; then
@@ -108,23 +109,29 @@ for case_file in "$SCRIPT_DIR"/cases/*.ae; do
         fail=$((fail + 1))
         continue
     fi
-    if ! diff -u "$TMP/$name.exe.out" "$TMP/$name.lib.out" >"$TMP/$name.diff" 2>&1; then
+    if ! same_bytes "$TMP/$name.exe.out" "$TMP/$name.lib.out"; then
         echo "  [FAIL] differential/$name: output differs between lowering paths"
-        echo "         --- --emit=exe / +++ --emit=lib"
-        sed 's/^/         /' "$TMP/$name.diff" | head -20
+        if command -v diff >/dev/null 2>&1; then
+            echo "         --- --emit=exe / +++ --emit=lib"
+            diff -u "$TMP/$name.exe.out" "$TMP/$name.lib.out" | sed 's/^/         /' | head -20
+        else
+            echo "         --emit=exe, first 10 lines:"; head -n 10 "$TMP/$name.exe.out" | sed 's/^/         /'
+            echo "         --emit=lib, first 10 lines:"; head -n 10 "$TMP/$name.lib.out" | sed 's/^/         /'
+        fi
         fail=$((fail + 1))
         continue
     fi
     pass=$((pass + 1))
 done
 
-# Self-check: prove the comparison can actually fail. Without this the suite
-# would report success just as happily if the diff were broken and every
-# comparison were vacuous.
+# Self-check: prove the comparison tells two outputs apart AND matches two
+# equal ones. Checking only the first passes when the tool cannot run, since
+# a command that fails reads as "different".
 printf 'a\n' > "$TMP/self.a"
 printf 'b\n' > "$TMP/self.b"
-if diff -q "$TMP/self.a" "$TMP/self.b" >/dev/null 2>&1; then
-    echo "  [FAIL] differential: the comparison does not detect a difference"
+printf 'a\n' > "$TMP/self.c"
+if same_bytes "$TMP/self.a" "$TMP/self.b" || ! same_bytes "$TMP/self.a" "$TMP/self.c"; then
+    echo "  [FAIL] differential: the comparison does not tell outputs apart"
     exit 1
 fi
 

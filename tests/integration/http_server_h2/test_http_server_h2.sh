@@ -45,6 +45,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 . "$ROOT/tests/lib/wait_port.sh"
 . "$ROOT/tests/lib/server_jobs.sh"
+. "$ROOT/tests/lib/same_bytes.sh"
 AE="$ROOT/build/ae"
 
 if ! command -v curl >/dev/null 2>&1; then
@@ -207,8 +208,8 @@ curl --silent --show-error --max-time 30 \
      "$URL_BASE/echo" 2>"$TMPDIR/post.err" || {
     echo "  [FAIL] /echo large POST failed:"; cat "$TMPDIR/post.err"; exit 1
 }
-# Compare bytes; cmp returns 0 on match.
-cmp -s "$POST_BODY" "$POST_RESP" || {
+# Compare bytes (tests/lib/same_bytes.sh: cmp, or cksum without diffutils).
+same_bytes "$POST_BODY" "$POST_RESP" || {
     echo "  [FAIL] /echo large POST round-trip mismatch"
     echo "    sent $(wc -c <"$POST_BODY") bytes; received $(wc -c <"$POST_RESP") bytes"
     exit 1
