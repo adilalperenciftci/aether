@@ -5,8 +5,8 @@
 // construction, field reads, and reassignment — so `struct P { register: int }`
 // compiles instead of emitting `int register;`.
 //
-// Self-asserting for the (synchronous) struct paths; the actor section proves
-// the message-field declaration + send + receive-binding paths compile and run.
+// Self-asserting: the struct paths, and the message-field declaration, send
+// and receive-binding paths through the total the actor keeps.
 
 import std.string
 
@@ -15,16 +15,12 @@ extern exit(code: int)
 struct Point { register: int signed: int }
 
 message Bump { volatile: int static: int }
-message Done {}
 
 actor Counter {
     state total = 0
     receive {
         Bump(volatile, static) -> {
             total = total + volatile + static
-        }
-        Done -> {
-            println(total) // 3+4 + 10+20 = 37
         }
     }
 }
@@ -50,7 +46,11 @@ main() {
     c = spawn(Counter())
     c ! Bump { volatile: 3, static: 4 }
     c ! Bump { volatile: 10, static: 20 }
-    c ! Done {}
+    wait_for_idle()
+    if c.total != 37 {
+        println("FAIL: message fields total = ${c.total}, want 3+4 + 10+20 = 37")
+        exit(1)
+    }
 
     println("PASS: C-keyword field names (struct + message) compile and run")
 }

@@ -39,6 +39,7 @@ main() {
     print("\nTest 4: Actor with imports\n")
     test = spawn(TestActor());
     test ! TestMessage { value: 42 };
+    wait_for_idle()
     print("  PASS: actor spawned and message sent\n")
 
     print("\n=== All 4 Tests Complete ===\n")
