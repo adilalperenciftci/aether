@@ -34,7 +34,7 @@ main() {
             spec.assert_str_eq(err2, "", "no jsonpath error on descent")
             spec.assert_eq(jsonpath.result_size(r2), 1, "one match")
             jsonpath.free_result(r2)
-            json.json_free(doc)
+            json.free(doc)
         }
     }
 

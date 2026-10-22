@@ -29,7 +29,6 @@ name(s: Shape) -> string {
         Rect -> { return "rect" }
         Empty -> { return "empty" }
     }
-    return "?"
 }
 
 describe(s: Shape) {

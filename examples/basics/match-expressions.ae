@@ -19,7 +19,6 @@ day_name(n) {
         7 -> { return "Sunday"; }
         _ -> { return "Invalid"; }
     }
-    return "Unknown";
 }
 
 // Describe a number

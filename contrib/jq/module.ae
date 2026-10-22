@@ -23,7 +23,7 @@
 //       input, _ = json.parse("[{\"name\":\"ann\",\"age\":41},{\"name\":\"bob\",\"age\":7}]")
 //       out, err = jq.run_json(prog, input)     // one line per output
 //       print(out)                              // "ann"
-//       json.json_free(input)
+//       json.free(input)
 //       jq.free(prog)
 //   }
 //

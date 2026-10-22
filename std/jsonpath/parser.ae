@@ -310,7 +310,6 @@ _parse_segments(p: *Parser) -> ptr {
         }
         list.add_raw(segs, seg)
     }
-    return segs
 }
 
 _parse_segment(p: *Parser) -> ptr {

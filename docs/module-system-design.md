@@ -544,13 +544,20 @@ The compiler searches for local modules in this order:
 4. `src/<module>.ae` - Single-file module in src
 5. `<module>/module.ae` - Project root
 6. `<module>.ae` - Single file in project root
+7. Steps 1 to 6 under the directory of the importing file, so a program
+   built from another directory still finds the modules beside it
+
+A module's own imports search its directory first (step 7, then steps 1
+to 6): `std.jsonpath`'s `import parser` names `std/jsonpath/parser.ae`
+wherever the compiler runs, even in a directory that has a `parser.ae` of
+its own (#3103). The entry program's imports keep the project root first.
 
 For nested modules like `import mypackage.utils`:
 - Dots are converted to slashes: `mypackage/utils/module.ae`
 - Same search paths are used with the converted path
 
-7. `~/.aether/packages/<name>/src/module.ae` - Installed package (via `ae add`)
-8. `~/.aether/packages/<name>/module.ae` - Installed package (flat layout)
+8. `~/.aether/packages/<name>/src/module.ae` - Installed package (via `ae add`)
+9. `~/.aether/packages/<name>/module.ae` - Installed package (flat layout)
 
 Packages installed with `ae add` are searched after local paths. The package name is the first component of the import path.
 

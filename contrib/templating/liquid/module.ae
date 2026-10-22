@@ -3706,7 +3706,6 @@ render_if_block(kinds: ptr, contents: ptr, start: int, end: int,
         }
         branch_start = nxt + 1
     }
-    return start, "unreachable"
 }
 
 // Render a `{% case x %}{% when v %}...{% when w %}...{% else %}...{% endcase %}`
@@ -3777,7 +3776,6 @@ render_case_block(kinds: ptr, contents: ptr, start: int, end: int,
         }
         branch_start = nxt + 1
     }
-    return start, "unreachable"
 }
 
 // Parse an integer modifier `limit:N` / `offset:N` / `cols:N` from a tag's

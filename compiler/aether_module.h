@@ -41,6 +41,9 @@ typedef struct {
     // Source file directory for relative resolution, with its trailing
     // slash: a heap copy of any length (#2543), NULL or "" when none.
     char* source_dir;
+    // #3103: 1 while a module's own imports are resolved (source_dir is
+    // that module's directory), 0 for the entry program's.
+    int source_is_module;
     // Lib-search path: an ordered list of directories (PATH-style),
     // searched left-to-right; first hit wins. Issue #413. Default is
     // a single entry, `"lib"`, populated at registry init. Each entry

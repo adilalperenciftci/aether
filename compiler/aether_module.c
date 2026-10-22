@@ -1119,6 +1119,29 @@ static char* pkg_probe_root(const char* root, const char* sub_path) {
 }
 
 // Resolve a local module path (e.g., "mypackage.utils") to a file path.
+/* The module `converted` (a path with slashes) under `base`, the importing
+ * file's directory with its trailing slash, in the shapes and the lib path
+ * order the CWD-relative probes use (Issue #413). */
+static char* resolve_under_source_dir(const char* base, const char* converted) {
+    char path[4096];
+    for (int li = 0; li < global_module_registry->lib_dir_count; li++) {
+        const char* lib = global_module_registry->lib_dirs[li];
+        snprintf(path, sizeof(path), "%s%s/%s/module.ae", base, lib, converted);
+        if (module_probe(path)) return strdup(path);
+        snprintf(path, sizeof(path), "%s%s/%s.ae", base, lib, converted);
+        if (module_probe(path)) return strdup(path);
+    }
+    snprintf(path, sizeof(path), "%ssrc/%s/module.ae", base, converted);
+    if (module_probe(path)) return strdup(path);
+    snprintf(path, sizeof(path), "%ssrc/%s.ae", base, converted);
+    if (module_probe(path)) return strdup(path);
+    snprintf(path, sizeof(path), "%s%s/module.ae", base, converted);
+    if (module_probe(path)) return strdup(path);
+    snprintf(path, sizeof(path), "%s%s.ae", base, converted);
+    if (module_probe(path)) return strdup(path);
+    return NULL;
+}
+
 char* module_resolve_local_path(const char* module_path) {
     char converted[512];
     char path[4096];
@@ -1128,6 +1151,17 @@ char* module_resolve_local_path(const char* module_path) {
     converted[sizeof(converted) - 1] = '\0';
     for (char* p = converted; *p; p++) {
         if (*p == '.') *p = '/';
+    }
+
+    /* #3103: a module's own import names a file beside it first. Tried after
+     * the CWD, std.jsonpath's `import parser` found contrib/jq/parser.ae
+     * whenever the compiler ran in contrib/jq, and a program importing
+     * both failed there ("'free_query' is not exported from module
+     * 'parser'"). The entry program keeps the CWD (the project root) first. */
+    const char* src_dir = global_module_registry->source_dir;
+    if (global_module_registry->source_is_module && src_dir && src_dir[0]) {
+        char* found = resolve_under_source_dir(src_dir, converted);
+        if (found) return found;
     }
 
     /* Try 1/2: search every CWD-relative lib_dirs[] entry in order,
@@ -1161,25 +1195,9 @@ char* module_resolve_local_path(const char* module_path) {
     if (module_probe(path)) return strdup(path);
 
     // Try 6b: Search relative to source file directory
-    if (global_module_registry->source_dir && global_module_registry->source_dir[0]) {
-        /* Mirror the CWD-relative loop above, but anchored at the
-         * source file's directory. Same left-to-right semantics
-         * across the multi-entry lib path. Issue #413. */
-        for (int li = 0; li < global_module_registry->lib_dir_count; li++) {
-            const char* lib = global_module_registry->lib_dirs[li];
-            snprintf(path, sizeof(path), "%s%s/%s/module.ae", global_module_registry->source_dir, lib, converted);
-            if (module_probe(path)) return strdup(path);
-            snprintf(path, sizeof(path), "%s%s/%s.ae", global_module_registry->source_dir, lib, converted);
-            if (module_probe(path)) return strdup(path);
-        }
-        snprintf(path, sizeof(path), "%ssrc/%s/module.ae", global_module_registry->source_dir, converted);
-        if (module_probe(path)) return strdup(path);
-        snprintf(path, sizeof(path), "%ssrc/%s.ae", global_module_registry->source_dir, converted);
-        if (module_probe(path)) return strdup(path);
-        snprintf(path, sizeof(path), "%s%s/module.ae", global_module_registry->source_dir, converted);
-        if (module_probe(path)) return strdup(path);
-        snprintf(path, sizeof(path), "%s%s.ae", global_module_registry->source_dir, converted);
-        if (module_probe(path)) return strdup(path);
+    if (src_dir && src_dir[0] && !global_module_registry->source_is_module) {
+        char* found = resolve_under_source_dir(src_dir, converted);
+        if (found) return found;
     }
 
     // Try 7-9: Search installed packages at ~/.aether/packages/
@@ -2052,9 +2070,10 @@ static void module_bind_import_identity(ASTNode* imp, const char* resolved,
 }
 
 /* Put back the source directory saved around a module's imports. */
-static void module_restore_source_dir(char* saved) {
+static void module_restore_source_dir(char* saved, int saved_is_module) {
     free(global_module_registry->source_dir);
     global_module_registry->source_dir = saved;
+    global_module_registry->source_is_module = saved_is_module;
 }
 
 // Recursive helper: load a single module and its transitive imports
@@ -2180,8 +2199,10 @@ static int orchestrate_module(const char* module_name, const char* file_path,
      * the parent's source_dir. The parent's is kept as it is, whole, and
      * put back (#2543). */
     char* saved_source_dir = global_module_registry->source_dir;
+    int saved_is_module = global_module_registry->source_is_module;
     global_module_registry->source_dir = NULL;
     module_set_source_dir(file_path);
+    global_module_registry->source_is_module = 1;
 
     // Recursively process this module's imports
     for (int i = 0; i < ast->child_count; i++) {
@@ -2192,7 +2213,7 @@ static int orchestrate_module(const char* module_name, const char* file_path,
         if (import_lane_target(child)) {
             if (!module_bind_target_import(child, file_path)) {   /* #2607 */
                 free(sub_file);
-                module_restore_source_dir(saved_source_dir);
+                module_restore_source_dir(saved_source_dir, saved_is_module);
                 return 0;
             }
         } else {
@@ -2207,13 +2228,13 @@ static int orchestrate_module(const char* module_name, const char* file_path,
         if (sub_file) {
             if (!orchestrate_module(sub_path, sub_file, graph)) {
                 free(sub_file);
-                module_restore_source_dir(saved_source_dir);
+                module_restore_source_dir(saved_source_dir, saved_is_module);
                 return 0;
             }
             free(sub_file);
             module_note_lane_target(child);   /* #2607 */
             if (!check_selective_import_exports(child, file_path)) {
-                module_restore_source_dir(saved_source_dir);
+                module_restore_source_dir(saved_source_dir, saved_is_module);
                 return 0;
             }
         } else {
@@ -2221,7 +2242,7 @@ static int orchestrate_module(const char* module_name, const char* file_path,
         }
     }
 
-    module_restore_source_dir(saved_source_dir);
+    module_restore_source_dir(saved_source_dir, saved_is_module);
     return 1;
 }
 
