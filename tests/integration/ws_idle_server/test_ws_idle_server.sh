@@ -8,6 +8,11 @@
 # timeout for a close and returned -1: any client quiet that long was
 # dropped. The server clears it once the handshake has gone out. Here the
 # idle timeout is 1 s and the client is quiet for 2.5 s between messages.
+#
+# The client then sends to the connection the server's handler closed: a
+# send fails with -1. The shared send raised SIGPIPE there on Linux, which
+# killed the client (exit 141); it sends with MSG_NOSIGNAL, and a dialled
+# socket has SO_NOSIGPIPE where that is the platform's way.
 
 set -e
 

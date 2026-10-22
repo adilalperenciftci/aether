@@ -202,6 +202,16 @@ const char* http_request_header_value(HttpRequest* r, int i) { (void)r; (void)i;
     // I/O polling is handled by aether_io_poller (included via multicore_scheduler.h)
 #endif
 
+/* A send to a peer that has gone fails with EPIPE rather than raising
+ * SIGPIPE, which kills a process that has not ignored it: a WebSocket
+ * client's, which no server start set up. Linux says so per call; macOS and
+ * the BSDs per socket (SO_NOSIGPIPE, set where the client dials). */
+#if defined(MSG_NOSIGNAL)
+#define AE_SEND_NOSIGNAL MSG_NOSIGNAL
+#else
+#define AE_SEND_NOSIGNAL 0
+#endif
+
 // -----------------------------------------------------------------------------
 // Server-side TLS (#260 Tier 0)
 // -----------------------------------------------------------------------------
@@ -401,7 +411,7 @@ static int conn_send(HttpConn* c, const void* buf, int len) {
     const char* p = (const char*)buf;
     int sent = 0;
     while (sent < len) {
-        int n = (int)send(c->fd, p + sent, (size_t)(len - sent), 0);
+        int n = (int)send(c->fd, p + sent, (size_t)(len - sent), AE_SEND_NOSIGNAL);
         if (n > 0) {
             sent += n;
             continue;
@@ -3704,6 +3714,10 @@ HttpWsConn* http_ws_connect(const char* url) {
         close(fd); freeaddrinfo(res); return NULL;
     }
     freeaddrinfo(res);
+#ifdef SO_NOSIGPIPE
+    int nosigpipe = 1;
+    setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &nosigpipe, sizeof(nosigpipe));
+#endif
 
     /* wss:// -- wrap the connected socket before a single handshake byte
      * moves. The CTX is the HTTP client's, so wss inherits the same trust
