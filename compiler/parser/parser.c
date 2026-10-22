@@ -2815,6 +2815,11 @@ static ASTNode* parse_postfix_expression(Parser* parser) {
             // here and handed to the typechecker as the implicit first
             // argument; ufcs_recv holds it until the call node exists.
             ASTNode* ufcs_recv = NULL;
+            /* #3099: any other callee is a value, called as a closure local
+             * or field is (`call(callee, args)`, the form the checker gives
+             * those). The callee was dropped and the call left nameless:
+             * `fs[1]()` was "Undefined function '?'". */
+            ASTNode* value_callee = NULL;
             if (expr && expr->type == AST_IDENTIFIER && expr->value) {
                 // Simple call: foo()
                 func_name = strdup(expr->value);
@@ -2837,6 +2842,9 @@ static ASTNode* parse_postfix_expression(Parser* parser) {
                 func_name = strdup(expr->value);
                 ufcs_recv = expr->children[0];
                 expr->children[0] = NULL;   // detach so free_ast_node(expr) won't reclaim it
+            } else if (expr) {
+                func_name = strdup("call");
+                value_callee = expr;
             }
 
             // heap.new(TypeName) — like sizeof, the argument is a *type
@@ -2883,6 +2891,10 @@ static ASTNode* parse_postfix_expression(Parser* parser) {
             if (ufcs_recv) {
                 func_call->annotation = strdup("ufcs");
                 add_child(func_call, ufcs_recv);
+            }
+            if (value_callee) {
+                add_child(func_call, value_callee);
+                func_call->annotation = annotation_add_marker(func_call->annotation, "value_callee");
             }
 
             // Parse arguments
@@ -3049,8 +3061,9 @@ static ASTNode* parse_postfix_expression(Parser* parser) {
                 }
             }
 
-            // Free the original identifier node since we've copied its name
-            if (expr) free_ast_node(expr);
+            // Free the original identifier node since we've copied its name;
+            // a value callee is not freed, it is the call's first argument.
+            if (expr && expr != value_callee) free_ast_node(expr);
 
             expr = func_call;
             continue;

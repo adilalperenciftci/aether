@@ -3102,8 +3102,11 @@ static void reject_non_closure_callee(ASTNode* call, SymbolTable* table) {
     else
         snprintf(name, sizeof(name), "the first argument");
     char msg[640];
-    snprintf(msg, sizeof(msg),
-             "call() needs a closure, but %s has type %s", name, what);
+    if (annotation_has_marker(call->annotation, "value_callee"))   /* #3099: `xs[0]()` */
+        snprintf(msg, sizeof(msg), "the value called here is not a function: it has type %s", what);
+    else
+        snprintf(msg, sizeof(msg),
+                 "call() needs a closure, but %s has type %s", name, what);
     const char* hint =
         t->kind == TYPE_TUPLE
             ? "a multi-value return bound to one name stays a tuple; destructure "
@@ -19291,6 +19294,26 @@ static int typecheck_function_call_inner(ASTNode* call, SymbolTable* table) {
              * error (the bare method name is already in call->value). */
             free(call->annotation);
             call->annotation = NULL;
+            /* #3099: a function held in a field of a receiver that is not a
+             * name (`hs[0].cb()`, `make_h().cb(2)`) is called as one held in
+             * a named receiver's field is (#2653): `call(recv.cb, ...)`. */
+            ASTNode* recv = call->child_count > 0 ? call->children[0] : NULL;
+            if (recv && call->value && !strchr(call->value, '.')) {
+                ASTNode* fn_ref = create_ast_node(AST_MEMBER_ACCESS, call->value, call->line, call->column);
+                add_child(fn_ref, recv);
+                Type* ft = infer_type(fn_ref, table);
+                int is_fn = ft && ft->kind == TYPE_FUNCTION;
+                if (ft) free_type(ft);
+                if (is_fn) {
+                    call->children[0] = fn_ref;
+                    free(call->value);
+                    call->value = strdup("call");
+                    return typecheck_function_call(call, table);
+                }
+                fn_ref->children[0] = NULL;   /* the receiver stays the call's */
+                fn_ref->child_count = 0;
+                free_ast_node(fn_ref);
+            }
         }
     }
 

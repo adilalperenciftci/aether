@@ -914,6 +914,17 @@ the default expression into the call's argument list and rewrites
 any embedded `__LINE__` / `__FILE__` / `__func__` to use the call
 site's metadata.
 
+### Calling a function value
+
+Parentheses after any expression whose value is a function call it: a
+local (`g(3)`), a field (`h.cb(2)`, `hs[0].cb()`), an element (`fs[i](x)`),
+or another call's result (`make_adder(5)(2)`). `call(f, args)` is the same
+call written out. The callee is evaluated once, before the arguments
+(`fs[pick()](3)` calls `pick` once), and held for the length of its call,
+so a function that rebinds the element or field it was read from runs to
+its end. A callee whose value is not a function is a type error, "the value
+called here is not a function", naming its type (#3099).
+
 ### Trailing blocks
 
 A call can be followed, on the same line as its `)`, by one of four blocks:

@@ -609,6 +609,15 @@ static void arg_drain_select(CodeGenerator* gen, ASTNode* expr, int first_arg,
 /* Open the wrap: declare and fill each temp, bind the arguments to them
  * (generate_expression then emits the temp's name for each), and start the
  * `_ad_r` result. The callee's own emission follows. */
+/* A callee that is a name or a field path read through names (`f`, `h.cb`,
+ * `a.b.cb`): reading it again has no effect and gives the same closure, so
+ * a closure call may name it twice (`.fn`, `.env`). Anything else, an
+ * index or a call among them, is evaluated once into a temp (#3099). */
+static int closure_callee_is_path(ASTNode* e) {
+    while (e && e->type == AST_MEMBER_ACCESS && e->child_count > 0) e = e->children[0];
+    return e && e->type == AST_IDENTIFIER;
+}
+
 static void arg_drain_open(CodeGenerator* gen, ASTNode* expr, ArgDrainWrap* w) {
     if (w->count == 0) return;
     char* names[16] = {0};
@@ -10362,10 +10371,15 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                             ad.closure[ad.count] = 1;
                             ad.idx[ad.count++] = 0;
                         } else if (closure_arg && !arg_drain_lookup(closure_arg) && ad.count < 16 &&
-                                   is_closure_cell_read(gen, closure_arg)) {
+                                   (is_closure_cell_read(gen, closure_arg) ||
+                                    !closure_callee_is_path(closure_arg))) {
                             /* #2755: a closure a cell holds is held for its
                              * own call, which may rebind the cell and give
-                             * back the cell's reference to it. */
+                             * back the cell's reference to it. #3099: so is
+                             * any callee other than a name or a field path
+                             * (`fs[pick()]`), which is also read twice below
+                             * (`.fn`, `.env`): held once, it is evaluated
+                             * once. */
                             ad.closure[ad.count] = 2;
                             ad.idx[ad.count++] = 0;
                         }
