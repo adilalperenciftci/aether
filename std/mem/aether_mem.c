@@ -572,29 +572,35 @@ int aether_mem_set_u32_be(void* p, int offset, int64_t value) {
     return 1;
 }
 
+/* The 64-bit readers assemble the bytes unsigned. Shifted as int64_t, a top
+ * byte of 128 or more overflowed a signed integer (`(int64_t)0xc6 << 56`),
+ * which C leaves undefined (UBSan, #2488). The bits are the same; the one
+ * conversion to int64_t at the end is two's complement on every target. */
 int64_t aether_mem_get_u64_le(const void* p, int offset) {
     if (!p) return 0;
     const uint8_t* b = (const uint8_t*)p + offset;
-    return ((int64_t)b[0])        |
-           ((int64_t)b[1] << 8)   |
-           ((int64_t)b[2] << 16)  |
-           ((int64_t)b[3] << 24)  |
-           ((int64_t)b[4] << 32)  |
-           ((int64_t)b[5] << 40)  |
-           ((int64_t)b[6] << 48)  |
-           ((int64_t)b[7] << 56);
+    uint64_t v = ((uint64_t)b[0])        |
+                 ((uint64_t)b[1] << 8)   |
+                 ((uint64_t)b[2] << 16)  |
+                 ((uint64_t)b[3] << 24)  |
+                 ((uint64_t)b[4] << 32)  |
+                 ((uint64_t)b[5] << 40)  |
+                 ((uint64_t)b[6] << 48)  |
+                 ((uint64_t)b[7] << 56);
+    return (int64_t)v;
 }
 int64_t aether_mem_get_u64_be(const void* p, int offset) {
     if (!p) return 0;
     const uint8_t* b = (const uint8_t*)p + offset;
-    return ((int64_t)b[0] << 56)  |
-           ((int64_t)b[1] << 48)  |
-           ((int64_t)b[2] << 40)  |
-           ((int64_t)b[3] << 32)  |
-           ((int64_t)b[4] << 24)  |
-           ((int64_t)b[5] << 16)  |
-           ((int64_t)b[6] << 8)   |
-           ((int64_t)b[7]);
+    uint64_t v = ((uint64_t)b[0] << 56)  |
+                 ((uint64_t)b[1] << 48)  |
+                 ((uint64_t)b[2] << 40)  |
+                 ((uint64_t)b[3] << 32)  |
+                 ((uint64_t)b[4] << 24)  |
+                 ((uint64_t)b[5] << 16)  |
+                 ((uint64_t)b[6] << 8)   |
+                 ((uint64_t)b[7]);
+    return (int64_t)v;
 }
 int aether_mem_set_u64_le(void* p, int offset, int64_t value) {
     if (!p) return 0;

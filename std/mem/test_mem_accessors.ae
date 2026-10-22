@@ -184,6 +184,19 @@ main() {
             spec.assert_eq(mem.get_uint8(b, 0), mem.get_uint8(b, 15),
                 "LE byte 0 equals BE byte 7")
         }
+
+        spec.it("reads a u64 whose top byte is 128 or more") callback {
+            // 0xc600000000000001: the reader assembles the bytes unsigned,
+            // so a top byte of 0xc6 overflows nothing (#2488) and comes
+            // back as the negative long it spells.
+            b = zeroed(ar, BUFSZ)
+            mem.set_u64_le(b, 0, -4179340454199820287)
+            spec.assert_eq(mem.get_uint8(b, 7), 198, "LE top byte last")
+            spec.assert_eq_long(mem.get_u64_le(b, 0), -4179340454199820287,
+                "LE round trip")
+            spec.assert_eq_long(mem.get_u64_be(b, 0), 72057594037928134,
+                "the same bytes read big-endian")
+        }
     }
 
     spec.describe(fw, "std.mem floats") {

@@ -11,12 +11,17 @@
 // The children are this program, re-run with a flag, so the test needs no
 // other binary and runs the same on every platform.
 // sweep-ok: the 30 s sleep is the --parent child's, killed at its 1 s deadline.
+@source("crash.c")
 import std.os
 import std.fs
 import std.io
 import std.list
 import std.mem
 import std.string
+
+// crash.c: an access violation on Windows, SIGSEGV elsewhere, raised as
+// such rather than by a write through null, which C leaves undefined.
+extern os_spawn_to_crash()
 
 check(label: string, ok: bool) -> int {
     if ok {
@@ -56,8 +61,8 @@ child(mode: string) -> int {
         return 0
     }
     if mode == "--crash" {
-        // A write through a null pointer: an access violation, SIGSEGV.
-        _x = mem.set_byte_unchecked(null, 0, 1)
+        // An access violation on Windows, SIGSEGV elsewhere (crash.c).
+        os_spawn_to_crash()
         println("not reached")
         return 0
     }

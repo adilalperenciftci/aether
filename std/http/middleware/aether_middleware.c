@@ -144,18 +144,23 @@ static char* b64_decode(const char* src, size_t* out_len) {
     size_t src_len = strlen(src);
     char* out = (char*)malloc(src_len + 1);
     if (!out) return NULL;
-    int bits = 0, val = 0;
+    /* `val` keeps only the bits not yet written, fewer than 8 between
+     * characters. An int that kept every bit overflowed after six
+     * characters, which C leaves undefined (UBSan, #2488). */
+    int bits = 0;
+    unsigned int val = 0;
     size_t out_pos = 0;
     for (size_t i = 0; i < src_len; i++) {
         int c = (unsigned char)src[i];
         if (c == '=' || c == '\r' || c == '\n' || c == ' ' || c == '\t') continue;
         int d = b64_decode_char(c);
         if (d < 0) { free(out); return NULL; }
-        val = (val << 6) | d;
+        val = (val << 6) | (unsigned int)d;
         bits += 6;
         if (bits >= 8) {
             bits -= 8;
             out[out_pos++] = (char)((val >> bits) & 0xff);
+            val &= (1u << bits) - 1u;
         }
     }
     out[out_pos] = '\0';

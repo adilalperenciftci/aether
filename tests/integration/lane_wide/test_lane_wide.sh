@@ -176,11 +176,15 @@ case "$arch" in
                 # Heap storage is 16-byte aligned, so no aligned 32-byte move
                 # may go through a slice element. This bites on the Linux and
                 # macOS legs: MinGW's GCC emits vmovups here whatever the
-                # type's alignment, so on Windows it cannot fail.
+                # type's alignment, so on Windows it cannot fail. A move to
+                # or from the stack frame (%rsp, %rbp) is not one: the
+                # compiler aligns its own spill slots, and an instrumented
+                # build (UBSan, #2488) spills `k` there.
                 sc="$(sed -n '/^_\{0,1\}scale:/,/ret/p' "$tmp/out.s")"
-                if printf '%s\n' "$sc" | grep -qE 'vmovaps[^;]*%ymm'; then
+                heap_moves="$(printf '%s\n' "$sc" | grep -E 'vmovaps[^;]*%ymm' | grep -vE '\(%(rsp|rbp)\)')"
+                if [ -n "$heap_moves" ]; then
                     echo "  [FAIL] lane_wide: with -mavx2, scale moves a slice element with vmovaps (faults on 16-byte-aligned heap)"
-                    printf '%s\n' "$sc" | grep -E 'vmovaps' | head -3 | sed 's/^/        /'
+                    printf '%s\n' "$heap_moves" | head -3 | sed 's/^/        /'
                     fail=1
                 fi
                 if ! printf '%s\n' "$sc" | grep -qE 'vmulps.*%ymm'; then
