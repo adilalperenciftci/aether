@@ -22,7 +22,6 @@ import std.string
 import std.list(list_new, list_free, list_add_raw, list_get_raw, list_size)
 import std.mem(copy)
 import std.fs
-import std.net
 import std.tcp
 import std.cryptography.sha2
 import std.cryptography.hmac
@@ -86,7 +85,7 @@ fn recio_fill(r: *RecordIO) -> int {
     filling = 1
     result = -1
     while filling == 1 {
-        chunk, n, err = net.tcp_receive_n_raw(r.sock, 4096)
+        chunk, n, err = tcp.read_n(r.sock, 4096)
         if string.equals(err, "") == 1 {
             if n <= 0 { result = n; filling = 0 } else {
                 bytes.copy_from_string(r.buf, r.len, chunk, n)
@@ -513,7 +512,7 @@ close_conn(conn: ptr) {
     tls13_record.free_ctx(c.app_send as ptr)
     tls13_record.free_ctx(c.app_recv as ptr)
     recio_free(c.rio as *RecordIO)
-    net.tcp_close(c.sock)
+    tcp.close(c.sock)
     libc_free(conn)
 }
 
@@ -620,19 +619,14 @@ pure_tls_server_accept(fd: int, cert_path: string, key_path: string) -> ptr {
     sock = tcp_socket_from_fd_owned(fd)
     if sock == null { return null }
 
-    fh_c = fs.file_open_raw(cert_path, "r")
-    if fh_c == null { net.tcp_close(sock); return null }
-    cert_text = fs.file_read_all_raw(fh_c)
-    fs.file_close(fh_c)
-
-    fh_k = fs.file_open_raw(key_path, "r")
-    if fh_k == null { net.tcp_close(sock); return null }
-    key_text = fs.file_read_all_raw(fh_k)
-    fs.file_close(fh_k)
+    cert_text, cerr = fs.read(cert_path)
+    if string.equals(cerr, "") != 1 { tcp.close(sock); return null }
+    key_text, kerr = fs.read(key_path)
+    if string.equals(kerr, "") != 1 { tcp.close(sock); return null }
 
     chain_list, lens_list = parse_cert_chain_pem(cert_text)
     if chain_list == null {
-        net.tcp_close(sock)
+        tcp.close(sock)
         return null
     }
 
@@ -646,7 +640,7 @@ pure_tls_server_accept(fd: int, cert_path: string, key_path: string) -> ptr {
     if priv_key == null {
         free_cert_chain(chain_list)
         list_free(lens_list)
-        net.tcp_close(sock)
+        tcp.close(sock)
         return null
     }
 
@@ -657,7 +651,7 @@ pure_tls_server_accept(fd: int, cert_path: string, key_path: string) -> ptr {
         bytes.free(priv_key)
         free_cert_chain(chain_list)
         list_free(lens_list)
-        net.tcp_close(sock)
+        tcp.close(sock)
         return null
     }
 
