@@ -1413,6 +1413,7 @@ test-ae: compiler ae stdlib
 	@# A bad AE_SWEEP_SHARD (#2757) must fail here: inside the pipelines below
 	@# it would leave the sweep with nothing to run, and nothing reads as a pass.
 	@sh tests/scripts/sweep_shard.sh < /dev/null
+	@rm -f $(BUILD_DIR)/test-ae.verdict
 	@tmpdir=$$(mktemp -d); \
 	root=$$(pwd); \
 	script="$$root/tests/scripts/run_ae_test.sh"; \
@@ -1478,8 +1479,12 @@ test-ae: compiler ae stdlib
 	fi; \
 	sh "$$root/tests/scripts/sweep_timings.sh" "$$tmpdir"; \
 	echo "Aether Tests: $$passed passed, $$failed failed, $$skipped skipped, $$total total"; \
+	printf '%s %s %s %s\n' "$$passed" "$$failed" "$$skipped" "$$total" > "$$root/$(BUILD_DIR)/test-ae.verdict"; \
 	rm -rf "$$tmpdir"; \
 	if [ "$$failed" -gt 0 ]; then exit 1; fi
+	@# A shell that stopped before its tally can still leave make with status
+	@# 0: only a written tally with no failure is a pass.
+	@sh tests/scripts/sweep_verdict.sh $(BUILD_DIR)/test-ae.verdict
 endif
 
 # Install smoke test: installs to a temp dir, runs ae init + ae run, cleans up
