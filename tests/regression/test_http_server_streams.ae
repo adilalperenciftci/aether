@@ -140,6 +140,7 @@ main() {
     }
 
     http.server_stop(s)
+    http.server_free(s)
     if bad > 0 { exit(1) }
     println("PASS #3109: chunked responses, SSE comments and the status a handler set")
 }
