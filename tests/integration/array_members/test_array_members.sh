@@ -72,7 +72,7 @@ main() {
     println("${[1, 2].len} ${count(make([]int, 3))} ${a.len} ${r.length}")
 }
 AE
-out="$(cd "$tmp" && "$AE" run fine.ae 2>&1)"
+out="$(cd "$tmp" && "$AE" run fine.ae 2>&1 | tr -d '\r')"
 if [ "$out" != "2 3 4 7" ]; then
     echo "  [FAIL] array_members: .len and a struct field named length, expected '2 3 4 7', got:"
     echo "$out" | sed 's/^/        /' | head -6
