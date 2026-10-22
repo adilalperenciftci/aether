@@ -13,10 +13,10 @@ The idea maps cleanly onto things Aether already has:
 
 | LiveView concept        | Aether primitive |
 |-------------------------|------------------|
-| per-connection process holding `assigns` | an actor / per-connection state keyed by the socket |
+| per-connection process holding `assigns` | an actor / the connection's `ctx` map |
 | the transport            | `contrib/tinyweb` WebSocket (`web_socket(path) \|msg, sender, ctx\|`) |
 | `handle_event`           | the WS message handler |
-| `render` → push          | `ws_send_frame(sender, html)` |
+| `render` → push          | `http.ws_send_text(sender, html)` |
 | the JS client            | ~15 lines: on message swap innerHTML, on click `ws.send(...)` |
 
 The question this doc answers: *how much of LiveView is worth building on
@@ -49,9 +49,9 @@ mount        -> 0
 ALL PASS: the LiveView loop (mount/handle_event/render/push) works
 ```
 
-- Per-connection state kept server-side, keyed by the connection's socket ptr
-  (`mem.ptr_to_long(sender)`): tinyweb's `web_socket` handler is shared, but the
-  `sender` socket is stable for a connection's lifetime.
+- Per-connection state kept server-side in the handler's `ctx`, the map a
+  connection's messages share: tinyweb's `web_socket` handler is shared, the
+  `ctx` is the connection's.
 - `render(state) -> html` is a pure function; the whole `#live` region is pushed
   as one frame (full-HTML replace: no diffing yet; the point was the *loop*).
 - Client events (`{"event":"inc"}`) arrive, mutate state, re-render, push back.
@@ -69,20 +69,19 @@ The prototype is the single most useful thing to read before building, and it is
 **committed** under `contrib/tinyweb/examples/liveview/`:
 
 - **`contrib/tinyweb/examples/liveview/example_counter_live.ae`**: the working WS-only
-  spike. Drives `tinyweb.ws_accept_loop` directly (see the "structural blocker"
-  section for why it bypasses `tw_start`). Also reproduced in
+  spike, a `web_socket` route served by `tw_start`. Also reproduced in
   [Appendix A](#appendix-a-the-working-spike-source) for at-a-glance reading.
 - **`contrib/tinyweb/examples/liveview/drive_live.py`**: a Python
   `websocket-client` driver asserting `mount→0, inc→1, inc→2, dec→1, reset→0`.
   Reproduced in [Appendix B](#appendix-b-the-python-driver).
 - **`contrib/tinyweb/examples/liveview/README.md`**: build/run instructions.
-- **`contrib/tinyweb/test_websocket.ae`** (committed, on `main`): the WS codec
-  round-trip test written for PR #1449. The `live_view` round-trip test (A.5)
-  should mirror its structure exactly (server accept loop in an actor, hand-rolled
-  client in `main`, `exit(0)`/`exit(1)`).
+- **`contrib/tinyweb/test_streams.ae`**: tinyweb's WebSocket, SSE and chunked
+  round trips. The `live_view` round-trip test (A.5) should mirror its
+  structure (`tw_start` in an actor, std.http's WebSocket client in `main`,
+  std.spec cases).
 
-Build the spike with the WS handshake C extern:
-`ae build contrib/tinyweb/examples/liveview/example_counter_live.ae --extra contrib/tinyweb/ws_handshake.c -o /tmp/counter_live`
+Build the spike:
+`ae build contrib/tinyweb/examples/liveview/example_counter_live.ae -o /tmp/counter_live`
 
 ## The honest strategic read: how big a bet is this?
 
@@ -109,8 +108,8 @@ schema roadmap flagged as "not yet." Three cost drivers make it a different
    ship and stay in protocol-sync with the server. Owning both sides of a wire
    protocol is an ongoing maintenance surface.
 
-But the pieces exist in embryo: tinyweb already does WebSocket (`ws_handshake.c`,
-`ws_client.ae`) and SSE; Aether has actors for per-connection state;
+But the pieces exist in embryo: tinyweb already serves WebSocket and SSE routes
+(std.http's); Aether has actors for per-connection state;
 `std.schema` / templating exist. So it's conceivable, not fantasy.
 
 **The on-ramp (why this is not either/or with the schema roadmap):** an
@@ -146,57 +145,24 @@ manual-memory model**, not an Elixir/OTP application framework. So:
   that a single-node systems runtime shouldn't grow into `std`. If any of it is
   wanted, it belongs in `contrib/*`, consumed explicitly.
 
-## The one structural blocker (must clear before Tier A)
+## The structural blocker (cleared)
 
-tinyweb has **no working way to run the HTTP loop and the WS/SSE loop
-concurrently.** `tw_start` binds the WS listener but then blocks in the HTTP
-accept loop (`http.server_start`), so `ws_accept_loop` never runs. The intended
-"run `server_start_ws` from a second actor" path segfaults: **passing the
-DSL-built server map across an actor message boundary corrupts its nested closure
-entries** (crash in `tw_start.isra -> aether_string_data` on the scheduler
-thread). The existing `example_websocket.ae` / `example_sse.ae` call only
-`tw_start`, so their WS/SSE handlers have never actually served.
-
-The spike sidesteps this by driving `ws_accept_loop` directly, WS-only. A real
-LiveView page needs to serve the initial HTML *and* the WebSocket at once, so
-this is the first thing to fix.
-
-The corruption is specific to the trailing-block DSL map (nested boxed closures)
-crossing the actor copy boundary: a **plain** map crosses fine (verified: a
-`map.put(m,"k","v")` map round-trips through an actor message intact; the
-DSL-built server map with its nested `ws_handlers` list of boxed closures does
-not).
-
-**Decision: do Option 1.** It is already proven in the spike and needs no
-compiler/runtime change:
-
-> **Option 1 (chosen): never send the DSL map across an actor boundary.**
-> Do not pass the `web_server_with_ws` map to an actor. Instead give each loop
-> only the two plain values it needs: the bound TCP listener (`ptr`) and the
-> handler list (`ptr`, a `list` of `ws_entry` maps): either by building them
-> inside the actor that runs the loop, or by extracting them from the server map
-> on the *main* thread and sending those two ptrs. A `list` of maps-of-boxed-
-> closures is fine to reference across threads as long as it is not *copied* by
-> an actor message; send the pointers, not the structure.
-
-Fallbacks, only if Option 1 proves insufficient (e.g. we later want a single
-`serve()` entry point that owns both loops):
-
-2. Make the server handle its own fan-out: one entry point that spawns the WS/SSE
-   accept loops on off-scheduler pthreads (blocking IO already must run off the
-   scheduler; see the h2 precedent) rather than via actor messages.
-3. Root-cause and fix the actor message-copy of nested boxed closures in the
-   compiler/runtime (largest blast radius; only pursue if the corruption bites
-   outside tinyweb). **File this as an issue regardless**: it is a latent
-   footgun for anyone passing DSL-built structures through messages.
+tinyweb used to listen for WebSocket and SSE on ports of their own, with loops
+of its own that nothing ran while `tw_start` blocked in the HTTP accept loop,
+so a program could not serve the page and the live channel at once. Since
+#3109, `web_socket` and `sse_endpoint` routes are std.http's, on the HTTP
+port: `tw_start` serves the initial HTML, the WebSocket and SSE together, and
+the spike runs through it. The server map built by the DSL crosses an actor
+message intact (`test_schema_api.ae` and `test_streams.ae` both start the
+server from one).
 
 ## Wire protocol
 
 The protocol is deliberately tiny and versioned so the server and the (browser)
 JS client can evolve together. All frames are WebSocket **text** frames carrying
-UTF-8 JSON. `tinyweb.ws_send_frame` (server→client) and the browser's
-`ws.send` (client→server) are the transports; `tinyweb.ws_read_frame` already
-unmasks inbound frames (PR #1449).
+UTF-8 JSON. `http.ws_send_text` (server→client) and the browser's
+`ws.send` (client→server) are the transports; std.http's codec unmasks
+inbound frames and reassembles fragmented ones.
 
 **Client → server** (one JSON object per frame):
 
@@ -230,10 +196,9 @@ unmasks inbound frames (PR #1449).
   and substitutes changed slots. The **first** post-mount frame is always a full
   `render` (client needs the skeleton); subsequent frames are `diff`.
 
-**Framing invariant:** each protocol message is exactly one WebSocket frame.
-`ws_send_frame` handles both the 2-byte and extended-length headers; payloads
-may exceed 126 bytes (they will), so this path must stay on the bytes-buffer
-implementation from PR #1449 (see Landmines).
+**Framing invariant:** each protocol message is exactly one WebSocket message.
+std.http's codec takes any length (payloads will exceed 126 bytes, and can
+exceed 64 KiB).
 
 ## Module & API surface
 
@@ -256,13 +221,13 @@ implementer should target (names may be refined, shapes should not):
 // the ws_handlers list (or the DSL registers it for you: see live_view_route).
 live_view(path: string, mount: fn, handle_event: fn, render: fn) -> ptr
 
-// DSL sugar for use inside a web_server_with_ws { ... } block, mirroring
+// DSL sugar for use inside a web_server { ... } block, mirroring
 // web_socket(...). Registers the live view on the server's ws_handlers.
 live_view_route(_ctx: ptr, path: string, mount: fn, handle_event: fn, render: fn)
 
-// --- per-connection state store (generalizes the spike's g_state) ---
-// Keyed by conn_key(sender) = "${mem.ptr_to_long(sender)}". A module-level
-// var holds a map<conn_key, assigns-map>. assigns_get lazily mounts.
+// --- per-connection state store (generalizes the spike's ctx attributes) ---
+// Held in the connection's ctx, the web_socket handler's third argument.
+// assigns_get lazily mounts.
 assigns_new()                              -> ptr           // fresh empty assigns map
 assign(assigns: ptr, key: string, val: string)             // set one field
 assign_get(assigns: ptr, key: string)      -> string       // read one field (\"\" if absent)
@@ -279,12 +244,11 @@ client_js(ws_path: string)                  -> string
 ```
 
 **Per-connection lifecycle & cleanup:** `assigns` for a connection is created on
-`mount` and must be **freed when the connection closes**. The WS message loop in
-`ws_handle_client` exits (returns `""` from `ws_read_frame`) on close: the
-`live_view` handler must hook that exit to `assigns_free(conn_key(sender))`, or
-the per-connection map leaks for every disconnect. This is the one lifecycle
-concern the spike ignores (it never disconnects mid-test) and a real server must
-not.
+`mount` and must be **freed when the connection closes**. tinyweb frees the
+connection's `ctx` when the connection closes, so assigns kept there as ctx
+attributes go with it; anything the `live_view` keeps outside `ctx` (an
+assigns map stored by pointer) needs a close hook of its own, or it leaks for
+every disconnect.
 
 ## Tiers
 
@@ -293,24 +257,16 @@ Each tier below carries **explicit acceptance criteria**: the definition of
 
 ### Tier A: the loop as a reusable shape (the plan)
 
-**A1. Concurrent serve**: clear the structural blocker (Option 1 above) so a
-single program serves the initial HTML over HTTP *and* the live channel over WS
-at the same time. This is the gate for everything else.
-- *Approach:* extract `(ws_listener, ws_handlers)` from the server on the main
-  thread; run `ws_accept_loop(ws_listener, ws_handlers)` in one actor and
-  `http.server_start(raw)` in another (or on an off-scheduler thread). Never send
-  the server map itself.
-- **Acceptance:** one program binds an HTTP port and a WS port; `curl`ing the
-  HTTP port returns the page HTML *and*, concurrently, a WS client connects to
-  the live path and completes a handshake: both in the same process, no crash,
-  run under valgrind with no new definite leaks across connect/serve/disconnect.
+**A1. Concurrent serve** (done, #3109): one program serves the initial HTML
+over HTTP *and* the live channel over WS at the same time, on one port, through
+`tw_start` (see "The structural blocker (cleared)").
 
 **A2. A `live_view` handler shape in `contrib/tinyweb/live_view`**: wrap the raw
 `web_socket` handler into the `mount` / `handle_event(sender, ev, assigns) ->
 assigns` / `render(assigns) -> html` triple (signatures above), with
-per-connection `assigns` stored and keyed by socket ptr (generalizing the spike's
-`g_state`/`conn_key`). Full-HTML push via `{"t":"render","html":…}`: correct,
-not yet minimal. Wire the connection-close path to `assigns_free`.
+per-connection `assigns` stored in the connection's `ctx` (generalizing the
+spike's ctx attributes). Full-HTML push via `{"t":"render","html":…}`: correct,
+not yet minimal. Free whatever assigns keep outside `ctx` on close.
 - **Acceptance:** the counter is re-expressible as three closures passed to
   `live_view(...)` with **zero** hand-written WS/frame code in the app; two
   concurrent connections keep independent counts (state is per-connection, not
@@ -370,13 +326,13 @@ artifact" muscle as the schema projections. Build all string work over
 **A5. A runnable showcase + test**: promote the counter spike into
 `contrib/tinyweb/example_live_view.ae` (a real page: served HTML + live region +
 inlined `client_js`), plus `contrib/tinyweb/test_live_view.ae`, a WS round-trip
-test **mirroring `test_websocket.ae`** (server accept loop in an actor,
-hand-rolled client in `main`, `exit(0)`/`exit(1)`).
+test **mirroring `test_streams.ae`** (`tw_start` in an actor, std.http's
+WebSocket client in `main`, std.spec cases).
 - **Acceptance:** `test_live_view.ae` drives `mount→0, inc→1, inc→2, dec→1,
   reset→0` over a real WS connection and passes; reverting A4's diff logic makes
-  the diff-frame assertion fail (the test guards the feature, like
-  `test_websocket.ae` guards the codec). Test lives in `contrib/` (not in the
-  `test-ae` CI glob) and documents its `--extra ws_handshake.c` build line.
+  the diff-frame assertion fail (the test guards the feature). Test lives in
+  `contrib/` (not in the `test-ae` CI glob) and is listed in
+  `.github/scripts/contrib_check.sh`.
 
 A shared spine: the `live_view` module every example uses, so a new live page is
 a `mount`/`render`/`handle_event` triple, not re-plumbing the WS accept loop.
@@ -408,36 +364,23 @@ tinyweb library.
 These bit us building the spike and PR #1449. Each one costs an afternoon if
 rediscovered.
 
-- **`ws_send_frame` payloads exceed 126 bytes: the framing must stay
-  byte-exact.** The header length bytes can be `0x00` (a NUL); the pre-#1449 code
-  built the header with `string.concat`/`from_int` and truncated at the NUL,
-  corrupting every frame ≥126 bytes. The fixed code assembles the whole frame in
-  a `std.bytes` buffer and sends it with `tcp.write_n` (length-aware). Do not
-  "simplify" it back to `string.concat` + `tcp.write`. `render` output is
-  routinely >126 bytes, so this path is always exercised.
 - **`string.array_get` returns a BORROWED pointer.** After `string.array_free`,
   anything from `array_get` dangles. When parsing the request/path or form
   fields, mint an owned copy first: `x = string.concat(string.array_get(a,i),"")`
   before freeing the array. This was the `?/�3V`-garbage-path 404 bug.
-- **The actor-map corruption (the whole reason for Option 1).** Never pass a
-  tinyweb DSL-built server map (nested boxed closures) across an actor message
-  boundary: it corrupts. Send plain ptrs (listener, handler list) instead. See
-  the structural-blocker section.
 - **Boxed closures: keep them boxed until call time.** In the WS dispatch loop,
   store the handler as `hboxed` (a `ptr`, `null` when absent) and only
   `unbox_closure(hboxed)` immediately before `call(...)`. Unboxing into a slot at
   lookup and invoking later leaks/segfaults (fixed in #1449; the `live_view`
   dispatch follows the same shape).
-- **Inbound client frames are masked; server frames are not.** `ws_read_frame`
-  already unmasks (RFC 6455 §5.3, via the `ws_unmask` C extern). If you write a
-  raw test client, YOU must mask client→server frames, and build the frame in a
-  `std.bytes` buffer sent in one `write_n` (a per-byte send fragments across the
-  server's fixed 2-byte header read). See `test_websocket.ae` /
-  [Appendix B](#appendix-b-the-python-driver).
+- **Inbound client frames are masked; server frames are not.** std.http's
+  codec unmasks (RFC 6455 §5.3), and its client masks. If you write a raw test
+  client, YOU must mask client→server frames, building each frame in a
+  `std.bytes` buffer (see `ping` in `test_streams.ae`), or use
+  `http.ws_connect`.
 - **TCP reads are short reads.** `tcp.read(n)` / `read_n(n)` may return fewer
   than `n` bytes. A client reading a server frame must loop until it has the
-  declared length (see `read_exact` in `test_websocket.ae`). The server's
-  `ws_read_frame` already handles this for the header/mask/payload.
+  declared length (see `read_exact` in `test_streams.ae`).
 - **Test-server hygiene under the Bash tool.** Aborted `.ae` server tests orphan
   `~/.aether/cache/<hex>` binaries that busy-loop and **squat the port**: the
   hidden cause of "flaky" bind failures. Launch detached
@@ -454,7 +397,7 @@ rediscovered.
 
 - **It's actors + a pure function + an existing transport.** No new runtime: the
   state lives in an actor, `render` is pure, the WebSocket is already there
-  (and, after PR #1449, actually works).
+  (std.http's, on the HTTP port).
 - **The diff is a projection.** Splitting a template into static skeleton +
   dynamic slots and shipping only slots is the same "one declaration → minimal
   artifact" muscle as the schema projections: pure, leak-free over `strbuilder`,
@@ -465,12 +408,10 @@ rediscovered.
 
 ## Concrete next steps (if pursued)
 
-1. Clear the concurrent-serve blocker (Tier A.1): the prerequisite for a real
-   page; pick option 1 (build-in-actor) first as it's already proven.
-2. Extract a `contrib/tinyweb/live_view` handler shape (A.2) and promote the
+1. Extract a `contrib/tinyweb/live_view` handler shape (A.2) and promote the
    counter spike into `example_live_view.ae` + a round-trip test (A.5).
-3. Add the `phx-*` vocabulary (A.3), then the static/dynamic diff (A.4).
-4. Revisit Tier B (server push, schema-bound forms) only when a real page asks
+2. Add the `phx-*` vocabulary (A.3), then the static/dynamic diff (A.4).
+3. Revisit Tier B (server push, schema-bound forms) only when a real page asks
    for it.
 
 ## Relationship to the other roadmap
@@ -489,43 +430,29 @@ loop and the diff-as-projection), and deliberately not the OTP/BEAM framework.
 ## Appendix A: the working spike source
 
 Committed at `contrib/tinyweb/examples/liveview/example_counter_live.ae` (reproduced here
-for at-a-glance reading; the committed file is the source of truth). Drives
-`tinyweb.ws_accept_loop` directly (bypassing `tw_start`; see the structural
-blocker). This is the A0 baseline the tiers build on. Build:
-`ae build contrib/tinyweb/examples/liveview/example_counter_live.ae --extra contrib/tinyweb/ws_handshake.c -o /tmp/counter_live`.
+for at-a-glance reading; the committed file is the source of truth). A
+`web_socket` route served by `tw_start`. This is the A0 baseline the tiers
+build on. Build:
+`ae build contrib/tinyweb/examples/liveview/example_counter_live.ae -o /tmp/counter_live`.
 Note it uses the *pre-A3* bare-string protocol (`"mount"`, and JSON that
 `string_contains` sniffs): A3 replaces that with the wire envelope above.
 
 ```aether,nolink
+// LiveView-lite SPIKE — proves the core LiveView loop on tinyweb's WebSocket
+// route and Aether's own primitives, WITHOUT the template-diff compiler or a
+// JS framework.
+//
+//   mount        -> per-connection assigns (a counter), kept server-side
+//   render       -> HTML from assigns
+//   phx-click    -> client sends {"event":"inc"} over the WebSocket
+//   handle_event -> mutate assigns -> re-render -> push the new HTML
+//
+// The assigns live in the handler's `ctx`, the map a connection's messages
+// share, so each browser tab has its own count.
+
 import contrib.tinyweb
-import std.tcp
-import std.list
-import std.list(list_new)
-import std.map
-import std.map(map_new, map_has)
-import std.mem
+import std.http
 import std.string(string_contains, to_int, string_concat)
-
-// ---- per-connection state (assigns), keyed by socket ptr ----
-var g_state: ptr = null
-
-fn conn_key(sender: ptr) -> string {
-    return "${mem.ptr_to_long(sender)}"
-}
-
-fn get_count(sender: ptr) -> int {
-    if g_state == null { g_state = map_new() }
-    k = conn_key(sender)
-    if map_has(g_state, k) == 0 { return 0 }
-    v, _ = map.get(g_state, k)
-    n, _ = to_int(v)
-    return n
-}
-
-fn set_count(sender: ptr, n: int) {
-    if g_state == null { g_state = map_new() }
-    map.put(g_state, conn_key(sender), "${n}")
-}
 
 // ---- render: assigns -> the live region's HTML ----
 fn render(count: int) -> string {
@@ -539,8 +466,8 @@ fn render(count: int) -> string {
 }
 
 // ---- handle_event: mutate assigns per the client event ----
-fn handle_event(sender: ptr, event: string) -> int {
-    n = get_count(sender)
+fn handle_event(ctx: ptr, event: string) -> int {
+    n, _ = to_int(tinyweb.ctx_get_attribute(ctx, "count"))
     if string_contains(event, "inc") == 1 {
         n = n + 1
     } else if string_contains(event, "dec") == 1 {
@@ -548,32 +475,22 @@ fn handle_event(sender: ptr, event: string) -> int {
     } else if string_contains(event, "reset") == 1 {
         n = 0
     }
-    set_count(sender, n)
+    tinyweb.ctx_set_attribute(ctx, "count", "${n}")
     return n
 }
 
 main() {
-    println("LiveView-lite counter: ws://127.0.0.1:8126/live  (Ctrl-C to stop)")
+    println("LiveView-lite counter — WebSocket on ws://127.0.0.1:8126/live  (Ctrl-C to stop)")
 
-    // Build the ws_handlers list directly (what web_socket(...) would produce).
-    handlers = list_new()
-    entry = map_new()
-    map.put(entry, "path", "/live")
-    map.put(entry, "handler", box_closure(|msg: string, sender: ptr, ctx: ptr| {
-        // "mount" hits no branch -> returns current count (0 on first frame).
-        n = handle_event(sender, msg)
-        tinyweb.ws_send_frame(sender, render(n))
-    }))
-    list.add(handlers, entry)
-
-    // Bind and run tinyweb's own WebSocket accept loop (blocking).
-    ws_tcp, err = tcp.listen_on("127.0.0.1", 8126)
-    if err != "" {
-        println("ERROR: bind 8126 failed: ${err}")
-        return
+    server = tinyweb.web_server_host("127.0.0.1", 8126) {
+        tinyweb.web_socket("/live") |msg: string, sender: ptr, ctx: ptr| {
+            // "mount" hits no branch -> the current count (0 on the first frame).
+            http.ws_send_text(sender, render(handle_event(ctx, msg)))
+        }
     }
-    println("listening")
-    tinyweb.ws_accept_loop(ws_tcp, handlers)
+
+    err = tinyweb.tw_start(server)
+    if err != "" { println("ERROR: ${err}") }
 }
 ```
 

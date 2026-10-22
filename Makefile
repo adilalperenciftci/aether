@@ -2552,8 +2552,6 @@ install: $(VERSION_HEADER) release-build ae stdlib
 #                                runtime needs the factor-language fork)
 #   - host/aether               (fork+exec sandboxed child via LD_PRELOAD;
 #                                libc + in-tree sandbox runtime only)
-#   - tinyweb                   (libc only — SHA-1 + base64 for WebSocket
-#                                handshake; no third-party dep)
 # Out of scope for v1: host/{java,go} (separate-process or JNI-style
 # bridges, different build shape — javac/jar and cgo c-archive don't fit
 # the cc→ar pipeline). The widget toolkit

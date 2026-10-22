@@ -382,14 +382,6 @@ probe_tinygo() {
     return 0
 }
 
-probe_tinyweb() {
-    # ws_handshake.c needs only libc — implements SHA-1 + base64 inline
-    # for the RFC 6455 Sec-WebSocket-Accept handshake. No system deps,
-    # no pkg-config probes; the build always succeeds.
-    echo ""
-    return 0
-}
-
 probe_factor() {
     # The bridge .c loads libfactor purely via dlopen (mirrors host/lua,
     # host/python after their dlopen rewrites) — it needs NO Factor dev
@@ -450,7 +442,6 @@ probe_aether() {
 # Keyed by module name (build_module's $1). Unlisted → treated as nocross.
 cross_class() {   # <module-name> -> echoes the class token
     case "$1" in
-        tinyweb)               echo "tier1" ;;       # libc-only (SHA1+base64 inline)
         # The vendored amalgamation needs nothing from the target; without
         # it, a libsqlite3 staged in CROSSBUILD_SYSROOT does.
         sqlite)                if [ -n "$SQLITE_VENDORED" ]; then echo "vendored"
@@ -581,7 +572,6 @@ CATALOGUE=(
     "duktape|host_duktape  contrib/host/duktape/aether_host_duktape.c  AETHER_HAS_DUKTAPE  probe_duktape"
     "tcl|host_tcl        contrib/host/tcl/aether_host_tcl.c       AETHER_HAS_TCL     probe_tcl"
     "tinygo|host_tinygo  contrib/host/tinygo/aether_host_tinygo.c AETHER_HAS_TINYGO  probe_tinygo"
-    "tinyweb|tinyweb     contrib/tinyweb/ws_handshake.c           AETHER_HAS_TINYWEB probe_tinyweb"
     "factor|host_factor  contrib/host/factor/aether_host_factor.c AETHER_HAS_FACTOR  probe_factor"
     "racket|host_racket  contrib/host/racket/aether_host_racket.c AETHER_HAS_RACKET  probe_racket"
     "aether|host_aether  contrib/host/aether/aether_host_aether.c AETHER_HAS_AETHER_HOST probe_aether"

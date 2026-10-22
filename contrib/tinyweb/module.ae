@@ -7,10 +7,9 @@
 import std.list
 import std.map
 import std.http
-import std.tcp
 import std.string
-import std.bytes
 import std.mem
+import std.os
 
 exports(
     ALL, GET, POST, PUT, DELETE, PATCH, HEAD, OPTIONS, CONNECT, TRACE,
@@ -22,25 +21,19 @@ exports(
     request_get_query_param, request_get_path_param, request_get_cookie,
     attributes_new, ctx_set_attribute, ctx_get_attribute,
     response_write, response_write_status, response_set_header, response_json,
-    WS_OPCODE_TEXT, WS_OPCODE_BINARY, WS_OPCODE_CLOSE, WS_OPCODE_PING, WS_OPCODE_PONG,
-    ws_generate_accept_key, ws_base64_encode,
     route_entry, filter_entry, ws_entry, static_entry,
     end_point, filter, filter_all, web_socket, serve_static, path,
-    web_server, web_server_host, web_server_with_ws, web_server_full,
-    with_timeout, with_backlog, with_ws_backlog, with_keep_alive,
+    web_server, web_server_host,
+    with_timeout, with_keep_alive,
     with_tls,
-    on_error, on_server_error, on_ws_timeout, on_ws_error,
     on_stats,
     stats_record, stats_add_filter,
     stats_get_path, stats_get_endpoint, stats_get_status,
     stats_get_duration, stats_get_endpoint_duration, stats_get_filters,
     filter_stat_path, filter_stat_result, filter_stat_duration,
-    ws_send_frame, ws_send_close, ws_read_frame,
-    ws_handle_client, ws_accept_loop,
     sse_entry, sse_endpoint, sse_send, sse_send_event, sse_comment, sse_close,
-    sse_handle_client, sse_accept_loop,
     chunked_start, write_chunk, chunked_end,
-    tw_start, server_start_ws, server_start_sse, tw_stop,
+    tw_start, tw_stop,
     compose, compose_at
 )
 
@@ -202,32 +195,6 @@ response_json(res: ptr, json_body: string) {
 }
 
 // ---------------------------------------------------------------------------
-// WebSocket frame opcodes
-// ---------------------------------------------------------------------------
-const WS_OPCODE_TEXT = 1
-const WS_OPCODE_BINARY = 2
-const WS_OPCODE_CLOSE = 8
-const WS_OPCODE_PING = 9
-const WS_OPCODE_PONG = 10
-
-// ---------------------------------------------------------------------------
-// WebSocket handshake helpers
-//
-// The WebSocket upgrade requires SHA-1 + Base64. These are provided as
-// extern C functions in ws_handshake.c, which @source compiles into every
-// program that imports the module (#2125): a binary release ships it as
-// source and builds no libaether_tinyweb.a, so nothing else would link it.
-// ---------------------------------------------------------------------------
-@source("ws_handshake.c")
-// Each returns a fresh string the caller owns.
-extern ws_generate_accept_key(client_key: string) -> string @heap
-extern ws_base64_encode(data: ptr, len: int) -> string @heap
-// Unmask a client->server frame payload (RFC 6455 §5.3): returns a fresh
-// copy of payload with payload[i] ^= mask_key[i % 4]. `len` is the frame's
-// declared payload length (payloads may contain NUL bytes).
-extern ws_unmask(payload: string, mask_key: string, len: int) -> string @heap
-
-// ---------------------------------------------------------------------------
 // Route / Filter registration data structures
 // ---------------------------------------------------------------------------
 
@@ -309,6 +276,13 @@ filter_all(_ctx: ptr, pattern: string, handler: @keep fn) {
 }
 
 // web_socket(path) |message, sender, ctx| { ... }
+//
+// Served on the server's own port by std.http (http.server_websocket), whose
+// RFC 6455 codec takes messages of any size, binary ones, pings and fragments.
+// `message` is the message received (binary ones whole, zero bytes and all),
+// `sender` the connection's std.http WebSocket handle (reply with
+// http.ws_send_text / http.ws_send_binary), `ctx` a map the connection's
+// messages share.
 web_socket(_ctx: ptr, ws_path: string, handler: @keep fn) {
     ws_handlers, _ = map.get(_ctx, "ws_handlers")
     prefix, _ = map.get_string(_ctx, "prefix")
@@ -352,27 +326,18 @@ web_server(port: int) {
     srv = map_new()
     map_put(srv, "port", port)
     map_put(srv, "host", "127.0.0.1")
-    map_put(srv, "ws_port", 0)
-    map_put(srv, "sse_port", 0)
     map_put(srv, "routes", list.new())
     map_put(srv, "filters", list.new())
     map_put(srv, "ws_handlers", list.new())
     map_put(srv, "sse_handlers", list.new())
     map_put(srv, "statics", list.new())
     map_put(srv, "prefix", "")
-    // Config extras
+    // Config extras, applied by tw_start
     map_put(srv, "socket_timeout_ms", 30000)
-    map_put(srv, "web_backlog", 50)
-    map_put(srv, "ws_backlog", 50)
     map_put(srv, "keep_alive", 1)
     // TLS is off until with_tls supplies a cert/key pair.
     map_put(srv, "tls_cert", "")
     map_put(srv, "tls_key", "")
-    // Error handling callbacks
-    map_put(srv, "on_error", 0)
-    map_put(srv, "on_server_error", 0)
-    map_put(srv, "on_ws_timeout", 0)
-    map_put(srv, "on_ws_error", 0)
     // Statistics callback
     map_put(srv, "on_stats", 0)
     return srv
@@ -382,21 +347,6 @@ web_server(port: int) {
 web_server_host(host: string, port: int) {
     srv = web_server(port)
     map_put(srv, "host", host)
-    return srv
-}
-
-// web_server_with_ws(host, http_port, ws_port) { ... }
-web_server_with_ws(host: string, port: int, ws_port: int) {
-    srv = web_server_host(host, port)
-    map_put(srv, "ws_port", ws_port)
-    return srv
-}
-
-// web_server_full(host, http_port, ws_port, sse_port) { ... }
-// Full config with HTTP, WebSocket, and SSE on separate ports
-web_server_full(host: string, port: int, ws_port: int, sse_port: int) {
-    srv = web_server_with_ws(host, port, ws_port)
-    map_put(srv, "sse_port", sse_port)
     return srv
 }
 
@@ -419,64 +369,17 @@ with_tls(srv: @keep ptr, cert_path: string, key_path: string) {
     return srv
 }
 
-// Set socket timeout in milliseconds
+// How long, in milliseconds, a kept-alive connection may sit idle waiting for
+// its next request (30000 by default): std.http's keep-alive idle timeout,
+// set by tw_start. An upgraded WebSocket or an SSE stream is not held to it.
 with_timeout(srv: ptr, ms: int) {
     map_put(srv, "socket_timeout_ms", ms)
 }
 
-// Set HTTP listen backlog
-with_backlog(srv: ptr, n: int) {
-    map_put(srv, "web_backlog", n)
-}
-
-// Set WebSocket listen backlog
-with_ws_backlog(srv: ptr, n: int) {
-    map_put(srv, "ws_backlog", n)
-}
-
-// 1 = enabled (default), 0 = disabled
+// 1 = keep connections alive between requests (default), 0 = close each
+// after its response. Applied by tw_start.
 with_keep_alive(srv: ptr, enabled: int) {
     map_put(srv, "keep_alive", enabled)
-}
-
-// ---------------------------------------------------------------------------
-// Error handling callbacks
-//
-// Register closures to handle errors:
-//   on_error(server) |path, msg| { println("Error: ${msg}") }
-//   on_server_error(server) |msg| { println("Server error: ${msg}") }
-// ---------------------------------------------------------------------------
-
-// Handler receives: (path: string, error_message: string)
-on_error(srv: ptr, handler: @keep fn) {
-    map_put(srv, "on_error", box_closure(handler))
-}
-
-// Handler receives: (error_message: string)
-on_server_error(srv: ptr, handler: @keep fn) {
-    map_put(srv, "on_server_error", box_closure(handler))
-}
-
-// Handler receives: (path: string, error_message: string)
-on_ws_timeout(srv: ptr, handler: @keep fn) {
-    map_put(srv, "on_ws_timeout", box_closure(handler))
-}
-
-// Handler receives: (path: string, error_message: string)
-on_ws_error(srv: ptr, handler: @keep fn) {
-    map_put(srv, "on_ws_error", box_closure(handler))
-}
-
-// Internal: invoke an error handler if registered, otherwise default behavior
-_invoke_error_handler(srv: ptr, key: string, arg1: string, arg2: string) {
-    boxed, _ = map.get(srv, key)
-    if boxed != 0 {
-        handler = unbox_closure(boxed)
-        call(handler, arg1, arg2)
-    } else {
-        // Default: print to stderr
-        println("tinyweb ${key}: ${arg1} ${arg2}")
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -514,246 +417,66 @@ stats_add_filter(stats: ptr, filter_path: string, result: string, duration_ms: i
     list.add(filters, fs)
 }
 
-// Accessors for stats records
-stats_get_path(stats: ptr) { v, _ = map.get(stats, "path"); return v }
-stats_get_endpoint(stats: ptr) { v, _ = map.get(stats, "endpoint"); return v }
-stats_get_status(stats: ptr) { v, _ = map.get(stats, "status"); return v }
-stats_get_duration(stats: ptr) { v, _ = map.get(stats, "duration"); return v }
-stats_get_endpoint_duration(stats: ptr) { v, _ = map.get(stats, "endpoint_duration"); return v }
-stats_get_filters(stats: ptr) { v, _ = map.get(stats, "filters"); return v }
+fn int_field(m: ptr, key: string) -> int {
+    v, _ = map.get(m, key)
+    return mem.ptr_to_long(v) as int
+}
 
-// Accessors for filter stat entries
-filter_stat_path(fs: ptr) { v, _ = map.get(fs, "path"); return v }
-filter_stat_result(fs: ptr) { v, _ = map.get(fs, "result"); return v }
-filter_stat_duration(fs: ptr) { v, _ = map.get(fs, "duration"); return v }
+// Accessors for stats records. Durations are in milliseconds; the record is
+// valid while the on_stats callback runs.
+stats_get_path(stats: ptr) -> string { v, _ = map.get_string(stats, "path"); return v }
+stats_get_endpoint(stats: ptr) -> string { v, _ = map.get_string(stats, "endpoint"); return v }
+stats_get_status(stats: ptr) -> int { return int_field(stats, "status") }
+stats_get_duration(stats: ptr) -> int { return int_field(stats, "duration") }
+stats_get_endpoint_duration(stats: ptr) -> int { return int_field(stats, "endpoint_duration") }
+// The list of filter stat entries, in the order the filters ran.
+stats_get_filters(stats: ptr) -> ptr { v, _ = map.get(stats, "filters"); return v }
 
-// Internal: record stats if callback registered
-_record_stats(srv: ptr, stats: ptr) {
-    boxed, _ = map.get(srv, "on_stats")
-    if boxed != 0 {
-        handler = unbox_closure(boxed)
-        call(handler, stats)
+// Accessors for filter stat entries. The result is "CONTINUE" or "STOP".
+filter_stat_path(fs: ptr) -> string { v, _ = map.get_string(fs, "path"); return v }
+filter_stat_result(fs: ptr) -> string { v, _ = map.get_string(fs, "result"); return v }
+filter_stat_duration(fs: ptr) -> int { return int_field(fs, "duration") }
+
+fn ms_since(started_ns: long) -> int {
+    return ((os.now_monotonic_ns() - started_ns) / 1000000) as int
+}
+
+fn stats_free(stats: ptr) {
+    filters, _ = map.get(stats, "filters")
+    n = list.size(filters)
+    for (i = 0; i < n; i++) {
+        fs, _ = list.get(filters, i)
+        map_free(fs)
     }
+    list.free(filters)
+    map_free(stats)
 }
 
 // ---------------------------------------------------------------------------
-// WebSocket MessageSender — wraps a TCP socket for sending frames
+// WebSocket, SSE and chunked endpoints
 //
-// Sends unmasked WebSocket text frames (server->client per RFC 6455).
+// All served by std.http on the server's own port (#3109): its WebSocket codec
+// is RFC 6455 conformance-tested (any length, binary, ping/pong, fragments,
+// close codes), and its SSE and chunked streams write through the
+// connection's own send path, TLS included.
 // ---------------------------------------------------------------------------
 
-// Send an unmasked WebSocket text frame over a raw TCP socket.
-// Send an unmasked text frame over a raw TCP socket
-ws_send_frame(sock: ptr, payload: string) {
-    len = string.length(payload)
-
-    // Assemble the whole frame in a NUL-safe bytes buffer and send it in ONE
-    // write. Two bugs are avoided here:
-    //   1. Header octets are RAW bytes (0x81, the length bytes), never ASCII
-    //      digits — the old from_int(129) emitted "129" and corrupted frames.
-    //   2. A length high-byte of 0 (e.g. for a 166-byte payload) is a NUL;
-    //      building the header with string.concat / strlen-based tcp.write
-    //      truncated there, corrupting every frame >=126 bytes. A bytes buffer
-    //      + length-aware write_n is NUL-safe.
-    // Sending in one write also avoids TCP fragmentation splitting the header
-    // across a peer's fixed-size reads. 0x81 = FIN | opcode=text(1).
-    //   len <  126     : 2-byte header [0x81, len]
-    //   len 126..65535 : 4-byte header [0x81, 126, len>>8, len&0xFF]
-    hdr_len = 2
-    if len >= 126 { hdr_len = 4 }
-    total = hdr_len + len
-    frame = make([]byte, total)
-    frame[0] = 129
-    if len < 126 {
-        frame[1] = len
-    } else {
-        frame[1] = 126
-        frame[2] = len / 256
-        frame[3] = len - (len / 256) * 256
-    }
-    if len > 0 {
-        mem.copy_slice(frame[hdr_len..total], string.bytes(payload))
-    }
-    tcp.write_n(sock, frame)
-    free(frame)
-}
-
-// Send a close frame (opcode 8, empty payload): [0x88, 0x00]. Raw octets in a
-// bytes buffer — from_int would emit "136"/"0" as text and corrupt the frame.
-ws_send_close(sock: ptr) {
-    frame = make([]byte, 2)
-    frame[0] = 136
-    frame[1] = 0
-    tcp.write_n(sock, frame)
-    free(frame)
-}
-
-// ---------------------------------------------------------------------------
-// WebSocket frame reading
-//
-// Reads one WebSocket frame from a TCP socket, unmasking if needed.
-// Returns the payload as a string, or "" on close/error.
-// Reads one WebSocket frame, unmasking if needed. Returns "" on close/error.
-// ---------------------------------------------------------------------------
-
-ws_read_frame(sock: ptr) {
-    // Read 2-byte header. tcp.read returns (data, err).
-    hdr, herr = tcp.read(sock, 2)
-    if herr != "" { return "" }
-
-    byte0 = string.char_at(hdr, 0)
-    byte1 = string.char_at(hdr, 1)
-
-    opcode = byte0 - ((byte0 / 16) * 16) // byte0 & 0x0F
-    masked = byte1 / 128 // (byte1 & 0x80) != 0
-    payload_len = byte1 - (masked * 128) // byte1 & 0x7F
-
-    // Extended payload length
-    if payload_len == 126 {
-        ext, eerr = tcp.read(sock, 2)
-        if eerr != "" { return "" }
-        payload_len = string.char_at(ext, 0) * 256 + string.char_at(ext, 1)
-    }
-
-    // Close frame
-    if opcode == WS_OPCODE_CLOSE {
-        ws_send_close(sock)
-        return ""
-    }
-
-    // Read masking key (4 bytes) if masked
-    mask_key = ""
-    if masked == 1 {
-        mkey, merr = tcp.read(sock, 4)
-        if merr != "" { return "" }
-        mask_key = mkey
-    }
-
-    // Read payload
-    if payload_len == 0 { return "" }
-    payload, perr = tcp.read(sock, payload_len)
-    if perr != "" { return "" }
-
-    // Unmask: payload[i] ^= mask_key[i % 4]
-    // (Client-to-server frames are always masked per RFC 6455.) Done in C for
-    // byte-exactness and speed — see ws_unmask in ws_handshake.c.
-    if masked == 1 {
-        return ws_unmask(payload, mask_key, payload_len)
-    }
-
-    return payload
-}
-
-// ---------------------------------------------------------------------------
-// WebSocket server accept loop
-//
-// Listens on a separate port, performs the HTTP upgrade handshake,
-// then loops reading frames and dispatching to the registered handler.
-// ---------------------------------------------------------------------------
-
-ws_handle_client(client: ptr, ws_handlers: ptr) {
-    // Read the HTTP upgrade request. tcp.read returns (data, err).
-    request_data, rerr = tcp.read(client, 4096)
-    if rerr != "" {
-        tcp.close(client)
-        return
-    }
-
-    // Extract path from "GET /path HTTP/1.1". array_get returns a BORROWED
-    // pointer into parts' storage, so mint an owned copy before array_free
-    // (else ws_path dangles — the documented string_array_get lifetime trap).
-    parts = string.split(request_data, " ")
-    n_parts = string.array_size(parts)
-    ws_path = ""
-    if n_parts >= 2 {
-        ws_path = string.concat(string.array_get(parts, 1), "")
-    }
-    string.array_free(parts)
-
-    // Extract Sec-WebSocket-Key header
-    lines = string.split(request_data, "\n")
-    n_lines = string.array_size(lines)
-    client_key = ""
-    for (i = 0; i < n_lines; i++) {
-        line = string.array_get(lines, i)
-        if string.starts_with(line, "Sec-WebSocket-Key: ") == 1 {
-            client_key = string.substring(line, 19, string.length(line))
-            client_key = string.trim(client_key)
+// The trampoline std.http runs for a web_socket route (`ud` is its entry):
+// each message the connection sends goes to the handler, until it closes.
+@c_callback tw_ws_dispatch(req: ptr, ws: ptr, ud: ptr) {
+    hboxed, _ = map.get(ud, "handler")
+    ctx = attributes_new()
+    while http.ws_recv(ws) != -1 {
+        msg = http.ws_message_bytes(ws)
+        text = ""
+        if msg != null {
+            text = string.new_with_length(msg, msg.len)
         }
+        handler = unbox_closure(hboxed)
+        call(handler, text, ws, ctx)
     }
-    string.array_free(lines)
-
-    if (client_key == "") {
-        tcp.close(client)
-        return
-    }
-
-    // Generate accept key and send handshake response
-    accept_key = ws_generate_accept_key(client_key)
-    response = "HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Accept: "
-    response = string.concat(response, accept_key)
-    response = string.concat(response, "\r\n\r\n")
-    tcp.write(client, response)
-
-    // Find the boxed handler for this path (keep it BOXED; unbox at call time —
-    // a bare `handler = unbox_closure(...)` can't be stored in a plain slot and
-    // then invoked, and mixing it with an int-init leaks/segfaults).
-    hboxed = null
-    n_ws = list.size(ws_handlers)
-    for (i = 0; i < n_ws; i++) {
-        entry, _ = list.get(ws_handlers, i)
-        entry_path, _ = map.get(entry, "path")
-        if (ws_path == entry_path) {
-            hboxed, _ = map.get(entry, "handler")
-        }
-    }
-
-    if hboxed == null {
-        // 404 — no handler registered for this path
-        ws_send_frame(client, "Error: 404")
-        ws_send_close(client)
-        tcp.close(client)
-        return
-    }
-
-    // Message loop — read frames and dispatch to handler
-    running = 1
-    for (running == 1; running == 1; running = running) {
-        msg = ws_read_frame(client)
-        if (msg == "") {
-            running = 0
-        } else {
-            // Call handler: (message, sender_socket, ctx)
-            // sender_socket is the raw TCP socket — use ws_send_frame() to reply
-            handler = unbox_closure(hboxed)
-            call(handler, msg, client, 0)
-        }
-    }
-
-    tcp.close(client)
+    map_free(ctx)
 }
-
-ws_accept_loop(tcp_server: ptr, ws_handlers: ptr) {
-    // Accept connections in a loop (blocking)
-    // Each client is handled sequentially for simplicity;
-    // production would spawn per-connection (Tiny uses virtual threads)
-    running = 1
-    for (running == 1; running == 1; running = running) {
-        client, aerr = tcp.accept(tcp_server)
-        if aerr == "" {
-            ws_handle_client(client, ws_handlers)
-        } else {
-            running = 0
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Server-Sent Events (SSE) and Chunked Responses
-//
-// SSE endpoints run on a separate port (like WebSockets) with their own
-// accept loop, since the C HTTP server closes connections after handler return.
-// ---------------------------------------------------------------------------
 
 // SSE endpoint entry: { path, handler_closure }
 sse_entry(path_pattern: string, handler: @keep fn) {
@@ -763,8 +486,9 @@ sse_entry(path_pattern: string, handler: @keep fn) {
     return entry
 }
 
-// DSL function: sse_endpoint("/events") |stream| { ... }
-// The handler receives an SSE stream object and uses sse_send() to push events.
+// DSL function: sse_endpoint("/events") |stream: ptr| { ... }
+// The handler receives the stream (a std.http SSE stream) and pushes events
+// with sse_send / sse_send_event; the connection closes when it returns.
 sse_endpoint(_ctx: ptr, sse_path: string, handler: @keep fn) {
     sse_handlers, _ = map.get(_ctx, "sse_handlers")
     prefix, _ = map.get_string(_ctx, "prefix")
@@ -772,118 +496,58 @@ sse_endpoint(_ctx: ptr, sse_path: string, handler: @keep fn) {
     list.add(sse_handlers, sse_entry(full_path, handler))
 }
 
-// An SSE stream wraps a TCP socket with the event-stream protocol.
-// Send an SSE data event
-sse_send(stream: ptr, data: string) {
-    tcp.write(stream, "data: ${data}\n\n")
-}
-
-// Send a named SSE event with an event type
-sse_send_event(stream: ptr, event_type: string, data: string) {
-    tcp.write(stream, "event: ${event_type}\ndata: ${data}\n\n")
-}
-
-// Send an SSE comment (keep-alive)
-sse_comment(stream: ptr, comment: string) {
-    tcp.write(stream, ": ${comment}\n\n")
-}
-
-// Close an SSE stream
-sse_close(stream: ptr) {
-    tcp.close(stream)
-}
-
-// Handle an SSE client connection: parse the HTTP request, send headers,
-// then call the registered handler with the raw socket as "stream"
-sse_handle_client(client: ptr, sse_handlers: ptr) {
-    // Read the HTTP request. tcp.read returns (data, err).
-    request_data, rerr = tcp.read(client, 4096)
-    if rerr != "" {
-        tcp.close(client)
-        return
-    }
-
-    // Extract path from "GET /path HTTP/1.1". Mint an owned copy before
-    // array_free — array_get returns a borrowed pointer into parts' storage.
-    parts = string.split(request_data, " ")
-    n_parts = string.array_size(parts)
-    req_path = ""
-    if n_parts >= 2 {
-        req_path = string.concat(string.array_get(parts, 1), "")
-    }
-    string.array_free(parts)
-
-    // Find the boxed handler for this path (unbox at call time — see
-    // ws_handle_client for why we keep it boxed rather than storing unboxed).
-    hboxed = null
-    n_sse = list.size(sse_handlers)
-    for (i = 0; i < n_sse; i++) {
-        entry, _ = list.get(sse_handlers, i)
-        entry_path, _ = map.get(entry, "path")
-        if (req_path == entry_path) {
-            hboxed, _ = map.get(entry, "handler")
-        }
-    }
-
-    if hboxed == null {
-        tcp.write(client, "HTTP/1.1 404 Not Found\r\nContent-Length: 9\r\n\r\nNot Found")
-        tcp.close(client)
-        return
-    }
-
-    // Send SSE headers
-    tcp.write(client, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: keep-alive\r\n\r\n")
-
-    // Call handler with the raw socket as "stream"
-    // Handler uses sse_send(stream, data) to push events
+// The trampoline std.http runs for an sse_endpoint route.
+@c_callback tw_sse_dispatch(req: ptr, sse: ptr, ud: ptr) {
+    hboxed, _ = map.get(ud, "handler")
     handler = unbox_closure(hboxed)
-    call(handler, client)
-
-    // Handler returned — close the connection
-    tcp.close(client)
+    call(handler, sse)
 }
 
-sse_accept_loop(tcp_server: ptr, sse_handlers: ptr) {
-    running = 1
-    for (running == 1; running == 1; running = running) {
-        client, aerr = tcp.accept(tcp_server)
-        if aerr == "" {
-            sse_handle_client(client, sse_handlers)
-        } else {
-            running = 0
-        }
-    }
+// Send an SSE data event. 0 when sent, -1 once the client has gone (the
+// stream takes nothing more).
+sse_send(stream: ptr, data: string) -> int {
+    return http.sse_send(stream, "", data)
 }
 
-// --- Chunked transfer encoding helpers ---
-// Work over raw TCP for streaming responses.
-
-// Send chunked response headers
-chunked_start(sock: ptr, status: int) {
-    tcp.write(sock, "HTTP/1.1 ${status} OK\r\nTransfer-Encoding: chunked\r\n\r\n")
+// Send a named SSE event. 0 or -1, as sse_send.
+sse_send_event(stream: ptr, event_type: string, data: string) -> int {
+    return http.sse_send(stream, event_type, data)
 }
 
-// Write a single chunk (hex-length + CRLF + data + CRLF)
-// Write a single chunk (hex-length + CRLF + data + CRLF)
-write_chunk(sock: ptr, data: string) {
-    len = string.length(data)
-    // Convert length to hex string
-    hex = ""
-    if len == 0 { hex = "0" }
-    else {
-        remaining = len
-        for (remaining > 0; remaining > 0; remaining = remaining / 16) {
-            digit = remaining - (remaining / 16) * 16
-            if digit < 10 { hex = string.concat(string.from_int(digit + 48), hex) }
-            else { hex = string.concat(string.from_int(digit + 87), hex) }
-        }
-    }
-    tcp.write(sock, "${hex}\r\n${data}\r\n")
+// Send an SSE comment (a keep-alive). 0 or -1, as sse_send.
+sse_comment(stream: ptr, comment: string) -> int {
+    return http.sse_comment(stream, comment)
 }
 
-// End chunked transfer (send zero-length chunk)
-chunked_end(sock: ptr) {
-    tcp.write(sock, "0\r\n\r\n")
+// End the stream before the handler returns.
+sse_close(stream: ptr) {
+    http.sse_close(stream)
+}
+
+// --- Chunked transfer encoding ---
+// A response whose body goes out in pieces, from an end_point handler:
+//
+//     stream, err = tinyweb.chunked_start(res, 200)
+//     tinyweb.write_chunk(stream, "part one")
+//     tinyweb.chunked_end(stream)
+//
+// The headers set on `res` before chunked_start go out with it.
+
+// Send the head with `status` and Transfer-Encoding: chunked. Returns
+// (stream, "") or (null, error) when the response already has a body.
+chunked_start(res: ptr, status: int) -> {
+    http.response_set_status(res, status)
+    return http.response_begin_chunked(res)
+}
+
+// Send one chunk. 0 when sent, -1 once the client has gone.
+write_chunk(stream: ptr, data: string) -> int {
+    return http.chunked_write(stream, string.bytes(data))
+}
+
+// End the body. 0 when sent, -1 once the client has gone.
+chunked_end(stream: ptr) -> int {
+    return http.chunked_end(stream)
 }
 
 // ---------------------------------------------------------------------------
@@ -896,35 +560,58 @@ chunked_end(sock: ptr) {
 // the matching filter chain (honoring STOP), then unboxes and calls the
 // endpoint handler. Without this, DSL routes registered via tw_start have no way
 // to invoke their closures — this is what makes the builder DSL runnable.
+//
+// With an on_stats callback, each request's filters and endpoint are timed
+// and the callback gets the record once the endpoint has returned.
 // ---------------------------------------------------------------------------
 
 @c_callback dsl_dispatch(req: ptr, res: ptr, ud: ptr) {
     entry = ud
+    started = os.now_monotonic_ns()
+    on_stats_boxed, _ = map.get(entry, "on_stats")
+    stats = null
+    if on_stats_boxed != 0 {
+        patt, _ = map.get_string(entry, "path")
+        stats = stats_record(http.request_path(req), patt, 0, 0, 0)
+    }
     // Per-request context object shared by filters and the endpoint handler.
     ctx = attributes_new()
 
     // 1. Run this route's filter chain; a filter returning STOP short-circuits
     //    (it has already written the response).
+    stopped = 0
     fl, _ = map.get(entry, "route_filters")
-    if fl != 0 {
-        fn_count = list.size(fl)
-        for (fi = 0; fi < fn_count; fi++) {
-            fboxed, _ = list.get(fl, fi)
-            fhandler = unbox_closure(fboxed)
-            verdict = call(fhandler, req, res, ctx)
-            if verdict == STOP {
-                map_free(ctx)
-                return
-            }
+    fn_count = list.size(fl)
+    for (fi = 0; fi < fn_count && stopped == 0; fi++) {
+        fe, _ = list.get(fl, fi)
+        fboxed, _ = map.get(fe, "handler")
+        f_started = os.now_monotonic_ns()
+        if call(unbox_closure(fboxed), req, res, ctx) == STOP { stopped = 1 }
+        if stats != null {
+            fpath, _ = map.get_string(fe, "path")
+            result = "CONTINUE"
+            if stopped == 1 { result = "STOP" }
+            stats_add_filter(stats, fpath, result, ms_since(f_started))
         }
     }
 
     // 2. Run the endpoint handler.
-    hboxed, _ = map.get(entry, "handler")
-    handler = unbox_closure(hboxed)
-    call(handler, req, res, ctx)
-
+    endpoint_ms = 0
+    if stopped == 0 {
+        h_started = os.now_monotonic_ns()
+        hboxed, _ = map.get(entry, "handler")
+        call(unbox_closure(hboxed), req, res, ctx)
+        endpoint_ms = ms_since(h_started)
+    }
     map_free(ctx)
+
+    if stats != null {
+        map_put(stats, "status", http.response_get_status(res))
+        map_put(stats, "duration", ms_since(started))
+        map_put(stats, "endpoint_duration", endpoint_ms)
+        call(unbox_closure(on_stats_boxed), stats)
+        stats_free(stats)
+    }
 }
 
 // Does filter `fmethod`/`fpat` apply to a route with `rmethod`/`rpath`? Method
@@ -986,6 +673,16 @@ tw_start(srv: ptr) -> string {
     // Register all routes with the C server
     // Uses http.server_add_route for all methods (GET, POST, PUT, DELETE,
     // PATCH, HEAD, OPTIONS, and the extended WebDAV/REST methods)
+    // Keep-alive and the idle timeout: std.http's, for every connection.
+    ka_v, _ = map.get(srv, "keep_alive")
+    timeout_v, _ = map.get(srv, "socket_timeout_ms")
+    ka_err = http.server_set_keepalive(raw, mem.ptr_to_long(ka_v) as int, 0,
+        1ms * mem.ptr_to_long(timeout_v))
+    if ka_err != "" {
+        return "keep-alive setup failed: ${ka_err}"
+    }
+
+    on_stats_boxed, _ = map.get(srv, "on_stats")
     routes, _ = map.get(srv, "routes")
     all_filters, _ = map.get(srv, "filters")
     n = list.size(routes)
@@ -1002,12 +699,12 @@ tw_start(srv: ptr) -> string {
             fe, _ = list.get(all_filters, fi)
             fm, _ = map.get(fe, "method")
             fp, _ = map.get(fe, "path")
-            fh, _ = map.get(fe, "handler")
             if filter_applies(fm, fp, method, patt) == 1 {
-                list.add(route_filters, fh)
+                list.add(route_filters, fe)
             }
         }
         map_put(entry, "route_filters", route_filters)
+        map_put(entry, "on_stats", on_stats_boxed)
 
         // Register the trampoline as the C handler; the route entry is the
         // user_data it receives back as `ud`.
@@ -1030,61 +727,24 @@ tw_start(srv: ptr) -> string {
         http.server_get(raw, "${base}/(.*)", http.serve_static, dir)
     }
 
-    // Start WebSocket server on separate port if configured. It listens on
-    // the server's host like the HTTP port does: tcp.listen took every
-    // interface whatever host was configured (#2639). std.tcp's listen_on
-    // takes an IPv4 address, "127.0.0.1" or "0.0.0.0", not a name.
-    ws_port_v, _ = map.get(srv, "ws_port")
-    ws_port = mem.ptr_to_long(ws_port_v) as int
+    // WebSocket and SSE routes, on this same port.
     ws_handlers, _ = map.get(srv, "ws_handlers")
-    if ws_port > 0 && list.size(ws_handlers) > 0 {
-        ws_tcp, ws_err = tcp.listen_on(host, ws_port)
-        if ws_err == "" {
-            map_put(srv, "ws_tcp_server", ws_tcp)
-            println("WebSocket server listening on port ${ws_port}")
-        } else {
-            println("ERROR: Failed to bind WebSocket server to port ${ws_port}")
-        }
+    n_ws = list.size(ws_handlers)
+    for (i = 0; i < n_ws; i++) {
+        entry, _ = list.get(ws_handlers, i)
+        wpath, _ = map.get_string(entry, "path")
+        http.server_websocket(raw, wpath, tw_ws_dispatch, entry)
     }
-
-    // Start SSE server on separate port if configured, on the server's host
-    // as the WebSocket port above.
-    sse_port_v, _ = map.get(srv, "sse_port")
-    sse_port = mem.ptr_to_long(sse_port_v) as int
     sse_handlers, _ = map.get(srv, "sse_handlers")
-    if sse_port > 0 && list.size(sse_handlers) > 0 {
-        sse_tcp, sse_err = tcp.listen_on(host, sse_port)
-        if sse_err == "" {
-            map_put(srv, "sse_tcp_server", sse_tcp)
-            println("SSE server listening on port ${sse_port}")
-        } else {
-            println("ERROR: Failed to bind SSE server to port ${sse_port}")
-        }
+    n_sse = list.size(sse_handlers)
+    for (i = 0; i < n_sse; i++) {
+        entry, _ = list.get(sse_handlers, i)
+        spath, _ = map.get_string(entry, "path")
+        http.server_sse(raw, spath, tw_sse_dispatch, entry)
     }
 
-    // Start accepting HTTP connections (blocking)
-    // For multi-protocol servers, run WS/SSE accept loops from separate actors:
-    //   actor WsRunner  { receive { Start -> server_start_ws(server) } }
-    //   actor SseRunner { receive { Start -> server_start_sse(server) } }
+    // Start accepting connections (blocking).
     return http.server_start(raw)
-}
-
-// Start only the WebSocket accept loop (call from a separate actor/thread)
-server_start_ws(srv: ptr) {
-    ws_tcp, _ = map.get(srv, "ws_tcp_server")
-    ws_handlers, _ = map.get(srv, "ws_handlers")
-    if ws_tcp != 0 {
-        ws_accept_loop(ws_tcp, ws_handlers)
-    }
-}
-
-// Start only the SSE accept loop (call from a separate actor/thread)
-server_start_sse(srv: ptr) {
-    sse_tcp, _ = map.get(srv, "sse_tcp_server")
-    sse_handlers, _ = map.get(srv, "sse_handlers")
-    if sse_tcp != 0 {
-        sse_accept_loop(sse_tcp, sse_handlers)
-    }
 }
 
 tw_stop(srv: ptr) {
@@ -1092,16 +752,6 @@ tw_stop(srv: ptr) {
     if raw != 0 {
         http.server_stop(raw)
         http.server_free(raw)
-    }
-    // Stop WebSocket server
-    ws_tcp, _ = map.get(srv, "ws_tcp_server")
-    if ws_tcp != 0 {
-        tcp.server_close(ws_tcp)
-    }
-    // Stop SSE server
-    sse_tcp, _ = map.get(srv, "sse_tcp_server")
-    if sse_tcp != 0 {
-        tcp.server_close(sse_tcp)
     }
 }
 

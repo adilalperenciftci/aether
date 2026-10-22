@@ -693,7 +693,31 @@ stop emitting on disconnect.
 
 Multi-line `data:` payloads are split on `\n` per the spec. Optional
 `id:` field via `sse_send_id` lets clients reconnect with
-`Last-Event-ID`.
+`Last-Event-ID`. `sse_comment(sse, text)` sends a `: text` line, which
+clients ignore: a keep-alive a proxy that drops idle connections sees as
+traffic. It returns 0, or -1 on a closed stream or a text with a line break.
+
+## Chunked responses
+
+```aether,fragment
+handle_report(req: ptr, res: ptr, ud: ptr) {
+    http.response_set_header(res, "Content-Type", "text/plain")
+    stream, err = http.response_begin_chunked(res)
+    if err != "" { return }
+    _a = http.chunked_write(stream, string.bytes("part one\n"))
+    _b = http.chunked_write(stream, string.bytes("part two\n"))
+    _z = http.chunked_end(stream)
+}
+```
+
+For a body whose length is not known when the head goes out.
+`response_begin_chunked` sends the status and the headers the handler has
+set, less any `Content-Length`, with `Transfer-Encoding: chunked` and
+`Connection: close`, and takes the connection over as `response_upgrade_sse`
+does, TLS included. It is refused (`(null, error)`) on a response that
+already has a body. Each `chunked_write` sends one chunk (an empty slice
+sends nothing); `chunked_end` sends the last one. Both return 0, or -1 once
+the client has gone. The stream is valid until the handler returns.
 
 ---
 

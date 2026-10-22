@@ -87,6 +87,10 @@ int http_sse_send_event_full(HttpSseConn* c, const char* n, const char* d,
 }
 HttpSseConn* http_response_sse_upgrade_raw(HttpServerResponse* r) { (void)r; return NULL; }
 void http_sse_close(HttpSseConn* c) { (void)c; }
+int http_sse_send_comment(HttpSseConn* c, const char* t) { (void)c; (void)t; return -1; }
+HttpChunkedStream* http_response_begin_chunked_raw(HttpServerResponse* r) { (void)r; return NULL; }
+int http_chunked_write(HttpChunkedStream* s, const void* d, int l) { (void)s; (void)d; (void)l; return -1; }
+int http_chunked_end(HttpChunkedStream* s) { (void)s; return -1; }
 void http_server_websocket(HttpServer* s, const char* p, HttpWsHandler h, void* u) {
     (void)s; (void)p; (void)h; (void)u;
 }
@@ -115,6 +119,7 @@ const char* http_get_path_param(HttpRequest* r, const char* k) { (void)r; (void)
 void http_request_free(HttpRequest* r) { (void)r; }
 HttpServerResponse* http_response_create(void) { return NULL; }
 void http_response_set_status(HttpServerResponse* r, int c) { (void)r; (void)c; }
+int http_response_get_status(HttpServerResponse* r) { (void)r; return 0; }
 void http_response_set_header(HttpServerResponse* r, const char* k, const char* v) { (void)r; (void)k; (void)v; }
 void http_response_add_header(HttpServerResponse* r, const char* k, const char* v) { (void)r; (void)k; (void)v; }
 void http_response_clear_headers(HttpServerResponse* r) { (void)r; }
@@ -2297,6 +2302,10 @@ void http_response_set_status(HttpServerResponse* res, int code) {
     res->status_text = strdup(http_status_text(code));
 }
 
+int http_response_get_status(HttpServerResponse* res) {
+    return res ? res->status_code : 0;
+}
+
 /* The reverse proxy's options, if this server has one mounted.
  *
  * The event driver needs them because it runs the proxy exchange itself. It
@@ -2596,6 +2605,7 @@ char* http_response_serialize(HttpServerResponse* res) {
 
 void http_server_response_free(HttpServerResponse* res) {
     if (res && res->sse_upgrade) { free(res->sse_upgrade); res->sse_upgrade = NULL; }
+    if (res && res->chunked_stream) { free(res->chunked_stream); res->chunked_stream = NULL; }
     if (!res) return;
 
     free(res->status_text);
@@ -2924,6 +2934,84 @@ int http_sse_send_event_full(HttpSseConn* sse,
 void http_sse_close(HttpSseConn* sse) {
     if (!sse) return;
     sse->closed = 1;
+}
+
+int http_sse_send_comment(HttpSseConn* sse, const char* text) {
+    if (!sse || !sse->conn || sse->closed || !text || strchr(text, '\n') || strchr(text, '\r'))
+        return -1;
+    size_t len = strlen(text) + 4;   /* ": " text "\n\n" */
+    char* buf = (char*)malloc(len + 1);
+    if (!buf) return -1;
+    snprintf(buf, len + 1, ": %s\n\n", text);
+    int n = conn_send(sse->conn, buf, (int)len);
+    free(buf);
+    if (n != (int)len) {
+        sse->closed = 1;
+        return -1;
+    }
+    return 0;
+}
+
+struct HttpChunkedStream {
+    HttpConn* conn;     /* not owned */
+    int       closed;
+};
+
+HttpChunkedStream* http_response_begin_chunked_raw(HttpServerResponse* res) {
+    if (!res || res->takeover_taken || !res->takeover_conn) return NULL;
+    if (res->body && res->body_length > 0) return NULL;
+    HttpConn* conn = (HttpConn*)res->takeover_conn;
+    if (!conn || conn->fd < 0) return NULL;
+    /* From here the connection is the stream's: a failure below closes it,
+     * rather than the server sending a response half turned chunked. */
+    res->takeover_taken = 1;
+
+    /* The handler's status and headers; the body's length is not known, so
+     * any Content-Length goes. */
+    for (int i = 0; i < res->header_count; i++) {
+        if (strcasecmp(res->header_keys[i], "Content-Length") == 0) {
+            free(res->header_keys[i]);
+            free(res->header_values[i]);
+            res->header_keys[i] = res->header_keys[res->header_count - 1];
+            res->header_values[i] = res->header_values[res->header_count - 1];
+            res->header_count--;
+            i--;
+        }
+    }
+    http_response_set_header(res, "Transfer-Encoding", "chunked");
+    http_response_set_header(res, "Connection", "close");
+    size_t len = 0;
+    char* head = http_response_serialize_len(res, &len);
+    if (!head) return NULL;
+    int n = conn_send(conn, head, (int)len);
+    free(head);
+    if (n != (int)len) return NULL;
+
+    HttpChunkedStream* s = (HttpChunkedStream*)calloc(1, sizeof(HttpChunkedStream));
+    if (!s) return NULL;
+    s->conn = conn;
+    res->chunked_stream = s;
+    return s;
+}
+
+int http_chunked_write(HttpChunkedStream* s, const void* data, int length) {
+    if (!s || !s->conn || s->closed || length < 0 || (length > 0 && !data)) return -1;
+    if (length == 0) return 0;
+    char size_line[16];
+    int sl = snprintf(size_line, sizeof(size_line), "%x\r\n", (unsigned)length);
+    if (conn_send(s->conn, size_line, sl) != sl ||
+        conn_send(s->conn, data, length) != length ||
+        conn_send(s->conn, "\r\n", 2) != 2) {
+        s->closed = 1;
+        return -1;
+    }
+    return 0;
+}
+
+int http_chunked_end(HttpChunkedStream* s) {
+    if (!s || !s->conn || s->closed) return -1;
+    s->closed = 1;
+    return conn_send(s->conn, "0\r\n\r\n", 5) == 5 ? 0 : -1;
 }
 
 // =================================================================

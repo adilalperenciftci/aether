@@ -54,7 +54,7 @@ ARG = r'\s*\(\s*("(?:[^"\\\n]|\\.)*"|[^,)\n]*)'
 HOST_SETTER = re.compile(r'\w*(?:set_host|server_bind|bind_raw)\s*\(\s*([A-Za-z_]\w*)\s*,\s*'
                          r'("(?:[^"\\\n]|\\.)*"|[^,)\n]*)')
 HOST_FIRST = re.compile(r'(?<![\w.])(?:(?:\w+\.)?(?:udp_bind_raw|tcp_listen_on_raw|listen_on)'
-                        r'|udp\.bind|(?:\w+\.)?(?:web_server_host|web_server_with_ws|web_server_full)'
+                        r'|udp\.bind|(?:\w+\.)?web_server_host'
                         r'|lb\.serve(?:_at)?)' + ARG)
 ANY_LISTEN = re.compile(r'(?<![\w.])(?:(?:\w+\.)?tcp_listen_raw|tcp\.listen)\s*\(')
 CREATE = re.compile(r'\b([A-Za-z_]\w*)\s*=\s*(?:\(\s*\w+\s*\*?\s*\)\s*)?[\w.]*server_create\s*\(')

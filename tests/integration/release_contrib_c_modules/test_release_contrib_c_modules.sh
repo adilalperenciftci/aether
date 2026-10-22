@@ -5,12 +5,12 @@
 # 0.801.0's release built `import contrib.sqlite` with
 # `ld: library 'aether_sqlite' not found`: the module's @link asks for the
 # veneer archive `make contrib` builds, and only a source tree has one.
-# contrib.tinyweb (ws_handshake.c), contrib.i18n.collate (aether_i18n.c and
-# the DUCET table) and contrib.avcodec (aether_avcodec.c) failed at link the
-# same way, their C being an --extra the release then trimmed away. Now
-# `ae build` compiles contrib.sqlite's veneer and the pinned amalgamation the
-# release ships when no archive is there (cached, as the cross build already
-# did), and the other three name their C with @source like contrib.jq does.
+# contrib.i18n.collate (aether_i18n.c and the DUCET table) and
+# contrib.avcodec (aether_avcodec.c) failed at link the same way, their C
+# being an --extra the release then trimmed away. Now `ae build` compiles
+# contrib.sqlite's veneer and the pinned amalgamation the release ships when
+# no archive is there (cached, as the cross build already did), and the
+# other two name their C with @source like contrib.jq does.
 #
 # The release tree is staged by scripts/stage-release.sh, the script every
 # release.yml leg packs, so this checks what ships. It fetches the SQLite and
@@ -90,11 +90,6 @@ main() {
     if err != "" { println("ERR: ${err}") } else { println("jq=${out}") }
 }' "jq=20"
 
-# RFC 6455's own example key and accept value.
-check tinyweb 'import contrib.tinyweb
-main() { println("accept=${tinyweb.ws_generate_accept_key("dGhlIHNhbXBsZSBub25jZQ==")}") }' \
-    "accept=s3pPLMBiTxaQ9kYGzzhZRbK+xOo="
-
 check collate 'import contrib.i18n.collate
 main() { println("collate=${collate.compare("en", "cafe", "café")}") }' "collate=-1"
 
@@ -111,5 +106,5 @@ main() {
 fi
 
 [ "$fails" -eq 0 ] || exit 1
-echo "  [PASS] $NAME: contrib.sqlite, jq, tinyweb and i18n.collate build and run from a staged release"
+echo "  [PASS] $NAME: contrib.sqlite, jq and i18n.collate build and run from a staged release"
 exit 0

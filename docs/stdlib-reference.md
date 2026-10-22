@@ -38,7 +38,7 @@ header comment is the authoritative description.
 | `std.fs` | Files, directories, metadata, recursive walk, and change watching. | 148 | [guide](../std/fs/README.md) · [source](../std/fs/module.ae) |
 | `std.hash` | Fast non-cryptographic hashes and checksums: FNV, MurmurHash3, SipHash, CRC-32. | 6 | [guide](../std/hash/README.md) · [source](../std/hash/module.ae) |
 | `std.host` | Primitives for Aether scripts embedded in a host application. | 14 | [guide](../std/host/README.md) · [source](../std/host/module.ae) |
-| `std.http` | HTTP client and server: the `std.net` surface plus Go-style wrappers. | 127 | [guide](../std/http/README.md) · [source](../std/http/module.ae) |
+| `std.http` | HTTP client and server: the `std.net` surface plus Go-style wrappers. | 132 | [guide](../std/http/README.md) · [source](../std/http/module.ae) |
 | `std.http1` | Pure-Aether HTTP/1.1 response reader (RFC 9112). | 14 | [guide](../std/http1/README.md) · [source](../std/http1/module.ae) |
 | `std.intarr` | Fixed-size packed-int buffer. | 15 | [guide](../std/intarr/README.md) · [source](../std/intarr/module.ae) |
 | `std.intmap` | Hash map from `long` keys to `long` values, for integer-keyed counting and lookup. | 12 | [guide](../std/intmap/README.md) · [source](../std/intmap/module.ae) |
@@ -2247,6 +2247,7 @@ Raw externs: `http_server_bind_raw`, `http_server_start_raw`.
 **Response Building:**
 - `http.response_create()` - Create response
 - `http.response_set_status(res, code)` - Set HTTP status code
+- `http.response_get_status(res)` → `int` - The status the response will be sent with (200 until a handler sets one)
 - `http.response_set_header(res, name, value)` - Set response header
 - `http.response_set_body(res, body)` - Set response body. Uses `strdup` + `strlen` internally, **truncates at the first embedded NUL**. Fine for text bodies; use `response_set_body_n` for anything that may contain binary.
 - `http.response_set_body_bytes(res, body: byte[])` - Binary-safe sibling of `response_set_body`: sets the bytes of `body` verbatim (embedded NULs survive); the server copies them.

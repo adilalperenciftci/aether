@@ -15,7 +15,7 @@ server = web_server_host("localhost", 8080) {
             response_write(res, "Hello, World!")
         }
         web_socket("/eee") |msg, sender, ctx| {
-            ws_send_frame(sender, "Echo: ${msg}")
+            http.ws_send_text(sender, "Echo: ${msg}")
         }
     }
 
@@ -25,7 +25,7 @@ server = web_server_host("localhost", 8080) {
         response_write(res, "User: ${request_get_path_param(ctx, \"1\")}")
     }
 }
-server_start(server)
+err = tw_start(server)
 ```
 
 ## Features
@@ -34,15 +34,49 @@ server_start(server)
 - **Path nesting**: `path("/api") { path("/v1") { end_point(...) } }`
 - **Filters**: `filter(GET, "/.*") |req, res, ctx| { CONTINUE / STOP }`
 - **Composition**: `compose(server) { ... }` to add routes after construction
-- **WebSocket**: server + client with RFC 6455 handshake
+- **WebSocket**: `web_socket("/ws") |msg, sender, ctx| { ... }`, on the
+  server's own port
 - **SSE**: `sse_endpoint("/events") |stream| { sse_send(stream, data) }`
 - **Static files**: MIME detection, traversal protection, index.html fallback
 - **Chunked transfer**: `chunked_start`, `write_chunk`, `chunked_end`
 - **Cookies**: `request_get_cookie(req, "name")`
 - **Attributes**: `ctx_set_attribute` / `ctx_get_attribute` for filter-to-endpoint data
-- **Error callbacks**: `on_error`, `on_server_error`, `on_ws_timeout`, `on_ws_error`
 - **Statistics**: `on_stats(server) |stats| { ... }`
-- **Config**: `with_timeout`, `with_backlog`, `with_ws_backlog`, `with_keep_alive`, `with_tls`
+- **Config**: `with_timeout`, `with_keep_alive`, `with_tls`
+
+### WebSocket, SSE and chunked responses
+
+All three are std.http's, served on the same port as the HTTP routes, TLS
+included:
+
+- A `web_socket` handler runs once per message. `msg` is the whole message,
+  of any length, a binary one zero bytes and all; `sender` is the
+  connection's std.http WebSocket (reply with `http.ws_send_text` or
+  `http.ws_send_binary`); `ctx` is a map the connection's messages share.
+  Pings are answered, and a quiet connection stays open.
+- An `sse_endpoint` handler gets the stream and runs until it returns.
+  `sse_send`, `sse_send_event` and `sse_comment` return 0, or -1 once the
+  client has gone, so a handler that streams in a loop knows when to stop.
+- An endpoint streams a body of unknown length with
+  `stream, err = chunked_start(res, status)`, `write_chunk(stream, data)`
+  and `chunked_end(stream)`. The headers set on `res` before it go out with
+  it; a response that already has a body is refused.
+
+### Statistics
+
+`on_stats(server) |stats| { ... }` runs after each request to an
+`end_point` with a record of it: `stats_get_path`, `stats_get_endpoint` (the
+route's pattern), `stats_get_status`, `stats_get_duration` and
+`stats_get_endpoint_duration` (milliseconds), and `stats_get_filters`, a
+list of the filters that ran (`filter_stat_path`, `filter_stat_result`,
+"CONTINUE" or "STOP", and `filter_stat_duration`).
+
+### Timeouts and keep-alive
+
+`with_timeout(server, ms)` is how long a connection may wait for its next
+request (30000 by default); an upgraded WebSocket or an SSE stream is not
+held to it. `with_keep_alive(server, 0)` closes each connection after its
+response.
 
 ### TLS
 
@@ -128,12 +162,9 @@ leaf: its block, if any, is a request-time handler, not more DSL.
 ## Files
 
 - `module.ae`: The library
-- `ws_client.ae`: WebSocket client
-- `ws_handshake.c` (SHA-1 + Base64 for the WebSocket accept key, plus
-  `ws_unmask` (RFC 6455 §5.3 frame unmasking)) C externs
 - `example_app.ae`: HTTP endpoints with filters and nested paths
 - `example_composition.ae`: Modular composition, deep nesting, auth filters
-- `example_websocket.ae`: HTTP + WebSocket server with echo handler
+- `example_websocket.ae`: HTTP + WebSocket routes with echo handlers
 - `example_static.ae`: Static file serving
 - `example_sse.ae`: Server-Sent Events + chunked transfer
 - `example_auth.ae`: Cookie parsing + filter-to-endpoint attributes
@@ -143,7 +174,5 @@ leaf: its block, if any, is a request-time handler, not more DSL.
 - `test_schema_api.ae`: schema_api integration tests (validation + schema/OpenAPI endpoints)
 - `test_spec.ae`: DSL registration unit tests
 - `test_integration.ae`: HTTP round-trip integration tests
-- `test_websocket.ae`: WebSocket codec round-trip (handshake, client-frame
-  unmasking, and extended-length server framing). Its C extern,
-  `ws_handshake.c`, is compiled in by the module's `@source`, so
-  `ae run test_websocket.ae` needs no `--extra`
+- `test_streams.ae`: WebSocket, SSE and chunked endpoints and the server
+  options, over loopback

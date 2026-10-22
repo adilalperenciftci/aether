@@ -120,6 +120,9 @@ typedef struct {
      * response rather than returned by value because the handler holds it
      * across many sse_send calls. */
     void* sse_upgrade;
+    /* Chunked stream (#3109): allocated by http_response_begin_chunked_raw,
+     * freed with the response, as sse_upgrade is. */
+    void* chunked_stream;
 } HttpServerResponse;
 
 // Route handler callback
@@ -488,6 +491,8 @@ void http_request_free(HttpRequest* req);
 // Response building
 HttpServerResponse* http_response_create(void);
 void http_response_set_status(HttpServerResponse* res, int code);
+// The status the response will be sent with (200 until a handler sets one).
+int http_response_get_status(HttpServerResponse* res);
 void http_response_set_header(HttpServerResponse* res, const char* key, const char* value);
 /* Append a header verbatim, even if a header with the same name
  * already exists. For protocols that allow/require repeated headers
@@ -738,6 +743,29 @@ HttpSseConn* http_response_sse_upgrade_raw(HttpServerResponse* res);
 // Best-effort close. Idempotent. After this call, send_event
 // returns -1.
 void http_sse_close(HttpSseConn* sse);
+
+// An SSE comment line (": <text>\n\n"), which clients ignore: a keep-alive a
+// proxy that drops idle connections sees as traffic (#3109). 0 when sent, -1
+// on a closed stream or a failed write.
+int http_sse_send_comment(HttpSseConn* sse, const char* text);
+
+// A chunked response (Transfer-Encoding: chunked, #3109): the handler streams
+// its body in pieces whose total it need not know. http_response_begin_chunked_raw
+// sends the response head -- the status and headers the handler has set, less
+// any Content-Length, plus Transfer-Encoding: chunked and Connection: close --
+// and takes the connection over, as the SSE upgrade does (writes go through
+// the connection's own send path, TLS included). Refused (NULL) when the
+// response is not on a live connection, has been taken over, or has a body;
+// NULL too, with the connection then closed, when the head cannot be sent.
+// The stream is owned by the server and valid until the handler returns.
+typedef struct HttpChunkedStream HttpChunkedStream;  /* opaque */
+HttpChunkedStream* http_response_begin_chunked_raw(HttpServerResponse* res);
+// One chunk of `length` bytes; 0 bytes sends nothing (a zero-length chunk
+// would end the body). Returns 0, or -1 on a closed stream or a failed write.
+int http_chunked_write(HttpChunkedStream* stream, const void* data, int length);
+// The last chunk and the end of the body. Returns 0, or -1 as above; the
+// stream takes no more chunks either way.
+int http_chunked_end(HttpChunkedStream* stream);
 
 // Register a per-request observation hook (#260 Tier 3). Multiple
 // hooks may register; they run in registration order after the
