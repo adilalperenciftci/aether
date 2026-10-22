@@ -1379,6 +1379,53 @@ void test_scheduler_actor_thread_parks_when_idle(void) {
     scheduler_cleanup();
 }
 
+// #3102: a receive timeout armed on an actor that receives nothing fires, on
+// its core and on its own thread. Only a message stepped an actor before, so
+// with more than one actor (no main-thread mode) the timeout never fired.
+// The step tests the deadline as a generated one does, and counts a firing.
+static void timeout_step(void* self) {
+    CounterActor* a = (CounterActor*)self;
+    if (a->timeout_ns > 0 && a->last_activity_ns > 0 &&
+        aether_now_ns() - a->last_activity_ns >= a->timeout_ns) {
+        a->timeout_ns = 0;
+        a->last_activity_ns = 0;
+        atomic_fetch_add(&a->count, 1);
+        return;
+    }
+    Message msg;
+    if (mailbox_receive(&a->mailbox, &msg)) atomic_store(&a->last_value, msg.payload_int);
+    atomic_store_explicit(&a->active, (a->mailbox.count > 0), memory_order_relaxed);
+}
+
+void test_scheduler_fires_receive_timeouts(void) {
+    scheduler_init(2);
+    CounterActor* on_core = (CounterActor*)scheduler_spawn_actor(-1, timeout_step, sizeof(CounterActor));
+    CounterActor* on_thread = (CounterActor*)scheduler_spawn_actor(-1, timeout_step, sizeof(CounterActor));
+    ASSERT_NOT_NULL(on_core);
+    ASSERT_NOT_NULL(on_thread);
+    atomic_store(&on_core->count, 0);
+    atomic_store(&on_thread->count, 0);
+    on_thread->auto_process = 1;
+    on_thread->timeout_ns = 20 * 1000000ULL;
+    on_thread->last_activity_ns = aether_now_ns();
+    ASSERT_EQ(0, pthread_create(&on_thread->thread, NULL, aether_actor_thread, on_thread));
+    on_core->timeout_ns = 20 * 1000000ULL;
+    on_core->last_activity_ns = aether_now_ns();
+
+    int core_fired = wait_count(&on_core->count, 1);
+    int thread_fired = wait_count(&on_thread->count, 1);
+
+    pthread_t t = on_thread->thread;
+    scheduler_release_actor((ActorBase*)on_thread);
+    int gone = wait_thread_gone((ActorBase*)on_thread);
+    pthread_join(t, NULL);
+    scheduler_shutdown();
+    scheduler_cleanup();
+    ASSERT_EQ(1, core_fired);
+    ASSERT_EQ(1, thread_fired);
+    ASSERT_TRUE(gone);
+}
+
 // #3087: a batch of sends wakes the cores it lands on. A loop of sends in
 // main() goes through the batch path (scheduler_send_batch_*), which put each
 // core's share on that core's queue and told no core: a parked core slept on
@@ -1583,6 +1630,7 @@ void register_scheduler_tests(void) {
     register_test_with_category("Scheduler teardown with a live actor thread", test_scheduler_teardown_with_live_actor_thread, TEST_CATEGORY_RUNTIME);
     register_test_with_category("Scheduler actor thread holds a released actor it stepped", test_scheduler_actor_thread_holds_released_actor, TEST_CATEGORY_RUNTIME);
     register_test_with_category("Scheduler actor thread parks when idle", test_scheduler_actor_thread_parks_when_idle, TEST_CATEGORY_RUNTIME);
+    register_test_with_category("Scheduler fires receive timeouts on a core and an actor thread", test_scheduler_fires_receive_timeouts, TEST_CATEGORY_RUNTIME);
     register_test_with_category("Scheduler batch send wakes parked cores", test_scheduler_batch_wakes_parked_cores, TEST_CATEGORY_RUNTIME);
     register_test_with_category("Scheduler actor thread inbox keeps every sender's order", test_scheduler_actor_thread_inbox_keeps_order, TEST_CATEGORY_RUNTIME);
     register_test_with_category("Scheduler drops a send to a released actor", test_scheduler_late_send_after_release, TEST_CATEGORY_RUNTIME);

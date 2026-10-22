@@ -1,30 +1,47 @@
-// Test: two actors with different timeouts
+// Test: two actors with different timeouts, both of which fire.
+//
+// With two actors the program runs on the scheduler's cores, not in
+// main-thread mode. No core stepped an actor whose mailbox was empty, so
+// neither timeout fired, and wait_for_idle() returned at once: this test
+// printed its PASS line without either handler having run (#3102). Now the
+// core fires each timeout once its deadline passes, and wait_for_idle()
+// waits for them, as it does in main-thread mode.
 
 message Ping {}
 
+extern exit(code: int)
+
 actor FastWaiter {
     state _count = 0
+    state fired = 0
 
     receive {
         Ping -> { _count = _count + 1 }
     } after 50 -> {
         println("FastWaiter: timeout at 50ms")
+        fired = 1
     }
 }
 
 actor SlowWaiter {
     state _count = 0
+    state fired = 0
 
     receive {
         Ping -> { _count = _count + 1 }
     } after 150 -> {
         println("SlowWaiter: timeout at 150ms")
+        fired = 1
     }
 }
 
 main() {
-    _f = spawn(FastWaiter())
-    _s = spawn(SlowWaiter())
+    f = spawn(FastWaiter())
+    s = spawn(SlowWaiter())
     wait_for_idle()
+    if f.fired != 1 || s.fired != 1 {
+        println("FAIL: fired ${f.fired} and ${s.fired}, expected both")
+        exit(1)
+    }
     println("PASS: both timeouts fired")
 }
