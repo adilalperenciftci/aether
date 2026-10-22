@@ -19204,6 +19204,28 @@ static int typecheck_function_call_inner(ASTNode* call, SymbolTable* table) {
     if (!call || call->type != AST_FUNCTION_CALL) return 0;
     note_short_name(call, table);   /* #2976: as written, before any rewrite */
 
+    /* #3116: `free(x)` in a module that defines its own `free`, which the
+     * merger renamed to that function. A slice argument is freed by the
+     * builtin, the one release of a `make` buffer: the module's function can
+     * only read the slice's pointer as its own object, and named alike it
+     * left the builtin out of reach in the module. Unless the function itself
+     * takes a slice, which is then its own business. */
+    if (call->annotation && strcmp(call->annotation, "own_free") == 0) {
+        free(call->annotation);
+        call->annotation = NULL;
+        Type* at = call->child_count == 1 ? infer_type(call->children[0], table) : NULL;
+        int slice_arg = type_is_slice(at);
+        if (at) free_type(at);
+        if (slice_arg) {
+            Symbol* fs = lookup_symbol(table, call->value);
+            ASTNode* p0 = (fs && is_definition(fs->node)) ? def_param_at(fs->node, 0) : NULL;
+            if (!(p0 && type_is_slice(p0->node_type))) {
+                free(call->value);
+                call->value = strdup("free");
+            }
+        }
+    }
+
     /* #928 UFCS, shape (a): the parser tagged this as a method-call on a
      * non-identifier receiver (e.g. `expect(5).to_eq(...)`) and stashed the
      * receiver subtree at children[0]. Rewrite to `method(recv, args)` up

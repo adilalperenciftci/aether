@@ -2811,10 +2811,16 @@ static void rename_intra_module_refs(ASTNode* node, const char* prefix,
         int renamed = name_in_list(node->value, local_names, local_count);
         for (int i = 0; !renamed && i < func_count; i++) {
             if (strcmp(node->value, func_names[i]) == 0) {
+                /* #3116: the module's own `free` taking one argument. The
+                 * checker gives a slice argument to the builtin instead,
+                 * once its type is known (typecheck_function_call_inner). */
+                int own_free = strcmp(node->value, "free") == 0 &&
+                               node->child_count == 1 && !node->annotation;
                 char prefixed[256];
                 merged_function_name_ns(prefix, node->value, prefixed, sizeof(prefixed));
                 free(node->value);
                 node->value = strdup(prefixed);
+                if (own_free) node->annotation = strdup("own_free");
                 renamed = 1;
                 break;
             }
