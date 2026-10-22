@@ -1,0 +1,99 @@
+name: "Experiment: the .ae corpus under UBSan (#2488)"
+
+# A measurement on its own branch, so the PR's CI never runs it (#2488). The
+# `make test-ae` list (every .ae program and every tests/integration shell
+# test the sweep runs) built and run with -fsanitize=undefined on Linux, the
+# runtime and std (libaether), aetherc and ae instrumented too.
+#
+# The flags reach every compile and link through a `gcc` and a `cc` first on
+# PATH that add them, so CC stays a plain `gcc`: the Makefile's build-flags
+# digest, `ae build` (which reads CC) and the shell tests that run "$CC" all
+# see the same compiler. UBSan recovers and goes on (the default), writing
+# each program's reports to a file named after the program
+# (log_path + log_exe_name) rather than to its stderr, which some tests
+# compare. The job fails if any report was written, and the summary groups
+# them by source location.
+on:
+  push:
+    branches: [ 'wip/2488-ubsan' ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ubsan:
+    name: make test-ae under UBSan
+    # The image and packages of ci.yml's Linux / GCC leg, so the sweep runs
+    # the same programs.
+    runs-on: ubuntu-22.04
+    timeout-minutes: 75
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install toolchain
+      run: |
+        sudo rm -f /etc/apt/sources.list.d/google-chrome.list; sudo apt-get update && sudo apt-get install -y gcc make bc pkg-config libgtk-4-dev
+        pip install --retries 10 --timeout 120 --break-system-packages websockets 2>/dev/null || pip install --retries 10 --timeout 120 websockets
+
+    - name: Put the sanitizing gcc first on PATH
+      run: |
+        bin="$RUNNER_TEMP/ubsan-bin"
+        mkdir -p "$bin"
+        for name in gcc cc; do
+          printf '#!/bin/sh\nexec /usr/bin/gcc -fsanitize=undefined -fno-omit-frame-pointer "$@"\n' > "$bin/$name"
+          chmod +x "$bin/$name"
+        done
+        echo "$bin" >> "$GITHUB_PATH"
+        mkdir -p "$RUNNER_TEMP/ubsan"
+
+    - name: Build the toolchain
+      run: |
+        command -v gcc; gcc --version | head -1
+        make -j"$(nproc)" compiler ae stdlib
+
+    - name: Sweep
+      env:
+        UBSAN_OPTIONS: print_stacktrace=1:log_exe_name=1:log_path=${{ runner.temp }}/ubsan/report
+      run: make test-ae NPROC="$(nproc)"
+
+    - name: Reports
+      if: always()
+      run: |
+        d="$RUNNER_TEMP/ubsan"
+        files=$(ls "$d" | wc -l | tr -d ' ')
+        {
+          echo "## The .ae corpus under UBSan (#2488)"
+          echo
+          echo "$files report files (one per program run that hit undefined behaviour)."
+          echo
+          if [ "$files" -gt 0 ]; then
+            echo "| programs | where | first message | programs, up to 4 |"
+            echo "|---|---|---|---|"
+            for f in "$d"/report.*; do
+              exe=${f#"$d"/report.}; exe=${exe%.*}
+              grep 'runtime error:' "$f" | while IFS= read -r line; do printf '%s\t%s\n' "$exe" "$line"; done
+            done | awk -F'\t' '{
+                loc = $2; sub(/: runtime error:.*/, "", loc)
+                msg = $2; sub(/^.*: runtime error: /, "", msg); gsub(/\|/, "/", msg)
+                if (!((loc, $1) in seen)) { seen[loc, $1] = 1; n[loc]++; if (n[loc] <= 4) ex[loc] = ex[loc] " " $1 }
+                if (!(loc in first)) first[loc] = msg
+              }
+              END { for (l in n) printf "| %d | %s | %s |%s |\n", n[l], l, first[l], ex[l] }' \
+              | sort -t'|' -k2,2nr
+          fi
+        } >> "$GITHUB_STEP_SUMMARY"
+        cat "$GITHUB_STEP_SUMMARY"
+        # The first 40 report files in full, with their stacks; all of them
+        # are in the artifact.
+        for f in $(ls "$d"/report.* 2>/dev/null | head -40); do echo "=== $f"; head -40 "$f"; done
+        [ "$files" -eq 0 ]
+
+    - name: Upload the reports
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: ubsan-reports
+        path: ${{ runner.temp }}/ubsan/
+        if-no-files-found: ignore
