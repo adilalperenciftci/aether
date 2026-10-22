@@ -11575,6 +11575,33 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                      * through aether_slice_at_w, which refuses a read-only
                      * view; a read is checked as it was. */
                     const char* elem = slice_elem_c_type(base->node_type);
+                    /* #3029: in a function's view body its slice parameters
+                     * are unbounded views, tested once at entry: the element's
+                     * address with no test of the sentinel or a bound (a
+                     * store still refuses a read-only view). */
+                    int view = 0;
+                    if (gen->slice_view_count > 0 && base->type == AST_IDENTIFIER && base->value) {
+                        for (int k = 0; k < gen->slice_view_count; k++)
+                            if (strcmp(gen->slice_view_names[k], base->value) == 0) view = 1;
+                    }
+                    if (view) {
+                        fprintf(gen->output, "(*(%s*)aether_slice_view_at%s(", elem,
+                                gen->generating_lvalue ? "_w" : "");
+                        int saved = gen->generating_lvalue;
+                        gen->generating_lvalue = 0;
+                        generate_expression(gen, base);
+                        fprintf(gen->output, ", (int64_t)(");
+                        generate_read(gen, expr->children[1]);
+                        gen->generating_lvalue = saved;
+                        fprintf(gen->output, "), sizeof(%s)", elem);
+                        if (gen->generating_lvalue) {
+                            fprintf(gen->output, ", ");
+                            emit_slice_diag_file(gen, expr);
+                            fprintf(gen->output, ", %d", expr->line);
+                        }
+                        fprintf(gen->output, "))");
+                        break;
+                    }
                     fprintf(gen->output, "(*(%s*)aether_slice_at%s(", elem,
                             gen->generating_lvalue ? "_w" : "");
                     /* The base is READ even when `s[i]` is a store target,

@@ -171,6 +171,21 @@ static inline void* aether_slice_at_w(AetherSlice s, int64_t i, size_t elem_size
     return aether_slice_at(s, i, elem_size, file, line);
 }
 
+/* #3029: `s[i]` in a function's view body, where the function's entry has
+ * tested once that `s` is an unbounded view: the element's address with no
+ * test, which is what aether_slice_at does for a view after its test of
+ * the sentinel. Without that test in the loop the compiler can vectorize. */
+static inline void* aether_slice_view_at(AetherSlice s, int64_t i, size_t elem_size) {
+    return (char*)s.ptr + (uint64_t)i * elem_size;
+}
+
+/* #3029: a store there, which still refuses a read-only view. */
+static inline void* aether_slice_view_at_w(AetherSlice s, int64_t i, size_t elem_size,
+                                           const char* file, int line) {
+    if (s.flags & AETHER_SLICE_READONLY) aether_slice_fail_readonly(file, line);
+    return (char*)s.ptr + (uint64_t)i * elem_size;
+}
+
 /* `s[lo..hi]` — the half-open sub-slice [lo, hi), sharing the backing
  * store. `hi` past the end, `lo > hi`, or a negative bound is a panic;
  * on an unbounded view only `lo <= hi` and `lo >= 0` can be checked. */

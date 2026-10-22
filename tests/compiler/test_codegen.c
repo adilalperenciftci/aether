@@ -132,6 +132,54 @@ TEST(codegen_fnptr_local_string_arg_passes_bytes) {
     free(buf);
 }
 
+/* #3029: a function indexing a slice parameter it never binds again is
+ * versioned on the unbounded-view sentinel: one test at entry calls a view
+ * body, which indexes with no test; the function's own body keeps its
+ * checks. */
+TEST(codegen_slice_param_versioned_on_the_view_sentinel) {
+    char* buf = generate_typechecked(
+        "total(xs: int[], n: int) -> int {\n"
+        "  t = 0\n"
+        "  i = 0\n"
+        "  while i < n {\n"
+        "    t = t + xs[i]\n"
+        "    i = i + 1\n"
+        "  }\n"
+        "  return t\n"
+        "}\n"
+        "main() { }");
+    ASSERT_NOT_NULL(buf);
+    ASSERT_TRUE(strstr(buf, "total__aether_view(AetherSlice xs, int n)") != NULL);
+    ASSERT_TRUE(strstr(buf, "if (xs.len == AETHER_SLICE_UNBOUNDED) return total__aether_view(xs, n);") != NULL);
+    ASSERT_TRUE(strstr(buf, "aether_slice_view_at(xs, ") != NULL);
+    ASSERT_TRUE(strstr(buf, "aether_slice_at(xs, ") != NULL);   // the checked body
+    free(buf);
+}
+
+/* A slice the function binds again, takes the address of, or a body
+ * holding a closure, is not versioned: its uses are not all the argument
+ * as it arrived. Through `&xs` the slice can be made bounded after the
+ * entry's test. */
+TEST(codegen_slice_param_not_versioned_when_rebound_or_captured) {
+    char* buf = generate_typechecked(
+        "rebinds(xs: int[]) -> int {\n"
+        "  xs = xs[1..3]\n"
+        "  return xs[0]\n"
+        "}\n"
+        "addressed(xs: int[]) -> int {\n"
+        "  p = &xs\n"
+        "  return xs[0]\n"
+        "}\n"
+        "captures(xs: int[]) -> int {\n"
+        "  f = || { return xs[0] }\n"
+        "  return f() + xs[1]\n"
+        "}\n"
+        "main() { }");
+    ASSERT_NOT_NULL(buf);
+    ASSERT_TRUE(strstr(buf, "__aether_view") == NULL);
+    free(buf);
+}
+
 TEST(codegen_fnptr_param_string_arg_passes_bytes) {
     char* buf = generate_typechecked(
         "through(cb: fn(int, string) -> int, s: string) -> int { return cb(1, s) }\n"

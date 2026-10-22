@@ -5911,7 +5911,8 @@ static void td_explain(ASTNode* loop, const char* why) {
         const char* v = getenv("AETHER_EXPLAIN_THREADED");
         on = (v && *v && strcmp(v, "0") != 0) ? 1 : 0;
     }
-    if (!on || !loop || loop->child_count < 2 || !loop->children[1]) return;
+    if (!on || aether_diagnostics_muted() || !loop || loop->child_count < 2 ||
+        !loop->children[1]) return;
     /* Neither the while nor the switch node carries a position; the
      * switch's selector expression does. */
     ASTNode* body = loop->children[1];

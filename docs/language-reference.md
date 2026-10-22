@@ -411,6 +411,8 @@ view = raw as byte[]            // view.len == -1, view[i] is unchecked
 bytes = view[0..64]             // bytes.len == 64, bytes[i] is checked
 ```
 
+A function that indexes a slice parameter is compiled twice when nothing in it binds that parameter again or takes its address, and it holds no closure (#3029). Its entry tests once whether every such parameter is an unbounded view. If so, a second body runs, where an index of them is the element's address with no test, and the loop around it can vectorize. Otherwise the function's own body runs, with every check. The answer and every bounds check are the same either way. What changes is the cost when the C compiler cannot see where the slice came from (the function is reached through a function value, from another translation unit or a library): there, an index of a view used to test the length sentinel and the bound at every element.
+
 In C the slice is `AetherSlice { void* ptr; uint64_t len; }` (`runtime/aether_slice.h`). A `T[]` parameter or return of an *Aether* function is that struct by value; a `T[]` parameter or return of an `extern` C function, and a `T[]` field of an `extern struct`, stay the bare `T*` C declares. See [c-interop.md](c-interop.md#typed-array-view-expr-as-t) for the boundary rules.
 
 ### Sequence Types (`*StringSeq`)

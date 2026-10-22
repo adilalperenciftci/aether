@@ -1,0 +1,107 @@
+// #3029: a function indexing a slice parameter it never binds again is
+// emitted twice, and its entry tests the unbounded-view sentinel once: a view
+// runs a body that indexes with no test, anything else the checked body.
+// Both must answer the same, a bounded slice must still trap out of bounds
+// in the versioned function, and a store through a view must still land.
+
+import std.string
+
+extern exit(code: int)
+extern malloc(n: long) -> ptr
+extern free(p: ptr)
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+// Read: a sum over the first n elements.
+fn total(xs: int[], n: int) -> long {
+    long t = 0
+    i = 0
+    while i < n {
+        t = t + xs[i]
+        i = i + 1
+    }
+    return t
+}
+
+// Write: fills the first n elements, then reads one back.
+fn fill(ys: int[], n: int, v: int) -> int {
+    i = 0
+    while i < n {
+        ys[i] = v + i
+        i = i + 1
+    }
+    return ys[n - 1]
+}
+
+// Two slices: the view body only when both are views.
+fn dot(a: float[], b: float[], n: int) -> float {
+    s = 0.0
+    i = 0
+    while i < n {
+        s = s + a[i] * b[i]
+        i = i + 1
+    }
+    return s
+}
+
+// An index past a bounded slice's end.
+fn at(xs: int[], i: int) -> int {
+    return xs[i]
+}
+
+main() {
+    println("=== slice parameters versioned on the view sentinel (#3029) ===")
+    n = 1000
+
+    bounded = make([]int, n)
+    i = 0
+    while i < n {
+        bounded[i] = i
+        i = i + 1
+    }
+    raw = malloc(n * 4)
+    view = raw as int[]
+    check(fill(view, n, 0) == n - 1, "a store through a view lands")
+    check(view.len == -1, "a pointer as int[] is an unbounded view")
+
+    check(total(bounded, n) == 499500, "bounded sum")
+    check(total(view, n) == 499500, "view sum, the same answer")
+    check(fill(bounded, n, 7) == n + 6, "bounded fill")
+    check(total(bounded, n) == 499500 + 7 * n, "bounded sum after the fill")
+
+    fa = make([]float, 4)
+    fraw = malloc(4 * 8)
+    fv = fraw as float[]
+    i = 0
+    while i < 4 {
+        fa[i] = 1.0 + i
+        fv[i] = 2.0
+        i = i + 1
+    }
+    check(dot(fv, fv, 4) == 16.0, "two views")
+    check(dot(fa, fv, 4) == 20.0, "a slice and a view: the checked body")
+    check(dot(fa, fa, 4) == 30.0, "two slices")
+
+    // Still trapped in the versioned function: the bounded slice runs the
+    // checked body.
+    caught = 0
+    try {
+        x = at(bounded, n)
+        println("FAIL: no panic (${x})")
+        exit(1)
+    } catch e {
+        check(string.ends_with(e, " out of range for length 1000") == 1, "the bound's message: ${e}")
+        caught = 1
+    }
+    check(caught == 1, "the out-of-bounds index trapped")
+    check(at(view, 5) == 5, "a view is not bounded, as before")
+
+    free(raw)
+    free(fraw)
+    println("All PASS")
+}
