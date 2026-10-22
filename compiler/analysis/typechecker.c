@@ -5570,11 +5570,15 @@ static int is_borrowed_view_source(const ASTNode* e) {
  * is checked: each element is then checked as a value of the sum (one of its
  * variants), and codegen wraps each variant as the sum. Left to its own
  * elements, the literal was an array of its first one's type, `Circle`, and
- * a `Square` beside it was refused. */
-static void sum_place_to_array_literal(ASTNode* value, Type* place) {
+ * a `Square` beside it was refused. So does a place whose elements are
+ * typed function pointers (`let fs: Op[2] = [twice, half]`), where a named
+ * function element is its address (#3098), and one of `ptr`s, where it is
+ * its C symbol. */
+static void place_to_array_literal(ASTNode* value, Type* place) {
     if (!value || value->type != AST_ARRAY_LITERAL || value->child_count == 0 || !place ||
         place->kind != TYPE_ARRAY || !place->element_type ||
-        place->element_type->kind != TYPE_SUM)
+        !(place->element_type->kind == TYPE_SUM || place->element_type->kind == TYPE_PTR ||
+          (place->element_type->kind == TYPE_FUNCTION && place->element_type->is_fnptr)))
         return;
     set_node_type(value, create_array_type(clone_type(place->element_type), value->child_count));
 }
@@ -13020,7 +13024,7 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                             ex->type->kind != TYPE_UNKNOWN)
                             slot = ex->type;
                     }
-                    sum_place_to_array_literal(init, slot);
+                    place_to_array_literal(init, slot);
                 }
                 // Match-as-expression: typecheck as statement, then use its type
                 if (init->type == AST_MATCH_STATEMENT) {
@@ -13840,7 +13844,7 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                 // #1044 implicit enum selector: `d = Blue` where `d` has an enum
                 // type resolves the bare member against that enum.
                 coerce_bare_enum_member(right, symbol->type, table);
-                sum_place_to_array_literal(right, symbol->type);   /* #3071 */
+                place_to_array_literal(right, symbol->type);   /* #3071 */
 
                 Type* right_type = infer_type(right, table);
                 /* #1286: a `T[N]` array or `null` into a `T[]` binding. */
@@ -15038,13 +15042,27 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                 /* #3071: an array literal into a written array-of-sum result. */
                 if (stmt->child_count == 1 && g_tc_return_owner &&
                     g_tc_return_owner->type != AST_CLOSURE && !g_tc_return_owner->type_inferred)
-                    sum_place_to_array_literal(stmt->children[i], g_tc_return_type);
+                    place_to_array_literal(stmt->children[i], g_tc_return_type);
                 if (stmt->children[i] && stmt->children[i]->type == AST_MATCH_STATEMENT) {
                     tc_push_value_match(stmt->children[i]);   /* #2768 */
                     typecheck_node(stmt->children[i], table);
                     tc_pop_value_match();
-                } else
+                } else {
                     typecheck_expression(stmt->children[i], table);
+                    /* `return held` from a `-> fn` function: the named function
+                     * is the value returned, so codegen emits its adapter, as
+                     * for an argument. Unmarked, the return was wrapped in a
+                     * call to an adapter nothing had registered: undeclared
+                     * in C. A typed function pointer result, or part of a
+                     * tuple result, takes the function's address instead
+                     * (#2636), and a `ptr` result its C symbol. */
+                    Type* slot = g_tc_return_type;
+                    if (slot && slot->kind == TYPE_TUPLE && stmt->child_count > 1)
+                        slot = i < slot->tuple_count ? slot->tuple_types[i] : NULL;
+                    if (!(slot && (slot->kind == TYPE_PTR ||
+                                   (slot->kind == TYPE_FUNCTION && slot->is_fnptr))))
+                        function_value_annotate(stmt->children[i], table);
+                }
             }
             /* #2697, #2733: a return of something with no value, a call of
              * a function that returns nothing or a `match` whose arms give
@@ -15871,8 +15889,30 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                 }
             }
             // Type check all array elements
+            Type* place = expr->node_type;
+            Type* place_elem = place && place->kind == TYPE_ARRAY ? place->element_type : NULL;
+            Type* fnptr_elem = place_elem && place_elem->kind == TYPE_FUNCTION &&
+                               place_elem->is_fnptr ? place_elem : NULL;
             for (int i = 0; i < expr->child_count; i++) {
-                typecheck_expression(expr->children[i], table);
+                ASTNode* el = expr->children[i];
+                typecheck_expression(el, table);
+                /* A named function among the elements is a function value,
+                 * as it is in an argument or a local's value: `[held, null]`
+                 * is an array of closures. Left a bare name, the element
+                 * had no type, the literal defaulted to an int array, and C
+                 * got `int fs[2] = {held, NULL}` (#3092, #3099). In an
+                 * array the place types as typed function pointers (`let
+                 * fs: Op[2] = [twice, half]`), it is the function's address,
+                 * as in a local of that type (#2623); in an array of `ptr`s,
+                 * its C symbol. */
+                if (fnptr_elem && fn_name_matches_signature(table, el, fnptr_elem)) {
+                    refuse_moded_fn_in_fnptr_slot(table, el, fnptr_elem);
+                    set_node_type(el, clone_type(fnptr_elem));
+                    if (el->annotation) free(el->annotation);
+                    el->annotation = strdup("fn_addr");
+                } else if (!(place_elem && place_elem->kind == TYPE_PTR)) {
+                    function_value_annotate(el, table);
+                }
                 if (refuse_valueless(expr->children[i], table, "store")) return 0;
             }
             /* The element type was chosen by the early inference pass from
@@ -16370,7 +16410,7 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                         ASTNode* fd = sdef->children[f];
                         if (fd && fd->type == AST_STRUCT_FIELD && fd->value &&
                             strcmp(fd->value, field_init->value) == 0)
-                            sum_place_to_array_literal(field_init->children[0], fd->node_type);
+                            place_to_array_literal(field_init->children[0], fd->node_type);
                     }
                     typecheck_expression(field_init->children[0], table);
                     if (refuse_valueless(field_init->children[0], table, "store")) {
@@ -17099,7 +17139,7 @@ int typecheck_binary_expression(ASTNode* expr, SymbolTable* table) {
      * [c, q]`) takes the place's type before it is checked. */
     if (expr->value && strcmp(expr->value, "=") == 0 && right->type == AST_ARRAY_LITERAL) {
         Type* lt = infer_type(left, table);
-        sum_place_to_array_literal(right, lt);
+        place_to_array_literal(right, lt);
         if (lt) free_type(lt);
     }
     typecheck_expression(right, table);
@@ -20047,7 +20087,7 @@ static int typecheck_function_call_inner(ASTNode* call, SymbolTable* table) {
             if (p->node_type && p->node_type->kind == TYPE_ENUM)
                 coerce_bare_enum_member(call->children[aslot], p->node_type, table);
             adopt_closure_signature(call->children[aslot], p->node_type);
-            sum_place_to_array_literal(call->children[aslot], p->node_type);   /* #3071 */
+            place_to_array_literal(call->children[aslot], p->node_type);   /* #3071 */
         }
     }
 
