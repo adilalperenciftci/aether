@@ -19,7 +19,8 @@
 
 import std.bytes
 import std.string
-import std.list(list_new, list_free, list_add_raw, list_get_raw, list_size)
+import std.list
+import std.list(list_new, list_free, list_size)
 import std.mem(copy)
 import std.fs
 import std.tcp
@@ -532,8 +533,8 @@ parse_cert_chain_pem(pem_text: string) -> (ptr, ptr) {
         block = string.substring_n(pem_text, tlen, pos, block_end)
         der, _label, perr = pem.parse(block)
         if string.equals(perr, "") == 1 && der != null {
-            list_add_raw(chain, der)
-            list_add_raw(lens, null)
+            list.add(chain, der)
+            list.add(lens, null)
         }
         pos = block_end
     }
@@ -605,7 +606,7 @@ fn free_cert_chain(chain: ptr) {
     n = list_size(chain)
     i = 0
     while i < n {
-        c = list_get_raw(chain, i) as ptr
+        c = list.at(chain, i) as ptr
         if c != null { bytes.free(c) }
         i = i + 1
     }

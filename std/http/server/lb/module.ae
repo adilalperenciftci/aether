@@ -347,5 +347,5 @@ _push_s(l: ptr, s: string) -> int { _ = list_add(l, s); return 0 }
 _push_i(l: ptr, i: int) -> int { _ = list_add(l, "${i}"); return 0 }
 _lget(l: ptr, i: int) -> string {
     if i >= list_size(l) { return "" }
-    return list_get_raw(l, i)
+    return list.at(l, i)
 }

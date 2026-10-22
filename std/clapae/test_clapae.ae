@@ -43,12 +43,12 @@ main() {
     // --- typed parse: string option, int option, flags, positional ---
     cmd = build_cmd()
     argv = list_new()
-    list_add_raw(argv, "--config")
-    list_add_raw(argv, "app.json")
-    list_add_raw(argv, "--count")
-    list_add_raw(argv, "7")
-    list_add_raw(argv, "-dv") // compound flags
-    list_add_raw(argv, "my_input") // positional
+    list.add(argv, "--config")
+    list.add(argv, "app.json")
+    list.add(argv, "--count")
+    list.add(argv, "7")
+    list.add(argv, "-dv") // compound flags
+    list.add(argv, "my_input") // positional
     res, m, err = parse_list(cmd, argv)
     list_free(argv)
     if res != clapae.RESULT_OK { fail(string_concat("expected OK, err=", err)) }
@@ -68,9 +68,9 @@ main() {
     // --- int validation at the boundary: --count notanumber -> RESULT_ERROR ---
     cmd2 = build_cmd()
     a2 = list_new()
-    list_add_raw(a2, "--count")
-    list_add_raw(a2, "notanumber")
-    list_add_raw(a2, "in")
+    list.add(a2, "--count")
+    list.add(a2, "notanumber")
+    list.add(a2, "in")
     res2, m2, err2 = parse_list(cmd2, a2)
     list_free(a2)
     if res2 != clapae.RESULT_ERROR { fail("expected ERROR for non-numeric --count") }
@@ -84,7 +84,7 @@ main() {
     // --- help requested: -h -> RESULT_HELP, library does NOT exit ---
     cmd3 = build_cmd()
     a3 = list_new()
-    list_add_raw(a3, "-h")
+    list.add(a3, "-h")
     res3, m3, err3 = parse_list(cmd3, a3)
     list_free(a3)
     if res3 != clapae.RESULT_HELP { fail("expected HELP for -h") }
@@ -95,9 +95,9 @@ main() {
     // --- subcommand with its own flag ---
     cmd4 = build_cmd()
     a4 = list_new()
-    list_add_raw(a4, "input_needed") // required positional for parent
-    list_add_raw(a4, "test")
-    list_add_raw(a4, "--list")
+    list.add(a4, "input_needed") // required positional for parent
+    list.add(a4, "test")
+    list.add(a4, "--list")
     res4, m4, err4 = parse_list(cmd4, a4)
     list_free(a4)
     if res4 != clapae.RESULT_OK { fail(string_concat("subcommand parse: ", err4)) }
@@ -112,8 +112,8 @@ main() {
     // --- inline short value (-cfile.json) ---
     cmd5 = build_cmd()
     a5 = list_new()
-    list_add_raw(a5, "-cinline.json")
-    list_add_raw(a5, "pos")
+    list.add(a5, "-cinline.json")
+    list.add(a5, "pos")
     res5, m5, err5 = parse_list(cmd5, a5)
     list_free(a5)
     if res5 != clapae.RESULT_OK { fail(string_concat("inline short: ", err5)) }
@@ -125,7 +125,7 @@ main() {
     // --- required positional missing -> RESULT_ERROR ---
     cmd6 = build_cmd()
     a6 = list_new()
-    list_add_raw(a6, "--debug")
+    list.add(a6, "--debug")
     res6, m6, err6 = parse_list(cmd6, a6)
     list_free(a6)
     if res6 != clapae.RESULT_ERROR { fail("expected ERROR for missing required positional") }
@@ -136,8 +136,8 @@ main() {
     // --- unknown option -> RESULT_ERROR ---
     cmd7 = build_cmd()
     a7 = list_new()
-    list_add_raw(a7, "--nonesuch")
-    list_add_raw(a7, "x")
+    list.add(a7, "--nonesuch")
+    list.add(a7, "x")
     res7, m7, err7 = parse_list(cmd7, a7)
     list_free(a7)
     if res7 != clapae.RESULT_ERROR { fail("expected ERROR for unknown option") }
@@ -148,8 +148,8 @@ main() {
     // --- --opt=value (equals form) ---
     cmd8 = build_cmd()
     a8 = list_new()
-    list_add_raw(a8, "--config=eq.json")
-    list_add_raw(a8, "pos8")
+    list.add(a8, "--config=eq.json")
+    list.add(a8, "pos8")
     res8, m8, err8 = parse_list(cmd8, a8)
     list_free(a8)
     if res8 != clapae.RESULT_OK { fail(string_concat("--opt=val: ", err8)) }
@@ -161,7 +161,7 @@ main() {
     // --- getters on ABSENT arguments ---
     cmd9 = build_cmd()
     a9 = list_new()
-    list_add_raw(a9, "only_positional")
+    list.add(a9, "only_positional")
     res9, m9, err9 = parse_list(cmd9, a9)
     list_free(a9)
     if res9 != clapae.RESULT_OK { fail(string_concat("absent-getters parse: ", err9)) }
@@ -181,9 +181,9 @@ main() {
     // --- negative and zero int values validate ---
     cmd10 = build_cmd()
     a10 = list_new()
-    list_add_raw(a10, "--count")
-    list_add_raw(a10, "-5")
-    list_add_raw(a10, "posn")
+    list.add(a10, "--count")
+    list.add(a10, "-5")
+    list.add(a10, "posn")
     res10, m10, err10 = parse_list(cmd10, a10)
     list_free(a10)
     if res10 != clapae.RESULT_OK { fail(string_concat("negative int: ", err10)) }
@@ -200,8 +200,8 @@ main() {
         arg("num") { long_("num"); kind(clapae.KIND_INT) }
     }
     a11 = list_new()
-    list_add_raw(a11, "--num")
-    list_add_raw(a11, "notint")
+    list.add(a11, "--num")
+    list.add(a11, "notint")
     res11, m11, err11 = parse_list(cmd11, a11)
     list_free(a11)
     if res11 != clapae.RESULT_ERROR { fail("kind(KIND_INT) should validate: expected ERROR for 'notint'") }
@@ -214,7 +214,7 @@ main() {
         arg("out") { long_("out"); string_arg() }
     }
     a12 = list_new()
-    list_add_raw(a12, "--out") // no following value
+    list.add(a12, "--out") // no following value
     res12, m12, err12 = parse_list(cmd12, a12)
     list_free(a12)
     if res12 != clapae.RESULT_ERROR { fail("expected ERROR: --out requires a value") }
@@ -229,9 +229,9 @@ main() {
         arg("mode") { positional() } // optional third positional
     }
     a14 = list_new()
-    list_add_raw(a14, "from.txt")
-    list_add_raw(a14, "to.txt")
-    list_add_raw(a14, "fast")
+    list.add(a14, "from.txt")
+    list.add(a14, "to.txt")
+    list.add(a14, "fast")
     res14, m14, err14 = parse_list(cmd14, a14)
     list_free(a14)
     if res14 != clapae.RESULT_OK { fail(string_concat("multi-positional: ", err14)) }
@@ -247,8 +247,8 @@ main() {
         arg("only") { positional() }
     }
     a15 = list_new()
-    list_add_raw(a15, "one")
-    list_add_raw(a15, "two") // no slot for a second positional
+    list.add(a15, "one")
+    list.add(a15, "two") // no slot for a second positional
     res15, m15, err15 = parse_list(cmd15, a15)
     list_free(a15)
     if res15 != clapae.RESULT_ERROR { fail("expected ERROR: unexpected positional") }
@@ -261,7 +261,7 @@ main() {
         arg("num") { long_("num"); int_arg() }
     }
     a16 = list_new()
-    list_add_raw(a16, "--num=notint")
+    list.add(a16, "--num=notint")
     res16, m16, err16 = parse_list(cmd16, a16)
     list_free(a16)
     if res16 != clapae.RESULT_ERROR { fail("expected ERROR: --num=notint") }
@@ -274,7 +274,7 @@ main() {
         arg("num") { short(110); int_arg() } // -n
     }
     a17ok = list_new()
-    list_add_raw(a17ok, "-n99")
+    list.add(a17ok, "-n99")
     r17a, m17a, e17a = parse_list(cmd17, a17ok)
     list_free(a17ok)
     if r17a != clapae.RESULT_OK { fail(string_concat("-n99: ", e17a)) }
@@ -283,7 +283,7 @@ main() {
     if v17 != 99 { fail("-n99 value") }
     free_matches(m17a as *ArgMatches)
     a17bad = list_new()
-    list_add_raw(a17bad, "-nX")
+    list.add(a17bad, "-nX")
     r17b, m17b, e17b = parse_list(cmd17, a17bad)
     list_free(a17bad)
     if r17b != clapae.RESULT_ERROR { fail("expected ERROR: -nX") }
@@ -298,9 +298,9 @@ main() {
         }
     }
     a18 = list_new()
-    list_add_raw(a18, "add")
-    list_add_raw(a18, "--count")
-    list_add_raw(a18, "notnum")
+    list.add(a18, "add")
+    list.add(a18, "--count")
+    list.add(a18, "notnum")
     res18, m18, err18 = parse_list(cmd18, a18)
     list_free(a18)
     if res18 != clapae.RESULT_ERROR { fail("subcommand error should propagate to parent") }
@@ -311,8 +311,8 @@ main() {
     // --- subcommand_matches with the WRONG name returns null ---
     cmd19 = build_cmd()
     a19 = list_new()
-    list_add_raw(a19, "needed")
-    list_add_raw(a19, "test")
+    list.add(a19, "needed")
+    list.add(a19, "test")
     res19, m19, err19 = parse_list(cmd19, a19)
     list_free(a19)
     if res19 != clapae.RESULT_OK { fail(string_concat("subcmd wrongname parse: ", err19)) }
@@ -325,11 +325,11 @@ main() {
     // --- repeated option: last value wins ---
     cmd20 = build_cmd()
     a20 = list_new()
-    list_add_raw(a20, "--config")
-    list_add_raw(a20, "first.json")
-    list_add_raw(a20, "--config")
-    list_add_raw(a20, "second.json")
-    list_add_raw(a20, "pos20")
+    list.add(a20, "--config")
+    list.add(a20, "first.json")
+    list.add(a20, "--config")
+    list.add(a20, "second.json")
+    list.add(a20, "pos20")
     res20, m20, err20 = parse_list(cmd20, a20)
     list_free(a20)
     if res20 != clapae.RESULT_OK { fail(string_concat("repeated option: ", err20)) }

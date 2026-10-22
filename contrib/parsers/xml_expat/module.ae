@@ -261,17 +261,17 @@ extern xml_parser_install_handlerset(p: ptr, hs: ptr)
 // captured-variable access via its own env).
 bind_start(_ctx: ptr, cb: @keep fn) {
     boxed = box_closure(cb)
-    map_put_raw(_ctx, "start", boxed)
+    map.put(_ctx, "start", boxed)
 }
 
 bind_end(_ctx: ptr, cb: @keep fn) {
     boxed = box_closure(cb)
-    map_put_raw(_ctx, "end", boxed)
+    map.put(_ctx, "end", boxed)
 }
 
 bind_text(_ctx: ptr, cb: @keep fn) {
     boxed = box_closure(cb)
-    map_put_raw(_ctx, "text", boxed)
+    map.put(_ctx, "text", boxed)
 }
 
 // One-shot: parse an in-memory document with closure-based
@@ -296,15 +296,15 @@ builder parse_with(input: string): int {
 
     if _builder != null {
         if map_has(_builder, "start") == 1 {
-            boxed = map_get_raw(_builder, "start")
+            boxed = map.lookup(_builder, "start")
             xml_handlerset_set_start(hs, boxed)
         }
         if map_has(_builder, "end") == 1 {
-            boxed = map_get_raw(_builder, "end")
+            boxed = map.lookup(_builder, "end")
             xml_handlerset_set_end(hs, boxed)
         }
         if map_has(_builder, "text") == 1 {
-            boxed = map_get_raw(_builder, "text")
+            boxed = map.lookup(_builder, "text")
             xml_handlerset_set_text(hs, boxed)
         }
     }

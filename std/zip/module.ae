@@ -689,7 +689,7 @@ writer_free(wp: ptr) {
         n = list_size(w.entries)
         i = 0
         while i < n {
-            free_wentry(list_get_raw(w.entries, i) as *ZipWEntry)
+            free_wentry(list.at(w.entries, i) as *ZipWEntry)
             i = i + 1
         }
         list.free(w.entries)
@@ -764,7 +764,7 @@ fn w_add_entry(w: *ZipWriter, name: string, name_len: int,
     e.comp_size = comp_len as long
     e.uncomp_size = data_len as long
     e.lfh_offset = lfh_off as long
-    list_add_raw(w.entries, e as ptr)
+    list.add(w.entries, e as ptr)
     return ""
 }
 
@@ -816,7 +816,7 @@ writer_finish(wp: ptr) -> {
 
     i = 0
     while i < n {
-        e = list_get_raw(w.entries, i) as *ZipWEntry
+        e = list.at(w.entries, i) as *ZipWEntry
 
         // A field that overflows 32 bits is written as the 0xFFFFFFFF sentinel
         // in the fixed record and carried in a ZIP64 extra block.

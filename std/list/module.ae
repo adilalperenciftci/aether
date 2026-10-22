@@ -9,7 +9,7 @@
 exports(
     list_new, list_new_in, list_add, list_add_raw, list_add_string_owned, list_get_raw, list_set,
     list_size, list_remove, list_clear, list_free,
-    get, get_string
+    get, get_string, at
 )
 
 extern list_new() -> ptr @fresh
@@ -52,6 +52,21 @@ get(list: ptr, index: int) -> {
         return null, "index out of range"
     }
     return list_get_raw(list, index), ""
+}
+
+// The item at `index`, for a caller that has bounded the index (a loop over
+// 0 ..< list_size). An index out of range, or a null list, is a panic that
+// names the index and the size, as a slice index is (#3107): the unchecked
+// read handed back a null there, which a caller took for a stored null.
+at(list: ptr, index: int) -> ptr {
+    if list == null {
+        panic("list.at: the list is null")
+    }
+    n = list_size(list)
+    if index < 0 || index >= n {
+        panic("list index ${index} out of range for length ${n}")
+    }
+    return list_get_raw(list, index)
 }
 
 // Index into a list whose element is a string. `get` hands back a `ptr`,

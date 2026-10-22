@@ -10,7 +10,7 @@ exports(
     map_new, map_put, map_put_raw, map_put_string_owned, map_get_raw, map_has, map_remove,
     map_size, map_clear, map_free, map_keys_raw, map_keys_free,
     map_keys_size_raw, map_keys_get_raw,
-    get, get_string, keys, keys_size, keys_get
+    get, get_string, lookup, keys, keys_size, keys_get
 )
 
 // Keys cross as `@aether string`: the C map reads the AetherString's length,
@@ -55,6 +55,16 @@ get(map: ptr, key: string) -> {
     }
     v = map_get_raw(map, key)
     return v, ""
+}
+
+// The value stored under `key`, or null when the map holds none (or the map
+// is null): `get` without its error slot, for a caller that reads absence
+// as null (#3107).
+lookup(map: ptr, key: string) -> ptr {
+    if map == null {
+        return null
+    }
+    return map_get_raw(map, key)
 }
 
 // Look up a key whose value is a string. `get` hands back a `ptr`, which a

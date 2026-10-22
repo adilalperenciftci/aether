@@ -52,9 +52,11 @@ same pointer back: true
 
 **`get` checks the index.** `list.get(l, 99)` on a shorter list returns
 `(null, "index out of range")`, and a null list returns `(null, "null list")`,
-so an empty error always means the value is good. `list_get_raw` is the
-unchecked form, for a loop that has already bounded the index by
-`list_size`.
+so an empty error always means the value is good. A loop that has already
+bounded the index by `list_size` reads with `list.at(l, i)`, which returns
+the item alone and panics, naming the index and the size, on an index out
+of range, as a slice index does. `list_get_raw` is the C binding both are
+built on, for std.list itself (#3107).
 
 **A string element is read with `get_string`.** `get` hands back a `ptr`,
 which a `string` local would read as text whatever it points at, so giving

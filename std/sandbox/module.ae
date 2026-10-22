@@ -144,7 +144,7 @@ fn freeze(perms: ptr) -> ptr {
     n = list.size(perms)
     i = 0
     while i < n {
-        e = list_get_raw(perms, i)
+        e = list.at(perms, i)
         if e == null {
             list.add(frozen, null)
         } else {
@@ -165,7 +165,7 @@ fn free_list(perms: ptr) {
     n = list.size(perms)
     i = 0
     while i < n {
-        libc_free(list_get_raw(perms, i))
+        libc_free(list.at(perms, i))
         i = i + 1
     }
     list.free(perms)

@@ -25,6 +25,7 @@ import std.string
 import std.strbuilder
 import std.map
 import std.collections
+import std.list
 import std.cryptography
 import std.encoding
 import std.fs
@@ -377,15 +378,15 @@ lex(src: string) -> (ptr, string) {
                     string_list_add(kinds, TOK_TEXT)
                     string_list_add(contents, tail)
                     toks = list_new()
-                    list_add_raw(toks, kinds)
-                    list_add_raw(toks, contents)
+                    list.add(toks, kinds)
+                    list.add(toks, contents)
                     return toks, string.concat("unterminated `{{`", loc_suffix(src, n, open_at))
                 }
                 raw_body = string.substring_n(src, n, open_at + 2, close_at)
                 if has_control_char(raw_body) == 1 {
                     toks = list_new()
-                    list_add_raw(toks, kinds)
-                    list_add_raw(toks, contents)
+                    list.add(toks, kinds)
+                    list.add(toks, contents)
                     return toks, string.concat("control character inside a tag", loc_suffix(src, n, open_at))
                 }
                 body, ls = peel_left_dash(raw_body)
@@ -404,15 +405,15 @@ lex(src: string) -> (ptr, string) {
                     string_list_add(kinds, TOK_TEXT)
                     string_list_add(contents, tail)
                     toks = list_new()
-                    list_add_raw(toks, kinds)
-                    list_add_raw(toks, contents)
+                    list.add(toks, kinds)
+                    list.add(toks, contents)
                     return toks, string.concat("unterminated `{%`", loc_suffix(src, n, open_at))
                 }
                 raw_body = string.substring_n(src, n, open_at + 2, close_at)
                 if has_control_char(raw_body) == 1 {
                     toks = list_new()
-                    list_add_raw(toks, kinds)
-                    list_add_raw(toks, contents)
+                    list.add(toks, kinds)
+                    list.add(toks, contents)
                     return toks, string.concat("control character inside a tag", loc_suffix(src, n, open_at))
                 }
                 body, ls = peel_left_dash(raw_body)
@@ -440,8 +441,8 @@ lex(src: string) -> (ptr, string) {
                     end_at, end_close = find_block_end(src, n, pos_after, "endcomment")
                     if end_at < 0 {
                         toks = list_new()
-                        list_add_raw(toks, kinds)
-                        list_add_raw(toks, contents)
+                        list.add(toks, kinds)
+                        list.add(toks, contents)
                         return toks, string.concat("unterminated `{% comment %}`", loc_suffix(src, n, open_at))
                     }
                     // The opener's right-strip would consume the very
@@ -458,8 +459,8 @@ lex(src: string) -> (ptr, string) {
                     end_at, end_close = find_block_end(src, n, pos_after, "endraw")
                     if end_at < 0 {
                         toks = list_new()
-                        list_add_raw(toks, kinds)
-                        list_add_raw(toks, contents)
+                        list.add(toks, kinds)
+                        list.add(toks, contents)
                         return toks, string.concat("unterminated `{% raw %}`", loc_suffix(src, n, open_at))
                     }
                     raw_text = string.substring_n(src, n, pos_after, end_at)
@@ -486,8 +487,8 @@ lex(src: string) -> (ptr, string) {
                     lerr2 = emit_liquid_lines(kinds, contents, inner_body)
                     if lerr2 != "" {
                         toks = list_new()
-                        list_add_raw(toks, kinds)
-                        list_add_raw(toks, contents)
+                        list.add(toks, kinds)
+                        list.add(toks, contents)
                         return toks, lerr2
                     }
                     if rs == 1 { strip_next = 1 }
@@ -504,8 +505,8 @@ lex(src: string) -> (ptr, string) {
         }
     }
     toks = list_new()
-    list_add_raw(toks, kinds)
-    list_add_raw(toks, contents)
+    list.add(toks, kinds)
+    list.add(toks, contents)
     return toks, ""
 }
 
@@ -2465,7 +2466,7 @@ filter_date(ctx: ptr, val: string, format: string) -> (string, string) {
             if map_has(ctx, KEY_NOW) == 0 {
                 return value_nil(), "date: \"now\" needs the time: call context_set_now first"
             }
-            e, _nerr = string.to_long(map_get_raw(ctx, KEY_NOW))
+            e, _nerr = string.to_long(map.lookup(ctx, KEY_NOW))
             epoch = e
         } else if all_digits(s) == 1 {
             e, eerr = string.to_long(s)
@@ -2617,8 +2618,8 @@ parse_file(path: string) -> (ptr, string) {
 // handed to a partial cache belongs to the cache.
 template_free(t: ptr) {
     if t == null { return }
-    string_list_free(list_get_raw(t, 0))
-    string_list_free(list_get_raw(t, 1))
+    string_list_free(list.at(t, 0))
+    string_list_free(list.at(t, 1))
     list_free(t)
 }
 
@@ -2661,7 +2662,7 @@ partial_cache_free(cache: ptr) {
     n = list_size(c.owned)
     i = 0
     while i < n {
-        template_free(list_get_raw(c.owned, i))
+        template_free(list.at(c.owned, i))
         i = i + 1
     }
     list_free(c.owned)
@@ -2690,11 +2691,11 @@ context_set_partial_cache(ctx: ptr, cache: @keep ptr) {
 load_partial(ctx: ptr, resolved: string) -> (ptr, string, string, int) {
     key = partial_cache_key()
     cache = null
-    if map_has(ctx, key) == 1 { cache = map_get_raw(ctx, key) }
+    if map_has(ctx, key) == 1 { cache = map.lookup(ctx, key) }
     if cache != null {
         c = cache as *PartialCache
         if map_has(c.by_path, resolved) == 1 {
-            return map_get_raw(c.by_path, resolved), "", "", 0
+            return map.lookup(c.by_path, resolved), "", "", 0
         }
     }
     src, ferr = fs.read(resolved)
@@ -2705,7 +2706,7 @@ load_partial(ctx: ptr, resolved: string) -> (ptr, string, string, int) {
     if cache != null {
         c2 = cache as *PartialCache
         map_put(c2.by_path, resolved, t)
-        list_add_raw(c2.owned, t)
+        list.add(c2.owned, t)
         return t, "", "", 0
     }
     return t, "", "", 1
@@ -2747,20 +2748,20 @@ context_set_now(ctx: ptr, unix_seconds: long) {
 
 // Free the context: its bindings, and every array and object it holds.
 context_free(ctx: ptr) {
-    if map_has(ctx, KEY_VALUES) == 1 { store_free(map_get_raw(ctx, KEY_VALUES)) }
+    if map_has(ctx, KEY_VALUES) == 1 { store_free(map.lookup(ctx, KEY_VALUES)) }
     bindings_free(ctx)
 }
 
 // Free a context's own maps -- its bare and its typed bindings -- but not a
 // value store it may share (a `{% render %}` context's is its caller's).
 bindings_free(ctx: ptr) {
-    if map_has(ctx, KEY_TYPED) == 1 { map_free(map_get_raw(ctx, KEY_TYPED)) }
+    if map_has(ctx, KEY_TYPED) == 1 { map_free(map.lookup(ctx, KEY_TYPED)) }
     map_free(ctx)
 }
 
 // The map of `ctx`'s typed bindings (name -> packed value), made on first use.
 typed_of(ctx: ptr) -> ptr {
-    have = map_get_raw(ctx, KEY_TYPED)
+    have = map.lookup(ctx, KEY_TYPED)
     if have != null { return have }
     typed = map_new()
     map_put(ctx, KEY_TYPED, typed)
@@ -2787,12 +2788,12 @@ lookup_value(ctx: ptr, name: string) -> string {
     if nn == 0 || string.char_at_n(name, nn, 0) < 32 { return value_nil() }
     // A stored value is never null, so a null from map_get_raw is "not
     // bound" -- one hash lookup a step rather than map_has and then a get.
-    typed = map_get_raw(ctx, KEY_TYPED)
+    typed = map.lookup(ctx, KEY_TYPED)
     if typed != null {
-        v = map_get_raw(typed, name)
+        v = map.lookup(typed, name)
         if v != null { return v }
     }
-    bare = map_get_raw(ctx, name)
+    bare = map.lookup(ctx, name)
     if bare != null { return bare }
     return value_nil()
 }
@@ -2816,7 +2817,7 @@ bump_counter(ctx: ptr, name: string, direction: int) -> (string, string) {
         map_put(ctx, key, "-1")
         return "-1", ""
     }
-    cur_s = map_get_raw(ctx, key)
+    cur_s = map.lookup(ctx, key)
     cur, err = string.to_int(cur_s)
     if err != "" {
         return "", string.concat("counter not an integer: ", cur_s)
@@ -2864,7 +2865,7 @@ cycle_emit(ctx: ptr, rest: string, full_body: string) -> (string, string) {
     key = string.concat("\x01cyc:", full_body)
     pos = 0
     if map_has(ctx, key) == 1 {
-        cur, err = string.to_int(map_get_raw(ctx, key))
+        cur, err = string.to_int(map.lookup(ctx, key))
         if err == "" { pos = cur }
     }
     if pos >= ic { pos = pos % ic }
@@ -2983,7 +2984,7 @@ eval_value(ctx: ptr, text: string) -> (string, string) {
     // `block.super` inside a layout child block is the parent's content for
     // that block; outside an override it is nil, not an error.
     if string.equals(a, "block.super") == 1 {
-        if map_has(ctx, KEY_BLOCK_SUPER) == 1 { return value_str(map_get_raw(ctx, KEY_BLOCK_SUPER)), "" }
+        if map_has(ctx, KEY_BLOCK_SUPER) == 1 { return value_str(map.lookup(ctx, KEY_BLOCK_SUPER)), "" }
         return value_nil(), ""
     }
     // A number literal keeps the text it was written with.
@@ -3851,7 +3852,7 @@ has_reversed(rest: string) -> int {
 save_value(ctx: ptr, name: string) -> (string, int) {
     typed = typed_of(ctx)
     if map_has(typed, name) == 0 { return "", 0 }
-    return string.copy(map_get_raw(typed, name)), 1
+    return string.copy(map.lookup(typed, name)), 1
 }
 
 // Inverse of save_value.
@@ -4307,13 +4308,13 @@ const KEY_NOW = "\x01now"
 // Read the include-root from ctx. Returns ("", 0) when unset.
 get_include_root(ctx: ptr) -> (string, int) {
     if map_has(ctx, KEY_INCLUDE_ROOT) == 0 { return "", 0 }
-    return map_get_raw(ctx, KEY_INCLUDE_ROOT), 1
+    return map.lookup(ctx, KEY_INCLUDE_ROOT), 1
 }
 
 // Read the current include-depth. 0 if unset.
 get_include_depth(ctx: ptr) -> int {
     if map_has(ctx, KEY_INCLUDE_DEPTH) == 0 { return 0 }
-    v = map_get_raw(ctx, KEY_INCLUDE_DEPTH)
+    v = map.lookup(ctx, KEY_INCLUDE_DEPTH)
     n, _ = string.to_int(v)
     return n
 }
@@ -4459,8 +4460,8 @@ render_include_tag(outer_ctx: @keep ptr, rest: string, strict: int) -> (string, 
         // host gave, so `date` reads the same "now".
         map_put(child, KEY_INCLUDE_ROOT, root)
         pkey = partial_cache_key()
-        if map_has(outer_ctx, pkey) == 1 { map_put(child, pkey, map_get_raw(outer_ctx, pkey)) }
-        if map_has(outer_ctx, KEY_NOW) == 1 { map_put(child, KEY_NOW, string.copy(map_get_raw(outer_ctx, KEY_NOW))) }
+        if map_has(outer_ctx, pkey) == 1 { map_put(child, pkey, map.lookup(outer_ctx, pkey)) }
+        if map_has(outer_ctx, KEY_NOW) == 1 { map_put(child, KEY_NOW, string.copy(map.lookup(outer_ctx, KEY_NOW))) }
     }
     // Bump depth on the child ctx for both forms.
     map_put(child, KEY_INCLUDE_DEPTH, string.from_int(depth + 1))
@@ -4612,7 +4613,7 @@ render_block_from(chain_kinds: ptr, chain_contents: ptr, chain_blocks: ptr, leve
     ctx: @keep ptr) -> (string, string) {
     lv = from
     while lv < levels {
-        if map_has(list_get_raw(chain_blocks, lv), name) == 1 { break }
+        if map_has(list.at(chain_blocks, lv), name) == 1 { break }
         lv = lv + 1
     }
     if lv >= levels {
@@ -4622,7 +4623,7 @@ render_block_from(chain_kinds: ptr, chain_contents: ptr, chain_blocks: ptr, leve
         lv + 1, name, base_kinds, base_contents,
         base_lo, base_hi, ctx)
     if serr != "" { return "", serr }
-    packed = map_get_raw(list_get_raw(chain_blocks, lv), name)
+    packed = map.lookup(list.at(chain_blocks, lv), name)
     pn = string_length(packed)
     comma = string.index_of_from_n(packed, pn, ",", 0)
     lo, _ = string.to_int(string.substring_n(packed, pn, 0, comma))
@@ -4631,7 +4632,7 @@ render_block_from(chain_kinds: ptr, chain_contents: ptr, chain_blocks: ptr, leve
     prior = ""
     if had_prior == 1 { prior, _ = map.get_string(ctx, KEY_BLOCK_SUPER) }
     map_put(ctx, KEY_BLOCK_SUPER, super_text)
-    inner, rerr = render_range(list_get_raw(chain_kinds, lv), list_get_raw(chain_contents, lv),
+    inner, rerr = render_range(list.at(chain_kinds, lv), list.at(chain_contents, lv),
         lo, hi, ctx)
     if had_prior == 1 {
         map_put(ctx, KEY_BLOCK_SUPER, prior)
@@ -4702,7 +4703,7 @@ free_layout_chain(chain_kinds: ptr, chain_contents: ptr, chain_blocks: ptr,
     nb = list_size(chain_blocks)
     i = 0
     while i < nb {
-        map_free(list_get_raw(chain_blocks, i))
+        map_free(list.at(chain_blocks, i))
         i = i + 1
     }
     list_free(chain_blocks)
@@ -4712,7 +4713,7 @@ free_layout_chain(chain_kinds: ptr, chain_contents: ptr, chain_blocks: ptr,
     n = list_size(owned)
     i = 0
     while i < n {
-        template_free(list_get_raw(owned, i))
+        template_free(list.at(owned, i))
         i = i + 1
     }
     list_free(owned)
@@ -4759,9 +4760,9 @@ render_layout_template(child_kinds: ptr, child_contents: ptr, child_n: int,
             free_layout_chain(chain_kinds, chain_contents, chain_blocks, seen, owned_parents)
             return "", cerr
         }
-        list_add_raw(chain_kinds, cur_kinds)
-        list_add_raw(chain_contents, cur_contents)
-        list_add_raw(chain_blocks, blocks)
+        list.add(chain_kinds, cur_kinds)
+        list.add(chain_contents, cur_contents)
+        list.add(chain_blocks, blocks)
         levels = levels + 1
 
         resolved, perr = resolve_partial_path(root, cur_parent)
@@ -4784,7 +4785,7 @@ render_layout_template(child_kinds: ptr, child_contents: ptr, child_n: int,
             free_layout_chain(chain_kinds, chain_contents, chain_blocks, seen, owned_parents)
             return "", string.concat("layout: cannot read parent: ", cur_parent)
         }
-        if owned == 1 { list_add_raw(owned_parents, parent_t) }
+        if owned == 1 { list.add(owned_parents, parent_t) }
         if terr != "" {
             msg = string.concat("layout parse error in ", cur_parent)
             msg = string.concat(msg, ": ")
@@ -4792,8 +4793,8 @@ render_layout_template(child_kinds: ptr, child_contents: ptr, child_n: int,
             free_layout_chain(chain_kinds, chain_contents, chain_blocks, seen, owned_parents)
             return "", msg
         }
-        cur_kinds = list_get_raw(parent_t, 0)
-        cur_contents = list_get_raw(parent_t, 1)
+        cur_kinds = list.at(parent_t, 0)
+        cur_contents = list.at(parent_t, 1)
         cur_n = string_list_size(cur_kinds)
         next_lay, next_name, lerr = layout_target(cur_kinds, cur_contents, cur_n)
         if lerr != "" {
@@ -4845,8 +4846,8 @@ render(t: ptr, ctx: @keep ptr) -> (string, string) {
 }
 
 render_template(t: ptr, ctx: @keep ptr) -> (string, string) {
-    kinds = list_get_raw(t, 0)
-    contents = list_get_raw(t, 1)
+    kinds = list.at(t, 0)
+    contents = list.at(t, 1)
     n = string_list_size(kinds)
 
     // A template whose first tag is `{% layout 'parent' %}` renders through
@@ -5065,9 +5066,8 @@ struct LiquidNode {
 
 struct LiquidStore {
     nodes: ptr // list: id -> *LiquidNode, null for an id that is free
-    free_ids: ptr // intarr used as a stack of the free ids
+    free_ids: int[] // a stack of the free ids; its .len is the capacity
     free_len: int
-    free_cap: int
     live: int // nodes held
     made: int // nodes made since the last collection
     depth: int // renders in progress over the contexts sharing this store
@@ -5076,14 +5076,13 @@ struct LiquidStore {
 store_new() -> ptr {
     st = heap.new(LiquidStore)
     st.nodes = list_new()
-    st.free_cap = 16
-    st.free_ids = intarr_new_raw(16)
+    st.free_ids = make([]int, 16)
     return st as ptr
 }
 
 // The store `ctx` keeps its arrays and objects in, made on first use.
 store_of(ctx: ptr) -> ptr {
-    have = map_get_raw(ctx, KEY_VALUES)
+    have = map.lookup(ctx, KEY_VALUES)
     if have != null { return have }
     st = store_new()
     map_put(ctx, KEY_VALUES, st)
@@ -5102,12 +5101,12 @@ store_free(p: ptr) {
     n = list_size(st.nodes)
     i = 0
     while i < n {
-        nd = list_get_raw(st.nodes, i)
+        nd = list.at(st.nodes, i)
         if nd != null { node_free(nd) }
         i = i + 1
     }
     list_free(st.nodes)
-    intarr_free(st.free_ids)
+    free(st.free_ids)
     heap.free(st)
 }
 
@@ -5122,11 +5121,11 @@ node_new(ctx: ptr, kind: int) -> (string, ptr) {
     id = 0
     if st.free_len > 0 {
         st.free_len = st.free_len - 1
-        id = intarr_get_raw(st.free_ids, st.free_len)
+        id = st.free_ids[st.free_len]
         list_set(st.nodes, id, nd as ptr)
     } else {
         id = list_size(st.nodes)
-        list_add_raw(st.nodes, nd as ptr)
+        list.add(st.nodes, nd as ptr)
     }
     st.live = st.live + 1
     st.made = st.made + 1
@@ -5143,7 +5142,7 @@ store_node(sp: ptr, v: string) -> ptr {
     st = sp as *LiquidStore
     id, err = string.to_int(value_payload(v))
     if err != "" || id < 0 || id >= list_size(st.nodes) { return null }
-    p = list_get_raw(st.nodes, id)
+    p = list.at(st.nodes, id)
     if p == null { return null }
     nd = p as *LiquidNode
     if nd.kind != k { return null }
@@ -5152,7 +5151,7 @@ store_node(sp: ptr, v: string) -> ptr {
 
 // The node `v` names in `ctx`'s store (store_node).
 node_of(ctx: ptr, v: string) -> ptr {
-    return store_node(map_get_raw(ctx, KEY_VALUES), v)
+    return store_node(map.lookup(ctx, KEY_VALUES), v)
 }
 
 arr_len(nd: ptr) -> int { return string_list_size((nd as *LiquidNode).items) }
@@ -5178,25 +5177,24 @@ obj_replace(nd: ptr, key: string, v: string) {
 // (value, 1) for a key the object has, (nil, 0) otherwise.
 obj_get(nd: ptr, key: string) -> (string, int) {
     o = nd as *LiquidNode
-    v = map_get_raw(o.fields, key)
+    v = map.lookup(o.fields, key)
     if v == null { return value_nil(), 0 }
     return v, 1
 }
 
 // Keep `id` for the next node.
 store_push_free(st: *LiquidStore, id: int) {
-    if st.free_len == st.free_cap {
-        grown = intarr_new_raw(st.free_cap * 2)
+    if st.free_len == st.free_ids.len {
+        grown = make([]int, st.free_ids.len * 2)
         i = 0
         while i < st.free_len {
-            intarr_set_raw(grown, i, intarr_get_raw(st.free_ids, i))
+            grown[i] = st.free_ids[i]
             i = i + 1
         }
-        intarr_free(st.free_ids)
+        free(st.free_ids)
         st.free_ids = grown
-        st.free_cap = st.free_cap * 2
     }
-    intarr_set_raw(st.free_ids, st.free_len, id)
+    st.free_ids[st.free_len] = id
     st.free_len = st.free_len + 1
 }
 
@@ -5212,11 +5210,11 @@ store_collect(ctx: ptr, sp: ptr) {
     st = sp as *LiquidStore
     pending = string_list_new()
     typed = typed_of(ctx)
-    keys = map_keys_raw(typed)
-    nk = map_keys_size_raw(keys)
+    keys, _kerr = map.keys(typed)
+    nk = map.keys_size(keys)
     i = 0
     while i < nk {
-        v = map_get_raw(typed, map_keys_get_raw(keys, i))
+        v = map.lookup(typed, map.keys_get(keys, i))
         if is_node_value(v) == 1 { string_list_add(pending, v) }
         i = i + 1
     }
@@ -5249,7 +5247,7 @@ store_collect(ctx: ptr, sp: ptr) {
     total = list_size(st.nodes)
     id = 0
     while id < total {
-        q = list_get_raw(st.nodes, id)
+        q = list.at(st.nodes, id)
         if q != null {
             held = q as *LiquidNode
             if held.marked == 1 {
@@ -5272,7 +5270,7 @@ store_collect(ctx: ptr, sp: ptr) {
 // last collection. For measuring; a template never needs it.
 context_value_nodes(ctx: ptr) -> int {
     if map_has(ctx, KEY_VALUES) == 0 { return 0 }
-    return (map_get_raw(ctx, KEY_VALUES) as *LiquidStore).live
+    return (map.lookup(ctx, KEY_VALUES) as *LiquidStore).live
 }
 
 // ---- Reading values: text, output, truthiness, equality, order -------------

@@ -4,7 +4,8 @@
 
 import std.schema
 import std.json
-import std.map(map_new, map_put_raw, map_free)
+import std.map
+import std.map(map_new, map_free)
 import std.string(string_equals, string_contains, string_free)
 
 extern exit(code: int)
@@ -154,8 +155,8 @@ fn test_strict_and_flat() -> int {
     // The flat parse cannot carry nesting, and says so.
     nested = order_schema()
     input = map_new()
-    map_put_raw(input, "id", "1")
-    map_put_raw(input, "customer", "{}")
+    map.put(input, "id", "1")
+    map.put(input, "customer", "{}")
     fv, fe = schema.parse(nested, input)
     fails = fails + ck(has_error(fe, "customer", "invalid_type"), "flat parse refuses an OBJECT field")
     fails = fails + ck(string_contains(schema.error_message(fe, 0), "parse_json") == 1 || schema.error_count(fe) > 1,

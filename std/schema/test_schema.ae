@@ -4,7 +4,7 @@
 // optional, and the parse -> (values, errors) contract with Zod-style codes.
 
 import std.schema
-import std.map(map_new, map_put_raw, map_free)
+import std.map(map_new, map_free)
 import std.map
 import std.string(string_equals, to_int, string_contains, string_free)
 
@@ -54,7 +54,7 @@ fn expect_err(label: string, s: ptr, input: ptr, field: string, code: string) {
 }
 
 fn put(m: ptr, k: string, v: string) {
-    map_put_raw(m, k, v)
+    map.put(m, k, v)
 }
 
 main() {

@@ -39,7 +39,9 @@ unbound: 0
 
 **`get` reports a missing key as success.** It guards `map == null` but not
 membership, so `map.get(m, "absent")` returns `(null, "")`. Use `map_has` for
-the unambiguous membership test, and null-check the pointer.
+the unambiguous membership test, and null-check the pointer. `map.lookup(m,
+k)` is the same answer without the error slot, the value or null, for a
+caller that reads absence as null.
 
 **A string value is read with `get_string`.** `get` hands back a `ptr`, and a
 `ptr` given to a `string` local as it is (`name, _ = map.get(m, "k")` after

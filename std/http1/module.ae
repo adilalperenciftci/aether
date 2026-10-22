@@ -101,7 +101,7 @@ fn free_str_list(lst: ptr) {
     n = list_size(lst)
     i = 0
     while i < n {
-        b = list_get_raw(lst, i)
+        b = list.at(lst, i)
         if b != null { bytes.free(b) }
         i = i + 1
     }
@@ -169,9 +169,9 @@ header(rp: ptr, name: string) -> string {
     i = 0
     result = ""
     while i < n {
-        nb = list_get_raw(r.header_names, i)
+        nb = list.at(r.header_names, i)
         if name_is(nb, name) == 1 {
-            vb = list_get_raw(r.header_values, i)
+            vb = list.at(r.header_values, i)
             result = bytes.to_string(vb, bytes.length(vb))
             i = n
         } else {
@@ -186,8 +186,8 @@ fn header_bytes(r: *HttpResponse, name: string) -> ptr {
     n = list_size(r.header_names)
     i = 0
     while i < n {
-        nb = list_get_raw(r.header_names, i)
-        if name_is(nb, name) == 1 { return list_get_raw(r.header_values, i) }
+        nb = list.at(r.header_names, i)
+        if name_is(nb, name) == 1 { return list.at(r.header_values, i) }
         i = i + 1
     }
     return null
@@ -323,8 +323,8 @@ parse_headers(r: *HttpResponse, buf: byte[], header_end: int, start: int) {
                     if c3 == 32 || c3 == 9 { vend = vend - 1 } else { break }
                 }
                 value = slice_bytes(buf, vstart, vend)
-                list_add_raw(r.header_names, lname)
-                list_add_raw(r.header_values, value)
+                list.add(r.header_names, lname)
+                list.add(r.header_values, value)
             }
             p = eol + 2
         }

@@ -49,11 +49,11 @@ header comment is the authoritative description.
 | `std.ksuid` | KSUID: 160-bit lexicographically sortable identifier. | 1 | [guide](../std/ksuid/README.md) · [source](../std/ksuid/module.ae) |
 | `std.language` | BCP 47 language tags and matching (RFC 5646, RFC 4647). | 11 | [guide](../std/language/README.md) · [source](../std/language/module.ae) |
 | `std.lanes` | SIMD lanes: four or eight floats, or two doubles, per vector, with masks and select. | 127 | [guide](../std/lanes/README.md) · [source](../std/lanes/module.ae) |
-| `std.list` | Dynamic array, re-exported from `std.collections`. | 13 | [guide](../std/list/README.md) · [source](../std/list/module.ae) |
+| `std.list` | Dynamic array, re-exported from `std.collections`. | 14 | [guide](../std/list/README.md) · [source](../std/list/module.ae) |
 | `std.log` | Levelled logging with timestamps, colours and counters. | 9 | [full section](#logging-stdlog) |
 | `std.longarr` | Fixed-size packed-long buffer. | 15 | [guide](../std/longarr/README.md) · [source](../std/longarr/module.ae) |
 | `std.lzf` | One-shot LZF compression and decompression. | 9 | [guide](../std/lzf/README.md) · [source](../std/lzf/module.ae) |
-| `std.map` | Hash map, re-exported from `std.collections`, with readable key snapshots. | 19 | [guide](../std/map/README.md) · [source](../std/map/module.ae) |
+| `std.map` | Hash map, re-exported from `std.collections`, with readable key snapshots. | 20 | [guide](../std/map/README.md) · [source](../std/map/module.ae) |
 | `std.math` | Arithmetic, trigonometry, rounding and floating-point helpers. | 45 | [full section](#math-stdmath) |
 | `std.mem` | Byte-level reads and writes over caller-allocated raw pointers. | 98 | [guide](../std/mem/README.md) · [source](../std/mem/module.ae) |
 | `std.message` | ICU MessageFormat formatting and message catalogues. | 8 | [guide](../std/message/README.md) · [source](../std/message/module.ae) |
@@ -205,13 +205,14 @@ ada []
 - `list.add(list, item)` → `string` - Append item, return error string
 - `list.get(list, index)` → `(ptr, string)` - The item at `index`: `(null, "index out of range")` or `(null, "null list")` on failure
 - `list.get_string(list, index)` → `(string, string)` - The item as a string, checked: `(null, "not a string")` when the element is some other pointer, `(null, "")` when it is null, and `get`'s errors
+- `list.at(list, index)` → `ptr` - The item at an index the caller has bounded (a loop over `0 ..< list.size(l)`); out of range, or a null list, is a panic naming the index and the size, as a slice index is
 - `list.set(list, index, item)` - Set item at index
 - `list.remove(list, index)` - Remove item at index
 - `list.size(list)` - Get number of elements
 - `list.clear(list)` - Remove all elements
 - `list.free(list)` - Free list memory
 
-Raw externs: `list_add_raw` (returns 1/0), `list_get_raw` (no bounds check).
+Raw externs: `list_add_raw` (returns 1/0), `list_get_raw` (no bounds check): the C bindings the functions above are built on, for std.list itself. Another module calls the functions (#3107).
 
 **String elements.** `list.add` and `list.set` of a string take a reference
 to it, released when the element leaves (`list.remove`, `list.clear`, a store
@@ -318,6 +319,7 @@ Aether [] 1
 - `map.put(map, key, value)` → `string` - Insert or update, return error string
 - `map.get(map, key)` → `(ptr, string)` - The value: `(null, "")` if the key is absent, `(null, "null map")` if `map` is null
 - `map.get_string(map, key)` → `(string, string)` - Get a string value: `(null, "")` if missing, `(null, "not a string")` if the value is some other pointer
+- `map.lookup(map, key)` → `ptr` - The value, or null when the key is absent or the map is null: `get` without its error slot
 - `map.has(map, key)` - Check if key exists
 - `map.remove(map, key)` - Remove key-value pair
 - `map.size(map)` - Get number of entries

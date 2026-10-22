@@ -33,8 +33,8 @@ fn widen(perms: sandbox.Grants) {
 }
 
 fn has_grant(perms: ptr, i: int, category: string, pattern: string) -> int {
-    if same(list_get_raw(perms, i * 2), category) != 1 { return 0 }
-    return same(list_get_raw(perms, i * 2 + 1), pattern)
+    if same(list.at(perms, i * 2), category) != 1 { return 0 }
+    return same(list.at(perms, i * 2 + 1), pattern)
 }
 
 main() {

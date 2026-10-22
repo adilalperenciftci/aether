@@ -2493,7 +2493,7 @@ fn parse_intermediates(body: byte[], out: ptr) {
                 init_intermediate(mc)
                 cerr = tls13_cert.parse_certificate(bytes.view(der)[0..cert_len], mc)
                 if string.equals(cerr, "") == 1 {
-                    list_add_raw(out, mc)
+                    list.add(out, mc)
                 } else {
                     tls13_cert.free_leaf(mc)
                     libc_free(mc)
@@ -2527,7 +2527,7 @@ fn free_intermediates(lst: ptr) {
     n = list_size(lst)
     i = 0
     while i < n {
-        m = list_get_raw(lst, i) as *LeafCert
+        m = list.at(lst, i) as *LeafCert
         if m != null {
             tls13_cert.free_leaf(m)
             libc_free(m)

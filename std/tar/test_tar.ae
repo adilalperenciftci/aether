@@ -24,12 +24,12 @@ delete_recursive(dir: string) {
     }
     let list = list_new()
     fs.walk(dir, | path: string, kind: int, depth: int | {
-            list_add_raw(list, string_concat(path, ""))
+            list.add(list, string_concat(path, ""))
             return 0
         })
     var i = list_size(list) - 1
     while i >= 0 {
-        p = list_get_raw(list, i)
+        p = list.at(list, i)
         st_kind, st_size, st_mtime, st_err = fs.file_stat(p)
         if st_kind == fs.STAT_KIND_DIR {
             fs.delete_dir(p)
