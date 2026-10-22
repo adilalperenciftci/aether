@@ -1,6 +1,7 @@
 #include "../analysis/quote.h"
 #include "../analysis/hoist.h"
 #include "../analysis/missing_return.h"
+#include "../analysis/contract_eval.h"
 #include "codegen_internal.h"
 #include "../analysis/sandbox_trust.h"
 #include "../aether_defines.h"
@@ -6015,6 +6016,16 @@ static const char* slice_elem_c_type(const Type* t) {
  * Windows path's backslashes were emitted raw, and each `\G`, `\s`, `\d`
  * became an unknown-escape warning per access (a `\a` a BEL in the
  * message). Control characters are written as octal escapes. */
+/* #3113: is `idx` an integer literal in `0 ..< n`? Such an index into a
+ * `T[N]` needs no run-time test (the checker refuses one outside it). */
+static int index_literal_within(const ASTNode* idx, int n) {
+    if (!idx || idx->type != AST_LITERAL || !idx->value || !idx->node_type) return 0;
+    TypeKind k = idx->node_type->kind;
+    if (k != TYPE_INT && k != TYPE_INT64) return 0;
+    int64_t v = 0;
+    return contract_eval_int64((ASTNode*)idx, NULL, &v) && v >= 0 && v < n;
+}
+
 static void emit_slice_diag_file(CodeGenerator* gen, const ASTNode* n) {
     const char* path = (n && n->source_file) ? n->source_file : "?";
     fputc('"', gen->output);
@@ -11628,11 +11639,26 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                 }
                 int str_base = base && base->node_type &&
                                base->node_type->kind == TYPE_STRING;
+                /* #3113: an index into a fixed-size `T[N]` is checked
+                 * against N, as a slice's is against its length: a local,
+                 * a field, a parameter, an actor's state or a `const`
+                 * table, read or stored, `+=` and `++` alike, the index
+                 * evaluated once. A literal index the checker has seen in
+                 * range needs no test. */
+                int sized = base && type_is_sized_array(base->node_type) &&
+                            !index_literal_within(expr->children[1],
+                                                  base->node_type->array_size);
                 if (str_base) fprintf(gen->output, "_aether_safe_str(");
                 generate_expression(gen, base);
                 if (str_base) fprintf(gen->output, ")");
                 fprintf(gen->output, "[");
+                if (sized) fprintf(gen->output, "aether_array_index((int64_t)(");
                 generate_read(gen, expr->children[1]);
+                if (sized) {
+                    fprintf(gen->output, "), %d, ", base->node_type->array_size);
+                    emit_slice_diag_file(gen, expr);
+                    fprintf(gen->output, ", %d)", expr->line);
+                }
                 fprintf(gen->output, "]");
             }
             break;

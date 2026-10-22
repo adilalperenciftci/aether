@@ -1,0 +1,100 @@
+// #3113: every index into a fixed-size array is checked against its length.
+// Each out-of-range index below is caught by `try`, and the array beside the
+// one written is untouched.
+struct Ctx {
+    w: long[4]
+    n: int
+}
+
+const SIGMA: int[4] = [3, 1, 2, 0]
+
+message Store {
+    i: int
+    v: int
+}
+
+at(a: int[3], i: int) -> int {
+    return a[i]
+}
+
+put(c: *Ctx, i: int, v: long) {
+    c.w[i] = v
+}
+
+actor Keeper {
+    state slots = [0, 0, 0]
+
+    receive {
+        Store(i, v) -> {
+            try {
+                slots[i] = v
+                println("stored ${slots[i]}")
+            } catch e {
+                println("caught: ${e}")
+            }
+        }
+    }
+}
+
+main() {
+    a = [1, 2, 3]
+    b = [7, 8, 9]
+    i = 4
+    try {
+        a[i] = 99
+        println("NOT REACHED write")
+    } catch e {
+        println("caught: ${e}")
+    }
+    try {
+        println("${at(a, 5)}")
+        println("NOT REACHED param")
+    } catch e {
+        println("caught: ${e}")
+    }
+    j = 3
+    try {
+        a[j] += 1
+        println("NOT REACHED compound")
+    } catch e {
+        println("caught: ${e}")
+    }
+    try {
+        a[j]++
+        println("NOT REACHED increment")
+    } catch e {
+        println("caught: ${e}")
+    }
+    k = -1
+    try {
+        a[k]--
+        println("NOT REACHED negative")
+    } catch e {
+        println("caught: ${e}")
+    }
+    c = Ctx { n: 0 }
+    try {
+        put(&c, 4, 5)
+        println("NOT REACHED field")
+    } catch e {
+        println("caught: ${e}")
+    }
+    m = 4
+    try {
+        println("${SIGMA[m]}")
+        println("NOT REACHED const")
+    } catch e {
+        println("caught: ${e}")
+    }
+    // In range, every form still works.
+    a[0] += 10
+    a[1]++
+    a[2] = at(a, 0) + SIGMA[i - 4]
+    put(&c, 3, 40)
+    println("a=${a[0]} ${a[1]} ${a[2]} b=${b[0]} ${b[1]} ${b[2]} c=${c.w[3]}")
+
+    keeper = spawn(Keeper())
+    keeper ! Store { i: 2, v: 5 }
+    keeper ! Store { i: 3, v: 6 }
+    wait_for_idle()
+}

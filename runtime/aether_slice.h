@@ -138,6 +138,25 @@ static inline void aether_slice_fail_index(int64_t idx, uint64_t len,
                         file, line, (long long)idx, (unsigned long long)len);
 }
 
+/* #3113: an index into a fixed-size array `T[N]` outside `0 ..< N`, the
+ * slice's panic with the array's length. */
+static inline void aether_array_fail_index(int64_t idx, uint64_t len,
+                                           const char* file, int line) {
+    aether_slice_panicf("%s:%d: array index %lld out of range for length %llu",
+                        file, line, (long long)idx, (unsigned long long)len);
+}
+
+/* #3113: `a[i]` on a `T[N]`: `i`, checked against N, for the generated C
+ * to index with (`a[aether_array_index(i, N, ...)]`), so the element stays
+ * an lvalue and `i` is evaluated once. A negative index is out of range.
+ * With a constant N and a loop bounded by it the C compiler drops the
+ * test. */
+static inline int64_t aether_array_index(int64_t i, uint64_t len,
+                                         const char* file, int line) {
+    if ((uint64_t)i >= len) aether_array_fail_index(i, len, file, line);
+    return i;
+}
+
 static inline void aether_slice_fail_range(int64_t lo, int64_t hi, uint64_t len,
                                            const char* file, int line) {
     aether_slice_panicf("%s:%d: slice range %lld..%lld out of range for length %llu",

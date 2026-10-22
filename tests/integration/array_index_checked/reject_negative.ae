@@ -1,0 +1,5 @@
+// #3113: a negative literal index is out of range.
+main() {
+    a = [1, 2, 3]
+    println("${a[-1]}")
+}

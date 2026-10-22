@@ -1,0 +1,12 @@
+// #3113: a parameter named like a const is a run-time value: its index is
+// checked when the program runs, not refused by the const it hides.
+const N = 1
+
+pick(a: int[3], N: int) -> int {
+    return a[N]
+}
+
+main() {
+    a = [1, 2, 3]
+    println("${pick(a, 7)}")
+}

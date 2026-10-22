@@ -2275,6 +2275,35 @@ static int is_const_array_element(ASTNode* elem, SymbolTable* table) {
     return is_const_expression(elem, table);
 }
 
+/* #3113: does `e` name only literals and the program's `const`s, as this
+ * scope sees them? A local, a parameter or a module `var` of the name
+ * (one that hides a `const` included) is a value known only at run time. */
+static int index_names_only_consts(ASTNode* e, SymbolTable* table) {
+    if (!e) return 0;
+    switch (e->type) {
+        case AST_LITERAL:
+            return 1;
+        case AST_IDENTIFIER: {
+            Symbol* s = e->value ? lookup_symbol(table, e->value) : NULL;
+            return s && s->is_const;   /* #2516: set for a `const`, never a `var` */
+        }
+        case AST_UNARY_EXPRESSION:
+        case AST_BINARY_EXPRESSION:
+            for (int i = 0; i < e->child_count; i++)
+                if (!index_names_only_consts(e->children[i], table)) return 0;
+            return e->child_count > 0;
+        default:
+            return 0;
+    }
+}
+
+/* #3113: the value of an index known when the program is compiled: a
+ * literal, a `const`, or arithmetic over them. */
+static int tc_index_constant(ASTNode* idx, SymbolTable* table, int64_t* out) {
+    return index_names_only_consts(idx, table) &&
+           contract_eval_int64(idx, g_typecheck_program, out);
+}
+
 /* #2590: a struct literal whose every field is a compile-time constant or
  * such a literal itself. A module-level `var` takes one: it lowers to an
  * initializer list (`static T g = { .a = 0 };`), which C accepts for a
@@ -16262,6 +16291,27 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                     type_error(error_msg, expr->line, expr->column);
                 }
                 if (idx_type) free_type(idx_type);
+
+                /* #3113: an index into a `T[N]` is in `0 ..< N`, checked
+                 * when the program runs; one known when it is compiled and
+                 * outside that is refused here. */
+                int64_t civ = 0;
+                if (type_is_sized_array(arr_type) && !arr_type->index_enum_name &&
+                    tc_index_constant(expr->children[1], table, &civ) &&
+                    (civ < 0 || civ >= arr_type->array_size)) {
+                    char error_msg[320];
+                    char tn[160];
+                    snprintf(error_msg, sizeof(error_msg),
+                             "array index %lld is out of range for '%s', whose indexes are "
+                             "0 through %d",
+                             (long long)civ, ret_type_spell(arr_type, tn, sizeof(tn)),
+                             arr_type->array_size - 1);
+                    type_error(error_msg, expr->children[1]->line ? expr->children[1]->line
+                                                                  : expr->line,
+                               expr->children[1]->line ? expr->children[1]->column
+                                                       : expr->column);
+                    return 0;
+                }
 
                 // Propagate element type from the array expression. The
                 // array's element type is authoritative: the early inference

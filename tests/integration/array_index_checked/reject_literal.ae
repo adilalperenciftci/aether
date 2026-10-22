@@ -1,0 +1,6 @@
+// #3113: a literal index outside a T[N] is a compile error.
+main() {
+    a = [1, 2, 3]
+    a[3] = 9
+    println("${a[0]}")
+}
