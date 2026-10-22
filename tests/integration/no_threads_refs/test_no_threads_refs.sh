@@ -21,8 +21,12 @@ CC="${CC:-cc}"
 TMPDIR="$(mktemp -d)"
 trap 'rm -rf "$TMPDIR"' EXIT
 
+# A value of the Makefile's own. Run under `make` (the sweep is), the inner
+# make inherits MAKEFLAGS and prints "Entering directory" lines into what it
+# echoes, so it starts clean.
 make_var() {
-    printf 'ae-print-var:\n\t@echo $(%s)\n' "$1" | make -s -f Makefile -f - ae-print-var
+    printf 'ae-print-var:\n\t@echo $(%s)\n' "$1" |
+        MAKEFLAGS= MAKELEVEL= make --no-print-directory -s -f Makefile -f - ae-print-var
 }
 SRCS="$(make_var RUNTIME_SRC) $(make_var STD_SRC) $(make_var STD_REACTOR_SRC) $(make_var COLLECTIONS_SRC)"
 CFLAGS_REQ="$(make_var AETHER_REQUIRED_CFLAGS)"
