@@ -1930,7 +1930,23 @@ void* AETHER_HOT scheduler_thread(void* arg) {
             // full processing path.  This makes the loop O(active) not O(total).
             int mbox_count = atomic_load_explicit(&actor->mailbox.count, memory_order_relaxed);
             int mig_to = atomic_load_explicit(&actor->migrate_to, memory_order_relaxed);
-            if (mbox_count == 0 && mig_to < 0) continue;  // Skip inactive actors (fast path!)
+            if (mbox_count == 0 && mig_to < 0) {
+                // An armed receive timeout whose deadline has passed (#3102):
+                // the step fires the `after` arm, by the same clock and test
+                // as the generated step's. Skipped with the rest, an actor
+                // that received nothing was never stepped, and its timeout
+                // never fired with more than one actor in the program.
+                if (likely(actor->timeout_ns == 0) || actor->last_activity_ns == 0 ||
+                    !actor->step) continue;
+                if (aether_now_ns() - actor->last_activity_ns < actor->timeout_ns) continue;
+                if (!atomic_flag_test_and_set_explicit(&actor->step_lock, memory_order_acquire)) {
+                    if (atomic_load_explicit(&actor->assigned_core, memory_order_relaxed) == sched->core_id)
+                        aether_step_safe(actor);
+                    atomic_flag_clear_explicit(&actor->step_lock, memory_order_release);
+                }
+                work_done = 1;
+                continue;
+            }
 
             if (!atomic_load_explicit(&actor->active, memory_order_relaxed)) {
                 atomic_store_explicit(&actor->active, 1, memory_order_relaxed);
@@ -2462,6 +2478,7 @@ void scheduler_wait(void) {
     int stable_count = 0;
     uint64_t last_processed = 0;
     int stall_checks = 0;
+    int timeout_rounds = 0;
     while (stable_count < 5) {
         atomic_thread_fence(memory_order_acquire);
 
@@ -2469,6 +2486,15 @@ void scheduler_wait(void) {
 
         if (pending == 0) {
             stable_count++;
+            // Quiet, but a receive timeout is armed (#3102): its core fires
+            // it once the deadline passes, and its arm may send more, so the
+            // wait goes on, as main-thread mode's does above (and as long).
+            if (stable_count == 5 && timeout_rounds < 100000 && has_pending_actor_timeout()) {
+                stable_count = 0;
+                timeout_rounds++;
+                aether_usleep(1000);
+                continue;
+            }
         } else {
             stable_count = 0;
         }

@@ -90,6 +90,17 @@ void* aether_actor_thread(void* arg) {
             continue;
         }
 
+        // An armed receive timeout whose deadline has passed (#3102): the
+        // step fires the `after` arm, by the same clock and test as the
+        // generated step's. Only a message stepped the actor before, so the
+        // timeout of one that received nothing never fired.
+        if (actor->timeout_ns > 0 && actor->last_activity_ns > 0 && actor->step &&
+            aether_now_ns() - actor->last_activity_ns >= actor->timeout_ns) {
+            idle = 0;
+            actor->step(arg);
+            continue;
+        }
+
         // Nothing to do: leave once the actor's core has stopped. Checked
         // against every core slot, not just the cores of the running
         // scheduler: scheduler_cleanup() sets num_cores to 0, and a thread
