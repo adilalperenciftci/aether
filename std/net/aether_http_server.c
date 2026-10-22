@@ -5484,12 +5484,14 @@ void http_server_drain_connection(HttpServer* server, int client_fd) {
     conn_serve(server, conn);
 }
 
+#if AETHER_HAS_THREADS
 /* The parking lot woke a connection: put it back on a worker rather than
  * serving it on the poller thread, which must stay free for the other parked
- * connections. */
+ * connections. Threaded only, as its caller and the pool are (#3121). */
 static void http_park_resume(HttpServer* server, HttpConn* conn) {
     http_pool_submit_conn((HttpConnectionPool*)server->conn_pool, conn);
 }
+#endif
 
 static void handle_client_connection(HttpServer* server, int client_fd) {
     /* Thread-pool path — defers to the public drain helper so the
