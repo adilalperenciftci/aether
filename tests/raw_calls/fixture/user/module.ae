@@ -1,0 +1,25 @@
+// Fixture for tests/raw_calls/check.ae: a module that reaches into lib's raw
+// layer. Four uses count (marked COUNTS); the rest must not.
+
+import fixture.lib
+import fixture.lib(lib_read_raw)               // COUNTS: a selective import
+
+extern user_own_raw(x: int) -> int
+
+// A helper of this file named like a binding is not one.
+fn local_raw(x: int) -> int {
+    return x
+}
+
+go(path: string) -> int {
+    h = lib.lib_open_raw(path)                 // COUNTS: qualified call
+    n = lib_read_raw(h, 4)                     // COUNTS: bare call
+    m = lib_read_raw (h, 8)                    // COUNTS: a space before the paren
+    k = user_own_raw(n)                        // its own binding
+    j = local_raw(m)                           // not a binding
+    // lib_open_raw(path) in a comment
+    s = "lib_open_raw(path) in a string"
+    return k + j + string_length(s)
+}
+
+extern string_length(s: string) -> int

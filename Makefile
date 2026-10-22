@@ -2806,6 +2806,7 @@ help:
 	@echo "  make check-docs       - Compile the documentation's complete examples"
 	@echo "  make check-tests      - The test suite can fail: verdicts reach the exit code, prune list is consistent, every std module has tests, listeners bind loopback, shell tests end background programs through server_jobs.sh, test programs write temp files under names of their own"
 	@echo "  make check-extern-widths - Every extern bound to C in this tree agrees with the C definition on each width; no plain C long in a bound signature"
+	@echo "  make check-raw-calls     - No std or contrib file calls a raw C binding another module declares"
 	@echo "  make check-contrib-modules - Type-check every non-host contrib module"
 	@echo "  make check-changelog  - Validate changelog fragments, catch a release-fold"
 	@echo "  make add-changelog    - Write a new_changelogs/ fragment (SECTION=, SLUG=)"
@@ -2997,6 +2998,7 @@ ci: clean
 	@$(CI_STAGE) 900 check-docs $(MAKE) check-docs
 	@$(CI_STAGE) 900 check-tests $(MAKE) check-tests
 	@$(CI_STAGE) 900 check-extern-widths $(MAKE) check-extern-widths
+	@$(CI_STAGE) 600 check-raw-calls $(MAKE) check-raw-calls
 	@echo ""
 	@echo "[5/11] Running .ae integration tests..."
 	@$(MAKE) test-ae
@@ -3078,6 +3080,24 @@ check-extern-widths: compiler ae stdlib
 	    > $(BUILD_DIR)/extern_widths/self_test.log 2>&1 || \
 	    { cat $(BUILD_DIR)/extern_widths/self_test.log; exit 1; }
 	@./$(EXTERN_WIDTHS_CHECKER) --exclude tests/extern_widths/fixture $(EXTERN_WIDTHS_DIRS)
+
+# -----------------------------------------------------------------
+# Raw calls (#3107): a std module binds C through `*_raw` externs and
+# builds its public functions on them (error results, ownership of what
+# is stored, bounds). No std or contrib file calls such a binding that
+# another module declares; it calls that module's public function. The
+# checker is Aether (tests/raw_calls/check.ae). Its self-test first: the
+# fixture holds exactly 4 such calls among uses that are not.
+# -----------------------------------------------------------------
+RAW_CALLS_CHECKER := $(BUILD_DIR)/raw_calls/check$(EXE_EXT)
+.PHONY: check-raw-calls
+check-raw-calls: compiler ae stdlib
+	@mkdir -p $(BUILD_DIR)/raw_calls
+	@./$(BUILD_DIR)/ae$(EXE_EXT) build tests/raw_calls/check.ae -o $(RAW_CALLS_CHECKER)
+	@./$(RAW_CALLS_CHECKER) --expect 4 tests/raw_calls/fixture \
+	    > $(BUILD_DIR)/raw_calls/self_test.log 2>&1 || \
+	    { cat $(BUILD_DIR)/raw_calls/self_test.log; exit 1; }
+	@./$(RAW_CALLS_CHECKER) std contrib
 
 # The C a program gets when the C compiler is not GCC-compatible
 # (AETHER_GCC_COMPAT 0, which is what MSVC compiles): strict C11 under gcc,

@@ -1,0 +1,17 @@
+// Fixture for tests/raw_calls/check.ae: a module that binds C and wraps it.
+// Its own calls of its raw bindings are its own business, and count as none.
+
+exports(open, read_n)
+
+extern lib_open_raw(path: string) -> ptr
+@extern("lib_read") lib_read_raw(h: ptr, n: int) -> int
+
+open(path: string) -> {
+    h = lib_open_raw(path)
+    if h == null { return null, "open failed" }
+    return h, ""
+}
+
+read_n(h: ptr, n: int) -> int {
+    return lib_read_raw(h, n)
+}
