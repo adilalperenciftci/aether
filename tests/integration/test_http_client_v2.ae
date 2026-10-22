@@ -179,16 +179,10 @@ handle_redirect_absolute(req: ptr, res: ptr, ud: ptr) {
 }
 
 // ------------------------------------------------------------------
-// Server actor — owns the blocking accept loop. The companion
-// SchedHelper is empty-on-purpose: the multicore scheduler needs
-// at least two registered actors before main() reliably yields back,
-// so the helper is a no-op spawned before the server. (Same trick
-// the broader tests in the tree use; tracking the underlying
-// requirement is a separate scheduler-ergonomics question.)
+// Server actor — owns the blocking accept loop.
 // ------------------------------------------------------------------
 
 message StartSrv { raw: ptr }
-message Noop {}
 
 actor SrvActor {
     state s = 0
@@ -198,11 +192,6 @@ actor SrvActor {
             http_server_start_raw(raw)
         }
     }
-}
-
-actor SchedHelper {
-    state x = 0
-    receive { Noop() -> { x = 1 } }
 }
 
 // ------------------------------------------------------------------
@@ -260,9 +249,6 @@ main() {
     http.server_get(raw, "/redirect-absolute", handle_redirect_absolute, 0)
 
     // Hand the server to an actor that calls server_start (blocking).
-    // SchedHelper spawned first to satisfy the >=2-actor scheduler
-    // requirement (without it, main() never yields back from sleep).
-    spawn(SchedHelper())
     a = spawn(SrvActor())
     a ! StartSrv { raw: raw }
 

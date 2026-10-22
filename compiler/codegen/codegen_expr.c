@@ -11731,9 +11731,14 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                     MessageDef* msg_def = lookup_message(gen->message_registry, message->value);
                     if (msg_def) {
                         const char* single_int = get_single_int_field(msg_def);
-                        if (single_int) {
+                        /* A message with no fields carries nothing: it goes
+                         * as a one-int one does, with no payload to allocate
+                         * (its handler reads none). */
+                        int no_fields = msg_def->fields == NULL;
+                        if (single_int || no_fields) {
                             // Single-field inline: value stored in payload_int (no malloc)
                             fprintf(gen->output, "{ Message _imsg = {%d, 0, ", msg_def->message_id);
+                            if (no_fields) fprintf(gen->output, "0");
                             for (int i = 0; i < message->child_count; i++) {
                                 ASTNode* field_init = message->children[i];
                                 if (field_init && field_init->type == AST_FIELD_INIT && field_init->child_count > 0) {
@@ -11811,7 +11816,11 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                                     }
                                 }
                             }
-                            fprintf(gen->output, "aether_send_message(");
+                            /* #3117: in a batched loop every send joins the
+                             * batch, so a payload message keeps its place
+                             * among the loop's one-int ones. */
+                            fprintf(gen->output, gen->in_main_loop ? "aether_send_message_batch("
+                                                                   : "aether_send_message(");
                             emit_send_target(gen, target, "void*");
                             fprintf(gen->output, ", &_msg, sizeof(%s)); }", message->value);
                         }

@@ -42,7 +42,6 @@ static WStealActor* make_wsteal_actor(int actor_id) {
     a->auto_process = 0;
     atomic_init(&a->assigned_core, -1);
     atomic_init(&a->migrate_to, -1);
-    atomic_init(&a->main_thread_only, 0);
     atomic_init(&a->reply_slot, NULL);
     atomic_flag_clear_explicit(&a->step_lock, memory_order_relaxed);
     atomic_init(&a->count, 0);

@@ -24,7 +24,7 @@ if ! "$AE" build probe.ae -o "$tmpdir/probe" >"$tmpdir/build.log" 2>&1; then
     exit 1
 fi
 
-if ! AETHER_NO_INLINE=1 "$tmpdir/probe" >"$tmpdir/run.log" 2>&1; then
+if ! "$tmpdir/probe" >"$tmpdir/run.log" 2>&1; then
     echo "  [FAIL] panic_actor_step_drain: probe exited non-zero"
     sed 's/^/    /' "$tmpdir/run.log" | head -20
     exit 1

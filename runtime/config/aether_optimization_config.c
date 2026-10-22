@@ -14,11 +14,6 @@ AetherRuntimeConfig g_aether_config = {
     .use_lockfree_mailbox = false,  // Opt-in (slower single-thread)
     .use_message_dedup = false,     // Opt-in (changes semantics)
     .verbose = false,
-    .inline_mode_active = false,
-    .inline_mode_forced = false,
-    .inline_mode_disabled = false,
-    .main_thread_mode = false,      // Sync processing on main thread
-    .main_actor = NULL,
     .actor_count = 0,
     .preempt_enabled = false,       // Opt-in: AETHER_PREEMPT=1
     .preempt_threshold_ns = 1000000, // 1ms default
@@ -27,7 +22,6 @@ AetherRuntimeConfig g_aether_config = {
     .actors_malloced = 0,
     .direct_sends = 0,
     .queue_sends = 0,
-    .inline_sends = 0,
     .batches_adjusted = 0,
     .simd_batches = 0,
     .messages_deduped = 0
@@ -107,16 +101,6 @@ void aether_runtime_configure(AetherOptFlags flags) {
 // Called once at scheduler init before any actors spawn
 void aether_init_from_env(void) {
 #if AETHER_HAS_GETENV
-    // Check inline mode env overrides first
-    if (getenv("AETHER_INLINE")) {
-        atomic_store(&g_aether_config.inline_mode_forced, true);
-        atomic_store(&g_aether_config.inline_mode_active, true);
-    }
-    if (getenv("AETHER_NO_INLINE")) {
-        atomic_store(&g_aether_config.inline_mode_disabled, true);
-        atomic_store(&g_aether_config.inline_mode_active, false);
-    }
-
     // Profile from env or default
     g_aether_config.profile = aether_profile_from_env();
 
@@ -173,16 +157,9 @@ void aether_print_config(void) {
     printf("  malloc:     %s\n", AETHER_HAS_MALLOC     ? "YES" : "NO");
     printf("  shell:      %s\n\n", AETHER_HAS_SHELL    ? "YES" : "NO");
 
-    printf("PROFILE: %s (msg_pool=%d)\n",
+    printf("PROFILE: %s (msg_pool=%d)\n\n",
            aether_profile_name(g_aether_config.profile),
            g_aether_config.msg_pool_size);
-
-    const char* inline_status = "auto";
-    if (atomic_load(&g_aether_config.inline_mode_forced)) inline_status = "forced ON (AETHER_INLINE)";
-    else if (atomic_load(&g_aether_config.inline_mode_disabled)) inline_status = "forced OFF (AETHER_NO_INLINE)";
-    printf("INLINE MODE: %s (current: %s)\n\n",
-           inline_status,
-           atomic_load(&g_aether_config.inline_mode_active) ? "active" : "inactive");
 
     printf("TIER 1 - ALWAYS ON:\n");
     printf("  [ON] Direct Send          - Same-core bypass\n");

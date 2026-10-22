@@ -287,38 +287,21 @@ void test_scheduler_spawn_aligned(void) {
 }
 
 // #2486: a core's actor table grows past MAX_ACTORS_PER_CORE while its
-// scheduler thread scans it without the lock and the main-thread reader
-// (aether_scheduler_poll) walks it from another thread, with messages
-// flowing. Afterwards every actor is in exactly one table, every slot at or
-// past a table's count is NULL (the grown tail included), and the replaced
-// tables are still chained for scheduler_cleanup() to free.
-typedef struct {
-    atomic_int stop;
-    atomic_int polls;
-} TablePollerArgs;
-
-static void* table_poller(void* arg) {
-    TablePollerArgs* p = (TablePollerArgs*)arg;
-    while (!atomic_load(&p->stop)) {
-        aether_scheduler_poll(1);
-        atomic_fetch_add(&p->polls, 1);
-    }
-    return NULL;
-}
+// scheduler thread scans it without the lock, with messages flowing.
+// Afterwards every actor is in exactly one table, every slot at or past a
+// table's count is NULL (the grown tail included), and the replaced tables
+// are still chained for scheduler_cleanup() to free. (A second reader,
+// aether_scheduler_poll walking the tables from another thread, went with
+// main-thread mode, #3112: the cores run every actor.)
 
 void test_scheduler_actor_table_growth(void) {
     enum { N = 2 * MAX_ACTORS_PER_CORE + 100 };
     scheduler_init(2);
+    scheduler_start();
     CounterActor** actors = calloc(N, sizeof(CounterActor*));
     int* seen = calloc(N, sizeof(int));
     ASSERT_NOT_NULL(actors);
     ASSERT_NOT_NULL(seen);
-
-    TablePollerArgs poll_args;
-    atomic_init(&poll_args.stop, 0);
-    atomic_init(&poll_args.polls, 0);
-    pthread_t poller;
-    int poller_started = 0;
 
     int spawned = 0, sent = 0;
     for (int i = 0; i < N; i++) {
@@ -339,11 +322,6 @@ void test_scheduler_actor_table_growth(void) {
         atomic_init(&a->last_value, i);
         actors[i] = a;
         spawned++;
-        // Scheduler threads run from the second spawn on; start the second
-        // reader then.
-        if (i == 1 && pthread_create(&poller, NULL, table_poller, &poll_args) == 0) {
-            poller_started = 1;
-        }
         // A sparse trickle: core 0 keeps going idle, which is when it scans.
         if (i % 50 == 49) {
             int target = (i * 7919) % (i + 1);
@@ -360,8 +338,6 @@ void test_scheduler_actor_table_growth(void) {
         if (processed >= sent) break;
         sleep_ms(5);
     }
-    atomic_store(&poll_args.stop, 1);
-    if (poller_started) pthread_join(poller, NULL);
     scheduler_shutdown();
 
     // Threads are joined: the tables are quiescent.
@@ -405,7 +381,6 @@ void test_scheduler_actor_table_growth(void) {
 
     ASSERT_EQ(N, spawned);
     ASSERT_EQ(sent, processed);
-    ASSERT_TRUE(poller_started);
     ASSERT_EQ(N, registered);
     ASSERT_EQ(0, bad_live);
     ASSERT_EQ(0, foreign);
@@ -417,7 +392,7 @@ void test_scheduler_actor_table_growth(void) {
 }
 
 // #2509: actors are spawned and released in rounds while every core scans
-// its table and another thread walks all of them with aether_scheduler_poll().
+// its table.
 // Half release themselves from their own step, the other half are released by
 // the main thread right after their step ran, while the core that ran it may
 // still be touching them. A release takes the actor out of its table at once
@@ -451,22 +426,9 @@ static int churn_registered(void) {
 void test_scheduler_release_churn(void) {
     enum { ROUNDS = 40, PER_ROUND = 250 };
     scheduler_init(4);
-
-    // Two actors that live throughout: the first takes main-thread mode, the
-    // second ends it for good and starts the core threads.
-    ActorBase* keep[2];
-    for (int i = 0; i < 2; i++) {
-        keep[i] = scheduler_spawn_actor(-1, (void (*)(void*))counter_step, sizeof(CounterActor));
-        ASSERT_NOT_NULL(keep[i]);
-    }
+    scheduler_start();
     int registered_before = churn_registered();
     int live_before = atomic_load(&g_aether_config.actor_count);
-
-    TablePollerArgs poll_args;
-    atomic_init(&poll_args.stop, 0);
-    atomic_init(&poll_args.polls, 0);
-    pthread_t poller;
-    int poller_started = pthread_create(&poller, NULL, table_poller, &poll_args) == 0;
 
     atomic_store(&g_churn_handled, 0);
     ChurnActor* batch[PER_ROUND];
@@ -510,13 +472,9 @@ void test_scheduler_release_churn(void) {
     int registered_after = churn_registered();
     int live_after = atomic_load(&g_aether_config.actor_count);
 
-    atomic_store(&poll_args.stop, 1);
-    if (poller_started) pthread_join(poller, NULL);
     scheduler_shutdown();
-    for (int i = 0; i < 2; i++) scheduler_release_actor(keep[i]);
     scheduler_cleanup();
 
-    ASSERT_TRUE(poller_started);
     ASSERT_EQ(ROUNDS * PER_ROUND, spawned);
     ASSERT_TRUE(handled_all);
     ASSERT_EQ(ROUNDS * PER_ROUND, atomic_load(&g_churn_handled));
@@ -621,12 +579,7 @@ static int wait_no_pending(void) {
 
 void test_scheduler_actor_thread_holds_released_actor(void) {
     scheduler_init(1);   // one core: every actor is the actor thread's core-mate
-
-    ActorBase* keep[2];
-    for (int i = 0; i < 2; i++) {
-        keep[i] = scheduler_spawn_actor(-1, (void (*)(void*))counter_step, sizeof(CounterActor));
-        ASSERT_NOT_NULL(keep[i]);
-    }
+    scheduler_start();
 
     ChurnActor* target = (ChurnActor*)scheduler_spawn_actor(-1, churn_step, sizeof(ChurnActor));
     ASSERT_NOT_NULL(target);
@@ -693,7 +646,6 @@ void test_scheduler_actor_thread_holds_released_actor(void) {
 
     scheduler_shutdown();
     scheduler_release_actor((ActorBase*)echo);
-    for (int i = 0; i < 2; i++) scheduler_release_actor(keep[i]);
     scheduler_cleanup();
 }
 
@@ -704,12 +656,7 @@ void test_scheduler_actor_thread_holds_released_actor(void) {
 // entry is tried after the actor has been reclaimed, under the plain build.
 void test_scheduler_late_send_after_release(void) {
     scheduler_init(2);
-
-    ActorBase* keep[2];
-    for (int i = 0; i < 2; i++) {
-        keep[i] = scheduler_spawn_actor(-1, (void (*)(void*))counter_step, sizeof(CounterActor));
-        ASSERT_NOT_NULL(keep[i]);
-    }
+    scheduler_start();
 
     CounterActor* a = (CounterActor*)scheduler_spawn_actor(-1, (void (*)(void*))counter_step,
                                                            sizeof(CounterActor));
@@ -757,7 +704,6 @@ void test_scheduler_late_send_after_release(void) {
 
     scheduler_shutdown();
     scheduler_release_actor((ActorBase*)b);
-    for (int i = 0; i < 2; i++) scheduler_release_actor(keep[i]);
     scheduler_cleanup();
 }
 
@@ -770,10 +716,7 @@ void test_scheduler_late_send_after_release(void) {
 // count below zero, which reads as a move in progress.
 void test_scheduler_reuse_waits_for_messages_in_flight(void) {
     scheduler_init(2);
-    // No main-thread mode, which would run the sends below on this thread,
-    // and with it no spawn that starts the cores: they start when asked.
-    int inline_was = atomic_load(&g_aether_config.inline_mode_disabled);
-    atomic_store(&g_aether_config.inline_mode_disabled, 1);
+    // No spawn starts the cores: they start when asked.
     CounterActor* a = (CounterActor*)scheduler_spawn_actor(1, (void (*)(void*))counter_step,
                                                            sizeof(CounterActor));
     ASSERT_NOT_NULL(a);
@@ -797,7 +740,6 @@ void test_scheduler_reuse_waits_for_messages_in_flight(void) {
 
     scheduler_shutdown();
     if (b) scheduler_release_actor((ActorBase*)b);
-    atomic_store(&g_aether_config.inline_mode_disabled, inline_was);
     scheduler_cleanup();
     ASSERT_EQ(10, counted);
     ASSERT_EQ(0, pending);
@@ -1136,6 +1078,7 @@ static CounterActor g_caller_actor;
 
 static void teardown_cycle(void) {
     scheduler_init(2);
+    scheduler_start();
     const size_t sizes[] = { sizeof(CounterActor), sizeof(ActorBase) + 1000, sizeof(OrderActor) };
     for (int s = 0; s < 3; s++) {
         for (int k = 0; k < 4; k++) {
@@ -1245,9 +1188,7 @@ static void yield_cpu(void) {
 
 static void contended_lock_cycle(void) {
     scheduler_init(1);
-    // The first spawn takes main-thread mode, the second ends it and starts
-    // the core thread; the message goes to the second.
-    ASSERT_NOT_NULL(scheduler_spawn_actor(-1, (void (*)(void*))counter_step, sizeof(CounterActor)));
+    scheduler_start();
     LockContender c;
     atomic_init(&c.sending, 0);
     c.target = scheduler_spawn_actor(-1, (void (*)(void*))counter_step, sizeof(CounterActor));
@@ -1281,12 +1222,8 @@ void test_scheduler_teardown_destroys_core_locks(void) {
 static void live_actor_thread_cycle(void) {
     scheduler_init(1);
     // An actor thread runs while its core does, so the core threads must be
-    // up: the first actor of a lifecycle takes main-thread mode, the second
-    // ends it and starts them (as in the churn test). Both are spawned, live
-    // into teardown and are ended there with the actor under test.
-    for (int i = 0; i < 2; i++) {
-        ASSERT_NOT_NULL(scheduler_spawn_actor(-1, (void (*)(void*))counter_step, sizeof(CounterActor)));
-    }
+    // up.
+    scheduler_start();
     ASSERT_TRUE(atomic_load(&schedulers[0].running));
     CounterActor* a = (CounterActor*)scheduler_spawn_actor(-1, (void (*)(void*))counter_step,
                                                            sizeof(CounterActor));
@@ -1349,10 +1286,7 @@ static int wait_count(atomic_int* count, int want) {
 void test_scheduler_actor_thread_parks_when_idle(void) {
     scheduler_init(1);
     scheduler_set_actor_park_ms(60000);
-    // Two actors first, so the core thread runs (as in the teardown cycle).
-    for (int i = 0; i < 2; i++) {
-        ASSERT_NOT_NULL(scheduler_spawn_actor(-1, (void (*)(void*))counter_step, sizeof(CounterActor)));
-    }
+    scheduler_start();
     CounterActor* a = (CounterActor*)scheduler_spawn_actor(-1, (void (*)(void*))counter_step,
                                                            sizeof(CounterActor));
     ASSERT_NOT_NULL(a);
@@ -1385,7 +1319,7 @@ void test_scheduler_actor_thread_parks_when_idle(void) {
 
 // #3102: a receive timeout armed on an actor that receives nothing fires, on
 // its core and on its own thread. Only a message stepped an actor before, so
-// with more than one actor (no main-thread mode) the timeout never fired.
+// on the scheduler threads the timeout never fired.
 // The step tests the deadline as a generated one does, and counts a firing.
 static void timeout_step(void* self) {
     CounterActor* a = (CounterActor*)self;
@@ -1403,6 +1337,7 @@ static void timeout_step(void* self) {
 
 void test_scheduler_fires_receive_timeouts(void) {
     scheduler_init(2);
+    scheduler_start();
     CounterActor* on_core = (CounterActor*)scheduler_spawn_actor(-1, timeout_step, sizeof(CounterActor));
     CounterActor* on_thread = (CounterActor*)scheduler_spawn_actor(-1, timeout_step, sizeof(CounterActor));
     ASSERT_NOT_NULL(on_core);
@@ -1460,7 +1395,7 @@ void test_scheduler_places_threads_among_process_cpus(void) {
 
     int recommended = cpu_recommend_cores();
 
-    // Two actors, one per core, so the threads start (no main-thread mode).
+    // Two actors, one per core.
     scheduler_init(2);
     CounterActor* a = (CounterActor*)scheduler_spawn_actor(0, (void (*)(void*))counter_step,
                                                            sizeof(CounterActor));
@@ -1643,7 +1578,7 @@ static void* order_sender_thread(void* arg) {
 
 void test_scheduler_actor_thread_inbox_keeps_order(void) {
     scheduler_init(1);
-    ASSERT_NOT_NULL(scheduler_spawn_actor(-1, (void (*)(void*))counter_step, sizeof(CounterActor)));
+    scheduler_start();
     BurstActor* burst = (BurstActor*)scheduler_spawn_actor(-1, burst_step, sizeof(BurstActor));
     ASSERT_NOT_NULL(burst);
     atomic_init(&burst->done, 0);

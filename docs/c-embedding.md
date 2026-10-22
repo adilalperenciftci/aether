@@ -287,7 +287,6 @@ The `ActorBase` contains:
 - `step`: Your message handler
 - `assigned_core`: Current core assignment (`atomic_int`, safe for cross-core reads)
 - `migrate_to`: Affinity hint for message-driven migration (`atomic_int`)
-- `main_thread_only`: If set, scheduler threads skip this actor (`atomic_int`)
 - `spsc_queue`: Lock-free same-core messaging (pointer, lazily allocated)
 - `reply_slot`: Non-NULL during ask/reply (`_Atomic` pointer)
 - `step_lock`: Prevents concurrent `step()` during work-steal handoff (`atomic_flag`)
@@ -437,9 +436,7 @@ Include the header in your C host application and send through the helpers, or b
 
 ## Polling from a C Event Loop
 
-When a C event loop (raylib, SDL, game loop, etc.) holds the main thread, Aether actors in main-thread mode cannot process messages, the scheduler has no opportunity to run.
-
-Use `aether_scheduler_poll()` to drain pending messages from C code between frames:
+With threads, actors run on the scheduler's threads from the first spawn on, so a C event loop (raylib, SDL, a game loop) that holds the main thread does not hold them up, and has nothing to poll: `aether_scheduler_poll` returns 0 there (#3112). In the cooperative (no-threads) runtime the actors run only when the host lets them, so a C loop calls `aether_scheduler_poll()` between frames:
 
 ```c
 #include "runtime/scheduler/multicore_scheduler.h"
@@ -463,7 +460,7 @@ while (!window_should_close()) {
 int aether_scheduler_poll(int max_per_actor);
 ```
 
-`aether_scheduler_poll` is safe to call from the main thread at any time. It only processes actors that are in main-thread mode; scheduler worker threads are not affected. It is a no-op if no actors are registered.
+In the cooperative runtime `aether_scheduler_poll` steps every actor that has messages, at most `max_per_actor` of them each; with threads it returns 0. It is a no-op if no actors are registered.
 
 ## See Also
 

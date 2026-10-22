@@ -45,7 +45,6 @@ handle_param(req: ptr, res: ptr, ud: ptr) {
 // ---- Server actor ----
 
 message StartSrv { raw: ptr }
-message Noop {}
 
 actor SrvActor {
     state s = 0
@@ -57,11 +56,6 @@ actor SrvActor {
             if err != "" { println("tinyweb server: ${err}") }
         }
     }
-}
-
-actor SchedHelper {
-    state x = 0
-    receive { Noop() -> { x = 1 } }
 }
 
 // ---- Helpers ----
@@ -115,7 +109,6 @@ main() {
     http.server_post(raw, "/echo", handle_echo, 0)
     http.server_get(raw, "/users/:id", handle_param, 0)
 
-    spawn(SchedHelper())
     a = spawn(SrvActor())
     a ! StartSrv { raw: raw }
     sleep(500)

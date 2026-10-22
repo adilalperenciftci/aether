@@ -66,11 +66,6 @@ actor SrvActor {
         }
     }
 }
-actor SchedHelper {
-    state x = 0
-    receive { Ping() -> { x = 1 } }
-}
-message Ping {}
 
 // The whole response through std.http.client, so a spec can assert on the
 // status (422, 400, 204) as well as the body. Null when no response came
@@ -141,7 +136,6 @@ main() {
         schema_api.openapi_route("/openapi.json", registry)
     }
 
-    spawn(SchedHelper())
     a = spawn(SrvActor())
     a ! StartSrv { srv: server }
     sleep(500)

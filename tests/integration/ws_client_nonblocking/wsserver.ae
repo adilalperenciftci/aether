@@ -38,14 +38,9 @@ const PORT = 18251
 }
 
 message StartSrv { raw: ptr }
-message Noop {}
 actor SrvActor {
     state s = 0
     receive { StartSrv(raw) -> { s = raw; http_server_start_raw(raw) } }
-}
-actor SchedHelper {
-    state x = 0
-    receive { Noop() -> { x = 1 } }
 }
 
 main() {
@@ -56,7 +51,6 @@ main() {
     http.server_websocket(raw, "/slow", slow_handler, null)
     println("READY")
 
-    spawn(SchedHelper())
     a = spawn(SrvActor())
     a ! StartSrv { raw: raw }
 

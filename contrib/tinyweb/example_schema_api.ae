@@ -52,11 +52,6 @@ actor SrvActor {
         }
     }
 }
-actor Sched {
-    state x = 0
-    receive { Ping() -> { x = 1 } }
-}
-message Ping {}
 
 // The whole response through std.http.client: the showcase prints the
 // status (201, 422) next to the body. Null when no response came back at
@@ -147,7 +142,6 @@ main() {
         schema_api.openapi_route("/openapi.json", registry)
     }
 
-    spawn(Sched())
     a = spawn(SrvActor())
     a ! StartSrv { srv: server }
     sleep(500)

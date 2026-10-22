@@ -11176,9 +11176,13 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                 break;  // collapsed — done
             }
 
-            // Batch optimization: only in main() (not inside actors)
+            // Batch optimization: only outside actors, and only around a
+            // loop that cannot wait between its sends (#3117). A loop inside
+            // a batched one joins its batch rather than opening another.
             // Uses queue_enqueue_batch to reduce atomics from N to num_cores
-            if (has_sends && gen->current_actor == NULL) {
+            int batch = has_sends && gen->current_actor == NULL && !gen->in_main_loop &&
+                        loop_sends_without_waiting(stmt);
+            if (batch) {
                 print_line(gen, "scheduler_send_batch_start();");
                 gen->in_main_loop = 1;
             }
@@ -11288,7 +11292,7 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                 print_line(gen, "#endif");
             }
 
-            if (has_sends && gen->current_actor == NULL) {
+            if (batch) {
                 print_line(gen, "scheduler_send_batch_flush();");
                 gen->in_main_loop = 0;
             }

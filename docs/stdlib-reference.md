@@ -2715,10 +2715,6 @@ arm.
 - `await_io` must be called from inside an actor's `receive` handler
   (not from `main()`). The bridge reads the current actor from a TLS
   set at the top of every generated `_step()` function.
-- Single-actor programs run in main-thread mode which bypasses the
-  scheduler loop, and therefore the I/O reactor. Spawn at least two
-  actors to force multi-threaded scheduler mode if you want `await_io`
-  to function.
 - The fd must outlive the `await_io` registration. If you close the
   fd before the `IoReady` fires, behavior depends on the backend
   (epoll reports EPOLLHUP; kqueue silently drops the one-shot).

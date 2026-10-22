@@ -63,16 +63,10 @@ const PORT = 18130
 //   GET /missing  -> 404                     (the non-200 status case)
 
 message StartSrv { raw: ptr }
-message Noop {}
 
 actor SrvActor {
     state s = 0
     receive { StartSrv(raw) -> { s = raw; http_server_start_raw(raw) } }
-}
-
-actor SchedHelper {
-    state x = 0
-    receive { Noop() -> { x = 1 } }
 }
 
 handle_info(req: ptr, res: ptr, ud: ptr) {
@@ -258,7 +252,6 @@ run_http_section(fw: ptr) {
         http.server_post(srv, "/created", handle_created, 0)
         http.server_post(srv, "/forbidden", handle_forbidden, 0)
 
-        spawn(SchedHelper())
         a = spawn(SrvActor())
         a ! StartSrv { raw: srv }
 

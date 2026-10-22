@@ -445,6 +445,37 @@ int contains_send_expression(ASTNode* node) {
     return 0;
 }
 
+/* #3117: can `node`, a loop, keep its sends in a batch (delivered at the
+ * loop's end, or 256 at a time)? Only when nothing in it can wait between two
+ * sends or look at what a send did: it calls nothing, prints nothing, asks
+ * nothing and reads no actor's state. A send, arithmetic, an assignment, a
+ * branch and an inner loop are fine: the counting and fork-join shape the
+ * batch exists for. A `return`, or a labeled `break` or `continue` (which can
+ * leave for an enclosing loop), would leave the batch unflushed, and a
+ * closure made in the loop runs outside it, so each keeps the loop out too. */
+int loop_sends_without_waiting(ASTNode* node) {
+    if (!node) return 1;
+    switch (node->type) {
+        case AST_FUNCTION_CALL: case AST_PRINT_STATEMENT: case AST_SEND_ASK:
+        case AST_CLOSURE: case AST_RETURN_STATEMENT:
+            return 0;
+        case AST_BREAK_STATEMENT: case AST_CONTINUE_STATEMENT:
+            if (node->value) return 0;
+            break;
+        case AST_MEMBER_ACCESS:
+            if (node->child_count > 0 && node->children[0] && node->children[0]->node_type &&
+                node->children[0]->node_type->kind == TYPE_ACTOR_REF)
+                return 0;
+            break;
+        default:
+            break;
+    }
+    for (int i = 0; i < node->child_count; i++) {
+        if (!loop_sends_without_waiting(node->children[i])) return 0;
+    }
+    return 1;
+}
+
 // Tree-shake of merged-but-unused stdlib functions runs around typecheck
 // (module_mark_unreachable before it, module_sweep_unreachable after it,
 // #2613); see aether_module.c. Codegen no longer needs a separate pass;

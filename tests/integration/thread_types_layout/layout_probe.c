@@ -21,7 +21,6 @@ int main(void) {
     AT(ActorBase, auto_process);
     AT(ActorBase, assigned_core);
     AT(ActorBase, migrate_to);
-    AT(ActorBase, main_thread_only);
     AT(ActorBase, spsc_queue);
     AT(ActorBase, reply_slot);
     AT(ActorBase, step_lock);

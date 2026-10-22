@@ -1,11 +1,9 @@
 // Test: two actors with different timeouts, both of which fire.
 //
-// With two actors the program runs on the scheduler's cores, not in
-// main-thread mode. No core stepped an actor whose mailbox was empty, so
-// neither timeout fired, and wait_for_idle() returned at once: this test
-// printed its PASS line without either handler having run (#3102). Now the
-// core fires each timeout once its deadline passes, and wait_for_idle()
-// waits for them, as it does in main-thread mode.
+// No core stepped an actor whose mailbox was empty, so neither timeout
+// fired, and wait_for_idle() returned at once: this test printed its PASS
+// line without either handler having run (#3102). Now the core fires each
+// timeout once its deadline passes, and wait_for_idle() waits for them.
 
 message Ping {}
 

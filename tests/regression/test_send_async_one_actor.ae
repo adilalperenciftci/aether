@@ -1,0 +1,40 @@
+// Regression (#3112): a send is asynchronous with one actor too.
+//
+// With a single actor the runtime ran the handler inside the sender's `!`
+// (main-thread mode) until a second actor was spawned, so a handler that
+// waited for something its sender does next waited for nothing: here it gave
+// up after two seconds and saw `ready` still 0, and with no timeout it would
+// have deadlocked. Every send now goes through the scheduler, so the handler
+// runs on a scheduler thread while main goes on and sets `ready`.
+
+extern exit(code: int)
+
+var ready = 0
+var saw_ready = -1
+
+message Wait {}
+
+actor Waiter {
+    receive {
+        Wait() -> {
+            waited = 0
+            while ready == 0 && waited < 2000 {
+                sleep(1)
+                waited = waited + 1
+            }
+            saw_ready = ready
+        }
+    }
+}
+
+main() {
+    w = spawn(Waiter())
+    w ! Wait {}
+    ready = 1
+    wait_for_idle()
+    if saw_ready != 1 {
+        println("FAIL #3112: the handler ran inside the send and never saw main go on (${saw_ready})")
+        exit(1)
+    }
+    println("PASS #3112: a send to a lone actor returns before its handler runs")
+}

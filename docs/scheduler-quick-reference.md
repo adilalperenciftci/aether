@@ -1,22 +1,10 @@
 # Aether Scheduler - Quick Reference
 
-## Main Thread Mode
+## Sends
 
-Single-actor programs bypass the scheduler entirely. When only one actor exists and all messages originate from the main thread, the runtime processes messages synchronously without spawning scheduler threads.
-
-**Activation:**
-- Automatic: Enabled when the first actor spawns, disabled when a second actor spawns
-- Manual disable: Set `AETHER_NO_INLINE=1` environment variable
-
-**Mechanism:**
-- `scheduler_start()` returns immediately
-- `scheduler_wait()` returns immediately (non-destructive; does not stop threads)
-- `aether_send_message` processes synchronously via `aether_send_message_sync`
-- **Threaded mode:** Zero-copy, message data passed directly from caller's stack
-- **Cooperative mode:** Heap-copy, message data is `malloc`'d because mailbox FIFO order means the sent message may not be consumed by the immediate `step()` call
-
-**Per-actor flag:**
-The `main_thread_only` field on `ActorBase` signals scheduler threads to skip processing this actor. When a second actor spawns, the flag is cleared on the first actor. In cooperative mode, this flag stays set for all actors.
+A send is asynchronous whatever the number of actors: the payload is copied to
+the heap and handed to the scheduler, and a scheduler thread runs the handler
+while the sender goes on (#3112).
 
 ---
 
@@ -25,11 +13,12 @@ The `main_thread_only` field on `ActorBase` signals scheduler threads to skip pr
 On platforms without pthreads (WebAssembly, embedded) or when threading is explicitly disabled (`-DAETHER_NO_THREADING`), the cooperative scheduler (`aether_scheduler_coop.c`) provides the same API as the multi-core scheduler but runs everything on a single thread.
 
 **Key differences:**
-- `scheduler_init()` forces `num_cores = 1`, `main_thread_mode = true`
+- `scheduler_init()` forces `num_cores = 1`
 - `scheduler_start()` / `scheduler_stop()` are no-ops
+- A send queues (the mailbox, then the actor's inbox past 32 messages) and never runs a handler
 - `scheduler_wait()` polls all actors via `aether_scheduler_poll()` until no messages remain
 - All sends go to local mailbox (no cross-core routing)
-- Ask/reply is synchronous (poll until `reply_ready`)
+- Ask/reply polls until `reply_ready`
 
 **Selection:** Controlled by `PLATFORM=wasm|embedded` or auto-detected from `EXTRA_CFLAGS` containing `AETHER_NO_THREADING`. Only one scheduler .c file is compiled.
 
@@ -216,7 +205,7 @@ Both migration and work stealing use ascending core-id lock ordering to prevent 
 - Avoid blocking operations in actor step functions
 
 ### Crashes
-- Verify every actor struct starts with `ActorBase`'s fields: expand `AETHER_ACTOR_BASE_FIELDS` first (or put an `ActorBase` member first) rather than copying the list, which drifts as fields are added. In order, they are `active`, `id`, `mailbox`, `step`, `thread`, `auto_process`, `assigned_core`, `migrate_to`, `main_thread_only`, `spsc_queue`, `reply_slot`, `step_lock`, `timeout_ns`, `last_activity_ns`, `dead`, `alloc_size`, `destroy_state`, `scheduler_owned`, `inbox`, `thread_parked`, `inflight`.
+- Verify every actor struct starts with `ActorBase`'s fields: expand `AETHER_ACTOR_BASE_FIELDS` first (or put an `ActorBase` member first) rather than copying the list, which drifts as fields are added. In order, they are `active`, `id`, `mailbox`, `step`, `thread`, `auto_process`, `assigned_core`, `migrate_to`, `spsc_queue`, `reply_slot`, `step_lock`, `timeout_ns`, `last_activity_ns`, `dead`, `alloc_size`, `destroy_state`, `scheduler_owned`, `inbox`, `thread_parked`, `inflight`.
 - Initialize `migrate_to = -1` after actor creation
 - Use `scheduler_send_remote` instead of direct mailbox writes for cross-core messages
 - Call `scheduler_shutdown()` before process exit (waits for quiescence, stops and joins threads)

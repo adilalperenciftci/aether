@@ -178,18 +178,12 @@ handle_echo_cacheable_ttl(req: ptr, res: ptr, ud: ptr) {
 // ---- Actors -----------------------------------------------
 
 message StartSrv { raw: ptr }
-message Noop {}
 actor SrvActor {
     state s = 0
     receive { StartSrv(raw) -> { s = raw; http_server_start_raw(raw) } }
 }
-actor SchedHelper {
-    state x = 0
-    receive { Noop() -> { x = 1 } }
-}
 
 run_server(srv: @keep ptr) {
-    spawn(SchedHelper())
     a = spawn(SrvActor())
     a ! StartSrv { raw: srv }
     // Block until the test harness SIGKILLs us. The earlier shape

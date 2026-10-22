@@ -406,18 +406,7 @@ typedef struct {
     atomic_bool use_message_dedup;
     atomic_bool verbose;
 
-    // Inline mode (auto-detected or env override)
-    // When active, single-actor programs bypass queues entirely
-    atomic_bool inline_mode_active;
-    atomic_bool inline_mode_forced;   // Set by AETHER_INLINE=1 env var
-    atomic_bool inline_mode_disabled; // Set by AETHER_NO_INLINE=1 env var
-
-    // Main thread actor mode: single actor, all sends from main(), no scheduler needed
-    // When active: messages processed synchronously in sender's context
-    atomic_bool main_thread_mode;
-    void* main_actor;  // Pointer to the single actor (ActorBase*)
-
-    // Actor tracking for auto-detection
+    // Live actors (spawned, not yet released)
     atomic_int actor_count;
 
     // Memory profile (auto-detected or env override)
@@ -433,7 +422,6 @@ typedef struct {
     atomic_uint_fast64_t actors_malloced;
     atomic_uint_fast64_t direct_sends;
     atomic_uint_fast64_t queue_sends;
-    atomic_uint_fast64_t inline_sends;     // Messages sent via inline mode
     atomic_uint_fast64_t batches_adjusted;
     atomic_uint_fast64_t simd_batches;
     atomic_uint_fast64_t messages_deduped;
@@ -476,54 +464,9 @@ static inline bool aether_has_opt(AetherOptFlags flag) {
 #define AETHER_STAT_INC(field) ((void)0)
 #endif
 
-// ============================================================================
-// INLINE MODE DETECTION (for single-actor sequential optimization)
-// ============================================================================
-
-// Check if inline mode is currently active (single branch, predicted false)
-static inline bool aether_inline_mode_active(void) {
-    return unlikely(atomic_load_explicit(&g_aether_config.inline_mode_active, memory_order_relaxed));
-}
-
-// Check if main thread actor mode is active (synchronous processing)
-// This is the fastest path: no scheduler, no queues, direct function calls.
-// NOTE: No __builtin_expect here — in single-actor programs this is always true
-// (hinting it as unlikely would put the fast inline path in cold instruction cache).
-// The CPU branch predictor learns the correct bias quickly for both cases.
-static inline bool aether_main_thread_mode_active(void) {
-    return atomic_load_explicit(&g_aether_config.main_thread_mode, memory_order_relaxed);
-}
-
-// Enable main thread mode for an actor (call after spawn, before any sends)
-static inline void aether_enable_main_thread_mode(void* actor) {
-    atomic_store_explicit(&g_aether_config.main_thread_mode, true, memory_order_relaxed);
-    g_aether_config.main_actor = actor;
-}
-
-// Called at spawn time to update actor count and inline mode state
+// Called at spawn time to count the actor
 static inline void aether_on_actor_spawn(void) {
-    int count = atomic_fetch_add_explicit(&g_aether_config.actor_count, 1, memory_order_relaxed);
-
-    // Check env overrides
-    if (atomic_load_explicit(&g_aether_config.inline_mode_disabled, memory_order_relaxed)) {
-        return; // User forced inline off
-    }
-
-    if (atomic_load_explicit(&g_aether_config.inline_mode_forced, memory_order_relaxed)) {
-        atomic_store_explicit(&g_aether_config.inline_mode_active, true, memory_order_relaxed);
-        return; // User forced inline on regardless of actor count
-    }
-
-    // Auto-detect: inline mode only for single actor (count was 0 before increment)
-    bool single_actor = (count == 0);
-    atomic_store_explicit(&g_aether_config.inline_mode_active, single_actor, memory_order_relaxed);
-
-    // MAIN THREAD MODE: Disable when second actor is spawned
-    // This ensures multi-actor programs use scheduler threads (not synchronous processing)
-    if (!single_actor) {
-        atomic_store_explicit(&g_aether_config.main_thread_mode, false, memory_order_relaxed);
-        g_aether_config.main_actor = NULL;
-    }
+    atomic_fetch_add_explicit(&g_aether_config.actor_count, 1, memory_order_relaxed);
 }
 
 // Called when an actor terminates
@@ -531,7 +474,7 @@ static inline void aether_on_actor_terminate(void) {
     atomic_fetch_sub_explicit(&g_aether_config.actor_count, 1, memory_order_relaxed);
 }
 
-// Initialize profile and inline mode from env vars
+// Initialize the profile from env vars
 // Called once at runtime init
 void aether_init_from_env(void);
 

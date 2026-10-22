@@ -56,8 +56,6 @@ static void worker_step(void* self) {
     if (fd >= 0) http_server_drain_connection(g_server, fd);
 }
 
-static void noop_step(void* self) { (void)self; }
-
 static int registered_actors(void) {
     int total = 0;
     for (int c = 0; c < num_cores; c++) total += atomic_load(&schedulers[c].actor_count);
@@ -140,12 +138,6 @@ static void sleep_ms(int ms) {
 }
 
 int http_actor_release_probe(void) {
-    /* An actor of the program's own that lives throughout: the first actor
-     * takes main-thread mode, the first worker ends it and the scheduler
-     * threads run the workers. */
-    ActorBase* keep = scheduler_spawn_actor(-1, noop_step, sizeof(ActorBase));
-    if (!keep) { printf("FAIL: spawn\n"); return 1; }
-
     g_server = http_server_create(0);
     if (!g_server) { printf("FAIL: server_create\n"); return 1; }
     http_server_get(g_server, "/ping", ping_handler, NULL);

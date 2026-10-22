@@ -749,6 +749,7 @@ void push_struct_destroy_defer(CodeGenerator* gen, const char* var_name,
 
 /* Internal helpers shared across files */
 int contains_send_expression(ASTNode* node);
+int loop_sends_without_waiting(ASTNode* node);
 const char* get_single_int_field(MessageDef* msg_def);
 /* The fields of a message in the order its C struct declares them, and the
  * C type each has there; the .c and the --emit-header file share them (#2517). */

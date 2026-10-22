@@ -36,15 +36,9 @@ extern void aether_send_message(void* actor_ptr, void* message_data, size_t mess
 
 // Forward declaration: I/O polling used in scheduler thread loop
 static int scheduler_io_poll(Scheduler* sched, int timeout_ms);
-
-// Forward declaration: TLS guard set by aether_send_message_sync while an
-// actor's step() is executing synchronously on the main thread.  Used to
-// defer main_thread_only=0 in scheduler_spawn_actor and prevent a scheduler
-// thread from entering the same step() concurrently.
-extern AETHER_TLS ActorBase* g_sync_step_actor;
-// Inline-send depth and pending releases, defined in aether_send_message.c.
-extern AETHER_TLS int g_inline_step_depth;
-extern AETHER_TLS int g_inline_release_pending;
+// Forward declaration: a pending send batch goes before a send around it
+// and before a wait (#3117), defined with the batch below.
+static inline void batch_flush_pending(void);
 
 #ifdef __APPLE__
 #include <mach/mach.h>
@@ -108,79 +102,6 @@ static void reply_slot_decref(ActorReplySlot* slot);
 // We use a function rather than a macro so the 8 step() sites stay
 // readable; `inline` lets the compiler devirtualize where it can.
 // --------------------------------------------------------------------------
-/* The thread that put the runtime into main-thread mode. */
-static aether_tid_t g_main_mode_thread;
-static atomic_int g_main_mode_thread_set = 0;
-
-int aether_on_main_mode_thread(void) {
-    if (!atomic_load_explicit(&g_main_mode_thread_set, memory_order_acquire)) return 1;
-    return aether_tid_equal(aether_tid_self(), g_main_mode_thread);
-}
-
-/* Leaving main-thread mode starts the scheduler threads, and from then on
- * the actor's core delivers into its mailbox, which takes one producer at a
- * time. An inline send checks that the mode is on and then writes that
- * mailbox itself, so a switch landing between the two gave the mailbox two
- * producers, and put scheduler deliveries ahead of the inline message: the
- * one step that follows consumed a delivered message instead, and left the
- * inline message -- its payload on the sender's stack -- for a scheduler
- * thread to process and free() after that frame was gone (#2266). This
- * lock makes "the mode is on, enqueue" and every switch out of the mode
- * exclusive. It is held across the enqueue only, never across a step, so a
- * thread leaving the mode never waits on a handler. */
-static atomic_flag g_main_mode_lock = ATOMIC_FLAG_INIT;
-
-static inline void main_mode_lock(void) {
-    while (atomic_flag_test_and_set_explicit(&g_main_mode_lock, memory_order_acquire)) AETHER_PAUSE();
-}
-
-static inline void main_mode_unlock(void) {
-    atomic_flag_clear_explicit(&g_main_mode_lock, memory_order_release);
-}
-
-int aether_main_mode_enqueue(ActorBase* actor, Message msg) {
-    main_mode_lock();
-    int on = aether_main_thread_mode_active();
-    if (on) mailbox_send(&actor->mailbox, msg);
-    main_mode_unlock();
-    return on;
-}
-
-void aether_leave_main_thread_mode(void) {
-    main_mode_lock();
-    ActorBase* main_actor = (ActorBase*)g_aether_config.main_actor;
-    atomic_store_explicit(&g_aether_config.main_thread_mode, false, memory_order_release);
-    g_aether_config.main_actor = NULL;
-    /* The inline step paths hold the actor's step_lock while they step,
-     * so clearing main_thread_only cannot let a scheduler thread step the
-     * actor concurrently with a step still on the main thread's stack. */
-    if (main_actor) atomic_store_explicit(&main_actor->main_thread_only, 0, memory_order_release);
-    main_mode_unlock();
-    scheduler_ensure_threads_running();
-}
-
-/* The actor whose step_lock THIS thread holds for an inline step. A
- * handler that sends to its own actor (`self ! Tick {}`) steps again on
- * the same thread, and step_lock is not recursive: the owner check is
- * what keeps that from spinning on its own lock. */
-static AETHER_TLS ActorBase* g_inline_lock_owner = NULL;
-
-int aether_inline_lock_acquire(ActorBase* actor) {
-    if (g_inline_lock_owner == actor) return 0;
-    while (atomic_flag_test_and_set_explicit(&actor->step_lock, memory_order_acquire)) AETHER_PAUSE();
-    g_inline_lock_owner = actor;
-    return 1;
-}
-
-void aether_inline_lock_release(ActorBase* actor) {
-    g_inline_lock_owner = NULL;
-    atomic_flag_clear_explicit(&actor->step_lock, memory_order_release);
-}
-
-/* Inline (main-thread-mode) step: hold step_lock across it so the switch
- * out of the mode by another thread is safe. */
-static inline void aether_step_inline(ActorBase* actor);
-
 static inline void aether_step_safe(ActorBase* actor) {
     if (!actor || !actor->step) return;
     if (atomic_load_explicit(&actor->dead, memory_order_acquire)) return;
@@ -262,18 +183,6 @@ static inline void aether_step_safe(ActorBase* actor) {
     if (reason_release) reason_release(reason);
 }
 
-static inline void aether_step_inline(ActorBase* actor) {
-    // As in aether_send_message_sync: a release made in the step waits until
-    // this is done touching the actor (#2509).
-    g_inline_step_depth++;
-    int locked = aether_inline_lock_acquire(actor);
-    aether_step_safe(actor);
-    if (locked) aether_inline_lock_release(actor);
-    if (--g_inline_step_depth == 0 && unlikely(g_inline_release_pending)) {
-        scheduler_inline_step_done();
-    }
-}
-
 /* Layout assertions to catch struct padding/size mismatches between
  * translation units. A derived actor is cast to ActorBase*, and both mirror
  * AETHER_ACTOR_BASE_FIELDS, so any disagreement about Mailbox's layout
@@ -333,10 +242,7 @@ static atomic_uint_fast64_t main_thread_sent = 0;
 // pthread_join already-joined threads — undefined behaviour (crash on Linux glibc).
 static atomic_int g_threads_joined = 0;
 
-// Track whether scheduler threads have been created.
-// scheduler_start() skips thread creation in main-thread mode; if main-thread
-// mode is later disabled (e.g. self-send pattern), we need to know whether
-// threads still need to be started.
+// Whether scheduler_start() has created the threads this lifecycle.
 static atomic_int g_threads_started = 0;
 
 // Barrier: scheduler_start() spins here until every thread has finished its
@@ -761,8 +667,7 @@ static void overflow_flush(int from_core) {
                     if (!actor->auto_process) inflight_leave(actor, 1);
                     scheduler_drop_dead_message(&schedulers[from_core], &msg);
                     flushed++;
-                } else if (ac == from_core && !actor->auto_process &&
-                    !atomic_load_explicit(&actor->main_thread_only, memory_order_relaxed)) {
+                } else if (ac == from_core && !actor->auto_process) {
                     if (mailbox_send(&actor->mailbox, msg)) {
                         inflight_leave(actor, 1);
                         atomic_store_explicit(&actor->active, 1, memory_order_relaxed);
@@ -1118,10 +1023,6 @@ static int actor_table_grow_locked(Scheduler* sched, int numa_node) {
 
 #define AETHER_EXTERNAL_READER_SLOTS 32
 
-// Set once main-thread mode has been entered or a second actor has existed:
-// the mode is not entered again in this scheduler lifecycle.
-static atomic_int g_main_mode_ended = 0;
-
 static _Atomic uint64_t g_reclaim_epoch = 1;  // never 0: 0 means "not reading"
 static _Atomic uint64_t g_external_reader[AETHER_EXTERNAL_READER_SLOTS];
 
@@ -1199,25 +1100,6 @@ void scheduler_reader_offline(void) {
     t_reader = NULL;
     atomic_store_explicit(&r->epoch, 0, memory_order_release);
     atomic_store_explicit(&r->in_use, 0, memory_order_release);
-}
-
-// Actors released while an inline send was stepping on this thread, released
-// for real when the outermost one is done (scheduler_inline_step_done).
-static AETHER_TLS ActorBase** t_inline_released = NULL;
-static AETHER_TLS int t_inline_released_count = 0;
-static AETHER_TLS int t_inline_released_capacity = 0;
-
-static int inline_release_defer(ActorBase* actor) {
-    if (t_inline_released_count == t_inline_released_capacity) {
-        int cap = t_inline_released_capacity ? t_inline_released_capacity * 2 : 4;
-        ActorBase** grown = realloc(t_inline_released, (size_t)cap * sizeof(ActorBase*));
-        if (!grown) return 0;
-        t_inline_released = grown;
-        t_inline_released_capacity = cap;
-    }
-    t_inline_released[t_inline_released_count++] = actor;
-    g_inline_release_pending = 1;
-    return 1;
 }
 
 typedef struct {
@@ -1683,7 +1565,6 @@ static void scheduler_drop_dead_message(Scheduler* sched, Message* msg) {
 // lock is taken or a message is in flight.
 static int move_actor(Scheduler* sched, ActorBase* actor, int dst, int slot_hint) {
     if (dst < 0 || dst >= num_cores || dst == sched->core_id || actor->auto_process ||
-        atomic_load_explicit(&actor->main_thread_only, memory_order_acquire) ||
         atomic_load_explicit(&actor->dead, memory_order_acquire))
         return 0;
     Scheduler* to = &schedulers[dst];
@@ -1875,25 +1756,6 @@ void* AETHER_HOT scheduler_thread(void* arg) {
                 continue;
             }
 
-            // For actors processed on main thread, just deliver to mailbox (don't process)
-            if (unlikely(atomic_load_explicit(&actor->main_thread_only, memory_order_acquire))) {
-                // Its place kept as below (#3093): the main thread drains the
-                // mailbox while the actor is its own, and once main-thread
-                // mode has let go of it this core makes room by stepping it.
-                int placed = 1;
-                while (!mailbox_send(&actor->mailbox, msg)) {
-                    if (atomic_load_explicit(&actor->main_thread_only, memory_order_acquire)) {
-                        aether_sched_yield();
-                    } else if (!make_room(sched, actor)) {
-                        placed = 0;
-                        break;
-                    }
-                }
-                inflight_leave(actor, 1);
-                if (!placed) scheduler_drop_dead_message(sched, &msg);
-                work_done = 1;
-                continue;
-            }
 
             // From here the message is this core's to deliver, and so is
             // every message of the same actor that follows it in the batch:
@@ -1996,8 +1858,6 @@ void* AETHER_HOT scheduler_thread(void* arg) {
             // A slot vacated since the snapshot reads NULL.
             if (unlikely(!actor)) continue;
 
-            // Skip actors processed on main thread
-            if (unlikely(atomic_load_explicit(&actor->main_thread_only, memory_order_acquire))) continue;
             // An actor with its own thread is stepped there. Counting it as
             // work, as this used to, kept the core from ever going idle and
             // parking for as long as such an actor existed (#2592).
@@ -2280,8 +2140,6 @@ void scheduler_init(int cores) {
     atomic_store_explicit(&g_threads_ready, 0, memory_order_relaxed);
     // Reset global overflow counter between scheduler lifecycles.
     atomic_store_explicit(&g_overflow_total, 0, memory_order_relaxed);
-    // A new lifecycle's first actor may use main-thread mode again (#2509).
-    atomic_store_explicit(&g_main_mode_ended, 0, memory_order_relaxed);
     // Reset main-thread send counter between scheduler lifecycles.
     // Without this, count_pending_messages() sees a stale sent > processed
     // delta from the prior run and scheduler_wait() spins forever.
@@ -2290,19 +2148,10 @@ void scheduler_init(int cores) {
     // TIER 2: Auto-detect hardware capabilities first
     aether_detect_hardware();
 
-    // Initialize profile and inline mode from env vars
+    // Initialize the profile from env vars
     aether_init_from_env();
 
-    // Reset main-thread-mode and actor count between scheduler lifecycles.
-    // Tests call scheduler_init/cleanup in sequence; a prior run may have left
-    // main_thread_mode=true (via scheduler_spawn_actor), causing scheduler_start()
-    // and scheduler_wait() to skip creating/joining threads on the next run.
-    // Only reset if the user hasn't force-enabled inline mode via AETHER_INLINE.
-    if (!atomic_load_explicit(&g_aether_config.inline_mode_forced, memory_order_relaxed)) {
-        atomic_store_explicit(&g_aether_config.main_thread_mode, false, memory_order_relaxed);
-        atomic_store_explicit(&g_aether_config.inline_mode_active, false, memory_order_relaxed);
-        g_aether_config.main_actor = NULL;
-    }
+    // Tests call scheduler_init/cleanup in sequence: the count starts afresh.
     atomic_store_explicit(&g_aether_config.actor_count, 0, memory_order_relaxed);
 
     // Initialize NUMA topology detection
@@ -2386,12 +2235,6 @@ void scheduler_init_with_opts(int cores, AetherOptFlags opts) {
 }
 
 void scheduler_start(void) {
-    // MAIN THREAD MODE: Single-actor programs don't need scheduler threads
-    // All message processing happens synchronously on the main thread
-    if (aether_main_thread_mode_active()) {
-        return;  // No threads to start
-    }
-
     // Only start threads once (idempotent: safe to call multiple times)
     if (atomic_exchange_explicit(&g_threads_started, 1, memory_order_acq_rel) == 1) {
         return;  // Threads already running
@@ -2422,17 +2265,6 @@ void scheduler_start(void) {
     while (atomic_load_explicit(&g_threads_ready, memory_order_acquire) < num_cores) {
         AETHER_PAUSE();
     }
-}
-
-// Ensure scheduler threads are running. Called when transitioning out of
-// main-thread mode (e.g. self-send from an actor handler). In main-thread
-// mode, scheduler_start() skips thread creation; this function starts them
-// on demand so queued messages get processed.
-void scheduler_ensure_threads_running(void) {
-    if (atomic_load_explicit(&g_threads_started, memory_order_acquire)) {
-        return;  // Already running
-    }
-    scheduler_start();
 }
 
 void scheduler_stop(void) {
@@ -2514,36 +2346,7 @@ static int has_pending_actor_timeout(void) {
 }
 
 void scheduler_wait(void) {
-    // MAIN THREAD MODE: All messages processed synchronously, nothing to wait for
-    // This is the fastest path for single-actor programs (counting benchmark)
-    if (aether_main_thread_mode_active()) {
-        // But if any actor has a pending timeout, poll until it fires
-        if (has_pending_actor_timeout()) {
-            int rounds = 0;
-            while (has_pending_actor_timeout() && rounds < 100000) {
-                int slot = reclaim_reader_enter();  // #2509
-                for (int c = 0; c < num_cores; c++) {
-                    int count;
-                    AetherActorTable* table = actor_table_snapshot(&schedulers[c], &count);
-                    for (int i = 0; i < count; i++) {
-                        ActorBase* a = actor_table_read(table, i);
-                        if (a && a->timeout_ns > 0 && a->step) {
-                            a->step(a);
-                        }
-                    }
-                }
-                reclaim_reader_exit(slot);
-                #ifdef _WIN32
-                Sleep(1);
-                #else
-                usleep(1000);
-                #endif
-                rounds++;
-            }
-        }
-        return;
-    }
-
+    batch_flush_pending();
     // Check if scheduler is still running
     int still_running = 0;
     for (int i = 0; i < num_cores; i++) {
@@ -2574,7 +2377,7 @@ void scheduler_wait(void) {
             stable_count++;
             // Quiet, but a receive timeout is armed (#3102): its core fires
             // it once the deadline passes, and its arm may send more, so the
-            // wait goes on, as main-thread mode's does above (and as long).
+            // wait goes on, polling every millisecond (100000 times at most).
             if (stable_count == 5 && timeout_rounds < 100000 && has_pending_actor_timeout()) {
                 stable_count = 0;
                 timeout_rounds++;
@@ -2624,7 +2427,7 @@ void scheduler_wait(void) {
 
 // Full shutdown: wait for quiescence, stop threads, join them.
 // Called once at program exit.  Safe to call even if threads were never
-// started (main-thread mode) or already shut down.
+// started or already shut down.
 void scheduler_shutdown(void) {
     // Wait for any in-flight messages first
     scheduler_wait();
@@ -3101,27 +2904,11 @@ void scheduler_send_remote(ActorBase* actor, Message msg, int from_core) {
         scheduler_actor_thread_deliver(actor, msg);
         return;
     }
-    // INLINE MODE: For single-actor programs, process synchronously on the main thread.
-    // scheduler_send_batch_add has the same check; keep them in sync. A
-    // thread other than main leaves the mode instead and sends through
-    // the scheduler (#2083).
-    if (unlikely(aether_main_thread_mode_active())) {
-        if (aether_on_main_mode_thread()) {
-            if (aether_main_mode_enqueue(actor, msg)) {
-                aether_step_inline(actor);
-                AETHER_STAT_INC(inline_sends);
-                return;
-            }
-            // The mode ended before the enqueue: the scheduler takes it.
-        } else {
-            aether_leave_main_thread_mode();
-        }
-    }
-
     if (current_core_id >= 0) {
         send_through_core(actor, msg, from_core);
         return;
     }
+    batch_flush_pending();
     if (!foreign_send_enter()) {
         send_while_stopped(actor, &msg);
         return;
@@ -3264,13 +3051,21 @@ typedef struct {
 
 static AETHER_TLS BatchSendBuffer* g_batch_buffer = NULL;
 
+/* #3117: a send from this thread that does not join its pending batch, or a
+ * wait for quiescence, sends the batch first: the batch's messages are older,
+ * and messages nobody has sent are not pending to the wait. */
+static inline void batch_flush_pending(void) {
+    if (unlikely(g_batch_buffer && g_batch_buffer->count > 0)) scheduler_send_batch_flush();
+}
+
+/* Opening a batch never drops what one holds (#3117): only a flush empties
+ * the buffer. An inner loop's start emptied it and lost the outer loop's
+ * messages. */
 void scheduler_send_batch_start(void) {
     if (!g_batch_buffer) {
         g_batch_buffer = calloc(1, sizeof(BatchSendBuffer));
         if (!g_batch_buffer) return;  // OOM: batching stays off, callers fall back
     }
-    g_batch_buffer->count = 0;
-    memset(g_batch_buffer->by_core, 0, sizeof(g_batch_buffer->by_core));
 }
 
 void scheduler_send_batch_add(ActorBase* actor, Message msg) {
@@ -3280,33 +3075,19 @@ void scheduler_send_batch_add(ActorBase* actor, Message msg) {
         return;
     }
     // An actor with its own thread: straight to its inbox, as from
-    // scheduler_send_remote, never stepped inline (#2598).
-    if (unlikely(actor->auto_process)) {
+    // scheduler_send_remote, never stepped inline (#2598). And nothing is
+    // batched on a scheduler thread (#3117): its sends keep its own core's
+    // channel and overflow order.
+    if (unlikely(actor->auto_process) || current_core_id >= 0) {
         scheduler_send_remote(actor, msg, current_core_id);
         return;
     }
-    // FAST PATH: Single-actor programs bypass batching entirely
-    // Main Thread Mode = synchronous processing, zero queue overhead
-    if (aether_main_thread_mode_active()) {
-        if (aether_on_main_mode_thread()) {
-            if (aether_main_mode_enqueue(actor, msg)) {
-                aether_step_inline(actor);
-                AETHER_STAT_INC(inline_sends);
-                return;
-            }
-            // The mode ended before the enqueue: the batch path takes it.
-        } else {
-            aether_leave_main_thread_mode();
-        }
-    }
-
     // BATCH PATH: Multi-actor fan-out optimization
     if (!g_batch_buffer) {
         scheduler_send_batch_start();
         if (!g_batch_buffer) {
-            // Batch buffer couldn't be allocated: deliver directly so the
-            // message is never dropped. Batching is only a throughput optimization.
-            mailbox_send(&actor->mailbox, msg);
+            // No buffer: the send goes out on its own, as an unbatched one.
+            scheduler_send_remote(actor, msg, current_core_id);
             return;
         }
     }
@@ -3400,6 +3181,10 @@ void scheduler_send_batch_flush(void) {
         sorted_actors[pos] = g_batch_buffer->actors[i];
         sorted_msgs[pos] = g_batch_buffer->messages[i];
     }
+    // Copied out: the buffer is empty before the overflow fallback below
+    // sends, which flushes a pending batch first.
+    g_batch_buffer->count = 0;
+    memset(g_batch_buffer->by_core, 0, sizeof(g_batch_buffer->by_core));
 
     // === PHASE 4: Batch enqueue to each core (ONE atomic per core!) ===
     uint64_t total_sent = 0;
@@ -3488,62 +3273,13 @@ ActorBase* scheduler_spawn_actor(int preferred_core, void (*step)(void*), size_t
     atomic_init(&actor->inflight, 0);
     atomic_init(&actor->assigned_core, preferred_core);
     atomic_init(&actor->migrate_to, -1);
-    atomic_init(&actor->main_thread_only, 0);
     atomic_init(&actor->reply_slot, NULL);
     atomic_flag_clear_explicit(&actor->step_lock, memory_order_relaxed);
     actor->timeout_ns = 0;
     actor->last_activity_ns = 0;
     atomic_init(&actor->dead, 0);
 
-    // Track actor count for inline mode auto-detection
-    // Get previous count and main_actor BEFORE aether_on_actor_spawn modifies them
-    int prev_count = atomic_load_explicit(&g_aether_config.actor_count, memory_order_relaxed);
-    ActorBase* prev_main_actor = (ActorBase*)g_aether_config.main_actor;
-    // A second actor ends main-thread mode: under the lock an inline
-    // enqueue holds, like every switch out of the mode (#2266).
-    main_mode_lock();
     aether_on_actor_spawn();
-    main_mode_unlock();
-
-    // Main-thread mode is for the first actor of a scheduler lifecycle and is
-    // entered at most once (#2509). Released actors bring the count back to
-    // 0, and a later spawn at 0 (the next per-request worker of an HTTP
-    // server, say) would otherwise be stepped inline on whichever thread
-    // spawned it, with the scheduler threads already running.
-    if (prev_count >= 1) {
-        atomic_store_explicit(&g_main_mode_ended, 1, memory_order_relaxed);
-    }
-
-    // MAIN THREAD MODE handling
-    if (prev_count == 0 && !atomic_load(&g_aether_config.inline_mode_disabled) &&
-        !atomic_exchange_explicit(&g_main_mode_ended, 1, memory_order_relaxed)) {
-        // First actor: enable main thread mode for synchronous processing
-        aether_enable_main_thread_mode(actor);
-        g_main_mode_thread = aether_tid_self();
-        atomic_store_explicit(&g_main_mode_thread_set, 1, memory_order_release);
-        atomic_store_explicit(&actor->main_thread_only, 1, memory_order_release);
-    } else if (prev_count == 1 && prev_main_actor != NULL) {
-        // Second actor: disable main thread mode on the first actor so scheduler
-        // threads can process both actors normally.
-        //
-        // RACE GUARD: If the main thread is currently executing prev_main_actor's
-        // step() synchronously (g_sync_step_actor == prev_main_actor), we must NOT
-        // clear main_thread_only here.  Doing so would allow a scheduler thread to
-        // call step() on the same actor concurrently — undefined behaviour.
-        //
-        // aether_send_message_sync() clears main_thread_only after step() returns,
-        // so deferred clearing is always safe.
-        if (g_sync_step_actor != prev_main_actor) {
-            atomic_store_explicit(&prev_main_actor->main_thread_only, 0, memory_order_release);
-        }
-        // else: aether_send_message_sync will clear it once step() unwinds.
-
-        // aether_on_actor_spawn() (above) disabled main_thread_mode.  If
-        // scheduler_start() was already called and returned early (because
-        // main-thread mode was active at the time), threads were never created.
-        // Start them now so both actors can be processed by the scheduler.
-        scheduler_ensure_threads_running();
-    }
 
     actor->scheduler_owned = 1;
     register_actor(actor, preferred_core);
@@ -3566,26 +3302,6 @@ static void actor_end(ActorBase* actor) {
 
 void scheduler_release_actor(ActorBase* actor) {
     if (!actor) return;
-
-    // Released while an inline send is stepping an actor on this thread (its
-    // own, typically): that send still touches the actor once the step
-    // returns, so the release waits for scheduler_inline_step_done().
-    if (g_inline_step_depth > 0) {
-        if (inline_release_defer(actor)) return;
-        // Out of memory to remember it: keeping the actor is safe, freeing
-        // it is not.
-        fprintf(stderr, "aether: out of memory deferring the release of actor %d; "
-                        "it is not freed\n", actor->id);
-        return;
-    }
-
-    // The lone actor of main-thread mode is going: leave the mode (which
-    // starts the scheduler threads), or the next spawn would be stepped
-    // inline against a main actor that no longer exists.
-    if (aether_main_thread_mode_active() &&
-        (ActorBase*)g_aether_config.main_actor == actor) {
-        aether_leave_main_thread_mode();
-    }
 
     // Read before the mark: once it is set, the actor's own thread may end
     // the actor at any moment, and nothing below touches it after that.
@@ -3615,20 +3331,6 @@ void scheduler_release_actor(ActorBase* actor) {
 void scheduler_actor_thread_exit(ActorBase* actor) {
     int was = atomic_fetch_or_explicit(&actor->dead, AETHER_ACTOR_THREAD_GONE, memory_order_acq_rel);
     if (was & AETHER_ACTOR_RELEASED) actor_end(actor);
-}
-
-void scheduler_inline_step_done(void) {
-    // Releases are taken one at a time from the end: releasing runs no step,
-    // so nothing is added meanwhile, but the list is not walked while it
-    // changes.
-    while (t_inline_released_count > 0) {
-        ActorBase* actor = t_inline_released[--t_inline_released_count];
-        scheduler_release_actor(actor);
-    }
-    free(t_inline_released);
-    t_inline_released = NULL;
-    t_inline_released_capacity = 0;
-    g_inline_release_pending = 0;
 }
 
 
@@ -3729,62 +3431,11 @@ void scheduler_reply(ActorBase* self, void* data, size_t data_size) {
     scheduler_reply_owned(self, data, data_size, NULL);
 }
 
-// ---------------------------------------------------------------------------
-// aether_scheduler_poll — drain pending messages for main-thread-only actors.
-//
-// Call this from C-hosted event loops (e.g., inside a render callback) to
-// keep Aether actors alive while the main thread is blocked in C code.
-//
-// Thread safety: only touches actors flagged as main_thread_only, which
-// scheduler worker threads explicitly skip — so no concurrent access.
-//
-// max_per_actor: max messages to process per actor per call (0 = unlimited).
-// Returns total number of messages processed across all actors.
+// aether_scheduler_poll: the scheduler threads run every actor from the first
+// spawn on (#3112), so a host thread has nothing to drain. See the header.
 int aether_scheduler_poll(int max_per_actor) {
-    // If main-thread inline mode is active, all sends are already handled
-    // synchronously — nothing to drain here.
-    if (aether_main_thread_mode_active()) return 0;
-
-    int total = 0;
-    int limit = (max_per_actor <= 0) ? 1024 : max_per_actor;
-
-    // A step run here may release its own actor, which the loop touches after
-    // the step: the reader slot keeps it allocated until the walk is over
-    // (#2509).
-    int slot = reclaim_reader_enter();
-    for (int c = 0; c < num_cores; c++) {
-        Scheduler* sched = &schedulers[c];
-
-        // No lock: scheduler threads change the table meanwhile (#2486).
-        int actor_count;
-        AetherActorTable* table = actor_table_snapshot(sched, &actor_count);
-
-        for (int i = 0; i < actor_count; i++) {
-            ActorBase* actor = actor_table_read(table, i);
-            if (!actor || !actor->step) continue;
-
-            // Only process actors the scheduler threads are skipping.
-            // It is safe to call step() here because scheduler threads check
-            // main_thread_only and skip these actors entirely.
-            if (!atomic_load_explicit(&actor->main_thread_only, memory_order_acquire))
-                continue;
-
-            int processed = 0;
-            if (!atomic_flag_test_and_set_explicit(&actor->step_lock, memory_order_acquire)) {
-                while (atomic_load_explicit(&actor->mailbox.count, memory_order_relaxed) > 0 && processed < limit) {
-                    aether_step_safe(actor);
-                    processed++;
-                    total++;
-                }
-                atomic_flag_clear_explicit(&actor->step_lock, memory_order_release);
-            }
-            if (atomic_load_explicit(&actor->mailbox.count, memory_order_relaxed) == 0)
-                atomic_store_explicit(&actor->active, 0, memory_order_relaxed);
-        }
-    }
-    reclaim_reader_exit(slot);
-
-    return total;
+    (void)max_per_actor;
+    return 0;
 }
 
 

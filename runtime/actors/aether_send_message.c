@@ -83,17 +83,9 @@ static inline int payload_pool_release(void* ptr) {
     return 1;  // Successfully returned to pool
 }
 
-// TLS flag: when set, skip freeing (used for sync mode zero-copy)
-extern AETHER_TLS int g_skip_free;
-
 // Free message payload - try pool first, then fall back to free()
 void aether_free_message(void* msg_data) {
     if (!msg_data) return;
-
-    // SYNC MODE: Skip free when processing messages with zero-copy stack pointers
-    if (unlikely(g_skip_free)) {
-        return;  // Caller's stack memory - don't free!
-    }
 
     // Try to return to pool
     if (payload_pool_release(msg_data)) {
@@ -104,205 +96,8 @@ void aether_free_message(void* msg_data) {
     free(msg_data);
 }
 
-// ==============================================================================
-// Message Sending with Pool Optimization
-// ==============================================================================
-
-// ==============================================================================
-// MAIN THREAD MODE: Synchronous Message Processing
-// ==============================================================================
-// When main thread mode is active:
-// - Single actor, all sends from main(), no scheduler threads
-// - Messages processed synchronously in sender's context
-// - Zero queue overhead: 50M+ msg/sec possible
-//
-// This is the fastest path for single-actor programs like the counting benchmark.
-
-// TLS flag: when set, aether_free_message skips freeing (used for sync mode)
-// Declared here, accessed by aether_free_message below
-AETHER_TLS int g_skip_free = 0;
-
-// TLS pointer: the actor whose step() is currently being executed synchronously
-// on the main thread (non-NULL only inside aether_send_message_sync).
-// scheduler_spawn_actor checks this to defer main_thread_only=0 if the second
-// actor is spawned while the first actor's step() is still on the call stack.
-// Without the deferral a scheduler thread can enter the same actor's step()
-// concurrently with the main thread → data race / crash.
-AETHER_TLS ActorBase* g_sync_step_actor = NULL;
-
-// How many inline sends (below) are touching an actor on this thread, and
-// whether an actor released meanwhile waits for the outermost to finish
-// (#2509): the inline path still touches the actor after its step returns,
-// and a step can release its own actor. scheduler_inline_step_done() runs
-// those releases.
-AETHER_TLS int g_inline_step_depth = 0;
-AETHER_TLS int g_inline_release_pending = 0;
-
-/* Returns 1 when the message was delivered inline, 0 when main-thread
- * mode ended before the payload was written and the caller must send
- * through the scheduler instead. */
-static inline int AETHER_HOT aether_send_message_sync(ActorBase* actor, void* message_data, size_t message_size) {
-    g_inline_step_depth++;
-    Message msg;
-    msg.type = *(int*)message_data;
-    msg.sender_id = 0;
-    msg.payload_int = 0;
-    msg.zerocopy.data = NULL;
-    msg.zerocopy.size = 0;
-    msg.zerocopy.owned = 0;
-    msg._reply_slot = g_pending_reply_slot;
-
-#if AETHER_HAS_THREADS
-    // ULTRA-FAST PATH: Pass original message directly without copying
-    // Since processing is synchronous, caller's stack memory is still valid
-    // We mark g_skip_free so step() doesn't try to free the caller's stack
-    msg.payload_ptr = message_data;
-#else
-    // COOPERATIVE MODE: heap-allocate the message data.
-    // The mailbox may have other messages queued ahead, so the immediate
-    // step() call below may consume a different message (FIFO order).
-    // The just-sent message will be processed later by scheduler_wait(),
-    // by which time the caller's stack frame may be gone.
-    //
-    // A dead actor takes no message: a released one's block is kept
-    // (#2517), so this read is defined, and the scheduler's send drops and
-    // counts the message before anything is allocated for it.
-    if (atomic_load_explicit(&actor->dead, memory_order_relaxed)) {
-        msg.payload_ptr = NULL;
-        scheduler_send_local(actor, msg);
-        g_inline_step_depth--;
-        return 1;
-    }
-    void* heap_copy = malloc(message_size);
-    if (!heap_copy) {
-        // Delivering a NULL payload would crash the handler (or, for a
-        // single-int message, silently run it on zeroed data). Match the
-        // threaded path below and fail loudly rather than corrupt state.
-        fprintf(stderr, "aether: malloc(%zu) failed for msg type %d to actor %d\n",
-                message_size, *(int*)message_data, actor->id);
-        abort();
-    }
-    memcpy(heap_copy, message_data, message_size);
-    msg.payload_ptr = heap_copy;
-#endif
-
-#if AETHER_HAS_THREADS
-    // Hold step_lock from before the mailbox write until the step has
-    // returned: another thread may switch the runtime out of main-thread
-    // mode meanwhile (a send from a std.worker or std.http thread, #2083),
-    // and the scheduler threads it starts take this lock before stepping,
-    // so they can neither step the actor while it is on this stack nor
-    // pick the stack-allocated payload out of the mailbox and free it.
-    // (The self-send transition inside step() used to set the lock
-    // itself; it finds it already held.)
-    int locked = aether_inline_lock_acquire(actor);
-    // The mode check and the enqueue are one step with respect to leaving
-    // the mode, so this message is the only one in the mailbox and the
-    // step below is the one that takes it (#2266). If the mode ended, the
-    // payload must be a heap copy: hand the send back to the caller's
-    // standard path.
-    if (!aether_main_mode_enqueue(actor, msg)) {
-        if (locked) aether_inline_lock_release(actor);
-        g_inline_step_depth--;
-        return 0;
-    }
-#else
-    mailbox_send(&actor->mailbox, msg);
-#endif
-
-#if AETHER_HAS_THREADS
-    // Tell aether_free_message to skip freeing the initial (stack-allocated) message.
-    // Self-sent messages from handlers are heap-allocated (see g_sync_step_actor check
-    // in aether_send_message), so they can be freed normally.
-    g_skip_free = 1;
-#endif
-    // Guard: scheduler_spawn_actor defers main_thread_only=0 while this is set
-    g_sync_step_actor = actor;
-    actor->step(actor);
-#if AETHER_HAS_THREADS
-    if (locked) aether_inline_lock_release(actor);
-#endif
-#if AETHER_HAS_THREADS
-    g_skip_free = 0;
-#endif
-
-    // Do NOT drain self-sent messages here.  If a handler does self ! Msg {},
-    // the message sits in the mailbox and will be processed on the NEXT call to
-    // aether_send_message (from main) or by the scheduler.  Draining eagerly
-    // would turn self-continuation patterns (animation loops) into infinite
-    // blocking loops that starve main().
-    g_sync_step_actor = NULL;
-
-    // Deferred main_thread_only disable: if the second actor was spawned during
-    // step() above, scheduler_spawn_actor skipped clearing main_thread_only to
-    // avoid a concurrent-step race.  Now that step() has returned it is safe.
-    if (!aether_main_thread_mode_active() &&
-        atomic_load_explicit(&actor->main_thread_only, memory_order_relaxed)) {
-        atomic_store_explicit(&actor->main_thread_only, 0, memory_order_release);
-    }
-
-    // Done with the actor: a release its step made can go ahead.
-    if (--g_inline_step_depth == 0 && unlikely(g_inline_release_pending)) {
-        scheduler_inline_step_done();
-    }
-
-    // Track stats
-    AETHER_STAT_INC(inline_sends);
-    return 1;
-}
-
-// Send a typed message to an actor using optimized scheduler paths
-// Uses SPSC queues, direct sends, and other optimizations automatically
-void aether_send_message(void* actor_ptr, void* message_data, size_t message_size) {
-    ActorBase* actor = (ActorBase*)actor_ptr;
-
-    // ==============================================================================
-    // FAST PATH: Main thread mode (single actor, synchronous processing)
-    // ==============================================================================
-    // For single-actor programs (like counting benchmark), process immediately.
-    // No scheduler threads, no queues, no atomics - pure function call.
-    if (aether_main_thread_mode_active()) {
-#if AETHER_HAS_THREADS
-        // If we're already inside a step() (self-send from a handler), the actor
-        // needs to run independently from the main thread.  Disable main-thread
-        // mode so the scheduler threads take over message processing.  This
-        // enables patterns like animation loops (self ! AnimateStep {}) that
-        // require the actor to process messages concurrently with main().
-        if (g_sync_step_actor != NULL) {
-            // Self-send from a handler: disable main-thread mode so the
-            // scheduler takes over message processing for this actor.
-            // Hold step_lock while the main thread's step() is still on the
-            // call stack.  Without this, the scheduler threads (started by
-            // the switch below) could call step() concurrently — a data
-            // race on actor state. aether_send_message_sync releases the
-            // lock after step() returns.
-            atomic_flag_test_and_set_explicit(&actor->step_lock, memory_order_acquire);
-            // The switch every other path makes: under the lock an inline
-            // enqueue holds (#2266), and it starts the scheduler threads
-            // that main-thread mode never created.
-            aether_leave_main_thread_mode();
-            // Fall through to the standard multi-actor send path below.
-        } else if (!aether_on_main_mode_thread()) {
-            // A thread that is not main (a std.worker / std.http pool
-            // thread, a C callback thread): it cannot step the actor
-            // inline — the main thread may be stepping it right now —
-            // so the runtime leaves main-thread mode, as a second spawn
-            // would, and the send goes through the scheduler (#2083).
-            aether_leave_main_thread_mode();
-            // Fall through to the standard multi-actor send path below.
-        } else
-#endif // AETHER_HAS_THREADS
-        {
-            if (aether_send_message_sync(actor, message_data, message_size)) return;
-            // Main-thread mode ended under us: fall through to the
-            // standard path, which heap-copies the payload.
-        }
-    }
-
-#if AETHER_HAS_THREADS
-    // ==============================================================================
-    // STANDARD PATH: Multi-actor scheduler-based processing
-    // ==============================================================================
+// The heap copy of a typed message's payload, as the Message a send carries.
+static Message payload_message(ActorBase* actor, void* message_data, size_t message_size) {
     // Always use heap allocation for type-safe messages.
     // TLS pools have thread affinity issues: a same-core actor may be migrated
     // to another core after the message is sent, causing the receiver to call
@@ -324,7 +119,19 @@ void aether_send_message(void* actor_ptr, void* message_data, size_t message_siz
     msg.zerocopy.size = 0;
     msg.zerocopy.owned = 0;
     msg._reply_slot = g_pending_reply_slot;
+    return msg;
+}
 
+// Send a typed message to an actor. The payload is copied to the heap and
+// handed to the scheduler, which delivers it whatever the actor count
+// (#3112): the handler runs later, on a scheduler thread, and the sender
+// goes on. The cooperative runtime queues it for the next wait_for_idle or
+// aether_scheduler_poll.
+void aether_send_message(void* actor_ptr, void* message_data, size_t message_size) {
+    ActorBase* actor = (ActorBase*)actor_ptr;
+    Message msg = payload_message(actor, message_data, message_size);
+
+#if AETHER_HAS_THREADS
     // Cache TLS once — avoids repeated tlv_get_addr calls on macOS
     const int my_core = current_core_id;
 
@@ -334,7 +141,13 @@ void aether_send_message(void* actor_ptr, void* message_data, size_t message_siz
         scheduler_send_remote(actor, msg, my_core);
     }
 #else
-    // No threads: always use synchronous processing
-    aether_send_message_sync(actor, message_data, message_size);
-#endif // AETHER_HAS_THREADS
+    scheduler_send_local(actor, msg);
+#endif
+}
+
+// A typed message sent inside a batched loop (#3117): it joins the batch, as
+// the loop's one-int messages do, so the loop's sends keep their order.
+void aether_send_message_batch(void* actor_ptr, void* message_data, size_t message_size) {
+    ActorBase* actor = (ActorBase*)actor_ptr;
+    scheduler_send_batch_add(actor, payload_message(actor, message_data, message_size));
 }

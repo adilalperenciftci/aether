@@ -37,7 +37,6 @@ handle_big(req: ptr, res: ptr, ud: ptr) {
 }
 
 message StartSrv { raw: ptr }
-message Noop {}
 
 actor SrvActor {
     state s = 0
@@ -47,11 +46,6 @@ actor SrvActor {
             http_server_start_raw(raw)
         }
     }
-}
-
-actor SchedHelper {
-    state x = 0
-    receive { Noop() -> { x = 1 } }
 }
 
 base_url() -> string { return "http://127.0.0.1:${PORT}" }
@@ -65,7 +59,6 @@ main() {
     }
     http.server_get(raw, "/big", handle_big, 0)
 
-    spawn(SchedHelper())
     a = spawn(SrvActor())
     a ! StartSrv { raw: raw }
 

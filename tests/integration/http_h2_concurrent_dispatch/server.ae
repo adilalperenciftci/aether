@@ -45,15 +45,10 @@ handle_fast(req: ptr, res: ptr, ud: ptr) {
 }
 
 message StartSrv { raw: ptr }
-message Noop {}
 
 actor SrvActor {
     state s = 0
     receive { StartSrv(raw) -> { s = raw; http_server_start_raw(raw) } }
-}
-actor SchedHelper {
-    state x = 0
-    receive { Noop() -> { x = 1 } }
 }
 
 main() {
@@ -95,7 +90,6 @@ main() {
     http.server_get(raw, "/slow", handle_slow, 0)
     http.server_get(raw, "/fast", handle_fast, 0)
 
-    spawn(SchedHelper())
     a = spawn(SrvActor())
     a ! StartSrv { raw: raw }
 
