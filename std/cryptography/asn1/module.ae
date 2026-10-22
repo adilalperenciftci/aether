@@ -278,7 +278,10 @@ read_tlv(r: ptr) -> (ptr, string) {
         return acc, ok
     }
 
-    if rr.pos + length > rr.len {
+    // Against what is left, not as rr.pos + length: a four-byte length can
+    // be negative or near 2^31, and the sum then wraps past the check
+    // (Wycheproof's DER signatures declare 0x7fffffff).
+    if length < 0 || length > rr.len - rr.pos {
         return null, "asn1: content runs past end of input"
     }
     // copy content into a fresh bytes
