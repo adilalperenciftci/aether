@@ -288,6 +288,21 @@ Pair[8] pairs                    // an array of structs, by value
 
 The element type may be any type name: a keyword (`int`, `byte`, `long`), one of the unsigned widths (`uint8`, `uint16`, `uint32`, `uint64`) or a struct. The declared element type is what the C carries (`uint16_t hs[3]`), so a value that fits the width is never widened to `int`. A `uint32` prints as itself through `print`, `println`, a `%u` format and `${x}` interpolation (`4000000000`, not `-294967296`).
 
+**The length is an integer constant expression** (#3115): a number in any base the language reads (`byte[0x40]`, `int[1_024]`), a `const` of the same file that holds one, or `+ - * / % << >>` and parentheses over those. A `const` may be declared anywhere in the file, above or below the array, and may itself be built from other constants. The length is at least 1. A name that is not such a constant, a length below 1 and a division by zero are compile errors at the length.
+
+```aether,fragment
+const QWORDS: int = 128     // lanes per 1024-byte block
+const NW = 8
+
+struct SkeinCtx {
+    ks: long[NW + 1]        // the extended key: NW words and their parity
+}
+
+fill(mem: long[]) {
+    long[QWORDS] scratch
+}
+```
+
 **Array-to-pointer decay.** A named fixed-size array decays to a pointer to its first element in pointer context, when assigned to an inferred binding, passed as a `ptr`-typed argument, or compared against a pointer (the same rule C uses):
 
 ```aether,fragment

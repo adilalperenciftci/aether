@@ -34,6 +34,13 @@ typedef struct {
                           // matters too: the guard returns without consuming a
                           // token, so the loop's force-advance would otherwise
                           // emit one error per remaining token.
+    /* #3115: the file's integer constants, for an array length written as a
+     * name or an expression (`long[QWORDS]`, `long[NW + 1]`). Scanned once,
+     * on the first length that needs them, from every top-level
+     * `const NAME[: T] = <integer constant expression>`. */
+    struct ParserIntConst* int_consts;
+    int int_const_count;
+    int int_consts_scanned;
 } Parser;
 
 // The deepest real nesting in this repository is 22 braces and 9 parens, so
