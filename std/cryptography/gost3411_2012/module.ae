@@ -9,7 +9,6 @@
 
 import std.bits
 import std.bytes
-import std.longarr
 
 extern malloc(size: int) -> ptr
 extern free(p: ptr)
@@ -619,7 +618,7 @@ store_le64(V: ptr, off: int, r: long) {
 }
 
 F_perm(c: *GostCtx, V: ptr) {
-    res = longarr_new_raw(8)
+    long[8] res
 
     w = 0
     while w < 8 {
@@ -642,17 +641,16 @@ F_perm(c: *GostCtx, V: ptr) {
         r = r ^ STREEBOG_T[6 * 256 + v6]
         r = r ^ STREEBOG_T[7 * 256 + v7]
 
-        longarr_set_unchecked(res, w, r)
+        res[w] = r
         w = w + 1
     }
 
     w = 0
     while w < 8 {
-        r_w = longarr_get_unchecked(res, w)
+        r_w = res[w]
         store_le64(V, w * 8, r_w)
         w = w + 1
     }
-    longarr_free(res)
 }
 
 E_cipher(c: *GostCtx, K: ptr, m: ptr) {

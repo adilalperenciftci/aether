@@ -48,7 +48,7 @@ extern rhombus_run_sandboxed(perms: sandbox.Grants, code: string) -> int
 // First-class shared map: the Rhombus script reads/writes the Aether-owned
 // shared map live via aether-map-get / aether-map-put. Enumerate with
 // map.keys(map).
-extern rhombus_run_sandboxed_with_map(perms: sandbox.Grants, code: string, map_token: int) -> int
+extern rhombus_run_sandboxed_with_map(perms: sandbox.Grants, code: string, map_token: long) -> int
 extern rhombus_run(code: string) -> int
 // Evaluate `code` in the persistent VM; returns its captured stdout as a
 // string ("" on failure). State persists across calls. The string is a

@@ -43,7 +43,7 @@
     <li><a href="#from_decimal">from_decimal</a></li>
     <li><a href="#free">free</a></li>
     <li><a href="#clone">clone</a></li>
-    <li><a href="#limb">limb</a></li>
+    <li><a href="#test_bit">test_bit</a></li>
   </ul>
   <hr>
   <h2>Modules</h2>
@@ -161,12 +161,13 @@
       <h3 class="function-name">to_bytes <span class="kind">fn</span></h3>
       <pre class="usage"><code>to_bytes(n) <span class="arrow">-&gt;</span> ptr</code></pre>
       <p class="signature"><span class="sig-params">n: ptr</span></p>
-      <p class="doc">Signed two's-complement big-endian. Returns a std.intarr where slot i holds byte i (0..255); the byte count is the intarr's size. Callers read with intarr_get_raw and mask &amp; 0xFF. NOTE: returns the bytes in an intarr-of-bytes; the test harness reads them back through bignum.* helpers. To keep the public surface a plain `ptr` of raw bytes, we copy into a malloc'd byte buffer.</p>
+      <p class="doc">The minimal two's-complement big-endian encoding of n (BigInteger's toByteArray), as a std.bytes the caller frees with bytes.free.</p>
     </div>
     <div class="function" id="to_bytes_unsigned" data-name="to_bytes_unsigned">
       <h3 class="function-name">to_bytes_unsigned <span class="kind">fn</span></h3>
       <pre class="usage"><code>to_bytes_unsigned(n) <span class="arrow">-&gt;</span> ptr</code></pre>
       <p class="signature"><span class="sig-params">n: ptr</span></p>
+      <p class="doc">The big-endian bytes of |n| with no sign byte, as a std.bytes the caller frees with bytes.free.</p>
     </div>
     <div class="function" id="from_int" data-name="from_int">
       <h3 class="function-name">from_int <span class="kind">fn</span></h3>
@@ -290,8 +291,9 @@
     </div>
     <div class="function" id="free" data-name="free">
       <h3 class="function-name">free <span class="kind">fn</span></h3>
-      <pre class="usage"><code>free(r)</code></pre>
-      <p class="signature"><span class="sig-params">r</span></p>
+      <pre class="usage"><code>free(mag)</code></pre>
+      <p class="signature"><span class="sig-params">mag</span></p>
+      <p class="doc">all zero</p>
     </div>
     <div class="function" id="clone" data-name="clone">
       <h3 class="function-name">clone <span class="kind">fn</span></h3>
@@ -299,11 +301,11 @@
       <p class="signature"><span class="sig-params">n: ptr</span></p>
       <p class="doc">internal: deep clone</p>
     </div>
-    <div class="function" id="limb" data-name="limb">
-      <h3 class="function-name">limb <span class="kind">fn</span></h3>
-      <pre class="usage"><code>limb(mag, i) <span class="arrow">-&gt;</span> long</code></pre>
-      <p class="signature"><span class="sig-params">mag: ptr, i: int</span></p>
-      <p class="doc">Read limb i of a magnitude as an unsigned 32-bit value in a 64-bit int.</p>
+    <div class="function" id="test_bit" data-name="test_bit">
+      <h3 class="function-name">test_bit <span class="kind">fn</span></h3>
+      <pre class="usage"><code>test_bit(n, i) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">n: ptr, i: int</span></p>
+      <p class="doc">Bit `i` of the magnitude |n|, 0 the least significant: 1 or 0, read from the limb in place with no allocation (BigInteger.testBit for n &gt;= 0). What a scalar multiplication walks bit by bit.</p>
     </div>
   </div>
 </main>

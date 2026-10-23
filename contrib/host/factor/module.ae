@@ -32,7 +32,7 @@ extern factor_run_sandboxed(perms: sandbox.Grants, code: string) -> int
 // First-class shared map: the Factor script reads/writes the Aether-owned
 // shared map live via FFI words aether-map-get / aether-map-put, so keys the
 // script discovers at runtime come back too. Enumerate with map.keys(map).
-extern factor_run_sandboxed_with_map(perms: sandbox.Grants, code: string, map_token: int) -> int
+extern factor_run_sandboxed_with_map(perms: sandbox.Grants, code: string, map_token: long) -> int
 extern factor_run(code: string) -> int
 // Evaluate `code` in the persistent VM; returns its captured output as a
 // string ("" on failure). State persists across calls. The string is a

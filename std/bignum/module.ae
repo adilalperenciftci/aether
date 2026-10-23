@@ -12,10 +12,10 @@
 // Zero is represented canonically as sign==0 with an empty (len==0)
 // magnitude (BC's ZeroMagnitude).
 //
-// Limbs are unsigned 32-bit quantities stored in a std.intarr. Aether's
-// `int` is 64-bit and `intarr` stores 32-bit slots that sign-extend on
-// read, so every limb read is masked with `& 0xFFFFFFFF` before use, and
-// limb arithmetic is done in 64-bit with explicit lo32/hi32 carry split.
+// Limbs are unsigned 32-bit quantities stored in an `int[]`. An Aether
+// `int` is 32-bit and signed, so a limb sign-extends when it is widened:
+// every limb read is masked with `& 0xFFFFFFFF`, and limb arithmetic is
+// done in 64-bit with an explicit lo32/hi32 carry split.
 // Logical shifts route through std.bits (lsr32 / lsr64) since Aether `>>`
 // is arithmetic.
 //
@@ -37,7 +37,6 @@
 // return NEW bignums and never mutate their inputs. There is no GC;
 // callers free results with bignum.free.
 
-import std.intarr
 import std.bits
 import std.strbuilder
 import std.bytes
@@ -52,7 +51,7 @@ exports(
     mod_pow, gcd, mod_inverse, is_probable_prime,
     shift_left, shift_right,
     to_hex, to_decimal, from_decimal, free,
-    clone, limb
+    clone, test_bit
 )
 
 // libc allocator — whitelisted externs, no shim. The struct is three
@@ -68,14 +67,14 @@ extern malloc(size: int) -> ptr
 
 struct BN {
     sign: int // -1, 0, or 1
-    mag: ptr // std.intarr of 32-bit limbs, big-endian ([0] = MSB), or null
+    mag: int[] // 32-bit limbs, big-endian ([0] = MSB); empty for zero
     len: int // number of limbs; 0 for zero
 }
 
 // ---- internal construction helpers ----
 
 // Allocate a BN. `mag` may be null (only valid with len 0 / sign 0).
-bn_alloc(s: int, mag: @keep ptr, len: int) -> *BN {
+bn_alloc(s: int, mag: @keep int[], len: int) -> *BN {
     n = malloc(sizeof(BN)) as *BN
     n.sign = s
     n.mag = mag
@@ -89,8 +88,8 @@ bn_zero() -> *BN {
 }
 
 // Read limb i of a magnitude as an unsigned 32-bit value in a 64-bit int.
-limb(mag: ptr, i: int) -> long {
-    return intarr_get_raw(mag, i) & 0xFFFFFFFF
+limb(mag: int[], i: int) -> long {
+    return mag[i] & 0xFFFFFFFF
 }
 
 // Build a BN from a freshly-built magnitude array, stripping leading
@@ -98,17 +97,17 @@ limb(mag: ptr, i: int) -> long {
 // when no stripping is needed; otherwise copies into a tight array and
 // frees the original. `signum` is the intended sign for a non-zero
 // result.
-bn_from_mag_checked(signum: int, mag: @keep ptr, len: int) -> *BN {
+bn_from_mag_checked(signum: int, mag: @keep int[], len: int) -> *BN {
     i = 0
     while i < len {
-        if (intarr_get_raw(mag, i) & 0xFFFFFFFF) != 0 {
+        if (mag[i] & 0xFFFFFFFF) != 0 {
             break
         }
         i = i + 1
     }
     if i == len {
         // all zero
-        intarr_free(mag)
+        free(mag)
         return bn_zero()
     }
     if i == 0 {
@@ -117,22 +116,22 @@ bn_from_mag_checked(signum: int, mag: @keep ptr, len: int) -> *BN {
     }
     // copy the significant tail into a tight array
     newlen = len - i
-    nm = intarr_new_raw(newlen)
+    nm = make([]int, newlen)
     j = 0
     while j < newlen {
-        intarr_set_raw(nm, j, intarr_get_raw(mag, i + j))
+        nm[j] = mag[i + j]
         j = j + 1
     }
-    intarr_free(mag)
+    free(mag)
     return bn_alloc(signum, nm, newlen)
 }
 
 // Clone a magnitude array of `len` limbs into a new one.
-mag_clone(mag: ptr, len: int) -> ptr {
-    nm = intarr_new_raw(len)
+mag_clone(mag: int[], len: int) -> int[] {
+    nm = make([]int, len)
     i = 0
     while i < len {
-        intarr_set_raw(nm, i, intarr_get_raw(mag, i))
+        nm[i] = mag[i]
         i = i + 1
     }
     return nm
@@ -143,7 +142,7 @@ mag_clone(mag: ptr, len: int) -> ptr {
 // Build a magnitude (big-endian limbs) from a byte span [off, off+length),
 // stripping leading zero bytes. Returns (mag, len); len 0 / null mag for
 // all-zero input.
-make_magnitude_be(b: ptr, off: int, length: int) -> (ptr, int) {
+make_magnitude_be(b: ptr, off: int, length: int) -> (int[], int) {
     e = off + length
     // strip leading zero bytes
     start = off
@@ -158,7 +157,7 @@ make_magnitude_be(b: ptr, off: int, length: int) -> (ptr, int) {
         return null, 0
     }
     nints = (nbytes + 3) / 4
-    mag = intarr_new_raw(nints)
+    mag = make([]int, nints)
     // first limb takes the leading partial group
     first = ((nbytes - 1) % 4) + 1
     v = 0
@@ -167,7 +166,7 @@ make_magnitude_be(b: ptr, off: int, length: int) -> (ptr, int) {
         v = (v << 8) | (mem_get_byte(b, start + k) & 0xFF)
         k = k + 1
     }
-    intarr_set_raw(mag, 0, v & 0xFFFFFFFF)
+    mag[0] = v & 0xFFFFFFFF
     // remaining limbs are full 4-byte groups
     pos = start + first
     li = 1
@@ -178,7 +177,7 @@ make_magnitude_be(b: ptr, off: int, length: int) -> (ptr, int) {
             w = (w << 8) | (mem_get_byte(b, pos + j) & 0xFF)
             j = j + 1
         }
-        intarr_set_raw(mag, li, w & 0xFFFFFFFF)
+        mag[li] = w & 0xFFFFFFFF
         pos = pos + 4
         li = li + 1
     }
@@ -220,18 +219,18 @@ from_bytes(b: ptr, length: int) -> ptr {
     }
     if ib >= e {
         // all 0xFF -> value is -1
-        m = intarr_new_raw(1)
-        intarr_set_raw(m, 0, 1)
+        m = make([]int, 1)
+        m[0] = 1
         return bn_alloc(-1, m, 1)
     }
     if (mem_get_byte(b, ib) & 0xFF) == 0x00 {
         ib = ib - 1
     }
     numbytes = e - ib
-    // build the inverted+1 (negated) byte buffer into a temp intarr-as-bytes
+    // build the inverted+1 (negated) bytes into a temporary int[], one per slot
     // We compute the magnitude bytes directly: inverse = ~byte, then +1
     // with carry propagation from the least-significant end.
-    inv = intarr_new_raw(numbytes) // one byte per slot
+    inv = make([]int, numbytes) // one byte per slot
     idx = 0
     src = ib
     while idx < numbytes {
@@ -254,7 +253,7 @@ from_bytes(b: ptr, length: int) -> ptr {
     }
     // make magnitude from these bytes (big-endian)
     mag, len = make_magnitude_from_bytearr(inv, numbytes)
-    intarr_free(inv)
+    free(inv)
     if len == 0 {
         return bn_zero()
     }
@@ -262,15 +261,15 @@ from_bytes(b: ptr, length: int) -> ptr {
 }
 
 // byte stored one-per-int-slot helpers (for the negation scratch buffer)
-inv_get_byte(a: ptr, i: int) -> int {
-    return intarr_get_raw(a, i) & 0xFF
+inv_get_byte(a: int[], i: int) -> int {
+    return a[i] & 0xFF
 }
-inv_set_byte(a: ptr, i: int, v: int) {
-    intarr_set_raw(a, i, v & 0xFF)
+inv_set_byte(a: int[], i: int, v: int) {
+    a[i] = v & 0xFF
 }
 
-// make_magnitude_be variant that reads from an intarr-of-bytes (big-endian)
-make_magnitude_from_bytearr(a: ptr, length: int) -> (ptr, int) {
+// make_magnitude_be variant that reads big-endian bytes held one per int
+make_magnitude_from_bytearr(a: int[], length: int) -> (int[], int) {
     start = 0
     while start < length {
         if inv_get_byte(a, start) != 0 {
@@ -283,7 +282,7 @@ make_magnitude_from_bytearr(a: ptr, length: int) -> (ptr, int) {
         return null, 0
     }
     nints = (nbytes + 3) / 4
-    mag = intarr_new_raw(nints)
+    mag = make([]int, nints)
     first = ((nbytes - 1) % 4) + 1
     v = 0
     k = 0
@@ -291,7 +290,7 @@ make_magnitude_from_bytearr(a: ptr, length: int) -> (ptr, int) {
         v = (v << 8) | inv_get_byte(a, start + k)
         k = k + 1
     }
-    intarr_set_raw(mag, 0, v & 0xFFFFFFFF)
+    mag[0] = v & 0xFFFFFFFF
     pos = start + first
     li = 1
     while li < nints {
@@ -301,7 +300,7 @@ make_magnitude_from_bytearr(a: ptr, length: int) -> (ptr, int) {
             w = (w << 8) | inv_get_byte(a, pos + j)
             j = j + 1
         }
-        intarr_set_raw(mag, li, w & 0xFFFFFFFF)
+        mag[li] = w & 0xFFFFFFFF
         pos = pos + 4
         li = li + 1
     }
@@ -340,13 +339,13 @@ from_int(v: long) -> ptr {
     hi = bits.lsr64(umag, 32) & 0xFFFFFFFF
     lo = umag & 0xFFFFFFFF
     if hi != 0 {
-        mag = intarr_new_raw(2)
-        intarr_set_raw(mag, 0, hi & 0xFFFFFFFF)
-        intarr_set_raw(mag, 1, lo & 0xFFFFFFFF)
+        mag = make([]int, 2)
+        mag[0] = hi & 0xFFFFFFFF
+        mag[1] = lo & 0xFFFFFFFF
         return bn_alloc(s, mag, 2)
     }
-    mag = intarr_new_raw(1)
-    intarr_set_raw(mag, 0, lo & 0xFFFFFFFF)
+    mag = make([]int, 1)
+    mag[0] = lo & 0xFFFFFFFF
     return bn_alloc(s, mag, 1)
 }
 
@@ -377,7 +376,7 @@ bitlen32(v: long) -> int {
 
 // Bit length of a magnitude (unsigned), no sign adjustment. Position of
 // the highest set bit + 1. Returns 0 for an all-zero / null magnitude.
-mag_bit_length(mag: ptr, len: int) -> int {
+mag_bit_length(mag: int[], len: int) -> int {
     indx = 0
     while indx < len {
         if limb(mag, indx) != 0 {
@@ -389,6 +388,15 @@ mag_bit_length(mag: ptr, len: int) -> int {
         return 0
     }
     return 32 * ((len - indx) - 1) + bitlen32(limb(mag, indx))
+}
+
+// Bit `i` of the magnitude |n|, 0 the least significant: 1 or 0, read from
+// the limb in place with no allocation (BigInteger.testBit for n >= 0). What
+// a scalar multiplication walks bit by bit.
+test_bit(n: ptr, i: int) -> int {
+    bn = n as *BN
+    if bn.len <= 0 || i < 0 { return 0 }
+    return mag_test_bit(bn.mag, bn.len, i)
 }
 
 // BC CalcBitLength, including the negative power-of-two adjustment.
@@ -439,7 +447,7 @@ bit_length(n: ptr) -> int {
 
 // Unsigned compare of two magnitudes (no leading zeros assumed equal-ish;
 // BC CompareNoLeadingZeros operates on whole arrays from index 0).
-compare_mag(x: ptr, xlen: int, y: ptr, ylen: int) -> int {
+compare_mag(x: int[], xlen: int, y: int[], ylen: int) -> int {
     if xlen != ylen {
         if xlen < ylen {
             return -1
@@ -480,19 +488,19 @@ compare(a: ptr, b: ptr) -> int {
 
 // Returns a freshly allocated magnitude (mag, len) = x + y (unsigned),
 // big-endian. Result may be one limb longer than max(xlen, ylen).
-mag_add(x: ptr, xlen: int, y: ptr, ylen: int) -> (ptr, int) {
+mag_add(x: int[], xlen: int, y: int[], ylen: int) -> (int[], int) {
     // ensure x is the longer
     if xlen < ylen {
         return mag_add(y, ylen, x, xlen)
     }
-    res = intarr_new_raw(xlen + 1)
+    res = make([]int, xlen + 1)
     long m = 0
     ti = xlen - 1
     vi = ylen - 1
     ri = xlen // result index (xlen+1 slots, [0..xlen])
     while vi >= 0 {
         m = m + limb(x, ti) + limb(y, vi)
-        intarr_set_raw(res, ri, (m & 0xFFFFFFFF))
+        res[ri] = (m & 0xFFFFFFFF)
         m = bits.lsr64(m, 32)
         ti = ti - 1
         vi = vi - 1
@@ -500,26 +508,26 @@ mag_add(x: ptr, xlen: int, y: ptr, ylen: int) -> (ptr, int) {
     }
     while ti >= 0 {
         m = m + limb(x, ti)
-        intarr_set_raw(res, ri, (m & 0xFFFFFFFF))
+        res[ri] = (m & 0xFFFFFFFF)
         m = bits.lsr64(m, 32)
         ti = ti - 1
         ri = ri - 1
     }
     // final carry into the top slot (index 0)
-    intarr_set_raw(res, 0, (m & 0xFFFFFFFF))
+    res[0] = (m & 0xFFFFFFFF)
     return res, xlen + 1
 }
 
 // Returns (mag, len) = x - y (unsigned), assuming x >= y. Result has xlen
 // limbs (caller strips leading zeros via checked construction).
-mag_sub(x: ptr, xlen: int, y: ptr, ylen: int) -> (ptr, int) {
-    res = intarr_new_raw(xlen)
+mag_sub(x: int[], xlen: int, y: int[], ylen: int) -> (int[], int) {
+    res = make([]int, xlen)
     borrow = 0
     ti = xlen - 1
     vi = ylen - 1
     while vi >= 0 {
         diff = limb(x, ti) - limb(y, vi) + borrow
-        intarr_set_raw(res, ti, (diff & 0xFFFFFFFF))
+        res[ti] = (diff & 0xFFFFFFFF)
         // borrow is -1 if diff went negative, else 0
         if diff < 0 {
             borrow = -1
@@ -531,7 +539,7 @@ mag_sub(x: ptr, xlen: int, y: ptr, ylen: int) -> (ptr, int) {
     }
     while ti >= 0 {
         diff = limb(x, ti) + borrow
-        intarr_set_raw(res, ti, (diff & 0xFFFFFFFF))
+        res[ti] = (diff & 0xFFFFFFFF)
         if diff < 0 {
             borrow = -1
         } else {
@@ -628,7 +636,7 @@ clone(n: ptr) -> ptr {
 // Schoolbook multiply: accumulates y*z into the freshly-zeroed `x`
 // (big-endian limbs, length y.len + z.len). Faithful port of BC's
 // Multiply(x, y, z) where x is the result buffer. Mutates `x` in place.
-mag_multiply(x: ptr, xlen: int, y: ptr, ylen: int, z: ptr, zlen: int) {
+mag_multiply(x: int[], xlen: int, y: int[], ylen: int, z: int[], zlen: int) {
     i = zlen
     xbase = xlen - ylen
     while i > 0 {
@@ -639,14 +647,14 @@ mag_multiply(x: ptr, xlen: int, y: ptr, ylen: int, z: ptr, zlen: int) {
             j = ylen - 1
             while j >= 0 {
                 val = val + a * limb(y, j) + limb(x, xbase + j)
-                intarr_set_raw(x, xbase + j, (val & 0xFFFFFFFF))
+                x[xbase + j] = (val & 0xFFFFFFFF)
                 val = bits.lsr64(val, 32)
                 j = j - 1
             }
         }
         xbase = xbase - 1
         if xbase >= 0 {
-            intarr_set_raw(x, xbase, (val & 0xFFFFFFFF))
+            x[xbase] = (val & 0xFFFFFFFF)
         }
     }
 }
@@ -672,11 +680,11 @@ karatsuba_threshold() -> int {
 
 // Convert a big-endian magnitude (mag[0]=MSB) of `len` limbs into a fresh
 // little-endian limb array (out[0]=LSB) of `len` limbs.
-le_from_mag(mag: ptr, len: int) -> ptr {
-    out = intarr_new_raw(len)
+le_from_mag(mag: int[], len: int) -> int[] {
+    out = make([]int, len)
     i = 0
     while i < len {
-        intarr_set_raw(out, i, intarr_get_raw(mag, len - 1 - i))
+        out[i] = mag[len - 1 - i]
         i = i + 1
     }
     return out
@@ -684,30 +692,30 @@ le_from_mag(mag: ptr, len: int) -> ptr {
 
 // Convert a little-endian limb array (in[0]=LSB) of `len` limbs into a
 // fresh big-endian magnitude (out[0]=MSB) of `len` limbs.
-mag_from_le(le: ptr, len: int) -> ptr {
-    out = intarr_new_raw(len)
+mag_from_le(le: int[], len: int) -> int[] {
+    out = make([]int, len)
     i = 0
     while i < len {
-        intarr_set_raw(out, i, intarr_get_raw(le, len - 1 - i))
+        out[i] = le[len - 1 - i]
         i = i + 1
     }
     return out
 }
 
 // Read LE limb i as unsigned 32-bit in a 64-bit int (0 past the end).
-le_limb(a: ptr, alen: int, i: int) -> long {
+le_limb(a: int[], alen: int, i: int) -> long {
     if i < 0 {
         return 0
     }
     if i >= alen {
         return 0
     }
-    return intarr_get_raw(a, i) & 0xFFFFFFFF
+    return a[i] & 0xFFFFFFFF
 }
 
 // Schoolbook multiply of two LE arrays into a fresh LE array of xn+yn.
-le_schoolbook(x: ptr, xn: int, y: ptr, yn: int) -> ptr {
-    res = intarr_new_raw(xn + yn) // zero-filled
+le_schoolbook(x: int[], xn: int, y: int[], yn: int) -> int[] {
+    res = make([]int, xn + yn) // zero-filled
     i = 0
     while i < xn {
         a = le_limb(x, xn, i)
@@ -715,12 +723,12 @@ le_schoolbook(x: ptr, xn: int, y: ptr, yn: int) -> ptr {
             long carry = 0
             j = 0
             while j < yn {
-                long v = a * le_limb(y, yn, j) + (intarr_get_raw(res, i + j) & 0xFFFFFFFF) + carry
-                intarr_set_raw(res, i + j, (v & 0xFFFFFFFF))
+                long v = a * le_limb(y, yn, j) + (res[i + j] & 0xFFFFFFFF) + carry
+                res[i + j] = (v & 0xFFFFFFFF)
                 carry = bits.lsr64(v, 32)
                 j = j + 1
             }
-            intarr_set_raw(res, i + yn, (carry & 0xFFFFFFFF))
+            res[i + yn] = (carry & 0xFFFFFFFF)
         }
         i = i + 1
     }
@@ -729,12 +737,12 @@ le_schoolbook(x: ptr, xn: int, y: ptr, yn: int) -> ptr {
 
 // LE add: dst[0..dlen) += src[0..slen) (slen <= dlen). dst must have room
 // for the carry (callers size accordingly). Returns the final carry.
-le_add_into(dst: ptr, dlen: int, src: ptr, slen: int, off: int) -> long {
+le_add_into(dst: int[], dlen: int, src: int[], slen: int, off: int) -> long {
     long carry = 0
     i = 0
     while i < slen {
-        long v = (intarr_get_raw(dst, off + i) & 0xFFFFFFFF) + (intarr_get_raw(src, i) & 0xFFFFFFFF) + carry
-        intarr_set_raw(dst, off + i, (v & 0xFFFFFFFF))
+        long v = (dst[off + i] & 0xFFFFFFFF) + (src[i] & 0xFFFFFFFF) + carry
+        dst[off + i] = (v & 0xFFFFFFFF)
         carry = bits.lsr64(v, 32)
         i = i + 1
     }
@@ -743,8 +751,8 @@ le_add_into(dst: ptr, dlen: int, src: ptr, slen: int, off: int) -> long {
         if k >= dlen {
             break
         }
-        long v = (intarr_get_raw(dst, k) & 0xFFFFFFFF) + carry
-        intarr_set_raw(dst, k, (v & 0xFFFFFFFF))
+        long v = (dst[k] & 0xFFFFFFFF) + carry
+        dst[k] = (v & 0xFFFFFFFF)
         carry = bits.lsr64(v, 32)
         k = k + 1
     }
@@ -753,7 +761,7 @@ le_add_into(dst: ptr, dlen: int, src: ptr, slen: int, off: int) -> long {
 
 // Karatsuba multiply of two LE arrays into a fresh LE array of xn+yn.
 // Recurses; falls back to schoolbook below the threshold.
-le_karatsuba(x: ptr, xn: int, y: ptr, yn: int) -> ptr {
+le_karatsuba(x: int[], xn: int, y: int[], yn: int) -> int[] {
     nmin = xn
     if yn < nmin {
         nmin = yn
@@ -781,29 +789,29 @@ le_karatsuba(x: ptr, xn: int, y: ptr, yn: int) -> ptr {
 
     // low parts (already in place via offset views — but we need contiguous
     // arrays for recursion, so build them). xl = x[0..xl_len), xh = x[half..)
-    xl = intarr_new_raw(xl_len)
+    xl = make([]int, xl_len)
     i = 0
     while i < xl_len {
-        intarr_set_raw(xl, i, intarr_get_raw(x, i))
+        xl[i] = x[i]
         i = i + 1
     }
-    yl = intarr_new_raw(yl_len)
+    yl = make([]int, yl_len)
     i = 0
     while i < yl_len {
-        intarr_set_raw(yl, i, intarr_get_raw(y, i))
+        yl[i] = y[i]
         i = i + 1
     }
     // high parts may be empty (len 0); guard recursion with len-0 producing 0
-    xh = intarr_new_raw(xh_len)
+    xh = make([]int, xh_len)
     i = 0
     while i < xh_len {
-        intarr_set_raw(xh, i, intarr_get_raw(x, half + i))
+        xh[i] = x[half + i]
         i = i + 1
     }
-    yh = intarr_new_raw(yh_len)
+    yh = make([]int, yh_len)
     i = 0
     while i < yh_len {
-        intarr_set_raw(yh, i, intarr_get_raw(y, half + i))
+        yh[i] = y[half + i]
         i = i + 1
     }
 
@@ -817,10 +825,10 @@ le_karatsuba(x: ptr, xn: int, y: ptr, yn: int) -> ptr {
         sx_len = xh_len
     }
     sx_len = sx_len + 1
-    sx = intarr_new_raw(sx_len)
+    sx = make([]int, sx_len)
     i = 0
     while i < xl_len {
-        intarr_set_raw(sx, i, intarr_get_raw(xl, i))
+        sx[i] = xl[i]
         i = i + 1
     }
     le_add_into(sx, sx_len, xh, xh_len, 0)
@@ -830,10 +838,10 @@ le_karatsuba(x: ptr, xn: int, y: ptr, yn: int) -> ptr {
         sy_len = yh_len
     }
     sy_len = sy_len + 1
-    sy = intarr_new_raw(sy_len)
+    sy = make([]int, sy_len)
     i = 0
     while i < yl_len {
-        intarr_set_raw(sy, i, intarr_get_raw(yl, i))
+        sy[i] = yl[i]
         i = i + 1
     }
     le_add_into(sy, sy_len, yh, yh_len, 0)
@@ -846,7 +854,7 @@ le_karatsuba(x: ptr, xn: int, y: ptr, yn: int) -> ptr {
 
     // result = z0 + z1*B^half + z2*B^(2*half)
     reslen = xn + yn
-    res = intarr_new_raw(reslen) // zero
+    res = make([]int, reslen) // zero
     // add z0
     le_add_into(res, reslen, z0, xl_len + yl_len, 0)
     // add z1 shifted by half
@@ -854,33 +862,33 @@ le_karatsuba(x: ptr, xn: int, y: ptr, yn: int) -> ptr {
     // add z2 shifted by 2*half
     le_add_into(res, reslen, z2, xh_len + yh_len, 2 * half)
 
-    intarr_free(xl); intarr_free(xh); intarr_free(yl); intarr_free(yh)
-    intarr_free(sx); intarr_free(sy)
-    intarr_free(z0); intarr_free(z1); intarr_free(z2)
+    free(xl); free(xh); free(yl); free(yh)
+    free(sx); free(sy)
+    free(z0); free(z1); free(z2)
     return res
 }
 
 // Karatsuba helper that tolerates zero-length operands (high halves can be
 // empty); returns a fresh LE array of xn+yn limbs (all zero if either is
 // empty).
-le_mul_maybe_zero(x: ptr, xn: int, y: ptr, yn: int) -> ptr {
+le_mul_maybe_zero(x: int[], xn: int, y: int[], yn: int) -> int[] {
     if xn == 0 {
-        return intarr_new_raw(yn) // all zero, length xn+yn = yn
+        return make([]int, yn) // all zero, length xn+yn = yn
     }
     if yn == 0 {
-        return intarr_new_raw(xn)
+        return make([]int, xn)
     }
     return le_karatsuba(x, xn, y, yn)
 }
 
 // LE subtract in place: dst[0..dlen) -= src[0..slen). Assumes dst >= src
 // (true for the Karatsuba z1 reconstruction). slen <= dlen.
-le_sub_into(dst: ptr, dlen: int, src: ptr, slen: int) {
+le_sub_into(dst: int[], dlen: int, src: int[], slen: int) {
     long borrow = 0
     i = 0
     while i < slen {
-        long v = (intarr_get_raw(dst, i) & 0xFFFFFFFF) - (intarr_get_raw(src, i) & 0xFFFFFFFF) - borrow
-        intarr_set_raw(dst, i, (v & 0xFFFFFFFF))
+        long v = (dst[i] & 0xFFFFFFFF) - (src[i] & 0xFFFFFFFF) - borrow
+        dst[i] = (v & 0xFFFFFFFF)
         if v < 0 {
             borrow = 1
         } else {
@@ -893,8 +901,8 @@ le_sub_into(dst: ptr, dlen: int, src: ptr, slen: int) {
         if k >= dlen {
             break
         }
-        long v = (intarr_get_raw(dst, k) & 0xFFFFFFFF) - borrow
-        intarr_set_raw(dst, k, (v & 0xFFFFFFFF))
+        long v = (dst[k] & 0xFFFFFFFF) - borrow
+        dst[k] = (v & 0xFFFFFFFF)
         if v < 0 {
             borrow = 1
         } else {
@@ -929,11 +937,11 @@ multiply(a: ptr, b: ptr) -> ptr {
         zle = le_karatsuba(xle, ba.len, yle, bb.len)
         reslen = ba.len + bb.len
         res = mag_from_le(zle, reslen)
-        intarr_free(xle); intarr_free(yle); intarr_free(zle)
+        free(xle); free(yle); free(zle)
         return bn_from_mag_checked(rsign, res, reslen)
     }
     reslen = ba.len + bb.len
-    res = intarr_new_raw(reslen) // calloc: zero-filled
+    res = make([]int, reslen) // calloc: zero-filled
     mag_multiply(res, reslen, ba.mag, ba.len, bb.mag, bb.len)
     return bn_from_mag_checked(rsign, res, reslen)
 }
@@ -951,7 +959,7 @@ multiply(a: ptr, b: ptr) -> ptr {
 // zero), remainder sign = a.sign.
 
 // Test bit `pos` (0 = LSB) of a magnitude (big-endian limbs).
-mag_test_bit(mag: ptr, len: int, pos: int) -> int {
+mag_test_bit(mag: int[], len: int, pos: int) -> int {
     limbfromlsb = bits.lsr32(pos, 5) // pos / 32
     bitinlimb = pos & 0x1f
     idx = len - 1 - limbfromlsb // big-endian: LSB limb is last
@@ -965,8 +973,8 @@ mag_test_bit(mag: ptr, len: int, pos: int) -> int {
 }
 
 // Limb i of a little-endian scratch array, as an unsigned 32-bit value.
-ul(a: ptr, i: int) -> long {
-    return intarr_get_raw(a, i) & 0xFFFFFFFF
+ul(a: int[], i: int) -> long {
+    return a[i] & 0xFFFFFFFF
 }
 
 // D3's test that the quotient estimate is too large: qhat >= 2^32, or
@@ -993,14 +1001,14 @@ join(hi: long, lo: long) -> long {
 // (both non-negative, canonical). The caller guarantees den is non-zero and
 // no larger than num, both canonical (no leading zero limbs); it adjusts
 // signs and frees.
-mag_divmod_bn(num: ptr, numlen: int, den: ptr, denlen: int) -> (ptr, ptr) {
+mag_divmod_bn(num: int[], numlen: int, den: int[], denlen: int) -> (ptr, ptr) {
     m = numlen
     n = denlen
     u = le_from_mag(num, m)
     v = le_from_mag(den, n)
     qlen = m - n + 1
-    q = intarr_new_raw(qlen)
-    r = intarr_new_raw(n)
+    q = make([]int, qlen)
+    r = make([]int, n)
     long b = 4294967296
     long mask = 0xFFFFFFFF
 
@@ -1012,32 +1020,32 @@ mag_divmod_bn(num: ptr, numlen: int, den: ptr, denlen: int) -> (ptr, ptr) {
         j = m - 1
         while j >= 0 {
             long cur = join(k, ul(u, j))
-            intarr_set_raw(q, j, bits.udiv64(cur, d) & mask)
+            q[j] = bits.udiv64(cur, d) & mask
             k = bits.urem64(cur, d)
             j = j - 1
         }
-        intarr_set_raw(r, 0, k & mask)
+        r[0] = k & mask
     } else {
         // D1: normalise, so the divisor's top limb has its high bit set.
         // un has one limb more than u. A shift of 0 leaves both as they are
         // (a 64-bit shift right by 32 of a 32-bit limb is 0), and no left
         // shift here reaches the sign bit (a limb shifted by at most 31).
-        sh = bits.clz32(intarr_get_raw(v, n - 1))
-        vn = intarr_new_raw(n)
+        sh = bits.clz32(v[n - 1])
+        vn = make([]int, n)
         i = n - 1
         while i > 0 {
-            intarr_set_raw(vn, i, ((ul(v, i) << sh) | bits.lsr64(ul(v, i - 1), 32 - sh)) & mask)
+            vn[i] = ((ul(v, i) << sh) | bits.lsr64(ul(v, i - 1), 32 - sh)) & mask
             i = i - 1
         }
-        intarr_set_raw(vn, 0, (ul(v, 0) << sh) & mask)
-        un = intarr_new_raw(m + 1)
-        intarr_set_raw(un, m, bits.lsr64(ul(u, m - 1), 32 - sh))
+        vn[0] = (ul(v, 0) << sh) & mask
+        un = make([]int, m + 1)
+        un[m] = bits.lsr64(ul(u, m - 1), 32 - sh)
         i = m - 1
         while i > 0 {
-            intarr_set_raw(un, i, ((ul(u, i) << sh) | bits.lsr64(ul(u, i - 1), 32 - sh)) & mask)
+            un[i] = ((ul(u, i) << sh) | bits.lsr64(ul(u, i - 1), 32 - sh)) & mask
             i = i - 1
         }
-        intarr_set_raw(un, 0, (ul(u, 0) << sh) & mask)
+        un[0] = (ul(u, 0) << sh) & mask
 
         long vtop = ul(vn, n - 1)
         long vnext = ul(vn, n - 2)
@@ -1064,12 +1072,12 @@ mag_divmod_bn(num: ptr, numlen: int, den: ptr, denlen: int) -> (ptr, ptr) {
             while i < n {
                 long p = bits.wrapping_mul64(qhat, ul(vn, i))
                 t = ul(un, i + j) - k - (p & mask)
-                intarr_set_raw(un, i + j, t & mask)
+                un[i + j] = t & mask
                 k = bits.lsr64(p, 32) - (t >> 32)
                 i = i + 1
             }
             t = ul(un, j + n) - k
-            intarr_set_raw(un, j + n, t & mask)
+            un[j + n] = t & mask
             // D5/D6: the estimate was one too large (rare): add one divisor
             // back.
             if t < 0 {
@@ -1078,13 +1086,13 @@ mag_divmod_bn(num: ptr, numlen: int, den: ptr, denlen: int) -> (ptr, ptr) {
                 i = 0
                 while i < n {
                     t = ul(un, i + j) + ul(vn, i) + k
-                    intarr_set_raw(un, i + j, t & mask)
+                    un[i + j] = t & mask
                     k = bits.lsr64(t, 32)
                     i = i + 1
                 }
-                intarr_set_raw(un, j + n, (ul(un, j + n) + k) & mask)
+                un[j + n] = (ul(un, j + n) + k) & mask
             }
-            intarr_set_raw(q, j, qhat & mask)
+            q[j] = qhat & mask
             j = j - 1
         }
         // D8: the remainder is un's low n limbs shifted back. Only the low
@@ -1093,19 +1101,19 @@ mag_divmod_bn(num: ptr, numlen: int, den: ptr, denlen: int) -> (ptr, ptr) {
         long low = bits.lsr64(mask, 32 - sh)
         i = 0
         while i < n - 1 {
-            intarr_set_raw(r, i, bits.lsr64(ul(un, i), sh) | ((ul(un, i + 1) & low) << (32 - sh)))
+            r[i] = bits.lsr64(ul(un, i), sh) | ((ul(un, i + 1) & low) << (32 - sh))
             i = i + 1
         }
-        intarr_set_raw(r, n - 1, bits.lsr64(ul(un, n - 1), sh))
-        intarr_free(vn)
-        intarr_free(un)
+        r[n - 1] = bits.lsr64(ul(un, n - 1), sh)
+        free(vn)
+        free(un)
     }
-    intarr_free(u)
-    intarr_free(v)
+    free(u)
+    free(v)
     qbe = mag_from_le(q, qlen)
     rbe = mag_from_le(r, n)
-    intarr_free(q)
-    intarr_free(r)
+    free(q)
+    free(r)
     return bn_from_mag_checked(1, qbe, qlen), bn_from_mag_checked(1, rbe, n)
 }
 
@@ -1209,57 +1217,57 @@ mont_mdash(m0: long) -> long {
 // CIOS Montgomery multiply: t = (x * y * R^(-1)) mod m, all LE, n limbs.
 // x, y, mle are LE arrays of exactly n limbs (zero-padded). mdash =
 // -m^(-1) mod 2^32. Returns a fresh LE array of n limbs in [0, m).
-mont_mul(x: ptr, y: ptr, mle: ptr, n: int, mdash: long) -> ptr {
+mont_mul(x: int[], y: int[], mle: int[], n: int, mdash: long) -> int[] {
     // accumulator t has n+2 limbs to hold intermediate carry safely.
-    t = intarr_new_raw(n + 2) // zero
+    t = make([]int, n + 2) // zero
     i = 0
     while i < n {
-        long xi = intarr_get_raw(x, i) & 0xFFFFFFFF
+        long xi = x[i] & 0xFFFFFFFF
         // t = t + xi * y
         long carry = 0
         j = 0
         while j < n {
-            long v = (intarr_get_raw(t, j) & 0xFFFFFFFF) + xi * (intarr_get_raw(y, j) & 0xFFFFFFFF) + carry
-            intarr_set_raw(t, j, (v & 0xFFFFFFFF))
+            long v = (t[j] & 0xFFFFFFFF) + xi * (y[j] & 0xFFFFFFFF) + carry
+            t[j] = (v & 0xFFFFFFFF)
             carry = bits.lsr64(v, 32)
             j = j + 1
         }
-        long sum = (intarr_get_raw(t, n) & 0xFFFFFFFF) + carry
-        intarr_set_raw(t, n, (sum & 0xFFFFFFFF))
-        intarr_set_raw(t, n + 1, ((intarr_get_raw(t, n + 1) & 0xFFFFFFFF) + bits.lsr64(sum, 32)) & 0xFFFFFFFF)
+        long sum = (t[n] & 0xFFFFFFFF) + carry
+        t[n] = (sum & 0xFFFFFFFF)
+        t[n + 1] = ((t[n + 1] & 0xFFFFFFFF) + bits.lsr64(sum, 32)) & 0xFFFFFFFF
         // u = (t[0] * mdash) mod 2^32 ; t = (t + u * m) / 2^32
-        long u = ((intarr_get_raw(t, 0) & 0xFFFFFFFF) * mdash) & 0xFFFFFFFF
+        long u = ((t[0] & 0xFFFFFFFF) * mdash) & 0xFFFFFFFF
         long carry2 = 0
         j = 0
         while j < n {
-            long v = (intarr_get_raw(t, j) & 0xFFFFFFFF) + u * (intarr_get_raw(mle, j) & 0xFFFFFFFF) + carry2
-            intarr_set_raw(t, j, (v & 0xFFFFFFFF))
+            long v = (t[j] & 0xFFFFFFFF) + u * (mle[j] & 0xFFFFFFFF) + carry2
+            t[j] = (v & 0xFFFFFFFF)
             carry2 = bits.lsr64(v, 32)
             j = j + 1
         }
-        long s2 = (intarr_get_raw(t, n) & 0xFFFFFFFF) + carry2
-        intarr_set_raw(t, n, (s2 & 0xFFFFFFFF))
-        intarr_set_raw(t, n + 1, ((intarr_get_raw(t, n + 1) & 0xFFFFFFFF) + bits.lsr64(s2, 32)) & 0xFFFFFFFF)
+        long s2 = (t[n] & 0xFFFFFFFF) + carry2
+        t[n] = (s2 & 0xFFFFFFFF)
+        t[n + 1] = ((t[n + 1] & 0xFFFFFFFF) + bits.lsr64(s2, 32)) & 0xFFFFFFFF
         // shift t down by one limb (divide by 2^32)
         k = 0
         while k < n + 1 {
-            intarr_set_raw(t, k, intarr_get_raw(t, k + 1))
+            t[k] = t[k + 1]
             k = k + 1
         }
-        intarr_set_raw(t, n + 1, 0)
+        t[n + 1] = 0
         i = i + 1
     }
     // t now has up to n+1 significant limbs; conditional subtract of m.
     // Compare (t as n+1 limbs) >= m (n limbs).
-    out = intarr_new_raw(n)
+    out = make([]int, n)
     ge = 0
-    if (intarr_get_raw(t, n) & 0xFFFFFFFF) != 0 {
+    if (t[n] & 0xFFFFFFFF) != 0 {
         ge = 1
     } else {
         c = n - 1
         while c >= 0 {
-            long tv = intarr_get_raw(t, c) & 0xFFFFFFFF
-            long mv = intarr_get_raw(mle, c) & 0xFFFFFFFF
+            long tv = t[c] & 0xFFFFFFFF
+            long mv = mle[c] & 0xFFFFFFFF
             if tv != mv {
                 if tv > mv {
                     ge = 1
@@ -1274,8 +1282,8 @@ mont_mul(x: ptr, y: ptr, mle: ptr, n: int, mdash: long) -> ptr {
         long borrow = 0
         j = 0
         while j < n {
-            long v = (intarr_get_raw(t, j) & 0xFFFFFFFF) - (intarr_get_raw(mle, j) & 0xFFFFFFFF) - borrow
-            intarr_set_raw(out, j, (v & 0xFFFFFFFF))
+            long v = (t[j] & 0xFFFFFFFF) - (mle[j] & 0xFFFFFFFF) - borrow
+            out[j] = (v & 0xFFFFFFFF)
             if v < 0 {
                 borrow = 1
             } else {
@@ -1286,33 +1294,33 @@ mont_mul(x: ptr, y: ptr, mle: ptr, n: int, mdash: long) -> ptr {
     } else {
         j = 0
         while j < n {
-            intarr_set_raw(out, j, intarr_get_raw(t, j))
+            out[j] = t[j]
             j = j + 1
         }
     }
-    intarr_free(t)
+    free(t)
     return out
 }
 
 // Build a zero-padded LE array of exactly n limbs from a non-negative BN's
 // magnitude (value assumed < 2^(32n)). For a zero BN, returns all zeros.
-le_padded_from_bn(n_bn: ptr, n: int) -> ptr {
+le_padded_from_bn(n_bn: ptr, n: int) -> int[] {
     bn = n_bn as *BN
-    out = intarr_new_raw(n) // zero
+    out = make([]int, n) // zero
     if bn.sign == 0 {
         return out
     }
     // mag is big-endian; copy into LE.
     i = 0
     while i < bn.len {
-        intarr_set_raw(out, i, intarr_get_raw(bn.mag, bn.len - 1 - i))
+        out[i] = bn.mag[bn.len - 1 - i]
         i = i + 1
     }
     return out
 }
 
 // Make a non-negative BN from an LE limb array (out[0]=LSB) of n limbs.
-bn_from_le(le: ptr, n: int) -> ptr {
+bn_from_le(le: int[], n: int) -> ptr {
     mag = mag_from_le(le, n)
     return bn_from_mag_checked(1, mag, n)
 }
@@ -1322,7 +1330,7 @@ bn_from_le(le: ptr, n: int) -> ptr {
 mod_pow_monty(base: ptr, exp: ptr, m: ptr) -> ptr {
     bm = m as *BN
     n = bm.len
-    long m0 = intarr_get_raw(bm.mag, n - 1) & 0xFFFFFFFF // LSB limb (BE last)
+    long m0 = bm.mag[n - 1] & 0xFFFFFFFF // LSB limb (BE last)
     long mdash = mont_mdash(m0)
     mle = le_padded_from_bn(m, n)
 
@@ -1348,23 +1356,23 @@ mod_pow_monty(base: ptr, exp: ptr, m: ptr) -> ptr {
     i = nbits - 1
     while i >= 0 {
         sq = mont_mul(acc, acc, mle, n, mdash)
-        intarr_free(acc)
+        free(acc)
         acc = sq
         if mag_test_bit(be.mag, be.len, i) == 1 {
             pr = mont_mul(acc, base_le, mle, n, mdash)
-            intarr_free(acc)
+            free(acc)
             acc = pr
         }
         i = i - 1
     }
     // convert out of Montgomery form: result = acc * 1 * R^(-1) mod m.
-    one_mont = intarr_new_raw(n) // value 1 in plain form (LE)
-    intarr_set_raw(one_mont, 0, 1)
+    one_mont = make([]int, n) // value 1 in plain form (LE)
+    one_mont[0] = 1
     final_le = mont_mul(acc, one_mont, mle, n, mdash)
     result = bn_from_le(final_le, n)
 
-    intarr_free(acc); intarr_free(final_le); intarr_free(one_mont)
-    intarr_free(one_le); intarr_free(base_le); intarr_free(mle)
+    free(acc); free(final_le); free(one_mont)
+    free(one_le); free(base_le); free(mle)
     return result
 }
 
@@ -1510,6 +1518,9 @@ mod_inverse(a: ptr, m: ptr) -> ptr {
     return old_s
 }
 
+// The deterministic Miller-Rabin witnesses: the first 13 primes.
+const MR_BASES: int[13] = [2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41]
+
 // Miller-Rabin primality test with a fixed set of small witness bases.
 // `rounds` caps how many bases to try (the fixed list is deterministic for
 // all n < 3.317e24 with the first 13 primes; beyond that it is a strong
@@ -1552,23 +1563,14 @@ is_probable_prime(n: ptr, rounds: int) -> int {
         bd = d as *BN
         s = s + 1
     }
-    // fixed deterministic witness bases (first 13 primes)
-    bases = intarr_new_raw(13)
-    intarr_set_raw(bases, 0, 2); intarr_set_raw(bases, 1, 3)
-    intarr_set_raw(bases, 2, 5); intarr_set_raw(bases, 3, 7)
-    intarr_set_raw(bases, 4, 11); intarr_set_raw(bases, 5, 13)
-    intarr_set_raw(bases, 6, 17); intarr_set_raw(bases, 7, 19)
-    intarr_set_raw(bases, 8, 23); intarr_set_raw(bases, 9, 29)
-    intarr_set_raw(bases, 10, 31); intarr_set_raw(bases, 11, 37)
-    intarr_set_raw(bases, 12, 41)
-    nbases = 13
+    nbases = MR_BASES.len
     limit = rounds
     if limit > nbases { limit = nbases }
     if limit < 1 { limit = 1 }
     result = 1
     bi = 0
     while bi < limit {
-        a = from_int(intarr_get_raw(bases, bi))
+        a = from_int(MR_BASES[bi])
         // skip bases >= n-1 (only relevant for tiny n, already handled above)
         if compare(a, nm1) >= 0 {
             free(a)
@@ -1611,7 +1613,6 @@ is_probable_prime(n: ptr, rounds: int) -> int {
             }
         }
     }
-    intarr_free(bases)
     free(one); free(two); free(three); free(nm1); free(d)
     return result
 }
@@ -1620,32 +1621,32 @@ is_probable_prime(n: ptr, rounds: int) -> int {
 
 // BC ShiftLeft of a magnitude by n bits (n > 0). Returns (mag, len). n is
 // read as an unsigned 32-bit count (lsr32 / & 0x1f), so INT_MIN shifts by 2^31.
-mag_shift_left(mag: ptr, maglen: int, n: int) -> (ptr, int) {
+mag_shift_left(mag: int[], maglen: int, n: int) -> (int[], int) {
     nints = bits.lsr32(n, 5) // n / 32
     nbits = n & 0x1f
     if nbits == 0 {
         newlen = maglen + nints
-        nm = intarr_new_raw(newlen)
+        nm = make([]int, newlen)
         i = 0
         while i < maglen {
-            intarr_set_raw(nm, i, intarr_get_raw(mag, i))
+            nm[i] = mag[i]
             i = i + 1
         }
         // trailing nints limbs already zero
         return nm, newlen
     }
     nbits2 = 32 - nbits
-    highbits = bits.lsr32((intarr_get_raw(mag, 0) & 0xFFFFFFFF), nbits2) & 0xFFFFFFFF
+    highbits = bits.lsr32((mag[0] & 0xFFFFFFFF), nbits2) & 0xFFFFFFFF
     newlen = maglen + nints
     extra = 0
     if highbits != 0 {
         newlen = newlen + 1
         extra = 1
     }
-    nm = intarr_new_raw(newlen)
+    nm = make([]int, newlen)
     i = 0
     if extra == 1 {
-        intarr_set_raw(nm, 0, highbits & 0xFFFFFFFF)
+        nm[0] = highbits & 0xFFFFFFFF
         i = 1
     }
     m = limb(mag, 0)
@@ -1653,13 +1654,13 @@ mag_shift_left(mag: ptr, maglen: int, n: int) -> (ptr, int) {
     while j < maglen - 1 {
         nxt = limb(mag, j + 1)
         val = ((m << nbits) & 0xFFFFFFFF) | bits.lsr32((nxt & 0xFFFFFFFF), nbits2) & 0xFFFFFFFF
-        intarr_set_raw(nm, i, val & 0xFFFFFFFF)
+        nm[i] = val & 0xFFFFFFFF
         i = i + 1
         m = nxt
         j = j + 1
     }
     last = (limb(mag, maglen - 1) << nbits) & 0xFFFFFFFF
-    intarr_set_raw(nm, i, last & 0xFFFFFFFF)
+    nm[i] = last & 0xFFFFFFFF
     // remaining nints low limbs are already zero
     return nm, newlen
 }
@@ -1711,8 +1712,8 @@ shift_right(n: ptr, bits_to: int) -> ptr {
     if bits_to >= bl {
         // result is 0 for non-negative, -1 for negative (floor division)
         if bn.sign < 0 {
-            m = intarr_new_raw(1)
-            intarr_set_raw(m, 0, 1)
+            m = make([]int, 1)
+            m[0] = 1
             return bn_alloc(-1, m, 1)
         }
         return bn_zero()
@@ -1724,14 +1725,14 @@ shift_right(n: ptr, bits_to: int) -> ptr {
     dropped = mag_has_low_bits(bn.mag, bn.len, bits_to)
 
     resultlength = bits.lsr32((bl - bits_to + 31), 5) // (bl - n + 31) / 32
-    res = intarr_new_raw(resultlength)
+    res = make([]int, resultlength)
     numints = bits.lsr32(bits_to, 5) // n / 32
     numbits = bits_to & 31
     if numbits == 0 {
         // copy the leading resultlength limbs of the magnitude
         i = 0
         while i < resultlength {
-            intarr_set_raw(res, i, intarr_get_raw(bn.mag, i))
+            res[i] = bn.mag[i]
             i = i + 1
         }
     } else {
@@ -1743,7 +1744,7 @@ shift_right(n: ptr, bits_to: int) -> ptr {
             if magpos - 1 >= 0 {
                 v = v | ((limb(bn.mag, magpos - 1) << numbits2) & 0xFFFFFFFF)
             }
-            intarr_set_raw(res, i, v & 0xFFFFFFFF)
+            res[i] = v & 0xFFFFFFFF
             magpos = magpos - 1
             i = i - 1
         }
@@ -1763,7 +1764,7 @@ shift_right(n: ptr, bits_to: int) -> ptr {
 }
 
 // Returns 1 if any of the low `nbits` bits of the magnitude are set.
-mag_has_low_bits(mag: ptr, maglen: int, nbits: int) -> int {
+mag_has_low_bits(mag: int[], maglen: int, nbits: int) -> int {
     if nbits <= 0 {
         return 0
     }
@@ -1800,31 +1801,19 @@ bytes_for_bits(nbits: int) -> int {
     return (nbits + 7) / 8
 }
 
-// Signed two's-complement big-endian. Returns a std.intarr where slot i
-// holds byte i (0..255); the byte count is the intarr's size. Callers
-// read with intarr_get_raw and mask & 0xFF.
-//
-// NOTE: returns the bytes in an intarr-of-bytes; the test harness reads
-// them back through bignum.* helpers. To keep the public surface a plain
-// `ptr` of raw bytes, we copy into a malloc'd byte buffer.
+// The minimal two's-complement big-endian encoding of n (BigInteger's
+// toByteArray), as a std.bytes the caller frees with bytes.free.
 to_bytes(n: ptr) -> ptr {
     return to_bytes_impl(n, 0)
 }
 
+// The big-endian bytes of |n| with no sign byte, as a std.bytes the caller
+// frees with bytes.free.
 to_bytes_unsigned(n: ptr) -> ptr {
     return to_bytes_impl(n, 1)
 }
 
-// We return a malloc'd buffer whose first 4 bytes are the length (LE int)
-// followed by the bytes. That keeps the signature `-> ptr` while letting
-// callers recover the length. The test harness uses to_bytes_len + raw
-// byte reads.
-//
-// Layout: [int32 length][bytes...]. mem.get_int reads the prefix.
-
-// Returns a std.bytes (AetherBytes) holding the big-endian encoding —
-// consistent with the rest of the cryptography port. Caller frees with
-// bytes.free.
+// The body of to_bytes and to_bytes_unsigned.
 to_bytes_impl(n: ptr, as_unsigned: int) -> ptr {
     bn = n as *BN
     if bn.sign == 0 {
@@ -2013,7 +2002,7 @@ free(n: ptr) {
     }
     bn = n as *BN
     if bn.mag != null {
-        intarr_free(bn.mag)
+        free(bn.mag)
     }
     libc_free(n)
 }
@@ -2040,7 +2029,7 @@ free(n: ptr) {
 // remainder. Classic schoolbook short division: carry the running remainder
 // down through the limbs, each step a 64-bit divide because the carry is
 // below `d` <= 2^32 and each limb is below 2^32.
-mag_divmod_small(mag: ptr, len: int, d: long) -> long {
+mag_divmod_small(mag: int[], len: int, d: long) -> long {
     // `long`, not inferred int: the running remainder is shifted left 32 bits
     // each step and would silently truncate in a 32-bit slot.
     long rem = 0
@@ -2049,14 +2038,14 @@ mag_divmod_small(mag: ptr, len: int, d: long) -> long {
         cur = (rem << 32) | limb(mag, i)
         q = cur / d
         rem = cur - q * d
-        intarr_set_raw(mag, i, q)
+        mag[i] = q
         i = i + 1
     }
     return rem
 }
 
 // Is every limb zero?
-mag_is_zero(mag: ptr, len: int) -> int {
+mag_is_zero(mag: int[], len: int) -> int {
     i = 0
     while i < len {
         if limb(mag, i) != 0 {
@@ -2082,14 +2071,14 @@ to_decimal(n: ptr) -> string {
 
     // Each pass yields up to 9 digits, emitted least-significant first and
     // reversed at the end. 10 chunks per limb-word is a generous bound.
-    chunks = intarr_new_raw(bn.len * 2 + 2)
+    chunks = make([]int, bn.len * 2 + 2)
     count = 0
     while mag_is_zero(work, len) == 0 {
         r = mag_divmod_small(work, len, 1000000000)
-        intarr_set_raw(chunks, count, r)
+        chunks[count] = r
         count = count + 1
     }
-    intarr_free(work)
+    free(work)
 
     sb = strbuilder.new(count * 9 + 2)
     if bn.sign < 0 {
@@ -2099,7 +2088,7 @@ to_decimal(n: ptr) -> string {
     // exactly 9 digits, because an interior chunk of 42 means "000000042".
     i = count - 1
     while i >= 0 {
-        v = intarr_get_raw(chunks, i) & 0xFFFFFFFF
+        v = chunks[i] & 0xFFFFFFFF
         if i == count - 1 {
             append_dec_nolead(sb, v)
         } else {
@@ -2107,7 +2096,7 @@ to_decimal(n: ptr) -> string {
         }
         i = i - 1
     }
-    intarr_free(chunks)
+    free(chunks)
     return strbuilder.finish(sb)
 }
 

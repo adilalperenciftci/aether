@@ -5539,18 +5539,20 @@ void push_heap_string_exit_free_defers(CodeGenerator* gen, ASTNode* body) {
  * emits `elem name[N];`. (Hit repeatedly by the Redis port's per-loop
  * scratch buffers; the first-statement-in-block decl path already does
  * this correctly, this fixes the not-first / hoisted path.) */
-/* The zero initializer for a hoisted local. A hoisted variable is
- * declared at function scope and assigned inside the branch or loop
- * body that binds it; on a path that skips the body its value is
- * indeterminate, and reading an indeterminate value is undefined — not
+/* The zero initializer for a local that starts with no value of its own.
+ * A hoisted variable is declared at function scope and assigned inside the
+ * branch or loop body that binds it; on a path that skips the body its
+ * value is indeterminate, and reading an indeterminate value is undefined — not
  * a garbage value, undefined: gcc's interprocedural constant
  * propagation may treat it as whatever the other call sites pass (a
  * literal 0), so a parameter that "genuinely varies" arrives as a
  * constant, with no sanitizer able to say so (#2128 is the shape of that
- * report). Initialized, the variable is 0/NULL/{0} on such a path and
- * every read is defined. Spelled per kind rather than as a universal
- * `{0}`, which clang flags on scalars (-Wbraced-scalar-init). */
-static const char* hoisted_zero_init(Type* t, const char* c_type) {
+ * report). A declaration without a value (`long x`, `int[3] k`, `P p`)
+ * starts at its type's zero value the same way (#3114). Initialized, the
+ * variable is 0/NULL/{0} and every read is defined. Spelled per kind
+ * rather than as a universal `{0}`, which clang flags on scalars
+ * (-Wbraced-scalar-init). */
+static const char* local_zero_init(Type* t, const char* c_type) {
     if (t) {
         switch (t->kind) {
             case TYPE_INT: case TYPE_INT64: case TYPE_UINT64: case TYPE_UINT32:
@@ -5560,7 +5562,7 @@ static const char* hoisted_zero_init(Type* t, const char* c_type) {
             case TYPE_BITSET: case TYPE_BITSTRUCT:   /* backing integers */
                 return " = 0";
             case TYPE_ISOLATED:
-                return hoisted_zero_init(t->element_type, c_type);
+                return local_zero_init(t->element_type, c_type);
             case TYPE_F32X4: case TYPE_F64X2: case TYPE_I32X4: case TYPE_I64X2:
             case TYPE_I16X8: case TYPE_F32X8: case TYPE_I32X8:
                 return " = {0}";   /* #2146: a vector, not a scalar 0 */
@@ -5568,6 +5570,8 @@ static const char* hoisted_zero_init(Type* t, const char* c_type) {
                 return " = NULL";
             case TYPE_FUNCTION:
                 return t->is_fnptr ? " = NULL" : " = {0}";
+            case TYPE_ARRAY:
+                return " = {0}";   /* a sized array, or a slice's AetherSlice */
             default:
                 break;
         }
@@ -5627,7 +5631,7 @@ static void emit_hoisted_local_decl(CodeGenerator* gen, Type* var_type,
     }
     const char* c_type = get_c_type(var_type);
     fprintf(gen->output, "%s %s%s;", volatile_decl_type(vq, c_type), name,
-            hoisted_zero_init(var_type, c_type));
+            local_zero_init(var_type, c_type));
     /* A hoisted local nothing reads (`_ = f()` in a loop) is unused. */
     if (codegen_local_unread(gen, name)) fprintf(gen->output, " (void)%s;", name);
     fprintf(gen->output, "\n");
@@ -5639,14 +5643,13 @@ static void emit_hoisted_local_decl(CodeGenerator* gen, Type* var_type,
 }
 
 /* Declare, before an if/else or a switch with a default, the names every arm
- * binds (hoist_common_decl_names, shared with the typechecker), so the
+ * binds (hoist_common_hoists, shared with the typechecker), so the
  * binding survives the arm (#2732 added the switch). */
 static void hoist_common_vars(CodeGenerator* gen, ASTNode* stmt) {
-    const char* names[HOIST_MAX_NAMES];
-    int count = hoist_common_decl_names(stmt, names, HOIST_MAX_NAMES);
+    const HoistNames* h = hoist_common_hoists(stmt);
 
-    for (int i = 0; i < count; i++) {
-        const char* n = names[i];
+    for (int i = 0; h && i < h->count; i++) {
+        const char* n = h->names[i];
 
         // Skip if already declared at outer scope.
         if (is_var_declared(gen, n)) continue;
@@ -5658,7 +5661,7 @@ static void hoist_common_vars(CodeGenerator* gen, ASTNode* stmt) {
         if (is_actor_state_var(gen, n)) continue;
 
         // Recover a usable type from the first arm that has one.
-        ASTNode* decl = hoist_common_first_decl(stmt, n);
+        ASTNode* decl = hoist_names_decl(h, i);
         Type* var_type = hoist_decl_type(decl);
         Type* joined = sibling_join_type(gen, n, var_type);
         if (joined) var_type = joined;
@@ -5911,7 +5914,8 @@ static void td_explain(ASTNode* loop, const char* why) {
         const char* v = getenv("AETHER_EXPLAIN_THREADED");
         on = (v && *v && strcmp(v, "0") != 0) ? 1 : 0;
     }
-    if (!on || !loop || loop->child_count < 2 || !loop->children[1]) return;
+    if (!on || aether_diagnostics_muted() || !loop || loop->child_count < 2 ||
+        !loop->children[1]) return;
     /* Neither the while nor the switch node carries a position; the
      * switch's selector expression does. */
     ASTNode* body = loop->children[1];
@@ -6230,12 +6234,11 @@ static int function_has_ensures(ASTNode* func) {
 
 void hoist_if_branch_vars(CodeGenerator* gen, ASTNode* body) {
     if (!body) return;
-    /* Which names: hoist_if_branch_candidates (shared with the typechecker,
+    /* Which names: hoist_if_branch_hoists (shared with the typechecker,
      * which must accept exactly the reads this makes compile). */
-    const char* names[HOIST_MAX_NAMES];
-    int count = hoist_if_branch_candidates(body, names, HOIST_MAX_NAMES);
-    for (int n = 0; n < count; n++) {
-        const char* name = names[n];
+    const HoistNames* h = hoist_if_branch_hoists(body);
+    for (int n = 0; h && n < h->count; n++) {
+        const char* name = h->names[n];
         if (is_var_declared(gen, name)) continue;
         /* #744: a module-level `var` global first assigned inside an
          * if-branch must NOT be hoisted as a fresh function local —
@@ -6247,7 +6250,7 @@ void hoist_if_branch_vars(CodeGenerator* gen, ASTNode* body) {
          * skip it here exactly as that path does. */
         if (is_module_global_var(gen, name)) continue;
         if (is_actor_state_var(gen, name)) continue;   /* #2505: self->name */
-        ASTNode* first_decl = hoist_if_branch_first_decl(body, name);
+        ASTNode* first_decl = hoist_names_decl(h, n);
         if (!first_decl) continue;
         Type* var_type = first_decl->node_type;
         if ((!var_type || var_type->kind == TYPE_VOID || var_type->kind == TYPE_UNKNOWN)
@@ -8832,6 +8835,30 @@ static int tree_reads_name(const ASTNode* node, const char* name, size_t len) {
     return 0;
 }
 
+/* The names `node` reads by tree_reads_name's rule, into `out`: each value,
+ * and each part of a dotted one up to a `.`. */
+static void reads_collect(const ASTNode* node, StrMap* out) {
+    if (!node) return;
+    if ((node->type == AST_IDENTIFIER || node->type == AST_FUNCTION_CALL) && node->value) {
+        strmap_put(out, node->value, (void*)1);
+        for (const char* dot = strchr(node->value, '.'); dot; dot = strchr(dot + 1, '.'))
+            strmap_put(out, cg_intern_n(node->value, (size_t)(dot - node->value)), (void*)1);
+    }
+    for (int i = 0; i < node->child_count; i++) reads_collect(node->children[i], out);
+}
+
+/* #3083: does the function being emitted read `name`? One walk of it for
+ * every local asked about, not one per local. */
+static int current_function_reads(CodeGenerator* gen, const char* name) {
+    if (gen->reads_root != gen->current_function) {
+        strmap_free(&gen->reads_index);
+        strmap_init(&gen->reads_index);
+        reads_collect(gen->current_function, &gen->reads_index);
+        gen->reads_root = gen->current_function;
+    }
+    return strmap_has(&gen->reads_index, name);
+}
+
 /* Is a local a destructure declares one the program never reads? A name
  * spelled with a leading `_` says so (the type checker does not warn about
  * it), and any other is looked for in the function being emitted. Such a
@@ -8843,8 +8870,7 @@ static int tree_reads_name(const ASTNode* node, const char* name, size_t len) {
 static int destructure_local_unread(CodeGenerator* gen, const char* name) {
     if (!name) return 0;
     if (name[0] == '_') return 1;
-    return !gen->current_function ||
-           !tree_reads_name(gen->current_function, name, strlen(name));
+    return !gen->current_function || !current_function_reads(gen, name);
 }
 
 int codegen_local_unread(CodeGenerator* gen, const char* name) {
@@ -9942,6 +9968,25 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                         strcmp(stmt->children[0]->value, stmt->value) == 0) {
                         break;
                     }
+                    /* #3114: a declaration without a value of a variable
+                     * declared already (hoisted out of the loop or branch
+                     * it is written in) starts it at its type's zero value
+                     * again, as one with that value would: each pass of a
+                     * loop gets a fresh `long acc`. What it holds is
+                     * released first, as any rebind releases it. */
+                    if (stmt->child_count == 0) {
+                        Type* vt = hoisted ? hoisted : stmt->node_type;
+                        const char* lv = is_promoted_capture(gen, stmt->value)
+                                         ? cg_internf("(*%s)", stmt->value) : stmt->value;
+                        own_emit_part(gen, vt, lv, OWN_DROP);
+                        print_indent(gen);
+                        const char* zero = local_zero_init(vt, get_c_type(vt));
+                        if (strcmp(zero, " = {0}") == 0)
+                            fprintf(gen->output, "memset((void*)&%s, 0, sizeof(%s));\n", lv, lv);
+                        else
+                            fprintf(gen->output, "%s%s;\n", lv, zero);
+                        break;
+                    }
                     /* #2289: an array literal bound to a fixed-size array
                      * that is already declared -- hoisted out of the loop
                      * or branch it is written in, or bound earlier -- is
@@ -10470,9 +10515,12 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                         }
                     }
 
-                    /* #2618: an owning array starts empty, so its exit
-                     * frees nothing it did not take. */
-                    if (decl_str_array && stmt->child_count == 0) fprintf(gen->output, " = {0}");
+                    /* #3114: a declaration without a value starts at its
+                     * type's zero value (an owning array starts empty, so
+                     * its exit frees nothing it did not take, #2618). */
+                    if (stmt->child_count == 0)
+                        fputs(local_zero_init(stmt->node_type, get_c_type(stmt->node_type)),
+                              gen->output);
                     fprintf(gen->output, ";\n");
                     unwind_track_release(gen);
                     if (decl_array_src) {
@@ -10927,7 +10975,17 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
             ASTNode* for_init = stmt->child_count > 0 ? stmt->children[0] : NULL;
             const char* loop_var = for_init && for_init->type == AST_VARIABLE_DECLARATION
                                    ? for_init->value : NULL;
-            int cell_init = loop_var && is_promoted_capture(gen, loop_var);
+            int state_var = loop_var && is_actor_state_var(gen, loop_var);
+            /* #2734: a bare init (`i = 0`) of a name already bound where the
+             * loop is, a local, a module `var` or an actor's state field,
+             * assigns it, as `x = ...` does anywhere (the checker leaves
+             * `type_inferred` on exactly those): emitted as that statement
+             * ahead of the loop, it takes the ownership any binding does,
+             * and the loop leaves the variable with its last value. The
+             * header declared a new one, so `i = 5; for (i = 0; i < 3; i++)
+             * {}` left `i` at 5. */
+            int assign_init = loop_var && for_init->type_inferred;
+            int cell_init = !assign_init && loop_var && is_promoted_capture(gen, loop_var);
             /* #2742: the loop's variable is owned as the binding a while-loop
              * rewrite makes, in the same block of its own:
              *  - a string: the loop declares its own `s` and `_heap_s`,
@@ -10944,16 +11002,16 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
              * of an outer loop, frees it. Declared in the header, the
              * variable owned nothing: the value it ended with was never
              * freed. Any other loop variable keeps the header declaration:
-             * one that shadows an enclosing local or a module `var` (the
-             * statement would assign those), and an actor's state field,
-             * which a handler reads and writes as `self->name`. */
-            int state_var = loop_var && is_actor_state_var(gen, loop_var);
-            int str_init = !cell_init && loop_var && !state_var && for_init->node_type &&
-                           for_init->node_type->kind == TYPE_STRING;
-            int stmt_init = !cell_init && !str_init && loop_var && !state_var &&
+             * one a typed init or a range-for declares over an enclosing
+             * local, a module `var` or an actor's state field of its name,
+             * which it shadows. */
+            int str_init = !assign_init && !cell_init && loop_var && !state_var &&
+                           for_init->node_type && for_init->node_type->kind == TYPE_STRING;
+            int stmt_init = !assign_init && !cell_init && !str_init && loop_var && !state_var &&
                             !is_var_declared(gen, loop_var) &&
                             !is_module_global_var(gen, loop_var);
             ScopedStringLocal str_local = {0};
+            if (assign_init) generate_statement(gen, for_init);
             int own_block = cell_init || str_init || stmt_init;
             if (own_block) {
                 print_line(gen, "{");
@@ -10989,7 +11047,7 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
             int step_ctl = step && !step_stmt && hoist_ready(gen) && ctl_contains(gen, step);
             /* #2798: so are the constructs in an init the header keeps, ahead
              * of the loop: nothing in it is evaluated before the init. */
-            if (!own_block && for_init && hoist_ready(gen)) {
+            if (!own_block && !assign_init && for_init && hoist_ready(gen)) {
                 ASTNode* iv = for_init;
                 if (iv->type == AST_VARIABLE_DECLARATION) {
                     iv = iv->child_count > 0 ? iv->children[0] : NULL;
@@ -11005,7 +11063,7 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
             }
             if (own_block) print_indent(gen);
             fprintf(gen->output, "for (");
-            if (!own_block && for_init) {
+            if (!own_block && !assign_init && for_init) {
                 ASTNode* init = for_init;
                 if (init->type == AST_VARIABLE_DECLARATION) {
                     generate_type(gen, init->node_type);
@@ -11118,9 +11176,13 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                 break;  // collapsed — done
             }
 
-            // Batch optimization: only in main() (not inside actors)
+            // Batch optimization: only outside actors, and only around a
+            // loop that cannot wait between its sends (#3117). A loop inside
+            // a batched one joins its batch rather than opening another.
             // Uses queue_enqueue_batch to reduce atomics from N to num_cores
-            if (has_sends && gen->current_actor == NULL) {
+            int batch = has_sends && gen->current_actor == NULL && !gen->in_main_loop &&
+                        loop_sends_without_waiting(stmt);
+            if (batch) {
                 print_line(gen, "scheduler_send_batch_start();");
                 gen->in_main_loop = 1;
             }
@@ -11230,7 +11292,7 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                 print_line(gen, "#endif");
             }
 
-            if (has_sends && gen->current_actor == NULL) {
+            if (batch) {
                 print_line(gen, "scheduler_send_batch_flush();");
                 gen->in_main_loop = 0;
             }

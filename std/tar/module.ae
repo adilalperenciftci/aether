@@ -1050,7 +1050,7 @@ extract(archive_path: string, destination: string, options: ExtractOptions) -> s
         // Clean up remaining dir_list items in case of early return/error
         var d = list_size(dir_list) - 1
         while d >= 0 {
-            dm = list_get_raw(dir_list, d) as *DirMetadata
+            dm = list.at(dir_list, d) as *DirMetadata
             heap.free(dm)
             d = d - 1
         }
@@ -1240,7 +1240,7 @@ extract(archive_path: string, destination: string, options: ExtractOptions) -> s
             }
 
             // Queue directory metadata to be applied last
-            list_add_raw(dir_list, target as ptr)
+            list.add(dir_list, target as ptr)
         } else if kind == KIND_SYMLINK {
             if fs.exists(target.path) == 1 || fs.fs_is_symlink(target.path) == 1 {
                 if options.overwrite == 0 {
@@ -1273,7 +1273,7 @@ extract(archive_path: string, destination: string, options: ExtractOptions) -> s
     // Apply directory metadata in reverse order of creation
     var d = list_size(dir_list) - 1
     while d >= 0 {
-        dm = list_get_raw(dir_list, d) as *DirMetadata
+        dm = list.at(dir_list, d) as *DirMetadata
         if options.preserve_mode == 1 {
             fs.chmod(dm.path, dm.mode)
         }

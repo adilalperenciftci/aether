@@ -39,7 +39,8 @@ exports(
 import std.schema
 import std.map
 import std.json
-import std.list(list_new, list_add_raw, list_get_raw, list_size)
+import std.list
+import std.list(list_new, list_size)
 import std.string(string_length, string_concat, string_equals)
 import std.strbuilder
 
@@ -344,7 +345,7 @@ fn build_openapi(groups: ptr) -> string {
     strbuilder.append(b, "\"paths\":{")
     i = 0
     while i < n {
-        m = list_get_raw(groups, i) as *ApiGroup
+        m = list.at(groups, i) as *ApiGroup
         name = schema_name_for(m.prefix)
         if i > 0 {
             strbuilder.append(b, ",")
@@ -374,7 +375,7 @@ fn build_openapi(groups: ptr) -> string {
     strbuilder.append(b, "\"components\":{\"schemas\":{")
     i = 0
     while i < n {
-        m = list_get_raw(groups, i) as *ApiGroup
+        m = list.at(groups, i) as *ApiGroup
         name = schema_name_for(m.prefix)
         js = schema.to_json_schema(m.resource)
         if i > 0 {

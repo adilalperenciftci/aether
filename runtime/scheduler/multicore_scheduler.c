@@ -36,15 +36,9 @@ extern void aether_send_message(void* actor_ptr, void* message_data, size_t mess
 
 // Forward declaration: I/O polling used in scheduler thread loop
 static int scheduler_io_poll(Scheduler* sched, int timeout_ms);
-
-// Forward declaration: TLS guard set by aether_send_message_sync while an
-// actor's step() is executing synchronously on the main thread.  Used to
-// defer main_thread_only=0 in scheduler_spawn_actor and prevent a scheduler
-// thread from entering the same step() concurrently.
-extern AETHER_TLS ActorBase* g_sync_step_actor;
-// Inline-send depth and pending releases, defined in aether_send_message.c.
-extern AETHER_TLS int g_inline_step_depth;
-extern AETHER_TLS int g_inline_release_pending;
+// Forward declaration: a pending send batch goes before a send around it
+// and before a wait (#3117), defined with the batch below.
+static inline void batch_flush_pending(void);
 
 #ifdef __APPLE__
 #include <mach/mach.h>
@@ -108,79 +102,6 @@ static void reply_slot_decref(ActorReplySlot* slot);
 // We use a function rather than a macro so the 8 step() sites stay
 // readable; `inline` lets the compiler devirtualize where it can.
 // --------------------------------------------------------------------------
-/* The thread that put the runtime into main-thread mode. */
-static aether_tid_t g_main_mode_thread;
-static atomic_int g_main_mode_thread_set = 0;
-
-int aether_on_main_mode_thread(void) {
-    if (!atomic_load_explicit(&g_main_mode_thread_set, memory_order_acquire)) return 1;
-    return aether_tid_equal(aether_tid_self(), g_main_mode_thread);
-}
-
-/* Leaving main-thread mode starts the scheduler threads, and from then on
- * the actor's core delivers into its mailbox, which takes one producer at a
- * time. An inline send checks that the mode is on and then writes that
- * mailbox itself, so a switch landing between the two gave the mailbox two
- * producers, and put scheduler deliveries ahead of the inline message: the
- * one step that follows consumed a delivered message instead, and left the
- * inline message -- its payload on the sender's stack -- for a scheduler
- * thread to process and free() after that frame was gone (#2266). This
- * lock makes "the mode is on, enqueue" and every switch out of the mode
- * exclusive. It is held across the enqueue only, never across a step, so a
- * thread leaving the mode never waits on a handler. */
-static atomic_flag g_main_mode_lock = ATOMIC_FLAG_INIT;
-
-static inline void main_mode_lock(void) {
-    while (atomic_flag_test_and_set_explicit(&g_main_mode_lock, memory_order_acquire)) AETHER_PAUSE();
-}
-
-static inline void main_mode_unlock(void) {
-    atomic_flag_clear_explicit(&g_main_mode_lock, memory_order_release);
-}
-
-int aether_main_mode_enqueue(ActorBase* actor, Message msg) {
-    main_mode_lock();
-    int on = aether_main_thread_mode_active();
-    if (on) mailbox_send(&actor->mailbox, msg);
-    main_mode_unlock();
-    return on;
-}
-
-void aether_leave_main_thread_mode(void) {
-    main_mode_lock();
-    ActorBase* main_actor = (ActorBase*)g_aether_config.main_actor;
-    atomic_store_explicit(&g_aether_config.main_thread_mode, false, memory_order_release);
-    g_aether_config.main_actor = NULL;
-    /* The inline step paths hold the actor's step_lock while they step,
-     * so clearing main_thread_only cannot let a scheduler thread step the
-     * actor concurrently with a step still on the main thread's stack. */
-    if (main_actor) atomic_store_explicit(&main_actor->main_thread_only, 0, memory_order_release);
-    main_mode_unlock();
-    scheduler_ensure_threads_running();
-}
-
-/* The actor whose step_lock THIS thread holds for an inline step. A
- * handler that sends to its own actor (`self ! Tick {}`) steps again on
- * the same thread, and step_lock is not recursive: the owner check is
- * what keeps that from spinning on its own lock. */
-static AETHER_TLS ActorBase* g_inline_lock_owner = NULL;
-
-int aether_inline_lock_acquire(ActorBase* actor) {
-    if (g_inline_lock_owner == actor) return 0;
-    while (atomic_flag_test_and_set_explicit(&actor->step_lock, memory_order_acquire)) AETHER_PAUSE();
-    g_inline_lock_owner = actor;
-    return 1;
-}
-
-void aether_inline_lock_release(ActorBase* actor) {
-    g_inline_lock_owner = NULL;
-    atomic_flag_clear_explicit(&actor->step_lock, memory_order_release);
-}
-
-/* Inline (main-thread-mode) step: hold step_lock across it so the switch
- * out of the mode by another thread is safe. */
-static inline void aether_step_inline(ActorBase* actor);
-
 static inline void aether_step_safe(ActorBase* actor) {
     if (!actor || !actor->step) return;
     if (atomic_load_explicit(&actor->dead, memory_order_acquire)) return;
@@ -262,18 +183,6 @@ static inline void aether_step_safe(ActorBase* actor) {
     if (reason_release) reason_release(reason);
 }
 
-static inline void aether_step_inline(ActorBase* actor) {
-    // As in aether_send_message_sync: a release made in the step waits until
-    // this is done touching the actor (#2509).
-    g_inline_step_depth++;
-    int locked = aether_inline_lock_acquire(actor);
-    aether_step_safe(actor);
-    if (locked) aether_inline_lock_release(actor);
-    if (--g_inline_step_depth == 0 && unlikely(g_inline_release_pending)) {
-        scheduler_inline_step_done();
-    }
-}
-
 /* Layout assertions to catch struct padding/size mismatches between
  * translation units. A derived actor is cast to ActorBase*, and both mirror
  * AETHER_ACTOR_BASE_FIELDS, so any disagreement about Mailbox's layout
@@ -333,10 +242,7 @@ static atomic_uint_fast64_t main_thread_sent = 0;
 // pthread_join already-joined threads — undefined behaviour (crash on Linux glibc).
 static atomic_int g_threads_joined = 0;
 
-// Track whether scheduler threads have been created.
-// scheduler_start() skips thread creation in main-thread mode; if main-thread
-// mode is later disabled (e.g. self-send pattern), we need to know whether
-// threads still need to be started.
+// Whether scheduler_start() has created the threads this lifecycle.
 static atomic_int g_threads_started = 0;
 
 // Barrier: scheduler_start() spins here until every thread has finished its
@@ -445,6 +351,40 @@ static inline void sched_wake(Scheduler* target) {
         pthread_cond_signal(&target->park_cond);
         pthread_mutex_unlock(&target->park_mutex);
     }
+}
+
+// ---------------------------------------------------------------------------
+// Messages in flight, and moving an actor between cores (#3090, #3093)
+//
+// A message one actor sends another goes either straight into the target's
+// mailbox, by the target's own core (a local send), or through a core's
+// queues: a from_queue, or a sender's overflow buffer on its way to one.
+// Moving the target to another core while a message of the second kind was
+// on its way left that message behind: the old core forwarded it, while the
+// sender's next message went to the new core directly and could be stepped
+// first (#3093, 31k of 3.2M messages out of order in a test).
+//
+// So every message routed through the queues is counted in the target's
+// `inflight` before the sender reads assigned_core (inflight_enter), and
+// uncounted when it reaches the mailbox (inflight_leave). An actor moves
+// only by its own core, at a point of that core's loop where it is stepping
+// nothing (so no local send to it is under way), and only after
+// move_begin() has turned `inflight` from 0 to AETHER_INFLIGHT_MOVING: no
+// message for it is anywhere but its mailbox, which moves with it. A sender
+// that counts its message during the move waits for move_end() before it
+// reads assigned_core, and then reads the new core.
+// ---------------------------------------------------------------------------
+
+static inline int move_begin(ActorBase* actor) {
+    int none = 0;
+    return atomic_compare_exchange_strong_explicit(&actor->inflight, &none,
+                                                   AETHER_INFLIGHT_MOVING,
+                                                   memory_order_acq_rel,
+                                                   memory_order_relaxed);
+}
+
+static inline void move_end(ActorBase* actor) {
+    atomic_fetch_and_explicit(&actor->inflight, ~AETHER_INFLIGHT_MOVING, memory_order_release);
 }
 
 // ---------------------------------------------------------------------------
@@ -634,6 +574,50 @@ static void overflow_append(int target, ActorBase* actor, Message msg) {
     atomic_fetch_add_explicit(&g_overflow_total, 1, memory_order_relaxed);
 }
 
+// The overflow buffers are this thread's own (thread-local), and they keep
+// what they grew to, so a burst is not paid for again. A scheduler thread
+// gives them back when it leaves its loop: nothing else can reach them once
+// the thread is gone, and a pair of actors trading messages at full speed
+// grew them to 15 to 28 MB per core, all of it lost at every scheduler
+// shutdown. An entry still in one when the thread leaves (its final flush
+// found the target's queue full, with the cores stopping) is dropped and
+// uncounted, as a message for a released actor is.
+static void scheduler_drop_dead_message(Scheduler* sched, Message* msg);
+
+static void overflow_release(Scheduler* sched) {
+    int dropped = 0;
+    for (int t = 0; t <= MAX_CORES; t++) {
+        OverflowBuf* b = &tls_overflow[t];
+        for (int i = b->head; i < b->head + b->count; i++) {
+            ActorBase* actor = b->actors[i];
+            if (actor && !actor->auto_process) inflight_leave(actor, 1);
+            scheduler_drop_dead_message(sched, &b->msgs[i]);
+            dropped++;
+        }
+        free(b->actors);
+        free(b->msgs);
+        b->actors = NULL;
+        b->msgs = NULL;
+        b->head = 0;
+        b->count = 0;
+        b->capacity = 0;
+    }
+    if (dropped > 0) atomic_fetch_sub_explicit(&g_overflow_total, dropped, memory_order_relaxed);
+    tls_overflow_any = 0;
+}
+
+// Queue a counted message for one of this core's own actors on this core's
+// own queue, behind whatever this core's own overflow buffer holds: an entry
+// there overflowed when the queue was full, so it is older, and a message
+// put in the queue past it was stepped first (#3093). send_through_core
+// keeps the same order for another core's queue.
+static void requeue_own(int core, ActorBase* actor, Message msg) {
+    if (tls_overflow[core].count > 0 ||
+        !queue_enqueue(&schedulers[core].from_queues[core], actor, msg)) {
+        overflow_append(core, actor, msg);
+    }
+}
+
 // Try to flush deferred sends into their target from_queues.
 // Called at the top of each scheduler_thread iteration.
 //
@@ -660,8 +644,13 @@ static void overflow_flush(int from_core) {
         // ── OWN-CORE (small overflow): direct mailbox + step() ─────────
         // Bypass the from_queue entirely for low-contention fast path.
         // When overflow is large (tree-spawn cascade), fall through to the
-        // uniform queue-based path below to avoid amplification.
-        if (t == from_core && from_core >= 0 && b->count <= 4096) {
+        // uniform queue-based path below to avoid amplification. Not while
+        // this core's own queue holds messages: an entry overflowed because
+        // that queue was full, so the queue's are older, and delivered past
+        // them it was stepped first (#3093: 511 of a sender's messages
+        // overtaken by its next 128).
+        if (t == from_core && from_core >= 0 && b->count <= 4096 &&
+            queue_size(&schedulers[from_core].from_queues[from_core]) == 0) {
             int start = b->head;
             int orig_count = b->count;
             int limit = orig_count < 128 ? orig_count : 128;
@@ -670,9 +659,17 @@ static void overflow_flush(int from_core) {
                 ActorBase* actor = b->actors[start + i];
                 Message msg = b->msgs[start + i];
                 int ac = atomic_load_explicit(&actor->assigned_core, memory_order_relaxed);
-                if (ac == from_core && !actor->auto_process &&
-                    !atomic_load_explicit(&actor->main_thread_only, memory_order_relaxed)) {
+                if (unlikely(atomic_load_explicit(&actor->dead, memory_order_acquire))) {
+                    // Released since it was sent: dropped and credited, as the
+                    // core loop drops one (#1301), and uncounted (#3090). Put in
+                    // the mailbox of a released actor, it was never processed,
+                    // and scheduler_wait() waited for it.
+                    if (!actor->auto_process) inflight_leave(actor, 1);
+                    scheduler_drop_dead_message(&schedulers[from_core], &msg);
+                    flushed++;
+                } else if (ac == from_core && !actor->auto_process) {
                     if (mailbox_send(&actor->mailbox, msg)) {
+                        inflight_leave(actor, 1);
                         atomic_store_explicit(&actor->active, 1, memory_order_relaxed);
                         flushed++;
                         // Immediately process if step_lock available
@@ -761,13 +758,62 @@ static void overflow_flush(int from_core) {
     tls_overflow_any = any;
 }
 
+// The CPUs this process may run on, in ascending order, read by the thread
+// that starts the scheduler before any scheduler thread places itself
+// (#3106). Scheduler thread i goes to the (i mod n)-th of them. It went to
+// CPU i, a number from 0: under `taskset -c 4-7` a thread bound itself to
+// CPU 0, outside the CPUs the program was started on (setting a thread's
+// own affinity needs no privilege), and in a cpuset cgroup a CPU outside
+// the set refused the binding, so placement depended on CPU numbers. 0
+// CPUs (the mask could not be read) leaves every thread where the OS puts
+// it.
+#define AETHER_PLACE_MAX_CPUS 1024
+static int g_place_cpus[AETHER_PLACE_MAX_CPUS];
+static int g_place_count = 0;
+
+static void read_process_cpus(void) {
+    g_place_count = 0;
+#if defined(__linux__)
+    cpu_set_t set;
+    CPU_ZERO(&set);
+    if (sched_getaffinity(0, sizeof(set), &set) == 0) {
+        for (int c = 0; c < CPU_SETSIZE && g_place_count < AETHER_PLACE_MAX_CPUS; c++)
+            if (CPU_ISSET(c, &set)) g_place_cpus[g_place_count++] = c;
+    }
+#elif defined(_WIN32)
+    // The process mask covers its processor group, numbered as
+    // SetThreadIdealProcessor numbers them.
+    DWORD_PTR proc_mask = 0, sys_mask = 0;
+    if (GetProcessAffinityMask(GetCurrentProcess(), &proc_mask, &sys_mask)) {
+        for (int c = 0; c < (int)(sizeof(DWORD_PTR) * 8); c++)
+            if (proc_mask & ((DWORD_PTR)1 << c)) g_place_cpus[g_place_count++] = c;
+    }
+#endif
+}
+
+// The CPU scheduler thread `core_id` is placed on, or -1 for none.
+int scheduler_core_cpu(int core_id) {
+    if (core_id < 0 || g_place_count <= 0) return -1;
+    return g_place_cpus[core_id % g_place_count];
+}
+
 // Keep a scheduler thread on its CPU (NUMA awareness): bound to it on Linux,
 // a hint on macOS and Windows.
+//
+// Linux keeps the hard binding (#3089). Measured on a 4-CPU CI runner
+// (kernel 6.17) against the same threads unbound, under busy loops: bound
+// won 7 of the 12 loaded cases (thread ring 10.8 against 7.4 M msg/s beside
+// two loops the kernel placed, skynet up to 2.4x), lost only where another
+// program's thread was pinned to a scheduler thread's own CPU (1.1x to
+// 1.5x), and tied on a quiet machine. Linux moves movable load off a bound
+// thread's CPU; Windows did not, which is why #3087 made it a hint there.
 static void pin_to_core(int core_id) {
 #ifdef __linux__
+    int cpu = scheduler_core_cpu(core_id);
+    if (cpu < 0) return;
     cpu_set_t cpuset;
     CPU_ZERO(&cpuset);
-    CPU_SET(core_id, &cpuset);
+    CPU_SET(cpu, &cpuset);
 #if defined(__ANDROID__)
     // bionic has no pthread_setaffinity_np; sched_setaffinity on the calling
     // thread's own id (0) is the same request.
@@ -796,7 +842,8 @@ static void pin_to_core(int core_id) {
     // into a fast or a slow mode by where the other load landed. With the
     // hint Windows keeps the thread on its CPU and moves it when that CPU is
     // busy, as macOS's affinity tag above lets it.
-    SetThreadIdealProcessor(GetCurrentThread(), (DWORD)core_id);
+    int cpu = scheduler_core_cpu(core_id);
+    if (cpu >= 0) SetThreadIdealProcessor(GetCurrentThread(), (DWORD)cpu);
 #endif
 }
 
@@ -976,10 +1023,6 @@ static int actor_table_grow_locked(Scheduler* sched, int numa_node) {
 
 #define AETHER_EXTERNAL_READER_SLOTS 32
 
-// Set once main-thread mode has been entered or a second actor has existed:
-// the mode is not entered again in this scheduler lifecycle.
-static atomic_int g_main_mode_ended = 0;
-
 static _Atomic uint64_t g_reclaim_epoch = 1;  // never 0: 0 means "not reading"
 static _Atomic uint64_t g_external_reader[AETHER_EXTERNAL_READER_SLOTS];
 
@@ -1057,25 +1100,6 @@ void scheduler_reader_offline(void) {
     t_reader = NULL;
     atomic_store_explicit(&r->epoch, 0, memory_order_release);
     atomic_store_explicit(&r->in_use, 0, memory_order_release);
-}
-
-// Actors released while an inline send was stepping on this thread, released
-// for real when the outermost one is done (scheduler_inline_step_done).
-static AETHER_TLS ActorBase** t_inline_released = NULL;
-static AETHER_TLS int t_inline_released_count = 0;
-static AETHER_TLS int t_inline_released_capacity = 0;
-
-static int inline_release_defer(ActorBase* actor) {
-    if (t_inline_released_count == t_inline_released_capacity) {
-        int cap = t_inline_released_capacity ? t_inline_released_capacity * 2 : 4;
-        ActorBase** grown = realloc(t_inline_released, (size_t)cap * sizeof(ActorBase*));
-        if (!grown) return 0;
-        t_inline_released = grown;
-        t_inline_released_capacity = cap;
-    }
-    t_inline_released[t_inline_released_count++] = actor;
-    g_inline_release_pending = 1;
-    return 1;
 }
 
 typedef struct {
@@ -1223,12 +1247,21 @@ static void tombstone_keep(ActorBase* actor) {
     aether_numa_free_aligned(actor, actor->alloc_size);
 }
 
-// The most recently kept block of this size, or NULL.
+// The most recently kept block of this size that no message is on its way
+// to, or NULL. A message sent to the released actor before its release can
+// still be in a core's queue, counted in the block's `inflight` (#3090); the
+// core that dequeues it drops it, the block still marked released, and
+// uncounts it. Handed to a new actor first, the block would have taken that
+// message as the new actor's, and its uncount from the new actor's count.
 static ActorBase* tombstone_take(size_t size) {
     ActorBase* actor = NULL;
     tombstone_lock();
     TombstoneBucket* b = tombstone_bucket_locked(size, 0);
-    if (b && b->count > 0) actor = b->blocks[--b->count];
+    for (int k = b ? b->count - 1 : -1; k >= 0 && !actor; k--) {
+        if (atomic_load_explicit(&b->blocks[k]->inflight, memory_order_acquire) != 0) continue;
+        actor = b->blocks[k];
+        b->blocks[k] = b->blocks[--b->count];
+    }
     tombstone_unlock();
     return actor;
 }
@@ -1522,6 +1555,68 @@ static void scheduler_drop_dead_message(Scheduler* sched, Message* msg) {
     atomic_fetch_add_explicit(&sched->messages_processed, 1, memory_order_relaxed);
 }
 
+// Move `actor` from `sched`, its core, to core `dst`, on `sched`'s own thread
+// while it steps nothing: every move of an actor between cores is made here
+// (#3090, #3093). Takes both cores' table locks without waiting, in
+// ascending core order as every two-lock path does, then the actor's step
+// lock, then move_begin: no message for it may be on its way through any
+// core. Returns 1 when moved; the new core is woken to step whatever is in
+// the mailbox that moved with it. Returns 0, the actor where it was, when a
+// lock is taken or a message is in flight.
+static int move_actor(Scheduler* sched, ActorBase* actor, int dst, int slot_hint) {
+    if (dst < 0 || dst >= num_cores || dst == sched->core_id || actor->auto_process ||
+        atomic_load_explicit(&actor->dead, memory_order_acquire))
+        return 0;
+    Scheduler* to = &schedulers[dst];
+    OptimizedSpinlock* first  = sched->core_id < dst ? &sched->actor_lock : &to->actor_lock;
+    OptimizedSpinlock* second = sched->core_id < dst ? &to->actor_lock : &sched->actor_lock;
+    if (atomic_flag_test_and_set_explicit(&first->lock, memory_order_acquire)) return 0;
+    if (atomic_flag_test_and_set_explicit(&second->lock, memory_order_acquire)) {
+        atomic_flag_clear_explicit(&first->lock, memory_order_release);
+        return 0;
+    }
+    int moved = 0;
+    int at = actor_table_has_room_locked(to) ? actor_table_find_locked(sched, actor, slot_hint) : -1;
+    if (at >= 0 && !atomic_flag_test_and_set_explicit(&actor->step_lock, memory_order_acquire)) {
+        if (move_begin(actor)) {
+            actor_table_remove_locked(sched, at);
+            atomic_store_explicit(&actor->assigned_core, dst, memory_order_release);
+            atomic_store_explicit(&actor->migrate_to, -1, memory_order_relaxed);
+            actor_table_push_locked(to, actor);
+            move_end(actor);
+            moved = 1;
+        }
+        atomic_flag_clear_explicit(&actor->step_lock, memory_order_release);
+    }
+    atomic_flag_clear_explicit(&second->lock, memory_order_release);
+    atomic_flag_clear_explicit(&first->lock, memory_order_release);
+    if (moved) sched_wake(to);
+    return moved;
+}
+
+// Step `actor`, this core's, once to make room in its full mailbox, so a
+// message for it keeps its place instead of going to the back of a queue
+// (#3093). Waits out a step lock another thread holds for a moment. Returns
+// 0 when the actor will take no more messages: dead, or with no handler.
+static int make_room(Scheduler* sched, ActorBase* actor) {
+    if (atomic_load_explicit(&actor->dead, memory_order_acquire) || !actor->step) return 0;
+    if (!atomic_flag_test_and_set_explicit(&actor->step_lock, memory_order_acquire)) {
+        // Down to half full, as the loop's drain before delivering did, so
+        // a run of messages does not take the lock once per message.
+        int stepped = 0;
+        while (atomic_load_explicit(&actor->mailbox.count, memory_order_acquire) > MAILBOX_SIZE / 2 &&
+               !atomic_load_explicit(&actor->dead, memory_order_acquire)) {
+            aether_step_safe(actor);
+            stepped++;
+        }
+        sched->messages_processed += stepped;
+        atomic_flag_clear_explicit(&actor->step_lock, memory_order_release);
+    } else {
+        AETHER_PAUSE();
+    }
+    return 1;
+}
+
 void* AETHER_HOT scheduler_thread(void* arg) {
     Scheduler* sched = (Scheduler*)arg;
     current_core_id = sched->core_id;
@@ -1605,14 +1700,16 @@ void* AETHER_HOT scheduler_thread(void* arg) {
             // payload/slot cleanup and a processed credit, or the
             // sent/processed balance never converges (#1301 drain test).
             if (unlikely(atomic_load_explicit(&actor->dead, memory_order_acquire))) {
+                if (!actor->auto_process) inflight_leave(actor, 1);
                 scheduler_drop_dead_message(sched, &msg);
                 work_done = 1;
                 continue;
             }
 
-            // Actor may have been migrated to another core after this message
-            // was enqueued.  Forward to the actor's current core rather than
-            // delivering here (which would race with the new core's processing).
+            // Not this core's actor. A counted message holds its actor where
+            // it was routed (move_begin waits for none), so this is a message
+            // routed by a stale read or one of the runtime's own: forward it,
+            // still counted, to the actor's core.
             if (unlikely(atomic_load_explicit(&actor->assigned_core, memory_order_acquire) != sched->core_id)) {
                 int new_core = atomic_load_explicit(&actor->assigned_core, memory_order_relaxed);
 #ifdef AETHER_DEBUG_ORDERING
@@ -1640,9 +1737,9 @@ void* AETHER_HOT scheduler_thread(void* arg) {
                     // Actor has an invalid assigned_core — deliver directly to mailbox
                     // to prevent silent message loss.
                     if (!mailbox_send(&actor->mailbox, msg)) {
-                        if (!queue_enqueue(&sched->from_queues[sched->core_id], actor, msg)) {
-                            overflow_append(sched->core_id, actor, msg);
-                        }
+                        requeue_own(sched->core_id, actor, msg);
+                    } else if (!actor->auto_process) {
+                        inflight_leave(actor, 1);
                     }
                     atomic_store_explicit(&actor->active, 1, memory_order_relaxed);
                 }
@@ -1659,100 +1756,76 @@ void* AETHER_HOT scheduler_thread(void* arg) {
                 continue;
             }
 
-            // For actors processed on main thread, just deliver to mailbox (don't process)
-            if (unlikely(atomic_load_explicit(&actor->main_thread_only, memory_order_acquire))) {
-                if (!mailbox_send(&actor->mailbox, msg)) {
-                    if (!queue_enqueue(&sched->from_queues[sched->core_id], actor, msg)) {
-                        overflow_append(sched->core_id, actor, msg);
-                    }
+
+            // From here the message is this core's to deliver, and so is
+            // every message of the same actor that follows it in the batch:
+            // a run (a fan-out's batch holds a worker's messages together).
+            // They go into the mailbox in their order, a full mailbox made
+            // room in by stepping the actor here, its owner, so no message
+            // gives up its place: re-queued at the back of this core's
+            // queue, as it was, a message could be overtaken by a later one
+            // of the same sender (#3093). The run is then uncounted at once,
+            // with every message of it in the mailbox (#3090), which keeps
+            // the count off this loop's per-message path.
+            int run_end = i + 1;
+            while (run_end < sched->coalesce_buffer.count &&
+                   sched->coalesce_buffer.actors[run_end] == (void*)actor) {
+                run_end++;
+            }
+            int placed = i;
+            while (placed < run_end) {
+                if (mailbox_send(&actor->mailbox, sched->coalesce_buffer.messages[placed])) {
+                    placed++;
+                    continue;
                 }
-                work_done = 1;
+                if (!make_room(sched, actor)) break;
+            }
+            if (placed > i) inflight_leave(actor, placed - i);
+            for (int k = placed; k < run_end; k++) {
+                // Dead, or never stepped (no handler): it takes no more
+                // messages, as a send to a dead actor is dropped.
+                inflight_leave(actor, 1);
+                scheduler_drop_dead_message(sched, &sched->coalesce_buffer.messages[k]);
+            }
+            int delivered = placed - i;
+            i = run_end - 1;
+            work_done = 1;
+            if (delivered == 0) continue;
+            atomic_store_explicit(&actor->active, 1, memory_order_relaxed);
+
+            // A sender on another core asked for this actor (#3090): it
+            // moves there before it runs, so what it sends next leaves from
+            // that core. A chain of sends (a ring, a pipeline) gathers on one
+            // core this way, where its sends are local; moved after running,
+            // as it used to be, each actor took the place its sender had just
+            // left, and the chain only shifted.
+            int ask = atomic_load_explicit(&actor->migrate_to, memory_order_relaxed);
+            if (ask >= 0 && ask != sched->core_id && move_actor(sched, actor, ask, -1)) {
                 continue;
             }
 
-            // Drain actor mailbox aggressively BEFORE trying to add new message
-            if (atomic_load_explicit(&actor->mailbox.count, memory_order_relaxed) > MAILBOX_SIZE / 2) {
-                int drained = 0;
-                if (actor->step && !atomic_flag_test_and_set_explicit(&actor->step_lock, memory_order_acquire)) {
-                    uint64_t _drain_start = atomic_load_explicit(&g_aether_config.preempt_enabled, memory_order_relaxed) ? aether_now_ns() : 0;
-                    while (atomic_load_explicit(&actor->mailbox.count, memory_order_relaxed) > 0 && drained < 128) {
-                        if (unlikely(atomic_load_explicit(&actor->assigned_core, memory_order_relaxed) != sched->core_id))
-                            break;
-                        aether_step_safe(actor);
-                        drained++;
-                        // Preemption: yield if handler batch exceeds threshold
-                        if (_drain_start && (aether_now_ns() - _drain_start) >= g_aether_config.preempt_threshold_ns)
-                            break;
-                    }
-                    atomic_flag_clear_explicit(&actor->step_lock, memory_order_release);
+            // Immediate processing: if actor is on our core and step_lock
+            // is available, drain its mailbox right here. FUSED DELIVER +
+            // PROCESS: no second pass over every actor of the core, so the
+            // loop is O(batch_size) instead of O(actor_count).
+            if (likely(actor->step) &&
+                atomic_load_explicit(&actor->assigned_core, memory_order_relaxed) == sched->core_id &&
+                !atomic_flag_test_and_set_explicit(&actor->step_lock, memory_order_acquire)) {
+                int processed = 0;
+                while (atomic_load_explicit(&actor->mailbox.count, memory_order_relaxed) > 0 &&
+                       processed < 64 &&
+                       atomic_load_explicit(&actor->assigned_core, memory_order_relaxed) == sched->core_id) {
+                    aether_step_safe(actor);
+                    processed++;
+                    // Yield to outer loop if cross-core messages arrived
+                    // (e.g. StopAnimation sent from main while actor sleeps).
+                    if (has_pending_cross_core(sched)) break;
                 }
-                sched->messages_processed += drained;
-            }
-
-            // Re-check: actor may have been stolen during aggressive drain
-            if (unlikely(atomic_load_explicit(&actor->assigned_core, memory_order_relaxed) != sched->core_id)) {
-                int new_core = atomic_load_explicit(&actor->assigned_core, memory_order_relaxed);
-                if (new_core >= 0 && new_core < num_cores) {
-                    int forwarded = 0;
-                    for (int r = 0; r < 8; r++) {
-                        if (queue_enqueue(&schedulers[new_core].from_queues[sched->core_id], actor, msg)) {
-                            sched_wake(&schedulers[new_core]);
-                            forwarded = 1; break;
-                        }
-                        int cur = atomic_load_explicit(&actor->assigned_core, memory_order_relaxed);
-                        if (cur >= 0 && cur < num_cores) new_core = cur;
-                        AETHER_PAUSE();
-                    }
-                    if (!forwarded) overflow_append(new_core, actor, msg);
-                } else {
-                    if (!mailbox_send(&actor->mailbox, msg)) {
-                        if (!queue_enqueue(&sched->from_queues[sched->core_id], actor, msg)) {
-                            overflow_append(sched->core_id, actor, msg);
-                        }
-                    }
-                    atomic_store_explicit(&actor->active, 1, memory_order_relaxed);
-                }
-                work_done = 1;
-                continue;
-            }
-
-            // Now try to deliver message and immediately process.
-            // FUSED DELIVER+PROCESS: Instead of delivering all messages first and
-            // then scanning all actors (O(N) with N=total actors per core), we
-            // deliver to the mailbox and immediately process if this actor is local
-            // and unlocked.  This eliminates the second O(N) pass entirely, making
-            // the scheduler loop O(batch_size) instead of O(actor_count).
-            if (!mailbox_send(&actor->mailbox, msg)) {
-                if (!queue_enqueue(&sched->from_queues[sched->core_id], actor, msg)) {
-                    overflow_append(sched->core_id, actor, msg);
-                }
-            } else {
-                atomic_store_explicit(&actor->active, 1, memory_order_relaxed);
-                work_done = 1;
-
-                // Immediate processing: if actor is on our core and step_lock
-                // is available, drain its mailbox right here.
-                if (likely(actor->step) &&
-                    !actor->auto_process &&
-                    !atomic_load_explicit(&actor->main_thread_only, memory_order_acquire) &&
-                    atomic_load_explicit(&actor->assigned_core, memory_order_relaxed) == sched->core_id &&
-                    !atomic_flag_test_and_set_explicit(&actor->step_lock, memory_order_acquire)) {
-                    int processed = 0;
-                    while (atomic_load_explicit(&actor->mailbox.count, memory_order_relaxed) > 0 &&
-                           processed < 64 &&
-                           atomic_load_explicit(&actor->assigned_core, memory_order_relaxed) == sched->core_id) {
-                        aether_step_safe(actor);
-                        processed++;
-                        // Yield to outer loop if cross-core messages arrived
-                        // (e.g. StopAnimation sent from main while actor sleeps).
-                        if (has_pending_cross_core(sched)) break;
-                    }
-                    atomic_flag_clear_explicit(&actor->step_lock, memory_order_release);
-                    sched->messages_processed += processed;
-                    if (processed > 0 &&
-                        atomic_load_explicit(&actor->mailbox.count, memory_order_relaxed) == 0) {
-                        atomic_store_explicit(&actor->active, 0, memory_order_relaxed);
-                    }
+                atomic_flag_clear_explicit(&actor->step_lock, memory_order_release);
+                sched->messages_processed += processed;
+                if (processed > 0 &&
+                    atomic_load_explicit(&actor->mailbox.count, memory_order_relaxed) == 0) {
+                    atomic_store_explicit(&actor->active, 0, memory_order_relaxed);
                 }
             }
         }
@@ -1760,33 +1833,15 @@ void* AETHER_HOT scheduler_thread(void* arg) {
         // TIER 1 ALWAYS ON: Adjust adaptive batch size based on what we received
         adaptive_batch_adjust(&sched->batch_state, sched->coalesce_buffer.count);
 
-        // Check migration for actors we just processed in the coalesce buffer.
-        // This is O(coalesce_count) not O(actor_count) — cheap and targeted.
-        // Without this, cross-core topologies (e.g. ring) never converge.
+        // Moves asked for while an actor was busy (its messages ran here
+        // first, or another core's message was in flight): this batch's
+        // actors are asked again now. O(coalesce_count), not O(actor_count).
         for (int mi = 0; mi < sched->coalesce_buffer.count; mi++) {
             ActorBase* mig_actor = (ActorBase*)sched->coalesce_buffer.actors[mi];
             int mig_to = atomic_load_explicit(&mig_actor->migrate_to, memory_order_relaxed);
-            if (unlikely(mig_to >= 0 && mig_to != sched->core_id && mig_to < num_cores &&
+            if (unlikely(mig_to >= 0 && mig_to != sched->core_id &&
                          atomic_load_explicit(&mig_actor->assigned_core, memory_order_relaxed) == sched->core_id)) {
-                Scheduler* dst = &schedulers[mig_to];
-                OptimizedSpinlock* first_lock  = (sched->core_id < mig_to) ? &sched->actor_lock : &dst->actor_lock;
-                OptimizedSpinlock* second_lock = (sched->core_id < mig_to) ? &dst->actor_lock : &sched->actor_lock;
-                if (!atomic_flag_test_and_set_explicit(&first_lock->lock, memory_order_acquire)) {
-                    if (!atomic_flag_test_and_set_explicit(&second_lock->lock, memory_order_acquire)) {
-                        if (actor_table_has_room_locked(dst)) {
-                            // Find and remove actor from our list
-                            int ai = actor_table_find_locked(sched, mig_actor, -1);
-                            if (ai >= 0) {
-                                actor_table_remove_locked(sched, ai);
-                                atomic_store_explicit(&mig_actor->assigned_core, mig_to, memory_order_relaxed);
-                                atomic_store_explicit(&mig_actor->migrate_to, -1, memory_order_relaxed);
-                                actor_table_push_locked(dst, mig_actor);
-                            }
-                        }
-                        atomic_flag_clear_explicit(&second_lock->lock, memory_order_release);
-                    }
-                    atomic_flag_clear_explicit(&first_lock->lock, memory_order_release);
-                }
+                move_actor(sched, mig_actor, mig_to, -1);
             }
         }
 
@@ -1803,8 +1858,6 @@ void* AETHER_HOT scheduler_thread(void* arg) {
             // A slot vacated since the snapshot reads NULL.
             if (unlikely(!actor)) continue;
 
-            // Skip actors processed on main thread
-            if (unlikely(atomic_load_explicit(&actor->main_thread_only, memory_order_acquire))) continue;
             // An actor with its own thread is stepped there. Counting it as
             // work, as this used to, kept the core from ever going idle and
             // parking for as long as such an actor existed (#2592).
@@ -1817,12 +1870,26 @@ void* AETHER_HOT scheduler_thread(void* arg) {
             // full processing path.  This makes the loop O(active) not O(total).
             int mbox_count = atomic_load_explicit(&actor->mailbox.count, memory_order_relaxed);
             int mig_to = atomic_load_explicit(&actor->migrate_to, memory_order_relaxed);
-            if (mbox_count == 0 && mig_to < 0) continue;  // Skip inactive actors (fast path!)
+            if (mbox_count == 0 && mig_to < 0) {
+                // An armed receive timeout whose deadline has passed (#3102):
+                // the step fires the `after` arm, by the same clock and test
+                // as the generated step's. Skipped with the rest, an actor
+                // that received nothing was never stepped, and its timeout
+                // never fired with more than one actor in the program.
+                if (likely(actor->timeout_ns == 0) || actor->last_activity_ns == 0 ||
+                    !actor->step) continue;
+                if (aether_now_ns() - actor->last_activity_ns < actor->timeout_ns) continue;
+                if (!atomic_flag_test_and_set_explicit(&actor->step_lock, memory_order_acquire)) {
+                    if (atomic_load_explicit(&actor->assigned_core, memory_order_relaxed) == sched->core_id)
+                        aether_step_safe(actor);
+                    atomic_flag_clear_explicit(&actor->step_lock, memory_order_release);
+                }
+                work_done = 1;
+                continue;
+            }
 
-            int was_active = atomic_load_explicit(&actor->active, memory_order_relaxed);
-            if (!was_active) {
+            if (!atomic_load_explicit(&actor->active, memory_order_relaxed)) {
                 atomic_store_explicit(&actor->active, 1, memory_order_relaxed);
-                was_active = 1;
             }
 
             if (likely(actor->step)) {
@@ -1833,9 +1900,9 @@ void* AETHER_HOT scheduler_thread(void* arg) {
                 if (spsc_count > 0) {
                     int sent_count = mailbox_send_batch(&actor->mailbox, spsc_msgs, spsc_count);
                     for (int m = sent_count; m < spsc_count; m++) {
-                        if (!queue_enqueue(&sched->from_queues[sched->core_id], actor, spsc_msgs[m])) {
-                            overflow_append(sched->core_id, actor, spsc_msgs[m]);
-                        }
+                        // Into the queues: counted as every such message is.
+                        inflight_enter(actor, 1);
+                        requeue_own(sched->core_id, actor, spsc_msgs[m]);
                     }
                 }
 
@@ -1861,60 +1928,22 @@ void* AETHER_HOT scheduler_thread(void* arg) {
             }
             work_done = 1;
 
-            // THEN: Message-driven migration — move actor to the core that
-            // communicates with it most.  Processing first ensures the actor
-            // makes progress even under constant migration pressure.
-            //
-            // SAFETY: Only migrate actors that have been initialized (have
-            // messages in their mailbox, are currently active, OR were active
-            // at the start of this iteration).  The third condition restores
-            // co-location: after processing, active=0 and mailbox=0, but
-            // was_active=1 means the setup-race window has already closed.
-            // A truly freshly-spawned actor (never activated) has was_active=0,
-            // active=0, mailbox=0 — migration is still blocked for that case.
-            // Re-read migrate_to (may have changed during processing)
+            // THEN: a move another core asked for (message-driven
+            // migration, or a steal, #3090). Processing first ensures the
+            // actor makes progress even under constant migration pressure.
+            // move_actor moves it only with no message of it in flight.
+            // `i` indexes the snapshot: since it was taken a deregistration
+            // may have moved another actor into slot i, so the live table is
+            // asked where the actor is, slot i first (#2486).
             mig_to = atomic_load_explicit(&actor->migrate_to, memory_order_relaxed);
-            if (unlikely(mig_to >= 0 &&
-                         mig_to != sched->core_id &&
-                         mig_to < num_cores &&
-                         (atomic_load_explicit(&actor->active, memory_order_relaxed) || atomic_load_explicit(&actor->mailbox.count, memory_order_relaxed) > 0 || was_active))) {
-                int dst_core = mig_to;
-                Scheduler* dst = &schedulers[dst_core];
-
-                // Lock in ascending core-id order to prevent deadlock
-                OptimizedSpinlock* first_lock  = (sched->core_id < dst_core) ? &sched->actor_lock : &dst->actor_lock;
-                OptimizedSpinlock* second_lock = (sched->core_id < dst_core) ? &dst->actor_lock : &sched->actor_lock;
-
-                if (!atomic_flag_test_and_set_explicit(
-                        &first_lock->lock, memory_order_acquire)) {
-                    if (!atomic_flag_test_and_set_explicit(
-                            &second_lock->lock, memory_order_acquire)) {
-                        // `i` indexes the snapshot. Since it was taken a steal or
-                        // a deregistration may have moved another actor into
-                        // slot i or taken this one, so the live table is asked
-                        // where the actor is, slot i first (#2486).
-                        int at = actor_table_has_room_locked(dst)
-                                     ? actor_table_find_locked(sched, actor, i) : -1;
-                        if (at >= 0) {
-                            actor_table_remove_locked(sched, at);
-                            atomic_store_explicit(&actor->assigned_core, dst_core, memory_order_relaxed);
-                            atomic_store_explicit(&actor->migrate_to, -1, memory_order_relaxed);
-                            actor_table_push_locked(dst, actor);
-
-                            atomic_flag_clear_explicit(&second_lock->lock, memory_order_release);
-                            atomic_flag_clear_explicit(&first_lock->lock, memory_order_release);
-
-                            // Re-examine this slot: it now holds the actor
-                            // moved in from the end, or NULL. In a snapshot of
-                            // a table that has since grown it is unchanged,
-                            // and the second look at it finds nothing to do.
-                            i--;
-                            continue;
-                        }
-                        atomic_flag_clear_explicit(&second_lock->lock, memory_order_release);
-                    }
-                    atomic_flag_clear_explicit(&first_lock->lock, memory_order_release);
-                }
+            if (unlikely(mig_to >= 0 && mig_to != sched->core_id &&
+                         move_actor(sched, actor, mig_to, i))) {
+                // Re-examine this slot: it now holds the actor moved in from
+                // the end, or NULL. In a snapshot of a table that has since
+                // grown it is unchanged, and the second look at it finds
+                // nothing to do.
+                i--;
+                continue;
             }
         }
         }  // end gated actor scan
@@ -1965,7 +1994,13 @@ void* AETHER_HOT scheduler_thread(void* arg) {
                                 // (e.g. Spawn) to the new core while earlier messages
                                 // (e.g. Setup) are still queued on the old core, breaking
                                 // the FIFO ordering that actors depend on for initialization.
-                                ActorBase* stolen = NULL;
+                                // The victim moves it (#3090): this core asks
+                                // for one, by migrate_to, and the victim's loop
+                                // moves it with no message of it in flight, as
+                                // every move between cores is made. Moved from
+                                // here, it left the victim's queued messages
+                                // for it behind, and the victim could be in a
+                                // local send to it as it went.
                                 for (int s = victim_count - 1; s >= 4; s--) {
                                     ActorBase* candidate = atomic_load_explicit(&victim_table->slots[s],
                                                                                 memory_order_relaxed);
@@ -1979,17 +2014,13 @@ void* AETHER_HOT scheduler_thread(void* arg) {
                                     // and the move would change the core its
                                     // thread parks on and stops with (#2598).
                                     if (candidate->auto_process) continue;
-                                    // Move the last actor into its slot and steal it
-                                    actor_table_remove_locked(victim, s);
-                                    stolen = candidate;
+                                    int none = -1;
+                                    if (atomic_compare_exchange_strong_explicit(
+                                            &candidate->migrate_to, &none, sched->core_id,
+                                            memory_order_relaxed, memory_order_relaxed)) {
+                                        atomic_fetch_add(&sched->steal_attempts, 1);
+                                    }
                                     break;
-                                }
-                                if (stolen) {
-                                    atomic_store_explicit(&stolen->assigned_core, sched->core_id, memory_order_relaxed);
-                                    atomic_store_explicit(&stolen->migrate_to, -1, memory_order_relaxed);
-                                    actor_table_push_locked(sched, stolen);
-                                    work_done = 1;
-                                    atomic_fetch_add(&sched->steal_attempts, 1);
                                 }
                             }
                             atomic_flag_clear_explicit(&second_lock->lock, memory_order_release);
@@ -2062,6 +2093,8 @@ void* AETHER_HOT scheduler_thread(void* arg) {
     // empty here.  But under extreme contention a late overflow_append could
     // slip in — flush it so no messages are lost.
     overflow_flush(sched->core_id);
+    // The buffers are this thread's: they go back with it.
+    overflow_release(sched);
 
     // Done reading: this core no longer holds back any free (#2509).
     reclaim_core_offline(sched);
@@ -2107,8 +2140,6 @@ void scheduler_init(int cores) {
     atomic_store_explicit(&g_threads_ready, 0, memory_order_relaxed);
     // Reset global overflow counter between scheduler lifecycles.
     atomic_store_explicit(&g_overflow_total, 0, memory_order_relaxed);
-    // A new lifecycle's first actor may use main-thread mode again (#2509).
-    atomic_store_explicit(&g_main_mode_ended, 0, memory_order_relaxed);
     // Reset main-thread send counter between scheduler lifecycles.
     // Without this, count_pending_messages() sees a stale sent > processed
     // delta from the prior run and scheduler_wait() spins forever.
@@ -2117,19 +2148,10 @@ void scheduler_init(int cores) {
     // TIER 2: Auto-detect hardware capabilities first
     aether_detect_hardware();
 
-    // Initialize profile and inline mode from env vars
+    // Initialize the profile from env vars
     aether_init_from_env();
 
-    // Reset main-thread-mode and actor count between scheduler lifecycles.
-    // Tests call scheduler_init/cleanup in sequence; a prior run may have left
-    // main_thread_mode=true (via scheduler_spawn_actor), causing scheduler_start()
-    // and scheduler_wait() to skip creating/joining threads on the next run.
-    // Only reset if the user hasn't force-enabled inline mode via AETHER_INLINE.
-    if (!atomic_load_explicit(&g_aether_config.inline_mode_forced, memory_order_relaxed)) {
-        atomic_store_explicit(&g_aether_config.main_thread_mode, false, memory_order_relaxed);
-        atomic_store_explicit(&g_aether_config.inline_mode_active, false, memory_order_relaxed);
-        g_aether_config.main_actor = NULL;
-    }
+    // Tests call scheduler_init/cleanup in sequence: the count starts afresh.
     atomic_store_explicit(&g_aether_config.actor_count, 0, memory_order_relaxed);
 
     // Initialize NUMA topology detection
@@ -2213,12 +2235,6 @@ void scheduler_init_with_opts(int cores, AetherOptFlags opts) {
 }
 
 void scheduler_start(void) {
-    // MAIN THREAD MODE: Single-actor programs don't need scheduler threads
-    // All message processing happens synchronously on the main thread
-    if (aether_main_thread_mode_active()) {
-        return;  // No threads to start
-    }
-
     // Only start threads once (idempotent: safe to call multiple times)
     if (atomic_exchange_explicit(&g_threads_started, 1, memory_order_acq_rel) == 1) {
         return;  // Threads already running
@@ -2226,6 +2242,10 @@ void scheduler_start(void) {
 
     // Reset per this start() call in case scheduler_init was not called again.
     atomic_store_explicit(&g_threads_ready, 0, memory_order_relaxed);
+
+    // The CPUs the threads are placed among, read before any of them binds
+    // itself (#3106); pthread_create publishes them to the threads.
+    read_process_cpus();
 
     for (int i = 0; i < num_cores; i++) {
         atomic_store_explicit(&schedulers[i].running, 1, memory_order_release);
@@ -2245,17 +2265,6 @@ void scheduler_start(void) {
     while (atomic_load_explicit(&g_threads_ready, memory_order_acquire) < num_cores) {
         AETHER_PAUSE();
     }
-}
-
-// Ensure scheduler threads are running. Called when transitioning out of
-// main-thread mode (e.g. self-send from an actor handler). In main-thread
-// mode, scheduler_start() skips thread creation; this function starts them
-// on demand so queued messages get processed.
-void scheduler_ensure_threads_running(void) {
-    if (atomic_load_explicit(&g_threads_started, memory_order_acquire)) {
-        return;  // Already running
-    }
-    scheduler_start();
 }
 
 void scheduler_stop(void) {
@@ -2337,36 +2346,7 @@ static int has_pending_actor_timeout(void) {
 }
 
 void scheduler_wait(void) {
-    // MAIN THREAD MODE: All messages processed synchronously, nothing to wait for
-    // This is the fastest path for single-actor programs (counting benchmark)
-    if (aether_main_thread_mode_active()) {
-        // But if any actor has a pending timeout, poll until it fires
-        if (has_pending_actor_timeout()) {
-            int rounds = 0;
-            while (has_pending_actor_timeout() && rounds < 100000) {
-                int slot = reclaim_reader_enter();  // #2509
-                for (int c = 0; c < num_cores; c++) {
-                    int count;
-                    AetherActorTable* table = actor_table_snapshot(&schedulers[c], &count);
-                    for (int i = 0; i < count; i++) {
-                        ActorBase* a = actor_table_read(table, i);
-                        if (a && a->timeout_ns > 0 && a->step) {
-                            a->step(a);
-                        }
-                    }
-                }
-                reclaim_reader_exit(slot);
-                #ifdef _WIN32
-                Sleep(1);
-                #else
-                usleep(1000);
-                #endif
-                rounds++;
-            }
-        }
-        return;
-    }
-
+    batch_flush_pending();
     // Check if scheduler is still running
     int still_running = 0;
     for (int i = 0; i < num_cores; i++) {
@@ -2387,6 +2367,7 @@ void scheduler_wait(void) {
     int stable_count = 0;
     uint64_t last_processed = 0;
     int stall_checks = 0;
+    int timeout_rounds = 0;
     while (stable_count < 5) {
         atomic_thread_fence(memory_order_acquire);
 
@@ -2394,6 +2375,15 @@ void scheduler_wait(void) {
 
         if (pending == 0) {
             stable_count++;
+            // Quiet, but a receive timeout is armed (#3102): its core fires
+            // it once the deadline passes, and its arm may send more, so the
+            // wait goes on, polling every millisecond (100000 times at most).
+            if (stable_count == 5 && timeout_rounds < 100000 && has_pending_actor_timeout()) {
+                stable_count = 0;
+                timeout_rounds++;
+                aether_usleep(1000);
+                continue;
+            }
         } else {
             stable_count = 0;
         }
@@ -2437,7 +2427,7 @@ void scheduler_wait(void) {
 
 // Full shutdown: wait for quiescence, stop threads, join them.
 // Called once at program exit.  Safe to call even if threads were never
-// started (main-thread mode) or already shut down.
+// started or already shut down.
 void scheduler_shutdown(void) {
     // Wait for any in-flight messages first
     scheduler_wait();
@@ -2502,7 +2492,16 @@ static void scheduler_free_core_tables(void) {
         int count = atomic_load_explicit(&sched->actor_count, memory_order_relaxed);
         for (int k = 0; table && k < count; k++) {
             ActorBase* actor = atomic_load_explicit(&table->slots[k], memory_order_relaxed);
-            if (!actor || !actor->scheduler_owned) continue;
+            if (!actor) continue;
+            if (!actor->scheduler_owned) {
+                // A caller's actor outlives this lifecycle, and its count of
+                // messages in flight (#3090) starts again from none with the
+                // queues that go with it: no sender is counting one now (a
+                // send is refused while the scheduler is not running, and
+                // the last foreign one has finished, above).
+                atomic_store_explicit(&actor->inflight, 0, memory_order_relaxed);
+                continue;
+            }
             if (actor->auto_process) {
                 // Its own thread may still be running it (#2517): this is a
                 // release, and the second of it and the thread's exit ends
@@ -2561,6 +2560,14 @@ void scheduler_cleanup(void) {
 static int register_actor(ActorBase* actor, int preferred_core);
 
 // An actor the caller allocated: the scheduler runs it and never frees it.
+// Its count of messages in flight is left as it is: a caller's actor can be
+// registered again after a shutdown and a scheduler_init() while a thread of
+// the caller's is sending to it, and a message counted for it before the
+// registration is still on its way. Set to 0 here, as it used to be, the
+// delivery of that message took the count to -1, which reads as a move in
+// progress, and the next sender waited for it forever (#3090). The count
+// starts at 0 in a zeroed actor, and teardown sets it back to 0
+// (scheduler_free_core_tables).
 int scheduler_register_actor(ActorBase* actor, int preferred_core) {
     actor->scheduler_owned = 0;
     atomic_init(&actor->inbox, NULL);
@@ -2765,10 +2772,10 @@ static int scheduler_io_poll(Scheduler* sched, int timeout_ms) {
         // Route through the scheduler's self-channel (from_queues[core_id])
         // instead of mailbox_send. The mailbox is SPSC and the accept thread
         // is already the producer via direct_send — adding a second producer
-        // (this scheduler thread) would corrupt the ring buffer.
-        if (!queue_enqueue(&sched->from_queues[sched->core_id], actor, msg)) {
-            overflow_append(sched->core_id, actor, msg);
-        }
+        // (this scheduler thread) would corrupt the ring buffer. Into the
+        // queues: counted as every such message is (#3090).
+        if (!actor->auto_process) inflight_enter(actor, 1);
+        requeue_own(sched->core_id, actor, msg);
         atomic_store_explicit(&actor->active, 1, memory_order_relaxed);
     }
     return n;
@@ -2818,15 +2825,21 @@ void scheduler_send_local(ActorBase* actor, Message msg) {
         // for the work-stealing handoff: if the actor is stolen to another core
         // after this send, the new owner will see both active=1 and the message.
         atomic_store_explicit(&actor->active, 1, memory_order_relaxed);
-        if (unlikely(!mailbox_send(&actor->mailbox, msg))) {
+        // Straight into the mailbox only when nothing of the actor's is in
+        // the queues (#3093): a message of it waiting in this core's queue,
+        // its mailbox full when it was sent, is older, and one put in the
+        // mailbox past it was stepped first. Otherwise queued behind it.
+        int queued = current_core_id >= 0 &&
+                     atomic_load_explicit(&actor->inflight, memory_order_relaxed) != 0;
+        if (unlikely(queued || !mailbox_send(&actor->mailbox, msg))) {
             // Mailbox full: re-queue via self-channel or overflow buffer.
             // Without this, the message is lost but messages_sent was already
             // incremented, causing scheduler_wait to hang forever.
             int core = current_core_id;
             if (core >= 0 && core < num_cores) {
-                if (!queue_enqueue(&schedulers[core].from_queues[core], actor, msg)) {
-                    overflow_append(core, actor, msg);
-                }
+                // Into the queues: counted as every such message is (#3090).
+                inflight_enter(actor, 1);
+                requeue_own(core, actor, msg);
             } else {
                 // Main thread: spin-retry mailbox (rare, small mailbox pressure)
                 while (!mailbox_send(&actor->mailbox, msg)) { AETHER_PAUSE(); }
@@ -2891,27 +2904,11 @@ void scheduler_send_remote(ActorBase* actor, Message msg, int from_core) {
         scheduler_actor_thread_deliver(actor, msg);
         return;
     }
-    // INLINE MODE: For single-actor programs, process synchronously on the main thread.
-    // scheduler_send_batch_add has the same check; keep them in sync. A
-    // thread other than main leaves the mode instead and sends through
-    // the scheduler (#2083).
-    if (unlikely(aether_main_thread_mode_active())) {
-        if (aether_on_main_mode_thread()) {
-            if (aether_main_mode_enqueue(actor, msg)) {
-                aether_step_inline(actor);
-                AETHER_STAT_INC(inline_sends);
-                return;
-            }
-            // The mode ended before the enqueue: the scheduler takes it.
-        } else {
-            aether_leave_main_thread_mode();
-        }
-    }
-
     if (current_core_id >= 0) {
         send_through_core(actor, msg, from_core);
         return;
     }
+    batch_flush_pending();
     if (!foreign_send_enter()) {
         send_while_stopped(actor, &msg);
         return;
@@ -2939,35 +2936,45 @@ static void send_through_core(ActorBase* actor, Message msg, int from_core) {
     // Already same-core AND caller is actually running on that core's
     // scheduler thread — deliver directly to mailbox (no queue overhead).
     // The current_core_id check prevents non-scheduler threads (e.g. main)
-    // from racing with the scheduler thread on mailbox access.
+    // from racing with the scheduler thread on mailbox access. Not counted:
+    // only this core moves the actor, and not while it is sending.
     if (from_core >= 0 && from_core == target_core &&
         from_core == current_core_id) {
-        if (unlikely(!mailbox_send(&actor->mailbox, msg))) {
-            // Mailbox full: re-queue via self-channel or overflow.
-            if (!queue_enqueue(&schedulers[from_core].from_queues[from_core], actor, msg)) {
-                overflow_append(from_core, actor, msg);
-            }
+        // Behind anything of the actor's already in the queues, as in
+        // scheduler_send_local (#3093).
+        if (unlikely(atomic_load_explicit(&actor->inflight, memory_order_relaxed) != 0 ||
+                     !mailbox_send(&actor->mailbox, msg))) {
+            // Mailbox full: re-queue via self-channel or overflow, counted
+            // as every message in the queues is.
+            inflight_enter(actor, 1);
+            requeue_own(from_core, actor, msg);
         }
         atomic_store_explicit(&actor->active, 1, memory_order_relaxed);
         AETHER_STAT_INC(direct_sends);
         return;
     }
 
-    // Cross-core send: migrate target actor to sender's core.
-    // This converges communicating actors onto the same core, turning cross-core
-    // sends into local sends.  For ring/ping-pong patterns, convergence happens
-    // within a few messages.
-    //
-    // GUARD: Only set migrate_to if the actor has been activated (processed at least
-    // one message).  Setting migrate_to on a freshly spawned actor before its first
-    // message (Setup) is delivered causes a race: the scheduler thread migrates the
-    // actor to the sender's core, then the next send (Spawn) takes the fast local
-    // path (scheduler_send_local) and bypasses Setup still queued on the old core.
-    if (from_core >= 0 && from_core == current_core_id && !actor->auto_process &&
-        atomic_load_explicit(&actor->active, memory_order_relaxed)) {
-        if (from_core != target_core) {
-            atomic_store_explicit(&actor->migrate_to, from_core, memory_order_relaxed);
+    // Through a core's queues (#3090, #3093): counted before the actor's core
+    // is read again, so the actor cannot move from the core this message is
+    // routed to before the message reaches its mailbox there.
+    if (!actor->auto_process) {
+        inflight_enter(actor, 1);
+        target_core = atomic_load_explicit(&actor->assigned_core, memory_order_acquire);
+        if (unlikely(target_core < 0 || target_core >= num_cores)) {
+            target_core = actor->id % num_cores;
         }
+    }
+
+    // A sender on another core asks for the actor (message-driven
+    // migration): its core moves it here before it runs this message, when
+    // no other message of it is in flight (scheduler_thread, move_actor), so
+    // communicating actors gather on one core and their sends turn local. A
+    // ring gathers in its first lap. Asked for only once it had run, as it
+    // used to be, an actor in a chain was never asked: the next one is idle
+    // when the message reaches it (#3090).
+    if (from_core >= 0 && from_core == current_core_id && !actor->auto_process &&
+        from_core != target_core) {
+        atomic_store_explicit(&actor->migrate_to, from_core, memory_order_relaxed);
     }
 
     // Enqueue to target core's per-sender SPSC channel (SPSC: only current_core_id writes here).
@@ -3044,13 +3051,21 @@ typedef struct {
 
 static AETHER_TLS BatchSendBuffer* g_batch_buffer = NULL;
 
+/* #3117: a send from this thread that does not join its pending batch, or a
+ * wait for quiescence, sends the batch first: the batch's messages are older,
+ * and messages nobody has sent are not pending to the wait. */
+static inline void batch_flush_pending(void) {
+    if (unlikely(g_batch_buffer && g_batch_buffer->count > 0)) scheduler_send_batch_flush();
+}
+
+/* Opening a batch never drops what one holds (#3117): only a flush empties
+ * the buffer. An inner loop's start emptied it and lost the outer loop's
+ * messages. */
 void scheduler_send_batch_start(void) {
     if (!g_batch_buffer) {
         g_batch_buffer = calloc(1, sizeof(BatchSendBuffer));
         if (!g_batch_buffer) return;  // OOM: batching stays off, callers fall back
     }
-    g_batch_buffer->count = 0;
-    memset(g_batch_buffer->by_core, 0, sizeof(g_batch_buffer->by_core));
 }
 
 void scheduler_send_batch_add(ActorBase* actor, Message msg) {
@@ -3060,33 +3075,19 @@ void scheduler_send_batch_add(ActorBase* actor, Message msg) {
         return;
     }
     // An actor with its own thread: straight to its inbox, as from
-    // scheduler_send_remote, never stepped inline (#2598).
-    if (unlikely(actor->auto_process)) {
+    // scheduler_send_remote, never stepped inline (#2598). And nothing is
+    // batched on a scheduler thread (#3117): its sends keep its own core's
+    // channel and overflow order.
+    if (unlikely(actor->auto_process) || current_core_id >= 0) {
         scheduler_send_remote(actor, msg, current_core_id);
         return;
     }
-    // FAST PATH: Single-actor programs bypass batching entirely
-    // Main Thread Mode = synchronous processing, zero queue overhead
-    if (aether_main_thread_mode_active()) {
-        if (aether_on_main_mode_thread()) {
-            if (aether_main_mode_enqueue(actor, msg)) {
-                aether_step_inline(actor);
-                AETHER_STAT_INC(inline_sends);
-                return;
-            }
-            // The mode ended before the enqueue: the batch path takes it.
-        } else {
-            aether_leave_main_thread_mode();
-        }
-    }
-
     // BATCH PATH: Multi-actor fan-out optimization
     if (!g_batch_buffer) {
         scheduler_send_batch_start();
         if (!g_batch_buffer) {
-            // Batch buffer couldn't be allocated: deliver directly so the
-            // message is never dropped. Batching is only a throughput optimization.
-            mailbox_send(&actor->mailbox, msg);
+            // No buffer: the send goes out on its own, as an unbatched one.
+            scheduler_send_remote(actor, msg, current_core_id);
             return;
         }
     }
@@ -3128,8 +3129,34 @@ void scheduler_send_batch_flush(void) {
     int by_core[MAX_CORES];
     memset(by_core, 0, sizeof(by_core));
 
+    // Every message is counted in flight before its actor's core is read
+    // (#3090, #3093), as in send_through_core. batch_add sent an actor with
+    // its own thread elsewhere, so each one here goes through a queue. One
+    // count per actor in the batch, not per message: a fan-out's batch holds
+    // a few actors many times each, and each count is a write to a line its
+    // actor's core is using.
+    {
+        ActorBase* seen[32];
+        int seen_n[32];
+        int nseen = 0;
+        for (int i = 0; i < count; i++) {
+            ActorBase* a = g_batch_buffer->actors[i];
+            int k = 0;
+            while (k < nseen && seen[k] != a) k++;
+            if (k < nseen) {
+                seen_n[k]++;
+            } else if (nseen < 32) {
+                seen[nseen] = a;
+                seen_n[nseen++] = 1;
+            } else {
+                inflight_enter(a, 1);
+            }
+        }
+        for (int k = 0; k < nseen; k++) inflight_enter(seen[k], seen_n[k]);
+    }
+
     for (int i = 0; i < count; i++) {
-        int tc = atomic_load_explicit(&g_batch_buffer->actors[i]->assigned_core, memory_order_relaxed);
+        int tc = atomic_load_explicit(&g_batch_buffer->actors[i]->assigned_core, memory_order_acquire);
         if (tc < 0 || tc >= num_cores) tc = g_batch_buffer->actors[i]->id % num_cores;
         targets[i] = tc;
         by_core[tc]++;
@@ -3154,6 +3181,10 @@ void scheduler_send_batch_flush(void) {
         sorted_actors[pos] = g_batch_buffer->actors[i];
         sorted_msgs[pos] = g_batch_buffer->messages[i];
     }
+    // Copied out: the buffer is empty before the overflow fallback below
+    // sends, which flushes a pending batch first.
+    g_batch_buffer->count = 0;
+    memset(g_batch_buffer->by_core, 0, sizeof(g_batch_buffer->by_core));
 
     // === PHASE 4: Batch enqueue to each core (ONE atomic per core!) ===
     uint64_t total_sent = 0;
@@ -3175,8 +3206,10 @@ void scheduler_send_batch_flush(void) {
         );
         pthread_mutex_unlock(&schedulers[c].foreign_lock);
 
-        // Fallback for overflow (rare) - scheduler_send_remote handles its own counting
+        // Fallback for overflow (rare) - scheduler_send_remote handles its own counting,
+        // the message in flight included, so this batch's count is given back first.
         for (int j = enqueued; j < cnt; j++) {
+            inflight_leave((ActorBase*)sorted_actors[start + j], 1);
             scheduler_send_remote(sorted_actors[start + j], sorted_msgs[start + j], -1);
         }
 
@@ -3237,64 +3270,16 @@ ActorBase* scheduler_spawn_actor(int preferred_core, void (*step)(void*), size_t
     actor->spsc_queue = NULL;  // Lazy-allocated by send_buffer_flush
     atomic_init(&actor->inbox, NULL);
     atomic_init(&actor->thread_parked, 0);
+    atomic_init(&actor->inflight, 0);
     atomic_init(&actor->assigned_core, preferred_core);
     atomic_init(&actor->migrate_to, -1);
-    atomic_init(&actor->main_thread_only, 0);
     atomic_init(&actor->reply_slot, NULL);
     atomic_flag_clear_explicit(&actor->step_lock, memory_order_relaxed);
     actor->timeout_ns = 0;
     actor->last_activity_ns = 0;
     atomic_init(&actor->dead, 0);
 
-    // Track actor count for inline mode auto-detection
-    // Get previous count and main_actor BEFORE aether_on_actor_spawn modifies them
-    int prev_count = atomic_load_explicit(&g_aether_config.actor_count, memory_order_relaxed);
-    ActorBase* prev_main_actor = (ActorBase*)g_aether_config.main_actor;
-    // A second actor ends main-thread mode: under the lock an inline
-    // enqueue holds, like every switch out of the mode (#2266).
-    main_mode_lock();
     aether_on_actor_spawn();
-    main_mode_unlock();
-
-    // Main-thread mode is for the first actor of a scheduler lifecycle and is
-    // entered at most once (#2509). Released actors bring the count back to
-    // 0, and a later spawn at 0 (the next per-request worker of an HTTP
-    // server, say) would otherwise be stepped inline on whichever thread
-    // spawned it, with the scheduler threads already running.
-    if (prev_count >= 1) {
-        atomic_store_explicit(&g_main_mode_ended, 1, memory_order_relaxed);
-    }
-
-    // MAIN THREAD MODE handling
-    if (prev_count == 0 && !atomic_load(&g_aether_config.inline_mode_disabled) &&
-        !atomic_exchange_explicit(&g_main_mode_ended, 1, memory_order_relaxed)) {
-        // First actor: enable main thread mode for synchronous processing
-        aether_enable_main_thread_mode(actor);
-        g_main_mode_thread = aether_tid_self();
-        atomic_store_explicit(&g_main_mode_thread_set, 1, memory_order_release);
-        atomic_store_explicit(&actor->main_thread_only, 1, memory_order_release);
-    } else if (prev_count == 1 && prev_main_actor != NULL) {
-        // Second actor: disable main thread mode on the first actor so scheduler
-        // threads can process both actors normally.
-        //
-        // RACE GUARD: If the main thread is currently executing prev_main_actor's
-        // step() synchronously (g_sync_step_actor == prev_main_actor), we must NOT
-        // clear main_thread_only here.  Doing so would allow a scheduler thread to
-        // call step() on the same actor concurrently — undefined behaviour.
-        //
-        // aether_send_message_sync() clears main_thread_only after step() returns,
-        // so deferred clearing is always safe.
-        if (g_sync_step_actor != prev_main_actor) {
-            atomic_store_explicit(&prev_main_actor->main_thread_only, 0, memory_order_release);
-        }
-        // else: aether_send_message_sync will clear it once step() unwinds.
-
-        // aether_on_actor_spawn() (above) disabled main_thread_mode.  If
-        // scheduler_start() was already called and returned early (because
-        // main-thread mode was active at the time), threads were never created.
-        // Start them now so both actors can be processed by the scheduler.
-        scheduler_ensure_threads_running();
-    }
 
     actor->scheduler_owned = 1;
     register_actor(actor, preferred_core);
@@ -3317,26 +3302,6 @@ static void actor_end(ActorBase* actor) {
 
 void scheduler_release_actor(ActorBase* actor) {
     if (!actor) return;
-
-    // Released while an inline send is stepping an actor on this thread (its
-    // own, typically): that send still touches the actor once the step
-    // returns, so the release waits for scheduler_inline_step_done().
-    if (g_inline_step_depth > 0) {
-        if (inline_release_defer(actor)) return;
-        // Out of memory to remember it: keeping the actor is safe, freeing
-        // it is not.
-        fprintf(stderr, "aether: out of memory deferring the release of actor %d; "
-                        "it is not freed\n", actor->id);
-        return;
-    }
-
-    // The lone actor of main-thread mode is going: leave the mode (which
-    // starts the scheduler threads), or the next spawn would be stepped
-    // inline against a main actor that no longer exists.
-    if (aether_main_thread_mode_active() &&
-        (ActorBase*)g_aether_config.main_actor == actor) {
-        aether_leave_main_thread_mode();
-    }
 
     // Read before the mark: once it is set, the actor's own thread may end
     // the actor at any moment, and nothing below touches it after that.
@@ -3366,20 +3331,6 @@ void scheduler_release_actor(ActorBase* actor) {
 void scheduler_actor_thread_exit(ActorBase* actor) {
     int was = atomic_fetch_or_explicit(&actor->dead, AETHER_ACTOR_THREAD_GONE, memory_order_acq_rel);
     if (was & AETHER_ACTOR_RELEASED) actor_end(actor);
-}
-
-void scheduler_inline_step_done(void) {
-    // Releases are taken one at a time from the end: releasing runs no step,
-    // so nothing is added meanwhile, but the list is not walked while it
-    // changes.
-    while (t_inline_released_count > 0) {
-        ActorBase* actor = t_inline_released[--t_inline_released_count];
-        scheduler_release_actor(actor);
-    }
-    free(t_inline_released);
-    t_inline_released = NULL;
-    t_inline_released_capacity = 0;
-    g_inline_release_pending = 0;
 }
 
 
@@ -3480,62 +3431,11 @@ void scheduler_reply(ActorBase* self, void* data, size_t data_size) {
     scheduler_reply_owned(self, data, data_size, NULL);
 }
 
-// ---------------------------------------------------------------------------
-// aether_scheduler_poll — drain pending messages for main-thread-only actors.
-//
-// Call this from C-hosted event loops (e.g., inside a render callback) to
-// keep Aether actors alive while the main thread is blocked in C code.
-//
-// Thread safety: only touches actors flagged as main_thread_only, which
-// scheduler worker threads explicitly skip — so no concurrent access.
-//
-// max_per_actor: max messages to process per actor per call (0 = unlimited).
-// Returns total number of messages processed across all actors.
+// aether_scheduler_poll: the scheduler threads run every actor from the first
+// spawn on (#3112), so a host thread has nothing to drain. See the header.
 int aether_scheduler_poll(int max_per_actor) {
-    // If main-thread inline mode is active, all sends are already handled
-    // synchronously — nothing to drain here.
-    if (aether_main_thread_mode_active()) return 0;
-
-    int total = 0;
-    int limit = (max_per_actor <= 0) ? 1024 : max_per_actor;
-
-    // A step run here may release its own actor, which the loop touches after
-    // the step: the reader slot keeps it allocated until the walk is over
-    // (#2509).
-    int slot = reclaim_reader_enter();
-    for (int c = 0; c < num_cores; c++) {
-        Scheduler* sched = &schedulers[c];
-
-        // No lock: scheduler threads change the table meanwhile (#2486).
-        int actor_count;
-        AetherActorTable* table = actor_table_snapshot(sched, &actor_count);
-
-        for (int i = 0; i < actor_count; i++) {
-            ActorBase* actor = actor_table_read(table, i);
-            if (!actor || !actor->step) continue;
-
-            // Only process actors the scheduler threads are skipping.
-            // It is safe to call step() here because scheduler threads check
-            // main_thread_only and skip these actors entirely.
-            if (!atomic_load_explicit(&actor->main_thread_only, memory_order_acquire))
-                continue;
-
-            int processed = 0;
-            if (!atomic_flag_test_and_set_explicit(&actor->step_lock, memory_order_acquire)) {
-                while (atomic_load_explicit(&actor->mailbox.count, memory_order_relaxed) > 0 && processed < limit) {
-                    aether_step_safe(actor);
-                    processed++;
-                    total++;
-                }
-                atomic_flag_clear_explicit(&actor->step_lock, memory_order_release);
-            }
-            if (atomic_load_explicit(&actor->mailbox.count, memory_order_relaxed) == 0)
-                atomic_store_explicit(&actor->active, 0, memory_order_relaxed);
-        }
-    }
-    reclaim_reader_exit(slot);
-
-    return total;
+    (void)max_per_actor;
+    return 0;
 }
 
 

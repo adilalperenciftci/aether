@@ -103,7 +103,7 @@ class TcpUdpTest(unittest.TestCase):
 class ConstructorTest(unittest.TestCase):
     def test_tinyweb_and_lb_hosts(self):
         self.assertEqual(lines('    s = tinyweb.web_server_host("localhost", 8080) {\n'), [1])
-        self.assertEqual(lines('    s = tinyweb.web_server_with_ws("127.0.0.1", 1, 2) {\n'), [])
+        self.assertEqual(lines('    s = tinyweb.web_server_host("127.0.0.1", 8080) {\n'), [])
         self.assertEqual(lines('    e = lb.serve("0.0.0.0", 9000, "rr", "", h, b, c)\n'), [1])
         self.assertEqual(lines('    e = lb.serve("127.0.0.1", 0, "rr", "", h, b, c)\n'), [])
 

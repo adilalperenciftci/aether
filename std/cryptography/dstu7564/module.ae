@@ -9,7 +9,6 @@
 
 import std.bits
 import std.bytes
-import std.longarr
 
 extern malloc(size: int) -> ptr
 extern free(p: ptr)
@@ -100,9 +99,9 @@ struct DstuCtx {
     block_size: int
     columns: int
     rounds: int
-    state: ptr // longarr(16)
-    temp_state1: ptr // longarr(16)
-    temp_state2: ptr // longarr(16)
+    state: long[16]
+    temp_state1: long[16]
+    temp_state2: long[16]
     input_blocks: long
     buf_off: int
     buf: ptr // std.bytes (128 bytes)
@@ -128,19 +127,19 @@ mix_column(c: long) -> long {
     return u ^ rotate(32, v) ^ rotate(40, x1) ^ rotate(48, x1)
 }
 
-mix_columns(c: *DstuCtx, s: ptr) {
+mix_columns(c: *DstuCtx, s: long[]) {
     col = 0
     while col < c.columns {
-        val = longarr_get_unchecked(s, col)
-        longarr_set_unchecked(s, col, mix_column(val))
+        val = s[col]
+        s[col] = mix_column(val)
         col = col + 1
     }
 }
 
-sub_bytes(c_ctx: *DstuCtx, s: ptr) {
+sub_bytes(c_ctx: *DstuCtx, s: long[]) {
     col = 0
     while col < c_ctx.columns {
-        u = longarr_get_unchecked(s, col)
+        u = s[col]
         lo = u & 0xFFFFFFFF
         hi = bits.lsr64(u, 32) & 0xFFFFFFFF
 
@@ -156,21 +155,21 @@ sub_bytes(c_ctx: *DstuCtx, s: ptr) {
         t7 = S3_KUPYNA[(hi >> 24) & 255]
         long new_hi = (t4 as long) | ((t5 as long) << 8) | ((t6 as long) << 16) | ((t7 as long) << 24)
 
-        longarr_set_unchecked(s, col, (new_lo & 0xFFFFFFFF) | ((new_hi & 0xFFFFFFFF) << 32))
+        s[col] = (new_lo & 0xFFFFFFFF) | ((new_hi & 0xFFFFFFFF) << 32)
         col = col + 1
     }
 }
 
-shift_rows(c_ctx: *DstuCtx, s: ptr) {
+shift_rows(c_ctx: *DstuCtx, s: long[]) {
     if c_ctx.columns == 8 {
-        c0 = longarr_get_unchecked(s, 0)
-        c1 = longarr_get_unchecked(s, 1)
-        c2 = longarr_get_unchecked(s, 2)
-        c3 = longarr_get_unchecked(s, 3)
-        c4 = longarr_get_unchecked(s, 4)
-        c5 = longarr_get_unchecked(s, 5)
-        c6 = longarr_get_unchecked(s, 6)
-        c7 = longarr_get_unchecked(s, 7)
+        c0 = s[0]
+        c1 = s[1]
+        c2 = s[2]
+        c3 = s[3]
+        c4 = s[4]
+        c5 = s[5]
+        c6 = s[6]
+        c7 = s[7]
 
         d = (c0 ^ c4) & 0xFFFFFFFF00000000
         c0 = c0 ^ d
@@ -220,31 +219,31 @@ shift_rows(c_ctx: *DstuCtx, s: ptr) {
         c6 = c6 ^ d
         c7 = c7 ^ d
 
-        longarr_set_unchecked(s, 0, c0)
-        longarr_set_unchecked(s, 1, c1)
-        longarr_set_unchecked(s, 2, c2)
-        longarr_set_unchecked(s, 3, c3)
-        longarr_set_unchecked(s, 4, c4)
-        longarr_set_unchecked(s, 5, c5)
-        longarr_set_unchecked(s, 6, c6)
-        longarr_set_unchecked(s, 7, c7)
+        s[0] = c0
+        s[1] = c1
+        s[2] = c2
+        s[3] = c3
+        s[4] = c4
+        s[5] = c5
+        s[6] = c6
+        s[7] = c7
     } else {
-        c00 = longarr_get_unchecked(s, 0)
-        c01 = longarr_get_unchecked(s, 1)
-        c02 = longarr_get_unchecked(s, 2)
-        c03 = longarr_get_unchecked(s, 3)
-        c04 = longarr_get_unchecked(s, 4)
-        c05 = longarr_get_unchecked(s, 5)
-        c06 = longarr_get_unchecked(s, 6)
-        c07 = longarr_get_unchecked(s, 7)
-        c08 = longarr_get_unchecked(s, 8)
-        c09 = longarr_get_unchecked(s, 9)
-        c10 = longarr_get_unchecked(s, 10)
-        c11 = longarr_get_unchecked(s, 11)
-        c12 = longarr_get_unchecked(s, 12)
-        c13 = longarr_get_unchecked(s, 13)
-        c14 = longarr_get_unchecked(s, 14)
-        c15 = longarr_get_unchecked(s, 15)
+        c00 = s[0]
+        c01 = s[1]
+        c02 = s[2]
+        c03 = s[3]
+        c04 = s[4]
+        c05 = s[5]
+        c06 = s[6]
+        c07 = s[7]
+        c08 = s[8]
+        c09 = s[9]
+        c10 = s[10]
+        c11 = s[11]
+        c12 = s[12]
+        c13 = s[13]
+        c14 = s[14]
+        c15 = s[15]
 
         d = (c00 ^ c08) & 0xFF00000000000000
         c00 = c00 ^ d
@@ -374,34 +373,34 @@ shift_rows(c_ctx: *DstuCtx, s: ptr) {
         c14 = c14 ^ d
         c15 = c15 ^ d
 
-        longarr_set_unchecked(s, 0, c00)
-        longarr_set_unchecked(s, 1, c01)
-        longarr_set_unchecked(s, 2, c02)
-        longarr_set_unchecked(s, 3, c03)
-        longarr_set_unchecked(s, 4, c04)
-        longarr_set_unchecked(s, 5, c05)
-        longarr_set_unchecked(s, 6, c06)
-        longarr_set_unchecked(s, 7, c07)
-        longarr_set_unchecked(s, 8, c08)
-        longarr_set_unchecked(s, 9, c09)
-        longarr_set_unchecked(s, 10, c10)
-        longarr_set_unchecked(s, 11, c11)
-        longarr_set_unchecked(s, 12, c12)
-        longarr_set_unchecked(s, 13, c13)
-        longarr_set_unchecked(s, 14, c14)
-        longarr_set_unchecked(s, 15, c15)
+        s[0] = c00
+        s[1] = c01
+        s[2] = c02
+        s[3] = c03
+        s[4] = c04
+        s[5] = c05
+        s[6] = c06
+        s[7] = c07
+        s[8] = c08
+        s[9] = c09
+        s[10] = c10
+        s[11] = c11
+        s[12] = c12
+        s[13] = c13
+        s[14] = c14
+        s[15] = c15
     }
 }
 
-P_perm(c_ctx: *DstuCtx, s: ptr) {
+P_perm(c_ctx: *DstuCtx, s: long[]) {
     round = 0
     while round < c_ctx.rounds {
         long rc = round
 
         col = 0
         while col < c_ctx.columns {
-            val = longarr_get_unchecked(s, col)
-            longarr_set_unchecked(s, col, val ^ rc)
+            val = s[col]
+            s[col] = val ^ rc
             rc = rc + 0x10
             col = col + 1
         }
@@ -414,7 +413,7 @@ P_perm(c_ctx: *DstuCtx, s: ptr) {
     }
 }
 
-Q_perm(c_ctx: *DstuCtx, s: ptr) {
+Q_perm(c_ctx: *DstuCtx, s: long[]) {
     round = 0
     while round < c_ctx.rounds {
         long rc = (((c_ctx.columns - 1) << 4) ^ round) << 56
@@ -422,8 +421,8 @@ Q_perm(c_ctx: *DstuCtx, s: ptr) {
 
         col = 0
         while col < c_ctx.columns {
-            val = longarr_get_unchecked(s, col)
-            longarr_set_unchecked(s, col, val + rc)
+            val = s[col]
+            s[col] = val + rc
             rc = rc - 0x1000000000000000
             col = col + 1
         }
@@ -443,8 +442,8 @@ process_block(c: *DstuCtx, input: ptr, inOff: int) {
         word = bytes.get_le64(input, pos)
         pos = pos + 8
 
-        longarr_set_unchecked(c.temp_state1, col, longarr_get_unchecked(c.state, col) ^ word)
-        longarr_set_unchecked(c.temp_state2, col, word)
+        c.temp_state1[col] = c.state[col] ^ word
+        c.temp_state2[col] = word
         col = col + 1
     }
 
@@ -453,8 +452,8 @@ process_block(c: *DstuCtx, input: ptr, inOff: int) {
 
     col = 0
     while col < c.columns {
-        val = longarr_get_unchecked(c.state, col) ^ longarr_get_unchecked(c.temp_state1, col) ^ longarr_get_unchecked(c.temp_state2, col)
-        longarr_set_unchecked(c.state, col, val)
+        val = c.state[col] ^ c.temp_state1[col] ^ c.temp_state2[col]
+        c.state[col] = val
         col = col + 1
     }
 }
@@ -483,20 +482,17 @@ new(algo: string) -> {
     }
 
     ctx.block_size = ctx.columns << 3
-    ctx.state = longarr_new_raw(16)
-    ctx.temp_state1 = longarr_new_raw(16)
-    ctx.temp_state2 = longarr_new_raw(16)
     ctx.buf = bytes.new(128)
 
     i = 0
     while i < 16 {
-        longarr_set_unchecked(ctx.state, i, 0)
-        longarr_set_unchecked(ctx.temp_state1, i, 0)
-        longarr_set_unchecked(ctx.temp_state2, i, 0)
+        ctx.state[i] = 0
+        ctx.temp_state1[i] = 0
+        ctx.temp_state2[i] = 0
         i = i + 1
     }
 
-    longarr_set_unchecked(ctx.state, 0, ctx.block_size)
+    ctx.state[0] = ctx.block_size
     ctx.input_blocks = 0
     ctx.buf_off = 0
 
@@ -556,7 +552,7 @@ finalize_to_bytes(c_ctx: *DstuCtx) -> ptr {
     // Apply transformation
     i = 0
     while i < c_ctx.columns {
-        longarr_set_unchecked(c_ctx.temp_state1, i, longarr_get_unchecked(c_ctx.state, i))
+        c_ctx.temp_state1[i] = c_ctx.state[i]
         i = i + 1
     }
 
@@ -564,8 +560,8 @@ finalize_to_bytes(c_ctx: *DstuCtx) -> ptr {
 
     i = 0
     while i < c_ctx.columns {
-        val = longarr_get_unchecked(c_ctx.state, i) ^ longarr_get_unchecked(c_ctx.temp_state1, i)
-        longarr_set_unchecked(c_ctx.state, i, val)
+        val = c_ctx.state[i] ^ c_ctx.temp_state1[i]
+        c_ctx.state[i] = val
         i = i + 1
     }
 
@@ -574,7 +570,7 @@ finalize_to_bytes(c_ctx: *DstuCtx) -> ptr {
     col = c_ctx.columns - needed_columns
     out_pos = 0
     while col < c_ctx.columns {
-        bytes.set_le64(out, out_pos, longarr_get_unchecked(c_ctx.state, col))
+        bytes.set_le64(out, out_pos, c_ctx.state[col])
         out_pos = out_pos + 8
         col = col + 1
     }
@@ -583,9 +579,6 @@ finalize_to_bytes(c_ctx: *DstuCtx) -> ptr {
 }
 
 free_internals(c: *DstuCtx) {
-    if c.state != null { longarr_free(c.state); c.state = null }
-    if c.temp_state1 != null { longarr_free(c.temp_state1); c.temp_state1 = null }
-    if c.temp_state2 != null { longarr_free(c.temp_state2); c.temp_state2 = null }
     if c.buf != null { bytes.free(c.buf); c.buf = null }
 }
 

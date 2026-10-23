@@ -257,8 +257,14 @@ void aether_shared_map_read_outputs_from_shm(AetherSharedMap* map, const char* s
     char* data = mmap(NULL, st.st_size, PROT_READ, MAP_SHARED, fd, 0);
     if (data == MAP_FAILED) { close(fd); return; }
 
-    // Skip frozen_count header
-    int frozen = data[0] | (data[1] << 8) | (data[2] << 16) | (data[3] << 24);
+    // Skip frozen_count header: four bytes, least significant first, as
+    // aether_shared_map_to_shm writes them. Read unsigned: as a plain char a
+    // byte of 128 or more is negative, and shifting it left is undefined in
+    // C (#2488); it also made the count negative.
+    const unsigned char* hdr = (const unsigned char*)data;
+    unsigned long frozen_u = (unsigned long)hdr[0] | ((unsigned long)hdr[1] << 8) |
+                             ((unsigned long)hdr[2] << 16) | ((unsigned long)hdr[3] << 24);
+    int frozen = frozen_u > 0x7fffffffUL ? 0x7fffffff : (int)frozen_u;
     int pos = 4;
 
     // Parse key\0value\0 pairs — skip first 'frozen' entries (inputs),

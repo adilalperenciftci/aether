@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
+#include <limits.h>
 #include "parser.h"
 #include "../aether_defines.h"
 
@@ -26,11 +27,20 @@ Parser* create_parser(Token** tokens, int token_count) {
     parser->when_top_level = 0;
     parser->depth = 0;
     parser->depth_exceeded = 0;
+    parser->int_consts = NULL;
+    parser->int_const_count = 0;
+    parser->int_consts_scanned = 0;
     return parser;
 }
 
+typedef struct ParserIntConst {
+    const char* name;   /* the token's text, alive for the whole parse */
+    long long value;
+} ParserIntConst;
+
 void free_parser(Parser* parser) {
     if (parser) {
+        free(parser->int_consts);
         free(parser);
     }
 }
@@ -48,6 +58,22 @@ Token* peek_ahead(Parser* parser, int offset) {
         return NULL;
     }
     return parser->tokens[pos];
+}
+
+/* #3115: the offset of the `]` that closes the `[` at offset `open` from the
+ * current token, on that `[`'s line; -1 when there is none. A declaration's
+ * array type may hold an expression (`Pair[N + 1] ps`), so the lookaheads
+ * that tell `T[n] name` from an index expression skip the whole group. */
+static int closing_bracket_offset(Parser* parser, int open) {
+    Token* o = peek_ahead(parser, open);
+    if (!o || o->type != TOKEN_LEFT_BRACKET) return -1;
+    int depth = 0;
+    for (int k = open;; k++) {
+        Token* t = peek_ahead(parser, k);
+        if (!t || t->line != o->line) return -1;
+        if (t->type == TOKEN_LEFT_BRACKET) depth++;
+        else if (t->type == TOKEN_RIGHT_BRACKET && --depth == 0) return k;
+    }
 }
 
 // Disambiguate a `|` (or `||`) right after a function call: is it the start
@@ -384,6 +410,232 @@ static Type* parse_struct_type_name(Parser* parser, Token* first) {
     type->struct_name = strdup(type_name);
     if (plen) type->qualifier = aether_intern(path);
     return type;
+}
+
+/* #3115: an integer literal's text as the language reads it (`128`, `0x40`,
+ * `0b1000`, `0o20`, `1_024`). 0 for anything else, a float among them. */
+static int int_literal_text(const char* text, long long* out) {
+    char digits[72];
+    size_t k = 0;
+    for (const char* c = text; c && *c && k + 1 < sizeof digits; c++)
+        if (*c != '_') digits[k++] = *c;
+    digits[k] = '\0';
+    int base = 0;
+    const char* s = digits;
+    if (s[0] == '0' && (s[1] == 'b' || s[1] == 'B')) { base = 2; s += 2; }
+    else if (s[0] == '0' && (s[1] == 'o' || s[1] == 'O')) { base = 8; s += 2; }
+    char* end = NULL;
+    unsigned long long v = strtoull(s, &end, base);
+    if (!end || *end || end == s || v > (unsigned long long)LLONG_MAX) return 0;
+    *out = (long long)v;
+    return 1;
+}
+
+/* #3115: an integer constant expression over the tokens from `pos`:
+ * literals, names among the file's integer constants, unary minus,
+ * parentheses, and `* / %`, `+ -`, `<< >>` with C's precedence. It stops at
+ * the first token that cannot continue it. `fail` names why it is not one:
+ * the first unknown name, or a division by zero. */
+typedef struct {
+    Parser* p;
+    int pos;
+    const char* fail;
+    Token* fail_at;
+} ConstEval;
+
+static Token* ce_peek(ConstEval* ce) {
+    return ce->pos < ce->p->token_count ? ce->p->tokens[ce->pos] : NULL;
+}
+
+static int ce_lookup(Parser* p, const char* name, long long* out) {
+    for (int i = 0; i < p->int_const_count; i++)
+        if (strcmp(p->int_consts[i].name, name) == 0) { *out = p->int_consts[i].value; return 1; }
+    return 0;
+}
+
+/* Every value an array-length expression reaches stays within +-2^31: a
+ * length is at most INT_MAX, and inside that bound no `*`, `+`, `-` or
+ * `<<` of two such values overflows a long long. */
+#define CE_LIMIT (1LL << 31)
+
+static int ce_in_range(ConstEval* ce, long long v, Token* at) {
+    if (v >= -CE_LIMIT && v <= CE_LIMIT) return 1;
+    if (!ce->fail) { ce->fail = "range"; ce->fail_at = at; }
+    return 0;
+}
+
+static int ce_shift(ConstEval* ce, long long* out);
+
+static int ce_unary(ConstEval* ce, long long* out) {
+    Token* t = ce_peek(ce);
+    if (!t) return 0;
+    if (t->type == TOKEN_MINUS) {
+        ce->pos++;
+        if (!ce_unary(ce, out)) return 0;
+        *out = -*out;
+        return 1;
+    }
+    if (t->type == TOKEN_LEFT_PAREN) {
+        ce->pos++;
+        if (!ce_shift(ce, out)) return 0;
+        Token* r = ce_peek(ce);
+        if (!r || r->type != TOKEN_RIGHT_PAREN) return 0;
+        ce->pos++;
+        return 1;
+    }
+    if (t->type == TOKEN_NUMBER) {
+        if (!int_literal_text(t->value, out) || !ce_in_range(ce, *out, t)) return 0;
+        ce->pos++;
+        return 1;
+    }
+    if (t->type == TOKEN_IDENTIFIER) {
+        if (!ce_lookup(ce->p, t->value, out)) {
+            if (!ce->fail) { ce->fail = "unknown"; ce->fail_at = t; }
+            return 0;
+        }
+        ce->pos++;
+        return 1;
+    }
+    return 0;
+}
+
+static int ce_mul(ConstEval* ce, long long* out) {
+    if (!ce_unary(ce, out)) return 0;
+    for (;;) {
+        Token* t = ce_peek(ce);
+        if (!t || (t->type != TOKEN_MULTIPLY && t->type != TOKEN_DIVIDE &&
+                   t->type != TOKEN_MODULO)) return 1;
+        ce->pos++;
+        long long r;
+        if (!ce_unary(ce, &r)) return 0;
+        if (t->type == TOKEN_MULTIPLY) *out *= r;
+        else if (r == 0) {
+            if (!ce->fail) { ce->fail = "zero"; ce->fail_at = t; }
+            return 0;
+        } else if (t->type == TOKEN_DIVIDE) *out /= r;
+        else *out %= r;
+        if (!ce_in_range(ce, *out, t)) return 0;
+    }
+}
+
+static int ce_add(ConstEval* ce, long long* out) {
+    if (!ce_mul(ce, out)) return 0;
+    for (;;) {
+        Token* t = ce_peek(ce);
+        if (!t || (t->type != TOKEN_PLUS && t->type != TOKEN_MINUS)) return 1;
+        ce->pos++;
+        long long r;
+        if (!ce_mul(ce, &r)) return 0;
+        *out = t->type == TOKEN_PLUS ? *out + r : *out - r;
+        if (!ce_in_range(ce, *out, t)) return 0;
+    }
+}
+
+static int ce_shift(ConstEval* ce, long long* out) {
+    if (!ce_add(ce, out)) return 0;
+    for (;;) {
+        Token* t = ce_peek(ce);
+        if (!t || (t->type != TOKEN_LSHIFT && t->type != TOKEN_RSHIFT)) return 1;
+        ce->pos++;
+        long long r;
+        if (!ce_add(ce, &r)) return 0;
+        /* a shift of a negative value, or by a negative or too-wide count,
+         * is no length */
+        if (*out < 0 || r < 0 || r > 31) {
+            if (!ce->fail) { ce->fail = "range"; ce->fail_at = t; }
+            return 0;
+        }
+        *out = t->type == TOKEN_LSHIFT ? *out << r : *out >> r;
+        if (!ce_in_range(ce, *out, t)) return 0;
+    }
+}
+
+/* #3115: collect the file's integer constants: every top-level
+ * `const NAME = e` or `const NAME: T = e` whose whole value is an integer
+ * constant expression. A constant built from a later one is found by
+ * scanning again, until a pass finds nothing new. */
+static void scan_int_consts(Parser* p) {
+    p->int_consts_scanned = 1;
+    int cap = 0;
+    for (int pass = 0; pass < 16; pass++) {
+        int found = 0, depth = 0;
+        for (int i = 0; i < p->token_count; i++) {
+            Token* t = p->tokens[i];
+            if (t->type == TOKEN_LEFT_BRACE) { depth++; continue; }
+            if (t->type == TOKEN_RIGHT_BRACE) { if (depth > 0) depth--; continue; }
+            if (depth != 0 || t->type != TOKEN_CONST || i + 2 >= p->token_count) continue;
+            Token* name = p->tokens[i + 1];
+            if (name->type != TOKEN_IDENTIFIER) continue;
+            long long known;
+            if (ce_lookup(p, name->value, &known)) continue;
+            /* skip `: T` to the `=` on the same line */
+            int j = i + 2;
+            while (j < p->token_count && p->tokens[j]->type != TOKEN_ASSIGN &&
+                   p->tokens[j]->line == name->line)
+                j++;
+            if (j >= p->token_count || p->tokens[j]->type != TOKEN_ASSIGN) continue;
+            ConstEval ce = { p, j + 1, NULL, NULL };
+            long long v;
+            if (!ce_shift(&ce, &v) || ce.pos == j + 1) continue;
+            /* the value is all of the expression: what follows starts a new
+             * statement (a later line, a `;`, the end) */
+            Token* last = p->tokens[ce.pos - 1];
+            Token* next = ce.pos < p->token_count ? p->tokens[ce.pos] : NULL;
+            if (next && next->type != TOKEN_EOF && next->type != TOKEN_SEMICOLON &&
+                next->line == last->line)
+                continue;
+            if (p->int_const_count == cap) {
+                cap = cap ? cap * 2 : 16;
+                ParserIntConst* grown = realloc(p->int_consts, (size_t)cap * sizeof *grown);
+                if (!grown) return;
+                p->int_consts = grown;
+            }
+            p->int_consts[p->int_const_count].name = name->value;
+            p->int_consts[p->int_const_count].value = v;
+            p->int_const_count++;
+            found = 1;
+        }
+        if (!found) return;
+    }
+}
+
+/* #3115: a fixed-size array's length, after its `[`: an integer constant
+ * expression of at least 1. Reports and returns 0 for anything else. */
+static int parse_array_length(Parser* parser) {
+    Token* start = peek_token(parser);
+    if (!parser->int_consts_scanned) scan_int_consts(parser);
+    ConstEval ce = { parser, parser->current_token, NULL, NULL };
+    long long v = 0;
+    int ok = ce_shift(&ce, &v);
+    char msg[256];
+    if (!ok || ce.pos == parser->current_token) {
+        if (ce.fail && strcmp(ce.fail, "zero") == 0) {
+            parser_error_at(parser, ce.fail_at, "division by zero in an array length");
+        } else if (ce.fail && strcmp(ce.fail, "range") == 0) {
+            snprintf(msg, sizeof msg, "an array length must be from 1 to %d; this one "
+                     "reaches a value outside that", INT_MAX);
+            parser_error_at(parser, ce.fail_at, msg);
+        } else if (ce.fail) {
+            snprintf(msg, sizeof msg,
+                "array length '%s' is not an integer constant of this file: a length is "
+                "a number, a `const` of the file holding one, or an expression over those",
+                ce.fail_at->value);
+            parser_error_at(parser, ce.fail_at, msg);
+        } else {
+            parser_error_at(parser, start,
+                "an array length is a number, a `const` of the file holding one, or an "
+                "expression over those (`int[4]`, `long[QWORDS]`, `long[NW + 1]`)");
+        }
+        return 0;
+    }
+    if (v < 1 || v > INT_MAX) {
+        snprintf(msg, sizeof msg, "an array length must be from 1 to %d, but this one is %lld",
+                 INT_MAX, v);
+        parser_error_at(parser, start, msg);
+        return 0;
+    }
+    parser->current_token = ce.pos;
+    return (int)v;
 }
 
 // #340: a type may carry a postfix `?` making it optional (`int?`, `string?`,
@@ -990,10 +1242,10 @@ static Type* parse_type_unsuffixed(Parser* parser) {
             // Dynamic array
             type = create_array_type(type, -1);
         } else {
-            // Fixed-size array
-            Token* size_token = expect_token(parser, TOKEN_NUMBER);
-            if (size_token) {
-                int size = atoi(size_token->value);
+            // Fixed-size array: the length is an integer constant
+            // expression (#3115), reported here when it is not one.
+            int size = parse_array_length(parser);
+            if (size > 0) {
                 if (!expect_token(parser, TOKEN_RIGHT_BRACKET)) return NULL;
                 type = create_array_type(type, size);
             }
@@ -1085,7 +1337,7 @@ static ASTNode* parse_interp_string_expr(const char* raw, int line, int column) 
             int n = sub_tokens[sub_count - 1]->type == TOKEN_EOF ? sub_count - 1 : sub_count;
             Parser* sub = create_parser(sub_tokens, n);
             ASTNode* expr_node = parse_expression(sub);
-            free(sub);
+            free_parser(sub);
             /* AST nodes copy a token's text (create_ast_node strdups it) and
              * keep no reference to the token itself, so these are ours to
              * release: every `${...}` used to leak its whole token run
@@ -2563,6 +2815,11 @@ static ASTNode* parse_postfix_expression(Parser* parser) {
             // here and handed to the typechecker as the implicit first
             // argument; ufcs_recv holds it until the call node exists.
             ASTNode* ufcs_recv = NULL;
+            /* #3099: any other callee is a value, called as a closure local
+             * or field is (`call(callee, args)`, the form the checker gives
+             * those). The callee was dropped and the call left nameless:
+             * `fs[1]()` was "Undefined function '?'". */
+            ASTNode* value_callee = NULL;
             if (expr && expr->type == AST_IDENTIFIER && expr->value) {
                 // Simple call: foo()
                 func_name = strdup(expr->value);
@@ -2585,6 +2842,9 @@ static ASTNode* parse_postfix_expression(Parser* parser) {
                 func_name = strdup(expr->value);
                 ufcs_recv = expr->children[0];
                 expr->children[0] = NULL;   // detach so free_ast_node(expr) won't reclaim it
+            } else if (expr) {
+                func_name = strdup("call");
+                value_callee = expr;
             }
 
             // heap.new(TypeName) — like sizeof, the argument is a *type
@@ -2631,6 +2891,10 @@ static ASTNode* parse_postfix_expression(Parser* parser) {
             if (ufcs_recv) {
                 func_call->annotation = strdup("ufcs");
                 add_child(func_call, ufcs_recv);
+            }
+            if (value_callee) {
+                add_child(func_call, value_callee);
+                func_call->annotation = annotation_add_marker(func_call->annotation, "value_callee");
             }
 
             // Parse arguments
@@ -2797,8 +3061,9 @@ static ASTNode* parse_postfix_expression(Parser* parser) {
                 }
             }
 
-            // Free the original identifier node since we've copied its name
-            if (expr) free_ast_node(expr);
+            // Free the original identifier node since we've copied its name;
+            // a value callee is not freed, it is the call's first argument.
+            if (expr && expr != value_callee) free_ast_node(expr);
 
             expr = func_call;
             continue;
@@ -3363,7 +3628,7 @@ static ASTNode* parse_statement_inner(Parser* parser) {
             }
             // The array form of the same declaration, with an element
             // type spelled by an identifier: `uint32[4] xs = [...]`,
-            // `uint16[2] hs`, `Pair[8] ps`. Shape IDENT `[` NUMBER? `]`
+            // `uint16[2] hs`, `Pair[N + 1] ps`. Shape IDENT `[` length? `]`
             // IDENT on one line — an index expression statement (`xs[i]`)
             // is never followed by an identifier on its own line, exactly
             // as `IDENT IDENT` above; the line check keeps `xs[1]` followed
@@ -3372,12 +3637,10 @@ static ASTNode* parse_statement_inner(Parser* parser) {
             // without this branch `uint32[4] xs` parsed as an index into an
             // undefined variable `uint32`.
             if (next && next->type == TOKEN_LEFT_BRACKET) {
-                Token* t2 = peek_ahead(parser, 2);
-                int off = (t2 && t2->type == TOKEN_NUMBER) ? 3 : 2;
-                Token* rb = peek_ahead(parser, off);
-                Token* nm = peek_ahead(parser, off + 1);
-                if (rb && rb->type == TOKEN_RIGHT_BRACKET &&
-                    nm && nm->type == TOKEN_IDENTIFIER && nm->line == rb->line) {
+                int rbo = closing_bracket_offset(parser, 1);
+                Token* rb = rbo > 0 ? peek_ahead(parser, rbo) : NULL;
+                Token* nm = rbo > 0 ? peek_ahead(parser, rbo + 1) : NULL;
+                if (rb && nm && nm->type == TOKEN_IDENTIFIER && nm->line == rb->line) {
                     return parse_variable_declaration(parser);
                 }
             }
@@ -3906,6 +4169,11 @@ ASTNode* parse_for_loop(Parser* parser) {
             if (!name) return NULL;
             init = create_ast_node(AST_VARIABLE_DECLARATION, name->value, name->line, name->column);
             init->node_type = create_type(TYPE_UNKNOWN);
+            /* #2734: a bare `x = expr`, as anywhere else: it assigns a
+             * variable already bound there. The checker clears the mark
+             * for a new name, which the loop declares as its own, as it
+             * does a typed init's (`int i = 0`) or a range-for's. */
+            init->type_inferred = 1;
             Token* eq = peek_token(parser);
             if (match_token(parser, TOKEN_ASSIGN)) {
                 int errors_before = aether_error_count();
@@ -5254,12 +5522,11 @@ ASTNode* parse_actor_definition(Parser* parser) {
                 if (t1 && t1->type == TOKEN_IDENTIFIER && t1->line == next_tok->line) {
                     ident_typed = 1;
                 } else if (t1 && t1->type == TOKEN_LEFT_BRACKET) {
-                    Token* t2 = peek_ahead(parser, 2);
-                    int off = (t2 && t2->type == TOKEN_NUMBER) ? 3 : 2;
-                    Token* rb = peek_ahead(parser, off);
-                    Token* nm = peek_ahead(parser, off + 1);
-                    ident_typed = rb && rb->type == TOKEN_RIGHT_BRACKET &&
-                                  nm && nm->type == TOKEN_IDENTIFIER && nm->line == rb->line;
+                    int rbo = closing_bracket_offset(parser, 1);
+                    Token* rb = rbo > 0 ? peek_ahead(parser, rbo) : NULL;
+                    Token* nm = rbo > 0 ? peek_ahead(parser, rbo + 1) : NULL;
+                    ident_typed = rb && nm && nm->type == TOKEN_IDENTIFIER &&
+                                  nm->line == rb->line;
                 }
             }
 
@@ -5569,6 +5836,14 @@ ASTNode* parse_extern_struct_field(Parser* parser) {
  *             hands `@retain` a string's characters with a reference of its
  *             own, right for C and not what the Aether function expects.
  *
+ *   @holds    the `ptr` argument is where the function keeps what its
+ *             `@retain` parameters are given (#3086): std's list and map
+ *             stores declare their container so. A keep through such a
+ *             call outlives the caller only when that argument's memory
+ *             does: a container the caller makes with an `@fresh` extern
+ *             and lets go nowhere keeps nothing past it. Only meaningful
+ *             on `ptr`.
+ *
  * Multiple annotations stack: `name: @aether @retain string` is legal.
  * Order is irrelevant; storage is a comma-separated set on
  * `param->annotation`, tested by substring. */
@@ -5588,12 +5863,14 @@ static void parse_extern_param_attrs_and_type(Parser* parser, ASTNode* param) {
                 tag = "into_param";
             } else if (strcmp(attr->value, "keep") == 0) {
                 tag = "keep_param";
+            } else if (strcmp(attr->value, "holds") == 0) {
+                tag = "holder_param";
             }
             if (tag) advance_token(parser);
         }
         if (!tag) {
             parser_error(parser, "unknown extern-param attribute (expected @aether, @retain, "
-                                 "@noescape, @into or @keep)");
+                                 "@noescape, @into, @keep or @holds)");
             break;
         }
         /* Append to the comma-separated set, deduping. */
@@ -5625,6 +5902,10 @@ static void parse_extern_param_attrs_and_type(Parser* parser, ASTNode* param) {
         param->node_type->kind != TYPE_PTR && param->node_type->kind != TYPE_FUNCTION) {
         parser_error(parser, "@noescape on an extern parameter is only valid on `ptr` or `fn`");
     }
+    if (param->annotation && strstr(param->annotation, "holder_param") &&
+        param->node_type->kind != TYPE_PTR) {
+        parser_error(parser, "@holds on an extern parameter is only valid on `ptr`");
+    }
 }
 
 /* Trailing `@`-attributes on an extern signature, shared by the bare
@@ -5635,6 +5916,10 @@ static void parse_extern_param_attrs_and_type(Parser* parser, ASTNode* param) {
  *             codegen_stmt.c. Only meaningful on `-> string`; anything else
  *             is a parse error since integers and pointers aren't heap-
  *             tracked and void has nothing to own.
+ *   @fresh    the `-> ptr` result is memory the call allocates, which nothing
+ *             else holds (#3086): std's list and map constructors. A
+ *             container bound from one is a holder (`@holds`) that keeps
+ *             nothing past its function unless it escapes.
  *   @borrow   the unannotated default. A no-op, accepted so callers can be
  *             explicit and symmetric with the tuple form.
  *   @c_import a C header owns the prototype, so codegen emits no declaration
@@ -5674,6 +5959,14 @@ static void parse_extern_trailing_attrs(Parser* parser, ASTNode* ext) {
                     annotation_add_marker(ext->annotation, "heap_return");
             }
             advance_token(parser);  /* consume 'heap' */
+        } else if (strcmp(tag->value, "fresh") == 0) {
+            advance_token(parser);  /* consume '@' */
+            if (!ext->node_type || ext->node_type->kind != TYPE_PTR) {
+                parser_error(parser, "@fresh on extern return is only valid on `-> ptr`");
+            } else {
+                ext->annotation = annotation_add_marker(ext->annotation, "fresh_return");
+            }
+            advance_token(parser);  /* consume 'fresh' */
         } else if (strcmp(tag->value, "borrow") == 0) {
             advance_token(parser);  /* consume '@' */
             advance_token(parser);  /* consume 'borrow' */

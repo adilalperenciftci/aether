@@ -21,12 +21,6 @@ extern tcp_close(sock: ptr) -> int
 const PORT = 18099
 
 message StartRaw { srv: ptr }
-message Noop {}
-
-actor SchedHelper {
-    state x = 0
-    receive { Noop() -> { x = 1 } }
-}
 
 // Persistent chunked server: accept a connection, drain the request, answer
 // with a chunked "hello world", close, repeat. Looping lets the client's
@@ -59,7 +53,6 @@ main() {
     lst = tcp_listen_on_raw("127.0.0.1", PORT)
     if lst == null { println("FAIL: chunked listen failed"); exit(1) }
 
-    spawn(SchedHelper())
     srv = spawn(RawChunkedSrv())
     srv ! StartRaw { srv: lst }
 

@@ -443,9 +443,12 @@ main() {
 The type checker refuses every way the binding's value itself could outlive
 the block: returning it, assigning or aliasing it into another binding or a
 struct field, placing it in an array, struct or message literal, capturing it
-in a closure or a quote (either can outlive the block), and inserting it into
-a container (`list.add`, `list.set`, `map.put`, `set.add`, `string.seq_cons`,
-and their raw and owning forms):
+in a closure or a quote (either can outlive the block), and giving it to a
+parameter that keeps it, as the callee declares (an Aether function's
+`@keep` one, an extern's `@retain` one): the item of a list or map store
+(`list.add`, `list.set`, `map.put` and their raw forms), the head or the tail
+of `string.seq_cons`. A parameter that copies what it is given keeps nothing:
+`set.add` copies its item, and a map copies its key.
 
 ```aether,fails
 import std.string

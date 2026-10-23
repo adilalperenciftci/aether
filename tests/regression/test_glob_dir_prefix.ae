@@ -14,7 +14,7 @@ extern exit(code: int)
 extern system(cmd: string) -> int
 
 main() {
-    if os.getenv("OS") == "Windows_NT" {
+    if os.platform() == "windows" {
         // The bug is Windows-specific; the assertion here is the cross-platform
         // contract. On the Windows CI runner the same test binary would need a
         // Windows shell to set up the fixture, so skip and rely on the POSIX

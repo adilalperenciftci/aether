@@ -87,6 +87,10 @@ int http_sse_send_event_full(HttpSseConn* c, const char* n, const char* d,
 }
 HttpSseConn* http_response_sse_upgrade_raw(HttpServerResponse* r) { (void)r; return NULL; }
 void http_sse_close(HttpSseConn* c) { (void)c; }
+int http_sse_send_comment(HttpSseConn* c, const char* t) { (void)c; (void)t; return -1; }
+HttpChunkedStream* http_response_begin_chunked_raw(HttpServerResponse* r) { (void)r; return NULL; }
+int http_chunked_write(HttpChunkedStream* s, const void* d, int l) { (void)s; (void)d; (void)l; return -1; }
+int http_chunked_end(HttpChunkedStream* s) { (void)s; return -1; }
 void http_server_websocket(HttpServer* s, const char* p, HttpWsHandler h, void* u) {
     (void)s; (void)p; (void)h; (void)u;
 }
@@ -115,6 +119,7 @@ const char* http_get_path_param(HttpRequest* r, const char* k) { (void)r; (void)
 void http_request_free(HttpRequest* r) { (void)r; }
 HttpServerResponse* http_response_create(void) { return NULL; }
 void http_response_set_status(HttpServerResponse* r, int c) { (void)r; (void)c; }
+int http_response_get_status(HttpServerResponse* r) { (void)r; return 0; }
 void http_response_set_header(HttpServerResponse* r, const char* k, const char* v) { (void)r; (void)k; (void)v; }
 void http_response_add_header(HttpServerResponse* r, const char* k, const char* v) { (void)r; (void)k; (void)v; }
 void http_response_clear_headers(HttpServerResponse* r) { (void)r; }
@@ -195,6 +200,16 @@ const char* http_request_header_value(HttpRequest* r, int i) { (void)r; (void)i;
         #include <sys/uio.h>
     #endif
     // I/O polling is handled by aether_io_poller (included via multicore_scheduler.h)
+#endif
+
+/* A send to a peer that has gone fails with EPIPE rather than raising
+ * SIGPIPE, which kills a process that has not ignored it: a WebSocket
+ * client's, which no server start set up. Linux says so per call; macOS and
+ * the BSDs per socket (SO_NOSIGPIPE, set where the client dials). */
+#if defined(MSG_NOSIGNAL)
+#define AE_SEND_NOSIGNAL MSG_NOSIGNAL
+#else
+#define AE_SEND_NOSIGNAL 0
 #endif
 
 // -----------------------------------------------------------------------------
@@ -379,6 +394,9 @@ static int conn_recv(HttpConn* c, void* buf, int len) {
     return (int)recv(c->fd, buf, len, 0);
 }
 
+/* Every one of `len` bytes, or -1: a plain send(2) can take fewer than asked
+ * (a signal cuts it short), and every caller here sends a whole response,
+ * frame or event (#3108). */
 static int conn_send(HttpConn* c, const void* buf, int len) {
     if (c->pure_tls) {
         return pt_server_send(c->pure_tls, buf, len);
@@ -390,7 +408,22 @@ static int conn_send(HttpConn* c, const void* buf, int len) {
         return n;
     }
 #endif
-    return (int)send(c->fd, buf, len, 0);
+    const char* p = (const char*)buf;
+    int sent = 0;
+    while (sent < len) {
+        int n = (int)send(c->fd, p + sent, (size_t)(len - sent), AE_SEND_NOSIGNAL);
+        if (n > 0) {
+            sent += n;
+            continue;
+        }
+#ifdef _WIN32
+        if (n < 0 && WSAGetLastError() == WSAEINTR) continue;
+#else
+        if (n < 0 && errno == EINTR) continue;
+#endif
+        return -1;
+    }
+    return sent;
 }
 
 /* Issue #383 zero-copy helpers. */
@@ -2279,6 +2312,10 @@ void http_response_set_status(HttpServerResponse* res, int code) {
     res->status_text = strdup(http_status_text(code));
 }
 
+int http_response_get_status(HttpServerResponse* res) {
+    return res ? res->status_code : 0;
+}
+
 /* The reverse proxy's options, if this server has one mounted.
  *
  * The event driver needs them because it runs the proxy exchange itself. It
@@ -2578,6 +2615,7 @@ char* http_response_serialize(HttpServerResponse* res) {
 
 void http_server_response_free(HttpServerResponse* res) {
     if (res && res->sse_upgrade) { free(res->sse_upgrade); res->sse_upgrade = NULL; }
+    if (res && res->chunked_stream) { free(res->chunked_stream); res->chunked_stream = NULL; }
     if (!res) return;
 
     free(res->status_text);
@@ -2906,6 +2944,84 @@ int http_sse_send_event_full(HttpSseConn* sse,
 void http_sse_close(HttpSseConn* sse) {
     if (!sse) return;
     sse->closed = 1;
+}
+
+int http_sse_send_comment(HttpSseConn* sse, const char* text) {
+    if (!sse || !sse->conn || sse->closed || !text || strchr(text, '\n') || strchr(text, '\r'))
+        return -1;
+    size_t len = strlen(text) + 4;   /* ": " text "\n\n" */
+    char* buf = (char*)malloc(len + 1);
+    if (!buf) return -1;
+    snprintf(buf, len + 1, ": %s\n\n", text);
+    int n = conn_send(sse->conn, buf, (int)len);
+    free(buf);
+    if (n != (int)len) {
+        sse->closed = 1;
+        return -1;
+    }
+    return 0;
+}
+
+struct HttpChunkedStream {
+    HttpConn* conn;     /* not owned */
+    int       closed;
+};
+
+HttpChunkedStream* http_response_begin_chunked_raw(HttpServerResponse* res) {
+    if (!res || res->takeover_taken || !res->takeover_conn) return NULL;
+    if (res->body && res->body_length > 0) return NULL;
+    HttpConn* conn = (HttpConn*)res->takeover_conn;
+    if (!conn || conn->fd < 0) return NULL;
+    /* From here the connection is the stream's: a failure below closes it,
+     * rather than the server sending a response half turned chunked. */
+    res->takeover_taken = 1;
+
+    /* The handler's status and headers; the body's length is not known, so
+     * any Content-Length goes. */
+    for (int i = 0; i < res->header_count; i++) {
+        if (strcasecmp(res->header_keys[i], "Content-Length") == 0) {
+            free(res->header_keys[i]);
+            free(res->header_values[i]);
+            res->header_keys[i] = res->header_keys[res->header_count - 1];
+            res->header_values[i] = res->header_values[res->header_count - 1];
+            res->header_count--;
+            i--;
+        }
+    }
+    http_response_set_header(res, "Transfer-Encoding", "chunked");
+    http_response_set_header(res, "Connection", "close");
+    size_t len = 0;
+    char* head = http_response_serialize_len(res, &len);
+    if (!head) return NULL;
+    int n = conn_send(conn, head, (int)len);
+    free(head);
+    if (n != (int)len) return NULL;
+
+    HttpChunkedStream* s = (HttpChunkedStream*)calloc(1, sizeof(HttpChunkedStream));
+    if (!s) return NULL;
+    s->conn = conn;
+    res->chunked_stream = s;
+    return s;
+}
+
+int http_chunked_write(HttpChunkedStream* s, const void* data, int length) {
+    if (!s || !s->conn || s->closed || length < 0 || (length > 0 && !data)) return -1;
+    if (length == 0) return 0;
+    char size_line[16];
+    int sl = snprintf(size_line, sizeof(size_line), "%x\r\n", (unsigned)length);
+    if (conn_send(s->conn, size_line, sl) != sl ||
+        conn_send(s->conn, data, length) != length ||
+        conn_send(s->conn, "\r\n", 2) != 2) {
+        s->closed = 1;
+        return -1;
+    }
+    return 0;
+}
+
+int http_chunked_end(HttpChunkedStream* s) {
+    if (!s || !s->conn || s->closed) return -1;
+    s->closed = 1;
+    return conn_send(s->conn, "0\r\n\r\n", 5) == 5 ? 0 : -1;
 }
 
 // =================================================================
@@ -3598,6 +3714,10 @@ HttpWsConn* http_ws_connect(const char* url) {
         close(fd); freeaddrinfo(res); return NULL;
     }
     freeaddrinfo(res);
+#ifdef SO_NOSIGPIPE
+    int nosigpipe = 1;
+    setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &nosigpipe, sizeof(nosigpipe));
+#endif
 
     /* wss:// -- wrap the connected socket before a single handshake byte
      * moves. The CTX is the HTTP client's, so wss inherits the same trust
@@ -4341,6 +4461,8 @@ static void conn_send_bad_request_line(HttpConn* conn) {
     conn->linger_on_close = 1;
 }
 
+static void conn_set_recv_timeout(HttpConn* c, int ms);
+
 static int handle_one_request(HttpServer* server, HttpConn* conn,
                               int requests_served, int max_requests) {
     int64_t t_start = http_now_us();
@@ -4812,6 +4934,12 @@ static int handle_one_request(HttpServer* server, HttpConn* conn,
                         http_server_response_free(res);
                         return 0;  /* close */
                     }
+                    /* #3118: the idle timeout guards the wait for the next
+                     * request; a WebSocket at rest between messages is the
+                     * protocol working. Left on, a blocking ws_recv took
+                     * the timeout for a close and dropped any client quiet
+                     * that long. ws_recv_timeout bounds a wait of its own. */
+                    conn_set_recv_timeout(conn, 0);
                     HttpWsConn ws_handle = {
                         .conn = conn, .closed = 0,
                         .msg_buf = NULL, .msg_cap = 0,
@@ -5190,25 +5318,29 @@ static int64_t conn_now_ms(void) {
     return (int64_t)time(NULL) * 1000;
 }
 
-/* Per-recv socket timeout, applied whenever a worker is about to block on
- * this connection. Also the idle guard against a slow-loris client. */
-static void conn_apply_recv_timeout(HttpServer* server, HttpConn* c) {
-    int fd = c->fd;
-    int idle_ms = server->keep_alive_idle_ms > 0
-        ? server->keep_alive_idle_ms : 30000;
-    if (c->applied_recv_timeout_ms == idle_ms) return;
-    c->applied_recv_timeout_ms = idle_ms;
+/* The receive timeout on `c`'s socket: `ms` milliseconds, 0 for none (a
+ * recv then waits as long as the peer stays connected). */
+static void conn_set_recv_timeout(HttpConn* c, int ms) {
+    if (c->applied_recv_timeout_ms == ms) return;
+    c->applied_recv_timeout_ms = ms;
 #ifdef _WIN32
-    DWORD rcv_timeout = (DWORD)idle_ms;
-    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO,
+    DWORD rcv_timeout = (DWORD)ms;
+    setsockopt(c->fd, SOL_SOCKET, SO_RCVTIMEO,
                (const char*)&rcv_timeout, sizeof(rcv_timeout));
 #else
     struct timeval rcv_tv = {
-        .tv_sec  = idle_ms / 1000,
-        .tv_usec = (idle_ms % 1000) * 1000
+        .tv_sec  = ms / 1000,
+        .tv_usec = (ms % 1000) * 1000
     };
-    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &rcv_tv, sizeof(rcv_tv));
+    setsockopt(c->fd, SOL_SOCKET, SO_RCVTIMEO, &rcv_tv, sizeof(rcv_tv));
 #endif
+}
+
+/* Per-recv socket timeout, applied whenever a worker is about to block on
+ * this connection. Also the idle guard against a slow-loris client. */
+static void conn_apply_recv_timeout(HttpServer* server, HttpConn* c) {
+    conn_set_recv_timeout(c, server->keep_alive_idle_ms > 0
+                             ? server->keep_alive_idle_ms : 30000);
 }
 
 /* Is the next request already here, or about to be?
@@ -5484,12 +5616,14 @@ void http_server_drain_connection(HttpServer* server, int client_fd) {
     conn_serve(server, conn);
 }
 
+#if AETHER_HAS_THREADS
 /* The parking lot woke a connection: put it back on a worker rather than
  * serving it on the poller thread, which must stay free for the other parked
- * connections. */
+ * connections. Threaded only, as its caller and the pool are (#3121). */
 static void http_park_resume(HttpServer* server, HttpConn* conn) {
     http_pool_submit_conn((HttpConnectionPool*)server->conn_pool, conn);
 }
+#endif
 
 static void handle_client_connection(HttpServer* server, int client_fd) {
     /* Thread-pool path — defers to the public drain helper so the

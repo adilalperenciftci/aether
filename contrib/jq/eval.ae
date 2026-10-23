@@ -1714,7 +1714,7 @@ _bind_alternatives(ctx: *Ctx, patterns: ptr, v: @keep ptr, env: @keep ptr, s: *S
 }
 
 // The P_VAR / P_ENTRY-with-$name nodes of a pattern, appended to `names`.
-_collect_pattern_vars(pat: ptr, names: ptr) {
+_collect_pattern_vars(pat: @keep ptr, names: ptr) {
     pn = pat as *Node
     if pn.kind == ast.P_VAR {
         list.add_raw(names, pat)
@@ -3637,9 +3637,9 @@ _contains(a: ptr, b: ptr) -> int {
 
 // Codepoint offsets of every occurrence of `sub` in `s` (overlapping).
 _str_indices(s: string, sub: string) -> ptr {
-    out = json.arr()
     m = string.length(sub)
     if m == 0 { return json.null_value() }
+    out = json.arr()
     start = 0
     while 1 == 1 {
         idx = string.index_of_from(s, sub, start)
@@ -3647,7 +3647,6 @@ _str_indices(s: string, sub: string) -> ptr {
         json.array_add_raw(out, json.from_int(value.codepoint_of_byte(s, idx) as long))
         start = idx + 1
     }
-    return out
 }
 
 _flatten_into(out: ptr, arr: ptr, depth: int) {

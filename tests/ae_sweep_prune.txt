@@ -11,6 +11,7 @@
 /lib/
 tests/integration/actor_alignment/
 tests/integration/actor_ref_after_release/
+tests/integration/actor_state_base_member_reject/
 tests/integration/ae_inspect/
 tests/integration/ae_add_release_artifact/
 tests/integration/ae_run_cflags/
@@ -245,6 +246,7 @@ tests/integration/when_in_imported_module/
 tests/integration/where_clause/
 tests/integration/ws_client_loopback/
 tests/integration/ws_client_nonblocking/
+tests/integration/ws_idle_server/
 tests/integration/ws_client_conformance/
 tests/integration/wss_client_tls/
 tests/integration/wycheproof/
@@ -272,3 +274,5 @@ tests/integration/emit_header_layout/
 tests/integration/extern_fnptr_bare_function/
 # #2683: mainfile.ae and imported.ae must not compile; the driver checks the diagnostic.
 tests/integration/local_named_after_called_function/
+# #3113: reject_*.ae must not compile and panic_shadowed.ae must panic; the driver checks each.
+tests/integration/array_index_checked/

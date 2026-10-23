@@ -110,14 +110,15 @@ struct AetherString* tinygo_call_str_str_owned  (void* h, const char* s, const c
 //
 // kinds: a NUL-terminated array of single-character codes
 //   'v' void  'i' int32  'l' int64  'd' double  's' const char*  'p' void*
-// return_kind is one of the same codes.
+// return_kind is one of the same codes, passed as an int (the width the
+// Aether extern gives it, #3097).
 // args is an array of argument-value pointers; each pointer points
 // to a value of the matching kind. The result (int64-sized buffer)
 // is written into *result_out.
 //
 // Returns 1 on success, 0 on failure (consult last_error).
 int tinygo_call_dynamic(void* handle, const char* sym,
-                        char return_kind, const char* arg_kinds,
+                        int return_kind, const char* arg_kinds,
                         void** args, void* result_out);
 
 #endif

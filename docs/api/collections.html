@@ -174,6 +174,7 @@
       <h3 class="function-name">list_add_raw <span class="kind">extern</span></h3>
       <pre class="usage"><code>list_add_raw(list, item) <span class="arrow">-&gt;</span> int</code></pre>
       <p class="signature"><span class="sig-params">list: ptr, item: ptr</span></p>
+      <p class="doc">The stores keep their item past the call (#3086): a `ptr` stays the container's, so a function that stores a borrowed `ptr` parameter declares it `@keep`, and a string or a closure is handed a reference of its own (`@retain`, R4).</p>
     </div>
     <div class="function" id="list_get_raw" data-name="list_get_raw">
       <h3 class="function-name">list_get_raw <span class="kind">extern</span></h3>
@@ -364,7 +365,7 @@
       <p class="signature"><span class="sig-params">list: ptr</span></p>
     </div>
     <div class="function" id="list_add" data-name="list_add">
-      <h3 class="function-name">list_add <span class="kind">fn</span></h3>
+      <h3 class="function-name">list_add <span class="kind">extern</span></h3>
       <pre class="usage"><code>list_add(list, item) <span class="arrow">-&gt;</span> string</code></pre>
       <p class="signature"><span class="sig-params">list: ptr, item: ptr</span></p>
       <p class="doc">Append an item to a list. Returns &quot;&quot; on success, error on failure (OOM during resize, null list).</p>
@@ -376,7 +377,7 @@
       <p class="doc">Index into a list. - (item, &quot;&quot;)                     : index in range - (null, &quot;index out of range&quot;)   : index &lt; 0 or index &gt;= size - (null, &quot;null list&quot;)            : `list` is null An empty error means the value is good, as everywhere else in std (#2439).</p>
     </div>
     <div class="function" id="map_put" data-name="map_put">
-      <h3 class="function-name">map_put <span class="kind">fn</span></h3>
+      <h3 class="function-name">map_put <span class="kind">extern</span></h3>
       <pre class="usage"><code>map_put(map, key, value) <span class="arrow">-&gt;</span> string</code></pre>
       <p class="signature"><span class="sig-params">map: ptr, key: string, value: ptr</span></p>
       <p class="doc">Insert or update a key-value pair. Returns &quot;&quot; on success, error on failure (OOM during resize, null map, null key).</p>

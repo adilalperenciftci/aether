@@ -5,7 +5,6 @@ import std.plural
 import std.map
 import std.list
 import std.strbuilder
-import std.mem
 
 exports(
     format, parse, format_pattern, pattern_free,
@@ -39,11 +38,6 @@ struct Catalog {
     messages: ptr // Map of ID -> *Pattern
 }
 
-struct MessageMapKeys {
-    keys: ptr
-    count: int
-}
-
 fn skip_ws(p: *MessageParser) {
     while p.pos < p.len {
         c = string_char_at(p.msg, p.pos)
@@ -62,7 +56,7 @@ fn node_free(n_ptr: ptr) {
         sz = list_size(n.branches)
         i = 0
         while i < sz {
-            b = list_get_raw(n.branches, i) as *Branch
+            b = list.at(n.branches, i) as *Branch
             if b != null {
                 if b.pattern != null {
                     pattern_nodes_free(b.pattern)
@@ -81,7 +75,7 @@ fn pattern_nodes_free(nodes_list: ptr) {
     sz = list_size(nodes_list)
     i = 0
     while i < sz {
-        n = list_get_raw(nodes_list, i) as *Node
+        n = list.at(nodes_list, i) as *Node
         if n != null {
             node_free(n)
         }
@@ -181,7 +175,7 @@ fn parse_pattern_err(p: *MessageParser) -> (ptr, string) {
             n.kind = 4 // Hash
             n.text = ""
             n.branches = null
-            list_add_raw(nodes, n)
+            list.add(nodes, n)
             p.pos = p.pos + 1
             continue
         }
@@ -192,13 +186,13 @@ fn parse_pattern_err(p: *MessageParser) -> (ptr, string) {
                 return null, err
             }
             string_release(err)
-            list_add_raw(nodes, block_node)
+            list.add(nodes, block_node)
         } else {
             lit_node = parse_literal(p)
             if string_length(lit_node.text) == 0 {
                 node_free(lit_node)
             } else {
-                list_add_raw(nodes, lit_node)
+                list.add(nodes, lit_node)
             }
         }
     }
@@ -341,7 +335,7 @@ fn parse_block(p: *MessageParser) -> (ptr, string) {
         b = heap.new(Branch)
         b.selector = selector
         b.pattern = branch_nodes
-        list_add_raw(branches, b)
+        list.add(branches, b)
     }
 
     if is_plural == 1 {
@@ -352,7 +346,7 @@ fn parse_block(p: *MessageParser) -> (ptr, string) {
         sz = list_size(branches)
         i = 0
         while i < sz {
-            b = list_get_raw(branches, i) as *Branch
+            b = list.at(branches, i) as *Branch
             if b != null {
                 pattern_nodes_free(b.pattern)
                 heap.free(b)
@@ -368,7 +362,7 @@ fn parse_block(p: *MessageParser) -> (ptr, string) {
         sz = list_size(branches)
         i = 0
         while i < sz {
-            b = list_get_raw(branches, i) as *Branch
+            b = list.at(branches, i) as *Branch
             if b != null {
                 pattern_nodes_free(b.pattern)
                 heap.free(b)
@@ -558,7 +552,7 @@ fn format_nodes(locale: string, nodes: ptr, args: ptr, plural_val: string) -> st
     sz = list_size(nodes)
     i = 0
     while i < sz {
-        n = list_get_raw(nodes, i) as *Node
+        n = list.at(nodes, i) as *Node
         if n != null {
             if n.kind == 0 {
                 strbuilder.append(sb, n.text)
@@ -589,7 +583,7 @@ fn format_nodes(locale: string, nodes: ptr, args: ptr, plural_val: string) -> st
                 // 1. Check explicit branches `=N`: an exactly equal number
                 bi = 0
                 while is_numeral && bi < bz {
-                    b = list_get_raw(n.branches, bi) as *Branch
+                    b = list.at(n.branches, bi) as *Branch
                     if b != null && string_starts_with(b.selector, "=") == 1 {
                         sel_val_str = string_substring(b.selector, 1, string_length(b.selector))
                         sel_num = decimal_canonical(sel_val_str)
@@ -607,7 +601,7 @@ fn format_nodes(locale: string, nodes: ptr, args: ptr, plural_val: string) -> st
                     category = decimal_category(locale, count_trimmed)
                     bi = 0
                     while bi < bz {
-                        b = list_get_raw(n.branches, bi) as *Branch
+                        b = list.at(n.branches, bi) as *Branch
                         if b != null && string_equals(b.selector, category) == 1 {
                             chosen_branch = b
                             break
@@ -621,7 +615,7 @@ fn format_nodes(locale: string, nodes: ptr, args: ptr, plural_val: string) -> st
                 if chosen_branch == null {
                     bi = 0
                     while bi < bz {
-                        b = list_get_raw(n.branches, bi) as *Branch
+                        b = list.at(n.branches, bi) as *Branch
                         if b != null && string_equals(b.selector, "other") == 1 {
                             chosen_branch = b
                             break
@@ -632,7 +626,7 @@ fn format_nodes(locale: string, nodes: ptr, args: ptr, plural_val: string) -> st
 
                 // 4. Degrade gracefully
                 if chosen_branch == null && bz > 0 {
-                    chosen_branch = list_get_raw(n.branches, 0) as *Branch
+                    chosen_branch = list.at(n.branches, 0) as *Branch
                 }
 
                 if chosen_branch != null {
@@ -651,7 +645,7 @@ fn format_nodes(locale: string, nodes: ptr, args: ptr, plural_val: string) -> st
 
                 bi = 0
                 while bi < bz {
-                    b = list_get_raw(n.branches, bi) as *Branch
+                    b = list.at(n.branches, bi) as *Branch
                     if b != null && string_equals(b.selector, sel_val) == 1 {
                         chosen_branch = b
                         break
@@ -662,7 +656,7 @@ fn format_nodes(locale: string, nodes: ptr, args: ptr, plural_val: string) -> st
                 if chosen_branch == null {
                     bi = 0
                     while bi < bz {
-                        b = list_get_raw(n.branches, bi) as *Branch
+                        b = list.at(n.branches, bi) as *Branch
                         if b != null && string_equals(b.selector, "other") == 1 {
                             chosen_branch = b
                             break
@@ -672,7 +666,7 @@ fn format_nodes(locale: string, nodes: ptr, args: ptr, plural_val: string) -> st
                 }
 
                 if chosen_branch == null && bz > 0 {
-                    chosen_branch = list_get_raw(n.branches, 0) as *Branch
+                    chosen_branch = list.at(n.branches, 0) as *Branch
                 }
 
                 if chosen_branch != null {
@@ -726,10 +720,10 @@ fn catalog_add(cat_ptr: ptr, id: string, msg: string) {
     }
     string_release(err)
     if map_has(cat.messages, id) == 1 {
-        old_pat = map_get_raw(cat.messages, id) as *Pattern
+        old_pat = map.lookup(cat.messages, id) as *Pattern
         pattern_free(old_pat)
     }
-    map_put_raw(cat.messages, id, pat as ptr)
+    map.put(cat.messages, id, pat as ptr)
 }
 
 fn catalog_format(cat_ptr: ptr, id: string, args: ptr) -> string {
@@ -740,7 +734,7 @@ fn catalog_format(cat_ptr: ptr, id: string, args: ptr) -> string {
     if map_has(cat.messages, id) == 0 {
         return string_concat("[missing: ", string_concat(id, "]"))
     }
-    pat = map_get_raw(cat.messages, id) as *Pattern
+    pat = map.lookup(cat.messages, id) as *Pattern
     if pat == null {
         return string_concat("[missing: ", string_concat(id, "]"))
     }
@@ -751,19 +745,20 @@ fn catalog_free(cat_ptr: ptr) {
     if cat_ptr == null { return }
     cat = cat_ptr as *Catalog
 
-    mk_ptr = map_keys_raw(cat.messages)
-    if mk_ptr != null {
-        mk = mk_ptr as *MessageMapKeys
-        i = 0
-        while i < mk.count {
-            id = mem.get_ptr(mk.keys, i * 8)
-            pat = map_get_raw(cat.messages, id) as *Pattern
-            if pat != null {
-                pattern_free(pat)
-            }
-            i = i + 1
+    // map.keys is a snapshot of the keys; keys_size and keys_get read it
+    // (the map's own layout is the map's business).
+    keys, _kerr = map.keys(cat.messages)
+    n = map.keys_size(keys)
+    i = 0
+    while i < n {
+        pat = map.lookup(cat.messages, map.keys_get(keys, i)) as *Pattern
+        if pat != null {
+            pattern_free(pat)
         }
-        map_keys_free(mk_ptr)
+        i = i + 1
+    }
+    if keys != null {
+        map_keys_free(keys)
     }
     map_free(cat.messages)
     heap.free(cat)

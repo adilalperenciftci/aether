@@ -51,9 +51,9 @@ extern aether_host_run_script_sandboxed(perms: sandbox.Grants, script_path: stri
 // via aether_map_get/aether_map_put.  The map is serialized to
 // shared memory before launch and read back after the child exits.
 // Returns: child exit code (0 = success).
-extern aether_host_run_sandboxed_with_map(perms: sandbox.Grants, binary_path: string, map_token: int) -> int
+extern aether_host_run_sandboxed_with_map(perms: sandbox.Grants, binary_path: string, map_token: long) -> int
 extern aether_host_run_script_sandboxed_with_map(
-    perms: sandbox.Grants, script_path: string, map_token: int) -> int
+    perms: sandbox.Grants, script_path: string, map_token: long) -> int
 
 // Run without sandbox (full access).  Still a subprocess — useful for
 // testing or trusted scripts that need unrestricted access.

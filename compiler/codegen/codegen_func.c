@@ -1,4 +1,5 @@
 #include "codegen_internal.h"
+#include "../aether_error.h"
 
 // True when this function definition is annotated `@c_callback`.
 // The annotation (#235) marks a function as having a stable, externally-
@@ -1827,7 +1828,10 @@ static void emit_function(CodeGenerator* gen, ASTNode* func, const char* clause_
     // generated C colliding at link time. Closes #279.
     // A clause function is static whatever its set's linkage: only the
     // set's dispatcher calls it.
-    if (as_clause) {
+    if (gen->fn_cname_override) {
+        // A function's view body (#3029): only its own entry calls it.
+        fprintf(gen->output, "static AETHER_MAYBE_UNUSED ");
+    } else if (as_clause) {
         fprintf(gen->output, fn_body_inlinable(func) ? "static inline AETHER_MAYBE_UNUSED "
                                                      : "static AETHER_MAYBE_UNUSED ");
     } else if (fn_has_internal_linkage(func)) {
@@ -1867,8 +1871,9 @@ static void emit_function(CodeGenerator* gen, ASTNode* func, const char* clause_
     // mangling); the symbol is what other translation units reach for
     // when they take the address of this function.
     const char* cb_sym = c_callback_symbol(func);
-    fprintf(gen->output, " %s(", as_clause ? clause_cname
-                                           : (cb_sym ? cb_sym : safe_c_name(func->value)));
+    fprintf(gen->output, " %s(", gen->fn_cname_override ? gen->fn_cname_override
+                                 : as_clause ? clause_cname
+                                 : (cb_sym ? cb_sym : safe_c_name(func->value)));
 
     // Generate parameters - handle pattern matching. A parameter's C name
     // carries its position: `_pattern_<pos>` for a literal or struct
@@ -2002,6 +2007,33 @@ static void emit_function(CodeGenerator* gen, ASTNode* func, const char* clause_
     }
 
     fprintf(gen->output, ") {\n");
+
+    /* #3029: one test of the sentinel at entry. Every slice parameter the
+     * body indexes an unbounded view: the view body runs instead, with the
+     * arguments as they arrived. Otherwise this checked body does. */
+    if (gen->slice_view_dispatch_count > 0) {
+        fprintf(gen->output, "    if (");
+        for (int k = 0; k < gen->slice_view_dispatch_count; k++) {
+            fprintf(gen->output, "%s%s.len == AETHER_SLICE_UNBOUNDED", k ? " && " : "",
+                    gen->slice_view_dispatch[k]);
+        }
+        fprintf(gen->output, ") %s%s__aether_view(", result ? "return " : "{ ",
+                safe_c_name(func->value));
+        int na = 0;
+        for (int i = 0; i < func->child_count; i++) {
+            ASTNode* child = func->children[i];
+            if (!child || !child->value || (child->type != AST_PATTERN_VARIABLE &&
+                                            child->type != AST_VARIABLE_DECLARATION)) continue;
+            int is_promoted = 0;
+            for (int pp = 0; pp < promoted_count; pp++)
+                if (promoted[pp] && strcmp(promoted[pp], child->value) == 0) is_promoted = 1;
+            fprintf(gen->output, "%s%s%s", na ? ", " : "",
+                    (is_promoted || is_sized_array_param(child->node_type)) ? "_param_" : "",
+                    child->value);
+            na++;
+        }
+        fprintf(gen->output, result ? ");\n" : "); return; }\n");
+    }
 
     /* std.mem scalar accessors: emit the body inline instead of the extern
      * call (#1733).
@@ -2290,7 +2322,124 @@ static void emit_function(CodeGenerator* gen, ASTNode* func, const char* clause_
     print_line(gen, "");
 }
 
+/* ---- #3029: versioning on the unbounded-view sentinel ---------------------
+ *
+ * A function whose caller the C compiler cannot see (another translation
+ * unit, a function pointer, a library boundary) cannot tell a bounded slice
+ * from an unbounded view (`p as T[]`, its length the sentinel), so every
+ * index of a slice parameter tests the sentinel and then the bound, and the
+ * loop around it does not vectorize: 4.2x on an int sum and 6.4x on an f32
+ * map at -O3 (the issue's table). Such a function is emitted twice: a view
+ * body, where every slice parameter it indexes is a view and an index is
+ * the element's address with no test (a view has no length to test, which
+ * is what the checked access does with it too), and the function itself,
+ * whose entry tests the sentinel once and calls the view body when every
+ * one of them is a view, and runs its own checked body otherwise. Per
+ * function, not per loop: a body's declarations, defers and labels are the
+ * function's. A slice the function binds again, takes the address of, or
+ * that a closure inside it captures, is not versioned. */
+
+/* Whether `operand`, under any member accesses, is the identifier `name`:
+ * `&xs` or `&xs.field`, the address of the slice itself rather than of an
+ * element. */
+static int view_param_address_of(ASTNode* operand, const char* name) {
+    while (operand && operand->type == AST_MEMBER_ACCESS && operand->child_count > 0)
+        operand = operand->children[0];
+    return operand && operand->type == AST_IDENTIFIER && operand->value &&
+           strcmp(operand->value, name) == 0;
+}
+
+/* Whether `node` binds, assigns or names `name` other than by reading it,
+ * or takes its address: through the address the slice can be made
+ * bounded after the entry's test, and the view body would index it with
+ * no check. */
+static int view_param_rebound(ASTNode* node, const char* name) {
+    if (!node) return 0;
+    if (node->value && node->type != AST_IDENTIFIER && strcmp(node->value, name) == 0) return 1;
+    if (node->type == AST_UNARY_EXPRESSION && node->value && strcmp(node->value, "&") == 0 &&
+        node->child_count > 0 && view_param_address_of(node->children[0], name)) return 1;
+    for (int i = 0; i < node->child_count; i++)
+        if (view_param_rebound(node->children[i], name)) return 1;
+    return 0;
+}
+
+/* Whether `node` indexes the identifier `name`. */
+static int view_param_indexed(ASTNode* node, const char* name) {
+    if (!node) return 0;
+    if (node->type == AST_ARRAY_ACCESS && node->child_count >= 2 && node->children[0] &&
+        node->children[0]->type == AST_IDENTIFIER && node->children[0]->value &&
+        strcmp(node->children[0]->value, name) == 0) return 1;
+    for (int i = 0; i < node->child_count; i++)
+        if (view_param_indexed(node->children[i], name)) return 1;
+    return 0;
+}
+
+/* Whether `node` holds a closure or a quote: a body of its own, emitted
+ * once, which a second copy of the function must not emit again. */
+static int view_body_has_closure(ASTNode* node) {
+    if (!node) return 0;
+    if (node->type == AST_CLOSURE) return 1;
+    for (int i = 0; i < node->child_count; i++)
+        if (view_body_has_closure(node->children[i])) return 1;
+    return 0;
+}
+
+/* The slice parameters of `func` that its body indexes and never binds
+ * again, at most `max`; 0 when the function is not one to version. */
+static int slice_view_params(CodeGenerator* gen, ASTNode* func, const char** out, int max) {
+    if (!func || func->type != AST_FUNCTION_DEFINITION || !func->value) return 0;
+    if (annotation_has_marker(func->annotation, "varargs") || is_c_callback(func)) return 0;
+    ASTNode* body = NULL;
+    for (int i = 0; i < func->child_count; i++) {
+        ASTNode* child = func->children[i];
+        if (!child) return 0;
+        if (child->type == AST_BLOCK) {
+            body = child;
+        } else if (child->type != AST_PATTERN_VARIABLE &&
+                   child->type != AST_VARIABLE_DECLARATION) {
+            return 0;   // a pattern or a guard: a clause shape, dispatched elsewhere
+        }
+    }
+    if (!body || view_body_has_closure(body)) return 0;
+    char** promoted = NULL;
+    int promoted_count = 0;
+    get_promoted_names_for_func(gen, fn_scope_name(gen->program, func), &promoted, &promoted_count);
+    int n = 0;
+    for (int i = 0; i < func->child_count && n < max; i++) {
+        ASTNode* child = func->children[i];
+        if (child->type == AST_BLOCK || !child->value || !type_is_slice(child->node_type)) continue;
+        int is_promoted = 0;
+        for (int p = 0; p < promoted_count; p++)
+            if (promoted[p] && strcmp(promoted[p], child->value) == 0) is_promoted = 1;
+        if (is_promoted || view_param_rebound(body, child->value)) continue;
+        if (view_param_indexed(body, child->value)) out[n++] = child->value;
+    }
+    return n;
+}
+
 void generate_function_definition(CodeGenerator* gen, ASTNode* func) {
+    const char* views[8];
+    int nviews = slice_view_params(gen, func, views, 8);
+    if (nviews > 0) {
+        gen->slice_view_names = views;
+        gen->slice_view_count = nviews;
+        gen->fn_cname_override = cg_internf("%s__aether_view", safe_c_name(func->value));
+        /* The same source is rendered twice: the view body reports
+         * nothing, and the function's own body, emitted next, reports
+         * every diagnostic once. */
+        aether_diagnostics_set_muted(1);
+        emit_function(gen, func, NULL);
+        aether_diagnostics_set_muted(0);
+        gen->slice_view_names = NULL;
+        gen->slice_view_count = 0;
+        gen->fn_cname_override = NULL;
+        gen->slice_view_dispatch = views;
+        gen->slice_view_dispatch_count = nviews;
+        emit_function(gen, func, NULL);
+        gen->slice_view_dispatch = NULL;
+        gen->slice_view_dispatch_count = 0;
+        return;
+    }
     emit_function(gen, func, NULL);
 }
 

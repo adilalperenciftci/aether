@@ -33,11 +33,13 @@ if "$AETHERC" "$REG" "$tmp/reg.c" > "$tmp/reg.log" 2>&1; then
     tables=$(grep -c 'static void\* const _ae_td_tbl_' "$tmp/reg.c")
     jumps=$(grep -c 'goto \*_ae_td_tbl_' "$tmp/reg.c")
     # Nine loops: basic, with_default, head_continue, labeled, nested (two),
-    # cleanups, wide, with_tail.
-    if [ "$tables" = "9" ] && [ "$jumps" -gt 9 ]; then
-        ok "the regression test's 9 dispatch loops are threaded ($jumps dispatch sites)"
+    # cleanups, wide, with_tail. Each function indexes the program slice it
+    # is given, so each has two bodies (#3029: a view body, and the checked
+    # one), and every loop is threaded in both: 18 tables.
+    if [ "$tables" = "18" ] && [ "$jumps" -gt 18 ]; then
+        ok "the regression test's 9 dispatch loops are threaded in both bodies ($jumps dispatch sites)"
     else
-        bad "expected 9 dispatch tables and more than 9 jumps, got $tables and $jumps"
+        bad "expected 18 dispatch tables and more than 18 jumps, got $tables and $jumps"
     fi
 else
     bad "aetherc failed on the regression test"

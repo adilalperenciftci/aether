@@ -19,10 +19,10 @@
 
 import std.bytes
 import std.string
-import std.list(list_new, list_free, list_add_raw, list_get_raw, list_size)
+import std.list
+import std.list(list_new, list_free, list_size)
 import std.mem(copy)
 import std.fs
-import std.net
 import std.tcp
 import std.cryptography.sha2
 import std.cryptography.hmac
@@ -86,7 +86,7 @@ fn recio_fill(r: *RecordIO) -> int {
     filling = 1
     result = -1
     while filling == 1 {
-        chunk, n, err = net.tcp_receive_n_raw(r.sock, 4096)
+        chunk, n, err = tcp.read_n(r.sock, 4096)
         if string.equals(err, "") == 1 {
             if n <= 0 { result = n; filling = 0 } else {
                 bytes.copy_from_string(r.buf, r.len, chunk, n)
@@ -153,12 +153,12 @@ fn recio_next_hs(r: *RecordIO) -> (ptr, int, string) {
     return rec, rlen, err
 }
 
-// Send the first `n` bytes of the std.bytes buffer `rec` on `sock` as a
-// borrowed view of the buffer, with no string copy (#2301). Returns send(2)'s
-// count, or -1 on failure: the contract the call sites had when they copied
-// the record into a string for net.tcp_send_n_raw.
+// Send the record `rec` on `sock`, a borrowed view of its buffer with no
+// string copy (#2301), every byte of it however many sends that takes
+// (#3108): a short send left the peer holding part of a record. Returns the
+// record's length, or -1 on failure.
 fn srv_send_view(sock: ptr, rec: byte[]) -> int {
-    sent, err = tcp.write_n(sock, rec)
+    sent, err = tcp.write_all(sock, rec)
     if err != "" {
         return -1
     }
@@ -513,7 +513,7 @@ close_conn(conn: ptr) {
     tls13_record.free_ctx(c.app_send as ptr)
     tls13_record.free_ctx(c.app_recv as ptr)
     recio_free(c.rio as *RecordIO)
-    net.tcp_close(c.sock)
+    tcp.close(c.sock)
     libc_free(conn)
 }
 
@@ -533,8 +533,8 @@ parse_cert_chain_pem(pem_text: string) -> (ptr, ptr) {
         block = string.substring_n(pem_text, tlen, pos, block_end)
         der, _label, perr = pem.parse(block)
         if string.equals(perr, "") == 1 && der != null {
-            list_add_raw(chain, der)
-            list_add_raw(lens, null)
+            list.add(chain, der)
+            list.add(lens, null)
         }
         pos = block_end
     }
@@ -606,7 +606,7 @@ fn free_cert_chain(chain: ptr) {
     n = list_size(chain)
     i = 0
     while i < n {
-        c = list_get_raw(chain, i) as ptr
+        c = list.at(chain, i) as ptr
         if c != null { bytes.free(c) }
         i = i + 1
     }
@@ -620,19 +620,14 @@ pure_tls_server_accept(fd: int, cert_path: string, key_path: string) -> ptr {
     sock = tcp_socket_from_fd_owned(fd)
     if sock == null { return null }
 
-    fh_c = fs.file_open_raw(cert_path, "r")
-    if fh_c == null { net.tcp_close(sock); return null }
-    cert_text = fs.file_read_all_raw(fh_c)
-    fs.file_close(fh_c)
-
-    fh_k = fs.file_open_raw(key_path, "r")
-    if fh_k == null { net.tcp_close(sock); return null }
-    key_text = fs.file_read_all_raw(fh_k)
-    fs.file_close(fh_k)
+    cert_text, cerr = fs.read(cert_path)
+    if string.equals(cerr, "") != 1 { tcp.close(sock); return null }
+    key_text, kerr = fs.read(key_path)
+    if string.equals(kerr, "") != 1 { tcp.close(sock); return null }
 
     chain_list, lens_list = parse_cert_chain_pem(cert_text)
     if chain_list == null {
-        net.tcp_close(sock)
+        tcp.close(sock)
         return null
     }
 
@@ -646,7 +641,7 @@ pure_tls_server_accept(fd: int, cert_path: string, key_path: string) -> ptr {
     if priv_key == null {
         free_cert_chain(chain_list)
         list_free(lens_list)
-        net.tcp_close(sock)
+        tcp.close(sock)
         return null
     }
 
@@ -657,7 +652,7 @@ pure_tls_server_accept(fd: int, cert_path: string, key_path: string) -> ptr {
         bytes.free(priv_key)
         free_cert_chain(chain_list)
         list_free(lens_list)
-        net.tcp_close(sock)
+        tcp.close(sock)
         return null
     }
 

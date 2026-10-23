@@ -81,7 +81,7 @@ str_of(v: string) -> string { return v }
 
 get(m: ptr, k: string) -> string {
     if map_has(m, k) == 0 { return "" }
-    return str_of(map_get_raw(m, k))
+    return str_of(map.lookup(m, k))
 }
 
 put(m: ptr, k: string, v: string) {
@@ -826,7 +826,7 @@ require_command(c: string, owner: string) {
 select_selection(api: string, extensions: string) {
     i = 0
     while i < list_size(g_features) {
-        f = str_of(list_get_raw(g_features, i))
+        f = str_of(list.at(g_features, i))
         if version_le(get(g_feat_number, f), api) == 1 { put(g_selected, f, "1") }
         i = i + 1
     }
@@ -846,7 +846,7 @@ select_selection(api: string, extensions: string) {
     // order, each block only when its `depends` holds.
     k = 0
     while k < list_size(g_order_owners) {
-        owner = str_of(list_get_raw(g_order_owners, k))
+        owner = str_of(list.at(g_order_owners, k))
         if map_has(g_selected, owner) == 1 {
             reqs = lines_of(get(g_reqs, owner))
             r = 0
@@ -883,10 +883,10 @@ select_selection(api: string, extensions: string) {
     // (VK_MAX_PHYSICAL_DEVICE_NAME_SIZE in VkPhysicalDeviceProperties) is
     // declared too. Registries from 1.3.207 list them in the features'
     // requirements; earlier ones name them only in the member.
-    keys = map_keys_raw(g_req_types)
+    keys, _kerr = map.keys(g_req_types)
     t = 0
-    while t < map_keys_size_raw(keys) {
-        ty = str_of(map_keys_get_raw(keys, t))
+    while t < map.keys_size(keys) {
+        ty = str_of(map.keys_get(keys, t))
         cat = get(g_cat, ty)
         if string.equals(cat, "struct") == 1 || string.equals(cat, "union") == 1 {
             mem = lines_of(get(g_members, ty))
@@ -1056,7 +1056,7 @@ emit_module(path: string, api: string, extensions: string) {
     // and the extensions' spec versions and names.
     k = 0
     while k < list_size(g_ext_const_order) {
-        nm = str_of(list_get_raw(g_ext_const_order, k))
+        nm = str_of(list.at(g_ext_const_order, k))
         v = get(g_ext_consts, nm)
         if string.equals(v, "=") == 1 {
             ty = get(g_const_type, nm)
@@ -1099,11 +1099,11 @@ emit_module(path: string, api: string, extensions: string) {
     }
     strbuilder.append(body, "\n")
 
-    enum_blocks = map_keys_raw(g_req_types)
+    enum_blocks, _berr = map.keys(g_req_types)
     blocks = list.new()
     b = 0
-    while b < map_keys_size_raw(enum_blocks) {
-        t = str_of(map_keys_get_raw(enum_blocks, b))
+    while b < map.keys_size(enum_blocks) {
+        t = str_of(map.keys_get(enum_blocks, b))
         if string.equals(get(g_cat, t), "enum") == 1 && map_has(g_enum_kind, t) == 1 {
             list.add(blocks, string.concat(t, ""))
         }
@@ -1114,7 +1114,7 @@ emit_module(path: string, api: string, extensions: string) {
     emitted = map.new()
     bi = 0
     while bi < list_size(blocks) {
-        t = str_of(list_get_raw(blocks, bi))
+        t = str_of(list.at(blocks, bi))
         strbuilder.append(body, "// ${t}\n")
         all = string.concat(get(g_enum_values, t), get(g_ext_values, t))
         vals = lines_of(all)
@@ -1161,7 +1161,7 @@ emit_module(path: string, api: string, extensions: string) {
     done = map.new()
     oi = 0
     while oi < list_size(g_order) {
-        emit_struct(str_of(list_get_raw(g_order, oi)), body, names, done)
+        emit_struct(str_of(list.at(g_order, oi)), body, names, done)
         oi = oi + 1
     }
 
@@ -1228,7 +1228,7 @@ emit_module(path: string, api: string, extensions: string) {
     loads_dev = strbuilder.new(1 << 14)
     ci = 0
     while ci < list_size(g_req_cmd_order) {
-        c = str_of(list_get_raw(g_req_cmd_order, ci))
+        c = str_of(list.at(g_req_cmd_order, ci))
         target = c
         alias = get(g_alias, c)
         if string.length(alias) > 0 { target = alias }
@@ -1562,9 +1562,9 @@ sort_list(l: ptr) {
     i = 1
     while i < n {
         j = i
-        while j > 0 && string.compare(str_of(list_get_raw(l, j - 1)), str_of(list_get_raw(l, j))) > 0 {
-            a = list_get_raw(l, j - 1)
-            list_set(l, j - 1, list_get_raw(l, j))
+        while j > 0 && string.compare(str_of(list.at(l, j - 1)), str_of(list.at(l, j))) > 0 {
+            a = list.at(l, j - 1)
+            list_set(l, j - 1, list.at(l, j))
             list_set(l, j, a)
             j = j - 1
         }
@@ -1665,7 +1665,7 @@ emit_dispatch(path: string, commands_path: string, api: string, extensions: stri
     strbuilder.append(sb, "#ifndef AETHER_VULKAN_DISPATCH_H\n#define AETHER_VULKAN_DISPATCH_H\n")
     oi = 0
     while oi < list_size(order) {
-        m = str_of(list_get_raw(order, oi))
+        m = str_of(list.at(order, oi))
         body = get(groups, m)
         strbuilder.append(sb, "\n/* ${get(levels, m)} */\n#define ${m}(X) \\\n")
         // Drop the continuation after the last entry.

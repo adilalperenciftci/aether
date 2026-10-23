@@ -813,7 +813,7 @@ builds a few programs (hello-world, a stateful actor, an actor pipeline, ping-po
 **Linux:**
 - Kernel 4.14+ recommended for full NUMA support
 - AddressSanitizer may require `gcc-multilib` on some distributions
-- Full thread affinity support for deterministic performance
+- Each scheduler thread is bound to one of the CPUs the process may use (its `taskset` or cpuset mask), and a container's CPU quota limits how many threads start
 
 **Windows:**
 - Pre-built binaries work in any terminal (PowerShell, CMD, Windows Terminal)

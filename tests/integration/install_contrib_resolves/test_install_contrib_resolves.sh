@@ -258,8 +258,10 @@ done
 # must produce a libaether_<X>.a. We skip the check when the system
 # dep was missing on the runner (recorded in MANIFEST: present = built).
 # `host/python` is recorded as `host_python` in the manifest.
-if [ ! -f "$MAKE_LIB_DIR/libaether_tinyweb.a" ]; then
-    echo "  [FAIL] tinyweb's archive missing from make install-contrib"
+# host/factor's bridge needs no headers or libraries to build (it dlopens
+# libfactor), so its archive is there on every runner.
+if [ ! -f "$MAKE_LIB_DIR/libaether_host_factor.a" ]; then
+    echo "  [FAIL] host/factor's archive missing from make install-contrib"
     exit 1
 fi
 

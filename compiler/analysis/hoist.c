@@ -6,50 +6,10 @@
 #include "hoist.h"
 #include "../aether_strmap.h"
 
+#include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-
-int hoist_direct_decl_names(ASTNode* block, const char** out, int count, int cap) {
-    if (!block || !out) return count;
-    for (int i = 0; i < block->child_count; i++) {
-        ASTNode* child = block->children[i];
-        if (!child) continue;
-        if (child->type == AST_VARIABLE_DECLARATION && child->value && count < cap) {
-            int already = 0;
-            for (int j = 0; j < count; j++) {
-                if (strcmp(out[j], child->value) == 0) { already = 1; break; }
-            }
-            if (!already) out[count++] = child->value;
-        }
-    }
-    return count;
-}
-
-ASTNode* hoist_find_decl(ASTNode* block, const char* name) {
-    if (!block || !name) return NULL;
-    for (int i = 0; i < block->child_count; i++) {
-        ASTNode* child = block->children[i];
-        if (!child) continue;
-        if (child->type == AST_VARIABLE_DECLARATION && child->value
-            && strcmp(child->value, name) == 0) {
-            return child;
-        }
-    }
-    return NULL;
-}
-
-int hoist_has_identifier_ref(ASTNode* node, const char* name) {
-    if (!node || !name) return 0;
-    if (node->type == AST_IDENTIFIER && node->value &&
-        strcmp(node->value, name) == 0) return 1;
-    /* Any identifier counts as a use; declaration order within a subtree is
-     * not tracked. Over-eager, and safe: an extra hoisted declaration is a
-     * zero-initialised local. */
-    for (int i = 0; i < node->child_count; i++) {
-        if (hoist_has_identifier_ref(node->children[i], name)) return 1;
-    }
-    return 0;
-}
 
 Type* hoist_decl_type(ASTNode* decl) {
     if (!decl) return NULL;
@@ -148,56 +108,9 @@ static void fold_bind(JoinFold* f, const ASTNode* n) {
     fold_add(f, t, v, written);
 }
 
-/* The bindings of `name` under `n` (closures excluded, each its own
- * function), joined in the order they are written. */
-static void join_walk(ASTNode* n, const char* name, JoinFold* f) {
-    if (!n) return;
-    if (n->type == AST_CLOSURE || n->type == AST_QUOTE) return;   /* its own function */
-    if (n->type == AST_VARIABLE_DECLARATION && n->value && strcmp(n->value, name) == 0)
-        fold_bind(f, n);
-    for (int i = 0; i < n->child_count; i++) join_walk(n->children[i], name, f);
-}
-
-static JoinFold fold_of(ASTNode* root, const char* name) {
-    JoinFold f;
-    memset(&f, 0, sizeof(f));
-    for (int i = 0; root && name && i < root->child_count; i++)
-        join_walk(root->children[i], name, &f);
-    return f;
-}
-
-Type* hoist_numeric_join(ASTNode* root, const char* name) {
-    JoinFold f = fold_of(root, name);
-    Type* r = fold_result(&f);
-    fold_free(&f);
-    return r;
-}
-
-/* The first binding of `name` under `n` (closures excluded) that writes
- * its type, of any kind. */
-static const ASTNode* first_written_decl(const ASTNode* n, const char* name) {
-    if (!n || n->type == AST_CLOSURE || n->type == AST_QUOTE) return NULL;
-    if (n->type == AST_VARIABLE_DECLARATION && n->value && !n->type_inferred && n->node_type &&
-        n->node_type->kind != TYPE_UNKNOWN && n->node_type->kind != TYPE_VOID &&
-        strcmp(n->value, name) == 0)
-        return n;
-    for (int i = 0; i < n->child_count; i++) {
-        const ASTNode* d = first_written_decl(n->children[i], name);
-        if (d) return d;
-    }
-    return NULL;
-}
-
-Type* hoist_written_type(ASTNode* root, const char* name) {
-    for (int i = 0; root && name && i < root->child_count; i++) {
-        const ASTNode* d = first_written_decl(root->children[i], name);
-        if (d) return clone_type(d->node_type);
-    }
-    return NULL;
-}
-
 /* #3064: the bindings of one name under a HoistJoins' root, in the order
- * join_walk meets them, and what the walk typing them has made of them.
+ * a walk of the root meets them, and what the walk typing them has made of
+ * them.
  * The walk types binds[0..typed) in that order; their parts are final for
  * it, folded in `head`. A binding not typed yet changes only when the walk
  * types it, so the parts of binds[typed..count) that `join` read (`rest`,
@@ -347,14 +260,159 @@ void hoist_joins_free(HoistJoins* j) {
     free(j);
 }
 
-/* Over the inferred bindings of `name` in `n` (closures excluded): sets
- * `*strings` when one is a string, `*others` when one is neither a string
- * nor `null`. */
-static void null_string_walk(ASTNode* n, const char* name, int* strings, int* others) {
-    if (!n) return;
-    if (n->type == AST_CLOSURE || n->type == AST_QUOTE) return;
-    if (n->type == AST_VARIABLE_DECLARATION && n->value && n->type_inferred &&
-        strcmp(n->value, name) == 0) {
+/* ---- #3083: one walk per body or statement ------------------------------
+ * The questions below are asked once per name, and a generated body binds
+ * thousands of names: walking the body for each was quadratic in them. Each
+ * answer is read from what one walk of the body (or the statement) gathered,
+ * kept until the next checker or codegen run (hoist_cache_reset). A walk
+ * gathers the tree's shape, which neither pass changes after codegen's
+ * renames; a binding's type, which the checker fills in as it goes, is read
+ * when it is asked for. The answers are kept by node, and a node's go with
+ * it (hoist_node_freed): one allocated later at its address is a new node. */
+
+struct HoistNodeCache {
+    HoistJoins* binds;   /* as a body: its bindings by name */
+    HoistNames* branch;  /* as a body: hoist_if_branch_hoists */
+    HoistNames* common;  /* as a statement: hoist_common_hoists */
+};
+
+/* Open addressing over the node's address; a removed slot is a tombstone
+ * until the table next grows. */
+typedef struct {
+    const ASTNode* node;
+    struct HoistNodeCache* cache;
+} CacheSlot;
+
+#define CACHE_TOMBSTONE ((const ASTNode*)(uintptr_t)1)
+
+static CacheSlot* g_cache;
+static size_t g_cache_cap;   /* a power of two, or 0 */
+static size_t g_cache_used;  /* live and tombstone slots */
+
+static size_t cache_hash(const ASTNode* n) {
+    uint64_t h = (uint64_t)(uintptr_t)n;
+    h ^= h >> 33;
+    h *= 0xff51afd7ed558ccdULL;
+    h ^= h >> 33;
+    return (size_t)h;
+}
+
+static CacheSlot* cache_slot(const ASTNode* n) {
+    if (!g_cache_cap) return NULL;
+    for (size_t i = cache_hash(n) & (g_cache_cap - 1);; i = (i + 1) & (g_cache_cap - 1)) {
+        if (g_cache[i].node == n) return &g_cache[i];
+        if (!g_cache[i].node) return NULL;
+    }
+}
+
+static void names_free(HoistNames* h) {
+    if (!h) return;
+    free((void*)h->names);
+    free(h->decls);
+    strmap_free(&h->at);
+    free(h);
+}
+
+static void cache_free(struct HoistNodeCache* c) {
+    hoist_joins_free(c->binds);
+    names_free(c->branch);
+    names_free(c->common);
+    free(c);
+}
+
+static struct HoistNodeCache* node_cache(ASTNode* n) {
+    CacheSlot* s = cache_slot(n);
+    if (s) return s->cache;
+    if ((g_cache_used + 1) * 2 > g_cache_cap) {
+        size_t cap = g_cache_cap ? g_cache_cap * 2 : 256;
+        CacheSlot* grown = (CacheSlot*)calloc(cap, sizeof(CacheSlot));
+        if (!grown) {
+            fprintf(stderr, "Fatal: out of memory in the hoisting cache\n");
+            exit(1);
+        }
+        size_t used = 0;
+        for (size_t i = 0; i < g_cache_cap; i++) {
+            const ASTNode* k = g_cache[i].node;
+            if (!k || k == CACHE_TOMBSTONE) continue;
+            size_t j = cache_hash(k) & (cap - 1);
+            while (grown[j].node) j = (j + 1) & (cap - 1);
+            grown[j] = g_cache[i];
+            used++;
+        }
+        free(g_cache);
+        g_cache = grown;
+        g_cache_cap = cap;
+        g_cache_used = used;
+    }
+    struct HoistNodeCache* c = (struct HoistNodeCache*)calloc(1, sizeof(*c));
+    if (!c) {
+        fprintf(stderr, "Fatal: out of memory in the hoisting cache\n");
+        exit(1);
+    }
+    size_t j = cache_hash(n) & (g_cache_cap - 1);
+    while (g_cache[j].node && g_cache[j].node != CACHE_TOMBSTONE) j = (j + 1) & (g_cache_cap - 1);
+    if (!g_cache[j].node) g_cache_used++;
+    g_cache[j].node = n;
+    g_cache[j].cache = c;
+    return c;
+}
+
+void hoist_node_freed(const ASTNode* n) {
+    CacheSlot* s = cache_slot(n);
+    if (!s) return;
+    cache_free(s->cache);
+    s->node = CACHE_TOMBSTONE;
+    s->cache = NULL;
+}
+
+void hoist_cache_reset(void) {
+    for (size_t i = 0; i < g_cache_cap; i++) {
+        if (g_cache[i].node && g_cache[i].node != CACHE_TOMBSTONE) cache_free(g_cache[i].cache);
+    }
+    free(g_cache);
+    g_cache = NULL;
+    g_cache_cap = 0;
+    g_cache_used = 0;
+}
+
+/* The bindings of `name` under `root` (closures excluded), in the order a
+ * walk of the body meets them; NULL for none. */
+static const HoistNameJoin* body_binds(ASTNode* root, const char* name) {
+    if (!root || !name) return NULL;
+    struct HoistNodeCache* c = node_cache(root);
+    if (!c->binds) c->binds = hoist_joins_new(root);
+    if (!c->binds) return NULL;
+    return (const HoistNameJoin*)strmap_get(&c->binds->names, name);
+}
+
+Type* hoist_numeric_join(ASTNode* root, const char* name) {
+    const HoistNameJoin* nj = body_binds(root, name);
+    JoinFold f;
+    memset(&f, 0, sizeof(f));
+    for (int i = 0; nj && i < nj->count; i++) fold_bind(&f, nj->binds[i]);
+    Type* r = fold_result(&f);
+    fold_free(&f);
+    return r;
+}
+
+Type* hoist_written_type(ASTNode* root, const char* name) {
+    const HoistNameJoin* nj = body_binds(root, name);
+    for (int i = 0; nj && i < nj->count; i++) {
+        const ASTNode* n = nj->binds[i];
+        if (!n->type_inferred && n->node_type && n->node_type->kind != TYPE_UNKNOWN &&
+            n->node_type->kind != TYPE_VOID)
+            return clone_type(n->node_type);
+    }
+    return NULL;
+}
+
+/* Over the inferred bindings of `name` under `root`: sets `*strings` when
+ * one is a string, `*others` when one is neither a string nor `null`. */
+static void null_string_binds(ASTNode* root, const char* name, int* strings, int* others) {
+    const HoistNameJoin* nj = body_binds(root, name);
+    for (int i = 0; nj && i < nj->count; i++) {
+        ASTNode* n = (ASTNode*)nj->binds[i];
+        if (!n->type_inferred) continue;
         ASTNode* init = n->child_count > 0 ? n->children[0] : NULL;
         Type* t = hoist_decl_type(n);
         if (init && init->type == AST_NULL_LITERAL) {
@@ -365,20 +423,18 @@ static void null_string_walk(ASTNode* n, const char* name, int* strings, int* ot
             *others = 1;
         }
     }
-    for (int i = 0; i < n->child_count; i++) null_string_walk(n->children[i], name, strings, others);
 }
 
-/* #2980 review: over the inferred bindings of `name` in `n` (closures
- * excluded), function values joined with `acc` by fn_type_mode_join. */
-static Type* fn_join_walk(ASTNode* n, const char* name, Type* acc) {
-    if (!n) return acc;
-    if (n->type == AST_CLOSURE || n->type == AST_QUOTE) return acc;
-    if (n->type == AST_VARIABLE_DECLARATION && n->value && n->type_inferred &&
-        strcmp(n->value, name) == 0) {
+/* #2980 review: the inferred bindings of `name` under `root` that are
+ * function values, joined with `acc` by fn_type_mode_join. */
+static Type* fn_join_binds(ASTNode* root, const char* name, Type* acc) {
+    const HoistNameJoin* nj = body_binds(root, name);
+    for (int i = 0; nj && i < nj->count; i++) {
+        ASTNode* n = (ASTNode*)nj->binds[i];
+        if (!n->type_inferred) continue;
         Type* j = fn_type_mode_join(acc, hoist_decl_type(n));
         if (j) { free_type(acc); acc = j; }
     }
-    for (int i = 0; i < n->child_count; i++) acc = fn_join_walk(n->children[i], name, acc);
     return acc;
 }
 
@@ -399,7 +455,7 @@ Type* hoist_join_type(ASTNode* scope_body, const char* name, Type* seed) {
      * through the stronger mode at each parameter, where either may stand;
      * typed from the first binding alone, a `@keep` in the other was lost. */
     if (seed->kind == TYPE_FUNCTION) {
-        Type* acc = fn_join_walk(scope_body, name, clone_type(seed));
+        Type* acc = fn_join_binds(scope_body, name, clone_type(seed));
         if (acc && types_equal(acc, seed)) { free_type(acc); return NULL; }
         return acc;
     }
@@ -410,7 +466,7 @@ Type* hoist_join_type(ASTNode* scope_body, const char* name, Type* seed) {
      * which a `string` local could not take (E0202). */
     if (seed->kind == TYPE_PTR && !seed->element_type) {
         int strings = 0, others = 0;
-        null_string_walk(scope_body, name, &strings, &others);
+        null_string_binds(scope_body, name, &strings, &others);
         if (strings && !others) return create_type(TYPE_STRING);
     }
     if (!is_number_type(seed)) return NULL;   /* not a numeric kind: nothing to join */
@@ -426,8 +482,8 @@ Type* hoist_join_type(ASTNode* scope_body, const char* name, Type* seed) {
 /* The arms of a branching statement: an if's then and else blocks, a
  * switch's case statements, whose children (after a case's selector) are
  * its body, or a match's arm bodies. A case's selector is never a
- * declaration, so the case node itself is the body hoist_direct_decl_names
- * and hoist_find_decl read (#2732). A match arm that binds a name has a
+ * declaration, so the case node itself is the body whose direct
+ * declarations are read (#2732). A match arm that binds a name has a
  * block body (the parser makes `1 -> v = 10` the block `{ v = 10 }`); any
  * other arm body is a value or a statement that binds nothing, and counts
  * as an arm all the same (#2768). Returns the count written to `arms` (at
@@ -459,15 +515,18 @@ static int is_branching(ASTNode* stmt) {
                     stmt->type == AST_MATCH_STATEMENT);
 }
 
-/* Does the arm pattern `p` bind `name`: `some(name)`, an element of a
- * list pattern (`[name, y]`, `[name | t]`), or a field of a struct pattern
- * (`Pt { x: name }`)? A bare name in a pattern is a
- * value compared with, or a sum's variant, and binds nothing. */
-static int pattern_binds_name(const ASTNode* p, const char* name) {
-    if (!p || !name) return 0;
+/* Each name the arm pattern `p` binds, to `visit` until it returns nonzero
+ * (which this returns): `some(name)`, an element of a list pattern (`[name,
+ * y]`, `[name | t]`), or a field of a struct pattern (`Pt { x: name }`). A
+ * bare name in a pattern is a value compared with, or a sum's variant, and
+ * binds nothing. */
+typedef int (*BoundNameVisit)(const char* name, void* user);
+
+static int pattern_each_bound(const ASTNode* p, BoundNameVisit visit, void* user) {
+    if (!p) return 0;
     if (p->type == AST_PATTERN_VARIABLE)
-        return p->annotation && strcmp(p->annotation, "some_pattern") == 0 && p->value &&
-               strcmp(p->value, name) == 0;
+        return p->value && p->annotation && strcmp(p->annotation, "some_pattern") == 0 &&
+               visit(p->value, user);
     /* #2992: a struct pattern binds the names its fields take, and those of
      * a struct pattern over a field. */
     if (p->type == AST_PATTERN_STRUCT) {
@@ -476,19 +535,24 @@ static int pattern_binds_name(const ASTNode* p, const char* name) {
             const ASTNode* sub = (fp && fp->type == AST_ASSIGNMENT && fp->child_count > 0)
                                  ? fp->children[0] : NULL;
             if (!sub) continue;
-            if (sub->type == AST_PATTERN_VARIABLE && sub->value && strcmp(sub->value, name) == 0)
+            if (sub->type == AST_PATTERN_VARIABLE && sub->value && visit(sub->value, user))
                 return 1;
-            if (sub->type == AST_PATTERN_STRUCT && pattern_binds_name(sub, name)) return 1;
+            if (sub->type == AST_PATTERN_STRUCT && pattern_each_bound(sub, visit, user)) return 1;
         }
         return 0;
     }
     if (p->type != AST_PATTERN_LIST && p->type != AST_PATTERN_CONS) return 0;
     for (int i = 0; i < p->child_count; i++) {
         const ASTNode* e = p->children[i];
-        if (e && e->type == AST_PATTERN_VARIABLE && e->value && strcmp(e->value, name) == 0)
-            return 1;
+        if (e && e->type == AST_PATTERN_VARIABLE && e->value && visit(e->value, user)) return 1;
     }
     return 0;
+}
+
+static int is_name(const char* name, void* want) { return strcmp(name, (const char*)want) == 0; }
+
+static int pattern_binds_name(const ASTNode* p, const char* name) {
+    return name && pattern_each_bound(p, is_name, (void*)name);
 }
 
 /* #2768: does an arm pattern of `stmt`, a match, bind `name`? Such a name
@@ -509,120 +573,194 @@ static int match_pattern_binds(const ASTNode* stmt, const char* name) {
 
 #define HOIST_MAX_ARMS 256
 
-int hoist_if_branch_candidates(ASTNode* body, const char** out, int cap) {
-    if (!body || !out) return 0;
-    /* Names a top-level statement declares get their own function-scope
-     * declaration (and heap tracker) where they are; hoisting them from an
-     * arm as well would declare them twice. */
-    const char* top_level_decls[HOIST_MAX_NAMES];
-    int top_count = 0;
-    for (int i = 0; i < body->child_count && top_count < HOIST_MAX_NAMES; i++) {
-        ASTNode* child = body->children[i];
-        if (!child) continue;
-        if (child->type == AST_VARIABLE_DECLARATION && child->value) {
-            top_level_decls[top_count++] = child->value;
-        }
-    }
-
-    const char* names[HOIST_MAX_NAMES];
-    int count = 0;
-    for (int i = 0; i < body->child_count; i++) {
-        ASTNode* arms[HOIST_MAX_ARMS];
-        int na = branch_arms(body->children[i], arms, HOIST_MAX_ARMS);
-        for (int j = 0; j < na; j++) {
-            count = hoist_direct_decl_names(arms[j], names, count, HOIST_MAX_NAMES);
-        }
-    }
-    /* A name a match's pattern binds comes out of no arm of that match;
-     * hoist_if_branch_first_decl, below, finds a binding of it elsewhere or
-     * none. */
-
-    int kept = 0;
-    for (int n = 0; n < count && kept < cap; n++) {
-        const char* name = names[n];
-        int dup = 0;
-        for (int k = 0; k < top_count; k++) {
-            if (strcmp(name, top_level_decls[k]) == 0) { dup = 1; break; }
-        }
-        if (dup) continue;
-        /* Only a name read outside the arms -- by a top-level statement that
-         * does not branch, or by an if's condition or a switch's or a
-         * match's subject -- is hoisted. */
-        int referenced_outside = 0;
-        for (int i = 0; i < body->child_count && !referenced_outside; i++) {
-            ASTNode* child = body->children[i];
-            if (!child) continue;
-            if (is_branching(child)) {
-                if (child->child_count > 0 &&
-                    hoist_has_identifier_ref(child->children[0], name)) {
-                    referenced_outside = 1;
-                }
-                continue;
-            }
-            if (hoist_has_identifier_ref(child, name)) referenced_outside = 1;
-        }
-        if (!referenced_outside) continue;
-        if (!hoist_if_branch_first_decl(body, name)) continue;
-        out[kept++] = name;
-    }
-    return kept;
+static HoistNames* names_new(int per) {
+    HoistNames* h = (HoistNames*)calloc(1, sizeof(HoistNames));
+    if (!h) return NULL;
+    h->per = per;
+    strmap_init(&h->at);
+    return h;
 }
 
-ASTNode* hoist_if_branch_first_decl(ASTNode* body, const char* name) {
-    if (!body) return NULL;
-    for (int i = 0; i < body->child_count; i++) {
-        if (match_pattern_binds(body->children[i], name)) continue;
-        ASTNode* arms[HOIST_MAX_ARMS];
-        int na = branch_arms(body->children[i], arms, HOIST_MAX_ARMS);
-        for (int j = 0; j < na; j++) {
-            ASTNode* d = hoist_find_decl(arms[j], name);
-            if (d) return d;
-        }
+/* Add `name` (one not in `h` yet), its bindings unset; returns its index. */
+static int names_push(HoistNames* h, const char* name) {
+    if (h->count == h->cap) {
+        int cap = h->cap ? h->cap * 2 : 8;
+        h->names = (const char**)aether_xrealloc((void*)h->names, (size_t)cap * sizeof(char*));
+        h->decls = (ASTNode**)aether_xrealloc(h->decls, (size_t)cap * (size_t)h->per *
+                                                        sizeof(ASTNode*));
+        memset(h->decls + (size_t)h->cap * (size_t)h->per, 0,
+               (size_t)(cap - h->cap) * (size_t)h->per * sizeof(ASTNode*));
+        h->cap = cap;
     }
-    return NULL;
+    h->names[h->count] = name;
+    strmap_put(&h->at, name, (void*)(intptr_t)(h->count + 1));
+    return h->count++;
 }
 
-int hoist_common_decl_names(ASTNode* stmt, const char** out, int cap) {
-    if (!stmt || !out) return 0;
-    ASTNode* arms[HOIST_MAX_ARMS];
-    int na = branch_arms(stmt, arms, HOIST_MAX_ARMS);
-    /* Every path must pass through an arm: an if needs its else, a switch
-     * its default, a match a `_` arm or arms that cover its type (#2768). */
-    if (stmt->type == AST_IF_STATEMENT && na < 2) return 0;
-    if (stmt->type == AST_SWITCH_STATEMENT) {
-        int has_default = 0;
-        for (int j = 0; j < na; j++) {
-            if (arms[j]->value && strcmp(arms[j]->value, "default") == 0) has_default = 1;
-        }
-        if (!has_default || na < 2) return 0;
-    }
-    if (stmt->type == AST_MATCH_STATEMENT && !ast_match_covers(stmt)) return 0;
-    if (na == 0) return 0;
-    const char* first[HOIST_MAX_NAMES];
-    int nfirst = hoist_direct_decl_names(arms[0], first, 0, HOIST_MAX_NAMES);
-    int kept = 0;
-    for (int i = 0; i < nfirst && kept < cap; i++) {
-        int everywhere = !match_pattern_binds(stmt, first[i]);
-        for (int j = 1; j < na && everywhere; j++) {
-            if (!hoist_find_decl(arms[j], first[i])) everywhere = 0;
-        }
-        if (everywhere) out[kept++] = first[i];
-    }
-    return kept;
+int hoist_names_find(const HoistNames* h, const char* name) {
+    void* at = h && name ? strmap_get(&h->at, name) : NULL;
+    return at ? (int)(intptr_t)at - 1 : -1;
 }
 
-ASTNode* hoist_common_first_decl(ASTNode* stmt, const char* name) {
-    ASTNode* arms[HOIST_MAX_ARMS];
-    int na = branch_arms(stmt, arms, HOIST_MAX_ARMS);
+ASTNode* hoist_names_decl(const HoistNames* h, int i) {
+    if (!h || i < 0 || i >= h->count) return NULL;
     ASTNode* any = NULL;
-    for (int j = 0; j < na; j++) {
-        ASTNode* d = hoist_find_decl(arms[j], name);
+    for (int k = 0; k < h->per; k++) {
+        ASTNode* d = h->decls[(size_t)i * (size_t)h->per + (size_t)k];
         if (!d) continue;
         if (!any) any = d;
         Type* t = hoist_decl_type(d);
         if (t && t->kind != TYPE_VOID && t->kind != TYPE_UNKNOWN) return d;
     }
     return any;
+}
+
+static int put_name(const char* name, void* out) {
+    strmap_put((StrMap*)out, name, (void*)1);
+    return 0;
+}
+
+static void pattern_bound_names(const ASTNode* p, StrMap* out) {
+    pattern_each_bound(p, put_name, out);
+}
+
+/* The names the arm patterns of `stmt`, a match, bind (match_pattern_binds
+ * for every name at once). */
+static void pattern_names(const ASTNode* stmt, StrMap* out) {
+    if (!stmt || stmt->type != AST_MATCH_STATEMENT) return;
+    for (int i = 1; i < stmt->child_count; i++) {
+        const ASTNode* a = stmt->children[i];
+        if (a && a->type == AST_MATCH_ARM && a->child_count > 0)
+            pattern_bound_names(a->children[0], out);
+    }
+}
+
+/* Every identifier name under `n` (closures included: any use counts). */
+static void identifier_names(const ASTNode* n, StrMap* out) {
+    if (!n) return;
+    if (n->type == AST_IDENTIFIER && n->value) strmap_put(out, n->value, (void*)1);
+    for (int i = 0; i < n->child_count; i++) identifier_names(n->children[i], out);
+}
+
+static HoistNames* branch_hoists_build(ASTNode* body) {
+    HoistNames* all = names_new(1);
+    HoistNames* kept = names_new(1);
+    if (!all || !kept) { names_free(all); names_free(kept); return NULL; }
+    /* Names a top-level statement declares get their own function-scope
+     * declaration (and heap tracker) where they are; hoisting them from an
+     * arm as well would declare them twice. Only a name read outside the
+     * arms -- by a top-level statement that does not branch, or by an if's
+     * condition or a switch's or a match's subject -- is hoisted. */
+    StrMap top, outside;
+    strmap_init(&top);
+    strmap_init(&outside);
+    for (int i = 0; i < body->child_count; i++) {
+        ASTNode* child = body->children[i];
+        if (!child) continue;
+        if (child->type == AST_VARIABLE_DECLARATION && child->value)
+            strmap_put(&top, child->value, (void*)1);
+        if (is_branching(child)) {
+            if (child->child_count > 0) identifier_names(child->children[0], &outside);
+        } else {
+            identifier_names(child, &outside);
+        }
+    }
+    /* Each name an arm binds, in the order the arms bind them, with its
+     * first binding in an arm of a statement whose patterns do not bind it
+     * (a name a match's pattern binds comes out of no arm of that match). */
+    for (int i = 0; i < body->child_count; i++) {
+        ASTNode* stmt = body->children[i];
+        ASTNode* arms[HOIST_MAX_ARMS];
+        int na = branch_arms(stmt, arms, HOIST_MAX_ARMS);
+        if (na == 0) continue;
+        StrMap bound;
+        strmap_init(&bound);
+        pattern_names(stmt, &bound);
+        for (int j = 0; j < na; j++) {
+            for (int k = 0; arms[j] && k < arms[j]->child_count; k++) {
+                ASTNode* d = arms[j]->children[k];
+                if (!d || d->type != AST_VARIABLE_DECLARATION || !d->value) continue;
+                int at = hoist_names_find(all, d->value);
+                if (at < 0) at = names_push(all, d->value);
+                if (!all->decls[at] && !strmap_has(&bound, d->value)) all->decls[at] = d;
+            }
+        }
+        strmap_free(&bound);
+    }
+    for (int n = 0; n < all->count; n++) {
+        const char* name = all->names[n];
+        if (strmap_has(&top, name) || !strmap_has(&outside, name) || !all->decls[n]) continue;
+        int at = names_push(kept, name);
+        kept->decls[at] = all->decls[n];
+    }
+    strmap_free(&top);
+    strmap_free(&outside);
+    names_free(all);
+    return kept;
+}
+
+const HoistNames* hoist_if_branch_hoists(ASTNode* body) {
+    if (!body) return NULL;
+    struct HoistNodeCache* c = node_cache(body);
+    if (!c->branch) c->branch = branch_hoists_build(body);
+    return c->branch;
+}
+
+static HoistNames* common_hoists_build(ASTNode* stmt) {
+    ASTNode* arms[HOIST_MAX_ARMS];
+    int na = branch_arms(stmt, arms, HOIST_MAX_ARMS);
+    HoistNames* h = names_new(na > 0 ? na : 1);
+    if (!h) return NULL;
+    /* Every path must pass through an arm: an if needs its else, a switch
+     * its default, a match a `_` arm or arms that cover its type (#2768). */
+    if (na == 0) return h;
+    if (stmt->type == AST_IF_STATEMENT && na < 2) return h;
+    if (stmt->type == AST_SWITCH_STATEMENT) {
+        int has_default = 0;
+        for (int j = 0; j < na; j++) {
+            if (arms[j]->value && strcmp(arms[j]->value, "default") == 0) has_default = 1;
+        }
+        if (!has_default || na < 2) return h;
+    }
+    if (stmt->type == AST_MATCH_STATEMENT && !ast_match_covers(stmt)) return h;
+    /* Each arm's first direct binding of each name it binds. */
+    StrMap* firsts = (StrMap*)calloc((size_t)na, sizeof(StrMap));
+    if (!firsts) return h;
+    for (int j = 0; j < na; j++) {
+        strmap_init(&firsts[j]);
+        for (int k = 0; arms[j] && k < arms[j]->child_count; k++) {
+            ASTNode* d = arms[j]->children[k];
+            if (d && d->type == AST_VARIABLE_DECLARATION && d->value &&
+                !strmap_has(&firsts[j], d->value))
+                strmap_put(&firsts[j], d->value, d);
+        }
+    }
+    StrMap bound;
+    strmap_init(&bound);
+    pattern_names(stmt, &bound);
+    /* The names the first arm binds that every other arm binds too. */
+    for (int i = 0; i < strmap_count(&firsts[0]); i++) {
+        const char* name = strmap_key_at(&firsts[0], i);
+        int everywhere = !strmap_has(&bound, name);
+        for (int j = 1; j < na && everywhere; j++)
+            if (!strmap_has(&firsts[j], name)) everywhere = 0;
+        if (!everywhere) continue;
+        ASTNode* d0 = (ASTNode*)strmap_value_at(&firsts[0], i);
+        int at = names_push(h, d0->value);
+        for (int j = 0; j < na; j++)
+            h->decls[(size_t)at * (size_t)na + (size_t)j] = (ASTNode*)strmap_get(&firsts[j], name);
+    }
+    strmap_free(&bound);
+    for (int j = 0; j < na; j++) strmap_free(&firsts[j]);
+    free(firsts);
+    return h;
+}
+
+const HoistNames* hoist_common_hoists(ASTNode* stmt) {
+    if (!stmt) return NULL;
+    struct HoistNodeCache* c = node_cache(stmt);
+    if (!c->common) c->common = common_hoists_build(stmt);
+    return c->common;
 }
 
 /* The matches whose arms a hoist_loop_decls walk is inside, innermost last:

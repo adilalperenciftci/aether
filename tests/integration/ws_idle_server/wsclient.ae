@@ -1,0 +1,52 @@
+// The client for ws_idle_server: a message, 2.5 s of quiet (past the
+// server's 1 s idle timeout), then another, each echoed. The server's
+// handler then returns, which closes the connection, and the sends after
+// that fail with -1 rather than raising SIGPIPE, which would kill this
+// process.
+import std.http
+import std.os
+import std.string
+
+extern exit(code: int)
+
+fn round_trip(w: ptr, text: string) {
+    if http.ws_send_text(w, text) < 0 {
+        println("FAIL: ws_send_text '${text}'")
+        exit(1)
+    }
+    kind = http.ws_recv(w)
+    if kind != 1 {
+        println("FAIL: the echo of '${text}': ws_recv returned ${kind}, want 1 (text)")
+        exit(1)
+    }
+    got = http.ws_message(w)
+    if string.compare(got, "echo: ${text}") != 0 {
+        println("FAIL: got [${got}] want [echo: ${text}]")
+        exit(1)
+    }
+}
+
+main() {
+    w = http.ws_connect("ws://127.0.0.1:${os.getenv("AE_TEST_PORT")}/echo")
+    if w == null {
+        println("FAIL: ws_connect returned null")
+        exit(1)
+    }
+    round_trip(w, "first")
+    sleep(2500)
+    round_trip(w, "after the quiet")
+    // The first send the peer's reset refuses is ECONNRESET; the ones after
+    // it are EPIPE, which raised SIGPIPE.
+    refused = 0
+    for (i = 0; i < 50 && refused < 3; i++) {
+        if http.ws_send_text(w, "after the close") < 0 { refused = refused + 1 } else { sleep(20) }
+    }
+    if refused < 3 {
+        println("FAIL: ${50 - refused} of 50 sends to a closed connection reported sent")
+        exit(1)
+    }
+    http.ws_close(w, 1000, "done")
+    http.ws_client_free(w)
+    println("PASS: ws idle round-trip")
+    exit(0)
+}

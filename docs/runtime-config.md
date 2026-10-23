@@ -237,8 +237,7 @@ if (my_core >= 0 && my_core == atomic_load(&actor->assigned_core)) {
 }
 ```
 
-A single-actor program takes an earlier path still: main-thread mode runs
-`step()` inline on the sender's thread rather than queueing at all. The SPSC
+Every send takes this path, whatever the number of actors (#3112). The SPSC
 queue is allocated on first use (`ensure_spsc_queue` in
 [`runtime/scheduler/multicore_scheduler.c`](../runtime/scheduler/multicore_scheduler.c)),
 so an actor that never receives a same-core send does not pay for one.
@@ -261,8 +260,6 @@ static inline Message* message_pool_alloc(void) {
 
 | Variable | Effect |
 |----------|--------|
-| `AETHER_NO_INLINE` | Disables Main Thread Actor Mode (forces scheduler-based processing) |
-| `AETHER_INLINE` | Forces Main Thread Actor Mode even with multiple actors |
 | `AETHER_SINGLE_CORE` | Pins all actors to core 0 (eliminates cross-core overhead) |
 | `AETHER_PROFILE` | Memory profile: `micro`, `small`, `medium` (default), `large` |
 | `AETHER_MSG_POOL_SIZE` | Override message pool size (default from profile) |

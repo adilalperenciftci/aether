@@ -1,0 +1,88 @@
+// A named function in an array literal or after `return` is a function
+// value, as it is in an argument or a local's value. The literal `[held,
+// null]` was typed as an int array (C: `int fs[2] = {held, NULL}`), and
+// `return held` from a `-> fn` function called an adapter nothing had
+// declared, both failing in the C compiler. Where the place is a typed
+// function pointer (a `cfn` result, a part of a tuple result, an array of
+// one), the function is its address there instead, and where it is a `ptr`
+// (a `-> ptr` result, an array of them), its C symbol.
+
+cfn Op(int) -> int
+
+struct Table {
+    ops: Op[2]
+}
+
+held() -> int {
+    return 7
+}
+
+twice(x: int) -> int {
+    return x * 2
+}
+
+pick() -> fn {
+    return held
+}
+
+half(x: int) -> int {
+    return x / 2
+}
+
+op() -> Op {
+    return twice
+}
+
+op_and_closure() -> (Op, fn) {
+    return half, held
+}
+
+ops_of() -> Op[2] {
+    return [half, twice]
+}
+
+@c_callback on_event(req: ptr, res: ptr, ud: ptr) {
+}
+
+@c_callback on_other(req: ptr, res: ptr, ud: ptr) {
+}
+
+event_handler() -> ptr {
+    return on_event
+}
+
+apply_both(fs: Op[2], x: int) -> int {
+    return fs[0](x) + fs[1](x)
+}
+
+main() {
+    fs = [held, held]
+    g = fs[1]
+    ops = [twice, twice]
+    h = ops[0]
+    f = pick()
+    maybe = [held, null]
+    m = maybe[0]
+    got = "${g()} ${h(21)} ${f()} ${m()} ${maybe.len}"
+    if got != "7 42 7 7 2" {
+        println("FAIL fn values: got '${got}'")
+        exit(1)
+    }
+    o = op()
+    p, c = op_and_closure()
+    t = Table { ops: [twice, half] }
+    r = ops_of()
+    let ps: Op[2] = [half, half]
+    ps = [twice, twice]
+    addr = "${o(4)} ${p(4)} ${c()} ${t.ops[1](8)} ${r[0](8)} ${apply_both([twice, half], 8)} ${ps[1](8)}"
+    if addr != "8 2 7 4 4 20 16" {
+        println("FAIL typed function pointers: got '${addr}'")
+        exit(1)
+    }
+    let handlers: ptr[2] = [on_event, on_other]
+    if event_handler() != handlers[0] || handlers[0] == handlers[1] || handlers[1] == null {
+        println("FAIL C symbols: a returned callback and an array of them disagree")
+        exit(1)
+    }
+    println("PASS named functions as array elements and returned values")
+}

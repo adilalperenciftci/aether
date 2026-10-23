@@ -13,7 +13,7 @@
 typedef struct {
     void*  key;
     size_t size;
-    long   seq;
+    int64_t seq;
 } TrackEntry;
 
 /* handle is the first member so the returned AetherAllocator* aliases the
@@ -26,7 +26,7 @@ typedef struct AetherTracking {
     size_t live;
     size_t used;
     size_t total_bytes;
-    long   seq;
+    int64_t seq;
 } AetherTracking;
 
 static size_t track_hash(void* p, size_t cap) {
@@ -38,7 +38,7 @@ static size_t track_hash(void* p, size_t cap) {
 }
 
 static void track_put_raw(TrackEntry* entries, size_t cap,
-                          void* key, size_t size, long seq) {
+                          void* key, size_t size, int64_t seq) {
     size_t i = track_hash(key, cap);
     while (entries[i].key != TRACK_EMPTY) i = (i + 1) & (cap - 1);
     entries[i].key = key;
@@ -137,9 +137,9 @@ int aether_tracking_count(AetherAllocator* t) {
     return (int)((AetherTracking*)t)->live;
 }
 
-long aether_tracking_bytes(AetherAllocator* t) {
+int64_t aether_tracking_bytes(AetherAllocator* t) {
     if (!t) return -1;
-    return (long)((AetherTracking*)t)->total_bytes;
+    return (int64_t)((AetherTracking*)t)->total_bytes;
 }
 
 int aether_tracking_report(AetherAllocator* t) {
@@ -154,8 +154,8 @@ int aether_tracking_report(AetherAllocator* t) {
     for (size_t i = 0; i < st->cap; i++) {
         void* k = st->entries[i].key;
         if (k != TRACK_EMPTY && k != TRACK_TOMB)
-            fprintf(stderr, "  leak #%ld: %zu bytes\n",
-                    st->entries[i].seq, st->entries[i].size);
+            fprintf(stderr, "  leak #%lld: %zu bytes\n",
+                    (long long)st->entries[i].seq, st->entries[i].size);
     }
     return (int)st->live;
 }

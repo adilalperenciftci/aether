@@ -32,7 +32,6 @@
 import std.bytes
 import std.bits
 import std.intarr
-import std.longarr
 
 exports(
     chacha20_xor, poly1305_mac, aead_seal, aead_open
@@ -48,43 +47,42 @@ rl(x: long, n: int) -> long {
 // ---- ChaCha20 (RFC 8439 §2.3) ----
 
 // One ChaCha20 quarter-round on state words at indices a,b,c,d.
-qr(st: ptr, a: int, b: int, c: int, d: int) {
-    va = longarr_get_unchecked(st, a)
-    vb = longarr_get_unchecked(st, b)
-    vc = longarr_get_unchecked(st, c)
-    vd = longarr_get_unchecked(st, d)
+qr(st: long[], a: int, b: int, c: int, d: int) {
+    va = st[a]
+    vb = st[b]
+    vc = st[c]
+    vd = st[d]
     va = m32(va + vb); vd = rl(vd ^ va, 16)
     vc = m32(vc + vd); vb = rl(vb ^ vc, 12)
     va = m32(va + vb); vd = rl(vd ^ va, 8)
     vc = m32(vc + vd); vb = rl(vb ^ vc, 7)
-    longarr_set_unchecked(st, a, va)
-    longarr_set_unchecked(st, b, vb)
-    longarr_set_unchecked(st, c, vc)
-    longarr_set_unchecked(st, d, vd)
+    st[a] = va
+    st[b] = vb
+    st[c] = vc
+    st[d] = vd
 }
 
 // Produce one 64-byte ChaCha20 block into `out` (offset 0..63) for the
 // given key (32 bytes), nonce (12 bytes), and 32-bit counter.
 chacha_block(key: ptr, nonce: ptr, counter: long, out: ptr) {
-    st = longarr_new_raw(16)
+    long[16] st
     // Constants "expand 32-byte k"
-    longarr_set_unchecked(st, 0, 0x61707865)
-    longarr_set_unchecked(st, 1, 0x3320646e)
-    longarr_set_unchecked(st, 2, 0x79622d32)
-    longarr_set_unchecked(st, 3, 0x6b206574)
+    st[0] = 0x61707865
+    st[1] = 0x3320646e
+    st[2] = 0x79622d32
+    st[3] = 0x6b206574
     i = 0
     while i < 8 {
-        longarr_set_unchecked(st, 4 + i, le32(key, i * 4))
+        st[4 + i] = le32(key, i * 4)
         i = i + 1
     }
-    longarr_set_unchecked(st, 12, counter & 0xFFFFFFFF)
-    longarr_set_unchecked(st, 13, le32(nonce, 0))
-    longarr_set_unchecked(st, 14, le32(nonce, 4))
-    longarr_set_unchecked(st, 15, le32(nonce, 8))
+    st[12] = counter & 0xFFFFFFFF
+    st[13] = le32(nonce, 0)
+    st[14] = le32(nonce, 4)
+    st[15] = le32(nonce, 8)
 
-    work = longarr_new_raw(16)
-    i = 0
-    while i < 16 { longarr_set_unchecked(work, i, longarr_get_unchecked(st, i)); i = i + 1 }
+    // The rounds work on a copy; the state is added back at the end.
+    long[16] work = st
 
     r = 0
     while r < 10 {
@@ -103,12 +101,10 @@ chacha_block(key: ptr, nonce: ptr, counter: long, out: ptr) {
 
     i = 0
     while i < 16 {
-        v = m32(longarr_get_unchecked(work, i) + longarr_get_unchecked(st, i))
+        v = m32(work[i] + st[i])
         set_le32(out, i * 4, v)
         i = i + 1
     }
-    longarr_free(st)
-    longarr_free(work)
 }
 
 le32(b: ptr, off: int) -> long {

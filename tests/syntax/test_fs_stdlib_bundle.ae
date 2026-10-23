@@ -23,9 +23,8 @@ fail(msg: string) {
 
 main() {
     // Detect Windows — the stdlib stubs symlink ops there.
-    os_name = os_getenv("OS")
     is_windows = 0
-    if os_name == "Windows_NT" {
+    if os.platform() == "windows" {
         is_windows = 1
     }
 

@@ -9,7 +9,7 @@
 // Run:  ae run std/schema/example.ae
 
 import std.schema
-import std.map(map_new, map_put_raw, map_free)
+import std.map(map_new, map_free)
 import std.map
 import std.string(string_starts_with)
 
@@ -97,7 +97,7 @@ fn signup(s: ptr, input: ptr) {
 }
 
 fn put(m: ptr, k: string, v: string) {
-    map_put_raw(m, k, v)
+    map.put(m, k, v)
 }
 
 main() {

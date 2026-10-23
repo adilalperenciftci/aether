@@ -1,0 +1,146 @@
+// Regression (#3109): std.http's server streams a chunked response, sends an
+// SSE comment, and reads a response's status back, which tinyweb's chunked,
+// keep-alive and on_stats paths are built on. A handler had no way to send a
+// body of unknown length on the server's own connection (TLS included), an
+// SSE stream had no keep-alive line, and nothing read a status a handler had
+// set.
+
+import std.http
+import std.tcp
+import std.string
+
+extern exit(code: int)
+extern http_server_start_background_raw(server: ptr) -> int
+extern http_server_port(server: ptr) -> int
+
+// The handler's Content-Length goes: the body's length is not known.
+handle_chunked(req: ptr, res: ptr, ud: ptr) {
+    http.response_set_header(res, "Content-Type", "text/plain")
+    http.response_set_header(res, "Content-Length", "99")
+    stream, err = http.response_begin_chunked(res)
+    if err != "" { return }
+    _a = http.chunked_write(stream, string.bytes("alpha\n"))
+    _e = http.chunked_write(stream, string.bytes(""))
+    _b = http.chunked_write(stream, string.bytes("beta\n"))
+    _z = http.chunked_end(stream)
+}
+
+handle_late(req: ptr, res: ptr, ud: ptr) {
+    http.response_set_body(res, "already answered")
+    stream, err = http.response_begin_chunked(res)
+    if stream != null { return }
+    http.response_set_status(res, 500)
+    http.response_set_body(res, "refused: ${err}")
+}
+
+handle_status(req: ptr, res: ptr, ud: ptr) {
+    before = http.response_get_status(res)
+    http.response_set_status(res, 201)
+    http.response_set_body(res, "${before}/${http.response_get_status(res)}")
+}
+
+@c_callback handle_sse(req: ptr, sse: ptr, ud: ptr) {
+    ok = http.sse_comment(sse, "ping")
+    split = http.sse_comment(sse, "two\nlines")
+    _d = http.sse_send(sse, "done", "${ok},${split}")
+}
+
+// Sends `raw` on a fresh connection and reads until the server closes it,
+// giving up after 3 s with nothing to read.
+exchange(port: int, raw: string) -> string {
+    sock, cerr = tcp.connect("127.0.0.1", port)
+    if cerr != "" { return "connect: ${cerr}" }
+    tcp.write(sock, raw)
+    resp = ""
+    reading = 1
+    while reading == 1 {
+        ready, _perr = tcp.poll(sock, 3000)
+        if !ready {
+            reading = 0
+        } else {
+            chunk, rerr = tcp.read(sock, 4096)
+            if rerr != "" || string.length(chunk) == 0 {
+                reading = 0
+            } else {
+                resp = string.concat(resp, chunk)
+            }
+        }
+    }
+    tcp.close(sock)
+    return resp
+}
+
+fn get(port: int, path: string) -> string {
+    return exchange(port, "GET ${path} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+}
+
+fn body_of(resp: string) -> string {
+    at = string.index_of(resp, "\r\n\r\n")
+    if at < 0 { return "" }
+    return string.substring(resp, at + 4, string.length(resp))
+}
+
+main() {
+    s = http.server_create(0)
+    if s == 0 {
+        println("FAIL: server_create")
+        exit(1)
+    }
+    http.server_set_host(s, "127.0.0.1")
+    http.server_get(s, "/chunked", handle_chunked, 0)
+    http.server_get(s, "/late", handle_late, 0)
+    http.server_get(s, "/status", handle_status, 0)
+    http.server_sse(s, "/sse", handle_sse, null)
+    http_server_start_background_raw(s)
+    port = 0
+    for (tries = 0; tries < 100 && port == 0; tries++) {
+        sleep(20)
+        port = http_server_port(s)
+    }
+    if port == 0 {
+        println("FAIL: the server never bound")
+        exit(1)
+    }
+    bad = 0
+
+    chunked = get(port, "/chunked")
+    if string.starts_with(chunked, "HTTP/1.1 200") != 1 || string.contains(chunked, "Transfer-Encoding: chunked") != 1 {
+        println("FAIL: /chunked's head: ${chunked}")
+        bad = bad + 1
+    }
+    if string.contains(chunked, "Content-Length") == 1 {
+        println("FAIL: /chunked kept the handler's Content-Length")
+        bad = bad + 1
+    }
+    if body_of(chunked) != "6\r\nalpha\n\r\n5\r\nbeta\n\r\n0\r\n\r\n" {
+        println("FAIL: /chunked's body on the wire: [${body_of(chunked)}]")
+        bad = bad + 1
+    }
+
+    late = get(port, "/late")
+    if string.starts_with(late, "HTTP/1.1 500") != 1 || string.contains(late, "refused: ") != 1 {
+        println("FAIL: a chunked start over a body was not refused: ${late}")
+        bad = bad + 1
+    }
+
+    status = get(port, "/status")
+    if string.starts_with(status, "HTTP/1.1 201") != 1 || body_of(status) != "200/201" {
+        println("FAIL: /status read back [${body_of(status)}], want 200/201")
+        bad = bad + 1
+    }
+
+    sse = get(port, "/sse")
+    if string.contains(sse, "\r\n\r\n: ping\n\n") != 1 {
+        println("FAIL: no ': ping' comment line in [${body_of(sse)}]")
+        bad = bad + 1
+    }
+    if string.contains(sse, "event: done\ndata: 0,-1\n\n") != 1 {
+        println("FAIL: sse_comment returned other than 0, then -1 for a line break: [${body_of(sse)}]")
+        bad = bad + 1
+    }
+
+    http.server_stop(s)
+    http.server_free(s)
+    if bad > 0 { exit(1) }
+    println("PASS #3109: chunked responses, SSE comments and the status a handler set")
+}

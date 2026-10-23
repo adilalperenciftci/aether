@@ -463,7 +463,7 @@ put(l: ptr, p: ptr) {
 
 main() { put(list.new(), null) }
 AE
-refused closure_in_container 5:17 "'p' is a borrowed \`ptr\` parameter captured by a closure that is stored in a container"
+refused closure_in_container 5:17 "'p' is a borrowed \`ptr\` parameter captured by a closure that is passed to a parameter that keeps it"
 
 cat > "$TMP/closure_to_keep.ae" <<'AE'
 var kept: ptr = null
@@ -1977,6 +1977,267 @@ relay(p: ptr) {
 main() { relay(null) }
 AE
 refused struct_param_keep_declared 13:14 "'p' is a borrowed \`ptr\` parameter held by a struct that is passed to a parameter that keeps it"
+
+# #3079, #3086: what a call keeps is read from the declaration it reaches,
+# never from the name it spells. std.collections' `list_add` declares its
+# item `@retain`, so it keeps what it is given, a boxed closure parameter
+# here.
+cat > "$TMP/container_qualified.ae" <<'AE'
+import std.collections
+
+var routes: ptr = null
+
+route(cb: fn) {
+    collections.list_add(routes, box_closure(cb))
+}
+
+main() {
+    routes = collections.list_new()
+    route(|| { println("x") })
+}
+AE
+refused container_qualified 6:34 "'cb' is a borrowed \`fn\` parameter, held by a boxed closure that is passed to a parameter that keeps it"
+
+# A program's own `list_add` that keeps nothing is no container.
+cat > "$TMP/own_list_add.ae" <<'AE'
+count(l: ptr, x: ptr) -> int {
+    return 0
+}
+
+list_add(l: ptr, x: ptr) -> int {
+    return count(l, x)
+}
+
+own(cb: fn) {
+    _ = list_add(null, box_closure(cb))
+}
+
+main() { own(|| { println("x") }) }
+AE
+accepted own_list_add
+
+# A `fn?` parameter is borrowed as the closure it may hold.
+cat > "$TMP/fn_opt_param_kept.ae" <<'AE'
+var kept: fn? = none
+
+keep(cb: fn?) {
+    kept = cb
+}
+
+main() { keep(none) }
+AE
+refused fn_opt_param_kept 4:5 "'cb' is a borrowed \`fn?\` parameter, stored in a module-level \`var\`"
+
+# So is a struct with a `fn?` field, and a sum one of whose variants holds a
+# closure, captured by a closure that escapes.
+cat > "$TMP/struct_opt_fn_captured.ae" <<'AE'
+var kept: ptr = null
+
+struct Holder { cb: fn? }
+
+keep(h: Holder) {
+    g = || { println("${h.cb == none}") }
+    kept = box_closure(g)
+}
+
+main() { keep(Holder { cb: none }) }
+AE
+refused struct_opt_fn_captured 7:5 "'h' is a borrowed \`Holder\` parameter, which holds a pointer"
+
+cat > "$TMP/sum_fn_captured.ae" <<'AE'
+var kept: ptr = null
+
+struct Act { cb: fn }
+struct Plain { n: int }
+type Acting = Act | Plain
+
+keep(a: Acting) {
+    g = || {
+        match a {
+            Act -> { call(a.cb) }
+            Plain -> { println("plain") }
+        }
+    }
+    kept = box_closure(g)
+}
+
+main() { keep(Plain { n: 1 }) }
+AE
+refused sum_fn_captured 14:5 "'a' is a borrowed \`Acting\` parameter, which holds a pointer"
+
+# #3086: a borrowed `ptr` parameter put in a std container is kept, as one
+# stored in a module `var` is: list.add, list.add_raw, list.set and map.put
+# (its value) declare the item `@retain` at the C boundary.
+cat > "$TMP/ptr_into_containers.ae" <<'AE'
+import std.list
+import std.map
+
+var seen: ptr = null
+var names: ptr = null
+
+remember(p: ptr) {
+    _r = list.add(seen, p)
+}
+
+remember_raw(p: ptr) {
+    _x = list.add_raw(seen, p)
+}
+
+replace(p: ptr) {
+    list.set(seen, 0, p)
+}
+
+name_it(k: string, p: ptr) {
+    _e = map.put(names, k, p)
+}
+
+main() {
+    seen = list.new()
+    names = map.new()
+    remember(null)
+    remember_raw(null)
+    replace(null)
+    name_it("a", null)
+}
+AE
+refused ptr_into_containers 8:25 "'p' is a borrowed \`ptr\` parameter, passed to a parameter that keeps it"
+for at in 12:29 16:23 20:28; do
+    case "$out" in
+        *"ptr_into_containers.ae:$at"*) ;;
+        *) echo "  [FAIL] ptr_into_containers: no E0902 at $at"; fails=$((fails + 1)) ;;
+    esac
+done
+
+# Declared `@keep`, the parameter may be stored; a map's key is copied, and
+# a string, a literal or a closure of the function's own is handed a
+# reference of its own.
+cat > "$TMP/containers_accepted.ae" <<'AE'
+import std.list
+import std.map
+import std.string
+
+var seen: ptr = null
+var names: ptr = null
+
+remember(p: @keep ptr) {
+    _r = list.add(seen, p)
+}
+
+name_it(k: string, s: string) {
+    _e = map.put(names, k, string.concat(s, "!"))
+    _f = map.put(names, "lit", "v")
+    _g = list.add(seen, s)
+    _h = list.add(seen, || { println(k) })
+}
+
+main() {
+    seen = list.new()
+    names = map.new()
+    remember(null)
+    name_it("a", "b")
+}
+AE
+accepted containers_accepted
+
+# #3086: a store keeps its item in the argument the extern names `@holds`
+# (std's list and map stores), so a keep through one outlives the call only
+# when that container does. A list the function makes (`list.new()` is
+# `@fresh`) and lets go nowhere keeps nothing past it: jq's free_node parks
+# its root in one, liquid's layout chain hands its lists to helpers that
+# read and free them.
+cat > "$TMP/holder_local.ae" <<'AE'
+import std.list
+
+walk_list(chain: ptr) -> int {
+    return list.size(chain)
+}
+
+drop_list(chain: ptr) {
+    list.free(chain)
+}
+
+free_tree(n: ptr) {
+    if n == null { return }
+    work = list.new()
+    list.add_raw(work, n)
+    _e = list.add(work, n)
+    list.free(work)
+}
+
+layout(kinds: ptr, contents: ptr) -> int {
+    chain_kinds = list.new()
+    chain_contents = list.new()
+    list.add_raw(chain_kinds, kinds)
+    list.add_raw(chain_contents, contents)
+    n = walk_list(chain_kinds) + walk_list(chain_contents)
+    drop_list(chain_kinds)
+    drop_list(chain_contents)
+    return n
+}
+
+main() {
+    free_tree(null)
+    println(layout(null, null))
+}
+AE
+accepted holder_local
+
+# The same list returned, stored in a field or a module var, or a list the
+# function did not make (a parameter, one a function hands back) keeps what
+# it holds past the call: E0902 at the store.
+cat > "$TMP/holder_escapes.ae" <<'AE'
+import std.list
+
+struct Box { items: ptr }
+
+var shelf: ptr = null
+
+returned(p: ptr) -> ptr {
+    l = list.new()
+    list.add_raw(l, p)
+    return l
+}
+
+in_field(b: *Box, p: ptr) {
+    l = list.new()
+    list.add_raw(l, p)
+    b.items = l
+}
+
+in_var(p: ptr) {
+    l = list.new()
+    list.add_raw(l, p)
+    shelf = l
+}
+
+into_param(l: ptr, p: ptr) {
+    list.add_raw(l, p)
+}
+
+the_shelf() -> ptr {
+    return shelf
+}
+
+not_fresh(p: ptr) {
+    l = the_shelf()
+    list.add_raw(l, p)
+}
+
+main() {
+    shelf = list.new()
+    _l = returned(null)
+    in_var(null)
+    into_param(shelf, null)
+    not_fresh(null)
+}
+AE
+refused holder_escapes 9:21 "'p' is a borrowed \`ptr\` parameter, passed to a parameter that keeps it"
+for at in 15:21 21:21 26:21 35:21; do
+    case "$out" in
+        *"holder_escapes.ae:$at"*) ;;
+        *) echo "  [FAIL] holder_escapes: no E0902 at $at"; fails=$((fails + 1)) ;;
+    esac
+done
 
 if [ "$fails" -ne 0 ]; then exit 1; fi
 echo "  [PASS] keeps_borrowed: a borrowed ptr parameter is never kept, alone or in a struct or closure that escapes; @keep, string.keep, string.seq_retain, a re-bound parameter, a struct local and a closure run in the call are"

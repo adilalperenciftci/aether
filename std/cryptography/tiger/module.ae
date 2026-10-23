@@ -31,7 +31,6 @@
 
 import std.bits
 import std.bytes
-import std.longarr
 
 extern malloc(size: int) -> ptr
 extern free(p: ptr)
@@ -314,7 +313,7 @@ struct TigerCtx {
     a: long
     b: long
     c: long
-    x: ptr // longarr(8), the message words
+    x: long[8] // the message words
     x_off: int
     buf: ptr // bytes(8), partial-word buffer
     b_off: int
@@ -358,10 +357,10 @@ round_cab(t: *TigerCtx, x: long, mul: long) {
 }
 
 xg(t: *TigerCtx, i: int) -> long {
-    return longarr_get_unchecked(t.x, i)
+    return t.x[i]
 }
 xs(t: *TigerCtx, i: int, v: long) {
-    longarr_set_unchecked(t.x, i, v)
+    t.x[i] = v
 }
 
 key_schedule(t: *TigerCtx) {
@@ -458,14 +457,13 @@ new() -> {
     ctx.a = 0x0123456789ABCDEF
     ctx.b = 0xFEDCBA9876543210
     ctx.c = 0xF096A5B4C3B2E187
-    ctx.x = longarr_new_raw(8)
     ctx.x_off = 0
     ctx.buf = bytes.new(8)
     ctx.b_off = 0
     ctx.byte_count = 0
     i = 0
     while i < 8 {
-        longarr_set_unchecked(ctx.x, i, 0)
+        ctx.x[i] = 0
         bytes.set(ctx.buf, i, 0)
         i = i + 1
     }
@@ -513,10 +511,6 @@ emit_le64(out: ptr, off: int, v: long) {
 }
 
 free_internals(t: *TigerCtx) {
-    if t.x != null {
-        longarr_free(t.x)
-        t.x = null
-    }
     if t.buf != null {
         bytes.free(t.buf)
         t.buf = null

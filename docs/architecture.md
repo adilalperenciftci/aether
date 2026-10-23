@@ -219,7 +219,7 @@ rejects timestamp macros outright.
        int count;                       // the actor's own state follows
    } CounterActor;
    ```
-   The fields, in order: `active`, `id`, `mailbox`, `step`, `thread`, `auto_process`, `assigned_core`, `migrate_to`, `main_thread_only`, `spsc_queue`, `reply_slot`, `step_lock`, `timeout_ns`, `last_activity_ns`, `dead`, `alloc_size`, `destroy_state`, `scheduler_owned`, `inbox`, `thread_parked`. The header comments each one.
+   The fields, in order: `active`, `id`, `mailbox`, `step`, `thread`, `auto_process`, `assigned_core`, `migrate_to`, `spsc_queue`, `reply_slot`, `step_lock`, `timeout_ns`, `last_activity_ns`, `dead`, `alloc_size`, `destroy_state`, `scheduler_owned`, `inbox`, `thread_parked`, `inflight`. The header comments each one.
 
 2. **Message Structure** (`runtime/actors/actor_state_machine.h`)
    ```c
@@ -313,12 +313,12 @@ For platforms without pthreads (WebAssembly, embedded, bare-metal), the cooperat
 ```
 
 **Key Differences from Multi-Core:**
-- `scheduler_init()` forces `num_cores = 1` and `main_thread_mode = true`
+- `scheduler_init()` forces `num_cores = 1`
 - `scheduler_start()` / `scheduler_stop()` are no-ops (no threads to manage)
+- A send queues: into the actor's mailbox, and past its 32 messages into its inbox (an unbounded FIFO); it never runs a handler (#3112)
 - `scheduler_wait()` drains via `aether_scheduler_poll()` loop
 - All sends are local (no cross-core queues, no migration)
-- Ask/reply is synchronous (poll until reply_ready)
-- `aether_send_message_sync()` heap-allocates message data (no zero-copy stack optimization, mailbox FIFO order means the sent message may not be the next one consumed)
+- Ask/reply polls until reply_ready
 
 **Selection:** The Makefile selects the scheduler based on `PLATFORM` or auto-detects `AETHER_NO_THREADING` in `EXTRA_CFLAGS`. Only one scheduler .c file is compiled into the binary. Users can also use `ae build --target wasm` for Emscripten builds.
 
@@ -381,13 +381,12 @@ design and its record in [design/ownership-model.md](design/ownership-model.md))
 
 The runtime implements these optimization strategies in the active code paths:
 
-1. **Main Thread Actor Mode** - Single-actor programs bypass scheduler entirely
-2. **Thread-Local Message Pools** - Eliminate malloc/free overhead
-3. **Batch Dequeue** - Reduce atomic operations from N to 1 per batch
-4. **Adaptive Batching** - Scale batch size with load (64 to 1024)
-5. **Direct Mailbox Delivery** - Same-core messages bypass the queue
-6. **Computed Goto Dispatch** - Direct label jumps for message handlers
-7. **Inline Single-Int Messages** - Bypass pool allocation for common messages
+1. **Thread-Local Message Pools** - Eliminate malloc/free overhead
+2. **Batch Dequeue** - Reduce atomic operations from N to 1 per batch
+3. **Adaptive Batching** - Scale batch size with load (64 to 1024)
+4. **Direct Mailbox Delivery** - Same-core messages bypass the queue
+5. **Computed Goto Dispatch** - Direct label jumps for message handlers
+6. **Inline Single-Int Messages** - Bypass pool allocation for common messages
 8. **Message-Driven Migration** - Co-locate communicating actors
 9. **Optimized Spinlock** - PAUSE/YIELD hints during spin-wait
 10. **Cache Line Alignment** - Prevent false sharing on shared structures

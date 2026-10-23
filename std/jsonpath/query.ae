@@ -172,9 +172,10 @@ _new_result() -> ptr {
     return c
 }
 
-// Append one matched node. The list keeps a reference of its own to the
-// path (list_add_string_owned); the caller still owns what it passed.
-_push(cursors: ptr, value: ptr, path: string) {
+// Append one matched node. The cursor keeps `value` (`@keep`, #3086); the
+// list takes a reference of its own to the path (list_add_string_owned),
+// which the caller still owns.
+_push(cursors: ptr, value: @keep ptr, path: string) {
     c = cursors as *Cursor
     list.add_raw(c.values, value)
     list.add_string_owned(c.paths, path)
@@ -199,7 +200,7 @@ _fork(cursors: ptr) -> ptr {
     return out
 }
 
-_fork_single(value: ptr, path: string) -> ptr {
+_fork_single(value: @keep ptr, path: string) -> ptr {
     out = _new_result()
     _push(out, value, path)
     return out
@@ -328,7 +329,7 @@ _expand_descendants(cursors: ptr) -> ptr {
 // Pre-order: this node, then each child. Child paths are plain builder
 // buffers; the recursive call copies them into the result list and the
 // local buffer is released after the subtree it labels is walked.
-_collect_descendants(value: ptr, path: string, out: ptr) {
+_collect_descendants(value: @keep ptr, path: string, out: ptr) {
     _push(out, value, path)
     t = json.type(value)
 
@@ -570,7 +571,7 @@ _eval_filter(f: ptr, current: @keep ptr, root: @keep ptr) -> int {
 
 // An existence test is true when the embedded query matches at least one
 // node; a LogicalType function test is true when the function says so.
-_eval_test(t: ptr, current: ptr, root: @keep ptr) -> int {
+_eval_test(t: ptr, current: @keep ptr, root: @keep ptr) -> int {
     tp = t as *Test
 
     if tp.kind == model.T_FUNCTION {
@@ -884,7 +885,7 @@ _json_cmp(a: ptr, b: ptr) -> int {
 
 // length() / count() / value() — ValueType results. Returns a freshly
 // allocated json value the caller owns, or null for Nothing.
-_eval_value_fn(fp: *TestFn, current: ptr, root: @keep ptr) -> ptr {
+_eval_value_fn(fp: *TestFn, current: @keep ptr, root: @keep ptr) -> ptr {
     if fp.kind == model.FN_LENGTH {
         arg = list.get_raw(fp.args, 0)
         v = _arg_to_value(arg, current, root)
@@ -925,7 +926,7 @@ _eval_value_fn(fp: *TestFn, current: ptr, root: @keep ptr) -> ptr {
 // Evaluate a function argument down to a single value, or null when the
 // argument's nodelist is not exactly one node (RFC 9535 §2.4.4: length()
 // of a multi-node or empty nodelist is Nothing).
-_arg_to_value(arg: ptr, current: ptr, root: @keep ptr) -> ptr {
+_arg_to_value(arg: ptr, current: @keep ptr, root: @keep ptr) -> ptr {
     ap = arg as *FnArg
 
     if ap.lit != null {
@@ -986,7 +987,7 @@ _release_arg_value(arg: ptr, value: ptr) {
 }
 
 // The node COUNT of a query argument, for count().
-_arg_nodelist_size(arg: ptr, current: ptr, root: @keep ptr) -> int {
+_arg_nodelist_size(arg: ptr, current: @keep ptr, root: @keep ptr) -> int {
     ap = arg as *FnArg
     if ap.test == null { return 0 }
 
@@ -1014,7 +1015,7 @@ _arg_nodelist_size(arg: ptr, current: ptr, root: @keep ptr) -> int {
 // the WHOLE string, search() any substring. std.regex is PCRE2, so
 // match() gets explicit anchors. Both return false (not an error) when
 // either argument is not a string, per the RFC's type rules.
-_eval_regex_fn(fp: *TestFn, current: ptr, root: @keep ptr, substring: int) -> int {
+_eval_regex_fn(fp: *TestFn, current: @keep ptr, root: @keep ptr, substring: int) -> int {
     if list.size(fp.args) != 2 { return 0 }
 
     lhs_arg = list.get_raw(fp.args, 0)

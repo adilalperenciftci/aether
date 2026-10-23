@@ -26,7 +26,6 @@
 
 import std.bits
 import std.bytes
-import std.intarr
 
 extern malloc(size: int) -> ptr
 extern free(p: ptr)
@@ -71,7 +70,7 @@ struct Sm3Ctx {
     block_len: int
     count_lo: long
     count_hi: long
-    w: ptr // intarr(68) message expansion
+    w: int[68] // message expansion
 }
 
 m32(x: long) -> long {
@@ -104,16 +103,15 @@ gg1(x: long, y: long, z: long) -> long {
 }
 
 wg(c: *Sm3Ctx, i: int) -> long {
-    return intarr_get_unchecked(c.w, i) & 0xFFFFFFFF
+    return c.w[i] & 0xFFFFFFFF
 }
 
 process_block(c: *Sm3Ctx) {
-    w = c.w
     // Load 16 big-endian words; expand to 68.
     i = 0
     while i < 16 {
         word = bytes.get_be32(c.block, i * 4)
-        intarr_set_unchecked(w, i, word & 0xFFFFFFFF)
+        c.w[i] = word & 0xFFFFFFFF
         i = i + 1
     }
     i = 16
@@ -124,7 +122,7 @@ process_block(c: *Sm3Ctx) {
         wj13 = wg(c, i - 13)
         r7 = rl(wj13, 7)
         v = (p1(x & 0xFFFFFFFF) ^ r7 ^ wg(c, i - 6)) & 0xFFFFFFFF
-        intarr_set_unchecked(w, i, v)
+        c.w[i] = v
         i = i + 1
     }
 
@@ -212,7 +210,6 @@ new() -> {
         bytes.set(ctx.block, j, 0)
         j = j + 1
     }
-    ctx.w = intarr_new_raw(68)
     return ctx, ""
 }
 
@@ -290,10 +287,6 @@ free_internals(c: *Sm3Ctx) {
     if c.block != null {
         bytes.free(c.block)
         c.block = null
-    }
-    if c.w != null {
-        intarr_free(c.w)
-        c.w = null
     }
 }
 

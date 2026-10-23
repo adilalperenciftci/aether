@@ -23,7 +23,6 @@
 
 import std.bits
 import std.bytes
-import std.intarr
 
 extern malloc(size: int) -> ptr
 extern free(p: ptr)
@@ -43,7 +42,7 @@ struct Rmd128Ctx {
     block_len: int
     count_lo: long
     count_hi: long
-    x: ptr // intarr(16) loaded message words
+    x: int[16] // loaded message words
 }
 
 m32(x: long) -> long {
@@ -68,7 +67,7 @@ f4(x: long, y: long, z: long) -> long {
 }
 
 xg(ctx: *Rmd128Ctx, i: int) -> long {
-    return intarr_get_unchecked(ctx.x, i) & 0xFFFFFFFF
+    return ctx.x[i] & 0xFFFFFFFF
 }
 
 // Left-line step functions: a = RL(a + Fi(b,c,d) + x + K, s)
@@ -279,7 +278,6 @@ new() -> {
         bytes.set(ctx.block, j, 0)
         j = j + 1
     }
-    ctx.x = intarr_new_raw(16)
     return ctx, ""
 }
 
@@ -287,7 +285,7 @@ absorb_block(c: *Rmd128Ctx) {
     i = 0
     while i < 16 {
         w = bytes.get_le32(c.block, i * 4)
-        intarr_set_unchecked(c.x, i, w)
+        c.x[i] = w
         i = i + 1
     }
     process_block(c)
@@ -359,10 +357,6 @@ free_internals(c: *Rmd128Ctx) {
     if c.block != null {
         bytes.free(c.block)
         c.block = null
-    }
-    if c.x != null {
-        intarr_free(c.x)
-        c.x = null
     }
 }
 

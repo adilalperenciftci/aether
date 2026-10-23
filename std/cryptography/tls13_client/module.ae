@@ -107,7 +107,6 @@ import std.cryptography.tls13_hs
 import std.cryptography.tls13_cert
 import std.cryptography.tls13_record
 import std.cryptography
-import std.net
 import std.tcp
 import std.list
 import std.os
@@ -434,7 +433,7 @@ fn recio_fill(r: *RecordIO) -> int {
     filling = 1
     result = -1
     while filling == 1 {
-        chunk, n, err = net.tcp_receive_n_raw(r.sock, 4096)
+        chunk, n, err = tcp.read_n(r.sock, 4096)
         if string.equals(err, "") == 1 {
             if n <= 0 { result = n; filling = 0 } else {
                 bytes.copy_from_string(r.buf, r.len, chunk, n)
@@ -555,12 +554,12 @@ struct ClientConn {
     res_hash_len: int
 }
 
-// Send the first `n` bytes of the std.bytes buffer `rec` on `sock` as a
-// borrowed view of the buffer, with no string copy (#2301). Returns send(2)'s
-// count, or -1 on failure: the contract the call sites had when they copied
-// the record into a string for net.tcp_send_n_raw.
+// Send the record `rec` on `sock`, a borrowed view of its buffer with no
+// string copy (#2301), every byte of it however many sends that takes
+// (#3108): a short send left the peer holding part of a record. Returns the
+// record's length, or -1 on failure.
 fn cli_send_view(sock: ptr, rec: byte[]) -> int {
-    sent, err = tcp.write_n(sock, rec)
+    sent, err = tcp.write_all(sock, rec)
     if err != "" {
         return -1
     }
@@ -716,18 +715,11 @@ fn connect_ex(host: string, port: int, x25519_priv: ptr, client_cert: ptr, clien
 //   cafile      a PEM bundle to trust INSTEAD of the system store (parity with
 //               set_cafile), or "" for the normal resolution.
 fn connect_full(host: string, port: int, x25519_priv: ptr, client_cert: ptr, client_cert_len: int, client_key: ptr, adopt_sock: @keep ptr, insecure: int, cafile: string) -> (ptr, string) {
-    // Dial into a FRESH name and pick afterwards, rather than assigning to
-    // `sock` twice. A conditional re-assignment here left the slot's type
-    // unresolved ("unresolved type in codegen, defaulting to int"), and that
-    // unresolved slot propagated far enough to retype an unrelated local in
-    // std/cryptography/tls13_cert as void*.
-    dialled = null
-    if adopt_sock == null {
-        dialled = net.tcp_connect_raw(host, port)
-    }
     sock = adopt_sock
-    if adopt_sock == null { sock = dialled }
-    if sock == null { return null, "connect failed" }
+    if sock == null {
+        sock, dial_err = tcp.connect(host, port)
+        if string.equals(dial_err, "") != 1 { return null, dial_err }
+    }
     // Initial key exchange group is x25519, using the caller's private scalar.
     // On a HelloRetryRequest we may switch to secp256r1 with a fresh scalar.
     cur_group = tls13_hs.GROUP_X25519
@@ -750,7 +742,7 @@ fn connect_full(host: string, port: int, x25519_priv: ptr, client_cert: ptr, cli
     transcript_add(tr, bytes.view(ch)[0..ch_len])
     serr = send_plaintext_handshake(sock, bytes.view(ch)[0..ch_len])
     if string.equals(serr, "") != 1 {
-        cleanup_hello(pub, rnd, sid, ch); transcript_free(tr); net.tcp_close(sock)
+        cleanup_hello(pub, rnd, sid, ch); transcript_free(tr); tcp.close(sock)
         return null, serr
     }
     rio = recio_new(sock)
@@ -758,7 +750,7 @@ fn connect_full(host: string, port: int, x25519_priv: ptr, client_cert: ptr, cli
     // ServerHello (may be a HelloRetryRequest we answer once).
     shrec, shlen, sherr = recio_next_hs(rio)
     if string.equals(sherr, "") != 1 {
-        cleanup_hello(pub, rnd, sid, ch); transcript_free(tr); recio_free(rio); net.tcp_close(sock)
+        cleanup_hello(pub, rnd, sid, ch); transcript_free(tr); recio_free(rio); tcp.close(sock)
         return null, sherr
     }
     sh_msg_len = shlen - 5
@@ -769,7 +761,7 @@ fn connect_full(host: string, port: int, x25519_priv: ptr, client_cert: ptr, cli
     perr = tls13_hs.parse_server_hello(bytes.view(sh)[0..sh_msg_len], &parsed)
     if string.equals(perr, "") != 1 {
         bytes.free(sh); bytes.free(shrec)
-        cleanup_hello(pub, rnd, sid, ch); transcript_free(tr); recio_free(rio); net.tcp_close(sock)
+        cleanup_hello(pub, rnd, sid, ch); transcript_free(tr); recio_free(rio); tcp.close(sock)
         return null, perr
     }
 
@@ -787,7 +779,7 @@ fn connect_full(host: string, port: int, x25519_priv: ptr, client_cert: ptr, cli
             // Server asked to retry a group we don't support (or echoed x25519,
             // which shouldn't happen after a HRR); give up.
             bytes.free(sh); bytes.free(shrec)
-            cleanup_hello(pub, rnd, sid, ch); transcript_free(tr); recio_free(rio); net.tcp_close(sock)
+            cleanup_hello(pub, rnd, sid, ch); transcript_free(tr); recio_free(rio); tcp.close(sock)
             return null, "HelloRetryRequest asked for an unsupported group"
         }
         cleanup_hello(pub, rnd, sid, ch) // free CH1 + its keyshare/nonces
@@ -805,7 +797,7 @@ fn connect_full(host: string, port: int, x25519_priv: ptr, client_cert: ptr, cli
         serr2 = send_plaintext_handshake(sock, bytes.view(ch)[0..ch_len])
         if string.equals(serr2, "") != 1 {
             cleanup_hello(pub2, rnd, sid, ch); bytes.free(cur_priv)
-            transcript_free(tr); recio_free(rio); net.tcp_close(sock)
+            transcript_free(tr); recio_free(rio); tcp.close(sock)
             return null, serr2
         }
         pub = pub2 // so later cleanup frees the right keyshare
@@ -814,7 +806,7 @@ fn connect_full(host: string, port: int, x25519_priv: ptr, client_cert: ptr, cli
         shrec, shlen, sherr = recio_next_hs(rio)
         if string.equals(sherr, "") != 1 {
             cleanup_hello(pub, rnd, sid, ch); bytes.free(cur_priv)
-            transcript_free(tr); recio_free(rio); net.tcp_close(sock)
+            transcript_free(tr); recio_free(rio); tcp.close(sock)
             return null, sherr
         }
         sh_msg_len = shlen - 5
@@ -825,13 +817,13 @@ fn connect_full(host: string, port: int, x25519_priv: ptr, client_cert: ptr, cli
         if string.equals(perr, "") != 1 {
             bytes.free(sh); bytes.free(shrec)
             cleanup_hello(pub, rnd, sid, ch); bytes.free(cur_priv)
-            transcript_free(tr); recio_free(rio); net.tcp_close(sock)
+            transcript_free(tr); recio_free(rio); tcp.close(sock)
             return null, perr
         }
         if parsed.is_hello_retry == 1 {
             bytes.free(sh); bytes.free(shrec)
             cleanup_hello(pub, rnd, sid, ch); bytes.free(cur_priv)
-            transcript_free(tr); recio_free(rio); net.tcp_close(sock)
+            transcript_free(tr); recio_free(rio); tcp.close(sock)
             return null, "server sent a second HelloRetryRequest"
         }
     }
@@ -857,7 +849,7 @@ fn connect_full(host: string, port: int, x25519_priv: ptr, client_cert: ptr, cli
         if parsed.key_share != null { bytes.free(parsed.key_share) }
         bytes.free(sh); bytes.free(shrec)
         cleanup_hello(pub, rnd, sid, ch); if own_priv == 1 { bytes.free(cur_priv) }
-        transcript_free(tr); recio_free(rio); net.tcp_close(sock)
+        transcript_free(tr); recio_free(rio); tcp.close(sock)
         return null, agerr
     }
     // Negotiate the record AEAD + key-schedule hash from the chosen suite.
@@ -865,7 +857,7 @@ fn connect_full(host: string, port: int, x25519_priv: ptr, client_cert: ptr, cli
     if string.equals(suite_err, "") != 1 {
         if parsed.key_share != null { bytes.free(parsed.key_share) }
         bytes.free(shared); bytes.free(sh); bytes.free(shrec)
-        cleanup_hello(pub, rnd, sid, ch); transcript_free(tr); recio_free(rio); net.tcp_close(sock)
+        cleanup_hello(pub, rnd, sid, ch); transcript_free(tr); recio_free(rio); tcp.close(sock)
         return null, suite_err
     }
 
@@ -880,7 +872,7 @@ fn connect_full(host: string, port: int, x25519_priv: ptr, client_cert: ptr, cli
     if own_priv == 1 { bytes.free(cur_priv) } // P-256 retry scalar (HRR path)
     bytes.free(p256_priv) // the pre-offered P-256 ephemeral
     if result == null {
-        recio_free(rio); net.tcp_close(sock)
+        recio_free(rio); tcp.close(sock)
     }
     return result, result_err
 }
@@ -894,15 +886,15 @@ fn connect_full(host: string, port: int, x25519_priv: ptr, client_cert: ptr, cli
 // the classical exchange. Same authentication + Finished as connect() via the
 // shared tail. Returns a live ClientConn or (null, error).
 connect_pq(host: string, port: int) -> (ptr, string) {
-    sock = net.tcp_connect_raw(host, port)
-    if sock == null { return null, "connect failed" }
+    sock, dial_err = tcp.connect(host, port)
+    if string.equals(dial_err, "") != 1 { return null, dial_err }
 
     // Ephemerals: an ML-KEM-768 keypair (keep dk to decapsulate) and an X25519
     // scalar (keep to agree). keygen seeds itself from the CSPRNG and fails
     // rather than hand back a key from a failed draw.
     ek, dk, kerr = mlkem.mlkem768_keygen()
     if kerr != "" {
-        net.tcp_close(sock)
+        tcp.close(sock)
         return null, kerr
     }
     xpriv = rand_into(32)
@@ -924,7 +916,7 @@ connect_pq(host: string, port: int) -> (ptr, string) {
     serr = send_plaintext_handshake(sock, bytes.view(ch)[0..ch_len])
     if string.equals(serr, "") != 1 {
         bytes.free(ek); bytes.free(dk); bytes.free(xpriv); bytes.free(xpub); bytes.free(hybrid)
-        cleanup_hello(null, rnd, sid, ch); transcript_free(tr); net.tcp_close(sock)
+        cleanup_hello(null, rnd, sid, ch); transcript_free(tr); tcp.close(sock)
         return null, serr
     }
     rio = recio_new(sock)
@@ -932,7 +924,7 @@ connect_pq(host: string, port: int) -> (ptr, string) {
     shrec, shlen, sherr = recio_next_hs(rio)
     if string.equals(sherr, "") != 1 {
         bytes.free(ek); bytes.free(dk); bytes.free(xpriv); bytes.free(xpub); bytes.free(hybrid)
-        cleanup_hello(null, rnd, sid, ch); transcript_free(tr); recio_free(rio); net.tcp_close(sock)
+        cleanup_hello(null, rnd, sid, ch); transcript_free(tr); recio_free(rio); tcp.close(sock)
         return null, sherr
     }
     sh_msg_len = shlen - 5
@@ -999,7 +991,7 @@ connect_pq(host: string, port: int) -> (ptr, string) {
     bytes.free(sh); bytes.free(shrec)
     cleanup_hello(null, rnd, sid, ch); transcript_free(tr)
     if result == null {
-        recio_free(rio); net.tcp_close(sock)
+        recio_free(rio); tcp.close(sock)
     }
     return result, result_err
 }
@@ -1584,7 +1576,7 @@ close_conn(conn: ptr) {
     if c.res_master != null { bytes.free(c.res_master) }
     if c.res_hash_algo != null { bytes.free(c.res_hash_algo) }
     recio_free(c.rio as *RecordIO)
-    net.tcp_close(c.sock)
+    tcp.close(c.sock)
     libc_free(conn)
 }
 
@@ -1775,8 +1767,8 @@ fn connect_resume_ed(host: string, port: int, x25519_priv: ptr, ticket: ptr, ear
     // PSK = HKDF-Expand-Label(res_master, "resumption", ticket_nonce, Hash.len)
     psk = tls13_ks.psk_from_resumption(algo, st.res_master, hl, bytes.view(st.nonce)[0..st.nonce_len])
 
-    sock = net.tcp_connect_raw(host, port)
-    if sock == null { bytes.free(psk); return null, "connect failed" }
+    sock, dial_err = tcp.connect(host, port)
+    if string.equals(dial_err, "") != 1 { bytes.free(psk); return null, dial_err }
     pub = x25519.base_point(x25519_priv)
     rnd = rand_into(32)
     sid = rand_into(32)
@@ -1806,7 +1798,7 @@ fn connect_resume_ed(host: string, port: int, x25519_priv: ptr, ticket: ptr, ear
     transcript_add(tr, bytes.view(ch)[0..ch_len])
     serr = send_plaintext_handshake(sock, bytes.view(ch)[0..ch_len])
     if string.equals(serr, "") != 1 {
-        bytes.free(early); bytes.free(psk); cleanup_hello(pub, rnd, sid, ch); transcript_free(tr); net.tcp_close(sock)
+        bytes.free(early); bytes.free(psk); cleanup_hello(pub, rnd, sid, ch); transcript_free(tr); tcp.close(sock)
         return null, serr
     }
 
@@ -1832,7 +1824,7 @@ fn connect_resume_ed(host: string, port: int, x25519_priv: ptr, ticket: ptr, ear
 
     shrec, shlen, sherr = recio_next_hs(rio)
     if string.equals(sherr, "") != 1 {
-        bytes.free(psk); cleanup_hello(pub, rnd, sid, ch); transcript_free(tr); recio_free(rio); net.tcp_close(sock)
+        bytes.free(psk); cleanup_hello(pub, rnd, sid, ch); transcript_free(tr); recio_free(rio); tcp.close(sock)
         return null, sherr
     }
     sh_msg_len = shlen - 5
@@ -1844,13 +1836,13 @@ fn connect_resume_ed(host: string, port: int, x25519_priv: ptr, ticket: ptr, ear
     perr = tls13_hs.parse_server_hello(bytes.view(sh)[0..sh_msg_len], &parsed)
     if string.equals(perr, "") != 1 {
         bytes.free(psk); bytes.free(sh); bytes.free(shrec)
-        cleanup_hello(pub, rnd, sid, ch); transcript_free(tr); recio_free(rio); net.tcp_close(sock)
+        cleanup_hello(pub, rnd, sid, ch); transcript_free(tr); recio_free(rio); tcp.close(sock)
         return null, perr
     }
     if parsed.psk_accepted != 1 {
         if parsed.key_share != null { bytes.free(parsed.key_share) }
         bytes.free(psk); bytes.free(sh); bytes.free(shrec)
-        cleanup_hello(pub, rnd, sid, ch); transcript_free(tr); recio_free(rio); net.tcp_close(sock)
+        cleanup_hello(pub, rnd, sid, ch); transcript_free(tr); recio_free(rio); tcp.close(sock)
         return null, "server rejected the PSK (no resumption)"
     }
 
@@ -1859,14 +1851,14 @@ fn connect_resume_ed(host: string, port: int, x25519_priv: ptr, ticket: ptr, ear
     if string.equals(agerr, "") != 1 {
         if parsed.key_share != null { bytes.free(parsed.key_share) }
         bytes.free(psk); bytes.free(sh); bytes.free(shrec)
-        cleanup_hello(pub, rnd, sid, ch); transcript_free(tr); recio_free(rio); net.tcp_close(sock)
+        cleanup_hello(pub, rnd, sid, ch); transcript_free(tr); recio_free(rio); tcp.close(sock)
         return null, agerr
     }
     rec_aead, rec_key_len, hash_algo, hash_len, suite_err = suite_params(parsed.cipher_suite)
     if string.equals(suite_err, "") != 1 {
         if parsed.key_share != null { bytes.free(parsed.key_share) }
         bytes.free(psk); bytes.free(shared); bytes.free(sh); bytes.free(shrec)
-        cleanup_hello(pub, rnd, sid, ch); transcript_free(tr); recio_free(rio); net.tcp_close(sock)
+        cleanup_hello(pub, rnd, sid, ch); transcript_free(tr); recio_free(rio); tcp.close(sock)
         return null, suite_err
     }
 
@@ -1984,7 +1976,7 @@ fn connect_resume_ed(host: string, port: int, x25519_priv: ptr, ticket: ptr, ear
     bytes.free(sh); bytes.free(shrec)
     cleanup_hello(pub, rnd, sid, ch); transcript_free(tr)
     if result == null {
-        recio_free(rio); net.tcp_close(sock)
+        recio_free(rio); tcp.close(sock)
     }
     return result, result_err
 }
@@ -2501,7 +2493,7 @@ fn parse_intermediates(body: byte[], out: ptr) {
                 init_intermediate(mc)
                 cerr = tls13_cert.parse_certificate(bytes.view(der)[0..cert_len], mc)
                 if string.equals(cerr, "") == 1 {
-                    list_add_raw(out, mc)
+                    list.add(out, mc)
                 } else {
                     tls13_cert.free_leaf(mc)
                     libc_free(mc)
@@ -2535,7 +2527,7 @@ fn free_intermediates(lst: ptr) {
     n = list_size(lst)
     i = 0
     while i < n {
-        m = list_get_raw(lst, i) as *LeafCert
+        m = list.at(lst, i) as *LeafCert
         if m != null {
             tls13_cert.free_leaf(m)
             libc_free(m)
@@ -2607,7 +2599,7 @@ pure_tls_client_connect(fd: int, host: string, verify_mode: int, cafile: string)
 
     priv = rand_into(32)
     if priv == null {
-        net.tcp_close(sock)
+        tcp.close(sock)
         aether_pure_tls_client_set_error("no randomness for the key share")
         return null
     }

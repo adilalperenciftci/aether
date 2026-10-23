@@ -25,7 +25,7 @@
 // iterations < 1) or allocation failure.
 //
 // Aether-specific care:
-//   * Blocks are 128 uint64 lanes held in one big std.longarr; lanes are
+//   * Blocks are 128 uint64 lanes held in one long[] matrix; lanes are
 //     loaded / stored LITTLE-ENDIAN. 64-bit `long` add wraps mod 2^64
 //     (two's complement), exactly Argon2's modular add.
 //   * The G compression's `2 * (low32(a) * low32(b))` product is computed
@@ -38,12 +38,12 @@
 
 import std.bits
 import std.bytes
-import std.longarr
 import std.cryptography.blake2
 import std.string
 
 extern malloc(size: int) -> ptr
 @extern("free") libc_free(p: ptr)
+extern calloc(count: long, size: long) -> ptr
 
 exports(
     argon2, argon2d, argon2i, argon2id,
@@ -58,6 +58,14 @@ const ARGON2_ID: int = 2
 const QWORDS: int = 128 // uint64 lanes per 1024-byte block
 const SYNC_POINTS: int = 4
 const VERSION: int = 0x13
+
+// One 1024-byte block of the memory matrix: QWORDS 64-bit lanes. The
+// scratch blocks of a fill are these, passed by pointer, so every index
+// is checked against the constant QWORDS (the C compiler drops the check
+// where the index is in range by construction).
+struct Block {
+    w: long[QWORDS]
+}
 
 // ---- Variable-length hash H' ----
 // H'(out_len, input[len]) per RFC 9106 §3.2:
@@ -128,45 +136,45 @@ bytes_as_string(b: byte[]) -> string {
     return bytes.finish(dup, n)
 }
 
-// ---- Block <-> longarr helpers ----
-// Memory matrix is one longarr of memoryBlocks*128 lanes. Block `i`
+// ---- Block <-> matrix helpers ----
+// The memory matrix is one long[] of memoryBlocks*128 lanes. Block `i`
 // occupies lanes [i*128 .. i*128+128).
 
 // Load a 1024-byte little-endian block from `src` (a std.bytes buffer at
 // byte offset 0) into matrix block `bidx`.
-load_block_from_bytes(mem: ptr, bidx: int, src: ptr) {
+load_block_from_bytes(mem: long[], bidx: int, src: ptr) {
     base = bidx * QWORDS
     i = 0
     while i < QWORDS {
         off = i * 8
-        longarr_set_unchecked(mem, base + i, bytes.get_le64(src, off))
+        mem[base + i] = bytes.get_le64(src, off)
         i = i + 1
     }
 }
 
 // Store matrix block `bidx` little-endian into `dst` (a std.bytes buffer).
-store_block_to_bytes(mem: ptr, bidx: int, dst: ptr) {
+store_block_to_bytes(mem: long[], bidx: int, dst: ptr) {
     base = bidx * QWORDS
     i = 0
     while i < QWORDS {
-        w = longarr_get_unchecked(mem, base + i)
+        w = mem[base + i]
         off = i * 8
         bytes.set_le64(dst, off, w)
         i = i + 1
     }
 }
 
-// ---- The G compression function over a scratch longarr of 128 lanes ----
+// ---- The G compression function over a 128-lane scratch block ----
 
 // GB modifies four lanes of `v` in place (indices a,b,c,d).
 // a += b + 2*low32(a)*low32(b); d = rotr64(d^a,32); c += d + 2*low32(c)*low32(d);
 // b = rotr64(b^c,24); a += b + 2*low32(a)*low32(b); d = rotr64(d^a,16);
 // c += d + 2*low32(c)*low32(d); b = rotr64(b^c,63).
-gb(v: ptr, a: int, b: int, c: int, d: int) {
-    va = longarr_get_unchecked(v, a)
-    vb = longarr_get_unchecked(v, b)
-    vc = longarr_get_unchecked(v, c)
-    vd = longarr_get_unchecked(v, d)
+gb(v: *Block, a: int, b: int, c: int, d: int) {
+    va = v.w[a]
+    vb = v.w[b]
+    vc = v.w[c]
+    vd = v.w[d]
 
     va = va + vb + mul2(va, vb)
     vd = bits.rotr64(vd ^ va, 32)
@@ -178,10 +186,10 @@ gb(v: ptr, a: int, b: int, c: int, d: int) {
     vc = vc + vd + mul2(vc, vd)
     vb = bits.rotr64(vb ^ vc, 63)
 
-    longarr_set_unchecked(v, a, va)
-    longarr_set_unchecked(v, b, vb)
-    longarr_set_unchecked(v, c, vc)
-    longarr_set_unchecked(v, d, vd)
+    v.w[a] = va
+    v.w[b] = vb
+    v.w[c] = vc
+    v.w[d] = vd
 }
 
 // 2 * (low32(x) * low32(y)), all mod 2^64.
@@ -192,8 +200,8 @@ mul2(x: long, y: long) -> long {
 }
 
 // Apply the Argon2 permutation P to block `v` (rows then columns), in
-// place over the 128-lane scratch longarr.
-apply_blake(v: ptr) {
+// place over the 128-lane scratch block.
+apply_blake(v: *Block) {
     // Rows: for i in 0,16,32,...,112
     i = 0
     while i < 128 {
@@ -227,8 +235,8 @@ apply_blake(v: ptr) {
 
 // FillBlock: current = R ^ Z, where R = prev ^ ref and Z = P(R).
 // If with_xor != 0, current ^= (R ^ Z) instead of being overwritten.
-// `rblk` and `zblk` are 128-lane scratch longarrs.
-fill_block(mem: ptr, prev_idx: int, ref_idx: int, cur_idx: int, with_xor: int, rblk: ptr, zblk: ptr) {
+// `rblk` and `zblk` are 128-lane scratch blocks.
+fill_block(mem: long[], prev_idx: int, ref_idx: int, cur_idx: int, with_xor: int, rblk: *Block, zblk: *Block) {
     pbase = prev_idx * QWORDS
     rbase = ref_idx * QWORDS
     cbase = cur_idx * QWORDS
@@ -236,9 +244,9 @@ fill_block(mem: ptr, prev_idx: int, ref_idx: int, cur_idx: int, with_xor: int, r
     // R = prev ^ ref; Z = R (copy).
     i = 0
     while i < QWORDS {
-        rv = longarr_get_unchecked(mem, pbase + i) ^ longarr_get_unchecked(mem, rbase + i)
-        longarr_set_unchecked(rblk, i, rv)
-        longarr_set_unchecked(zblk, i, rv)
+        rv = mem[pbase + i] ^ mem[rbase + i]
+        rblk.w[i] = rv
+        zblk.w[i] = rv
         i = i + 1
     }
 
@@ -247,27 +255,27 @@ fill_block(mem: ptr, prev_idx: int, ref_idx: int, cur_idx: int, with_xor: int, r
     // current = R ^ Z  (optionally XORed into the existing current block).
     i = 0
     while i < QWORDS {
-        nv = longarr_get_unchecked(rblk, i) ^ longarr_get_unchecked(zblk, i)
+        nv = rblk.w[i] ^ zblk.w[i]
         if with_xor != 0 {
-            nv = longarr_get_unchecked(mem, cbase + i) ^ nv
+            nv = mem[cbase + i] ^ nv
         }
-        longarr_set_unchecked(mem, cbase + i, nv)
+        mem[cbase + i] = nv
         i = i + 1
     }
 }
 
 // Fill of the address block: Z = P(input); address = input ^ Z.
 // (The single-argument Fill in BC: R is the input itself, no prev^ref.)
-fill_addresses(input: ptr, addr: ptr, zblk: ptr) {
+fill_addresses(input: *Block, addr: *Block, zblk: *Block) {
     i = 0
     while i < QWORDS {
-        longarr_set_unchecked(zblk, i, longarr_get_unchecked(input, i))
+        zblk.w[i] = input.w[i]
         i = i + 1
     }
     apply_blake(zblk)
     i = 0
     while i < QWORDS {
-        longarr_set_unchecked(addr, i, longarr_get_unchecked(input, i) ^ longarr_get_unchecked(zblk, i))
+        addr.w[i] = input.w[i] ^ zblk.w[i]
         i = i + 1
     }
 }
@@ -295,15 +303,20 @@ argon2(atype: int, pass: byte[], salt: byte[], secret: byte[], ad: byte[], t_cos
     lane_length = segment_length * SYNC_POINTS
     memory_blocks = parallelism * lane_length
 
-    // The big memory matrix: memory_blocks * 128 lanes.
-    mem = longarr_new_raw(memory_blocks * QWORDS)
-    if mem == null {
+    // The big memory matrix: memory_blocks * 128 lanes. calloc rather
+    // than make: a memory cost the machine cannot give is a null result
+    // for the caller, not a panic.
+    long lanes = memory_blocks
+    lanes = lanes * QWORDS
+    mem_raw = calloc(lanes, 8)
+    if mem_raw == null {
         return null
     }
-    rblk = longarr_new_raw(QWORDS)
-    zblk = longarr_new_raw(QWORDS)
-    addr_blk = longarr_new_raw(QWORDS)
-    input_blk = longarr_new_raw(QWORDS)
+    mem = (mem_raw as long[])[0..lanes]
+    rblk = Block {}
+    zblk = Block {}
+    addr_blk = Block {}
+    input_blk = Block {}
 
     // ---- Initialize: H0 = Blake2b-512(LE32(p,outLen,m,t,v,y) || strings) ----
     ctx = blake2.new_b(64)
@@ -348,7 +361,7 @@ argon2(atype: int, pass: byte[], salt: byte[], secret: byte[], ad: byte[], t_cos
     bytes.free(h0)
 
     // ---- Fill memory blocks ----
-    fill_memory(mem, atype, t_cost, parallelism, memory_blocks, segment_length, lane_length, rblk, zblk, addr_blk, input_blk)
+    fill_memory(mem, atype, t_cost, parallelism, memory_blocks, segment_length, lane_length, &rblk, &zblk, &addr_blk, &input_blk)
 
     // ---- Digest: XOR last block of every lane, then H'(out_len, finalBlock) ----
     final_idx = lane_length - 1
@@ -359,7 +372,7 @@ argon2(atype: int, pass: byte[], salt: byte[], secret: byte[], ad: byte[], t_cos
         while k < QWORDS {
             fbase = final_idx * QWORDS
             lbase = last_in_lane * QWORDS
-            longarr_set_unchecked(mem, fbase + k, longarr_get_unchecked(mem, fbase + k) ^ longarr_get_unchecked(mem, lbase + k))
+            mem[fbase + k] = mem[fbase + k] ^ mem[lbase + k]
             k = k + 1
         }
         i = i + 1
@@ -370,11 +383,7 @@ argon2(atype: int, pass: byte[], salt: byte[], secret: byte[], ad: byte[], t_cos
     hprime(bytes.view(blk_bytes)[0..1024], out_len, out, 0)
 
     bytes.free(blk_bytes)
-    longarr_free(mem)
-    longarr_free(rblk)
-    longarr_free(zblk)
-    longarr_free(addr_blk)
-    longarr_free(input_blk)
+    free(mem)
     return out
 }
 
@@ -405,7 +414,7 @@ add_byte_string(ctx: ptr, octets: byte[]) {
 
 // ---- Memory filling ----
 
-fill_memory(mem: ptr, atype: int, iterations: int, parallelism: int, memory_blocks: int, segment_length: int, lane_length: int, rblk: ptr, zblk: ptr, addr_blk: ptr, input_blk: ptr) {
+fill_memory(mem: long[], atype: int, iterations: int, parallelism: int, memory_blocks: int, segment_length: int, lane_length: int, rblk: *Block, zblk: *Block, addr_blk: *Block, input_blk: *Block) {
     pass = 0
     while pass < iterations {
         slice = 0
@@ -435,7 +444,7 @@ is_data_independent(atype: int, pass: int, slice: int) -> int {
     return 0
 }
 
-fill_segment(mem: ptr, atype: int, pass: int, slice: int, lane: int, iterations: int, parallelism: int, memory_blocks: int, segment_length: int, lane_length: int, rblk: ptr, zblk: ptr, addr_blk: ptr, input_blk: ptr) {
+fill_segment(mem: long[], atype: int, pass: int, slice: int, lane: int, iterations: int, parallelism: int, memory_blocks: int, segment_length: int, lane_length: int, rblk: *Block, zblk: *Block, addr_blk: *Block, input_blk: *Block) {
     data_independent = is_data_independent(atype, pass, slice)
 
     starting_index = 0
@@ -452,16 +461,16 @@ fill_segment(mem: ptr, atype: int, pass: int, slice: int, lane: int, iterations:
         // Clear address & input blocks, init input block.
         i = 0
         while i < QWORDS {
-            longarr_set_unchecked(addr_blk, i, 0)
-            longarr_set_unchecked(input_blk, i, 0)
+            addr_blk.w[i] = 0
+            input_blk.w[i] = 0
             i = i + 1
         }
-        longarr_set_unchecked(input_blk, 0, pass)
-        longarr_set_unchecked(input_blk, 1, lane)
-        longarr_set_unchecked(input_blk, 2, slice)
-        longarr_set_unchecked(input_blk, 3, memory_blocks)
-        longarr_set_unchecked(input_blk, 4, iterations)
-        longarr_set_unchecked(input_blk, 5, atype)
+        input_blk.w[0] = pass
+        input_blk.w[1] = lane
+        input_blk.w[2] = slice
+        input_blk.w[3] = memory_blocks
+        input_blk.w[4] = iterations
+        input_blk.w[5] = atype
         if pass == 0 {
             if slice == 0 {
                 next_addresses(input_blk, addr_blk, zblk)
@@ -483,9 +492,9 @@ fill_segment(mem: ptr, atype: int, pass: int, slice: int, lane: int, iterations:
             if addr_index == 0 {
                 next_addresses(input_blk, addr_blk, zblk)
             }
-            pseudo = longarr_get_unchecked(addr_blk, addr_index)
+            pseudo = addr_blk.w[addr_index]
         } else {
-            pseudo = longarr_get_unchecked(mem, prev_offset * QWORDS + 0)
+            pseudo = mem[prev_offset * QWORDS + 0]
         }
 
         ref_lane = get_ref_lane(pass, slice, lane, parallelism, pseudo)
@@ -505,9 +514,9 @@ fill_segment(mem: ptr, atype: int, pass: int, slice: int, lane: int, iterations:
     }
 }
 
-next_addresses(input_blk: ptr, addr_blk: ptr, zblk: ptr) {
-    // input.v[6]++
-    longarr_set_unchecked(input_blk, 6, longarr_get_unchecked(input_blk, 6) + 1)
+next_addresses(input_blk: *Block, addr_blk: *Block, zblk: *Block) {
+    // input.v.w[6]++
+    input_blk.w[6] = input_blk.w[6] + 1
     fill_addresses(input_blk, addr_blk, zblk)
     fill_addresses(addr_blk, addr_blk, zblk)
 }

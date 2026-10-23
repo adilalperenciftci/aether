@@ -84,7 +84,7 @@ import std.json
 import std.map
 import std.map(map_new, map_has, map_free)
 import std.list
-import std.list(list_new, list_add_raw, list_get_raw, list_size, list_free)
+import std.list(list_new, list_size, list_free)
 import std.strbuilder
 import std.string(string_length, string_equals, string_concat, string_char_at,
     string_char_at_n, string_contains, string_index_of, string_index_of_from,
@@ -253,7 +253,7 @@ field(_ctx: @keep ptr, name: string, ty: int) -> ptr {
         panic("schema.field(\"${name}\") inside the block of ${parent.name}, which is not a record: declare nested fields under a field of type schema.OBJECT or schema.array(schema.OBJECT)")
     }
     f = new_field(name, ty)
-    list_add_raw(s.fields, f)
+    list.add(s.fields, f)
     return f
 }
 
@@ -287,7 +287,7 @@ fn add_rule(_ctx: ptr, kind: int, ival: long, ival2: long, sval: string, refine_
     r.ival2 = ival2
     r.sval = sval
     r.refine_fn = refine_fn
-    list_add_raw(f.rules, r)
+    list.add(f.rules, r)
 }
 
 // numeric: value >= n  |  STR: length >= n
@@ -404,7 +404,7 @@ fn push_error(errors: ptr, field_name: string, code: string, msg: string) {
     // (string_concat(_, "")) that errors_free can reclaim with string_free; the
     // original interp temporary is tracker-freed when this frame returns.
     e.msg = string_concat(msg, "")
-    list_add_raw(errors, e)
+    list.add(errors, e)
 }
 
 // Coerce/type-check a raw string against a field type.
@@ -686,7 +686,7 @@ fn run_rules(errors: ptr, f: *Field, path: string, typed: string) -> (string, in
     rsz = list_size(f.rules)
     j = 0
     while j < rsz {
-        r = list_get_raw(f.rules, j) as *Rule
+        r = list.at(f.rules, j) as *Rule
         if r.kind >= RULE_XFORM_FIRST {
             next = apply_transform(r.kind, cur)
             string_free(cur)
@@ -714,7 +714,7 @@ parse(schema_ptr: ptr, input: ptr) -> (ptr, ptr) {
     fsz = list_size(s.fields)
     i = 0
     while i < fsz {
-        f = list_get_raw(s.fields, i) as *Field
+        f = list.at(s.fields, i) as *Field
         present_in = map_has(input, f.name)
 
         if present_in == 0 {
@@ -797,7 +797,7 @@ fn check_object(s: *Schema, obj: ptr, prefix: string, strict: int, errors: ptr) 
     fsz = list_size(s.fields)
     i = 0
     while i < fsz {
-        f = list_get_raw(s.fields, i) as *Field
+        f = list.at(s.fields, i) as *Field
         path = join_path(prefix, f.name)
         v = json.object_get_raw(obj, f.name)
         if v != null && json.type(v) == JSON_NULL {
@@ -894,7 +894,7 @@ fn count_fails(errors: ptr, f: *Field, path: string, n: int) -> int {
     rsz = list_size(f.rules)
     j = 0
     while j < rsz {
-        r = list_get_raw(f.rules, j) as *Rule
+        r = list.at(f.rules, j) as *Rule
         k = r.kind
         if k == RULE_PRESENT && n == 0 {
             push_error(errors, path, "invalid_value", "${path} must not be empty")
@@ -1132,7 +1132,7 @@ fn object_schema_into(b: ptr, s: *Schema) {
     fsz = list_size(s.fields)
     i = 0
     while i < fsz {
-        f = list_get_raw(s.fields, i) as *Field
+        f = list.at(s.fields, i) as *Field
         if i > 0 {
             strbuilder.append(b, ",")
         }
@@ -1146,7 +1146,7 @@ fn object_schema_into(b: ptr, s: *Schema) {
     first_req = 1
     i = 0
     while i < fsz {
-        f = list_get_raw(s.fields, i) as *Field
+        f = list.at(s.fields, i) as *Field
         if f.is_optional == 0 && f.has_default == 0 {
             if first_req == 0 {
                 strbuilder.append(b, ",")
@@ -1176,7 +1176,7 @@ fn field_schema_into(b: ptr, f: *Field) {
         rsz = list_size(f.rules)
         j = 0
         while j < rsz {
-            r = list_get_raw(f.rules, j) as *Rule
+            r = list.at(f.rules, j) as *Rule
             if r.kind == RULE_MIN || r.kind == RULE_LEN {
                 strbuilder.append(b, ",\"minItems\":")
                 strbuilder.append_long(b, r.ival)
@@ -1201,7 +1201,7 @@ fn field_schema_into(b: ptr, f: *Field) {
     rsz = list_size(f.rules)
     j = 0
     while j < rsz {
-        r = list_get_raw(f.rules, j) as *Rule
+        r = list.at(f.rules, j) as *Rule
         k = r.kind
         if k == RULE_MIN {
             if is_str {
@@ -1295,7 +1295,7 @@ schema_free(schema_ptr: ptr) {
     fsz = list_size(s.fields)
     i = 0
     while i < fsz {
-        field_free(list_get_raw(s.fields, i) as *Field)
+        field_free(list.at(s.fields, i) as *Field)
         i = i + 1
     }
     list_free(s.fields)
@@ -1306,7 +1306,7 @@ fn field_free(f: *Field) {
     rsz = list_size(f.rules)
     j = 0
     while j < rsz {
-        r = list_get_raw(f.rules, j) as *Rule
+        r = list.at(f.rules, j) as *Rule
         if r.refine_fn != null {
             libc_free(r.refine_fn) // free the box_closure()'d _AeClosure
         }
@@ -1339,7 +1339,7 @@ errors_free(errors: ptr) {
     sz = list_size(errors)
     i = 0
     while i < sz {
-        e = list_get_raw(errors, i) as *SchemaError
+        e = list.at(errors, i) as *SchemaError
         // heap.free runs SchemaError's typed destructor, which frees the owned
         // magic-string fields e.field and e.msg; e.code is a borrowed string
         // literal (not a magic AetherString), so the destructor skips it.

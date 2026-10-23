@@ -9,8 +9,11 @@
 #include <ws2tcpip.h>
 #else
 #include <sys/socket.h>
+#include <sys/time.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#include <pthread.h>
+#include <unistd.h>
 #endif
 #include "../../std/net/aether_http_server.h"
 #include "../../std/http/proxy/aether_proxy.h"
@@ -656,3 +659,86 @@ TEST(http_proxy_cache_keeps_a_long_ttl) {
     ASSERT_TRUE(found);
     ASSERT_TRUE(ttl_ms == 30LL * 24 * 3600 * 1000);
 }
+
+#if !defined(_WIN32)
+/* #3108: the server's sends went out as one send(2) each, which can take
+ * fewer bytes than asked: a signal or a send timeout cuts it short once part
+ * of the buffer is out. A response written that way reached the client
+ * truncated. Here the server's end of a socketpair has a 4 KiB buffer and a
+ * 500 ms send timeout, and the client pauses 750 ms after 64 KiB of a
+ * 256 KiB response; the rest goes when it reads on. */
+enum { BIG_BODY = 256 * 1024 };
+
+static void big_body_handler(HttpRequest* req, HttpServerResponse* res, void* ud) {
+    (void)req;
+    const char* body = (const char*)ud;
+    http_response_set_status(res, 200);
+    http_response_set_body_n(res, body, BIG_BODY);
+}
+
+typedef struct {
+    int fd;
+    char* buf;
+    int cap;
+    int got;
+} PausingReader;
+
+static void* pausing_reader(void* arg) {
+    PausingReader* r = (PausingReader*)arg;
+    int paused = 0;
+    while (r->got < r->cap) {
+        int n = (int)recv(r->fd, r->buf + r->got, (size_t)(r->cap - r->got), 0);
+        if (n <= 0) break;
+        r->got += n;
+        if (!paused && r->got >= 64 * 1024) {
+            paused = 1;
+            usleep(750000);
+        }
+    }
+    return NULL;
+}
+
+TEST_CATEGORY(http_server_sends_a_whole_response_through_short_sends, TEST_CATEGORY_NETWORK) {
+    char* body = (char*)malloc(BIG_BODY);
+    ASSERT_NOT_NULL(body);
+    for (int i = 0; i < BIG_BODY; i++) body[i] = (char)('a' + i % 26);
+
+    HttpServer* server = http_server_create(0);
+    ASSERT_NOT_NULL(server);
+    http_server_get(server, "/big", big_body_handler, body);
+    http_server_set_keepalive_raw(server, 0, 0, 0);
+
+    int fds[2];
+    ASSERT_EQ(0, socketpair(AF_UNIX, SOCK_STREAM, 0, fds));
+    int small = 4096;
+    struct timeval tv = { 0, 500000 };
+    setsockopt(fds[0], SOL_SOCKET, SO_SNDBUF, &small, sizeof(small));
+    setsockopt(fds[1], SOL_SOCKET, SO_RCVBUF, &small, sizeof(small));
+    setsockopt(fds[0], SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+
+    const char* req = "GET /big HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n";
+    ASSERT_EQ((int)strlen(req), (int)send(fds[1], req, strlen(req), 0));
+
+    PausingReader r = { fds[1], (char*)malloc(BIG_BODY + 4096), BIG_BODY + 4096, 0 };
+    ASSERT_NOT_NULL(r.buf);
+    pthread_t reader;
+    ASSERT_EQ(0, pthread_create(&reader, NULL, pausing_reader, &r));
+    http_server_drain_connection(server, fds[0]);   /* closes fds[0] */
+    pthread_join(reader, NULL);
+
+    char* head_end = NULL;
+    for (int i = 0; i + 4 <= r.got; i++) {
+        if (memcmp(r.buf + i, "\r\n\r\n", 4) == 0) { head_end = r.buf + i + 4; break; }
+    }
+    ASSERT_NOT_NULL(head_end);
+    int body_got = r.got - (int)(head_end - r.buf);
+    printf("  body received: %d of %d bytes\n", body_got, BIG_BODY);
+    ASSERT_EQ(BIG_BODY, body_got);
+    ASSERT_TRUE(memcmp(head_end, body, BIG_BODY) == 0);
+
+    close(fds[1]);
+    free(r.buf);
+    http_server_free(server);
+    free(body);
+}
+#endif

@@ -26,7 +26,7 @@ main() {
     // POSIX-only: mkfifo, /tmp, and a numeric uid don't exist on Windows,
     // where sockets/FIFOs stay STAT_KIND_OTHER and user_id() returns -1 by
     // design. Skip gracefully rather than crash the Windows matrix.
-    if os.getenv("OS") == "Windows_NT" {
+    if os.platform() == "windows" {
         println("SKIP fs_stat_kind_socket_fifo: POSIX-only (socket/fifo kinds + uid)")
         return
     }

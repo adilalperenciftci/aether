@@ -51,8 +51,9 @@ exports(
     http_server_set_metrics_raw, server_set_metrics,
     server_sse,
     http_response_sse_upgrade_raw,
-    sse_send, sse_send_id, sse_send_full, sse_close,
+    sse_send, sse_send_id, sse_send_full, sse_comment, sse_close,
     response_upgrade_sse,
+    response_begin_chunked, chunked_write, chunked_end,
     server_websocket,
     ws_connect, ws_client_free,
     http_ws_message_length,
@@ -65,7 +66,7 @@ exports(
     http_server_use_middleware,
     http_get_header, http_get_query_param, http_get_path_param,
     http_request_free,
-    http_response_create, http_response_set_status,
+    http_response_create, http_response_set_status, http_response_get_status,
     http_response_set_header, http_response_add_header,
     http_response_clear_headers,
     http_response_set_body, response_set_body_bytes,
@@ -510,6 +511,7 @@ extern http_sse_send_event_id(sse: ptr, event_name: string, data: string, id: st
 extern http_sse_send_event_full(sse: ptr, event_name: string, data: string, id: string, retry_ms: int) -> int
 extern http_response_sse_upgrade_raw(res: ptr) -> ptr
 extern http_sse_close(sse: ptr)
+extern http_sse_send_comment(sse: ptr, text: string) -> int
 
 server_sse(server: ptr, path: string, handler: @keep ptr, user_data: ptr) {
     http_server_sse(server, path, handler, user_data)
@@ -564,6 +566,55 @@ response_upgrade_sse(res: ptr) -> {
 
 sse_close(sse: ptr) {
     http_sse_close(sse)
+}
+
+// An SSE comment (`: text`), which clients ignore: a keep-alive that a proxy
+// dropping idle connections sees as traffic (#3109). 0 when sent, -1 on a
+// closed stream, a failed write or a text with a line break.
+sse_comment(sse: ptr, text: string) -> int {
+    return http_sse_send_comment(sse, text)
+}
+
+// A chunked response (#3109): stream a body whose length is not known in
+// advance. response_begin_chunked sends the status and the headers the
+// handler has set (a Content-Length dropped; Transfer-Encoding: chunked and
+// Connection: close added) and takes the connection over, as
+// response_upgrade_sse does, over TLS too. Then each chunked_write(stream,
+// data) sends one chunk, and chunked_end(stream) ends the body. Returns
+// (stream, "") or (null, error) when the response is not on a live
+// connection, was already taken over, or has a body, or when the head
+// could not be sent (the connection then closes). The stream is valid
+// until the handler returns.
+//
+//     http.response_set_header(res, "Content-Type", "text/plain")
+//     stream, err = http.response_begin_chunked(res)
+//     if err == "" {
+//         _ = http.chunked_write(stream, string.bytes("part one\n"))
+//         _ = http.chunked_end(stream)
+//     }
+extern http_response_begin_chunked_raw(res: ptr) -> ptr
+extern http_chunked_write(stream: ptr, data: ptr, length: int) -> int
+extern http_chunked_end(stream: ptr) -> int
+
+response_begin_chunked(res: ptr) -> {
+    if res == null { return null, "no response" }
+    stream = http_response_begin_chunked_raw(res)
+    if stream == null {
+        return null, "chunked response refused (no live connection, already taken over, a body already set, or the head not sent)"
+    }
+    return stream, ""
+}
+
+// One chunk holding the bytes of `data`; an empty slice sends nothing.
+// 0 when sent, -1 on a closed stream or a failed write (the client left).
+chunked_write(stream: ptr, data: byte[]) -> int {
+    if data.len < 0 { panic("http.chunked_write: the `data` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    return http_chunked_write(stream, data, data.len)
+}
+
+// The end of the body. 0 when sent, -1 as chunked_write.
+chunked_end(stream: ptr) -> int {
+    return http_chunked_end(stream)
 }
 
 // WebSocket (#260 Tier 2 / E2 — RFC 6455). The handler owns the
@@ -802,6 +853,8 @@ extern http_request_free(req: ptr)
 // HTTP Response - building
 extern http_response_create() -> ptr
 extern http_response_set_status(res: ptr, code: int)
+// The status the response will be sent with (200 until a handler sets one).
+extern http_response_get_status(res: ptr) -> int
 extern http_response_set_header(res: ptr, name: string, value: string)
 // Append a header verbatim, even if a header with the same name already
 // exists. Use for protocols that allow/require repeated headers — e.g.
@@ -870,7 +923,7 @@ extern http_request_body_complete(req: ptr) -> int
 extern http_get_request_body_read() -> ptr
 extern http_get_request_body_read_length() -> int
 extern http_release_request_body_read()
-extern string_new_with_length(data: ptr, length: int) -> string @heap
+extern string_new_with_length(data: ptr, length: long) -> string @heap
 extern http_request_query(req: ptr) -> string
 
 // Trusted TCP peer address — the IP `getpeername(2)` reports for the

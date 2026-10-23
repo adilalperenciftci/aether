@@ -1,6 +1,7 @@
 #include "../analysis/quote.h"
 #include "../analysis/hoist.h"
 #include "../analysis/missing_return.h"
+#include "../analysis/contract_eval.h"
 #include "codegen_internal.h"
 #include "../analysis/sandbox_trust.h"
 #include "../aether_defines.h"
@@ -608,6 +609,15 @@ static void arg_drain_select(CodeGenerator* gen, ASTNode* expr, int first_arg,
 /* Open the wrap: declare and fill each temp, bind the arguments to them
  * (generate_expression then emits the temp's name for each), and start the
  * `_ad_r` result. The callee's own emission follows. */
+/* A callee that is a name or a field path read through names (`f`, `h.cb`,
+ * `a.b.cb`): reading it again has no effect and gives the same closure, so
+ * a closure call may name it twice (`.fn`, `.env`). Anything else, an
+ * index or a call among them, is evaluated once into a temp (#3099). */
+static int closure_callee_is_path(ASTNode* e) {
+    while (e && e->type == AST_MEMBER_ACCESS && e->child_count > 0) e = e->children[0];
+    return e && e->type == AST_IDENTIFIER;
+}
+
 static void arg_drain_open(CodeGenerator* gen, ASTNode* expr, ArgDrainWrap* w) {
     if (w->count == 0) return;
     char* names[16] = {0};
@@ -1948,12 +1958,13 @@ static int is_stdlib_string_aware_extern(const char* c_func_name) {
  * where C wants an ae_opt_int, and `h(none)` an initializer list. */
 static void emit_closure_argument(CodeGenerator* gen, ASTNode* arg, Type* pt);
 
-static void generate_fnptr_call_args(CodeGenerator* gen, Type* sig, ASTNode* call) {
-    for (int i = 0; i < call->child_count; i++) {
+static void generate_fnptr_call_args(CodeGenerator* gen, Type* sig, ASTNode* call, int first) {
+    for (int i = first; i < call->child_count; i++) {
         ASTNode* arg = call->children[i];
-        if (i > 0) fprintf(gen->output, ", ");
-        Type* param = (sig && sig->param_types && i < sig->param_count)
-                      ? sig->param_types[i] : NULL;
+        if (i > first) fprintf(gen->output, ", ");
+        int pi = i - first;
+        Type* param = (sig && sig->param_types && pi < sig->param_count)
+                      ? sig->param_types[pi] : NULL;
         if (param && param->kind == TYPE_STRING && arg && arg->node_type &&
             (arg->node_type->kind == TYPE_STRING || arg->node_type->kind == TYPE_PTR)) {
             fprintf(gen->output, "aether_string_data(");
@@ -2003,6 +2014,19 @@ static void emit_fnptr_take_close(CodeGenerator* gen, int took) {
     if (took) fprintf(gen->output, "))");
 }
 
+static void emit_slice_diag_file(CodeGenerator* gen, const ASTNode* n);
+
+/* #3098: the check before a call through a typed function pointer, which
+ * panics at the call when `callee` is null instead of jumping to address 0.
+ * `callee` is a name or a field path, so reading it again is free. Opens a
+ * comma expression the caller ends by naming the callee. */
+static void emit_fnptr_null_check(CodeGenerator* gen, const char* callee, ASTNode* call) {
+    fprintf(gen->output, "(%s ? (void)0 : aether_panic(\"null_function_call: call through a null function pointer at \" ",
+            callee);
+    emit_slice_diag_file(gen, call);
+    fprintf(gen->output, " \":%d:%d\"), ", call->line, call->column);
+}
+
 static void generate_fnptr_local_call(CodeGenerator* gen, Type* sig,
                                       const char* local_name, ASTNode* call,
                                       int discarded) {
@@ -2019,9 +2043,38 @@ static void generate_fnptr_local_call(CodeGenerator* gen, Type* sig,
     int narrow = !discarded && fnptr_returns_bool(sig);
     if (narrow) fprintf(gen->output, "((_Bool)(unsigned char)(");
     /* #2651: spelled as the declarators spell it (fnptr_c_spelling). */
-    fprintf(gen->output, "((%s)(%s))(", fnptr_c_spelling(sig, NULL),
-            safe_value_name(local_name));
-    generate_fnptr_call_args(gen, sig, call);
+    const char* callee = safe_value_name(local_name);
+    emit_fnptr_null_check(gen, callee, call);
+    fprintf(gen->output, "(%s)(%s))(", fnptr_c_spelling(sig, NULL), callee);
+    generate_fnptr_call_args(gen, sig, call, 0);
+    fprintf(gen->output, ")");
+    if (narrow) fprintf(gen->output, "))");
+    emit_fnptr_take_close(gen, took);
+    arg_drain_close(gen, call, &ad);
+}
+
+/* #3098: `call(f, args)` where `f` is a typed function pointer an
+ * expression other than a name yields (`fs[1]`, `w.h.cb`, `pick()`):
+ * evaluated once, through the null check, and cast to its signature. */
+static void generate_fnptr_value_call(CodeGenerator* gen, ASTNode* call, int discarded) {
+    Type* sig = call->children[0]->node_type;
+    const char* ret_c = sig->return_type ? get_c_type(sig->return_type) : "void";
+    ArgDrainWrap ad;
+    ad.ret_ct = ret_c;
+    ad.ret_type = NULL;
+    ad.have_value = strcmp(ret_c, "void") != 0;
+    ad.discarded = discarded;
+    arg_drain_select(gen, call, 1, NULL, NULL, !ad.have_value || discarded, &ad);
+    arg_drain_open(gen, call, &ad);
+    int took = emit_fnptr_take_open(gen, call);
+    int narrow = !discarded && fnptr_returns_bool(sig);
+    if (narrow) fprintf(gen->output, "((_Bool)(unsigned char)(");
+    fprintf(gen->output, "((%s)_aether_callee_fn((_AeFnPtr)(", fnptr_c_spelling(sig, NULL));
+    generate_expression(gen, call->children[0]);
+    fprintf(gen->output, "), \"null_function_call: call through a null function pointer at \" ");
+    emit_slice_diag_file(gen, call);
+    fprintf(gen->output, " \":%d:%d\"))(", call->line, call->column);
+    generate_fnptr_call_args(gen, sig, call, 1);
     fprintf(gen->output, ")");
     if (narrow) fprintf(gen->output, "))");
     emit_fnptr_take_close(gen, took);
@@ -2078,6 +2131,8 @@ int typed_fnptr_call(CodeGenerator* gen, ASTNode* call) {
     if (!call || call->type != AST_FUNCTION_CALL || !call->value) return 0;
     if (call->annotation && (strcmp(call->annotation, "fnptr_local_call") == 0 ||
                              strncmp(call->annotation, "fnfield_", 8) == 0)) return 1;
+    if (strcmp(call->value, "call") == 0 && call->child_count > 0 && call->children[0] &&
+        is_fnptr_type(call->children[0]->node_type)) return 1;
     Type* sig = lookup_fnptr_global(gen, call->value);
     return sig && sig->kind == TYPE_FUNCTION && sig->is_fnptr;
 }
@@ -2835,12 +2890,8 @@ static ASTNode* stmt_hoisted_decl(ASTNode* s, const char* var_name) {
         if (s->child_count > 1) hoist_loop_decls(s->children[1], hoist_name_hunt, &h);
         return h.decl;
     }
-    const char* names[HOIST_MAX_NAMES];
-    int n = hoist_common_decl_names(s, names, HOIST_MAX_NAMES);
-    for (int i = 0; i < n; i++)
-        if (names[i] && strcmp(names[i], var_name) == 0)
-            return hoist_common_first_decl(s, var_name);
-    return NULL;
+    const HoistNames* h = hoist_common_hoists(s);
+    return hoist_names_decl(h, hoist_names_find(h, var_name));
 }
 
 // The line of the first declaration of `var_name` that is VISIBLE from
@@ -2960,13 +3011,9 @@ static int enclosing_decl_line(ASTNode* program, const char* func_name,
                  * switch or match and read after it is declared at the top
                  * of the function (hoist_if_branch_vars): visible from its
                  * first binding on. */
-                const char* names[HOIST_MAX_NAMES];
-                int n = hoist_if_branch_candidates(body, names, HOIST_MAX_NAMES);
-                for (int c = 0; c < n; c++) {
-                    if (!names[c] || strcmp(names[c], var_name) != 0) continue;
-                    ASTNode* first = hoist_if_branch_first_decl(body, var_name);
-                    if (first && !subtree_contains(first, viewer)) return first->line;
-                }
+                const HoistNames* h = hoist_if_branch_hoists(body);
+                ASTNode* first = hoist_names_decl(h, hoist_names_find(h, var_name));
+                if (first && !subtree_contains(first, viewer)) return first->line;
                 return INT_MAX;
             }
         }
@@ -4953,9 +5000,11 @@ void emit_closure_definitions(CodeGenerator* gen) {
             char** prev_declared = gen->declared_vars;
             Type** prev_declared_types = gen->declared_var_types;
             int prev_declared_count = gen->declared_var_count;
+            StrMap prev_declared_index = gen->declared_index;
             gen->declared_vars = NULL;
             gen->declared_var_types = NULL;
             gen->declared_var_count = 0;
+            strmap_init(&gen->declared_index);
             /* #2124: the closure body is a C function of its own; its
              * hoisted locals join over ITS bindings, not the enclosing
              * function's. */
@@ -5172,6 +5221,7 @@ void emit_closure_definitions(CodeGenerator* gen) {
             gen->declared_vars = prev_declared;
             gen->declared_var_types = prev_declared_types;
             gen->declared_var_count = prev_declared_count;
+            gen->declared_index = prev_declared_index;
             gen->hoist_scope_body = prev_hoist_scope;
             // Free this closure body's heap-string set and restore the
             // enclosing scope's (see the matching reset above).
@@ -5355,7 +5405,7 @@ void emit_message_string_copy(CodeGenerator* gen, const char* lv, ASTNode* init)
         is_heap_string_expr(gen, init);
     fprintf(gen->output,
             "if (%s) { const char* _mt = %s; size_t _ml = aether_string_length(_mt); "
-            "%s = (const char*)string_new_with_length((void*)aether_string_data(_mt), (int)_ml); ",
+            "%s = (const char*)string_new_with_length((void*)aether_string_data(_mt), (int64_t)_ml); ",
             lv, lv, lv);
     if (owned_temp) fprintf(gen->output, "aether_heap_str_free(_mt); ");
     fprintf(gen->output, "} ");
@@ -6010,10 +6060,21 @@ static const char* slice_elem_c_type(const Type* t) {
 }
 
 /* The source path a bounds-check failure names, as a C string literal
- * (#2305). A path is written into generated C, so it is escaped like any
- * string: a Windows path's backslashes were emitted raw, and each `\G`,
- * `\s`, `\d` became an unknown-escape warning per access (a `\a` a BEL in
- * the message). Control characters are written as octal escapes. */
+ * (#2305), and the one a call through the empty closure names (#3091).
+ * A path is written into generated C, so it is escaped like any string: a
+ * Windows path's backslashes were emitted raw, and each `\G`, `\s`, `\d`
+ * became an unknown-escape warning per access (a `\a` a BEL in the
+ * message). Control characters are written as octal escapes. */
+/* #3113: is `idx` an integer literal in `0 ..< n`? Such an index into a
+ * `T[N]` needs no run-time test (the checker refuses one outside it). */
+static int index_literal_within(const ASTNode* idx, int n) {
+    if (!idx || idx->type != AST_LITERAL || !idx->value || !idx->node_type) return 0;
+    TypeKind k = idx->node_type->kind;
+    if (k != TYPE_INT && k != TYPE_INT64) return 0;
+    int64_t v = 0;
+    return contract_eval_int64((ASTNode*)idx, NULL, &v) && v >= 0 && v < n;
+}
+
 static void emit_slice_diag_file(CodeGenerator* gen, const ASTNode* n) {
     const char* path = (n && n->source_file) ? n->source_file : "?";
     fputc('"', gen->output);
@@ -9376,9 +9437,10 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                     int took = emit_fnptr_take_open(gen, expr);
                     int narrow = gen->discard_call_node != expr && fnptr_returns_bool(field_sig);
                     if (narrow) fprintf(gen->output, "((_Bool)(unsigned char)(");
-                    fprintf(gen->output, "(%s%s%s)(",
-                            recv_c, is_ptr ? "->" : ".", field_c);
-                    generate_fnptr_call_args(gen, field_sig, expr);
+                    const char* callee = cg_internf("%s%s%s", recv_c, is_ptr ? "->" : ".", field_c);
+                    emit_fnptr_null_check(gen, callee, expr);
+                    fprintf(gen->output, "%s)(", callee);
+                    generate_fnptr_call_args(gen, field_sig, expr, 0);
                     fprintf(gen->output, ")");
                     if (narrow) fprintf(gen->output, "))");
                     emit_fnptr_take_close(gen, took);
@@ -10196,6 +10258,10 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                 else if (strcmp(func_name, "builder_depth") == 0) {
                     fprintf(gen->output, "_aether_ctx_depth");
                 }
+                else if (strcmp(func_name, "call") == 0 && expr->child_count >= 1 &&
+                         is_fnptr_type(expr->children[0]->node_type)) {
+                    generate_fnptr_value_call(gen, expr, ad_call_discarded);
+                }
                 // call(closure_var, args...) — invoke a closure stored in a variable
                 // Looks up the closure's hoisted function signature and calls through it
                 else if (strcmp(func_name, "call") == 0 && expr->child_count >= 1) {
@@ -10350,10 +10416,15 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                             ad.closure[ad.count] = 1;
                             ad.idx[ad.count++] = 0;
                         } else if (closure_arg && !arg_drain_lookup(closure_arg) && ad.count < 16 &&
-                                   is_closure_cell_read(gen, closure_arg)) {
+                                   (is_closure_cell_read(gen, closure_arg) ||
+                                    !closure_callee_is_path(closure_arg))) {
                             /* #2755: a closure a cell holds is held for its
                              * own call, which may rebind the cell and give
-                             * back the cell's reference to it. */
+                             * back the cell's reference to it. #3099: so is
+                             * any callee other than a name or a field path
+                             * (`fs[pick()]`), which is also read twice below
+                             * (`.fn`, `.env`): held once, it is evaluated
+                             * once. */
                             ad.closure[ad.count] = 2;
                             ad.idx[ad.count++] = 0;
                         }
@@ -10386,9 +10457,13 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                             fprintf(gen->output, ", %s", atype);
                             sig_pi++;
                         }
-                        fprintf(gen->output, "))");
+                        /* #3091: through `_aether_callee_fn`, which
+                         * panics at this call when the closure is empty. */
+                        fprintf(gen->output, "))_aether_callee_fn(");
                         generate_expression(gen, closure_arg);
-                        fprintf(gen->output, ".fn)(");
+                        fprintf(gen->output, ".fn, \"empty_closure_call: call through an empty closure at \" ");
+                        emit_slice_diag_file(gen, expr);
+                        fprintf(gen->output, " \":%d:%d\"))(", expr->line, expr->column);
                         generate_expression(gen, closure_arg);
                         fprintf(gen->output, ".env");
                         int arg_pi = 0;
@@ -10862,6 +10937,15 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                         if (fresh_t) {
                             emit_composite_arg_temp(gen, arg, fresh_t);
                         } else if (array_literal_arg_temp(gen, arg)) {
+                        } else if (ext_name && arg->node_type &&
+                                   is_string_seq_ptr_type(arg->node_type) &&
+                                   is_retain_extern_param(gen, ext_name, arg_printed)) {
+                            /* #3086: an `@retain` extern keeps the sequence
+                             * (std's `string.seq_cons` its tail), so the call
+                             * hands it a reference of its own, as it does a
+                             * string or a closure (R4): a fresh one as it
+                             * is, a place's retained. */
+                            emit_seq_take(gen, arg);
                         } else
                         if (extern_param_t && extern_param_t->c_alias &&
                             strcmp(extern_param_t->c_alias, "va_list") == 0) {
@@ -11570,6 +11654,33 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                      * through aether_slice_at_w, which refuses a read-only
                      * view; a read is checked as it was. */
                     const char* elem = slice_elem_c_type(base->node_type);
+                    /* #3029: in a function's view body its slice parameters
+                     * are unbounded views, tested once at entry: the element's
+                     * address with no test of the sentinel or a bound (a
+                     * store still refuses a read-only view). */
+                    int view = 0;
+                    if (gen->slice_view_count > 0 && base->type == AST_IDENTIFIER && base->value) {
+                        for (int k = 0; k < gen->slice_view_count; k++)
+                            if (strcmp(gen->slice_view_names[k], base->value) == 0) view = 1;
+                    }
+                    if (view) {
+                        fprintf(gen->output, "(*(%s*)aether_slice_view_at%s(", elem,
+                                gen->generating_lvalue ? "_w" : "");
+                        int saved = gen->generating_lvalue;
+                        gen->generating_lvalue = 0;
+                        generate_expression(gen, base);
+                        fprintf(gen->output, ", (int64_t)(");
+                        generate_read(gen, expr->children[1]);
+                        gen->generating_lvalue = saved;
+                        fprintf(gen->output, "), sizeof(%s)", elem);
+                        if (gen->generating_lvalue) {
+                            fprintf(gen->output, ", ");
+                            emit_slice_diag_file(gen, expr);
+                            fprintf(gen->output, ", %d", expr->line);
+                        }
+                        fprintf(gen->output, "))");
+                        break;
+                    }
                     fprintf(gen->output, "(*(%s*)aether_slice_at%s(", elem,
                             gen->generating_lvalue ? "_w" : "");
                     /* The base is READ even when `s[i]` is a store target,
@@ -11587,11 +11698,26 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                 }
                 int str_base = base && base->node_type &&
                                base->node_type->kind == TYPE_STRING;
+                /* #3113: an index into a fixed-size `T[N]` is checked
+                 * against N, as a slice's is against its length: a local,
+                 * a field, a parameter, an actor's state or a `const`
+                 * table, read or stored, `+=` and `++` alike, the index
+                 * evaluated once. A literal index the checker has seen in
+                 * range needs no test. */
+                int sized = base && type_is_sized_array(base->node_type) &&
+                            !index_literal_within(expr->children[1],
+                                                  base->node_type->array_size);
                 if (str_base) fprintf(gen->output, "_aether_safe_str(");
                 generate_expression(gen, base);
                 if (str_base) fprintf(gen->output, ")");
                 fprintf(gen->output, "[");
+                if (sized) fprintf(gen->output, "aether_array_index((int64_t)(");
                 generate_read(gen, expr->children[1]);
+                if (sized) {
+                    fprintf(gen->output, "), %d, ", base->node_type->array_size);
+                    emit_slice_diag_file(gen, expr);
+                    fprintf(gen->output, ", %d)", expr->line);
+                }
                 fprintf(gen->output, "]");
             }
             break;
@@ -11605,9 +11731,14 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                     MessageDef* msg_def = lookup_message(gen->message_registry, message->value);
                     if (msg_def) {
                         const char* single_int = get_single_int_field(msg_def);
-                        if (single_int) {
+                        /* A message with no fields carries nothing: it goes
+                         * as a one-int one does, with no payload to allocate
+                         * (its handler reads none). */
+                        int no_fields = msg_def->fields == NULL;
+                        if (single_int || no_fields) {
                             // Single-field inline: value stored in payload_int (no malloc)
                             fprintf(gen->output, "{ Message _imsg = {%d, 0, ", msg_def->message_id);
+                            if (no_fields) fprintf(gen->output, "0");
                             for (int i = 0; i < message->child_count; i++) {
                                 ASTNode* field_init = message->children[i];
                                 if (field_init && field_init->type == AST_FIELD_INIT && field_init->child_count > 0) {
@@ -11685,7 +11816,11 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                                     }
                                 }
                             }
-                            fprintf(gen->output, "aether_send_message(");
+                            /* #3117: in a batched loop every send joins the
+                             * batch, so a payload message keeps its place
+                             * among the loop's one-int ones. */
+                            fprintf(gen->output, gen->in_main_loop ? "aether_send_message_batch("
+                                                                   : "aether_send_message(");
                             emit_send_target(gen, target, "void*");
                             fprintf(gen->output, ", &_msg, sizeof(%s)); }", message->value);
                         }

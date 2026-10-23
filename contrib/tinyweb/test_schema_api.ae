@@ -26,12 +26,11 @@
 
 import contrib.tinyweb
 import contrib.tinyweb.schema_api
-import std.http(http_post_raw, http_get_raw, http_put_raw, http_delete_raw,
-    http_response_status_code, http_response_body_str, http_response_free)
+import std.http.client
 import std.list
 import std.schema
 import std.spec
-import std.string(string_contains)
+import std.string
 
 extern exit(code: int)
 extern sleep(ms: int)
@@ -67,23 +66,31 @@ actor SrvActor {
         }
     }
 }
-actor SchedHelper {
-    state x = 0
-    receive { Ping() -> { x = 1 } }
-}
-message Ping {}
 
+// The whole response through std.http.client, so a spec can assert on the
+// status (422, 400, 204) as well as the body. Null when no response came
+// back at all, which reads as status 0.
+fn fetch(method: string, path: string, body: string) -> ptr {
+    req = client.request(method, "http://127.0.0.1:18092${path}")
+    if string.length(body) > 0 {
+        client.set_body(req, string.bytes(body), "application/json")
+    }
+    resp, err = client.send_request(req)
+    client.request_free(req)
+    if err != "" { println("  ${method} ${path}: ${err}") }
+    return resp
+}
 fn post(path: string, body: string) -> ptr {
-    return http_post_raw("http://127.0.0.1:18092${path}", body, "application/json")
+    return fetch("POST", path, body)
 }
 fn put(path: string, body: string) -> ptr {
-    return http_put_raw("http://127.0.0.1:18092${path}", body, "application/json")
+    return fetch("PUT", path, body)
 }
 fn get(path: string) -> ptr {
-    return http_get_raw("http://127.0.0.1:18092${path}")
+    return fetch("GET", path, "")
 }
 fn del(path: string) -> ptr {
-    return http_delete_raw("http://127.0.0.1:18092${path}")
+    return fetch("DELETE", path, "")
 }
 
 main() {
@@ -129,7 +136,6 @@ main() {
         schema_api.openapi_route("/openapi.json", registry)
     }
 
-    spawn(SchedHelper())
     a = spawn(SrvActor())
     a ! StartSrv { srv: server }
     sleep(500)
@@ -137,24 +143,24 @@ main() {
     spec.describe(fw, "schema_api: validated writes") {
         spec.it(fw, "lets a valid body through to the handler") callback {
             r = post("/users/", "{\"age\":25,\"name\":\"Ada\"}")
-            spec.assert_eq(http_response_status_code(r), 201, "handler ran, 201")
-            spec.assert_eq(string_contains(http_response_body_str(r), "ok"), 1,
+            spec.assert_eq(client.response_status(r), 201, "handler ran, 201")
+            spec.assert_eq(string.contains(client.response_body(r), "ok"), 1,
                 "the handler's own body came back")
-            http_response_free(r)
+            client.response_free(r)
         }
 
         spec.it(fw, "validates a nested object") callback {
             r = post("/users/", "{\"age\":30,\"name\":\"Bo\",\"address\":{\"city\":\"Oslo\"}}")
-            spec.assert_eq(http_response_status_code(r), 201, "a valid nested body reaches the handler")
-            http_response_free(r)
+            spec.assert_eq(client.response_status(r), 201, "a valid nested body reaches the handler")
+            client.response_free(r)
         }
 
         spec.it(fw, "points a nested error at its path") callback {
             r = post("/users/", "{\"age\":30,\"name\":\"Bo\",\"address\":{\"city\":\"\"}}")
-            spec.assert_eq(http_response_status_code(r), 422, "422 for an empty nested field")
-            spec.assert_eq(string_contains(http_response_body_str(r), "\"pointer\":\"/data/attributes/address/city\""), 1,
+            spec.assert_eq(client.response_status(r), 422, "422 for an empty nested field")
+            spec.assert_eq(string.contains(client.response_body(r), "\"pointer\":\"/data/attributes/address/city\""), 1,
                 "the error's JSON pointer is the field's path")
-            http_response_free(r)
+            client.response_free(r)
         }
 
         // The point of validating at the edge: the handler must NOT run.
@@ -162,18 +168,18 @@ main() {
         // branch on the reason rather than parsing prose.
         spec.it(fw, "rejects a value outside its range with a coded 422") callback {
             r = post("/users/", "{\"age\":12,\"name\":\"Bob\"}")
-            spec.assert_eq(http_response_status_code(r), 422, "422 not 201")
-            spec.assert_eq(string_contains(http_response_body_str(r), "too_small"), 1,
+            spec.assert_eq(client.response_status(r), 422, "422 not 201")
+            spec.assert_eq(string.contains(client.response_body(r), "too_small"), 1,
                 "the error code names the constraint")
-            http_response_free(r)
+            client.response_free(r)
         }
 
         spec.it(fw, "rejects a missing required field") callback {
             r = post("/users/", "{\"age\":30}")
-            spec.assert_eq(http_response_status_code(r), 422, "422 for a missing field")
-            spec.assert_eq(string_contains(http_response_body_str(r), "missing"), 1,
+            spec.assert_eq(client.response_status(r), 422, "422 for a missing field")
+            spec.assert_eq(string.contains(client.response_body(r), "missing"), 1,
                 "the error says what is missing")
-            http_response_free(r)
+            client.response_free(r)
         }
 
         // Unparseable JSON is a DIFFERENT failure from a well-formed body
@@ -182,8 +188,8 @@ main() {
         // serialiser.
         spec.it(fw, "distinguishes malformed JSON with a 400") callback {
             r = post("/users/", "{\"age\":")
-            spec.assert_eq(http_response_status_code(r), 400, "400 not 422")
-            http_response_free(r)
+            spec.assert_eq(client.response_status(r), 400, "400 not 422")
+            client.response_free(r)
         }
 
         // update is the other VALIDATED verb, so a validation regression on
@@ -193,15 +199,15 @@ main() {
         // understands.
         spec.it(fw, "validates the update path too") callback {
             ok = put("/users/7", "{\"age\":40,\"name\":\"Grace\"}")
-            spec.assert_eq(http_response_status_code(ok), 200, "a valid PUT reaches the handler")
-            spec.assert_eq(string_contains(http_response_body_str(ok), "update"), 1,
+            spec.assert_eq(client.response_status(ok), 200, "a valid PUT reaches the handler")
+            spec.assert_eq(string.contains(client.response_body(ok), "update"), 1,
                 "and it is the update handler that ran")
-            http_response_free(ok)
+            client.response_free(ok)
 
             bad = put("/users/7", "{\"age\":5,\"name\":\"Tiny\"}")
-            spec.assert_eq(http_response_status_code(bad), 422,
+            spec.assert_eq(client.response_status(bad), 422,
                 "an invalid PUT is rejected like an invalid POST")
-            http_response_free(bad)
+            client.response_free(bad)
         }
     }
 
@@ -212,25 +218,25 @@ main() {
     spec.describe(fw, "schema_api: unvalidated verbs") {
         spec.it(fw, "routes index to the collection handler") callback {
             r = get("/users/")
-            spec.assert_eq(http_response_status_code(r), 200, "index responds 200")
-            spec.assert_eq(string_contains(http_response_body_str(r), "index"), 1,
+            spec.assert_eq(client.response_status(r), 200, "index responds 200")
+            spec.assert_eq(string.contains(client.response_body(r), "index"), 1,
                 "the index handler ran, not show")
-            http_response_free(r)
+            client.response_free(r)
         }
 
         spec.it(fw, "routes show to the member handler") callback {
             r = get("/users/42")
-            spec.assert_eq(http_response_status_code(r), 200, "show responds 200")
-            spec.assert_eq(string_contains(http_response_body_str(r), "show"), 1,
+            spec.assert_eq(client.response_status(r), 200, "show responds 200")
+            spec.assert_eq(string.contains(client.response_body(r), "show"), 1,
                 "the show handler ran, not index")
-            http_response_free(r)
+            client.response_free(r)
         }
 
         spec.it(fw, "routes destroy and preserves its status") callback {
             r = del("/users/42")
-            spec.assert_eq(http_response_status_code(r), 204,
+            spec.assert_eq(client.response_status(r), 204,
                 "the handler's 204 is not rewritten")
-            http_response_free(r)
+            client.response_free(r)
         }
     }
 
@@ -239,19 +245,19 @@ main() {
     spec.describe(fw, "schema_api: generated documents") {
         spec.it(fw, "serves a draft-07 JSON Schema for the resource") callback {
             r = get("/users/schema")
-            spec.assert_eq(http_response_status_code(r), 200, "schema route responds")
-            spec.assert_eq(string_contains(http_response_body_str(r), "\"$schema\""), 1,
+            spec.assert_eq(client.response_status(r), 200, "schema route responds")
+            spec.assert_eq(string.contains(client.response_body(r), "\"$schema\""), 1,
                 "the document declares its dialect")
-            http_response_free(r)
+            client.response_free(r)
         }
 
         spec.it(fw, "serves an aggregate OpenAPI 3.0 document") callback {
             r = get("/openapi.json")
-            spec.assert_eq(http_response_status_code(r), 200, "openapi route responds")
+            spec.assert_eq(client.response_status(r), 200, "openapi route responds")
             spec.assert_eq(
-                string_contains(http_response_body_str(r), "\"openapi\":\"3.0.3\""), 1,
+                string.contains(client.response_body(r), "\"openapi\":\"3.0.3\""), 1,
                 "the document declares its OpenAPI version")
-            http_response_free(r)
+            client.response_free(r)
         }
     }
 

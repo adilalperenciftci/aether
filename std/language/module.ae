@@ -478,7 +478,7 @@ fn match_strings(m: *Matcher, preferred: string) -> string {
         i = 0
         sz = list_size(pref_list)
         while i < sz {
-            p = list_get_raw(pref_list, i)
+            p = list.at(pref_list, i)
             if p != null {
                 // Cast to the struct type so heap.free emits the typed
                 // destructor that also releases the owned `tag` string field.
@@ -518,7 +518,7 @@ fn match_strings(m: *Matcher, preferred: string) -> string {
                 p = heap.new(Preferred)
                 p.tag = string_copy(tag_str)
                 p.q = q_val
-                list_add_raw(pref_list, p)
+                list.add(pref_list, p)
             }
             string_seq_free(subparts)
         }
@@ -531,10 +531,10 @@ fn match_strings(m: *Matcher, preferred: string) -> string {
     sz = list_size(pref_list)
     i = 1
     while i < sz {
-        cur = list_get_raw(pref_list, i) as *Preferred
+        cur = list.at(pref_list, i) as *Preferred
         j = i - 1
         while j >= 0 {
-            prev_pref = list_get_raw(pref_list, j) as *Preferred
+            prev_pref = list.at(pref_list, j) as *Preferred
             if prev_pref.q >= cur.q {
                 break
             }
@@ -554,7 +554,7 @@ fn match_strings(m: *Matcher, preferred: string) -> string {
     prev = string_seq_empty()
     i = sz - 1
     while i >= 0 {
-        p = list_get_raw(pref_list, i)
+        p = list.at(pref_list, i)
         pref = p as *Preferred
         acc = string_seq_cons(pref.tag, prev)
         string_seq_free(prev)

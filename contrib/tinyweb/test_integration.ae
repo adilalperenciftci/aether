@@ -10,6 +10,8 @@
 // As specs each reports independently.
 
 import std.http
+import std.http.client
+import std.string
 import std.spec
 
 // ---- Handlers ----
@@ -43,51 +45,55 @@ handle_param(req: ptr, res: ptr, ud: ptr) {
 // ---- Server actor ----
 
 message StartSrv { raw: ptr }
-message Noop {}
 
 actor SrvActor {
     state s = 0
     receive {
         StartSrv(raw) -> {
             s = raw
-            // http.server_start is a Go-style wrapper returning an error
-            // string; this is the raw int-returning extern that actually
-            // runs the accept loop.
-            http_server_start_raw(raw)
+            // Runs the accept loop until http.server_stop.
+            err = http.server_start(raw)
+            if err != "" { println("tinyweb server: ${err}") }
         }
     }
 }
 
-actor SchedHelper {
-    state x = 0
-    receive { Noop() -> { x = 1 } }
-}
-
 // ---- Helpers ----
 
-// Return the raw HttpResponse so specs can assert on status separately
-// from body — the Go-style http.get/http.post wrappers collapse non-2xx
-// into an error string with no status access, which would make the 404
-// case untestable.
-_get(path: string) {
-    return http_get_raw("http://127.0.0.1:8080${path}")
+// The whole response through std.http.client, so a spec can assert on the
+// status apart from the body: http.get and http.post turn anything but a
+// 2xx into an error string, which would leave the 404 case untestable. Null
+// when no response came back at all, which reads as status 0.
+_call(method: string, path: string, body: string) -> ptr {
+    req = client.request(method, "http://127.0.0.1:8080${path}")
+    if string.length(body) > 0 {
+        client.set_body(req, string.bytes(body), "text/plain")
+    }
+    resp, err = client.send_request(req)
+    client.request_free(req)
+    if err != "" { println("  ${method} ${path}: ${err}") }
+    return resp
 }
 
-_post(path: string, body: string) {
-    return http_post_raw("http://127.0.0.1:8080${path}", body, "text/plain")
+_get(path: string) -> ptr {
+    return _call("GET", path, "")
+}
+
+_post(path: string, body: string) -> ptr {
+    return _call("POST", path, body)
 }
 
 // Assert status + exact body, then free. Freeing here rather than at each
 // call site is what keeps the specs readable.
 _expect(resp: ptr, code: int, body: string, msg: string) {
-    spec.assert_eq(http.response_status_code(resp), code, "${msg}: status")
-    spec.assert_str_eq(http.response_body_str(resp), body, "${msg}: body")
-    http.response_free(resp)
+    spec.assert_eq(client.response_status(resp), code, "${msg}: status")
+    spec.assert_str_eq(client.response_body(resp), body, "${msg}: body")
+    client.response_free(resp)
 }
 
 _expect_code(resp: ptr, code: int, msg: string) {
-    spec.assert_eq(http.response_status_code(resp), code, "${msg}: status")
-    http.response_free(resp)
+    spec.assert_eq(client.response_status(resp), code, "${msg}: status")
+    client.response_free(resp)
 }
 
 main() {
@@ -103,7 +109,6 @@ main() {
     http.server_post(raw, "/echo", handle_echo, 0)
     http.server_get(raw, "/users/:id", handle_param, 0)
 
-    spawn(SchedHelper())
     a = spawn(SrvActor())
     a ! StartSrv { raw: raw }
     sleep(500)

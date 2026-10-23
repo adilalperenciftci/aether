@@ -44,6 +44,19 @@ static const char* current_filename = NULL;
 static const char* current_source = NULL;
 static int error_count_global = 0;
 static int warning_count_global = 0;
+/* While set, a diagnostic is neither printed nor counted. Codegen sets it
+ * around the second rendering of one function (#3029's view body): the
+ * same source emitted twice would otherwise report everything twice, and
+ * the other rendering reports it once. */
+static int diagnostics_muted = 0;
+
+void aether_diagnostics_set_muted(int muted) {
+    diagnostics_muted = muted ? 1 : 0;
+}
+
+int aether_diagnostics_muted(void) {
+    return diagnostics_muted;
+}
 
 // Get suggestion based on error code
 static const char* get_common_suggestion(AetherErrorCode code) {
@@ -172,8 +185,8 @@ static const char* get_line(const char* source, int line_num, int* line_length) 
 }
 
 void aether_error_report(AetherError* error) {
-    if (!error) return;
-    
+    if (!error || diagnostics_muted) return;
+
     error_count_global++;
 
     /* A diagnostic built by hand often leaves filename and source_code NULL
@@ -288,7 +301,7 @@ void aether_error_report(AetherError* error) {
 }
 
 void aether_warning_report(AetherError* warning) {
-    if (!warning) return;
+    if (!warning || diagnostics_muted) return;
     
     warning_count_global++;
 

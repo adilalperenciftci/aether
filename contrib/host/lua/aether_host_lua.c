@@ -481,7 +481,7 @@ void lua_vm_set_global_str(void* vm, const char* name, const char* value) {
     g_lua.lua_setglobal(s, name);
 }
 
-void lua_vm_set_global_int(void* vm, const char* name, long value) {
+void lua_vm_set_global_int(void* vm, const char* name, int64_t value) {
     if (!vm || !name) return;
     lua_State* s = (lua_State*)vm;
     g_lua.lua_pushinteger(s, (lua_Integer)value);
@@ -532,10 +532,10 @@ int lua_vm_result_type(void* vm) {
     if (!vm) return AE_LUA_TNIL;
     return ae_lua_tag_at((lua_State*)vm, -1);
 }
-long lua_vm_result_int(void* vm) {
+int64_t lua_vm_result_int(void* vm) {
     if (!vm) return 0;
     int isnum = 0;
-    return (long)g_lua.lua_tointegerx((lua_State*)vm, -1, &isnum);
+    return (int64_t)g_lua.lua_tointegerx((lua_State*)vm, -1, &isnum);
 }
 const char* lua_vm_result_str(void* vm) {
     if (!vm) return "";
@@ -567,16 +567,16 @@ const char* lua_arg_str(void* vm, int i) {
     const char* r = g_lua.lua_tolstring((lua_State*)vm, i, NULL);
     return r ? r : "";
 }
-long lua_arg_int(void* vm, int i) {
+int64_t lua_arg_int(void* vm, int i) {
     if (!vm) return 0;
     int isnum = 0;
-    return (long)g_lua.lua_tointegerx((lua_State*)vm, i, &isnum);
+    return (int64_t)g_lua.lua_tointegerx((lua_State*)vm, i, &isnum);
 }
 int lua_arg_bool(void* vm, int i) {
     if (!vm) return 0;
     return g_lua.lua_toboolean((lua_State*)vm, i);
 }
-void lua_push_int(void* vm, long v) {
+void lua_push_int(void* vm, int64_t v) {
     if (vm) g_lua.lua_pushinteger((lua_State*)vm, (lua_Integer)v);
 }
 void lua_push_str(void* vm, const char* v) {
@@ -652,7 +652,7 @@ void lua_table_seti_str(void* vm, int i, const char* v) {
     g_lua.lua_pushstring(s, v ? v : "");
     g_lua.lua_seti(s, -2, (lua_Integer)i);
 }
-void lua_table_seti_int(void* vm, int i, long v) {
+void lua_table_seti_int(void* vm, int i, int64_t v) {
     if (!vm || g_tbl_depth <= 0) return;
     lua_State* s = (lua_State*)vm;
     g_lua.lua_pushinteger(s, (lua_Integer)v);
@@ -672,7 +672,7 @@ void lua_table_set_str(void* vm, const char* key, const char* v) {
     g_lua.lua_pushstring(s, v ? v : "");
     g_lua.lua_setfield(s, -2, key);
 }
-void lua_table_set_int(void* vm, const char* key, long v) {
+void lua_table_set_int(void* vm, const char* key, int64_t v) {
     if (!vm || g_tbl_depth <= 0 || !key) return;
     lua_State* s = (lua_State*)vm;
     g_lua.lua_pushinteger(s, (lua_Integer)v);
@@ -722,8 +722,11 @@ void lua_push_double(void* vm, double v) {
      * float push isn't resolved. Most RESP Doubles arrive integral. */
     lua_State* s = (lua_State*)vm;
     double r = v < 0 ? -v : v;
-    if (r == (double)(long)v) {
-        g_lua.lua_pushinteger(s, (lua_Integer)(long)v);
+    /* In range before the conversion: a double past 2^63 does not fit. Then
+     * `v` itself against its integer, not `r`: |v| never equalled a negative
+     * integer, and every negative whole Double went out as a string. */
+    if (r < 9223372036854775808.0 && v == (double)(int64_t)v) {
+        g_lua.lua_pushinteger(s, (lua_Integer)(int64_t)v);
     } else {
         char buf[40];
         snprintf(buf, sizeof(buf), "%.17g", v);
@@ -735,8 +738,8 @@ void lua_push_double(void* vm, double v) {
 // The host arms a count hook; when the budget is hit the hook raises a Lua
 // error (the script-timeout shape). One global budget per process is enough
 // for the single-threaded EVAL model; a richer per-VM budget can follow.
-static long g_lua_instr_budget = 0;
-static long g_lua_instr_used = 0;
+static int64_t g_lua_instr_budget = 0;
+static int64_t g_lua_instr_used = 0;
 
 static void ae_lua_count_hook(lua_State* s, lua_Debug* ar) {
     (void)ar;
@@ -749,7 +752,7 @@ static void ae_lua_count_hook(lua_State* s, lua_Debug* ar) {
 
 /* Arm the count hook: fire every `every` VM instructions, abort after
  * `budget` total. `budget`<=0 disarms. LUA_MASKCOUNT == 1<<3 == 8. */
-void lua_vm_set_instruction_limit(void* vm, long budget, int every) {
+void lua_vm_set_instruction_limit(void* vm, int64_t budget, int every) {
     if (!vm) return;
     lua_State* s = (lua_State*)vm;
     g_lua_instr_budget = budget;
@@ -781,33 +784,33 @@ void* lua_vm_new(void) { (void)lua_init(); return 0; }
 void  lua_vm_free(void* vm) { (void)vm; }
 int   lua_vm_register(void* vm, const char* n, void* f) { (void)vm; (void)n; (void)f; return -1; }
 void  lua_vm_set_global_str(void* vm, const char* n, const char* v) { (void)vm; (void)n; (void)v; }
-void  lua_vm_set_global_int(void* vm, const char* n, long v) { (void)vm; (void)n; (void)v; }
+void  lua_vm_set_global_int(void* vm, const char* n, int64_t v) { (void)vm; (void)n; (void)v; }
 void  lua_vm_set_global_strlist(void* vm, const char* n, void* it) { (void)vm; (void)n; (void)it; }
 int   lua_vm_eval(void* vm, const char* c) { (void)vm; (void)c; return -1; }
 int   lua_vm_result_type(void* vm) { (void)vm; return 0; }
-long  lua_vm_result_int(void* vm) { (void)vm; return 0; }
+int64_t  lua_vm_result_int(void* vm) { (void)vm; return 0; }
 const char* lua_vm_result_str(void* vm) { (void)vm; return ""; }
 int   lua_vm_result_bool(void* vm) { (void)vm; return 0; }
 void  lua_vm_pop_result(void* vm) { (void)vm; }
 int   lua_arg_count(void* vm) { (void)vm; return 0; }
 int   lua_arg_type(void* vm, int i) { (void)vm; (void)i; return 0; }
 const char* lua_arg_str(void* vm, int i) { (void)vm; (void)i; return ""; }
-long  lua_arg_int(void* vm, int i) { (void)vm; (void)i; return 0; }
+int64_t  lua_arg_int(void* vm, int i) { (void)vm; (void)i; return 0; }
 int   lua_arg_bool(void* vm, int i) { (void)vm; (void)i; return 0; }
-void  lua_push_int(void* vm, long v) { (void)vm; (void)v; }
+void  lua_push_int(void* vm, int64_t v) { (void)vm; (void)v; }
 void  lua_push_str(void* vm, const char* v) { (void)vm; (void)v; }
 void  lua_push_bool(void* vm, int v) { (void)vm; (void)v; }
 void  lua_push_nil(void* vm) { (void)vm; }
 void  lua_push_tagged_table(void* vm, const char* f, const char* m) { (void)vm; (void)f; (void)m; }
 int   lua_raise_error(void* vm, const char* m) { (void)vm; (void)m; return 0; }
-void  lua_vm_set_instruction_limit(void* vm, long b, int e) { (void)vm; (void)b; (void)e; }
+void  lua_vm_set_instruction_limit(void* vm, int64_t b, int e) { (void)vm; (void)b; (void)e; }
 // #910 table builder — unavailable stubs.
 void  lua_table_begin(void* vm, int a, int r) { (void)vm; (void)a; (void)r; }
 void  lua_table_seti_str(void* vm, int i, const char* v) { (void)vm; (void)i; (void)v; }
-void  lua_table_seti_int(void* vm, int i, long v) { (void)vm; (void)i; (void)v; }
+void  lua_table_seti_int(void* vm, int i, int64_t v) { (void)vm; (void)i; (void)v; }
 void  lua_table_seti_bool(void* vm, int i, int v) { (void)vm; (void)i; (void)v; }
 void  lua_table_set_str(void* vm, const char* k, const char* v) { (void)vm; (void)k; (void)v; }
-void  lua_table_set_int(void* vm, const char* k, long v) { (void)vm; (void)k; (void)v; }
+void  lua_table_set_int(void* vm, const char* k, int64_t v) { (void)vm; (void)k; (void)v; }
 void  lua_table_set_bool(void* vm, const char* k, int v) { (void)vm; (void)k; (void)v; }
 void  lua_table_end_seti(void* vm, int i) { (void)vm; (void)i; }
 void  lua_table_end_setfield(void* vm, const char* k) { (void)vm; (void)k; }

@@ -30,7 +30,7 @@ slashes(path: string) -> string {
 main() {
     println("=== fs.realpath regression ===")
 
-    windows = os_getenv("OS") == "Windows_NT"
+    windows = os.platform() == "windows"
     // A name of this process's own, so a second sweep running beside this
     // one does not delete the directory mid-test (#2771).
     name = "aether_fs_realpath_test_${os.getpid()}"

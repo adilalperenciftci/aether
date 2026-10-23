@@ -38,7 +38,7 @@ header comment is the authoritative description.
 | `std.fs` | Files, directories, metadata, recursive walk, and change watching. | 148 | [guide](../std/fs/README.md) · [source](../std/fs/module.ae) |
 | `std.hash` | Fast non-cryptographic hashes and checksums: FNV, MurmurHash3, SipHash, CRC-32. | 6 | [guide](../std/hash/README.md) · [source](../std/hash/module.ae) |
 | `std.host` | Primitives for Aether scripts embedded in a host application. | 14 | [guide](../std/host/README.md) · [source](../std/host/module.ae) |
-| `std.http` | HTTP client and server: the `std.net` surface plus Go-style wrappers. | 127 | [guide](../std/http/README.md) · [source](../std/http/module.ae) |
+| `std.http` | HTTP client and server: the `std.net` surface plus Go-style wrappers. | 132 | [guide](../std/http/README.md) · [source](../std/http/module.ae) |
 | `std.http1` | Pure-Aether HTTP/1.1 response reader (RFC 9112). | 14 | [guide](../std/http1/README.md) · [source](../std/http1/module.ae) |
 | `std.intarr` | Fixed-size packed-int buffer. | 15 | [guide](../std/intarr/README.md) · [source](../std/intarr/module.ae) |
 | `std.intmap` | Hash map from `long` keys to `long` values, for integer-keyed counting and lookup. | 12 | [guide](../std/intmap/README.md) · [source](../std/intmap/module.ae) |
@@ -49,11 +49,11 @@ header comment is the authoritative description.
 | `std.ksuid` | KSUID: 160-bit lexicographically sortable identifier. | 1 | [guide](../std/ksuid/README.md) · [source](../std/ksuid/module.ae) |
 | `std.language` | BCP 47 language tags and matching (RFC 5646, RFC 4647). | 11 | [guide](../std/language/README.md) · [source](../std/language/module.ae) |
 | `std.lanes` | SIMD lanes: four or eight floats, or two doubles, per vector, with masks and select. | 127 | [guide](../std/lanes/README.md) · [source](../std/lanes/module.ae) |
-| `std.list` | Dynamic array, re-exported from `std.collections`. | 13 | [guide](../std/list/README.md) · [source](../std/list/module.ae) |
+| `std.list` | Dynamic array, re-exported from `std.collections`. | 14 | [guide](../std/list/README.md) · [source](../std/list/module.ae) |
 | `std.log` | Levelled logging with timestamps, colours and counters. | 9 | [full section](#logging-stdlog) |
 | `std.longarr` | Fixed-size packed-long buffer. | 15 | [guide](../std/longarr/README.md) · [source](../std/longarr/module.ae) |
 | `std.lzf` | One-shot LZF compression and decompression. | 9 | [guide](../std/lzf/README.md) · [source](../std/lzf/module.ae) |
-| `std.map` | Hash map, re-exported from `std.collections`, with readable key snapshots. | 19 | [guide](../std/map/README.md) · [source](../std/map/module.ae) |
+| `std.map` | Hash map, re-exported from `std.collections`, with readable key snapshots. | 20 | [guide](../std/map/README.md) · [source](../std/map/module.ae) |
 | `std.math` | Arithmetic, trigonometry, rounding and floating-point helpers. | 45 | [full section](#math-stdmath) |
 | `std.mem` | Byte-level reads and writes over caller-allocated raw pointers. | 98 | [guide](../std/mem/README.md) · [source](../std/mem/module.ae) |
 | `std.message` | ICU MessageFormat formatting and message catalogues. | 8 | [guide](../std/message/README.md) · [source](../std/message/module.ae) |
@@ -83,7 +83,7 @@ header comment is the authoritative description.
 | `std.string` | Managed strings: construction, search, slicing, case, split and join. | 100 | [full section](#strings-stdstring) |
 | `std.sync` | Atomic 64-bit integer cell (load, store, add, sub, compare-and-swap) for refcounts and lock-free reclamation. | 7 | [guide](../std/sync/README.md) · [source](../std/sync/module.ae) |
 | `std.tar` | Streaming POSIX ustar archives: reader and writer. | 24 | [full section](#posix-ustar-archives-stdtar) |
-| `std.tcp` | TCP sockets, re-exported from `std.net`. | 35 | [guide](../std/tcp/README.md) · [source](../std/tcp/module.ae) |
+| `std.tcp` | TCP sockets, re-exported from `std.net`. | 36 | [guide](../std/tcp/README.md) · [source](../std/tcp/module.ae) |
 | `std.udp` | Datagram sockets for game networking: non-blocking bind, send_to, recv_from, poll, and address values. | 40 | [guide](../std/udp/README.md) · [source](../std/udp/module.ae) |
 | `std.time` | Civil date and time over Unix epoch seconds (UTC). | 22 | [guide](../std/time/README.md) · [source](../std/time/module.ae) |
 | `std.tracking` | Leak-detecting allocator wrapper. | 5 | [guide](../std/tracking/README.md) · [source](../std/tracking/module.ae) |
@@ -205,13 +205,14 @@ ada []
 - `list.add(list, item)` → `string` - Append item, return error string
 - `list.get(list, index)` → `(ptr, string)` - The item at `index`: `(null, "index out of range")` or `(null, "null list")` on failure
 - `list.get_string(list, index)` → `(string, string)` - The item as a string, checked: `(null, "not a string")` when the element is some other pointer, `(null, "")` when it is null, and `get`'s errors
+- `list.at(list, index)` → `ptr` - The item at an index the caller has bounded (a loop over `0 ..< list.size(l)`); out of range, or a null list, is a panic naming the index and the size, as a slice index is
 - `list.set(list, index, item)` - Set item at index
 - `list.remove(list, index)` - Remove item at index
 - `list.size(list)` - Get number of elements
 - `list.clear(list)` - Remove all elements
 - `list.free(list)` - Free list memory
 
-Raw externs: `list_add_raw` (returns 1/0), `list_get_raw` (no bounds check).
+Raw externs: `list_add_raw` (returns 1/0), `list_get_raw` (no bounds check): the C bindings the functions above are built on, for std.list itself. Another module calls the functions (#3107).
 
 **String elements.** `list.add` and `list.set` of a string take a reference
 to it, released when the element leaves (`list.remove`, `list.clear`, a store
@@ -318,6 +319,7 @@ Aether [] 1
 - `map.put(map, key, value)` → `string` - Insert or update, return error string
 - `map.get(map, key)` → `(ptr, string)` - The value: `(null, "")` if the key is absent, `(null, "null map")` if `map` is null
 - `map.get_string(map, key)` → `(string, string)` - Get a string value: `(null, "")` if missing, `(null, "not a string")` if the value is some other pointer
+- `map.lookup(map, key)` → `ptr` - The value, or null when the key is absent or the map is null: `get` without its error slot
 - `map.has(map, key)` - Check if key exists
 - `map.remove(map, key)` - Remove key-value pair
 - `map.size(map)` - Get number of entries
@@ -2245,6 +2247,7 @@ Raw externs: `http_server_bind_raw`, `http_server_start_raw`.
 **Response Building:**
 - `http.response_create()` - Create response
 - `http.response_set_status(res, code)` - Set HTTP status code
+- `http.response_get_status(res)` → `int` - The status the response will be sent with (200 until a handler sets one)
 - `http.response_set_header(res, name, value)` - Set response header
 - `http.response_set_body(res, body)` - Set response body. Uses `strdup` + `strlen` internally, **truncates at the first embedded NUL**. Fine for text bodies; use `response_set_body_n` for anything that may contain binary.
 - `http.response_set_body_bytes(res, body: byte[])` - Binary-safe sibling of `response_set_body`: sets the bytes of `body` verbatim (embedded NULs survive); the server copies them.
@@ -2713,10 +2716,6 @@ arm.
 - `await_io` must be called from inside an actor's `receive` handler
   (not from `main()`). The bridge reads the current actor from a TLS
   set at the top of every generated `_step()` function.
-- Single-actor programs run in main-thread mode which bypasses the
-  scheduler loop, and therefore the I/O reactor. Spawn at least two
-  actors to force multi-threaded scheduler mode if you want `await_io`
-  to function.
 - The fd must outlive the `await_io` registration. If you close the
   fd before the `IoReady` fires, behavior depends on the backend
   (epoll reports EPOLLHUP; kqueue silently drops the one-shot).
@@ -3371,6 +3370,7 @@ compare 1 sign 1 bits 127
 - `bignum.add` / `subtract` / `multiply` / `divide` / `remainder` / `mod` `(a, b)` → `ptr` - Arithmetic
 - `bignum.negate(a)` / `bignum.abs(a)` → `ptr`, `bignum.shift_left(a, n)` / `shift_right(a, n)` → `ptr`
 - `bignum.compare(a, b)` → `int`, `bignum.is_zero(a)` / `bignum.sign(a)` / `bignum.bit_length(a)` → `int`
+- `bignum.test_bit(a, i)` → `int` - Bit `i` of `|a|` (0 the least significant), read in place with no allocation: what a scalar multiplication walks
 - `bignum.mod_pow(base, exp, m)` → `ptr` - Modular exponentiation, without forming `base^exp`
 - `bignum.gcd(a, b)` / `bignum.mod_inverse(a, m)` → `ptr`, `bignum.is_probable_prime(n, rounds)` → `int`
 - `bignum.free(n)` - Release a handle
@@ -3866,8 +3866,8 @@ main() {
 - `arena.alloc_aligned(arena, bytes, alignment)` → `ptr` - Same as `alloc` with explicit alignment (must be a power of 2).
 - `arena.reset(arena)` - Free every allocation in one shot. Pointers become invalid.
 - `arena.destroy(arena)` - Free the arena and its memory.
-- `arena.used(arena)` → `int` - Bytes currently allocated (sum across overflow blocks).
-- `arena.size(arena)` → `int` - Total capacity (sum across overflow blocks).
+- `arena.used(arena)` → `long` - Bytes currently allocated (sum across overflow blocks).
+- `arena.size(arena)` → `long` - Total capacity (sum across overflow blocks).
 
 Arenas don't track AetherString refcounts, strings allocated through the regular stdlib still need `release()` (or `defer release(...)`); the arena is for bulk raw allocations that the user controls themselves. Avoid handing arena-allocated pointers to functions that retain them past the next `arena.reset()` or `arena.destroy()`.
 

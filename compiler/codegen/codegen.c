@@ -12,6 +12,7 @@
 #include "../aether_error.h"
 #include "../analysis/actor_reply.h"
 #include "../analysis/sandbox_trust.h"
+#include "../analysis/hoist.h"
 
 /* The AetherString header the emitted C inspects, from the definition the
  * runtime uses (std/string/aether_string_abi.h): its magic's bytes in
@@ -442,6 +443,37 @@ int contains_send_expression(ASTNode* node) {
         if (contains_send_expression(node->children[i])) return 1;
     }
     return 0;
+}
+
+/* #3117: can `node`, a loop, keep its sends in a batch (delivered at the
+ * loop's end, or 256 at a time)? Only when nothing in it can wait between two
+ * sends or look at what a send did: it calls nothing, prints nothing, asks
+ * nothing and reads no actor's state. A send, arithmetic, an assignment, a
+ * branch and an inner loop are fine: the counting and fork-join shape the
+ * batch exists for. A `return`, or a labeled `break` or `continue` (which can
+ * leave for an enclosing loop), would leave the batch unflushed, and a
+ * closure made in the loop runs outside it, so each keeps the loop out too. */
+int loop_sends_without_waiting(ASTNode* node) {
+    if (!node) return 1;
+    switch (node->type) {
+        case AST_FUNCTION_CALL: case AST_PRINT_STATEMENT: case AST_SEND_ASK:
+        case AST_CLOSURE: case AST_RETURN_STATEMENT:
+            return 0;
+        case AST_BREAK_STATEMENT: case AST_CONTINUE_STATEMENT:
+            if (node->value) return 0;
+            break;
+        case AST_MEMBER_ACCESS:
+            if (node->child_count > 0 && node->children[0] && node->children[0]->node_type &&
+                node->children[0]->node_type->kind == TYPE_ACTOR_REF)
+                return 0;
+            break;
+        default:
+            break;
+    }
+    for (int i = 0; i < node->child_count; i++) {
+        if (!loop_sends_without_waiting(node->children[i])) return 0;
+    }
+    return 1;
 }
 
 // Tree-shake of merged-but-unused stdlib functions runs around typecheck
@@ -903,6 +935,18 @@ void code_generator_release(CodeGenerator* gen) {
         gen->closures = NULL;
         gen->closure_count = 0;
         gen->closure_capacity = 0;
+        /* Which closure literal a variable holds (closure_var_bind): a
+         * strdup'd scope and name per entry. Nothing freed it, so every
+         * compile of a program that binds a closure to a variable leaked
+         * the table. */
+        for (int i = 0; i < gen->closure_var_count; i++) {
+            free(gen->closure_var_map[i].scope);
+            free(gen->closure_var_map[i].var_name);
+        }
+        free(gen->closure_var_map);
+        gen->closure_var_map = NULL;
+        gen->closure_var_count = 0;
+        gen->closure_var_capacity = 0;
         for (int i = 0; i < gen->promoted_func_count; i++) {
             for (int j = 0; j < gen->promoted_funcs[i].count; j++) {
                 free(gen->promoted_funcs[i].names[j]);
@@ -948,6 +992,8 @@ void code_generator_release(CodeGenerator* gen) {
             }
             free(gen->declared_vars);
         }
+        strmap_free(&gen->declared_index);
+        strmap_free(&gen->reads_index);
         if (gen->module_global_vars) {
             for (int i = 0; i < gen->module_global_var_count; i++) {
                 free(gen->module_global_vars[i]);
@@ -997,12 +1043,7 @@ void free_code_generator(CodeGenerator* gen) {
 
 // Helper: check if variable was already declared in current function
 int is_var_declared(CodeGenerator* gen, const char* var_name) {
-    for (int i = 0; i < gen->declared_var_count; i++) {
-        if (strcmp(gen->declared_vars[i], var_name) == 0) {
-            return 1;
-        }
-    }
-    return 0;
+    return strmap_get(&gen->declared_index, var_name) != NULL;
 }
 
 // #701: is `name` a module-level `var` global (a file-scope static)?
@@ -1061,6 +1102,10 @@ void register_module_global_var(CodeGenerator* gen, const char* name, int is_pro
  * without bound. */
 void truncate_declared_vars(CodeGenerator* gen, int saved_count) {
     for (int i = saved_count; i < gen->declared_var_count; i++) {
+        /* A later slot of the name goes with this one: the slots go as a
+         * suffix. */
+        if ((intptr_t)strmap_get(&gen->declared_index, gen->declared_vars[i]) == i + 1)
+            strmap_put(&gen->declared_index, gen->declared_vars[i], NULL);
         free(gen->declared_vars[i]);
         if (gen->declared_var_types && gen->declared_var_types[i]) {
             free_type(gen->declared_var_types[i]);
@@ -1086,16 +1131,14 @@ void mark_var_declared_typed(CodeGenerator* gen, const char* var_name, Type* hoi
     gen->declared_var_types = new_types;
     gen->declared_vars[gen->declared_var_count] = strdup(var_name);
     gen->declared_var_types[gen->declared_var_count] = hoisted_type ? clone_type(hoisted_type) : NULL;
+    if (!strmap_get(&gen->declared_index, var_name))
+        strmap_put(&gen->declared_index, var_name, (void*)(intptr_t)(gen->declared_var_count + 1));
     gen->declared_var_count++;
 }
 
 Type* declared_var_type(CodeGenerator* gen, const char* var_name) {
-    for (int i = 0; i < gen->declared_var_count; i++) {
-        if (strcmp(gen->declared_vars[i], var_name) == 0) {
-            return gen->declared_var_types ? gen->declared_var_types[i] : NULL;
-        }
-    }
-    return NULL;
+    intptr_t at = (intptr_t)strmap_get(&gen->declared_index, var_name);
+    return at && gen->declared_var_types ? gen->declared_var_types[at - 1] : NULL;
 }
 
 // Helper: clear declared vars (call at function start)
@@ -1117,6 +1160,8 @@ void clear_declared_vars(CodeGenerator* gen) {
     gen->declared_var_types = NULL;
     gen->hoist_scope_body = NULL;
     gen->declared_var_count = 0;
+    strmap_free(&gen->declared_index);
+    strmap_init(&gen->declared_index);
 }
 
 // Helper: check if variable currently holds a heap-allocated string
@@ -6126,6 +6171,9 @@ static void rename_locals_shadowing_functions(ASTNode* program) {
  * binding's (a nested binding of the name included, renamed alike), and
  * field, argument and function names are not value names.
  *
+ * A for loop's init that assigns a variable already bound there (#2734)
+ * declares nothing and keeps its name.
+ *
  * #2994: so is every name a `match` arm's pattern binds (`some(v)` over
  * any optional, the names of a list or a struct pattern), which is that
  * arm's own: codegen writes the value of a bound `match` in the arm's
@@ -6198,8 +6246,8 @@ static void rename_scoped_bindings_in(ASTNode* scope, ASTNode* node, const NameS
     for (int i = 0; i < node->child_count; i++)
         rename_scoped_bindings_in(scope, node->children[i], fixed);
     if (node->type == AST_FOR_LOOP && node->child_count > 0 && node->children[0] &&
-        node->children[0]->type == AST_VARIABLE_DECLARATION && node->children[0]->node_type &&
-        node->children[0]->node_type->kind == TYPE_STRING) {
+        node->children[0]->type == AST_VARIABLE_DECLARATION && !node->children[0]->type_inferred &&
+        node->children[0]->node_type && node->children[0]->node_type->kind == TYPE_STRING) {
         rename_scoped_binding(scope, node, node->children[0]->value, fixed);
     } else if (node->type == AST_CATCH_CLAUSE && node->value) {
         rename_scoped_binding(scope, node, node->value, fixed);
@@ -8067,6 +8115,8 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     /* The rename changed definition names, which are the index's keys,
        without changing the child count it is keyed on. */
     program_index_reset();
+    /* So are the hoisting answers the checker kept (#3083). */
+    hoist_cache_reset();
     erase_string_retype_casts(program);
     /* #2586: the functions used as fn-pointer values, by name, before any
      * pass classifies a function or emits a return of one. */
@@ -8639,7 +8689,7 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     print_line(gen, "#include <stdlib.h>");
     print_line(gen, "#include <stddef.h>");
     print_line(gen, "extern void* aether_caps_malloc(size_t bytes);");
-    print_line(gen, "extern const char* string_new_with_length(void* data, int length);");
+    print_line(gen, "extern const char* string_new_with_length(void* data, int64_t length);");
     print_line(gen, "extern void string_retain(const char*);");
     print_line(gen, "extern void aether_string_publish(const void*);");
     /* The header of a counted string, as the runtime lays it out. A string
@@ -8664,7 +8714,7 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
                (unsigned)AETHER_STRING_SHARED_BIT);
     print_line(gen, "        return s;");
     print_line(gen, "    }");
-    print_line(gen, "    return string_new_with_length((void*)s, (int)strlen(s));");
+    print_line(gen, "    return string_new_with_length((void*)s, (int64_t)strlen(s));");
     print_line(gen, "}");
     /* A string handed out as a `ptr` result: a pinned string (a literal, a
      * fault's name) is its C characters, as a literal used as a `ptr` is
@@ -9003,8 +9053,9 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
      * the duplicates are tolerated by C: no conflicting-types error.
      * string_new_with_length is declared as the std modules' extern is
      * (a `ptr` buffer, `-> string @heap`: `const char*` from `void*`, #3018,
-     * #3030) for the same reason. */
-    print_line(gen, "extern const char* string_new_with_length(void* data, int length);");
+     * #3030) for the same reason, with a `long` length: the runtime takes a
+     * size_t, which an `int` filled only half of (#3097). */
+    print_line(gen, "extern const char* string_new_with_length(void* data, int64_t length);");
     /* Issue #467: list / map heap-string-value owning-add helpers.
      * Prototypes emitted here so codegen can route `list.add(l,
      * heap_str)` / `map.put(m, k, heap_str)` calls to these symbols
@@ -9131,6 +9182,16 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     print_line(gen, "#endif");
     // Closure support: generic closure struct (function pointer + captured environment)
     print_line(gen, "typedef struct { void (*fn)(void); void* env; } _AeClosure;");
+    /* #3091: the function a call through a closure jumps to. The empty
+     * closure (`null` in a closure slot, also when a `fn?` holds it) has
+     * none, and the call panics with `where`, its category and source
+     * position, instead of jumping to address 0. A call through a typed
+     * function pointer an expression yields is checked here too (#3098). */
+    print_line(gen, "typedef void (*_AeFnPtr)(void);");
+    print_line(gen, "static inline _AeFnPtr _aether_callee_fn(_AeFnPtr fn, const char* where) {");
+    print_line(gen, "    if (!fn) aether_panic(where);");
+    print_line(gen, "    return fn;");
+    print_line(gen, "}");
     /* The head every closure env starts with: its destructor (#1398) and its
      * reference count (#2494). An env is held by the closure value's owner
      * and by every env that captured the closure; each holder releases

@@ -60,7 +60,6 @@
 
 import std.bits
 import std.bytes
-import std.intarr
 import std.cryptography
 import std.cryptography.sha3
 
@@ -238,39 +237,39 @@ mul_mont(a: int, b: int) -> int {
     return mont_reduce(a * b)
 }
 
-// ---- Poly = intarr(256) of coefficients ----
+// ---- Poly = int[256] of coefficients ----
 
-poly_new() -> ptr {
-    return intarr_new_raw(N)
+poly_new() -> int[] {
+    return make([]int, N)
 }
-poly_free(p: ptr) {
-    intarr_free(p)
+poly_free(p: int[]) {
+    free(p)
 }
-pg(p: ptr, i: int) -> int {
-    return intarr_get_unchecked(p, i)
+pg(p: int[], i: int) -> int {
+    return p[i]
 }
-ps(p: ptr, i: int, v: int) {
-    intarr_set_unchecked(p, i, v)
+ps(p: int[], i: int, v: int) {
+    p[i] = v
 }
 
-// PolyVec = array of k poly ptrs, stored as intarr(N*k) flat: poly j at j*N.
-polyvec_new(k: int) -> ptr {
-    return intarr_new_raw(N * k)
+// PolyVec = k polys stored flat in one int[N*k]: poly j at j*N.
+polyvec_new(k: int) -> int[] {
+    return make([]int, N * k)
 }
-polyvec_free(p: ptr) {
-    intarr_free(p)
+polyvec_free(p: int[]) {
+    free(p)
 }
 // Coefficient i of poly j in a flat polyvec.
-vg(pv: ptr, j: int, i: int) -> int {
-    return intarr_get_unchecked(pv, j * N + i)
+vg(pv: int[], j: int, i: int) -> int {
+    return pv[j * N + i]
 }
-vs(pv: ptr, j: int, i: int, v: int) {
-    intarr_set_unchecked(pv, j * N + i, v)
+vs(pv: int[], j: int, i: int, v: int) {
+    pv[j * N + i] = v
 }
 
 // ---- NTT (in place on a single poly via flat polyvec slot) ----
 
-ntt(pv: ptr, j: int) {
+ntt(pv: int[], j: int) {
     base = j * N
     k = 1
     len = 128
@@ -281,10 +280,10 @@ ntt(pv: ptr, j: int) {
             k = k + 1
             jj = start
             while jj < start + len {
-                t = intarr_get_unchecked(pv, base + jj)
-                u = mul_mont(zeta, intarr_get_unchecked(pv, base + jj + len))
-                intarr_set_unchecked(pv, base + jj + len, s16(t - u))
-                intarr_set_unchecked(pv, base + jj, s16(t + u))
+                t = pv[base + jj]
+                u = mul_mont(zeta, pv[base + jj + len])
+                pv[base + jj + len] = s16(t - u)
+                pv[base + jj] = s16(t + u)
                 jj = jj + 1
             }
             start = jj + len
@@ -293,7 +292,7 @@ ntt(pv: ptr, j: int) {
     }
 }
 
-inv_ntt(pv: ptr, j: int) {
+inv_ntt(pv: int[], j: int) {
     base = j * N
     k = 0
     len = 2
@@ -304,10 +303,10 @@ inv_ntt(pv: ptr, j: int) {
             k = k + 1
             jj = start
             while jj < start + len {
-                t = intarr_get_unchecked(pv, base + jj)
-                u = intarr_get_unchecked(pv, base + jj + len)
-                intarr_set_unchecked(pv, base + jj, barrett_reduce(s16(t + u)))
-                intarr_set_unchecked(pv, base + jj + len, mul_mont(zeta, s16(t - u)))
+                t = pv[base + jj]
+                u = pv[base + jj + len]
+                pv[base + jj] = barrett_reduce(s16(t + u))
+                pv[base + jj + len] = mul_mont(zeta, s16(t - u))
                 jj = jj + 1
             }
             start = jj + len
@@ -316,70 +315,70 @@ inv_ntt(pv: ptr, j: int) {
     }
     i = 0
     while i < 256 {
-        intarr_set_unchecked(pv, base + i, mul_mont(intarr_get_unchecked(pv, base + i), ZETAS_INV[127]))
+        pv[base + i] = mul_mont(pv[base + i], ZETAS_INV[127])
         i = i + 1
     }
 }
 
-poly_reduce(pv: ptr, j: int) {
+poly_reduce(pv: int[], j: int) {
     base = j * N
     i = 0
     while i < 256 {
-        intarr_set_unchecked(pv, base + i, barrett_reduce(intarr_get_unchecked(pv, base + i)))
+        pv[base + i] = barrett_reduce(pv[base + i])
         i = i + 1
     }
 }
 
-poly_ntt(pv: ptr, j: int) {
+poly_ntt(pv: int[], j: int) {
     ntt(pv, j)
     poly_reduce(pv, j)
 }
 
-poly_to_mont(pv: ptr, j: int) {
+poly_to_mont(pv: int[], j: int) {
     base = j * N
     // f = (1<<32) % q = 1353
     f = 1353
     i = 0
     while i < 256 {
-        intarr_set_unchecked(pv, base + i, mont_reduce(intarr_get_unchecked(pv, base + i) * f))
+        pv[base + i] = mont_reduce(pv[base + i] * f)
         i = i + 1
     }
 }
 
 // r[j] += a[j]
-poly_add(rpv: ptr, rj: int, apv: ptr, aj: int) {
+poly_add(rpv: int[], rj: int, apv: int[], aj: int) {
     rb = rj * N
     ab = aj * N
     i = 0
     while i < 256 {
-        intarr_set_unchecked(rpv, rb + i, s16(intarr_get_unchecked(rpv, rb + i) + intarr_get_unchecked(apv, ab + i)))
+        rpv[rb + i] = s16(rpv[rb + i] + apv[ab + i])
         i = i + 1
     }
 }
 
 // r[j] = a[j] - r[j]   (BC Subtract semantics)
-poly_subtract(rpv: ptr, rj: int, apv: ptr, aj: int) {
+poly_subtract(rpv: int[], rj: int, apv: int[], aj: int) {
     rb = rj * N
     ab = aj * N
     i = 0
     while i < 256 {
-        intarr_set_unchecked(rpv, rb + i, s16(intarr_get_unchecked(apv, ab + i) - intarr_get_unchecked(rpv, rb + i)))
+        rpv[rb + i] = s16(apv[ab + i] - rpv[rb + i])
         i = i + 1
     }
 }
 
 // Base multiplication of two degree-1 polys in NTT domain.
-basemul(rpv: ptr, rbase: int, off: int, a0: int, a1: int, b0: int, b1: int, zeta: int) {
+basemul(rpv: int[], rbase: int, off: int, a0: int, a1: int, b0: int, b1: int, zeta: int) {
     o0 = mul_mont(a1, b1)
     o0 = mul_mont(o0, zeta)
     o0 = s16(o0 + mul_mont(a0, b0))
-    intarr_set_unchecked(rpv, rbase + off, o0)
+    rpv[rbase + off] = o0
     o1 = mul_mont(a0, b1)
     o1 = s16(o1 + mul_mont(a1, b0))
-    intarr_set_unchecked(rpv, rbase + off + 1, o1)
+    rpv[rbase + off + 1] = o1
 }
 
-basemul_mont(rpv: ptr, rj: int, apv: ptr, aj: int, bpv: ptr, bj: int) {
+basemul_mont(rpv: int[], rj: int, apv: int[], aj: int, bpv: int[], bj: int) {
     rb = rj * N
     ab = aj * N
     bb = bj * N
@@ -387,17 +386,17 @@ basemul_mont(rpv: ptr, rj: int, apv: ptr, aj: int, bpv: ptr, bj: int) {
     while i < 64 {
         z = ZETAS[64 + i]
         basemul(rpv, rb, 4 * i,
-            intarr_get_unchecked(apv, ab + 4 * i), intarr_get_unchecked(apv, ab + 4 * i + 1),
-            intarr_get_unchecked(bpv, bb + 4 * i), intarr_get_unchecked(bpv, bb + 4 * i + 1), z)
+            apv[ab + 4 * i], apv[ab + 4 * i + 1],
+            bpv[bb + 4 * i], bpv[bb + 4 * i + 1], z)
         basemul(rpv, rb, 4 * i + 2,
-            intarr_get_unchecked(apv, ab + 4 * i + 2), intarr_get_unchecked(apv, ab + 4 * i + 3),
-            intarr_get_unchecked(bpv, bb + 4 * i + 2), intarr_get_unchecked(bpv, bb + 4 * i + 3), s16(-z))
+            apv[ab + 4 * i + 2], apv[ab + 4 * i + 3],
+            bpv[bb + 4 * i + 2], bpv[bb + 4 * i + 3], s16(-z))
         i = i + 1
     }
 }
 
 // r[rj] = <a (k polys), b (k polys)> pointwise-accumulated, reduced.
-polyvec_pointwise_acc(rpv: ptr, rj: int, apv: ptr, bpv: ptr, k: int, scratch: ptr) {
+polyvec_pointwise_acc(rpv: int[], rj: int, apv: int[], bpv: int[], k: int, scratch: int[]) {
     basemul_mont(rpv, rj, apv, 0, bpv, 0)
     i = 1
     while i < k {
@@ -411,12 +410,12 @@ polyvec_pointwise_acc(rpv: ptr, rj: int, apv: ptr, bpv: ptr, k: int, scratch: pt
 // ---- 12-bit (de)serialization of NTT polys ----
 
 // Pack poly j into 384 bytes at out[off..].
-poly_to_bytes(pv: ptr, j: int, out: ptr, off: int) {
+poly_to_bytes(pv: int[], j: int, out: ptr, off: int) {
     base = j * N
     i = 0
     while i < 128 {
-        t0 = cond_sub_q(intarr_get_unchecked(pv, base + 2 * i)) & 0xFFFF
-        t1 = cond_sub_q(intarr_get_unchecked(pv, base + 2 * i + 1)) & 0xFFFF
+        t0 = cond_sub_q(pv[base + 2 * i]) & 0xFFFF
+        t1 = cond_sub_q(pv[base + 2 * i + 1]) & 0xFFFF
         bytes.set(out, off + 3 * i + 0, t0 & 0xFF)
         bytes.set(out, off + 3 * i + 1, (bits.lsr32(t0, 8) | (t1 << 4)) & 0xFF)
         bytes.set(out, off + 3 * i + 2, bits.lsr32(t1, 4) & 0xFF)
@@ -424,7 +423,7 @@ poly_to_bytes(pv: ptr, j: int, out: ptr, off: int) {
     }
 }
 
-poly_from_bytes(pv: ptr, j: int, src: ptr, off: int) {
+poly_from_bytes(pv: int[], j: int, src: ptr, off: int) {
     base = j * N
     i = 0
     while i < 128 {
@@ -433,20 +432,20 @@ poly_from_bytes(pv: ptr, j: int, src: ptr, off: int) {
         a2 = bytes.get(src, off + 3 * i + 2) & 0xFF
         c0 = ((a0) | (a1 << 8)) & 0xFFF
         c1 = (bits.lsr32(a1, 4) | (a2 << 4)) & 0xFFF
-        intarr_set_unchecked(pv, base + 2 * i, s16(c0))
-        intarr_set_unchecked(pv, base + 2 * i + 1, s16(c1))
+        pv[base + 2 * i] = s16(c0)
+        pv[base + 2 * i + 1] = s16(c1)
         i = i + 1
     }
 }
 
-polyvec_to_bytes(pv: ptr, k: int, out: ptr, off: int) {
+polyvec_to_bytes(pv: int[], k: int, out: ptr, off: int) {
     i = 0
     while i < k {
         poly_to_bytes(pv, i, out, off + i * POLY_BYTES)
         i = i + 1
     }
 }
-polyvec_from_bytes(pv: ptr, k: int, src: ptr, off: int) {
+polyvec_from_bytes(pv: int[], k: int, src: ptr, off: int) {
     i = 0
     while i < k {
         poly_from_bytes(pv, i, src, off + i * POLY_BYTES)
@@ -456,7 +455,7 @@ polyvec_from_bytes(pv: ptr, k: int, src: ptr, off: int) {
 
 // ---- Message <-> poly ----
 
-poly_from_msg(pv: ptr, j: int, msg: ptr, off: int) {
+poly_from_msg(pv: int[], j: int, msg: ptr, off: int) {
     base = j * N
     half = (Q + 1) / 2 // 1665
     i = 0
@@ -466,21 +465,21 @@ poly_from_msg(pv: ptr, j: int, msg: ptr, off: int) {
         while b < 8 {
             bit = (bits.lsr32(mi, b)) & 1
             mask = 0 - bit // 0 or -1
-            intarr_set_unchecked(pv, base + 8 * i + b, s16(mask & half))
+            pv[base + 8 * i + b] = s16(mask & half)
             b = b + 1
         }
         i = i + 1
     }
 }
 
-poly_to_msg(pv: ptr, j: int, msg: ptr, off: int) {
+poly_to_msg(pv: int[], j: int, msg: ptr, off: int) {
     base = j * N
     lower = Q >> 2 // 832
     upper = Q - lower // 2497
     // cond_sub_q first
     i = 0
     while i < 256 {
-        intarr_set_unchecked(pv, base + i, cond_sub_q(intarr_get_unchecked(pv, base + i)))
+        pv[base + i] = cond_sub_q(pv[base + i])
         i = i + 1
     }
     i = 0
@@ -488,7 +487,7 @@ poly_to_msg(pv: ptr, j: int, msg: ptr, off: int) {
         mi = 0
         b = 0
         while b < 8 {
-            cj = intarr_get_unchecked(pv, base + 8 * i + b)
+            cj = pv[base + 8 * i + b]
             // t = ((lower - cj) & (cj - upper)) >>> 31  (uint), 1 iff cj in (lower,upper)
             prod = (lower - cj) & (cj - upper)
             t = bits.lsr32(prod, 31) & 1
@@ -503,25 +502,25 @@ poly_to_msg(pv: ptr, j: int, msg: ptr, off: int) {
 // ---- d_v compression of v poly ----
 
 // dv=4: 128 bytes for the whole poly.
-compress_poly_128(pv: ptr, j: int, out: ptr, off: int) {
+compress_poly_128(pv: int[], j: int, out: ptr, off: int) {
     base = j * N
     // cond_sub_q
     i = 0
     while i < 256 {
-        intarr_set_unchecked(pv, base + i, cond_sub_q(intarr_get_unchecked(pv, base + i)))
+        pv[base + i] = cond_sub_q(pv[base + i])
         i = i + 1
     }
     pos = off
     i = 0
     while i < 32 { // N/8
-        t0 = compress4(intarr_get_unchecked(pv, base + 8 * i + 0))
-        t1 = compress4(intarr_get_unchecked(pv, base + 8 * i + 1))
-        t2 = compress4(intarr_get_unchecked(pv, base + 8 * i + 2))
-        t3 = compress4(intarr_get_unchecked(pv, base + 8 * i + 3))
-        t4 = compress4(intarr_get_unchecked(pv, base + 8 * i + 4))
-        t5 = compress4(intarr_get_unchecked(pv, base + 8 * i + 5))
-        t6 = compress4(intarr_get_unchecked(pv, base + 8 * i + 6))
-        t7 = compress4(intarr_get_unchecked(pv, base + 8 * i + 7))
+        t0 = compress4(pv[base + 8 * i + 0])
+        t1 = compress4(pv[base + 8 * i + 1])
+        t2 = compress4(pv[base + 8 * i + 2])
+        t3 = compress4(pv[base + 8 * i + 3])
+        t4 = compress4(pv[base + 8 * i + 4])
+        t5 = compress4(pv[base + 8 * i + 5])
+        t6 = compress4(pv[base + 8 * i + 6])
+        t7 = compress4(pv[base + 8 * i + 7])
         bytes.set(out, pos + 0, (t0 | (t1 << 4)) & 0xFF)
         bytes.set(out, pos + 1, (t2 | (t3 << 4)) & 0xFF)
         bytes.set(out, pos + 2, (t4 | (t5 << 4)) & 0xFF)
@@ -534,38 +533,38 @@ compress4(c: int) -> int {
     return (((c + (Q >> 5)) * 315) >> 16) & 0xF
 }
 
-decompress_poly_128(pv: ptr, j: int, src: ptr, off: int) {
+decompress_poly_128(pv: int[], j: int, src: ptr, off: int) {
     base = j * N
     pos = off
     i = 0
     while i < 128 { // N/2
         byte_v = bytes.get(src, pos) & 0xFF
-        intarr_set_unchecked(pv, base + 2 * i + 0, s16((((byte_v & 15) * Q) + 8) >> 4))
-        intarr_set_unchecked(pv, base + 2 * i + 1, s16(((bits.lsr32(byte_v, 4) * Q) + 8) >> 4))
+        pv[base + 2 * i + 0] = s16((((byte_v & 15) * Q) + 8) >> 4)
+        pv[base + 2 * i + 1] = s16(((bits.lsr32(byte_v, 4) * Q) + 8) >> 4)
         pos = pos + 1
         i = i + 1
     }
 }
 
 // dv=5: 160 bytes.
-compress_poly_160(pv: ptr, j: int, out: ptr, off: int) {
+compress_poly_160(pv: int[], j: int, out: ptr, off: int) {
     base = j * N
     i = 0
     while i < 256 {
-        intarr_set_unchecked(pv, base + i, cond_sub_q(intarr_get_unchecked(pv, base + i)))
+        pv[base + i] = cond_sub_q(pv[base + i])
         i = i + 1
     }
     pos = off
     i = 0
     while i < 32 {
-        t0 = compress5(intarr_get_unchecked(pv, base + 8 * i + 0))
-        t1 = compress5(intarr_get_unchecked(pv, base + 8 * i + 1))
-        t2 = compress5(intarr_get_unchecked(pv, base + 8 * i + 2))
-        t3 = compress5(intarr_get_unchecked(pv, base + 8 * i + 3))
-        t4 = compress5(intarr_get_unchecked(pv, base + 8 * i + 4))
-        t5 = compress5(intarr_get_unchecked(pv, base + 8 * i + 5))
-        t6 = compress5(intarr_get_unchecked(pv, base + 8 * i + 6))
-        t7 = compress5(intarr_get_unchecked(pv, base + 8 * i + 7))
+        t0 = compress5(pv[base + 8 * i + 0])
+        t1 = compress5(pv[base + 8 * i + 1])
+        t2 = compress5(pv[base + 8 * i + 2])
+        t3 = compress5(pv[base + 8 * i + 3])
+        t4 = compress5(pv[base + 8 * i + 4])
+        t5 = compress5(pv[base + 8 * i + 5])
+        t6 = compress5(pv[base + 8 * i + 6])
+        t7 = compress5(pv[base + 8 * i + 7])
         bytes.set(out, pos + 0, (t0 | (t1 << 5)) & 0xFF)
         bytes.set(out, pos + 1, (bits.lsr32(t1, 3) | (t2 << 2) | (t3 << 7)) & 0xFF)
         bytes.set(out, pos + 2, (bits.lsr32(t3, 1) | (t4 << 4)) & 0xFF)
@@ -579,7 +578,7 @@ compress5(c: int) -> int {
     return (((c + (Q >> 6)) * 630) >> 16) & 0x1F
 }
 
-decompress_poly_160(pv: ptr, j: int, src: ptr, off: int) {
+decompress_poly_160(pv: int[], j: int, src: ptr, off: int) {
     base = j * N
     pos = off
     i = 0
@@ -598,14 +597,14 @@ decompress_poly_160(pv: ptr, j: int, src: ptr, off: int) {
         t6 = (bits.lsr32(c3, 6) | (c4 << 2)) & 0x1F
         t7 = bits.lsr32(c4, 3) & 0x1F
         pos = pos + 5
-        intarr_set_unchecked(pv, base + 8 * i + 0, s16(((t0 * Q) + 16) >> 5))
-        intarr_set_unchecked(pv, base + 8 * i + 1, s16(((t1 * Q) + 16) >> 5))
-        intarr_set_unchecked(pv, base + 8 * i + 2, s16(((t2 * Q) + 16) >> 5))
-        intarr_set_unchecked(pv, base + 8 * i + 3, s16(((t3 * Q) + 16) >> 5))
-        intarr_set_unchecked(pv, base + 8 * i + 4, s16(((t4 * Q) + 16) >> 5))
-        intarr_set_unchecked(pv, base + 8 * i + 5, s16(((t5 * Q) + 16) >> 5))
-        intarr_set_unchecked(pv, base + 8 * i + 6, s16(((t6 * Q) + 16) >> 5))
-        intarr_set_unchecked(pv, base + 8 * i + 7, s16(((t7 * Q) + 16) >> 5))
+        pv[base + 8 * i + 0] = s16(((t0 * Q) + 16) >> 5)
+        pv[base + 8 * i + 1] = s16(((t1 * Q) + 16) >> 5)
+        pv[base + 8 * i + 2] = s16(((t2 * Q) + 16) >> 5)
+        pv[base + 8 * i + 3] = s16(((t3 * Q) + 16) >> 5)
+        pv[base + 8 * i + 4] = s16(((t4 * Q) + 16) >> 5)
+        pv[base + 8 * i + 5] = s16(((t5 * Q) + 16) >> 5)
+        pv[base + 8 * i + 6] = s16(((t6 * Q) + 16) >> 5)
+        pv[base + 8 * i + 7] = s16(((t7 * Q) + 16) >> 5)
         i = i + 1
     }
 }
@@ -613,7 +612,7 @@ decompress_poly_160(pv: ptr, j: int, src: ptr, off: int) {
 // ---- d_u compression of b polyvec ----
 
 // du=10: k*320 bytes.
-compress_polyvec_320(pv: ptr, k: int, out: ptr, off: int) {
+compress_polyvec_320(pv: int[], k: int, out: ptr, off: int) {
     // cond_sub_q whole vector
     j = 0
     while j < k {
@@ -653,7 +652,7 @@ compress10(c: int) -> int {
     return hi & 0x3FF
 }
 
-decompress_polyvec_320(pv: ptr, k: int, src: ptr, off: int) {
+decompress_polyvec_320(pv: int[], k: int, src: ptr, off: int) {
     pos = off
     j = 0
     while j < k {
@@ -680,7 +679,7 @@ decompress_polyvec_320(pv: ptr, k: int, src: ptr, off: int) {
 }
 
 // du=11: k*352 bytes.
-compress_polyvec_352(pv: ptr, k: int, out: ptr, off: int) {
+compress_polyvec_352(pv: int[], k: int, out: ptr, off: int) {
     j = 0
     while j < k {
         i = 0
@@ -728,7 +727,7 @@ compress11(c: int) -> int {
     return hi & 0x7FF
 }
 
-decompress_polyvec_352(pv: ptr, k: int, src: ptr, off: int) {
+decompress_polyvec_352(pv: int[], k: int, src: ptr, off: int) {
     pos = off
     j = 0
     while j < k {
@@ -770,7 +769,7 @@ decompress_polyvec_352(pv: ptr, k: int, src: ptr, off: int) {
 
 // ---- CBD noise sampling ----
 
-cbd_eta2(pv: ptr, j: int, buf: ptr) {
+cbd_eta2(pv: int[], j: int, buf: ptr) {
     base = j * N
     i = 0
     while i < 32 { // N/8
@@ -781,14 +780,14 @@ cbd_eta2(pv: ptr, j: int, buf: ptr) {
         while jj < 8 {
             a = (bits.lsr32(d, 4 * jj + 0)) & 0x3
             b = (bits.lsr32(d, 4 * jj + 2)) & 0x3
-            intarr_set_unchecked(pv, base + 8 * i + jj, s16(a - b))
+            pv[base + 8 * i + jj] = s16(a - b)
             jj = jj + 1
         }
         i = i + 1
     }
 }
 
-cbd_eta3(pv: ptr, j: int, buf: ptr) {
+cbd_eta3(pv: int[], j: int, buf: ptr) {
     base = j * N
     i = 0
     while i < 64 { // N/4
@@ -804,7 +803,7 @@ cbd_eta3(pv: ptr, j: int, buf: ptr) {
         while jj < 4 {
             a = (bits.lsr32(d, 6 * jj + 0)) & 0x7
             b = (bits.lsr32(d, 6 * jj + 3)) & 0x7
-            intarr_set_unchecked(pv, base + 4 * i + jj, s16(a - b))
+            pv[base + 4 * i + jj] = s16(a - b)
             jj = jj + 1
         }
         i = i + 1
@@ -812,7 +811,7 @@ cbd_eta3(pv: ptr, j: int, buf: ptr) {
 }
 
 // PRF: SHAKE256(seed[0..32] || nonce), eta2 -> 128 bytes, eta3 -> 192 bytes.
-get_noise(pv: ptr, j: int, seed: ptr, seed_off: int, nonce: int, eta: int) {
+get_noise(pv: int[], j: int, seed: ptr, seed_off: int, nonce: int, eta: int) {
     in_buf = bytes.new(SYM + 1)
     i = 0
     while i < SYM {
@@ -837,7 +836,7 @@ get_noise(pv: ptr, j: int, seed: ptr, seed_off: int, nonce: int, eta: int) {
 // ---- Matrix A generation via SHAKE128 rejection sampling ----
 
 // Fill poly a[i][j] (flat) by rejection sampling from SHAKE128(seed || x || y).
-gen_matrix_poly(dest: ptr, dj: int, seed: ptr, x: int, y: int) {
+gen_matrix_poly(dest: int[], dj: int, seed: ptr, x: int, y: int) {
     in_buf = bytes.new(SYM + 2)
     i = 0
     while i < SYM {
@@ -872,13 +871,13 @@ gen_matrix_poly(dest: ptr, dj: int, seed: ptr, x: int, y: int) {
         pos = pos + 3
         if d1 < Q {
             if ctr < N {
-                intarr_set_unchecked(dest, base + ctr, d1)
+                dest[base + ctr] = d1
                 ctr = ctr + 1
             }
         }
         if d2 < Q {
             if ctr < N {
-                intarr_set_unchecked(dest, base + ctr, d2)
+                dest[base + ctr] = d2
                 ctr = ctr + 1
             }
         }
@@ -886,9 +885,9 @@ gen_matrix_poly(dest: ptr, dj: int, seed: ptr, x: int, y: int) {
     bytes.free(buf)
 }
 
-// Generate the k*k matrix into `mat` (flat intarr of N*k*k).
+// Generate the k*k matrix into `mat` (a flat int[] of N*k*k).
 // mat poly (i,j) lives at slot (i*k + j) of N coeffs.
-gen_matrix(mat: ptr, seed: ptr, k: int, transpose: int) {
+gen_matrix(mat: int[], seed: ptr, k: int, transpose: int) {
     i = 0
     while i < k {
         j = 0
@@ -934,7 +933,7 @@ indcpa_keygen(p: *MlkemParams, d: ptr, kp: ptr) {
     bytes.free(gbuf)
 
     // Matrix A (non-transposed)
-    mat = intarr_new_raw(N * k * k)
+    mat = make([]int, N * k * k)
     gen_matrix(mat, rho, k, 0)
 
     skpv = polyvec_new(k)
@@ -970,7 +969,6 @@ indcpa_keygen(p: *MlkemParams, d: ptr, kp: ptr) {
         // pkpv[i] = <A[i], skpv>
         row = mat_row(mat, i, k)
         polyvec_pointwise_acc(pkpv, i, row, skpv, k, scratch)
-        polyvec_free(row)
         poly_to_mont(pkpv, i)
         i = i + 1
     }
@@ -993,32 +991,19 @@ indcpa_keygen(p: *MlkemParams, d: ptr, kp: ptr) {
 
     bytes.free(rho)
     bytes.free(sigma)
-    intarr_free(mat)
+    free(mat)
     polyvec_free(skpv)
     polyvec_free(e)
     polyvec_free(pkpv)
     poly_free(scratch)
 }
 
-// Matrix `mat` is a flat intarr of N*k*k coefficients; poly (i,j) lives at
-// flat slot (i*k + j). Return a freshly-allocated k-poly polyvec copy of row i
-// (slots i*k .. i*k+k-1) so the standard polyvec accessors apply. The caller
-// MUST free the returned polyvec.
-mat_row(mat: ptr, i: int, k: int) -> ptr {
-    rowpv = polyvec_new(k)
-    j = 0
-    while j < k {
-        src_slot = i * k + j
-        sb = src_slot * N
-        db = j * N
-        c = 0
-        while c < 256 {
-            intarr_set_unchecked(rowpv, db + c, intarr_get_unchecked(mat, sb + c))
-            c = c + 1
-        }
-        j = j + 1
-    }
-    return rowpv
+// Matrix `mat` is a flat int[] of N*k*k coefficients; poly (i,j) lives at
+// flat slot (i*k + j), so row i (slots i*k .. i*k+k-1) is one contiguous
+// run: a k-poly polyvec viewing the matrix, no copy. It is a view: the
+// caller does not free it.
+mat_row(mat: int[], i: int, k: int) -> int[] {
+    return mat[i * k * N.. (i * k + k) * N]
 }
 
 // ---- K-PKE encrypt ----
@@ -1042,7 +1027,7 @@ indcpa_encrypt(p: *MlkemParams, pk: ptr, pk_off: int, msg: ptr, msg_off: int, co
     poly_from_msg(kp_pv, 0, msg, msg_off)
 
     // Matrix A transposed
-    mat = intarr_new_raw(N * k * k)
+    mat = make([]int, N * k * k)
     gen_matrix(mat, rho, k, 1)
 
     sp = polyvec_new(k)
@@ -1077,7 +1062,6 @@ indcpa_encrypt(p: *MlkemParams, pk: ptr, pk_off: int, msg: ptr, msg_off: int, co
     while i < k {
         row = mat_row(mat, i, k)
         polyvec_pointwise_acc(bp, i, row, sp, k, scratch)
-        polyvec_free(row)
         i = i + 1
     }
 
@@ -1119,7 +1103,7 @@ indcpa_encrypt(p: *MlkemParams, pk: ptr, pk_off: int, msg: ptr, msg_off: int, co
     }
 
     bytes.free(rho)
-    intarr_free(mat)
+    free(mat)
     polyvec_free(pkpv)
     polyvec_free(kp_pv)
     polyvec_free(sp)

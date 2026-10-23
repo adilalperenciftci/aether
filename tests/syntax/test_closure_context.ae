@@ -13,7 +13,7 @@ create_panel(title: string) {
 }
 
 // add_child adds to the current builder context
-add_child(child: ptr) {
+add_child(child: @keep ptr) {
     parent = builder_context()
     if parent != null {
         list.add(parent, child)

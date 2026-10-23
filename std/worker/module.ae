@@ -78,7 +78,7 @@ exports(
 // and invokes it (on the worker thread for `work`, on the loop thread for
 // `done`) with the emitted fn(env, args...) convention. `ptr` job handles are
 // opaque WorkerJob*.
-extern aether_worker_run(work: @retain fn, done: @retain fn) -> int
+extern aether_worker_run(work: @retain fn, done: @retain fn(@keep ptr)) -> int
 extern aether_worker_run_detached(work: @retain fn) -> int
 extern aether_worker_set_main_poster(poster: @retain fn)
 extern aether_worker_deliver(job: ptr)
@@ -94,7 +94,10 @@ extern aether_worker_pool_shutdown()
 // that result to `done` on the loop thread (through the installed poster, or
 // the drain queue if none). Returns true if the worker launched, false on
 // failure (no threads / out of memory) — on false neither closure runs.
-run(work: @keep fn, done: @keep fn) -> bool {
+// The result is the completion's: `done` takes it `@keep` (#3086), so it may
+// store it (in a list, as `map` does), and a completion that only reads it
+// fits as well.
+run(work: @keep fn, done: @keep fn(@keep ptr)) -> bool {
     return aether_worker_run(work, done) == 1
 }
 
@@ -188,7 +191,7 @@ map(items: ptr, f: @keep fn) -> ptr {
                 let r: ptr = call(f, item)
                 return r
             },
-            | r: ptr | { list.set(out, slot, r) }
+            | r: @keep ptr | { list.set(out, slot, r) }
         )
         i = i + 1
     }

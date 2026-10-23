@@ -288,6 +288,21 @@ Pair[8] pairs                    // an array of structs, by value
 
 The element type may be any type name: a keyword (`int`, `byte`, `long`), one of the unsigned widths (`uint8`, `uint16`, `uint32`, `uint64`) or a struct. The declared element type is what the C carries (`uint16_t hs[3]`), so a value that fits the width is never widened to `int`. A `uint32` prints as itself through `print`, `println`, a `%u` format and `${x}` interpolation (`4000000000`, not `-294967296`).
 
+**The length is an integer constant expression** (#3115): a number in any base the language reads (`byte[0x40]`, `int[1_024]`), a `const` of the same file that holds one, or `+ - * / % << >>` and parentheses over those. A `const` may be declared anywhere in the file, above or below the array, and may itself be built from other constants. The length is at least 1. A name that is not such a constant, a length below 1 and a division by zero are compile errors at the length.
+
+```aether,fragment
+const QWORDS: int = 128     // lanes per 1024-byte block
+const NW = 8
+
+struct SkeinCtx {
+    ks: long[NW + 1]        // the extended key: NW words and their parity
+}
+
+fill(mem: long[]) {
+    long[QWORDS] scratch
+}
+```
+
 **Array-to-pointer decay.** A named fixed-size array decays to a pointer to its first element in pointer context, when assigned to an inferred binding, passed as a `ptr`-typed argument, or compared against a pointer (the same rule C uses):
 
 ```aether,fragment
@@ -323,6 +338,8 @@ main() {
 105 1
 7 0
 ```
+
+**An index into a fixed-size array is checked, as a slice's is.** `a[i]` on a `T[N]` with `i` outside `0 ..< N` is a runtime panic naming the source line, the index and the length (`array index 4 out of range for length 3`), the same ordinary panic a slice index raises: `try` catches it, and a negative index is out of range. The test covers every index into a `T[N]`: a read, a store, `+=` and `++`, through a local, a field, a parameter, an actor's state or a `const` table. An index known when the program is compiled (a literal, a `const`, or arithmetic over them) that is out of range is a compile error. With a constant `N` and a loop bounded by it, the C compiler drops the test.
 
 **An array literal's element type is the join of its elements.** `[1, 2.5, 3]` and `[0.18 * math.PI, 0.25 * math.PI]` are `float` arrays; an all-integer literal is `int`, widening to `long` if any element needs it. The type is decided after every element is typed, so a module constant or a call in any position counts. A literal of another type is an array of its first element's type, or, in a place that is an array of a sum, of that sum, each variant wrapped ([Constructing, implicit wrap](#constructing-implicit-wrap)); `null` and `none` have no type of their own: `[null, s]` is an array of `s`'s type, its `null` the null string, pointer or empty closure as in any slot of that type, and `[none, x]` an array of `x`'s optional type. Every element must fit the element type: `[1, "x"]`, or `[p, null]` with `p` a struct, is a compile error naming the element. Arrays are one-dimensional: an array literal cannot contain an array literal (use a flat `T[rows * cols]` indexed as `row * cols + col`, or a list of arrays).
 
@@ -392,13 +409,13 @@ main() {
 2 2 5
 ```
 
-- **`s.len`** is the element count, an `int`.
-- **`s[i]` is bounds-checked.** An index outside `0 ..< s.len` is a runtime panic naming the source line, the index and the length (`slice index 5 out of range for length 3`). It is an ordinary panic: `try` catches it, and an actor step that trips it dies cleanly. A negative index is out of range, never a read before the buffer.
+- **`s.len`** is the element count, an `int`. It is read, never written: a slice's length is fixed when the slice is made, and an array's is a constant, so `s.len = n` (or `+=`, `++`) is a type error that points at `s[lo..hi]` for fewer elements (#3104). It is the only member a slice or an array has: any other name, `s.length` or `s.size`, is a type error that names `.len` (#3092).
+- **`s[i]` is bounds-checked.** An index outside `0 ..< s.len` is a runtime panic naming the source line, the index and the length (`slice index 5 out of range for length 3`). It is an ordinary panic: `try` catches it, and an actor step that trips it dies cleanly. A negative index is out of range, never a read before the buffer. An index into a fixed-size `T[N]` array is checked the same way, against `N` ([Array Types](#array-types)).
 - **`s[lo..hi]`** is the half-open sub-slice `[lo, hi)`, checked the same way (`lo <= hi <= s.len`). `s[lo..]` runs to the end, `s[..hi]` from the start, `s[..]` is the whole thing. The base may be a slice or a `T[N]` array; the result is always a `T[]` over the *same* elements, so a write through it is visible through the original.
 - **A `T[N]` array converts to `T[]` implicitly** wherever a slice is expected: a parameter, a `T[]`-typed binding or field, a `return` from a `-> T[]` function. The length travels with it. `null`, and the empty literal `[]`, convert to the empty slice: `.len` is `0`, it views no storage, and it compares equal to `null`. So `s == []` is `s == null` (it asks whether `s` views any storage; test `s.len == 0` for emptiness), a C function's `T[]` parameter takes `[]` as the null pointer, and an if-expression or a `match` given to a `T[]` converts each arm on its own. A module-level `var` or `const` of type `T[]` takes either as its initial value.
 - **A string is not a slice.** Passing one where a `T[]` is expected (a parameter, a binding, a `return`) is a type error; `string.bytes(s)` is the bounded, read-only `byte[]` view of a string's bytes, and it decays to their pointer at a C extern like any slice. Reading it costs what any slice's read does; a store through it (an element store, `+=`, `++`), or through any view made from it (a sub-slice, a pattern's tail), in this function or one it is given to, panics with "a write through a read-only view of a string", and one the checker can see through a local bound to it is a compile error (E0200) (#3025). A string's own bytes are read-only too: `s[i]` reads one, and a write (`s[i] = v`, `s[i] += v`, `s[i]++`) is a compile error (E0200). Build the new text as a new string, or work on the bytes in a `byte[N]` array of your own.
 - **A slice decays to its pointer** wherever a `ptr` is expected, exactly as a `T[N]` array does: a `ptr` parameter, a C extern's parameter (including one declared `T[]`), a comparison against `null`, and pointer arithmetic (`s + n` is a `ptr` to element `n`). `s as ptr` spells the same conversion explicitly, for a `ptr` return or binding. The length is dropped at that boundary; nothing else about the extern ABI changes.
-- **`make([]T, n)`** allocates `n` zeroed elements and returns them as a bounded slice; `free(s)` releases them. Only the slice that holds such a buffer, or a view of a raw pointer the program owns from its start (`(p as T[])[0..n]`), may be freed: a view owns nothing. `free` of a sub-slice (`b[2..4]`, `b[1..]`, a list pattern's tail), of an array viewed as a slice, of `string.bytes(s)`, or of an array `T[N]`, is a compile error where the checker sees it (a local bound once to one, or the expression itself), and a named panic at run time anywhere else (`free of a view of elements another slice or an array holds, which owns nothing`). Before, the allocator was given a pointer it never handed out.
+- **`make([]T, n)`** allocates `n` zeroed elements and returns them as a bounded slice; `free(s)` releases them. Only the slice that holds such a buffer, or a view of a raw pointer the program owns from its start (`(p as T[])[0..n]`), may be freed: a view owns nothing. `free` of a sub-slice (`b[2..4]`, `b[1..]`, a list pattern's tail), of an array viewed as a slice, of `string.bytes(s)`, or of an array `T[N]`, is a compile error where the checker sees it (a local bound once to one, or the expression itself), and a named panic at run time anywhere else (`free of a view of elements another slice or an array holds, which owns nothing`). Before, the allocator was given a pointer it never handed out. In a module that defines a `free` of its own (`bignum.free`, `json.free`), `free(s)` of a slice is still this release, unless the module's `free` itself takes a slice: the module's function would only see the slice's pointer (#3116).
 - A slice does not own the storage it views. It is valid for exactly as long as that storage: an array in an enclosing scope, a `make` buffer until its `free`, a C buffer until C reclaims it. The elements are the storage's: a string read out of a `string[]` slice (`t = s[i]`, a return, a field) takes a reference of its own, and a store into an element (`s[i] = v`) takes the new string and releases the one it replaces, as a store into the array itself does. Memory C owns, viewed as `p as string[]`, owns nothing: a store there gives C the characters and takes no reference ([memory-management.md](memory-management.md#ptr-slots)).
 - **A slice of a function's own storage stays in the function** (E0900). An array literal in a slice slot, and a function's own fixed-size array, live in its frame, which ends when the function returns. A slice of either may be used while the function runs and passed down to the functions it calls, but it may not leave the function: returned (alone, in a struct or tuple, or in a closure that captured it), stored in a module-level `var`, or stored in a field of something that may outlive the function: a struct behind a pointer, or a global (a struct value of the function's own may take it, and is then itself such a slice). Each of those is refused at the value that leaves, `'lit' returns a slice of its own storage (an array literal)`. Keep such a slice in storage that lives as long as it: a `make([]T, n)` buffer, a slice the caller passed in, or a module-level array. A slice parameter (`xs: int[]`) views the caller's storage and may be returned; a fixed-size array parameter (`a: int[3]`) is the function's own copy of the caller's array, so a slice of it is a slice of the function's storage. What a name holds where it leaves is what counts, path by path: a local or a field of a local struct re-bound to a `make` buffer before the `return` holds no slice of the frame any more, but one that still holds it on any path to the `return` (an `if` that re-binds it in one branch only, a loop that may `break` before the re-bind) is refused. A call of a closure the function binds (`reset()` after `reset = || { v = make([]int, 4) }`) counts what the closure re-binds for sure: a name of the function it binds on every way through its body before any `return` (both branches of an `if`, every arm of a `match` that covers its value, not a loop's body) holds what the closure gave it after the call. The name is the function's own when the function binds it ahead of the closure, in a block around it, and the closure does not declare one of its own first; a closure bound more than once, or called before it is bound, re-binds nothing that counts. A `try` around such a call starts its handler from what held a slice before any statement of its body ran, or after any. The other way is counted, conservatively: a closure that may store a slice of the function's storage into one of its names (`setview = || { v = arr }`) gives that name a slice from where the closure is written on, whether and whenever it is called, and a store a closure makes through a pointer or into a module-level `var` is judged as the same store written in the function. What the closure stores is judged as the function's own stores are: a fixed-size array of the function or an array literal, a name that holds such a slice at some point of the function, a local of the closure bound to one, or a parameter of the closure it is called with one for (any parameter that can hold a slice, when the closure is passed on or stored). A slice parameter of the function, a `make` buffer, a module-level `var` or `[]` stored by a closure leaves the name as it was. A call's result is taken to be no view of the caller, so a function that hands back the slice it was given is not seen through, in a closure (`v = same(arr)`) or not.
 
@@ -410,6 +427,8 @@ raw = malloc(64)
 view = raw as byte[]            // view.len == -1, view[i] is unchecked
 bytes = view[0..64]             // bytes.len == 64, bytes[i] is checked
 ```
+
+A function that indexes a slice parameter is compiled twice when nothing in it binds that parameter again or takes its address, and it holds no closure (#3029). Its entry tests once whether every such parameter is an unbounded view. If so, a second body runs, where an index of them is the element's address with no test, and the loop around it can vectorize. Otherwise the function's own body runs, with every check. The answer and every bounds check are the same either way. What changes is the cost when the C compiler cannot see where the slice came from (the function is reached through a function value, from another translation unit or a library): there, an index of a view used to test the length sentinel and the bound at every element.
 
 In C the slice is `AetherSlice { void* ptr; uint64_t len; }` (`runtime/aether_slice.h`). A `T[]` parameter or return of an *Aether* function is that struct by value; a `T[]` parameter or return of an `extern` C function, and a `T[]` field of an `extern struct`, stay the bare `T*` C declares. See [c-interop.md](c-interop.md#typed-array-view-expr-as-t) for the boundary rules.
 
@@ -487,6 +506,32 @@ float temperature = 98.6
 ```
 
 Variables are inferred from their initialization or usage context.
+
+**A local declared without a value starts at its type's zero value**: `0` for
+a number, `false`, `null` for a string, a pointer or a closure, `none` for an
+optional, the empty slice, an array of zeros, and a struct whose every field
+is its zero. `long x`, `int[3] k` and `P p` are `x = 0`, three zeros and a
+`P` of zeros, so a read before the first write is defined, and an element a
+filling loop misses is 0. In a loop body each pass declares it afresh, as a
+declaration with a value binds it afresh: what an owning one held is released
+and it is zero again (#3114).
+
+```aether,run
+struct P {
+    a: long
+    w: long[4]
+}
+
+main() {
+    long x
+    int[3] k
+    P p
+    println("${x + k[1] + p.a + p.w[2]}")
+}
+```
+```output
+0
+```
 
 **`let` / `var` are optional keywords**, accepted but not required. Bare Python-style assignment is the canonical form and is what most stdlib code uses. `let x = 10` and `var x = 10` parse identically to `x = 10`. There is no semantic distinction between `let` and `var` Aether is not Rust; mutability is a property of the binding's later use, not its declaration. There is no `mut`: `let mut x = 0` is an error, because a `let` must bind something and `mut` is not a keyword the language has. A typed declaration is written without `let` (`int n = 0`, `Pair p`), so two names after `let` is always a mistake.
 
@@ -895,6 +940,19 @@ the default expression into the call's argument list and rewrites
 any embedded `__LINE__` / `__FILE__` / `__func__` to use the call
 site's metadata.
 
+### Calling a function value
+
+Parentheses after any expression whose value is a function call it: a
+local (`g(3)`), a field (`h.cb(2)`, `hs[0].cb()`), an element (`fs[i](x)`),
+or another call's result (`make_adder(5)(2)`). `call(f, args)` is the same
+call written out. The callee is evaluated once, before the arguments
+(`fs[pick()](3)` calls `pick` once), and held for the length of its call,
+so a function that rebinds the element or field it was read from runs to
+its end. A callee whose value is not a function is a type error, "the value
+called here is not a function", naming its type (#3099). A typed function
+pointer (`fn(int) -> int`, a `cfn` type) is called the same way, from a
+local, a parameter, a field, an element or a result.
+
 ### Trailing blocks
 
 A call can be followed, on the same line as its `)`, by one of four blocks:
@@ -1060,7 +1118,9 @@ n7
 
 A clause set is one function with one result, decided over every clause. A
 clause that writes a type gives it, and what every other clause returns must
-fit it. With none written, the result is the join of what the clauses return,
+fit it, as a binding fits a local's written type: a literal fits when the type
+holds its value (`g(0) -> 5` beside `g(k) -> uint8 { ... }`; `300` does not).
+With none written, the result is the join of what the clauses return,
 as an [if-expression](#if-expressions)'s branches join:
 `pick(0, s: int, b: long) -> s` beside `pick(k, s: int, b: long) -> b`
 returns a `long`, a clause that returns `0` beside one that returns a
@@ -1204,9 +1264,28 @@ for (i = 0; i < 10; i = i + 1) {
 }
 ```
 
-The variable the init binds is the loop's, from the condition through the body
-to the end of the loop: a binding of its name in the body assigns it, so a loop
-can step its variable there, and after the loop the name is free to bind again.
+A bare init (`i = 0`) is the binding `i = 0` is anywhere. When the name is
+already bound where the loop is (a local, a module-level `var`, an actor's
+state field), it assigns that variable, which holds the value the loop ends
+with:
+
+```aether,run
+main() {
+    i = 5
+    for (i = 0; i < 3; i++) {
+    }
+    println(i)
+}
+```
+```output
+3
+```
+
+For a new name it declares the loop's own variable, from the condition through
+the body to the end of the loop: a binding of its name in the body assigns it,
+so a loop can step its variable there, and after the loop the name is free to
+bind again. A typed init (`for (int i = 0; ...)`) and a range-for's variable
+always declare the loop's own, shadowing a binding of the name (#2734).
 
 ```aether,run
 main() {
@@ -1284,7 +1363,7 @@ for i in 1..n {
 }
 ```
 
-The range `start..end` is exclusive of `end` (like Python's `range(start, end)`). It desugars to a C-style for loop internally.
+The range `start..end` is exclusive of `end` (like Python's `range(start, end)`). It desugars to a C-style for loop internally. Its variable is the loop's own, a new one even where the name is bound outside the loop.
 
 ### Loop Control
 
@@ -2033,6 +2112,8 @@ downstream triage match on it, so it does not change with the prose after it.
 | `precondition_violation` | a `requires` clause that evaluated false |
 | `postcondition_violation` | an `ensures` clause that evaluated false |
 | `forced_unwrap_none` | `x!` on an optional holding `none` |
+| `empty_closure_call` | a call through the empty closure (a closure slot or a `fn?` holding `null`) |
+| `null_function_call` | a call through a typed function pointer (`fn(int) -> int`, a `cfn` type) holding `null` |
 
 A failure that forwards an existing error value (`expr!` on a fallible) prints
 that error's own message rather than a category, because the message came from
@@ -2110,8 +2191,8 @@ Every place that holds a string (a local, a struct field, an element, a module-l
 - **A function may not free a parameter** (E0901): `string.free(p)` or `release(p)` on a `string` parameter, or `string.seq_free(p)` on a `*StringSeq` one, would release a reference the function does not own. Store it to keep it; a parameter the body re-binds holds a string of its own and may be freed.
 - **`string.free(x)` releases the reference `x` holds and leaves `x` empty**, for a local, a field or a module-level `var`. Nothing frees it again.
 
-- **A `ptr` parameter is borrowed for the call unless it is declared `@keep`** (E0902). A `ptr` owns nothing, so a pointer a function keeps (stores where it outlives the call, returns, sends in a message, or passes to another `@keep` parameter) is declared `p: @keep ptr`; a pointer computed from it (`p + n`, `p - n`) points into the same memory and counts as `p`. A struct local to the function, and a closure that runs and is dropped inside the call, do not outlive it: putting the pointer in one (`s = Pair { a: p }`, `s.a = p`, `run(|| { use(p) })`) keeps nothing, and the struct or the closure is a keep only when it escapes itself, returned, stored in a field, a module-level `var` or a container, or passed to a `@keep` or `@retain` parameter. A tuple (`t = (p, 1)`), an optional, and anything read out of a holder (a field, a tuple part, an optional's payload `o!` or `o ?? d`, a `match` binding) hold it the same way, except that a part of a tuple or a field of a struct built from parts holds only what went into that part or field (after `t = (p, q)` and `a, b = t`, `b` holds `q` and not `p`; after `s = Pair { a: p, b: q }` or `s.b = q`, `s.b` holds `q`), and so does what a closure that captured it returns (`call(f)`). A closure that captured the pointer and stores it somewhere that outlives the call keeps it too, and so does one that reads it through an address of a local, or a local a closure assigns, stored there after the closure was written: it is checked where it is called or passed (`g = || { kept = pb.item }`, `b.item = p`, `call(g)`). The checker verifies each function against its own body, and a call against the callee's signature; a loop's body is checked with what every pass through it binds, so `kept = q` placed before `q = p` in a loop keeps `p`, unless the body first binds `q` anew (`q = list.new()`). A `string` reaches a `@keep ptr` only through `string.keep(s)`, which hands over a reference of its own (`string.release_kept(p)` gives it back), or as a literal or a `const` bound to one, which is pinned, and a `*StringSeq` only through `string.seq_retain(s)` (`string.seq_free` gives it back). C memory viewed as `string[]` (`(names as string[])[i] = s`) is given the string's characters and no reference, so the string must outlive C's reads: a string built in the statement never does, and a local does only when the memory ends with the function (an argv array the function allocates, hands to C and does not let escape). Memory that outlives the function (reached through a parameter, a module-level `var`, a field or a heap box, or whose pointer is returned or stored) takes `(names as ptr[])[i] = string.keep(s)`, given back with `string.release_kept` where the memory is freed, and refuses any other string but a literal or a `const` bound to one. A closure's `ptr` parameter borrows unless it is declared `@keep` (`|el: @keep ptr, t: float|`), and the mode is part of a function's type, `fn(@keep ptr, float)`: a call through a value of that type is checked as a direct call is, and a function goes only where its type says what it keeps, never into a bare `fn`, a `ptr` or a typed C function pointer, whose parameters borrow ([Closure types that say what they keep](#closure-types-that-say-what-they-keep-fnkeep-ptr-float)). A typed pointer (`*Node`) and a `distinct` type over `ptr` are not checked: a string converts to neither.
-- **A `fn` parameter, and a struct parameter taken by value that holds a `ptr` or a closure, are borrowed the same way** (E0902). A closure may capture a borrowed `ptr` of its caller, and a struct's `ptr` field points at the caller's memory, so a function that keeps such a parameter (stores it where it outlives the call, boxes it there with `box_closure`, puts it in a container, or passes it to a parameter that keeps it) declares it `@keep`: `on_event(cb: @keep fn)`, `register(h: @keep Handler)`. The function's own body is checked, as for a `ptr` parameter, and a caller is then checked against the declaration: a closure that captures a borrowed `ptr`, given to a `@keep fn` parameter, is E0902 at the caller. A closure the function only calls, or hands to a borrowing parameter (`run(|| { use(p) })`), keeps nothing, and neither does handing the parameter back with `return`. A store into memory the function allocates and frees (an array it hands to C) keeps nothing either, for any parameter. The declaration changes no count: the call borrows the closure as every call does, and the callee's store takes its own reference.
+- **A `ptr` parameter is borrowed for the call unless it is declared `@keep`** (E0902). A `ptr` owns nothing, so a pointer a function keeps (stores where it outlives the call, returns, sends in a message, puts in a std container, or passes to another `@keep` parameter) is declared `p: @keep ptr`; a pointer computed from it (`p + n`, `p - n`) points into the same memory and counts as `p`. A struct local to the function, and a closure that runs and is dropped inside the call, do not outlive it: putting the pointer in one (`s = Pair { a: p }`, `s.a = p`, `run(|| { use(p) })`) keeps nothing, and the struct or the closure is a keep only when it escapes itself, returned, stored in a field, a module-level `var` or a container, or passed to a `@keep` or `@retain` parameter. A tuple (`t = (p, 1)`), an optional, and anything read out of a holder (a field, a tuple part, an optional's payload `o!` or `o ?? d`, a `match` binding) hold it the same way, except that a part of a tuple or a field of a struct built from parts holds only what went into that part or field (after `t = (p, q)` and `a, b = t`, `b` holds `q` and not `p`; after `s = Pair { a: p, b: q }` or `s.b = q`, `s.b` holds `q`), and so does what a closure that captured it returns (`call(f)`). A closure that captured the pointer and stores it somewhere that outlives the call keeps it too, and so does one that reads it through an address of a local, or a local a closure assigns, stored there after the closure was written: it is checked where it is called or passed (`g = || { kept = pb.item }`, `b.item = p`, `call(g)`). The checker verifies each function against its own body, and a call against the callee's signature; a loop's body is checked with what every pass through it binds, so `kept = q` placed before `q = p` in a loop keeps `p`, unless the body first binds `q` anew (`q = list.new()`). A `string` reaches a `@keep ptr` only through `string.keep(s)`, which hands over a reference of its own (`string.release_kept(p)` gives it back), or as a literal or a `const` bound to one, which is pinned, and a `*StringSeq` only through `string.seq_retain(s)` (`string.seq_free` gives it back). C memory viewed as `string[]` (`(names as string[])[i] = s`) is given the string's characters and no reference, so the string must outlive C's reads: a string built in the statement never does, and a local does only when the memory ends with the function (an argv array the function allocates, hands to C and does not let escape). Memory that outlives the function (reached through a parameter, a module-level `var`, a field or a heap box, or whose pointer is returned or stored) takes `(names as ptr[])[i] = string.keep(s)`, given back with `string.release_kept` where the memory is freed, and refuses any other string but a literal or a `const` bound to one. A closure's `ptr` parameter borrows unless it is declared `@keep` (`|el: @keep ptr, t: float|`), and the mode is part of a function's type, `fn(@keep ptr, float)`: a call through a value of that type is checked as a direct call is, and a function goes only where its type says what it keeps, never into a bare `fn`, a `ptr` or a typed C function pointer, whose parameters borrow ([Closure types that say what they keep](#closure-types-that-say-what-they-keep-fnkeep-ptr-float)). A typed pointer (`*Node`) and a `distinct` type over `ptr` are not checked: a string converts to neither.
+- **A `fn` or `fn?` parameter, and a struct or sum parameter taken by value that holds a `ptr` or a closure (in a field or a variant, or an optional of one), are borrowed the same way** (E0902). A closure may capture a borrowed `ptr` of its caller, and a struct's `ptr` field points at the caller's memory, so a function that keeps such a parameter (stores it where it outlives the call, boxes it there with `box_closure`, puts it in a container, or passes it to a parameter that keeps it) declares it `@keep`: `on_event(cb: @keep fn)`, `register(h: @keep Handler)`. What a call keeps is read from the callee's declaration, never from the name it spells: std's list and map stores (`list.add`, `list.set`, `map.put`, their raw forms and their `collections.` spellings) declare the item `@retain` at the C boundary, so they keep it, and a program's own `list_add` keeps what its own body keeps. The function's own body is checked, as for a `ptr` parameter, and a caller is then checked against the declaration: a closure that captures a borrowed `ptr`, given to a `@keep fn` parameter, is E0902 at the caller. A closure the function only calls, or hands to a borrowing parameter (`run(|| { use(p) })`), keeps nothing, and neither does handing the parameter back with `return`. A store into memory the function allocates and frees (an array it hands to C) keeps nothing either, for any parameter, and neither does one into a std container the function makes (`list.new()`, `map.new()`) and lets go nowhere: the stores name the container that holds what they keep (`@holds`), and a list a function makes, uses and frees, or hands only to functions that borrow it, ends with the function. A container that is a parameter, a field or a module-level `var`, or that is returned or stored, keeps it past the call. The declaration changes no count: the call borrows the closure as every call does, and the callee's store takes its own reference.
 - **A `ptr` parameter declared `@into` may reach the function's result and nowhere else** (E0902). A function that builds a value around its argument (a recorder, an iterator, a view) declares `p: @into ptr` and may `return` it, as the pointer, a view of it (`p as *Node`, `p + n`), in a struct, a tuple part or an optional, in a closure that captures it, or in the result of another `@into` call; any other escape is E0902 as for a borrowed parameter. Its result type must be able to hold a pointer (a pointer, a function, or a struct, tuple, optional, array or sum with such a part), and only a bare `ptr` takes `@into`. The caller holds the result as it holds a struct local that holds its argument: the result may live in a local, be read and be lent to borrowing parameters (`(&q) as ptr`), and it escapes, with the argument, only where the argument itself would (returned, stored in a module-level `var`, a field through a pointer or a container, sent, captured by a closure that escapes, given to a `@keep` or `@retain` parameter). With several `@into` parameters the result holds every one of them. A function that returns another `@into` call's result made from its own parameter declares that parameter `@into` too, and its callers are checked the same way. A string reaches an `@into ptr` only through `string.keep(s)` (or as a literal or a `const` bound to one), a closure given to one is boxed on the heap with a reference of its own (`release_closure` gives it back), and `@into` is part of a function's type as `@keep` is (`fn(@into ptr) -> Recorder`): a call through such a value holds its result to the same rule. An extern's parameter may be `@into` too ([`@retain`, `@noescape` and `@into`](#retain-noescape-and-into-what-an-extern-does-with-a-parameter)).
 
 ```aether,run
@@ -2255,6 +2336,41 @@ hi
 ```
 
 std and contrib declare the parameters they keep: `worker.run`, `run_detached`, `set_main_poster` and `map`, `observe.observe` and `observe_fields`, `schema.refine`, `spec.before_each` and `after_each`, `quickjs.function`, and tinyweb's route, filter, websocket, SSE and `on_*` registrations. A closure that captures a borrowed `ptr`, given to one of them, is E0902 where it is given: copy what it needs, or declare the `ptr` `@keep` too.
+
+#### Migrating from 0.838
+
+What a call keeps is read from the callee's declaration (#3086). std's list and map stores declare their item `@retain` at the C boundary: `list.add`, `list.add_raw`, `list.set`, `map.put` and `map.put_raw`, and their `collections.` spellings, which are now externs over C functions of the same names with the same results. `string.seq_cons` declares its head and its tail `@retain` too. So a borrowed `ptr` parameter put in a list or a map is E0902, as storing it in a module-level `var` is. On 0.838.0 only a closure or a struct that held one was checked there, and the pointer itself outlived the call in the container. Declare the parameter `@keep`, or store a copy. A list or a map the function makes itself (`list.new()`, `map.new()`) and lets go nowhere is no such place: a borrowed `ptr` stored in it, as a worklist or a chain of the caller's lists, keeps nothing past the call. A string, a literal or a closure of the function's own is handed a reference of its own, as before.
+
+```aether,fails
+import std.list
+
+var seen: ptr = null
+remember(p: ptr) { _r = list.add(seen, p) }        // E0902: the list keeps `p`
+
+main() {
+    seen = list.new()
+    remember(null)
+}
+```
+
+```aether,run
+import std.list
+
+var seen: ptr = null
+remember(p: @keep ptr) { _r = list.add(seen, p) }  // the parameter says it is kept
+
+main() {
+    seen = list.new()
+    remember(null)
+    println(list.size(seen))
+}
+```
+
+```output
+1
+```
+
+A store that copies what it is given keeps nothing: a map's key, a set's item. `@scoped` reads the same declarations: a `@scoped` value given to a parameter that keeps it escapes its block ("it is passed to a parameter that keeps it"), as one given to `list.add`, `map.put` or `string.seq_cons` (head or tail) does, and one given to `set.add`, which copies it, does not.
 
 ---
 
@@ -3683,7 +3799,22 @@ the argument only during the call, neither storing it, handing it to another
 thread, nor freeing it. It is accepted on `ptr` and `fn` parameters. The std
 externs that keep a closure are declared `@retain`: `observe`, the worker
 pool's jobs and main-thread poster, and the HTTP server's route, SSE and
-WebSocket handlers.
+WebSocket handlers. So are the stores that keep what they are given (#3086):
+the item of std's list and map stores (`list.add`, `list.add_raw`,
+`list.set`, `map.put`, `map.put_raw`), and the head and the tail of
+`string.seq_cons`. A `*StringSeq` given to an `@retain` parameter is handed
+a reference of its own as a string is: a fresh one as it is, a place's
+retained. What a call keeps is read from these declarations: a borrowed
+`ptr` given to one is E0902, and a `@scoped` value given to one escapes.
+
+A store names the argument that holds what it keeps with `@holds` on that
+`ptr` parameter (std's list and map stores, their container), and an extern
+whose result is memory the call allocates, which nothing else holds, says so
+with `@fresh` after its result type (`list_new() -> ptr @fresh`, std's list
+and map constructors). A keep through a store then outlives the caller only
+when the holder does: a local bound only from `@fresh` calls that goes
+nowhere a borrowed `ptr` would escape to ends with the function, so a
+borrowed `ptr` stored in it keeps nothing past the call.
 
 `@into` on a `ptr` parameter says the C function's result points into or
 holds the argument, and keeps it nowhere else. The compiler cannot read C,
@@ -3827,11 +3958,13 @@ reduce(f: fn(int, int) -> int, x: int, y: int) -> int {
 
 Pass an Aether function's address with the `as fn(...)` cast, `walk(my_handler as fn(ptr, ptr) -> void, p, q)` or a C function pointer obtained from an extern. A `string` argument reaches the callee as its bytes: the call wraps it in `aether_string_data(arg)`, as a call to an extern does, so a heap string (interpolated, concatenated) arrives as its characters and not as its `AetherString` header. This holds for every typed-pointer call: a `fn(...)` parameter, a cast local (`f = p as fn(uint32, string) -> int; f(7, name)`) and a function-pointer struct field. A closure cannot go there (it carries an environment, and a C function pointer has none), and the compiler says so at the call (`a closure cannot be passed as a typed function pointer`); a callback that may be a closure takes a bare `fn` parameter and is invoked with `call(cb, …)`, or, when it keeps a `ptr` it is given, a [closure type that says so](#closure-types-that-say-what-they-keep-fnkeep-ptr-float). This is the parameter form of the same typed-fn-pointer machinery used by `as fn(...)` locals and function-pointer struct fields; the prototype matches the C signature exactly (needed for callback APIs like `qsort`, `dictScan`, signal handlers, libcurl/sqlite hooks).
 
-A named Aether function bound to a typed function pointer is its address there too, without the cast: an argument to such a parameter, a struct or message field of that type, a `let` local of it, a module-level `var` (its initializer, and an assignment to it in a function body) or `const` (`const CB: fn(int) -> string = label`, called `CB(1)`), and a function's result. The signature is checked: the parameter types must match, and so must the result, where `fn(ptr, int)` and `fn(ptr, int) -> void` are the same type.
+A named Aether function bound to a typed function pointer is its address there too, without the cast: an argument to such a parameter, a struct or message field of that type, a `let` local of it, a module-level `var` (its initializer, and an assignment to it in a function body) or `const` (`const CB: fn(int) -> string = label`, called `CB(1)`), an element of an array literal going into an array of that type (`let ops: Op[2] = [twice, half]`, a field, an argument, a result), and a function's result, or a part of a tuple result of that type. The signature is checked: the parameter types must match, and so must the result, where `fn(ptr, int)` and `fn(ptr, int) -> void` are the same type.
 
 A closure cannot be stored in any of those slots, as it cannot be passed to the parameter: a closure literal, or a local bound to one, given to a struct field, an array element, a local, a module-level `var` or a function result of a typed function pointer type is a type error naming the field or variable. Store a named function there, or declare the slot a bare `fn` and call it with `call(...)`.
 
 A typed function pointer's own parameter can be a typed function pointer, `fn(fn(string) -> string, string) -> string`, and a function with that parameter fits it.
+
+A call through a typed function pointer that holds `null` panics at the call with the category `null_function_call` and the call's source position ([Panic categories](#panic-categories)), which a `catch` receives, as a call through the empty closure does (#3098).
 
 A call through a typed function pointer converts a slice argument as a direct call does: `[]` and `null` become the empty slice, and an array a view of its elements (#2856). A closure whose signature the compiler knows converts its arguments the same way, an optional's bare value and `none` included.
 
@@ -3904,7 +4037,12 @@ wherever a closure goes: a binding, a field, an argument, a result, an
 element of an array literal (`[f, null]`, `[null, f]`), a part of a tuple
 literal, a module-level `var`, the default of `??`. A `fn?` given `null`
 holds the empty closure, as a `ptr?` given `null` holds a null pointer: it
-is not `none`, and `o == null` is true. A closure compares only with
+is a present value, not `none`, so `o == null` is true, a `match` runs its
+`some` arm and `o!` gives the empty closure; `none` is the absence of any
+closure. A call through the empty closure, however it was reached, panics
+at the call with the category `empty_closure_call` and the call's source
+position ([Panic categories](#panic-categories)), which a `catch`
+receives. A closure compares only with
 `null`: `f == g` between two closures, or a closure and a pointer, is a
 compile error, and so is one between two `fn?` or a `fn?` and a closure
 (Go's rule for function values). The same

@@ -720,7 +720,7 @@ fn decode_san_dnsnames(octet_content: @keep ptr, out: *LeafCert) {
             if alen == 4 || alen == 16 {
                 ip = bytes.new(alen)
                 bytes.copy_from_bytes(ip, 0, name_content, 0, alen)
-                list_add_raw(out.ip_addrs, ip)
+                list.add(out.ip_addrs, ip)
             }
         }
         if tag == 0x82 {
@@ -736,7 +736,7 @@ fn decode_san_dnsnames(octet_content: @keep ptr, out: *LeafCert) {
                 nm = bytes.new(nlen)
                 if nlen > 0 { bytes.set(nm, nlen - 1, 0) }
                 bytes.copy_from_bytes(nm, 0, name_content, 0, nlen)
-                list_add_raw(out.dns_names, nm)
+                list.add(out.dns_names, nm)
             }
         }
         bytes.free(name_content)
@@ -779,7 +779,7 @@ leaf_dns_name(c: *LeafCert, i: int) -> ptr {
     if c.dns_names == null { return null }
     if i < 0 { return null }
     if i >= list_size(c.dns_names) { return null }
-    return list_get_raw(c.dns_names, i) as ptr
+    return list.at(c.dns_names, i) as ptr
 }
 
 // Free every owned buffer/string in a parsed LeafCert.
@@ -797,7 +797,7 @@ free_leaf(c: *LeafCert) {
         n = list_size(c.dns_names)
         i = 0
         while i < n {
-            e = list_get_raw(c.dns_names, i) as ptr
+            e = list.at(c.dns_names, i) as ptr
             bytes.free(e)
             i = i + 1
         }
@@ -807,7 +807,7 @@ free_leaf(c: *LeafCert) {
         m = list_size(c.ip_addrs)
         j = 0
         while j < m {
-            a = list_get_raw(c.ip_addrs, j) as ptr
+            a = list.at(c.ip_addrs, j) as ptr
             bytes.free(a)
             j = j + 1
         }
@@ -1019,7 +1019,7 @@ check_hostname(c: *LeafCert, host: string) -> string {
         hit = 0
         i4 = 0
         while i4 < n4 {
-            cand = list_get_raw(c.ip_addrs, i4) as ptr
+            cand = list.at(c.ip_addrs, i4) as ptr
             if cand != null {
                 if bytes.length(cand) == 4 {
                     same = 1
@@ -1043,7 +1043,7 @@ check_hostname(c: *LeafCert, host: string) -> string {
     if n == 0 { return "certificate has no subjectAltName dNSNames" }
     i = 0
     while i < n {
-        nm = list_get_raw(c.dns_names, i) as ptr
+        nm = list.at(c.dns_names, i) as ptr
         if nm != null {
             plen = bytes.length(nm)
             if dnsname_matches(nm, plen, host, hlen) == 1 { return "" }
@@ -1644,7 +1644,7 @@ chain_verify(leaf: *LeafCert, anchors: ptr) -> string {
     if n == 0 { return "no trust anchors" }
     i = 0
     while i < n {
-        a = list_get_raw(anchors, i) as *LeafCert
+        a = list.at(anchors, i) as *LeafCert
         if a != null {
             if dn_equal(bytes.view(leaf.issuer)[0..leaf.issuer_len], bytes.view(a.subject)[0..a.subject_len]) == 1 {
                 if verify_cert_signature(leaf, a) == 1 {
@@ -1663,7 +1663,7 @@ fn chains_to_anchor(cert: *LeafCert, anchors: ptr) -> int {
     n = list_size(anchors)
     i = 0
     while i < n {
-        a = list_get_raw(anchors, i) as *LeafCert
+        a = list.at(anchors, i) as *LeafCert
         if a != null {
             if dn_equal(bytes.view(cert.issuer)[0..cert.issuer_len], bytes.view(a.subject)[0..a.subject_len]) == 1 {
                 if verify_cert_signature(cert, a) == 1 {
@@ -1710,8 +1710,8 @@ chain_verify_path(leaf: *LeafCert, intermediates: ptr, anchors: ptr) -> string {
                     if idx < 0 {
                         walking = 0
                     } else {
-                        list_add_raw(used, list_get_raw(intermediates, idx))
-                        current = list_get_raw(intermediates, idx) as *LeafCert
+                        list.add(used, list.at(intermediates, idx))
+                        current = list.at(intermediates, idx) as *LeafCert
                         depth = depth + 1
                     }
                 }
@@ -1730,7 +1730,7 @@ fn find_issuer_unused(cert: *LeafCert, intermediates: ptr, used: ptr) -> int {
     n = list_size(intermediates)
     i = 0
     while i < n {
-        m = list_get_raw(intermediates, i) as *LeafCert
+        m = list.at(intermediates, i) as *LeafCert
         if m != null {
             if is_in_list(intermediates, i, used) == 0 {
                 if dn_equal(bytes.view(cert.issuer)[0..cert.issuer_len], bytes.view(m.subject)[0..m.subject_len]) == 1 {
@@ -1754,7 +1754,7 @@ find_issuer_cert(leaf: *LeafCert, intermediates: ptr, anchors: ptr) -> ptr {
         n = list_size(intermediates)
         i = 0
         while i < n {
-            m = list_get_raw(intermediates, i) as *LeafCert
+            m = list.at(intermediates, i) as *LeafCert
             if m != null {
                 if dn_equal(bytes.view(leaf.issuer)[0..leaf.issuer_len], bytes.view(m.subject)[0..m.subject_len]) == 1 {
                     if verify_cert_signature(leaf, m) == 1 { return m as ptr }
@@ -1767,7 +1767,7 @@ find_issuer_cert(leaf: *LeafCert, intermediates: ptr, anchors: ptr) -> ptr {
         an = list_size(anchors)
         j = 0
         while j < an {
-            a = list_get_raw(anchors, j) as *LeafCert
+            a = list.at(anchors, j) as *LeafCert
             if a != null {
                 if dn_equal(bytes.view(leaf.issuer)[0..leaf.issuer_len], bytes.view(a.subject)[0..a.subject_len]) == 1 {
                     if verify_cert_signature(leaf, a) == 1 { return a as ptr }
@@ -1781,11 +1781,11 @@ find_issuer_cert(leaf: *LeafCert, intermediates: ptr, anchors: ptr) -> ptr {
 
 // Is the intermediate at index `idx` (by stored pointer) already in `used`?
 fn is_in_list(intermediates: ptr, idx: int, used: ptr) -> int {
-    target = list_get_raw(intermediates, idx)
+    target = list.at(intermediates, idx)
     un = list_size(used)
     j = 0
     while j < un {
-        if list_get_raw(used, j) == target { return 1 }
+        if list.at(used, j) == target { return 1 }
         j = j + 1
     }
     return 0
@@ -1836,10 +1836,9 @@ trust_store_add(anchors: ptr, path: string) -> (int, string) {
     if fs.dir_exists(path) == 1 {
         return add_pem_dir(anchors, path)
     }
-    fh = fs.file_open_raw(path, "r")
-    if fh == null { return 0, "cannot open trust store ${path}" }
-    text = fs.file_read_all_raw(fh)
-    fs.file_close(fh)
+    // fs.read's error already names the path and the OS reason.
+    text, err = fs.read(path)
+    if string.equals(err, "") != 1 { return 0, "cannot open trust store ${err}" }
     return add_pem_text(anchors, text), ""
 }
 
@@ -1854,8 +1853,8 @@ trust_store_add_pem(anchors: ptr, text: string) -> int {
 
 // Every file directly inside `dir`, through add_pem_text.
 fn add_pem_dir(anchors: ptr, dir: string) -> (int, string) {
-    entries = fs.dir_list_raw(dir)
-    if entries == null { return 0, "cannot list trust store directory ${dir}" }
+    entries, lerr = fs.list_dir(dir)
+    if string.equals(lerr, "") != 1 { return 0, "cannot list trust store directory ${dir}" }
     total = 0
     count = fs.dir_list_count(entries)
     i = 0
@@ -1867,12 +1866,10 @@ fn add_pem_dir(anchors: ptr, dir: string) -> (int, string) {
         // 0 is "the filesystem did not say", so it is tried too.
         if kind != fs.STAT_KIND_DIR && string.starts_with(name, ".") != 1 {
             full = fs.path_join(dir, name)
-            fh = fs.file_open_raw(full, "r")
-            if fh != null {
-                text = fs.file_read_all_raw(fh)
-                fs.file_close(fh)
-                if text != null { total = total + add_pem_text(anchors, text) }
-            }
+            // A file that cannot be read (a dangling link, no permission) is
+            // skipped, as OpenSSL's directory lookup skips it.
+            text, rerr = fs.read(full)
+            if string.equals(rerr, "") == 1 { total = total + add_pem_text(anchors, text) }
         }
         i = i + 1
     }
@@ -1901,7 +1898,7 @@ fn add_pem_text(anchors: ptr, text: string) -> int {
                 dlen = bytes.length(der)
                 cerr = parse_certificate(bytes.view(der)[0..dlen], leaf)
                 if string.equals(cerr, "") == 1 {
-                    list_add_raw(anchors, leaf)
+                    list.add(anchors, leaf)
                     added = added + 1
                 } else {
                     free_leaf(leaf)
@@ -1943,7 +1940,7 @@ free_anchors(anchors: ptr) {
     n = list_size(anchors)
     i = 0
     while i < n {
-        a = list_get_raw(anchors, i) as *LeafCert
+        a = list.at(anchors, i) as *LeafCert
         if a != null {
             free_leaf(a)
             free(a)

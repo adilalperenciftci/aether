@@ -1,0 +1,103 @@
+// Regression (#3117): which loops batch their sends, and what a batch keeps.
+//
+// The compiler opened a send batch around every `while` loop that sent, so
+// a loop that waited between sends held its messages until it ended, a
+// message with a payload went around the batch and overtook the one-int ones
+// sent before it, and an inner loop's batch emptied the outer one's, losing
+// its messages. Now only a loop that cannot wait between its sends is
+// batched, every send in it joins the batch, and an inner loop joins the
+// outer loop's. A loop a labeled `break` can leave is not batched: the
+// break jumps past the end where the batch is sent.
+
+extern exit(code: int)
+
+message Add { n: int }
+message Note { n: int, tag: string }
+
+actor Sum {
+    state count = 0
+    state last = -1
+    state in_order = 1
+    receive {
+        Add(n) -> {
+            count = count + 1
+            if n != last + 1 { in_order = 0 }
+            last = n
+        }
+        Note(n, tag) -> {
+            count = count + 1
+            if n != last + 1 { in_order = 0 }
+            last = n
+        }
+    }
+}
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL #3117: ${msg}")
+        exit(1)
+    }
+}
+
+main() {
+    // A loop that waits between sends: each one is delivered as it goes.
+    c = spawn(Sum())
+    i = 0
+    while i < 3 {
+        c ! Add { n: i }
+        wait_for_idle()
+        check(c.count == i + 1, "a waiting loop's send ${i} was held: ${c.count} handled")
+        i = i + 1
+    }
+
+    // A batched loop of one-int and payload messages keeps their order.
+    m = spawn(Sum())
+    i = 0
+    while i < 40 {
+        if i % 2 == 0 {
+            m ! Add { n: i }
+        } else {
+            m ! Note { n: i, tag: "odd" }
+        }
+        i = i + 1
+    }
+    wait_for_idle()
+    check(m.count == 40, "the mixed loop delivered ${m.count} of 40")
+    check(m.in_order == 1, "a payload message overtook a one-int one")
+
+    // An inner loop joins the outer loop's batch, which loses nothing.
+    a = spawn(Sum())
+    b = spawn(Sum())
+    i = 0
+    while i < 10 {
+        a ! Add { n: i }
+        j = 0
+        while j < 2 {
+            b ! Add { n: i * 2 + j }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    wait_for_idle()
+    check(a.count == 10, "the outer loop's messages: ${a.count} of 10")
+    check(b.count == 20, "the inner loop's messages: ${b.count} of 20")
+
+    // An inner loop that sends and leaves the outer one with `break outer`.
+    // Nothing flushes after it (wait_for_idle would), so the messages must
+    // have gone as they were sent.
+    d = spawn(Sum())
+    k = 0
+    outer: while k < 3 {
+        check(k == 0, "the labeled break did not leave the outer loop")
+        j = 0
+        while j < 10 {
+            d ! Add { n: j }
+            if j == 4 { break outer }
+            j = j + 1
+        }
+        k = k + 1
+    }
+    sleep(500)
+    check(d.count == 5, "a loop left by a labeled break kept ${5 - d.count} of 5 messages")
+    println("PASS #3117: loops batch only what cannot wait, in order, nothing lost")
+}

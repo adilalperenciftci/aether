@@ -1413,6 +1413,7 @@ test-ae: compiler ae stdlib
 	@# A bad AE_SWEEP_SHARD (#2757) must fail here: inside the pipelines below
 	@# it would leave the sweep with nothing to run, and nothing reads as a pass.
 	@sh tests/scripts/sweep_shard.sh < /dev/null
+	@rm -f $(BUILD_DIR)/test-ae.verdict
 	@tmpdir=$$(mktemp -d); \
 	root=$$(pwd); \
 	script="$$root/tests/scripts/run_ae_test.sh"; \
@@ -1478,8 +1479,12 @@ test-ae: compiler ae stdlib
 	fi; \
 	sh "$$root/tests/scripts/sweep_timings.sh" "$$tmpdir"; \
 	echo "Aether Tests: $$passed passed, $$failed failed, $$skipped skipped, $$total total"; \
+	printf '%s %s %s %s\n' "$$passed" "$$failed" "$$skipped" "$$total" > "$$root/$(BUILD_DIR)/test-ae.verdict"; \
 	rm -rf "$$tmpdir"; \
 	if [ "$$failed" -gt 0 ]; then exit 1; fi
+	@# A shell that stopped before its tally can still leave make with status
+	@# 0: only a written tally with no failure is a pass.
+	@sh tests/scripts/sweep_verdict.sh $(BUILD_DIR)/test-ae.verdict
 endif
 
 # Install smoke test: installs to a temp dir, runs ae init + ae run, cleans up
@@ -2547,8 +2552,6 @@ install: $(VERSION_HEADER) release-build ae stdlib
 #                                runtime needs the factor-language fork)
 #   - host/aether               (fork+exec sandboxed child via LD_PRELOAD;
 #                                libc + in-tree sandbox runtime only)
-#   - tinyweb                   (libc only — SHA-1 + base64 for WebSocket
-#                                handshake; no third-party dep)
 # Out of scope for v1: host/{java,go} (separate-process or JNI-style
 # bridges, different build shape — javac/jar and cgo c-archive don't fit
 # the cc→ar pipeline). The widget toolkit
@@ -2799,7 +2802,9 @@ help:
 	@echo "  make test-all       - Run both C and .ae tests"
 	@echo "  make check-standalone - Compile every standalone C main (benches, demos)"
 	@echo "  make check-docs       - Compile the documentation's complete examples"
-	@echo "  make check-tests      - The test suite can fail: verdicts reach the exit code, prune list is consistent, every std module has tests, listeners bind loopback, shell tests end background programs through server_jobs.sh, test programs write temp files under names of their own"
+	@echo "  make check-tests      - The test suite can fail: verdicts reach the exit code, prune list is consistent, every std module has tests, listeners bind loopback, shell tests end background programs through server_jobs.sh and compare files with same_bytes, test programs write temp files under names of their own and ask the build for the platform"
+	@echo "  make check-extern-widths - Every extern bound to C in this tree agrees with the C definition on each width; no plain C long in a bound signature"
+	@echo "  make check-raw-calls     - No std or contrib file calls a raw C binding another module declares"
 	@echo "  make check-contrib-modules - Type-check every non-host contrib module"
 	@echo "  make check-changelog  - Validate changelog fragments, catch a release-fold"
 	@echo "  make add-changelog    - Write a new_changelogs/ fragment (SECTION=, SLUG=)"
@@ -2990,6 +2995,8 @@ ci: clean
 	@$(CI_STAGE) 900 check-standalone $(MAKE) check-standalone
 	@$(CI_STAGE) 900 check-docs $(MAKE) check-docs
 	@$(CI_STAGE) 900 check-tests $(MAKE) check-tests
+	@$(CI_STAGE) 900 check-extern-widths $(MAKE) check-extern-widths
+	@$(CI_STAGE) 600 check-raw-calls $(MAKE) check-raw-calls
 	@echo ""
 	@echo "[5/11] Running .ae integration tests..."
 	@$(MAKE) test-ae
@@ -3050,6 +3057,45 @@ ownership-grid ownership-grid-check: compiler ae stdlib
 	    -o $(OWNERSHIP_GRID_RUNNER)
 	NPROC=$(NPROC) ./$(OWNERSHIP_GRID_RUNNER) \
 	    $(if $(filter ownership-grid-check,$@),--check) $(OWNERSHIP_GRID_ARGS)
+
+# -----------------------------------------------------------------
+# Extern widths (#3097): every extern bound to a C function of this tree
+# agrees with the C definition on the width of each argument and of the
+# result, and no bound C signature uses a plain `long` (32 bits on Windows,
+# 64 elsewhere). No C compiler sees an extern's prototype beside the C
+# definition, so nothing else catches a disagreement: the call is made with
+# the wrong width. The checker is Aether (tests/extern_widths/check.ae). Its
+# self-test first: the fixture holds exactly 11 mismatches, one of each
+# kind, among definitions that agree.
+# -----------------------------------------------------------------
+EXTERN_WIDTHS_CHECKER := $(BUILD_DIR)/extern_widths/check$(EXE_EXT)
+EXTERN_WIDTHS_DIRS := std contrib runtime tests examples tools lsp benchmarks
+.PHONY: check-extern-widths
+check-extern-widths: compiler ae stdlib
+	@mkdir -p $(BUILD_DIR)/extern_widths
+	@./$(BUILD_DIR)/ae$(EXE_EXT) build tests/extern_widths/check.ae -o $(EXTERN_WIDTHS_CHECKER)
+	@./$(EXTERN_WIDTHS_CHECKER) --expect 11 tests/extern_widths/fixture \
+	    > $(BUILD_DIR)/extern_widths/self_test.log 2>&1 || \
+	    { cat $(BUILD_DIR)/extern_widths/self_test.log; exit 1; }
+	@./$(EXTERN_WIDTHS_CHECKER) --exclude tests/extern_widths/fixture $(EXTERN_WIDTHS_DIRS)
+
+# -----------------------------------------------------------------
+# Raw calls (#3107): a std module binds C through `*_raw` externs and
+# builds its public functions on them (error results, ownership of what
+# is stored, bounds). No std or contrib file calls such a binding that
+# another module declares; it calls that module's public function. The
+# checker is Aether (tests/raw_calls/check.ae). Its self-test first: the
+# fixture holds exactly 4 such calls among uses that are not.
+# -----------------------------------------------------------------
+RAW_CALLS_CHECKER := $(BUILD_DIR)/raw_calls/check$(EXE_EXT)
+.PHONY: check-raw-calls
+check-raw-calls: compiler ae stdlib
+	@mkdir -p $(BUILD_DIR)/raw_calls
+	@./$(BUILD_DIR)/ae$(EXE_EXT) build tests/raw_calls/check.ae -o $(RAW_CALLS_CHECKER)
+	@./$(RAW_CALLS_CHECKER) --expect 4 tests/raw_calls/fixture \
+	    > $(BUILD_DIR)/raw_calls/self_test.log 2>&1 || \
+	    { cat $(BUILD_DIR)/raw_calls/self_test.log; exit 1; }
+	@./$(RAW_CALLS_CHECKER) std contrib
 
 # The C a program gets when the C compiler is not GCC-compatible
 # (AETHER_GCC_COMPAT 0, which is what MSVC compiles): strict C11 under gcc,
@@ -3274,7 +3320,7 @@ test-optional: compiler ae stdlib
 
 check-tests:
 	@echo "==================================="
-	@echo "  test suite (verdicts, prune list, loopback listeners, shell kills, temp names)"
+	@echo "  test suite (verdicts, prune list, loopback listeners, shell kills, shell tools, temp names, platform)"
 	@echo "==================================="
 	@py=""; \
 	for cand in python3 python "py -3"; do \
@@ -3290,10 +3336,14 @@ check-tests:
 	    $$py tests/scripts/check_loopback_listeners.py && \
 	    $$py tests/scripts/test_check_shell_kills.py && \
 	    $$py tests/scripts/check_shell_kills.py && \
+	    $$py tests/scripts/test_check_shell_tools.py && \
+	    $$py tests/scripts/check_shell_tools.py && \
 	    $$py tests/scripts/test_check_shell_tmp.py && \
 	    $$py tests/scripts/check_shell_tmp.py && \
 	    $$py tests/scripts/test_check_ae_tmp.py && \
-	    $$py tests/scripts/check_ae_tmp.py; \
+	    $$py tests/scripts/check_ae_tmp.py && \
+	    $$py tests/scripts/test_check_platform_env.py && \
+	    $$py tests/scripts/check_platform_env.py; \
 	else \
 	    echo "  [SKIP] test suite checks — no working Python found"; \
 	    echo "         (checked on the Linux/macOS legs, which run the same target)"; \

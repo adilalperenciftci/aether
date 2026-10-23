@@ -113,7 +113,7 @@ string_value(v: ptr) -> string {
     return json.get_string_raw(v)
 }
 
-// Deep copy. Owned by the caller; free with json.json_free.
+// Deep copy. Owned by the caller; free with json.free.
 copy(v: ptr) -> ptr {
     t = type_of(v)
     if t == T_NULL { return json.null_value() }

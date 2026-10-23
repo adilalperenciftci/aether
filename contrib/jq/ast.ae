@@ -182,7 +182,7 @@ free_node(n: ptr) {
     list.free(work)
 }
 
-_push_child(work: ptr, child: ptr) {
+_push_child(work: ptr, child: @keep ptr) {
     if child != null { list.add_raw(work, child) }
 }
 

@@ -141,7 +141,6 @@ is_keyword(s: string) -> int {
         "__loc__" -> { return 1 }
         _ -> { return 0 }
     }
-    return 0
 }
 
 // --- character classes ---------------------------------------------

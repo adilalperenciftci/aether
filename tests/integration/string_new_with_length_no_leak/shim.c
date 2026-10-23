@@ -14,18 +14,18 @@
  * normalise to KB so the probe's threshold means the same thing on
  * every platform. */
 #if defined(_WIN32) || defined(__MINGW32__) || defined(__MINGW64__)
-long getrusage_max_rss_kb(void) { return -1; }
+int getrusage_max_rss_kb(void) { return -1; }
 #else
 #include <sys/resource.h>
-long getrusage_max_rss_kb(void) {
+int getrusage_max_rss_kb(void) {
     struct rusage r;
     if (getrusage(RUSAGE_SELF, &r) != 0) return -1;
 #if defined(__APPLE__)
     /* Darwin reports bytes; convert to KB to match Linux/BSD. */
-    return (long)(r.ru_maxrss / 1024);
+    return (int)(r.ru_maxrss / 1024);
 #else
     /* Linux and BSD: already in KB per POSIX. */
-    return (long)r.ru_maxrss;
+    return (int)r.ru_maxrss;
 #endif
 }
 #endif

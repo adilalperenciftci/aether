@@ -1179,15 +1179,21 @@ static uint8_t* b64url_decode(const char* in, size_t in_len, size_t* out_len) {
     uint8_t* out = malloc(cap);
     if (!out) return NULL;
     size_t op = 0;
-    int v = 0, bits = 0;
+    /* `v` keeps only the bits not yet written, fewer than 8 between
+     * characters. An int that kept every bit overflowed after six
+     * characters, which C leaves undefined (#2488, the same decoder shape
+     * UBSan found in std/http/middleware). */
+    unsigned int v = 0;
+    int bits = 0;
     for (size_t i = 0; i < in_len; i++) {
         int8_t c = lookup[(unsigned char)in[i]];
         if (c < 0) { free(out); return NULL; }
-        v = (v << 6) | c;
+        v = (v << 6) | (unsigned int)c;
         bits += 6;
         if (bits >= 8) {
             bits -= 8;
             out[op++] = (uint8_t)((v >> bits) & 0xff);
+            v &= (1u << bits) - 1u;
         }
     }
     *out_len = op;

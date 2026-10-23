@@ -1,0 +1,71 @@
+// Regression (#3115): a fixed-size array's length is an integer constant
+// expression, not only a decimal number.
+//
+// The parser took a NUMBER token and read it with atoi, so `long[QWORDS]`
+// beside `const QWORDS: int = 128` was "Expected NUMBER, got IDENTIFIER",
+// `long[NW + 1]` the same, and `byte[0x10]` an array of length 0. A length
+// is now a literal in any base, a `const` of the file holding an integer, or
+// `+ - * / % << >>` and parentheses over those, in every place a type is
+// written: locals, struct fields, parameters and arrays of structs.
+
+extern exit(code: int)
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL #3115: ${msg}")
+        exit(1)
+    }
+}
+
+const QWORDS: int = 128
+const NW = 8
+// Built from another const, and from one declared below it.
+const PAIRS: int = NW / 2
+const LATER_TWICE = LATER * 2
+const LATER: int = 3
+
+struct Pair {
+    a: int
+    b: int
+}
+
+struct Ctx {
+    ks: long[NW + 1]
+    tw: long[(NW - 5)]
+    tags: byte[0x10]
+    bits: int[1 << 3]
+}
+
+fn sum(xs: int[NW]) -> int {
+    total = 0
+    i = 0
+    while i < xs.len {
+        total = total + xs[i]
+        i = i + 1
+    }
+    return total
+}
+
+main() {
+    long[QWORDS] lanes
+    lanes[QWORDS - 1] = 7
+    check(lanes.len == 128, "long[QWORDS] has 128 lanes")
+    check(lanes[127] == 7, "the last lane holds what was stored")
+
+    Pair[PAIRS] ps
+    ps[PAIRS - 1].a = 5
+    check(ps.len == 4, "Pair[PAIRS] has NW / 2 elements")
+
+    int[LATER_TWICE] later
+    check(later.len == 6, "a const built from one declared after it")
+
+    c = Ctx {}
+    check(c.ks.len == 9, "a field of NW + 1 words")
+    check(c.tw.len == 3, "a parenthesized length")
+    check(c.tags.len == 16, "a hex length is its value, not 0")
+    check(c.bits.len == 8, "a shifted length")
+
+    xs = [1, 2, 3, 4, 5, 6, 7, 8]
+    check(sum(xs) == 36, "a parameter typed int[NW]")
+    println("ok")
+}

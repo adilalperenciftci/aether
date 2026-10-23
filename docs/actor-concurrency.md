@@ -14,12 +14,13 @@ The actor runtime includes several performance optimizations applied automatical
 - Work stealing activated when cores become idle
 - Non-blocking work stealing using try-lock with ascending core-id lock ordering
 - NUMA-aware allocation when available (Linux and Windows; on macOS `aether_numa_alloc` is a plain `malloc`)
-- Message-driven actor migration co-locates communicating actors on the sender's core
+- Message-driven actor migration co-locates communicating actors on the sender's core: an actor a message from another core reaches moves to that core before it runs it, so a chain of sends (a ring, a pipeline) gathers on one core in its first round, where its sends are local
+- An actor moves only by its own core, and only while no message for it is on its way through a core's queues (each such message is counted in the actor's `inflight`), so the messages one actor sends another arrive in order across a move (#3090, #3093)
 
 **Work Stealing:**
 - Triggered after extended idle scheduler cycles
 - Selects the core with the most pending work
-- Steals entire actors (not individual messages) to preserve cache locality
+- Takes entire actors (not individual messages) to preserve cache locality: the idle core asks the busy one for an actor, and the busy core moves it, as every move is made
 - Uses ascending core-id lock ordering consistent with migration to prevent deadlock
 
 **Message Delivery:**
@@ -29,12 +30,8 @@ The actor runtime includes several performance optimizations applied automatical
 
 ### Active Optimizations
 
-**Main Thread Actor Mode:**
-- Single-actor programs bypass the scheduler entirely
-- Messages processed synchronously in the sender's context
-- Zero-copy: caller's stack pointer passed directly
-- Activated automatically when only one actor exists
-- Disabled by `AETHER_NO_INLINE=1` environment variable
+**Sends are asynchronous, whatever the actor count:** the sender goes on and
+a scheduler thread runs the handler, from the first actor on (#3112).
 
 **Message Coalescing:**
 - Batch dequeue drains multiple messages in a single atomic operation
@@ -83,7 +80,9 @@ typedef struct {
 } CounterActor;
 ```
 
-The fields, in order: `active`, `id`, `mailbox`, `step`, `thread`, `auto_process`, `assigned_core`, `migrate_to`, `main_thread_only`, `spsc_queue`, `reply_slot`, `step_lock`, `timeout_ns`, `last_activity_ns`, `dead`, `alloc_size`, `destroy_state`, `scheduler_owned`, `inbox`, `thread_parked`. The header comments each one.
+The fields, in order: `active`, `id`, `mailbox`, `step`, `thread`, `auto_process`, `assigned_core`, `migrate_to`, `spsc_queue`, `reply_slot`, `step_lock`, `timeout_ns`, `last_activity_ns`, `dead`, `alloc_size`, `destroy_state`, `scheduler_owned`, `inbox`, `thread_parked`, `inflight`. The header comments each one.
+
+An actor the compiler generates holds the base as its first member instead, `ActorBase _aether_base;`, followed by its states. So a state can be named like any of these fields (`state id`, `state active`); only a state named `_aether_base` is refused (#3094).
 
 ## Message Passing
 
@@ -181,7 +180,7 @@ actor Monitor {
 }
 ```
 
-The timeout is one-shot: it is cancelled when any message is received. The countdown starts when the actor's mailbox becomes empty. Internally, the generated step function checks `_aether_clock_ns()` against a deadline before each `mailbox_receive()` call.
+The timeout is one-shot: it is cancelled when any message is received. The countdown starts when the actor's mailbox becomes empty. Internally, the generated step function checks `_aether_clock_ns()` against a deadline before each `mailbox_receive()` call. With no message to step it for, the actor's core (or its own thread) steps it once the deadline passes, so the timeout fires within a park's timed wait of it (32 ms at most), and `wait_for_idle()` waits for every armed timeout to fire (#3102).
 
 The timeout expression can reference actor state fields, not just integer literals, useful when the interval is configurable per-actor or computed:
 
@@ -254,10 +253,6 @@ coverage: `tests/regression/test_panic_unwind_cleanup.ae` (the full
 matrix), `tests/integration/panic_unwind_no_leak/` (50000 caught panics,
 RSS flat), `tests/integration/panic_actor_step_drain/` (scheduler barrier).
 
-Main-thread inline mode (single-actor programs) has no step barrier by
-design, so a handler panic there still reaches the no-frame fallback
-(reason + trace + abort), unchanged.
-
 ## Cooperative Preemption
 
 By default, message handlers run to completion. A tight compute loop inside a handler will block that core's scheduler thread. For programs where this is a concern, cooperative preemption can be enabled:
@@ -329,13 +324,17 @@ int main() {
 
 Actors are placed on the caller's core at spawn time. Actors spawned from the main thread default to core 0, keeping top-level actor groups co-located. Actors spawned from within actor handlers inherit the parent's core.
 
-During operation, cross-core message senders set a `migrate_to` hint on the target actor, requesting migration to the sender's core. The owning scheduler thread checks these hints after processing messages in the coalesce buffer and migrates the actor accordingly. This co-locates communicating actors regardless of their initial placement. Migration is non-blocking: if the destination lock cannot be acquired, migration is deferred to the next iteration.
+During operation, a sender on another core sets a `migrate_to` hint on the target actor, asking for it on the sender's core. The actor's own core moves it, before it runs the message that brought the request, so a chain of sends (a thread ring, a pipeline) gathers on one core in its first round and its sends turn local. A busy actor whose messages run first is asked again after that batch. A move is non-blocking: if a lock cannot be taken, it waits for the next iteration.
+
+An actor moves only while no message for it is on its way through a core's queues. A sender counts its message in the actor's `inflight` before it reads the actor's core, and the core that delivers the message to the mailbox uncounts it, a whole run of one actor's messages at once. The move turns `inflight` from 0 to a moving mark, so a message cannot be left behind on the core the actor leaves and then overtaken by the sender's next one (#3093). A message that finds the mailbox full keeps its place: the actor's core steps it to make room, instead of putting the message at the back of a queue. Work stealing goes through the same path: the idle core asks for an actor, and the busy core moves it.
+
+Measured on Windows (i7-13700K, 1,000,000 messages, 10 runs, M msg/s, medians) against the runtime before (#3090): thread ring 24.91 from 3.03, on 0.078 s of CPU from 5.56 s, its 100 actors on one core; fork-join 39.69 from 30.23, each worker's batch delivered as one run; ping-pong (12.56 and 12.36) and counting (42.90 and 42.84) unchanged; skynet 1.69 from 1.31, with a narrower spread.
 
 ### Message Routing
 
-- **Same-core messages:** Direct mailbox or SPSC queue write (verified via `current_core_id`)
-- **Cross-core messages:** Enqueued to target core's lock-free incoming queue
-- **Migrated actor messages:** Forwarded to the actor's current core with spin-retry
+- **Same-core messages:** Direct mailbox or SPSC queue write (verified via `current_core_id`), behind any message of the actor still in the queues
+- **Cross-core messages:** Counted in the target's `inflight`, then enqueued to the target core's lock-free incoming queue
+- **A message on a core the actor has left:** Only one routed by a stale read or by the runtime itself, since a counted message holds the actor where it was routed; forwarded to the actor's current core, still counted
 
 ## Memory Management
 
@@ -346,7 +345,7 @@ Message payloads are managed by thread-local pools. Payloads are returned to the
 ## Memory Model
 
 The actor runtime uses several allocation strategies for automatic cleanup:
-- **Actor memory**: one NUMA-aware, 64-byte-aligned allocation per actor at spawn time (`aether_numa_alloc_aligned`), or the kept block of a released actor of the same size. `scheduler_release_actor` takes the actor out of its core's table and retires it; it is reclaimed once every core's scheduler thread and every per-actor thread has passed the top of its loop since, and no other thread is walking the tables. The scheduler threads, per-actor threads and `aether_scheduler_poll` read the tables without a lock, so the reclaim has to wait for them; a core blocked in a long step delays it. A reclaimed block is not returned to the allocator while the scheduler runs: it stays marked released, so a send to it is dropped rather than reading freed memory, and the next spawn of that size takes it. The blocks go back with the scheduler's tables. The mailbox is an inline struct member, not a separate allocation.
+- **Actor memory**: one NUMA-aware, 64-byte-aligned allocation per actor at spawn time (`aether_numa_alloc_aligned`), or the kept block of a released actor of the same size. `scheduler_release_actor` takes the actor out of its core's table and retires it; it is reclaimed once every core's scheduler thread and every per-actor thread has passed the top of its loop since, and no other thread is walking the tables. The scheduler threads, per-actor threads and `wait_for_idle`'s scan for armed timeouts read the tables without a lock, so the reclaim has to wait for them; a core blocked in a long step delays it. A reclaimed block is not returned to the allocator while the scheduler runs: it stays marked released, so a send to it is dropped rather than reading freed memory, and the next spawn of that size takes it. The blocks go back with the scheduler's tables. The mailbox is an inline struct member, not a separate allocation.
 - **Message payloads**: thread-local pools with automatic return
 - **Arenas**: a general-purpose arena allocator provides bulk deallocation without per-object tracking for opt-in uses (`std.arena`, JSON parsing). The actor path does not use arenas.
 

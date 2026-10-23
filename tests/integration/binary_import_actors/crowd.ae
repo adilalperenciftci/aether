@@ -24,8 +24,7 @@ actor Herald {
     }
 }
 
-// Two actors: past the single-actor main-thread mode, so the scheduler's
-// threads do the work.
+// Two actors, the scheduler's threads doing the work.
 count_to(n: int) -> int {
     a = spawn(Counter())
     b = spawn(Counter())

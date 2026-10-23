@@ -19,7 +19,6 @@ handle_test(req: ptr, res: ptr, ud: ptr) {
 }
 
 message Go { raw: ptr }
-message Noop {}
 
 actor Srv {
     state s = 0
@@ -32,10 +31,6 @@ actor Srv {
 }
 
 // Force multi-threaded scheduler
-actor Helper {
-    state x = 0
-    receive { Noop() -> { x = 1 } }
-}
 
 main() {
     print("=== HTTP Response Accessor Tests ===\n\n")
@@ -46,7 +41,6 @@ main() {
     // each new executable listening there opens a firewall prompt (#2639).
     http.server_set_host(raw, "127.0.0.1")
     http.server_get(raw, "/test", handle_test, 0)
-    spawn(Helper())
     a = spawn(Srv())
     a ! Go { raw: raw }
     sleep(300)

@@ -26,7 +26,6 @@
 
 import std.bits
 import std.bytes
-import std.longarr
 
 extern malloc(size: int) -> ptr
 extern free(p: ptr)
@@ -62,7 +61,7 @@ struct Sha2Ctx {
     block_len: int // bytes currently buffered (0..block_size-1 between blocks)
     count_lo: long // total message length in bytes (low 64 bits)
     count_hi: long // high bits of the byte count (for SHA-512's 128-bit length)
-    w: ptr // longarr(80) message schedule
+    w: long[80] // message schedule, 80 words (64 used by the 32-bit core)
     is512: int // 1 => 64-bit core, 0 => 32-bit core
     block_size: int // 64 (sha256 family) or 128 (sha512 family)
     digest_len: int // output length in bytes (28/32/48/64/...)
@@ -169,28 +168,27 @@ maj64(x: long, y: long, z: long) -> long {
 // 32-bit words out of the block buffer, expands to 64, runs the 64
 // rounds, folds into the hash state. Every 32-bit add is masked.
 process_block_256(ctx: *Sha2Ctx) {
-    w = ctx.w
     // Load 16 words, big-endian.
     i = 0
     while i < 16 {
         word = bytes.get_be32(ctx.block, i * 4)
         // get_be32 may return a sign-extended negative int for the high
         // bit; mask to 32 bits so the schedule math stays unsigned.
-        longarr_set_unchecked(w, i, m32(word))
+        ctx.w[i] = m32(word)
         i = i + 1
     }
     // Expand to 64 words.
     i = 16
     while i < 64 {
-        w2 = longarr_get_unchecked(w, i - 2)
-        w7 = longarr_get_unchecked(w, i - 7)
-        w15 = longarr_get_unchecked(w, i - 15)
-        w16 = longarr_get_unchecked(w, i - 16)
+        w2 = ctx.w[i - 2]
+        w7 = ctx.w[i - 7]
+        w15 = ctx.w[i - 15]
+        w16 = ctx.w[i - 16]
         // theta operands are pre-masked to 32 bits inside the helpers.
         t1 = theta1_256(w2 & 0xFFFFFFFF)
         t0 = theta0_256(w15 & 0xFFFFFFFF)
         v = m32(t1 + w7 + t0 + w16)
-        longarr_set_unchecked(w, i, v)
+        ctx.w[i] = v
         i = i + 1
     }
 
@@ -206,7 +204,7 @@ process_block_256(ctx: *Sha2Ctx) {
     i = 0
     while i < 64 {
         kv = K256[i]
-        wv = longarr_get_unchecked(w, i)
+        wv = ctx.w[i]
         s1 = sum1_256(e)
         chv = ch32(e, f, g)
         t1 = m32(h + s1 + chv + kv + wv)
@@ -238,21 +236,20 @@ process_block_256(ctx: *Sha2Ctx) {
 // naturally at 64 bits (Aether long is 64-bit), so no masking is needed
 // on the adds — but shifts/rotates still go through std.bits.
 process_block_512(ctx: *Sha2Ctx) {
-    w = ctx.w
     i = 0
     while i < 16 {
         word = bytes.get_be64(ctx.block, i * 8)
-        longarr_set_unchecked(w, i, word)
+        ctx.w[i] = word
         i = i + 1
     }
     i = 16
     while i < 80 {
-        w2 = longarr_get_unchecked(w, i - 2)
-        w7 = longarr_get_unchecked(w, i - 7)
-        w15 = longarr_get_unchecked(w, i - 15)
-        w16 = longarr_get_unchecked(w, i - 16)
+        w2 = ctx.w[i - 2]
+        w7 = ctx.w[i - 7]
+        w15 = ctx.w[i - 15]
+        w16 = ctx.w[i - 16]
         v = sigma1_512(w2) + w7 + sigma0_512(w15) + w16
-        longarr_set_unchecked(w, i, v)
+        ctx.w[i] = v
         i = i + 1
     }
 
@@ -268,7 +265,7 @@ process_block_512(ctx: *Sha2Ctx) {
     i = 0
     while i < 80 {
         kv = K512[i]
-        wv = longarr_get_unchecked(w, i)
+        wv = ctx.w[i]
         t1 = h + sum1_512(e) + ch64(e, f, g) + kv + wv
         t2 = sum0_512(a) + maj64(a, b, c)
         h = g
@@ -398,7 +395,6 @@ new(algo: string) -> {
         bytes.set(ctx.block, j, 0)
         j = j + 1
     }
-    ctx.w = longarr_new_raw(80)
     return ctx, ""
 }
 
@@ -588,10 +584,6 @@ free_internals(c: *Sha2Ctx) {
     if c.block != null {
         bytes.free(c.block)
         c.block = null
-    }
-    if c.w != null {
-        longarr_free(c.w)
-        c.w = null
     }
 }
 

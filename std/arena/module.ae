@@ -33,13 +33,13 @@ exports(
 
 // C-style externs, which the wrappers below call (the module exports one
 // name per operation, #2976).
-extern arena_create(size: int) -> ptr
-extern arena_alloc(arena: ptr, bytes: int) -> ptr
-extern arena_alloc_aligned(arena: ptr, bytes: int, alignment: int) -> ptr
+extern arena_create(size: long) -> ptr
+extern arena_alloc(arena: ptr, bytes: long) -> ptr
+extern arena_alloc_aligned(arena: ptr, bytes: long, alignment: long) -> ptr
 extern arena_reset(arena: ptr)
 extern arena_destroy(arena: ptr)
-extern arena_get_used(arena: ptr) -> int
-extern arena_get_size(arena: ptr) -> int
+extern arena_get_used(arena: ptr) -> long
+extern arena_get_size(arena: ptr) -> long
 
 // Aether-native wrappers.
 
@@ -74,11 +74,11 @@ destroy(arena: ptr) {
 
 // Bytes currently allocated from the arena (sum across overflow
 // blocks).
-used(arena: ptr) -> int {
+used(arena: ptr) -> long {
     return arena_get_used(arena)
 }
 
 // Total capacity (sum across overflow blocks).
-size(arena: ptr) -> int {
+size(arena: ptr) -> long {
     return arena_get_size(arena)
 }

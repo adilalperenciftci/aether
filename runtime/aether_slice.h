@@ -138,6 +138,25 @@ static inline void aether_slice_fail_index(int64_t idx, uint64_t len,
                         file, line, (long long)idx, (unsigned long long)len);
 }
 
+/* #3113: an index into a fixed-size array `T[N]` outside `0 ..< N`, the
+ * slice's panic with the array's length. */
+static inline void aether_array_fail_index(int64_t idx, uint64_t len,
+                                           const char* file, int line) {
+    aether_slice_panicf("%s:%d: array index %lld out of range for length %llu",
+                        file, line, (long long)idx, (unsigned long long)len);
+}
+
+/* #3113: `a[i]` on a `T[N]`: `i`, checked against N, for the generated C
+ * to index with (`a[aether_array_index(i, N, ...)]`), so the element stays
+ * an lvalue and `i` is evaluated once. A negative index is out of range.
+ * With a constant N and a loop bounded by it the C compiler drops the
+ * test. */
+static inline int64_t aether_array_index(int64_t i, uint64_t len,
+                                         const char* file, int line) {
+    if ((uint64_t)i >= len) aether_array_fail_index(i, len, file, line);
+    return i;
+}
+
 static inline void aether_slice_fail_range(int64_t lo, int64_t hi, uint64_t len,
                                            const char* file, int line) {
     aether_slice_panicf("%s:%d: slice range %lld..%lld out of range for length %llu",
@@ -169,6 +188,21 @@ static inline void* aether_slice_at_w(AetherSlice s, int64_t i, size_t elem_size
                                       const char* file, int line) {
     if (s.flags & AETHER_SLICE_READONLY) aether_slice_fail_readonly(file, line);
     return aether_slice_at(s, i, elem_size, file, line);
+}
+
+/* #3029: `s[i]` in a function's view body, where the function's entry has
+ * tested once that `s` is an unbounded view: the element's address with no
+ * test, which is what aether_slice_at does for a view after its test of
+ * the sentinel. Without that test in the loop the compiler can vectorize. */
+static inline void* aether_slice_view_at(AetherSlice s, int64_t i, size_t elem_size) {
+    return (char*)s.ptr + (uint64_t)i * elem_size;
+}
+
+/* #3029: a store there, which still refuses a read-only view. */
+static inline void* aether_slice_view_at_w(AetherSlice s, int64_t i, size_t elem_size,
+                                           const char* file, int line) {
+    if (s.flags & AETHER_SLICE_READONLY) aether_slice_fail_readonly(file, line);
+    return (char*)s.ptr + (uint64_t)i * elem_size;
 }
 
 /* `s[lo..hi]` — the half-open sub-slice [lo, hi), sharing the backing

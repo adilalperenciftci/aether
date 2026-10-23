@@ -11,6 +11,7 @@
 #include "../config/aether_optimization_config.h"
 #include "../aether_numa.h"
 #include "../actors/aether_send_message.h"
+#include "../actors/aether_actor_inbox.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -32,18 +33,13 @@ AETHER_TLS void* g_pending_reply_slot = NULL;
 AETHER_TLS void* g_current_reply_slot = NULL;
 AETHER_TLS void* g_current_step_actor = NULL;
 
-// Defined in aether_send_message.c
-extern AETHER_TLS ActorBase* g_sync_step_actor;
-extern AETHER_TLS int g_inline_step_depth;
-extern AETHER_TLS int g_inline_release_pending;
-
 // ============================================================================
 // Released actors (#2509)
 // ============================================================================
 //
 // One thread, but a step can still release its own actor, and whatever ran
-// that step (aether_scheduler_poll, scheduler_wait, an inline send) touches
-// the actor after it returns. So an actor released while any of them is in
+// that step (aether_scheduler_poll, scheduler_wait) touches the actor after
+// it returns. So an actor released while any of them is in
 // progress is kept here and freed when the last one is done.
 
 static int g_coop_walk_depth = 0;  // aether_scheduler_poll / scheduler_wait walks in progress
@@ -61,11 +57,24 @@ static int g_coop_kept_count = 0;
 static int g_coop_kept_capacity = 0;
 
 static void coop_free_actor(ActorBase* actor) {
-    // Anything still in the mailbox was sent against the release contract.
+    // Anything still in the mailbox or waiting behind it was sent against the
+    // release contract.
     Message discard;
     while (mailbox_receive(&actor->mailbox, &discard)) {
         if (discard.payload_ptr) aether_free_message(discard.payload_ptr);
         if (discard.zerocopy.owned && discard.zerocopy.data) free(discard.zerocopy.data);
+    }
+    ActorInbox* ib = atomic_exchange_explicit(&actor->inbox, NULL, memory_order_relaxed);
+    if (ib) {
+        Message spill[AETHER_INBOX_RING];
+        int got;
+        while ((got = actor_inbox_take(ib, spill, AETHER_INBOX_RING)) > 0) {
+            for (int k = 0; k < got; k++) {
+                if (spill[k].payload_ptr) aether_free_message(spill[k].payload_ptr);
+                if (spill[k].zerocopy.owned && spill[k].zerocopy.data) free(spill[k].zerocopy.data);
+            }
+        }
+        free(ib);
     }
     if (actor->spsc_queue) {
         free(actor->spsc_queue);
@@ -169,6 +178,50 @@ static int coop_send_to_dead_actor(ActorBase* actor, Message* msg) {
 
 // One thread: nothing but aether_scheduler_poll and scheduler_wait steps an
 // actor, and their walk depth covers them.
+
+/* A send queues (#3112): into the mailbox while it has room and nothing waits
+ * behind it, else into the actor's inbox (aether_actor_inbox.h, an unbounded
+ * FIFO), from which coop_refill moves the messages on, oldest first, as the
+ * mailbox empties. A send never runs a handler; aether_scheduler_poll and
+ * wait_for_idle do. */
+static void coop_deliver(ActorBase* actor, Message msg) {
+    if (coop_send_to_dead_actor(actor, &msg)) return;
+    ActorInbox* ib = atomic_load_explicit(&actor->inbox, memory_order_relaxed);
+    if ((!ib || atomic_load_explicit(&ib->count, memory_order_relaxed) == 0) &&
+        mailbox_send(&actor->mailbox, msg))
+        return;
+    if (!ib) {
+        ib = actor_inbox_new();
+        if (!ib) {
+            fprintf(stderr, "aether: out of memory queueing message type %d for actor %d\n",
+                    msg.type, actor->id);
+            abort();
+        }
+        atomic_store_explicit(&actor->inbox, ib, memory_order_relaxed);
+    }
+    if (!actor_inbox_push(ib, msg)) {
+        fprintf(stderr, "aether: out of memory queueing message type %d for actor %d\n",
+                msg.type, actor->id);
+        abort();
+    }
+}
+
+// Moves what waits in the actor's inbox into its mailbox, as room allows.
+static void coop_refill(ActorBase* actor) {
+    ActorInbox* ib = atomic_load_explicit(&actor->inbox, memory_order_relaxed);
+    if (!ib) return;
+    int room = MAILBOX_SIZE - atomic_load_explicit(&actor->mailbox.count, memory_order_relaxed);
+    if (room <= 0) return;
+    Message moved[MAILBOX_SIZE];
+    int n = actor_inbox_take(ib, moved, room);
+    for (int k = 0; k < n; k++) mailbox_send(&actor->mailbox, moved[k]);
+}
+
+static int coop_has_messages(ActorBase* actor) {
+    ActorInbox* ib = atomic_load_explicit(&actor->inbox, memory_order_relaxed);
+    return atomic_load_explicit(&actor->mailbox.count, memory_order_acquire) > 0 ||
+           (ib && atomic_load_explicit(&ib->count, memory_order_relaxed) > 0);
+}
 void scheduler_reader_online(void) {}
 void scheduler_reader_quiescent(void) {}
 void scheduler_reader_offline(void) {}
@@ -178,16 +231,16 @@ void scheduler_actor_thread_deliver(ActorBase* actor, Message msg) { (void)actor
 void scheduler_set_actor_park_ms(int ms) { (void)ms; }
 void scheduler_set_core_park_ms(int ms) { (void)ms; }
 
-// Frees the released actors once no walk and no inline send is running.
+// Frees the released actors once no walk is running.
 static void coop_free_released(void) {
-    if (g_coop_walk_depth > 0 || g_inline_step_depth > 0) return;
+    if (g_coop_walk_depth > 0) return;
     while (g_coop_released_count > 0) {
         coop_free_actor(g_coop_released[--g_coop_released_count]);
     }
 }
 
 // One thread: the released actors are ended here and now (#2528), unless a
-// walk or an inline send is on the stack, which ends them when it returns.
+// walk is on the stack, which ends them when it returns.
 int scheduler_reclaim_released(void) {
     coop_free_released();
     return g_coop_released_count;
@@ -210,11 +263,6 @@ static int coop_defer_release(ActorBase* actor) {
 
 int scheduler_released_actors_pending(void) {
     return g_coop_released_count;
-}
-
-void scheduler_inline_step_done(void) {
-    g_inline_release_pending = 0;
-    coop_free_released();  // waits for an enclosing walk, which frees them at its end
 }
 
 // ============================================================================
@@ -255,9 +303,6 @@ void scheduler_init(int cores) {
     table->capacity = MAX_ACTORS_PER_CORE;
     atomic_store_explicit(&schedulers[0].actor_table, table, memory_order_relaxed);
     atomic_store_explicit(&schedulers[0].actor_count, 0, memory_order_relaxed);
-
-    // Force main-thread mode — all processing is cooperative
-    atomic_store(&g_aether_config.main_thread_mode, true);
 }
 
 void scheduler_init_with_opts(int cores, AetherOptFlags opts) {
@@ -271,10 +316,6 @@ void scheduler_init_with_opts(int cores, AetherOptFlags opts) {
 
 void scheduler_start(void) {
     // No threads to start
-}
-
-void scheduler_ensure_threads_running(void) {
-    // No threads in cooperative mode — this is a no-op
 }
 
 void scheduler_stop(void) {
@@ -371,22 +412,12 @@ ActorBase* scheduler_spawn_actor(int preferred_core, void (*step)(void*), size_t
     actor->spsc_queue = NULL;
     atomic_store_explicit(&actor->assigned_core, 0, memory_order_relaxed);
     atomic_store_explicit(&actor->migrate_to, -1, memory_order_relaxed);
-    atomic_store_explicit(&actor->main_thread_only, 1, memory_order_relaxed);  // Always main-thread
     atomic_store_explicit(&actor->reply_slot, NULL, memory_order_relaxed);
     atomic_flag_clear_explicit(&actor->step_lock, memory_order_relaxed);
     actor->timeout_ns = 0;
     actor->last_activity_ns = 0;
 
-    // Track actor count for inline mode
-    int prev_count = atomic_load_explicit(&g_aether_config.actor_count, memory_order_relaxed);
     aether_on_actor_spawn();
-
-    if (prev_count == 0) {
-        aether_enable_main_thread_mode(actor);
-    }
-    // In cooperative mode, main_thread_mode stays on even with multiple actors.
-    // We force it back on because aether_on_actor_spawn() disables it for count > 1.
-    atomic_store_explicit(&g_aether_config.main_thread_mode, true, memory_order_relaxed);
 
     actor->scheduler_owned = 1;
     register_actor(actor, 0);
@@ -418,11 +449,8 @@ void scheduler_release_actor(ActorBase* actor) {
 
     // A step may be releasing its own actor: free it once whatever runs the
     // step is done with it (#2509).
-    if (g_coop_walk_depth > 0 || g_inline_step_depth > 0) {
-        if (coop_defer_release(actor)) {
-            if (g_inline_step_depth > 0) g_inline_release_pending = 1;
-            return;
-        }
+    if (g_coop_walk_depth > 0) {
+        if (coop_defer_release(actor)) return;
         // Out of memory to remember it: keep it rather than free it under
         // the step.
         fprintf(stderr, "aether: out of memory deferring the release of actor %d; "
@@ -433,19 +461,17 @@ void scheduler_release_actor(ActorBase* actor) {
 }
 
 // ============================================================================
-// Message sending — cooperative: direct mailbox send, process via poll
+// Message sending — cooperative: queued (coop_deliver), processed via poll
 // ============================================================================
 
 void scheduler_send_local(ActorBase* actor, Message msg) {
-    if (coop_send_to_dead_actor(actor, &msg)) return;
-    mailbox_send(&actor->mailbox, msg);
+    coop_deliver(actor, msg);
 }
 
 void scheduler_send_remote(ActorBase* actor, Message msg, int from_core) {
     (void)from_core;
     // In cooperative mode there's only one core — all sends are local
-    if (coop_send_to_dead_actor(actor, &msg)) return;
-    mailbox_send(&actor->mailbox, msg);
+    coop_deliver(actor, msg);
 }
 
 // Batch send — trivial in single-threaded mode
@@ -454,8 +480,7 @@ void scheduler_send_batch_start(void) {
 }
 
 void scheduler_send_batch_add(ActorBase* actor, Message msg) {
-    if (coop_send_to_dead_actor(actor, &msg)) return;
-    mailbox_send(&actor->mailbox, msg);
+    coop_deliver(actor, msg);
 }
 
 void scheduler_send_batch_flush(void) {
@@ -520,11 +545,12 @@ int aether_scheduler_poll(int max_per_actor) {
         if (!actor || !actor->step) continue;
 
         int processed = 0;
-        int has_messages = atomic_load_explicit(&actor->mailbox.count, memory_order_acquire) > 0;
+        int has_messages = coop_has_messages(actor);
         int has_timeout = actor->timeout_ns > 0 && actor->last_activity_ns > 0;
 
         if (has_messages) {
             while (processed < limit) {
+                coop_refill(actor);
                 if (atomic_load_explicit(&actor->mailbox.count, memory_order_acquire) == 0) break;
                 actor->step(actor);
                 processed++;
@@ -559,7 +585,7 @@ void* scheduler_ask_message(ActorBase* target, void* msg_data, size_t msg_size, 
     // Set pending reply slot
     g_pending_reply_slot = &slot;
 
-    // Send the message (will be processed synchronously if main_thread_mode)
+    // Queued as any send is, and processed by the polls below
     void* msg_copy = malloc(msg_size);
     if (!msg_copy) return NULL;
     memcpy(msg_copy, msg_data, msg_size);
@@ -574,7 +600,7 @@ void* scheduler_ask_message(ActorBase* target, void* msg_data, size_t msg_size, 
     msg.zerocopy.owned = 0;
     msg._reply_slot = &slot;
 
-    mailbox_send(&target->mailbox, msg);
+    coop_deliver(target, msg);
     g_pending_reply_slot = NULL;
 
     // Process messages until reply is ready

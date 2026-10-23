@@ -17,6 +17,7 @@
   <ul class="function-nav">
     <li><a href="#new">new</a></li>
     <li><a href="#new_in">new_in</a></li>
+    <li><a href="#add">add</a></li>
     <li><a href="#add_raw">add_raw</a></li>
     <li><a href="#add_string_owned">add_string_owned</a></li>
     <li><a href="#get_raw">get_raw</a></li>
@@ -25,9 +26,9 @@
     <li><a href="#remove">remove</a></li>
     <li><a href="#clear">clear</a></li>
     <li><a href="#free">free</a></li>
-    <li><a href="#add">add</a></li>
     <li><a href="#get">get</a></li>
     <li><a href="#get_string">get_string</a></li>
+    <li><a href="#at">at</a></li>
   </ul>
   <hr>
   <h2>Modules</h2>
@@ -138,10 +139,17 @@
       <pre class="usage"><code>new_in(alloc) <span class="arrow">-&gt;</span> ptr</code></pre>
       <p class="signature"><span class="sig-params">alloc: ptr</span></p>
     </div>
+    <div class="function" id="add" data-name="add">
+      <h3 class="function-name">add <span class="kind">extern</span></h3>
+      <pre class="usage"><code>add(list, item) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">list: ptr, item: ptr</span></p>
+      <p class="doc">Append an item to a list. Returns &quot;&quot; on success, error on failure.</p>
+    </div>
     <div class="function" id="add_raw" data-name="add_raw">
       <h3 class="function-name">add_raw <span class="kind">extern</span></h3>
       <pre class="usage"><code>add_raw(list, item) <span class="arrow">-&gt;</span> int</code></pre>
       <p class="signature"><span class="sig-params">list: ptr, item: ptr</span></p>
+      <p class="doc">The stores keep their item past the call (#3086): a `ptr` stays the list's, so a function that adds a borrowed `ptr` parameter declares it `@keep`, and a string or a closure is handed a reference of its own (`@retain`, R4).</p>
     </div>
     <div class="function" id="add_string_owned" data-name="add_string_owned">
       <h3 class="function-name">add_string_owned <span class="kind">extern</span></h3>
@@ -179,12 +187,6 @@
       <pre class="usage"><code>free(list)</code></pre>
       <p class="signature"><span class="sig-params">list: ptr</span></p>
     </div>
-    <div class="function" id="add" data-name="add">
-      <h3 class="function-name">add <span class="kind">fn</span></h3>
-      <pre class="usage"><code>add(list, item) <span class="arrow">-&gt;</span> string</code></pre>
-      <p class="signature"><span class="sig-params">list: ptr, item: ptr</span></p>
-      <p class="doc">Append an item to a list. Returns &quot;&quot; on success, error on failure.</p>
-    </div>
     <div class="function" id="get" data-name="get">
       <h3 class="function-name">get <span class="kind">fn</span></h3>
       <pre class="usage"><code>get(list, index) <span class="arrow">-&gt;</span> (ptr, string)</code></pre>
@@ -196,6 +198,12 @@
       <pre class="usage"><code>get_string(list, index) <span class="arrow">-&gt;</span> (string, string)</code></pre>
       <p class="signature"><span class="sig-params">list: ptr, index: int</span></p>
       <p class="doc">Index into a list whose element is a string. `get` hands back a `ptr`, which a `string` local would read as text whatever it points at (refused, E0202); this says the element is a string, and checks it is one: - (item, &quot;&quot;)                     : index in range, the element a string - (null, &quot;&quot;)                     : the element is null - (null, &quot;not a string&quot;)         : the element is some other pointer - (null, &quot;index out of range&quot;)   : index &lt; 0 or index &gt;= size - (null, &quot;null list&quot;)            : `list` is null</p>
+    </div>
+    <div class="function" id="at" data-name="at">
+      <h3 class="function-name">at <span class="kind">fn</span></h3>
+      <pre class="usage"><code>at(list, index) <span class="arrow">-&gt;</span> ptr</code></pre>
+      <p class="signature"><span class="sig-params">list: ptr, index: int</span></p>
+      <p class="doc">The item at `index`, for a caller that has bounded the index (a loop over 0 ..&lt; list_size). An index out of range, or a null list, is a panic that names the index and the size, as a slice index is (#3107): the unchecked read handed back a null there, which a caller took for a stored null.</p>
     </div>
   </div>
 </main>

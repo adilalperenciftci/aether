@@ -49,11 +49,14 @@ extern void_function(param: type)  // No return type = void
 | Aether Type | C Type |
 |-------------|--------|
 | `int` | `int` |
+| `long` | `int64_t` |
 | `float` | `double` |
 | `string` | `const char*` |
 | `bool` | `int` |
 | `byte` | `unsigned char` |
 | `ptr` | `void*` |
+
+> **Widths must agree.** The compiler writes an extern's C prototype from these types, and no C compiler sees it beside the C function's own definition, so a mismatch is not an error: the call is made with the wrong width. A C `size_t`, `int64_t` or `uint64_t` is a `long` here, not an `int` (the upper half of a 32-bit argument is unspecified). Do not declare a bound C function with a plain C `long`: it is 32 bits on Windows and 64 elsewhere, so no Aether type matches it everywhere; use `int64_t` or `int`. `make check-extern-widths` checks every extern in this repository against the C that defines it (#3097). An extern marked `@c_import` is checked by the C compiler against the header instead.
 
 > **`byte` mapping note.** `byte` lowers to `unsigned char`, not `uint8_t`. The two are typedef-compatible on every platform Aether targets, but C's strict-aliasing rules give `unsigned char *` an exemption (it can legally alias any type's bytes for read/write); `uint8_t *` does not. Since `byte` is exactly the type used in C extern signatures that scrape bytes from other types' storage (packed binary protocol parsers, NaN-boxing tag readers, on-disk file headers), `unsigned char` is the right choice.
 

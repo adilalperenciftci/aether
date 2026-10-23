@@ -64,6 +64,13 @@ typedef struct {
     // cannot flow into that type is reported in the language's terms
     // instead of by the C compiler.
     Type** declared_var_types;
+    // #3083: name -> its first slot in declared_vars + 1 (NULL: not
+    // declared), so a lookup is one probe, not a scan of every local.
+    StrMap declared_index;
+    // #3083: every name `reads_root` (the function being emitted) reads, by
+    // tree_reads_name's rule, gathered by one walk of it.
+    const ASTNode* reads_root;
+    StrMap reads_index;
     // #2124: the body of the function (or main) being generated, walked
     // by the hoisters to find every binding of a name across sibling
     // branches and loop bodies, so a hoisted local is declared with the
@@ -84,6 +91,17 @@ typedef struct {
     const char* current_origin_module;
     int module_global_var_count;
     int generating_lvalue;  // Track if we're generating an assignment target (lvalue)
+    /* #3029: versioning on the unbounded-view sentinel. While a function's
+     * view body is emitted, `slice_view_names` are its slice parameters,
+     * every one an unbounded view there, indexed with no test of the
+     * sentinel; `fn_cname_override` is that body's C name. While the
+     * function itself is emitted, `slice_view_dispatch` names the same
+     * parameters for the test at its entry that calls the view body. */
+    const char** slice_view_names;
+    int slice_view_count;
+    const char* fn_cname_override;
+    const char** slice_view_dispatch;
+    int slice_view_dispatch_count;
     int in_const_init;  // #2799: depth inside a file-scope constant's initializer, where a
                         // constant named is written as its own initializer (ISO C)
     int in_condition;  // Track if we're in a condition (if/while) to avoid double parens

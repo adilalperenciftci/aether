@@ -1,0 +1,376 @@
+// TinyWeb's WebSocket, SSE and chunked endpoints, and its server options,
+// over loopback: one server in an actor, the clients in main.
+//
+// tinyweb had its own WebSocket and SSE listeners on ports of their own,
+// with a frame codec that read 4096 bytes at a time and took the payload
+// for text (#3109): a message over that size, one with a zero byte, or a
+// ping broke the connection, a quiet one was dropped by the read timeout,
+// an SSE client that left was written to forever, and the timeout,
+// keep-alive and on_stats options were recorded and never applied. They are
+// all std.http's now, on the server's own port.
+
+import contrib.tinyweb
+import std.http
+import std.http.client
+import std.tcp
+import std.list
+import std.bytes
+import std.string
+import std.os
+import std.spec
+
+extern exit(code: int)
+
+const PORT = 8231
+const BIG = 70000
+
+var g_sse_sent: int = 0
+var g_sse_gone: int = 0
+var g_stats_seen: int = 0
+var g_stats_status: int = 0
+var g_stats_route_ok: int = 0
+var g_stats_filters: int = 0
+var g_stats_filter_result: string = ""
+
+message Serve { srv: ptr }
+actor Server {
+    state s = 0
+    receive {
+        Serve(srv) -> {
+            s = srv
+            err = tinyweb.tw_start(srv)
+            if err != "" { println("tinyweb: ${err}") }
+        }
+    }
+}
+
+fn record_stats(stats: ptr) {
+    g_stats_status = tinyweb.stats_get_status(stats)
+    g_stats_route_ok = 0
+    if tinyweb.stats_get_path(stats) == tinyweb.stats_get_endpoint(stats) { g_stats_route_ok = 1 }
+    fl = tinyweb.stats_get_filters(stats)
+    g_stats_filters = list.size(fl)
+    if g_stats_filters > 0 {
+        fs, _ = list.get(fl, 0)
+        g_stats_filter_result = tinyweb.filter_stat_result(fs)
+    }
+    g_stats_seen = g_stats_seen + 1
+}
+
+// Up to 3 s for the server's thread to record a request.
+fn wait_for_stats(want: int) -> int {
+    for (i = 0; i < 300 && g_stats_seen < want; i++) {
+        sleep(10)
+    }
+    return g_stats_seen
+}
+
+// Up to 3 s for the SSE handler to see its client gone.
+fn wait_for_sse_gone() -> int {
+    for (i = 0; i < 300 && g_sse_gone == 0; i++) {
+        sleep(10)
+    }
+    return g_sse_gone
+}
+
+fn ws_url(path: string) -> string {
+    return "ws://127.0.0.1:${PORT}${path}"
+}
+
+// One text round trip on `w`: the reply, or "" when none came.
+fn ws_round_trip(w: ptr, text: string) -> string {
+    if http.ws_send_text(w, text) < 0 { return "" }
+    if http.ws_recv(w) != 1 { return "" }
+    return http.ws_message(w)
+}
+
+fn ws_done(w: ptr) {
+    http.ws_close(w, 1000, "done")
+    http.ws_client_free(w)
+}
+
+fn big_text() -> string {
+    b = bytes.new(BIG)
+    for (i = 0; i < BIG; i++) {
+        bytes.set(b, i, 97 + i - ((i / 26) * 26))
+    }
+    return bytes.finish(b, BIG)
+}
+
+// Exactly n bytes from sock, or "" when the connection ends first.
+fn read_exact(sock: ptr, n: int) -> string {
+    acc = bytes.new(n)
+    got = 0
+    while got < n {
+        chunk, m, err = tcp.read_n(sock, n - got)
+        if err != "" { return "" }
+        for (j = 0; j < m; j++) {
+            bytes.set(acc, got + j, string.char_at(chunk, j))
+        }
+        got = got + m
+    }
+    return bytes.finish(acc, n)
+}
+
+// A raw upgrade on a fresh socket, for what std.http's client does not send
+// (a ping). Null when the server did not answer 101.
+fn raw_ws_connect(path: string) -> ptr {
+    sock, err = tcp.connect("127.0.0.1", PORT)
+    if err != "" { return null }
+    tcp.write(sock, "GET ${path} HTTP/1.1\r\nHost: 127.0.0.1\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n")
+    head, _ = tcp.read(sock, 4096)
+    if string.contains(head, " 101 ") == 0 {
+        tcp.close(sock)
+        return null
+    }
+    return sock
+}
+
+// A ping with payload "hb", masked as a client must: the pong's payload, or
+// "" when no pong came.
+fn ping(sock: ptr) -> string {
+    f = bytes.new(8)
+    bytes.set(f, 0, 137) // FIN | ping
+    bytes.set(f, 1, 130) // masked, 2 bytes
+    bytes.set(f, 2, 1)
+    bytes.set(f, 3, 2)
+    bytes.set(f, 4, 3)
+    bytes.set(f, 5, 4)
+    bytes.set(f, 6, 104 ^ 1) // 'h'
+    bytes.set(f, 7, 98 ^ 2) // 'b'
+    tcp.write_n(sock, bytes.view(f))
+    bytes.free(f)
+    hdr = read_exact(sock, 2)
+    if hdr == "" || string.char_at(hdr, 0) != 138 || string.char_at(hdr, 1) != 2 { return "" }
+    return read_exact(sock, 2)
+}
+
+fn get(path: string) -> ptr {
+    req = client.request("GET", "http://127.0.0.1:${PORT}${path}")
+    resp, err = client.send_request(req)
+    client.request_free(req)
+    if err != "" { println("  GET ${path}: ${err}") }
+    return resp
+}
+
+main() {
+    fw = spec.init()
+
+    server = tinyweb.web_server(PORT) {
+        tinyweb.web_socket("/ws/echo") | msg: string, sender: ptr, ctx: ptr | {
+            http.ws_send_text(sender, msg)
+        }
+        tinyweb.web_socket("/ws/bin") | msg: string, sender: ptr, ctx: ptr | {
+            http.ws_send_binary(sender, string.bytes(msg))
+        }
+        // ctx is the connection's: it outlives one message.
+        tinyweb.web_socket("/ws/count") | msg: string, sender: ptr, ctx: ptr | {
+            n, _ = string.to_int(tinyweb.ctx_get_attribute(ctx, "n"))
+            tinyweb.ctx_set_attribute(ctx, "n", "${n + 1}")
+            http.ws_send_text(sender, "${n + 1}")
+        }
+        tinyweb.sse_endpoint("/sse/ticks") | stream: ptr | {
+            n = 0
+            while tinyweb.sse_send_event(stream, "tick", "${n}") == 0 {
+                n = n + 1
+                g_sse_sent = n
+                sleep(20)
+            }
+            g_sse_gone = 1
+        }
+        tinyweb.end_point(tinyweb.GET, "/chunked") | req: ptr, res: ptr, ctx: ptr | {
+            tinyweb.response_set_header(res, "Content-Type", "text/plain")
+            stream, err = tinyweb.chunked_start(res, 200)
+            if err == "" {
+                tinyweb.write_chunk(stream, "alpha\n")
+                tinyweb.write_chunk(stream, "")
+                tinyweb.write_chunk(stream, "beta\n")
+                tinyweb.chunked_end(stream)
+            }
+        }
+        tinyweb.end_point(tinyweb.GET, "/chunked-late") | req: ptr, res: ptr, ctx: ptr | {
+            tinyweb.response_write(res, "a body")
+            _s, err = tinyweb.chunked_start(res, 200)
+            if err != "" { tinyweb.response_write_status(res, "refused", 500) }
+        }
+        tinyweb.path("/api") {
+            tinyweb.filter_all("/.*") | req: ptr, res: ptr, ctx: ptr | {
+                return tinyweb.CONTINUE
+            }
+            tinyweb.end_point(tinyweb.GET, "/item") | req: ptr, res: ptr, ctx: ptr | {
+                tinyweb.response_write_status(res, "made", 201)
+            }
+        }
+        tinyweb.path("/locked") {
+            tinyweb.filter_all("/.*") | req: ptr, res: ptr, ctx: ptr | {
+                tinyweb.response_write_status(res, "no", 403)
+                return tinyweb.STOP
+            }
+            tinyweb.end_point(tinyweb.GET, "/item") | req: ptr, res: ptr, ctx: ptr | {
+                tinyweb.response_write(res, "never")
+            }
+        }
+    }
+    tinyweb.with_timeout(server, 1000)
+    tinyweb.on_stats(server) | stats: ptr | {
+        record_stats(stats)
+    }
+
+    a = spawn(Server())
+    a ! Serve { srv: server }
+    sleep(500)
+
+    spec.describe(fw, "tinyweb websocket") {
+        spec.it("echoes a message on the server's own port") callback {
+            w = http.ws_connect(ws_url("/ws/echo"))
+            spec.assert_true(w != null, "the upgrade on the HTTP port")
+            if w != null {
+                spec.assert_str_eq(ws_round_trip(w, "hello"), "hello", "the echo")
+                ws_done(w)
+            }
+        }
+
+        spec.it("carries a message over 64 KiB both ways") callback {
+            w = http.ws_connect(ws_url("/ws/echo"))
+            if w != null {
+                big = big_text()
+                back = ws_round_trip(w, big)
+                spec.assert_eq(string.length(back), BIG, "the echo's length")
+                spec.assert_true(back == big, "the echo's bytes")
+                ws_done(w)
+            } else {
+                spec.fail("no connection")
+            }
+        }
+
+        spec.it("hands a binary message over whole, zero bytes and all") callback {
+            w = http.ws_connect(ws_url("/ws/bin"))
+            if w != null {
+                b = bytes.new(5)
+                bytes.set(b, 0, 0)
+                bytes.set(b, 1, 255)
+                bytes.set(b, 2, 0)
+                bytes.set(b, 3, 7)
+                bytes.set(b, 4, 0)
+                http.ws_send_binary(w, bytes.view(b))
+                bytes.free(b)
+                spec.assert_eq(http.ws_recv(w), 2, "a binary reply")
+                got = http.ws_message_bytes(w)
+                spec.assert_eq(got.len, 5, "five bytes")
+                if got.len == 5 {
+                    spec.assert_eq(got[1] as int, 255, "byte 1")
+                    spec.assert_eq(got[3] as int, 7, "byte 3, past a zero")
+                }
+                ws_done(w)
+            } else {
+                spec.fail("no connection")
+            }
+        }
+
+        spec.it("answers a ping with a pong") callback {
+            sock = raw_ws_connect("/ws/echo")
+            spec.assert_true(sock != null, "the upgrade")
+            if sock != null {
+                spec.assert_str_eq(ping(sock), "hb", "the pong carries the ping's payload")
+                tcp.close(sock)
+            }
+        }
+
+        spec.it("keeps one ctx for a connection's messages") callback {
+            w = http.ws_connect(ws_url("/ws/count"))
+            if w != null {
+                spec.assert_str_eq(ws_round_trip(w, "a"), "1", "first message")
+                spec.assert_str_eq(ws_round_trip(w, "b"), "2", "second message")
+                ws_done(w)
+            } else {
+                spec.fail("no connection")
+            }
+        }
+
+        spec.it("keeps a connection quiet for longer than with_timeout") callback {
+            w = http.ws_connect(ws_url("/ws/echo"))
+            if w != null {
+                spec.assert_str_eq(ws_round_trip(w, "before"), "before", "before the quiet")
+                sleep(1500)
+                spec.assert_str_eq(ws_round_trip(w, "after"), "after", "after 1.5 s, past the 1 s timeout")
+                ws_done(w)
+            } else {
+                spec.fail("no connection")
+            }
+        }
+    }
+
+    spec.describe(fw, "tinyweb server options") {
+        spec.it("closes an HTTP connection idle for with_timeout") callback {
+            sock, err = tcp.connect("127.0.0.1", PORT)
+            spec.assert_str_eq(err, "", "connected")
+            if err == "" {
+                started = os.now_monotonic_ms()
+                readable, _ = tcp.poll(sock, 5000)
+                waited = os.now_monotonic_ms() - started
+                spec.assert_true(readable, "the server closed it")
+                spec.assert_true(waited < 3000, "after ${waited} ms, the 1 s timeout and not the 30 s default")
+                tcp.close(sock)
+            }
+        }
+
+        spec.it("reports each request to on_stats") callback {
+            before = g_stats_seen
+            r = get("/api/item")
+            spec.assert_eq(client.response_status(r), 201, "the endpoint ran")
+            client.response_free(r)
+            spec.assert_eq(wait_for_stats(before + 1), before + 1, "one record")
+            spec.assert_eq(g_stats_status, 201, "its status")
+            spec.assert_eq(g_stats_route_ok, 1, "its path and endpoint")
+            spec.assert_eq(g_stats_filters, 1, "the filter that ran")
+            spec.assert_str_eq(g_stats_filter_result, "CONTINUE", "the filter let it through")
+        }
+
+        spec.it("reports a request a filter stopped") callback {
+            before = g_stats_seen
+            r = get("/locked/item")
+            spec.assert_eq(client.response_status(r), 403, "the filter answered")
+            client.response_free(r)
+            spec.assert_eq(wait_for_stats(before + 1), before + 1, "one record")
+            spec.assert_eq(g_stats_status, 403, "the filter's status")
+            spec.assert_str_eq(g_stats_filter_result, "STOP", "the filter stopped it")
+        }
+    }
+
+    spec.describe(fw, "tinyweb sse and chunked") {
+        spec.it("stops an SSE handler once its client leaves") callback {
+            sock, err = tcp.connect("127.0.0.1", PORT)
+            if err == "" {
+                tcp.write(sock, "GET /sse/ticks HTTP/1.1\r\nHost: 127.0.0.1\r\nAccept: text/event-stream\r\n\r\n")
+                seen = ""
+                for (i = 0; i < 20 && string.contains(seen, "data: 0") == 0; i++) {
+                    part, _ = tcp.read(sock, 4096)
+                    seen = string.concat(seen, part)
+                }
+                spec.assert_true(string.contains(seen, "event: tick\ndata: 0") == 1, "the first event")
+                tcp.close(sock)
+                spec.assert_eq(wait_for_sse_gone(), 1, "sse_send returned -1 and the handler ended")
+            } else {
+                spec.fail("no connection")
+            }
+        }
+
+        spec.it("streams a chunked body the client reads back whole") callback {
+            r = get("/chunked")
+            spec.assert_eq(client.response_status(r), 200, "the status")
+            spec.assert_str_eq(client.response_header(r, "Transfer-Encoding"), "chunked", "chunked on the wire")
+            spec.assert_str_eq(client.response_body(r), "alpha\nbeta\n", "the chunks, in order")
+            client.response_free(r)
+        }
+
+        spec.it("refuses a chunked start once the response has a body") callback {
+            r = get("/chunked-late")
+            spec.assert_str_eq(client.response_body(r), "refused", "chunked_start's error")
+            client.response_free(r)
+        }
+    }
+
+    rc = spec.run_summary(fw)
+    // The server actor keeps the process alive once the specs finish.
+    exit(rc)
+}

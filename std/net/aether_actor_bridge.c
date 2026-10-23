@@ -22,22 +22,20 @@
 // here to identify the "current" actor and core at the point of call.
 //
 // g_current_step_actor is set by every generated *_step() function at
-// entry (see compiler/codegen/codegen_actor.c), so it is valid in all
-// scheduling modes: main-thread sync mode, scheduler-thread dispatch,
-// and work-stealing. g_sync_step_actor is kept as a legacy fallback
-// for the main-thread-only path.
+// entry (see compiler/codegen/codegen_actor.c), so it is valid on every
+// thread that steps an actor: a scheduler core, work-stealing, an actor's
+// own thread.
 extern AETHER_TLS int current_core_id;
 extern AETHER_TLS void* g_current_step_actor;
-extern AETHER_TLS ActorBase* g_sync_step_actor;
 
 // Suspend the current actor until `fd` is readable. Returns 0 on
 // success, -1 on failure (no active actor context, invalid fd, or the
 // scheduler refused the registration).
 //
-// The caller must have received or spawned from within an actor's
-// receive handler — `g_sync_step_actor` is only set while an actor's
-// step() function is on the call stack. Calling await_io from main()
-// with no active actor is a programming error and returns -1.
+// The caller must be an actor's receive handler: `g_current_step_actor`
+// is set only while an actor's step() function is on the call stack.
+// Calling await_io from main() with no active actor is a programming error
+// and returns -1.
 //
 // On success, control returns to the caller immediately; the runtime
 // does NOT block here. The actor resumes via a fresh step() invocation
@@ -47,16 +45,12 @@ int ae_io_await(int fd) {
     if (fd < 0) return -1;
 
     ActorBase* actor = (ActorBase*)g_current_step_actor;
-    if (!actor) actor = g_sync_step_actor;
     if (!actor) return -1;
 
+    // A step on a thread that is no scheduler core (an actor's own thread)
+    // registers through core 0.
     int core = current_core_id;
-    if (core < 0) {
-        // Main-thread actor mode: step() runs on the main thread with
-        // current_core_id == -1, but the actor is still assigned to a
-        // scheduler core. Route the registration through that core.
-        core = 0;
-    }
+    if (core < 0) core = 0;
 
     return scheduler_io_register(core, fd, actor, AETHER_IO_READ);
 }

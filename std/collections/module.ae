@@ -27,25 +27,32 @@ exports(
 )
 
 // ---- ArrayList raw externs ----
-extern list_new() -> ptr
-extern list_new_in(alloc: ptr) -> ptr
-extern list_add_raw(list: ptr, item: @aether ptr) -> int
+extern list_new() -> ptr @fresh
+extern list_new_in(alloc: ptr) -> ptr @fresh
+// The stores keep their item past the call (#3086): a `ptr` stays the
+// container's, so a function that stores a borrowed `ptr` parameter
+// declares it `@keep`, and a string or a closure is handed a reference of
+// its own (`@retain`, R4).
+extern list_add_raw(list: @holds ptr, item: @aether @retain ptr) -> int
+// Append an item to a list. Returns "" on success, error on failure (OOM
+// during resize, null list).
+extern list_add(list: @holds ptr, item: @aether @retain ptr) -> string
 // String-aware add (#467), for C and `ptr` callers: the list takes a
 // reference of its own (a counted string retained, a plain C pointer
 // copied), tags the element and stores it; list_free releases owned
 // elements before freeing the backing array. `list.add(l, s)` of a
 // `string` in Aether code is a store into the list (R3): the compiler
 // hands the list a reference, moving a fresh value in.
-extern list_add_string_owned(list: ptr, item: @aether ptr) -> int
+extern list_add_string_owned(list: @holds ptr, item: @aether ptr) -> int
 extern list_get_raw(list: ptr, index: int) -> ptr
-extern list_set(list: ptr, index: int, item: @aether ptr)
+extern list_set(list: @holds ptr, index: int, item: @aether @retain ptr)
 extern list_size(list: ptr) -> int
 extern list_remove(list: ptr, index: int)
 extern list_clear(list: ptr)
 extern list_free(list: ptr)
 
 // ---- HashMap raw externs ----
-extern map_new() -> ptr
+extern map_new() -> ptr @fresh
 // `key` is BORROWED: map_put_raw copies the key into the map's own
 // AetherString (string_new at put time, released at map_free), so it
 // never holds a reference to the caller's key bytes after the call.
@@ -56,10 +63,16 @@ extern map_new() -> ptr
 // Keys cross as `@aether string`: the C map reads the AetherString's length,
 // so a key with an embedded NUL is the whole key (#2469). Unwrapped to a C
 // string, "a\0x" and "a\0y" were one key, "a".
-extern map_put_raw(map: ptr, key: @aether string, value: @aether ptr) -> int
+extern map_put_raw(map: @holds ptr, key: @aether string, value: @aether @retain ptr) -> int
+// Insert or update a key-value pair. Returns "" on success, error on
+// failure (OOM during resize, null map, null key).
+extern map_put(map: @holds ptr, key: @aether string, value: @aether @retain ptr) -> string
 // Heap-string-aware put (#467). Retains the value and tags the
-// map so map_free releases each string value before freeing.
-extern map_put_string_owned(map: ptr, key: @aether @retain string, value: @aether ptr) -> int
+// map so map_free releases each string value before freeing. The key is
+// copied, as map_put_raw's is, so it is not `@retain` either (#3086: it
+// was, and a call with a counted key handed the map a reference it never
+// released).
+extern map_put_string_owned(map: @holds ptr, key: @aether string, value: @aether ptr) -> int
 extern map_get_raw(map: ptr, key: @aether string) -> ptr
 extern map_has(map: ptr, key: @aether string) -> int
 extern map_remove(map: ptr, key: @aether string)
@@ -136,16 +149,6 @@ extern string_list_sort_lex(list: ptr)
 
 // ---- Go-style wrappers ----
 
-// Append an item to a list. Returns "" on success, error on failure
-// (OOM during resize, null list).
-list_add(list: ptr, item: ptr) -> {
-    ok = list_add_raw(list, item)
-    if ok == 0 {
-        return "list.add failed"
-    }
-    return ""
-}
-
 // Index into a list.
 // - (item, "")                     : index in range
 // - (null, "index out of range")   : index < 0 or index >= size
@@ -159,16 +162,6 @@ list_get(list: ptr, index: int) -> {
         return null, "index out of range"
     }
     return list_get_raw(list, index), ""
-}
-
-// Insert or update a key-value pair. Returns "" on success, error on
-// failure (OOM during resize, null map, null key).
-map_put(map: ptr, key: string, value: ptr) -> {
-    ok = map_put_raw(map, key, value)
-    if ok == 0 {
-        return "map.put failed"
-    }
-    return ""
 }
 
 // Look up a key.

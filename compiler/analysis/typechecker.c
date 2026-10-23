@@ -1728,6 +1728,34 @@ static int reject_string_char_write(ASTNode* target, SymbolTable* table, ASTNode
     return 1;
 }
 
+/* #3104: a write to the length of a slice or an array: `xs.len = n`,
+ * `xs.len += n`, `xs.len++`. `.len` is a value computed from the slice
+ * (#1286): a slice's length is fixed when the slice is made, and an
+ * array's is a constant. The write reached the C compiler as a store to a
+ * non-lvalue ("lvalue required"). Returns 1 when it reported. */
+static int reject_length_write(ASTNode* target, SymbolTable* table, ASTNode* at) {
+    if (!target || target->type != AST_MEMBER_ACCESS || !target->value ||
+        strcmp(target->value, "len") != 0 || target->child_count < 1 || !target->children[0])
+        return 0;
+    Type* ot = infer_type(target->children[0], table);
+    int is_array = ot && ot->kind == TYPE_ARRAY;
+    if (ot) free_type(ot);
+    if (!is_array) return 0;
+    ASTNode* base = target->children[0];
+    int named = base->type == AST_IDENTIFIER && base->value;
+    char msg[300];
+    char hint[300];
+    snprintf(msg, sizeof(msg),
+             "cannot write to the length of %s%s%s: a slice's length is fixed when the slice "
+             "is made, and an array's is a constant",
+             named ? "'" : "", named ? base->value : "a slice or an array", named ? "'" : "");
+    snprintf(hint, sizeof(hint),
+             "for fewer elements, take a slice of the same ones: `%s[lo..hi]`",
+             named ? base->value : "xs");
+    type_error_hint(msg, hint, at->line, at->column);
+    return 1;
+}
+
 static int is_integer_scalar(TypeKind kind) {
     return kind == TYPE_INT || kind == TYPE_INT64 || kind == TYPE_UINT64 ||
            kind == TYPE_UINT32 || kind == TYPE_UINT16 || kind == TYPE_UINT8;
@@ -2245,6 +2273,35 @@ static int is_const_expression(ASTNode* expr, SymbolTable* table) {
  * array_const branch of the const-declaration typecheck. */
 static int is_const_array_element(ASTNode* elem, SymbolTable* table) {
     return is_const_expression(elem, table);
+}
+
+/* #3113: does `e` name only literals and the program's `const`s, as this
+ * scope sees them? A local, a parameter or a module `var` of the name
+ * (one that hides a `const` included) is a value known only at run time. */
+static int index_names_only_consts(ASTNode* e, SymbolTable* table) {
+    if (!e) return 0;
+    switch (e->type) {
+        case AST_LITERAL:
+            return 1;
+        case AST_IDENTIFIER: {
+            Symbol* s = e->value ? lookup_symbol(table, e->value) : NULL;
+            return s && s->is_const;   /* #2516: set for a `const`, never a `var` */
+        }
+        case AST_UNARY_EXPRESSION:
+        case AST_BINARY_EXPRESSION:
+            for (int i = 0; i < e->child_count; i++)
+                if (!index_names_only_consts(e->children[i], table)) return 0;
+            return e->child_count > 0;
+        default:
+            return 0;
+    }
+}
+
+/* #3113: the value of an index known when the program is compiled: a
+ * literal, a `const`, or arithmetic over them. */
+static int tc_index_constant(ASTNode* idx, SymbolTable* table, int64_t* out) {
+    return index_names_only_consts(idx, table) &&
+           contract_eval_int64(idx, g_typecheck_program, out);
 }
 
 /* #2590: a struct literal whose every field is a compile-time constant or
@@ -3045,8 +3102,11 @@ static void reject_non_closure_callee(ASTNode* call, SymbolTable* table) {
     else
         snprintf(name, sizeof(name), "the first argument");
     char msg[640];
-    snprintf(msg, sizeof(msg),
-             "call() needs a closure, but %s has type %s", name, what);
+    if (annotation_has_marker(call->annotation, "value_callee"))   /* #3099: `xs[0]()` */
+        snprintf(msg, sizeof(msg), "the value called here is not a function: it has type %s", what);
+    else
+        snprintf(msg, sizeof(msg),
+                 "call() needs a closure, but %s has type %s", name, what);
     const char* hint =
         t->kind == TYPE_TUPLE
             ? "a multi-value return bound to one name stays a tuple; destructure "
@@ -3530,17 +3590,33 @@ static ASTNode* global_var_decl(ASTNode* child);
 /* The module-level `var` a bare `name = value` binding assigns: the
  * program's global of that name, when no local of it is in scope (#701).
  * NULL for any other binding. */
+static ASTNode* module_var_named(const char* name) {
+    ASTNode* program = aether_typecheck_program_node();
+    for (int i = 0; program && i < program->child_count; i++) {
+        ASTNode* g = global_var_decl(program->children[i]);
+        if (g && strcmp(g->value, name) == 0) return g;
+    }
+    return NULL;
+}
+
 static ASTNode* rebound_global_var(ASTNode* stmt, SymbolTable* table) {
     if (stmt->type != AST_VARIABLE_DECLARATION || !stmt->type_inferred || !stmt->value)
         return NULL;
     for (SymbolTable* s = table; s && s->parent; s = s->parent)
         if (lookup_symbol_local(s, stmt->value)) return NULL;
-    ASTNode* program = aether_typecheck_program_node();
-    for (int i = 0; program && i < program->child_count; i++) {
-        ASTNode* g = global_var_decl(program->children[i]);
-        if (g && strcmp(g->value, stmt->value) == 0) return g;
+    return module_var_named(stmt->value);
+}
+
+/* #2734: does a C-style for loop's bare init (`i = 0`) name a variable bound
+ * where the loop is: a local bound before it (an actor's state field is
+ * one), or a module `var`? Then the init assigns it, as `i = 0` does
+ * anywhere. */
+static int for_init_names_bound(const char* name, SymbolTable* table) {
+    for (SymbolTable* t = table; t && t->parent; t = t->parent) {
+        Symbol* s = lookup_symbol_local(t, name);
+        if (s) return !s->hoist_pending;
     }
-    return NULL;
+    return module_var_named(name) != NULL;
 }
 
 static Type* fnptr_binding_slot(ASTNode* stmt, SymbolTable* table) {
@@ -5003,41 +5079,44 @@ typedef struct {
     int used;
 } TrackedVar;
 
+/* A function's tracked locals, found by name (#3083): `first` maps a name
+ * to its first entry + 1, and `next` chains the entries of one name, which a
+ * reference marks used together. Scanning them all for each reference was
+ * quadratic in a function's locals. */
+typedef struct {
+    TrackedVar* vars;
+    int count;
+    StrMap first;
+    int* next;
+} TrackedVars;
+
+/* The entries of a name are marked together, so a marked first entry means
+ * every one is: a local rebound n times and read n times costs n, not n^2. */
+static void mark_used(TrackedVars* t, const char* name) {
+    intptr_t at = (intptr_t)strmap_get(&t->first, name);
+    if (!at || t->vars[at - 1].used) return;
+    for (; at; at = t->next[at - 1]) t->vars[at - 1].used = 1;
+}
+
 // Collect all AST_IDENTIFIER references in a subtree (excluding declarations)
-static void collect_references(ASTNode* node, TrackedVar* vars, int var_count) {
+static void collect_references(ASTNode* node, TrackedVars* t) {
     if (!node) return;
 
     // An identifier in expression position is a reference
-    if (node->type == AST_IDENTIFIER && node->value) {
-        for (int i = 0; i < var_count; i++) {
-            if (strcmp(vars[i].name, node->value) == 0) {
-                vars[i].used = 1;
-            }
-        }
-    }
+    if (node->type == AST_IDENTIFIER && node->value) mark_used(t, node->value);
 
     /* A lowered quote's body is the tree's now: each variable it captures
      * is read through the tree (docs/quote.md). */
     if (node->type == AST_QUOTE) {
         QuoteInfo* q = quote_of(node);
-        for (int k = 0; q && k < q->ncaps; k++) {
-            for (int i = 0; i < var_count; i++) {
-                if (strcmp(vars[i].name, q->caps[k].name) == 0) vars[i].used = 1;
-            }
-        }
+        for (int k = 0; q && k < q->ncaps; k++) mark_used(t, q->caps[k].name);
     }
 
     // A call through a local is a use of that local: `g(p)` where `g` was
     // assigned via `f as fn(ptr) -> int` parses as AST_FUNCTION_CALL with
     // the callee name in node->value (no AST_IDENTIFIER child), so match
     // the call name against tracked variables too.
-    if (node->type == AST_FUNCTION_CALL && node->value) {
-        for (int i = 0; i < var_count; i++) {
-            if (strcmp(vars[i].name, node->value) == 0) {
-                vars[i].used = 1;
-            }
-        }
-    }
+    if (node->type == AST_FUNCTION_CALL && node->value) mark_used(t, node->value);
 
     // A call through a local's fn-pointer field, `f.get_text(p)`, uses `f`
     // too. The parser collapsed the callee to the dotted name `f.get_text`
@@ -5047,12 +5126,10 @@ static void collect_references(ASTNode* node, TrackedVar* vars, int var_count) {
     if (node->type == AST_FUNCTION_CALL && node->value && node->annotation &&
         strncmp(node->annotation, "fnfield_", 8) == 0) {
         const char* dot = strchr(node->value, '.');
-        size_t rlen = dot ? (size_t)(dot - node->value) : 0;
-        for (int i = 0; i < var_count && rlen > 0; i++) {
-            if (strlen(vars[i].name) == rlen &&
-                strncmp(vars[i].name, node->value, rlen) == 0) {
-                vars[i].used = 1;
-            }
+        char recv[256];
+        if (dot && dot > node->value && dot - node->value < (ptrdiff_t)sizeof(recv)) {
+            snprintf(recv, sizeof(recv), "%.*s", (int)(dot - node->value), node->value);
+            mark_used(t, recv);
         }
     }
 
@@ -5068,11 +5145,7 @@ static void collect_references(ASTNode* node, TrackedVar* vars, int var_count) {
             !(mt && mt->kind == TYPE_ARRAY) && !is_string_seq_ptr_type(mt)) {
             char len_name[256];
             snprintf(len_name, sizeof(len_name), "%s_len", match_expr->value);
-            for (int i = 0; i < var_count; i++) {
-                if (strcmp(vars[i].name, len_name) == 0) {
-                    vars[i].used = 1;
-                }
-            }
+            mark_used(t, len_name);
         }
     }
 
@@ -5080,13 +5153,13 @@ static void collect_references(ASTNode* node, TrackedVar* vars, int var_count) {
     if (node->type == AST_VARIABLE_DECLARATION) {
         // Only walk children (RHS expression), not the declaration name
         for (int i = 0; i < node->child_count; i++) {
-            collect_references(node->children[i], vars, var_count);
+            collect_references(node->children[i], t);
         }
         return;
     }
 
     for (int i = 0; i < node->child_count; i++) {
-        collect_references(node->children[i], vars, var_count);
+        collect_references(node->children[i], t);
     }
 }
 
@@ -5172,9 +5245,18 @@ static void check_unused_variables(ASTNode* body, const char** global_names,
     }
 
     // Collect references
-    for (int i = 0; i < body->child_count; i++) {
-        collect_references(body->children[i], vars, var_count);
+    TrackedVars t = { vars, var_count, {0}, (int*)calloc((size_t)var_count, sizeof(int)) };
+    strmap_init(&t.first);
+    if (!t.next) { free(vars); return; }
+    for (int i = var_count - 1; i >= 0; i--) {
+        t.next[i] = (int)(intptr_t)strmap_get(&t.first, vars[i].name);
+        strmap_put(&t.first, vars[i].name, (void*)(intptr_t)(i + 1));
     }
+    for (int i = 0; i < body->child_count; i++) {
+        collect_references(body->children[i], &t);
+    }
+    strmap_free(&t.first);
+    free(t.next);
 
     // Warn about unused
     for (int i = 0; i < var_count; i++) {
@@ -5513,11 +5595,15 @@ static int is_borrowed_view_source(const ASTNode* e) {
  * is checked: each element is then checked as a value of the sum (one of its
  * variants), and codegen wraps each variant as the sum. Left to its own
  * elements, the literal was an array of its first one's type, `Circle`, and
- * a `Square` beside it was refused. */
-static void sum_place_to_array_literal(ASTNode* value, Type* place) {
+ * a `Square` beside it was refused. So does a place whose elements are
+ * typed function pointers (`let fs: Op[2] = [twice, half]`), where a named
+ * function element is its address (#3098), and one of `ptr`s, where it is
+ * its C symbol. */
+static void place_to_array_literal(ASTNode* value, Type* place) {
     if (!value || value->type != AST_ARRAY_LITERAL || value->child_count == 0 || !place ||
         place->kind != TYPE_ARRAY || !place->element_type ||
-        place->element_type->kind != TYPE_SUM)
+        !(place->element_type->kind == TYPE_SUM || place->element_type->kind == TYPE_PTR ||
+          (place->element_type->kind == TYPE_FUNCTION && place->element_type->is_fnptr)))
         return;
     set_node_type(value, create_array_type(clone_type(place->element_type), value->child_count));
 }
@@ -6577,6 +6663,7 @@ int typecheck_program(ASTNode* program) {
     g_typecheck_program = program;
     g_tc_ptr_to_closure = 0;
     tc_clauses_reset();   /* #2647: a program's clause sets, indexed afresh */
+    hoist_cache_reset();  /* #3083: the hoisting answers, gathered afresh */
 
     /* #2631: a module file checked on its own (it has an `exports(...)`
      * list, the test `program_is_module` below makes too) knows the
@@ -7407,7 +7494,14 @@ int typecheck_program(ASTNode* program) {
 
         Symbol* full_sym = lookup_symbol(global_table, full_name);
         Symbol* short_sym = lookup_symbol_local(global_table, short_name);
-        if (full_sym && short_sym && short_sym->is_function && full_sym->type) {
+        /* #3086: only a symbol the import bound. One it left alone (the
+         * builtin `free`, which std.string's glob names too) was given the
+         * import's type and declaration here, so a module's body, where a
+         * bare `free` is the builtin, was checked against `string.free`. A
+         * program's call of the name is resolved through the alias
+         * (typecheck_function_call_inner). */
+        if (full_sym && short_sym && short_sym->import_bound && short_sym->is_function &&
+            full_sym->type) {
             if (short_sym->type) free_type(short_sym->type);
             short_sym->type = clone_type(full_sym->type);
             short_sym->node = full_sym->node;
@@ -7811,6 +7905,14 @@ int typecheck_actor_definition(ASTNode* actor, SymbolTable* table) {
         ASTNode* child = actor->children[i];
         
         if (child->type == AST_STATE_DECLARATION) {
+            /* The generated actor keeps the runtime's actor fields in a
+             * member of this name, beside the states (#3094): a state may be
+             * named like any of those fields, but not like the member. */
+            if (child->value && strcmp(child->value, "_aether_base") == 0) {
+                type_error_hint("a state cannot be named '_aether_base'",
+                                "the generated actor keeps the runtime's actor fields under that name; rename the state",
+                                child->line, child->column);
+            }
             int checked = 0;
             if ((!child->node_type || child->node_type->kind == TYPE_UNKNOWN)
                 && child->child_count > 0 && child->children[0]) {
@@ -7958,25 +8060,7 @@ static int scoped_mentions(ASTNode* node, const char* name) {
     return 0;
 }
 
-/* Curated container-insert builtins: handing a @scoped value to one of these
- * stores it beyond the block. Same curation posture as codegen's
- * is_nonstoring_builtin allowlist. Names are the as-written qualified
- * spellings (the AST stores callees in dotted form). */
-static int scoped_store_call(const char* fn) {
-    if (!fn) return 0;
-    /* The std calls that keep their argument in a container. #3001: the
-     * list named `list.push`, `map.set` and `seq.cons`, which std does not
-     * have, and missed the sequence cons and the raw and owning forms. */
-    /* #3034: and std.collections' unqualified `list_add` and `map_put`,
-     * which tinyweb stores its route handlers through. */
-    static const char* sinks[] = {
-        "list.add", "list.add_raw", "list.add_string_owned", "list.set",
-        "map.put", "map.put_raw", "map.put_string_owned",
-        "set.add", "set.try_add", "string.seq_cons", "list_add", "map_put", NULL };
-    for (int i = 0; sinks[i]; i++)
-        if (strcmp(fn, sinks[i]) == 0) return 1;
-    return 0;
-}
+static int call_arg_mode(ASTNode* program, ASTNode* call, int i);   /* defined below */
 
 /* Reason string if `node` escapes `name` AT THIS NODE, else NULL. */
 static const char* scoped_escape_reason(ASTNode* node, const char* name) {
@@ -8006,14 +8090,18 @@ static const char* scoped_escape_reason(ASTNode* node, const char* name) {
         return "it is captured by a closure that can outlive the block";
     if (node->type == AST_QUOTE && scoped_mentions(node, name))
         return "it is captured by a quote, whose tree can outlive the block";
-    if (node->type == AST_FUNCTION_CALL && node->value &&
-        scoped_store_call(node->value)) {
-        int first = strcmp(node->value, "call") == 0 ? 1 : 0;
-        for (int i = first; i < node->child_count; i++) {
+    /* #3086: given to a parameter that keeps it, as its callee declares:
+     * an Aether function's `@keep` one, an extern's `@retain` one (std's
+     * list and map stores), or one of a closure type that says so. #3001
+     * named the stores instead, and #3079 knew them by the function a call
+     * reaches; a parameter that copies its argument (a set's item, a map's
+     * key) keeps nothing. */
+    if (node->type == AST_FUNCTION_CALL && node->value) {
+        for (int i = 0; i < node->child_count; i++) {
             ASTNode* a = node->children[i];
-            if (a && a->type == AST_IDENTIFIER && a->value &&
-                strcmp(a->value, name) == 0)
-                return "it is inserted into a container";
+            if (a && a->type == AST_IDENTIFIER && a->value && strcmp(a->value, name) == 0 &&
+                call_arg_mode(g_typecheck_program, node, i) == FN_MODE_KEEP)
+                return "it is passed to a parameter that keeps it";
         }
     }
     return NULL;
@@ -8777,6 +8865,8 @@ static int keep_set_other_param(const KeepSet* s, const char* param) {
 
 static int is_bare_ptr_type(Type* t);
 
+static int type_holds_borrowable(ASTNode* program, Type* t, int depth);
+
 /* #3034: does the struct `name` hold, by value, a bare `ptr` or a closure
  * (in a field, or in a struct field held by value)? */
 static int struct_holds_borrowable(ASTNode* program, const char* name, int depth) {
@@ -8788,13 +8878,26 @@ static int struct_holds_borrowable(ASTNode* program, const char* name, int depth
         for (int f = 0; f < sd->child_count; f++) {
             ASTNode* fd = sd->children[f];
             Type* ft = fd && fd->type == AST_STRUCT_FIELD ? fd->node_type : NULL;
-            if (!ft) continue;
-            if (is_bare_ptr_type(ft) || (ft->kind == TYPE_FUNCTION && !ft->is_fnptr)) return 1;
-            if (ft->kind == TYPE_STRUCT && ft->struct_name &&
-                struct_holds_borrowable(program, ft->struct_name, depth + 1))
-                return 1;
+            if (ft && type_holds_borrowable(program, ft, depth + 1)) return 1;
         }
         return 0;
+    }
+    return 0;
+}
+
+/* #3034: does a value of type `t` hold, by value, a bare `ptr` or a
+ * closure: it is one, or a struct with one in a field (or in a struct
+ * field held by value). #3079: or an optional of one (a `fn?` field), or
+ * a sum one of whose variants holds one. */
+static int type_holds_borrowable(ASTNode* program, Type* t, int depth) {
+    if (!t || depth > 8) return 0;
+    if (is_bare_ptr_type(t) || (t->kind == TYPE_FUNCTION && !t->is_fnptr)) return 1;
+    if (t->kind == TYPE_OPTIONAL) return type_holds_borrowable(program, t->element_type, depth + 1);
+    if (t->kind == TYPE_STRUCT && t->struct_name)
+        return struct_holds_borrowable(program, t->struct_name, depth + 1);
+    if (t->kind == TYPE_SUM) {
+        for (int i = 0; t->tuple_types && i < t->tuple_count; i++)
+            if (type_holds_borrowable(program, t->tuple_types[i], depth + 1)) return 1;
     }
     return 0;
 }
@@ -8806,12 +8909,16 @@ static int struct_holds_borrowable(ASTNode* program, const char* name, int depth
 static const char* borrowed_param_kind(ASTNode* program, Type* t, int* is_fn) {
     *is_fn = 0;
     if (!t) return NULL;
-    if (t->kind == TYPE_FUNCTION && !t->is_fnptr) {
+    /* #3079: a `fn?` is borrowed as the closure it may hold. */
+    Type* inner = t->kind == TYPE_OPTIONAL ? t->element_type : t;
+    if (inner && inner->kind == TYPE_FUNCTION && !inner->is_fnptr) {
         *is_fn = 1;
         return aether_intern(type_spelled(t));
     }
-    if (t->kind == TYPE_STRUCT && t->struct_name && !t->distinct_name &&
-        struct_holds_borrowable(program, t->struct_name, 0))
+    /* A struct taken by value that holds a pointer or a closure, and #3079
+     * a sum one of whose variants does (or an optional of either). */
+    if (inner && (inner->kind == TYPE_STRUCT || inner->kind == TYPE_SUM) &&
+        !inner->distinct_name && type_holds_borrowable(program, inner, 0))
         return aether_intern(type_spelled(t));
     return NULL;
 }
@@ -8915,11 +9022,15 @@ static ASTNode* call_extern_decl(ASTNode* program, const char* name) {
 }
 
 /* The declaration a call is checked against: an Aether function, or an
- * extern. NULL for a call through a value or a builtin. */
+ * extern. NULL for a call through a value or a builtin. #3086: an extern a
+ * module keeps to itself (std.list's `list_add_raw`, a bare `extern`) is
+ * not merged into the program, so it is the declaration the call was typed
+ * against (callee_extern), the module's own. */
 static ASTNode* call_callee_decl(ASTNode* program, ASTNode* call) {
     if (!program || !call || !call->value) return NULL;
     ASTNode* def = effect_resolve_callee(program, call->value);
-    return def ? def : call_extern_decl(program, call->value);
+    if (def) return def;
+    return call->callee_extern ? call->callee_extern : call_extern_decl(program, call->value);
 }
 
 /* The parameter of `decl` that argument `i` of `call` fills, or NULL. */
@@ -9300,6 +9411,7 @@ static void bind_pattern_holders(KeepSet* s, ASTNode* pat, Carried c, Type* t,
     }
 }
 
+static int call_keeps_in_local_holder(ASTNode* program, ASTNode* call, int i, const KeepSet* s);
 static void check_ptr_keeps_in(ASTNode* program, ASTNode* n, KeepSet* s,
                                const char** globals, int nglobals, int in_closure);
 
@@ -9905,21 +10017,16 @@ static void check_ptr_keeps_in(ASTNode* program, ASTNode* n, KeepSet* s,
                 report_borrowed_keep(s, f, c, "sent in a message");
         }
     }
+    /* #3086: a parameter that keeps what it is given, as its callee
+     * declares it (call_arg_mode): std's list and map stores declare theirs
+     * `@retain` at the C boundary, so a borrowed `ptr` put in a container is
+     * E0902 as one stored in a module `var` is, not only a closure or a
+     * struct that holds one (#3001's holders-only rule). */
     if (n->type == AST_FUNCTION_CALL && n->value) {
-        int container = scoped_store_call(n->value);
         for (int i = 0; i < n->child_count; i++) {
             if (!(c = carries_borrowed_ptr(n->children[i], s)).n) continue;
-            if (call_keeps_arg(program, n, i)) {
+            if (call_keeps_arg(program, n, i) && !call_keeps_in_local_holder(program, n, i, s))
                 report_borrowed_keep(s, n->children[i], c, "passed to a parameter that keeps it");
-            } else if (container) {
-                /* What holds a parameter, and #3034 a `fn` or struct
-                 * parameter itself (a closure is boxed into the slot). */
-                Carried kept = { 0 };
-                for (int k = 0; k < c.n; k++)
-                    if (c.vias[k] || keep_set_other_param(s, c.params[k]) >= 0)
-                        carried_add_at(&kept, c.params[k], c.vias[k], c.parts[k]);
-                if (kept.n) report_borrowed_keep(s, n->children[i], kept, "stored in a container");
-            }
         }
     }
     for (int i = 0; i < n->child_count; i++)
@@ -10080,6 +10187,70 @@ static int c_name_outlives(const KeepCtx* c, const char* name, int depth) {
     check_ptr_keeps_in(c->program, c->body, &s, c->globals, c->nglobals, 0);
     keep_set_free(&s);
     return s.escaped;
+}
+
+/* #3086: is `e` a holder (`@holds`) whose memory ends with the function: a
+ * local bound only from calls to `@fresh` externs (a container the function
+ * makes, std's list and map constructors) or `null`, and that goes nowhere
+ * a borrowed `ptr` parameter would escape to (the E0902 facts, asked as
+ * c_name_outlives asks them). Decided by those declarations alone: a
+ * parameter, a module `var`, a field or anything else is taken to outlive
+ * it. */
+typedef struct { int found; int other; } HolderBindings;
+
+static void scan_holder_bindings(ASTNode* program, ASTNode* n, const char* name,
+                                 HolderBindings* b) {
+    if (!n || b->other) return;
+    if (n->type == AST_FUNCTION_DEFINITION || n->type == AST_BUILDER_FUNCTION) return;
+    ASTNode* v = NULL;
+    if (n->type == AST_VARIABLE_DECLARATION && n->value && !strcmp(n->value, name) &&
+        n->child_count > 0)
+        v = n->children[n->child_count - 1];
+    else if (n->type == AST_BINARY_EXPRESSION && n->value && !strcmp(n->value, "=") &&
+             n->child_count == 2 && n->children[0] && n->children[0]->type == AST_IDENTIFIER &&
+             n->children[0]->value && !strcmp(n->children[0]->value, name))
+        v = n->children[1];
+    if (v) {
+        b->found = 1;
+        v = strip_ptr_casts(v);
+        ASTNode* decl = v && v->type == AST_FUNCTION_CALL ? call_callee_decl(program, v) : NULL;
+        int fresh = v && (v->type == AST_NULL_LITERAL ||
+                          (decl && decl->type == AST_EXTERN_FUNCTION &&
+                           annotation_has_marker(decl->annotation, "fresh_return")));
+        if (!fresh) b->other = 1;
+    }
+    for (int i = 0; i < n->child_count; i++) scan_holder_bindings(program, n->children[i], name, b);
+}
+
+static int holder_outlives(const KeepCtx* c, ASTNode* e, int depth) {
+    e = strip_ptr_casts(e);
+    if (!c || depth > 8 || !e || e->type != AST_IDENTIFIER || !e->value) return 1;
+    const char* name = e->value;
+    for (int g = 0; g < c->nglobals; g++)
+        if (!strcmp(c->globals[g], name)) return 1;
+    for (int i = 0; c->fn && i < c->fn->child_count && c->fn->children[i] != c->body; i++) {
+        ASTNode* p = c->fn->children[i];
+        if (p && p->value && !strcmp(p->value, name)) return 1;
+    }
+    HolderBindings b = { 0, 0 };
+    scan_holder_bindings(c->program, c->body, name, &b);
+    if (!b.found || b.other) return 1;
+    return c_name_outlives(c, name, depth);
+}
+
+/* #3086: does `call` keep argument `i` only in a holder that ends with the
+ * function? An extern names the argument that holds what its `@retain`
+ * parameters are given with `@holds` (std's list and map stores); without
+ * one, a keep is taken to outlive the call. */
+static int call_keeps_in_local_holder(ASTNode* program, ASTNode* call, int i, const KeepSet* s) {
+    if (!s || !s->ctx || call_value_type(call)) return 0;
+    ASTNode* decl = call_callee_decl(program, call);
+    if (!decl || decl->type != AST_EXTERN_FUNCTION) return 0;
+    for (int h = 0; h < decl->child_count && h < call->child_count; h++) {
+        if (h == i || !param_has_mode(decl->children[h], "holder_param")) continue;
+        return !holder_outlives(s->ctx, call->children[h], s->depth + 1);
+    }
+    return 0;
 }
 
 /* Does the memory the store target `lhs` writes (`p.f`, `p[i]`, `(p as
@@ -11591,24 +11762,18 @@ static int report_unheld_binding(ASTNode* stmt, Type* w, Type* t, ASTNode* init)
 
 /* Function (or main) entry: hoist_if_branch_vars's names. */
 static void declare_if_branch_hoists(ASTNode* body, SymbolTable* table) {
-    const char* names[HOIST_MAX_NAMES];
-    int n = hoist_if_branch_candidates(body, names, HOIST_MAX_NAMES);
-    for (int i = 0; i < n; i++) {
-        declare_hoisted_local(table, names[i],
-                              hoist_decl_type(hoist_if_branch_first_decl(body, names[i])));
-    }
+    const HoistNames* h = hoist_if_branch_hoists(body);
+    for (int i = 0; h && i < h->count; i++)
+        declare_hoisted_local(table, h->names[i], hoist_decl_type(hoist_names_decl(h, i)));
 }
 
 /* Before an if/else, or a switch with a default (#2732): hoist_common_vars's
  * names (every arm declares them), typed from the first arm that types
  * them. */
 static void declare_common_hoists(ASTNode* stmt, SymbolTable* table) {
-    const char* names[HOIST_MAX_NAMES];
-    int n = hoist_common_decl_names(stmt, names, HOIST_MAX_NAMES);
-    for (int i = 0; i < n; i++) {
-        declare_hoisted_local(table, names[i],
-                              hoist_decl_type(hoist_common_first_decl(stmt, names[i])));
-    }
+    const HoistNames* h = hoist_common_hoists(stmt);
+    for (int i = 0; h && i < h->count; i++)
+        declare_hoisted_local(table, h->names[i], hoist_decl_type(hoist_names_decl(h, i)));
 }
 
 /* Before a while: hoist_loop_vars's names. */
@@ -12879,7 +13044,7 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                             ex->type->kind != TYPE_UNKNOWN)
                             slot = ex->type;
                     }
-                    sum_place_to_array_literal(init, slot);
+                    place_to_array_literal(init, slot);
                 }
                 // Match-as-expression: typecheck as statement, then use its type
                 if (init->type == AST_MATCH_STATEMENT) {
@@ -13678,7 +13843,8 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                 ASTNode* right = stmt->children[1];
                 if (reject_const_element_write(left, table, stmt) ||   /* #2516 */
                     reject_string_char_write(left, table, stmt) ||     /* #3022 */
-                    reject_readonly_view_write(left, stmt))            /* #3025 */
+                    reject_readonly_view_write(left, stmt) ||          /* #3025 */
+                    reject_length_write(left, table, stmt))            /* #3104 */
                     return 0;
 
                 Symbol* symbol = lookup_symbol(table, left->value);
@@ -13698,7 +13864,7 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                 // #1044 implicit enum selector: `d = Blue` where `d` has an enum
                 // type resolves the bare member against that enum.
                 coerce_bare_enum_member(right, symbol->type, table);
-                sum_place_to_array_literal(right, symbol->type);   /* #3071 */
+                place_to_array_literal(right, symbol->type);   /* #3071 */
 
                 Type* right_type = infer_type(right, table);
                 /* #1286: a `T[N]` array or `null` into a `T[]` binding. */
@@ -13935,7 +14101,15 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
             
             // Type check init (child 0)
             if (stmt->child_count > 0 && stmt->children[0]) {
-                typecheck_statement(stmt->children[0], loop_table);
+                /* #2734: a bare init of a name not bound here declares the
+                 * loop's own variable, as a typed init or a range-for's
+                 * does; one of a bound name stays the binding that assigns
+                 * it. Codegen reads which from `type_inferred`. */
+                ASTNode* init = stmt->children[0];
+                if (init->type == AST_VARIABLE_DECLARATION && init->type_inferred &&
+                    init->value && !for_init_names_bound(init->value, table))
+                    init->type_inferred = 0;
+                typecheck_statement(init, loop_table);
             }
             
             // Type check condition (child 1). #3042 review: as for `if` and
@@ -14896,13 +15070,27 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                 /* #3071: an array literal into a written array-of-sum result. */
                 if (stmt->child_count == 1 && g_tc_return_owner &&
                     g_tc_return_owner->type != AST_CLOSURE && !g_tc_return_owner->type_inferred)
-                    sum_place_to_array_literal(stmt->children[i], g_tc_return_type);
+                    place_to_array_literal(stmt->children[i], g_tc_return_type);
                 if (stmt->children[i] && stmt->children[i]->type == AST_MATCH_STATEMENT) {
                     tc_push_value_match(stmt->children[i]);   /* #2768 */
                     typecheck_node(stmt->children[i], table);
                     tc_pop_value_match();
-                } else
+                } else {
                     typecheck_expression(stmt->children[i], table);
+                    /* `return held` from a `-> fn` function: the named function
+                     * is the value returned, so codegen emits its adapter, as
+                     * for an argument. Unmarked, the return was wrapped in a
+                     * call to an adapter nothing had registered: undeclared
+                     * in C. A typed function pointer result, or part of a
+                     * tuple result, takes the function's address instead
+                     * (#2636), and a `ptr` result its C symbol. */
+                    Type* slot = g_tc_return_type;
+                    if (slot && slot->kind == TYPE_TUPLE && stmt->child_count > 1)
+                        slot = i < slot->tuple_count ? slot->tuple_types[i] : NULL;
+                    if (!(slot && (slot->kind == TYPE_PTR ||
+                                   (slot->kind == TYPE_FUNCTION && slot->is_fnptr))))
+                        function_value_annotate(stmt->children[i], table);
+                }
             }
             /* #2697, #2733: a return of something with no value, a call of
              * a function that returns nothing or a `match` whose arms give
@@ -15729,8 +15917,30 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                 }
             }
             // Type check all array elements
+            Type* place = expr->node_type;
+            Type* place_elem = place && place->kind == TYPE_ARRAY ? place->element_type : NULL;
+            Type* fnptr_elem = place_elem && place_elem->kind == TYPE_FUNCTION &&
+                               place_elem->is_fnptr ? place_elem : NULL;
             for (int i = 0; i < expr->child_count; i++) {
-                typecheck_expression(expr->children[i], table);
+                ASTNode* el = expr->children[i];
+                typecheck_expression(el, table);
+                /* A named function among the elements is a function value,
+                 * as it is in an argument or a local's value: `[held, null]`
+                 * is an array of closures. Left a bare name, the element
+                 * had no type, the literal defaulted to an int array, and C
+                 * got `int fs[2] = {held, NULL}` (#3092, #3099). In an
+                 * array the place types as typed function pointers (`let
+                 * fs: Op[2] = [twice, half]`), it is the function's address,
+                 * as in a local of that type (#2623); in an array of `ptr`s,
+                 * its C symbol. */
+                if (fnptr_elem && fn_name_matches_signature(table, el, fnptr_elem)) {
+                    refuse_moded_fn_in_fnptr_slot(table, el, fnptr_elem);
+                    set_node_type(el, clone_type(fnptr_elem));
+                    if (el->annotation) free(el->annotation);
+                    el->annotation = strdup("fn_addr");
+                } else if (!(place_elem && place_elem->kind == TYPE_PTR)) {
+                    function_value_annotate(el, table);
+                }
                 if (refuse_valueless(expr->children[i], table, "store")) return 0;
             }
             /* The element type was chosen by the early inference pass from
@@ -16150,6 +16360,27 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                 }
                 if (idx_type) free_type(idx_type);
 
+                /* #3113: an index into a `T[N]` is in `0 ..< N`, checked
+                 * when the program runs; one known when it is compiled and
+                 * outside that is refused here. */
+                int64_t civ = 0;
+                if (type_is_sized_array(arr_type) && !arr_type->index_enum_name &&
+                    tc_index_constant(expr->children[1], table, &civ) &&
+                    (civ < 0 || civ >= arr_type->array_size)) {
+                    char error_msg[320];
+                    char tn[160];
+                    snprintf(error_msg, sizeof(error_msg),
+                             "array index %lld is out of range for '%s', whose indexes are "
+                             "0 through %d",
+                             (long long)civ, ret_type_spell(arr_type, tn, sizeof(tn)),
+                             arr_type->array_size - 1);
+                    type_error(error_msg, expr->children[1]->line ? expr->children[1]->line
+                                                                  : expr->line,
+                               expr->children[1]->line ? expr->children[1]->column
+                                                       : expr->column);
+                    return 0;
+                }
+
                 // Propagate element type from the array expression. The
                 // array's element type is authoritative: the early inference
                 // pass may have stamped this access from the array's FIRST
@@ -16207,7 +16438,7 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                         ASTNode* fd = sdef->children[f];
                         if (fd && fd->type == AST_STRUCT_FIELD && fd->value &&
                             strcmp(fd->value, field_init->value) == 0)
-                            sum_place_to_array_literal(field_init->children[0], fd->node_type);
+                            place_to_array_literal(field_init->children[0], fd->node_type);
                     }
                     typecheck_expression(field_init->children[0], table);
                     if (refuse_valueless(field_init->children[0], table, "store")) {
@@ -16284,6 +16515,19 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                     typecheck_expression(expr->children[0], table);
                     set_node_type(expr, create_type(TYPE_INT));
                     return 1;
+                }
+                if (lt && lt->kind == TYPE_ARRAY) {
+                    /* #3092: `.len` is an array's one member (a slice's and a
+                     * fixed-size array's alike), so any other name is a
+                     * mistake to name here; left alone it reached the C as a
+                     * member of a pointer or an array (`arr.length`). */
+                    char msg[256];
+                    snprintf(msg, sizeof(msg),
+                             "'%s' is not a member of an array: an array's length is `.len`, its only member",
+                             expr->value);
+                    free_type(lt);
+                    type_error(msg, expr->line, expr->column);
+                    return 0;
                 }
                 if (lt && is_lane_type(lt->kind)) {
                     int idx = lane_accessor_index(lt->kind, expr->value);
@@ -16750,7 +16994,8 @@ static int reject_step_operand(ASTNode* expr, SymbolTable* table, const char* wr
     if (!t) return 0;
     if (reject_const_element_write(t, table, expr) ||   /* #2516 */
         reject_string_char_write(t, table, expr) ||
-        reject_readonly_view_write(t, expr))            /* #3025 */
+        reject_readonly_view_write(t, expr) ||          /* #3025 */
+        reject_length_write(t, table, expr))            /* #3104 */
         return 1;
     char msg[512];
     char hint[640];
@@ -16935,7 +17180,7 @@ int typecheck_binary_expression(ASTNode* expr, SymbolTable* table) {
      * [c, q]`) takes the place's type before it is checked. */
     if (expr->value && strcmp(expr->value, "=") == 0 && right->type == AST_ARRAY_LITERAL) {
         Type* lt = infer_type(left, table);
-        sum_place_to_array_literal(right, lt);
+        place_to_array_literal(right, lt);
         if (lt) free_type(lt);
     }
     typecheck_expression(right, table);
@@ -17132,7 +17377,8 @@ int typecheck_binary_expression(ASTNode* expr, SymbolTable* table) {
     if (operator == TOKEN_ASSIGN) {
         if (reject_const_element_write(left, table, expr) ||   /* #2516 */
             reject_string_char_write(left, table, expr) ||     /* #3022 */
-            reject_readonly_view_write(left, expr)) {          /* #3025 */
+            reject_readonly_view_write(left, expr) ||          /* #3025 */
+            reject_length_write(left, table, expr)) {          /* #3104 */
             free_type(left_type);
             free_type(right_type);
             return 0;
@@ -19039,6 +19285,28 @@ static int typecheck_function_call_inner(ASTNode* call, SymbolTable* table) {
     if (!call || call->type != AST_FUNCTION_CALL) return 0;
     note_short_name(call, table);   /* #2976: as written, before any rewrite */
 
+    /* #3116: `free(x)` in a module that defines its own `free`, which the
+     * merger renamed to that function. A slice argument is freed by the
+     * builtin, the one release of a `make` buffer: the module's function can
+     * only read the slice's pointer as its own object, and named alike it
+     * left the builtin out of reach in the module. Unless the function itself
+     * takes a slice, which is then its own business. */
+    if (call->annotation && strcmp(call->annotation, "own_free") == 0) {
+        free(call->annotation);
+        call->annotation = NULL;
+        Type* at = call->child_count == 1 ? infer_type(call->children[0], table) : NULL;
+        int slice_arg = type_is_slice(at);
+        if (at) free_type(at);
+        if (slice_arg) {
+            Symbol* fs = lookup_symbol(table, call->value);
+            ASTNode* p0 = (fs && is_definition(fs->node)) ? def_param_at(fs->node, 0) : NULL;
+            if (!(p0 && type_is_slice(p0->node_type))) {
+                free(call->value);
+                call->value = strdup("free");
+            }
+        }
+    }
+
     /* #928 UFCS, shape (a): the parser tagged this as a method-call on a
      * non-identifier receiver (e.g. `expect(5).to_eq(...)`) and stashed the
      * receiver subtree at children[0]. Rewrite to `method(recv, args)` up
@@ -19051,6 +19319,26 @@ static int typecheck_function_call_inner(ASTNode* call, SymbolTable* table) {
              * error (the bare method name is already in call->value). */
             free(call->annotation);
             call->annotation = NULL;
+            /* #3099: a function held in a field of a receiver that is not a
+             * name (`hs[0].cb()`, `make_h().cb(2)`) is called as one held in
+             * a named receiver's field is (#2653): `call(recv.cb, ...)`. */
+            ASTNode* recv = call->child_count > 0 ? call->children[0] : NULL;
+            if (recv && call->value && !strchr(call->value, '.')) {
+                ASTNode* fn_ref = create_ast_node(AST_MEMBER_ACCESS, call->value, call->line, call->column);
+                add_child(fn_ref, recv);
+                Type* ft = infer_type(fn_ref, table);
+                int is_fn = ft && ft->kind == TYPE_FUNCTION;
+                if (ft) free_type(ft);
+                if (is_fn) {
+                    call->children[0] = fn_ref;
+                    free(call->value);
+                    call->value = strdup("call");
+                    return typecheck_function_call(call, table);
+                }
+                fn_ref->children[0] = NULL;   /* the receiver stays the call's */
+                fn_ref->child_count = 0;
+                free_ast_node(fn_ref);
+            }
         }
     }
 
@@ -19101,6 +19389,16 @@ static int typecheck_function_call_inner(ASTNode* call, SymbolTable* table) {
 
     // Use qualified lookup to handle namespaced calls like string.new -> string_new
     Symbol* symbol = lookup_qualified_symbol(table, call->value);
+    /* #3086: a bare name the program's import binds is the import's in the
+     * program (the alias below rewrites the call to it), also where the
+     * import left a builtin of the name in place (std.string's glob and
+     * `free`): it is checked against the import's declaration. Not in a
+     * module's merged body, whose bare names are its own. */
+    if (symbol && call->value && !strchr(call->value, '.') && !table->merged_from &&
+        !symbol->import_bound && find_import_alias(call->value)) {
+        Symbol* aliased = lookup_qualified_symbol(table, find_import_alias(call->value));
+        if (aliased && aliased->is_function) symbol = aliased;
+    }
 
     /* #924 re-export: a `hub.fn(...)` call where hub re-exports fn from
      * another module resolves (via lookup_qualified_symbol) to the defining
@@ -19409,6 +19707,10 @@ static int typecheck_function_call_inner(ASTNode* call, SymbolTable* table) {
         type_error(error_msg, call->line, call->column);
         return 0;
     }
+
+    /* #3086: the extern the call resolves to, for call_callee_decl. */
+    if (symbol->node && symbol->node->type == AST_EXTERN_FUNCTION)
+        call->callee_extern = symbol->node;
 
     if (!check_quote_callee(call, symbol)) return 0;
     if (!bind_named_arguments(call, symbol)) return 0;
@@ -19846,7 +20148,7 @@ static int typecheck_function_call_inner(ASTNode* call, SymbolTable* table) {
             if (p->node_type && p->node_type->kind == TYPE_ENUM)
                 coerce_bare_enum_member(call->children[aslot], p->node_type, table);
             adopt_closure_signature(call->children[aslot], p->node_type);
-            sum_place_to_array_literal(call->children[aslot], p->node_type);   /* #3071 */
+            place_to_array_literal(call->children[aslot], p->node_type);   /* #3071 */
         }
     }
 

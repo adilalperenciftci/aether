@@ -230,7 +230,13 @@ jac_mul(k: ptr, P: *EcPt, p: ptr) -> *EcPt {
         dbl = pt_double(q, p)
         pt_free(q)
         q = dbl
-        if bit_at(k, i) == 1 {
+        // bignum.test_bit reads the limb in place. Reading each scalar bit as
+        // `bit0(shift_right(k, i))` made a 256-bit allocation and a full
+        // `mod 2` per bit, ~256 times per scalar multiplication: one P-256
+        // verify cost ~2 s and a depth-4 all-ECDSA chain (Cloudflare's)
+        // ~13 s, long enough to trip a peer's handshake deadline. Every
+        // scalar reaching here is reduced mod n, so it is non-negative.
+        if bignum.test_bit(k, i) == 1 {
             sum = pt_add(q, P, p)
             pt_free(q)
             q = sum
@@ -238,25 +244,6 @@ jac_mul(k: ptr, P: *EcPt, p: ptr) -> *EcPt {
         i = i - 1
     }
     return q
-}
-
-// Bit i of a non-negative bignum, read straight from its limb array in O(1).
-//
-// jac_mul used to read each scalar bit as `bit0(shift_right(k, i))`: a fresh
-// 256-bit allocation per bit, then a full `mod 2` on it, ~256 times per
-// scalar multiplication. That overhead, not the curve arithmetic, made one
-// P-256 verify cost ~2 s and a depth-4 all-ECDSA chain (Cloudflare's) ~13 s
-// -- long enough to trip the peer's handshake deadline and fail the TLS
-// connect outright. Every scalar reaching here is reduced mod n, so it is
-// non-negative and `sign` needs no handling. Limbs are 32-bit, big-endian
-// (mag[0] is the MSB), matching std.bignum's BN layout.
-bit_at(n: ptr, i: int) -> int {
-    bn = n as *BN
-    if bn.len <= 0 || i < 0 { return 0 }
-    li = bn.len - 1 - (i / 32)
-    if li < 0 { return 0 }
-    w = bignum.limb(bn.mag, li)
-    return ((w >> (i % 32)) & 1) as int
 }
 
 bit0(n: ptr) -> int {

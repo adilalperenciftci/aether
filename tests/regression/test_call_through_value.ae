@@ -1,0 +1,61 @@
+// #3099: any expression whose value is a closure can be called, as a
+// closure local or a named receiver's closure field can: an element
+// (`fs[1]()`), a call's result (`make_adder(5)(2)`), and a closure field of
+// a receiver that is not a name (`hs[0].cb()`). The callee is evaluated
+// once, before the arguments: `fs[pick()](3)` calls pick once.
+
+import std.list
+
+struct H {
+    cb: fn
+}
+
+add(a: int, b: int) -> int {
+    return a + b
+}
+
+make_adder(n: int) -> fn {
+    return | x: int | { return x + n }
+}
+
+main() {
+    fails = 0
+    fs = [|| { return 1 }, || { return 2 }]
+    if fs[1]() != 2 {
+        println("FAIL fs[1]()")
+        fails = fails + 1
+    }
+
+    seen = list.new()
+    pick = || {
+        list.add(seen, 1)
+        return 1
+    }
+    scale = [| x: int | { return x * 10 }, | x: int | { return x * 100 }]
+    v = scale[pick()](3)
+    if v != 300 || list.size(seen) != 1 {
+        println("FAIL scale[pick()](3): ${v}, pick called ${list.size(seen)} times")
+        fails = fails + 1
+    }
+    list.free(seen)
+
+    if make_adder(5)(2) != 7 {
+        println("FAIL make_adder(5)(2)")
+        fails = fails + 1
+    }
+    gs = [add, add]
+    if gs[0](2, 3) != 5 {
+        println("FAIL gs[0](2, 3)")
+        fails = fails + 1
+    }
+    hs = [H { cb: || { return 4 } }]
+    if hs[0].cb() != 4 {
+        println("FAIL hs[0].cb()")
+        fails = fails + 1
+    }
+
+    if fails != 0 {
+        exit(1)
+    }
+    println("PASS calls through elements, results and fields")
+}

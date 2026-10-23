@@ -132,6 +132,54 @@ TEST(codegen_fnptr_local_string_arg_passes_bytes) {
     free(buf);
 }
 
+/* #3029: a function indexing a slice parameter it never binds again is
+ * versioned on the unbounded-view sentinel: one test at entry calls a view
+ * body, which indexes with no test; the function's own body keeps its
+ * checks. */
+TEST(codegen_slice_param_versioned_on_the_view_sentinel) {
+    char* buf = generate_typechecked(
+        "total(xs: int[], n: int) -> int {\n"
+        "  t = 0\n"
+        "  i = 0\n"
+        "  while i < n {\n"
+        "    t = t + xs[i]\n"
+        "    i = i + 1\n"
+        "  }\n"
+        "  return t\n"
+        "}\n"
+        "main() { }");
+    ASSERT_NOT_NULL(buf);
+    ASSERT_TRUE(strstr(buf, "total__aether_view(AetherSlice xs, int n)") != NULL);
+    ASSERT_TRUE(strstr(buf, "if (xs.len == AETHER_SLICE_UNBOUNDED) return total__aether_view(xs, n);") != NULL);
+    ASSERT_TRUE(strstr(buf, "aether_slice_view_at(xs, ") != NULL);
+    ASSERT_TRUE(strstr(buf, "aether_slice_at(xs, ") != NULL);   // the checked body
+    free(buf);
+}
+
+/* A slice the function binds again, takes the address of, or a body
+ * holding a closure, is not versioned: its uses are not all the argument
+ * as it arrived. Through `&xs` the slice can be made bounded after the
+ * entry's test. */
+TEST(codegen_slice_param_not_versioned_when_rebound_or_captured) {
+    char* buf = generate_typechecked(
+        "rebinds(xs: int[]) -> int {\n"
+        "  xs = xs[1..3]\n"
+        "  return xs[0]\n"
+        "}\n"
+        "addressed(xs: int[]) -> int {\n"
+        "  p = &xs\n"
+        "  return xs[0]\n"
+        "}\n"
+        "captures(xs: int[]) -> int {\n"
+        "  f = || { return xs[0] }\n"
+        "  return f() + xs[1]\n"
+        "}\n"
+        "main() { }");
+    ASSERT_NOT_NULL(buf);
+    ASSERT_TRUE(strstr(buf, "__aether_view") == NULL);
+    free(buf);
+}
+
 TEST(codegen_fnptr_param_string_arg_passes_bytes) {
     char* buf = generate_typechecked(
         "through(cb: fn(int, string) -> int, s: string) -> int { return cb(1, s) }\n"
@@ -148,8 +196,8 @@ TEST(codegen_fnptr_struct_field_string_arg_passes_bytes) {
         "by_pointer(p: *Ops, s: string) -> int { return p.measure(s) }\n"
         "main() { }");
     ASSERT_NOT_NULL(buf);
-    ASSERT_TRUE(strstr(buf, "(o.measure)(aether_string_data(s))") != NULL);
-    ASSERT_TRUE(strstr(buf, "(p->measure)(aether_string_data(s))") != NULL);
+    ASSERT_TRUE(strstr(buf, ", o.measure)(aether_string_data(s))") != NULL);
+    ASSERT_TRUE(strstr(buf, ", p->measure)(aether_string_data(s))") != NULL);
     free(buf);
 }
 
@@ -649,7 +697,7 @@ TEST(codegen_fnptr_local_named_release_shadows_builtin) {
         "  release(state) }\n"
         "main() { }");
     ASSERT_NOT_NULL(buf);
-    ASSERT_TRUE(strstr(buf, "((void(*)(void*))(release))(state)") != NULL);
+    ASSERT_TRUE(strstr(buf, "(void(*)(void*))(release))(state)") != NULL);
     ASSERT_TRUE(strstr(buf, "string_release(state)") == NULL);
     ASSERT_TRUE(strstr(buf, "release() type error") == NULL);
     free(buf);
@@ -668,7 +716,7 @@ TEST(codegen_fnptr_local_named_free_shadows_builtin_and_keeps_its_spelling) {
         "main() { }");
     ASSERT_NOT_NULL(buf);
     ASSERT_TRUE(strstr(buf, "void* free = h->free;") != NULL);
-    ASSERT_TRUE(strstr(buf, "((void(*)(void*))(free))(state)") != NULL);
+    ASSERT_TRUE(strstr(buf, "(void(*)(void*))(free))(state)") != NULL);
     ASSERT_TRUE(strstr(buf, "ae_free") == NULL);
     free(buf);
 }
@@ -701,7 +749,7 @@ TEST(codegen_call_through_global_fnptr_var_emits_typed_cast) {
         "main() { }");
     ASSERT_NOT_NULL(buf);
     ASSERT_TRUE(strstr(buf, "static void* gl_gen_buffers = NULL;") != NULL);
-    ASSERT_TRUE(strstr(buf, "((void(*)(int, void*))(gl_gen_buffers))(1, ids)") != NULL);
+    ASSERT_TRUE(strstr(buf, "(void(*)(int, void*))(gl_gen_buffers))(1, ids)") != NULL);
     free(buf);
 }
 
@@ -721,7 +769,7 @@ TEST(codegen_cfn_local_param_and_field_lower_like_fn_types) {
         "  r2 = o.scale(1.0, 1.0) + apply(sc, r) }");
     ASSERT_NOT_NULL(buf);
     ASSERT_TRUE(strstr(buf, "void* sc = ((void*)(getp()))") != NULL);
-    ASSERT_TRUE(strstr(buf, "((double(*)(double, float))(sc))(1.5, 4.0)") != NULL);
+    ASSERT_TRUE(strstr(buf, "(double(*)(double, float))(sc))(1.5, 4.0)") != NULL);
     ASSERT_TRUE(strstr(buf, "double (*f)(double, float)") != NULL);
     ASSERT_TRUE(strstr(buf, "double (*scale)(double, float)") != NULL);
     ASSERT_TRUE(strstr(buf, "typedef") == NULL || strstr(buf, "Scale;") == NULL);
@@ -746,12 +794,14 @@ TEST(codegen_fnptr_bool_return_reads_low_byte_when_used) {
         "  if r(3) { println(\"a\") }\n"
         "  if d.ready(4) { println(\"b\") } }");
     ASSERT_NOT_NULL(buf);
-    ASSERT_TRUE(strstr(buf, "((_Bool)(unsigned char)(((int(*)(int))(r))(3)))") != NULL);
-    ASSERT_TRUE(strstr(buf, "((_Bool)(unsigned char)((d.ready)(4)))") != NULL);
-    ASSERT_TRUE(strstr(buf, "((_Bool)(unsigned char)(((int(*)(int))(r))(1)") == NULL);
-    ASSERT_TRUE(strstr(buf, "((_Bool)(unsigned char)((d.ready)(2)") == NULL);
-    ASSERT_TRUE(strstr(buf, "((int(*)(int))(r))(1);") != NULL);
-    ASSERT_TRUE(strstr(buf, "(d.ready)(2);") != NULL);
+    ASSERT_TRUE(strstr(buf, "((_Bool)(unsigned char)((r ? (void)0 : aether_panic(") != NULL);
+    ASSERT_TRUE(strstr(buf, "(int(*)(int))(r))(3)))") != NULL);
+    ASSERT_TRUE(strstr(buf, "((_Bool)(unsigned char)((d.ready ? (void)0 : aether_panic(") != NULL);
+    ASSERT_TRUE(strstr(buf, ", d.ready)(4)))") != NULL);
+    ASSERT_TRUE(strstr(buf, "(int(*)(int))(r))(1)))") == NULL);
+    ASSERT_TRUE(strstr(buf, ", d.ready)(2)))") == NULL);
+    ASSERT_TRUE(strstr(buf, "(int(*)(int))(r))(1);") != NULL);
+    ASSERT_TRUE(strstr(buf, ", d.ready)(2);") != NULL);
     free(buf);
 }
 

@@ -50,7 +50,7 @@ fi
 
 # The cast must appear in the emitted C — `((int(*)(int, int))(add))(3, 4)`.
 # Allow flexible whitespace between operators / parens.
-if ! grep -qE '\(\(int *\(\*\) *\(int, *int\)\) *\(add\)\) *\(3, *4\)' "$tmpdir/case1.gen.c"; then
+if ! grep -qE '\(int *\(\*\) *\(int, *int\)\) *\(add\)\) *\(3, *4\)' "$tmpdir/case1.gen.c"; then
     echo "  [FAIL] case 1: expected typed fn-pointer cast at call site, got:"
     grep -E 'add' "$tmpdir/case1.gen.c" | sed 's/^/    /'
     exit 1
@@ -95,7 +95,7 @@ if ! "$AETHERC" "$tmpdir/case2.ae" "$tmpdir/case2.gen.c" 2>"$tmpdir/case2.err"; 
     exit 1
 fi
 
-if ! grep -qE '\(\(int *\(\*\) *\(int\)\) *\(dbl\)\) *\(21\)' "$tmpdir/case2.gen.c"; then
+if ! grep -qE '\(int *\(\*\) *\(int\)\) *\(dbl\)\) *\(21\)' "$tmpdir/case2.gen.c"; then
     echo "  [FAIL] case 2: expected typed cast for unary fn-pointer call"
     grep -E 'dbl' "$tmpdir/case2.gen.c" | sed 's/^/    /'
     exit 1
@@ -121,7 +121,7 @@ if ! "$AETHERC" "$tmpdir/case3.ae" "$tmpdir/case3.gen.c" 2>"$tmpdir/case3.err"; 
     exit 1
 fi
 
-if ! grep -qE '\(\(void *\(\*\) *\(int\)\) *\(log_it\)\) *\(42\)' "$tmpdir/case3.gen.c"; then
+if ! grep -qE '\(void *\(\*\) *\(int\)\) *\(log_it\)\) *\(42\)' "$tmpdir/case3.gen.c"; then
     echo "  [FAIL] case 3: expected void-returning fn-pointer cast"
     grep -E 'log_it' "$tmpdir/case3.gen.c" | sed 's/^/    /'
     exit 1

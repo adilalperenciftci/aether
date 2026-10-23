@@ -3,6 +3,7 @@
 #include <string.h>
 #include <stdarg.h>
 #include "ast.h"
+#include "analysis/hoist.h"
 #include <limits.h>
 #include "../std/mem/aether_grow.h"
 
@@ -1060,6 +1061,7 @@ ASTNode* create_ast_node(ASTNodeType type, const char* value, int line, int colu
     node->origin_module = NULL;
     node->arg_order = NULL;
     node->arg_order_count = 0;
+    node->callee_extern = NULL;
     return node;
 }
 
@@ -1134,6 +1136,7 @@ ASTNode* clone_ast_node(ASTNode* node) {
         memcpy(clone->arg_order, node->arg_order, sizeof(int) * (size_t)node->arg_order_count);
         clone->arg_order_count = node->arg_order_count;
     }
+    clone->callee_extern = node->callee_extern;
     if (node->value_len > 0) ast_set_literal_bytes(clone, node->value, node->value_len);   /* #2520 */
 
     /* Slot for slot: an empty one stays where it is, as the parser left it. */
@@ -1178,6 +1181,7 @@ void free_ast_node(ASTNode* node) {
         free(node->children);
     }
 
+    hoist_node_freed(node);
     free(node);
 }
 
@@ -1432,7 +1436,14 @@ void clause_set_join(ASTNode* const* nodes, int count, ClauseJoin* out) {
         join_arm = join_arm_after(join_arm, arm);
         /* Beside a written type, an inferred clause fits it (their join is
          * it, and one with no join does not); a second written type is the
-         * same one or none. */
+         * same one or none. #3082: a value the written type holds fits it
+         * (ast_number_holds), as a local's written type holds a binding
+         * (#3070): `g(0) -> 5` beside `-> uint8`, which the join of an int
+         * and a uint8 (an int) refused. */
+        if (written && cl->type_inferred && ast_number_holds(join, t, arm)) {
+            if (k) free_type(k);
+            k = clone_type(join);
+        }
         int unfit = written &&
                     (!k || !types_equal(k, join) || (!cl->type_inferred && !types_equal(t, join)));
         if (!k || unfit) {

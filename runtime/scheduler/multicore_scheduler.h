@@ -56,9 +56,8 @@ typedef struct {
 // TLS pointer to the actor whose step() is currently running on this
 // thread. Set by generated *_step() functions at entry; read by the
 // reactor bridge (std/net/aether_actor_bridge.c) so await_io() can
-// identify the calling actor without a parameter. Unlike
-// g_sync_step_actor which is specific to main-thread sync mode, this
-// variable is set for every step call on every thread.
+// identify the calling actor without a parameter. It is set for every
+// step call on every thread.
 extern AETHER_TLS void* g_current_step_actor;
 
 /* Accessors for the three thread-local slots the generated program touches.
@@ -129,8 +128,6 @@ struct ActorInbox;   /* runtime/actors/aether_actor_inbox.h */
     atomic_int assigned_core; \
     /* Affinity hint: core to migrate to (-1 = none) */ \
     atomic_int migrate_to; \
-    /* If set, scheduler threads must not process this actor */ \
-    atomic_int main_thread_only; \
     /* Same-core batches from send_buffer_flush (lazy) */ \
     SPSCQueue* spsc_queue; \
     /* Non-NULL only while an ask/reply is in flight */ \
@@ -173,7 +170,14 @@ struct ActorInbox;   /* runtime/actors/aether_actor_inbox.h */
     /* 1 while the actor's own thread sleeps in its idle park (#2592): a \
      * sender that has just put a message in the inbox and reads 1 wakes \
      * the thread. */ \
-    atomic_int thread_parked;
+    atomic_int thread_parked; \
+    /* Messages for this actor on their way through a core's queues or a \
+     * sender's overflow buffer: counted before the sender reads \
+     * assigned_core, uncounted when the message reaches the mailbox \
+     * (#3090, #3093). The actor moves to another core only while this is \
+     * 0, with AETHER_INFLIGHT_MOVING set for the move, so no message is \
+     * left behind on the core it leaves. */ \
+    atomic_int inflight;
 
 typedef struct {
     AETHER_ACTOR_BASE_FIELDS
@@ -183,6 +187,27 @@ typedef struct {
 #define AETHER_ACTOR_PANICKED 1
 #define AETHER_ACTOR_RELEASED 2
 #define AETHER_ACTOR_THREAD_GONE 4
+
+/* ActorBase.inflight (#3090, #3093): set while the actor's core moves it to
+ * another; the counts of messages in flight sit below it. */
+#define AETHER_INFLIGHT_MOVING (1 << 30)
+
+/* A sender about to route `n` messages for `actor` through a core's queues
+ * counts them first, then reads assigned_core: while the count is not 0 the
+ * actor stays on its core, so the messages reach it there. During a move it
+ * waits for the move to end, and then reads the new core. */
+static inline void inflight_enter(ActorBase* actor, int n) {
+    int v = atomic_fetch_add_explicit(&actor->inflight, n, memory_order_acq_rel);
+    while (unlikely(v & AETHER_INFLIGHT_MOVING)) {
+        AETHER_CPU_PAUSE();
+        v = atomic_load_explicit(&actor->inflight, memory_order_acquire);
+    }
+}
+
+/* `n` counted messages reached the actor's mailbox (or were dropped). */
+static inline void inflight_leave(ActorBase* actor, int n) {
+    atomic_fetch_sub_explicit(&actor->inflight, n, memory_order_release);
+}
 
 /* Generated actor structs are declared aligned(64) (codegen_actor.c), one
  * cache line, so the runtime allocates every actor on this boundary (#2485). */
@@ -268,33 +293,22 @@ void scheduler_init(int cores);
 void scheduler_init_with_opts(int cores, AetherOptFlags opts);
 
 void scheduler_start(void);
-void scheduler_ensure_threads_running(void);  // Start threads if not already started (for main-thread mode transition)
 
-/* Main-thread mode is "one actor, every send from the thread running
- * main()": that thread steps the actor inline at each send. A send from
- * any other thread cannot join in — stepping the same actor from two
- * threads is the data race #2083's second symptom (heap corruption) —
- * so the runtime leaves the mode exactly as spawning a second actor
- * does, and the send goes through the scheduler. */
-int  aether_on_main_mode_thread(void);
-void aether_leave_main_thread_mode(void);
-/* Put `msg` in `actor`'s mailbox for an inline step, if the runtime is still
- * in main-thread mode: the check and the enqueue are one step with respect
- * to leaving the mode, so no scheduler delivery can come between or ahead
- * of them (#2266). Returns 1 when enqueued, 0 when the mode has ended and
- * the caller must send through the scheduler instead. */
-int  aether_main_mode_enqueue(ActorBase* actor, Message msg);
-/* The inline (main-thread-mode) step holds the actor's step_lock, and a
- * handler that sends to its own actor steps again on the same thread:
- * acquire returns 0 when this thread already holds the lock (nothing to
- * release), 1 when it took it. */
-int  aether_inline_lock_acquire(ActorBase* actor);
-void aether_inline_lock_release(ActorBase* actor);
+// The CPU scheduler thread `core_id` is placed on: the (core_id mod n)-th
+// of the n CPUs the process may run on, read when the threads last started
+// (#3106). -1 when that set could not be read or the platform has no CPU
+// numbers to place by (macOS).
+int scheduler_core_cpu(int core_id);
+
 void scheduler_stop(void);
 void scheduler_wait(void);      // Wait for quiescence (all pending messages processed). Non-destructive.
 void scheduler_shutdown(void);  // Wait + stop + join threads. Call once at program exit.
 void scheduler_cleanup(void);
 
+/* An actor the caller allocated: zeroed before its first registration
+ * (calloc, or memset), with its mailbox initialised and its step set. It
+ * may be registered again after a shutdown; its count of messages in
+ * flight carries over (#3090). */
 int scheduler_register_actor(ActorBase* actor, int preferred_core);
 void scheduler_deregister_actor(ActorBase* actor);
 void scheduler_send_local(ActorBase* actor, Message msg);
@@ -384,10 +398,6 @@ void scheduler_set_actor_park_ms(int ms);
  * steps it from 1 to 32 ms the longer the core is idle. For tests, as the
  * one above: set long, a core that is never woken stalls (#3087). */
 void scheduler_set_core_park_ms(int ms);
-/* Called by the inline (main-thread-mode) send once the step it ran has
- * returned and it no longer touches the actor: an actor that released itself
- * in that step is released now (#2509). */
-void scheduler_inline_step_done(void);
 
 // Ask/reply: send a message and block until a reply arrives or timeout.
 // Returns malloc'd reply payload on success (caller must free), NULL on timeout.
@@ -403,11 +413,11 @@ void scheduler_reply(ActorBase* self, void* data, size_t data_size);
 void scheduler_reply_owned(ActorBase* self, void* data, size_t data_size,
                            void (*release)(void*));
 
-// Drain pending messages for main-thread-only actors.
-// Call this from C-hosted event loops (e.g. inside a render/event callback)
-// to keep Aether actors alive while the main thread is occupied in C code.
-// max_per_actor: max messages to process per actor per call (0 = unlimited).
-// Returns total messages processed across all actors.
+// The cooperative (no-threads) runtime's dispatch: step every actor with
+// messages, at most max_per_actor messages each (0 = 1024), and return how
+// many were processed. A C host's event loop calls it between frames to keep
+// actors running. With threads the scheduler threads run every actor, from
+// the first spawn on (#3112), so it has nothing to drain and returns 0.
 int aether_scheduler_poll(int max_per_actor);
 
 // I/O event integration — register/unregister fds for non-blocking I/O dispatch

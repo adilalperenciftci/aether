@@ -1,0 +1,8 @@
+// #3113: an index that is a const, or arithmetic over consts, outside a
+// T[N] is a compile error.
+const N = 2
+
+main() {
+    a = [1, 2, 3, 4]
+    println("${a[N * 2]}")
+}

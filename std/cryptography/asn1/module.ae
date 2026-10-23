@@ -278,7 +278,10 @@ read_tlv(r: ptr) -> (ptr, string) {
         return acc, ok
     }
 
-    if rr.pos + length > rr.len {
+    // Against what is left, not as rr.pos + length: a four-byte length can
+    // be negative or near 2^31, and the sum then wraps past the check
+    // (Wycheproof's DER signatures declare 0x7fffffff).
+    if length < 0 || length > rr.len - rr.pos {
         return null, "asn1: content runs past end of input"
     }
     // copy content into a fresh bytes
@@ -951,8 +954,8 @@ encode_set(elements_list: ptr) -> ptr {
     while i < sz {
         j = 0
         while j < sz - 1 - i {
-            e1 = list_get_raw(elements_list, j)
-            e2 = list_get_raw(elements_list, j + 1)
+            e1 = list.at(elements_list, j)
+            e2 = list.at(elements_list, j + 1)
             cmp = compare_bytes(e1, e2)
             if cmp > 0 {
                 list_set(elements_list, j, e2)
@@ -967,7 +970,7 @@ encode_set(elements_list: ptr) -> ptr {
     tot_len = 0
     i = 0
     while i < sz {
-        el = list_get_raw(elements_list, i)
+        el = list.at(elements_list, i)
         tot_len = tot_len + bytes.length(el)
         i = i + 1
     }
@@ -976,7 +979,7 @@ encode_set(elements_list: ptr) -> ptr {
     off = 0
     i = 0
     while i < sz {
-        el = list_get_raw(elements_list, i)
+        el = list.at(elements_list, i)
         off = emit_bytes(body, off, el)
         bytes.free(el)
         i = i + 1
@@ -1011,7 +1014,7 @@ encode_sequence_list(elements_list: ptr) -> ptr {
     tot_len = 0
     i = 0
     while i < sz {
-        el = list_get_raw(elements_list, i)
+        el = list.at(elements_list, i)
         tot_len = tot_len + bytes.length(el)
         i = i + 1
     }
@@ -1019,7 +1022,7 @@ encode_sequence_list(elements_list: ptr) -> ptr {
     off = 0
     i = 0
     while i < sz {
-        el = list_get_raw(elements_list, i)
+        el = list.at(elements_list, i)
         off = emit_bytes(body, off, el)
         bytes.free(el)
         i = i + 1

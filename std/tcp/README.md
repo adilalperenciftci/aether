@@ -40,8 +40,11 @@ main() {
 
 Every write and read may transfer **fewer bytes than asked**, which is TCP
 working as designed rather than an error: each is one `send(2)` or `recv(2)`,
-and returns the count it moved. A length-prefixed protocol loops on the
-rest until the full count is transferred or the connection dies.
+and returns the count it moved. A send comes back short when the socket's
+30 s send timeout expires while the peer reads slowly, or a signal cuts it
+short. `write_all(sock, s)` sends a whole `byte[]` slice, as many sends as it
+takes, and returns `(s.len, "")` or the bytes sent with `"send failed"` (#3108);
+a read loops on the rest until the full count is in or the connection dies.
 
 ## Binary data in `byte[]` slices
 
@@ -56,12 +59,7 @@ reading, and a slice with no bound (`p as byte[]`, `.len` -1) panics.
 
 ```aether,fragment
 // Send all of `frame`, then read exactly `want` bytes into `buf`.
-sent = 0
-while sent < frame.len {
-    n, err = tcp.write_slice(sock, frame[sent..])
-    if err != "" { break }
-    sent = sent + n
-}
+sent, werr = tcp.write_all(sock, frame)
 got = 0
 while got < want {
     n, err = tcp.read_into(sock, buf[got..want])
@@ -106,5 +104,5 @@ while !stopping {
 ## Exports
 
 `connect`, `listen`, `listen_on`, `accept`, `read`, `read_n`, `read_into`,
-`write`, `write_n`, `write_slice`, `poll`, `poll2`, `server_poll`, `server_port`, `set_nodelay`,
+`write`, `write_n`, `write_slice`, `write_all`, `poll`, `poll2`, `server_poll`, `server_port`, `set_nodelay`,
 `fd`, `server_fd`, `tcp_close`, `tcp_server_close`.

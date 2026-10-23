@@ -54,7 +54,6 @@ run_batch(s: *StringSeq, count: int) -> int {
             return run_batch(t, count + 1)
         }
     }
-    return count
 }
 
 main() {

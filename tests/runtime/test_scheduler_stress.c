@@ -35,10 +35,12 @@ typedef struct {
     atomic_int errors;
 } StressActor;
 
+// One message per call, the step contract (docs/c-embedding.md): the
+// scheduler counts every call as one message processed. This one drained up
+// to 100, and took the 101st out of the mailbox without counting it.
 void stress_actor_step(StressActor* self) {
     Message msg;
-    int batch = 0;
-    while (mailbox_receive(&self->mailbox, &msg) && batch++ < 100) {
+    if (mailbox_receive(&self->mailbox, &msg)) {
         atomic_fetch_add(&self->count, 1);
     }
     atomic_store_explicit(&self->active, (self->mailbox.count > 0), memory_order_relaxed);
@@ -57,7 +59,7 @@ typedef struct {
 
 static void order_step(OrderActor* self) {
     Message msg;
-    while (mailbox_receive(&self->mailbox, &msg)) {
+    if (mailbox_receive(&self->mailbox, &msg)) {
         if (msg.payload_int && self->last_seq >= 0 && msg.payload_int != self->last_seq + 1) {
             atomic_fetch_add(&self->out_of_order, 1);
         }
@@ -79,7 +81,7 @@ typedef struct {
 
 static void cascade_step(CascadeActor* self) {
     Message msg;
-    while (mailbox_receive(&self->mailbox, &msg)) {
+    if (mailbox_receive(&self->mailbox, &msg)) {
         atomic_fetch_add(&self->count, 1);
 
         // Forward to next actor

@@ -25,7 +25,7 @@ fail(msg: string) {
 }
 
 main() {
-    if os_getenv("OS") == "Windows_NT" {
+    if os.platform() == "windows" {
         println("SKIP os_run: Windows backend not yet implemented")
         return
     }

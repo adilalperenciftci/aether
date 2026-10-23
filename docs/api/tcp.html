@@ -37,6 +37,7 @@
     <li><a href="#write">write</a></li>
     <li><a href="#write_n">write_n</a></li>
     <li><a href="#write_slice">write_slice</a></li>
+    <li><a href="#write_all">write_all</a></li>
     <li><a href="#read">read</a></li>
     <li><a href="#read_n">read_n</a></li>
     <li><a href="#read_into">read_into</a></li>
@@ -259,13 +260,19 @@
       <h3 class="function-name">write_n <span class="kind">fn</span></h3>
       <pre class="usage"><code>write_n(sock, data)</code></pre>
       <p class="signature"><span class="sig-params">sock: ptr, data: byte[]</span></p>
-      <p class="doc">Length-aware socket write: sends the bytes of `data`, whose length travels with the slice (#2301), so embedded NUL bytes do not truncate the send. Returns the OS send(2) byte count; callers that require full-buffer delivery should loop, sending `data[n..]` until every byte has been accepted. An empty slice sends nothing and returns (0, &quot;&quot;). For a string, send its byte view: `tcp.write_n(sock, string.bytes(s))`, a prefix with `string.bytes(s)[0..n]`; for a `std.bytes` buffer, `bytes.view(buf)`.</p>
+      <p class="doc">Length-aware socket write: sends the bytes of `data`, whose length travels with the slice (#2301), so embedded NUL bytes do not truncate the send. Returns the OS send(2) byte count, which may be short: a caller that needs every byte delivered calls write_all. An empty slice sends nothing and returns (0, &quot;&quot;). For a string, send its byte view: `tcp.write_n(sock, string.bytes(s))`, a prefix with `string.bytes(s)[0..n]`; for a `std.bytes` buffer, `bytes.view(buf)`.</p>
     </div>
     <div class="function" id="write_slice" data-name="write_slice">
       <h3 class="function-name">write_slice <span class="kind">fn</span></h3>
       <pre class="usage"><code>write_slice(sock, s) <span class="arrow">-&gt;</span> (int, string)</code></pre>
       <p class="signature"><span class="sig-params">sock: ptr, s: byte[]</span></p>
-      <p class="doc">Write a `byte[]` slice's bytes, binary-safe: the length travels with the slice (#2301). Returns (bytes_sent, &quot;&quot;) or (0, &quot;send failed&quot;). The count is one send(2) and may be SHORT, as with write_n: a caller that needs the whole slice delivered loops on the rest, `s[sent..]`. An empty slice sends nothing and returns (0, &quot;&quot;). A slice with no bound panics.</p>
+      <p class="doc">Write a `byte[]` slice's bytes, binary-safe: the length travels with the slice (#2301). Returns (bytes_sent, &quot;&quot;) or (0, &quot;send failed&quot;). The count is one send(2) and may be SHORT, as with write_n: a caller that needs the whole slice delivered calls write_all. An empty slice sends nothing and returns (0, &quot;&quot;). A slice with no bound panics.</p>
+    </div>
+    <div class="function" id="write_all" data-name="write_all">
+      <h3 class="function-name">write_all <span class="kind">fn</span></h3>
+      <pre class="usage"><code>write_all(sock, data) <span class="arrow">-&gt;</span> (_0, string)</code></pre>
+      <p class="signature"><span class="sig-params">sock: ptr, data: byte[]</span></p>
+      <p class="doc">Write every byte of a `byte[]` slice (#3108), as many sends as it takes: one send can accept fewer bytes than asked, when the socket's send timeout (30 s) expires while the peer reads slowly, or a signal cuts it short. Returns (data.len, &quot;&quot;) once every byte is out, or (sent, &quot;send failed&quot;) with the bytes sent before a send failed or timed out having sent nothing. An empty slice sends nothing and returns (0, &quot;&quot;); a slice with no bound panics.</p>
     </div>
     <div class="function" id="read" data-name="read">
       <h3 class="function-name">read <span class="kind">fn</span></h3>

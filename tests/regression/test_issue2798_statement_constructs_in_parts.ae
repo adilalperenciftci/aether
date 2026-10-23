@@ -149,13 +149,13 @@ main() {
     p = Pair { a: mark(1), b: num(true) or { mark(2) } }
     check(p.a == 1 && p.b == 2 && trail == 12, "a struct literal's field")
 
-    // A `for` loop's init (shadowing a local) and increment.
+    // A `for` loop's init (assigning a local, #2734) and increment.
     j = 100
     total = 0
     for (j = (num(true) or { 1 }); j < 4; j = j + 1) {
         total = total + j
     }
-    check(total == 6 && j == 100, "a for loop's init")
+    check(total == 6 && j == 4, "a for loop's init")
     k = 0
     calls = 0
     for (_i = 0; k < 3; tick() + (num(true) or { 0 })) {

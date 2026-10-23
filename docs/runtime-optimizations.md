@@ -13,56 +13,19 @@ The optimizations are tiered by how they activate:
 
 ## Active Optimizations
 
-### Main Thread Actor Mode
+### Every send goes through the scheduler
 
-**Implementation:** `runtime/actors/aether_send_message.c`, `runtime/scheduler/multicore_scheduler.c`, `runtime/config/aether_optimization_config.h`
+**Implementation:** `runtime/actors/aether_send_message.c`, `runtime/scheduler/multicore_scheduler.c`
 
-Single-actor programs bypass the scheduler entirely. When only one actor exists, message processing occurs synchronously on the main thread with zero-copy message delivery.
-
-**Activation:**
-- Automatic: Enabled when the first actor spawns, disabled if a second actor spawns
-- Manual disable: Set `AETHER_NO_INLINE=1` environment variable
-
-**Mechanism:**
-
-When main thread mode is active:
-1. `aether_send_message` calls `aether_send_message_sync` instead of routing through scheduler
-2. **Threaded mode:** The sync path passes the caller's stack pointer directly (no malloc, no memcpy). A TLS flag (`g_skip_free`) prevents the handler from freeing the stack pointer
-3. **Cooperative mode:** The sync path heap-allocates a copy of the message data, because the mailbox may have other messages queued ahead, the immediate `step()` call consumes the oldest message (FIFO), not necessarily the one just sent
-4. `actor->step()` is called synchronously in the sender's context
-
-```c
-static inline void aether_send_message_sync(ActorBase* actor, void* message_data, size_t message_size) {
-    Message msg;
-    msg.type = *(int*)message_data;
-#if AETHER_HAS_THREADS
-    msg.payload_ptr = message_data;  // Direct pointer to caller's stack (zero-copy)
-#else
-    msg.payload_ptr = malloc(message_size);  // Cooperative: heap-copy (FIFO safety)
-    memcpy(msg.payload_ptr, message_data, message_size);
-#endif
-
-    mailbox_send(&actor->mailbox, msg);
-
-#if AETHER_HAS_THREADS
-    g_skip_free = 1;
-#endif
-    actor->step(actor);
-#if AETHER_HAS_THREADS
-    g_skip_free = 0;
-#endif
-}
-```
-
-**Per-actor flag:**
-
-The `main_thread_only` field on `ActorBase` signals scheduler threads to skip processing this actor. When a second actor spawns, the flag is cleared on the first actor so scheduler threads can process both normally. In cooperative mode, `main_thread_only` stays set for all actors, the cooperative scheduler always processes them directly.
-
-**Scheduler integration:**
-
-- `scheduler_start()` returns immediately if main thread mode is active (no-op in cooperative mode)
-- `scheduler_wait()` returns immediately in threaded mode; in cooperative mode, drains via `aether_scheduler_poll()` loop
-- Scheduler threads check `actor->main_thread_only` before processing (cooperative mode has no scheduler threads)
+A send (`!`) is asynchronous whatever the number of actors: the payload is
+copied to the heap and handed to the scheduler, and the sender goes on while a
+scheduler thread runs the handler. The runtime once ran the first actor's
+handler inside the sender's `!` until a second actor was spawned ("main-thread
+mode"), so a handler that blocked, waiting on something its sender was about
+to do, deadlocked a one-actor program, and the order of a program's output
+depended on how many actors it had (#3112). The cooperative (no-threads)
+runtime queues a send the same way and runs it at the next `wait_for_idle`,
+`aether_scheduler_poll` or shutdown.
 
 ### Thread-Local Message Payload Pools
 
@@ -113,7 +76,7 @@ The batch dequeue reads `head` and `tail` once, copies all available messages, t
 
 **Implementation:** `runtime/scheduler/multicore_scheduler.c`, `compiler/codegen/codegen.c`
 
-For main thread fan-out patterns (fork-join), batch send reduces atomic operations from N to num_cores. The compiler detects while loops containing sends in `main()` and wraps them with batch start/flush calls.
+For main thread fan-out patterns (fork-join), batch send reduces atomic operations from N to num_cores. The compiler wraps a while loop of a non-actor function in batch start/flush calls when the loop sends and cannot wait between its sends (#3117): it calls nothing, prints nothing, asks nothing and reads no actor's state, and has no `return`, labeled `break` or `continue` (which can leave for an enclosing loop) or closure in it. Sends, arithmetic, assignments, branches and inner loops are fine, the counting and fork-join shape. A loop that sleeps, reads a line or waits between sends is not batched, since its messages would wait for the loop's end.
 
 ```c
 // Generated code for fork-join pattern:
@@ -129,9 +92,7 @@ The flush snapshots each message's target core, sorts by core using radix sort, 
 
 **Partial batch enqueue:** `queue_enqueue_batch` enqueues as many messages as fit in the queue and returns the count, rather than failing the entire batch when the queue is near full. This lets the common case (queue has room) complete with a single atomic store per core. When the queue can't absorb the full batch, the flush falls back to `scheduler_send_remote` for each remaining message, which handles its own routing and counting. The fallback path is rare in practice because the cross-core queue holds 1024 items.
 
-**Runtime auto-detection:** The batch send path automatically detects when Main Thread Actor Mode is active (single-actor programs) and uses the synchronous zero-copy path instead of batching. This ensures single-actor benchmarks like counting use the optimal path while multi-actor fan-out patterns like fork-join benefit from batch send. No manual configuration is required.
-
-**Pattern detection:** Only applied in `main()` function loops, not inside actor receive handlers. This preserves low-latency actor-to-actor messaging while optimizing main-to-actors fan-out.
+**Pattern detection:** Only applied outside actor receive handlers, which preserves low-latency actor-to-actor messaging while optimizing main-to-actors fan-out. Inside a batch every send joins it, a message with a payload included (`aether_send_message_batch`), so the loop's sends to one actor arrive in the order they were made; an inner loop joins the outer loop's batch. A send that goes around a pending batch flushes it first, and so does `wait_for_idle()`; opening a batch never drops what one holds. On a scheduler thread nothing is batched: its sends keep their core's own channel and overflow order.
 
 ### Adaptive Batch Size
 
@@ -336,7 +297,7 @@ The benchmark build uses `-flto` for both compilation and linking, enabling cros
 
 **Implementation:** `runtime/utils/aether_cpu_detect.c`
 
-The `cpu_recommend_cores` function uses CPUID on x86 and falls back to OS-level APIs (`sysctl` on macOS, `sysconf` on Linux, `GetNativeSystemInfo` on Windows) when CPUID returns zero (ARM, virtualized environments).
+The `cpu_recommend_cores` function uses CPUID on x86 and falls back to OS-level APIs (`sysctl` on macOS, `sysconf` on Linux, `GetNativeSystemInfo` on Windows) when CPUID returns zero (ARM, virtualized environments). It then takes no more threads than the CPUs the process may use, `aether_cpu_available()`: the affinity mask (`taskset`, a cpuset cgroup, a Windows job or `start /affinity`) and, on Linux, a cgroup CPU quota (`docker --cpus`, a Kubernetes limit). The cap of 16 still applies. The machine's count started 16 scheduler threads for a 2-CPU container, which then preempted each other (#3106). `std.worker` and the HTTP server size their pools the same way.
 
 ### Apple Silicon P-Core Detection
 
@@ -355,6 +316,15 @@ Detection uses `sysctlbyname("hw.perflevel0.physicalcpu")` to query the P-core c
 | Windows | `SetThreadIdealProcessor` | Hint only |
 
 Note: macOS does not support hard core pinning by design, and Windows uses a hint by choice: bound to one logical CPU, a scheduler thread could not leave it when another program ran there, and shared it a time slice at a time (#3087). The OS keeps a thread on its CPU and moves it when that CPU is busy.
+
+Linux keeps the hard binding, measured (#3089). On a 4-CPU CI runner, bound and unbound threads were compared under busy loops:
+- bound won 7 of the 12 loaded cases (thread ring 10.8 against 7.4 M msg/s beside two loops the kernel placed, skynet up to 2.4x);
+- bound lost only where another program's thread was pinned to a scheduler thread's own CPU, by 1.1x to 1.5x;
+- on a quiet machine they tied.
+
+Linux moves movable load off a bound thread's CPU, which Windows did not.
+
+On Linux and Windows, scheduler thread i is placed on the i-th CPU the process may run on, counted from its affinity mask when the threads start, not on CPU i (#3106). Under `taskset -c 4-7` the threads stay on CPUs 4 to 7, where binding to CPU 0 escaped the mask. In a cpuset cgroup no binding is refused for a CPU outside the set.
 
 ### Per-Core Message Counters
 
@@ -474,11 +444,7 @@ The Aether compiler (`aetherc`) runs its own optimization passes on the AST befo
 
 ### Hot/Cold Path Fixes (scheduler-level)
 
-**Problem A, `aether_main_thread_mode_active()` branch hint** (`runtime/config/aether_optimization_config.h`)
-
-The inline accessor previously carried `__builtin_expect(..., 0)`, marking the main-thread path as *unlikely*. For single-actor programs this path is always taken, so the hint put the fast code in the cold instruction-cache section. Removed the hint; the C compiler now places the branch neutrally.
-
-**Problem B, Dead branch in generated send code** (`compiler/codegen/codegen_expr.c`)
+**Dead branch in generated send code** (`compiler/codegen/codegen_expr.c`)
 
 Generated code for `actor ! Msg` from the main thread previously emitted:
 ```c

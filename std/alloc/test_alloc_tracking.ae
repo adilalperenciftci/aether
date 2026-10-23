@@ -2,7 +2,8 @@
 
 import std.alloc(system, raw, resize, release, of_arena, arena_free)
 import std.tracking(wrap, count, bytes, report, destroy)
-import std.list(list_new_in, list_add_raw, add, list_size, list_free)
+import std.list
+import std.list(list_new_in, add, list_size, list_free)
 import std.arena
 
 extern exit(code: int)
@@ -68,7 +69,7 @@ main() {
     l = list_new_in(lt)
     i = 0
     while i < 64 {
-        list_add_raw(l, l)
+        list.add(l, l)
         i = i + 1
     }
     if list_size(l) != 64 { fail("list size ${list_size(l)}, want 64") }

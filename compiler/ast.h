@@ -651,6 +651,12 @@ typedef struct ASTNode {
      * on every other node. */
     int* arg_order;
     int arg_order_count;
+
+    /* #3086: on a call the checker typed against an extern, that extern's
+     * declaration: a module's own extern is not merged into the program,
+     * so this is how what the call keeps is read from its declaration. Not
+     * owned; NULL on every other node. */
+    struct ASTNode* callee_extern;
 } ASTNode;
 
 // Type functions

@@ -11,7 +11,7 @@ exports(
     tcp_server_port_raw, tcp_server_poll_raw, tcp_set_nodelay_raw,
     tcp_fd_raw, tcp_server_fd_raw, tcp_poll_raw, tcp_poll2_raw,
     tcp_send_bytes_raw, tcp_receive_into_raw,
-    connect, write, write_n, write_slice, read, read_n, read_into,
+    connect, write, write_n, write_slice, write_all, read, read_n, read_into,
     listen, listen_on, accept, fd, server_fd,
     server_port, server_poll, set_nodelay, poll, poll2
 )
@@ -32,6 +32,7 @@ extern tcp_send_n_raw(sock: ptr, data: ptr, length: int) -> int
 extern tcp_receive_raw(sock: ptr, max_bytes: int) -> string @heap
 extern tcp_receive_n_raw(sock: ptr, max_bytes: int) -> (string @heap, int, string)
 extern tcp_send_bytes_raw(sock: ptr, data: ptr, length: int) -> int
+extern tcp_send_all_raw(sock: ptr, data: ptr, length: int) -> int
 extern tcp_receive_into_raw(sock: ptr, buf: ptr, cap: int) -> int
 extern tcp_close(sock: ptr) -> int
 extern tcp_listen_raw(port: int) -> ptr
@@ -72,9 +73,9 @@ write(sock: ptr, data: string) -> {
 
 // Length-aware socket write: sends the bytes of `data`, whose length
 // travels with the slice (#2301), so embedded NUL bytes do not truncate
-// the send. Returns the OS send(2) byte count; callers that require
-// full-buffer delivery should loop, sending `data[n..]` until every byte
-// has been accepted. An empty slice sends nothing and returns (0, "").
+// the send. Returns the OS send(2) byte count, which may be short: a
+// caller that needs every byte delivered calls write_all. An empty slice
+// sends nothing and returns (0, "").
 //
 // For a string, send its byte view: `tcp.write_n(sock, string.bytes(s))`,
 // a prefix with `string.bytes(s)[0..n]`; for a `std.bytes` buffer,
@@ -131,13 +132,29 @@ fn need_bound(fname: string, s: byte[]) {
 // Write a `byte[]` slice's bytes, binary-safe: the length travels with
 // the slice (#2301). Returns (bytes_sent, "") or (0, "send failed"). The
 // count is one send(2) and may be SHORT, as with write_n: a caller that
-// needs the whole slice delivered loops on the rest, `s[sent..]`. An empty
-// slice sends nothing and returns (0, ""). A slice with no bound panics.
+// needs the whole slice delivered calls write_all. An empty slice sends
+// nothing and returns (0, ""). A slice with no bound panics.
 write_slice(sock: ptr, s: byte[]) -> {
     need_bound("write_slice", s)
     n = tcp_send_bytes_raw(sock, s, s.len)
     if n < 0 {
         return 0, "send failed"
+    }
+    return n, ""
+}
+
+// Write every byte of a `byte[]` slice (#3108), as many sends as it takes:
+// one send can accept fewer bytes than asked, when the socket's send
+// timeout (30 s) expires while the peer reads slowly, or a signal cuts it
+// short. Returns (data.len, "") once every byte is out, or (sent, "send
+// failed") with the bytes sent before a send failed or timed out having
+// sent nothing. An empty slice sends nothing and returns (0, ""); a slice
+// with no bound panics.
+write_all(sock: ptr, data: byte[]) -> {
+    need_bound("write_all", data)
+    n = tcp_send_all_raw(sock, data, data.len)
+    if n < data.len {
+        return n, "send failed"
     }
     return n, ""
 }

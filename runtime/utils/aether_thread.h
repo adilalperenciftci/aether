@@ -21,6 +21,34 @@
 
 #include "../config/aether_optimization_config.h"
 
+#if defined(_WIN32)
+// ---- Windows types --------------------------------------------------------
+// Spelled without <windows.h>, with the layout of the Win32 objects they
+// stand for (checked against them in the threaded path, where windows.h is
+// included). Threaded or not: a program and the libaether it links against
+// share structs that hold a thread, a mutex and a condition (ActorBase), so
+// their layout must not depend on AETHER_NO_THREADING, which a cooperative
+// libaether is built with and a program is not (#3120).
+#include <stdint.h>    // uintptr_t
+
+typedef void* pthread_t;                // HANDLE
+typedef struct {                        // CRITICAL_SECTION
+    void*     debug_info;
+    long      lock_count;
+    long      recursion_count;
+    void*     owning_thread;
+    void*     lock_semaphore;
+    uintptr_t spin_count;
+} pthread_mutex_t;
+typedef struct { void* ptr; } pthread_cond_t;   // CONDITION_VARIABLE
+typedef unsigned long pthread_key_t;            // DWORD: an FLS index
+
+// Attribute types — Windows has no equivalents; these are accepted but ignored
+typedef int  pthread_attr_t;
+typedef int  pthread_mutexattr_t;
+typedef int  pthread_condattr_t;
+#endif
+
 #if !AETHER_HAS_THREADS
 
 // ============================================================
@@ -37,7 +65,7 @@
 //   - Linux/macOS: <pthread.h> (full POSIX)
 //   - Emscripten:  <pthread.h> (stub types when threads disabled)
 //   - ARM newlib:  <sys/_pthreadtypes.h> via <sys/types.h> (from <stdio.h>)
-//   - Windows:     handled by the #elif _WIN32 path below (not here)
+//   - Windows:     the Win32-shaped types above, a threaded build's (#3120)
 //
 // We only provide our own typedefs for truly bare-metal environments
 // where no system headers define pthread types at all.
@@ -50,7 +78,7 @@
     defined(__APPLE__) || defined(__EMSCRIPTEN__) || defined(__wasi__) || \
     defined(_NEWLIB_VERSION)
 #include <pthread.h>
-#else
+#elif !defined(_WIN32)
 // Bare-metal without newlib: define minimal types
 typedef int pthread_mutex_t;
 typedef int pthread_cond_t;
@@ -127,8 +155,12 @@ static inline int aether_nop_join(pthread_t t, void** r) { (void)t; if (r) *r = 
 // needs the macro to exist too — runtime/sandbox/aether_audit.c does exactly
 // that, and without this a threadless build fails with "use of undeclared
 // identifier 'PTHREAD_MUTEX_INITIALIZER'" (#1655, first hit on wasm32-wasi).
-// pthread_mutex_t is an int here and every lock operation is a no-op, so any
-// value is correct; 0 matches the "unlocked" reading of the typedef.
+// Every lock operation is a no-op, so any value is correct: 0 for the int
+// typedefs, a zeroed object for the Win32-shaped structs.
+#if defined(_WIN32)
+#  define PTHREAD_MUTEX_INITIALIZER {0}
+#  define PTHREAD_COND_INITIALIZER {0}
+#endif
 #ifndef PTHREAD_MUTEX_INITIALIZER
 #  define PTHREAD_MUTEX_INITIALIZER 0
 #endif
@@ -207,32 +239,13 @@ static inline int aether_nop_join(pthread_t t, void** r) { (void)t; if (r) *r = 
 #  define EBUSY 16
 #endif
 
-// ---- Types ---------------------------------------------------------------
-// Spelled without <windows.h>, with the layout of the Win32 objects they
-// stand for (checked against them below, where windows.h is included).
+// The types are the Win32-shaped ones defined at the top of this file.
 // A program's generated C includes this header for the types alone: the
 // actor runtime's structs carry a thread, a mutex and a condition. On MinGW
 // <windows.h> brings <x86intrin.h>, and with it every AVX-512 and AVX10
 // header GCC ships, some 80,000 lines per program build (#2673), so such a
 // translation unit defines AETHER_THREAD_TYPES_ONLY and stops here. The
 // runtime, which calls the functions, includes the rest.
-
-typedef void* pthread_t;                // HANDLE
-typedef struct {                        // CRITICAL_SECTION
-    void*     debug_info;
-    long      lock_count;
-    long      recursion_count;
-    void*     owning_thread;
-    void*     lock_semaphore;
-    uintptr_t spin_count;
-} pthread_mutex_t;
-typedef struct { void* ptr; } pthread_cond_t;   // CONDITION_VARIABLE
-typedef unsigned long pthread_key_t;            // DWORD: an FLS index
-
-// Attribute types — Windows has no equivalents; these are accepted but ignored
-typedef int  pthread_attr_t;
-typedef int  pthread_mutexattr_t;
-typedef int  pthread_condattr_t;
 
 #ifndef AETHER_THREAD_TYPES_ONLY
 

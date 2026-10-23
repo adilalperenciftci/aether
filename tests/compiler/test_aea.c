@@ -415,7 +415,13 @@ TEST_CATEGORY(aea_codec_covers_every_ast_field, TEST_CATEGORY_COMPILER) {
      * checker binds them to their parameters. It is set only by the checker
      * (NULL after a parse), so like `origin_module` the codec does not carry
      * it and refuses an AST that has it; neither the wire format nor
-     * AEA_FORMAT_VERSION changed. */
+     * AEA_FORMAT_VERSION changed.
+     *
+     * ASTNode grew to 152 with `callee_extern` (#3086): the extern a call
+     * was typed against, recorded by the type checker. Like `arg_order` it
+     * is NULL after a parse, so the codec does not carry it and refuses an
+     * AST that has it; neither the wire format nor AEA_FORMAT_VERSION
+     * changed. */
     /* Type grew to 136 with `closure_literal` (#2460), a type-checker
      * back-pointer like compound_node: NULL after a parse and refused by
      * encode_type, so the wire format and AEA_FORMAT_VERSION are unchanged
@@ -430,7 +436,7 @@ TEST_CATEGORY(aea_codec_covers_every_ast_field, TEST_CATEGORY_COMPILER) {
      * parse state, so the codec carries it and AEA_FORMAT_VERSION went to
      * 5. */
     if (sizeof(void*) == 8 && sizeof(int) == 4) {
-        ASSERT_EQ(144, (int)sizeof(ASTNode));
+        ASSERT_EQ(152, (int)sizeof(ASTNode));
         ASSERT_EQ(152, (int)sizeof(Type));
     }
 }

@@ -60,6 +60,10 @@ void aether_error_get_source(const char** out_filename, const char** out_source)
 void aether_error_set_source(const char* filename, const char* source);
 void aether_error_report(AetherError* error);
 void aether_warning_report(AetherError* warning);
+// While muted, errors, warnings and codegen notes are neither printed nor
+// counted. Codegen mutes the second rendering of one function (#3029).
+void aether_diagnostics_set_muted(int muted);
+int aether_diagnostics_muted(void);
 
 // Helper functions
 void aether_error_simple(const char* message, int line, int column);

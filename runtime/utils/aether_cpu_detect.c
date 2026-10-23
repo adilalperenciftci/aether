@@ -17,6 +17,8 @@
 #include <windows.h>
 #endif
 
+#include "aether_cpu_available.h"
+
 #if AETHER_HAS_SIMD
    /* CPUID intrinsics come from different headers per toolchain. MSVC exposes
     * __cpuidex via <intrin.h>; a GNU compiler (gcc/clang, INCLUDING zig cc's
@@ -367,6 +369,15 @@ int cpu_recommend_cores(void) {
         cores = 1;
 #endif
     }
+
+    // No more threads than CPUs the process may use: its affinity mask
+    // (taskset, a cpuset cgroup, a Windows job or start /affinity) and a
+    // cgroup CPU quota (docker --cpus, a Kubernetes limit). The machine's
+    // count started 16 scheduler threads for a 2-CPU container, which then
+    // preempted each other (#3106); std.worker and the HTTP server size
+    // their pools the same way.
+    int available = aether_cpu_available();
+    if (available > 0 && available < cores) cores = available;
 
     if (cores > 16) cores = 16;
     if (cores < 1) cores = 1;

@@ -78,9 +78,15 @@
 /*
  * Unconditionally aligning does not cost very much, so do it if unsure.
  * Unaligned accesses are not safe even on x86, so disable by default.
+ *
+ * Aether: 1, as the comment above says. At 0 the compressor compares two
+ * bytes as `*(u16 *)p` at any address, an unaligned load C leaves
+ * undefined (UBSan reports it, #2488). The byte-wise compare reads the
+ * same two bytes, so the output is unchanged, and GCC and Clang fuse it
+ * into one load where the target allows one.
  */
 #ifndef STRICT_ALIGN
-# define STRICT_ALIGN 0 /* was: # !(defined(__i386) || defined (__amd64)) */
+# define STRICT_ALIGN 1 /* was: 0, and before that !(defined(__i386) || defined (__amd64)) */
 #endif
 
 /*
