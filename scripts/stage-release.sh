@@ -4,6 +4,7 @@
 # `make test-release-archive`, so what CI checks is what ships.
 #
 #   scripts/stage-release.sh <bin-dir> <out-dir> [--module-artifacts <aetherc>]
+#                            [--contrib-archives]
 #
 # <bin-dir> holds the built aetherc and ae (.exe on Windows), libaether.a,
 # MANIFEST and, when built, shared/ (build/, or build/.alien/<target> for a
@@ -12,6 +13,11 @@
 # --module-artifacts runs <aetherc> to precompile the installed std modules
 # (#1746); a cross-build, whose aetherc cannot run here, leaves it out and its
 # imports parse the sources.
+# --contrib-archives builds contrib.sqlite's veneer and the vendored SQLite
+# for the machine running this script and ships them as lib/contrib/
+# libaether_sqlite.a and libsqlite3.a (the dev layout's build/contrib, which
+# `ae build` and aeb's own link both put on -L). Only a NATIVE stage may pass
+# it: a cross-build's archives would be for the wrong machine.
 #
 # The packaging used to be written out three times in release.yml (Unix,
 # Windows, FreeBSD) and a fourth time, differently, in the Makefile's smoke
@@ -24,10 +30,12 @@ set -eu
 [ $# -ge 2 ] || { echo "usage: $0 <bin-dir> <out-dir> [--module-artifacts <aetherc>]" >&2; exit 2; }
 bin="$1"; out="$2"; shift 2
 modules_aetherc=""
+contrib_archives=""
 while [ $# -gt 0 ]; do
     case "$1" in
         --module-artifacts) [ $# -ge 2 ] || { echo "$0: --module-artifacts needs an aetherc" >&2; exit 2; }
                             modules_aetherc="$2"; shift 2 ;;
+        --contrib-archives) contrib_archives=1; shift ;;
         *) echo "$0: unknown argument '$1'" >&2; exit 2 ;;
     esac
 done
@@ -99,6 +107,25 @@ sh .github/scripts/trim_contrib_sources.sh "$c" --keep-host-bridges
 # Compiled module artifacts (#1746), made by the aetherc this release ships.
 if [ -n "$modules_aetherc" ]; then
     sh scripts/build_module_artifacts.sh "$modules_aetherc" . "$out/lib/aether/modules"
+fi
+
+# The contrib.sqlite archives (#1372). A program linked without `ae build`
+# (aeb's orchestrator link, an aether.toml link_flags list) names
+# `-laether_sqlite -lsqlite3` itself and reads no source, so a release that
+# ships only the source (above) fails it with "library 'aether_sqlite' not
+# found". `ae build` finds the same archives and keeps them in place of
+# compiling the veneer. Native stages only (see the header).
+if [ -n "$contrib_archives" ]; then
+    cdir="$(mktemp -d)"
+    if ! MODULES=sqlite CONTRIB_OUT="$cdir" bash tests/scripts/contrib_build.sh >"$cdir/build.log" 2>&1 \
+       || [ ! -f "$cdir/libaether_sqlite.a" ] || [ ! -f "$cdir/libsqlite3.a" ]; then
+        sed 's/^/    /' "$cdir/build.log" >&2
+        echo "$0: could not build the contrib.sqlite archives (the vendored libsqlite3.a is required)" >&2
+        rm -rf "$cdir"; exit 1
+    fi
+    mkdir -p "$out/lib/contrib"
+    cp "$cdir/libaether_sqlite.a" "$cdir/libsqlite3.a" "$out/lib/contrib/"
+    rm -rf "$cdir"
 fi
 
 cp LICENSE README.md VERSION "$out/"

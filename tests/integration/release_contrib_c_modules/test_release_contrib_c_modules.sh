@@ -33,7 +33,7 @@ TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP" || true' EXIT
 rel="$TMP/release"
 
-if ! sh "$ROOT/scripts/stage-release.sh" "$ROOT/build" "$rel" > "$TMP/stage.log" 2>&1; then
+if ! sh "$ROOT/scripts/stage-release.sh" "$ROOT/build" "$rel" --contrib-archives > "$TMP/stage.log" 2>&1; then
     if grep -q "fetch-\(sqlite\|quickjs\)" "$TMP/stage.log"; then
         echo "  [SKIP] $NAME: the amalgamations could not be fetched (offline?)"
         exit 0
@@ -42,15 +42,22 @@ if ! sh "$ROOT/scripts/stage-release.sh" "$ROOT/build" "$rel" > "$TMP/stage.log"
     tail -8 "$TMP/stage.log" | sed 's/^/        /'
     exit 1
 fi
-# What the archive carries: no contrib archives anywhere in it
-# (libaether_main.a is the runtime's Windows --emit=obj entry point).
-contrib_archives() {
-    find "$rel" -name 'libaether_*.a' ! -name libaether_main.a
-    find "$rel" -name 'libsqlite3.a'
-}
-if contrib_archives | grep -q .; then
-    echo "  [FAIL] $NAME: the staged release carries contrib archives:"
-    contrib_archives | sed 's/^/        /'
+# What the archive carries: contrib.sqlite's veneer and the vendored SQLite
+# as lib/contrib/ archives (--contrib-archives, what every native release leg
+# passes), and nothing else in the way of contrib archives (libaether_main.a
+# is the runtime's Windows --emit=obj entry point). aeb's own link names
+# `-laether_sqlite -lsqlite3` and never compiles contrib source, so a release
+# without them failed `library 'aether_sqlite' not found` for sae and LisMusic.
+for a in libaether_sqlite.a libsqlite3.a; do
+    [ -f "$rel/lib/contrib/$a" ] || {
+        echo "  [FAIL] $NAME: the staged release has no lib/contrib/$a"
+        exit 1; }
+done
+others=$(find "$rel" \( -name 'libaether_*.a' ! -name libaether_main.a ! -name libaether_sqlite.a \
+                       -o -name 'libsqlite3.a' -path '*' ! -path "$rel/lib/contrib/*" \) )
+if [ -n "$others" ]; then
+    echo "  [FAIL] $NAME: unexpected contrib archives in the staged release:"
+    echo "$others" | sed 's/^/        /'
     exit 1
 fi
 
@@ -83,6 +90,54 @@ main() {
     sqlite.free(rs)
     sqlite.close(db)
 }' "sqlite=84"
+
+# The same program with the amalgamation gone from the staged tree: `ae build`
+# cannot compile the veneer now, so it links the shipped archives or it fails.
+# (A build against the source is the check above; this one is the archives.)
+mv "$rel/share/aether/contrib/sqlite/amalgamation" "$TMP/amalgamation.away"
+check sqlite_archives 'import contrib.sqlite
+main() {
+    db, err = sqlite.open(":memory:")
+    if err != "" { println("open: ${err}"); return }
+    sqlite.exec(db, "create table t(x int); insert into t values (21)")
+    rs, qerr = sqlite.query(db, "select x * 2 from t")
+    if qerr != "" { println("query: ${qerr}"); return }
+    println("sqlite=${sqlite.cell(rs, 0, 0)}")
+    sqlite.free(rs)
+    sqlite.close(db)
+}' "sqlite=42"
+mv "$TMP/amalgamation.away" "$rel/share/aether/contrib/sqlite/amalgamation"
+
+# Linked the way aeb links (no `ae build`): the emitted C, libaether.a and the
+# module's own @link flags, with only -L lib and -L lib/contrib.
+if [ "$EXE" != ".exe" ]; then
+    printf '%s\n' 'import contrib.sqlite
+main() {
+    db, err = sqlite.open(":memory:")
+    if err != "" { println("open: ${err}"); return }
+    sqlite.close(db)
+    println("direct=ok")
+}' > "$TMP/direct.ae"
+    if ( cd "$TMP" && AETHER_HOME="$rel" "$rel/bin/aetherc" direct.ae direct.c ) > "$TMP/direct.log" 2>&1 \
+       && [ -f "$TMP/direct.c" ]; then
+        # The module's own link request, as the emitted C's header carries it.
+        want=$(sed -n 's|^// aether-link: ||p' "$TMP/direct.c" | head -1)
+        cflags=$(AETHER_HOME="$rel" "$rel/bin/ae" cflags 2>/dev/null)
+        if ! ${CC:-cc} "$TMP/direct.c" $cflags -L"$rel/lib/contrib" $want \
+              -o "$TMP/direct" > "$TMP/direct.cc.log" 2>&1; then
+            echo "  [FAIL] $NAME: linking '$want' by hand against the release failed"
+            tail -8 "$TMP/direct.cc.log" | sed 's/^/        /'
+            fails=$((fails + 1))
+        elif [ "$("$TMP/direct" 2>&1)" != "direct=ok" ]; then
+            echo "  [FAIL] $NAME: the hand-linked program ran wrong"
+            fails=$((fails + 1))
+        fi
+    else
+        echo "  [FAIL] $NAME: aetherc could not compile the direct-link probe"
+        tail -8 "$TMP/direct.log" | sed 's/^/        /'
+        fails=$((fails + 1))
+    fi
+fi
 
 check jq 'import contrib.jq
 main() {

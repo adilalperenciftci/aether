@@ -1576,7 +1576,7 @@ test-release-archive: compiler ae stdlib check-archive-exports
 	@echo "==================================="
 	@tmpdir=$$(mktemp -d) && \
 	reldir="$$tmpdir/release" && \
-	{ sh scripts/stage-release.sh $(BUILD_DIR) "$$reldir" --module-artifacts $(BUILD_DIR)/aetherc$(EXE_EXT) > "$$tmpdir/stage.log" 2>&1 || \
+	{ sh scripts/stage-release.sh $(BUILD_DIR) "$$reldir" --contrib-archives --module-artifacts $(BUILD_DIR)/aetherc$(EXE_EXT) > "$$tmpdir/stage.log" 2>&1 || \
 	  { echo "  FAIL: scripts/stage-release.sh:"; tail -20 "$$tmpdir/stage.log" | sed 's/^/      /'; rm -rf "$$tmpdir"; exit 1; }; } && \
 	echo "  Staged the release tree in $$reldir" && \
 	echo "  Packing tarball..." && \

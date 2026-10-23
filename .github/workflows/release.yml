@@ -620,7 +620,7 @@ jobs:
         VERSION=$(cat VERSION | tr -d '[:space:]')
         # What the archive holds is defined once, in the tree being packaged
         # (`make test-release-archive` runs the same script on every PR).
-        sh scripts/stage-release.sh build release --module-artifacts build/aetherc
+        sh scripts/stage-release.sh build release --contrib-archives --module-artifacts build/aetherc
         cd release && tar -czf ../aether-${VERSION}-${{ matrix.target }}.tar.gz *
 
     # -- Package: Windows (MSYS2 shell) ---
@@ -629,7 +629,7 @@ jobs:
       shell: msys2 {0}
       run: |
         VERSION=$(cat VERSION | tr -d '[:space:]')
-        sh scripts/stage-release.sh build release --module-artifacts build/aetherc.exe
+        sh scripts/stage-release.sh build release --contrib-archives --module-artifacts build/aetherc.exe
         # A zip entry's main timestamp is a DOS date and time with no zone,
         # written in the packer's local zone and read back in the
         # extractor's. Packed in UTC, the files of the archive extracted
