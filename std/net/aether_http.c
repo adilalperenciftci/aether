@@ -146,6 +146,7 @@ void http_client_pool_size_for_proxy(void) {}
 #include <sys/resource.h>
 #endif
 #include <stdint.h>   /* INT64_MAX, for the pool expiry watermark */
+#include <errno.h>    /* errno and its codes, read on every platform */
 
 #ifdef _WIN32
     #include <winsock2.h>
@@ -167,7 +168,6 @@ void http_client_pool_size_for_proxy(void) {}
     #include <arpa/inet.h>
     #include <poll.h>        /* poll: no FD_SETSIZE bound, unlike select   */
     #include <fcntl.h>       /* fcntl, O_NONBLOCK for connect-with-timeout */
-    #include <errno.h>       /* EINPROGRESS / EWOULDBLOCK detection      */
     #include <sys/select.h>  /* select(), fd_set                          */
     #include <sys/time.h>    /* struct timeval                            */
 #endif

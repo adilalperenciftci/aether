@@ -21,16 +21,21 @@ CC="${CC:-cc}"
 TMPDIR="$(mktemp -d)"
 trap 'rm -rf "$TMPDIR"' EXIT
 
-# A value of the Makefile's own. Run under `make` (the sweep is), the inner
-# make inherits MAKEFLAGS and prints "Entering directory" lines into what it
-# echoes, so it starts clean.
+# A value of the Makefile's own, for a build with EXTRA_CFLAGS=$2. Run under
+# `make` (the sweep is), the inner make inherits MAKEFLAGS and prints
+# "Entering directory" lines into what it echoes, so it starts clean.
 make_var() {
     printf 'ae-print-var:\n\t@echo $(%s)\n' "$1" |
-        MAKEFLAGS= MAKELEVEL= make --no-print-directory -s -f Makefile -f - ae-print-var
+        MAKEFLAGS= MAKELEVEL= make --no-print-directory -s -f Makefile -f - ae-print-var \
+            EXTRA_CFLAGS="$2"
 }
-SRCS="$(make_var RUNTIME_SRC) $(make_var STD_SRC) $(make_var STD_REACTOR_SRC) $(make_var COLLECTIONS_SRC)"
-CFLAGS_REQ="$(make_var AETHER_REQUIRED_CFLAGS)"
-if [ -z "$SRCS" ] || [ -z "$CFLAGS_REQ" ]; then
+# The sources each build compiles: a no-threads one has the cooperative
+# scheduler in place of the threaded one.
+srcs_of() {
+    echo "$(make_var RUNTIME_SRC "$1") $(make_var STD_SRC "$1") $(make_var STD_REACTOR_SRC "$1") $(make_var COLLECTIONS_SRC "$1")"
+}
+CFLAGS_REQ="$(make_var AETHER_REQUIRED_CFLAGS "")"
+if [ -z "$(srcs_of "")" ] || [ -z "$CFLAGS_REQ" ]; then
     echo "  [FAIL] no_threads_refs: could not read the libaether sources from the Makefile"
     exit 1
 fi
@@ -38,7 +43,7 @@ fi
 # $1 = mode (threads | coop), $2 = extra flag
 compile_all() {
     mkdir -p "$TMPDIR/$1"
-    for src in $SRCS; do echo "$src"; done |
+    for src in $(srcs_of "$2"); do echo "$src"; done |
         xargs -P 4 -I{} sh -c 'o="$0/$(echo "$1" | tr / _).o"; $2 -c -O0 $3 $4 "$1" -o "$o" 2>>"$0.err" || echo "$1" >>"$0.failed"' \
             "$TMPDIR/$1" {} "$CC" "$2" "$CFLAGS_REQ"
     if [ -s "$TMPDIR/$1.failed" ]; then
