@@ -8803,14 +8803,21 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                         clo = R;
                     if (clo) {
                         int eq = strcmp(expr->value, "==") == 0;
+                        /* A condition's opener already parenthesises it, as
+                         * for every other `==` below: `if (((c).fn == 0))`
+                         * trips clang's default -Wparentheses-equality on
+                         * every `if c == null`. The closure operand is no
+                         * condition of its own. */
+                        int skip_parens = gen->in_condition;
+                        gen->in_condition = 0;
                         if (closure_value_is_fresh(gen, clo)) {
                             fprintf(gen->output, "(%s_aether_closure_holds_take(", eq ? "!" : "");
                             generate_expression(gen, clo);
                             fprintf(gen->output, "))");
                         } else {
-                            fprintf(gen->output, "((");
+                            fprintf(gen->output, skip_parens ? "(" : "((");
                             generate_expression(gen, clo);
-                            fprintf(gen->output, ").fn %s 0)", eq ? "==" : "!=");
+                            fprintf(gen->output, ").fn %s 0%s", eq ? "==" : "!=", skip_parens ? "" : ")");
                         }
                         break;
                     }
