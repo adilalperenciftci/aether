@@ -14,6 +14,452 @@ cut while your branch is open cannot fold your entry into the released section.
 
 ## [current]
 
+## [0.840.0]
+
+### Added
+
+- **`list.at(list, i)` and `map.lookup(map, key)`, and std and contrib use
+  the containers' public functions.** `list.at` returns the item at an
+  index the caller has bounded and panics, naming the index and the size,
+  on one out of range, as a slice index does; `map.lookup` returns the
+  value or null, `map.get` without its error slot. 25 files in std and
+  contrib called std.list's and std.map's raw C bindings instead (286
+  calls: `list_get_raw`, which read a null past the end, `list_add_raw`,
+  `map_put_raw`, `map_get_raw`, `map_keys_*_raw`), and std.message read
+  the map's key snapshot through a copy of its C struct layout. They call
+  `list.at`, `list.add`, `map.put`, `map.lookup` and `map.keys` (#3107).
+
+- **`make check-raw-calls`, run by `make ci`: no std or contrib file calls a
+  raw C binding another module declares.** A module binds C through
+  `*_raw` externs and builds its public functions on them; a caller in
+  another module that names the binding skips the error results, the
+  ownership and the bounds the public function adds. The checker, in
+  Aether (tests/raw_calls/check.ae), reports each such call and selective
+  import, skipping a module's own bindings, helpers named like one,
+  comments and strings, and runs its self-test over a fixture first
+  (#3107).
+
+- **`tcp.write_all(sock, data: byte[])` sends a whole buffer, and the TLS
+  modules send their records through it.** `write`, `write_n` and
+  `write_slice` each make one send and return its count, which can be
+  short when the socket's 30 s send timeout expires while a peer reads
+  slowly, or a signal cuts the send off. tls13_client and tls13_server sent
+  each record with one `write_n` and reported a short count as "failed to
+  send record", with part of the record already at the peer. `write_all`
+  sends until every byte is out or a send fails, and returns `(sent, err)`
+  (#3108).
+
+- **std.http's server streams a chunked response, sends SSE comments, and
+  reads back a response's status.** `http.response_begin_chunked(res)`
+  sends the head with `Transfer-Encoding: chunked` and takes the connection
+  over, as `response_upgrade_sse` does (TLS included); `chunked_write` and
+  `chunked_end` send the body. `http.sse_comment(sse, text)` sends a
+  keep-alive line clients ignore. `http.response_get_status(res)` returns
+  the status a handler has set (#3109).
+
+### Changed
+
+- **std's TLS modules, the HTTP load balancer and tinyweb's tests call other
+  modules through their public functions.** They called the `*_raw` C
+  bindings of std.net, std.fs and std.http directly. The TLS modules now
+  dial with `tcp.connect`, read with `tcp.read_n`, and load certificates,
+  keys and trust stores with `fs.read` and `fs.list_dir`. `fs.read` opens in
+  binary mode, so on Windows a certificate file is no longer read through
+  text mode, and a trust store that cannot be opened names the OS reason.
+  The load balancer starts with `http.server_start` and `server_set_tls`.
+  tinyweb's tests and schema showcase use std.http.client, which gives the
+  status and the body (#3107).
+
+- **A C-style `for` loop's bare init assigns a variable already bound.**
+  `i = 5; for (i = 0; i < 3; i++) {}` left `i` at 5: the loop declared a new
+  `i` that shadowed the local. A bare init (`i = 0`) is now the binding it
+  is anywhere else: it assigns a local, a module-level `var` or an actor's
+  state field of that name, which keeps the value the loop ends with, and
+  declares the loop's own variable only for a new name. A typed init
+  (`int i = 0`) and a range-for's variable still declare the loop's own.
+  To keep a loop that relied on the shadowing, give its variable a new name
+  or write its type in the init (`for (int i = 0; ...)`) (#2734).
+
+- **A send is asynchronous whatever the number of actors.** With one actor
+  the runtime ran the handler inside the sender's `!` ("main-thread mode")
+  until a second actor was spawned, so a handler that blocked on something
+  its sender was about to do deadlocked the program, the order of a
+  program's output depended on its actor count, and tests and examples
+  spawned a do-nothing actor to get the real behaviour. Every send now goes
+  through the scheduler from the first actor on, and the cooperative
+  (no-threads) runtime queues it for the next `wait_for_idle`,
+  `aether_scheduler_poll` or shutdown. `AETHER_INLINE` and
+  `AETHER_NO_INLINE` are gone with the mode, and `aether_scheduler_poll`
+  returns 0 with threads: there is nothing left for a host to drain. A
+  program that printed from a handler and then from `main` and relied on
+  that order calls `wait_for_idle()` between them (#3112).
+
+- **contrib.tinyweb serves its WebSocket, SSE and chunked endpoints through
+  std.http, on the server's own port.** It had listeners on ports of their
+  own, whose accept loops a program had to start beside `tw_start`, and a
+  frame codec that took one read for a whole frame, had no 64-bit length,
+  answered no ping and took an empty frame for a close; its SSE writes never
+  reported a client that had left, and `chunked_start` needed a raw socket
+  an endpoint does not have. `with_timeout`, `with_keep_alive` and
+  `on_stats` were stored and never applied. Now:
+  - `web_socket` handlers get every message whole (any length, binary ones
+    zero bytes and all), pings are answered, a quiet connection stays open,
+    and `ctx` is a map the connection's messages share; reply with
+    `http.ws_send_text` or `http.ws_send_binary`.
+  - `sse_send`, `sse_send_event` and `sse_comment` return 0, or -1 once the
+    client has gone.
+  - `chunked_start(res, status)` returns `(stream, err)`, and `write_chunk`
+    and `chunked_end` take the stream.
+  - `with_timeout` and `with_keep_alive` set std.http's keep-alive, and
+    `on_stats` gets a record of each endpoint request, whose accessors now
+    return a `string` or an `int`.
+  - Removed: `web_server_with_ws`, `web_server_full`, `with_backlog`,
+    `with_ws_backlog`, `on_error`, `on_server_error`, `on_ws_timeout`,
+    `on_ws_error` (stored, never called), the `WS_OPCODE_*` constants, the
+    frame and accept-loop functions (`ws_send_frame`, `ws_read_frame`,
+    `ws_accept_loop`, ...), `ws_handshake.c` and `ws_client.ae` (std.http's
+    `ws_connect` is the client) (#3109).
+
+### Fixed
+
+- **A call through the empty closure is a named panic.** `let c: fn =
+  null` then `c()`, a closure field or parameter given `null`, and a `fn?`
+  holding `null` (a present empty closure, which `match`'s `some` arm and
+  `!` take) crashed with an access violation and no message. The call now
+  panics with the category `empty_closure_call` and its source position,
+  which a `catch` receives (#3091).
+
+- **Migrating from 0.838: a function that puts a borrowed `ptr` parameter
+  in a std container declares it `@keep`.** What a call keeps is read from
+  the callee's declaration, never from the name it spells (#3079, #3086).
+  std's list and map stores declare their item `@retain` at the C
+  boundary: `list.add`, `list.add_raw`, `list.set`, `map.put` and
+  `map.put_raw` (and their `collections.` spellings, now externs over C
+  functions of the same names, with the same results), and `string.seq_cons`
+  its head and its tail. A borrowed `ptr` parameter put in a list or a map
+  is E0902, as one stored in a module `var` is; on 0.838.0 only a closure
+  or a struct holding one was checked, and `collections.list_add(routes,
+  box_closure(cb))` not even that, while a program's own `list_add` that
+  kept nothing was refused.
+
+  ```aether
+  remember(p: ptr) { _r = list.add(seen, p) }        // E0902: the list keeps `p`
+  remember(p: @keep ptr) { _r = list.add(seen, p) }  // the parameter says it is kept
+  ```
+
+  A list or a map the function makes itself and lets go nowhere is no
+  such place: the stores name the container that holds what they keep
+  (`@holds`), the constructors say their result is fresh (`@fresh`), and
+  a borrowed `ptr` parked in such a worklist keeps nothing past the call.
+
+  A `fn?` parameter, and a struct or sum parameter one of whose fields or
+  variants holds a closure or a `ptr` (an optional of one included), are
+  borrowed as a `fn` parameter is. `@scoped` reads the same declarations:
+  a value given to a parameter that keeps it escapes, including
+  `string.seq_cons`'s tail; one given to `set.add`, which copies it, does
+  not. `collections.map_put_string_owned` declared its copied key
+  `@retain`, so a counted key handed the map a reference it never released
+  (std.map declared the same function without it, so which applied
+  depended on import order); the key is borrowed now.
+
+- **A program's own function named like one of std's container stores is
+  called as itself.** A program's `list_add(xs: ptr, f: fn)` was compiled
+  as std's closure store (`_aether_list_add_closure`) and failed in the C
+  compiler, and its own `map_put` given a string as std's owning store.
+  `list_add` and `map_put` are std's C functions now (#3086), so a program
+  function of either name gets a C name of its own, as one named like any
+  other std C function does (#3080).
+
+- **Messages from one actor to another arrive in order while the target
+  moves between cores, and a chain of actors gathers on one core.** When an
+  actor moved to the core that sent to it, a message still queued on its old
+  core was forwarded after it, and the sender's next message, sent to the
+  new core directly, could be stepped first. A test with eight senders and
+  four moving targets saw 14,400 to 21,924 of 3,200,000 messages out of
+  order (#3093). A message re-queued because the target's mailbox was full
+  went to the back of a queue and could be overtaken the same way.
+
+  Now every message routed through a core's queues is counted on its target
+  until it reaches the mailbox, and an actor moves only by its own core with
+  none in flight. A full mailbox is made room in by stepping the actor, so
+  the message keeps its place.
+
+  A moved actor used to take the place its sender had just left, so a thread
+  ring only shifted around the cores. Now it moves before it runs the
+  message, so the ring gathers on one core in its first lap: 24.91 M msg/s
+  from 3.03, on 1/71 of the CPU time (#3090). A worker's batch is delivered
+  as one run: fork-join 39.69 M msg/s from 30.23. Ping-pong and counting are
+  unchanged.
+
+- **Every extern agrees with its C definition on the width of each argument
+  and result, and `make check-extern-widths` keeps it so.** An extern's C
+  prototype is written by the compiler and never seen beside the C that
+  defines the function, so where the two disagreed the call went ahead with
+  the wrong width. The new check, in Aether, found 55 externs that
+  disagreed with their C (#3097):
+  - C functions declared with a plain `long`, 32 bits on Windows: the Lua
+    host's integers, `std.tracking`'s byte count and `std.observe`'s
+    tokens were cut to 32 bits there. They are `int64_t` now.
+  - Sizes and tokens that are `size_t` or `uint64_t` in C but were
+    declared `int`: `string_new_with_length` in 11 modules and in the
+    compiler's own prelude, `std.alloc` and `std.arena` sizes, and every
+    contrib host's `*_run_sandboxed_with_map` map token. They are `long`
+    now. `arena.used` and `arena.size` return `long`.
+  - A `char` parameter (`tinygo_call_dynamic`) and `std.casper`'s uid,
+    both now as the extern reads them.
+
+  The check runs in CI. A C `long` in a bound signature fails it, since no
+  Aether type has that width on every platform. The Lua host also pushes a
+  negative whole Double as an integer now; it used to go out as a string.
+
+- **A literal clause fits a written result type that holds its value.**
+  `g(0) -> 5` beside `g(k) -> uint8 { ... }` was refused as an `int`,
+  which `uint8` does not hold, while a literal bound beside a local's
+  written type is taken. A literal clause is held as a binding is now;
+  `300` beside `-> uint8` is still refused (#3082).
+
+- **An actor state can be named like any of the runtime's actor fields.**
+  `state id`, `state active` or `state mailbox` passed the checker and then
+  failed in the C compiler with a duplicate member, because the generated
+  actor struct spliced the runtime's actor fields in beside the states. The
+  base is a member of its own now (`ActorBase _aether_base`), so those
+  names are ordinary states. Only a state named `_aether_base` itself is
+  refused, by the checker with a message (#3094).
+
+- **A receive timeout fires in a program with more than one actor.**
+  `receive { ... } after N -> { ... }` fired only in main-thread mode, a
+  program with one actor. On the scheduler's cores nothing stepped an
+  actor whose mailbox was empty, so the timeout of an actor that received
+  nothing never fired, and `wait_for_idle()` returned without waiting
+  for it. Now the actor's core, or its own thread, steps it once the
+  deadline passes, within a park's timed wait (32 ms at most). And
+  `wait_for_idle()` waits for armed timeouts, as main-thread mode does
+  (#3102).
+
+- **A module's own import names the file beside it, wherever the compiler
+  runs.** A program built in a directory with a `parser.ae` of its own
+  (contrib/jq) and importing `std.jsonpath` failed: "'free_query' is not
+  exported from module 'parser'". std.jsonpath's `import parser` searched
+  the current directory before its own, and found the program's file. A
+  module's own imports look beside it first now; the entry program's keep
+  the project root first. contrib/jq's `_str_indices` no longer leaks its
+  result for an empty needle, and jq, std.jsonpath, liquid and four
+  examples build without their W1002 warnings (#3103).
+
+- **A write to `.len` of a slice or an array is a type error.** `xs.len = 2`,
+  `xs.len += 1`, `xs.len++` and `a.len = 3` on an array passed the checker
+  and failed in the C compiler on generated code ("lvalue required"). The
+  checker refuses each with its own message and points at `xs[lo..hi]` for
+  fewer elements (#3104).
+
+- **Undefined behaviour the UBSan run of the test corpus found is gone.**
+  `mem.get_u64_le` and `mem.get_u64_be` overflowed a signed integer for a
+  top byte of 128 or more; HTTP basic auth's base64 decoder and h2c's
+  HTTP2-Settings decoder overflowed an int after six characters; std.lzf
+  compared two bytes through an unaligned `u16` load; the shared map read
+  its header through a plain char. The values were right on the compilers
+  in use, but C leaves each undefined, so a compiler was free to break
+  them (#2488).
+
+- **An array length may be a named constant or an expression over them.**
+  The parser took only a decimal number and read it with `atoi`, so
+  `long[QWORDS]` beside `const QWORDS: int = 128` and `long[NW + 1]` were
+  syntax errors, `byte[0x40]` was an array of length 0, and `int[0]`
+  compiled as a slice. A length is now an integer constant expression (a
+  literal in any base, a `const` of the file, `+ - * / % << >>` and
+  parentheses), at least 1, in every place a type is written, and anything
+  else is an error that says what a length may be (#3115).
+
+- **An index into a fixed-size array is checked, as a slice's is.**
+  `a[i]` on a `T[N]` compiled to a plain C `a[i]`, so `a[4] = 99` on an
+  `int[3]` wrote into the stack frame and a read past the end returned
+  garbage, with no panic. Every index into a `T[N]` (a read, a store, `+=`,
+  `++`, through a local, a field, a parameter, an actor's state or a
+  `const` table) is now checked against N, and one outside `0 ..< N` is the
+  slice's panic: `array index 4 out of range for length 3`, with the source
+  line, which `try` catches. An index known when the program is compiled
+  that is out of range is a compile error. With a constant N and a loop
+  bounded by it the C compiler drops the test: the cryptography modules'
+  table lookups and the cross-language benchmarks run as fast as before
+  (#3113).
+
+- **A module that defines its own `free` can free a slice.** The merger
+  renames a module's calls to its own functions, so in a module defining
+  `free(p: ptr)` (`bignum.free`, `json.free`) every `free(xs)` called that
+  function: a slice decayed to its pointer, the module read it as its own
+  object and crashed, and the builtin that releases a `make` buffer was
+  out of reach. A slice argument now goes to the builtin unless the
+  module's `free` takes a slice itself (#3116).
+
+- **The actor scheduler counts and places its threads by the CPUs the
+  process may use.** Thread i was bound to CPU i (Linux) or given it as its
+  ideal processor (Windows), a number from 0: under `taskset -c 4-7` the
+  threads left the CPUs the program was started on, and in a cpuset
+  container a binding outside the set was refused. They now go to the
+  i-th CPU of the process's affinity mask. The thread count was the
+  machine's (16 threads for a 2-CPU container); it is now no more than
+  the affinity mask and a cgroup CPU quota allow, as `std.worker` and the
+  HTTP server already sized their pools. Linux keeps the hard binding,
+  measured under background load (#3089, #3106).
+
+- **A DER length past the input is refused, however large.** std.cryptography.asn1
+  checked a TLV's length as `pos + length > len`; a four-byte length that is
+  negative or near 2^31 wrapped that sum past the check, and the reader went
+  on with content it did not have. An INTEGER declaring 0x7fffffff bytes
+  reached `bignum.from_bytes`, which panicked (Wycheproof's DER ECDSA
+  signatures). The length is now compared with what is left of the input.
+
+- **A named function is a value in an array literal and after `return`.**
+  `[held, null]` was typed as an int array, and C got `int fs[2] = {held,
+  NULL}`; `return held` from a `-> fn` function called an adapter nothing
+  had declared. Both are function values now, as an argument or a local's
+  value already was: `[held, null]` is an array of closures, and the
+  returned function is the closure a caller calls. Where the place is a
+  typed function pointer (a `cfn` result, a part of a tuple result, an
+  array of one such as `let ops: Op[2] = [twice, half]`), the function is
+  its address there instead.
+
+- **`.len` is an array's only member, and any other name says so.**
+  `arr.length` passed the checker and stopped at the C compiler ("request
+  for member 'length' in something not a structure or union"), and so did
+  `a.size` on a fixed-size array or `.length` on an array of closures. On
+  a slice or an array, a member other than `.len` is now a type error that
+  names `.len` (#3092).
+
+- **Any expression whose value is a function can be called.** `fs[1]()` was
+  refused as "Undefined function '?'": the parser kept only a name, a
+  `module.fn` or a field as a callee and dropped any other. An element, a
+  call's result (`make_adder(5)(2)`) and a closure field of a receiver that
+  is not a name (`hs[0].cb()`) are now called as a closure local is,
+  through `call(callee, args)`. The callee is evaluated once and held for
+  its call, and one whose value is not a function is refused as such (#3099).
+
+- **`ae fmt` writes `make([]fn, 2)` tight.** A slice's element type is
+  written against its `[]` (`[]int`, `[]*Node`), but `fn`, the one type
+  that is a keyword, was taken for a keyword and spaced: `make([] fn, 2)`
+  (#3081).
+
+- **A call through a null function pointer is a named panic.** A typed
+  function pointer (`fn(int) -> int`, a `cfn` type) holding `null`, called
+  from a local, a parameter, a field, a module-level `var`, an array
+  element or a function's result, jumped to address 0 and crashed with no
+  message. The call now panics with the category `null_function_call` and
+  its source position, which a `catch` receives (#3098). A typed function
+  pointer reached through an element or a field of a field (`fs[1](x)`,
+  `w.h.cb(x)`) is called through its signature, not as a closure.
+
+- **A local declared without a value starts at its type's zero value.**
+  `long x`, `int[3] k` and `P p` were `int64_t x; int k[3]; P p;` in C, so
+  reading one before writing it read whatever its stack slot held, with no
+  diagnostic. Each is now its zero value (0, false, null, none, the empty
+  slice, an array of zeros, a struct of zeros), in a function, a closure
+  and an actor's handler, and in a loop body each pass starts it at zero
+  again, releasing what an owning one held. Measured on BLAKE2b and
+  ChaCha20, whose block functions declare 16-element arrays this way: no
+  change outside the run-to-run noise (#3114).
+
+- **Tests ask the build which platform they run on.** Eleven tests decided
+  they ran on Windows from `getenv("OS") == "Windows_NT"`, a variable
+  cmd.exe and the desktop set, so from a shell without it (an MSYS2 login
+  shell with a clean environment, a CI step, a service) a Windows build
+  took the POSIX branch and failed. They ask `os.platform()`, and
+  `make check-tests` fails on a `getenv("OS")` in tests, std or contrib
+  (#3119).
+
+- **A no-threads stdlib built at -O0 links.** `http_park_resume` was
+  compiled in every build and calls `http_pool_submit_conn`, which only a
+  threaded build defines. At -O2 GCC dropped the unused function and the
+  reference with it; at -O0 `make stdlib EXTRA_CFLAGS='-DAETHER_NO_THREADING
+  -O0'` failed to link the shared runtime on Windows and left an unresolved
+  symbol in the Linux one. It is compiled where its only caller is, and a
+  test compiles every libaether source at -O0 in both modes and fails on any
+  symbol a no-threads object needs that only threaded objects define
+  (#3121).
+
+- **A cooperative libaether and its programs agree on ActorBase on
+  Windows.** With `-DAETHER_NO_THREADING` (a cooperative libaether, `make
+  ci-coop`'s setup) aether_thread.h fell to bare-metal `int` thread types
+  on Windows, while a program built against it by `ae` has the Win32-shaped
+  ones. The four ActorBase fields after `thread` sat 4 bytes apart in the
+  two and the rest agreed only through padding, ActorReplySlot was 40 bytes
+  in one and 80 in the other, and Scheduler differed from `thread` on. The
+  Windows types are now one definition for both builds, and a test compares
+  those structs' layouts built both ways (#3120).
+
+- **std.http's server keeps a quiet WebSocket open, and a WebSocket client
+  whose peer has gone is told so rather than killed.** An upgraded
+  connection kept the receive timeout the server sets on every HTTP
+  connection (the keep-alive idle timeout, 30 s by default), so a handler's
+  blocking `ws_recv` took a client quiet that long for a close and returned
+  -1. The server clears it once the upgrade has gone out; `ws_recv_timeout`
+  still bounds a wait a handler wants bounded. And a send on a connection
+  the peer had closed raised SIGPIPE, which on Linux killed a client
+  process (one that runs no server, so nothing had ignored it); it fails
+  with -1 now (#3118).
+
+- **A loop that waits between sends delivers each send as it goes, and a
+  nested loop no longer loses the outer loop's messages.** The compiler
+  opened a send batch around every `while` loop of a non-actor function
+  that sent, so a heartbeat, a loop that slept or read a line between
+  sends, or one that called `wait_for_idle()` held its messages until the
+  loop ended or 256 had been sent; a message with a payload went around
+  the batch and overtook earlier one-int messages to the same actor; and an
+  inner loop's batch emptied the outer one's, losing its messages
+  (`a got 0 of 10`). A batch now wraps only a loop that cannot wait between
+  its sends (no call, print, ask, read of an actor's state, `return` or
+  labeled `break` or `continue`), every send in it joins it, an inner loop
+  joins the outer loop's batch, a send that goes around a pending batch and
+  `wait_for_idle()` flush it first, opening a batch never drops what one
+  holds, and a scheduler thread batches nothing (#3117).
+
+- **std.http's server sends every byte of a response.** On a plaintext
+  connection each response, WebSocket frame and SSE event went out as one
+  send(2), which can take fewer bytes than asked when a signal or a send
+  timeout cuts it off once part of the buffer is out; the rest never went,
+  and the client got a truncated response. The server now sends until every
+  byte is out, retrying an interrupted send (#3108).
+
+### Performance
+
+- **A function that indexes its slice parameters runs a view body when it
+  is given views.** Called where the C compiler cannot see the argument's
+  origin (another file, a function value, a library boundary), every index
+  of a `T[]` parameter tested for an unbounded view (`p as T[]`) and then
+  the bound, and the loop around it did not vectorize. Such a function now
+  has two bodies: one test at entry calls a view body, which indexes with
+  no test, when every slice parameter it indexes is a view, and the
+  function's own checked body runs otherwise. A bounded slice is checked
+  as before and still panics out of bounds. Measured with the origin
+  hidden, ps per element at -O3: an f32 map over views 302 to 53, an int
+  sum 194 to 83; bounded slices unchanged. A slice the function binds
+  again, takes the address of, or that a closure in it captures, is not
+  versioned (#3029).
+
+- **std.bignum and the cryptography modules hold their buffers as arrays and
+  slices, and bignum's modular exponentiation is 2.7x faster.** They kept
+  their limbs, message schedules, states and round keys in std.intarr and
+  std.longarr handles, read through another module's raw C bindings. The
+  fixed-size buffers are now fixed-size array fields and locals (a SHA-2
+  schedule is a `long[80]`, an Argon2 block a `long[QWORDS]` struct), the
+  sized ones `make([]int, n)` slices, so every index is checked. Measured on
+  Windows, gcc -O2, best of four interleaved rounds against the same
+  compiler: a 2048-bit `mod_pow` 2.7x faster, ML-KEM-768 +10%, SHA-3 +15%,
+  BLAKE2b +14%, 3DES +23%, Streebog +15%, Argon2 +3%, the other hashes and
+  ciphers within noise, and Tiger -2% (one index check per 8 bytes it
+  feeds). `bignum.test_bit(n, i)` reads one bit in place; p256's scalar
+  multiplication read it through the BN struct's layout before (#3107).
+
+- **Hoisting a function's branch-bound locals is linear in them.** The
+  checker and codegen walked the function body once per name bound in its
+  branches (the joins, the written type, the first binding, whether the
+  name is read), codegen scanned every declared local per lookup, and the
+  unused-variable pass compared every reference with every local. Each
+  question now reads what one walk of the body gathered: a generated main
+  with 3000 such names compiles in 0.13 s, from 2.57 s, and one with 6000
+  in 0.25 s, from 16.17 s. A function also hoisted at most 64 names out of
+  its branches, so a 65th, bound in an arm and read after it, was refused
+  as "Undefined variable"; any number is hoisted now (#3083).
+
 ## [0.839.0]
 
 ### Fixed
