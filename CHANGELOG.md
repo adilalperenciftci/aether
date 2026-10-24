@@ -14,6 +14,36 @@ cut while your branch is open cannot fold your entry into the released section.
 
 ## [current]
 
+## [0.842.0]
+
+### Fixed
+
+- **`quickjs.function` takes a typed callback, so a host function can keep its runtime pointer.** `cb` was a bare `@keep fn`, which borrows every parameter it is handed: a callback that kept `q` (a registry, the widget callbacks a page API registers) was refused with E0902, and sae declared its own `extern qjs_function` with the type to get past it. `cb` is now `fn(@keep ptr, int, int) -> int`; a closure that declares `q` borrowed and keeps it is still refused.
+
+- **A binary release now ships `libaether_sqlite.a` and `libsqlite3.a`, in `lib/contrib/`.** `ae build` compiles contrib.sqlite's veneer from the source the release ships, but a program linked any other way (aeb's own link, which sae and aether-ui's LisMusic use, or a hand-written `-laether_sqlite -lsqlite3`) reads no source and died with "library 'aether_sqlite' not found". `scripts/stage-release.sh --contrib-archives` (passed by the Unix and Windows legs of release.yml and by `make test-release-archive`) builds the veneer and the vendored SQLite for the machine running it and puts them where `ae build` and aeb already look. The FreeBSD and Android cross legs still ship none.
+
+- **A reverse proxy or load balancer answers 502 when its upstream cannot be reached.**
+  The event-driven proxy path closed the client's connection with nothing
+  written when the dial to the upstream was refused, the send failed or the
+  upstream closed before answering, so the client saw "Empty reply from
+  server" (curl exit 52) instead of the 502 the blocking path gives. The
+  failure now goes to the proxy exchange as an errored response, which counts
+  it against the upstream's breaker, retries where it may and otherwise makes
+  the 502 or 504, with `X-Aether-Proxy-Error: upstream_transport`. Found by
+  aeo's `spec_driver_loadbalancer_live`, which expects `aeo-lb` with a
+  placeholder backend to answer.
+
+- **A spawned child keeps its parent's standard streams when the parent marked them close-on-exec.**
+  Node marks its stdin, stdout and stderr close-on-exec, so a program run
+  under Node that used `os.spawn_proc` (or the other fork-and-exec paths of
+  `std.os`) started its child with none of the three, and a child that
+  needs them failed in ways that named nothing: chromedriver spawned by the
+  Selenium engine from Node could not start Chrome ("Failed to create Chrome
+  process"), and the first file such a child opened took descriptor 0. The
+  child now clears close-on-exec on 0, 1 and 2 before exec, which is what
+  inheriting the parent's streams means; a stream the parent closed stays
+  closed.
+
 ## [0.841.0]
 
 ### Fixed
