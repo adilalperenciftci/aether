@@ -1,6 +1,7 @@
 // std.net over IPv6: tcp_listen_on_raw takes "::1", "[::1]" and "::" (both
-// families), and tcp_connect_raw dials an IPv6 literal, bracketed or not,
-// and an IPv4 client reaches a "::" listener. Every one of these was refused
+// families; not built on Windows, where the wildcard opens a firewall
+// prompt), tcp_connect_raw dials an IPv6 literal, bracketed or not, and an
+// IPv4 client reaches a "::" listener. Every one of these was refused
 // while std.net resolved and bound IPv4 only.
 //
 // Skips where the host has no IPv6 loopback. On Linux that is asked of
@@ -21,19 +22,22 @@ has_v6_loopback() -> int {
     return 0
 }
 
-// Listen on `host`, connect to `dial`, close both. "" or why not.
-round_trip(host: string, dial: string) -> string {
-    srv = net.tcp_listen_on_raw(host, 0)
-    if srv == null { return "listen on ${host} refused" }
+// Connect to `dial` at `srv`'s port and close both. "" or why not.
+round_trip(srv: ptr, what: string, dial: string) -> string {
+    if srv == null { return "listen on ${what} refused" }
     port = net.tcp_server_port_raw(srv)
     conn = net.tcp_connect_raw(dial, port)
-    if conn == null {
-        _ = net.tcp_server_close(srv)
-        return "connect to ${dial} port ${port} (listener ${host}) failed"
-    }
-    _ = net.tcp_close(conn)
     _ = net.tcp_server_close(srv)
+    if conn == null { return "connect to ${dial} port ${port} (listener ${what}) failed" }
+    _ = net.tcp_close(conn)
     return ""
+}
+
+fail_if(err: string) {
+    if err != "" {
+        println("FAIL: ${err}")
+        exit(1)
+    }
 }
 
 main() {
@@ -53,15 +57,17 @@ main() {
     }
     _ = net.tcp_server_close(probe)
 
-    cases = ["::1", "::1", "[::1]", "[::1]", "::", "::1", "::", "127.0.0.1"]
-    i = 0
-    while i < 8 {
-        err = round_trip(cases[i], cases[i + 1])
-        if err != "" {
-            println("FAIL: ${err}")
-            exit(1)
-        }
-        i = i + 2
+    fail_if(round_trip(net.tcp_listen_on_raw("::1", 0), "::1", "::1"))
+    fail_if(round_trip(net.tcp_listen_on_raw("::1", 0), "::1", "[::1]"))
+    // loopback-ok: the bracketed spelling of ::1
+    fail_if(round_trip(net.tcp_listen_on_raw("[::1]", 0), "[::1]", "::1"))
+    // Dual-stack needs the wildcard, which opens a firewall prompt on
+    // Windows; it is checked everywhere else.
+    when target.os != "windows" {
+        // loopback-ok: dual-stack needs the wildcard (not built on Windows)
+        fail_if(round_trip(net.tcp_listen_on_raw("::", 0), "::", "::1"))
+        // loopback-ok: as above
+        fail_if(round_trip(net.tcp_listen_on_raw("::", 0), "::", "127.0.0.1"))
     }
     // A name is still refused as a listen address.
     if net.tcp_listen_on_raw("localhost", 0) != null { // loopback-ok: refused before any bind

@@ -1,4 +1,5 @@
-// The server half of test_http_ipv6.sh: binds BIND_HOST on an ephemeral port,
+// The server half of test_http_ipv6.sh: binds BIND_HOST ("::1", "::" or
+// "localhost"; anything else is 127.0.0.1) on an ephemeral port,
 // optionally over TLS (CERT_PATH and KEY_PATH; AETHER_PURE_TLS=1 selects the
 // pure-Aether server), prints "READY <port>", and answers every GET with the
 // peer address it saw, so the runner can tell an IPv4 client of a "::"
@@ -42,8 +43,30 @@ main() {
             exit(1)
         }
     }
-    http.server_set_host(raw, host)
-    if http_server_bind_raw(raw, host, 0) < 0 {
+    rc = -1
+    match host {
+        "::1" -> {
+            http.server_set_host(raw, "::1")
+            rc = http_server_bind_raw(raw, "::1", 0)
+        }
+        "localhost" -> {
+            // loopback-ok: "localhost" is the case under test (it must still bind 127.0.0.1 only)
+            http.server_set_host(raw, "localhost")
+            // loopback-ok: as above
+            rc = http_server_bind_raw(raw, "localhost", 0)
+        }
+        "::" -> {
+            // loopback-ok: dual-stack needs the wildcard; the runner skips this case on Windows
+            http.server_set_host(raw, "::")
+            // loopback-ok: as above
+            rc = http_server_bind_raw(raw, "::", 0)
+        }
+        _ -> {
+            http.server_set_host(raw, "127.0.0.1")
+            rc = http_server_bind_raw(raw, "127.0.0.1", 0)
+        }
+    }
+    if rc < 0 {
         println("BIND FAILED")
         exit(3)
     }

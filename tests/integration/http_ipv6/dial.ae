@@ -1,5 +1,5 @@
 // The sandbox half of test_http_ipv6.sh, run under libaether_sandbox.so: a
-// "::" listener, then one tcp_connect_raw to TARGET at its port. Prints
+// loopback listener, then one tcp_connect_raw to TARGET at its port. Prints
 // "allowed" or "denied", so the runner can check which grants admit which
 // peer families.
 
@@ -9,7 +9,14 @@ import std.os
 extern exit(code: int)
 
 main() {
-    srv = net.tcp_listen_on_raw("::", 0)
+    // Only an allowed connect reaches a listener, so there is one on the
+    // target's family: LISTEN=v6 for ::1, else 127.0.0.1 (which a
+    // ::ffff:127.0.0.1 dial also reaches). Loopback either way.
+    srv = net.tcp_listen_on_raw("127.0.0.1", 0)
+    if os.getenv("LISTEN") == "v6" {
+        _ = net.tcp_server_close(srv)
+        srv = net.tcp_listen_on_raw("::1", 0)
+    }
     if srv == null {
         println("LISTEN FAILED")
         exit(3)

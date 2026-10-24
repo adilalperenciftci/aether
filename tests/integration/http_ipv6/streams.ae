@@ -40,9 +40,10 @@ fail(what: string) {
     exit(1)
 }
 
-// A port nothing is listening on, for the server to take.
+// A port nothing is listening on, for the server to take. Asked of ::1, and
+// in practice free on 127.0.0.1 as well.
 free_port() -> int {
-    probe = net.tcp_listen_on_raw("::", 0)
+    probe = net.tcp_listen_on_raw("::1", 0)
     if probe == null { return 0 }
     port = net.tcp_server_port_raw(probe)
     _ = net.tcp_server_close(probe)
@@ -113,6 +114,7 @@ main() {
     port = free_port()
     if port <= 0 { fail("no free port on ::") }
 
+    // loopback-ok: dual-stack needs the wildcard; the runner skips this on Windows
     server = tinyweb.web_server_host("::", port) {
         tinyweb.web_socket("/ws/echo") | msg: string, sender: ptr, ctx: ptr | {
             http.ws_send_text(sender, msg)

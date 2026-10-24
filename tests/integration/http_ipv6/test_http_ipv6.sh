@@ -124,11 +124,24 @@ get "http://[::1]:$PORT/" "STATUS 200 BODY ipv6-ok peer=::1"
 get_fails "http://127.0.0.1:$PORT/"
 stop_server "$SRV_PID"; SRV_PID=""
 
+# The "::" wildcard is what dual-stack means, and on Windows each new
+# executable listening on it opens a firewall prompt (#2639). There the
+# dual-stack parts are left out and TLS runs over ::1 alone.
+case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*) WILDCARD=no ;;
+    *) WILDCARD=yes ;;
+esac
+
 # --- 2. dual-stack "::" ---
-start "::" "$TMP/s2.log" || fail "could bind ::1 but not ::"
-get "http://[::1]:$PORT/" "STATUS 200 BODY ipv6-ok peer=::1"
-get "http://127.0.0.1:$PORT/" "STATUS 200 BODY ipv6-ok peer=127.0.0.1"
-stop_server "$SRV_PID"; SRV_PID=""
+if [ "$WILDCARD" = yes ]; then
+    start "::" "$TMP/s2.log" || fail "could bind ::1 but not ::"
+    get "http://[::1]:$PORT/" "STATUS 200 BODY ipv6-ok peer=::1"
+    get "http://127.0.0.1:$PORT/" "STATUS 200 BODY ipv6-ok peer=127.0.0.1"
+    stop_server "$SRV_PID"; SRV_PID=""
+    DUAL_NOTE="dual-stack ::"
+else
+    DUAL_NOTE="dual-stack skipped on Windows (wildcard listener)"
+fi
 
 # --- 3. "localhost" still means 127.0.0.1 ---
 start "localhost" "$TMP/s3.log" || fail "could not bind localhost"
@@ -148,35 +161,46 @@ if command -v openssl >/dev/null 2>&1; then
         -subj "/CN=localhost" \
         -addext "subjectAltName=IP:127.0.0.1,IP:::1,DNS:localhost" >"$TMP/ssl.log" 2>&1 \
         || { sed -n '1,10p' "$TMP/ssl.log"; fail "could not generate a test certificate"; }
-    start "::" "$TMP/s4.log" AETHER_PURE_TLS=1 CERT_PATH="$TMP/cert.pem" KEY_PATH="$TMP/key.pem" \
-        || fail "could not bind :: for TLS"
+    TLS_HOST="::"
+    [ "$WILDCARD" = yes ] || TLS_HOST="::1"
+    start "$TLS_HOST" "$TMP/s4.log" AETHER_PURE_TLS=1 CERT_PATH="$TMP/cert.pem" KEY_PATH="$TMP/key.pem" \
+        || fail "could not bind $TLS_HOST for TLS"
     get "https://[::1]:$PORT/" "STATUS 200 BODY ipv6-ok peer=::1" AETHER_PURE_TLS=1 CAFILE="$TMP/cert.pem"
-    get "https://127.0.0.1:$PORT/" "STATUS 200 BODY ipv6-ok peer=127.0.0.1" AETHER_PURE_TLS=1 CAFILE="$TMP/cert.pem"
+    if [ "$WILDCARD" = yes ]; then
+        get "https://127.0.0.1:$PORT/" "STATUS 200 BODY ipv6-ok peer=127.0.0.1" AETHER_PURE_TLS=1 CAFILE="$TMP/cert.pem"
+    fi
     stop_server "$SRV_PID"; SRV_PID=""
-    TLS_NOTE="pure TLS 1.3 over both families"
+    TLS_NOTE="pure TLS 1.3 over IPv6"
 else
     TLS_NOTE="TLS part skipped: no openssl to make a cert"
 fi
 
 # --- 5. TinyWeb WebSocket, SSE and long poll ---
-streams "plain HTTP"
-STREAMS_NOTE="ws/SSE/long poll over HTTP"
-if [ -f "$TMP/cert.pem" ]; then
-    streams "TLS (OpenSSL server)" CERT_PATH="$TMP/cert.pem" KEY_PATH="$TMP/key.pem" \
-        CAFILE="$TMP/cert.pem" SSL_CERT_FILE="$TMP/cert.pem"
-    streams "pure TLS 1.3" SKIP_WS=1 AETHER_PURE_TLS=1 CERT_PATH="$TMP/cert.pem" \
-        KEY_PATH="$TMP/key.pem" CAFILE="$TMP/cert.pem"
-    STREAMS_NOTE="ws/wss/SSE/long poll over HTTP and TLS"
+if [ "$WILDCARD" = no ]; then
+    STREAMS_NOTE="TinyWeb streams skipped on Windows (wildcard listener)"
+else
+    streams "plain HTTP"
+    STREAMS_NOTE="ws/SSE/long poll over HTTP"
+    if [ -f "$TMP/cert.pem" ]; then
+        streams "TLS (OpenSSL server)" CERT_PATH="$TMP/cert.pem" KEY_PATH="$TMP/key.pem" \
+            CAFILE="$TMP/cert.pem" SSL_CERT_FILE="$TMP/cert.pem"
+        streams "pure TLS 1.3" SKIP_WS=1 AETHER_PURE_TLS=1 CERT_PATH="$TMP/cert.pem" \
+            KEY_PATH="$TMP/key.pem" CAFILE="$TMP/cert.pem"
+        STREAMS_NOTE="ws/wss/SSE/long poll over HTTP and TLS"
+    fi
 fi
 
 # --- 6. tcp grants don't cross families ---
 PRELOAD="$ROOT/build/libaether_sandbox.so"
 if [ "$(uname -s)" = Linux ] && [ -f "$PRELOAD" ]; then
-    # dial GRANT TARGET EXPECTED
+    # dial GRANT TARGET EXPECTED: the listener is on ::1 for an IPv6
+    # target, 127.0.0.1 otherwise.
     dial() {
-        printf 'tcp_listen:*\nenv:TARGET\ntcp:%s\n' "$1" >"$TMP/grants"
+        printf 'tcp_listen:*\nenv:TARGET\nenv:LISTEN\ntcp:%s\n' "$1" >"$TMP/grants"
+        _listen=v4
+        [ "$2" = "::1" ] && _listen=v6
         _got=$(LD_PRELOAD="$PRELOAD" AETHER_SANDBOX_LOG=none AETHER_SANDBOX_GRANTS="$TMP/grants" \
-               TARGET="$2" "$TMP/dial" 2>&1) || :
+               TARGET="$2" LISTEN="$_listen" "$TMP/dial" 2>&1) || :
         [ "$_got" = "$3" ] || fail "grant tcp:$1, connect to $2: expected $3, got '$_got'"
     }
     dial "127.0.0.1" "127.0.0.1" allowed
@@ -190,4 +214,4 @@ else
     SANDBOX_NOTE="grant part skipped: no LD_PRELOAD sandbox here"
 fi
 
-echo "  [PASS] http_ipv6: ::1, dual-stack ::, localhost-stays-IPv4, $TLS_NOTE, $STREAMS_NOTE, $SANDBOX_NOTE"
+echo "  [PASS] http_ipv6: ::1, $DUAL_NOTE, localhost-stays-IPv4, $TLS_NOTE, $STREAMS_NOTE, $SANDBOX_NOTE"

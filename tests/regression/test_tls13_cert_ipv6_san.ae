@@ -39,6 +39,16 @@ leaf(ips: @into ptr, names: @into ptr) -> tls13_cert.LeafCert {
     }
 }
 
+// A list of bytes buffers, and the buffers.
+drop(l: ptr) {
+    i = 0
+    while i < list_size(l) {
+        bytes.free(list.at(l, i))
+        i = i + 1
+    }
+    list_free(l)
+}
+
 // 1 when `host` is not judged as `ok` says it should be.
 expect(c: *tls13_cert.LeafCert, host: string, ok: int) -> int {
     err = tls13_cert.check_hostname(c, host)
@@ -92,6 +102,9 @@ main() {
     e = leaf(short, null)
     failures += expect(&e, "::1", 0)
 
+    drop(ips)
+    drop(names)
+    drop(short)
     if failures > 0 { exit(1) }
     println("tls13_cert ipv6 san: ok")
 }
