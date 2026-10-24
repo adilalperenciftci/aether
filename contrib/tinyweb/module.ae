@@ -344,6 +344,8 @@ web_server(port: int) {
 }
 
 // web_server_host(host, port) { ... }
+// `host` is a name, an IPv4 address, an IPv6 address ("::1"), or "::" for
+// every interface of both families.
 web_server_host(host: string, port: int) {
     srv = web_server(port)
     map_put(srv, "host", host)
@@ -651,7 +653,9 @@ tw_start(srv: ptr) -> string {
     // server_bind returns "" on success, an error message otherwise.
     bind_err = http.server_bind(raw, host, port)
     if bind_err != "" {
-        return "failed to bind ${host}:${port}: ${bind_err}"
+        // An IPv6 host is bracketed, as in a URL: "[::1]:8443".
+        where = if string.contains(host, ":") == 1 { "[${host}]" } else { host }
+        return "failed to bind ${where}:${port}: ${bind_err}"
     }
 
     // TLS, when with_tls supplied a pair. Applied before the routes so a bad

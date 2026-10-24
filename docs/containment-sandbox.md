@@ -426,7 +426,11 @@ should have both.
 - **Ports are checked.**
   `grant_tcp("db.internal", 5432)` allows that port only; `0` allows any
   port. The check names the resource `host:port` (`[v6]:port` for IPv6),
-  in std.net and in the `LD_PRELOAD` layer's `connect()` alike.
+  in std.net and in the `LD_PRELOAD` layer's `connect()` alike. Grant an
+  IPv6 host as `grant_tcp("::1", 8443)` (stored as `[::1]:8443`). A grant
+  for one family never admits the other: `127.0.0.1` does not cover `::1`.
+  An IPv4-mapped peer (`::ffff:127.0.0.1`, how a dual-stack socket reaches
+  an IPv4 host) is the IPv4 host, and matches its grant.
 
 - **Application-level only.** See "Cross-process containment" below
   for extending enforcement to child processes.

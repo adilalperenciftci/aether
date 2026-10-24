@@ -405,6 +405,13 @@ int  http_upstream_acquire_ex(const char* host, int port, int allow_pool,
  * failed. A caller woken by a poller must handle 0 by waiting again: a wakeup
  * does not promise this descriptor is the one that became ready. */
 int  http_upstream_connected(HttpUpstreamConn* c);
+/* 1 when a connect that http_upstream_connected reported failed has another
+ * resolved address to try (a name with IPv6 and IPv4 addresses, say). The
+ * caller releases the failed one, stops watching its descriptor, and calls
+ * http_upstream_redial with the same host and port: the new descriptor, in
+ * the same state http_upstream_acquire leaves one, or -1. */
+int  http_upstream_has_next(HttpUpstreamConn* c);
+int  http_upstream_redial(const char* host, int port, HttpUpstreamConn* c);
 void http_upstream_release(HttpUpstreamConn* c, int keep);
 
 #endif

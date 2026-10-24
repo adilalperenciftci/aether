@@ -166,6 +166,7 @@ tests/integration/https_client_pure_tls/
 tests/integration/https_windows_trust/
 tests/integration/http_server_tls/
 tests/integration/http_server_websocket/
+tests/integration/http_ipv6/
 tests/integration/sched_foreign_send_lifecycle/
 tests/integration/tinyweb_tls/
 tests/integration/http_stream_upload/

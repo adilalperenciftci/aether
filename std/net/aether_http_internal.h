@@ -113,6 +113,18 @@ struct HttpUpstreamConnOpaque {
     Transport t;
     int  reused;
     int  connecting;
+    /* The addresses a fresh dial has tried (a hash of each), and how many the
+     * name resolved to: http_upstream_redial skips the tried ones by value,
+     * not by position, because the list's order can change between dials
+     * (another connection may have recorded which family works). */
+    unsigned addr_tried[8];
+    int  addr_n_tried;
+    int  addr_total;
+    /* What a fresh dial was for, so the family that connects can be
+     * remembered (aether_net_note_family) once the connect completes. Empty
+     * for a pooled connection, and for a name with one address. */
+    char dial_host[128];
+    int  dial_port;
     char pool_key[512];
 };
 
