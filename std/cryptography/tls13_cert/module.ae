@@ -999,6 +999,126 @@ fn parse_ipv4(host: string, hlen: int) -> ptr {
     return out
 }
 
+// The value of one hex digit, or -1.
+fn hex_digit(ch: int) -> int {
+    if ch >= 48 && ch <= 57 { return ch - 48 }
+    if ch >= 97 && ch <= 102 { return ch - 87 }
+    if ch >= 65 && ch <= 70 { return ch - 55 }
+    return -1
+}
+
+// Parse an IPv6 literal (RFC 4291 s2.2 text form, "::" at most once, no
+// brackets) into 16 bytes, or null when `host` is not one. Stricter than the
+// RFC on purpose: a zone ("%eth0") and an embedded dotted IPv4 tail
+// ("::ffff:192.0.2.1") are refused, and the caller then refuses the host
+// rather than matching it against dNSNames.
+fn parse_ipv6(host: string, hlen: int) -> ptr {
+    if hlen < 2 { return null }
+    // Each group as it is read, two bytes apiece; placed around the gap at
+    // the end.
+    words = bytes.new(16)
+    nw = 0
+    gap = -1
+    bad = 0
+    i = 0
+    if (string_char_at_n(host, hlen, 0) & 0xFF) == 58 {
+        if (string_char_at_n(host, hlen, 1) & 0xFF) != 58 {
+            bad = 1
+        } else {
+            gap = 0
+            i = 2
+        }
+    }
+    while bad == 0 && i < hlen {
+        v = 0
+        digits = 0
+        stop = 0
+        while stop == 0 && i < hlen {
+            hv = hex_digit(string_char_at_n(host, hlen, i) & 0xFF)
+            if hv < 0 {
+                stop = 1
+            } else {
+                v = v * 16 + hv
+                digits = digits + 1
+                i = i + 1
+            }
+        }
+        if digits == 0 || digits > 4 || nw >= 8 {
+            bad = 1
+        } else {
+            bytes.set(words, 2 * nw, (v >> 8) & 0xFF)
+            bytes.set(words, 2 * nw + 1, v & 0xFF)
+            nw = nw + 1
+        }
+        if bad == 0 && i < hlen {
+            if (string_char_at_n(host, hlen, i) & 0xFF) != 58 {
+                bad = 1
+            } else {
+                i = i + 1
+                if i < hlen && (string_char_at_n(host, hlen, i) & 0xFF) == 58 {
+                    if gap >= 0 { bad = 1 }
+                    gap = nw
+                    i = i + 1
+                } else if i == hlen {
+                    bad = 1 // a lone trailing ':'
+                }
+            }
+        }
+    }
+    if gap < 0 && nw != 8 { bad = 1 }
+    if gap >= 0 && nw > 7 { bad = 1 }
+    if bad == 1 {
+        bytes.free(words)
+        return null
+    }
+    // bytes.new does not zero: every byte of `out` is written below.
+    out = bytes.new(16)
+    k = 0
+    while k < 16 {
+        bytes.set(out, k, 0)
+        k = k + 1
+    }
+    head = nw
+    if gap >= 0 { head = gap }
+    k = 0
+    while k < 2 * head {
+        bytes.set(out, k, bytes.get(words, k) & 0xFF)
+        k = k + 1
+    }
+    tail = nw - head
+    k = 0
+    while k < 2 * tail {
+        bytes.set(out, 16 - 2 * tail + k, bytes.get(words, 2 * head + k) & 0xFF)
+        k = k + 1
+    }
+    bytes.free(words)
+    return out
+}
+
+// 1 when `ip` (4 or 16 bytes) is one of the certificate's iPAddress SANs.
+// Lengths must agree: an IPv4 address never matches a 16-byte SAN, nor an
+// IPv6 one a 4-byte SAN.
+fn ip_san_matches(c: *LeafCert, ip: ptr) -> int {
+    if c.ip_addrs == null { return 0 }
+    want = bytes.length(ip)
+    n = list_size(c.ip_addrs)
+    i = 0
+    while i < n {
+        cand = list.at(c.ip_addrs, i) as ptr
+        if cand != null && bytes.length(cand) == want {
+            same = 1
+            b = 0
+            while b < want {
+                if (bytes.get(cand, b) & 0xFF) != (bytes.get(ip, b) & 0xFF) { same = 0 }
+                b = b + 1
+            }
+            if same == 1 { return 1 }
+        }
+        i = i + 1
+    }
+    return 0
+}
+
 check_hostname(c: *LeafCert, host: string) -> string {
     hlen0 = string.length(host)
     if hlen0 == 0 { return "empty hostname" }
@@ -1015,26 +1135,24 @@ check_hostname(c: *LeafCert, host: string) -> string {
             bytes.free(ipv4)
             return "certificate has no iPAddress SAN for this address"
         }
-        n4 = list_size(c.ip_addrs)
-        hit = 0
-        i4 = 0
-        while i4 < n4 {
-            cand = list.at(c.ip_addrs, i4) as ptr
-            if cand != null {
-                if bytes.length(cand) == 4 {
-                    same = 1
-                    b = 0
-                    while b < 4 {
-                        if (bytes.get(cand, b) & 0xFF) != (bytes.get(ipv4, b) & 0xFF) { same = 0 }
-                        b = b + 1
-                    }
-                    if same == 1 { hit = 1 }
-                }
-            }
-            i4 = i4 + 1
-        }
+        hit4 = ip_san_matches(c, ipv4)
         bytes.free(ipv4)
-        if hit == 1 { return "" }
+        if hit4 == 1 { return "" }
+        return "certificate is not valid for the requested address"
+    }
+    // A colon is never part of a DNS name, so a host with one is an IPv6
+    // literal or nothing: one that does not parse is refused, never tried
+    // against the dNSNames.
+    if string.contains(host, ":") == 1 {
+        ipv6 = parse_ipv6(host, hlen0)
+        if ipv6 == null { return "not a valid IPv6 address" }
+        if c.ip_addrs == null {
+            bytes.free(ipv6)
+            return "certificate has no iPAddress SAN for this address"
+        }
+        hit6 = ip_san_matches(c, ipv6)
+        bytes.free(ipv6)
+        if hit6 == 1 { return "" }
         return "certificate is not valid for the requested address"
     }
     if c.dns_names == null { return "certificate has no subjectAltName dNSNames" }

@@ -1,0 +1,24 @@
+// The client half of test_http_ipv6.sh: one GET of URL through
+// std.http.client (pure-Aether TLS for https when AETHER_PURE_TLS=1), with
+// CAFILE pinned when set. Prints "STATUS <code> BODY <body>", or "ERR: <why>".
+
+import std.http.client
+import std.cryptography.tls13_client
+import std.os
+
+main() {
+    req = client.request("GET", os.getenv("URL"))
+    client.set_timeout(req, 10s)
+    ca = os.getenv("CAFILE")
+    if ca != null {
+        if ca != "" { client.set_cafile(req, ca) }
+    }
+    resp, err = client.send_request(req)
+    client.request_free(req)
+    if err != "" {
+        println("ERR: ${err}")
+        return
+    }
+    println("STATUS ${client.response_status(resp)} BODY ${client.response_body(resp)}")
+    client.response_free(resp)
+}

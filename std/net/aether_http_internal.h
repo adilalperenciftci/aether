@@ -113,6 +113,9 @@ struct HttpUpstreamConnOpaque {
     Transport t;
     int  reused;
     int  connecting;
+    /* The resolved address to try when the connect in flight fails, or 0
+     * when there is none (a pooled connection, or the last address). */
+    int  addr_next;
     char pool_key[512];
 };
 

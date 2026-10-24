@@ -58,6 +58,7 @@ int aether_net_wouldblock(void) { return 0; }
     #include <poll.h>
     #include <fcntl.h>
 #endif
+#include "aether_net_addr.h"
 
 /* recv returned <= 0: distinguish "peer idle, socket still alive"
  * (SO_RCVTIMEO fired, or a nonblocking socket with nothing buffered) from
@@ -121,36 +122,20 @@ TcpSocket* tcp_connect_raw(const char* host, int port) {
     /* getaddrinfo, not gethostbyname: the latter returns a pointer into a
      * shared, process-static struct, so concurrent connects on different
      * threads race and corrupt each other's resolved address. getaddrinfo is
-     * thread-safe and returns caller-owned memory. Pinned to AF_INET to match
-     * the sockaddr_in the rest of this function builds. */
-    struct sockaddr_in serv_addr;
-    memset(&serv_addr, 0, sizeof(serv_addr));
-    {
-        char port_str[16];
-        snprintf(port_str, sizeof(port_str), "%d", port);
-        struct addrinfo hints;
-        memset(&hints, 0, sizeof(hints));
-        hints.ai_family   = AF_INET;
-        hints.ai_socktype = SOCK_STREAM;
-        struct addrinfo* res = NULL;
-        if (getaddrinfo(host, port_str, &hints, &res) != 0 || !res) {
-            return NULL;
+     * thread-safe and returns caller-owned memory. Each address the host has,
+     * IPv6 or IPv4, is tried in turn. */
+    AetherAddrList addrs;
+    if (aether_addr_resolve(host, port, &addrs) != 0) return NULL;
+    int sockfd = -1;
+    for (int i = 0; i < addrs.n && sockfd < 0; i++) {
+        sockfd = (int)socket(addrs.ss[i].ss_family, SOCK_STREAM, 0);
+        if (sockfd < 0) continue;
+        if (connect(sockfd, (struct sockaddr*)&addrs.ss[i], addrs.len[i]) < 0) {
+            close(sockfd);
+            sockfd = -1;
         }
-        memcpy(&serv_addr, res->ai_addr, sizeof(struct sockaddr_in));
-        freeaddrinfo(res);
     }
-    serv_addr.sin_family = AF_INET;
-    serv_addr.sin_port = htons(port);
-
-    int sockfd = socket(AF_INET, SOCK_STREAM, 0);
-    if (sockfd < 0) {
-        return NULL;
-    }
-
-    if (connect(sockfd, (struct sockaddr*)&serv_addr, sizeof(serv_addr)) < 0) {
-        close(sockfd);
-        return NULL;
-    }
+    if (sockfd < 0) return NULL;
 
     net_set_socket_timeouts(sockfd, 30);
 
@@ -315,8 +300,9 @@ int tcp_close(TcpSocket* sock) {
 }
 
 /* One listener for both entry points (#2136). `address` NULL means every
- * interface (INADDR_ANY, what tcp_listen_raw always did); a dotted IPv4
- * address binds that interface alone — "127.0.0.1" for a debugging
+ * IPv4 interface (INADDR_ANY, what tcp_listen_raw always did), "::" every
+ * interface of both families; a numeric IPv4 or IPv6 address binds that
+ * interface alone — "127.0.0.1" for a debugging
  * channel that must not be reachable from the network. `allow_zero`
  * lets port 0 through, asking the OS for an ephemeral port that is read
  * back with getsockname so tcp_server_port_raw can report it. */
@@ -330,27 +316,29 @@ static TcpServer* tcp_listen_impl(const char* address, int port, int allow_zero)
         return NULL;
     }
 
-    struct sockaddr_in serv_addr;
-    memset(&serv_addr, 0, sizeof(serv_addr));
-    serv_addr.sin_family = AF_INET;
+    /* An address is a numeric one, IPv4 or IPv6 (bracketed or not); a name
+     * is refused rather than resolved. "::" is every interface of both
+     * families. */
     if (address && address[0]) {
-        if (inet_pton(AF_INET, address, &serv_addr.sin_addr) != 1) {
-            return NULL;   /* not a dotted IPv4 address */
+        char bare[64];
+        unsigned char probe[16];
+        if (!aether_addr_unbracket(address, bare, sizeof bare) ||
+            (inet_pton(AF_INET, bare, probe) != 1 && inet_pton(AF_INET6, bare, probe) != 1)) {
+            return NULL;   /* not a numeric address */
         }
-    } else {
-        serv_addr.sin_addr.s_addr = INADDR_ANY;
     }
-    serv_addr.sin_port = htons((unsigned short)port);
+    struct sockaddr_storage serv_addr;
+    socklen_t serv_len = 0;
+    if (aether_addr_bind(address, port, &serv_addr, &serv_len) != 0) {
+        return NULL;
+    }
 
-    int sockfd = socket(AF_INET, SOCK_STREAM, 0);
+    int sockfd = aether_addr_listen_socket(&serv_addr);
     if (sockfd < 0) {
         return NULL;
     }
 
-    int opt = 1;
-    setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, (const char*)&opt, sizeof(opt));
-
-    if (bind(sockfd, (struct sockaddr*)&serv_addr, sizeof(serv_addr)) < 0) {
+    if (bind(sockfd, (struct sockaddr*)&serv_addr, serv_len) < 0) {
         close(sockfd);
         return NULL;
     }
@@ -362,11 +350,11 @@ static TcpServer* tcp_listen_impl(const char* address, int port, int allow_zero)
 
     int bound = port;
     if (port == 0) {
-        struct sockaddr_in got;
+        struct sockaddr_storage got;
         socklen_t got_len = sizeof(got);
         memset(&got, 0, sizeof(got));
         if (getsockname(sockfd, (struct sockaddr*)&got, &got_len) == 0) {
-            bound = (int)ntohs(got.sin_port);
+            bound = aether_addr_port(&got);
         }
     }
 
@@ -402,7 +390,7 @@ int tcp_set_nodelay_raw(TcpSocket* sock, int on) {
 TcpSocket* tcp_accept_raw(TcpServer* server) {
     if (!server) return NULL;
 
-    struct sockaddr_in cli_addr;
+    struct sockaddr_storage cli_addr;
     socklen_t clilen = sizeof(cli_addr);
 
     int newsockfd = accept(server->fd, (struct sockaddr*)&cli_addr, &clilen);

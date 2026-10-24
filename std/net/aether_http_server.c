@@ -201,6 +201,7 @@ const char* http_request_header_value(HttpRequest* r, int i) { (void)r; (void)i;
     #endif
     // I/O polling is handled by aether_io_poller (included via multicore_scheduler.h)
 #endif
+#include "aether_net_addr.h"
 
 /* A send to a peer that has gone fails with EPIPE rather than raising
  * SIGPIPE, which kills a process that has not ignored it: a WebSocket
@@ -1591,49 +1592,25 @@ void http_server_set_host(HttpServer* server, const char* host) {
     server->host = copy;
 }
 
-/* The IPv4 address a listener on `host` binds: "0.0.0.0" every interface,
- * a dotted address that one, and a name ("localhost") the address it
- * resolves to. A name used to go to inet_pton alone, which left the address
- * zeroed, and zero is INADDR_ANY: asking for "localhost" listened on every
- * interface (#2639). Returns 0, or -1 for a name that does not resolve. */
-static int http_server_bind_addr(const char* host, struct in_addr* out) {
-    if (strcmp(host, "0.0.0.0") == 0) {
-        out->s_addr = INADDR_ANY;
-        return 0;
-    }
-    if (inet_pton(AF_INET, host, out) == 1) return 0;
-    struct addrinfo hints, *res = NULL;
-    memset(&hints, 0, sizeof(hints));
-    hints.ai_family   = AF_INET;
-    hints.ai_socktype = SOCK_STREAM;
-    if (getaddrinfo(host, NULL, &hints, &res) != 0 || !res) return -1;
-    *out = ((struct sockaddr_in*)res->ai_addr)->sin_addr;
-    freeaddrinfo(res);
-    return 0;
-}
-
 int http_server_bind_raw(HttpServer* server, const char* host, int port) {
-    struct sockaddr_in addr;
-    memset(&addr, 0, sizeof(addr));
-    addr.sin_family = AF_INET;
-    addr.sin_port = htons(port);
-    if (http_server_bind_addr(host, &addr.sin_addr) != 0) {
+    /* A name binds the address it resolves to, never every interface
+     * (#2639); "::" binds both families. See aether_addr_bind. */
+    struct sockaddr_storage addr;
+    socklen_t addr_len = 0;
+    if (aether_addr_bind(host, port, &addr, &addr_len) != 0) {
         fprintf(stderr, "Failed to bind socket: cannot resolve host %s\n", host);
         return -1;
     }
 
-    server->socket_fd = socket(AF_INET, SOCK_STREAM, 0);
+    server->socket_fd = aether_addr_listen_socket(&addr);
     if (server->socket_fd < 0) {
         fprintf(stderr, "Failed to create socket\n");
         return -1;
     }
 
-    // Set socket options
-    int opt = 1;
-    setsockopt(server->socket_fd, SOL_SOCKET, SO_REUSEADDR, (const char*)&opt, sizeof(opt));
-
-    if (bind(server->socket_fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
-        fprintf(stderr, "Failed to bind socket to %s:%d\n", host, port);
+    if (bind(server->socket_fd, (struct sockaddr*)&addr, addr_len) < 0) {
+        char where[300];
+        fprintf(stderr, "Failed to bind socket to %s\n", aether_addr_authority(where, sizeof where, host, port));
         close(server->socket_fd);
         server->socket_fd = -1;
         return -1;
@@ -1660,10 +1637,10 @@ int http_server_bind_raw(HttpServer* server, const char* host, int port) {
     // (parallel test runners, the VCR embed layer) can read it via
     // http_server_port(). vcr_embed_abi_wish.md open question 3.
     if (port == 0) {
-        struct sockaddr_in bound;
+        struct sockaddr_storage bound;
         socklen_t blen = sizeof(bound);
         if (getsockname(server->socket_fd, (struct sockaddr*)&bound, &blen) == 0) {
-            server->port = ntohs(bound.sin_port);
+            server->port = aether_addr_port(&bound);
         }
     }
 
@@ -3627,23 +3604,21 @@ static int ws_parse_url(const char* url, char* host, size_t host_sz,
     const char* hostend = slash ? slash : (p + strlen(p));
 
     /* Optional :port, scanned inside the authority only so a path
-     * containing ':' cannot be mistaken for one. */
-    const char* colon = NULL;
-    for (const char* q = p; q < hostend; q++) if (*q == ':') colon = q;
-
-    size_t hlen = (size_t)((colon ? colon : hostend) - p);
-    if (hlen == 0 || hlen >= host_sz) return -1;
-    memcpy(host, p, hlen);
-    host[hlen] = '\0';
+     * containing ':' cannot be mistaken for one. An IPv6 host is bracketed
+     * ("[::1]:8443") and comes back without the brackets. */
+    const char* port_at = NULL;
+    size_t plen = 0;
+    if (aether_addr_split_authority(p, (size_t)(hostend - p), host, host_sz,
+                                    &port_at, &plen) != 0) return -1;
+    if (host[0] == '\0') return -1;
 
     /* Default port follows the scheme, as RFC 6455 s3 specifies: 80 for ws,
      * 443 for wss. An explicit :port always wins. */
     *port = *tls ? 443 : 80;
-    if (colon) {
+    if (port_at) {
         char portbuf[16];
-        size_t plen = (size_t)(hostend - colon - 1);
         if (plen == 0 || plen >= sizeof(portbuf)) return -1;
-        memcpy(portbuf, colon + 1, plen);
+        memcpy(portbuf, port_at, plen);
         portbuf[plen] = '\0';
         *port = atoi(portbuf);
         if (*port <= 0 || *port > 65535) return -1;
@@ -3697,23 +3672,22 @@ HttpWsConn* http_ws_connect(const char* url) {
     int  pr = ws_parse_url(url, host, sizeof(host), &port, path, sizeof(path), &tls);
     if (pr != 0) return NULL;
 
-    /* Resolve + connect. getaddrinfo rather than gethostbyname: the latter
-     * returns a pointer into a process-static struct, which two threads
-     * dialling at once would race on. */
-    struct addrinfo hints, *res = NULL;
-    memset(&hints, 0, sizeof(hints));
-    hints.ai_family   = AF_INET;
-    hints.ai_socktype = SOCK_STREAM;
-    char portstr[16];
-    snprintf(portstr, sizeof(portstr), "%d", port);
-    if (getaddrinfo(host, portstr, &hints, &res) != 0 || !res) return NULL;
-
-    int fd = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
-    if (fd < 0) { freeaddrinfo(res); return NULL; }
-    if (connect(fd, res->ai_addr, (socklen_t)res->ai_addrlen) != 0) {
-        close(fd); freeaddrinfo(res); return NULL;
+    /* Resolve + connect, trying each address the host resolves to in turn
+     * (IPv6 and IPv4 alike). getaddrinfo rather than gethostbyname: the
+     * latter returns a pointer into a process-static struct, which two
+     * threads dialling at once would race on. */
+    AetherAddrList addrs;
+    if (aether_addr_resolve(host, port, &addrs) != 0) return NULL;
+    int fd = -1;
+    for (int i = 0; i < addrs.n && fd < 0; i++) {
+        fd = (int)socket(addrs.ss[i].ss_family, SOCK_STREAM, 0);
+        if (fd < 0) continue;
+        if (connect(fd, (struct sockaddr*)&addrs.ss[i], addrs.len[i]) != 0) {
+            close(fd);
+            fd = -1;
+        }
     }
-    freeaddrinfo(res);
+    if (fd < 0) return NULL;
 #ifdef SO_NOSIGPIPE
     int nosigpipe = 1;
     setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &nosigpipe, sizeof(nosigpipe));
@@ -3793,16 +3767,18 @@ HttpWsConn* http_ws_connect(const char* url) {
     snprintf(client_key, sizeof(client_key), "%s==", aether_string_data(key_b64));
     string_release(key_b64);
 
+    char authority[300];
+    aether_addr_authority(authority, sizeof authority, host, port);
     char req[2048];
     int rn = snprintf(req, sizeof(req),
         "GET %s HTTP/1.1\r\n"
-        "Host: %s:%d\r\n"
+        "Host: %s\r\n"
         "Upgrade: websocket\r\n"
         "Connection: Upgrade\r\n"
         "Sec-WebSocket-Key: %s\r\n"
         "Sec-WebSocket-Version: 13\r\n"
         "\r\n",
-        path, host, port, client_key);
+        path, authority, client_key);
     /* From here every failure must drop the SSL as well as the socket, so
      * the bail-outs below go through one place rather than repeating the
      * pair and eventually forgetting one. */
@@ -4298,6 +4274,7 @@ static void conn_resolve_addrs(HttpConn* c) {
     struct sockaddr_storage ss;
     socklen_t sslen = sizeof(ss);
     if (getpeername(c->fd, (struct sockaddr*)&ss, &sslen) == 0) {
+        aether_addr_unmap(&ss);   /* an IPv4 client of a "::" listener */
         const char* src = NULL;
         if (ss.ss_family == AF_INET) {
             struct sockaddr_in* sa = (struct sockaddr_in*)&ss;
@@ -4315,6 +4292,7 @@ static void conn_resolve_addrs(HttpConn* c) {
 
     sslen = sizeof(ss);
     if (getsockname(c->fd, (struct sockaddr*)&ss, &sslen) == 0) {
+        aether_addr_unmap(&ss);
         const char* src = NULL;
         if (ss.ss_family == AF_INET) {
             struct sockaddr_in* sa = (struct sockaddr_in*)&ss;
@@ -5645,22 +5623,19 @@ typedef struct {
 
 // Create a SO_REUSEPORT listen socket bound to the same port
 static int create_reuseport_socket(const char* host, int port, int backlog) {
-    struct sockaddr_in addr;
-    memset(&addr, 0, sizeof(addr));
-    addr.sin_family = AF_INET;
-    addr.sin_port = htons(port);
-    if (http_server_bind_addr(host, &addr.sin_addr) != 0) return -1;
+    struct sockaddr_storage addr;
+    socklen_t addr_len = 0;
+    if (aether_addr_bind(host, port, &addr, &addr_len) != 0) return -1;
 
-    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    int fd = aether_addr_listen_socket(&addr);
     if (fd < 0) return -1;
 
-    int opt = 1;
-    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
 #ifdef SO_REUSEPORT
+    int opt = 1;
     setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt));
 #endif
 
-    if (bind(fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+    if (bind(fd, (struct sockaddr*)&addr, addr_len) < 0) {
         close(fd);
         return -1;
     }
@@ -5755,7 +5730,7 @@ static void accept_poller_loop(HttpServer* server, int listen_fd, AetherIoPoller
 
                 // Accept all pending connections
                 while (1) {
-                    struct sockaddr_in client_addr;
+                    struct sockaddr_storage client_addr;
                     socklen_t client_len = sizeof(client_addr);
                     int client_fd = accept(listen_fd,
                         (struct sockaddr*)&client_addr, &client_len);
@@ -6009,7 +5984,7 @@ static int http_server_run(HttpServer* server) {
             if (!(pfd[0].revents & (POLLIN | POLLERR | POLLHUP))) continue;
 #endif
 
-            struct sockaddr_in client_addr;
+            struct sockaddr_storage client_addr;
             socklen_t client_len = sizeof(client_addr);
             int client_fd = accept(server->socket_fd, (struct sockaddr*)&client_addr, &client_len);
             if (client_fd < 0) {

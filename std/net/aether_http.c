@@ -171,6 +171,7 @@ void http_client_pool_size_for_proxy(void) {}
     #include <sys/select.h>  /* select(), fd_set                          */
     #include <sys/time.h>    /* struct timeval                            */
 #endif
+#include "aether_net_addr.h"
 
 /* ---- pure-Aether TLS 1.3 client bridge (#1849) --------------------------
  *
@@ -338,14 +339,6 @@ static int url_copy(char* dst, size_t cap, const char* src) {
     return 1;
 }
 
-/* A host of `len` bytes from `start`, whole or not at all. */
-static int url_copy_host(char* host, size_t host_size, const char* start, size_t len) {
-    if (len >= host_size) return 0;
-    memcpy(host, start, len);
-    host[len] = '\0';
-    return 1;
-}
-
 int parse_url(const char* url, char* host, size_t host_size,
                      int* port, char* path, size_t path_size, int* use_tls) {
     if (!url || !host || !port || !use_tls || host_size == 0 ||
@@ -366,17 +359,17 @@ int parse_url(const char* url, char* host, size_t host_size,
         *port = 80;
     }
 
+    /* The authority ends at the path. An IPv6 host is bracketed
+     * ("[::1]:8443") and comes back without the brackets; every user of
+     * `host` (the resolver, SNI, the sandbox resource, the Host header) wants
+     * it bare or brackets it again itself. */
     const char* slash = strchr(start, '/');
-    const char* colon = strchr(start, ':');
-
-    if (colon && (!slash || colon < slash)) {
-        if (!url_copy_host(host, host_size, start, (size_t)(colon - start))) return 0;
-        *port = atoi(colon + 1);
-    } else if (slash) {
-        if (!url_copy_host(host, host_size, start, (size_t)(slash - start))) return 0;
-    } else {
-        if (!url_copy(host, host_size, start)) return 0;
-    }
+    size_t alen = slash ? (size_t)(slash - start) : strlen(start);
+    const char* port_at = NULL;
+    size_t port_len = 0;
+    if (aether_addr_split_authority(start, alen, host, host_size, &port_at, &port_len) != 0)
+        return 0;
+    if (port_at) *port = atoi(port_at);
     if (path && !url_copy(path, path_size, slash ? slash : "/")) return 0;
 
     return 1;
@@ -1953,29 +1946,15 @@ static void transport_apply_timeouts(Transport* t, int64_t timeout_ns) {
  * serving (serve-and-dial), where the inner call runs on a server worker thread
  * -- race on that static buffer and can corrupt each other's resolved address.
  * getaddrinfo is thread-safe and returns caller-owned memory freed with
- * freeaddrinfo. Pinned to AF_INET: the callers build a sockaddr_in and the
- * timeout/connect path assumes IPv4, so widening to IPv6 is a separate change.
+ * freeaddrinfo. Every address the name has is kept, IPv6 and IPv4 alike, in
+ * getaddrinfo's preference order, so the dial can try each in turn.
  *
  * A failed resolve leaves *resolved at 0, so a later caller retries rather than
  * reading an uninitialised address. */
 static int resolve_dial_addr(const char* host, int port,
-                             struct sockaddr_in* out, int* resolved) {
+                             AetherAddrList* out, int* resolved) {
     if (*resolved) return 1;
-
-    char port_str[16];
-    snprintf(port_str, sizeof(port_str), "%d", port);
-    struct addrinfo hints;
-    memset(&hints, 0, sizeof(hints));
-    hints.ai_family   = AF_INET;
-    hints.ai_socktype = SOCK_STREAM;
-    struct addrinfo* res = NULL;
-    if (getaddrinfo(host, port_str, &hints, &res) != 0 || !res) return 0;
-
-    memset(out, 0, sizeof(*out));
-    memcpy(out, res->ai_addr, sizeof(struct sockaddr_in));
-    freeaddrinfo(res);
-    out->sin_family = AF_INET;
-    out->sin_port = htons(port);
+    if (aether_addr_resolve(host, port, out) != 0) return 0;
     *resolved = 1;
     return 1;
 }
@@ -1986,7 +1965,7 @@ static void ae_set_err(char** out_err, const char* msg) {
     *out_err = msg ? strdup(msg) : NULL;
 }
 
-/* Open one connection to `serv_addr`: socket, connect (with the request's
+/* Open one connection to one of `addrs`: socket, connect (with the request's
  * timeout when set), the forward-proxy CONNECT tunnel for HTTPS, and the TLS
  * handshake. On success `out` holds a ready transport and 0 is returned; on
  * failure nothing is left open, *err holds a message the caller frees, and
@@ -2013,116 +1992,143 @@ static const char* http_tls_backend_missing(void) {
 #endif
 }
 
-static int http_dial(HttpClientRequest* req, struct sockaddr_in* serv_addr_in,
+/* Connect a fresh socket to one address, within `timeout_ns` when it is
+ * positive (non-blocking connect, then wait), else with a plain blocking
+ * connect. Returns the descriptor, in blocking mode, or -1 with *why set. */
+static int http_connect_one(const struct sockaddr_storage* addr, socklen_t addr_len,
+                            int64_t timeout_ns, const char** why) {
+    int sockfd = (int)socket(addr->ss_family, SOCK_STREAM, 0);
+    if (sockfd < 0) {
+        *why = "could not create socket";
+        return -1;
+    }
+    if (timeout_ns <= 0) {
+        if (connect(sockfd, (const struct sockaddr*)addr, addr_len) < 0) {
+            close(sockfd);
+            *why = "connection failed";
+            return -1;
+        }
+        return sockfd;
+    }
+
+#ifdef _WIN32
+    u_long nb = 1;
+    ioctlsocket(sockfd, FIONBIO, &nb);
+#else
+    int flags = fcntl(sockfd, F_GETFL, 0);
+    if (flags >= 0) fcntl(sockfd, F_SETFL, flags | O_NONBLOCK);
+#endif
+    int connect_rc = connect(sockfd, (const struct sockaddr*)addr, addr_len);
+    if (connect_rc < 0) {
+#ifdef _WIN32
+        int err = WSAGetLastError();
+        int in_progress = (err == WSAEWOULDBLOCK || err == WSAEINPROGRESS);
+#else
+        int in_progress = (errno == EINPROGRESS || errno == EWOULDBLOCK);
+#endif
+        if (!in_progress) {
+            close(sockfd);
+            *why = "connection failed";
+            return -1;
+        }
+        /* Watch both the writable set (success) and the exception set
+         * (failure). On POSIX, a refused non-blocking connect makes the
+         * socket writable with SO_ERROR=ECONNREFUSED — only `wfds` matters.
+         * On Windows, Winsock signals connect failures via the *exception*
+         * fd set instead, NOT writable — so a select that watches only wfds
+         * waits the full timeout for refused connects rather than failing
+         * fast. Watching both makes select fire on either outcome; SO_ERROR
+         * distinguishes success from failure afterwards. */
+#ifdef _WIN32
+        /* Winsock's fd_set is a small array of SOCKET handles, not a bitmap
+         * indexed by descriptor, so it has no FD_SETSIZE hazard for a single
+         * socket. */
+        fd_set wfds, efds;
+        FD_ZERO(&wfds); FD_SET(sockfd, &wfds);
+        FD_ZERO(&efds); FD_SET(sockfd, &efds);
+        struct timeval tv;
+        tv.tv_sec  = (time_t)(timeout_ns / 1000000000LL);
+        tv.tv_usec = (long)((timeout_ns / 1000LL) % 1000000LL);
+        int sel = select(sockfd + 1, NULL, &wfds, &efds, &tv);
+#else
+        /* poll, not select: a POSIX fd_set is a bitmap of FD_SETSIZE bits,
+         * and FD_SET on a descriptor at or above it writes past the end. A
+         * process serving many connections (a proxy, which is what dials most
+         * often) passes 1024 descriptors easily, and the corruption would
+         * land on the stack. poll takes the descriptor by value and has no
+         * such bound. POLLOUT covers both outcomes: a refused non-blocking
+         * connect reports the socket ready with SO_ERROR set, which the check
+         * below reads. */
+        struct pollfd pfd;
+        pfd.fd = sockfd;
+        pfd.events = POLLOUT;
+        pfd.revents = 0;
+        int64_t timeout_ms = (timeout_ns + 999999LL) / 1000000LL;
+        if (timeout_ms > INT_MAX) timeout_ms = INT_MAX;
+        int sel = poll(&pfd, 1, (int)timeout_ms);
+#endif
+        if (sel == 0) {
+            close(sockfd);
+            *why = "connect timeout";
+            return -1;
+        }
+        if (sel < 0) {
+            close(sockfd);
+            *why = "select on connect failed";
+            return -1;
+        }
+        /* Check SO_ERROR — distinguishes "writable because connected" from
+         * "writable because failed". On Windows the failure surfaces via
+         * efds; on POSIX via wfds with so_err set. SO_ERROR works the same
+         * in both cases. */
+        int so_err = 0;
+        socklen_t slen = sizeof(so_err);
+        if (getsockopt(sockfd, SOL_SOCKET, SO_ERROR, (char*)&so_err, &slen) < 0
+            || so_err != 0) {
+            close(sockfd);
+            *why = "connection failed";
+            return -1;
+        }
+    }
+    /* Restore blocking mode for the send/recv path — those use
+     * setsockopt(SO_*TIMEO) for their timeouts. */
+#ifdef _WIN32
+    nb = 0;
+    ioctlsocket(sockfd, FIONBIO, &nb);
+#else
+    if (flags >= 0) fcntl(sockfd, F_SETFL, flags);
+#endif
+    return sockfd;
+}
+
+static int http_dial(HttpClientRequest* req, const AetherAddrList* addrs,
                      const char* host, int port, int use_tls, int via_proxy,
                      Transport* out, char** out_err) {
-    struct sockaddr_in serv_addr = *serv_addr_in;
-    int sockfd = socket(AF_INET, SOCK_STREAM, 0);
+    /* Each address the host resolved to, in turn: a name with an IPv6 and an
+     * IPv4 address still connects when one family is unreachable from here.
+     * Under a timeout the attempts share it: each gets an equal part of what
+     * is left, so one address that drops packets cannot spend it all, and the
+     * last gets the rest. */
+    const char* why = "could not resolve host";
+    int sockfd = -1;
+    uint64_t deadline = req->timeout_ns > 0
+        ? aether_now_ns() + (uint64_t)req->timeout_ns : 0;
+    for (int i = 0; i < addrs->n && sockfd < 0; i++) {
+        int64_t budget = 0;
+        if (deadline) {
+            uint64_t now = aether_now_ns();
+            if (now >= deadline) { why = "connect timeout"; break; }
+            budget = (int64_t)((deadline - now) / (uint64_t)(addrs->n - i));
+            if (budget <= 0) budget = 1;
+        }
+        sockfd = http_connect_one(&addrs->ss[i], addrs->len[i], budget, &why);
+    }
     if (sockfd < 0) {
-        ae_set_err(out_err, "could not create socket");
+        ae_set_err(out_err, why);
         return -1;
     }
 
-    /* Connect — with timeout via non-blocking + select when the
-     * caller asked for one. Without a timeout, fall through to the
-     * original blocking connect (preserves v1 behaviour exactly). */
-    int connect_rc;
     if (req->timeout_ns > 0) {
-#ifdef _WIN32
-        u_long nb = 1;
-        ioctlsocket(sockfd, FIONBIO, &nb);
-#else
-        int flags = fcntl(sockfd, F_GETFL, 0);
-        if (flags >= 0) fcntl(sockfd, F_SETFL, flags | O_NONBLOCK);
-#endif
-        connect_rc = connect(sockfd, (struct sockaddr*)&serv_addr, sizeof(serv_addr));
-        if (connect_rc < 0) {
-#ifdef _WIN32
-            int err = WSAGetLastError();
-            int in_progress = (err == WSAEWOULDBLOCK || err == WSAEINPROGRESS);
-#else
-            int in_progress = (errno == EINPROGRESS || errno == EWOULDBLOCK);
-#endif
-            if (in_progress) {
-                /* Watch both the writable set (success) and the
-                 * exception set (failure). On POSIX, a refused
-                 * non-blocking connect makes the socket writable
-                 * with SO_ERROR=ECONNREFUSED — only `wfds` matters.
-                 * On Windows, Winsock signals connect failures via
-                 * the *exception* fd set instead, NOT writable —
-                 * so a select that watches only wfds waits the full
-                 * timeout for refused connects rather than failing
-                 * fast. Watching both makes select fire on either
-                 * outcome; SO_ERROR distinguishes success from
-                 * failure afterwards. */
-#ifdef _WIN32
-                /* Winsock's fd_set is a small array of SOCKET handles, not a
-                 * bitmap indexed by descriptor, so it has no FD_SETSIZE
-                 * hazard for a single socket. */
-                fd_set wfds, efds;
-                FD_ZERO(&wfds); FD_SET(sockfd, &wfds);
-                FD_ZERO(&efds); FD_SET(sockfd, &efds);
-                struct timeval tv;
-                tv.tv_sec  = (time_t)(req->timeout_ns / 1000000000LL);
-                tv.tv_usec = (long)((req->timeout_ns / 1000LL) % 1000000LL);
-                int sel = select(sockfd + 1, NULL, &wfds, &efds, &tv);
-#else
-                /* poll, not select: a POSIX fd_set is a bitmap of FD_SETSIZE
-                 * bits, and FD_SET on a descriptor at or above it writes past
-                 * the end. A process serving many connections (a proxy, which
-                 * is what dials most often) passes 1024 descriptors easily,
-                 * and the corruption would land on the stack. poll takes the
-                 * descriptor by value and has no such bound. POLLOUT covers
-                 * both outcomes: a refused non-blocking connect reports the
-                 * socket ready with SO_ERROR set, which the check below
-                 * reads. */
-                struct pollfd pfd;
-                pfd.fd = sockfd;
-                pfd.events = POLLOUT;
-                pfd.revents = 0;
-                int64_t timeout_ms = (req->timeout_ns + 999999LL) / 1000000LL;
-                if (timeout_ms > INT_MAX) timeout_ms = INT_MAX;
-                int sel = poll(&pfd, 1, (int)timeout_ms);
-#endif
-                if (sel == 0) {
-                    close(sockfd);
-                    ae_set_err(out_err, "connect timeout");
-                    return -1;
-                }
-                if (sel < 0) {
-                    close(sockfd);
-                    ae_set_err(out_err, "select on connect failed");
-                    return -1;
-                }
-                /* Check SO_ERROR — distinguishes "writable because
-                 * connected" from "writable because failed". On
-                 * Windows the failure surfaces via efds; on POSIX
-                 * via wfds with so_err set. SO_ERROR works the
-                 * same in both cases. */
-                int so_err = 0;
-                socklen_t slen = sizeof(so_err);
-                if (getsockopt(sockfd, SOL_SOCKET, SO_ERROR, (char*)&so_err, &slen) < 0
-                    || so_err != 0) {
-                    close(sockfd);
-                    ae_set_err(out_err, "connection failed");
-                    return -1;
-                }
-                connect_rc = 0;
-            } else {
-                close(sockfd);
-                ae_set_err(out_err, "connection failed");
-                return -1;
-            }
-        }
-        /* Restore blocking mode for the send/recv path — those use
-         * setsockopt(SO_*TIMEO) below for their timeouts. */
-#ifdef _WIN32
-        nb = 0;
-        ioctlsocket(sockfd, FIONBIO, &nb);
-#else
-        if (flags >= 0) fcntl(sockfd, F_SETFL, flags);
-#endif
-
         /* Apply send/recv timeouts equal to the configured value.
          *
          * SO_RCVTIMEO / SO_SNDTIMEO take different shapes on the two
@@ -2142,13 +2148,6 @@ static int http_dial(HttpClientRequest* req, struct sockaddr_in* serv_addr_in,
          * the next whole millisecond (sub-ms DWORD=0 is ambiguous
          * with "infinite"). */
         http_apply_timeouts(sockfd, req->timeout_ns);
-    } else {
-        connect_rc = connect(sockfd, (struct sockaddr*)&serv_addr, sizeof(serv_addr));
-        if (connect_rc < 0) {
-            close(sockfd);
-            ae_set_err(out_err, "connection failed");
-            return -1;
-        }
     }
 
     out->sockfd = sockfd;
@@ -2162,10 +2161,12 @@ static int http_dial(HttpClientRequest* req, struct sockaddr_in* serv_addr_in,
      * tunnel — it uses an absolute-form request line, handled below. */
     if (via_proxy && use_tls) {
         char creq[512];
+        char authority[300];
+        aether_addr_authority(authority, sizeof authority, host, port);
         int cn = snprintf(creq, sizeof(creq),
-                          "CONNECT %s:%d HTTP/1.1\r\nHost: %s:%d\r\n"
+                          "CONNECT %s HTTP/1.1\r\nHost: %s\r\n"
                           "Proxy-Connection: keep-alive\r\n\r\n",
-                          host, port, host, port);
+                          authority, authority);
         if (cn <= 0 || cn >= (int)sizeof(creq) ||
             send(sockfd, creq, (size_t)cn, 0) != cn) {
             close(sockfd);
@@ -2603,11 +2604,9 @@ char* http_build_request_head_into(const HttpReqHead* p,
     HDR_APPEND_STR(p->method); HDR_APPEND_LIT(" ");
     if (p->via_proxy && !p->use_tls) {
         char absline[1408];
-        if (p->port == 80) {
-            snprintf(absline, sizeof(absline), "http://%s%s", p->host, p->path);
-        } else {
-            snprintf(absline, sizeof(absline), "http://%s:%d%s", p->host, p->port, p->path);
-        }
+        char authority[300];
+        aether_addr_authority(authority, sizeof authority, p->host, p->port == 80 ? -1 : p->port);
+        snprintf(absline, sizeof(absline), "http://%s%s", authority, p->path);
         HDR_APPEND_STR(absline);
     } else {
         HDR_APPEND_STR(p->path);
@@ -2619,11 +2618,14 @@ char* http_build_request_head_into(const HttpReqHead* p,
      * The authority, which includes the port whenever it is not the default
      * for the scheme (RFC 9110 7.2). Sending the bare host to a server on
      * another port names a different authority than the one being addressed,
-     * which a virtual-hosted server routes on. IPv6 literals would need
-     * brackets here; the connect path is IPv4-only (see the note above), so
-     * there is no such host to reach this. */
+     * which a virtual-hosted server routes on. An IPv6 literal host is
+     * bracketed, as in the URL. */
     if (!header_already_set(p->req, "Host")) {
-        HDR_APPEND_LIT("Host: "); HDR_APPEND_STR(p->host);
+        HDR_APPEND_LIT("Host: ");
+        int host_v6 = strchr(p->host, ':') != NULL;
+        if (host_v6) HDR_APPEND_LIT("[");
+        HDR_APPEND_STR(p->host);
+        if (host_v6) HDR_APPEND_LIT("]");
         if (p->port != (p->use_tls ? 443 : 80)) {
             char port_suffix[24];
             size_t pn = 0;
@@ -2821,19 +2823,8 @@ int http_upstream_acquire(const char* host, int port, HttpUpstreamConn* out) {
     return http_upstream_acquire_ex(host, port, 1, out);
 }
 
-/* `allow_pool` is 0 when the caller has just been burned by a pooled
- * connection the upstream had closed. Taking another one from the same pool
- * could hand it a second corpse, and the retry after that is the one the
- * client never gets an answer from. */
-int http_upstream_acquire_ex(const char* host, int port, int allow_pool,
-                             HttpUpstreamConn* out) {
-    if (!out || !host || port <= 0) return -1;
-    /* Field by field, not memset over the struct. Most of this object is a
-     * 512 byte pool key, and blanking it wrote nine cache lines per request
-     * that the very next line overwrites with about forty bytes. Those lines
-     * are cold once more than a handful of connections are in flight, which
-     * is where this path's last-level misses were coming from. Every field the
-     * code goes on to read is still given the value the memset gave it. */
+/* A fresh transport on `out`, the pool key kept. */
+static void upstream_reset(HttpUpstreamConn* out) {
     out->t.sockfd = 0;
     out->t.nonblocking = 0;
     out->t.applied_timeout_ns = -1;
@@ -2847,6 +2838,72 @@ int http_upstream_acquire_ex(const char* host, int port, int allow_pool,
 #endif
     out->reused = 0;
     out->connecting = 0;
+    out->addr_next = 0;
+}
+
+/* Dial `host` from its `first` resolved address on. Non-blocking, so only an
+ * address that fails at once (no route to that family, a refusal the kernel
+ * already knows) moves on here; one still connecting is the answer, and
+ * addr_next says where http_upstream_redial goes if it then fails -- the
+ * usual case being a name whose IPv6 address comes first and whose server
+ * listens on IPv4 alone. */
+static int upstream_dial(const char* host, int port, int first, HttpUpstreamConn* out) {
+    AetherAddrList addrs;
+    int resolved = 0;
+    if (!resolve_dial_addr(host, port, &addrs, &resolved)) return -1;
+
+    for (int i = first; i < addrs.n; i++) {
+        int fd = (int)socket(addrs.ss[i].ss_family, SOCK_STREAM, 0);
+        if (fd < 0) continue;
+#ifdef _WIN32
+        u_long nb = 1;
+        ioctlsocket(fd, FIONBIO, &nb);
+#else
+        int flags = fcntl(fd, F_GETFL, 0);
+        if (flags >= 0) fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+#endif
+        int nodelay = 1;
+        setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, (const char*)&nodelay, sizeof(nodelay));
+
+        out->t.sockfd = fd;
+        out->t.nonblocking = 1;      /* dialled non-blocking just above */
+        out->reused = 0;
+        out->addr_next = i + 1 < addrs.n ? i + 1 : 0;
+        if (connect(fd, (struct sockaddr*)&addrs.ss[i], addrs.len[i]) == 0) {
+            out->connecting = 0;
+            return fd;
+        }
+#ifdef _WIN32
+        int err = WSAGetLastError();
+        int in_progress = (err == WSAEWOULDBLOCK || err == WSAEINPROGRESS);
+#else
+        int in_progress = (errno == EINPROGRESS || errno == EWOULDBLOCK);
+#endif
+        if (in_progress) {
+            out->connecting = 1;      /* finished when the descriptor is writable */
+            return fd;
+        }
+        close(fd);
+        out->t.sockfd = -1;
+    }
+    out->addr_next = 0;
+    return -1;
+}
+
+/* `allow_pool` is 0 when the caller has just been burned by a pooled
+ * connection the upstream had closed. Taking another one from the same pool
+ * could hand it a second corpse, and the retry after that is the one the
+ * client never gets an answer from. */
+int http_upstream_acquire_ex(const char* host, int port, int allow_pool,
+                             HttpUpstreamConn* out) {
+    if (!out || !host || port <= 0) return -1;
+    /* Field by field, not memset over the struct. Most of this object is a
+     * 512 byte pool key, and blanking it wrote nine cache lines per request
+     * that the very next line overwrites with about forty bytes. Those lines
+     * are cold once more than a handful of connections are in flight, which
+     * is where this path's last-level misses were coming from. Every field the
+     * code goes on to read is still given the value the memset gave it. */
+    upstream_reset(out);
     out->pool_key[0] = '\0';
 
     http_pool_key(out->pool_key, sizeof(out->pool_key), host, port, 0,
@@ -2860,43 +2917,18 @@ int http_upstream_acquire_ex(const char* host, int port, int allow_pool,
         }
         return out->t.sockfd;
     }
+    return upstream_dial(host, port, 0, out);
+}
 
-    struct sockaddr_in addr;
-    int resolved = 0;
-    if (!resolve_dial_addr(host, port, &addr, &resolved)) return -1;
+int http_upstream_has_next(HttpUpstreamConn* c) {
+    return c && !c->reused && c->addr_next > 0;
+}
 
-    int fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (fd < 0) return -1;
-#ifdef _WIN32
-    u_long nb = 1;
-    ioctlsocket(fd, FIONBIO, &nb);
-#else
-    int flags = fcntl(fd, F_GETFL, 0);
-    if (flags >= 0) fcntl(fd, F_SETFL, flags | O_NONBLOCK);
-#endif
-    int nodelay = 1;
-    setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, (const char*)&nodelay, sizeof(nodelay));
-
-    out->t.sockfd = fd;
-    out->t.nonblocking = 1;      /* dialled non-blocking just above */
-    out->reused = 0;
-    if (connect(fd, (struct sockaddr*)&addr, sizeof(addr)) == 0) {
-        out->connecting = 0;
-        return fd;
-    }
-#ifdef _WIN32
-    int err = WSAGetLastError();
-    int in_progress = (err == WSAEWOULDBLOCK || err == WSAEINPROGRESS);
-#else
-    int in_progress = (errno == EINPROGRESS || errno == EWOULDBLOCK);
-#endif
-    if (!in_progress) {
-        close(fd);
-        out->t.sockfd = -1;
-        return -1;
-    }
-    out->connecting = 1;      /* finished when the descriptor is writable */
-    return fd;
+int http_upstream_redial(const char* host, int port, HttpUpstreamConn* c) {
+    if (!c || !host || c->reused || c->addr_next <= 0) return -1;
+    int first = c->addr_next;
+    upstream_reset(c);
+    return upstream_dial(host, port, first, c);
 }
 
 /* Did the connect this driver started actually succeed? A refused connection
@@ -3172,7 +3204,7 @@ static HttpResponse* http_request_internal(HttpClientRequest* req) {
      * connection does not need DNS, and holding an established socket hostage
      * to a resolver blip is the less useful behaviour -- it is also what nginx
      * does. A request that has to dial still fails exactly as it did. */
-    struct sockaddr_in serv_addr;
+    AetherAddrList serv_addr;
     int serv_addr_resolved = 0;
 
     /* Zero-initialised so applied_timeout_ns starts at the "nothing applied"

@@ -1,0 +1,168 @@
+#!/bin/sh
+# std.http over IPv6: the server binds "::1" and "::" (dual-stack), the
+# client dials bracketed literals, over plain HTTP and pure-Aether TLS 1.3.
+#
+#   1. a "::1" listener answers http://[::1]:P/ and sees the peer as ::1
+#   2. a "::" listener answers both http://127.0.0.1:P/ and http://[::1]:P/,
+#      and reports the IPv4 client as 127.0.0.1, not ::ffff:127.0.0.1
+#   3. a "localhost" listener still binds IPv4 only, as before
+#   4. the same dual-stack listener over pure TLS 1.3, both ends pure Aether,
+#      the certificate naming 127.0.0.1 and ::1 as iPAddress SANs
+#   5. under libaether_sandbox.so (Linux), a tcp grant for 127.0.0.1 admits
+#      127.0.0.1 and ::ffff:127.0.0.1 but not ::1, and one for [::1] admits
+#      ::1 alone: a grant for one family never opens the other
+#
+# Skips, and says so, when this host cannot bind ::1.
+
+set -e
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+. "$ROOT/tests/lib/wait_port.sh"
+. "$ROOT/tests/lib/server_jobs.sh"
+AE="$ROOT/build/ae"
+
+[ -x "$AE" ] || { echo "  [SKIP] http_ipv6: ae not built"; exit 0; }
+
+TMP="$(mktemp -d)"
+SRV_PID=""
+cleanup() {
+    stop_server "$SRV_PID"
+    rm -rf "$TMP" || :
+    return 0
+}
+trap cleanup EXIT
+fail() { echo "  [FAIL] http_ipv6: $1"; exit 1; }
+
+"$AE" build "$SCRIPT_DIR/server.ae" -o "$TMP/srv" >"$TMP/b1.log" 2>&1 \
+    || { sed -n '1,12p' "$TMP/b1.log"; fail "server did not build"; }
+"$AE" build "$SCRIPT_DIR/client.ae" -o "$TMP/cli" >"$TMP/b2.log" 2>&1 \
+    || { sed -n '1,12p' "$TMP/b2.log"; fail "client did not build"; }
+"$AE" build "$SCRIPT_DIR/dial.ae" -o "$TMP/dial" >"$TMP/b3.log" 2>&1 \
+    || { sed -n '1,12p' "$TMP/b3.log"; fail "dial did not build"; }
+
+# start HOST LOG [env...]: start the server on HOST, set PORT, or return 3
+# when the host can't bind it.
+start() {
+    _host="$1"; _log="$2"; shift 2
+    env BIND_HOST="$_host" "$@" "$TMP/srv" >"$_log" 2>&1 &
+    SRV_PID=$!
+    _i=0
+    while [ "$_i" -lt 100 ]; do
+        grep -q "READY\|BIND FAILED" "$_log" 2>/dev/null && break
+        sleep 0.1
+        _i=$((_i + 1))
+    done
+    if grep -q "BIND FAILED" "$_log"; then
+        stop_server "$SRV_PID"; SRV_PID=""
+        return 3
+    fi
+    grep -q READY "$_log" || { sed -n '1,10p' "$_log"; fail "server on $_host never became READY"; }
+    PORT=$(read_ready_port "$_log") || exit 1
+}
+
+# get URL EXPECTED [env...]: GET URL and require EXPECTED in the output.
+get() {
+    _url="$1"; _want="$2"; shift 2
+    _out=$(env URL="$_url" "$@" "$TMP/cli" 2>&1) || :
+    case "$_out" in
+        *"$_want"*) ;;
+        *) printf '%s\n' "$_out" | sed 's/^/    cli: /'; fail "$_url: expected '$_want'" ;;
+    esac
+}
+
+# get_fails URL [env...]: GET URL and require a transport error.
+get_fails() {
+    _url="$1"; shift
+    _out=$(env URL="$_url" "$@" "$TMP/cli" 2>&1) || :
+    case "$_out" in
+        "ERR: "*) ;;
+        *) printf '%s\n' "$_out" | sed 's/^/    cli: /'; fail "$_url: expected a connect failure" ;;
+    esac
+}
+
+# Does this host have IPv6 loopback? Asked of the OS, not of the code under
+# test: a server that fails to bind ::1 on a host that has it is a failure,
+# not a skip. "unknown" where neither probe applies (Windows), and then the
+# server's own bind decides.
+ipv6_loopback() {
+    if [ -r /proc/net/if_inet6 ]; then
+        grep -q '^00000000000000000000000000000001 ' /proc/net/if_inet6 && echo yes || echo no
+    elif command -v ifconfig >/dev/null 2>&1; then
+        ifconfig lo0 2>/dev/null | grep -q 'inet6 ::1' && echo yes || echo no
+    else
+        echo unknown
+    fi
+}
+HAS_V6=$(ipv6_loopback)
+if [ "$HAS_V6" = no ]; then
+    echo "  [SKIP] http_ipv6: this host has no IPv6 loopback"
+    exit 0
+fi
+
+# --- 1. IPv6 loopback ---
+if ! start "::1" "$TMP/s1.log"; then
+    [ "$HAS_V6" = yes ] && fail "the server could not bind ::1, which this host has"
+    echo "  [SKIP] http_ipv6: this host cannot bind ::1 (no IPv6)"
+    exit 0
+fi
+get "http://[::1]:$PORT/" "STATUS 200 BODY ipv6-ok peer=::1"
+get_fails "http://127.0.0.1:$PORT/"
+stop_server "$SRV_PID"; SRV_PID=""
+
+# --- 2. dual-stack "::" ---
+start "::" "$TMP/s2.log" || fail "could bind ::1 but not ::"
+get "http://[::1]:$PORT/" "STATUS 200 BODY ipv6-ok peer=::1"
+get "http://127.0.0.1:$PORT/" "STATUS 200 BODY ipv6-ok peer=127.0.0.1"
+stop_server "$SRV_PID"; SRV_PID=""
+
+# --- 3. "localhost" still means 127.0.0.1 ---
+start "localhost" "$TMP/s3.log" || fail "could not bind localhost"
+get "http://127.0.0.1:$PORT/" "STATUS 200 BODY ipv6-ok peer=127.0.0.1"
+get_fails "http://[::1]:$PORT/"
+stop_server "$SRV_PID"; SRV_PID=""
+
+# --- 4. dual-stack over pure TLS 1.3 ---
+if command -v openssl >/dev/null 2>&1; then
+    . "$ROOT/tests/lib/test_openssl_conf.sh"
+    test_openssl_conf "$TMP"
+    # MSYS2_ARG_CONV_EXCL: see https_pure_tls_vertical; keeps the subject
+    # from being rewritten as a Windows path.
+    MSYS2_ARG_CONV_EXCL='/CN=' \
+    openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 \
+        -keyout "$TMP/key.pem" -out "$TMP/cert.pem" -days 2 -nodes \
+        -subj "/CN=localhost" \
+        -addext "subjectAltName=IP:127.0.0.1,IP:::1,DNS:localhost" >"$TMP/ssl.log" 2>&1 \
+        || { sed -n '1,10p' "$TMP/ssl.log"; fail "could not generate a test certificate"; }
+    start "::" "$TMP/s4.log" AETHER_PURE_TLS=1 CERT_PATH="$TMP/cert.pem" KEY_PATH="$TMP/key.pem" \
+        || fail "could not bind :: for TLS"
+    get "https://[::1]:$PORT/" "STATUS 200 BODY ipv6-ok peer=::1" AETHER_PURE_TLS=1 CAFILE="$TMP/cert.pem"
+    get "https://127.0.0.1:$PORT/" "STATUS 200 BODY ipv6-ok peer=127.0.0.1" AETHER_PURE_TLS=1 CAFILE="$TMP/cert.pem"
+    stop_server "$SRV_PID"; SRV_PID=""
+    TLS_NOTE="pure TLS 1.3 over both families"
+else
+    TLS_NOTE="TLS part skipped: no openssl to make a cert"
+fi
+
+# --- 5. tcp grants don't cross families ---
+PRELOAD="$ROOT/build/libaether_sandbox.so"
+if [ "$(uname -s)" = Linux ] && [ -f "$PRELOAD" ]; then
+    # dial GRANT TARGET EXPECTED
+    dial() {
+        printf 'tcp_listen:*\nenv:TARGET\ntcp:%s\n' "$1" >"$TMP/grants"
+        _got=$(LD_PRELOAD="$PRELOAD" AETHER_SANDBOX_LOG=none AETHER_SANDBOX_GRANTS="$TMP/grants" \
+               TARGET="$2" "$TMP/dial" 2>&1) || :
+        [ "$_got" = "$3" ] || fail "grant tcp:$1, connect to $2: expected $3, got '$_got'"
+    }
+    dial "127.0.0.1" "127.0.0.1" allowed
+    dial "127.0.0.1" "::ffff:127.0.0.1" allowed
+    dial "127.0.0.1" "::1" denied
+    dial "[::1]" "::1" allowed
+    dial "[::1]" "127.0.0.1" denied
+    dial "[::1]" "::ffff:127.0.0.1" denied
+    SANDBOX_NOTE="grants kept to their family"
+else
+    SANDBOX_NOTE="grant part skipped: no LD_PRELOAD sandbox here"
+fi
+
+echo "  [PASS] http_ipv6: ::1, dual-stack ::, localhost-stays-IPv4, $TLS_NOTE, $SANDBOX_NOTE"

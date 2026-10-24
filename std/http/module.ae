@@ -796,7 +796,8 @@ server_bind(server: ptr, host: string, port: int) -> {
 }
 
 // Set the bind host before server_start. Default is "0.0.0.0".
-// Pass "127.0.0.1" to bind loopback only.
+// Pass "127.0.0.1" to bind loopback only, "::1" for IPv6 loopback, or "::"
+// for every interface of both families (IPv4 clients arrive as IPv4 peers).
 server_set_host(server: ptr, host: string) -> {
     http_server_set_host(server, host)
     return ""

@@ -1,0 +1,97 @@
+// The pure TLS client verifies an IPv6 literal against the certificate's
+// 16-byte iPAddress SANs. It used to send any host that was not a dotted
+// IPv4 address to dNSName matching, so https://[::1]/ failed against a
+// certificate that names ::1, and a host like "::1" was compared with DNS
+// names, a namespace an address never belongs to (RFC 6125 s1.7.2).
+
+import std.cryptography.tls13_cert
+import std.bytes
+import std.list
+
+extern exit(code: int)
+
+ip(octets: int[], n: int) -> ptr {
+    b = bytes.new(n)
+    i = 0
+    while i < n {
+        bytes.set(b, i, octets[i])
+        i = i + 1
+    }
+    return b
+}
+
+text(s: string, n: int) -> ptr {
+    b = bytes.new(n)
+    _ = bytes.copy_from_string(b, 0, s, n)
+    return b
+}
+
+leaf(ips: @into ptr, names: @into ptr) -> tls13_cert.LeafCert {
+    return tls13_cert.LeafCert {
+        tbs: null, tbs_len: 0,
+        sig_alg_oid: null, signature: null, signature_len: 0,
+        spki_algo_oid: null, spki_key: null, spki_key_len: 0,
+        issuer: null, issuer_len: 0,
+        subject: null, subject_len: 0,
+        not_before: null, not_before_len: 0,
+        not_after: null, not_after_len: 0,
+        dns_names: names, ip_addrs: ips
+    }
+}
+
+// 1 when `host` is not judged as `ok` says it should be.
+expect(c: *tls13_cert.LeafCert, host: string, ok: int) -> int {
+    err = tls13_cert.check_hostname(c, host)
+    got = 0
+    if err == "" { got = 1 }
+    if got != ok {
+        println("FAIL: ${host}: expected ${ok}, got '${err}'")
+        return 1
+    }
+    return 0
+}
+
+main() {
+    loop6 = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]
+    doc6 = [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]
+    loop4 = [127, 0, 0, 1]
+    ips = list_new()
+    list_add_raw(ips, ip(loop6, 16))
+    list_add_raw(ips, ip(doc6, 16))
+    list_add_raw(ips, ip(loop4, 4))
+    c = leaf(ips, null)
+    failures = 0
+
+    failures += expect(&c, "::1", 1)
+    failures += expect(&c, "0:0:0:0:0:0:0:1", 1)
+    failures += expect(&c, "2001:db8::1", 1)
+    failures += expect(&c, "2001:DB8:0:0:0:0:0:1", 1)
+    failures += expect(&c, "2001:0db8::0001", 1)
+    failures += expect(&c, "127.0.0.1", 1)
+    failures += expect(&c, "::2", 0)
+    failures += expect(&c, "2001:db8::", 0)
+    // Malformed literals are refused, never tried as names.
+    failures += expect(&c, "::1%lo", 0)
+    failures += expect(&c, ":::1", 0)
+    failures += expect(&c, "1::2::3", 0)
+    failures += expect(&c, "12345::1", 0)
+    failures += expect(&c, "1:2:3:4:5:6:7:8:9", 0)
+    failures += expect(&c, "1:2:3:4:5:6:7", 0)
+    failures += expect(&c, "::1:", 0)
+    failures += expect(&c, "::ffff:127.0.0.1", 0)
+
+    // An address in a dNSName does not authorise that address.
+    names = list_new()
+    list_add_raw(names, text("::1", 3))
+    d = leaf(null, names)
+    failures += expect(&d, "::1", 0)
+
+    // The families never cross: a 4-byte SAN of 0.0.0.1 is not ::1.
+    short = list_new()
+    list_add_raw(short, ip([0, 0, 0, 1], 4))
+    e = leaf(short, null)
+    failures += expect(&e, "::1", 0)
+
+    if failures > 0 { exit(1) }
+    println("tls13_cert ipv6 san: ok")
+}

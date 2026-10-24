@@ -1,0 +1,56 @@
+// The server half of test_http_ipv6.sh: binds BIND_HOST on an ephemeral port,
+// optionally over TLS (CERT_PATH and KEY_PATH; AETHER_PURE_TLS=1 selects the
+// pure-Aether server), prints "READY <port>", and answers every GET with the
+// peer address it saw, so the runner can tell an IPv4 client of a "::"
+// listener from an IPv6 one. Prints "BIND FAILED" and exits 3 when the
+// address can't be bound (no IPv6 on this host).
+
+import std.http
+import std.os
+import std.cryptography.tls13_server
+
+extern exit(code: int)
+extern http_server_start_raw(server: ptr) -> int
+extern http_server_bind_raw(server: ptr, host: string, port: int) -> int
+extern http_server_port(server: ptr) -> int
+
+handle_root(req: ptr, res: ptr, ud: ptr) {
+    http.response_set_status(res, 200)
+    http.response_set_header(res, "Content-Type", "text/plain")
+    http.response_set_body(res, "ipv6-ok peer=${http.request_remote_addr(req)}")
+}
+
+message StartSrv { raw: ptr }
+
+actor SrvActor {
+    state s = 0
+    receive { StartSrv(raw) -> { s = raw; http_server_start_raw(raw) } }
+}
+
+main() {
+    host = os.getenv("BIND_HOST")
+    raw = http.server_create(0)
+    if raw == 0 {
+        println("FAIL: server_create returned null")
+        exit(1)
+    }
+    cert = os.getenv("CERT_PATH")
+    if cert != null {
+        tls_err = http.server_set_tls(raw, cert, os.getenv("KEY_PATH"))
+        if tls_err != "" {
+            println("FAIL: server_set_tls: ${tls_err}")
+            exit(1)
+        }
+    }
+    http.server_set_host(raw, host)
+    if http_server_bind_raw(raw, host, 0) < 0 {
+        println("BIND FAILED")
+        exit(3)
+    }
+    println("READY ${http_server_port(raw)}")
+    http.server_get(raw, "/", handle_root, 0)
+    a = spawn(SrvActor())
+    a ! StartSrv { raw: raw }
+    sleep(60000)
+    exit(0)
+}

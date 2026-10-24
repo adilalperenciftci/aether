@@ -1,0 +1,72 @@
+// std.net over IPv6: tcp_listen_on_raw takes "::1", "[::1]" and "::" (both
+// families), and tcp_connect_raw dials an IPv6 literal, bracketed or not,
+// and an IPv4 client reaches a "::" listener. Every one of these was refused
+// while std.net resolved and bound IPv4 only.
+//
+// Skips where the host has no IPv6 loopback. On Linux that is asked of
+// /proc, not of the code under test, so a listener that can't bind ::1 on a
+// host that has it fails rather than skipping.
+
+import std.net
+import std.fs
+import std.string
+
+extern exit(code: int)
+
+has_v6_loopback() -> int {
+    if fs.exists("/proc/net/if_inet6") == 0 { return -1 } // unknown here
+    text, err = fs.read("/proc/net/if_inet6")
+    if err != "" { return -1 }
+    if string.contains(text, "00000000000000000000000000000001 ") == 1 { return 1 }
+    return 0
+}
+
+// Listen on `host`, connect to `dial`, close both. "" or why not.
+round_trip(host: string, dial: string) -> string {
+    srv = net.tcp_listen_on_raw(host, 0)
+    if srv == null { return "listen on ${host} refused" }
+    port = net.tcp_server_port_raw(srv)
+    conn = net.tcp_connect_raw(dial, port)
+    if conn == null {
+        _ = net.tcp_server_close(srv)
+        return "connect to ${dial} port ${port} (listener ${host}) failed"
+    }
+    _ = net.tcp_close(conn)
+    _ = net.tcp_server_close(srv)
+    return ""
+}
+
+main() {
+    v6 = has_v6_loopback()
+    if v6 == 0 {
+        println("SKIP: no IPv6 loopback on this host")
+        return
+    }
+    probe = net.tcp_listen_on_raw("::1", 0)
+    if probe == null {
+        if v6 == 1 {
+            println("FAIL: tcp_listen_on_raw refused ::1, which this host has")
+            exit(1)
+        }
+        println("SKIP: ::1 cannot be bound here")
+        return
+    }
+    _ = net.tcp_server_close(probe)
+
+    cases = ["::1", "::1", "[::1]", "[::1]", "::", "::1", "::", "127.0.0.1"]
+    i = 0
+    while i < 8 {
+        err = round_trip(cases[i], cases[i + 1])
+        if err != "" {
+            println("FAIL: ${err}")
+            exit(1)
+        }
+        i = i + 2
+    }
+    // A name is still refused as a listen address.
+    if net.tcp_listen_on_raw("localhost", 0) != null { // loopback-ok: refused before any bind
+        println("FAIL: tcp_listen_on_raw accepted a name")
+        exit(1)
+    }
+    println("PASS")
+}

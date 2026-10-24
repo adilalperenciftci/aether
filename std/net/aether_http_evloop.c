@@ -805,7 +805,14 @@ static int ev_respond_from(EvDriver* d, EvConn* c) {
 /* The proxy asked for another attempt, against whichever upstream it picked
  * this time. Same path as the first attempt: a connection, a head, an
  * exchange. */
+static int ev_begin_retry_ex(EvDriver* d, EvConn* c, int next_addr);
 static int ev_begin_retry(EvDriver* d, EvConn* c) {
+    return ev_begin_retry_ex(d, c, 0);
+}
+
+/* `next_addr` 1: the connect to one of the upstream's addresses failed and
+ * it has another, so dial that rather than starting over. */
+static int ev_begin_retry_ex(EvDriver* d, EvConn* c, int next_addr) {
     const char* url = http_request_url_of(c->px.outbound);
     /* The path is sized from the URL; a fixed path[1024] cut a long client
      * path, and the proxy forwarded the cut one (#2674). */
@@ -816,7 +823,8 @@ static int ev_begin_retry(EvDriver* d, EvConn* c) {
         return -1;
     if (use_tls) { free(path); return -1; }
 
-    int fd = http_upstream_acquire(host, port, &c->up);
+    int fd = next_addr ? http_upstream_redial(host, port, &c->up)
+                       : http_upstream_acquire(host, port, &c->up);
     if (fd < 0) {
         free(path);
         return ev_upstream_failed(d, c, "connection failed", 0);
@@ -1175,6 +1183,16 @@ static int ev_advance(EvDriver* d, EvConn* c) {
 #endif
         case EV_UPSTREAM_DIAL: {
             int done = http_upstream_connected(&c->up);
+            if (done < 0 && http_upstream_has_next(&c->up)) {
+                /* The upstream's name has another address: an IPv6 one that
+                 * refused while the server listens on IPv4, say. Dial that
+                 * before calling the upstream down. */
+                ev_drop_upstream(d, c);
+                ev_reclaim_rxbuf(c);
+                int r = ev_begin_retry_ex(d, c, 1);
+                if (r <= 0) return r;
+                continue;
+            }
             if (done < 0) {
                 int r = ev_upstream_failed(d, c, "connection failed", 1);
                 if (r <= 0) return r;

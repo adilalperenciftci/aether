@@ -78,6 +78,22 @@ request (30000 by default); an upgraded WebSocket or an SSE stream is not
 held to it. `with_keep_alive(server, 0)` closes each connection after its
 response.
 
+### IPv6
+
+`web_server_host` takes an IPv6 address as well as a name or an IPv4 one.
+`"::"` listens on every interface of both families, which is what an
+IPv6-only host (or one that wants both) needs; IPv4 clients arrive on it and
+`request_remote_addr` reports them as plain IPv4 (`203.0.113.7`). `"::1"` is
+IPv6 loopback alone, and `"localhost"` still means 127.0.0.1.
+
+```aether
+server = tinyweb.web_server_host("::", 8443) {
+    tinyweb.end_point(tinyweb.GET, "/") |req: ptr, res: ptr, ctx: ptr| {
+        tinyweb.response_write(res, "hello over either family")
+    }
+}
+```
+
 ### TLS
 
 ```aether
