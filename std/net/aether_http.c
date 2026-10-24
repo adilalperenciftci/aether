@@ -2752,6 +2752,19 @@ HttpResponse* http_response_alloc_empty(void) {
     return response;
 }
 
+/* A response that says the exchange failed before an answer came, as the
+ * blocking path's does for a refused dial, a failed send or a connection
+ * closed mid-answer: no status, `why` as its error. A driver that gave up on
+ * the upstream hands this to the proxy exchange, which counts the failure,
+ * retries where it may and otherwise turns it into the 502 or 504 the client
+ * is owed. */
+HttpResponse* http_response_alloc_failed(const char* why) {
+    HttpResponse* response = http_response_alloc_empty();
+    if (!response) return NULL;
+    response->error = string_new(why ? why : "upstream failed");
+    return response;
+}
+
 /* ---- What a driver needs to read from an outbound request ---- */
 
 const char* http_request_method_of(const HttpClientRequest* req) {
