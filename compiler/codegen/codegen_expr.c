@@ -9294,6 +9294,26 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
             break;
             
         case AST_UNARY_EXPRESSION:
+            if (expr->child_count >= 1 && expr->value && strcmp(expr->value, "move") == 0) {
+                ASTNode* operand = expr->children[0];
+                if (operand && operand->type == AST_IDENTIFIER && operand->value) {
+                    const char* var_name = safe_value_name(operand->value);
+                    const char* ctype = order_c11_type(operand);
+                    if (!ctype) ctype = "void*";
+                    TempSeq s;
+                    seq_open(gen, &s);
+                    const char* tmp = seq_let(gen, &s, ctype, "_move_tmp");
+                    fprintf(gen->output, "%s", var_name);
+                    seq_next(gen, &s);
+                    fprintf(gen->output, "%s = 0", var_name);
+                    seq_next(gen, &s);
+                    fprintf(gen->output, "%s", tmp);
+                    seq_close(gen, &s);
+                } else {
+                    generate_expression(gen, operand);
+                }
+                break;
+            }
             /* #2428: `-v` / `~m` on an eight-lane value, through its helper
              * (the halves form is a struct; see the binary case). */
             if (expr->child_count >= 1 && expr->value && expr->children[0]->node_type &&
