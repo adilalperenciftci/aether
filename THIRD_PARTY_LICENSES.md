@@ -98,7 +98,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
-## PCRE2 — BSD-3-Clause (with binary-redistribution exemption)
+## PCRE2 — BSD-3-Clause WITH PCRE2-exception (binary-redistribution exemption)
 
 Used by `std.regex` (issue
 [#1389](https://github.com/aether-lang-dev/aether/issues/1389)). The directory
@@ -108,11 +108,14 @@ Used by `std.regex` (issue
 `scripts/vendor-pcre2.sh`. It carries no local patches; three files keep the
 alternate names upstream itself designates for non-autotools embedding
 (`pcre2.h`, `config.h`, `pcre2_chartables.c`). The upstream licence text,
-also present as `std/regex/pcre2/LICENCE`:
+also present as `std/regex/pcre2/LICENCE.md`:
 
 ```
-PCRE2 LICENCE
--------------
+PCRE2 Licence
+=============
+
+| SPDX-License-Identifier: | BSD-3-Clause WITH PCRE2-exception |
+|---------|-------|
 
 PCRE2 is a library of functions to support regular expressions whose syntax
 and semantics are as close as possible to those of the Perl 5 language.
@@ -126,43 +129,52 @@ testdata directory is not copyrighted and is in the public domain.
 The basic library functions are written in C and are freestanding. Also
 included in the distribution is a just-in-time compiler that can be used to
 optimize pattern matching. This is an optional feature that can be omitted when
-the library is built.
+the library is built. The just-in-time compiler is separately licensed under the
+"2-clause BSD" licence.
 
 
-THE BASIC LIBRARY FUNCTIONS
----------------------------
+COPYRIGHT
+---------
 
-Written by:       Philip Hazel
-Email local part: Philip.Hazel
-Email domain:     gmail.com
+### The basic library functions
 
-Retired from University of Cambridge Computing Service,
-Cambridge, England.
+    Written by:       Philip Hazel
+    Email local part: Philip.Hazel
+    Email domain:     gmail.com
 
-Copyright (c) 1997-2024 University of Cambridge
-All rights reserved.
+    Retired from University of Cambridge Computing Service,
+    Cambridge, England.
 
+    Copyright (c) 1997-2007 University of Cambridge
+    Copyright (c) 2007-2024 Philip Hazel
+    All rights reserved.
 
-PCRE2 JUST-IN-TIME COMPILATION SUPPORT
---------------------------------------
+### PCRE2 Just-In-Time compilation support
 
-Written by:       Zoltan Herczeg
-Email local part: hzmester
-Email domain:     freemail.hu
+    Written by:       Zoltan Herczeg
+    Email local part: hzmester
+    Email domain:     freemail.hu
 
-Copyright(c) 2010-2024 Zoltan Herczeg
-All rights reserved.
+    Copyright (c) 2010-2024 Zoltan Herczeg
+    All rights reserved.
 
+### Stack-less Just-In-Time compiler
 
-STACK-LESS JUST-IN-TIME COMPILER
---------------------------------
+    Written by:       Zoltan Herczeg
+    Email local part: hzmester
+    Email domain:     freemail.hu
 
-Written by:       Zoltan Herczeg
-Email local part: hzmester
-Email domain:     freemail.hu
+    Copyright (c) 2009-2024 Zoltan Herczeg
+    All rights reserved.
 
-Copyright(c) 2009-2024 Zoltan Herczeg
-All rights reserved.
+The code in the `deps/sljit` directory has its own LICENSE file.
+
+### All other contributions
+
+Many other contributors have participated in the authorship of PCRE2. As PCRE2
+has never required a Contributor Licensing Agreement, or other copyright
+assignment agreement, all contributions have copyright retained by each
+original contributor or their employer.
 
 
 THE "BSD" LICENCE
@@ -171,16 +183,16 @@ THE "BSD" LICENCE
 Redistribution and use in source and binary forms, with or without
 modification, are permitted provided that the following conditions are met:
 
-    * Redistributions of source code must retain the above copyright notices,
-      this list of conditions and the following disclaimer.
+* Redistributions of source code must retain the above copyright notices,
+  this list of conditions and the following disclaimer.
 
-    * Redistributions in binary form must reproduce the above copyright
-      notices, this list of conditions and the following disclaimer in the
-      documentation and/or other materials provided with the distribution.
+* Redistributions in binary form must reproduce the above copyright
+  notices, this list of conditions and the following disclaimer in the
+  documentation and/or other materials provided with the distribution.
 
-    * Neither the name of the University of Cambridge nor the names of any
-      contributors may be used to endorse or promote products derived from this
-      software without specific prior written permission.
+* Neither the name of the University of Cambridge nor the names of any
+  contributors may be used to endorse or promote products derived from this
+  software without specific prior written permission.
 
 THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
 AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
@@ -203,8 +215,6 @@ not apply all the way down a chain of software. If binary package A includes
 PCRE2, it must respect the condition, but if package B is software that
 includes package A, the condition is not imposed on package B unless it uses
 PCRE2 independently.
-
-End
 ```
 
 ## Project Wycheproof — Apache License 2.0

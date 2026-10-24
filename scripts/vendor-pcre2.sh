@@ -6,6 +6,14 @@
 # Run from the repo root. To bump the version: update VERSION and SHA256
 # below (sha from the pcre2 GitHub release page), run the script, review
 # the diff, and update THIRD_PARTY_LICENSES.md if the licence text changed.
+# The release is also GPG-signed (pcre2-<v>.tar.gz.sig); upstream's
+# SECURITY.md names the signing key. Check it by hand when bumping:
+#   gpg --recv-keys A95536204A3BB489715231282A98E77EB6F24CA8
+#   gpg --verify pcre2-<v>.tar.gz.sig pcre2-<v>.tar.gz
+# When the source list in NON-AUTOTOOLS-BUILD changes, update the lists
+# below and the #includes in aether_pcre2_vendored.c together;
+# `gcc -MM std/regex/aether_pcre2_vendored.c -DAETHER_VENDOR_PCRE2` lists
+# every file the unity build reads.
 #
 # The vendored tree is VERBATIM upstream — no local patches, ever. The three
 # files whose committed name differs from their upstream name are the ones
@@ -19,8 +27,8 @@
 # by editing config.h, so the whole tree stays checkable against upstream.
 set -eu
 
-VERSION=10.44
-SHA256=86b9cb0aa3bcb7994faa88018292bc704cdbb708e785f7c74352ff6ea7d3175b
+VERSION=10.49
+SHA256=929f0b20e62879252a15886b06c89f1edef61a363cbd5826fb041080a5e557ae
 URL="https://github.com/PCRE2Project/pcre2/releases/download/pcre2-${VERSION}/pcre2-${VERSION}.tar.gz"
 DEST=std/regex/pcre2
 
@@ -39,23 +47,25 @@ SRC="$TMP/pcre2-${VERSION}/src"
 rm -rf "$DEST"
 mkdir -p "$DEST"
 
-# The 28 sources aether_pcre2_vendored.c #includes, plus the 3 that those
-# sources themselves #include (jit_match/jit_misc/ucptables are textual
-# inclusions upstream, never compiled standalone).
+# The 31 sources NON-AUTOTOOLS-BUILD lists, which aether_pcre2_vendored.c
+# #includes.
 for f in \
-    pcre2_auto_possess pcre2_chkdint pcre2_compile pcre2_config \
-    pcre2_context pcre2_convert pcre2_dfa_match pcre2_error pcre2_extuni \
-    pcre2_find_bracket pcre2_jit_compile pcre2_maketables pcre2_match \
-    pcre2_match_data pcre2_newline pcre2_ord2utf pcre2_pattern_info \
+    pcre2_auto_possess pcre2_chkdint pcre2_compile pcre2_compile_cgroup \
+    pcre2_compile_class pcre2_config pcre2_context pcre2_convert \
+    pcre2_dfa_match pcre2_error pcre2_extuni pcre2_find_bracket \
+    pcre2_jit_compile pcre2_maketables pcre2_match pcre2_match_data \
+    pcre2_match_next pcre2_newline pcre2_ord2utf pcre2_pattern_info \
     pcre2_script_run pcre2_serialize pcre2_string_utils pcre2_study \
     pcre2_substitute pcre2_substring pcre2_tables pcre2_ucd \
-    pcre2_valid_utf pcre2_xclass \
-    pcre2_jit_match pcre2_jit_misc pcre2_ucptables; do
+    pcre2_valid_utf pcre2_xclass; do
     cp "$SRC/$f.c" "$DEST/"
 done
 
-# Internal headers the sources include.
-for h in pcre2_internal.h pcre2_intmodedep.h pcre2_ucp.h; do
+# Internal headers the sources include, and the *_inc.h files they include
+# textually (never compiled standalone).
+for h in pcre2_internal.h pcre2_intmodedep.h pcre2_ucp.h pcre2_compile.h \
+    pcre2_util.h pcre2_jit_match_inc.h pcre2_jit_misc_inc.h \
+    pcre2_ucptables_inc.h; do
     cp "$SRC/$h" "$DEST/"
 done
 
@@ -66,14 +76,14 @@ cp "$SRC/pcre2_chartables.c.dist" "$DEST/pcre2_chartables.c"
 
 # Upstream licence, kept beside the code it covers (also reproduced in
 # THIRD_PARTY_LICENSES.md).
-cp "$TMP/pcre2-${VERSION}/LICENCE" "$DEST/LICENCE"
+cp "$TMP/pcre2-${VERSION}/LICENCE.md" "$DEST/LICENCE.md"
 
 cat > "$DEST/VENDOR.md" <<EOF
 # Vendored PCRE2 ${VERSION}
 
 Byte-identical subset of upstream PCRE2 ${VERSION}
 (<https://github.com/PCRE2Project/pcre2>), BSD-3-Clause — full licence in
-\`LICENCE\` here and in \`THIRD_PARTY_LICENSES.md\`. Vendored for #1389 so
+\`LICENCE.md\` here and in \`THIRD_PARTY_LICENSES.md\`. Vendored for #1389 so
 \`std.regex\` works without a system libpcre2-8: native builds on boxes
 without the library, and \`ae build --target ...\` cross builds with no
 CROSSBUILD_SYSROOT.

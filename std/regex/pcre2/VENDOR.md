@@ -1,14 +1,14 @@
-# Vendored PCRE2 10.44
+# Vendored PCRE2 10.49
 
-Byte-identical subset of upstream PCRE2 10.44
+Byte-identical subset of upstream PCRE2 10.49
 (<https://github.com/PCRE2Project/pcre2>), BSD-3-Clause — full licence in
-`LICENCE` here and in `THIRD_PARTY_LICENSES.md`. Vendored for #1389 so
+`LICENCE.md` here and in `THIRD_PARTY_LICENSES.md`. Vendored for #1389 so
 `std.regex` works without a system libpcre2-8: native builds on boxes
 without the library, and `ae build --target ...` cross builds with no
 CROSSBUILD_SYSROOT.
 
-- Upstream tarball: pcre2-10.44.tar.gz
-- SHA-256: `86b9cb0aa3bcb7994faa88018292bc704cdbb708e785f7c74352ff6ea7d3175b`
+- Upstream tarball: pcre2-10.49.tar.gz
+- SHA-256: `929f0b20e62879252a15886b06c89f1edef61a363cbd5826fb041080a5e557ae`
 - Regenerate with: `scripts/vendor-pcre2.sh` (edit VERSION/SHA256 there to bump)
 
 Three files are upstream files under the name upstream designates for
