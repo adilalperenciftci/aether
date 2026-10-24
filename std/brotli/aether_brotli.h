@@ -58,18 +58,27 @@ const char* brotli_get_compress_bytes(void);
 int         brotli_get_compress_length(void);
 void        brotli_release_compress(void);
 
-/* One-shot decompression. `max_bytes` sets a strict upper bound on decompressed
- * output size (0 = default safety ceiling). Returns 1 on success, 0 on decode
- * error / corrupted bitstream, and -2 when `max_bytes` output limit is
- * exceeded (mitigating decompression bombs / DoS attack vectors like
- * broccoli2shell / CVE-2026-111497). */
+/* 1 when the linked libbrotlidec carries the CVE-2026-111497 fix, which
+ * every decode below requires. 0 when it does not, or brotli is absent. */
+int         brotli_decoder_patched(void);
+
+/* One-shot decompression. `max_bytes` caps the decoded size (0 = a 1 GiB
+ * ceiling). Returns 1 on success, -2 when the output would pass `max_bytes`,
+ * -3 when the input ends before the stream does, -4 when the decoder is
+ * refused (see brotli_decoder_patched), and 0 for anything else
+ * (corrupt input, bytes after the end, out of memory). The cap is what lets
+ * a server decode a request body it did not write: a few hundred bytes of
+ * brotli can describe gigabytes. */
 int         brotli_try_decompress(const char* data, int length, int max_bytes);
 const char* brotli_get_decompress_bytes(void);
 int         brotli_get_decompress_length(void);
 void        brotli_release_decompress(void);
 
-/* Streaming decompression. `max_bytes` sets a strict upper bound on cumulative
- * decompressed output across all stream writes (0 = default safety ceiling). */
+/* Streaming decompression. `max_bytes` caps the total decoded across every
+ * write (0 = a 1 GiB ceiling). write returns 1, -2 past the cap, or 0;
+ * finish returns 1 once the stream has ended and -3 when it has not. Any
+ * failure leaves the handle refusing further writes. Each call's output is
+ * held on the handle until the next call, as for the encoder. */
 void*       brotli_try_decompress_stream_new(int max_bytes);
 int         brotli_try_decompress_stream_write(void* handle, const char* data, int length);
 int         brotli_try_decompress_stream_finish(void* handle);

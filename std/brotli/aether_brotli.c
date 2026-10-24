@@ -202,6 +202,20 @@ int brotli_try_compress(const char* data, int length, int quality) {
     return 1;
 }
 
+/* CVE-2026-111497 ("broccoli2shell"): libbrotlidec 1.0.3 to 1.2.0 can write
+ * out of bounds on a malformed block switch, which is remote code execution
+ * for anything decoding untrusted `br`. The fix (1.0.10, 1.1.1, 1.2.1, and
+ * distro backports that keep the old version number, Debian's
+ * 1.0.9-2+deb12u1 among them) gave the reserved error code -17 a name,
+ * BLOCK_SWITCH, in the same commit. The library's own error-string table is
+ * compiled from that list, so asking it to name -17 tells a fixed decoder
+ * from an unfixed one where the version number cannot. An unfixed library
+ * is refused: decoding fails closed, encoding is unaffected. */
+int brotli_decoder_patched(void) {
+    const char* name = BrotliDecoderErrorString((BrotliDecoderErrorCode)-17);
+    return name && strstr(name, "BLOCK_SWITCH") ? 1 : 0;
+}
+
 /* One-shot decompression output slot, thread-local */
 static _Thread_local unsigned char* tls_decomp_buf = NULL;
 static _Thread_local size_t         tls_decomp_cap = 0;
@@ -219,6 +233,7 @@ static void free_decomp_tls(void) {
 int brotli_try_decompress(const char* data, int length, int max_bytes) {
     free_decomp_tls();
     if (length < 0 || max_bytes < 0) return 0;
+    if (!brotli_decoder_patched()) return -4;
 
     size_t in_len;
     const unsigned char* in = brotli_unwrap_bytes(data, length, &in_len);
@@ -281,7 +296,7 @@ int brotli_try_decompress(const char* data, int length, int max_bytes) {
             out = nb;
             cap = ncap;
         } else if (res == BROTLI_DECODER_RESULT_NEEDS_MORE_INPUT) {
-            status = 0;
+            status = -3; /* the input ends before the stream does */
             break;
         } else {
             status = 0;
@@ -327,7 +342,7 @@ typedef struct {
 } BrotliDecompressStream;
 
 void* brotli_try_decompress_stream_new(int max_bytes) {
-    if (max_bytes < 0) return NULL;
+    if (max_bytes < 0 || !brotli_decoder_patched()) return NULL;
     BrotliDecompressStream* z = (BrotliDecompressStream*)aether_caps_calloc(1, sizeof(BrotliDecompressStream));
     if (!z) return NULL;
     z->dec = BrotliDecoderCreateInstance(NULL, NULL, NULL);
@@ -378,6 +393,9 @@ int brotli_try_decompress_stream_write(void* handle, const char* data, int lengt
         }
 
         if (res == BROTLI_DECODER_RESULT_SUCCESS) {
+            /* Bytes after the end of the stream are corruption, not a
+             * second stream: the one-shot path refuses them too. */
+            if (avail_in > 0) { z->broken = 1; return 0; }
             z->finished = 1;
             break;
         } else if (res == BROTLI_DECODER_RESULT_NEEDS_MORE_INPUT) {
@@ -413,11 +431,16 @@ int brotli_try_decompress_stream_write(void* handle, const char* data, int lengt
     return 1;
 }
 
+/* The stream must have reached its end by now: a decoder still waiting for
+ * input means the body was cut short, and a truncated body is an error
+ * rather than the shorter plaintext decoded so far. Returns -3 for that. */
 int brotli_try_decompress_stream_finish(void* handle) {
     BrotliDecompressStream* z = (BrotliDecompressStream*)handle;
     if (!z || z->broken) return 0;
-    if (z->finished) { z->out_len = 0; return 1; }
-    return brotli_try_decompress_stream_write(handle, NULL, 0);
+    z->out_len = 0;
+    if (z->finished) return 1;
+    z->broken = 1;
+    return -3;
 }
 
 const char* brotli_get_decompress_stream_bytes(void* handle) {
@@ -461,6 +484,8 @@ void brotli_release_stream(void* handle) { (void)handle; }
 int brotli_try_compress(const char* data, int length, int quality) {
     (void)data; (void)length; (void)quality; return 0;
 }
+
+int brotli_decoder_patched(void) { return 0; }
 
 int brotli_try_decompress(const char* data, int length, int max_bytes) {
     (void)data; (void)length; (void)max_bytes; return 0;

@@ -32,6 +32,7 @@
     <li><a href="#get_decompress_stream_length">get_decompress_stream_length</a></li>
     <li><a href="#release_decompress_stream">release_decompress_stream</a></li>
     <li><a href="#available">available</a></li>
+    <li><a href="#decoder_available">decoder_available</a></li>
     <li><a href="#compress">compress</a></li>
     <li><a href="#decompress">decompress</a></li>
     <li><a href="#decompress_max">decompress_max</a></li>
@@ -145,7 +146,7 @@
 <main class="content">
   <div class="module-header">
     <h1>brotli</h1>
-    <p class="module-desc">std.brotli — Brotli compression (RFC 7932), streaming and one-shot.</p>
+    <p class="module-desc">std.brotli — Brotli (RFC 7932) encoding and decoding, streaming and one-shot.</p>
     <p class="import-line"><code>import std.brotli</code></p>
   </div>
   <div class="functions" id="functions">
@@ -226,7 +227,12 @@
     <div class="function" id="available" data-name="available">
       <h3 class="function-name">available <span class="kind">fn</span></h3>
       <pre class="usage"><code>available() <span class="arrow">-&gt;</span> int</code></pre>
-      <p class="doc">1 when the toolchain was built with libbrotlienc detected. Use it to skip a test or pick a fallback encoding rather than threading an error everywhere.</p>
+      <p class="doc">1 when the toolchain was built with libbrotli detected. Use it to skip a test or pick a fallback encoding rather than threading an error everywhere.</p>
+    </div>
+    <div class="function" id="decoder_available" data-name="decoder_available">
+      <h3 class="function-name">decoder_available <span class="kind">fn</span></h3>
+      <pre class="usage"><code>decoder_available() <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="doc">1 when decoding works here: brotli is built in AND the system libbrotlidec carries the CVE-2026-111497 fix (an out-of-bounds write on malformed input, libbrotli 1.0.3 to 1.2.0). Without the fix every decode refuses with an error rather than run a decoder that untrusted input can exploit; encoding is unaffected. The check asks the library itself, so a distro backport that keeps the old version number passes.</p>
     </div>
     <div class="function" id="compress" data-name="compress">
       <h3 class="function-name">compress <span class="kind">fn</span></h3>
@@ -238,13 +244,13 @@
       <h3 class="function-name">decompress <span class="kind">fn</span></h3>
       <pre class="usage"><code>decompress(data)</code></pre>
       <p class="signature"><span class="sig-params">data: byte[]</span></p>
-      <p class="doc">One-shot: decompress brotli-encoded data. Returns (bytes, count, &quot;&quot;) on success, (&quot;&quot;, 0, error) otherwise.</p>
+      <p class="doc">One-shot: decompress with the default 1 GiB ceiling. Returns (bytes, count, &quot;&quot;) on success, (&quot;&quot;, 0, error) otherwise. For input you did not produce, use decompress_max with a cap that fits the job.</p>
     </div>
     <div class="function" id="decompress_max" data-name="decompress_max">
       <h3 class="function-name">decompress_max <span class="kind">fn</span></h3>
       <pre class="usage"><code>decompress_max(data, max_bytes)</code></pre>
       <p class="signature"><span class="sig-params">data: byte[], max_bytes: int</span></p>
-      <p class="doc">One-shot decompress with a strict output limit (`max_bytes`). If output would exceed `max_bytes`, decoding is aborted and returns an error mitigating decompression bomb attack vectors (e.g. broccoli2shell / CVE-2026-111497).</p>
+      <p class="doc">One-shot with a cap: decoding stops, and returns an &quot;output limit exceeded&quot; error, as soon as the output would pass `max_bytes` (0 = the 1 GiB ceiling). Truncated input, corrupt input and bytes after the end of the stream are errors too.</p>
     </div>
     <div class="function" id="stream_new" data-name="stream_new">
       <h3 class="function-name">stream_new <span class="kind">fn</span></h3>
@@ -280,25 +286,25 @@
       <h3 class="function-name">decompress_stream_new <span class="kind">fn</span></h3>
       <pre class="usage"><code>decompress_stream_new(max_bytes) <span class="arrow">-&gt;</span> (ptr, string)</code></pre>
       <p class="signature"><span class="sig-params">max_bytes: int</span></p>
-      <p class="doc">Streaming decompression. `max_bytes` sets a strict cumulative output upper bound across stream lifetime (0 = default safety ceiling).</p>
+      <p class="doc">Open a decoding stream whose total output is capped at `max_bytes` (0 = the 1 GiB ceiling). Returns (handle, &quot;&quot;) or (null, error).</p>
     </div>
     <div class="function" id="decompress_stream_write" data-name="decompress_stream_write">
       <h3 class="function-name">decompress_stream_write <span class="kind">fn</span></h3>
       <pre class="usage"><code>decompress_stream_write(handle, data)</code></pre>
       <p class="signature"><span class="sig-params">handle: ptr, data: byte[]</span></p>
-      <p class="doc">Feed bytes into a decompression stream. Returns (decompressed_chunk, count, &quot;&quot;).</p>
+      <p class="doc">Feed compressed bytes in any size of chunk. Returns (bytes, count, &quot;&quot;) with whatever they decoded to. After an error the handle refuses further writes.</p>
     </div>
     <div class="function" id="decompress_stream_finish" data-name="decompress_stream_finish">
       <h3 class="function-name">decompress_stream_finish <span class="kind">fn</span></h3>
       <pre class="usage"><code>decompress_stream_finish(handle) <span class="arrow">-&gt;</span> (string, int, string)</code></pre>
       <p class="signature"><span class="sig-params">handle: ptr</span></p>
-      <p class="doc">Finish a decompression stream and flush any final decompressed bytes.</p>
+      <p class="doc">Confirm the stream ended. Returns (&quot;&quot;, 0, &quot;&quot;) when it did, and a &quot;truncated stream&quot; error when the input stopped short of the end, so a cut connection is not mistaken for a shorter body. Still needs decompress_stream_free.</p>
     </div>
     <div class="function" id="decompress_stream_free" data-name="decompress_stream_free">
       <h3 class="function-name">decompress_stream_free <span class="kind">fn</span></h3>
       <pre class="usage"><code>decompress_stream_free(handle)</code></pre>
       <p class="signature"><span class="sig-params">handle: ptr</span></p>
-      <p class="doc">Release a decompression stream handle. Safe on null.</p>
+      <p class="doc">Release a decoding stream. Safe on null.</p>
     </div>
     <div class="function" id="MIN_QUALITY" data-name="MIN_QUALITY">
       <h3 class="function-name">MIN_QUALITY <span class="kind">const</span></h3>
