@@ -11,9 +11,7 @@
 //     key fails at the signature step and the peer just sees the connection
 //     drop. Generate with:
 //       openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1
-//   - X25519 key exchange only. A client offering only other groups is
-//     refused by parse_client_hello; HelloRetryRequest is not implemented,
-//     so there is no renegotiation to a group we do support.
+//   - Key exchange: X25519MLKEM768 (post-quantum hybrid) and X25519.
 //   - Buffer arguments are std.bytes HANDLES, never bytes.data(b) -- see the
 //     header of tls13_client for why that distinction bites.
 
@@ -27,6 +25,7 @@ import std.tcp
 import std.cryptography.sha2
 import std.cryptography.hmac
 import std.cryptography.x25519
+import std.cryptography.mlkem
 import std.cryptography.p256
 import std.cryptography.tls13_kdf
 import std.cryptography.tls13_client
@@ -190,6 +189,33 @@ fn send_record_raw(sock: ptr, rec: ptr) -> string {
     return ""
 }
 
+// The alert for a ClientHello parse_client_hello refused: illegal_parameter
+// (47) for a malformed X25519MLKEM768 share (RFC 10024 §4.2),
+// handshake_failure (40) when nothing offered is something we do, and
+// decode_error (50) for the rest, which are all framing faults.
+fn ch_error_alert(perr: string) -> int {
+    if string.contains(perr, "X25519MLKEM768") == 1 { return 47 }
+    if string.contains(perr, "no key_share") == 1 { return 40 }
+    if string.contains(perr, "no mutually supported") == 1 { return 40 }
+    if string.contains(perr, "supported_versions") == 1 { return 70 } // protocol_version
+    return 50
+}
+
+// A fatal alert in the clear, before any keys exist. Best effort: the
+// handshake is failing either way.
+fn send_plaintext_alert(sock: ptr, level: int, desc: int) {
+    b = bytes.new(7)
+    bytes.set(b, 0, 0x15) // alert
+    bytes.set(b, 1, 0x03)
+    bytes.set(b, 2, 0x03) // legacy record version 0x0303
+    bytes.set(b, 3, 0x00)
+    bytes.set(b, 4, 0x02) // length 2
+    bytes.set(b, 5, level & 0xFF)
+    bytes.set(b, 6, desc & 0xFF)
+    srv_send_view(sock, bytes.view(b)[0..7])
+    bytes.free(b)
+}
+
 // Fresh randomness, or null. Returning null on failure is deliberate and the
 // callers MUST check: every use here is security-critical -- the server
 // random, the ECDSA-P256 signing nonce, and the X25519 private key. Silently
@@ -302,34 +328,97 @@ accept(sock: @keep ptr, cert_chain: ptr, cert_lens: ptr, priv_key: ptr, x25519_p
         has_sni: 0, saw_supported_versions: 0 }
     perr = tls13_hs.parse_client_hello(bytes.view(ch_msg)[0..ch_msg_len], &ch_parsed)
     if string.equals(perr, "") != 1 {
-        bytes.free(ch_msg); recio_free(rio)
+        send_plaintext_alert(sock, 2, ch_error_alert(perr))
+        tls13_hs.free_ch(&ch_parsed); bytes.free(ch_msg); recio_free(rio)
         return null, perr
     }
 
     tr = tls13_client.transcript_new()
     tls13_client.transcript_add(tr, bytes.view(ch_msg)[0..ch_msg_len])
 
-    // 2. Compute X25519 shared secret
-    shared, agerr = x25519.agree(x25519_priv, ch_parsed.key_share)
-    if string.equals(agerr, "") != 1 {
+    // 2. Compute shared secret & server key share
+    shared = null
+    shared_len = 0
+    server_ks = null
+    server_ks_len = 0
+
+    if ch_parsed.group == tls13_hs.GROUP_X25519MLKEM768 {
+        if ch_parsed.key_share_len != 1216 {
+            send_plaintext_alert(sock, 2, 47)
+            tls13_hs.free_ch(&ch_parsed); bytes.free(ch_msg); tls13_client.transcript_free(tr); recio_free(rio)
+            return null, "X25519MLKEM768 key share wrong length"
+        }
+        ek = bytes.new(1184)
+        bytes.copy_from_bytes(ek, 0, ch_parsed.key_share, 0, 1184)
+        cxpub = bytes.new(32)
+        bytes.copy_from_bytes(cxpub, 0, ch_parsed.key_share, 1184, 32)
+
+        ct, mlk_ss, merr = mlkem.mlkem768_encaps(ek)
+        bytes.free(ek)
+        if string.equals(merr, "") != 1 || ct == null || mlk_ss == null {
+            if ct != null { bytes.free(ct) }
+            if mlk_ss != null { bytes.free(mlk_ss) }
+            bytes.free(cxpub)
+            send_plaintext_alert(sock, 2, 47) // illegal_parameter (RFC 10024 §4.2)
+            tls13_hs.free_ch(&ch_parsed); bytes.free(ch_msg); tls13_client.transcript_free(tr); recio_free(rio)
+            return null, string.concat("X25519MLKEM768 encapsulation failed: ", merr)
+        }
+
+        x_ss, xerr = x25519.agree(x25519_priv, cxpub)
+        bytes.free(cxpub)
+        if string.equals(xerr, "") != 1 || x_ss == null {
+            if x_ss != null { bytes.free(x_ss) }
+            bytes.free(ct); bytes.free(mlk_ss)
+            send_plaintext_alert(sock, 2, 47)
+            tls13_hs.free_ch(&ch_parsed); bytes.free(ch_msg); tls13_client.transcript_free(tr); recio_free(rio)
+            return null, xerr
+        }
+
+        sxpub = x25519.base_point(x25519_priv)
+        server_ks = bytes.new(1120)
+        bytes.copy_from_bytes(server_ks, 0, ct, 0, 1088)
+        bytes.copy_from_bytes(server_ks, 1088, sxpub, 0, 32)
+        server_ks_len = 1120
+        bytes.free(ct); bytes.free(sxpub)
+
+        shared = bytes.new(64)
+        bytes.copy_from_bytes(shared, 0, mlk_ss, 0, 32)
+        bytes.copy_from_bytes(shared, 32, x_ss, 0, 32)
+        shared_len = 64
+        bytes.free(mlk_ss); bytes.free(x_ss)
+    } else if ch_parsed.group == tls13_hs.GROUP_X25519 {
+        x_ss, xerr = x25519.agree(x25519_priv, ch_parsed.key_share)
+        if string.equals(xerr, "") != 1 || x_ss == null {
+            if x_ss != null { bytes.free(x_ss) }
+            send_plaintext_alert(sock, 2, 47) // illegal_parameter (RFC 8446 §7.4.2)
+            tls13_hs.free_ch(&ch_parsed); bytes.free(ch_msg); tls13_client.transcript_free(tr); recio_free(rio)
+            return null, xerr
+        }
+        sxpub = x25519.base_point(x25519_priv)
+        server_ks = sxpub
+        server_ks_len = 32
+        shared = x_ss
+        shared_len = 32
+    } else {
+        send_plaintext_alert(sock, 2, 40)
         tls13_hs.free_ch(&ch_parsed); bytes.free(ch_msg); tls13_client.transcript_free(tr); recio_free(rio)
-        return null, agerr
+        return null, "unsupported group in client hello"
     }
-    x25519_pub = x25519.base_point(x25519_priv)
 
     // 3. Build and send ServerHello (plaintext)
     srnd = rand_into(32)
     if srnd == null {
         tls13_hs.free_ch(&ch_parsed); bytes.free(ch_msg)
         tls13_client.transcript_free(tr); recio_free(rio)
-        bytes.free(x25519_pub); bytes.free(shared)
+        bytes.free(server_ks); bytes.free(shared)
         return null, "no randomness available for the server random"
     }
-    sh = tls13_hs.server_hello(srnd, bytes.view(ch_parsed.session_id)[0..ch_parsed.session_id_len], ch_parsed.cipher_suite, ch_parsed.group, bytes.view(x25519_pub)[0..32])
+    sh = tls13_hs.server_hello(srnd, bytes.view(ch_parsed.session_id)[0..ch_parsed.session_id_len], ch_parsed.cipher_suite, ch_parsed.group, bytes.view(server_ks)[0..server_ks_len])
+    bytes.free(server_ks)
     sh_len = bytes.length(sh)
     sherr = send_plaintext_handshake(sock, bytes.view(sh)[0..sh_len])
     if string.equals(sherr, "") != 1 {
-        bytes.free(srnd); bytes.free(x25519_pub); bytes.free(shared); bytes.free(sh)
+        bytes.free(srnd); bytes.free(shared); bytes.free(sh)
         tls13_hs.free_ch(&ch_parsed); bytes.free(ch_msg); tls13_client.transcript_free(tr); recio_free(rio)
         return null, sherr
     }
@@ -338,13 +427,14 @@ accept(sock: @keep ptr, cert_chain: ptr, cert_lens: ptr, priv_key: ptr, x25519_p
     // 4. Key Schedule
     rec_aead, rec_key_len, hash_algo, hash_len, suite_err = suite_params(ch_parsed.cipher_suite)
     if string.equals(suite_err, "") != 1 {
-        bytes.free(srnd); bytes.free(x25519_pub); bytes.free(shared); bytes.free(sh)
+        bytes.free(srnd); bytes.free(shared); bytes.free(sh)
         tls13_hs.free_ch(&ch_parsed); bytes.free(ch_msg); tls13_client.transcript_free(tr); recio_free(rio)
         return null, suite_err
     }
 
     th_chsh = transcript_hash_algo(tr, hash_algo)
-    keys = derive_handshake_keys_algo(bytes.view(shared)[0..32], bytes.view(th_chsh)[0..hash_len], rec_key_len, hash_algo)
+    keys = derive_handshake_keys_algo(bytes.view(shared)[0..shared_len], bytes.view(th_chsh)[0..hash_len], rec_key_len, hash_algo)
+    bytes.free(shared)
 
     srv_hs_ctx = tls13_record.new_aead(rec_aead, bytes.view(hs_server_key(keys))[0..rec_key_len], hs_server_iv(keys))
     cli_hs_ctx = tls13_record.new_aead(rec_aead, bytes.view(hs_client_key(keys))[0..rec_key_len], hs_client_iv(keys))
@@ -419,7 +509,7 @@ accept(sock: @keep ptr, cert_chain: ptr, cert_lens: ptr, priv_key: ptr, x25519_p
     }
 
     if fin_ok == 0 {
-        bytes.free(th_sf); bytes.free(srnd); bytes.free(x25519_pub); bytes.free(shared); bytes.free(sh)
+        bytes.free(th_sf); bytes.free(srnd); bytes.free(sh)
         tls13_hs.free_ch(&ch_parsed); bytes.free(ch_msg); tls13_client.transcript_free(tr); recio_free(rio)
         tls13_record.free_ctx(srv_hs_ctx); tls13_record.free_ctx(cli_hs_ctx)
         tls13_client.free_hs_keys(keys); bytes.free(th_chsh)
@@ -442,7 +532,7 @@ accept(sock: @keep ptr, cert_chain: ptr, cert_lens: ptr, priv_key: ptr, x25519_p
     // Cleanup handshake state
     bytes.free(ck); bytes.free(civ); bytes.free(sk); bytes.free(siv)
     bytes.free(ms); bytes.free(c_ap); bytes.free(s_ap); bytes.free(th_sf)
-    bytes.free(srnd); bytes.free(x25519_pub); bytes.free(shared); bytes.free(sh)
+    bytes.free(srnd); bytes.free(sh)
     tls13_hs.free_ch(&ch_parsed); bytes.free(ch_msg); tls13_client.transcript_free(tr)
     tls13_record.free_ctx(srv_hs_ctx); tls13_record.free_ctx(cli_hs_ctx)
     tls13_client.free_hs_keys(keys); bytes.free(th_chsh)

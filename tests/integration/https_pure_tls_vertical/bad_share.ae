@@ -1,0 +1,107 @@
+// The pure server's answer to a bad X25519MLKEM768 key share (#2483): a
+// fatal illegal_parameter alert (RFC 10024 §4.2), in the clear, and no
+// ServerHello.
+//
+// Two ClientHellos, one connection each:
+//   modulus  a 1216-byte share whose ML-KEM half fails the FIPS 203 §7.2
+//            modulus check (every 12-bit coefficient decodes to 4095 >= q);
+//   length   a 500-byte share, the wrong size for the group.
+// Either one reaching encapsulation, or answered with a ServerHello, fails.
+
+import std.cryptography.tls13_hs
+import std.bytes
+import std.string
+import std.tcp
+import std.os
+
+extern exit(code: int)
+
+fn filled(n: int, v: int) -> ptr {
+    b = bytes.new(n)
+    i = 0
+    while i < n {
+        bytes.set(b, i, v)
+        i = i + 1
+    }
+    return b
+}
+
+// Send a ClientHello offering only X25519MLKEM768 with `share`, and return
+// the server's alert as "level:description" ("2:47" is a fatal
+// illegal_parameter), or a description of whatever came instead.
+fn probe(port: int, share: ptr, share_len: int) -> string {
+    sock, err = tcp.connect("127.0.0.1", port)
+    if err != "" { return "connect: ${err}" }
+    rnd = filled(32, 1)
+    sid = filled(32, 2)
+    ch = tls13_hs.client_hello_full(rnd, bytes.view(sid)[0..32], tls13_hs.GROUP_X25519MLKEM768, bytes.view(share)[0..share_len], 0, null, 0, null, "127.0.0.1")
+    ch_len = bytes.length(ch)
+    rec = bytes.new(5 + ch_len)
+    bytes.set(rec, 0, 0x16) // handshake
+    bytes.set(rec, 1, 0x03)
+    bytes.set(rec, 2, 0x01)
+    bytes.set(rec, 3, (ch_len >> 8) & 0xFF)
+    bytes.set(rec, 4, ch_len & 0xFF)
+    bytes.copy_from_bytes(rec, 5, ch, 0, ch_len)
+    _sent, werr = tcp.write_all(sock, bytes.view(rec)[0..5 + ch_len])
+    bytes.free(rec); bytes.free(ch); bytes.free(rnd); bytes.free(sid)
+    if werr != "" {
+        tcp.close(sock)
+        return "write: ${werr}"
+    }
+
+    got = bytes.new(7)
+    bytes.set(got, 6, 0)
+    n = 0
+    tries = 0
+    while n < 7 && tries < 50 {
+        r, rerr = tcp.read_into(sock, bytes.view(got)[n..7])
+        if rerr == "timeout" {
+            tries = tries + 1
+        } else if rerr != "" {
+            tries = 50
+        } else {
+            n = n + r
+        }
+    }
+    tcp.close(sock)
+    if n < 7 {
+        bytes.free(got)
+        return "only ${n} bytes before the connection ended"
+    }
+    out = ""
+    if bytes.get(got, 0) == 0x15 {
+        out = "${bytes.get(got, 5)}:${bytes.get(got, 6)}"
+    } else {
+        out = "record type ${bytes.get(got, 0)}"
+    }
+    bytes.free(got)
+    return out
+}
+
+main() {
+    port, _perr = string.to_int(os_getenv("AE_TEST_PORT"))
+    fails = 0
+
+    bad_ek = filled(1216, 0xFF)
+    r1 = probe(port, bad_ek, 1216)
+    bytes.free(bad_ek)
+    if r1 == "2:47" {
+        println("PASS: modulus: fatal illegal_parameter")
+    } else {
+        println("FAIL: modulus: want alert 2:47, got ${r1}")
+        fails = fails + 1
+    }
+
+    short = filled(500, 3)
+    r2 = probe(port, short, 500)
+    bytes.free(short)
+    if r2 == "2:47" {
+        println("PASS: length: fatal illegal_parameter")
+    } else {
+        println("FAIL: length: want alert 2:47, got ${r2}")
+        fails = fails + 1
+    }
+
+    if fails != 0 { exit(1) }
+}

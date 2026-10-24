@@ -204,7 +204,7 @@ main() {
     p256pt_i = 0
     while p256pt_i < 65 { bytes.set(p256pt, p256pt_i, 0x11); p256pt_i = p256pt_i + 1 }
     bytes.set(p256pt, 0, 0x04)
-    dual = tls13_hs.client_hello_full(random, bytes.view(sid)[0..32], tls13_hs.GROUP_X25519, bytes.view(pub)[0..32], tls13_hs.GROUP_SECP256R1, bytes.view(p256pt)[0..65], "example.com")
+    dual = tls13_hs.client_hello_full(random, bytes.view(sid)[0..32], tls13_hs.GROUP_X25519, bytes.view(pub)[0..32], tls13_hs.GROUP_SECP256R1, bytes.view(p256pt)[0..65], 0, null, "example.com")
     // The CH must be a valid handshake message and larger than a single-share
     // CH (it carries an extra 4 + 65 = 69-byte key_share entry + SNI).
     if g8(dual, 0) == 1 {

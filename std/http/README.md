@@ -74,16 +74,18 @@ import std.http
 import std.cryptography.tls13_server   // pure TLS server; needs --with=fs
 ```
 
-The pure backend has constraints the OpenSSL one does not, and each fails as a
+The pure backend has constraints the OpenSSL one does not, and most fail as a
 **dropped connection rather than a message**, so they are worth knowing before
 debugging one:
 
 - the server key must be **ECDSA P-256**: there is no RSA signing path, so an
   RSA certificate produces a server that fails at the signature step
   (`openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1`)
-- key exchange is **X25519 only**
+- key exchange is **X25519MLKEM768** (the post-quantum hybrid, preferred
+  when the client offers it) **or X25519**
 - **HelloRetryRequest is not implemented**, so a client offering only other
-  groups is refused rather than renegotiated
+  groups (a P-256-only client, say) is refused with a `handshake_failure`
+  alert rather than renegotiated
 
 The client side is the mirror, and is now wired the same way (#1849):
 `std.http.client` does HTTPS through OpenSSL where it is compiled in, and
@@ -95,7 +97,9 @@ import std.cryptography.tls13_client
 ```
 
 to the program and `https://` works in a cross-built binary that links no TLS
-library at all. `set_insecure` and `set_cafile` are honoured on the pure path
+library at all. The pure client offers X25519MLKEM768 by default, alongside
+X25519 and P-256 key shares, so it gets post-quantum key exchange from any
+server that supports it (#2483). `set_insecure` and `set_cafile` are honoured on the pure path
 too, and an https request through a forward proxy works because the CONNECT
 tunnel is established before the handshake either way.
 

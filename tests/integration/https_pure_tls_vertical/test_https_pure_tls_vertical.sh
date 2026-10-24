@@ -68,6 +68,8 @@ openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -keyout "$TMP
     || { sed -n '1,12p' "$TMP/b1.log"; fail "server did not build"; }
 "$AE" build "$SCRIPT_DIR/client.ae" -o "$TMP/cli" >"$TMP/b2.log" 2>&1 \
     || { sed -n '1,12p' "$TMP/b2.log"; fail "pure-TLS client did not build"; }
+"$AE" build "$SCRIPT_DIR/bad_share.ae" -o "$TMP/bad" >"$TMP/b3.log" 2>&1 \
+    || { sed -n '1,12p' "$TMP/b3.log"; fail "bad-share probe did not build"; }
 
 CERT_PATH="$TMP/cert.pem" KEY_PATH="$TMP/key.pem" "$TMP/srv" >"$TMP/srv.log" 2>&1 &
 SRV_PID=$!
@@ -131,6 +133,22 @@ case "$OUT3" in
     *"PASS: HTTP/1.1 response received over pure TLS"*) ;;
     *) fail "Permutation 3: no HTTP response over TLS stream" ;;
 esac
+# Both ends are ours, so they must settle on X25519MLKEM768 (#2483). The
+# OpenSSL server in permutation 1 is left unchecked: which group it picks
+# depends on the OpenSSL version (3.5 and later prefer the hybrid too).
+case "$OUT3" in
+    *"GROUP: 4588"*) ;;
+    *) printf '%s\n' "$OUT3" | sed 's/^/    cli: /'
+       fail "Permutation 3: pure client and pure server did not negotiate X25519MLKEM768" ;;
+esac
+
+# --- Permutation 3b: a bad X25519MLKEM768 share -> Pure-Aether TLS Server ---
+# RFC 10024 §4.2: a share failing the FIPS 203 §7.2 check, or of the wrong
+# length, gets a fatal illegal_parameter alert. The server keeps serving.
+OUT3B=$(AE_TEST_PORT="$PORT" "$TMP/bad" 2>&1) || {
+    printf '%s\n' "$OUT3B" | grep -vE 'warning: unresolved|-->' | sed 's/^/    bad: /'
+    fail "Permutation 3b: the pure server mishandled a bad X25519MLKEM768 share"
+}
 
 # --- Permutation 4: curl -> Pure-Aether TLS Server ---
 CURL_OUT4=$(curl -s --cacert "$TMP/cert.pem" https://127.0.0.1:$PORT/ 2>&1) || fail "Permutation 4 (curl -> Pure server) failed"
@@ -139,4 +157,4 @@ case "$CURL_OUT4" in
     *) fail "Permutation 4: unexpected response '$CURL_OUT4'" ;;
 esac
 
-echo "  [PASS] https_pure_tls_vertical: all 4 client/server permutations succeeded"
+echo "  [PASS] https_pure_tls_vertical: all client/server permutations succeeded"
